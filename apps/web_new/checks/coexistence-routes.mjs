@@ -24,6 +24,9 @@
 // Usage: `pnpm --filter web_new coexistence:generate` rewrites the marked
 // blocks in both Caddyfiles; `--check` (CI) fails when they are stale.
 // Area gates append their entries to the JSON and re-run the generator.
+// Both modes also refuse a hand-written route above the marked block that
+// shadows a migrated entry (NEWFRONT-953): Caddy routes to the first match,
+// so a legacy predecessor would silently keep serving the old app.
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -296,6 +299,65 @@ export function syncFile(filePath, anchor, indent, routeLines, { check = false }
   return "updated";
 }
 
+// A routing directive with an inline matcher: `reverse_proxy /x/* …` and
+// `redir /x …` in the CE file, `handle /x* {` and `handle_path /x* {` in the
+// AIO file. A bare `@name` or upstream in the matcher position carries no
+// path, so only matchers starting with "/" are route matchers.
+const ROUTE_DIRECTIVE = /^(redir|reverse_proxy|handle|handle_path)\s+(\S+)/;
+
+/**
+ * True when a hand-written matcher covers any URL of a migrated literal
+ * entry: its bare path or its subtree. Exact spellings (`/x`, `/x/`) cover
+ * only that URL; subtree spellings (`/x/*`, `/x*`) cover the subtree, and
+ * an ancestor subtree spelling (`/auth/*` over `/auth/device`) covers the
+ * whole entry below it. A bare ancestor (`/auth`) matches only that exact
+ * URL, never the entry beneath it. A pre-block catch-all (`/*`, `*`) covers
+ * everything. Comparison is case-sensitive, like Caddy path matching.
+ */
+export function matcherCoversEntry(matcher, entry) {
+  if (matcher === "/*" || matcher === "*") return true;
+  if (!matcher.startsWith("/")) return false;
+  if (matcher === entry || matcher === `${entry}/*` || matcher === `${entry}*` || matcher === `${entry}/`) {
+    return true;
+  }
+  let base = null;
+  if (matcher.endsWith("/*")) base = matcher.slice(0, -2);
+  else if (matcher.endsWith("*")) base = matcher.slice(0, -1).replace(/\/$/, "");
+  // A null base is a bare path, never an ancestor prefix. (An empty base is
+  // impossible here: only "/*" and "*" produce one, and both return above.)
+  if (base === null) return false;
+  return entry.startsWith(`${base}/`);
+}
+
+/**
+ * Hand-written routes above the generated block that shadow migrated
+ * entries. Returns one finding per shadowing line —
+ * `{ line, directive, matcher, entries }` with a 1-based `line` and every
+ * covered entry. Only literal entries are checked: a workspace-scoped entry
+ * cannot be shadowed by a static prefix. Lines at or below the BEGIN marker
+ * (the generated block, and any deliberate legacy fallback beneath it) are
+ * never findings. A file without markers has no generated block yet, so
+ * there is nothing to shadow.
+ */
+export function findShadowingRoutes(text, entries) {
+  const lines = text.split("\n");
+  const begin = lines.findIndex((line) => line.trim() === `# ${MARK_BEGIN}`);
+  if (begin === -1) return [];
+  const literal = entries
+    .map(parseEntry)
+    .filter((parsed) => !parsed.catchAll && !isWorkspaceScoped(parsed))
+    .map((parsed) => parsed.entry);
+  const findings = [];
+  for (let index = 0; index < begin; index += 1) {
+    const match = ROUTE_DIRECTIVE.exec(lines[index].trim());
+    if (match === null) continue;
+    const [, directive, matcher] = match;
+    const covered = literal.filter((entry) => matcherCoversEntry(matcher, entry));
+    if (covered.length > 0) findings.push({ line: index + 1, directive, matcher, entries: covered });
+  }
+  return findings;
+}
+
 function parseArgs(argv) {
   const opts = { check: false, list: LIST, ce: CADDY_CE, aio: CADDY_AIO };
   for (let i = 0; i < argv.length; i += 1) {
@@ -312,6 +374,24 @@ function parseArgs(argv) {
 export function main(argv) {
   const opts = parseArgs(argv);
   const { entries, reservedTopLevel } = loadEntries(opts.list);
+  const shadows = [
+    ...findShadowingRoutes(readFileSync(opts.ce, "utf8"), entries).map((finding) => ({ file: opts.ce, ...finding })),
+    ...findShadowingRoutes(readFileSync(opts.aio, "utf8"), entries).map((finding) => ({
+      file: opts.aio,
+      ...finding,
+    })),
+  ];
+  if (shadows.length > 0) {
+    const details = shadows
+      .map(
+        (finding) =>
+          `  ${finding.file}:${finding.line}: hand-written \`${finding.directive} ${finding.matcher}\` shadows migrated ${finding.entries.length === 1 ? "route" : "routes"} ${finding.entries.join(", ")}`
+      )
+      .join("\n");
+    throw new Error(
+      `legacy proxy route(s) shadow the generated web_new block (Caddy routes to the first match). Remove the hand-written line, or move it below the \`# ${MARK_END}\` line so the generated route wins:\n${details}`
+    );
+  }
   const ce = syncFile(opts.ce, CE_ANCHOR, "\t", buildCeLines(entries, reservedTopLevel), { check: opts.check });
   const aio = syncFile(opts.aio, AIO_ANCHOR, "    ", buildAioLines(entries, reservedTopLevel), {
     check: opts.check,

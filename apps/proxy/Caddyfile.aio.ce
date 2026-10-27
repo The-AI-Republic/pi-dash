@@ -17,15 +17,6 @@
         reverse_proxy localhost:3004
     }
 
-	handle /auth/* {
-        reverse_proxy localhost:3004
-    }
-
-	handle_path /god-mode* {
-        root * /app/admin
-        try_files {path} {path}/ /index.html
-        file_server
-    }
     # BEGIN MIGRATED ROUTES (generated from apps/web_new/migrated-routes.json — do not edit; run `pnpm --filter web_new coexistence:generate`)
     handle /sign-in* {
         root * /app/web_new
@@ -289,6 +280,12 @@
         file_server
     }
     # END MIGRATED ROUTES
+    # Legacy /auth/* fallback. It stays below the generated block on purpose:
+    # a migrated /auth/* subpath (today /auth/device) must win, and Caddy
+    # handles the first matching block. (NEWFRONT-953)
+    handle /auth/* {
+        reverse_proxy localhost:3004
+    }
     handle_path /* {
         root * /app/web
         try_files {path} {path}/ /index.html
