@@ -9,6 +9,7 @@
 import { test, expect } from "../fixtures";
 import type { ParitySeedFacts } from "../drivers/parity-driver";
 import {
+  fetchIssue,
   seedProjectUserProperties,
   serverCreateIssue,
   serverCreateProject,
@@ -281,6 +282,26 @@ test(
     for (let batch = 0; batch < 95; batch++) {
       createdIds.push(await serverCreateIssue(seed.workspaceSlug, seed.projectId, session, `${prefix} ${batch}`));
     }
+    // The new app's recency bypass lifts every issue created within
+    // the last 30s into an unvirtualized strip; the 95 stales would
+    // all qualify and bury the seeds. Age the newest out before
+    // opening so the setup list is fully virtualized on both apps
+    // (the oracle has no strip, so the wait only costs wall time
+    // there).
+    await expect
+      .poll(
+        async () => {
+          const last = await fetchIssue(
+            seed.workspaceSlug,
+            seed.projectId,
+            createdIds[createdIds.length - 1] as string,
+            session
+          );
+          return Date.now() - Date.parse(String(last["created_at"]));
+        },
+        { timeout: 180_000, intervals: [5_000] }
+      )
+      .toBeGreaterThan(31_000);
     const freshName = `Parity fresh ${uniqueSuffix()}`;
     try {
       await resetPrefs(seed.workspaceSlug, seed.projectId, session);
