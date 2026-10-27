@@ -360,6 +360,44 @@ describe(
   EDITOR_TEST_TIMEOUT
 );
 
+describe(
+  "PageBodyEditor read-only binding (PAGE-092)",
+  () => {
+    it("binds the live document with editing off and renders remote updates", async () => {
+      const doc = new Y.Doc();
+      mount({ collab: { doc }, editable: false, seedDocument: true });
+      const region = await screen.findByLabelText("Page body", undefined, LOAD_TIMEOUT);
+      expect(region).toHaveAttribute("contenteditable", "false");
+      await vi.waitFor(() => expect(doc.getXmlFragment("default").length).toBeGreaterThan(0));
+      const peer = new Y.Doc();
+      Y.applyUpdate(peer, Y.encodeStateAsUpdate(doc));
+      const paragraph = peer.getXmlFragment("default").get(0) as Y.XmlElement;
+      const text = paragraph.get(0) as Y.XmlText;
+      await act(async () => {
+        text.insert(text.length, " plus remote");
+      });
+      await act(async () => {
+        Y.applyUpdate(doc, Y.encodeStateAsUpdate(peer));
+      });
+      await vi.waitFor(() => expect(region).toHaveTextContent("plus remote"));
+      expect(region).toHaveAttribute("contenteditable", "false");
+    });
+
+    it("takes no paste while editing is off", async () => {
+      const onPasteHtml = vi.fn(async (html: string) => html);
+      const mounted = mount({ editable: false, onPasteHtml });
+      const region = await screen.findByLabelText("Page body", undefined, LOAD_TIMEOUT);
+      expect(region).toHaveAttribute("contenteditable", "false");
+      paste(region, { html: "<p>foreign</p>" });
+      await act(async () => {});
+      expect(onPasteHtml).not.toHaveBeenCalled();
+      expect(mounted.onChange).not.toHaveBeenCalled();
+      expect(region).toHaveTextContent("Stored words");
+    });
+  },
+  EDITOR_TEST_TIMEOUT
+);
+
 describe("looksLikeMarkdown", () => {
   it("recognises every structural flavour", () => {
     for (const text of [

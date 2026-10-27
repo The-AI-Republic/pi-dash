@@ -5,8 +5,10 @@
 // visibility, list loading/empty/error states, fetch and caching behavior,
 // list URL semantics, and the detail shell (record load, error panel,
 // breadcrumb cluster with sibling switcher, read gating, loading states,
-// deep links). Rows: PAGE-018–PAGE-025, PAGE-079–PAGE-080.
+// deep links). Rows: PAGE-018–PAGE-025, PAGE-079–PAGE-080, PAGE-092.
 import { test, expect } from "../fixtures";
+import { createDriver } from "../drivers/index";
+import type { Browser } from "@playwright/test";
 import {
   parityProjectIdentifier,
   requireMentionMember,
@@ -29,13 +31,14 @@ import {
   serverRenamePage,
   serverSetPageAccess,
   serverUpdatePageDescription,
+  sessionBrowserCookies,
   signInSessionWithRetry,
   type PagesListServerRow,
   type ParityPageVersion,
   type ParitySeedFacts,
 } from "../helpers/api";
 import { specTags, specTitle } from "../helpers/tags";
-import type { PagesGatingRequest } from "../drivers/parity-driver";
+import type { PagesGatingRequest, ParityDriver } from "../drivers/parity-driver";
 
 /** Project MEMBER role (the seed owner is admin; guests hold 5). */
 const PROJECT_MEMBER_ROLE = 15;
@@ -180,6 +183,22 @@ function withD17(items: string[], suffix: readonly string[], leg: string): strin
 /** True when the status reads as a successful mutation answer. */
 function isOkStatus(status: number): boolean {
   return status === 200 || status === 201 || status === 204;
+}
+
+/**
+ * A second signed-in context driving the same page through the run's own
+ * driver (PAGE-092): the viewer reads while the main context's peer edits.
+ */
+async function openViewer(
+  browser: Browser,
+  target: ParityDriver["target"],
+  url: string,
+  sessionCookie: string
+): Promise<{ close: () => Promise<void>; driver: ParityDriver }> {
+  const context = await browser.newContext();
+  const viewer = createDriver(await context.newPage(), target);
+  await viewer.openAuthenticated(url, sessionBrowserCookies(sessionCookie));
+  return { close: () => context.close(), driver: viewer };
 }
 
 test(
@@ -1480,6 +1499,97 @@ test(
       expect(await driver.pagesGatingQueryParam("paneTab")).toBe(null);
 
       expect(versionDetail.id).toBe(versionId);
+    } finally {
+      await cleanupProject(seed, projectId, session);
+    }
+  }
+);
+
+test(
+  specTitle(["PAGE-092"], "a read-only viewer follows a peer's live edits without an editable region"),
+  { tag: specTags(["PAGE-092"]) },
+  async ({ driver, seed, browser }) => {
+    const session = await signInSessionWithRetry(seed.email, seed.password);
+    const guest = requireGuest(seed);
+    const projectId = await scratchProject(seed, "livefollow", session);
+    try {
+      const stamp = tag("fol");
+      const pageId = await serverCreatePage(seed.workspaceSlug, projectId, session, `${stamp} page`);
+      // Guests read others' open pages only when the project lets guests
+      // view everything; editing still needs member standing or ownership.
+      await setupRetry("guest view-all flag", () =>
+        serverPatchProject(seed.workspaceSlug, projectId, session, { guest_view_all_features: true })
+      );
+      await setupRetry("add guest", () =>
+        serverEnsureProjectGuest(seed.workspaceSlug, projectId, guest.email, session)
+      );
+      // A stored snapshot for the overlay half, persisted before either
+      // context opens so no live write can land in it.
+      await setupRetry("seed snapshot", () =>
+        serverUpdatePageDescription(
+          seed.workspaceSlug,
+          projectId,
+          pageId,
+          session,
+          `<p>${stamp} snapshot words</p>`,
+          tiptapParagraphs(`${stamp} snapshot words`)
+        )
+      );
+      const versions = await waitVersions(seed, projectId, pageId, session, 1);
+      const versionId = versions[0]?.id ?? "";
+      expect(versionId).not.toBe("");
+
+      // The peer edits while the guest viewer reads the same page.
+      await driver.openEntry();
+      await driver.signInWithPassword(seed.email, seed.password);
+      await driver.pagesGatingOpenDetail(seed.workspaceSlug, projectId, pageId);
+      expect(await driver.pagesGatingWaitDetailSettled()).toBe("editor");
+      await driver.pagesLiveWaitSynced();
+      const guestSession = await signInSessionWithRetry(guest.email, guest.password);
+      const viewer = await openViewer(
+        browser,
+        driver.target,
+        `/${seed.workspaceSlug}/projects/${projectId}/pages/${pageId}`,
+        guestSession
+      );
+      try {
+        await viewer.driver.pagesGatingOpenDetail(seed.workspaceSlug, projectId, pageId);
+        expect(await viewer.driver.pagesGatingWaitDetailSettled()).toBe("editor");
+        expect(await viewer.driver.pagesGatingEditableCount()).toBe(0);
+
+        // The peer's keystrokes land on the viewer's canvas with no reload,
+        // and the viewer's body never gains an editable region.
+        const marker = `live-follow-092-${stamp}`;
+        await driver.pagesLiveTypeInBody(`${marker} `);
+        await expect.poll(() => viewer.driver.pagesLiveBodyText(), { timeout: 60_000 }).toContain(marker);
+        expect(await viewer.driver.pagesGatingEditableCount()).toBe(0);
+
+        // The version overlay stays the snapshot view: the stored words
+        // render, the live text never lands in them, and no restore control
+        // is offered.
+        await viewer.driver.pagesPaneOpenViaToolbar();
+        await viewer.driver.pagesPaneSelectTab("Info");
+        await viewer.driver.pagesPaneSelectVersion(versionId);
+        await expect
+          .poll(() => viewer.driver.pagesPaneOverlayText(), { timeout: 60_000 })
+          .toContain(`${stamp} snapshot words`);
+        expect(await viewer.driver.pagesPaneOverlayText()).not.toContain(marker);
+        expect(await viewer.driver.pagesPaneRestoreVisible()).toBe(false);
+
+        // No presence roster renders for the viewer either.
+        expect(await viewer.driver.pagesCloudToolbarEndNames()).toEqual(["(icon:panel-right)"]);
+      } finally {
+        await viewer.close();
+      }
+
+      // Server half: the guest reads the record but no write lands.
+      const base = `/api/workspaces/${seed.workspaceSlug}/projects/${projectId}`;
+      expect(await serverPageRequestStatus("GET", `${base}/pages/${pageId}/`, guestSession)).toBe(200);
+      expect(
+        await serverPageRequestStatus("PATCH", `${base}/pages/${pageId}/`, guestSession, { name: "guest try" })
+      ).toBe(403);
+      const record = await serverPageRecord(seed.workspaceSlug, projectId, pageId, session);
+      expect(record.name).not.toBe("guest try");
     } finally {
       await cleanupProject(seed, projectId, session);
     }

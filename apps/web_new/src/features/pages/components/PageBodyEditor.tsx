@@ -1,8 +1,8 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Page body editing surface (parity/specs/pages.md §5.3, §10.1,
-// PAGE-026–032). It is the page's own lazy editor: the page extension set
+// Page body editing surface (parity/specs/pages.md §5.3, §10.1, §19.2,
+// PAGE-026–032, PAGE-092). It is the page's own lazy editor: the page extension set
 // (description core plus underline, alignment and task lists) and the
 // Tiptap chunk resolve together through import(), so the initial load
 // never carries them. It publishes the command handle the sticky bar and
@@ -60,7 +60,9 @@ export interface PageBodyEditorProps {
   /**
    * Whether the surface takes input (default true). A read-only viewer
    * binds the same live document with editing off, so the body follows
-   * remote updates without offering an editable region (PAGE-053).
+   * remote updates without offering an editable region (PAGE-053,
+   * PAGE-092) — and a surface with editing off takes no paste, so a
+   * Markdown paste never writes into the shared document from a viewer.
    */
   editable?: boolean | undefined;
   /** The live document to bind (PAGE-065); absent keeps the standalone editor. */
@@ -210,7 +212,9 @@ async function loadPageEditor(
     // as an ordinary document edit (PAGE-039). Text-only pastes keep the
     // editor's native Markdown handling.
     React.useEffect(() => {
-      if (editor === null) return;
+      // A non-editable surface takes no paste: without this a Markdown
+      // paste would write into the shared document from a viewer (PAGE-092).
+      if (editor === null || !editable) return;
       const dom = editor.view.dom;
       const onPaste = (event: ClipboardEvent): void => {
         handlePagePaste(
@@ -226,7 +230,7 @@ async function loadPageEditor(
       // the rewritten clone is inserted a second time (PAGE-039).
       dom.addEventListener("paste", onPaste, true);
       return () => dom.removeEventListener("paste", onPaste, true);
-    }, [editor]);
+    }, [editor, editable]);
 
     if (editor === null) return <div aria-hidden="true" className="relative" />;
     return (

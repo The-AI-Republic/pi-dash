@@ -1281,6 +1281,7 @@ target:
 | PAGE-075–PAGE-078                     | §9.3–§9.4        | `pages/prefs-cloud-misc.spec.ts`                                                          |
 | PAGE-079, PAGE-080                    | §4.5             | `pages/gating-states-detail-shell.spec.ts`                                                |
 | PAGE-084–PAGE-090                     | §12.2–§12.3      | **none — web_new only**                                                                   |
+| PAGE-091, PAGE-092                    | §19.1–§19.2      | gate-added rows (NEWFRONT-851) — see §19                              |
 
 Every one of PAGE-001–083 has at least one `specTitle([...])` scenario in
 the nine files (checked against `web-new-dev` at `3701e2fff`). Two things
@@ -1640,3 +1641,78 @@ label from this table that it does not assert.
 | Mark picker tabs                 | `Emoji`, `Icon`                                                                                                                                                                                                                                                     | PAGE-027                     |
 | Toolbar icon count               | 14 icon-only controls in the sticky bar (the oracle counts them; the mark/alignment/list/quote/code/table/image/colour entries above account for the set)                                                                                                           | PAGE-028–PAGE-036            |
 | Nested (spec-defined, no oracle) | `Add sub-page`, `Move to…`, `Restricted page`                                                                                                                                                                                                                       | PAGE-084, PAGE-086, PAGE-087 |
+
+## 19. Rows added by the area gate (PAGE-091, PAGE-092)
+
+Two old-app behaviours surfaced during the build slices with no inventory
+row of their own. Both were verified by reading the old sources and by
+probing the old app before being rowed here (evidence in NEWFRONT-851's
+workpad). They are parity rows, not new features: the old app does them
+today and the new app must too.
+
+### 19.1 Table structure editing (PAGE-091)
+
+An editable table carries a hover affordance beside each row and each
+column. The row handle's menu offers, in this order, an insert-above entry,
+an insert-below entry, a duplicate entry that copies the row together with
+its cell content, a clear-contents entry that empties the selected cells,
+and a delete entry that removes the row; the column handle's menu mirrors
+it with insert-left, insert-right, duplicate, clear-contents and delete.
+Both menus also carry a collapsible colour section whose swatches paint the
+**cell background** of the selected range and clear it again. Every action
+is an ordinary document edit: it lives in the body, saves through the same
+path, and reloads intact. Deleting the last remaining row leaves the editor
+with an empty paragraph rather than a table.
+
+The affordances are for editable pages only: a locked, archived or
+otherwise read-only page renders neither handle, and the Tab/Shift-Tab cell
+walk from PAGE-033 keeps working after any of these actions.
+
+This row is **not** satisfied by the formatting-bar Table entry of
+PAGE-033 (insert 3×3, caret in the first cell): that entry only creates a
+table. Row 091 covers restructuring one that already exists.
+
+The old app's cell colour is stored on the cell's own style attribute and
+its text-colour half was never wired up; the new app must persist the
+background choice, and is free to store it as a cell attribute rather than
+an inline style as long as it survives save and reload and renders in the
+editor.
+
+### 19.2 Read-only followers of a live document (PAGE-092)
+
+A page that is read-only for the current viewer (not the owner's own page,
+a locked page, or a viewer below the edit gate) still joins the
+collaboration session the editable case uses, and remote edits show up on
+the canvas without a reload, while the viewer's own surface has no
+content-editable region and therefore no draft to write back. The version
+overlay for that viewer is the snapshot view of PAGE-053 (restore hidden).
+
+The new app already chooses per-viewer session mounting (NEWFRONT-847
+handed this to the gate); this row pins the outcome rather than the
+mechanism. Presence rosters and cursors are **not** required by it: PAGE-077
+records that no presence roster exists, and the old app renders none.
+
+### 19.3 Scenarios still to be written
+
+Both rows are added greenfield: no oracle scenario, no `web-new` driver
+method and no `new` implementation covers them yet, so their Status cells
+read `not started` until a slice lands them. Because the old app does both
+behaviours, each row needs an **oracle** scenario pinned live against
+`apps/web` first, then the same scenario on `web_new`:
+
+- PAGE-091 — a new scenario in `pages/title-toolbar.spec.ts`, "table row
+  and column handles restructure the saved table". It opens a table from
+  the formatting bar, hovers a row handle, reads the menu entries in order,
+  duplicates a row and asserts the extra row, clears it, deletes it, paints
+  a cell background and asserts it survives save plus reload; a read-only
+  half asserts no handle renders on a locked page. It needs its own
+  driver methods (open the menus, invoke an entry, read table dimensions
+  and a cell's background) — the PAGE-033 methods only create and measure.
+- PAGE-092 — a new scenario in `pages/gating-states-detail-shell.spec.ts`,
+  "a read-only viewer follows a peer's live edits without an editable
+  region". It is byte-for-byte the same on both legs: a peer types, the
+  viewer sees the text, the viewer has no content-editable region. The
+  existing collab driver methods (PAGE-065) cover the mechanics.
+
+Both rows join the pages area gate's required set: the gate cannot turn the
+area green while either is `not started`.
