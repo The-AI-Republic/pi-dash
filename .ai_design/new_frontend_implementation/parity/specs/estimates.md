@@ -1051,12 +1051,20 @@ Issues owns the generic property row and the dropdown family
   typing `90` finds the row whose label never shows "90". The `${value}`
   filter is built from the stored text, and the clear row is indexed by
   its "No estimate" label. This is a pinned quirk, **bug:
-  NEWFRONT-820**, not intended behaviour. The palette page (EST-021,
-  §6.5) behaves differently — it filters rendered text — so there is
-  no single rule to inherit. Slice 744 must decide explicitly for the
-  picker: match the displayed label (the natural behaviour) and record
-  the divergence, or keep matching the stored value. Do not describe
-  the old app as filtering labels.
+  NEWFRONT-820**, not intended behaviour.
+
+  **Resolution (NEWFRONT-744, closed out by NEWFRONT-820).** The new
+  picker matches the **displayed label**, not the stored value. On a
+  time system a stored `90` reads "1h 30m", so typing `1h` finds it and
+  typing `90` finds nothing; the clear row still matches "No estimate".
+  Points and categories behave exactly as before because their stored
+  and displayed text are the same string. This is a deliberate
+  divergence from the old stored-value indexing (recorded in §9.3) and
+  makes the picker agree with the palette page (§6.5), which filters
+  rendered row text. The rule is pinning-free against the oracle —
+  EST-017/EST-021 seed points and categories, where both rules agree —
+  so no oracle scenario can distinguish them; the unit tests are the
+  proof. Do not describe the old app as filtering labels.
 - **Write.** One issue update carrying `estimate_point` = the chosen
   point id, or `null` for the clear row. It answers **204 with no
   body** (§7.2) — there is no updated issue to read back, so the client
@@ -1191,10 +1199,10 @@ Issues'. Estimates owns:
   is non-empty. Opening a page clears the query, so the page starts
   showing every value and the user opts into filtering by typing;
   clearing the box restores the full list. The rows are indexed by the
-  string they show — "1h 30m" for a stored `90` — so §6.1's
-  stored-value search quirk (NEWFRONT-820) does **not** apply here.
-  The two surfaces search different things in the old app; the new
-  app should make them agree deliberately (slice 744). The old page
+  string they show — "1h 30m" for a stored `90`. The two surfaces
+  search different things in the old app; the new app agrees
+  deliberately (§6.1 resolution): both match displayed labels, so a
+  stored `90` is found by `1h`, never by `90`. The old page
   shows a plain "no estimate found" line only when the active system
   has no values at all.
 - The page must not appear when estimates are off: the command is
@@ -1490,11 +1498,14 @@ behaviour (noted per row).
   and let slice 743 decide only with oracle evidence; do not subtly
   claim the two conditions are the same. Gate: align when 809 is fixed.
 - **NEWFRONT-820 — the estimate picker searches the stored value, not
-  the label.** Time options display "1h 30m" while the search index is
-  the stored `90`, so a label search fails and a stored-value search
-  matches text the user cannot see. Intended: search what is shown.
-  Not pinned by an oracle scenario. New app: slice 744 picks and
-  records the rule (§6.1); gate aligns when 820 is resolved.
+  the label — RESOLVED.** Time options display "1h 30m" while the old
+  search index was the stored `90`, so a label search failed and a
+  stored-value search matched text the user could not see. Not pinned
+  by an oracle scenario (EST-017/EST-021 use points and categories,
+  where stored and displayed text are identical). New app: slice 744
+  chose to search displayed labels, and the picker and palette now
+  agree (§6.1 resolution, §9.3). The old app is unchanged; no gate
+  alignment is needed because no scenario distinguishes the rules.
 - **No estimate search.** `estimate-search.tsx` renders a placeholder
   and is mounted nowhere; EST-028 pins the absence of list search. Do
   not build a search field, and do not cite that file as a behaviour
@@ -1516,6 +1527,7 @@ oracle scenario, so none can fail the gate on its own.
 | Value trimming | Raw drafts are validated and sent untrimmed; whitespace-only reads as zero (numeric) or as text (categories), not as empty | A value is trimmed once on commit and that trimmed value is what validation and submit see, so whitespace-only reads as empty (§3.6, §3.7) | 742 |
 | Time starter (cloud) | No starter block for cloud families: choosing time is a dead end | Hours template plus a two-value scratch set, stored as minutes (§3.3) | 743 |
 | Key allocation on add | `length + 1`, which can reuse a key | `max + 1`, keys contiguous 1..n (D21, §9.1) | 742, 743 |
+| Picker search index | The work-item picker searches the raw stored value, so on a time system `1h` misses "1h 30m" and `90` matches a row that never shows it (NEWFRONT-820) | The picker searches displayed labels, agreeing with the palette page; `90` matches nothing unless a row shows it (§6.1) | 744 |
 | Analytics estimate labels | Groups carry the raw stored value; a time system charts "90" and the table prints it verbatim | May render the humanised value through the shared formatter if slice 747 chooses so (§6.4) | 747 |
 
 ## 10. Desktop and editions (EST-029)
