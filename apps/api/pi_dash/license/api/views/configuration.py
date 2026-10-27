@@ -87,16 +87,16 @@ class DisableEmailFeatureEndpoint(BaseAPIView):
 
 
 def _flag_is_enabled(value):
-    """Normalize a transport-security flag to bool.
+    """Normalize a transport-security flag the way save-then-runtime does.
 
-    Stored flags are "1"/"0" strings; candidates may also arrive as JSON
-    booleans or numbers.
+    The configurations PATCH stores values verbatim and every runtime
+    sender compares against "1", so only "1" (and JSON true, which the
+    UI formats as "1") counts as enabled. Any other spelling grades
+    exactly as runtime would treat it after saving.
     """
     if isinstance(value, bool):
         return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    return str(value).strip().lower() in ("1", "true", "t", "yes", "y", "on")
+    return str(value).strip() == "1"
 
 
 class EmailCredentialCheckEndpoint(BaseAPIView):

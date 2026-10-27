@@ -136,6 +136,42 @@ def test_receiver_only_grades_stored_configuration(admin_client, smtp_mocks):
     assert message_kwargs["to"] == ["to@example.com"]
 
 
+def test_noncanonical_stored_flags_grade_as_runtime_would(admin_client):
+    """Stored non-"1" spellings (e.g. env EMAIL_USE_TLS=true with no DB row).
+
+    A receiver-only check must agree with both the old `== "1"` check and
+    production sends, so stored "true"/"True" grade as off.
+    """
+    stored = (
+        "stored.smtp.example",
+        "stored-user",
+        "stored-secret",
+        "2525",
+        "true",
+        "True",
+        "stored@example.com",
+    )
+    with (
+        patch(
+            "pi_dash.license.api.views.configuration.get_email_configuration",
+            return_value=stored,
+        ),
+        patch(
+            "pi_dash.license.api.views.configuration.get_connection"
+        ) as get_connection,
+        patch(
+            "pi_dash.license.api.views.configuration.EmailMultiAlternatives"
+        ) as message_class,
+    ):
+        message_class.return_value.send.return_value = 1
+        response = admin_client.post(
+            URL, {"receiver_email": "to@example.com"}, format="json"
+        )
+    assert response.status_code == 200
+    kwargs = _connection_kwargs(get_connection)
+    assert (kwargs["use_tls"], kwargs["use_ssl"]) == (False, False)
+
+
 def test_candidate_settings_override_stored(admin_client, smtp_mocks):
     get_connection, message_class = smtp_mocks
     response = admin_client.post(
@@ -200,7 +236,9 @@ def test_blank_password_falls_back_to_stored(admin_client, smtp_mocks, blank):
     [
         (1025, True, False, (1025, True, False)),
         ("1026", 1, 0, (1026, True, False)),
-        (" 1027 ", "true", "false", (1027, True, False)),
+        # Non-canonical spellings grade as runtime would treat them after
+        # saving (off): save stores verbatim, runtime compares == "1".
+        (" 1027 ", "true", "True", (1027, False, False)),
         ("1028", "1", "0", (1028, True, False)),
     ],
 )
@@ -219,6 +257,23 @@ def test_flag_and_port_coercions(admin_client, smtp_mocks, port, use_tls, use_ss
     assert response.status_code == 200
     kwargs = _connection_kwargs(get_connection)
     assert (kwargs["port"], kwargs["use_tls"], kwargs["use_ssl"]) == expected
+
+
+def test_empty_nonpassword_graded_as_given_and_null_falls_back(
+    admin_client, smtp_mocks
+):
+    """Only the password treats blank as stored; other present fields grade
+    as given, while null falls back to stored per field."""
+    get_connection, _ = smtp_mocks
+    response = admin_client.post(
+        URL,
+        {"receiver_email": "to@example.com", "EMAIL_HOST": "", "EMAIL_PORT": None},
+        format="json",
+    )
+    assert response.status_code == 200
+    kwargs = _connection_kwargs(get_connection)
+    assert kwargs["host"] == ""
+    assert kwargs["port"] == 2525
 
 
 def test_candidate_auth_failure_mapping_preserved(admin_client, smtp_mocks):
