@@ -86,6 +86,7 @@ use uuid::Uuid;
 
 use pidash_auth::permissions::project;
 use pidash_auth::scope::TenantScope;
+use pidash_services::read;
 use pidash_services::v1_work_items::queries_sub;
 use pidash_services::v1_work_items::shape_issue::BASE_EXPANSION_NAMES;
 use pidash_services::v1_work_items::shape_social::{
@@ -2038,15 +2039,16 @@ async fn file_asset_url(pool: &PgPool, asset_id: &Uuid) -> Result<Option<String>
         pool: &PgPool,
         workspace_id: Option<Uuid>,
     ) -> Result<Option<String>, Denial> {
-        match workspace_id {
-            Some(id) => sqlx::query_scalar(r#"SELECT "slug" FROM "workspaces" WHERE "id" = $1"#)
-                .bind(id)
-                .fetch_optional(pool)
-                .await
-                .map_err(|error| db_error(error, "file-asset-slug"))
-                .map(|slug: Option<Option<String>>| slug.flatten()),
-            None => Ok(None),
-        }
+        read::workspace_slug(pool, workspace_id)
+            .await
+            .map_err(|error| match error {
+                // Unreachable: the slug lookup never 404s.
+                read::Error::NotFound => Denial::ServerError,
+                read::Error::Db(err) => {
+                    let (site, source) = err.split();
+                    db_error(source, site)
+                }
+            })
     }
     match entity_type.as_deref() {
         Some("WORKSPACE_LOGO")

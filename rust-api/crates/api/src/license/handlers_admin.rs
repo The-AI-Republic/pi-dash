@@ -83,6 +83,7 @@ use pidash_auth::csrf as csrf_kernel;
 use pidash_auth::session as session_kernel;
 use pidash_auth::signing::{Signer, SESSION_SIGNING_SALT};
 use pidash_services::domain::identity;
+use pidash_services::read::{self, UserShape};
 use pidash_types::license::serializers_core::{
     instance_admin_me_to_representation, instance_admin_to_representation, AdminMeRow,
     InstanceAdminRow, LiteUserRow,
@@ -437,52 +438,12 @@ fn avatar_url(
     )
 }
 
-/// Full `users` projection shared by `me`, `session`, and `user_detail`.
-/// Every user column rides a LEFT JOIN somewhere, so all read `Option`
-/// and the caller decides what a missing row means. `sqlx::FromRow` maps
-/// by column name (wide selects exceed the 16-tuple `FromRow` impls), so
-/// the SELECT aliases below must match these field names exactly.
-#[derive(Debug, Clone, sqlx::FromRow)]
-struct UserShape {
-    id: Option<Uuid>,
-    first_name: Option<String>,
-    last_name: Option<String>,
-    avatar: Option<String>,
-    avatar_asset_id: Option<Uuid>,
-    avatar_asset_row: Option<Uuid>,
-    avatar_asset_entity: Option<String>,
-    avatar_asset_workspace: Option<Uuid>,
-    avatar_asset_project: Option<Uuid>,
-    avatar_asset_issue: Option<Uuid>,
-    avatar_asset_workspace_slug: Option<String>,
-    cover_image: Option<String>,
-    date_joined: Option<DateTime<Utc>>,
-    display_name: Option<String>,
-    email: Option<String>,
-    is_active: Option<bool>,
-    is_bot: Option<bool>,
-    is_email_verified: Option<bool>,
-    user_timezone: Option<String>,
-    username: Option<String>,
-    is_password_autoset: Option<bool>,
-    last_login_medium: Option<String>,
-}
-
-const USER_SHAPE_SELECT: &str = "u.id AS id, u.first_name AS first_name, u.last_name AS last_name, u.avatar AS avatar, u.avatar_asset_id AS avatar_asset_id, fa.id AS avatar_asset_row, fa.entity_type AS avatar_asset_entity, fa.workspace_id AS avatar_asset_workspace, fa.project_id AS avatar_asset_project, fa.issue_id AS avatar_asset_issue, w.slug AS avatar_asset_workspace_slug, u.cover_image AS cover_image, u.date_joined AS date_joined, u.display_name AS display_name, u.email AS email, u.is_active AS is_active, u.is_bot AS is_bot, u.is_email_verified AS is_email_verified, u.user_timezone AS user_timezone, u.username AS username, u.is_password_autoset AS is_password_autoset, u.last_login_medium AS last_login_medium";
-
+/// Fetch one user with its avatar-asset joins via the public read
+/// service.
 async fn fetch_user(pool: &PgPool, user_id: &Uuid) -> Result<Option<UserShape>, Denial> {
-    // Both joins are deliberately unscoped: the forward-FK descriptor reads
-    // through `_base_manager`, so soft-deleted assets/workspaces resolve.
-    let row: Option<UserShape> = sqlx::query_as(&format!(
-        "SELECT {USER_SHAPE_SELECT} FROM users u LEFT JOIN file_assets fa ON fa.id = u.avatar_asset_id LEFT JOIN workspaces w ON w.id = fa.workspace_id WHERE u.id = $1"
-    ))
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    // A present row always carries its PK; its absence means the caller
-    // joined a null FK (`user_detail: null`, `user: null`).
-    Ok(row.filter(|shape| shape.id.is_some()))
+    read::fetch_user(pool, user_id)
+        .await
+        .map_err(|_| Denial::ServerError)
 }
 
 /// Render a `UserShape` through `InstanceAdminMeSerializer`

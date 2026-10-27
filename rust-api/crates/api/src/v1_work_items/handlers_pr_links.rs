@@ -659,6 +659,7 @@ use pidash_services::integrations::code_reviews::{
     NewLegacyLink, ReviewAdapter, ReviewParser,
 };
 use pidash_services::integrations::repositories::{NewRepository, RepositoryDefaults};
+use pidash_services::read;
 
 /// Map a sqlx failure into the `pr_links` store error.
 fn pr_store_error(context: &str, error: sqlx::Error) -> PrStoreError {
@@ -717,19 +718,14 @@ impl PrStore {
     }
 
     async fn workspace_of(&self, project_id: &uuid::Uuid) -> Result<uuid::Uuid, PrStoreError> {
-        // `PROJECT_WORKSPACE_LOOKUP_SQL`, plus the default-manager
-        // `deleted_at` scope: Python's `self.project` traversal misses
-        // soft-deleted projects (`DoesNotExist` → 404), so the lookup
-        // must too.
-        let row: Option<(Uuid,)> = sqlx::query_as(
-            "SELECT workspace_id FROM projects WHERE id = $1 AND deleted_at IS NULL LIMIT 1",
-        )
-        .bind(project_id)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|error| pr_store_error("project workspace", error))?;
-        row.map(|row| row.0)
-            .ok_or_else(|| PrStoreError(PROJECT_WORKSPACE_MISS.to_owned()))
+        // The public read service; deleted projects miss → the 404
+        // sentinel (Python's `self.project` traversal on `save()`).
+        read::workspace_of(&self.pool, project_id)
+            .await
+            .map_err(|error| match error {
+                read::Error::NotFound => PrStoreError(PROJECT_WORKSPACE_MISS.to_owned()),
+                read::Error::Db(err) => pr_store_error("project workspace", err.into_source()),
+            })
     }
 }
 

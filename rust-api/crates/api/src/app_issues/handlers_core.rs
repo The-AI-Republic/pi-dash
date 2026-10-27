@@ -132,11 +132,9 @@ use pidash_services::dispatch::admission::{
 use pidash_services::dispatch::policy::{
     cloud_agent_is_configured, managed_runner_is_enabled, UserFlags,
 };
-use pidash_services::orchestration::blockers::{
-    has_open_blockers_sql, relations_summary, summary_sql, BlockerRow,
-};
 use pidash_services::orchestration::clock::ProjectClockPolicy;
 use pidash_services::orchestration::entries::{FireOutcome, FireRequest};
+use pidash_services::read;
 use pidash_types::dispatch::{AgentExecutorKind, ManagedRunnerReason};
 use pidash_types::orchestration::StateRef;
 use pidash_types::WorkspaceId;
@@ -4431,42 +4429,15 @@ async fn fetch_agent_runs(
     Ok((latest, active, count.0))
 }
 
-/// The cached blocker summary (`relations_summary(obj)`): both direction
-/// lists plus the open-blockers `Exists`, in that order.
+/// The cached blocker summary via the public read service: both
+/// direction lists plus the open-blockers `Exists`, in that order.
 async fn fetch_blocker_summary(
     pool: &sqlx::PgPool,
     issue_id: &Uuid,
 ) -> Result<pidash_services::orchestration::blockers::RelationsSummary, Denial> {
-    let fetch_list = async |blocking: bool| -> Result<Vec<BlockerRow>, Denial> {
-        let sql = summary_sql(blocking).replace(":issue_id", "$1");
-        type BlockerTuple = (Uuid, i32, String, Option<String>, Option<String>);
-        let rows: Vec<BlockerTuple> = sqlx::query_as(&sql)
-            .bind(issue_id)
-            .fetch_all(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-        Ok(rows
-            .into_iter()
-            .map(
-                |(issue_id, sequence_id, project_identifier, state_name, state_group)| BlockerRow {
-                    issue_id,
-                    sequence_id,
-                    project_identifier,
-                    state_name,
-                    state_group,
-                },
-            )
-            .collect())
-    };
-    let blocked_by = fetch_list(false).await?;
-    let blocking = fetch_list(true).await?;
-    let open_sql = has_open_blockers_sql().replace(":issue_id", "$1");
-    let open: Option<(i32,)> = sqlx::query_as(&open_sql)
-        .bind(issue_id)
-        .fetch_optional(pool)
+    read::fetch_blocker_summary(pool, issue_id)
         .await
-        .map_err(|_| Denial::ServerError)?;
-    Ok(relations_summary(&blocked_by, &blocking, open.is_some()))
+        .map_err(|_| Denial::ServerError)
 }
 
 /// Render one `IssueDetailSerializer(...).data` body as an insertion-ordered
