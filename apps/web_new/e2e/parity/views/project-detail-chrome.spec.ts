@@ -69,21 +69,22 @@ test(
 );
 
 test(
-  specTitle(["VIEW-022"], "bug: an unknown view id renders a nameless phantom, not the error state"),
+  specTitle(["VIEW-022"], "an unknown view id shows the missing-view empty state with a way back"),
   { tag: specTags(["VIEW-022"]) },
   async ({ driver }) => {
-    // bug: NEWFRONT-227 — the retrieve endpoint answers 200 with a null
-    // body for unknown ids instead of 404, so the detail renders a
-    // nameless phantom (no error state, no current-view crumb). The
-    // intended behavior is the VIEW-022 error state with a way back.
+    // The retrieve endpoint answers 404 for an unknown id (NEWFRONT-227),
+    // so the detail takes the same missing-view path as the forbidden case
+    // instead of rendering a nameless phantom.
     const harness = await viewsHarness("parity-vd22b");
-    const { owner, workspaceSlug, projectId, projectName } = harness;
+    const { owner, workspaceSlug, projectId } = harness;
     await createProjectViewFull(workspaceSlug, projectId, owner.cookie, { name: `Vd22b Alpha ${harness.tag}` });
 
     await viewsOpenDetailAs(driver, harness, "00000000-0000-0000-0000-000000000000");
-    await expect.poll(() => driver.viewsDetailEmptyTitle(), POLL).toBe("View work items will appear here");
-    expect(await driver.viewsDetailErrorTitle()).toBe("");
-    await expect.poll(() => driver.viewsDetailBreadcrumb(), POLL).toEqual([projectName, "Views"]);
+    await expect.poll(() => driver.viewsDetailErrorTitle(), POLL).toBe("View does not exist");
+    expect(await driver.viewsDetailEmptyTitle()).toBe("");
+
+    await driver.viewsDetailErrorBack();
+    await expect.poll(() => driver.currentUrlPath(), POLL).toMatch(/\/views\/?$/);
   }
 );
 
