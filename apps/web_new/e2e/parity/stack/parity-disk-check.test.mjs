@@ -23,15 +23,18 @@ const DF_STUB = [
   '  echo "garbage line without numbers"',
   "  exit 0",
   "fi",
+  // Free space in GB per filesystem; size defaults to 100 GB.
   'case "${2:-}" in',
-  '  /) pct="${DF_ROOT_PCT:-50}" ;;',
-  '  /extra) pct="${DF_EXTRA_PCT:-50}" ;;',
-  '  *) pct="${DF_DOCKER_PCT:-50}" ;;',
+  '  /) free="${DF_ROOT_FREE:-50}" ;;',
+  '  /extra) free="${DF_EXTRA_FREE:-50}" ;;',
+  '  *) free="${DF_DOCKER_FREE:-50}" ;;',
   "esac",
-  "used=$((pct * 1000))",
-  "avail=$(((100 - pct) * 1000))",
+  'size=$((${DF_SIZE_GB:-100} * 1048576))',
+  "avail=$((free * 1048576))",
+  "used=$((size - avail))",
+  "pct=$((used * 100 / size))",
   'echo "Filesystem 1024-blocks Used Available Capacity Mounted on"',
-  'echo "/dev/fake 100000 $used $avail ${pct}% ${2:-/}"',
+  'echo "/dev/fake $size $used $avail ${pct}% ${2:-/}"',
   "",
 ].join("\n");
 
@@ -44,11 +47,12 @@ const DOCKER_STUB = [
   "  *run*)",
   '    if [ "${VM_DF_FAIL:-0}" = "1" ]; then exit 1; fi',
   '    if [ "${VM_DF_GARBAGE:-0}" = "1" ]; then echo "garbage"; exit 0; fi',
-  '    vm_pct="${VM_DISK_PCT:-50}"',
-  "    vm_used=$((vm_pct * 1000))",
-  "    vm_avail=$(((100 - vm_pct) * 1000))",
+  "    vm_size=$((100 * 1048576))",
+  '    vm_avail=$((${VM_DISK_FREE:-50} * 1048576))',
+  "    vm_used=$((vm_size - vm_avail))",
+  "    vm_pct=$((vm_used * 100 / vm_size))",
   '    echo "Filesystem 1024-blocks Used Available Capacity Mounted on"',
-  '    echo "overlay 100000 $vm_used $vm_avail ${vm_pct}% /"',
+  '    echo "overlay $vm_size $vm_used $vm_avail ${vm_pct}% /"',
   "    exit 0 ;;",
   "esac",
   'echo "${DOCKER_OS:-}|${DOCKER_ROOT_DIR:-/var/lib/docker}"',
@@ -93,46 +97,59 @@ function runChecker(bin, { env = {}, args = [] } = {}) {
 
 describe("parity disk guard", () => {
   it("refuses a full root disk like the NEWFRONT-175 incident", () => {
-    const result = runChecker(stubBin(), { env: { DF_ROOT_PCT: "100" } });
+    const result = runChecker(stubBin(), { env: { DF_ROOT_FREE: "0" } });
     assert.equal(result.status, 1);
     assert.match(result.stdout, /REFUSED/);
-    assert.match(result.stdout, /\/ at 100% used/);
+    assert.match(result.stdout, /\/ has 0\.0G free, 100% used/);
   });
 
-  it("refuses exactly at the default limit", () => {
-    const result = runChecker(stubBin(), { env: { DF_ROOT_PCT: "90" } });
-    assert.equal(result.status, 1);
-    assert.match(result.stdout, /REFUSED/);
+  it("refuses just below the default 6 GB floor and passes at it", () => {
+    const bin = stubBin();
+    const below = runChecker(bin, { env: { DF_ROOT_FREE: "5" } });
+    assert.equal(below.status, 1);
+    assert.match(below.stdout, /REFUSED: \/ has 5\.0G free/);
+    assert.match(below.stdout, /needs 6G free/);
+    const at = runChecker(bin, { env: { DF_ROOT_FREE: "6" } });
+    assert.equal(at.status, 0);
+    assert.match(at.stdout, /WARNING/);
   });
 
-  it("warns but proceeds between warn and refuse", () => {
-    const result = runChecker(stubBin(), { env: { DF_ROOT_PCT: "85" } });
+  it("passes a large disk at 90% used that still has plenty free (NEWFRONT-851)", () => {
+    const result = runChecker(stubBin(), {
+      env: { DF_SIZE_GB: "1900", DF_ROOT_FREE: "190", DOCKER_DOWN: "1" },
+    });
     assert.equal(result.status, 0);
-    assert.match(result.stdout, /WARNING/);
+    assert.match(result.stdout, /disk check ok: least free 190\.0G \(90% used\)/);
+  });
+
+  it("warns but proceeds between the warn and refuse floors", () => {
+    const result = runChecker(stubBin(), { env: { DF_ROOT_FREE: "10" } });
+    assert.equal(result.status, 0);
+    assert.match(result.stdout, /WARNING: \/ has 10\.0G free/);
   });
 
   it("passes a healthy disk", () => {
-    const result = runChecker(stubBin(), { env: { DF_ROOT_PCT: "45" } });
+    const result = runChecker(stubBin(), { env: { DF_ROOT_FREE: "55" } });
     assert.equal(result.status, 0);
     assert.match(result.stdout, /disk check ok/);
   });
 
-  it("honors PARITY_DISK_MAX_USE_PCT overrides", () => {
+  it("honors PARITY_DISK_MIN_FREE_GB and PARITY_DISK_WARN_FREE_GB overrides", () => {
     const bin = stubBin();
     const relaxed = runChecker(bin, {
-      env: { DF_ROOT_PCT: "97", PARITY_DISK_MAX_USE_PCT: "99" },
+      env: { DF_ROOT_FREE: "3", PARITY_DISK_MIN_FREE_GB: "2", PARITY_DISK_WARN_FREE_GB: "4" },
     });
     assert.equal(relaxed.status, 0);
     assert.match(relaxed.stdout, /WARNING/);
     const strict = runChecker(bin, {
-      env: { DF_ROOT_PCT: "85", PARITY_DISK_MAX_USE_PCT: "80", PARITY_DISK_WARN_PCT: "70" },
+      env: { DF_ROOT_FREE: "20", PARITY_DISK_MIN_FREE_GB: "25", PARITY_DISK_WARN_FREE_GB: "40" },
     });
     assert.equal(strict.status, 1);
   });
 
   it("bypasses the refusal only via the documented escape hatch", () => {
     const result = runChecker(stubBin(), {
-      env: { DF_ROOT_PCT: "100", PARITY_IGNORE_DISK_CHECK: "1" },
+      env: { DF_ROOT_FREE: "0", PARITY_IGNORE_DISK_CHECK: "1" },
     });
     assert.equal(result.status, 0);
     assert.match(result.stdout, /BYPASSED/);
@@ -141,10 +158,19 @@ describe("parity disk guard", () => {
   it("also refuses when only Docker's data-root filesystem is full", () => {
     const dataRoot = mkdtempSync(join(tmpdir(), "parity-docker-root-"));
     const result = runChecker(stubBin(), {
-      env: { DF_ROOT_PCT: "50", DF_DOCKER_PCT: "95", DOCKER_ROOT_DIR: dataRoot },
+      env: { DF_ROOT_FREE: "50", DF_DOCKER_FREE: "2", DOCKER_ROOT_DIR: dataRoot },
     });
     assert.equal(result.status, 1);
-    assert.match(result.stdout, new RegExp(`${dataRoot} at 95% used`));
+    assert.match(result.stdout, new RegExp(`REFUSED: ${dataRoot} has 2\\.0G free`));
+  });
+
+  it("judges by the filesystem with the least free space", () => {
+    const dataRoot = mkdtempSync(join(tmpdir(), "parity-docker-root-"));
+    const result = runChecker(stubBin(), {
+      env: { DF_ROOT_FREE: "40", DF_DOCKER_FREE: "30", DOCKER_ROOT_DIR: dataRoot },
+    });
+    assert.equal(result.status, 0);
+    assert.match(result.stdout, new RegExp(`least free 30\\.0G \\(70% used\\) on ${dataRoot}`));
   });
 
   it("measures a VM-backed daemon's disk inside the daemon instead of failing", () => {
@@ -152,53 +178,53 @@ describe("parity disk guard", () => {
     // the host df cannot read it. The guard must measure the VM disk.
     const result = runChecker(stubBin(), {
       env: {
-        DF_ROOT_PCT: "20",
+        DF_ROOT_FREE: "80",
         DOCKER_OS: "Docker Desktop",
         DOCKER_ROOT_DIR: "/vm/no/such/docker-root",
-        VM_DISK_PCT: "42",
+        VM_DISK_FREE: "58",
       },
     });
     assert.equal(result.status, 0);
     assert.match(result.stdout, /measured inside the daemon/);
     assert.match(result.stdout, /\/vm\/no\/such\/docker-root .* at 42% used/);
-    assert.match(result.stdout, /disk check ok: worst 42% used on \/vm\/no\/such\/docker-root/);
+    assert.match(result.stdout, /disk check ok: least free 58\.0G \(42% used\) on \/vm\/no\/such\/docker-root/);
   });
 
-  it("applies the same refusal threshold to the VM disk", () => {
+  it("applies the same refusal floor to the VM disk", () => {
     const result = runChecker(stubBin(), {
       env: {
-        DF_ROOT_PCT: "50",
+        DF_ROOT_FREE: "50",
         DOCKER_OS: "Docker Desktop",
         DOCKER_ROOT_DIR: "/vm/no/such/docker-root",
-        VM_DISK_PCT: "94",
+        VM_DISK_FREE: "4",
       },
     });
     assert.equal(result.status, 1);
-    assert.match(result.stdout, /REFUSED: \/vm\/no\/such\/docker-root at 94% used/);
+    assert.match(result.stdout, /REFUSED: \/vm\/no\/such\/docker-root has 4\.0G free/);
   });
 
-  it("warns but proceeds when the VM disk is between warn and refuse", () => {
+  it("warns but proceeds when the VM disk is between the floors", () => {
     const result = runChecker(stubBin(), {
       env: {
-        DF_ROOT_PCT: "50",
+        DF_ROOT_FREE: "50",
         DOCKER_OS: "Docker Desktop",
         DOCKER_ROOT_DIR: "/vm/no/such/docker-root",
-        VM_DISK_PCT: "85",
+        VM_DISK_FREE: "12",
       },
     });
     assert.equal(result.status, 0);
-    assert.match(result.stdout, /WARNING: \/vm\/no\/such\/docker-root at 85% used/);
+    assert.match(result.stdout, /WARNING: \/vm\/no\/such\/docker-root has 12\.0G free/);
     assert.match(result.stdout, /measured inside the daemon/);
   });
 
   it("treats Darwin as VM-backed even when OperatingSystem is not Docker Desktop", () => {
     const result = runChecker(stubBin(), {
       env: {
-        DF_ROOT_PCT: "50",
+        DF_ROOT_FREE: "50",
         DOCKER_OS: "Debian GNU/Linux 12 (bookworm)",
         DOCKER_ROOT_DIR: "/vm/no/such/docker-root",
         UNAME_S: "Darwin",
-        VM_DISK_PCT: "33",
+        VM_DISK_FREE: "67",
       },
     });
     assert.equal(result.status, 0);
@@ -209,7 +235,7 @@ describe("parity disk guard", () => {
   it("warns and continues when the in-VM df output is unparseable", () => {
     const result = runChecker(stubBin(), {
       env: {
-        DF_ROOT_PCT: "50",
+        DF_ROOT_FREE: "50",
         DOCKER_OS: "Docker Desktop",
         DOCKER_ROOT_DIR: "/vm/no/such/docker-root",
         VM_DF_GARBAGE: "1",
@@ -223,7 +249,7 @@ describe("parity disk guard", () => {
   it("warns and continues when the VM disk cannot be measured", () => {
     const result = runChecker(stubBin(), {
       env: {
-        DF_ROOT_PCT: "50",
+        DF_ROOT_FREE: "50",
         DOCKER_OS: "Docker Desktop",
         DOCKER_ROOT_DIR: "/vm/no/such/docker-root",
         VM_DF_FAIL: "1",
@@ -237,7 +263,7 @@ describe("parity disk guard", () => {
   it("still exits 2 for a genuinely bad data-root on a Linux host", () => {
     const result = runChecker(stubBin(), {
       env: {
-        DF_ROOT_PCT: "50",
+        DF_ROOT_FREE: "50",
         DOCKER_OS: "Debian GNU/Linux 12 (bookworm)",
         DOCKER_ROOT_DIR: "/vm/no/such/docker-root",
         UNAME_S: "Linux",
@@ -251,20 +277,20 @@ describe("parity disk guard", () => {
     const dataRoot = mkdtempSync(join(tmpdir(), "parity-docker-root-"));
     const result = runChecker(stubBin(), {
       env: {
-        DF_ROOT_PCT: "50",
-        DF_DOCKER_PCT: "93",
+        DF_ROOT_FREE: "50",
+        DF_DOCKER_FREE: "3",
         DOCKER_OS: "Docker Desktop",
         DOCKER_ROOT_DIR: dataRoot,
       },
     });
     assert.equal(result.status, 1);
-    assert.match(result.stdout, new RegExp(`${dataRoot} at 93% used`));
+    assert.match(result.stdout, new RegExp(`${dataRoot} has 3\\.0G free`));
     assert.doesNotMatch(result.stdout, /measured inside the daemon/);
   });
 
   it("falls back to / when docker is unreachable", () => {
     const result = runChecker(stubBin(), {
-      env: { DF_ROOT_PCT: "50", DOCKER_DOWN: "1" },
+      env: { DF_ROOT_FREE: "50", DOCKER_DOWN: "1" },
     });
     assert.equal(result.status, 0);
     assert.match(result.stdout, /checked \/ only/);
@@ -272,26 +298,46 @@ describe("parity disk guard", () => {
 
   it("covers extra --path filesystems", () => {
     const result = runChecker(stubBin(), {
-      env: { DF_ROOT_PCT: "50", DF_EXTRA_PCT: "96", DOCKER_DOWN: "1" },
+      env: { DF_ROOT_FREE: "50", DF_EXTRA_FREE: "4", DOCKER_DOWN: "1" },
       args: ["--path", "/extra"],
     });
     assert.equal(result.status, 1);
-    assert.match(result.stdout, /\/extra at 96% used/);
+    assert.match(result.stdout, /\/extra has 4\.0G free/);
   });
 
-  it("rejects bad thresholds and bad arguments with exit 2", () => {
+  it("rejects bad floors and bad arguments with exit 2", () => {
     const bin = stubBin();
-    const badValue = runChecker(bin, { env: { PARITY_DISK_MAX_USE_PCT: "soon" } });
+    const badValue = runChecker(bin, { env: { PARITY_DISK_MIN_FREE_GB: "soon" } });
     assert.equal(badValue.status, 2);
+    assert.match(badValue.stderr, /PARITY_DISK_MIN_FREE_GB must be a whole number/);
+    const badWarn = runChecker(bin, { env: { PARITY_DISK_WARN_FREE_GB: "lots" } });
+    assert.equal(badWarn.status, 2);
+    assert.match(badWarn.stderr, /PARITY_DISK_WARN_FREE_GB must be a whole number/);
+    const zero = runChecker(bin, { env: { PARITY_DISK_MIN_FREE_GB: "0" } });
+    assert.equal(zero.status, 2);
+    assert.match(zero.stderr, /at least 1/);
     const inverted = runChecker(bin, {
-      env: { PARITY_DISK_WARN_PCT: "95", PARITY_DISK_MAX_USE_PCT: "90" },
+      env: { PARITY_DISK_WARN_FREE_GB: "6", PARITY_DISK_MIN_FREE_GB: "10" },
     });
     assert.equal(inverted.status, 2);
-    assert.match(inverted.stderr, /must be below/);
+    assert.match(inverted.stderr, /must be above/);
+    const equal = runChecker(bin, {
+      env: { PARITY_DISK_WARN_FREE_GB: "8", PARITY_DISK_MIN_FREE_GB: "8" },
+    });
+    assert.equal(equal.status, 2);
     const badFlag = runChecker(bin, { args: ["--rebuild"] });
     assert.equal(badFlag.status, 2);
     const missingValue = runChecker(bin, { args: ["--path"] });
     assert.equal(missingValue.status, 2);
+  });
+
+  it("refuses the retired percentage overrides instead of ignoring them", () => {
+    const bin = stubBin();
+    for (const name of ["PARITY_DISK_MAX_USE_PCT", "PARITY_DISK_WARN_PCT"]) {
+      const result = runChecker(bin, { env: { DF_ROOT_FREE: "50", [name]: "95" } });
+      assert.equal(result.status, 2);
+      assert.match(result.stderr, new RegExp(`${name} is no longer supported`));
+    }
   });
 
   it("prints usage for --help and -h", () => {
@@ -303,47 +349,18 @@ describe("parity disk guard", () => {
     }
   });
 
-  it("rejects non-numeric and out-of-range thresholds", () => {
-    const bin = stubBin();
-    const warnNaN = runChecker(bin, {
-      env: { PARITY_DISK_WARN_PCT: "eighty" },
-    });
-    assert.equal(warnNaN.status, 2);
-    assert.match(warnNaN.stderr, /PARITY_DISK_WARN_PCT must be an integer/);
-    for (const value of ["0", "101"]) {
-      const warnRange = runChecker(bin, {
-        env: { PARITY_DISK_WARN_PCT: value },
-      });
-      assert.equal(warnRange.status, 2);
-      assert.match(warnRange.stderr, /integers 1-100/);
-      const maxRange = runChecker(bin, {
-        env: { PARITY_DISK_MAX_USE_PCT: value },
-      });
-      assert.equal(maxRange.status, 2);
-      assert.match(maxRange.stderr, /integers 1-100/);
-    }
-  });
-
-  it("rejects a warn threshold equal to the refuse threshold", () => {
-    const result = runChecker(stubBin(), {
-      env: { PARITY_DISK_WARN_PCT: "90", PARITY_DISK_MAX_USE_PCT: "90" },
-    });
-    assert.equal(result.status, 2);
-    assert.match(result.stderr, /must be below/);
-  });
-
   it("treats a docker data-root of / as the same filesystem", () => {
     const bin = stubBin();
     const healthy = runChecker(bin, {
-      env: { DF_ROOT_PCT: "50", DOCKER_ROOT_DIR: "/" },
+      env: { DF_ROOT_FREE: "50", DOCKER_ROOT_DIR: "/" },
     });
     assert.equal(healthy.status, 0);
     assert.match(healthy.stdout, /same filesystem/);
     const full = runChecker(bin, {
-      env: { DF_ROOT_PCT: "95", DOCKER_ROOT_DIR: "/" },
+      env: { DF_ROOT_FREE: "5", DOCKER_ROOT_DIR: "/" },
     });
     assert.equal(full.status, 1);
-    assert.match(full.stdout, /\/ at 95% used/);
+    assert.match(full.stdout, /\/ has 5\.0G free, 95% used/);
   });
 
   it("exits 2 when df fails or reports garbage", () => {
