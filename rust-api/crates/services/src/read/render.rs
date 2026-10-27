@@ -60,3 +60,34 @@ pub fn state_row_from(tuple: StateRowTuple) -> StateRow {
         sequence: tuple.8,
     }
 }
+
+#[cfg(test)]
+mod live {
+    use serde_json::Value;
+    use uuid::Uuid;
+
+    use super::*;
+
+    #[test]
+    fn render_state_shape() {
+        let row = state_row_from((
+            Uuid::nil(),
+            Uuid::nil(),
+            Uuid::nil(),
+            "Backlog".to_owned(),
+            "#ff0000".to_owned(),
+            "backlog".to_owned(),
+            true,
+            "".to_owned(),
+            1.0,
+        ));
+        let value = render_state(&row);
+        assert_eq!(value["name"], Value::String("Backlog".to_owned()));
+        assert_eq!(value["group"], Value::String("backlog".to_owned()));
+        assert_eq!(value["default"], Value::Bool(true));
+        assert_eq!(
+            value["id"],
+            Value::String("00000000-0000-0000-0000-000000000000".to_owned())
+        );
+    }
+}

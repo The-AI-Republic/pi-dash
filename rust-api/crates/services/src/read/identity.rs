@@ -108,3 +108,67 @@ pub async fn fetch_user(pool: &PgPool, user_id: &Uuid) -> Result<Option<UserShap
     // joined a null FK (`user_detail: null`, `user: null`).
     Ok(row.filter(|shape| shape.id.is_some()))
 }
+
+#[cfg(test)]
+mod live {
+    use uuid::Uuid;
+
+    use super::*;
+    use crate::read::test_support::{pool, seed_world};
+
+    #[tokio::test]
+    async fn fetch_profile_hit_and_miss() {
+        let Some(db) = pool().await else { return };
+        let world = seed_world(&db).await;
+        let hit = fetch_profile(&db, world.user_id).await.expect("hit");
+        assert_eq!(hit.id, world.profile_id);
+        assert!(hit.last_workspace_id.is_none());
+        let err = fetch_profile(&db, Uuid::new_v4()).await.expect_err("miss");
+        assert!(matches!(err, Error::NotFound));
+    }
+
+    #[tokio::test]
+    async fn fetch_asset_hit_and_miss() {
+        let Some(db) = pool().await else { return };
+        let world = seed_world(&db).await;
+        let hit = fetch_asset(&db, world.asset_id).await.expect("hit");
+        assert_eq!(hit.id, world.asset_id);
+        assert_eq!(hit.entity_type.as_deref(), Some("USER_AVATAR"));
+        let err = fetch_asset(&db, Uuid::new_v4()).await.expect_err("miss");
+        assert!(matches!(err, Error::NotFound));
+    }
+
+    #[tokio::test]
+    async fn fetch_user_hit_miss_and_unscoped_avatar() {
+        let Some(db) = pool().await else { return };
+        let world = seed_world(&db).await;
+        let hit = fetch_user(&db, &world.user_id)
+            .await
+            .expect("hit")
+            .expect("some");
+        assert_eq!(hit.id, Some(world.user_id));
+        assert_eq!(hit.email.as_deref(), Some(world.user_email.as_str()));
+        assert!(fetch_user(&db, &Uuid::new_v4())
+            .await
+            .expect("miss is None")
+            .is_none());
+        // Unscoped joins (bug-13 precedent): point the avatar FK at the
+        // seeded asset, soft-delete the asset, and it still resolves.
+        sqlx::query("UPDATE users SET avatar_asset_id = $1 WHERE id = $2")
+            .bind(world.asset_id)
+            .bind(world.user_id)
+            .execute(&db)
+            .await
+            .expect("point avatar");
+        sqlx::query("UPDATE file_assets SET deleted_at = now() WHERE id = $1")
+            .bind(world.asset_id)
+            .execute(&db)
+            .await
+            .expect("soft-delete asset");
+        let resolved = fetch_user(&db, &world.user_id)
+            .await
+            .expect("resolves")
+            .expect("some");
+        assert_eq!(resolved.avatar_asset_row, Some(world.asset_id));
+    }
+}

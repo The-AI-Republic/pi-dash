@@ -17,6 +17,8 @@ pub mod comment;
 pub mod identity;
 pub mod issues;
 pub mod render;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod work_items;
 pub mod workspace;
 
@@ -136,3 +138,24 @@ pub use work_items::{
     OwnedAssigneeRow, OwnedRelationItem, RenderRequest, ISSUE_EXTRA_COLS, ISSUE_SELECT_COLS,
 };
 pub use workspace::{workspace_of, workspace_row, workspace_slug};
+
+#[cfg(test)]
+mod surface {
+    // Survey names that were already public before OVL-05: each `use`
+    // fails to compile if its home ever goes private again.
+    use crate::app_issues::issue_move::MoveStore;
+    use crate::app_issues::pr_links::PrLinksStore;
+    use crate::assistant::seams::{agent_model_profile_for_user, has_usable_llm_config};
+
+    #[test]
+    fn already_public_names_stay_public() {
+        // Generic bounds over the homes resolve (the survey methods
+        // live on these traits); the bounds are never instantiated.
+        fn _needs_pr_links<T: PrLinksStore>() {}
+        fn _needs_move<T: MoveStore>() {}
+        // The assistant seams are callable pure decisions.
+        assert!(has_usable_llm_config(true));
+        assert!(!has_usable_llm_config(false));
+        let _ = agent_model_profile_for_user(true);
+    }
+}

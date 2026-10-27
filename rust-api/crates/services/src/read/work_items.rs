@@ -1241,3 +1241,91 @@ pub async fn render_write_response(
     )
     .await
 }
+
+#[cfg(test)]
+mod live {
+    use chrono_tz::Tz;
+    use uuid::Uuid;
+
+    use super::*;
+    use crate::read::test_support::{pool, seed_world};
+
+    #[tokio::test]
+    async fn decode_and_write_render_roundtrip() {
+        let Some(db) = pool().await else { return };
+        let world = seed_world(&db).await;
+        let tz: Tz = chrono_tz::UTC;
+        let decoded = fetch_issue_for_write(
+            &db,
+            &world.workspace_slug,
+            &world.project_id,
+            &world.issue_id,
+            &tz,
+        )
+        .await
+        .expect("fetches");
+        assert_eq!(decoded.id, world.issue_id.to_string());
+        assert_eq!(decoded.name, "Seed issue");
+        assert_eq!(decoded.sequence_id, 101);
+        assert_eq!(decoded.project_identifier, "SEED");
+        assert!(decoded.created_at.ends_with('Z'));
+        let rendered = render_write_response(&db, &decoded, &tz, None)
+            .await
+            .expect("renders");
+        assert_eq!(rendered["id"], Value::String(world.issue_id.to_string()));
+        assert_eq!(rendered["name"], Value::String("Seed issue".to_owned()));
+        let err = fetch_issue_for_write(
+            &db,
+            &world.workspace_slug,
+            &world.project_id,
+            &Uuid::new_v4(),
+            &tz,
+        )
+        .await
+        .expect_err("miss");
+        assert!(matches!(err, Error::NotFound));
+    }
+
+    #[tokio::test]
+    async fn render_decoded_list_smoke() {
+        let Some(db) = pool().await else { return };
+        let world = seed_world(&db).await;
+        let tz: Tz = chrono_tz::UTC;
+        let decoded = fetch_issue_for_write(
+            &db,
+            &world.workspace_slug,
+            &world.project_id,
+            &world.issue_id,
+            &tz,
+        )
+        .await
+        .expect("fetches");
+        let kept: Vec<String> = shape::FIELDS_IN_ORDER
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect();
+        let rendered = render_decoded(
+            &db,
+            &decoded,
+            &tz,
+            &RenderRequest {
+                field_specs: None,
+                kept: &kept,
+                expand: &["project"],
+                is_list: true,
+                viewer: None,
+                web_base: None,
+            },
+        )
+        .await
+        .expect("renders");
+        assert_eq!(
+            rendered["sequence_id"],
+            Value::Number(world.sequence_id.into())
+        );
+        assert_eq!(
+            rendered["project"]["identifier"],
+            Value::String("SEED".to_owned())
+        );
+    }
+}

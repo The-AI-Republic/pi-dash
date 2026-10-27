@@ -728,6 +728,7 @@ pub async fn comment_is_synced(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::read::test_support::{pool, seed_world};
 
     #[test]
     fn moved_user_reads_carry_no_soft_delete_guard() {
@@ -736,5 +737,50 @@ mod tests {
         assert!(!user_detail_sql().contains("deleted_at"));
         assert!(user_detail_sql().contains("\"users\".\"id\" = $1"));
         assert!(!display_name_sql().contains("deleted_at"));
+    }
+
+    #[test]
+    fn comment_row_decodes_aliases_and_member() {
+        let value = serde_json::json!({
+            "id": "c",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "updated_at": "2026-01-02T00:00:00+00:00",
+            "created_by": "u",
+            "is_member": true,
+        });
+        let row = CommentRow::from_value(&value).expect("decodes");
+        assert_eq!(row.id, "c");
+        assert_eq!(row.created_by.as_deref(), Some("u"));
+        assert_eq!(row.is_member, Some(true));
+        assert!(row.issue_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn render_comment_renders_seeded_row() {
+        let Some(db) = pool().await else { return };
+        let world = seed_world(&db).await;
+        let text: String =
+            sqlx::query_scalar("SELECT row_to_json(c)::text FROM issue_comments c WHERE id = $1")
+                .bind(world.comment_id)
+                .fetch_one(&db)
+                .await
+                .expect("comment json");
+        let value: Value = serde_json::from_str(&text).expect("parses");
+        let row = CommentRow::from_value(&value).expect("decodes");
+        let view = render_comment(&db, &row, &chrono_tz::UTC, true)
+            .await
+            .expect("renders");
+        assert_eq!(view.id, world.comment_id.to_string());
+        assert_eq!(view.issue_detail.name, "Seed issue");
+        assert_eq!(view.project_detail.identifier, "SEED");
+        assert_eq!(view.workspace_detail.slug, world.workspace_slug);
+        assert!(view.comment_reactions.is_empty());
+        assert!(!view.is_synced);
+        assert!(view.actor_detail.is_some());
+        let json = serde_json::to_value(&view).expect("serializes");
+        assert_eq!(
+            json["comment_stripped"],
+            Value::String("seed comment".to_owned())
+        );
     }
 }
