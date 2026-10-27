@@ -48,7 +48,13 @@ test(
         expect(options[0]).toContain("You");
         expect(options.length).toBeGreaterThanOrEqual(1);
         const youOption = page.getByRole("listbox").getByRole("option", { name: "You" });
-        const badgeTexts = await youOption.locator("div").allInnerTexts();
+        // The old app badges the avatar initial in a div; the kit Avatar
+        // renders it in nested spans (spec §10 gate alignment, live-probed:
+        // no divs, no imgs, spans carry "PO").
+        const badgeTexts =
+          driver.target === "web_new"
+            ? await youOption.locator("span").allInnerTexts()
+            : await youOption.locator("div").allInnerTexts();
         expect(badgeTexts.some((t) => /^[A-Z]{1,2}$/.test(t.trim()))).toBe(true);
       });
 

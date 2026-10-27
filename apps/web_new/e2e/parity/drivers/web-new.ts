@@ -5165,6 +5165,16 @@ export class WebNewDriver implements ParityDriver {
   /** Gate on the popup settling: options, the empty line, or a load error. */
   private async waitForPickerOptions(): Promise<void> {
     const popup = this.pickerPopup();
+    // Loading and settled-empty both carry role=status; only loading shows
+    // the spinner. Wait it out first: lazy lists resolve on open, and the
+    // old gate settled on the loading status while zero options existed,
+    // so the first option read raced the fetch (ISS-212/ISS-213). A spinner
+    // that never clears degrades to the old gate instead of hanging.
+    await popup
+      .locator(".animate-spin")
+      .first()
+      .waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => {});
     const settled = this.pickerListbox()
       .getByRole("option")
       .first()

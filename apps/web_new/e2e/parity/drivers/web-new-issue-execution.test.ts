@@ -576,6 +576,41 @@ describe("sidebar property rows (ISS-241/242)", () => {
     expect(events).toEqual(["focus", "Enter", "settled"]);
   });
 
+  it("waits out the loading spinner before settling the popup, and degrades when it never clears", async () => {
+    const option = locator({ waitFor: async () => undefined });
+    const listbox = locator({ getByRole: () => locator({ first: () => option }) });
+    const popupWith = (spinner: { waitFor: () => Promise<unknown> }, queries: string[]) =>
+      locator({
+        getByRole: () => locator({ first: () => option }),
+        locator: (selector: string) => {
+          queries.push(selector);
+          return locator({ first: () => locator(spinner) });
+        },
+      });
+    const trigger = locator({ click: async () => undefined });
+    for (const stuck of [false, true]) {
+      const queries: string[] = [];
+      const page = pageOf({
+        getByRole: (role: string) => {
+          if (role === "group") return locator({ getByRole: () => trigger });
+          if (role === "listbox") return listbox;
+          return popupWith(
+            stuck
+              ? {
+                  waitFor: async () => {
+                    throw new Error("still spinning");
+                  },
+                }
+              : { waitFor: async () => undefined },
+            queries
+          );
+        },
+      });
+      await new WebNewDriver(page).propertyOpenPicker("Cycle");
+      expect(queries).toContain(".animate-spin");
+    }
+  });
+
   it("reads a trigger with no text as an empty value", async () => {
     const trigger = locator({ innerText: async () => null as unknown as string });
     const page = pageOf({ getByRole: () => locator({ getByRole: () => trigger }) });
