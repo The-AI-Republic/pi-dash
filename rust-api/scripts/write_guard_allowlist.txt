@@ -22,13 +22,6 @@ crates/api/src/app_intake/issues.rs | UPDATE issues | 3b366969a83f | sql #2
 crates/api/src/app_intake/issues.rs | UPDATE issues | 7ce0b0be5307 | sql
 crates/api/src/app_integrations/handlers_git_repo.rs | UPDATE projects | 0ef80849a6bf | sql
 crates/api/src/app_integrations/handlers_github_proj.rs | UPDATE projects | 99a4e1ac4240 | sql
-crates/api/src/app_issues/handlers_archive.rs | UPDATE issues | 3dae415873f4 | sql
-crates/api/src/app_issues/handlers_archive.rs | UPDATE issues | 5ba77957ce14 | sql
-crates/api/src/app_issues/handlers_archive.rs | UPDATE issues | 6805cb131af1 | sql
-crates/api/src/app_issues/handlers_core.rs | INSERT issue_sequences | d0848e1114fe | sql
-crates/api/src/app_issues/handlers_core.rs | INSERT issues | 8180f3df4edc | sql
-crates/api/src/app_issues/handlers_core.rs | UPDATE issues | 76f7f24a8641 | sql
-crates/api/src/app_issues/handlers_core.rs | UPDATE issues | b4cdf9d7c5f3 | sql
 crates/api/src/app_issues/handlers_engage.rs | INSERT descriptions | 21f513f251e7 | sql
 crates/api/src/app_issues/handlers_engage.rs | INSERT issue_comments | 23735a4e1ca6 | sql
 crates/api/src/app_issues/handlers_engage.rs | UPDATE descriptions | d46a5b53abbe | sql

@@ -31,6 +31,11 @@
 //!   restores in `users.rs` is deleted again: the hand-written impl lives
 //!   in the (untouched) `users_hooks.rs`, and keeping both fails the build
 //!   with duplicate impls (loud, by design).
+//! * The `pub mod issue_hooks;` declaration is restored, and the empty
+//!   `impl ActiveModelBehavior for ActiveModel {}` the generator emits in
+//!   `issues.rs` is deleted again — the real `Issue.save()` hooks live in
+//!   the hand-written `issue_hooks` module, and the compiler rejects the
+//!   duplicate impl.
 //!
 //! Django stays the schema owner: after a Django sync the entities are
 //! regenerated and the `parity` test proves they still match
@@ -47,6 +52,7 @@ pub mod assistant_user_llm_config;
 pub mod descriptions;
 pub mod issue_assignees;
 pub mod issue_comments;
+pub mod issue_hooks;
 pub mod issue_relations;
 pub mod issue_sequences;
 pub mod issues;

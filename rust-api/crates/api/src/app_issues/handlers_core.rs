@@ -86,6 +86,7 @@
 //! post-query raises before `model_activity`/version run).
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, StatusCode};
@@ -93,7 +94,6 @@ use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, NaiveDate, NaiveDateTime, TimeZone, Timelike, Utc};
 use chrono_tz::Tz;
 use serde_json::{Map, Value};
-use sha2::{Digest, Sha256};
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -102,19 +102,15 @@ use pidash_auth::permissions::allow::{
 };
 use pidash_auth::permissions::{ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER};
 use pidash_auth::scope::TenantScope;
-use pidash_db::app_pages::strip::sync_description_stripped;
 use pidash_db::tasks_ticker::models::issue_agent_ticker::{
     IssueAgentTicker, COLUMNS as TICKER_COLUMNS, TABLE as TICKER_TABLE,
 };
-use pidash_jobs::queue::{self, NewJob};
-use pidash_jobs::TaskMessage;
 use pidash_services::app_issues::serializers_create::{
     assignee_member_filter_sql, issue_create_to_representation, issue_create_validate,
-    label_filter_null_project_sql, label_filter_sql, m2m_batches, m2m_insert_sql,
-    CreateValidateError, ExecutorPolicy, IssueCreateRow, LockedIssueAttrs, LockedIssueValues,
-    PodRef, ResolvedProject, ValidateAttrs, ValidateContext, ValidateInstance, ValidateProbes,
-    ValidatedAttrs, DEFAULT_ASSIGNEE_EXISTS_SQL, ESTIMATE_EXISTS_SQL, HAS_ACTIVE_RUN_SQL,
-    PARENT_EXISTS_SQL, POD_FETCH_SQL, PROJECT_FETCH_SQL, STATE_EXISTS_SQL,
+    label_filter_null_project_sql, label_filter_sql, CreateValidateError, ExecutorPolicy,
+    IssueCreateRow, LockedIssueAttrs, LockedIssueValues, PodRef, ResolvedProject, ValidateAttrs,
+    ValidateContext, ValidateInstance, ValidateProbes, ValidatedAttrs, ESTIMATE_EXISTS_SQL,
+    HAS_ACTIVE_RUN_SQL, PARENT_EXISTS_SQL, POD_FETCH_SQL, PROJECT_FETCH_SQL, STATE_EXISTS_SQL,
 };
 use pidash_services::app_issues::serializers_detail::{
     issue_detail_to_representation, serialize_drf_datetime, serialize_iso_datetime,
@@ -132,6 +128,14 @@ use pidash_services::dispatch::admission::{
 use pidash_services::dispatch::policy::{
     cloud_agent_is_configured, managed_runner_is_enabled, UserFlags,
 };
+use pidash_services::domain::activity::TaskEnqueueHook;
+use pidash_services::domain::issues as domain_issues;
+use pidash_services::domain::issues::IssueFieldSet as IssueSaveRow;
+use pidash_services::domain::transition::IssueTransitionHook;
+use pidash_services::domain::{self, WriteActor, WriteCtx, WriteScope};
+use pidash_services::orchestration::blockers::{
+    has_open_blockers_sql, relations_summary, summary_sql, BlockerRow,
+};
 use pidash_services::orchestration::clock::ProjectClockPolicy;
 use pidash_services::orchestration::entries::{FireOutcome, FireRequest};
 use pidash_services::read;
@@ -147,6 +151,8 @@ use super::queries_core::{
 use super::{
     actor_user_id, json_response, resolve_project_id, Denial, HandlerResult, NOT_FOUND_BODY,
 };
+use crate::domain_hooks::AppTaskEnqueueHook;
+use crate::issue_transition::AppTransitionHook;
 use crate::middleware::body_limit::read_request_bytes;
 use crate::middleware::SessionHandle;
 use crate::serializer::render_datetime_in;
@@ -227,13 +233,7 @@ const CORE_BODY_SPEC: shared_body::BodySpec = shared_body::BodySpec {
 /// `X-Pi-Dash-Skip-Immediate-Dispatch: 1` (`base.py:677`).
 const SKIP_DISPATCH_HEADER: &str = "x-pi-dash-skip-immediate-dispatch";
 
-// Canonical task names live in `pidash_services::domain::activity`.
-use pidash_services::domain::activity::{ISSUE_ACTIVITY_TASK, MODEL_ACTIVITY_TASK};
 const RECENT_VISITED_TASK: &str = "pi_dash.bgtasks.recent_visited_task.recent_visited_task";
-const VERSION_TASK: &str =
-    "pi_dash.bgtasks.issue_description_version_task.issue_description_version_task";
-const SOFT_DELETE_TASK: &str = "pi_dash.bgtasks.deletion_task.soft_delete_related_objects";
-
 /// `now()` truncated to microseconds: Postgres `timestamptz` keeps micros,
 /// and two successive `now()` calls must not drift on the sub-micro tail.
 fn utc_now_micros() -> DateTime<Utc> {
@@ -521,53 +521,6 @@ fn not_found_detail(body: &str, status: StatusCode) -> Response {
         .header(header::CONTENT_TYPE, "application/json")
         .body(axum::body::Body::from(body.to_owned()))
         .expect("detail response")
-}
-
-/// CPython `json.dumps` spacing (`", "` / `": "`) over a serde value: the
-/// `requested_data` / `current_instance` / `updated_issue` kwargs. ASCII
-/// escaping is intentionally NOT replicated — the queue row stores the
-/// parsed value, so only the value must match (same rationale as the D-26
-/// archive port's `to_spaced_json`).
-struct SpacedFormatter;
-
-impl serde_json::ser::Formatter for SpacedFormatter {
-    fn begin_object_key<W>(&mut self, writer: &mut W, first: bool) -> std::io::Result<()>
-    where
-        W: ?Sized + std::io::Write,
-    {
-        if first {
-            Ok(())
-        } else {
-            writer.write_all(b", ")
-        }
-    }
-
-    fn begin_object_value<W>(&mut self, writer: &mut W) -> std::io::Result<()>
-    where
-        W: ?Sized + std::io::Write,
-    {
-        writer.write_all(b": ")
-    }
-
-    fn begin_array_value<W>(&mut self, writer: &mut W, first: bool) -> std::io::Result<()>
-    where
-        W: ?Sized + std::io::Write,
-    {
-        if first {
-            Ok(())
-        } else {
-            writer.write_all(b", ")
-        }
-    }
-}
-
-/// Serialize with [`SpacedFormatter`] (non-ASCII stays literal: the queue
-/// transport re-encodes anyway, so only the parsed value must match).
-fn to_spaced_json<T: serde::Serialize>(value: &T) -> Result<String, Denial> {
-    let mut buf = Vec::new();
-    let mut ser = serde_json::ser::Serializer::with_formatter(&mut buf, SpacedFormatter);
-    value.serialize(&mut ser).map_err(|_| Denial::ServerError)?;
-    String::from_utf8(buf).map_err(|_| Denial::ServerError)
 }
 
 // ---------------------------------------------------------------------------
@@ -2351,16 +2304,6 @@ fn json_bad_request(body: &str) -> Response {
         .expect("bad-request response")
 }
 
-/// Whether a `sqlx` failure is an integrity-constraint violation (SQLSTATE
-/// class 23 — what Django surfaces as `IntegrityError` and the m2m legs
-/// swallow).
-fn is_integrity_violation(error: &sqlx::Error) -> bool {
-    match error {
-        sqlx::Error::Database(db) => db.code().is_some_and(|code| code.starts_with("23")),
-        _ => false,
-    }
-}
-
 /// `Pod.all_objects.get(pk)` ([`POD_FETCH_SQL`]): tombstones included so
 /// `validate()` can return the friendly deleted message.
 async fn pod_ref(pool: &sqlx::PgPool, id: &Uuid) -> Result<Option<PodRef>, sqlx::Error> {
@@ -3016,46 +2959,6 @@ fn skip_immediate_dispatch(headers: &HeaderMap) -> bool {
         .is_some_and(|value| value.as_bytes() == b"1")
 }
 
-/// The post-save fire: a non-transition answers `NoTransition` without
-/// I/O; a failed handler is logged with the verbatim line (the counter
-/// already bumped inside) and the save stands; only a *lookup* storage
-/// failure propagates to the 500 — exactly the `try` placement in
-/// `fire_state_transition`. Drives the one live seam (PIDASHCONV-1216).
-#[allow(clippy::too_many_arguments)]
-async fn fire_after_save(
-    state: &AppState,
-    pool: &sqlx::PgPool,
-    actor_id: Uuid,
-    issue_id: Uuid,
-    prev_state_id: Option<Uuid>,
-    current_state_id: Option<Uuid>,
-    dispatch_immediate: bool,
-    created_by: Option<Uuid>,
-    now: DateTime<Utc>,
-) -> Result<(), Denial> {
-    let outcome = crate::issue_transition::fire_issue_transition(
-        state,
-        pool,
-        actor_id,
-        FireRequest {
-            issue_id,
-            prev_state_id,
-            current_state_id,
-            dispatch_immediate,
-            moved_by_run: None,
-            now,
-            jitter_secs: 0.0,
-            created_by,
-        },
-    )
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    if let FireOutcome::Failed { log_line, .. } = outcome {
-        tracing::error!("{log_line}");
-    }
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
 // `Issue.save()` port: defaults, recomputes, sequence/sort, the write
 // ---------------------------------------------------------------------------
@@ -3077,70 +2980,6 @@ async fn state_row(
     sqlx::query_as(sql).bind(id).fetch_optional(pool).await
 }
 
-/// The NULL-state default assignment (`issue.py:288-301`): the default
-/// state first, else the first non-triage state, both `ORDER BY sequence`.
-/// Predicates are the `State.objects` manager (live + non-triage group)
-/// plus the explicit `~is_triage` filter — `is_triage` is a plain boolean
-/// with no save-sync, so both predicates stay.
-async fn default_state_for_project(
-    pool: &sqlx::PgPool,
-    project_id: &Uuid,
-) -> Result<Option<Uuid>, Denial> {
-    for default_only in [true, false] {
-        let extra = if default_only {
-            " AND s.\"default\""
-        } else {
-            ""
-        };
-        let sql = format!(
-            "SELECT s.id FROM states AS s WHERE s.project_id = $1 \
-             AND s.deleted_at IS NULL AND NOT (s.\"group\" = 'triage') AND NOT s.is_triage{extra} \
-             ORDER BY s.sequence ASC LIMIT 1"
-        );
-        let row: Option<(Uuid,)> = sqlx::query_as(&sql)
-            .bind(project_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-        if let Some((id,)) = row {
-            return Ok(Some(id));
-        }
-    }
-    Ok(None)
-}
-
-/// `Pod.default_for_project_id` (`runner/models.py:174-176`):
-/// `Pod.objects` (live only), project-default first.
-async fn default_pod_for_project(
-    pool: &sqlx::PgPool,
-    project_id: &Uuid,
-) -> Result<Option<Uuid>, Denial> {
-    let row: Option<(Uuid,)> = sqlx::query_as(
-        "SELECT id FROM pod WHERE project_id = $1 AND is_default AND deleted_at IS NULL \
-         ORDER BY is_default DESC, created_at ASC LIMIT 1",
-    )
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(row.map(|row| row.0))
-}
-
-/// `self.state` on a save whose state id Django must resolve
-/// (untouched-state updates, destroy): a forward-FK read, which Django
-/// 4.2 resolves through `State._base_manager` (a plain `Manager` —
-/// `State` sets no `base_manager_name`), so triage and soft-deleted
-/// states still resolve and only a dangling FK misses → the
-/// required-object 404.
-async fn saved_state_group(pool: &sqlx::PgPool, state_id: &Uuid) -> Result<Option<String>, Denial> {
-    let row: Option<(String,)> = sqlx::query_as("SELECT \"group\" FROM states WHERE id = $1")
-        .bind(state_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    Ok(row.map(|row| row.0))
-}
-
 /// `self.project` on a save (`issue.py:293-296` + the lock key): the
 /// issue's FK cache is cold on both paths, so Django fetches the row. A
 /// miss raises `DoesNotExist` → the required-object 404.
@@ -3154,349 +2993,42 @@ async fn touch_save_project(pool: &sqlx::PgPool, project_id: &Uuid) -> Result<()
     row.map(|_| ()).ok_or(Denial::NotFound)
 }
 
-/// `convert_uuid_to_integer` (`utils/uuid.py:19-26`): sha256 of the
-/// hyphenated-lowercase id, first 8 bytes big-endian signed.
-fn advisory_lock_key(project_id: &Uuid) -> i64 {
-    let mut hasher = Sha256::new();
-    hasher.update(project_id.to_string().as_bytes());
-    let digest = hasher.finalize();
-    let mut bytes = [0u8; 8];
-    bytes.copy_from_slice(&digest[..8]);
-    i64::from_be_bytes(bytes)
+/// The domain-write context for an app issue request: the request user as
+/// actor (with their stored time zone name) plus the gated tenant scope.
+/// The origin stays `None` — origins resolve per effect at their original
+/// points (see `domain::issues`).
+fn write_ctx(tenant: &CoreTenant, user_id: &Uuid) -> WriteCtx {
+    WriteCtx::new(WriteActor {
+        user_id: *user_id,
+        timezone: Some(tenant.timezone.name().to_owned()),
+    })
+    .with_scope(WriteScope {
+        workspace_id: Some(tenant.workspace_id),
+        project_id: Some(tenant.project_id),
+    })
 }
 
-/// Every `issues` column in [`models_core`](pidash_db::app_issues::models_core)
-/// `COLUMNS` order, as owned values — the INSERT and the full-column
-/// UPDATE both bind from here.
-struct IssueSaveRow {
-    id: Uuid,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-    created_by_id: Option<Uuid>,
-    updated_by_id: Option<Uuid>,
-    deleted_at: Option<DateTime<Utc>>,
-    project_id: Uuid,
-    workspace_id: Uuid,
-    parent_id: Option<Uuid>,
-    state_id: Option<Uuid>,
-    point: Option<i32>,
-    estimate_point_id: Option<Uuid>,
-    name: String,
-    description_json: Value,
-    description_html: String,
-    description_stripped: Option<String>,
-    description_binary: Option<Vec<u8>>,
-    priority: String,
-    complexity_score: i32,
-    start_date: Option<NaiveDate>,
-    target_date: Option<NaiveDate>,
-    sequence_id: i32,
-    sort_order: f64,
-    completed_at: Option<DateTime<Utc>>,
-    archived_at: Option<NaiveDate>,
-    is_draft: bool,
-    external_source: Option<String>,
-    external_id: Option<String>,
-    type_id: Option<Uuid>,
-    git_work_branch: String,
-    workpad: String,
-    created_via: Option<String>,
-    assigned_pod_id: Option<Uuid>,
-    agent_executor: Option<String>,
-}
-
-/// `Issue.objects.create(...)`: the 34-column INSERT in `COLUMNS` order.
-async fn insert_issue_row(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    row: &IssueSaveRow,
-) -> Result<(), Denial> {
-    sqlx::query(
-        "INSERT INTO issues (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, \
-         project_id, workspace_id, parent_id, state_id, point, estimate_point_id, name, \
-         description_json, description_html, description_stripped, description_binary, priority, \
-         complexity_score, start_date, target_date, sequence_id, sort_order, completed_at, \
-         archived_at, is_draft, external_source, external_id, type_id, git_work_branch, workpad, \
-         created_via, assigned_pod_id, agent_executor) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, \
-         $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34)",
-    )
-    .bind(row.id)
-    .bind(row.created_at)
-    .bind(row.updated_at)
-    .bind(row.created_by_id)
-    .bind(row.updated_by_id)
-    .bind(row.deleted_at)
-    .bind(row.project_id)
-    .bind(row.workspace_id)
-    .bind(row.parent_id)
-    .bind(row.state_id)
-    .bind(row.point)
-    .bind(row.estimate_point_id)
-    .bind(row.name.as_str())
-    .bind(row.description_json.clone())
-    .bind(row.description_html.as_str())
-    .bind(row.description_stripped.as_deref())
-    .bind(row.description_binary.as_deref())
-    .bind(row.priority.as_str())
-    .bind(row.complexity_score)
-    .bind(row.start_date)
-    .bind(row.target_date)
-    .bind(row.sequence_id)
-    .bind(row.sort_order)
-    .bind(row.completed_at)
-    .bind(row.archived_at)
-    .bind(row.is_draft)
-    .bind(row.external_source.as_deref())
-    .bind(row.external_id.as_deref())
-    .bind(row.type_id)
-    .bind(row.git_work_branch.as_str())
-    .bind(row.workpad.as_str())
-    .bind(row.created_via.as_deref())
-    .bind(row.assigned_pod_id)
-    .bind(row.agent_executor.as_deref())
-    .execute(&mut **tx)
-    .await
-    .map_err(|error| {
-        if is_integrity_violation(&error) {
-            Denial::BadError("The payload is not valid".to_owned())
-        } else {
-            Denial::ServerError
-        }
-    })?;
-    Ok(())
-}
-
-/// `instance.save()` on an update: Django writes every column (no
-/// `update_fields`), so the UPDATE sets all 33 non-pk columns.
-async fn update_issue_row(pool: &sqlx::PgPool, row: &IssueSaveRow) -> Result<(), Denial> {
-    sqlx::query(
-        "UPDATE issues SET created_at = $1, updated_at = $2, created_by_id = $3, updated_by_id = $4, \
-         deleted_at = $5, project_id = $6, workspace_id = $7, parent_id = $8, state_id = $9, \
-         point = $10, estimate_point_id = $11, name = $12, description_json = $13, \
-         description_html = $14, description_stripped = $15, description_binary = $16, \
-         priority = $17, complexity_score = $18, start_date = $19, target_date = $20, \
-         sequence_id = $21, sort_order = $22, completed_at = $23, archived_at = $24, \
-         is_draft = $25, external_source = $26, external_id = $27, type_id = $28, \
-         git_work_branch = $29, workpad = $30, created_via = $31, assigned_pod_id = $32, \
-         agent_executor = $33 WHERE id = $34",
-    )
-    .bind(row.created_at)
-    .bind(row.updated_at)
-    .bind(row.created_by_id)
-    .bind(row.updated_by_id)
-    .bind(row.deleted_at)
-    .bind(row.project_id)
-    .bind(row.workspace_id)
-    .bind(row.parent_id)
-    .bind(row.state_id)
-    .bind(row.point)
-    .bind(row.estimate_point_id)
-    .bind(row.name.as_str())
-    .bind(row.description_json.clone())
-    .bind(row.description_html.as_str())
-    .bind(row.description_stripped.as_deref())
-    .bind(row.description_binary.as_deref())
-    .bind(row.priority.as_str())
-    .bind(row.complexity_score)
-    .bind(row.start_date)
-    .bind(row.target_date)
-    .bind(row.sequence_id)
-    .bind(row.sort_order)
-    .bind(row.completed_at)
-    .bind(row.archived_at)
-    .bind(row.is_draft)
-    .bind(row.external_source.as_deref())
-    .bind(row.external_id.as_deref())
-    .bind(row.type_id)
-    .bind(row.git_work_branch.as_str())
-    .bind(row.workpad.as_str())
-    .bind(row.created_via.as_deref())
-    .bind(row.assigned_pod_id)
-    .bind(row.agent_executor.as_deref())
-    .bind(row.id)
-    .execute(pool)
-    .await
-    .map_err(|error| {
-        if is_integrity_violation(&error) {
-            Denial::BadError("The payload is not valid".to_owned())
-        } else {
-            Denial::ServerError
-        }
-    })?;
-    Ok(())
-}
-
-/// One m2m `bulk_create(batch_size=10)` leg: a multi-row INSERT per
-/// 10-chunk in input order; an `IntegrityError` swallows the REST of the
-/// batches (`except: pass` wraps the whole call), any other error 500s.
-#[allow(clippy::too_many_arguments)]
-async fn write_m2m_batches(
-    pool: &sqlx::PgPool,
-    table: &str,
-    member_column: &str,
-    ids: &[Uuid],
-    issue_id: &Uuid,
-    project_id: &Uuid,
-    workspace_id: &Uuid,
-    created_by_id: Option<Uuid>,
-    updated_by_id: Option<Uuid>,
-    ignore_conflicts: bool,
-) -> Result<(), Denial> {
-    for batch in m2m_batches(ids) {
-        let sql = m2m_insert_sql(table, member_column, batch.len(), ignore_conflicts);
-        let mut query = sqlx::query(&sql);
-        for member_id in batch {
-            // `auto_now_add` + `auto_now`: two `now()` calls per row, like
-            // the per-object instantiation Django bulk-saves.
-            let created = utc_now_micros();
-            let updated = utc_now_micros();
-            query = query
-                .bind(Uuid::new_v4())
-                .bind(created)
-                .bind(updated)
-                .bind(created_by_id)
-                .bind(updated_by_id)
-                .bind(project_id)
-                .bind(workspace_id)
-                .bind(issue_id)
-                .bind(member_id);
-        }
-        match query.execute(pool).await {
-            Ok(_) => {}
-            Err(error) if is_integrity_violation(&error) => break,
-            Err(_) => return Err(Denial::ServerError),
-        }
-    }
-    Ok(())
-}
-
-/// The create default-assignee fallback (`serializers/issue.py:419-444`):
-/// empty/missing assignees + a valid project-default member → one
-/// `IssueAssignee` row, `IntegrityError` swallowed.
-async fn write_default_assignee(
-    pool: &sqlx::PgPool,
-    default_assignee_id: &Uuid,
-    issue_id: &Uuid,
-    project_id: &Uuid,
-    workspace_id: &Uuid,
-    created_by_id: Option<Uuid>,
-) -> Result<(), Denial> {
-    let member: Option<(i32,)> = sqlx::query_as(DEFAULT_ASSIGNEE_EXISTS_SQL)
-        .bind(default_assignee_id)
-        .bind(project_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    if member.is_none() {
-        return Ok(());
-    }
-    let sql = m2m_insert_sql("issue_assignees", "assignee_id", 1, false);
-    let created = utc_now_micros();
-    let updated = utc_now_micros();
-    match sqlx::query(&sql)
-        .bind(Uuid::new_v4())
-        .bind(created)
-        .bind(updated)
-        .bind(created_by_id)
-        .bind(None::<Uuid>)
-        .bind(project_id)
-        .bind(workspace_id)
-        .bind(issue_id)
-        .bind(default_assignee_id)
-        .execute(pool)
-        .await
-    {
-        Ok(_) => Ok(()),
-        Err(error) if is_integrity_violation(&error) => Ok(()),
-        Err(_) => Err(Denial::ServerError),
+/// Map a domain-write failure onto the save arms: a dangling-row miss
+/// 404s, an integrity violation is the invalid-payload 400, anything else
+/// 500s.
+fn domain_denial(error: domain::DomainError) -> Denial {
+    if error.is_not_found() {
+        Denial::NotFound
+    } else if error.is_integrity_violation() {
+        Denial::BadError("The payload is not valid".to_owned())
+    } else {
+        Denial::ServerError
     }
 }
+
+// The save row is the domain's `IssueFieldSet` (imported at the top):
+// every `issues` column as owned values. Assembly, overlay and fetchers
+// keep building it here (validation-adjacent); the INSERT / full-column
+// UPDATE moved to `domain::issues` (ORM-03).
 
 // ---------------------------------------------------------------------------
 // Task enqueues (best-effort: failures never change the response)
 // ---------------------------------------------------------------------------
-
-/// `task.delay(*args, **kwargs)` through the jobs kernel: unported tasks
-/// forward Celery-format, like every other D-26 port. Enqueue failures
-/// log and the response stands (Django's broker publish is equally
-/// fire-and-forget from the view's perspective).
-async fn enqueue_task(
-    pool: &sqlx::PgPool,
-    task: &str,
-    args: Vec<Value>,
-    kwargs: Map<String, Value>,
-) {
-    let message = TaskMessage::new(task, args, kwargs);
-    let job = NewJob::new(
-        message.task.clone(),
-        Value::Array(message.args.clone()),
-        Value::Object(message.kwargs.clone()),
-    );
-    if let Err(error) = queue::enqueue(pool, &job).await {
-        tracing::warn!(%error, task = message.task.as_str(), "task enqueue failed; response stands");
-    }
-}
-
-/// `issue_activity.delay(type, requested_data, actor_id, issue_id,
-/// project_id, current_instance, epoch, notification, origin[, subscriber])`.
-#[allow(clippy::too_many_arguments)]
-async fn enqueue_issue_activity(
-    pool: &sqlx::PgPool,
-    activity_type: &str,
-    requested_data: Value,
-    actor_id: &Uuid,
-    issue_id: &Uuid,
-    project_id: &Uuid,
-    current_instance: Value,
-    origin: &str,
-    subscriber: Option<bool>,
-) {
-    let mut kwargs = Map::new();
-    kwargs.insert("type".to_owned(), Value::String(activity_type.to_owned()));
-    kwargs.insert("requested_data".to_owned(), requested_data);
-    kwargs.insert("actor_id".to_owned(), Value::String(actor_id.to_string()));
-    kwargs.insert("issue_id".to_owned(), Value::String(issue_id.to_string()));
-    kwargs.insert(
-        "project_id".to_owned(),
-        Value::String(project_id.to_string()),
-    );
-    kwargs.insert("current_instance".to_owned(), current_instance);
-    kwargs.insert(
-        "epoch".to_owned(),
-        Value::Number(serde_json::Number::from(Utc::now().timestamp())),
-    );
-    kwargs.insert("notification".to_owned(), Value::Bool(true));
-    kwargs.insert("origin".to_owned(), Value::String(origin.to_owned()));
-    if let Some(subscriber) = subscriber {
-        kwargs.insert("subscriber".to_owned(), Value::Bool(subscriber));
-    }
-    enqueue_task(pool, ISSUE_ACTIVITY_TASK, vec![], kwargs).await;
-}
-
-/// `model_activity.delay(model_name, model_id, requested_data,
-/// current_instance, actor_id, slug, origin)`: `requested_data` is the RAW
-/// object (never JSON-encoded at these sites); the UUID actor rides as a
-/// string, exactly as Celery's encoder would carry the UUID object.
-#[allow(clippy::too_many_arguments)]
-async fn enqueue_model_activity(
-    pool: &sqlx::PgPool,
-    model_id: &Uuid,
-    requested_data: Value,
-    current_instance: Value,
-    actor_id: &Uuid,
-    slug: &str,
-    origin: &str,
-) {
-    let mut kwargs = Map::new();
-    kwargs.insert("model_name".to_owned(), Value::String("issue".to_owned()));
-    kwargs.insert("model_id".to_owned(), Value::String(model_id.to_string()));
-    kwargs.insert("requested_data".to_owned(), requested_data);
-    kwargs.insert("current_instance".to_owned(), current_instance);
-    kwargs.insert("actor_id".to_owned(), Value::String(actor_id.to_string()));
-    kwargs.insert("slug".to_owned(), Value::String(slug.to_owned()));
-    kwargs.insert("origin".to_owned(), Value::String(origin.to_owned()));
-    enqueue_task(pool, MODEL_ACTIVITY_TASK, vec![], kwargs).await;
-}
 
 /// `recent_visited_task.delay(slug, entity_name, entity_identifier,
 /// user_id, project_id)` — all keywords.
@@ -3519,47 +3051,10 @@ async fn enqueue_recent_visited(
         "project_id".to_owned(),
         Value::String(project_id.to_string()),
     );
-    enqueue_task(pool, RECENT_VISITED_TASK, vec![], kwargs).await;
-}
-
-/// `issue_description_version_task.delay(updated_issue, issue_id, user_id[,
-/// is_creating])`: the update site OMITS `is_creating` (it is not `False`).
-async fn enqueue_version_task(
-    pool: &sqlx::PgPool,
-    updated_issue: &str,
-    issue_id: &Uuid,
-    user_id: &Uuid,
-    is_creating: Option<bool>,
-) {
-    let mut kwargs = Map::new();
-    kwargs.insert(
-        "updated_issue".to_owned(),
-        Value::String(updated_issue.to_owned()),
-    );
-    kwargs.insert("issue_id".to_owned(), Value::String(issue_id.to_string()));
-    kwargs.insert("user_id".to_owned(), Value::String(user_id.to_string()));
-    if let Some(is_creating) = is_creating {
-        kwargs.insert("is_creating".to_owned(), Value::Bool(is_creating));
-    }
-    enqueue_task(pool, VERSION_TASK, vec![], kwargs).await;
-}
-
-/// `soft_delete_related_objects.delay(app_label, model_name, pk,
-/// using=None)`: positional ids + the explicit `using` kwarg.
-async fn enqueue_soft_delete(pool: &sqlx::PgPool, issue_id: &Uuid) {
-    let mut kwargs = Map::new();
-    kwargs.insert("using".to_owned(), Value::Null);
-    enqueue_task(
-        pool,
-        SOFT_DELETE_TASK,
-        vec![
-            Value::String("db".to_owned()),
-            Value::String("issue".to_owned()),
-            Value::String(issue_id.to_string()),
-        ],
-        kwargs,
-    )
-    .await;
+    let enqueue = AppTaskEnqueueHook::new(pool);
+    enqueue
+        .enqueue_task(RECENT_VISITED_TASK, vec![], kwargs)
+        .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -3820,21 +3315,21 @@ impl CoreIssueRow {
     }
 }
 
-impl IssueSaveRow {
-    /// The `validate()`-consumed snapshot (annotation-less lookups).
-    fn write_instance(&self) -> WriteInstance {
-        WriteInstance {
-            id: self.id,
-            project_id: self.project_id,
-            workspace_id: self.workspace_id,
-            external_source: self.external_source.clone(),
-            agent_executor: self.agent_executor.clone(),
-            assigned_pod_id: self.assigned_pod_id,
-            name: self.name.clone(),
-            description_html: self.description_html.clone(),
-            description_json: self.description_json.clone(),
-            description_stripped: self.description_stripped.clone(),
-        }
+/// The `validate()`-consumed snapshot (annotation-less lookups). A free
+/// function: the row is the domain's `IssueFieldSet`, which cannot carry
+/// an inherent impl from this crate.
+fn write_instance_of_save(row: &IssueSaveRow) -> WriteInstance {
+    WriteInstance {
+        id: row.id,
+        project_id: row.project_id,
+        workspace_id: row.workspace_id,
+        external_source: row.external_source.clone(),
+        agent_executor: row.agent_executor.clone(),
+        assigned_pod_id: row.assigned_pod_id,
+        name: row.name.clone(),
+        description_html: row.description_html.clone(),
+        description_json: row.description_json.clone(),
+        description_stripped: row.description_stripped.clone(),
     }
 }
 
@@ -4326,7 +3821,7 @@ async fn render_detail_body(
     let body = render_detail_map(pool, row, timezone, with_subscribed, touch_prefetches).await?;
     let value = Value::Object(body);
     if spaced {
-        to_spaced_json(&value)
+        domain_issues::to_spaced_json(&value).ok_or(Denial::ServerError)
     } else {
         serde_json::to_string(&value).map_err(|_| Denial::ServerError)
     }
@@ -4399,14 +3894,9 @@ fn v_m2m_effective(
     (present, effective)
 }
 
-/// The fresh-row assembly: the row, the touched state's group, and the raw
-/// m2m inputs.
-type NewIssueAssembly = (
-    IssueSaveRow,
-    Option<String>,
-    Option<Vec<Uuid>>,
-    Option<Vec<Uuid>>,
-);
+/// The fresh-row assembly: the row and the raw m2m inputs. The state
+/// decision (default assignment, `completed_at`) moved to the save hooks.
+type NewIssueAssembly = (IssueSaveRow, Option<Vec<Uuid>>, Option<Vec<Uuid>>);
 
 /// Build the fresh row for `Issue.objects.create(...)`: model defaults
 /// everywhere the input is absent, the sanitized `description_html`, and
@@ -4418,7 +3908,7 @@ fn assemble_new_issue(
     tenant: &CoreTenant,
 ) -> Result<NewIssueAssembly, Denial> {
     let name = v_text(validated, "name").ok_or(Denial::ServerError)?;
-    let (_, state_id, state_group) = v_state(validated);
+    let (_, state_id, _) = v_state(validated);
     let description_html = filtered
         .description_html
         .clone()
@@ -4430,7 +3920,9 @@ fn assemble_new_issue(
         id: Uuid::new_v4(),
         created_at: now_created,
         updated_at: now_updated,
-        created_by_id: Some(tenant.user_id),
+        // Audit stamps come from the domain write context, not the
+        // assembly: `created_by` is the actor, `updated_by` stays `None`.
+        created_by_id: None,
         updated_by_id: None,
         deleted_at: match validated.get("deleted_at") {
             Some(Validated::DateTime(moment)) => Some(*moment),
@@ -4499,7 +3991,6 @@ fn assemble_new_issue(
     };
     Ok((
         row,
-        state_group,
         v_uuid_list(validated, "assignee_ids"),
         v_uuid_list(validated, "label_ids"),
     ))
@@ -4507,13 +3998,13 @@ fn assemble_new_issue(
 
 /// `super().update(instance, validated_data)`: every present key applies
 /// (`Null` clears); absent keys keep the row. `description_stripped`
-/// input is skipped — `save()` recomputes it unconditionally. Returns the
-/// state decision for the save legs.
+/// input is skipped — `save()` recomputes it unconditionally. The state
+/// decision (default assignment, `completed_at`) moved to the save hooks.
 fn apply_validated_to_existing(
     row: &mut IssueSaveRow,
     validated: &BTreeMap<&'static str, Validated>,
     filtered: &ValidatedAttrs,
-) -> Result<(bool, Option<Uuid>, Option<String>), Denial> {
+) -> Result<(), Denial> {
     if let Some(name) = v_text(validated, "name") {
         row.name = name.to_owned();
     }
@@ -4616,13 +4107,13 @@ fn apply_validated_to_existing(
     if validated.contains_key("created_via") {
         row.created_via = v_text(validated, "created_via").map(str::to_owned);
     }
-    // `state` applies through the save legs (default assignment when the
-    // final id is `None`), not here.
-    let (touched, state_id, group) = v_state(validated);
+    // `state` overlays here; the default assignment (when the final id
+    // is `None`) and the `completed_at` recompute run in the save hooks.
+    let (touched, state_id, _) = v_state(validated);
     if touched {
         row.state_id = state_id;
     }
-    Ok((touched, row.state_id, group))
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -4908,81 +4399,6 @@ async fn render_put_body(
 // Shared update legs
 // ---------------------------------------------------------------------------
 
-/// The save legs for an update-shaped write (PATCH/PUT/destroy):
-/// `row.state_id` is final on entry (applied or kept). A `None` id takes
-/// the default assignment (`self.project` touch + default queries,
-/// `completed_at` untouched); a set id recomputes `completed_at` off the
-/// touched group or a fresh `self.state` read (whose miss is the
-/// required-object 404). `description_stripped` always recomputes.
-async fn update_state_legs(
-    pool: &sqlx::PgPool,
-    row: &mut IssueSaveRow,
-    touched: bool,
-    group: Option<String>,
-) -> Result<(), Denial> {
-    if row.state_id.is_none() {
-        touch_save_project(pool, &row.project_id).await?;
-        row.state_id = default_state_for_project(pool, &row.project_id).await?;
-    } else {
-        let group = match (touched, group) {
-            (_, Some(group)) => group,
-            (false, None) => {
-                let state_id = row.state_id.ok_or(Denial::ServerError)?;
-                saved_state_group(pool, &state_id)
-                    .await?
-                    .ok_or(Denial::NotFound)?
-            }
-            // The field `get()` always resolves the group of a touched state.
-            (true, None) => return Err(Denial::ServerError),
-        };
-        if group == "completed" {
-            row.completed_at = Some(utc_now_micros());
-        } else {
-            row.completed_at = None;
-        }
-    }
-    row.description_stripped = sync_description_stripped(Some(&row.description_html));
-    Ok(())
-}
-
-/// One update m2m leg (`serializers/issue.py:477-511`): present keys
-/// soft-delete the live links, then re-insert the effective ids with
-/// `ON CONFLICT DO NOTHING`; audit ids come from the PRE-SAVE instance.
-async fn update_m2m_leg(
-    pool: &sqlx::PgPool,
-    table: &str,
-    member_column: &str,
-    present: bool,
-    effective: &[Uuid],
-    row: &IssueSaveRow,
-    audit: (Option<Uuid>, Option<Uuid>),
-) -> Result<(), Denial> {
-    if !present {
-        return Ok(());
-    }
-    let sql =
-        format!("UPDATE {table} SET deleted_at = $1 WHERE issue_id = $2 AND deleted_at IS NULL");
-    sqlx::query(&sql)
-        .bind(utc_now_micros())
-        .bind(row.id)
-        .execute(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    write_m2m_batches(
-        pool,
-        table,
-        member_column,
-        effective,
-        &row.id,
-        &row.project_id,
-        &row.workspace_id,
-        audit.0,
-        audit.1,
-        true,
-    )
-    .await
-}
-
 /// Split a proxied-or-read request after the UUID guards passed. The read
 /// is unbounded past the serve-wide `BodyLimitLayer`; a mid-stream
 /// transport failure fails closed with the truncated-body 502.
@@ -5063,204 +4479,98 @@ pub async fn create_issue(
         Ok(filtered) => filtered,
         Err(response) => return Ok(response),
     };
-    let (mut row, state_group, raw_assignees, raw_labels) =
-        assemble_new_issue(&validated, &filtered, &tenant)?;
-    if row.assigned_pod_id.is_none() {
-        row.assigned_pod_id = default_pod_for_project(&pool, &tenant.project_id).await?;
-    }
+    let (row, raw_assignees, raw_labels) = assemble_new_issue(&validated, &filtered, &tenant)?;
     if row.state_id.is_none() {
-        // The `self.project` touch runs inside the atomic block on the
-        // state-given leg (the lock key); hoisted here — a `SELECT`'s
-        // transaction membership is unobservable.
+        // The `self.project` touch (`issue.py:293-296` + the lock key):
+        // Django fetches the project row on the NULL-state leg — a miss
+        // is the required-object 404. A `SELECT`'s transaction membership
+        // is unobservable, so it runs ahead of the domain write.
         touch_save_project(&pool, &tenant.project_id).await?;
-        row.state_id = default_state_for_project(&pool, &tenant.project_id).await?;
-    } else {
-        let group = match state_group {
-            Some(group) => group,
-            // Unreachable: a given state carries its group from the field
-            // `get()`; fall back to the `self.state` read regardless.
-            None => {
-                let state_id = row.state_id.ok_or(Denial::ServerError)?;
-                saved_state_group(&pool, &state_id)
-                    .await?
-                    .ok_or(Denial::ServerError)?
-            }
-        };
-        if group == "completed" {
-            row.completed_at = Some(utc_now_micros());
-        } else {
-            row.completed_at = None;
-        }
     }
-    let mut tx = pool.begin().await.map_err(|_| Denial::ServerError)?;
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(advisory_lock_key(&tenant.project_id))
-        .execute(&mut *tx)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    let max_sequence: (Option<i64>,) = sqlx::query_as(
-        "SELECT MAX(sequence) FROM issue_sequences WHERE project_id = $1 AND deleted_at IS NULL",
-    )
-    .bind(tenant.project_id)
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    row.sequence_id = i32::try_from(max_sequence.0.map(|max| max + 1).unwrap_or(1))
-        .map_err(|_| Denial::ServerError)?;
-    let max_sort: (Option<f64>,) = match row.state_id {
-        Some(state_id) => sqlx::query_as(
-            "SELECT MAX(sort_order) FROM issues \
-                 WHERE project_id = $1 AND state_id = $2 AND deleted_at IS NULL",
-        )
-        .bind(tenant.project_id)
-        .bind(state_id)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(|_| Denial::ServerError)?,
-        None => sqlx::query_as(
-            "SELECT MAX(sort_order) FROM issues \
-             WHERE project_id = $1 AND state_id IS NULL AND deleted_at IS NULL",
-        )
-        .bind(tenant.project_id)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(|_| Denial::ServerError)?,
-    };
-    if let Some(largest) = max_sort.0 {
-        row.sort_order = largest + 10000.0;
-    }
-    row.description_stripped = sync_description_stripped(Some(&row.description_html));
-    insert_issue_row(&mut tx, &row).await?;
-    sqlx::query(
-        "INSERT INTO issue_sequences (id, created_at, updated_at, created_by_id, updated_by_id, \
-         deleted_at, project_id, workspace_id, issue_id, sequence, deleted) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
-    )
-    .bind(Uuid::new_v4())
-    .bind(utc_now_micros())
-    .bind(utc_now_micros())
-    .bind(Some(tenant.user_id))
-    .bind(None::<Uuid>)
-    .bind(None::<DateTime<Utc>>)
-    .bind(tenant.project_id)
-    .bind(tenant.workspace_id)
-    .bind(row.id)
-    .bind(i64::from(row.sequence_id))
-    .bind(false)
-    .execute(&mut *tx)
-    .await
-    .map_err(|error| {
-        if is_integrity_violation(&error) {
-            Denial::BadError("The payload is not valid".to_owned())
-        } else {
-            Denial::ServerError
-        }
-    })?;
-    tx.commit().await.map_err(|_| Denial::ServerError)?;
-    // Django's `post_save` fires inside `Issue.objects.create`, before the
-    // assignee/label `bulk_create`s, so the entry prompt sees empty m2m.
-    let prev = crate::issue_transition::capture_prior_state_pool(&pool, None)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    fire_after_save(
-        &state,
-        &pool,
-        user_id,
-        row.id,
-        prev,
-        row.state_id,
-        true,
-        Some(user_id),
-        utc_now_micros(),
-    )
-    .await?;
-    // The m2m legs run post-commit in autocommit (the `except
-    // IntegrityError: pass` around each `bulk_create`).
+    // The m2m plan resolves pre-save (pure reads of validated input).
     let assignees = filtered
         .assignee_ids
         .clone()
         .or(raw_assignees)
         .unwrap_or_default();
-    if assignees.is_empty() {
-        if let Some(default) = tenant.default_assignee_id {
-            write_default_assignee(
-                &pool,
-                &default,
-                &row.id,
-                &tenant.project_id,
-                &tenant.workspace_id,
-                row.created_by_id,
-            )
-            .await?;
-        }
-    } else {
-        write_m2m_batches(
-            &pool,
-            "issue_assignees",
-            "assignee_id",
-            &assignees,
-            &row.id,
-            &tenant.project_id,
-            &tenant.workspace_id,
-            row.created_by_id,
-            None,
-            false,
-        )
-        .await?;
-    }
     let labels = filtered
         .label_ids
         .clone()
         .or(raw_labels)
         .unwrap_or_default();
-    if !labels.is_empty() {
-        write_m2m_batches(
-            &pool,
-            "issue_labels",
-            "label_id",
-            &labels,
-            &row.id,
-            &tenant.project_id,
-            &tenant.workspace_id,
-            row.created_by_id,
-            None,
-            false,
-        )
-        .await?;
-    }
     // `base_host` raises past the save (the issue + no jobs persist on a
-    // misconfigured host), so the origin resolves here, not up front.
-    let origin = request_origin(&state)?;
-    let requested = to_spaced_json(&data.value)?;
-    enqueue_issue_activity(
-        &pool,
-        "issue.activity.created",
-        Value::String(requested.clone()),
-        &user_id,
-        &row.id,
-        &tenant.project_id,
-        Value::Null,
-        &origin,
-        None,
-    )
-    .await;
-    let Some(post) = fetch_create_response_row(&pool, &slug, &tenant.project_id, &row.id).await?
+    // misconfigured host): `request_origin` is pure over settings, so it
+    // resolves here but only takes effect past the fire + m2m legs — the
+    // chain stops ahead of the activity when it is `None`.
+    let origin = request_origin(&state).ok();
+    let requested = domain_issues::to_spaced_json(&data.value).ok_or(Denial::ServerError)?;
+    // The atomic sequence/sort INSERT (save hooks) plus the post-commit
+    // chain — transition fire, m2m + default-assignee legs, created
+    // activity — in handler order. Django's `post_save` fires inside
+    // `Issue.objects.create`, before the assignee/label `bulk_create`s.
+    let orm = state.orm().ok_or(Denial::ServerError)?;
+    let ctx = write_ctx(&tenant, &user_id);
+    let transition: Arc<dyn IssueTransitionHook> = Arc::new(AppTransitionHook::new(&state, &pool));
+    let enqueue: Arc<dyn TaskEnqueueHook> = Arc::new(AppTaskEnqueueHook::new(&pool));
+    let outcome = domain::run(&ctx, orm, |txn| {
+        let transition = transition.clone();
+        let enqueue = enqueue.clone();
+        let pool = pool.clone();
+        let ctx = ctx.clone();
+        let origin = origin.clone();
+        let requested = requested.clone();
+        Box::pin(async move {
+            txn.hooks_mut().register(transition);
+            txn.hooks_mut().register(enqueue);
+            domain_issues::create(
+                &ctx,
+                txn,
+                &pool,
+                domain_issues::CreateIssue {
+                    fields: row,
+                    assignees,
+                    default_assignee: tenant.default_assignee_id,
+                    labels,
+                    fire: domain_issues::FireSpec {
+                        dispatch_immediate: true,
+                        created_by: Some(user_id),
+                        now: utc_now_micros(),
+                    },
+                    origin: origin.clone(),
+                    activity_requested: Value::String(requested.clone()),
+                },
+            )
+            .await
+        })
+    })
+    .await
+    .map_err(domain_denial)?;
+    if outcome.chain.stopped().is_some() {
+        return Err(Denial::ServerError);
+    }
+    let issue_id = outcome.issue.id;
+    let Some(post) = fetch_create_response_row(&pool, &slug, &tenant.project_id, &issue_id).await?
     else {
         // `user_timezone_converter(None)` → `TypeError` → the generic 500,
         // with the row + `issue_activity` already persisted.
         return Err(Denial::ServerError);
     };
-    enqueue_model_activity(
-        &pool,
-        &row.id,
-        data.value.clone(),
-        Value::Null,
-        &user_id,
-        &slug,
-        &origin,
+    // A `None` origin stopped the chain above, so this is `Some` — the
+    // `ok_or` is unreachable, kept for the type.
+    let origin = origin.ok_or(Denial::ServerError)?;
+    domain_issues::emit_model_activity(
+        &enqueue,
+        domain_issues::ModelActivitySpec {
+            model: issue_id,
+            requested: data.value.clone(),
+            current: Value::Null,
+            actor: user_id,
+            slug: slug.clone(),
+            origin: Some(origin),
+        },
     )
     .await;
-    enqueue_version_task(&pool, &requested, &row.id, &user_id, Some(true)).await;
+    domain_issues::emit_version_task(&enqueue, &requested, &issue_id, &user_id, Some(true)).await;
     Ok(json_created(render_create_response_body(
         &post,
         &tenant.timezone,
@@ -5320,7 +4630,7 @@ pub async fn partial_update_issue(
     tenant.workspace_id = looked_up.save.workspace_id;
     let current_instance =
         render_detail_body(&pool, &looked_up, &tenant.timezone, false, false, true).await?;
-    let requested = to_spaced_json(&data.value)?;
+    let requested = domain_issues::to_spaced_json(&data.value).ok_or(Denial::ServerError)?;
     let validated =
         match validate_issue_body(&pool, &data, RequestShape::Patch, &tenant.timezone).await {
             Ok(validated) => validated,
@@ -5344,93 +4654,75 @@ pub async fn partial_update_issue(
         .await
         .map_err(|_| Denial::ServerError)?;
     let mut row = looked_up.save;
-    let audit = (row.created_by_id, row.updated_by_id);
-    let (touched, _, group) = apply_validated_to_existing(&mut row, &validated, &filtered)?;
-    // The m2m legs run ahead of the row write (`update()` pops them first).
+    apply_validated_to_existing(&mut row, &validated, &filtered)?;
+    if row.state_id.is_none() {
+        // The NULL-state leg's `self.project` touch (a miss is the
+        // required-object 404), ahead of the domain write.
+        touch_save_project(&pool, &row.project_id).await?;
+    }
+    // The m2m plan resolves pre-save; the legs run inside the domain
+    // write, ahead of the row write (`update()` pops them first).
     let (assignee_present, assignees) =
         v_m2m_effective(filtered.assignee_ids.clone(), &validated, "assignee_ids");
-    update_m2m_leg(
-        &pool,
-        "issue_assignees",
-        "assignee_id",
-        assignee_present,
-        &assignees,
-        &row,
-        audit,
-    )
-    .await?;
     let (label_present, labels) =
         v_m2m_effective(filtered.label_ids.clone(), &validated, "label_ids");
-    update_m2m_leg(
-        &pool,
-        "issue_labels",
-        "label_id",
-        label_present,
-        &labels,
-        &row,
-        audit,
-    )
-    .await?;
-    update_state_legs(&pool, &mut row, touched, group).await?;
     // `update()` assigns `updated_at`, then `save()`'s `auto_now`
     // overwrites it — the net effect is one save-time stamp.
-    row.updated_by_id = Some(user_id);
+    // (`updated_by` is stamped from the write context.)
     row.updated_at = utc_now_micros();
-    update_issue_row(&pool, &row).await?;
-    // `github_signals.trigger_completion_comment`
-    // (`bgtasks/github_signals.py:44-75`): a save moving a mirrored issue
-    // into a completed-group state enqueues the provider's
-    // `post_completion_comment`. Django fires it from `Issue.save()`,
-    // before the orchestration receiver (bgtasks connects first), so it
-    // runs here — after the row write, before `fire_after_save`.
-    // Best-effort: the save stands.
-    if prev != row.state_id {
-        crate::issue_transition::enqueue_completion_comment(
-            &pool,
-            &pk,
-            prev.as_ref(),
-            row.state_id.as_ref(),
-        )
-        .await;
-    }
+    // `base_host` raises past the fire: pure over settings, resolved here,
+    // effective in the chain ahead of the activity trio.
+    let origin = request_origin(&state).ok();
     let dispatch_immediate = !skip_immediate_dispatch(&parts.headers);
-    fire_after_save(
-        &state,
-        &pool,
-        user_id,
-        pk,
-        prev,
-        row.state_id,
-        dispatch_immediate,
-        Some(user_id),
-        utc_now_micros(),
-    )
-    .await?;
-    if !(skip_activity && is_description_update) {
-        let origin = request_origin(&state)?;
-        enqueue_issue_activity(
-            &pool,
-            "issue.activity.updated",
-            Value::String(requested.clone()),
-            &user_id,
-            &pk,
-            &tenant.project_id,
-            Value::String(current_instance.clone()),
-            &origin,
-            None,
-        )
-        .await;
-        enqueue_model_activity(
-            &pool,
-            &pk,
-            data.value.clone(),
-            Value::String(current_instance.clone()),
-            &user_id,
-            &slug,
-            &origin,
-        )
-        .await;
-        enqueue_version_task(&pool, &current_instance, &pk, &user_id, None).await;
+    // The three task enqueues are skipped for description-only migration
+    // skips; the save + fire always run.
+    let activity = if skip_activity && is_description_update {
+        None
+    } else {
+        Some(domain_issues::UpdateActivity {
+            origin: origin.clone(),
+            requested: requested.clone(),
+            current_instance: current_instance.clone(),
+            raw_body: data.value.clone(),
+            slug: slug.clone(),
+        })
+    };
+    let orm = state.orm().ok_or(Denial::ServerError)?;
+    let ctx = write_ctx(&tenant, &user_id);
+    let transition: Arc<dyn IssueTransitionHook> = Arc::new(AppTransitionHook::new(&state, &pool));
+    let enqueue: Arc<dyn TaskEnqueueHook> = Arc::new(AppTaskEnqueueHook::new(&pool));
+    let outcome = domain::run(&ctx, orm, |txn| {
+        let transition = transition.clone();
+        let enqueue = enqueue.clone();
+        let pool = pool.clone();
+        let ctx = ctx.clone();
+        Box::pin(async move {
+            txn.hooks_mut().register(transition);
+            txn.hooks_mut().register(enqueue);
+            domain_issues::partial_update(
+                &ctx,
+                txn,
+                &pool,
+                domain_issues::PartialIssue {
+                    fields: row,
+                    assignees: assignee_present.then_some(assignees),
+                    labels: label_present.then_some(labels),
+                    prev_state: prev,
+                    fire: domain_issues::FireSpec {
+                        dispatch_immediate,
+                        created_by: Some(user_id),
+                        now: utc_now_micros(),
+                    },
+                    activity,
+                },
+            )
+            .await
+        })
+    })
+    .await
+    .map_err(domain_denial)?;
+    if outcome.chain.stopped().is_some() {
+        return Err(Denial::ServerError);
     }
     Ok(empty_response())
 }
@@ -5487,7 +4779,7 @@ pub async fn put_update_issue(
             Ok(validated) => validated,
             Err(failure) => return field_pass_response(failure),
         };
-    let instance = looked_up.write_instance();
+    let instance = write_instance_of_save(&looked_up);
     let filtered =
         match run_validate(&pool, &state, &validated, None, Some(&instance), &tenant).await {
             Ok(filtered) => filtered,
@@ -5497,62 +4789,59 @@ pub async fn put_update_issue(
         .await
         .map_err(|_| Denial::ServerError)?;
     let mut row = looked_up;
-    let audit = (row.created_by_id, row.updated_by_id);
-    let (touched, _, group) = apply_validated_to_existing(&mut row, &validated, &filtered)?;
+    apply_validated_to_existing(&mut row, &validated, &filtered)?;
+    if row.state_id.is_none() {
+        // The NULL-state leg's `self.project` touch, ahead of the write.
+        touch_save_project(&pool, &row.project_id).await?;
+    }
+    // The m2m plan resolves pre-save; the legs run inside the domain
+    // write, ahead of the row write (`update()` pops them first).
     let (assignee_present, assignees) =
         v_m2m_effective(filtered.assignee_ids.clone(), &validated, "assignee_ids");
-    update_m2m_leg(
-        &pool,
-        "issue_assignees",
-        "assignee_id",
-        assignee_present,
-        &assignees,
-        &row,
-        audit,
-    )
-    .await?;
     let (label_present, labels) =
         v_m2m_effective(filtered.label_ids.clone(), &validated, "label_ids");
-    update_m2m_leg(
-        &pool,
-        "issue_labels",
-        "label_id",
-        label_present,
-        &labels,
-        &row,
-        audit,
-    )
-    .await?;
-    update_state_legs(&pool, &mut row, touched, group).await?;
-    row.updated_by_id = Some(user_id);
+    // `update()` assigns `updated_at`, then `save()`'s `auto_now`
+    // overwrites it — the net effect is one save-time stamp.
     row.updated_at = utc_now_micros();
-    update_issue_row(&pool, &row).await?;
-    // `github_signals.trigger_completion_comment`
-    // (`bgtasks/github_signals.py:44-75`): a save moving a mirrored issue
-    // into a completed-group state enqueues the provider's
-    // `post_completion_comment` — before the orchestration receiver, as
-    // in Django. Best-effort: the save stands.
-    if prev != row.state_id {
-        crate::issue_transition::enqueue_completion_comment(
-            &pool,
-            &pk,
-            prev.as_ref(),
-            row.state_id.as_ref(),
-        )
-        .await;
+    let orm = state.orm().ok_or(Denial::ServerError)?;
+    let ctx = write_ctx(&tenant, &user_id);
+    let transition: Arc<dyn IssueTransitionHook> = Arc::new(AppTransitionHook::new(&state, &pool));
+    let enqueue: Arc<dyn TaskEnqueueHook> = Arc::new(AppTaskEnqueueHook::new(&pool));
+    let outcome = domain::run(&ctx, orm, |txn| {
+        let transition = transition.clone();
+        let enqueue = enqueue.clone();
+        let pool = pool.clone();
+        let ctx = ctx.clone();
+        Box::pin(async move {
+            txn.hooks_mut().register(transition);
+            txn.hooks_mut().register(enqueue);
+            domain_issues::update(
+                &ctx,
+                txn,
+                &pool,
+                domain_issues::UpdateIssue {
+                    fields: row,
+                    assignees: assignee_present.then_some(assignees),
+                    labels: label_present.then_some(labels),
+                    prev_state: prev,
+                    fire: domain_issues::FireSpec {
+                        dispatch_immediate: true,
+                        created_by: Some(user_id),
+                        now: utc_now_micros(),
+                    },
+                },
+            )
+            .await
+        })
+    })
+    .await
+    .map_err(domain_denial)?;
+    if outcome.chain.stopped().is_some() {
+        return Err(Denial::ServerError);
     }
-    fire_after_save(
-        &state,
-        &pool,
-        user_id,
-        pk,
-        prev,
-        row.state_id,
-        true,
-        Some(user_id),
-        utc_now_micros(),
-    )
-    .await?;
+    // The representation renders from the saved row (hook outputs
+    // included), as it rendered from the post-legs row before.
+    let row = IssueSaveRow::from(&outcome.issue);
     let initial = data.value.as_object();
     let body = render_put_body(
         &pool,
@@ -5611,51 +4900,55 @@ pub async fn destroy_issue(
     // state legs run — the FK follow resolves triage/deleted states,
     // only a dangling FK 404s — plus stripped + audit), then the
     // related-objects forward.
-    row.deleted_at = Some(utc_now_micros());
-    update_state_legs(&pool, &mut row, false, None).await?;
-    row.updated_by_id = Some(user_id);
+    // `issue.delete()`: `deleted_at` now, then the full `save()` (the
+    // state legs run — the FK follow resolves triage/deleted states,
+    // only a dangling FK 404s — plus stripped + audit), then the
+    // related-objects forward, the hard recent-visit delete and the
+    // unsubscribed `deleted` activity — as one domain write + chain.
+    if row.state_id.is_none() {
+        // The NULL-state leg's `self.project` touch, ahead of the write.
+        touch_save_project(&pool, &row.project_id).await?;
+    }
     row.updated_at = utc_now_micros();
-    update_issue_row(&pool, &row).await?;
-    fire_after_save(
-        &state,
-        &pool,
-        user_id,
-        pk,
-        prev,
-        row.state_id,
-        true,
-        Some(user_id),
-        utc_now_micros(),
-    )
-    .await?;
-    enqueue_soft_delete(&pool, &pk).await;
-    sqlx::query(
-        "DELETE FROM user_recent_visits AS visit USING workspaces AS workspace \
-         WHERE visit.workspace_id = workspace.id AND visit.project_id = $1 \
-         AND workspace.slug = $2 AND visit.entity_identifier = $3 AND visit.entity_name = 'issue'",
-    )
-    .bind(tenant.project_id)
-    .bind(slug.as_str())
-    .bind(pk)
-    .execute(&pool)
+    // `base_host` raises past the visit delete: pure over settings,
+    // resolved here, effective in the chain ahead of the activity.
+    let origin = request_origin(&state).ok();
+    let orm = state.orm().ok_or(Denial::ServerError)?;
+    let ctx = write_ctx(&tenant, &user_id);
+    let transition: Arc<dyn IssueTransitionHook> = Arc::new(AppTransitionHook::new(&state, &pool));
+    let enqueue: Arc<dyn TaskEnqueueHook> = Arc::new(AppTaskEnqueueHook::new(&pool));
+    let outcome = domain::run(&ctx, orm, |txn| {
+        let transition = transition.clone();
+        let enqueue = enqueue.clone();
+        let pool = pool.clone();
+        let ctx = ctx.clone();
+        Box::pin(async move {
+            txn.hooks_mut().register(transition);
+            txn.hooks_mut().register(enqueue);
+            domain_issues::soft_delete(
+                &ctx,
+                txn,
+                &pool,
+                domain_issues::SoftDeleteIssue {
+                    fields: row,
+                    prev_state: prev,
+                    fire: domain_issues::FireSpec {
+                        dispatch_immediate: true,
+                        created_by: Some(user_id),
+                        now: utc_now_micros(),
+                    },
+                    origin,
+                    slug: slug.clone(),
+                },
+            )
+            .await
+        })
+    })
     .await
-    .map_err(|_| Denial::ServerError)?;
-    let origin = request_origin(&state)?;
-    let mut deleted_key = Map::new();
-    deleted_key.insert("issue_id".to_owned(), Value::String(pk.to_string()));
-    let requested = to_spaced_json(&deleted_key)?;
-    enqueue_issue_activity(
-        &pool,
-        "issue.activity.deleted",
-        Value::String(requested),
-        &user_id,
-        &pk,
-        &tenant.project_id,
-        Value::Object(Map::new()),
-        &origin,
-        Some(false),
-    )
-    .await;
+    .map_err(domain_denial)?;
+    if outcome.chain.stopped().is_some() {
+        return Err(Denial::ServerError);
+    }
     Ok(empty_response())
 }
 
@@ -5827,35 +5120,10 @@ pub async fn bulk_delete_issues(
         }
         // The issues leg reuses the `issue_objects` scope (it soft-deletes
         // only in-scope rows; out-of-scope ids still count as misses).
-        // The triage span is a null-safe `NOT EXISTS` (Django's
-        // `LEFT JOIN` scope keeps null-state rows; the spanned manager
-        // only joins live states). Project + workspace scoping is load
-        // bearing: without it a foreign id in the list would soft-delete
-        // another project's issue, which Django's filtered queryset never
-        // touches.
-        let project_bind = survivors.len() + 2;
-        let slug_bind = survivors.len() + 3;
-        // Comma-join, not JOIN..ON: Postgres forbids referencing the
-        // UPDATE target from a FROM-clause ON expression.
-        let sql = format!(
-            "UPDATE issues AS issue SET deleted_at = $1 \
-             FROM projects AS project, workspaces AS workspace \
-             WHERE issue.deleted_at IS NULL AND issue.id IN ({placeholders}) \
-             AND issue.project_id = ${project_bind} AND issue.project_id = project.id \
-             AND issue.workspace_id = workspace.id AND workspace.slug = ${slug_bind} \
-             AND NOT EXISTS (SELECT 1 FROM states AS state \
-             WHERE state.id = issue.state_id AND state.deleted_at IS NULL \
-             AND state.\"group\" = 'triage') \
-             AND issue.archived_at IS NULL AND project.archived_at IS NULL \
-             AND issue.is_draft = FALSE"
-        );
-        let mut query = sqlx::query(&sql).bind(utc_now_micros());
-        for id in &survivors {
-            query = query.bind(id);
-        }
-        query = query.bind(tenant.project_id).bind(slug.as_str());
-        query
-            .execute(&pool)
+        // The issues leg reuses the `issue_objects` scope via the
+        // domain bulk write (queryset `delete()`: one scoped UPDATE,
+        // no `save()`, no fire, no activity).
+        domain_issues::bulk_soft_delete_issues(&pool, &survivors, &tenant.project_id, &slug)
             .await
             .map_err(|_| Denial::ServerError)?;
     }
