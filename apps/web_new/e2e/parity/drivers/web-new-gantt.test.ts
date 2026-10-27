@@ -1542,6 +1542,14 @@ describe("gantt add-block (ISS-054)", () => {
     await expect(driver.ganttRowAddVisible("Undated")).resolves.toBe(true);
     await expect(driver.ganttAddBlock("Undated", 2)).resolves.toBeUndefined();
   });
+
+  it("settles 800ms for the hover affordance like the oracle", async () => {
+    const waits: number[] = [];
+    const page = addPage();
+    page.waitForTimeout = async (ms: number) => void waits.push(ms);
+    await new WebNewDriver(page).ganttRowAddVisible("Undated");
+    expect(waits).toEqual([800]);
+  });
 });
 
 describe("gantt quick-add (ISS-055)", () => {

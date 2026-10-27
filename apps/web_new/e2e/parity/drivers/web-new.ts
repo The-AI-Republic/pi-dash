@@ -12042,7 +12042,9 @@ export class WebNewDriver implements ParityDriver {
   async ganttRowAddVisible(issueName: string): Promise<boolean> {
     const at = await this.ganttChartPointForRow(issueName, 2);
     await this.page.mouse.move(at.x, at.y);
-    await this.page.waitForTimeout(300);
+    // The "+" mounts under the cursor on row hover; the oracle settles
+    // 800ms for it (my 300ms mistranslation read false, ISS-054).
+    await this.page.waitForTimeout(800);
     const add = this.page.getByTestId("gantt-add-block").first();
     return (await add.count()) > 0 && (await add.isVisible());
   }
