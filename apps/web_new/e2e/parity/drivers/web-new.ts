@@ -10553,6 +10553,12 @@ export class WebNewDriver implements ParityDriver {
     if ((await scope.count()) === 0) return null;
     const heading = scope.getByRole("heading").first();
     if ((await heading.count()) === 0) return null;
+    // The kit renders title + description as sibling spans inside one h3
+    // (EmptyState detailed tier); the oracle's h3 holds the title alone.
+    // Read the title span so both drivers return the title, falling back
+    // to the whole heading when no span exists.
+    const titleSpan = heading.locator(":scope > span").first();
+    if ((await titleSpan.count()) > 0) return ((await titleSpan.innerText()) ?? "").trim();
     return ((await heading.innerText()) ?? "").trim();
   }
 

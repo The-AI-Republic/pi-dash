@@ -11,7 +11,10 @@ test(
   specTitle(["ISS-206"], "no worklog surfaces render in the OSS build"),
   { tag: specTags(["ISS-206"]) },
   async ({ driver, seed, page }) => {
-    const tag = `NF122 worklog ${Date.now()}`;
+    // The probe name must not contain the forbidden token: the detail page
+    // renders the issue title as body text, so a "worklog" name would match
+    // the absence assertion below on the title alone (gate fix).
+    const tag = `NF122 time-entry ${Date.now()}`;
     const session = await signInSession(seed.email, seed.password);
     const issue = await serverCreateIssueFull(seed.workspaceSlug, seed.projectId, `${tag} issue`, session);
     try {

@@ -126,6 +126,42 @@ describe("web_new empty-state driver", () => {
     expect(selectors).toContain('[data-testid="issues-empty-state"]:visible');
   });
 
+  it("reads the title span when the heading also carries the description", async () => {
+    const { page } = pageOf({
+      locator: (selector) => {
+        if (selector === '[data-testid="issues-empty-state"]:visible') {
+          return locator({
+            getByRole: () =>
+              locator({
+                innerText: async () => "Start with your first work item.\nWork items are the building blocks.",
+                locator: () => locator({ innerText: async () => "Start with your first work item." }),
+              }),
+          });
+        }
+        return locator();
+      },
+    });
+    await expect(new WebNewDriver(page).layoutsEmptyTitle()).resolves.toBe("Start with your first work item.");
+  });
+
+  it("falls back to the heading text when no title span exists", async () => {
+    const { page } = pageOf({
+      locator: (selector) => {
+        if (selector === '[data-testid="issues-empty-state"]:visible') {
+          return locator({
+            getByRole: () =>
+              locator({
+                innerText: async () => "No matching results.",
+                locator: () => locator({ count: async () => 0 }),
+              }),
+          });
+        }
+        return locator();
+      },
+    });
+    await expect(new WebNewDriver(page).layoutsEmptyTitle()).resolves.toBe("No matching results.");
+  });
+
   it("reads nothing when no card is mounted", async () => {
     const { page } = pageOf({
       locator: (selector) =>
