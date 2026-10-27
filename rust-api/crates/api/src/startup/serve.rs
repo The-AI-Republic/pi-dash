@@ -33,10 +33,11 @@ use pidash_db::config::Settings;
 use pidash_services::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
 use pidash_services::user_settings::SettingsSchema;
 
-use super::{connect_serve_pools, settings_from_env, shutdown_signal};
+use super::{connect_serve_pools, queue_schema_pool, settings_from_env, shutdown_signal};
 use crate::desktop_gate::DesktopRequestGate;
 use crate::edge::{EdgeHandle, DEFAULT_UPSTREAM};
 use crate::state::AppState;
+use crate::RouteWrap;
 
 /// The composed server without the socket: the state the router was
 /// built over plus the router. [`ServeBuilder::build`] returns this for
@@ -56,12 +57,9 @@ pub struct ServeParts {
 /// state is built once, from the final settings.
 type StateMod = Box<dyn FnOnce(AppState) -> AppState + Send>;
 
-/// One deferred router wrap, applied in call order outside the OSS
-/// middleware stack.
-type RouteWrap = Box<dyn FnOnce(axum::Router) -> axum::Router + Send>;
-
 /// Owns the `serve` startup sequence; extensions plug in through the
-/// `with_*` seams, [`ServeBuilder::merge_routes`] and [`ServeBuilder::wrap`].
+/// `with_*` seams, [`ServeBuilder::merge_routes`], [`ServeBuilder::wrap`]
+/// and [`ServeBuilder::wrap_inside`].
 ///
 /// The OSS binary serves with `from_env` plus [`ServeBuilder::run`] (and
 /// the CLI bind address); every other method is an extension point the
@@ -74,6 +72,8 @@ pub struct ServeBuilder {
     state_mods: Vec<StateMod>,
     extra: axum::Router<AppState>,
     wraps: Vec<RouteWrap>,
+    inside: Vec<RouteWrap>,
+    queue_schema_owner: Option<sqlx::PgPool>,
 }
 
 impl ServeBuilder {
@@ -88,6 +88,8 @@ impl ServeBuilder {
             state_mods: Vec::new(),
             extra: axum::Router::new(),
             wraps: Vec::new(),
+            inside: Vec::new(),
+            queue_schema_owner: None,
         })
     }
 
@@ -103,6 +105,8 @@ impl ServeBuilder {
             state_mods: Vec::new(),
             extra: axum::Router::new(),
             wraps: Vec::new(),
+            inside: Vec::new(),
+            queue_schema_owner: None,
         }
     }
 
@@ -197,6 +201,45 @@ impl ServeBuilder {
         self
     }
 
+    /// Apply `layer` inside the OSS middleware stack: the router carries
+    /// it before [`build_app`](crate::build_app) wraps [`stack`](crate::stack),
+    /// so on the request path the layer runs after `SessionLayer` (it
+    /// observes the `SessionHandle` the stack inserts) and before the
+    /// route handler. Same bounds as [`ServeBuilder::wrap`].
+    /// (PIDASHCONV-1558: the overlay's JWT, federation-guard and quota
+    /// layers must sit here — outside they see no `SessionHandle` and
+    /// fail open.)
+    ///
+    /// Repeated calls apply in call order — plain tower `.layer()`
+    /// chaining, so the last call runs first on the request
+    /// (outside-in) and last on the response. The overlay's JWT →
+    /// federation → quota request order therefore reads as three calls
+    /// in reverse — quota, federation, JWT — the same lines its
+    /// `wrap_cloud_middleware` applies today.
+    pub fn wrap_inside<L>(mut self, layer: L) -> Self
+    where
+        L: Layer<Route> + Clone + Send + Sync + 'static,
+        L::Service: Service<Request<Body>> + Clone + Send + Sync + 'static,
+        <L::Service as Service<Request<Body>>>::Response: IntoResponse + 'static,
+        <L::Service as Service<Request<Body>>>::Error: Into<Infallible> + 'static,
+        <L::Service as Service<Request<Body>>>::Future: Send + 'static,
+    {
+        self.inside
+            .push(Box::new(move |router| router.layer(layer)));
+        self
+    }
+
+    /// Run the queue-schema DDL in [`ServeBuilder::run`] on `pool`
+    /// instead of the app pool. Split-role deploys pass the schema
+    /// owner's pool (the migrator role; the app role is DML-only and
+    /// Postgres checks `CREATE` on the schema even for
+    /// `CREATE TABLE IF NOT EXISTS`). Unset, `run` ensures the schema
+    /// on primary, exactly as before. (PIDASHCONV-1558.)
+    pub fn with_queue_schema_owner(mut self, pool: sqlx::PgPool) -> Self {
+        self.queue_schema_owner = Some(pool);
+        self
+    }
+
     /// Compose the state and the router without binding or connecting:
     /// the pool-less [`ServeParts`] for tests and embedding.
     pub fn build(self) -> ServeParts {
@@ -208,9 +251,11 @@ impl ServeBuilder {
             state_mods,
             extra,
             wraps,
+            inside,
+            queue_schema_owner: _,
         } = self;
         let state = Self::assemble_state(version, settings, edge, None, state_mods);
-        let router = Self::assemble_router(state.clone(), extra, wraps);
+        let router = Self::assemble_router(state.clone(), extra, inside, wraps);
         ServeParts { state, router }
     }
 
@@ -226,6 +271,8 @@ impl ServeBuilder {
             state_mods,
             extra,
             wraps,
+            inside,
+            queue_schema_owner,
         } = self;
         let pools = connect_serve_pools().await?;
         // Enqueue paths (magic-link mail, password mail, …) INSERT into the
@@ -234,7 +281,11 @@ impl ServeBuilder {
         // workerless (the V-02 matrix starts no worker for the Rust run), so
         // `serve` must ensure the schema too (PIDASHCONV-854). Fail-fast like
         // `worker`: refusing to start beats per-request 500s.
-        pidash_jobs::queue::ensure_schema(pools.primary()).await?;
+        pidash_jobs::queue::ensure_schema(queue_schema_pool(
+            queue_schema_owner.as_ref(),
+            pools.primary(),
+        ))
+        .await?;
         tracing::info!(
             %addr,
             upstream = edge.upstream(),
@@ -258,7 +309,7 @@ impl ServeBuilder {
             Some((pools, orm, redis)),
             state_mods,
         );
-        let app = Self::assemble_router(state, extra, wraps);
+        let app = Self::assemble_router(state, extra, inside, wraps);
         let listener = tokio::net::TcpListener::bind(addr).await?;
         axum::serve(
             listener,
@@ -296,13 +347,15 @@ impl ServeBuilder {
     }
 
     /// The router every path serves: [`build_app`](crate::build_app) over
-    /// the state plus the merged extras, then every wrap in call order.
+    /// the state plus the merged extras, with every inside wrap applied
+    /// pre-stack in call order, then every outside wrap in call order.
     fn assemble_router(
         state: AppState,
         extra: axum::Router<AppState>,
+        inside: Vec<RouteWrap>,
         wraps: Vec<RouteWrap>,
     ) -> axum::Router {
-        let mut router = crate::build_app(state, Some(extra));
+        let mut router = crate::build_app_with_layers(state, Some(extra), inside);
         for wrap in wraps {
             router = wrap(router);
         }
@@ -536,6 +589,129 @@ mod tests {
                 .state
                 .version(),
             "cloud-1"
+        );
+    }
+
+    /// Extra router whose handler logs its run: proves inside layers run
+    /// before the route handler.
+    fn ping_extra(events: &Arc<std::sync::Mutex<Vec<String>>>) -> axum::Router<AppState> {
+        let handler_events = events.clone();
+        axum::Router::new().route(
+            "/api/ping",
+            axum::routing::get(move || {
+                let handler_events = handler_events.clone();
+                async move {
+                    handler_events
+                        .lock()
+                        .expect("event log")
+                        .push("handler".to_owned());
+                    "pong"
+                }
+            }),
+        )
+    }
+
+    /// `wrap_inside` layers run after `SessionLayer` and before the route
+    /// handler: with pools attached (via `with_state` over lazy pools)
+    /// the inside layer observes the `SessionHandle` the stack inserts,
+    /// while an equivalent outside layer does not.
+    ///
+    /// Hermetic: the probe carries no cookie and no API key, so the
+    /// session path loads nothing (empty session, no user) and the
+    /// token log passes through — the lazy pools never dial.
+    #[tokio::test]
+    async fn inside_layer_observes_session_handle_outside_does_not() {
+        let events: Arc<std::sync::Mutex<Vec<String>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let probe = |label: &'static str, events: Arc<std::sync::Mutex<Vec<String>>>| {
+            axum::middleware::from_fn(
+                move |request: axum::http::Request<axum::body::Body>,
+                      next: axum::middleware::Next| {
+                    let events = events.clone();
+                    async move {
+                        let saw_handle =
+                            request.extensions().get::<crate::SessionHandle>().is_some();
+                        events
+                            .lock()
+                            .expect("event log")
+                            .push(format!("{label}:handle={saw_handle}"));
+                        next.run(request).await
+                    }
+                },
+            )
+        };
+        let pool =
+            sqlx::PgPool::connect_lazy("postgres://localhost:1/unused").expect("lazy pool builds");
+        let parts = ServeBuilder::for_tests()
+            .with_state(|state| state.with_pools(pidash_db::Pools::primary_only(pool)))
+            .merge_routes(ping_extra(&events))
+            .wrap_inside(probe("inside", events.clone()))
+            .wrap(probe("outside", events.clone()))
+            .build();
+        let response = parts
+            .router
+            .oneshot(
+                axum::http::Request::get("/api/ping")
+                    .body(axum::body::Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("serve");
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert_eq!(
+            events.lock().expect("event log").as_slice(),
+            ["outside:handle=false", "inside:handle=true", "handler"]
+        );
+    }
+
+    /// Repeated `wrap_inside` calls apply in call order — plain tower
+    /// `.layer()` chaining, so the last call runs first on the request
+    /// (outside-in) and last on the response. The overlay's JWT →
+    /// federation → quota request order therefore reads quota,
+    /// federation, JWT — the same lines its `wrap_cloud_middleware`
+    /// applies today.
+    #[tokio::test]
+    async fn repeated_wrap_inside_applies_in_call_order() {
+        let events: Arc<std::sync::Mutex<Vec<String>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let probe = |label: &'static str, events: Arc<std::sync::Mutex<Vec<String>>>| {
+            axum::middleware::from_fn(
+                move |request: axum::http::Request<axum::body::Body>,
+                      next: axum::middleware::Next| {
+                    let events = events.clone();
+                    async move {
+                        events
+                            .lock()
+                            .expect("event log")
+                            .push(format!("{label}:req"));
+                        let response = next.run(request).await;
+                        events
+                            .lock()
+                            .expect("event log")
+                            .push(format!("{label}:resp"));
+                        response
+                    }
+                },
+            )
+        };
+        let parts = ServeBuilder::for_tests()
+            .merge_routes(ping_extra(&events))
+            .wrap_inside(probe("a", events.clone()))
+            .wrap_inside(probe("b", events.clone()))
+            .build();
+        let response = parts
+            .router
+            .oneshot(
+                axum::http::Request::get("/api/ping")
+                    .body(axum::body::Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("serve");
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert_eq!(
+            events.lock().expect("event log").as_slice(),
+            ["b:req", "a:req", "handler", "a:resp", "b:resp"]
         );
     }
 }

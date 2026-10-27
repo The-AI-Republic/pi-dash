@@ -110,6 +110,26 @@ pub use state::AppState;
 /// let _app: axum::Router = pidash_api::build_app(state, Some(private_routes()));
 /// ```
 pub fn build_app(state: AppState, extra: Option<axum::Router<AppState>>) -> axum::Router {
+    build_app_with_layers(state, extra, Vec::new())
+}
+
+/// One deferred router wrap: a layer application held for assembly.
+/// [`ServeBuilder`](startup::ServeBuilder) collects outside wraps
+/// ([`wrap`](startup::ServeBuilder::wrap)) and inside wraps
+/// ([`wrap_inside`](startup::ServeBuilder::wrap_inside)) as these.
+pub(crate) type RouteWrap = Box<dyn FnOnce(axum::Router) -> axum::Router + Send>;
+
+/// [`build_app`] with inside-stack layers: each wrap applies to the
+/// assembled router in order, before [`stack`], so the layers run
+/// inside the OSS stack — after `SessionLayer` on the request path
+/// (they observe the `SessionHandle`), before the route handler.
+/// [`ServeBuilder::wrap_inside`](startup::ServeBuilder::wrap_inside)
+/// is the public entry; `build_app` stays the single wiring point.
+pub(crate) fn build_app_with_layers(
+    state: AppState,
+    extra: Option<axum::Router<AppState>>,
+    inside: Vec<RouteWrap>,
+) -> axum::Router {
     let settings = state.settings().clone();
     let store = state
         .pools()
@@ -117,7 +137,10 @@ pub fn build_app(state: AppState, extra: Option<axum::Router<AppState>>) -> axum
     // The token-log `process_logs` enqueue rides the same primary pool;
     // pool-less states degrade to tracing only (`QueueSink` with `None`).
     let queue_pool = state.pools().map(|pools| pools.primary().clone());
-    let router = with_routes(state, extra.unwrap_or_default());
+    let mut router = with_routes(state, extra.unwrap_or_default());
+    for wrap in inside {
+        router = wrap(router);
+    }
     stack(
         router,
         &CorsConfig::from_settings(&settings),
