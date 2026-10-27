@@ -8,12 +8,18 @@
 // row to the layout root; both come from one builder instance. A saved
 // view passes its record so the row edits the view rather than the
 // personal filter store.
+//
+// The control and row are built here, above the layout root that draws the
+// floating spinner, so this component opens the mutation-loader scope around
+// both. A filter write then enters the same loader the nested root reads, and
+// the spinner covers the write plus the list refetch it triggers (ISS-005).
 
 import * as React from "react";
 import type { SavedView } from "@pidash/api-client";
 
 import type { DisplayPrefs } from "../../prefs/displayPrefs.js";
 import type { IssuesEntity } from "../../prefs/entities.js";
+import { IssuesLoaderProvider } from "../../loaders/loaderContext.js";
 import { useRichFilterBuilder, type RichFilterBuilderParts } from "./RichFilterBuilder.js";
 import type { ViewSnapshot } from "./views.js";
 
@@ -40,7 +46,17 @@ export interface IssueFiltersProps {
   children: (parts: RichFilterBuilderParts) => React.ReactNode;
 }
 
-export default function IssueFilters({
+export default function IssueFilters(props: IssueFiltersProps): React.ReactElement {
+  // The scope wraps the builder hook: the hook captures its loader when it
+  // mounts, so it has to mount below this provider rather than beside it.
+  return (
+    <IssuesLoaderProvider>
+      <MountedFilters {...props} />
+    </IssuesLoaderProvider>
+  );
+}
+
+function MountedFilters({
   workspaceSlug,
   projectId,
   entity,
