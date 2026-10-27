@@ -71,6 +71,7 @@ import { PageFloatingPaneToggle } from "./PageFloatingPaneToggle.js";
 import { PageLiveLoader } from "./PageLiveLoader.js";
 import { PageCanvasHeader } from "./PageCanvasHeader.js";
 import type { PageEditorHandle } from "../lib/pageEditorAdapter.js";
+import { PageBodyEditor } from "./PageBodyEditor.js";
 import { PageEditorSurface, PAGE_BODY_LABEL } from "./PageEditorSurface.js";
 import { PageHeadingPreview } from "./PageHeadingPreview.js";
 import { PageNavigationPane } from "./PageNavigationPane.js";
@@ -87,6 +88,10 @@ import { subscribeEntityPeek, type EntityPeekRequest } from "../../../shared/she
 const LazyIssuePeek = React.lazy(() =>
   import("../../issues/peek/ResolvingIssuePeek.js").then((module) => ({ default: module.ResolvingIssuePeek }))
 );
+
+// Read-only live updates report nowhere: no drafts, no formatting bar, no
+// command handle. Export keeps its draft-then-stored sourcing.
+function ignoreReadOnlyBodyUpdate(): void {}
 
 export interface PageDetailScreenProps {
   workspaceSlug: string;
@@ -207,17 +212,24 @@ export function PageDetailScreen({
   });
 
   const syncStatus = usePageSyncStatus(pageId);
-  // One collaboration session per editable page (PAGE-065–067): the
-  // mount below mirrors the document the live editors bind. Read-only
-  // pages keep their stored snapshot and report converged instead.
+  // One collaboration session per readable page (PAGE-065–067): the mount
+  // below mirrors the document the live editors bind. Read-only viewers
+  // join the same session the old client opens for them, so their body
+  // follows remote updates; they only render it without input (PAGE-053).
   const liveMount = usePageLiveSession({
     workspaceSlug,
     projectId,
     pageId,
     user: me.data === undefined ? null : { id: me.data.id, name: me.data.display_name },
-    enabled: (capabilities?.canEdit ?? false) && page !== undefined,
+    enabled: (capabilities?.canRead ?? false) && page !== undefined,
   });
-  usePageReadOnlySyncReport(pageId, page !== undefined && capabilities !== null && !capabilities.canEdit);
+  // The static converged report stands in only while no session runs (a
+  // panel, or a read the identity never arrived for); a running session
+  // owns every report, on the read-only side too.
+  usePageReadOnlySyncReport(
+    pageId,
+    liveMount === null && page !== undefined && capabilities !== null && !capabilities.canEdit
+  );
   // The binding is stable per document: a fresh object every render
   // would rebuild the editors' extensions and drop the caret.
   const liveDocHandle = liveMount?.docHandle ?? null;
@@ -552,16 +564,58 @@ export function PageDetailScreen({
                       onMarkPick={saveMark}
                     />
                     {bodyReady ? (
-                      <div
-                        className={`editor-container text-size-${preferences.font_size} text-face-${preferences.font_style}`}
-                      >
-                        <RichTextView
-                          html={page.description_html}
-                          label={PAGE_BODY_LABEL}
-                          resolveAsset={resolveAsset}
-                          workspaceSlug={workspaceSlug}
-                        />
-                      </div>
+                      liveMount === null ? (
+                        <div
+                          className={`editor-container text-size-${preferences.font_size} text-face-${preferences.font_style}`}
+                        >
+                          <RichTextView
+                            html={page.description_html}
+                            label={PAGE_BODY_LABEL}
+                            resolveAsset={resolveAsset}
+                            workspaceSlug={workspaceSlug}
+                          />
+                        </div>
+                      ) : liveMount.liveReady ? (
+                        // A read-only viewer binds the same live document
+                        // with editing off, so the body follows remote
+                        // updates without offering an editable region
+                        // (PAGE-053). The stored snapshot stands in while
+                        // the editor chunk loads, and seeds the shared
+                        // fields when they are empty; a session draft never
+                        // does (viewers read server truth, not their stale
+                        // draft).
+                        <div
+                          className={`editor-container text-size-${preferences.font_size} text-face-${preferences.font_style}`}
+                        >
+                          <React.Suspense
+                            fallback={
+                              <RichTextView
+                                html={storedHtml}
+                                label={PAGE_BODY_LABEL}
+                                resolveAsset={resolveAsset}
+                                workspaceSlug={workspaceSlug}
+                              />
+                            }
+                          >
+                            <PageBodyEditor
+                              key={page.id}
+                              initialHtml={storedHtml}
+                              resolveAsset={resolveAsset}
+                              workspaceSlug={workspaceSlug}
+                              onChange={ignoreReadOnlyBodyUpdate}
+                              onFormattingChange={ignoreReadOnlyBodyUpdate}
+                              onReady={ignoreReadOnlyBodyUpdate}
+                              label={PAGE_BODY_LABEL}
+                              editable={false}
+                              collab={liveDoc}
+                              seedDocument={liveMount.seedDocument}
+                              descriptionJson={page.description_json}
+                            />
+                          </React.Suspense>
+                        </div>
+                      ) : (
+                        <PageLiveLoader />
+                      )
                     ) : (
                       <PageBodySkeleton />
                     )}

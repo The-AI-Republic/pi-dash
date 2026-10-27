@@ -20,7 +20,11 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/pages/$pag
 
 function PageDetailComponent(): React.ReactElement {
   const { ws, projectId, pageId } = Route.useParams();
-  const search = Route.useSearch();
+  // Narrow again: the router merges each parent match's unvalidated search
+  // under the child's validated keys, so an unknown ?paneTab=zzz arrives
+  // raw here despite validateSearch — and the pane's presence check would
+  // open on it (PAGE-045). Re-parsing keeps the one choke point narrow.
+  const search = parsePageDetailSearch({ ...Route.useSearch() });
   const navigate = useNavigate();
   // The export chunk registers its dialog into the detail seam on import,
   // so the load starts from the route body and the dialog stays out of the

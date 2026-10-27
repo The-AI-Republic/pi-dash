@@ -304,7 +304,11 @@ export interface UsePageLiveSessionOptions {
   pageId: string;
   /** Null while signed out: no credentials open no socket (PAGE-068). */
   user: PageLiveUser | null;
-  /** False off the editable path: read-only pages keep their snapshot. */
+  /**
+   * False where no session runs: panels, and reads the identity never
+   * arrived for. Read-only viewers join the session and render it without
+   * input (PAGE-053).
+   */
   enabled: boolean;
   /** Tests inject a stub backend; production loads the chunk. */
   loadBackend?: ((input: PageLiveBackendInput) => Promise<PageLiveBackend>) | undefined;
@@ -377,11 +381,11 @@ function snapshot(session: PageLiveSession, backend: PageLiveBackend): PageLiveM
 }
 
 /**
- * One page's collaboration session for the editable surface: loads the
- * backend chunk, walks the reconnect machine, and mirrors the mount the
- * live editors bind to. Null while disabled or signed out. A chunk that
- * fails to load degrades to the standalone editor with the fallback
- * save, never to a stuck loader.
+ * One page's collaboration session for the detail surface, editable and
+ * read-only alike: loads the backend chunk, walks the reconnect machine,
+ * and mirrors the mount the live editors bind to. Null while disabled or
+ * signed out. A chunk that fails to load degrades to the standalone
+ * editor with the fallback save, never to a stuck loader.
  */
 export function usePageLiveSession(options: UsePageLiveSessionOptions): PageLiveMount | null {
   const { workspaceSlug, projectId, pageId, user, enabled } = options;
@@ -472,10 +476,10 @@ export function usePageLiveSession(options: UsePageLiveSessionOptions): PageLive
 }
 
 /**
- * The read-only half of the session contract: a page that keeps its
- * stored snapshot reports converged, so the fault badge never owns a
- * surface the socket was never meant to drive (PAGE-067). The editable
- * path never calls this — the session owns its reports.
+ * The sessionless half of the session contract: a page no session runs
+ * for reports converged, so the fault badge never owns a surface the
+ * socket was never meant to drive (PAGE-067). The screen keeps it off
+ * once a session owns the page's reports, on the read-only side too.
  */
 export function usePageReadOnlySyncReport(pageId: string, snapshot: boolean): void {
   React.useEffect(() => {

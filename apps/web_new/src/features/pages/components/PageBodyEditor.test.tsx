@@ -100,6 +100,14 @@ describe(
       expect(await surface()).toHaveTextContent("Stored words");
     });
 
+    it("renders the body without an editable region when editing is off (PAGE-053)", async () => {
+      mount({ editable: false });
+      await vi.dynamicImportSettled();
+      const body = await screen.findByLabelText("Page body", undefined, LOAD_TIMEOUT);
+      expect(body).toHaveTextContent("Stored words");
+      expect(body).not.toHaveAttribute("contenteditable", "true");
+    });
+
     it("reports the edited HTML and the caret's formatting state", async () => {
       const mounted = mount();
       const editable = await surface();

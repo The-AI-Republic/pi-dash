@@ -23474,11 +23474,32 @@ export class WebNewDriver implements ParityDriver {
 
   async pagesPaneEditorDeleteImage(): Promise<void> {
     // Select-all spares image nodes, so the removal clicks the block itself
-    // to select it before pressing Backspace, as a user would.
-    const image = this.pagesPaneLiveBody().locator("image-component").first();
-    const target = (await image.count()) > 0 ? image : this.pagesPaneLiveBody().locator("img").first();
-    await target.click({ timeout: WebNewDriver.WAIT_MS });
-    await this.page.keyboard.press("Backspace");
+    // to select it before pressing Backspace, as a user would. A click that
+    // lands while the editor is still settling can miss the selection and
+    // leave the node behind (its Backspace eats text instead), so a
+    // surviving image is clicked again instead of failing the scenario on
+    // a row the user can plainly still see (NEWFRONT-941).
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const image = this.pagesPaneLiveBody().locator("image-component").first();
+      const target = (await image.count()) > 0 ? image : this.pagesPaneLiveBody().locator("img").first();
+      await target.click({ timeout: WebNewDriver.WAIT_MS });
+      await this.page.keyboard.press("Backspace");
+      const removed = await expect
+        .poll(() => this.pagesPaneLiveImageCount(), { timeout: 2_000 })
+        .toBe(0)
+        .then(
+          () => true,
+          () => false
+        );
+      if (removed) return;
+    }
+    throw new Error("[parity] the editor image survived three delete attempts.");
+  }
+
+  /** Image nodes the live body still paints (block form plus plain tags). */
+  private async pagesPaneLiveImageCount(): Promise<number> {
+    const body = this.pagesPaneLiveBody();
+    return (await body.locator("image-component").count()) + (await body.locator("img").count());
   }
 
   /** Install the member-list filter once; the omitted id steers each answer. */
