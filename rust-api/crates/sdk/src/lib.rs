@@ -213,8 +213,14 @@ pub mod ops {
     pub use pidash_services::dispatch::tools::CREATE_SORT_ORDER_MAX_SQL;
     pub use pidash_services::dispatch::LlmProfile;
     pub use pidash_services::integrations::adapters_github::ClientAuth;
+    pub use pidash_services::integrations::adapters_github::GitHubAdapter;
     pub use pidash_services::integrations::adapters_github::GithubClient;
     pub use pidash_services::integrations::adapters_github::GithubError;
+    pub use pidash_services::integrations::github_client::LiveGithubClient;
+    pub use pidash_services::integrations::github_client::PoolPrStore;
+    pub use pidash_services::integrations::github_client::PrLinksSurface;
+    pub use pidash_services::integrations::github_client::TransportContext;
+    pub use pidash_services::integrations::github_client::TransportGuard;
     pub use pidash_services::orchestration::blockers;
     pub use pidash_services::orchestration::blockers::has_open_blockers_sql;
     pub use pidash_services::orchestration::blockers::summary_list;
