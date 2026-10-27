@@ -191,10 +191,14 @@ test(
 
     if (driver.target === "web_new") {
       await test.step("the failure rolls back and names itself", async () => {
-        await expect.poll(() => driver.homeManageWidgetEnabled("Recents"), { timeout: 15_000 }).toBe(recentsBefore);
+        // Read the notice first: the toggle paints optimistically, so an
+        // enabled check here could pass before the flip lands, and toasts
+        // dismiss after a few seconds. Once the notice is up the failed
+        // write has rolled back, so the switch must read as before.
         await expect.poll(() => driver.homeLastToast(), { timeout: 15_000 }).not.toBeNull();
         const toast = await driver.homeLastToast();
         expect(`${toast?.title ?? ""} ${toast?.message ?? ""}`.toLowerCase()).toMatch(/error|fail/);
+        await expect.poll(() => driver.homeManageWidgetEnabled("Recents"), { timeout: 15_000 }).toBe(recentsBefore);
       });
     } else {
       await test.step("bug NEWFRONT-131: the old app rolls back silently", async () => {
