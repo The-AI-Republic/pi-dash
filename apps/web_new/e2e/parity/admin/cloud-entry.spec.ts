@@ -26,10 +26,13 @@
 //
 // The web_new leg asserts the intended classification instead (the
 // gate builds it, per NEWFRONT-496): a session-less 401 bounces
-// through the provider handoff carrying the console path back, a 403
-// probes the session once and either denies terminally or bounces, a
-// failed check or an inconclusive probe retries, and a retry resets
-// both verdicts. The oracle leg keeps the observed old behavior above.
+// through the provider handoff carrying the console path back as a
+// relative return_to while replacing the history entry, a 403 probes
+// the session once and either denies terminally or bounces, a failed
+// check or an inconclusive probe retries, and a retry resets both
+// verdicts. The oracle leg keeps the observed old behavior above; the
+// `bug:` titles name the old gate's loop, which stays true of the
+// oracle.
 import { test, expect } from "../fixtures";
 import {
   cloudBrowserCookies,
@@ -118,6 +121,10 @@ test(
     // return_to, replacing history. Observed: the retry screen loops.
     await driver.cloudArmSignInCapture();
     await driver.adminCloudStartGateFetchSpy();
+    // Baseline: the tab sits on its blank start entry, so a single goto
+    // to the gate makes the history one longer. A replace handoff keeps
+    // that length; a push handoff adds a second entry.
+    const entriesBefore = await driver.adminHistoryLength();
     await driver.adminCloudOpenRootWithCookies([]);
     if (driver.target === "web_new") {
       // Intended (NEWFRONT-496): the anonymous 401 is already proof of
@@ -130,6 +137,15 @@ test(
       const counts = await driver.adminCloudGateFetchCounts();
       expect(counts.adminCheck).toBe(1);
       expect(counts.probe).toBe(0);
+      // The handoff replaced the gate's entry: the tab lands on the
+      // provider stub without growing the history, so going back leaves
+      // the console behind rather than re-entering it (a push would add
+      // an entry and land the visitor back on /god-mode/ for another
+      // bounce).
+      await expect.poll(async () => driver.adminCurrentPath(), { timeout: 30_000 }).toBe("/api/auth/sign-in/");
+      expect(await driver.adminHistoryLength()).toBe(entriesBefore + 1);
+      const backAfterHandoff = await driver.adminCloudGoBack();
+      expect(backAfterHandoff).toBe("about:blank");
     } else {
       await driver.adminCloudWaitForHomeBranch("error");
       const facts = await driver.adminCloudHomeFacts();
@@ -176,8 +192,13 @@ test(
       expect(facts.deniedHref).toBe("/");
       expect(facts.retryVisible).toBe(false);
       expect((await driver.adminCloudGateFetchCounts()).probe).toBe(1);
+      // Exactly one way out: a single root link, nothing else to click.
+      expect(await driver.page.getByRole("link").count()).toBe(1);
       expect(await driver.page.getByRole("button").count()).toBe(0);
       expect(await driver.cloudSignInRequests()).toEqual([]);
+      // Terminal means terminal: the gate stays on its own address
+      // instead of navigating the visitor anywhere.
+      expect(await driver.adminCurrentPath()).toBe("/god-mode/");
     } else {
       await driver.adminCloudWaitForHomeBranch("error");
       const facts = await driver.adminCloudHomeFacts();
@@ -235,6 +256,55 @@ test(
       expect(await driver.cloudSignInRequests()).toEqual([]);
     }
     await driver.adminCloudReleaseAdminCheckFault();
+    expect(await driver.cloudSignInRequests()).toEqual([]);
+  }
+);
+
+test(
+  specTitle(
+    ["ADM-078", "ADM-079"],
+    "bug: NEWFRONT-496 a probe blip reaches the retry screen unprobed (intended: probed, retried)"
+  ),
+  { tag: specTags(["ADM-078", "ADM-079"]) },
+  async ({ driver }: { driver: ParityDriver }) => {
+    // A signed-in non-admin reaches the probe (the check answers 403),
+    // then the probe blips. Guessing "anonymous" here would hand a
+    // returning visitor to OIDC and loop right back, so the gate must
+    // land on the retry screen — and stay there until retried. The old
+    // console reaches that screen too, but without ever probing.
+    const session = await cloudDevLogin(uniqueEmail("parity-446-gate-probe-blip"));
+    expect((await serverAdminMe(session.cookie)).status).toBe(403);
+    await driver.cloudArmSignInCapture();
+    await driver.adminCloudStartGateFetchSpy();
+    // Hold the probe failing rather than handing out one bad answer:
+    // the entry mounts under React strict mode, so a single-shot fault
+    // can be consumed before the screen settles. The old console never
+    // reaches the probe, so the held fault simply goes unread there.
+    await driver.adminCloudFailAuthProbe(Number.POSITIVE_INFINITY, 500);
+    await driver.adminCloudOpenRootWithCookies(cloudBrowserCookies(session.cookie));
+    await driver.adminCloudWaitForHomeBranch("error");
+    const facts = await driver.adminCloudHomeFacts();
+    expect(facts.heading).toBe("Something went wrong");
+    expect(facts.retryVisible).toBe(true);
+    expect(facts.deniedHref).toBe(null);
+    const counts = await driver.adminCloudGateFetchCounts();
+    if (driver.target === "web_new") {
+      // Intended (NEWFRONT-496): the genuine 403 is classified, and the
+      // inconclusive probe resolves to retry — never to a bounce.
+      expect(counts.probe).toBeGreaterThanOrEqual(1);
+      expect(await driver.cloudSignInRequests()).toEqual([]);
+      // Retry re-probes (the check still answers 403); with the blip
+      // over the recovered session reads authenticated and the gate
+      // settles on the terminal denied screen — the branch a guessed
+      // anonymous would have skipped.
+      await driver.adminCloudReleaseAuthProbeFault();
+      await driver.adminCloudRetry();
+      await driver.adminCloudWaitForHomeBranch("denied");
+      expect((await driver.adminCloudHomeFacts()).heading).toBe("Access denied");
+      expect((await driver.adminCloudGateFetchCounts()).probe).toBeGreaterThan(counts.probe);
+    }
+    await driver.adminCloudReleaseAuthProbeFault();
+    // Neither target ever bounces on an inconclusive probe.
     expect(await driver.cloudSignInRequests()).toEqual([]);
   }
 );

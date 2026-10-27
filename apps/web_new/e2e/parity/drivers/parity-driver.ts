@@ -8732,6 +8732,8 @@ export interface ParityDriver {
   adminCloudReleaseAdminCheckFault(): Promise<void>;
   /** Fail the next `times` auth-probe reads with `status`, then pass through. */
   adminCloudFailAuthProbe(times: number, status: number): Promise<void>;
+  /** Stop failing auth-probe reads (a held fault, released before a retry). */
+  adminCloudReleaseAuthProbeFault(): Promise<void>;
   /** Delay the next admin-check read by `ms` (one-shot; the spinner then shows deterministically). */
   adminCloudDelayAdminCheck(ms: number): Promise<void>;
   /** Admin-check + probe request counts since the last spy start. */
@@ -8740,6 +8742,13 @@ export interface ParityDriver {
   adminCloudStartGateFetchSpy(): Promise<void>;
   /** Click the gate's retry control. */
   adminCloudRetry(): Promise<void>;
+  /**
+   * Go back one history entry and return the URL the tab lands on. A
+   * provider handoff that replaced the gate leaves nothing behind, so
+   * back lands on the blank start page; a handoff that pushed an entry
+   * lands back on the gate (the back-button loop ADM-076 forbids).
+   */
+  adminCloudGoBack(): Promise<string>;
 
   // --- Space board access & routing (NEWFRONT-447, SPC-001..009). ---
   /** Open an arbitrary in-app path (unknown-path routing, SPC-009). */

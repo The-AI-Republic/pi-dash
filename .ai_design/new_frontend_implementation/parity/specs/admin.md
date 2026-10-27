@@ -1132,16 +1132,19 @@ probe would trigger an OIDC bounce that returns to another failing
 check, creating the exact home-to-OIDC-to-denied loop this gate
 exists to prevent. The loop-avoiding classification is load-bearing.
 
-Intended behavior behind NEWFRONT-496 (the slice builds this, not the
-observed old behavior): the old gate classifies the admin check from a
-status field that is always empty (it reads the status off the thrown
-response body, which carries none), so every failure — anonymous 401,
-non-admin 403, transient 5xx — lands in the error bucket, the probe
-never fires, and every non-admin visitor loops on the retry screen
-with zero OIDC handoffs. The new gate reads the HTTP status off the
-response itself, restoring the bounce for anonymous visitors, the
-denied screen for signed-in non-admins, and the retry screen for
-genuinely transient failures.
+Behavior behind NEWFRONT-496 (built in web_new; the oracle keeps the
+old bug): the old gate classifies the admin check from a status field
+that is always empty (it reads the status off the thrown response
+body, which carries none), so every failure — anonymous 401, non-admin
+403, transient 5xx — lands in the error bucket, the probe never fires,
+and every non-admin visitor loops on the retry screen with zero OIDC
+handoffs. The new gate reads the HTTP status off the response itself,
+restoring the bounce for anonymous visitors, the denied screen for
+signed-in non-admins, and the retry screen for genuinely transient
+failures. The cloud-entry scenarios assert that classification on the
+web_new leg and keep the oracle leg on the old behavior, and the gate
+asserts a probe 5xx resolves to retry (never a bounce) before denying
+on a retry once the session reads back.
 
 ## 11. Runners page (ADM-080) — target per main#534
 
