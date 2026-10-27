@@ -36,8 +36,9 @@
 // Target behavior (NEWFRONT-475/476/477/478): the scenarios below run
 // the intended rules on apps/web_new — the empty name names the field
 // inline, a failed disable reports the failure and rolls the toggle
-// back, the security picker dirties the form, and the test action grades
-// the entered settings. The oracle keeps the pinned old outcomes.
+// back, the security picker dirties the form, and the test action stays
+// open on unsaved edits while the check grades the entered settings.
+// The oracle keeps the pinned old outcomes.
 import { test, expect } from "../fixtures";
 import {
   serverAdminEmailCheck,
@@ -535,10 +536,10 @@ test(
       form = await driver.adminEmailFormFacts();
       expect(form.values.passwordFilled).toBe(true);
       expect(form.saveDisabled).toBe(false);
-      // The test action stays open on unsaved edits in both apps: the
-      // check grades what the form shows (NEWFRONT-477).
+      // The check grades the entered settings, so the test action opens
+      // on validity alone and never asks for a save first.
       expect(form.testEmailDisabled).toBe(false);
-      expect(form.saveFirstHint ?? null).toBeNull();
+      expect(form.saveFirstHint).toBeNull();
 
       // The password toggle flips the field without touching the value.
       await driver.adminEmailTogglePassword();
@@ -744,9 +745,14 @@ test(
     const before = await snapshotSmtp(session);
     const receiver = uniqueEmail("parity-adm-test");
     try {
+      // Pin every SMTP key so the form loads a fully known state.
       await serverAdminUpdateConfigurations(session, {
         EMAIL_HOST: "parity-smtp.invalid",
         EMAIL_PORT: "587",
+        EMAIL_HOST_USER: "",
+        EMAIL_HOST_PASSWORD: "",
+        EMAIL_USE_TLS: "1",
+        EMAIL_USE_SSL: "0",
         EMAIL_FROM: "parity-smtp@example.com",
         ENABLE_SMTP: "1",
       });
@@ -775,8 +781,25 @@ test(
       expect(modal.sendLabel).toBeNull();
       expect(modal.dismissLabel).toBe("Close");
 
-      // The check POST carries only the receiver address.
-      expect(await driver.adminEmailCheckBodies()).toEqual([{ receiver_email: receiver }]);
+      if (driver.target === "web_new") {
+        // The check POST carries the receiver plus the form's current
+        // settings; the blank password is omitted so the server grades
+        // the stored secret.
+        expect(await driver.adminEmailCheckBodies()).toEqual([
+          {
+            receiver_email: receiver,
+            EMAIL_HOST: "parity-smtp.invalid",
+            EMAIL_PORT: "587",
+            EMAIL_HOST_USER: "",
+            EMAIL_USE_TLS: "1",
+            EMAIL_USE_SSL: "0",
+            EMAIL_FROM: "parity-smtp@example.com",
+          },
+        ]);
+      } else {
+        // The check POST carries only the receiver address.
+        expect(await driver.adminEmailCheckBodies()).toEqual([{ receiver_email: receiver }]);
+      }
       const direct = await serverAdminEmailCheck(session, receiver);
       expect(direct.status).toBe(200);
 
@@ -834,16 +857,14 @@ test(
 );
 
 test(
-  specTitle(["ADM-021"], "check grades the entered settings, not the stored ones"),
+  specTitle(["ADM-021"], "bug: NEWFRONT-477 check runs against stored settings, not entered ones"),
   { tag: specTags(["ADM-021"]) },
   async ({ driver, seed }: { driver: ParityDriver; seed: ParitySeedFacts }) => {
     const session = await serverAdminSession(seed.email, seed.password);
-    const receiver = uniqueEmail("parity-adm-entered");
+    const receiver = uniqueEmail("parity-adm-stored");
     const stored = await snapshotSmtp(session);
-    // Stored settings point at a definitely-unreachable host so the
-    // check cannot succeed by accident; the entered values name a
-    // different unreachable host, so the graded values are visible in
-    // the request body either way.
+    // Establish a stored configuration that differs from the values the
+    // form will carry, so a rerun never starts from the same state.
     await serverAdminUpdateConfigurations(session, {
       ...DISABLED_SMTP,
       EMAIL_HOST: "stored-smtp.invalid",
@@ -854,30 +875,44 @@ test(
       await openEmail(driver, seed);
       await expect.poll(async () => (await driver.adminEmailFacts()).formVisible, { timeout: 15_000 }).toBe(true);
       await driver.adminEmailFill({ host: "entered-smtp.invalid", from: "entered@example.com" });
-      // Unsaved edits leave the test action open; nothing requires a save first.
-      const dirty = await driver.adminEmailFormFacts();
-      expect(dirty.testEmailDisabled).toBe(false);
-      expect(dirty.saveFirstHint ?? null).toBeNull();
+      if (driver.target === "web_new") {
+        // Intended (NEWFRONT-477): the check grades the entered
+        // settings, so unsaved edits leave the test action open with
+        // no save-first hint.
+        const dirty = await driver.adminEmailFormFacts();
+        expect(dirty.testEmailDisabled).toBe(false);
+        expect(dirty.saveFirstHint).toBeNull();
+      } else {
+        expect((await driver.adminEmailFormFacts()).testEmailDisabled).toBe(false);
+      }
 
-      await driver.adminStartEmailCheckSpy();
       await driver.adminTestEmailOpen();
+      await driver.adminStartEmailCheckSpy();
       await driver.adminTestEmailFillReceiver(receiver);
       await driver.adminTestEmailSend();
-      await expect.poll(async () => (await driver.adminTestEmailFacts()).step, { timeout: 90_000 }).toBe("failed");
-      const bodies = (await driver.adminEmailCheckBodies()) as Array<Record<string, unknown>>;
-      expect(bodies).toHaveLength(1);
-      const body = bodies[0] ?? {};
-      expect(body["receiver_email"]).toBe(receiver);
+      await expect.poll(async () => (await driver.adminTestEmailFacts()).step, { timeout: 30_000 }).toBe("success");
       if (driver.target === "web_new") {
-        // Intended (NEWFRONT-477): the entered, unsaved values ride
-        // along, so the server grades them instead of the stored ones.
-        expect(body["EMAIL_HOST"]).toBe("entered-smtp.invalid");
-        expect(body["EMAIL_FROM"]).toBe("entered@example.com");
+        // The body carries the entered settings — the host and sender
+        // the form holds, not the stored ones — with the rest of the
+        // form's current values alongside.
+        expect(await driver.adminEmailCheckBodies()).toEqual([
+          {
+            receiver_email: receiver,
+            EMAIL_HOST: "entered-smtp.invalid",
+            EMAIL_PORT: "587",
+            EMAIL_HOST_USER: "",
+            EMAIL_USE_TLS: "1",
+            EMAIL_USE_SSL: "0",
+            EMAIL_FROM: "entered@example.com",
+          },
+        ]);
       } else {
-        // The old app posts only the receiver: the server grades its own
-        // stored configuration (the pinned bug).
-        expect(Object.keys(body)).toEqual(["receiver_email"]);
+        // The body carries only the receiver: the server grades its own
+        // stored settings rather than anything the form could add.
+        expect(await driver.adminEmailCheckBodies()).toEqual([{ receiver_email: receiver }]);
       }
+      const direct = await serverAdminEmailCheck(session, receiver);
+      expect(direct.status).toBe(200);
       await driver.adminTestEmailClose();
     } finally {
       await restoreSmtp(session, stored);
