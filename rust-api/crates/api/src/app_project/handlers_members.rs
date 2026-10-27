@@ -3953,9 +3953,14 @@ mod tests {
         assert_eq!(check("true"), "Not a valid string.");
         assert_eq!(check("[\"x\"]"), "Not a valid string.");
         assert_eq!(check("\"a\\u0000b\""), "Null characters are not allowed.");
-        assert_eq!(
-            check("\"\\ud800\""),
-            "Surrogate characters are not allowed: U+D800."
+        // Tier 3 since PIDASHCONV-1555: lone surrogates are a 400 at parse
+        // (were validator 400s after an accepting parse).
+        assert!(
+            matches!(
+                parse_json_text("\"\\ud800\""),
+                Err(JsonFail::Message(message)) if !message.is_empty()
+            ),
+            "surrogate JSON 400s with serde text"
         );
     }
 

@@ -8151,9 +8151,10 @@ mod tests {
             }
         }
         match parse_object_or_500(b"{bad").expect_err("malformed") {
-            Denial::BadDetail(message) => assert_eq!(
-                message,
-                "JSON parse error - Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"
+            // Tier 3 since PIDASHCONV-1555: serde's text, not CPython's.
+            Denial::BadDetail(message) => assert!(
+                message.starts_with("JSON parse error - ") && message.len() > 19,
+                "envelope + serde text, got {message:?}"
             ),
             denial => panic!("expected BadDetail, got {denial:?}"),
         }
@@ -8165,9 +8166,10 @@ mod tests {
     #[test]
     fn negotiated_json_text_empty_is_eof() {
         match parse_body_value_text_spans(b"", &[]).expect_err("decoded-empty 400s") {
-            Denial::BadDetail(message) => assert_eq!(
-                message,
-                "JSON parse error - Expecting value: line 1 column 1 (char 0)"
+            // Tier 3 since PIDASHCONV-1555: serde's EOF text, not CPython's.
+            Denial::BadDetail(message) => assert!(
+                message.starts_with("JSON parse error - ") && message.len() > 19,
+                "envelope + serde text, got {message:?}"
             ),
             denial => panic!("expected BadDetail, got {denial:?}"),
         }
@@ -8338,18 +8340,19 @@ mod tests {
         assert_eq!(rendered(br#"["a'b\"c"]"#), "['a\\'b\"c']");
         assert_eq!(rendered(b"[\"\\u0001\"]"), "['\\x01']");
         assert_eq!(rendered(r#"["é"]"#.as_bytes()), "['é']");
-        // Nested surrogates repr-escape (clean output); top-level ones
-        // stay raw for the renderer-crash rule.
-        let nested = parse_body_value(b"[\"\\ud800\"]").expect("nested surrogate");
-        assert_eq!(
-            py_repr(&nested)
-                .expect("shallow")
-                .to_clean_string()
-                .expect("nested escapes clean"),
-            "['\\ud800']"
-        );
-        let top = parse_body_value(b"\"\\ud800\"").expect("top surrogate");
-        assert!(py_repr(&top).expect("shallow").to_clean_string().is_none());
+        // Tier 3 since PIDASHCONV-1555: lone surrogates are a 400 at
+        // parse now (were accepted, with repr-escape / renderer-crash
+        // arms downstream).
+        for raw in [b"[\"\\ud800\"]".as_slice(), b"\"\\ud800\""] {
+            assert!(
+                matches!(
+                    parse_body_value(raw),
+                    Err(Denial::BadDetail(message))
+                        if message.starts_with("JSON parse error - ")
+                ),
+                "{raw:?}: surrogate JSON 400s"
+            );
+        }
     }
 
     #[test]
@@ -8434,23 +8437,19 @@ mod tests {
                 .body,
             r#"["Null characters are not allowed."]"#
         );
-        // Lone surrogates fail the surrogate validator with the code point.
-        let dirty = parse_body_value(b"\"\\ud800\"").expect("dirty value");
-        assert_eq!(
-            coerce_char(Some(&dirty), false, false, Some(255))
-                .expect_err("surrogate")
-                .body,
-            r#"["Surrogate characters are not allowed: U+D800."]"#
-        );
-        // Validators collect: a long dirty name answers both messages.
-        let both = format!("\"{}\\ud800\"", "n".repeat(300));
-        let both = parse_body_value(both.as_bytes()).expect("long dirty");
-        assert_eq!(
-            coerce_char(Some(&both), false, false, Some(255))
-                .expect_err("collect")
-                .body,
-            r#"["Ensure this field has no more than 255 characters.","Surrogate characters are not allowed: U+D800."]"#
-        );
+        // Tier 3 since PIDASHCONV-1555: lone surrogates are a 400 at
+        // parse now (were validator 400s after an accepting parse).
+        let long_dirty = format!("\"{}\\ud800\"", "n".repeat(300));
+        for raw in [b"\"\\ud800\"".as_slice(), long_dirty.as_bytes()] {
+            assert!(
+                matches!(
+                    parse_body_value(raw),
+                    Err(Denial::BadDetail(message))
+                        if message.starts_with("JSON parse error - ")
+                ),
+                "{raw:?}: surrogate JSON 400s"
+            );
+        }
     }
 
     #[test]
@@ -8486,22 +8485,19 @@ mod tests {
                 .expect("ok"),
             Some("planned".to_owned())
         );
-        // A top-level dirty string echoes raw into the choice message,
-        // which crashes the renderer (the oracle's plain 500); only nested
-        // members repr-escape into a clean 400.
-        let dirty = parse_body_value(b"\"\\ud800\"").expect("dirty value");
-        assert!(matches!(
-            coerce_choice(Some(&dirty), &choices),
-            Err(Denial::RendererCrash)
-        ));
-        let nested = parse_body_value(b"[\"\\ud800\"]").expect("nested dirty");
-        assert_eq!(
-            coerce_choice(Some(&nested), &choices)
-                .expect("shallow")
-                .expect_err("nested")
-                .body,
-            r#"["\"['\\ud800']\" is not a valid choice."]"#
-        );
+        // Tier 3 since PIDASHCONV-1555: lone surrogates are a 400 at
+        // parse now (were renderer-crash 500s top-level and repr-escaped
+        // 400s nested).
+        for raw in [b"\"\\ud800\"".as_slice(), b"[\"\\ud800\"]"] {
+            assert!(
+                matches!(
+                    parse_body_value(raw),
+                    Err(Denial::BadDetail(message))
+                        if message.starts_with("JSON parse error - ")
+                ),
+                "{raw:?}: surrogate JSON 400s"
+            );
+        }
     }
 
     #[test]
@@ -9441,16 +9437,37 @@ mod tests {
 
     #[test]
     fn json_value_eq_deep_survives_small_stack() {
-        // The add-path dedupe runs on RAW values, which may nest to the
-        // 9939 cap: the comparison must not recurse (a recursive walk
-        // aborts the 2MB worker).
+        // The add-path dedupe comparison must not recurse (a recursive
+        // walk aborts the 2MB worker). Values are built programmatically:
+        // serde 400s 9938-deep parses since PIDASHCONV-1555 (tier 3).
         let deep = format!("{}1{}", "[".repeat(9938), "]".repeat(9938));
-        let left = parse_body_value(deep.as_bytes()).expect("left");
-        let right = parse_body_value(deep.as_bytes()).expect("right");
+        assert!(
+            matches!(
+                parse_body_value(deep.as_bytes()),
+                Err(Denial::BadDetail(message))
+                    if message.starts_with("JSON parse error - ")
+            ),
+            "9938-deep JSON 400s"
+        );
+        fn nest(depth: usize) -> JVal {
+            let mut value = JVal::Num(JNum::int("1".to_owned()));
+            for _ in 0..depth {
+                value = JVal::Array(vec![value]);
+            }
+            value
+        }
+        let left = nest(5000);
+        let right = nest(5000);
         let shallow = parse_body_value(b"[1]").expect("shallow");
-        let (equal, unequal) = std::thread::Builder::new()
+        // Values move back out so the deep drops land on the main test
+        // stack, not the 2MB probe stack.
+        let (equal, unequal, _left, _right, _shallow) = std::thread::Builder::new()
             .stack_size(2 * 1024 * 1024)
-            .spawn(move || (json_value_eq(&left, &right), json_value_eq(&left, &shallow)))
+            .spawn(move || {
+                let equal = json_value_eq(&left, &right);
+                let unequal = json_value_eq(&left, &shallow);
+                (equal, unequal, left, right, shallow)
+            })
             .expect("spawn")
             .join()
             .expect("no stack overflow");

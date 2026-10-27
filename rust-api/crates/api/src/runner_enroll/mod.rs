@@ -309,21 +309,19 @@ mod tests {
         assert_eq!(py_strip("  x "), "x");
     }
 
-    /// The clean variant additionally 500s on surrogate-carrying strings
-    /// (Django's `UnicodeEncodeError` at the Postgres encode).
+    /// Tier 3 since PIDASHCONV-1555: lone surrogates are a 400 at
+    /// parse now, so no dirty value reaches the strip helpers (the
+    /// clean-vs-lossy split is dead; both strip clean text identically).
     #[test]
     fn or_empty_clean_rejects_surrogates() {
-        let dirty = parse_body("{\"v\": \"a\\ud800b\"}");
-        let response = or_empty_clean(data_get(&dirty, "v").expect("get")).expect_err("500s");
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        // ...while the lossy variant flows through (compared positions).
-        assert_eq!(
-            or_empty_lossy(data_get(&dirty, "v").expect("get")).expect("lossy"),
-            "a\u{fffd}b"
-        );
+        assert!(json::parse_request_bytes(b"{\"v\": \"a\\ud800b\"}").is_err());
         let clean = parse_body(r#"{"v": "  ok  "}"#);
         assert_eq!(
             or_empty_clean(data_get(&clean, "v").expect("get")).expect("clean"),
+            "ok"
+        );
+        assert_eq!(
+            or_empty_lossy(data_get(&clean, "v").expect("get")).expect("lossy"),
             "ok"
         );
     }

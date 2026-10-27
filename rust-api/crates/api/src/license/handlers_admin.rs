@@ -2816,10 +2816,14 @@ mod tests {
         // Empty body is `{}` without parsing (DRF `_parse`: stream None).
         let empty = parse_json_body(&json_headers(), b"", 5_242_880).expect("empty is {}");
         assert_eq!(empty.value(), &serde_json::json!({}));
-        // Blank bodies are DRF `ParseError` with the CPython message.
+        // Blank bodies are DRF `ParseError` (tier 3: serde text).
         let err = parse_json_body(&json_headers(), b"   ", 5_242_880).expect_err("blank body 400s");
-        let (_, body) = err.status_and_body();
-        assert!(body.contains("column 4 (char 3)"), "{body}");
+        let (status, body) = err.status_and_body();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            body.starts_with("{\"detail\":\"JSON parse error - "),
+            "{body}"
+        );
         // Non-JSON content-type with a body is 415.
         let mut plain = HeaderMap::new();
         plain.insert(header::CONTENT_TYPE, "text/plain".parse().unwrap());
@@ -2863,9 +2867,9 @@ mod tests {
             parse_json_body(&json_headers(), b"{bad}", 5_242_880).expect_err("malformed 400s");
         let (status, body) = err.status_and_body();
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(
-            body,
-            r#"{"detail":"JSON parse error - Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"}"#
+        assert!(
+            body.starts_with("{\"detail\":\"JSON parse error - "),
+            "envelope + serde text, got {body:?}"
         );
         // Non-UTF-8 is a codec `ParseError` 400 (DRF catches `ValueError`,
         // which includes `UnicodeDecodeError`), not a 500.

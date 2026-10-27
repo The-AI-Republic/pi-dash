@@ -6003,12 +6003,15 @@ mod tests {
             parse_post_data(&headers_len("text/plain", raw.len()), raw),
             Err(Denial::UnsupportedMediaType(_))
         ));
-        // Strict constants reject.
+        // Strict constants reject (tier 3: serde text, not the strict text).
         let raw = b"{\"size\": NaN}";
         let err =
             parse_post_data(&headers_len("application/json", raw.len()), raw).expect_err("nan");
         match err {
-            Denial::BadDetail(detail) => assert!(detail.contains("not JSON compliant"), "{detail}"),
+            Denial::BadDetail(detail) => assert!(
+                detail.starts_with("JSON parse error - "),
+                "envelope + serde text, got {detail:?}"
+            ),
             other => panic!("{other:?}"),
         }
         // Urlencoded forms parse to text.

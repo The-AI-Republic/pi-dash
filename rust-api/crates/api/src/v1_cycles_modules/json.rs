@@ -495,7 +495,13 @@ fn from_serde(value: serde_json::Value) -> JVal {
         serde_json::Value::Bool(flag) => JVal::Bool(flag),
         serde_json::Value::Number(number) => {
             let text = number.to_string();
-            if number.is_f64() {
+            // Grammatical float bit (fraction or exponent present), like
+            // the old scanner: serde's is_f64() is false for overflow
+            // floats (1e400) that the grammar still calls floats, and
+            // to_string() normalizes float spellings (5e3 -> 5e+3) while
+            // every JNum method behaves identically on either spelling.
+            let is_float = text.bytes().any(|b| b == b'.' || b == b'e' || b == b'E');
+            if is_float {
                 JVal::Num(JNum::float(text))
             } else {
                 JVal::Num(JNum::int(text))
@@ -798,6 +804,13 @@ mod tests {
         let exp = object.get("e").expect("e");
         let JVal::Num(exp) = exp else { panic!("exp") };
         assert!(exp.is_float());
+        // Overflow floats stay floats (serde's is_f64 is false for them).
+        let over = parse_request_bytes(b"1e400").expect("overflow float");
+        let JVal::Num(over) = &over else {
+            panic!("num")
+        };
+        assert!(over.is_float());
+        assert_eq!(over.py_string(), "inf");
         // Saturating floats and -0 folding still hold.
         assert_eq!(JNum::float("1e400".to_owned()).py_string(), "inf");
         assert_eq!(JNum::int("-0".to_owned()).py_string(), "0");
