@@ -2266,7 +2266,10 @@ export class WebNewDriver implements ParityDriver {
       .locator('a[data-row-anchor="true"]')
       .filter({ hasText: issueName });
     if ((await scoped.count()) > 0) return scoped;
-    return this.page.locator('a[data-row-anchor="true"]').filter({ hasText: issueName });
+    const pageWide = this.page.locator('a[data-row-anchor="true"]').filter({ hasText: issueName });
+    if ((await pageWide.count()) > 0) return pageWide;
+    // Calendar blocks carry issue ids but no row anchors (ISS-133).
+    return this.page.locator('a[id^="issue-"]').filter({ hasText: issueName });
   }
 
   async openRowMenuEntry(issueName: string, entry: string): Promise<void> {
@@ -2661,27 +2664,38 @@ export class WebNewDriver implements ParityDriver {
     return this.createDialog().locator("form").getByRole("button").first();
   }
 
-  async hoverCardRead(_issueName: string): Promise<{ text: string; priorityIcon: string; dateColor: string }> {
+  async hoverCardRead(issueName: string): Promise<{ text: string; priorityIcon: string; dateColor: string }> {
+    const empty = { text: "", priorityIcon: "", dateColor: "" };
+    // Mirror the oracle: hover the row (or calendar block) first. A
+    // failed hover propagates; only a successful hover with no card
+    // (undated rows) reports empty fields.
+    await this.hoverIssueRow(issueName);
     // The card names the record in its key, title and state, so one open
     // card is the read: no per-name scoping that a redesign could break.
     const card = this.page.getByTestId("work-item-preview").first();
-    if ((await card.count()) === 0) return { text: "", priorityIcon: "", dateColor: "" };
+    if ((await card.count()) === 0) return empty;
     const waited = await card
       .waitFor({ state: "visible", timeout: 15_000 })
       .then(() => true)
       .catch(() => false);
-    if (!waited) return { text: "", priorityIcon: "", dateColor: "" };
-    return card.evaluate((element: HTMLElement) => {
-      const text = (element.textContent ?? "").replace(/\s+/g, " ").trim();
-      const glyph = element.querySelector('[data-testid="preview-card-priority"] svg');
-      const priorityIcon = (glyph?.getAttribute("class") ?? "")
-        .split(/\s+/)
-        .filter((name) => name.startsWith("lucide-") && name !== "lucide")
-        .join(" ");
-      const dates = element.querySelector('[data-testid="preview-card-dates"]');
-      const dateColor = dates === null ? "" : getComputedStyle(dates).color;
-      return { text, priorityIcon, dateColor };
-    });
+    if (!waited) return empty;
+    try {
+      return await card.evaluate((element: HTMLElement) => {
+        const text = (element.textContent ?? "").replace(/\s+/g, " ").trim();
+        const glyph = element.querySelector('[data-testid="preview-card-priority"] svg');
+        const priorityIcon = (glyph?.getAttribute("class") ?? "")
+          .split(/\s+/)
+          .filter((name) => name.startsWith("lucide-") && name !== "lucide")
+          .join(" ");
+        const dates = element.querySelector('[data-testid="preview-card-dates"]');
+        const dateColor = dates === null ? "" : getComputedStyle(dates).color;
+        return { text, priorityIcon, dateColor };
+      });
+    } finally {
+      // Close the popover so an open card never covers the next hover
+      // target; a missing card leaves nothing to close.
+      await this.page.keyboard.press("Escape").catch(() => undefined);
+    }
   }
 
   async modalTabOrder(): Promise<string[]> {

@@ -490,3 +490,60 @@ describe("web_new calendar month picker", () => {
     expect(clicks).toEqual(["title"]);
   });
 });
+
+describe("web_new hover card reads", () => {
+  function hoverPage(
+    opts: { region: number; wide: number; blocks: number; cardText: string | null },
+    seen: string[]
+  ): PageStub {
+    const stub = pageOf({
+      role: () =>
+        locator({
+          locator: () => locator({ count: async () => opts.region, hover: async () => void seen.push("row") }),
+        }),
+      locator: (selector: string) => {
+        if (selector === 'a[data-row-anchor="true"]') {
+          return locator({ count: async () => opts.wide, hover: async () => void seen.push("wide") });
+        }
+        if (selector === 'a[id^="issue-"]') {
+          return locator({ count: async () => opts.blocks, hover: async () => void seen.push("block") });
+        }
+        return locator();
+      },
+    });
+    const card =
+      opts.cardText === null
+        ? locator({ count: async () => 0 })
+        : locator({
+            evaluate: async () => ({ text: opts.cardText, priorityIcon: "circle-alert", dateColor: "red" }),
+          });
+    (stub.page as unknown as Record<string, unknown>).getByTestId = () => card;
+    return stub;
+  }
+
+  it("hovers the row anchor, reads the open card, and dismisses it", async () => {
+    const seen: string[] = [];
+    const { page, keys } = hoverPage({ region: 1, wide: 0, blocks: 0, cardText: "PAR-1 Range issue" }, seen);
+    const card = await new WebNewDriver(page).hoverCardRead("Range issue");
+    expect(card.text).toBe("PAR-1 Range issue");
+    expect(seen).toEqual(["row"]);
+    expect(keys).toEqual(["Escape"]);
+  });
+
+  it("falls back to calendar blocks when no row anchor matches", async () => {
+    const seen: string[] = [];
+    const { page } = hoverPage({ region: 0, wide: 0, blocks: 1, cardText: "PAR-1 Range issue" }, seen);
+    const card = await new WebNewDriver(page).hoverCardRead("Range issue");
+    expect(card.text).toBe("PAR-1 Range issue");
+    expect(seen).toEqual(["block"]);
+  });
+
+  it("reports empty fields and skips the dismiss when the hover opens no card", async () => {
+    const seen: string[] = [];
+    const { page, keys } = hoverPage({ region: 1, wide: 0, blocks: 0, cardText: null }, seen);
+    const card = await new WebNewDriver(page).hoverCardRead("Undated issue");
+    expect(card).toEqual({ text: "", priorityIcon: "", dateColor: "" });
+    expect(seen).toEqual(["row"]);
+    expect(keys).toEqual([]);
+  });
+});
