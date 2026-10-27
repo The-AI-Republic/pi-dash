@@ -1617,6 +1617,27 @@ describe("WebNewDriver labels tab list and form", () => {
     expect(stub.pageObject.goto).toHaveBeenCalledWith("/acme/settings/projects/p1/labels");
   });
 
+  it("settles heading-only by default and awaits rows only on opt-in", async () => {
+    const plain = generalSettingsPageDouble({
+      locator: () => new GeneralFakeLocator(),
+      role: () => new GeneralFakeLocator(),
+    });
+    await new WebNewDriver(plain.page).settingsLabelsOpen("acme", "p1");
+    const roles = plain.pageObject.getByRole.mock.calls.map((call) => call[0]);
+    expect(roles).not.toContain("list");
+    expect(plain.pageObject.getByText).not.toHaveBeenCalled();
+
+    const eager = generalSettingsPageDouble({
+      locator: () => new GeneralFakeLocator(),
+      role: () => new GeneralFakeLocator(),
+      text: () => new GeneralFakeLocator(),
+    });
+    await new WebNewDriver(eager.page).settingsLabelsOpen("acme", "p1", { awaitRows: true });
+    const eagerRoles = eager.pageObject.getByRole.mock.calls.map((call) => call[0]);
+    expect(eagerRoles).toContain("list");
+    expect(eager.pageObject.getByText).toHaveBeenCalledWith("No labels yet", { exact: true });
+  });
+
   it("reads names in DOM order and matches rows exactly", async () => {
     const rows = new GeneralFakeLocator({
       items: [labelRowDouble("beta", false), labelRowDouble("alphabet", false)],

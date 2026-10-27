@@ -5799,6 +5799,9 @@ export class WebNewDriver implements ParityDriver {
     // nest their children, so match the row whose own name span reads
     // exactly: the group header's span precedes its children in the DOM.
     const rows = this.page.locator('[data-testid="label-row"]');
+    // Open settles on the heading while the list still loads, so every
+    // row read waits for the first row itself.
+    await rows.first().waitFor({ timeout: 30_000 });
     const total = await rows.count();
     for (let i = 0; i < total; i++) {
       const row = rows.nth(i);
@@ -5840,7 +5843,10 @@ export class WebNewDriver implements ParityDriver {
       settle(this.page.getByRole("heading", { name: /don.t have access/i }).first()),
     ]);
     if (!settled) throw new Error("[parity] labels settings settled on neither the list nor the denial view.");
-    if ((await listSettled) && options.awaitRows !== false) {
+    // Heading-only by default, like the oracle: the skeleton scenario
+    // needs Open to return while the list still loads. Row readers wait
+    // for their own rows, so only explicit opt-ins await them here.
+    if ((await listSettled) && options.awaitRows === true) {
       // The heading paints before the labels query resolves; the skeleton
       // occupies the list slot until rows or the empty state replace it.
       await Promise.race([
@@ -6000,7 +6006,10 @@ export class WebNewDriver implements ParityDriver {
     // the whole flow. Center drops nest; near-top drops slot above.
     const row = await this.labelsRowByName(source);
     await row.scrollIntoViewIfNeeded();
-    await row.hover({ timeout: 30_000 });
+    // Hover the row's own slot: a group row's box spans its nested
+    // children, so hovering the row lands on a child and the group
+    // handle never reveals.
+    await row.locator("div[data-label-slot]").first().hover({ timeout: 30_000 });
     const handle = row.getByTestId("label-drag-handle").first();
     await handle.waitFor({ timeout: 30_000 });
     const from = await handle.boundingBox();
@@ -6067,16 +6076,44 @@ export class WebNewDriver implements ParityDriver {
     await this.page.route("**/api/workspaces/*/labels/", hold);
   }
 
+  /** The open issue picker lists project labels with no listbox role. */
+  private issueLabelOptions(): Locator {
+    return this.page.locator('ul[aria-label="Project labels"]').getByTestId("label-picker-option");
+  }
+
   async issueLabelsOpenPicker(): Promise<void> {
-    return todo("issueLabelsOpenPicker");
+    await this.propertyTrigger("Labels").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByTestId("label-picker-search").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    // Either an option or the empty note proves the list settled; the
+    // empty project would hang an option-only wait.
+    const option = this.issueLabelOptions().first();
+    const empty = this.page.getByTestId("label-picker-empty").first();
+    await option.or(empty).waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async issueLabelsOptionTexts(): Promise<string[]> {
-    return todo("issueLabelsOptionTexts");
+    // Options pair an aria-hidden color dot with the name span, so the
+    // button text is the name alone.
+    const texts = await this.issueLabelOptions().allInnerTexts();
+    return texts.map((text) => text.trim()).filter((text) => text.length > 0);
   }
 
   async issueLabelsRowText(): Promise<string> {
-    return todo("issueLabelsRowText");
+    const row = this.propertyRow("Labels");
+    await row.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    // The trigger shows a count ("1 selected"); the names render on the
+    // chips once the labels list lands, so wait for the chips when the
+    // count promises them. Stale ids render no chips and read as the
+    // bare count after the wait expires.
+    const selected = /(\d+)\s+selected/.exec((await row.innerText().catch(() => "")) ?? "");
+    if (selected !== null && Number(selected[1]) > 0) {
+      await this.page
+        .locator('ul[aria-label="Selected labels"]')
+        .first()
+        .waitFor({ timeout: WebNewDriver.WAIT_MS })
+        .catch(() => {});
+    }
+    return ((await row.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
   }
 
   async settingsLabelsNameValue(): Promise<string> {
