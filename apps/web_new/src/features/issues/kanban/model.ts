@@ -502,7 +502,12 @@ export function reconcileLabelGhosts(board: BoardData, fallback: BoardData): Boa
     recovered.set(column.key, { rows: missing, unlabeled: unlabeled.length, total: fallbackCell.total });
   }
   if (recovered.size === 0) return board;
-  const columns = candidates.map((column) => {
+  // A column only the fallback read knows joins the board when it actually
+  // recovered a row; otherwise it would carry a count with no cards.
+  const columns = [
+    ...board.columns,
+    ...fallback.columns.filter((column) => !known.has(column.key) && recovered.has(column.key)),
+  ].map((column) => {
     const entry = recovered.get(column.key);
     return entry === undefined ? column : { ...column, total: entry.total };
   });

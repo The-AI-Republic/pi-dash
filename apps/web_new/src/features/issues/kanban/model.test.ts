@@ -445,6 +445,28 @@ describe("label ghost reconciliation (ISS-031/NEWFRONT-158)", () => {
     expect(result.total).toBe(2);
   });
 
+  it("does not add a fallback-only column that recovered nothing", () => {
+    const second = "623e4567-e89b-12d3-a456-426614174005";
+    const board = subGroupedBoard(subGrouped({ [STATE]: { None: { rows: [row({ id: "plain" })], total: 1 } } }), {
+      groupDimension: "state",
+      subDimension: "labels",
+      groupLabels: labels,
+      subLabels: labels,
+      showEmpty: true,
+    });
+    const fallback = groupedBoard(
+      grouped({
+        [STATE]: { rows: [row({ id: "plain" }), row({ id: "ghost" })], total: 2 },
+        [second]: { rows: [row({ id: "kept-2", state_id: second, label_ids: [LABEL] })], total: 1 },
+      }),
+      { dimension: "state", labels: new Map([...labels, [second, "Done"]]), showEmpty: true }
+    );
+    const result = reconcileLabelGhosts(board, fallback);
+    expect(result.columns.map((column) => [column.key, column.total])).toEqual([[STATE, 2]]);
+    expect(result.lanes.map((lane) => [lane.key, lane.total])).toEqual([["None", 2]]);
+    expect(result.total).toBe(2);
+  });
+
   it("waits for every lane's column window before recovering", () => {
     const ghost = row({ id: "ghost" });
     const plain = row({ id: "plain" });
