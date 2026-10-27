@@ -3684,7 +3684,10 @@ export class WebNewDriver implements ParityDriver {
     return await field.first().inputValue();
   }
   async peekIdentifier(): Promise<string | null> {
-    return todo("peekIdentifier");
+    const preview = this.page.getByTestId("issue-preview").first();
+    const id = preview.getByRole("button", { name: /^[A-Z0-9]{2,}-\d+$/ }).first();
+    if ((await id.count()) === 0) return null;
+    return ((await id.innerText()) ?? "").trim();
   }
   async closePeek(): Promise<void> {
     // The panel shell decorates its close control by accessible name, so
@@ -3693,7 +3696,8 @@ export class WebNewDriver implements ParityDriver {
     await this.page.getByTestId("issue-preview").waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
   }
   async peekCloseVisible(): Promise<boolean> {
-    return todo("peekCloseVisible");
+    const preview = this.page.getByTestId("issue-preview").first();
+    return this.isShown(preview.getByRole("button", { name: "Close preview" }));
   }
   async clickListRow(name: string): Promise<void> {
     // Any visible row that names the work item: the issues list rows are
@@ -3705,23 +3709,57 @@ export class WebNewDriver implements ParityDriver {
     await row.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
     await row.click({ timeout: WebNewDriver.WAIT_MS });
   }
-  async setPeekMode(_mode: string): Promise<void> {
-    return todo("setPeekMode");
+  async setPeekMode(mode: string): Promise<void> {
+    const preview = this.page.getByTestId("issue-preview").first();
+    await preview.getByTestId("peek-mode-trigger").first().click({ timeout: WebNewDriver.WAIT_MS });
+    // The labels title-case "screen" ("Full screen") while the scenario
+    // says "Full Screen"; match either.
+    const item = this.page.getByRole("menuitem", { name: new RegExp(`^${escapeRegExp(mode)}$`, "i") }).first();
+    await item.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("menuitem").first().waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
   async peekPanelBox(): Promise<{ x: number; y: number; width: number; height: number } | null> {
-    return todo("peekPanelBox");
+    const panel = this.page.getByTestId("issue-preview").first();
+    if ((await panel.count()) === 0) return null;
+    const box = await panel.boundingBox().catch(() => null);
+    if (!box) return null;
+    return { x: box.x, y: box.y, width: box.width, height: box.height };
   }
   async copyPeekLink(): Promise<void> {
-    return todo("copyPeekLink");
+    const preview = this.page.getByTestId("issue-preview").first();
+    await preview
+      .getByRole("button", { name: "Copy work item link", exact: true })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
   async peekFullScreenHref(): Promise<string | null> {
-    return todo("peekFullScreenHref");
+    const link = this.page.getByTestId("peek-fullscreen-link").first();
+    if ((await link.count()) === 0) return null;
+    return link.getAttribute("href").catch(() => null);
   }
   async peekQuickActionNames(): Promise<string[]> {
-    return todo("peekQuickActionNames");
+    const preview = this.page.getByTestId("issue-preview").first();
+    const trigger = preview.getByTestId("detail-menu-trigger").first();
+    const visibleItems = this.page.locator('[role="menuitem"]:visible');
+    for (let attempt = 0; ; attempt++) {
+      await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+      try {
+        await visibleItems.first().waitFor({ timeout: 5000 });
+        break;
+      } catch {
+        if (attempt >= 2) throw new Error("[parity] peek quick-action menu did not open.");
+      }
+    }
+    const names = (await visibleItems.allTextContents()).map((t) => t.trim()).filter((t) => t.length > 0);
+    await this.page.keyboard.press("Escape").catch(() => {});
+    return names;
   }
   async peekErrorTitle(): Promise<string | null> {
-    return todo("peekErrorTitle");
+    const preview = this.page.getByTestId("issue-preview").first();
+    if ((await preview.count()) === 0) return null;
+    const text = ((await preview.innerText().catch(() => "")) ?? "").trim();
+    const match = /Work item does not exist/.exec(text);
+    return match ? match[0] : null;
   }
   async widgetTitles(): Promise<string[]> {
     // Section titles are the headers this slice and the sub-issues root
