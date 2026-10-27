@@ -1,19 +1,25 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Collaboration session (parity/specs/pages.md §8.4, §8.6, PAGE-067,
-// PAGE-069). One backend, one retry schedule, one walk through the
-// reconnect machine: the socket dials on its own backoff, frames route
-// to the realtime seams, and a terminal disconnect with an empty cache
-// fetches the binary fallback. Every redial kills the stale socket
-// first; a close that arrives late for a killed dial counts as one more
-// failed attempt, which only shortens the invisible retry budget.
+// Collaboration session (parity/specs/pages.md §2.3, §8.4, §8.6,
+// PAGE-058, PAGE-067, PAGE-069). One backend, one retry schedule, one
+// walk through the reconnect machine: the socket dials on its own
+// backoff, frames route to the realtime seams, and a terminal
+// disconnect with an empty cache fetches the binary fallback. Every
+// redial kills the stale socket first; a close that arrives late for a
+// killed dial counts as one more failed attempt, which only shortens
+// the invisible retry budget. Local lock events forward over the socket
+// so peers freeze, and peers' lock events land on the caches.
 
 import { getPageDescriptionBinary } from "@pidash/api-client";
+import { useQueryClient } from "@tanstack/react-query";
 import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
+import { getRealtimeHub, type RealtimeEvent } from "../../../core/query/realtime.js";
 import { notifyError } from "../../../shared/shell/toaster.js";
+import { pageKeys } from "../api/keys.js";
+import { PAGES_REALTIME_TOPIC } from "../api/rowMutations.js";
 import {
   createPageLiveBackend,
   PAGE_LIVE_BODY_FIELD,
@@ -24,6 +30,15 @@ import {
 import { PAGE_CONTENT_TOO_LARGE, reportPageRealtimeError } from "./pageRealtimeErrors.js";
 import { pageLiveCloseKind, parsePageLivePayload, type PageLiveCloseKind } from "./pageLiveFrames.js";
 import { liveCursorColor, liveIdentityToken, type PageLiveUser } from "./pageLiveIdentity.js";
+import {
+  applyPageLiveProperty,
+  clearPageLivePropertyEchoes,
+  notePageLivePropertySent,
+  pageLivePropertyWire,
+  parsePageLiveProperty,
+  takePageLivePropertyEcho,
+  type PageLivePropertyEvent,
+} from "./pageLivePropertyEvents.js";
 import {
   nextPageLiveStage,
   PAGE_LIVE_CONNECT_TIMEOUT_MS,
@@ -60,6 +75,8 @@ export interface PageLiveSessionDeps {
   pageId: string;
   backend: PageLiveBackend;
   fetchBinary: () => Promise<Uint8Array>;
+  /** A peer's property event, echo-free; absent in tests that ignore it. */
+  onPropertyEvent?: ((event: PageLivePropertyEvent) => void) | undefined;
 }
 
 /**
@@ -79,6 +96,8 @@ export function createPageLiveSession(deps: PageLiveSessionDeps): PageLiveSessio
   let retryTimer: ReturnType<typeof setTimeout> | null = null;
   let connectTimer: ReturnType<typeof setTimeout> | null = null;
   let lastNotice = "";
+  let socketOpen = false;
+  let outbox: PageLivePropertyEvent | null = null;
   let stoppers: Array<() => void> = [];
   const listeners = new Set<() => void>();
 
@@ -194,16 +213,47 @@ export function createPageLiveSession(deps: PageLiveSessionDeps): PageLiveSessio
     }, pageLiveRetryDelayMs(retriesUsed));
   };
 
+  const sendProperty = (property: PageLivePropertyEvent): void => {
+    notePageLivePropertySent(pageId, property);
+    backend.connection.sendStateless(pageLivePropertyWire(property));
+  };
+
+  const forwardProperty = (incoming: RealtimeEvent): void => {
+    const payload = incoming.payload;
+    if (typeof payload !== "object" || payload === null) return;
+    const record = payload as { pageId?: unknown; event?: unknown };
+    if (record.pageId !== pageId || typeof record.event !== "string") return;
+    const property = parsePageLiveProperty(record.event);
+    if (property === null) return;
+    if (!socketOpen) {
+      // The socket is not up yet (or again): only the latest state
+      // matters, so one slot holds it until the next open.
+      outbox = property;
+      return;
+    }
+    sendProperty(property);
+  };
+
   const handleOpen = (): void => {
     // A socket that opens proves the network is back: past drops stop
     // counting against the retry budget (PAGE-067).
     retriesUsed = 0;
     clearConnect();
+    socketOpen = true;
+    if (outbox !== null) {
+      const queued = outbox;
+      outbox = null;
+      sendProperty(queued);
+    }
     transition({ type: "opened" });
   };
 
   const handleClose = (code: number): void => {
     clearConnect();
+    socketOpen = false;
+    // Echoes for pre-drop sends never arrive — the next socket gets no
+    // replay — so pending expectations would only swallow peers' actions.
+    clearPageLivePropertyEchoes(pageId);
     handleDrop(pageLiveCloseKind(code));
   };
 
@@ -227,6 +277,12 @@ export function createPageLiveSession(deps: PageLiveSessionDeps): PageLiveSessio
   };
 
   const handleStateless = (payload: string): void => {
+    const property = parsePageLiveProperty(payload);
+    if (property !== null) {
+      if (takePageLivePropertyEcho(pageId, property)) return;
+      deps.onPropertyEvent?.(property);
+      return;
+    }
     const inbound = parsePageLivePayload(payload, pageId);
     if (inbound === null || inbound.kind === "force-close") return;
     const error = inbound.error;
@@ -283,7 +339,8 @@ export function createPageLiveSession(deps: PageLiveSessionDeps): PageLiveSessio
         backend.connection.onClose(handleClose),
         backend.connection.onSynced(handleSynced),
         backend.connection.onStateless(handleStateless),
-        backend.connection.onAuthFailed(handleAuthFailed)
+        backend.connection.onAuthFailed(handleAuthFailed),
+        getRealtimeHub().subscribe(PAGES_REALTIME_TOPIC, forwardProperty)
       );
       dial();
     },
@@ -292,6 +349,7 @@ export function createPageLiveSession(deps: PageLiveSessionDeps): PageLiveSessio
       destroyed = true;
       clearRetry();
       clearConnect();
+      clearPageLivePropertyEchoes(pageId);
       for (const stop of stoppers) stop();
       stoppers = [];
     },
@@ -392,10 +450,21 @@ export function usePageLiveSession(options: UsePageLiveSessionOptions): PageLive
   const { workspaceSlug, projectId, pageId, user, enabled } = options;
   const userId = user?.id ?? null;
   const userName = user?.name ?? "";
+  const queryClient = useQueryClient();
   const loadRef = React.useRef(options.loadBackend);
   loadRef.current = options.loadBackend;
   const fetchRef = React.useRef(options.fetchBinary);
   fetchRef.current = options.fetchBinary;
+  const propertyRef = React.useRef<(event: PageLivePropertyEvent) => void>(() => undefined);
+  propertyRef.current = (event) => {
+    applyPageLiveProperty(
+      queryClient,
+      pageKeys.detail(workspaceSlug, projectId, pageId),
+      pageKeys.list(workspaceSlug, projectId),
+      pageId,
+      event
+    );
+  };
   const sessionRef = React.useRef<PageLiveSession | null>(null);
 
   const liveKey = `${pageId}:${enabled}:${userId ?? ""}`;
@@ -431,7 +500,12 @@ export function usePageLiveSession(options: UsePageLiveSessionOptions): PageLive
           return;
         }
         backend = ready;
-        const liveSession = createPageLiveSession({ pageId, backend: ready, fetchBinary: readBinary });
+        const liveSession = createPageLiveSession({
+          pageId,
+          backend: ready,
+          fetchBinary: readBinary,
+          onPropertyEvent: (event) => propertyRef.current(event),
+        });
         session = liveSession;
         sessionRef.current = liveSession;
         const sync = (): void => setMount(snapshot(liveSession, ready));

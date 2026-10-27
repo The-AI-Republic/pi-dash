@@ -1052,3 +1052,51 @@ describe("export dialog", () => {
     expect(cancelFake.click).toHaveBeenCalledWith({ timeout: 30_000 });
   });
 });
+
+describe("wait synced", () => {
+  const BODY_SELECTOR = '[aria-label="Page body"][contenteditable="true"]';
+  const READONLY_SELECTOR = '[data-testid="page-detail-title"][data-readonly="true"]';
+
+  function syncedDriver(mounts: { body: boolean; readonly: boolean }): {
+    driver: WebNewDriver;
+    bodyFake: FakeLocator;
+    readonlyFake: FakeLocator;
+  } {
+    const header = at({ getByText: () => empty() });
+    const fail = async (): Promise<void> => {
+      throw new Error("Timeout 30000ms exceeded.");
+    };
+    const bodyFake = new FakeLocator({ count: 1, waitFor: mounts.body ? async () => undefined : fail });
+    const readonlyFake = new FakeLocator({ count: 1, waitFor: mounts.readonly ? async () => undefined : fail });
+    const stub = pageDouble({
+      testIds: { "page-detail-header": header },
+      selectors: {
+        [BODY_SELECTOR]: bodyFake as unknown as Locator,
+        [READONLY_SELECTOR]: readonlyFake as unknown as Locator,
+      },
+    });
+    return { driver: new WebNewDriver(stub.page), bodyFake, readonlyFake };
+  }
+
+  it("settles on the live body editor when it mounts", async () => {
+    const { driver, bodyFake } = syncedDriver({ body: true, readonly: false });
+
+    await expect(driver.pagesLiveWaitSynced()).resolves.toBeUndefined();
+    expect(bodyFake.waitFor).toHaveBeenCalledWith({ state: "visible", timeout: 30_000 });
+  });
+
+  it("settles on the read-only face when no live editor mounts (NEWFRONT-940)", async () => {
+    const { driver, readonlyFake } = syncedDriver({ body: false, readonly: true });
+
+    await expect(driver.pagesLiveWaitSynced()).resolves.toBeUndefined();
+    expect(readonlyFake.waitFor).toHaveBeenCalledWith({ state: "visible", timeout: 30_000 });
+  });
+
+  it("fails loudly when neither face mounts", async () => {
+    const { driver } = syncedDriver({ body: false, readonly: false });
+
+    await expect(driver.pagesLiveWaitSynced()).rejects.toThrow(
+      "pagesLiveWaitSynced: neither the live body editor nor the read-only face mounted within 30000ms"
+    );
+  });
+});

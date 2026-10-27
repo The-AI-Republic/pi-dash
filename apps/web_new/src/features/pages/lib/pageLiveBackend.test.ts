@@ -80,6 +80,7 @@ class FakeProvider extends FakeEmitter {
   config: Record<string, unknown>;
   awareness: Record<string, unknown> = {};
   destroy = vi.fn(() => undefined);
+  sendStateless = vi.fn((_payload: string) => undefined);
 
   constructor(config: Record<string, unknown>) {
     super();
@@ -228,6 +229,16 @@ describe("createPageLiveBackend", () => {
     stop();
     provider?.emit("stateless", { payload: '{"action":"error"}' });
     expect(stateless).toHaveBeenCalledTimes(1);
+  });
+
+  it("sends bare stateless payloads through the provider", async () => {
+    const backend = await createPageLiveBackend(INPUT, stubImporters());
+    const provider = FakeProvider.instances[0];
+
+    backend.connection.sendStateless("lock");
+
+    expect(provider?.sendStateless).toHaveBeenCalledTimes(1);
+    expect(provider?.sendStateless).toHaveBeenCalledWith("lock");
   });
 
   it("drives dials and teardown through the socket", async () => {

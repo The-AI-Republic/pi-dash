@@ -29,6 +29,9 @@ import {
 } from "./pageLiveSession.js";
 import { PAGE_CONTENT_TOO_LARGE, resetPageRealtimeErrors, subscribePageRealtimeErrors } from "./pageRealtimeErrors.js";
 import type { PageLiveBackend } from "./pageLiveBackend.js";
+import { getRealtimeHub, resetRealtimeHub } from "../../../core/query/realtime.js";
+import { PAGES_REALTIME_TOPIC } from "../api/rowMutations.js";
+import { resetPageLivePropertyEchoes } from "./pageLivePropertyEvents.js";
 
 const PAGE_ID = "323e4567-e89b-12d3-a456-426614174002";
 
@@ -49,6 +52,7 @@ interface FakeHarness {
   connect: ReturnType<typeof vi.fn>;
   disconnect: ReturnType<typeof vi.fn>;
   destroyBackend: ReturnType<typeof vi.fn>;
+  sendStateless: ReturnType<typeof vi.fn<(payload: string) => void>>;
   applied: Uint8Array[];
   lengths: Map<string, number>;
   applyBinary: ReturnType<typeof vi.fn<(bytes: Uint8Array) => void>>;
@@ -68,6 +72,7 @@ function fakeHarness(options: { cacheReady?: boolean; lengths?: Map<string, numb
   const connect = vi.fn(async () => undefined);
   const disconnect = vi.fn(() => undefined);
   const destroyBackend = vi.fn(() => undefined);
+  const sendStateless = vi.fn((_payload: string) => undefined);
   const applyBinary = vi.fn((bytes: Uint8Array) => {
     applied.push(bytes);
   });
@@ -103,6 +108,7 @@ function fakeHarness(options: { cacheReady?: boolean; lengths?: Map<string, numb
           frames.delete(listener);
         };
       },
+      sendStateless,
       onAuthFailed: (listener) => {
         authFailures.add(listener);
         return () => {
@@ -148,6 +154,7 @@ function fakeHarness(options: { cacheReady?: boolean; lengths?: Map<string, numb
     connect,
     disconnect,
     destroyBackend,
+    sendStateless,
     applied,
     lengths,
     applyBinary,
@@ -155,14 +162,19 @@ function fakeHarness(options: { cacheReady?: boolean; lengths?: Map<string, numb
   };
 }
 
-function startSession(harness: FakeHarness): PageLiveSession {
+function startSession(harness: FakeHarness, onPropertyEvent?: (event: string) => void): PageLiveSession {
   const session = createPageLiveSession({
     pageId: PAGE_ID,
     backend: harness.backend,
     fetchBinary: harness.fetchBinary,
+    ...(onPropertyEvent === undefined ? {} : { onPropertyEvent }),
   });
   session.start();
   return session;
+}
+
+function publishProperty(pageId: string, event: unknown): void {
+  getRealtimeHub().publish({ topic: PAGES_REALTIME_TOPIC, payload: { pageId, event } });
 }
 
 function errorFrame(overrides: Record<string, unknown> = {}): string {
@@ -182,11 +194,15 @@ function errorFrame(overrides: Record<string, unknown> = {}): string {
 beforeEach(() => {
   vi.useFakeTimers();
   vi.clearAllMocks();
+  resetRealtimeHub();
+  resetPageLivePropertyEchoes();
 });
 
 afterEach(() => {
   vi.useRealTimers();
   resetPageRealtimeErrors();
+  resetRealtimeHub();
+  resetPageLivePropertyEchoes();
 });
 
 describe("createPageLiveSession", () => {
@@ -646,5 +662,112 @@ describe("createPageLiveSession", () => {
     expect(session.getStage()).toEqual({ kind: "initial" });
     expect(session.getCacheEmpty()).toBeNull();
     expect(session.getFallback()).toBe("idle");
+  });
+});
+
+describe("page property events", () => {
+  it("forwards local lock events over the socket once open", () => {
+    const harness = fakeHarness();
+    startSession(harness);
+    harness.open();
+
+    publishProperty(PAGE_ID, "locked");
+    publishProperty(PAGE_ID, "unlocked");
+
+    expect(harness.sendStateless).toHaveBeenCalledTimes(2);
+    expect(harness.sendStateless).toHaveBeenNthCalledWith(1, "lock");
+    expect(harness.sendStateless).toHaveBeenNthCalledWith(2, "unlock");
+  });
+
+  it("holds lock events while the socket is down and flushes the latest on open", () => {
+    const harness = fakeHarness();
+    startSession(harness);
+
+    publishProperty(PAGE_ID, "locked");
+    publishProperty(PAGE_ID, "unlocked");
+    expect(harness.sendStateless).not.toHaveBeenCalled();
+
+    harness.open();
+    expect(harness.sendStateless).toHaveBeenCalledTimes(1);
+    expect(harness.sendStateless).toHaveBeenCalledWith("unlock");
+  });
+
+  it("ignores foreign pages, malformed payloads and non-property events", () => {
+    const harness = fakeHarness();
+    startSession(harness);
+    harness.open();
+    const hub = getRealtimeHub();
+
+    publishProperty("other-page", "locked");
+    hub.publish({ topic: PAGES_REALTIME_TOPIC, payload: null });
+    hub.publish({ topic: PAGES_REALTIME_TOPIC, payload: "locked" });
+    hub.publish({ topic: PAGES_REALTIME_TOPIC, payload: { pageId: PAGE_ID, event: 7 } });
+    publishProperty(PAGE_ID, "archived");
+
+    expect(harness.sendStateless).not.toHaveBeenCalled();
+  });
+
+  it("delivers peers' property events and swallows its own echo", () => {
+    const harness = fakeHarness();
+    const onPropertyEvent = vi.fn();
+    startSession(harness, onPropertyEvent);
+    harness.open();
+
+    harness.stateless("locked");
+    expect(onPropertyEvent).toHaveBeenCalledTimes(1);
+    expect(onPropertyEvent).toHaveBeenCalledWith("locked");
+
+    publishProperty(PAGE_ID, "locked");
+    expect(harness.sendStateless).toHaveBeenCalledWith("lock");
+    harness.stateless("locked");
+    expect(onPropertyEvent).toHaveBeenCalledTimes(1);
+
+    harness.stateless("locked");
+    expect(onPropertyEvent).toHaveBeenCalledTimes(2);
+  });
+
+  it("ignores unknown bare broadcasts without touching the error path", () => {
+    const harness = fakeHarness();
+    const onPropertyEvent = vi.fn();
+    const errors: unknown[] = [];
+    const stop = subscribePageRealtimeErrors((error) => {
+      errors.push(error);
+    });
+    try {
+      startSession(harness, onPropertyEvent);
+
+      harness.stateless("archived");
+      harness.stateless("");
+
+      expect(onPropertyEvent).not.toHaveBeenCalled();
+      expect(errors).toEqual([]);
+      expect(shell.notifyError).not.toHaveBeenCalled();
+    } finally {
+      stop();
+    }
+  });
+
+  it("tolerates property events with no listener attached", () => {
+    const harness = fakeHarness();
+    startSession(harness);
+
+    expect(() => harness.stateless("locked")).not.toThrow();
+  });
+
+  it("drops pending echoes on close and stops forwarding on destroy", () => {
+    const harness = fakeHarness();
+    const onPropertyEvent = vi.fn();
+    const session = startSession(harness, onPropertyEvent);
+    harness.open();
+    publishProperty(PAGE_ID, "locked");
+    expect(harness.sendStateless).toHaveBeenCalledTimes(1);
+
+    harness.close(1006);
+    harness.stateless("locked");
+    expect(onPropertyEvent).toHaveBeenCalledTimes(1);
+
+    session.destroy();
+    publishProperty(PAGE_ID, "unlocked");
+    expect(harness.sendStateless).toHaveBeenCalledTimes(1);
   });
 });

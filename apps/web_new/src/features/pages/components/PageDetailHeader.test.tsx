@@ -356,6 +356,14 @@ describe("PageDetailHeader", () => {
     fireEvent.click(await screen.findByRole("menuitem", { name: PAGE_COPY_MARKDOWN_LABEL }));
     expect(copyMarkdown).toHaveBeenCalledTimes(1);
   });
+
+  it("closes the shelved menu on Escape (NEWFRONT-940)", async () => {
+    renderHeader({ page: { ...page, archived_at: "2026-03-04" } });
+    fireEvent.click(screen.getByRole("button", { name: PAGE_OPTIONS_LABEL }));
+    expect(await screen.findByRole("menuitem", { name: "Restore" })).toBeInTheDocument();
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(screen.queryAllByRole("menuitem")).toEqual([]));
+  });
 });
 
 describe("PageDetailHeader display toggles", () => {

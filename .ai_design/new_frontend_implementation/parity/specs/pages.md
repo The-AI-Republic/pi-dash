@@ -159,7 +159,11 @@ pages the guest does not own land on the not-found panel (§4.2).
 - **Lock** is the boolean `is_locked`. Locking is optimistic on the client
   with rollback and a notice on failure; the transitional phase between the
   old and new state is a brief visual state. Locking freezes editing for
-  everyone, owner included.
+  everyone, owner included. The acting client's collaboration session stays
+  up across the locked state (PAGE-058): the freeze broadcast leaves over
+  its socket after the server confirms, so tearing the session down on the
+  optimistic freeze would strand peers editable. The locked face stays
+  read-only behind the live binding (PAGE-053).
 - **Archive** is `archived_at` (a timestamp or null). Archiving is
   optimistic; restoring clears it. Archiving drops every user favourite row
   for that page. A page's archive marker reads as a dated line in its header
@@ -786,6 +790,12 @@ markdown, Version history, Make a copy, Export; the owner/admin entries
 The menu deliberately has **no** new-tab, copy-link, lock or move entry —
 the list row menu owns those. Delete appears only on an archived page
 (§7.3).
+
+Nested pages (D17) add one entry to the new build's menu only: **Add
+sub-page** sits after **Version history** for member and above (§12.2
+PAGE-084; absent for guests and on shelved pages). The oracle scenarios
+pin the pre-nested order above and the new leg derives its expectation
+by inserting the entry, since the old app cannot show nested pages.
 
 ### 7.5 What the header does not carry (PAGE-076–078, PAGE-082, PAGE-083)
 
