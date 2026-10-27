@@ -213,4 +213,14 @@ describe("createLegendOrderSorter", () => {
     expect(rank({ value: undefined })).toBe(2);
     expect(rank({ value: "Created", dataKey: () => 1 })).toBe(1);
   });
+
+  it("keeps the first series on key or name collisions", () => {
+    const rank = createLegendOrderSorter([
+      ...SERIES,
+      { key: "resolved", name: "Resolved again" },
+      { key: "extra", name: "Created" },
+    ]);
+    expect(rank({ value: "Resolved again", dataKey: "resolved" })).toBe(0);
+    expect(rank({ value: "Created" })).toBe(1);
+  });
 });

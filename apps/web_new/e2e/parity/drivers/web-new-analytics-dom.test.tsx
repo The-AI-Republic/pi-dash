@@ -150,6 +150,58 @@ describe("analytics dialog driver against the rendered panel", () => {
   });
 });
 
+describe("analytics dialog wide toggle against settled markup", () => {
+  it("fires on the first width change, then on consecutive stable frames", async () => {
+    document.body.innerHTML = `<div role="dialog"><div role="document"></div></div>`;
+    const content = document.querySelector("[role='dialog'] [role='document']") as HTMLElement;
+    const widths = [800, 850, 900, 900, 900];
+    let reads = 0;
+    content.getBoundingClientRect = () => ({ width: widths[Math.min(reads, widths.length - 1)] }) as DOMRect;
+    const predicates: Array<(...args: never[]) => unknown> = [];
+    const page = {
+      getByTestId: () => ({ first: () => ({ click: async () => undefined }) }),
+      getByRole: () => ({ locator: () => ({ boundingBox: async () => ({ width: 800, height: 600 }) }) }),
+      waitForFunction: async (fn: (...args: never[]) => unknown) => {
+        predicates.push(fn);
+      },
+    } as unknown as Page;
+    await new WebNewDriver(page).analyticsDialogToggleWide();
+    expect(predicates).toHaveLength(2);
+    const [changed, settled] = predicates as [(previous: number) => boolean, () => boolean];
+    // The change predicate fires once the width moves past the pre-click read.
+    reads = 0;
+    expect(changed(800)).toBe(false);
+    reads = 1;
+    expect(changed(800)).toBe(true);
+    // The settle predicate records the first frame, resets on movement,
+    // and fires after two consecutive agreeing frames.
+    reads = 1;
+    expect(settled()).toBe(false);
+    reads = 2;
+    expect(settled()).toBe(false);
+    reads = 3;
+    expect(settled()).toBe(false);
+    reads = 4;
+    expect(settled()).toBe(true);
+  });
+
+  it("holds both waits while the panel content is missing", async () => {
+    document.body.innerHTML = `<div role="dialog"></div>`;
+    const predicates: Array<(...args: never[]) => unknown> = [];
+    const page = {
+      getByTestId: () => ({ first: () => ({ click: async () => undefined }) }),
+      getByRole: () => ({ locator: () => ({ boundingBox: async () => ({ width: 800, height: 600 }) }) }),
+      waitForFunction: async (fn: (...args: never[]) => unknown) => {
+        predicates.push(fn);
+      },
+    } as unknown as Page;
+    await new WebNewDriver(page).analyticsDialogToggleWide();
+    const [changed, settled] = predicates as [(previous: number) => boolean, () => boolean];
+    expect(changed(800)).toBe(false);
+    expect(settled()).toBe(false);
+  });
+});
+
 describe("analytics chart axis reads against settled markup", () => {
   it("reads created-vs-resolved x labels from the axis tick group", async () => {
     document.body.innerHTML = `
