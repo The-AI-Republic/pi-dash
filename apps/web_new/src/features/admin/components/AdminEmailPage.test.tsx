@@ -25,13 +25,7 @@ import {
   SMTP_TLS_KEY,
   SMTP_USER_KEY,
 } from "../emailConfig.js";
-import {
-  EMAIL_DISABLE_ERROR_LOG,
-  EMAIL_DISABLE_FAILED_MESSAGE,
-  EMAIL_DISABLE_FAILED_TITLE,
-  EMAIL_DISABLED_TOAST_MESSAGE,
-  EMAIL_DISABLED_TOAST_TITLE,
-} from "../hooks.js";
+import { EMAIL_DISABLED_TOAST_MESSAGE, EMAIL_DISABLED_TOAST_TITLE } from "../hooks.js";
 import { AdminEmailPage, EMAIL_PAGE_TITLE } from "./AdminEmailPage.js";
 
 function smtpRow(key: string, value: string | null) {
@@ -237,11 +231,15 @@ describe("AdminEmailPage", () => {
 
     fireEvent.click(screen.getByTestId("admin-email-toggle"));
     await waitFor(() => expect(notifyError).toHaveBeenCalled());
-    expect(notifyError).toHaveBeenCalledWith(EMAIL_DISABLE_FAILED_TITLE, EMAIL_DISABLE_FAILED_MESSAGE);
+    // Literal strings: these are what the parity driver and the acceptance
+    // criteria match, so pinning the constants alone would let the copy
+    // drift while the test stayed green.
+    expect(notifyError).toHaveBeenCalledWith(
+      "Could not disable email",
+      "The email settings were left unchanged. Try again."
+    );
     expect(notifySuccess).not.toHaveBeenCalled();
-    // The parity scenario polls the console for this line through the
-    // real toggle path, so the page pins it too, not just the hook test.
-    expect(errors.some((args) => args[0] === EMAIL_DISABLE_ERROR_LOG)).toBe(true);
+    expect(errors.some((args) => args[0] === "Error disabling the email")).toBe(true);
     expect(screen.getByTestId("admin-email-toggle")).toHaveAttribute("aria-checked", "true");
     expect(screen.getByTestId("admin-email-form")).toBeInTheDocument();
     expect(screen.getByTestId("admin-email-host")).toHaveValue("smtp.example.com");
