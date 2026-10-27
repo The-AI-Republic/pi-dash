@@ -66,10 +66,6 @@ crates/api/src/space/social.rs | UPDATE issue_comments | 01c1d5c56858 | sql
 crates/api/src/space/social.rs | UPDATE issue_comments | 6a0805c12eee | sql
 crates/api/src/space/social.rs | UPDATE issue_comments | 7acaba4dcda0 | sql
 crates/api/src/space/social.rs | UPDATE issue_comments | 833b6f189399 | sql
-crates/api/src/v1_assets/intake.rs | INSERT issue_sequences | 2258a209548f | sql
-crates/api/src/v1_assets/intake.rs | INSERT issues | 3173c6df4f22 | sql
-crates/api/src/v1_assets/intake.rs | UPDATE issues | 158804ceb869 | sql
-crates/api/src/v1_assets/intake.rs | UPDATE issues | a29e28ae2494 | sql
 crates/api/src/v1_projects/handlers_project.rs | UPDATE projects | 13a902850983 | sql
 crates/api/src/v1_projects/handlers_project.rs | UPDATE projects | 6a507dbf7b5e | sql
 crates/api/src/v1_projects/handlers_project.rs | UPDATE projects | 9162da44cd01 | sql

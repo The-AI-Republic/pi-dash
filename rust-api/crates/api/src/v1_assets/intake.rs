@@ -29,8 +29,8 @@
 //!   the same bytes;
 //! * `description_html` sanitization is
 //!   [`crate::space::sanitize::sanitize_html`] (`nh3.clean` port) and tag
-//!   stripping is `pidash_db`'s `strip_tags_ml` (`html_processor`
-//!   port). The lxml round-trip is the shared
+//!   stripping rides the `Issue.save()` hooks' MLStripper port. The lxml
+//!   round-trip is the shared
 //!   [`pidash_services::html_normalize::lxml_roundtrip`]; the markdown-it
 //!   converter below it has no foundation home, so it lives here,
 //!   differentially tested against live Python (see `markdown`).
@@ -59,6 +59,7 @@
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
@@ -78,12 +79,19 @@ use pidash_db::v1_assets::intake_queries;
 use pidash_db::v1_projects::queries_projmem::{self, TenantScope as QueryScope};
 use pidash_jobs::v1_assets::tasks as intake_tasks;
 use pidash_services::app_issues::envelope;
+use pidash_services::domain::activity::TaskEnqueueHook;
+use pidash_services::domain::issues as domain_issues;
+use pidash_services::domain::issues::IssueFieldSet;
+use pidash_services::domain::transition::IssueTransitionHook;
+use pidash_services::domain::{self, WriteActor, WriteCtx, WriteScope};
 use pidash_services::html_normalize::lxml_roundtrip;
 use pidash_types::v1_assets::intake as intake_types;
 use pidash_types::{ProjectId, WorkspaceId};
 
 use super::permissions as v1_perm;
 use crate::assistant::events::py_dumps;
+use crate::domain_hooks::AppTaskEnqueueHook;
+use crate::issue_transition::AppTransitionHook;
 use crate::license::form_body::{self, BodyFail, BodyKind};
 use crate::paginator::{
     apply_offset_window, max_hits, next_cursor, offset_window, prev_cursor, Cursor,
@@ -96,7 +104,6 @@ use pidash_compat::datetime::{render_date_opt, render_datetime_opt, render_uuid_
 use pidash_compat::db::{is_integrity_error, is_unique_violation};
 pub(crate) use pidash_compat::response::json_response;
 pub use pidash_compat::response::SERVER_ERROR_BODY;
-use pidash_db::v1_assets::model::sticky::strip_tags_ml;
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -773,6 +780,7 @@ const IS_TYPE: usize = 26;
 const IS_DELETED_AT: usize = 27;
 const IS_GIT_WORK_BRANCH: usize = 28;
 const IS_ASSIGNED_POD: usize = 29;
+const IS_WORKPAD: usize = 30;
 const IS_CREATED_VIA: usize = 31;
 const IS_AGENT_EXECUTOR: usize = 32;
 const IS_COMPLEXITY_SCORE: usize = 33;
@@ -836,6 +844,7 @@ struct IssueRow {
     estimate_point_id: Option<Uuid>,
     type_id: Option<Uuid>,
     assigned_pod_id: Option<Uuid>,
+    workpad: String,
 }
 
 fn cell<T>(row: &sqlx::postgres::PgRow, index: usize) -> Result<T, Denial>
@@ -931,10 +940,96 @@ impl IssueRow {
             deleted_at: cell(row, base + IS_DELETED_AT)?,
             git_work_branch: cell(row, base + IS_GIT_WORK_BRANCH)?,
             assigned_pod_id: cell(row, base + IS_ASSIGNED_POD)?,
+            workpad: cell(row, base + IS_WORKPAD)?,
             created_via: cell(row, base + IS_CREATED_VIA)?,
             agent_executor: cell(row, base + IS_AGENT_EXECUTOR)?,
             complexity_score: cell(row, base + IS_COMPLEXITY_SCORE)?,
         })
+    }
+
+    /// The full-save field set: every column, for the domain write the
+    /// update/delete drivers run after overlaying their validated input.
+    /// `priority`/`complexity_score` fall back exactly like the old
+    /// UPDATE binds (`""`/`0`) on the unreachable stored-`None`.
+    fn field_set(&self) -> IssueFieldSet {
+        IssueFieldSet {
+            id: self.id,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+            created_by_id: self.created_by_id,
+            updated_by_id: self.updated_by_id,
+            deleted_at: self.deleted_at,
+            project_id: self.project_id,
+            workspace_id: self.workspace_id,
+            parent_id: self.parent_id,
+            state_id: self.state_id,
+            point: self.point,
+            estimate_point_id: self.estimate_point_id,
+            name: self.name.clone(),
+            description_json: self.description_json.clone(),
+            description_html: self.description_html.clone(),
+            description_stripped: self.description_stripped.clone(),
+            description_binary: self.description_binary.clone(),
+            priority: self.priority.clone().unwrap_or_default(),
+            complexity_score: self.complexity_score.unwrap_or(0),
+            start_date: self.start_date,
+            target_date: self.target_date,
+            sequence_id: self.sequence_id,
+            sort_order: self.sort_order,
+            completed_at: self.completed_at,
+            archived_at: self.archived_at,
+            is_draft: self.is_draft,
+            external_source: self.external_source.clone(),
+            external_id: self.external_id.clone(),
+            type_id: self.type_id,
+            git_work_branch: self.git_work_branch.clone(),
+            workpad: self.workpad.clone(),
+            created_via: self.created_via.clone(),
+            assigned_pod_id: self.assigned_pod_id,
+            agent_executor: self.agent_executor.clone(),
+        }
+    }
+
+    /// Adapt a saved domain row back to the render row (the create path
+    /// renders the returned row without re-reading).
+    fn from_model(model: &pidash_db::entity::issues::Model) -> Self {
+        let fields = IssueFieldSet::from(model);
+        Self {
+            id: fields.id,
+            created_at: fields.created_at,
+            updated_at: fields.updated_at,
+            deleted_at: fields.deleted_at,
+            point: fields.point,
+            name: fields.name,
+            description_json: fields.description_json,
+            description_html: fields.description_html,
+            description_stripped: fields.description_stripped,
+            description_binary: fields.description_binary,
+            priority: Some(fields.priority),
+            complexity_score: Some(fields.complexity_score),
+            start_date: fields.start_date,
+            target_date: fields.target_date,
+            sequence_id: fields.sequence_id,
+            sort_order: fields.sort_order,
+            completed_at: fields.completed_at,
+            archived_at: fields.archived_at,
+            is_draft: fields.is_draft,
+            external_source: fields.external_source,
+            external_id: fields.external_id,
+            git_work_branch: fields.git_work_branch,
+            created_via: fields.created_via,
+            agent_executor: fields.agent_executor,
+            created_by_id: fields.created_by_id,
+            updated_by_id: fields.updated_by_id,
+            project_id: fields.project_id,
+            workspace_id: fields.workspace_id,
+            parent_id: fields.parent_id,
+            state_id: fields.state_id,
+            estimate_point_id: fields.estimate_point_id,
+            type_id: fields.type_id,
+            assigned_pod_id: fields.assigned_pod_id,
+            workpad: fields.workpad,
+        }
     }
 
     /// Adapt to the merged full-`IssueSerializer` renderer input.
@@ -3642,18 +3737,6 @@ async fn fetch_companion_issue(pool: &sqlx::PgPool, issue_id: &Uuid) -> Result<I
     IssueRow::from_row(&row)
 }
 
-/// `issue.state` / `State` group reads: `_base_manager` (unfiltered) —
-/// the triage group resolves (the accept flow depends on it); a
-/// dangling id is the 404 branch.
-async fn fetch_state_group(pool: &sqlx::PgPool, state_id: &Uuid) -> Result<String, Denial> {
-    let group: Option<String> = sqlx::query_scalar(r#"SELECT "group" FROM states WHERE id = $1"#)
-        .bind(state_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    group.ok_or(Denial::ResourceMissing)
-}
-
 /// The accept default (`State.objects.filter(workspace, project,
 /// default=True).first()`, `StateManager` = live + non-triage,
 /// `Meta.ordering = ("sequence",)`).
@@ -3674,298 +3757,154 @@ async fn fetch_default_state(
     .map_err(|_| Denial::ServerError)
 }
 
-/// `Issue.save()`'s `state is None` resolution (`db/models/issue.py`):
-/// `State.objects` (whose manager excludes `group = 'triage'`) filtered
-/// by `~Q(is_triage=True)` — the auto-created Triage row carries
-/// `is_triage = FALSE`, so both conditions are needed — with NO
-/// workspace scope: the default first, else the first row, both in
-/// sequence order.
-async fn resolve_save_state(
-    pool: &sqlx::PgPool,
-    project_id: &Uuid,
-) -> Result<Option<Uuid>, Denial> {
-    let default: Option<Uuid> = sqlx::query_scalar(
-        r#"SELECT "id" FROM "states" WHERE "project_id" = $1
-           AND "deleted_at" IS NULL AND "group" <> 'triage' AND "is_triage" = FALSE AND "default" = TRUE
-           ORDER BY "sequence" LIMIT 1"#,
-    )
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    if default.is_some() {
-        return Ok(default);
-    }
-    sqlx::query_scalar(
-        r#"SELECT "id" FROM "states" WHERE "project_id" = $1
-           AND "deleted_at" IS NULL AND "group" <> 'triage' AND "is_triage" = FALSE
-           ORDER BY "sequence" LIMIT 1"#,
-    )
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)
-}
-
 // ---------------------------------------------------------------------------
 // Saves (`Issue.save` / `ModelSerializer.update` / soft delete)
 // ---------------------------------------------------------------------------
 
-/// Replace one link set (`IssueAssignee` / `IssueLabel`): soft-delete
-/// the live links, then `bulk_create(..., ignore_conflicts=True)` the
-/// new ids with the PRE-SAVE issue's audit columns. `IntegrityError`
-/// (unique + FK races alike) is swallowed; anything else is the 500.
-async fn replace_links(
-    pool: &sqlx::PgPool,
-    table: &str,
-    id_column: &str,
-    issue: &IssueRow,
-    ids: &[Uuid],
-    now: DateTime<Utc>,
-) -> Result<(), Denial> {
-    let delete_sql = format!(
-        "UPDATE \"{table}\" SET deleted_at = $1 WHERE issue_id = $2 AND deleted_at IS NULL"
-    );
-    sqlx::query(&delete_sql)
-        .bind(now)
-        .bind(issue.id)
-        .execute(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    for id in ids {
-        let insert_sql = format!(
-            "INSERT INTO \"{table}\" (id, created_at, updated_at, created_by_id, updated_by_id, \
-             deleted_at, issue_id, \"{id_column}\", project_id, workspace_id) \
-             VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, $8, $9) ON CONFLICT DO NOTHING"
-        );
-        let result = sqlx::query(&insert_sql)
-            .bind(Uuid::new_v4())
-            .bind(now)
-            .bind(now)
-            .bind(issue.created_by_id)
-            .bind(issue.updated_by_id)
-            .bind(issue.id)
-            .bind(id)
-            .bind(issue.project_id)
-            .bind(issue.workspace_id)
-            .execute(pool)
-            .await;
-        match result {
-            Ok(_) => {}
-            Err(error) if is_integrity_error(&error) => {}
-            Err(_) => return Err(Denial::ServerError),
-        }
+/// Map a domain-write failure onto this endpoint's arms: a dangling-row
+/// miss 404s (the old state-group read's `ResourceMissing`, preserved),
+/// anything else 500s — the old saves mapped every database failure,
+/// integrity included, to `ServerError`, exactly like Django's uncaught
+/// `IntegrityError`.
+fn domain_denial(error: domain::DomainError) -> Denial {
+    if error.is_not_found() {
+        Denial::ResourceMissing
+    } else {
+        Denial::ServerError
     }
-    Ok(())
+}
+
+fn write_ctx(ctx: &Context, workspace_id: Uuid) -> WriteCtx {
+    WriteCtx::new(WriteActor {
+        user_id: ctx.user_id,
+        timezone: Some(ctx.timezone.name().to_owned()),
+    })
+    .with_scope(WriteScope {
+        workspace_id: Some(workspace_id),
+        project_id: Some(ctx.project_id),
+    })
+}
+
+/// The post-save fire arguments, one `post_save` receiver run: the v1
+/// intake views never set Django's `_orchestration_dispatch_immediate`
+/// attr and carry no moved-by run, so the defaults apply on every path.
+fn fire_spec(actor_id: &Uuid, now: DateTime<Utc>) -> domain_issues::FireSpec {
+    domain_issues::FireSpec {
+        dispatch_immediate: true,
+        created_by: Some(*actor_id),
+        moved_by_run: None,
+        now,
+    }
 }
 
 /// Apply an issue-half patch: link replacement, `updated_at` stamp,
-/// column writes, then `Issue.save()` (not adding): `state is None`
-/// resolution (which leaves `completed_at` alone — an explicitly
-/// supplied value sticks, an absent one keeps the stored value),
-/// otherwise `completed_at` recompute (overwriting any validated value
-/// whenever a state is set), `description_stripped` recompute (`""` →
-/// `None` on this path), audit stamp. Returns the post-save row.
+/// column writes, then `Issue.save()` (not adding). Rides
+/// `domain::issues::partial_update` with no activity trio — the view's
+/// own `issue.activity.updated` (v1 key omission plus the intake
+/// `intake=` extra) is enqueued driver-side ahead of this call, exactly
+/// where Django's view puts it (before `serializer.save()`).
 async fn save_issue_patch(
-    pool: &sqlx::PgPool,
+    state: &AppState,
+    ctx: &Context,
     issue: &IssueRow,
     patch: &IssuePatch,
-    user_id: &Uuid,
-) -> Result<IssueRow, Denial> {
-    let now_links = cycle_mod::micros_now();
-    if let Some(assignees) = &patch.assignees {
-        replace_links(
-            pool,
-            "issue_assignees",
-            "assignee_id",
-            issue,
-            assignees,
-            now_links,
-        )
-        .await?;
-    }
-    if let Some(labels) = &patch.labels {
-        replace_links(pool, "issue_labels", "label_id", issue, labels, now_links).await?;
-    }
+) -> Result<(), Denial> {
     // `update()` stamps `updated_at`, then `save()`'s `auto_now`
     // overwrites it — two clock reads, either of which can straddle.
     let _now_update = cycle_mod::micros_now();
     let now_save = cycle_mod::micros_now();
-
-    let mut state_id = patch.state.unwrap_or(issue.state_id);
-    // `Issue.save`'s `state is None` branch resolves the state but never
-    // recomputes `completed_at` (that is only the `else` branch).
-    let state_was_null = patch.state == Some(None);
-    if state_was_null {
-        state_id = resolve_save_state(pool, &issue.project_id).await?;
-    }
-    let completed_at = match state_id {
-        Some(id) if !state_was_null => {
-            let group = fetch_state_group(pool, &id).await?;
-            if group == "completed" {
-                Some(now_save)
-            } else {
-                None
-            }
-        }
-        _ => patch.completed_at.unwrap_or(issue.completed_at),
-    };
-    let html = patch
+    let mut fields = issue.field_set();
+    fields.name = patch.name.clone().unwrap_or_else(|| issue.name.clone());
+    fields.description_html = patch
         .description_html
         .clone()
         .unwrap_or_else(|| issue.description_html.clone());
-    // `Issue.save()` non-adding branch: falsy html → NULL, else the
-    // strip result as-is (even `""` — `strip_tags("<p></p>")`).
-    let stripped: Option<String> = if html.is_empty() {
-        None
-    } else {
-        Some(strip_tags_ml(&html))
-    };
-
-    sqlx::query(
-        r#"UPDATE "issues" SET "name" = $1, "description_html" = $2, "priority" = $3,
-           "point" = $4, "complexity_score" = $5, "start_date" = $6, "target_date" = $7,
-           "sequence_id" = $8, "sort_order" = $9, "completed_at" = $10, "archived_at" = $11,
-           "is_draft" = $12, "external_source" = $13, "external_id" = $14,
-           "git_work_branch" = $15, "created_via" = $16, "agent_executor" = $17,
-           "created_by_id" = $18, "parent_id" = $19, "state_id" = $20,
-           "estimate_point_id" = $21, "type_id" = $22, "assigned_pod_id" = $23,
-           "deleted_at" = $24, "description_stripped" = $25,
-           "updated_at" = $26, "updated_by_id" = $27 WHERE "id" = $28"#,
-    )
-    .bind(patch.name.clone().unwrap_or_else(|| issue.name.clone()))
-    .bind(html.clone())
-    .bind(
-        patch
-            .priority
-            .clone()
-            .unwrap_or_else(|| issue.priority.clone().unwrap_or_default()),
-    )
-    .bind(patch.point.unwrap_or(issue.point))
-    .bind(patch.complexity_score.unwrap_or(issue.complexity_score))
-    .bind(patch.start_date.unwrap_or(issue.start_date))
-    .bind(patch.target_date.unwrap_or(issue.target_date))
-    .bind(patch.sequence_id.unwrap_or(issue.sequence_id))
-    .bind(patch.sort_order.unwrap_or(issue.sort_order))
-    .bind(completed_at)
-    .bind(patch.archived_at.unwrap_or(issue.archived_at))
-    .bind(patch.is_draft.unwrap_or(issue.is_draft))
-    .bind(
-        patch
-            .external_source
-            .clone()
-            .unwrap_or_else(|| issue.external_source.clone()),
-    )
-    .bind(
-        patch
-            .external_id
-            .clone()
-            .unwrap_or_else(|| issue.external_id.clone()),
-    )
-    .bind(
-        patch
-            .git_work_branch
-            .clone()
-            .unwrap_or_else(|| issue.git_work_branch.clone()),
-    )
-    .bind(
-        patch
-            .created_via
-            .clone()
-            .unwrap_or_else(|| issue.created_via.clone()),
-    )
-    .bind(
-        patch
-            .agent_executor
-            .clone()
-            .unwrap_or_else(|| issue.agent_executor.clone()),
-    )
-    .bind(patch.created_by.unwrap_or(issue.created_by_id))
-    .bind(patch.parent.unwrap_or(issue.parent_id))
-    .bind(state_id)
-    .bind(patch.estimate_point.unwrap_or(issue.estimate_point_id))
-    .bind(patch.issue_type.unwrap_or(issue.type_id))
-    .bind(patch.assigned_pod.unwrap_or(issue.assigned_pod_id))
-    .bind(patch.deleted_at.unwrap_or(issue.deleted_at))
-    .bind(stripped.clone())
-    .bind(now_save)
-    .bind(user_id)
-    .bind(issue.id)
-    .execute(pool)
+    fields.priority = patch
+        .priority
+        .clone()
+        .unwrap_or_else(|| issue.priority.clone().unwrap_or_default());
+    fields.point = patch.point.unwrap_or(issue.point);
+    fields.complexity_score = patch
+        .complexity_score
+        .unwrap_or(issue.complexity_score)
+        .unwrap_or(0);
+    fields.start_date = patch.start_date.unwrap_or(issue.start_date);
+    fields.target_date = patch.target_date.unwrap_or(issue.target_date);
+    fields.sequence_id = patch.sequence_id.unwrap_or(issue.sequence_id);
+    fields.sort_order = patch.sort_order.unwrap_or(issue.sort_order);
+    fields.completed_at = patch.completed_at.unwrap_or(issue.completed_at);
+    fields.archived_at = patch.archived_at.unwrap_or(issue.archived_at);
+    fields.is_draft = patch.is_draft.unwrap_or(issue.is_draft);
+    fields.external_source = patch
+        .external_source
+        .clone()
+        .unwrap_or_else(|| issue.external_source.clone());
+    fields.external_id = patch
+        .external_id
+        .clone()
+        .unwrap_or_else(|| issue.external_id.clone());
+    fields.git_work_branch = patch
+        .git_work_branch
+        .clone()
+        .unwrap_or_else(|| issue.git_work_branch.clone());
+    fields.created_via = patch
+        .created_via
+        .clone()
+        .unwrap_or_else(|| issue.created_via.clone());
+    fields.agent_executor = patch
+        .agent_executor
+        .clone()
+        .unwrap_or_else(|| issue.agent_executor.clone());
+    fields.created_by_id = patch.created_by.unwrap_or(issue.created_by_id);
+    fields.parent_id = patch.parent.unwrap_or(issue.parent_id);
+    fields.state_id = patch.state.unwrap_or(issue.state_id);
+    fields.estimate_point_id = patch.estimate_point.unwrap_or(issue.estimate_point_id);
+    fields.type_id = patch.issue_type.unwrap_or(issue.type_id);
+    fields.assigned_pod_id = patch.assigned_pod.unwrap_or(issue.assigned_pod_id);
+    fields.deleted_at = patch.deleted_at.unwrap_or(issue.deleted_at);
+    fields.updated_at = now_save;
+    let prev_state = issue.state_id;
+    let m2m_audit = (issue.created_by_id, issue.updated_by_id);
+    let orm = state.orm().ok_or(Denial::ServerError)?;
+    let domain_ctx = write_ctx(ctx, issue.workspace_id);
+    let transition: Arc<dyn IssueTransitionHook> =
+        Arc::new(AppTransitionHook::new(state, &ctx.pool));
+    let enqueue: Arc<dyn TaskEnqueueHook> = Arc::new(AppTaskEnqueueHook::new(&ctx.pool));
+    let outcome = domain::run(&domain_ctx, orm, |txn| {
+        let transition = transition.clone();
+        let enqueue = enqueue.clone();
+        let pool = ctx.pool.clone();
+        let domain_ctx = domain_ctx.clone();
+        let assignees = patch.assignees.clone();
+        let labels = patch.labels.clone();
+        let fire = fire_spec(&ctx.user_id, now_save);
+        Box::pin(async move {
+            txn.hooks_mut().register(transition);
+            txn.hooks_mut().register(enqueue);
+            domain_issues::partial_update(
+                &domain_ctx,
+                txn,
+                &pool,
+                domain_issues::PartialIssue {
+                    fields,
+                    assignees,
+                    labels,
+                    m2m_audit,
+                    sequence: None,
+                    prev_state,
+                    fire,
+                    activity: None,
+                },
+            )
+            .await
+        })
+    })
     .await
-    .map_err(|_| Denial::ServerError)?;
-
-    let mut saved = issue.clone();
-    if let Some(name) = &patch.name {
-        saved.name = name.clone();
+    .map_err(domain_denial)?;
+    if outcome.chain.stopped().is_some() {
+        return Err(Denial::ServerError);
     }
-    saved.description_html = html;
-    if let Some(priority) = &patch.priority {
-        saved.priority = Some(priority.clone());
-    }
-    if let Some(point) = patch.point {
-        saved.point = point;
-    }
-    if let Some(score) = patch.complexity_score {
-        saved.complexity_score = score;
-    }
-    if let Some(start) = patch.start_date {
-        saved.start_date = start;
-    }
-    if let Some(target) = patch.target_date {
-        saved.target_date = target;
-    }
-    if let Some(sequence) = patch.sequence_id {
-        saved.sequence_id = sequence;
-    }
-    if let Some(sort) = patch.sort_order {
-        saved.sort_order = sort;
-    }
-    saved.completed_at = completed_at;
-    if let Some(archived) = patch.archived_at {
-        saved.archived_at = archived;
-    }
-    if let Some(draft) = patch.is_draft {
-        saved.is_draft = draft;
-    }
-    if let Some(source) = &patch.external_source {
-        saved.external_source = source.clone();
-    }
-    if let Some(external) = &patch.external_id {
-        saved.external_id = external.clone();
-    }
-    if let Some(branch) = &patch.git_work_branch {
-        saved.git_work_branch = branch.clone();
-    }
-    if let Some(via) = &patch.created_via {
-        saved.created_via = via.clone();
-    }
-    if let Some(executor) = &patch.agent_executor {
-        saved.agent_executor = executor.clone();
-    }
-    if let Some(created_by) = patch.created_by {
-        saved.created_by_id = created_by;
-    }
-    if let Some(parent) = patch.parent {
-        saved.parent_id = parent;
-    }
-    saved.state_id = state_id;
-    if let Some(estimate) = patch.estimate_point {
-        saved.estimate_point_id = estimate;
-    }
-    if let Some(issue_type) = patch.issue_type {
-        saved.type_id = issue_type;
-    }
-    if let Some(pod) = patch.assigned_pod {
-        saved.assigned_pod_id = pod;
-    }
-    if let Some(deleted) = patch.deleted_at {
-        saved.deleted_at = deleted;
-    }
-    saved.description_stripped = stripped;
-    saved.updated_at = now_save;
-    saved.updated_by_id = Some(*user_id);
-    Ok(saved)
+    Ok(())
 }
 
 /// Apply an intake-half patch (`super().update` + `save()`): column
@@ -4026,79 +3965,59 @@ async fn save_intake_patch(
 /// request — with `completed_at` / `description_stripped` recomputed
 /// and the audit stamp moved. Returns the post-save (clobbered) row.
 async fn apply_triage_transition(
-    pool: &sqlx::PgPool,
+    state: &AppState,
+    ctx: &Context,
     pre_save: &IssueRow,
     default_id: &Uuid,
-    user_id: &Uuid,
-) -> Result<IssueRow, Denial> {
-    let now = cycle_mod::micros_now();
-    let group = fetch_state_group(pool, default_id).await?;
-    let completed_at = if group == "completed" {
-        Some(now)
-    } else {
-        None
-    };
-    // Same non-adding rule (`issue.save()` rewrites all fields):
-    // falsy html → NULL, else the strip result as-is.
-    let stripped: Option<String> = if pre_save.description_html.is_empty() {
-        None
-    } else {
-        Some(strip_tags_ml(&pre_save.description_html))
-    };
+) -> Result<(), Denial> {
     // The full-row rewrite IS the clobber: every pre-save column is
     // written back, so issue-half writes from this request vanish
-    // (`point` included — it is writable via the issue-half).
-    sqlx::query(
-        r#"UPDATE "issues" SET "name" = $1, "description_json" = $2, "description_html" = $3,
-           "description_stripped" = $4, "priority" = $5, "complexity_score" = $6,
-           "start_date" = $7, "target_date" = $8, "sequence_id" = $9, "sort_order" = $10,
-           "completed_at" = $11, "archived_at" = $12, "is_draft" = $13,
-           "external_source" = $14, "external_id" = $15, "git_work_branch" = $16,
-           "created_via" = $17, "agent_executor" = $18, "created_by_id" = $19,
-           "parent_id" = $20, "state_id" = $21, "estimate_point_id" = $22, "type_id" = $23,
-           "assigned_pod_id" = $24, "deleted_at" = $25, "point" = $26,
-           "updated_at" = $27, "updated_by_id" = $28 WHERE "id" = $29"#,
-    )
-    .bind(&pre_save.name)
-    .bind(&pre_save.description_json)
-    .bind(&pre_save.description_html)
-    .bind(&stripped)
-    .bind(&pre_save.priority)
-    .bind(pre_save.complexity_score)
-    .bind(pre_save.start_date)
-    .bind(pre_save.target_date)
-    .bind(pre_save.sequence_id)
-    .bind(pre_save.sort_order)
-    .bind(completed_at)
-    .bind(pre_save.archived_at)
-    .bind(pre_save.is_draft)
-    .bind(&pre_save.external_source)
-    .bind(&pre_save.external_id)
-    .bind(&pre_save.git_work_branch)
-    .bind(&pre_save.created_via)
-    .bind(&pre_save.agent_executor)
-    .bind(pre_save.created_by_id)
-    .bind(pre_save.parent_id)
-    .bind(default_id)
-    .bind(pre_save.estimate_point_id)
-    .bind(pre_save.type_id)
-    .bind(pre_save.assigned_pod_id)
-    .bind(pre_save.deleted_at)
-    .bind(pre_save.point)
-    .bind(now)
-    .bind(user_id)
-    .bind(pre_save.id)
-    .execute(pool)
+    // (`point` included — it is writable via the issue-half). It rides
+    // `domain::issues::update`: the save hooks recompute `completed_at`
+    // / stripped text, and the chain runs the `post_save` completion
+    // pair + fire Django's `issue.save()` fires.
+    let now = cycle_mod::micros_now();
+    let mut fields = pre_save.field_set();
+    fields.state_id = Some(*default_id);
+    fields.updated_at = now;
+    let prev_state = pre_save.state_id;
+    let m2m_audit = (pre_save.created_by_id, pre_save.updated_by_id);
+    let orm = state.orm().ok_or(Denial::ServerError)?;
+    let domain_ctx = write_ctx(ctx, pre_save.workspace_id);
+    let transition: Arc<dyn IssueTransitionHook> =
+        Arc::new(AppTransitionHook::new(state, &ctx.pool));
+    let enqueue: Arc<dyn TaskEnqueueHook> = Arc::new(AppTaskEnqueueHook::new(&ctx.pool));
+    let outcome = domain::run(&domain_ctx, orm, |txn| {
+        let transition = transition.clone();
+        let enqueue = enqueue.clone();
+        let pool = ctx.pool.clone();
+        let domain_ctx = domain_ctx.clone();
+        let fire = fire_spec(&ctx.user_id, now);
+        Box::pin(async move {
+            txn.hooks_mut().register(transition);
+            txn.hooks_mut().register(enqueue);
+            domain_issues::update(
+                &domain_ctx,
+                txn,
+                &pool,
+                domain_issues::UpdateIssue {
+                    fields,
+                    assignees: None,
+                    labels: None,
+                    m2m_audit,
+                    prev_state,
+                    fire,
+                },
+            )
+            .await
+        })
+    })
     .await
-    .map_err(|_| Denial::ServerError)?;
-
-    let mut saved = pre_save.clone();
-    saved.state_id = Some(*default_id);
-    saved.completed_at = completed_at;
-    saved.description_stripped = stripped;
-    saved.updated_at = now;
-    saved.updated_by_id = Some(*user_id);
-    Ok(saved)
+    .map_err(domain_denial)?;
+    if outcome.chain.stopped().is_some() {
+        return Err(Denial::ServerError);
+    }
+    Ok(())
 }
 
 /// Instance soft delete (`db/mixins.py:72-78`): `deleted_at` stamp,
@@ -4254,35 +4173,6 @@ async fn ensure_triage(
     }
 }
 
-/// `convert_uuid_to_integer` (`utils/uuid.py`): the advisory-lock key —
-/// signed big-endian `int64` of the `sha256(str(uuid))` prefix.
-fn advisory_key(project_id: &Uuid) -> i64 {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(project_id.to_string().as_bytes());
-    let digest = hasher.finalize();
-    let mut bytes = [0u8; 8];
-    bytes.copy_from_slice(&digest[..8]);
-    i64::from_be_bytes(bytes)
-}
-
-/// `Pod.default_for_project_id` (`runner/models.py`): the live default
-/// pod, earliest first — or `None` (raw-SQL-seeded projects have none:
-/// the `post_save` signal only fires on ORM creates).
-async fn default_pod_for_project(
-    pool: &sqlx::PgPool,
-    project_id: &Uuid,
-) -> Result<Option<Uuid>, Denial> {
-    sqlx::query_scalar(
-        r#"SELECT "id" FROM "pod" WHERE "project_id" = $1 AND "is_default" = TRUE
-           AND "deleted_at" IS NULL ORDER BY "created_at" ASC LIMIT 1"#,
-    )
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)
-}
-
 /// `Issue.objects.create(...)` (`views/intake.py:186-194` +
 /// `Issue.save()` adding branch): the transaction-scoped advisory lock
 /// is taken first, then `sequence_id` from the `issue_sequences`
@@ -4297,151 +4187,101 @@ async fn default_pod_for_project(
 /// path), workspace from the project, crum audit.
 #[allow(clippy::too_many_arguments)]
 async fn insert_issue(
-    pool: &sqlx::PgPool,
+    state: &AppState,
+    ctx: &Context,
     name: &str,
     description_json: &Value,
     description_html: &str,
     priority: &str,
     project: &ProjectRow,
     triage_id: &Uuid,
-    user_id: &Uuid,
 ) -> Result<IssueRow, Denial> {
-    let pod_id = default_pod_for_project(pool, &project.id).await?;
-    let mut tx = pool.begin().await.map_err(|_| Denial::ServerError)?;
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(advisory_key(&project.id))
-        .execute(&mut *tx)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    let last_sequence: Option<Option<i64>> = sqlx::query_scalar(
-        r#"SELECT MAX("sequence") FROM "issue_sequences" WHERE "project_id" = $1 AND "deleted_at" IS NULL"#,
-    )
-    .bind(project.id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    // `last_sequence + 1 if last_sequence else 1`: `0` and `None` both
-    // restart at 1 (falsy either way).
-    let sequence_id = i32::try_from(
-        last_sequence
-            .flatten()
-            .filter(|last| *last != 0)
-            .map(|last| last + 1)
-            .unwrap_or(1),
-    )
-    .map_err(|_| Denial::ServerError)?;
-    let max_sort: Option<f64> = sqlx::query_scalar(
-        r#"SELECT MAX("sort_order") FROM "issues"
-           WHERE "project_id" = $1 AND "state_id" = $2 AND "deleted_at" IS NULL"#,
-    )
-    .bind(project.id)
-    .bind(triage_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|_| Denial::ServerError)?
-    .flatten();
-    let sort_order = max_sort.map_or(65535.0, |max| max + 10000.0);
-    // `Issue.save()` adding branch: falsy html → NULL, else the strip
-    // result as-is (even `""` — no `or None` on this path).
-    let stripped: Option<String> = if description_html.is_empty() {
-        None
-    } else {
-        Some(strip_tags_ml(description_html))
-    };
-
-    let id = Uuid::new_v4();
-    let created_at = cycle_mod::micros_now();
-    let updated_at = cycle_mod::micros_now();
-    sqlx::query(
-        r#"INSERT INTO "issues" ("id", "created_at", "updated_at", "created_by_id", "updated_by_id",
-           "deleted_at", "project_id", "workspace_id", "parent_id", "state_id", "point",
-           "estimate_point_id", "name", "description_json", "description_html",
-           "description_stripped", "description_binary", "priority", "complexity_score",
-           "start_date", "target_date", "sequence_id", "sort_order", "completed_at",
-           "archived_at", "is_draft", "external_source", "external_id", "type_id",
-           "git_work_branch", "workpad", "created_via", "assigned_pod_id", "agent_executor")
-           VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, NULL, $7, NULL, NULL, $8, $9, $10,
-           $11, NULL, $12, 0, NULL, NULL, $13, $14, NULL, NULL, FALSE, NULL, NULL, NULL,
-           '', '', NULL, $15, NULL)"#,
-    )
-    .bind(id)
-    .bind(created_at)
-    .bind(updated_at)
-    .bind(user_id)
-    .bind(project.id)
-    .bind(project.workspace_id)
-    .bind(triage_id)
-    .bind(name)
-    .bind(description_json)
-    .bind(description_html)
-    .bind(&stripped)
-    .bind(priority)
-    .bind(sequence_id)
-    .bind(sort_order)
-    .bind(pod_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-
-    let sequence_created = cycle_mod::micros_now();
-    let sequence_updated = cycle_mod::micros_now();
-    sqlx::query(
-        r#"INSERT INTO "issue_sequences" ("id", "created_at", "updated_at", "created_by_id",
-           "updated_by_id", "deleted_at", "issue_id", "sequence", "project_id", "workspace_id",
-           "deleted") VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, $7, $8, FALSE)"#,
-    )
-    .bind(Uuid::new_v4())
-    .bind(sequence_created)
-    .bind(sequence_updated)
-    .bind(user_id)
-    .bind(id)
-    .bind(i64::from(sequence_id))
-    .bind(project.id)
-    .bind(project.workspace_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    // The intake-bridge insert and the activity enqueue in the caller
-    // run after this commit: Django's view is not atomic beyond
-    // `Issue.save`, so they stay outside this transaction
-    // (`views/intake.py:200-207`).
-    tx.commit().await.map_err(|_| Denial::ServerError)?;
-
-    Ok(IssueRow {
-        id,
-        created_at,
-        updated_at,
+    // `Issue.objects.create(...)` + `Issue.save()` ride
+    // `domain::issues::create`: the hooks resolve the pod default,
+    // `completed_at` (triage, so NULL), stripped text, sequence and sort
+    // order, and the post-commit chain runs the `post_save` fire Django's
+    // create fires (no m2m legs: the serializer runs with an EMPTY
+    // context on this endpoint). The created activity keeps its
+    // driver-side emit in the caller (v1 key omission plus the intake
+    // `intake=` extra).
+    let fields = IssueFieldSet {
+        id: Uuid::new_v4(),
+        created_at: cycle_mod::micros_now(),
+        updated_at: cycle_mod::micros_now(),
+        created_by_id: Some(ctx.user_id),
+        updated_by_id: None,
         deleted_at: None,
+        project_id: project.id,
+        workspace_id: project.workspace_id,
+        parent_id: None,
+        state_id: Some(*triage_id),
         point: None,
+        estimate_point_id: None,
         name: name.to_owned(),
         description_json: description_json.clone(),
         description_html: description_html.to_owned(),
-        description_stripped: stripped,
+        description_stripped: None,
         description_binary: None,
-        priority: Some(priority.to_owned()),
-        complexity_score: Some(0),
+        priority: priority.to_owned(),
+        complexity_score: 0,
         start_date: None,
         target_date: None,
-        sequence_id,
-        sort_order,
+        sequence_id: 0,
+        sort_order: 65535.0,
         completed_at: None,
         archived_at: None,
         is_draft: false,
         external_source: None,
         external_id: None,
-        git_work_branch: String::new(),
-        created_via: None,
-        agent_executor: None,
-        created_by_id: Some(*user_id),
-        updated_by_id: None,
-        project_id: project.id,
-        workspace_id: project.workspace_id,
-        parent_id: None,
-        state_id: Some(*triage_id),
-        estimate_point_id: None,
         type_id: None,
-        assigned_pod_id: pod_id,
+        git_work_branch: String::new(),
+        workpad: String::new(),
+        created_via: None,
+        assigned_pod_id: None,
+        agent_executor: None,
+    };
+    let fire = fire_spec(&ctx.user_id, cycle_mod::micros_now());
+    let orm = state.orm().ok_or(Denial::ServerError)?;
+    let domain_ctx = write_ctx(ctx, project.workspace_id);
+    let transition: Arc<dyn IssueTransitionHook> =
+        Arc::new(AppTransitionHook::new(state, &ctx.pool));
+    let enqueue: Arc<dyn TaskEnqueueHook> = Arc::new(AppTaskEnqueueHook::new(&ctx.pool));
+    let outcome = domain::run(&domain_ctx, orm, |txn| {
+        let transition = transition.clone();
+        let enqueue = enqueue.clone();
+        let pool = ctx.pool.clone();
+        let domain_ctx = domain_ctx.clone();
+        Box::pin(async move {
+            txn.hooks_mut().register(transition);
+            txn.hooks_mut().register(enqueue);
+            domain_issues::create(
+                &domain_ctx,
+                txn,
+                &pool,
+                domain_issues::CreateIssue {
+                    fields,
+                    assignees: Vec::new(),
+                    default_assignee: None,
+                    labels: Vec::new(),
+                    fire,
+                    origin: None,
+                    activity_requested: Value::Null,
+                    activity_notification: None,
+                    activity_require_origin: false,
+                    skip_activity: true,
+                    model_activity: None,
+                    created_override: None,
+                },
+            )
+            .await
+        })
     })
+    .await
+    .map_err(domain_denial)?;
+    if outcome.chain.stopped().is_some() {
+        return Err(Denial::ServerError);
+    }
+    Ok(IssueRow::from_model(&outcome.issue))
 }
 
 /// `IntakeIssue.objects.create(intake_id, project_id, issue,
@@ -4701,14 +4541,14 @@ async fn intake_create(
     let name = coerce_create_name(name_value)?;
     let description_html = coerce_create_html(issue_data.get("description_html"))?;
     let issue = insert_issue(
-        &ctx.pool,
+        &state,
+        &ctx,
         &name,
         &description_json,
         &description_html,
         &priority,
         &project,
         &triage_id,
-        &ctx.user_id,
     )
     .await?;
     // `intake_id=intake.id` (`:197`): the AND-guard fallthrough 500s
@@ -4974,7 +4814,7 @@ async fn intake_update(
             Utc::now().timestamp(),
         );
         cycle_mod::enqueue_best_effort(&ctx.pool, &job).await;
-        save_issue_patch(&ctx.pool, pre_save_issue, patch, &ctx.user_id).await?;
+        save_issue_patch(&state, &ctx, pre_save_issue, patch).await?;
     }
 
     // `views/intake.py:416` serializes `IntakeIssueSerializer(intake_issue)`
@@ -5026,8 +4866,7 @@ async fn intake_update(
             .is_some()
             {
                 if let Some(default_id) = default_id {
-                    apply_triage_transition(&ctx.pool, &companion, &default_id, &ctx.user_id)
-                        .await?;
+                    apply_triage_transition(&state, &ctx, &companion, &default_id).await?;
                     transitioned = true;
                 }
             }
@@ -5166,7 +5005,58 @@ async fn intake_destroy(
         if v1_perm::delete_guard(is_creator, is_admin).is_err() {
             return Err(Denial::DeleteDenied);
         }
-        soft_delete_row(&ctx.pool, "issues", "issue", &issue.id, &ctx.user_id).await?;
+        // `issue.delete()` (`db/mixins.py:71-77`): stamp + full `save()`
+        // (the state legs run), the completion pair + fire Django's save
+        // fires, and the related-objects forward. No recent-visit delete
+        // and no `deleted` activity: Django's v1 destroy has neither.
+        // `delete()` stamps `deleted_at`, then `save()`'s `auto_now`
+        // moves `updated_at` — two clock reads.
+        let mut fields = issue.field_set();
+        fields.deleted_at = Some(cycle_mod::micros_now());
+        fields.updated_at = cycle_mod::micros_now();
+        let prev_state = issue.state_id;
+        let fire = fire_spec(&ctx.user_id, fields.updated_at);
+        let orm = state.orm().ok_or(Denial::ServerError)?;
+        let domain_ctx = write_ctx(&ctx, issue.workspace_id);
+        let transition: Arc<dyn IssueTransitionHook> =
+            Arc::new(AppTransitionHook::new(&state, &ctx.pool));
+        let enqueue: Arc<dyn TaskEnqueueHook> = Arc::new(AppTaskEnqueueHook::new(&ctx.pool));
+        let outcome = domain::run(&domain_ctx, orm, |txn| {
+            let transition = transition.clone();
+            let enqueue = enqueue.clone();
+            let pool = ctx.pool.clone();
+            let domain_ctx = domain_ctx.clone();
+            let slug = slug.clone();
+            Box::pin(async move {
+                txn.hooks_mut().register(transition);
+                txn.hooks_mut().register(enqueue);
+                domain_issues::soft_delete(
+                    &domain_ctx,
+                    txn,
+                    &pool,
+                    domain_issues::SoftDeleteIssue {
+                        fields,
+                        prev_state,
+                        fire,
+                        origin: None,
+                        slug,
+                        completion: true,
+                        visit_delete: false,
+                        activity_current: Value::Null,
+                        activity_notification: None,
+                        activity_require_origin: false,
+                        activity_subscriber: None,
+                        skip_activity: true,
+                    },
+                )
+                .await
+            })
+        })
+        .await
+        .map_err(domain_denial)?;
+        if outcome.chain.stopped().is_some() {
+            return Err(Denial::ServerError);
+        }
     }
     soft_delete_row(
         &ctx.pool,
@@ -15815,21 +15705,6 @@ mod tests {
         assert!(coerce_create_html(Some(&Value::from(7))).is_err());
         assert!(coerce_create_html(Some(&Value::from(5.0))).is_err());
         assert!(coerce_create_html(Some(&Value::Null)).is_err());
-    }
-
-    #[test]
-    fn advisory_key_matches_sha_prefix() {
-        // `convert_uuid_to_integer` (`utils/uuid.py:19-26`): the
-        // first 8 sha256 *bytes*, signed big-endian.
-        let id = Uuid::parse_str("123e4567-e89b-12d3-a456-426614174000").unwrap();
-        assert_eq!(advisory_key(&id), {
-            use sha2::Digest;
-            let digest = sha2::Sha256::digest(id.to_string().as_bytes());
-            i64::from_be_bytes([
-                digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6],
-                digest[7],
-            ])
-        });
     }
 
     #[test]
