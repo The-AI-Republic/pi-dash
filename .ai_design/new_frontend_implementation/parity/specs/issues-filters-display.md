@@ -99,8 +99,9 @@ nothing.
 
 Operators come in plain and negated pairs (ISS-099), stored as a base
 operator plus a negation flag; every enum property offers `is` and
-`is not`, while a date condition's menu offers `is` / `between` (range,
-not negation). Value slots adapt to the field kind: searchable
+`is not`, while date conditions keep both lookup families (`is` / `is
+not` for one day, `between` / `not between` for a range). Value slots
+adapt to the field kind: searchable
 single pick (re-picking the current value clears it; opens by itself
 when empty; dash placeholder when unset), searchable multi pick (first
 two picks as chips, overflow counted; same empty behavior), single date

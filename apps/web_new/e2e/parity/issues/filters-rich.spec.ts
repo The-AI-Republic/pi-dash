@@ -281,16 +281,42 @@ test(
         await driver.pickRichOperator("is not");
         expect(await driver.richFilterRowText()).toContain("is not");
         // Negation is stored as base operator + flag, not a separate lookup.
-        await expectStoredRichFilters(seed, "not", "priority", "urgent");
+        await expectStoredPriorityLeaf(seed, { negated: true });
         return;
       }
 
       expect(await driver.isSingleRichOperatorLocked()).toBe(true);
-      // The locked operator still stores the picked value normally.
-      await expectStoredRichFilters(seed, "priority", "urgent");
+      // The locked operator still stores the picked value normally, with no
+      // negation wrapper around the leaf (the OSS lock's observable).
+      await expectStoredPriorityLeaf(seed, { negated: false });
     });
   }
 );
+
+function containsNotNode(expression: unknown): boolean {
+  if (Array.isArray(expression)) return expression.some(containsNotNode);
+  if (typeof expression !== "object" || expression === null) return false;
+  const record = expression as Record<string, unknown>;
+  return "not" in record || Object.values(record).some(containsNotNode);
+}
+
+/** Poll once for the lone priority leaf and whether a `not` node wraps it. */
+async function expectStoredPriorityLeaf(seed: SeedFacts, expected: { negated: boolean }) {
+  await expect
+    .poll(
+      async () => {
+        const stored = (await serverUserProperties(seed.workspaceSlug, seed.projectId, session)).rich_filters;
+        const json = JSON.stringify(stored);
+        return {
+          negated: containsNotNode(stored),
+          hasPriority: json.includes("priority"),
+          hasUrgent: json.includes("urgent"),
+        };
+      },
+      { timeout: 30_000 }
+    )
+    .toEqual({ ...expected, hasPriority: true, hasUrgent: true });
+}
 
 const SINGLE_ROWS = ["ISS-100"];
 test(
