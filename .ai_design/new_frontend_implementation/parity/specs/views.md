@@ -1128,11 +1128,33 @@ limits were measured, not assumed:
   comes back with no `anchor` key, on both the project and workspace
   routes.
 
-VIEW-019 and VIEW-020 are therefore `blocked: cloud view write path stores
-neither access nor anchor` until NEWFRONT-972 lands; the slot code already
-fails loudly rather than faking the state. VIEW-040 needs no server change
+VIEW-019 and VIEW-020 were therefore `blocked: cloud view write path stores
+neither access nor anchor` until NEWFRONT-972 landed; the slot code already
+failed loudly rather than faking the state. VIEW-040 needs no server change
 — its persist is the custom's `display_filters` PATCH, an OSS endpoint —
 so its cloud leg is run work, not a product gap.
+
+**Gate note (NEWFRONT-745, 2026-10-27, later the same day).** NEWFRONT-972
+merged into `web-new-dev` as `95edef538` (`IssueViewSerializer` takes
+`access` and `anchor`; migration `0170_issueview_anchor`; both scopes
+echo). The gate's two cloud legs are written and pass on a cloud-edition
+`web_new` tower against that API:
+
+- VIEW-019 — `project-create-dialog.spec.ts`, "cloud: the access selector
+  creates an owner-only view and the badge follows it": picking owner-only
+  stores `access: 0` and shows the Private row badge and the detail lock;
+  leaving the default stores `access: 1` and shows Public.
+- VIEW-020 — `project-row-actions.spec.ts`, "cloud: publishing shows Live
+  and a link, unpublishing clears both": the owner's menu offers Publish,
+  publishing stores an `anchor` and shows a link built from it, the row
+  carries the Live marker, and unpublishing clears the anchor and the
+  marker.
+
+Both legs are target-only: they skip unless the new build declares the
+cloud edition (`PARITY_NEW_EDITION=cloud`), and they skip on the oracle
+project for the reason above. Their rows turn `new green` when the final
+full-area proof run is green; the OSS halves of the same files stay
+unchanged and green on all three targets.
 
 ## 15. Bug markers (observed → intended → adjudication)
 
