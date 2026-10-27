@@ -36,6 +36,7 @@ export {
   mergeDisplayPrefs,
   parseDisplayPrefs,
   selectDisplayPrefs,
+  switchLayoutPrefs,
   useEntityPrefs,
   useUpdateDisplayPrefs,
 } from "./prefs/displayPrefs.js";

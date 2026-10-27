@@ -3,7 +3,13 @@
 // See the LICENSE file for details.
 import { describe, expect, it } from "vitest";
 import type { PrefsRecord } from "./entities.js";
-import { buildPrefsPatch, parseDisplayPrefs, selectDisplayPrefs } from "./displayPrefs.js";
+import {
+  buildPrefsPatch,
+  parseDisplayPrefs,
+  selectDisplayPrefs,
+  switchLayoutPrefs,
+  type DisplayPrefs,
+} from "./displayPrefs.js";
 
 function record(overrides: Partial<PrefsRecord> = {}): PrefsRecord {
   return {
@@ -162,5 +168,60 @@ describe("buildPrefsPatch", () => {
       properties: { state: false, priority: true },
     });
     expect(patch.display_properties).toEqual({ state: false, priority: true });
+  });
+});
+
+describe("switchLayoutPrefs", () => {
+  function prefs(overrides: Partial<DisplayPrefs> = {}): DisplayPrefs {
+    return {
+      layout: "list",
+      groupBy: null,
+      subGroupBy: null,
+      orderBy: "sort_order",
+      showEmptyGroups: false,
+      showSubIssues: true,
+      calendar: { mode: "month", showWeekends: false },
+      properties: {},
+      ...overrides,
+    };
+  }
+
+  it("seeds state grouping when switching to board with none set", () => {
+    expect(switchLayoutPrefs(prefs(), "kanban")).toEqual({
+      layout: "kanban",
+      groupBy: "state",
+      subGroupBy: null,
+    });
+  });
+
+  it("drops a stray sub-grouping when the grouping itself was unset", () => {
+    expect(switchLayoutPrefs(prefs({ subGroupBy: "priority" }), "kanban")).toEqual({
+      layout: "kanban",
+      groupBy: "state",
+      subGroupBy: null,
+    });
+  });
+
+  it("clears the sub-grouping when it equals the grouping", () => {
+    expect(switchLayoutPrefs(prefs({ groupBy: "priority", subGroupBy: "priority" }), "kanban")).toEqual({
+      layout: "kanban",
+      groupBy: "priority",
+      subGroupBy: null,
+    });
+  });
+
+  it("keeps an existing grouping and sub-grouping on the switch", () => {
+    expect(switchLayoutPrefs(prefs({ groupBy: "state", subGroupBy: "priority" }), "kanban")).toEqual({
+      layout: "kanban",
+      groupBy: "state",
+      subGroupBy: "priority",
+    });
+  });
+
+  it("leaves grouping alone when switching anywhere but the board", () => {
+    expect(switchLayoutPrefs(prefs(), "calendar")).toEqual({ layout: "calendar" });
+    expect(switchLayoutPrefs(prefs({ groupBy: "priority", subGroupBy: "priority" }), "list")).toEqual({
+      layout: "list",
+    });
   });
 });

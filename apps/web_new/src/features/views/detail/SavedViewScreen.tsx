@@ -39,6 +39,7 @@ import {
   stripPeekParams,
   mergeDisplayPrefs,
   parseDisplayPrefs,
+  switchLayoutPrefs,
   selectCreatableProjects,
   useWeekStart,
   type IssueSearch,
@@ -297,7 +298,7 @@ function SavedViewBody({
       offered={VIEW_LAYOUTS}
       display={display}
       onDisplayChange={(next) => {
-        setDisplay((current) => mergeDisplayPrefs(current, { layout: next }));
+        setDisplay((current) => mergeDisplayPrefs(current, switchLayoutPrefs(current, next)));
       }}
       renderLayout={(active, prefs) => (
         <ViewLayoutBody

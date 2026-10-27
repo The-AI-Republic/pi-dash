@@ -116,6 +116,22 @@ export function mergeDisplayPrefs(current: DisplayPrefs, partial: Partial<Displa
 }
 
 /**
+ * The display transition for a layout switch (ISS-243). A switch to the
+ * board seeds state grouping when none is set and drops a sub-grouping
+ * that would equal the grouping, so the board opens in state columns
+ * instead of one flat column; every other switch only moves the layout.
+ */
+export function switchLayoutPrefs(current: DisplayPrefs, kind: LayoutKind): Partial<DisplayPrefs> {
+  if (kind !== "kanban") return { layout: kind };
+  if (current.groupBy === null) return { layout: kind, groupBy: "state", subGroupBy: null };
+  return {
+    layout: kind,
+    groupBy: current.groupBy,
+    subGroupBy: current.subGroupBy === current.groupBy ? null : current.subGroupBy,
+  };
+}
+
+/**
  * Complete display_filters/display_properties objects for a partial
  * update. Unknown stored keys ride along untouched inside each object;
  * the filters/rich_filters top-level keys are never sent, so the server

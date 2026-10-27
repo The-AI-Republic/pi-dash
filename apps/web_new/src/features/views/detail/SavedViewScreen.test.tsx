@@ -83,6 +83,9 @@ vi.mock("../../issues/layouts/IssuesLayoutRoot.js", () => ({
         <button type="button" onClick={() => props.onDisplayChange?.("calendar")}>
           switch-calendar
         </button>
+        <button type="button" onClick={() => props.onDisplayChange?.("kanban")}>
+          switch-board
+        </button>
         <div data-testid="root-header-actions">{props.headerActions}</div>
         <div data-testid="root-display">{props.displayControl}</div>
         <div data-testid="root-filter-control">{props.filterControl}</div>
@@ -490,6 +493,21 @@ describe("SavedViewScreen", () => {
     await waitFor(() => expect(screen.getByTestId("view-body")).toHaveAttribute("data-layout", "calendar"));
     // The record stays untouched until Update view persists the live copy.
     expect(harness.view).toMatchObject({ display_filters: { layout: "kanban" } });
+  });
+
+  it("seeds state grouping when the local switch moves to board (ISS-243)", async () => {
+    harness.view = {
+      ...makeView({ id: VIEW_ID, project: PROJECT_ID, name: "Triage" }),
+      display_filters: { layout: "list", group_by: null, order_by: "sort_order" },
+    };
+    renderScreen();
+    await waitFor(() => expect(screen.getByTestId("layout-root")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "switch-board" }));
+    await waitFor(() =>
+      expect(filterHarness.viewDisplay).toMatchObject({ layout: "kanban", groupBy: "state", subGroupBy: null })
+    );
+    // The record stays untouched until Update view persists the live copy.
+    expect(harness.view).toMatchObject({ display_filters: { layout: "list" } });
   });
 
   it("hosts the filter toggle, display and add entry on an unlocked view", async () => {

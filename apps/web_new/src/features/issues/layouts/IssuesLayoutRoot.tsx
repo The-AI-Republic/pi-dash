@@ -19,7 +19,12 @@ import { HighlightProvider } from "../freshness/highlight.js";
 import { LayoutBody } from "../loaders/LayoutBody.js";
 import { IssuesLoaderProvider, useIssuesLoader } from "../loaders/loaderContext.js";
 import { MutationSpinner } from "../loaders/MutationSpinner.js";
-import { selectDisplayPrefs, useUpdateDisplayPrefs, type DisplayPrefs } from "../prefs/displayPrefs.js";
+import {
+  selectDisplayPrefs,
+  switchLayoutPrefs,
+  useUpdateDisplayPrefs,
+  type DisplayPrefs,
+} from "../prefs/displayPrefs.js";
 import { prefsQueryOptions } from "../prefs/prefsQuery.js";
 import type { IssuesEntity } from "../prefs/entities.js";
 import { resolveActiveLayout, type LayoutKind } from "./kinds.js";
@@ -106,7 +111,7 @@ function IssuesLayoutRootInner({
   const { isMutationLoading } = useIssuesLoader();
   const handleSwitch = (kind: LayoutKind): void => {
     if (onDisplayChange !== undefined) onDisplayChange(kind);
-    else updateDisplayPrefs({ layout: kind });
+    else updateDisplayPrefs(switchLayoutPrefs(prefs, kind));
   };
   return (
     <div className="flex h-full flex-col">
