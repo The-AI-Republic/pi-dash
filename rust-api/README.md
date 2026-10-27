@@ -45,7 +45,10 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 ## Local checks
 
-GitHub CI is advisory; run these locally before pushing:
+GitHub CI is advisory -- including the `rust-api` and `rust-api-write-guard`
+checks that run on pull requests into `rust-dev`. It does not gate merge, per
+the rulebook; but a red PR check must be explained in the PR body before merge.
+Run these locally before pushing:
 
 ```sh
 cd rust-api
