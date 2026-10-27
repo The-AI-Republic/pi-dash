@@ -23,6 +23,8 @@ interface StubNode {
   waitFor?: (options?: unknown) => Promise<void>;
   isVisible?: () => Promise<boolean>;
   isDisabled?: () => Promise<boolean>;
+  innerText?: () => Promise<string>;
+  allInnerTexts?: () => Promise<string[]>;
   evaluate?: (fn: (element: never) => unknown) => Promise<unknown>;
   locator?: (selector: string) => Locator;
   getByTestId?: (id: string) => Locator;
@@ -32,6 +34,7 @@ interface StubNode {
   filter?: (options: unknown) => Locator;
   first?: () => Locator;
   nth?: (index: number) => Locator;
+  or?: (other: Locator) => Locator;
 }
 
 function node(overrides: Partial<StubNode> = {}): Locator {
@@ -47,6 +50,8 @@ function node(overrides: Partial<StubNode> = {}): Locator {
     waitFor: async () => undefined,
     isVisible: async () => true,
     isDisabled: async () => false,
+    innerText: async () => "",
+    allInnerTexts: async () => [],
     evaluate: async () => undefined,
     ...overrides,
   };
@@ -59,6 +64,7 @@ function node(overrides: Partial<StubNode> = {}): Locator {
     filter: () => self as unknown as Locator,
     first: () => self as unknown as Locator,
     nth: () => self as unknown as Locator,
+    or: () => self as unknown as Locator,
   };
   for (const [name, value] of Object.entries(chain)) {
     if (self[name as keyof StubNode] === undefined) {
@@ -84,6 +90,7 @@ interface PageParts {
   reload?: () => Promise<void>;
   evaluate?: (fn: () => unknown) => Promise<unknown>;
   keyboardPress?: (key: string) => Promise<void>;
+  keyboardType?: (text: string) => Promise<void>;
 }
 
 function pageOf(parts: PageParts = {}): Page {
@@ -98,7 +105,10 @@ function pageOf(parts: PageParts = {}): Page {
     waitForLoadState: (state?: unknown) => parts.waitForLoadState?.(state) ?? Promise.resolve(),
     reload: () => parts.reload?.() ?? Promise.resolve(),
     evaluate: (fn: () => unknown) => parts.evaluate?.(fn) ?? Promise.resolve(undefined),
-    keyboard: { press: (key: string) => parts.keyboardPress?.(key) ?? Promise.resolve() },
+    keyboard: {
+      press: (key: string) => parts.keyboardPress?.(key) ?? Promise.resolve(),
+      type: (text: string) => parts.keyboardType?.(text) ?? Promise.resolve(),
+    },
   } as unknown as Page;
 }
 
@@ -501,5 +511,199 @@ describe("ModalDriver", () => {
         selector === "form" ? node({ getByRole: (role: string) => (role === "button" ? chip : absent()) }) : absent(),
     });
     await expect(new WebNewDriver(pageWithDialog(dialog)).modalProjectName()).resolves.toBe("Parity Project");
+  });
+});
+
+describe("IssueModalProjectPicker", () => {
+  const LABEL_SPANS = ':scope > span:not([aria-hidden="true"])';
+
+  function chipDialog(chip: Locator): Locator {
+    return dialogMock({
+      onLocator: (selector: string) =>
+        selector === "form" ? node({ getByRole: (role: string) => (role === "button" ? chip : absent()) }) : absent(),
+    });
+  }
+
+  function optionList(options: Locator): (role: string) => Locator {
+    return (role: string) => (role === "listbox" ? options : absent());
+  }
+
+  it("reads the project value through the chip name", async () => {
+    const chip = node({
+      textContent: async () => "PParity Project",
+      locator: (selector: string) =>
+        selector === "span.truncate" ? node({ textContent: async () => "Parity Project" }) : absent(),
+    });
+    await expect(new WebNewDriver(pageWithDialog(chipDialog(chip))).issueModalProjectValue()).resolves.toBe(
+      "Parity Project"
+    );
+  });
+
+  it("opens the picker on the chip and settles on options", async () => {
+    const calls: string[] = [];
+    const chip = node({
+      click: async () => {
+        calls.push("chip");
+      },
+    });
+    const options = node({
+      getByRole: (role: string) =>
+        role === "option"
+          ? node({
+              waitFor: async () => {
+                calls.push("settled");
+              },
+            })
+          : absent(),
+    });
+    const page = pageWithDialog(chipDialog(chip), {}, optionList(options));
+    await new WebNewDriver(page).issueModalProjectOpenPicker();
+    expect(calls).toEqual(["chip", "settled"]);
+  });
+
+  it("skips the chip click when the search box is already mounted", async () => {
+    let clicked = false;
+    const chip = node({
+      click: async () => {
+        clicked = true;
+      },
+    });
+    const page = pageWithDialog(chipDialog(chip), {}, (role: string) =>
+      role === "combobox" ? node() : role === "listbox" ? node() : absent()
+    );
+    await new WebNewDriver(page).issueModalProjectOpenPicker();
+    expect(clicked).toBe(false);
+  });
+
+  it("reads option labels from the label spans only", async () => {
+    const options = node({
+      getByRole: (role: string) =>
+        role === "option"
+          ? node({
+              locator: (selector: string) =>
+                selector === LABEL_SPANS ? node({ allInnerTexts: async () => [" Parity ", "B", ""] }) : absent(),
+            })
+          : absent(),
+    });
+    const page = pageWithDialog(dialogMock({}), {}, optionList(options));
+    await expect(new WebNewDriver(page).issueModalProjectOptionTexts()).resolves.toEqual(["Parity", "B"]);
+  });
+
+  it("types the search query into the picker search box", async () => {
+    let typed = "";
+    const page = pageWithDialog(dialogMock({}), {}, (role: string) =>
+      role === "combobox" ? node({ pressSequentially: async (text: string) => void (typed = text) }) : absent()
+    );
+    await new WebNewDriver(page).issueModalProjectSearch("Bravo");
+    expect(typed).toBe("Bravo");
+  });
+
+  it("reads the empty line only when no options render", async () => {
+    const withOptions = node({ getByRole: () => node({ count: async () => 2 }) });
+    const withOptionsPage = pageWithDialog(dialogMock({}), {}, optionList(withOptions));
+    await expect(new WebNewDriver(withOptionsPage).issueModalProjectEmptyText()).resolves.toBe("");
+
+    const empty = node({
+      getByRole: () => node({ count: async () => 0 }),
+    });
+    const emptyPage = pageWithDialog(dialogMock({}), {}, (role: string) => {
+      if (role === "listbox") return empty;
+      if (role === "status") return node({ innerText: async () => "No matching results" });
+      return absent();
+    });
+    await expect(new WebNewDriver(emptyPage).issueModalProjectEmptyText()).resolves.toBe("No matching results");
+
+    const barePage = pageWithDialog(dialogMock({}), {}, (role: string) => (role === "listbox" ? empty : absent()));
+    await expect(new WebNewDriver(barePage).issueModalProjectEmptyText()).resolves.toBe("");
+  });
+
+  it("picks the option naming the project", async () => {
+    let picked = "";
+    const options = node({
+      getByRole: (role: string, roleOptions?: unknown) => {
+        if (role !== "option") return absent();
+        const want = (roleOptions as { name?: string } | undefined)?.name ?? "";
+        return node({
+          click: async () => {
+            picked = want;
+          },
+        });
+      },
+    });
+    const page = pageWithDialog(dialogMock({}), {}, optionList(options));
+    await new WebNewDriver(page).issueModalProjectPick("Bravo");
+    expect(picked).toBe("Bravo");
+  });
+
+  it("presses Escape once when the popup closes at once", async () => {
+    const presses: string[] = [];
+    const options = node({ waitFor: async () => undefined });
+    const page = pageWithDialog(
+      dialogMock({}),
+      { keyboardPress: async (key: string) => void presses.push(key) },
+      (role: string) => (role === "listbox" ? options : absent())
+    );
+    await new WebNewDriver(page).issueModalProjectPressEscape();
+    expect(presses).toEqual(["Escape"]);
+  });
+
+  it("presses Escape again when the first only clears the query", async () => {
+    const presses: string[] = [];
+    let waits = 0;
+    const options = node({
+      waitFor: async () => {
+        waits += 1;
+        if (waits === 1) throw new Error("still open");
+      },
+    });
+    const page = pageWithDialog(
+      dialogMock({}),
+      { keyboardPress: async (key: string) => void presses.push(key) },
+      (role: string) => (role === "listbox" ? options : absent())
+    );
+    await new WebNewDriver(page).issueModalProjectPressEscape();
+    expect(presses).toEqual(["Escape", "Escape"]);
+  });
+
+  it("fills the title through real keystrokes", async () => {
+    const calls: string[] = [];
+    const field = node({
+      click: async () => {
+        calls.push("focus");
+      },
+      inputValue: async () => "Hello",
+    });
+    const dialog = node({
+      getByPlaceholder: (text: string) => (text === "Title" ? field : absent()),
+    });
+    const page = pageWithDialog(
+      dialog,
+      {
+        keyboardPress: async (key: string) => void calls.push(`press:${key}`),
+        keyboardType: async (text: string) => void calls.push(`type:${text}`),
+      },
+      () => absent()
+    );
+    await new WebNewDriver(page).issueModalFillTitle("Hello");
+    expect(calls).toEqual(["focus", "press:ControlOrMeta+a", "press:Backspace", "type:Hello"]);
+  });
+
+  it("submits and waits for the dialog to detach", async () => {
+    const calls: string[] = [];
+    const dialog = node({
+      locator: (selector: string) =>
+        selector === 'button[type="submit"]'
+          ? node({
+              click: async () => {
+                calls.push("submit");
+              },
+            })
+          : absent(),
+      waitFor: async (options?: unknown) => {
+        calls.push(`wait:${JSON.stringify(options)}`);
+      },
+    });
+    await new WebNewDriver(pageWithDialog(dialog)).issueModalSubmit();
+    expect(calls).toEqual(["submit", `wait:${JSON.stringify({ state: "detached", timeout: 60_000 })}`]);
   });
 });

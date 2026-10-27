@@ -5202,40 +5202,90 @@ export class WebNewDriver implements ParityDriver {
     );
   }
 
+  /** The modal project picker's option list (kit Combobox popup). */
+  private issueModalProjectListbox(): Locator {
+    return this.page.getByRole("listbox", { name: "Projects" });
+  }
+
+  /** The picker's search box; mounted whenever its popup is open. */
+  private issueModalProjectSearchBox(): Locator {
+    return this.page.getByRole("combobox", { name: "Search projects" });
+  }
+
   async issueModalProjectValue(): Promise<string> {
-    return todo("issueModalProjectValue");
+    return this.modalProjectName();
   }
 
   async issueModalProjectOpenPicker(): Promise<void> {
-    return todo("issueModalProjectOpenPicker");
+    // Idempotent: Escape-after-search leaves the popup open (it only
+    // clears the query), so a step that follows one must not toggle it
+    // shut with a blind click — and an open-but-empty popup has no
+    // listbox, so the search box is the open signal.
+    if ((await this.issueModalProjectSearchBox().count()) > 0) return;
+    await this.modalProjectChip().click({ timeout: WebNewDriver.WAIT_MS });
+    // Settle: options or the empty line — the project read is lazy on
+    // open, so a bare attached-wait races the loading row.
+    const listbox = this.issueModalProjectListbox();
+    const settled = listbox
+      .getByRole("option")
+      .first()
+      .or(this.page.getByRole("status").filter({ hasText: "No matching results" }));
+    await settled.first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async issueModalProjectOptionTexts(): Promise<string[]> {
-    return todo("issueModalProjectOptionTexts");
+    // Kit options pair an aria-hidden glyph with the label, so only the
+    // label spans are read: mark initials would otherwise glue onto
+    // project names.
+    const texts = await this.issueModalProjectListbox()
+      .getByRole("option")
+      .locator(':scope > span:not([aria-hidden="true"])')
+      .allInnerTexts();
+    return texts.map((text) => text.trim()).filter((text) => text.length > 0);
   }
 
-  async issueModalProjectSearch(_query: string): Promise<void> {
-    return todo("issueModalProjectSearch");
+  async issueModalProjectSearch(query: string): Promise<void> {
+    const input = this.issueModalProjectSearchBox();
+    await input.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await input.pressSequentially(query, { timeout: WebNewDriver.WAIT_MS });
   }
 
   async issueModalProjectEmptyText(): Promise<string> {
-    return todo("issueModalProjectEmptyText");
+    if ((await this.issueModalProjectListbox().getByRole("option").count()) > 0) return "";
+    const empty = this.page.getByRole("status").filter({ hasText: "No matching results" }).first();
+    if ((await empty.count()) === 0) return "";
+    return ((await empty.innerText()) ?? "").trim();
   }
 
-  async issueModalProjectPick(_text: string): Promise<void> {
-    return todo("issueModalProjectPick");
+  async issueModalProjectPick(text: string): Promise<void> {
+    await this.issueModalProjectListbox()
+      .getByRole("option", { name: text })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async issueModalProjectPressEscape(): Promise<void> {
-    return todo("issueModalProjectPressEscape");
+    await this.page.keyboard.press("Escape");
+    // Escape in a non-empty search box only clears the query (the popup
+    // stays open), so close again when it is still attached after a
+    // bounded wait; never press blindly twice — a stray Escape would
+    // dismiss the whole create modal.
+    const listbox = this.issueModalProjectListbox();
+    const stillOpen = await listbox.waitFor({ state: "detached", timeout: 3_000 }).then(
+      () => false,
+      () => true
+    );
+    if (stillOpen) await this.page.keyboard.press("Escape");
+    await listbox.waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
 
-  async issueModalFillTitle(_title: string): Promise<void> {
-    return todo("issueModalFillTitle");
+  async issueModalFillTitle(title: string): Promise<void> {
+    await this.fillCreateTitle(title);
   }
 
   async issueModalSubmit(): Promise<void> {
-    return todo("issueModalSubmit");
+    await this.submitCreateModal();
+    await this.createDialog().waitFor({ state: "detached", timeout: 60_000 });
   }
 
   /**
