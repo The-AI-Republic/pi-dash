@@ -354,10 +354,15 @@ export const SubIssueSection = React.forwardRef<SubIssueSectionHandle, SubIssueS
     />
   );
 
-  // Nothing has arrived yet: draw the header, its count-free title, the
-  // add entry and the busy row until the read settles, so a collapsed or
-  // remounted parent keeps its toggle and its first-child path.
+  // Nothing has arrived yet. While the read is in flight the section
+  // renders nothing but its dialogs (ISS-173): a childless parent shows
+  // no header at all, and the widget action row keeps the first-child
+  // path through the handle. Only a failed read keeps the header, with
+  // the retry that lets the section recover without a remount.
   if (envelope === undefined) {
+    if (!query.isError) {
+      return dialogs;
+    }
     return (
       <div className="flex flex-col gap-(--space-3)" data-testid="sub-issues-section">
         <div className="flex items-center gap-(--space-2)">
@@ -378,29 +383,29 @@ export const SubIssueSection = React.forwardRef<SubIssueSectionHandle, SubIssueS
             <span className="truncate text-14">{title}</span>
           </button>
           <span className="flex shrink-0 items-center gap-(--space-1)" onClick={(event) => event.stopPropagation()}>
-            {query.isError ? null : <Spinner size="small" aria-label="Loading sub-work items" />}
             {addMenu}
           </span>
         </div>
         {state.open ? (
           <div id="sub-issues-panel" className="grid overflow-hidden">
-            {query.isError ? (
-              <div className="flex items-center gap-(--space-2) px-(--space-2) py-(--space-1)">
-                <span className="text-body text-(--danger)">Couldn&apos;t load the sub-work items.</span>
-                <Button variant="ghost" size="small" onClick={() => void query.refetch()}>
-                  Try again
-                </Button>
-              </div>
-            ) : (
-              <p role="status" className="text-body px-(--space-2) py-(--space-1) text-(--text-muted)">
-                Loading sub-work items
-              </p>
-            )}
+            <div className="flex items-center gap-(--space-2) px-(--space-2) py-(--space-1)">
+              <span className="text-body text-(--danger)">Couldn&apos;t load the sub-work items.</span>
+              <Button variant="ghost" size="small" onClick={() => void query.refetch()}>
+                Try again
+              </Button>
+            </div>
           </div>
         ) : null}
         {dialogs}
       </div>
     );
+  }
+
+  // Settled with zero children: nothing but the dialogs, matching the
+  // other widgets (ISS-173). The handle still opens the add flows, so a
+  // first child created from the action row has somewhere to land.
+  if (rows.length === 0) {
+    return dialogs;
   }
 
   const rollup = subIssueRollup(envelope);

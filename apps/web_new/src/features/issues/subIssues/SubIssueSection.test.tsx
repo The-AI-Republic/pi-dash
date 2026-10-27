@@ -25,6 +25,7 @@ import { ISSUE_TYPE_FILTER_FLAG, TEAM_PROJECT_FILTER_FLAG } from "../edition/fla
 import { registerEditionIssuesProviders, resetEditionIssuesProviders } from "../edition/providers.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
 import { SubIssueSection, type SubIssueSectionHandle } from "./SubIssueSection.js";
+import { subIssuesKey } from "./queries.js";
 import { createParentState, useSubIssuesUiStore } from "./store.js";
 
 const WS = "acme";
@@ -272,7 +273,7 @@ function renderSection(props: Partial<React.ComponentProps<typeof SubIssueSectio
       />
     </QueryClientProvider>
   );
-  return { onOpen, ...view };
+  return { client, onOpen, ...view };
 }
 
 function resetStore(): void {
@@ -322,13 +323,13 @@ describe("SubIssueSection title", () => {
     expect(within(header).getByRole("img", { name: "0% done" })).toHaveAttribute("data-percent", "0");
   });
 
-  it("draws a childless parent's header so its first child can be added", async () => {
+  it("renders no section for a childless parent once the read settles", async () => {
     stubApi({ pages: [page({ sub_issues: [], state_distribution: {}, total_count: 0 })] });
-    renderSection();
-    const header = await screen.findByTestId("sub-issues-collapsible");
-    await waitFor(() => expect(within(header).getByText("0/0 Done")).toBeInTheDocument());
-    expect(screen.queryByText("Child one")).not.toBeInTheDocument();
-    expect(screen.getByTestId("sub-issues-add")).toBeInTheDocument();
+    const { client } = renderSection();
+    await waitFor(() => expect(client.getQueryState(subIssuesKey(WS, PROJECT, PARENT))?.status).toBe("success"));
+    expect(screen.queryByTestId("sub-issues-section")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("sub-issues-collapsible")).not.toBeInTheDocument();
+    expect(screen.queryByText("Loading sub-work items")).not.toBeInTheDocument();
   });
 
   it("reopens a collapsed section after a remount", async () => {
@@ -346,7 +347,7 @@ describe("SubIssueSection title", () => {
     expect(await screen.findByText("Child one")).toBeInTheDocument();
   });
 
-  it("keeps the header up while the first read is in flight", async () => {
+  it("renders nothing while the first read is in flight, then the header once children arrive", async () => {
     const waiting: (() => void)[] = [];
     createAppClient("https://api.test", (async (url: string) => {
       if (url.endsWith("/auth/get-csrf-token/")) return ok(url, 200, { csrf_token: "csrf" });
@@ -354,11 +355,15 @@ describe("SubIssueSection title", () => {
       return ok(url, 200, page());
     }) as never);
     renderSection();
-    const header = await screen.findByTestId("sub-issues-collapsible");
-    expect(header).toHaveTextContent("Sub-work items");
-    expect(await screen.findByText("Loading sub-work items")).toBeInTheDocument();
+    await waitFor(() => expect(waiting.length).toBeGreaterThan(0));
+    expect(screen.queryByTestId("sub-issues-section")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("sub-issues-collapsible")).not.toBeInTheDocument();
+    expect(screen.queryByText("Loading sub-work items")).not.toBeInTheDocument();
     for (const release of waiting) release();
-    await waitFor(() => expect(screen.queryByText("Loading sub-work items")).not.toBeInTheDocument());
+    await screen.findByText("Child one");
+    const header = screen.getByTestId("sub-issues-collapsible");
+    expect(within(header).getByText("Sub-work items")).toBeInTheDocument();
+    expect(within(header).getByText("0/1 Done")).toBeInTheDocument();
   });
 
   it("collapses and reopens, keeping the setting per parent", async () => {
@@ -894,7 +899,7 @@ describe("SubIssueSection branches", () => {
     expect(calls.some((call) => call.method === "PATCH")).toBe(false);
   });
 
-  it("draws the loading row until the first page arrives", async () => {
+  it("shows no loading copy while the first page is in flight", async () => {
     const waiting: (() => void)[] = [];
     createAppClient("https://api.test", (async (url: string) => {
       if (url.endsWith("/auth/get-csrf-token/")) return ok(url, 200, { csrf_token: "csrf" });
@@ -906,9 +911,12 @@ describe("SubIssueSection branches", () => {
       return ok(url, 200, {});
     }) as never);
     renderSection();
-    expect(await screen.findByText("Loading sub-work items")).toBeInTheDocument();
+    await waitFor(() => expect(waiting.length).toBeGreaterThan(0));
+    expect(screen.queryByText("Loading sub-work items")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("sub-issues-collapsible")).not.toBeInTheDocument();
     for (const release of waiting) release();
     expect(await screen.findByText("Child one")).toBeInTheDocument();
+    expect(screen.queryByText("Loading sub-work items")).not.toBeInTheDocument();
   });
 
   it("names the read failure and retries it", async () => {
