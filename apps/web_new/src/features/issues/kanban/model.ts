@@ -544,24 +544,128 @@ export function mergeBoardPage(current: BoardData, incoming: BoardData, owner?: 
 }
 
 /**
- * Fold rows the labels sub-grouped read omits back into the None lane
- * (ISS-031/NEWFRONT-158). A deleted label leaves a soft-deleted join row:
- * the server's labels grouping filters it out of every lane and out of
- * the envelope total, while the flat read still shows the issue as
- * unlabeled. Nothing in the sub-grouped envelope marks the omission, so
- * the caller always reads the board once without the label axis and this
- * merge decides what is missing.
+ * Fold rows the labels grouping read omits into the None column
+ * (ISS-028, ISS-031/NEWFRONT-158/961). A deleted label leaves a
+ * soft-deleted join row: the server's labels grouping filters it out of
+ * the column (or lane) it belongs to and out of the envelope total, while
+ * a read without the label axis still shows the issue as unlabeled.
+ * Nothing in the labels envelope marks the omission, so the caller always
+ * reads the board once without the label axis and this merge decides what
+ * is missing. The axis says which of the board's two label groupings the
+ * fallback serves.
  *
- * The fallback read is grouped only by the board's main dimension. A
- * column is trusted only when its fallback rows and every lane's window
- * for it are complete, so a partially paged column is never mistaken for
- * a ghost. Unlabeled rows
- * the board does not already show join None; the fallback's unlabeled
- * count is the count authority for the cell, and a column the ghost
- * emptied joins the board so its row has somewhere to render.
+ * The board's shape picks the fold. A board sub-grouped by labels takes a
+ * flat fallback and gains the recovered rows in the None lane (ISS-031).
+ * A board grouped by labels on its main axis takes a flat fallback, or a
+ * fallback grouped by the sub axis when lanes are on, and gains them in
+ * the None column, each row under the lane the fallback placed it in
+ * (ISS-028). Rows the board already renders never duplicate, a lane the
+ * board does not draw is left alone, and a column the ghost emptied joins
+ * the board so its row has somewhere to render.
+ *
+ * The fallback is complete: every recovered read walks all of its pages,
+ * so a row missing from the board is ghosted rather than simply not paged
+ * in yet. The fallback's unlabeled rows are then the count authority for
+ * the None column and for each lane's cell, which keeps every count equal
+ * to the cards behind it.
  */
-export function reconcileLabelGhosts(board: BoardData, fallback: BoardData): BoardData {
-  if (!board.subGrouped || fallback.subGrouped) return board;
+export function reconcileLabelGhosts(board: BoardData, fallback: BoardData, axis: "main" | "sub"): BoardData {
+  if (fallback.subGrouped) return board;
+  // A labels main axis (ISS-028) and a labels sub-group (ISS-031) differ
+  // in where the recovered rows belong: the column, or the None lane.
+  if (axis === "main") return recoverLabelColumnGhosts(board, fallback);
+  return recoverSubGroupedLabelGhosts(board, fallback);
+}
+
+/** Row ids already rendered in one column, across every lane. */
+function renderedIds(board: BoardData, columnKey: string): Set<string> {
+  const ids = new Set<string>();
+  for (const lane of board.lanes) {
+    for (const row of lane.cells[columnKey]?.rows ?? NO_ROWS) ids.add(row.id);
+  }
+  return ids;
+}
+
+/** The None column, appended when the labels read dropped it whole. */
+function noneColumn(columns: readonly BoardColumn[], total: number): BoardColumn[] {
+  if (columns.some((column) => column.key === "None")) return [...columns];
+  return [...columns, { key: "None", title: GROUP_NONE_LABEL, total }];
+}
+
+/**
+ * Ghost recovery for a board grouped by labels on its main axis. The
+ * fallback holds one cell per lane: the flat read's single `all` cell, or
+ * one cell per sub-axis value of a grouped read. The None column is the
+ * only column a ghost can belong to, since its label history is gone, so
+ * the fallback's unlabeled rows the board does not already render join
+ * that column, each under the lane the fallback placed it in. Each drawn
+ * lane's None cell counts its full window, recovered or still paging, and
+ * the column count is the sum of those cells, so every header equals the
+ * issues behind it. A lane the board does not draw stays out, and a ghost
+ * that no drawn lane can hold leaves the board untouched rather than
+ * adding a column with no cards. Only a settled lane recovers: while a
+ * drawn lane still holds part of its None window, a row it does not show
+ * may simply be unpaged, so that lane keeps its own cards and count and
+ * column paging stays in charge (NEWFRONT-961 review). The fallback read
+ * walks every page, so it is always complete and needs no such guard.
+ */
+function recoverLabelColumnGhosts(board: BoardData, fallback: BoardData): BoardData {
+  const fallbackLane = fallback.lanes[0];
+  if (fallbackLane === undefined) return board;
+  const present = renderedIds(board, "None");
+  const flat = fallback.columns.length === 1 && fallback.columns[0]?.key === "all";
+  const lanesByKey = new Map(board.lanes.map((lane) => [lane.key, lane]));
+  const missingByLane = new Map<string, IssueListItem[]>();
+  const unlabeledByLane = new Map<string, number>();
+  for (const [key, cell] of Object.entries(fallbackLane.cells)) {
+    const laneKey = flat ? "" : key;
+    const boardLane = lanesByKey.get(laneKey);
+    if (boardLane === undefined) continue;
+    // A row missing from a lane that still holds only part of its None
+    // window may simply not be paged in yet, so that lane waits: its
+    // cards and counts keep the column paging in charge rather than
+    // folding the unpaged remainder in early.
+    const boardCell = boardLane.cells["None"];
+    if (boardCell !== undefined && boardCell.rows.length < boardCell.total) continue;
+    const unlabeled = cell.rows.filter((row) => row.label_ids.length === 0);
+    if (unlabeled.length === 0) continue;
+    unlabeledByLane.set(laneKey, unlabeled.length);
+    const missing = unlabeled.filter((row) => !present.has(row.id));
+    if (missing.length > 0) missingByLane.set(laneKey, missing);
+  }
+  const placed = [...missingByLane.values()].reduce((count, rows) => count + rows.length, 0);
+  if (placed === 0) return board;
+  const lanes = board.lanes.map((entry) => {
+    const unlabeledCount = unlabeledByLane.get(entry.key);
+    if (unlabeledCount === undefined) return entry;
+    const cell = entry.cells["None"];
+    const rows = [...(cell?.rows ?? NO_ROWS), ...(missingByLane.get(entry.key) ?? NO_ROWS)];
+    const total = Math.max(cell?.total ?? 0, unlabeledCount, rows.length);
+    const cells = { ...entry.cells, None: { columnKey: "None", rows, total } };
+    return { ...entry, cells, total: Object.values(cells).reduce((sum, item) => sum + item.total, 0) };
+  });
+  // Every lane's final None cell counts, not only the ones that recovered a
+  // row: a settled lane that recovered sits beside one still paging, and
+  // the header must cover both or the recovered cards above the drawn
+  // total leave it short (NEWFRONT-961 review).
+  const laneTotal = lanes.reduce((sum, lane) => sum + (lane.cells["None"]?.total ?? 0), 0);
+  const columnTotal = Math.max(board.columns.find((column) => column.key === "None")?.total ?? 0, laneTotal);
+  const columns = noneColumn(board.columns, columnTotal).map((column) =>
+    column.key === "None" ? { ...column, total: columnTotal } : column
+  );
+  return {
+    columns,
+    lanes,
+    subGrouped: board.subGrouped,
+    total: Math.max(
+      board.total,
+      columns.reduce((sum, column) => sum + column.total, 0)
+    ),
+  };
+}
+
+/** Ghost recovery for a board sub-grouped by labels (ISS-031/NEWFRONT-158). */
+function recoverSubGroupedLabelGhosts(board: BoardData, fallback: BoardData): BoardData {
   const fallbackLane = fallback.lanes[0];
   if (fallbackLane === undefined) return board;
   const recovered = new Map<string, { rows: IssueListItem[]; unlabeled: number; total: number }>();
@@ -579,10 +683,7 @@ export function reconcileLabelGhosts(board: BoardData, fallback: BoardData): Boa
     });
     if (!settled) continue;
     const unlabeled = fallbackCell.rows.filter((row) => row.label_ids.length === 0);
-    const present = new Set<string>();
-    for (const lane of board.lanes) {
-      for (const row of lane.cells[column.key]?.rows ?? []) present.add(row.id);
-    }
+    const present = renderedIds(board, column.key);
     const missing = unlabeled.filter((row) => !present.has(row.id));
     if (missing.length === 0) continue;
     recovered.set(column.key, { rows: missing, unlabeled: unlabeled.length, total: fallbackCell.total });

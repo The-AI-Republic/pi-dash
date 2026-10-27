@@ -276,6 +276,104 @@ test(
 );
 
 test(
+  specTitle(["ISS-028"], "bug: a deleted label ghosts its issue from labels main grouping (NEWFRONT-961)"),
+  { tag: specTags(["ISS-028"]) },
+  async ({ driver, seed }) => {
+    // A scratch project keeps the ghost contained: the deleted label's
+    // through-row would otherwise haunt the seed's grouped reads for every
+    // later scenario (NEWFRONT-158). This scenario asserts the intended
+    // behavior the new app builds, so only its web_new leg asserts: the
+    // oracle leg pins the old bug and never fails on a fix (NEWFRONT-159
+    // precedent for a fix that is already merged).
+    const owner = await signInFreshUser(seed.email, seed.password);
+    const suffix = uniqueSuffix().slice(0, 6).toUpperCase();
+    const projectId = await serverCreateProject(
+      seed.workspaceSlug,
+      owner.cookie,
+      `KB ghost col ${suffix}`,
+      `KC${suffix}`
+    );
+    try {
+      const states = await serverListStates(seed.workspaceSlug, projectId, owner.cookie);
+      const home = states.find((state) => state.isDefault) ?? states[0];
+      if (!home) throw new Error("[parity] scratch project has no states.");
+      const ghostName = `KB col ghost ${suffix}`;
+      const ghostId = await serverCreateIssue(seed.workspaceSlug, projectId, owner.cookie, ghostName, home.id);
+      const keptName = `KB col kept ${suffix}`;
+      const keptId = await serverCreateIssue(seed.workspaceSlug, projectId, owner.cookie, keptName, home.id);
+      const plainName = `KB col plain ${suffix}`;
+      await serverCreateIssue(seed.workspaceSlug, projectId, owner.cookie, plainName, home.id);
+      const doomed = await serverCreateLabel(
+        seed.workspaceSlug,
+        projectId,
+        `KB doomed ${suffix}`,
+        "#666666",
+        owner.cookie
+      );
+      await serverPatchIssue(seed.workspaceSlug, projectId, ghostId, { label_ids: [doomed.id] }, owner.cookie);
+      await serverDeleteLabel(seed.workspaceSlug, projectId, doomed.id, owner.cookie);
+      const live = await serverCreateLabel(seed.workspaceSlug, projectId, `KB live ${suffix}`, "#777777", owner.cookie);
+      await serverPatchIssue(seed.workspaceSlug, projectId, keptId, { label_ids: [live.id] }, owner.cookie);
+      await openBoard(driver, seed, projectId, { group_by: "labels" });
+
+      await test.step("the ghosted issue renders under None with a count that matches its cards", async () => {
+        if (driver.target === "web_new") {
+          // Intended (NEWFRONT-961): the labels read drops the ghost from
+          // every column and from the total; the flat recovery read brings
+          // it back under None, so None holds the never-labeled issue and
+          // the ghost.
+          // The delete can settle a beat after its 204 — a column for the
+          // deleted label lingered past two consecutive reads in two of
+          // eight probes — so poll until the columns settle instead of
+          // reading once. A failed label, patch or delete leaves the ghost
+          // in a live column, which never matches this shape.
+          const settled = async () => {
+            const columns = await driver.kanbanColumns();
+            const none = columns.find((entry) => entry.name === "None");
+            const names = (await driver.kanbanCards()).map((card) => card.name);
+            return {
+              columns: columns.map((entry) => `${entry.name}:${entry.count}`).sort(),
+              noneCards: none === undefined ? [] : (await driver.kanbanColumnCards(none.name)).sort(),
+              hasKept: names.includes(keptName),
+            };
+          };
+          const expected = {
+            columns: [`${live.name}:1`, "None:2"].sort(),
+            noneCards: [ghostName, plainName].sort(),
+            hasKept: true,
+          };
+          await expect.poll(settled, { timeout: 120_000 }).toEqual(expected);
+          // Reload once more: the recovered count must survive a cold read,
+          // not just the render that first brought the ghost in.
+          await kanbanReloadWithRetry(driver);
+          await expect.poll(settled, { timeout: 120_000 }).toEqual(expected);
+          // Server state: the ghost row exists and is unlabeled — only the
+          // labels read drops it.
+          const rows = await serverIssues(seed.workspaceSlug, projectId, owner.cookie);
+          expect(rows).toHaveLength(3);
+          const ghost = await serverIssueDetails(seed.workspaceSlug, projectId, ghostId, owner.cookie);
+          expect(ghost.labelIds).toEqual([]);
+          return;
+        }
+        // Old app: the labels read drops the ghost from its None column and
+        // from the count alike, so None holds only the never-labeled issue
+        // and the ghost card renders nowhere (old bug NEWFRONT-961).
+        await expect
+          .poll(async () => (await driver.kanbanColumns()).map((entry) => `${entry.name}:${entry.count}`).sort(), {
+            timeout: 120_000,
+          })
+          .toEqual([`${live.name}:1`, "None:1"].sort());
+        expect((await driver.kanbanCards()).map((card) => card.name)).not.toContain(ghostName);
+      });
+    } finally {
+      await test.step("cleanup removes the scratch project", async () => {
+        await serverDeleteProject(seed.workspaceSlug, projectId, owner.cookie);
+      });
+    }
+  }
+);
+
+test(
   specTitle(["ISS-029"], "kanban swimlanes with cumulative counts"),
   { tag: specTags(["ISS-029"]) },
   async ({ driver, seed }) => {

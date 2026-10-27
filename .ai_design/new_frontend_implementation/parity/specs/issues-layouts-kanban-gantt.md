@@ -54,6 +54,17 @@ Endpoint shorthand (backend contracts, also used by the inventory): `BASE` =
   joins the board so its row has somewhere to render. Recovery waits for
   complete fallback rows and complete lane windows per column, so ordinary
   pagination can never be mistaken for a ghost.
+- Intended behavior (NEWFRONT-961): the same ghosting hits labels as the
+  board's *main* grouping. The labels envelope drops the issue from its
+  None column and from the column and board totals alike, so the header
+  undercounts too. A labels board therefore runs the same recovery read
+  without the label axis: flat when there are no lanes, or grouped by the
+  sub axis when there are, so the recovered row lands under the lane the
+  read placed it in. Unlabeled rows the None column does not already
+  render join it, the fallback's unlabeled count is the None column's
+  count, and a labels read that dropped None entirely gains the column
+  so the row has somewhere to render. A labels board with no ghosts is
+  left exactly as the server answered it.
 
 ### Collapse and empty groups (ISS-030–ISS-032)
 

@@ -101,7 +101,8 @@ export async function readBoard(
   client: ApiClient,
   workspaceSlug: string,
   input: BoardReadInput,
-  cursor?: string
+  cursor?: string,
+  perPage?: number
 ): Promise<BoardResponse> {
   const projectId = boardProjectId(input.entity);
   if (projectId === null) throw new Error("board reads need a project-scoped entity");
@@ -109,7 +110,7 @@ export async function readBoard(
   const subKey = serverGroupBy(effectiveSubGroup(input.groupBy, input.subGroupBy));
   const scope = input.entity.scope;
   if (serverKey === null) {
-    const flat = baseQuery(input, BOARD_PAGE_SIZE, cursor);
+    const flat = baseQuery(input, perPage ?? BOARD_PAGE_SIZE, cursor);
     if (scope === "cycle") return listCycleIssues(client, workspaceSlug, projectId, input.entity.cycleId, flat);
     if (scope === "module") return listModuleIssues(client, workspaceSlug, projectId, input.entity.moduleId, flat);
     return listIssues(client, workspaceSlug, projectId, flat);
@@ -118,12 +119,12 @@ export async function readBoard(
     // The sub-grouped serializer is only mounted on the project list; the
     // cycle and module pages never offer a sub-group axis.
     return listSubGroupedIssues(client, workspaceSlug, projectId, {
-      ...baseQuery(input, BOARD_SUB_PAGE_SIZE, cursor),
+      ...baseQuery(input, perPage ?? BOARD_SUB_PAGE_SIZE, cursor),
       groupBy: serverKey,
       subGroupBy: subKey,
     });
   }
-  const query = { ...baseQuery(input, BOARD_PAGE_SIZE, cursor), groupBy: serverKey };
+  const query = { ...baseQuery(input, perPage ?? BOARD_PAGE_SIZE, cursor), groupBy: serverKey };
   if (scope === "cycle") {
     return listGroupedCycleIssues(client, workspaceSlug, projectId, input.entity.cycleId, query);
   }
@@ -133,60 +134,74 @@ export async function readBoard(
   return listGroupedIssues(client, workspaceSlug, projectId, query);
 }
 
-/** Rows per recovery page while walking a label-grouped fallback. */
+/** Rows per recovery page while walking a label-recovery fallback. */
 export const LABEL_RECOVERY_PAGE_SIZE = 100;
 
 /**
- * Rows from a main-dimension grouped read, without the label axis. The
- * labels sub-grouped serializer can omit a row whose only label was
- * deleted (NEWFRONT-158); this read still carries it. It is project-scoped
- * because that is the only scope that offers sub-grouping, and it follows
- * the envelope's cursor chain so a column beyond the first window is not
- * mistaken for complete. A repeated cursor stops the walk.
+ * The read that recovers rows omitted by labels grouping, or undefined
+ * when the board has no label grouping to recover. A labels sub-group
+ * (ISS-031) keeps the board's main axis, because the lanes live there. A
+ * labels main axis (ISS-028) drops the label axis and keeps the sub axis
+ * when lanes are on, so recovered rows land under the lane the read
+ * placed them in; with no lanes it reads the flat list. Display
+ * dimensions stay display dimensions: `readBoard` maps them itself.
+ */
+export function labelRecoveryInput(input: BoardReadInput): BoardReadInput | undefined {
+  const main = input.groupBy;
+  if (main === null) return undefined;
+  const lanes = effectiveSubGroup(input.groupBy, input.subGroupBy);
+  if (main === "labels") return { ...input, groupBy: lanes, subGroupBy: null };
+  return lanes === "labels" ? { ...input, subGroupBy: null } : undefined;
+}
+
+/** Every page of one recovery read, in the envelope's cursor order. */
+async function readLabelRecoveryPages(
+  client: ApiClient,
+  workspaceSlug: string,
+  query: BoardReadInput
+): Promise<BoardResponse[]> {
+  const pages = [await readBoard(client, workspaceSlug, query, undefined, LABEL_RECOVERY_PAGE_SIZE)];
+  const asked = new Set<string>();
+  let last = pages[0]!;
+  while (last.next_page_results && last.next_cursor !== "" && !asked.has(last.next_cursor)) {
+    asked.add(last.next_cursor);
+    last = await readBoard(client, workspaceSlug, query, last.next_cursor, LABEL_RECOVERY_PAGE_SIZE);
+    pages.push(last);
+  }
+  return pages;
+}
+
+/**
+ * Rows from a read that carries no label axis. The labels grouping can
+ * omit a row whose label history is entirely deleted (NEWFRONT-158/961);
+ * only a read without that axis still carries it. Every page walks the
+ * envelope's cursor chain into one board, so a column beyond the first
+ * window is never mistaken for complete. A repeated cursor stops the walk.
  */
 export async function readLabelRecovery(
   client: ApiClient,
   workspaceSlug: string,
   input: BoardReadInput
-): Promise<GroupedIssueListResponse> {
-  const projectId = boardProjectId(input.entity);
-  if (projectId === null) throw new Error("label recovery needs a project-scoped entity");
-  const groupBy = serverGroupBy(input.groupBy);
-  if (groupBy === null) throw new Error("label recovery needs a grouped board");
-  const buckets: GroupedIssueListResponse["results"] = {};
-  const fold = (page: GroupedIssueListResponse) => {
-    for (const [key, bucket] of Object.entries(page.results)) {
-      const existing = buckets[key];
-      if (existing === undefined) {
-        buckets[key] = { results: [...bucket.results], total_results: bucket.total_results };
-        continue;
-      }
-      const seen = new Set(existing.results.map((row) => row.id));
-      buckets[key] = {
-        results: [...existing.results, ...bucket.results.filter((row) => !seen.has(row.id))],
-        total_results: bucket.total_results,
-      };
-    }
-  };
-  const firstPage = await listGroupedIssues(client, workspaceSlug, projectId, {
-    ...baseQuery(input, LABEL_RECOVERY_PAGE_SIZE),
-    groupBy,
-  });
-  fold(firstPage);
-  const asked = new Set<string>();
-  let page = firstPage;
-  while (page.next_page_results && page.next_cursor !== "" && !asked.has(page.next_cursor)) {
-    asked.add(page.next_cursor);
-    page = await listGroupedIssues(client, workspaceSlug, projectId, {
-      ...baseQuery(input, LABEL_RECOVERY_PAGE_SIZE, page.next_cursor),
-      groupBy,
-    });
-    fold(page);
-  }
-  return { ...firstPage, results: buckets };
+): Promise<BoardData> {
+  if (boardProjectId(input.entity) === null) throw new Error("label recovery needs a project-scoped entity");
+  const query = labelRecoveryInput(input);
+  if (query === undefined) throw new Error("label recovery needs a labels grouping");
+  const pages = await readLabelRecoveryPages(client, workspaceSlug, query);
+  let board = toBoard(pages[0]!, query);
+  for (const page of pages.slice(1)) board = mergeBoardPage(board, toBoard(page, query));
+  return board;
 }
 
-/** Grouped fallback read used to restore rows omitted by label grouping. */
+/**
+ * The recovery read a board enables, or undefined when it enables none.
+ * Only project-scoped boards recover: the grouped and sub-grouped
+ * serializers that answer a labels axis are mounted there alone.
+ */
+export function labelRecoveryForBoard(input: BoardReadInput): BoardReadInput | undefined {
+  return input.entity.scope === "project" ? labelRecoveryInput(input) : undefined;
+}
+
+/** Fallback read used to restore rows omitted by labels grouping. */
 export function labelRecoveryQueryOptions(client: ApiClient, workspaceSlug: string, input: BoardReadInput) {
   return queryOptions({
     queryKey: [...boardQueryKey(workspaceSlug, input), "label-recovery"],
@@ -346,16 +361,15 @@ export function useBoard(client: ApiClient, workspaceSlug: string, input: BoardR
   }
 
   const first = useQuery(boardQueryOptions(client, workspaceSlug, input));
-  const subKey = serverGroupBy(effectiveSubGroup(input.groupBy, input.subGroupBy));
   const primaryBoard = React.useMemo(
     () => (first.data === undefined ? null : toBoard(first.data, input)),
     [first.data, input]
   );
-  // The sub-grouped envelope carries no signal for a ghosted row: the
-  // server drops it from the lanes and from the total alike. Only the
-  // main-dimension read can show it, so labels boards always read one
-  // (NEWFRONT-158).
-  const recover = subKey === "labels__id" && input.entity.scope === "project";
+  // A labels envelope carries no signal for a ghosted row: the server drops
+  // it from the columns or lanes and from the total alike. Only a read
+  // without the label axis can show it, so every labels board reads one
+  // (NEWFRONT-158/961).
+  const recover = labelRecoveryForBoard(input) !== undefined;
   const extras = React.useMemo<BoardExtraPage[]>(
     () => [
       ...Object.entries(columnCursors).flatMap(([key, cursors]) =>
@@ -384,10 +398,10 @@ export function useBoard(client: ApiClient, workspaceSlug: string, input: BoardR
       merged = mergeBoardPage(merged, toBoard(query.data, input), pageOwner(extras[index]!));
     }
     if (recover && recovery.data !== undefined) {
-      merged = reconcileLabelGhosts(merged, toBoard(recovery.data, { ...input, subGroupBy: null }));
+      merged = reconcileLabelGhosts(merged, recovery.data, input.groupBy === "labels" ? "main" : "sub");
     }
     return merged;
-  }, [primaryBoard, extraQueries, extras, input, recover, recovery.data, subKey]);
+  }, [primaryBoard, extraQueries, extras, input, recover, recovery.data]);
 
   const flatPages = React.useMemo(() => {
     const pages: BoardResponse[] = [];
