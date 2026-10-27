@@ -26,6 +26,7 @@ import {
   SMTP_USER_KEY,
 } from "../emailConfig.js";
 import {
+  EMAIL_DISABLE_ERROR_LOG,
   EMAIL_DISABLE_FAILED_MESSAGE,
   EMAIL_DISABLE_FAILED_TITLE,
   EMAIL_DISABLED_TOAST_MESSAGE,
@@ -217,7 +218,10 @@ describe("AdminEmailPage", () => {
   });
 
   it("keeps the toggle on with the form visible when the disable fails (NEWFRONT-476 intent)", async () => {
-    vi.spyOn(console, "error").mockImplementation(() => {});
+    const errors: unknown[][] = [];
+    vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      errors.push(args);
+    });
     createAppClient(
       "https://api.test",
       stubTransport({
@@ -235,6 +239,9 @@ describe("AdminEmailPage", () => {
     await waitFor(() => expect(notifyError).toHaveBeenCalled());
     expect(notifyError).toHaveBeenCalledWith(EMAIL_DISABLE_FAILED_TITLE, EMAIL_DISABLE_FAILED_MESSAGE);
     expect(notifySuccess).not.toHaveBeenCalled();
+    // The parity scenario polls the console for this line through the
+    // real toggle path, so the page pins it too, not just the hook test.
+    expect(errors.some((args) => args[0] === EMAIL_DISABLE_ERROR_LOG)).toBe(true);
     expect(screen.getByTestId("admin-email-toggle")).toHaveAttribute("aria-checked", "true");
     expect(screen.getByTestId("admin-email-form")).toBeInTheDocument();
     expect(screen.getByTestId("admin-email-host")).toHaveValue("smtp.example.com");
