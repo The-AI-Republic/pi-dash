@@ -1417,7 +1417,6 @@ async fn render_current_instance<S: MoveStore>(
 /// for recoverable failures; [`MoveError::IssueNotFound`] /
 /// [`MoveError::ProjectNotFound`] propagate for the 404s.
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 pub async fn move_work_item_to_project<S: MoveStore>(
     store: &S,
     slug: &str,
@@ -1675,9 +1674,7 @@ pub async fn move_work_item_to_project<S: MoveStore>(
         issue: moved,
         current_instance,
         requested_data,
-        dispatch_immediate: options
-            .dispatch_immediate
-            .unwrap_or_else(|| handoff_runs.is_empty()),
+        dispatch_immediate: options.dispatch_immediate.unwrap_or(handoff_runs.is_empty()),
         post_commit,
         enqueues,
     }))

@@ -57,9 +57,15 @@ use super::error::DomainError;
 use super::issues_move::{MoveCreationOutboxes, MovePostCommitHook};
 use super::transition::IssueTransitionHook;
 use super::txn::WriteTxn;
+
+pub use super::issues_move::{
+    move_to_project, CreationDeps, MoveAdmissionCache, MoveDomainOutcome, MoveDrainError,
+    MoveInput, MoveRejection,
+};
 use crate::app_issues::issue_move::{
     issue_activity_kwargs as move_issue_activity_kwargs, move_model_activity_kwargs,
 };
+pub use crate::app_issues::issue_move::{MoveGuards, MoveOptions};
 use crate::app_issues::serializers_create::{
     m2m_batches, m2m_insert_sql, ASSIGNEE_CLEAR_SQL, DEFAULT_ASSIGNEE_EXISTS_SQL, LABEL_CLEAR_SQL,
 };
