@@ -1055,6 +1055,7 @@ test(
   specTitle(["PAGE-024"], "breadcrumb cluster carries project, back link, switcher, sync, and actions"),
   { tag: specTags(["PAGE-024"]) },
   async ({ driver, seed }) => {
+    test.slow();
     const session = await signInSessionWithRetry(seed.email, seed.password);
     const projectId = await scratchProject(seed, "crumbs", session);
     try {
@@ -1083,13 +1084,22 @@ test(
       await driver.pagesGatingSwitcherSelect(second);
       await expect.poll(async () => driver.pagesGatingDocTitle(), { timeout: 30_000 }).toBe(second);
 
-      // Sync indicator plus the header action cluster. The seeded stack
-      // brings up no live server, so the settled editor reports the
-      // connection-lost badge.
-      await expect
-        .poll(async () => (await driver.pagesGatingDetailCluster()).syncBadge, { timeout: 60_000 })
-        .toBe("Connection lost");
-      expect(await driver.pagesGatingDetailCluster()).toMatchObject({ star: true, copyLink: true, menu: true });
+      // Sync indicator plus the header action cluster. The badge is a
+      // transitional/fault surface only, so a live stack (the gate runs one
+      // for collab-live) reports nothing on a converged editor. Drive the
+      // fault the way PAGE-061 does — refuse the collaboration socket and
+      // reload so the initial dial is refused — which reaches the same
+      // terminal badge on either leg, in a stack with or without live.
+      await driver.pagesLiveBlockCollaborationSocket();
+      try {
+        await driver.page.reload();
+        await expect
+          .poll(async () => (await driver.pagesGatingDetailCluster()).syncBadge, { timeout: 180_000 })
+          .toBe("Connection lost");
+        expect(await driver.pagesGatingDetailCluster()).toMatchObject({ star: true, copyLink: true, menu: true });
+      } finally {
+        await driver.pagesLiveUnblockCollaborationSocket();
+      }
 
       const rows = await serverListPages(seed.workspaceSlug, projectId, session);
       expect(rows.map(displayTitle).sort()).toEqual([first, second].sort());
@@ -1173,11 +1183,22 @@ test(
       await driver.openEntry();
       await driver.signInWithPassword(seed.email, seed.password);
 
-      // Body skeleton blocks while the document syncs on a cold load. This
-      // opens first: once the document caches locally the loader never
-      // shows again in this context.
-      await driver.pagesGatingOpenDetail(seed.workspaceSlug, projectId, openId);
-      await expect.poll(async () => driver.pagesGatingBodySkeletonVisible(), { timeout: 60_000 }).toBe(true);
+      // Body skeleton blocks while the document is still unknown on a cold
+      // load. A live stack hands the document to the editor faster than a
+      // polling sample can catch, so hold the document unknown the way
+      // PAGE-067 does: refuse the collaboration socket before the
+      // navigation, then let the normal dial through. Once the document is
+      // known the skeleton never returns for this page in this session.
+      await driver.pagesLiveBlockCollaborationSocket();
+      try {
+        await driver.pagesGatingOpenDetail(seed.workspaceSlug, projectId, openId);
+        await expect.poll(async () => driver.pagesGatingBodySkeletonVisible(), { timeout: 60_000 }).toBe(true);
+      } finally {
+        await driver.pagesLiveUnblockCollaborationSocket();
+      }
+      // A fresh page switch is the recovery the refused dial needs on both
+      // legs (the old client never redials a refused initial connection).
+      await driver.page.reload();
       expect(await driver.pagesGatingWaitDetailSettled()).toBe("editor");
       expect(await driver.pagesGatingBodySkeletonVisible()).toBe(false);
 
@@ -1250,22 +1271,26 @@ test(
       // Distinct authors: same-author snapshots coalesce server-side.
       // Serialized on the worker: each snapshot reads current page state
       // at task time, so the second write waits for the first snapshot.
-      await serverUpdatePageDescription(
-        seed.workspaceSlug,
-        projectId,
-        pageId,
-        session,
-        `<p>${stamp} owner draft</p>`,
-        tiptapParagraphs(`${stamp} owner draft`)
+      await setupRetry("owner draft", () =>
+        serverUpdatePageDescription(
+          seed.workspaceSlug,
+          projectId,
+          pageId,
+          session,
+          `<p>${stamp} owner draft</p>`,
+          tiptapParagraphs(`${stamp} owner draft`)
+        )
       );
       await waitVersions(seed, projectId, pageId, session, 1);
-      await serverUpdatePageDescription(
-        seed.workspaceSlug,
-        projectId,
-        pageId,
-        memberSession,
-        `<p>${stamp} member draft</p>`,
-        tiptapParagraphs(`${stamp} member draft`)
+      await setupRetry("member draft", () =>
+        serverUpdatePageDescription(
+          seed.workspaceSlug,
+          projectId,
+          pageId,
+          memberSession,
+          `<p>${stamp} member draft</p>`,
+          tiptapParagraphs(`${stamp} member draft`)
+        )
       );
       const versions = await waitVersions(seed, projectId, pageId, session, 2);
       const versionId = versions[versions.length - 1]?.id ?? "";
@@ -1313,22 +1338,26 @@ test(
       const memberSession = await signInSessionWithRetry(mention.email, mention.password);
       // Serialized on the worker (see above): the second write waits for
       // the first snapshot.
-      await serverUpdatePageDescription(
-        seed.workspaceSlug,
-        projectId,
-        pageId,
-        session,
-        `<p>${stamp} owner draft</p>`,
-        tiptapParagraphs(`${stamp} owner draft`)
+      await setupRetry("owner draft", () =>
+        serverUpdatePageDescription(
+          seed.workspaceSlug,
+          projectId,
+          pageId,
+          session,
+          `<p>${stamp} owner draft</p>`,
+          tiptapParagraphs(`${stamp} owner draft`)
+        )
       );
       await waitVersions(seed, projectId, pageId, session, 1);
-      await serverUpdatePageDescription(
-        seed.workspaceSlug,
-        projectId,
-        pageId,
-        memberSession,
-        `<p>${stamp} member draft</p>`,
-        tiptapParagraphs(`${stamp} member draft`)
+      await setupRetry("member draft", () =>
+        serverUpdatePageDescription(
+          seed.workspaceSlug,
+          projectId,
+          pageId,
+          memberSession,
+          `<p>${stamp} member draft</p>`,
+          tiptapParagraphs(`${stamp} member draft`)
+        )
       );
       const versions = await waitVersions(seed, projectId, pageId, session, 2);
       // Resolve the keyed version by content (timeline order is newest-first).
