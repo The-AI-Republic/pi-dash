@@ -4,7 +4,7 @@
 // Oracle scenarios (NEWFRONT-315): page-detail title editing, the mark
 // picker, and the sticky formatting toolbar — typography, text marks,
 // alignment, lists, quote/code, tables, images, bar visibility, colors.
-// Rows: PAGE-026–PAGE-036.
+// Rows: PAGE-026–PAGE-036, PAGE-091.
 //
 // Behavior pinned live against the old app (prod oracle, no live server):
 // - The title is a single-h1 TipTap editor with no length cap and no count
@@ -684,6 +684,128 @@ test(
       await pagesToolbarPollDescriptionHtml(seed.workspaceSlug, projectId, pageId, session, "<table");
       await driver.pagesLiveOpenPageDetail(seed.workspaceSlug, projectId, pageId);
       await expect.poll(() => driver.pagesToolbarTableDims(), { timeout: 60_000 }).toBe("3x3");
+    } finally {
+      await serverCleanupProject(seed.workspaceSlug, projectId, session);
+    }
+  }
+);
+
+test(
+  specTitle(["PAGE-091"], "table row and column handles restructure the saved table"),
+  { tag: specTags(["PAGE-091"]) },
+  async ({ driver, seed }) => {
+    const session = await signInSession(seed.email, seed.password);
+    const { projectId, pageId } = await openFreshPage(driver, seed, session, "tablehandles");
+    try {
+      await driver.pagesToolbarSettle(seed.workspaceSlug, projectId, pageId);
+      await driver.pagesLiveTypeInBody("before");
+      await driver.pagesToolbarClick(12);
+      await expect.poll(() => driver.pagesToolbarTableDims(), { timeout: 15_000 }).toBe("3x3");
+
+      // Handles raise while editing; both menus hold their five entries
+      // in order above the colour section.
+      expect(await driver.pagesToolbarTableHandleVisible()).toBe(true);
+      await expect
+        .poll(() => driver.pagesToolbarTableMenuEntries("row"), { timeout: 15_000 })
+        .toEqual(["Insert above", "Insert below", "Duplicate", "Clear contents", "Delete"]);
+      await expect
+        .poll(() => driver.pagesToolbarTableMenuEntries("column"), { timeout: 15_000 })
+        .toEqual(["Insert left", "Insert right", "Duplicate", "Clear contents", "Delete"]);
+
+      // Both drivers act on the first row's handle, so the mark must go
+      // into the hovered row: the menu reads leave the caret wherever each
+      // editor drops it, so walk back to r0c0 first (Shift+Tab never
+      // appends a row). Then prove duplication copies content (the mark
+      // doubles), deleting the first row drops the original (the mark
+      // singles), and clearing the first row empties it.
+      for (let walk = 0; walk < 9; walk += 1) {
+        if ((await driver.pagesToolbarCaretCell()) === "r0c0") break;
+        await driver.pagesToolbarPressKey("Shift+Tab");
+      }
+      expect(await driver.pagesToolbarCaretCell()).toBe("r0c0");
+      await driver.pagesToolbarTypeText("dup-me");
+      await driver.pagesToolbarTableMenuPick("row", "Duplicate");
+      await expect.poll(() => driver.pagesToolbarTableDims(), { timeout: 15_000 }).toBe("4x3");
+      expect((await driver.pagesToolbarBodyHtml()).split("dup-me").length).toBe(3);
+      await driver.pagesToolbarTableMenuPick("row", "Delete");
+      await expect.poll(() => driver.pagesToolbarTableDims(), { timeout: 15_000 }).toBe("3x3");
+      expect((await driver.pagesToolbarBodyHtml()).split("dup-me").length).toBe(2);
+      await driver.pagesToolbarTableMenuPick("row", "Clear contents");
+      await expect.poll(() => driver.pagesToolbarBodyHtml(), { timeout: 15_000 }).not.toContain("dup-me");
+      await expect.poll(() => driver.pagesToolbarTableDims(), { timeout: 15_000 }).toBe("3x3");
+
+      // Columns mirror rows: the drivers act on the first column's
+      // handle, so mark a cell in the hovered column (r1c0), prove the
+      // duplicate carries the mark, then narrow back. Re-anchor on r0c0
+      // first — Tabbing forward from an unknown caret could run off the
+      // last cell and append a row instead of reaching r1c0.
+      for (let walk = 0; walk < 9; walk += 1) {
+        if ((await driver.pagesToolbarCaretCell()) === "r0c0") break;
+        await driver.pagesToolbarPressKey("Shift+Tab");
+      }
+      expect(await driver.pagesToolbarCaretCell()).toBe("r0c0");
+      for (let tab = 0; tab < 3; tab += 1) {
+        await driver.pagesToolbarPressKey("Tab");
+      }
+      expect(await driver.pagesToolbarCaretCell()).toBe("r1c0");
+      await driver.pagesToolbarTypeText("col-me");
+      await driver.pagesToolbarTableMenuPick("column", "Duplicate");
+      await expect.poll(() => driver.pagesToolbarTableDims(), { timeout: 15_000 }).toBe("3x4");
+      expect((await driver.pagesToolbarBodyHtml()).split("col-me").length).toBe(3);
+      await driver.pagesToolbarTableMenuPick("column", "Delete");
+      await expect.poll(() => driver.pagesToolbarTableDims(), { timeout: 15_000 }).toBe("3x3");
+      expect((await driver.pagesToolbarBodyHtml()).split("col-me").length).toBe(2);
+
+      // Tab still walks the cells after restructuring. The menu
+      // actions leave a range selection behind (at least in the old
+      // editor), under which Tab is inert — click a cell first to
+      // re-anchor a collapsed caret, then prove the walk both ways.
+      await driver.pagesToolbarTableClickCell(0, 0);
+      expect(await driver.pagesToolbarCaretCell()).toBe("r0c0");
+      await driver.pagesToolbarPressKey("Tab");
+      expect(await driver.pagesToolbarCaretCell()).toBe("r0c1");
+      await driver.pagesToolbarPressKey("Shift+Tab");
+      expect(await driver.pagesToolbarCaretCell()).toBe("r0c0");
+
+      // A painted background covers the selected row and survives save
+      // plus reload; clearing takes it back off.
+      expect(await driver.pagesToolbarTableCellBackground(0, 0)).toBeNull();
+      await driver.pagesToolbarTablePaint("row", 2);
+      const painted = await driver.pagesToolbarTableCellBackground(0, 0);
+      expect(painted).not.toBeNull();
+      expect(await driver.pagesToolbarTableCellBackground(0, 2)).toBe(painted);
+      expect(await driver.pagesToolbarTableCellBackground(1, 0)).toBeNull();
+      await driver.pagesToolbarSave();
+      await pagesToolbarPollDescriptionHtml(seed.workspaceSlug, projectId, pageId, session, "<table");
+      await driver.pagesLiveOpenPageDetail(seed.workspaceSlug, projectId, pageId);
+      await expect.poll(() => driver.pagesToolbarTableCellBackground(0, 0), { timeout: 60_000 }).toBe(painted);
+      await expect.poll(() => driver.pagesToolbarTableDims(), { timeout: 60_000 }).toBe("3x3");
+      await driver.pagesToolbarTablePaintClear("row");
+      await expect.poll(() => driver.pagesToolbarTableCellBackground(0, 0), { timeout: 15_000 }).toBeNull();
+
+      // Deleting every row leaves a paragraph, not a table.
+      await driver.pagesToolbarTableMenuPick("row", "Delete");
+      await driver.pagesToolbarTableMenuPick("row", "Delete");
+      await driver.pagesToolbarTableMenuPick("row", "Delete");
+      await expect.poll(() => driver.pagesToolbarTableDims(), { timeout: 15_000 }).toBeNull();
+      expect(await driver.pagesToolbarBodyHtml()).toContain("<p");
+
+      // Locked pages render no handles: the bar hides (proving the
+      // locked view rendered) and no handle raises over the table.
+      const lockedId = await serverCreatePage(seed.workspaceSlug, projectId, session, `${tag("tablehandles")} locked`);
+      await test.step("locked pages render no table handles", async () => {
+        await driver.pagesLiveOpenPageDetail(seed.workspaceSlug, projectId, lockedId);
+        await driver.pagesToolbarSettle(seed.workspaceSlug, projectId, lockedId);
+        await driver.pagesLiveTypeInBody("gated");
+        await driver.pagesToolbarClick(12);
+        await expect.poll(() => driver.pagesToolbarTableDims(), { timeout: 15_000 }).toBe("3x3");
+        await driver.pagesToolbarSave();
+        await pagesToolbarPollDescriptionHtml(seed.workspaceSlug, projectId, lockedId, session, "<table");
+        await pagesLiveSetPageLock(seed.workspaceSlug, projectId, lockedId, true, session);
+        await driver.pagesLiveOpenPageDetail(seed.workspaceSlug, projectId, lockedId);
+        expect(await driver.pagesToolbarVisible()).toBe(false);
+        expect(await driver.pagesToolbarTableHandleVisible()).toBe(false);
+      });
     } finally {
       await serverCleanupProject(seed.workspaceSlug, projectId, session);
     }

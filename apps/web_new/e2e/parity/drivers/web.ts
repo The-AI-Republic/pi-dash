@@ -40060,6 +40060,126 @@ export class WebDriver implements ParityDriver {
     });
   }
 
+  /** The first cell of the first body table (the handles' hover target). */
+  private pagesOldTableFirstCell(): Locator {
+    return this.page
+      .locator('.frame-renderer > .editor-container [contenteditable="true"] table tr:nth-child(1) > :nth-child(1)')
+      .first();
+  }
+
+  /** The floating table menu holding the `axis` insert entry (PAGE-091). */
+  private pagesOldTableMenu(axis: "row" | "column"): Locator {
+    const insert = axis === "row" ? "Insert above" : "Insert left";
+    // The menu is the insert entry's nearest ancestor div (the structure
+    // entries are its direct-child buttons). Engine selectors such as
+    // :text-is() are invalid inside CSS :has(), so anchor on the entry
+    // through getByRole and walk up instead of filtering by content.
+    return this.page.getByRole("button", { name: insert, exact: true }).locator("xpath=ancestor::div[1]").first();
+  }
+
+  /** Click the first cell so the hover-handle decorations mount, then open the `axis` menu. */
+  private async pagesOldTableOpenMenu(axis: "row" | "column"): Promise<Locator> {
+    const handleClass = axis === "row" ? ".table-row-handle-container" : ".table-col-handle-container";
+    await this.pagesOldTableFirstCell().click({ timeout: WebDriver.OPEN_MS });
+    await this.page.locator(`${handleClass} button`).first().click({ timeout: WebDriver.OPEN_MS });
+    const menu = this.pagesOldTableMenu(axis);
+    await menu.waitFor({ state: "visible", timeout: WebDriver.OPEN_MS });
+    return menu;
+  }
+
+  async pagesToolbarTableMenuEntries(axis: "row" | "column"): Promise<string[]> {
+    const menu = await this.pagesOldTableOpenMenu(axis);
+    const texts = await menu.locator(":scope > button").allTextContents();
+    await this.page.keyboard.press("Escape");
+    // The five structure entries in DOM order; the header toggle, the
+    // colour disclosure and its swatches are not structure entries.
+    const want =
+      axis === "row"
+        ? ["Insert above", "Insert below", "Duplicate", "Clear contents", "Delete"]
+        : ["Insert left", "Insert right", "Duplicate", "Clear contents", "Delete"];
+    return texts.map((text) => text.trim()).filter((text) => want.includes(text));
+  }
+
+  async pagesToolbarTableMenuPick(axis: "row" | "column", entry: string): Promise<void> {
+    const menu = await this.pagesOldTableOpenMenu(axis);
+    // getByRole, not :scope > button:text-is(): the engine pseudo-class
+    // never matches in this composition even though the entry buttons
+    // are the menu's direct children (verified live), while the
+    // accessible names are exactly the entry labels.
+    await menu.getByRole("button", { name: entry, exact: true }).click({ timeout: WebDriver.OPEN_MS });
+  }
+
+  async pagesToolbarTablePaint(axis: "row" | "column", index: number): Promise<void> {
+    const menu = await this.pagesOldTableOpenMenu(axis);
+    // Swatches are the menu's textless, iconless buttons, in palette order.
+    const picked = await menu.evaluate((element, swatch) => {
+      // The swatches sit nested in the colour disclosure's panel, below
+      // the disclosure button itself.
+      const buttons = [...element.querySelectorAll("button")];
+      const paints = buttons.filter(
+        (button) => (button.textContent ?? "").trim() === "" && button.querySelector("svg") === null
+      );
+      const target = paints[swatch];
+      if (target === undefined) return false;
+      (target as HTMLElement).click();
+      return true;
+    }, index);
+    if (!picked) throw new Error(`[parity] table paint swatch ${index} is missing.`);
+  }
+
+  async pagesToolbarTablePaintClear(axis: "row" | "column"): Promise<void> {
+    const menu = await this.pagesOldTableOpenMenu(axis);
+    // The clear control is the menu's only textless button carrying an icon.
+    const cleared = await menu.evaluate((element) => {
+      const buttons = [...element.querySelectorAll("button")];
+      const target = buttons.find(
+        (button) => (button.textContent ?? "").trim() === "" && button.querySelector("svg") !== null
+      );
+      if (target === undefined) return false;
+      (target as HTMLElement).click();
+      return true;
+    });
+    if (!cleared) throw new Error("[parity] table paint clear is missing.");
+  }
+
+  async pagesToolbarTableCellBackground(row: number, col: number): Promise<string | null> {
+    const background = await this.page.evaluate(
+      ([cellRow, cellCol]: [number, number]) => {
+        const editor = document.querySelector('.frame-renderer > .editor-container [contenteditable="true"]');
+        const cell = editor?.querySelector(`table tr:nth-child(${cellRow + 1}) > :nth-child(${cellCol + 1})`);
+        if (!(cell instanceof HTMLElement)) return null;
+        return getComputedStyle(cell).backgroundColor;
+      },
+      [row, col] as [number, number]
+    );
+    const clean = (background ?? "").trim().toLowerCase();
+    if (clean === "" || clean === "transparent" || clean === "rgba(0, 0, 0, 0)") return null;
+    return (background ?? "").trim();
+  }
+
+  async pagesToolbarTableHandleVisible(): Promise<boolean> {
+    if ((await this.pagesOldTableFirstCell().count()) === 0) return false;
+    await this.pagesOldTableFirstCell().click({ timeout: WebDriver.OPEN_MS });
+    try {
+      await this.page
+        .locator(".table-row-handle-container")
+        .first()
+        .waitFor({ state: "attached", timeout: WebDriver.OPEN_MS });
+    } catch {
+      return false;
+    }
+    return true;
+  }
+
+  async pagesToolbarTableClickCell(row: number, col: number): Promise<void> {
+    await this.page
+      .locator(
+        `.frame-renderer > .editor-container [contenteditable="true"] table tr:nth-child(${row + 1}) > :nth-child(${col + 1})`
+      )
+      .first()
+      .click({ timeout: WebDriver.OPEN_MS });
+  }
+
   async pagesToolbarImageUpload(filePath: string): Promise<void> {
     const [chooser] = await Promise.all([
       this.page.waitForEvent("filechooser", { timeout: WebDriver.OPEN_MS }),

@@ -7504,6 +7504,20 @@ export interface ParityDriver {
   pagesToolbarTableDims(): Promise<string | null>;
   /** Caret cell as "rXcY", or "outside" when the caret is not in a table. */
   pagesToolbarCaretCell(): Promise<string>;
+  /** The `axis` handle menu's structure entries in DOM order (PAGE-091). */
+  pagesToolbarTableMenuEntries(axis: "row" | "column"): Promise<string[]>;
+  /** Open the `axis` handle menu on the first row/column and invoke `entry` (PAGE-091). */
+  pagesToolbarTableMenuPick(axis: "row" | "column", entry: string): Promise<void>;
+  /** Paint the first row/column with the `index`-th swatch of the menu's colour section (PAGE-091). */
+  pagesToolbarTablePaint(axis: "row" | "column", index: number): Promise<void>;
+  /** Clear the cell background through the `axis` menu's colour section (PAGE-091). */
+  pagesToolbarTablePaintClear(axis: "row" | "column"): Promise<void>;
+  /** Computed background of one body-table cell, or null when unpainted (PAGE-091). */
+  pagesToolbarTableCellBackground(row: number, col: number): Promise<string | null>;
+  /** Whether a table handle appears for the first body-table row/column (PAGE-091). */
+  pagesToolbarTableHandleVisible(): Promise<boolean>;
+  /** Click one body-table cell to re-anchor a collapsed caret there (PAGE-091). */
+  pagesToolbarTableClickCell(row: number, col: number): Promise<void>;
   /** Insert an image through the toolbar entry and upload `filePath`. */
   pagesToolbarImageUpload(filePath: string): Promise<void>;
   /** Whether the body holds an uploaded (asset-URL) image. */

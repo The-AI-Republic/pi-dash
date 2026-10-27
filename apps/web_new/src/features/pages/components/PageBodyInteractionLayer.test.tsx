@@ -40,6 +40,12 @@ function handle(overrides: Partial<PageEditorHandle> = {}): PageEditorHandle {
     applyCommand: vi.fn(),
     applyBlockKind: vi.fn(),
     insertTable: vi.fn(),
+    positionAtPoint: vi.fn(() => null),
+    selectTableRow: vi.fn(),
+    selectTableColumn: vi.fn(),
+    tableRowAction: vi.fn(),
+    tableColumnAction: vi.fn(),
+    paintTableCells: vi.fn(),
     applyColor: vi.fn(),
     clearColor: vi.fn(),
     insertImage: vi.fn(),
@@ -501,19 +507,17 @@ describe("PageBodyInteractionLayer", () => {
     const page = handle();
     (page.textBeforeCaret as ReturnType<typeof vi.fn>).mockReturnValue("/head");
     (page.caretAnchor as ReturnType<typeof vi.fn>).mockReturnValue({ top: window.innerHeight - 8, left: 24 });
-    const getBoundingClientRect = vi
-      .spyOn(HTMLElement.prototype, "getBoundingClientRect")
-      .mockReturnValue({
-        width: 256,
-        height: 320,
-        top: 0,
-        left: 0,
-        right: 256,
-        bottom: 320,
-        x: 0,
-        y: 0,
-        toJSON: () => ({}),
-      });
+    const getBoundingClientRect = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({
+      width: 256,
+      height: 320,
+      top: 0,
+      left: 0,
+      right: 256,
+      bottom: 320,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    });
     try {
       mount({ getHandle: () => page });
       const surface = screen.getByTestId("page-slash-palette").parentElement;

@@ -29598,6 +29598,83 @@ export class WebNewDriver implements ParityDriver {
       return `r${Array.prototype.indexOf.call(row.parentNode.children, row)}c${cell.cellIndex}`;
     });
   }
+  /** The `axis` handle button and its menu (PAGE-091). */
+  private pagesToolbarTableMenu(axis: "row" | "column"): { handle: Locator; menu: Locator } {
+    const kind = axis === "row" ? "row" : "column";
+    return {
+      handle: this.page.getByTestId(`page-table-${kind}-handle`),
+      menu: this.page.getByTestId(`page-table-${kind}-menu`),
+    };
+  }
+  /** The first cell of the first body table (the handles' hover target). */
+  private pagesToolbarTableFirstCell(): Locator {
+    return this.page
+      .locator('.editor-container [contenteditable="true"] table tr:nth-child(1) > :nth-child(1)')
+      .first();
+  }
+  /**
+   * Click the first cell so the caret sits in the hovered line, hover it
+   * so the handles raise, then open the `axis` menu. The click mirrors
+   * the old driver's menu open: both legs act on the first row/column,
+   * so the caret must be there deterministically, not by luck.
+   */
+  private async pagesToolbarTableOpenMenu(axis: "row" | "column"): Promise<Locator> {
+    await this.pagesToolbarTableFirstCell().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.pagesToolbarTableFirstCell().hover({ timeout: WebNewDriver.WAIT_MS });
+    const { handle, menu } = this.pagesToolbarTableMenu(axis);
+    await handle.click({ timeout: WebNewDriver.WAIT_MS });
+    await menu.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    return menu;
+  }
+  async pagesToolbarTableMenuEntries(axis: "row" | "column"): Promise<string[]> {
+    const menu = await this.pagesToolbarTableOpenMenu(axis);
+    const items = await menu.getByTestId("page-table-menu-item").allTextContents();
+    await this.page.keyboard.press("Escape");
+    return items.map((item) => item.trim());
+  }
+  async pagesToolbarTableMenuPick(axis: "row" | "column", entry: string): Promise<void> {
+    const menu = await this.pagesToolbarTableOpenMenu(axis);
+    await menu.getByRole("menuitem", { name: entry, exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+  }
+  async pagesToolbarTablePaint(axis: "row" | "column", index: number): Promise<void> {
+    const menu = await this.pagesToolbarTableOpenMenu(axis);
+    await menu.getByTestId("page-table-color-swatch").nth(index).click({ timeout: WebNewDriver.WAIT_MS });
+  }
+  async pagesToolbarTablePaintClear(axis: "row" | "column"): Promise<void> {
+    const menu = await this.pagesToolbarTableOpenMenu(axis);
+    await menu.getByTestId("page-table-color-clear").click({ timeout: WebNewDriver.WAIT_MS });
+  }
+  async pagesToolbarTableCellBackground(row: number, col: number): Promise<string | null> {
+    const background = await this.page.evaluate(
+      ([cellRow, cellCol]: [number, number]) => {
+        const editor = document.querySelector('.editor-container [contenteditable="true"]');
+        const cell = editor?.querySelector(`table tr:nth-child(${cellRow + 1}) > :nth-child(${cellCol + 1})`);
+        if (!(cell instanceof HTMLElement)) return null;
+        return getComputedStyle(cell).backgroundColor;
+      },
+      [row, col] as [number, number]
+    );
+    const clean = (background ?? "").trim().toLowerCase();
+    if (clean === "" || clean === "transparent" || clean === "rgba(0, 0, 0, 0)") return null;
+    return (background ?? "").trim();
+  }
+  async pagesToolbarTableHandleVisible(): Promise<boolean> {
+    if ((await this.pagesToolbarTableFirstCell().count()) === 0) return false;
+    await this.pagesToolbarTableFirstCell().hover({ timeout: WebNewDriver.WAIT_MS });
+    try {
+      await this.pagesToolbarTableMenu("row").handle.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    } catch {
+      return false;
+    }
+    return true;
+  }
+  async pagesToolbarTableClickCell(row: number, col: number): Promise<void> {
+    await this.page
+      .locator(`.editor-container [contenteditable="true"] table tr:nth-child(${row + 1}) > :nth-child(${col + 1})`)
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+  }
+
   async pagesToolbarImageUpload(filePath: string): Promise<void> {
     const [chooser] = await Promise.all([
       this.page.waitForEvent("filechooser", { timeout: WebNewDriver.WAIT_MS }),

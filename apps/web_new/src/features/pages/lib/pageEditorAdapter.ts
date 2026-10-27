@@ -19,6 +19,7 @@ import {
 import { emojiHtml, embedHtml, type PageCatalogBlockKind, type PageEmbedAttributes } from "./pageBlocks.js";
 import { missingPageEmbedInserts } from "./pageEmbedHeal.js";
 import type { PageEntityReferenceAttributes } from "../../../shared/editor/pageBlockExtensions.js";
+import type { PageTableLineAxis } from "../../../shared/editor/pageTableExtensions.js";
 
 /** The chain methods this adapter calls, by the command that calls them. */
 export interface PageEditorChain {
@@ -38,6 +39,25 @@ export interface PageEditorChain {
   setContent: (content: string, emitUpdate?: boolean) => PageEditorChain;
   /** Drop a 3×3 table at the caret (PAGE-033). */
   insertPageTable: (attributes?: { rows?: number; cols?: number; withHeaderRow?: boolean }) => PageEditorChain;
+  /** Select the row/column holding `pos` (PAGE-091 handle highlight). */
+  selectPageTableRow: (attributes: { pos: number }) => PageEditorChain;
+  selectPageTableColumn: (attributes: { pos: number }) => PageEditorChain;
+  /** Insert a row above/below the row holding `pos` (PAGE-091). */
+  insertPageTableRowAbove: (attributes: { pos: number }) => PageEditorChain;
+  insertPageTableRowBelow: (attributes: { pos: number }) => PageEditorChain;
+  /** Insert a column left/right of the column holding `pos` (PAGE-091). */
+  insertPageTableColumnLeft: (attributes: { pos: number }) => PageEditorChain;
+  insertPageTableColumnRight: (attributes: { pos: number }) => PageEditorChain;
+  /** Duplicate the row/column holding `pos` with its content (PAGE-091). */
+  duplicatePageTableRow: (attributes: { pos: number }) => PageEditorChain;
+  duplicatePageTableColumn: (attributes: { pos: number }) => PageEditorChain;
+  /** Empty the cells of the row/column holding `pos` (PAGE-091). */
+  clearPageTableCells: (attributes: { pos: number; axis: PageTableLineAxis }) => PageEditorChain;
+  /** Delete the row/column holding `pos` (PAGE-091). */
+  deletePageTableRow: (attributes: { pos: number }) => PageEditorChain;
+  deletePageTableColumn: (attributes: { pos: number }) => PageEditorChain;
+  /** Paint the row/column holding `pos` with a palette key, or clear it (PAGE-091). */
+  paintPageTableCells: (attributes: { pos: number; axis: PageTableLineAxis; color: string | null }) => PageEditorChain;
   /** Apply one mark to the range (the colour pair rides on one mark). */
   setMark: (name: string, attributes: Record<string, unknown>) => PageEditorChain;
   /** Remove one mark from the range (PAGE-036 clear). */
@@ -144,12 +164,28 @@ export interface PageEditorRef {
   };
 }
 
+/** One row-menu entry the table handle offers, in menu order (PAGE-091). */
+export type PageTableRowAction = "insertAbove" | "insertBelow" | "duplicate" | "clear" | "delete";
+
+/** One column-menu entry the table handle offers, in menu order (PAGE-091). */
+export type PageTableColumnAction = "insertLeft" | "insertRight" | "duplicate" | "clear" | "delete";
+
 /** What the title, the bar and later slices drive on the live editor. */
 export interface PageEditorHandle {
   /** Run one formatting command at the caret (bold, lists, quote, code…). */
   applyCommand: (command: PageFormatCommand) => void;
   /** Insert a 3×3 table at the caret (PAGE-033). */
   insertTable: () => void;
+  /** The document position under a viewport point, for the table handles (PAGE-091). */
+  positionAtPoint: (clientX: number, clientY: number) => number | null;
+  /** Select the row/column holding `pos` (PAGE-091 handle highlight). */
+  selectTableRow: (pos: number) => void;
+  selectTableColumn: (pos: number) => void;
+  /** Run one row/column menu entry against the line holding `pos` (PAGE-091). */
+  tableRowAction: (pos: number, action: PageTableRowAction) => void;
+  tableColumnAction: (pos: number, action: PageTableColumnAction) => void;
+  /** Paint the row/column holding `pos` with a palette key, or clear it (PAGE-091). */
+  paintTableCells: (pos: number, axis: PageTableLineAxis, color: string | null) => void;
   /** Apply one letter or wash colour to the current range (PAGE-036). */
   applyColor: (kind: "text" | "background", key: string) => void;
   /** Clear one colour kind back to plain text/wash (PAGE-036). */
@@ -350,6 +386,78 @@ export function insertPageTable(editor: PageEditorRef): void {
 }
 
 /**
+ * The document position under a viewport point (PAGE-091). The table
+ * handles hover the DOM, so they only ask for points inside a cell; a
+ * point the view cannot place answers null and the handles stay hidden.
+ */
+export function pagePositionAtPoint(editor: PageEditorRef, clientX: number, clientY: number): number | null {
+  const view = editor.view;
+  if (view === undefined) return null;
+  const found = view.posAtCoords({ left: clientX, top: clientY });
+  if (found === null) return null;
+  return found.pos;
+}
+
+/** Select the row or column holding `pos` (PAGE-091 handle highlight). */
+export function runSelectTableLine(editor: PageEditorRef, pos: number, axis: PageTableLineAxis): void {
+  if (axis === "row") {
+    editor.chain().focus().selectPageTableRow({ pos }).run();
+    return;
+  }
+  editor.chain().focus().selectPageTableColumn({ pos }).run();
+}
+
+/** Run one row-menu entry against the row holding `pos` (PAGE-091). */
+export function runTableRowAction(editor: PageEditorRef, pos: number, action: PageTableRowAction): void {
+  switch (action) {
+    case "insertAbove":
+      editor.chain().focus().insertPageTableRowAbove({ pos }).run();
+      return;
+    case "insertBelow":
+      editor.chain().focus().insertPageTableRowBelow({ pos }).run();
+      return;
+    case "duplicate":
+      editor.chain().focus().duplicatePageTableRow({ pos }).run();
+      return;
+    case "clear":
+      editor.chain().focus().clearPageTableCells({ pos, axis: "row" }).run();
+      return;
+    case "delete":
+      editor.chain().focus().deletePageTableRow({ pos }).run();
+  }
+}
+
+/** Run one column-menu entry against the column holding `pos` (PAGE-091). */
+export function runTableColumnAction(editor: PageEditorRef, pos: number, action: PageTableColumnAction): void {
+  switch (action) {
+    case "insertLeft":
+      editor.chain().focus().insertPageTableColumnLeft({ pos }).run();
+      return;
+    case "insertRight":
+      editor.chain().focus().insertPageTableColumnRight({ pos }).run();
+      return;
+    case "duplicate":
+      editor.chain().focus().duplicatePageTableColumn({ pos }).run();
+      return;
+    case "clear":
+      editor.chain().focus().clearPageTableCells({ pos, axis: "column" }).run();
+      return;
+    case "delete":
+      editor.chain().focus().deletePageTableColumn({ pos }).run();
+  }
+}
+
+/** Paint the row or column holding `pos` with a palette key, or clear it (PAGE-091). */
+export function paintTableCells(
+  editor: PageEditorRef,
+  pos: number,
+  axis: PageTableLineAxis,
+  color: string | null
+): void {
+  editor.chain().focus().paintPageTableCells({ pos, axis, color }).run();
+}
+
+/**
  * The mark attribute one colour kind writes (PAGE-036). The mark
  * attribute for letters is the live server's `color`; the adapter's own
  * pair keeps the `textColor` name, so only this table maps the two.
@@ -509,6 +617,12 @@ export function pageEditorHandle(editor: PageEditorRef): PageEditorHandle {
     applyCommand: (command) => runPageCommand(editor, command),
     applyBlockKind: (kind) => runBlockKind(editor, kind),
     insertTable: () => insertPageTable(editor),
+    positionAtPoint: (clientX, clientY) => pagePositionAtPoint(editor, clientX, clientY),
+    selectTableRow: (pos) => runSelectTableLine(editor, pos, "row"),
+    selectTableColumn: (pos) => runSelectTableLine(editor, pos, "column"),
+    tableRowAction: (pos, action) => runTableRowAction(editor, pos, action),
+    tableColumnAction: (pos, action) => runTableColumnAction(editor, pos, action),
+    paintTableCells: (pos, axis, color) => paintTableCells(editor, pos, axis, color),
     applyColor: (kind, key) => applyPageColor(editor, kind, key),
     clearColor: (kind) => clearPageColor(editor, kind),
     insertImage: (src, storedSrc, alt) => runInsertImage(editor, src, storedSrc, alt),
