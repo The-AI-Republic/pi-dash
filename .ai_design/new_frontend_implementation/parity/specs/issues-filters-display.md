@@ -127,12 +127,14 @@ controls render locked to their positive form (`allowNegative` is
 hard-coded false, bug: NEWFRONT-149); the rebuild offers the `is` /
 `is not` pair described above. No
 chip bar renders on issues surfaces; removal runs through each
-condition's own control (NEWFRONT-148). The legacy dropdown chrome
-(ISS-082–095 Acceptance) renders on no issues surface — the picker
-plus the row is the only filter UI (inventory correction pending with
-the tracker parent). Operators render lowercase; joined conditions
-show no AND text; valueless conditions are UI-ephemeral and collapse
-away on the next expression write.
+condition's own control (NEWFRONT-148, now the inventory's documented
+behavior rather than a deviation). The legacy page-level dropdown
+chrome (the old ISS-082–095 entry point) renders on no issues
+surface — the picker plus the row is the filter UI; the shared
+section chrome instead lives in the rich value lists, the display
+dropdown, and the sub-issue widget (ISS-094). Operators render
+lowercase; joined conditions show no AND text; valueless conditions
+are UI-ephemeral and collapse away on the next expression write.
 
 ## Analytics entry
 
