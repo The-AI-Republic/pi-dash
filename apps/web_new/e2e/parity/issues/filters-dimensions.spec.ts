@@ -225,11 +225,13 @@ test(
     await test.step("the seeded owner created every issue", async () => {
       await driver.addRichCondition("Created by");
       const options = await driver.richValueOptions();
-      // Match the owner by name, not the first Parity workspace member:
-      // alphabetical order lists the "Parity Mention" bot before the
-      // "Parity Oracle" owner, and the scenarios need the owner (gate fix,
-      // both legs: the oracle names the owner the same way).
-      const raw = options.find((name) => name.includes("Oracle"));
+      // Match the owner, not the first Parity workspace member: the
+      // rebuild labels self "You" (avatar initials glued, e.g. "POYou")
+      // and lists the "Parity Mention" bot beside it, so a bare "Parity"
+      // match grabs the bot (live-proven: created_by stored the bot's id).
+      // The oracle keeps the display name ("P Parity Oracle"), so match
+      // either form (gate fix, both legs).
+      const raw = options.find((name) => name.includes("You") || name.includes("Oracle"));
       if (raw === undefined) throw new Error("[parity] seeded owner missing from member options.");
       // Member options prefix the avatar initial in their accessible name
       // ("P Parity Oracle"), so match on the name part without it.
@@ -254,11 +256,13 @@ test(
     await test.step("nothing seeded is assigned to the owner", async () => {
       await driver.addRichCondition("Assignees");
       const options = await driver.richValueOptions();
-      // Match the owner by name, not the first Parity workspace member:
-      // alphabetical order lists the "Parity Mention" bot before the
-      // "Parity Oracle" owner, and the scenarios need the owner (gate fix,
-      // both legs: the oracle names the owner the same way).
-      const raw = options.find((name) => name.includes("Oracle"));
+      // Match the owner, not the first Parity workspace member: the
+      // rebuild labels self "You" (avatar initials glued, e.g. "POYou")
+      // and lists the "Parity Mention" bot beside it, so a bare "Parity"
+      // match grabs the bot (live-proven: created_by stored the bot's id).
+      // The oracle keeps the display name ("P Parity Oracle"), so match
+      // either form (gate fix, both legs).
+      const raw = options.find((name) => name.includes("You") || name.includes("Oracle"));
       if (raw === undefined) throw new Error("[parity] seeded owner missing from assignee options.");
       // Member options prefix the avatar initial in their accessible name
       // ("P Parity Oracle"), so match on the name part without it.
@@ -279,11 +283,13 @@ test(
     await test.step("a mention of the owner matches nothing seeded", async () => {
       await driver.addRichCondition("Mentions");
       const options = await driver.richValueOptions();
-      // Match the owner by name, not the first Parity workspace member:
-      // alphabetical order lists the "Parity Mention" bot before the
-      // "Parity Oracle" owner, and the scenarios need the owner (gate fix,
-      // both legs: the oracle names the owner the same way).
-      const raw = options.find((name) => name.includes("Oracle"));
+      // Match the owner, not the first Parity workspace member: the
+      // rebuild labels self "You" (avatar initials glued, e.g. "POYou")
+      // and lists the "Parity Mention" bot beside it, so a bare "Parity"
+      // match grabs the bot (live-proven: created_by stored the bot's id).
+      // The oracle keeps the display name ("P Parity Oracle"), so match
+      // either form (gate fix, both legs).
+      const raw = options.find((name) => name.includes("You") || name.includes("Oracle"));
       if (raw === undefined) throw new Error("[parity] seeded owner missing from mention options.");
       // Member options prefix the avatar initial in their accessible name
       // ("P Parity Oracle"), so match on the name part without it.

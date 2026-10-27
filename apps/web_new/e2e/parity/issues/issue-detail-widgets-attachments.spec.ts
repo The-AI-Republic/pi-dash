@@ -85,7 +85,11 @@ test(
         if (driver.target === "web_new") {
           await expect.poll(() => driver.lastToast(), { timeout: 60_000 }).toContain("Attachment uploaded");
           const assets = await issueAttachments(seed.workspaceSlug, seed.projectId, issue.id, session);
-          expect(assets.map((row) => String(row["name"] ?? ""))).toContain(`oracle-nope-${ts}.txt`);
+          expect(assets).toHaveLength(2);
+          const names = assets.map((row) =>
+            String((row["attributes"] as Record<string, unknown> | undefined)?.["name"] ?? "")
+          );
+          expect(names).toContain(`oracle-nope-${ts}.txt`);
         } else {
           await expect.poll(() => driver.lastToast(), { timeout: 30_000 }).toMatch(/file could not be attached/i);
           const assets = await issueAttachments(seed.workspaceSlug, seed.projectId, issue.id, session);

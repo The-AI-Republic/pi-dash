@@ -370,7 +370,13 @@ test(
       await driver.layoutsEmptyChoose("Clear filters");
       // Positive read: the archived row renders again.
       // bug:NEWFRONT-165 — the archived menu omits Delete; ISS-064 intends it.
-      expect(await driver.layoutsRowMenuItems(title)).toEqual(["Restore", "Open in new tab", "Copy link"]);
+      // The rebuild carries Delete (row-actions ISS-064 proves it), so the new
+      // leg pins the fixed menu while the oracle keeps the bug pin (spec §10).
+      const archivedMenu =
+        driver.target === "web_new"
+          ? ["Restore", "Open in new tab", "Copy link", "Delete"]
+          : ["Restore", "Open in new tab", "Copy link"];
+      expect(await driver.layoutsRowMenuItems(title)).toEqual(archivedMenu);
     } finally {
       await serverRestoreIssue(seed.workspaceSlug, seed.projectId, id, session).catch(() => {});
       await serverDeleteIssue(seed.workspaceSlug, seed.projectId, id, session).catch(() => {});
