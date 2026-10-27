@@ -3931,6 +3931,20 @@ export class WebNewDriver implements ParityDriver {
     return this.page.locator(`[data-widget-rows="${widget}"]`).first();
   }
 
+  /**
+   * The disclosure to drive. Relations and Links mount the shared
+   * WidgetSection, whose disclosure is its section button — but a shared
+   * header element wins when one is present, so the generic header reads
+   * keep working wherever that markup exists.
+   */
+  private async widgetHeaderFor(widget: string): Promise<Locator> {
+    if (widget === "Relations" || widget === "Links") {
+      const shared = this.page.locator(`[data-widget-header="${widget}"]`).first();
+      if ((await shared.count()) > 0) return shared;
+    }
+    return this.widgetHeader(widget);
+  }
+
   async widgetRowNames(widget: string): Promise<string[]> {
     // Sub-work items render one row block per child (nested children
     // included); relations and links prefix their row testids per row;
@@ -3960,7 +3974,7 @@ export class WebNewDriver implements ParityDriver {
     return out;
   }
   async widgetProgress(widget: string): Promise<string | null> {
-    const header = this.widgetHeader(widget);
+    const header = await this.widgetHeaderFor(widget);
     if ((await header.count()) === 0) return null;
     const text = ((await header.innerText().catch(() => "")) ?? "").trim();
     const match = /(\d+\s*\/\s*\d+\s*Done)/.exec(text);
@@ -3990,12 +4004,12 @@ export class WebNewDriver implements ParityDriver {
   }
   async openWidgetSection(widget: string): Promise<void> {
     if (await this.widgetExpanded(widget)) return;
-    await this.widgetHeader(widget).click({ timeout: WebNewDriver.WAIT_MS });
+    await (await this.widgetHeaderFor(widget)).click({ timeout: WebNewDriver.WAIT_MS });
   }
   async widgetExpanded(widget: string): Promise<boolean> {
     // The header's aria flag and the mounted panel agree; the panel is
     // the proof because a collapsed parent unmounts it entirely.
-    const header = this.widgetHeader(widget);
+    const header = await this.widgetHeaderFor(widget);
     if ((await header.count()) === 0) return false;
     return (await header.getAttribute("aria-expanded")) === "true";
   }
@@ -4101,12 +4115,12 @@ export class WebNewDriver implements ParityDriver {
     // The disclosure button nests no controls itself; the header row
     // around it holds the disclosure plus the display, filter and add
     // menu triggers.
-    const header = this.widgetHeader(widget);
+    const header = await this.widgetHeaderFor(widget);
     if ((await header.count()) === 0) return 0;
     return header.locator("xpath=ancestor::div[1]").locator("button").count();
   }
   async toggleWidgetSection(widget: string): Promise<void> {
-    await this.widgetHeader(widget).click({ timeout: WebNewDriver.WAIT_MS });
+    await (await this.widgetHeaderFor(widget)).click({ timeout: WebNewDriver.WAIT_MS });
   }
   /** Widget action-row buttons by section title. */
   private static readonly WIDGET_ADD_ACTIONS: Record<string, string> = {
@@ -6113,24 +6127,59 @@ export class WebNewDriver implements ParityDriver {
     return todo("globalViewIssueVisible");
   }
 
-  async openCycleIssues(_workspaceSlug: string, _projectId: string, _cycleId: string): Promise<void> {
-    return todo("openCycleIssues");
+  async openCycleIssues(workspaceSlug: string, projectId: string, cycleId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/cycles/${cycleId}`, {
+      waitUntil: "domcontentloaded",
+    });
+    // Settle on any mounted cycle content — the layout switcher, the
+    // issues skeleton, or the transfer prompt itself. Callers poll the
+    // prompt separately, so the deadline is a backstop, not a verdict.
+    const deadline = Date.now() + 60_000;
+    for (;;) {
+      const switcher = this.page.getByTestId(/^layout-switcher-(segmented|dropdown)$/);
+      if ((await switcher.count()) > 0) return;
+      if ((await this.page.getByTestId("issues-skeleton-list").count()) > 0) return;
+      if (await this.cycleTransferButtonVisible()) return;
+      if (Date.now() > deadline) return;
+      await this.page.waitForTimeout(1_000);
+    }
   }
 
   async cycleTransferButtonVisible(): Promise<boolean> {
-    return todo("cycleTransferButtonVisible");
+    return (await this.page.getByRole("button", { name: "Transfer work items", exact: true }).count()) > 0;
+  }
+
+  /** The open transfer dialog's cycle list. */
+  private cycleTransferListbox(): Locator {
+    return this.page.getByRole("listbox", { name: "Cycles" });
   }
 
   async cycleTransferOpen(): Promise<void> {
-    return todo("cycleTransferOpen");
+    await this.page
+      .getByRole("button", { name: "Transfer work items", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByPlaceholder("Search for a cycle...").waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async cycleTransferOptionNames(): Promise<string[]> {
-    return todo("cycleTransferOptionNames");
+    // Options pair the name with a status pill; only the name spans
+    // are read, so the pill never glues onto the cycle name.
+    const texts = await this.cycleTransferListbox()
+      .getByRole("option")
+      .locator(":scope > span.truncate")
+      .allInnerTexts();
+    return texts.map((text) => text.trim()).filter((text) => text.length > 0);
   }
 
-  async cycleTransferPick(_name: string): Promise<void> {
-    return todo("cycleTransferPick");
+  async cycleTransferPick(name: string): Promise<void> {
+    const pattern = new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+    await this.cycleTransferListbox()
+      .getByRole("option", { name: pattern })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    // A successful pick closes the dialog; a refusal leaves it open and
+    // fails the wait honestly.
+    await this.page.getByPlaceholder("Search for a cycle...").waitFor({ state: "detached", timeout: 60_000 });
   }
 
   async failNextIssuePatch(_status: number, _delayMs: number): Promise<void> {
