@@ -62,3 +62,9 @@ mod tests {
         assert_eq!(ProjectId::from("p-2").to_string(), "p-2");
     }
 }
+
+// THROWAWAY OVL-01 red-proof: unused variable must fail clippy -D warnings. DO NOT MERGE.
+pub fn ovl01_throwaway_red_proof() -> u32 {
+    let unused_probe_variable = 42;
+    42
+}
