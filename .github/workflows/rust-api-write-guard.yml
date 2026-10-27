@@ -1,13 +1,18 @@
 name: rust-api-write-guard
 
 # ORM-09 (design D7): ratchet against new writes to ORM-covered tables outside
-# pidash_services::domain. Pure Python, no DB. Push-only like every other
-# rust-api* workflow: the project forbids pull_request triggers (GitHub CI runs
-# only after merge to rust-dev), and the coordinator's red-CI triage assumes
-# each run maps to a merge. Advisory like all rust-api CI -- the gate is the
-# local check in rust-api/README.md.
+# pidash_services::domain. Pure Python, no DB. Runs on push to rust-dev and on
+# pull requests into rust-dev (OVL-01, PIDASHCONV-1539); the heavy contract
+# suites stay push-only. Advisory like all rust-api CI -- it does not gate
+# merge, per the rulebook; a red PR check must be explained in the PR body
+# before merge. The gate is the local check in rust-api/README.md.
 on:
   push:
+    branches: [rust-dev]
+    paths:
+      - "rust-api/**"
+      - ".github/workflows/rust-api-write-guard.yml"
+  pull_request:
     branches: [rust-dev]
     paths:
       - "rust-api/**"
@@ -15,6 +20,10 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   write-guard:
