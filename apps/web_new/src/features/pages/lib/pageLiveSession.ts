@@ -307,7 +307,7 @@ export interface UsePageLiveSessionOptions {
   /**
    * False where no session runs: panels, and reads the identity never
    * arrived for. Read-only viewers join the session and render it without
-   * input (PAGE-053).
+   * input (PAGE-053, PAGE-092).
    */
   enabled: boolean;
   /** Tests inject a stub backend; production loads the chunk. */
@@ -383,9 +383,10 @@ function snapshot(session: PageLiveSession, backend: PageLiveBackend): PageLiveM
 /**
  * One page's collaboration session for the detail surface, editable and
  * read-only alike: loads the backend chunk, walks the reconnect machine,
- * and mirrors the mount the live editors bind to. Null while disabled or
- * signed out. A chunk that fails to load degrades to the standalone
- * editor with the fallback save, never to a stuck loader.
+ * and mirrors the mount the live editors bind to — read-only viewers bind
+ * it with editing off (PAGE-092). Null while disabled or signed out. A
+ * chunk that fails to load degrades to the standalone editor with the
+ * fallback save, never to a stuck loader.
  */
 export function usePageLiveSession(options: UsePageLiveSessionOptions): PageLiveMount | null {
   const { workspaceSlug, projectId, pageId, user, enabled } = options;

@@ -151,6 +151,8 @@ export interface PageAccessInput {
   isLocked: boolean;
   viewerId: string | null;
   projectRole: number | null;
+  /** The project's guest_view_all_features flag: guests may read open pages. */
+  guestViewAll?: boolean | undefined;
 }
 
 export interface PageCapabilities {
@@ -176,16 +178,19 @@ export function pageStanding(input: Pick<PageAccessInput, "ownedBy" | "viewerId"
 
 /**
  * Read: open pages for members and admins, a restricted page only for its
- * owner, and a guest only the pages it owns (its collection never carries
- * anyone else's). Edit: read plus member-or-owner standing, unlocked and
- * unarchived. A locked or shelved page keeps the shell but has no editable
- * region.
+ * owner, and a guest only the pages it owns — unless the project lets
+ * guests view everything, in which case a guest reads open pages too
+ * (PAGE-092). Edit: read plus member-or-owner standing, unlocked and
+ * unarchived, so a guest reader never edits. A locked or shelved page
+ * keeps the shell but has no editable region.
  */
 export function pageCapabilities(input: PageAccessInput): PageCapabilities {
   const standing = pageStanding(input);
   const restricted = input.access === PAGE_ACCESS_PRIVATE;
   const isShelved = input.archivedAt !== null;
-  const canRead = standing === "owner" || ((standing === "admin" || standing === "member") && !restricted);
+  const guestReader = standing === "guest" && input.guestViewAll === true && !restricted;
+  const canRead =
+    standing === "owner" || ((standing === "admin" || standing === "member") && !restricted) || guestReader;
   const canManage = standing === "owner" || standing === "admin";
   const memberOrOwner = standing === "owner" || standing === "admin" || standing === "member";
   const canEdit = canRead && !input.isLocked && !isShelved && memberOrOwner;

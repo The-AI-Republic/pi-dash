@@ -120,6 +120,8 @@ interface Harness {
   versionJson: Record<string, unknown>;
   projectPageView: boolean;
   projectStatus: number;
+  /** The project row lets guests view everything (PAGE-092). */
+  projectGuestViewAll: boolean;
   /** The instance bootstrap answers with an LLM configuration. */
   instanceLlm: boolean;
 }
@@ -168,6 +170,7 @@ beforeEach(() => {
     versionJson: {},
     projectPageView: true,
     projectStatus: 200,
+    projectGuestViewAll: false,
     instanceLlm: false,
   };
   resetPageBodyCache();
@@ -254,7 +257,13 @@ beforeEach(() => {
         url,
         harness.projectStatus,
         harness.projectStatus === 200
-          ? { ...makeProjectRow({ page_view: harness.projectPageView }), id: projectRead[1] }
+          ? {
+              ...makeProjectRow({
+                page_view: harness.projectPageView,
+                guest_view_all_features: harness.projectGuestViewAll,
+              }),
+              id: projectRead[1],
+            }
           : { error: "not found" }
       );
     }
@@ -1745,6 +1754,69 @@ describe("PageDetailScreen collaboration mount (PAGE-065-067)", () => {
     renderScreen();
     await screen.findByText("This page is locked and read-only.");
     expect(await screen.findByTestId("page-live-loader")).toBeInTheDocument();
+  });
+});
+
+describe("PageDetailScreen read-only live followers (PAGE-092)", () => {
+  function sharedDoc(body: string): Y.Doc {
+    const doc = new Y.Doc();
+    const paragraph = new Y.XmlElement("paragraph");
+    paragraph.insert(0, [new Y.XmlText(body)]);
+    doc.getXmlFragment("default").insert(0, [paragraph]);
+    return doc;
+  }
+
+  function renderReadOnly(): { container: HTMLElement } {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const view = render(
+      <QueryClientProvider client={queryClient}>
+        <PageDetailScreen
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          pageId={harness.pageId}
+          search={{}}
+          onSearchChange={vi.fn()}
+        />
+      </QueryClientProvider>
+    );
+    return { container: view.container };
+  }
+
+  it("reads an open page for a flag-on guest with no editable region", async () => {
+    harness.role = 5;
+    harness.viewer = VIEWER;
+    harness.projectGuestViewAll = true;
+    const { container } = renderReadOnly();
+    await screen.findByText("Draft body");
+    // The title keeps its textbox role in both its fallback and loaded
+    // states; neither state is ever content-editable for a viewer.
+    expect(screen.getByRole("textbox", { name: "Page title" })).not.toHaveAttribute("contenteditable", "true");
+    expect(container.querySelector('[contenteditable="true"]')).toBeNull();
+    expect(live.options?.enabled).toBe(true);
+    expect(live.snapshot).toHaveBeenCalledWith(harness.pageId, true);
+  });
+
+  it("binds the live document with editing off once a read-only viewer knows it", async () => {
+    harness.page = record({ is_locked: true });
+    live.mount = { liveReady: true, docHandle: sharedDoc("Shared body"), seedDocument: true };
+    const { container } = renderReadOnly();
+    await screen.findByText("This page is locked and read-only.");
+    await screen.findByText("Shared body", undefined, { timeout: 10_000 });
+    // Scoped to the body: the lazy title carries its own marker states.
+    const body = container.querySelector(".editor-container");
+    expect(body?.querySelector('[contenteditable="true"]')).toBeNull();
+    expect(body?.querySelector('[contenteditable="false"]')).not.toBeNull();
+    expect(container.querySelector('[contenteditable="true"]')).toBeNull();
+    expect(getPageBodyDraft(harness.pageId)).toBeNull();
+    expect(live.options?.enabled).toBe(true);
+  });
+
+  it("renders the stored content without an editable region when a read-only session degrades", async () => {
+    harness.page = record({ is_locked: true });
+    live.mount = { liveReady: true, docHandle: null, seedDocument: false };
+    const { container } = renderReadOnly();
+    await screen.findByText("Draft body");
+    expect(container.querySelector('[contenteditable="true"]')).toBeNull();
   });
 });
 

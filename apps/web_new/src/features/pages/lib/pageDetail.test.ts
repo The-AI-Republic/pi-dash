@@ -203,6 +203,22 @@ describe("pageCapabilities", () => {
     expect(caps.canEdit).toBe(false);
   });
 
+  it("reads open pages for a guest when the project lets guests view everything, without editing (PAGE-092)", () => {
+    const caps = pageCapabilities({ ...base, projectRole: ROLE_GUEST, guestViewAll: true });
+    expect(caps.standing).toBe("guest");
+    expect(caps.canRead).toBe(true);
+    expect(caps.canEdit).toBe(false);
+    expect(caps.readOnly).toBe(true);
+    expect(caps.canManage).toBe(false);
+  });
+
+  it("still refuses a restricted page for a flag-on guest who does not own it (PAGE-092)", () => {
+    const caps = pageCapabilities({ ...base, access: 1, projectRole: ROLE_GUEST, guestViewAll: true });
+    expect(caps.canRead).toBe(false);
+    expect(caps.canEdit).toBe(false);
+    expect(caps.readOnly).toBe(false);
+  });
+
   it("renders locked and shelved pages read-only, owner included", () => {
     for (const patch of [{ isLocked: true }, { archivedAt: "2026-10-01T00:00:00Z" }]) {
       const caps = pageCapabilities({ ...base, ...patch, viewerId: "owner-id", projectRole: ROLE_ADMIN });

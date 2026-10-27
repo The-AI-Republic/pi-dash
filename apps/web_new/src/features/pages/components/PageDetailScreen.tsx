@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Pages detail shell (parity/specs/pages.md §4, §6.5–§6.9, §7, §8.1–§8.3,
-// §8.6, §9.6, PAGE-022–025, 045–050, 055–064, 074, 079–080, 084/086). One
+// §8.6, §9.6, §19.2, PAGE-022–025, 045–050, 055–064, 074, 079–080, 084/086, 092). One
 // record read by URL id with visit
 // tracking plus the shared collection read that feeds the sibling switcher;
 // the header cluster with its action controls and options menu, the
@@ -158,8 +158,9 @@ export function PageDetailScreen({
       isLocked: page.is_locked,
       viewerId,
       projectRole: role,
+      guestViewAll: project.data?.guest_view_all_features === true,
     });
-  }, [page, viewerId, role]);
+  }, [page, viewerId, role, project.data?.guest_view_all_features]);
   // The assistant handle mounts only where the edition declares it, the
   // viewer may edit the page, and the instance has an LLM configuration
   // to answer with (PAGE-075). The community build fails the first
@@ -215,7 +216,9 @@ export function PageDetailScreen({
   // One collaboration session per readable page (PAGE-065–067): the mount
   // below mirrors the document the live editors bind. Read-only viewers
   // join the same session the old client opens for them, so their body
-  // follows remote updates; they only render it without input (PAGE-053).
+  // follows remote updates; they only render it without input (PAGE-053,
+  // PAGE-092). Only a page with no session at all keeps its stored
+  // snapshot and reports converged instead.
   const liveMount = usePageLiveSession({
     workspaceSlug,
     projectId,
@@ -579,7 +582,7 @@ export function PageDetailScreen({
                         // A read-only viewer binds the same live document
                         // with editing off, so the body follows remote
                         // updates without offering an editable region
-                        // (PAGE-053). The stored snapshot stands in while
+                        // (PAGE-053, PAGE-092). The stored snapshot stands in while
                         // the editor chunk loads, and seeds the shared
                         // fields when they are empty; a session draft never
                         // does (viewers read server truth, not their stale
