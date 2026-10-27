@@ -11554,6 +11554,9 @@ export class WebNewDriver implements ParityDriver {
     await body.evaluate((node) => {
       node.scrollTop = node.scrollHeight;
     });
+    // The auto-load races the read that follows: settle like the oracle
+    // (2s) so the next page has landed before the caller samples.
+    await this.page.waitForTimeout(2_000);
   }
 
   /** Flat columns page behind a scroll sentinel, never an explicit entry. */

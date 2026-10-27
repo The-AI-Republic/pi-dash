@@ -1279,10 +1279,15 @@ describe("kanban column paging and scroll", () => {
             })
           : locator({ count: async () => 0 }),
     });
-    const page = pageOf({ getByTestId: (id: string) => (id === "kanban-column" ? list([column]) : list([])) });
+    const waits: Array<number | undefined> = [];
+    const page = pageOf({
+      getByTestId: (id: string) => (id === "kanban-column" ? list([column]) : list([])),
+      waitForTimeout: async (ms?: number) => void waits.push(ms),
+    });
     const driver = new WebNewDriver(page);
     await driver.kanbanColumnScrollEnd("Todo");
     expect(node.scrollTop).toBe(600);
+    expect(waits).toEqual([2_000]);
     await driver.kanbanColumnLoadMore("Todo");
     expect(node.scrollTop).toBe(600);
   });
