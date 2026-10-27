@@ -7,7 +7,9 @@
 // chunk resolves, live once the backend walks, degraded when the chunk
 // fails — and connectivity or focus fast-forwards a pending retry.
 
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, renderHook, waitFor } from "@testing-library/react";
+import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const sync = vi.hoisted(() => ({ reportPageSync: vi.fn() }));
@@ -29,6 +31,7 @@ vi.mock("@pidash/api-client", async (importOriginal) => ({
 }));
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import { resetRealtimeHub } from "../../../core/query/realtime.js";
 import type { PageLiveBackend, PageLiveBackendInput } from "./pageLiveBackend.js";
 import {
   fetchPageLiveFallbackBinary,
@@ -36,16 +39,28 @@ import {
   usePageReadOnlySyncReport,
   type UsePageLiveSessionOptions,
 } from "./pageLiveSession.js";
+import { resetPageLivePropertyEchoes } from "./pageLivePropertyEvents.js";
 import { resetPageRealtimeErrors } from "./pageRealtimeErrors.js";
+import { pageKeys } from "../api/keys.js";
+import { makePageRow } from "../testing.js";
 
 const PAGE_ID = "323e4567-e89b-12d3-a456-426614174002";
 const USER = { id: "user-1", name: "Ada" };
+
+function sessionWrapper(
+  client = new QueryClient()
+): ({ children }: { children: React.ReactNode }) => React.ReactElement {
+  return function SessionWrapper({ children }: { children: React.ReactNode }): React.ReactElement {
+    return <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+  };
+}
 
 interface FakeHarness {
   backend: PageLiveBackend;
   open: () => void;
   close: (code: number) => void;
   synced: () => void;
+  stateless: (payload: string) => void;
   cacheReady: () => void;
   connect: ReturnType<typeof vi.fn>;
   destroyBackend: ReturnType<typeof vi.fn>;
@@ -56,6 +71,7 @@ function fakeHarness(options: { cacheReady?: boolean; lengths?: Map<string, numb
   const opens = new Set<() => void>();
   const closes = new Set<(code: number, reason: string) => void>();
   const synceds = new Set<() => void>();
+  const frames = new Set<(payload: string) => void>();
   const readys = new Set<() => void>();
   const ready = options.cacheReady ?? true;
   const lengths = options.lengths ?? new Map<string, number>();
@@ -88,7 +104,13 @@ function fakeHarness(options: { cacheReady?: boolean; lengths?: Map<string, numb
           synceds.delete(listener);
         };
       },
-      onStateless: () => () => undefined,
+      onStateless: (listener) => {
+        frames.add(listener);
+        return () => {
+          frames.delete(listener);
+        };
+      },
+      sendStateless: () => undefined,
       onAuthFailed: () => () => undefined,
       connect,
       disconnect: vi.fn(() => undefined),
@@ -115,6 +137,9 @@ function fakeHarness(options: { cacheReady?: boolean; lengths?: Map<string, numb
     },
     synced: () => {
       for (const listener of synceds) listener();
+    },
+    stateless: (payload) => {
+      for (const listener of frames) listener(payload);
     },
     cacheReady: () => {
       isReady = true;
@@ -155,6 +180,8 @@ beforeEach(() => {
   vi.useFakeTimers();
   createAppClient("https://api.test", () => new Promise<never>(() => undefined));
   vi.clearAllMocks();
+  resetRealtimeHub();
+  resetPageLivePropertyEchoes();
   contracts.getPageDescriptionBinary.mockResolvedValue(new Uint8Array([1]));
 });
 
@@ -163,14 +190,20 @@ afterEach(() => {
   vi.unstubAllGlobals();
   resetAppClient();
   resetPageRealtimeErrors();
+  resetRealtimeHub();
+  resetPageLivePropertyEchoes();
 });
 
 describe("usePageLiveSession", () => {
   it("stays null while disabled or signed out", () => {
     const loadBackend = vi.fn(async () => fakeHarness().backend);
-    const disabled = renderHook(() => usePageLiveSession(options({ enabled: false, loadBackend })));
+    const disabled = renderHook(() => usePageLiveSession(options({ enabled: false, loadBackend })), {
+      wrapper: sessionWrapper(),
+    });
     expect(disabled.result.current).toBeNull();
-    const signedOut = renderHook(() => usePageLiveSession(options({ user: null, loadBackend })));
+    const signedOut = renderHook(() => usePageLiveSession(options({ user: null, loadBackend })), {
+      wrapper: sessionWrapper(),
+    });
     expect(signedOut.result.current).toBeNull();
     expect(loadBackend).not.toHaveBeenCalled();
     expect(sync.reportPageSync).not.toHaveBeenCalled();
@@ -186,8 +219,9 @@ describe("usePageLiveSession", () => {
       seen.push(input);
       return gate.promise;
     });
-    const rendered = renderHook(() =>
-      usePageLiveSession(options({ loadBackend, fetchBinary: async () => new Uint8Array([]) }))
+    const rendered = renderHook(
+      () => usePageLiveSession(options({ loadBackend, fetchBinary: async () => new Uint8Array([]) })),
+      { wrapper: sessionWrapper() }
     );
     expect(rendered.result.current).toMatchObject({ liveReady: false, showLoader: true, docHandle: null });
     expect(sync.reportPageSync).toHaveBeenCalledWith(PAGE_ID, "syncing");
@@ -214,7 +248,9 @@ describe("usePageLiveSession", () => {
 
   it("mirrors the session walk into the mount", async () => {
     const harness = fakeHarness();
-    const rendered = renderHook(() => usePageLiveSession(options({ loadBackend: async () => harness.backend })));
+    const rendered = renderHook(() => usePageLiveSession(options({ loadBackend: async () => harness.backend })), {
+      wrapper: sessionWrapper(),
+    });
     await act(async () => undefined);
     act(() => {
       harness.open();
@@ -228,9 +264,34 @@ describe("usePageLiveSession", () => {
     rendered.unmount();
   });
 
+  it("patches the cached rows when a peer locks the page", async () => {
+    const client = new QueryClient();
+    client.setQueryData(pageKeys.detail("acme", "project-1", PAGE_ID), makePageRow({ id: PAGE_ID, is_locked: false }));
+    const harness = fakeHarness();
+    const rendered = renderHook(() => usePageLiveSession(options({ loadBackend: async () => harness.backend })), {
+      wrapper: sessionWrapper(client),
+    });
+    await act(async () => undefined);
+    act(() => {
+      harness.stateless("locked");
+    });
+    expect(
+      client.getQueryData<ReturnType<typeof makePageRow>>(pageKeys.detail("acme", "project-1", PAGE_ID))?.is_locked
+    ).toBe(true);
+    act(() => {
+      harness.stateless("unlocked");
+    });
+    expect(
+      client.getQueryData<ReturnType<typeof makePageRow>>(pageKeys.detail("acme", "project-1", PAGE_ID))?.is_locked
+    ).toBe(false);
+    rendered.unmount();
+  });
+
   it("mounts warm caches before the sync lands", async () => {
     const harness = fakeHarness({ cacheReady: false, lengths: new Map([["default", 2]]) });
-    const rendered = renderHook(() => usePageLiveSession(options({ loadBackend: async () => harness.backend })));
+    const rendered = renderHook(() => usePageLiveSession(options({ loadBackend: async () => harness.backend })), {
+      wrapper: sessionWrapper(),
+    });
     await act(async () => undefined);
     expect(rendered.result.current?.showLoader).toBe(true);
     act(() => {
@@ -242,7 +303,9 @@ describe("usePageLiveSession", () => {
 
   it("fetches the production fallback binary with no injected reader", async () => {
     const harness = fakeHarness();
-    const rendered = renderHook(() => usePageLiveSession(options({ loadBackend: async () => harness.backend })));
+    const rendered = renderHook(() => usePageLiveSession(options({ loadBackend: async () => harness.backend })), {
+      wrapper: sessionWrapper(),
+    });
     await act(async () => undefined);
     await act(async () => {
       harness.close(4401);
@@ -262,7 +325,9 @@ describe("usePageLiveSession", () => {
 
   it("degrades to the standalone editor when the chunk fails", async () => {
     const gate = deferred<PageLiveBackend>();
-    const rendered = renderHook(() => usePageLiveSession(options({ loadBackend: () => gate.promise })));
+    const rendered = renderHook(() => usePageLiveSession(options({ loadBackend: () => gate.promise })), {
+      wrapper: sessionWrapper(),
+    });
     await act(async () => {
       gate.reject(new Error("chunk gone"));
     });
@@ -280,7 +345,9 @@ describe("usePageLiveSession", () => {
   it("destroys a backend that resolves after unmount", async () => {
     const harness = fakeHarness();
     const gate = deferred<PageLiveBackend>();
-    const rendered = renderHook(() => usePageLiveSession(options({ loadBackend: () => gate.promise })));
+    const rendered = renderHook(() => usePageLiveSession(options({ loadBackend: () => gate.promise })), {
+      wrapper: sessionWrapper(),
+    });
     rendered.unmount();
     await act(async () => {
       gate.resolve(harness.backend);
@@ -291,7 +358,9 @@ describe("usePageLiveSession", () => {
 
   it("ignores a rejection after unmount", async () => {
     const gate = deferred<PageLiveBackend>();
-    const rendered = renderHook(() => usePageLiveSession(options({ loadBackend: () => gate.promise })));
+    const rendered = renderHook(() => usePageLiveSession(options({ loadBackend: () => gate.promise })), {
+      wrapper: sessionWrapper(),
+    });
     rendered.unmount();
     await act(async () => {
       gate.reject(new Error("too late"));
@@ -304,6 +373,7 @@ describe("usePageLiveSession", () => {
     const loadBackend = vi.fn(async () => first.backend);
     const rendered = renderHook(({ pageId }) => usePageLiveSession(options({ pageId, loadBackend })), {
       initialProps: { pageId: PAGE_ID },
+      wrapper: sessionWrapper(),
     });
     await act(async () => undefined);
     expect(rendered.result.current?.docHandle).toBe(first.backend.doc.handle);
@@ -321,7 +391,10 @@ describe("usePageLiveSession", () => {
     const harness = fakeHarness();
     const rendered = renderHook(
       ({ enabled, user }) => usePageLiveSession(options({ enabled, user, loadBackend: async () => harness.backend })),
-      { initialProps: { enabled: true, user: USER as UsePageLiveSessionOptions["user"] } }
+      {
+        initialProps: { enabled: true, user: USER as UsePageLiveSessionOptions["user"] },
+        wrapper: sessionWrapper(),
+      }
     );
     await act(async () => undefined);
     expect(rendered.result.current?.docHandle).toBe(harness.backend.doc.handle);
@@ -337,6 +410,7 @@ describe("usePageLiveSession", () => {
     const loadBackend = vi.fn(async () => first.backend);
     const rendered = renderHook(({ user }) => usePageLiveSession(options({ user, loadBackend })), {
       initialProps: { user: USER as UsePageLiveSessionOptions["user"] },
+      wrapper: sessionWrapper(),
     });
     await act(async () => undefined);
     loadBackend.mockResolvedValue(second.backend);
@@ -349,7 +423,9 @@ describe("usePageLiveSession", () => {
 
   it("fast-forwards a pending retry on connectivity or focus", async () => {
     const harness = fakeHarness();
-    const rendered = renderHook(() => usePageLiveSession(options({ loadBackend: async () => harness.backend })));
+    const rendered = renderHook(() => usePageLiveSession(options({ loadBackend: async () => harness.backend })), {
+      wrapper: sessionWrapper(),
+    });
     await act(async () => undefined);
     act(() => {
       harness.open();
@@ -373,7 +449,9 @@ describe("usePageLiveSession", () => {
 
   it("forces a fresh dial on connectivity even while synced", async () => {
     const harness = fakeHarness();
-    const rendered = renderHook(() => usePageLiveSession(options({ loadBackend: async () => harness.backend })));
+    const rendered = renderHook(() => usePageLiveSession(options({ loadBackend: async () => harness.backend })), {
+      wrapper: sessionWrapper(),
+    });
     await act(async () => undefined);
     act(() => {
       harness.open();
@@ -391,7 +469,9 @@ describe("usePageLiveSession", () => {
   it("nudges only on a visible tab and never before the session", async () => {
     const harness = fakeHarness();
     const gate = deferred<PageLiveBackend>();
-    const rendered = renderHook(() => usePageLiveSession(options({ loadBackend: () => gate.promise })));
+    const rendered = renderHook(() => usePageLiveSession(options({ loadBackend: () => gate.promise })), {
+      wrapper: sessionWrapper(),
+    });
     await act(async () => {
       window.dispatchEvent(new window.Event("online"));
       document.dispatchEvent(new window.Event("visibilitychange"));
@@ -473,7 +553,7 @@ describe("usePageLiveSession defaults", () => {
     try {
       FakeWebSocket.instances = [];
       vi.stubGlobal("WebSocket", FakeWebSocket);
-      const rendered = renderHook(() => usePageLiveSession(options()));
+      const rendered = renderHook(() => usePageLiveSession(options()), { wrapper: sessionWrapper() });
       await waitFor(() => expect(rendered.result.current?.docHandle).not.toBeNull(), { timeout: 15000 });
       await waitFor(() => expect(FakeWebSocket.instances.length).toBeGreaterThan(0), { timeout: 15000 });
       const socket = FakeWebSocket.instances[0];

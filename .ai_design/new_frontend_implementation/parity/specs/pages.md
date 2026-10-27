@@ -787,6 +787,12 @@ The menu deliberately has **no** new-tab, copy-link, lock or move entry —
 the list row menu owns those. Delete appears only on an archived page
 (§7.3).
 
+Nested pages (D17) add one entry to the new build's menu only: **Add
+sub-page** sits after **Version history** for member and above (§12.2
+PAGE-084; absent for guests and on shelved pages). The oracle scenarios
+pin the pre-nested order above and the new leg derives its expectation
+by inserting the entry, since the old app cannot show nested pages.
+
 ### 7.5 What the header does not carry (PAGE-076–078, PAGE-082, PAGE-083)
 
 - No share control in the community build (cloud slot, PAGE-076).

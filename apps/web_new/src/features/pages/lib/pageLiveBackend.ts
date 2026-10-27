@@ -35,6 +35,8 @@ export interface PageLiveConnectionPort {
   onClose(listener: (code: number, reason: string) => void): () => void;
   onSynced(listener: () => void): () => void;
   onStateless(listener: (payload: string) => void): () => void;
+  /** One bare stateless payload to the mount (a property wire name). */
+  sendStateless(payload: string): void;
   /** A rejected handshake: the mount answers with a message, no close. */
   onAuthFailed(listener: () => void): () => void;
   /** One dial: resolves once open, rejects when the upgrade fails. */
@@ -100,6 +102,7 @@ interface SocketHandle {
 interface ProviderHandle {
   destroy: () => void;
   setAwarenessField: (key: string, value: unknown) => void;
+  sendStateless: (payload: string) => void;
   on: (event: string, listener: (payload?: unknown) => void) => void;
   off: (event: string, listener: (payload?: unknown) => void) => void;
 }
@@ -214,6 +217,7 @@ export async function createPageLiveBackend(
       provider.on("stateless", forward);
       return () => provider.off("stateless", forward);
     },
+    sendStateless: (payload) => provider.sendStateless(payload),
     onAuthFailed: (listener) => {
       const forward = (): void => listener();
       provider.on("authenticationFailed", forward);

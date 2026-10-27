@@ -1497,6 +1497,28 @@ describe("PageDetailScreen header actions (PAGE-055-060)", () => {
     expect(router.navigate).not.toHaveBeenCalled();
     expect(screen.getByTestId("page-archived-marker")).toBeInTheDocument();
   });
+
+  it("closes the shelved options menu on Escape with no lingering menu items (NEWFRONT-940)", async () => {
+    harness.page = record({ archived_at: "2026-10-20" });
+    renderScreen();
+    expect(await screen.findByTestId("page-archived-marker")).toBeInTheDocument();
+    await openOptions();
+    expect(await screen.findByRole("menuitem", { name: "Restore" })).toBeInTheDocument();
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(screen.queryAllByRole("menuitem")).toEqual([]));
+  });
+
+  it("closes the shelved options menu on Escape after archiving through the menu (NEWFRONT-940)", async () => {
+    renderScreen();
+    await screen.findByRole("textbox", { name: "Page title" });
+    await openOptions();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Archive" }));
+    expect(await screen.findByTestId("page-archived-marker")).toBeInTheDocument();
+    await openOptions();
+    expect(await screen.findByRole("menuitem", { name: "Restore" })).toBeInTheDocument();
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(screen.queryAllByRole("menuitem")).toEqual([]));
+  });
 });
 
 describe("PageDetailScreen fallback persistence (PAGE-064)", () => {

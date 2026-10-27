@@ -210,6 +210,17 @@ async function expectEditableOrReload(driver: ParityDriver, editable: boolean): 
   await expect.poll(() => driver.pagesHeaderEditorEditable(), { timeout: 30_000 }).toBe(editable);
 }
 
+/** D17 seats "Add sub-page" in the new app's options menu after "Version
+ * history" for member and above (spec §12.2 PAGE-084); the oracle pins
+ * the pre-nested order, so the new leg derives its expectation by
+ * inserting the entry into the pinned list. */
+function withSubPageEntry(pinned: readonly string[], leg: string): string[] {
+  if (leg !== "new") return [...pinned];
+  const at = pinned.indexOf("Version history");
+  if (at < 0) return [...pinned];
+  return [...pinned.slice(0, at + 1), "Add sub-page", ...pinned.slice(at + 1)];
+}
+
 /** Poll until a visible toast mentions `snippet` (toasts auto-dismiss; the box is loaded). */
 async function waitForToast(driver: ParityDriver, snippet: string, timeoutMs = 60_000): Promise<void> {
   await expect
@@ -412,7 +423,7 @@ test(
 test(
   specTitle(["PAGE-057"], "visibility switching hides from non-privileged viewers and while shelved"),
   { tag: specTags(["PAGE-057"]) },
-  async ({ driver, seed, browser }) => {
+  async ({ driver, seed, browser }, testInfo) => {
     const tag = stamp();
     const session = await seedSession(seed);
     const pageId = await serverCreatePage(seed.workspaceSlug, seed.projectId, session, `Hdr057b ${tag}`);
@@ -425,7 +436,12 @@ test(
       await peer.driver.pagesHeaderOpenOptions();
       await expect
         .poll(() => peer.driver.pagesHeaderMenuItems(), { timeout: 15_000 })
-        .toEqual(["Full width", "Sticky toolbar", "Copy markdown", "Version history", "Make a copy", "Export"]);
+        .toEqual(
+          withSubPageEntry(
+            ["Full width", "Sticky toolbar", "Copy markdown", "Version history", "Make a copy", "Export"],
+            testInfo.project.name
+          )
+        );
     } finally {
       await peer.close();
     }
@@ -649,7 +665,7 @@ test(
 test(
   specTitle(["PAGE-060"], "options menu gathers every entry in order and each one acts"),
   { tag: specTags(["PAGE-060"]) },
-  async ({ driver, seed }) => {
+  async ({ driver, seed }, testInfo) => {
     const tag = stamp();
     const session = await seedSession(seed);
     const title = `Hdr060 ${tag}`;
@@ -662,16 +678,21 @@ test(
     await driver.pagesHeaderOpenOptions();
     await expect
       .poll(() => driver.pagesHeaderMenuItems(), { timeout: 15_000 })
-      .toEqual([
-        "Full width",
-        "Sticky toolbar",
-        "Copy markdown",
-        "Version history",
-        "Make a copy",
-        "Archive",
-        "Make private",
-        "Export",
-      ]);
+      .toEqual(
+        withSubPageEntry(
+          [
+            "Full width",
+            "Sticky toolbar",
+            "Copy markdown",
+            "Version history",
+            "Make a copy",
+            "Archive",
+            "Make private",
+            "Export",
+          ],
+          testInfo.project.name
+        )
+      );
     await driver.page.keyboard.press("Escape");
     await expect.poll(() => driver.pagesHeaderMenuItems(), { timeout: 15_000 }).toEqual([]);
 
@@ -738,7 +759,7 @@ test(
 test(
   specTitle(["PAGE-060"], "options menu degrades by role: member sees the reduced set, guests see no menu"),
   { tag: specTags(["PAGE-060"]) },
-  async ({ driver, seed, browser }) => {
+  async ({ driver, seed, browser }, testInfo) => {
     const tag = stamp();
     const session = await seedSession(seed);
     const pageId = await serverCreatePage(seed.workspaceSlug, seed.projectId, session, `Hdr060b ${tag}`);
@@ -750,7 +771,12 @@ test(
       await peer.driver.pagesHeaderOpenOptions();
       await expect
         .poll(() => peer.driver.pagesHeaderMenuItems(), { timeout: 15_000 })
-        .toEqual(["Full width", "Sticky toolbar", "Copy markdown", "Version history", "Make a copy", "Export"]);
+        .toEqual(
+          withSubPageEntry(
+            ["Full width", "Sticky toolbar", "Copy markdown", "Version history", "Make a copy", "Export"],
+            testInfo.project.name
+          )
+        );
     } finally {
       await peer.close();
     }
