@@ -431,6 +431,7 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
     let invoke = model_runtime::invoke::InvokeCtx {
         tools: model_runtime::tools_exec::ToolCtx {
             pool: ctx.pools.primary().clone(),
+            orm: ctx.orm.clone(),
             cloud: ctx.settings.cloud_agent.clone(),
             managed: ctx.settings.managed_runner.clone(),
             http: reqwest::Client::new(),

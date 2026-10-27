@@ -1023,6 +1023,10 @@ pub struct CreateIssue {
     /// shaped activity (the intake `intake=` extra kwarg) keep that leg
     /// driver-side and pass `true`.
     pub skip_activity: bool,
+    /// Skip the creation fire: drivers that drive their own post-commit
+    /// fire (the agent tools' bespoke `fire_create_transition`) pass
+    /// `true` so the chain stays empty.
+    pub skip_fire: bool,
     pub model_activity: Option<ModelActivitySpec>,
     pub created_override: Option<CreatedOverride>,
 }
@@ -1046,13 +1050,16 @@ pub async fn create(
         .insert(&txn.connection())
         .await
         .map_err(DomainError::Db)?;
-    let mut chain = vec![ChainEffect::FireTransition {
-        issue_id: model.id,
-        prev_state: None,
-        current_state: model.state_id,
-        spec: input.fire,
-        actor_id: actor,
-    }];
+    let mut chain = Vec::new();
+    if !input.skip_fire {
+        chain.push(ChainEffect::FireTransition {
+            issue_id: model.id,
+            prev_state: None,
+            current_state: model.state_id,
+            spec: input.fire,
+            actor_id: actor,
+        });
+    }
     // Empty/missing assignees + a project default → the fallback leg;
     // explicit ids → the batch leg (`serializers/issue.py:419-444`).
     if input.assignees.is_empty() {
@@ -1583,6 +1590,67 @@ pub async fn set_workpad(
     Ok(outcome)
 }
 
+/// The agent-tool workpad write (`tools.py:300-307`): a `QuerySet.update`
+/// equivalent — bare columns, no hooks, no chain. Contrast
+/// [`set_workpad`], which runs the save (hook recomputes plus the
+/// completion leg) for the v1 workpad endpoint. Runs on any executor so
+/// audit-transaction drivers keep the write inside their transaction.
+pub async fn update_workpad<'e, E>(
+    ex: E,
+    issue_id: Uuid,
+    project_id: Uuid,
+    workpad: &str,
+    updated_at: DateTime<Utc>,
+) -> Result<u64, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(WORKPAD_BARE_UPDATE_SQL)
+        .bind(issue_id)
+        .bind(project_id)
+        .bind(workpad)
+        .bind(updated_at)
+        .execute(ex)
+        .await
+        .map(|done| done.rows_affected())
+}
+
+const WORKPAD_BARE_UPDATE_SQL: &str =
+    "UPDATE issues SET workpad = $3, updated_at = $4 WHERE id = $1 AND project_id = $2 \
+     AND deleted_at IS NULL";
+
+/// The agent-tool transition save (`tools.py:334-335`): a
+/// `save(update_fields=["state", "updated_at", "updated_by"])`
+/// equivalent — the three columns land with no hook-recompute writes
+/// (`completed_at`/`description_stripped` stay untouched, exactly what
+/// the field list writes) and no chain: the driver routes completion,
+/// fire and orchestration itself, as today. Runs on any executor so
+/// audit-transaction drivers keep the write inside their transaction
+/// (and under their row lock — a separate domain transaction would
+/// deadlock against it).
+pub async fn update_issue_state<'e, E>(
+    ex: E,
+    issue_id: Uuid,
+    state_id: Uuid,
+    updated_at: DateTime<Utc>,
+    updated_by_id: Uuid,
+) -> Result<u64, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(ISSUE_STATE_BARE_UPDATE_SQL)
+        .bind(issue_id)
+        .bind(state_id)
+        .bind(updated_at)
+        .bind(updated_by_id)
+        .execute(ex)
+        .await
+        .map(|done| done.rows_affected())
+}
+
+const ISSUE_STATE_BARE_UPDATE_SQL: &str =
+    "UPDATE issues SET state_id = $2, updated_at = $3, updated_by_id = $4 WHERE id = $1";
+
 /// An activity enqueue that runs ahead of the row write (the archive
 /// endpoints enqueue before saving): the event, the pre-built spaced
 /// dumps, and the origin the driver resolved up front.
@@ -2053,6 +2121,17 @@ mod tests {
             serde_json::to_string(&Value::Object(mine)).expect("json"),
             serde_json::to_string(&Value::Object(theirs)).expect("json"),
         );
+    }
+
+    #[test]
+    fn bare_update_sql_shapes() {
+        // Moved verbatim from the retired `dispatch::tools` consts: the
+        // agent-tool `QuerySet.update` / `update_fields` equivalents.
+        assert!(WORKPAD_BARE_UPDATE_SQL.contains("SET workpad = $3"));
+        assert!(WORKPAD_BARE_UPDATE_SQL.contains("project_id = $2"));
+        assert!(WORKPAD_BARE_UPDATE_SQL.contains("deleted_at IS NULL"));
+        assert!(ISSUE_STATE_BARE_UPDATE_SQL.contains("SET state_id = $2"));
+        assert!(ISSUE_STATE_BARE_UPDATE_SQL.contains("updated_by_id = $4"));
     }
 
     #[test]
@@ -2534,6 +2613,7 @@ mod tests {
                         activity_notification: Some(true),
                         activity_require_origin: true,
                         skip_activity: false,
+                        skip_fire: false,
                         model_activity: None,
                         created_override: None,
                     },

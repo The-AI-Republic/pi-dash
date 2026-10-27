@@ -4468,6 +4468,7 @@ pub async fn collection_create(
                     activity_notification: None,
                     activity_require_origin: false,
                     skip_activity: true,
+                    skip_fire: false,
                     model_activity: None,
                     created_override: None,
                 },

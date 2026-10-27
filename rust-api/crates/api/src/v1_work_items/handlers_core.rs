@@ -4871,6 +4871,7 @@ async fn create_issue_inner(
                     activity_notification: None,
                     activity_require_origin: false,
                     skip_activity: false,
+                    skip_fire: false,
                     model_activity: Some(domain_issues::ModelActivitySpec {
                         model: new_id,
                         requested: data,

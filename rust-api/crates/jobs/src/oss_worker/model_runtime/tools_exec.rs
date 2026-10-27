@@ -83,6 +83,9 @@ use pidash_services::dispatch::{
     admission::AdmissionCache, consume_admission_token, DeferredConsume, LlmProfile,
 };
 use pidash_services::domain::identity::AgentUserCollisionError;
+use pidash_services::domain::issues as domain_issues;
+use pidash_services::domain::issues::IssueFieldSet;
+use pidash_services::domain::{self, WriteActor, WriteCtx, WriteScope};
 use pidash_services::extensions::CloudAgentToolsetsSeam;
 use pidash_services::orchestration::clock::{ClockWrite, ProjectClockPolicy};
 use pidash_services::orchestration::creation::{
@@ -286,6 +289,9 @@ fn parse_django_uuid(text: &str) -> Option<Uuid> {
 pub struct ToolCtx {
     /// Worker primary pool (reads, ledger, audit transactions).
     pub pool: PgPool,
+    /// The shared SeaORM connection (stage 8): domain writes run their
+    /// transactions on this handle.
+    pub orm: pidash_db::DatabaseConnection,
     /// `CLOUD_AGENT_*` (`audit_guards`, bounds, event cap).
     pub cloud: CloudAgentSettings,
     /// Managed-runner settings (transition store inputs).
@@ -1087,9 +1093,31 @@ async fn bound_issue_tx(
     .map_err(ToolExecError::Db)
 }
 
+/// Map a domain-write failure onto the tool errors: the model only
+/// ever sees the message, the ledger the Python type. Fault-path only
+/// (the row write itself): races the old inline SQL would surface as
+/// `OperationalError`/`IntegrityError` arrive stringified instead.
+fn domain_error(error: domain::DomainError) -> ToolExecError {
+    ToolExecError::Db(sqlx::Error::Protocol(error.to_string()))
+}
+
+fn write_ctx(scope: &ToolScope, project_id: Uuid) -> WriteCtx {
+    WriteCtx::new(WriteActor {
+        user_id: scope.creator_id,
+        timezone: None,
+    })
+    .with_scope(WriteScope {
+        workspace_id: Some(scope.workspace_id),
+        project_id: Some(project_id),
+    })
+}
+
 /// `pidash_update_current_issue_workpad` (`tools.py:296-307`). A run
 /// with no bound issue updates zero rows (`pk=None`) and still reports
-/// `updated`, with `issue_id` rendering Python's `str(None)`.
+/// `updated`, with `issue_id` rendering Python's `str(None)`. The write
+/// rides `domain::issues::update_workpad` — the `QuerySet.update`
+/// equivalent, bare columns with no save signals — inside the audit
+/// transaction, exactly where the inline `UPDATE` ran.
 async fn op_update_current_issue_workpad(
     tx: &mut Transaction<'_>,
     scope: &ToolScope,
@@ -1103,13 +1131,14 @@ async fn op_update_current_issue_workpad(
                 attribute: "project_id",
             });
         };
-        sqlx::query(plan::WORKPAD_UPDATE_SQL)
-            .bind(work_item_id)
-            .bind(issue.project_id)
-            .bind(body)
-            .bind(Utc::now())
-            .execute(&mut **tx.inner())
-            .await?;
+        let _ = domain_issues::update_workpad(
+            &mut **tx.inner(),
+            work_item_id,
+            issue.project_id,
+            body,
+            Utc::now(),
+        )
+        .await?;
         let updated = plan::workpad_updated(&work_item_id.to_string());
         serde_json::to_value(updated).map_err(|error| {
             ToolExecError::Failure(plan::ToolCallFailure::Failed(error.to_string()))
@@ -1154,6 +1183,7 @@ async fn state_view_tx(
 /// Returns the brief plus the post-commit fire inputs — the caller
 /// drives [`fire_create_transition`] once the audit commits.
 async fn op_create_project_issue(
+    ctx: &ToolCtx,
     tx: &mut Transaction<'_>,
     scope: &ToolScope,
     description: &str,
@@ -1204,107 +1234,98 @@ async fn op_create_project_issue(
         .fetch_optional(&mut **tx.inner())
         .await?
         .flatten();
-    let state_id = match tool_state {
-        Some(state) => Some(state),
-        None => {
-            let repaired: Option<Uuid> = sqlx::query_scalar(plan::CREATE_SAVE_DEFAULT_STATE_SQL)
-                .bind(project_id)
-                .fetch_optional(&mut **tx.inner())
-                .await?
-                .flatten();
-            match repaired {
-                Some(state) => Some(state),
-                None => sqlx::query_scalar(plan::CREATE_SAVE_FALLBACK_STATE_SQL)
-                    .bind(project_id)
-                    .fetch_optional(&mut **tx.inner())
-                    .await?
-                    .flatten(),
-            }
-        }
-    };
-    sqlx::query(plan::CREATE_ADVISORY_LOCK_SQL)
-        .bind(plan::advisory_lock_key(&project_id))
-        .execute(&mut **tx.inner())
-        .await?;
-    let last_sequence: Option<i64> = sqlx::query_scalar(plan::CREATE_SEQ_SCAN_SQL)
-        .bind(project_id)
-        .fetch_optional(&mut **tx.inner())
-        .await?
-        .flatten();
-    let sequence_id = plan::saved_sequence_id(last_sequence);
-    let largest_sort_order: Option<f64> = match state_id {
-        Some(state) => sqlx::query_scalar(plan::CREATE_SORT_ORDER_MAX_SQL)
-            .bind(project_id)
-            .bind(state)
-            .fetch_optional(&mut **tx.inner())
-            .await?
-            .flatten(),
-        None => sqlx::query_scalar(
-            "SELECT MAX(sort_order) FROM issues \
-                 WHERE project_id = $1 AND state_id IS NULL AND deleted_at IS NULL",
-        )
-        .bind(project_id)
-        .fetch_optional(&mut **tx.inner())
-        .await?
-        .flatten(),
-    };
-    let sort_order = plan::saved_sort_order(largest_sort_order);
-    let pod_id: Option<Uuid> = sqlx::query_scalar(plan::CREATE_DEFAULT_POD_SQL)
-        .bind(project_id)
-        .fetch_optional(&mut **tx.inner())
-        .await?
-        .flatten();
-    // `completed_at` stamps only when the TOOL supplied the state and
-    // its group is `completed` — a save-repaired state never stamps.
-    let now = Utc::now();
-    let completed_at: Option<DateTime<Utc>> = match tool_state {
-        Some(state) => {
-            let group = state_view_tx(tx, state).await?.map(|view| view.group);
-            if group.as_deref() == Some("completed") {
-                Some(now)
-            } else {
-                None
-            }
-        }
-        None => None,
-    };
+    // The save rides `domain::issues::create`: the hooks repair a
+    // missing tool state (same default-then-fallback queries), take the
+    // advisory lock, scan the effective sequence and sort order, resolve
+    // the default pod, stamp `completed_at` for a tool-supplied completed
+    // state only (a repaired state never stamps — the assembled `None`
+    // rides through), and strip the html. The fire and the created
+    // activity are both skipped: the caller drives the bespoke
+    // post-commit fire and Django sends no activity on this path, so the
+    // chain stays empty and no hooks are registered. The issue commits in
+    // the domain transaction, ahead of the audit commit below (the old
+    // inline inserts shared the audit transaction — a post-write audit
+    // failure now leaves the issue standing; fault-path only).
     // `to_safe_html` never yields `""` (the `<p></p>` fallback), so the
-    // `NULL` arm is defensive, kept for the port's exact shape.
+    // hook's `NULL` arm is defensive, kept for the port's exact shape.
     let html = to_safe_html(Some(description));
-    let stripped: Option<String> = if html.is_empty() {
-        None
-    } else {
-        Some(ml_strip_tags(&html))
-    };
+    let now = Utc::now();
     let issue_id = Uuid::new_v4();
-    let sequence_row_id = Uuid::new_v4();
-    sqlx::query(plan::CREATE_ISSUE_INSERT_SQL)
-        .bind(issue_id)
-        .bind(now)
-        .bind(now)
-        .bind(scope.creator_id)
-        .bind(project_id)
-        .bind(scope.workspace_id)
-        .bind(state_id)
-        .bind(stripped_title)
-        .bind(html.as_str())
-        .bind(stripped.as_deref())
-        .bind(sequence_id)
-        .bind(sort_order)
-        .bind(completed_at)
-        .bind(pod_id)
-        .execute(&mut **tx.inner())
-        .await?;
-    sqlx::query(plan::CREATE_ISSUE_SEQUENCE_INSERT_SQL)
-        .bind(sequence_row_id)
-        .bind(now)
-        .bind(scope.creator_id)
-        .bind(project_id)
-        .bind(scope.workspace_id)
-        .bind(issue_id)
-        .bind(sequence_id)
-        .execute(&mut **tx.inner())
-        .await?;
+    let fields = IssueFieldSet {
+        id: issue_id,
+        created_at: now,
+        updated_at: now,
+        created_by_id: Some(scope.creator_id),
+        updated_by_id: None,
+        deleted_at: None,
+        project_id,
+        workspace_id: scope.workspace_id,
+        parent_id: None,
+        state_id: tool_state,
+        point: None,
+        estimate_point_id: None,
+        name: stripped_title.to_owned(),
+        description_json: serde_json::Value::Object(serde_json::Map::new()),
+        description_html: html,
+        description_stripped: None,
+        description_binary: None,
+        priority: "none".to_owned(),
+        complexity_score: 0,
+        start_date: None,
+        target_date: None,
+        sequence_id: 0,
+        sort_order: 65535.0,
+        completed_at: None,
+        archived_at: None,
+        is_draft: false,
+        external_source: None,
+        external_id: None,
+        type_id: None,
+        git_work_branch: String::new(),
+        workpad: String::new(),
+        created_via: Some("cloud_agent".to_owned()),
+        assigned_pod_id: None,
+        agent_executor: None,
+    };
+    // Inert: the fire is skipped (the caller drives it post-commit).
+    let fire = domain_issues::FireSpec {
+        dispatch_immediate: true,
+        created_by: Some(scope.creator_id),
+        moved_by_run: None,
+        now,
+    };
+    let domain_ctx = write_ctx(scope, project_id);
+    let outcome = domain::run(&domain_ctx, &ctx.orm, |txn| {
+        let domain_ctx = domain_ctx.clone();
+        let pool = ctx.pool.clone();
+        Box::pin(async move {
+            domain_issues::create(
+                &domain_ctx,
+                txn,
+                &pool,
+                domain_issues::CreateIssue {
+                    fields,
+                    assignees: Vec::new(),
+                    default_assignee: None,
+                    labels: Vec::new(),
+                    fire,
+                    origin: None,
+                    activity_requested: serde_json::Value::Null,
+                    activity_notification: None,
+                    activity_require_origin: false,
+                    skip_activity: true,
+                    skip_fire: true,
+                    model_activity: None,
+                    created_override: None,
+                },
+            )
+            .await
+        })
+    })
+    .await
+    .map_err(domain_error)?;
+    let state_id = outcome.issue.state_id;
+    let sequence_id = i64::from(outcome.issue.sequence_id);
     // `{"created": True, **_issue_data(issue)}` (brief, `created`
     // first): the project identifier plus the resolved state.
     let project_identifier: Option<String> =
@@ -2086,13 +2107,19 @@ async fn op_transition_current_issue<'a>(
         return (tx, value);
     }
     let now = Utc::now();
-    if let Err(error) = sqlx::query(plan::TRANSITION_ISSUE_SAVE_SQL)
-        .bind(issue_id)
-        .bind(target_id)
-        .bind(now)
-        .bind(scope.creator_id)
-        .execute(&mut **tx.inner())
-        .await
+    // The `save(update_fields=["state", "updated_at", "updated_by"])`
+    // equivalent: three bare columns, no hook-recompute writes, no chain
+    // — completion, fire and the orchestration drive stay driver-side, as
+    // today. Inside the audit transaction, under the row lock above (a
+    // separate domain transaction would deadlock against it).
+    if let Err(error) = domain_issues::update_issue_state(
+        &mut **tx.inner(),
+        issue_id,
+        target_id,
+        now,
+        scope.creator_id,
+    )
+    .await
     {
         return (tx, Err(error.into()));
     }
@@ -3339,7 +3366,9 @@ async fn dispatch_fn(
                         scope,
                         ledger_id,
                     } = audit;
-                    match op_create_project_issue(&mut tx, &scope, description, &stripped).await {
+                    match op_create_project_issue(ctx, &mut tx, &scope, description, &stripped)
+                        .await
+                    {
                         Ok((result, fire)) => {
                             let creator_id = scope.creator_id;
                             let run_id = scope.run_id;

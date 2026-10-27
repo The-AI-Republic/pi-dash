@@ -4538,6 +4538,7 @@ pub async fn create_issue(
                     activity_notification: Some(true),
                     activity_require_origin: true,
                     skip_activity: false,
+                    skip_fire: false,
                     model_activity: None,
                     created_override: None,
                 },
