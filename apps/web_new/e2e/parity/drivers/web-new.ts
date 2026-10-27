@@ -7884,11 +7884,12 @@ export class WebNewDriver implements ParityDriver {
 
   async layoutsReloadIssues(): Promise<void> {
     await this.page.reload({ waitUntil: "domcontentloaded" });
-    // Either surface settles the reload: the profile tab or a project
-    // list (project, cycle, module, archived), rows or empty state.
+    // Either surface settles the reload: the profile tab, a project
+    // list (project, cycle, module, archived), or one of the board
+    // layouts, rows or empty state.
     await this.page
       .locator(
-        '[data-testid="profile-list"], [data-testid="list-group-header"], [data-testid="list-row"], [data-testid="empty-state"]'
+        '[data-testid="profile-list"], [data-testid="list-group-header"], [data-testid="list-row"], [data-testid="empty-state"], [data-testid="spreadsheet-scroller"], [data-testid="kanban-layout"], [data-testid="gantt-layout"]'
       )
       .first()
       .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
@@ -7910,8 +7911,45 @@ export class WebNewDriver implements ParityDriver {
     return this.isShown(this.page.getByTestId("issues-calendar"));
   }
 
+  /** The sheet's scroll container; the sheet reads ready when it shows. */
+  private layoutsSheetScroller(): Locator {
+    return this.page.getByTestId("spreadsheet-scroller");
+  }
+
+  private layoutsSheetTable(): Locator {
+    return this.layoutsSheetScroller().locator("table").first();
+  }
+
+  /**
+   * One property cell, addressed the way its label names it
+   * ("State for Parity first issue").
+   */
+  private layoutsSheetCell(issueName: string, column: string): Locator {
+    const escaped = `${column} for ${issueName}`.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    return this.page.locator(`td[aria-label="${escaped}"]`).first();
+  }
+
+  /** First-column cells in row order; spacers carry no such id. */
+  private layoutsSheetFirstCells(): Locator {
+    return this.layoutsSheetTable().locator('tbody td[id^="issue-"]');
+  }
+
+  /**
+   * The name a first-column cell shows: the title link, or the plain
+   * span while the row is still optimistic. Spacer and skeleton rows
+   * read blank.
+   */
+  private async layoutsSheetFirstCellName(cell: Locator): Promise<string> {
+    if ((await cell.count()) === 0) return "";
+    const link = cell.locator("a").first();
+    if ((await link.count()) > 0) return (await link.innerText()).trim();
+    const named = cell.locator("div.truncate").first();
+    if ((await named.count()) > 0) return (await named.innerText()).trim();
+    return "";
+  }
+
   async layoutsSpreadsheetVisible(): Promise<boolean> {
-    return todo("layoutsSpreadsheetVisible");
+    return this.isShown(this.layoutsSheetScroller());
   }
 
   async layoutsKanbanVisible(): Promise<boolean> {
@@ -8194,95 +8232,285 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async layoutsSheetHeaders(): Promise<string[]> {
-    return todo("layoutsSheetHeaders");
+    const table = this.layoutsSheetTable();
+    await table.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const heads = table.locator("thead th");
+    const count = await heads.count();
+    const labels: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      labels.push((await heads.nth(index).innerText()).trim().replace(/\s+/g, " "));
+    }
+    return labels.filter((label) => label.length > 0);
   }
 
   async layoutsSheetRowNames(): Promise<string[]> {
-    return todo("layoutsSheetRowNames");
+    const table = this.layoutsSheetTable();
+    await table.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const cells = this.layoutsSheetFirstCells();
+    const count = await cells.count();
+    const names: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const name = await this.layoutsSheetFirstCellName(cells.nth(index));
+      if (name !== "") names.push(name);
+    }
+    return names;
   }
 
   async layoutsSheetFirstColumnSticky(): Promise<boolean> {
-    return todo("layoutsSheetFirstColumnSticky");
+    const table = this.layoutsSheetTable();
+    await table.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const first = table.locator("thead th").first();
+    return (await first.evaluate((node) => getComputedStyle(node).position)) === "sticky";
   }
 
   async layoutsSheetFirstColumnShadowed(): Promise<boolean> {
-    return todo("layoutsSheetFirstColumnShadowed");
+    const first = this.layoutsSheetFirstCells().first();
+    await first.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const shadow = await first.evaluate((node) => (node as HTMLElement).style.boxShadow);
+    return shadow !== "" && shadow !== "none";
   }
 
   async layoutsSheetScrollRight(): Promise<void> {
-    return todo("layoutsSheetScrollRight");
+    const scroller = this.layoutsSheetScroller();
+    await scroller.evaluate((node) => node.scrollTo({ left: node.scrollWidth }));
   }
 
   async layoutsSheetHeaderSticky(): Promise<boolean> {
-    return todo("layoutsSheetHeaderSticky");
+    const table = this.layoutsSheetTable();
+    await table.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const head = table.locator("thead").first();
+    return (await head.evaluate((node) => getComputedStyle(node).position)) === "sticky";
   }
 
-  async layoutsSheetCellText(_issueName: string, _column: string): Promise<string> {
-    return todo("layoutsSheetCellText");
+  async layoutsSheetCellText(issueName: string, column: string): Promise<string> {
+    const cell = this.layoutsSheetCell(issueName, column);
+    await cell.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    return (await cell.innerText()).trim().replace(/\s+/g, " ");
   }
 
-  async layoutsSheetCellEditable(_issueName: string, _column: string): Promise<boolean> {
-    return todo("layoutsSheetCellEditable");
+  async layoutsSheetCellEditable(issueName: string, column: string): Promise<boolean> {
+    const cell = this.layoutsSheetCell(issueName, column);
+    await cell.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    // Editable cells host their picker's trigger; read-only cells render
+    // bare values with no controls.
+    return (await cell.locator("button:not([disabled]), input, [role=combobox]").count()) > 0;
   }
 
-  async layoutsSheetCellSetState(_issueName: string, _stateName: string): Promise<void> {
-    return todo("layoutsSheetCellSetState");
+  /**
+   * Pick `option` from the cell's combobox popup, then settle it closed.
+   * Multi-pick popups stay open after a pick, so Escape always follows.
+   */
+  private async layoutsSheetCellPick(issueName: string, column: string, option: string): Promise<void> {
+    const cell = this.layoutsSheetCell(issueName, column);
+    await cell.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const trigger = cell.locator("button:not([disabled])").first();
+    await trigger.scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
+    await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    const listbox = this.page.getByRole("listbox").last();
+    await listbox.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await listbox.getByRole("option", { name: option }).first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.keyboard.press("Escape");
+    await listbox.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
   }
 
-  async layoutsSheetCellSetPriority(_issueName: string, _priorityName: string): Promise<void> {
-    return todo("layoutsSheetCellSetPriority");
+  async layoutsSheetCellSetState(issueName: string, stateName: string): Promise<void> {
+    await this.layoutsSheetCellPick(issueName, "State", stateName);
   }
 
-  async layoutsSheetFocusCell(_issueName: string, _column: string): Promise<void> {
-    return todo("layoutsSheetFocusCell");
+  async layoutsSheetCellSetPriority(issueName: string, priorityName: string): Promise<void> {
+    await this.layoutsSheetCellPick(issueName, "Priority", priorityName);
   }
 
-  async layoutsSheetPressArrow(_arrow: "up" | "down" | "left" | "right"): Promise<void> {
-    return todo("layoutsSheetPressArrow");
+  async layoutsSheetFocusCell(issueName: string, column: string): Promise<void> {
+    const cell = this.layoutsSheetCell(issueName, column);
+    await cell.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await cell.scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
+    // The grid owns arrows only while the cell itself holds focus, so
+    // focus it directly instead of clicking (which would land in the
+    // picker's trigger).
+    await cell.focus({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async layoutsSheetPressArrow(arrow: "up" | "down" | "left" | "right"): Promise<void> {
+    const key = { up: "ArrowUp", down: "ArrowDown", left: "ArrowLeft", right: "ArrowRight" }[arrow];
+    await this.page.keyboard.press(key);
   }
 
   async layoutsSheetFocusedCell(): Promise<{ issueName: string; column: string } | null> {
-    return todo("layoutsSheetFocusedCell");
+    // Focus lives on the cell elements; their labels name the column
+    // first ("State for Parity first issue"), so the first separator
+    // splits them even when the issue name carries its own " for ".
+    const label = await this.page.evaluate(() => {
+      const active = document.activeElement;
+      const cell = active?.closest("td[data-column-index]");
+      return cell?.getAttribute("aria-label") ?? null;
+    });
+    if (label === null) return null;
+    const split = label.indexOf(" for ");
+    if (split < 0) return null;
+    return { column: label.slice(0, split), issueName: label.slice(split + 5) };
   }
 
-  async layoutsSheetSortMenu(_column: string): Promise<string[]> {
-    return todo("layoutsSheetSortMenu");
+  /** The header cell for `column`, matched on its label. */
+  private layoutsSheetHeader(column: string): Locator {
+    return this.page.locator("thead th").filter({ hasText: column }).first();
   }
 
-  async layoutsSheetSort(_column: string, _direction: "ascending" | "descending"): Promise<void> {
-    return todo("layoutsSheetSort");
+  /** Open the sort menu for `column`; the caller closes it. */
+  private async layoutsSheetOpenSortMenu(column: string): Promise<void> {
+    const header = this.layoutsSheetHeader(column);
+    await header.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await header.getByRole("button").first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("menuitem").first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
 
-  async layoutsSheetClearSort(_column: string): Promise<void> {
-    return todo("layoutsSheetClearSort");
+  async layoutsSheetSortMenu(column: string): Promise<string[]> {
+    await this.layoutsSheetOpenSortMenu(column);
+    try {
+      return await this.layoutsReadOpenMenuItems();
+    } finally {
+      await this.layoutsCloseOpenMenu();
+    }
   }
 
-  async layoutsSheetSortMarker(_column: string): Promise<"ascending" | "descending" | "none"> {
-    return todo("layoutsSheetSortMarker");
+  async layoutsSheetSort(column: string, direction: "ascending" | "descending"): Promise<void> {
+    await this.layoutsSheetOpenSortMenu(column);
+    await (
+      await this.layoutsOpenMenuItem(direction === "ascending" ? "Ascending" : "Descending")
+    ).click({
+      timeout: WebNewDriver.WAIT_MS,
+    });
   }
 
-  async layoutsSheetQuickAdd(_title: string): Promise<void> {
-    return todo("layoutsSheetQuickAdd");
+  async layoutsSheetClearSort(column: string): Promise<void> {
+    await this.layoutsSheetOpenSortMenu(column);
+    await (await this.layoutsOpenMenuItem("Clear sorting")).click({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async layoutsSheetSortMarker(column: string): Promise<"ascending" | "descending" | "none"> {
+    const header = this.layoutsSheetHeader(column);
+    await header.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const marker = header.locator("div.rounded-full svg").first();
+    if ((await marker.count()) === 0) return "none";
+    const cls = (await marker.getAttribute("class")) ?? "";
+    // The sorted header carries a direction glyph (lucide names its icon
+    // classes): wide-to-narrow marks ascending, narrow-to-wide descending.
+    if (cls.includes("arrow-down-wide-narrow")) return "ascending";
+    if (cls.includes("arrow-up-narrow-wide")) return "descending";
+    throw new Error(`[parity] unknown sort marker classes "${cls}".`);
+  }
+
+  async layoutsSheetQuickAdd(title: string): Promise<void> {
+    const trigger = this.page.getByRole("button", { name: "Add work item", exact: true }).last();
+    await trigger.scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
+    await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    const field = this.page.getByPlaceholder("Work item title");
+    await field.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await field.fill(title);
+    await field.press("Enter");
+    // Creation lands asynchronously; settle so an immediate row read
+    // sees the new row, not the flight.
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    for (;;) {
+      if ((await this.layoutsSheetRowNames()).includes(title)) return;
+      if (Date.now() >= deadline) throw new Error("[parity] sheet quick-add never rendered its row.");
+      await this.page.waitForTimeout(500);
+    }
   }
 
   async layoutsSheetScrollEnd(): Promise<void> {
-    return todo("layoutsSheetScrollEnd");
+    const scroller = this.layoutsSheetScroller();
+    await scroller.evaluate((node) => node.scrollTo({ top: node.scrollHeight }));
+    // The bottom edge triggers the next page fetch; give it a beat
+    // before the caller re-reads.
+    await this.page.waitForTimeout(1000);
   }
 
-  async layoutsSheetHasSubIssueToggle(_issueName: string): Promise<boolean> {
-    return todo("layoutsSheetHasSubIssueToggle");
+  /** The row container for `name`, matched on its first cell. */
+  private async layoutsSheetRow(issueName: string): Promise<Locator> {
+    const cells = this.layoutsSheetFirstCells();
+    const count = await cells.count();
+    for (let index = 0; index < count; index += 1) {
+      const cell = cells.nth(index);
+      if ((await this.layoutsSheetFirstCellName(cell)) === issueName) {
+        return cell.locator("xpath=ancestor::tr[1]");
+      }
+    }
+    throw new Error(`[parity] no sheet row "${issueName}".`);
   }
 
-  async layoutsSheetExpandSubIssues(_issueName: string): Promise<void> {
-    return todo("layoutsSheetExpandSubIssues");
+  /** Either toggle label; expansion flips it. */
+  private layoutsSheetToggle(row: Locator): Locator {
+    return row
+      .locator('button[aria-label="Expand sub-work items"], button[aria-label="Collapse sub-work items"]')
+      .first();
   }
 
-  async layoutsSheetSubIssueNames(_issueName: string): Promise<string[]> {
-    return todo("layoutsSheetSubIssueNames");
+  async layoutsSheetHasSubIssueToggle(issueName: string): Promise<boolean> {
+    const row = await this.layoutsSheetRow(issueName);
+    return (await this.layoutsSheetToggle(row).count()) > 0;
   }
 
-  async layoutsSheetOpenSubIssueCount(_issueName: string): Promise<void> {
-    return todo("layoutsSheetOpenSubIssueCount");
+  async layoutsSheetExpandSubIssues(issueName: string): Promise<void> {
+    const cells = this.layoutsSheetFirstCells();
+    const before = await cells.count();
+    const row = await this.layoutsSheetRow(issueName);
+    await row
+      .getByRole("button", { name: "Expand sub-work items", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    // Expansion fetches the children, so new rows arrive asynchronously.
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    for (;;) {
+      if ((await cells.count()) > before) return;
+      if (Date.now() >= deadline) {
+        throw new Error(`[parity] sub-issues of "${issueName}" never rendered in the sheet.`);
+      }
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  async layoutsSheetSubIssueNames(issueName: string): Promise<string[]> {
+    // Children render as the rows directly after the parent; each row
+    // stamps its depth, so names are collected while rows stay deeper
+    // than the parent's own.
+    const table = this.layoutsSheetTable();
+    await table.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const rows = table.locator("tbody tr");
+    const count = await rows.count();
+    const pairs: Array<{ name: string; depth: number }> = [];
+    for (let index = 0; index < count; index += 1) {
+      const row = rows.nth(index);
+      pairs.push({
+        name: await this.layoutsSheetFirstCellName(row.locator('td[id^="issue-"]').first()),
+        depth: Number.parseInt((await row.getAttribute("data-depth")) ?? "0", 10) || 0,
+      });
+    }
+    const children: string[] = [];
+    let collecting = false;
+    let parentDepth = 0;
+    for (const pair of pairs) {
+      if (!collecting) {
+        if (pair.name === issueName) {
+          collecting = true;
+          parentDepth = pair.depth;
+        }
+        continue;
+      }
+      if (pair.depth <= parentDepth) break;
+      children.push(pair.name);
+    }
+    if (!collecting) throw new Error(`[parity] no sheet row "${issueName}".`);
+    return children;
+  }
+
+  async layoutsSheetOpenSubIssueCount(issueName: string): Promise<void> {
+    const before = this.page.url();
+    const cell = this.layoutsSheetCell(issueName, "Sub-work item");
+    await cell.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await cell.getByRole("button").first().click({ timeout: WebNewDriver.WAIT_MS });
+    // The count navigates to the browse path; settle so an immediate
+    // URL read sees the destination, not the departure.
+    await this.page.waitForURL((url) => url.href !== before, { timeout: WebNewDriver.WAIT_MS });
   }
 
   /** The mounted calendar root, or null when another layout is showing. */
@@ -9067,16 +9295,46 @@ export class WebNewDriver implements ParityDriver {
     return todo("layoutsReleaseStalls");
   }
 
-  async layoutsSheetCellSetDueDate(_issueName: string, _isoDate: string): Promise<void> {
-    return todo("layoutsSheetCellSetDueDate");
+  async layoutsSheetCellSetDueDate(issueName: string, isoDate: string): Promise<void> {
+    // The due-date cell opens a month calendar: native month/year
+    // selects plus a day grid whose buttons stamp their ISO day, so the
+    // click addresses the exact day, not the bare number.
+    const cell = this.layoutsSheetCell(issueName, "Due date");
+    await cell.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const trigger = cell.locator("button:not([disabled])").first();
+    await trigger.scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
+    await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    const [year, month] = isoDate.split("-").map((part) => Number.parseInt(part, 10));
+    const monthNames = [
+      "January",
+      "February",
+      "March",
+      "April",
+      "May",
+      "June",
+      "July",
+      "August",
+      "September",
+      "October",
+      "November",
+      "December",
+    ];
+    const monthCombo = this.page.getByRole("combobox", { name: "Month" }).first();
+    await monthCombo.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await monthCombo.selectOption({ label: monthNames[(month ?? 1) - 1] ?? "" });
+    const yearCombo = this.page.getByRole("combobox", { name: "Year" }).first();
+    await yearCombo.selectOption({ label: String(year) });
+    const day = this.page.locator(`button[data-day="${isoDate}"]`).first();
+    await day.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await day.click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async layoutsCurrentUrl(): Promise<string> {
     return this.page.url();
   }
 
-  async layoutsSheetCellSetAssignee(_issueName: string, _memberName: string): Promise<void> {
-    return todo("layoutsSheetCellSetAssignee");
+  async layoutsSheetCellSetAssignee(issueName: string, memberName: string): Promise<void> {
+    await this.layoutsSheetCellPick(issueName, "Assignees", memberName);
   }
 
   async layoutsAddExistingModalIssueNames(): Promise<string[]> {
@@ -9160,8 +9418,11 @@ export class WebNewDriver implements ParityDriver {
     }
   }
 
-  async layoutsSheetToggleSubIssues(_issueName: string): Promise<void> {
-    return todo("layoutsSheetToggleSubIssues");
+  async layoutsSheetToggleSubIssues(issueName: string): Promise<void> {
+    // A bare toggle: unlike expansion it settles nothing, so absence
+    // pins (the nested-rendering bug) read the outcome, not a throw.
+    const row = await this.layoutsSheetRow(issueName);
+    await this.layoutsSheetToggle(row).click({ timeout: WebNewDriver.WAIT_MS });
   }
   // --- NEWFRONT-118 (layouts B): kanban board + gantt timeline stubs.
   // --- Appended; existing stubs above are untouched.
