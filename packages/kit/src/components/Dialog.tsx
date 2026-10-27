@@ -6,6 +6,7 @@ import { X } from "lucide-react";
 import * as React from "react";
 import { cn } from "../lib/cn";
 import { pickDefined } from "../lib/props";
+import { POPOVER_LAYER_CLASS } from "../lib/styles";
 import { IconButton } from "./IconButton";
 
 export interface DialogProps {
@@ -108,10 +109,20 @@ export function Dialog({
     <BaseDialog.Root {...pickDefined({ open })} onOpenChange={handleOpenChange}>
       {trigger ? <BaseDialog.Trigger render={trigger} /> : null}
       <BaseDialog.Portal>
-        <BaseDialog.Backdrop className="fixed inset-0 bg-black/40 transition-opacity duration-(--motion-duration)" />
+        <BaseDialog.Backdrop
+          className={cn(
+            "fixed inset-0 bg-black/40 transition-opacity duration-(--motion-duration)",
+            POPOVER_LAYER_CLASS
+          )}
+        />
         <BaseDialog.Popup
           {...pickDefined({ initialFocus })}
-          className={cn("shadow-dialog fixed border border-(--border) bg-(--bg) p-(--space-12)", ...frame, className)}
+          className={cn(
+            "shadow-dialog fixed border border-(--border) bg-(--bg) p-(--space-12)",
+            POPOVER_LAYER_CLASS,
+            ...frame,
+            className
+          )}
         >
           <div className="flex shrink-0 items-start justify-between gap-(--space-4)">
             <div className="flex flex-col gap-(--space-2)">
