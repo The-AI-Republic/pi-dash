@@ -320,6 +320,36 @@ describe("selectWorkItemContext", () => {
     expect(estimate.usePageState("").options.map((option) => option.title)).toEqual(["No estimate", "1", "3"]);
   });
 
+  it("filters the estimate page by the displayed time labels, not stored values", () => {
+    // NEWFRONT-820: both surfaces search what the rows show. A stored
+    // 90 reads "1h 30m", so "1h" narrows to it while "90" matches
+    // nothing. The clear row matches its own label.
+    const { pages } = selectWorkItemContext(
+      input({
+        pickers: {
+          ...input().pickers,
+          estimates: [
+            {
+              id: "e1",
+              name: "Time",
+              type: "time",
+              last_used: true,
+              points: [
+                { id: "p90", key: 1, value: "90" },
+                { id: "p45", key: 2, value: "45" },
+              ],
+            } as never,
+          ],
+        },
+      })
+    );
+    const estimate = pages.find((page) => page.placeholder === "Change estimate")!;
+    expect(estimate.usePageState("").options.map((option) => option.title)).toEqual(["No estimate", "1h 30m", "45m"]);
+    expect(estimate.usePageState("1h").options.map((option) => option.title)).toEqual(["1h 30m"]);
+    expect(estimate.usePageState("90").options).toEqual([]);
+    expect(estimate.usePageState("no").options.map((option) => option.title)).toEqual(["No estimate"]);
+  });
+
   it("offers only the clear row when no estimate system is active", () => {
     const updateFields = vi.fn();
     const close = vi.fn();
