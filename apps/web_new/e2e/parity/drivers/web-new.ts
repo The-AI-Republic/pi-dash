@@ -6818,12 +6818,30 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async openDisplayOptions(): Promise<void> {
+    if (!(await this.isProfileDisplaySurface())) {
+      // Project, archived, module and cycle surfaces share DisplayControl;
+      // its trigger and panel carry their own testids.
+      await this.projectDisplayTrigger().click({ timeout: WebNewDriver.WAIT_MS });
+      await this.projectDisplayPanel().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+      return;
+    }
     // The visible profile tab's trigger; the narrow header carries its own.
     await this.profileDisplayTrigger().click({ timeout: WebNewDriver.WAIT_MS });
     await this.profileDisplayPanel().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
 
   async closeDisplayOptions(): Promise<void> {
+    if (!(await this.isProfileDisplaySurface())) {
+      await this.page.keyboard.press("Escape");
+      await this.projectDisplayPanel()
+        .waitFor({ state: "hidden", timeout: 10_000 })
+        .catch(async () => {
+          // Focus can sit outside the popover, so fall back to the trigger.
+          await this.projectDisplayTrigger().click({ timeout: WebNewDriver.WAIT_MS });
+          await this.projectDisplayPanel().waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
+        });
+      return;
+    }
     await this.page.keyboard.press("Escape");
     await this.profileDisplayPanel()
       .waitFor({ state: "hidden", timeout: 10_000 })
@@ -6846,21 +6864,62 @@ export class WebNewDriver implements ParityDriver {
     return this.profileDisplayPanel().getByRole("button", { name: option, exact: true });
   }
 
+  private projectDisplayTrigger(): Locator {
+    return this.page.getByTestId("display-options-trigger").filter({ visible: true }).first();
+  }
+
+  private projectDisplayPanel(): Locator {
+    return this.page.getByTestId("display-options-panel");
+  }
+
+  /** A DisplayControl section by its testid suffix (properties, group, subGroup, order, options). */
+  private projectDisplaySection(section: string): Locator {
+    return this.projectDisplayPanel().getByTestId(`display-section-${section}`);
+  }
+
+  /** True while the profile tab's own Display panel is the live one; every other surface shares DisplayControl. */
+  private async isProfileDisplaySurface(): Promise<boolean> {
+    return (await this.profileDisplayTrigger().count()) > 0;
+  }
+
   async displayPanelText(): Promise<string> {
-    return todo("displayPanelText");
+    const panel = (await this.isProfileDisplaySurface()) ? this.profileDisplayPanel() : this.projectDisplayPanel();
+    return ((await panel.first().innerText()) ?? "").trim();
   }
 
   async setDisplayGroupBy(option: string): Promise<void> {
+    if (!(await this.isProfileDisplaySurface())) {
+      const choice = this.projectDisplaySection("group").getByRole("button", { name: option, exact: true });
+      await choice.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+      await choice.click({ timeout: WebNewDriver.WAIT_MS });
+      return;
+    }
     const choice = this.profileDisplayPanel().getByRole("radio", { name: option, exact: true });
     await choice.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
     await choice.click({ timeout: WebNewDriver.WAIT_MS });
   }
 
-  async setDisplayOrderBy(_option: string): Promise<void> {
-    return todo("setDisplayOrderBy");
+  async setDisplayOrderBy(option: string): Promise<void> {
+    if (!(await this.isProfileDisplaySurface())) {
+      const choice = this.projectDisplaySection("order").getByRole("button", { name: option, exact: true });
+      await choice.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+      await choice.click({ timeout: WebNewDriver.WAIT_MS });
+      return;
+    }
+    const choice = this.profileDisplayOption(option);
+    await choice.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await choice.click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async setDisplayExtraOption(option: string, enabled: boolean): Promise<void> {
+    if (!(await this.isProfileDisplaySurface())) {
+      const target = this.projectDisplaySection("options").getByRole("button", { name: option, exact: true });
+      await target.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+      if ((await this.isDisplayOptionChecked(option)) !== enabled) {
+        await target.click({ timeout: WebNewDriver.WAIT_MS });
+      }
+      return;
+    }
     const target = this.profileDisplayOption(option);
     await target.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
     if ((await this.isDisplayOptionChecked(option)) !== enabled) {
@@ -6869,15 +6928,41 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async isDisplayOptionChecked(option: string): Promise<boolean> {
+    if (!(await this.isProfileDisplaySurface())) {
+      // Grouping, ordering and switch rows are all aria-pressed buttons;
+      // section order disambiguates labels the panel repeats ("Priority" is
+      // a group row, an order row and a pill). Pills have their own reader
+      // and are skipped here.
+      for (const section of ["group", "subGroup", "order", "options"]) {
+        const target = this.projectDisplaySection(section).getByRole("button", { name: option, exact: true });
+        if ((await target.count()) > 0) return (await target.first().getAttribute("aria-pressed")) === "true";
+      }
+      const missing = this.projectDisplayPanel().getByRole("button", { name: option, exact: true });
+      await missing.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+      return (await missing.first().getAttribute("aria-pressed")) === "true";
+    }
     return (await this.profileDisplayOption(option).getAttribute("aria-pressed")) === "true";
   }
 
-  async toggleDisplayProperty(_option: string): Promise<void> {
-    return todo("toggleDisplayProperty");
+  async toggleDisplayProperty(option: string): Promise<void> {
+    if (!(await this.isProfileDisplaySurface())) {
+      const pill = this.projectDisplaySection("properties").getByRole("button", { name: option, exact: true });
+      await pill.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+      await pill.click({ timeout: WebNewDriver.WAIT_MS });
+      return;
+    }
+    const target = this.profileDisplayOption(option);
+    await target.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await target.click({ timeout: WebNewDriver.WAIT_MS });
   }
 
-  async isDisplayPropertyActive(_option: string): Promise<boolean> {
-    return todo("isDisplayPropertyActive");
+  async isDisplayPropertyActive(option: string): Promise<boolean> {
+    if (!(await this.isProfileDisplaySurface())) {
+      const pill = this.projectDisplaySection("properties").getByRole("button", { name: option, exact: true });
+      await pill.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+      return (await pill.first().getAttribute("aria-pressed")) === "true";
+    }
+    return (await this.profileDisplayOption(option).getAttribute("aria-pressed")) === "true";
   }
 
   /** The condition row, present only while the builder shows it. */
@@ -7073,16 +7158,56 @@ export class WebNewDriver implements ParityDriver {
     await this.richRow().getByTestId("rich-clear-all").click({ timeout: WebNewDriver.WAIT_MS });
   }
 
-  async openProjectView(_workspaceSlug: string, _projectId: string, _viewId: string): Promise<void> {
-    return todo("openProjectView");
+  async openProjectView(workspaceSlug: string, projectId: string, viewId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/views/${viewId}`, {
+      waitUntil: "domcontentloaded",
+    });
+    // Settle like openProjectIssues: the filter row, any settled layout
+    // twin, or the signed-out entry after a bounce. Callers poll the row
+    // themselves, so the bounce check is the contract here.
+    const deadline = Date.now() + 60_000;
+    for (;;) {
+      if ((await this.richRow().count()) > 0) return;
+      const switcher = this.page.getByTestId(/^layout-switcher-(segmented|dropdown)$/);
+      if ((await switcher.count()) > 0) return;
+      if ((await this.authEmailField().count()) > 0) {
+        throw new Error("[parity] view page bounced to sign-in; the session did not survive.");
+      }
+      if (Date.now() > deadline) return;
+      await this.page.waitForTimeout(1_000);
+    }
   }
 
-  async saveRichViewAs(_name: string): Promise<void> {
-    return todo("saveRichViewAs");
+  /** The save-view dialog, scoped by its title field. */
+  private saveViewDialog(): Locator {
+    return this.page
+      .getByRole("dialog")
+      .filter({ has: this.page.getByPlaceholder("Title") })
+      .first();
+  }
+
+  async saveRichViewAs(name: string): Promise<void> {
+    await this.page.getByTestId("rich-save-view").first().click({ timeout: WebNewDriver.WAIT_MS });
+    const dialog = this.saveViewDialog();
+    const field = dialog.getByPlaceholder("Title").first();
+    await field.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await field.fill(name);
+    await dialog
+      .getByRole("button", { name: "Create View", exact: true })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    // The issues surface does not navigate on save (no onViewCreated
+    // host), so the closing dialog — not a views URL — is the commit
+    // signal; a failed write keeps it open and fails the wait honestly.
+    await dialog.waitFor({ state: "detached", timeout: 60_000 });
   }
 
   async updateRichView(): Promise<void> {
-    return todo("updateRichView");
+    // Generous: the Update affordance appears only once the dirty state
+    // propagates after the PATCH round-trip, slow on a hot shared stack.
+    const target = this.page.getByTestId("rich-view-actions").getByRole("button", { name: "Update view" });
+    await target.waitFor({ state: "visible", timeout: 60_000 });
+    await target.click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async openAnalytics(): Promise<void> {

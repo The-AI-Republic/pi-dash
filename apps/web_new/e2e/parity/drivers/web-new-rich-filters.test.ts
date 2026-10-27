@@ -490,3 +490,100 @@ describe("rich filter add-condition", () => {
     }
   });
 });
+
+describe("saveRichViewAs / updateRichView", () => {
+  function savePage() {
+    const saveClick = vi.fn(async () => undefined);
+    const createClick = vi.fn(async () => undefined);
+    const fill = vi.fn(async () => undefined);
+    const waits: unknown[] = [];
+    const field = locator({ fill, waitFor: async () => undefined });
+    const dialog = locator({
+      getByPlaceholder: () => field,
+      getByRole: () => locator({ click: createClick }),
+      waitFor: async (options?: unknown) => {
+        waits.push(options);
+      },
+    });
+    const page = {
+      getByTestId: (id: string) => (id === "rich-save-view" ? locator({ click: saveClick }) : locator()),
+      getByRole: () => dialog,
+      getByPlaceholder: () => locator(),
+    } as unknown as Page;
+    return { driver: new WebNewDriver(page), saveClick, createClick, fill, waits };
+  }
+
+  it("saves through the dialog and waits for it to close", async () => {
+    const { driver, saveClick, createClick, fill, waits } = savePage();
+    await driver.saveRichViewAs("Oracle saved view");
+    expect(saveClick).toHaveBeenCalledWith({ timeout: WebNewDriver.WAIT_MS });
+    expect(fill).toHaveBeenCalledWith("Oracle saved view");
+    expect(createClick).toHaveBeenCalledWith({ timeout: WebNewDriver.WAIT_MS });
+    expect(waits).toContainEqual({ state: "detached", timeout: 60_000 });
+  });
+
+  it("waits generously for the Update view action", async () => {
+    const updateClick = vi.fn(async () => undefined);
+    const waits: unknown[] = [];
+    const actions = locator({
+      getByRole: () =>
+        locator({
+          click: updateClick,
+          waitFor: async (options?: unknown) => {
+            waits.push(options);
+          },
+        }),
+    });
+    const page = { getByTestId: () => actions } as unknown as Page;
+    await new WebNewDriver(page).updateRichView();
+    expect(waits).toContainEqual({ state: "visible", timeout: 60_000 });
+    expect(updateClick).toHaveBeenCalledWith({ timeout: WebNewDriver.WAIT_MS });
+  });
+});
+
+describe("openProjectView", () => {
+  function viewPage(counts: { row?: number; switcher?: number; email?: number } = {}) {
+    const goto = vi.fn(async () => undefined);
+    const page = {
+      goto,
+      getByTestId: (id: string | RegExp) =>
+        typeof id === "string" && id === "rich-filter-row"
+          ? locator({ count: async () => counts.row ?? 0 })
+          : locator({ count: async () => counts.switcher ?? 0 }),
+      getByPlaceholder: () => locator({ count: async () => counts.email ?? 0 }),
+      waitForTimeout: async () => undefined,
+    } as unknown as Page;
+    return { driver: new WebNewDriver(page), goto };
+  }
+
+  it("opens the view URL and settles on the filter row", async () => {
+    const { driver, goto } = viewPage({ row: 1 });
+    await driver.openProjectView("ws", "pid", "vid");
+    expect(goto).toHaveBeenCalledWith("/ws/projects/pid/views/vid", { waitUntil: "domcontentloaded" });
+  });
+
+  it("settles on a layout twin when the row stays hidden", async () => {
+    const { driver, goto } = viewPage({ switcher: 1 });
+    await driver.openProjectView("ws", "pid", "vid");
+    expect(goto).toHaveBeenCalledTimes(1);
+  });
+
+  it("throws when the view bounces to sign-in", async () => {
+    const { driver } = viewPage({ email: 1 });
+    await expect(driver.openProjectView("ws", "pid", "vid")).rejects.toThrow("bounced to sign-in");
+  });
+
+  it("gives up settling after a minute without throwing", async () => {
+    const { driver } = viewPage({});
+    let calls = 0;
+    const now = vi.spyOn(Date, "now").mockImplementation(() => {
+      calls += 1;
+      return calls <= 1 ? 1_000 : 1_000 + 61_000;
+    });
+    try {
+      await driver.openProjectView("ws", "pid", "vid");
+    } finally {
+      now.mockRestore();
+    }
+  });
+});
