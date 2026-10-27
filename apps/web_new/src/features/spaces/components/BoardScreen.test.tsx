@@ -443,6 +443,18 @@ describe("BoardScreen", () => {
     expect(navigation.navigate).toHaveBeenCalledWith({ href: "/spaces/issues/anchor-1/?board=list" });
   });
 
+  it("sends the pasted state and priority on the first issues fetch (SPC-036)", async () => {
+    const requests = renderBoard({}, ANCHOR, { board: "list", state: [STATE_ID], priority: ["high", "urgent"] });
+    await screen.findByTestId("space-list-layout");
+    const issues = requests.filter((url) => url.includes("/issues/"));
+    expect(issues).toHaveLength(1);
+    const query = new URL(issues[0] ?? "", "https://api.test").searchParams;
+    expect(query.get("state")).toBe(STATE_ID);
+    expect(query.get("priority")?.split(",").sort()).toEqual(["high", "urgent"]);
+    expect(query.has("labels")).toBe(false);
+    expect(query.has("board")).toBe(false);
+  });
+
   it("renders no pill for a state id the states fetch does not know, but still sends it (SPC-035/036)", async () => {
     const unknown = "66666666-6666-4666-8666-666666666666";
     const requests = renderBoard({}, ANCHOR, { board: "list", state: [unknown] });

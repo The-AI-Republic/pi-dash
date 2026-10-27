@@ -235,24 +235,64 @@ test(
   async ({ driver, seed }) => {
     // Intended: pasting an address with state, priority and label
     // parameters reproduces the same filtered board (the initial fetch
-    // carries the parameters). Current: pills seed from the address but
-    // the initial fetch goes out unfiltered and nothing refetches after
-    // the seed. See NEWFRONT-463.
+    // carries the parameters). The old app seeds the pills from the
+    // address but reads the filter store before the address lands in it,
+    // so its initial fetch goes out unfiltered and nothing refetches after
+    // the seed. See NEWFRONT-463. web_new reads the address into the first
+    // request, so the row is only green on the new leg with the intended
+    // assertions.
     const anchor = requireAnchor(seed);
     const probe = `${ISSUE_PREFIX}shared`;
     await serverSpaceCreateIssue(seed.workspaceSlug, seed.projectId, session, { name: probe, priority: "high" });
     const states = await serverSpaceStates(anchor);
     const todo = states.find((state) => state.name === "Todo");
     if (!todo) throw new Error("[parity] seeded Todo state missing from the public states.");
-
-    // Pasting a filtered address seeds the pills…
-    await driver.spaceFiltersBeginFetchWatch();
-    await driver.spaceOpenBoard(anchor, `?board=list&state=${todo.id}&priority=high`);
-    await expectBoardNames(driver, [...seed.issueNames, probe]);
-    expect(await driver.spaceFiltersAppliedFacets()).toEqual([
+    const wantedPills = [
       { facet: "priority", values: ["high"] },
       { facet: "state", values: ["Todo"] },
+    ];
+
+    // The server narrows for these parameters; whether the list does depends
+    // on which app built the request.
+    expect((await serverSpaceIssues(anchor, { state: todo.id, priority: "high" })).map((issue) => issue.name)).toEqual([
+      probe,
     ]);
+
+    await driver.spaceFiltersBeginFetchWatch();
+    await driver.spaceOpenBoard(anchor, `?board=list&state=${todo.id}&priority=high`);
+    if (driver.target === "web_new") {
+      // Intended: the address's facets ride the first list fetch, so the
+      // board opens already narrowed and the pills describe it.
+      await expectBoardNames(driver, [probe]);
+      expect(await driver.spaceFiltersAppliedFacets()).toEqual(wantedPills);
+      const landed = await driver.spaceFiltersFetchQueries();
+      expect(landed.length).toBeGreaterThan(0);
+      for (const query of landed) {
+        const params = new URLSearchParams(query);
+        expect(params.get("state")).toBe(todo.id);
+        expect(params.get("priority")).toBe("high");
+      }
+      await driver.spaceFiltersEndFetchWatch();
+
+      // Reload reads the same address the same way.
+      await driver.page.reload();
+      await expectBoardNames(driver, [probe]);
+      expect(await driver.spaceFiltersAppliedFacets()).toEqual(wantedPills);
+
+      // Clearing strips the facet keys, keeps the view, and widens the board.
+      await driver.spaceFiltersClearAll();
+      const cleared = new URL(driver.page.url());
+      expect(cleared.searchParams.get("board")).toBe("list");
+      expect(cleared.searchParams.has("priority")).toBe(false);
+      expect(cleared.searchParams.has("state")).toBe(false);
+      expect(cleared.searchParams.has("labels")).toBe(false);
+      await expectBoardNames(driver, [...seed.issueNames, probe]);
+      return;
+    }
+
+    // Observed old behavior: the pills seed from the address…
+    await expectBoardNames(driver, [...seed.issueNames, probe]);
+    expect(await driver.spaceFiltersAppliedFacets()).toEqual(wantedPills);
     // …but the list stays unfiltered: no initial fetch carries the parameters.
     const queries = await driver.spaceFiltersFetchQueries();
     expect(queries.length).toBeGreaterThan(0);
@@ -262,12 +302,6 @@ test(
       expect(params.has("state")).toBe(false);
     }
     await driver.spaceFiltersEndFetchWatch();
-
-    // The server would narrow for these parameters; the app never sends
-    // them on load.
-    expect((await serverSpaceIssues(anchor, { state: todo.id, priority: "high" })).map((issue) => issue.name)).toEqual([
-      probe,
-    ]);
 
     // Reload reproduces the same state: pills plus the unfiltered list.
     await driver.page.reload();
@@ -293,17 +327,51 @@ test(
   { tag: specTags(["SPC-037"]) },
   async ({ driver, seed }) => {
     // Intended: a label-bearing address narrows the list fetch server-side
-    // (the fetch carries the label parameter). Current: the bare shell
-    // renders but the initial fetch drops the parameter — same root cause
-    // as the SPC-036 scenario (NEWFRONT-463).
+    // (the initial fetch and every page carry the label parameter). The old
+    // app renders the bare shell but its load fetch drops the parameter —
+    // the same dropped-seed root cause as SPC-036 (NEWFRONT-463). web_new
+    // sends it, so the row is only green on the new leg with the intended
+    // assertions.
     const anchor = requireAnchor(seed);
     const label = await createProjectLabel(seed.workspaceSlug, seed.projectId, session, `${LABEL_PREFIX}one`);
     const probe = `${ISSUE_PREFIX}labeled`;
     await serverSpaceCreateIssue(seed.workspaceSlug, seed.projectId, session, { name: probe, labelIds: [label.id] });
 
-    // A label-bearing address renders the bare shell…
+    // The server honors the parameter; whether the list does depends on
+    // which app built the request.
+    expect((await serverSpaceIssues(anchor, { labels: label.id })).map((issue) => issue.name)).toEqual([probe]);
+
     await driver.spaceFiltersBeginFetchWatch();
     await driver.spaceOpenBoard(anchor, `?board=list&labels=${label.id}`);
+    if (driver.target === "web_new") {
+      // Intended: the label narrows the first load, and the strip still
+      // shows a bare shell since the panel offers no label options.
+      await expectBoardNames(driver, [probe]);
+      expect(await driver.spaceFiltersAppliedFacets()).toEqual([{ facet: "labels", values: [] }]);
+      const landed = await driver.spaceFiltersFetchQueries();
+      expect(landed.length).toBeGreaterThan(0);
+      for (const query of landed) {
+        expect(new URLSearchParams(query).get("labels")).toBe(label.id);
+      }
+      await driver.spaceFiltersEndFetchWatch();
+
+      // The shell's facet-level remove clears it like any other facet and
+      // widens the board back to everything.
+      await driver.spaceFiltersClearFacet("labels");
+      expect(new URL(driver.page.url()).searchParams.has("labels")).toBe(false);
+      await expectBoardNames(driver, [...seed.issueNames, probe]);
+
+      // Pasting the label address again narrows it again.
+      await driver.spaceOpenBoard(anchor, `?board=list&labels=${label.id}`);
+      await expectBoardNames(driver, [probe]);
+
+      // The panel offers no label options to change it with.
+      await driver.spaceFiltersOpenPanel();
+      expect(await driver.spaceFiltersFacetNames()).toEqual(["Priority", "State"]);
+      return;
+    }
+
+    // Observed old behavior: the bare shell renders…
     await expectBoardNames(driver, [...seed.issueNames, probe]);
     expect(await driver.spaceFiltersAppliedFacets()).toEqual([{ facet: "labels", values: [] }]);
     // …but no fetch carries the label parameter.
@@ -313,9 +381,6 @@ test(
       expect(new URLSearchParams(query).has("labels")).toBe(false);
     }
     await driver.spaceFiltersEndFetchWatch();
-
-    // The server honors the parameter; the app never sends it on load.
-    expect((await serverSpaceIssues(anchor, { labels: label.id })).map((issue) => issue.name)).toEqual([probe]);
 
     // The shell's facet-level remove clears it like any other facet.
     await driver.spaceFiltersClearFacet("labels");
