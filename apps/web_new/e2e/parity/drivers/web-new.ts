@@ -9457,11 +9457,16 @@ export class WebNewDriver implements ParityDriver {
     if (before === 0) throw new Error("[parity] no filter pill: seed one before adding a condition.");
     await this.page.getByRole("button", { name: "Add filter", exact: true }).last().click();
     await this.layoutsPickMenuEntry(propertyLabel);
-    // A static value set (state group, priority) lists itself right after
-    // the property is picked; a workflow state needs its list opened.
-    const pick = this.page.getByRole("checkbox", { name: valueLabel, exact: true }).first();
-    if ((await pick.count()) === 0) {
+    // A fresh field auto-opens its value popup on mount, so the values
+    // are usually already there — and clicking `--` while open would
+    // dismiss the popup again. Only open it by hand when no value
+    // section appears; a workflow state's slow fetch keeps the popup
+    // (loading) open, which also skips the click.
+    const popup = async (): Promise<number> => this.page.locator('[data-testid^="rich-section-"]').count();
+    const opened = await this.layoutsWaitForCount(popup, 1, 10_000);
+    if (opened === 0) {
       await this.page.getByRole("button", { name: "--", exact: true }).last().click();
+      await this.layoutsWaitForCount(popup, 1, WEB_NEW_LAYOUTS_WAIT_MS);
     }
     const found = await this.layoutsWaitForCount(
       async () => this.page.getByRole("checkbox", { name: valueLabel, exact: true }).count(),
