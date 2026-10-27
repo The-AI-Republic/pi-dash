@@ -3932,22 +3932,29 @@ describe("instance configuration contracts", () => {
     });
   });
 
-  it("omits blank candidate fields so the endpoint keeps stored settings", async () => {
+  it("omits absent fields and a blank password, but sends other blanks as given", async () => {
     const transport = csrfThen(() => ({
       status: 200,
       body: JSON.stringify({ message: "Email successfully sent." }),
     }));
     const client = createClient({ baseUrl: "https://api.test", transport });
     await checkEmailCredentials(client, "probe@example.com", {
-      host: " ",
+      host: "",
       port: null,
       from: undefined,
-      user: null,
+      user: " ",
       password: "",
       security: null,
     });
     const postCall = transport.calls.find((call) => call.url.endsWith("/api/instances/email-credentials-check/"));
-    expect(JSON.parse(String(postCall?.init.body))).toEqual({ receiver_email: "probe@example.com" });
+    // Absent fields fall back to stored; a blank password means "keep the
+    // stored secret"; other blank values are graded exactly as entered
+    // (NEWFRONT-524 contract).
+    expect(JSON.parse(String(postCall?.init.body))).toEqual({
+      receiver_email: "probe@example.com",
+      EMAIL_HOST: "",
+      EMAIL_HOST_USER: " ",
+    });
   });
 
   it("surfaces the server mail error on a failed check", async () => {

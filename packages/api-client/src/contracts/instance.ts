@@ -252,10 +252,12 @@ export type EmailCredentialCheckResult = z.infer<typeof EmailCredentialCheckResu
 /**
  * SMTP values a caller may grade instead of the stored configuration.
  * Fields are optional: anything left out (or null) is graded against
- * the stored setting, and a blank password also means "use the stored
- * one", since a stored secret never reads back. Security is the
- * single TLS/SSL/none choice, which the contract fans out to the two
- * flag keys the endpoint understands.
+ * the stored setting. A blank password also means "use the stored one",
+ * since a stored secret never reads back; every other field is graded
+ * exactly as given, blank included, so a cleared host never silently
+ * grades the saved host. Security is the single TLS/SSL/none choice,
+ * which the contract fans out to the two flag keys the endpoint
+ * understands.
  */
 export interface EmailCredentialCandidate {
   host?: string | null | undefined;
@@ -287,22 +289,24 @@ export async function checkEmailCredentials(
 
 /**
  * Wire shape for the candidate settings: the endpoint's configuration
- * keys, with the security choice spelled as the two flag keys. Blank
- * values are omitted so the endpoint keeps the stored setting.
+ * keys, with the security choice spelled as the two flag keys. Absent
+ * values are omitted so the endpoint keeps the stored setting; a blank
+ * password is omitted for the same reason, while a blank host, port,
+ * sender or username is sent as given (NEWFRONT-524 contract).
  */
 export function candidatePayload(candidate: EmailCredentialCandidate | undefined): Record<string, string> {
   if (!candidate) return {};
   const payload: Record<string, string> = {};
-  const put = (key: string, value: string | null | undefined) => {
+  const put = (key: string, value: string | null | undefined, blankMeansStored = false) => {
     if (value === null || value === undefined) return;
-    if (value.trim() === "") return;
+    if (blankMeansStored && value.trim() === "") return;
     payload[key] = value;
   };
   put("EMAIL_HOST", candidate.host);
   put("EMAIL_PORT", candidate.port);
   put("EMAIL_FROM", candidate.from);
   put("EMAIL_HOST_USER", candidate.user);
-  put("EMAIL_HOST_PASSWORD", candidate.password);
+  put("EMAIL_HOST_PASSWORD", candidate.password, true);
   if (candidate.security !== null && candidate.security !== undefined) {
     payload["EMAIL_USE_TLS"] = candidate.security === "tls" ? "1" : "0";
     payload["EMAIL_USE_SSL"] = candidate.security === "ssl" ? "1" : "0";
