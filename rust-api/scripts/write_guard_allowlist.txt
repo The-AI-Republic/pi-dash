@@ -12,14 +12,6 @@ crates/api/src/app_assets/handlers_v2_user_workspace.rs | UPDATE users | a1c00eb
 crates/api/src/app_assets/handlers_v2_user_workspace.rs | UPDATE users | a40ebae0af76 | sql
 crates/api/src/app_assets/handlers_v2_user_workspace.rs | UPDATE workspaces | 2ed91ba8f15a | sql
 crates/api/src/app_assets/handlers_v2_user_workspace.rs | UPDATE workspaces | efea18ad1add | sql
-crates/api/src/app_intake/issues.rs | INSERT issue_assignees | 52501550efe1 | sql
-crates/api/src/app_intake/issues.rs | INSERT issue_assignees | d4be040642db | sql
-crates/api/src/app_intake/issues.rs | INSERT issue_sequences | 55b37b671088 | sql
-crates/api/src/app_intake/issues.rs | INSERT issues | df9b174e78c4 | sql
-crates/api/src/app_intake/issues.rs | UPDATE issue_assignees | 686195cb3555 | sql
-crates/api/src/app_intake/issues.rs | UPDATE issues | 3b366969a83f | sql
-crates/api/src/app_intake/issues.rs | UPDATE issues | 3b366969a83f | sql #2
-crates/api/src/app_intake/issues.rs | UPDATE issues | 7ce0b0be5307 | sql
 crates/api/src/app_integrations/handlers_git_repo.rs | UPDATE projects | 0ef80849a6bf | sql
 crates/api/src/app_integrations/handlers_github_proj.rs | UPDATE projects | 99a4e1ac4240 | sql
 crates/api/src/app_issues/handlers_engage.rs | INSERT descriptions | 21f513f251e7 | sql

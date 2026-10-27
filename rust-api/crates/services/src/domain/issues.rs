@@ -1019,6 +1019,10 @@ pub struct CreateIssue {
     pub activity_requested: Value,
     pub activity_notification: Option<bool>,
     pub activity_require_origin: bool,
+    /// Skip the created activity: drivers whose view enqueues its own
+    /// shaped activity (the intake `intake=` extra kwarg) keep that leg
+    /// driver-side and pass `true`.
+    pub skip_activity: bool,
     pub model_activity: Option<ModelActivitySpec>,
     pub created_override: Option<CreatedOverride>,
 }
@@ -1099,18 +1103,20 @@ pub async fn create(
             created_by: over.created_by,
         });
     }
-    chain.push(ChainEffect::IssueActivity(IssueActivitySpec {
-        event: "issue.activity.created".to_owned(),
-        requested: input.activity_requested,
-        actor,
-        issue: model.id,
-        project: model.project_id,
-        current: Value::Null,
-        notification: input.activity_notification,
-        origin: input.origin,
-        require_origin: input.activity_require_origin,
-        subscriber: None,
-    }));
+    if !input.skip_activity {
+        chain.push(ChainEffect::IssueActivity(IssueActivitySpec {
+            event: "issue.activity.created".to_owned(),
+            requested: input.activity_requested,
+            actor,
+            issue: model.id,
+            project: model.project_id,
+            current: Value::Null,
+            notification: input.activity_notification,
+            origin: input.origin,
+            require_origin: input.activity_require_origin,
+            subscriber: None,
+        }));
+    }
     if let Some(spec) = input.model_activity {
         chain.push(ChainEffect::ModelActivity(spec));
     }
@@ -1396,6 +1402,9 @@ pub struct SoftDeleteIssue {
     pub activity_notification: Option<bool>,
     pub activity_require_origin: bool,
     pub activity_subscriber: Option<bool>,
+    /// Skip the deleted activity: drivers whose view enqueues no
+    /// `issue.activity.deleted` (the intake destroy) pass `true`.
+    pub skip_activity: bool,
 }
 
 pub async fn soft_delete(
@@ -1444,18 +1453,20 @@ pub async fn soft_delete(
             issue_id: model.id,
         });
     }
-    chain.push(ChainEffect::IssueActivity(IssueActivitySpec {
-        event: "issue.activity.deleted".to_owned(),
-        requested: Value::String(requested),
-        actor,
-        issue: model.id,
-        project: model.project_id,
-        current: input.activity_current,
-        notification: input.activity_notification,
-        origin: input.origin,
-        require_origin: input.activity_require_origin,
-        subscriber: input.activity_subscriber,
-    }));
+    if !input.skip_activity {
+        chain.push(ChainEffect::IssueActivity(IssueActivitySpec {
+            event: "issue.activity.deleted".to_owned(),
+            requested: Value::String(requested),
+            actor,
+            issue: model.id,
+            project: model.project_id,
+            current: input.activity_current,
+            notification: input.activity_notification,
+            origin: input.origin,
+            require_origin: input.activity_require_origin,
+            subscriber: input.activity_subscriber,
+        }));
+    }
     let outcome = ChainOutcome::new();
     let step = outcome.clone();
     let pool = pool.clone();
@@ -2522,6 +2533,7 @@ mod tests {
                         activity_requested: Value::String("{\"name\": \"svc issue\"}".to_owned()),
                         activity_notification: Some(true),
                         activity_require_origin: true,
+                        skip_activity: false,
                         model_activity: None,
                         created_override: None,
                     },

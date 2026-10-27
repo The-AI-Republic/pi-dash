@@ -6740,6 +6740,7 @@ async fn draft_to_issue(
                     activity_requested: Value::String(requested),
                     activity_notification: Some(true),
                     activity_require_origin: true,
+                    skip_activity: false,
                     model_activity: None,
                     created_override: None,
                 },

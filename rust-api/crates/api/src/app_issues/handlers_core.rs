@@ -4537,6 +4537,7 @@ pub async fn create_issue(
                     activity_requested: Value::String(requested.clone()),
                     activity_notification: Some(true),
                     activity_require_origin: true,
+                    skip_activity: false,
                     model_activity: None,
                     created_override: None,
                 },
@@ -4958,6 +4959,7 @@ pub async fn destroy_issue(
                     activity_notification: Some(true),
                     activity_require_origin: true,
                     activity_subscriber: Some(false),
+                    skip_activity: false,
                 },
             )
             .await
