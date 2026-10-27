@@ -419,6 +419,7 @@ pidash_sdk::read::web_base_url
 pidash_sdk::read::workspace
 pidash_sdk::read::workspace_member
 pidash_sdk::read::workspace_seed_emit
+pidash_sdk::startup::BuiltWorker
 pidash_sdk::startup::CorsConfig
 pidash_sdk::startup::EdgeFlags
 pidash_sdk::startup::EdgeHandle
@@ -427,7 +428,10 @@ pidash_sdk::startup::Overlay
 pidash_sdk::startup::PgSessionStore
 pidash_sdk::startup::QueueSink
 pidash_sdk::startup::SecurityConfig
+pidash_sdk::startup::ServeBuilder
+pidash_sdk::startup::ServeParts
 pidash_sdk::startup::SessionConfig
+pidash_sdk::startup::WorkerBuilder
 pidash_sdk::startup::build_router_with_overlay
 pidash_sdk::startup::proxy
 pidash_sdk::startup::stack

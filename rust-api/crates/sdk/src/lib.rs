@@ -23,13 +23,15 @@
 
 /// Serve/worker composition: router builders, the overlay hook, the edge
 /// handle, the middleware stack with the session store, and worker
-/// registration. OVL-03 (PIDASHCONV-1541)..OVL-07 (PIDASHCONV-1545) add
-/// `ServeBuilder`/`WorkerBuilder` here.
+/// registration. OVL-03 (PIDASHCONV-1541) added
+/// `ServeBuilder`/`WorkerBuilder` (`ServeParts`/`BuiltWorker`) here;
+/// OVL-04 (PIDASHCONV-1542)..OVL-07 (PIDASHCONV-1545) extend it.
 pub mod startup {
     pub use pidash_api::build_router_with_overlay;
     pub use pidash_api::edge::proxy;
     pub use pidash_api::edge::EdgeHandle; // also imported by the overlay as `pidash_api::EdgeHandle`.
     pub use pidash_api::stack;
+    pub use pidash_api::startup::{BuiltWorker, ServeBuilder, ServeParts, WorkerBuilder};
     pub use pidash_api::CorsConfig;
     pub use pidash_api::EdgeFlags;
     pub use pidash_api::LoggingConfig;
