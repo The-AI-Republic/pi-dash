@@ -635,7 +635,10 @@ function recoverLabelColumnGhosts(board: BoardData, fallback: BoardData): BoardD
     return { ...entry, cells, total: Object.values(cells).reduce((sum, item) => sum + item.total, 0) };
   });
   let unlabeled = 0;
-  for (const entry of lanes) unlabeled += entry.cells["None"]?.total ?? 0;
+  for (const entry of lanes) {
+    const cell = entry.cells["None"];
+    if (cell !== undefined) unlabeled += cell.total;
+  }
   const columnTotal = Math.max(board.columns.find((column) => column.key === "None")?.total ?? 0, unlabeled);
   const columns = noneColumn(board.columns, columnTotal).map((column) =>
     column.key === "None" ? { ...column, total: columnTotal } : column
