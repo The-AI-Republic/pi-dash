@@ -92,7 +92,9 @@ describe("KanbanColumn", () => {
         onToggleCollapse={vi.fn()}
       />
     );
-    expect(screen.getByTestId("kanban-column-loading")).toBeInTheDocument();
+    const skeleton = screen.getByTestId("kanban-column-loading");
+    expect(skeleton).toBeInTheDocument();
+    expect(skeleton).toHaveClass("shrink-0");
   });
 
   it("keeps loaded cards instead of the skeleton while a refresh runs", () => {

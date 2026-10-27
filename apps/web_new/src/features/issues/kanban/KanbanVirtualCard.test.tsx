@@ -61,6 +61,7 @@ describe("KanbanVirtualCard", () => {
     render(shell());
     expect(screen.getByText("Fix login")).toBeVisible();
     expect(VIRTUAL_OVERSCAN_PX).toBe(800);
+    expect(screen.getByText("Fix login").parentElement).toHaveClass("shrink-0");
   });
 
   it("mounts content once the shell nears the viewport", () => {
@@ -72,6 +73,7 @@ describe("KanbanVirtualCard", () => {
     expect(placeholder).toHaveAttribute("data-group-key", COLUMN);
     expect(placeholder).toHaveAttribute("data-virtualized", "true");
     expect(placeholder).toHaveStyle({ height: `${VIRTUAL_CARD_HEIGHT_PX}px` });
+    expect(placeholder).toHaveClass("shrink-0");
     act(() => seen.callbacks[0]?.([{ isIntersecting: true }]));
     expect(screen.getByText("Fix login")).toBeVisible();
   });
