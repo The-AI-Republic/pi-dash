@@ -2027,12 +2027,25 @@ export class WebNewDriver implements ParityDriver {
   }
 
   // --- Issues bulk-ops / modal / drafts stubs (NEWFRONT-120).
+  // Multi-select (ISS-108–111): the old app renders no bulk affordances,
+  // but the new app owns the intended selection and its OSS upgrade
+  // banner. The scenarios branch on their target, so these reads describe
+  // the new app rather than mirroring the old bug.
   async selectionCheckboxCount(): Promise<number> {
-    return todo("selectionCheckboxCount");
+    return this.page.getByRole("checkbox", { name: /^Select / }).count();
+  }
+
+  async selectFirstRow(): Promise<void> {
+    // Row controls are named `Select <identifier>`; group controls are
+    // `Select all …`, so this deliberately excludes the group header.
+    const box = this.page.getByRole("checkbox", { name: /^Select (?!all\b)/ }).first();
+    if ((await box.count()) === 0) throw new Error("[parity] no row selection control is rendered.");
+    await box.click();
   }
 
   async bulkBarVisible(): Promise<boolean> {
-    return todo("bulkBarVisible");
+    const banner = this.page.getByTestId("bulk-upgrade-banner");
+    return (await banner.count()) > 0 && (await banner.first().isVisible());
   }
 
   async pressKey(key: string, shift?: boolean): Promise<void> {
@@ -2045,7 +2058,20 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async reloadSawDialog(): Promise<boolean> {
-    return todo("reloadSawDialog");
+    let sawDialog = false;
+    const onDialog = async (dialog: import("@playwright/test").Dialog): Promise<void> => {
+      sawDialog = true;
+      await dialog.dismiss();
+    };
+    this.page.on("dialog", onDialog);
+    try {
+      await this.page.reload();
+      await this.page.waitForLoadState("domcontentloaded");
+      await this.page.waitForTimeout(2000);
+    } finally {
+      this.page.off("dialog", onDialog);
+    }
+    return sawDialog;
   }
 
   async dismissWelcomeDialog(): Promise<void> {

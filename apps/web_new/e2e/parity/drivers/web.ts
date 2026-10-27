@@ -1989,7 +1989,13 @@ export class WebDriver implements ParityDriver {
   // running old app: with bulk operations unavailable, list rows render no
   // selection checkbox and no sticky bar ever appears.
   async selectionCheckboxCount(): Promise<number> {
-    return this.page.getByRole("checkbox").count();
+    return this.page.getByRole("checkbox", { name: /^Select / }).count();
+  }
+
+  async selectFirstRow(): Promise<void> {
+    const box = this.page.getByRole("checkbox", { name: /^Select (?!all\b)/ }).first();
+    if ((await box.count()) === 0) throw new Error("[parity] no row selection control is rendered.");
+    await box.click();
   }
 
   async bulkBarVisible(): Promise<boolean> {
