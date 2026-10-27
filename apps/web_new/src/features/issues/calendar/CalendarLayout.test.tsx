@@ -6,6 +6,8 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { IssueListItem } from "@pidash/api-client";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -16,6 +18,10 @@ import { CalendarLayout } from "./CalendarLayout.js";
 import { CALENDAR_ADD_EXISTING_ITEM, CALENDAR_ADD_ITEM, CALENDAR_TITLE_PLACEHOLDER } from "./CalendarDay.js";
 import { monthTitle, stepMonth } from "./model.js";
 import type { PrefsRecord } from "../prefs/entities.js";
+
+// The kit's popup tier, read from the shipped tokens so the calendar's
+// sticky layers are compared against one source of truth.
+const KIT_TOKENS = resolve(process.cwd(), "../../packages/kit/src/tokens.css");
 
 const PROJECT_ID = "223e4567-e89b-12d3-a456-426614174001";
 const ISSUE_ID = "323e4567-e89b-12d3-a456-426614174002";
@@ -347,6 +353,30 @@ describe("CalendarLayout", () => {
     expect(state.updatePrefs).toHaveBeenNthCalledWith(2, {
       calendar: { mode: "month", showWeekends: false },
     });
+  });
+
+  it("keeps the compact options usable above the sticky weekday header (ISS-023)", async () => {
+    // The reported bug: on a phone the options popup opened but its rows
+    // were hit through the header instead. The compact menu renders its
+    // rows on the kit's popover tier, above the header's sticky tier, so
+    // each pick reaches its own button and the menu closes after it.
+    state.narrow = true;
+    state.touch = true;
+    state.prefs = prefs("week");
+    renderLayout();
+    const user = userEvent.setup();
+    const header = screen.getByText("Sat").closest("div.sticky") as HTMLElement;
+    const headerTier = Number(/\bz-(\d+)\b/.exec(header.className)?.[1] ?? "0");
+    const popoverTier = Number(readFileSync(KIT_TOKENS, "utf8").match(/--layer-popover:\s*(\d+)/)?.[1]);
+
+    await user.click(screen.getByRole("button", { name: "Calendar options" }));
+    const positioner = screen.getByRole("button", { name: /Month layout/ }).closest("[role='presentation']");
+    expect(positioner?.className).toContain("layer-popover");
+    expect(popoverTier).toBeGreaterThan(headerTier);
+
+    await user.click(screen.getByRole("button", { name: /Month layout/ }));
+    expect(state.updatePrefs).toHaveBeenCalledWith({ calendar: { mode: "month", showWeekends: true } });
+    expect(screen.queryByRole("button", { name: /Month layout/ })).not.toBeInTheDocument();
   });
 
   it("does not write options before the preference record arrives", async () => {

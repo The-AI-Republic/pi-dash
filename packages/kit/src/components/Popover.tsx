@@ -5,6 +5,7 @@ import { Popover as BasePopover } from "@base-ui-components/react/popover";
 import * as React from "react";
 import { cn } from "../lib/cn";
 import { pickDefined } from "../lib/props";
+import { POPOVER_LAYER_CLASS } from "../lib/styles";
 
 export interface PopoverProps {
   /** Element rendered as the popover trigger. */
@@ -30,7 +31,7 @@ export function Popover({
     <BasePopover.Root {...pickDefined({ open, onOpenChange })}>
       <BasePopover.Trigger render={trigger} />
       <BasePopover.Portal>
-        <BasePopover.Positioner sideOffset={6}>
+        <BasePopover.Positioner sideOffset={6} className={POPOVER_LAYER_CLASS}>
           <BasePopover.Popup
             className={cn(
               "shadow-popover w-72 rounded-(--radius-popover) border border-(--border) bg-(--bg) p-(--space-8)",
