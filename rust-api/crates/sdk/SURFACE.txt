@@ -43,6 +43,7 @@ pidash_sdk::assistant::MSG_FAILED
 pidash_sdk::assistant::MSG_STREAMING
 pidash_sdk::assistant::ModelError
 pidash_sdk::assistant::ModelRef
+pidash_sdk::assistant::NewEvent
 pidash_sdk::assistant::PROVIDER_ANTHROPIC
 pidash_sdk::assistant::PROVIDER_OPENAI_COMPATIBLE
 pidash_sdk::assistant::ParsedBody
@@ -72,6 +73,7 @@ pidash_sdk::assistant::TurnSeam
 pidash_sdk::assistant::TurnUsage
 pidash_sdk::assistant::UserLLMConfig
 pidash_sdk::assistant::actor
+pidash_sdk::assistant::append_event
 pidash_sdk::assistant::assistant_mcp_server
 pidash_sdk::assistant::base_url_blocked
 pidash_sdk::assistant::body_get
@@ -81,7 +83,7 @@ pidash_sdk::assistant::cancel_turn_update
 pidash_sdk::assistant::classify_error
 pidash_sdk::assistant::clean_title
 pidash_sdk::assistant::clear_active_turn_update
-pidash_sdk::assistant::complete_turn_update
+pidash_sdk::assistant::complete_turn
 pidash_sdk::assistant::content_to_text
 pidash_sdk::assistant::context_eligible
 pidash_sdk::assistant::crypto
@@ -94,12 +96,11 @@ pidash_sdk::assistant::decrypt_api_key
 pidash_sdk::assistant::drive_turn
 pidash_sdk::assistant::encrypt
 pidash_sdk::assistant::encrypt_api_key
-pidash_sdk::assistant::fail_turn_update
-pidash_sdk::assistant::finalize_open_rows_update
+pidash_sdk::assistant::fail_turn
+pidash_sdk::assistant::finalize_open_messages
 pidash_sdk::assistant::governor
 pidash_sdk::assistant::has_secret
 pidash_sdk::assistant::history_limit
-pidash_sdk::assistant::insert_event_sql
 pidash_sdk::assistant::installation_token
 pidash_sdk::assistant::is_blocked
 pidash_sdk::assistant::is_desktop_from_extension
@@ -113,7 +114,7 @@ pidash_sdk::assistant::ok_false_detail
 pidash_sdk::assistant::ok_true
 pidash_sdk::assistant::parse_body
 pidash_sdk::assistant::pool_of
-pidash_sdk::assistant::prune_turn_deltas_delete
+pidash_sdk::assistant::prune_turn_deltas
 pidash_sdk::assistant::publish_frame
 pidash_sdk::assistant::py_dumps
 pidash_sdk::assistant::py_scalar_display

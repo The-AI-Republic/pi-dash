@@ -321,7 +321,6 @@ pub mod assistant {
     pub use pidash_api::assistant::throttles::LLM_TEST_THROTTLE;
     pub use pidash_db::assistant::event_queries::decode_history_blobs;
     pub use pidash_db::assistant::event_queries::history_limit;
-    pub use pidash_db::assistant::event_queries::insert_event_sql;
     pub use pidash_db::assistant::event_queries::publish_frame;
     pub use pidash_db::assistant::event_queries::serialize_event_json;
     pub use pidash_db::assistant::event_queries::truncate_kind;
@@ -339,14 +338,10 @@ pub mod assistant {
     pub use pidash_jobs::assistant::run_turn::cancel_turn_update;
     pub use pidash_jobs::assistant::run_turn::classify_error;
     pub use pidash_jobs::assistant::run_turn::clear_active_turn_update;
-    pub use pidash_jobs::assistant::run_turn::complete_turn_update;
     pub use pidash_jobs::assistant::run_turn::context_eligible;
     pub use pidash_jobs::assistant::run_turn::drive_turn;
-    pub use pidash_jobs::assistant::run_turn::fail_turn_update;
-    pub use pidash_jobs::assistant::run_turn::finalize_open_rows_update;
     pub use pidash_jobs::assistant::run_turn::lock_turn_select;
     pub use pidash_jobs::assistant::run_turn::mark_running_update;
-    pub use pidash_jobs::assistant::run_turn::prune_turn_deltas_delete;
     pub use pidash_jobs::assistant::run_turn::skipped_payload;
     pub use pidash_jobs::assistant::run_turn::thread_lock_select;
     pub use pidash_jobs::assistant::run_turn::truncate_code;
@@ -411,6 +406,12 @@ pub mod assistant {
     pub use pidash_services::assistant::title::TITLE_MAX_LEN;
     pub use pidash_services::assistant::title::TITLE_MAX_OUTPUT_TOKENS;
     pub use pidash_services::assistant::title::TITLE_SYSTEM_PROMPT;
+    pub use pidash_services::domain::assistant::append_event;
+    pub use pidash_services::domain::assistant::complete_turn;
+    pub use pidash_services::domain::assistant::fail_turn;
+    pub use pidash_services::domain::assistant::finalize_open_messages;
+    pub use pidash_services::domain::assistant::prune_turn_deltas;
+    pub use pidash_services::domain::assistant::NewEvent;
     pub use pidash_types::assistant::errors::AssistantError;
     pub use pidash_types::assistant::serializers;
     pub use pidash_types::assistant::serializers::PROVIDER_ANTHROPIC;
