@@ -23,7 +23,7 @@ import { specTags, specTitle } from "../helpers/tags";
 test(
   specTitle(["ISS-218"], "runs-on dropdown lists pods and agents, pins pod on pick"),
   { tag: specTags(["ISS-218"]) },
-  async ({ driver, seed }) => {
+  async ({ driver, seed, page }) => {
     const tag = `NF122 pods ${Date.now()}`;
     const session = await signInSession(seed.email, seed.password);
     // Fresh projects auto-create one default pod; the scenario adds a tier
@@ -66,7 +66,16 @@ test(
         const defaults = await serverProjectPods(projectId, session);
         const auto = defaults.find((p) => p.isDefault);
         expect(auto).toBeDefined();
-        expect(options.some((o) => o.includes(auto?.name ?? "") && /default/i.test(o))).toBe(true);
+        // The old app folds the default tag into the option text; the
+        // rebuild tags it with a visible DEFAULT pill that the option-text
+        // read skips by design (aria-hidden trailing), so the new leg pins
+        // the pill itself (spec §10 gate alignment).
+        if (driver.target === "web_new") {
+          const autoOption = page.getByRole("listbox").getByRole("option", { name: auto?.name ?? "" });
+          await expect(autoOption.getByText("DEFAULT")).toBeVisible();
+        } else {
+          expect(options.some((o) => o.includes(auto?.name ?? "") && /default/i.test(o))).toBe(true);
+        }
         // Neither agent is offered on this stack, so both rows disable with
         // a human-readable reason rendered inline.
         expect(await driver.pickerOptionDisabled("Pi Dash Cloud Agent")).toBe(true);
