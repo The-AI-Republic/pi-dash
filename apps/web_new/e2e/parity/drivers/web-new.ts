@@ -5379,7 +5379,15 @@ export class WebNewDriver implements ParityDriver {
     // a missing row.
     const heading = this.page.getByText("Properties", { exact: true }).first();
     await heading.waitFor({ timeout: WebNewDriver.WAIT_MS }).catch(() => {});
-    return (await this.propertyRow(label).count()) > 0;
+    // Rows mount after the heading (pods/estimates resolve late), so settle
+    // before calling absence — the oracle reads once because its rows mount
+    // with the heading. A truly absent row costs the full budget.
+    try {
+      await this.propertyRow(label).first().waitFor({ state: "visible", timeout: 10_000 });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /** The inline API rejection the pod picker renders under its trigger. */

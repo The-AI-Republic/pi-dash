@@ -948,8 +948,21 @@ describe("widget progress and rows (ISS-174)", () => {
     });
     const page = pageOf({
       getByText: () => locator({ first: () => heading }),
-      getByRole: () => locator({ count: async () => 0 }),
+      getByRole: () =>
+        locator({
+          waitFor: async () => {
+            throw new Error("timed out");
+          },
+        }),
     });
     await expect(new WebNewDriver(page).propertyRowPresent("Runs on")).resolves.toBe(false);
+  });
+
+  it("reports the row once it mounts after the heading", async () => {
+    const page = pageOf({
+      getByText: () => locator({ first: () => locator() }),
+      getByRole: () => locator(),
+    });
+    await expect(new WebNewDriver(page).propertyRowPresent("Estimate")).resolves.toBe(true);
   });
 });
