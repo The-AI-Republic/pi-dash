@@ -1109,6 +1109,31 @@ does not hold the rest of the area. The row keeps `oracle green`; it does
 not become `new green` until its cloud leg passes. OSS legs alone are not
 enough for VIEW-019, VIEW-020 and VIEW-040.
 
+**Gate note (NEWFRONT-745, 2026-10-27).** NEWFRONT-948 landed the three
+slots, so `web_new` has a cloud edition to run these rows against. Two
+limits were measured, not assumed:
+
+- **No oracle half.** The old cloud app renders none of the controls: its
+  `ce` modules are empty stubs (`apps/web/ce/components/views/access-controller.tsx`,
+  `publish/use-view-publish.tsx`, and `GlobalViewLayoutSelection` in
+  `ce/components/views/helper.tsx`), and the private overlay carries no
+  views override for either app. A cloud leg is therefore target-only,
+  like VIEW-033, and never proves the old behaviour.
+- **No server write path.** `IssueView`
+  (`apps/api/pi_dash/db/models/view.py`) has an `access` column that
+  `IssueViewSerializer.Meta.read_only_fields` marks read-only and **no
+  `anchor` field at all**; no migration adds one, and both `partial_update`
+  handlers answer 200 while ignoring the key. Measured against the gate
+  stack: `PATCH {access: 0}` echoes `access: 1`, and a `PATCH {anchor}`
+  comes back with no `anchor` key, on both the project and workspace
+  routes.
+
+VIEW-019 and VIEW-020 are therefore `blocked: cloud view write path stores
+neither access nor anchor` until NEWFRONT-972 lands; the slot code already
+fails loudly rather than faking the state. VIEW-040 needs no server change
+— its persist is the custom's `display_filters` PATCH, an OSS endpoint —
+so its cloud leg is run work, not a product gap.
+
 ## 15. Bug markers (observed → intended → adjudication)
 
 The rows whose oracle cells carry a `bug:` scenario: VIEW-002, 007, 014,
