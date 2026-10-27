@@ -70,6 +70,7 @@ enum Mode {
 async fn serve(bind: &str) -> MainResult {
     let addr: SocketAddr = bind.parse()?;
     pidash_api::startup::ServeBuilder::from_env()?
+        .with_version(env!("CARGO_PKG_VERSION"))
         .with_bind(addr)
         .run()
         .await

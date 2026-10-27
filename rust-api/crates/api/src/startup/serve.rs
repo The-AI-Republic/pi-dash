@@ -107,8 +107,8 @@ impl ServeBuilder {
     }
 
     /// Report `version` from the state (the `/healthz` body). Defaults to
-    /// this crate's version, which is the OSS binary's version; a binary
-    /// carrying its own version installs it here.
+    /// this crate's version; the OSS binary installs its own here (as it
+    /// always reported), and any embedding binary does the same.
     pub fn with_version(mut self, version: impl Into<String>) -> Self {
         self.version = version.into();
         self
