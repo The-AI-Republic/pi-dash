@@ -300,14 +300,12 @@ test(
       // seconds — the same flow lands in 5s on a small list — so a 45s
       // watch that never sees the row pins the absence.
       //
-      // Actual on the new app: the bypass strip is unwired — only the
-      // dead first-slice IssueList mounts it, while the project list
-      // (ListLayout) sorts the confirmed row last, out of the window
-      // (fix: NEWFRONT-937). The optimistic temp row DOES carry the
-      // fresh name briefly, so the web_new leg sequences past it first
-      // (server commit, then temp cleared by the confirm refetch) and
-      // pins the resulting stable absence; without the sequencing the
-      // watch flakes on temp sightings.
+      // Actual on the new app: NEWFRONT-937 wired the bypass strip
+      // into ListLayout, so the web_new leg pins presence instead. The
+      // optimistic temp row still carries the fresh name first, so the
+      // leg sequences past it (server commit, then temp cleared by the
+      // confirm refetch) and only then watches for the bypass row;
+      // without the sequencing the watch flakes on temp sightings.
       if (driver.target === "web_new") {
         await expect
           .poll(
@@ -317,25 +315,37 @@ test(
           )
           .toEqual(true);
         await expect.poll(async () => driver.layoutsTempRowVisible(), { timeout: 60_000 }).toEqual(false);
-      }
-      let sawFresh = false;
-      const watchUntil = Date.now() + 45_000;
-      while (Date.now() < watchUntil) {
-        const rows = await driver.layoutsListGroupIssueNames("All work items");
-        if (rows.includes(freshName)) {
-          sawFresh = true;
-          break;
+        let sawFresh = false;
+        const watchUntil = Date.now() + 45_000;
+        while (Date.now() < watchUntil) {
+          const rows = await driver.layoutsListGroupIssueNames("All work items");
+          if (rows.includes(freshName)) {
+            sawFresh = true;
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 3000));
         }
-        await new Promise((resolve) => setTimeout(resolve, 3000));
+        expect(sawFresh).toEqual(true);
+        // The strip row carries the fresh highlight; read it promptly,
+        // the highlight is transient.
+        await expect.poll(async () => driver.layoutsRowHighlighted(freshName), { timeout: 15_000 }).toEqual(true);
+      } else {
+        let sawFresh = false;
+        const watchUntil = Date.now() + 45_000;
+        while (Date.now() < watchUntil) {
+          const rows = await driver.layoutsListGroupIssueNames("All work items");
+          if (rows.includes(freshName)) {
+            sawFresh = true;
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 3000));
+        }
+        expect(sawFresh).toEqual(false);
+        // Intended: the fresh row also carries the transient highlight.
+        // Actual on the oracle: only drops highlight; creates never do
+        // (bug:NEWFRONT-168).
+        expect(await driver.layoutsRowHighlighted(freshName)).toEqual(false);
       }
-      expect(sawFresh).toEqual(false);
-      // Intended: the fresh row also carries the transient highlight.
-      // Actual on the oracle: only drops highlight; creates never do
-      // (bug:NEWFRONT-168). Actual on the new app: same absence until
-      // NEWFRONT-937 wires the strip — the confirmed row sits out of
-      // the window, and the sampled temp highlight some runs catch is
-      // the optimistic row, not the bypass.
-      expect(await driver.layoutsRowHighlighted(freshName)).toEqual(false);
       const rows = await serverIssues(seed.workspaceSlug, seed.projectId, session);
       const fresh = rows.find((row) => row.name === freshName);
       expect(fresh?.id ?? "").not.toEqual("");
