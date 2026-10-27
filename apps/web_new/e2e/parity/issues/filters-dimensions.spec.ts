@@ -8,17 +8,16 @@
 // ISS-093 (subscriber).
 //
 // SCOPE NOTE (verified by code-wide composer search plus live recon): the
-// legacy per-dimension dropdown chrome described in these rows' Acceptance
-// (a "Filters" dropdown with collapsible sections, five-row caps, applied
-// counts, search boxes, custom-date modal) renders on NO issues surface in
-// this checkout — every issues header pairs the condition-row builder with
-// the Display popover only. Per the tracker parent (NEWFRONT-28) these
-// scenarios prove each dimension's FILTERING BEHAVIOR through the live
-// condition-row UI on the project issues page — the parity signal the
-// rebuild needs — and are tagged to their rows. The chrome gap itself is
-// reported to the parent for an inventory correction. ISS-094 (shared
-// section chrome) has no filtering behavior to prove and carries no
-// scenario here; see the parent finding.
+// rows' entry point is the condition-row builder on main issues pages, not
+// a page-level legacy "Filters" dropdown (NEWFRONT-148 corrected the
+// inventory). Each dimension's value picker is a search box over an
+// uncapped option list — no applied count, collapse, or five-row cap;
+// the shared section chrome is rebuild target behavior (ISS-094, §22),
+// not an oracle property. The sub-issue widget is the only surface with
+// the older dropdown shape (state, priority, assignees, dates, and issue
+// types only), and these scenarios prove the main-page filtering behavior
+// through the live condition row. ISS-094 carries no filtering behavior
+// of its own here.
 //
 // REVEAL PATTERN (verified live): the row renders only while the stored
 // expression is non-empty, so every scenario seeds an expression through

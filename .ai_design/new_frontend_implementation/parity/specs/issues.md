@@ -580,42 +580,50 @@ allow barely any); cycle and module pills vanish when the project
 disables those features, and epics relabel the sub-issue count as a
 work-item count. Oracle: `filters-display.spec.ts`.
 
-The older per-dimension filters (ISS-082–093) survive as the sections
-inside the sub-issue widget filter dropdown; on main issues pages the
-condition-row builder is the only filter UI. Each dimension is a
-collapsible section with a checkbox (multi-choice) or radio
-(single-choice) row set, an applied count in its title, a shared
-search box, a five-row cap with an expand/collapse control, and an
-explicit empty placeholder when search matches nothing. Applied rows
-sort above unapplied ones; member rows put the signed-in user first.
-Dimensions: workflow state with group icon and loading skeletons
-(ISS-082); state group as a fixed five with icons (ISS-083); priority
-as a fixed five with icons (ISS-084); assignee and creator as member
-pickers with avatars (ISS-085, ISS-086); mentions as a member picker
-over mentioned items (ISS-087); labels with colored dots, applied-first
-then alphabetical (ISS-088); cycle with status icons where the running
-cycle pulses (ISS-089); module with icons (ISS-090); project with
-logo or emoji for cross-project views (ISS-091); start and due dates
-as preset relative windows plus a custom range dialog, where custom
-entries are detected by their dash and cleared by unticking the custom
-row, and presets and custom combine (ISS-092); and subscriber as a
-member-style dimension on the personal work-items page only (ISS-093).
-Persisted through user-properties (workspace scope where the surface
-is workspace-level). The shared chrome all these sections use —
-title plus chevron collapse, checkbox versus radio options with
-optional icon or pulse, applied count, shared search box, view-all
-past five, empty placeholder (ISS-094) — has no legacy per-dimension
-surface on the main issues page. In the new frontend it is the section
-control behind the condition-row builder's value popovers and the
-display dropdown (§22). Oracle: `filters-dimensions.spec.ts`.
+The per-dimension filters (ISS-082–093) have two shipped surfaces.
+On main issues pages they are rich-filter dimensions: the condition
+row's property picker offers State, State Group, Priority, Assignees,
+Created by, Mentions, Label, Cycle, Module, Start date and Target date;
+the personal work-items page adds Project and Subscriber. Each
+dimension's value picker is a search box over an uncapped option list
+with check marks — no section title, applied count, collapse, or
+five-row cap — while the date dimensions use date-picker value inputs
+for a single day or a range. Picking joins the condition to the stored
+expression with AND and narrows the list; the expression lives in
+user-properties (`rich_filters`), with the workspace record on personal
+surfaces. Cycle and Module are hidden when the project disables those
+features, and a project picks no Project dimension. The sub-issue
+widget's own Filters dropdown is the second surface: it composes the
+legacy collapsible sections for State, Priority, Assignees, Start date,
+Target date, and issue types only — state group and project are
+allowlisted out — each with its own title count, collapse, search, and
+five-row cap (priority renders every row in fixed order instead),
+applied local to the loaded page. Dimensions: workflow state with group
+icons (ISS-082); state group as all seven groups in one picker
+(ISS-083); priority as a fixed five with icons (ISS-084); assignee and
+creator as member pickers with avatars (ISS-085, ISS-086); mentions as
+a member picker over mentioned items (ISS-087); labels with colored
+dots (ISS-088); cycle with lifecycle status icons including completed
+cycles (ISS-089); module with icons (ISS-090); project with logo or
+emoji for cross-project views (ISS-091); start and target dates as
+date-picker values on main pages, and as preset relative windows plus
+a Custom row opening the date modal in the widget, where custom entries
+are detected by the dash in the stored value and cleared by unticking
+the custom row, and presets and custom combine (ISS-092); and
+subscriber as a catalogue-only dimension on the personal work-items
+page, with no oracle scenario behind it (ISS-093). The
+collapsible-section chrome (ISS-094) renders on issues surfaces only
+inside that widget dropdown; the rebuild's shared section control for
+the rich value lists, the display dropdown, and the widget is §22
+target behavior, not an oracle property. No page-level legacy Filters
+dropdown exists. Oracle: `filters-dimensions.spec.ts`.
 
-Above secondary lists, one applied-filter chip renders per active
-value (ISS-095): a marker (icon, avatar, color swatch) plus its label,
-with date chips spelling out preset names or formatted custom ranges.
-Each chip carries its own remove control where the page is editable,
-removing just that value through a user-properties patch. Chips whose
-backing record vanished (deleted state, departed member) are skipped
-silently rather than shown broken. Oracle: `filters-rich.spec.ts`.
+On issues surfaces an applied condition is removed through its own
+condition pill's remove control (ISS-095); removing one condition
+patches the expression immediately and leaves the siblings intact.
+No applied-filters chip bar is composed above any issues list. The
+Applied*Filters chip components belong to views, cycles, modules,
+pages and projects, not issues. Oracle: `filters-rich.spec.ts`.
 
 The condition-row builder header toggle (ISS-096) doubles as the entry
 point: with no conditions and nothing unsaved it reads as an add
@@ -1579,31 +1587,31 @@ surfaces that consume the access flag; no boards UI is needed here.
 
 ISS-094 — decision: correct the row and build the chrome where it
 renders. The NEWFRONT-119 oracle finding stands for main issues
-pages: the legacy per-dimension sections render on no main issues
+pages: the legacy per-dimension dropdown renders on no main issues
 surface there — the condition-row builder plus the Display sections
-are the only filter UI. But the same section components have a live
-surface inside the issues area: the sub-issue widget filter dropdown
-is the sole importer of the legacy header sections within the area,
-and the display-filter dropdown shares the dropdown shell. So the row
-is neither built as a page-level family nor retired. The inventory
-correction (applied by the owning slice NEWFRONT-629): scope the old
-entry point to the sub-issue widget filter and display dropdowns and
-read the acceptance as the chrome of those dropdowns — title plus
-chevron collapse, checkbox (multi) or radio (single) options with
-optional icon or pulse, applied count, shared search box,
-view-all past five, empty placeholder. The slice builds exactly that
-chrome in those two dropdowns. Scenario disposition: add an ISS-094
-scenario to the sub-issue rows spec asserting collapse, search, the
-five-row cap with its expand control, checkbox-versus-radio choice,
-and the applied count inside that dropdown; the row stays not-started
-until the slice lands and turns built with it.
+are the only filter UI, and the condition row's value pickers are a
+search box over an uncapped option list, not collapsible sections.
+The section chrome has exactly one live surface on issues surfaces in
+the old app: the sub-issue widget filter dropdown, which composes the
+legacy sections for state, priority, assignees, the two dates, and
+issue types. So the row is neither rebuilt as a page-level family nor
+retired. The inventory correction (completed by NEWFRONT-148) scopes
+the oracle entry point to that widget dropdown and reads the acceptance
+as its chrome — title plus chevron collapse, checkbox (multi) or radio
+(single) options with optional icon or pulse, applied count, shared
+search box, view-all past five (priority renders every row instead),
+and empty placeholder. The rebuild target, owned by NEWFRONT-629 with
+the widget adoption in NEWFRONT-647, is one shared section control
+behind the rich value lists, the display dropdown, and the widget —
+target behavior recorded here, not an oracle property.
 
 Implementation note (NEWFRONT-629): the slice built the chrome as the
 shared section control under the issues filters and adopted it in the
-two surfaces that exist today — the condition-row builder's rich value
-lists and the display dropdown. Both read title, applied count, chevron
-collapse, the search box, the five-row cap with view all/less, the
-no-matches placeholder, and icon and pulse marks from the one control.
+surfaces that exist today — the condition-row builder's rich value
+lists, the display dropdown, and (through NEWFRONT-647) the sub-issue
+widget. They read title, applied count, chevron collapse, the search
+box, the five-row cap with view all/less, the no-matches placeholder,
+and icon and pulse marks from the one control.
 
 One refusal is deliberate rather than a gap: the display dropdown
 keeps `aria-pressed` rows over checkbox/radio semantics and does not

@@ -515,12 +515,12 @@ test(
 
 const REMOVE_ROWS = ["ISS-095"];
 test(
-  specTitle(REMOVE_ROWS, "bug: removal runs per-condition with no chip bar (NEWFRONT-148)"),
+  specTitle(REMOVE_ROWS, "removal runs per-condition with no issues chip bar"),
   { tag: specTags(REMOVE_ROWS) },
   async ({ driver, seed }) => {
-    // The row wants one chip per active value with its own X; the oracle
-    // renders no chip bar, so removal happens through each condition's own
-    // remove control while the sibling condition survives.
+    // Issues surfaces render no chip bar (NEWFRONT-148 corrected the
+    // inventory); removal happens through each condition's own remove
+    // control while the sibling condition and its stored key survive.
     await revealRichRow(driver, seed, REVEAL_KEEP_ALL);
     await driver.addRichCondition("State");
     await driver.pickRichValues(["Todo"]);
