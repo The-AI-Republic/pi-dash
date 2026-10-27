@@ -250,7 +250,19 @@ test(
       await test.step("header copy-link copies the absolute URL with a toast", async () => {
         await driver.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
         await driver.copyIssueLink();
-        await expect.poll(() => driver.lastToast(), { timeout: 15_000 }).toMatch(/link copied/i);
+        // The toast wording is each app's own copy (spec §13, NEWFRONT-945):
+        // pin the intent — a notice saying the link was copied — so both
+        // pass. One poll for both halves: lastToast reads the visible toast,
+        // so separate polls could read different toasts.
+        await expect
+          .poll(
+            async () => {
+              const toast = (await driver.lastToast()) ?? "";
+              return /cop(y|ied)/i.test(toast) && /link/i.test(toast) ? toast : "";
+            },
+            { timeout: 15_000 }
+          )
+          .not.toBe("");
         expect(await driver.readClipboard()).toContain(`/browse/${issue.seq}`);
       });
       await test.step("identifier line shows IDENT-seq", async () => {
