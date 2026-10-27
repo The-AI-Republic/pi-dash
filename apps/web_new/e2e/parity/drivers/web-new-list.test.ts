@@ -416,7 +416,6 @@ interface RowHooks {
   stateTitle?: string;
   priorityTitle?: string;
   chipDisabled?: boolean;
-  noStateChip?: boolean;
   expand?: boolean;
   collapse?: boolean;
   peekOpener?: boolean;
@@ -439,25 +438,21 @@ function childArticleNode(name: string): Locator {
 
 /** A list-row stub with chip wrappers, toggle buttons and nested children. */
 function listRowNode(issueName: string, hooks: RowHooks): Locator {
-  const stateWrap =
-    hooks.noStateChip === true
-      ? node({ count: async () => 0, locator: () => node({ count: async () => 0 }) })
-      : node({
-          getAttribute: async (attr: string) => {
-            if (attr !== "title") return null;
-            return hooks.titles === undefined ? (hooks.stateTitle ?? null) : hooks.titles();
-          },
-          locator: (selector: string) =>
-            selector === "button"
-              ? node({
-                  getAttribute: async (attr: string) =>
-                    attr === "disabled" && hooks.chipDisabled === true ? "" : null,
-                  click: async () => {
-                    hooks.onChipClick?.();
-                  },
-                })
-              : node({ count: async () => 0 }),
-        });
+  const stateWrap = node({
+    getAttribute: async (attr: string) => {
+      if (attr !== "title") return null;
+      return hooks.titles === undefined ? (hooks.stateTitle ?? null) : hooks.titles();
+    },
+    locator: (selector: string) =>
+      selector === "button"
+        ? node({
+            getAttribute: async (attr: string) => (attr === "disabled" && hooks.chipDisabled === true ? "" : null),
+            click: async () => {
+              hooks.onChipClick?.();
+            },
+          })
+        : node({ count: async () => 0 }),
+  });
   const priorityWrap = node({
     getAttribute: async (attr: string) => (attr === "title" ? (hooks.priorityTitle ?? null) : null),
     locator: (selector: string) =>
@@ -522,14 +517,40 @@ describe("web-new row chips", () => {
   });
 
   it("reads editability from the state chip", async () => {
-    const enabled = pageOf({ locator: () => listRowNode("Alpha", { stateTitle: "State: Todo" }) });
+    let waited = 0;
+    const chip = node({
+      waitFor: async () => void (waited += 1),
+      getAttribute: async () => null,
+    });
+    const wrap = node({ locator: () => chip });
+    const row = node({
+      locator: (selector: string) => (selector === 'span[title^="State: "]' ? wrap : node({ count: async () => 0 })),
+    });
+    const enabled = pageOf({ locator: () => row });
     await expect(new WebNewDriver(enabled.page).layoutsRowCanEditState("Alpha")).resolves.toBe(true);
+    expect(waited).toBe(1);
+    const noChipRow = node({
+      locator: (selector: string) =>
+        selector === 'span[title^="State: "]'
+          ? node({
+              locator: () =>
+                node({
+                  waitFor: async () => {
+                    throw new Error("Timeout");
+                  },
+                }),
+            })
+          : node({ count: async () => 0 }),
+    });
+    const missing = pageOf({ locator: () => noChipRow });
+    await expect(new WebNewDriver(missing.page).layoutsRowCanEditState("Alpha")).resolves.toBe(false);
+  });
+
+  it("reads a disabled chip as cannot-edit", async () => {
     const disabled = pageOf({
       locator: () => listRowNode("Alpha", { stateTitle: "State: Todo", chipDisabled: true }),
     });
     await expect(new WebNewDriver(disabled.page).layoutsRowCanEditState("Alpha")).resolves.toBe(false);
-    const missing = pageOf({ locator: () => listRowNode("Alpha", { noStateChip: true }) });
-    await expect(new WebNewDriver(missing.page).layoutsRowCanEditState("Alpha")).resolves.toBe(false);
   });
 
   it("sets state through the combobox and settles on the repaint", async () => {

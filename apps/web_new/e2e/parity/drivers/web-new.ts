@@ -8164,10 +8164,16 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async layoutsRowCanEditState(issueName: string): Promise<boolean> {
-    // Guests get a disabled chip, or no chip at all once settled
-    // (NEWFRONT-339); either shape reads as cannot-edit.
+    // The strip mounts on idle after the rows paint, so the read waits
+    // for the chip instead of racing it. Guests settle with a disabled
+    // chip, or none at all (NEWFRONT-339); either shape reads as
+    // cannot-edit.
     const chip = this.layoutsRowStateWrap(issueName).locator("button").first();
-    if ((await chip.count()) === 0) return false;
+    const settled = await chip.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS }).then(
+      () => true,
+      () => false
+    );
+    if (!settled) return false;
     return (await chip.getAttribute("disabled")) === null;
   }
 
