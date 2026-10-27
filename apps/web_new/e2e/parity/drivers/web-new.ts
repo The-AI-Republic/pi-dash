@@ -558,6 +558,11 @@ export class WebNewDriver implements ParityDriver {
     | { matches: (url: URL) => boolean; handler: (route: Route) => Promise<void> }
     | undefined = undefined;
 
+  /** The armed one-shot issue PATCH failure, if failNextIssuePatch set one. */
+  private issuePatchFailureRoute:
+    | { matches: (url: URL) => boolean; handler: (route: Route) => Promise<void> }
+    | undefined = undefined;
+
   // Runner-chat stubs and counters (NEWFRONT-549); set by the chat methods.
   private runnerChatSessionCreateFailRemaining = 0;
   private runnerChatSessionCreateDelayMs = 0;
@@ -1562,8 +1567,13 @@ export class WebNewDriver implements ParityDriver {
     return todo("rulesOpenIssueDetail");
   }
 
-  async rulesOpenIntakeIssue(_workspaceSlug: string, _projectId: string, _inboxIssueId: string): Promise<void> {
-    return todo("rulesOpenIntakeIssue");
+  async rulesOpenIntakeIssue(workspaceSlug: string, projectId: string, inboxIssueId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/intake?inboxIssueId=${inboxIssueId}`);
+    await this.page.waitForLoadState("domcontentloaded");
+    // The intake screen resolves the triage row, then loads its feed;
+    // that chain is slow on the dev server.
+    await this.intakeShellWaitSettled();
+    await this.page.getByRole("group", { name: "Add comment" }).first().waitFor({ timeout: 300_000 });
   }
 
   async rulesCommentBodyText(_commentId: string): Promise<string | null> {
@@ -1701,7 +1711,14 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async rulesIntakeTriageVisible(): Promise<boolean> {
-    return todo("rulesIntakeTriageVisible");
+    // Accept/Decline prove the intake variant; each is awaited so a slow
+    // triage chain cannot read as absent, then confirmed visible so a
+    // prerendered-but-hidden control cannot pass.
+    const accept = this.page.getByTestId("intake-triage-accept").first();
+    const decline = this.page.getByTestId("intake-triage-decline").first();
+    await accept.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await decline.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return (await accept.isVisible()) && (await decline.isVisible());
   }
 
   // Shell chrome (NEWFRONT-126, rows SHELL-001/002; NEWFRONT-288): the
@@ -5262,8 +5279,24 @@ export class WebNewDriver implements ParityDriver {
       .catch(() => {});
   }
 
-  async openArchivedIssueDetail(_workspaceSlug: string, _projectId: string, _issueId: string): Promise<void> {
-    return todo("openArchivedIssueDetail");
+  async openArchivedIssueDetail(workspaceSlug: string, projectId: string, issueId: string): Promise<void> {
+    // Archived issues render on the archives URL itself (no browse
+    // redirect) with an archive banner above the locked detail.
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/archives/issues/${issueId}`);
+    await this.page.waitForLoadState("domcontentloaded");
+    const activity = this.page.getByRole("heading", { name: "Activity", exact: true });
+    const deadline = Date.now() + 75_000;
+    for (;;) {
+      if ((await this.page.getByText(/not found|does not exist|went wrong/i).count()) > 0)
+        throw new Error(`[parity] archived detail for ${issueId} rendered an error state (${this.page.url()}).`);
+      try {
+        await activity.first().waitFor({ timeout: Math.max(1_000, deadline - Date.now()) });
+        return;
+      } catch {
+        if (Date.now() >= deadline)
+          throw new Error(`[parity] Activity never rendered for archived ${issueId} (current: ${this.page.url()}).`);
+      }
+    }
   }
 
   /** Any open date calendar: every picker testids its calendar *-calendar, and closed popovers unmount. */
@@ -5692,8 +5725,13 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async intakeStateOpenPicker(): Promise<void> {
+    // Idempotent: Escape-after-search leaves the popup open (ISS-207
+    // clears the query and holds it), so never toggle an open popup
+    // shut with a blind click.
+    if (await this.pickerOpen()) return;
     await this.intakeCreateStateTrigger().click({ timeout: WebNewDriver.WAIT_MS });
     await this.intakeCreateOptionList().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await this.intakeCreateOptionList().getByRole("option").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async intakeStateOptionTexts(): Promise<string[]> {
@@ -6203,8 +6241,11 @@ export class WebNewDriver implements ParityDriver {
     return (await this.page.getByRole("heading", { name: /not authorized/i }).count()) > 0;
   }
 
-  async globalViewIssueVisible(_name: string): Promise<boolean> {
-    return todo("globalViewIssueVisible");
+  async globalViewIssueVisible(name: string): Promise<boolean> {
+    // Layout-agnostic: an exact-text match anywhere on the page.
+    // Scenario issue names never equal a project name exactly, so
+    // sidebar project entries cannot false-positive this.
+    return (await this.page.getByText(name, { exact: true }).count()) > 0;
   }
 
   async openCycleIssues(workspaceSlug: string, projectId: string, cycleId: string): Promise<void> {
@@ -6262,12 +6303,39 @@ export class WebNewDriver implements ParityDriver {
     await this.page.getByPlaceholder("Search for a cycle...").waitFor({ state: "detached", timeout: 60_000 });
   }
 
-  async failNextIssuePatch(_status: number, _delayMs: number): Promise<void> {
-    return todo("failNextIssuePatch");
+  async failNextIssuePatch(status: number, delayMs: number): Promise<void> {
+    // Only the next issue PATCH fails, once: reads and other writes pass
+    // through, and the handler removes itself after answering so a
+    // retried save goes to the real server. The delay keeps the
+    // optimistic value on screen long enough to poll for it. A URL
+    // predicate (not a glob) routes the request.
+    const matches = (url: URL): boolean =>
+      url.pathname.includes("/api/workspaces/") &&
+      url.pathname.includes("/projects/") &&
+      url.pathname.includes("/issues/");
+    const handler = async (route: Route): Promise<void> => {
+      if (route.request().method() !== "PATCH") {
+        await route.continue();
+        return;
+      }
+      // Answer first, unroute after: removing the handler from inside
+      // itself finalizes the route and a later fulfill throws
+      // "already handled".
+      try {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        await route.fulfill({ status, contentType: "application/json", body: "{}" });
+      } finally {
+        await this.clearIssuePatchFailure();
+      }
+    };
+    this.issuePatchFailureRoute = { matches, handler };
+    await this.page.route(matches, handler);
   }
 
   async clearIssuePatchFailure(): Promise<void> {
-    return todo("clearIssuePatchFailure");
+    const current = this.issuePatchFailureRoute;
+    this.issuePatchFailureRoute = undefined;
+    if (current) await this.page.unroute(current.matches, current.handler).catch(() => {});
   }
 
   /** Wait for the signed-out entry card after a sign-out round-trip. */
