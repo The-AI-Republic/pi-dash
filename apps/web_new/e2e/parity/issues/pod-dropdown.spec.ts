@@ -80,7 +80,17 @@ test(
         // a human-readable reason rendered inline.
         expect(await driver.pickerOptionDisabled("Pi Dash Cloud Agent")).toBe(true);
         expect(await driver.pickerOptionDisabled("Pi Dash Agent (desktop)")).toBe(true);
-        expect(options.some((o) => /cloud agent/i.test(o) && o.length > "Pi Dash Cloud Agent".length)).toBe(true);
+        // The old app folds the unavailability reason into the option text;
+        // the rebuild renders it as trailing pill text the option-text read
+        // skips by design, so the new leg reads the whole option (spec §10
+        // gate alignment).
+        if (driver.target === "web_new") {
+          const cloudOption = page.getByRole("listbox").getByRole("option", { name: "Pi Dash Cloud Agent" });
+          const cloudText = ((await cloudOption.innerText()) ?? "").trim();
+          expect(cloudText.length).toBeGreaterThan("Pi Dash Cloud Agent".length);
+        } else {
+          expect(options.some((o) => /cloud agent/i.test(o) && o.length > "Pi Dash Cloud Agent".length)).toBe(true);
+        }
         await driver.pickerClickOutside();
       });
 

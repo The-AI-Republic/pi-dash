@@ -74,7 +74,11 @@ test(
             timeout: 15_000,
           })
           .toEqual(expect.arrayContaining([alphaId, betaId]));
-        await expect.poll(() => driver.propertyValueText("Modules"), { timeout: 15_000 }).toContain(`${tag} alpha`);
+        // Multi-select renders a counted label on the rebuild (area spec
+        // §17: "removable chips or a counted label"); the old app names
+        // the picks in the row (spec §10 gate alignment).
+        const accumulated = driver.target === "web_new" ? "2 Modules" : `${tag} alpha`;
+        await expect.poll(() => driver.propertyValueText("Modules"), { timeout: 15_000 }).toContain(accumulated);
         await driver.pickerClickOutside();
       });
 
