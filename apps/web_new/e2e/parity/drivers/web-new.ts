@@ -7824,21 +7824,55 @@ export class WebNewDriver implements ParityDriver {
   // --- NEWFRONT-117 (layouts A). Throwing stubs per the shared driver
   // --- contract; the layouts area fills these in when it lands.
 
+  /** The desktop header switcher; the dropdown twin carries no data hooks. */
+  private layoutsSegmentedSwitcher(): Locator {
+    return this.page.getByTestId("layout-switcher-segmented").filter({ visible: true }).first();
+  }
+
+  private static layoutsLayoutKey(value: string): LayoutsLayoutKey {
+    const keys: readonly string[] = ["list", "kanban", "calendar", "spreadsheet", "gantt_chart"];
+    if ((keys as readonly string[]).includes(value)) return value as LayoutsLayoutKey;
+    throw new Error(`[parity] unrecognised layout key "${value}".`);
+  }
+
   async layoutsOfferedLayouts(): Promise<LayoutsLayoutKey[]> {
-    return todo("layoutsOfferedLayouts");
+    // Canonical order comes free: the switcher filters LAYOUT_ORDER by
+    // the registered set, so DOM order is the asserted order.
+    const switcher = this.layoutsSegmentedSwitcher();
+    await switcher.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const buttons = switcher.locator("[data-layout]");
+    const count = await buttons.count();
+    const keys: LayoutsLayoutKey[] = [];
+    for (let index = 0; index < count; index += 1) {
+      keys.push(WebNewDriver.layoutsLayoutKey((await buttons.nth(index).getAttribute("data-layout")) ?? ""));
+    }
+    return keys;
   }
 
   async layoutsActiveLayout(): Promise<LayoutsLayoutKey> {
-    // The profile tab's switcher trigger names the live layout.
-    const trigger = this.page
-      .getByRole("button", { name: /^Issue layout, current / })
-      .filter({ visible: true })
-      .first();
-    await trigger.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
-    const label = (await trigger.getAttribute("aria-label")) ?? "";
-    const key = WebNewDriver.PROFILE_LAYOUT_LABELS.find((entry) => label.endsWith(entry.label))?.key;
-    if (key === undefined) throw new Error(`[parity] unrecognised layout trigger label "${label}".`);
-    return key;
+    // The profile tab names the live layout on its switcher trigger;
+    // project surfaces mark the active segmented choice instead (its
+    // DOM reads the same below the lg breakpoint, where the mobile
+    // menu takes over visibly). Either hook wins its race.
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    for (;;) {
+      const trigger = this.page
+        .getByRole("button", { name: /^Issue layout, current / })
+        .filter({ visible: true })
+        .first();
+      if ((await trigger.count()) > 0) {
+        const label = (await trigger.getAttribute("aria-label")) ?? "";
+        const key = WebNewDriver.PROFILE_LAYOUT_LABELS.find((entry) => label.endsWith(entry.label))?.key;
+        if (key === undefined) throw new Error(`[parity] unrecognised layout trigger label "${label}".`);
+        return key;
+      }
+      const active = this.layoutsSegmentedSwitcher().locator('[data-layout][data-active="true"]');
+      if ((await active.count()) > 0) {
+        return WebNewDriver.layoutsLayoutKey((await active.first().getAttribute("data-layout")) ?? "");
+      }
+      if (Date.now() >= deadline) throw new Error("[parity] no layout switcher rendered.");
+      await this.page.waitForTimeout(500);
+    }
   }
 
   async layoutsSwitchTo(layout: LayoutsLayoutKey): Promise<void> {
@@ -7906,7 +7940,10 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async layoutsListVisible(): Promise<boolean> {
-    return this.isShown(this.page.getByTestId("profile-list"));
+    if (await this.isShown(this.page.getByTestId("profile-list"))) return true;
+    // Project surfaces render a group header per section whenever the
+    // list layout has rows; empty and other layouts render none.
+    return this.isShown(this.page.getByTestId("list-group-header").first());
   }
 
   async layoutsCalendarVisible(): Promise<boolean> {
@@ -7957,7 +7994,8 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async layoutsKanbanVisible(): Promise<boolean> {
-    return this.isShown(this.page.getByTestId("profile-board"));
+    if (await this.isShown(this.page.getByTestId("profile-board"))) return true;
+    return this.isShown(this.page.getByTestId("kanban-layout"));
   }
 
   /** Profile layout names as the switcher trigger reads them. */
@@ -7990,7 +8028,7 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async layoutsGanttVisible(): Promise<boolean> {
-    return todo("layoutsGanttVisible");
+    return this.isShown(this.page.getByTestId("gantt-layout"));
   }
 
   async layoutsListGroups(): Promise<string[]> {
