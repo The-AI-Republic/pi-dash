@@ -86,14 +86,21 @@ function cellPoint(cell: PointElement): BoardDropPoint | null {
 }
 
 /**
- * Drop target under `(x, y)`, or null over empty board chrome. The hit
- * element climbs to the nearest card, cell, column or zone; when the
- * document cannot hit-test (or the hit climbs nowhere), every candidate
- * is scanned by its rect instead.
+ * Drop target under `(x, y)`, or null over empty board chrome. The
+ * delete zone wins whenever the point lands inside its rect (it is
+ * pointer-events-none, so hit-testing would fall through to the board
+ * beneath it); otherwise the hit element climbs to the nearest card,
+ * cell or column, and when the document cannot hit-test (or the hit
+ * climbs nowhere), every remaining candidate is scanned by its rect.
  */
 export function boardDropAtPoint(doc: PointDocument | null | undefined, x: number, y: number): BoardDropPoint | null {
   if (doc === null || doc === undefined) return null;
   if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+  for (const zone of Array.from(doc.querySelectorAll(KANBAN_DELETE_ZONE_SELECTOR))) {
+    if (isPointInside(zone.getBoundingClientRect(), x, y)) {
+      return { kind: "delete", columnKey: null, laneKey: null, issueId: null, edge: null };
+    }
+  }
   if (typeof doc.elementFromPoint === "function") {
     const hit = doc.elementFromPoint(x, y);
     const zone = hit?.closest?.(KANBAN_DELETE_ZONE_SELECTOR) ?? null;
@@ -114,11 +121,6 @@ export function boardDropAtPoint(doc: PointDocument | null | undefined, x: numbe
     if (column !== null) {
       const point = columnPoint(column);
       if (point !== null) return point;
-    }
-  }
-  for (const zone of Array.from(doc.querySelectorAll(KANBAN_DELETE_ZONE_SELECTOR))) {
-    if (isPointInside(zone.getBoundingClientRect(), x, y)) {
-      return { kind: "delete", columnKey: null, laneKey: null, issueId: null, edge: null };
     }
   }
   for (const card of Array.from(doc.querySelectorAll(KANBAN_CARD_SELECTOR))) {
