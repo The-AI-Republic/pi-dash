@@ -91,7 +91,7 @@ export function KanbanLoadMore({ onLoad }: { onLoad: () => void }): React.ReactE
 /** Placeholder shells while a column's first page loads. */
 export function ColumnSkeleton(): React.ReactElement {
   return (
-    <div data-testid="kanban-column-loading" className="flex flex-col gap-(--space-2) p-(--space-3)">
+    <div data-testid="kanban-column-loading" className="flex shrink-0 flex-col gap-(--space-2) p-(--space-3)">
       {Array.from({ length: 3 }, (_, index) => (
         <Skeleton key={index} height="64px" />
       ))}

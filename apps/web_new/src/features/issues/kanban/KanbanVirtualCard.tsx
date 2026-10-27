@@ -8,7 +8,9 @@
 // the vertical overscan, leaving a height-estimated placeholder behind.
 // Horizontal distance never unmounts: every column mounts its window
 // no matter how far the board scrolled sideways (ISS-039). Without an
-// observer (tests, SSR) shells render content immediately.
+// observer (tests, SSR) shells render content immediately. Both states
+// pin shrink-0: the column body is a flex column and would otherwise
+// crush its rows to nothing, hiding every page past the first (NEWFRONT-968).
 
 import * as React from "react";
 
@@ -73,11 +75,16 @@ export function KanbanVirtualCard({
 }: KanbanVirtualCardProps): React.ReactElement {
   const { ref, near } = useNearViewport<HTMLDivElement>();
   if (near || forceContent) {
-    return <div ref={ref}>{children}</div>;
+    return (
+      <div ref={ref} className="shrink-0">
+        {children}
+      </div>
+    );
   }
   return (
     <div
       ref={ref}
+      className="shrink-0"
       data-testid="kanban-card"
       data-issue-id={issueId}
       data-group-key={groupKey}
