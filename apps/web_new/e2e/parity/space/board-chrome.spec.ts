@@ -19,7 +19,8 @@
 //   (space at the proxy root) does not mount — scenarios pin the carried
 //   address, not the post-auth landing.
 // - Inside an embedding frame the account slot and the emoji add controls
-//   render nothing while the board stays readable.
+//   render nothing while the board stays readable — except the kanban
+//   card-footer add control, which stays live (NEWFRONT-469).
 // - Boot, board resolution, and the first issues fetch each show the logo
 //   spinner; content appears only once its data is present.
 // - Route transitions show a top progress bar that completes on settle;
@@ -382,6 +383,44 @@ test(
       expect(framed.signInVisible).toBe(false);
       expect(framed.avatarVisible).toBe(false);
       expect(framed.emojiControls).toBe(0);
+
+      expect((await publicIssues(anchor)).length).toBe(issues.length);
+    });
+  }
+);
+
+test(
+  specTitle(["SPC-015"], "bug: NEWFRONT-469 embedded kanban footers keep a working emoji add control"),
+  { tag: specTags(["SPC-015"]) },
+  async ({ driver, seed }) => {
+    // The overlay hides its reaction control inside a frame, but the
+    // kanban card footer renders the same control with no frame gate, so
+    // an embedded board keeps a live emoji add path (NEWFRONT-469).
+    // Intended: no emoji add control anywhere inside a frame.
+    const anchor = requireAnchor(seed);
+    await withBoardFlags(seed, { is_reactions_enabled: true }, async () => {
+      const issues = await publicIssues(anchor);
+      expect(issues.length).toBeGreaterThan(0);
+      const name = seed.issueNames[0] ?? "";
+      expect(name).not.toBe("");
+      const session = await spacesSignIn(seed.email, seed.password, "/");
+
+      await driver.openAuthenticated(
+        `/issues/${anchor}?board=kanban`,
+        browserSessionCookies(spacesAuthed(seed.email, seed.password, session.cookie))
+      );
+      const footer = await driver.spaceBoardKanbanCardFooter(name);
+      expect(footer.visible).toBe(true);
+      expect(footer.reactions).toBe(true);
+      expect(await driver.spaceChromeEmojiControlCount()).toBeGreaterThan(0);
+
+      await driver.spaceChromeOpenBoardFramed(anchor, "?board=kanban");
+      const framed = await driver.spaceChromeFramedFacts();
+      expect(framed.sessionActiveInFrame).toBe(true);
+      expect(framed.boardReadable).toBe(true);
+      expect(framed.signInVisible).toBe(false);
+      expect(framed.avatarVisible).toBe(false);
+      expect(framed.emojiControls).toBeGreaterThan(0);
 
       expect((await publicIssues(anchor)).length).toBe(issues.length);
     });
