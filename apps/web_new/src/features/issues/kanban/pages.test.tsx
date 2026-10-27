@@ -21,6 +21,7 @@ import {
   isGrouped,
   isSubGrouped,
   readBoard,
+  labelRecoveryForBoard,
   labelRecoveryInput,
   readLabelRecovery,
   toBoard,
@@ -205,6 +206,12 @@ describe("labelRecoveryInput", () => {
     expect(lanes?.subGroupBy).toBeNull();
     // A stored sub-group repeating the group is no axis at all.
     expect(labelRecoveryInput(input({ groupBy: "labels", subGroupBy: "labels" }))?.groupBy).toBeNull();
+  });
+
+  it("enables no recovery outside a project scope", () => {
+    const entity = { scope: "workspace" } as const;
+    expect(labelRecoveryForBoard({ ...input({ groupBy: "labels" }), entity })).toBeUndefined();
+    expect(labelRecoveryForBoard(input({ groupBy: "labels" }))).toBeDefined();
   });
 
   it("keeps the main axis and drops the lanes for a labels sub-group", () => {

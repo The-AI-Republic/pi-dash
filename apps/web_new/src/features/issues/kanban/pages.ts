@@ -192,6 +192,15 @@ export async function readLabelRecovery(
   return board;
 }
 
+/**
+ * The recovery read a board enables, or undefined when it enables none.
+ * Only project-scoped boards recover: the grouped and sub-grouped
+ * serializers that answer a labels axis are mounted there alone.
+ */
+export function labelRecoveryForBoard(input: BoardReadInput): BoardReadInput | undefined {
+  return input.entity.scope === "project" ? labelRecoveryInput(input) : undefined;
+}
+
 /** Fallback read used to restore rows omitted by labels grouping. */
 export function labelRecoveryQueryOptions(client: ApiClient, workspaceSlug: string, input: BoardReadInput) {
   return queryOptions({
@@ -360,8 +369,7 @@ export function useBoard(client: ApiClient, workspaceSlug: string, input: BoardR
   // it from the columns or lanes and from the total alike. Only a read
   // without the label axis can show it, so every labels board reads one
   // (NEWFRONT-158/961).
-  const recoveryRead = input.entity.scope === "project" ? labelRecoveryInput(input) : undefined;
-  const recover = recoveryRead !== undefined;
+  const recover = labelRecoveryForBoard(input) !== undefined;
   const extras = React.useMemo<BoardExtraPage[]>(
     () => [
       ...Object.entries(columnCursors).flatMap(([key, cursors]) =>

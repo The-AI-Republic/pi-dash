@@ -824,6 +824,50 @@ describe("label ghost reconciliation on the main axis (ISS-028/NEWFRONT-961)", (
     expect(reconcileLabelGhosts(board, fallback, "main")).toBe(board);
   });
 
+  it("leaves the board alone without a fallback lane or any unlabeled row", () => {
+    const kept = row({ id: "kept", label_ids: [LABEL] });
+    const board = labelsBoard({ [LABEL]: { rows: [kept], total: 1 } });
+    expect(reconcileLabelGhosts(board, { ...board, lanes: [] }, "main")).toBe(board);
+    // A fallback whose rows all carry a live label has nothing to recover.
+    const fallback = flatBoard({ ...flatEnvelope, results: [kept], total_count: 1 });
+    expect(reconcileLabelGhosts(board, fallback, "main")).toBe(board);
+  });
+
+  it("keeps a lane with no None cell out of the recovered counts", () => {
+    const laneA = "623e4567-e89b-12d3-a456-426614174005";
+    const laneB = "723e4567-e89b-12d3-a456-426614174006";
+    const plainA = row({ id: "plain-a", state_id: laneA, label_ids: [] });
+    const board = subGroupedBoard(
+      subGrouped({
+        None: {
+          [laneA]: { rows: [plainA], total: 1 },
+          [laneB]: { rows: [], total: 0 },
+        },
+      }),
+      {
+        groupDimension: "labels",
+        subDimension: "state",
+        groupLabels: labels,
+        subLabels: labels,
+        showEmpty: true,
+      }
+    );
+    const ghost = row({ id: "ghost", state_id: laneB, label_ids: [] });
+    const fallback = groupedBoard(
+      grouped({
+        [laneA]: { rows: [plainA], total: 1 },
+        [laneB]: { rows: [ghost], total: 1 },
+      }),
+      { dimension: "state", labels, showEmpty: true }
+    );
+    const result = reconcileLabelGhosts(board, fallback, "main");
+    expect(result.lanes.map((entry) => [entry.key, entry.cells["None"]?.rows.map((item) => item.id)])).toEqual([
+      [laneA, ["plain-a"]],
+      [laneB, ["ghost"]],
+    ]);
+    expect(result.columns.map((column) => column.total)).toEqual([2]);
+  });
+
   it("ignores a sub-grouped fallback, which no labels board reads", () => {
     const ghost = row({ id: "ghost", label_ids: [] });
     const board = labelsBoard({ None: { rows: [row({ id: "plain" })], total: 1 } });
