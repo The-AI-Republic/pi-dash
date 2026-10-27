@@ -148,15 +148,7 @@ export async function readLabelRecovery(
   const groupBy = serverGroupBy(input.groupBy);
   if (groupBy === null) throw new Error("label recovery needs a grouped board");
   const buckets: GroupedIssueListResponse["results"] = {};
-  let envelope: GroupedIssueListResponse | null = null;
-  let cursor: string | undefined;
-  const asked = new Set<string>();
-  for (;;) {
-    const page = await listGroupedIssues(client, workspaceSlug, projectId, {
-      ...baseQuery(input, LABEL_RECOVERY_PAGE_SIZE, cursor),
-      groupBy,
-    });
-    envelope ??= page;
+  const fold = (page: GroupedIssueListResponse) => {
     for (const [key, bucket] of Object.entries(page.results)) {
       const existing = buckets[key];
       if (existing === undefined) {
@@ -169,13 +161,23 @@ export async function readLabelRecovery(
         total_results: bucket.total_results,
       };
     }
-    if (!page.next_page_results || page.next_cursor === "") break;
-    if (asked.has(page.next_cursor)) break;
+  };
+  const firstPage = await listGroupedIssues(client, workspaceSlug, projectId, {
+    ...baseQuery(input, LABEL_RECOVERY_PAGE_SIZE),
+    groupBy,
+  });
+  fold(firstPage);
+  const asked = new Set<string>();
+  let page = firstPage;
+  while (page.next_page_results && page.next_cursor !== "" && !asked.has(page.next_cursor)) {
     asked.add(page.next_cursor);
-    cursor = page.next_cursor;
+    page = await listGroupedIssues(client, workspaceSlug, projectId, {
+      ...baseQuery(input, LABEL_RECOVERY_PAGE_SIZE, page.next_cursor),
+      groupBy,
+    });
+    fold(page);
   }
-  if (envelope === null) throw new Error("label recovery read returned no envelope");
-  return { ...envelope, results: buckets };
+  return { ...firstPage, results: buckets };
 }
 
 /** Grouped fallback read used to restore rows omitted by label grouping. */

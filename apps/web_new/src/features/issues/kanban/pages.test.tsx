@@ -208,6 +208,9 @@ describe("readLabelRecovery", () => {
       },
     });
     await expect(readLabelRecovery(client, "acme", input({ groupBy: null }))).rejects.toThrow("grouped board");
+    await expect(readLabelRecovery(client, "acme", input({ entity: { scope: "workspace" } }))).rejects.toThrow(
+      "project-scoped"
+    );
     const recovered = await readLabelRecovery(client, "acme", input());
     expect(recovered.results[STATE]?.results).toHaveLength(2);
     expect(recovered.results[STATE]?.total_results).toBe(2);
