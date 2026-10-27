@@ -1140,6 +1140,14 @@ BOUNCE_STRIPPED = (
     "member whose runner is registered here."
 )
 
+#: Override body that fails to parse on both template engines (Jinja2 on
+#: Django, minijinja strict on Rust), so the entry-run prompt build raises
+#: inside the post-save orchestration (PIDASHCONV-1571). ``default-posture``
+#: is an ``overridable`` coding-task section, so a workspace-level row wins
+#: over the registry default on both backends.
+BROKEN_OVERRIDE_SECTION = "default-posture"
+BROKEN_OVERRIDE_BODY = "{% if %}\n"
+
 
 def _seed_ticking_project(db_conn, user, workspace):
     """Project with ticking enabled, one ``In Progress`` state, member access.
@@ -1311,17 +1319,26 @@ def _terminal_turn(db_conn, turn_id):
     return None
 
 
-def _drive_create_issue(db_conn, tag, *, pod=False, runner=False, backlog=False):
+def _drive_create_issue(db_conn, tag, *, pod=False, runner=False, backlog=False,
+                        broken_prompt=False):
     """Seed, drive one ``create_issue`` tool call, wait for the terminal
     turn. Returns (user, project_id, state_id, pod_id, turn_id, requests),
     where requests are the provider stub's captured payloads (the
     follow-up request carries the tool result). ``backlog`` seeds one
-    Backlog state so the bounce has a target (PIDASHCONV-1444)."""
+    Backlog state so the bounce has a target (PIDASHCONV-1444).
+    ``broken_prompt`` seeds a workspace override whose body fails to parse,
+    so the entry-run prompt build raises inside the post-save orchestration
+    (PIDASHCONV-1571)."""
     user, workspace = _seed_member(db_conn, f"create-{tag}")
     project_id, state_id = _seed_ticking_project(db_conn, user, workspace)
     if backlog:
         seed_helpers.Seed(db_conn).state(
             project_id, workspace["id"], name="Backlog", group="backlog"
+        )
+        db_conn.commit()
+    if broken_prompt:
+        seed_helpers.Seed(db_conn).override(
+            str(workspace["id"]), BROKEN_OVERRIDE_SECTION, BROKEN_OVERRIDE_BODY
         )
         db_conn.commit()
     pod_id = _seed_pod(db_conn, workspace, project_id) if pod else None
@@ -1781,3 +1798,46 @@ def test_drift_untyped_midstream_failure_names_the_configured_model(db_conn):
     _assert_drift_failed_shape(
         db_conn, thread_id, turn_id, row, kinds, "model_invalid", _DRIFT_MODEL_DETAIL
     )
+
+
+def test_create_issue_prompt_failure_completes_turn(db_conn):
+    """Broken prompt template: post-insert orchestration fails, tool still briefs.
+
+    PIDASHCONV-1571, the Rust mirror of the Django oracle case: the
+    entry-run prompt build raises inside the post-save orchestration.
+    Django's receiver swallows every handler error, so the save stands and
+    the tool returns its normal brief — the Rust drive must commit the
+    failed run + armed ticker and complete the turn the same way instead
+    of failing closed on the finalized run.
+    """
+    user, project_id, state_id, _pod_id, _turn_id, requests = _drive_create_issue(
+        db_conn, "promptfail", pod=True, runner=True, broken_prompt=True
+    )
+    issue = _assert_tool_created_issue(db_conn, project_id, state_id, "promptfail")
+    _assert_ticker_armed(db_conn, issue, user["id"])
+    runs = _run_rows(db_conn, issue["id"])
+    assert len(runs) == 1, "the failed prompt build still commits its run row"
+    run = runs[0]
+    assert run["status"] == "failed"
+    assert run["error_code"] == "prompt_build_failed"
+    assert run["trigger"] == "state_transition"
+    assert run["error"].startswith("prompt build failed:")
+    result = _tool_result(requests)
+    assert result["created"] is True
+    assert str(result["id"]) == str(issue["id"])
+    assert result["state"] == TICKING_STATE
+    assert result["state_group"] == TICKING_GROUP
+    # The failed run's terminal effects post one "Run failed" comment. Its
+    # tail is the template engine's own render error, so only the
+    # engine-independent head is pinned here. The turn drive enqueues the
+    # effects task and the solo worker runs it after the turn job, so the
+    # comment arrives after the terminal turn — poll for it.
+    comments = wait_for(
+        lambda: _comment_rows(db_conn, issue["id"]) or None,
+        what="failed-run comment posted",
+    )
+    assert len(comments) == 1, "the failed run posts exactly one comment"
+    stripped = comments[0]["comment_stripped"]
+    assert stripped.startswith("Run failed.")
+    assert "prompt build failed" in stripped
+    assert "default-posture" in stripped

@@ -65,6 +65,14 @@ BOUNCE_STRIPPED = (
     "member whose runner is registered here."
 )
 
+#: Override body that fails to parse on both template engines (Jinja2 on
+#: Django, minijinja strict on Rust), so the entry-run prompt build raises
+#: inside the post-save orchestration (PIDASHCONV-1571). ``default-posture``
+#: is an ``overridable`` coding-task section, so a workspace-level row wins
+#: over the registry default on both backends.
+BROKEN_OVERRIDE_SECTION = "default-posture"
+BROKEN_OVERRIDE_BODY = "{% if %}\n"
+
 
 # --------------------------------------------------------------------------- #
 # Live oracle helpers
@@ -319,17 +327,26 @@ class _ScriptedStub:
 # --------------------------------------------------------------------------- #
 
 
-def _drive_create_issue(db_conn, broker_url, tag, *, pod=False, runner=False, backlog=False):
+def _drive_create_issue(db_conn, broker_url, tag, *, pod=False, runner=False, backlog=False,
+                        broken_prompt=False):
     """Seed, drive one ``create_issue`` tool call, wait for the terminal
     turn. Returns (user, project_id, state_id, pod_id, turn_id, requests),
     where requests are the provider stub's captured payloads (the
     follow-up request carries the tool result). ``backlog`` seeds one
-    Backlog state so the bounce has a target (PIDASHCONV-1444)."""
+    Backlog state so the bounce has a target (PIDASHCONV-1444).
+    ``broken_prompt`` seeds a workspace override whose body fails to parse,
+    so the entry-run prompt build raises inside the post-save orchestration
+    (PIDASHCONV-1571)."""
     user, workspace = _seed_member(db_conn, tag)
     project_id, state_id = _seed_ticking_project(db_conn, user, workspace)
     if backlog:
         seed_helpers.Seed(db_conn).state(
             project_id, workspace["id"], name="Backlog", group="backlog"
+        )
+        db_conn.commit()
+    if broken_prompt:
+        seed_helpers.Seed(db_conn).override(
+            str(workspace["id"]), BROKEN_OVERRIDE_SECTION, BROKEN_OVERRIDE_BODY
         )
         db_conn.commit()
     pod_id = _seed_pod(db_conn, workspace, project_id) if pod else None
@@ -527,3 +544,42 @@ def test_create_issue_bounce_reports_backlog_tool_result(db_conn, broker_url):
     assert len(comments) == 1, "the bounce posts exactly one comment"
     assert comments[0]["comment_stripped"] == BOUNCE_STRIPPED
     assert _run_rows(db_conn, issue["id"]) == []
+
+
+def test_create_issue_prompt_failure_completes_turn(db_conn, broker_url):
+    """Broken prompt template: post-insert orchestration fails, tool still briefs.
+
+    PIDASHCONV-1571: the entry-run prompt build raises inside
+    ``handle_issue_state_transition``. Django's ``post_save`` receiver
+    swallows every handler error (``orchestration/signals.py:98-107``), so
+    the save stands and the tool returns its normal brief: the issue
+    exists, the ticker stays armed, the entry run row commits as
+    failed/``prompt_build_failed``, and the turn completes.
+    """
+    user, project_id, state_id, _pod_id, _turn_id, requests = _drive_create_issue(
+        db_conn, broker_url, "promptfail", pod=True, runner=True, broken_prompt=True
+    )
+    issue = _assert_tool_created_issue(db_conn, project_id, state_id, "promptfail")
+    _assert_ticker_armed(db_conn, issue, user["id"])
+    runs = _run_rows(db_conn, issue["id"])
+    assert len(runs) == 1, "the failed prompt build still commits its run row"
+    run = runs[0]
+    assert run["status"] == "failed"
+    assert run["error_code"] == "prompt_build_failed"
+    assert run["trigger"] == "state_transition"
+    assert run["error"].startswith("prompt build failed:")
+    result = _tool_result(requests)
+    assert result["created"] is True
+    assert str(result["id"]) == str(issue["id"])
+    assert result["state"] == TICKING_STATE
+    assert result["state_group"] == TICKING_GROUP
+    # The failed run's terminal effects post one "Run failed" comment
+    # (``run_lifecycle._post_failure_comment``). Its tail is the template
+    # engine's own render error, so only the engine-independent head is
+    # pinned here.
+    comments = _comment_rows(db_conn, issue["id"])
+    assert len(comments) == 1, "the failed run posts exactly one comment"
+    stripped = comments[0]["comment_stripped"]
+    assert stripped.startswith("Run failed.")
+    assert "prompt build failed" in stripped
+    assert "default-posture" in stripped

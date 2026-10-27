@@ -1121,10 +1121,16 @@ pub async fn execute_create_issue<S: ToolStore>(
     // The drive may have bounced the issue to a Backlog target
     // (`scheduling.py:1111-1113` mutates the in-memory issue Django
     // briefs at `issues.py:284`): re-read so the brief reports the
-    // post-drive row. A miss (a concurrent delete narrowed the scoped
-    // read) falls back to the saved row — Django briefs its in-memory
-    // issue regardless (PIDASHCONV-1444).
-    let row = store.scoped_issue(deps, &row.id).await?.unwrap_or(row);
+    // post-drive row. Django briefs its in-memory issue regardless —
+    // it never re-reads — so any re-read failure, a miss (a
+    // concurrent delete narrowed the scoped read, PIDASHCONV-1444)
+    // or a storage error, falls back to the saved row
+    // (PIDASHCONV-1571).
+    let row = store
+        .scoped_issue(deps, &row.id)
+        .await
+        .unwrap_or(None)
+        .unwrap_or(row);
     let identifier = tool_identifier(&row.project_identifier, row.sequence_id);
     let link = row_link(deps, &row);
     store

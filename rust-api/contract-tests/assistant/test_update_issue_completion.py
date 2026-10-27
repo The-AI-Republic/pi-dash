@@ -58,6 +58,14 @@ BOUNCE_STRIPPED = (
     "member whose runner is registered here."
 )
 
+#: Override body that fails to parse on both template engines (Jinja2 on
+#: Django, minijinja strict on Rust), so the entry-run prompt build raises
+#: inside the post-save orchestration (PIDASHCONV-1571). ``default-posture``
+#: is an ``overridable`` coding-task section, so a workspace-level row wins
+#: over the registry default on both backends.
+BROKEN_OVERRIDE_SECTION = "default-posture"
+BROKEN_OVERRIDE_BODY = "{% if %}\n"
+
 
 def _base_url() -> str:
     return os.environ["BASE_URL"]
@@ -485,5 +493,127 @@ def test_update_issue_bounce_reports_backlog_tool_result(db_conn):
         assert len(comments) == 1, "the bounce posts exactly one comment"
         assert comments[0]["comment_stripped"] == BOUNCE_STRIPPED
         assert _run_rows(db_conn, issue_id) == []
+    finally:
+        stub.stop()
+
+
+def test_update_issue_prompt_failure_commits_move(db_conn):
+    """Prompt build failure mid-drive: the edit commits, the tool briefs.
+
+    PIDASHCONV-1571: a turn moves a Todo issue into a ticking state with a
+    pod and an eligible runner, but the entry-run prompt build raises
+    (broken workspace override). The prompt path finalizes the run FAILED
+    and returns ``render-failed`` with no exception
+    (``orchestration/service.py:820-832``), so Django commits the whole
+    atomic and the tool returns its normal brief — with
+    ``dispatched_run_id`` pointing at the failed run. Backend-agnostic
+    like the sibling tests.
+    """
+    seed_helpers.ensure_setup_done(db_conn)
+    chain = seed_helpers.issue_chain(db_conn, "1571upfail")
+    owner, ws, project = chain["owner"], chain["workspace"], chain["project"]
+    seed_helpers.workspace_member(db_conn, str(ws["id"]), str(owner["id"]), role=15)
+    seed_helpers.project_member(
+        db_conn, str(project["id"]), str(ws["id"]), str(owner["id"]), role=15
+    )
+    seed = seed_helpers.Seed(db_conn)
+    todo_id = seed.state(str(project["id"]), str(ws["id"]), name="Todo", group="unstarted")
+    progress_id = seed.state(
+        str(project["id"]), str(ws["id"]), name="In Progress", group="started"
+    )
+    issue_id = str(chain["issue"]["id"])
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "UPDATE projects SET agent_ticking_enabled=TRUE, "
+            "agent_default_interval_seconds=10800, "
+            "agent_review_default_interval_seconds=10800, "
+            "agent_test_default_interval_seconds=10800, "
+            "agent_default_max_ticks=20, default_agent_executor='local_runner' "
+            "WHERE id = %s",
+            (str(project["id"]),),
+        )
+        cur.execute(
+            "UPDATE issues SET state_id = %s WHERE id = %s",
+            (str(todo_id), issue_id),
+        )
+    pod_id = seed.pod(str(ws["id"]), str(project["id"]))
+    seed.runner(str(owner["id"]), str(ws["id"]), str(pod_id))
+    seed.override(str(ws["id"]), BROKEN_OVERRIDE_SECTION, BROKEN_OVERRIDE_BODY)
+    db_conn.commit()
+
+    stub = _ToolCallStub(issue_id, str(progress_id))
+    base = stub.start()
+    try:
+        cookie = login_session_cookie(_base_url(), owner["email"], PASSWORD)
+        client = api_client(_base_url(), cookie)
+        _configure_llm(client, base)
+
+        threads_base = f"/api/workspaces/{ws['slug']}/ai-assistant"
+        res = client.post(f"{threads_base}/threads/", json={"title": "move it"})
+        assert res.status_code == 201, res.text
+        thread_id = res.json()["id"]
+        res = client.post(
+            f"{threads_base}/threads/{thread_id}/messages/",
+            json={"content": "Please start work on the issue."},
+        )
+        assert res.status_code == 202, res.text
+        turn_id = res.json()["turn"]["id"]
+
+        row = wait_for(
+            lambda: _turn_row(db_conn, turn_id)
+            if _turn_row(db_conn, turn_id)["status"] == "completed"
+            else None,
+            what="tool-call turn completed",
+            timeout=180,
+        )
+        assert row["status"] == "completed"
+
+        assert str(_issue_state(db_conn, issue_id)) == str(progress_id), (
+            "the move commits although the prompt build failed"
+        )
+        tickers = _ticker_rows(db_conn, issue_id)
+        assert len(tickers) == 1, "the entered-bucket fire arms exactly one ticker"
+        ticker = tickers[0]
+        assert ticker["enabled"] is True
+        assert ticker["disarm_reason"] == ""
+        assert ticker["next_run_at"] is not None
+        assert str(ticker["created_by_id"]) == str(owner["id"])
+        runs = _run_rows(db_conn, issue_id)
+        assert len(runs) == 1, "the failed prompt build still commits its run row"
+        run = runs[0]
+        assert run["status"] == "failed"
+        assert run["error_code"] == "prompt_build_failed"
+        assert run["trigger"] == "state_transition"
+        assert run["phase_kind"] == "coding-task"
+        assert run["error"].startswith("prompt build failed:")
+        results = _tool_results(stub.payloads)
+        assert len(results) == 1, "the follow-up carries exactly one tool result"
+        result = results[0]
+        assert result["updated"] is True
+        assert str(result["id"]) == issue_id
+        assert result["changed"] == ["state"]
+        assert result["state"] == "In Progress"
+        assert result["state_group"] == "started"
+        assert result["dispatched_run_id"] == str(run["id"])
+
+        def _failed_comment():
+            comments = _comment_rows(db_conn, issue_id)
+            if len(comments) == 1:
+                return comments[0]
+            return None
+
+        # The failed run's terminal effects post one "Run failed" comment
+        # (its tail is the template engine's own render error, so only the
+        # engine-independent head is pinned). Django applies the effects
+        # inline; Rust enqueues them for its worker — poll for both.
+        comment = wait_for(
+            _failed_comment,
+            what="failed-run comment posted",
+            timeout=180,
+        )
+        stripped = comment["comment_stripped"]
+        assert stripped.startswith("Run failed.")
+        assert "prompt build failed" in stripped
+        assert "default-posture" in stripped
     finally:
         stub.stop()

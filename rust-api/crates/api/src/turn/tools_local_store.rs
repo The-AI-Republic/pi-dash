@@ -523,9 +523,14 @@ pub trait ToolStore {
     /// actor: the create path runs impersonated (`issues.py:256`,
     /// `with impersonate(user)`), as the update path does. Returns the
     /// drive outcome (`None` when the handler was skipped or its
-    /// failure swallowed); only a *lookup* storage failure propagates,
+    /// failure swallowed). A state-*lookup* storage failure propagates,
     /// exactly the `try` placement in `fire_state_transition` (the
-    /// `fire_after_save` precedent).
+    /// `fire_after_save` precedent), as does a post-commit dispatch
+    /// failure — Django dispatches from `on_commit`, outside the
+    /// signal `try`, so its tool fails there too (PIDASHCONV-1571).
+    /// A finalized run is a normal outcome, not an error: the
+    /// prompt-build failure path commits the FAILED run with no
+    /// exception, so the drive commits and drains its publish pair.
     async fn drive_create_transition(
         &self,
         issue_id: &Uuid,
@@ -1928,6 +1933,14 @@ impl ToolStore for PgToolStore {
         // the outbox unreachable — human moves dispatch here, after the
         // commit, so the runner read sees the rows).
         if let Some((cache, dispatches, deferred, terminal_effects)) = post_commit {
+            // A finalized run is a normal outcome, not an error: the
+            // prompt-build failure path (`service.py:820-832`)
+            // finalizes the run FAILED and returns `render-failed`
+            // with no exception — Django commits the whole atomic
+            // and the tool briefs normally (PIDASHCONV-1571).
+            for run_id in &terminal_effects {
+                drain_finalized_run(&self.pool, *run_id).await;
+            }
             for run_id in dispatches {
                 pidash_jobs::dispatch::dispatch_agent_run(&self.pool, &self.cloud, run_id, *now)
                     .await
@@ -1935,13 +1948,6 @@ impl ToolStore for PgToolStore {
             }
             for consume in &deferred {
                 pidash_services::dispatch::admission::consume_admission_token(&cache, consume);
-            }
-            if !terminal_effects.is_empty() {
-                // Python's transition never finalizes a run: fail closed.
-                return Err(StoreError::Transition(
-                    "turn transition finalized a run: unreachable, no finalization on this path"
-                        .to_owned(),
-                ));
             }
         }
         Ok((row, drive_outcome))
@@ -2263,9 +2269,25 @@ impl ToolStore for PgToolStore {
             }
             FireOutcome::Called(transition) => {
                 tx.commit().await?;
+                // A finalized run is a normal outcome, not an error:
+                // the prompt-build failure path (`service.py:820-832`)
+                // finalizes the run FAILED and returns `render-failed`
+                // with no exception — Django commits and the tool
+                // briefs normally. Drain each finalized run's publish
+                // pair the jobs-context way (the `oss_worker`
+                // precedent, PIDASHCONV-859): enqueue the
+                // terminal-effects task best-effort; the inline apply
+                // is skipped, the queued task covers the hooks
+                // idempotently (PIDASHCONV-1571).
+                for run_id in &terminal_effects {
+                    drain_finalized_run(pool, *run_id).await;
+                }
                 // Post-commit dispatch drain: human moves dispatch
                 // here — after the commit, so the runner read sees
-                // the rows (the `drive_transition` drain shape).
+                // the rows (the `drive_transition` drain shape). A
+                // dispatch failure propagates: Django dispatches
+                // from `on_commit`, outside the signal `try`, so its
+                // tool fails there too (the save stands either way).
                 for run_id in dispatches {
                     pidash_jobs::dispatch::dispatch_agent_run(pool, &self.cloud, run_id, *now)
                         .await
@@ -2273,13 +2295,6 @@ impl ToolStore for PgToolStore {
                 }
                 for consume in &deferred {
                     pidash_services::dispatch::admission::consume_admission_token(&cache, consume);
-                }
-                if !terminal_effects.is_empty() {
-                    // Python's transition never finalizes a run: fail closed.
-                    return Err(StoreError::Transition(
-                        "turn transition finalized a run: unreachable, no finalization on this path"
-                            .to_owned(),
-                    ));
                 }
                 Ok(Some(TransitionOutcome {
                     created_run_id: transition.created_run,
@@ -2682,6 +2697,34 @@ where
             }
         }
         Ok(out.outcome.proceed)
+    }
+}
+
+/// Drain one finalized run's publish pair from a turn drive
+/// (`agent_run_finalization.py:89-103`, the `oss_worker` jobs-context
+/// shape): enqueue the terminal-effects task best-effort — the emit's
+/// own `try` in Python — and skip the inline apply, which needs live
+/// runner seams the turn store does not hold. The queued task covers
+/// the hooks idempotently (PIDASHCONV-859); the reconciler closes any
+/// remaining window. Never fails the drive (PIDASHCONV-1571).
+async fn drain_finalized_run(pool: &PgPool, run_id: Uuid) {
+    use pidash_services::runner_runs::LifecycleEffect;
+    for effect in pidash_services::runner_runs::finalization::plan_publish_effects(run_id) {
+        match effect {
+            LifecycleEffect::PublishTerminalEffects { run_id } => {
+                let job = pidash_jobs::runner_runs::sweeps_chat::terminal_effects_job(&run_id);
+                if let Err(error) = pidash_jobs::queue::enqueue(pool, &job).await {
+                    tracing::error!(%error, "failed to publish terminal effects for run {run_id}");
+                }
+            }
+            LifecycleEffect::ApplyTerminalEffectsInline { run_id } => {
+                tracing::warn!(
+                    "skipping inline terminal effects for run {run_id}: no live RunnerRunsSeams \
+                     (PIDASHCONV-859); the queued effects task covers the hooks idempotently"
+                );
+            }
+            _ => {}
+        }
     }
 }
 
