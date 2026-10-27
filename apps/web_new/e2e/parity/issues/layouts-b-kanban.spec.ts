@@ -678,7 +678,10 @@ test(
     await test.step("project context opens the create modal", async () => {
       expect(await driver.kanbanHeaderCreateVisible(column)).toBe(true);
       await driver.kanbanHeaderCreate(column);
-      expect(await driver.kanbanCreateModalVisible()).toBe(true);
+      // NEWFRONT-967: the create dialog lazy-loads its chunk on first
+      // open (hundreds of modules under vite dev), so the modal cannot
+      // beat a single-shot read — poll like step 2 does below.
+      await expect.poll(() => driver.kanbanCreateModalVisible(), { timeout: 30_000 }).toBe(true);
       // NEWFRONT-177: the open dialog hides the app subtree behind inert
       // + aria-hidden; column reads must still resolve through it.
       const columns = await driver.kanbanColumns();
