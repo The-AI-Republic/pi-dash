@@ -72,7 +72,6 @@ use crate::tasks_cleanup::deletion::SOFT_DELETE_TASK;
 use pidash_db::app_pages::strip::ml_strip_tags;
 use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings, RunnerSettings};
 use pidash_db::orchestration::querysets::MEMBER_PROJECT_ISSUES_SQL;
-use pidash_db::orchestration::workpad::AgentUserCollisionError;
 use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
 use pidash_db::tx::Transaction;
 use pidash_services::assistant::markdown::to_safe_html;
@@ -83,6 +82,7 @@ use pidash_services::dispatch::tools as plan;
 use pidash_services::dispatch::{
     admission::AdmissionCache, consume_admission_token, DeferredConsume, LlmProfile,
 };
+use pidash_services::domain::identity::AgentUserCollisionError;
 use pidash_services::extensions::CloudAgentToolsetsSeam;
 use pidash_services::orchestration::clock::{ClockWrite, ProjectClockPolicy};
 use pidash_services::orchestration::creation::{

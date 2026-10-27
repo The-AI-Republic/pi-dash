@@ -405,6 +405,7 @@ pub struct RequestContext<'a> {
     pub app_base: String,
     pub space_base: String,
     pub pool: sqlx::PgPool,
+    pub orm: pidash_db::DatabaseConnection,
     pub session: SessionHandle,
     /// Shared Redis handle for the join-path cache invalidation
     /// (`invalidate_cache_directly`, PIDASHCONV-479). `None` when
@@ -438,6 +439,7 @@ impl<'a> RequestContext<'a> {
             .pools()
             .map(|pools| pools.primary().clone())
             .ok_or_else(server_error)?;
+        let orm = state.orm().cloned().ok_or_else(server_error)?;
         let settings = state.settings();
         let settings_view = host_settings(settings);
         let app_base = base_host(&settings_view, false, false, true);
@@ -456,6 +458,7 @@ impl<'a> RequestContext<'a> {
             app_base,
             space_base,
             pool,
+            orm,
             session: session
                 .map(|extension| extension.0)
                 .ok_or_else(server_error)?,
@@ -758,8 +761,8 @@ pub fn expires_at(value: &Value) -> Result<Option<chrono::DateTime<chrono::Utc>>
 /// mapper's `None` stands.
 pub fn token_fields(
     token_response: &Value,
-) -> Result<pidash_db::auth_oauth::queries::account::TokenFields, CallbackError> {
-    use pidash_db::auth_oauth::queries::account::TokenFields;
+) -> Result<pidash_services::domain::identity::account::TokenFields, CallbackError> {
+    use pidash_services::domain::identity::account::TokenFields;
     let mapped = google_token_data(token_response);
     Ok(TokenFields {
         access_token: mapped.access_token.as_str().map(str::to_owned),
@@ -996,137 +999,10 @@ pub fn get_display_name(email: &str) -> String {
         .collect()
 }
 
-/// `post_save` receiver `create_user_notification` (`user.py:307-320`):
-/// a preferences row on every non-bot create (all five flags true).
-/// Same insert as the email/magic/gitlab signup paths.
-async fn insert_notification_prefs(
-    pool: &sqlx::PgPool,
-    now: chrono::DateTime<chrono::Utc>,
-    user_id: &uuid::Uuid,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "INSERT INTO \"user_notification_preferences\" (\"id\", \"created_at\", \"updated_at\", \
-         \"created_by_id\", \"updated_by_id\", \"deleted_at\", \"user_id\", \"workspace_id\", \
-         \"project_id\", \"property_change\", \"state_change\", \"comment\", \"mention\", \
-         \"issue_completed\") \
-         VALUES ($1, $2, $2, NULL, NULL, NULL, $3, NULL, NULL, TRUE, TRUE, TRUE, TRUE, TRUE)",
-    )
-    .bind(uuid::Uuid::new_v4())
-    .bind(now)
-    .bind(user_id)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
-/// New-user row (`adapter/base.py:300-328` + `User.save()` side effects
-/// `user.py:167-187`): `User(email, username=uuid4hex)`,
-/// `set_password(uuid4hex)` + autoset/verified flags, names (each `""`
-/// when falsy), then the save backfills `display_name` and leaves
-/// `token` empty (`token_updated_at` is `None`, so no rotation).
-pub async fn create_user(
-    pool: &sqlx::PgPool,
-    email: &str,
-    first_name: &str,
-    last_name: &str,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Result<UserRow, CallbackError> {
-    let id = uuid::Uuid::new_v4();
-    let username = new_state();
-    let password = encode_password(&new_state());
-    let display_name = backfill_display_name(email);
-    let first_name = if first_name.is_empty() {
-        String::new()
-    } else {
-        first_name.to_owned()
-    };
-    let last_name = if last_name.is_empty() {
-        String::new()
-    } else {
-        last_name.to_owned()
-    };
-    sqlx::query(
-        "INSERT INTO \"users\" (\"id\", \"password\", \"last_login\", \"username\", \
-         \"mobile_number\", \"email\", \"display_name\", \"first_name\", \
-         \"last_name\", \"avatar\", \"avatar_asset_id\", \"cover_image\", \
-         \"cover_image_asset_id\", \"date_joined\", \"created_at\", \
-         \"updated_at\", \"last_location\", \"created_location\", \
-         \"is_superuser\", \"is_managed\", \"is_password_expired\", \
-         \"is_active\", \"is_staff\", \"is_email_verified\", \
-         \"is_password_autoset\", \"is_password_reset_required\", \"token\", \
-         \"last_active\", \"last_login_time\", \"last_logout_time\", \
-         \"last_login_ip\", \"last_logout_ip\", \"last_login_medium\", \
-         \"last_login_uagent\", \"token_updated_at\", \"is_bot\", \"bot_type\", \
-         \"user_timezone\", \"is_email_valid\", \"masked_at\") \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, \
-         $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, \
-         $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40)",
-    )
-    .bind(id)
-    .bind(password.clone())
-    .bind(None::<chrono::DateTime<chrono::Utc>>)
-    .bind(username)
-    .bind(None::<String>)
-    .bind(email)
-    .bind(display_name.clone())
-    .bind(first_name.clone())
-    .bind(last_name.clone())
-    .bind(String::new())
-    .bind(None::<uuid::Uuid>)
-    .bind(None::<String>)
-    .bind(None::<uuid::Uuid>)
-    .bind(now)
-    .bind(now)
-    .bind(now)
-    .bind(String::new())
-    .bind(String::new())
-    .bind(false)
-    .bind(false)
-    .bind(false)
-    .bind(true)
-    .bind(false)
-    .bind(true)
-    .bind(true)
-    .bind(false)
-    .bind(String::new())
-    .bind(now)
-    .bind(None::<chrono::DateTime<chrono::Utc>>)
-    .bind(None::<chrono::DateTime<chrono::Utc>>)
-    .bind(String::new())
-    .bind(String::new())
-    .bind("email")
-    .bind(String::new())
-    .bind(None::<chrono::DateTime<chrono::Utc>>)
-    .bind(false)
-    .bind(None::<String>)
-    .bind("UTC")
-    .bind(false)
-    .bind(None::<chrono::DateTime<chrono::Utc>>)
-    .execute(pool)
-    .await
-    .map_err(|_| CallbackError::Internal)?;
-    // `post_save` fires on the first `save()` (`user.py:307`), before the
-    // profile/avatar writes the caller runs next — same as email/magic.
-    insert_notification_prefs(pool, now, &id)
-        .await
-        .map_err(|_| CallbackError::Internal)?;
-    Ok(UserRow {
-        id,
-        password,
-        email: Some(email.to_owned()),
-        is_active: true,
-        is_superuser: false,
-        first_name,
-        last_name,
-        display_name,
-        avatar: String::new(),
-        avatar_asset_id: None,
-    })
-}
-
-// ---------------------------------------------------------------------------
-// Profile, sync, stamps, task fan-out.
-// ---------------------------------------------------------------------------
+// NOTE: the new-user INSERT, the `create_user_notification` post_save
+// insert and the signup profile row moved to
+// `domain::identity::create_user` (PIDASHCONV-1525). The signup arm
+// below calls it directly.
 
 /// `get_random_color` (`utils/color.py:9-14`): `"#"` + six hexdigits.
 /// Python draws from `string.hexdigits` (mixed case); the port draws from
@@ -1136,9 +1012,6 @@ pub fn random_color() -> String {
     format!("#{}", &new_state()[..6])
 }
 
-/// The `Profile.objects.get_or_create(user=user)` read half: the
-/// onboarding flag and last-workspace pointer `get_redirection_path`
-/// branches on. `None` when the row is missing (the caller creates it).
 pub struct ProfileState {
     pub is_onboarded: bool,
     pub last_workspace_id: Option<uuid::Uuid>,
@@ -1154,89 +1027,13 @@ pub async fn get_or_create_profile(
     user_id: uuid::Uuid,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<ProfileState, CallbackError> {
-    let row: Option<(bool, Option<uuid::Uuid>)> = sqlx::query_as(
-        "SELECT \"is_onboarded\", \"last_workspace_id\" FROM \"profiles\" WHERE \"user_id\" = $1 LIMIT 1",
-    )
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| CallbackError::Internal)?;
-    if let Some((is_onboarded, last_workspace_id)) = row {
-        return Ok(ProfileState {
-            is_onboarded,
-            last_workspace_id,
-        });
-    }
-    let onboarding = serde_json::json!({
-        "profile_complete": false,
-        "workspace_create": false,
-        "workspace_invite": false,
-        "workspace_join": false,
-    });
-    let mobile_onboarding = serde_json::json!({
-        "profile_complete": false,
-        "workspace_create": false,
-        "workspace_join": false,
-    });
-    let product_tour = serde_json::json!({
-        "work_items": false,
-        "cycles": false,
-        "modules": false,
-        "intake": false,
-        "pages": false,
-    });
-    sqlx::query(
-        "INSERT INTO \"profiles\" (\"id\", \"created_at\", \"updated_at\", \
-         \"user_id\", \"theme\", \"is_app_rail_docked\", \"is_tour_completed\", \
-         \"onboarding_step\", \"use_case\", \"role\", \"is_onboarded\", \
-         \"last_workspace_id\", \"billing_address_country\", \
-         \"billing_address\", \"has_billing_address\", \"company_name\", \
-         \"notification_view_mode\", \"is_smooth_cursor_enabled\", \
-         \"is_mobile_onboarded\", \"mobile_onboarding_step\", \
-         \"mobile_timezone_auto_set\", \"language\", \"start_of_the_week\", \
-         \"goals\", \"background_color\", \
-         \"is_navigation_tour_completed\", \"has_marketing_email_consent\", \
-         \"is_subscribed_to_changelog\", \"product_tour\", \"settings\") \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, \
-         $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, \
-         $29, $30)",
-    )
-    .bind(uuid::Uuid::new_v4())
-    .bind(now)
-    .bind(now)
-    .bind(user_id)
-    .bind(serde_json::json!({}))
-    .bind(true)
-    .bind(false)
-    .bind(onboarding)
-    .bind(None::<String>)
-    .bind(None::<String>)
-    .bind(false)
-    .bind(None::<uuid::Uuid>)
-    .bind("INDIA")
-    .bind(None::<serde_json::Value>)
-    .bind(false)
-    .bind(String::new())
-    .bind("full")
-    .bind(false)
-    .bind(false)
-    .bind(mobile_onboarding)
-    .bind(false)
-    .bind("en")
-    .bind(0i16)
-    .bind(serde_json::json!({}))
-    .bind(random_color())
-    .bind(false)
-    .bind(false)
-    .bind(false)
-    .bind(product_tour)
-    .bind(serde_json::json!({}))
-    .execute(pool)
-    .await
-    .map_err(|_| CallbackError::Internal)?;
+    use pidash_services::domain::identity;
+    let path = identity::get_or_create_profile(pool, user_id, now, &random_color())
+        .await
+        .map_err(|_| CallbackError::Internal)?;
     Ok(ProfileState {
-        is_onboarded: false,
-        last_workspace_id: None,
+        is_onboarded: path.is_onboarded,
+        last_workspace_id: path.last_workspace_id,
     })
 }
 
@@ -1286,23 +1083,21 @@ pub async fn sync_user_data(
     max_bytes: u64,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), CallbackError> {
-    sqlx::query(
-        "UPDATE \"users\" SET \"first_name\" = $1, \"last_name\" = $2, \
-         \"display_name\" = $3 WHERE \"id\" = $4",
+    use pidash_services::domain::identity;
+    identity::sync_user_data(
+        pool,
+        user.id,
+        &identity::SyncUpdate {
+            first_name,
+            last_name,
+            display_name: &get_display_name(email),
+            avatar: None,
+            avatar_asset_id: None,
+            is_staff: None,
+            touch_updated_at: false,
+            now,
+        },
     )
-    .bind(if first_name.is_empty() {
-        String::new()
-    } else {
-        first_name.to_owned()
-    })
-    .bind(if last_name.is_empty() {
-        String::new()
-    } else {
-        last_name.to_owned()
-    })
-    .bind(get_display_name(email))
-    .bind(user.id)
-    .execute(pool)
     .await
     .map_err(|_| CallbackError::Internal)?;
     delete_old_avatar(
@@ -1322,18 +1117,12 @@ pub async fn sync_user_data(
     .await
     {
         Some(asset_id) => {
-            sqlx::query("UPDATE \"users\" SET \"avatar_asset_id\" = $1 WHERE \"id\" = $2")
-                .bind(asset_id)
-                .bind(user.id)
-                .execute(pool)
+            identity::stamp_avatar_asset(pool, user.id, asset_id)
                 .await
                 .map_err(|_| CallbackError::Internal)?;
         }
         None => {
-            sqlx::query("UPDATE \"users\" SET \"avatar\" = $1 WHERE \"id\" = $2")
-                .bind(avatar_url)
-                .bind(user.id)
-                .execute(pool)
+            identity::stamp_avatar_url(pool, user.id, avatar_url)
                 .await
                 .map_err(|_| CallbackError::Internal)?;
         }
@@ -1747,23 +1536,23 @@ pub async fn save_user_data(
         .await;
     }
     let token = format!("{}{}", new_state(), new_state());
-    sqlx::query(
-        "UPDATE \"users\" SET \"last_login_medium\" = $1, \"last_active\" = $2, \
-         \"last_login_time\" = $3, \"last_login_ip\" = $4, \
-         \"last_login_uagent\" = $5, \"token_updated_at\" = $6, \
-         \"is_active\" = TRUE, \"token\" = $7, \"updated_at\" = $2, \
-         \"display_name\" = CASE WHEN \"display_name\" = '' THEN split_part(\"email\", '@', 1) ELSE \"display_name\" END, \
-         \"is_staff\" = \"is_staff\" OR \"is_superuser\" WHERE \"id\" = $8",
+    use pidash_services::domain::identity;
+    identity::save_user_data(
+        pool,
+        user.id,
+        &identity::LoginStamps {
+            medium: Some(PROVIDER),
+            login_ip: ip,
+            login_uagent: user_agent,
+            avatar: None,
+            avatar_asset_id: None,
+            display_name: Some(identity::DisplayNameUpdate::BackfillCase),
+            is_staff: Some(identity::StaffSync::OrSuperuser),
+            touch_updated_at: true,
+            rotated_token: &token,
+            now,
+        },
     )
-    .bind(PROVIDER)
-    .bind(now)
-    .bind(now)
-    .bind(ip)
-    .bind(user_agent)
-    .bind(now)
-    .bind(token)
-    .bind(user.id)
-    .execute(pool)
     .await
     .map_err(|_| CallbackError::Internal)?;
     Ok(())
@@ -2102,12 +1891,12 @@ pub async fn upsert_account(
     pool: &sqlx::PgPool,
     user_id: uuid::Uuid,
     user_data: &Value,
-    tokens: &pidash_db::auth_oauth::queries::account::TokenFields,
+    tokens: &pidash_services::domain::identity::account::TokenFields,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), CallbackError> {
-    use pidash_db::auth_oauth::queries::account::{create_update_account, ExistingAccount};
+    use pidash_services::domain::identity::account::{create_update_account, ExistingAccount};
     let provider_id =
-        pidash_db::auth_oauth::queries::account::lookup_provider_id(user_data).unwrap_or("");
+        pidash_services::domain::identity::account::lookup_provider_id(user_data).unwrap_or("");
     let prior: Option<(chrono::DateTime<chrono::Utc>, Value)> = if provider_id.is_empty() {
         None
     } else {
@@ -2300,12 +2089,56 @@ pub async fn authenticate_google(
         Some(row) => row,
         None => {
             check_signup(&ctx.pool, secret, &email).await?;
-            let mut row = create_user(&ctx.pool, &email, first_name, last_name, now).await?;
+            // `User(...)` + first `save()` with the `post_save`
+            // preferences row and the adapter profile row, all inside
+            // `domain::identity::create_user`.
+            use pidash_services::domain::identity;
+            let password = encode_password(&new_state());
+            let display_name = backfill_display_name(&email);
+            let id = identity::create_user(
+                &ctx.orm,
+                &identity::NewUser {
+                    id: None,
+                    email: &email,
+                    username: new_state(),
+                    password_hash: password.clone(),
+                    first_name: if first_name.is_empty() {
+                        ""
+                    } else {
+                        first_name
+                    },
+                    last_name: if last_name.is_empty() { "" } else { last_name },
+                    display_name: display_name.clone(),
+                    avatar: "",
+                    is_email_verified: true,
+                    is_password_autoset: true,
+                    last_active: Some(now),
+                    login_ip: Some(""),
+                    login_uagent: Some(""),
+                    is_bot: false,
+                    now,
+                    profile: Some(identity::NewProfile {
+                        company_name: "",
+                        background_color: random_color(),
+                    }),
+                },
+            )
+            .await
+            .map_err(|_| CallbackError::Internal)?;
+            let mut row = UserRow {
+                id,
+                password,
+                email: Some(email.clone()),
+                is_active: true,
+                is_superuser: false,
+                first_name: first_name.to_owned(),
+                last_name: last_name.to_owned(),
+                display_name,
+                avatar: String::new(),
+                avatar_asset_id: None,
+            };
             if !avatar_url.is_empty() {
-                sqlx::query("UPDATE \"users\" SET \"avatar\" = $1 WHERE \"id\" = $2")
-                    .bind(avatar_url)
-                    .bind(row.id)
-                    .execute(&ctx.pool)
+                identity::stamp_avatar_url(&ctx.pool, row.id, avatar_url)
                     .await
                     .map_err(|_| CallbackError::Internal)?;
                 row.avatar = avatar_url.to_owned();
@@ -2325,16 +2158,12 @@ pub async fn authenticate_google(
                 )
                 .await
                 {
-                    sqlx::query("UPDATE \"users\" SET \"avatar_asset_id\" = $1 WHERE \"id\" = $2")
-                        .bind(asset_id)
-                        .bind(row.id)
-                        .execute(&ctx.pool)
+                    identity::stamp_avatar_asset(&ctx.pool, row.id, asset_id)
                         .await
                         .map_err(|_| CallbackError::Internal)?;
                     row.avatar_asset_id = Some(asset_id);
                 }
             }
-            get_or_create_profile(&ctx.pool, row.id, now).await?;
             if !is_signup && google_sync_enabled(&ctx.pool, secret).await? {
                 sync_user_data(
                     &client,
@@ -2967,13 +2796,39 @@ mod tests {
     /// `https://oauth2.googleapis.com` URLs on both backends).
     #[tokio::test]
     async fn google_kernel_signup_creates_notification_prefs() {
+        use pidash_services::domain::identity;
         let Some(pool) = kernel_pool().await else {
             return;
         };
+        let orm = pidash_db::sea_orm_connection(&pool);
         let tag = uuid::Uuid::new_v4().simple().to_string()[..8].to_owned();
         let email = format!("go1528-{tag}@example.test");
         let now = chrono::Utc::now();
-        let outcome = create_user(&pool, &email, "Kernel", "User", now).await;
+        let outcome = identity::create_user(
+            &orm,
+            &identity::NewUser {
+                id: None,
+                email: &email,
+                username: new_state(),
+                password_hash: encode_password(&new_state()),
+                first_name: "Kernel",
+                last_name: "User",
+                display_name: backfill_display_name(&email),
+                avatar: "",
+                is_email_verified: true,
+                is_password_autoset: true,
+                last_active: Some(now),
+                login_ip: Some(""),
+                login_uagent: Some(""),
+                is_bot: false,
+                now,
+                profile: Some(identity::NewProfile {
+                    company_name: "",
+                    background_color: random_color(),
+                }),
+            },
+        )
+        .await;
 
         // Observe everything before cleanup so a failure still sweeps.
         let user_id: Option<uuid::Uuid> =
@@ -3010,9 +2865,8 @@ mod tests {
         };
         cleanup_kernel_world(&pool, &email, &[]).await;
 
-        let row = outcome.expect("create_user succeeds");
-        assert_eq!(row.email.as_deref(), Some(email.as_str()));
-        user_id.expect("user row created");
+        let id = outcome.expect("create_user succeeds");
+        assert_eq!(user_id, Some(id), "returned id matches the row");
         assert_eq!(flags.len(), 1, "exactly one prefs row");
         let (property_change, state_change, comment, mention, issue_completed) = flags[0];
         assert!(property_change, "property_change defaults true");

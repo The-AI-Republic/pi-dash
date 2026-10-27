@@ -55,6 +55,7 @@ pub mod activity;
 pub mod assistant;
 pub mod ctx;
 pub mod error;
+pub mod identity;
 pub mod tokens;
 pub mod transition;
 pub mod txn;

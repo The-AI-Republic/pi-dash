@@ -73,6 +73,7 @@ use pidash_services::auth_session::magic::{
     strip_magic_prefix, token_from_u32, verify_decision, verify_error, InitGate, InitiateOutcome,
     VerifyOutcome, TOKEN_REJECTION_LIMIT,
 };
+use pidash_services::domain::identity;
 
 /// Unwrap a `Result`, answering the uncaught-exception 500 on any error
 /// (every fallible I/O on these paths propagates in Python).
@@ -959,106 +960,15 @@ fn autoset_password() -> (String, String) {
     (hash, raw)
 }
 
-/// New-user INSERT (`adapter/base.py:301-342` + `User.save()` side
-/// effects `user.py:167-187`): every NOT NULL column is supplied (Django
-/// emits no DB-level defaults); the password hash lands before the insert
-/// and `token` stays `""` (`token_updated_at` NULL → no rotation).
-#[allow(clippy::too_many_arguments)]
-async fn insert_user(
-    pool: &sqlx::PgPool,
-    now: chrono::DateTime<chrono::Utc>,
-    email: &str,
-    username: &str,
-    password_hash: &str,
-    display_name: &str,
-    login_ip: Option<&str>,
-    login_uagent: Option<&str>,
-) -> Result<uuid::Uuid, sqlx::Error> {
-    let id = uuid::Uuid::new_v4();
-    sqlx::query(
-        "INSERT INTO \"users\" (\"id\", \"password\", \"last_login\", \"username\", \"mobile_number\", \
-         \"email\", \"display_name\", \"first_name\", \"last_name\", \"avatar\", \"avatar_asset_id\", \
-         \"cover_image\", \"cover_image_asset_id\", \"date_joined\", \"created_at\", \"updated_at\", \
-         \"last_location\", \"created_location\", \"is_superuser\", \"is_managed\", \
-         \"is_password_expired\", \"is_active\", \"is_staff\", \"is_email_verified\", \
-         \"is_password_autoset\", \"is_password_reset_required\", \"token\", \"last_active\", \
-         \"last_login_time\", \"last_logout_time\", \"last_login_ip\", \"last_logout_ip\", \
-         \"last_login_medium\", \"last_login_uagent\", \"token_updated_at\", \"is_bot\", \"bot_type\", \
-         \"user_timezone\", \"is_email_valid\", \"masked_at\") \
-         VALUES ($1, $2, NULL, $3, NULL, $4, $5, '', '', '', NULL, NULL, NULL, $6, $6, $6, \
-         '', '', FALSE, FALSE, FALSE, TRUE, FALSE, TRUE, TRUE, FALSE, '', $6, NULL, NULL, $7, '', \
-         'email', $8, NULL, FALSE, NULL, 'UTC', FALSE, NULL)",
-    )
-    .bind(id)
-    .bind(password_hash)
-    .bind(username)
-    .bind(email)
-    .bind(display_name)
-    .bind(now)
-    .bind(login_ip)
-    .bind(login_uagent)
-    .execute(pool)
-    .await?;
-    Ok(id)
-}
+// NOTE: the new-user INSERT, the `create_user_notification` post_save
+// insert and the signup profile row moved to
+// `domain::identity::create_user` (PIDASHCONV-1525), which runs the
+// entity insert (the `after_save` hook fires) plus the service-level
+// profile row. The signup arm below calls it directly.
 
-/// `post_save` receiver `create_user_notification` (`user.py:327-340`):
-/// a preferences row on every non-bot create.
-async fn insert_notification_prefs(
-    pool: &sqlx::PgPool,
-    now: chrono::DateTime<chrono::Utc>,
-    user_id: &uuid::Uuid,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "INSERT INTO \"user_notification_preferences\" (\"id\", \"created_at\", \"updated_at\", \
-         \"created_by_id\", \"updated_by_id\", \"deleted_at\", \"user_id\", \"workspace_id\", \
-         \"project_id\", \"property_change\", \"state_change\", \"comment\", \"mention\", \
-         \"issue_completed\") \
-         VALUES ($1, $2, $2, NULL, NULL, NULL, $3, NULL, NULL, TRUE, TRUE, TRUE, TRUE, TRUE)",
-    )
-    .bind(uuid::Uuid::new_v4())
-    .bind(now)
-    .bind(user_id)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
-/// Profile row (`Profile.objects.create(user=user)`, `base.py:342`) with
-/// the model defaults (`user.py:198-288` + `color.py:9-14`).
-async fn insert_profile(
-    pool: &sqlx::PgPool,
-    now: chrono::DateTime<chrono::Utc>,
-    user_id: &uuid::Uuid,
-) -> Result<(), sqlx::Error> {
-    // `get_random_color` (`utils/color.py:9`): `#` + six hex digits.
-    let color = format!("#{}", hex_encode(&uuid::Uuid::new_v4().into_bytes()[..3]));
-    sqlx::query(
-        "INSERT INTO \"profiles\" (\"id\", \"created_at\", \"updated_at\", \
-         \"user_id\", \"theme\", \"is_app_rail_docked\", \
-         \"is_tour_completed\", \"onboarding_step\", \"use_case\", \"role\", \"is_onboarded\", \
-         \"last_workspace_id\", \"billing_address_country\", \"billing_address\", \
-         \"has_billing_address\", \"company_name\", \"notification_view_mode\", \
-         \"is_smooth_cursor_enabled\", \"is_mobile_onboarded\", \"mobile_onboarding_step\", \
-         \"mobile_timezone_auto_set\", \"language\", \"start_of_the_week\", \"goals\", \
-         \"background_color\", \"is_navigation_tour_completed\", \"has_marketing_email_consent\", \
-         \"is_subscribed_to_changelog\", \"product_tour\", \"settings\") \
-         VALUES ($1, $2, $2, $3, '{}', TRUE, FALSE, \
-         '{\"profile_complete\": false, \"workspace_create\": false, \
-           \"workspace_invite\": false, \"workspace_join\": false}', \
-         NULL, NULL, FALSE, NULL, 'INDIA', NULL, FALSE, '', 'full', FALSE, FALSE, \
-         '{\"profile_complete\": false, \"workspace_create\": false, \"workspace_join\": false}', \
-         FALSE, 'en', 0, '{}', $4, FALSE, FALSE, FALSE, \
-         '{\"work_items\": false, \"cycles\": false, \"modules\": false, \"intake\": false, \
-           \"pages\": false}', '{}')",
-    )
-    .bind(uuid::Uuid::new_v4())
-    .bind(now)
-    .bind(user_id)
-    .bind(color)
-    .execute(pool)
-    .await?;
-    Ok(())
+/// `get_random_color` (`utils/color.py:9`): `#` + six hex digits.
+fn profile_background_color() -> String {
+    format!("#{}", hex_encode(&uuid::Uuid::new_v4().into_bytes()[..3]))
 }
 
 /// `save_user_data` (`adapter/base.py:220-234`): the login stamp UPDATE
@@ -1089,21 +999,25 @@ async fn save_user_data(
         uuid::Uuid::new_v4().simple(),
         uuid::Uuid::new_v4().simple()
     );
-    let updated: Result<_, sqlx::Error> = sqlx::query(
-        "UPDATE \"users\" SET \"last_login_medium\" = 'magic-code', \"last_active\" = $1, \
-         \"last_login_time\" = $1, \"last_login_ip\" = $2, \"last_login_uagent\" = $3, \
-         \"token_updated_at\" = $1, \"token\" = $4, \"is_active\" = TRUE, \"updated_at\" = $1 \
-         WHERE \"users\".\"id\" = $5",
+    let updated = identity::save_user_data(
+        pool,
+        user.id,
+        &identity::LoginStamps {
+            medium: Some("magic-code"),
+            login_ip,
+            login_uagent,
+            avatar: None,
+            avatar_asset_id: None,
+            display_name: None,
+            is_staff: None,
+            touch_updated_at: true,
+            rotated_token: &rotated,
+            now,
+        },
     )
-    .bind(now)
-    .bind(login_ip)
-    .bind(login_uagent)
-    .bind(rotated)
-    .bind(user.id)
-    .execute(pool)
     .await;
     match updated {
-        Ok(_) => Ok(()),
+        Ok(()) => Ok(()),
         Err(_) => Err(server_error()),
     }
 }
@@ -1114,26 +1028,17 @@ async fn save_user_data(
 
 /// `Profile.objects.get_or_create(user=user)`: the live row's
 /// `is_onboarded` + `last_workspace_id`, creating the default row first
-/// when missing.
+/// when missing. `Profile` extends `TimeAuditModel` (`user.py:200`), not
+/// the full `BaseModel`: no `deleted_at` soft-delete column, so the
+/// domain lookup carries no filter either.
 async fn get_or_create_profile(
     pool: &sqlx::PgPool,
     now: chrono::DateTime<chrono::Utc>,
     user_id: &uuid::Uuid,
 ) -> Result<(bool, Option<uuid::Uuid>), sqlx::Error> {
-    // `Profile` extends `TimeAuditModel` (`user.py:200`), not the full
-    // `BaseModel`: no `deleted_at` soft-delete column, so no filter here.
-    let row: Option<(bool, Option<uuid::Uuid>)> = sqlx::query_as(
-        "SELECT \"is_onboarded\", \"last_workspace_id\" FROM \"profiles\" \
-         WHERE \"user_id\" = $1 LIMIT 1",
-    )
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await?;
-    if let Some(found) = row {
-        return Ok(found);
-    }
-    insert_profile(pool, now, user_id).await?;
-    Ok((false, None))
+    let path =
+        identity::get_or_create_profile(pool, *user_id, now, &profile_background_color()).await?;
+    Ok((path.is_onboarded, path.last_workspace_id))
 }
 
 /// `get_redirection_path` (`utils/redirection_path.py:8-46`): the pure
@@ -1960,22 +1865,40 @@ async fn sign(
                 .next()
                 .unwrap_or(&form.email)
                 .to_owned();
-            let id = insert_user(
-                &pool,
-                now,
-                &form.email,
-                &username,
-                &password_hash,
-                &display_name,
-                login_ip.as_deref(),
-                headers
-                    .get(header::USER_AGENT)
-                    .and_then(|v| v.to_str().ok()),
+            // `User(...)` + first `save()` with the `post_save`
+            // preferences row and the adapter profile row, all inside
+            // `domain::identity::create_user`.
+            let Some(orm) = state.orm() else {
+                return server_error();
+            };
+            let id = identity::create_user(
+                orm,
+                &identity::NewUser {
+                    id: None,
+                    email: &form.email,
+                    username,
+                    password_hash: password_hash.clone(),
+                    first_name: "",
+                    last_name: "",
+                    display_name,
+                    avatar: "",
+                    is_email_verified: true,
+                    is_password_autoset: true,
+                    last_active: Some(now),
+                    login_ip: login_ip.as_deref(),
+                    login_uagent: headers
+                        .get(header::USER_AGENT)
+                        .and_then(|v| v.to_str().ok()),
+                    is_bot: false,
+                    now,
+                    profile: Some(identity::NewProfile {
+                        company_name: "",
+                        background_color: profile_background_color(),
+                    }),
+                },
             )
             .await;
             let id = or_500!(id);
-            or_500!(insert_notification_prefs(&pool, now, &id).await);
-            or_500!(insert_profile(&pool, now, &id).await);
             DbUser {
                 id,
                 email: form.email.clone(),

@@ -82,6 +82,7 @@ use uuid::Uuid;
 use pidash_auth::csrf as csrf_kernel;
 use pidash_auth::session as session_kernel;
 use pidash_auth::signing::{Signer, SESSION_SIGNING_SALT};
+use pidash_services::domain::identity;
 use pidash_types::license::serializers_core::{
     instance_admin_me_to_representation, instance_admin_to_representation, AdminMeRow,
     InstanceAdminRow, LiteUserRow,
@@ -1883,109 +1884,10 @@ async fn is_instance_admin(
     Ok(row.is_some())
 }
 
-/// `User.objects.create(...)` (`admin.py:210-217`) + `User.save()` side
-/// effects (`user.py:169-187`): every NOT NULL column is supplied (Django
-/// emits no DB-level defaults). `is_active` is already TRUE (model
-/// default); `token` stays `""` (`token_updated_at` NULL → no rotation).
-#[allow(clippy::too_many_arguments)]
-async fn insert_signup_user(
-    pool: &PgPool,
-    now: DateTime<Utc>,
-    email: &str,
-    first_name: &str,
-    last_name: &str,
-    password_hash: &str,
-) -> Result<Uuid, Denial> {
-    let id = Uuid::new_v4();
-    let username = Uuid::new_v4().simple().to_string();
-    sqlx::query(
-        "INSERT INTO \"users\" (\"id\", \"password\", \"last_login\", \"username\", \"mobile_number\", \
-         \"email\", \"display_name\", \"first_name\", \"last_name\", \"avatar\", \"avatar_asset_id\", \
-         \"cover_image\", \"cover_image_asset_id\", \"date_joined\", \"created_at\", \"updated_at\", \
-         \"last_location\", \"created_location\", \"is_superuser\", \"is_managed\", \
-         \"is_password_expired\", \"is_active\", \"is_staff\", \"is_email_verified\", \
-         \"is_password_autoset\", \"is_password_reset_required\", \"token\", \"last_active\", \
-         \"last_login_time\", \"last_logout_time\", \"last_login_ip\", \"last_logout_ip\", \
-         \"last_login_medium\", \"last_login_uagent\", \"token_updated_at\", \"is_bot\", \"bot_type\", \
-         \"user_timezone\", \"is_email_valid\", \"masked_at\") \
-         VALUES ($1, $2, NULL, $3, NULL, $4, $5, $6, $7, '', NULL, NULL, NULL, $8, $8, $8, \
-         '', '', FALSE, FALSE, FALSE, TRUE, FALSE, FALSE, FALSE, FALSE, '', $8, NULL, NULL, '', '', \
-         'email', '', NULL, FALSE, NULL, 'UTC', FALSE, NULL)",
-    )
-    .bind(id)
-    .bind(password_hash)
-    .bind(&username)
-    .bind(email)
-    .bind(display_name_for(email))
-    .bind(first_name)
-    .bind(last_name)
-    .bind(now)
-    .execute(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(id)
-}
-
-/// `post_save` receiver `create_user_notification` (`user.py:306-320`): a
-/// preferences row on every non-bot create (anonymous save → NULL audit).
-async fn insert_notification_prefs(
-    pool: &PgPool,
-    now: DateTime<Utc>,
-    user_id: &Uuid,
-) -> Result<(), Denial> {
-    sqlx::query(
-        "INSERT INTO \"user_notification_preferences\" (\"id\", \"created_at\", \"updated_at\", \
-         \"created_by_id\", \"updated_by_id\", \"deleted_at\", \"user_id\", \"workspace_id\", \
-         \"project_id\", \"property_change\", \"state_change\", \"comment\", \"mention\", \
-         \"issue_completed\") \
-         VALUES ($1, $2, $2, NULL, NULL, NULL, $3, NULL, NULL, TRUE, TRUE, TRUE, TRUE, TRUE)",
-    )
-    .bind(Uuid::new_v4())
-    .bind(now)
-    .bind(user_id)
-    .execute(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(())
-}
-
-/// `Profile.objects.create(user, company_name)` (`admin.py:218`) with the
-/// model defaults (`user.py:200-278` + `color.py:9-14`).
-async fn insert_signup_profile(
-    pool: &PgPool,
-    now: DateTime<Utc>,
-    user_id: &Uuid,
-    company_name: &str,
-) -> Result<(), Denial> {
-    sqlx::query(
-        "INSERT INTO \"profiles\" (\"id\", \"created_at\", \"updated_at\", \
-         \"user_id\", \"theme\", \"is_app_rail_docked\", \
-         \"is_tour_completed\", \"onboarding_step\", \"use_case\", \"role\", \"is_onboarded\", \
-         \"last_workspace_id\", \"billing_address_country\", \"billing_address\", \
-         \"has_billing_address\", \"company_name\", \"notification_view_mode\", \
-         \"is_smooth_cursor_enabled\", \"is_mobile_onboarded\", \"mobile_onboarding_step\", \
-         \"mobile_timezone_auto_set\", \"language\", \"start_of_the_week\", \"goals\", \
-         \"background_color\", \"is_navigation_tour_completed\", \"has_marketing_email_consent\", \
-         \"is_subscribed_to_changelog\", \"product_tour\", \"settings\") \
-         VALUES ($1, $2, $2, $3, '{}', TRUE, FALSE, \
-         '{\"profile_complete\": false, \"workspace_create\": false, \
-           \"workspace_invite\": false, \"workspace_join\": false}', \
-         NULL, NULL, FALSE, NULL, 'INDIA', NULL, FALSE, $4, 'full', FALSE, FALSE, \
-         '{\"profile_complete\": false, \"workspace_create\": false, \"workspace_join\": false}', \
-         FALSE, 'en', 0, '{}', $5, FALSE, FALSE, FALSE, \
-         '{\"work_items\": false, \"cycles\": false, \"modules\": false, \"intake\": false, \
-           \"pages\": false}', '{}')",
-    )
-    .bind(Uuid::new_v4())
-    .bind(now)
-    .bind(user_id)
-    .bind(company_name)
-    .bind(background_color())
-    .execute(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(())
-}
+// NOTE: the signup user INSERT, the `create_user_notification` post_save
+// insert and the `Profile.objects.create(user, company_name)` row moved to
+// `domain::identity::create_user` (PIDASHCONV-1525). The signup arm above
+// calls it directly.
 
 /// The stamp `save()` (`admin.py:220-226,347-353`): login stamps plus the
 /// `User.save` token rotation (`token_updated_at` set → fresh 64-hex
@@ -1999,18 +1901,24 @@ async fn apply_login_stamps(
     user_agent: Option<&str>,
 ) -> Result<(), Denial> {
     let rotated = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
-    sqlx::query(
-        "UPDATE \"users\" SET \"is_active\" = TRUE, \"last_active\" = $1, \
-         \"last_login_time\" = $1, \"last_login_ip\" = $2, \"last_login_uagent\" = $3, \
-         \"token_updated_at\" = $1, \"token\" = $4, \"updated_at\" = $1 \
-         WHERE \"id\" = $5",
+    identity::save_user_data(
+        pool,
+        *user_id,
+        &identity::LoginStamps {
+            // The license stamps never assign the medium (it keeps the
+            // `"email"` insert default).
+            medium: None,
+            login_ip: ip,
+            login_uagent: user_agent,
+            avatar: None,
+            avatar_asset_id: None,
+            display_name: None,
+            is_staff: None,
+            touch_updated_at: true,
+            rotated_token: &rotated,
+            now,
+        },
     )
-    .bind(now)
-    .bind(ip)
-    .bind(user_agent)
-    .bind(rotated)
-    .bind(user_id)
-    .execute(pool)
     .await
     .map_err(|_| Denial::ServerError)?;
     Ok(())
@@ -2206,17 +2114,37 @@ async fn sign_up(State(state): State<AppState>, req: Request) -> Result<Response
     let first_name = form.first_name.clone().ok_or(Denial::ServerError)?;
     let password_hash = encode_password(&password);
     let now = Utc::now();
-    let user_id = insert_signup_user(
-        pool,
-        now,
-        &email,
-        &first_name,
-        &form.last_name,
-        &password_hash,
+    // `User(...)` + first `save()` (`admin.py:210-218`) with the
+    // `post_save` preferences row (`user.py:307`) and the
+    // `Profile.objects.create(user, company_name)` row (`admin.py:218`),
+    // all inside `domain::identity::create_user`.
+    let orm = state.orm().ok_or(Denial::ServerError)?;
+    let user_id = identity::create_user(
+        orm,
+        &identity::NewUser {
+            id: None,
+            email: &email,
+            username: Uuid::new_v4().simple().to_string(),
+            password_hash: password_hash.clone(),
+            first_name: &first_name,
+            last_name: &form.last_name,
+            display_name: display_name_for(&email),
+            avatar: "",
+            is_email_verified: false,
+            is_password_autoset: false,
+            last_active: Some(now),
+            login_ip: Some(""),
+            login_uagent: Some(""),
+            is_bot: false,
+            now,
+            profile: Some(identity::NewProfile {
+                company_name: &form.company_name,
+                background_color: background_color(),
+            }),
+        },
     )
-    .await?;
-    insert_notification_prefs(pool, now, &user_id).await?;
-    insert_signup_profile(pool, now, &user_id, &form.company_name).await?;
+    .await
+    .map_err(|_| Denial::ServerError)?;
     // `user.save()` (`admin.py:220-227`) lands BEFORE the admin insert
     // (`admin.py:229`): a NULL User-Agent 500s with NO admin row (a retry
     // then 5180s, not 5150s), and a bad-telemetry 500 leaves a stamped
