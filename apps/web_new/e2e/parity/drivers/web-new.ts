@@ -23055,13 +23055,30 @@ export class WebNewDriver implements ParityDriver {
 
   async pagesPaneEditorPasteHtml(html: string): Promise<void> {
     // A synthetic paste carrying text/html exercises the editor's own
-    // handler (headings, images) without clipboard permissions.
+    // handler (headings, images) without clipboard permissions. The
+    // handler inserts asynchronously and leaves a pasted block
+    // node-selected, so a paste that returns straight away hands the next
+    // step a selection that replaces the block it just added instead of
+    // following it (PAGE-048's image vanishes when the link paragraph
+    // lands on top of it, NEWFRONT-851). The call therefore settles the
+    // insert before it returns: a caret key drops that node selection
+    // without touching the document or the scroll offset (a click at the
+    // end of the body would scroll the canvas there, which four scenarios
+    // read), and two frames let the transaction paint.
     await this.pagesPaneEditorClickEnd();
-    await this.pagesPaneLiveEditor().evaluate((element, markup) => {
+    const editor = this.pagesPaneLiveEditor();
+    await editor.evaluate((element, markup) => {
       const transfer = new DataTransfer();
       transfer.setData("text/html", markup);
       element.dispatchEvent(new ClipboardEvent("paste", { clipboardData: transfer, bubbles: true, cancelable: true }));
     }, html);
+    await this.page.keyboard.press("ArrowRight");
+    await editor.evaluate(
+      () =>
+        new Promise<void>((resolve) => {
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+        })
+    );
   }
 
   async pagesPaneQueryParam(key: string): Promise<string | null> {
