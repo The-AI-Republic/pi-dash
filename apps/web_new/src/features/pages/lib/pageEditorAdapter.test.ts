@@ -3,8 +3,9 @@
 // See the LICENSE file for details.
 // Editor command adapter (parity/specs/pages.md §5.3, PAGE-026–032): each
 // toolbar command's chain call, the typography restyle, the caret jump to
-// the body start, the formatting state the bar reads back, and the whole
-// body replacement the version restore writes (PAGE-053).
+// the body start, the formatting state the bar reads back, the whole body
+// replacement the version restore writes (PAGE-053), and the table
+// structure commands the hover handles drive (§19.1, PAGE-091).
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -40,7 +41,14 @@ import {
   runInsertImage,
   runPageCommand,
   healMissingPageEmbeds,
+  paintTableCells,
+  pagePositionAtPoint,
+  runSelectTableLine,
+  runTableColumnAction,
+  runTableRowAction,
   type PageEditorChain,
+  type PageTableColumnAction,
+  type PageTableRowAction,
   type PageEditorRef,
   type PageEditorView,
   type PageFocusPosition,
@@ -1073,5 +1081,146 @@ describe("page block actions (PAGE-037)", () => {
     const remove = editor();
     deletePageBlock(remove.ref, { from: 3, to: 9, json: "block" });
     expect(remove.calls).toEqual(["focus", "deleteRange([object Object])", "run"]);
+  });
+});
+
+/** A chain recording method names with their first argument, for the table commands. */
+function tableChainSpy(): { chain: PageEditorChain; seen: [string, unknown][] } {
+  const seen: [string, unknown][] = [];
+  const chain = new Proxy({} as PageEditorChain, {
+    get: (_target, property: string) => {
+      if (property === "run") {
+        return () => {
+          seen.push(["run", undefined]);
+          return true;
+        };
+      }
+      return (...args: unknown[]) => {
+        seen.push([property, args[0]]);
+        return chain;
+      };
+    },
+  });
+  return { chain, seen };
+}
+
+/** An editor probe with a view and a recording chain, for the table handle. */
+function tableEditor(): { ref: PageEditorRef; seen: [string, unknown][] } {
+  const { chain, seen } = tableChainSpy();
+  const { ref } = documentEditor([{ type: "paragraph" }]);
+  return { ref: { ...ref, chain: () => chain }, seen };
+}
+
+describe("page table structure actions (PAGE-091)", () => {
+  it("reads the document position under a viewport point", () => {
+    const { ref } = tableEditor();
+    expect(pagePositionAtPoint(ref, 15, 300)).toBe(15);
+  });
+
+  it("answers null when the point is unplaceable or the view is missing", () => {
+    const { ref } = tableEditor();
+    const view = ref.view;
+    if (view === undefined) throw new Error("no view");
+    view.posAtCoords = () => null;
+    expect(pagePositionAtPoint(ref, 0, 0)).toBeNull();
+    expect(pagePositionAtPoint(editor().ref, 0, 0)).toBeNull();
+  });
+
+  it("selects the targeted row and column", () => {
+    const row = tableEditor();
+    runSelectTableLine(row.ref, 7, "row");
+    expect(row.seen).toEqual([
+      ["focus", undefined],
+      ["selectPageTableRow", { pos: 7 }],
+      ["run", undefined],
+    ]);
+    const column = tableEditor();
+    runSelectTableLine(column.ref, 9, "column");
+    expect(column.seen).toEqual([
+      ["focus", undefined],
+      ["selectPageTableColumn", { pos: 9 }],
+      ["run", undefined],
+    ]);
+  });
+
+  it("runs each row-menu entry against the targeted row", () => {
+    const entries: [PageTableRowAction, string][] = [
+      ["insertAbove", "insertPageTableRowAbove"],
+      ["insertBelow", "insertPageTableRowBelow"],
+      ["duplicate", "duplicatePageTableRow"],
+      ["clear", "clearPageTableCells"],
+      ["delete", "deletePageTableRow"],
+    ];
+    for (const [action, command] of entries) {
+      const { ref, seen } = tableEditor();
+      runTableRowAction(ref, 7, action);
+      expect(seen[0]).toEqual(["focus", undefined]);
+      expect(seen[2]).toEqual(["run", undefined]);
+      if (action === "clear") expect(seen[1]).toEqual([command, { pos: 7, axis: "row" }]);
+      else expect(seen[1]).toEqual([command, { pos: 7 }]);
+    }
+  });
+
+  it("runs each column-menu entry against the targeted column", () => {
+    const entries: [PageTableColumnAction, string][] = [
+      ["insertLeft", "insertPageTableColumnLeft"],
+      ["insertRight", "insertPageTableColumnRight"],
+      ["duplicate", "duplicatePageTableColumn"],
+      ["clear", "clearPageTableCells"],
+      ["delete", "deletePageTableColumn"],
+    ];
+    for (const [action, command] of entries) {
+      const { ref, seen } = tableEditor();
+      runTableColumnAction(ref, 7, action);
+      expect(seen[0]).toEqual(["focus", undefined]);
+      expect(seen[2]).toEqual(["run", undefined]);
+      if (action === "clear") expect(seen[1]).toEqual([command, { pos: 7, axis: "column" }]);
+      else expect(seen[1]).toEqual([command, { pos: 7 }]);
+    }
+  });
+
+  it("paints and clears the targeted line", () => {
+    const painted = tableEditor();
+    paintTableCells(painted.ref, 7, "row", "pink");
+    expect(painted.seen).toEqual([
+      ["focus", undefined],
+      ["paintPageTableCells", { pos: 7, axis: "row", color: "pink" }],
+      ["run", undefined],
+    ]);
+    const cleared = tableEditor();
+    paintTableCells(cleared.ref, 9, "column", null);
+    expect(cleared.seen).toEqual([
+      ["focus", undefined],
+      ["paintPageTableCells", { pos: 9, axis: "column", color: null }],
+      ["run", undefined],
+    ]);
+  });
+
+  it("drives every table entry through the editor handle", () => {
+    const { ref, seen } = tableEditor();
+    const handle = pageEditorHandle(ref);
+    expect(handle.positionAtPoint(15, 300)).toBe(15);
+    handle.selectTableRow(7);
+    handle.selectTableColumn(9);
+    handle.tableRowAction(7, "duplicate");
+    handle.tableColumnAction(9, "delete");
+    handle.paintTableCells(7, "row", "pink");
+    expect(seen).toEqual([
+      ["focus", undefined],
+      ["selectPageTableRow", { pos: 7 }],
+      ["run", undefined],
+      ["focus", undefined],
+      ["selectPageTableColumn", { pos: 9 }],
+      ["run", undefined],
+      ["focus", undefined],
+      ["duplicatePageTableRow", { pos: 7 }],
+      ["run", undefined],
+      ["focus", undefined],
+      ["deletePageTableColumn", { pos: 9 }],
+      ["run", undefined],
+      ["focus", undefined],
+      ["paintPageTableCells", { pos: 7, axis: "row", color: "pink" }],
+      ["run", undefined],
+    ]);
   });
 });

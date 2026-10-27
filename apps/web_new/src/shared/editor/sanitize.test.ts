@@ -84,6 +84,14 @@ describe("sanitizeHtml", () => {
     expect(clean).toContain('data-colwidth="120,130"');
   });
 
+  it("keeps the painted cell background on table cells (PAGE-091)", () => {
+    const clean = sanitizeHtml(
+      '<table><tbody><tr><th data-background-color="pink">a</th><td data-background-color="green">b</td></tr></tbody></table>'
+    );
+    expect(clean).toContain('data-background-color="pink"');
+    expect(clean).toContain('data-background-color="green"');
+  });
+
   it("keeps letter and wash colour keys on a span (PAGE-036)", () => {
     const clean = sanitizeHtml('<p><span data-text-color="pink" data-background-color="green">paint</span></p>');
     expect(clean).toContain('data-text-color="pink"');

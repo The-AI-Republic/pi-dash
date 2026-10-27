@@ -42,6 +42,7 @@ import {
 } from "./PageBodyControls.js";
 import { PAGE_TOOLBAR_ID } from "./PageFormattingBar.js";
 import { PageAssistantHandle, PageAssistantMenu } from "./PageAssistantMenu.js";
+import { PageTableHandles } from "./PageTableHandles.js";
 
 export const PAGE_BODY_INTERACTION_LABEL = "Page body actions";
 
@@ -508,6 +509,10 @@ export function PageBodyInteractionLayer({
           {assistantReady ? <PageAssistantHandle onAsk={askAssistant} /> : null}
         </div>
       ) : null}
+      {/* Table row/column handles track their own hover (PAGE-091). This
+          layer mounts only beside the editable body, so the handles never
+          render on a locked, archived or read-only page. */}
+      <PageTableHandles getHandle={getHandle} onDocumentChange={onDocumentChange} html={html} />
       {assistant === null ? null : (
         <div className="pointer-events-auto z-30" style={popover}>
           <PageAssistantMenu
