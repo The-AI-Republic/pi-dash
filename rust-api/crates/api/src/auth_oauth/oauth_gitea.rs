@@ -572,6 +572,7 @@ pub async fn gitea_config(
 // ---------------------------------------------------------------------------
 
 use pidash_services::auth_oauth::error::AuthenticationException;
+use pidash_services::domain::workspaces::members;
 
 fn provider_error() -> AuthenticationException {
     AuthenticationException::new(
@@ -1604,26 +1605,22 @@ pub async fn process_invitations(
         let props = default_props_json();
         let issue_props = default_issue_props_json();
         for invite in &workspace_invites {
-            sqlx::query(
-                r#"INSERT INTO workspace_members
-                   (id, created_at, updated_at, workspace_id, member_id, role,
-                    company_role, view_props, default_props, issue_props,
-                    is_active, getting_started_checklist, tips, explored_features,
-                    created_by_id, updated_by_id, deleted_at)
-                   VALUES ($1,$2,$2,$3,$4,$5,
-                           NULL,$6,$6,$7,
-                           TRUE,'{}','{}','{}',
-                           NULL,NULL,NULL)
-                   ON CONFLICT DO NOTHING"#,
+            members::add(
+                pool,
+                &members::NewMember {
+                    workspace_id: invite.workspace_id,
+                    user_id: Some(user_id),
+                    role: invite.role,
+                    company_role: None,
+                    created_by: None,
+                    view_props: &props,
+                    default_props: &props,
+                    issue_props: &issue_props,
+                    now,
+                    ignore_conflicts: true,
+                    db_now: false,
+                },
             )
-            .bind(uuid::Uuid::new_v4())
-            .bind(now)
-            .bind(invite.workspace_id)
-            .bind(user_id)
-            .bind(i32::from(invite.role))
-            .bind(&props)
-            .bind(&issue_props)
-            .execute(pool)
             .await?;
         }
         for invite in &workspace_invites {
@@ -1656,34 +1653,30 @@ pub async fn process_invitations(
     // ever joins the first).
     if !project_invites.is_empty() {
         let props = default_props_json();
+        let issue_props = default_issue_props_json();
         let prefs = default_preferences_json();
         for invite in &project_invites {
             let role = if invite.role == 5 || invite.role == 15 {
-                i32::from(invite.role)
+                invite.role
             } else {
                 15
             };
-            sqlx::query(
-                r#"INSERT INTO workspace_members
-                   (id, created_at, updated_at, workspace_id, member_id, role,
-                    company_role, view_props, default_props, issue_props,
-                    is_active, getting_started_checklist, tips, explored_features,
-                    created_by_id, updated_by_id, deleted_at)
-                   VALUES ($1,$2,$2,$3,$4,$5,
-                           NULL,$6,$6,$7,
-                           TRUE,'{}','{}','{}',
-                           $8,NULL,NULL)
-                   ON CONFLICT DO NOTHING"#,
+            members::add(
+                pool,
+                &members::NewMember {
+                    workspace_id: invite.workspace_id,
+                    user_id: Some(user_id),
+                    role,
+                    company_role: None,
+                    created_by: invite.created_by_id,
+                    view_props: &props,
+                    default_props: &props,
+                    issue_props: &issue_props,
+                    now,
+                    ignore_conflicts: true,
+                    db_now: false,
+                },
             )
-            .bind(uuid::Uuid::new_v4())
-            .bind(now)
-            .bind(invite.workspace_id)
-            .bind(user_id)
-            .bind(role)
-            .bind(&props)
-            .bind(default_issue_props_json())
-            .bind(invite.created_by_id)
-            .execute(pool)
             .await?;
         }
         for invite in &project_invites {

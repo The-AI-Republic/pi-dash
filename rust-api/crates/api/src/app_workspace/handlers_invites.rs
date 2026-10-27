@@ -100,6 +100,7 @@ use pidash_services::app_project::ser_shared as lite_user;
 use pidash_services::app_workspace::{
     models_workspace, queries_membership as queries, ser_invite, ser_workspace, tasks,
 };
+use pidash_services::domain::workspaces::members;
 
 use super::gates;
 use crate::middleware::SessionHandle;
@@ -3233,24 +3234,19 @@ async fn join_post(
             Ok(props) => props,
             Err(denial) => return denial.into_response(),
         };
-    let empty_dict = match member_default_json(models_workspace::workspace_member::EMPTY_DICT_JSON)
-    {
-        Ok(props) => props,
-        Err(denial) => return denial.into_response(),
-    };
     if let Some((member_id, member_created_by)) = existing {
         let (updated_by_id, created_by_id) =
             audit_columns_on_update(responder_id, member_created_by);
-        if let Err(error) = sqlx::query(
-            "UPDATE workspace_members SET is_active = TRUE, role = $1, updated_at = $2, \
-             updated_by_id = $3, created_by_id = $4 WHERE id = $5",
+        if let Err(error) = members::update_role(
+            pool,
+            &members::RoleUpdate {
+                id: member_id,
+                role: invite.role,
+                updated_at: now,
+                updated_by: updated_by_id,
+                created_by: Some(created_by_id),
+            },
         )
-        .bind(invite.role)
-        .bind(now)
-        .bind(updated_by_id)
-        .bind(created_by_id)
-        .bind(member_id)
-        .execute(pool)
         .await
         {
             if is_integrity_error(&error) {
@@ -3258,26 +3254,22 @@ async fn join_post(
             }
             return Denial::ServerError.into_response();
         }
-    } else if let Err(error) = sqlx::query(
-        "INSERT INTO workspace_members \
-         (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, \
-         workspace_id, member_id, role, company_role, view_props, default_props, issue_props, \
-         getting_started_checklist, tips, explored_features, is_active) \
-         VALUES ($1, $2, $2, $3, NULL, NULL, $4, $5, $6, NULL, $7, $8, $9, $10, $11, $12, TRUE)",
+    } else if let Err(error) = members::add(
+        pool,
+        &members::NewMember {
+            workspace_id: invite.workspace_id,
+            user_id: Some(user_id),
+            role: invite.role,
+            company_role: None,
+            created_by: responder_id,
+            view_props: &view_props,
+            default_props: &default_props,
+            issue_props: &issue_props,
+            now,
+            ignore_conflicts: false,
+            db_now: false,
+        },
     )
-    .bind(uuid::Uuid::new_v4())
-    .bind(now)
-    .bind(responder_id)
-    .bind(invite.workspace_id)
-    .bind(user_id)
-    .bind(invite.role)
-    .bind(view_props)
-    .bind(default_props)
-    .bind(issue_props)
-    .bind(empty_dict.clone())
-    .bind(empty_dict.clone())
-    .bind(empty_dict)
-    .execute(pool)
     .await
     {
         if is_integrity_error(&error) {
@@ -3632,15 +3624,8 @@ async fn my_invites_create(
             continue;
         };
         bust_members_key(&state, &workspace_row.slug).await;
-        if let Err(error) = sqlx::query(
-            "UPDATE workspace_members SET is_active = TRUE, role = $1 \
-             WHERE workspace_id = $2 AND member_id = $3 AND deleted_at IS NULL",
-        )
-        .bind(invite.role)
-        .bind(invite.workspace_id)
-        .bind(user_id)
-        .execute(pool)
-        .await
+        if let Err(error) =
+            members::activate_by_membership(pool, invite.workspace_id, user_id, invite.role).await
         {
             if is_integrity_error(&error) {
                 return json_response(StatusCode::BAD_REQUEST, INVALID_PAYLOAD_BODY);
@@ -3665,78 +3650,32 @@ async fn my_invites_create(
     // carries a DB default, so the JSON props and `is_active` ride
     // along explicitly (PIDASHCONV-751).
     if !invites.is_empty() {
-        let mut values: Vec<String> = Vec::with_capacity(invites.len());
-        for index in 0..invites.len() {
-            let base = index * 13;
-            values.push(format!(
-                "(${}, ${}, ${}, ${}, NULL, NULL, ${}, ${}, ${}, NULL, \
-                 ${}, ${}, ${}, ${}, ${}, ${}, TRUE)",
-                base + 1,
-                base + 2,
-                base + 3,
-                base + 4,
-                base + 5,
-                base + 6,
-                base + 7,
-                base + 8,
-                base + 9,
-                base + 10,
-                base + 11,
-                base + 12,
-                base + 13
-            ));
-        }
-        let sql = format!(
-            "INSERT INTO workspace_members \
-             (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, \
-             workspace_id, member_id, role, company_role, view_props, default_props, \
-             issue_props, getting_started_checklist, tips, explored_features, is_active) \
-             VALUES {} ON CONFLICT DO NOTHING",
-            values.join(", ")
-        );
-        let mut query = sqlx::query(&sql);
-        for invite in invites.iter() {
-            // Fresh defaults per row: the Django callables mint a new
-            // dict per instance.
-            let view_props = match member_default_json(
-                models_workspace::workspace_member::DEFAULT_VIEW_PROPS_JSON,
-            ) {
+        // Fresh defaults per row in Django (`get_default_props` /
+        // `get_issue_props` callables mint a new dict per instance);
+        // the shared binds below commit identical bytes.
+        let view_props = match member_default_json(
+            models_workspace::workspace_member::DEFAULT_VIEW_PROPS_JSON,
+        ) {
+            Ok(props) => props,
+            Err(denial) => return denial.into_response(),
+        };
+        let issue_props =
+            match member_default_json(models_workspace::workspace_member::DEFAULT_ISSUE_PROPS_JSON)
+            {
                 Ok(props) => props,
                 Err(denial) => return denial.into_response(),
             };
-            let default_props = match member_default_json(
-                models_workspace::workspace_member::DEFAULT_VIEW_PROPS_JSON,
-            ) {
-                Ok(props) => props,
-                Err(denial) => return denial.into_response(),
-            };
-            let issue_props = match member_default_json(
-                models_workspace::workspace_member::DEFAULT_ISSUE_PROPS_JSON,
-            ) {
-                Ok(props) => props,
-                Err(denial) => return denial.into_response(),
-            };
-            let empty_dict =
-                match member_default_json(models_workspace::workspace_member::EMPTY_DICT_JSON) {
-                    Ok(props) => props,
-                    Err(denial) => return denial.into_response(),
-                };
-            query = query
-                .bind(uuid::Uuid::new_v4())
-                .bind(now)
-                .bind(now)
-                .bind(user_id)
-                .bind(invite.workspace_id)
-                .bind(user_id)
-                .bind(invite.role)
-                .bind(view_props)
-                .bind(default_props)
-                .bind(issue_props)
-                .bind(empty_dict.clone())
-                .bind(empty_dict.clone())
-                .bind(empty_dict);
-        }
-        if let Err(error) = query.execute(pool).await {
+        // One row per invite; rows carry their own workspace.
+        let rows: Vec<members::BulkMember> = invites
+            .iter()
+            .map(|invite| members::BulkMember {
+                workspace_id: invite.workspace_id,
+                user_id,
+                role: invite.role,
+                created_by: Some(user_id),
+            })
+            .collect();
+        if let Err(error) = members::bulk_add(pool, &rows, &view_props, &issue_props, now).await {
             if is_integrity_error(&error) {
                 return json_response(StatusCode::BAD_REQUEST, INVALID_PAYLOAD_BODY);
             }
@@ -4211,11 +4150,6 @@ async fn join_request_approve(
             Ok(props) => props,
             Err(denial) => return denial.into_response(),
         };
-    let empty_dict = match member_default_json(models_workspace::workspace_member::EMPTY_DICT_JSON)
-    {
-        Ok(props) => props,
-        Err(denial) => return denial.into_response(),
-    };
     let approved = async move {
         let existing: Option<(uuid::Uuid,)> = sqlx::query_as(
             "SELECT wm.id FROM workspace_members wm WHERE wm.workspace_id = $1 AND wm.member_id = $2 \
@@ -4228,41 +4162,37 @@ async fn join_request_approve(
         if let Some((member_id,)) = existing {
             // The reactivate `.save()` stamps `updated_by` with the
             // approver (`db/models/base.py:42`).
-            sqlx::query(
-                "UPDATE workspace_members SET is_active = TRUE, role = $1, updated_at = $2, \
-                 updated_by_id = $4 WHERE id = $3",
+            members::update_role(
+                &mut *tx,
+                &members::RoleUpdate {
+                    id: member_id,
+                    role: request_role,
+                    updated_at: now,
+                    updated_by: Some(approver_id),
+                    created_by: None,
+                },
             )
-            .bind(request_role)
-            .bind(now)
-            .bind(member_id)
-            .bind(approver_id)
-            .execute(&mut *tx)
             .await?;
         } else {
             // The create `.save()` keeps `updated_by` NULL on add
             // (`db/models/base.py:37-39`), so the column stays unset —
             // while the JSON props ride the model defaults (`:207-213`).
-            sqlx::query(
-                "INSERT INTO workspace_members \
-                 (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, \
-                 workspace_id, member_id, role, company_role, view_props, default_props, \
-                 issue_props, getting_started_checklist, tips, explored_features, is_active) \
-                 VALUES ($1, $2, $2, $3, NULL, NULL, $4, $5, $6, NULL, $7, $8, $9, \
-                 $10, $11, $12, TRUE)",
+            members::add(
+                &mut *tx,
+                &members::NewMember {
+                    workspace_id,
+                    user_id: Some(requester_id),
+                    role: request_role,
+                    company_role: None,
+                    created_by: Some(approver_id),
+                    view_props: &view_props,
+                    default_props: &default_props,
+                    issue_props: &issue_props,
+                    now,
+                    ignore_conflicts: false,
+                    db_now: false,
+                },
             )
-            .bind(uuid::Uuid::new_v4())
-            .bind(now)
-            .bind(approver_id)
-            .bind(workspace_id)
-            .bind(requester_id)
-            .bind(request_role)
-            .bind(view_props)
-            .bind(default_props)
-            .bind(issue_props)
-            .bind(empty_dict.clone())
-            .bind(empty_dict.clone())
-            .bind(empty_dict)
-            .execute(&mut *tx)
             .await?;
         }
         sqlx::query("UPDATE profiles SET last_workspace_id = $1 WHERE user_id = $2")

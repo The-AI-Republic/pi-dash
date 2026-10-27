@@ -834,30 +834,70 @@ async fn run_create_dummy_data_inner(
     };
     let members_raw = ask_line(io, kernel::PROMPT_MEMBER_EMAILS)?;
     let members = kernel::split_member_emails(&members_raw);
-    let workspace_id = queries::workspace_create(
+    // `Workspace.objects.create(slug=..., name=..., owner=user)`
+    // (`:37`): `timezone UTC`, random `background_color`, `logo` /
+    // `organization_size` `NULL`, `NULL` audit (no crum user). The
+    // `post_save` seeding rides inside `domain::workspaces::create`.
+    use pidash_services::domain::workspaces::{self, members};
+    let now = chrono::Utc::now();
+    let background_color = kernel::random_color();
+    let stamps = workspaces::create(
         pool,
-        &workspace_name,
-        &workspace_slug,
-        owner.id,
-        &kernel::random_color(),
+        &workspaces::NewWorkspace {
+            id: uuid::Uuid::new_v4(),
+            name: &workspace_name,
+            slug: &workspace_slug,
+            owner_id: owner.id,
+            created_by: None,
+            logo: None,
+            logo_asset_id: None,
+            organization_size: None,
+            timezone: "UTC",
+            background_color: &background_color,
+            deleted_at: None,
+            created_at: now,
+            updated_at: now,
+            seed_created_by: None,
+        },
     )
     .await
     .map_err(|e| caught_db_error_text(&e))?;
-    // `post_save` on `Workspace` (`scheduler/signals.py:28-39`) fires
-    // during the create above, before the member rows below: seed the
-    // builtin schedulers. The receiver swallows every failure, so this
-    // never fails the command. `None` created_by: a management command
-    // has no crum request user, so Django stamps `NULL`.
-    pidash_services::scheduler::builtins::seed_builtin_schedulers(pool, workspace_id, None).await;
+    let workspace_id = stamps
+        .map(|stamps| stamps.id)
+        .ok_or_else(|| "Workspace creation returned no row".to_owned())?;
     let props = queries::workspace_member_props_json();
     let issue_props = queries::workspace_issue_props_json();
-    queries::workspace_member_create(pool, workspace_id, owner.id, 20, &props, &issue_props)
-        .await
-        .map_err(|e| caught_db_error_text(&e))?;
+    members::add(
+        pool,
+        &members::NewMember {
+            workspace_id,
+            user_id: Some(owner.id),
+            role: 20,
+            company_role: None,
+            created_by: None,
+            view_props: &props,
+            default_props: &props,
+            issue_props: &issue_props,
+            now,
+            ignore_conflicts: false,
+            db_now: false,
+        },
+    )
+    .await
+    .map_err(|e| caught_db_error_text(&e))?;
     let member_ids = queries::user_ids_by_emails(pool, &members)
         .await
         .map_err(|e| caught_db_error_text(&e))?;
-    queries::workspace_members_bulk_create(pool, workspace_id, &member_ids, &props, &issue_props)
+    let bulk_rows: Vec<members::BulkMember> = member_ids
+        .iter()
+        .map(|user_id| members::BulkMember {
+            workspace_id,
+            user_id: *user_id,
+            role: 20,
+            created_by: None,
+        })
+        .collect();
+    members::bulk_add(pool, &bulk_rows, &props, &issue_props, now)
         .await
         .map_err(|e| caught_db_error_text(&e))?;
     let project_count_raw = ask_line(io, kernel::PROMPT_PROJECT_COUNT)?;

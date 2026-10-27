@@ -126,6 +126,7 @@ use pidash_services::app_project::tasks::{
     invite_token, INTEGRITY_ERROR_BODY, OBJECT_NOT_FOUND_BODY, SERVER_ERROR_BODY,
     VALIDATION_ERROR_BODY,
 };
+use pidash_services::domain::workspaces::members;
 use pidash_types::{ProjectId, WorkspaceId};
 
 // ---------------------------------------------------------------------------
@@ -2960,37 +2961,36 @@ async fn join_post(
             } else {
                 invite.role
             };
-            sqlx::query(
-                "INSERT INTO workspace_members (id, workspace_id, member_id, role,
-                    company_role, view_props, default_props, issue_props, is_active,
-                    getting_started_checklist, tips, explored_features,
-                    created_by_id, updated_by_id, created_at, updated_at, deleted_at)
-                 VALUES ($1, $2, $3, $4,
-                    NULL, $5::jsonb, $5::jsonb, $6::jsonb, true,
-                    '{}', '{}', '{}',
-                    $7, NULL, now(), now(), NULL)",
+            // The model defaults serialize from fixed `json!` values;
+            // reparse for the domain input (jsonb storage normalizes
+            // key order either way, so the committed bytes match).
+            let view_props: Value = serde_json::from_str(&default_workspace_props_json())
+                .map_err(|_| Denial::ServerError)?;
+            let issue_props: Value = serde_json::from_str(&default_issue_props_json())
+                .map_err(|_| Denial::ServerError)?;
+            members::add(
+                &pool,
+                &members::NewMember {
+                    workspace_id: invite.workspace_id,
+                    user_id,
+                    role,
+                    company_role: None,
+                    created_by,
+                    view_props: &view_props,
+                    default_props: &view_props,
+                    issue_props: &issue_props,
+                    now: chrono::Utc::now(),
+                    ignore_conflicts: false,
+                    db_now: true,
+                },
             )
-            .bind(uuid::Uuid::new_v4())
-            .bind(invite.workspace_id)
-            .bind(user_id)
-            .bind(role)
-            .bind(default_workspace_props_json())
-            .bind(default_issue_props_json())
-            .bind(created_by)
-            .execute(&pool)
             .await
             .map_err(integrity_denial)?;
         }
         Some((id,)) => {
-            sqlx::query(
-                "UPDATE workspace_members SET is_active = true, updated_at = now(), updated_by_id = $1
-                 WHERE id = $2",
-            )
-            .bind(created_by)
-            .bind(id)
-            .execute(&pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
+            members::activate_by_id(&pool, id, created_by)
+                .await
+                .map_err(|_| Denial::ServerError)?;
         }
     }
     // The existing project membership is looked up by workspace only —

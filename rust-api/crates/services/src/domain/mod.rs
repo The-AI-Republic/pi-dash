@@ -59,6 +59,7 @@ pub mod identity;
 pub mod tokens;
 pub mod transition;
 pub mod txn;
+pub mod workspaces;
 
 pub use ctx::{WriteActor, WriteCtx, WriteOptions, WriteScope};
 pub use error::DomainError;

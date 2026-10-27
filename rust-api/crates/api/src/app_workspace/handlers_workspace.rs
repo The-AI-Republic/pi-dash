@@ -97,6 +97,7 @@ use pidash_auth::permissions::{ROLE_ADMIN, ROLE_MEMBER};
 use pidash_services::app_workspace::{
     models_workspace, queries_core, ser_invite, ser_workspace, tasks,
 };
+use pidash_services::domain::workspaces::{self, members};
 use pidash_types::license::serializers_workspace::RESTRICTED_WORKSPACE_SLUGS;
 use pidash_types::WorkspaceId;
 
@@ -3574,28 +3575,28 @@ pub async fn create_workspace(
     let organization_size = validated.organization_size.flatten();
     let workspace_id = uuid::Uuid::new_v4();
     let now = chrono::Utc::now();
-    let insert: Result<InsertedStamps, sqlx::Error> =
-        sqlx::query_as(
-            r#"INSERT INTO workspaces
-               (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, name, logo, logo_asset_id, owner_id, slug, organization_size, timezone, background_color)
-               VALUES ($1, $2, $2, $3, NULL, $4, $5, $6, $7, $3, $8, $9, $10, $11)
-               RETURNING created_at, updated_at"#,
-        )
-        .bind(workspace_id)
-        .bind(now)
-        .bind(user_id)
-        .bind(validated.deleted_at.flatten())
-        .bind(&name)
-        .bind(logo.as_deref())
-        .bind(validated.logo_asset_id.flatten())
-        .bind(&slug)
-        .bind(organization_size.as_deref())
-        .bind(&timezone)
-        .bind(&background_color)
-        .fetch_optional(&pool)
-        .await;
+    let insert = workspaces::create(
+        &pool,
+        &workspaces::NewWorkspace {
+            id: workspace_id,
+            name: &name,
+            slug: &slug,
+            owner_id: user_id,
+            created_by: Some(user_id),
+            logo: logo.as_deref(),
+            logo_asset_id: validated.logo_asset_id.flatten(),
+            organization_size: organization_size.as_deref(),
+            timezone: &timezone,
+            background_color: &background_color,
+            deleted_at: validated.deleted_at.flatten(),
+            created_at: now,
+            updated_at: now,
+            seed_created_by: Some(user_id),
+        },
+    )
+    .await;
     let (created_at, updated_at) = match insert {
-        Ok(Some(timestamps)) => timestamps,
+        Ok(Some(stamps)) => (stamps.created_at, stamps.updated_at),
         Ok(None) => return Err(Denial::ServerError),
         Err(error) if is_unique_violation(&error) => {
             return Ok(json_response(
@@ -3605,16 +3606,6 @@ pub async fn create_workspace(
         }
         Err(_) => return Err(Denial::ServerError),
     };
-    // `post_save` on `Workspace` (`scheduler/signals.py:28-39`) fires
-    // during the save above, before the member row below: seed the
-    // builtin schedulers. The receiver swallows every failure, so this
-    // never fails the request.
-    pidash_services::scheduler::builtins::seed_builtin_schedulers(
-        &pool,
-        workspace_id,
-        Some(user_id),
-    )
-    .await;
     // `WorkspaceMember.objects.create(...)` (`:126-132`): the `company_role`
     // echo (`:127`) renders through Python `str()` (null stays null).
     let company_role = match input.get("company_role") {
@@ -3623,33 +3614,30 @@ pub async fn create_workspace(
         InputValue::Value(Value::Null) => None,
         InputValue::Value(value) => Some(py_str(value)),
     };
-    let member_insert: Result<_, sqlx::Error> = sqlx::query(
-        r#"INSERT INTO workspace_members
-           (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, member_id, role, company_role, view_props, default_props, issue_props, getting_started_checklist, tips, explored_features, is_active)
-           VALUES ($1, $2, $2, $3, NULL, NULL, $4, $3, 20, $5, $6, $7, $8, $9, $10, $11, TRUE)"#,
-    )
-    .bind(uuid::Uuid::new_v4())
-    .bind(now)
-    .bind(user_id)
-    .bind(workspace_id)
-    .bind(company_role)
-    .bind(member_default_json(
-        models_workspace::workspace_member::DEFAULT_VIEW_PROPS_JSON,
-    )?)
     // `default_props` shares `get_default_props` with `view_props`
     // (`workspace.py:207-208`), so the one ported default serves both.
-    .bind(member_default_json(
-        models_workspace::workspace_member::DEFAULT_VIEW_PROPS_JSON,
-    )?)
-    .bind(member_default_json(
-        models_workspace::workspace_member::DEFAULT_ISSUE_PROPS_JSON,
-    )?)
-    .bind(member_default_json(models_workspace::workspace_member::EMPTY_DICT_JSON)?)
-    .bind(member_default_json(models_workspace::workspace_member::EMPTY_DICT_JSON)?)
-    .bind(member_default_json(models_workspace::workspace_member::EMPTY_DICT_JSON)?)
-    .execute(&pool)
-    .await;
-    if let Err(error) = member_insert {
+    let view_props =
+        member_default_json(models_workspace::workspace_member::DEFAULT_VIEW_PROPS_JSON)?;
+    let issue_props =
+        member_default_json(models_workspace::workspace_member::DEFAULT_ISSUE_PROPS_JSON)?;
+    if let Err(error) = members::add(
+        &pool,
+        &members::NewMember {
+            workspace_id,
+            user_id: Some(user_id),
+            role: 20,
+            company_role: company_role.as_deref(),
+            created_by: Some(user_id),
+            view_props: &view_props,
+            default_props: &view_props,
+            issue_props: &issue_props,
+            now,
+            ignore_conflicts: false,
+            db_now: false,
+        },
+    )
+    .await
+    {
         // Any unique violation (even the member row's) answers the 409:
         // Postgres renders every one with "already exists".
         if is_unique_violation(&error) {
