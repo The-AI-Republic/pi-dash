@@ -399,25 +399,62 @@ describe("editor reads and writes", () => {
   });
 
   it("deletes an image block before falling back to a plain img", async () => {
-    const block = fake();
+    let present = true;
+    const block = fake({ count: () => (present ? 1 : 0) });
     const editor = editorOf();
     const withBlock = bodyOf(editor, { "image-component": block.asLocator() });
     const blockStub = pageDouble({ selectors: { [BODY_SELECTOR]: withBlock } });
+    blockStub.press.mockImplementation(async () => {
+      present = false;
+    });
 
     await new WebNewDriver(blockStub.page).pagesPaneEditorDeleteImage();
 
     expect(block.click).toHaveBeenCalledWith({ timeout: 30_000 });
     expect(blockStub.press).toHaveBeenCalledWith("Backspace");
 
-    const plain = fake();
+    let plainPresent = true;
+    const plain = fake({ count: () => (plainPresent ? 1 : 0) });
     const withoutBlock = bodyOf(editor, { "image-component": empty(), img: plain.asLocator() });
     const plainStub = pageDouble({ selectors: { [BODY_SELECTOR]: withoutBlock } });
+    plainStub.press.mockImplementation(async () => {
+      plainPresent = false;
+    });
 
     await new WebNewDriver(plainStub.page).pagesPaneEditorDeleteImage();
 
     expect(plain.click).toHaveBeenCalledWith({ timeout: 30_000 });
     expect(plainStub.press).toHaveBeenCalledWith("Backspace");
   });
+
+  it("clicks again when the first Backspace leaves the image behind (NEWFRONT-941)", async () => {
+    let presses = 0;
+    const block = fake({ count: () => (presses >= 2 ? 0 : 1) });
+    const stub = pageDouble({
+      selectors: { [BODY_SELECTOR]: bodyOf(editorOf(), { "image-component": block.asLocator() }) },
+    });
+    stub.press.mockImplementation(async () => {
+      presses += 1;
+    });
+
+    await new WebNewDriver(stub.page).pagesPaneEditorDeleteImage();
+
+    expect(block.click).toHaveBeenCalledTimes(2);
+    expect(presses).toBe(2);
+  });
+
+  it("throws when the editor image survives three delete attempts (NEWFRONT-941)", async () => {
+    const block = fake();
+    const stub = pageDouble({
+      selectors: { [BODY_SELECTOR]: bodyOf(editorOf(), { "image-component": block.asLocator() }) },
+    });
+
+    await expect(new WebNewDriver(stub.page).pagesPaneEditorDeleteImage()).rejects.toThrow(
+      "survived three delete attempts"
+    );
+    expect(block.click).toHaveBeenCalledTimes(3);
+    expect(stub.press).toHaveBeenCalledTimes(3);
+  }, 20_000);
 });
 
 describe("pane shell", () => {

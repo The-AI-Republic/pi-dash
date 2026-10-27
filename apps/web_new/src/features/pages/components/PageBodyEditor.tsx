@@ -57,6 +57,12 @@ export interface PageBodyEditorProps {
   onPasteText?: ((text: string) => Promise<string | null>) | undefined;
   /** Whether a plain-text paste is an entity address worth resolving. */
   claimsPasteText?: ((text: string) => boolean) | undefined;
+  /**
+   * Whether the surface takes input (default true). A read-only viewer
+   * binds the same live document with editing off, so the body follows
+   * remote updates without offering an editable region (PAGE-053).
+   */
+  editable?: boolean | undefined;
   /** The live document to bind (PAGE-065); absent keeps the standalone editor. */
   collab?: PageLiveDocBinding | null | undefined;
   /** Seed empty shared fields from the stored markup once the server state is known. */
@@ -100,6 +106,7 @@ async function loadPageEditor(
     onPasteHtml,
     onPasteText,
     claimsPasteText,
+    editable = true,
     collab,
     seedDocument,
     descriptionJson,
@@ -141,7 +148,7 @@ async function loadPageEditor(
       {
         extensions: boundExtensions,
         content: shownHtml,
-        editable: true,
+        editable,
         // The instance is created from the mount effect, never during
         // render, so the first paint never hands out a node that is
         // replaced a tick later.

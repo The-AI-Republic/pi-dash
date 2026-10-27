@@ -80,6 +80,48 @@ describe("useLivePageDocument", () => {
     expect(state().document.stats.words).toBe(4);
   });
 
+  it("keeps the last live state when the body region drops out mid-session (PAGE-048)", async () => {
+    render(<Harness html="<p>Stored</p>" />);
+    paint('<div class="editor-container"><p>Live body</p><img src="https://x.test/a.png" alt="A"></div>');
+    await waitFor(() => expect(state().document.assets).toHaveLength(1));
+    // A loader swap unmounts the body region; the gap must not publish a
+    // body-less canvas (no rows, loader heading) as a document change.
+    paint('<div class="page-loader"><h1>Loading</h1></div>');
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    });
+    expect(state().document.assets).toHaveLength(1);
+    expect(state().document.headings).toEqual([]);
+  });
+
+  it("keeps the last live state when the body reads momentarily empty (PAGE-048)", async () => {
+    render(<Harness html="<p>Stored</p>" />);
+    paint('<div class="editor-container"><p>Live body</p></div>');
+    await waitFor(() => expect(state().document.stats.words).toBe(2));
+    // A transient empty read must not resurrect the stored snapshot.
+    paint('<div class="editor-container">  </div>');
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    });
+    expect(state().document.stats.words).toBe(2);
+  });
+
+  it("keeps the last live state when the canvas goes away after paint (PAGE-048)", async () => {
+    const { rerender } = render(<Harness html="<p>Stored</p>" />);
+    paint('<div class="editor-container"><p>Live body</p></div>');
+    await waitFor(() => expect(state().document.stats.words).toBe(2));
+    rerender(<Harness html="<p>Changed stored words here</p>" noCanvas />);
+    expect(state().document.stats.words).toBe(2);
+  });
+
+  it("falls back to fresh stored markup while the painted body is still empty (PAGE-048)", () => {
+    const { rerender } = render(<Harness html="<p>First</p>" />);
+    paint('<div class="editor-container">  </div>');
+    // A stored update re-reads synchronously against the empty body.
+    rerender(<Harness html="<p>Second stored</p>" />);
+    expect(state().document.stats.words).toBe(2);
+  });
+
   it("ignores transient surfaces rendered beside the body, so counts stay put (PAGE-037/049)", async () => {
     render(<Harness html="<p>Draft body</p>" />);
     // The palette and mention popups are siblings of `.editor-container`,

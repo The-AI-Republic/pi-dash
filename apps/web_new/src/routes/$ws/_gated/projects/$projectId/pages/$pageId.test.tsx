@@ -76,6 +76,21 @@ describe("page detail route", () => {
     );
   });
 
+  it("narrows the router-merged search before the screen sees it (PAGE-045)", () => {
+    // The router merges unvalidated parent search under the child's keys,
+    // so an unknown tab arrives raw despite validateSearch; the screen
+    // must receive the narrowed form or the pane opens on presence alone.
+    router.search = { paneTab: "zzz", version: "v1", type: "private" };
+    const Component = Route.options.component;
+    if (!Component) throw new Error("missing component");
+    render(<Component />);
+    expect(screenSpy.render).toHaveBeenCalledWith(
+      expect.objectContaining({
+        search: { version: "v1" },
+      })
+    );
+  });
+
   it("writes key changes back into the same address", () => {
     router.navigate.mockReset();
     const Component = Route.options.component;

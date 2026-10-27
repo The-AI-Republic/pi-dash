@@ -502,7 +502,10 @@ test(
       await test.step("a file link does not leak in as an asset row", async () => {
         await driver.pagesPaneEditorPasteHtml('<p><a href="https://example.com/nc317-doc.pdf">nc317 doc</a></p>');
         await expect.poll(() => driver.pagesPaneEditorText(), { timeout: 30_000 }).toContain("nc317 doc");
-        expect(await driver.pagesPaneAssetsRows()).toHaveLength(1);
+        // The pane follows the editor a beat behind (observer plus frame),
+        // so the settled row count is polled like its sibling steps instead
+        // of racing the update with a single read (NEWFRONT-941).
+        await expect.poll(() => driver.pagesPaneAssetsRows(), { timeout: 30_000 }).toHaveLength(1);
       });
 
       await test.step("removing the image from the document clears the tab", async () => {
@@ -890,7 +893,10 @@ test(
       const pathBefore = await driver.currentPath();
       await test.step("restore replaces live content without navigating away", async () => {
         await driver.pagesPaneSelectVersion(snapshot.id);
-        expect(await driver.pagesPaneRestoreVisible()).toBe(true);
+        // The control appears only once the snapshot read lands (spec
+        // §6.9), so the assertion waits for it instead of racing the
+        // fetch with a single read (NEWFRONT-941).
+        await expect.poll(() => driver.pagesPaneRestoreVisible(), { timeout: 30_000 }).toBe(true);
         await driver.pagesPaneRestore();
         expect(await driver.pagesPaneOverlayOpen()).toBe(false);
         expect(await driver.pagesPaneQueryParam("version")).toBe(null);

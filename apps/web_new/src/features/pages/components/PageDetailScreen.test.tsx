@@ -70,10 +70,21 @@ vi.mock("../../issues/peek/ResolvingIssuePeek.js", () => ({
 
 // The session hook is stubbed: its own suite walks the machine, while the
 // screen suite only switches on the mount it mirrors. Null is the default
-// every pre-existing test renders with — the standalone surface.
-const live = vi.hoisted(() => ({ mount: null as null | Record<string, unknown>, snapshot: vi.fn() }));
+// every pre-existing test renders with — the standalone surface. Options
+// are captured so the read-only tests can pin the session's scope.
+const live = vi.hoisted(
+  () =>
+    ({ mount: null, options: null, snapshot: vi.fn() }) as {
+      mount: null | Record<string, unknown>;
+      options: null | Record<string, unknown>;
+      snapshot: ReturnType<typeof vi.fn>;
+    }
+);
 vi.mock("../lib/pageLiveSession.js", () => ({
-  usePageLiveSession: () => live.mount,
+  usePageLiveSession: (options: Record<string, unknown>) => {
+    live.options = options;
+    return live.mount;
+  },
   usePageReadOnlySyncReport: live.snapshot,
 }));
 
@@ -377,6 +388,7 @@ afterEach(() => {
   vi.mocked(notifySuccess).mockClear();
   vi.mocked(notifyError).mockClear();
   live.mount = null;
+  live.options = null;
   live.snapshot.mockClear();
   window.localStorage.clear();
 });
@@ -1694,6 +1706,45 @@ describe("PageDetailScreen collaboration mount (PAGE-065-067)", () => {
     await screen.findByTestId("page-detail-screen");
     await screen.findByText("Draft body");
     expect(live.snapshot).toHaveBeenCalledWith(harness.pageId, true);
+  });
+
+  it("joins the session on a read-only page and lets it own the sync report (PAGE-053)", async () => {
+    live.mount = { liveReady: true, docHandle: null, seedDocument: false };
+    harness.page = record({ is_locked: true });
+    renderScreen();
+    await screen.findByText("This page is locked and read-only.");
+    expect(live.options).toMatchObject({ enabled: true });
+    expect(live.snapshot).toHaveBeenCalledWith(harness.pageId, false);
+  });
+
+  it("binds a read-only viewer to the live document without an editable region (PAGE-053)", async () => {
+    live.mount = { liveReady: true, docHandle: sharedDoc("Shared name", "Live body words"), seedDocument: true };
+    harness.page = record({ is_locked: true, description_html: "<p>Stored snapshot words</p>" });
+    const { container } = render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <PageDetailScreen
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          pageId={harness.pageId}
+          search={{}}
+          onSearchChange={vi.fn()}
+        />
+      </QueryClientProvider>
+    );
+    await screen.findByText("This page is locked and read-only.");
+    expect(await screen.findByText("Live body words")).toBeInTheDocument();
+    expect(screen.queryByText("Stored snapshot words")).not.toBeInTheDocument();
+    expect(container.querySelector('[contenteditable="true"]')).toBeNull();
+    expect(screen.queryByRole("toolbar", { name: "Formatting" })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Launch notes" })).toBeInTheDocument();
+  });
+
+  it("holds the sync loader on a read-only page while the live document is unknown (PAGE-053)", async () => {
+    live.mount = { liveReady: false, docHandle: null, seedDocument: false };
+    harness.page = record({ is_locked: true });
+    renderScreen();
+    await screen.findByText("This page is locked and read-only.");
+    expect(await screen.findByTestId("page-live-loader")).toBeInTheDocument();
   });
 });
 

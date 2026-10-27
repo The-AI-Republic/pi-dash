@@ -58,6 +58,12 @@ export function useLivePageDocument(
   const [document, setDocument] = React.useState<PageDocument>(() =>
     parsePageDocument(storedHtml, { workspaceSlug, projectId })
   );
+  // Once the body region has painted with content, the canvas is the only
+  // source of truth: a later read without a body (a loader swap, a remount
+  // gap) must keep the last live state instead of publishing the stored
+  // snapshot or a body-less canvas as if the document had changed
+  // (PAGE-048). Only the pre-paint reads below may fall back.
+  const bodyPaintedRef = React.useRef(false);
 
   // Reading the canvas rather than the stored body is what makes the pane
   // live. The read is scoped to the body: the title shares the canvas and
@@ -67,12 +73,19 @@ export function useLivePageDocument(
   const read = React.useCallback((): void => {
     const canvas = canvasRef.current;
     if (canvas === null) {
+      if (bodyPaintedRef.current) return;
       setDocument(parsePageDocument(storedHtml, { workspaceSlug, projectId }));
       return;
     }
-    const body = pageBodyElement(canvas) ?? canvas;
-    const painted = body.innerHTML.trim() === "" ? storedHtml : body.innerHTML;
-    setDocument(parsePageDocument(painted, { workspaceSlug, projectId }));
+    const body = pageBodyElement(canvas);
+    if (body === null || body.innerHTML.trim() === "") {
+      if (bodyPaintedRef.current) return;
+      const painted = body === null ? canvas.innerHTML : storedHtml;
+      setDocument(parsePageDocument(painted.trim() === "" ? storedHtml : painted, { workspaceSlug, projectId }));
+      return;
+    }
+    bodyPaintedRef.current = true;
+    setDocument(parsePageDocument(body.innerHTML, { workspaceSlug, projectId }));
   }, [canvasRef, storedHtml, workspaceSlug, projectId]);
 
   React.useEffect(() => {
