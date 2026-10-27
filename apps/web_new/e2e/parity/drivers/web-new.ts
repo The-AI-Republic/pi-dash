@@ -28838,6 +28838,29 @@ export class WebNewDriver implements ParityDriver {
     this.pagesHeaderLockFailBlocked = false;
   }
 
+  private pagesHeaderDescriptionFailInstalled = false;
+  private pagesHeaderDescriptionFailBlocked = false;
+
+  async pagesHeaderFailDescriptionWrites(): Promise<void> {
+    if (!this.pagesHeaderDescriptionFailInstalled) {
+      this.pagesHeaderDescriptionFailInstalled = true;
+      // Only the all-forms PATCH is refused; the fallback's GET keeps
+      // returning the stored binary so the scenario pins a refused save.
+      await this.page.route(/\/api\/workspaces\/.+\/projects\/.+\/pages\/.+\/description\/$/, async (route) => {
+        if (this.pagesHeaderDescriptionFailBlocked && route.request().method() === "PATCH") {
+          await route.fulfill({ status: 500, contentType: "application/json", body: "{}" });
+        } else {
+          await route.continue();
+        }
+      });
+    }
+    this.pagesHeaderDescriptionFailBlocked = true;
+  }
+
+  async pagesHeaderUnfailDescriptionWrites(): Promise<void> {
+    this.pagesHeaderDescriptionFailBlocked = false;
+  }
+
   async pagesHeaderArchivedMarker(): Promise<string | null> {
     const marker = this.page.getByTestId("page-archived-marker").first();
     if ((await marker.count()) === 0) return null;

@@ -1110,6 +1110,92 @@ test(
 );
 
 test(
+  specTitle(["PAGE-064"], "bug: NEWFRONT-359 a refused fallback description save wedges the old client"),
+  { tag: specTags(["PAGE-064"]) },
+  async ({ driver, seed }, testInfo) => {
+    test.slow();
+    const tag = stamp();
+    const session = await seedSession(seed);
+    const pageId = await serverCreatePage(seed.workspaceSlug, seed.projectId, session, `Hdr359 ${tag}`);
+    // Cache a body first: the fallback only runs with an editor handle, and
+    // the reported wedge is a visible editor the user cannot click, not the
+    // cold-document loader.
+    await driver.openAuthenticated(detailPath(seed, seed.projectId, pageId), sessionBrowserCookies(session));
+    await driver.pagesLiveWaitSynced();
+    const cached = `cached-359-${tag}`;
+    await driver.pagesLiveTypeInBody(`${cached} `);
+    await expect.poll(() => driver.pagesLiveBodyText(), { timeout: 60_000 }).toContain(cached);
+    // The socket persists after its debounce; wait for the server copy so
+    // the fresh load below has a body to fall back onto rather than an
+    // empty document whose loader could mask the save failure.
+    await expect
+      .poll(
+        async () =>
+          (await pagesHeaderReadPage(seed.workspaceSlug, seed.projectId, pageId, session)).description_html ?? "",
+        { timeout: 120_000 }
+      )
+      .toContain(cached);
+    await driver.pagesHeaderSpyDescriptionWrites();
+    await driver.pagesHeaderFailDescriptionWrites();
+    await driver.pagesLiveBlockCollaborationSocket();
+    try {
+      // Fresh load: the socket is refused, so the REST fallback owns body
+      // writes — and every one of its PATCHes answers 500.
+      await driver.openAuthenticated(detailPath(seed, seed.projectId, pageId), sessionBrowserCookies(session));
+      const badgeTrail: string[] = [];
+      let noticeSeen = false;
+      let lostAt = 0;
+      const start = Date.now();
+      const deadline = start + (testInfo.project.name === "oracle" ? 120_000 : 180_000);
+      while (Date.now() < deadline) {
+        const badge = await driver.pagesHeaderSyncBadgeText();
+        badgeTrail.push(`t+${Math.round((Date.now() - start) / 1000)}s:${badge ?? "<hidden>"}`);
+        if (badgeTrail.length > 140) badgeTrail.shift();
+        const toast = await driver.pagesHeaderToastText();
+        if (toast !== null && /could not be saved/i.test(toast)) noticeSeen = true;
+        if (badge === "Connection lost") {
+          lostAt = Date.now();
+          // The new app raises its fallback failure notice and settles; the
+          // old app is the bug this pin records.
+          if (noticeSeen) break;
+        }
+        if (testInfo.project.name === "oracle" && Date.now() - start > 95_000) break;
+        await driver.page.waitForTimeout(1000);
+      }
+      // The refusal must be the description PATCH, never a broken binary
+      // read: the GET stays up in both apps.
+      const statuses = await driver.pagesHeaderDescriptionWriteStatuses();
+      expect(statuses, `description patch statuses: ${statuses.join(",")}`).toContain(500);
+      if (testInfo.project.name === "oracle") {
+        // Old app pin (NEWFRONT-359): the refused fallback save never
+        // surfaces a notice and the state never settles to Connection lost,
+        // so the editor keeps churning under the retry loop.
+        expect(noticeSeen).toBe(false);
+        expect(lostAt).toBe(0);
+        expect(badgeTrail.join(" ")).not.toContain("Connection lost");
+      } else {
+        // New app: the refusal is visible, the client still reaches the
+        // terminal disconnected state, and the page stays usable.
+        expect(lostAt, `badge trail: ${badgeTrail.join(" ")}`).toBeGreaterThan(0);
+        expect(noticeSeen, `badge trail: ${badgeTrail.join(" ")}`).toBe(true);
+        const typed = `typed-359-${tag}`;
+        await driver.pagesLiveTypeInBody(`${typed} `);
+        expect(await driver.pagesLiveBodyText()).toContain(typed);
+        // The standard save gesture forces another fallback attempt instead
+        // of wedging the retry loop: one more refused PATCH reaches the
+        // server through the debounce.
+        const before = await driver.pagesHeaderDescriptionWriteCount();
+        await driver.pagesHeaderPressSave();
+        await expect.poll(() => driver.pagesHeaderDescriptionWriteCount(), { timeout: 30_000 }).toBeGreaterThan(before);
+      }
+    } finally {
+      await driver.pagesHeaderUnfailDescriptionWrites();
+      await driver.pagesLiveUnblockCollaborationSocket();
+    }
+  }
+);
+
+test(
   specTitle(["PAGE-064"], "title saves ride the record endpoint outside the description path"),
   { tag: specTags(["PAGE-064"]) },
   async ({ driver, seed }) => {

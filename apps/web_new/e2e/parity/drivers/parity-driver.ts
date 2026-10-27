@@ -7376,6 +7376,13 @@ export interface ParityDriver {
   pagesHeaderDescriptionWriteCount(): Promise<number>;
   /** Top-level keys of the most recent description PATCH body. */
   pagesHeaderDescriptionWriteKeys(): Promise<string[]>;
+  /**
+   * Refuse description PATCH writes (500) while the flag is set; GET
+   * description reads and record PATCHes continue untouched.
+   */
+  pagesHeaderFailDescriptionWrites(): Promise<void>;
+  /** Undo pagesHeaderFailDescriptionWrites. */
+  pagesHeaderUnfailDescriptionWrites(): Promise<void>;
   /** Start counting page-record PATCH writes (title/mark/properties path). */
   pagesHeaderSpyPageWrites(): Promise<void>;
   /** Page-record PATCH writes observed since pagesHeaderSpyPageWrites. */
