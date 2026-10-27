@@ -89,8 +89,9 @@ test(
     const name = `Vd14 Board ${harness.tag}`;
 
     // Intended: the dialog stays open with the user's input intact so the
-    // user can retry. The app resets the form to blank defaults instead.
-    await test.step("bug: NEWFRONT-221 a failing submit toasts and resets the form", async () => {
+    // user can retry. The old app resets the form to blank defaults instead;
+    // web_new ships the intended retention (views spec §15).
+    await test.step("bug: NEWFRONT-221 a failing submit keeps the form for retry", async () => {
       await viewsOpenListAs(driver, harness);
       await driver.viewsOpenCreateFromHeader();
       await expect.poll(() => driver.viewsDialogOpen(), POLL).toBe(true);
@@ -100,8 +101,13 @@ test(
       await driver.viewsDialogSubmitAttempt();
       await expect.poll(() => driver.lastToast(), POLL).toContain("Failed to create view");
       expect(await driver.viewsDialogOpen()).toBe(true);
-      await expect.poll(() => driver.viewsDialogTitleValue(), POLL).toBe("");
-      expect(await driver.viewsDialogDescriptionValue()).toBe("");
+      if (driver.target === "web_new") {
+        expect(await driver.viewsDialogTitleValue()).toBe(name);
+        expect(await driver.viewsDialogDescriptionValue()).toBe("wiped on failure");
+      } else {
+        await expect.poll(() => driver.viewsDialogTitleValue(), POLL).toBe("");
+        expect(await driver.viewsDialogDescriptionValue()).toBe("");
+      }
       const server = await serverSavedViews(workspaceSlug, projectId, owner.cookie);
       expect(server).toHaveLength(0);
     });

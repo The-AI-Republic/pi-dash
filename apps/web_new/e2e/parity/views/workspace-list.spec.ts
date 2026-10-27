@@ -97,10 +97,11 @@ test(
   specTitle(["VIEW-039"], "bug: customs render empty during load with no skeleton"),
   { tag: specTags(["VIEW-039"]) },
   async ({ driver }) => {
-    // bug: NEWFRONT-230 — the store computed returns [] (not null) while
+    // bug: NEWFRONT-230 — the old store computed returns [] (not null) while
     // customs load, so the ViewListLoader branch never runs: holding the
     // list response for 5s shows an empty customs section, then rows pop
-    // in. The intended behavior is the VIEW-039 skeleton.
+    // in. The intended behavior is the VIEW-039 skeleton, which web_new
+    // ships, so its leg proves the skeleton then the rows (spec §15/§16).
     const harness = await viewsHarness("parity-w39");
     const { owner, workspaceSlug } = harness;
     const custom = `W39 Alpha ${harness.tag}`;
@@ -108,6 +109,12 @@ test(
 
     await driver.wsViewsDelayNextList(5000);
     await wsViewsOpenListAs(driver, harness);
+    if (driver.target === "web_new") {
+      expect(await driver.wsViewsSkeletonFlashed(8000)).toBe(true);
+      await expect.poll(() => driver.wsViewsListNames(), POLL).toEqual([custom]);
+      expect(await driver.wsViewsSkeletonVisible()).toBe(false);
+      return;
+    }
     expect(await driver.wsViewsSkeletonFlashed(8000)).toBe(false);
     await expect.poll(() => driver.wsViewsListNames(), POLL).toEqual([custom]);
     expect(await driver.wsViewsSkeletonVisible()).toBe(false);

@@ -44,10 +44,11 @@ test(
   specTitle(["VIEW-033"], "no tab strip renders on workspace list or detail pages"),
   { tag: specTags(["VIEW-033"]) },
   async ({ driver }) => {
-    // Gap: the GlobalViewsHeader tab strip (default/custom tabs with
-    // auto-scroll, per-tab menus and a trailing member+ add button) is
-    // unmounted dead code — no strip renders anywhere. Creation lives in
-    // the detail header's Add view button instead (see VIEW-038).
+    // Target, no oracle (spec §10/§16): the workspace detail page carries a
+    // tab strip with one tab per default and custom view, per-tab menus and
+    // a trailing add button. The old app never mounted that header, so it
+    // pins the strip's absence; web_new ships it. The list page keeps no
+    // strip — it has no active view, and its creation lives nowhere (§9).
     const harness = await viewsHarness("parity-w33");
     const { owner, workspaceSlug } = harness;
     const custom = `W33 Alpha ${harness.tag}`;
@@ -60,6 +61,12 @@ test(
 
     await wsViewsOpenDetailAs(driver, harness, customId);
     await expect.poll(() => driver.wsViewsDetailTabTitle(), POLL).toContain("All Views");
+    if (driver.target === "web_new") {
+      // The strip sits inside the detail's lazy filter-chunk boundary, so it
+      // appears a beat after the header; poll rather than read once.
+      await expect.poll(() => driver.wsViewsStripVisible(), POLL).toBe(true);
+      return;
+    }
     expect(await driver.wsViewsStripVisible()).toBe(false);
   }
 );
@@ -110,10 +117,10 @@ test(
   specTitle(["VIEW-038"], "locked customs hide display but keep toggle and add; guests see add"),
   { tag: specTags(["VIEW-038"]) },
   async ({ driver }) => {
-    // Gap (mirrors the project locked-row gap): the filter toggle stays
-    // on locked views while Display hides. Gap vs "add ADMIN/MEMBER":
-    // the live detail Add renders for every role incl. guests (the
-    // member-gated + belonged to the dead tab strip).
+    // Intended (VIEW-038, spec §11/§16): a locked custom hides the filter
+    // toggle along with Display and the layout selector, and Add view is
+    // offered only to workspace admins and members. The old app kept the
+    // toggle and showed Add to guests; web_new ships the target.
     const harness = await viewsHarness("parity-w38l");
     const { owner, workspaceSlug } = harness;
     const guest = await viewsSeat(harness, ROLE.GUEST, "parity-w38lg");
@@ -127,14 +134,19 @@ test(
     await wsViewsOpenDetailAs(driver, harness, customId);
     await expect.poll(() => driver.wsViewsDetailTabTitle(), POLL).toContain("All Views");
     expect(await driver.wsViewsDetailDisplayVisible()).toBe(false);
-    expect(await driver.wsViewsDetailFiltersToggleVisible()).toBe(true);
-    expect(await driver.wsViewsDetailAddVisible()).toBe(true);
+    if (driver.target === "web_new") {
+      expect(await driver.wsViewsDetailFiltersToggleVisible()).toBe(false);
+      expect(await driver.wsViewsDetailAddVisible()).toBe(true);
+    } else {
+      expect(await driver.wsViewsDetailFiltersToggleVisible()).toBe(true);
+      expect(await driver.wsViewsDetailAddVisible()).toBe(true);
+    }
     expect((await serverWorkspaceViewDetail(workspaceSlug, customId, owner.cookie)).is_locked).toBe(true);
 
     await wsViewsOpenDetailAs(driver, harness, "all-issues", guest);
     await expect.poll(() => driver.wsViewsDetailTabTitle(), POLL).toContain("All Views");
     expect(await driver.wsViewsDetailErrorTitle()).toBe("");
-    expect(await driver.wsViewsDetailAddVisible()).toBe(true);
+    expect(await driver.wsViewsDetailAddVisible()).toBe(driver.target === "web_new" ? false : true);
   }
 );
 

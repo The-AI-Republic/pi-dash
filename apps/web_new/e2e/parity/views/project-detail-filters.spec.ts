@@ -64,13 +64,14 @@ test(
 );
 
 test(
-  specTitle(["VIEW-025", "VIEW-026"], "locked views hide layout and display but keep a working filter toggle"),
+  specTitle(["VIEW-025", "VIEW-026"], "locked views hide layout, display and the filter toggle"),
   { tag: specTags(["VIEW-025", "VIEW-026"]) },
   async ({ driver }) => {
-    // Gap vs the rows' "no switcher / neither control" wording: the
-    // filter toggle stays visible on locked views while layout and
-    // Display hide; saving stays shut server-side (locked PATCHes fail
-    // with 400) and no Update/Save button offers without a dirty query.
+    // A locked view hides the layout switcher and Display on both apps.
+    // The filter toggle is the target divergence: intended is hidden
+    // (VIEW-025/026 wording, spec §16) and web_new ships that; the old app
+    // keeps it and pins the gap. Add work item and the quick menu stay.
+    // Saving is shut server-side too (locked PATCHes fail with 400).
     const harness = await viewsHarness("parity-vd25l");
     const { owner, workspaceSlug, projectId } = harness;
     const name = `Vd25l Alpha ${harness.tag}`;
@@ -82,7 +83,7 @@ test(
     await expect.poll(() => driver.viewsDetailEmptyTitle(), POLL).toBe("View work items will appear here");
     expect(await driver.viewsDetailLayoutVisible()).toBe(false);
     expect(await driver.viewsDetailDisplayVisible()).toBe(false);
-    expect(await driver.viewsDetailFiltersToggleVisible()).toBe(true);
+    expect(await driver.viewsDetailFiltersToggleVisible()).toBe(driver.target !== "web_new");
     expect(await driver.viewsDetailAddVisible()).toBe(true);
     expect((await serverProjectViewDetail(workspaceSlug, projectId, viewId, owner.cookie)).is_locked).toBe(true);
     await expect(patchProjectView(workspaceSlug, projectId, viewId, owner.cookie, { name })).rejects.toThrow(
@@ -116,6 +117,10 @@ test(
 
     await driver.viewsDetailLayoutPick(1);
     await expect.poll(() => driver.viewsDetailLayoutActive(), POLL).toBe(1);
+    // The board layout supports sub-grouping, so its section is offered
+    // (VIEW-026). Whether the shared Issues panel also withholds it until
+    // a Group by choice exists is the Issues area's rule (ISS-077), not
+    // this row's, and both apps currently show it unconditionally.
     expect(await driver.viewsDetailDisplayOptions()).toContain("Sub-group by");
 
     await patchProject(workspaceSlug, projectId, owner.cookie, { cycle_view: true, module_view: true });

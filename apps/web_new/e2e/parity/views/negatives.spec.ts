@@ -26,6 +26,17 @@ import {
 
 const POLL = { timeout: 60_000 };
 
+// The desktop-runtime endpoints the runner area's request spy watches
+// (`runners/desktop-runtime.spec.ts`): assistant reads, enrollment and the
+// runner chat transport. Views must not reach any of them.
+function desktopRuntimeTraffic(urls: string[]): string[] {
+  return urls.filter(
+    (url) =>
+      url.includes("/api/") &&
+      (url.includes("/ai-assistant/") || url.includes("/desktop-enroll/") || url.includes("/runners/chat/"))
+  );
+}
+
 test.describe("views negative rows", () => {
   test(
     specTitle(["VIEW-043"], "other users' changes never refresh lists or details without a reload"),
@@ -104,17 +115,23 @@ test.describe("views negative rows", () => {
         await expect.poll(() => driver.viewsDialogOpen(), POLL).toBe(false);
       });
 
-      await test.step("bug: NEWFRONT-241 the dialog tabs title, actions, wrap — skipping Description", async () => {
-        // bug: NEWFRONT-241 — the Description field between Title and the
-        // actions never receives focus; the intended order is Title,
-        // Description, then the actions.
+      await test.step("the dialog tab order reaches Title, Description, then the actions", async () => {
+        // bug: NEWFRONT-241 — the old app's Description field between Title
+        // and the actions never receives focus on Tab. Intended (views spec
+        // §15): Title, Description, the remaining fields, then Cancel and
+        // the submit. web_new ships the intended order.
         await viewsOpenListAs(driver, harness);
         await driver.viewsOpenCreateFromHeader();
         await expect.poll(() => driver.viewsDialogOpen(), POLL).toBe(true);
         const order = await driver.viewsDialogTabOrder();
         const joined = order.join("|");
-        expect(joined).toContain("Title|Cancel|Create View");
-        expect(joined).not.toContain("Description");
+        if (driver.target === "web_new") {
+          expect(joined).toContain("Title|Description|");
+          expect(joined).toMatch(/Description\|.*Cancel\|Create View/);
+        } else {
+          expect(joined).toContain("Title|Cancel|Create View");
+          expect(joined).not.toContain("Description");
+        }
         await driver.viewsDialogEscape();
       });
 
@@ -177,6 +194,23 @@ test.describe("views negative rows", () => {
       const seen = `Vdesk Listed ${harness.tag}`;
       const seenId = await createProjectViewFull(workspaceSlug, projectId, owner.cookie, { name: seen });
 
+      // The desktop-target bundle mounts the background runtime supervisor
+      // for every signed-in project page. Opened in a plain browser (no
+      // native bridge) it reports that it cannot reach the bridge — on the
+      // issues page exactly as on views, so the reading is the shell's
+      // state, not a views capability. The scenario therefore proves views
+      // adds nothing: whatever the shell shows on the project's issues
+      // page, the views pages show the same, and no runtime request is
+      // issued from either.
+      const shellNotice = await (async () => {
+        await driver.openAuthenticated(`/${workspaceSlug}/projects/${projectId}/issues`, browserSessionCookies(owner));
+        await driver.page
+          .getByTestId("runtime-notice")
+          .waitFor({ state: "attached", timeout: 15_000 })
+          .catch(() => undefined);
+        return (await driver.page.getByTestId("runtime-notice").count()) > 0;
+      })();
+
       await test.step("no native bridge is exposed to the page", async () => {
         await viewsOpenListAs(driver, harness);
         expect(await driver.desktopRuntimeIsTauriPresent()).toBe(false);
@@ -190,9 +224,12 @@ test.describe("views negative rows", () => {
         await expect.poll(() => driver.viewsDetailTabTitle(), POLL).toBe(`${projectName} - ${seen}`);
         await driver.viewsDetailSwitcherOpen(seen);
         expect(await driver.viewsDetailSwitcherOptions()).toContain(seen);
-        expect(await driver.desktopRuntimeSpyUrls()).toEqual([]);
-        expect(await driver.desktopRuntimeRuntimeBannerVisible()).toBe(false);
+        expect(desktopRuntimeTraffic(await driver.desktopRuntimeSpyUrls())).toEqual([]);
+        // Same shell notice as the project's issues page — present only
+        // because the desktop bundle cannot find its bridge here.
+        expect(await driver.desktopRuntimeRuntimeBannerVisible()).toBe(shellNotice);
         expect(await driver.desktopRuntimeIsTauriPresent()).toBe(false);
+        await driver.desktopRuntimeStopRequestSpy();
       });
     }
   );
