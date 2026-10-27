@@ -417,3 +417,76 @@ describe("web_new visible issue names", () => {
     expect(roles).toContainEqual({ role: "main", name: undefined });
   });
 });
+
+describe("web_new calendar options picker", () => {
+  function optionsPage(optionVisible: boolean, clicks: string[]): Page {
+    const option = locator({
+      isVisible: async () => optionVisible,
+      click: async () => {
+        clicks.push("option");
+      },
+    });
+    const optionsButton = locator({
+      click: async () => {
+        clicks.push("options");
+      },
+    });
+    const root = locator({ getByRole: () => optionsButton });
+    return {
+      getByRole: (role: string, options?: Record<string, unknown>) =>
+        role === "button" && options?.["name"] !== "Options" ? option : locator(),
+      getByTestId: () => root,
+      waitForTimeout: async () => undefined,
+    } as unknown as Page;
+  }
+
+  it("clicks an already-visible option without toggling Options shut", async () => {
+    const clicks: string[] = [];
+    await new WebNewDriver(optionsPage(true, clicks)).layoutsCalSetMode("week");
+    expect(clicks).toEqual(["option"]);
+  });
+
+  it("opens the panel first when the option is not visible", async () => {
+    const clicks: string[] = [];
+    await new WebNewDriver(optionsPage(false, clicks)).layoutsCalSetMode("week");
+    expect(clicks).toEqual(["options", "option"]);
+  });
+});
+
+describe("web_new calendar month picker", () => {
+  function pickerPage(initiallyOpen: boolean, clicks: string[]): Page {
+    let open = initiallyOpen;
+    const months = locator({
+      count: async () => 2,
+      nth: (index: number) => locator({ innerText: async () => ["Jan", "Feb"][index] ?? "" }),
+    });
+    const panel = locator({
+      isVisible: async () => open,
+      getByTestId: () => months,
+    });
+    const title = locator({
+      click: async () => {
+        clicks.push("title");
+        open = !open;
+      },
+    });
+    return {
+      getByTestId: (id: string) => (id === "calendar-month-picker" ? panel : title),
+      waitForTimeout: async () => undefined,
+    } as unknown as Page;
+  }
+
+  it("opens a closed picker and toggles it shut on close", async () => {
+    const clicks: string[] = [];
+    const driver = new WebNewDriver(pickerPage(false, clicks));
+    await expect(driver.layoutsCalMonthPickerMonths()).resolves.toEqual(["Jan", "Feb"]);
+    expect(clicks).toEqual(["title", "title"]);
+  });
+
+  it("reuses an open picker and only clicks to close it", async () => {
+    const clicks: string[] = [];
+    const driver = new WebNewDriver(pickerPage(true, clicks));
+    await expect(driver.layoutsCalMonthPickerMonths()).resolves.toEqual(["Jan", "Feb"]);
+    expect(clicks).toEqual(["title"]);
+  });
+});

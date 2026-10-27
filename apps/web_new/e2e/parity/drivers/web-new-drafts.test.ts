@@ -326,6 +326,15 @@ describe("create, copy and edit dialogs", () => {
     expectTrace(recorder.trace(), ['count page.getByRole("dialog")', 'getByText("Add to project"', "count", DIALOG]);
   });
 
+  it("searches every open dialog, not just the create form", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method }) => (method === "count" ? 1 : undefined);
+    await expect(new WebNewDriver(recorder.page()).modalTextContains("Set a parent")).resolves.toBe(true);
+    // Picker and confirm dialogs carry no Title field; a create-dialog
+    // filter would blind the read to them (ISS-122/134/135/136).
+    expect(recorder.trace().join("\n")).not.toContain(".filter(");
+  });
+
   it("reads the dialog heading, or blank when it is closed", async () => {
     const recorder = new Recorder();
     recorder.respond = ({ method }) => (method === "textContent" ? " Create a draft " : undefined);

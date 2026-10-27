@@ -813,6 +813,7 @@ describe("web_new project list branches", () => {
     await new WebNewDriver(stub.page).layoutsReloadIssues();
     expect(stub.testIds).toEqual(["profile-list"]);
     expect(stub.selectors[0]).toContain('[data-testid="list-group-header"]');
+    expect(stub.selectors[0]).toContain('[data-testid="issues-calendar"]');
   });
 
   it("reads profile groups from their markers", async () => {

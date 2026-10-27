@@ -2218,7 +2218,10 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async modalTextContains(text: string): Promise<boolean> {
-    return (await this.createDialog().getByText(text, { exact: false }).count()) > 0;
+    // Search every open dialog like the oracle: pickers mount as sibling
+    // dialogs above the create form, and confirm dialogs carry no Title
+    // field at all, so the create-dialog scope misses both (ISS-122/134/135/136).
+    return (await this.page.getByRole("dialog").getByText(text, { exact: false }).count()) > 0;
   }
 
   async confirmSaveDraft(): Promise<void> {
@@ -9044,7 +9047,7 @@ export class WebNewDriver implements ParityDriver {
     // stall (the sub-issue query fires only after the list resolves).
     await this.page
       .locator(
-        '[data-testid="profile-list"], [data-testid="list-group-header"], [data-testid="list-row"], [data-testid="empty-state"], [data-testid="spreadsheet-scroller"], [data-testid="kanban-layout"], [data-testid="gantt-layout"], [data-testid="list-loading"], [data-testid="section-loading"]'
+        '[data-testid="profile-list"], [data-testid="list-group-header"], [data-testid="list-row"], [data-testid="empty-state"], [data-testid="spreadsheet-scroller"], [data-testid="kanban-layout"], [data-testid="gantt-layout"], [data-testid="calendar-layout"], [data-testid="issues-calendar"], [data-testid="list-loading"], [data-testid="section-loading"]'
       )
       .first()
       .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
@@ -10008,14 +10011,25 @@ export class WebNewDriver implements ParityDriver {
   }
 
   private async layoutsCalOpenMonthPicker(): Promise<Locator> {
-    await this.page.getByTestId("calendar-title").first().click();
     const panel = this.page.getByTestId("calendar-month-picker").first();
-    await panel.waitFor({ state: "visible", timeout: 15_000 });
+    // The title toggles the panel: clicking while it is already open
+    // (left open by a previous read) shuts it and the wait below times
+    // out. Only click when the panel is not visible.
+    if (!(await panel.isVisible())) {
+      await this.page.getByTestId("calendar-title").first().click();
+      await panel.waitFor({ state: "visible", timeout: 15_000 });
+    }
     return panel;
   }
 
   private async layoutsCalCloseOverlay(): Promise<void> {
-    await this.page.keyboard.press("Escape");
+    // Escape does not dismiss this panel (probed: it stays open), while
+    // a title click toggles it shut. Close by toggling only when open.
+    const panel = this.page.getByTestId("calendar-month-picker").first();
+    if (await panel.isVisible()) {
+      await this.page.getByTestId("calendar-title").first().click();
+      await panel.waitFor({ state: "hidden", timeout: 15_000 });
+    }
   }
 
   async layoutsCalMonthPickerMonths(): Promise<string[]> {
@@ -10080,15 +10094,21 @@ export class WebNewDriver implements ParityDriver {
   }
 
   private async layoutsCalPickOption(name: string): Promise<void> {
-    await this.layoutsCalRoot()
-      .getByRole("button", { name: "Options", exact: true })
-      .first()
-      .click({ timeout: WEB_NEW_LAYOUTS_WAIT_MS })
-      .catch(async () => {
-        await this.page.getByLabel("Calendar options").first().click({ timeout: WEB_NEW_LAYOUTS_WAIT_MS });
-      });
     const option = this.page.getByRole("button", { name, exact: true }).first();
-    await option.waitFor({ state: "visible", timeout: 15_000 });
+    // The Options control toggles its panel: clicking it while the panel
+    // is still open from a previous pick shuts the panel and the option
+    // never appears. When the option is already visible, click it
+    // directly; only open the panel when it is not.
+    if (!(await option.isVisible())) {
+      await this.layoutsCalRoot()
+        .getByRole("button", { name: "Options", exact: true })
+        .first()
+        .click({ timeout: WEB_NEW_LAYOUTS_WAIT_MS })
+        .catch(async () => {
+          await this.page.getByLabel("Calendar options").first().click({ timeout: WEB_NEW_LAYOUTS_WAIT_MS });
+        });
+      await option.waitFor({ state: "visible", timeout: 15_000 });
+    }
     await option.click({ timeout: WebNewDriver.WAIT_MS });
   }
 
