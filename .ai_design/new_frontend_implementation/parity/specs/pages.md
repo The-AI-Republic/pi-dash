@@ -163,7 +163,7 @@ pages the guest does not own land on the not-found panel (§4.2).
   up across the locked state (PAGE-058): the freeze broadcast leaves over
   its socket after the server confirms, so tearing the session down on the
   optimistic freeze would strand peers editable. The locked face stays
-  read-only; only the socket lifetime extends.
+  read-only behind the live binding (PAGE-053).
 - **Archive** is `archived_at` (a timestamp or null). Archiving is
   optimistic; restoring clears it. Archiving drops every user favourite row
   for that page. A page's archive marker reads as a dated line in its header

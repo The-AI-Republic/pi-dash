@@ -21899,10 +21899,11 @@ export class WebNewDriver implements ParityDriver {
 
   async pagesLiveWaitSynced(): Promise<void> {
     await expect.poll(async () => this.pagesLiveSyncBadge(), { timeout: 60_000 }).toBeNull();
-    // Read-only pages (archived, locked, or guest-viewed) mount the static
-    // face instead of the live editor (NEWFRONT-940): settle on whichever
-    // face mounts first, and fail only when both miss their budget (a race
-    // would let one face's early rejection mask the other's mount).
+    // The editable body region only mounts where the viewer can edit; a
+    // locked, archived, or guest-viewed page settles on its read-only
+    // face instead (NEWFRONT-940). Wait for whichever mounts first and
+    // fail only when both miss their budget (a race would let one face's
+    // early rejection mask the other's mount).
     const settled = await Promise.any([
       this.pagesLiveBodyEditor().first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS }),
       this.page
