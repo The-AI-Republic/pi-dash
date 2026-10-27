@@ -86,9 +86,24 @@ belongs to slice NEWFRONT-553 (§9).
 The naming inconsistency (RUN-005, bug NEWFRONT-191) is confirmed and wider
 than one label: the rail header and the page title use one area name while
 the project breadcrumb and header use another, and the in-page headings and
-the CLI verb use a third. Parity settles on one canonical name; the scenario
-pins the current names and the follow-up decides. No behavior change is
-implied by this row.
+the CLI verb use a third. NEWFRONT-191 has now settled it (decision D27):
+**AI Workers** is the one canonical user-facing name for this area, on every
+surface — browser title, rail header, project breadcrumb and header, in-page
+headings, project sidebar entry, project-settings tab and our documentation.
+
+Three things do not change with the display name. "Runner" stays the
+technical noun of an individual agent host: the CLI verb (`pidash runner
+add`), the `/api/runners/…` paths, the `Runner` model and our code
+identifiers keep it. A pod stays "pods" and a run stays "runs"; they are not
+renamed. And the agents area (schedulers, prompts, assistant) keeps its own
+name, which is why "AI Agents" is not available for this one.
+
+The rename is deliberately not built here: RUN-005 still pins the current
+split names as the bug the oracle observes, and the rename lands as its own
+follow-up slice (linked as NEWFRONT-946). Until that slice runs, the new
+app keeps rendering "AI Agents" in the title and rail, "AI Workers" in the
+project breadcrumb/sidebar/tab, and "Runners" in the overview heading, exactly
+as the oracle expects. No behavior change is implied by this row.
 
 Each runner row (RUN-010) links to the runner detail and offers Delete
 always and Revoke only for an enrolled, not-already-revoked runner — the
@@ -664,7 +679,9 @@ silently; each names its tracker.
 - NEWFRONT-191 (RUN-005): the area shows three different names across the
   rail header and page title, the project breadcrumb and header, and the
   in-page headings with the CLI verb. Target: one canonical name on every
-  surface (§1).
+  surface (§1). Decided (D27): the name is **AI Workers**; keep "runner" as
+  the technical noun for a host (CLI verb, API paths, model, code). The
+  rename itself is a follow-up slice, not this issue (NEWFRONT-946).
 - NEWFRONT-297 (RUN-024): every approval decide call currently errors
   server-side, so the acted card stays with a failure toast. Target: the
   card drops off on refetch with the decision persisted (§5).
