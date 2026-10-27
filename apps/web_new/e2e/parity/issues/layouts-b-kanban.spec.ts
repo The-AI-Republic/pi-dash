@@ -1158,26 +1158,54 @@ test(
     const states = await serverListStates(seed.workspaceSlug, projectId, owner.cookie);
     const home = states.find((state) => state.isDefault) ?? states[0];
     if (!home) throw new Error("[parity] scratch project has no states.");
-    const aId = await serverCreateIssue(seed.workspaceSlug, projectId, owner.cookie, `KB dates a ${suffix}`, home.id);
-    const bId = await serverCreateIssue(seed.workspaceSlug, projectId, owner.cookie, `KB dates b ${suffix}`, home.id);
-    const cId = await serverCreateIssue(seed.workspaceSlug, projectId, owner.cookie, `KB dates c ${suffix}`, home.id);
+    const nameA = `KB dates a ${suffix}`;
+    const nameB = `KB dates b ${suffix}`;
+    const nameC = `KB dates c ${suffix}`;
+    const aId = await serverCreateIssue(seed.workspaceSlug, projectId, owner.cookie, nameA, home.id);
+    const bId = await serverCreateIssue(seed.workspaceSlug, projectId, owner.cookie, nameB, home.id);
+    const cId = await serverCreateIssue(seed.workspaceSlug, projectId, owner.cookie, nameC, home.id);
     await serverPatchIssue(seed.workspaceSlug, projectId, aId, { target_date: "2026-12-01" }, owner.cookie);
     await serverPatchIssue(seed.workspaceSlug, projectId, bId, { target_date: "2026-12-02" }, owner.cookie);
     await serverPatchIssue(seed.workspaceSlug, projectId, cId, { target_date: "2026-12-03" }, owner.cookie);
     const ctx = await openBoard(driver, seed, projectId, { group_by: "state" });
 
-    await test.step("the dated lanes never mount", async () => {
-      // Intended: one swimlane per target date with its issue as a card.
-      // Pinned: the sub-grouped fetch succeeds but the board body stays
-      // blank — no lanes ever mount (NEWFRONT-159). Bounded: the flat
-      // board above warms the host, and a healthy board mounts lanes in
-      // seconds once kanban is active, so 60 empty seconds is the crash.
+    await test.step("the dated lanes mount on web_new but never mount on the oracle", async () => {
+      // Intended (NEWFRONT-159): one swimlane per target date with its
+      // issue as a card; web_new implements it. The bug: title still marks
+      // the oracle leg, which pins the old crash: the sub-grouped fetch
+      // succeeds but the board body stays blank — no lanes ever mount.
+      // Bounded: the flat board above warms the host, and a healthy board
+      // mounts lanes in seconds once kanban is active, so 60 empty seconds
+      // is the crash.
       const current = await serverProjectUserProperties(seed.workspaceSlug, projectId, ctx.user.cookie);
       await serverPatchProjectUserProperties(seed.workspaceSlug, projectId, ctx.user.cookie, {
         display_filters: { ...current.displayFilters, sub_group_by: "target_date" },
       });
       await boardReloadWithRetry(driver);
       await expect.poll(() => driver.boardActiveLayout(), { timeout: 120_000 }).toBe("kanban");
+      if (driver.target === "web_new") {
+        await expect.poll(() => driver.kanbanSwimlanes(), { timeout: 120_000 }).toHaveLength(3);
+        const lanes = await driver.kanbanSwimlanes();
+        expect(lanes.map((entry) => entry.name).sort()).toEqual(["Dec 1, 2026", "Dec 2, 2026", "Dec 3, 2026"]);
+        expect(lanes.find((entry) => entry.name === "Dec 1, 2026")?.count).toBe(1);
+        expect(lanes.find((entry) => entry.name === "Dec 2, 2026")?.count).toBe(1);
+        expect(lanes.find((entry) => entry.name === "Dec 3, 2026")?.count).toBe(1);
+        // Lane cells load lazily, so poll until each date cell holds its
+        // own card instead of reading once.
+        await expect
+          .poll(
+            async () => [
+              await driver.kanbanCellCards(home.name, "Dec 1, 2026"),
+              await driver.kanbanCellCards(home.name, "Dec 2, 2026"),
+              await driver.kanbanCellCards(home.name, "Dec 3, 2026"),
+            ],
+            { timeout: 120_000 }
+          )
+          .toEqual([[nameA], [nameB], [nameC]]);
+        const rows = await serverIssues(seed.workspaceSlug, projectId, owner.cookie);
+        expect(rows).toHaveLength(3);
+        return;
+      }
       let mounted = false;
       try {
         await expect.poll(() => driver.kanbanSwimlanes(), { timeout: 60_000 }).not.toHaveLength(0);
