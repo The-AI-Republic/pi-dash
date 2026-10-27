@@ -1253,35 +1253,34 @@ async fn process_workspace_project_invitations(
         // `ProjectMember` write omits `project_id` although the column is
         // NOT NULL — Postgres raises `IntegrityError` despite
         // `ignore_conflicts=True`.
-        let moment = now.to_rfc3339();
-        let mut values: Vec<String> = Vec::with_capacity(project_invites.len());
-        for invite in &project_invites {
-            let created_by = invite
-                .created_by_id
-                .map(|id| format!("'{id}'"))
-                .unwrap_or_else(|| "NULL".to_owned());
-            values.push(format!(
-                "('{}', '{moment}', '{moment}', {created_by}, NULL, NULL, '{}', '{}', NULL, {}, \
-                 '{props}', '{props}', '{prefs}', 65535.0, TRUE)",
-                uuid::Uuid::new_v4(),
-                invite.workspace_id,
-                user.id,
-                map_invite_role(invite.role),
-                props = project_default_props(),
-                prefs = project_default_preferences(),
-            ));
-        }
-        let sql = format!(
-            "INSERT INTO \"project_members\" (\"id\", \"created_at\", \"updated_at\", \
-             \"created_by_id\", \"updated_by_id\", \"deleted_at\", \"workspace_id\", \"member_id\", \
-             \"comment\", \"role\", \"view_props\", \"default_props\", \"preferences\", \
-             \"sort_order\", \"is_active\") \
-             VALUES {} ON CONFLICT DO NOTHING",
-            values.join(", ")
-        );
+        let props: serde_json::Value =
+            serde_json::from_str(project_default_props()).map_err(|_| server_error())?;
+        let prefs: serde_json::Value =
+            serde_json::from_str(project_default_preferences()).map_err(|_| server_error())?;
+        let bulk: Vec<pidash_services::domain::projects::members::BulkRow> = project_invites
+            .iter()
+            .map(|invite| {
+                pidash_services::domain::projects::members::BulkRow {
+                    workspace_id: invite.workspace_id,
+                    // PB-1008: the explicit `NULL` raises the same 23502
+                    // the omitted column raises (identical message,
+                    // identical effect).
+                    project_id: None,
+                    user_id: user.id,
+                    role: pidash_services::domain::projects::members::RoleBind::Int(i64::from(
+                        map_invite_role(invite.role),
+                    )),
+                    created_by: invite.created_by_id,
+                    created_at: now,
+                    updated_at: now,
+                }
+            })
+            .collect();
         // The missing `project_id` raises here when the arm fires — the
         // earlier writes above already committed (no transaction).
-        sqlx::query(&sql).execute(pool).await.map_err(map_err)?;
+        pidash_services::domain::projects::members::bulk_add(pool, &bulk, &props, &prefs, false)
+            .await
+            .map_err(map_err)?;
     }
 
     // Both querysets are (soft-)deleted after the joins (`:90-91`): the

@@ -51,7 +51,7 @@
 //!   overwrites `sequence` with `max(project sequences)+15000` whenever the
 //!   project already has states, so the auto-created Triage keeps `65000`
 //!   only on an empty project. `slug` is likewise filled (`"triage"`).
-//!   [`triage_insert_sql`] emits the explicit create kwargs; the reseed is
+//!   The triage INSERT moved to `domain::projects::states`; the reseed is
 //!   handler work.
 //! * QUIRK-unconditional-comment-id (`asset.py:110-119`): post stuffs
 //!   `entity_identifier` into `comment_id` for EVERY entity type, even
@@ -213,36 +213,6 @@ pub fn intake_issue_prefetch_sql() -> String {
 /// (`:129`) feeds `.first()`. `$1` = project id, `$2` = workspace id.
 pub fn triage_lookup_sql() -> String {
     "SELECT \"states\".* FROM \"states\" WHERE (\"states\".\"deleted_at\" IS NULL AND \"states\".\"group\" = 'triage' AND \"states\".\"project_id\" = $1 AND \"states\".\"workspace_id\" = $2) ORDER BY \"states\".\"sequence\" ASC LIMIT 1".to_string()
-}
-
-/// N3 triage auto-create exact defaults (`views/intake.py:134-142`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TriageDefaults {
-    pub name: String,
-    pub group: String,
-    pub color: String,
-    pub sequence: f64,
-    pub default: bool,
-}
-
-/// The literal defaults from `intake.py:134-142`: `name="Triage"`,
-/// `group=StateGroup.TRIAGE`, `color="#4E5355"`, `sequence=65000`,
-/// `default=False` (project/workspace come from the board row).
-pub fn triage_defaults() -> TriageDefaults {
-    TriageDefaults {
-        name: "Triage".to_string(),
-        group: "triage".to_string(),
-        color: "#4E5355".to_string(),
-        sequence: 65000.0,
-        default: false,
-    }
-}
-
-/// N3 triage INSERT column set (`views/intake.py:134-142`). `$1` = id, `$2`
-/// = created_at, `$3` = updated_at, `$4` = project id, `$5` = workspace id;
-/// name/group/color/sequence/default are the [`triage_defaults`] literals.
-pub fn triage_insert_sql() -> String {
-    "INSERT INTO \"states\" (\"id\", \"created_at\", \"updated_at\", \"name\", \"group\", \"project_id\", \"workspace_id\", \"color\", \"sequence\", \"default\") VALUES ($1, $2, $3, 'Triage', 'triage', $4, $5, '#4E5355', 65000, false)".to_string()
 }
 
 /// N3 Issue INSERT (`views/intake.py:145-152`). `$1` = id, `$2` =
@@ -570,15 +540,6 @@ mod tests {
         let sql = triage_lookup_sql();
         assert!(sql.contains("\"group\" = 'triage'"));
         assert!(sql.ends_with("ORDER BY \"states\".\"sequence\" ASC LIMIT 1"));
-        let defaults = triage_defaults();
-        assert_eq!(defaults.name, "Triage");
-        assert_eq!(defaults.group, "triage");
-        assert_eq!(defaults.color, "#4E5355");
-        assert_eq!(defaults.sequence, 65000.0);
-        assert!(!defaults.default);
-        let insert = triage_insert_sql();
-        assert!(insert.contains("'Triage', 'triage'"));
-        assert!(insert.contains("'#4E5355', 65000, false"));
     }
 
     #[test]

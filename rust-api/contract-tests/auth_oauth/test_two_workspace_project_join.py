@@ -398,9 +398,10 @@ def _assert_workspace_phases_first(path: Path, fetch_marker: str, end_marker: st
     )
     # Match the write statements, not bare table names (comments name the
     # tables too). ORM-07 moved the workspace write into
-    # `domain::workspaces::members`, so the pin matches the domain call.
+    # `domain::workspaces::members` and the project write into
+    # `domain::projects::members`, so the pin matches the domain calls.
     ws_m = re.search(r"members::(add|bulk_add)\b", block)
-    proj_m = re.search(r"INSERT\s+INTO\s+\"?project_members\"?", block)
+    proj_m = re.search(r"projects::members::(add|bulk_add)\b", block)
     assert ws_m is not None and proj_m is not None, (
         "harness: workspace/project write statements not found in the block"
     )

@@ -109,6 +109,7 @@ use super::gates;
 use crate::middleware::SessionHandle;
 use crate::paginator::py_float_str;
 use crate::state::AppState;
+use pidash_services::domain::projects::members as project_members;
 
 // ---------------------------------------------------------------------------
 // Exact bodies (F-W24-15 `errors`, byte-pinned in `tests` below)
@@ -2896,23 +2897,13 @@ fn encode_random_password() -> String {
 
 /// Bulk-deactivate statement for one pk chunk: the builder's `IN
 /// (:pks)` expands to a positional list. An empty chunk issues no
-/// statement (the caller skips it).
-fn bulk_deactivate_statement(table: &str, chunk_len: usize) -> String {
+/// statement (the caller skips it). Workspace rows only — the
+/// project arm moved to `domain::projects::members`.
+fn bulk_deactivate_statement(chunk_len: usize) -> String {
     let placeholders: Vec<String> = (1..=chunk_len).map(|n| format!("${n}")).collect();
-    let (prefix, suffix) = if table == "project_members" {
-        (
-            queries_user::project_bulk_deactivate_sql(),
-            "project_members.id IN (:pks)",
-        )
-    } else {
-        (
-            queries_user::workspace_bulk_deactivate_sql(),
-            "workspace_members.id IN (:pks)",
-        )
-    };
-    prefix.replace(
-        suffix,
-        &format!("{table}.id IN ({})", placeholders.join(", ")),
+    queries_user::workspace_bulk_deactivate_sql().replace(
+        "workspace_members.id IN (:pks)",
+        &format!("workspace_members.id IN ({})", placeholders.join(", ")),
     )
 }
 
@@ -2931,12 +2922,12 @@ fn invite_purge_statement() -> String {
 
 /// Run the bulk deactivation in `batch_size=100` chunks (bug 5: no
 /// `updated_at`, no `deleted_at` filter, pk-direct).
-async fn bulk_deactivate(pool: &PgPool, table: &str, ids: &[uuid::Uuid]) -> Result<(), Denial> {
+async fn bulk_deactivate(pool: &PgPool, ids: &[uuid::Uuid]) -> Result<(), Denial> {
     for chunk in ids.chunks(queries_user::BULK_DEACTIVATE_BATCH_SIZE) {
         if chunk.is_empty() {
             continue;
         }
-        let sql = bulk_deactivate_statement(table, chunk.len());
+        let sql = bulk_deactivate_statement(chunk.len());
         let mut query = sqlx::query(&sql);
         for id in chunk {
             query = query.bind(*id);
@@ -3054,10 +3045,13 @@ pub async fn me_deactivate(
             );
         }
     }
-    if let Err(denial) = bulk_deactivate(pool, "project_members", &project_ids).await {
+    if let Err(denial) = project_members::deactivate_many(pool, &project_ids)
+        .await
+        .map_err(|_| Denial::ServerError)
+    {
         return denial.into_response();
     }
-    if let Err(denial) = bulk_deactivate(pool, "workspace_members", &workspace_ids).await {
+    if let Err(denial) = bulk_deactivate(pool, &workspace_ids).await {
         return denial.into_response();
     }
     // One `:now` sample for the run (the `queries_user` contract —
@@ -3793,14 +3787,10 @@ mod tests {
     #[test]
     fn bulk_statement_expands_one_placeholder_per_id() {
         assert_eq!(
-            bulk_deactivate_statement("project_members", 2),
-            "UPDATE project_members SET is_active = FALSE WHERE project_members.id IN ($1, $2)"
-        );
-        assert_eq!(
-            bulk_deactivate_statement("workspace_members", 1),
+            bulk_deactivate_statement(1),
             "UPDATE workspace_members SET is_active = FALSE WHERE workspace_members.id IN ($1)"
         );
-        let wide = bulk_deactivate_statement("project_members", 100);
+        let wide = bulk_deactivate_statement(100);
         assert!(wide.contains("$100"));
         assert!(!wide.contains("$101"));
     }

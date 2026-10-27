@@ -221,17 +221,6 @@ pub fn member_write_target_where() -> String {
 /// 5` — the literal `5`, verbatim.
 pub const GUEST_DEMOTE_ROLE: i32 = 5;
 
-/// R4 guest-demote cascade (`:89`): `UPDATE project_members SET role=5
-/// WHERE workspace__slug=:slug AND member_id=:target`. Ported bug 3: NO
-/// `is_active` filter — inactive project rows are rewritten too. The
-/// `deleted_at` guard comes from the default manager underneath.
-pub fn guest_demote_cascade_sql() -> String {
-    format!(
-        "UPDATE project_members SET role = 5 WHERE project_members.workspace_id = {} AND project_members.member_id = :target AND project_members.deleted_at IS NULL",
-        workspace_id_by_slug_sql()
-    )
-}
-
 // ---------------------------------------------------------------------------
 // R5 destroy / R6 leave guards + deactivations (member.py:98-205)
 // ---------------------------------------------------------------------------
@@ -257,16 +246,6 @@ pub fn sole_project_admin_exists_sql(member_param: &str) -> String {
 /// Strict less — equal roles CAN remove (ported bug 5).
 pub fn can_remove(requester_role: i32, target_role: i32) -> bool {
     requester_role >= target_role
-}
-
-/// R5/R6 project deactivation (`:144-146` + `:198-200`): `UPDATE
-/// project_members SET is_active=FALSE, updated_at=:now WHERE
-/// workspace__slug=:slug AND member_id=:target AND is_active=TRUE`.
-pub fn project_deactivate_sql() -> String {
-    format!(
-        "UPDATE project_members SET is_active = FALSE, updated_at = :now WHERE project_members.workspace_id = {} AND project_members.member_id = :target AND project_members.is_active = TRUE AND project_members.deleted_at IS NULL",
-        workspace_id_by_slug_sql()
-    )
 }
 
 /// R6 sole-workspace-admin count (`:167`): active admins in the workspace.
@@ -711,9 +690,7 @@ mod tests {
             member_requester_where(),
             member_retrieve_target_where(),
             member_write_target_where(),
-            guest_demote_cascade_sql(),
             sole_project_admin_exists_sql(":wm_pk"),
-            project_deactivate_sql(),
             sole_workspace_admin_count_sql(),
             me_lookup_where(),
             draft_count_annotation_sql(),
@@ -803,12 +780,9 @@ mod tests {
         ] {
             assert!(target.contains(needle), "missing {needle}");
         }
-        // Ported bug 3: NO is_active filter on the cascade.
+        // Ported bug 3: NO is_active filter on the cascade (the
+        // cascade itself moved to `domain::projects::members`).
         assert_eq!(GUEST_DEMOTE_ROLE, 5);
-        let cascade = guest_demote_cascade_sql();
-        assert!(cascade.contains("UPDATE project_members SET role = 5"));
-        assert!(cascade.contains("project_members.member_id = :target"));
-        assert!(!cascade.contains("is_active"));
     }
 
     #[test]
@@ -829,10 +803,8 @@ mod tests {
         assert!(can_remove(20, 20));
         assert!(can_remove(15, 5));
         assert!(!can_remove(5, 15));
-        // Deactivations answer 204.
-        let projects = project_deactivate_sql();
-        assert!(projects.contains("SET is_active = FALSE, updated_at = :now"));
-        assert!(projects.contains("project_members.is_active = TRUE"));
+        // Deactivations answer 204 (the project UPDATE moved to
+        // `domain::projects::members`).
     }
 
     #[test]

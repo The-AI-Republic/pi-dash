@@ -4270,21 +4270,21 @@ async fn ensure_triage(
     let sequence = max_sequence
         .map(|max| max + 15000.0)
         .unwrap_or(intake_queries::TRIAGE_SEQUENCE_FALLBACK);
-    let id = Uuid::new_v4();
     let created_at = cycle_mod::micros_now();
     let updated_at = cycle_mod::micros_now();
-    let result = sqlx::query(&intake_queries::triage_insert_sql())
-        .bind(id)
-        .bind(created_at)
-        .bind(updated_at)
-        .bind(project.id)
-        .bind(project.workspace_id)
-        .bind(user_id)
-        .bind(sequence)
-        .execute(pool)
-        .await;
+    let result = pidash_services::domain::projects::states::add_triage(
+        pool,
+        project.id,
+        project.workspace_id,
+        sequence,
+        *user_id,
+        created_at,
+        updated_at,
+        pidash_services::domain::projects::states::TriageText::Full,
+    )
+    .await;
     match result {
-        Ok(_) => Ok(id),
+        Ok(id) => Ok(id),
         Err(error) if is_unique_violation(&error) => Err(Denial::PayloadInvalid),
         Err(_) => Err(Denial::ServerError),
     }

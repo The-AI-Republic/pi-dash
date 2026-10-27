@@ -15,7 +15,6 @@
 //!   get_queryset` (`:233-253`), identical to the list shape, plus
 //!   the retrieve `.get(issue_id=...)` (`:277`).
 //! * [`triage_lookup_sql`] / [`triage_max_sequence_sql`] /
-//!   [`triage_insert_sql`] — the triage-state get-or-create (`:173-184`),
 //!   including the `State.save` resequence read (`max + 15000`).
 //! * [`label_ids_fragment`] / [`patch_assignee_ids_fragment`] /
 //!   [`patch_issue_lookup_sql`] — the patch `ArrayAgg` annotations
@@ -113,13 +112,6 @@ pub const PROJECT_MEMBER_TABLE: &str = "project_members";
 /// Default `order_by` kwarg (`views/intake.py:82,252`).
 pub const DEFAULT_ORDER: &str = "-created_at";
 
-/// Triage-state row literals (`views/intake.py:176-184`,
-/// `db/models/state.py:70-78`).
-pub const TRIAGE_NAME: &str = "Triage";
-/// Stored group string (`StateGroup.TRIAGE.value`, lowercase).
-pub const TRIAGE_GROUP: &str = "triage";
-/// Stored color literal.
-pub const TRIAGE_COLOR: &str = "#4E5355";
 /// Sequence fallback: `State.save` (`db/models/state.py:131-139`)
 /// overwrites the passed `65000` with `max + 15000` whenever the
 /// project already has a live non-triage state; the literal survives
@@ -304,32 +296,6 @@ pub fn triage_max_sequence_sql() -> String {
     )
 }
 
-/// `State.objects.create(name='Triage', group='triage', ...)`
-/// (`views/intake.py:176-184`) as SQL text. Columns follow the
-/// `states` Django field order; the fixed literals are the exact
-/// call-site values. `slug` is `'triage'`: `create` runs `save`,
-/// which sets `slugify("Triage")` (`db/models/state.py:130-131`).
-/// `description` stores `''` (`TextField(blank=True)`, no
-/// `null=True`); `is_triage`/`default` store `FALSE` (field
-/// defaults, not passed at the call site). `created_by_id` is the
-/// crum request user (`BaseModel.save`, `db/models/base.py:23-44`)
-/// and `sequence` is the resequenced value (see
-/// [`triage_max_sequence_sql`]) — both are binds, not literals
-/// (PIDASHCONV-1404).
-///
-/// Bind contract: `$1` id, `$2` created_at, `$3` updated_at,
-/// `$4` project id, `$5` workspace id, `$6` created_by id,
-/// `$7` sequence.
-pub fn triage_insert_sql() -> String {
-    format!(
-        r#"INSERT INTO "{t}" ("id", "created_at", "updated_at", "created_by_id", "updated_by_id", "deleted_at", "project_id", "workspace_id", "name", "description", "color", "slug", "sequence", "group", "is_triage", "default", "external_source", "external_id") VALUES ($1, $2, $3, $6, NULL, NULL, $4, $5, '{n}', '', '{c}', 'triage', $7, '{g}', FALSE, FALSE, NULL, NULL)"#,
-        t = state::TABLE,
-        n = TRIAGE_NAME,
-        c = TRIAGE_COLOR,
-        g = TRIAGE_GROUP,
-    )
-}
-
 // ---------------------------------------------------------------------------
 // Units 4-5 — patch ArrayAgg annotations (views/intake.py:350-371)
 // ---------------------------------------------------------------------------
@@ -510,26 +476,6 @@ mod tests {
         assert!(sql.contains(r#""states"."project_id" = $1"#), "{sql}");
         assert!(sql.contains(r#""states"."group" != 'triage'"#), "{sql}");
         assert!(sql.contains(r#""states"."deleted_at" IS NULL"#), "{sql}");
-    }
-
-    #[test]
-    fn triage_insert_carries_call_site_literals() {
-        // fx-q-intake triage_get_or_create (`views/intake.py:176-184`):
-        // name Triage, group triage, color #4E5355, default false.
-        // `created_by` ($6) and `sequence` ($7) are binds: `save()`
-        // stamps the crum user and resequences to `max + 15000`
-        // (PIDASHCONV-1404).
-        let sql = triage_insert_sql();
-        assert!(sql.starts_with(r#"INSERT INTO "states""#), "{sql}");
-        assert!(sql.contains("'Triage'"), "{sql}");
-        assert!(sql.contains("'triage'"), "{sql}");
-        assert!(sql.contains("'#4E5355'"), "{sql}");
-        assert!(!sql.contains("65000"), "{sql}");
-        assert!(sql.contains("$4, $5"), "{sql}");
-        assert!(sql.contains("$6"), "{sql}");
-        assert!(sql.contains("$7"), "{sql}");
-        // Plain create (not get_or_create): no ON CONFLICT clause.
-        assert!(!sql.contains("ON CONFLICT"), "{sql}");
     }
 
     #[test]

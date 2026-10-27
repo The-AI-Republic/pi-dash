@@ -13,6 +13,7 @@
 
 use crate::OpsIo;
 use clap::Args;
+use pidash_services::domain::projects::members as project_members;
 
 // ---------------------------------------------------------------------------
 // Arguments (flags named verbatim; argparse `nargs="?"` becomes
@@ -638,7 +639,7 @@ pub async fn run_create_project_member(
     match queries::project_member_exists(pool, project.id, user.id).await {
         Ok(true) => {
             if let Err(error) =
-                queries::project_member_update(pool, project.id, user.id, role).await
+                project_members::ops_update_role(pool, project.id, user.id, role).await
             {
                 emit_db_skeleton(io, &error);
                 return Ok(1);
@@ -672,16 +673,22 @@ pub async fn run_create_project_member(
             let filters = queries::property_filters_json();
             let display_filters = queries::property_display_filters_json();
             let display_properties = queries::property_display_properties_json();
-            if let Err(error) = queries::property_create(
+            let rich = serde_json::json!({});
+            if let Err(error) = project_members::add_property(
                 pool,
-                project.workspace_id,
-                project.id,
-                user.id,
-                65535.0,
-                &filters,
-                &display_filters,
-                &display_properties,
-                &preferences,
+                &project_members::NewMemberProperty {
+                    workspace_id: project.workspace_id,
+                    project_id: project.id,
+                    user_id: user.id,
+                    filters: &filters,
+                    display_filters: &display_filters,
+                    display_properties: &display_properties,
+                    rich_filters: &rich,
+                    preferences: &preferences,
+                    sort_order: 65535.0,
+                    created_by: None,
+                    now: chrono::Utc::now(),
+                },
             )
             .await
             {
@@ -730,30 +737,37 @@ async fn create_project_member_with_hook(
         }
     };
     let hook_sort = min_sort.map(|min| min - 10000.0).unwrap_or(65535.0);
-    if let Err(error) = queries::property_create(
+    let rich = serde_json::json!({});
+    if let Err(error) = project_members::add_property(
         pool,
-        project.workspace_id,
-        project.id,
-        user.id,
-        hook_sort,
-        &queries::property_filters_json(),
-        &queries::property_display_filters_json(),
-        &queries::property_display_properties_json(),
-        preferences,
+        &project_members::NewMemberProperty {
+            workspace_id: project.workspace_id,
+            project_id: project.id,
+            user_id: user.id,
+            filters: &queries::property_filters_json(),
+            display_filters: &queries::property_display_filters_json(),
+            display_properties: &queries::property_display_properties_json(),
+            rich_filters: &rich,
+            preferences,
+            sort_order: hook_sort,
+            created_by: None,
+            now: chrono::Utc::now(),
+        },
     )
     .await
     {
         emit_db_skeleton(io, &error);
         return Err(1);
     }
-    if let Err(error) = queries::project_member_create(
+    if let Err(error) = project_members::ops_add(
         pool,
-        project.id,
         project.workspace_id,
+        project.id,
         user.id,
         role,
         props,
         preferences,
+        chrono::Utc::now(),
     )
     .await
     {

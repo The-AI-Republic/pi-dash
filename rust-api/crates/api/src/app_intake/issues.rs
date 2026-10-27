@@ -4773,27 +4773,25 @@ async fn ensure_triage_state(
         Err(_) => return Err(Denial::ServerError.into_response()),
     };
     let sequence = max_sequence.map(|max| max + 15000.0).unwrap_or(65000.0);
-    let new_id = Uuid::new_v4();
     let now = Utc::now();
     // Full `State.objects.create` row: explicit kwargs plus the
     // `save()`-filled columns (`description=""`, `slug="triage"`,
     // `is_triage=False`) and the crum `created_by`.
-    if let Err(error) = sqlx::query(
-        "INSERT INTO \"states\" (\"id\", \"created_at\", \"updated_at\", \"created_by_id\", \"name\", \"description\", \"slug\", \"color\", \"project_id\", \"workspace_id\", \"sequence\", \"group\", \"default\", \"is_triage\") VALUES ($1, $2, $3, $4, 'Triage', '', 'triage', '#4E5355', $5, $6, $7, 'triage', false, false)",
+    match pidash_services::domain::projects::states::add_triage(
+        pool,
+        gate.project_id,
+        gate.workspace_id,
+        sequence,
+        gate.user_id,
+        now,
+        now,
+        pidash_services::domain::projects::states::TriageText::Quoted,
     )
-    .bind(new_id)
-    .bind(now)
-    .bind(now)
-    .bind(gate.user_id)
-    .bind(gate.project_id)
-    .bind(gate.workspace_id)
-    .bind(sequence)
-    .execute(pool)
     .await
     {
-        return Err(db_error(error));
+        Ok(new_id) => Ok(new_id),
+        Err(error) => Err(db_error(error)),
     }
-    Ok(new_id)
 }
 
 /// `convert_uuid_to_integer(project.id)` (`utils/uuid.py:19-26`): sha256

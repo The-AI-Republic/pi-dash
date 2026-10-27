@@ -103,6 +103,8 @@ use sqlx::Row;
 
 use pidash_db::app_project::models::{project_member, project_user_property};
 use pidash_services::app_project::{ser_member, ser_shared, tasks};
+use pidash_services::domain::projects::members as project_members;
+use pidash_services::domain::projects::members::RoleBind;
 use pidash_services::v1_projects::ser_collab;
 
 use super::gates;
@@ -2411,14 +2413,6 @@ async fn member_create_inner(
 /// values fail at the DB exactly like Django's (huge ints ride `f64`,
 /// still out of range). `None` (missing role on an existing row) is
 /// SQL NULL → the `IntegrityError` 400.
-#[derive(Debug, PartialEq)]
-enum RoleBind {
-    Null,
-    Int(i64),
-    Float(f64),
-    Text(String),
-}
-
 fn role_bind(value: &JVal) -> RoleBind {
     match value {
         JVal::Null => RoleBind::Null,
@@ -2611,51 +2605,9 @@ async fn member_create_write(
     // statement with Django's `CAST(CASE ... AS smallint)` shape
     // (QUIRK-bulk-cast); skipped entirely when there is nothing to
     // reactivate.
-    if !updates.is_empty() {
-        let mut sql = String::from("UPDATE project_members SET role = CAST(CASE id");
-        let mut index = 0;
-        for _ in &updates {
-            index += 1;
-            let id_arg = index;
-            index += 1;
-            let role_arg = index;
-            sql.push_str(&format!(" WHEN ${id_arg} THEN ${role_arg}"));
-        }
-        sql.push_str(" END AS smallint), is_active = CASE id");
-        for _ in &updates {
-            index += 1;
-            let id_arg = index;
-            index += 1;
-            let active_arg = index;
-            sql.push_str(&format!(" WHEN ${id_arg} THEN ${active_arg}"));
-        }
-        sql.push_str(" END WHERE id IN (");
-        for (position, _) in updates.iter().enumerate() {
-            if position > 0 {
-                sql.push_str(", ");
-            }
-            index += 1;
-            sql.push_str(&format!("${index}"));
-        }
-        sql.push(')');
-        let mut query = sqlx::query(&sql);
-        for (id, role) in &updates {
-            query = query.bind(id);
-            query = match role {
-                RoleBind::Null => query.bind(None::<String>),
-                RoleBind::Int(int) => query.bind(int),
-                RoleBind::Float(float) => query.bind(float),
-                RoleBind::Text(text) => query.bind(text),
-            };
-        }
-        for (id, _) in &updates {
-            query = query.bind(id).bind(true);
-        }
-        for (id, _) in &updates {
-            query = query.bind(id);
-        }
-        query.execute(pool).await.map_err(db_denial)?;
-    }
+    project_members::update_roles_bulk(pool, &updates)
+        .await
+        .map_err(db_denial)?;
     // Per-user `MIN(sort_order)` over the workspace (`member.py:99-111`).
     let sort_rows: Vec<(uuid::Uuid, Option<f64>)> = sqlx::query_as(
         r#"SELECT pup.user_id, MIN(pup.sort_order) FROM project_user_properties pup
@@ -2687,7 +2639,7 @@ async fn member_create_write(
         pidash_db::app_issues::models_core::project_user_property::default_display_properties();
     let props_rich = project_user_property::default_rich_filters();
     let props_prefs = project_user_property::default_preferences();
-    let mut new_members: Vec<(uuid::Uuid, uuid::Uuid, RoleBind, f64)> = Vec::new();
+    let mut new_members: Vec<(uuid::Uuid, RoleBind, f64)> = Vec::new();
     for item in &members {
         let JVal::Object(object) = item else {
             return Err(Denial::ServerError);
@@ -2708,100 +2660,47 @@ async fn member_create_write(
             .to_clean_string()
             .unwrap_or_else(|| raw_key.to_lossy_string());
         let sort_order = project_member::sort_order_on_create(sort_min.get(&raw_key).copied());
-        new_members.push((uuid::Uuid::new_v4(), member_id, role, sort_order));
+        new_members.push((member_id, role, sort_order));
     }
     if !new_members.is_empty() {
-        let mut sql = String::from(
-            "INSERT INTO project_members (created_at, updated_at, created_by_id, updated_by_id, deleted_at, id, project_id, workspace_id, member_id, comment, role, view_props, default_props, preferences, sort_order, is_active) VALUES ",
-        );
-        let mut index = 0;
-        for (position, _) in new_members.iter().enumerate() {
-            if position > 0 {
-                sql.push_str(", ");
-            }
-            sql.push('(');
-            for column in 0..16 {
-                if column > 0 {
-                    sql.push_str(", ");
-                }
-                index += 1;
-                sql.push_str(&format!("${index}"));
-            }
-            sql.push(')');
-        }
-        sql.push_str(" ON CONFLICT DO NOTHING");
-        let mut query = sqlx::query(&sql);
-        for (id, member_id, role, _) in &new_members {
-            // `auto_now_add` / `auto_now` each call `now()` (the fixture
-            // shows the two stamps microseconds apart).
-            let created_at = chrono::Utc::now();
-            let updated_at = chrono::Utc::now();
-            query = query
-                .bind(created_at)
-                .bind(updated_at)
-                .bind(None::<uuid::Uuid>)
-                .bind(None::<uuid::Uuid>)
-                .bind(None::<chrono::DateTime<chrono::Utc>>)
-                .bind(id)
-                .bind(project_id)
-                .bind(workspace_id)
-                .bind(member_id)
-                .bind(None::<String>);
-            query = match role {
-                RoleBind::Null => query.bind(None::<String>),
-                RoleBind::Int(int) => query.bind(int),
-                RoleBind::Float(float) => query.bind(float),
-                RoleBind::Text(text) => query.bind(text),
-            };
-            query = query
-                .bind(&member_view)
-                .bind(&member_view)
-                .bind(&member_prefs)
-                .bind(project_member::DEFAULT_SORT_ORDER)
-                .bind(true);
-        }
-        query.execute(pool).await.map_err(db_denial)?;
-        let mut sql = String::from(
-            "INSERT INTO project_user_properties (created_at, updated_at, created_by_id, updated_by_id, deleted_at, id, project_id, workspace_id, user_id, filters, display_filters, display_properties, rich_filters, preferences, sort_order) VALUES ",
-        );
-        let mut index = 0;
-        for (position, _) in new_members.iter().enumerate() {
-            if position > 0 {
-                sql.push_str(", ");
-            }
-            sql.push('(');
-            for column in 0..15 {
-                if column > 0 {
-                    sql.push_str(", ");
-                }
-                index += 1;
-                sql.push_str(&format!("${index}"));
-            }
-            sql.push(')');
-        }
-        sql.push_str(" ON CONFLICT DO NOTHING");
-        let mut query = sqlx::query(&sql);
-        for (_, member_id, _, sort_order) in &new_members {
-            let created_at = chrono::Utc::now();
-            let updated_at = chrono::Utc::now();
-            query = query
-                .bind(created_at)
-                .bind(updated_at)
-                .bind(None::<uuid::Uuid>)
-                .bind(None::<uuid::Uuid>)
-                .bind(None::<chrono::DateTime<chrono::Utc>>)
-                .bind(uuid::Uuid::new_v4())
-                .bind(project_id)
-                .bind(workspace_id)
-                .bind(member_id)
-                .bind(&props_filters)
-                .bind(&props_display_filters)
-                .bind(&props_display_properties)
-                .bind(&props_rich)
-                .bind(&props_prefs)
-                .bind(sort_order);
-        }
-        query.execute(pool).await.map_err(db_denial)?;
+        // `auto_now_add` / `auto_now` each call `now()` (the fixture
+        // shows the two stamps microseconds apart): one pair per row
+        // per statement.
+        let member_rows: Vec<project_members::BulkRow> = new_members
+            .iter()
+            .map(|(member_id, role, _)| project_members::BulkRow {
+                workspace_id: *workspace_id,
+                project_id: Some(*project_id),
+                user_id: *member_id,
+                role: role.clone(),
+                created_by: None,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .collect();
+        project_members::bulk_add(pool, &member_rows, &member_view, &member_prefs, false)
+            .await
+            .map_err(db_denial)?;
+        let prop_rows: Vec<project_members::BulkProperty<'_>> = new_members
+            .iter()
+            .map(|(member_id, _, sort_order)| project_members::BulkProperty {
+                workspace_id: *workspace_id,
+                project_id: *project_id,
+                user_id: *member_id,
+                filters: &props_filters,
+                display_filters: &props_display_filters,
+                display_properties: &props_display_properties,
+                rich_filters: &props_rich,
+                preferences: &props_prefs,
+                sort_order: *sort_order,
+                created_by: None,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .collect();
+        project_members::bulk_add_properties(pool, &prop_rows, false)
+            .await
+            .map_err(db_denial)?;
     }
     // Re-read newest-first for the emits + 201 body (`member.py:140-150`).
     type CreatedRow = (
@@ -3121,84 +3020,23 @@ async fn member_partial_update_inner(
     // note `save()` overwrites any validated `updated_by` with the
     // request user, while a validated `created_by` persists.
     let saved_at = chrono::Utc::now();
-    let mut sets = vec![
-        "updated_at = $1".to_owned(),
-        "updated_by_id = $2".to_owned(),
-    ];
-    let mut index = 2;
-    if patch.deleted_at.is_some() {
-        index += 1;
-        sets.push(format!("deleted_at = ${index}"));
-    }
-    if patch.comment.is_some() {
-        index += 1;
-        sets.push(format!("comment = ${index}"));
-    }
-    if patch.role.is_some() {
-        index += 1;
-        sets.push(format!("role = ${index}"));
-    }
-    if patch.view_props.is_some() {
-        index += 1;
-        sets.push(format!("view_props = ${index}"));
-    }
-    if patch.default_props.is_some() {
-        index += 1;
-        sets.push(format!("default_props = ${index}"));
-    }
-    if patch.preferences.is_some() {
-        index += 1;
-        sets.push(format!("preferences = ${index}"));
-    }
-    if patch.sort_order.is_some() {
-        index += 1;
-        sets.push(format!("sort_order = ${index}"));
-    }
-    if patch.is_active.is_some() {
-        index += 1;
-        sets.push(format!("is_active = ${index}"));
-    }
-    if patch.created_by.is_some() {
-        index += 1;
-        sets.push(format!("created_by_id = ${index}"));
-    }
-    index += 1;
-    let id_arg = index;
-    let sql = format!(
-        "UPDATE project_members SET {} WHERE id = ${id_arg}",
-        sets.join(", ")
-    );
-    let mut query = sqlx::query(&sql).bind(saved_at).bind(user_id);
-    if let Some(deleted_at) = patch.deleted_at.as_ref() {
-        query = query.bind(deleted_at.as_ref().map(|parsed| parsed.utc));
-    }
-    if let Some(comment) = patch.comment.as_ref() {
-        query = query.bind(comment);
-    }
-    if let Some(role) = patch.role {
-        query = query.bind(role as i16);
-    }
-    // JSONB columns bind the `Value` (TEXT has no cast to jsonb).
-    if let Some(view_props) = patch.view_props.as_ref() {
-        query = query.bind(view_props);
-    }
-    if let Some(default_props) = patch.default_props.as_ref() {
-        query = query.bind(default_props);
-    }
-    if let Some(preferences) = patch.preferences.as_ref() {
-        query = query.bind(preferences);
-    }
-    if let Some(sort_order) = patch.sort_order {
-        query = query.bind(sort_order);
-    }
-    if let Some(is_active) = patch.is_active {
-        query = query.bind(is_active);
-    }
-    if let Some(created_by) = patch.created_by {
-        query = query.bind(created_by);
-    }
-    query = query.bind(pk);
-    query.execute(&pool).await.map_err(db_denial)?;
+    let domain_patch = project_members::MemberPatch {
+        deleted_at: patch
+            .deleted_at
+            .as_ref()
+            .map(|deleted_at| deleted_at.as_ref().map(|parsed| parsed.utc)),
+        comment: patch.comment.as_ref().map(|comment| comment.as_deref()),
+        role: patch.role,
+        view_props: patch.view_props.as_ref(),
+        default_props: patch.default_props.as_ref(),
+        preferences: patch.preferences.as_ref(),
+        sort_order: patch.sort_order,
+        is_active: patch.is_active,
+        created_by: patch.created_by,
+    };
+    project_members::patch_member(&pool, pk, &domain_patch, saved_at, user_id)
+        .await
+        .map_err(db_denial)?;
     // The response renders the in-memory instance (validated values in
     // request order for JSONB), never a DB re-read.
     let mut merged = target;
@@ -3339,16 +3177,9 @@ async fn member_destroy_inner(
             "You cannot remove a user having role higher than you",
         ));
     }
-    sqlx::query(
-        r#"UPDATE project_members SET is_active = false, updated_at = $1, updated_by_id = $2
-           WHERE id = $3"#,
-    )
-    .bind(chrono::Utc::now())
-    .bind(user_id)
-    .bind(target_id)
-    .execute(&pool)
-    .await
-    .map_err(db_denial)?;
+    project_members::deactivate_by_id(&pool, target_id, chrono::Utc::now(), user_id)
+        .await
+        .map_err(db_denial)?;
     Ok(empty_response(StatusCode::NO_CONTENT))
 }
 
@@ -3414,16 +3245,9 @@ async fn member_leave_inner(
             ));
         }
     }
-    sqlx::query(
-        r#"UPDATE project_members SET is_active = false, updated_at = $1, updated_by_id = $2
-           WHERE id = $3"#,
-    )
-    .bind(chrono::Utc::now())
-    .bind(user_id)
-    .bind(member_id)
-    .execute(&pool)
-    .await
-    .map_err(db_denial)?;
+    project_members::deactivate_by_id(&pool, member_id, chrono::Utc::now(), user_id)
+        .await
+        .map_err(db_denial)?;
     Ok(empty_response(StatusCode::NO_CONTENT))
 }
 
@@ -3734,22 +3558,13 @@ async fn preference_patch_inner(
     };
     ser_member::merge_preferences(&mut stored, &patch_map);
     let merged = Value::Object(stored);
-    sqlx::query(
-        r#"UPDATE project_members SET preferences = $1, updated_at = $2, updated_by_id = $3
-           WHERE id = $4"#,
-    )
-    .bind(&merged)
-    .bind(chrono::Utc::now())
-    .bind(user_id)
-    .bind(
-        member
-            .id
-            .parse::<uuid::Uuid>()
-            .map_err(|_| Denial::ServerError)?,
-    )
-    .execute(&pool)
-    .await
-    .map_err(db_denial)?;
+    let member_id = member
+        .id
+        .parse::<uuid::Uuid>()
+        .map_err(|_| Denial::ServerError)?;
+    project_members::save_preferences(&pool, member_id, &merged, chrono::Utc::now(), user_id)
+        .await
+        .map_err(db_denial)?;
     // The response renders the in-memory merge (stored order + appended
     // keys), never a DB re-read (`endpoint:383-385`).
     let mut response = serde_json::Map::new();

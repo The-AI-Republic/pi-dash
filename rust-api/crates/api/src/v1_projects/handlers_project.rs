@@ -2778,78 +2778,78 @@ pub async fn create_project_inner(
     .map_err(|_| Denial::ServerError)?;
     let is_default = requested_default || !has_default;
     let now = chrono::Utc::now();
-    let project_id = uuid::Uuid::new_v4();
     let description = field_str(&data, "description").unwrap_or_default();
     // `transaction.atomic()`: unset-others + insert (`:187-194`, plus the
     // `save()` unset arm `:277-284`).
-    let mut tx = pre.pool.begin().await.map_err(|_| Denial::ServerError)?;
-    if ser::unsets_other_defaults(Some(requested_default)) || is_default {
-        sqlx::query(
-            r#"UPDATE "projects" SET "is_default" = FALSE WHERE "workspace_id" = $1 AND "is_default" AND "id" != $2 AND "deleted_at" IS NULL"#,
-        )
-        .bind(workspace_id)
-        .bind(project_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    }
-    let insert = sqlx::query(
-        r#"INSERT INTO "projects" ("id", "created_at", "updated_at", "created_by_id", "updated_by_id",
-            "name", "description", "description_text", "description_html", "network", "workspace_id",
-            "identifier", "default_assignee_id", "project_lead_id", "emoji", "icon_prop",
-            "module_view", "cycle_view", "issue_views_view", "page_view", "intake_view",
-            "is_time_tracking_enabled", "is_issue_type_enabled", "is_default",
-            "guest_view_all_features", "members_can_edit_states", "cover_image", "cover_image_asset_id",
-            "estimate_id", "archive_in", "close_in", "logo_props", "default_state_id", "timezone",
-            "external_source", "external_id", "repo_url", "base_branch",
-            "agent_default_interval_seconds", "agent_default_max_ticks",
-            "agent_review_default_interval_seconds", "agent_test_default_interval_seconds",
-            "agent_ticking_enabled", "default_agent_executor")
-         VALUES ($1,$2,$3,$4,NULL,$5,$6,NULL,NULL,2,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,NULL,NULL,$24,$25,$26,NULL,$27,$28,$29,$30,$31,10800,10,10800,10800,TRUE,$32)"#,
+    let v1_name = name.clone().unwrap_or_default();
+    let v1_icon = field_json(&data, "icon_prop").unwrap_or(Value::Null);
+    let v1_emoji = field_opt_str(&data, "emoji").unwrap_or(None);
+    let v1_cover = field_opt_str(&data, "cover_image").unwrap_or(None);
+    let v1_ext_source = field_opt_str(&data, "external_source").unwrap_or(None);
+    let v1_ext_id = field_opt_str(&data, "external_id").unwrap_or(None);
+    let v1_repo = field_str(&data, "repo_url").unwrap_or_default();
+    let v1_branch = field_str(&data, "base_branch").unwrap_or_else(|| "main".to_owned());
+    let project_id = pidash_services::domain::projects::create(
+        &pre.pool,
+        &pidash_services::domain::projects::NewProject {
+            name: &v1_name,
+            description: &description,
+            description_text: None,
+            description_html: None,
+            network: 2,
+            workspace_id,
+            identifier: &identifier,
+            default_assignee: assignee,
+            project_lead: lead,
+            emoji: v1_emoji.as_deref(),
+            icon_prop: Some(&v1_icon),
+            module_view: field_bool(&data, "module_view").unwrap_or(false),
+            cycle_view: field_bool(&data, "cycle_view").unwrap_or(false),
+            issue_views_view: field_bool(&data, "issue_views_view").unwrap_or(false),
+            page_view: field_bool(&data, "page_view").unwrap_or(true),
+            intake_view: field_bool(&data, "intake_view").unwrap_or(false),
+            is_time_tracking_enabled: field_bool(&data, "is_time_tracking_enabled")
+                .unwrap_or(false),
+            is_issue_type_enabled: field_bool(&data, "is_issue_type_enabled").unwrap_or(false),
+            guest_view_all_features: field_bool(&data, "guest_view_all_features").unwrap_or(false),
+            cover_image: v1_cover.as_deref(),
+            cover_image_asset: None,
+            estimate: None,
+            archive_in: field_int(&data, "archive_in").unwrap_or(0),
+            close_in: field_int(&data, "close_in").unwrap_or(0),
+            logo_props: &logo_props,
+            default_state: None,
+            archived_at: None,
+            is_default,
+            clear_others: ser::unsets_other_defaults(Some(requested_default)) || is_default,
+            timezone: &timezone,
+            external_source: v1_ext_source.as_deref(),
+            external_id: v1_ext_id.as_deref(),
+            repo_url: &v1_repo,
+            base_branch: &v1_branch,
+            agent_interval: 10800,
+            agent_max_ticks: 10,
+            agent_review: 10800,
+            agent_test: 10800,
+            agent_ticking: true,
+            default_executor: &default_executor,
+            members_can_edit_states: field_bool(&data, "members_can_edit_states").unwrap_or(true),
+            created_by: pre.actor.id,
+            created_at: now,
+            updated_at: now,
+            v1: true,
+        },
     )
-    .bind(project_id)
-    .bind(now)
-    .bind(now)
-    .bind(pre.actor.id)
-    .bind(name.clone().unwrap_or_default())
-    .bind(description)
-    .bind(workspace_id)
-    .bind(&identifier)
-    .bind(assignee)
-    .bind(lead)
-    .bind(field_opt_str(&data, "emoji").unwrap_or(None))
-    .bind(field_json(&data, "icon_prop").unwrap_or(Value::Null))
-    .bind(field_bool(&data, "module_view").unwrap_or(false))
-    .bind(field_bool(&data, "cycle_view").unwrap_or(false))
-    .bind(field_bool(&data, "issue_views_view").unwrap_or(false))
-    .bind(field_bool(&data, "page_view").unwrap_or(true))
-    .bind(field_bool(&data, "intake_view").unwrap_or(false))
-    .bind(field_bool(&data, "is_time_tracking_enabled").unwrap_or(false))
-    .bind(field_bool(&data, "is_issue_type_enabled").unwrap_or(false))
-    .bind(is_default)
-    .bind(field_bool(&data, "guest_view_all_features").unwrap_or(false))
-    .bind(field_bool(&data, "members_can_edit_states").unwrap_or(true))
-    .bind(field_opt_str(&data, "cover_image").unwrap_or(None))
-    .bind(field_int(&data, "archive_in").unwrap_or(0))
-    .bind(field_int(&data, "close_in").unwrap_or(0))
-    .bind(logo_props)
-    .bind(&timezone)
-    .bind(field_opt_str(&data, "external_source").unwrap_or(None))
-    .bind(field_opt_str(&data, "external_id").unwrap_or(None))
-    .bind(field_str(&data, "repo_url").unwrap_or_default())
-    .bind(field_str(&data, "base_branch").unwrap_or_else(|| "main".to_owned()))
-    .bind(&default_executor);
-    let insert_result = insert.execute(&mut *tx).await;
-    match insert_result {
-        Ok(_) => {}
+    .await;
+    let project_id = match project_id {
+        Ok(id) => id,
         Err(sqlx::Error::Database(db)) if db.code().as_deref() == Some("23505") => {
             // `DETAIL: Key (...) already exists.` — the 409 name body,
             // which also swallows identifier clashes (BUG-1).
             return Err(Denial::Conflict(ser::NAME_TAKEN_BODY.to_owned()));
         }
         Err(_) => return Err(Denial::ServerError),
-    }
-    tx.commit().await.map_err(|_| Denial::ServerError)?;
+    };
     // `create_default_pod_for_new_project` (`runner/signals.py:31-66`): the
     // `post_save` handler fires on `Project.objects.create`, before the
     // admins/states below. Best-effort + idempotent — never fails creation.
@@ -2947,22 +2947,22 @@ pub async fn add_project_admin(
     let now = chrono::Utc::now();
     let props = default_props_json();
     let prefs = default_preferences_json();
-    sqlx::query(
-        r#"INSERT INTO "project_members" ("id", "created_at", "updated_at", "created_by_id",
-            "project_id", "workspace_id", "member_id", "role", "view_props", "default_props",
-            "preferences", "sort_order", "is_active")
-         VALUES ($1,$2,$3,$4,$5,$6,$7,20,$8,$8,$9,65535,TRUE)"#,
+    pidash_services::domain::projects::members::add(
+        pool,
+        &pidash_services::domain::projects::members::NewProjectMember {
+            workspace_id: *workspace_id,
+            project_id: Some(*project_id),
+            user_id: Some(*member_id),
+            role: 20,
+            created_by: Some(*actor_id),
+            view_props: &props,
+            default_props: &props,
+            preferences: &prefs,
+            now,
+            ignore_conflicts: false,
+            db_now: false,
+        },
     )
-    .bind(uuid::Uuid::new_v4())
-    .bind(now)
-    .bind(now)
-    .bind(actor_id)
-    .bind(project_id)
-    .bind(workspace_id)
-    .bind(member_id)
-    .bind(&props)
-    .bind(&prefs)
-    .execute(pool)
     .await
     .map_err(|_| Denial::ServerError)?;
     let min_sort: Option<f64> = sqlx::query_scalar(
@@ -2976,25 +2976,23 @@ pub async fn add_project_admin(
     .flatten();
     let sort_order = min_sort.map(|m| m - 10000.0).unwrap_or(65535.0);
     let (filters, display_filters, display_properties) = user_property_defaults();
-    sqlx::query(
-        r#"INSERT INTO "project_user_properties" ("id", "created_at", "updated_at", "created_by_id",
-            "workspace_id", "project_id", "user_id", "filters", "display_filters",
-            "display_properties", "rich_filters", "preferences", "sort_order")
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'{}',$11,$12)"#,
+    let rich = serde_json::json!({});
+    pidash_services::domain::projects::members::add_property(
+        pool,
+        &pidash_services::domain::projects::members::NewMemberProperty {
+            workspace_id: *workspace_id,
+            project_id: *project_id,
+            user_id: *member_id,
+            filters: &filters,
+            display_filters: &display_filters,
+            display_properties: &display_properties,
+            rich_filters: &rich,
+            preferences: &prefs,
+            sort_order,
+            created_by: Some(*actor_id),
+            now,
+        },
     )
-    .bind(uuid::Uuid::new_v4())
-    .bind(now)
-    .bind(now)
-    .bind(actor_id)
-    .bind(workspace_id)
-    .bind(project_id)
-    .bind(member_id)
-    .bind(&filters)
-    .bind(&display_filters)
-    .bind(&display_properties)
-    .bind(&prefs)
-    .bind(sort_order)
-    .execute(pool)
     .await
     .map_err(|_| Denial::ServerError)?;
     Ok(())
@@ -3553,26 +3551,21 @@ pub async fn insert_default_state(
     default: bool,
     now: &chrono::DateTime<chrono::Utc>,
 ) -> Result<(), Denial> {
-    sqlx::query(
-        r#"INSERT INTO "states" ("id", "created_at", "updated_at", "created_by_id",
-            "project_id", "workspace_id", "name", "description", "color", "slug",
-            "sequence", "group", "is_triage", "default")
-         VALUES ($1,$2,$3,$4,$5,$6,$7,'',$8,$9,$10,$11,FALSE,$12)"#,
+    pidash_services::domain::projects::states::add_default(
+        pool,
+        &pidash_services::domain::projects::states::NewDefaultState {
+            project_id: *project_id,
+            workspace_id: *workspace_id,
+            name,
+            color,
+            sequence,
+            group,
+            default,
+            created_by: *actor_id,
+            now: *now,
+            v1: true,
+        },
     )
-    .bind(uuid::Uuid::new_v4())
-    .bind(now)
-    .bind(now)
-    .bind(actor_id)
-    .bind(project_id)
-    .bind(workspace_id)
-    .bind(name)
-    .bind(color)
-    // `bulk_create` bypasses `save()`: `slug` keeps the `""` default.
-    .bind("")
-    .bind(sequence)
-    .bind(group)
-    .bind(default)
-    .execute(pool)
     .await
     .map_err(|_| Denial::ServerError)?;
     Ok(())
