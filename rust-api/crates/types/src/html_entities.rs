@@ -16,8 +16,7 @@
 //! a decimal ref past the 4300-digit `int()` cap saturates to U+FFFD
 //! instead of raising, matching the strip/sticky/mail decoders it
 //! replaced. [`html_unescape_strict`] keeps CPython 3.11+ behavior and
-//! reports the cap as [`DigitCapError`] (the multipart filename path
-//! maps it to its 500).
+//! reports the cap as [`DigitCapError`] for callers that need it.
 //!
 //! The bs4-shaped lookups ([`lookup_bare_entity`], [`c1_remap`]) are thin
 //! views over the same table, not a second copy: the bare-name fold is
