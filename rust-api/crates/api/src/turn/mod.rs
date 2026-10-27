@@ -18,7 +18,7 @@
 //!   each cites its Python source at the top.
 //!
 //! Reuse rule: foundation pieces that are `pub` and constructible from
-//! the binary are reused (`Lane`, `ToolCall`, usage, `KeyResolver`,
+//! this crate are reused (`Lane`, `ToolCall`, usage, `KeyResolver`,
 //! the services decision surfaces). The D-11 history/request-builder
 //! types are not (their struct-variant fields are crate-private), so
 //! the turn message model lives here, pinned against the same

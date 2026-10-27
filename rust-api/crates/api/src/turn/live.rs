@@ -134,7 +134,7 @@ fn db_error(error: sqlx::Error) -> SeamError {
 }
 
 fn render_stamp(now: DateTime<Utc>) -> String {
-    pidash_api::runner_enroll::enroll::render_isoformat(now)
+    crate::runner_enroll::enroll::render_isoformat(now)
 }
 
 fn empty_payload() -> Value {
@@ -534,8 +534,8 @@ impl LiveTurnSeam {
     /// Decrypt one stored ciphertext (`crypto.decrypt`) as the turn's
     /// resolution failure shape.
     async fn decrypt(&self, token: &[u8]) -> Result<String, ModelError> {
-        let config = pidash_api::assistant::common::crypto_config_from_settings(&self.settings);
-        let decrypted = pidash_api::assistant::common::decrypt_api_key(&config, token)
+        let config = crate::assistant::common::crypto_config_from_settings(&self.settings);
+        let decrypted = crate::assistant::common::decrypt_api_key(&config, token)
             .await
             .map_err(crypto_model_error)?;
         if !llm_service::cache_enabled(self.settings.assistant.key_cache_ttl_secs) {
@@ -985,7 +985,7 @@ impl TurnSeam for LiveTurnSeam {
                     read_timeout,
                     &plan.name,
                 );
-                ResilientSession::new(spec).map_err(|_| ())
+                ResilientSession::new(spec).ok_or(())
             },
         );
         let mut skipped: Vec<SkippedServer> = skipped.iter().map(port_skipped).collect();

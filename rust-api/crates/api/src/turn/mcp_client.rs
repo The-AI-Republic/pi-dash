@@ -2106,19 +2106,19 @@ pub struct ResilientSession {
 }
 
 impl ResilientSession {
-    /// Build the driver (`build_toolset`, `mcp.py:175-209`). Fails — the
+    /// Build the driver (`build_toolset`, `mcp.py:175-209`). `None` — the
     /// `toolset_unavailable` skip — when the URL is not http(s) or the
     /// auth header is not a valid header value.
-    pub fn new(spec: ToolsetSpec) -> Result<Self, ()> {
-        let url = spec.url.parse::<reqwest::Url>().map_err(|_| ())?;
+    pub fn new(spec: ToolsetSpec) -> Option<Self> {
+        let url = spec.url.parse::<reqwest::Url>().ok()?;
         if url.scheme() != "http" && url.scheme() != "https" {
-            return Err(());
+            return None;
         }
         if let Some(auth) = spec.auth_header.as_deref() {
-            reqwest::header::HeaderValue::from_str(auth).map_err(|_| ())?;
+            reqwest::header::HeaderValue::from_str(auth).ok()?;
         }
         let state = ResilientState::new(spec.server_name.clone(), spec.prefix.clone());
-        Ok(Self {
+        Some(Self {
             spec,
             state,
             live: None,
@@ -2806,12 +2806,12 @@ mod tests {
     fn constructor_validates() {
         use pidash_services::assistant::mcp::build_toolset_spec;
         let good = build_toolset_spec("http://h/mcp", None, Some("mcp_h"), false, 10.0, 300.0, "h");
-        assert!(ResilientSession::new(good).is_ok());
+        assert!(ResilientSession::new(good).is_some());
         let bad_url = build_toolset_spec("not a url", None, Some("mcp_h"), false, 10.0, 300.0, "h");
-        assert!(ResilientSession::new(bad_url).is_err());
+        assert!(ResilientSession::new(bad_url).is_none());
         let bad_scheme =
             build_toolset_spec("ftp://h/mcp", None, Some("mcp_h"), false, 10.0, 300.0, "h");
-        assert!(ResilientSession::new(bad_scheme).is_err());
+        assert!(ResilientSession::new(bad_scheme).is_none());
         let bad_header = build_toolset_spec(
             "http://h/mcp",
             Some("a\nb"),
@@ -2821,6 +2821,6 @@ mod tests {
             300.0,
             "h",
         );
-        assert!(ResilientSession::new(bad_header).is_err());
+        assert!(ResilientSession::new(bad_header).is_none());
     }
 }

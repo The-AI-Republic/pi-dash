@@ -1760,7 +1760,7 @@ impl ToolStore for PgToolStore {
             // concurrent eligibility flip between probe and re-run
             // degrades to an armed ticker the next tick covers.
             let matcher =
-                pidash_api::v1_work_items::handlers_actions::LiveMatcher::new(self.pool.clone());
+                crate::v1_work_items::handlers_actions::LiveMatcher::new(self.pool.clone());
             let triggered_by =
                 pidash_db::dispatch::status::AgentRunTrigger::StateTransition.value();
             sqlx::query("SAVEPOINT turn_preflight_probe")
@@ -2019,9 +2019,7 @@ impl ToolStore for PgToolStore {
         let mut preflight = TurnPreflight {
             pool: self.pool.clone(),
             deps: Some(make_deps()),
-            matcher: pidash_api::v1_work_items::handlers_actions::LiveMatcher::new(
-                self.pool.clone(),
-            ),
+            matcher: crate::v1_work_items::handlers_actions::LiveMatcher::new(self.pool.clone()),
             now: *now,
         };
         let outcome = handle_issue_state_transition(&mut store, &mut preflight, &request).await;
@@ -2133,8 +2131,7 @@ impl ToolStore for PgToolStore {
         // a fixed-decision stub, and — only when stubbed false —
         // re-run the services preflight after the drive, so the real
         // bounce lands post-reconcile, exactly as in Python.
-        let matcher =
-            pidash_api::v1_work_items::handlers_actions::LiveMatcher::new(self.pool.clone());
+        let matcher = crate::v1_work_items::handlers_actions::LiveMatcher::new(self.pool.clone());
         let triggered_by = pidash_db::dispatch::status::AgentRunTrigger::StateTransition.value();
         let mut tx = pidash_db::tx::Transaction::begin(&self.pool).await?;
         sqlx::query("SAVEPOINT turn_preflight_probe")
@@ -2312,7 +2309,7 @@ impl ToolStore for PgToolStore {
         let desc_stripped: Option<String> = if input.html.is_empty() {
             None
         } else {
-            Some(pidash_api::space::sanitize::strip_tags(&input.html))
+            Some(crate::space::sanitize::strip_tags(&input.html))
         };
         let labels: Vec<String> = if input.fold {
             vec!["fold".to_owned()]
@@ -2436,7 +2433,7 @@ impl ToolStore for PgToolStore {
         }
         // Event row (`events.append_event`): own transaction, thread
         // locked, thread-scoped seq; the payload embeds the envelope.
-        let created_at = pidash_api::runner_enroll::enroll::render_isoformat(*now);
+        let created_at = crate::runner_enroll::enroll::render_isoformat(*now);
         let envelope = message_envelope(
             &message_id,
             summary,
@@ -2640,7 +2637,7 @@ impl pidash_services::orchestration::entries::PreflightSeam for FixedPreflight {
 struct TurnPreflight<C, H, P> {
     pool: PgPool,
     deps: Option<pidash_jobs::orchestration::StoreDeps<C, H, P>>,
-    matcher: pidash_api::v1_work_items::handlers_actions::LiveMatcher,
+    matcher: crate::v1_work_items::handlers_actions::LiveMatcher,
     now: DateTime<Utc>,
 }
 
