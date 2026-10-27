@@ -159,6 +159,31 @@ test(
     const anchor = requireAnchor(seed);
     const issueId = await seedIssueId(anchor, seed, 2);
 
+    if (driver.target === "web_new") {
+      // Intended behavior (NEWFRONT-461): commenting disabled hides the
+      // activity section in every presentation; enabling shows it in side
+      // view too, proving one flag gates them all.
+      await driver.spaceOpenBoard(anchor, `?board=list&peekId=${issueId}`);
+      await expectPeekOpen(driver);
+      expect(await driver.spacePeekMode()).toBe("side");
+      expect(await driver.spacePeekActivityVisible()).toBe(false);
+
+      await driver.spacePeekSwitchMode("full");
+      await expect.poll(() => driver.spacePeekMode(), BOARD_POLL).toBe("full");
+      expect(await driver.spacePeekActivityVisible()).toBe(false);
+
+      await serverSpaceSetBoardFlags(seed.workspaceSlug, seed.projectId, session, { comments: true });
+      try {
+        await driver.spaceOpenBoard(anchor, `?board=list&peekId=${issueId}`);
+        await expectPeekOpen(driver);
+        expect(await driver.spacePeekMode()).toBe("side");
+        await expect.poll(() => driver.spacePeekActivityVisible(), BOARD_POLL).toBe(true);
+      } finally {
+        await serverSpaceSetBoardFlags(seed.workspaceSlug, seed.projectId, session, { comments: false });
+      }
+      return;
+    }
+
     await driver.spaceOpenBoard(anchor, `?board=list&peekId=${issueId}`);
     await expectPeekOpen(driver);
     expect(await driver.spacePeekMode()).toBe("side");
