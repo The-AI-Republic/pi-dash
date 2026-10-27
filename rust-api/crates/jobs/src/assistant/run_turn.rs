@@ -24,7 +24,7 @@
 //!   [`TurnSeam::complete_turn`] / [`fail_turn`] / [`cancel_turn`]; the exact
 //!   `UPDATE`/`INSERT`/`DELETE` shapes are the `*_sql` builders here, pinned
 //!   against the fixture's `updates` entries.
-//! - `_finalize_open_rows` (`:173-178`) → [`finalize_open_rows_update`].
+//! - `_finalize_open_rows` (`:173-178`) → `domain::assistant::finalize_open_messages`.
 //! - `_Streamer` (`:220-292`) → [`StreamSink`]: a `TextPart` start closes the
 //!   open row and opens a new one, deltas accumulate and flush every
 //!   [`DELTA_FLUSH_MS`] or at [`PENDING_FLUSH_CHARS`] pending chars, the end
@@ -641,20 +641,6 @@ pub fn lock_turn_select() -> String {
     format!("SELECT * FROM {TABLE_TURN} WHERE id = $1 FOR UPDATE")
 }
 
-/// Terminal complete write (`tasks.py:157-166`): status + model_messages +
-/// usage + model_used (or "") + completed_at. The `AND status = 'running'`
-/// guard has no Python equivalent (`tasks.py` overwrites unconditionally):
-/// Python's hard kill at 330s keeps a live turn and the 390s sweep mutually
-/// exclusive, while Rust relies on the guard so a swept turn can never flip
-/// back to completed. Callers skip the event/row writes when 0 rows match.
-pub fn complete_turn_update() -> String {
-    format!(
-        "UPDATE {TABLE_TURN} SET status = '{TURN_COMPLETED}', model_messages = $2, \
-         usage = $3, model_used = $4, completed_at = NOW() WHERE id = $1 \
-         AND status = '{TURN_RUNNING}'"
-    )
-}
-
 /// Clear the thread's in-flight pointer when it still names this turn
 /// (`tasks.py:166,190,211`).
 pub fn clear_active_turn_update() -> String {
@@ -664,37 +650,13 @@ pub fn clear_active_turn_update() -> String {
     )
 }
 
-/// Terminal fail write (`tasks.py:181-188`): status plus truncated
-/// code/detail plus `completed_at`. Truncation happens in
-/// [`truncate_code`]/[`truncate_detail`] before binding, never in SQL,
-/// because the Python slices count code points. Guarded on `running` like
-/// [`complete_turn_update`]: only the first terminal writer owns the row.
-pub fn fail_turn_update() -> String {
-    format!(
-        "UPDATE {TABLE_TURN} SET status = '{TURN_FAILED}', error_code = $2, \
-         error_detail = $3, completed_at = NOW() WHERE id = $1 \
-         AND status = '{TURN_RUNNING}'"
-    )
-}
-
 /// Terminal cancel write (`tasks.py:204-209`): status + completed_at only —
 /// no error columns, unlike the fail path. Guarded on `running` like
-/// [`complete_turn_update`]: only the first terminal writer owns the row.
+/// the complete/fail writes: only the first terminal writer owns the row.
 pub fn cancel_turn_update() -> String {
     format!(
         "UPDATE {TABLE_TURN} SET status = '{TURN_CANCELLED}', completed_at = NOW() WHERE id = $1 \
          AND status = '{TURN_RUNNING}'"
-    )
-}
-
-/// Close still-streaming rows (`tasks.py:173-178`): every message of the
-/// turn stuck in `streaming` moves to the terminal status with `completed_at`
-/// now. Covers the soft-time-limit signal and sweep paths, where the
-/// in-loop finalizer cannot run.
-pub fn finalize_open_rows_update() -> String {
-    format!(
-        "UPDATE {TABLE_MESSAGE} SET status = $2, completed_at = NOW() \
-         WHERE turn_id = $1 AND status = '{MSG_STREAMING}'"
     )
 }
 
@@ -704,47 +666,8 @@ pub fn thread_lock_select() -> String {
     format!("SELECT id FROM {TABLE_THREAD} WHERE id = $1 FOR UPDATE")
 }
 
-/// Error message row (`events.create_message`, `tasks.py:191-193`): an
-/// `error`-kind, `failed`-status message carrying `detail or code`. Seq is
-/// `COALESCE(MAX(seq), 0) + 1` on the thread (`events.py:78-80`), so the
-/// first row takes seq 1 — the same form the tools ports use.
-///
-/// `created_at` is `auto_now_add` (`models.py:138`), `NOT NULL` with no
-/// database default, so the insert must supply it: `$5` binds it as an
-/// explicit `now` (`events.create_message` stamps it Python-side), the same
-/// convention `loop_dispatch::message_insert_sql` and the `db` events port
-/// use. `completed_at` stays NULL, like the ORM row.
-pub fn error_message_insert() -> String {
-    format!(
-        "INSERT INTO {TABLE_MESSAGE} \
-         (id, thread_id, turn_id, seq, kind, display_content, payload, status, created_at) \
-         VALUES ($1, $2, $3, \
-         (SELECT COALESCE(MAX(seq), 0) + 1 FROM {TABLE_MESSAGE} WHERE thread_id = $2), \
-         '{KIND_ERROR}', $4, '{{}}', '{MSG_FAILED}', $5)"
-    )
-}
-
-/// `turn_failed` event row (`tasks.py:194-200`): kind, the error message id,
-/// and the turn/error payload. The event id is a `BigAutoField`, so the
-/// insert omits it — but returns it (`RETURNING id`) for the post-commit
-/// publish, which re-reads the committed row by id like `_publish_by_id`.
-/// Like the message row, `created_at` is `auto_now_add` (`models.py:166`,
-/// `events.append_event`) with no database default, so `$5` binds it.
-pub fn turn_failed_event_insert() -> String {
-    format!(
-        "INSERT INTO {TABLE_EVENT} (thread_id, turn_id, seq, kind, message_id, payload, created_at) \
-         VALUES ($1, $2, \
-         (SELECT COALESCE(MAX(seq), 0) + 1 FROM {TABLE_EVENT} WHERE thread_id = $1), \
-         '{EVENT_TURN_FAILED}', $3, $4, $5) RETURNING id"
-    )
-}
-
-/// Delta pruning (`events.prune_turn_deltas`, `tasks.py:170,201,213`): a
-/// finished turn's `assistant_delta` events are deleted; completed content
-/// lives in rows.
-pub fn prune_turn_deltas_delete() -> String {
-    format!("DELETE FROM {TABLE_EVENT} WHERE turn_id = $1 AND kind = '{EVENT_ASSISTANT_DELTA}'")
-}
+// (complete/fail/finalize/error/event/prune builders moved to
+// `pidash_services::domain::assistant`; cancel/clear/locks stay.)
 
 // --------------------------------------------------------------------------- //
 // Seam boundary + turn driver (`tasks.py:299-367`)
@@ -1581,10 +1504,8 @@ mod tests {
 
         assert!(lock_turn_select().contains("FOR UPDATE"));
 
-        let complete = complete_turn_update();
-        for col in ["model_messages", "usage", "model_used", "completed_at"] {
-            assert!(complete.contains(col), "complete sets {col}");
-        }
+        // (complete/fail/finalize/error/event/prune pins moved to
+        // `pidash_services::domain::assistant` with their SQL.)
         let clear = clear_active_turn_update();
         assert!(clear.contains("active_turn_id = NULL"));
         assert!(
@@ -1592,10 +1513,6 @@ mod tests {
             "clears only when matching"
         );
 
-        let fail = fail_turn_update();
-        for col in ["error_code", "error_detail", "completed_at"] {
-            assert!(fail.contains(col), "fail sets {col}");
-        }
         // Cancel writes status only — no error columns (`tasks.py:204-209`).
         let cancel = cancel_turn_update();
         assert!(cancel.contains("status = 'cancelled'"));
@@ -1604,36 +1521,7 @@ mod tests {
             "cancel keeps error columns: {cancel}"
         );
 
-        let fin = finalize_open_rows_update();
-        assert!(fin.contains("status = $2"));
-        assert!(fin.contains("status = 'streaming'"));
-
-        let err = error_message_insert();
-        assert!(err.contains("'error'") && err.contains("'failed'"));
-        assert!(
-            err.contains("COALESCE(MAX(seq), 0) + 1"),
-            "seq alloc: {err}"
-        );
-        // `created_at` is `auto_now_add` with no database default: the insert
-        // must carry the column or every row violates NOT NULL.
-        assert!(
-            err.contains("created_at"),
-            "message stamps created_at: {err}"
-        );
-
-        let ev = turn_failed_event_insert();
-        assert!(ev.contains("'turn_failed'"));
-        assert!(ev.contains("COALESCE(MAX(seq), 0) + 1"), "seq alloc: {ev}");
-        assert!(ev.contains("created_at"), "event stamps created_at: {ev}");
-        assert!(
-            ev.contains("RETURNING id"),
-            "post-commit publish re-reads by id: {ev}"
-        );
-
         assert!(thread_lock_select().contains("FOR UPDATE"));
-
-        let prune = prune_turn_deltas_delete();
-        assert!(prune.contains("assistant_event") && prune.contains("'assistant_delta'"));
     }
 
     /// Terminal writes are guarded on `running` (PIDASHCONV-1253): a swept
@@ -1642,16 +1530,13 @@ mod tests {
     /// no-op on every Python-reachable path.
     #[test]
     fn terminal_updates_guard_running() {
-        for sql in [
-            complete_turn_update(),
-            fail_turn_update(),
-            cancel_turn_update(),
-        ] {
-            assert!(
-                sql.contains("AND status = 'running'"),
-                "guarded terminal write: {sql}"
-            );
-        }
+        // (complete/fail guards pinned in full text by
+        // `pidash_services::domain::assistant`.)
+        let sql = cancel_turn_update();
+        assert!(
+            sql.contains("AND status = 'running'"),
+            "guarded terminal write: {sql}"
+        );
     }
 
     /// The soft-limit (code, detail) pair is Django's verbatim

@@ -182,42 +182,19 @@ async fn save_row(
     api_key_encrypted: &Option<Vec<u8>>,
     existed: bool,
 ) -> Result<(), Failure> {
-    let now = chrono::Utc::now();
-    let result = if existed {
-        sqlx::query(
-            r#"UPDATE assistant_user_llm_config
-               SET provider_kind = $1, base_url = $2, model_name = $3,
-                   api_key_encrypted = $4, updated_at = $5
-               WHERE user_id = $6"#,
-        )
-        .bind(provider_kind)
-        .bind(base_url)
-        .bind(model_name)
-        .bind(api_key_encrypted)
-        .bind(now)
-        .bind(user_id)
-        .execute(pool)
-        .await
-    } else {
-        sqlx::query(
-            r#"INSERT INTO assistant_user_llm_config
-               (user_id, provider_kind, base_url, model_name, api_key_encrypted,
-                last_verified_at, created_at, updated_at)
-               VALUES ($1, $2, $3, $4, $5, NULL, $6, $7)"#,
-        )
-        .bind(user_id)
-        .bind(provider_kind)
-        .bind(base_url)
-        .bind(model_name)
-        .bind(api_key_encrypted)
-        .bind(now)
-        .bind(now)
-        .execute(pool)
-        .await
-    };
-    result
-        .map(|_| ())
-        .map_err(|_| Failure::bare_error(StatusCode::BAD_REQUEST, "invalid"))?;
+    pidash_services::domain::assistant::save_llm_config(
+        pool,
+        &pidash_services::domain::assistant::LlmConfigSave {
+            user_id: *user_id,
+            provider_kind,
+            base_url,
+            model_name,
+            api_key_encrypted,
+            existed,
+        },
+    )
+    .await
+    .map_err(|_| Failure::bare_error(StatusCode::BAD_REQUEST, "invalid"))?;
     Ok(())
 }
 
@@ -487,11 +464,8 @@ async fn delete_config(
         Ok(actor) => actor,
         Err(failure) => return failure.into_response(),
     };
-    if let Err(failure) = sqlx::query(r#"DELETE FROM assistant_user_llm_config WHERE user_id = $1"#)
-        .bind(actor.id)
-        .execute(&pool)
+    if let Err(failure) = pidash_services::domain::assistant::delete_llm_config(&pool, actor.id)
         .await
-        .map(|_| ())
         .map_err(|_| Failure::server_error())
     {
         return failure.into_response();
@@ -648,15 +622,10 @@ async fn post_test(
         ProbeOutcome::Classified(code, detail) => ok_false_detail(code, detail),
         ProbeOutcome::Ok => {
             let now = chrono::Utc::now();
-            if let Err(failure) = sqlx::query(
-                r#"UPDATE assistant_user_llm_config SET last_verified_at = $1 WHERE user_id = $2"#,
-            )
-            .bind(now)
-            .bind(actor.id)
-            .execute(&pool)
-            .await
-            .map(|_| ())
-            .map_err(|_| Failure::server_error())
+            if let Err(failure) =
+                pidash_services::domain::assistant::stamp_llm_config_verified(&pool, actor.id, now)
+                    .await
+                    .map_err(|_| Failure::server_error())
             {
                 return failure.into_response();
             }

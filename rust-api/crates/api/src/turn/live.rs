@@ -109,12 +109,6 @@ const MCP_SERVERS_SQL: &str = "SELECT id, name, url, auth_header_encrypted \
      FROM assistant_mcp_server WHERE user_id = $1 AND is_enabled \
      ORDER BY created_at ASC, id ASC";
 
-/// `message.save(update_fields=["display_content", "status",
-/// "completed_at"])` (`tasks.py:143-149`): the stamp is the ORM clock value
-/// Python assigns, so it is bound rather than rendered by `NOW()`.
-const FINALIZE_MESSAGE_SQL: &str = "UPDATE assistant_message \
-     SET display_content = $2, status = $3, completed_at = $4 WHERE id = $1";
-
 /// Read back one message row for the `message_completed` envelope
 /// (`events.message_envelope(message)`, `tasks.py:150-153`).
 const MESSAGE_ROW_SQL: &str =
@@ -579,19 +573,20 @@ impl LiveTurnSeam {
         .await
         .map_err(db_error)?;
         let seq = max.unwrap_or(0) + 1;
-        // `insert_event_sql` binds in `COLUMNS` order minus the pk:
-        // thread, turn, seq, kind, message, payload, created_at.
-        sqlx::query(&events::insert_event_sql())
-            .bind(thread_id)
-            .bind(turn_id)
-            .bind(seq)
-            .bind(kind)
-            .bind(message_id)
-            .bind(payload)
-            .bind(now)
-            .execute(&mut *tx)
-            .await
-            .map_err(db_error)?;
+        pidash_services::domain::assistant::append_event(
+            &mut *tx,
+            &pidash_services::domain::assistant::NewEvent {
+                thread_id,
+                turn_id,
+                seq,
+                kind,
+                message_id,
+                payload,
+                created_at: now,
+            },
+        )
+        .await
+        .map_err(db_error)?;
         tx.commit().await.map_err(db_error)?;
         self.publish_event(thread_id, seq, kind, payload, message_id, now)
             .await;
@@ -688,23 +683,23 @@ impl LiveTurnSeam {
         .await
         .map_err(db_error)?;
         let seq = max.unwrap_or(0) + 1;
-        // `insert_message_sql` binds in `COLUMNS` order: id, thread, turn,
-        // seq, kind, display_content, payload, status, created_at,
-        // completed_at.
-        sqlx::query(&events::insert_message_sql())
-            .bind(message_id)
-            .bind(thread_id)
-            .bind(turn_id)
-            .bind(seq)
-            .bind(kind)
-            .bind(display_content)
-            .bind(payload)
-            .bind(status)
-            .bind(now)
-            .bind(None::<DateTime<Utc>>)
-            .execute(&mut *tx)
-            .await
-            .map_err(db_error)?;
+        pidash_services::domain::assistant::create_message_row(
+            &mut *tx,
+            &pidash_services::domain::assistant::NewMessage {
+                id: message_id,
+                thread_id,
+                turn_id,
+                seq,
+                kind,
+                display_content,
+                payload,
+                status,
+                created_at: now,
+                completed_at: None,
+            },
+        )
+        .await
+        .map_err(db_error)?;
         tx.commit().await.map_err(db_error)?;
         Ok((message_id, seq))
     }
@@ -1372,14 +1367,11 @@ impl TurnSeam for LiveTurnSeam {
         status: &'static str,
     ) -> Result<(), SeamError> {
         let now = Utc::now();
-        sqlx::query(FINALIZE_MESSAGE_SQL)
-            .bind(message_id)
-            .bind(text)
-            .bind(status)
-            .bind(now)
-            .execute(&self.pool)
-            .await
-            .map_err(db_error)?;
+        pidash_services::domain::assistant::finalize_message(
+            &self.pool, message_id, text, status, now,
+        )
+        .await
+        .map_err(db_error)?;
         if status != rt::MSG_COMPLETED {
             return Ok(());
         }
@@ -1455,15 +1447,15 @@ impl TurnSeam for LiveTurnSeam {
             .execute(&mut *tx)
             .await
             .map_err(db_error)?;
-        let won = sqlx::query(&rt::complete_turn_update())
-            .bind(ctx.turn_id)
-            .bind(&model_messages)
-            .bind(&usage)
-            .bind(&model_used)
-            .execute(&mut *tx)
-            .await
-            .map_err(db_error)?
-            .rows_affected();
+        let won = pidash_services::domain::assistant::complete_turn(
+            &mut *tx,
+            ctx.turn_id,
+            &model_messages,
+            &usage,
+            &model_used,
+        )
+        .await
+        .map_err(db_error)?;
         if won == 0 {
             // Another terminal writer (sweep, timeout) already owned the
             // row: roll back and emit nothing — Python never reaches here
@@ -1491,9 +1483,7 @@ impl TurnSeam for LiveTurnSeam {
             Utc::now(),
         )
         .await?;
-        sqlx::query(&rt::prune_turn_deltas_delete())
-            .bind(ctx.turn_id)
-            .execute(&self.pool)
+        pidash_services::domain::assistant::prune_turn_deltas(&self.pool, ctx.turn_id)
             .await
             .map_err(db_error)?;
         Ok(())
@@ -1520,26 +1510,23 @@ impl TurnSeam for LiveTurnSeam {
             .execute(&mut *tx)
             .await
             .map_err(db_error)?;
-        let won = sqlx::query(&rt::fail_turn_update())
-            .bind(ctx.turn_id)
-            .bind(&code)
-            .bind(&detail)
-            .execute(&mut *tx)
-            .await
-            .map_err(db_error)?
-            .rows_affected();
+        let won =
+            pidash_services::domain::assistant::fail_turn(&mut *tx, ctx.turn_id, &code, &detail)
+                .await
+                .map_err(db_error)?;
         if won == 0 {
             // Another terminal writer already owned the row (see
             // `complete_turn`): roll back and emit nothing, so a lost race
             // never writes a second terminal event.
             return Ok(());
         }
-        sqlx::query(&rt::finalize_open_rows_update())
-            .bind(ctx.turn_id)
-            .bind(rt::MSG_FAILED)
-            .execute(&mut *tx)
-            .await
-            .map_err(db_error)?;
+        pidash_services::domain::assistant::finalize_open_messages(
+            &mut *tx,
+            ctx.turn_id,
+            rt::MSG_FAILED,
+        )
+        .await
+        .map_err(db_error)?;
         sqlx::query(&rt::clear_active_turn_update())
             .bind(ctx.thread_id)
             .bind(ctx.turn_id)
@@ -1582,9 +1569,7 @@ impl TurnSeam for LiveTurnSeam {
             now,
         )
         .await?;
-        sqlx::query(&rt::prune_turn_deltas_delete())
-            .bind(ctx.turn_id)
-            .execute(&self.pool)
+        pidash_services::domain::assistant::prune_turn_deltas(&self.pool, ctx.turn_id)
             .await
             .map_err(db_error)?;
         Ok(())
@@ -1610,12 +1595,13 @@ impl TurnSeam for LiveTurnSeam {
             // never writes a second terminal event.
             return Ok(());
         }
-        sqlx::query(&rt::finalize_open_rows_update())
-            .bind(ctx.turn_id)
-            .bind(rt::MSG_CANCELLED)
-            .execute(&mut *tx)
-            .await
-            .map_err(db_error)?;
+        pidash_services::domain::assistant::finalize_open_messages(
+            &mut *tx,
+            ctx.turn_id,
+            rt::MSG_CANCELLED,
+        )
+        .await
+        .map_err(db_error)?;
         sqlx::query(&rt::clear_active_turn_update())
             .bind(ctx.thread_id)
             .bind(ctx.turn_id)
@@ -1633,9 +1619,7 @@ impl TurnSeam for LiveTurnSeam {
             Utc::now(),
         )
         .await?;
-        sqlx::query(&rt::prune_turn_deltas_delete())
-            .bind(ctx.turn_id)
-            .execute(&self.pool)
+        pidash_services::domain::assistant::prune_turn_deltas(&self.pool, ctx.turn_id)
             .await
             .map_err(db_error)?;
         Ok(())
