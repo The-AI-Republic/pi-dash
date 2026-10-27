@@ -6,11 +6,13 @@
 // placeholders per provider; the Gitea public-host prefill; the live
 // application-settings link (the NEWFRONT-492 intended behavior); and
 // the copy-field paste guidance with console help links.
-import { render, screen } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { fireEvent, render, screen } from "@testing-library/react";
 import * as React from "react";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { resolveCopyHelpHref } from "./providerAuth.js";
+import { createAppClient, resetAppClient } from "../../core/api/client.js";
+import { resolveCopyHelpHref, AUTH_PROVIDER_BY_SLUG } from "./providerAuth.js";
 import {
   GITEA_HOST_KEY,
   GITEA_PUBLIC_APPLICATIONS_URL,
@@ -26,6 +28,7 @@ import {
   giteaHostPrefill,
 } from "./providerCredentials.js";
 import { AdminAuthCopyField } from "./components/AdminAuthCopyField.js";
+import { AdminAuthProviderForm } from "./components/AdminAuthProviderForm.js";
 
 describe("giteaHostPrefill", () => {
   it("defaults a blank stored host to the public service", () => {
@@ -231,5 +234,63 @@ describe("PROVIDER_CREDENTIALS copy guidance", () => {
       />
     );
     expect(screen.getByRole("link", { name: help.label })).toHaveAttribute("href", GITEA_PUBLIC_APPLICATIONS_URL);
+  });
+});
+
+describe("Gitea form over PROVIDER_CREDENTIALS (ADM-030, NEWFRONT-492)", () => {
+  const GITEA_CONFIG = {
+    GITEA_HOST: "",
+    GITEA_CLIENT_ID: "",
+    GITEA_CLIENT_SECRET: "",
+    ENABLE_GITEA_SYNC: "0",
+  };
+  const HELP_LABEL = PROVIDER_CREDENTIALS.gitea.copyHelp?.["Callback URI"]?.label ?? "";
+
+  function renderGiteaForm(): void {
+    const gitea = PROVIDER_CREDENTIALS.gitea;
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <AdminAuthProviderForm
+          provider={AUTH_PROVIDER_BY_SLUG.gitea}
+          config={GITEA_CONFIG}
+          fields={gitea.fields}
+          {...(gitea.prefill === undefined ? {} : { prefill: gitea.prefill })}
+          {...(gitea.copyHelp === undefined ? {} : { copyHelp: gitea.copyHelp })}
+        />
+      </QueryClientProvider>
+    );
+  }
+
+  function helpHref(): string | null {
+    return screen.getByRole("link", { name: HELP_LABEL }).getAttribute("href");
+  }
+
+  beforeEach(() => {
+    const unreachable = (async (url: string) => ({
+      status: 404,
+      url,
+      headers: { get: () => null },
+      text: () => Promise.resolve("{}"),
+    })) as never;
+    createAppClient("https://app.example.test", unreachable);
+  });
+
+  afterEach(() => {
+    resetAppClient();
+  });
+
+  it("follows the typed host live and falls back to the public host the moment it clears", () => {
+    renderGiteaForm();
+    expect(screen.getByTestId("admin-auth-field-GITEA_HOST")).toHaveValue(GITEA_PUBLIC_HOST);
+    expect(helpHref()).toBe(GITEA_PUBLIC_APPLICATIONS_URL);
+
+    fireEvent.change(screen.getByTestId("admin-auth-field-GITEA_HOST"), {
+      target: { value: "https://gitea.parity.invalid" },
+    });
+    expect(helpHref()).toBe("https://gitea.parity.invalid/user/settings/applications");
+
+    fireEvent.change(screen.getByTestId("admin-auth-field-GITEA_HOST"), { target: { value: "" } });
+    expect(helpHref()).toBe(GITEA_PUBLIC_APPLICATIONS_URL);
   });
 });
