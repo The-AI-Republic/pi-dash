@@ -23,6 +23,7 @@ vi.mock("../../../core/platform/index.js", () => ({
   },
 }));
 
+import { LIST_COPY_MESSAGE } from "../../issues/index.js";
 import {
   WorkspaceViewMenu,
   selectWorkspaceViewMenuEntries,
@@ -142,7 +143,7 @@ describe("WorkspaceViewMenu", () => {
     expect(platformHarness.openExternal).toHaveBeenCalledWith(`https://app.example.test${HREF}`);
   });
 
-  it("copies the detail address and confirms", async () => {
+  it("copies the detail address and confirms with the shared list wording", async () => {
     const writeText = vi.fn(async () => undefined);
     stubClipboard(writeText);
     render(
@@ -157,7 +158,9 @@ describe("WorkspaceViewMenu", () => {
     await openMenu();
     fireEvent.click(screen.getByRole("menuitem", { name: "Copy link" }));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(`https://app.example.test${HREF}`));
-    expect(notify.notifySuccess).toHaveBeenCalledWith("Link Copied", "The view's address is on the clipboard.");
+    expect(notify.notifySuccess).toHaveBeenCalledWith("Link Copied", LIST_COPY_MESSAGE);
+    // ISS-067 pins this fragment on the toast body.
+    expect(LIST_COPY_MESSAGE).toContain("link copied to clipboard");
   });
 
   it("toasts the refusal when the address cannot be produced", async () => {

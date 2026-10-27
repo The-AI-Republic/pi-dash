@@ -16,6 +16,7 @@ import * as React from "react";
 import { platform } from "../../../core/platform/index.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
 import { copyLinkWithToast } from "../../../shared/shell/shareLink.js";
+import { LIST_COPY_MESSAGE } from "../../issues/index.js";
 
 /** What the caller may do to the view behind this menu. */
 export interface WorkspaceViewMenuStanding {
@@ -89,12 +90,14 @@ export function WorkspaceViewMenu({
   const entries = selectWorkspaceViewMenuEntries(standing, {
     onEdit,
     onOpenInNewTab: () => void platform.openExternal(platform.shareableUrl(href)),
+    // The whole-list ellipsis (ISS-067) shares this menu, so the success
+    // body is the issues list wording, not a views-specific sentence.
     onCopyLink: () =>
       void copyLinkWithToast(
         href,
         {
           copied: "Link Copied",
-          copiedBody: "The view's address is on the clipboard.",
+          copiedBody: LIST_COPY_MESSAGE,
           failed: "Couldn't copy the view link.",
         },
         { success: notifySuccess, error: notifyError }
