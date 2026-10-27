@@ -984,6 +984,44 @@ describe("label ghost reconciliation on the main axis (ISS-028/NEWFRONT-961)", (
     expect(result.total).toBe(4);
   });
 
+  it("counts a lane with no None cell as zero", () => {
+    const laneA = "623e4567-e89b-12d3-a456-426614174005";
+    const laneB = "723e4567-e89b-12d3-a456-426614174006";
+    const plainA = row({ id: "plain-a", state_id: laneA, label_ids: [] });
+    const keptB = row({ id: "kept-b", state_id: laneB, label_ids: [LABEL] });
+    // Lane B carries only a live label, so nothing ever draws a None cell
+    // for it.
+    const board = subGroupedBoard(
+      subGrouped({
+        [LABEL]: { [laneB]: { rows: [keptB], total: 1 } },
+        None: { [laneA]: { rows: [plainA], total: 1 } },
+      }),
+      {
+        groupDimension: "labels",
+        subDimension: "state",
+        groupLabels: labels,
+        subLabels: labels,
+        showEmpty: true,
+      }
+    );
+    delete board.lanes.find((entry) => entry.key === laneB)!.cells["None"];
+    const ghost = row({ id: "ghost", state_id: laneA, label_ids: [] });
+    const fallback = groupedBoard(
+      grouped({
+        [laneA]: { rows: [plainA, ghost], total: 2 },
+        [laneB]: { rows: [keptB], total: 1 },
+      }),
+      { dimension: "state", labels, showEmpty: true }
+    );
+    const result = reconcileLabelGhosts(board, fallback, "main");
+    expect(result.lanes.find((entry) => entry.key === laneA)?.cells["None"]?.total).toBe(2);
+    expect(result.lanes.find((entry) => entry.key === laneB)?.cells["None"]).toBeUndefined();
+    expect(result.columns.map((column) => [column.key, column.total])).toEqual([
+      [LABEL, 1],
+      ["None", 2],
+    ]);
+  });
+
   it("keeps a lane whose fallback holds no unlabeled row as it is", () => {
     const laneA = "623e4567-e89b-12d3-a456-426614174005";
     const laneB = "723e4567-e89b-12d3-a456-426614174006";
