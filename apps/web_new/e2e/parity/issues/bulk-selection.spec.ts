@@ -206,7 +206,14 @@ test(
     });
 
     await test.step("no bulk toolbar can act on the list", async () => {
-      expect(await driver.selectionCheckboxCount()).toBe(0);
+      if (driver.target === "web_new") {
+        // OSS selection exists on the new app (ISS-108); only the
+        // functional toolbar is cloud-gated, so with nothing selected
+        // neither app shows a bar.
+        expect(await driver.selectionCheckboxCount()).toBeGreaterThan(0);
+      } else {
+        expect(await driver.selectionCheckboxCount()).toBe(0);
+      }
       expect(await driver.bulkBarVisible()).toBe(false);
     });
 
