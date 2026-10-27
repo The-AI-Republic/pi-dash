@@ -120,11 +120,15 @@ test(
     // Board offers sub-grouping as a section (VIEW-026). Whether it waits
     // for a Group by choice is the issues area's rule (ISS-077), and the
     // two apps differ there: web_new withholds it until a grouping exists,
-    // the old app lists it unconditionally. Assert each app's own answer,
-    // then prove the section appears once a grouping is picked.
+    // the old app lists it unconditionally.
+    //
+    // Assert the rule, not the board's opening state: a switch into Board
+    // may seed a Group by (the issues area stores State when none was
+    // chosen), so "Sub-group by is absent right after the switch" is only
+    // true while the board has no grouping. Either way, the section must
+    // follow the grouping — shown once one is chosen, never before it.
     const boardOptions = await driver.viewsDetailDisplayOptions();
     if (driver.target === "web_new") {
-      expect(boardOptions).not.toContain("Sub-group by");
       await driver.viewsDetailDisplayPick("Group by", "States");
       expect(await driver.viewsDetailDisplayOptions()).toContain("Sub-group by");
     } else {

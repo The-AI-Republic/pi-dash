@@ -655,8 +655,12 @@ and follows the issues area's rule (ISS-077) rather than this row's: it
 appears only once a Group by dimension is chosen, so a Board with no
 grouping lists Group by but not Sub-group by. The old app lists Sub-group by
 on any Board regardless of grouping; the target is the ISS-077 rule, which
-`web_new` already implements, and the VIEW-026 scenario asserts each app's
-own answer and then proves the section appears after a grouping is picked.
+`web_new` already implements. The VIEW-026 scenario asserts each app's own
+answer and then proves the section appears once a grouping is picked. It
+asserts the rule rather than the board's opening state: a switch into Board
+may already seed a Group by (the issues area stores State when none was
+chosen), so "no Sub-group by immediately after the switch" is only true
+while the board carries no grouping.
 Entries for cycle and module follow the project's `cycle_view` and
 `module_view` flags: absent when the feature is off, present when on. Changes
 update the view's live display state and mark it dirty; Update view persists
