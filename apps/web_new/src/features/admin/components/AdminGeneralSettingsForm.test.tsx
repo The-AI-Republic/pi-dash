@@ -188,6 +188,9 @@ describe("AdminGeneralSettingsForm", () => {
     const message = document.getElementById(describedBy ?? "");
     expect(message).not.toBeNull();
     expect(message).toHaveTextContent(GENERAL_NAME_REQUIRED_MESSAGE);
+    // The copy the admin actually reads, pinned literally so a changed
+    // message value cannot pass by comparing against the constant.
+    expect(message?.textContent?.trim()).toBe("Instance name is required.");
     expect(message?.getAttribute("role")).toBe("alert");
     expect(writes).toEqual([]);
   });
