@@ -87,6 +87,36 @@ describe("IssuesLoaderProvider", () => {
     await waitFor(() => expect(h.text()).toBe("loading:false"));
   });
 
+  it("reuses an outer scope instead of splitting the count with a nested one", async () => {
+    const outerGates: Array<{ run: <T>(task: () => Promise<T>) => Promise<T> }> = [];
+    const innerGates: Array<{ run: <T>(task: () => Promise<T>) => Promise<T> }> = [];
+    render(
+      <IssuesLoaderProvider>
+        <Probe
+          onLoader={(loader) => {
+            outerGates.push({ run: loader.runWithMutationLoader });
+          }}
+        />
+        <IssuesLoaderProvider>
+          <Probe
+            onLoader={(loader) => {
+              innerGates.push({ run: loader.runWithMutationLoader });
+            }}
+          />
+        </IssuesLoaderProvider>
+      </IssuesLoaderProvider>
+    );
+    const outer = outerGates[outerGates.length - 1]!;
+    const inner = innerGates[innerGates.length - 1]!;
+    expect(inner.run).toBe(outer.run);
+    const gate = deferred<string>();
+    const settled = outer.run(() => gate.promise);
+    await waitFor(() => expect(screen.getAllByText("loading:true")).toHaveLength(2));
+    gate.resolve("done");
+    await expect(settled).resolves.toBe("done");
+    await waitFor(() => expect(screen.getAllByText("loading:false")).toHaveLength(2));
+  });
+
   it("throws outside the provider", () => {
     expect(() =>
       render(
