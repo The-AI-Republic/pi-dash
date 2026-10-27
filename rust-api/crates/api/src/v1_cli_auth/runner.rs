@@ -234,10 +234,7 @@ async fn authenticate_api(pool: &PgPool, presented: &str) -> Result<Caller, Resp
         }
     }
     // `api_token.last_used = now; save(update_fields=["last_used"])`.
-    sqlx::query(r#"UPDATE api_tokens SET last_used = $1 WHERE id = $2"#)
-        .bind(now)
-        .bind(id)
-        .execute(pool)
+    pidash_services::domain::tokens::touch_api_token_last_used_by_id(pool, id, now)
         .await
         .map_err(|_| server_error())?;
     // The token loggers stamp this id on the `process_logs` payload
@@ -303,19 +300,13 @@ async fn authenticate_machine(
     if !is_member(pool, workspace_id, user_id).await? {
         // `machine_token.revoke()` on the way out (`revoked_at` is `None`
         // here, so the guard is a no-op and the write always lands).
-        sqlx::query(r#"UPDATE machine_token SET revoked_at = $1 WHERE id = $2"#)
-            .bind(now)
-            .bind(id)
-            .execute(pool)
+        pidash_services::domain::tokens::revoke_machine_token_by_id(pool, id, now)
             .await
             .map_err(|_| server_error())?;
         return Err(invalid_token());
     }
     // `MachineToken.objects.filter(pk=...).update(last_used_at=now)`.
-    sqlx::query(r#"UPDATE machine_token SET last_used_at = $1 WHERE id = $2"#)
-        .bind(now)
-        .bind(id)
-        .execute(pool)
+    pidash_services::domain::tokens::touch_machine_token_last_used_by_id(pool, id, now)
         .await
         .map_err(|_| server_error())?;
     // The token loggers stamp this id on the `process_logs` payload
@@ -436,13 +427,14 @@ impl revoke::RevokeStore for DeleteStore<'_> {
         now: DateTime<Utc>,
         stored_reason: &str,
     ) -> Result<(), revoke::RevokeError> {
-        sqlx::query(revoke::REVOKE_ACTIVE_SESSIONS_SQL)
-            .bind(now)
-            .bind(stored_reason)
-            .bind(runner_id)
-            .execute(&mut *self.tx)
-            .await
-            .map_err(store_err)?;
+        pidash_services::domain::tokens::revoke_runner_sessions_for_runner(
+            &mut *self.tx,
+            runner_id,
+            now,
+            stored_reason,
+        )
+        .await
+        .map_err(store_err)?;
         Ok(())
     }
 

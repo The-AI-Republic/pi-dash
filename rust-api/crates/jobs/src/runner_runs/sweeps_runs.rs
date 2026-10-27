@@ -1007,16 +1007,14 @@ impl SweepsRunsStore for LiveSweepsRunsStore {
         session_ids: &[Uuid],
         now: DateTime<Utc>,
     ) -> Result<u64, SweepsError> {
-        if session_ids.is_empty() {
-            return Ok(0);
-        }
-        let revoke_sql = revoke_sessions_update(session_ids.len());
-        let mut revoke = sqlx::query(&revoke_sql).bind(now).bind(REVOKED_REASON_IDLE);
-        for sid in session_ids {
-            revoke = revoke.bind(*sid);
-        }
-        let result = revoke.execute(&self.pool).await?;
-        Ok(result.rows_affected())
+        pidash_services::domain::tokens::revoke_runner_sessions_by_ids(
+            &self.pool,
+            session_ids,
+            now,
+            REVOKED_REASON_IDLE,
+        )
+        .await
+        .map_err(SweepsError::from)
     }
 
     async fn active_session_pairs(&self) -> Result<Vec<(Uuid, Uuid)>, SweepsError> {

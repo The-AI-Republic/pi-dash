@@ -27,7 +27,7 @@
 //! lock/create/touch statements, ownership errors) live in the Done layer
 //! [`pidash_db::auth_oauth::queries::dev_machine`] (PIDASHCONV-327,
 //! AUTHOAUTH-F8); `deactivate_api_token` in
-//! [`pidash_db::auth_oauth::queries::cli_token`] (AUTHOAUTH-F7); the
+//! [`pidash_services::domain::tokens::cli_token`] (AUTHOAUTH-F7); the
 //! token classify/hash/fingerprint kernels in [`pidash_auth::token`]
 //! (foundation). This module owns the HTTP shell (routes, API-key auth,
 //! body validation), the membership/workspace/APIToken/MachineToken SQL,
@@ -65,7 +65,8 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use pidash_auth::token as token_kernel;
-use pidash_db::auth_oauth::queries::{cli_token, dev_machine};
+use pidash_db::auth_oauth::queries::dev_machine;
+use pidash_services::domain::tokens::cli_token;
 
 use crate::assistant::common::{
     body_get, json_response, parse_body, pool_of, request_content_type, BodyField, BodyMap,
@@ -229,10 +230,7 @@ async fn authenticate_api(pool: &sqlx::PgPool, presented: &str) -> Result<Caller
         }
     }
     // `api_token.last_used = now; save(update_fields=["last_used"])`.
-    sqlx::query(r#"UPDATE api_tokens SET last_used = $1 WHERE id = $2"#)
-        .bind(now)
-        .bind(id)
-        .execute(pool)
+    pidash_services::domain::tokens::touch_api_token_last_used_by_id(pool, id, now)
         .await
         .map_err(|_| Failure::server_error().into_response())?;
     // The token loggers stamp this id on the `process_logs` payload
@@ -301,19 +299,13 @@ async fn authenticate_machine(
     if !is_member(pool, workspace_id, user_id).await? {
         // `machine_token.revoke()` on the way out (`revoked_at` is `None`
         // here, so the guard is a no-op and the write always lands).
-        sqlx::query(r#"UPDATE machine_token SET revoked_at = $1 WHERE id = $2"#)
-            .bind(now)
-            .bind(id)
-            .execute(pool)
+        pidash_services::domain::tokens::revoke_machine_token_by_id(pool, id, now)
             .await
             .map_err(|_| Failure::server_error().into_response())?;
         return Err(invalid_token());
     }
     // `MachineToken.objects.filter(pk=...).update(last_used_at=now)`.
-    sqlx::query(r#"UPDATE machine_token SET last_used_at = $1 WHERE id = $2"#)
-        .bind(now)
-        .bind(id)
-        .execute(pool)
+    pidash_services::domain::tokens::touch_machine_token_last_used_by_id(pool, id, now)
         .await
         .map_err(|_| Failure::server_error().into_response())?;
     // The token loggers stamp this id on the `process_logs` payload
@@ -857,12 +849,11 @@ async fn post_revoke(State(state): State<AppState>, headers: HeaderMap) -> Respo
         Caller::Machine { token_id, .. } => {
             // `machine_token.revoke()`: no-op when already revoked, else
             // stamp `revoked_at` (`runner/models.py:865-869`).
-            if sqlx::query(
-                r#"UPDATE machine_token SET revoked_at = $1 WHERE id = $2 AND revoked_at IS NULL"#,
+            if pidash_services::domain::tokens::revoke_machine_token_by_id_if_active(
+                &pool,
+                token_id,
+                Utc::now(),
             )
-            .bind(Utc::now())
-            .bind(token_id)
-            .execute(&pool)
             .await
             .is_err()
             {
@@ -888,12 +879,11 @@ async fn post_revoke(State(state): State<AppState>, headers: HeaderMap) -> Respo
                 Err(_) => return Failure::server_error().into_response(),
             };
             if let Some((id, true)) = row {
-                if sqlx::query(
-                    r#"UPDATE api_tokens SET is_active = false, updated_at = $1 WHERE id = $2"#,
+                if pidash_services::domain::tokens::deactivate_api_token_by_id(
+                    &pool,
+                    id,
+                    Utc::now(),
                 )
-                .bind(Utc::now())
-                .bind(id)
-                .execute(&pool)
                 .await
                 .is_err()
                 {

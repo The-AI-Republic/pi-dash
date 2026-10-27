@@ -2316,14 +2316,14 @@ impl PubsubStore for MovePubsub<'_> {
         session_id: Uuid,
         reason: &str,
     ) -> Result<(), OutboxError> {
-        sqlx::query(runner_session::REVOKE_SQL)
-            .bind(Utc::now())
-            .bind(reason)
-            .bind(session_id)
-            .execute(self.pool)
-            .await
-            .map(|_| ())
-            .map_err(OutboxError::from)
+        pidash_services::domain::tokens::revoke_runner_session(
+            self.pool,
+            session_id,
+            Utc::now(),
+            reason,
+        )
+        .await
+        .map_err(OutboxError::from)
     }
 
     async fn clear_session_marker(&self, session_id: Uuid) -> Result<(), OutboxError> {

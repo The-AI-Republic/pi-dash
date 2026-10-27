@@ -360,9 +360,7 @@ async fn authenticate_api_token(pool: &sqlx::PgPool, presented: &str) -> Result<
     auth_token::validate_api_token(Some(&kernel_row), presented, now.timestamp())
         .map_err(|_| Denial::InvalidToken)?;
     // `api_token.last_used = now; save(update_fields=["last_used"])`.
-    sqlx::query("UPDATE api_tokens SET last_used = now() WHERE token = $1")
-        .bind(presented)
-        .execute(pool)
+    pidash_services::domain::tokens::touch_api_token_last_used_by_token(pool, presented)
         .await
         .map_err(|_| Denial::ServerError)?;
     Ok(user_id)
@@ -408,16 +406,12 @@ async fn authenticate_machine_token(
     .await
     .map_err(|_| Denial::ServerError)?;
     if !member {
-        sqlx::query("UPDATE machine_token SET revoked_at = now() WHERE id = $1")
-            .bind(row.id)
-            .execute(pool)
+        pidash_services::domain::tokens::revoke_machine_token_by_id_now(pool, row.id)
             .await
             .map_err(|_| Denial::ServerError)?;
         return Err(Denial::InvalidToken);
     }
-    sqlx::query("UPDATE machine_token SET last_used_at = now() WHERE id = $1")
-        .bind(row.id)
-        .execute(pool)
+    pidash_services::domain::tokens::touch_machine_token_last_used_by_id_now(pool, row.id)
         .await
         .map_err(|_| Denial::ServerError)?;
     Ok(row.user_id)

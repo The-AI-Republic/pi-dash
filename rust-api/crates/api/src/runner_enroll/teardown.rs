@@ -2404,13 +2404,14 @@ impl RevokeStore for TxStores<'_, '_> {
         now: DateTime<Utc>,
         stored_reason: &str,
     ) -> Result<(), RevokeError> {
-        sqlx::query(revoke_kernel::REVOKE_ACTIVE_SESSIONS_SQL)
-            .bind(now)
-            .bind(stored_reason)
-            .bind(runner_id)
-            .execute(&mut **self.tx)
-            .await
-            .map_err(|error| RevokeError::Store(error.to_string()))?;
+        pidash_services::domain::tokens::revoke_runner_sessions_for_runner(
+            &mut **self.tx,
+            runner_id,
+            now,
+            stored_reason,
+        )
+        .await
+        .map_err(|error| RevokeError::Store(error.to_string()))?;
         Ok(())
     }
 
@@ -2625,13 +2626,14 @@ impl PubsubStore for PoolPubsubStore<'_, '_> {
         session_id: Uuid,
         reason: &str,
     ) -> Result<(), SessionOutboxError> {
-        sqlx::query(db_runner_session::REVOKE_SQL)
-            .bind(now_micros())
-            .bind(reason)
-            .bind(session_id)
-            .execute(self.pool)
-            .await
-            .map_err(SessionOutboxError::Db)?;
+        pidash_services::domain::tokens::revoke_runner_session(
+            self.pool,
+            session_id,
+            now_micros(),
+            reason,
+        )
+        .await
+        .map_err(SessionOutboxError::Db)?;
         Ok(())
     }
 
@@ -2741,13 +2743,14 @@ impl PubsubStore for TxPubsub<'_, '_, '_> {
     ) -> Result<(), SessionOutboxError> {
         let mut guard = self.tx.lock().await;
         let tx: &mut sqlx::Transaction<'_, sqlx::Postgres> = &mut guard;
-        sqlx::query(db_runner_session::REVOKE_SQL)
-            .bind(now_micros())
-            .bind(reason)
-            .bind(session_id)
-            .execute(&mut **tx)
-            .await
-            .map_err(SessionOutboxError::Db)?;
+        pidash_services::domain::tokens::revoke_runner_session(
+            &mut **tx,
+            session_id,
+            now_micros(),
+            reason,
+        )
+        .await
+        .map_err(SessionOutboxError::Db)?;
         Ok(())
     }
 

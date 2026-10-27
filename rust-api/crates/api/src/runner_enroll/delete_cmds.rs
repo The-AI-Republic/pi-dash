@@ -928,14 +928,14 @@ impl PubsubStore for PoolPubsub<'_> {
         session_id: Uuid,
         reason: &str,
     ) -> Result<(), OutboxError> {
-        sqlx::query(runner_session::REVOKE_SQL)
-            .bind(Utc::now())
-            .bind(reason)
-            .bind(session_id)
-            .execute(self.pool)
-            .await
-            .map(|_| ())
-            .map_err(OutboxError::from)
+        pidash_services::domain::tokens::revoke_runner_session(
+            self.pool,
+            session_id,
+            Utc::now(),
+            reason,
+        )
+        .await
+        .map_err(OutboxError::from)
     }
 
     async fn clear_session_marker(&self, session_id: Uuid) -> Result<(), OutboxError> {
@@ -1041,13 +1041,14 @@ impl RevokeStore for DeleteStore<'_, '_> {
         now: DateTime<Utc>,
         stored_reason: &str,
     ) -> Result<(), RevokeError> {
-        sqlx::query(revoke::REVOKE_ACTIVE_SESSIONS_SQL)
-            .bind(now)
-            .bind(stored_reason)
-            .bind(runner_id)
-            .execute(&mut **self.tx)
-            .await
-            .map_err(store_err)?;
+        pidash_services::domain::tokens::revoke_runner_sessions_for_runner(
+            &mut **self.tx,
+            runner_id,
+            now,
+            stored_reason,
+        )
+        .await
+        .map_err(store_err)?;
         // S2 ran: every active session for this runner is revoked on
         // the tx, so the driver's later `close_runner_session` must
         // skip the pool close (see its comment).

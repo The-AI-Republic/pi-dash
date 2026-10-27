@@ -801,22 +801,18 @@ async fn post_token(State(state): State<AppState>, body: Bytes) -> Response {
     // distinguishable from user-created PATs (`device.py:340-349`).
     let user_id = row_user_id.expect("approved row carries a user");
     let api_token = format!("pi_dash_api_{}", uuid::Uuid::new_v4().simple());
-    let minted = sqlx::query(
-        r#"INSERT INTO api_tokens
-           (id, created_at, updated_at, token, label, description,
-            is_active, user_type, user_id, workspace_id,
-            is_service, allowed_rate_limit)
-           VALUES ($1, $2, $3, $4, $5, $6, true, 0, $7, $8, false, '60/min')"#,
+    let minted = pidash_services::domain::tokens::issue_device_token(
+        &mut *tx,
+        &pidash_services::domain::tokens::NewDeviceToken {
+            id: uuid::Uuid::new_v4(),
+            token: api_token.clone(),
+            label: api_token_device_flow::device_flow_label(&now),
+            description: api_token_device_flow::DEVICE_FLOW_DESCRIPTION.to_string(),
+            user_id,
+            workspace_id: row_workspace_id,
+            now,
+        },
     )
-    .bind(uuid::Uuid::new_v4())
-    .bind(now)
-    .bind(now)
-    .bind(&api_token)
-    .bind(api_token_device_flow::device_flow_label(&now))
-    .bind(api_token_device_flow::DEVICE_FLOW_DESCRIPTION)
-    .bind(user_id)
-    .bind(row_workspace_id)
-    .execute(&mut *tx)
     .await;
     if minted.is_err() {
         return Denial::ServerError.into_response();

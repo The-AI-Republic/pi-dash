@@ -399,10 +399,8 @@ pub async fn actor(pool: &PgPool, headers: &HeaderMap, secret_key: &[u8]) -> Res
     // (`api_authentication.py:41-44`); machine tokens stamp `last_used_at`.
     // Best-effort: a failed stamp must not fail the request.
     if !raw.starts_with(pidash_auth::token::MACHINE_TOKEN_PREFIX) {
-        let _ = sqlx::query(r#"UPDATE "api_tokens" SET "last_used" = now() WHERE "token" = $1"#)
-            .bind(raw)
-            .execute(pool)
-            .await;
+        let _ =
+            pidash_services::domain::tokens::touch_api_token_last_used_by_token(pool, raw).await;
     }
     // The token loggers stamp this id on the `process_logs` payload
     // (Django reads `request.user` post-view; PIDASHCONV-937).
@@ -489,19 +487,16 @@ async fn resolve_machine_token(
     if !member {
         // `revoke()` stamps `revoked_at` only (`runner/models.py:865-869`);
         // `last_used_at` is stamped on success only.
-        let _ = sqlx::query(
-            r#"UPDATE "machine_token" SET "revoked_at" = now() WHERE "token_hash" = $1"#,
-        )
-        .bind(&presented_hash)
-        .execute(pool)
-        .await;
+        let _ =
+            pidash_services::domain::tokens::revoke_machine_token_by_hash(pool, &presented_hash)
+                .await;
         return Err(Denial::InvalidToken);
     }
-    let _ =
-        sqlx::query(r#"UPDATE "machine_token" SET "last_used_at" = now() WHERE "token_hash" = $1"#)
-            .bind(&presented_hash)
-            .execute(pool)
-            .await;
+    let _ = pidash_services::domain::tokens::touch_machine_token_last_used_by_hash(
+        pool,
+        &presented_hash,
+    )
+    .await;
     Ok(user_id)
 }
 

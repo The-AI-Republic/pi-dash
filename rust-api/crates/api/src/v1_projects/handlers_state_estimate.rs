@@ -464,9 +464,7 @@ async fn authenticate_api_token(pool: &sqlx::PgPool, raw: &str) -> Result<Identi
         .map_err(|_| HandlerError::InvalidToken)?;
     // `api_token.save(update_fields=["last_used"])`: operational failures 500
     // through the generic branch, like Python.
-    sqlx::query(r#"UPDATE api_tokens SET last_used = now() WHERE token = $1"#)
-        .bind(raw)
-        .execute(pool)
+    pidash_services::domain::tokens::touch_api_token_last_used_by_token(pool, raw)
         .await
         .map_err(|_| HandlerError::ServerError)?;
     load_identity(pool, user_id).await
@@ -524,16 +522,12 @@ async fn authenticate_machine_token(
     .await
     .map_err(|_| HandlerError::ServerError)?;
     if member.is_none() {
-        sqlx::query(r#"UPDATE machine_token SET revoked_at = now() WHERE token_hash = $1"#)
-            .bind(&presented_hash)
-            .execute(pool)
+        pidash_services::domain::tokens::revoke_machine_token_by_hash(pool, &presented_hash)
             .await
             .map_err(|_| HandlerError::ServerError)?;
         return Err(HandlerError::InvalidToken);
     }
-    sqlx::query(r#"UPDATE machine_token SET last_used_at = now() WHERE token_hash = $1"#)
-        .bind(&presented_hash)
-        .execute(pool)
+    pidash_services::domain::tokens::touch_machine_token_last_used_by_hash(pool, &presented_hash)
         .await
         .map_err(|_| HandlerError::ServerError)?;
     load_identity(pool, user_id).await

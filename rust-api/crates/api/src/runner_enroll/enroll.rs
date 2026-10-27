@@ -61,10 +61,10 @@ use sqlx::postgres::{PgRow, Postgres};
 use sqlx::{Row, Transaction};
 use uuid::Uuid;
 
-use pidash_db::auth_oauth::queries::cli_token::deactivate_api_token;
 use pidash_db::runner_enroll::columns::{
     dev_machine as dm_cols, enums, machine_token as mt_cols, pod as pod_cols, runner as r_cols,
 };
+use pidash_services::domain::tokens::cli_token::deactivate_api_token;
 use pidash_services::runner_enroll::queries::enroll_reads as enroll_sql;
 use pidash_services::runner_enroll::serializers::shapes as enroll_shapes;
 use pidash_services::runner_enroll::tokens as enroll_tokens;
