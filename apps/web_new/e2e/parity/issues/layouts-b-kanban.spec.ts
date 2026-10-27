@@ -679,6 +679,10 @@ test(
       expect(await driver.kanbanHeaderCreateVisible(column)).toBe(true);
       await driver.kanbanHeaderCreate(column);
       expect(await driver.kanbanCreateModalVisible()).toBe(true);
+      // NEWFRONT-177: the open dialog hides the app subtree behind inert
+      // + aria-hidden; column reads must still resolve through it.
+      const columns = await driver.kanbanColumns();
+      expect(columns.some((entry) => entry.name === column)).toBe(true);
     });
 
     await test.step("cycle context offers create and add-existing", async () => {
