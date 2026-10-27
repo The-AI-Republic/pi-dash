@@ -27,6 +27,8 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use pidash_services::assistant::agent::AssistantDeps;
+use pidash_services::domain::comments as comment_domain;
+use pidash_services::domain::relations as relation_domain;
 
 // ---------------------------------------------------------------------------
 // Environment (injected settings + clock)
@@ -1221,22 +1223,19 @@ impl ToolStore for PgToolStore {
     ) -> Result<bool, StoreError> {
         // `relations.relate :196-207`: the INSERT, with the
         // unique-violation arm (`IntegrityError` → re-read) as `Ok(false)`.
-        let outcome = sqlx::query(
-            "INSERT INTO issue_relations (id, created_at, updated_at, created_by_id, updated_by_id, \
-             deleted_at, project_id, workspace_id, issue_id, related_issue_id, relation_type) \
-             VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, $7, $8, $9)",
-        )
-        .bind(Uuid::new_v4())
-        .bind(now)
-        .bind(now)
-        .bind(actor_id)
-        .bind(project_id)
-        .bind(workspace_id)
-        .bind(issue_id)
-        .bind(related_id)
-        .bind(stored_type)
-        .execute(&self.pool)
-        .await;
+        let row = relation_domain::RelationRow {
+            id: Uuid::new_v4(),
+            created_at: *now,
+            updated_at: *now,
+            created_by: Some(*actor_id),
+            updated_by: None,
+            project_id: *project_id,
+            workspace_id: *workspace_id,
+            issue_id: *issue_id,
+            related_issue_id: *related_id,
+            relation_type: stored_type,
+        };
+        let outcome = relation_domain::relate_row(&self.pool, &row).await;
         match outcome {
             Ok(_) => Ok(true),
             Err(error)
@@ -1262,16 +1261,8 @@ impl ToolStore for PgToolStore {
         // plus the related-objects sweep enqueue. Best-effort by repo
         // precedent (unlike `.delay()`, which propagates a broker
         // failure): a queue failure must not fail the op.
-        sqlx::query(
-            "UPDATE issue_relations SET deleted_at = $1, updated_at = $2, updated_by_id = $3 \
-             WHERE id = $4",
-        )
-        .bind(now)
-        .bind(now)
-        .bind(actor_id)
-        .bind(row_id)
-        .execute(&self.pool)
-        .await?;
+        relation_domain::soft_delete_relation_row(&self.pool, *row_id, *actor_id, *now, *now)
+            .await?;
         let mut kwargs = serde_json::Map::with_capacity(1);
         kwargs.insert("using".to_owned(), Value::Null);
         enqueue_best_effort(
@@ -2331,53 +2322,46 @@ impl ToolStore for PgToolStore {
         } else {
             Vec::new()
         };
+        // Domain twins, in Django order; one `now()` feeds all four
+        // stamps. The twin binds `attachments` as a typed empty array
+        // (`'{}'`): the retired statement bound `Value::Array([])`,
+        // which sqlx sends as jsonb, so the INSERT failed on every
+        // call (PIDASHCONV-1582) — this migration is error-to-success.
+        let empty_json = Value::Object(serde_json::Map::new());
+        let empty_list: Vec<String> = Vec::new();
+        let rows = comment_domain::CommentRows {
+            id: comment_id,
+            description_id: Uuid::new_v4(),
+            created_at: *now,
+            updated_at: *now,
+            desc_created_at: *now,
+            desc_updated_at: *now,
+            workspace_id: input.workspace_id,
+            project_id: input.project_id,
+            issue_id: input.issue_id,
+            actor_id: Some(input.actor_id),
+            created_by: Some(input.actor_id),
+            updated_by: None,
+            deleted_at: None,
+            html: &input.html,
+            json: &empty_json,
+            stripped: &stripped,
+            desc_stripped: desc_stripped.as_deref(),
+            access: "INTERNAL",
+            speaker_type: "agent",
+            speaker_label: "Pi Dash AI",
+            speaker_agent_run_id: None,
+            external_id: None,
+            external_source: None,
+            parent_id: None,
+            attachments: &empty_list,
+            labels: &labels,
+            edited_at: None,
+        };
         let mut tx = self.pool.begin().await?;
-        sqlx::query(
-            "INSERT INTO issue_comments (id, created_at, updated_at, deleted_at, issue_id, \
-             project_id, workspace_id, actor_id, access, comment_json, comment_html, \
-             comment_stripped, labels, speaker_type, speaker_label, external_source, \
-             external_id, parent_id, attachments, description_id, edited_at, created_by_id, \
-             updated_by_id) \
-             VALUES ($1, $2, $3, NULL, $4, $5, $6, $7, 'INTERNAL', $8, $9, $10, $11, 'agent', \
-             'Pi Dash AI', NULL, NULL, NULL, $12, NULL, NULL, $13, NULL)",
-        )
-        .bind(comment_id)
-        .bind(now)
-        .bind(now)
-        .bind(input.issue_id)
-        .bind(input.project_id)
-        .bind(input.workspace_id)
-        .bind(input.actor_id)
-        .bind(Value::Object(serde_json::Map::new()))
-        .bind(&input.html)
-        .bind(&stripped)
-        .bind(&labels)
-        .bind(Value::Array(Vec::new()))
-        .bind(input.actor_id)
-        .execute(&mut *tx)
-        .await?;
-        let description_id = Uuid::new_v4();
-        sqlx::query(
-            "INSERT INTO descriptions (id, created_at, updated_at, created_by_id, updated_by_id, \
-             workspace_id, project_id, description_json, description_html, description_binary, \
-             description_stripped) VALUES ($1, $2, $3, $4, NULL, $5, $6, $7, $8, NULL, $9)",
-        )
-        .bind(description_id)
-        .bind(now)
-        .bind(now)
-        .bind(input.actor_id)
-        .bind(input.workspace_id)
-        .bind(input.project_id)
-        .bind(Value::Object(serde_json::Map::new()))
-        .bind(&input.html)
-        .bind(desc_stripped)
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query("UPDATE issue_comments SET description_id = $1 WHERE id = $2")
-            .bind(description_id)
-            .bind(comment_id)
-            .execute(&mut *tx)
-            .await?;
+        comment_domain::insert_comment_row(&mut *tx, &rows).await?;
+        comment_domain::insert_description_row(&mut *tx, &rows).await?;
+        comment_domain::link_comment_description(&mut *tx, rows.id, rows.description_id).await?;
         tx.commit().await?;
         Ok(comment_id)
     }

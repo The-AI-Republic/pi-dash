@@ -80,4 +80,6 @@ impl Related<super::workspaces::Entity> for Entity {
     }
 }
 
-impl ActiveModelBehavior for ActiveModel {}
+// No `ActiveModelBehavior` impl here: the `Description.save()` hook lives in
+// the hand-written `comment_hooks` module (regeneration restores the empty
+// impl — delete it again; the compiler rejects the duplicate).

@@ -36,6 +36,8 @@
 //!   `issues.rs` is deleted again — the real `Issue.save()` hooks live in
 //!   the hand-written `issue_hooks` module, and the compiler rejects the
 //!   duplicate impl.
+//! * Same for `pub mod comment_hooks;`: the generator-emitted empty impls
+//!   in `issue_comments.rs` and `descriptions.rs` are deleted again.
 //!
 //! Django stays the schema owner: after a Django sync the entities are
 //! regenerated and the `parity` test proves they still match
@@ -49,6 +51,7 @@ pub mod accounts;
 pub mod api_tokens;
 pub mod assistant_message;
 pub mod assistant_user_llm_config;
+pub mod comment_hooks;
 pub mod descriptions;
 pub mod issue_assignees;
 pub mod issue_comments;

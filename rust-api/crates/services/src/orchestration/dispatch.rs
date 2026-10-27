@@ -181,28 +181,6 @@ pub const PROJECT_DEFAULT_STATE_SQL: &str = "SELECT default_state_id FROM projec
 /// project id.
 pub const PROJECT_CLOCK_POLICY_SQL: &str = "SELECT agent_ticking_enabled, agent_default_max_ticks, agent_default_interval_seconds, agent_review_default_interval_seconds, agent_test_default_interval_seconds FROM projects WHERE id = $1";
 
-/// Bounce comment INSERT (`IssueComment.objects.create`, `:1118-1125`,
-/// through the custom `save()` `:598-627`): full column list with the
-/// Django-side defaults (no DB default to fall back on). `$1` now
-/// (`created_at`), `$2` now (`updated_at`), `$3` id, `$4` project, `$5`
-/// workspace, `$6` stripped (`strip_tags` of `$7`), `$7` body, `$8`
-/// issue, `$9` actor (the system user; `created_by_id` stays NULL — the
-/// bounce path has no crum user, and the fixture pins no audit column).
-pub const COMMENT_INSERT_SQL: &str = "INSERT INTO issue_comments (created_at, updated_at, id, project_id, workspace_id, comment_stripped, comment_html, issue_id, actor_id, created_by_id, updated_by_id, deleted_at, comment_json, description_id, attachments, labels, access, external_source, external_id, speaker_type, speaker_label, speaker_agent_run_id, edited_at, parent_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, NULL, NULL, '{}', NULL, '{}', '{}', 'INTERNAL', NULL, NULL, 'agent', '', NULL, NULL, NULL)";
-
-/// Bounce comment `Description` side row (`:623-625`):
-/// `Description.objects.create(workspace, project, created_by,
-/// updated_by, description_stripped, description_json, description_html)`.
-/// `$1` now, `$2` now, `$3` id, `$4` workspace, `$5` project, `$6` body,
-/// `$7` stripped.
-pub const DESCRIPTION_INSERT_SQL: &str = "INSERT INTO descriptions (created_at, updated_at, id, workspace_id, project_id, description_html, description_stripped, created_by_id, updated_by_id, deleted_at, description_json, description_binary) VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, NULL, NULL, '{}', NULL)";
-
-/// Comment↔description link (`:627`):
-/// `save(update_fields=["description_id"])`. `$1` description id, `$2`
-/// comment id.
-pub const COMMENT_DESCRIPTION_UPDATE_SQL: &str =
-    "UPDATE issue_comments SET description_id = $1 WHERE id = $2";
-
 /// Wait activity row (`_record_wait_activity`, `:839-852`): full column
 /// list with the Django-side defaults. `$1` now, `$2` now, `$3` id, `$4`
 /// project, `$5` workspace, `$6` issue, `$7` pool (`old_value`), `$8`
@@ -526,9 +504,8 @@ pub struct RoleVerdict {
     pub is_workspace_admin: bool,
 }
 
-/// One bounce comment ([`COMMENT_INSERT_SQL`] +
-/// [`DESCRIPTION_INSERT_SQL`] + [`COMMENT_DESCRIPTION_UPDATE_SQL`]):
-/// the driver builds it, the seam writes all three rows in order.
+/// One bounce comment (the driver builds it, the seam writes the
+/// three domain executor rows in order).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewIssueComment {
     pub id: Uuid,

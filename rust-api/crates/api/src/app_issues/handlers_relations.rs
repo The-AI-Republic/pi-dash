@@ -104,6 +104,7 @@ use pidash_compat::db::{is_integrity_error, is_unique_violation};
 use pidash_compat::response::{empty_response_no_content_type as empty_response, json_response};
 use pidash_compat::validate::push_pairs_error as push_error;
 use pidash_services::app_issues::relation_mapper::get_actual_relation;
+use pidash_services::domain::relations as relation_domain;
 
 // ---- owned paths ------------------------------------------------------------
 
@@ -1072,16 +1073,15 @@ async fn relation_create(
         chrono::DateTime<chrono::Utc>,
     )> = Vec::with_capacity(prepared.len());
     for chunk in prepared.chunks(10) {
-        let mut ids: Vec<uuid::Uuid> = Vec::with_capacity(chunk.len());
-        let mut issue_ids: Vec<uuid::Uuid> = Vec::with_capacity(chunk.len());
-        let mut related_ids: Vec<uuid::Uuid> = Vec::with_capacity(chunk.len());
-        let mut created: Vec<chrono::DateTime<chrono::Utc>> = Vec::with_capacity(chunk.len());
-        let mut updated: Vec<chrono::DateTime<chrono::Utc>> = Vec::with_capacity(chunk.len());
+        // Domain batch twin: one chunk-atomic `UNNEST ... ON CONFLICT
+        // DO NOTHING` per chunk (bare — no arbiter is possible: the
+        // dedup index is a partial unique *index*, which `ON CONFLICT
+        // ON CONSTRAINT` rejects with SQLSTATE 42P10).
+        let mut rows = Vec::with_capacity(chunk.len());
         for slot in chunk {
             // `auto_now_add`/`auto_now` stamp each object in Python
             // before the `INSERT`.
             let stamp = chrono::Utc::now();
-            let id = uuid::Uuid::new_v4();
             let item = slot.expect("null items rejected above");
             let (issue_side, related_side) = if flipped {
                 (item, issue_id)
@@ -1089,42 +1089,20 @@ async fn relation_create(
                 (issue_id, item)
             };
             stamps.push((item, stamp, stamp));
-            ids.push(id);
-            issue_ids.push(issue_side);
-            related_ids.push(related_side);
-            created.push(stamp);
-            updated.push(stamp);
+            rows.push(relation_domain::RelationRow {
+                id: uuid::Uuid::new_v4(),
+                created_at: stamp,
+                updated_at: stamp,
+                created_by: Some(user_id),
+                updated_by: Some(user_id),
+                project_id,
+                workspace_id,
+                issue_id: issue_side,
+                related_issue_id: related_side,
+                relation_type: stored_type,
+            });
         }
-        // Bare `ON CONFLICT DO NOTHING`: exactly what
-        // `bulk_create(ignore_conflicts=True)` emits. No arbiter is
-        // possible — the dedup index
-        // (`issue_relation_unique_issue_related_issue_when_deleted_at_null`)
-        // is a partial unique *index*, which `ON CONFLICT ON CONSTRAINT`
-        // rejects (SQLSTATE 42P10).
-        let outcome = sqlx::query(
-            r#"INSERT INTO issue_relations
-               (id, created_at, updated_at, relation_type, issue_id, related_issue_id,
-                created_by_id, updated_by_id, project_id, workspace_id)
-               SELECT u.id, u.created_at, u.updated_at, $6, u.issue_id, u.related_id,
-                      $7, $8, $9, $10
-               FROM UNNEST($1::uuid[], $2::timestamptz[], $3::timestamptz[],
-                           $4::uuid[], $5::uuid[])
-                    AS u(id, created_at, updated_at, issue_id, related_id)
-               ON CONFLICT DO NOTHING"#,
-        )
-        .bind(&ids)
-        .bind(&created)
-        .bind(&updated)
-        .bind(&issue_ids)
-        .bind(&related_ids)
-        .bind(stored_type)
-        .bind(user_id)
-        .bind(user_id)
-        .bind(project_id)
-        .bind(workspace_id)
-        .execute(&pool)
-        .await;
-        if let Err(error) = outcome {
+        if let Err(error) = relation_domain::relate_rows_or_nothing(&pool, &rows).await {
             return integrity_denial(error).into_response();
         }
     }
@@ -1496,16 +1474,10 @@ async fn remove_relation(
     let current_instance = python_dumps(&Value::Object(shape));
     // `.delete()` first (soft row + fan-out), then the activity row.
     let now = chrono::Utc::now();
-    if let Err(error) = sqlx::query(
-        "UPDATE issue_relations SET deleted_at = $1, updated_at = $1, updated_by_id = $2 WHERE id = $3",
-    )
-    .bind(now)
-    .bind(user_id)
-    .bind(edge.id)
-    .execute(&pool)
-    .await
+    if relation_domain::soft_delete_relation_row(&pool, edge.id, user_id, now, now)
+        .await
+        .is_err()
     {
-        let _ = error;
         return Denial::ServerError.into_response();
     }
     enqueue_soft_delete(&pool, "issuerelation", &edge.id).await;

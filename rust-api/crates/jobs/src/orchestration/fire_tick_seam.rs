@@ -53,6 +53,7 @@ use pidash_db::tx::Transaction;
 use pidash_services::dispatch::{
     consume_admission_token, AdmissionCache, DeferredConsume, LlmProfile,
 };
+use pidash_services::domain::comments as comment_domain;
 use pidash_services::domain::identity::{
     create_bot_user, find_agent_user, make_unusable_password, stamp_bot_unusable_password,
     AgentUserCollisionError, NewBotUser, AGENT_DISPLAY_NAME, AGENT_USERNAME, AGENT_USER_EMAIL,
@@ -68,11 +69,10 @@ use pidash_services::orchestration::dispatch::{
     PreflightOutcome, RetickOutcome, RunAiOutcome, ThinRunAiOutcome, WaitOutcome,
 };
 use pidash_services::orchestration::dispatch::{
-    BACKLOG_TARGET_SQL, COMMENT_DESCRIPTION_UPDATE_SQL, COMMENT_INSERT_SQL, DESCRIPTION_INSERT_SQL,
-    IN_PROGRESS_STATE_SQL, LIVE_ASSIGNEE_CANDIDATES_SQL, PAUSED_STATE_SQL, PAUSE_ISSUE_LOCK_SQL,
-    PROJECT_CLOCK_POLICY_SQL, PROJECT_DEFAULT_STATE_SQL, PROJECT_ROLE_FACTS_SQL,
-    RETICK_ISSUE_LOCK_SQL, WAIT_ACTIVITY_INSERT_SQL, WAIT_REARM_UPDATE_SQL, WAIT_UPDATE_SQL,
-    WORKSPACE_SLUG_SQL,
+    BACKLOG_TARGET_SQL, IN_PROGRESS_STATE_SQL, LIVE_ASSIGNEE_CANDIDATES_SQL, PAUSED_STATE_SQL,
+    PAUSE_ISSUE_LOCK_SQL, PROJECT_CLOCK_POLICY_SQL, PROJECT_DEFAULT_STATE_SQL,
+    PROJECT_ROLE_FACTS_SQL, RETICK_ISSUE_LOCK_SQL, WAIT_ACTIVITY_INSERT_SQL, WAIT_REARM_UPDATE_SQL,
+    WAIT_UPDATE_SQL, WORKSPACE_SLUG_SQL,
 };
 use pidash_types::orchestration::{
     cadence_fields_for, is_ticking_state, StateRef, PAUSED_STATE_NAME,
@@ -517,37 +517,55 @@ where
         comment: &NewIssueComment,
     ) -> Result<(), DispatchError> {
         // The three writes of `IssueComment.save`, in order (any failure
-        // propagates so the transaction rolls the move back).
-        sqlx::query(COMMENT_INSERT_SQL)
-            .bind(comment.now)
-            .bind(comment.now)
-            .bind(comment.id)
-            .bind(comment.project_id)
-            .bind(comment.workspace_id)
-            .bind(comment.comment_stripped.as_str())
-            .bind(comment.comment_html.as_str())
-            .bind(comment.issue_id)
-            .bind(comment.actor_id)
-            .execute(&mut **self.dispatch_tx().inner())
+        // propagates so the transaction rolls the move back). One `now()`
+        // feeds all four stamps; the description row reuses the
+        // comment's ML-stripped text (a ported quirk — Django's
+        // `Description.save` would recompute with `strip_tags`; see
+        // PIDASHCONV-1581).
+        let empty_json = serde_json::json!({});
+        let empty_list: Vec<String> = Vec::new();
+        let rows = comment_domain::CommentRows {
+            id: comment.id,
+            description_id: comment.description_id,
+            created_at: comment.now,
+            updated_at: comment.now,
+            desc_created_at: comment.now,
+            desc_updated_at: comment.now,
+            workspace_id: comment.workspace_id,
+            project_id: comment.project_id,
+            issue_id: comment.issue_id,
+            actor_id: Some(comment.actor_id),
+            created_by: None,
+            updated_by: None,
+            deleted_at: None,
+            html: comment.comment_html.as_str(),
+            json: &empty_json,
+            stripped: comment.comment_stripped.as_str(),
+            desc_stripped: Some(comment.comment_stripped.as_str()),
+            access: "INTERNAL",
+            speaker_type: "agent",
+            speaker_label: "",
+            speaker_agent_run_id: None,
+            external_id: None,
+            external_source: None,
+            parent_id: None,
+            attachments: &empty_list,
+            labels: &empty_list,
+            edited_at: None,
+        };
+        comment_domain::insert_comment_row(&mut **self.dispatch_tx().inner(), &rows)
             .await
             .map_err(db)?;
-        sqlx::query(DESCRIPTION_INSERT_SQL)
-            .bind(comment.now)
-            .bind(comment.now)
-            .bind(comment.description_id)
-            .bind(comment.workspace_id)
-            .bind(comment.project_id)
-            .bind(comment.comment_html.as_str())
-            .bind(comment.comment_stripped.as_str())
-            .execute(&mut **self.dispatch_tx().inner())
+        comment_domain::insert_description_row(&mut **self.dispatch_tx().inner(), &rows)
             .await
             .map_err(db)?;
-        sqlx::query(COMMENT_DESCRIPTION_UPDATE_SQL)
-            .bind(comment.description_id)
-            .bind(comment.id)
-            .execute(&mut **self.dispatch_tx().inner())
-            .await
-            .map_err(db)?;
+        comment_domain::link_comment_description(
+            &mut **self.dispatch_tx().inner(),
+            rows.id,
+            rows.description_id,
+        )
+        .await
+        .map_err(db)?;
         Ok(())
     }
 

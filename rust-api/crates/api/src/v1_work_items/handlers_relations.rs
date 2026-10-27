@@ -117,6 +117,7 @@ use uuid::Uuid;
 use pidash_auth::scope::TenantScope;
 use pidash_services::domain::activity::TaskEnqueueHook;
 use pidash_services::domain::issues as domain_issues;
+use pidash_services::domain::relations as relation_domain;
 use pidash_services::domain::transition::IssueTransitionHook;
 use pidash_services::domain::{self, WriteActor, WriteCtx, WriteScope};
 use pidash_services::v1_work_items::queries_sub::{
@@ -1497,28 +1498,24 @@ async fn relate_op(
             // `updated_by` (REL-5). A concurrent writer's unique
             // violation re-reads below (Python's `IntegrityError`
             // catch does the same).
-            let inserted = sqlx::query(
-                r#"INSERT INTO "issue_relations" ("id", "created_at", "updated_at", "created_by_id", "updated_by_id",
-                     "project_id", "workspace_id", "issue_id", "related_issue_id", "relation_type")
-                   VALUES ($1, $2, $3, $4, NULL, $5, $6, $7, $8, $9) ON CONFLICT DO NOTHING"#,
-            )
-            .bind(Uuid::new_v4())
-            .bind(now_utc())
-            .bind(now_utc())
-            .bind(actor_id)
-            .bind(source.project_id)
-            .bind(source.workspace_id)
-            .bind(issue_id)
-            .bind(related_id)
-            .bind(&stored)
-            .execute(pool)
-            .await;
-            match inserted {
-                Ok(done) if done.rows_affected() == 1 => {
+            let row = relation_domain::RelationRow {
+                id: Uuid::new_v4(),
+                created_at: now_utc(),
+                updated_at: now_utc(),
+                created_by: Some(*actor_id),
+                updated_by: None,
+                project_id: source.project_id,
+                workspace_id: source.workspace_id,
+                issue_id,
+                related_issue_id: related_id,
+                relation_type: &stored,
+            };
+            match relation_domain::relate_row_or_nothing(pool, &row).await {
+                Ok(true) => {
                     created.push(target);
                     continue;
                 }
-                Ok(_) => {}
+                Ok(false) => {}
                 Err(error) if is_unique_violation(&error) => {}
                 Err(error) => return Err(db_error(error, "relate-insert")),
             }
@@ -1623,15 +1620,13 @@ async fn unrelate_op(
         // `row.delete()`: `deleted_at = now`, full `save()` (`updated_at`
         // re-stamped, `updated_by` = actor per REL-5), then the sweep.
         for row in matching {
-            sqlx::query(
-                r#"UPDATE "issue_relations" SET "deleted_at" = $1, "updated_at" = $2, "updated_by_id" = $3
-                   WHERE "id" = $4"#,
+            relation_domain::soft_delete_relation_row(
+                pool,
+                row.id,
+                *actor_id,
+                now_utc(),
+                now_utc(),
             )
-            .bind(now_utc())
-            .bind(now_utc())
-            .bind(actor_id)
-            .bind(row.id)
-            .execute(pool)
             .await
             .map_err(|error| db_error(error, "unrelate-delete"))?;
             let (sweep_args, sweep_kwargs) =
@@ -1857,58 +1852,42 @@ async fn relation_post_inner(
     // rows and still answers 400. The explicit `created_by`/`updated_by`
     // survive verbatim (`bulk_create` calls no `save()`).
     for batch in issue_ids.chunks(10) {
-        let mut sql = String::from(
-            r#"INSERT INTO "issue_relations" ("id", "created_at", "updated_at", "created_by_id", "updated_by_id",
-                 "project_id", "workspace_id", "issue_id", "related_issue_id", "relation_type") VALUES "#,
-        );
-        for (index, _) in batch.iter().enumerate() {
-            if index > 0 {
-                sql.push_str(", ");
-            }
-            let base = index * 10;
-            sql.push_str(&format!(
-                "(${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${})",
-                base + 1,
-                base + 2,
-                base + 3,
-                base + 4,
-                base + 5,
-                base + 6,
-                base + 7,
-                base + 8,
-                base + 9,
-                base + 10,
-            ));
-        }
-        sql.push_str(" ON CONFLICT DO NOTHING");
-        let mut query = sqlx::query(&sql);
+        // Domain batch twin: one chunk-atomic `INSERT ... ON CONFLICT
+        // DO NOTHING` per 10-row batch, each autocommitted — an FK
+        // failure in a later batch keeps the earlier rows and still
+        // answers 400. Two `now()` calls per row like the two
+        // `auto_now`/`auto_now_add` pre-saves on each constructed
+        // instance; `bulk_create` calls no `save()`, so the explicit
+        // actor audit survives verbatim.
+        let mut rows = Vec::with_capacity(batch.len());
         for target_id in batch {
             let (row_issue, row_related) = if reverse {
                 (*target_id, *issue_id)
             } else {
                 (*issue_id, *target_id)
             };
-            // Two `now()` calls like the two `auto_now`/`auto_now_add`
-            // pre-saves on each constructed instance.
-            query = query
-                .bind(Uuid::new_v4())
-                .bind(now_utc())
-                .bind(now_utc())
-                .bind(pre.actor.id)
-                .bind(pre.actor.id)
-                .bind(project_id)
-                .bind(link_workspace)
-                .bind(row_issue)
-                .bind(row_related)
-                .bind(&stored);
+            rows.push(relation_domain::RelationRow {
+                id: Uuid::new_v4(),
+                created_at: now_utc(),
+                updated_at: now_utc(),
+                created_by: Some(pre.actor.id),
+                updated_by: Some(pre.actor.id),
+                project_id,
+                workspace_id: link_workspace,
+                issue_id: row_issue,
+                related_issue_id: row_related,
+                relation_type: &stored,
+            });
         }
-        query.execute(&pre.pool).await.map_err(|error| {
-            if is_fk_violation(&error) {
-                Denial::FieldErrors(PAYLOAD_NOT_VALID_BODY.to_owned())
-            } else {
-                db_error(error, "relation-post-insert")
-            }
-        })?;
+        relation_domain::relate_rows_or_nothing(&pre.pool, &rows)
+            .await
+            .map_err(|error| {
+                if is_fk_violation(&error) {
+                    Denial::FieldErrors(PAYLOAD_NOT_VALID_BODY.to_owned())
+                } else {
+                    db_error(error, "relation-post-insert")
+                }
+            })?;
     }
     // The activity fan-out (`:3096-3106`): `requested_data` dumps the
     // parsed request body, `origin` resolves after the insert (a missing

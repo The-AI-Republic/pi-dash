@@ -1430,46 +1430,6 @@ pub const LINKED_REVIEWS_SQL: &str = "SELECT id, provider, url, title, state, ex
      FROM git_code_review_links WHERE issue_id = $1 AND deleted_at IS NULL \
      ORDER BY created_at DESC LIMIT 20";
 
-/// `pidash_add_current_issue_comment` row (`tools.py:279-292`):
-/// `IssueComment.objects.create(issue, project, workspace, actor,
-/// comment_html=to_safe_html(body), comment_json={}, speaker_type="agent",
-/// speaker_label="Pi Dash Cloud Agent", speaker_agent_run_id=run.id)`.
-/// Full column list with the Django-side defaults (`access`,
-/// `attachments`, `labels` have no DB default to fall back on). `$1`
-/// id, `$2` now (both audit timestamps), `$3` actor (also
-/// `created_by_id`: `impersonate(run.created_by)` makes the actor the
-/// current user; `updated_by_id` stays NULL on creation per
-/// `BaseModel.save`), `$4` workspace, `$5` project, `$6`
-/// `comment_stripped` (`strip_tags` of `$7`, Django-side), `$7` safe
-/// HTML (assistant-markdown seam), `$8` issue, `$9` run id. The custom
-/// `save()` also inserts the `Description` row
-/// ([`COMMENT_DESCRIPTION_INSERT_SQL`]) and links it
-/// ([`COMMENT_DESCRIPTION_LINK_SQL`]).
-pub const COMMENT_INSERT_SQL: &str = "INSERT INTO issue_comments \
-     (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, \
-     project_id, comment_stripped, comment_json, comment_html, description_id, attachments, \
-     labels, issue_id, actor_id, access, external_source, external_id, speaker_type, \
-     speaker_label, speaker_agent_run_id, edited_at, parent_id) \
-     VALUES ($1, $2, $2, $3, NULL, NULL, $4, $5, $6, '{}', $7, NULL, '{}', '{}', $8, $3, \
-     'INTERNAL', NULL, NULL, 'agent', 'Pi Dash Cloud Agent', $9, NULL, NULL)";
-
-/// Comment `Description` side row (`db/models/issue.py:620-625`):
-/// `Description.objects.create(workspace, project, created_by,
-/// updated_by, description_stripped, description_json, description_html)`.
-/// `$1` id, `$2` now (both audit timestamps), `$3` actor
-/// (`created_by_id`; `updated_by_id` NULL on creation), `$4` workspace,
-/// `$5` project, `$6` safe HTML, `$7` stripped.
-pub const COMMENT_DESCRIPTION_INSERT_SQL: &str = "INSERT INTO descriptions \
-     (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, \
-     project_id, description_json, description_html, description_binary, description_stripped) \
-     VALUES ($1, $2, $2, $3, NULL, NULL, $4, $5, '{}', $6, NULL, $7)";
-
-/// Comment↔description link (`db/models/issue.py:623`):
-/// `save(update_fields=["description_id"])`. `$1` comment id, `$2`
-/// description id.
-pub const COMMENT_DESCRIPTION_LINK_SQL: &str =
-    "UPDATE issue_comments SET description_id = $2 WHERE id = $1";
-
 /// `pidash_transition_current_issue` target lookup (`tools.py:313`):
 /// `State.objects.get(pk=state_id, project_id)`. `$1` state id, `$2`
 /// project id.
@@ -3020,12 +2980,7 @@ mod tests {
 
     #[test]
     fn sql_text() {
-        for sql in [
-            LEDGER_INSERT_WRITE_SQL,
-            LEDGER_INSERT_READ_SQL,
-            COMMENT_INSERT_SQL,
-            COMMENT_DESCRIPTION_INSERT_SQL,
-        ] {
+        for sql in [LEDGER_INSERT_WRITE_SQL, LEDGER_INSERT_READ_SQL] {
             assert_eq!(insert_arity(sql).0, insert_arity(sql).1, "{sql}");
         }
         for fragment in [
@@ -3079,12 +3034,6 @@ mod tests {
         assert!(SEARCH_ISSUES_SQL.contains("projects.identifier, issues.created_at FROM issues"));
         assert!(GET_PROJECT_ISSUE_SQL.contains("issues.id = $1 AND issues.project_id = $2"));
         assert!(LINKED_REVIEWS_SQL.contains("ORDER BY created_at DESC LIMIT 20"));
-        assert!(COMMENT_INSERT_SQL.contains("'Pi Dash Cloud Agent'"));
-        assert!(COMMENT_INSERT_SQL.contains("'INTERNAL'"));
-        assert!(COMMENT_INSERT_SQL.contains("attachments"));
-        assert!(COMMENT_DESCRIPTION_INSERT_SQL.contains("INSERT INTO descriptions"));
-        assert!(COMMENT_DESCRIPTION_INSERT_SQL.contains("description_binary"));
-        assert!(COMMENT_DESCRIPTION_LINK_SQL.contains("description_id = $2"));
         assert!(TRANSITION_STATE_GET_SQL.contains("FROM states"));
         assert!(TRANSITION_ISSUE_LOCK_SQL.contains("FOR UPDATE OF issues"));
         assert!(!TRANSITION_ISSUE_LOCK_SQL.contains("LIMIT"));

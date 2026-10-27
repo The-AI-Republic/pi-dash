@@ -156,6 +156,7 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use pidash_db::config::encryption::Keyring;
+use pidash_services::domain::comments as comment_domain;
 use pidash_services::domain::issues as domain_issues;
 use pidash_services::domain::transition::IssueTransitionHook;
 use pidash_services::integrations::adapters_github::GithubError;
@@ -450,31 +451,6 @@ pub const DEFAULT_POD_SQL: &str = "SELECT id FROM pod WHERE project_id = $1 AND 
 /// change-tracker comparison for the description side-table. `$1` the
 /// issue id, `$2` the upstream comment id.
 pub const ISSUE_COMMENT_LOOKUP_SQL: &str = "SELECT id, comment_html, comment_stripped, comment_json, description_id FROM issue_comments WHERE issue_id = $1 AND external_source = 'github' AND external_id = $2 AND deleted_at IS NULL";
-
-/// `Description.objects.create(…)` for a new mirror comment
-/// (`issue.py:625`): `WorkspaceBaseModel` columns; `description_stripped`
-/// recomputed by `Description.save` — which imports DJANGO's `strip_tags`
-/// (`description.py:6`, entities kept), overwriting the decoded value the
-/// caller passed (`description.py:22-28`). Hence the Django
-/// [`strip_tags`] call here, unlike every other stripped write in this
-/// module. Audit lands NULL: the create runs `BaseModel.save`, which
-/// blanks both columns in the worker (no crum user — ported bug, see the
-/// module docs).
-const INSERT_DESCRIPTION_SQL: &str = "INSERT INTO descriptions (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, project_id, description_json, description_html, description_binary, description_stripped) VALUES ($1, $2, $3, NULL, NULL, NULL, $4, $5, $6, $7, NULL, $8)";
-
-/// `IssueComment.objects.create` column list: array defaults `'{}'`,
-/// `access 'INTERNAL'`, `speaker_type 'human'`, `speaker_label ''`.
-const INSERT_ISSUE_COMMENT_SQL: &str = "INSERT INTO issue_comments (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, comment_stripped, comment_json, comment_html, description_id, attachments, labels, issue_id, actor_id, access, external_source, external_id, speaker_type, speaker_label, speaker_agent_run_id, edited_at, parent_id) VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, $8, $9, $10, $11, '{}', '{}', $12, $13, 'INTERNAL', 'github', $14, 'human', '', NULL, NULL, NULL)";
-
-/// Existing mirror comment refresh (`issue.py:606-646`): the render
-/// triple plus audit restamp and `updated_at` (full `save()`); the
-/// description side-table updates only when a tracked field changed.
-const UPDATE_ISSUE_COMMENT_SQL: &str = "UPDATE issue_comments SET comment_html = $2, comment_stripped = $3, comment_json = $4, workspace_id = $5, project_id = $6, actor_id = $7, created_by_id = $8, updated_by_id = $8, updated_at = $9 WHERE id = $1";
-/// Change-tracked description refresh (`issue.py:644-646`): a plain
-/// `filter().update`, so no `save()` — but it writes
-/// `updated_by_id=self.updated_by_id`, read after `BaseModel.save` set it
-/// to None in the worker (NULL — ported bug, see the module docs).
-const UPDATE_COMMENT_DESCRIPTION_SQL: &str = "UPDATE descriptions SET description_html = $2, description_stripped = $3, description_json = $4, updated_by_id = NULL, updated_at = $5 WHERE id = $1";
 
 /// Comment-sync lookup (`github_sync_task.py:230-232`):
 /// `GithubCommentSync.objects.update_or_create(issue_sync, comment, …)` —
@@ -1374,73 +1350,95 @@ pub async fn upsert_comment(
             .await
             .map_err(db_error)?;
     let mut tx = pool.begin().await.map_err(db_error)?;
+    let empty_json = json!({});
+    let empty_list: Vec<String> = Vec::new();
     let comment_id = match existing {
         None => {
-            let description_id = Uuid::new_v4();
-            sqlx::query(INSERT_DESCRIPTION_SQL)
-                .bind(description_id)
-                .bind(*now)
-                .bind(*now)
-                .bind(scan.workspace_id)
-                .bind(scan.project_id)
-                .bind(json!({}))
-                .bind(&comment_html)
-                .bind(strip_tags(&comment_html))
-                .execute(&mut *tx)
+            // Domain twins, description first with the id bound inline
+            // (no link step). The description audit stays NULL (the
+            // worker-crum quirk) while the comment audit restamps the
+            // scan actor twice; one `now()` feeds all four stamps.
+            let desc_stripped = strip_tags(&comment_html);
+            let rows = comment_domain::CommentRows {
+                id: Uuid::new_v4(),
+                description_id: Uuid::new_v4(),
+                created_at: *now,
+                updated_at: *now,
+                desc_created_at: *now,
+                desc_updated_at: *now,
+                workspace_id: scan.workspace_id,
+                project_id: scan.project_id,
+                issue_id: *issue_id,
+                actor_id: Some(scan.actor_id),
+                created_by: None,
+                updated_by: None,
+                deleted_at: None,
+                html: &comment_html,
+                json: &empty_json,
+                stripped: &comment_stripped,
+                desc_stripped: Some(&desc_stripped),
+                access: "INTERNAL",
+                speaker_type: "human",
+                speaker_label: "",
+                speaker_agent_run_id: None,
+                external_id: Some(&remote_id_text),
+                external_source: Some("github"),
+                parent_id: None,
+                attachments: &empty_list,
+                labels: &empty_list,
+                edited_at: None,
+            };
+            comment_domain::insert_description_row(&mut *tx, &rows)
                 .await
                 .map_err(db_error)?;
-            let comment_id = Uuid::new_v4();
-            sqlx::query(INSERT_ISSUE_COMMENT_SQL)
-                .bind(comment_id)
-                .bind(*now)
-                .bind(*now)
-                .bind(scan.actor_id)
-                .bind(scan.actor_id)
-                .bind(scan.project_id)
-                .bind(scan.workspace_id)
-                .bind(&comment_stripped)
-                .bind(json!({}))
-                .bind(&comment_html)
-                .bind(description_id)
-                .bind(*issue_id)
-                .bind(scan.actor_id)
-                .bind(&remote_id_text)
-                .execute(&mut *tx)
+            let linked = comment_domain::CommentRows {
+                created_by: Some(scan.actor_id),
+                updated_by: Some(scan.actor_id),
+                deleted_at: None,
+                ..rows
+            };
+            comment_domain::insert_comment_row_linked(&mut *tx, &linked)
                 .await
                 .map_err(db_error)?;
-            comment_id
+            linked.id
         }
         Some((comment_id, old_html, old_stripped, old_json, description_id)) => {
-            sqlx::query(UPDATE_ISSUE_COMMENT_SQL)
-                .bind(comment_id)
-                .bind(&comment_html)
-                .bind(&comment_stripped)
-                .bind(json!({}))
-                .bind(scan.workspace_id)
-                .bind(scan.project_id)
-                .bind(scan.actor_id)
-                .bind(scan.actor_id)
-                .bind(*now)
-                .execute(&mut *tx)
+            // The scan actor restamps `actor_id` + both audit columns
+            // (a ported quirk — Django's update path leaves `actor_id`
+            // alone; see PIDASHCONV-1581 item 3).
+            let update = comment_domain::SyncCommentUpdate {
+                id: comment_id,
+                updated_at: *now,
+                html: &comment_html,
+                stripped: &comment_stripped,
+                json: &empty_json,
+                workspace_id: scan.workspace_id,
+                project_id: scan.project_id,
+                actor: scan.actor_id,
+            };
+            comment_domain::update_sync_comment(&mut *tx, &update)
                 .await
                 .map_err(db_error)?;
             // Change-tracked description refresh (`issue.py:629-646`):
             // only the render triple, only when it changed, only with a
             // description row to write to. The comparison runs against the
             // save()-recomputed values (decoded, unstripped), which is what
-            // the database holds.
+            // the database holds. The refresh overwrites the FULL triple
+            // (Django syncs only the changed subset — a ported quirk, see
+            // PIDASHCONV-1581 item 2).
             let changed = old_html != comment_html
                 || old_stripped != comment_stripped
                 || old_json != json!({});
             if changed {
                 if let Some(description_id) = description_id {
-                    sqlx::query(UPDATE_COMMENT_DESCRIPTION_SQL)
-                        .bind(description_id)
-                        .bind(&comment_html)
-                        .bind(&comment_stripped)
-                        .bind(json!({}))
-                        .bind(*now)
-                        .execute(&mut *tx)
+                    let full = comment_domain::SyncDescriptionFull {
+                        id: description_id,
+                        updated_at: *now,
+                        html: &comment_html,
+                        stripped: &comment_stripped,
+                        json: &empty_json,
+                    };
+                    comment_domain::sync_description_full(&mut *tx, &full)
                         .await
                         .map_err(db_error)?;
                 }
@@ -2613,10 +2611,6 @@ mod tests {
             ADVISORY_LOCK_SQL,
             DEFAULT_POD_SQL,
             ISSUE_COMMENT_LOOKUP_SQL,
-            INSERT_DESCRIPTION_SQL,
-            INSERT_ISSUE_COMMENT_SQL,
-            UPDATE_ISSUE_COMMENT_SQL,
-            UPDATE_COMMENT_DESCRIPTION_SQL,
             COMMENT_SYNC_LOOKUP_SQL,
             INSERT_COMMENT_SYNC_SQL,
             UPDATE_COMMENT_SYNC_SQL,
@@ -2698,8 +2692,8 @@ mod tests {
 
         // Mirror rows: actor restamp collapsed into the update (the
         // issue pin moved to `domain::issues::sync_bare_sql_shapes` with
-        // the statement; the comment pin stays until Part E).
-        assert!(UPDATE_ISSUE_COMMENT_SQL.contains("created_by_id = $8"));
+        // the statement; the comment pins moved to
+        // `domain::comments::sync_sql_shapes` with the twins).
 
         // Metadata-only writes touch nothing else.
         assert_eq!(

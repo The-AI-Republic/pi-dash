@@ -269,97 +269,11 @@ fn url_schemes() -> HashSet<&'static str> {
     ["http", "https", "mailto", "tel"].into_iter().collect()
 }
 
-/// Django's `django.utils.html.strip_tags`.
-///
-/// Loop `_strip_once` while both `<` and `>` remain, stopping when an
-/// iteration stops removing `<` (verbatim Django algorithm). `_strip_once`
-/// feeds a lenient parser collecting text, `&name;`/`&#name;` references
-/// verbatim, and skipping tags (quote-aware), comments and declarations.
+/// Django's `django.utils.html.strip_tags` (canonical port lives in
+/// `pidash_db::app_pages::strip`; this re-export keeps the call sites
+/// stable).
 pub fn strip_tags(value: &str) -> String {
-    let mut current = value.to_owned();
-    loop {
-        if !(current.contains('<') && current.contains('>')) {
-            break;
-        }
-        let next = strip_once(&current);
-        if next.matches('<').count() == current.matches('<').count() {
-            break;
-        }
-        current = next;
-    }
-    current
-}
-
-fn strip_once(value: &str) -> String {
-    let bytes = value.as_bytes();
-    let mut out = String::with_capacity(value.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        if byte != b'<' {
-            // Copy one full char ('<' is ASCII, so byte detection never
-            // splits a multi-byte sequence; entities pass through verbatim
-            // like HTMLParser's handle_entityref/handle_charref arms).
-            let ch = value[index..].chars().next().expect("char boundary");
-            out.push(ch);
-            index += ch.len_utf8();
-            continue;
-        }
-        // At '<': comments, declarations, and tags are skipped.
-        if value[index..].starts_with("<!--") {
-            if let Some(end) = value[index..].find("-->") {
-                index += end + 3;
-            } else {
-                // Unterminated comment: HTMLParser bogus-comments to EOF.
-                break;
-            }
-            continue;
-        }
-        if value[index..].starts_with("<!") || value[index..].starts_with("<?") {
-            if let Some(end) = find_tag_end(&value[index..]) {
-                index += end;
-            } else {
-                out.push('<');
-                index += 1;
-            }
-            continue;
-        }
-        // A '<' followed by ASCII alpha, '/', '!', or '?' opens a tag;
-        // anything else is literal text (HTMLParser parse-starttag rules).
-        let rest = &value[index + 1..];
-        let opener = rest.chars().next().unwrap_or('\0');
-        if opener.is_ascii_alphabetic() || opener == '/' {
-            if let Some(end) = find_tag_end(&value[index..]) {
-                index += end;
-                continue;
-            }
-        }
-        out.push('<');
-        index += 1;
-    }
-    out
-}
-
-/// Length in bytes of `<...>` starting at `text[0] == '<'`, respecting
-/// single/double quotes; `None` when unterminated.
-fn find_tag_end(text: &str) -> Option<usize> {
-    let bytes = text.as_bytes();
-    let mut quote: Option<u8> = None;
-    let mut index = 1;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        if let Some(q) = quote {
-            if byte == q {
-                quote = None;
-            }
-        } else if byte == b'"' || byte == b'\'' {
-            quote = Some(byte);
-        } else if byte == b'>' {
-            return Some(index + 1);
-        }
-        index += 1;
-    }
-    None
+    pidash_db::app_pages::strip::django_strip_tags(value)
 }
 
 #[cfg(test)]
