@@ -159,7 +159,11 @@ pages the guest does not own land on the not-found panel (§4.2).
 - **Lock** is the boolean `is_locked`. Locking is optimistic on the client
   with rollback and a notice on failure; the transitional phase between the
   old and new state is a brief visual state. Locking freezes editing for
-  everyone, owner included.
+  everyone, owner included. The acting client's collaboration session stays
+  up across the locked state (PAGE-058): the freeze broadcast leaves over
+  its socket after the server confirms, so tearing the session down on the
+  optimistic freeze would strand peers editable. The locked face stays
+  read-only; only the socket lifetime extends.
 - **Archive** is `archived_at` (a timestamp or null). Archiving is
   optimistic; restoring clears it. Archiving drops every user favourite row
   for that page. A page's archive marker reads as a dated line in its header

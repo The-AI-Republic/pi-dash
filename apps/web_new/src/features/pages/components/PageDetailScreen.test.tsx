@@ -71,7 +71,8 @@ vi.mock("../../issues/peek/ResolvingIssuePeek.js", () => ({
 // The session hook is stubbed: its own suite walks the machine, while the
 // screen suite only switches on the mount it mirrors. Null is the default
 // every pre-existing test renders with — the standalone surface. Options
-// are captured so the read-only tests can pin the session's scope.
+// are captured so the read-only and lifetime tests can pin the session's
+// scope.
 const live = vi.hoisted(
   () =>
     ({ mount: null, options: null, snapshot: vi.fn() }) as {
@@ -1732,7 +1733,11 @@ describe("PageDetailScreen collaboration mount (PAGE-065-067)", () => {
     expect(live.snapshot).toHaveBeenCalledWith(harness.pageId, false);
     cleanup();
     live.snapshot.mockClear();
-    harness.page = record({ is_locked: true });
+    // The static report covers the pre-session window (the mock mounts
+    // nothing): a shelved page joins the session like any readable page
+    // once the mount lands (PAGE-053), so this example pins the null-mount
+    // side only.
+    harness.page = record({ archived_at: "2026-10-01" });
     renderScreen();
     await screen.findByTestId("page-detail-screen");
     await screen.findByText("Draft body");
@@ -1839,6 +1844,60 @@ describe("PageDetailScreen read-only live followers (PAGE-092)", () => {
     const { container } = renderReadOnly();
     await screen.findByText("Draft body");
     expect(container.querySelector('[contenteditable="true"]')).toBeNull();
+  });
+});
+
+describe("PageDetailScreen locked session lifetime (PAGE-058)", () => {
+  it("keeps the session mounted on a locked page for its owner", async () => {
+    // The lock broadcast leaves over the owner's socket after the server
+    // confirms, but the optimistic freeze lands first: tearing the session
+    // down on the freeze would swallow the peers' freeze. Gating on
+    // readability keeps it up; the face stays read-only.
+    live.mount = { liveReady: true, docHandle: null, seedDocument: false };
+    harness.page = record({ is_locked: true });
+    renderScreen();
+    await screen.findByText("This page is locked and read-only.");
+    expect(live.options).toMatchObject({ enabled: true });
+    expect(live.snapshot).toHaveBeenLastCalledWith(harness.pageId, false);
+  });
+
+  it("keeps the session mounted on a locked page for a member peer", async () => {
+    live.mount = { liveReady: true, docHandle: null, seedDocument: false };
+    harness.viewer = VIEWER;
+    harness.page = record({ is_locked: true });
+    renderScreen();
+    await screen.findByText("This page is locked and read-only.");
+    expect(live.options).toMatchObject({ enabled: true });
+    expect(live.snapshot).toHaveBeenLastCalledWith(harness.pageId, false);
+  });
+
+  it("leaves the session down on a locked page for a guest", async () => {
+    harness.viewer = VIEWER;
+    harness.role = 5;
+    harness.page = record({ is_locked: true });
+    renderScreen();
+    await screen.findByTestId("page-detail-panel");
+    expect(live.options).toMatchObject({ enabled: false });
+    expect(live.snapshot).toHaveBeenLastCalledWith(harness.pageId, true);
+  });
+
+  it("mounts the session on a shelved page", async () => {
+    // A shelved page joins the session like any readable page: the old
+    // client opens the same collaborative editor for it with editing off,
+    // so the body follows remote updates behind the archived face.
+    live.mount = { liveReady: true, docHandle: null, seedDocument: false };
+    harness.page = record({ is_locked: true, archived_at: "2026-10-01" });
+    renderScreen();
+    await screen.findByText("This page is archived and read-only.");
+    expect(live.options).toMatchObject({ enabled: true });
+    expect(live.snapshot).toHaveBeenLastCalledWith(harness.pageId, false);
+  });
+
+  it("mounts the session on an editable page", async () => {
+    renderScreen();
+    await screen.findByRole("textbox", { name: "Page title" });
+    expect(live.options).toMatchObject({ enabled: true });
+    expect(live.snapshot).toHaveBeenLastCalledWith(harness.pageId, false);
   });
 });
 

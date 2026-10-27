@@ -217,8 +217,12 @@ export function PageDetailScreen({
   // below mirrors the document the live editors bind. Read-only viewers
   // join the same session the old client opens for them, so their body
   // follows remote updates; they only render it without input (PAGE-053,
-  // PAGE-092). Only a page with no session at all keeps its stored
-  // snapshot and reports converged instead.
+  // PAGE-092). The session stays up across the locked state (PAGE-058):
+  // the freeze broadcast leaves over the acting client's socket after the
+  // server confirms, and gating on editability alone would tear it down
+  // on the optimistic freeze before the mutation publishes. Only a page
+  // with no session at all keeps its stored snapshot and reports
+  // converged instead.
   const liveMount = usePageLiveSession({
     workspaceSlug,
     projectId,
