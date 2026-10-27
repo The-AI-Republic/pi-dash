@@ -23,6 +23,7 @@ import { test, expect } from "../fixtures";
 import {
   parityProjectIdentifier,
   serverCleanupProject,
+  serverCreateArchivedEstimate,
   serverCreateEstimate,
   serverCreateEstimatePoint,
   serverCreateEstimateRaw,
@@ -562,6 +563,56 @@ test(
         system.points[0]?.id
       );
       expect(await driver.estimatesActiveSystemName()).toBe(`${tag} prime`);
+    } finally {
+      await serverCleanupProject(seed.workspaceSlug, projectId, session);
+    }
+  }
+);
+
+test(
+  specTitle(["EST-016"], "bug: deleting an unlinked system clears the linked project reference (NEWFRONT-809)"),
+  { tag: specTags(["EST-016"]) },
+  async ({ driver, seed }) => {
+    const tag = `NF809 split ${Date.now()}`;
+    const session = await signInSession(seed.email, seed.password);
+    const projectId = await serverCreateProjectWithFlags(
+      seed.workspaceSlug,
+      `${tag} project`,
+      parityProjectIdentifier("N809"),
+      {},
+      session
+    );
+    // The distinguishing setup: the project links an archived (dormant)
+    // system while a different, flagged system is the active row. The
+    // flagged row is deletable from the screen; the linked one is not.
+    const kept = await serverCreateArchivedEstimate(seed.workspaceSlug, projectId, `${tag} kept`, ["1", "2"], session);
+    await serverSetProjectEstimate(seed.workspaceSlug, projectId, kept.id, session);
+    const active = await serverCreateEstimate(seed.workspaceSlug, projectId, `${tag} prime`, ["1", "2"], session);
+    try {
+      await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
+      await driver.estimatesOpenSettings(seed.workspaceSlug, projectId);
+      await expect.poll(() => driver.estimatesActiveSystemName(), { timeout: 30_000 }).toBe(`${tag} prime`);
+
+      await driver.estimatesActiveRowDeleteClick();
+      await expect.poll(() => driver.estimatesEditDeleteConfirmDialogTitle(), { timeout: 20_000 }).toContain("Delete");
+      await driver.estimatesEditDeleteConfirmDialogConfirm();
+      await expect.poll(() => driver.lastToast(), { timeout: 20_000 }).toContain("deleted");
+
+      await test.step("the deleted system is gone", async () => {
+        expect((await serverEstimatesList(seed.workspaceSlug, projectId, session)).map((row) => row.id)).not.toContain(
+          active.id
+        );
+        expect((await serverEstimatesList(seed.workspaceSlug, projectId, session)).map((row) => row.id)).toContain(
+          kept.id
+        );
+      });
+
+      // The old client unlinks whenever the project has any linked
+      // system, so the unrelated link is cleared too (NEWFRONT-809).
+      // Intended (new app, spec §4.3 narrow rule): the reference still
+      // points at the kept system. If the old app is fixed this fails —
+      // unmark the scenario and assert the preserved link instead.
+      await expect.poll(() => serverProjectEstimateId(seed.workspaceSlug, projectId, session)).toBeNull();
     } finally {
       await serverCleanupProject(seed.workspaceSlug, projectId, session);
     }

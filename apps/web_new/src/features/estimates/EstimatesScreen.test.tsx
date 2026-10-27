@@ -615,6 +615,28 @@ describe("EstimatesScreen", () => {
     expect(calls.filter((call) => call.method === "PATCH")).toHaveLength(0);
   });
 
+  it("keeps the unrelated link when deleting the active system while linked elsewhere", async () => {
+    // Narrow unlink rule (NEWFRONT-809): the flagged row is deleted but
+    // the reference points at the older system, so no project write runs
+    // and estimates stay on.
+    const user = userEvent.setup();
+    const { calls } = stubApi({
+      systems: [
+        systemRow({ id: ACTIVE_ID, name: "Active system", last_used: true }),
+        systemRow({ id: OLD_ID, name: "Old system", created_at: "2023-01-01T00:00:00Z" }),
+      ],
+      estimate: OLD_ID,
+    });
+    const { queryClient } = renderScreen(true, OLD_ID);
+    await screen.findByText("Active system");
+    await user.click(screen.getByRole("button", { name: "Delete Active system" }));
+    await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith(ESTIMATE_DELETED_TITLE, expect.any(String)));
+    expect(calls.filter((call) => call.method === "DELETE")).toHaveLength(1);
+    expect(calls.filter((call) => call.method === "PATCH")).toHaveLength(0);
+    expect(queryClient.getQueryData(authKeys.project(WORKSPACE, PROJECT))).toMatchObject({ estimate: OLD_ID });
+  });
+
   it("shows a generated name as-is and links it like any other system", async () => {
     const user = userEvent.setup();
     const { calls } = stubApi({
