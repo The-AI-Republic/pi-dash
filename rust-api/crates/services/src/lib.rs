@@ -23,6 +23,7 @@ pub mod assistant;
 pub mod auth_oauth;
 pub mod auth_session;
 pub mod dispatch;
+pub mod domain;
 pub mod extensions;
 pub mod health;
 pub mod html_normalize;

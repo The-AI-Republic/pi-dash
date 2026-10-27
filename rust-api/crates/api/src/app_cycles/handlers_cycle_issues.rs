@@ -97,9 +97,8 @@ pub const CYCLE_ISSUES_PATH: &str =
 pub const CYCLE_ISSUE_PATH: &str =
     "/api/workspaces/{slug}/projects/{project_id}/cycles/{cycle_id}/cycle-issues/{issue_id}/";
 
-/// `issue_activity` Celery wire name (bare `@shared_task` default:
-/// `bgtasks/issue_activities_task.py:1503-1504`).
-pub const ISSUE_ACTIVITY_TASK: &str = "pi_dash.bgtasks.issue_activities_task.issue_activity";
+/// Re-export of the canonical [`pidash_services::domain::activity::ISSUE_ACTIVITY_TASK`].
+pub use pidash_services::domain::activity::ISSUE_ACTIVITY_TASK;
 
 /// Group-clash message (`issue.py:146-150`); renders as
 /// [`cycle_queries::GROUP_CLASH_BODY`] through `Denial::BadError`.

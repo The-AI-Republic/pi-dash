@@ -1,137 +1,95 @@
 #![forbid(unsafe_code)]
 
-//! Live issue-save orchestration seam (stage 8 bug fix PIDASHCONV-1216).
+//! Live issue-save orchestration seam (stage 8 bug fix PIDASHCONV-1216),
+//! as the api binary's binding over the public transition surface.
 //!
 //! The Django `Issue.post_save` receiver (`orchestration/signals.py:61-108`)
 //! fires on every issue save and reconciles the ticker + creates the entry
-//! run. The Rust port kept that explicit (`capture_prior_state` +
-//! `fire_state_transition`) but wired the save handlers to per-handler stub
-//! seams, so any move into/out of a ticking state did nothing (or only half):
-//! no ticker arm/disarm, no `agent_run`.
+//! run. The orchestration itself moved out of this crate (ORM-02
+//! PIDASHCONV-1520) so a `WriteTxn` after-commit step can call it:
 //!
-//! This module is the one live seam the save handlers share. It runs the
-//! merged services driver [`fire_state_transition`] against:
+//! * the pre-save snapshot is
+//!   [`pidash_services::domain::transition::capture_prior_state_pool`],
+//! * the completion comment and the transition fire core are
+//!   [`pidash_jobs::issue_transition`].
 //!
-//! * the jobs-side [`LiveCreationStore`] for the creation/finalize writers
-//!   (the same tx-backed store the move, scheduler and assistant paths use),
-//!   and
-//! * the pool, autocommit per statement, for the ticker/clock reads and
-//!   writes.
-//!
-//! The split is load-bearing: the reconcile [`clock`] lock (`SELECT … FOR
-//! UPDATE`) must not be held across `preflight_eligibility_or_bounce`, whose
-//! bounce opens its own transaction and locks the same ticker row — a held
-//! lock would deadlock the request. Autocommit per ticker statement mirrors
-//! Django's own separate `reconcile` atomic (which commits before preflight)
-//! and the shipped v1 ticker seam (PIDASHCONV-856).
-//!
-//! Post-commit work mirrors `_create_and_dispatch_run`'s `on_commit` drain
-//! (`creation.py:148-152`): dispatch each created run, drain a pod for a
-//! machine executor, publish finalized-run terminal effects, and consume any
-//! deferred admission tokens.
+//! This module keeps the save handlers' entry points at their existing
+//! paths: two re-exports plus [`fire_issue_transition`], which builds the
+//! two [`StoreDeps`][pidash_jobs::orchestration::StoreDeps] from the
+//! [`AppState`] and delegates to the jobs core with the api drains.
+//! [`AppTransitionHook`] is the same binding as a
+//! [`IssueTransitionHook`][pidash_services::domain::transition::IssueTransitionHook]
+//! for binaries that register it on a [`WriteTxn`][pidash_services::domain::WriteTxn]
+//! hook registry.
 
-use pidash_db::orchestration::workpad::AgentUserCollisionError;
-use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
-use pidash_db::tx::Transaction;
-use pidash_jobs::orchestration::{LiveCreationStore, StoreDeps};
-use pidash_services::dispatch::admission::AdmissionCache;
-use pidash_services::dispatch::policy::UserFlags;
-use pidash_services::dispatch::LlmProfile;
-use pidash_services::orchestration::clock::{
-    ClockWrite, ProjectClockPolicy, CREATE_TICKER_PARAMS, LOCK_TICKER_PARAMS, SAVE_CLOCK_PARAMS,
-    SAVE_CLOCK_SQL,
-};
-use pidash_services::orchestration::creation::{
-    AdmissionError, CreationError, CreationSeam, ExecutionError, ExecutionFields, ExecutionRequest,
-    FinalizeAgentRunSeam, IssueView, LockedIssue, NewAgentRun, PodView, ProjectView, RenderBundle,
-    RenderedTurn, RunView, RunnerView, StateView,
-};
-use pidash_services::orchestration::dispatch::PROJECT_CLOCK_POLICY_SQL;
-use pidash_services::orchestration::entries::{
-    fire_state_transition, BindingView, EntriesSeam, FireOutcome, FireRequest, NewSchedulerRun,
-    PreflightSeam, ProjectRoleFacts, SchedulerView, WorkspaceView, PRIOR_STATE_SELECT_SQL,
-};
-use pidash_services::prompting::composer::{OverrideIndex, OverrideRow};
-use pidash_types::dispatch::AgentExecutorKind;
-use serde_json::Value;
-use sqlx::postgres::PgRow;
-use sqlx::{PgPool, Row};
+use std::future::Future;
+use std::pin::Pin;
+
+use pidash_jobs::issue_transition::{PodDrain, PublishEffectsDrain};
+use pidash_services::domain::transition::IssueTransitionHook;
+use pidash_services::orchestration::entries::{FireOutcome, FireRequest};
+use pidash_services::runner_runs::LifecycleEffect;
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::state::AppState;
-use crate::v1_work_items::handlers_actions::{dispatch_deps_for_ids, LiveMatcher};
+use crate::v1_work_items::handlers_actions::dispatch_deps_for_ids;
 
-/// The ticker/clock seam methods run pool-direct (autocommit); everything
-/// else delegates to the tx-backed [`LiveCreationStore`].
-pub(crate) struct LiveTransitionSeam<'a, C, H, P> {
-    pool: &'a PgPool,
-    store: LiveCreationStore<'a, C, H, P>,
+/// The post-save completion comment-back, re-exported from the jobs layer.
+pub(crate) use pidash_jobs::issue_transition::enqueue_completion_comment;
+/// The pre-save `state_id` snapshot, re-exported from the domain layer.
+pub(crate) use pidash_services::domain::transition::capture_prior_state_pool;
+
+/// The api binary's post-commit drains for the jobs transition core:
+/// the `project_move_handoff` publish drain and the `runner_poll` pod
+/// drain. Both clones are cheap (`PgPool` and `AppState` are `Arc`
+/// handles).
+struct TransitionDrains {
+    pool: PgPool,
+    state: AppState,
+    actor_id: Uuid,
 }
 
-impl<'a, C, H, P> LiveTransitionSeam<'a, C, H, P> {
-    fn db(error: sqlx::Error) -> CreationError {
-        CreationError::Db(error.to_string())
+impl PublishEffectsDrain for TransitionDrains {
+    fn drain(
+        &self,
+        effects: Vec<LifecycleEffect>,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        let pool = self.pool.clone();
+        let state = self.state.clone();
+        let actor_id = self.actor_id;
+        Box::pin(async move {
+            // Web request: the crum user is the requester.
+            crate::project_move_handoff::drain_publish_effects(
+                &pool,
+                &state,
+                effects,
+                Some(actor_id),
+            )
+            .await;
+        })
     }
 }
 
-/// The pre-save `state_id` snapshot (`capture_prior_state`, `signals.py:61-71`)
-/// against the pool: `None` for a new instance or a missing row.
-pub(crate) async fn capture_prior_state_pool(
-    pool: &PgPool,
-    issue_pk: Option<Uuid>,
-) -> Result<Option<Uuid>, sqlx::Error> {
-    let Some(issue_pk) = issue_pk else {
-        return Ok(None);
-    };
-    let row: Option<(Uuid, Option<Uuid>)> = sqlx::query_as(PRIOR_STATE_SELECT_SQL)
-        .bind(issue_pk)
-        .fetch_optional(pool)
-        .await?;
-    Ok(row.and_then(|(_, state_id)| state_id))
-}
-
-/// Post-commit completion comment-back for a state-changing save
-/// (`github_signals.py:44-75`, via the jobs-layer port; the
-/// `tools_local_store::enqueue_completion_comment` shape from
-/// PIDASHCONV-1252, shared by every app_issues/v1 write path —
-/// PIDASHCONV-1460). The caller gates on its own transition check
-/// (`prev != current`); this resolves the dispatch (group, mirror,
-/// idempotency guards) and enqueues the provider's
-/// `post_completion_comment` job. Best-effort: failures only warn, the
-/// save stands.
-pub(crate) async fn enqueue_completion_comment(
-    pool: &PgPool,
-    issue_id: &Uuid,
-    prev_state_id: Option<&Uuid>,
-    current_state_id: Option<&Uuid>,
-) {
-    use pidash_jobs::integrations::github_signals::{
-        dispatch_completion_comment, dispatch_job, DispatchOutcome,
-    };
-    let outcome =
-        dispatch_completion_comment(pool, issue_id, current_state_id, false, prev_state_id).await;
-    let target = match outcome {
-        Ok(DispatchOutcome::Dispatch(target)) => target,
-        Ok(DispatchOutcome::Skip(_)) => return,
-        Err(error) => {
-            tracing::warn!(%error, "completion comment dispatch lookup failed; op stands");
-            return;
-        }
-    };
-    let job = dispatch_job(&target);
-    if let Err(error) = pidash_jobs::queue::enqueue(pool, &job).await {
-        tracing::warn!(%error, task = %job.task, "task enqueue failed; op stands");
+impl PodDrain for TransitionDrains {
+    fn drain_pod(&self, pod_id: Uuid) -> Pin<Box<dyn Future<Output = Result<(), ()>> + Send + '_>> {
+        let pool = self.pool.clone();
+        let state = self.state.clone();
+        Box::pin(async move {
+            crate::runner_sessions::runner_poll::drain_pod_by_id(&pool, &state, pod_id).await
+        })
     }
 }
 
 /// Run the post-save transition fire for one issue against live SQL.
 ///
-/// A non-transition answers [`FireOutcome::NoTransition`] without opening a
-/// transaction. A handler failure rolls the driver's creation transaction
-/// back and answers [`FireOutcome::Failed`] (the caller logs the verbatim
-/// line; the save itself stands). A successful drive commits and drains the
-/// creation outboxes.
-pub(crate) async fn fire_issue_transition(
+/// Same signature and behaviour as before the ORM-02 move: builds the two
+/// dependency bundles from the [`AppState`] and delegates to the jobs
+/// core with the api drains. Public so overlay binaries (which link this
+/// crate) and [`AppTransitionHook`] registrants can call it.
+// The `()` error is the transition-driver convention, kept verbatim.
+#[allow(clippy::result_unit_err)]
+pub async fn fire_issue_transition(
     state: &AppState,
     pool: &PgPool,
     actor_id: Uuid,
@@ -149,521 +107,70 @@ pub(crate) async fn fire_issue_transition(
         dispatch_deps_for_ids(state, pool, actor_id, request.issue_id, now_unix_secs)
             .await
             .map_err(|_| ())?;
-
-    let tx = Transaction::begin(pool).await.map_err(|_| ())?;
-    let mut seam = LiveTransitionSeam {
-        pool,
-        store: LiveCreationStore::new(tx, pool, store_deps),
-    };
-    let mut preflight = LivePreflight {
-        pool: pool.clone(),
-        deps: Some(preflight_deps),
-        matcher,
-        now: request.now,
-        jitter_secs: request.jitter_secs,
-    };
-
-    let outcome = fire_state_transition(&mut seam, &mut preflight, &request).await;
-    let (tx, _pool, cache, dispatches, deferred, terminal_effects) = seam.store.into_parts();
-
-    let outcome = match outcome {
-        Ok(outcome) => outcome,
-        Err(_) => {
-            let _ = tx.rollback().await;
-            return Err(());
-        }
-    };
-    if !matches!(outcome, FireOutcome::Called(_)) {
-        // NoTransition / Failed: nothing this drive committed is kept.
-        let _ = tx.rollback().await;
-        return Ok(outcome);
-    }
-    tx.commit().await.map_err(|_| ())?;
-
-    if !terminal_effects.is_empty() {
-        let mut pairs = Vec::with_capacity(terminal_effects.len() * 2);
-        for id in terminal_effects {
-            pairs.extend(pidash_services::runner_runs::finalization::plan_publish_effects(id));
-        }
-        // Web request: the crum user is the requester.
-        crate::project_move_handoff::drain_publish_effects(pool, state, pairs, Some(actor_id))
-            .await;
-    }
     let cloud = state.settings().cloud_agent.clone();
-    for run_id in dispatches {
-        match pidash_jobs::dispatch::dispatch_agent_run(pool, &cloud, run_id, request.now).await {
-            Ok(pidash_jobs::dispatch::DispatchDecision::PodDrain { pod_id }) => {
-                crate::runner_sessions::runner_poll::drain_pod_by_id(pool, state, pod_id)
-                    .await
-                    .map_err(|_| ())?;
-            }
-            Ok(_) => {}
-            Err(_) => return Err(()),
-        }
-    }
-    for consume in &deferred {
-        pidash_services::dispatch::admission::consume_admission_token(&cache, consume);
-    }
-    Ok(outcome)
+    let drains = TransitionDrains {
+        pool: pool.clone(),
+        state: state.clone(),
+        actor_id,
+    };
+    pidash_jobs::issue_transition::fire_transition(
+        pool,
+        store_deps,
+        preflight_deps,
+        matcher,
+        &cloud,
+        request,
+        &drains,
+        &drains,
+    )
+    .await
 }
 
-// ---------------------------------------------------------------------------
-// Preflight seam: the jobs `preflight_eligibility_or_bounce` driver
-// ---------------------------------------------------------------------------
-
-/// The eligibility preflight over the request pool (its own transaction and
-/// commit, like Django's bounce atomic). The deps travel by `Option` because
-/// the driver takes them by value while the seam only lends `&mut self`; the
-/// driver consults preflight at most once per fire, so the `None` arm is
-/// defensive.
-struct LivePreflight<C, H, P> {
+/// The api binary's [`IssueTransitionHook`]: the public transition entry
+/// points bound to this binary's state and pool. Handlers that drive
+/// domain writes register it on the [`WriteTxn`][pidash_services::domain::WriteTxn]
+/// hook registry so after-commit steps can fire the orchestration.
+pub struct AppTransitionHook {
+    state: AppState,
     pool: PgPool,
-    deps: Option<StoreDeps<C, H, P>>,
-    matcher: LiveMatcher,
-    now: chrono::DateTime<chrono::Utc>,
-    jitter_secs: f64,
 }
 
-impl<C, H, P> PreflightSeam for LivePreflight<C, H, P>
-where
-    C: AdmissionCache,
-    H: Fn(Uuid) -> bool + Clone + Send + Sync,
-    P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
-{
-    async fn preflight_eligibility_or_bounce(
-        &mut self,
-        issue_id: Uuid,
-        creator_id: Uuid,
-        pod_id: Uuid,
-        triggered_by: &str,
-    ) -> Result<bool, CreationError> {
-        let Some(deps) = self.deps.take() else {
-            return Err(CreationError::Db(
-                "issue transition preflight: deps already consumed".to_owned(),
-            ));
-        };
-        let out = pidash_jobs::orchestration::preflight_eligibility_or_bounce(
-            &self.pool,
-            deps,
-            &self.matcher,
-            self.now,
-            self.jitter_secs,
-            issue_id,
-            Some(creator_id),
-            pod_id,
-            triggered_by,
-        )
-        .await
-        .map_err(|error| CreationError::Db(error.to_string()))?;
-        for line in &out.outcome.logs {
-            if line.level == "WARNING" {
-                tracing::warn!("{}", line.message);
-            } else {
-                tracing::info!("{}", line.message);
-            }
-        }
-        Ok(out.outcome.proceed)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Ticker / clock SQL (shared with `v1_work_items`; the L5 consts, verbatim)
-// ---------------------------------------------------------------------------
-
-/// Translate an L5 clock statement's `:name` placeholders to positional `$n`
-/// in `params` order (the documented handler contract in
-/// `services::orchestration::clock`; never a fork — the text still comes from
-/// the L5 consts). Longer names first so `:id` never corrupts `:issue_id`.
-pub(crate) fn translate_clock_sql(sql: &str, params: &[&str]) -> String {
-    let mut ordered: Vec<(usize, &&str)> = params.iter().enumerate().collect();
-    ordered.sort_by_key(|item| std::cmp::Reverse(item.1.len()));
-    let mut out = sql.to_owned();
-    for (index, name) in ordered {
-        out = out.replace(&format!(":{name}"), &format!("${}", index + 1));
-    }
-    out
-}
-
-pub(crate) fn lock_ticker_by_issue_sql() -> String {
-    translate_clock_sql(
-        &pidash_services::orchestration::clock::lock_ticker_sql(),
-        LOCK_TICKER_PARAMS,
-    )
-}
-
-pub(crate) fn create_ticker_sql() -> String {
-    translate_clock_sql(
-        &pidash_services::orchestration::clock::create_ticker_sql(),
-        CREATE_TICKER_PARAMS,
-    )
-}
-
-pub(crate) fn save_clock_sql() -> String {
-    translate_clock_sql(SAVE_CLOCK_SQL, SAVE_CLOCK_PARAMS)
-}
-
-/// Map one full ticker row (the jobs `map_ticker` shape over the same shared
-/// column list).
-pub(crate) fn map_ticker(row: &PgRow) -> Result<IssueAgentTicker, sqlx::Error> {
-    Ok(IssueAgentTicker {
-        id: row.try_get("id")?,
-        created_at: row.try_get("created_at")?,
-        updated_at: row.try_get("updated_at")?,
-        created_by_id: row.try_get("created_by_id")?,
-        updated_by_id: row.try_get("updated_by_id")?,
-        deleted_at: row.try_get("deleted_at")?,
-        issue_id: row.try_get("issue_id")?,
-        used: row.try_get("used")?,
-        granted: row.try_get("granted")?,
-        waited: row.try_get("waited")?,
-        user_disabled: row.try_get("user_disabled")?,
-        next_run_at: row.try_get("next_run_at")?,
-        last_tick_at: row.try_get("last_tick_at")?,
-        enabled: row.try_get("enabled")?,
-        disarm_reason: row.try_get("disarm_reason")?,
-        pending_entry: row.try_get("pending_entry")?,
-        pending_entry_free: row.try_get("pending_entry_free")?,
-        pending_entry_actor_id: row.try_get("pending_entry_actor_id")?,
-        pending_entry_trigger: row.try_get("pending_entry_trigger")?,
-        resume_parent_run_id: row.try_get("resume_parent_run_id")?,
-    })
-}
-
-/// Map one `PROJECT_CLOCK_POLICY_SQL` row. The cadence columns are INT4; the
-/// policy widens them to i64 (the jobs `map_policy` precedent).
-pub(crate) fn map_policy(row: &PgRow) -> Result<ProjectClockPolicy, sqlx::Error> {
-    let interval_impl: Option<i32> = row.try_get("agent_default_interval_seconds")?;
-    let interval_review: Option<i32> = row.try_get("agent_review_default_interval_seconds")?;
-    let interval_test: Option<i32> = row.try_get("agent_test_default_interval_seconds")?;
-    Ok(ProjectClockPolicy {
-        agent_ticking_enabled: row.try_get("agent_ticking_enabled")?,
-        agent_default_max_ticks: row.try_get("agent_default_max_ticks")?,
-        agent_default_interval_seconds: interval_impl.map(i64::from),
-        agent_review_default_interval_seconds: interval_review.map(i64::from),
-        agent_test_default_interval_seconds: interval_test.map(i64::from),
-    })
-}
-
-// ---------------------------------------------------------------------------
-// Seam impls
-// ---------------------------------------------------------------------------
-
-impl<C, H, P> CreationSeam for LiveTransitionSeam<'_, C, H, P>
-where
-    C: AdmissionCache,
-    H: Fn(Uuid) -> bool + Clone + Send + Sync,
-    P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
-{
-    async fn issue(&mut self, issue_id: Uuid) -> Result<IssueView, CreationError> {
-        self.store.issue(issue_id).await
-    }
-
-    async fn project(&mut self, project_id: Uuid) -> Result<ProjectView, CreationError> {
-        self.store.project(project_id).await
-    }
-
-    async fn state(&mut self, state_id: Option<Uuid>) -> Result<Option<StateView>, CreationError> {
-        self.store.state(state_id).await
-    }
-
-    async fn latest_prior_run(&mut self, issue_id: Uuid) -> Result<Option<RunView>, CreationError> {
-        self.store.latest_prior_run(issue_id).await
-    }
-
-    async fn active_run_for(&mut self, issue_id: Uuid) -> Result<Option<RunView>, CreationError> {
-        self.store.active_run_for(issue_id).await
-    }
-
-    async fn run(&mut self, run_id: Uuid) -> Result<Option<RunView>, CreationError> {
-        self.store.run(run_id).await
-    }
-
-    async fn runner(&mut self, runner_id: Uuid) -> Result<Option<RunnerView>, CreationError> {
-        self.store.runner(runner_id).await
-    }
-
-    async fn assigned_pod(&mut self, pod_id: Uuid) -> Result<Option<PodView>, CreationError> {
-        self.store.assigned_pod(pod_id).await
-    }
-
-    async fn default_pod_for_project(
-        &mut self,
-        project_id: Uuid,
-    ) -> Result<Option<PodView>, CreationError> {
-        self.store.default_pod_for_project(project_id).await
-    }
-
-    async fn resume_parent_run_id(
-        &mut self,
-        issue_id: Uuid,
-    ) -> Result<Option<Uuid>, CreationError> {
-        self.store.resume_parent_run_id(issue_id).await
-    }
-
-    async fn work_item_id_for_run(&mut self, run_id: Uuid) -> Result<Option<Uuid>, CreationError> {
-        self.store.work_item_id_for_run(run_id).await
-    }
-
-    async fn lock_issue_for_handoff(
-        &mut self,
-        issue_id: Uuid,
-    ) -> Result<Option<LockedIssue>, CreationError> {
-        self.store.lock_issue_for_handoff(issue_id).await
-    }
-
-    async fn lock_run_for_handoff(
-        &mut self,
-        run_id: Uuid,
-    ) -> Result<Option<RunView>, CreationError> {
-        self.store.lock_run_for_handoff(run_id).await
-    }
-
-    async fn user_flags(&mut self, user_id: Uuid) -> Result<UserFlags, CreationError> {
-        self.store.user_flags(user_id).await
-    }
-
-    async fn insert_run(&mut self, row: &NewAgentRun) -> Result<RunView, CreationError> {
-        self.store.insert_run(row).await
-    }
-
-    async fn save_prompt(
-        &mut self,
-        run_id: Uuid,
-        prompt: &str,
-        manifest: &Value,
-    ) -> Result<(), CreationError> {
-        self.store.save_prompt(run_id, prompt, manifest).await
-    }
-
-    async fn save_run_config(&mut self, run_id: Uuid, config: &Value) -> Result<(), CreationError> {
-        self.store.save_run_config(run_id, config).await
-    }
-
-    async fn execution_fields(
-        &mut self,
-        req: &ExecutionRequest,
-    ) -> Result<ExecutionFields, ExecutionError> {
-        self.store.execution_fields(req).await
-    }
-
-    async fn lock_cloud_creation_capacity(
-        &mut self,
-        workspace_id: Uuid,
-        executor_kind: AgentExecutorKind,
-        automatic: bool,
-    ) -> Result<Option<AdmissionError>, CreationError> {
-        self.store
-            .lock_cloud_creation_capacity(workspace_id, executor_kind, automatic)
-            .await
-    }
-
-    fn dispatch_after_commit(&mut self, run_id: Uuid) {
-        self.store.dispatch_after_commit(run_id)
-    }
-
-    async fn render_bundle(
-        &mut self,
-        issue_id: Uuid,
-        run_id: Uuid,
-        parent_run_id: Option<Uuid>,
-        trigger: &str,
-        created_by_id: Uuid,
-    ) -> Result<RenderBundle, CreationError> {
-        self.store
-            .render_bundle(issue_id, run_id, parent_run_id, trigger, created_by_id)
-            .await
-    }
-
-    fn extra_toolsets_schema_tool(&self) -> String {
-        self.store.extra_toolsets_schema_tool()
-    }
-}
-
-impl<C, H, P> FinalizeAgentRunSeam for LiveTransitionSeam<'_, C, H, P>
-where
-    C: AdmissionCache,
-    H: Fn(Uuid) -> bool + Clone + Send + Sync,
-    P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
-{
-    async fn finalize_failed_run(
-        &mut self,
-        run_id: Uuid,
-        error_code: &str,
-        error: &str,
-        now: chrono::DateTime<chrono::Utc>,
-    ) -> Result<RunView, CreationError> {
-        self.store
-            .finalize_failed_run(run_id, error_code, error, now)
-            .await
-    }
-}
-
-impl<C, H, P> EntriesSeam for LiveTransitionSeam<'_, C, H, P>
-where
-    C: AdmissionCache,
-    H: Fn(Uuid) -> bool + Clone + Send + Sync,
-    P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
-{
-    async fn prior_state_id(&mut self, issue_id: Uuid) -> Result<Option<Uuid>, CreationError> {
-        let row: Option<(Uuid, Option<Uuid>)> = sqlx::query_as(PRIOR_STATE_SELECT_SQL)
-            .bind(issue_id)
-            .fetch_optional(self.pool)
-            .await
-            .map_err(Self::db)?;
-        Ok(row.and_then(|(_, state_id)| state_id))
-    }
-
-    async fn queued_follow_up(&mut self, issue_id: Uuid) -> Result<Option<RunView>, CreationError> {
-        self.store.queued_follow_up(issue_id).await
-    }
-
-    async fn lock_ticker(
-        &mut self,
-        issue_id: Uuid,
-    ) -> Result<Option<IssueAgentTicker>, CreationError> {
-        let row: Option<PgRow> = sqlx::query(&lock_ticker_by_issue_sql())
-            .bind(issue_id)
-            .fetch_optional(self.pool)
-            .await
-            .map_err(Self::db)?;
-        row.map(|row| map_ticker(&row))
-            .transpose()
-            .map_err(Self::db)
-    }
-
-    async fn save_ticker(
-        &mut self,
-        row: &IssueAgentTicker,
-        write: ClockWrite,
-    ) -> Result<(), CreationError> {
-        match write {
-            ClockWrite::None => Ok(()),
-            ClockWrite::Insert => {
-                sqlx::query(&create_ticker_sql())
-                    .bind(row.created_at)
-                    .bind(row.created_by_id)
-                    .bind(row.id)
-                    .bind(row.issue_id)
-                    .bind(row.next_run_at)
-                    .bind(row.enabled)
-                    .bind(row.disarm_reason.as_str())
-                    .bind(row.pending_entry)
-                    .bind(row.pending_entry_free)
-                    .bind(row.pending_entry_actor_id)
-                    .bind(row.pending_entry_trigger.as_str())
-                    .bind(row.resume_parent_run_id)
-                    .execute(self.pool)
-                    .await
-                    .map_err(Self::db)?;
-                Ok(())
-            }
-            ClockWrite::Update => {
-                sqlx::query(&save_clock_sql())
-                    .bind(chrono::Utc::now())
-                    .bind(row.granted)
-                    .bind(row.next_run_at)
-                    .bind(row.enabled)
-                    .bind(row.disarm_reason.as_str())
-                    .bind(row.pending_entry)
-                    .bind(row.pending_entry_free)
-                    .bind(row.pending_entry_actor_id)
-                    .bind(row.pending_entry_trigger.as_str())
-                    .bind(row.resume_parent_run_id)
-                    .bind(row.id)
-                    .execute(self.pool)
-                    .await
-                    .map_err(Self::db)?;
-                Ok(())
-            }
+impl AppTransitionHook {
+    pub fn new(state: &AppState, pool: &PgPool) -> Self {
+        Self {
+            state: state.clone(),
+            pool: pool.clone(),
         }
     }
+}
 
-    fn set_rollback(&mut self) {
-        self.store.set_rollback()
+impl IssueTransitionHook for AppTransitionHook {
+    fn enqueue_completion_comment(
+        &self,
+        issue_id: Uuid,
+        prev_state_id: Option<Uuid>,
+        current_state_id: Option<Uuid>,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        let pool = self.pool.clone();
+        Box::pin(async move {
+            enqueue_completion_comment(
+                &pool,
+                &issue_id,
+                prev_state_id.as_ref(),
+                current_state_id.as_ref(),
+            )
+            .await;
+        })
     }
 
-    async fn clock_policy(
-        &mut self,
-        project_id: Uuid,
-    ) -> Result<ProjectClockPolicy, CreationError> {
-        let row: PgRow = sqlx::query(PROJECT_CLOCK_POLICY_SQL)
-            .bind(project_id)
-            .fetch_one(self.pool)
-            .await
-            .map_err(Self::db)?;
-        map_policy(&row).map_err(Self::db)
-    }
-
-    async fn binding(&mut self, binding_id: Uuid) -> Result<BindingView, CreationError> {
-        self.store.binding(binding_id).await
-    }
-
-    async fn scheduler_override_pod(
-        &mut self,
-        pod_id: Uuid,
-        project_id: Option<Uuid>,
-    ) -> Result<Option<PodView>, CreationError> {
-        self.store.scheduler_override_pod(pod_id, project_id).await
-    }
-
-    async fn workspace(&mut self, workspace_id: Uuid) -> Result<WorkspaceView, CreationError> {
-        self.store.workspace(workspace_id).await
-    }
-
-    async fn scheduler_row(&mut self, scheduler_id: Uuid) -> Result<SchedulerView, CreationError> {
-        self.store.scheduler_row(scheduler_id).await
-    }
-
-    async fn scheduler_override_rows(
-        &mut self,
-        workspace_id: Uuid,
-    ) -> Result<Vec<OverrideRow>, CreationError> {
-        self.store.scheduler_override_rows(workspace_id).await
-    }
-
-    async fn project_role_facts(
-        &mut self,
-        user_id: Uuid,
-        workspace_slug: &str,
-        project_id: Uuid,
-    ) -> Result<ProjectRoleFacts, CreationError> {
-        self.store
-            .project_role_facts(user_id, workspace_slug, project_id)
-            .await
-    }
-
-    async fn has_usable_llm_config(&mut self, user_id: Uuid) -> Result<bool, CreationError> {
-        self.store.has_usable_llm_config(user_id).await
-    }
-
-    async fn agent_system_user(
-        &mut self,
-    ) -> Result<Result<Uuid, AgentUserCollisionError>, CreationError> {
-        self.store.agent_system_user().await
-    }
-
-    async fn insert_scheduler_run(
-        &mut self,
-        row: &NewSchedulerRun,
-    ) -> Result<RunView, CreationError> {
-        self.store.insert_scheduler_run(row).await
-    }
-
-    fn compose_scheduler_turn(
-        &mut self,
-        context: &Value,
-        index: &OverrideIndex,
-        workspace_id: Option<&str>,
-        executor_kind: Option<&str>,
-        tool_catalog_version: i64,
-    ) -> Result<RenderedTurn, String> {
-        self.store.compose_scheduler_turn(
-            context,
-            index,
-            workspace_id,
-            executor_kind,
-            tool_catalog_version,
-        )
+    fn fire(
+        &self,
+        actor_id: Uuid,
+        request: FireRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<FireOutcome, ()>> + Send + '_>> {
+        let state = self.state.clone();
+        let pool = self.pool.clone();
+        Box::pin(async move { fire_issue_transition(&state, &pool, actor_id, request).await })
     }
 }
 

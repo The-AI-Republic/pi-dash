@@ -85,6 +85,10 @@ encoding_rs = "0.8"
 # churn beyond the new edges).
 html5ever = "0.39"
 markup5ever_rcdom = "0.39.0"
+# ORM-02 (PIDASHCONV-1520, design D1/D5): the domain write services run on
+# the SeaORM transaction. Identical spec to pidash-db (locked sea-orm
+# 1.1.20 — no lock churn, `cargo tree -d` shows one copy).
+sea-orm = { version = "~1.1.20", default-features = false, features = ["sqlx-postgres", "runtime-tokio", "macros", "with-uuid", "with-chrono", "with-json"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }

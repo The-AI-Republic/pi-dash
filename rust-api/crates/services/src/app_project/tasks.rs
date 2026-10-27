@@ -77,15 +77,15 @@ use sha2::Sha256;
 
 /// Celery wire name for `recent_visited_task` (bare `@shared_task`).
 pub const RECENT_VISITED_TASK: &str = "pi_dash.bgtasks.recent_visited_task.recent_visited_task";
-/// Celery wire name for `model_activity` (bare `@shared_task`).
-pub const MODEL_ACTIVITY_TASK: &str = "pi_dash.bgtasks.webhook_task.model_activity";
+/// Re-export of the canonical [`crate::domain::activity::MODEL_ACTIVITY_TASK`].
+pub use crate::domain::activity::MODEL_ACTIVITY_TASK;
 /// Celery wire name for `webhook_activity` (bare `@shared_task`).
 pub const WEBHOOK_ACTIVITY_TASK: &str = "pi_dash.bgtasks.webhook_task.webhook_activity";
 /// Celery wire name for `project_add_user_email` (bare `@shared_task`).
 pub const PROJECT_ADD_USER_EMAIL_TASK: &str =
     "pi_dash.bgtasks.project_add_user_email_task.project_add_user_email";
-/// Celery wire name for `issue_activity` (bare `@shared_task`).
-pub const ISSUE_ACTIVITY_TASK: &str = "pi_dash.bgtasks.issue_activities_task.issue_activity";
+/// Re-export of the canonical [`crate::domain::activity::ISSUE_ACTIVITY_TASK`].
+pub use crate::domain::activity::ISSUE_ACTIVITY_TASK;
 
 /// Kwarg order of `recent_visited_task.delay` (`project/base.py:246-252`).
 pub const RECENT_VISITED_KWARG_ORDER: &[&str] = &[

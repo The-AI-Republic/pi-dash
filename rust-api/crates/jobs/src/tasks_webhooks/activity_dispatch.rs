@@ -114,8 +114,8 @@ use pidash_services::tasks_webhooks::activity_tracks::{
 use crate::queue::{enqueue, NewJob};
 use crate::worker::{Handler, Registry, Verdict};
 
-/// Celery task name (`@shared_task`, `:1503-1504`).
-pub const ISSUE_ACTIVITY_TASK: &str = "pi_dash.bgtasks.issue_activities_task.issue_activity";
+/// Re-export of the canonical [`pidash_services::domain::activity::ISSUE_ACTIVITY_TASK`].
+pub use pidash_services::domain::activity::ISSUE_ACTIVITY_TASK;
 
 /// `notifications.delay(...)` target (`notification_task.py:190-200`).
 pub const NOTIFICATIONS_TASK: &str = "pi_dash.bgtasks.notification_task.notifications";

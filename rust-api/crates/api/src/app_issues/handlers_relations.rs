@@ -801,9 +801,8 @@ fn layout_py_float(rendered: &str, value: f64) -> String {
 // Tasks: best-effort publishing through the queue
 // ---------------------------------------------------------------------------
 
-/// `issue_activity` Celery wire name (bare `@shared_task` default:
-/// `bgtasks/issue_activities_task.py:1503-1504`).
-const ISSUE_ACTIVITY_TASK: &str = "pi_dash.bgtasks.issue_activities_task.issue_activity";
+// Canonical task name lives in `pidash_services::domain::activity`.
+use pidash_services::domain::activity::ISSUE_ACTIVITY_TASK;
 /// `crawl_work_item_link_title` wire name (`bgtasks/work_item_link_task.py:262`).
 const CRAWL_LINK_TASK: &str = "pi_dash.bgtasks.work_item_link_task.crawl_work_item_link_title";
 

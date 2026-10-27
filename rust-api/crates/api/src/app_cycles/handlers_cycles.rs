@@ -1594,15 +1594,12 @@ async fn validate_and_rewrite(
 // Task publishes (deferred, best-effort)
 // ---------------------------------------------------------------------------
 
-/// Celery wire name for `model_activity`
-/// (`bgtasks/webhook_task.py:463`).
-const MODEL_ACTIVITY_TASK: &str = "pi_dash.bgtasks.webhook_task.model_activity";
+// Canonical task names live in `pidash_services::domain::activity`.
+use pidash_services::domain::activity::MODEL_ACTIVITY_TASK;
 /// Celery wire name for `recent_visited_task` (bare `@shared_task`
 /// default).
 const RECENT_VISITED_TASK: &str = "pi_dash.bgtasks.recent_visited_task.recent_visited_task";
-/// Celery wire name for `issue_activity`
-/// (`bgtasks/issue_activities_task.py:1504`).
-const ISSUE_ACTIVITY_TASK: &str = "pi_dash.bgtasks.issue_activities_task.issue_activity";
+use pidash_services::domain::activity::ISSUE_ACTIVITY_TASK;
 
 /// One `model_activity.delay(...)` enqueue (`base.py:318-326`,
 /// `:397-405`): kwargs in call order; `requested_data` is the raw

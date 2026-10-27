@@ -1494,11 +1494,8 @@ fn normalize_parse_floats(value: &mut Value) {
 // Tasks: best-effort publishing through the queue
 // ---------------------------------------------------------------------------
 
-/// `issue_activity` Celery wire name (bare `@shared_task` default:
-/// `bgtasks/issue_activities_task.py:1503-1504`).
-pub const ISSUE_ACTIVITY_TASK: &str = "pi_dash.bgtasks.issue_activities_task.issue_activity";
-/// `model_activity` Celery wire name (`bgtasks/webhook_task.py:463-464`).
-pub const MODEL_ACTIVITY_TASK: &str = "pi_dash.bgtasks.webhook_task.model_activity";
+/// Re-exports of the canonical [`pidash_services::domain::activity`] task names.
+pub use pidash_services::domain::activity::{ISSUE_ACTIVITY_TASK, MODEL_ACTIVITY_TASK};
 
 /// Enqueue a worker message for the worker to forward to the broker
 /// (Python-owned task). Best-effort: without a queue the response still
