@@ -264,15 +264,33 @@ test(
     await enterAnalyticsTab(driver, world, "overview");
 
     const cards = await driver.analyticsOverviewCards();
+    // Spec §5 declares the eight human labels the intended wording and
+    // the new build implements them; the oracle pins the raw keys. This
+    // scenario records the divergence rather than a second copy of the bug.
+    const expected =
+      driver.target === "web_new"
+        ? [
+            "Total Users",
+            "Total Admins",
+            "Total Members",
+            "Total Guests",
+            "Total Projects",
+            "Total Work items",
+            "Total Cycles",
+            "Total Intake",
+          ]
+        : [
+            "Total common.users",
+            "Total common.admins",
+            "Total common.members",
+            "Total common.guests",
+            "Total common.projects",
+            "Total common.work_items",
+            "Total common.cycles",
+            "Total sidebar.intake",
+          ];
     expect(cards.map((card) => card.label)).toEqual([
-      "Total common.users",
-      "Total common.admins",
-      "Total common.members",
-      "Total common.guests",
-      "Total common.projects",
-      "Total common.work_items",
-      "Total common.cycles",
-      "Total sidebar.intake",
+      ...expected,
       "Agent input tokens",
       "Agent output tokens",
       "Agent total tokens",

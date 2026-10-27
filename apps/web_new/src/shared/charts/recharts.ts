@@ -24,3 +24,12 @@ type BarShapeFn = Extract<BarShapeProp, (...args: never[]) => unknown>;
 
 /** Render-props a bar segment passes to a shape function. */
 export type BarShapeRenderProps = Parameters<BarShapeFn>[0];
+
+type LegendSorterProp = NonNullable<React.ComponentProps<RechartsModule["Legend"]>["itemSorter"]>;
+type LegendSorterFn = Extract<LegendSorterProp, (...args: never[]) => unknown>;
+
+/** One legend entry the library passes to an item-sorter function. */
+export type LegendSorterEntry = Parameters<LegendSorterFn>[0];
+
+/** Item-sorter callback shape the legend accepts. */
+export type LegendSorter = (entry: LegendSorterEntry) => number | string;

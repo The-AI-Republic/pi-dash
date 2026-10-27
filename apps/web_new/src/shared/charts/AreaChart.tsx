@@ -15,7 +15,7 @@ import { useResolvedScheme } from "../../core/theme/index.js";
 import { ChartLegendContent, ChartTooltipContent } from "./ChartTooltip.js";
 import { resolveChartScheme } from "./colors.js";
 import type { RechartsModule } from "./recharts.js";
-import { mapAreaData, type AreaPoint } from "./series.js";
+import { createLegendOrderSorter, mapAreaData, type AreaPoint } from "./series.js";
 
 /** One plotted series: its data key, legend name, and concrete color. */
 export interface AreaSeriesDef {
@@ -66,7 +66,14 @@ function createAreaPlot(charts: RechartsModule): React.ComponentType<AreaPlotPro
           <XAxis dataKey="label" tick={{ fill: tick, fontSize: 12 }} tickLine={false} axisLine={{ stroke: grid }} />
           <YAxis tick={{ fill: tick, fontSize: 12 }} tickLine={false} axisLine={false} allowDecimals={false} />
           <Tooltip content={<ChartTooltipContent />} cursor={{ stroke: grid }} />
-          {legend ? <Legend content={<ChartLegendContent />} verticalAlign="bottom" align="left" /> : null}
+          {legend ? (
+            <Legend
+              content={<ChartLegendContent />}
+              verticalAlign="bottom"
+              align="left"
+              itemSorter={createLegendOrderSorter(series)}
+            />
+          ) : null}
           {series.map((entry) => (
             <Area
               key={entry.key}

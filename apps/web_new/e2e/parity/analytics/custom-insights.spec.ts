@@ -292,13 +292,16 @@ test(
     await test.step("choosing a split re-queries and narrows the x picker", async () => {
       await driver.analyticsStartRequestSpy();
       await driver.analyticsCustomPickerSelect(2, "State name");
+      // The new client addresses the endpoint with a trailing slash;
+      // the oracle without. The match ignores it: the endpoint and
+      // its parameters are the assertion, not the slash.
       await expect
         .poll(
           async () =>
             (await driver.analyticsSpyRequests()).filter((request) => {
               const query = new URLSearchParams(request.query);
               return (
-                request.path.endsWith("/advance-analytics-charts") &&
+                request.path.replace(/\/$/, "").endsWith("/advance-analytics-charts") &&
                 query.get("type") === "custom-work-items" &&
                 query.get("group_by") === "STATES"
               );
@@ -324,7 +327,7 @@ test(
             (await driver.analyticsSpyRequests()).filter((request) => {
               const query = new URLSearchParams(request.query);
               return (
-                request.path.endsWith("/advance-analytics-charts") &&
+                request.path.replace(/\/$/, "").endsWith("/advance-analytics-charts") &&
                 query.get("type") === "custom-work-items" &&
                 query.get("x_axis") === "LABELS"
               );
@@ -346,7 +349,7 @@ test(
             (await driver.analyticsSpyRequests()).filter((request) => {
               const query = new URLSearchParams(request.query);
               return (
-                request.path.endsWith("/advance-analytics-charts") &&
+                request.path.replace(/\/$/, "").endsWith("/advance-analytics-charts") &&
                 query.get("type") === "custom-work-items" &&
                 query.get("x_axis") === "LABELS" &&
                 query.get("group_by") === null

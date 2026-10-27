@@ -9,6 +9,8 @@ import { render, screen } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+const legendPropsStash = vi.hoisted(() => ({ props: [] as Array<Record<string, unknown>> }));
+
 vi.mock("recharts", () => ({
   ResponsiveContainer: ({ children, height }: { children?: ReactNode; height?: number }) => (
     <div data-testid="mock-responsive" data-height={height}>
@@ -36,7 +38,10 @@ vi.mock("recharts", () => ({
       data-dot={String(props["dot"])}
     />
   ),
-  Legend: ({ content }: { content?: ReactNode }) => <div data-testid="mock-legend">{content}</div>,
+  Legend: (props: Record<string, unknown>) => {
+    legendPropsStash.props.push(props);
+    return <div data-testid="mock-legend">{props["content"] as ReactNode}</div>;
+  },
   Tooltip: ({ content }: { content?: ReactNode }) => <div data-testid="mock-tooltip">{content}</div>,
 }));
 
@@ -44,6 +49,7 @@ import { AreaChart } from "./AreaChart.js";
 
 afterEach(() => {
   document.documentElement.removeAttribute("data-theme");
+  legendPropsStash.props.length = 0;
 });
 
 const POINTS = [
@@ -81,6 +87,19 @@ describe("AreaChart", () => {
     render(<AreaChart points={POINTS} series={SERIES} legend={false} />);
     await screen.findByTestId("mock-area-chart");
     expect(screen.queryByTestId("mock-legend")).not.toBeInTheDocument();
+  });
+
+  it("sorts the legend in series order, not alphabetically", async () => {
+    render(<AreaChart points={POINTS} series={SERIES} />);
+    await screen.findByTestId("mock-legend");
+    expect(legendPropsStash.props).toHaveLength(1);
+    const sorter = legendPropsStash.props[0]?.["itemSorter"] as (entry: { value?: string; dataKey?: string }) => number;
+    expect(typeof sorter).toBe("function");
+    // Alphabetical order would rank Created first; the sorter must hold
+    // the caller series order (Resolved, then Created).
+    expect(sorter({ value: "Resolved", dataKey: "resolved" })).toBeLessThan(
+      sorter({ value: "Created", dataKey: "created" })
+    );
   });
 
   it("resolves kit dark chrome under the dark document theme", async () => {

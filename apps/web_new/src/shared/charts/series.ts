@@ -6,6 +6,7 @@
 // to the flat rows the plotting library consumes, plus the hover
 // tooltip shaping. Slices pass display-ready labels; grouping,
 // ordering, and coloring decisions stay with the caller.
+import type { LegendSorter, LegendSorterEntry } from "./recharts.js";
 
 /** One radar point: a dimension label with its value. */
 export interface RadarPoint {
@@ -144,4 +145,32 @@ export function mapLegendEntries(payload: unknown): ChartLegendEntry[] {
     label: typeof item["value"] === "string" ? item["value"] : String(item["value"] ?? ""),
     color: typeof item["color"] === "string" ? item["color"] : undefined,
   }));
+}
+
+/**
+ * Legend sorter holding the legend to series order. The plotting
+ * library sorts legend rows alphabetically by name unless told
+ * otherwise; mapping each entry back to its series index keeps the
+ * wrappers' documented plotted-and-legend order. Entries naming no
+ * known series sort after every series, in arrival order.
+ */
+export function createLegendOrderSorter(series: readonly { key: string; name: string }[]): LegendSorter {
+  const order = new Map<string, number>();
+  series.forEach((entry, index) => {
+    if (!order.has(entry.key)) order.set(entry.key, index);
+    if (!order.has(entry.name)) order.set(entry.name, index);
+  });
+  const rankOf = (entry: LegendSorterEntry): number => {
+    const dataKey = entry.dataKey;
+    if (typeof dataKey === "string" || typeof dataKey === "number") {
+      const byKey = order.get(String(dataKey));
+      if (byKey !== undefined) return byKey;
+    }
+    if (entry.value !== undefined) {
+      const byName = order.get(entry.value);
+      if (byName !== undefined) return byName;
+    }
+    return series.length;
+  };
+  return rankOf;
 }
