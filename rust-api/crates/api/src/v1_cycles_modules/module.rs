@@ -150,7 +150,7 @@ pub enum Denial {
 impl Denial {
     fn content_type(&self) -> &'static str {
         match self {
-            Denial::RendererCrash => super::json_cpython::PLAIN_CRASH_CONTENT_TYPE,
+            Denial::RendererCrash => super::json::PLAIN_CRASH_CONTENT_TYPE,
             _ => "application/json",
         }
     }
@@ -189,7 +189,7 @@ impl Denial {
             ),
             Denial::RendererCrash => (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                super::json_cpython::PLAIN_CRASH_BODY.to_owned(),
+                super::json::PLAIN_CRASH_BODY.to_owned(),
             ),
         }
     }
@@ -2340,14 +2340,14 @@ fn json_field_surr(text: &str, surr: &[(usize, u16)]) -> FieldSurr {
     if surr.is_empty() {
         return out;
     }
-    let Ok(value) = super::json_cpython::parse_json_text_spans(text, surr) else {
+    let Ok(value) = super::json::parse_json_text_spans(text, surr) else {
         return out;
     };
     let Some(object) = value.into_object() else {
         return out;
     };
     for (key, value) in object.iter() {
-        let super::json_cpython::JVal::Str(text) = value else {
+        let super::json::JVal::Str(text) = value else {
             continue;
         };
         if let (Some(name), Some(unit)) = (key.to_clean_string(), text.first_surrogate()) {
@@ -2381,7 +2381,7 @@ fn form_field_surr(
         if spans.is_empty() {
             continue;
         }
-        if let Some(unit) = super::json_cpython::JStr::from_dirty(text, spans).first_surrogate() {
+        if let Some(unit) = super::json::JStr::from_dirty(text, spans).first_surrogate() {
             out.insert(key.clone(), unit);
         }
     }
@@ -2405,7 +2405,7 @@ fn json_members_dirty(text: &str, surr: &[(usize, u16)]) -> MembersDirty {
     if surr.is_empty() {
         return out;
     }
-    let Ok(value) = super::json_cpython::parse_json_text_spans(text, surr) else {
+    let Ok(value) = super::json::parse_json_text_spans(text, surr) else {
         return out;
     };
     let Some(object) = value.into_object() else {
@@ -2415,13 +2415,13 @@ fn json_members_dirty(text: &str, surr: &[(usize, u16)]) -> MembersDirty {
         if key.to_clean_string().as_deref() != Some("members") {
             continue;
         }
-        if let super::json_cpython::JVal::Array(items) = value {
+        if let super::json::JVal::Array(items) = value {
             out = items
                 .iter()
                 .map(|item| {
                     matches!(
                         item,
-                        super::json_cpython::JVal::Str(text) if text.has_surrogate()
+                        super::json::JVal::Str(text) if text.has_surrogate()
                     )
                 })
                 .collect();
@@ -2460,7 +2460,7 @@ fn form_members_dirty(
             if spans.is_empty() {
                 return false;
             }
-            super::json_cpython::JStr::from_dirty(text, spans).has_surrogate()
+            super::json::JStr::from_dirty(text, spans).has_surrogate()
         })
         .collect()
 }
@@ -6000,71 +6000,32 @@ mod tests {
 
     #[test]
     fn field_surr_attribution_712() {
-        // JSON: the span lands on the clean top-level key holding it.
-        let fields = json_field_surr("{\"name\": \"�693\"}", &[(10, 0xD801)]);
-        assert_eq!(fields.get("name"), Some(&0xD801));
-        assert_eq!(fields.len(), 1);
-        // A literal placeholder with no spans attributes nothing.
-        assert!(json_field_surr("{\"name\": \"�693\"}", &[]).is_empty());
-        // Malformed JSON attributes nothing (serde already answered).
+        // Tier 3 since PIDASHCONV-1552/1555: spans are always empty (JSON
+        // with spans 400s at parse; form spans never filled), so no field
+        // ever attributes a surrogate. A literal placeholder stays text.
+        assert!(json_field_surr("{\"name\": \"\u{fffd}693\"}", &[(10, 0xD801)]).is_empty());
+        assert!(json_field_surr("{\"name\": \"\u{fffd}693\"}", &[]).is_empty());
         assert!(json_field_surr("{\"name\": ", &[(0, 0xD800)]).is_empty());
-        // Dirty keys never match; clean siblings still attribute.
-        let fields = json_field_surr("{\"�\": 1, \"name\": \"�\"}", &[(2, 0xD800), (20, 0xD801)]);
-        assert_eq!(fields.get("name"), Some(&0xD801));
-        assert_eq!(fields.len(), 1);
-        // Form: scalar spans attribute; arrays are skipped.
         let map: serde_json::Map<String, Value> =
-            serde_json::from_str("{\"name\": \"�693\", \"members\": [\"�\"]}").expect("form map");
+            serde_json::from_str("{\"name\": \"\u{fffd}693\"}").expect("form map");
         let mut surr: BTreeMap<String, Vec<Vec<(usize, u16)>>> = BTreeMap::new();
         surr.insert("name".to_owned(), vec![vec![(0, 0xD801)]]);
-        surr.insert("members".to_owned(), vec![vec![(0, 0xD800)]]);
-        let fields = form_field_surr(&map, &surr);
-        assert_eq!(fields.get("name"), Some(&0xD801));
-        assert!(!fields.contains_key("members"));
+        assert!(form_field_surr(&map, &surr).is_empty());
     }
 
     #[test]
     fn members_dirty_attribution_732() {
-        // JSON: per-element flags, index-aligned with the array.
-        assert_eq!(
-            json_members_dirty("{\"members\": [\"�\", \"ok\"]}", &[(14, 0xD801)]),
-            vec![true, false]
+        // Tier 3 since PIDASHCONV-1552/1555: spans never attribute (see
+        // field_surr_attribution_712); members flags stay all-clean.
+        assert!(
+            json_members_dirty("{\"members\": [\"\u{fffd}\", \"ok\"]}", &[(14, 0xD801)]).is_empty()
         );
-        // Only string elements flag; numbers, nulls and nested arrays
-        // never crash (their echoes repr-escape).
-        assert_eq!(
-            json_members_dirty(
-                "{\"members\": [\"�\", 5, null, [\"�\"]]}",
-                &[(14, 0xD801), (31, 0xD800)]
-            ),
-            vec![true, false, false, false]
-        );
-        // Last-wins like serde: a trailing scalar shadows the array, and
-        // its shape error carries no echo, so no flags survive.
-        assert!(json_members_dirty(
-            "{\"members\": [\"�\"], \"members\": \"s\"}",
-            &[(14, 0xD800)]
-        )
-        .is_empty());
-        // A literal placeholder with no spans attributes nothing.
-        assert!(json_members_dirty("{\"members\": [\"�\"]}", &[]).is_empty());
-        // Malformed JSON attributes nothing (serde already answered).
         assert!(json_members_dirty("{\"members\": ", &[(0, 0xD800)]).is_empty());
-        // Form: each string element reads its own aligned slot.
         let map: serde_json::Map<String, Value> =
-            serde_json::from_str("{\"members\": [\"�a\", \"ok\"]}").expect("form map");
+            serde_json::from_str("{\"members\": [\"\u{fffd}a\", \"ok\"]}").expect("form map");
         let mut surr: BTreeMap<String, Vec<Vec<(usize, u16)>>> = BTreeMap::new();
         surr.insert("members".to_owned(), vec![vec![(0, 0xD801)], Vec::new()]);
-        assert_eq!(form_members_dirty(&map, &surr), vec![true, false]);
-        // Placeholders and dict-form slots carry no spans and stay clean;
-        // missing slots read clean too.
-        let map: serde_json::Map<String, Value> =
-            serde_json::from_str("{\"members\": [null, [{\"x\": [\"�\"]}]]}").expect("indexed");
         assert_eq!(form_members_dirty(&map, &surr), vec![false, false]);
-        let map: serde_json::Map<String, Value> =
-            serde_json::from_str("{\"name\": \"m\"}").expect("no members");
-        assert!(form_members_dirty(&map, &surr).is_empty());
-        assert!(form_members_dirty(&map, &BTreeMap::new()).is_empty());
     }
 
     #[test]
@@ -6075,10 +6036,7 @@ mod tests {
         assert_eq!(denial.content_type(), "text/plain");
         let (status, body) = denial.status_and_body();
         assert_eq!(status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(
-            body,
-            super::super::json_cpython::PLAIN_CRASH_BODY.to_owned()
-        );
+        assert_eq!(body, super::super::json::PLAIN_CRASH_BODY.to_owned());
     }
 
     #[test]

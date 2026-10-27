@@ -59,14 +59,14 @@
 //!   cross-project moves keep the bridge's old `project_id`
 //!   (`views/cycle.py:946-987`).
 //!
-//! Request bodies parse through [`super::json_cpython`] (PIDASHCONV-626),
-//! the shared CPython-envelope JSON layer:
+//! Request bodies parse through [`super::json`] (PIDASHCONV-626; serde
+//! since PIDASHCONV-1555), the shared JSON layer behind DRF's envelope:
 //!
-//! * `NaN`/`Infinity`/`-Infinity` in value position are strict-constant
-//!   400s under DRF's `STRICT_JSON` (the default); lone `\uD800-\uDFFF`
-//!   surrogates are accepted and flow through the `JStr` units.
-//! * Nesting parses to the measured 9939-deep cap (past it Django's JSON
-//!   500); `str()` echoes render to 9937-deep (past it the same).
+//! * `NaN`/`Infinity`/`-Infinity` in value position are 400s (serde's
+//!   text, not the strict-constant text); lone `\uD800-\uDFFF`
+//!   surrogates are 400s too (tier 3; accepted before PIDASHCONV-1555).
+//! * Nesting past serde's recursion limit (~128) is a 400 (tier 3; was
+//!   the measured 9939-deep cap with Django's JSON 500 past it).
 //!
 //! Fixture: `FX-CYCMOD-08`
 //! (`rust-api/fixtures/v1_cycles_modules/handlers/cycle.golden.json`).
@@ -87,8 +87,8 @@ use sqlx::{PgPool, Row};
 use pidash_auth::permissions::project;
 
 #[cfg(test)]
-use super::json_cpython::JNum;
-use super::json_cpython::{
+use super::json::JNum;
+use super::json::{
     to_serde_publish, to_serde_publish_map, JObject, JStr, JVal, JsonFail, PLAIN_CRASH_BODY,
     PLAIN_CRASH_CONTENT_TYPE,
 };
@@ -2639,22 +2639,23 @@ pub async fn expand_labels(
 // ---------------------------------------------------------------------------
 
 /// Parse the request body into `request.data` through the shared
-/// CPython-envelope layer ([`super::json_cpython`]): an empty body is `{}`
-/// (DRF's empty-stream default); malformed JSON is the DRF `ParseError`
-/// with CPython's error text; past the depth cap is Django's JSON 500.
+/// JSON layer ([`super::json`]): an empty body is `{}` (DRF's
+/// empty-stream default); malformed JSON is the DRF `ParseError` with
+/// serde's error text (tier 3 since PIDASHCONV-1555); past serde's depth
+/// limit is a 400, never Django's JSON 500.
 pub fn parse_body_value(raw: &[u8]) -> Result<JVal, Denial> {
     parse_body_value_spans(raw, &[])
 }
 
 /// [`parse_body_value`] over charset-decoded text carrying lone-surrogate
-/// spans (exotic charsets, PIDASHCONV-693): placeholders become `Sur`
-/// units inside the parsed strings.
+/// spans (exotic charsets, PIDASHCONV-693): any non-empty span list is a
+/// 400 (tier 3 since PIDASHCONV-1555; spans were threaded into the
+/// parsed strings before). Spans are always empty since PIDASHCONV-1552.
 pub fn parse_body_value_spans(raw: &[u8], surr: &[(usize, u16)]) -> Result<JVal, Denial> {
-    super::json_cpython::parse_request_data_spans(raw, surr).map_err(|fail| match fail {
-        JsonFail::Message(detail) => Denial::BadDetail(format!(
-            "{}{detail}",
-            super::json_cpython::JSON_PARSE_PREFIX
-        )),
+    super::json::parse_request_data_spans(raw, surr).map_err(|fail| match fail {
+        JsonFail::Message(detail) => {
+            Denial::BadDetail(format!("{}{detail}", super::json::JSON_PARSE_PREFIX))
+        }
         JsonFail::Recursion => Denial::ServerError,
     })
 }
@@ -2665,11 +2666,10 @@ pub fn parse_body_value_spans(raw: &[u8], surr: &[(usize, u16)]) -> Result<JVal,
 /// the EOF `ParseError`, never `{}` — the module path (`parse_json_map`)
 /// already works this way; verified live against Django.
 pub fn parse_body_value_text_spans(raw: &[u8], surr: &[(usize, u16)]) -> Result<JVal, Denial> {
-    super::json_cpython::parse_request_bytes_spans(raw, surr).map_err(|fail| match fail {
-        JsonFail::Message(detail) => Denial::BadDetail(format!(
-            "{}{detail}",
-            super::json_cpython::JSON_PARSE_PREFIX
-        )),
+    super::json::parse_request_bytes_spans(raw, surr).map_err(|fail| match fail {
+        JsonFail::Message(detail) => {
+            Denial::BadDetail(format!("{}{detail}", super::json::JSON_PARSE_PREFIX))
+        }
         JsonFail::Recursion => Denial::ServerError,
     })
 }
@@ -2848,12 +2848,13 @@ pub struct CoerceFail {
 }
 
 /// Python `str(value)` for error echoes, over parsed values: the shared
-/// layer's [`super::json_cpython::py_str`] (strings verbatim with raw
-/// surrogates, true `repr()` quoting nested, depth-capped); a render past
-/// the depth cap is Django's JSON 500. (Callers divert top-level dirty
-/// echoes to [`Denial::RendererCrash`] before formatting.)
+/// layer's [`super::json::py_str`] (strings verbatim, true `repr()`
+/// quoting nested; values never nest past serde's recursion limit, so
+/// the render cannot fail). The [`Denial::RendererCrash`] arm is dead
+/// (tier 3 since PIDASHCONV-1555: lone surrogates are a 400 at parse,
+/// so no dirty echo reaches the renderer).
 pub fn py_repr(value: &JVal) -> Result<JStr, Denial> {
-    super::json_cpython::py_str(value).map_err(|_| Denial::ServerError)
+    super::json::py_str(value).map_err(|_| Denial::ServerError)
 }
 
 /// DRF `CharField` over one JSON value (verified live): `null` fails unless
@@ -8153,9 +8154,10 @@ mod tests {
             }
         }
         match parse_object_or_500(b"{bad").expect_err("malformed") {
-            Denial::BadDetail(message) => assert_eq!(
-                message,
-                "JSON parse error - Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"
+            // Tier 3 since PIDASHCONV-1555: serde's text, not CPython's.
+            Denial::BadDetail(message) => assert!(
+                message.starts_with("JSON parse error - ") && message.len() > 19,
+                "envelope + serde text, got {message:?}"
             ),
             denial => panic!("expected BadDetail, got {denial:?}"),
         }
@@ -8167,9 +8169,10 @@ mod tests {
     #[test]
     fn negotiated_json_text_empty_is_eof() {
         match parse_body_value_text_spans(b"", &[]).expect_err("decoded-empty 400s") {
-            Denial::BadDetail(message) => assert_eq!(
-                message,
-                "JSON parse error - Expecting value: line 1 column 1 (char 0)"
+            // Tier 3 since PIDASHCONV-1555: serde's EOF text, not CPython's.
+            Denial::BadDetail(message) => assert!(
+                message.starts_with("JSON parse error - ") && message.len() > 19,
+                "envelope + serde text, got {message:?}"
             ),
             denial => panic!("expected BadDetail, got {denial:?}"),
         }
@@ -8314,266 +8317,6 @@ mod tests {
         }
     }
 
-    /// F-N7: malformed bodies answer CPython's `json` error texts, not
-    /// serde's (fuzzed: 3674 structured/random/UTF-8 cases, 0 mismatches,
-    /// 0 reverse-divergences; serde_json 1.0.151 texts — this battery pins
-    /// them, so a serde upgrade that rewords errors fails loudly).
-    #[test]
-    fn json_parse_cpython_parity() {
-        for (raw, want) in [
-            (b"{bad" as &[u8], "JSON parse error - Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"),
-            (b"{]" as &[u8], "JSON parse error - Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"),
-            (b"{{}}" as &[u8], "JSON parse error - Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"),
-            (b"{'a':1}" as &[u8], "JSON parse error - Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"),
-            (b"{\"a\" 1}" as &[u8], "JSON parse error - Expecting ':' delimiter: line 1 column 6 (char 5)"),
-            (b"{\"a\":}" as &[u8], "JSON parse error - Expecting value: line 1 column 6 (char 5)"),
-            (b"{\"a\":1} trailing" as &[u8], "JSON parse error - Extra data: line 1 column 9 (char 8)"),
-            (b"truex" as &[u8], "JSON parse error - Extra data: line 1 column 5 (char 4)"),
-            (b"\"a\"b" as &[u8], "JSON parse error - Extra data: line 1 column 4 (char 3)"),
-            (b"\"\"x" as &[u8], "JSON parse error - Extra data: line 1 column 3 (char 2)"),
-            (b"1 2" as &[u8], "JSON parse error - Extra data: line 1 column 3 (char 2)"),
-            (b"{\"a\":1}{\"b\":2}" as &[u8], "JSON parse error - Extra data: line 1 column 8 (char 7)"),
-            (b"[1][2]" as &[u8], "JSON parse error - Extra data: line 1 column 4 (char 3)"),
-            (b"01 2" as &[u8], "JSON parse error - Extra data: line 1 column 2 (char 1)"),
-            (b"[01]" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 3 (char 2)"),
-            (b"{\"a\":01}" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 7 (char 6)"),
-            (b"01" as &[u8], "JSON parse error - Extra data: line 1 column 2 (char 1)"),
-            (b"0x1" as &[u8], "JSON parse error - Extra data: line 1 column 2 (char 1)"),
-            (b"{\"a\":0x1}" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 7 (char 6)"),
-            (b"-x" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
-            (b"[1e]" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 3 (char 2)"),
-            (b"12e" as &[u8], "JSON parse error - Extra data: line 1 column 3 (char 2)"),
-            (b"12e+" as &[u8], "JSON parse error - Extra data: line 1 column 3 (char 2)"),
-            (b"1e" as &[u8], "JSON parse error - Extra data: line 1 column 2 (char 1)"),
-            (b"{\"a\": 1e}" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 8 (char 7)"),
-            (b"[12e+]" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 4 (char 3)"),
-            (b"[-12e" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 5 (char 4)"),
-            (b"[0.5." as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 5 (char 4)"),
-            (b"[0.5.5]" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 5 (char 4)"),
-            (b"[-.5]" as &[u8], "JSON parse error - Expecting value: line 1 column 2 (char 1)"),
-            (b"{\"a\":-.5}" as &[u8], "JSON parse error - Expecting value: line 1 column 6 (char 5)"),
-            (b"[.5]" as &[u8], "JSON parse error - Expecting value: line 1 column 2 (char 1)"),
-            (b"{\"a\":.5}" as &[u8], "JSON parse error - Expecting value: line 1 column 6 (char 5)"),
-            (b"." as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
-            (b"{\"a\":.}" as &[u8], "JSON parse error - Expecting value: line 1 column 6 (char 5)"),
-            (b"+" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
-            (b"{\"a\": +}" as &[u8], "JSON parse error - Expecting value: line 1 column 7 (char 6)"),
-            (b"[--1]" as &[u8], "JSON parse error - Expecting value: line 1 column 2 (char 1)"),
-            (b"nul" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
-            (b"tru" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
-            (b"nulx" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
-            (b"nullx" as &[u8], "JSON parse error - Extra data: line 1 column 5 (char 4)"),
-            (b"[nulx]" as &[u8], "JSON parse error - Expecting value: line 1 column 2 (char 1)"),
-            (b"{\"a\":nulx}" as &[u8], "JSON parse error - Expecting value: line 1 column 6 (char 5)"),
-            (b"[truex]" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 6 (char 5)"),
-            (b"falsey" as &[u8], "JSON parse error - Extra data: line 1 column 6 (char 5)"),
-            (b"[falsey]" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 7 (char 6)"),
-            (b"nulL" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
-            (b"True" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
-            (b"None" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
-            (b"nulll" as &[u8], "JSON parse error - Extra data: line 1 column 5 (char 4)"),
-            (b"true2" as &[u8], "JSON parse error - Extra data: line 1 column 5 (char 4)"),
-            (b"[true2]" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 6 (char 5)"),
-            (b"{" as &[u8], "JSON parse error - Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"),
-            (b"{\"a\"" as &[u8], "JSON parse error - Expecting ':' delimiter: line 1 column 5 (char 4)"),
-            (b"{\"a\":" as &[u8], "JSON parse error - Expecting value: line 1 column 6 (char 5)"),
-            (b"[1" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 3 (char 2)"),
-            (b"{\"a\": \"abc" as &[u8], "JSON parse error - Unterminated string starting at: line 1 column 7 (char 6)"),
-            (b"{\"a\": tru" as &[u8], "JSON parse error - Expecting value: line 1 column 7 (char 6)"),
-            (b"-" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
-            (b"{\"a\": 12" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 9 (char 8)"),
-            (b"{\"a\": -" as &[u8], "JSON parse error - Expecting value: line 1 column 7 (char 6)"),
-            (b"[ 2" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 4 (char 3)"),
-            (b"[-2" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 4 (char 3)"),
-            (b"[1,2" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 5 (char 4)"),
-            (b"{\"a\":1," as &[u8], "JSON parse error - Expecting property name enclosed in double quotes: line 1 column 8 (char 7)"),
-            (b"{\"a\" :" as &[u8], "JSON parse error - Expecting value: line 1 column 7 (char 6)"),
-            (b"[1," as &[u8], "JSON parse error - Expecting value: line 1 column 4 (char 3)"),
-            (b"{\"a\":1 " as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 8 (char 7)"),
-            (b"[1 " as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 4 (char 3)"),
-            (b"{\"a\":\"b\"" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 9 (char 8)"),
-            (b"{\"a\":true" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 10 (char 9)"),
-            (b"{\"a\":1.5" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 9 (char 8)"),
-            (b"{\"a\":[1]" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 9 (char 8)"),
-            (b"{\"a\":1,\"b\":2" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 13 (char 12)"),
-            (b"[tru" as &[u8], "JSON parse error - Expecting value: line 1 column 2 (char 1)"),
-            (b"{\"a\":1 :" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 8 (char 7)"),
-            (b"{\"a\":\"b\" " as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 10 (char 9)"),
-            (b"[[[" as &[u8], "JSON parse error - Expecting value: line 1 column 4 (char 3)"),
-            (b"{\"a\":{\"b\":}" as &[u8], "JSON parse error - Expecting value: line 1 column 11 (char 10)"),
-            (b"{\"a\": 1e5x}" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 10 (char 9)"),
-            (b"\"abc" as &[u8], "JSON parse error - Unterminated string starting at: line 1 column 1 (char 0)"),
-            (b"\"" as &[u8], "JSON parse error - Unterminated string starting at: line 1 column 1 (char 0)"),
-            (b"\"\\" as &[u8], "JSON parse error - Unterminated string starting at: line 1 column 1 (char 0)"),
-            (b"\"\\u" as &[u8], "JSON parse error - Invalid \\uXXXX escape: line 1 column 3 (char 2)"),
-            (b"\"\\u12" as &[u8], "JSON parse error - Invalid \\uXXXX escape: line 1 column 3 (char 2)"),
-            (b"\"\\ud800" as &[u8], "JSON parse error - Invalid \\uXXXX escape: line 1 column 3 (char 2)"),
-            (b"\"\\u0041" as &[u8], "JSON parse error - Invalid \\uXXXX escape: line 1 column 3 (char 2)"),
-            (b"\"\\ud800\\u12\"" as &[u8], "JSON parse error - Invalid \\uXXXX escape: line 1 column 9 (char 8)"),
-            (b"{\"a\": \"\\q\"}" as &[u8], "JSON parse error - Invalid \\escape: line 1 column 8 (char 7)"),
-            (b"{\"a\": \"\\u12\"}" as &[u8], "JSON parse error - Invalid \\uXXXX escape: line 1 column 9 (char 8)"),
-            (b"\"a" as &[u8], "JSON parse error - Unterminated string starting at: line 1 column 1 (char 0)"),
-            (b"\"ab" as &[u8], "JSON parse error - Unterminated string starting at: line 1 column 1 (char 0)"),
-            (b"\"\\u12345" as &[u8], "JSON parse error - Unterminated string starting at: line 1 column 1 (char 0)"),
-            (b"{\"a\": \"x\x01y\"}" as &[u8], "JSON parse error - Invalid control character at: line 1 column 9 (char 8)"),
-            (b"\"a\nb\"" as &[u8], "JSON parse error - Invalid control character at: line 1 column 3 (char 2)"),
-            (b"\"a\tb\"" as &[u8], "JSON parse error - Invalid control character at: line 1 column 3 (char 2)"),
-            (b"[{\"a\":1},]" as &[u8], "JSON parse error - Expecting value: line 1 column 10 (char 9)"),
-            (b"{\"a\":1,}" as &[u8], "JSON parse error - Expecting property name enclosed in double quotes: line 1 column 8 (char 7)"),
-            (b"{\"a\":[1,}" as &[u8], "JSON parse error - Expecting value: line 1 column 9 (char 8)"),
-            (b"[[1,]]" as &[u8], "JSON parse error - Expecting value: line 1 column 5 (char 4)"),
-            (b"{\"a\":{\"b\":1,}}" as &[u8], "JSON parse error - Expecting property name enclosed in double quotes: line 1 column 13 (char 12)"),
-            (b"[1,]" as &[u8], "JSON parse error - Expecting value: line 1 column 4 (char 3)"),
-            (b"{\"a\":,}" as &[u8], "JSON parse error - Expecting value: line 1 column 6 (char 5)"),
-            (b"{,}" as &[u8], "JSON parse error - Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"),
-            (b"{\n\"a\"\n1\n}" as &[u8], "JSON parse error - Expecting ':' delimiter: line 3 column 1 (char 6)"),
-            (b"[\n1\n2\n]" as &[u8], "JSON parse error - Expecting ',' delimiter: line 3 column 1 (char 4)"),
-            (b"{\"\xc3\xa9\":}" as &[u8], "JSON parse error - Expecting value: line 1 column 6 (char 5)"),
-            (b"\"\xc3\xa9" as &[u8], "JSON parse error - Unterminated string starting at: line 1 column 1 (char 0)"),
-            (b"\xef\xbb\xbf{\"a\":1}" as &[u8], "JSON parse error - Unexpected UTF-8 BOM (decode using utf-8-sig): line 1 column 1 (char 0)"),
-            (b"\xef\xbb\xbf" as &[u8], "JSON parse error - Unexpected UTF-8 BOM (decode using utf-8-sig): line 1 column 1 (char 0)"),
-            (b"[\xef\xbb\xbf]" as &[u8], "JSON parse error - Expecting value: line 1 column 2 (char 1)"),
-            (b"{\xef\xbb\xbf\"a\":1}" as &[u8], "JSON parse error - Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"),
-            (b"1\xef\xbb\xbf" as &[u8], "JSON parse error - Extra data: line 1 column 2 (char 1)"),
-            (b"\xff\xfe" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xff in position 0: invalid start byte"),
-            (b"\xc3" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
-            (b"\xc3(" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xc3 in position 0: invalid continuation byte"),
-            (b"\xe2(\xa1" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xe2 in position 0: invalid continuation byte"),
-            (b"\x80" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0x80 in position 0: invalid start byte"),
-            (b"\xed\xa0\x80" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xed in position 0: invalid continuation byte"),
-            (b"\xf0\x9f\x98" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
-            (b"\xe2\x82(" as &[u8], "JSON parse error - 'utf-8' codec can't decode bytes in position 0-1: invalid continuation byte"),
-            (b"\xe2\x82" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
-            (b"\xc0\x80" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xc0 in position 0: invalid start byte"),
-            (b"\xed\xbf\xbf" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xed in position 0: invalid continuation byte"),
-            (b"\xf4\x90\x80\x80" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xf4 in position 0: invalid continuation byte"),
-            (b"\xdf" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
-            (b"\xef\xbf" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
-            (b"{\"a\": \"\xed\xa0\x80\"}" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xed in position 7: invalid continuation byte"),
-            (b"\xe0\x80\x80" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xe0 in position 0: invalid continuation byte"),
-            (b"a\x80b" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0x80 in position 1: invalid start byte"),
-            (b"\xc2\xc2" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xc2 in position 0: invalid continuation byte"),
-            // The codecs tail-drop: a trailing incomplete sequence parses
-            // as the truncated text (even when the tail could never be
-            // valid, like `\xed\xa0`); impossible bytes still fail.
-            (b"\xed\xa0" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
-            (b"[\xc3" as &[u8], "JSON parse error - Expecting value: line 1 column 2 (char 1)"),
-            (b"\"\xc3" as &[u8], "JSON parse error - Unterminated string starting at: line 1 column 1 (char 0)"),
-            (b"\xc0" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xc0 in position 0: invalid start byte"),
-            (b"\xf5" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xf5 in position 0: invalid start byte"),
-            (b"\xe0\x80" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xe0 in position 0: invalid continuation byte"),
-            (b"\xf0\x80\x80" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xf0 in position 0: invalid continuation byte"),
-            (b"\xf4\xbf\xbf" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xf4 in position 0: invalid continuation byte"),
-            (b"\xc3\xc3" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xc3 in position 0: invalid continuation byte"),
-            (b"\xed\xa0X" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xed in position 0: invalid continuation byte"),
-        ] {
-            let raw: &[u8] = raw;
-            match parse_body_value(raw).expect_err("battery is errors-only") {
-                Denial::BadDetail(message) => assert_eq!(message, want, "{raw:?}"),
-                denial => panic!("{raw:?}: expected BadDetail, got {denial:?}"),
-            }
-        }
-        // Strict constants reject under DRF's STRICT_JSON with the fixed
-        // text (no position), exactly when first in scan order.
-        for (raw, token) in [
-            (b"NaN".as_slice(), "NaN"),
-            (b"[Infinity]", "Infinity"),
-            (b"{\"a\": -Infinity}", "-Infinity"),
-            (b"{\"a\": NaNx}", "NaN"),
-        ] {
-            match parse_body_value(raw).expect_err("strict rejects") {
-                Denial::BadDetail(message) => assert_eq!(
-                    message,
-                    format!("JSON parse error - Out of range float values are not JSON compliant: '{token}'"),
-                    "{raw:?}"
-                ),
-                denial => panic!("{raw:?}: expected strict 400, got {denial:?}"),
-            }
-        }
-        // The digit limit rejects long int tokens with the fixed text.
-        let over = format!("{{\"a\": {}}}", "1".repeat(4301));
-        match parse_body_value(over.as_bytes()).expect_err("int limit") {
-            Denial::BadDetail(message) => assert_eq!(
-                message,
-                "JSON parse error - Exceeds the limit (4300 digits) for integer string conversion: \
-                 value has 4301 digits; use sys.set_int_max_str_digits() to increase the limit"
-            ),
-            denial => panic!("expected int-limit 400, got {denial:?}"),
-        }
-        // A truncated deep input recovers its plain EOF error; balanced
-        // deep input parses to the measured cap, then takes the generic
-        // 500 exactly where Django's RecursionError does.
-        let deep_open = "[".repeat(129);
-        match parse_body_value(deep_open.as_bytes()).expect_err("truncated deep") {
-            Denial::BadDetail(message) => assert_eq!(
-                message,
-                "JSON parse error - Expecting value: line 1 column 130 (char 129)"
-            ),
-            denial => panic!("expected EOF recovery, got {denial:?}"),
-        }
-        let deep_shut = format!("{{\"a\": {}1{}}}", "[".repeat(9938), "]".repeat(9938));
-        assert!(
-            parse_body_value(deep_shut.as_bytes()).is_ok(),
-            "9939-deep parses"
-        );
-        let too_deep = format!("{{\"a\": {}1{}}}", "[".repeat(9939), "]".repeat(9939));
-        assert!(
-            matches!(
-                parse_body_value(too_deep.as_bytes()).expect_err("past the cap"),
-                Denial::ServerError
-            ),
-            "9940-deep is Django's JSON 500"
-        );
-        // A mismatched closer past the old 128 cap keeps byte-exact text.
-        let mismatch = format!("{{\"a\": {}}}", "[".repeat(200).as_str());
-        match parse_body_value(mismatch.as_bytes()).expect_err("deep mismatch") {
-            Denial::BadDetail(message) => assert_eq!(
-                message,
-                "JSON parse error - Expecting value: line 1 column 207 (char 206)"
-            ),
-            denial => panic!("expected deep mismatch text, got {denial:?}"),
-        }
-        // The tail-drop can leave a VALID document: `{"a":1}\xc3`
-        // parses as `{"a":1}` (verified live through the oracle).
-        match &parse_body_value(b"{\"a\":1}\xc3").expect("tail-drop valid") {
-            JVal::Object(object) => assert!(object.get("a").is_some()),
-            value => panic!("expected object, got {value:?}"),
-        }
-        // An empty body is `{}`, never a parse error (DRF's
-        // content-length short-circuit, verified live).
-        match &parse_body_value(b"").expect("empty body") {
-            JVal::Object(object) => assert!(object.is_empty()),
-            value => panic!("expected empty object, got {value:?}"),
-        }
-        // Error margins at the cap (every flip verified live through
-        // Django): the value family surfaces to depth 9938, the
-        // string/object/delimiter/strict family to 9935.
-        let at_margin = |depth: usize, inner: &str| {
-            let mut raw = vec![b'['; depth];
-            raw.extend_from_slice(inner.as_bytes());
-            parse_body_value(&raw)
-        };
-        assert!(matches!(at_margin(9938, ","), Err(Denial::BadDetail(_))));
-        assert!(matches!(at_margin(9939, ","), Err(Denial::ServerError)));
-        assert!(matches!(at_margin(9935, "NaN"), Err(Denial::BadDetail(_))));
-        assert!(matches!(at_margin(9936, "NaN"), Err(Denial::ServerError)));
-        assert!(matches!(at_margin(9935, "1}"), Err(Denial::BadDetail(_))));
-        assert!(matches!(at_margin(9936, "1}"), Err(Denial::ServerError)));
-        // Terminated lone surrogates parse (CPython accepts them): the
-        // field holds the exact surrogate units.
-        match &parse_body_value(br#"{"a": "\ud800"}"#).expect("lone surrogate") {
-            JVal::Object(object) => match object.get("a") {
-                Some(JVal::Str(text)) => {
-                    assert!(text.has_surrogate());
-                    assert_eq!(text.first_surrogate(), Some(0xD800));
-                    assert_eq!(text.len_chars(), 1);
-                }
-                other => panic!("expected dirty string, got {other:?}"),
-            },
-            value => panic!("expected object, got {value:?}"),
-        }
-    }
-
     #[test]
     fn python_repr_echoes() {
         fn rendered(raw: &[u8]) -> String {
@@ -8600,18 +8343,19 @@ mod tests {
         assert_eq!(rendered(br#"["a'b\"c"]"#), "['a\\'b\"c']");
         assert_eq!(rendered(b"[\"\\u0001\"]"), "['\\x01']");
         assert_eq!(rendered(r#"["é"]"#.as_bytes()), "['é']");
-        // Nested surrogates repr-escape (clean output); top-level ones
-        // stay raw for the renderer-crash rule.
-        let nested = parse_body_value(b"[\"\\ud800\"]").expect("nested surrogate");
-        assert_eq!(
-            py_repr(&nested)
-                .expect("shallow")
-                .to_clean_string()
-                .expect("nested escapes clean"),
-            "['\\ud800']"
-        );
-        let top = parse_body_value(b"\"\\ud800\"").expect("top surrogate");
-        assert!(py_repr(&top).expect("shallow").to_clean_string().is_none());
+        // Tier 3 since PIDASHCONV-1555: lone surrogates are a 400 at
+        // parse now (were accepted, with repr-escape / renderer-crash
+        // arms downstream).
+        for raw in [b"[\"\\ud800\"]".as_slice(), b"\"\\ud800\""] {
+            assert!(
+                matches!(
+                    parse_body_value(raw),
+                    Err(Denial::BadDetail(message))
+                        if message.starts_with("JSON parse error - ")
+                ),
+                "{raw:?}: surrogate JSON 400s"
+            );
+        }
     }
 
     #[test]
@@ -8696,23 +8440,19 @@ mod tests {
                 .body,
             r#"["Null characters are not allowed."]"#
         );
-        // Lone surrogates fail the surrogate validator with the code point.
-        let dirty = parse_body_value(b"\"\\ud800\"").expect("dirty value");
-        assert_eq!(
-            coerce_char(Some(&dirty), false, false, Some(255))
-                .expect_err("surrogate")
-                .body,
-            r#"["Surrogate characters are not allowed: U+D800."]"#
-        );
-        // Validators collect: a long dirty name answers both messages.
-        let both = format!("\"{}\\ud800\"", "n".repeat(300));
-        let both = parse_body_value(both.as_bytes()).expect("long dirty");
-        assert_eq!(
-            coerce_char(Some(&both), false, false, Some(255))
-                .expect_err("collect")
-                .body,
-            r#"["Ensure this field has no more than 255 characters.","Surrogate characters are not allowed: U+D800."]"#
-        );
+        // Tier 3 since PIDASHCONV-1555: lone surrogates are a 400 at
+        // parse now (were validator 400s after an accepting parse).
+        let long_dirty = format!("\"{}\\ud800\"", "n".repeat(300));
+        for raw in [b"\"\\ud800\"".as_slice(), long_dirty.as_bytes()] {
+            assert!(
+                matches!(
+                    parse_body_value(raw),
+                    Err(Denial::BadDetail(message))
+                        if message.starts_with("JSON parse error - ")
+                ),
+                "{raw:?}: surrogate JSON 400s"
+            );
+        }
     }
 
     #[test]
@@ -8748,22 +8488,19 @@ mod tests {
                 .expect("ok"),
             Some("planned".to_owned())
         );
-        // A top-level dirty string echoes raw into the choice message,
-        // which crashes the renderer (the oracle's plain 500); only nested
-        // members repr-escape into a clean 400.
-        let dirty = parse_body_value(b"\"\\ud800\"").expect("dirty value");
-        assert!(matches!(
-            coerce_choice(Some(&dirty), &choices),
-            Err(Denial::RendererCrash)
-        ));
-        let nested = parse_body_value(b"[\"\\ud800\"]").expect("nested dirty");
-        assert_eq!(
-            coerce_choice(Some(&nested), &choices)
-                .expect("shallow")
-                .expect_err("nested")
-                .body,
-            r#"["\"['\\ud800']\" is not a valid choice."]"#
-        );
+        // Tier 3 since PIDASHCONV-1555: lone surrogates are a 400 at
+        // parse now (were renderer-crash 500s top-level and repr-escaped
+        // 400s nested).
+        for raw in [b"\"\\ud800\"".as_slice(), b"[\"\\ud800\"]"] {
+            assert!(
+                matches!(
+                    parse_body_value(raw),
+                    Err(Denial::BadDetail(message))
+                        if message.starts_with("JSON parse error - ")
+                ),
+                "{raw:?}: surrogate JSON 400s"
+            );
+        }
     }
 
     #[test]
@@ -9703,16 +9440,37 @@ mod tests {
 
     #[test]
     fn json_value_eq_deep_survives_small_stack() {
-        // The add-path dedupe runs on RAW values, which may nest to the
-        // 9939 cap: the comparison must not recurse (a recursive walk
-        // aborts the 2MB worker).
+        // The add-path dedupe comparison must not recurse (a recursive
+        // walk aborts the 2MB worker). Values are built programmatically:
+        // serde 400s 9938-deep parses since PIDASHCONV-1555 (tier 3).
         let deep = format!("{}1{}", "[".repeat(9938), "]".repeat(9938));
-        let left = parse_body_value(deep.as_bytes()).expect("left");
-        let right = parse_body_value(deep.as_bytes()).expect("right");
+        assert!(
+            matches!(
+                parse_body_value(deep.as_bytes()),
+                Err(Denial::BadDetail(message))
+                    if message.starts_with("JSON parse error - ")
+            ),
+            "9938-deep JSON 400s"
+        );
+        fn nest(depth: usize) -> JVal {
+            let mut value = JVal::Num(JNum::int("1".to_owned()));
+            for _ in 0..depth {
+                value = JVal::Array(vec![value]);
+            }
+            value
+        }
+        let left = nest(5000);
+        let right = nest(5000);
         let shallow = parse_body_value(b"[1]").expect("shallow");
-        let (equal, unequal) = std::thread::Builder::new()
+        // Values move back out so the deep drops land on the main test
+        // stack, not the 2MB probe stack.
+        let (equal, unequal, _left, _right, _shallow) = std::thread::Builder::new()
             .stack_size(2 * 1024 * 1024)
-            .spawn(move || (json_value_eq(&left, &right), json_value_eq(&left, &shallow)))
+            .spawn(move || {
+                let equal = json_value_eq(&left, &right);
+                let unequal = json_value_eq(&left, &shallow);
+                (equal, unequal, left, right, shallow)
+            })
             .expect("spawn")
             .join()
             .expect("no stack overflow");

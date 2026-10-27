@@ -104,7 +104,7 @@ use super::{
 };
 use crate::state::AppState;
 use crate::v1_cycles_modules::body as shared_body;
-use crate::v1_cycles_modules::json_cpython::{
+use crate::v1_cycles_modules::json::{
     parse_request_bytes_spans, JObject, JStr, JVal, JsonFail, JSON_PARSE_PREFIX,
 };
 
@@ -2089,7 +2089,7 @@ async fn fire_after_save(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::v1_cycles_modules::json_cpython::parse_request_bytes;
+    use crate::v1_cycles_modules::json::parse_request_bytes;
     use pidash_services::app_issues::{ISSUE_DETAIL_ARCHIVE_FIELDS, ISSUE_DETAIL_BASE_FIELDS};
     use pidash_services::orchestration::entries::fire_state_transition;
 
@@ -2394,33 +2394,30 @@ mod tests {
 
     #[tokio::test]
     async fn bulk_parse_error_body_is_lowercase_cpython() {
-        // A blank-but-nonempty body carries the CPython position.
+        // A blank-but-nonempty body 400s; the pins that remain are the
+        // 400 status and the lowercase envelope (message is serde's).
         let Err(JsonFail::Message(blank)) = parse_request_bytes(b" ") else {
             panic!("blank body must fail");
         };
-        assert_eq!(blank, "Expecting value: line 1 column 2 (char 1)");
+        assert!(!blank.is_empty(), "serde reason, got {blank:?}"); // Tier 3 since PIDASHCONV-1555: serde text
         let (status, body) =
             denial_body(Denial::BadDetail(format!("{JSON_PARSE_PREFIX}{blank}"))).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(
-            body,
-            "{\"detail\":\"JSON parse error - Expecting value: line 1 column 2 (char 1)\"}"
+        assert!(
+            body.starts_with("{\"detail\":\"JSON parse error - "),
+            "envelope shape, got {body:?}"
         );
-        // The shared parser's reason for `{oops`, verbatim.
+        // The shared parser's reason for `{oops` (serde text).
         let Err(JsonFail::Message(reason)) = parse_request_bytes(b"{oops") else {
             panic!("{{oops must fail");
         };
-        assert_eq!(
-            reason,
-            "Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"
-        );
+        assert!(!reason.is_empty(), "serde reason, got {reason:?}");
         let (status, body) =
             denial_body(Denial::BadDetail(format!("{JSON_PARSE_PREFIX}{reason}"))).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(
-            body,
-            "{\"detail\":\"JSON parse error - \
-             Expecting property name enclosed in double quotes: line 1 column 2 (char 1)\"}"
+        assert!(
+            body.starts_with("{\"detail\":\"JSON parse error - "),
+            "envelope shape, got {body:?}"
         );
     }
 

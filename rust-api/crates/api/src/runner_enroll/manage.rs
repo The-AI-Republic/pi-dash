@@ -22,10 +22,11 @@
 //!   sqlx's 16-tuple `FromRow`); rendering goes through the merged
 //!   [`shapes`](pidash_services::runner_enroll::serializers::shapes) kernels,
 //!   so key order and omission rules are never re-derived here.
-//! * Request bodies parse through the shared CPython-envelope layer
-//!   ([`crate::v1_cycles_modules::json_cpython`]); unparseable JSON is
-//!   DRF's `ParseError` (`{"detail": "JSON parse error - …"}`), past the
-//!   depth cap is Django's JSON 500. Non-JSON content types proxy to
+//! * Request bodies parse through the shared JSON layer
+//!   ([`crate::v1_cycles_modules::json`]); unparseable JSON is
+//!   DRF's `ParseError` (`{"detail": "JSON parse error - …"}`, serde's
+//!   text since PIDASHCONV-1555); depth failures are 400s, never
+//!   Django's JSON 500. Non-JSON content types proxy to
 //!   Django (the `app_scheduler` `read_request_data` precedent — form
 //!   posts stay on the Python plane).
 //! * `now()` values are truncated to microseconds before bind+render:
@@ -113,7 +114,7 @@ use pidash_types::{UserId, WorkspaceId};
 use crate::middleware::SessionHandle;
 use crate::runner_runs::{json_response, pool_of, server_error};
 use crate::state::AppState;
-use crate::v1_cycles_modules::json_cpython::{self, JObject, JVal, JsonFail};
+use crate::v1_cycles_modules::json::{self, JObject, JVal, JsonFail};
 
 // ---------------------------------------------------------------------------
 // Error bodies (D13-F7 `handlers/endpoints.golden.json`, key order verbatim
@@ -261,7 +262,7 @@ fn now_micros() -> DateTime<Utc> {
 }
 
 // ---------------------------------------------------------------------------
-// Request bodies (the `app_scheduler` envelope over `json_cpython`)
+// Request bodies (the `app_scheduler` envelope over `json`)
 // ---------------------------------------------------------------------------
 
 /// Read `request.data` for a POST/PATCH body: content-length 0
@@ -301,7 +302,7 @@ async fn read_request_data(state: &AppState, req: Request) -> Result<JVal, Respo
         .await
         .map(|collected| collected.to_bytes())
         .map_err(|_| server_error())?;
-    match json_cpython::parse_request_data(&bytes) {
+    match json::parse_request_data(&bytes) {
         Ok(value) => Ok(value),
         Err(JsonFail::Message(detail)) => Err(json_response(
             StatusCode::BAD_REQUEST,
@@ -316,7 +317,7 @@ async fn read_request_data(state: &AppState, req: Request) -> Result<JVal, Respo
 fn parse_error_body(detail: &str) -> String {
     format!(
         "{{\"detail\":{}}}",
-        serde_json::to_string(&format!("{}{detail}", json_cpython::JSON_PARSE_PREFIX))
+        serde_json::to_string(&format!("{}{detail}", json::JSON_PARSE_PREFIX))
             .expect("json string")
     )
 }
@@ -432,7 +433,7 @@ fn j_description(value: Option<&JVal>) -> Result<String, Response> {
     if !j_truthy(value) {
         return Ok(String::new());
     }
-    let rendered = json_cpython::py_str(value).map_err(|_| server_error())?;
+    let rendered = json::py_str(value).map_err(|_| server_error())?;
     rendered.to_clean_string().ok_or_else(server_error)
 }
 
@@ -2140,7 +2141,7 @@ pub fn routes() -> Router<AppState> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::v1_cycles_modules::json_cpython::{JNum, JStr};
+    use crate::v1_cycles_modules::json::{JNum, JStr};
     use pidash_db::runner_enroll::columns::pod as pod_cols;
 
     const FIXTURE_ENDPOINTS: &str =
@@ -2426,17 +2427,9 @@ mod tests {
 
     #[test]
     fn strip_surrogate_split() {
-        // A lone surrogate (e.g. JSON "\udc00"): the pod path keeps the
-        // lossy spelling for the naming validator (which 400s on the
-        // U+FFFD via its ASCII charset, exactly as Python 400s on the
-        // surrogate); the runner rename — with no validator before the
-        // store — 500s, as Django does encoding the row for Postgres.
-        let mut dirty = JStr::from_text("r");
-        dirty.push_surrogate(0xdc00);
-        let value = JVal::Str(dirty);
-        assert_eq!(or_empty_stripped(Some(&value)).unwrap(), "r\u{fffd}");
-        assert!(or_empty_stripped_clean(Some(&value)).is_err());
-        // Clean inputs behave identically on both helpers.
+        // Lone surrogates were a 400 at parse since PIDASHCONV-1555 (tier
+        // 3), so no dirty value reaches these helpers; both strip clean
+        // text identically.
         for clean in [None, Some(JVal::Null), Some(jstr("")), Some(jstr("  x  "))] {
             assert_eq!(
                 or_empty_stripped(clean.as_ref()).unwrap(),

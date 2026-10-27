@@ -35,7 +35,7 @@
 //! representative SQL in `queries_sub`, POST/activity kwargs in `tasks`,
 //! gates in [`super::perms`] over the F-06 kernel
 //! (`pidash_auth::permissions`), request bodies through
-//! `crate::v1_cycles_modules::{body, json_cpython}`, the request shell
+//! `crate::v1_cycles_modules::{body, json}`, the request shell
 //! (preamble, project rewrite, membership facts) through
 //! `crate::v1_projects::handlers_project` (the `handlers_pr_links`
 //! precedent), task fan-out through `pidash_jobs::queue`. This module owns
@@ -511,7 +511,7 @@ fn parse_body_with_spec(
     spec: &crate::v1_cycles_modules::body::BodySpec,
 ) -> Result<WriteBody, Denial> {
     use crate::v1_cycles_modules::body::{negotiate_body, BodyError, NegotiatedBody};
-    use crate::v1_cycles_modules::json_cpython::{
+    use crate::v1_cycles_modules::json::{
         parse_json_text_spans, to_serde_publish, to_serde_publish_map, JsonFail,
     };
     match negotiate_body(headers, body, spec) {

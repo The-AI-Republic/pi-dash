@@ -102,7 +102,7 @@ use crate::paginator::py_float_str;
 use crate::serializer::render_datetime_in;
 use crate::state::AppState;
 use crate::uuid_path::is_canonical_uuid;
-use crate::v1_cycles_modules::json_cpython::{self, JsonFail};
+use crate::v1_cycles_modules::json::{self, JsonFail};
 
 /// Register the seven owned endpoints. Cutover granularity is the
 /// route + method (pilot `owned()` pattern): sibling methods on these
@@ -639,10 +639,11 @@ fn render_admin(
 /// `form_body::select_body_kind`); unmatched types are 415. On the JSON
 /// branch the body must be an object (`None.get("email")` /
 /// `[1].get("email")` raise `AttributeError` out of the view → generic
-/// 500); otherwise it parses through the shared CPython layer
-/// (`json_cpython`, PIDASHCONV-1128), so malformed JSON, strict constants,
-/// int-limit and codec errors carry CPython's exact text as `ParseError`
-/// 400 `{"detail"}`; past the depth cap is Django's JSON 500.
+/// 500); otherwise it parses through the shared JSON layer
+/// (`json`, PIDASHCONV-1128), so malformed JSON is a `ParseError` 400
+/// with serde's text (tier 3 since PIDASHCONV-1555; the strict-constant,
+/// int-limit and depth-cap texts are gone); codec errors keep CPython's
+/// text; depth failures are 400s, never Django's JSON 500.
 fn parse_json_body(
     headers: &HeaderMap,
     body: &[u8],
@@ -656,9 +657,9 @@ fn parse_json_body(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     match select_body_kind(content_type) {
-        Some(BodyKind::Json) => match json_cpython::parse_request_bytes(body) {
+        Some(BodyKind::Json) => match json::parse_request_bytes(body) {
             Ok(jval) => {
-                let data = json_cpython::to_serde_publish(&jval);
+                let data = json::to_serde_publish(&jval);
                 if data.is_object() {
                     Ok(ParsedBody::json(data))
                 } else {
@@ -669,7 +670,7 @@ fn parse_json_body(
             }
             Err(JsonFail::Message(detail)) => Err(Denial::BadDetail(format!(
                 "{}{detail}",
-                json_cpython::JSON_PARSE_PREFIX
+                json::JSON_PARSE_PREFIX
             ))),
             Err(JsonFail::Recursion) => Err(Denial::ServerError),
         },
@@ -2816,10 +2817,14 @@ mod tests {
         // Empty body is `{}` without parsing (DRF `_parse`: stream None).
         let empty = parse_json_body(&json_headers(), b"", 5_242_880).expect("empty is {}");
         assert_eq!(empty.value(), &serde_json::json!({}));
-        // Blank bodies are DRF `ParseError` with the CPython message.
+        // Blank bodies are DRF `ParseError` (tier 3: serde text).
         let err = parse_json_body(&json_headers(), b"   ", 5_242_880).expect_err("blank body 400s");
-        let (_, body) = err.status_and_body();
-        assert!(body.contains("column 4 (char 3)"), "{body}");
+        let (status, body) = err.status_and_body();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            body.starts_with("{\"detail\":\"JSON parse error - "),
+            "{body}"
+        );
         // Non-JSON content-type with a body is 415.
         let mut plain = HeaderMap::new();
         plain.insert(header::CONTENT_TYPE, "text/plain".parse().unwrap());
@@ -2863,9 +2868,9 @@ mod tests {
             parse_json_body(&json_headers(), b"{bad}", 5_242_880).expect_err("malformed 400s");
         let (status, body) = err.status_and_body();
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(
-            body,
-            r#"{"detail":"JSON parse error - Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"}"#
+        assert!(
+            body.starts_with("{\"detail\":\"JSON parse error - "),
+            "envelope + serde text, got {body:?}"
         );
         // Non-UTF-8 is a codec `ParseError` 400 (DRF catches `ValueError`,
         // which includes `UnicodeDecodeError`), not a 500.

@@ -1022,7 +1022,7 @@ mod tests {
     }
 
     fn parse_body(json: &str) -> JVal {
-        crate::v1_cycles_modules::json_cpython::parse_request_bytes(json.as_bytes())
+        crate::v1_cycles_modules::json::parse_request_bytes(json.as_bytes())
             .expect("test json parses")
     }
 

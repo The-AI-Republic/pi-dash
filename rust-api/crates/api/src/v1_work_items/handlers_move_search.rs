@@ -186,7 +186,7 @@ use crate::orchestration::{
 use crate::serializer::{render_datetime, render_datetime_in};
 use crate::state::AppState;
 use crate::v1_cycles_modules::body as shared_body;
-use crate::v1_cycles_modules::json_cpython::{
+use crate::v1_cycles_modules::json::{
     parse_json_text, to_serde_publish, JsonFail, JSON_PARSE_PREFIX,
 };
 

@@ -47,8 +47,8 @@
 //! `::queries` (PIDASHCONV-568), emits + `handle_exception` in `::tasks`
 //! (PIDASHCONV-570), tables + defaults in `pidash_db::app_project::models`
 //! (PIDASHCONV-567). Bodies negotiate through the shared D-20
-//! `v1_cycles_modules::body` kernel with CPython-faithful JSON errors from
-//! `v1_cycles_modules::json_cpython`. Asset URLs reuse
+//! `v1_cycles_modules::body` kernel with serde-text JSON errors from
+//! `v1_cycles_modules::json` (tier 3 since PIDASHCONV-1555). Asset URLs reuse
 //! `v1_projects::handlers_members` (same `FileAsset.asset_url` property —
 //! reuse, never fork); `ProjectUserProperty` filter defaults reuse
 //! `pidash_db::app_issues::models_core` (D-26 owns them).
@@ -108,7 +108,7 @@ use pidash_services::v1_projects::ser_collab;
 use super::gates;
 use crate::state::AppState;
 use crate::v1_cycles_modules::body as shared_body;
-use crate::v1_cycles_modules::json_cpython::{
+use crate::v1_cycles_modules::json::{
     parse_request_data, py_str, to_serde_publish, JObject, JStr, JVal, JsonFail, JSON_PARSE_PREFIX,
 };
 use crate::v1_projects::handlers_members as v1members;
@@ -645,9 +645,9 @@ fn json_value_to_jval(value: &Value) -> JVal {
         Value::Number(number) => {
             let text = number.to_string();
             if text.contains(['.', 'e', 'E']) {
-                JVal::Num(crate::v1_cycles_modules::json_cpython::JNum::float(text))
+                JVal::Num(crate::v1_cycles_modules::json::JNum::float(text))
             } else {
-                JVal::Num(crate::v1_cycles_modules::json_cpython::JNum::int(text))
+                JVal::Num(crate::v1_cycles_modules::json::JNum::int(text))
             }
         }
         Value::String(text) => JVal::Str(JStr::from_text(text)),
@@ -1516,7 +1516,7 @@ fn validate_json_field(
             let clean = text
                 .to_clean_string()
                 .unwrap_or_else(|| text.to_lossy_string());
-            match crate::v1_cycles_modules::json_cpython::parse_json_text(&clean) {
+            match crate::v1_cycles_modules::json::parse_json_text(&clean) {
                 Ok(parsed) => Ok(to_serde_publish(&parsed)),
                 Err(JsonFail::Message(_)) => Err(FieldFail::one(INVALID.to_owned())),
                 Err(JsonFail::Recursion) => Err(FieldFail::ServerError),
@@ -3762,7 +3762,7 @@ async fn preference_patch_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::v1_cycles_modules::json_cpython::parse_json_text;
+    use crate::v1_cycles_modules::json::parse_json_text;
 
     fn jval(text: &str) -> JVal {
         parse_json_text(text).expect("test json parses")
@@ -3953,9 +3953,14 @@ mod tests {
         assert_eq!(check("true"), "Not a valid string.");
         assert_eq!(check("[\"x\"]"), "Not a valid string.");
         assert_eq!(check("\"a\\u0000b\""), "Null characters are not allowed.");
-        assert_eq!(
-            check("\"\\ud800\""),
-            "Surrogate characters are not allowed: U+D800."
+        // Tier 3 since PIDASHCONV-1555: lone surrogates are a 400 at parse
+        // (were validator 400s after an accepting parse).
+        assert!(
+            matches!(
+                parse_json_text("\"\\ud800\""),
+                Err(JsonFail::Message(message)) if !message.is_empty()
+            ),
+            "surrogate JSON 400s with serde text"
         );
     }
 

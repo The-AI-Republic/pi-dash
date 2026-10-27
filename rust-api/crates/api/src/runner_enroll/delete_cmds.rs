@@ -134,7 +134,7 @@ use crate::runner_enroll::auth::{authenticate_machine_token, MachineAuth, ALLOW_
 use crate::runner_runs::run_endpoints::execute_terminal_effects;
 use crate::runner_runs::{json_response, pool_of, server_error, LivePorts, RunnerPorts};
 use crate::state::AppState;
-use crate::v1_cycles_modules::json_cpython::{self, JObject, JVal, JsonFail};
+use crate::v1_cycles_modules::json::{self, JObject, JVal, JsonFail};
 
 // ---------------------------------------------------------------------------
 // Error bodies (D13-F7 `handlers/endpoints.golden.json`, key order verbatim
@@ -300,7 +300,7 @@ fn redis_client(state: &AppState) -> Option<redis::Client> {
 }
 
 // ---------------------------------------------------------------------------
-// Request bodies (the manage.rs envelope over `json_cpython`, twinned)
+// Request bodies (the manage.rs envelope over `json`, twinned)
 // ---------------------------------------------------------------------------
 
 /// Read `request.data`: content-length 0 validates as `{}` with the
@@ -337,7 +337,7 @@ async fn read_request_data(state: &AppState, req: Request) -> Result<JVal, Respo
         .await
         .map(|collected| collected.to_bytes())
         .map_err(|_| server_error())?;
-    match json_cpython::parse_request_data(&bytes) {
+    match json::parse_request_data(&bytes) {
         Ok(value) => Ok(value),
         Err(JsonFail::Message(detail)) => Err(json_response(
             StatusCode::BAD_REQUEST,
@@ -352,7 +352,7 @@ async fn read_request_data(state: &AppState, req: Request) -> Result<JVal, Respo
 fn parse_error_body(detail: &str) -> String {
     format!(
         "{{\"detail\":{}}}",
-        serde_json::to_string(&format!("{}{detail}", json_cpython::JSON_PARSE_PREFIX))
+        serde_json::to_string(&format!("{}{detail}", json::JSON_PARSE_PREFIX))
             .expect("json string")
     )
 }
@@ -420,7 +420,7 @@ fn py_string(value: Option<&JVal>) -> Result<String, Response> {
     if !j_truthy(value) {
         return Ok(String::new());
     }
-    json_cpython::py_str(value)
+    json::py_str(value)
         .map(|rendered| rendered.to_lossy_string())
         .map_err(|_| server_error())
 }
@@ -2732,7 +2732,7 @@ mod tests {
 
     #[test]
     fn body_value_semantics() {
-        let data = json_cpython::parse_request_data(
+        let data = json::parse_request_data(
             br#"{"s": "  x  ", "n": 123, "b": true, "nil": null, "e": "", "arr": [1]}"#,
         )
         .expect("parses");
@@ -2762,7 +2762,7 @@ mod tests {
         assert_eq!(body_opt_raw(data_get(&data, "e").unwrap()).unwrap(), None);
         assert!(body_opt_raw(data_get(&data, "n").unwrap()).is_err());
         // Non-object bodies have no `.get` (AttributeError → 500).
-        let array = json_cpython::parse_request_data(b"[1]").expect("parses");
+        let array = json::parse_request_data(b"[1]").expect("parses");
         assert!(data_get(&array, "s").is_err());
     }
 

@@ -863,7 +863,7 @@ fn decode_stream_utf8(body: &[u8]) -> Result<String, String> {
                 // never flushes it: the bytes vanish (W2 probe).
                 Ok(String::from_utf8_lossy(&body[..error.valid_up_to()]).into_owned())
             } else {
-                Err(super::json_cpython::utf8_decode_detail(body))
+                Err(super::json::utf8_decode_detail(body))
             }
         }
     }
