@@ -30026,10 +30026,22 @@ export class WebNewDriver implements ParityDriver {
     return true;
   }
   async pagesToolbarTableClickCell(row: number, col: number): Promise<void> {
-    await this.page
+    const cell = this.page
       .locator(`.editor-container [contenteditable="true"] table tr:nth-child(${row + 1}) > :nth-child(${col + 1})`)
-      .first()
-      .click({ timeout: WebNewDriver.WAIT_MS });
+      .first();
+    // A table-menu command re-applies the line it acted on, so the first
+    // click after one is discarded and the caret stays on that line. Two
+    // clicks a frame apart land the caret in the requested cell on both
+    // editors (the old app behaves identically), and a second click is
+    // inert when the caret already sits there.
+    await cell.click({ timeout: WebNewDriver.WAIT_MS });
+    await cell.evaluate(
+      () =>
+        new Promise<void>((resolve) => {
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+        })
+    );
+    await cell.click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async pagesToolbarImageUpload(filePath: string): Promise<void> {

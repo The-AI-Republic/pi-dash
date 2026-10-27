@@ -714,14 +714,12 @@ test(
 
       // Both drivers act on the first row's handle, so the mark must go
       // into the hovered row: the menu reads leave the caret wherever each
-      // editor drops it, so walk back to r0c0 first (Shift+Tab never
-      // appends a row). Then prove duplication copies content (the mark
-      // doubles), deleting the first row drops the original (the mark
-      // singles), and clearing the first row empties it.
-      for (let walk = 0; walk < 9; walk += 1) {
-        if ((await driver.pagesToolbarCaretCell()) === "r0c0") break;
-        await driver.pagesToolbarPressKey("Shift+Tab");
-      }
+      // editor drops it, so re-anchor a collapsed caret on r0c0 first (a
+      // key walk cannot be relied on while a line range is selected). Then
+      // prove duplication copies content (the mark doubles), deleting the
+      // first row drops the original (the mark singles), and clearing the
+      // first row empties it.
+      await driver.pagesToolbarTableClickCell(0, 0);
       expect(await driver.pagesToolbarCaretCell()).toBe("r0c0");
       await driver.pagesToolbarTypeText("dup-me");
       await driver.pagesToolbarTableMenuPick("row", "Duplicate");
@@ -739,10 +737,7 @@ test(
       // duplicate carries the mark, then narrow back. Re-anchor on r0c0
       // first — Tabbing forward from an unknown caret could run off the
       // last cell and append a row instead of reaching r1c0.
-      for (let walk = 0; walk < 9; walk += 1) {
-        if ((await driver.pagesToolbarCaretCell()) === "r0c0") break;
-        await driver.pagesToolbarPressKey("Shift+Tab");
-      }
+      await driver.pagesToolbarTableClickCell(0, 0);
       expect(await driver.pagesToolbarCaretCell()).toBe("r0c0");
       for (let tab = 0; tab < 3; tab += 1) {
         await driver.pagesToolbarPressKey("Tab");
@@ -757,9 +752,9 @@ test(
       expect((await driver.pagesToolbarBodyHtml()).split("col-me").length).toBe(2);
 
       // Tab still walks the cells after restructuring. The menu
-      // actions leave a range selection behind (at least in the old
-      // editor), under which Tab is inert — click a cell first to
-      // re-anchor a collapsed caret, then prove the walk both ways.
+      // actions leave a range selection behind (in both editors), under
+      // which Tab is inert — re-anchor a collapsed caret first, then
+      // prove the walk both ways.
       await driver.pagesToolbarTableClickCell(0, 0);
       expect(await driver.pagesToolbarCaretCell()).toBe("r0c0");
       await driver.pagesToolbarPressKey("Tab");
