@@ -95,8 +95,9 @@ Three things do not change with the display name. "Runner" stays the
 technical noun of an individual agent host: the CLI verb (`pidash runner
 add`), the `/api/runners/…` paths, the `Runner` model and our code
 identifiers keep it. A pod stays "pods" and a run stays "runs"; they are not
-renamed. And the agents area (schedulers, prompts, assistant) keeps its own
-name, which is why "AI Agents" is not available for this one.
+renamed. "AI Agents" is not reused for this area: it was this area's own
+former name, deliberately abandoned by the maintainer in PDASHOSS01-44, so
+re-adopting it would reverse that call.
 
 The rename is deliberately not built here: RUN-005 still pins the current
 split names as the bug the oracle observes, and the rename lands as its own
