@@ -916,7 +916,10 @@ test(
       await driver.pagesLiveWaitSynced();
     }
     await driver.pagesLiveWaitSynced();
-    expect(await driver.pagesHeaderOfflinePill()).toBeNull();
+    // The pill follows connectivity after a short settle beat in both
+    // directions (spec §8.3), so the clear is polled rather than read
+    // the instant the socket reports itself synced.
+    await expect.poll(() => driver.pagesHeaderOfflinePill(), { timeout: 15_000 }).toBeNull();
     // The offline typing reaches the server after the reconnect.
     await expect
       .poll(
