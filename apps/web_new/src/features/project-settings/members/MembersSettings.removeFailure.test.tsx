@@ -180,5 +180,18 @@ describe("MembersSettings refused removal", () => {
       ADA,
       GRACE,
     ]);
+
+    // Durable, not a flash: the old notice was added and then swept away with
+    // the confirmation about a tenth of a second later, which a single look
+    // right after close cannot tell apart from a notice that stays. Keep
+    // watching past that window and require the same notice, text and all.
+    const deadline = Date.now() + 1200;
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const later = screen.queryByTestId("toast-notification");
+      expect(later).not.toBeNull();
+      expect(within(later as HTMLElement).getByText(REMOVE_MEMBER_FAILED_TITLE)).toBeInTheDocument();
+      expect(within(later as HTMLElement).getByText(GONE_DETAIL)).toBeInTheDocument();
+    }
   });
 });
