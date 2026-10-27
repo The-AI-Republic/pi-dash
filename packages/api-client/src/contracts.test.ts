@@ -3957,6 +3957,25 @@ describe("instance configuration contracts", () => {
     });
   });
 
+  it("fans the security choice out to both flag keys", async () => {
+    const transport = csrfThen(() => ({
+      status: 200,
+      body: JSON.stringify({ message: "Email successfully sent." }),
+    }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    for (const [security, expected] of [
+      ["tls", { EMAIL_USE_TLS: "1", EMAIL_USE_SSL: "0" }],
+      ["none", { EMAIL_USE_TLS: "0", EMAIL_USE_SSL: "0" }],
+    ] as const) {
+      await checkEmailCredentials(client, "probe@example.com", { security });
+      const calls = transport.calls.filter((call) => call.url.endsWith("/api/instances/email-credentials-check/"));
+      expect(JSON.parse(String(calls[calls.length - 1]?.init.body))).toEqual({
+        receiver_email: "probe@example.com",
+        ...expected,
+      });
+    }
+  });
+
   it("surfaces the server mail error on a failed check", async () => {
     const transport = csrfThen(() => ({
       status: 400,
