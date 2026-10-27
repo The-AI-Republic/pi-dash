@@ -214,4 +214,22 @@ describe("CalendarDay", () => {
     const card = screen.getByRole("tooltip");
     expect(card).toHaveTextContent("In progress");
   });
+
+  it("keeps the day-number strip out of the pointer path", () => {
+    // ISS-021: the strip is decoration; on a crowded month it must never
+    // be the element that answers a click meant for a control below it.
+    renderDay({ cell: { ...CELL, isToday: true } });
+    const header = tileFor(CELL.iso).firstElementChild as HTMLElement;
+    expect(header).toHaveClass("pointer-events-none");
+    expect(header.querySelector("span.rounded-full")?.textContent).toBe("15");
+  });
+
+  it("renders Load more inside the tile's content region, below its blocks", () => {
+    renderDay({ rows: [row()], totalRows: 5 });
+    const content = tileFor(CELL.iso).querySelector("div.flex.min-h-0.flex-1.flex-col") as HTMLElement;
+    const more = screen.getByRole("button", { name: "Load more" });
+    expect(content).toContainElement(more);
+    const block = screen.getByRole("link", { name: "WEB-42" });
+    expect(block.compareDocumentPosition(more) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
 });

@@ -107,7 +107,19 @@ export function CalendarGrid(props: CalendarGridProps): React.ReactElement {
         className="min-h-0 flex-1 overflow-y-auto"
         onPointerMove={handlePointerMove}
       >
-        <div className="grid h-full auto-rows-fr" style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }}>
+        {/*
+         * Rows have a min-content floor: a crowded day grows its week's
+         * row instead of spilling its blocks and paging control into the
+         * next week, where that week's day-number strip would paint over
+         * the overflow and swallow its clicks (ISS-021). The 1fr ceiling
+         * still stretches a short month to fill the viewport, and a taller
+         * one overflows into the scrolling area above.
+         */}
+        <div
+          data-testid="calendar-grid"
+          className="grid h-full auto-rows-[minmax(min-content,1fr)]"
+          style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }}
+        >
           {props.weeks.flat().map((cell) => (
             <Day key={cell.iso} cell={cell} props={props} />
           ))}
