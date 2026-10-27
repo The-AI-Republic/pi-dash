@@ -468,9 +468,10 @@ wording is each app's own copy, not a parity property — the rebuild
 says "Update work item", the old app says "Update", and the oracle
 scenario pins the intent (an edit-mode heading naming an update) so it
 passes on both (NEWFRONT-934). The same single heading serves every
-entry point that opens the edit form: the row menu, the relations
-widget's row edit, and the intake accept form; only the intake form
-names the specific action it performs.
+entry point that opens the edit form — the row menu, the detail and
+peek panels, the relations widget's row edit, and drafts; only the
+intake accept form carries its own heading naming the specific action
+it performs (the editTitle override, INT-020).
 
 The archive entry is gated on the issue's state group (ISS-061):
 unless the issue sits in a completed or cancelled state the entry
