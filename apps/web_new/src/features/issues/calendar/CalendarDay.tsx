@@ -89,7 +89,10 @@ export function CalendarDay({
   const [title, setTitle] = React.useState("");
   const allRows = [...rows, ...extraRows.filter((extra) => !rows.some((row) => row.id === extra.id))];
   const hasMore = totalRows > allRows.length;
-  const headerClass = `hidden flex-shrink-0 justify-end md:flex ${cell.inMonth ? "font-medium" : "text-(--text-muted)"}`;
+  // The desktop day number is decoration: it carries no click, so it never
+  // takes a pointer. Should a crowded tile ever reach into a neighbouring
+  // row, the strip still cannot swallow that row's controls (ISS-021).
+  const headerClass = `pointer-events-none hidden flex-shrink-0 justify-end md:flex ${cell.inMonth ? "font-medium" : "text-(--text-muted)"}`;
 
   function submit(): void {
     const name = title.trim();

@@ -171,4 +171,28 @@ describe("CalendarGrid", () => {
     expect(labels).toEqual(["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]);
     expect(document.querySelectorAll("[data-calendar-day]")).toHaveLength(0);
   });
+
+  it("lets a week row grow to a crowded day instead of spilling into the next row", () => {
+    // ISS-021: with tracks pinned to 1fr a crowded tile's blocks and
+    // "Load more" overflowed the row, and the next week's day-number
+    // strip painted over that overflow and took its clicks.
+    renderGrid();
+    const grid = screen.getByTestId("calendar-grid");
+    expect(grid).toHaveClass("auto-rows-[minmax(min-content,1fr)]");
+    expect(grid).not.toHaveClass("auto-rows-fr");
+  });
+
+  it("still fills the scrolling area so a short month stretches to the viewport", () => {
+    renderGrid();
+    const grid = screen.getByTestId("calendar-grid");
+    expect(grid).toHaveClass("h-full");
+  });
+
+  it("keeps the grid inside the scrolling area so tall months scroll as a whole", () => {
+    renderGrid();
+    const scroll = screen.getByTestId("calendar-scroll");
+    expect(scroll).toHaveClass("overflow-y-auto");
+    expect(scroll).toHaveClass("min-h-0");
+    expect(screen.getByTestId("calendar-grid").parentElement).toBe(scroll);
+  });
 });
