@@ -128,6 +128,15 @@ def test_delete_cascades_to_targets_and_prefs(world, instance_admin):
     assert not LoopUserPreference.objects.filter(job=job).exists()
 
 
+def test_delete_missing_returns_404(world, instance_admin):
+    job = make_job(slug="del-missing")
+    c = _client(instance_admin)
+    assert c.delete(f"{JOBS_URL}{job.id}/").status_code == 204
+    res = c.delete(f"{JOBS_URL}{job.id}/")
+    assert res.status_code == 404
+    assert res.data["error"] == "not_found"
+
+
 def test_targets_listing(world, instance_admin, kms_crypto):
     from pi_dash.tests.contract.assistant.conftest import configure_llm
     from pi_dash.tests.contract.loop.conftest import make_target
