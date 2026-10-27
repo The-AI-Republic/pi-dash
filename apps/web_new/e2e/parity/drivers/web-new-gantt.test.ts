@@ -1491,7 +1491,7 @@ describe("gantt bar gestures (ISS-051–053)", () => {
 describe("gantt add-block (ISS-054)", () => {
   const ISSUE = "123e4567-e89b-12d3-a456-426614174000";
 
-  function addPage() {
+  function addPage(moves: { x: number; y: number }[] = []) {
     const link = locator({
       count: async () => 1,
       getAttribute: async (key: string) => (key === "aria-label" ? "Undated" : `issue-${ISSUE}`),
@@ -1506,6 +1506,14 @@ describe("gantt add-block (ISS-054)", () => {
     return pageOf({
       getByTestId: (id: string) => {
         if (id === "gantt-sidebar-row") return locator({ count: async () => 1, nth: () => row });
+        // The chart mounts scrolled to center today, so the strip box
+        // sits off-viewport; the hover must ignore it and anchor to the
+        // visible sidebar edge instead (ISS-044/054).
+        if (id === "gantt-sidebar-column") {
+          return locator({
+            first: () => locator({ boundingBox: async () => ({ x: 200, y: 0, width: 100, height: 44 }) }),
+          });
+        }
         if (id === "gantt-day-columns") {
           return locator({
             locator: () =>
@@ -1513,10 +1521,10 @@ describe("gantt add-block (ISS-054)", () => {
                 first: () =>
                   locator({
                     count: async () => 1,
-                    boundingBox: async () => ({ x: 300, y: 0, width: 400, height: 44 }),
+                    boundingBox: async () => ({ x: 300, y: 0, width: 40, height: 44 }),
                   }),
               }),
-            first: () => locator({ boundingBox: async () => ({ x: 300, y: 0, width: 400, height: 44 }) }),
+            first: () => locator({ boundingBox: async () => ({ x: -231, y: 0, width: 2240, height: 180 }) }),
           });
         }
         return locator();
@@ -1529,7 +1537,7 @@ describe("gantt add-block (ISS-054)", () => {
         return locator();
       },
       mouse: {
-        move: async () => undefined,
+        move: async (x: number, y: number) => void moves.push({ x, y }),
         click: async () => undefined,
         down: async () => undefined,
         up: async () => undefined,
@@ -1549,6 +1557,14 @@ describe("gantt add-block (ISS-054)", () => {
     page.waitForTimeout = async (ms: number) => void waits.push(ms);
     await new WebNewDriver(page).ganttRowAddVisible("Undated");
     expect(waits).toEqual([800]);
+  });
+
+  it("anchors the hover to the visible sidebar edge, not the scrolled strip", async () => {
+    // Sidebar at x=200 w=100, day width 40, offset 2: the hover lands
+    // at (380, 22) even though the strip box sits off-viewport.
+    const moves: { x: number; y: number }[] = [];
+    await new WebNewDriver(addPage(moves)).ganttRowAddVisible("Undated");
+    expect(moves).toEqual([{ x: 380, y: 22 }]);
   });
 });
 

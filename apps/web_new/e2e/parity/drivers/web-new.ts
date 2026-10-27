@@ -12032,11 +12032,17 @@ export class WebNewDriver implements ParityDriver {
   }
 
   private async ganttChartPointForRow(issueName: string, dayOffset: number): Promise<{ x: number; y: number }> {
+    // Sidebar rows align vertically with chart rows, so the sidebar
+    // row's center is the lane's center. Anchor x to the visible
+    // sidebar edge like the oracle: the chart mounts scrolled to
+    // center today, so the day-column strip's box sits off-viewport
+    // (live probe: strip.x=-231) and a strip-anchored hover lands on
+    // nothing (ISS-044/054 read false, ISS-049/055-059 cascaded).
     const dayWidth = await this.ganttDayWidth();
     const { box } = await this.ganttRowBox(issueName);
-    const strip = await this.page.getByTestId("gantt-day-columns").first().boundingBox();
-    if (strip === null) throw new Error("[parity] timeline strip has no box.");
-    return { x: strip.x + dayOffset * dayWidth + 2, y: box.y + box.height / 2 };
+    const sidebar = await this.page.getByTestId("gantt-sidebar-column").first().boundingBox();
+    if (sidebar === null) throw new Error("[parity] timeline sidebar has no box.");
+    return { x: sidebar.x + sidebar.width + dayOffset * dayWidth, y: box.y + box.height / 2 };
   }
 
   async ganttRowAddVisible(issueName: string): Promise<boolean> {
