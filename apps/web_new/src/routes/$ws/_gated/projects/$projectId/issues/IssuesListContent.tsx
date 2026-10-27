@@ -11,7 +11,7 @@
 // item prompt until the filter row adds a condition during this visit, and
 // the no-results card with clear-all from then on.
 
-import { useSuspenseQuery, type QueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useQuery, useSuspenseQuery, type QueryClient } from "@tanstack/react-query";
 import type { ApiClient } from "@pidash/api-client";
 import { Button } from "@pidash/kit";
 import * as React from "react";
@@ -128,9 +128,22 @@ export function IssuesListContent({
   const { data: preferences } = useSuspenseQuery(
     prefsQueryOptions(apiClient, workspaceSlug, { scope: "project", projectId: projectId })
   );
-  const { data: issues } = useSuspenseQuery(
-    issuesQueryOptions(apiClient, workspaceSlug, projectId, search, preferences.rich_filters, orderByOf(preferences))
-  );
+  // The stored rich filters and order ride in this key, so every filter or
+  // display write changes it. The previous page stays on screen under the
+  // floating spinner while the refetch runs (ISS-005): re-suspending here
+  // would drop the whole route — loader scope, filter row and spinner —
+  // back to the pending skeleton for the entire refetch.
+  const issuesRead = useQuery({
+    ...issuesQueryOptions(
+      apiClient,
+      workspaceSlug,
+      projectId,
+      search,
+      preferences.rich_filters,
+      orderByOf(preferences)
+    ),
+    placeholderData: keepPreviousData,
+  });
   // The stored rich filters (ISS-095–099) scope the list's first page and
   // every later page; without conditions this is the plain flat read. The
   // list layout owns that page (its own chunk) and reads it itself, so the
@@ -161,6 +174,17 @@ export function IssuesListContent({
       </section>
     );
   }
+
+  // beforeLoad warms this read, so a missing page only happens when the
+  // prefetch was skipped or dropped: show the same skeleton the pending
+  // window shows. A failure with no page to keep throws to the route error
+  // boundary, the way the suspense read did; a background refetch failure
+  // keeps rendering the previous page.
+  if (issuesRead.data === undefined) {
+    if (issuesRead.isError) throw issuesRead.error;
+    return <ListSkeleton />;
+  }
+  const issues = issuesRead.data;
 
   // Layout slices extend the offered list with their renderer; the
   // Display control resolves the same active layout from it.
