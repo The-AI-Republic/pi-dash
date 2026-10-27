@@ -90,7 +90,7 @@ describe("IntakeDetailHeader link controls (INT-024)", () => {
     await user.click(screen.getByRole("button", { name: REQUEST_ACTIONS_LABEL }));
     await user.click(await screen.findByRole("menuitem", { name: "Copy work item link" }));
     expect(writeText).toHaveBeenCalledWith("https://app.example.test/acme/browse/APO-7/");
-    expect(await screen.findByText("Work item link copied to clipboard.")).toBeInTheDocument();
+    expect(await screen.findByText("Copied the work item link.")).toBeInTheDocument();
   });
 
   it("shows no copy control to a viewer without copy standing on an open request", () => {
@@ -107,7 +107,7 @@ describe("IntakeDetailHeader link controls (INT-024)", () => {
     expect(screen.queryByTestId("intake-detail-menu")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Copy work item link" }));
     expect(writeText).toHaveBeenCalledWith("https://app.example.test/acme/browse/APO-7/");
-    expect(await screen.findByText("Work item link copied to clipboard.")).toBeInTheDocument();
+    expect(await screen.findByText("Copied the work item link.")).toBeInTheDocument();
     const open = screen.getByTestId("intake-detail-open-work-item");
     expect(open).toHaveTextContent(OPEN_WORK_ITEM_LABEL);
     expect(open).toHaveAttribute("href", "/acme/browse/APO-7/");

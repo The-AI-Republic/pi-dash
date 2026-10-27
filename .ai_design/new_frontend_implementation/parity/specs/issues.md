@@ -978,7 +978,11 @@ parent id. Oracle: `issue-detail-sidebar.spec.ts`.
 The detail header carries a copy-link button (ISS-160) copying the
 absolute work-item URL with a success toast, and a subscribe toggle
 (ISS-161) reading and writing `BASE/issues/{id}/subscribe/` (status
-read, post to subscribe, delete to unsubscribe). The toggle toasts on
+read, post to subscribe, delete to unsubscribe). The copy toast's
+exact wording is each app's own copy, not a parity property — the
+rebuild says "Copied the work item link.", the old app its own
+Link-copied notice, and the oracle scenario pins the intent (a notice
+saying the link was copied) so it passes on both (NEWFRONT-945). The toggle toasts on
 change, shows a loader until the state is known, hides on archived
 items, and disables while in flight. The header ellipsis (ISS-162)
 holds the destructive and navigation entries with role gating:

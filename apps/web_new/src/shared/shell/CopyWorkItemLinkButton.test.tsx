@@ -61,7 +61,7 @@ describe("CopyWorkItemLinkButton", () => {
     fireEvent.click(screen.getByRole("button", { name: COPY_WORK_ITEM_LINK_LABEL }));
     expect(platformHarness.shareableUrl).toHaveBeenCalledWith("/acme/browse/ACME-12/");
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("https://app.example.test/acme/browse/ACME-12/"));
-    expect(await screen.findByText("Work item link copied to clipboard.")).toBeInTheDocument();
+    expect(await screen.findByText("Copied the work item link.")).toBeInTheDocument();
   });
 
   it("toasts the refusal when no hosted origin exists", async () => {
@@ -89,7 +89,7 @@ describe("copyWorkItemLinkAddress", () => {
     );
     await expect(copyWorkItemLinkAddress("acme", "ACME-12")).resolves.toBe(true);
     expect(writeText).toHaveBeenCalledWith("https://app.example.test/acme/browse/ACME-12/");
-    expect(await screen.findByText("Work item link copied to clipboard.")).toBeInTheDocument();
+    expect(await screen.findByText("Copied the work item link.")).toBeInTheDocument();
   });
 
   it("reports a denied clipboard instead of throwing", async () => {
