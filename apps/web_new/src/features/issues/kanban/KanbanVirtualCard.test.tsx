@@ -3,8 +3,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Virtualized board card shell (parity/specs/issues.md §5, ISS-043):
-// content near the viewport, a marked placeholder past the overscan,
-// and content while forced or without an observer.
+// content while vertically near the viewport at any horizontal distance
+// (ISS-039), a marked placeholder past the vertical overscan, and
+// content while forced or without an observer.
 import { act, render, renderHook, screen } from "@testing-library/react";
 import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -12,7 +13,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   KanbanVirtualCard,
   useNearViewport,
+  virtualCardRootMargin,
   VIRTUAL_CARD_HEIGHT_PX,
+  VIRTUAL_CROSS_OVERSCAN_PX,
   VIRTUAL_OVERSCAN_PX,
 } from "./KanbanVirtualCard.js";
 
@@ -94,5 +97,19 @@ describe("KanbanVirtualCard", () => {
     installObserver();
     const { result } = renderHook(() => useNearViewport<HTMLDivElement>());
     expect(result.current.near).toBe(true);
+  });
+
+  it("observes with vertical overscan and unbounded horizontal reach", () => {
+    // ISS-039: a lone card in a far column (horizontal distance only)
+    // must mount its content, while ISS-043 keeps windowing tall
+    // columns vertically. The browser derives near/far from these
+    // margins, so the margins themselves are the pinned contract.
+    expect(virtualCardRootMargin()).toBe(
+      `${VIRTUAL_OVERSCAN_PX}px ${VIRTUAL_CROSS_OVERSCAN_PX}px ${VIRTUAL_OVERSCAN_PX}px ${VIRTUAL_CROSS_OVERSCAN_PX}px`
+    );
+    expect(VIRTUAL_CROSS_OVERSCAN_PX).toBe(1_000_000);
+    installObserver();
+    render(shell());
+    expect(seen.options[0]).toMatchObject({ rootMargin: virtualCardRootMargin() });
   });
 });
