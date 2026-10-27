@@ -323,6 +323,55 @@ queue-schema role (`MIGRATOR_DATABASE_URL`) while the builders run
 `ensure_schema` on the app pool; the port carries its pre-step or files
 for a hook.
 
+## Domain write services (ORM-02)
+
+`pidash_services::domain` is the one public surface for writes to the
+covered tables (design `.ai_design/rust_orm/design.md` D3, §4). Overlays
+call it; they never execute OSS SQL text themselves:
+
+```rust
+pidash_services::domain::run(&ctx, &db, |txn| {
+    Box::pin(async move {
+        txn.advisory_xact_lock(key).await?;
+        txn.on_commit(|| async move { /* post-commit effects */ });
+        Ok::<(), pidash_services::domain::DomainError>(())
+    })
+})
+.await?;
+```
+
+- `WriteCtx` — actor (the `crum`-user equivalent), request origin/host,
+  workspace/project scope, and a per-caller options struct for the
+  view-to-view deltas (D6).
+- `WriteTxn` — the SeaORM transaction plus the after-commit queue and the
+  hook registry. Entity calls run on it directly; existing sea-query
+  builders go through `exec_builder`, raw SQL (advisory locks,
+  `SELECT … FOR UPDATE`) through `exec_raw`. A SeaORM transaction cannot
+  adopt an `sqlx::Transaction`, so domain writes never mix in sqlx
+  transactions (D5). Reads stay on sqlx.
+- After-commit queue — the `pidash_db::tx::AfterCommit` semantics
+  (in order, exactly once, after a successful commit; errors roll back
+  and drop the queue) with async steps, awaited by `run()` after the
+  commit. Django timing correspondence: pi-dash sets no
+  `ATOMIC_REQUESTS` (autocommit default), so its activity enqueues are
+  plain inline `.delay()` calls and its `on_commit` callbacks run
+  immediately outside `atomic()`; `domain::run` always opens a
+  transaction instead, and no migrated path queues work yet, so moving a
+  future enqueue into the queue changes neither the side effects nor
+  their client-visible timing — each migration re-confirms this for its
+  own paths. Failure modes, order and the outermost-only scope are
+  documented with Django file citations on `CommitQueue`/`WriteTxn`.
+- Hook registry — trait objects implemented wherever their dependencies
+  live, so entity-adjacent logic can trigger services/jobs effects
+  (scheduler seeding, the issue transition) without a crate cycle.
+- `domain::activity` — the single copy of the `issue_activity`,
+  `model_activity` and version task names; every previous copy is a
+  re-export.
+- Issue post-save orchestration — the pre-save snapshot lives in
+  `domain::transition`, the completion comment and the transition fire
+  core in `pidash_jobs::issue_transition`; the api module keeps
+  same-path wrappers over its own drains.
+
 ## SeaORM entities (ORM-01)
 
 SeaORM 1.1 (`~1.1.20`, design `.ai_design/rust_orm/design.md` D1) covers

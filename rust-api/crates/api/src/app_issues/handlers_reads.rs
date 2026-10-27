@@ -537,9 +537,8 @@ fn get_id_list(row: &Map<String, Value>, key: &str) -> Vec<String> {
 // Deferred publishes (best-effort `rust_job_queue` rows; the response stands)
 // ---------------------------------------------------------------------------
 
-/// Celery wire name for `issue_activity`
-/// (`bgtasks/issue_activities_task.py:1504`).
-const ISSUE_ACTIVITY_TASK: &str = "pi_dash.bgtasks.issue_activities_task.issue_activity";
+// Canonical task name lives in `pidash_services::domain::activity`.
+use pidash_services::domain::activity::ISSUE_ACTIVITY_TASK;
 /// Celery wire name for `recent_visited_task` (bare `@shared_task` default).
 const RECENT_VISITED_TASK: &str = "pi_dash.bgtasks.recent_visited_task.recent_visited_task";
 

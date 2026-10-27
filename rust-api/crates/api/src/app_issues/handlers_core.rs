@@ -225,9 +225,8 @@ const CORE_BODY_SPEC: shared_body::BodySpec = shared_body::BodySpec {
 /// `X-Pi-Dash-Skip-Immediate-Dispatch: 1` (`base.py:677`).
 const SKIP_DISPATCH_HEADER: &str = "x-pi-dash-skip-immediate-dispatch";
 
-/// Celery task names (plain `@shared_task`: module + function).
-const ISSUE_ACTIVITY_TASK: &str = "pi_dash.bgtasks.issue_activities_task.issue_activity";
-const MODEL_ACTIVITY_TASK: &str = "pi_dash.bgtasks.webhook_task.model_activity";
+// Canonical task names live in `pidash_services::domain::activity`.
+use pidash_services::domain::activity::{ISSUE_ACTIVITY_TASK, MODEL_ACTIVITY_TASK};
 const RECENT_VISITED_TASK: &str = "pi_dash.bgtasks.recent_visited_task.recent_visited_task";
 const VERSION_TASK: &str =
     "pi_dash.bgtasks.issue_description_version_task.issue_description_version_task";

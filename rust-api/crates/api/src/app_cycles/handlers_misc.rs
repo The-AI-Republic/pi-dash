@@ -900,9 +900,8 @@ pub async fn overlap_exists(
 // `transfer_cycle_issues`, `utils/cycle_transfer_issues.py:36-479`)
 // ---------------------------------------------------------------------------
 
-/// Celery wire name for `issue_activity` (bare `@shared_task` default;
-/// also pinned by the D-32 intake `services::app_intake::tasks`).
-pub const ISSUE_ACTIVITY_TASK: &str = "pi_dash.bgtasks.issue_activities_task.issue_activity";
+/// Re-export of the canonical [`pidash_services::domain::activity::ISSUE_ACTIVITY_TASK`].
+pub use pidash_services::domain::activity::ISSUE_ACTIVITY_TASK;
 /// `type` kwarg of the transfer emit (`cycle_transfer_issues.py:463`).
 pub const TRANSFER_ACTIVITY_TYPE: &str = "cycle.activity.created";
 

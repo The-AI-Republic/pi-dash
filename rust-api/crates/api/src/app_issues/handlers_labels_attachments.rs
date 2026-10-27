@@ -1425,9 +1425,8 @@ async fn invalidate_workspace_labels(
 
 // ---- task publishes -----------------------------------------------------------
 
-/// Celery wire name for `issue_activity`
-/// (`bgtasks/issue_activities_task.py:1504`).
-const ISSUE_ACTIVITY_TASK: &str = "pi_dash.bgtasks.issue_activities_task.issue_activity";
+// Canonical task name lives in `pidash_services::domain::activity`.
+use pidash_services::domain::activity::ISSUE_ACTIVITY_TASK;
 
 /// `base_host(request, is_app=True)` (`utils/host.py:17-66`): `APP_BASE_URL`
 /// wins when set, else `WEB_URL`; unset is `ImproperlyConfigured` → 500.

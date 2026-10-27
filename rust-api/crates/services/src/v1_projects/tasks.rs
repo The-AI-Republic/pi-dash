@@ -71,11 +71,10 @@
 
 use serde_json::{Map, Value};
 
-/// `model_activity` (`webhook_task.py:463`): full Celery name, plain
-/// `@shared_task`. Body in D-08; pinned equal to the D-33 const (same
-/// string — this crate cannot import `pidash-jobs`, so the pin is by
-/// value on both sides).
-pub const MODEL_ACTIVITY_TASK: &str = "pi_dash.bgtasks.webhook_task.model_activity";
+/// Re-export of the canonical [`crate::domain::activity::MODEL_ACTIVITY_TASK`]
+/// (the D-08 body and the D-33 owners re-export the same const, so the
+/// pin is by construction now).
+pub use crate::domain::activity::MODEL_ACTIVITY_TASK;
 
 /// `webhook_activity` (`webhook_task.py:377`): full Celery name, plain
 /// `@shared_task`. Body in D-08; pinned equal to the D-33 const.
@@ -273,9 +272,10 @@ mod tests {
     #[test]
     fn task_names_match_the_python_celery_names() {
         // Plain `@shared_task` names are the module path; these literals
-        // must stay byte-identical to the D-08/D-33 owners (this crate
-        // cannot import pidash-jobs, so the pin is by value — and by
-        // equality with the D-33 consts, so the two domains never fork).
+        // must stay byte-identical to the D-08/D-33 owners.
+        // `MODEL_ACTIVITY_TASK` is the shared domain const now (single
+        // source, no cross-pin left to assert); `WEBHOOK_ACTIVITY_TASK`
+        // still has one copy per domain, pinned equal here.
         assert_eq!(
             MODEL_ACTIVITY_TASK,
             "pi_dash.bgtasks.webhook_task.model_activity"
@@ -284,7 +284,6 @@ mod tests {
             WEBHOOK_ACTIVITY_TASK,
             "pi_dash.bgtasks.webhook_task.webhook_activity"
         );
-        assert_eq!(MODEL_ACTIVITY_TASK, shared::MODEL_ACTIVITY_TASK);
         assert_eq!(WEBHOOK_ACTIVITY_TASK, shared::WEBHOOK_ACTIVITY_TASK);
     }
 

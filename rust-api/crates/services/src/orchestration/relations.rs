@@ -818,11 +818,10 @@ pub fn grouped_relations(
 // Activity enqueue (`_log_activity`, `:123-135`)
 // ---------------------------------------------------------------------------
 
-/// Celery wire name for `issue_activity` (bare `@shared_task`) — the
-/// same task the estimate sites publish to (see
-/// `app_project::tasks::ISSUE_ACTIVITY_TASK`); the relations call site
-/// additionally passes `notification=True`.
-pub const ISSUE_ACTIVITY_TASK: &str = "pi_dash.bgtasks.issue_activities_task.issue_activity";
+/// Re-export of the canonical [`crate::domain::activity::ISSUE_ACTIVITY_TASK`]
+/// (the same task the estimate sites publish to; the relations call site
+/// additionally passes `notification=True`).
+pub use crate::domain::activity::ISSUE_ACTIVITY_TASK;
 
 /// `type` passed by the relate-created call (`relations.py:221`).
 pub const RELATION_CREATED_ACTIVITY: &str = "issue_relation.activity.created";

@@ -118,8 +118,8 @@ pub const ISSUE_ARCHIVE_PATH: &str =
 pub const BULK_ARCHIVE_PATH: &str =
     "/api/workspaces/{slug}/projects/{project_id}/bulk-archive-issues/";
 
-/// `issue_activity` Celery wire name (bare `@shared_task` default).
-pub const ISSUE_ACTIVITY_TASK: &str = "pi_dash.bgtasks.issue_activities_task.issue_activity";
+/// Re-export of the canonical [`pidash_services::domain::activity::ISSUE_ACTIVITY_TASK`].
+pub use pidash_services::domain::activity::ISSUE_ACTIVITY_TASK;
 
 /// `archive()` state-gate body (`archive.py:262`).
 const ARCHIVE_STATE_MESSAGE: &str = "Can only archive completed or cancelled state group issue";
