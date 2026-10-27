@@ -96,6 +96,17 @@ pub trait PodDrain: Send + Sync {
 /// creation outboxes.
 // The `()` error is the transition-driver convention (callers log the
 // verbatim line; the save stands either way), kept from the api original.
+// Every erasure below logs its cause first (PIDASHCONV-1563): the web
+// handlers map `()` to a 500 with no other trace, so without these logs
+// the next fire failure needs temporary logging to diagnose.
+fn fire_erased<E: std::fmt::Display>(error: E, site: &str, request: &FireRequest) {
+    tracing::error!(
+        %error,
+        site,
+        issue_id = %request.issue_id,
+        "issue transition fire failure"
+    );
+}
 #[allow(clippy::too_many_arguments, clippy::result_unit_err)]
 pub async fn fire_transition<C, H, P, M>(
     pool: &PgPool,
@@ -116,7 +127,9 @@ where
     if request.prev_state_id == request.current_state_id {
         return Ok(FireOutcome::NoTransition);
     }
-    let tx = Transaction::begin(pool).await.map_err(|_| ())?;
+    let tx = Transaction::begin(pool)
+        .await
+        .map_err(|error| fire_erased(error, "fire-tx-begin", &request))?;
     let mut seam = LiveTransitionSeam {
         pool,
         store: LiveCreationStore::new(tx, pool, store_deps),
@@ -134,7 +147,8 @@ where
 
     let outcome = match outcome {
         Ok(outcome) => outcome,
-        Err(_) => {
+        Err(error) => {
+            fire_erased(&error, "fire-drive", &request);
             let _ = tx.rollback().await;
             return Err(());
         }
@@ -144,7 +158,9 @@ where
         let _ = tx.rollback().await;
         return Ok(outcome);
     }
-    tx.commit().await.map_err(|_| ())?;
+    tx.commit()
+        .await
+        .map_err(|error| fire_erased(&error, "fire-tx-commit", &request))?;
 
     if !terminal_effects.is_empty() {
         let mut pairs = Vec::with_capacity(terminal_effects.len() * 2);
@@ -156,10 +172,30 @@ where
     for run_id in dispatches {
         match dispatch_agent_run(pool, cloud, run_id, request.now).await {
             Ok(DispatchDecision::PodDrain { pod_id }) => {
-                pod_drain.drain_pod(pod_id).await.map_err(|_| ())?;
+                if let Err(()) = pod_drain.drain_pod(pod_id).await {
+                    // The drain logs its own cause where the storage error
+                    // is still in hand; this breadcrumb carries the fire.
+                    tracing::error!(
+                        site = "fire-pod-drain",
+                        issue_id = %request.issue_id,
+                        %run_id,
+                        %pod_id,
+                        "issue transition fire failure"
+                    );
+                    return Err(());
+                }
             }
             Ok(_) => {}
-            Err(_) => return Err(()),
+            Err(error) => {
+                tracing::error!(
+                    %error,
+                    site = "fire-dispatch",
+                    issue_id = %request.issue_id,
+                    %run_id,
+                    "issue transition fire failure"
+                );
+                return Err(());
+            }
         }
     }
     for consume in &deferred {

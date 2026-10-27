@@ -87,7 +87,8 @@ impl PodDrain for TransitionDrains {
 /// dependency bundles from the [`AppState`] and delegates to the jobs
 /// core with the api drains. Public so overlay binaries (which link this
 /// crate) and [`AppTransitionHook`] registrants can call it.
-// The `()` error is the transition-driver convention, kept verbatim.
+// The `()` error is the transition-driver convention, kept verbatim. Each
+// erasure logs its cause first (PIDASHCONV-1563), as does the jobs core.
 #[allow(clippy::result_unit_err)]
 pub async fn fire_issue_transition(
     state: &AppState,
@@ -102,11 +103,27 @@ pub async fn fire_issue_transition(
     let (store_deps, _matcher) =
         dispatch_deps_for_ids(state, pool, actor_id, request.issue_id, now_unix_secs)
             .await
-            .map_err(|_| ())?;
+            .map_err(|denial| {
+                // The deps builders warn-log their own storage cause; this
+                // carries the fire it 500s (PIDASHCONV-1563).
+                tracing::error!(
+                    denial = ?denial,
+                    site = "fire-dispatch-deps",
+                    issue_id = %request.issue_id,
+                    "issue transition fire failure"
+                );
+            })?;
     let (preflight_deps, matcher) =
         dispatch_deps_for_ids(state, pool, actor_id, request.issue_id, now_unix_secs)
             .await
-            .map_err(|_| ())?;
+            .map_err(|denial| {
+                tracing::error!(
+                    denial = ?denial,
+                    site = "fire-preflight-deps",
+                    issue_id = %request.issue_id,
+                    "issue transition fire failure"
+                );
+            })?;
     let cloud = state.settings().cloud_agent.clone();
     let drains = TransitionDrains {
         pool: pool.clone(),

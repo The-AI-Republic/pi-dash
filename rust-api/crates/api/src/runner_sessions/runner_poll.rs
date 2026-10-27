@@ -1115,6 +1115,13 @@ impl PubsubStore for PollPubsubStore<'_, '_> {
     }
 }
 
+/// Log a drain-path cause before it erases into `()` (PIDASHCONV-1563):
+/// the transition fire maps `()` to a 500 with no other trace, so the
+/// storage error must land here while it is still in hand.
+fn drain_error<E: std::fmt::Display>(error: E, site: &str, pod_id: &Uuid) {
+    tracing::error!(%error, site, %pod_id, "runner drain failure");
+}
+
 /// Dispatch one [`drain_kernel::DrainEffect`] after commit, logging
 /// the swallowed-failure lines. Only the offline error propagates —
 /// the row stays `ASSIGNED` while the caller observes the failure,
@@ -1128,7 +1135,14 @@ async fn dispatch_assign(
     let drain_kernel::DrainEffect::SendAssign { runner_id, message } = effect;
     let outcome = pubsub_kernel::send_to_runner(&pubsub, *runner_id, message)
         .await
-        .map_err(|_| ())?;
+        .map_err(|error| {
+            tracing::error!(
+                %error,
+                site = "drain-send-assign",
+                %runner_id,
+                "runner drain failure"
+            );
+        })?;
     for warning in &outcome.warnings {
         tracing::warn!("{warning}");
     }
@@ -1233,7 +1247,7 @@ pub(crate) async fn drain_pod_by_id(
         .bind(pod_id)
         .fetch_optional(pool)
         .await
-        .map_err(|_| ())?;
+        .map_err(|error| drain_error(error, "drain-pod-lookup", &pod_id))?;
     if pod.is_none() {
         return Ok(());
     }
@@ -1251,20 +1265,31 @@ async fn drain_pod(
     pod_id: Uuid,
 ) -> Result<(), ()> {
     use sqlx::Row;
-    let mut tx = pool.begin().await.map_err(|_| ())?;
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| drain_error(error, "drain-begin", &pod_id))?;
     let threshold = alive_threshold(now_micros());
     let runners = sqlx::query(drain_kernel::DRAIN_POD_IDLE_RUNNERS_SQL)
         .bind(threshold)
         .bind(pod_id)
         .fetch_all(&mut *tx)
         .await
-        .map_err(|_| ())?;
+        .map_err(|error| drain_error(error, "drain-idle-runners", &pod_id))?;
     let mut plans: Vec<drain_kernel::AssignmentPlan> = Vec::new();
     for runner in &runners {
-        let runner_id: Uuid = runner.try_get(0).map_err(|_| ())?;
-        let owner_id: Uuid = runner.try_get(1).map_err(|_| ())?;
-        let provisioning: String = runner.try_get(7).map_err(|_| ())?;
-        let visibility: i16 = runner.try_get(8).map_err(|_| ())?;
+        let runner_id: Uuid = runner
+            .try_get(0)
+            .map_err(|error| drain_error(error, "drain-runner-row", &pod_id))?;
+        let owner_id: Uuid = runner
+            .try_get(1)
+            .map_err(|error| drain_error(error, "drain-runner-row", &pod_id))?;
+        let provisioning: String = runner
+            .try_get(7)
+            .map_err(|error| drain_error(error, "drain-runner-row", &pod_id))?;
+        let visibility: i16 = runner
+            .try_get(8)
+            .map_err(|error| drain_error(error, "drain-runner-row", &pod_id))?;
         // Non-private runners issue no query (the `qs.none()` arm).
         let Some(next_sql) =
             drain_kernel::next_for_runner_sql(&provisioning, i32::from(visibility))
@@ -1277,15 +1302,29 @@ async fn drain_pod(
             .bind(owner_id)
             .fetch_optional(&mut *tx)
             .await
-            .map_err(|_| ())?;
+            .map_err(|error| drain_error(error, "drain-next-run", &pod_id))?;
         let Some(run) = run else {
             continue;
         };
-        let run_id: Uuid = run.try_get(0).map_err(|_| ())?;
-        let work_item_id: Option<Uuid> = run.try_get(7).map_err(|_| ())?;
-        let prompt: String = run.try_get(19).map_err(|_| ())?;
-        let run_config: Value = run.try_get(23).map_err(|_| ())?;
+        let run_id: Uuid = run
+            .try_get(0)
+            .map_err(|error| drain_error(error, "drain-run-row", &pod_id))?;
+        let work_item_id: Option<Uuid> = run
+            .try_get(7)
+            .map_err(|error| drain_error(error, "drain-run-row", &pod_id))?;
+        let prompt: String = run
+            .try_get(19)
+            .map_err(|error| drain_error(error, "drain-run-row", &pod_id))?;
+        let run_config: Value = run
+            .try_get(23)
+            .map_err(|error| drain_error(error, "drain-run-row", &pod_id))?;
         let Value::Object(run_config) = run_config else {
+            tracing::error!(
+                site = "drain-run-config-shape",
+                %pod_id,
+                %run_id,
+                "runner drain failure"
+            );
             return Err(());
         };
         // `$3` is a fresh `timezone.now()` per assignment (`:233`).
@@ -1296,7 +1335,7 @@ async fn drain_pod(
             .bind(run_id)
             .execute(&mut *tx)
             .await
-            .map_err(|_| ())?;
+            .map_err(|error| drain_error(error, "drain-assign", &pod_id))?;
         plans.push(drain_kernel::plan_assignment(
             &drain_kernel::AssignmentFacts {
                 run_id,
@@ -1308,7 +1347,9 @@ async fn drain_pod(
             },
         ));
     }
-    tx.commit().await.map_err(|_| ())?;
+    tx.commit()
+        .await
+        .map_err(|error| drain_error(error, "drain-commit", &pod_id))?;
     for plan in &plans {
         dispatch_assign(pool, state, &plan.after_commit).await?;
     }
