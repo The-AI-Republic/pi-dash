@@ -65,8 +65,8 @@ export interface BoardReadInput {
   subLabels: ReadonlyMap<string, string>;
   /**
    * Project values the grouped read may leave out (labels, modules,
-   * cycles) so empty groups can still render (ISS-029/038). Shape only:
-   * it never rides in the query key.
+   * cycles, assignees) so empty groups can still render (ISS-029/038).
+   * Shape only: it never rides in the query key.
    */
   groupDomain?: readonly string[] | undefined;
   subDomain?: readonly string[] | undefined;

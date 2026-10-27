@@ -77,7 +77,8 @@ const NO_ROWS: readonly IssueListItem[] = [];
 
 /**
  * Dimensions whose project value list the grouped read can leave out:
- * the server only emits buckets for used labels, modules and cycles.
+ * the server only emits buckets for used labels, modules, cycles and
+ * assignees.
  * With empty groups visible the project's own values join the board, so
  * an unused value still gets its column or lane. The empty-value bucket
  * is synthetic for these dimensions too, because a fully assigned board
@@ -206,8 +207,8 @@ export function flatBoard(response: Pick<IssueListResponse, "results" | "total_c
 /**
  * Sub-group keys in first-seen server order with the empty bucket last.
  * With empty groups visible, a reference-backed sub-group (labels,
- * modules, cycles) also draws its project values and a synthetic empty
- * lane, since the envelope only carries used values.
+ * modules, cycles, assignees) also draws its project values and a
+ * synthetic empty lane, since the envelope only carries used values.
  */
 export function laneKeys(
   response: Pick<SubGroupedIssueListResponse, "results">,
