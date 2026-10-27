@@ -82,7 +82,7 @@ function record(richFilters: Record<string, unknown>): PrefsRecord & Record<stri
 
 function setup(
   richFilters: Record<string, unknown>,
-  options: { hold?: boolean; fail?: boolean; states?: Array<Record<string, unknown>> } = {}
+  options: { hold?: boolean; fail?: boolean; states?: Array<Record<string, unknown>>; strict?: boolean } = {}
 ) {
   const patches: Array<Record<string, unknown>> = [];
   let release = (): void => {};
@@ -127,13 +127,14 @@ function setup(
     );
   }
 
-  render(
+  const tree = (
     <QueryClientProvider client={queryClient}>
       <IssuesLoaderProvider>
         <Harness />
       </IssuesLoaderProvider>
     </QueryClientProvider>
   );
+  render(options.strict === true ? <React.StrictMode>{tree}</React.StrictMode> : tree);
   return { patches, release, hold: options.hold === true, queryClient };
 }
 
@@ -258,6 +259,21 @@ describe("rich filter builder populated state", () => {
     expect(screen.getByTestId("rich-filter-toggle")).toHaveAttribute("aria-pressed", "false");
     await user.click(screen.getByTestId("rich-filter-toggle"));
     expect(screen.getByTestId("rich-filter-row")).toBeInTheDocument();
+  });
+
+  it("keeps the header toggle working after a StrictMode mount replay", async () => {
+    // The dev app (and the parity stack) render inside StrictMode, which
+    // mounts, runs cleanup, and mounts again. The state-based builder must
+    // survive that replay: the old app's registry HOC lost its instance
+    // here and the toggle went dead (NEWFRONT-146).
+    const user = userEvent.setup();
+    setup({ priority__in: "none" }, { strict: true });
+    expect(screen.getByTestId("rich-filter-toggle")).toHaveAttribute("aria-pressed", "true");
+    await user.click(screen.getByTestId("rich-filter-toggle"));
+    expect(screen.queryByTestId("rich-filter-row")).not.toBeInTheDocument();
+    await user.click(screen.getByTestId("rich-filter-toggle"));
+    expect(screen.getByTestId("rich-filter-row")).toBeInTheDocument();
+    expect(screen.getAllByTestId("rich-condition")).toHaveLength(1);
   });
 
   it("removes only the chosen condition and patches the rest", async () => {

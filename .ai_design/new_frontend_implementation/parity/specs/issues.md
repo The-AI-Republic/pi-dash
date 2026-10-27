@@ -615,10 +615,15 @@ The condition-row builder header toggle (ISS-096) doubles as the entry
 point: with no conditions and nothing unsaved it reads as an add
 control opening the field picker; otherwise it shows or hides the
 builder row, switching to an accented icon while conditions exist or
-the view has unsaved edits. The oracle pins NEWFRONT-146 (the toggle
-inert in both directions, so the row follows the stored expression
-instead — a non-empty expression shows it on load and clearing the
-last condition hides it); slices build the working toggle. Oracle:
+the view has unsaved edits. The dev-server oracle pins NEWFRONT-146:
+there the toggle is inert in both directions, because the old filter
+HOC registers its per-entity instance in a side-effectful memo and an
+unmount cleanup deletes it, so StrictMode's simulated unmount empties
+the registry for good. The production oracle, which is the default,
+has no strict double-effects and the toggle works, so the row states
+are proven there with seeded expressions (a non-empty expression
+shows the row on load and clearing the last condition hides it) and
+the same scenario holds on both builds. Oracle:
 `filters-rich.spec.ts`.
 
 Each condition (ISS-097) is a three-part pill: the field (clicking

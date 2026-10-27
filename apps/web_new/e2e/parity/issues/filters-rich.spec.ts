@@ -11,12 +11,19 @@
 // app (extend, never fork).
 //
 // REVEAL PATTERN (verified live): the row renders only while the stored
-// expression is non-empty — the header toggle cannot conjure it from an
-// empty store (NEWFRONT-146). Every scenario therefore seeds an expression
+// expression is non-empty. Every scenario therefore seeds an expression
 // through the API, then opens the list; the row is already there and the
 // scenario drives it from that point. The seeded Priority=None expression
 // keeps every seed issue (all three carry priority "none"); the seeded
 // Urgent expression matches nothing and proves AND-join behavior.
+//
+// NEWFRONT-146 is dev-oracle-only. On the dev-server oracle the header
+// toggle is inert: the old filter HOC creates its per-entity instance in
+// a side-effectful memo and an unmount cleanup deletes it, so StrictMode's
+// simulated unmount leaves the registry empty. The production oracle (the
+// default) has no strict double-effects and the toggle works, so the
+// scenario below proves the row states through seeded expressions and is
+// green on both builds.
 import { test, expect } from "../fixtures";
 import {
   createProjectView,
@@ -156,13 +163,14 @@ test(
   specTitle(TOGGLE_ROWS, "bug: header toggle is inert; the row follows the expression (NEWFRONT-146)"),
   { tag: specTags(TOGGLE_ROWS) },
   async ({ driver, seed }) => {
-    // The row wants the header toggle to show/hide the row; the oracle's
-    // toggle does nothing in either direction (146), so the row follows
-    // the stored expression instead: a seeded expression shows it and
-    // clearing the last condition hides it.
+    // The row follows the stored expression: a seeded expression shows it
+    // and clearing the last condition hides it. A hide/show round trip
+    // through the header toggle leaves it visible. On the dev oracle the
+    // toggle does nothing at all (NEWFRONT-146); on the production oracle
+    // it hides and shows the row, so the round trip holds either way.
     await revealRichRow(driver, seed, REVEAL_KEEP_ALL);
 
-    await test.step("the seeded expression shows the row; the toggle leaves it", async () => {
+    await test.step("the seeded expression shows the row; a toggle round trip leaves it", async () => {
       expect(await driver.richConditionCount()).toBe(1);
       const row = await driver.richFilterRowText();
       expect(row).toContain("Priority");
