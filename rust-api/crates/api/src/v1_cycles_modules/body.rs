@@ -35,12 +35,11 @@
 //! `body_decoders` (same URL paths, same JSON, same SQL semantics).
 
 use axum::http::HeaderMap;
+use pidash_types::html_entities::html_unescape_strict;
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 
-use super::sanitize_data::{
-    HTML5_ENTITIES, INVALID_CHARREFS, INVALID_CODEPOINT_RANGES, NONPRINTABLE_RANGES,
-};
+use super::sanitize_data::NONPRINTABLE_RANGES;
 
 /// Per-domain HTML-input shape: which form/multipart keys arrive as arrays
 /// (DRF `ListField.get_value` → `getlist`) and which scalar fields treat a
@@ -1787,7 +1786,7 @@ fn binascii_b64decode(data: &[u8]) -> Result<Vec<u8>, ()> {
 /// (the `int()` digit cap, 3.11+), which Django lets escape as the generic
 /// 500; that surfaces here as `Err(BodyError::ServerError)`.
 fn sanitize_file_name(name: &str) -> Result<Option<String>, BodyError> {
-    let name = html_unescape(name)?;
+    let name = html_unescape_strict(name).map_err(|_| BodyError::ServerError)?;
     let name = name.rsplit('/').next().unwrap_or("");
     let name = name.rsplit('\\').next().unwrap_or("");
     let name: String = name.chars().filter(|c| is_printable(*c)).collect();
@@ -1824,152 +1823,6 @@ fn splitext_no_sep(name: &str) -> (&str, &str) {
         }
     }
     (name, "")
-}
-
-/// `html.unescape` (`CPython/Lib/html/__init__.py`): the
-/// `&(#[0-9]+;?|#[xX][0-9a-fA-F]+;?|[^\t\n\x0C <&#;]{1,32};?)` scan with
-/// the html5 table (`sanitize_data`), the WHATWG invalid-ref rules, and
-/// the decimal digit-cap error. Every slice below cuts at ASCII matches,
-/// so byte offsets are always char boundaries.
-fn html_unescape(text: &str) -> Result<String, BodyError> {
-    if !text.contains('&') {
-        return Ok(text.to_owned());
-    }
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(amp) = rest.find('&') {
-        out.push_str(&rest[..amp]);
-        rest = &rest[amp..];
-        match match_charref(rest)? {
-            Some((replacement, consumed)) => {
-                out.push_str(&replacement);
-                rest = &rest[consumed..];
-            }
-            None => {
-                out.push('&');
-                rest = &rest[1..];
-            }
-        }
-    }
-    out.push_str(rest);
-    Ok(out)
-}
-
-/// One `_charref` match at `&...`: `Some((replacement, bytes))` when the
-/// regex matches (even when the replacement is the literal text — CPython
-/// consumes the group either way), `None` when it does not match, `Err`
-/// on the decimal digit-cap `ValueError`.
-fn match_charref(text: &str) -> Result<Option<(String, usize)>, BodyError> {
-    debug_assert!(text.starts_with('&'));
-    let after = &text[1..];
-    if let Some(body) = after.strip_prefix('#') {
-        return match_numeric_ref(body);
-    }
-    // Named ref: 1..=32 class chars (counted in chars, like the `re`
-    // engine), then one optional `;`.
-    let mut end = 1;
-    let mut count = 0;
-    for (offset, c) in after.char_indices() {
-        if count == 32 || !is_charref_char(c) {
-            break;
-        }
-        count += 1;
-        end = 1 + offset + c.len_utf8();
-    }
-    if count == 0 {
-        return Ok(None);
-    }
-    let mut group = &text[1..end];
-    let mut consumed = end;
-    if text[end..].starts_with(';') {
-        group = &text[1..end + 1];
-        consumed = end + 1;
-    }
-    Ok(Some((replace_named_ref(group), consumed)))
-}
-
-/// The named-ref class `[^\\t\\n\\f <&#;]` (note: `\r` and non-ASCII pass).
-fn is_charref_char(c: char) -> bool {
-    !matches!(c, '\t' | '\n' | '\x0C' | ' ' | '<' | '&' | '#' | ';')
-}
-
-/// `_replace_charref` named arm: the full key, then the longest `len >= 2`
-/// prefix in the table (the remainder stays literal), else the literal
-/// text. The prefix fallback also applies to `;`-terminated groups
-/// (`&notanentity;` → `¬anentity;`).
-fn replace_named_ref(group: &str) -> String {
-    if let Some(hit) = lookup_entity(group) {
-        return hit.to_owned();
-    }
-    let chars: Vec<char> = group.chars().collect();
-    for end in (2..chars.len()).rev() {
-        let prefix: String = chars[..end].iter().collect();
-        if let Some(hit) = lookup_entity(&prefix) {
-            let rest: String = chars[end..].iter().collect();
-            return format!("{hit}{rest}");
-        }
-    }
-    format!("&{group}")
-}
-
-fn lookup_entity(key: &str) -> Option<&'static str> {
-    HTML5_ENTITIES
-        .binary_search_by(|probe| probe.0.cmp(key))
-        .ok()
-        .map(|index| HTML5_ENTITIES[index].1)
-}
-
-/// The numeric alternatives `#[0-9]+;?` / `#[xX][0-9a-fA-F]+;?`; `body` is
-/// the text after `&#`. All-ASCII, so byte offsets are char boundaries.
-fn match_numeric_ref(body: &str) -> Result<Option<(String, usize)>, BodyError> {
-    let (hex, digits) = match body.strip_prefix(['x', 'X']) {
-        Some(rest) => (true, rest),
-        None => (false, body),
-    };
-    let is_digit = |b: &u8| {
-        if hex {
-            b.is_ascii_hexdigit()
-        } else {
-            b.is_ascii_digit()
-        }
-    };
-    let digit_len = digits.bytes().take_while(is_digit).count();
-    if digit_len == 0 {
-        return Ok(None);
-    }
-    let mut consumed = 2 + digit_len + usize::from(hex);
-    if digits[digit_len..].starts_with(';') {
-        consumed += 1;
-    }
-    let digits = &digits[..digit_len];
-    // CPython converts the full digit run with `int()`: more than 4300
-    // decimal digits raises `ValueError` (the count, not the value —
-    // 5000 zeros raise too). Hex parsing is linear-time and unbounded.
-    if !hex && digits.len() > 4300 {
-        return Err(BodyError::ServerError);
-    }
-    let radix = if hex { 16 } else { 10 };
-    let value = u64::from_str_radix(digits, radix).unwrap_or(u64::MAX);
-    Ok(Some((replace_numeric_ref(value), consumed)))
-}
-
-/// `_replace_charref` numeric arm: the remap table first (it shadows the
-/// codepoint set on 0x80-0x9F), then surrogates/out-of-range → U+FFFD,
-/// then invalid codepoints → the empty string, else the char.
-fn replace_numeric_ref(value: u64) -> String {
-    if value <= 0x9F {
-        if let Ok(index) = INVALID_CHARREFS.binary_search_by(|probe| (probe.0 as u64).cmp(&value)) {
-            return INVALID_CHARREFS[index].1.to_owned();
-        }
-    }
-    if value > 0x10FFFF || (0xD800..0xE000).contains(&value) {
-        return "\u{FFFD}".to_owned();
-    }
-    let value = value as u32;
-    if in_ranges(value, INVALID_CODEPOINT_RANGES) {
-        return String::new();
-    }
-    char::from_u32(value).map_or_else(|| "\u{FFFD}".to_owned(), |c| c.to_string())
 }
 
 /// CPython `str.isprintable` per char: false exactly on general categories
@@ -3026,103 +2879,6 @@ mod codec_tests {
     }
 
     #[test]
-    fn filename_sanitize_exact_table() {
-        // Every html5 key resolves to its value (table integrity; live
-        // Django agreement is pinned by the contract suite).
-        for (key, value) in HTML5_ENTITIES.iter() {
-            assert_eq!(html_unescape(&format!("&{key}")).unwrap(), *value, "{key}");
-        }
-        // Legacy no-semicolon forms resolve; non-legacy names stay literal.
-        for (entity, expected) in [
-            ("&amp", "&"),
-            ("&lt", "<"),
-            ("&gt", ">"),
-            ("&quot", "\""),
-            ("&nbsp", "\u{A0}"),
-            ("&copy", "©"),
-            ("&reg", "®"),
-            ("&not", "¬"),
-            ("&apos", "&apos"),
-            ("&hellip", "&hellip"),
-            ("&mdash", "&mdash"),
-            ("&sol", "&sol"),
-        ] {
-            assert_eq!(&html_unescape(entity).unwrap(), expected, "{entity}");
-        }
-        // Longest-prefix fallback, also for `;`-terminated groups.
-        for (entity, expected) in [
-            ("&ampx", "&x"),
-            ("&notanentity;", "¬anentity;"),
-            ("&foobar;", "&foobar;"),
-            ("&", "&"),
-            ("&;", "&;"),
-            ("&&amp;", "&&"),
-            ("&am\rp;", "&am\rp;"),
-        ] {
-            assert_eq!(&html_unescape(entity).unwrap(), expected, "{entity:?}");
-        }
-        // Past the 32-char greedy window the match cannot reach `;`.
-        let long = format!("&{};b", "a".repeat(40));
-        assert_eq!(&html_unescape(&long).unwrap(), &long);
-    }
-
-    #[test]
-    fn filename_sanitize_exact_numeric() {
-        for (entity, expected) in [
-            ("&#65", "A"),
-            ("&#65;", "A"),
-            ("&#00065;", "A"),
-            ("&#X41;", "A"),
-            ("&#x41;", "A"),
-            ("&#x80;", "€"),
-            ("&#128;", "€"),
-            ("&#13;", "\r"),
-            ("&#0;", "\u{FFFD}"),
-            ("&#xD800;", "\u{FFFD}"),
-            ("&#xDFFF;", "\u{FFFD}"),
-            ("&#x110000;", "\u{FFFD}"),
-            ("&#99999999999999999999999999;", "\u{FFFD}"),
-            ("&#x1;", ""),
-            ("&#xB;", ""),
-            ("&#xC;", "\u{C}"),
-            ("&#x1F;", ""),
-            ("&#x7F;", ""),
-            ("&#xFDD0;", ""),
-            ("&#xFFFE;", ""),
-            ("&#x10FFFF;", ""),
-            ("&#;", "&#;"),
-            ("&#x;", "&#x;"),
-            ("&#xg;", "&#xg;"),
-        ] {
-            assert_eq!(&html_unescape(entity).unwrap(), expected, "{entity}");
-        }
-        // The full WHATWG remap table.
-        for (value, expected) in INVALID_CHARREFS.iter() {
-            for entity in [format!("&#{value};"), format!("&#x{value:X};")] {
-                assert_eq!(html_unescape(&entity).unwrap(), *expected, "{entity}");
-            }
-        }
-        // The decimal digit cap is a count, not a value (CPython 3.11+).
-        assert_eq!(
-            &html_unescape(&format!("&#{};", "9".repeat(4300))).unwrap(),
-            "\u{FFFD}"
-        );
-        assert_eq!(
-            html_unescape(&format!("&#{};", "9".repeat(4301))).unwrap_err(),
-            BodyError::ServerError
-        );
-        assert_eq!(
-            html_unescape(&format!("&#{};", "0".repeat(5000))).unwrap_err(),
-            BodyError::ServerError
-        );
-        // Hex parsing is unbounded.
-        assert_eq!(
-            &html_unescape(&format!("&#x{};", "F".repeat(5000))).unwrap(),
-            "\u{FFFD}"
-        );
-    }
-
-    #[test]
     fn filename_sanitize_exact_order_and_printable() {
         let san = |name: &str| sanitize_file_name(name).unwrap();
         // Unescape runs BEFORE the strip: decoded separators still strip.
@@ -3150,7 +2906,7 @@ mod codec_tests {
         // The digit cap is unreachable via multipart: headers past the
         // 1024-byte window are RAW-skipped (`parse_boundary_stream`,
         // Django 4.2.30), so a 4301-digit ref never reaches `sanitize`
-        // (the cap itself is covered unit-only above, like R5a).
+        // (the cap itself is pinned in `pidash-types`, like R5a).
         let ct = "multipart/form-data; boundary=----b";
         let nines = "9".repeat(4301);
         let bad = [
@@ -3166,6 +2922,23 @@ mod codec_tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn filename_sanitize_digit_cap_maps_to_server_error() {
+        // The strict shared unescape reports the 4300-digit `ValueError`;
+        // sanitize maps it to the generic 500 (the full table, numeric
+        // and cap vectors moved to `pidash-types` with the code).
+        let over = format!("&#{};", "9".repeat(4301));
+        assert_eq!(
+            sanitize_file_name(&over).unwrap_err(),
+            BodyError::ServerError
+        );
+        let at_cap = format!("&#{};", "9".repeat(4300));
+        assert_eq!(
+            sanitize_file_name(&at_cap).unwrap(),
+            Some("\u{FFFD}".to_owned())
+        );
     }
 
     #[test]
