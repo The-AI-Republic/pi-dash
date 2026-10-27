@@ -169,6 +169,15 @@ function monthHighlightDeadDay(startOfWeek: number): boolean {
   return (new Date().getDay() + 7 - startOfWeek) % 7 === 6;
 }
 
+/**
+ * Month's today-week highlight as each target should render it: the old
+ * app still has the NEWFRONT-163 timestamp bug and drops it on the week's
+ * last day; the new app intentionally marks the week every day.
+ */
+function monthTodayHighlighted(target: string, startOfWeek: number): boolean {
+  return target === "web_new" ? true : !monthHighlightDeadDay(startOfWeek);
+}
+
 test(
   specTitle(["ISS-044"], "gantt timeline layout with sidebar and bars"),
   { tag: specTags(["ISS-044"]) },
@@ -296,12 +305,15 @@ test(
     });
 
     await test.step("every zoom highlights the current column", async () => {
-      // NEWFRONT-163: the Month week highlight is missing on the week's
-      // last day; Quarter marks the current month every day.
-      const deadDay = monthHighlightDeadDay(await serverProfileStartOfWeek(ctx.user.cookie));
+      // NEWFRONT-163: the oracle drops Month's week highlight on the
+      // week's last day; the new app marks the week every day. Quarter
+      // marks the current month every day on both.
+      const weekStart = await serverProfileStartOfWeek(ctx.user.cookie);
       for (const zoom of ["Month", "Quarter"] as const) {
         await driver.ganttSetZoom(zoom);
-        expect(await driver.ganttTodayHighlighted()).toBe(zoom === "Month" ? !deadDay : true);
+        expect(await driver.ganttTodayHighlighted()).toBe(
+          zoom === "Month" ? monthTodayHighlighted(driver.target, weekStart) : true
+        );
       }
     });
 
@@ -312,17 +324,19 @@ test(
 );
 
 test(
-  specTitle(["ISS-046"], "bug: month zoom drops the today highlight on the week's last day (NEWFRONT-163)"),
+  specTitle(["ISS-046"], "month zoom marks the today week every day (NEWFRONT-163 fixed)"),
   { tag: specTags(["ISS-046"]) },
   async ({ driver, seed }) => {
     const ctx = await openTimeline(driver, seed, seed.projectId);
     await expect.poll(() => driver.ganttSidebarRows(), { timeout: 120_000 }).toHaveLength(3);
-    const deadDay = monthHighlightDeadDay(await serverProfileStartOfWeek(ctx.user.cookie));
+    const weekStart = await serverProfileStartOfWeek(ctx.user.cookie);
 
-    await test.step("month marks today except on the dead day", async () => {
+    await test.step("month marks today's week on every day of the week", async () => {
       await driver.ganttSetZoom("Month");
       expect(await driver.ganttActiveZoom()).toBe("Month");
-      expect(await driver.ganttTodayHighlighted()).toBe(!deadDay);
+      // The oracle still drops this highlight on the week's last day
+      // (NEWFRONT-163); the new app implements the intended behavior.
+      expect(await driver.ganttTodayHighlighted()).toBe(monthTodayHighlighted(driver.target, weekStart));
     });
 
     await test.step("cleanup restores the seed preferences", async () => {

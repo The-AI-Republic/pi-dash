@@ -397,10 +397,13 @@ start day comes from the user profile. Week is the initial level.
 Today (ISS-046) re-renders the current zoom and scrolls today into
 view, landing just right of center; the current-date column is
 highlighted in every zoom, and mounting the chart auto-centers today.
-The oracle pins NEWFRONT-163 (at Month zoom the today-week highlight
-vanishing on the week's last day); intended, the week containing today
-stays highlighted every day. The expand control moves the chart into a
-full-screen portal overlay and the shrink control returns it inline
+NEWFRONT-163 fixed the old app's Month bug (its today-week highlight
+vanished on the week's last day because the week flag compared full
+timestamps against a midnight end date): the week containing today stays
+highlighted every day on `web_new`, and the scenario asserts that while
+the oracle leg still pins the old day-aware behavior. The expand control
+moves the chart into a full-screen portal overlay and the shrink control
+returns it inline
 (ISS-047). Scrolling near either horizontal edge appends the adjacent
 date range and grows the chart without bound (ISS-048); prepending on
 the left preserves the scroll position. Oracle:
