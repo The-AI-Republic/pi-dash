@@ -29668,6 +29668,13 @@ export class WebNewDriver implements ParityDriver {
     }
     return true;
   }
+  async pagesToolbarTableClickCell(row: number, col: number): Promise<void> {
+    await this.page
+      .locator(`.editor-container [contenteditable="true"] table tr:nth-child(${row + 1}) > :nth-child(${col + 1})`)
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+  }
+
   async pagesToolbarImageUpload(filePath: string): Promise<void> {
     const [chooser] = await Promise.all([
       this.page.waitForEvent("filechooser", { timeout: WebNewDriver.WAIT_MS }),

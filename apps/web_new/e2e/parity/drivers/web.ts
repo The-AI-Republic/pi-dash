@@ -40171,6 +40171,15 @@ export class WebDriver implements ParityDriver {
     return true;
   }
 
+  async pagesToolbarTableClickCell(row: number, col: number): Promise<void> {
+    await this.page
+      .locator(
+        `.frame-renderer > .editor-container [contenteditable="true"] table tr:nth-child(${row + 1}) > :nth-child(${col + 1})`
+      )
+      .first()
+      .click({ timeout: WebDriver.OPEN_MS });
+  }
+
   async pagesToolbarImageUpload(filePath: string): Promise<void> {
     const [chooser] = await Promise.all([
       this.page.waitForEvent("filechooser", { timeout: WebDriver.OPEN_MS }),

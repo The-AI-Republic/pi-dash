@@ -756,12 +756,16 @@ test(
       await expect.poll(() => driver.pagesToolbarTableDims(), { timeout: 15_000 }).toBe("3x3");
       expect((await driver.pagesToolbarBodyHtml()).split("col-me").length).toBe(2);
 
-      // Tab still walks the cells after restructuring.
-      const first = await driver.pagesToolbarCaretCell();
+      // Tab still walks the cells after restructuring. The menu
+      // actions leave a range selection behind (at least in the old
+      // editor), under which Tab is inert — click a cell first to
+      // re-anchor a collapsed caret, then prove the walk both ways.
+      await driver.pagesToolbarTableClickCell(0, 0);
+      expect(await driver.pagesToolbarCaretCell()).toBe("r0c0");
       await driver.pagesToolbarPressKey("Tab");
-      const second = await driver.pagesToolbarCaretCell();
-      expect(second).toMatch(/^r\d+c\d+$/);
-      expect(second).not.toBe(first);
+      expect(await driver.pagesToolbarCaretCell()).toBe("r0c1");
+      await driver.pagesToolbarPressKey("Shift+Tab");
+      expect(await driver.pagesToolbarCaretCell()).toBe("r0c0");
 
       // A painted background covers the selected row and survives save
       // plus reload; clearing takes it back off.

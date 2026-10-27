@@ -7516,6 +7516,8 @@ export interface ParityDriver {
   pagesToolbarTableCellBackground(row: number, col: number): Promise<string | null>;
   /** Whether a table handle appears for the first body-table row/column (PAGE-091). */
   pagesToolbarTableHandleVisible(): Promise<boolean>;
+  /** Click one body-table cell to re-anchor a collapsed caret there (PAGE-091). */
+  pagesToolbarTableClickCell(row: number, col: number): Promise<void>;
   /** Insert an image through the toolbar entry and upload `filePath`. */
   pagesToolbarImageUpload(filePath: string): Promise<void>;
   /** Whether the body holds an uploaded (asset-URL) image. */
