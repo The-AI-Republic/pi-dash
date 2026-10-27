@@ -131,6 +131,7 @@ use crate::state::AppState;
 use crate::v1_projects::handlers_project::{preamble, project_base_facts, rewrite_project_id};
 
 use super::perms::{decide, gate_for, V1WorkItemsRoute};
+use pidash_compat::db::is_unique_violation;
 
 // ---------------------------------------------------------------------------
 // Responses
@@ -695,15 +696,6 @@ async fn fetch_project_workspace(
 fn is_fk_violation(error: &sqlx::Error) -> bool {
     match error {
         sqlx::Error::Database(db) => db.code().as_deref() == Some("23503"),
-        _ => false,
-    }
-}
-
-/// Whether a sqlx failure is a unique violation (the relate race:
-/// `IntegrityError` → re-read the pair).
-fn is_unique_violation(error: &sqlx::Error) -> bool {
-    match error {
-        sqlx::Error::Database(db) => db.code().as_deref() == Some("23505"),
         _ => false,
     }
 }

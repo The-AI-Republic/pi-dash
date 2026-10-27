@@ -106,6 +106,7 @@ use crate::app_issues::{query_last, Denial, QueryMap};
 use crate::serializer::render_datetime_in;
 use crate::state::AppState;
 use crate::v1_projects::tz_zones::PYTZ_COMMON_TIMEZONES;
+use pidash_compat::db::{is_integrity_error, is_unique_violation};
 
 /// `workspace-slug-check/` (`urls/workspace.py:45-49`, W01).
 pub const SLUG_CHECK_PATH: &str = "/api/workspace-slug-check/";
@@ -3398,29 +3399,6 @@ pub(crate) fn format_csv_datetime(instant: &chrono::DateTime<chrono::Utc>, _zone
 // ---------------------------------------------------------------------------
 // Integrity mapping (`handle_exception`, create's own `except`)
 // ---------------------------------------------------------------------------
-
-/// Whether a sqlx failure is a Postgres integrity error (the
-/// `IntegrityError` umbrella: unique 23505, FK 23503, check 23514,
-/// not-null 23502).
-fn is_integrity_error(error: &sqlx::Error) -> bool {
-    matches!(
-        error
-            .as_database_error()
-            .and_then(|db| db.code())
-            .as_deref(),
-        Some("23505" | "23503" | "23514" | "23502")
-    )
-}
-
-fn is_unique_violation(error: &sqlx::Error) -> bool {
-    matches!(
-        error
-            .as_database_error()
-            .and_then(|db| db.code())
-            .as_deref(),
-        Some("23505")
-    )
-}
 
 /// Stock `get_object` miss: `get_object_or_404` raises `Http404("No <Model>
 /// matches the given query.")`, rewrapped by DRF as `NotFound` — 404

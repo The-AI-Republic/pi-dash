@@ -116,6 +116,7 @@ use crate::state::AppState;
 use pidash_auth::permissions::allow::AllowFacts;
 use pidash_auth::permissions::project::ProjectFacts;
 use pidash_auth::permissions::{ROLE_ADMIN, ROLE_MEMBER};
+use pidash_compat::db::is_integrity_error;
 use pidash_services::app_project::ser_member::{
     invite_to_representation, project_lite_to_representation, resolve_project_cover_image_url,
     resolve_workspace_logo_url, workspace_lite_to_representation, ProjectLiteRow,
@@ -357,17 +358,6 @@ fn gate_denial(outcome: GateOutcome, class_gate: bool) -> Denial {
             }
         }
         GateOutcome::Unauthenticated => Denial::Unauthorized,
-    }
-}
-
-/// Whether a sqlx failure is an integrity-constraint (`23xxx`) failure.
-fn is_integrity_error(err: &sqlx::Error) -> bool {
-    match err {
-        sqlx::Error::Database(db) => db
-            .code()
-            .as_deref()
-            .is_some_and(|code| code.starts_with("23")),
-        _ => false,
     }
 }
 

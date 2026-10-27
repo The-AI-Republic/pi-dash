@@ -92,6 +92,7 @@ use crate::space::sanitize::{sanitize_html, Sanitize};
 use crate::state::AppState;
 use crate::uuid_path::{classify_uuid_segment, UuidSegment};
 use crate::v1_cycles_modules::cycle as cycle_mod;
+use pidash_compat::db::{is_integrity_error, is_unique_violation};
 use pidash_db::v1_assets::model::sticky::strip_tags_ml;
 
 // ---------------------------------------------------------------------------
@@ -303,13 +304,6 @@ fn page_denial(error: crate::paginator::PageError) -> Denial {
 /// `handle_exception` branch).
 fn cycle_denial(_error: cycle_mod::Denial) -> Denial {
     Denial::ServerError
-}
-
-/// True for Postgres unique-violation errors (SQLSTATE 23505): the
-/// triage-creation race Django's `handle_exception` maps to the
-/// `IntegrityError` 400 (`base.py:136-140`).
-fn is_unique_violation(error: &sqlx::Error) -> bool {
-    matches!(error, sqlx::Error::Database(db) if db.code().as_deref() == Some("23505"))
 }
 
 // ---------------------------------------------------------------------------
@@ -3784,15 +3778,6 @@ async fn replace_links(
         }
     }
     Ok(())
-}
-
-/// Postgres integrity errors (unique + FK + not-null + check): the
-/// family Django surfaces as `IntegrityError`.
-fn is_integrity_error(error: &sqlx::Error) -> bool {
-    matches!(error, sqlx::Error::Database(db) if matches!(
-        db.code().as_deref(),
-        Some("23505" | "23503" | "23502" | "23514")
-    ))
 }
 
 /// Apply an issue-half patch: link replacement, `updated_at` stamp,

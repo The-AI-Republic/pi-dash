@@ -606,45 +606,14 @@ fn group_member_selects(group_by: Option<&str>, sub_group_by: Option<&str>) -> S
     out
 }
 
-/// Bind a `sea_query::Value` vec to raw SQL (same mapping as the D-26
-/// `bind_all`, over this endpoint's placeholders).
+/// Bind a `sea_query::Value` vec to raw SQL, over this endpoint's
+/// placeholders. The mapping is the canonical `pidash_compat::db`
+/// binder (OVL-04); this wrapper only maps its error to the local 500.
 fn bind_values<'a>(
     sql: &'a str,
     values: Vec<sea_query::Value>,
 ) -> Result<sqlx::query::Query<'a, Postgres, sqlx::postgres::PgArguments>, Denial> {
-    use sea_query::Value as SeaValue;
-    let mut query = sqlx::query(sql);
-    for value in &values {
-        query = match value {
-            SeaValue::Bool(value) => query.bind(*value),
-            SeaValue::TinyInt(value) => query.bind(*value),
-            SeaValue::SmallInt(value) => query.bind(*value),
-            SeaValue::Int(value) => query.bind(*value),
-            SeaValue::BigInt(value) => query.bind(*value),
-            SeaValue::TinyUnsigned(value) => query.bind(value.map(i16::from)),
-            SeaValue::SmallUnsigned(value) => query.bind(value.map(i32::from)),
-            SeaValue::Unsigned(value) => query.bind(value.map(|v| v as i64)),
-            SeaValue::BigUnsigned(value) => query.bind(value.map(|v| v as i64)),
-            SeaValue::Float(value) => query.bind(*value),
-            SeaValue::Double(value) => query.bind(*value),
-            SeaValue::String(value) => query.bind(value.clone().map(|text| *text)),
-            SeaValue::Char(value) => query.bind(value.map(|char| char.to_string())),
-            SeaValue::Bytes(value) => query.bind(value.clone().map(|bytes| (*bytes).clone())),
-            SeaValue::Uuid(value) => query.bind(value.clone().map(|id| *id)),
-            SeaValue::ChronoDate(value) => query.bind(value.clone().map(|date| *date)),
-            SeaValue::ChronoDateTimeUtc(value) => query.bind(value.clone().map(|moment| *moment)),
-            SeaValue::ChronoTime(_)
-            | SeaValue::ChronoDateTime(_)
-            | SeaValue::ChronoDateTimeLocal(_)
-            | SeaValue::ChronoDateTimeWithTimeZone(_)
-            // `Json` / `Array` exist only because ORM-01 enables
-            // `sea-query/with-json` workspace-wide (via sea-orm); this
-            // compiler emits scalars, never them.
-            | SeaValue::Json(_)
-            | SeaValue::Array(_, _) => return Err(Denial::ServerError),
-        };
-    }
-    Ok(query)
+    pidash_compat::db::bind_all(sql, values).map_err(|_| Denial::ServerError)
 }
 
 /// Filtered `FROM … WHERE` for the module-issue list (`issue.py:97-107`):

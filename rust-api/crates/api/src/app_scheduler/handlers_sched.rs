@@ -74,6 +74,7 @@ use super::gate::{self, Gate};
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
 use crate::uuid_path::{classify_uuid_segment, UuidSegment};
+use pidash_compat::db::is_integrity_error;
 
 // ---------------------------------------------------------------------------
 // Exact bodies
@@ -669,16 +670,6 @@ async fn read_json_body(req: Request) -> Result<Value, Denial> {
         return Ok(Value::Object(Map::new()));
     }
     serde_json::from_slice(&bytes).map_err(|_| Denial::BadDetail(JSON_PARSE_ERROR.to_owned()))
-}
-
-/// Whether a sqlx failure is an integrity violation (unique, FK,
-/// not-null, check — SQLSTATE class `23`), which Django's
-/// `handle_exception` answers 400 for (`app_pages` precedent).
-fn is_integrity_error(error: &sqlx::Error) -> bool {
-    error
-        .as_database_error()
-        .and_then(|db| db.code())
-        .is_some_and(|code| code.starts_with("23"))
 }
 
 /// `GET /api/workspaces/<slug>/schedulers/` (`views.py:55-72`): any

@@ -103,6 +103,7 @@ use crate::v1_cycles_modules::body as shared_body;
 use crate::v1_cycles_modules::json::{
     parse_request_data, JObject, JStr, JVal, JsonFail, JSON_PARSE_PREFIX,
 };
+use pidash_compat::db::is_unique_violation;
 
 /// Collection path (`app/urls/api.py:10-14`).
 pub const API_TOKENS_PATH: &str = "/api/users/api-tokens/";
@@ -1845,13 +1846,6 @@ fn model_expired_at(text: &str) -> Result<Option<DateTime<Utc>>, Response> {
             None => Err(invalid()),
         },
     }
-}
-
-fn is_unique_violation(error: &sqlx::Error) -> bool {
-    error
-        .as_database_error()
-        .and_then(|db| db.code())
-        .is_some_and(|code| code.as_ref() == "23505")
 }
 
 /// `patch` (`api.py:56-72`): scoped `.first()` (a miss is the bare

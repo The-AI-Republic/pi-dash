@@ -68,6 +68,7 @@ use super::{
     view_response, DaemonRunner, LivePorts, RunnerPorts, ALLOW_RUN_DAEMON,
 };
 use crate::state::AppState;
+use pidash_compat::db::is_unique_violation;
 
 // ---------------------------------------------------------------------------
 // Pure frame helpers (unit-tested against FX-RUN-09)
@@ -579,14 +580,6 @@ pub async fn record_dedupe(
             }
         }
     }
-}
-
-/// Whether a sqlx error is a unique violation (SQLSTATE 23505).
-fn is_unique_violation(error: &sqlx::Error) -> bool {
-    error
-        .as_database_error()
-        .and_then(|db| db.code())
-        .is_some_and(|code| code == "23505")
 }
 
 // ---------------------------------------------------------------------------

@@ -126,6 +126,7 @@ use pidash_services::v1_work_items::{filter_fields, FieldSpec};
 use super::perms::{check_can_archive, decide, gate_for, ArchiveDecision, V1WorkItemsRoute};
 use crate::state::AppState;
 use ego_tree::NodeRef;
+use pidash_compat::db::is_integrity_error;
 use pulldown_cmark::{
     CodeBlockKind, CowStr, Event, HeadingLevel, LinkType, Options, Parser, Tag, TagEnd,
 };
@@ -322,18 +323,6 @@ async fn enqueue_best_effort(
     );
     if let Err(error) = pidash_jobs::queue::enqueue(pool, &job).await {
         tracing::warn!(%error, task, "task enqueue failed; response stands");
-    }
-}
-
-/// A Postgres integrity failure (`IntegrityError` in Python): any `23xxx`
-/// SQLSTATE (unique, FK, not-null, check).
-fn is_integrity_error(error: &sqlx::Error) -> bool {
-    match error {
-        sqlx::Error::Database(db) => db
-            .code()
-            .as_deref()
-            .is_some_and(|code| code.starts_with("23")),
-        _ => false,
     }
 }
 

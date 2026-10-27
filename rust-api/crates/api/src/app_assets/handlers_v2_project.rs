@@ -93,6 +93,7 @@ use crate::uuid_path::{classify_uuid_segment, UuidSegment};
 use pidash_auth::permissions::allow::AllowFacts;
 use pidash_auth::permissions::{ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER};
 use pidash_auth::scope::TenantScope;
+use pidash_compat::db::is_integrity_error;
 use pidash_services::app_assets::queries_v2_project as q;
 use pidash_types::WorkspaceId;
 
@@ -2451,24 +2452,6 @@ async fn s3_copy_object(
         Ok(())
     } else {
         Err(CopyError::Refused)
-    }
-}
-
-/// Django `IntegrityError` (unique/fk/not-null/check) as sqlx sees it:
-/// these branches `pass`, anything else 500s.
-fn is_integrity_error(error: &sqlx::Error) -> bool {
-    match error {
-        sqlx::Error::Database(db) => {
-            let kind = db.kind();
-            matches!(
-                kind,
-                sqlx::error::ErrorKind::UniqueViolation
-                    | sqlx::error::ErrorKind::ForeignKeyViolation
-                    | sqlx::error::ErrorKind::NotNullViolation
-                    | sqlx::error::ErrorKind::CheckViolation
-            )
-        }
-        _ => false,
     }
 }
 

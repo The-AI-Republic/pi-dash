@@ -84,6 +84,7 @@ use super::guards::{
     DEVICE_CODE_MIN_POLL_GAP_SECS, DEVICE_CODE_POLL_INTERVAL_SECS, DEVICE_CODE_START_MAX_RETRIES,
     DEVICE_CODE_TTL_SECS,
 };
+use pidash_compat::db::is_unique_violation;
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -220,12 +221,6 @@ fn pool_of(state: &AppState) -> Result<sqlx::PgPool, Denial> {
         .pools()
         .map(|pools| pools.primary().clone())
         .ok_or(Denial::ServerError)
-}
-
-/// `true` for a Postgres unique-violation (`23505`) — the concurrent
-/// generator collision the start retry converts instead of 500ing.
-fn is_unique_violation(err: &sqlx::Error) -> bool {
-    matches!(err, sqlx::Error::Database(db) if db.code().as_deref() == Some("23505"))
 }
 
 // ---------------------------------------------------------------------------
