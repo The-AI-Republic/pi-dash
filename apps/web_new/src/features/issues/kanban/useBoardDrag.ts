@@ -81,7 +81,12 @@ export function useBoardDrag(
       scrollToward({ x: event.clientX, y: event.clientY });
     };
     const onUp = (event: PointerEvent): void => {
-      const point = boardDropAtPoint(doc, event.clientX, event.clientY);
+      // The release commits what the hover indicated: when the content
+      // shifted under the stationary pointer (scroll, re-render), the
+      // release point hit-tests nothing and the last hovered target wins.
+      // A pointer that truly left the board tracked null on its way out,
+      // so cancelling outside still releases nowhere.
+      const point = boardDropAtPoint(doc, event.clientX, event.clientY) ?? targetRef.current;
       const done = draggedRef.current;
       draggedRef.current = null;
       targetRef.current = null;

@@ -1291,6 +1291,68 @@ describe("KanbanBoard drag and drop", () => {
     expect(mocks.notifyInfo).toHaveBeenCalledWith("Cannot move the work item", expect.any(String));
   });
 
+  it("warns on a refused drop whose destination cell is missing", () => {
+    const board = flatBoard();
+    const lane = board.lanes[0];
+    if (lane === undefined) throw new Error("missing lane");
+    delete lane.cells[DONE];
+    mocks.board = board;
+    setup({ prefs: prefs({ groupBy: "state_detail.group" }) });
+    stubFlatGeometry();
+    pressCard(cardByName("Fix login"));
+    fireEvent(document, pointer("pointermove", 400, 300));
+    fireEvent(document, pointer("pointerup", 400, 300));
+    expect(mocks.moveCard).not.toHaveBeenCalled();
+    expect(mocks.notifyInfo).toHaveBeenCalledWith("Cannot move the work item", expect.stringMatching(/cannot move/i));
+  });
+
+  it("stays silent when the destination cell is missing on an allowing board", () => {
+    const board = flatBoard();
+    const lane = board.lanes[0];
+    if (lane === undefined) throw new Error("missing lane");
+    delete lane.cells[DONE];
+    mocks.board = board;
+    setup();
+    stubFlatGeometry();
+    pressCard(cardByName("Fix login"));
+    fireEvent(document, pointer("pointermove", 400, 300));
+    fireEvent(document, pointer("pointerup", 400, 300));
+    expect(mocks.moveCard).not.toHaveBeenCalled();
+    expect(mocks.notifyInfo).not.toHaveBeenCalled();
+  });
+
+  it("warns on a refused drop when the release point misses after a hover", () => {
+    setup({ prefs: prefs({ groupBy: "state_detail.group" }) });
+    stubFlatGeometry();
+    pressCard(cardByName("Fix login"));
+    fireEvent(document, pointer("pointermove", 400, 300));
+    expect(screen.getByTestId("kanban-drop-indicator")).toBeInTheDocument();
+    // No exit move: the content shifted under the stationary pointer, so
+    // the release hit-tests empty chrome although Done was indicated.
+    fireEvent(document, pointer("pointerup", 900, 900));
+    expect(mocks.moveCard).not.toHaveBeenCalled();
+    expect(mocks.notifyInfo).toHaveBeenCalledWith("Cannot move the work item", expect.stringMatching(/cannot move/i));
+  });
+
+  it("commits the hovered column when the release point misses", () => {
+    setup();
+    stubFlatGeometry();
+    pressCard(cardByName("Fix login"));
+    fireEvent(document, pointer("pointermove", 400, 300));
+    expect(screen.getByTestId("kanban-drop-indicator")).toBeInTheDocument();
+    fireEvent(document, pointer("pointerup", 900, 900));
+    expect(mocks.moveCard).toHaveBeenCalledWith({
+      issueId: ISSUE,
+      plan: {
+        patch: { state_id: DONE, sort_order: 65535 },
+        cycle: null,
+        modules: null,
+        reorderOnly: false,
+      },
+      currentModuleIds: [],
+    });
+  });
+
   it("stays silent dropping back onto its own seat under a refused order", () => {
     setup({ prefs: prefs({ orderBy: "-created_at" }) });
     stubFlatGeometry();
