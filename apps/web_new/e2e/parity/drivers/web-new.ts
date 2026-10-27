@@ -49702,6 +49702,27 @@ export class WebNewDriver implements ParityDriver {
     return labels;
   }
 
+  async viewsDetailDisplayPick(section: string, option: string): Promise<void> {
+    const trigger = this.page.getByTestId("display-options-trigger").first();
+    await trigger.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    if (!(await this.isShown(this.page.getByTestId("display-options-panel")))) {
+      await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    const panel = this.page.getByTestId("display-options-panel");
+    await panel.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    // The section is located by its own title attribute rather than by text
+    // so a heading that gains an applied count ("Group by (1)") still reads;
+    // a layout that withholds the section fails here, which is the point.
+    const row = panel
+      .locator(`[data-section-title="${section}"]`)
+      .getByRole("button", { name: option, exact: true })
+      .first();
+    await row.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await row.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.keyboard.press("Escape");
+    await panel.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
+  }
+
   async viewsDetailFilterAdd(property: string, value: string): Promise<void> {
     // The issues header repeats some controls for the small-screen bar, so
     // every lookup here is scoped to the first (desktop) instance.

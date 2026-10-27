@@ -23475,6 +23475,16 @@ export class WebDriver implements ParityDriver {
       .filter((t) => t.length > 0);
   }
 
+  async viewsDetailDisplayPick(section: string, option: string): Promise<void> {
+    await this.openDisplayOptions();
+    const target = this.displaySection(section).getByRole("button", { name: option }).first();
+    // An app that withholds the section (or the row inside it) fails the
+    // bounded wait here rather than picking something else.
+    await target.waitFor({ state: "visible", timeout: 15_000 });
+    await this.clickPanelOption(target);
+    await this.closeDisplayOptions();
+  }
+
   async viewsDetailFilterAdd(property: string, value: string): Promise<void> {
     // With no conditions the header toggle is the add-filter trigger; it
     // opens the property menu, then the value menu for the property.

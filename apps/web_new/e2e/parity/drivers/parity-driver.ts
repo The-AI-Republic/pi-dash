@@ -4581,6 +4581,13 @@ export interface ParityDriver {
   viewsDetailTabTitle(): Promise<string>;
   /** Display dropdown option texts for the active layout. */
   viewsDetailDisplayOptions(): Promise<string[]>;
+  /**
+   * Pick an option inside one Display section, named by its heading
+   * ("Group by", "Order by"), then close the panel. Absent sections fail
+   * the same way a missing option does, so a scenario can assert that a
+   * section is withheld by asking for a row inside it.
+   */
+  viewsDetailDisplayPick(section: string, option: string): Promise<void>;
   /** Add a saved-query condition; resolves once Update view offers. */
   viewsDetailFilterAdd(property: string, value: string): Promise<void>;
   /** Click Update view; resolves once the button hides. */

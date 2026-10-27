@@ -650,16 +650,24 @@ switcher at all.
 **Display options (VIEW-026).** The Display control offers exactly the
 sections the active layout supports (Display properties, Group by, Order by,
 Show empty groups, Show sub-work items, Sub-group by only where the layout
-supports it, Calendar options for Calendar). Entries for cycle and module
-follow the project's `cycle_view` and `module_view` flags: absent when the
-feature is off, present when on. Changes update the view's live display
-state and mark it dirty; Update view persists them through
-`display_filters`/`display_properties` and the echo replaces local state.
-Locked views hide the Display control.
+supports it, Calendar options for Calendar). Sub-group by is a Board section
+and follows the issues area's rule (ISS-077) rather than this row's: it
+appears only once a Group by dimension is chosen, so a Board with no
+grouping lists Group by but not Sub-group by. The old app lists Sub-group by
+on any Board regardless of grouping; the target is the ISS-077 rule, which
+`web_new` already implements, and the VIEW-026 scenario asserts each app's
+own answer and then proves the section appears after a grouping is picked.
+Entries for cycle and module follow the project's `cycle_view` and
+`module_view` flags: absent when the feature is off, present when on. Changes
+update the view's live display state and mark it dirty; Update view persists
+them through `display_filters`/`display_properties` and the echo replaces
+local state. Locked views hide the Display control.
 
-**Filter toggle and saved query (VIEW-026).** The filter toggle shows or
-hides the issues area's rich filter row for this view. The row edits the
-view's saved expression and display settings, not the viewer's personal
+**Filter toggle and saved query (VIEW-026).** The filter affordance is the
+issues area's (ISS-096): with no condition and nothing unsaved it is an
+"Add filter" button that opens the property picker, and with a condition or
+unsaved change it toggles the rich filter row. Either way it edits this
+view's saved expression and display settings, never the viewer's personal
 filters. Its Save as/Update view triggers are the issues-owned controls from
 `parity/specs/issues.md` §9/§21 (ISS-104/105) and must **delegate to this
 area's dialog without changing the payload**: the row computes the same

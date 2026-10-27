@@ -117,11 +117,19 @@ test(
 
     await driver.viewsDetailLayoutPick(1);
     await expect.poll(() => driver.viewsDetailLayoutActive(), POLL).toBe(1);
-    // The board layout supports sub-grouping, so its section is offered
-    // (VIEW-026). Whether the shared Issues panel also withholds it until
-    // a Group by choice exists is the Issues area's rule (ISS-077), not
-    // this row's, and both apps currently show it unconditionally.
-    expect(await driver.viewsDetailDisplayOptions()).toContain("Sub-group by");
+    // Board offers sub-grouping as a section (VIEW-026). Whether it waits
+    // for a Group by choice is the issues area's rule (ISS-077), and the
+    // two apps differ there: web_new withholds it until a grouping exists,
+    // the old app lists it unconditionally. Assert each app's own answer,
+    // then prove the section appears once a grouping is picked.
+    const boardOptions = await driver.viewsDetailDisplayOptions();
+    if (driver.target === "web_new") {
+      expect(boardOptions).not.toContain("Sub-group by");
+      await driver.viewsDetailDisplayPick("Group by", "States");
+      expect(await driver.viewsDetailDisplayOptions()).toContain("Sub-group by");
+    } else {
+      expect(boardOptions).toContain("Sub-group by");
+    }
 
     await patchProject(workspaceSlug, projectId, owner.cookie, { cycle_view: true, module_view: true });
     await driver.reloadPage();

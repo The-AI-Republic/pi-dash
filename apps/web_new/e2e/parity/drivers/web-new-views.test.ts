@@ -991,6 +991,52 @@ describe("views detail chrome", () => {
     await expect(new WebNewDriver(state.page).viewsDetailDisplayOptions()).resolves.toEqual([]);
   });
 
+  it("opens the display panel when needed and picks a section row", async () => {
+    const row = loc();
+    const state = harness((query) => {
+      if (query.kind === "selector" && query.value === '[data-section-title="Group by"]') return row;
+      if (query.kind === "role" && query.value === "button") return row;
+      return undefined;
+    });
+    const driver = new WebNewDriver(state.page);
+    await driver.viewsDetailDisplayPick("Group by", "States");
+    expect(row.waitFor).toHaveBeenCalledWith({ state: "visible", timeout: 30_000 });
+    expect(row.click).toHaveBeenCalledWith({ timeout: 30_000 });
+    expect(state.press).toHaveBeenCalledWith("Escape");
+    // The section is located by its title attribute, not by visible text,
+    // so an applied count in the heading still resolves.
+    expect(asked(state)).toContain('selector:[data-section-title="Group by"]');
+    expect(row.getByRole).toHaveBeenCalledWith("button", { name: "States", exact: true });
+  });
+
+  it("settles a display pick even when the panel teardown times out", async () => {
+    const row = loc();
+    const panel = loc({
+      isVisible: vi.fn(async () => true),
+      locator: vi.fn(() => row),
+      waitFor: vi.fn(async (options: { state: string }) =>
+        options.state === "visible" ? undefined : Promise.reject(new Error("timeout"))
+      ),
+    });
+    const state = harness((query) =>
+      query.kind === "testid" && query.value === "display-options-panel" ? panel : undefined
+    );
+    await expect(new WebNewDriver(state.page).viewsDetailDisplayPick("Group by", "States")).resolves.toBeUndefined();
+    expect(row.click).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not re-click an open display panel", async () => {
+    const row = loc();
+    const panel = loc({ isVisible: vi.fn(async () => true), locator: vi.fn(() => row) });
+    const state = harness((query) =>
+      query.kind === "testid" && query.value === "display-options-panel" ? panel : undefined
+    );
+    const trigger = state.node as never as Stub;
+    await new WebNewDriver(state.page).viewsDetailDisplayPick("Order by", "Last created");
+    expect(trigger.click).not.toHaveBeenCalled();
+    expect(row.click).toHaveBeenCalledTimes(1);
+  });
+
   it("adds a filter through the issues header", async () => {
     const option = loc();
     const properties = loc({ getByRole: vi.fn(() => option) });
