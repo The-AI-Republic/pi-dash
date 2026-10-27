@@ -4530,10 +4530,15 @@ pub async fn create_issue(
                     fire: domain_issues::FireSpec {
                         dispatch_immediate: true,
                         created_by: Some(user_id),
+                        moved_by_run: None,
                         now: utc_now_micros(),
                     },
                     origin: origin.clone(),
                     activity_requested: Value::String(requested.clone()),
+                    activity_notification: Some(true),
+                    activity_require_origin: true,
+                    model_activity: None,
+                    created_override: None,
                 },
             )
             .await
@@ -4681,6 +4686,9 @@ pub async fn partial_update_issue(
             current_instance: current_instance.clone(),
             raw_body: data.value.clone(),
             slug: slug.clone(),
+            notification: Some(true),
+            require_origin: true,
+            emit_version: true,
         })
     };
     let orm = state.orm().ok_or(Denial::ServerError)?;
@@ -4700,6 +4708,11 @@ pub async fn partial_update_issue(
                 txn,
                 &pool,
                 domain_issues::PartialIssue {
+                    // The overlay never moves the audit pair (verified at
+                    // the ORM-03/B migration), so the post-overlay row
+                    // still carries the pre-save values Django reads.
+                    m2m_audit: (row.created_by_id, row.updated_by_id),
+                    sequence: None,
                     fields: row,
                     assignees: assignee_present.then_some(assignees),
                     labels: label_present.then_some(labels),
@@ -4707,6 +4720,7 @@ pub async fn partial_update_issue(
                     fire: domain_issues::FireSpec {
                         dispatch_immediate,
                         created_by: Some(user_id),
+                        moved_by_run: None,
                         now: utc_now_micros(),
                     },
                     activity,
@@ -4816,6 +4830,7 @@ pub async fn put_update_issue(
                 txn,
                 &pool,
                 domain_issues::UpdateIssue {
+                    m2m_audit: (row.created_by_id, row.updated_by_id),
                     fields: row,
                     assignees: assignee_present.then_some(assignees),
                     labels: label_present.then_some(labels),
@@ -4823,6 +4838,7 @@ pub async fn put_update_issue(
                     fire: domain_issues::FireSpec {
                         dispatch_immediate: true,
                         created_by: Some(user_id),
+                        moved_by_run: None,
                         now: utc_now_micros(),
                     },
                 },
@@ -4931,6 +4947,7 @@ pub async fn destroy_issue(
                     fire: domain_issues::FireSpec {
                         dispatch_immediate: true,
                         created_by: Some(user_id),
+                        moved_by_run: None,
                         now: utc_now_micros(),
                     },
                     origin,

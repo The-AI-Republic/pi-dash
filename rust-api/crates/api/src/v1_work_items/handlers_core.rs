@@ -50,19 +50,25 @@
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use axum::extract::{OriginalUri, Path, Query, State};
 use axum::http::{HeaderMap, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, NaiveDate, TimeZone as _, Utc};
 use chrono_tz::Tz;
+use sea_orm::EntityTrait;
 use serde_json::{Map, Value};
-use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use pidash_auth::permissions::project;
 use pidash_auth::scope::TenantScope;
+use pidash_db::entity::issues;
+use pidash_services::domain::activity::TaskEnqueueHook;
+use pidash_services::domain::issues as domain_issues;
+use pidash_services::domain::transition::IssueTransitionHook;
+use pidash_services::domain::{self, WriteActor, WriteCtx, WriteScope};
 /// Canonical home of the stored-HTML round-trip (PIDASHCONV-1554); kept as
 /// a re-export so existing `handlers_core::lxml_roundtrip` callers keep working.
 pub use pidash_services::html_normalize::lxml_roundtrip;
@@ -75,6 +81,8 @@ use pidash_services::v1_work_items::shape_issue as shape;
 use pidash_services::v1_work_items::tasks as work_tasks;
 use pidash_services::v1_work_items::{filter_fields, python_number_str, FieldSpec};
 
+use crate::domain_hooks::AppTaskEnqueueHook;
+use crate::issue_transition::AppTransitionHook;
 use crate::state::AppState;
 
 use super::perms::{decide, gate_for, resolve_moved_by_run, RunFacts, V1WorkItemsRoute};
@@ -4249,18 +4257,6 @@ async fn issue_detail_inner(
 // Write validation (`IssueSerializer.validate`, `serializers/issue.py:182-288`)
 // ---------------------------------------------------------------------------
 
-/// `convert_uuid_to_integer` (`utils/uuid.py:22-29`): the
-/// `pg_advisory_xact_lock` key for the create path — sha256 of the
-/// canonical UUID string, first 8 bytes big-endian signed.
-fn advisory_lock_key(project_id: &Uuid) -> i64 {
-    let mut hasher = Sha256::new();
-    hasher.update(project_id.to_string().as_bytes());
-    let digest = hasher.finalize();
-    let mut bytes = [0u8; 8];
-    bytes.copy_from_slice(&digest[..8]);
-    i64::from_be_bytes(bytes)
-}
-
 /// `base_host(request, is_app=True)` (`utils/host.py:18-66`) for the
 /// `model_activity` origin: `APP_BASE_URL`, else `WEB_URL`, else the
 /// `ImproperlyConfigured` 500 (raised after every write lands, so the row
@@ -4366,21 +4362,6 @@ async fn fetch_state_group(pool: &PgPool, state_id: &Uuid) -> Result<Option<Stri
         .map(|row: Option<String>| row)
 }
 
-/// `Pod.default_for_project_id` (`runner/models.py:174-176`): the
-/// project-default pod (`PodManager` scope, `Meta.ordering =
-/// ("-is_default", "created_at")` — every candidate is default, so the
-/// earliest `created_at` wins).
-async fn fetch_default_pod(pool: &PgPool, project_id: &Uuid) -> Result<Option<Uuid>, Denial> {
-    sqlx::query_scalar(
-        r#"SELECT "id" FROM "pod" WHERE "project_id" = $1 AND "is_default" AND "deleted_at" IS NULL ORDER BY "created_at" ASC LIMIT 1"#,
-    )
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "write-default-pod"))
-    .map(|row: Option<Uuid>| row)
-}
-
 /// The create-time default type
 /// (`serializers/issue.py:297-300`): `IssueType.objects.filter(
 /// project_issue_types__project_id=..., is_default=True).first()` —
@@ -4474,25 +4455,6 @@ async fn filter_label_ids(
     .fetch_all(pool)
     .await
     .map_err(|error| db_error(error, "write-label-filter"))
-}
-
-/// The create-time default-assignee arm
-/// (`serializers/issue.py:332-348`): the project's default assignee only
-/// lands when it is itself a valid (active, `role >= 15`) member.
-async fn default_assignee_exists(
-    pool: &PgPool,
-    project_id: &Uuid,
-    member_id: &Uuid,
-) -> Result<bool, Denial> {
-    sqlx::query_scalar(
-        r#"SELECT EXISTS(SELECT 1 FROM "project_members" WHERE "member_id" = $1 AND "project_id" = $2 AND "role" >= 15 AND "is_active" AND "deleted_at" IS NULL)"#,
-    )
-    .bind(member_id)
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "write-default-assignee"))
-    .map(|found: Option<bool>| found.unwrap_or(false))
 }
 
 /// Port of `IssueSerializer.validate()` (`serializers/issue.py:182-288`),
@@ -4708,6 +4670,40 @@ fn coerce_created_by_override(value: &Value) -> Result<Option<Uuid>, Denial> {
     }
 }
 
+/// Map an override-coercion failure to its chain stop: the constant 400
+/// detail arm, else the 500 arm (the only two the coercions produce).
+fn override_stop(denial: Denial) -> domain_issues::ChainStop {
+    match denial {
+        Denial::BadError(_) => domain_issues::ChainStop::OverrideDetail,
+        _ => domain_issues::ChainStop::OverrideFailed,
+    }
+}
+
+/// The domain-write context for a v1 work-item request: the API actor
+/// (with their stored time zone name) plus the gated tenant scope.
+fn domain_write_ctx(pre: &Preamble, project_id: &Uuid) -> WriteCtx {
+    WriteCtx::new(WriteActor {
+        user_id: pre.actor.id,
+        timezone: pre.actor.timezone.clone(),
+    })
+    .with_scope(WriteScope {
+        workspace_id: pre.workspace_id,
+        project_id: Some(*project_id),
+    })
+}
+
+/// Map a domain-write failure onto the save arms: integrity violations
+/// and dangling-row misses (a state validated by probe, gone at save —
+/// the port's `UPDATE` FK decided a 400 there too) are the
+/// invalid-payload 400, anything else 500s.
+fn domain_save_denial(error: domain::DomainError) -> Denial {
+    if error.is_integrity_violation() || error.is_not_found() {
+        Denial::FieldErrors(PAYLOAD_NOT_VALID_BODY.to_owned())
+    } else {
+        Denial::ServerError
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Create (`IssueListCreateAPIEndpoint.post`, `views/issue.py:470-540`)
 // ---------------------------------------------------------------------------
@@ -4792,260 +4788,6 @@ fn external_dup_body(dup_id: &Uuid) -> String {
     )
 }
 
-/// Every `issues` column for the create `INSERT`, in bind order
-/// (`Issue.objects.create(**validated_data, project_id, type)` +
-/// `Issue.save` + `BaseModel.save` + `ProjectBaseModel.save`).
-#[allow(clippy::too_many_arguments)]
-async fn insert_issue_row(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    id: &Uuid,
-    created_at: &DateTime<Utc>,
-    updated_at: &DateTime<Utc>,
-    deleted_at: Option<DateTime<Utc>>,
-    point: Option<i32>,
-    name: &str,
-    description_html: &str,
-    description_stripped: Option<String>,
-    priority: &str,
-    complexity_score: i32,
-    start_date: Option<NaiveDate>,
-    target_date: Option<NaiveDate>,
-    sequence_id: i32,
-    sort_order: f64,
-    completed_at: Option<DateTime<Utc>>,
-    archived_at: Option<NaiveDate>,
-    is_draft: bool,
-    external_source: Option<String>,
-    external_id: Option<String>,
-    git_work_branch: &str,
-    created_via: Option<String>,
-    agent_executor: Option<String>,
-    created_by_id: Option<Uuid>,
-    project_id: &Uuid,
-    workspace_id: &Uuid,
-    parent_id: Option<Uuid>,
-    state_id: Option<Uuid>,
-    estimate_point_id: Option<Uuid>,
-    type_id: Option<Uuid>,
-    assigned_pod_id: Option<Uuid>,
-) -> Result<(), Denial> {
-    sqlx::query(
-        r#"INSERT INTO "issues" ("id", "created_at", "updated_at", "deleted_at", "point", "name", "description_json", "description_html", "description_stripped", "description_binary", "priority", "complexity_score", "start_date", "target_date", "sequence_id", "sort_order", "completed_at", "archived_at", "is_draft", "external_source", "external_id", "git_work_branch", "workpad", "created_via", "agent_executor", "created_by_id", "updated_by_id", "project_id", "workspace_id", "parent_id", "state_id", "estimate_point_id", "type_id", "assigned_pod_id") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34)"#,
-    )
-    .bind(id)
-    .bind(created_at)
-    .bind(updated_at)
-    .bind(deleted_at)
-    .bind(point)
-    .bind(name)
-    .bind(Value::Object(Map::new()))
-    .bind(description_html)
-    .bind(description_stripped)
-    .bind(None::<Vec<u8>>)
-    .bind(priority)
-    .bind(complexity_score)
-    .bind(start_date)
-    .bind(target_date)
-    .bind(sequence_id)
-    .bind(sort_order)
-    .bind(completed_at)
-    .bind(archived_at)
-    .bind(is_draft)
-    .bind(external_source)
-    .bind(external_id)
-    .bind(git_work_branch)
-    .bind(String::new())
-    .bind(created_via)
-    .bind(agent_executor)
-    .bind(created_by_id)
-    .bind(None::<Uuid>)
-    .bind(project_id)
-    .bind(workspace_id)
-    .bind(parent_id)
-    .bind(state_id)
-    .bind(estimate_point_id)
-    .bind(type_id)
-    .bind(assigned_pod_id)
-    .execute(&mut **tx)
-    .await
-    .map(|_| ())
-    .map_err(|error| save_error(&error, "write-insert"))
-}
-
-/// The `IssueSequence` row `Issue.save` writes after the insert
-/// (`db/models/issue.py:340`): audit columns from `BaseModel.save`
-/// (creating → actor / `None`), the workspace from the project, `deleted`
-/// `False`.
-async fn insert_issue_sequence(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    project_id: &Uuid,
-    workspace_id: &Uuid,
-    issue_id: &Uuid,
-    sequence: i32,
-    actor_id: &Uuid,
-) -> Result<(), Denial> {
-    sqlx::query(
-        r#"INSERT INTO "issue_sequences" ("id", "created_at", "updated_at", "created_by_id", "updated_by_id", "deleted_at", "project_id", "workspace_id", "issue_id", "sequence", "deleted") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"#,
-    )
-    .bind(Uuid::new_v4())
-    .bind(now_utc())
-    .bind(now_utc())
-    .bind(actor_id)
-    .bind(None::<Uuid>)
-    .bind(None::<DateTime<Utc>>)
-    .bind(project_id)
-    .bind(workspace_id)
-    .bind(issue_id)
-    .bind(i64::from(sequence))
-    .bind(false)
-    .execute(&mut **tx)
-    .await
-    .map(|_| ())
-    .map_err(|error| save_error(&error, "write-sequence"))
-}
-
-/// One M2M batch (`bulk_create(..., batch_size=10)`): a single multi-row
-/// `INSERT`, `ON CONFLICT DO NOTHING` exactly when the call site passes
-/// `ignore_conflicts=True` (update only). Audit columns ride from the
-/// issue instance (`created_by` / `updated_by` as read there); every
-/// failure returns `Err` and the caller swallows it (`except
-/// IntegrityError: pass` — aborting the remaining batches on create).
-#[allow(clippy::too_many_arguments)]
-async fn insert_m2m_batch(
-    pool: &PgPool,
-    table: &str,
-    id_column: &str,
-    issue_id: &Uuid,
-    project_id: &Uuid,
-    workspace_id: &Uuid,
-    created_by_id: Option<Uuid>,
-    updated_by_id: Option<Uuid>,
-    ids: &[Uuid],
-    ignore_conflicts: bool,
-) -> Result<(), sqlx::Error> {
-    let mut qb: sqlx::QueryBuilder<sqlx::Postgres> = sqlx::QueryBuilder::new("");
-    qb.push("INSERT INTO ");
-    qb.push(table);
-    qb.push(
-        " (\"id\", \"created_at\", \"updated_at\", \"created_by_id\", \"updated_by_id\", \"deleted_at\", \"project_id\", \"workspace_id\", \"issue_id\", ",
-    );
-    qb.push(id_column);
-    qb.push(") VALUES ");
-    // One `push` per row (the `", "` separator); everything inside the
-    // row is unseparated (`push_bind` would emit a separator after `(`).
-    let mut separated = qb.separated(", ");
-    for id in ids {
-        separated.push("(");
-        separated.push_bind_unseparated(Uuid::new_v4());
-        separated.push_unseparated(", ");
-        separated.push_bind_unseparated(now_utc());
-        separated.push_unseparated(", ");
-        separated.push_bind_unseparated(now_utc());
-        separated.push_unseparated(", ");
-        separated.push_bind_unseparated(created_by_id);
-        separated.push_unseparated(", ");
-        separated.push_bind_unseparated(updated_by_id);
-        separated.push_unseparated(", ");
-        separated.push_bind_unseparated(None::<DateTime<Utc>>);
-        separated.push_unseparated(", ");
-        separated.push_bind_unseparated(project_id);
-        separated.push_unseparated(", ");
-        separated.push_bind_unseparated(workspace_id);
-        separated.push_unseparated(", ");
-        separated.push_bind_unseparated(issue_id);
-        separated.push_unseparated(", ");
-        separated.push_bind_unseparated(id);
-        separated.push_unseparated(")");
-    }
-    if ignore_conflicts {
-        qb.push(" ON CONFLICT DO NOTHING");
-    }
-    qb.build().execute(pool).await.map(|_| ())
-}
-
-/// The create M2M writes (`serializers/issue.py:307-365`): batches of 10
-/// WITHOUT `ignore_conflicts`, aborting the remaining batches on the
-/// first `IntegrityError` (silently); without assignees the default
-/// assignee lands when valid (also `IntegrityError`-swallowed).
-#[allow(clippy::too_many_arguments)]
-async fn create_m2m(
-    pool: &PgPool,
-    new_id: &Uuid,
-    project_id: &Uuid,
-    workspace_id: &Uuid,
-    actor_id: &Uuid,
-    default_assignee_id: Option<Uuid>,
-    assignees: Option<Vec<Uuid>>,
-    labels: Option<Vec<Uuid>>,
-) -> Result<(), Denial> {
-    match assignees {
-        Some(ids) if !ids.is_empty() => {
-            for batch in ids.chunks(10) {
-                if insert_m2m_batch(
-                    pool,
-                    "\"issue_assignees\"",
-                    "\"assignee_id\"",
-                    new_id,
-                    project_id,
-                    workspace_id,
-                    Some(*actor_id),
-                    None,
-                    batch,
-                    false,
-                )
-                .await
-                .is_err()
-                {
-                    break;
-                }
-            }
-        }
-        _ => {
-            if let Some(member_id) = default_assignee_id {
-                if default_assignee_exists(pool, project_id, &member_id).await? {
-                    let _ = insert_m2m_batch(
-                        pool,
-                        "\"issue_assignees\"",
-                        "\"assignee_id\"",
-                        new_id,
-                        project_id,
-                        workspace_id,
-                        Some(*actor_id),
-                        None,
-                        std::slice::from_ref(&member_id),
-                        false,
-                    )
-                    .await;
-                }
-            }
-        }
-    }
-    if let Some(ids) = labels {
-        if !ids.is_empty() {
-            for batch in ids.chunks(10) {
-                if insert_m2m_batch(
-                    pool,
-                    "\"issue_labels\"",
-                    "\"label_id\"",
-                    new_id,
-                    project_id,
-                    workspace_id,
-                    Some(*actor_id),
-                    None,
-                    batch,
-                    false,
-                )
-                .await
-                .is_err()
-                {
-                    break;
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
 async fn create_issue_inner(
     state: &AppState,
     headers: &HeaderMap,
@@ -5117,214 +4859,141 @@ async fn create_issue_inner(
     }
 
     // `serializer.save()` → `create()` (`:291-366`) + `Issue.save`
-    // (`db/models/issue.py:267-351`).
+    // (`db/models/issue.py:267-351`): the assembled row rides
+    // `domain::issues::create` — the save hooks resolve the pod/state
+    // defaults, `completed_at`, stripped text, sequence and sort order.
+    // Only the serializer-level default type stays driver-side.
     let issue_type = match parsed.issue_type {
         Some(Some(id)) => Some(id),
         _ => fetch_default_issue_type(&pre.pool, &project_id).await?,
     };
-    let assigned_pod = match parsed.assigned_pod {
-        // `save()` resolves the project-default pod whenever the new
-        // instance holds `None` — absent and explicit-null alike.
-        Some(Some(id)) => Some(id),
-        _ => fetch_default_pod(&pre.pool, &project_id).await?,
-    };
-    // A provided state takes the completed arm (`save()`'s `else` — the
-    // validated `completed_at` is ignored); a missing/null state resolves
-    // the default and keeps the validated `completed_at` (the `if` branch
-    // never touches it).
-    let (state_id, completed_at) = match parsed.state {
-        Some(Some(id)) => {
-            let group = fetch_state_group(&pre.pool, &id).await?;
-            let completed_at = if group.as_deref() == Some("completed") {
-                Some(now_utc())
-            } else {
-                None
-            };
-            (Some(id), completed_at)
-        }
-        _ => {
-            let resolved = fetch_default_state(&pre.pool, &project_id).await?;
-            (resolved.map(|(id, _)| id), parsed.completed_at.flatten())
-        }
-    };
-
     let new_id = Uuid::new_v4();
     let created_at = now_utc();
     let updated_at = now_utc();
-    let description_html = parsed.description_html.clone().unwrap_or_default();
-    let description_stripped = if description_html.is_empty() {
-        None
-    } else {
-        Some(crate::space::sanitize::strip_tags(&description_html))
+    let fields = domain_issues::IssueFieldSet {
+        id: new_id,
+        created_at,
+        updated_at,
+        created_by_id: None,
+        updated_by_id: None,
+        deleted_at: parsed.deleted_at.flatten(),
+        project_id,
+        workspace_id: project.workspace_id,
+        parent_id: parsed.parent.flatten(),
+        state_id: parsed.state.flatten(),
+        point: parsed.point.flatten().map(|point| point as i32),
+        estimate_point_id: parsed.estimate_point.flatten(),
+        name: parsed.name.clone().unwrap_or_default(),
+        description_json: Value::Object(Map::new()),
+        description_html: parsed.description_html.clone().unwrap_or_default(),
+        description_stripped: None,
+        description_binary: None,
+        priority: parsed.priority.clone().unwrap_or_else(|| "none".to_owned()),
+        complexity_score: parsed.complexity_score.unwrap_or(0) as i32,
+        start_date: parsed.start_date.flatten(),
+        target_date: parsed.target_date.flatten(),
+        sequence_id: 0,
+        sort_order: parsed.sort_order.unwrap_or(65535.0),
+        completed_at: parsed.completed_at.flatten(),
+        archived_at: parsed.archived_at.flatten(),
+        is_draft: parsed.is_draft.unwrap_or(false),
+        external_source: parsed.external_source.clone().flatten(),
+        external_id: parsed.external_id.clone().flatten(),
+        type_id: issue_type,
+        git_work_branch: parsed.git_work_branch.clone().unwrap_or_default(),
+        workpad: String::new(),
+        created_via: parsed.created_via.clone().flatten(),
+        assigned_pod_id: parsed.assigned_pod.flatten(),
+        agent_executor: parsed.agent_executor.clone().flatten(),
     };
-    // Sibling-maximum `sort_order` (`:333-338`): the validated value (or
-    // 65535) survives only when no `(project, state)` sibling exists —
-    // `state IS NOT DISTINCT FROM` matches the `state=None` siblings too.
-    let sort_input = parsed.sort_order.unwrap_or(65535.0);
-    let largest_sort: Option<Option<f64>> = sqlx::query_scalar(
-        r#"SELECT MAX("sort_order") FROM "issues" WHERE "project_id" = $1 AND "state_id" IS NOT DISTINCT FROM $2 AND "deleted_at" IS NULL"#,
-    )
-    .bind(project_id)
-    .bind(state_id)
-    .fetch_optional(&pre.pool)
-    .await
-    .map_err(|error| db_error(error, "write-max-sort"))?;
-    let sort_order = match largest_sort.flatten() {
-        Some(largest) => largest + 10000.0,
-        None => sort_input,
+    // The raw-data overrides resolve pre-save (pure), but their failures
+    // surface post-commit in the chain leg, in port order — a bad override
+    // 400s/500s with the row, fire and m2m legs already persisted. The
+    // absent-key defaults evaluate here rather than past the m2m legs;
+    // wall-clock only.
+    let override_created_at = match parsed_body.value.get("created_at") {
+        None => Ok(Some(now_utc())),
+        Some(value) => coerce_created_at_override(value, &tz, tz_name).map_err(override_stop),
     };
-
-    let mut tx = pre
-        .pool
-        .begin()
-        .await
-        .map_err(|error| db_error(error, "write-begin"))?;
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(advisory_lock_key(&project_id))
-        .execute(&mut *tx)
-        .await
-        .map_err(|error| db_error(error, "write-lock"))?;
-    let last_sequence: Option<Option<i64>> = sqlx::query_scalar(
-        r#"SELECT MAX("sequence") FROM "issue_sequences" WHERE "project_id" = $1 AND "deleted_at" IS NULL"#,
-    )
-    .bind(project_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|error| db_error(error, "write-max-sequence"))?;
-    // `last_sequence + 1 if last_sequence else 1`: `0` and `None` both
-    // restart at 1 (falsy either way).
-    let sequence_id = i32::try_from(
-        last_sequence
-            .flatten()
-            .filter(|last| *last != 0)
-            .map(|last| last + 1)
-            .unwrap_or(1),
-    )
-    .map_err(|_| Denial::ServerError)?;
-    insert_issue_row(
-        &mut tx,
-        &new_id,
-        &created_at,
-        &updated_at,
-        parsed.deleted_at.flatten(),
-        parsed.point.flatten().map(|point| point as i32),
-        parsed.name.as_deref().unwrap_or_default(),
-        &description_html,
-        description_stripped,
-        parsed.priority.as_deref().unwrap_or("none"),
-        parsed.complexity_score.unwrap_or(0) as i32,
-        parsed.start_date.flatten(),
-        parsed.target_date.flatten(),
-        sequence_id,
-        sort_order,
-        completed_at,
-        parsed.archived_at.flatten(),
-        parsed.is_draft.unwrap_or(false),
-        parsed.external_source.flatten(),
-        parsed.external_id.flatten(),
-        parsed.git_work_branch.as_deref().unwrap_or_default(),
-        parsed.created_via.flatten(),
-        parsed.agent_executor.flatten(),
-        // `BaseModel.save` overwrites any validated `created_by` with the
-        // actor at insert; `updated_by` stays `None`.
-        Some(pre.actor.id),
-        &project_id,
-        &project.workspace_id,
-        parsed.parent.flatten(),
-        state_id,
-        parsed.estimate_point.flatten(),
-        issue_type,
-        assigned_pod,
-    )
-    .await?;
-    insert_issue_sequence(
-        &mut tx,
-        &project_id,
-        &project.workspace_id,
-        &new_id,
-        sequence_id,
-        &pre.actor.id,
-    )
-    .await?;
-    tx.commit()
-        .await
-        .map_err(|error| db_error(error, "write-commit"))?;
-
+    let override_created_by = match parsed_body.value.get("created_by") {
+        None => Ok(Some(pre.actor.id)),
+        Some(value) => coerce_created_by_override(value).map_err(override_stop),
+    };
+    let requested_text = requested_data_text(&data);
+    // `base_host` raises past the save (the row + `issue_activity` persist
+    // on a misconfigured host): pure over settings, resolved here,
+    // effective in the chain's model leg.
+    let origin = app_origin(&state.settings().urls).ok();
     // Django's `post_save` fires inside `Issue.objects.create`, before the
     // assignee/label `bulk_create`s (and before the `created_at` /
     // `created_by` second save, whose transition no-ops on `prev == current`),
     // so the entry prompt sees empty m2m. A new row has no prior state, so
     // creating directly in a ticking state arms the clock and creates the
     // entry run (PIDASHCONV-1216).
-    fire_after_save(
-        state,
-        &pre.pool,
-        new_id,
-        pre.actor.id,
-        None,
-        state_id,
-        None,
-        Some(pre.actor.id),
-        Utc::now(),
-    )
-    .await?;
-
-    create_m2m(
-        &pre.pool,
-        &new_id,
-        &project_id,
-        &project.workspace_id,
-        &pre.actor.id,
-        project.default_assignee_id,
-        parsed.assignees,
-        parsed.labels,
-    )
-    .await?;
-
-    // The raw-data overrides (`:509-514`): a second save limited to
-    // `update_fields=["created_at", "created_by"]` on the refetched row —
-    // the `save()` recomputes run in memory only, never reaching the row.
-    let override_created_at = match parsed_body.value.get("created_at") {
-        None => Some(now_utc()),
-        Some(value) => coerce_created_at_override(value, &tz, tz_name)?,
-    };
-    let override_created_by = match parsed_body.value.get("created_by") {
-        None => Some(pre.actor.id),
-        Some(value) => coerce_created_by_override(value)?,
-    };
-    sqlx::query(r#"UPDATE "issues" SET "created_at" = $1, "created_by_id" = $2 WHERE "id" = $3"#)
-        .bind(override_created_at)
-        .bind(override_created_by)
-        .bind(new_id)
-        .execute(&pre.pool)
-        .await
-        .map(|_| ())
-        .map_err(|error| save_error(&error, "write-override"))?;
-
-    // Task fan-out (`:516-539`): the activity carries the `django_dumps`
-    // text of the NORMALIZED body, the webhook the body object itself.
-    let requested_text = requested_data_text(&data);
-    let kwargs = work_tasks::issue_activity_kwargs(
-        work_tasks::ACTIVITY_ISSUE_CREATED,
-        Some(&requested_text),
-        &pre.actor.id.to_string(),
-        &new_id.to_string(),
-        &project_id.to_string(),
-        None,
-        Utc::now().timestamp(),
-    );
-    enqueue_best_effort(&pre.pool, work_tasks::ISSUE_ACTIVITY_TASK, vec![], kwargs).await;
-    let origin = app_origin(&state.settings().urls)?;
-    let webhook = work_tasks::issue_model_activity_kwargs(
-        &new_id.to_string(),
-        data.clone(),
-        None,
-        &pre.actor.id.to_string(),
-        slug,
-        &origin,
-    );
-    enqueue_best_effort(&pre.pool, work_tasks::MODEL_ACTIVITY_TASK, vec![], webhook).await;
-
+    let orm = state.orm().ok_or(Denial::ServerError)?;
+    let ctx = domain_write_ctx(&pre, &project_id);
+    let actor_id = pre.actor.id;
+    let default_assignee_id = project.default_assignee_id;
+    let transition: Arc<dyn IssueTransitionHook> =
+        Arc::new(AppTransitionHook::new(state, &pre.pool));
+    let enqueue: Arc<dyn TaskEnqueueHook> = Arc::new(AppTaskEnqueueHook::new(&pre.pool));
+    let outcome = domain::run(&ctx, orm, |txn| {
+        let transition = transition.clone();
+        let enqueue = enqueue.clone();
+        let pool = pre.pool.clone();
+        let ctx = ctx.clone();
+        let slug = slug.to_owned();
+        Box::pin(async move {
+            txn.hooks_mut().register(transition);
+            txn.hooks_mut().register(enqueue);
+            domain_issues::create(
+                &ctx,
+                txn,
+                &pool,
+                domain_issues::CreateIssue {
+                    fields,
+                    assignees: parsed.assignees.clone().unwrap_or_default(),
+                    default_assignee: default_assignee_id,
+                    labels: parsed.labels.clone().unwrap_or_default(),
+                    fire: domain_issues::FireSpec {
+                        dispatch_immediate: true,
+                        created_by: Some(actor_id),
+                        moved_by_run: None,
+                        now: Utc::now(),
+                    },
+                    origin: None,
+                    activity_requested: Value::String(requested_text),
+                    activity_notification: None,
+                    activity_require_origin: false,
+                    model_activity: Some(domain_issues::ModelActivitySpec {
+                        model: new_id,
+                        requested: data,
+                        current: Value::Null,
+                        actor: actor_id,
+                        slug,
+                        origin,
+                    }),
+                    created_override: Some(domain_issues::CreatedOverride {
+                        created_at: override_created_at,
+                        created_by: override_created_by,
+                    }),
+                },
+            )
+            .await
+        })
+    })
+    .await
+    .map_err(domain_save_denial)?;
+    match outcome.chain.stopped() {
+        None => {}
+        Some(domain_issues::ChainStop::OverrideConflict) => {
+            return Err(Denial::FieldErrors(PAYLOAD_NOT_VALID_BODY.to_owned()));
+        }
+        Some(domain_issues::ChainStop::OverrideDetail) => {
+            return Err(Denial::BadError("Please provide valid detail".to_owned()));
+        }
+        Some(_) => return Err(Denial::ServerError),
+    }
     // The 201 renders the PRE-override in-memory instance: refetch the
     // row, then restore the insert-time `created_at` / `created_by`.
     let mut decoded = fetch_issue_for_write(&pre.pool, slug, &project_id, &new_id, &tz).await?;
@@ -5491,58 +5160,6 @@ async fn resolve_save_state(
     }
 }
 
-/// The update M2M writes (`serializers/issue.py:368-413`): only when the
-/// key was provided — soft-delete the old rows (queryset `.delete()` is
-/// the `deleted_at` sweep, never a hard delete), then batches of 10 WITH
-/// `ignore_conflicts`, the whole `bulk_create` `IntegrityError`-swallowed.
-#[allow(clippy::too_many_arguments)]
-async fn update_m2m_side(
-    pool: &PgPool,
-    table: &str,
-    issue_id: &Uuid,
-    project_id: &Uuid,
-    workspace_id: &Uuid,
-    created_by_id: Option<Uuid>,
-    updated_by_id: Option<Uuid>,
-    ids: Vec<Uuid>,
-) -> Result<(), Denial> {
-    let sweep = format!(
-        "UPDATE {table} SET \"deleted_at\" = $1 WHERE \"issue_id\" = $2 AND \"deleted_at\" IS NULL"
-    );
-    sqlx::query(&sweep)
-        .bind(now_utc())
-        .bind(issue_id)
-        .execute(pool)
-        .await
-        .map(|_| ())
-        .map_err(|error| db_error(error, "write-m2m-sweep"))?;
-    let column = if table.contains("assignee") {
-        "\"assignee_id\""
-    } else {
-        "\"label_id\""
-    };
-    for batch in ids.chunks(10) {
-        if insert_m2m_batch(
-            pool,
-            table,
-            column,
-            issue_id,
-            project_id,
-            workspace_id,
-            created_by_id,
-            updated_by_id,
-            batch,
-            true,
-        )
-        .await
-        .is_err()
-        {
-            break;
-        }
-    }
-    Ok(())
-}
-
 async fn patch_issue_inner(
     state: &AppState,
     headers: &HeaderMap,
@@ -5666,57 +5283,22 @@ async fn patch_issue_inner(
         }
     }
 
-    // `serializer.save()` → `update()` (`:368-416`).
-    let row_created_by: Option<Uuid> = current.created_by.as_deref().and_then(|id| id.parse().ok());
-    let row_updated_by: Option<Uuid> = current.updated_by.as_deref().and_then(|id| id.parse().ok());
-    if let Some(ids) = parsed.assignees.clone() {
-        update_m2m_side(
-            &pre.pool,
-            "\"issue_assignees\"",
-            pk,
-            &project_id,
-            &workspace_id,
-            row_created_by,
-            row_updated_by,
-            ids,
-        )
-        .await?;
-    }
-    if let Some(ids) = parsed.labels.clone() {
-        update_m2m_side(
-            &pre.pool,
-            "\"issue_labels\"",
-            pk,
-            &project_id,
-            &workspace_id,
-            row_created_by,
-            row_updated_by,
-            ids,
-        )
-        .await?;
-    }
-
-    // `super().update()` → full `save()`: `updated_at`/`updated_by` and
-    // the stripped/completed recomputes always land (even for `{}`).
-    let (set_state, set_completed) =
-        resolve_save_state(&pre.pool, &project_id, &current, parsed.state).await?;
-    let html_new = parsed
-        .description_html
-        .clone()
-        .unwrap_or_else(|| current.description_html.clone());
-    let stripped_new = if html_new.is_empty() {
-        None
+    // `serializer.save()` → `update()` (`:368-416`): the m2m legs run ahead
+    // of the row write inside `domain::issues::partial_update`, then the
+    // full-column `save()` (`updated_at`/`updated_by` and the
+    // stripped/completed recomputes always land, even for `{}`), the
+    // completion pair when the state moved, the always-immediate fire, and
+    // the two activities (no version task on this view).
+    //
+    // The save-time `sequence_id` int4 check resolves here (pure) but
+    // surfaces past the m2m legs in the domain write — a bad sequence 500s
+    // with the legs already persisted, as today.
+    let sequence = if parsed.sequence_overflow {
+        Some(Err(()))
     } else {
-        Some(crate::space::sanitize::strip_tags(&html_new))
-    };
-    // A provided `sequence_id` must fit `int4` (save-time `DataError` →
-    // 500); the overflow flag is the beyond-`i64` arm of the same error.
-    if parsed.sequence_overflow {
-        return Err(Denial::ServerError);
-    }
-    let sequence_new: Option<i32> = match parsed.sequence_id {
-        Some(number) => Some(i32::try_from(number).map_err(|_| Denial::ServerError)?),
-        None => None,
+        parsed
+            .sequence_id
+            .map(|number| i32::try_from(number).map_err(|_| ()))
     };
     // The pre-save snapshot (`capture_prior_state`, `signals.py:61-71`):
     // the stored `state_id` re-read just before the save, past every
@@ -5726,133 +5308,152 @@ async fn patch_issue_inner(
     let prev_state_id = crate::issue_transition::capture_prior_state_pool(&pre.pool, Some(*pk))
         .await
         .map_err(|_| Denial::ServerError)?;
-    let mut qb: sqlx::QueryBuilder<sqlx::Postgres> = sqlx::QueryBuilder::new("");
-    qb.push("UPDATE \"issues\" SET ");
-    let mut sep = qb.separated(", ");
-    sep.push("\"updated_at\" = ");
-    sep.push_bind_unseparated(now_utc());
-    sep.push("\"updated_by_id\" = ");
-    sep.push_bind_unseparated(pre.actor.id);
-    sep.push("\"description_stripped\" = ");
-    sep.push_bind_unseparated(stripped_new);
-    if let Some(completed) = set_completed {
-        sep.push("\"completed_at\" = ");
-        sep.push_bind_unseparated(completed);
-    }
-    if let Some(state) = set_state {
-        sep.push("\"state_id\" = ");
-        sep.push_bind_unseparated(state);
-    }
-    macro_rules! set_col {
-        ($column:literal, $value:expr) => {
-            if let Some(value) = $value {
-                sep.push(concat!($column, " = "));
-                sep.push_bind_unseparated(value);
-            }
-        };
-    }
-    // Nullable columns bind the OUTER option: explicit null stores
-    // `NULL`, absent skips the column.
-    set_col!("\"deleted_at\"", parsed.deleted_at);
-    set_col!(
-        "\"point\"",
-        parsed.point.map(|point| point.map(|point| point as i32))
-    );
-    set_col!("\"name\"", parsed.name.clone());
-    set_col!("\"description_html\"", parsed.description_html.clone());
-    set_col!("\"priority\"", parsed.priority.clone());
-    set_col!(
-        "\"complexity_score\"",
-        parsed.complexity_score.map(|score| score as i32)
-    );
-    set_col!("\"start_date\"", parsed.start_date);
-    set_col!("\"target_date\"", parsed.target_date);
-    set_col!("\"sequence_id\"", sequence_new);
-    set_col!("\"sort_order\"", parsed.sort_order);
-    if set_completed.is_none() {
-        set_col!("\"completed_at\"", parsed.completed_at);
-    }
-    set_col!("\"archived_at\"", parsed.archived_at);
-    set_col!("\"is_draft\"", parsed.is_draft);
-    set_col!("\"external_source\"", parsed.external_source.clone());
-    set_col!("\"external_id\"", parsed.external_id.clone());
-    set_col!("\"git_work_branch\"", parsed.git_work_branch.clone());
-    set_col!("\"created_via\"", parsed.created_via.clone());
-    set_col!("\"agent_executor\"", parsed.agent_executor.clone());
-    set_col!("\"created_by_id\"", parsed.created_by);
-    set_col!("\"parent_id\"", parsed.parent);
-    set_col!("\"estimate_point_id\"", parsed.estimate_point);
-    set_col!("\"type_id\"", parsed.issue_type);
-    set_col!("\"assigned_pod_id\"", parsed.assigned_pod);
-    qb.push(" WHERE \"id\" = ");
-    qb.push_bind(pk);
-    qb.build()
-        .execute(&pre.pool)
+    // The full-save base row, re-read beside the snapshot: the `DecodedIssue`
+    // above is render-lossy (tz-rendered datetimes, no `description_json` /
+    // `workpad`), and the save writes every column. A miss 404s — the port
+    // would run the m2m legs first and 404 on the final refetch instead, a
+    // mid-flight-delete race either way.
+    let orm = state.orm().ok_or(Denial::ServerError)?;
+    let Some(base) = issues::Entity::find_by_id(*pk)
+        .one(orm)
         .await
-        .map(|_| ())
-        .map_err(|error| save_error(&error, "write-update"))?;
-
-    // The post-save fire (`signals.py:74-107`): it runs inside the save
-    // in Python (before the `.delay` fan-out below), so it runs here —
-    // after the `UPDATE`, before the enqueues. `dispatch_immediate` is
-    // always true (this view never stamps the opt-out); `moved_by_run`
-    // is the resolved header run. A failed handler is logged and the
-    // save stands; only a lookup storage failure 500s.
-    let current_state: Option<Uuid> = current.state.as_deref().and_then(|id| id.parse().ok());
-    let current_state_id = match set_state {
-        Some(state) => state,
-        None => current_state,
+        .map_err(|error| db_error(error, "write-reread"))?
+    else {
+        return Err(Denial::NotFound(RESOURCE_NOT_FOUND_BODY.to_owned()));
     };
-    // `github_signals.trigger_completion_comment`
-    // (`bgtasks/github_signals.py:44-75`): a save moving a mirrored issue
-    // into a completed-group state enqueues the provider's
-    // `post_completion_comment` — before the orchestration receiver, as
-    // in Django. Best-effort: the save stands.
-    if prev_state_id != current_state_id {
-        crate::issue_transition::enqueue_completion_comment(
-            &pre.pool,
-            pk,
-            prev_state_id.as_ref(),
-            current_state_id.as_ref(),
-        )
-        .await;
+    let mut fields = domain_issues::IssueFieldSet::from(&base);
+    let audit = (base.created_by_id, base.updated_by_id);
+    // The validated overlay: present keys move (nullable columns take the
+    // OUTER option — explicit null stores `NULL`, absent keeps the row),
+    // `state`/`completed_at` assemble for the hook arms (a provided state
+    // recompletes, explicit-null/absent resolves the default and keeps the
+    // validated-or-current `completed_at`).
+    fields.updated_at = now_utc();
+    if let Some(value) = parsed.description_html.clone() {
+        fields.description_html = value;
     }
-    fire_after_save(
-        state,
-        &pre.pool,
-        *pk,
-        pre.actor.id,
-        prev_state_id,
-        current_state_id,
-        moved_by_run,
-        Some(pre.actor.id),
-        Utc::now(),
-    )
-    .await?;
-
-    // Task fan-out (`:844-865`): both activities carry the before-image.
+    if let Some(value) = parsed.deleted_at {
+        fields.deleted_at = value;
+    }
+    if let Some(value) = parsed.point {
+        fields.point = value.map(|point| point as i32);
+    }
+    if let Some(value) = parsed.name.clone() {
+        fields.name = value;
+    }
+    if let Some(value) = parsed.priority.clone() {
+        fields.priority = value;
+    }
+    if let Some(value) = parsed.complexity_score {
+        fields.complexity_score = value as i32;
+    }
+    if let Some(value) = parsed.start_date {
+        fields.start_date = value;
+    }
+    if let Some(value) = parsed.target_date {
+        fields.target_date = value;
+    }
+    if let Some(value) = parsed.sort_order {
+        fields.sort_order = value;
+    }
+    let row_completed = fields.completed_at;
+    fields.completed_at = parsed.completed_at.flatten().or(row_completed);
+    if let Some(value) = parsed.archived_at {
+        fields.archived_at = value;
+    }
+    if let Some(value) = parsed.is_draft {
+        fields.is_draft = value;
+    }
+    if let Some(value) = parsed.external_source.clone() {
+        fields.external_source = value;
+    }
+    if let Some(value) = parsed.external_id.clone() {
+        fields.external_id = value;
+    }
+    if let Some(value) = parsed.git_work_branch.clone() {
+        fields.git_work_branch = value;
+    }
+    if let Some(value) = parsed.created_via.clone() {
+        fields.created_via = value;
+    }
+    if let Some(value) = parsed.agent_executor.clone() {
+        fields.agent_executor = value;
+    }
+    if let Some(value) = parsed.created_by {
+        fields.created_by_id = value;
+    }
+    if let Some(value) = parsed.parent {
+        fields.parent_id = value;
+    }
+    if let Some(value) = parsed.estimate_point {
+        fields.estimate_point_id = value;
+    }
+    if let Some(value) = parsed.issue_type {
+        fields.type_id = value;
+    }
+    if let Some(value) = parsed.assigned_pod {
+        fields.assigned_pod_id = value;
+    }
+    fields.state_id = match parsed.state {
+        Some(value) => value,
+        None => base.state_id,
+    };
+    // `base_host` raises past the fire (the save + `issue_activity` persist
+    // on a misconfigured host): pure over settings, resolved here,
+    // effective in the chain's model leg.
+    let origin = app_origin(&state.settings().urls).ok();
     let requested_text = requested_data_text(&data);
-    let kwargs = work_tasks::issue_activity_kwargs(
-        work_tasks::ACTIVITY_ISSUE_UPDATED,
-        Some(&requested_text),
-        &pre.actor.id.to_string(),
-        &pk.to_string(),
-        &project_id.to_string(),
-        Some(&current_text),
-        Utc::now().timestamp(),
-    );
-    enqueue_best_effort(&pre.pool, work_tasks::ISSUE_ACTIVITY_TASK, vec![], kwargs).await;
-    let origin = app_origin(&state.settings().urls)?;
-    let webhook = work_tasks::issue_model_activity_kwargs(
-        &pk.to_string(),
-        data.clone(),
-        Some(&current_text),
-        &pre.actor.id.to_string(),
-        slug,
-        &origin,
-    );
-    enqueue_best_effort(&pre.pool, work_tasks::MODEL_ACTIVITY_TASK, vec![], webhook).await;
-
+    let ctx = domain_write_ctx(&pre, &project_id);
+    let actor_id = pre.actor.id;
+    let transition: Arc<dyn IssueTransitionHook> =
+        Arc::new(AppTransitionHook::new(state, &pre.pool));
+    let enqueue: Arc<dyn TaskEnqueueHook> = Arc::new(AppTaskEnqueueHook::new(&pre.pool));
+    let outcome = domain::run(&ctx, orm, |txn| {
+        let transition = transition.clone();
+        let enqueue = enqueue.clone();
+        let pool = pre.pool.clone();
+        let ctx = ctx.clone();
+        let slug = slug.to_owned();
+        Box::pin(async move {
+            txn.hooks_mut().register(transition);
+            txn.hooks_mut().register(enqueue);
+            domain_issues::partial_update(
+                &ctx,
+                txn,
+                &pool,
+                domain_issues::PartialIssue {
+                    m2m_audit: audit,
+                    sequence,
+                    fields,
+                    assignees: parsed.assignees.clone(),
+                    labels: parsed.labels.clone(),
+                    prev_state: prev_state_id,
+                    fire: domain_issues::FireSpec {
+                        dispatch_immediate: true,
+                        created_by: Some(actor_id),
+                        moved_by_run,
+                        now: Utc::now(),
+                    },
+                    activity: Some(domain_issues::UpdateActivity {
+                        origin,
+                        requested: requested_text,
+                        current_instance: current_text,
+                        raw_body: data,
+                        slug,
+                        notification: None,
+                        require_origin: false,
+                        emit_version: false,
+                    }),
+                },
+            )
+            .await
+        })
+    })
+    .await
+    .map_err(domain_save_denial)?;
+    if outcome.chain.stopped().is_some() {
+        return Err(Denial::ServerError);
+    }
     let decoded = fetch_issue_for_write(&pre.pool, slug, &project_id, pk, &tz).await?;
     let rendered = render_write_response(&pre.pool, &decoded, &tz, web_base.as_deref()).await?;
     Ok(json_response(

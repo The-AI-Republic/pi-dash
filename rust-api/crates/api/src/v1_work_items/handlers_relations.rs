@@ -103,6 +103,7 @@
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use axum::extract::{OriginalUri, Path, Request, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -114,7 +115,10 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use pidash_auth::scope::TenantScope;
-use pidash_services::read;
+use pidash_services::domain::activity::TaskEnqueueHook;
+use pidash_services::domain::issues as domain_issues;
+use pidash_services::domain::transition::IssueTransitionHook;
+use pidash_services::domain::{self, WriteActor, WriteCtx, WriteScope};
 use pidash_services::v1_work_items::queries_sub::{
     actual_relation, is_reverse_relation, union_ids,
 };
@@ -128,6 +132,8 @@ use pidash_services::v1_work_items::shape_relations::{
 };
 use pidash_services::v1_work_items::tasks as work_tasks;
 
+use crate::domain_hooks::AppTaskEnqueueHook;
+use crate::issue_transition::AppTransitionHook;
 use crate::state::AppState;
 use crate::v1_projects::handlers_project::{preamble, project_base_facts, rewrite_project_id};
 
@@ -2419,119 +2425,80 @@ async fn workpad_patch_inner(
     if !workpad_has_body(&parsed.value)? {
         return Err(Denial::FieldErrors(WORKPAD_MISSING_BODY.to_owned()));
     }
-    let mut txn = pre
-        .pool
-        .begin()
+    // The existence probe (`:3307-3311`): the SAME text the domain
+    // lock-read runs, on the pool — a miss 404s BEFORE validation runs,
+    // as today. (`FOR UPDATE` in autocommit releases at statement end.)
+    let probe = sqlx::query(domain_issues::WORKPAD_SELECT_SQL)
+        .bind(issue_id)
+        .bind(project_id)
+        .bind(slug)
+        .fetch_optional(&pre.pool)
         .await
-        .map_err(|error| db_error(error, "workpad-txn"))?;
-    // The locked read (`:3307-3311`, fixture `workpad_patch_lock`):
-    // `LIMIT 21` (executed `.get()`) + `FOR UPDATE OF issues`
-    // (`of=("self",)` — a bare lock would 500 on the nullable state
-    // join). A miss 404s BEFORE validation runs.
-    let row = sqlx::query(
-        r#"SELECT "issues"."description_html", "issues"."state_id",
-                  "issues"."completed_at", "states"."group" AS "state_group"
-           FROM "issues"
-           LEFT OUTER JOIN "states" ON ("issues"."state_id" = "states"."id")
-           INNER JOIN "projects" ON ("issues"."project_id" = "projects"."id")
-           INNER JOIN "workspaces" ON ("issues"."workspace_id" = "workspaces"."id")
-           WHERE ("issues"."deleted_at" IS NULL
-             AND NOT ("states"."group" = 'triage' AND "states"."group" IS NOT NULL)
-             AND NOT ("issues"."archived_at" IS NOT NULL)
-             AND NOT ("projects"."archived_at" IS NOT NULL)
-             AND NOT ("issues"."is_draft")
-             AND "issues"."id" = $1
-             AND "issues"."project_id" = $2
-             AND "workspaces"."slug" = $3)
-           LIMIT 21 FOR UPDATE OF "issues""#,
-    )
-    .bind(issue_id)
-    .bind(project_id)
-    .bind(slug)
-    .fetch_optional(&mut *txn)
-    .await
-    .map_err(|error| db_error(error, "workpad-lock"))?;
-    let Some(row) = row else {
-        txn.rollback()
-            .await
-            .map_err(|error| db_error(error, "workpad-rollback"))?;
+        .map_err(|error| db_error(error, "workpad-lock"))?;
+    if probe.is_none() {
         return Err(Denial::NotFound(RESOURCE_NOT_FOUND_BODY.to_owned()));
-    };
+    }
     let validated = validate_workpad_write(&WorkpadWriteInput {
         body: &parsed.value,
         partial: true,
     })
-    .map_err(|error| Denial::FieldErrors(error.body().to_owned()));
-    let validated = match validated {
-        Ok(validated) => validated,
-        Err(denial) => {
-            txn.rollback()
-                .await
-                .map_err(|error| db_error(error, "workpad-rollback"))?;
-            return Err(denial);
-        }
-    };
+    .map_err(|error| Denial::FieldErrors(error.body().to_owned()))?;
     let Some(workpad) = validated.workpad else {
         // Unreachable: the wire-field gate above guarantees a `body` key,
         // and validation only omits it when absent.
-        txn.rollback()
-            .await
-            .map_err(|error| db_error(error, "workpad-rollback"))?;
         return Err(Denial::ServerError);
     };
-    let description_html = row_string(&row, "description_html")?;
-    let prev_state_id: Option<Uuid> = row_uuid_opt(&row, "state_id")?;
-    let completed_at: Option<DateTime<Utc>> = row
-        .try_get("completed_at")
-        .map_err(|_| Denial::ServerError)?;
-    let state_group: Option<String> = row_string_opt(&row, "state_group")?;
-    // `Issue.save` (REL-5): a stateless issue is ASSIGNED the default
-    // non-triage state (else the first by `sequence`), but its
-    // `completed_at` is untouched (the recompute needs a prior state);
-    // `description_stripped` recomputes; `updated_by` stamps the actor.
-    let (state_id, completed_at) = resolve_workpad_state(
-        &mut txn,
-        &project_id,
-        prev_state_id,
-        state_group.as_deref(),
-        completed_at,
-    )
-    .await?;
-    let stripped = workpad_stripped(&description_html);
+    // The locked read + sparse `save()` (workpad, audit, hook recomputes)
+    // run in the domain write; the completion pair when the state moved.
+    // No orchestration fire — the port has none.
     let updated_at = now_utc();
-    sqlx::query(
-        r#"UPDATE "issues" SET "workpad" = $1, "description_stripped" = $2, "completed_at" = $3,
-                  "state_id" = $4, "updated_by_id" = $5, "updated_at" = $6
-           WHERE "id" = $7"#,
-    )
-    .bind(&workpad)
-    .bind(stripped.as_deref())
-    .bind(completed_at)
-    .bind(state_id)
-    .bind(pre.actor.id)
-    .bind(updated_at)
-    .bind(issue_id)
-    .execute(&mut *txn)
+    let orm = state.orm().ok_or(Denial::ServerError)?;
+    let issue_id = *issue_id;
+    let ctx = WriteCtx::new(WriteActor {
+        user_id: pre.actor.id,
+        timezone: pre.actor.timezone.clone(),
+    })
+    .with_scope(WriteScope {
+        workspace_id: pre.workspace_id,
+        project_id: Some(project_id),
+    });
+    let transition: Arc<dyn IssueTransitionHook> =
+        Arc::new(AppTransitionHook::new(state, &pre.pool));
+    let enqueue: Arc<dyn TaskEnqueueHook> = Arc::new(AppTaskEnqueueHook::new(&pre.pool));
+    let outcome = domain::run(&ctx, orm, |txn| {
+        let transition = transition.clone();
+        let enqueue = enqueue.clone();
+        let pool = pre.pool.clone();
+        let ctx = ctx.clone();
+        let slug = slug.to_owned();
+        Box::pin(async move {
+            txn.hooks_mut().register(transition);
+            txn.hooks_mut().register(enqueue);
+            domain_issues::set_workpad(
+                &ctx,
+                txn,
+                &pool,
+                domain_issues::SetWorkpad {
+                    issue_id,
+                    project_id,
+                    slug,
+                    workpad,
+                    updated_at,
+                },
+            )
+            .await
+        })
+    })
     .await
-    .map_err(|error| db_error(error, "workpad-update"))?;
-    txn.commit()
-        .await
-        .map_err(|error| db_error(error, "workpad-commit"))?;
-    // `github_signals.trigger_completion_comment`
-    // (`bgtasks/github_signals.py:44-75`): the workpad save runs the
-    // NULL-state default leg, so patching the workpad of a mirrored
-    // NULL-state issue whose default state is completed-group enqueues
-    // the provider's `post_completion_comment` — after commit, like the
-    // other post-commit completion enqueues. Best-effort: the write
-    // stands. (PIDASHCONV-1460.)
-    if prev_state_id != state_id {
-        crate::issue_transition::enqueue_completion_comment(
-            &pre.pool,
-            issue_id,
-            prev_state_id.as_ref(),
-            state_id.as_ref(),
-        )
-        .await;
+    .map_err(|error| {
+        if error.is_not_found() {
+            Denial::NotFound(RESOURCE_NOT_FOUND_BODY.to_owned())
+        } else {
+            Denial::ServerError
+        }
+    })?;
+    if outcome.stopped().is_some() {
+        return Err(Denial::ServerError);
     }
     // The timestamp only — the body just came from the caller (`:3315-3320`).
     let mut out = Map::with_capacity(1);
@@ -2541,12 +2508,6 @@ async fn workpad_patch_inner(
     );
     let body = serde_json::to_string(&out).map_err(|_| Denial::ServerError)?;
     Ok(json_response(StatusCode::OK, body))
-}
-
-/// The workpad-PATCH `description_stripped` recompute via the public
-/// read service (`db/models/issue.py:346-350`).
-fn workpad_stripped(description_html: &str) -> Option<String> {
-    read::workpad_stripped(description_html)
 }
 
 /// `"body" in request.data` (`:3287`): key membership on objects,
@@ -2561,27 +2522,6 @@ fn workpad_has_body(value: &Value) -> Result<bool, Denial> {
         // generic 500.
         _ => Err(Denial::ServerError),
     }
-}
-
-/// The NULL-state arm of `Issue.save` via the public read service
-/// (`db/models/issue.py:288-308`).
-async fn resolve_workpad_state(
-    txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    project_id: &Uuid,
-    state_id: Option<Uuid>,
-    state_group: Option<&str>,
-    completed_at: Option<DateTime<Utc>>,
-) -> Result<(Option<Uuid>, Option<DateTime<Utc>>), Denial> {
-    read::resolve_workpad_state(txn, project_id, state_id, state_group, completed_at)
-        .await
-        .map_err(|error| match error {
-            // Unreachable: this read never 404s or fails mid-row.
-            read::Error::NotFound | read::Error::Failed(_) => Denial::ServerError,
-            read::Error::Db(err) => {
-                let (site, source) = err.split();
-                db_error(source, site)
-            }
-        })
 }
 
 #[cfg(test)]
@@ -3245,18 +3185,6 @@ mod tests {
         ));
         assert_eq!(activate_timezone(None).expect("none"), chrono_tz::UTC);
         assert_eq!(activate_timezone(Some("UTC")).expect("utc"), chrono_tz::UTC);
-    }
-
-    #[test]
-    fn workpad_stripped_decodes_entities() {
-        // `Issue.save` recomputes via `html_processor.strip_tags`
-        // (MLStripper, entity-decoding) — not Django's verbatim kernel.
-        assert_eq!(workpad_stripped(""), None);
-        assert_eq!(
-            workpad_stripped("<p>a &amp; b</p>").as_deref(),
-            Some("a & b")
-        );
-        assert_eq!(workpad_stripped("<p></p>").as_deref(), Some(""));
     }
 
     #[test]

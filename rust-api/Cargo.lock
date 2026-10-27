@@ -2998,6 +2998,7 @@ dependencies = [
  "rust_decimal",
  "rustls",
  "scraper",
+ "sea-orm",
  "sea-query",
  "serde",
  "serde_json",

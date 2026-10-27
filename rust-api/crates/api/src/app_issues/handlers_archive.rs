@@ -1315,6 +1315,7 @@ pub async fn archive_issue(
                     fire: domain_issues::FireSpec {
                         dispatch_immediate: true,
                         created_by: Some(context.gate.user_id),
+                        moved_by_run: None,
                         now,
                     },
                     pre_activity: domain_issues::PreSaveActivity {
@@ -1394,6 +1395,7 @@ pub async fn unarchive_issue(
                     fire: domain_issues::FireSpec {
                         dispatch_immediate: true,
                         created_by: Some(context.gate.user_id),
+                        moved_by_run: None,
                         now,
                     },
                     pre_activity: domain_issues::PreSaveActivity {
