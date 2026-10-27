@@ -5921,11 +5921,16 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async ganttShowsIssue(issueName: string): Promise<boolean> {
-    // Settle on the bar so the dependency absence below reads on a
-    // rendered chart, not a loader; a still-missing bar reads false.
+    // The sidebar lists every issue in the view, dated or not, and the
+    // oracle settles on the name text — so a present row link means shown.
+    // Bars exist only for dated issues and must not gate this read.
     const deadline = Date.now() + 60_000;
     for (;;) {
-      if (await this.ganttBarExists(issueName).catch(() => false)) return true;
+      const shown = await this.ganttRowLink(issueName).then(
+        () => true,
+        () => false
+      );
+      if (shown) return true;
       if (Date.now() >= deadline) return false;
       await this.page.waitForTimeout(500);
     }
@@ -11833,7 +11838,9 @@ export class WebNewDriver implements ParityDriver {
       )
         .trim()
         .replace(/\s+/g, " ");
-      if (text.replace(/^[A-Z]+-\d+\s+/, "") === issueName) return links.nth(index);
+      // Identifiers carry digits in the prefix (N122ZDUQCM-1), not just
+      // letters — the strip must accept both (live-proven ISS-237).
+      if (text.replace(/^[A-Z0-9]+-\d+\s+/, "") === issueName) return links.nth(index);
     }
     throw new Error(`[parity] no timeline row titled ${JSON.stringify(issueName)}.`);
   }
@@ -11845,8 +11852,8 @@ export class WebNewDriver implements ParityDriver {
     for (let index = 0; index < total; index += 1) {
       const row = rows.nth(index);
       const text = ((await row.innerText().catch(() => null)) ?? "").trim().replace(/\s+/g, " ");
-      const identifier = /^([A-Z]+-\d+)\s+/.exec(text)?.[1] ?? null;
-      const name = identifier === null ? text : text.replace(/^[A-Z]+-\d+\s+/, "").replace(/\s+\d+ days?$/, "");
+      const identifier = /^([A-Z0-9]+-\d+)\s+/.exec(text)?.[1] ?? null;
+      const name = identifier === null ? text : text.replace(/^[A-Z0-9]+-\d+\s+/, "").replace(/\s+\d+ days?$/, "");
       const duration = row.getByTestId("gantt-row-duration");
       const durationText = (await duration.count()) > 0 ? (await duration.innerText()).trim() || null : null;
       out.push({ identifier, name, duration: durationText });

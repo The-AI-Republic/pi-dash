@@ -118,26 +118,22 @@ describe("edition stubs", () => {
     expect(gotos).toEqual(["/ws/projects/pid/views/view1"]);
   });
 
-  it("settles on a late bar and reads a missing one as absent", async () => {
+  it("reads a present row as shown even without a bar", async () => {
     const link = locator({ innerText: async () => "WEB-1 First", getAttribute: async () => "issue-row-1" });
-    const late = pageOf({
-      locator: (selector: string) => {
-        if (selector === '#gantt-sidebar a[id^="issue-"]') return locator({ count: async () => 1, nth: () => link });
-        return locator({
-          first: () =>
-            locator({ count: async () => 1, boundingBox: async () => ({ x: 0, y: 0, width: 40, height: 20 }) }),
-        });
-      },
-    });
-    await expect(new WebNewDriver(late).ganttShowsIssue("First")).resolves.toBe(true);
-
-    // Construct before mocking time: the driver's startedAt initializer
-    // consumes a Date.now call at construction.
-    const bare = pageOf({
+    const dateless = pageOf({
       locator: (selector: string) => {
         if (selector === '#gantt-sidebar a[id^="issue-"]') return locator({ count: async () => 1, nth: () => link });
         return locator({ first: () => locator({ count: async () => 0, boundingBox: async () => null }) });
       },
+    });
+    await expect(new WebNewDriver(dateless).ganttShowsIssue("First")).resolves.toBe(true);
+  });
+
+  it("reads a missing row as absent", async () => {
+    // Construct before mocking time: the driver's startedAt initializer
+    // consumes a Date.now call at construction.
+    const bare = pageOf({
+      locator: () => locator({ count: async () => 0 }),
       waitForTimeout: async () => undefined,
     });
     const driver = new WebNewDriver(bare);

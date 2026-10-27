@@ -810,6 +810,29 @@ describe("gantt sidebar", () => {
     );
   });
 
+  it("strips identifier prefixes carrying digits", async () => {
+    await expect(
+      new WebNewDriver(linksPage(["N122ZDUQCM-1 Second"])).ganttOpenRowPeek("Second")
+    ).resolves.toBeUndefined();
+  });
+
+  it("splits a digit-prefix identifier from the name", async () => {
+    const page = pageOf({
+      getByTestId: () =>
+        locator({
+          count: async () => 1,
+          nth: () =>
+            locator({
+              innerText: async () => "N122ZDUQCM-1 First",
+              getByTestId: () => locator({ count: async () => 0 }),
+            }),
+        }),
+    });
+    await expect(new WebNewDriver(page).ganttSidebarRows()).resolves.toEqual([
+      { identifier: "N122ZDUQCM-1", name: "First", duration: null },
+    ]);
+  });
+
   it("finds a bar by the row's issue id", async () => {
     const page = pageOf({
       locator: (selector: string) =>
