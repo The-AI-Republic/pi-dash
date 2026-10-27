@@ -1574,3 +1574,127 @@ describe("gantt quick-add (ISS-055)", () => {
     await expect(new WebNewDriver(absent).ganttHasQuickAdd()).resolves.toBe(false);
   });
 });
+
+describe("gantt bar chrome, preview and scroll arrows (ISS-056)", () => {
+  const ISSUE = "row-1";
+  const link = locator({ innerText: async () => "WEB-1 First", getAttribute: async () => `issue-${ISSUE}` });
+
+  function barPage(bar: StubLocator, extra: Partial<Record<string, unknown>> = {}): Page {
+    return pageOf({
+      locator: (selector: string) => {
+        if (selector === '#gantt-sidebar a[id^="issue-"]') return locator({ count: async () => 1, nth: () => link });
+        if (selector === `#gantt-block-${ISSUE}`) return locator({ first: () => locator(bar) });
+        return locator();
+      },
+      ...extra,
+    });
+  }
+
+  it("reads bar tint, mask and pinned name off the block", async () => {
+    const info = { tinted: true, masked: true, namePinned: true };
+    const page = barPage({
+      count: async () => 1,
+      boundingBox: async () => ({ x: 0, y: 0, width: 80, height: 24 }),
+      evaluate: async () => info,
+    });
+    await expect(new WebNewDriver(page).ganttBarInfo("First")).resolves.toEqual(info);
+  });
+
+  it("reads a missing bar or body as null", async () => {
+    const missing = barPage({ count: async () => 0, boundingBox: async () => null });
+    await expect(new WebNewDriver(missing).ganttBarInfo("First")).resolves.toBeNull();
+    const bodiless = barPage({
+      count: async () => 1,
+      boundingBox: async () => ({ x: 0, y: 0, width: 80, height: 24 }),
+      evaluate: async () => null,
+    });
+    await expect(new WebNewDriver(bodiless).ganttBarInfo("First")).resolves.toBeNull();
+  });
+
+  it("hovers the bar after scrolling it into view", async () => {
+    const calls: string[] = [];
+    const page = barPage({
+      scrollIntoViewIfNeeded: async () => void calls.push("scroll"),
+      hover: async () => void calls.push("hover"),
+    });
+    await new WebNewDriver(page).ganttHoverBar("First");
+    expect(calls).toEqual(["scroll", "hover"]);
+  });
+
+  it("reports the hover preview card presence", async () => {
+    const shown = pageOf({ getByTestId: () => locator({ count: async () => 1, isVisible: async () => true }) });
+    await expect(new WebNewDriver(shown).ganttPreviewVisible()).resolves.toBe(true);
+    const bare = pageOf({ getByTestId: () => locator({ count: async () => 0 }) });
+    await expect(new WebNewDriver(bare).ganttPreviewVisible()).resolves.toBe(false);
+  });
+
+  it("opens peek from a bar click and settles on its title", async () => {
+    const calls: string[] = [];
+    const page = barPage(
+      {
+        scrollIntoViewIfNeeded: async () => undefined,
+        click: async () => void calls.push("bar"),
+      },
+      {
+        getByTestId: () =>
+          locator({
+            waitFor: async () => undefined,
+            getByLabel: () => locator({ inputValue: async () => "First" }),
+          }),
+      }
+    );
+    await new WebNewDriver(page).ganttOpenBarPeek("First");
+    expect(calls).toEqual(["bar"]);
+  });
+
+  it("reads the row's scroll arrow presence", async () => {
+    const offered = pageOf({
+      locator: () => locator({ getByRole: () => locator({ count: async () => 1, isVisible: async () => true }) }),
+    });
+    await expect(new WebNewDriver(offered).ganttScrollArrowVisible("First")).resolves.toBe(true);
+    const bare = pageOf({
+      locator: () => locator({ getByRole: () => locator({ count: async () => 0 }) }),
+    });
+    await expect(new WebNewDriver(bare).ganttScrollArrowVisible("First")).resolves.toBe(false);
+  });
+
+  it("refuses to click a missing scroll arrow", async () => {
+    const page = pageOf({
+      locator: (selector: string) => {
+        if (selector === '#gantt-sidebar a[id^="issue-"]') return locator({ count: async () => 1, nth: () => link });
+        return locator({ getByRole: () => locator({ count: async () => 0 }) });
+      },
+    });
+    await expect(new WebNewDriver(page).ganttClickScrollArrow("First")).rejects.toThrow("no scroll arrow");
+  });
+
+  it("clicks the arrow and settles once the bar is in view", async () => {
+    const calls: string[] = [];
+    const page = pageOf({
+      locator: (selector: string) => {
+        if (selector === '#gantt-sidebar a[id^="issue-"]') return locator({ count: async () => 1, nth: () => link });
+        if (selector === `#gantt-block-${ISSUE}`) {
+          return locator({
+            first: () => locator({ boundingBox: async () => ({ x: 10, y: 0, width: 80, height: 24 }) }),
+          });
+        }
+        return locator({
+          getByRole: () => locator({ click: async () => void calls.push("arrow") }),
+        });
+      },
+    });
+    await new WebNewDriver(page).ganttClickScrollArrow("First");
+    expect(calls).toEqual(["arrow"]);
+  });
+
+  it("reads bar viewport membership off its box", async () => {
+    const inside = barPage({ boundingBox: async () => ({ x: 10, y: 0, width: 80, height: 24 }) });
+    await expect(new WebNewDriver(inside).ganttBarInView("First")).resolves.toBe(true);
+    const left = barPage({ boundingBox: async () => ({ x: -100, y: 0, width: 80, height: 24 }) });
+    await expect(new WebNewDriver(left).ganttBarInView("First")).resolves.toBe(false);
+    const right = barPage({ boundingBox: async () => ({ x: 1300, y: 0, width: 80, height: 24 }) });
+    await expect(new WebNewDriver(right).ganttBarInView("First")).resolves.toBe(false);
+    const boxless = barPage({ boundingBox: async () => null });
+    await expect(new WebNewDriver(boxless).ganttBarInView("First")).resolves.toBe(false);
+  });
+});

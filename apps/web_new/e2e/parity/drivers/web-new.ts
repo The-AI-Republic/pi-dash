@@ -5886,30 +5886,49 @@ export class WebNewDriver implements ParityDriver {
       .waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
   }
 
-  async subIssueFiltersOpen(_workspaceSlug: string, _projectId: string, _parentIssueId: string): Promise<void> {
-    // The caller opens the detail first; this only drops the filter menu.
-    await this.page.getByTestId("sub-issue-filters-trigger").click({ timeout: WebNewDriver.WAIT_MS });
-    await this.page.getByTestId("sub-issue-filters-panel").waitFor({ timeout: WebNewDriver.WAIT_MS });
+  async subIssueFiltersOpen(workspaceSlug: string, projectId: string, parentIssueId: string): Promise<void> {
+    await this.openIssueDetail(workspaceSlug, projectId, parentIssueId);
+    await this.page.getByTestId("sub-issues-collapsible").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByTestId("sub-issue-filters-trigger").first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByTestId("sub-issue-filters-panel").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async subIssueFiltersPanelText(): Promise<string> {
-    return (await this.page.getByTestId("sub-issue-filters-panel").innerText()).trim();
+    const panel = this.page.getByTestId("sub-issue-filters-panel").first();
+    await panel.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return ((await panel.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+  }
+
+  /** The header's key copy button; sidebar keys never win the scope. */
+  private identifierBadge(): Locator {
+    return this.page.getByRole("button", { name: /^[A-Z0-9]{2,}-\d+$/ }).first();
   }
 
   async detailIdentifierText(): Promise<string> {
-    return todo("detailIdentifierText");
+    const badge = this.identifierBadge();
+    await badge.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return ((await badge.innerText()) ?? "").trim();
   }
 
   async detailIdentifierCopy(): Promise<void> {
-    return todo("detailIdentifierCopy");
+    // The clipboard grant is arranged by the caller's read, not here.
+    await this.identifierBadge().click({ timeout: WebNewDriver.WAIT_MS });
   }
 
-  async viewsOpenDetail(_workspaceSlug: string, _projectId: string, _viewId: string): Promise<void> {
-    return todo("viewsOpenDetail");
+  async viewsOpenDetail(workspaceSlug: string, projectId: string, viewId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/views/${viewId}`);
+    await this.page.waitForLoadState("domcontentloaded");
   }
 
-  async ganttShowsIssue(_issueName: string): Promise<boolean> {
-    return todo("ganttShowsIssue");
+  async ganttShowsIssue(issueName: string): Promise<boolean> {
+    // Settle on the bar so the dependency absence below reads on a
+    // rendered chart, not a loader; a still-missing bar reads false.
+    const deadline = Date.now() + 60_000;
+    for (;;) {
+      if (await this.ganttBarExists(issueName).catch(() => false)) return true;
+      if (Date.now() >= deadline) return false;
+      await this.page.waitForTimeout(500);
+    }
   }
 
   // --- Project settings labels (NEWFRONT-393, PSET-036–042; new-app surface
@@ -12047,32 +12066,72 @@ export class WebNewDriver implements ParityDriver {
     return await entry.isVisible();
   }
 
-  async ganttBarInfo(_issueName: string): Promise<{ tinted: boolean; masked: boolean; namePinned: boolean } | null> {
-    return todo("ganttBarInfo");
+  /** One issue's timeline bar block, addressed by row id. */
+  private ganttBar(issueId: string): Locator {
+    return this.page.locator(`#gantt-block-${issueId}`).first();
   }
 
-  async ganttHoverBar(_issueName: string): Promise<void> {
-    return todo("ganttHoverBar");
+  async ganttBarInfo(issueName: string): Promise<{ tinted: boolean; masked: boolean; namePinned: boolean } | null> {
+    if (!(await this.ganttBarExists(issueName))) return null;
+    const issueId = await this.ganttIssueIdByName(issueName);
+    return await this.ganttBar(issueId).evaluate((bar) => {
+      const body = bar.querySelector('[data-testid="gantt-bar-body"]') as HTMLElement | null;
+      if (!body) return null;
+      const tint = window.getComputedStyle(body).backgroundColor;
+      const mask = window.getComputedStyle(body).maskImage ?? "";
+      const name = bar.querySelector('[data-testid="gantt-bar-name"]') as HTMLElement | null;
+      const pinned = !!name && window.getComputedStyle(name).position === "sticky";
+      return {
+        tinted: !!tint && tint !== "rgba(0, 0, 0, 0)" && tint !== "transparent",
+        masked: mask.includes("gradient"),
+        namePinned: pinned && window.getComputedStyle(name as HTMLElement).left !== "auto",
+      };
+    });
+  }
+
+  async ganttHoverBar(issueName: string): Promise<void> {
+    const issueId = await this.ganttIssueIdByName(issueName);
+    const bar = this.ganttBar(issueId);
+    await bar.scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
+    await bar.hover({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.waitForTimeout(600);
   }
 
   async ganttPreviewVisible(): Promise<boolean> {
-    return todo("ganttPreviewVisible");
+    return this.isShown(this.page.getByTestId("work-item-preview").first());
   }
 
-  async ganttOpenBarPeek(_issueName: string): Promise<void> {
-    return todo("ganttOpenBarPeek");
+  async ganttOpenBarPeek(issueName: string): Promise<void> {
+    const issueId = await this.ganttIssueIdByName(issueName);
+    const bar = this.ganttBar(issueId);
+    await bar.scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
+    await bar.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByTestId("issue-preview").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await expect.poll(() => this.issuePeekTitle(), { timeout: WebNewDriver.WAIT_MS }).toBe(issueName);
   }
 
-  async ganttScrollArrowVisible(_issueName: string): Promise<boolean> {
-    return todo("ganttScrollArrowVisible");
+  async ganttScrollArrowVisible(issueName: string): Promise<boolean> {
+    // One sticky arrow per off-screen bar, labelled for its row.
+    const arrow = this.ganttContainer().getByRole("button", { name: `Scroll to ${issueName}` });
+    if ((await arrow.count()) === 0) return false;
+    return await arrow.first().isVisible();
   }
 
-  async ganttClickScrollArrow(_issueName: string): Promise<void> {
-    return todo("ganttClickScrollArrow");
+  async ganttClickScrollArrow(issueName: string): Promise<void> {
+    const arrow = this.ganttContainer()
+      .getByRole("button", { name: `Scroll to ${issueName}` })
+      .first();
+    if ((await arrow.count()) === 0) throw new Error(`[parity] no scroll arrow for ${JSON.stringify(issueName)}.`);
+    await arrow.click({ timeout: WebNewDriver.WAIT_MS });
+    await expect.poll(() => this.ganttBarInView(issueName), { timeout: WebNewDriver.WAIT_MS }).toBe(true);
   }
 
-  async ganttBarInView(_issueName: string): Promise<boolean> {
-    return todo("ganttBarInView");
+  async ganttBarInView(issueName: string): Promise<boolean> {
+    const issueId = await this.ganttIssueIdByName(issueName);
+    const box = await this.ganttBar(issueId).boundingBox();
+    if (!box) return false;
+    const viewport = this.page.viewportSize() ?? { width: 1280, height: 720 };
+    return box.x < viewport.width && box.x + box.width > 0;
   }
 
   async ganttSidebarLoading(): Promise<boolean> {
