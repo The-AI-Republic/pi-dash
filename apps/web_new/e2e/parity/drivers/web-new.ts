@@ -3165,8 +3165,24 @@ export class WebNewDriver implements ParityDriver {
       timeout: WebNewDriver.WAIT_MS,
     });
   }
-  async openReadOnlyIssueDetail(_workspaceSlug: string, _issueSeq: string): Promise<void> {
-    return todo("openReadOnlyIssueDetail");
+  async openReadOnlyIssueDetail(workspaceSlug: string, issueSeq: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/browse/${issueSeq}`);
+    // No title field renders on read-only detail (static title instead),
+    // so the identifier plus a hydrated sidebar row decide.
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    let loops = 0;
+    for (;;) {
+      if ((await this.issueDetailIdentifier()) === issueSeq) {
+        if ((await this.sidebarProperty("State")) !== null) return;
+      }
+      if ((await this.page.getByPlaceholder("name@company.com").count()) > 0) {
+        throw new Error("[parity] session lost while opening the read-only detail page.");
+      }
+      loops++;
+      if (Date.now() > deadline) throw new Error(`[parity] read-only detail did not hydrate for ${issueSeq}.`);
+      if (loops % 15 === 0) await this.page.reload().catch(() => {});
+      else await this.page.waitForTimeout(2000);
+    }
   }
   async issueDetailTitle(): Promise<string | null> {
     // Editable detail carries the title field; anything else is not a
@@ -3176,19 +3192,58 @@ export class WebNewDriver implements ParityDriver {
     return field.inputValue().catch(() => null);
   }
   async issueDetailIdentifier(): Promise<string | null> {
-    return todo("issueDetailIdentifier");
+    // The header renders the key as a copy button; scope to buttons so
+    // sidebar keys never win.
+    const id = this.page.getByRole("button", { name: /^[A-Z0-9]{2,}-\d+$/ }).first();
+    if ((await id.count()) === 0) return null;
+    return ((await id.innerText()) ?? "").trim();
   }
-  async editIssueTitle(_name: string): Promise<void> {
-    return todo("editIssueTitle");
+  async editIssueTitle(name: string): Promise<void> {
+    const field = this.page.getByLabel("Title").first();
+    await field.fill(name, { timeout: WebNewDriver.WAIT_MS });
+    // Blur so the debounced autosave flushes; Tab avoids the header
+    // copy button, which would toast on click.
+    await field.press("Tab", { timeout: WebNewDriver.WAIT_MS });
   }
   async saveIndicator(): Promise<string | null> {
-    return todo("saveIndicator");
+    const saving = this.page.getByText(/^Saving…$/).first();
+    if ((await saving.count()) > 0) return "Saving…";
+    const saved = this.page.getByText(/^Saved$/).first();
+    if ((await saved.count()) > 0) return "Saved";
+    return null;
   }
   async descriptionText(): Promise<string | null> {
-    return todo("descriptionText");
+    // Editing renders a contenteditable; the settled view renders the
+    // "Edit description" surface; an untouched issue shows the add
+    // button, which reads as empty.
+    const editor = this.page.locator("[contenteditable='true']").first();
+    if ((await editor.count()) > 0) return ((await editor.innerText()) ?? "").trim();
+    const view = this.page.getByRole("button", { name: "Edit description" }).first();
+    if ((await view.count()) > 0) return ((await view.innerText()) ?? "").trim();
+    const add = this.page.getByRole("button", { name: "Add a description" }).first();
+    if ((await add.count()) > 0) return "";
+    return null;
   }
-  async setDescription(_text: string): Promise<void> {
-    return todo("setDescription");
+  async setDescription(text: string): Promise<void> {
+    const add = this.page.getByRole("button", { name: "Add a description" }).first();
+    if ((await add.count()) > 0) await add.click({ timeout: WebNewDriver.WAIT_MS });
+    else {
+      const view = this.page.getByRole("button", { name: "Edit description" }).first();
+      if ((await view.count()) > 0) await view.click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    const editor = this.page.locator("[contenteditable='true']").first();
+    await editor.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await editor.click({ timeout: WebNewDriver.WAIT_MS });
+    // fill() never reaches the rich editor's state; type instead.
+    await this.page.keyboard.press("ControlOrMeta+a");
+    if (text.length === 0) {
+      await this.page.keyboard.press("Backspace");
+    } else {
+      await editor.pressSequentially(text, { timeout: WebNewDriver.WAIT_MS });
+    }
+    // Blur out so the debounced autosave flushes; Tab avoids the
+    // header copy button, which would toast on click.
+    await editor.press("Tab", { timeout: WebNewDriver.WAIT_MS });
   }
   async sidebarProperty(label: string): Promise<string | null> {
     // Read the row's value half: the label span is the row's accessible
@@ -3259,25 +3314,62 @@ export class WebNewDriver implements ParityDriver {
     return this.page.evaluate(() => navigator.clipboard.readText());
   }
   async subscribeToggle(): Promise<string | null> {
-    return todo("subscribeToggle");
+    const toggle = this.page.getByRole("button", { name: /^(Subscribe|Unsubscribe)$/ }).first();
+    if ((await toggle.count()) === 0) return null;
+    return ((await toggle.innerText()) ?? "").trim() || null;
   }
   async clickSubscribeToggle(): Promise<void> {
-    return todo("clickSubscribeToggle");
+    await this.page
+      .getByRole("button", { name: /^(Subscribe|Unsubscribe)$/ })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
   async quickActionNames(): Promise<string[]> {
-    return todo("quickActionNames");
+    const items = await this.openDetailQuickActions();
+    return (await items.allTextContents()).map((t) => t.trim()).filter((t) => t.length > 0);
   }
-  async clickQuickAction(_name: string): Promise<void> {
-    return todo("clickQuickAction");
+  async clickQuickAction(name: string): Promise<void> {
+    // A click swallowed by a re-render leaves the menu open with no
+    // effect, so retry until the menu closes (every item closes it).
+    for (let attempt = 0; ; attempt++) {
+      const items = await this.openDetailQuickActions();
+      await items.filter({ hasText: name }).first().click({ timeout: WebNewDriver.WAIT_MS });
+      try {
+        await this.page.getByRole("menuitem").first().waitFor({ state: "detached", timeout: 5000 });
+        return;
+      } catch {
+        if (attempt >= 2) throw new Error(`[parity] quick action ${JSON.stringify(name)} did not land.`);
+        await this.page.keyboard.press("Escape").catch(() => {});
+      }
+    }
   }
-  async quickActionDisabled(_name: string): Promise<boolean> {
-    return todo("quickActionDisabled");
+  async quickActionDisabled(name: string): Promise<boolean> {
+    const items = await this.openDetailQuickActions();
+    const disabled = await items.filter({ hasText: name }).first().isDisabled();
+    await this.page.keyboard.press("Escape").catch(() => {});
+    return disabled;
   }
-  async openLegacyIssueRoute(_workspaceSlug: string, _projectId: string, _issueId: string): Promise<void> {
-    return todo("openLegacyIssueRoute");
+  private async openDetailQuickActions(): Promise<Locator> {
+    // The header's icon-only menu button; retry past re-render
+    // swallows until the items show.
+    const trigger = this.page.getByTestId("detail-menu-trigger").first();
+    const visibleItems = this.page.locator('[role="menuitem"]:visible');
+    for (let attempt = 0; ; attempt++) {
+      await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+      try {
+        await visibleItems.first().waitFor({ timeout: 5000 });
+        return visibleItems;
+      } catch {
+        if (attempt >= 2) throw new Error("[parity] detail quick-action menu did not open.");
+      }
+    }
+  }
+  async openLegacyIssueRoute(workspaceSlug: string, projectId: string, issueId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/issues/${issueId}`);
+    await this.page.waitForURL(/\/browse\//, { timeout: WebNewDriver.WAIT_MS });
   }
   async seesDetailMissing(): Promise<boolean> {
-    return todo("seesDetailMissing");
+    return (await this.page.getByText(/No work item matches this address/).count()) > 0;
   }
   async signedIn(): Promise<boolean> {
     // The entry card is the only signed-out surface; a workspace shell,
@@ -3286,13 +3378,61 @@ export class WebNewDriver implements ParityDriver {
     return !(await this.authEmailField().isVisible());
   }
   async openDescriptionHistory(): Promise<void> {
-    return todo("openDescriptionHistory");
+    const trigger = this.page.getByRole("button", { name: /Edited by/ }).first();
+    const visibleItems = this.page.locator('[role="menuitem"]:visible');
+    for (let attempt = 0; ; attempt++) {
+      await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+      try {
+        await visibleItems.first().waitFor({ timeout: 5000 });
+        return;
+      } catch {
+        if (attempt >= 2) throw new Error("[parity] description history menu did not open.");
+      }
+    }
   }
   async historyVersionNames(): Promise<string[]> {
-    return todo("historyVersionNames");
+    const items = this.page.locator('[role="menuitem"]:visible');
+    return (await items.allTextContents()).map((t) => t.trim()).filter((t) => t.length > 0);
   }
-  async restoreHistoryVersion(_name: string): Promise<void> {
-    return todo("restoreHistoryVersion");
+  async restoreHistoryVersion(name: string): Promise<void> {
+    const key = (text: string): string =>
+      text
+        .replace(
+          /(less than a minute ago|\d+\s+(second|minute|hour|day|week|month|year)s?\s+ago|just now|yesterday)/gi,
+          ""
+        )
+        .replace(/\s+/g, "")
+        .toLowerCase();
+    const want = key(name);
+    for (let attempt = 0; ; attempt++) {
+      const candidates = this.page.locator('[role="menuitem"]:visible');
+      const count = await candidates.count();
+      let targetIndex = -1;
+      for (let i = 0; i < count; i++) {
+        const text = ((await candidates.nth(i).textContent()) ?? "").trim();
+        if (want.length > 0 && key(text).includes(want)) {
+          targetIndex = i;
+          break;
+        }
+      }
+      if (targetIndex < 0) {
+        if (attempt >= 2) throw new Error(`[parity] no history version matched "${name}".`);
+        await this.page.waitForTimeout(500);
+        continue;
+      }
+      const target = candidates.nth(targetIndex);
+      try {
+        await target.click({ timeout: WebNewDriver.WAIT_MS });
+      } catch {
+        await target.click({ force: true });
+      }
+      break;
+    }
+    const dialog = this.page.getByRole("dialog", { name: /Description history/ });
+    await dialog.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.getByRole("button", { name: /^Restore$/ }).click();
+    await dialog.waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
+    await this.page.waitForLoadState("networkidle").catch(() => {});
   }
 
   // --- Comment composer and CRUD (NEWFRONT-112). Stubs mirror the
