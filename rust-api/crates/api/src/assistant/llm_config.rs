@@ -24,10 +24,13 @@
 //! [`super::model_seam::CeAssistantSeam`], which reuses
 //! [`pidash_services::assistant::llm::resolve_byok_model`] and the
 //! [`pidash_services::assistant::title`] request/response pipeline), and
-//! the member gate reuses [`super::perm::require_member`]. This module
-//! owns the HTTP shell (routes, session auth), the config-row SQL, and
-//! the DRF error rendering (the `pydantic-ai`/`openai`/`anthropic` SDK
-//! clients stay in Python; the wire behavior is what is ported).
+//! the member gate reuses [`super::perm::require_member`]. The
+//! config-row service lives in
+//! [`pidash_services::assistant::config`] and the probe in
+//! [`pidash_services::assistant::probe`] (OVL-07); this module owns the
+//! HTTP shell (routes, session auth, PUT validation) and the DRF error
+//! rendering (the `pydantic-ai`/`openai`/`anthropic` SDK clients stay in
+//! Python; the wire behavior is what is ported).
 //!
 //! Throttle scopes (`assistant_llm_test` 6/minute,
 //! `assistant_llm_generate_title` 20/minute,
@@ -53,12 +56,17 @@ use axum::Router;
 use serde_json::Value;
 
 use pidash_db::assistant::models::{has_secret, user_llm_config};
+use pidash_services::assistant::config::{
+    self, ConfigDeps, ConfigError, LlmConfigRow, ValidatedPut,
+};
+use pidash_services::assistant::probe::{self, ProbeOutcome};
+use pidash_services::assistant::ssrf::SystemResolver;
 use pidash_services::extensions::{ByokTitleInputs, TitleError, TitleRequest};
 use pidash_types::assistant::serializers;
 
 use super::common::{
-    actor, base_url_blocked, body_get, crypto_config, decrypt_api_key, encrypt_api_key, isoformat,
-    ok_false, ok_false_detail, ok_true, parse_body, parse_put_body, pool_of, request_content_type,
+    actor, base_url_blocked, body_get, crypto_config, decrypt_api_key, isoformat, ok_false,
+    ok_false_detail, ok_true, parse_body, parse_put_body, pool_of, request_content_type,
     run_char_field, validate_choice, workspace_role, BodyField, BodyMap, CharFieldRules, Failure,
     ParsedBody,
 };
@@ -128,80 +136,15 @@ fn owned_title(
 // ---------------------------------------------------------------------------
 // config rows (`UserLLMConfig.objects.filter(user=...)`, `models.py:238-262`)
 // ---------------------------------------------------------------------------
-
-/// One `assistant_user_llm_config` row as the handlers read it.
-#[derive(Debug, Clone)]
-struct LlmRow {
-    provider_kind: String,
-    base_url: String,
-    model_name: String,
-    api_key_encrypted: Option<Vec<u8>>,
-    last_verified_at: Option<chrono::DateTime<chrono::Utc>>,
-}
-
-/// Decoded config-row tuple: provider, base URL, model, encrypted key,
-/// verification timestamp.
-type LlmRowTuple = (
-    String,
-    String,
-    String,
-    Option<Vec<u8>>,
-    Option<chrono::DateTime<chrono::Utc>>,
-);
-
-async fn fetch_row(pool: &sqlx::PgPool, user_id: &uuid::Uuid) -> Result<Option<LlmRow>, Failure> {
-    let row: Option<LlmRowTuple> = sqlx::query_as(
-        r#"SELECT provider_kind, base_url, model_name, api_key_encrypted, last_verified_at
-           FROM assistant_user_llm_config WHERE user_id = $1 LIMIT 1"#,
-    )
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Failure::server_error())?;
-    Ok(row.map(
-        |(provider_kind, base_url, model_name, api_key_encrypted, last_verified_at)| LlmRow {
-            provider_kind,
-            base_url,
-            model_name,
-            api_key_encrypted,
-            last_verified_at,
-        },
-    ))
-}
-
-/// `cfg.save()` (`llm_config.py:71`): a full-row write that refreshes
-/// `updated_at` (`auto_now`); `created_at`, `user_id`, and
-/// `last_verified_at` keep their stored values. Any failure answers 400
-/// `{"error": "invalid"}` (`:72-73`).
-async fn save_row(
-    pool: &sqlx::PgPool,
-    user_id: &uuid::Uuid,
-    provider_kind: &str,
-    base_url: &str,
-    model_name: &str,
-    api_key_encrypted: &Option<Vec<u8>>,
-    existed: bool,
-) -> Result<(), Failure> {
-    pidash_services::domain::assistant::save_llm_config(
-        pool,
-        &pidash_services::domain::assistant::LlmConfigSave {
-            user_id: *user_id,
-            provider_kind,
-            base_url,
-            model_name,
-            api_key_encrypted,
-            existed,
-        },
-    )
-    .await
-    .map_err(|_| Failure::bare_error(StatusCode::BAD_REQUEST, "invalid"))?;
-    Ok(())
-}
+// The row service lives in [`pidash_services::assistant::config`]
+// (OVL-07 moved `fetch_row`/`save_row` there as `get_config` /
+// `put_config` / `delete_config`); this module keeps the HTTP shell
+// plus the response rendering below.
 
 /// Render `_serialize` (`llm_config.py:23-38`): `Meta.fields` order minus
 /// the write-only `api_key`; `last_verified_at` is `isoformat()` or
 /// `None`. The unset shape carries the model default provider kind.
-fn serialize_row(row: Option<&LlmRow>) -> Value {
+fn serialize_row(row: Option<&LlmConfigRow>) -> Value {
     match row {
         None => serde_json::json!({
             "provider_kind": user_llm_config::DEFAULT_PROVIDER_KIND.as_str(),
@@ -224,23 +167,20 @@ fn serialize_row(row: Option<&LlmRow>) -> Value {
 // PUT validation (`UserLLMConfigSerializer`, `serializers.py:37-75`)
 // ---------------------------------------------------------------------------
 
-/// Validated PUT fields; `None` is "omitted" (partial-update keeps the
-/// stored value, create falls back to the model default).
-#[derive(Debug, Default)]
-struct ValidatedPut {
-    provider_kind: Option<String>,
-    base_url: Option<String>,
-    model_name: Option<String>,
-    api_key: Option<String>,
-}
-
 /// Field-level + cross-field validation in DRF order: every present
 /// writable field coerces, checks `max_length`, then runs its custom
 /// `validate_<field>`; errors collect in `Meta.fields` order and the
 /// cross-field `validate()` runs only when no field failed.
-fn validate_put(
+///
+/// Public for the cloud overlay's config twin (OVL-07), which copied
+/// this function line for line. It moves to
+/// [`pidash_services::assistant::config`] once OVL-04's compat crate
+/// lands — its field mechanics (`run_char_field`, `validate_choice`)
+/// are OVL-04's named unit, and this crate cannot move them without
+/// forking that unit's rebase.
+pub fn validate_put(
     body: &BodyMap,
-    instance: Option<&LlmRow>,
+    instance: Option<&LlmConfigRow>,
 ) -> Result<ValidatedPut, Vec<(String, Vec<String>)>> {
     let mut errors: Vec<(String, Vec<String>)> = Vec::new();
     let mut out = ValidatedPut::default();
@@ -357,9 +297,9 @@ async fn get_config(
         Ok(actor) => actor,
         Err(failure) => return failure.into_response(),
     };
-    let row = match fetch_row(&pool, &actor.id).await {
+    let row = match config::get_config(&pool, actor.id).await {
         Ok(row) => row,
-        Err(failure) => return failure.into_response(),
+        Err(_) => return Failure::server_error().into_response(),
     };
     crate::license::json_response(&serialize_row(row.as_ref()))
 }
@@ -383,70 +323,42 @@ async fn put_config(
         Ok(data) => data,
         Err(failure) => return failure.into_response(),
     };
-    let row = match fetch_row(&pool, &actor.id).await {
+    let row = match config::get_config(&pool, actor.id).await {
         Ok(row) => row,
-        Err(failure) => return failure.into_response(),
+        Err(_) => return Failure::server_error().into_response(),
     };
     let validated = match validate_put(&data, row.as_ref()) {
         Ok(validated) => validated,
         Err(errors) => return Failure::field_errors(errors).into_response(),
     };
 
-    let existed = row.is_some();
-    let stored_provider = row.as_ref().map(|row| row.provider_kind.clone());
-    let stored_base = row.as_ref().map(|row| row.base_url.clone());
-    let stored_model = row.as_ref().map(|row| row.model_name.clone());
-    let stored_verified = row.as_ref().and_then(|row| row.last_verified_at);
-    let stored_key = row.as_ref().and_then(|row| row.api_key_encrypted.clone());
-
-    let base_url_stored = validated
-        .base_url
-        .unwrap_or_else(|| stored_base.unwrap_or_default());
-    if base_url_blocked(&state, &base_url_stored) {
-        return Failure::error_body(
-            StatusCode::BAD_REQUEST,
-            "base_url_blocked",
-            "That endpoint host is not allowed.",
-        )
-        .into_response();
-    }
-
-    let mut api_key_encrypted = stored_key;
-    if let Some(api_key) = validated.api_key.filter(|key| !key.is_empty()) {
-        let config = crypto_config(&state);
-        match encrypt_api_key(&config, &api_key).await {
-            Ok(ciphertext) => api_key_encrypted = Some(ciphertext),
-            Err(err) => {
-                return super::common::crypto_failure(err, |assistant| {
-                    Failure::assistant_error(assistant).into_response()
-                });
-            }
+    let crypto = crypto_config(&state);
+    let kms = super::kms::HttpKmsTransport::from_env(&crypto);
+    let deps = ConfigDeps {
+        pool: &pool,
+        crypto: &crypto,
+        kms: &kms,
+        block_private_urls: state.settings().assistant.block_private_urls,
+        ssrf_resolver: &SystemResolver,
+    };
+    let saved = match config::put_config(&deps, actor.id, row.as_ref(), validated).await {
+        Ok(saved) => saved,
+        Err(ConfigError::BaseUrlBlocked) => {
+            return Failure::error_body(
+                StatusCode::BAD_REQUEST,
+                "base_url_blocked",
+                "That endpoint host is not allowed.",
+            )
+            .into_response()
         }
-    }
-    let provider_kind = validated
-        .provider_kind
-        .or(stored_provider)
-        .unwrap_or_else(|| user_llm_config::DEFAULT_PROVIDER_KIND.as_str().to_owned());
-    let model_name = validated.model_name.or(stored_model).unwrap_or_default();
-    if let Err(failure) = save_row(
-        &pool,
-        &actor.id,
-        &provider_kind,
-        &base_url_stored,
-        &model_name,
-        &api_key_encrypted,
-        existed,
-    )
-    .await
-    {
-        return failure.into_response();
-    }
-    let saved = LlmRow {
-        provider_kind,
-        base_url: base_url_stored,
-        model_name,
-        api_key_encrypted,
-        last_verified_at: stored_verified,
+        Err(ConfigError::Crypto(err)) => {
+            return super::common::crypto_failure(err, |assistant| {
+                Failure::assistant_error(assistant).into_response()
+            })
+        }
+        Err(ConfigError::SaveFailed) => {
+            return Failure::bare_error(StatusCode::BAD_REQUEST, "invalid").into_response()
+        }
     };
     crate::license::json_response(&serialize_row(Some(&saved)))
 }
@@ -464,11 +376,8 @@ async fn delete_config(
         Ok(actor) => actor,
         Err(failure) => return failure.into_response(),
     };
-    if let Err(failure) = pidash_services::domain::assistant::delete_llm_config(&pool, actor.id)
-        .await
-        .map_err(|_| Failure::server_error())
-    {
-        return failure.into_response();
+    if config::delete_config(&pool, actor.id).await.is_err() {
+        return Failure::server_error().into_response();
     }
     Response::builder()
         .status(StatusCode::NO_CONTENT)
@@ -481,104 +390,8 @@ async fn delete_config(
 // connection test (`UserLLMConfigTestEndpoint`, `llm_config.py:85-108`)
 // ---------------------------------------------------------------------------
 
-/// Outcome of the provider probe: success, a classified failure with its
-/// `(code, detail)`, or an unexpected transport failure (the outer
-/// `except Exception`, `llm_config.py:101-102`).
-#[derive(Debug, PartialEq)]
-enum ProbeOutcome {
-    Ok,
-    Classified(&'static str, &'static str),
-    TransportFailure,
-}
-
-/// Classify a probe HTTP round-trip the way `_run_test`
-/// (`llm_config.py:160-185`) classifies the SDK exception text: 2xx is
-/// success; otherwise the lowercased `"<status> <body>"` is scanned with
-/// the same three keyword groups in the same order, defaulting to
-/// `provider_unreachable`.
-fn classify_probe(status: u16, body: &str) -> ProbeOutcome {
-    if (200..300).contains(&status) {
-        return ProbeOutcome::Ok;
-    }
-    let text = format!("{status} {}", body.to_lowercase());
-    let has = |needles: &[&str]| needles.iter().any(|needle| text.contains(needle));
-    if has(&["401", "unauthorized", "api key", "authentication"]) {
-        ProbeOutcome::Classified("provider_auth_failed", "API key rejected.")
-    } else if has(&["connection", "timeout", "unreachable", "resolve"]) {
-        ProbeOutcome::Classified("provider_unreachable", "Could not reach the endpoint.")
-    } else if has(&["model", "not found", "does not exist"]) {
-        ProbeOutcome::Classified("model_invalid", "Model not accepted by the provider.")
-    } else {
-        ProbeOutcome::Classified("provider_unreachable", "Could not reach the endpoint.")
-    }
-}
-
-/// Probe the configured provider with a single minimal prompt
-/// (`agent.run("Reply with the single word: ok", request_limit=1)`,
-/// `llm_config.py:168-172`). The Anthropic branch ignores `base_url`
-/// exactly like `build_model` (`runtime/llm.py:99-103`); everything else
-/// posts to `{base_url}/chat/completions`. Only the response class and
-/// the keyword scan above are observed — bodies are never surfaced.
-async fn probe_provider(
-    provider_kind: &str,
-    base_url: &str,
-    model_name: &str,
-    api_key: &str,
-) -> ProbeOutcome {
-    // No redirect following: pydantic-ai builds its SDK clients over its
-    // own non-following httpx client (`create_async_http_client`), so a
-    // 302 is observed as-is by `_run_test`, not chased.
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .expect("probe client builds");
-    let result = if provider_kind == serializers::PROVIDER_ANTHROPIC {
-        client
-            .post("https://api.anthropic.com/v1/messages")
-            .header("x-api-key", api_key)
-            .header("anthropic-version", "2023-06-01")
-            .header("Content-Type", "application/json")
-            .body(
-                serde_json::to_string(&serde_json::json!({
-                    "model": model_name,
-                    "messages": [{"role": "user", "content": "Reply with the single word: ok"}],
-                    "max_tokens": 16,
-                }))
-                .expect("probe body serializes"),
-            )
-            .timeout(std::time::Duration::from_secs(60))
-            .send()
-            .await
-    } else {
-        client
-            .post(format!(
-                "{}/chat/completions",
-                base_url.trim_end_matches('/')
-            ))
-            .bearer_auth(api_key)
-            .header("Content-Type", "application/json")
-            .body(
-                serde_json::to_string(&serde_json::json!({
-                    "model": model_name,
-                    "messages": [{"role": "user", "content": "Reply with the single word: ok"}],
-                }))
-                .expect("probe body serializes"),
-            )
-            .timeout(std::time::Duration::from_secs(60))
-            .send()
-            .await
-    };
-    match result {
-        Err(_) => ProbeOutcome::TransportFailure,
-        Ok(response) => {
-            let status = response.status().as_u16();
-            match response.text().await {
-                Ok(body) => classify_probe(status, &body),
-                Err(_) => ProbeOutcome::TransportFailure,
-            }
-        }
-    }
-}
+// The probe lives in [`pidash_services::assistant::probe`] (OVL-07
+// moved `classify_probe` / `probe_provider` there verbatim).
 
 /// `POST users/me/ai-assistant/config/test/` (`llm_config.py:88-108`).
 async fn post_test(
@@ -599,9 +412,9 @@ async fn post_test(
     {
         return super::Denial::throttled().into_response();
     }
-    let row = match fetch_row(&pool, &actor.id).await {
+    let row = match config::get_config(&pool, actor.id).await {
         Ok(row) => row,
-        Err(failure) => return failure.into_response(),
+        Err(_) => return Failure::server_error().into_response(),
     };
     let Some(row) = row.filter(|row| has_secret(&row.api_key_encrypted)) else {
         return ok_false("llm_config_missing");
@@ -617,7 +430,8 @@ async fn post_test(
                 return super::common::crypto_failure(err, |assistant| ok_false(assistant.code()));
             }
         };
-    match probe_provider(&row.provider_kind, &row.base_url, &row.model_name, &api_key).await {
+    match probe::probe_provider(&row.provider_kind, &row.base_url, &row.model_name, &api_key).await
+    {
         ProbeOutcome::TransportFailure => ok_false("provider_unreachable"),
         ProbeOutcome::Classified(code, detail) => ok_false_detail(code, detail),
         ProbeOutcome::Ok => {
@@ -726,9 +540,9 @@ async fn post_generate_title(
         .into_response();
     }
 
-    let row = match fetch_row(&pool, &actor.id).await {
+    let row = match config::get_config(&pool, actor.id).await {
         Ok(row) => row,
-        Err(failure) => return failure.into_response(),
+        Err(_) => return Failure::server_error().into_response(),
     };
     // The BYOK row is data for the seam, not a gate: a missing row is a
     // `None` the CE path answers with `llm_config_missing` while the
@@ -771,8 +585,8 @@ async fn post_generate_title(
 mod tests {
     use super::*;
 
-    fn row() -> LlmRow {
-        LlmRow {
+    fn row() -> LlmConfigRow {
+        LlmConfigRow {
             provider_kind: "openai_compatible".to_owned(),
             base_url: "https://8.8.8.8/v1".to_owned(),
             model_name: "m".to_owned(),
@@ -838,23 +652,6 @@ mod tests {
         let validated = validate_put(&body, Some(&existing)).expect("partial valid");
         assert_eq!(validated.model_name.as_deref(), Some("m2"));
         assert_eq!(validated.base_url, None);
-    }
-
-    #[test]
-    fn probe_classification_matches_run_test_order() {
-        assert_eq!(classify_probe(200, "ok"), ProbeOutcome::Ok);
-        assert_eq!(
-            classify_probe(401, r#"{"error":{"message":"Incorrect API key"}}"#),
-            ProbeOutcome::Classified("provider_auth_failed", "API key rejected.")
-        );
-        assert_eq!(
-            classify_probe(404, r#"{"error":{"message":"model not found"}}"#),
-            ProbeOutcome::Classified("model_invalid", "Model not accepted by the provider.")
-        );
-        assert_eq!(
-            classify_probe(500, "boom"),
-            ProbeOutcome::Classified("provider_unreachable", "Could not reach the endpoint.")
-        );
     }
 
     #[test]

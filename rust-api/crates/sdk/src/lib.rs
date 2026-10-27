@@ -282,6 +282,9 @@ pub mod compat {
 
 /// Assistant runtime: the turn pipeline, the model runtime,
 /// crypto/MCP/title/SSRF helpers, and assistant config + event stores.
+/// OVL-07 (PIDASHCONV-1545) added the live engine steps, the history
+/// codec, the config/probe/retry services, and the remaining event
+/// shapes.
 pub mod assistant {
     pub use pidash_api::assistant::agent_profile::is_desktop_from_extension;
     pub use pidash_api::assistant::common::actor;
@@ -312,6 +315,7 @@ pub mod assistant {
     pub use pidash_api::assistant::governor;
     pub use pidash_api::assistant::governor::Governor;
     pub use pidash_api::assistant::kms::HttpKmsTransport;
+    pub use pidash_api::assistant::llm_config::validate_put;
     pub use pidash_api::assistant::model_seam::CeAssistantSeam;
     pub use pidash_api::assistant::throttles;
     pub use pidash_api::assistant::throttles::spec_for;
@@ -319,12 +323,47 @@ pub mod assistant {
     pub use pidash_api::assistant::throttles::ThrottleSpec;
     pub use pidash_api::assistant::throttles::Throttled;
     pub use pidash_api::assistant::throttles::LLM_TEST_THROTTLE;
+    pub use pidash_api::turn::history::dump_blob;
+    pub use pidash_api::turn::history::dump_message;
+    pub use pidash_api::turn::history::now_stamp;
+    pub use pidash_api::turn::history::parse_blob;
+    pub use pidash_api::turn::history::parse_retry_details;
+    pub use pidash_api::turn::history::retry_message;
+    pub use pidash_api::turn::history::CodecError;
+    pub use pidash_api::turn::history::RetryErrorDetail;
+    pub use pidash_api::turn::history::RetryLocSeg;
+    pub use pidash_api::turn::history::RunIds;
+    pub use pidash_api::turn::history::TurnFinish;
+    pub use pidash_api::turn::history::TurnMessage;
+    pub use pidash_api::turn::history::TurnOutcome;
+    pub use pidash_api::turn::history::TurnRequestPart;
+    pub use pidash_api::turn::history::TurnResponsePart;
+    pub use pidash_api::turn::history::TurnRetryContent;
+    pub use pidash_api::turn::history::TurnState;
+    pub use pidash_api::turn::live::create_message;
+    pub use pidash_api::turn::live::mcp_max_servers;
+    pub use pidash_api::turn::live::mcp_timeouts;
+    pub use pidash_api::turn::live::publish_event;
+    pub use pidash_api::turn::live::LiveStream;
+    pub use pidash_api::turn::live::LiveToolset;
+    pub use pidash_api::turn::live::LiveTurnSeam;
+    pub use pidash_api::turn::mcp_client::CallResult;
+    pub use pidash_api::turn::mcp_client::McpContent;
+    pub use pidash_api::turn::mcp_client::McpError;
+    pub use pidash_api::turn::mcp_client::McpToolDef;
+    pub use pidash_api::turn::mcp_client::McpValue;
+    pub use pidash_api::turn::mcp_client::ResilientSession;
     pub use pidash_db::assistant::event_queries::decode_history_blobs;
     pub use pidash_db::assistant::event_queries::history_limit;
+    pub use pidash_db::assistant::event_queries::load_history_sql;
+    pub use pidash_db::assistant::event_queries::message_envelope_json;
+    pub use pidash_db::assistant::event_queries::next_event_seq_sql;
+    pub use pidash_db::assistant::event_queries::next_message_seq_sql;
     pub use pidash_db::assistant::event_queries::publish_frame;
     pub use pidash_db::assistant::event_queries::serialize_event_json;
     pub use pidash_db::assistant::event_queries::truncate_kind;
     pub use pidash_db::assistant::event_queries::EventParts;
+    pub use pidash_db::assistant::event_queries::MessageParts;
     pub use pidash_db::assistant::event_queries::HISTORY_STATUS;
     pub use pidash_db::assistant::models::assistant_mcp_server;
     pub use pidash_db::assistant::models::assistant_mcp_server::AssistantMCPServer;
@@ -384,6 +423,13 @@ pub mod assistant {
     pub use pidash_jobs::oss_worker::model_runtime::keys::KeyResolver;
     pub use pidash_jobs::oss_worker::model_runtime::provider::Lane;
     pub use pidash_jobs::oss_worker::model_runtime::provider::ProviderError;
+    pub use pidash_services::assistant::config::delete_config;
+    pub use pidash_services::assistant::config::get_config;
+    pub use pidash_services::assistant::config::put_config;
+    pub use pidash_services::assistant::config::ConfigDeps;
+    pub use pidash_services::assistant::config::ConfigError;
+    pub use pidash_services::assistant::config::LlmConfigRow;
+    pub use pidash_services::assistant::config::ValidatedPut;
     pub use pidash_services::assistant::crypto;
     pub use pidash_services::assistant::crypto::decrypt;
     pub use pidash_services::assistant::crypto::encrypt;
@@ -398,6 +444,17 @@ pub mod assistant {
     pub use pidash_services::assistant::mcp::build_toolset_spec;
     pub use pidash_services::assistant::mcp::ResilientState;
     pub use pidash_services::assistant::mcp::ToolsetSpec;
+    pub use pidash_services::assistant::probe::classify_probe;
+    pub use pidash_services::assistant::probe::probe_provider;
+    pub use pidash_services::assistant::probe::ProbeOutcome;
+    pub use pidash_services::assistant::retry::retry_after_seconds;
+    pub use pidash_services::assistant::retry::should_retry_status;
+    pub use pidash_services::assistant::retry::sleep_for_retry;
+    pub use pidash_services::assistant::retry::INITIAL_RETRY_DELAY_SECS;
+    pub use pidash_services::assistant::retry::MAX_RETRIES;
+    pub use pidash_services::assistant::retry::MAX_RETRY_DELAY_SECS;
+    pub use pidash_services::assistant::retry::RETRY_AFTER_MAX_SECS;
+    pub use pidash_services::assistant::seams::agent_model_credential_for_user;
     pub use pidash_services::assistant::ssrf::is_blocked;
     pub use pidash_services::assistant::ssrf::SystemResolver;
     pub use pidash_services::assistant::title::clean_title;
