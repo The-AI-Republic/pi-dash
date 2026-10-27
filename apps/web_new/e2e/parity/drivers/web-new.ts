@@ -9534,8 +9534,34 @@ export class WebNewDriver implements ParityDriver {
     return (await this.page.getByRole("heading", { name: "Recent activity" }).count()) > 0;
   }
 
+  /** Mobile layout menu names (LAYOUT_LABELS, as the menu reads them). */
+  private static readonly MOBILE_LAYOUT_LABELS: ReadonlyArray<{ key: LayoutsLayoutKey; label: string }> = [
+    { key: "list", label: "List" },
+    { key: "kanban", label: "Board" },
+    { key: "calendar", label: "Calendar" },
+    { key: "spreadsheet", label: "Spreadsheet" },
+    { key: "gantt_chart", label: "Timeline" },
+  ];
+
+  /** The compact header bar; the desktop header duplicates its controls. */
+  private layoutsMobileHeader(): Locator {
+    return this.page.getByTestId("issues-mobile-header").first();
+  }
+
   async layoutsMobileOfferedLayouts(): Promise<LayoutsLayoutKey[]> {
-    return todo("layoutsMobileOfferedLayouts");
+    await this.layoutsMobileHeader().getByTestId("mobile-layout-trigger").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("menuitem").first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    try {
+      const keys: LayoutsLayoutKey[] = [];
+      for (const label of await this.layoutsReadOpenMenuItems()) {
+        const key = WebNewDriver.MOBILE_LAYOUT_LABELS.find((entry) => entry.label === label)?.key;
+        if (key === undefined) throw new Error(`[parity] unrecognised mobile layout "${label}".`);
+        keys.push(key);
+      }
+      return keys;
+    } finally {
+      await this.layoutsCloseOpenMenu();
+    }
   }
 
   async layoutsMobileDisplayVisible(): Promise<boolean> {
@@ -9543,7 +9569,11 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async layoutsMobileAnalyticsVisible(): Promise<boolean> {
-    return todo("layoutsMobileAnalyticsVisible");
+    // Scoped to the compact bar: the desktop header renders the same
+    // entry node, hidden by viewport classes.
+    return this.isShown(
+      this.layoutsMobileHeader().getByTestId("issues-analytics-entry").filter({ visible: true }).first()
+    );
   }
 
   async layoutsSkeletonVisible(): Promise<boolean> {
@@ -9680,12 +9710,30 @@ export class WebNewDriver implements ParityDriver {
     return names;
   }
 
-  async layoutsMobileSwitchTo(_layout: LayoutsLayoutKey): Promise<void> {
-    return todo("layoutsMobileSwitchTo");
+  async layoutsMobileSwitchTo(layout: LayoutsLayoutKey): Promise<void> {
+    const label = WebNewDriver.MOBILE_LAYOUT_LABELS.find((entry) => entry.key === layout)?.label;
+    if (label === undefined) throw new Error(`[parity] cannot switch mobile to "${layout}".`);
+    await this.layoutsMobileHeader().getByTestId("mobile-layout-trigger").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("menuitem").first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await (await this.layoutsOpenMenuItem(label)).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.layoutsWaitForProjectLayout(layout);
   }
 
   async layoutsMobileDisplayCycleModuleDisabled(): Promise<{ cycleDisabled: boolean; moduleDisabled: boolean }> {
-    return todo("layoutsMobileDisplayCycleModuleDisabled");
+    // Off features hide their group-by rows (hideCycle/hideModule), so a
+    // missing row reads as disabled. The panel portals to the body; only
+    // the trigger needs the mobile scope.
+    await this.layoutsMobileHeader().getByTestId("display-options-trigger").click({ timeout: WebNewDriver.WAIT_MS });
+    const panel = this.page.getByTestId("display-options-panel");
+    await panel.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    try {
+      const group = panel.getByTestId("display-section-group");
+      const cycleDisabled = (await group.getByRole("button", { name: "Cycle", exact: true }).count()) === 0;
+      const moduleDisabled = (await group.getByRole("button", { name: "Module", exact: true }).count()) === 0;
+      return { cycleDisabled, moduleDisabled };
+    } finally {
+      await this.layoutsCloseOpenMenu();
+    }
   }
 
   async layoutsRowMenuOpenNewTabUrl(issueName: string): Promise<string> {
