@@ -42,6 +42,15 @@ Endpoint shorthand (backend contracts, also used by the inventory): `BASE` =
   unlabeled, yet render in no lane (old bug NEWFRONT-158, pinned by a bug
   scenario on a scratch project). Oracle swimlane scenarios use scratch
   projects so no label history leaks between them.
+- Intended behavior (NEWFRONT-158): an unlabeled row always renders in the
+  synthetic None lane, whatever its label history. Because the labels
+  sub-grouped envelope can omit such a row from every lane, the board also
+  reads its main grouping without the label axis when the placed lane
+  totals fall short of the envelope total. A complete fallback column is
+  the count authority: its unlabeled rows missing from every lane join
+  None, and the column and lane counts then match the cards. Recovery only
+  runs on complete column windows, so ordinary pagination can never be
+  mistaken for a ghost.
 
 ### Collapse and empty groups (ISS-030–ISS-032)
 

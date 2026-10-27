@@ -21,6 +21,8 @@ import {
   laneKeys,
   laneTotal,
   mergeBoardPage,
+  needsLabelRecovery,
+  reconcileLabelGhosts,
   showsGroup,
   subGroupedBoard,
   subGroupedColumns,
@@ -313,6 +315,127 @@ describe("sub-grouped lanes", () => {
     response.results[STATE]!.total_results = 9;
     const columns = subGroupedColumns(response, labels, { dimension: "state", showEmpty: true });
     expect(columns[0]?.total).toBe(9);
+  });
+});
+
+describe("needsLabelRecovery", () => {
+  it("compares placed lane totals with the envelope total", () => {
+    const missing = subGroupedBoard(subGrouped({ [STATE]: { None: { rows: [row({ id: "plain" })], total: 1 } } }), {
+      groupDimension: "state",
+      subDimension: "labels",
+      groupLabels: labels,
+      subLabels: labels,
+      showEmpty: true,
+    });
+    expect(needsLabelRecovery({ ...missing, total: 2 })).toBe(true);
+    expect(needsLabelRecovery({ ...missing, total: 1 })).toBe(false);
+    expect(needsLabelRecovery(flatBoard({ results: [], total_count: 0 }))).toBe(false);
+  });
+});
+
+describe("label ghost reconciliation (ISS-031/NEWFRONT-158)", () => {
+  it("returns the ghosted row to None while live and plain rows keep their lanes", () => {
+    const ghost = row({ id: "ghost", label_ids: [] });
+    const kept = row({ id: "kept", label_ids: [LABEL] });
+    const plain = row({ id: "plain", label_ids: [] });
+    const board = subGroupedBoard(
+      {
+        ...subGrouped({
+          [STATE]: {
+            [LABEL]: { rows: [kept], total: 1 },
+            None: { rows: [plain], total: 1 },
+          },
+        }),
+        total_count: 3,
+      },
+      {
+        groupDimension: "state",
+        subDimension: "labels",
+        groupLabels: labels,
+        subLabels: labels,
+        showEmpty: true,
+      }
+    );
+    const fallback = groupedBoard(grouped({ [STATE]: { rows: [kept, ghost, plain], total: 3 } }), {
+      dimension: "state",
+      labels,
+      showEmpty: true,
+    });
+    const result = reconcileLabelGhosts(board, fallback);
+    expect(result.lanes.map((lane) => [lane.key, lane.total])).toEqual([
+      [LABEL, 1],
+      ["None", 2],
+    ]);
+    expect(result.lanes[1]?.cells[STATE]?.rows.map((entry) => entry.id)).toEqual(["plain", "ghost"]);
+    expect(result.lanes[1]?.cells[STATE]?.total).toBe(2);
+    expect(result.columns[0]?.total).toBe(3);
+    expect(result.total).toBe(3);
+  });
+
+  it("creates the None lane when the server omitted it entirely", () => {
+    const board = subGroupedBoard(
+      subGrouped({ [STATE]: { [LABEL]: { rows: [row({ label_ids: [LABEL] })], total: 1 } } }),
+      {
+        groupDimension: "state",
+        subDimension: "labels",
+        groupLabels: labels,
+        subLabels: labels,
+        showEmpty: true,
+      }
+    );
+    const fallback = groupedBoard(
+      grouped({ [STATE]: { rows: [row({ label_ids: [LABEL] }), row({ id: "ghost" })], total: 2 } }),
+      { dimension: "state", labels, showEmpty: true }
+    );
+    const result = reconcileLabelGhosts(board, fallback);
+    expect(result.lanes.map((lane) => [lane.key, lane.total])).toEqual([
+      [LABEL, 1],
+      ["None", 1],
+    ]);
+    expect(result.columns[0]?.total).toBe(2);
+  });
+
+  it("waits for every lane's column window before recovering", () => {
+    const ghost = row({ id: "ghost" });
+    const plain = row({ id: "plain" });
+    const board = subGroupedBoard(subGrouped({ [STATE]: { None: { rows: [plain], total: 40 } } }), {
+      groupDimension: "state",
+      subDimension: "labels",
+      groupLabels: labels,
+      subLabels: labels,
+      showEmpty: true,
+    });
+    const fallback = groupedBoard(grouped({ [STATE]: { rows: [plain, ghost], total: 41 } }), {
+      dimension: "state",
+      labels,
+      showEmpty: true,
+    });
+    expect(reconcileLabelGhosts(board, fallback)).toBe(board);
+  });
+
+  it("ignores a fallback whose column is only a partial page", () => {
+    const board = subGroupedBoard(subGrouped({ [STATE]: { None: { rows: [row({ id: "plain" })], total: 1 } } }), {
+      groupDimension: "state",
+      subDimension: "labels",
+      groupLabels: labels,
+      subLabels: labels,
+      showEmpty: true,
+    });
+    const fallback = groupedBoard(grouped({ [STATE]: { rows: [row({ id: "ghost" })], total: 50 } }), {
+      dimension: "state",
+      labels,
+      showEmpty: true,
+    });
+    expect(reconcileLabelGhosts(board, fallback)).toBe(board);
+  });
+
+  it("does not reconcile a non-sub-grouped board", () => {
+    const fallback = groupedBoard(grouped({ [STATE]: { rows: [row({ id: "ghost" })], total: 1 } }), {
+      dimension: "state",
+      labels,
+      showEmpty: true,
+    });
+    expect(reconcileLabelGhosts(fallback, fallback)).toBe(fallback);
   });
 });
 
