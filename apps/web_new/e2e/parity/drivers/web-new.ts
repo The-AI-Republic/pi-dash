@@ -8324,12 +8324,11 @@ export class WebNewDriver implements ParityDriver {
   ): Promise<void> {
     const wrap = kind === "state" ? this.layoutsRowStateWrap(issueName) : this.layoutsRowPriorityWrap(issueName);
     await wrap.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
-    // Deferred rows mount their picker on first interaction; the click
-    // both mounts and opens it.
-    await wrap.locator("button").first().click({ timeout: WebNewDriver.WAIT_MS });
     const search = kind === "state" ? "Search states" : "Search priorities";
     const listbox = this.page.getByRole("listbox").last();
-    await listbox.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    // Deferred rows mount their picker on first interaction; the click
+    // both mounts and opens it.
+    await this.layoutsRowOpenChipPicker(wrap, listbox, kind);
     await this.page.getByRole("combobox", { name: search }).first().fill(option, { timeout: WebNewDriver.WAIT_MS });
     await listbox.getByRole("option", { name: option }).first().click({ timeout: WebNewDriver.WAIT_MS });
     const deadline = Date.now() + WebNewDriver.WAIT_MS;
@@ -8339,6 +8338,32 @@ export class WebNewDriver implements ParityDriver {
         throw new Error(`[parity] row chip for "${issueName}" never showed "${option}".`);
       }
       await this.page.waitForTimeout(250);
+    }
+  }
+
+  /**
+   * Open one row chip's picker, retrying the click while no popup shows.
+   * A preceding pick's re-render can detach the chip between mousedown
+   * and mouseup — focus lands but the click never fires — and a popup
+   * left open eats the next click as an outside dismiss. Either way the
+   * popup stays hidden, so the click repeats until it shows.
+   */
+  private async layoutsRowOpenChipPicker(wrap: Locator, listbox: Locator, kind: string): Promise<void> {
+    const trigger = wrap.locator("button").first();
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    for (;;) {
+      await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+      const opened = await listbox.waitFor({ state: "visible", timeout: 5_000 }).then(
+        () => true,
+        () => false
+      );
+      // A popup that mounts just after the wait gives up still counts;
+      // without this the retry would toggle it shut again.
+      if (opened || (await listbox.isVisible().catch(() => false))) return;
+      if (Date.now() >= deadline) {
+        throw new Error(`[parity] row ${kind} picker never opened.`);
+      }
+      await this.page.waitForTimeout(500);
     }
   }
 

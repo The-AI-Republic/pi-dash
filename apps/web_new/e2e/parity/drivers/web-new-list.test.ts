@@ -620,6 +620,125 @@ describe("web-new row chips", () => {
     expect(priorityStub.roles).toContainEqual({ role: "combobox", name: "Search priorities" });
   });
 
+  it("retries the chip click when the popup stays hidden", async () => {
+    let current = "State: Todo";
+    let clicks = 0;
+    let waits = 0;
+    const option = node({
+      click: async () => {
+        current = "State: Doing";
+      },
+    });
+    const listbox = node({
+      waitFor: async () => {
+        waits += 1;
+        if (waits === 1) throw new Error("Timeout");
+      },
+      isVisible: async () => false,
+      getByRole: () => option,
+    });
+    const row = node({
+      locator: (selector: string) => {
+        if (selector === 'span[title^="State: "]') {
+          return node({
+            getAttribute: async (attr: string) => (attr === "title" ? current : null),
+            locator: () => node({ click: async () => void (clicks += 1) }),
+          });
+        }
+        return node({ count: async () => 0 });
+      },
+    });
+    const stub = pageOf({
+      locator: () => row,
+      role: (role: string) => {
+        if (role === "listbox") return listbox;
+        if (role === "combobox") return node();
+        return node({ count: async () => 0 });
+      },
+    });
+    await new WebNewDriver(stub.page).layoutsRowSetState("Alpha", "Doing");
+    expect(clicks).toBe(2);
+  });
+
+  it("accepts a popup that mounts just after the wait", async () => {
+    let current = "State: Todo";
+    let clicks = 0;
+    const option = node({
+      click: async () => {
+        current = "State: Doing";
+      },
+    });
+    const listbox = node({
+      waitFor: async () => {
+        throw new Error("Timeout");
+      },
+      isVisible: async () => true,
+      getByRole: () => option,
+    });
+    const row = node({
+      locator: (selector: string) => {
+        if (selector === 'span[title^="State: "]') {
+          return node({
+            getAttribute: async (attr: string) => (attr === "title" ? current : null),
+            locator: () => node({ click: async () => void (clicks += 1) }),
+          });
+        }
+        return node({ count: async () => 0 });
+      },
+    });
+    const stub = pageOf({
+      locator: () => row,
+      role: (role: string) => {
+        if (role === "listbox") return listbox;
+        if (role === "combobox") return node();
+        return node({ count: async () => 0 });
+      },
+    });
+    await new WebNewDriver(stub.page).layoutsRowSetState("Alpha", "Doing");
+    expect(clicks).toBe(1);
+  });
+
+  it("throws when the picker never opens", async () => {
+    let now = 1_000;
+    const spy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    try {
+      const row = node({
+        locator: (selector: string) => {
+          if (selector === 'span[title^="State: "]') {
+            return node({
+              getAttribute: async (attr: string) => (attr === "title" ? "State: Todo" : null),
+              locator: () => node(),
+            });
+          }
+          return node({ count: async () => 0 });
+        },
+      });
+      const listbox = node({
+        waitFor: async () => {
+          throw new Error("Timeout");
+        },
+        isVisible: async () => false,
+        getByRole: () => node(),
+      });
+      const stub = pageOf({
+        locator: () => row,
+        role: (role: string) => {
+          if (role === "listbox") return listbox;
+          if (role === "combobox") return node();
+          return node({ count: async () => 0 });
+        },
+        tick: () => {
+          now += 60_000;
+        },
+      });
+      await expect(new WebNewDriver(stub.page).layoutsRowSetState("Alpha", "Doing")).rejects.toThrow(
+        "[parity] row state picker never opened."
+      );
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it("throws when the chip never repaints", async () => {
     let now = 1_000;
     const spy = vi.spyOn(Date, "now").mockImplementation(() => now);
