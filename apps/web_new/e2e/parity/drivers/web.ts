@@ -54052,6 +54052,11 @@ export class WebDriver implements ParityDriver {
     this.adminCloudProbeFault = { times, status };
   }
 
+  async adminCloudReleaseAuthProbeFault(): Promise<void> {
+    await this.adminCloudEnsureGateRoutes();
+    this.adminCloudProbeFault = { times: 0, status: 500 };
+  }
+
   async adminCloudDelayAdminCheck(ms: number): Promise<void> {
     await this.adminCloudEnsureGateRoutes();
     this.adminCloudAdminCheckDelayMs = ms;
@@ -54059,6 +54064,11 @@ export class WebDriver implements ParityDriver {
 
   async adminCloudRetry(): Promise<void> {
     await this.page.getByRole("button", { name: "Try again" }).click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async adminCloudGoBack(): Promise<string> {
+    await this.page.goBack({ waitUntil: "domcontentloaded", timeout: WebDriver.WAIT_MS }).catch(() => null);
+    return this.page.url();
   }
 
   // --- Space navbar & chrome (NEWFRONT-448, SPC-010..019 + SPC-065). ---

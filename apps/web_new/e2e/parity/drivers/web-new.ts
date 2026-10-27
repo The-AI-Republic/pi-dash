@@ -41318,6 +41318,11 @@ export class WebNewDriver implements ParityDriver {
     this.adminCloudProbeFault = { times, status };
   }
 
+  async adminCloudReleaseAuthProbeFault(): Promise<void> {
+    await this.adminEnsureCloudGateRoutes();
+    this.adminCloudProbeFault = { times: 0, status: 500 };
+  }
+
   async adminCloudDelayAdminCheck(ms: number): Promise<void> {
     await this.adminEnsureCloudGateRoutes();
     this.adminCloudCheckDelayMs = ms;
@@ -41328,6 +41333,11 @@ export class WebNewDriver implements ParityDriver {
       .getByTestId("admin-cloud-error")
       .getByRole("button", { name: "Try again", exact: true })
       .click({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async adminCloudGoBack(): Promise<string> {
+    await this.page.goBack({ waitUntil: "domcontentloaded", timeout: WebNewDriver.WAIT_MS }).catch(() => null);
+    return this.page.url();
   }
   // --- Space navbar & chrome (NEWFRONT-448, SPC-010..019 + SPC-065). ---
   async spaceChromeNavbarIdentity(): Promise<SpaceChromeNavbarIdentity> {
