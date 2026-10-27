@@ -93,19 +93,12 @@ crates/db/src/orchestration/workpad.rs | UPDATE issues | 32e88e8a80aa | sql
 crates/db/src/v1_assets/asset_queries.rs | UPDATE users | fad1763c8a10 | sea-query
 crates/jobs/src/integrations/git_sync.rs | INSERT descriptions | 2fcca91b698a | sql
 crates/jobs/src/integrations/git_sync.rs | INSERT issue_comments | 42b043aab707 | sql
-crates/jobs/src/integrations/git_sync.rs | INSERT issue_sequences | fa0b6409bfc6 | sql
-crates/jobs/src/integrations/git_sync.rs | INSERT issues | 4296c92aaee8 | sql
 crates/jobs/src/integrations/git_sync.rs | UPDATE descriptions | ef6e5f08dd04 | sql
 crates/jobs/src/integrations/git_sync.rs | UPDATE issue_comments | f86a0cc606e2 | sql
-crates/jobs/src/integrations/git_sync.rs | UPDATE issues | e6213981e6c2 | sql
 crates/jobs/src/integrations/github_sync.rs | INSERT descriptions | 2fcca91b698a | sql
 crates/jobs/src/integrations/github_sync.rs | INSERT issue_comments | bbe3c09ff877 | sql
-crates/jobs/src/integrations/github_sync.rs | INSERT issue_sequences | fa0b6409bfc6 | sql
-crates/jobs/src/integrations/github_sync.rs | INSERT issues | 4296c92aaee8 | sql
 crates/jobs/src/integrations/github_sync.rs | UPDATE descriptions | ef6e5f08dd04 | sql
 crates/jobs/src/integrations/github_sync.rs | UPDATE issue_comments | c44584f00d18 | sql
-crates/jobs/src/integrations/github_sync.rs | UPDATE issues | 9c18d36ab1b1 | sql
-crates/jobs/src/integrations/github_sync.rs | UPDATE issues | e1b027d4ed7c | sql
 crates/jobs/src/tasks_cleanup/dummy_data.rs | INSERT issue_assignees | c2cedf21ec47 | sql
 crates/jobs/src/tasks_cleanup/dummy_data.rs | INSERT issue_sequences | b5f228b9985d | sql
 crates/jobs/src/tasks_cleanup/dummy_data.rs | INSERT issues | 7f4e35179110 | sql
@@ -123,8 +116,6 @@ crates/jobs/src/tasks_cleanup/workspace_seed.rs | INSERT workspace_members | 38f
 crates/jobs/src/tasks_cleanup/workspace_seed.rs | UPDATE projects | 140bbcf424e7 | sql
 crates/jobs/src/tasks_webhooks/activity_dispatch.rs | UPDATE issues | 408189099ae3 | sql
 crates/jobs/src/tasks_webhooks/activity_dispatch.rs | UPDATE issues | 588a92ecf217 | sql
-crates/jobs/src/tasks_webhooks/automation.rs | UPDATE issues | 23e43f868929 | sql
-crates/jobs/src/tasks_webhooks/automation.rs | UPDATE issues | 6805cb131af1 | sql
 crates/services/src/app_assets/queries_v2_project.rs | UPDATE projects | 4373f6498ae7 | sql
 crates/services/src/app_issues/move.rs | INSERT issue_sequences | f141b015b498 | sql
 crates/services/src/app_issues/move.rs | UPDATE descriptions | 2c5f069e1e40 | sql
@@ -155,7 +146,6 @@ crates/services/src/integrations/repositories.rs | UPDATE projects | 0b9c0f07e27
 crates/services/src/orchestration/dispatch.rs | INSERT descriptions | 1bfca5a22fe7 | sql
 crates/services/src/orchestration/dispatch.rs | INSERT issue_comments | 6637edd9b9fe | sql
 crates/services/src/orchestration/dispatch.rs | UPDATE issue_comments | 210caaf40f84 | sql
-crates/services/src/orchestration/dispatch.rs | UPDATE issues | 5ab96c4723c1 | sql
 crates/services/src/orchestration/relations.rs | INSERT issue_relations | 87b5409a9520 | sql
 crates/services/src/orchestration/relations.rs | UPDATE issue_relations | 432c2d351844 | sql
 crates/services/src/runner_runs/lifecycle.rs | INSERT descriptions | 2708d2456fe5 | sql

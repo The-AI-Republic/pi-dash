@@ -1651,6 +1651,295 @@ where
 const ISSUE_STATE_BARE_UPDATE_SQL: &str =
     "UPDATE issues SET state_id = $2, updated_at = $3, updated_by_id = $4 WHERE id = $1";
 
+/// The sync-mirror full-row INSERT both providers share
+/// (`Issue.objects.create`, `git_sync_task.py:92-97`; the
+/// `update_or_create` create arm, `github_sync_task.py:135-140`, via the
+/// `Issue.save()` creation path `issue.py:267-340`): pod/state/sequence/
+/// sort-order resolved driver-side, then one 34-column row. The audit
+/// columns carry the actor directly — the two Python writes (the create,
+/// whose audit `BaseModel.save` clobbers to NULL in the worker, plus the
+/// follow-up `filter(pk).update(created_by, updated_by)`
+/// `git_sync_task.py:108-112` / `github_sync_task.py:156-160`, collapse
+/// into this one statement with identical final bytes.
+///
+/// Bare columns, no hooks, no chain: the driver holds its scan `sqlx`
+/// transaction around the issue, sequence and sync rows (per-issue
+/// atomicity), and a separate domain transaction would split that unit —
+/// the same in-transaction justification as [`update_workpad`]. The sync
+/// create fires no signal legs (`state is None` on the git arm, so the
+/// orchestration receiver sees no change; the completion receiver skips
+/// creates), so there is nothing to chain.
+pub struct MirrorIssueInsert {
+    pub issue_id: Uuid,
+    pub now: DateTime<Utc>,
+    pub actor_id: Uuid,
+    pub project_id: Uuid,
+    pub workspace_id: Uuid,
+    pub state_id: Option<Uuid>,
+    pub name: String,
+    pub description_html: String,
+    /// The save recompute (`issue.py:330-334`), computed driver-side via
+    /// `strip_html_text` — passed through, never re-stripped here.
+    pub description_stripped: String,
+    pub sequence_id: i64,
+    pub sort_order: f64,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub external_source: String,
+    pub external_id: String,
+    pub pod_id: Option<Uuid>,
+}
+
+pub async fn insert_mirror_issue<'e, E>(
+    ex: E,
+    insert: &MirrorIssueInsert,
+) -> Result<u64, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(MIRROR_ISSUE_INSERT_SQL)
+        .bind(insert.issue_id)
+        .bind(insert.now)
+        .bind(insert.now)
+        .bind(insert.actor_id)
+        .bind(insert.actor_id)
+        .bind(insert.project_id)
+        .bind(insert.workspace_id)
+        .bind(insert.state_id)
+        .bind(&insert.name)
+        .bind(serde_json::json!({}))
+        .bind(&insert.description_html)
+        .bind(&insert.description_stripped)
+        .bind(insert.sequence_id)
+        .bind(insert.sort_order)
+        .bind(insert.completed_at)
+        .bind(&insert.external_source)
+        .bind(&insert.external_id)
+        .bind(insert.pod_id)
+        .execute(ex)
+        .await
+        .map(|done| done.rows_affected())
+}
+
+const MIRROR_ISSUE_INSERT_SQL: &str = "INSERT INTO issues (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, parent_id, state_id, point, estimate_point_id, name, description_json, description_html, description_stripped, description_binary, priority, complexity_score, start_date, target_date, sequence_id, sort_order, completed_at, archived_at, is_draft, external_source, external_id, type_id, git_work_branch, workpad, created_via, assigned_pod_id, agent_executor) VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, NULL, $8, NULL, NULL, $9, $10, $11, $12, NULL, 'none', 0, NULL, NULL, $13, $14, $15, NULL, FALSE, $16, $17, NULL, '', '', NULL, $18, NULL)";
+
+/// The `IssueSequence.objects.create(issue, sequence, project)`
+/// companion row (`issue.py:340`): `ProjectBaseModel` audit columns (NULL
+/// in the worker — the crum clobber), `deleted false`. The row id is
+/// generated here; callers never read it back.
+pub struct MirrorIssueSequence {
+    pub project_id: Uuid,
+    pub workspace_id: Uuid,
+    pub issue_id: Uuid,
+    pub sequence: i64,
+    pub now: DateTime<Utc>,
+}
+
+pub async fn insert_issue_sequence<'e, E>(
+    ex: E,
+    seq: &MirrorIssueSequence,
+) -> Result<u64, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(MIRROR_ISSUE_SEQUENCE_INSERT_SQL)
+        .bind(Uuid::new_v4())
+        .bind(seq.now)
+        .bind(seq.now)
+        .bind(seq.project_id)
+        .bind(seq.workspace_id)
+        .bind(seq.issue_id)
+        .bind(seq.sequence)
+        .execute(ex)
+        .await
+        .map(|done| done.rows_affected())
+}
+
+const MIRROR_ISSUE_SEQUENCE_INSERT_SQL: &str = "INSERT INTO issue_sequences (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, issue_id, sequence, deleted) VALUES ($1, $2, $3, NULL, NULL, NULL, $4, $5, $6, $7, FALSE)";
+
+/// The git-mirror UPDATE arm (`Issue.objects.filter(pk).update(...)`,
+/// `git_sync_task.py:100-108`): absolute values, no `save()` side
+/// effects — the stripped form is `_safe_render`'s value passed through
+/// unchanged (`QuerySet.update` never recomputes it), and state/sequence/
+/// sort-order are untouched. The shared audit restamp (`:108-112`)
+/// collapses into the same statement (identical final bytes).
+pub struct GitMirrorIssueUpdate {
+    pub issue_id: Uuid,
+    pub name: String,
+    pub description_html: String,
+    pub description_stripped: String,
+    pub workspace_id: Uuid,
+    pub actor_id: Uuid,
+    pub external_source: String,
+    pub external_id: String,
+    pub now: DateTime<Utc>,
+}
+
+pub async fn update_git_mirror_issue<'e, E>(
+    ex: E,
+    upd: &GitMirrorIssueUpdate,
+) -> Result<u64, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(GIT_MIRROR_UPDATE_SQL)
+        .bind(upd.issue_id)
+        .bind(&upd.name)
+        .bind(&upd.description_html)
+        .bind(&upd.description_stripped)
+        .bind(serde_json::json!({}))
+        .bind(upd.workspace_id)
+        .bind(upd.actor_id)
+        .bind(upd.actor_id)
+        .bind(&upd.external_source)
+        .bind(&upd.external_id)
+        .bind(upd.now)
+        .execute(ex)
+        .await
+        .map(|done| done.rows_affected())
+}
+
+const GIT_MIRROR_UPDATE_SQL: &str = "UPDATE issues SET name = $2, description_html = $3, description_stripped = $4, description_json = $5, workspace_id = $6, created_by_id = $7, updated_by_id = $8, external_source = $9, external_id = $10, updated_at = $11 WHERE id = $1";
+
+/// The github-mirror UPDATE arm (`update_or_create` via a full
+/// `Issue.save()`, `github_sync_task.py:135-140`, `issue.py:288-350`):
+/// `save()` rewrites the whole row, but only the render triple, the
+/// driver-recomputed `completed_at` and the audit restamp can differ.
+/// The stripped form is the save recompute (`issue.py:345-350`),
+/// computed driver-side via `strip_html_text` and passed through. The
+/// audit restamp (`github_sync_task.py:156-160`) collapses into the same
+/// statement (identical final bytes). Bare columns, no hooks, no chain:
+/// the update arm changes no state, so no signal fires.
+pub struct GithubMirrorIssueUpdate {
+    pub issue_id: Uuid,
+    pub name: String,
+    pub description_html: String,
+    pub description_stripped: String,
+    pub actor_id: Uuid,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub now: DateTime<Utc>,
+}
+
+pub async fn update_github_mirror_issue<'e, E>(
+    ex: E,
+    upd: &GithubMirrorIssueUpdate,
+) -> Result<u64, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(GITHUB_MIRROR_UPDATE_SQL)
+        .bind(upd.issue_id)
+        .bind(&upd.name)
+        .bind(&upd.description_html)
+        .bind(&upd.description_stripped)
+        .bind(serde_json::json!({}))
+        .bind(upd.actor_id)
+        .bind(upd.completed_at)
+        .bind(upd.now)
+        .execute(ex)
+        .await
+        .map(|done| done.rows_affected())
+}
+
+const GITHUB_MIRROR_UPDATE_SQL: &str = "UPDATE issues SET name = $2, description_html = $3, description_stripped = $4, description_json = $5, created_by_id = $6, updated_by_id = $6, completed_at = $7, updated_at = $8 WHERE id = $1";
+
+/// Adopt the resolved default on a stateless mirror (the `state is None`
+/// branch, `issue.py:288-301`, reached from the github update arm's full
+/// `save()`): `self.state = default_state`, persisted bare — no
+/// `updated_at` touch here, because in Python the touch comes from the
+/// same `save()`'s `auto_now`, which the sibling
+/// [`update_github_mirror_issue`] call carries. The driver calls adopt
+/// first, then the full update, exactly as today; a NULL state keeps the
+/// row stateless, as in Python.
+pub async fn adopt_issue_state<'e, E>(
+    ex: E,
+    issue_id: Uuid,
+    state_id: Option<Uuid>,
+) -> Result<u64, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(ADOPT_ISSUE_STATE_SQL)
+        .bind(issue_id)
+        .bind(state_id)
+        .execute(ex)
+        .await
+        .map(|done| done.rows_affected())
+}
+
+const ADOPT_ISSUE_STATE_SQL: &str = "UPDATE issues SET state_id = $2 WHERE id = $1";
+
+/// The ticker state-move write (`scheduling.py:700,1113,1468`):
+/// `save(update_fields=["state", "updated_at"])` — ONLY these columns.
+/// Contrast [`update_issue_state`], which additionally stamps
+/// `updated_by_id` (the agent-tool save shape): here the in-memory
+/// `updated_by` assignments never reach the row, exactly what the field
+/// list writes. Bare columns, no hooks, no chain: the driver routes the
+/// orchestration fire itself (`reconcile_on_seam` with the tick-caused
+/// event), as today. Runs on any executor so the dispatch seam keeps the
+/// write inside its transaction.
+pub async fn update_issue_state_no_audit<'e, E>(
+    ex: E,
+    issue_id: Uuid,
+    state_id: Uuid,
+    updated_at: DateTime<Utc>,
+) -> Result<u64, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(TICKER_STATE_UPDATE_SQL)
+        .bind(state_id)
+        .bind(updated_at)
+        .bind(issue_id)
+        .execute(ex)
+        .await
+        .map(|done| done.rows_affected())
+}
+
+const TICKER_STATE_UPDATE_SQL: &str =
+    "UPDATE issues SET state_id = $1, updated_at = $2 WHERE id = $3";
+
+/// The automation bulk writes (`bulk_update(..., batch_size=100)`):
+/// `["archived_at"]` (`issue_automation_task.py:69`) and `["state"]`
+/// (`:132`) — a single column each, no `updated_at` touch (`bulk_update`
+/// never bumps `auto_now` on unlisted fields), no `save()`, no signals.
+/// The driver keeps the batch-100 chunking; the per-issue
+/// `issue_activity.delay` fan-out stays driver-enqueued, as today.
+pub async fn bulk_set_archived_at<'e, E>(
+    ex: E,
+    ids: &[Uuid],
+    archived_at: NaiveDate,
+) -> Result<u64, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(BULK_ARCHIVE_SQL)
+        .bind(archived_at)
+        .bind(ids)
+        .execute(ex)
+        .await
+        .map(|done| done.rows_affected())
+}
+
+const BULK_ARCHIVE_SQL: &str = "UPDATE issues SET archived_at = $1 WHERE id = ANY($2)";
+
+pub async fn bulk_set_state<'e, E>(
+    ex: E,
+    ids: &[Uuid],
+    state_id: Option<Uuid>,
+) -> Result<u64, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(BULK_CLOSE_SQL)
+        .bind(state_id)
+        .bind(ids)
+        .execute(ex)
+        .await
+        .map(|done| done.rows_affected())
+}
+
+const BULK_CLOSE_SQL: &str = "UPDATE issues SET state_id = $1 WHERE id = ANY($2)";
+
 /// An activity enqueue that runs ahead of the row write (the archive
 /// endpoints enqueue before saving): the event, the pre-built spaced
 /// dumps, and the origin the driver resolved up front.
@@ -2132,6 +2421,66 @@ mod tests {
         assert!(WORKPAD_BARE_UPDATE_SQL.contains("deleted_at IS NULL"));
         assert!(ISSUE_STATE_BARE_UPDATE_SQL.contains("SET state_id = $2"));
         assert!(ISSUE_STATE_BARE_UPDATE_SQL.contains("updated_by_id = $4"));
+    }
+
+    #[test]
+    fn sync_bare_sql_shapes() {
+        // Moved verbatim from the retired sync consts (`git_sync` /
+        // `github_sync`): the mirror INSERT both providers shared, the
+        // sequence companion row, and the two provider-shaped UPDATE
+        // arms. Full-text pins: the statements moved byte-for-byte, so
+        // the jobs parse-suite coverage carries over by construction.
+        assert_eq!(
+            MIRROR_ISSUE_INSERT_SQL,
+            "INSERT INTO issues (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, parent_id, state_id, point, estimate_point_id, name, description_json, description_html, description_stripped, description_binary, priority, complexity_score, start_date, target_date, sequence_id, sort_order, completed_at, archived_at, is_draft, external_source, external_id, type_id, git_work_branch, workpad, created_via, assigned_pod_id, agent_executor) VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, NULL, $8, NULL, NULL, $9, $10, $11, $12, NULL, 'none', 0, NULL, NULL, $13, $14, $15, NULL, FALSE, $16, $17, NULL, '', '', NULL, $18, NULL)"
+        );
+        assert!(MIRROR_ISSUE_INSERT_SQL.contains("sequence_id"));
+        assert!(MIRROR_ISSUE_INSERT_SQL.contains("sort_order"));
+        assert!(MIRROR_ISSUE_INSERT_SQL.contains("assigned_pod_id"));
+        assert!(MIRROR_ISSUE_INSERT_SQL.contains("'none', 0"));
+        assert_eq!(
+            MIRROR_ISSUE_SEQUENCE_INSERT_SQL,
+            "INSERT INTO issue_sequences (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, issue_id, sequence, deleted) VALUES ($1, $2, $3, NULL, NULL, NULL, $4, $5, $6, $7, FALSE)"
+        );
+        // Git arm: no state/sequence/sort touch, `updated_at` carried.
+        assert_eq!(
+            GIT_MIRROR_UPDATE_SQL,
+            "UPDATE issues SET name = $2, description_html = $3, description_stripped = $4, description_json = $5, workspace_id = $6, created_by_id = $7, updated_by_id = $8, external_source = $9, external_id = $10, updated_at = $11 WHERE id = $1"
+        );
+        assert!(!GIT_MIRROR_UPDATE_SQL.contains("state_id"));
+        assert!(!GIT_MIRROR_UPDATE_SQL.contains("sequence_id"));
+        assert!(!GIT_MIRROR_UPDATE_SQL.contains("sort_order"));
+        // Github arm: the audit restamp collapses onto one bind.
+        assert_eq!(
+            GITHUB_MIRROR_UPDATE_SQL,
+            "UPDATE issues SET name = $2, description_html = $3, description_stripped = $4, description_json = $5, created_by_id = $6, updated_by_id = $6, completed_at = $7, updated_at = $8 WHERE id = $1"
+        );
+        assert!(GITHUB_MIRROR_UPDATE_SQL.contains("created_by_id = $6"));
+        // Adopt: state only, no `updated_at` (the sibling save carries it).
+        assert_eq!(
+            ADOPT_ISSUE_STATE_SQL,
+            "UPDATE issues SET state_id = $2 WHERE id = $1"
+        );
+    }
+
+    #[test]
+    fn ticker_and_automation_bare_sql_shapes() {
+        // Moved verbatim from the retired `orchestration::dispatch`
+        // ticker const and the `automation` bulk consts.
+        assert_eq!(
+            TICKER_STATE_UPDATE_SQL,
+            "UPDATE issues SET state_id = $1, updated_at = $2 WHERE id = $3"
+        );
+        assert!(!TICKER_STATE_UPDATE_SQL.contains("updated_by_id"));
+        // Bulk writes touch exactly one column each.
+        assert_eq!(
+            BULK_ARCHIVE_SQL,
+            "UPDATE issues SET archived_at = $1 WHERE id = ANY($2)"
+        );
+        assert_eq!(
+            BULK_CLOSE_SQL,
+            "UPDATE issues SET state_id = $1 WHERE id = ANY($2)"
+        );
     }
 
     #[test]
@@ -3399,5 +3748,355 @@ mod tests {
                 .await
                 .expect("cleanup issue");
         }
+    }
+
+    /// The mirror INSERT reread columns (name, html, stripped, json,
+    /// created_by, updated_by, state, sequence, sort, ext_source, ext_id).
+    type MirrorRereadRow = (
+        String,
+        String,
+        String,
+        Value,
+        Option<Uuid>,
+        Option<Uuid>,
+        Option<Uuid>,
+        i32,
+        f64,
+        Option<String>,
+        Option<String>,
+    );
+
+    /// The github-arm reread columns (name, html, stripped, completed_at,
+    /// state, updated_at).
+    type GithubRereadRow = (
+        String,
+        String,
+        String,
+        Option<DateTime<Utc>>,
+        Option<Uuid>,
+        DateTime<Utc>,
+    );
+
+    /// The sync/ticker/automation bare writes land their exact columns:
+    /// the mirror INSERT carries every sentinel (a bind-order swap fails),
+    /// adopt sets state without touching `updated_at`, the github arm
+    /// rewrites the render triple + `completed_at`, the git arm passes its
+    /// stripped value through untouched, the ticker move leaves
+    /// `updated_by_id` alone, and the bulks touch one column each
+    /// (including the NULL-state QUIRK-5 close).
+    #[tokio::test]
+    async fn sync_ticker_automation_bare_roundtrip() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let actor = Uuid::new_v4();
+        let workspace_id = Uuid::new_v4();
+        let project_id = Uuid::new_v4();
+        let backlog_id = Uuid::new_v4();
+        let done_id = Uuid::new_v4();
+        let username = format!("bare-{}", actor.simple());
+        sqlx::query(
+            "INSERT INTO users (id, password, username, email, first_name, last_name, \
+             avatar, date_joined, created_at, updated_at, last_location, created_location, \
+             is_superuser, is_managed, is_password_expired, is_active, is_staff, \
+             is_email_verified, is_password_autoset, token, user_timezone, last_login_ip, \
+             last_logout_ip, last_login_medium, last_login_uagent, is_bot, display_name, \
+             is_email_valid, is_password_reset_required) VALUES ($1, '!', $2, $3, 'CT', \
+             'User', '', now(), now(), now(), '', '', false, false, false, true, false, \
+             true, false, $4, 'UTC', '', '', '', '', false, $2, true, false)",
+        )
+        .bind(actor)
+        .bind(username.clone())
+        .bind(format!("{username}@example.test"))
+        .bind("t".repeat(64))
+        .execute(&pool)
+        .await
+        .expect("seed user");
+        sqlx::query(
+            "INSERT INTO workspaces (id, created_at, updated_at, name, slug, timezone, \
+             background_color, owner_id) VALUES ($1, now(), now(), 'bare ws', $2, 'UTC', \
+             '#ffffff', $3)",
+        )
+        .bind(workspace_id)
+        .bind(format!("bare-{workspace_id}"))
+        .bind(actor)
+        .execute(&pool)
+        .await
+        .expect("seed workspace");
+        sqlx::query(
+            "INSERT INTO projects (id, name, description, network, identifier, workspace_id, \
+             created_by_id, cycle_view, module_view, issue_views_view, page_view, intake_view, \
+             archive_in, close_in, logo_props, is_time_tracking_enabled, is_issue_type_enabled, \
+             guest_view_all_features, timezone, members_can_edit_states, repo_url, base_branch, \
+             agent_default_interval_seconds, agent_default_max_ticks, agent_ticking_enabled, \
+             is_default, agent_review_default_interval_seconds, default_agent_executor, \
+             agent_test_default_interval_seconds, created_at, updated_at) VALUES ($1, \
+             'bare project', '', 0, $2, $3, $4, true, true, true, true, false, 0, 0, '{}', true, \
+             true, false, 'UTC', false, '', '', 0, 0, false, false, 0, '', 0, now(), now())",
+        )
+        .bind(project_id)
+        .bind(format!(
+            "B{:08X}",
+            (project_id.as_u128() & 0xffff_ffff) as u32
+        ))
+        .bind(workspace_id)
+        .bind(actor)
+        .execute(&pool)
+        .await
+        .expect("seed project");
+        for (id, name, group, sequence, default) in [
+            (backlog_id, "Backlog", "backlog", 100.0, true),
+            (done_id, "Done", "completed", 200.0, false),
+        ] {
+            sqlx::query(
+                "INSERT INTO states (id, created_at, updated_at, name, description, color, \
+                 slug, project_id, workspace_id, sequence, \"group\", \"default\", is_triage) \
+                 VALUES ($1, now(), now(), $2, '', '#ff0000', $3, $4, $5, $6, $7, $8, false)",
+            )
+            .bind(id)
+            .bind(name)
+            .bind(format!("bare-{name}-{sequence}-{project_id}"))
+            .bind(project_id)
+            .bind(workspace_id)
+            .bind(sequence)
+            .bind(group)
+            .bind(default)
+            .execute(&pool)
+            .await
+            .expect("seed state");
+        }
+
+        let t0 = now_micros();
+        let issue_id = Uuid::new_v4();
+        let rows = insert_mirror_issue(
+            &pool,
+            &MirrorIssueInsert {
+                issue_id,
+                now: t0,
+                actor_id: actor,
+                project_id,
+                workspace_id,
+                state_id: None,
+                name: "mirror-name".to_owned(),
+                description_html: "<p>mirror-html</p>".to_owned(),
+                description_stripped: "mirror-stripped".to_owned(),
+                sequence_id: 7,
+                sort_order: 65535.0,
+                completed_at: None,
+                external_source: "github".to_owned(),
+                external_id: "4242".to_owned(),
+                pod_id: None,
+            },
+        )
+        .await
+        .expect("mirror insert");
+        assert_eq!(rows, 1);
+        let row: MirrorRereadRow = sqlx::query_as(
+            "SELECT name, description_html, description_stripped, description_json, \
+             created_by_id, updated_by_id, state_id, sequence_id, sort_order, \
+             external_source, external_id FROM issues WHERE id = $1",
+        )
+        .bind(issue_id)
+        .fetch_one(&pool)
+        .await
+        .expect("mirror reread");
+        assert_eq!(
+            row,
+            (
+                "mirror-name".to_owned(),
+                "<p>mirror-html</p>".to_owned(),
+                "mirror-stripped".to_owned(),
+                Value::Object(Map::new()),
+                Some(actor),
+                Some(actor),
+                None,
+                7,
+                65535.0,
+                Some("github".to_owned()),
+                Some("4242".to_owned()),
+            )
+        );
+        let stamps: (DateTime<Utc>, DateTime<Utc>) =
+            sqlx::query_as("SELECT created_at, updated_at FROM issues WHERE id = $1")
+                .bind(issue_id)
+                .fetch_one(&pool)
+                .await
+                .expect("mirror stamps");
+        assert_eq!(stamps, (t0, t0));
+
+        let rows = insert_issue_sequence(
+            &pool,
+            &MirrorIssueSequence {
+                project_id,
+                workspace_id,
+                issue_id,
+                sequence: 7,
+                now: t0,
+            },
+        )
+        .await
+        .expect("sequence insert");
+        assert_eq!(rows, 1);
+        let seq: (Uuid, i64, Option<Uuid>, bool) = sqlx::query_as(
+            "SELECT issue_id, sequence, created_by_id, deleted FROM issue_sequences \
+             WHERE issue_id = $1",
+        )
+        .bind(issue_id)
+        .fetch_one(&pool)
+        .await
+        .expect("sequence reread");
+        assert_eq!(seq, (issue_id, 7, None, false));
+
+        // Adopt: state lands, `updated_at` untouched.
+        let rows = adopt_issue_state(&pool, issue_id, Some(done_id))
+            .await
+            .expect("adopt");
+        assert_eq!(rows, 1);
+        let adopted: (Option<Uuid>, DateTime<Utc>) =
+            sqlx::query_as("SELECT state_id, updated_at FROM issues WHERE id = $1")
+                .bind(issue_id)
+                .fetch_one(&pool)
+                .await
+                .expect("adopt reread");
+        assert_eq!(adopted, (Some(done_id), t0));
+
+        // Github arm: render triple + completed + auto_now; state kept.
+        let t1 = now_micros();
+        let rows = update_github_mirror_issue(
+            &pool,
+            &GithubMirrorIssueUpdate {
+                issue_id,
+                name: "gh-name".to_owned(),
+                description_html: "<p>gh</p>".to_owned(),
+                description_stripped: "gh-stripped".to_owned(),
+                actor_id: actor,
+                completed_at: Some(t1),
+                now: t1,
+            },
+        )
+        .await
+        .expect("github update");
+        assert_eq!(rows, 1);
+        let updated: GithubRereadRow = sqlx::query_as(
+            "SELECT name, description_html, description_stripped, completed_at, state_id, \
+             updated_at FROM issues WHERE id = $1",
+        )
+        .bind(issue_id)
+        .fetch_one(&pool)
+        .await
+        .expect("github reread");
+        assert_eq!(
+            updated,
+            (
+                "gh-name".to_owned(),
+                "<p>gh</p>".to_owned(),
+                "gh-stripped".to_owned(),
+                Some(t1),
+                Some(done_id),
+                t1,
+            )
+        );
+
+        // Git arm: absolute values, stripped passed through, state kept.
+        let t2 = now_micros();
+        let rows = update_git_mirror_issue(
+            &pool,
+            &GitMirrorIssueUpdate {
+                issue_id,
+                name: "git-name".to_owned(),
+                description_html: "<p>git</p>".to_owned(),
+                description_stripped: "raw safe_render value".to_owned(),
+                workspace_id,
+                actor_id: actor,
+                external_source: "gitlab".to_owned(),
+                external_id: "99".to_owned(),
+                now: t2,
+            },
+        )
+        .await
+        .expect("git update");
+        assert_eq!(rows, 1);
+        let git: (String, String, Option<String>, Option<String>, Option<Uuid>) = sqlx::query_as(
+            "SELECT name, description_stripped, external_source, external_id, state_id \
+             FROM issues WHERE id = $1",
+        )
+        .bind(issue_id)
+        .fetch_one(&pool)
+        .await
+        .expect("git reread");
+        assert_eq!(
+            git,
+            (
+                "git-name".to_owned(),
+                "raw safe_render value".to_owned(),
+                Some("gitlab".to_owned()),
+                Some("99".to_owned()),
+                Some(done_id),
+            )
+        );
+
+        // Ticker move: state + `updated_at` only; audit untouched.
+        let t3 = now_micros();
+        let rows = update_issue_state_no_audit(&pool, issue_id, backlog_id, t3)
+            .await
+            .expect("ticker move");
+        assert_eq!(rows, 1);
+        let moved: (Option<Uuid>, DateTime<Utc>, Option<Uuid>) =
+            sqlx::query_as("SELECT state_id, updated_at, updated_by_id FROM issues WHERE id = $1")
+                .bind(issue_id)
+                .fetch_one(&pool)
+                .await
+                .expect("ticker reread");
+        assert_eq!(moved, (Some(backlog_id), t3, Some(actor)));
+
+        // Automation bulks: one column each, NULL close included.
+        let day = chrono::NaiveDate::from_ymd_opt(2026, 1, 2).expect("bulk day");
+        let rows = bulk_set_archived_at(&pool, &[issue_id], day)
+            .await
+            .expect("bulk archive");
+        assert_eq!(rows, 1);
+        let rows = bulk_set_state(&pool, &[issue_id], None)
+            .await
+            .expect("bulk close null");
+        assert_eq!(rows, 1);
+        let bulked: (Option<NaiveDate>, Option<Uuid>) =
+            sqlx::query_as("SELECT archived_at, state_id FROM issues WHERE id = $1")
+                .bind(issue_id)
+                .fetch_one(&pool)
+                .await
+                .expect("bulk reread");
+        assert_eq!(bulked, (Some(day), None));
+
+        // Cleanup in FK order.
+        for sql in [
+            "DELETE FROM issue_sequences WHERE issue_id = $1",
+            "DELETE FROM issues WHERE id = $1",
+        ] {
+            sqlx::query(sql)
+                .bind(issue_id)
+                .execute(&pool)
+                .await
+                .expect("cleanup issue rows");
+        }
+        sqlx::query("DELETE FROM states WHERE project_id = $1")
+            .bind(project_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup states");
+        sqlx::query("DELETE FROM projects WHERE id = $1")
+            .bind(project_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup project");
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(workspace_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup workspace");
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(actor)
+            .execute(&pool)
+            .await
+            .expect("cleanup user");
     }
 }

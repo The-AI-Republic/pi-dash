@@ -156,6 +156,7 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use pidash_db::config::encryption::Keyring;
+use pidash_services::domain::issues as domain_issues;
 use pidash_services::domain::transition::IssueTransitionHook;
 use pidash_services::integrations::adapters_github::GithubError;
 
@@ -402,23 +403,6 @@ pub const ISSUE_LOOKUP_SQL: &str = "SELECT id FROM issues WHERE project_id = $1 
 /// the `state is None` branch never touches it.
 pub const ISSUE_STATE_SQL: &str = "SELECT i.state_id, s.\"group\" AS state_group, i.completed_at FROM issues i LEFT JOIN states s ON s.id = i.state_id WHERE i.id = $1";
 
-/// `Issue.objects.create(…)` column list, in physical order: the
-/// `Issue.save()` creation path resolves pod/state/sequence/sort-order
-/// first (see [`create_issue`]), then writes the full row. Application
-/// defaults with no DB fallback (`priority 'none'`, `complexity_score 0`,
-/// `sequence/sort` resolved, `is_draft false`, `git_work_branch ''`,
-/// `workpad ''`); everything else NULL. `workspace_id` comes from
-/// `ProjectBaseModel.save` (`project.workspace`), not the task defaults.
-const INSERT_ISSUE_SQL: &str = "INSERT INTO issues (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, parent_id, state_id, point, estimate_point_id, name, description_json, description_html, description_stripped, description_binary, priority, complexity_score, start_date, target_date, sequence_id, sort_order, completed_at, archived_at, is_draft, external_source, external_id, type_id, git_work_branch, workpad, created_via, assigned_pod_id, agent_executor) VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, NULL, $8, NULL, NULL, $9, $10, $11, $12, NULL, 'none', 0, NULL, NULL, $13, $14, $15, NULL, FALSE, $16, $17, NULL, '', '', NULL, $18, NULL)";
-
-/// `update_or_create` issue UPDATE arm (`github_sync_task.py:135-140` via
-/// `Issue.save`, `issue.py:288-350`): `save()` rewrites the whole row,
-/// but only the render triple, the recomputed `completed_at` and the
-/// audit restamp can differ — `name`, state and `updated_at` (auto_now)
-/// aside, every other column keeps its value. (The two Python writes —
-/// `save()` then `filter(pk).update(created_by, updated_by)` — collapse
-/// into this one statement; the final bytes are identical.)
-const UPDATE_ISSUE_SQL: &str = "UPDATE issues SET name = $2, description_html = $3, description_stripped = $4, description_json = $5, created_by_id = $6, updated_by_id = $6, completed_at = $7, updated_at = $8 WHERE id = $1";
 
 /// `GithubIssueSync.objects.update_or_create(repository_sync, issue, …)`
 /// (`github_sync_task.py:168-182`): full-row insert and full-defaults
@@ -434,12 +418,6 @@ const UPDATE_ISSUE_SYNC_SQL: &str = "UPDATE github_issue_syncs SET repo_issue_id
 /// issue)` — metadata is read for the login merge below. `$1` the sync
 /// id, `$2` the issue id.
 pub const GITHUB_SYNC_LOOKUP_SQL: &str = "SELECT id, metadata FROM github_issue_syncs WHERE repository_sync_id = $1 AND issue_id = $2 AND deleted_at IS NULL";
-
-/// `IssueSequence.objects.create(issue, sequence, project)`
-/// (`issue.py:340`): `ProjectBaseModel` audit columns, `deleted false`.
-/// `workspace_id` derives from `project.workspace` via
-/// `ProjectBaseModel.save`, same as the issue row.
-const INSERT_ISSUE_SEQUENCE_SQL: &str = "INSERT INTO issue_sequences (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, issue_id, sequence, deleted) VALUES ($1, $2, $3, NULL, NULL, NULL, $4, $5, $6, $7, FALSE)";
 
 /// Next per-project sequence (`Issue.save`, `issue.py:314-327`): the max
 /// over the scoped `IssueSequence` rows. `$1` is the project id; NULL
@@ -1030,39 +1008,40 @@ async fn create_issue(
     // html_processor stripper, decoding entities.
     let stripped = strip_html_text(description_html);
     let issue_id = Uuid::new_v4();
-    sqlx::query(INSERT_ISSUE_SQL)
-        .bind(issue_id)
-        .bind(*now)
-        .bind(*now)
-        .bind(scan.actor_id)
-        .bind(scan.actor_id)
-        .bind(scan.project_id)
-        .bind(*workspace_id)
-        .bind(state_id)
-        .bind(name)
-        .bind(json!({}))
-        .bind(description_html)
-        .bind(stripped)
-        .bind(sequence_id)
-        .bind(sort_order)
-        .bind(completed_at)
-        .bind("github")
-        .bind(number.to_string())
-        .bind(pod_id)
-        .execute(&mut **tx)
-        .await
-        .map_err(db_error)?;
-    sqlx::query(INSERT_ISSUE_SEQUENCE_SQL)
-        .bind(Uuid::new_v4())
-        .bind(*now)
-        .bind(*now)
-        .bind(scan.project_id)
-        .bind(*workspace_id)
-        .bind(issue_id)
-        .bind(sequence_id)
-        .execute(&mut **tx)
-        .await
-        .map_err(db_error)?;
+    domain_issues::insert_mirror_issue(
+        &mut **tx,
+        &domain_issues::MirrorIssueInsert {
+            issue_id,
+            now: *now,
+            actor_id: scan.actor_id,
+            project_id: scan.project_id,
+            workspace_id: *workspace_id,
+            state_id,
+            name: (*name).to_owned(),
+            description_html: (*description_html).to_owned(),
+            description_stripped: stripped,
+            sequence_id,
+            sort_order,
+            completed_at,
+            external_source: "github".to_owned(),
+            external_id: number.to_string(),
+            pod_id,
+        },
+    )
+    .await
+    .map_err(db_error)?;
+    domain_issues::insert_issue_sequence(
+        &mut **tx,
+        &domain_issues::MirrorIssueSequence {
+            project_id: scan.project_id,
+            workspace_id: *workspace_id,
+            issue_id,
+            sequence: sequence_id,
+            now: *now,
+        },
+    )
+    .await
+    .map_err(db_error)?;
     let sync_id =
         insert_issue_sync(tx, scan, workspace_id, &issue_id, number, sync_values, now).await?;
     Ok((issue_id, sync_id, state_id))
@@ -1233,18 +1212,20 @@ pub async fn upsert_issue(
             };
             // `save()` recomputes the stripped form (`issue.py:345-350`).
             let stripped = strip_html_text(&description_html);
-            sqlx::query(UPDATE_ISSUE_SQL)
-                .bind(issue_id)
-                .bind(&name)
-                .bind(&description_html)
-                .bind(&stripped)
-                .bind(json!({}))
-                .bind(scan.actor_id)
-                .bind(completed_at)
-                .bind(*now)
-                .execute(pool)
-                .await
-                .map_err(db_error)?;
+            domain_issues::update_github_mirror_issue(
+                pool,
+                &domain_issues::GithubMirrorIssueUpdate {
+                    issue_id,
+                    name,
+                    description_html,
+                    description_stripped: stripped,
+                    actor_id: scan.actor_id,
+                    completed_at,
+                    now: *now,
+                },
+            )
+            .await
+            .map_err(db_error)?;
             let mut tx = pool.begin().await.map_err(db_error)?;
             let sync_id = update_issue_sync(&mut tx, scan, &issue_id, number, &values, now).await?;
             merge_issue_login(&mut tx, &sync_id, gh_issue).await?;
@@ -2625,12 +2606,10 @@ mod tests {
             PROJECT_WORKSPACE_SQL,
             ISSUE_LOOKUP_SQL,
             ISSUE_STATE_SQL,
-            INSERT_ISSUE_SQL,
-            UPDATE_ISSUE_SQL,
+
             INSERT_ISSUE_SYNC_SQL,
             UPDATE_ISSUE_SYNC_SQL,
             GITHUB_SYNC_LOOKUP_SQL,
-            INSERT_ISSUE_SEQUENCE_SQL,
             MAX_SEQUENCE_SQL,
             MAX_SORT_ORDER_SQL,
             ADVISORY_LOCK_SQL,
@@ -2719,8 +2698,9 @@ mod tests {
         assert!(INSERT_COMMENT_SYNC_SQL.contains("NULL, NULL, NULL"));
         assert!(UPDATE_COMMENT_SYNC_SQL.contains("created_by_id = NULL"));
 
-        // Mirror rows: actor restamp collapsed into the update.
-        assert!(UPDATE_ISSUE_SQL.contains("created_by_id = $6"));
+        // Mirror rows: actor restamp collapsed into the update (the
+        // issue pin moved to `domain::issues::sync_bare_sql_shapes` with
+        // the statement; the comment pin stays until Part E).
         assert!(UPDATE_ISSUE_COMMENT_SQL.contains("created_by_id = $8"));
 
         // Metadata-only writes touch nothing else.

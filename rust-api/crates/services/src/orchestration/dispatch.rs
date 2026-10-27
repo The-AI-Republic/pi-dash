@@ -181,13 +181,6 @@ pub const PROJECT_DEFAULT_STATE_SQL: &str = "SELECT default_state_id FROM projec
 /// project id.
 pub const PROJECT_CLOCK_POLICY_SQL: &str = "SELECT agent_ticking_enabled, agent_default_max_ticks, agent_default_interval_seconds, agent_review_default_interval_seconds, agent_test_default_interval_seconds FROM projects WHERE id = $1";
 
-/// The state-move write (`:1109`, `:696`, `:1463`):
-/// `save(update_fields=["state", "updated_at"])` — ONLY these columns
-/// (the `updated_by` assignments never reach the row). `$1` state id,
-/// `$2` now, `$3` issue id.
-pub const ISSUE_STATE_UPDATE_SQL: &str =
-    "UPDATE issues SET state_id = $1, updated_at = $2 WHERE id = $3";
-
 /// Bounce comment INSERT (`IssueComment.objects.create`, `:1118-1125`,
 /// through the custom `save()` `:598-627`): full column list with the
 /// Django-side defaults (no DB default to fall back on). `$1` now
@@ -691,7 +684,8 @@ pub trait DispatchSeam: CreationSeam + FinalizeAgentRunSeam {
         &mut self,
         project_id: Uuid,
     ) -> Result<ProjectClockPolicy, DispatchError>;
-    /// The state-move write ([`ISSUE_STATE_UPDATE_SQL`]).
+    /// The state-move write
+    /// ([`update_issue_state_no_audit`](crate::domain::issues::update_issue_state_no_audit)).
     async fn update_issue_state(
         &mut self,
         issue_id: Uuid,
