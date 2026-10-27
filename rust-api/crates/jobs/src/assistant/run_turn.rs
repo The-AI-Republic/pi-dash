@@ -20,7 +20,10 @@
 //! - `_start_assistant_row` / `_emit_delta` / `_finalize_row` (`:118-155`) →
 //!   [`TurnSeam::start_row`] / [`emit_delta`] / [`finalize_row`], driven by
 //!   [`StreamSink`] below.
-//! - `_complete_turn` / `_fail_turn` / `_cancel_turn` (`:157-213`) →
+//! - `_was_cut_off` / `_mark_cut_off` (`:369-372,502-530`) →
+//!   [`TurnSeam::was_cut_off`] / [`TurnSeam::mark_cut_off`], called between
+//!   usage extraction and completion exactly like Python.
+//! - `_complete_turn` / `_fail_turn` / `_cancel_turn` (`:158-213`) →
 //!   [`TurnSeam::complete_turn`] / [`fail_turn`] / [`cancel_turn`]; the exact
 //!   `UPDATE`/`INSERT`/`DELETE` shapes are the `*_sql` builders here, pinned
 //!   against the fixture's `updates` entries.
@@ -44,9 +47,11 @@
 //!   substring-matched) first, then auth, unreachable, model, internal.
 //!   The typed-first branch (`:443-451`) is the [`AgentError::Typed`] arm:
 //!   a typed failure crosses the seam already classified and is used
-//!   verbatim, never text-guessed. (Only this bullet tracks `origin/main`;
-//!   the rest of this map tracks the frozen `tasks.py` until PIDASHCONV-1055
-//!   merges `main`.)
+//!   verbatim, never text-guessed. The `_hit_output_limit` branch
+//!   (`:489-499`) is the [`AgentError::OutputTruncated`] arm, mapping to
+//!   `response_truncated` past the provider classifier. (Only this bullet
+//!   tracks `origin/main`; the rest of this map tracks the frozen
+//!   `tasks.py` until PIDASHCONV-1055 merges `main`.)
 //! - `run_assistant_turn` (`:476-491`, `name="assistant.run_turn"`,
 //!   `acks_late=False`, `max_retries=0`, soft/hard limits from settings) →
 //!   [`RUN_TURN_TASK`] + [`register_turn_handler`]. Celery retries are
@@ -220,6 +225,8 @@ pub const CODE_INTERNAL: &str = "internal";
 pub const CODE_ITERATION_LIMIT: &str = "iteration_limit";
 /// Soft-time-limit code (`tasks.py:489`, `SoftTimeLimitExceeded` branch).
 pub const CODE_TURN_TIMEOUT: &str = "turn_timeout";
+/// Output-limit code (`tasks.py:463`, `_hit_output_limit` branch).
+pub const CODE_RESPONSE_TRUNCATED: &str = "response_truncated";
 
 /// User-facing details, verbatim (`tasks.py:469-480`).
 pub const DETAIL_OUT_OF_CREDIT: &str = "The provider rejected the request for lack of credit.";
@@ -234,6 +241,9 @@ pub const DETAIL_MODEL_INVALID: &str =
 pub const DETAIL_INTERNAL: &str = "The assistant hit an unexpected error.";
 /// Soft-time-limit detail, verbatim (`tasks.py:489`).
 pub const DETAIL_TURN_TIMEOUT: &str = "The assistant took too long to respond.";
+/// Output-limit detail, verbatim (`tasks.py:463`).
+pub const DETAIL_RESPONSE_TRUNCATED: &str =
+    "The reply was cut off because it reached the model's output limit.";
 
 /// Classify an untyped provider failure: the text fallback of
 /// `_classify_error` (`tasks.py:454-480`).
@@ -699,7 +709,8 @@ pub struct ModelError {
 }
 
 /// Agent-run failure, mirroring the three `except` arms of `_run_turn`
-/// (`tasks.py:346-361`).
+/// (`tasks.py:346-361`) plus the output-limit check inside
+/// `_classify_error` (`tasks.py:489-499`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentError {
     /// `UsageLimitExceeded` → `iteration_limit` (`tasks.py:351-355`).
@@ -716,6 +727,14 @@ pub enum AgentError {
     /// any cause is an `AssistantError` (see [`ModelError`] for the same
     /// already-classified crossing at model-resolution time).
     Typed { code: String, detail: String },
+    /// The model ran out of output tokens (`IncompleteToolCall`, or the
+    /// length-exhaustion `UnexpectedModelBehavior`) → `response_truncated`
+    /// with the constant cut-off detail: the `_hit_output_limit` branch
+    /// (`tasks.py:489-499`), which Django checks after the provider
+    /// classifier and before `internal`. The variant bypasses
+    /// [`classify_error`] outright — neither pydantic-ai message matches
+    /// any provider marker, so the bypass classifies identically.
+    OutputTruncated,
     /// Any other provider failure → [`classify_error`] (`tasks.py:356-361`).
     Provider {
         message: String,
@@ -837,14 +856,29 @@ pub trait TurnSeam: Send + Sync {
         &self,
         stream: &Self::Stream,
     ) -> impl std::future::Future<Output = Result<Option<TurnUsage>, SeamError>> + Send;
-    /// `_complete_turn` (`tasks.py:157-170`), including the delta prune
-    /// (`:170`).
+    /// `_was_cut_off` (`tasks.py:369,502-507`): true when the final
+    /// reply ended because the output limit was reached.
+    fn was_cut_off(
+        &self,
+        stream: &Self::Stream,
+    ) -> impl std::future::Future<Output = Result<bool, SeamError>> + Send;
+    /// `_mark_cut_off` (`tasks.py:370-371,510-530`): flag the turn's last
+    /// reply as cut off — `payload.truncated` on the row, then the
+    /// envelope re-sent as a second `message_completed`.
+    fn mark_cut_off(
+        &self,
+        ctx: &TurnContext,
+    ) -> impl std::future::Future<Output = Result<(), SeamError>> + Send;
+    /// `_complete_turn` (`tasks.py:158-172`), including the delta prune
+    /// (`:172`). `truncated` adds the `"truncated": true` key to the
+    /// `turn_completed` payload — only when true (`:168-169`).
     fn complete_turn(
         &self,
         ctx: &TurnContext,
         model_messages: Value,
         usage: Value,
         model_used: String,
+        truncated: bool,
     ) -> impl std::future::Future<Output = Result<(), SeamError>> + Send;
     /// `_fail_turn` (`tasks.py:181-201`): truncates code/detail first,
     /// including the error row, the event and the delta prune (`:191-201`).
@@ -1051,7 +1085,11 @@ pub async fn drive_turn_with_deadline<S: TurnSeam>(
 
     let model_messages = seam.dump_messages(&stream).await?;
     let usage = usage_value(seam.extract_usage(&stream).await?.as_ref());
-    seam.complete_turn(&ctx, model_messages, usage, model_label)
+    let truncated = seam.was_cut_off(&stream).await?;
+    if truncated {
+        seam.mark_cut_off(&ctx).await?;
+    }
+    seam.complete_turn(&ctx, model_messages, usage, model_label, truncated)
         .await?;
     Ok(DriveResult::Completed)
 }
@@ -1074,6 +1112,14 @@ async fn stream_failed<S: TurnSeam>(
         // cause chain, so the code/detail cross verbatim — text matching
         // here would erase both into the generic bucket.
         AgentError::Typed { code, detail } => (code, detail),
+        // Output-limit (`tasks.py:489-499`): the constant code/detail —
+        // `_hit_output_limit` sits after the provider classifier, and
+        // neither pydantic-ai message matches a provider marker, so the
+        // variant bypasses `classify_error` outright.
+        AgentError::OutputTruncated => (
+            CODE_RESPONSE_TRUNCATED.to_owned(),
+            DETAIL_RESPONSE_TRUNCATED.to_owned(),
+        ),
         AgentError::Provider {
             message,
             status_code,
@@ -1620,6 +1666,8 @@ mod tests {
         cancel_after: Option<usize>,
         pulls: Mutex<usize>,
         usage: Option<TurnUsage>,
+        /// Scripted `was_cut_off` answer (default false).
+        cut_off: bool,
         fail_emit: bool,
         /// 1-based row-op index to fail once (`start_row`/`emit_delta`/
         /// `finalize_row` in perform order); the failure-path writes that
@@ -1655,6 +1703,7 @@ mod tests {
                     requests: Some(1),
                     tool_calls: Some(0),
                 }),
+                cut_off: false,
                 fail_emit: false,
                 fail_row_op_at: None,
                 row_ops: Mutex::new(0),
@@ -1822,15 +1871,24 @@ mod tests {
         async fn extract_usage(&self, _s: &FakeStream) -> Result<Option<TurnUsage>, SeamError> {
             Ok(self.usage.clone())
         }
+        async fn was_cut_off(&self, _s: &FakeStream) -> Result<bool, SeamError> {
+            self.log("was_cut_off".to_owned());
+            Ok(self.cut_off)
+        }
+        async fn mark_cut_off(&self, _c: &TurnContext) -> Result<(), SeamError> {
+            self.log("mark_cut_off".to_owned());
+            Ok(())
+        }
         async fn complete_turn(
             &self,
             _c: &TurnContext,
             _m: Value,
             usage: Value,
             model_used: String,
+            truncated: bool,
         ) -> Result<(), SeamError> {
             self.log(format!(
-                "complete_turn:{model_used}:{}",
+                "complete_turn:{model_used}:{}:{truncated}",
                 serde_json::to_string(&usage).unwrap()
             ));
             Ok(())
@@ -2152,6 +2210,69 @@ mod tests {
         );
         assert!(seam.saw("finalize_row:failed:hi").len() == 1);
         assert!(seam.saw("fail_turn:provider_unreachable").len() == 1);
+    }
+
+    #[tokio::test]
+    async fn drive_output_truncated_fails_response_truncated() {
+        // `_hit_output_limit` (`tasks.py:489-499`): an output-limit
+        // failure carries the constant code/detail, never
+        // text-classified — the pydantic-ai messages match no
+        // provider marker, so the bypass equals Django's order.
+        let mut seam = FakeSeam::ok(vec![]);
+        seam.open_err = Some(AgentError::OutputTruncated);
+        let out = drive_turn(&seam, Uuid::new_v4(), TURN_SOFT_LIMIT_SECS as i64)
+            .await
+            .unwrap();
+        assert_eq!(
+            out,
+            DriveResult::Failed {
+                code: CODE_RESPONSE_TRUNCATED.to_owned(),
+                detail: DETAIL_RESPONSE_TRUNCATED.to_owned(),
+            }
+        );
+        assert_eq!(seam.saw("fail_turn:response_truncated:").len(), 1);
+        assert!(seam.saw("complete_turn").is_empty());
+    }
+
+    #[tokio::test]
+    async fn drive_cut_off_marks_and_completes_truncated() {
+        // `_was_cut_off` / `_mark_cut_off` (`tasks.py:369-372`): a
+        // cut-off success marks the row before completing, and the
+        // completion carries the flag.
+        let mut seam = FakeSeam::ok(vec![StreamItem::End]);
+        seam.cut_off = true;
+        let out = drive_turn(&seam, Uuid::new_v4(), TURN_SOFT_LIMIT_SECS as i64)
+            .await
+            .unwrap();
+        assert_eq!(out, DriveResult::Completed);
+        assert_eq!(seam.saw("was_cut_off").len(), 1);
+        assert_eq!(seam.saw("mark_cut_off").len(), 1);
+        let done = seam.saw("complete_turn");
+        assert_eq!(done.len(), 1);
+        assert!(done[0].ends_with(":true"), "truncated flag: {done:?}");
+        let calls = seam.take_calls();
+        let marked = calls.iter().position(|c| c == "mark_cut_off").unwrap();
+        let completed = calls
+            .iter()
+            .position(|c| c.starts_with("complete_turn"))
+            .unwrap();
+        assert!(marked < completed, "mark precedes complete: {calls:?}");
+    }
+
+    #[tokio::test]
+    async fn drive_clean_finish_skips_mark_and_flag() {
+        // The normal-finish control: no mark call, and the completion
+        // carries no flag.
+        let seam = FakeSeam::ok(vec![StreamItem::End]);
+        let out = drive_turn(&seam, Uuid::new_v4(), TURN_SOFT_LIMIT_SECS as i64)
+            .await
+            .unwrap();
+        assert_eq!(out, DriveResult::Completed);
+        assert_eq!(seam.saw("was_cut_off").len(), 1);
+        assert!(seam.saw("mark_cut_off").is_empty());
+        let done = seam.saw("complete_turn");
+        assert_eq!(done.len(), 1);
+        assert!(done[0].ends_with(":false"), "no flag: {done:?}");
     }
 
     #[tokio::test]

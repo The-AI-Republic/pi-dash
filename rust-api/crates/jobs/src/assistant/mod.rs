@@ -143,12 +143,19 @@ mod tests {
         async fn extract_usage(&self, _: &()) -> Result<Option<TurnUsage>, SeamError> {
             Ok(None)
         }
+        async fn was_cut_off(&self, _: &()) -> Result<bool, SeamError> {
+            Ok(false)
+        }
+        async fn mark_cut_off(&self, _: &TurnContext) -> Result<(), SeamError> {
+            Ok(())
+        }
         async fn complete_turn(
             &self,
             _: &TurnContext,
             _: Value,
             _: Value,
             _: String,
+            _: bool,
         ) -> Result<(), SeamError> {
             Ok(())
         }

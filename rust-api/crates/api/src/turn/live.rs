@@ -114,6 +114,28 @@ const MCP_SERVERS_SQL: &str = "SELECT id, name, url, auth_header_encrypted \
 const MESSAGE_ROW_SQL: &str =
     "SELECT seq, payload, created_at FROM assistant_message WHERE id = $1";
 
+/// The turn's last `assistant` row (`_mark_cut_off`, `tasks.py:518-520`):
+/// highest `seq` first, for the payload flag and the re-sent envelope.
+const LAST_ASSISTANT_ROW_SQL: &str = "SELECT id, seq, payload, display_content, status, \
+     created_at, completed_at FROM assistant_message \
+     WHERE turn_id = $1 AND kind = 'assistant' ORDER BY seq DESC LIMIT 1";
+
+/// Flag the row's payload (`message.save(update_fields=["payload"])`,
+/// `tasks.py:523-524`).
+const MARK_CUT_OFF_SQL: &str = "UPDATE assistant_message SET payload = $2 WHERE id = $1";
+
+/// [`LAST_ASSISTANT_ROW_SQL`] row: id, seq, payload, display_content,
+/// status, created_at, completed_at.
+type LastAssistantRow = (
+    Uuid,
+    i64,
+    Value,
+    String,
+    String,
+    DateTime<Utc>,
+    Option<DateTime<Utc>>,
+);
+
 /// Lift a ported decision-surface skip (`mcp.SkippedServer`, services) into
 /// the seam's boundary type (`rt::SkippedServer`, jobs); same two fields.
 fn port_skipped(server: &mcp_service::SkippedServer) -> SkippedServer {
@@ -805,6 +827,48 @@ impl LiveTurnSeam {
         });
         serde_json::from_str(&rendered).map_err(|e| SeamError(e.to_string()))
     }
+
+    /// Append one `message_completed` event for an already-written row:
+    /// the envelope plus the turn-scoped event (`tasks.py:150-153` in
+    /// `_finalize_row`, `tasks.py:526-530` in `_mark_cut_off`).
+    #[allow(clippy::too_many_arguments)]
+    async fn emit_message_completed(
+        &self,
+        ctx: &TurnContext,
+        message_id: Uuid,
+        text: &str,
+        status: &str,
+        seq: i64,
+        payload: &Value,
+        created_at: DateTime<Utc>,
+        completed_at: Option<DateTime<Utc>>,
+        now: DateTime<Utc>,
+    ) -> Result<(), SeamError> {
+        let envelope = Self::envelope_json(
+            message_id,
+            rt::KIND_ASSISTANT,
+            text,
+            status,
+            seq,
+            Some(ctx.turn_id),
+            payload,
+            created_at,
+            completed_at,
+        )?;
+        let event_payload = serde_json::json!({
+            "turn_id": ctx.turn_id.to_string(),
+            "message": envelope,
+        });
+        self.append_event(
+            ctx.thread_id,
+            Some(ctx.turn_id),
+            rt::EVENT_MESSAGE_COMPLETED,
+            &event_payload,
+            Some(message_id),
+            now,
+        )
+        .await
+    }
 }
 
 fn internal_model_error(error: impl std::fmt::Display) -> ModelError {
@@ -1452,27 +1516,15 @@ impl TurnSeam for LiveTurnSeam {
         let Some((seq, payload, created_at)) = row else {
             return Ok(());
         };
-        let envelope = Self::envelope_json(
+        self.emit_message_completed(
+            ctx,
             message_id,
-            rt::KIND_ASSISTANT,
             text,
             status,
             seq,
-            Some(ctx.turn_id),
             &payload,
             created_at,
             Some(now),
-        )?;
-        let event_payload = serde_json::json!({
-            "turn_id": ctx.turn_id.to_string(),
-            "message": envelope,
-        });
-        self.append_event(
-            ctx.thread_id,
-            Some(ctx.turn_id),
-            rt::EVENT_MESSAGE_COMPLETED,
-            &event_payload,
-            Some(message_id),
             now,
         )
         .await
@@ -1502,13 +1554,63 @@ impl TurnSeam for LiveTurnSeam {
             .map(|value| turn_usage_from_run(&value.usage)))
     }
 
-    /// `_complete_turn` (`tasks.py:157-170`), including the delta prune.
+    /// `_was_cut_off` (`tasks.py:502-507`): the final reply ended
+    /// because the output limit was reached. A missing outcome reads as
+    /// "not truncated", like the swallowed lookup in Python.
+    async fn was_cut_off(&self, stream: &Self::Stream) -> Result<bool, SeamError> {
+        let outcome = stream
+            .outcome
+            .lock()
+            .map_err(|error| SeamError(error.to_string()))?;
+        Ok(outcome
+            .as_ref()
+            .and_then(|value| value.finish)
+            .is_some_and(|finish| finish == history::TurnFinish::Length))
+    }
+
+    /// `_mark_cut_off` (`tasks.py:510-530`): flag the turn's last reply
+    /// as cut off — `payload.truncated` on the row, then the envelope
+    /// re-sent as a second `message_completed` for clients to merge.
+    async fn mark_cut_off(&self, ctx: &TurnContext) -> Result<(), SeamError> {
+        let row: Option<LastAssistantRow> = sqlx::query_as(LAST_ASSISTANT_ROW_SQL)
+            .bind(ctx.turn_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(db_error)?;
+        let Some((message_id, seq, payload, text, status, created_at, completed_at)) = row else {
+            return Ok(());
+        };
+        let mut flagged = payload.as_object().cloned().unwrap_or_default();
+        flagged.insert("truncated".to_owned(), Value::Bool(true));
+        let merged = Value::Object(flagged);
+        sqlx::query(MARK_CUT_OFF_SQL)
+            .bind(message_id)
+            .bind(&merged)
+            .execute(&self.pool)
+            .await
+            .map_err(db_error)?;
+        self.emit_message_completed(
+            ctx,
+            message_id,
+            &text,
+            &status,
+            seq,
+            &merged,
+            created_at,
+            completed_at,
+            Utc::now(),
+        )
+        .await
+    }
+
+    /// `_complete_turn` (`tasks.py:158-172`), including the delta prune.
     async fn complete_turn(
         &self,
         ctx: &TurnContext,
         model_messages: Value,
         usage: Value,
         model_used: String,
+        truncated: bool,
     ) -> Result<(), SeamError> {
         let mut tx = self.pool.begin().await.map_err(db_error)?;
         sqlx::query(&rt::lock_turn_select())
@@ -1539,10 +1641,13 @@ impl TurnSeam for LiveTurnSeam {
             .await
             .map_err(db_error)?;
         tx.commit().await.map_err(db_error)?;
-        let payload = serde_json::json!({
+        let mut payload = serde_json::json!({
             "turn_id": ctx.turn_id.to_string(),
             "usage": usage,
         });
+        if truncated {
+            payload["truncated"] = Value::Bool(true);
+        }
         self.append_event(
             ctx.thread_id,
             Some(ctx.turn_id),

@@ -628,12 +628,21 @@ mod tests {
             unreachable!("fake turn seam is never driven")
         }
 
+        async fn was_cut_off(&self, _stream: &Self::Stream) -> Result<bool, SeamError> {
+            unreachable!("fake turn seam is never driven")
+        }
+
+        async fn mark_cut_off(&self, _ctx: &TurnContext) -> Result<(), SeamError> {
+            unreachable!("fake turn seam is never driven")
+        }
+
         async fn complete_turn(
             &self,
             _ctx: &TurnContext,
             _model_messages: serde_json::Value,
             _usage: serde_json::Value,
             _model_used: String,
+            _truncated: bool,
         ) -> Result<(), SeamError> {
             unreachable!("fake turn seam is never driven")
         }
