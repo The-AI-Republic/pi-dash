@@ -4,8 +4,10 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
+import { POPOVER_LAYER_CLASS } from "../lib/styles";
 import { Button } from "./Button";
 import { isMenuCustom, isMenuSeparator, Menu } from "./Menu";
+import { positionerOf } from "./overlays.testSupport";
 
 function setup(onSelect: () => void = vi.fn()) {
   return render(
@@ -49,6 +51,12 @@ describe("Menu", () => {
     fireEvent.click(screen.getByRole("menuitem", { name: "Edit" }));
     expect(onSelect).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+  });
+
+  it("lands the menu on the popover tier above in-page chrome", () => {
+    setup();
+    fireEvent.click(screen.getByRole("button", { name: "Actions" }));
+    expect(positionerOf(screen.getByRole("menu")).className).toContain(POPOVER_LAYER_CLASS);
   });
 
   it("skips disabled items and closes on Escape with focus back on the trigger", async () => {

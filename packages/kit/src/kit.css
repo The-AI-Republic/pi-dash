@@ -55,6 +55,13 @@
   box-shadow: var(--shadow-dialog);
 }
 
+/* Stacking for portalled popups. The Base UI positioner is the element
+   that lives in the portal, so it carries the tier; without it the popup
+   has `z-index: auto` and any sticky in-page chrome paints over it. */
+@utility layer-popover {
+  z-index: var(--layer-popover);
+}
+
 /* Skeleton shimmer. Duration honors the motion token. */
 @theme {
   --animate-shimmer: shimmer 1.6s linear infinite;

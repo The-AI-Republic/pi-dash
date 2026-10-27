@@ -15,7 +15,7 @@ import { Check } from "lucide-react";
 import * as React from "react";
 import { cn } from "../lib/cn";
 import { pickDefined } from "../lib/props";
-import { FOCUS_RING } from "../lib/styles";
+import { FOCUS_RING, POPOVER_LAYER_CLASS } from "../lib/styles";
 import { fieldInputClasses } from "./FieldScaffold";
 import { Spinner } from "./Spinner";
 
@@ -229,7 +229,7 @@ export function Combobox({
     <BasePopover.Root {...pickDefined({ open, onOpenChange: (next: boolean) => requestOpen(next) })}>
       <BasePopover.Trigger render={renderedTrigger} />
       <BasePopover.Portal>
-        <BasePopover.Positioner sideOffset={4} align="start">
+        <BasePopover.Positioner sideOffset={4} align="start" className={POPOVER_LAYER_CLASS}>
           <BasePopover.Popup
             className={cn(popupClasses, className)}
             initialFocus={resolveInitialFocus}

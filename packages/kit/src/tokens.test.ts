@@ -147,6 +147,9 @@ describe("tokens.css", () => {
     expect(light.get("--radius-popover")).toBe("6px");
     expect(light.get("--radius-dialog")).toBe("8px");
     expect(light.get("--motion-duration")).toBe("120ms");
+    // Popups portal out of the page tree; their tier has to sit above the
+    // sticky rows and panels screens use (10..60), including the peek.
+    expect(light.get("--layer-popover")).toBe("70");
     expect(light.get("--icon-size")).toBe("16px");
     expect(light.get("--icon-stroke")).toBe("1.5");
   });

@@ -4,7 +4,9 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
+import { POPOVER_LAYER_CLASS } from "../lib/styles";
 import { ContextMenu } from "./ContextMenu";
+import { positionerOf } from "./overlays.testSupport";
 
 function setup(onSelect: () => void = vi.fn()) {
   return render(
@@ -30,6 +32,12 @@ describe("ContextMenu", () => {
     fireEvent.click(screen.getByRole("menuitem", { name: "Set as default" }));
     expect(onSelect).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+  });
+
+  it("lands the context menu on the popover tier above in-page chrome", () => {
+    setup();
+    fireEvent.contextMenu(screen.getByText("Tab"));
+    expect(positionerOf(screen.getByRole("menu")).className).toContain(POPOVER_LAYER_CLASS);
   });
 
   it("closes on Escape", async () => {

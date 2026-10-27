@@ -4,6 +4,7 @@
 import { Tooltip as BaseTooltip } from "@base-ui-components/react/tooltip";
 import * as React from "react";
 import { pickDefined } from "../lib/props";
+import { POPOVER_LAYER_CLASS } from "../lib/styles";
 
 export interface TooltipProps {
   /** Element the hint anchors to. */
@@ -19,7 +20,7 @@ export function Tooltip({ children, content, open, onOpenChange }: TooltipProps)
     <BaseTooltip.Root {...pickDefined({ open, onOpenChange })}>
       <BaseTooltip.Trigger render={children} />
       <BaseTooltip.Portal>
-        <BaseTooltip.Positioner sideOffset={6}>
+        <BaseTooltip.Positioner sideOffset={6} className={POPOVER_LAYER_CLASS}>
           <BaseTooltip.Popup
             role="tooltip"
             className="text-meta shadow-popover max-w-64 rounded-(--radius-control) border border-(--border) bg-(--surface) px-(--space-3) py-(--space-2) text-(--text)"

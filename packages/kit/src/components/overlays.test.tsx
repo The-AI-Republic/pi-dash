@@ -4,9 +4,11 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
+import { POPOVER_LAYER_CLASS } from "../lib/styles";
 import { Button } from "./Button";
 import { Popover } from "./Popover";
 import { Tooltip } from "./Tooltip";
+import { positionerOf } from "./overlays.testSupport";
 
 describe("Popover", () => {
   it("opens from the trigger and closes on Escape with focus back", async () => {
@@ -23,6 +25,20 @@ describe("Popover", () => {
     expect(screen.queryByText("Popover body")).not.toBeInTheDocument();
     expect(trigger).toHaveFocus();
   });
+
+  it("lands its popup on the popover tier above in-page chrome", async () => {
+    // A sticky row with a z-index used to paint over the popup and take
+    // its clicks; the positioner inside the portal carries the tier.
+    const user = userEvent.setup();
+    render(
+      <Popover trigger={<Button>Details</Button>}>
+        <p>Popover body</p>
+      </Popover>
+    );
+    await user.click(screen.getByRole("button", { name: "Details" }));
+    expect(positionerOf(screen.getByText("Popover body")).className).toContain(POPOVER_LAYER_CLASS);
+    expect(document.body.contains(positionerOf(screen.getByText("Popover body")))).toBe(true);
+  });
 });
 
 describe("Tooltip", () => {
@@ -38,7 +54,9 @@ describe("Tooltip", () => {
         <Button>New</Button>
       </Tooltip>
     );
-    expect(screen.getByRole("tooltip")).toHaveTextContent("Create issue");
+    const hint = screen.getByRole("tooltip");
+    expect(hint).toHaveTextContent("Create issue");
+    expect(positionerOf(hint).className).toContain(POPOVER_LAYER_CLASS);
     await user.keyboard("{Escape}");
     expect(onOpenChange).toHaveBeenCalledWith(false, expect.anything());
   });

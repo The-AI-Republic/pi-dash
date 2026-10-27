@@ -4,6 +4,8 @@
 // See the LICENSE file for details.
 import { render, screen } from "@testing-library/react";
 import type { IssueListItem } from "@pidash/api-client";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import { CalendarGrid } from "./CalendarGrid.js";
@@ -11,6 +13,10 @@ import { scrollContainerTowardPointer } from "./autoScroll.js";
 import type { CalendarCell, CalendarWeek } from "./model.js";
 
 vi.mock("./autoScroll.js", () => ({ scrollContainerTowardPointer: vi.fn() }));
+
+// The kit ships the popup tier as a token; the header's tier must stay
+// below it, so the two read each other rather than a copied constant.
+const KIT_TOKENS = resolve(process.cwd(), "../../packages/kit/src/tokens.css");
 
 function cell(day: number, overrides: Partial<CalendarCell> = {}): CalendarCell {
   return {
@@ -146,6 +152,17 @@ describe("CalendarGrid", () => {
     const scroll = screen.getByTestId("calendar-scroll");
     scroll.dispatchEvent(new MouseEvent("pointermove", { clientY: 499, bubbles: true }));
     expect(scrollContainerTowardPointer).toHaveBeenCalledWith(scroll, 499);
+  });
+
+  it("keeps the sticky weekday header below the kit popover tier", () => {
+    // A popup portalled to the body only needs to clear the header while
+    // it is open (ISS-023): the header's own tier must stay under the
+    // kit's popover tier, or the two fight over the same clicks.
+    renderGrid();
+    const header = screen.getByText("Sat").closest("div.sticky") as HTMLElement;
+    const headerTier = Number(/\bz-(\d+)\b/.exec(header.className)?.[1] ?? "0");
+    expect(headerTier).toBeGreaterThan(0);
+    expect(headerTier).toBeLessThan(Number(readFileSync(KIT_TOKENS, "utf8").match(/--layer-popover:\s*(\d+)/)?.[1]));
   });
 
   it("falls back to the supplied weekday labels when there are no weeks", () => {

@@ -5,6 +5,7 @@ import { ContextMenu as BaseContextMenu } from "@base-ui-components/react/contex
 import * as React from "react";
 import { cn } from "../lib/cn";
 import { pickDefined } from "../lib/props";
+import { POPOVER_LAYER_CLASS } from "../lib/styles";
 import { isMenuCustom, isMenuSeparator, MenuItemBody, type MenuEntry } from "./Menu";
 
 export interface ContextMenuProps {
@@ -29,7 +30,7 @@ export function ContextMenu({ trigger, items, open, onOpenChange }: ContextMenuP
     <BaseContextMenu.Root {...pickDefined({ open, onOpenChange })}>
       <BaseContextMenu.Trigger render={trigger} />
       <BaseContextMenu.Portal>
-        <BaseContextMenu.Positioner sideOffset={4}>
+        <BaseContextMenu.Positioner sideOffset={4} className={POPOVER_LAYER_CLASS}>
           <BaseContextMenu.Popup className={popupClasses}>
             {items.map((entry, index) =>
               isMenuSeparator(entry) ? (

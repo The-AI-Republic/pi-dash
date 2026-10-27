@@ -116,6 +116,12 @@
   --shadow-dialog: 0 12px 48px rgb(0 0 0 / 0.18);
   --shadow-none: none;
 
+  /* Stacking: portalled popups sit above every in-page stack level so
+     sticky chrome (a header row, a sheet column) never swallows their
+     clicks. Screens use 10..60 for their own sticky/panel layers; a popup
+     also opens inside the peek panel, so its tier clears those too. */
+  --layer-popover: 70;
+
   /* Focus: always visible, 2px accent ring with 1px offset */
   --focus-ring-width: 2px;
   --focus-ring-offset: 1px;

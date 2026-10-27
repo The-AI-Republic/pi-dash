@@ -9,6 +9,7 @@ import { Menu as BaseMenu } from "@base-ui-components/react/menu";
 import * as React from "react";
 import { cn } from "../lib/cn";
 import { pickDefined } from "../lib/props";
+import { POPOVER_LAYER_CLASS } from "../lib/styles";
 
 export interface MenuAction {
   label: string;
@@ -115,7 +116,7 @@ export function Menu({ trigger, items, open, onOpenChange }: MenuProps): React.R
     <BaseMenu.Root {...pickDefined({ open, onOpenChange })}>
       <BaseMenu.Trigger render={trigger} />
       <BaseMenu.Portal>
-        <BaseMenu.Positioner sideOffset={4}>
+        <BaseMenu.Positioner sideOffset={4} className={POPOVER_LAYER_CLASS}>
           <BaseMenu.Popup className={popupClasses}>
             {items.map((entry, index) =>
               isMenuSeparator(entry) ? (

@@ -5,9 +5,11 @@ import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { POPOVER_LAYER_CLASS } from "../lib/styles";
 import { Button } from "./Button";
 import { Combobox, filterComboboxOptions, shouldAutoFocusSearch, type ComboboxOption } from "./Combobox";
 import { IconButton } from "./IconButton";
+import { positionerOf } from "./overlays.testSupport";
 
 const OPTIONS: ComboboxOption[] = [
   { id: "urgent", label: "Urgent" },
@@ -100,6 +102,12 @@ describe("Combobox", () => {
     expect(screen.getByRole("listbox", { name: "Priorities" })).toBeInTheDocument();
     await user.keyboard("{Escape}");
     expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+  });
+
+  it("lands the option list on the popover tier above in-page chrome", () => {
+    setup();
+    fireEvent.click(screen.getByRole("button", { name: "Priority" }));
+    expect(positionerOf(screen.getByRole("listbox")).className).toContain(POPOVER_LAYER_CLASS);
   });
 
   it("notifies open changes", () => {
