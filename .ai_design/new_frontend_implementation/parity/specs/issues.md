@@ -275,9 +275,9 @@ count of issues in that group. Headers sit in a sticky row; the board
 scrolls horizontally beneath it. Columns render lazily: only the first
 few mount immediately, the rest mount when scrolled into view behind
 skeleton placeholders. The header count equals the number of issues in
-the group; the oracle pins NEWFRONT-153 (a grouped header count that
-excludes a pending-triage issue while its card renders) and slices
-build the intended equality. Oracle: `layouts-b-kanban.spec.ts`.
+the group; NEWFRONT-153 fixed the old grouped header count that excluded
+a pending-triage issue while its card rendered, and the scenario asserts
+the intended equality. Oracle: `layouts-b-kanban.spec.ts`.
 
 With a sub-group-by set, the board renders a sticky row of group
 headers followed by one horizontal lane per sub-group value (ISS-029).
