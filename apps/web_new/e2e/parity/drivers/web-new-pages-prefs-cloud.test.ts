@@ -751,6 +751,22 @@ describe("page assistant and cloud slots", () => {
     ]);
   });
 
+  it("excludes the sibling switcher whose name carries the page title", async () => {
+    const action = (aria: string) => at({ getAttribute: async () => aria });
+    const switcher = at({
+      getAttribute: async () => "Switch page, current NF320 share 123",
+      locator: () => at({ count: 1 }),
+    });
+    const buttons = at({
+      count: 3,
+      nth: (index) => (index === 0 ? switcher : action(index === 1 ? "Copy link" : "Page options")),
+    });
+    const header = at({ getByRole: () => buttons });
+    const driver = new WebNewDriver(pageDouble({ testIds: { "page-detail-header": header } }).page);
+
+    await expect(driver.pagesCloudHeaderActionNames()).resolves.toEqual(["Copy link", "Page options"]);
+  });
+
   it("names the pane toggle icon and handles missing or unclassed icons", async () => {
     const icon = (className: string | null) => at({ getAttribute: async () => className });
     const toggle = at({ locator: () => at({ first: () => icon("lucide lucide-panel-right") }) });

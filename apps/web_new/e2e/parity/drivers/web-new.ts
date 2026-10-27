@@ -22689,6 +22689,11 @@ export class WebNewDriver implements ParityDriver {
       const button = buttons.nth(index);
       const aria = ((await button.getAttribute("aria-label")) ?? "").trim();
       if (aria === "" || aria === "Navigation pane") continue;
+      // The sibling switcher lives in the header too and carries the
+      // current page title in its accessible name, so a page named with
+      // "share" (or "extra") would pollute the community-absence reads.
+      // It is navigation, not an action: skip it by its marker.
+      if ((await button.locator('[data-testid="page-switcher-current-name"]').count()) > 0) continue;
       names.push(aria);
     }
     return names;
