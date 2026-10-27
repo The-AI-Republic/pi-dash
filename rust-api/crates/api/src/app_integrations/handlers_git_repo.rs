@@ -95,6 +95,8 @@ use axum::Router;
 
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
+use pidash_compat::response::json_response;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 use pidash_db::app_integrations::queries_git::{self, BoundRepository, ProjectBinding};
 use pidash_db::integrations::git_models::git_provider_account;
 use pidash_db::integrations::git_models::git_repository_binding;
@@ -149,8 +151,6 @@ fn owned_bind() -> axum::routing::MethodRouter<AppState> {
 /// (`views/base.py:189-194`).
 pub const UNAUTHENTICATED_BODY: &str =
     r#"{"detail":"Authentication credentials were not provided."}"#;
-/// `handle_exception`'s generic 500 branch (`views/base.py:147-149`).
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// DRF's default `Http404` body (missing workspace/project row in the
 /// bind body).
 pub const NOT_FOUND_DETAIL_BODY: &str = r#"{"detail":"Not found."}"#;
@@ -240,14 +240,6 @@ fn parse_error_response(err: &serde_json::Error) -> Response {
             .expect("parse error serializes")
     );
     json_response(StatusCode::BAD_REQUEST, body)
-}
-
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("git repo json response")
 }
 
 fn pool_of(state: &AppState) -> Result<sqlx::PgPool, RepoDenial> {

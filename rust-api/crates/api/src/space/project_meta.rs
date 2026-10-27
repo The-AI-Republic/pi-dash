@@ -100,7 +100,7 @@
 //!   as row text (Postgres `float8out` would print `65535`).
 
 use axum::extract::{Extension, Path, Request, State};
-use axum::http::{header, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
@@ -110,6 +110,7 @@ use sqlx::Row;
 
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
+use pidash_compat::response::json_response;
 use pidash_services::space::guards::{self, AnchorLookup, ErrorBody, ExceptionKind};
 use pidash_services::space::queries::project_meta as queries;
 use pidash_services::space::serializers::lite;
@@ -226,15 +227,6 @@ impl IntoResponse for HandlerError {
         let status = StatusCode::from_u16(body.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
         json_response(status, body.body.to_string())
     }
-}
-
-/// Render `body` (already exact JSON bytes) as a JSON response.
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("handler json response")
 }
 
 fn pool_of(state: &AppState) -> Result<&sqlx::PgPool, HandlerError> {

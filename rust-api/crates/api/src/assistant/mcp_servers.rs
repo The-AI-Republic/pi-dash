@@ -719,7 +719,7 @@ fn serialize_server(row: &ServerRow, effective_prefix: Option<&str>, timezone: &
 fn blocked_response() -> Response {
     error_response(
         StatusCode::BAD_REQUEST,
-        &serde_json::json!({
+        serde_json::json!({
             "error": "url_blocked",
             "detail": "That server host is not allowed.",
         }),
@@ -731,7 +731,7 @@ fn blocked_response() -> Response {
 fn duplicate_name_response() -> Response {
     error_response(
         StatusCode::BAD_REQUEST,
-        &serde_json::json!({
+        serde_json::json!({
             "error": "duplicate_name",
             "detail": "You already have a tool server with that name.",
         }),
@@ -857,7 +857,7 @@ fn dtype_error(kind: &str) -> Map<String, Value> {
 
 /// Render a field-error dict 400 (`raise_exception=True`).
 fn validation_error_response(errors: &Map<String, Value>) -> Response {
-    error_response(StatusCode::BAD_REQUEST, &Value::Object(errors.clone()))
+    error_response(StatusCode::BAD_REQUEST, Value::Object(errors.clone()))
 }
 
 /// Set/clear the encrypted auth header (`_apply_auth_header`,
@@ -952,7 +952,7 @@ async fn list_servers(
             )
         })
         .collect();
-    json_body(StatusCode::OK, &Value::Array(body))
+    json_body(StatusCode::OK, Value::Array(body))
 }
 
 /// `POST`: validate, SSRF-guard, duplicate-name check, server-cap
@@ -1007,7 +1007,7 @@ async fn create_server(
         Ok(count) if count >= limit as i64 => {
             return error_response(
                 StatusCode::BAD_REQUEST,
-                &serde_json::json!({
+                serde_json::json!({
                     "error": "too_many_servers",
                     "detail": format!(
                         "You can have at most {limit} tool servers. Remove one before adding another."
@@ -1055,7 +1055,7 @@ async fn create_server(
     };
     json_body(
         StatusCode::CREATED,
-        &serialize_server(
+        serialize_server(
             &ServerRow {
                 id,
                 name,
@@ -1164,7 +1164,7 @@ async fn patch_server(
     }
     json_body(
         StatusCode::OK,
-        &serialize_server(&row, None, &actor.timezone),
+        serialize_server(&row, None, &actor.timezone),
     )
 }
 

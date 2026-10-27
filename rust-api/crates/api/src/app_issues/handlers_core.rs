@@ -155,6 +155,7 @@ use crate::v1_cycles_modules::body as shared_body;
 use crate::v1_cycles_modules::json::{
     parse_request_data, to_serde_publish, JsonFail, JSON_PARSE_PREFIX,
 };
+use pidash_compat::response::{json_created, no_content as empty_response};
 
 /// Detail path in `app/urls/issue.py:81-84` form.
 pub const CORE_DETAIL_PATH: &str = "/api/workspaces/{slug}/projects/{project_id}/issues/{pk}/";
@@ -510,15 +511,6 @@ fn request_origin(state: &AppState) -> Result<String, Denial> {
 // ---------------------------------------------------------------------------
 // Responses
 // ---------------------------------------------------------------------------
-
-/// 204 with NO `Content-Type`: Django strips it on empty responses
-/// (verified live — `ct=-` on PATCH/DELETE 204s).
-fn empty_response() -> Response {
-    Response::builder()
-        .status(StatusCode::NO_CONTENT)
-        .body(axum::body::Body::empty())
-        .expect("204 response")
-}
 
 fn not_found_detail(body: &str, status: StatusCode) -> Response {
     Response::builder()
@@ -2658,15 +2650,6 @@ const ESTIMATE_EXISTS_NULL_PROJECT_SQL: &str =
 /// `bool(api_key_encrypted)`.
 const ASSISTANT_KEY_SQL: &str =
     "SELECT api_key_encrypted FROM assistant_user_llm_config WHERE user_id = $1 LIMIT 1";
-
-/// 201 with a pre-rendered JSON body (mirrors the sibling handlers).
-fn json_created(body: String) -> Response {
-    Response::builder()
-        .status(StatusCode::CREATED)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("created response")
-}
 
 /// 400 with a pre-rendered JSON body (mirrors the sibling handlers).
 fn json_bad_request(body: &str) -> Response {

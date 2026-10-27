@@ -107,6 +107,7 @@ use crate::serializer::render_datetime_in;
 use crate::state::AppState;
 use crate::v1_projects::tz_zones::PYTZ_COMMON_TIMEZONES;
 use pidash_compat::db::{is_integrity_error, is_unique_violation};
+pub(crate) use pidash_compat::response::{empty_response, json_response};
 
 /// `workspace-slug-check/` (`urls/workspace.py:45-49`, W01).
 pub const SLUG_CHECK_PATH: &str = "/api/workspace-slug-check/";
@@ -480,22 +481,6 @@ fn gate_for_export() -> &'static gates::Gate {
 // ---------------------------------------------------------------------------
 
 pub(crate) type HandlerResult = Result<Response, Denial>;
-
-pub(crate) fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("view response")
-}
-
-pub(crate) fn empty_response(status: StatusCode) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(Vec::new()))
-        .expect("empty response")
-}
 
 /// `request.user` from the Django session: missing session, missing key,
 /// or a non-UUID id is anonymous → 401.

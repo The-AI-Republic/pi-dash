@@ -147,6 +147,7 @@ use crate::v1_cycles_modules::body as shared_body;
 use crate::v1_cycles_modules::json::{
     parse_request_data_spans, to_serde_publish, JsonFail, JSON_PARSE_PREFIX,
 };
+use pidash_compat::response::{json_response, no_content as empty_response, SERVER_ERROR_BODY};
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -242,8 +243,6 @@ const PAGE_NOT_FOUND_BODY: &str = r#"{"error": "Page not found."}"#;
 const INVALID_PAYLOAD_BODY: &str = r#"{"error":"The payload is not valid"}"#;
 /// `handle_exception`'s `ValidationError` branch (`app/views/base.py:126-130`).
 const INVALID_DETAIL_BODY: &str = r#"{"error":"Please provide valid detail"}"#;
-/// `handle_exception`'s generic 500 branch (`app/views/base.py:145-149`).
-const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// `handle_exception`'s `KeyError` branch (`app/views/base.py:137-141`).
 const KEY_ERROR_BODY: &str = r#"{"error":"The required key does not exist."}"#;
 /// `DraftIssueCreateSerializer.validate` project-membership messages
@@ -264,22 +263,6 @@ const FAVORITE_EXISTS_BODY: &str = r#"{"error":"Favorite already exists"}"#;
 // ---------------------------------------------------------------------------
 
 type HandlerResult = Result<Response, Denial>;
-
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("view response")
-}
-
-/// 204 with NO `Content-Type`: Django strips it on empty responses (verified live).
-fn empty_response() -> Response {
-    Response::builder()
-        .status(StatusCode::NO_CONTENT)
-        .body(axum::body::Body::empty())
-        .expect("204 response")
-}
 
 fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")

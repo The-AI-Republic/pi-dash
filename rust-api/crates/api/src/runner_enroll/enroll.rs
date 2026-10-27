@@ -74,6 +74,7 @@ use super::throttle as enroll_throttle;
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
 use pidash_compat::db::is_integrity_error;
+pub use pidash_compat::response::{error_body, json_response, server_error, SERVER_ERROR_BODY};
 
 // ---------------------------------------------------------------------------
 // Wire consts (`enrollment.py`, `register.py`)
@@ -112,20 +113,6 @@ const SESSION_AUTH_HASH_SALT: &str =
 // Shared responses (the `runner_runs` shape, restated: no cross-domain dep)
 // ---------------------------------------------------------------------------
 
-/// Unhandled-failure body (500). Runner views have no custom
-/// `handle_exception`, so Django renders its HTML error page here; only
-/// the status is contract-pinned.
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
-
-/// Render a JSON body with the DRF content type.
-pub fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("runner-enroll response builds")
-}
-
 /// The request pool, or the 500 when the server runs pool-less
 /// (unreachable in `serve`, which fail-fasts at boot).
 pub fn pool_of(state: &AppState) -> Result<&sqlx::PgPool, Response> {
@@ -136,14 +123,6 @@ pub fn pool_of(state: &AppState) -> Result<&sqlx::PgPool, Response> {
             SERVER_ERROR_BODY.to_owned(),
         )),
     }
-}
-
-/// The 500 shortcut for fallible handler paths.
-pub fn server_error() -> Response {
-    json_response(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        SERVER_ERROR_BODY.to_owned(),
-    )
 }
 
 /// DRF `Allow` for the GET-only health probe
@@ -176,11 +155,6 @@ fn view_response(mut response: Response, allow: &'static str) -> Response {
         .headers_mut()
         .insert(header::ALLOW, HeaderValue::from_static(allow));
     response
-}
-
-/// `{"error": name}` (view-inline 4xx bodies).
-pub fn error_body(name: &str) -> String {
-    serde_json::json!({ "error": name }).to_string()
 }
 
 /// `{"error": name, "error_description": desc}`.

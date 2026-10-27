@@ -72,6 +72,7 @@ use axum::Router;
 use sqlx::{Postgres, Row};
 
 use crate::state::AppState;
+pub use pidash_compat::response::{json_ok as json_response, SERVER_ERROR_BODY};
 
 /// Merge the app-search route groups with the views route groups
 /// (PIDASHCONV-275); merges keep both sides.
@@ -103,10 +104,6 @@ pub const UNAUTHENTICATED_BODY: &str =
 /// a badly-formed UUID in a filter raises Django `ValidationError`, not
 /// DRF's parse error.
 pub const INVALID_DETAIL_BODY: &str = r#"{"error":"Please provide valid detail"}"#;
-/// `handle_exception`'s generic 500 branch. Covers `ValueError` from the
-/// unguarded `int(count)` (B8), `AttributeError` from the unguarded
-/// `issue.parent` read (B5), and anything unclassified.
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// DRF `exception_handler` maps `Http404(*args)` to `NotFound(*args)`, so
 /// the `_rewrite_project_kwarg` miss (`Project.resolve`, "Project not
 /// found") renders with the resolve message — verified against DRF 3.15.2
@@ -174,15 +171,6 @@ impl IntoResponse for Denial {
             .body(axum::body::Body::from(body))
             .expect("static denial response")
     }
-}
-
-/// Render a pre-shaped compact-JSON body (`JSONRenderer`, `COMPACT_JSON`).
-pub fn json_response(body: String) -> Response {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("search response")
 }
 
 /// `request.user` from the Django session. No session, no key, or a

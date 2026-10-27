@@ -57,6 +57,7 @@ use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 
 use crate::state::AppState;
+pub use pidash_compat::response::{json_ok_value as json_response, SERVER_ERROR_BODY};
 
 /// `BACKEND_SESSION_KEY` value Django accepts here: `AUTHENTICATION_BACKENDS`
 /// is exactly `(ModelBackend,)` (`settings/common.py:125`).
@@ -72,8 +73,6 @@ pub const SESSION_AUTH_HASH_SALT: &str =
 /// `permission_denied` raises `NotAuthenticated`, not `PermissionDenied`).
 pub const UNAUTHENTICATED_BODY: &str =
     r#"{"detail":"Authentication credentials were not provided."}"#;
-/// `views/base.py:92-95` generic branch (also the app base, same bytes).
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// `views/base.py:79-82` (`ObjectDoesNotExist` branch).
 pub const NOT_FOUND_BODY: &str = r#"{"error":"The required object does not exist."}"#;
 
@@ -462,17 +461,6 @@ pub fn owned(
         };
     }
     router
-}
-
-/// Render a value body as compact JSON (`JSONRenderer`, `COMPACT_JSON`):
-/// no spaces, struct field order preserved.
-pub fn json_response<T: serde::Serialize>(value: &T) -> Response {
-    let body = serde_json::to_string(value).expect("serializable response");
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("json response")
 }
 
 /// DRF `DateTimeField(allow_null=True)` over one JSON value: the shared

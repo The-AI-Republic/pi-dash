@@ -67,7 +67,7 @@
 //! and the shared DRF counter kernel against the app redis cache —
 //! fail-open without a cache, answering the rewritten 429 like Django.
 
-use axum::body::{Body, Bytes};
+use axum::body::Bytes;
 use axum::extract::{Extension, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -85,6 +85,8 @@ use super::guards::{
     DEVICE_CODE_TTL_SECS,
 };
 use pidash_compat::db::is_unique_violation;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
+use pidash_compat::response::{error_body, json_response};
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -141,8 +143,6 @@ fn owned_token() -> axum::routing::MethodRouter<AppState> {
 /// `IsAuthenticated` gate, no `WWW-Authenticate` header).
 pub const UNAUTHENTICATED_DETAIL_BODY: &str =
     r#"{"detail":"Authentication credentials were not provided."}"#;
-/// `handle_exception`'s generic 500 branch.
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 
 // ---------------------------------------------------------------------------
 // Denial / error mapping
@@ -183,14 +183,6 @@ impl Denial {
     }
 }
 
-/// `{"error": message}` with DRF-compact rendering.
-fn error_body(message: &str) -> String {
-    format!(
-        "{{\"error\":{}}}",
-        serde_json::to_string(message).expect("error message serializes")
-    )
-}
-
 impl IntoResponse for Denial {
     fn into_response(self) -> Response {
         if matches!(self, Denial::ServerError) {
@@ -199,14 +191,6 @@ impl IntoResponse for Denial {
         let (status, body) = self.status_and_body();
         json_response(status, body)
     }
-}
-
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(body))
-        .expect("device-flow json response")
 }
 
 /// Successful body: `serde_json` with `preserve_order` keeps the `json!`

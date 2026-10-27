@@ -74,7 +74,7 @@
 
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
-use axum::http::{header, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Router;
 use chrono::{DateTime, Datelike, Utc};
@@ -98,6 +98,7 @@ use pidash_types::WorkspaceId;
 use super::gates;
 use crate::app_issues::{query_last, Denial, QueryMap};
 use crate::state::AppState;
+use pidash_compat::response::{empty_response, json_response};
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -238,22 +239,6 @@ fn gate_roles(gate: &gates::Gate) -> &[i32] {
 // ---------------------------------------------------------------------------
 
 type HandlerResult = Result<Response, Denial>;
-
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("view response")
-}
-
-fn empty_response(status: StatusCode) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(Vec::new()))
-        .expect("empty response")
-}
 
 fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")

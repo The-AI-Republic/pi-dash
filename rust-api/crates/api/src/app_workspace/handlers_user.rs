@@ -111,6 +111,8 @@ use crate::middleware::SessionHandle;
 use crate::paginator::py_float_str;
 use crate::state::AppState;
 use pidash_compat::db::is_integrity_error;
+use pidash_compat::response::json_response;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 use pidash_services::domain::projects::members as project_members;
 
 // ---------------------------------------------------------------------------
@@ -120,8 +122,6 @@ use pidash_services::domain::projects::members as project_members;
 /// `ObjectDoesNotExist` branch (`app/views/base.py:132-136,232-236`):
 /// bare `.get()` misses (profile reads, session re-read, dangling FKs).
 pub const OBJECT_NOT_FOUND_BODY: &str = r#"{"error":"The required object does not exist."}"#;
-/// Generic branch (`app/views/base.py:145-149,244-248`).
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// `IntegrityError` branch (`app/views/base.py:120-124,220-224`).
 pub const INVALID_PAYLOAD_BODY: &str = r#"{"error":"The payload is not valid"}"#;
 /// Django `ValidationError` branch (`app/views/base.py:126-130,226-230`):
@@ -200,14 +200,6 @@ fn error_envelope(message: String) -> Value {
     let mut body = Map::new();
     body.insert("error".to_owned(), Value::String(message));
     Value::Object(body)
-}
-
-fn json_response(status: StatusCode, body: &str) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body.to_owned()))
-        .expect("user-handler response")
 }
 
 impl IntoResponse for Denial {

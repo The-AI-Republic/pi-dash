@@ -77,6 +77,7 @@ use crate::license::{resolve_actor, Actor};
 use crate::state::AppState;
 use pidash_auth::permissions::allow::AllowFacts;
 use pidash_auth::permissions::{ROLE_ADMIN, ROLE_MEMBER};
+use pidash_compat::response::json_ok_value as json_response;
 use pidash_types::WorkspaceId;
 
 /// `@allow_permission([ADMIN])` rows (connect, disconnect).
@@ -241,16 +242,6 @@ impl IntoResponse for Denial {
 
 fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
-}
-
-fn json_response(value: Value) -> Response {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(
-            serde_json::to_string(&value).expect("json response"),
-        ))
-        .expect("json response")
 }
 
 // ---------------------------------------------------------------------------

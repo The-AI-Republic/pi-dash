@@ -74,6 +74,9 @@ use uuid::Uuid;
 
 use crate::state::AppState;
 use crate::uuid_path::{classify_uuid_segment, UuidSegment};
+use pidash_compat::response::{
+    json_response as raw, json_value as json_status, no_content, server_error,
+};
 use pidash_services::app_assets::{queries_v1, shape};
 
 // ---------------------------------------------------------------------------
@@ -91,31 +94,6 @@ const PAGE_NOT_FOUND_BODY: &str = r#"{"error": "Page not found."}"#;
 /// 400 `{"asset": ["No file was submitted."]}`.
 const NO_FILE_BODY: &str = r#"{"asset":["No file was submitted."]}"#;
 
-fn raw(status: StatusCode, body: &'static str) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("static response")
-}
-
-fn json_status(status: StatusCode, body: &Value) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(
-            serde_json::to_string(body).expect("serializable response"),
-        ))
-        .expect("json response")
-}
-
-fn server_error() -> Response {
-    raw(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        crate::license::SERVER_ERROR_BODY,
-    )
-}
-
 /// `.get()` miss envelope: `ObjectDoesNotExist` through the view's
 /// `handle_exception` (`app/views/base.py:234-238`).
 fn does_not_exist() -> Response {
@@ -124,10 +102,6 @@ fn does_not_exist() -> Response {
 
 fn page_not_found() -> Response {
     raw(StatusCode::NOT_FOUND, PAGE_NOT_FOUND_BODY)
-}
-
-fn no_content() -> Response {
-    StatusCode::NO_CONTENT.into_response()
 }
 
 fn pool(state: &AppState) -> Option<&sqlx::PgPool> {
@@ -233,11 +207,11 @@ impl PostBody {
             PostBody::File | PostBody::NoFile => None,
             PostBody::UnsupportedMediaType(content_type) => Some(json_status(
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                &json!({"detail": format!("Unsupported media type \"{content_type}\" in request.")}),
+                json!({"detail": format!("Unsupported media type \"{content_type}\" in request.")}),
             )),
             PostBody::Malformed(detail) => Some(json_status(
                 StatusCode::BAD_REQUEST,
-                &json!({"detail": detail}),
+                json!({"detail": detail}),
             )),
         }
     }
@@ -401,7 +375,7 @@ fn file_asset_record(
 fn found_envelope(items: Vec<Value>) -> Response {
     json_status(
         StatusCode::from_u16(queries_v1::FOUND_STATUS).expect("valid status"),
-        &json!({"data": items, "status": true}),
+        json!({"data": items, "status": true}),
     )
 }
 
@@ -410,7 +384,7 @@ fn found_envelope(items: Vec<Value>) -> Response {
 fn miss_body() -> Response {
     json_status(
         StatusCode::from_u16(queries_v1::MISS_STATUS).expect("valid status"),
-        &queries_v1::miss_body(),
+        queries_v1::miss_body(),
     )
 }
 
@@ -420,7 +394,7 @@ fn miss_body() -> Response {
 fn unhandled() -> Response {
     json_status(
         StatusCode::from_u16(queries_v1::USER_GET_FOUND_STATUS).expect("valid status"),
-        &queries_v1::unhandled_body(),
+        queries_v1::unhandled_body(),
     )
 }
 

@@ -14,10 +14,19 @@ edition = "2021"
 # full workspace.
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio", "uuid", "chrono"] }
 sea-query = { version = "0.32", default-features = false, features = ["backend-postgres", "postgres-array", "with-uuid", "with-chrono", "with-json"] }
+# Response envelopes (OVL-04 part 2): axum Response builders plus the
+# serde/serde_json the Serialize generics need. All already in
+# rust-api/Cargo.lock via pidash-api (no lock churn).
+axum = "0.8"
+http = "1"
+serde = "1"
+serde_json = "1"
 
 [dev-dependencies]
-# Unit tests only (the library names no chrono/uuid/serde_json types
-# directly). All three are already in rust-api/Cargo.lock.
-serde_json = "1"
+# Unit tests only (the library names no chrono/uuid types directly).
+# All already in rust-api/Cargo.lock.
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 uuid = "1"
+# Envelope tests read bodies back with `axum::body::to_bytes`
+# (async); the current-thread runtime is enough.
+tokio = { version = "1", features = ["macros", "rt"] }

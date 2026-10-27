@@ -86,6 +86,7 @@ use pidash_services::domain::workspaces::members;
 use crate::auth_session::render::disallowed_redirect;
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
+use pidash_compat::response::redirect_found_html;
 
 /// `GITHUB_NOT_CONFIGURED` code (fixture F5 `OAUTH_ERROR_ROWS` order).
 fn github_not_configured() -> oauth_error::AuthenticationException {
@@ -166,12 +167,7 @@ fn redirect_response(location: String) -> Response {
     if too_long {
         return disallowed_redirect();
     }
-    Response::builder()
-        .status(StatusCode::FOUND)
-        .header(header::LOCATION, location)
-        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-        .body(axum::body::Body::empty())
-        .expect("redirect response")
+    redirect_found_html(location)
 }
 
 /// Uncaught-exception answer: Django's 500 page. The contract suite pins

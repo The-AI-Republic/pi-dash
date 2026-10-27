@@ -75,11 +75,12 @@ use pidash_types::runner_runs::{AgentRunStatus, TERMINAL_RUN_STATUSES};
 use pidash_types::runner_sessions::{remove_runner_frame, revoke_frame};
 use pidash_types::{UserId, WorkspaceId};
 
-use crate::license::{query_last, QueryMap, SERVER_ERROR_BODY, UNAUTHENTICATED_BODY};
+use crate::license::{query_last, QueryMap, UNAUTHENTICATED_BODY};
 use crate::runner_runs::run_endpoints::drain_lifecycle_effects;
 use crate::runner_runs::LivePorts;
 use crate::state::AppState;
 use crate::uuid_path::is_canonical_uuid;
+use pidash_compat::response::{json_response, no_content, server_error};
 
 /// `{"error": "not found"}` — 404 (unknown id, or present-but-unviewable).
 const NOT_FOUND_BODY: &str = r#"{"error":"not found"}"#;
@@ -107,13 +108,6 @@ fn invalid_token() -> Response {
     json_response(StatusCode::FORBIDDEN, INVALID_TOKEN_BODY.to_owned())
 }
 
-fn server_error() -> Response {
-    json_response(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        SERVER_ERROR_BODY.to_owned(),
-    )
-}
-
 /// 400 `{"error": str(exc)}` (`views/runner.py:55`): the message is the
 /// services const, so the handler cannot drift from the parser.
 fn bad_purge_flag() -> Response {
@@ -124,22 +118,6 @@ fn bad_purge_flag() -> Response {
             serde_json::to_string(purge::PURGE_LOCAL_ERROR).expect("static error serializes")
         ),
     )
-}
-
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(axum::http::header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("handler response")
-}
-
-/// Empty 204 (`Response(status=204)` with no data; no content type).
-fn no_content() -> Response {
-    Response::builder()
-        .status(StatusCode::NO_CONTENT)
-        .body(axum::body::Body::empty())
-        .expect("handler empty response")
 }
 
 fn pool_of(state: &AppState) -> Result<PgPool, Response> {

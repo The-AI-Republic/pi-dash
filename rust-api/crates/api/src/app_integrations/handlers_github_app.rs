@@ -88,6 +88,8 @@ use super::gates::{
     WEBHOOK_BAD_SIGNATURE_BODY,
 };
 use super::hmac::verify_webhook_signature;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
+use pidash_compat::response::{json_response, redirect_found_html};
 
 /// The five owned paths. Every other method on each path proxies to
 /// Django (DRF's 405-after-auth and metadata responses live there),
@@ -155,9 +157,6 @@ pub const UNAUTHENTICATED_BODY: &str =
 /// DRF `get_object_or_404(Workspace, ...)` body.
 pub const WORKSPACE_NOT_FOUND_BODY: &str = r#"{"detail":"No Workspace matches the given query."}"#;
 
-/// `handle_exception`'s generic 500 branch.
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
-
 /// Handler failure with its exact status + body.
 #[derive(Debug)]
 enum Denial {
@@ -179,28 +178,13 @@ impl IntoResponse for Denial {
     }
 }
 
-/// Compact-JSON response with an explicit status (`JSONRenderer` bytes:
-/// no spaces, insertion order preserved via `preserve_order`).
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("json response")
-}
-
 /// `HttpResponseRedirect` (`github.py:140-147`): 302 with a `Location`
 /// header and an empty body.
 fn redirect_response(location: String) -> Response {
     let Some(location) = crate::response_headers::header_value(&location) else {
         return Denial::ServerError.into_response();
     };
-    Response::builder()
-        .status(StatusCode::FOUND)
-        .header(header::LOCATION, location)
-        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-        .body(axum::body::Body::empty())
-        .expect("redirect response")
+    redirect_found_html(location)
 }
 
 /// `urlencode(params)` (`urllib.parse`, `quote_via=quote_plus`): joining

@@ -144,6 +144,7 @@ use crate::v1_cycles_modules::body as shared_body;
 use crate::v1_cycles_modules::json::{
     parse_json_text, to_serde_publish, JsonFail, JSON_PARSE_PREFIX,
 };
+use pidash_compat::response::escape_u2028 as escape_json_text;
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -312,21 +313,10 @@ fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
 }
 
-/// DRF `JSONRenderer` post-pass (`renderers.py`): U+2028/U+2029 escape to
-/// `\\u2028`/`\\u2029` in every response so the output stays a strict
-/// JavaScript subset.
-fn escape_json_text(body: &str) -> String {
-    body.replace('\u{2028}', "\\u2028")
-        .replace('\u{2029}', "\\u2029")
-}
-
-/// Render `body` (already exact JSON bytes) with an explicit status.
+/// Render `body` (already exact JSON bytes) with an explicit status,
+/// escaped through the canonical `escape_u2028` (OVL-04).
 fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(escape_json_text(&body)))
-        .expect("versions/move json response")
+    pidash_compat::response::json_response(status, escape_json_text(&body))
 }
 
 type HandlerResult = Result<Response, Denial>;

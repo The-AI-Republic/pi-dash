@@ -101,6 +101,7 @@ use crate::state::AppState;
 use crate::v1_cycles_modules::body as shared_body;
 
 use pidash_compat::db::{is_integrity_error, is_unique_violation};
+use pidash_compat::response::{empty_response_no_content_type as empty_response, json_response};
 use pidash_services::app_issues::relation_mapper::get_actual_relation;
 
 // ---- owned paths ------------------------------------------------------------
@@ -336,24 +337,6 @@ impl IntoResponse for Denial {
 
 fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
-}
-
-/// Render `body` (already exact JSON bytes) with an explicit status.
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("relations json response")
-}
-
-/// DRF's 204: empty body with NO content type (verified live: Django
-/// only sets `Content-Type` when it renders a body).
-fn empty_response(status: StatusCode) -> Response {
-    Response::builder()
-        .status(status)
-        .body(axum::body::Body::empty())
-        .expect("relations empty response")
 }
 
 fn pool_of(state: &AppState) -> Result<sqlx::PgPool, Denial> {

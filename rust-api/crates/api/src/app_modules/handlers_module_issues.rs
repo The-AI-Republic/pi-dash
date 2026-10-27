@@ -80,7 +80,7 @@
 use std::collections::HashMap;
 
 use axum::extract::{Path, Query, State};
-use axum::http::{header, StatusCode};
+use axum::http::StatusCode;
 use axum::response::Response;
 use axum::Router;
 use serde_json::{Map, Value};
@@ -96,6 +96,7 @@ use crate::app_issues::{
 };
 use crate::state::AppState;
 use pidash_auth::permissions::allow::AllowFacts;
+pub(crate) use pidash_compat::response::{empty_response, json_response};
 
 /// `GET` + `POST` on the module-issues collection path, `POST` on the
 /// issue-modules path, `DELETE` on the detail path. Every other method
@@ -156,22 +157,6 @@ pub const GROUP_CLASH_MESSAGE: &str = "Group by and sub group by cannot have sam
 // ---------------------------------------------------------------------------
 
 pub(crate) type HandlerResult = Result<Response, Denial>;
-
-pub(crate) fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("view response")
-}
-
-pub(crate) fn empty_response(status: StatusCode) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(Vec::new()))
-        .expect("empty response")
-}
 
 #[cfg(test)]
 fn json_string(value: &str) -> String {

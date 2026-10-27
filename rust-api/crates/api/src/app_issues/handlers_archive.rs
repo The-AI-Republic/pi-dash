@@ -69,8 +69,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
 
 use axum::extract::{Path, Query, State};
-use axum::http::{header, HeaderMap, StatusCode};
-use axum::response::Response;
+use axum::http::{HeaderMap, StatusCode};
 use chrono_tz::Tz;
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -107,6 +106,7 @@ use crate::v1_cycles_modules::body as shared_body;
 use crate::v1_cycles_modules::json::{
     parse_request_bytes_spans, JObject, JStr, JVal, JsonFail, JSON_PARSE_PREFIX,
 };
+use pidash_compat::response::{empty_response, json_response as status_response};
 
 /// Archived collection path in `app/urls/issue.py:247-249` form.
 pub const ARCHIVED_ISSUES_PATH: &str =
@@ -323,27 +323,9 @@ async fn workspace_id(pool: &sqlx::PgPool, slug: &str) -> Result<uuid::Uuid, Den
     row.map(|row| row.0).ok_or(Denial::ServerError)
 }
 
-/// A non-200 JSON response with the exact body.
-fn status_response(status: StatusCode, body: &str) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body.to_owned()))
-        .expect("status response")
-}
-
 /// JSON-escape one string value.
 fn json_detail(value: &str) -> String {
     serde_json::to_string(value).expect("detail string")
-}
-
-/// The 204 with no body (`DELETE` unarchive).
-fn empty_response(status: StatusCode) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(Vec::new()))
-        .expect("empty response")
 }
 
 // ---------------------------------------------------------------------------
@@ -1816,7 +1798,7 @@ pub async fn bulk_archive(
             Err(shared_body::BodyError::UnsupportedMediaType(message)) => {
                 return Ok(status_response(
                     StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                    &unsupported_media_type_body(&message),
+                    unsupported_media_type_body(&message),
                 ));
             }
             Err(shared_body::BodyError::ParseDetail(message)) => {

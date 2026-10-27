@@ -71,6 +71,7 @@ use serde_json::Value;
 use sqlx::PgPool;
 
 use crate::state::AppState;
+pub use pidash_compat::response::{json_ok, SERVER_ERROR_BODY};
 
 /// Domain router: the four scheduler paths in
 /// [`handlers::routes`]. Owned GETs serve from Rust (cutover granularity);
@@ -101,8 +102,6 @@ pub const BINDING_NOT_FOUND_BODY: &str =
     r#"{"detail":"No SchedulerBinding matches the given query."}"#;
 /// `handle_exception`'s `KeyError` branch (unknown `user_timezone`).
 pub const MISSING_KEY_BODY: &str = r#"{"error":"The required key does not exist."}"#;
-/// `handle_exception`'s generic 500 branch.
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 
 /// Handler failure with its exact status + body.
 #[derive(Debug)]
@@ -177,16 +176,6 @@ impl IntoResponse for Denial {
 
 fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
-}
-
-/// 200 with a pre-rendered JSON body (DRF content type; key order is the
-/// construction order via `preserve_order`).
-pub fn json_ok(body: String) -> Response {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("json response")
 }
 
 /// 200 JSON from a value (key order is the construction order).

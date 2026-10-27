@@ -76,6 +76,7 @@ use crate::middleware::body_limit::read_request_bytes;
 use crate::state::AppState;
 use crate::v1_cycles_modules::body as shared_body;
 use pidash_compat::db::is_integrity_error;
+use pidash_compat::response::{empty_response, json_response};
 use pidash_db::app_pages::strip::ml_strip_tags;
 
 // ---------------------------------------------------------------------------
@@ -325,24 +326,6 @@ impl IntoResponse for Denial {
 
 fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
-}
-
-/// Render `body` (already exact JSON bytes) with an explicit status.
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("engage json response")
-}
-
-/// DRF's 204: empty body with the JSON content type.
-fn empty_response(status: StatusCode) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::empty())
-        .expect("engage empty response")
 }
 
 fn pool_of(state: &AppState) -> Result<sqlx::PgPool, Denial> {

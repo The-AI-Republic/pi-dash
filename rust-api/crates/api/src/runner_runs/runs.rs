@@ -74,11 +74,11 @@ use pidash_types::WorkspaceId;
 use super::{
     is_uuid_path_segment, json_response, pool_of, proxy_with_body, view_response,
     ALLOW_RELEASE_PIN, ALLOW_RETICK, ALLOW_RUNS, ALLOW_RUN_CANCEL, ALLOW_RUN_DETAIL,
-    SERVER_ERROR_BODY,
 };
 use crate::license::{query_last, resolve_actor, QueryMap, UNAUTHENTICATED_BODY};
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
+use pidash_compat::response::server_error;
 
 // ---------------------------------------------------------------------------
 // Exact bodies (only arms this port answers; proxied arms are Django's)
@@ -737,14 +737,6 @@ impl RunEventRecord {
 /// 401 for anonymous callers on guarded endpoints (DRF `NotAuthenticated`).
 fn unauthorized() -> Response {
     json_response(StatusCode::UNAUTHORIZED, UNAUTHENTICATED_BODY.to_owned())
-}
-
-/// 500 for transport / model-violation failures on owned branches.
-fn server_error() -> Response {
-    json_response(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        SERVER_ERROR_BODY.to_owned(),
-    )
 }
 
 impl From<RowError> for Response {

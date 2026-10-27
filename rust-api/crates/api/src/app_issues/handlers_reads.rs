@@ -83,6 +83,7 @@ use super::queries_engage;
 use super::{
     fetch_count, fetch_json_rows, order_key, query_last, shape_row, Binder, Denial, QueryMap,
 };
+use pidash_compat::response::json_response;
 use pidash_db::tasks_ticker::IssueAgentTicker;
 use pidash_services::app_issues::serializers_assoc::{
     project_user_property_to_representation, ProjectUserPropertyRow,
@@ -398,14 +399,6 @@ async fn resolve_entity_gate(
 // ---------------------------------------------------------------------------
 // Small responses
 // ---------------------------------------------------------------------------
-
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("static response")
-}
 
 fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")

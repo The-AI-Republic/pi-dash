@@ -104,6 +104,7 @@ use crate::v1_cycles_modules::json::{
     parse_request_data, JObject, JStr, JVal, JsonFail, JSON_PARSE_PREFIX,
 };
 use pidash_compat::db::is_unique_violation;
+use pidash_compat::response::{empty_response_no_content_type as empty_response, json_response};
 
 /// Collection path (`app/urls/api.py:10-14`).
 pub const API_TOKENS_PATH: &str = "/api/users/api-tokens/";
@@ -178,23 +179,6 @@ pub fn routes() -> Router<AppState> {
 // ---------------------------------------------------------------------------
 // Shared request plumbing
 // ---------------------------------------------------------------------------
-
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(body))
-        .expect("view response")
-}
-
-/// 204 / bare-404 shape: empty body with NO content type (verified
-/// live — DRF dataless responses carry no `Content-Type` here).
-fn empty_response(status: StatusCode) -> Response {
-    Response::builder()
-        .status(status)
-        .body(Body::empty())
-        .expect("empty response")
-}
 
 fn unsupported_media_type(message: String) -> Response {
     let body = serde_json::json!({"detail": message}).to_string();

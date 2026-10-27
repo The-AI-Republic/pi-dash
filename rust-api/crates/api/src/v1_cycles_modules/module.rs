@@ -81,6 +81,8 @@ use sqlx::{PgPool, Row};
 use pidash_auth::permissions::project;
 
 use crate::state::AppState;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
+use pidash_compat::response::{json_created, json_ok, no_content};
 
 // ---------------------------------------------------------------------------
 // Responses
@@ -104,8 +106,6 @@ pub const NOT_FOUND_BODY: &str = r#"{"error":"The requested resource does not ex
 /// survives instead of the `"Not found."` default
 /// (`db/models/project.py:213-218`).
 pub const PROJECT_NOT_FOUND_BODY: &str = r#"{"detail":"Project not found"}"#;
-/// `handle_exception`'s generic branch (`api/views/base.py:166-170`).
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// `handle_exception`'s Django-`ValidationError` branch
 /// (`api/views/base.py:148-152`): invalid UUIDs inside `pk__in` lookups on
 /// the module-issues POST path.
@@ -209,32 +209,6 @@ impl IntoResponse for Denial {
 
 fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
-}
-
-/// Render a 200 JSON response with exact bytes.
-fn json_ok(body: String) -> Response {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(axum::http::header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("handler json response")
-}
-
-/// Render a 201 JSON response with exact bytes.
-fn json_created(body: String) -> Response {
-    Response::builder()
-        .status(StatusCode::CREATED)
-        .header(axum::http::header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("handler json response")
-}
-
-/// Render an empty 204 response.
-fn no_content() -> Response {
-    Response::builder()
-        .status(StatusCode::NO_CONTENT)
-        .body(axum::body::Body::empty())
-        .expect("handler empty response")
 }
 
 fn pool_of(state: &AppState) -> Result<PgPool, Denial> {

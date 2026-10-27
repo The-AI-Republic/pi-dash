@@ -73,7 +73,7 @@
 use std::collections::HashMap;
 
 use axum::extract::{Path, Query, State};
-use axum::http::{header, StatusCode};
+use axum::http::StatusCode;
 use axum::response::Response;
 use axum::Router;
 use chrono_tz::Tz;
@@ -85,6 +85,7 @@ use pidash_services::app_modules::{queries, shape, tasks};
 use super::gates;
 use crate::app_issues::Denial;
 use crate::state::AppState;
+pub(crate) use pidash_compat::response::{empty_response, json_response};
 
 /// Collection path in `app/urls/module.py:19-23` form.
 pub const MODULES_PATH: &str = "/api/workspaces/{slug}/projects/{project_id}/modules/";
@@ -166,22 +167,6 @@ fn gate_for_destroy() -> &'static gates::Gate {
 // ---------------------------------------------------------------------------
 
 pub(crate) type HandlerResult = Result<Response, Denial>;
-
-pub(crate) fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("view response")
-}
-
-pub(crate) fn empty_response(status: StatusCode) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(Vec::new()))
-        .expect("empty response")
-}
 
 /// `request.user` from the Django session: missing session, missing key,
 /// or a non-UUID id is anonymous → 401.

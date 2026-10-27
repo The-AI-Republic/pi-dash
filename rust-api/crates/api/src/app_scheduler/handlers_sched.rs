@@ -58,7 +58,7 @@
 //!   choice as the `app_pages` `char_internal` precedent).
 
 use axum::extract::{Path, Request, State};
-use axum::http::{header, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Extension, Json, Router};
@@ -75,6 +75,7 @@ use crate::middleware::SessionHandle;
 use crate::state::AppState;
 use crate::uuid_path::{classify_uuid_segment, UuidSegment};
 use pidash_compat::db::is_integrity_error;
+use pidash_compat::response::json_response;
 
 // ---------------------------------------------------------------------------
 // Exact bodies
@@ -126,14 +127,6 @@ fn error_envelope(message: String) -> Value {
     let mut body = Map::new();
     body.insert("error".to_owned(), Value::String(message));
     Value::Object(body)
-}
-
-fn json_response(status: StatusCode, body: &str) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body.to_owned()))
-        .expect("scheduler-handler response")
 }
 
 impl IntoResponse for Denial {

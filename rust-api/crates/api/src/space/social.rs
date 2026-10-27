@@ -104,6 +104,7 @@ use sqlx::Row;
 use crate::middleware::body_limit::read_request_bytes;
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
+use pidash_compat::response::json_response;
 use pidash_db::app_pages::strip::ml_strip_tags;
 use pidash_services::read::{self, ActorDetailView, CommentReactionView, CommentRow, CommentView};
 use pidash_services::space::{guards, queries};
@@ -286,15 +287,6 @@ impl IntoResponse for HandlerError {
 
 fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
-}
-
-/// Render `body` (already exact JSON bytes) with an explicit status.
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("handler json response")
 }
 
 fn pool_of(state: &AppState) -> Result<&sqlx::PgPool, HandlerError> {

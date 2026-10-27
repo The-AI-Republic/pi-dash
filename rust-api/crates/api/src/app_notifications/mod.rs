@@ -126,6 +126,8 @@ use crate::paginator::{self, Cursor, PageError, PageResponse};
 use crate::serializer::render_datetime_in;
 use crate::state::AppState;
 use crate::uuid_path::{classify_uuid_segment, UuidSegment};
+use pidash_compat::response::json_ok;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 
 // ---------------------------------------------------------------------------
 // Wire constants (all verified live against Django, 2026-09-30)
@@ -141,8 +143,6 @@ pub const NOTIFICATION_NOT_FOUND_BODY: &str =
 /// (`app/views/base.py`): answers `partial_update` misses, whose lookup
 /// is a bare `.get()` (`base.py:152`).
 pub const OBJECT_NOT_FOUND_BODY: &str = r#"{"error":"The required object does not exist."}"#;
-/// `handle_exception`'s generic 500 branch.
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// `handle_exception`'s `KeyError` branch: answers unknown
 /// `snoozed` / `archived` values (`base.py:80-92` dict lookup).
 pub const KEY_ERROR_BODY: &str = r#"{"error":"The required key does not exist."}"#;
@@ -254,15 +254,6 @@ impl IntoResponse for Denial {
 
 pub fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
-}
-
-/// Render a 200 JSON response with exact bytes.
-fn json_ok(body: String) -> Response {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("handler json response")
 }
 
 /// Map a [`PageError`] the way the views do: the documented 400-class

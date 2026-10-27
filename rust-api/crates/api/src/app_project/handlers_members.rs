@@ -93,7 +93,7 @@ use std::collections::HashMap;
 
 use axum::body::Bytes;
 use axum::extract::{Path, State};
-use axum::http::{header, HeaderMap, Method, StatusCode, Uri};
+use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
 use chrono::{Datelike, Offset, TimeZone};
@@ -114,6 +114,7 @@ use crate::v1_cycles_modules::json::{
     parse_request_data, py_str, to_serde_publish, JObject, JStr, JVal, JsonFail, JSON_PARSE_PREFIX,
 };
 use crate::v1_projects::handlers_members as v1members;
+use pidash_compat::response::{empty_response_no_content_type as empty_response, json_response};
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -328,23 +329,6 @@ fn db_denial(error: sqlx::Error) -> Denial {
 // ---------------------------------------------------------------------------
 
 type HandlerResult = Result<Response, Denial>;
-
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("view response")
-}
-
-/// 204 shape: empty body with NO content type (verified live against Django
-/// — DRF dataless responses carry no `Content-Type` here).
-fn empty_response(status: StatusCode) -> Response {
-    Response::builder()
-        .status(status)
-        .body(axum::body::Body::empty())
-        .expect("empty response")
-}
 
 fn ok_json(body: String) -> Response {
     json_response(StatusCode::OK, body)
@@ -3657,6 +3641,7 @@ mod tests {
 
     #[test]
     fn empty_response_has_no_content_type() {
+        use axum::http::header;
         let response = empty_response(StatusCode::NO_CONTENT);
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
         assert!(response.headers().get(header::CONTENT_TYPE).is_none());

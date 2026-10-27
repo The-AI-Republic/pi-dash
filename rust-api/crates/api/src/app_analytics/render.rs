@@ -137,6 +137,7 @@ use super::gates::{decide_gate, gate_for, tenant_context, GateOutcome};
 use crate::app_issues::{fetch_json_rows, query_last, Denial as IssuesDenial, QueryMap};
 use pidash_auth::permissions::allow::AllowFacts;
 use pidash_auth::permissions::{ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER};
+use pidash_compat::response::json_response;
 use pidash_db::issue_filters::issue_filters_get;
 use pidash_services::app_analytics::queries as q;
 use pidash_types::WorkspaceId;
@@ -251,8 +252,6 @@ pub const NOT_FOUND_BODY: &str = super::gates::NOT_FOUND_BODY;
 /// `handle_exception`'s `ValidationError` branch: malformed `?project_ids=`
 /// entries (UUID coercion inside dispatch).
 pub const INVALID_DETAIL_BODY: &str = r#"{"error":"Please provide valid detail"}"#;
-/// `handle_exception`'s generic 500 branch.
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// `{"message": "Invalid tab"}` 400 (`advance.py:152`) in DRF's compact
 /// rendering (no space after the colon — verified against live Django; the
 /// Q-04 builder const keeps a space and is not used for the body).
@@ -330,14 +329,6 @@ impl IntoResponse for Denial {
             .body(axum::body::Body::from(body))
             .expect("static denial response")
     }
-}
-
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("advance response")
 }
 
 // ---------------------------------------------------------------------------
@@ -3735,6 +3726,7 @@ async fn get_project_stats(
 //   `state_details, assignee_details, label_details, cycle_details,
 //   module_details`; buckets carry `dimension, [segment,] count|estimate`.
 
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 use pidash_services::app_analytics::queries::sort_data_keys;
 
 /// Regrouped buckets: keys in first-seen (row) order plus each key's

@@ -107,6 +107,7 @@ use crate::middleware::SessionHandle;
 use crate::state::AppState;
 use pidash_db::redis::RedisHandle;
 
+use pidash_compat::response::redirect_found;
 use pidash_services::auth_oauth::error::AuthenticationException;
 use pidash_services::auth_oauth::exchange::map_exchange_error;
 use pidash_services::auth_oauth::providers::{
@@ -215,9 +216,7 @@ pub fn redirect_response(location: &str) -> Response {
     if too_long {
         return disallowed_redirect();
     }
-    let mut response = StatusCode::FOUND.into_response();
-    response.headers_mut().insert(header::LOCATION, value);
-    response
+    redirect_found(value)
 }
 
 /// Uncaught-exception answer. Plain Django `View`s have no
@@ -225,7 +224,7 @@ pub fn redirect_response(location: &str) -> Response {
 /// technical 500 page. The contract pins the status only, so the body is
 /// empty.
 pub fn server_error() -> Response {
-    StatusCode::INTERNAL_SERVER_ERROR.into_response()
+    pidash_compat::response::empty_response_no_content_type(StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 /// `params = exc.get_error_dict()` rendered for `get_safe_redirect_url`:

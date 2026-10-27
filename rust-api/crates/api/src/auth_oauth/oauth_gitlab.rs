@@ -81,6 +81,8 @@ use sqlx::PgPool;
 use crate::auth_session::render::disallowed_redirect;
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
+use pidash_compat::response::redirect_found;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 use pidash_services::domain::workspaces::members;
 
 /// App initiate path (`authentication/urls.py:106`).
@@ -190,10 +192,6 @@ fn owned(
     router
 }
 
-/// `handle_exception`'s generic 500 branch (same body the sibling
-/// handler ports use; the contract pins the status, not the page).
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
-
 /// Handler failure with its exact status + body.
 #[derive(Debug)]
 enum Denial {
@@ -238,11 +236,7 @@ fn redirect_response(location: String) -> Response {
     if too_long {
         return disallowed_redirect();
     }
-    Response::builder()
-        .status(StatusCode::FOUND)
-        .header(header::LOCATION, location)
-        .body(axum::body::Body::empty())
-        .expect("redirect response")
+    redirect_found(location)
 }
 
 /// Django `QueryDict.get` (last wins) over the raw query pairs.

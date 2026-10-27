@@ -100,6 +100,8 @@ use super::perms::{
     gate_for, refuse_agent_action, refuse_agent_retick, resolve_moved_by_run, run_belongs_to,
     RunFacts, V1WorkItemsRoute,
 };
+use pidash_compat::response::json_response;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 
 // ---------------------------------------------------------------------------
 // Responses
@@ -112,8 +114,6 @@ pub const UNAUTHENTICATED_BODY: &str =
 /// `APIKeyAuthentication` failure (`api/middleware/api_authentication.py`):
 /// every token rejection maps to this single 403 body.
 pub const INVALID_TOKEN_BODY: &str = r#"{"detail":"Given API token is not valid"}"#;
-/// `handle_exception`'s generic branch (`api/views/base.py:166-170`).
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// The three issue-scoped endpoints' lookup miss
 /// (`views/issue.py:963,1042,1231`).
 pub const WORK_ITEM_NOT_FOUND_BODY: &str = r#"{"error":"Work item not found"}"#;
@@ -213,15 +213,6 @@ impl IntoResponse for Denial {
 
 fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
-}
-
-/// Render a JSON response with exact bytes and status.
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(axum::http::header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("handler json response")
 }
 
 /// Map a database/driver failure to the generic 500 while logging the site
