@@ -34,6 +34,8 @@ interface Harness {
   views: ReturnType<typeof makeView>[];
   viewsStatus: number;
   viewsDelayMs: number;
+  /** Set in a test to hold the customs read; the transport fills `release`. */
+  viewsHold: { release: () => void } | null;
   viewsCalls: number;
   workspaceName: string;
   workspaces: Record<string, unknown>[];
@@ -48,6 +50,7 @@ beforeEach(() => {
     views: [],
     viewsStatus: 200,
     viewsDelayMs: 0,
+    viewsHold: null,
     viewsCalls: 0,
     workspaceName: "Acme",
     workspaces: [{ id: WS_ID, name: "Acme", slug: "acme", logo_url: null, total_members: 3, role: 20 }],
@@ -57,6 +60,8 @@ beforeEach(() => {
     if (url.includes("/api/workspaces/acme/views/?")) {
       harness.viewsCalls += 1;
       if (harness.viewsDelayMs > 0) await sleep(harness.viewsDelayMs);
+      const hold = harness.viewsHold;
+      if (hold !== null) await new Promise<void>((resolve) => (hold.release = resolve));
       return jsonResponse(url, harness.viewsStatus, harness.views);
     }
     if (url.endsWith("/api/users/me/workspaces/")) return jsonResponse(url, 200, harness.workspaces);
@@ -108,6 +113,38 @@ describe("WorkspaceViewsListScreen", () => {
     await waitFor(() => expect(screen.getByTestId("workspace-views-customs")).toBeInTheDocument());
     expect(screen.queryByTestId("project-views-skeleton")).not.toBeInTheDocument();
     expect(container.querySelector('[data-skeleton-row="true"]')).toBeNull();
+  });
+
+  // The exact repro NEWFRONT-230 records against the old app: the
+  // workspace resolves first and the customs read is still in flight
+  // afterwards. The old store then reports an empty collection, so the
+  // loader branch never runs and the list shows nothing until the rows
+  // arrive. Here the workspace is deliberately resolved first, then the
+  // customs read is released: the skeleton must be on screen in between.
+  it("keeps the skeleton after the workspace resolves while the customs read is in flight", async () => {
+    harness.views = [makeView({ id: VIEW_A, name: "Alpha board" })];
+    const hold = { release: () => undefined };
+    harness.viewsHold = hold;
+
+    renderScreen();
+
+    // Workspace resolved (its own read is not held): the tab title and the
+    // four defaults are up while the customs read is still in flight.
+    await waitFor(() => expect(document.title).toBe("Acme - All Views"));
+    expect(defaultLabels()).toEqual(DEFAULTS);
+    expect(harness.viewsCalls).toBe(1);
+
+    // Customs still pending: the skeleton holds the customs area alone.
+    expect(screen.getByTestId("project-views-skeleton")).toBeInTheDocument();
+    expect(screen.queryByTestId("workspace-views-customs")).not.toBeInTheDocument();
+    expect(screen.queryAllByTestId("workspace-views-custom-row")).toHaveLength(0);
+
+    hold.release();
+    await waitFor(() => expect(screen.getByTestId("workspace-views-customs")).toBeInTheDocument());
+    expect(screen.queryByTestId("project-views-skeleton")).not.toBeInTheDocument();
+    expect(screen.getAllByTestId("workspace-views-custom-row").map((row) => row.getAttribute("data-view-id"))).toEqual([
+      VIEW_A,
+    ]);
   });
 
   it("lists only the four defaults when the workspace has no customs", async () => {
