@@ -778,12 +778,13 @@ test(
 test(
   specTitle(["ISS-037", "ISS-041"], "bug: non-manual order persists the drop without feedback (NEWFRONT-154)"),
   { tag: specTags(["ISS-037", "ISS-041"]) },
-  async ({ driver, seed }) => {
-    // The inventory says a non-manual order overlays the current order and
-    // suppresses the move; the old app shows the generic drop hint and
-    // persists a new sort_order with no toast and no visible change. The new
-    // app implements the intended (suppressed) behavior; this scenario pins
-    // the old one until NEWFRONT-154 lands.
+  async ({ driver, seed, page }) => {
+    // The old app shows the generic drop hint and persists a new sort_order
+    // with no toast and no visible change. The inventory makes suppression
+    // the intended behavior, and web_new implements it: the column names the
+    // active order, the release warns, and the server order stays put. The
+    // bug: title still marks the oracle leg, which pins the old behavior
+    // (NEWFRONT-154).
     const ctx = await openBoard(driver, seed, seed.projectId, { group_by: "state", order_by: "priority" });
     await expect.poll(() => driver.kanbanCards(), { timeout: 120_000 }).toHaveLength(3);
     const column = (await driver.kanbanColumns())[0]?.name ?? "";
@@ -796,17 +797,26 @@ test(
     };
     const before = await orderOf(top);
 
-    await test.step("the hold shows the generic hint, not the current order", async () => {
+    await test.step("the hold names the active order on web_new, but not on the oracle", async () => {
       const { overlay } = await driver.kanbanDragHoldOverColumn(top, column);
-      expect(overlay).toBe("Drop here to move the work item");
+      expect(overlay).toBe(driver.target === "web_new" ? "Ordered by priority" : "Drop here to move the work item");
     });
 
-    await test.step("the release persists server-side with no visible change", async () => {
+    await test.step("the release changes nothing on web_new and persists silently on the oracle", async () => {
       expect(await driver.kanbanColumnCards(column)).toEqual(placed);
-      expect(await driver.boardLastToast()).toBeNull();
-      // The silent persist races the assertion exactly like a normal
-      // reorder: poll until the server order moves instead of reading once.
-      await expect.poll(async () => orderOf(top), { timeout: 60_000 }).not.toBe(before);
+      if (driver.target === "web_new") {
+        const toast = await driver.boardLastToast();
+        expect(toast?.title).toBe("Cannot move the work item");
+        expect(toast?.message).toMatch(/ordered by priority/i);
+        // Give any late PATCH a chance to land before proving it never did.
+        await page.waitForTimeout(2_000);
+        expect(await orderOf(top)).toBe(before);
+      } else {
+        expect(await driver.boardLastToast()).toBeNull();
+        // The silent persist races the assertion exactly like a normal
+        // reorder: poll until the server order moves instead of reading once.
+        await expect.poll(async () => orderOf(top), { timeout: 60_000 }).not.toBe(before);
+      }
     });
 
     await test.step("cleanup restores orders and preferences", async () => {
