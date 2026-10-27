@@ -125,6 +125,30 @@ describe("ModuleLinksSection", () => {
     expect(within(section).queryByTestId("modules-link-row")).not.toBeInTheDocument();
   });
 
+  it("opens when links arrive after mount (NEWFRONT-342)", () => {
+    const client = {} as never;
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const tree = (links: readonly ModuleLinkSummary[]) => (
+      <QueryClientProvider client={queryClient}>
+        <ModuleLinksSection
+          workspaceSlug={SLUG}
+          projectId={PROJECT}
+          moduleId={MODULE}
+          links={links}
+          canEdit
+          client={client}
+        />
+      </QueryClientProvider>
+    );
+    const { rerender } = render(tree([]));
+    const section = screen.getByTestId("modules-links-section");
+    const toggle = within(section).getByRole("button", { name: "Links" });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    rerender(tree([makeModuleLink()]));
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(within(section).getByTestId("modules-link-row")).toBeInTheDocument();
+  });
+
   it("copies the URL with the pinned notice and reports a denial", async () => {
     const user = userEvent.setup();
     const writeText = stubClipboard();
