@@ -29894,26 +29894,21 @@ export class WebNewDriver implements ParityDriver {
     return (await body.evaluate((el) => el.innerHTML).catch(() => "")) ?? "";
   }
   async pagesToolbarSelectAll(): Promise<void> {
-    // Keyboard-only, and extended rather than select-all: clicking the body
-    // while a selection exists can leave the DOM caret and the editor's own
-    // selection disagreeing, and the editor's own select-all spans the
-    // document boundaries (endpoints the list lift cannot work with —
-    // NEWFRONT-930), so extend a native range from the document start
-    // instead. Revert to plain select-all once NEWFRONT-930 lands.
-    const mod = process.platform === "darwin" ? "Meta" : "Control";
+    // Focus the body and let the editor's own select-all run. The adapter
+    // repairs the document-boundary endpoints the editor produces
+    // (NEWFRONT-930), so a formatting command acts on the text blocks the
+    // way a native in-text selection would. The chord is the platform's
+    // primary modifier, like every other page gesture; a selection that
+    // never forms means the editor is not focused, so retry once.
     const body = this.pagesTitleBodySurface();
     for (let attempt = 0; attempt < 3; attempt += 1) {
       await body.focus({ timeout: WebNewDriver.WAIT_MS });
-      await this.page.keyboard.press(`${mod}+Home`);
-      await this.page.keyboard.press(`${mod}+Shift+End`);
+      await this.page.keyboard.press("ControlOrMeta+a");
       const selected = await this.page.evaluate(() => {
         const selection = window.getSelection();
         return !!selection && !selection.isCollapsed && selection.toString() !== "";
       });
       if (selected) return;
-      // Collapse through the editor's keymap so both sides agree before
-      // retrying.
-      await this.page.keyboard.press("ArrowRight");
     }
     throw new Error("[parity] body select-all never selected.");
   }

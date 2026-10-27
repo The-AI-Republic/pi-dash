@@ -507,8 +507,10 @@ test(
       await driver.pagesToolbarTypeText("BBB");
       expect(await driver.pagesToolbarTypography()).toBe("Text");
 
-      // Caret to the document start, then restyle the first block.
-      await driver.pagesToolbarPressKey("ControlOrMeta+Home");
+      // Caret up into the previous block, then restyle the first block.
+      // A Home key with a modifier does nothing on macOS, so the caret
+      // moves block by block instead.
+      await driver.pagesToolbarPressKey("ArrowUp");
       await driver.pagesToolbarTypographyPick("Heading 2");
       await expect.poll(() => driver.pagesToolbarTypography(), { timeout: 15_000 }).toBe("Heading 2");
       await expect.poll(() => driver.pagesToolbarBodyHtml(), { timeout: 15_000 }).toContain("<h2");
