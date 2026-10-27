@@ -909,7 +909,7 @@ describe("label ghost reconciliation on the main axis (ISS-028/NEWFRONT-961)", (
     expect(result.columns.map((column) => column.total)).toEqual([2]);
   });
 
-  it("holds a ghost from a lane without a None cell", () => {
+  it("recovers a ghost into a lane with no None cell yet", () => {
     const laneA = "623e4567-e89b-12d3-a456-426614174005";
     const laneB = "723e4567-e89b-12d3-a456-426614174006";
     const plainA = row({ id: "plain-a", state_id: laneA, label_ids: [] });
@@ -937,6 +937,51 @@ describe("label ghost reconciliation on the main axis (ISS-028/NEWFRONT-961)", (
     expect(result.lanes[1]?.cells["None"]?.rows.map((entry) => entry.id)).toEqual(["ghost"]);
     expect(result.lanes[1]?.cells["None"]?.total).toBe(1);
     expect(result.columns.map((column) => column.total)).toEqual([2]);
+  });
+
+  it("counts a paging lane's None cell alongside a lane that recovered", () => {
+    const laneA = "623e4567-e89b-12d3-a456-426614174005";
+    const laneB = "723e4567-e89b-12d3-a456-426614174006";
+    const plainA = row({ id: "plain-a", state_id: laneA, label_ids: [] });
+    const b1 = row({ id: "b1", state_id: laneB, label_ids: [] });
+    const b2 = row({ id: "b2", state_id: laneB, label_ids: [] });
+    // Lane A holds its whole None window; lane B has one card still to page
+    // in. The board's None column already counts both lanes' totals.
+    const board = subGroupedBoard(
+      subGrouped({
+        None: {
+          [laneA]: { rows: [plainA], total: 1 },
+          [laneB]: { rows: [b1], total: 2 },
+        },
+      }),
+      {
+        groupDimension: "labels",
+        subDimension: "state",
+        groupLabels: labels,
+        subLabels: labels,
+        showEmpty: true,
+      }
+    );
+    expect(board.columns.map((column) => column.total)).toEqual([3]);
+    const ghost = row({ id: "ghost", state_id: laneA, label_ids: [] });
+    const fallback = groupedBoard(
+      grouped({
+        [laneA]: { rows: [plainA, ghost], total: 2 },
+        [laneB]: { rows: [b1, b2], total: 2 },
+      }),
+      { dimension: "state", labels, showEmpty: true }
+    );
+    const result = reconcileLabelGhosts(board, fallback, "main");
+    // Lane A recovers its ghost and now holds two; lane B is still paging
+    // and keeps its own cards. The header covers both lanes, so it equals
+    // the cards behind it once lane B pages in rather than only lane A's.
+    expect(result.lanes.map((entry) => [entry.key, entry.cells["None"]?.rows.map((item) => item.id)])).toEqual([
+      [laneA, ["plain-a", "ghost"]],
+      [laneB, ["b1"]],
+    ]);
+    expect(result.lanes.map((entry) => entry.cells["None"]?.total)).toEqual([2, 2]);
+    expect(result.columns.map((column) => [column.key, column.total])).toEqual([["None", 4]]);
+    expect(result.total).toBe(4);
   });
 
   it("keeps a lane whose fallback holds no unlabeled row as it is", () => {

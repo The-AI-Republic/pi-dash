@@ -598,16 +598,16 @@ function noneColumn(columns: readonly BoardColumn[], total: number): BoardColumn
  * one cell per sub-axis value of a grouped read. The None column is the
  * only column a ghost can belong to, since its label history is gone, so
  * the fallback's unlabeled rows the board does not already render join
- * that column, each under the lane the fallback placed it in. The
- * fallback's unlabeled count for the drawn lanes is the column count, so
- * every header equals the issues behind it. A lane the board does not
- * draw stays out, and a ghost that no drawn lane can hold leaves the
- * board untouched rather than adding a column with no cards. Only a
- * settled lane recovers: while a drawn lane still holds part of its None
- * window, a row it does not show may simply be unpaged, so that lane
- * keeps its own cards and count and column paging stays in charge
- * (NEWFRONT-961 review). The fallback read walks every page, so it is
- * always complete and needs no such guard.
+ * that column, each under the lane the fallback placed it in. Each drawn
+ * lane's None cell counts its full window, recovered or still paging, and
+ * the column count is the sum of those cells, so every header equals the
+ * issues behind it. A lane the board does not draw stays out, and a ghost
+ * that no drawn lane can hold leaves the board untouched rather than
+ * adding a column with no cards. Only a settled lane recovers: while a
+ * drawn lane still holds part of its None window, a row it does not show
+ * may simply be unpaged, so that lane keeps its own cards and count and
+ * column paging stays in charge (NEWFRONT-961 review). The fallback read
+ * walks every page, so it is always complete and needs no such guard.
  */
 function recoverLabelColumnGhosts(board: BoardData, fallback: BoardData): BoardData {
   const fallbackLane = fallback.lanes[0];
@@ -635,18 +635,21 @@ function recoverLabelColumnGhosts(board: BoardData, fallback: BoardData): BoardD
   }
   const placed = [...missingByLane.values()].reduce((count, rows) => count + rows.length, 0);
   if (placed === 0) return board;
-  let unlabeled = 0;
   const lanes = board.lanes.map((entry) => {
     const unlabeledCount = unlabeledByLane.get(entry.key);
     if (unlabeledCount === undefined) return entry;
     const cell = entry.cells["None"];
     const rows = [...(cell?.rows ?? NO_ROWS), ...(missingByLane.get(entry.key) ?? NO_ROWS)];
     const total = Math.max(cell?.total ?? 0, unlabeledCount, rows.length);
-    unlabeled += total;
     const cells = { ...entry.cells, None: { columnKey: "None", rows, total } };
     return { ...entry, cells, total: Object.values(cells).reduce((sum, item) => sum + item.total, 0) };
   });
-  const columnTotal = Math.max(board.columns.find((column) => column.key === "None")?.total ?? 0, unlabeled);
+  // Every lane's final None cell counts, not only the ones that recovered a
+  // row: a settled lane that recovered sits beside one still paging, and
+  // the header must cover both or the recovered cards above the drawn
+  // total leave it short (NEWFRONT-961 review).
+  const laneTotal = lanes.reduce((sum, lane) => sum + (lane.cells["None"]?.total ?? 0), 0);
+  const columnTotal = Math.max(board.columns.find((column) => column.key === "None")?.total ?? 0, laneTotal);
   const columns = noneColumn(board.columns, columnTotal).map((column) =>
     column.key === "None" ? { ...column, total: columnTotal } : column
   );
