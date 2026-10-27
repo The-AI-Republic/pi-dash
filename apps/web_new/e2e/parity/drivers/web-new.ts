@@ -7897,6 +7897,10 @@ export class WebNewDriver implements ParityDriver {
   }
 
   private async layoutsWaitForProjectLayout(layout: LayoutsLayoutKey): Promise<void> {
+    // Settle on the mounted surface, not the chooser mark: the switcher
+    // flips active optimistically while lazy layouts still load, and
+    // one-shot visibility reads right after a switch would race the
+    // mount. Each branch waits its layout's own root.
     if (layout === "calendar") {
       await this.page.getByTestId("issues-calendar").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
       return;
@@ -7908,6 +7912,18 @@ export class WebNewDriver implements ParityDriver {
         .locator('[aria-label="Issue list"], [aria-label="Issues"]')
         .first()
         .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+      return;
+    }
+    if (layout === "spreadsheet") {
+      await this.layoutsSheetScroller().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+      return;
+    }
+    if (layout === "kanban") {
+      await this.page.getByTestId("kanban-layout").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+      return;
+    }
+    if (layout === "gantt_chart") {
+      await this.page.getByTestId("gantt-layout").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
       return;
     }
     await this.page

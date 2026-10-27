@@ -64,11 +64,13 @@ function pageOf(
   parts: {
     testId?: (id: string) => Locator;
     role?: (role: string, options?: unknown) => Locator;
+    locator?: (selector: string) => Locator;
   } = {}
 ): Page {
   return {
     getByTestId: (id: string) => parts.testId?.(id) ?? node({ count: async () => 0 }),
     getByRole: (role: string, options?: unknown) => parts.role?.(role, options) ?? node({ count: async () => 0 }),
+    locator: (selector: string) => parts.locator?.(selector) ?? node({ count: async () => 0 }),
   } as unknown as Page;
 }
 
@@ -174,6 +176,25 @@ describe("web_new shared layout surfaces", () => {
 
     const neither = pageOf({ testId: () => node({ count: async () => 0 }) });
     await expect(new WebNewDriver(neither).layoutsKanbanVisible()).resolves.toBe(false);
+  });
+
+  it("settles each lazy layout on its own root after switching", async () => {
+    const waited: string[] = [];
+    const page = pageOf({
+      testId: (id: string) =>
+        node({
+          waitFor: async () => void waited.push(id),
+        }),
+      locator: (selector: string) => {
+        if (selector.startsWith("[data-layout=")) return node();
+        return node({ count: async () => 0 });
+      },
+    });
+    const driver = new WebNewDriver(page);
+    await driver.layoutsSwitchTo("spreadsheet");
+    await driver.layoutsSwitchTo("kanban");
+    await driver.layoutsSwitchTo("gantt_chart");
+    expect(waited).toEqual(["spreadsheet-scroller", "kanban-layout", "gantt-layout"]);
   });
 
   it("reads gantt visibility off the gantt root", async () => {
