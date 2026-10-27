@@ -334,6 +334,40 @@ test(
   }
 );
 
+const SUBGROUP_ABSENT_ROWS = ["ISS-077"];
+test(
+  specTitle(SUBGROUP_ABSENT_ROWS, "kanban without a grouping hides sub-group by"),
+  { tag: specTags(SUBGROUP_ABSENT_ROWS) },
+  async ({ driver, seed }) => {
+    await test.step("sign in and open the ungrouped board", async () => {
+      const attempt = async () => {
+        await driver.openEntry();
+        await driver.signInWithPassword(seed.email, seed.password);
+        await resetIssueUserProperties(seed.workspaceSlug, seed.projectId, session);
+        await setIssueDisplayFilters(seed.workspaceSlug, seed.projectId, session, {
+          layout: "kanban",
+        });
+        await driver.openProjectIssues(seed.workspaceSlug, seed.projectId);
+      };
+      try {
+        await attempt();
+      } catch {
+        await attempt();
+      }
+    });
+
+    await test.step("the panel hides sub-group by until a grouping is chosen", async () => {
+      // Gate probe (NEWFRONT-658): both apps hide the section with
+      // group-by null, matching the spec ("visible only once a
+      // grouping is chosen"), so both legs pin the absence.
+      await driver.openDisplayOptions();
+      const panel = await driver.displayPanelText();
+      expect(panel).not.toContain("Sub-group by");
+      await driver.closeDisplayOptions();
+    });
+  }
+);
+
 const ANALYTICS_ROWS = ["ISS-107"];
 test(
   specTitle(ANALYTICS_ROWS, "analytics opens a project-scoped dialog"),
