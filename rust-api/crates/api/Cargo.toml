@@ -77,6 +77,10 @@ base64 = "0.22"
 # D-20 exotic charsets (PIDASHCONV-693): `bz2_codec` decode. Pure-Rust
 # default backend (libbz2-rs-sys), no system dependency.
 bzip2 = "0.6"
+# Multipart filename sanitizing (PIDASHCONV-1556): `str.isprintable`
+# as general categories C*/Z* except U+0020, on Unicode 16.0 data.
+# Already in the lockfile via jsonschema, so no new downloads.
+unicode-general-category = "1"
 # Magic-link sign-in/up views read urlencoded forms via the D-16 email
 # line below (`serde_urlencoded`; same 0.7 line, no new downloads).
 # Assistant config validation (D-06): IDN second pass of the Django

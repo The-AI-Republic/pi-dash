@@ -25,8 +25,9 @@
 //!
 //! Non-goals (documented, not stubbed): the 5MB body 413 lives in Django
 //! middleware (`request_body_size.py`) and belongs to a serve-wide
-//! follow-up; filename sanitizing is the exact `sanitize_file_name` port
-//! (full html5 table + CPython `isprintable`, PIDASHCONV-694). Paths that
+//! follow-up; filename sanitizing is the `sanitize_file_name` port
+//! (shared html5 unescape + `unicode-general-category` printability,
+//! PIDASHCONV-1556; the tier-3 CPython edges it drops are listed there). Paths that
 //! never touch `request.data` (GET/DELETE/archive) never call this module,
 //! so they can never 415.
 //
@@ -35,11 +36,10 @@
 //! `body_decoders` (same URL paths, same JSON, same SQL semantics).
 
 use axum::http::HeaderMap;
-use pidash_types::html_entities::html_unescape_strict;
+use pidash_types::html_entities::html_unescape;
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
-
-use super::sanitize_data::NONPRINTABLE_RANGES;
+use unicode_general_category::{get_general_category, GeneralCategory};
 
 /// Per-domain HTML-input shape: which form/multipart keys arrive as arrays
 /// (DRF `ListField.get_value` → `getlist`) and which scalar fields treat a
@@ -1508,7 +1508,7 @@ fn parse_multipart_parts(
                 // Filenames never validate (and sanitize strips the
                 // U+FFFD placeholders as non-printable): spans drop.
                 let filename =
-                    sanitize_file_name(&decode_oneshot_replace(&filename, *charset)?.text)?;
+                    sanitize_file_name(&decode_oneshot_replace(&filename, *charset)?.text);
                 let Some(filename) = filename else { continue };
                 let filename = truncate_uploaded_name(&filename);
                 let mut value = data;
@@ -1782,18 +1782,20 @@ fn binascii_b64decode(data: &[u8]) -> Result<Vec<u8>, ()> {
 /// empty results mean "no file here" (the part is skipped). Returns `None`
 /// for empty/`.`/`..` names.
 ///
-/// A decimal ref with more than 4300 digits raises `ValueError` in CPython
-/// (the `int()` digit cap, 3.11+), which Django lets escape as the generic
-/// 500; that surfaces here as `Err(BodyError::ServerError)`.
-fn sanitize_file_name(name: &str) -> Result<Option<String>, BodyError> {
-    let name = html_unescape_strict(name).map_err(|_| BodyError::ServerError)?;
+/// Printability is `str.isprintable` on Unicode 16.0 categories (drop
+/// C*/Z* except U+0020): the only drift from CPython 3.12 is the
+/// codepoints Unicode 16.0 newly assigned (tier 3, PIDASHCONV-1556).
+/// The shared unescape is infallible — an over-long decimal ref
+/// saturates to U+FFFD — so the old 4300-digit `ValueError` 500 is gone.
+fn sanitize_file_name(name: &str) -> Option<String> {
+    let name = html_unescape(name);
     let name = name.rsplit('/').next().unwrap_or("");
     let name = name.rsplit('\\').next().unwrap_or("");
     let name: String = name.chars().filter(|c| is_printable(*c)).collect();
     if name.is_empty() || name == "." || name == ".." {
-        return Ok(None);
+        return None;
     }
-    Ok(Some(name))
+    Some(name)
 }
 
 /// `UploadedFile._set_name` truncation (`django/core/files/uploadedfile.py`):
@@ -1825,17 +1827,28 @@ fn splitext_no_sep(name: &str) -> (&str, &str) {
     (name, "")
 }
 
-/// CPython `str.isprintable` per char: false exactly on general categories
-/// C*/Z* other than U+0020 (`sanitize_data::NONPRINTABLE_RANGES`, verified
-/// against the interpreter for every codepoint).
+/// `str.isprintable` per char on Unicode 16.0 categories: false on
+/// general categories C*/Z* other than U+0020 (PIDASHCONV-1556; swept
+/// against CPython 3.12 for every codepoint — the only diffs are the
+/// codepoints Unicode 16.0 newly assigned).
 fn is_printable(c: char) -> bool {
-    !in_ranges(c as u32, NONPRINTABLE_RANGES)
-}
-
-/// Point-in-sorted-disjoint-ranges.
-fn in_ranges(value: u32, ranges: &[(u32, u32)]) -> bool {
-    let index = ranges.partition_point(|&(lo, _)| lo <= value);
-    index > 0 && value <= ranges[index - 1].1
+    if c == ' ' {
+        return true;
+    }
+    if c.is_control() {
+        return false;
+    }
+    !matches!(
+        get_general_category(c),
+        GeneralCategory::Control
+            | GeneralCategory::Format
+            | GeneralCategory::Surrogate
+            | GeneralCategory::PrivateUse
+            | GeneralCategory::Unassigned
+            | GeneralCategory::LineSeparator
+            | GeneralCategory::ParagraphSeparator
+            | GeneralCategory::SpaceSeparator
+    )
 }
 
 #[cfg(test)]
@@ -2880,7 +2893,7 @@ mod codec_tests {
 
     #[test]
     fn filename_sanitize_exact_order_and_printable() {
-        let san = |name: &str| sanitize_file_name(name).unwrap();
+        let san = |name: &str| sanitize_file_name(name);
         // Unescape runs BEFORE the strip: decoded separators still strip.
         assert_eq!(san("..&#x2F;evil"), Some("evil".to_owned()));
         assert_eq!(san("a/b&#x5C;c"), Some("c".to_owned()));
@@ -2925,20 +2938,14 @@ mod codec_tests {
     }
 
     #[test]
-    fn filename_sanitize_digit_cap_maps_to_server_error() {
-        // The strict shared unescape reports the 4300-digit `ValueError`;
-        // sanitize maps it to the generic 500 (the full table, numeric
-        // and cap vectors moved to `pidash-types` with the code).
+    fn filename_sanitize_overlong_charref_saturates() {
+        // Tier 3 (PIDASHCONV-1556): the shared unescape is infallible,
+        // so an over-long decimal ref saturates to U+FFFD (printable,
+        // kept) instead of the old 4300-digit `ValueError` 500.
         let over = format!("&#{};", "9".repeat(4301));
-        assert_eq!(
-            sanitize_file_name(&over).unwrap_err(),
-            BodyError::ServerError
-        );
+        assert_eq!(sanitize_file_name(&over), Some("\u{FFFD}".to_owned()));
         let at_cap = format!("&#{};", "9".repeat(4300));
-        assert_eq!(
-            sanitize_file_name(&at_cap).unwrap(),
-            Some("\u{FFFD}".to_owned())
-        );
+        assert_eq!(sanitize_file_name(&at_cap), Some("\u{FFFD}".to_owned()));
     }
 
     #[test]

@@ -24,7 +24,6 @@ pub mod cycle;
 pub mod gates;
 pub mod json_cpython;
 pub mod module;
-pub mod sanitize_data;
 
 use axum::Router;
 
