@@ -3701,11 +3701,16 @@ export class WebNewDriver implements ParityDriver {
   }
   async clickListRow(name: string): Promise<void> {
     // Any visible row that names the work item: the issues list rows are
-    // links, the profile list rows are buttons.
-    const row = this.page
-      .locator('[data-testid="issue-list"] a[id^="issue-"], [data-testid="profile-list"] button[data-profile-row]')
-      .filter({ hasText: name })
-      .first();
+    // row-anchor links inside the Issues region (mirroring
+    // visibleIssueNames), the profile list rows are buttons.
+    const issues = this.page
+      .getByRole("region", { name: "Issues" })
+      .locator('a[data-row-anchor="true"]')
+      .filter({ hasText: name });
+    const profile = this.page
+      .locator('[data-testid="profile-list"] button[data-profile-row]')
+      .filter({ hasText: name });
+    const row = (await issues.count()) > 0 ? issues.first() : profile.first();
     await row.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
     await row.click({ timeout: WebNewDriver.WAIT_MS });
   }

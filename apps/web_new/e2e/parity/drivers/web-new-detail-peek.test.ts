@@ -23,6 +23,7 @@ interface StubNode {
   locator?: (selector: string) => Locator;
   getByTestId?: (id: string) => Locator;
   getByRole?: (role: string, options?: unknown) => Locator;
+  filter?: (options: unknown) => Locator;
   first?: () => Locator;
 }
 
@@ -42,6 +43,7 @@ function node(overrides: Partial<StubNode> = {}): Locator {
     locator: () => node({ count: async () => 0 }),
     getByTestId: () => node({ count: async () => 0 }),
     getByRole: () => node({ count: async () => 0 }),
+    filter: () => self as unknown as Locator,
     first: () => self as unknown as Locator,
   };
   for (const [name, value] of Object.entries(chain)) {
@@ -182,6 +184,32 @@ describe("DetailPeekDriver", () => {
     });
     await expect(new WebNewDriver(page).peekQuickActionNames()).resolves.toEqual(["Delete", "Archive"]);
     expect(keys).toEqual(["Escape"]);
+  });
+
+  it("clicks the row anchor inside the Issues region", async () => {
+    const seen: string[] = [];
+    let clicked = false;
+    const page = pageOf({
+      role: (role: string) => {
+        if (role !== "region") return absent();
+        return node({
+          locator: (selector: string) => {
+            seen.push(selector);
+            return node({
+              filter: () =>
+                node({
+                  click: async () => {
+                    clicked = true;
+                  },
+                }),
+            });
+          },
+        });
+      },
+    });
+    await new WebNewDriver(page).clickListRow("Target issue");
+    expect(seen).toEqual(['a[data-row-anchor="true"]']);
+    expect(clicked).toBe(true);
   });
 
   it("reads the peek error title and null otherwise", async () => {
