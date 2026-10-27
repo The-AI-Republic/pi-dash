@@ -16,8 +16,12 @@
 //!   middlewares deliberately swallow stamp failures, and both
 //!   behaviors are pinned by contract suites.
 //! * Transactional drivers (revoke, delete cascade, session open,
-//!   rotate, enroll mint) move onto [`WriteTxn`][crate::domain::WriteTxn]
-//!   in part B2; their SQL moves with them.
+//!   rotate, enroll mint) stay executor-generic on the caller's existing
+//!   `sqlx` transaction: each flow joins tables outside this module, and
+//!   design D5 runs the whole domain write on one transaction, so moving
+//!   one leg onto [`WriteTxn`][crate::domain::WriteTxn] alone would split
+//!   it. Their token SQL moves here; the flows convert to `WriteTxn`
+//!   whole when their aggregates do (ORM-03/ORM-07).
 //!
 //! Clocks are load-bearing and preserved per shape: middleware stamps use
 //! the DB `now()`, flows holding a frozen timestamp bind it. Quoting is
