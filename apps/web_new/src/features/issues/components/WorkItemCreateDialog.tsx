@@ -329,6 +329,7 @@ function contextForm(
   if (initial?.labelIds !== undefined) state.labelIds = [...initial.labelIds];
   if (initial?.cycleId !== undefined) state.cycleId = initial.cycleId;
   if (initial?.moduleIds !== undefined) state.moduleIds = [...initial.moduleIds];
+  if (initial?.targetDate != null) state.targetDate = initial.targetDate;
   if (context?.cycleId != null) state.cycleId = context.cycleId;
   if (context?.moduleId != null) state.moduleIds = [context.moduleId];
   return state;

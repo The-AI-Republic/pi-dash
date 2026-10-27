@@ -67,7 +67,20 @@ describe("layoutDisplayMatrix", () => {
     const matrix = layoutDisplayMatrix("kanban");
     expect(matrix.properties).toHaveLength(13);
     expect(matrix.groupBy).not.toContain(null);
-    expect(matrix.subGroupBy).toContain(null);
+    expect(matrix.subGroupBy).toEqual([
+      "state",
+      "state_detail.group",
+      "priority",
+      "cycle",
+      "module",
+      "labels",
+      "assignees",
+      "created_by",
+      "team_project",
+      "target_date",
+      null,
+    ]);
+    expect(matrix.subGroupBy).toContain("target_date");
     expect(matrix.orderBy).toHaveLength(6);
     expect(matrix.switches).toEqual(["sub_issue", "show_empty_groups"]);
   });

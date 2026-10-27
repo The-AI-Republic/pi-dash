@@ -45,6 +45,7 @@ export const GROUP_DIMENSION_LABELS: Record<string, string> = {
   assignees: "Assignees",
   created_by: "Created by",
   team_project: "Team project",
+  target_date: "Due date",
 };
 
 /** Label for the ungrouped choice. */
@@ -117,6 +118,8 @@ const KANBAN_GROUP: readonly (string | null)[] = [
   "created_by",
 ];
 
+const KANBAN_SUB_GROUP: readonly (string | null)[] = [...LIST_GROUP.slice(0, -1), "target_date", null];
+
 const FULL_ORDERS: readonly string[] = [
   "sort_order",
   "-created_at",
@@ -178,7 +181,7 @@ export function layoutDisplayMatrix(layout: LayoutKind): LayoutDisplayMatrix {
       return {
         properties: ALL_PILLS,
         groupBy: KANBAN_GROUP,
-        subGroupBy: LIST_GROUP,
+        subGroupBy: KANBAN_SUB_GROUP,
         orderBy: FULL_ORDERS,
         switches: ["sub_issue", "show_empty_groups"],
       };

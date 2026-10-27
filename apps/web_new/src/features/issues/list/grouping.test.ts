@@ -60,13 +60,14 @@ describe("serverGroupBy", () => {
     ["team_project", "project_id"],
     ["created_by", "created_by"],
     ["state_detail.group", "state__group"],
+    ["target_date", "target_date"],
   ])("maps %s to %s", (dimension, expected) => {
     expect(serverGroupBy(dimension)).toBe(expected);
   });
 
   it("returns null for flat and unknown dimensions", () => {
     expect(serverGroupBy(null)).toBeNull();
-    expect(serverGroupBy("target_date")).toBeNull();
+    expect(serverGroupBy("start_date")).toBeNull();
   });
 
   it("folds a team-project bucket's plain project id into the row shape", () => {
@@ -100,6 +101,12 @@ describe("group titles and ordering", () => {
     ["cancelled", "Canceled"],
   ])("titles state group %s", (key, title) => {
     expect(defaultGroupTitle("state_detail.group", key)).toBe(title);
+  });
+
+  it("titles a target-date bucket as a readable day", () => {
+    expect(defaultGroupTitle("target_date", "2026-12-01")).toBe("Dec 1, 2026");
+    expect(groupTitle("2026-12-02", new Map(), { dimension: "target_date" })).toBe("Dec 2, 2026");
+    expect(defaultGroupTitle("target_date", "None")).toBe("None");
   });
 
   it("prefers resolved names, then fixed titles, then the raw key", () => {
@@ -221,6 +228,7 @@ describe("sectionPrefill", () => {
     ["assignees", { assignee_ids: ["value"] }],
     ["cycle", { cycle_id: "value" }],
     ["module", { module_ids: ["value"] }],
+    ["target_date", { target_date: "value" }],
     ["project", {}],
     ["created_by", {}],
   ])("maps %s grouping to its create field", (dimension, expected) => {

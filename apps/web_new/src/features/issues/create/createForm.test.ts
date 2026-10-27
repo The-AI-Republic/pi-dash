@@ -388,6 +388,7 @@ describe("initialCreateForm", () => {
       labelIds: ["label-1"],
       cycleId: "cycle-1",
       moduleIds: ["module-1"],
+      targetDate: "2026-12-01",
     });
     expect(form).toMatchObject({
       projectId: PROJECT,
@@ -397,6 +398,7 @@ describe("initialCreateForm", () => {
       labelIds: ["label-1"],
       cycleId: "cycle-1",
       moduleIds: ["module-1"],
+      targetDate: "2026-12-01",
     });
   });
 
