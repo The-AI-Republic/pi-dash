@@ -246,22 +246,22 @@ test(
 );
 
 test(
-  specTitle(["ISS-028"], "bug: grouped column count excludes the pending-triage issue (NEWFRONT-153)"),
+  specTitle(["ISS-028"], "grouped column count equals the cards it renders (NEWFRONT-153)"),
   { tag: specTags(["ISS-028"]) },
   async ({ driver, seed }) => {
     // The old backend's grouped count filter drops the pending-triage seed
-    // issue while the grouped results keep it, so the Todo header undercounts
-    // the cards it renders. The new app implements the intended behavior
-    // (count equals cards); this scenario pins the old one until NEWFRONT-153
-    // lands.
+    // issue while the grouped results keep it, so on the old app the Todo
+    // header undercounts the cards it renders. The intended behavior is
+    // that the header count equals the number of issues in the group, which
+    // the new app implements (NEWFRONT-153); this scenario asserts that.
     const ctx = await openBoard(driver, seed, seed.projectId, { group_by: "state" });
 
-    await test.step("the header undercounts the cards it renders", async () => {
+    await test.step("the header counts every card it renders", async () => {
       await expect.poll(() => driver.kanbanColumns(), { timeout: 120_000 }).toHaveLength(1);
       const columns = await driver.kanbanColumns();
       const cards = await driver.kanbanColumnCards(columns[0]?.name ?? "");
       expect(cards).toHaveLength(3);
-      expect(columns[0]?.count).toBeLessThan(cards.length);
+      expect(columns[0]?.count).toBe(cards.length);
     });
 
     await test.step("the server holds three issues in that state", async () => {
