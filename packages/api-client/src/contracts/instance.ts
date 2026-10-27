@@ -250,20 +250,68 @@ export const EmailCredentialCheckResult = z.object({
 export type EmailCredentialCheckResult = z.infer<typeof EmailCredentialCheckResult>;
 
 /**
+ * SMTP values a caller may grade instead of the stored configuration.
+ * Fields are optional: anything left out (or null) is graded against
+ * the stored setting. A blank password also means "use the stored one",
+ * since a stored secret never reads back; every other field is graded
+ * exactly as given, blank included, so a cleared host never silently
+ * grades the saved host. Security is the single TLS/SSL/none choice,
+ * which the contract fans out to the two flag keys the endpoint
+ * understands.
+ */
+export interface EmailCredentialCandidate {
+  host?: string | null | undefined;
+  port?: string | null | undefined;
+  from?: string | null | undefined;
+  user?: string | null | undefined;
+  password?: string | null | undefined;
+  security?: "tls" | "ssl" | "none" | null | undefined;
+}
+
+/**
  * POST /api/instances/email-credentials-check/ sends a real message to
- * the receiver and reports the outcome. The payload carries only the
- * receiver address; the send is graded against the stored SMTP
- * configuration, not values typed but unsaved. Failures surface as the
- * server's error message on a 400.
+ * the receiver and reports the outcome. Without ``candidate`` the send
+ * is graded against the stored SMTP configuration; with it, the
+ * entered (possibly unsaved) values are graded instead, so "test before
+ * save" tests what the form shows. Failures surface as the server's
+ * error message on a 400.
  */
 export async function checkEmailCredentials(
   client: ApiClient,
-  receiverEmail: string
+  receiverEmail: string,
+  candidate?: EmailCredentialCandidate
 ): Promise<EmailCredentialCheckResult> {
   const envelope = await client.sendJson<unknown>("POST", "/api/instances/email-credentials-check/", {
-    json: { receiver_email: receiverEmail },
+    json: { receiver_email: receiverEmail, ...candidatePayload(candidate) },
   });
   return client.parse(EmailCredentialCheckResult, envelope.data, "POST /api/instances/email-credentials-check/");
+}
+
+/**
+ * Wire shape for the candidate settings: the endpoint's configuration
+ * keys, with the security choice spelled as the two flag keys. Absent
+ * values are omitted so the endpoint keeps the stored setting; a blank
+ * password is omitted for the same reason, while a blank host, port,
+ * sender or username is sent as given (NEWFRONT-524 contract).
+ */
+export function candidatePayload(candidate: EmailCredentialCandidate | undefined): Record<string, string> {
+  if (!candidate) return {};
+  const payload: Record<string, string> = {};
+  const put = (key: string, value: string | null | undefined, blankMeansStored = false) => {
+    if (value === null || value === undefined) return;
+    if (blankMeansStored && value.trim() === "") return;
+    payload[key] = value;
+  };
+  put("EMAIL_HOST", candidate.host);
+  put("EMAIL_PORT", candidate.port);
+  put("EMAIL_FROM", candidate.from);
+  put("EMAIL_HOST_USER", candidate.user);
+  put("EMAIL_HOST_PASSWORD", candidate.password, true);
+  if (candidate.security !== null && candidate.security !== undefined) {
+    payload["EMAIL_USE_TLS"] = candidate.security === "tls" ? "1" : "0";
+    payload["EMAIL_USE_SSL"] = candidate.security === "ssl" ? "1" : "0";
+  }
+  return payload;
 }
 
 /**

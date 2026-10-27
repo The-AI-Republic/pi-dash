@@ -28,16 +28,16 @@
 // the form so the save stays shut (bug: NEWFRONT-478). The test modal runs compose, success
 // and failure steps and resets on close, but its check POST carries only
 // the receiver address, so the server grades the stored settings rather
-// than the entered ones (bug: NEWFRONT-477). While the configuration
+// than the entered ones (bug: NEWFRONT-477); the new app also sends the
+// entered settings. While the configuration
 // loads, a pill stands in for the toggle; the multi-row form skeleton
 // shows only once the toggle is on with no configuration behind it.
 //
 // Target behavior (NEWFRONT-475/476/477/478): the scenarios below run
 // the intended rules on apps/web_new — the empty name names the field
 // inline, a failed disable reports the failure and rolls the toggle
-// back, the security picker dirties the form, and the test action
-// closes on unsaved edits with a save-first hint. The oracle keeps the
-// pinned old outcomes.
+// back, the security picker dirties the form, and the test action grades
+// the entered settings. The oracle keeps the pinned old outcomes.
 import { test, expect } from "../fixtures";
 import {
   serverAdminEmailCheck,
@@ -475,9 +475,7 @@ test(
         } else {
           // The failure reports success: the notice, the hidden form and
           // the off toggle all claim the feature is down.
-          await expect
-            .poll(async () => (await driver.adminEmailFacts()).formVisible, { timeout: 15_000 })
-            .toBe(false);
+          await expect.poll(async () => (await driver.adminEmailFacts()).formVisible, { timeout: 15_000 }).toBe(false);
           await expect.poll(async () => driver.adminLastToast(), { timeout: 15_000 }).not.toBeNull();
           expect(await driver.adminLastToast()).toEqual({
             title: "Email feature disabled",
@@ -537,14 +535,10 @@ test(
       form = await driver.adminEmailFormFacts();
       expect(form.values.passwordFilled).toBe(true);
       expect(form.saveDisabled).toBe(false);
-      if (driver.target === "web_new") {
-        // Save-first interim (NEWFRONT-477): unsaved edits close the
-        // check, which grades the stored settings.
-        expect(form.testEmailDisabled).toBe(true);
-        expect(form.saveFirstHint ?? "").toContain("Save your changes before testing");
-      } else {
-        expect(form.testEmailDisabled).toBe(false);
-      }
+      // The test action stays open on unsaved edits in both apps: the
+      // check grades what the form shows (NEWFRONT-477).
+      expect(form.testEmailDisabled).toBe(false);
+      expect(form.saveFirstHint ?? null).toBeNull();
 
       // The password toggle flips the field without touching the value.
       await driver.adminEmailTogglePassword();
@@ -840,14 +834,16 @@ test(
 );
 
 test(
-  specTitle(["ADM-021"], "bug: NEWFRONT-477 check runs against stored settings, not entered ones"),
+  specTitle(["ADM-021"], "check grades the entered settings, not the stored ones"),
   { tag: specTags(["ADM-021"]) },
   async ({ driver, seed }: { driver: ParityDriver; seed: ParitySeedFacts }) => {
     const session = await serverAdminSession(seed.email, seed.password);
-    const receiver = uniqueEmail("parity-adm-stored");
+    const receiver = uniqueEmail("parity-adm-entered");
     const stored = await snapshotSmtp(session);
-    // Establish a stored configuration that differs from the values the
-    // form will carry, so a rerun never starts from the same state.
+    // Stored settings point at a definitely-unreachable host so the
+    // check cannot succeed by accident; the entered values name a
+    // different unreachable host, so the graded values are visible in
+    // the request body either way.
     await serverAdminUpdateConfigurations(session, {
       ...DISABLED_SMTP,
       EMAIL_HOST: "stored-smtp.invalid",
@@ -858,33 +854,30 @@ test(
       await openEmail(driver, seed);
       await expect.poll(async () => (await driver.adminEmailFacts()).formVisible, { timeout: 15_000 }).toBe(true);
       await driver.adminEmailFill({ host: "entered-smtp.invalid", from: "entered@example.com" });
-      if (driver.target === "web_new") {
-        // Intended interim (NEWFRONT-477): the check grades stored
-        // settings, so unsaved edits close the test action and the form
-        // says to save first. Saving reopens it, and the check still
-        // posts only the receiver.
-        const dirty = await driver.adminEmailFormFacts();
-        expect(dirty.testEmailDisabled).toBe(true);
-        expect(dirty.saveFirstHint ?? "").toContain("Save your changes before testing");
-        await driver.adminEmailSave();
-        await expect
-          .poll(async () => (await driver.adminEmailFormFacts()).testEmailDisabled, { timeout: 15_000 })
-          .toBe(false);
-        expect((await driver.adminEmailFormFacts()).saveFirstHint).toBeNull();
-      } else {
-        expect((await driver.adminEmailFormFacts()).testEmailDisabled).toBe(false);
-      }
+      // Unsaved edits leave the test action open; nothing requires a save first.
+      const dirty = await driver.adminEmailFormFacts();
+      expect(dirty.testEmailDisabled).toBe(false);
+      expect(dirty.saveFirstHint ?? null).toBeNull();
 
-      await driver.adminTestEmailOpen();
       await driver.adminStartEmailCheckSpy();
+      await driver.adminTestEmailOpen();
       await driver.adminTestEmailFillReceiver(receiver);
       await driver.adminTestEmailSend();
-      await expect.poll(async () => (await driver.adminTestEmailFacts()).step, { timeout: 30_000 }).toBe("success");
-      // The body carries only the receiver: the server grades its own
-      // stored settings rather than anything the form could add.
-      expect(await driver.adminEmailCheckBodies()).toEqual([{ receiver_email: receiver }]);
-      const direct = await serverAdminEmailCheck(session, receiver);
-      expect(direct.status).toBe(200);
+      await expect.poll(async () => (await driver.adminTestEmailFacts()).step, { timeout: 90_000 }).toBe("failed");
+      const bodies = (await driver.adminEmailCheckBodies()) as Array<Record<string, unknown>>;
+      expect(bodies).toHaveLength(1);
+      const body = bodies[0] ?? {};
+      expect(body["receiver_email"]).toBe(receiver);
+      if (driver.target === "web_new") {
+        // Intended (NEWFRONT-477): the entered, unsaved values ride
+        // along, so the server grades them instead of the stored ones.
+        expect(body["EMAIL_HOST"]).toBe("entered-smtp.invalid");
+        expect(body["EMAIL_FROM"]).toBe("entered@example.com");
+      } else {
+        // The old app posts only the receiver: the server grades its own
+        // stored configuration (the pinned bug).
+        expect(Object.keys(body)).toEqual(["receiver_email"]);
+      }
       await driver.adminTestEmailClose();
     } finally {
       await restoreSmtp(session, stored);

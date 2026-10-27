@@ -3905,6 +3905,77 @@ describe("instance configuration contracts", () => {
     expect(postCall?.init.body).toBe(JSON.stringify({ receiver_email: "probe@example.com" }));
   });
 
+  it("sends candidate SMTP settings alongside the receiver", async () => {
+    const transport = csrfThen((url) => {
+      expect(url.endsWith("/api/instances/email-credentials-check/")).toBe(true);
+      return { status: 200, body: JSON.stringify({ message: "Email successfully sent." }) };
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await checkEmailCredentials(client, "probe@example.com", {
+      host: "entered.smtp.example",
+      port: "2525",
+      from: "entered@example.com",
+      user: "entered-user",
+      password: "entered-secret",
+      security: "ssl",
+    });
+    const postCall = transport.calls.find((call) => call.url.endsWith("/api/instances/email-credentials-check/"));
+    expect(JSON.parse(String(postCall?.init.body))).toEqual({
+      receiver_email: "probe@example.com",
+      EMAIL_HOST: "entered.smtp.example",
+      EMAIL_PORT: "2525",
+      EMAIL_FROM: "entered@example.com",
+      EMAIL_HOST_USER: "entered-user",
+      EMAIL_HOST_PASSWORD: "entered-secret",
+      EMAIL_USE_TLS: "0",
+      EMAIL_USE_SSL: "1",
+    });
+  });
+
+  it("omits absent fields and a blank password, but sends other blanks as given", async () => {
+    const transport = csrfThen(() => ({
+      status: 200,
+      body: JSON.stringify({ message: "Email successfully sent." }),
+    }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await checkEmailCredentials(client, "probe@example.com", {
+      host: "",
+      port: null,
+      from: undefined,
+      user: " ",
+      password: "",
+      security: null,
+    });
+    const postCall = transport.calls.find((call) => call.url.endsWith("/api/instances/email-credentials-check/"));
+    // Absent fields fall back to stored; a blank password means "keep the
+    // stored secret"; other blank values are graded exactly as entered
+    // (NEWFRONT-524 contract).
+    expect(JSON.parse(String(postCall?.init.body))).toEqual({
+      receiver_email: "probe@example.com",
+      EMAIL_HOST: "",
+      EMAIL_HOST_USER: " ",
+    });
+  });
+
+  it("fans the security choice out to both flag keys", async () => {
+    const transport = csrfThen(() => ({
+      status: 200,
+      body: JSON.stringify({ message: "Email successfully sent." }),
+    }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    for (const [security, expected] of [
+      ["tls", { EMAIL_USE_TLS: "1", EMAIL_USE_SSL: "0" }],
+      ["none", { EMAIL_USE_TLS: "0", EMAIL_USE_SSL: "0" }],
+    ] as const) {
+      await checkEmailCredentials(client, "probe@example.com", { security });
+      const calls = transport.calls.filter((call) => call.url.endsWith("/api/instances/email-credentials-check/"));
+      expect(JSON.parse(String(calls[calls.length - 1]?.init.body))).toEqual({
+        receiver_email: "probe@example.com",
+        ...expected,
+      });
+    }
+  });
+
   it("surfaces the server mail error on a failed check", async () => {
     const transport = csrfThen(() => ({
       status: 400,

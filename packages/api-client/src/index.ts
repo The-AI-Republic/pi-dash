@@ -1231,6 +1231,7 @@ export {
   adminSignIn,
   adminSignOut,
   adminSignUp,
+  candidatePayload,
   checkEmailCredentials,
   cloudSignInUrl,
   disableEmailFeature,
@@ -1246,6 +1247,7 @@ export type {
   AdminSignInInput,
   AdminSignUpInput,
   CloudAuthProbe,
+  EmailCredentialCandidate,
   InstancePatch,
 } from "./contracts/instance.js";
 export { Pod, PodList, PodMini, createPod, deletePod, getPod, listPods, updatePod } from "./contracts/pods.js";

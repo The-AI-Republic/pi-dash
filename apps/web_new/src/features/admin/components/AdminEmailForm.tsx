@@ -7,9 +7,9 @@
 // transport-security choice. Save stays shut unless the form is valid
 // and dirty (the security picker dirties it like any other control,
 // NEWFRONT-478 intent) and forces SMTP back on. The test-email action
-// opens only from a valid, saved form: the check grades the stored
-// settings, so testing with unsaved edits would mislead (NEWFRONT-477
-// save-first interim), and the form says so while it is dirty.
+// opens from any valid form, saved or not, and hands the modal the
+// values on screen so the check grades what the admin entered
+// (NEWFRONT-477).
 import { Button, Input } from "@pidash/kit";
 import { Eye, EyeOff } from "lucide-react";
 import * as React from "react";
@@ -183,19 +183,14 @@ export function AdminEmailForm({ initial, onSaved }: AdminEmailFormProps): React
           <Button
             variant="secondary"
             onClick={() => setModalOpen(true)}
-            disabled={!valid || dirty}
+            disabled={!valid}
             data-testid="admin-email-test-email"
           >
             Send test email
           </Button>
         </div>
-        {valid && dirty ? (
-          <p data-testid="admin-email-save-first-hint" className="text-meta text-(--text-muted)">
-            Save your changes before testing — the check runs against the saved settings.
-          </p>
-        ) : null}
       </form>
-      {modalOpen ? <AdminTestEmailModal onClose={() => setModalOpen(false)} /> : null}
+      {modalOpen ? <AdminTestEmailModal candidate={values} onClose={() => setModalOpen(false)} /> : null}
     </>
   );
 }

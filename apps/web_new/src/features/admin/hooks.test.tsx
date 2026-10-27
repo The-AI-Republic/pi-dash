@@ -1036,7 +1036,16 @@ function CheckProbe({ receiver }: { receiver: string }): React.ReactElement {
   const check = useCheckEmailCredentials();
   return (
     <>
-      <button type="button" data-testid="fire" onClick={() => check.mutate(receiver)}>
+      <button
+        type="button"
+        data-testid="fire"
+        onClick={() =>
+          check.mutate({
+            receiverEmail: receiver,
+            candidate: { host: "smtp.example.com", port: "587", from: "team@example.com", security: "tls" },
+          })
+        }
+      >
         fire
       </button>
       <div data-testid="probe">
@@ -1047,7 +1056,7 @@ function CheckProbe({ receiver }: { receiver: string }): React.ReactElement {
 }
 
 describe("useCheckEmailCredentials", () => {
-  it("posts the receiver address and resolves the confirmation", async () => {
+  it("posts the receiver with the candidate settings and resolves the confirmation", async () => {
     const calls: Array<{ method: string | undefined; path: string; body: unknown }> = [];
     createAppClient(
       "https://api.test",
@@ -1063,7 +1072,14 @@ describe("useCheckEmailCredentials", () => {
       {
         method: "POST",
         path: "/api/instances/email-credentials-check/",
-        body: { receiver_email: "admin@example.com" },
+        body: {
+          receiver_email: "admin@example.com",
+          EMAIL_HOST: "smtp.example.com",
+          EMAIL_PORT: "587",
+          EMAIL_FROM: "team@example.com",
+          EMAIL_USE_TLS: "1",
+          EMAIL_USE_SSL: "0",
+        },
       },
     ]);
   });
