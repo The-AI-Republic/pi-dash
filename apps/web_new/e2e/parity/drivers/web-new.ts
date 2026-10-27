@@ -4059,8 +4059,13 @@ export class WebNewDriver implements ParityDriver {
       .poll(async () => ((await control.innerText().catch(() => "")) ?? "").trim(), { timeout: WebNewDriver.WAIT_MS })
       .not.toBe("Loading more…");
   }
-  async widgetHeaderControlCount(_widget: string): Promise<number> {
-    return todo("widgetHeaderControlCount");
+  async widgetHeaderControlCount(widget: string): Promise<number> {
+    // The disclosure button nests no controls itself; the header row
+    // around it holds the disclosure plus the display, filter and add
+    // menu triggers.
+    const header = this.widgetHeader(widget);
+    if ((await header.count()) === 0) return 0;
+    return header.locator("xpath=ancestor::div[1]").locator("button").count();
   }
   async toggleWidgetSection(widget: string): Promise<void> {
     await this.widgetHeader(widget).click({ timeout: WebNewDriver.WAIT_MS });
@@ -4068,20 +4073,61 @@ export class WebNewDriver implements ParityDriver {
   async widgetAddMenuNames(_widget: string): Promise<string[]> {
     return todo("widgetAddMenuNames");
   }
+  /** The widget action-row button that opens the sub-issue add menu. */
+  private subIssueAddAction(): Locator {
+    return this.page.locator('[data-widget-action="Add sub-work item"]').first();
+  }
+
+  /** Pick one entry of the open widget add menu. */
+  private async pickWidgetAddEntry(label: string): Promise<void> {
+    const entry = this.page.getByRole("menuitem", { name: label, exact: true });
+    await entry.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await entry.click({ timeout: WebNewDriver.WAIT_MS });
+  }
+
   async openSubIssueCreateModal(): Promise<void> {
-    return todo("openSubIssueCreateModal");
+    await this.subIssueAddAction().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.pickWidgetAddEntry("Create new");
+    await this.createDialog().first().waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS });
   }
   async createModalParentName(): Promise<string | null> {
-    return todo("createModalParentName");
+    const tag = this.createDialog().getByTestId("parent-tag").first();
+    if ((await tag.count()) === 0) return null;
+    const text = ((await tag.innerText()) ?? "").trim().replace(/\s+/g, " ");
+    return text === "" ? null : text;
   }
   async createModalProjectLocked(): Promise<boolean> {
-    return todo("createModalProjectLocked");
+    const chip = this.modalProjectChip();
+    if ((await chip.count()) === 0) return false;
+    return chip.first().isDisabled();
   }
-  async createModalSubmit(_name: string): Promise<void> {
-    return todo("createModalSubmit");
+  async createModalSubmit(name: string): Promise<void> {
+    await this.fillCreateTitle(name);
+    await this.submitCreateModal();
+    await this.createDialog().waitFor({ state: "detached", timeout: 60_000 });
   }
-  async addExistingSubIssue(_search: string, _name: string): Promise<void> {
-    return todo("addExistingSubIssue");
+  async addExistingSubIssue(search: string, name: string): Promise<void> {
+    await this.subIssueAddAction().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.pickWidgetAddEntry("Add existing");
+    const dialog = this.page.getByRole("dialog", { name: "Add existing work items" });
+    await dialog.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.getByLabel("Search work items").first().fill(search, { timeout: WebNewDriver.WAIT_MS });
+    // The search debounces 500ms, then the picked option ticks the row;
+    // the dialog stays open for more picks until the submit lands.
+    const option = dialog.getByRole("option", { name }).first();
+    await option.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await option.click({ timeout: WebNewDriver.WAIT_MS });
+    await dialog
+      .getByRole("button", { name: "Add selected work items", exact: true })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.waitFor({ state: "detached", timeout: 60_000 });
+    // Ends with the row rendered: the attach invalidates the section.
+    await expect
+      .poll(async () => (await this.widgetRowNames(WebNewDriver.SUB_ISSUES_WIDGET)).some((row) => row.includes(name)), {
+        timeout: WebNewDriver.WAIT_MS,
+      })
+      .toBe(true);
   }
   async clickWidgetRow(_widget: string, _rowName: string): Promise<void> {
     return todo("clickWidgetRow");

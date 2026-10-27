@@ -463,3 +463,146 @@ describe("cloud worklog drivers (NEWFRONT-672, ISS-206 cloud leg)", () => {
     ]);
   });
 });
+
+describe("sub-issue add flows", () => {
+  const ACTION = '[data-widget-action="Add sub-work item"]';
+
+  it("counts the header row controls, zero when the header is absent", async () => {
+    const row = locator({ locator: () => locator({ count: async () => 3 }) });
+    const header = locator({ locator: () => row });
+    const page = pageOf({
+      locator: (selector: string) => (selector === '[data-testid="sub-issues-collapsible"]' ? header : locator()),
+    });
+    await expect(new WebNewDriver(page).widgetHeaderControlCount("Sub-work items")).resolves.toBe(3);
+    const bare = pageOf({ locator: () => locator({ count: async () => 0 }) });
+    await expect(new WebNewDriver(bare).widgetHeaderControlCount("Sub-work items")).resolves.toBe(0);
+  });
+
+  function addMenuPage(picked: string[]): Page {
+    return pageOf({
+      locator: (selector: string) =>
+        selector === ACTION ? locator({ click: async () => void picked.push("action") }) : locator(),
+      getByRole: (role: string, options?: unknown) => {
+        if (role === "menuitem") {
+          const want = (options as { name?: string } | undefined)?.name ?? "";
+          return locator({ click: async () => void picked.push(want) });
+        }
+        return locator();
+      },
+    });
+  }
+
+  it("opens the create modal through the add menu", async () => {
+    const picked: string[] = [];
+    await new WebNewDriver(addMenuPage(picked)).openSubIssueCreateModal();
+    expect(picked).toEqual(["action", "Create new"]);
+  });
+
+  it("reads the preset parent tag, null when absent or blank", async () => {
+    const tag = (text: string, present: boolean) =>
+      pageOf({
+        getByRole: () =>
+          locator({
+            getByTestId: (id: string) =>
+              id === "parent-tag"
+                ? locator({ count: async () => (present ? 1 : 0), innerText: async () => text })
+                : locator(),
+          }),
+      });
+    await expect(new WebNewDriver(tag("  ABC-12\nParent Name ", true)).createModalParentName()).resolves.toBe(
+      "ABC-12 Parent Name"
+    );
+    await expect(new WebNewDriver(tag("", false)).createModalParentName()).resolves.toBeNull();
+    await expect(new WebNewDriver(tag("   ", true)).createModalParentName()).resolves.toBeNull();
+  });
+
+  it("reads the project lock from the chip disabled state", async () => {
+    const chipPage = (present: boolean, disabled: boolean) =>
+      pageOf({
+        getByRole: () =>
+          locator({
+            locator: () =>
+              locator({
+                getByRole: () =>
+                  locator({
+                    count: async () => (present ? 1 : 0),
+                    isDisabled: async () => disabled,
+                  }),
+              }),
+          }),
+      });
+    await expect(new WebNewDriver(chipPage(true, true)).createModalProjectLocked()).resolves.toBe(true);
+    await expect(new WebNewDriver(chipPage(true, false)).createModalProjectLocked()).resolves.toBe(false);
+    await expect(new WebNewDriver(chipPage(false, false)).createModalProjectLocked()).resolves.toBe(false);
+  });
+
+  it("submits the modal with the given name and waits for it to close", async () => {
+    const calls: string[] = [];
+    const field = locator({
+      click: async () => void calls.push("focus"),
+      inputValue: async () => "Child",
+    });
+    const dialog = locator({
+      getByPlaceholder: (text: string) => (text === "Title" ? field : locator()),
+      locator: (selector: string) =>
+        selector === 'button[type="submit"]' ? locator({ click: async () => void calls.push("submit") }) : locator(),
+      waitFor: async (options?: unknown) => void calls.push(`wait:${JSON.stringify(options)}`),
+    });
+    const page = pageOf({
+      getByRole: () => dialog,
+      keyboard: {
+        press: async (key: string) => void calls.push(`press:${key}`),
+        type: async (text: string) => void calls.push(`type:${text}`),
+      },
+    });
+    await new WebNewDriver(page).createModalSubmit("Child");
+    expect(calls).toContain("type:Child");
+    expect(calls).toContain("submit");
+    expect(calls).toContain(`wait:${JSON.stringify({ state: "detached", timeout: 60_000 })}`);
+  });
+
+  it("adds an existing issue through search, pick and submit", async () => {
+    const picked: string[] = [];
+    const dialog = locator({
+      getByLabel: (label: string) =>
+        label === "Search work items"
+          ? locator({ fill: async (value: string) => void picked.push(`search:${value}`) })
+          : locator(),
+      getByRole: (role: string, options?: unknown) => {
+        const want = (options as { name?: string } | undefined)?.name ?? "";
+        if (role === "option") return locator({ click: async () => void picked.push(`pick:${want}`) });
+        if (role === "button" && want === "Add selected work items") {
+          return locator({ click: async () => void picked.push("submit") });
+        }
+        return locator();
+      },
+    });
+    const rows = locator({
+      count: async () => 1,
+      nth: () => locator({ innerText: async () => "ABC-1 Existing child" }),
+    });
+    const page = pageOf({
+      locator: (selector: string) => {
+        if (selector === ACTION) return locator({ click: async () => void picked.push("action") });
+        if (selector === '[data-testid="sub-issues-section"]') {
+          return locator({ locator: () => rows });
+        }
+        return locator();
+      },
+      getByRole: (role: string, options?: unknown) => {
+        if (role === "dialog") return dialog;
+        if (role === "menuitem") {
+          const want = (options as { name?: string } | undefined)?.name ?? "";
+          return locator({ click: async () => void picked.push(want) });
+        }
+        return locator();
+      },
+    });
+    await new WebNewDriver(page).addExistingSubIssue("Existing", "Existing child");
+    expect(picked).toContain("action");
+    expect(picked).toContain("Add existing");
+    expect(picked).toContain("search:Existing");
+    expect(picked).toContain("pick:Existing child");
+    expect(picked).toContain("submit");
+  });
+});
