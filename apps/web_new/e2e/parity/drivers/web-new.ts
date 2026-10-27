@@ -5238,10 +5238,19 @@ export class WebNewDriver implements ParityDriver {
     return todo("issueModalSubmit");
   }
 
-  /** The merged-dates cell trigger in the row naming the issue (list, or the fresh strip above it). */
-  private async rangeMergedCell(issueName: string): Promise<Locator> {
+  /**
+   * The list row naming the issue (list, or the fresh strip above it).
+   * The merged cell sits beside the row anchor, not inside it, so scope
+   * to the ancestor article.
+   */
+  private async rangeMergedRow(issueName: string): Promise<Locator> {
     const anchors = await this.issueRowAnchors(issueName);
-    return anchors.first().getByTestId("row-dates-trigger");
+    return anchors.first().locator("xpath=ancestor::article[1]");
+  }
+
+  /** The merged-dates cell trigger in the row naming the issue. */
+  private async rangeMergedCell(issueName: string): Promise<Locator> {
+    return (await this.rangeMergedRow(issueName)).getByTestId("row-dates-trigger");
   }
 
   async rangeMergedCellText(issueName: string): Promise<string> {
@@ -5259,8 +5268,7 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async rangeMergedCellClear(issueName: string): Promise<void> {
-    const anchors = await this.issueRowAnchors(issueName);
-    const row = anchors.first();
+    const row = await this.rangeMergedRow(issueName);
     await row.getByTestId("row-dates-trigger").hover({ timeout: WebNewDriver.WAIT_MS });
     await row.getByTestId("row-dates-clear").first().click({ timeout: WebNewDriver.WAIT_MS });
   }

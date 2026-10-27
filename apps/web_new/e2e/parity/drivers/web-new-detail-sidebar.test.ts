@@ -690,9 +690,9 @@ describe("DateDropdownDriver", () => {
     expect(calls).toEqual(["trigger-hover", "clear-click"]);
   });
 
-  /** The row anchor naming the issue, with a merged-dates cell. */
+  /** The row anchor naming the issue, whose article holds a merged-dates cell. */
   function datedRow(cell: Locator): Locator {
-    const anchor = node({
+    const article = node({
       getByTestId: (id: string) => {
         if (id === "row-dates-trigger") return cell;
         if (id === "row-dates-clear") {
@@ -705,6 +705,7 @@ describe("DateDropdownDriver", () => {
         return absent();
       },
     });
+    const anchor = node({ locator: () => article });
     return node({ filter: () => node({ first: () => anchor }) });
   }
 
@@ -745,7 +746,7 @@ describe("DateDropdownDriver", () => {
 
   it("clears both ends through the merged cell's clear control", async () => {
     const calls: string[] = [];
-    const anchor = node({
+    const article = node({
       getByTestId: (id: string) => {
         if (id === "row-dates-trigger") {
           return node({
@@ -764,6 +765,7 @@ describe("DateDropdownDriver", () => {
         return absent();
       },
     });
+    const anchor = node({ locator: () => article });
     const page = pageOf({
       role: (role: string) => {
         if (role !== "region") return absent();
