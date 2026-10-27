@@ -59,14 +59,14 @@
 //!   cross-project moves keep the bridge's old `project_id`
 //!   (`views/cycle.py:946-987`).
 //!
-//! Request bodies parse through [`super::json`] (PIDASHCONV-626),
-//! the shared CPython-envelope JSON layer:
+//! Request bodies parse through [`super::json`] (PIDASHCONV-626; serde
+//! since PIDASHCONV-1555), the shared JSON layer behind DRF's envelope:
 //!
-//! * `NaN`/`Infinity`/`-Infinity` in value position are strict-constant
-//!   400s under DRF's `STRICT_JSON` (the default); lone `\uD800-\uDFFF`
-//!   surrogates are accepted and flow through the `JStr` units.
-//! * Nesting parses to the measured 9939-deep cap (past it Django's JSON
-//!   500); `str()` echoes render to 9937-deep (past it the same).
+//! * `NaN`/`Infinity`/`-Infinity` in value position are 400s (serde's
+//!   text, not the strict-constant text); lone `\uD800-\uDFFF`
+//!   surrogates are 400s too (tier 3; accepted before PIDASHCONV-1555).
+//! * Nesting past serde's recursion limit (~128) is a 400 (tier 3; was
+//!   the measured 9939-deep cap with Django's JSON 500 past it).
 //!
 //! Fixture: `FX-CYCMOD-08`
 //! (`rust-api/fixtures/v1_cycles_modules/handlers/cycle.golden.json`).
@@ -2639,16 +2639,18 @@ pub async fn expand_labels(
 // ---------------------------------------------------------------------------
 
 /// Parse the request body into `request.data` through the shared
-/// CPython-envelope layer ([`super::json`]): an empty body is `{}`
-/// (DRF's empty-stream default); malformed JSON is the DRF `ParseError`
-/// with CPython's error text; past the depth cap is Django's JSON 500.
+/// JSON layer ([`super::json`]): an empty body is `{}` (DRF's
+/// empty-stream default); malformed JSON is the DRF `ParseError` with
+/// serde's error text (tier 3 since PIDASHCONV-1555); past serde's depth
+/// limit is a 400, never Django's JSON 500.
 pub fn parse_body_value(raw: &[u8]) -> Result<JVal, Denial> {
     parse_body_value_spans(raw, &[])
 }
 
 /// [`parse_body_value`] over charset-decoded text carrying lone-surrogate
-/// spans (exotic charsets, PIDASHCONV-693): placeholders become `Sur`
-/// units inside the parsed strings.
+/// spans (exotic charsets, PIDASHCONV-693): any non-empty span list is a
+/// 400 (tier 3 since PIDASHCONV-1555; spans were threaded into the
+/// parsed strings before). Spans are always empty since PIDASHCONV-1552.
 pub fn parse_body_value_spans(raw: &[u8], surr: &[(usize, u16)]) -> Result<JVal, Denial> {
     super::json::parse_request_data_spans(raw, surr).map_err(|fail| match fail {
         JsonFail::Message(detail) => {
@@ -2846,10 +2848,11 @@ pub struct CoerceFail {
 }
 
 /// Python `str(value)` for error echoes, over parsed values: the shared
-/// layer's [`super::json::py_str`] (strings verbatim with raw
-/// surrogates, true `repr()` quoting nested, depth-capped); a render past
-/// the depth cap is Django's JSON 500. (Callers divert top-level dirty
-/// echoes to [`Denial::RendererCrash`] before formatting.)
+/// layer's [`super::json::py_str`] (strings verbatim, true `repr()`
+/// quoting nested; values never nest past serde's recursion limit, so
+/// the render cannot fail). The [`Denial::RendererCrash`] arm is dead
+/// (tier 3 since PIDASHCONV-1555: lone surrogates are a 400 at parse,
+/// so no dirty echo reaches the renderer).
 pub fn py_repr(value: &JVal) -> Result<JStr, Denial> {
     super::json::py_str(value).map_err(|_| Denial::ServerError)
 }

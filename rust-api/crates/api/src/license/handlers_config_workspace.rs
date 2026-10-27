@@ -460,9 +460,10 @@ fn py_repr_str(s: &str) -> String {
 /// The base match lowercases like Django's `parse_header_parameters`, so
 /// `Application/JSON`, charset params, and the `*/*`, `application/*`,
 /// and `*/json` wildcards all serve. JSON bodies parse through the shared
-/// CPython layer (`json`, PIDASHCONV-1128), so malformed JSON,
-/// strict constants, int-limit and codec errors carry CPython's exact
-/// text; past the depth cap is Django's JSON 500.
+/// JSON layer (`json`, PIDASHCONV-1128), so malformed JSON is a 400 with
+/// serde's text (tier 3 since PIDASHCONV-1555; the strict-constant,
+/// int-limit and depth-cap texts are gone); codec errors keep CPython's
+/// text; depth failures are 400s, never Django's JSON 500.
 fn decode_json_body(
     headers: &HeaderMap,
     body: &[u8],

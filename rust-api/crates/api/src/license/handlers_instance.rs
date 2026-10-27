@@ -1072,9 +1072,10 @@ async fn fetch_instance_by_id(
 /// content-type selects the parser in `select_parser` order (JSON, form,
 /// multipart — `form_body::select_body_kind`). JSON and multipart framing
 /// errors → 400 `detail`; unmatched types → 415. JSON bodies parse through
-/// the shared CPython layer (`json`, PIDASHCONV-1128), so malformed
-/// JSON, strict constants, int-limit and codec errors carry CPython's exact
-/// text; past the depth cap is Django's JSON 500.
+/// the shared JSON layer (`json`, PIDASHCONV-1128), so malformed JSON is
+/// a 400 with serde's text (tier 3 since PIDASHCONV-1555; the
+/// strict-constant, int-limit and depth-cap texts are gone); codec errors
+/// keep CPython's text; depth failures are 400s, never Django's JSON 500.
 fn patch_body(
     headers: &HeaderMap,
     body: &[u8],

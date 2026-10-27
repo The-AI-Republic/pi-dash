@@ -47,8 +47,8 @@
 //! `::queries` (PIDASHCONV-568), emits + `handle_exception` in `::tasks`
 //! (PIDASHCONV-570), tables + defaults in `pidash_db::app_project::models`
 //! (PIDASHCONV-567). Bodies negotiate through the shared D-20
-//! `v1_cycles_modules::body` kernel with CPython-faithful JSON errors from
-//! `v1_cycles_modules::json`. Asset URLs reuse
+//! `v1_cycles_modules::body` kernel with serde-text JSON errors from
+//! `v1_cycles_modules::json` (tier 3 since PIDASHCONV-1555). Asset URLs reuse
 //! `v1_projects::handlers_members` (same `FileAsset.asset_url` property —
 //! reuse, never fork); `ProjectUserProperty` filter defaults reuse
 //! `pidash_db::app_issues::models_core` (D-26 owns them).

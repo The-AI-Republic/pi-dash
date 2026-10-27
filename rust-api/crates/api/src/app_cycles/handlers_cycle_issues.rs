@@ -154,9 +154,9 @@ const CYCLE_WRITE_BODY_SPEC: shared_body::BodySpec = shared_body::BodySpec {
 /// - The content type selects JSON / form / multipart in
 ///   `select_parser` order; an unsupported or missing content type is the
 ///   415 `{"detail": "Unsupported media type ..."}`.
-/// - JSON text decodes through the CPython-error layer
-///   (`json`), so a syntax error carries CPython's exact
-///   `{"detail": "JSON parse error - ..."}` text.
+/// - JSON text decodes through the shared layer (`json`), so a syntax
+///   error carries serde's text in the `{"detail": "JSON parse error - ..."}`
+///   envelope (tier 3 since PIDASHCONV-1555).
 /// - Form and multipart bodies become the `request.data` scalar map.
 /// - A non-object JSON body has no `.get` in the view (`AttributeError` →
 ///   the generic 500).

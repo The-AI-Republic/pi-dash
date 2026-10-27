@@ -22,10 +22,11 @@
 //!   sqlx's 16-tuple `FromRow`); rendering goes through the merged
 //!   [`shapes`](pidash_services::runner_enroll::serializers::shapes) kernels,
 //!   so key order and omission rules are never re-derived here.
-//! * Request bodies parse through the shared CPython-envelope layer
+//! * Request bodies parse through the shared JSON layer
 //!   ([`crate::v1_cycles_modules::json`]); unparseable JSON is
-//!   DRF's `ParseError` (`{"detail": "JSON parse error - …"}`), past the
-//!   depth cap is Django's JSON 500. Non-JSON content types proxy to
+//!   DRF's `ParseError` (`{"detail": "JSON parse error - …"}`, serde's
+//!   text since PIDASHCONV-1555); depth failures are 400s, never
+//!   Django's JSON 500. Non-JSON content types proxy to
 //!   Django (the `app_scheduler` `read_request_data` precedent — form
 //!   posts stay on the Python plane).
 //! * `now()` values are truncated to microseconds before bind+render:
