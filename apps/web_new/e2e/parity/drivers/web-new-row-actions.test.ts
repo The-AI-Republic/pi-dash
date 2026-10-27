@@ -97,6 +97,7 @@ interface PageRoutes {
   locator?: (selector: string) => Locator;
   testId?: (id: string) => Locator;
   role?: (role: string, options?: unknown) => Locator;
+  tick?: () => void;
   placeholder?: (text: string) => Locator;
   keyboardPress?: (key: string) => Promise<void>;
   evaluate?: (fn: (...args: never[]) => unknown) => Promise<unknown>;
@@ -164,6 +165,9 @@ function pageOf(routes: PageRoutes = {}): PageStub {
     waitForURL: async (fn: (url: URL) => boolean, options?: unknown) => {
       state.urlPredicates.push(fn);
       await routes.waitForURL?.(fn, options);
+    },
+    waitForTimeout: async () => {
+      routes.tick?.();
     },
     reload: async () => null,
   } as unknown as Page;
@@ -592,6 +596,70 @@ describe("web_new header and page menus", () => {
     });
     await new WebNewDriver(plain.page).layoutsListPageMenuChoose("Open in new tab");
     expect(plain.grants).toEqual([]);
+  });
+
+  it("reads the whole-list menu off the view-menu trigger", async () => {
+    const stub = pageOf({
+      testId: (id: string) => (id === "workspace-view-menu-trigger" ? node() : node({ count: async () => 0 })),
+      ...menuRoutes([{ label: "Open in new tab" }, { label: "Copy link" }]),
+    });
+    await expect(new WebNewDriver(stub.page).layoutsListPageMenuItems()).resolves.toEqual([
+      "Open in new tab",
+      "Copy link",
+    ]);
+    expect(stub.testIds).toContain("workspace-view-menu-trigger");
+    expect(stub.keys).toEqual(["Escape"]);
+  });
+
+  it("chooses the whole-list menu off the view-menu trigger", async () => {
+    const clicks: string[] = [];
+    const stub = pageOf({
+      testId: (id: string) =>
+        id === "workspace-view-menu-trigger"
+          ? node({ click: async () => void clicks.push("trigger") })
+          : node({ count: async () => 0 }),
+      role: () =>
+        collection(
+          ["Open in new tab", "Copy link"].map((label) =>
+            node({
+              innerText: async () => label,
+              locator: () => node({ count: async () => 0 }),
+              click: async () => void clicks.push(label),
+            })
+          )
+        ),
+    });
+    await new WebNewDriver(stub.page).layoutsListPageMenuChoose("Copy link");
+    expect(clicks).toEqual(["trigger", "Copy link"]);
+    expect(stub.grants).toEqual([["clipboard-read", "clipboard-write"]]);
+  });
+
+  it("prefers the quick actions when both triggers render", async () => {
+    const clicks: string[] = [];
+    const stub = pageOf({
+      testId: (id: string) => node({ click: async () => void clicks.push(id) }),
+      ...menuRoutes([{ label: "Open in new tab" }, { label: "Copy link" }]),
+    });
+    await new WebNewDriver(stub.page).layoutsListPageMenuItems();
+    expect(clicks).toEqual(["list-page-actions"]);
+  });
+
+  it("throws when no whole-list trigger renders", async () => {
+    let now = 1_000;
+    const spy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    try {
+      const stub = pageOf({
+        testId: () => node({ count: async () => 0 }),
+        tick: () => {
+          now += 60_000;
+        },
+      });
+      await expect(new WebNewDriver(stub.page).layoutsListPageMenuItems()).rejects.toThrow(
+        "[parity] whole-list menu trigger never rendered."
+      );
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   /** A group header whose plus is a menu trigger (span) or a direct div. */

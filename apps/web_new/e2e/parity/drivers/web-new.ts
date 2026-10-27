@@ -9343,8 +9343,25 @@ export class WebNewDriver implements ParityDriver {
     return this.isShown(panel.getByRole("button", { name: "Copy work item link" }));
   }
 
+  /**
+   * The whole-list ellipsis trigger on either host: view pages hang it
+   * off the view menu, every other list surface off the list-page quick
+   * actions. Both open the same Open/Copy pair.
+   */
+  private async layoutsListPageMenuTrigger(): Promise<Locator> {
+    const quick = this.page.getByTestId("list-page-actions");
+    const view = this.page.getByTestId("workspace-view-menu-trigger");
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    for (;;) {
+      if ((await quick.count()) > 0) return quick;
+      if ((await view.count()) > 0) return view;
+      if (Date.now() >= deadline) throw new Error("[parity] whole-list menu trigger never rendered.");
+      await this.page.waitForTimeout(500);
+    }
+  }
+
   async layoutsListPageMenuItems(): Promise<string[]> {
-    await this.page.getByTestId("list-page-actions").click({ timeout: WebNewDriver.WAIT_MS });
+    await (await this.layoutsListPageMenuTrigger()).click({ timeout: WebNewDriver.WAIT_MS });
     await this.page.getByRole("menuitem").first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
     try {
       return await this.layoutsReadOpenMenuItems();
@@ -9696,7 +9713,7 @@ export class WebNewDriver implements ParityDriver {
 
   async layoutsListPageMenuChoose(item: string): Promise<void> {
     if (item === "Copy link") await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
-    await this.page.getByTestId("list-page-actions").click({ timeout: WebNewDriver.WAIT_MS });
+    await (await this.layoutsListPageMenuTrigger()).click({ timeout: WebNewDriver.WAIT_MS });
     await this.page.getByRole("menuitem").first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
     await (await this.layoutsOpenMenuItem(item)).click({ timeout: WebNewDriver.WAIT_MS });
   }
