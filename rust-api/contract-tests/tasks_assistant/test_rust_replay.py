@@ -22,7 +22,9 @@ config, unreachable endpoint, resolved BYOK), the instructions + the 17
 local tool schemas on the wire (toolset), the streamed text, usage
 extraction, the terminal writes and the delta prune, the cancel key, and a
 mid-stream seam fault failing the turn at once (PIDASHCONV-1254, via a
-turn-scoped trigger on the delta writes).
+turn-scoped trigger on the delta writes), and a toolset-resolution failure
+running the turn without tools (PIDASHCONV-1570, via a brief rename of the
+``assistant_mcp_server`` table).
 BYOK ciphertext is Fernet under ``ASSISTANT_ENCRYPTION_KEY`` — the same
 backend the Rust handlers decrypt with (``assistant/crypto.py``
 ``FernetBackend``), so the seeded row is what the worker reads.
@@ -37,6 +39,7 @@ import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from psycopg import errors as pg_errors
 from psycopg.rows import dict_row
 
 from _harness import redis as redis_helper
@@ -959,6 +962,171 @@ def test_midstream_seam_failure_fails_turn_at_once(db_conn):
         if fn is not None:
             _remove_delta_fault(db_conn, fn, trg)
         stub.stop()
+
+
+# --------------------------------------------------------------------------- #
+# Toolset-resolution failure: the turn runs without tools (PIDASHCONV-1570)
+# --------------------------------------------------------------------------- #
+
+#: The pseudo-entry the driver emits when toolset resolution blows up
+#: entirely (``run_turn.rs::resolve_toolsets_outcome``): the total-outage
+#: case must not also be the silent one (mirrors
+#: ``assistant/test_turn_errors.py``; modules stay independent).
+TOOLSETS_UNAVAILABLE = {"name": "all tool servers", "reason": "toolsets_unavailable"}
+
+MCP_TABLE = "assistant_mcp_server"
+
+
+def _seed_mcp_server(db_conn, user_id) -> str:
+    """One enabled MCP server (dead-port URL) for the fault user.
+
+    The fault fails the lookup before any row is read, so the server is
+    never contacted; if the fault ever stops triggering, the turn would run
+    *with* a broken server instead — observably different (no pseudo-entry),
+    so the test fails rather than passing silently.
+    """
+    server_id = str(uuid.uuid4())
+    now = _now_iso()
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO assistant_mcp_server "
+            "(id, user_id, name, url, auth_header_encrypted, is_enabled, "
+            "created_at, updated_at) "
+            "VALUES (%s, %s, %s, %s, NULL, TRUE, %s, %s)",
+            (server_id, str(user_id), "fault-replay", "http://127.0.0.1:9/mcp", now, now),
+        )
+    db_conn.commit()
+    return server_id
+
+
+def _install_mcp_lookup_fault(db_conn, tag: str) -> str:
+    """Fail every ``assistant_mcp_server`` lookup by renaming the table away.
+
+    Postgres has no SELECT trigger, so the black-box shape of "the MCP
+    lookup blew up" is a brief rename: the per-turn query
+    (``MCP_SERVERS_SQL``) fails with undefined-table while the name is
+    gone. The rename is global but the window is one turn (installed after
+    seeding, published, waited on, renamed back in ``finally``); the replay
+    suite runs sequentially, so no other turn is in flight. The shadow name
+    carries the unique tag so a stale leftover from a crashed run cannot
+    collide; if the live name is already missing the install fails loudly
+    instead of piling on. Both interpolated values are generated hex, never
+    user input. Returns the shadow table name for removal.
+    """
+    shadow = f"{MCP_TABLE}_fault_{tag}"
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT to_regclass(%s)", (f"public.{MCP_TABLE}",))
+        assert cur.fetchone()[0] is not None, (
+            "assistant_mcp_server is already renamed away: a previous fault "
+            "run crashed without cleanup"
+        )
+        cur.execute(f"ALTER TABLE {MCP_TABLE} RENAME TO {shadow}")
+    db_conn.commit()
+    # Self-check: the lookup the worker runs must fail now.
+    with db_conn.cursor() as cur:
+        try:
+            cur.execute(f"SELECT id FROM {MCP_TABLE} LIMIT 1")
+        except pg_errors.UndefinedTable:
+            pass
+        else:
+            raise AssertionError("MCP lookup fault did not trigger")
+    return shadow
+
+
+def _remove_mcp_lookup_fault(db_conn, shadow: str):
+    with db_conn.cursor() as cur:
+        cur.execute(f"ALTER TABLE {shadow} RENAME TO {MCP_TABLE}")
+        cur.execute(f"SELECT count(*) FROM {MCP_TABLE}")
+    db_conn.commit()
+
+
+def test_toolsets_unavailable_runs_turn_without_tools(db_conn):
+    """MCP lookup failure costs the turn its tools, not its life.
+
+    The driver degrades a ``resolve_toolsets`` error to the all-tool-servers
+    pseudo-entry and the run proceeds with no MCP legs: the skipped event is
+    followed by ``turn_completed``, and the provider wire carries exactly
+    the 17 local tool schemas. Before the PIDASHCONV-1570 fix the live seam
+    returned before installing ``tools``, so ``open_stream`` failed the turn
+    with ``internal`` / "assistant turn: toolsets were not resolved".
+    """
+    stub = _StubProvider(chunks=("Hello",))
+    base = stub.start()
+    tag = uuid.uuid4().hex[:8]
+    shadow = None
+    try:
+        user, workspace = _seed_member(db_conn, f"tools{tag}")
+        _configure_llm(db_conn, user["id"], base)
+        thread_id, turn_id, _msg = _seed_turn_trio(db_conn, user, workspace)
+        _seed_mcp_server(db_conn, user["id"])
+        shadow = _install_mcp_lookup_fault(db_conn, tag)
+
+        celery_id = _publish(turn_id)
+        row = wait_for(
+            lambda: _turn_row(db_conn, turn_id)
+            if _turn_row(db_conn, turn_id)["status"] in ("completed", "failed")
+            else None,
+            what="toolsets-unavailable turn settled",
+        )
+        rust_queue.wait_for_settled(celery_id, what="toolsets-unavailable turn settled")
+        assert row["status"] == "completed", (
+            f"turn failed: {row['error_code']}: {row['error_detail']}"
+        )
+        assert row["model_used"] == "openai_compatible:oracle-stub"
+        assert isinstance(row["model_messages"], list) and row["model_messages"], (
+            "completed content is stored for replay"
+        )
+        assert set(row["usage"]) >= {
+            "input_tokens",
+            "output_tokens",
+            "total_tokens",
+            "requests",
+            "tool_calls",
+        }
+        assert _thread_row(db_conn, thread_id)["active_turn_id"] is None
+
+        with db_conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT display_content, status FROM assistant_message "
+                "WHERE turn_id = %s AND kind = 'assistant' ORDER BY seq",
+                (turn_id,),
+            )
+            assistant_rows = cur.fetchall()
+        assert assistant_rows, "the stream wrote at least one assistant row"
+        assert "".join(r["display_content"] for r in assistant_rows) == "Hello"
+        assert all(r["status"] == "completed" for r in assistant_rows)
+
+        events = _turn_events(db_conn, turn_id)
+        kinds = [e["kind"] for e in events]
+        assert "turn_started" in kinds
+        assert "message_created" in kinds
+        assert "message_completed" in kinds
+        assert "turn_completed" in kinds
+        assert "turn_failed" not in kinds
+        assert "assistant_delta" not in kinds, "deltas are pruned on completion"
+        completed = next(e for e in events if e["kind"] == "turn_completed")
+        assert completed["payload"]["usage"] == row["usage"]
+
+        skipped = [e for e in events if e["kind"] == "tool_servers_skipped"]
+        assert len(skipped) == 1, f"one skipped event, got {kinds!r}"
+        assert skipped[0]["payload"] == {"servers": [TOOLSETS_UNAVAILABLE]}
+        assert kinds.index("tool_servers_skipped") < kinds.index("turn_completed"), (
+            "the skipped event precedes turn_completed"
+        )
+
+        # No MCP legs, built-ins kept: the wire carries exactly the 17
+        # local tool schemas.
+        assert stub.requests, "the provider was called"
+        tools = stub.requests[0]["body"]["tools"]
+        names = [t["function"]["name"] for t in tools]
+        assert len(names) == 17, f"the 17 local tools, got {names!r}"
+        assert names[0] == "create_comment"  # registration order
+    finally:
+        if shadow is not None:
+            _remove_mcp_lookup_fault(db_conn, shadow)
+        stub.stop()
+
+
 # create_issue post-save orchestration (PIDASHCONV-1251)
 # --------------------------------------------------------------------------- #
 
