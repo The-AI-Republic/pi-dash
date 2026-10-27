@@ -212,6 +212,28 @@ describe("labelRecoveryInput", () => {
     const entity = { scope: "workspace" } as const;
     expect(labelRecoveryForBoard({ ...input({ groupBy: "labels" }), entity })).toBeUndefined();
     expect(labelRecoveryForBoard(input({ groupBy: "labels" }))).toBeDefined();
+    expect(labelRecoveryForBoard(input({ groupBy: "state", subGroupBy: "labels" }))).toBeDefined();
+    expect(labelRecoveryForBoard(input({ groupBy: "state" }))).toBeUndefined();
+  });
+
+  it("enables the labels main axis on cycle and module boards", () => {
+    for (const entity of [
+      { scope: "cycle", projectId: PROJECT, cycleId: CYCLE },
+      { scope: "module", projectId: PROJECT, moduleId: MODULE },
+    ] as const) {
+      const read = labelRecoveryForBoard(input({ entity, groupBy: "labels" }));
+      expect(read?.groupBy).toBeNull();
+      expect(read?.entity).toEqual(entity);
+    }
+  });
+
+  it("keeps the labels sub-group project-only on cycle and module boards", () => {
+    for (const entity of [
+      { scope: "cycle", projectId: PROJECT, cycleId: CYCLE },
+      { scope: "module", projectId: PROJECT, moduleId: MODULE },
+    ] as const) {
+      expect(labelRecoveryForBoard(input({ entity, groupBy: "state", subGroupBy: "labels" }))).toBeUndefined();
+    }
   });
 
   it("keeps the main axis and drops the lanes for a labels sub-group", () => {
