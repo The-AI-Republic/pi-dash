@@ -11938,7 +11938,18 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async ganttBarExists(issueName: string): Promise<boolean> {
-    const issueId = await this.ganttIssueIdByName(issueName);
+    let issueId: string;
+    try {
+      issueId = await this.ganttIssueIdByName(issueName);
+    } catch (error) {
+      // A quick-added row renders after its create lands; polls must
+      // read "not yet" rather than abort on the transient lookup miss
+      // (expect.poll does not retry a throwing predicate, ISS-055).
+      // Anything else — a malformed row id, a detached page — still
+      // throws.
+      if (error instanceof Error && error.message.includes("no timeline row titled")) return false;
+      throw error;
+    }
     const bar = this.page.locator(`#gantt-block-${issueId}`).first();
     if ((await bar.count()) === 0) return false;
     const box = await bar.boundingBox();
@@ -12169,7 +12180,12 @@ export class WebNewDriver implements ParityDriver {
       await this.page.reload();
       const deadline = Date.now() + 120_000;
       for (;;) {
-        const loader = this.page.locator("div.animate-pulse").first();
+        // The new app's reload loader is the route pending skeleton
+        // (the kit shimmer spans carry no animate-pulse div, and the
+        // sidebar's own pulse is the unconfirmed-row overlay, ISS-059).
+        const loader = this.page
+          .locator('[data-testid="issues-skeleton-list"], [data-testid="issues-skeleton-gantt"]')
+          .first();
         if ((await loader.count()) > 0 && (await loader.isVisible().catch(() => false))) return true;
         if (Date.now() > deadline) return false;
         await this.page.waitForTimeout(250);

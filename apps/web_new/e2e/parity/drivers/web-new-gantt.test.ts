@@ -919,7 +919,7 @@ describe("gantt load delays", () => {
       reload: async () => undefined,
       waitForTimeout: async (ms: number) => clock.advance(ms),
       locator: (selector: string) =>
-        selector === "div.animate-pulse"
+        selector === '[data-testid="issues-skeleton-list"], [data-testid="issues-skeleton-gantt"]'
           ? locator({
               count: async () => (loaderSeen() ? 1 : 0),
               first: () => locator({ isVisible: async () => loaderSeen() }),
@@ -1153,6 +1153,16 @@ describe("gantt driver reads behind absent markers", () => {
           : locator({ first: () => locator({ count: async () => 0 }) }),
     });
     await expect(new WebNewDriver(page).ganttBarExists("First")).resolves.toBe(false);
+  });
+
+  it("reads a not-yet-rendered row as no bar instead of throwing", async () => {
+    // The quick-add create lands asynchronously; the poll inside
+    // ganttQuickAdd must survive the transient lookup miss (ISS-055).
+    const page = pageOf({
+      locator: (selector: string) =>
+        selector.includes('a[id^="issue-"]') ? locator({ count: async () => 0 }) : locator(),
+    });
+    await expect(new WebNewDriver(page).ganttBarExists("Fresh")).resolves.toBe(false);
   });
 
   it("falls back to a missing week label when the width query cannot parse the span", async () => {
