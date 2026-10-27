@@ -602,19 +602,31 @@ function noneColumn(columns: readonly BoardColumn[], total: number): BoardColumn
  * fallback's unlabeled count for the drawn lanes is the column count, so
  * every header equals the issues behind it. A lane the board does not
  * draw stays out, and a ghost that no drawn lane can hold leaves the
- * board untouched rather than adding a column with no cards.
+ * board untouched rather than adding a column with no cards. Only a
+ * settled lane recovers: while a drawn lane still holds part of its None
+ * window, a row it does not show may simply be unpaged, so that lane
+ * keeps its own cards and count and column paging stays in charge
+ * (NEWFRONT-961 review). The fallback read walks every page, so it is
+ * always complete and needs no such guard.
  */
 function recoverLabelColumnGhosts(board: BoardData, fallback: BoardData): BoardData {
   const fallbackLane = fallback.lanes[0];
   if (fallbackLane === undefined) return board;
   const present = renderedIds(board, "None");
   const flat = fallback.columns.length === 1 && fallback.columns[0]?.key === "all";
-  const drawn = new Set(board.lanes.map((lane) => lane.key));
+  const lanesByKey = new Map(board.lanes.map((lane) => [lane.key, lane]));
   const missingByLane = new Map<string, IssueListItem[]>();
   const unlabeledByLane = new Map<string, number>();
   for (const [key, cell] of Object.entries(fallbackLane.cells)) {
     const laneKey = flat ? "" : key;
-    if (!drawn.has(laneKey)) continue;
+    const boardLane = lanesByKey.get(laneKey);
+    if (boardLane === undefined) continue;
+    // A row missing from a lane that still holds only part of its None
+    // window may simply not be paged in yet, so that lane waits: its
+    // cards and counts keep the column paging in charge rather than
+    // folding the unpaged remainder in early.
+    const boardCell = boardLane.cells["None"];
+    if (boardCell !== undefined && boardCell.rows.length < boardCell.total) continue;
     const unlabeled = cell.rows.filter((row) => row.label_ids.length === 0);
     if (unlabeled.length === 0) continue;
     unlabeledByLane.set(laneKey, unlabeled.length);

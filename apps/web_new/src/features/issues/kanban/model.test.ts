@@ -761,6 +761,47 @@ describe("label ghost reconciliation on the main axis (ISS-028/NEWFRONT-961)", (
     expect(reconcileLabelGhosts(board, fallback, "main")).toBe(board);
   });
 
+  it("leaves a ghost-free labels board with a paged None column untouched", () => {
+    const kept = row({ id: "kept", label_ids: [LABEL] });
+    const plain = row({ id: "plain", label_ids: [] });
+    // The None column holds two of its forty rows: the rest are simply not
+    // paged in yet, and its own paging must keep the column.
+    const board = labelsBoard({
+      [LABEL]: { rows: [kept], total: 1 },
+      None: { rows: [plain], total: 40 },
+    });
+    const fallback = flatBoard({ ...flatEnvelope, results: [kept, plain], total_count: 2 });
+    expect(reconcileLabelGhosts(board, fallback, "main")).toBe(board);
+  });
+
+  it("waits for the None window to close before recovering a ghost", () => {
+    const kept = row({ id: "kept", label_ids: [LABEL] });
+    const plain = row({ id: "plain", label_ids: [] });
+    const ghost = row({ id: "ghost", label_ids: [] });
+    // Two unlabeled rows declared but one drawn: the missing row may still
+    // be on the next page, so nothing is recovered yet.
+    const partial = labelsBoard({ None: { rows: [plain], total: 2 } });
+    const fallback = flatBoard({ ...flatEnvelope, results: [kept, plain, ghost], total_count: 3 });
+    expect(reconcileLabelGhosts(partial, fallback, "main")).toBe(partial);
+    // Once the column holds its whole window the omission is a ghost.
+    const settled = labelsBoard({
+      [LABEL]: { rows: [kept], total: 1 },
+      None: { rows: [plain, ghost], total: 2 },
+    });
+    const otherGhost = row({ id: "other-ghost", label_ids: [] });
+    const wider = flatBoard({
+      ...flatEnvelope,
+      results: [kept, plain, ghost, otherGhost],
+      total_count: 4,
+    });
+    const result = reconcileLabelGhosts(settled, wider, "main");
+    expect(result.columns.map((column) => [column.key, column.total])).toEqual([
+      [LABEL, 1],
+      ["None", 3],
+    ]);
+    expect(result.lanes[0]?.cells["None"]?.rows.map((entry) => entry.id)).toEqual(["plain", "ghost", "other-ghost"]);
+  });
+
   it("places a ghost under the lane the fallback read put it in", () => {
     const laneA = "623e4567-e89b-12d3-a456-426614174005";
     const laneB = "723e4567-e89b-12d3-a456-426614174006";
