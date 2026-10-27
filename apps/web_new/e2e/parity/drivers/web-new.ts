@@ -7851,9 +7851,10 @@ export class WebNewDriver implements ParityDriver {
 
   async layoutsActiveLayout(): Promise<LayoutsLayoutKey> {
     // The profile tab names the live layout on its switcher trigger;
-    // project surfaces mark the active segmented choice instead (its
-    // DOM reads the same below the lg breakpoint, where the mobile
-    // menu takes over visibly). Either hook wins its race.
+    // project surfaces mark the active segmented choice instead. The
+    // segmented read is visibility-blind on purpose: below lg the group
+    // hides while the mobile menu takes over visibly, but its data
+    // marks still name the same active layout. Either hook wins its race.
     const deadline = Date.now() + WebNewDriver.WAIT_MS;
     for (;;) {
       const trigger = this.page
@@ -7866,7 +7867,7 @@ export class WebNewDriver implements ParityDriver {
         if (key === undefined) throw new Error(`[parity] unrecognised layout trigger label "${label}".`);
         return key;
       }
-      const active = this.layoutsSegmentedSwitcher().locator('[data-layout][data-active="true"]');
+      const active = this.page.getByTestId("layout-switcher-segmented").locator('[data-layout][data-active="true"]');
       if ((await active.count()) > 0) {
         return WebNewDriver.layoutsLayoutKey((await active.first().getAttribute("data-layout")) ?? "");
       }
@@ -8988,7 +8989,7 @@ export class WebNewDriver implements ParityDriver {
       });
     const option = this.page.getByRole("button", { name, exact: true }).first();
     await option.waitFor({ state: "visible", timeout: 15_000 });
-    await option.click();
+    await option.click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async layoutsCalSetMode(mode: "month" | "week"): Promise<void> {
@@ -9186,7 +9187,9 @@ export class WebNewDriver implements ParityDriver {
 
   async layoutsCalTapDay(dayNumber: number): Promise<void> {
     const tile = await this.layoutsCalTile(dayNumber);
-    await tile.locator('div[role="button"]').first().click();
+    // Bounded: an untimed click hangs to the test timeout when the tile
+    // never settles instead of failing the step in seconds.
+    await tile.locator('div[role="button"]').first().click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async layoutsCalDayDetailNames(): Promise<string[]> {

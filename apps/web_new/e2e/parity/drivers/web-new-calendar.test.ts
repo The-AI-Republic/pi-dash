@@ -292,3 +292,46 @@ describe("calendar peek", () => {
     expect(url).not.toContain("peekIssueId");
   });
 });
+
+describe("calendar tap and mode clicks stay bounded", () => {
+  it("taps a day with a bounded click", async () => {
+    const timeouts: unknown[] = [];
+    const tap = tile(15, {
+      locator: (selector: string) =>
+        selector === 'div[role="button"]'
+          ? locator({
+              click: async (options?: unknown) =>
+                void timeouts.push((options as { timeout?: unknown } | undefined)?.timeout),
+            })
+          : locator(),
+    });
+    await new WebNewDriver(calendarPage([tap])).layoutsCalTapDay(15);
+    expect(timeouts).toHaveLength(1);
+    expect(typeof timeouts[0]).toBe("number");
+    expect(Number.isFinite(timeouts[0] as number)).toBe(true);
+  });
+
+  it("picks the mode option with a bounded click", async () => {
+    const timeouts: unknown[] = [];
+    const tiles = [tile(1), tile(2), tile(3), tile(4), tile(5)];
+    const root = locator({
+      locator: (selector: string) =>
+        selector === "[data-calendar-day]"
+          ? locator({ count: async () => tiles.length, nth: (index) => tiles[index] ?? locator() })
+          : locator(),
+      getByRole: () => locator(),
+    });
+    const page = pageOf({
+      testId: (id) => (id === "issues-calendar" ? root : locator()),
+      role: (role: string, options?: unknown) =>
+        role === "button" && (options as { name?: unknown } | undefined)?.name === "Week layout"
+          ? locator({
+              click: async (clicked?: unknown) =>
+                void timeouts.push((clicked as { timeout?: unknown } | undefined)?.timeout),
+            })
+          : locator(),
+    });
+    await new WebNewDriver(page).layoutsCalSetMode("week");
+    expect(timeouts).toEqual([expect.any(Number)]);
+  });
+});

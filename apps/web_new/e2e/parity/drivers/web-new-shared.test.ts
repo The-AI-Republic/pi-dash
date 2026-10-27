@@ -126,6 +126,25 @@ describe("web_new shared layout surfaces", () => {
     await expect(new WebNewDriver(page).layoutsActiveLayout()).resolves.toEqual("calendar");
   });
 
+  it("reads the marked choice even when the segmented group hides", async () => {
+    // Below lg the group hides while the mobile menu takes over; the
+    // data marks still name the active layout, so the read must not
+    // gate on visibility.
+    const page = pageOf({
+      testId: (id: string) =>
+        id === "layout-switcher-segmented"
+          ? node({
+              filter: () => node({ count: async () => 0 }),
+              locator: (selector: string) =>
+                selector === '[data-layout][data-active="true"]'
+                  ? node({ getAttribute: async () => "calendar" })
+                  : node({ count: async () => 0 }),
+            })
+          : node({ count: async () => 0 }),
+    });
+    await expect(new WebNewDriver(page).layoutsActiveLayout()).resolves.toEqual("calendar");
+  });
+
   it("falls back to the profile trigger without a segmented switcher", async () => {
     const page = pageOf({
       role: (role: string) =>
