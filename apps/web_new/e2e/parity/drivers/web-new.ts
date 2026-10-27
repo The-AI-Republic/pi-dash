@@ -31685,7 +31685,13 @@ export class WebNewDriver implements ParityDriver {
     await this.page.mouse.down();
     await this.page.mouse.move(box.x + Math.max(2, box.width - 1), middle, { steps: 8 });
     await this.page.mouse.up();
-    await this.pagesBlocksBubble().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    // The bubble hook is a zero-size positioning shell (its surface is
+    // absolutely positioned), so visibility waits target the Link control
+    // it carries rather than the shell itself (PAGE-043).
+    await this.pagesBlocksBubble()
+      .getByRole("button", { name: "Link", exact: true })
+      .first()
+      .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
 
   async pagesBlocksLinkBubbleVisible(): Promise<boolean> {
