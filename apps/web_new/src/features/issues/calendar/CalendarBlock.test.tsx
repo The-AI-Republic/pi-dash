@@ -2,7 +2,7 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { IssueListItem } from "@pidash/api-client";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -161,6 +161,33 @@ describe("CalendarBlock", () => {
     fireEvent.click(screen.getByRole("button", { name: "Quick actions" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
     expect(handlers.onDelete).toHaveBeenCalledOnce();
+  });
+
+  it("opens the actions menu from the trigger without following the peek link", () => {
+    const handlers = renderBlock();
+    // The parity driver clicks the inner affordance, not the button itself.
+    const target = screen
+      .getByRole("button", { name: "Quick actions" })
+      .querySelector("div.cursor-pointer") as HTMLElement;
+    // A canceled click returns false: the peek-link navigation must not run.
+    expect(fireEvent.click(target)).toBe(false);
+    expect(handlers.onOpen).not.toHaveBeenCalled();
+    expect(screen.getByRole("menuitem", { name: "Edit" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "Delete" })).toBeInTheDocument();
+  });
+
+  it("dismisses the actions menu on Escape and still opens peek afterwards", async () => {
+    // Mouse opens via fireEvent (kit Menu.test.tsx: user-event's instant
+    // pointer sequence trips Base UI's 200ms mouseup guard under jsdom);
+    // Escape follows the keyboard path like the kit's own dismissal test.
+    const handlers = renderBlock();
+    const user = userEvent.setup();
+    fireEvent.click(screen.getByRole("button", { name: "Quick actions" }));
+    expect(screen.getByRole("menuitem", { name: "Edit" })).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("menuitem", { name: "Edit" })).not.toBeInTheDocument());
+    fireEvent.click(screen.getByRole("link", { name: "WEB-42" }));
+    expect(handlers.onOpen).toHaveBeenCalledOnce();
   });
 
   it("renders a temp block as an inert pulsing row", async () => {

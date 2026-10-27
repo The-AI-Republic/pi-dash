@@ -241,7 +241,14 @@ export function CalendarBlock({
       {quickActions && !temp ? (
         <div
           className="shrink-0"
-          onClick={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            // The trigger nests inside the peek-link anchor: stopping
+            // propagation keeps peek shut, but only preventDefault cancels
+            // the link itself, which a real browser would otherwise follow
+            // and unload the just-opened menu with the page.
+            event.preventDefault();
+            event.stopPropagation();
+          }}
           onPointerDown={(event) => event.stopPropagation()}
           onPointerMove={(event) => event.stopPropagation()}
         >
