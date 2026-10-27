@@ -96,6 +96,22 @@ describe("boardDropAtPoint", () => {
     });
   });
 
+  it("lets the zone win when the hit falls through to a cell beneath it", () => {
+    const zone = node({}, rect(0, 40));
+    const cell = node({ "data-column-key": COLUMN, "data-lane-key": LANE }, rect(0, 400));
+    // The zone is pointer-events-none, so elementFromPoint returns the
+    // board element beneath it; the hit climbs to a cell, not the zone.
+    const hit = node({}, rect(0, 400), { [KANBAN_CELL_SELECTOR]: cell });
+    const elements = { [KANBAN_DELETE_ZONE_SELECTOR]: [zone] };
+    expect(boardDropAtPoint(docOf(elements, hit), 50, 20)).toEqual({
+      kind: "delete",
+      columnKey: null,
+      laneKey: null,
+      issueId: null,
+      edge: null,
+    });
+  });
+
   it("reads the card and its insertion edge from the hit", () => {
     const card = cardNode();
     const above = node({}, rect(100, 180), { [KANBAN_CARD_SELECTOR]: card });
