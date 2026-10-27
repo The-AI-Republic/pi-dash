@@ -5,7 +5,7 @@
 // Cycle detail route: the trail, the shared layouts bound to the cycle
 // entity, the header actions and the creation dialog (CYC-032–034).
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import * as React from "react";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -30,8 +30,8 @@ const mocks = vi.hoisted(() => ({
   layout: { current: "list" },
   filter: { current: null as null | Record<string, unknown> },
   parsed: { current: [] as unknown[] },
-  overlayCreate: vi.fn(),
-  overlayAdd: vi.fn(),
+  attach: vi.fn(async () => true),
+  useAttachExisting: vi.fn(),
   clearFilters: vi.fn(),
   loadKanban: vi.fn(async () => ({ default: () => null })),
   loadList: vi.fn(async () => ({ default: () => null })),
@@ -180,17 +180,6 @@ vi.mock("../../../../../../features/issues/list/lazy.js", () => ({
       <button
         type="button"
         onClick={() =>
-          (props.onRegisterOverlays as (overlays: unknown) => void)({
-            openCreate: mocks.overlayCreate,
-            openAddExisting: mocks.overlayAdd,
-          })
-        }
-      >
-        register
-      </button>
-      <button
-        type="button"
-        onClick={() =>
           (props.onPeekChange as (request: unknown) => void)({ issueId: "WEB-1", projectId: PROJECT, nestingLevel: 0 })
         }
       >
@@ -321,6 +310,28 @@ vi.mock("../../../../../../features/issues/components/WorkItemCreateDialog.js", 
       </div>
     ) : null,
 }));
+vi.mock("../../../../../../features/issues/list/AddExistingModal.js", () => ({
+  AddExistingModal: (props: Record<string, unknown>) =>
+    props.open === true ? (
+      <div
+        data-testid="add-existing-modal"
+        data-workspace={String(props.workspaceSlug ?? "")}
+        data-project={String(props.projectId ?? "")}
+        data-exclude-cycle-members={String(props.excludeCycleMembers ?? false)}
+      >
+        <button type="button" onClick={() => (props.onOpenChange as (open: boolean) => void)(false)}>
+          close picker
+        </button>
+        <button type="button" onClick={() => (props.onOpenChange as (open: boolean) => void)(true)}>
+          confirm picker open
+        </button>
+        <button type="button" onClick={() => (props.onAttach as (ids: string[]) => void)(["issue-9"])}>
+          attach picker
+        </button>
+      </div>
+    ) : null,
+}));
+vi.mock("../../../../../../features/issues/list/attach.js", () => ({ useAttachExisting: mocks.useAttachExisting }));
 
 import { ApiError } from "@pidash/api-client";
 
@@ -404,6 +415,8 @@ beforeEach(() => {
   });
   mocks.projects.mockReturnValue({ queryKey: ["projects"], queryFn: async () => [projectSeed()] });
   mocks.cycle.mockReturnValue({ queryKey: ["cycle"], queryFn: async () => cycleSeed() });
+  mocks.attach.mockResolvedValue(true);
+  mocks.useAttachExisting.mockReturnValue({ attach: mocks.attach, isAttaching: false });
 });
 
 describe("cycle detail route", () => {
@@ -808,21 +821,48 @@ describe("cycle detail route", () => {
     expect(mocks.clearFilters).not.toHaveBeenCalled();
   });
 
-  it("runs the list overlays once the layout registers them", async () => {
+  it("opens the host dialogs from the empty card with zero issues (ISS-069)", async () => {
     mocks.page.mockReturnValue({
       queryKey: ["page"],
       queryFn: async () => pageSeed({ total_count: 0, results: [], count: 0 }),
     });
     renderRoute();
     expect(await screen.findByTestId("cycle-empty")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "register" }));
+    // Create reaches the host's cycle-scoped dialog with no layout mounted.
     fireEvent.click(screen.getByRole("button", { name: "create" }));
+    expect(await screen.findByTestId("create-dialog")).toHaveAttribute("data-cycle", CYCLE);
+    fireEvent.click(screen.getByRole("button", { name: "close create" }));
+    expect(screen.queryByTestId("create-dialog")).not.toBeInTheDocument();
+    // Add-existing reaches the host's picker, wired to the cycle attach.
     fireEvent.click(screen.getByRole("button", { name: "add" }));
-    expect(mocks.overlayCreate).toHaveBeenCalled();
-    expect(mocks.overlayAdd).toHaveBeenCalled();
+    const picker = await screen.findByTestId("add-existing-modal");
+    expect(picker).toHaveAttribute("data-workspace", "acme");
+    expect(picker).toHaveAttribute("data-project", PROJECT);
+    expect(picker).toHaveAttribute("data-exclude-cycle-members", "true");
+    expect(mocks.useAttachExisting).toHaveBeenCalledWith({
+      workspaceSlug: "acme",
+      projectId: PROJECT,
+      entity: { scope: "cycle", projectId: PROJECT, cycleId: CYCLE },
+      cycleId: CYCLE,
+    });
+    // A landed attach closes the picker; a failed one keeps it open.
+    fireEvent.click(screen.getByRole("button", { name: "attach picker" }));
+    expect(mocks.attach).toHaveBeenCalledWith(["issue-9"]);
+    await waitFor(() => expect(screen.queryByTestId("add-existing-modal")).not.toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "add" }));
+    expect(await screen.findByTestId("add-existing-modal")).toBeInTheDocument();
+    mocks.attach.mockResolvedValue(false);
+    fireEvent.click(screen.getByRole("button", { name: "attach picker" }));
+    await waitFor(() => expect(mocks.attach).toHaveBeenCalledTimes(2));
+    expect(screen.getByTestId("add-existing-modal")).toBeInTheDocument();
+    // The picker's own close still dismisses it; a spurious open keeps it.
+    fireEvent.click(screen.getByRole("button", { name: "confirm picker open" }));
+    expect(screen.getByTestId("add-existing-modal")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "close picker" }));
+    expect(screen.queryByTestId("add-existing-modal")).not.toBeInTheDocument();
   });
 
-  it("tolerates overlay calls before any layout registers", async () => {
+  it("keeps the empty card live under a non-list layout (ISS-069)", async () => {
     mocks.layout.current = "kanban";
     mocks.page.mockReturnValue({
       queryKey: ["page"],
@@ -831,9 +871,9 @@ describe("cycle detail route", () => {
     renderRoute();
     expect(await screen.findByTestId("cycle-empty")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "create" }));
+    expect(await screen.findByTestId("create-dialog")).toHaveAttribute("data-cycle", CYCLE);
     fireEvent.click(screen.getByRole("button", { name: "add" }));
-    expect(mocks.overlayCreate).not.toHaveBeenCalled();
-    expect(mocks.overlayAdd).not.toHaveBeenCalled();
+    expect(await screen.findByTestId("add-existing-modal")).toBeInTheDocument();
   });
 
   it("prefetches the cycle reads and the board and leaf chunks", async () => {

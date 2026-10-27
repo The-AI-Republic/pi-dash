@@ -43,7 +43,7 @@ import { isFilteredEmpty } from "../../../../../../features/issues/emptyStates/f
 import { isConditionComplete, parseRichExpression } from "../../../../../../features/issues/filters/rich/expression.js";
 import type { RichFilterBuilderParts } from "../../../../../../features/issues/filters/rich/RichFilterBuilder.js";
 import { LazyIssueFilters, preloadIssueFilters } from "../../../../../../features/issues/filters/rich/lazy.js";
-import type { ListLayoutOverlays } from "../../../../../../features/issues/list/ListLayout.js";
+import { useAttachExisting } from "../../../../../../features/issues/list/attach.js";
 import { selectCreatableProjects } from "../../../../../../features/issues/create/createProjects.js";
 import type { WorkItemCreateProject } from "../../../../../../features/issues/components/WorkItemCreateDialog.js";
 import { useWeekStart } from "../../../../../../features/issues/dropdowns/weekStart.js";
@@ -69,6 +69,13 @@ const LazyGanttTimeline = React.lazy(() =>
 const LazyWorkItemCreateDialog = React.lazy(() =>
   import("../../../../../../features/issues/components/WorkItemCreateDialog.js").then((module) => ({
     default: module.WorkItemCreateDialog,
+  }))
+);
+// The empty card's picker rides its own chunk, as it does inside the list
+// layout (Quality gates, initial-JS budget).
+const LazyAddExistingModal = React.lazy(() =>
+  import("../../../../../../features/issues/list/AddExistingModal.js").then((module) => ({
+    default: module.AddExistingModal,
   }))
 );
 
@@ -122,9 +129,15 @@ export function CycleDetailContent({
       showSubIssues,
     })
   );
-  const [overlays, setOverlays] = React.useState<ListLayoutOverlays | null>(null);
   const [createOpen, setCreateOpen] = React.useState(false);
+  const [addExistingOpen, setAddExistingOpen] = React.useState(false);
   const weekStart = useWeekStart();
+  // The host owns both empty-card entries: an empty page never mounts a
+  // layout, so no layout ever registers its overlays here (ISS-069).
+  const { attach } = useAttachExisting({ workspaceSlug, projectId, entity, cycleId });
+  async function attachExisting(ids: string[]): Promise<void> {
+    if (await attach(ids)) setAddExistingOpen(false);
+  }
 
   if (project === null) {
     return (
@@ -234,10 +247,10 @@ export function CycleDetailContent({
         completed={finished}
         canAct={canEdit}
         onCreate={() => {
-          overlays?.openCreate();
+          setCreateOpen(true);
         }}
         onAddExisting={() => {
-          overlays?.openAddExisting();
+          setAddExistingOpen(true);
         }}
       />
     );
@@ -345,7 +358,6 @@ export function CycleDetailContent({
               onPeekChange={onPeekChange}
               peekProjectId={peekProjectId}
               compact={compact}
-              onRegisterOverlays={setOverlays}
             />
           );
         }}
@@ -386,6 +398,22 @@ export function CycleDetailContent({
         initialProjectId={projectId}
         projectIdentifier={project.identifier}
         context={{ cycleId }}
+      />
+    </React.Suspense>
+  ) : null;
+  // Same picker the list layout mounts for a cycle scope; the host owns it
+  // so the empty card reaches it with no layout mounted (ISS-069).
+  const addExistingDialog = addExistingOpen ? (
+    <React.Suspense fallback={null}>
+      <LazyAddExistingModal
+        open
+        onOpenChange={(open) => {
+          if (!open) setAddExistingOpen(false);
+        }}
+        workspaceSlug={workspaceSlug}
+        projectId={projectId}
+        excludeCycleMembers
+        onAttach={(ids) => attachExisting(ids)}
       />
     </React.Suspense>
   ) : null;
@@ -456,6 +484,7 @@ export function CycleDetailContent({
         )}
       </div>
       {createDialog}
+      {addExistingDialog}
     </>
   );
 }
