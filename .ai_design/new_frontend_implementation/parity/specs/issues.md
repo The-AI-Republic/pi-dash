@@ -678,18 +678,21 @@ filter or regroup. Arrow keys move a highlighted active row and scroll
 it into view, with Shift plus arrows extending the selection to the
 previous or next entity; all of it disables when selection is disabled
 (ISS-109). While items are selected, a browser reload or leave
-confirmation is armed; confirming clears the selection (ISS-110). The
-oracle pins NEWFRONT-129 across ISS-108–111 (the list offering no
-selection checkboxes, arrow keys driving no selection, no leave
-confirmation, no banner); slices build the intended mechanics and the
-scenarios are aligned at gate. Oracle: `bulk-selection.spec.ts`.
+confirmation is armed; confirming clears the selection (ISS-110).
+NEWFRONT-129 records an old-app bug: the OSS `apps/web` build hard-disables
+bulk operations, so its oracle pins the absence (no selection checkboxes,
+arrow keys driving no selection, no leave confirmation, no banner).
+`apps/web_new` implements the intended mechanics instead, and its ISS-108–111
+scenarios prove selection, keyboard selection, the leave guard and the
+banner. Oracle: `bulk-selection.spec.ts`.
 
 In this build a sticky bottom bar appears once a selection is active
 (ISS-111): it promotes bulk editing with an upgrade link, since the
 functional bulk toolbar is cloud-only. It renders nothing when no
-selection is active. Slices build the banner per the intended design
-(see the NEWFRONT-129 note above); the cloud toolbar replaces it in
-the cloud edition. Oracle: `bulk-selection.spec.ts`.
+selection is active. The old OSS app never reaches it because selection is
+disabled (`bug: NEWFRONT-129`); `apps/web_new` builds the banner as intended.
+The cloud toolbar replaces it in the cloud edition. Oracle:
+`bulk-selection.spec.ts`.
 
 The cloud bulk toolbar applies one request across the selection.
 Bulk update (ISS-112) posts `POST BASE/bulk-operation-issues/` with

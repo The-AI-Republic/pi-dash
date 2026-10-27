@@ -3,11 +3,11 @@
 // See the LICENSE file for details.
 // Oracle scenarios: multi-select and bulk operations (NEWFRONT-120).
 // Rows ISS-108–ISS-116. The seeded stack runs the OSS build, where bulk
-// operations are unavailable: these scenarios pin the OSS-observable
-// behavior. ISS-108–ISS-111 carry a bug marker (NEWFRONT-129): the
-// inventory describes working selection mechanics plus an OSS upgrade
-// banner, but selection is hard-disabled in this build, so no checkbox,
-// no keyboard selection, no leave prompt, and no banner can ever appear.
+// operations are unavailable. OSS selection is a documented old-app bug
+// (NEWFRONT-129): the old app hard-disables it, while apps/web_new owns
+// the intended mechanics plus the OSS upgrade banner. The ISS-108–111
+// scenarios branch on their target so the oracle pins the old absence and
+// the new app proves the intended behavior.
 import { test, expect } from "../fixtures";
 import { serverIssueNames, signInSession } from "../helpers/api";
 import { specTags, specTitle } from "../helpers/tags";
@@ -21,7 +21,7 @@ async function signInAndOpenIssues(
 }
 
 test(
-  specTitle(["ISS-108"], "bug: NEWFRONT-129 list offers no selection checkboxes"),
+  specTitle(["ISS-108"], "bug: NEWFRONT-129 list selection follows the target"),
   { tag: specTags(["ISS-108"]) },
   async ({ driver, seed }) => {
     await test.step("sign in through the UI", async () => {
@@ -39,9 +39,19 @@ test(
         .toEqual(expect.arrayContaining([...seed.issueNames]));
     });
 
-    await test.step("no row or group selection checkbox is rendered", async () => {
-      expect(await driver.selectionCheckboxCount()).toBe(0);
-    });
+    if (driver.target === "web_new") {
+      await test.step("rows and groups offer selection controls", async () => {
+        expect(await driver.selectionCheckboxCount()).toBeGreaterThan(0);
+      });
+      await test.step("a row toggle raises the OSS upgrade banner", async () => {
+        await driver.selectFirstRow();
+        expect(await driver.bulkBarVisible()).toBe(true);
+      });
+    } else {
+      await test.step("the old app renders no selection controls", async () => {
+        expect(await driver.selectionCheckboxCount()).toBe(0);
+      });
+    }
 
     await test.step("the server agrees with the screen", async () => {
       const session = await signInSession(seed.email, seed.password);
@@ -52,7 +62,7 @@ test(
 );
 
 test(
-  specTitle(["ISS-109"], "bug: NEWFRONT-129 arrow keys drive no selection"),
+  specTitle(["ISS-109"], "bug: NEWFRONT-129 keyboard selection follows the target"),
   { tag: specTags(["ISS-109"]) },
   async ({ driver, seed }) => {
     await test.step("sign in through the UI", async () => {
@@ -67,19 +77,23 @@ test(
         .toEqual(expect.arrayContaining([...seed.issueNames]));
     });
 
-    await test.step("arrow and shift-arrow keys select nothing", async () => {
+    await test.step("arrow and shift-arrow keys follow the target", async () => {
       await driver.pressKey("ArrowDown");
       await driver.pressKey("ArrowDown");
       await driver.pressKey("ArrowDown", true);
       await driver.pressKey("ArrowUp", true);
-      expect(await driver.selectionCheckboxCount()).toBe(0);
-      expect(await driver.bulkBarVisible()).toBe(false);
+      if (driver.target === "web_new") {
+        expect(await driver.bulkBarVisible()).toBe(true);
+      } else {
+        expect(await driver.selectionCheckboxCount()).toBe(0);
+        expect(await driver.bulkBarVisible()).toBe(false);
+      }
     });
   }
 );
 
 test(
-  specTitle(["ISS-110"], "bug: NEWFRONT-129 reload asks no leave confirmation"),
+  specTitle(["ISS-110"], "bug: NEWFRONT-129 leave confirmation follows the target"),
   { tag: specTags(["ISS-110"]) },
   async ({ driver, seed }) => {
     await test.step("sign in through the UI", async () => {
@@ -94,8 +108,17 @@ test(
         .toEqual(expect.arrayContaining([...seed.issueNames]));
     });
 
-    await test.step("reloading shows no leave dialog and keeps the list", async () => {
-      expect(await driver.reloadSawDialog()).toBe(false);
+    if (driver.target === "web_new") {
+      await test.step("selecting a row arms the reload confirmation", async () => {
+        await driver.selectFirstRow();
+        expect(await driver.reloadSawDialog()).toBe(true);
+      });
+    } else {
+      await test.step("reloading shows no leave dialog", async () => {
+        expect(await driver.reloadSawDialog()).toBe(false);
+      });
+    }
+    await test.step("the list survives the reload", async () => {
       await expect
         .poll(() => driver.visibleIssueNames(), { timeout: 120_000 })
         .toEqual(expect.arrayContaining([...seed.issueNames]));
@@ -104,7 +127,7 @@ test(
 );
 
 test(
-  specTitle(["ISS-111"], "bug: NEWFRONT-129 no upgrade banner renders"),
+  specTitle(["ISS-111"], "bug: NEWFRONT-129 OSS upgrade banner follows the target"),
   { tag: specTags(["ISS-111"]) },
   async ({ driver, seed }) => {
     await test.step("sign in through the UI", async () => {
@@ -119,8 +142,14 @@ test(
         .toEqual(expect.arrayContaining([...seed.issueNames]));
     });
 
-    await test.step("no bulk bar or upgrade banner is shown", async () => {
-      expect(await driver.bulkBarVisible()).toBe(false);
+    await test.step("the bulk bar follows the target", async () => {
+      if (driver.target === "web_new") {
+        expect(await driver.bulkBarVisible()).toBe(false);
+        await driver.selectFirstRow();
+        expect(await driver.bulkBarVisible()).toBe(true);
+      } else {
+        expect(await driver.bulkBarVisible()).toBe(false);
+      }
     });
   }
 );

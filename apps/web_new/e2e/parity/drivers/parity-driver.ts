@@ -327,10 +327,13 @@ export interface ParityDriver {
   rulesIntakeTriageVisible(): Promise<boolean>;
 
   // Issue multi-select and bulk operations (NEWFRONT-120, ISS-108–116).
-  // In builds where selection is disabled these reads stay at their
-  // empty values: no checkboxes, no bulk bar.
+  // The old OSS app hard-disables selection (NEWFRONT-129); the new app
+  // renders the intended controls and upgrade banner. Scenarios branch on
+  // the target when the old absence and new behavior differ.
   /** Row and group-header selection checkboxes currently rendered. */
   selectionCheckboxCount(): Promise<number>;
+  /** Toggle the first rendered row control (not a group header), as a user would. */
+  selectFirstRow(): Promise<void>;
   /** Whether any sticky bulk bar (functional toolbar or upgrade banner) shows. */
   bulkBarVisible(): Promise<boolean>;
   /** Press a key as the user would; Shift held when `shift` is set. */
