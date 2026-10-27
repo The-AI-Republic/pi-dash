@@ -43,8 +43,6 @@ crates/api/src/app_project/handlers_workflow.rs | UPDATE states | aff65fbe46b1 |
 crates/api/src/app_project/handlers_workflow.rs | UPDATE states | b54cf069476d | sql
 crates/api/src/app_project/handlers_workflow.rs | UPDATE states | ef5c6b4d4dab | sql
 crates/api/src/app_project/handlers_workflow.rs | UPDATE states | f39455f5ba88 | sql
-crates/api/src/app_workspace/handlers_favorites_drafts.rs | INSERT issue_sequences | 229d9180d2da | sql
-crates/api/src/app_workspace/handlers_favorites_drafts.rs | INSERT issues | 4c3c461365b1 | sql
 crates/api/src/app_workspace/handlers_invites.rs | UPDATE profiles | 9ca7d72d49a9 | sql
 crates/api/src/app_workspace/handlers_invites.rs | UPDATE users | 1c0a5c1f0059 | sql
 crates/api/src/app_workspace/handlers_members.rs | UPDATE workspace_members | e1d811590920 | sql
@@ -87,7 +85,6 @@ crates/api/src/v1_projects/handlers_project.rs | UPDATE projects | 99fab9d9592c 
 crates/api/src/v1_projects/handlers_project.rs | UPDATE projects | ba562d530463 | sql
 crates/api/src/v1_projects/handlers_state_estimate.rs | UPDATE states | 77fbc782e50d | sql
 crates/api/src/v1_projects/handlers_state_estimate.rs | UPDATE states | 99f27808da58 | sql
-crates/api/src/v1_work_items/handlers_core.rs | UPDATE issues | 4e2a78939527 | sql
 crates/api/src/v1_work_items/handlers_pr_links.rs | UPDATE projects | 0b9c0f07e274 | sql
 crates/api/src/v1_work_items/handlers_relations.rs | INSERT issue_relations | 593c3fc0ee60 | sql
 crates/api/src/v1_work_items/handlers_relations.rs | INSERT issue_relations | abf362107edd | sql

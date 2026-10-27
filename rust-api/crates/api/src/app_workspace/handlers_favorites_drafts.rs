@@ -88,15 +88,16 @@
 //!
 //! # Orchestration fire (draft-to-issue)
 //!
-//! `Issue.save()` fires the orchestration `post_save` receiver (`capture_prior_state` +
-//! `fire_state_transition`). This module calls the merged
-//! `pidash_services::orchestration::entries` drivers through the one live seam
-//! (`crate::issue_transition`): the ticker reconcile, preflight and run creation all run
-//! live against the request pool, exactly like Django's receiver. The
-//! `github_signals` completion-comment leg fires only on updates
-//! (`created → return`), never on this path.
+//! The draft-to-issue save rides `domain::issues::create` (ORM-03):
+//! the `Issue.save()` hooks resolve the pod/state defaults,
+//! `completed_at`, stripped text, sequence and sort order, and the
+//! post-commit chain runs the orchestration fire, the m2m legs and the
+//! created activity in handler order. The `github_signals`
+//! completion-comment leg fires only on updates (`created → return`),
+//! never on this path.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use axum::extract::State;
 use axum::http::{header, HeaderMap, StatusCode};
@@ -105,7 +106,6 @@ use axum::Router;
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use chrono_tz::Tz;
 use serde_json::{Map, Value};
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use pidash_auth::permissions::allow::AllowFacts;
@@ -116,10 +116,10 @@ use pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK;
 use pidash_jobs::TaskMessage;
 use pidash_services::app_issues::serializers_create::{
     assignee_member_filter_sql, issue_create_to_representation, issue_create_validate,
-    label_filter_null_project_sql, label_filter_sql, m2m_batches, m2m_insert_sql,
-    CreateValidateError, ExecutorPolicy, IssueCreateRow, LockedIssueAttrs, PodRef, ResolvedProject,
-    ValidateAttrs, ValidateContext, ValidateProbes, ValidatedAttrs, DEFAULT_ASSIGNEE_EXISTS_SQL,
-    ESTIMATE_EXISTS_SQL, PARENT_EXISTS_SQL, POD_FETCH_SQL, PROJECT_FETCH_SQL, STATE_EXISTS_SQL,
+    label_filter_null_project_sql, label_filter_sql, m2m_insert_sql, CreateValidateError,
+    ExecutorPolicy, IssueCreateRow, LockedIssueAttrs, PodRef, ResolvedProject, ValidateAttrs,
+    ValidateContext, ValidateProbes, ValidatedAttrs, ESTIMATE_EXISTS_SQL, PARENT_EXISTS_SQL,
+    POD_FETCH_SQL, PROJECT_FETCH_SQL, STATE_EXISTS_SQL,
 };
 use pidash_services::app_issues::shape::envelope;
 use pidash_services::app_workspace::queries_extras as qx;
@@ -133,13 +133,19 @@ use pidash_services::dispatch::admission::{
 use pidash_services::dispatch::policy::{
     cloud_agent_is_configured, managed_runner_is_enabled, UserFlags,
 };
-use pidash_services::orchestration::entries::{FireOutcome, FireRequest};
+use pidash_services::domain::activity::TaskEnqueueHook;
+use pidash_services::domain::issues as domain_issues;
+use pidash_services::domain::issues::IssueFieldSet as IssueSaveRow;
+use pidash_services::domain::transition::IssueTransitionHook;
+use pidash_services::domain::{self, WriteActor, WriteCtx, WriteScope};
 use pidash_types::dispatch::{AgentExecutorKind, ManagedRunnerReason};
 use pidash_types::v1_assets::sticky as sticky_kernel;
 use pidash_types::WorkspaceId;
 
 use super::gates;
 use crate::app_issues::Denial;
+use crate::domain_hooks::AppTaskEnqueueHook;
+use crate::issue_transition::AppTransitionHook;
 use crate::middleware::gzip::{accepts_gzip, compress_if_shorter, MIN_COMPRESS_BYTES};
 use crate::serializer::render_datetime_in;
 use crate::state::AppState;
@@ -6231,43 +6237,21 @@ async fn run_issue_create_validate(
     }
 }
 
-/// Every `issues` column in `COLUMNS` order, as owned values — the
-/// INSERT binds from here, and the 201 body renders off it.
-struct IssueSaveRow {
-    id: Uuid,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-    created_by_id: Option<Uuid>,
-    updated_by_id: Option<Uuid>,
-    deleted_at: Option<DateTime<Utc>>,
-    project_id: Uuid,
-    workspace_id: Uuid,
-    parent_id: Option<Uuid>,
-    state_id: Option<Uuid>,
-    point: Option<i32>,
-    estimate_point_id: Option<Uuid>,
-    name: String,
-    description_json: Value,
-    description_html: String,
-    description_stripped: Option<String>,
-    description_binary: Option<Vec<u8>>,
-    priority: String,
-    complexity_score: i32,
-    start_date: Option<NaiveDate>,
-    target_date: Option<NaiveDate>,
-    sequence_id: i32,
-    sort_order: f64,
-    completed_at: Option<DateTime<Utc>>,
-    archived_at: Option<NaiveDate>,
-    is_draft: bool,
-    external_source: Option<String>,
-    external_id: Option<String>,
-    type_id: Option<Uuid>,
-    git_work_branch: String,
-    workpad: String,
-    created_via: Option<String>,
-    assigned_pod_id: Option<Uuid>,
-    agent_executor: Option<String>,
+// The save row is the domain's `IssueFieldSet` (imported at the top):
+// every `issues` column as owned values. Assembly keeps building it
+// here (validation-adjacent); the INSERT moved to `domain::issues`
+// (ORM-03).
+/// Map a domain-write failure onto the save arms: a dangling-row miss
+/// 404s, an integrity violation is the invalid-payload 400, anything else
+/// 500s.
+fn domain_denial(error: domain::DomainError) -> Denial {
+    if error.is_not_found() {
+        Denial::NotFound
+    } else if error.is_integrity_violation() {
+        Denial::BadError("The payload is not valid".to_owned())
+    } else {
+        Denial::ServerError
+    }
 }
 
 /// The fresh-row assembly: the row plus the raw m2m inputs.
@@ -6333,218 +6317,6 @@ fn assemble_new_issue(
         opt_ids(values, "assignee_ids"),
         opt_ids(values, "label_ids"),
     ))
-}
-
-/// `convert_uuid_to_integer` (`utils/uuid.py:19-26`): sha256 of the
-/// hyphenated-lowercase id, first 8 bytes big-endian signed.
-fn advisory_lock_key(project_id: &Uuid) -> i64 {
-    let mut hasher = Sha256::new();
-    hasher.update(project_id.to_string().as_bytes());
-    let digest = hasher.finalize();
-    let mut bytes = [0u8; 8];
-    bytes.copy_from_slice(&digest[..8]);
-    i64::from_be_bytes(bytes)
-}
-
-/// `Pod.default_for_project_id` (`runner/models.py:174-176`):
-/// `Pod.objects` (live), project-default first (probed live:
-/// `ORDER BY is_default DESC, created_at ASC`).
-async fn default_pod_for_project(
-    pool: &sqlx::PgPool,
-    project_id: &Uuid,
-) -> Result<Option<Uuid>, Denial> {
-    let row: Option<(Uuid,)> = sqlx::query_as(
-        "SELECT id FROM pod WHERE project_id = $1 AND is_default AND deleted_at IS NULL ORDER BY is_default DESC, created_at ASC LIMIT 1",
-    )
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(row.map(|row| row.0))
-}
-
-/// `Issue.objects.create(...)`: the 34-column INSERT in `COLUMNS` order.
-/// An `IntegrityError` is the 400 payload branch; anything else 500s.
-async fn insert_issue_row(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    row: &IssueSaveRow,
-) -> Result<(), Denial> {
-    sqlx::query(
-        "INSERT INTO issues (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, parent_id, state_id, point, estimate_point_id, name, description_json, description_html, description_stripped, description_binary, priority, complexity_score, start_date, target_date, sequence_id, sort_order, completed_at, archived_at, is_draft, external_source, external_id, type_id, git_work_branch, workpad, created_via, assigned_pod_id, agent_executor) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34)",
-    )
-    .bind(row.id)
-    .bind(row.created_at)
-    .bind(row.updated_at)
-    .bind(row.created_by_id)
-    .bind(row.updated_by_id)
-    .bind(row.deleted_at)
-    .bind(row.project_id)
-    .bind(row.workspace_id)
-    .bind(row.parent_id)
-    .bind(row.state_id)
-    .bind(row.point)
-    .bind(row.estimate_point_id)
-    .bind(row.name.as_str())
-    .bind(row.description_json.clone())
-    .bind(row.description_html.as_str())
-    .bind(row.description_stripped.as_deref())
-    .bind(row.description_binary.as_deref())
-    .bind(row.priority.as_str())
-    .bind(row.complexity_score)
-    .bind(row.start_date)
-    .bind(row.target_date)
-    .bind(row.sequence_id)
-    .bind(row.sort_order)
-    .bind(row.completed_at)
-    .bind(row.archived_at)
-    .bind(row.is_draft)
-    .bind(row.external_source.as_deref())
-    .bind(row.external_id.as_deref())
-    .bind(row.type_id)
-    .bind(row.git_work_branch.as_str())
-    .bind(row.workpad.as_str())
-    .bind(row.created_via.as_deref())
-    .bind(row.assigned_pod_id)
-    .bind(row.agent_executor.as_deref())
-    .execute(&mut **tx)
-    .await
-    .map_err(|error| {
-        if is_integrity_violation(&error) {
-            Denial::BadError("The payload is not valid".to_owned())
-        } else {
-            Denial::ServerError
-        }
-    })?;
-    Ok(())
-}
-
-/// One m2m `bulk_create(batch_size=10)` leg in one transaction: a multi-row
-/// INSERT per 10-chunk in input order; an `IntegrityError` rolls the WHOLE
-/// leg back and swallows (`except: pass` wraps the atomic call — earlier
-/// batches do NOT persist), any other error 500s.
-#[allow(clippy::too_many_arguments)]
-async fn write_issue_m2m_batches(
-    pool: &sqlx::PgPool,
-    table: &str,
-    member_column: &str,
-    ids: &[Uuid],
-    issue_id: &Uuid,
-    project_id: &Uuid,
-    workspace_id: &Uuid,
-    created_by_id: Option<Uuid>,
-    updated_by_id: Option<Uuid>,
-) -> Result<(), Denial> {
-    let mut tx = pool.begin().await.map_err(|_| Denial::ServerError)?;
-    for batch in m2m_batches(ids) {
-        let sql = m2m_insert_sql(table, member_column, batch.len(), false);
-        let mut query = sqlx::query(&sql);
-        for member_id in batch {
-            // `auto_now_add` + `auto_now`: two `now()` calls per row, like
-            // the per-object instantiation Django bulk-saves.
-            let created = utc_now_micros();
-            let updated = utc_now_micros();
-            query = query
-                .bind(Uuid::new_v4())
-                .bind(created)
-                .bind(updated)
-                .bind(created_by_id)
-                .bind(updated_by_id)
-                .bind(project_id)
-                .bind(workspace_id)
-                .bind(issue_id)
-                .bind(member_id);
-        }
-        match query.execute(&mut *tx).await {
-            Ok(_) => {}
-            // Drop without commit: the leg rolls back, then swallows.
-            Err(error) if is_integrity_violation(&error) => return Ok(()),
-            Err(_) => return Err(Denial::ServerError),
-        }
-    }
-    tx.commit().await.map_err(|_| Denial::ServerError)?;
-    Ok(())
-}
-
-/// The create default-assignee fallback (`serializers/issue.py:419-444`):
-/// empty/missing assignees + a valid project-default member → one
-/// `IssueAssignee` row, `IntegrityError` swallowed.
-async fn write_default_assignee(
-    pool: &sqlx::PgPool,
-    default_assignee_id: &Uuid,
-    issue_id: &Uuid,
-    project_id: &Uuid,
-    workspace_id: &Uuid,
-    created_by_id: Option<Uuid>,
-) -> Result<(), Denial> {
-    let member: Option<(i32,)> = sqlx::query_as(DEFAULT_ASSIGNEE_EXISTS_SQL)
-        .bind(default_assignee_id)
-        .bind(project_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    if member.is_none() {
-        return Ok(());
-    }
-    let sql = m2m_insert_sql("issue_assignees", "assignee_id", 1, false);
-    let created = utc_now_micros();
-    let updated = utc_now_micros();
-    match sqlx::query(&sql)
-        .bind(Uuid::new_v4())
-        .bind(created)
-        .bind(updated)
-        .bind(created_by_id)
-        .bind(None::<Uuid>)
-        .bind(project_id)
-        .bind(workspace_id)
-        .bind(issue_id)
-        .bind(default_assignee_id)
-        .execute(pool)
-        .await
-    {
-        Ok(_) => Ok(()),
-        Err(error) if is_integrity_violation(&error) => Ok(()),
-        Err(_) => Err(Denial::ServerError),
-    }
-}
-
-/// The post-save fire: a non-transition answers `NoTransition` without
-/// I/O; a failed handler is logged with the verbatim line (the counter
-/// already bumped inside) and the save stands; only a *lookup* storage
-/// failure propagates to the 500 — exactly the `try` placement in
-/// `fire_state_transition`. Drives the one live seam (PIDASHCONV-1216).
-#[allow(clippy::too_many_arguments)]
-async fn fire_after_save(
-    state: &AppState,
-    pool: &sqlx::PgPool,
-    actor_id: Uuid,
-    issue_id: Uuid,
-    prev_state_id: Option<Uuid>,
-    current_state_id: Option<Uuid>,
-    dispatch_immediate: bool,
-    created_by: Option<Uuid>,
-    now: DateTime<Utc>,
-) -> Result<(), Denial> {
-    let outcome = crate::issue_transition::fire_issue_transition(
-        state,
-        pool,
-        actor_id,
-        FireRequest {
-            issue_id,
-            prev_state_id,
-            current_state_id,
-            dispatch_immediate,
-            moved_by_run: None,
-            now,
-            jitter_secs: 0.0,
-            created_by,
-        },
-    )
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    if let FireOutcome::Failed { log_line, .. } = outcome {
-        tracing::error!("{log_line}");
-    }
-    Ok(())
 }
 
 fn host_settings_of(state: &AppState) -> HostSettings<'_> {
@@ -6887,7 +6659,7 @@ async fn draft_to_issue(
         Ok(filtered) => filtered,
         Err(response) => return Ok(response),
     };
-    let (mut row, raw_assignees, raw_labels) = assemble_new_issue(
+    let (row, raw_assignees, raw_labels) = assemble_new_issue(
         &values,
         &filtered,
         assigned_pod.flatten().map(|pod| pod.id),
@@ -6895,165 +6667,17 @@ async fn draft_to_issue(
         &project.workspace_id,
         &user_id,
     )?;
-    if row.assigned_pod_id.is_none() {
-        row.assigned_pod_id = default_pod_for_project(&pool, &draft_project).await?;
-    }
-    if row.state_id.is_none() {
-        // The `self.project` touch runs inside the atomic block on the
-        // state-given leg (the lock key); hoisted here — a `SELECT`'s
-        // transaction membership is unobservable.
-        touch_save_project(&pool, &draft_project).await?;
-        row.state_id = default_draft_state_opt(&pool, Some(draft_project)).await?;
-    } else {
-        // The group rides the field-cached instance on Django (no query);
-        // a race miss 500s (the state validated live seconds ago).
-        let state_id = row.state_id.ok_or(Denial::ServerError)?;
-        let group = state_row(&pool, &state_id)
-            .await?
-            .map(|row| row.group)
-            .ok_or(Denial::ServerError)?;
-        if group == "completed" {
-            row.completed_at = Some(utc_now_micros());
-        } else {
-            row.completed_at = None;
-        }
-    }
-    let mut tx = pool.begin().await.map_err(|_| Denial::ServerError)?;
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(advisory_lock_key(&draft_project))
-        .execute(&mut *tx)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    let max_sequence: (Option<i64>,) = sqlx::query_as(
-        "SELECT MAX(sequence) FROM issue_sequences WHERE project_id = $1 AND deleted_at IS NULL",
-    )
-    .bind(draft_project)
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    row.sequence_id = i32::try_from(max_sequence.0.map(|max| max + 1).unwrap_or(1))
-        .map_err(|_| Denial::ServerError)?;
-    let max_sort: (Option<f64>,) = match row.state_id {
-        Some(state_id) => sqlx::query_as(
-            "SELECT MAX(sort_order) FROM issues WHERE project_id = $1 AND state_id = $2 AND deleted_at IS NULL",
-        )
-        .bind(draft_project)
-        .bind(state_id)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(|_| Denial::ServerError)?,
-        None => sqlx::query_as(
-            "SELECT MAX(sort_order) FROM issues WHERE project_id = $1 AND state_id IS NULL AND deleted_at IS NULL",
-        )
-        .bind(draft_project)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(|_| Denial::ServerError)?,
-    };
-    if let Some(largest) = max_sort.0 {
-        row.sort_order = largest + 10000.0;
-    }
-    row.description_stripped = sync_description_stripped(Some(&row.description_html));
-    insert_issue_row(&mut tx, &row).await?;
-    sqlx::query(
-        "INSERT INTO issue_sequences (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, issue_id, sequence, deleted) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
-    )
-    .bind(Uuid::new_v4())
-    .bind(utc_now_micros())
-    .bind(utc_now_micros())
-    .bind(Some(user_id))
-    .bind(None::<Uuid>)
-    .bind(None::<DateTime<Utc>>)
-    .bind(draft_project)
-    .bind(project.workspace_id)
-    .bind(row.id)
-    .bind(i64::from(row.sequence_id))
-    .bind(false)
-    .execute(&mut *tx)
-    .await
-    .map_err(|error| {
-        if is_integrity_violation(&error) {
-            Denial::BadError("The payload is not valid".to_owned())
-        } else {
-            Denial::ServerError
-        }
-    })?;
-    tx.commit().await.map_err(|_| Denial::ServerError)?;
-    // Django's `post_save` fires inside `Issue.objects.create`, before the
-    // assignee/label `bulk_create`s, so the entry prompt sees empty m2m.
-    let prev = crate::issue_transition::capture_prior_state_pool(&pool, None)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    fire_after_save(
-        &state,
-        &pool,
-        user_id,
-        row.id,
-        prev,
-        row.state_id,
-        true,
-        Some(user_id),
-        utc_now_micros(),
-    )
-    .await?;
-    // The m2m legs run post-commit in autocommit (each `bulk_create`
-    // wrapped in its own `except IntegrityError: pass`).
+    // The m2m plan resolves pre-save (pure reads of validated input).
     let assignees = filtered
         .assignee_ids
         .clone()
         .or(raw_assignees)
         .unwrap_or_default();
-    if assignees.is_empty() {
-        if let Some(default) = project.default_assignee_id {
-            write_default_assignee(
-                &pool,
-                &default,
-                &row.id,
-                &draft_project,
-                &project.workspace_id,
-                row.created_by_id,
-            )
-            .await?;
-        }
-    } else {
-        write_issue_m2m_batches(
-            &pool,
-            "issue_assignees",
-            "assignee_id",
-            &assignees,
-            &row.id,
-            &draft_project,
-            &project.workspace_id,
-            row.created_by_id,
-            None,
-        )
-        .await?;
-    }
     let labels = filtered
         .label_ids
         .clone()
         .or(raw_labels)
         .unwrap_or_default();
-    if !labels.is_empty() {
-        write_issue_m2m_batches(
-            &pool,
-            "issue_labels",
-            "label_id",
-            &labels,
-            &row.id,
-            &draft_project,
-            &project.workspace_id,
-            row.created_by_id,
-            None,
-        )
-        .await?;
-    }
-    // `base_host` raises past the save (the issue persists on a
-    // misconfigured host), so the origin resolves here, not up front.
-    let origin = request_origin(&state)?;
-    let actor_text = user_id.to_string();
-    let issue_text = row.id.to_string();
-    let project_text = draft_project.to_string();
     // Task bytes render the raw QueryDict (PIDASHCONV-763): form list
     // fields dump as last-wins scalars. A projected COPY — `input`
     // still feeds the cycle/module branches below.
@@ -7066,18 +6690,76 @@ async fn draft_to_issue(
     } else {
         python_dumps(&input.value)
     };
-    enqueue_activity_emit(
-        &pool,
-        &wtask::draft_issue_created_activity(
-            requested.clone(),
-            &actor_text,
-            &issue_text,
-            &project_text,
-            Utc::now().timestamp(),
-            &origin,
-        ),
-    )
-    .await;
+    // `base_host` raises past the save (the issue persists on a
+    // misconfigured host): `request_origin` is pure over settings, so it
+    // resolves here but only takes effect past the fire + m2m legs — the
+    // chain stops ahead of the activity when it is `None`.
+    let origin = request_origin(&state).ok();
+    let actor_text = user_id.to_string();
+    // The atomic sequence/sort INSERT (save hooks) plus the post-commit
+    // chain — transition fire, m2m + default-assignee legs, created
+    // activity — in handler order. Django's `post_save` fires inside
+    // `Issue.objects.create`, before the assignee/label `bulk_create`s,
+    // so the entry prompt sees empty m2m.
+    let orm = state.orm().ok_or(Denial::ServerError)?;
+    let ctx = WriteCtx::new(WriteActor {
+        user_id,
+        timezone: Some(timezone.name().to_owned()),
+    })
+    .with_scope(WriteScope {
+        workspace_id: Some(draft_workspace),
+        project_id: Some(draft_project),
+    });
+    let transition: Arc<dyn IssueTransitionHook> = Arc::new(AppTransitionHook::new(&state, &pool));
+    let enqueue: Arc<dyn TaskEnqueueHook> = Arc::new(AppTaskEnqueueHook::new(&pool));
+    let outcome = domain::run(&ctx, orm, |txn| {
+        let transition = transition.clone();
+        let enqueue = enqueue.clone();
+        let pool = pool.clone();
+        let ctx = ctx.clone();
+        let origin = origin.clone();
+        Box::pin(async move {
+            txn.hooks_mut().register(transition);
+            txn.hooks_mut().register(enqueue);
+            domain_issues::create(
+                &ctx,
+                txn,
+                &pool,
+                domain_issues::CreateIssue {
+                    fields: row,
+                    assignees,
+                    default_assignee: project.default_assignee_id,
+                    labels,
+                    fire: domain_issues::FireSpec {
+                        dispatch_immediate: true,
+                        created_by: Some(user_id),
+                        moved_by_run: None,
+                        now: utc_now_micros(),
+                    },
+                    origin,
+                    activity_requested: Value::String(requested),
+                    activity_notification: Some(true),
+                    activity_require_origin: true,
+                    model_activity: None,
+                    created_override: None,
+                },
+            )
+            .await
+        })
+    })
+    .await
+    .map_err(domain_denial)?;
+    if outcome.chain.stopped().is_some() {
+        return Err(Denial::ServerError);
+    }
+    // A `None` origin stopped the chain above, so this is `Some` — the
+    // `ok_or` is unreachable, kept for the type.
+    let origin = origin.ok_or(Denial::ServerError)?;
+    // The 201 body renders off the saved row (hook outputs included),
+    // exactly the in-memory row the direct save used to leave behind.
+    let row = IssueSaveRow::from(&outcome.issue);
+    let issue_text = row.id.to_string();
+    let project_text = draft_project.to_string();
     // The cycle branch (`:240-265`): a truthy RAW `cycle_id`
     // (`objects.create` — `save()` overwrites the audit ids with the
     // actor/`None`), then `cycle.activity.created` with the `"None"`
@@ -7439,15 +7121,6 @@ mod tests {
         ] {
             assert!(parse_drf_datetime(text, &utc).is_err(), "{text:?}");
         }
-    }
-
-    #[test]
-    fn advisory_lock_key_vectors() {
-        assert_eq!(
-            advisory_lock_key(&uuid("11111111-1111-1111-1111-111111111111")),
-            -4972562656765536426
-        );
-        assert_eq!(advisory_lock_key(&Uuid::nil()), 1349170572285598868);
     }
 
     #[test]

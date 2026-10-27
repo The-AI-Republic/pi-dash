@@ -4952,6 +4952,12 @@ pub async fn destroy_issue(
                     },
                     origin,
                     slug: slug.clone(),
+                    completion: false,
+                    visit_delete: true,
+                    activity_current: Value::Object(Map::new()),
+                    activity_notification: Some(true),
+                    activity_require_origin: true,
+                    activity_subscriber: Some(false),
                 },
             )
             .await

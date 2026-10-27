@@ -1373,12 +1373,29 @@ async fn update_driver(
 /// forward, the hard recent-visit delete and the unsubscribed `deleted`
 /// activity. Implied by the issue's "the `update_issue_row` full save"
 /// (the third caller of the migrated save).
+/// `DELETE ...`: the fetched row (the driver stamps `updated_at`;
+/// `deleted_at` rides the fields when the driver owns that clock too —
+/// v1 stamps it separately — else the domain stamps now), the pre-save
+/// snapshot, the fire spec and the per-view shapes: the v1 delete runs
+/// the completion pair and skips the recent-visit delete, while the app
+/// delete does the reverse; the `deleted` activity keys follow the same
+/// app/v1 split as every other activity leg. (`completion: false` on the
+/// app path preserves a pre-existing divergence: Django's post_save
+/// receiver runs the pair on every delete save,
+/// `bgtasks/github_signals.py:44-75`; the app port never has. Tracked
+/// separately; the migration keeps both behaviors.)
 pub struct SoftDeleteIssue {
     pub fields: IssueFieldSet,
     pub prev_state: Option<Uuid>,
     pub fire: FireSpec,
     pub origin: Option<String>,
     pub slug: String,
+    pub completion: bool,
+    pub visit_delete: bool,
+    pub activity_current: Value,
+    pub activity_notification: Option<bool>,
+    pub activity_require_origin: bool,
+    pub activity_subscriber: Option<bool>,
 }
 
 pub async fn soft_delete(
@@ -1391,43 +1408,54 @@ pub async fn soft_delete(
     let enqueue = enqueue_hook(txn);
     let actor = ctx.actor.user_id;
     let mut fields = input.fields;
-    fields.deleted_at = Some(now_micros());
+    if fields.deleted_at.is_none() {
+        fields.deleted_at = Some(now_micros());
+    }
     let model = fields
         .into_full_save_active_model(actor_or_none(ctx))
         .update(&txn.connection())
         .await
         .map_err(DomainError::Db)?;
     // `to_spaced_json({"issue_id": ...})` is a single key, so no
-    // separator is ever involved: the `format!` is byte-identical and
-    // infallible (UUIDs need no escaping).
+    // separator is ever involved: the `format!` is byte-identical to the
+    // v1 `django_dumps` of the same map, and infallible (UUIDs need no
+    // escaping) — one `requested` serves both views.
     let requested = format!("{{\"issue_id\": \"{}\"}}", model.id);
-    let chain = vec![
-        ChainEffect::FireTransition {
+    let mut chain = Vec::with_capacity(5);
+    if input.completion {
+        chain.push(ChainEffect::CompletionIfChanged {
             issue_id: model.id,
             prev_state: input.prev_state,
             current_state: model.state_id,
-            spec: input.fire,
-            actor_id: actor,
-        },
-        ChainEffect::SoftDeleteTask { issue_id: model.id },
-        ChainEffect::VisitDelete {
+        });
+    }
+    chain.push(ChainEffect::FireTransition {
+        issue_id: model.id,
+        prev_state: input.prev_state,
+        current_state: model.state_id,
+        spec: input.fire,
+        actor_id: actor,
+    });
+    chain.push(ChainEffect::SoftDeleteTask { issue_id: model.id });
+    if input.visit_delete {
+        chain.push(ChainEffect::VisitDelete {
             project_id: model.project_id,
             slug: input.slug,
             issue_id: model.id,
-        },
-        ChainEffect::IssueActivity(IssueActivitySpec {
-            event: "issue.activity.deleted".to_owned(),
-            requested: Value::String(requested),
-            actor,
-            issue: model.id,
-            project: model.project_id,
-            current: Value::Object(Map::new()),
-            notification: Some(true),
-            origin: input.origin,
-            require_origin: true,
-            subscriber: Some(false),
-        }),
-    ];
+        });
+    }
+    chain.push(ChainEffect::IssueActivity(IssueActivitySpec {
+        event: "issue.activity.deleted".to_owned(),
+        requested: Value::String(requested),
+        actor,
+        issue: model.id,
+        project: model.project_id,
+        current: input.activity_current,
+        notification: input.activity_notification,
+        origin: input.origin,
+        require_origin: input.activity_require_origin,
+        subscriber: input.activity_subscriber,
+    }));
     let outcome = ChainOutcome::new();
     let step = outcome.clone();
     let pool = pool.clone();
@@ -1976,6 +2004,43 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&Value::Object(mine_model)).expect("json"),
             serde_json::to_string(&Value::Object(theirs_model)).expect("json"),
+        );
+    }
+
+    #[test]
+    fn draft_activity_kwargs_match_work_tasks_bytes() {
+        // The domain app-shaped leg must emit byte-identical kwargs to
+        // the `app_workspace::tasks` builder it replaces (`Map` is
+        // insertion-ordered workspace-wide, so key ORDER is load-bearing).
+        // `epoch` stamps twice, so it compares separately.
+        let mine = issue_activity_kwargs(
+            "issue.activity.created",
+            Value::String("req".to_owned()),
+            &uid(1),
+            &uid(2),
+            &uid(3),
+            Value::Null,
+            Some(true),
+            Some("https://app.example"),
+            None,
+        );
+        let theirs = crate::app_workspace::tasks::draft_issue_created_activity(
+            "req".to_owned(),
+            &uid(1).to_string(),
+            &uid(2).to_string(),
+            &uid(3).to_string(),
+            0,
+            "https://app.example",
+        )
+        .kwargs();
+        assert!(mine.get("epoch").and_then(Value::as_i64).unwrap_or(0) > 0);
+        let mut mine = mine;
+        let mut theirs = theirs;
+        mine.shift_remove("epoch");
+        theirs.shift_remove("epoch");
+        assert_eq!(
+            serde_json::to_string(&Value::Object(mine)).expect("json"),
+            serde_json::to_string(&Value::Object(theirs)).expect("json"),
         );
     }
 
