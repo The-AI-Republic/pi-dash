@@ -32,7 +32,8 @@
     "NEWFRONT-672": { "reason": "ISS-206 cloud worklog backend", "paths": ["^apps/api/pi_dash/db/models/worklog\\.py$", "^apps/api/pi_dash/db/models/__init__\\.py$", "^apps/api/pi_dash/db/migrations/01(69|7[0-9])_[A-Za-z0-9_]+\\.py$", "^apps/api/pi_dash/app/serializers/worklog\\.py$", "^apps/api/pi_dash/app/serializers/__init__\\.py$", "^apps/api/pi_dash/app/views/issue/worklog\\.py$", "^apps/api/pi_dash/app/urls/issue\\.py$", "^apps/api/pi_dash/bgtasks/issue_activities_task\\.py$", "^apps/api/pi_dash/tests/contract/app/test_issue_worklogs\\.py$"] },
     "NEWFRONT-914": { "reason": "pages custom-element storage (sanitizer + editor schema)", "paths": ["^apps/api/pi_dash/utils/content_validator\\.py$", "^apps/api/pi_dash/tests/unit/utils/test_content_validator\\.py$", "^packages/editor/src/core/extensions/entity-reference/", "^packages/editor/src/core/extensions/core-without-props\\.ts$", "^packages/editor/src/core/extensions/index\\.ts$", "^apps/live/tests/controllers/document-conversion\\.test\\.ts$"] },
     "NEWFRONT-931": { "reason": "PAGE-037 text-align server projection", "paths": ["^packages/editor/src/core/helpers/yjs-utils\\.ts$", "^apps/live/tests/controllers/document-conversion\\.test\\.ts$"] },
-    "NEWFRONT-932": { "reason": "PAGE-040 stored-embed structured snapshot read", "paths": ["^apps/api/pi_dash/app/serializers/page\\.py$", "^apps/api/pi_dash/tests/contract/api/test_pages\\.py$"] }
+    "NEWFRONT-932": { "reason": "PAGE-040 stored-embed structured snapshot read", "paths": ["^apps/api/pi_dash/app/serializers/page\\.py$", "^apps/api/pi_dash/tests/contract/api/test_pages\\.py$"] },
+    "NEWFRONT-128": { "reason": "merged issue history endpoint 500 (CMT-013)", "paths": ["^apps/api/pi_dash/app/views/issue/activity\\.py$", "^apps/api/pi_dash/tests/contract/api/test_issue_history\\.py$"] }
   },
   "oracleIssues": {
     "$comment": "Oracle issues may add data-testid attributes to the old apps, nothing else.",
