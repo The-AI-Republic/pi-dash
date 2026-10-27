@@ -2148,7 +2148,8 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async enableCreateMore(): Promise<void> {
-    return todo("enableCreateMore");
+    const toggle = this.createDialog().getByRole("switch", { name: "Create more" }).first();
+    await toggle.click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async modalPrimaryButtonLabel(): Promise<string> {
@@ -2160,7 +2161,9 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async gitBranchValue(): Promise<string> {
-    return todo("gitBranchValue");
+    const input = this.createDialog().locator("#git_work_branch").first();
+    if ((await input.count()) === 0) return "";
+    return input.inputValue();
   }
 
   async createTitleFocused(): Promise<boolean> {
@@ -2205,32 +2208,67 @@ export class WebNewDriver implements ParityDriver {
     await this.createDialog().getByRole("button", { name: "Publish issue", exact: true }).first().click();
   }
 
-  async openRowMenuEntry(_issueName: string, _entry: string): Promise<void> {
-    return todo("openRowMenuEntry");
+  async openRowMenuEntry(issueName: string, entry: string): Promise<void> {
+    // Right-click the row anchor: the row's context menu carries the
+    // same entries as its hover ellipsis. Retry once past live
+    // re-render detaches.
+    let lastError: unknown = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const row = this.page
+          .getByRole("region", { name: "Issues" })
+          .locator('a[data-row-anchor="true"]')
+          .filter({ hasText: issueName })
+          .first();
+        await row.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+        await row.click({ button: "right", timeout: WebNewDriver.WAIT_MS });
+        const item = this.page.getByRole("menuitem", { name: entry, exact: true }).first();
+        await item.waitFor({ timeout: WebNewDriver.WAIT_MS });
+        await item.click({ timeout: WebNewDriver.WAIT_MS });
+        return;
+      } catch (error) {
+        lastError = error;
+        await this.page.keyboard.press("Escape").catch(() => {});
+      }
+    }
+    throw lastError;
   }
 
-  async modalButtonDisabled(_name: string): Promise<boolean> {
-    return todo("modalButtonDisabled");
+  async modalButtonDisabled(name: string): Promise<boolean> {
+    return this.createDialog().getByRole("button", { name, exact: true }).first().isDisabled();
   }
 
   async openParentPicker(): Promise<void> {
-    return todo("openParentPicker");
+    const dialog = this.createDialog();
+    await dialog
+      .getByRole("button", { name: "Add parent", exact: true })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    // The search popover portals outside the dialog.
+    await this.page.getByLabel("Search work items").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
-  async searchParentInModal(_query: string): Promise<void> {
-    return todo("searchParentInModal");
+  async searchParentInModal(query: string): Promise<void> {
+    const search = this.page.getByLabel("Search work items").first();
+    await search.fill(query, { timeout: WebNewDriver.WAIT_MS });
   }
 
-  async selectParentResult(_issueName: string): Promise<void> {
-    return todo("selectParentResult");
+  async selectParentResult(issueName: string): Promise<void> {
+    // Candidate rows are plain buttons (identifier plus name), not
+    // options; the popover portals outside the dialog.
+    const row = this.page.locator("li").filter({ hasText: issueName }).getByRole("button").first();
+    await row.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.createDialog().getByTestId("parent-tag").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async parentResultNewTabLinks(): Promise<number> {
-    return todo("parentResultNewTabLinks");
+    return this.page.locator('a[target="_blank"]').count();
   }
 
-  async removeParentInModal(_issueName: string): Promise<void> {
-    return todo("removeParentInModal");
+  async removeParentInModal(issueName: string): Promise<void> {
+    const tag = this.createDialog().getByTestId("parent-tag").filter({ hasText: issueName }).first();
+    await tag.getByRole("button").first().click({ timeout: WebNewDriver.WAIT_MS });
+    await tag.waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
 
   async openLabelsPicker(): Promise<void> {
@@ -2257,8 +2295,14 @@ export class WebNewDriver implements ParityDriver {
     return (await option.getAttribute("aria-pressed")) === "true";
   }
 
-  async hoverIssueRow(_issueName: string): Promise<void> {
-    return todo("hoverIssueRow");
+  async hoverIssueRow(issueName: string): Promise<void> {
+    const row = this.page
+      .getByRole("region", { name: "Issues" })
+      .locator('a[data-row-anchor="true"]')
+      .filter({ hasText: issueName })
+      .first();
+    await row.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await row.hover({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async openToastViewAction(): Promise<string> {
@@ -2302,7 +2346,20 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async expandListRows(): Promise<boolean> {
-    return todo("expandListRows");
+    // Scroll first: section pagination can also trip on an intersection
+    // sentinel with no visible affordance.
+    await this.page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+    await this.page.waitForTimeout(2000);
+    const more = this.page.getByRole("button", { name: "Load more", exact: true });
+    const count = await more.count();
+    for (let i = 0; i < count; i++) {
+      await more
+        .nth(i)
+        .click()
+        .catch(() => undefined);
+      await this.page.waitForTimeout(1500);
+    }
+    return count > 0;
   }
 
   async switchIssueLayout(label: string): Promise<void> {
@@ -2336,15 +2393,23 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async toggleAdvancedGit(): Promise<void> {
-    return todo("toggleAdvancedGit");
+    const toggle = this.createDialog().getByRole("button", { name: "Advanced — git" }).first();
+    await toggle.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.createDialog().locator("#git_work_branch").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
-  async fillGitBranch(_branch: string): Promise<void> {
-    return todo("fillGitBranch");
+  async fillGitBranch(branch: string): Promise<void> {
+    const input = this.createDialog().locator("#git_work_branch").first();
+    await input.click({ timeout: WebNewDriver.WAIT_MS });
+    await input.press("ControlOrMeta+a");
+    await input.press("Backspace");
+    await input.pressSequentially(branch, { timeout: WebNewDriver.WAIT_MS });
   }
 
   async gitBranchError(): Promise<string> {
-    return todo("gitBranchError");
+    const alert = this.createDialog().locator("#git_work_branch-error").first();
+    if ((await alert.count()) === 0) return "";
+    return ((await alert.textContent()) ?? "").trim();
   }
 
   async fillDescription(text: string): Promise<void> {
@@ -2560,7 +2625,26 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async modalTabOrder(): Promise<string[]> {
-    return todo("modalTabOrder");
+    const dialog = this.createDialog();
+    return dialog.evaluate((element: HTMLElement) => {
+      const stops = Array.from(element.querySelectorAll("[tabindex]"));
+      const labelOf = (node: Element): string => {
+        const html = node as HTMLElement;
+        const labelled = html.getAttribute("aria-label")?.trim();
+        if (labelled) return labelled;
+        const placeholder =
+          (node as HTMLInputElement).placeholder?.trim() || (node as HTMLTextAreaElement).placeholder?.trim();
+        if (placeholder) return placeholder;
+        const id = html.id?.trim();
+        if (id) return id;
+        return (html.textContent ?? "").trim();
+      };
+      return stops.map((node) => {
+        const index = (node as HTMLElement).tabIndex;
+        const tag = node.tagName.toLowerCase();
+        return `${tag}#${index}:${labelOf(node)}`;
+      });
+    });
   }
 
   async focusCreateTitle(): Promise<void> {
@@ -2570,6 +2654,16 @@ export class WebNewDriver implements ParityDriver {
   async openCyclePage(workspaceSlug: string, projectId: string, cycleId: string): Promise<void> {
     await this.page.goto(`/${workspaceSlug}/projects/${projectId}/cycles/${cycleId}`, { timeout: 60_000 });
     await this.page.waitForLoadState("domcontentloaded");
+    await this.openContextSettled();
+  }
+
+  async openModulePage(workspaceSlug: string, projectId: string, moduleId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/modules/${moduleId}`, { timeout: 60_000 });
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.openContextSettled();
+  }
+
+  private async openContextSettled(): Promise<void> {
     // Settle on whatever the guard decides, the way project issues do:
     // the shared list header mounts with the rows, empty and error twins
     // alike (the labelled list box only wraps the not-found branches, so
@@ -2593,10 +2687,6 @@ export class WebNewDriver implements ParityDriver {
         await this.page.waitForTimeout(1_000);
       }
     }
-  }
-
-  async openModulePage(_workspaceSlug: string, _projectId: string, _moduleId: string): Promise<void> {
-    return todo("openModulePage");
   }
 
   // --- NEWFRONT-123 (home) stubs: mirror of the oracle driver additions. ---
