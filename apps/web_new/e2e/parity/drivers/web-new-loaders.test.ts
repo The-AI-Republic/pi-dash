@@ -134,9 +134,11 @@ describe("web-new request stalls", () => {
     await driver.layoutsStallIssuesGet(20);
     expect(stub.routes).toHaveLength(1);
     const { pattern, handler } = stub.routes[0] ?? { pattern: null, handler: null };
-    expect(String(pattern)).toBe(String(/\/issues\//));
+    expect(String(pattern)).toBe(String(/\/api\/.*\/issues\//));
     expect(pattern instanceof RegExp && pattern.test("/api/workspaces/w/projects/p/issues/")).toBe(true);
     expect(pattern instanceof RegExp && pattern.test("/api/workspaces/w/projects/")).toBe(false);
+    // Vite dev modules carry /issues/ segments but are not API calls.
+    expect(pattern instanceof RegExp && pattern.test("/src/features/issues/list/ListRow.tsx")).toBe(false);
     if (handler === null) throw new Error("no stall handler installed");
     let continued = 0;
     const started = Date.now();

@@ -9524,10 +9524,17 @@ export class WebNewDriver implements ParityDriver {
     return this.isShown(this.page.locator('article[data-temprow="true"]'));
   }
 
+  /**
+   * Issue API calls (and only those): the oracle's bare /issues/ pattern
+   * also matches vite dev module URLs (/src/.../issues/...), which stalls
+   * the app boot itself and breaks held chunk loads.
+   */
+  private static readonly ISSUES_API_PATTERN = /\/api\/.*\/issues\//;
+
   async layoutsStallIssuesGet(delayMs: number): Promise<void> {
     // Per-request holds: slow hosts only shift the loader window, and
     // non-GET traffic passes straight through.
-    await this.page.route(/\/issues\//, async (route) => {
+    await this.page.route(WebNewDriver.ISSUES_API_PATTERN, async (route) => {
       if (route.request().method() !== "GET") {
         await route.continue();
         return;
@@ -9541,7 +9548,7 @@ export class WebNewDriver implements ParityDriver {
 
   async layoutsStallIssueMutation(delayMs: number): Promise<void> {
     this.layoutsStalledMutations = 0;
-    await this.page.route(/\/issues\//, async (route) => {
+    await this.page.route(WebNewDriver.ISSUES_API_PATTERN, async (route) => {
       const method = route.request().method();
       if (method !== "POST" && method !== "PATCH" && method !== "PUT") {
         await route.continue();
