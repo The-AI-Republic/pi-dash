@@ -220,9 +220,12 @@ test(
 
     // Each presentation closes through its own mechanism: the header
     // control in side view, the backdrop in modal, Escape in full-screen.
-    // Note: the pasted priority address seeds pills but the initial fetch
-    // drops it (NEWFRONT-463), so the board underneath is unfiltered from
-    // load; close preserves that state exactly — it drops only the issue.
+    // The pasted priority address seeds the pill on both apps; whether the
+    // board underneath is already narrowed depends on the app (old bug
+    // NEWFRONT-463: the old load fetch drops the seeded filter, while
+    // web_new carries it). Close must preserve whichever board it opened
+    // over — it only drops the issue.
+    const boardBehind = driver.target === "web_new" ? [probe] : [...seed.issueNames, probe];
     for (const [mode, via] of [
       ["side", "header"],
       ["modal", "backdrop"],
@@ -239,7 +242,7 @@ test(
       expect(url.searchParams.get("board")).toBe("list");
       expect(url.searchParams.get("priority")).toBe("high");
       expect(await driver.spaceFiltersAppliedFacets()).toEqual([{ facet: "priority", values: ["high"] }]);
-      await expectBoardNames(driver, [...seed.issueNames, probe]);
+      await expectBoardNames(driver, boardBehind);
     }
 
     // Server-side the surviving parameters still narrow to the probe.
