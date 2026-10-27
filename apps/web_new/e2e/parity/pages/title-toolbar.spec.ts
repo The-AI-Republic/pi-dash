@@ -712,10 +712,12 @@ test(
         .poll(() => driver.pagesToolbarTableMenuEntries("column"), { timeout: 15_000 })
         .toEqual(["Insert left", "Insert right", "Duplicate", "Clear contents", "Delete"]);
 
-      // The caret sits in the first cell after insertion: mark it, then
-      // prove duplication copies content (the mark doubles), deleting the
-      // first row drops the original (the mark singles), and clearing the
-      // first row empties it.
+      // Both drivers open menus off the first cell's handle, so the caret
+      // is in the hovered row (r0c0) after the reads above: assert it, mark
+      // it, then prove duplication copies content (the mark doubles),
+      // deleting the first row drops the original (the mark singles), and
+      // clearing the first row empties it.
+      expect(await driver.pagesToolbarCaretCell()).toBe("r0c0");
       await driver.pagesToolbarTypeText("dup-me");
       await driver.pagesToolbarTableMenuPick("row", "Duplicate");
       await expect.poll(() => driver.pagesToolbarTableDims(), { timeout: 15_000 }).toBe("4x3");
@@ -727,7 +729,8 @@ test(
       await expect.poll(() => driver.pagesToolbarBodyHtml(), { timeout: 15_000 }).not.toContain("dup-me");
       await expect.poll(() => driver.pagesToolbarTableDims(), { timeout: 15_000 }).toBe("3x3");
 
-      // Columns mirror rows: mark the second row's first cell, prove the
+      // Columns mirror rows: the drivers act on the first column's
+      // handle, so mark a cell in the hovered column (r1c0), prove the
       // duplicate carries the mark, then narrow back.
       for (let walk = 0; walk < 6; walk += 1) {
         if ((await driver.pagesToolbarCaretCell()) === "r1c0") break;

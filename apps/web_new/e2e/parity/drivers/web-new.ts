@@ -29612,8 +29612,14 @@ export class WebNewDriver implements ParityDriver {
       .locator('.editor-container [contenteditable="true"] table tr:nth-child(1) > :nth-child(1)')
       .first();
   }
-  /** Hover the first cell so the handles raise, then open the `axis` menu. */
+  /**
+   * Click the first cell so the caret sits in the hovered line, hover it
+   * so the handles raise, then open the `axis` menu. The click mirrors
+   * the old driver's menu open: both legs act on the first row/column,
+   * so the caret must be there deterministically, not by luck.
+   */
   private async pagesToolbarTableOpenMenu(axis: "row" | "column"): Promise<Locator> {
+    await this.pagesToolbarTableFirstCell().click({ timeout: WebNewDriver.WAIT_MS });
     await this.pagesToolbarTableFirstCell().hover({ timeout: WebNewDriver.WAIT_MS });
     const { handle, menu } = this.pagesToolbarTableMenu(axis);
     await handle.click({ timeout: WebNewDriver.WAIT_MS });

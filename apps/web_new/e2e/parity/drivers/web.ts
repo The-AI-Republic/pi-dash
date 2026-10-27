@@ -40070,7 +40070,11 @@ export class WebDriver implements ParityDriver {
   /** The floating table menu holding the `axis` insert entry (PAGE-091). */
   private pagesOldTableMenu(axis: "row" | "column"): Locator {
     const insert = axis === "row" ? "Insert above" : "Insert left";
-    return this.page.locator(`div:has(> button:text-is("${insert}"))`).first();
+    // The menu is the insert entry's nearest ancestor div (the structure
+    // entries are its direct-child buttons). Engine selectors such as
+    // :text-is() are invalid inside CSS :has(), so anchor on the entry
+    // through getByRole and walk up instead of filtering by content.
+    return this.page.getByRole("button", { name: insert, exact: true }).locator("xpath=ancestor::div[1]").first();
   }
 
   /** Click the first cell so the hover-handle decorations mount, then open the `axis` menu. */
