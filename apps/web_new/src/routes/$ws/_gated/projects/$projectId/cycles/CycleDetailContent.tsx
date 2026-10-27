@@ -105,6 +105,9 @@ export function CycleDetailContent({
   const roles = useProjectRoles(workspaceSlug);
   const projectRow = useProjectRow(workspaceSlug, projectId);
   const projectTimeZone = projectRow.data?.timezone ?? "UTC";
+  // The estimate link comes from the retrieve row: the projects list
+  // answers a fixed .values() projection without it (EST-019).
+  const estimatesEnabled = projectRow.data?.estimate != null;
   const [sidebarCollapsed, setSidebarCollapsed] = useCycleSidebarCollapsed();
   // Stored rich filters scope the layouts; the first page only feeds
   // the totals and the empty-card decision.
@@ -446,7 +449,7 @@ export function CycleDetailContent({
             projectId={projectId}
             cycle={cycle}
             projectTimeZone={projectTimeZone}
-            estimatesEnabled={project.estimate != null}
+            estimatesEnabled={estimatesEnabled}
             editable={canEdit}
             onClose={() => setSidebarCollapsed(true)}
           />

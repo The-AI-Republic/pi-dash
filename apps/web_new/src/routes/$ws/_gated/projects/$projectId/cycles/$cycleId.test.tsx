@@ -20,7 +20,11 @@ const mocks = vi.hoisted(() => ({
   projects: vi.fn(),
   cycle: vi.fn(),
   roles: { current: { data: {} as Record<string, number>, isPending: false } },
-  projectRow: { current: { data: { timezone: "America/New_York" } as { timezone?: string } | undefined } },
+  projectRow: {
+    current: {
+      data: { timezone: "America/New_York" } as { timezone?: string; estimate?: string | null } | undefined,
+    },
+  },
   sidebarCollapsed: { current: false },
   setSidebarCollapsed: vi.fn(),
   layout: { current: "list" },
@@ -998,12 +1002,35 @@ describe("cycle detail route", () => {
   });
 
   it("enables estimates when the project carries an estimate system", async () => {
+    // The projects list answers a fixed .values() projection without the
+    // estimate link (ProjectViewSet.list), so the list seed omits it the
+    // way the server does; the retrieve row carries the link.
+    const { estimate: _listNeverSends, ...listRow } = projectSeed();
+    expect(_listNeverSends).toBeNull();
+    mocks.projects.mockReturnValue({ queryKey: ["projects"], queryFn: async () => [listRow] });
+    mocks.projectRow.current = { data: { timezone: "America/New_York", estimate: "eid-1" } };
+    renderRoute();
+    expect(await screen.findByTestId("detail-sidebar")).toHaveAttribute("data-estimates", "true");
+  });
+
+  it("ignores an estimate link on the list row; the retrieve row decides", async () => {
     mocks.projects.mockReturnValue({
       queryKey: ["projects"],
       queryFn: async () => [projectSeed({ estimate: "eid-1" })],
     });
+    mocks.projectRow.current = { data: { timezone: "America/New_York", estimate: null } };
     renderRoute();
-    expect(await screen.findByTestId("detail-sidebar")).toHaveAttribute("data-estimates", "true");
+    expect(await screen.findByTestId("detail-sidebar")).toHaveAttribute("data-estimates", "false");
+  });
+
+  it("disables estimates while the project row resolves", async () => {
+    mocks.projects.mockReturnValue({
+      queryKey: ["projects"],
+      queryFn: async () => [projectSeed({ estimate: "eid-1" })],
+    });
+    mocks.projectRow.current = { data: undefined };
+    renderRoute();
+    expect(await screen.findByTestId("detail-sidebar")).toHaveAttribute("data-estimates", "false");
   });
 
   it("falls back to UTC without a project row or timezone", async () => {
