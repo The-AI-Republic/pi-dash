@@ -68,6 +68,8 @@ export function IssueDescriptionField({
   const pipelineRef = React.useRef(pipeline);
   pipelineRef.current = pipeline;
   const timerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The HTML a save currently in flight is carrying, if any.
+  const inflightRef = React.useRef<string | null>(null);
 
   const clearTimer = (): void => {
     if (timerRef.current !== null) {
@@ -79,18 +81,33 @@ export function IssueDescriptionField({
   const flush = React.useCallback((): void => {
     clearTimer();
     if (!dirtyRef.current) return;
+    // A save already in flight owns the next settle: stay dirty so its
+    // resolver re-flushes the trailing edits. This also keeps
+    // overlapping flushes (double blur, blur plus unmount) from
+    // double-sending.
+    if (inflightRef.current !== null) return;
     // Dirty implies latest differs from saved: emissions identical to
     // the saved HTML return early in onChange, and every savedRef
     // assignment clears the flag.
     const html = latestRef.current;
+    inflightRef.current = html;
     pipelineRef.current.markSaving();
     void saveRef.current(html).then(
       () => {
-        savedRef.current = html;
-        dirtyRef.current = false;
-        pipelineRef.current.markSaved();
+        inflightRef.current = null;
+        // Only converge when nothing newer arrived mid-flight. Edits
+        // typed while the save was out are still dirty: send them now
+        // instead of marking them clean with this stale snapshot.
+        if (latestRef.current === html) {
+          savedRef.current = html;
+          dirtyRef.current = false;
+          pipelineRef.current.markSaved();
+        } else {
+          flushRef.current();
+        }
       },
       () => {
+        inflightRef.current = null;
         // Stays dirty: the next edit, blur, or unmount retries.
         pipelineRef.current.markSaved();
       }

@@ -246,4 +246,70 @@ describe("IssueDescriptionField", () => {
     expect(container.querySelector("[contenteditable='true']")).toBeNull();
     expect(onSave).not.toHaveBeenCalled();
   });
+
+  it("persists edits typed while a save is in flight", async () => {
+    const user = userEvent.setup();
+    let resolveSave!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      resolveSave = resolve;
+    });
+    const onSave = vi.fn(async (_html: string) => {});
+    onSave.mockImplementationOnce(() => gate);
+    function Host(): React.ReactElement {
+      const pipeline = useSavePipeline();
+      return (
+        <>
+          <IssueDescriptionField value="<p>base</p>" disabled={false} pipeline={pipeline} onSave={onSave} />
+          <p data-testid="pipeline-status">{pipeline.status}</p>
+        </>
+      );
+    }
+    render(<Host />);
+    const editable = await openEditor();
+    editable.focus();
+    await user.keyboard(" first");
+    fireEvent.blur(editable);
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    // More keystrokes land while that save is still in flight.
+    editable.focus();
+    await user.keyboard(" second");
+    resolveSave();
+    // No further input: the trailing edits go out on their own.
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(2));
+    expect((onSave.mock.calls[1]?.[0] as string) ?? "").toContain("second");
+    await waitFor(() => expect(status()).toBe("saved"));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(onSave).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not double-send on overlapping flushes", async () => {
+    const user = userEvent.setup();
+    let resolveSave!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      resolveSave = resolve;
+    });
+    const onSave = vi.fn(async (_html: string) => {});
+    onSave.mockImplementationOnce(() => gate);
+    function Host(): React.ReactElement {
+      const pipeline = useSavePipeline();
+      return (
+        <>
+          <IssueDescriptionField value="<p>base</p>" disabled={false} pipeline={pipeline} onSave={onSave} />
+          <p data-testid="pipeline-status">{pipeline.status}</p>
+        </>
+      );
+    }
+    render(<Host />);
+    const editable = await openEditor();
+    editable.focus();
+    await user.keyboard(" once");
+    fireEvent.blur(editable);
+    fireEvent.blur(editable);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(onSave).toHaveBeenCalledTimes(1);
+    resolveSave();
+    await waitFor(() => expect(status()).toBe("saved"));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(onSave).toHaveBeenCalledTimes(1);
+  });
 });
