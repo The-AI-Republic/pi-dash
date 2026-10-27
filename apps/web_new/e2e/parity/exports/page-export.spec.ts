@@ -824,8 +824,10 @@ test(
     await test.step("settings pickers are Tab-reachable", async () => {
       await driver.exportsSettingsOpen(world.workspaceSlug, browserSessionCookies(world.owner));
       await expect.poll(() => driver.exportsSettingsAccess(), { timeout: 60_000 }).toBe("form");
-      // Intended: every control tab-reachable.
-      expect(await controlTabIndex(driver, "page", "all projects")).toBe(0);
+      // Intended: every control tab-reachable. The guide mounts
+      // asynchronously behind the settings frame, so the first read
+      // polls until it lands.
+      await expect.poll(() => controlTabIndex(driver, "page", "all projects"), { timeout: 60_000 }).toBe(0);
       expect(await controlTabIndex(driver, "page", "csv")).toBe(0);
       expect(await controlTabIndex(driver, "page", "refresh status")).toBe(0);
     });
