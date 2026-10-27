@@ -10,8 +10,8 @@
 //! `db_error` logged before the move. Handlers keep logging through
 //! their own `db_error`, so operator-visible logs are unchanged too.
 //!
-//! Re-exported through `pidash-sdk::read` once OVL-02
-//! (PIDASHCONV-1540) lands the facade crate.
+//! Re-exported through `pidash-sdk::read` (the facade's `read`
+//! module carries this root API item for item).
 
 pub mod comment;
 pub mod identity;
@@ -146,6 +146,7 @@ mod surface {
     use crate::app_issues::issue_move::MoveStore;
     use crate::app_issues::pr_links::PrLinksStore;
     use crate::assistant::seams::{agent_model_profile_for_user, has_usable_llm_config};
+    use crate::integrations::adapters_github::GithubClient;
 
     #[test]
     fn already_public_names_stay_public() {
@@ -153,6 +154,7 @@ mod surface {
         // live on these traits); the bounds are never instantiated.
         fn _needs_pr_links<T: PrLinksStore>() {}
         fn _needs_move<T: MoveStore>() {}
+        fn _needs_github<T: GithubClient>() {}
         // The assistant seams are callable pure decisions.
         assert!(has_usable_llm_config(true));
         assert!(!has_usable_llm_config(false));
