@@ -25,6 +25,7 @@ pub mod auth_session;
 pub mod dispatch;
 pub mod extensions;
 pub mod health;
+pub mod html_normalize;
 pub mod integrations;
 pub mod license;
 pub mod r#loop;

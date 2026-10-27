@@ -80,6 +80,11 @@ tracing = "0.1"
 # PIDASHCONV-1280 link-crawler titles: WHATWG decoding for Dammit-declared
 # charsets (shift_jis, windows-125x, utf-16, ...). Pure-Rust, no C build.
 encoding_rs = "0.8"
+# PIDASHCONV-1554 stored-HTML normaliser: fragment parsing (same locked
+# html5ever 0.39.x / markup5ever_rcdom 0.39.x pair as pidash-api, no lock
+# churn beyond the new edges).
+html5ever = "0.39"
+markup5ever_rcdom = "0.39.0"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }
