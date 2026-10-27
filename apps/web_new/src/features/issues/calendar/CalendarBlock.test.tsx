@@ -12,8 +12,6 @@ import {
   CALENDAR_DRAG_THRESHOLD_PX,
   CalendarBlock,
   blockIdentifier,
-  previewDateLine,
-  stateGroupIcon,
 } from "./CalendarBlock.js";
 
 const ISSUE_ID = "323e4567-e89b-12d3-a456-426614174002";
@@ -117,40 +115,71 @@ describe("CalendarBlock", () => {
     expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
   });
 
-  it("shows state, priority and dates in the hover preview", () => {
+  it("shows the shared preview card on hover: key, state, title, priority and dates (ISS-133)", () => {
     vi.useFakeTimers();
-    renderBlock(row({ priority: "high", start_date: "2026-10-01", target_date: "2026-10-20" }), false, {
+    renderBlock(row({ priority: "urgent", start_date: "2026-10-01", target_date: "2026-10-20" }), false, {
       stateName: "In progress",
       stateGroup: "started",
     });
     fireEvent.pointerEnter(screen.getByRole("link", { name: "WEB-42" }));
     act(() => vi.advanceTimersByTime(CALENDAR_BLOCK_PREVIEW_DELAY_MS));
-    const card = screen.getByRole("tooltip");
-    expect(card).toHaveTextContent("In progress");
-    expect(card).toHaveTextContent("high");
-    expect(card).toHaveTextContent("2026-10-01 → 2026-10-20");
+    const tooltip = screen.getByRole("tooltip");
+    expect(tooltip).toHaveAttribute("data-calendar-preview", "true");
+    const card = screen.getByTestId("work-item-preview");
+    expect(tooltip).toContainElement(card);
+    expect(card).toHaveTextContent("WEB-42");
+    expect(screen.getByTestId("preview-card-state")).toHaveTextContent("In progress");
+    expect(card).toHaveTextContent("Fix login");
+    expect(screen.getByTestId("preview-card-dates")).toHaveTextContent("Oct 01, 2026 - Oct 20, 2026");
+    expect(screen.getByTestId("preview-card-priority").querySelector("svg.lucide-circle-alert")).not.toBeNull();
   });
 
-  it("marks the hover-preview priority with its level glyph", () => {
+  it("marks the hover-preview priority with its level glyph (ISS-133)", () => {
     vi.useFakeTimers();
     renderBlock(row({ priority: "high" }));
     fireEvent.pointerEnter(screen.getByRole("link", { name: "WEB-42" }));
     act(() => vi.advanceTimersByTime(CALENDAR_BLOCK_PREVIEW_DELAY_MS));
-    const priority = screen.getByTestId("calendar-block-priority");
+    const priority = screen.getByTestId("preview-card-priority");
     expect(priority.querySelector("svg.lucide-signal-high")).not.toBeNull();
     expect(priority.querySelector("svg.lucide-chevron-up")).toBeNull();
   });
 
-  it("describes partial and absent date lines", () => {
-    expect(previewDateLine(row({ start_date: "2026-10-01", target_date: null }))).toBe("Starts 2026-10-01");
-    expect(previewDateLine(row({ start_date: null, target_date: "2026-10-20" }))).toBe("Due 2026-10-20");
-    expect(previewDateLine(row({ start_date: null, target_date: null }))).toBeNull();
+  it("renders a priority glyph even when the priority is none (ISS-133)", () => {
+    vi.useFakeTimers();
+    renderBlock(row({ priority: "none" }));
+    fireEvent.pointerEnter(screen.getByRole("link", { name: "WEB-42" }));
+    act(() => vi.advanceTimersByTime(CALENDAR_BLOCK_PREVIEW_DELAY_MS));
+    expect(screen.getByTestId("preview-card-priority").querySelector("svg.lucide-ban")).not.toBeNull();
   });
 
-  it("maps every state group to an icon", () => {
-    for (const group of ["backlog", "unstarted", "started", "review", "test", "completed", "cancelled", null]) {
-      expect(stateGroupIcon(group)).not.toBeNull();
-    }
+  it("highlights an overdue due date and keeps a future range plain (ISS-133)", () => {
+    vi.useFakeTimers();
+    renderBlock(row({ target_date: "2000-01-03" }), false, { stateName: "Doing", stateGroup: "started" });
+    fireEvent.pointerEnter(screen.getByRole("link", { name: "WEB-42" }));
+    act(() => vi.advanceTimersByTime(CALENDAR_BLOCK_PREVIEW_DELAY_MS));
+    const overdue = screen.getByTestId("preview-card-dates");
+    expect(overdue).toHaveTextContent("Jan 03, 2000");
+    expect(overdue).toHaveAttribute("data-overdue", "true");
+    expect(overdue.className).toContain("text-(--danger)");
+    cleanup();
+    renderBlock(row({ start_date: "2999-02-01", target_date: "2999-02-02" }), false, {
+      stateName: "Doing",
+      stateGroup: "started",
+    });
+    fireEvent.pointerEnter(screen.getByRole("link", { name: "WEB-42" }));
+    act(() => vi.advanceTimersByTime(CALENDAR_BLOCK_PREVIEW_DELAY_MS));
+    const plain = screen.getByTestId("preview-card-dates");
+    expect(plain).toHaveTextContent("Feb 01, 2999 - Feb 02, 2999");
+    expect(plain).not.toHaveAttribute("data-overdue");
+    expect(plain.className).toContain("text-(--text-muted)");
+  });
+
+  it("shows the state name in the preview even when its group is unknown (ISS-133)", () => {
+    vi.useFakeTimers();
+    renderBlock(row(), false, { stateName: "Doing", stateGroup: null });
+    fireEvent.pointerEnter(screen.getByRole("link", { name: "WEB-42" }));
+    act(() => vi.advanceTimersByTime(CALENDAR_BLOCK_PREVIEW_DELAY_MS));
+    expect(screen.getByTestId("preview-card-state")).toHaveTextContent("Doing");
   });
 
   it("opens Edit and Delete from the hover quick actions", async () => {
