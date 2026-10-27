@@ -126,7 +126,10 @@ test(
 
     await driver.layoutsRowMenuChoose(first, "Edit");
     await expect.poll(async () => driver.layoutsWorkItemModalVisible(), { timeout: 60_000 }).toEqual(true);
-    expect(await driver.layoutsWorkItemModalTitle()).toEqual("Update");
+    // The heading is each app's own copy (spec §7, NEWFRONT-934): the old
+    // app says "Update", the rebuild "Update work item". Pin the intent —
+    // an edit-mode heading naming an update — so both apps pass.
+    expect(await driver.layoutsWorkItemModalTitle()).toMatch(/update/i);
     expect(await driver.layoutsWorkItemModalHasText(first)).toEqual(true);
     await driver.layoutsWorkItemModalClose();
     expect(await driver.layoutsWorkItemModalVisible()).toEqual(false);

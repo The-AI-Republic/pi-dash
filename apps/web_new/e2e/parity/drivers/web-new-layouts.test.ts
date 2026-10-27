@@ -206,6 +206,33 @@ describe("web_new work-item modal driver", () => {
     expect(roles.filter((row) => row.role === "dialog").length).toBeGreaterThan(0);
   });
 
+  it("reads the edit-mode heading the scenario matches by intent (ISS-060)", async () => {
+    // The same dialog serves edit mode; its heading wording is the app's
+    // own copy (spec §7, NEWFRONT-934). The driver must surface whatever
+    // sentence the heading carries, trimmed, so the scenario can pin the
+    // intent with a case-insensitive match instead of the old app's text.
+    const filters: unknown[] = [];
+    const dialog = locator({ count: async () => 1 });
+    dialog.getByRole = () => locator({ first: () => locator({ innerText: async () => "  Update work item  " }) });
+    dialog.filter = (options: unknown) => {
+      filters.push(options);
+      return dialog;
+    };
+    const { page } = pageOf({
+      role: (role) => (role === "dialog" ? dialog : locator()),
+      placeholder: (text) => (text === "Title" ? locator() : locator({ count: async () => 0 })),
+    });
+
+    const heading = await new WebNewDriver(page).layoutsWorkItemModalTitle();
+    expect(heading).toBe("Update work item");
+    expect(heading ?? "").toMatch(/update/i);
+    // The dialog is still picked out by its Title field, so a strip or
+    // confirmation dialog with another heading never answers for it.
+    expect(filters).toHaveLength(1);
+    expect(Object.keys(filters[0] as Record<string, unknown>)).toEqual(["has"]);
+    expect(await new WebNewDriver(page).layoutsWorkItemModalVisible()).toBe(true);
+  });
+
   it("reports no modal when no dialog exists", async () => {
     const { page } = pageOf({
       role: () => locator({ count: async () => 0 }),
