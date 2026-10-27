@@ -1725,6 +1725,76 @@ fn json_truthy(value: &serde_json::Value) -> bool {
     }
 }
 
+/// Coerce the raw `name` JSON scalar exactly as the retired typed bind
+/// did: the database spelled ints/uints/floats/bools server-side, so the
+/// driver renders those spellings. A uint past `i64::MAX` wraps (the old
+/// `uint as i64` bind — ported quirk); a bool renders lowercase
+/// (`true`/`false`, where Django `str()` spells `True`/`False` — ported
+/// Tier-3 divergence, no client sends bool names). Containers and null
+/// have no adaptation (Django raises → 500).
+fn coerce_name(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(text) => Some(text.clone()),
+        serde_json::Value::Number(number) => {
+            if let Some(int) = number.as_i64() {
+                Some(int.to_string())
+            } else if let Some(uint) = number.as_u64() {
+                Some((uint as i64).to_string())
+            } else {
+                number.as_f64().map(pg_float_text)
+            }
+        }
+        serde_json::Value::Bool(flag) => Some(flag.to_string()),
+        _ => None,
+    }
+}
+
+/// `float8::text` (`float8out`, `extra_float_digits = 1`): shortest
+/// roundtrip digits, exponent form when the decimal exponent is below
+/// -4 or at/above 17, two-digit exponents (`1e+20`, `1e-05`). Rust's
+/// `Display` already emits the shortest digits; only the exponent
+/// decision differs. Vectors verified against Postgres 16.
+fn pg_float_text(float: f64) -> String {
+    if float.is_infinite() {
+        return if float.is_sign_negative() {
+            "-Infinity".to_owned()
+        } else {
+            "Infinity".to_owned()
+        };
+    }
+    if float.is_nan() {
+        return "NaN".to_owned();
+    }
+    let plain = format!("{float}");
+    let sign = if plain.starts_with('-') { "-" } else { "" };
+    let digits: String = plain.chars().filter(|c| c.is_ascii_digit()).collect();
+    let sig = digits.trim_start_matches('0');
+    if sig.is_empty() {
+        return "0".to_owned();
+    }
+    let point = plain.find('.');
+    let exp = match point {
+        Some(dot) => {
+            let int_digits = plain[..dot]
+                .trim_start_matches('-')
+                .trim_start_matches('0')
+                .len();
+            if int_digits > 0 {
+                int_digits as i32 - 1
+            } else {
+                -(digits.len() as i32 - sig.len() as i32)
+            }
+        }
+        None => plain.trim_start_matches('-').trim_start_matches('0').len() as i32 - 1,
+    };
+    if !(-4..17).contains(&exp) {
+        let mantissa = format!("{}.{}", &sig[..1], sig[1..].trim_end_matches('0'));
+        let mantissa = mantissa.trim_end_matches('.');
+        return format!("{sign}{mantissa}e{exp:+03}");
+    }
+    plain
+}
+
 /// The git-sync lock message (`app/serializers/issue.py:225`).
 const SYNC_LOCKED_MESSAGE: &str =
     "This field is synced from a Git provider and is read-only. Unbind the project's repository to edit.";
@@ -2047,11 +2117,11 @@ async fn collection_create(
         Some(serde_json::Value::String(html)) => Some(html.clone()),
         Some(_) => return Denial::ServerError.into_response(),
     };
-    // Only strings reach the old INSERT: numbers/bools die in Postgres
-    // with 42804, arrays/objects in the text binder — every non-string
-    // that passed the gate answers 500, after the triage side effects
-    // above and before any issue row exists.
-    let serde_json::Value::String(name) = &name_value else {
+    // The old INSERT bound the raw JSON scalar and let Postgres coerce
+    // server-side (psycopg adaptation parity): ints/uints/floats/bools
+    // render exactly as the database spells them. Containers and null
+    // have no adaptation (Django raises → 500).
+    let Some(name) = coerce_name(&name_value) else {
         return Denial::ServerError.into_response();
     };
     let Some(description_html) = description_html else {
@@ -2642,5 +2712,55 @@ mod tests {
         );
         assert_eq!(message.kwargs.get("using"), Some(&serde_json::Value::Null));
         assert_eq!(message.kwargs.len(), 1);
+    }
+
+    #[test]
+    fn coerce_name_matches_retired_typed_binds() {
+        use serde_json::{Number, Value};
+        // Strings pass through; ints/uints spell decimally.
+        assert_eq!(
+            coerce_name(&Value::String("x".to_owned())),
+            Some("x".to_owned())
+        );
+        assert_eq!(
+            coerce_name(&Value::Number(Number::from(12345))),
+            Some("12345".to_owned())
+        );
+        assert_eq!(
+            coerce_name(&Value::Number(Number::from(-7))),
+            Some("-7".to_owned())
+        );
+        // A uint past i64::MAX wraps, as the old `uint as i64` bind did.
+        assert_eq!(
+            coerce_name(&Value::Number(Number::from(u64::MAX))),
+            Some("-1".to_owned())
+        );
+        // Bools render lowercase (Postgres spelling, not Django's `True`).
+        assert_eq!(coerce_name(&Value::Bool(true)), Some("true".to_owned()));
+        assert_eq!(coerce_name(&Value::Bool(false)), Some("false".to_owned()));
+        // Containers and null have no adaptation.
+        assert_eq!(coerce_name(&Value::Null), None);
+        assert_eq!(coerce_name(&Value::Array(vec![])), None);
+        assert_eq!(coerce_name(&Value::Object(serde_json::Map::new())), None);
+    }
+
+    #[test]
+    fn pg_float_text_matches_float8out() {
+        // Vectors verified against Postgres 16 (`SELECT x::float8::text`).
+        for (input, expected) in [
+            (1.5, "1.5"),
+            (100000.0, "100000"),
+            (1e20, "1e+20"),
+            (0.00001, "1e-05"),
+            (123.456, "123.456"),
+            (0.1, "0.1"),
+            (0.0001, "0.0001"),
+            (-1e20, "-1e+20"),
+            (0.0, "0"),
+        ] {
+            assert_eq!(pg_float_text(input), expected, "float {input}");
+        }
+        assert_eq!(pg_float_text(f64::INFINITY), "Infinity");
+        assert_eq!(pg_float_text(f64::NEG_INFINITY), "-Infinity");
     }
 }
