@@ -165,6 +165,36 @@ describe("useGanttMutations dates", () => {
     act(() => h.release());
   });
 
+  it("keeps the dropped dates when an older list read resolves late (ISS-051)", async () => {
+    const h = setup();
+    let resolveRead: ((value: { results: Array<Record<string, unknown>>; total_count: number }) => void) | null = null;
+    let readStarted = false;
+    const read = h.queryClient.fetchQuery({
+      queryKey: issueKeys.lists(SLUG, PROJECT),
+      queryFn: () => {
+        readStarted = true;
+        return new Promise((resolve) => {
+          resolveRead = resolve;
+        });
+      },
+      staleTime: 0,
+    });
+    await waitFor(() => expect(readStarted).toBe(true));
+
+    act(() => h.mutations().moveBar("a", { startDate: "2026-10-04", endDate: "2026-10-06" }));
+    await waitFor(() => expect(h.calls.some((call) => call.method === "POST")).toBe(true));
+    expect(h.data().results[0]).toMatchObject({ start_date: "2026-10-04", target_date: "2026-10-06" });
+
+    // The request began before the drop and returns the pre-drop dates
+    // afterwards. It must not replace the newer optimistic dates.
+    resolveRead!({ results: ROWS, total_count: ROWS.length });
+    await act(async () => {
+      await read.catch(() => undefined);
+    });
+    expect(h.data().results[0]).toMatchObject({ start_date: "2026-10-04", target_date: "2026-10-06" });
+    act(() => h.release());
+  });
+
   it("plants a block through the single issue PATCH", async () => {
     const h = setup();
     act(() => h.mutations().plantBlock("b", { startDate: "2026-10-09", endDate: "2026-10-10" }));

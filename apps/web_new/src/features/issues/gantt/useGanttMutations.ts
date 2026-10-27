@@ -66,6 +66,10 @@ export function useGanttMutations(workspaceSlug: string, projectId: string): Gan
 
   const dates = useMutation<void, Error, { issueId: string; input: IssueDatesInput; batch: boolean }>({
     mutationFn: async ({ issueId, input, batch }) => {
+      // A list read that started before the drop can resolve after the
+      // optimistic paint and restore the pre-drag dates. Stop those reads
+      // first so the bar settles on the dates this write commits (ISS-051).
+      await queryClient.cancelQueries({ queryKey: listsPrefix });
       const snapshots = snapshotQueries(queryClient, listsPrefix);
       for (const snapshot of snapshots) {
         queryClient.setQueryData(snapshot.queryKey, withIssueDates(snapshot.data, issueId, input));
@@ -84,6 +88,14 @@ export function useGanttMutations(workspaceSlug: string, projectId: string): Gan
             start_date: input.startDate,
             target_date: input.endDate,
           });
+        }
+        // The batch endpoint commits this exact pair. Reassert it after the
+        // write in case a read raced the request's success (ISS-051).
+        for (const snapshot of snapshots) {
+          queryClient.setQueryData(
+            snapshot.queryKey,
+            withIssueDates(queryClient.getQueryData(snapshot.queryKey), issueId, input)
+          );
         }
       } catch (error) {
         rollbackSnapshots(queryClient, snapshots);
