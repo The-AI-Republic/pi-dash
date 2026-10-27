@@ -25,12 +25,7 @@ import {
   SMTP_TLS_KEY,
   SMTP_USER_KEY,
 } from "../emailConfig.js";
-import {
-  EMAIL_DISABLE_FAILED_MESSAGE,
-  EMAIL_DISABLE_FAILED_TITLE,
-  EMAIL_DISABLED_TOAST_MESSAGE,
-  EMAIL_DISABLED_TOAST_TITLE,
-} from "../hooks.js";
+import { EMAIL_DISABLED_TOAST_MESSAGE, EMAIL_DISABLED_TOAST_TITLE } from "../hooks.js";
 import { AdminEmailPage, EMAIL_PAGE_TITLE } from "./AdminEmailPage.js";
 
 function smtpRow(key: string, value: string | null) {
@@ -217,7 +212,10 @@ describe("AdminEmailPage", () => {
   });
 
   it("keeps the toggle on with the form visible when the disable fails (NEWFRONT-476 intent)", async () => {
-    vi.spyOn(console, "error").mockImplementation(() => {});
+    const errors: unknown[][] = [];
+    vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      errors.push(args);
+    });
     createAppClient(
       "https://api.test",
       stubTransport({
@@ -233,8 +231,15 @@ describe("AdminEmailPage", () => {
 
     fireEvent.click(screen.getByTestId("admin-email-toggle"));
     await waitFor(() => expect(notifyError).toHaveBeenCalled());
-    expect(notifyError).toHaveBeenCalledWith(EMAIL_DISABLE_FAILED_TITLE, EMAIL_DISABLE_FAILED_MESSAGE);
+    // Literal strings: these are what the parity driver and the acceptance
+    // criteria match, so pinning the constants alone would let the copy
+    // drift while the test stayed green.
+    expect(notifyError).toHaveBeenCalledWith(
+      "Could not disable email",
+      "The email settings were left unchanged. Try again."
+    );
     expect(notifySuccess).not.toHaveBeenCalled();
+    expect(errors.some((args) => args[0] === "Error disabling the email")).toBe(true);
     expect(screen.getByTestId("admin-email-toggle")).toHaveAttribute("aria-checked", "true");
     expect(screen.getByTestId("admin-email-form")).toBeInTheDocument();
     expect(screen.getByTestId("admin-email-host")).toHaveValue("smtp.example.com");
