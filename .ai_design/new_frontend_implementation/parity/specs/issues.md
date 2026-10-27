@@ -976,7 +976,13 @@ items, and disables while in flight. The header ellipsis (ISS-162)
 holds the destructive and navigation entries with role gating:
 delete redirects to the issues list (archives for archived items)
 with a toast, archive redirects with a toast, restore toasts and
-navigates to the item. The identifier (ISS-163) renders the short
+navigates to the item. The delete/archive confirmation headings'
+exact wording is each app's own copy, not a parity property — the
+rebuild says "Delete work item" and "Archive work item IDENT SEQ",
+the old app says "Delete Work item" and "Archive Work item IDENT
+SEQ", and the oracle scenario pins the intent (a confirmation
+heading naming the verb and the record) so it passes on both
+(NEWFRONT-944). The identifier (ISS-163) renders the short
 code plus sequence, click-to-copy with toast and tooltip, hidden when
 the key display property is off; work-item type switching and the
 type badge are cloud-only, so this build shows only the copyable id

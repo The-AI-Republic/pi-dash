@@ -329,8 +329,11 @@ test(
       await expect.poll(() => driver.sidebarProperty("State"), { timeout: 30_000 }).not.toBeNull();
       await test.step("delete asks for confirmation naming the work item", async () => {
         await driver.clickQuickAction("Delete");
-        // The modal mounts asynchronously after the menu closes.
-        await expect.poll(() => driver.confirmModalText(), { timeout: 30_000 }).toContain("Delete Work item");
+        // The modal mounts asynchronously after the menu closes. The
+        // heading's casing is each app's own copy ("Delete Work item" on
+        // the old app, "Delete work item" on the rebuild), so the scenario
+        // pins the intent, not the sentence (NEWFRONT-944).
+        await expect.poll(() => driver.confirmModalText(), { timeout: 30_000 }).toMatch(/delete work item/i);
         await expect.poll(() => driver.confirmModalText(), { timeout: 30_000 }).toContain(issue.seq);
       });
       await test.step("confirming toasts and redirects to the issues list", async () => {
@@ -380,8 +383,11 @@ test(
         await driver.clickQuickAction("Archive");
         // The modal mounts asynchronously after the menu closes, and it
         // renders the identifier and sequence as separate runs ("PAR 565").
+        // The heading's casing is each app's own copy ("Archive Work item"
+        // on the old app, "Archive work item" on the rebuild), so the
+        // scenario pins the intent, not the sentence (NEWFRONT-944).
         const [ident, num] = issue.seq.split("-");
-        await expect.poll(() => driver.confirmModalText(), { timeout: 30_000 }).toContain("Archive Work item");
+        await expect.poll(() => driver.confirmModalText(), { timeout: 30_000 }).toMatch(/archive work item/i);
         await expect.poll(() => driver.confirmModalText(), { timeout: 30_000 }).toContain(`${ident} ${num}`);
         await driver.confirmModal("Archive");
         await expect.poll(() => driver.lastToast(), { timeout: 30_000 }).toContain("Archive success");
