@@ -172,3 +172,17 @@ export function parityApiUrl(env: Env): string {
 export function parityOracleAdminUrl(env: Env): string {
   return pick(env, "PARITY_ORACLE_ADMIN_URL") ?? `${parityOracleUrl(env).replace(/\/+$/, "")}/god-mode`;
 }
+
+/**
+ * Which edition the NEW build serves (VIEW-019/020/040, parity/specs/views.md
+ * §14). The stack itself only knows the oracle's edition
+ * (`PARITY_ORACLE_EDITION`); `web_new` is built separately through
+ * `PIDASH_EDITION_MODULE`, so a run that points `PARITY_NEW_URL` at a cloud
+ * build declares it with `PARITY_NEW_EDITION=cloud`. Unset means the OSS
+ * build, exactly as before. Edition-gated rows skip their cloud leg unless
+ * this says cloud, so a mixed stack never scores a cloud leg off the OSS
+ * tower.
+ */
+export function isCloudNewEdition(env: Env = process.env): boolean {
+  return (pick(env, "PARITY_NEW_EDITION") ?? "").toLowerCase() === "cloud";
+}

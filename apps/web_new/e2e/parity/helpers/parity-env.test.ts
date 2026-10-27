@@ -160,6 +160,20 @@ describe("suite URL helpers", () => {
   });
 });
 
+describe("new-build edition (PARITY_NEW_EDITION)", () => {
+  it("only reads as cloud when a cloud build is declared", () => {
+    expect(isCloudNewEdition({ PARITY_NEW_EDITION: "cloud" })).toBe(true);
+    expect(isCloudNewEdition({ PARITY_NEW_EDITION: " Cloud " })).toBe(true);
+  });
+
+  it("treats unset, blank and other editions as the OSS build", () => {
+    expect(isCloudNewEdition({})).toBe(false);
+    expect(isCloudNewEdition({ PARITY_NEW_EDITION: "" })).toBe(false);
+    expect(isCloudNewEdition({ PARITY_NEW_EDITION: "   " })).toBe(false);
+    expect(isCloudNewEdition({ PARITY_NEW_EDITION: "oss" })).toBe(false);
+  });
+});
+
 describe("bash conformance (stack/parity-env.sh)", () => {
   const script = join(dirname(fileURLToPath(import.meta.url)), "..", "stack", "parity-env.sh");
 

@@ -14,6 +14,7 @@ import {
   serverPlantViewFlags,
   serverWorkspaceViewDetail,
 } from "../helpers/api";
+import { isCloudNewEdition } from "../helpers/parity-env";
 import { specTags, specTitle } from "../helpers/tags";
 import { viewsHarness, viewsSeat, wsSpreadsheetDisplay, wsViewsOpenDetailAs, wsViewsOpenListAs } from "./support";
 
@@ -182,7 +183,10 @@ test(
 test(
   specTitle(["VIEW-040"], "OSS shows no layout selector; the spreadsheet default renders"),
   { tag: specTags(["VIEW-040"]) },
-  async ({ driver }) => {
+  async ({ driver }, testInfo) => {
+    // The cloud build fills the selector slot, so this absence assertion is
+    // the OSS half of the row and only means something on an OSS build.
+    test.skip(testInfo.project.name === "new" && isCloudNewEdition(), "the cloud build serves the selector");
     const harness = await viewsHarness("parity-w40");
     const { owner, workspaceSlug, projectId } = harness;
     const issue = `W40 Issue ${harness.tag}`;
@@ -198,5 +202,83 @@ test(
     // The layout selector is a cloud-only seam (empty OSS stub).
     expect(await driver.wsViewsDetailLayoutVisible()).toBe(false);
     await expect.poll(() => driver.viewsDetailShowsIssue(issue), POLL).toBe(true);
+  }
+);
+
+test(
+  specTitle(["VIEW-040"], "cloud: the layout selector switches the body and persists it"),
+  { tag: specTags(["VIEW-040"]) },
+  async ({ driver }, testInfo) => {
+    // Cloud leg (parity/specs/views.md §11/§14): target-only, because the old
+    // cloud app renders no selector (its ce layout module is an empty stub).
+    // It runs when PARITY_NEW_URL points at a cloud build, which the run
+    // declares with PARITY_NEW_EDITION=cloud.
+    test.skip(testInfo.project.name !== "new", "the layout selector pins the web_new cloud build only");
+    test.skip(!isCloudNewEdition(), "cloud leg needs web_new built with the cloud edition");
+    const harness = await viewsHarness("parity-w40c");
+    const { owner, workspaceSlug, projectId } = harness;
+    const issue = `W40c Issue ${harness.tag}`;
+    await createIssue(workspaceSlug, projectId, owner.cookie, issue);
+    const custom = `W40c Alpha ${harness.tag}`;
+    const customId = await createWorkspaceViewFull(workspaceSlug, owner.cookie, {
+      name: custom,
+      ...wsSpreadsheetDisplay(),
+    });
+
+    await test.step("a custom opens with the selector on its stored layout", async () => {
+      await wsViewsOpenDetailAs(driver, harness, customId);
+      await expect.poll(() => driver.wsViewsDetailTabTitle(), POLL).toContain("All Views");
+      expect(await driver.wsViewsDetailLayoutVisible()).toBe(true);
+      // Stored spreadsheet -> index 3 in the switcher's canonical order.
+      await expect.poll(() => driver.viewsDetailLayoutActive(), POLL).toBe(3);
+      await expect.poll(() => driver.viewsDetailShowsIssue(issue), POLL).toBe(true);
+    });
+
+    await test.step("switching to the list layout persists in the view's display payload", async () => {
+      await driver.viewsDetailLayoutPick(0);
+      // The switch is an optimistic local edit followed by the view's own
+      // display-filter update (§11), so wait on the server, not the header.
+      await expect
+        .poll(
+          async () => (await serverWorkspaceViewDetail(workspaceSlug, customId, owner.cookie)).display_filters,
+          POLL
+        )
+        .toMatchObject({ layout: "list" });
+      await expect.poll(() => driver.viewsDetailShowsIssue(issue), POLL).toBe(true);
+    });
+
+    await test.step("the choice survives a reload", async () => {
+      await wsViewsOpenDetailAs(driver, harness, customId);
+      await expect.poll(() => driver.wsViewsDetailTabTitle(), POLL).toContain("All Views");
+      await expect.poll(() => driver.viewsDetailLayoutActive(), POLL).toBe(0);
+      await expect.poll(() => driver.viewsDetailShowsIssue(issue), POLL).toBe(true);
+    });
+
+    await test.step("a default view keeps the switch personal, off the custom's record", async () => {
+      await wsViewsOpenDetailAs(driver, harness, "all-issues");
+      await expect.poll(() => driver.wsViewsDetailTabTitle(), POLL).toContain("All Views");
+      expect(await driver.wsViewsDetailLayoutVisible()).toBe(true);
+      const before = await serverWorkspaceViewDetail(workspaceSlug, customId, owner.cookie);
+      // Switch the default to whichever offered layout it is not on, so the
+      // pick is always a real change.
+      const current = await driver.viewsDetailLayoutActive();
+      const target = current === 0 ? 3 : 0;
+      await driver.viewsDetailLayoutPick(target);
+      await expect.poll(() => driver.viewsDetailLayoutActive(), POLL).toBe(target);
+      // The custom keeps its own stored layout: a default's pick writes the
+      // member's personal record, never another record's display payload.
+      const after = await serverWorkspaceViewDetail(workspaceSlug, customId, owner.cookie);
+      expect(after.display_filters).toEqual(before.display_filters);
+    });
+
+    await test.step("a locked custom offers no selector", async () => {
+      await serverPlantViewFlags(customId, { is_locked: true });
+      await wsViewsOpenDetailAs(driver, harness, customId);
+      // The absence assertion needs the header mounted first, or "no
+      // selector" would pass merely because nothing had rendered yet.
+      await expect.poll(() => driver.wsViewsDetailCrumbs(), POLL).toEqual(["Views", custom]);
+      expect(await driver.wsViewsDetailLayoutVisible()).toBe(false);
+      await expect.poll(() => driver.viewsDetailShowsIssue(issue), POLL).toBe(true);
+    });
   }
 );
