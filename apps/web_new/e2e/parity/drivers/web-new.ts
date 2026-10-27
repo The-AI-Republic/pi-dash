@@ -3262,11 +3262,17 @@ export class WebNewDriver implements ParityDriver {
     if ((await row.count()) === 0) return false;
     return (await row.first().getByRole("button").count()) > 0;
   }
-  async pickState(_name: string): Promise<void> {
-    return todo("pickState");
+  async pickState(name: string): Promise<void> {
+    await this.pickSidebarOption("State", name);
   }
-  async pickPriority(_name: string): Promise<void> {
-    return todo("pickPriority");
+  async pickPriority(name: string): Promise<void> {
+    await this.pickSidebarOption("Priority", name);
+  }
+  /** Open a single-select sidebar picker, choose an option, settle on the popup closing. */
+  private async pickSidebarOption(label: string, name: string): Promise<void> {
+    await this.propertyOpenPicker(label);
+    await this.pickerPick(name);
+    await this.pickerListbox().waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
   async copyIssueLink(): Promise<void> {
     // Detail header's shared copy control (DESK-019): copies the hosted
@@ -3522,53 +3528,117 @@ export class WebNewDriver implements ParityDriver {
   async composerVisibleNotices(): Promise<{ message: string; kind: "success" | "error" | "unknown" }[]> {
     return todo("composerVisibleNotices");
   }
-  async pickAssignee(_displayName: string): Promise<void> {
-    return todo("pickAssignee");
+  async pickAssignee(displayName: string): Promise<void> {
+    await this.pickSidebarOption("Assignees", displayName);
   }
-  async pickRunsOn(_name: string): Promise<void> {
-    return todo("pickRunsOn");
+  async pickRunsOn(name: string): Promise<void> {
+    await this.pickSidebarOption("Runs on", name);
   }
   async runsOnOptions(): Promise<string[]> {
-    return todo("runsOnOptions");
+    await this.propertyOpenPicker("Runs on");
+    const names = await this.pickerOptionTexts();
+    await this.page.keyboard.press("Escape").catch(() => {});
+    return names;
   }
-  async pickDate(_label: string, _day: string): Promise<void> {
-    return todo("pickDate");
+  async pickDate(label: string, day: string): Promise<void> {
+    const trigger = this.propertyRow(label).getByRole("button", { name: label }).first();
+    await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    // In-month cells only: adjacent-month days repeat the same numbers.
+    const cell = this.page
+      .locator('button[data-in-month="true"]')
+      .filter({ hasText: new RegExp(`^${day}$`) })
+      .first();
+    await cell.click({ timeout: WebNewDriver.WAIT_MS });
+    await cell.waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
   async calendarDayDisabled(_day: string): Promise<boolean> {
     return todo("calendarDayDisabled");
   }
-  async clearDate(_label: string): Promise<void> {
-    return todo("clearDate");
+  async clearDate(label: string): Promise<void> {
+    const row = this.propertyRow(label);
+    await row.hover({ timeout: WebNewDriver.WAIT_MS }).catch(() => {});
+    const clear = row.getByRole("button", { name: `Clear ${label}` }).first();
+    await clear.click({ timeout: WebNewDriver.WAIT_MS });
   }
-  async pickCycle(_name: string): Promise<void> {
-    return todo("pickCycle");
+  async pickCycle(name: string): Promise<void> {
+    await this.pickSidebarOption("Cycle", name);
   }
   async clearCycle(): Promise<void> {
-    return todo("clearCycle");
+    await this.pickSidebarOption("Cycle", "No cycle");
   }
-  async toggleModule(_name: string): Promise<void> {
-    return todo("toggleModule");
+  async toggleModule(name: string): Promise<void> {
+    await this.propertyOpenPicker("Modules");
+    await this.pickerPick(name);
+    // The multi-select menu stays open after a toggle; dismiss it so later
+    // reads see the settled row rather than the open menu.
+    await this.page.keyboard.press("Escape").catch(() => {});
   }
-  async setParentByName(_name: string): Promise<void> {
-    return todo("setParentByName");
+  async setParentByName(name: string): Promise<void> {
+    const trigger = this.propertyTrigger("Parent");
+    await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    const dialog = this.page.getByRole("dialog", { name: "Set parent work item" });
+    await dialog.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.getByLabel("Search work items").fill(name, { timeout: WebNewDriver.WAIT_MS });
+    // The search debounces; the click timeout covers the query round-trip.
+    const option = dialog.getByRole("option", { name: new RegExp(escapeRegExp(name)) });
+    await option.first().click({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
   async parentBanner(_childSeq: string): Promise<string | null> {
-    return todo("parentBanner");
+    // One banner per page; the child key only disambiguates on the oracle.
+    const banner = this.page.getByTestId("parent-banner").first();
+    if ((await banner.count()) === 0) return null;
+    return ((await banner.innerText().catch(() => "")) ?? "").trim() || null;
   }
   async bannerMenuNames(_childSeq: string): Promise<string[]> {
-    return todo("bannerMenuNames");
+    await this.page.getByRole("button", { name: "Parent options" }).first().click({ timeout: WebNewDriver.WAIT_MS });
+    const items = this.page.locator('[role="menuitem"]:visible');
+    await items.first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    // Ends with the menu open; the scenario dismisses it.
+    return (await items.allTextContents()).map((t) => t.trim()).filter((t) => t.length > 0);
   }
   async removeParent(): Promise<void> {
-    return todo("removeParent");
+    await this.page.getByRole("button", { name: "Parent options" }).first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .getByRole("menuitem", { name: /Remove parent work item/i })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("menuitem").first().waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
   async openParentFromBanner(): Promise<void> {
-    return todo("openParentFromBanner");
+    const banner = this.page.getByTestId("parent-banner").first();
+    await banner.getByRole("link").first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("heading", { name: "Activity", exact: true }).waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
-  async addLabel(_name: string): Promise<void> {
-    return todo("addLabel");
+  async addLabel(name: string): Promise<void> {
+    // The label picker renders no listbox, so open it by hand rather
+    // than through propertyOpenPicker.
+    const trigger = this.propertyTrigger("Labels");
+    await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    const search = this.page.getByTestId("label-picker-search").first();
+    await search.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await search.fill(name, { timeout: WebNewDriver.WAIT_MS });
+    // Selecting the filtered option assigns; the create button covers
+    // a name no label carries yet.
+    const option = this.page
+      .getByTestId("label-picker-option")
+      .filter({ hasText: new RegExp(`^${escapeRegExp(name)}$`) })
+      .first();
+    try {
+      await option.waitFor({ timeout: 5000 });
+      await option.click({ timeout: WebNewDriver.WAIT_MS });
+    } catch {
+      await this.page.getByTestId("label-picker-create").first().click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    await this.page.keyboard.press("Escape").catch(() => {});
   }
-  async removeLabel(_name: string): Promise<void> {
-    return todo("removeLabel");
+  async removeLabel(name: string): Promise<void> {
+    // Chips remove inline without opening the picker; make sure no
+    // picker is open first so its options cannot intercept the click.
+    await this.page.keyboard.press("Escape").catch(() => {});
+    const chip = this.page.getByRole("button", { name: `Remove ${name}` }).first();
+    await chip.click({ timeout: WebNewDriver.WAIT_MS });
+    await chip.waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
   async openPeek(workspaceSlug: string, projectId: string, issueId: string): Promise<void> {
     // The issues address carries the peek id, so a deep link auto-opens the
