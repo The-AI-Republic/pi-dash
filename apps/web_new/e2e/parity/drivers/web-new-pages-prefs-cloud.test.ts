@@ -302,7 +302,7 @@ describe("page navigation and editor primitives", () => {
     await driver.pagesPrefsEditorSelectAll();
 
     expect(stub.type).toHaveBeenCalledWith("typed text");
-    expect(stub.press).toHaveBeenCalledWith("Control+a");
+    expect(stub.press).toHaveBeenCalledWith("ControlOrMeta+a");
     expect(stub.press).toHaveBeenCalledWith("Backspace");
     expect(editor.click).toHaveBeenCalledWith({ timeout: 30_000 });
   });

@@ -22434,13 +22434,13 @@ export class WebNewDriver implements ParityDriver {
 
   async pagesPrefsEditorClear(): Promise<void> {
     await this.pagesPrefsEditorClickEnd();
-    await this.page.keyboard.press("Control+a");
+    await this.page.keyboard.press("ControlOrMeta+a");
     await this.page.keyboard.press("Backspace");
   }
 
   async pagesPrefsEditorSelectAll(): Promise<void> {
     await this.pagesPrefsBodyEditor().click({ timeout: 30_000 });
-    await this.page.keyboard.press("Control+a");
+    await this.page.keyboard.press("ControlOrMeta+a");
   }
 
   async pagesPrefsTitleValue(): Promise<string> {
@@ -22451,7 +22451,7 @@ export class WebNewDriver implements ParityDriver {
 
   async pagesPrefsTitleFill(text: string): Promise<void> {
     await this.pagesPrefsTitleField().click({ timeout: 30_000 });
-    await this.page.keyboard.press("Control+a");
+    await this.page.keyboard.press("ControlOrMeta+a");
     await this.page.keyboard.type(text);
   }
 
