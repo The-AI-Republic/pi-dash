@@ -1110,6 +1110,149 @@ test(
 );
 
 test(
+  specTitle(["PAGE-064"], "bug: NEWFRONT-359 a refused fallback description save storms silently on the old client"),
+  { tag: specTags(["PAGE-064"]) },
+  async ({ driver, seed }, testInfo) => {
+    test.slow();
+    const tag = stamp();
+    const session = await seedSession(seed);
+    const pageId = await serverCreatePage(seed.workspaceSlug, seed.projectId, session, `Hdr359 ${tag}`);
+    // Cache a body first: the fallback only runs with an editor handle, and
+    // the reported wedge is a visible editor the user cannot click, not the
+    // cold-document loader.
+    await driver.openAuthenticated(detailPath(seed, seed.projectId, pageId), sessionBrowserCookies(session));
+    await driver.pagesLiveWaitSynced();
+    const cached = `cached-359-${tag}`;
+    await driver.pagesLiveTypeInBody(`${cached} `);
+    await expect.poll(() => driver.pagesLiveBodyText(), { timeout: 60_000 }).toContain(cached);
+    // The socket persists after its debounce; wait for the server copy so
+    // the fresh load below has a body to fall back onto rather than an
+    // empty document whose loader could mask the save failure.
+    await expect
+      .poll(
+        async () =>
+          (await pagesHeaderReadPage(seed.workspaceSlug, seed.projectId, pageId, session)).description_html ?? "",
+        { timeout: 120_000 }
+      )
+      .toContain(cached);
+    await driver.pagesHeaderSpyDescriptionWrites();
+    await driver.pagesHeaderFailDescriptionWrites();
+    await driver.pagesLiveBlockCollaborationSocket();
+    try {
+      // Fresh load: the socket is refused, so the REST fallback owns body
+      // writes — and every one of its PATCHes answers 500. Dirty local
+      // edits are required: a clean reconcile saves byte-identical content
+      // and stays quiet, while a refused dirty save re-triggers the
+      // fallback on the old client (NEWFRONT-359).
+      await driver.openAuthenticated(detailPath(seed, seed.projectId, pageId), sessionBrowserCookies(session));
+      await expect.poll(() => driver.pagesLiveBodyText(), { timeout: 60_000 }).toContain(cached);
+      const dirty = `dirty-359-${tag}`;
+      await driver.pagesLiveTypeInBody(`${dirty} `);
+      await expect.poll(() => driver.pagesLiveBodyText(), { timeout: 60_000 }).toContain(dirty);
+      // The spy predates the reload, so slice the volley window below from
+      // here: everything from this count on is a refused post-reload patch.
+      const windowBaseline = await driver.pagesHeaderDescriptionWriteCount();
+      // Both clients still reach the terminal disconnected state under the
+      // refused socket: the 500s never wedge the badge (the Syncing wedge
+      // from the issue does not reproduce — clean or dirty, the badge
+      // settles within seconds; see the issue forensics). Polling here
+      // guards the pin's premise instead of assuming it.
+      const badgeTrail: string[] = [];
+      let noticeSeen = false;
+      const start = Date.now();
+      const observe = async (): Promise<{ badge: string | null; patches: number }> => {
+        const badge = await driver.pagesHeaderSyncBadgeText();
+        const patches = await driver.pagesHeaderDescriptionWriteCount();
+        badgeTrail.push(`t+${Math.round((Date.now() - start) / 1000)}s:${badge ?? "<hidden>"}/p${patches}`);
+        if (badgeTrail.length > 140) badgeTrail.shift();
+        const toast = await driver.pagesHeaderToastText();
+        if (toast !== null && /could not be saved/i.test(toast)) noticeSeen = true;
+        return { badge, patches };
+      };
+      await expect
+        .poll(
+          async () => {
+            const { badge } = await observe();
+            return badge;
+          },
+          { timeout: 60_000 }
+        )
+        .toBe("Connection lost");
+      // Absorb the activation storm: the first refused dirty save refires
+      // on the old client, so the gesture below measures a fresh burst,
+      // not the activation one. The event ends at the last patch followed
+      // by 5s quiet; a sustained storm only makes the delta below larger.
+      let eventLen = await driver.pagesHeaderDescriptionWriteCount();
+      let quietStart = Date.now();
+      const absorbUntil = Date.now() + 25_000;
+      while (Date.now() < absorbUntil) {
+        await driver.page.waitForTimeout(1000);
+        const { patches } = await observe();
+        if (patches > eventLen) {
+          eventLen = patches;
+          quietStart = Date.now();
+        } else if (Date.now() - quietStart >= 5000) {
+          break;
+        }
+      }
+      // The refusal must be the description PATCH, never a broken binary
+      // read: the GET stays up in both apps.
+      const statuses = await driver.pagesHeaderDescriptionWriteStatuses();
+      expect(statuses, `description patch statuses: ${statuses.join(",")}`).toContain(500);
+      const patchTimeline = async (): Promise<string> => {
+        const times = await driver.pagesHeaderDescriptionWriteTimes();
+        const seen = await driver.pagesHeaderDescriptionWriteStatuses();
+        return times.map((time, index) => `${((time - start) / 1000).toFixed(1)}:${seen[index] ?? "?}"}`).join(",");
+      };
+      if (testInfo.project.name === "oracle") {
+        // Old app pin (NEWFRONT-359): the refused dirty save is silent (no
+        // failure notice) and refires as a volley — the activation save
+        // spawns overlapping retries in the same beat, where the 30s
+        // cadence allows a single patch — instead of settling into a calm
+        // retry. The volley re-renders the fallback loader, so clicks
+        // landing inside it meet an unstable editor.
+        expect(noticeSeen, `badge trail: ${badgeTrail.join(" ")}`).toBe(false);
+        const times = (await driver.pagesHeaderDescriptionWriteTimes()).slice(windowBaseline);
+        const windowStatuses = statuses.slice(windowBaseline);
+        const timeline = await patchTimeline();
+        const context = `storm timeline (s:status from reload): ${timeline}; badge trail: ${badgeTrail.join(" ")}`;
+        expect(times.length, context).toBeGreaterThanOrEqual(2);
+        const gaps = times.slice(1).map((time, index) => time - times[index]);
+        expect(Math.min(...gaps), context).toBeLessThan(1000);
+        expect(
+          windowStatuses.every((status) => status === 500),
+          context
+        ).toBe(true);
+      } else {
+        // New app: the refusal is visible, the client still reaches the
+        // terminal disconnected state, and the page stays usable.
+        expect(noticeSeen, `badge trail: ${badgeTrail.join(" ")}`).toBe(true);
+        const typed = `typed-359-${tag}`;
+        await driver.pagesLiveTypeInBody(`${typed} `);
+        expect(await driver.pagesLiveBodyText()).toContain(typed);
+        // The standard save gesture forces exactly one more fallback
+        // attempt through the debounce, then the reset interval stays
+        // quiet: no refire burst, retry on the next tick instead.
+        const before = await driver.pagesHeaderDescriptionWriteCount();
+        await driver.pagesHeaderPressSave();
+        await expect.poll(() => driver.pagesHeaderDescriptionWriteCount(), { timeout: 30_000 }).toBe(before + 1);
+        const forcedCount = await driver.pagesHeaderDescriptionWriteCount();
+        await driver.page.waitForTimeout(8_000);
+        await observe();
+        const timeline = await patchTimeline();
+        expect(
+          await driver.pagesHeaderDescriptionWriteCount(),
+          `storm timeline (s:status from reload): ${timeline}; badge trail: ${badgeTrail.join(" ")}`
+        ).toBe(forcedCount);
+      }
+    } finally {
+      await driver.pagesHeaderUnfailDescriptionWrites();
+      await driver.pagesLiveUnblockCollaborationSocket();
+    }
+  }
+);
+
+test(
   specTitle(["PAGE-064"], "title saves ride the record endpoint outside the description path"),
   { tag: specTags(["PAGE-064"]) },
   async ({ driver, seed }) => {

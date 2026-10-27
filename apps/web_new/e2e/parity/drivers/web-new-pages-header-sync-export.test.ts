@@ -797,6 +797,37 @@ describe("description and page write spies", () => {
     await expect(driver.pagesHeaderDescriptionWriteStatuses()).resolves.toEqual([200, 500]);
   });
 
+  it("fails only description patches and leaves reads and record writes alone", async () => {
+    const stub = pageDouble();
+    const driver = new WebNewDriver(stub.page);
+
+    await driver.pagesHeaderFailDescriptionWrites();
+    await driver.pagesHeaderFailDescriptionWrites();
+
+    expect(stub.route).toHaveBeenCalledTimes(1);
+    const registration = stub.routes[0] as PageDouble["routes"][number];
+    expect(registration.pattern).toBeInstanceOf(RegExp);
+    const pattern = registration.pattern as RegExp;
+    expect(pattern.test(descriptionUrl)).toBe(true);
+    expect(pattern.test("https://api.test/api/workspaces/w1/projects/p1/pages/pg-1/")).toBe(false);
+
+    const refused = routeDouble("PATCH");
+    await registration.handler(refused.route);
+    expect(refused.fulfill).toHaveBeenCalledWith({ status: 500, contentType: "application/json", body: "{}" });
+    expect(refused.cont).not.toHaveBeenCalled();
+
+    const read = routeDouble("GET");
+    await registration.handler(read.route);
+    expect(read.cont).toHaveBeenCalledTimes(1);
+    expect(read.fulfill).not.toHaveBeenCalled();
+
+    await driver.pagesHeaderUnfailDescriptionWrites();
+    const passed = routeDouble("PATCH");
+    await registration.handler(passed.route);
+    expect(passed.cont).toHaveBeenCalledTimes(1);
+    expect(passed.fulfill).not.toHaveBeenCalled();
+  });
+
   it("treats a description patch without a body as keyless", async () => {
     const stub = pageDouble();
     const driver = new WebNewDriver(stub.page);
