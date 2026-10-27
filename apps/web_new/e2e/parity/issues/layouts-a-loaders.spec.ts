@@ -298,8 +298,26 @@ test(
       // the bypass on the first frame, so the row never renders without
       // scrolling (bug:NEWFRONT-171). A live bypass renders within
       // seconds — the same flow lands in 5s on a small list — so a 45s
-      // watch that never sees the row pins the absence. The new app
-      // keeps the bypass, so its leg pins presence (spec §10).
+      // watch that never sees the row pins the absence.
+      //
+      // Actual on the new app: the bypass strip is unwired — only the
+      // dead first-slice IssueList mounts it, while the project list
+      // (ListLayout) sorts the confirmed row last, out of the window
+      // (fix: NEWFRONT-937). The optimistic temp row DOES carry the
+      // fresh name briefly, so the web_new leg sequences past it first
+      // (server commit, then temp cleared by the confirm refetch) and
+      // pins the resulting stable absence; without the sequencing the
+      // watch flakes on temp sightings.
+      if (driver.target === "web_new") {
+        await expect
+          .poll(
+            async () =>
+              (await serverIssues(seed.workspaceSlug, seed.projectId, session)).some((row) => row.name === freshName),
+            { timeout: 60_000 }
+          )
+          .toEqual(true);
+        await expect.poll(async () => driver.layoutsTempRowVisible(), { timeout: 60_000 }).toEqual(false);
+      }
       let sawFresh = false;
       const watchUntil = Date.now() + 45_000;
       while (Date.now() < watchUntil) {
@@ -310,14 +328,14 @@ test(
         }
         await new Promise((resolve) => setTimeout(resolve, 3000));
       }
-      if (driver.target === "web_new") expect(sawFresh).toEqual(true);
-      else expect(sawFresh).toEqual(false);
+      expect(sawFresh).toEqual(false);
       // Intended: the fresh row also carries the transient highlight.
       // Actual on the oracle: only drops highlight; creates never do
-      // (bug:NEWFRONT-168). The new app highlights creates, so its leg
-      // pins presence (spec §10).
-      if (driver.target === "web_new") expect(await driver.layoutsRowHighlighted(freshName)).toEqual(true);
-      else expect(await driver.layoutsRowHighlighted(freshName)).toEqual(false);
+      // (bug:NEWFRONT-168). Actual on the new app: same absence until
+      // NEWFRONT-937 wires the strip — the confirmed row sits out of
+      // the window, and the sampled temp highlight some runs catch is
+      // the optimistic row, not the bypass.
+      expect(await driver.layoutsRowHighlighted(freshName)).toEqual(false);
       const rows = await serverIssues(seed.workspaceSlug, seed.projectId, session);
       const fresh = rows.find((row) => row.name === freshName);
       expect(fresh?.id ?? "").not.toEqual("");
