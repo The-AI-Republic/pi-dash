@@ -26,6 +26,7 @@ import {
   formFromSnapshot,
   hasEditMembership,
   isPatchEmpty,
+  withStoredBranch,
   type EditableRow,
 } from "./editForm.js";
 
@@ -87,6 +88,12 @@ describe("formFromRow", () => {
   it("defaults the branch when the row carries none", () => {
     expect(formFromRow(row({ git_work_branch: null }), PROJECT).gitWorkBranch).toBe("");
     expect(formFromRow(row({ git_work_branch: undefined }), PROJECT).gitWorkBranch).toBe("");
+  });
+
+  it("leaves the form untouched when no stored branch arrived", () => {
+    const form = formFromRow(row(), PROJECT);
+    expect(withStoredBranch(form, undefined)).toBe(form);
+    expect(withStoredBranch(form, "team/late")).toEqual({ ...form, gitWorkBranch: "team/late" });
   });
 
   it("normalizes absent and empty optional fields to null", () => {

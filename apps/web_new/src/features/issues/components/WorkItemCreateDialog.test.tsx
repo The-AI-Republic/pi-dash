@@ -296,6 +296,8 @@ interface StubOptions {
   estimateSystem?: boolean;
   /** The detail row an issue edit reads; absent answers 404. */
   issueDetail?: Record<string, unknown>;
+  /** Hold the detail read until this settles, so a test can edit first. */
+  issueDetailGate?: Promise<void>;
   /** Hold a description image upload so the editor's busy state shows. */
   uploadDelayMs?: number;
   /** The instance bootstrap's editor-AI flag; unset answers keyless. */
@@ -685,7 +687,9 @@ function stubTransport(options: StubOptions = {}) {
     }
     if (/\/issues\/[^/]+\/$/.test(url) && method === "GET") {
       const row = options.issueDetail;
-      return row === undefined ? json(404, {}) : json(200, row);
+      if (row === undefined) return json(404, {});
+      if (options.issueDetailGate !== undefined) await options.issueDetailGate;
+      return json(200, row);
     }
     if (/\/draft-issues\/[^/]+\/$/.test(url) && method === "PATCH") {
       sent.push(body);
@@ -2185,6 +2189,32 @@ describe("WorkItemCreateDialog edit mode (ISS-126)", () => {
     save();
     await waitFor(() => expect(patches(h.calls)).toHaveLength(1));
     expect(patches(h.calls)[0]).toEqual({ git_work_branch: "" });
+  });
+
+  it("keeps branch text typed before the detail read lands (ISS-128)", async () => {
+    let release = (): void => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { props } = editProps();
+    const h = setup(
+      { issueDetailGate: gate, issueDetail: detailRow("<p>stored words</p>", { git_work_branch: "team/stored" }) },
+      props
+    );
+    await waitFor(() => expect(titleField()).toHaveValue("Existing work"));
+    expect(screen.queryByLabelText("Work branch")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Advanced — git" }));
+    const field = screen.getByLabelText("Work branch");
+    fireEvent.change(field, { target: { value: "mine/typed" } });
+    expect(field).toHaveValue("mine/typed");
+    release();
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "Description" })).toHaveValue("stored words"));
+    // The late read must not overwrite what the user already typed...
+    expect(screen.getByLabelText("Work branch")).toHaveValue("mine/typed");
+    save();
+    await waitFor(() => expect(patches(h.calls)).toHaveLength(1));
+    // ...but it is still the baseline, so the edit travels as a change.
+    expect(patches(h.calls)[0]).toEqual({ git_work_branch: "mine/typed" });
   });
 
   it("sends an image uploaded into an empty description", async () => {
