@@ -1208,3 +1208,182 @@ describe("ListLayout selection", () => {
     expect(screen.queryByRole("img", { name: /Cannot select/ })).not.toBeInTheDocument();
   });
 });
+
+describe("ListLayout fresh bypass (ISS-006)", () => {
+  function freshRow(overrides: Partial<IssueListItem> = {}): IssueListItem {
+    const now = new Date().toISOString();
+    return row({ created_at: now, updated_at: now, ...overrides });
+  }
+
+  function flatSections(rows: IssueListItem[]) {
+    return [{ key: "all", title: "All work items", rows, total: rows.length, value: null }];
+  }
+
+  function staleRows(count: number, firstSequence = 1): IssueListItem[] {
+    return Array.from({ length: count }, (_, index) =>
+      row({
+        id: `123e4567-e89b-12d3-a456-42661417${String(5000 + firstSequence + index)}`,
+        sequence_id: firstSequence + index,
+        name: `Row ${firstSequence + index}`,
+      })
+    );
+  }
+
+  it("renders fresh rows in a strip above the virtualized list", async () => {
+    const rows = [
+      ...staleRows(2),
+      freshRow({
+        id: "123e4567-e89b-12d3-a456-426614176000",
+        sequence_id: 3,
+        name: "Fresh confirmed",
+      }),
+    ];
+    mocks.pages.mockReturnValue(pageState({ sections: flatSections(rows), total: rows.length }));
+    renderLayout();
+
+    const strip = await screen.findByTestId("issues-fresh-strip");
+    expect(within(strip).getByRole("button", { name: "Fresh confirmed" })).toBeInTheDocument();
+    expect(within(strip).queryByRole("button", { name: "Row 1" })).not.toBeInTheDocument();
+    // The bypass moves the row out of the virtualizer instead of copying it.
+    expect(screen.getAllByRole("button", { name: "Fresh confirmed" })).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "Row 1" })).toBeInTheDocument();
+    const region = screen.getByRole("region", { name: "Issues" });
+    expect(strip.compareDocumentPosition(region) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("renders the pending temp row exactly once", async () => {
+    const temp = freshRow({
+      id: "temp-9f8e7d6c-test-row",
+      sequence_id: 0,
+      project_id: "",
+      name: "Saving row",
+    });
+    const rows = [temp, ...staleRows(1)];
+    mocks.pages.mockReturnValue(pageState({ sections: flatSections(rows), total: rows.length }));
+    renderLayout();
+
+    const strip = await screen.findByTestId("issues-fresh-strip");
+    expect(within(strip).getByRole("button", { name: "Saving row" })).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Saving row" })).toHaveLength(1);
+  });
+
+  it("shows only the strip while the first create pends", async () => {
+    const temp = freshRow({
+      id: "temp-first-create-row",
+      sequence_id: 0,
+      project_id: "",
+      name: "First row",
+    });
+    mocks.pages.mockReturnValue(pageState({ sections: flatSections([temp]), total: 1 }));
+    renderLayout();
+
+    const strip = await screen.findByTestId("issues-fresh-strip");
+    expect(within(strip).getByRole("button", { name: "First row" })).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "First row" })).toHaveLength(1);
+  });
+
+  it("omits the strip when no row is fresh", async () => {
+    renderLayout();
+
+    expect(await screen.findByTestId("row-probe")).toBeInTheDocument();
+    expect(screen.queryByTestId("issues-fresh-strip")).not.toBeInTheDocument();
+  });
+
+  it("keeps grouped sections unpartitioned", async () => {
+    const fresh = freshRow({ sequence_id: 7, name: "Fresh grouped" });
+    mocks.pages.mockReturnValue(
+      pageState({
+        grouped: true,
+        sections: [{ key: STATE, title: "Todo", rows: [fresh], total: 1, value: STATE }],
+        total: 1,
+      })
+    );
+    renderLayout({ prefs: prefs({ groupBy: "state" }) });
+
+    expect(await screen.findByRole("button", { name: "Fresh grouped" })).toBeInTheDocument();
+    expect(screen.queryByTestId("issues-fresh-strip")).not.toBeInTheDocument();
+  });
+
+  it("renders no strip for a flat list with no sections", () => {
+    mocks.pages.mockReturnValue(pageState({ sections: [], total: 0 }));
+    renderLayout();
+
+    expect(screen.queryByTestId("issues-fresh-strip")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("row-probe")).not.toBeInTheDocument();
+  });
+
+  it("skips the scroll reveal for bypassed rows", async () => {
+    const rows = [
+      ...staleRows(12),
+      freshRow({
+        id: "123e4567-e89b-12d3-a456-426614176001",
+        sequence_id: 13,
+        name: "Fresh tail",
+      }),
+    ];
+    mocks.pages.mockReturnValue(pageState({ sections: flatSections(rows), total: rows.length }));
+    renderLayout();
+
+    expect(await screen.findByRole("button", { name: "Fresh tail" })).toBeInTheDocument();
+    const region = screen.getByRole("region", { name: "Issues" });
+    Object.defineProperty(region, "scrollHeight", { configurable: true, value: 12 * 44 });
+    Object.defineProperty(region, "clientHeight", { configurable: true, value: 400 });
+    const scrollTo = vi.fn();
+    Object.defineProperty(region, "scrollTo", { configurable: true, value: scrollTo });
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select 12" }));
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown" }));
+    });
+    // The fresh tail is already visible above the virtualizer: no scroll.
+    expect(scrollTo).not.toHaveBeenCalled();
+    // And the way back still reveals through the virtualizer.
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp" }));
+    });
+    await waitFor(() => expect(scrollTo).toHaveBeenCalled());
+  });
+
+  it("reveals virtualized rows past a bypassed temp row", async () => {
+    const temp = freshRow({
+      id: "temp-9f8e7d6c-reveal-row",
+      sequence_id: 0,
+      project_id: "",
+      name: "Saving row",
+    });
+    const rows = [temp, ...staleRows(30)];
+    mocks.pages.mockReturnValue(pageState({ sections: flatSections(rows), total: rows.length }));
+    renderLayout();
+
+    const boxes = await screen.findAllByRole("checkbox", { name: /^Select \d+$/ });
+    const lastRendered = boxes.at(-1)!;
+    const lastSequence = Number(lastRendered.getAttribute("aria-label")!.replace("Select ", ""));
+    const nextSequence = lastSequence + 1;
+    fireEvent.click(lastRendered);
+    expect(screen.queryByRole("checkbox", { name: `Select ${nextSequence}` })).not.toBeInTheDocument();
+    const region = screen.getByRole("region", { name: "Issues" });
+    Object.defineProperty(region, "scrollHeight", { configurable: true, value: rows.length * 44 });
+    Object.defineProperty(region, "clientHeight", { configurable: true, value: 400 });
+    Object.defineProperty(region, "scrollTo", {
+      configurable: true,
+      value: ({ top }: { top: number }) => {
+        region.scrollTop = top;
+        fireEvent.scroll(region);
+      },
+    });
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown" }));
+    });
+    expect(await screen.findByRole("checkbox", { name: `Select ${nextSequence}` })).toBeInTheDocument();
+    expect(region.scrollTop).toBeGreaterThan(0);
+  });
+
+  it("skips the scroll reveal once the flat list unmounts", () => {
+    renderLayout({}, { kanban_filters: { group_by: ["all"], sub_group_by: [] } });
+    expect(screen.queryByTestId("row-probe")).not.toBeInTheDocument();
+
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown" }));
+    });
+    expect(screen.queryByTestId("row-probe")).not.toBeInTheDocument();
+  });
+});

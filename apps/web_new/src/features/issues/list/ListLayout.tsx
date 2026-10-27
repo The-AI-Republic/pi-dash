@@ -18,6 +18,7 @@ import { creationBlockedInColumn } from "../edition/workflow.js";
 import { usePermissions } from "../../../core/session/index.js";
 import { projectDetailsQueryOptions, projectsQueryOptions } from "../../projects/index.js";
 import { isCollapsed, readCollapsedGroups, useToggleCollapsedGroup } from "./collapse.js";
+import { partitionFresh } from "../freshness/fresh.js";
 
 import {
   creationDisabledForGroup,
@@ -242,6 +243,16 @@ export function ListLayout({
     hideModule: !project?.module_view,
   };
 
+  /**
+   * Recency bypass (ISS-006): fresh rows mount in an unvirtualized strip
+   * above the flat list so a create lands without scrolling. Grouped
+   * sections mount every row already, so they bypass nothing.
+   */
+  const flatBypass = React.useMemo(
+    () => partitionFresh(pages.grouped ? [] : (pages.sections[0]?.rows ?? [])),
+    [pages.grouped, pages.sections]
+  );
+
   const allRows = pages.sections.flatMap((section) => section.rows);
   const [expandedSelectionIds, setExpandedSelectionIds] = React.useState<ReadonlySet<string>>(() => new Set());
   const [childrenByParent, setChildrenByParent] = React.useState<ReadonlyMap<string, readonly IssueListItem[]>>(
@@ -296,17 +307,26 @@ export function ListLayout({
         for (const child of childrenByParent.get(issue.id) ?? []) visit(child);
       }
     };
-    for (const section of pages.sections) {
-      for (const issue of section.rows) {
+    // The flat virtualizer owns only the unbypassed rows, so revealed
+    // indexes count those; grouped sections mount every row.
+    const rowLists: ReadonlyArray<readonly IssueListItem[]> = pages.grouped
+      ? pages.sections.map((section) => section.rows)
+      : [flatBypass.rest];
+    for (const rows of rowLists) {
+      for (const issue of rows) {
         visit(issue);
         rowIndex += 1;
       }
     }
     return indexes;
-  }, [pages.sections, expandedSelectionIds, childrenByParent]);
+  }, [pages.sections, pages.grouped, flatBypass, expandedSelectionIds, childrenByParent]);
   const revealSelectionRow = React.useCallback(
     (id: string) => {
-      if (listRef.current !== null) listRef.current.scrollToIndex(selectionRowIndex.get(id)!);
+      const index = selectionRowIndex.get(id);
+      // Bypassed fresh rows mount above the virtualizer and stay visible,
+      // so only virtualized rows need a scroll reveal.
+      if (index === undefined) return;
+      if (listRef.current !== null) listRef.current.scrollToIndex(index);
     },
     [selectionRowIndex]
   );
@@ -498,25 +518,32 @@ export function ListLayout({
                 {pages.grouped ? (
                   section.rows.map((issue) => renderListRow(issue))
                 ) : (
-                  <FlatRows
-                    rows={section.rows}
-                    renderRow={renderListRow}
-                    rowHeight={compact ? 32 : 44}
-                    listRef={listRef}
-                    footer={
-                      pages.hasMore ? (
-                        <div
-                          ref={sentinelRef}
-                          data-testid="list-sentinel"
-                          className="flex flex-col gap-(--space-2) p-(--space-3)"
-                        >
-                          {Array.from({ length: 3 }, (_, index) => (
-                            <Skeleton key={index} height="32px" />
-                          ))}
-                        </div>
-                      ) : null
-                    }
-                  />
+                  <>
+                    {flatBypass.fresh.length > 0 ? (
+                      <div data-testid="issues-fresh-strip" className="shrink-0">
+                        {flatBypass.fresh.map((issue) => renderListRow(issue))}
+                      </div>
+                    ) : null}
+                    <FlatRows
+                      rows={flatBypass.rest}
+                      renderRow={renderListRow}
+                      rowHeight={compact ? 32 : 44}
+                      listRef={listRef}
+                      footer={
+                        pages.hasMore ? (
+                          <div
+                            ref={sentinelRef}
+                            data-testid="list-sentinel"
+                            className="flex flex-col gap-(--space-2) p-(--space-3)"
+                          >
+                            {Array.from({ length: 3 }, (_, index) => (
+                              <Skeleton key={index} height="32px" />
+                            ))}
+                          </div>
+                        ) : null
+                      }
+                    />
+                  </>
                 )}
                 {pages.grouped && pages.sectionFetching(section) ? (
                   <div data-testid="section-loading" className="flex flex-col gap-(--space-2) p-(--space-3)">
