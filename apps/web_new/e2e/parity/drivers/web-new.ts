@@ -31064,9 +31064,13 @@ export class WebNewDriver implements ParityDriver {
     return this.pagesBlocksHandle().locator("xpath=..").locator('[role="menu"]');
   }
 
-  /** The selection bubble beside a selection (formatting + link). */
+  /**
+   * The selection bubble beside a selection (formatting + link). The
+   * interaction layer wraps the control and tags the wrapper, so this
+   * addresses the surface by its hook rather than by its scroll styling.
+   */
   private pagesBlocksBubble(): Locator {
-    return this.page.locator("div.horizontal-scrollbar").first();
+    return this.page.locator('[data-testid="page-selection-bubble"]').first();
   }
 
   private pagesBlocksLinkInput(): Locator {
@@ -31238,7 +31242,8 @@ export class WebNewDriver implements ParityDriver {
         if (node !== last && !last.contains(node)) return false;
         const tail = last.lastChild;
         if (tail !== null && tail.nodeType === Node.ELEMENT_NODE) return range.startContainer === last;
-        return range.startContainer === tail && range.startOffset === (tail?.textContent ?? "").length;
+        // An empty block has no tail at all, so a caret in it is not the end.
+        return tail !== null && range.startContainer === tail && range.startOffset === tail.textContent.length;
       })
       .catch(() => false);
   }
