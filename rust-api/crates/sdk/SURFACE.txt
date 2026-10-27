@@ -355,6 +355,8 @@ pidash_sdk::ops::GetAgentUserError
 pidash_sdk::ops::GitHubAdapter
 pidash_sdk::ops::GithubClient
 pidash_sdk::ops::GithubError
+pidash_sdk::ops::HandoffInlineDeps
+pidash_sdk::ops::HandoffStore
 pidash_sdk::ops::LIVE_ASSIGNEE_CANDIDATES_SQL
 pidash_sdk::ops::LOCK_TICKER_PARAMS
 pidash_sdk::ops::LifecycleEffect
@@ -392,12 +394,14 @@ pidash_sdk::ops::agent_system_user_id
 pidash_sdk::ops::base_settings_schema
 pidash_sdk::ops::blockers
 pidash_sdk::ops::builtins
+pidash_sdk::ops::complete_project_move_handoff_inline
 pidash_sdk::ops::connect_primary
 pidash_sdk::ops::create_ticker_sql
 pidash_sdk::ops::default_for
 pidash_sdk::ops::dispatch_waiting
 pidash_sdk::ops::drain_for_runner_by_id
 pidash_sdk::ops::drain_pod_by_id
+pidash_sdk::ops::drain_publish_effects
 pidash_sdk::ops::effective_interval_seconds
 pidash_sdk::ops::emit_fire_tick
 pidash_sdk::ops::emit_terminal_effects

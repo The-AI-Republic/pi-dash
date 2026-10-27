@@ -56,9 +56,11 @@ use pidash_services::runner_sessions::pubsub::{
     send_to_runner, PubsubStore, CLOSE_ACTIVE_SESSIONS_SQL,
 };
 
-use crate::project_move_handoff::{drain_publish_effects, RedisAdmissionCache};
+use crate::project_move_handoff::drain_publish_effects;
+use pidash_services::dispatch::admission::RedisAdmissionCache;
 use crate::runner_enroll::teardown::redis_client;
 use crate::state::AppState;
+use pidash_jobs::orchestration::HandoffStore;
 
 /// The creation runtime facts a span store is built from: executor
 /// settings, the admission cache, and the unix clock for the
@@ -137,7 +139,16 @@ where
         for id in outboxes.terminal_effects {
             pairs.extend(finalize_kernel::plan_publish_effects(id));
         }
-        drain_publish_effects(pool, state, pairs, terminal_created_by).await;
+        let ports = crate::runner_runs::LivePorts::new(pool.clone(), state);
+        pidash_jobs::orchestration::drain_publish_effects(pairs, |effect| {
+            crate::runner_runs::run_endpoints::drain_lifecycle_effects(
+                pool,
+                &ports,
+                vec![effect],
+                terminal_created_by,
+            )
+        })
+        .await;
     }
     let cloud = state.settings().cloud_agent.clone();
     let now = now_micros();

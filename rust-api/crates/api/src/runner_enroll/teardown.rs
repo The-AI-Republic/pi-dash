@@ -2703,12 +2703,14 @@ async fn fire_bundle(
     for op in fire_plan(bundle) {
         match op {
             FireOp::Publish(effect) => {
-                crate::project_move_handoff::drain_one_publish(
-                    pool,
-                    &ports,
-                    effect,
-                    terminal_created_by,
-                )
+                pidash_jobs::orchestration::drain_publish_effects(vec![effect], |one| {
+                    crate::runner_runs::run_endpoints::drain_lifecycle_effects(
+                        pool,
+                        &ports,
+                        vec![one],
+                        terminal_created_by,
+                    )
+                })
                 .await
             }
             FireOp::Handoff(run_id) => {
@@ -2983,7 +2985,6 @@ mod tests {
     use pidash_services::runner_enroll::queries::{enroll_reads, manage_reads};
     use pidash_services::runner_enroll::revoke::check_revoke_reason;
     use pidash_services::runner_enroll::tokens::{mint_refresh_token, REFRESH_TOKEN_PREFIX};
-    use pidash_services::runner_runs::LifecycleEffect;
 
     const FIXTURE_ENDPOINTS: &str =
         include_str!("../../../../fixtures/runner_enroll/handlers/endpoints.golden.json");
@@ -3370,7 +3371,6 @@ mod tests {
 
     // ---- D13-F6: revoke cascade --------------------------------------
 
-    #[test]
     #[test]
     fn f6_reason_handling() {
         // Known + short: as-is, silent.
