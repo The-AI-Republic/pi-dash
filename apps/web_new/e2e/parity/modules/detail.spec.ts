@@ -1326,17 +1326,26 @@ test.describe("module detail on desktop", () => {
         await test.step("bug: NEWFRONT-342 the section stays collapsed after reload though links exist", async () => {
           await driver.layoutsReloadIssues();
           await expect.poll(() => driver.modulesDetailSidebarName(), { timeout: 120_000 }).toBe(moduleName);
-          // A fixed app opens the section once the stored link loads;
-          // live it stays collapsed, so settle, pin it closed, then
-          // prove the rows are one toggle away (the data is there —
-          // only the default-open is not).
-          await driver.page.waitForTimeout(5_000);
-          expect(await driver.modulesDetailLinksOpen()).toBe(false);
-          await driver.modulesDetailLinksToggle();
-          await expect
-            .poll(() => driver.modulesDetailLinksRows(), { timeout: 30_000 })
-            .toEqual([{ title: "http://example.com", url: "http://example.com", target: "_blank" }]);
-          expect(await driver.modulesDetailLinksEmptyNotice()).toBe(null);
+          if (driver.target === "web_new") {
+            // Fixed (NEWFRONT-342): the section opens by default once
+            // the stored link loads, so the rows render with no toggle.
+            await expect.poll(() => driver.modulesDetailLinksOpen(), { timeout: 30_000 }).toBe(true);
+            await expect
+              .poll(() => driver.modulesDetailLinksRows(), { timeout: 30_000 })
+              .toEqual([{ title: "http://example.com", url: "http://example.com", target: "_blank" }]);
+            expect(await driver.modulesDetailLinksEmptyNotice()).toBe(null);
+          } else {
+            // Live the app stays collapsed, so settle, pin it closed,
+            // then prove the rows are one toggle away (the data is
+            // there — only the default-open is not).
+            await driver.page.waitForTimeout(5_000);
+            expect(await driver.modulesDetailLinksOpen()).toBe(false);
+            await driver.modulesDetailLinksToggle();
+            await expect
+              .poll(() => driver.modulesDetailLinksRows(), { timeout: 30_000 })
+              .toEqual([{ title: "http://example.com", url: "http://example.com", target: "_blank" }]);
+            expect(await driver.modulesDetailLinksEmptyNotice()).toBe(null);
+          }
         });
 
         await test.step("a refused create shows the failure notice and stores nothing", async () => {
