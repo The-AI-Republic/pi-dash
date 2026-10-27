@@ -79,6 +79,7 @@ export type { IssuesHeaderProps } from "./components/IssuesHeader.js";
 export { MobileIssuesHeader } from "./components/MobileIssuesHeader.js";
 export type { MobileIssuesHeaderProps } from "./components/MobileIssuesHeader.js";
 export { ListPageQuickActions } from "./menus/ListPageQuickActions.js";
+export { LIST_COPY_MESSAGE } from "./menus/messages.js";
 export { useCreateWorkItem, WORK_ITEM_CREATED_TITLE, WORK_ITEM_CREATE_FAILED_TITLE } from "./api/create.js";
 export type { WorkItemCreateInput } from "./api/create.js";
 export { clearWorkItemDraft, loadWorkItemDraft, storeWorkItemDraft, workItemDraftKey } from "./lib/createDraft.js";
