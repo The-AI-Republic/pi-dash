@@ -586,10 +586,23 @@ function InlinePropertyStripImpl({
   );
 }
 
-/** Label trigger named by the caller; the picker reuses this exact chip. */
-function LabelsTrigger({ label, disabled }: { label: string; disabled: boolean }): React.ReactElement {
+/**
+ * Label trigger named by the caller; the picker reuses this exact chip.
+ * DeferredPicker and the popover both hand trigger props (click and key
+ * handlers, ids, the anchor ref) to this element, so anything beyond the
+ * named props must land on the button rather than be swallowed here.
+ */
+function LabelsTrigger({
+  label,
+  disabled,
+  ...rest
+}: {
+  label: string;
+  disabled: boolean;
+} & React.ButtonHTMLAttributes<HTMLButtonElement>): React.ReactElement {
   return (
     <button
+      {...rest}
       type="button"
       aria-label={label}
       disabled={disabled}
@@ -600,11 +613,23 @@ function LabelsTrigger({ label, disabled }: { label: string; disabled: boolean }
   );
 }
 
-/** Icon-only priority trigger; its inner class is the parity value marker. */
-function PriorityButton({ level, disabled }: { level: PriorityLevel; disabled: boolean }): React.ReactElement {
+/**
+ * Icon-only priority trigger; its inner class is the parity value marker.
+ * Forwards injected trigger props like LabelsTrigger above: without the
+ * spread the chip renders with no click or keyboard handler at all.
+ */
+function PriorityButton({
+  level,
+  disabled,
+  ...rest
+}: {
+  level: PriorityLevel;
+  disabled: boolean;
+} & React.ButtonHTMLAttributes<HTMLButtonElement>): React.ReactElement {
   const Icon = PRIORITY_ICONS[level];
   return (
     <button
+      {...rest}
       type="button"
       aria-label={`Priority: ${level}`}
       disabled={disabled}

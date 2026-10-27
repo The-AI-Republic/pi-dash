@@ -69,9 +69,11 @@ vi.mock("../labels/LabelPicker.js", () => ({
     onChange: (ids: string[]) => void;
     disabled?: boolean;
   }) => (
-    <button type="button" disabled={props.disabled} onClick={() => props.onChange([...props.value, "new-label"])}>
-      {props.label ?? "Labels"}
-    </button>
+    <div data-testid="label-picker">
+      <button type="button" disabled={props.disabled} onClick={() => props.onChange([...props.value, "new-label"])}>
+        {props.label ?? "Labels"}
+      </button>
+    </div>
   ),
 }));
 
@@ -558,5 +560,106 @@ describe("InlinePropertyStrip deferred pickers", () => {
     fireEvent.click(chip(container));
     expect(screen.queryByTestId("state-picker")).not.toBeInTheDocument();
     expect(chip(container)).toBeDisabled();
+  });
+});
+
+describe("InlinePropertyStrip deferred activation per chip", () => {
+  // Every static chip must carry DeferredPicker's injected handlers to its
+  // button: component triggers (priority, labels) once dropped them and
+  // stayed dead while DOM-button chips worked (NEWFRONT-935).
+  function titledChip(container: HTMLElement, title: string): HTMLElement {
+    const found = container.querySelector<HTMLElement>(`[title="${title}"] button`);
+    if (found === null) throw new Error(`${title} chip missing`);
+    return found;
+  }
+
+  const dated = () => issue({ start_date: "2026-10-01", target_date: "2026-10-20" });
+  const cases: Array<{
+    name: string;
+    chip: (container: HTMLElement) => HTMLElement;
+    picker: string;
+    props?: Partial<InlinePropertyStripProps>;
+  }> = [
+    {
+      name: "state",
+      chip: (container) => titledChip(container, "State: Todo"),
+      picker: "state-picker",
+    },
+    {
+      name: "priority",
+      chip: () => screen.getByRole("button", { name: "Priority: high" }),
+      picker: "priority-picker",
+    },
+    {
+      name: "dates",
+      chip: () => screen.getByTestId("row-dates-trigger"),
+      picker: "row-dates",
+      props: { issue: dated() },
+    },
+    {
+      name: "start date",
+      chip: () => screen.getByRole("button", { name: "Start date" }),
+      picker: "date-Start date",
+      props: { issue: issue({ start_date: "2026-10-01" }) },
+    },
+    {
+      name: "due date",
+      chip: () => screen.getByRole("button", { name: "Due date" }),
+      picker: "date-Due date",
+      props: { issue: issue({ target_date: "2026-10-20" }), properties: { start_date: false } },
+    },
+    {
+      name: "assignee",
+      chip: () => screen.getByRole("button", { name: "Assignees: Assignee" }),
+      picker: "member-picker",
+    },
+    {
+      name: "modules",
+      chip: (container) => titledChip(container, "Modules: Modules"),
+      picker: "module-picker",
+    },
+    {
+      name: "cycle",
+      chip: (container) => titledChip(container, "Cycle: Cycle"),
+      picker: "cycle-picker",
+    },
+    {
+      name: "estimate",
+      chip: () => screen.getByTestId("row-estimate-trigger"),
+      picker: "estimate-picker",
+    },
+    {
+      name: "labels",
+      chip: () => screen.getByRole("button", { name: "Labels: Bug" }),
+      picker: "label-picker",
+      props: { issue: issue({ label_ids: ["label-1"] }) },
+    },
+  ];
+
+  it.each(cases)("mounts the $name picker on click when deferred", ({ chip, picker, props: overrides }) => {
+    const { container } = render(<InlinePropertyStrip {...props({ deferPickers: true, ...overrides })} />);
+    expect(screen.queryByTestId(picker)).not.toBeInTheDocument();
+    fireEvent.click(chip(container));
+    expect(screen.getByTestId(picker)).toBeInTheDocument();
+  });
+
+  it.each(cases)("mounts the $name picker from the keyboard when deferred", ({ chip, picker, props: overrides }) => {
+    const { container } = render(<InlinePropertyStrip {...props({ deferPickers: true, ...overrides })} />);
+    fireEvent.keyDown(chip(container), { key: "Enter" });
+    expect(screen.getByTestId(picker)).toBeInTheDocument();
+  });
+
+  it("mounts the priority picker on Space when deferred", () => {
+    render(<InlinePropertyStrip {...props({ deferPickers: true })} />);
+    expect(screen.queryByTestId("priority-picker")).not.toBeInTheDocument();
+    fireEvent.keyDown(screen.getByRole("button", { name: "Priority: high" }), { key: " " });
+    expect(screen.getByTestId("priority-picker")).toBeInTheDocument();
+  });
+
+  it("mounts the labels picker on Space when deferred", () => {
+    render(<InlinePropertyStrip {...props({ deferPickers: true, issue: issue({ label_ids: ["label-1"] }) })} />);
+    expect(screen.queryByTestId("label-picker")).not.toBeInTheDocument();
+    fireEvent.keyDown(screen.getByRole("button", { name: "Labels: Bug" }), { key: " " });
+    expect(screen.getByTestId("label-picker")).toBeInTheDocument();
   });
 });
