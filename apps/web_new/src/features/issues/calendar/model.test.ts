@@ -125,10 +125,20 @@ describe("calendar model", () => {
 
   it("titles months and same-month or split weeks", () => {
     expect(monthTitle(2026, 9)).toBe("October 2026");
-    expect(weekTitle(weekRow(new Date(2026, 9, 15), 0, true, NOW))).toBe("October 2026");
+    expect(weekTitle(weekRow(new Date(2026, 9, 15), 0, true, NOW))).toBe("Oct 11 – Oct 17, 2026");
     expect(weekTitle(weekRow(new Date(2026, 9, 1), 0, true, NOW))).toBe("Sep 27 – Oct 3, 2026");
     expect(weekTitle(weekRow(new Date(2026, 11, 31), 0, true, NOW))).toBe("Dec 27, 2026 – Jan 2, 2027");
     expect(weekTitle([])).toBe("");
+  });
+
+  it("ranges every week title so prev/next always move it (ISS-022)", () => {
+    // Same-month weeks used to collapse to the bare month name, freezing
+    // the header while the grid stepped; every week step must move it.
+    const anchor = new Date(2026, 9, 15);
+    const current = weekTitle(weekRow(anchor, 0, true, NOW));
+    expect(current).toBe("Oct 11 – Oct 17, 2026");
+    expect(weekTitle(weekRow(stepWeek(anchor, -1), 0, true, NOW))).not.toBe(current);
+    expect(weekTitle(weekRow(stepWeek(anchor, 1), 0, true, NOW))).not.toBe(current);
   });
 
   it("steps months and weeks across year boundaries", () => {
