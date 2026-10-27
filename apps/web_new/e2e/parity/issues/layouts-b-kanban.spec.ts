@@ -447,6 +447,7 @@ test(
         `/${seed.workspaceSlug}/projects/${projectId}/cycles/${cycleId}`,
         browserCookies(user)
       );
+      await kanbanOpenWithRetry(driver);
 
       await test.step("the ghosted issue renders under None with a count that matches its cards", async () => {
         if (driver.target === "web_new") {
