@@ -168,6 +168,30 @@ describe("AdminGeneralSettingsForm", () => {
     expect(writes).toEqual([]);
   });
 
+  it("wires the required message to the name field the way the parity driver reads it", async () => {
+    const user = userEvent.setup();
+    const writes: SeenWrite[] = [];
+    renderForm(storedInstance(), { writes });
+    const name = screen.getByRole("textbox", { name: "Instance name" });
+    // Before any save attempt the field describes nothing: no message
+    // shows while the prefilled name is valid.
+    expect(name).not.toHaveAttribute("aria-describedby");
+    expect(name).not.toHaveAttribute("aria-invalid");
+    await user.clear(name);
+    await user.click(screen.getByRole("button", { name: GENERAL_SAVE_IDLE_LABEL }));
+    // The parity driver resolves the field's message through
+    // aria-describedby and reads its visible text, so the mapping must
+    // point at the rendered required message, not just a sibling alert.
+    expect(name).toHaveAttribute("aria-invalid", "true");
+    const describedBy = name.getAttribute("aria-describedby");
+    expect(describedBy).not.toBeNull();
+    const message = document.getElementById(describedBy ?? "");
+    expect(message).not.toBeNull();
+    expect(message).toHaveTextContent(GENERAL_NAME_REQUIRED_MESSAGE);
+    expect(message?.getAttribute("role")).toBe("alert");
+    expect(writes).toEqual([]);
+  });
+
   it("clears the required message once the name turns valid", async () => {
     const user = userEvent.setup();
     renderForm(storedInstance(), { writes: [] });
