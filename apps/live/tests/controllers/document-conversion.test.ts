@@ -306,7 +306,7 @@ describe("server HTML emitter", () => {
   it("serializes unaligned content byte-for-byte (document)", () => {
     const input = [
       "<h1>Title head</h1>",
-      "<p>a&lt;b&gt;&amp;&quot;q&quot; \u00a0end</p>", // \u00a0 = nbsp, emitted as &nbsp;
+      "<p>a&lt;b&gt;&amp;&quot;q&quot; \u00a0end\u00adhy</p>", // \u00a0 = nbsp -> &nbsp;, \u00ad = shy -> &shy;
       "<p>it's a &lt;tag&gt;</p>", // ' is emitted as &apos;
       "<p></p>",
       "<p>one<br>two</p>",
@@ -325,7 +325,7 @@ describe("server HTML emitter", () => {
 
     expect(convertHTMLDocumentToAllFormats({ document_html: input, variant: "document" }).description_html).toBe(
       '<h1 class="editor-heading-block">Title head</h1>' +
-        '<p class="editor-paragraph-block">a&lt;b&gt;&amp;&quot;q&quot; &nbsp;end</p>' +
+        '<p class="editor-paragraph-block">a&lt;b&gt;&amp;&quot;q&quot; &nbsp;end&shy;hy</p>' +
         '<p class="editor-paragraph-block">it&apos;s a &lt;tag&gt;</p>' +
         '<p class="editor-paragraph-block"></p>' +
         '<p class="editor-paragraph-block">one<br>two</p>' +
