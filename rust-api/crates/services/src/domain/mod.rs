@@ -41,7 +41,9 @@
 //! queue) with one difference — steps are async, because they call async
 //! transition and enqueue functions. Today's handlers await the post-save
 //! orchestration before responding, so the drain is awaited too: fire-and-
-//! forget spawning here would change observable timing.
+//! forget spawning here would change observable timing. The queue's doc
+//! records the Django `on_commit` correspondence (failure modes, order,
+//! outermost-only scope) with file citations.
 //!
 //! Effects that need services/jobs code but are triggered next to an entity
 //! (scheduler seeding on workspace create) travel through the
@@ -57,7 +59,7 @@ pub mod txn;
 
 pub use ctx::{WriteActor, WriteCtx, WriteOptions, WriteScope};
 pub use error::DomainError;
-pub use txn::{CommitQueue, HookRegistry, WriteTxn};
+pub use txn::{CommitQueue, HookRegistry, TxnConn, WriteTxn};
 
 /// Run one domain write: begin, run `work` on the [`WriteTxn`], commit and
 /// then drain the after-commit queue.

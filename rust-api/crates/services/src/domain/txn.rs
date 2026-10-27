@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use sea_orm::{
     ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, DbErr, ExecResult,
-    Statement, StatementBuilder, TransactionTrait, Value,
+    QueryResult, Statement, StatementBuilder, TransactionTrait, Value,
 };
 
 use super::error::DomainError;
@@ -26,6 +26,29 @@ type CommitStep =
 /// steps run in order, exactly once, after a successful commit; a rollback
 /// or a dropped queue runs nothing — with async steps (see the
 /// [`super`] module doc for why the drain is awaited).
+///
+/// Django correspondence (`django/db/transaction.py`,
+/// `django/db/backends/base/base.py`; verified against Django 6.0.5):
+///
+/// * Order: registration order, like Django's `run_and_clear_commit_hooks`
+///   (`base.py`), which pops callbacks FIFO.
+/// * Failure: steps are infallible (`Output = ()`), so a failing effect
+///   records its failure and returns — the drain continues with the next
+///   step. That is Django's `robust=True` arm (log-and-continue). A step
+///   that panics unwinds through the drain: the steps after it never run,
+///   but the write stays committed, because the commit precedes the drain
+///   — Django's default `robust=False` arm (`transaction.py:129`), where
+///   the exception propagates and the rest are skipped. Queue only
+///   infallible work; fallible effects (enqueues, drains) handle their
+///   errors internally and warn (the `enqueue_completion_comment`
+///   best-effort precedent).
+/// * Scope: the queue belongs to the outermost commit only. Unlike Django,
+///   which drops callbacks registered inside a rolled-back savepoint
+///   (`savepoint_rollback`, `base.py`), `WriteTxn` has no nested scopes
+///   (see below), so there is nothing to drop.
+/// * No open transaction: Django runs `on_commit` immediately in autocommit
+///   (`on_commit`, `base.py`). `domain::run` always opens a transaction,
+///   so queued steps always run post-commit, awaited before `run` returns.
 #[derive(Default)]
 pub struct CommitQueue {
     steps: Vec<CommitStep>,
@@ -96,7 +119,53 @@ impl HookRegistry {
     }
 }
 
+/// The query handle for a [`WriteTxn`]: [`ConnectionTrait`] without
+/// [`TransactionTrait`], so entity calls, selects and [`WriteTxn`]'s own
+/// `exec_*` helpers all run, but a nested `begin()` is a compile error.
+///
+/// Nested scopes are unsupported on purpose. SeaORM's nested `begin()`
+/// (`TransactionTrait for DatabaseTransaction`, sea-orm 1.1.20
+/// `database/transaction.rs`) issues a savepoint through sqlx's
+/// transaction-depth counter, and Django drops `on_commit` callbacks
+/// registered inside a rolled-back savepoint (`savepoint_rollback`,
+/// `django/db/backends/base/base.py`) — but the [`CommitQueue`] cannot
+/// observe a savepoint rollback, so steps queued inside one would wrongly
+/// survive it. Until a `WriteTxn` savepoint API with queue scoping exists,
+/// savepoints stay out: `SAVEPOINT`/`RELEASE`/`ROLLBACK TO` SQL through
+/// [`WriteTxn::exec_raw`] is likewise forbidden.
+pub struct TxnConn<'t> {
+    inner: &'t DatabaseTransaction,
+}
+
+#[async_trait::async_trait]
+impl ConnectionTrait for TxnConn<'_> {
+    fn get_database_backend(&self) -> DbBackend {
+        self.inner.get_database_backend()
+    }
+
+    async fn execute(&self, stmt: Statement) -> Result<ExecResult, DbErr> {
+        self.inner.execute(stmt).await
+    }
+
+    async fn execute_unprepared(&self, sql: &str) -> Result<ExecResult, DbErr> {
+        self.inner.execute_unprepared(sql).await
+    }
+
+    async fn query_one(&self, stmt: Statement) -> Result<Option<QueryResult>, DbErr> {
+        self.inner.query_one(stmt).await
+    }
+
+    async fn query_all(&self, stmt: Statement) -> Result<Vec<QueryResult>, DbErr> {
+        self.inner.query_all(stmt).await
+    }
+}
+
 /// A SeaORM transaction plus its after-commit queue and hook registry.
+///
+/// The queue is outermost-commit-only (see [`CommitQueue`]): this type has
+/// no nested constructor, and [`WriteTxn::connection`] exposes queries
+/// without transaction control, so savepoint-scoped work cannot be
+/// expressed by accident.
 pub struct WriteTxn {
     txn: Option<DatabaseTransaction>,
     queue: CommitQueue,
@@ -112,11 +181,15 @@ impl WriteTxn {
         })
     }
 
-    /// The SeaORM transaction for entity calls and [`ConnectionTrait`]
-    /// queries. Panics once the transaction has finished, like
+    /// The query handle for entity calls and [`ConnectionTrait`] queries:
+    /// [`TxnConn`] deliberately omits [`TransactionTrait`], so a nested
+    /// `begin()` (a savepoint the [`CommitQueue`] could not observe) is a
+    /// compile error. Panics once the transaction has finished, like
     /// [`pidash_db::tx::Transaction::inner`].
-    pub fn connection(&self) -> &DatabaseTransaction {
-        self.txn.as_ref().expect("transaction already finished")
+    pub fn connection(&self) -> TxnConn<'_> {
+        TxnConn {
+            inner: self.txn.as_ref().expect("transaction already finished"),
+        }
     }
 
     /// Queue an async step for after commit (Django's `on_commit`).
@@ -206,6 +279,29 @@ mod tests {
         assert_eq!(*log.lock().expect("lock"), vec!["first", "second", "third"]);
     }
 
+    /// A panicking step unwinds the drain (Django's default
+    /// `robust=False`: the steps after it never run). The write stays
+    /// committed — the panic happens after the commit — which the live
+    /// test below proves with a real row.
+    #[tokio::test]
+    async fn panicking_step_unwinds_drain_and_skips_the_rest() {
+        let log: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut queue = CommitQueue::new();
+        let log_panic = Arc::clone(&log);
+        queue.on_commit(move || async move {
+            log_panic.lock().expect("lock").push("before-panic");
+            panic!("step failure unwinds the drain");
+        });
+        let log_skipped = Arc::clone(&log);
+        queue.on_commit(move || async move {
+            log_skipped.lock().expect("lock").push("skipped");
+        });
+        let failed = tokio::spawn(queue.drain()).await;
+        let error = failed.expect_err("drain unwinds");
+        assert!(error.is_panic());
+        assert_eq!(*log.lock().expect("lock"), vec!["before-panic"]);
+    }
+
     #[tokio::test]
     async fn dropped_queue_runs_nothing() {
         let log: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
@@ -281,6 +377,68 @@ mod tests {
         .await
         .expect("commit");
         assert_eq!(*log.lock().expect("lock"), vec!["drained"]);
+    }
+
+    /// A step that fails internally (records the failure, returns `()`)
+    /// never rolls the write back: the commit precedes the drain, and the
+    /// steps after it still run (Django's `robust=True` arm).
+    #[tokio::test]
+    async fn failing_step_never_rolls_back_the_write() {
+        let Some(db) = live_db().await else { return };
+        db.execute(Statement::from_string(
+            DbBackend::Postgres,
+            "CREATE TABLE IF NOT EXISTS domain_writetxn_probe \
+             (id UUID PRIMARY KEY, note TEXT NOT NULL)"
+                .to_owned(),
+        ))
+        .await
+        .expect("probe table");
+        let id = uuid::Uuid::new_v4();
+        let log: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
+        let ctx = crate::domain::WriteCtx::default();
+        let failed = Arc::clone(&log);
+        let ran = Arc::clone(&log);
+        crate::domain::run(&ctx, &db, |txn| {
+            Box::pin(async move {
+                txn.exec_raw(
+                    "INSERT INTO domain_writetxn_probe (id, note) VALUES ($1, $2)",
+                    [Value::from(id), Value::from("committed")],
+                )
+                .await
+                .map_err(DomainError::Db)?;
+                txn.on_commit(move || async move {
+                    failed.lock().expect("lock").push("failed-effect");
+                });
+                txn.on_commit(move || async move {
+                    ran.lock().expect("lock").push("next-step");
+                });
+                Ok::<(), DomainError>(())
+            })
+        })
+        .await
+        .expect("commit");
+        assert_eq!(
+            *log.lock().expect("lock"),
+            vec!["failed-effect", "next-step"]
+        );
+        let row = db
+            .query_one(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "SELECT note FROM domain_writetxn_probe WHERE id = $1",
+                [Value::from(id)],
+            ))
+            .await
+            .expect("read back")
+            .expect("committed row");
+        let note: String = row.try_get("", "note").expect("note decodes");
+        assert_eq!(note, "committed");
+        db.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "DELETE FROM domain_writetxn_probe WHERE id = $1",
+            [Value::from(id)],
+        ))
+        .await
+        .expect("cleanup");
     }
 
     #[tokio::test]

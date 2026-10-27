@@ -352,7 +352,15 @@ pidash_services::domain::run(&ctx, &db, |txn| {
 - After-commit queue — the `pidash_db::tx::AfterCommit` semantics
   (in order, exactly once, after a successful commit; errors roll back
   and drop the queue) with async steps, awaited by `run()` after the
-  commit.
+  commit. Django timing correspondence: pi-dash sets no
+  `ATOMIC_REQUESTS` (autocommit default), so its activity enqueues are
+  plain inline `.delay()` calls and its `on_commit` callbacks run
+  immediately outside `atomic()`; `domain::run` always opens a
+  transaction instead, and no migrated path queues work yet, so moving a
+  future enqueue into the queue changes neither the side effects nor
+  their client-visible timing — each migration re-confirms this for its
+  own paths. Failure modes, order and the outermost-only scope are
+  documented with Django file citations on `CommitQueue`/`WriteTxn`.
 - Hook registry — trait objects implemented wherever their dependencies
   live, so entity-adjacent logic can trigger services/jobs effects
   (scheduler seeding, the issue transition) without a crate cycle.
