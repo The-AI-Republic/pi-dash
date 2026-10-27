@@ -214,6 +214,7 @@ pub mod ops {
     pub use pidash_ops::connect_primary;
     pub use pidash_ops::run;
     pub use pidash_ops::OpsCommand;
+    pub use pidash_services::app_issues::SourceIssueRow;
     pub use pidash_services::dispatch::admission::RedisAdmissionCache;
     pub use pidash_services::dispatch::tools::advisory_lock_key;
     pub use pidash_services::dispatch::tools::py_stripped;
@@ -228,6 +229,12 @@ pub mod ops {
     pub use pidash_services::dispatch::LlmProfile;
     pub use pidash_services::domain::identity::agent_system_user_id;
     pub use pidash_services::domain::identity::GetAgentUserError;
+    pub use pidash_services::domain::issues::move_to_project;
+    pub use pidash_services::domain::issues::CreationDeps;
+    pub use pidash_services::domain::issues::MoveDomainOutcome;
+    pub use pidash_services::domain::issues::MoveInput;
+    pub use pidash_services::domain::issues::MovePostCommitHook;
+    pub use pidash_services::domain::issues::MoveRejection;
     pub use pidash_services::integrations::adapters_github::ClientAuth;
     pub use pidash_services::integrations::adapters_github::GitHubAdapter;
     pub use pidash_services::integrations::adapters_github::GithubClient;

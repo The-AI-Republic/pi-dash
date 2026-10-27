@@ -348,6 +348,7 @@ pidash_sdk::ops::ClientAuth
 pidash_sdk::ops::ClockIssue
 pidash_sdk::ops::ClockWrite
 pidash_sdk::ops::CreateDispatchRequest
+pidash_sdk::ops::CreationDeps
 pidash_sdk::ops::DrainError
 pidash_sdk::ops::EffectBundle
 pidash_sdk::ops::FireOp
@@ -363,6 +364,10 @@ pidash_sdk::ops::LifecycleEffect
 pidash_sdk::ops::LiveGithubClient
 pidash_sdk::ops::LlmProfile
 pidash_sdk::ops::LogLine
+pidash_sdk::ops::MoveDomainOutcome
+pidash_sdk::ops::MoveInput
+pidash_sdk::ops::MovePostCommitHook
+pidash_sdk::ops::MoveRejection
 pidash_sdk::ops::OpsCommand
 pidash_sdk::ops::OutboxError
 pidash_sdk::ops::PROJECT_SELECT_SQL
@@ -380,6 +385,7 @@ pidash_sdk::ops::SAVE_CLOCK_PARAMS
 pidash_sdk::ops::SAVE_CLOCK_SQL
 pidash_sdk::ops::SetValue
 pidash_sdk::ops::SettingsSchema
+pidash_sdk::ops::SourceIssueRow
 pidash_sdk::ops::StateRef
 pidash_sdk::ops::StateView
 pidash_sdk::ops::TERMINAL_RUN_STATUSES
@@ -416,6 +422,7 @@ pidash_sdk::ops::is_ticking_state
 pidash_sdk::ops::latest_prior_run_sql
 pidash_sdk::ops::lock_ticker_sql
 pidash_sdk::ops::merge_settings
+pidash_sdk::ops::move_to_project
 pidash_sdk::ops::next_event_seq
 pidash_sdk::ops::next_message_seq
 pidash_sdk::ops::pending_entry_ticker_for

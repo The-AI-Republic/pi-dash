@@ -1344,6 +1344,8 @@ impl FinalizeAgentRunSeam for HandoffStore<'_, '_> {
 /// the caller to log. Moved from the api handoff module (OVL-06
 /// PIDASHCONV-1544); the api entry is now a thin caller.
 /// Re-exported through `pidash-sdk::ops`.
+// The `()` error is the moved OSS signature: the caller logs.
+#[allow(clippy::result_unit_err)]
 pub async fn complete_project_move_handoff_inline<F, Fut, T, E>(
     pool: &PgPool,
     deps: &HandoffInlineDeps,

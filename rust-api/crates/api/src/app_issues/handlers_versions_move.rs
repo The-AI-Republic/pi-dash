@@ -116,6 +116,7 @@ use crate::v1_cycles_modules::json::{
 };
 use pidash_compat::datetime::{render_date, render_datetime_in, render_uuid_opt, uuid_string};
 use pidash_compat::response::escape_u2028 as escape_json_text;
+use pidash_jobs::orchestration::{MoveIssueDeps, MoveIssueError, MoveIssueParams, TransitionFire};
 
 // ---------------------------------------------------------------------------
 // Routes

@@ -2990,8 +2990,6 @@ mod tests {
         include_str!("../../../../fixtures/runner_enroll/handlers/endpoints.golden.json");
     const FIXTURE_TOKENS: &str =
         include_str!("../../../../fixtures/runner_enroll/tokens/tokens.golden.json");
-    const FIXTURE_FLOWS: &str =
-        include_str!("../../../../fixtures/runner_enroll/services/flows.golden.json");
     const FIXTURE_WIRE: &str =
         include_str!("../../../../fixtures/runner_enroll/external/wire_pins.json");
     const FIXTURE_ENROLL_REFRESH_SQL: &str =
