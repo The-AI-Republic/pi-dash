@@ -1629,21 +1629,16 @@ async fn open_transaction(
         .map_err(TxnFail::from)?;
     }
     // `create(… last_seen_at=now())`: the kwarg `now()` evaluates
-    // first, then `auto_now_add` stamps `created_at` — two calls, in
-    // that order.
-    let last_seen_at = Utc::now();
-    let created_at = Utc::now();
-    sqlx::query(runner_session::OPEN_INSERT_SQL)
-        .bind(new_sid)
-        .bind(runner.id)
-        .bind(runner_session::DEFAULT_PROTOCOL_VERSION)
-        .bind(created_at)
-        .bind(last_seen_at)
-        .bind(None::<DateTime<Utc>>)
-        .bind(runner_session::DEFAULT_REVOKED_REASON)
-        .execute(&mut *tx)
-        .await
-        .map_err(TxnFail::from)?;
+    // first, then `auto_now_add` stamps `created_at` — the domain
+    // driver keeps that order.
+    pidash_services::domain::tokens::open_runner_session(
+        &mut *tx,
+        new_sid,
+        runner.id,
+        runner_session::DEFAULT_PROTOCOL_VERSION,
+    )
+    .await
+    .map_err(TxnFail::from)?;
     execute_hello(&mut tx, runner, body).await?;
     let mut effects = OpenEffects::default();
     execute_reap_open(&mut tx, runner.id, body, &mut effects).await?;

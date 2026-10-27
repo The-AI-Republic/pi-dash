@@ -34,7 +34,7 @@
 //! * Ticket `SET EX` is skipped when Redis is `None`, but the endpoint
 //!   still 201s an unredeemable ticket (`:832-850`).
 //! * Rotate drops `user` from the dev-machine filter while bootstrap
-//!   keeps it (`:181-190`; the `rotate_revoke_sql` machine branch).
+//!   keeps it (`:181-190`; the domain `revoke_tokens_for_machine_in_workspace`).
 //! * An unknown `?pod=` name falls through to the project default pod
 //!   instead of 404ing (`:671-675`).
 //! * The managed-cap 409 returns from inside the attempt `atomic()`
@@ -1073,22 +1073,22 @@ async fn insert_machine_token(
     host_label: &str,
     minted: &enroll_tokens::MintedToken,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(&enroll_sql::machine_token_insert_sql())
-        .bind(Uuid::new_v4())
-        .bind(user_id)
-        .bind(dev_machine_id)
-        .bind(workspace_id)
-        .bind(host_label)
-        .bind(&minted.hashed)
-        .bind(&minted.fingerprint)
-        .bind(enroll_sql::machine_token_label(host_label))
-        .bind(true)
-        .bind(Utc::now())
-        .bind(None::<DateTime<Utc>>)
-        .bind(None::<DateTime<Utc>>)
-        .execute(&mut **tx)
-        .await
-        .map(|_| ())
+    pidash_services::domain::tokens::insert_machine_token(
+        &mut **tx,
+        &pidash_services::domain::tokens::NewMachineToken {
+            id: Uuid::new_v4(),
+            user_id,
+            dev_machine_id,
+            workspace_id,
+            host_label: host_label.to_owned(),
+            token_hash: minted.hashed.clone(),
+            token_fingerprint: minted.fingerprint.clone(),
+            label: enroll_sql::machine_token_label(host_label),
+            is_service: true,
+            created_at: Utc::now(),
+        },
+    )
+    .await
 }
 
 /// `_maybe_mint_machine_token` (`:130-171`): locked-exists probe, mint,
@@ -1169,17 +1169,26 @@ pub async fn rotate_machine_token(
     secret_key: &str,
 ) -> Result<enroll_tokens::MintedToken, RotateOutcome> {
     let with_machine = dev_machine_id.is_some();
-    let sql = enroll_sql::rotate_revoke_sql(with_machine);
-    let mut revoke = sqlx::query(&sql).bind(Utc::now());
     if with_machine {
-        revoke = revoke.bind(dev_machine_id).bind(workspace_id);
-    } else {
-        revoke = revoke.bind(host_label).bind(user_id).bind(workspace_id);
-    }
-    revoke
-        .execute(&mut **tx)
+        pidash_services::domain::tokens::revoke_tokens_for_machine_in_workspace(
+            &mut **tx,
+            dev_machine_id.expect("checked is_some"),
+            workspace_id,
+            Utc::now(),
+        )
         .await
         .map_err(|_| RotateOutcome::Server)?;
+    } else {
+        pidash_services::domain::tokens::revoke_tokens_legacy_host(
+            &mut **tx,
+            host_label,
+            user_id,
+            workspace_id,
+            Utc::now(),
+        )
+        .await
+        .map_err(|_| RotateOutcome::Server)?;
+    }
     let minted = enroll_tokens::mint_machine_token(secret_key);
     match insert_machine_token(
         tx,

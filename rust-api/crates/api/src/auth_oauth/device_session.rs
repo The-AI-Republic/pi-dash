@@ -786,35 +786,37 @@ async fn exchange_in_transaction(
     }
     // `_rotate_machine_token` (`device.py:112-129`): revoke every live
     // token for the pair, then mint.
-    sqlx::query(dev_machine::ROTATE_REVOKE_SQL)
-        .bind(now)
-        .bind(workspace_id)
-        .bind(params.dev_machine_id)
-        .execute(&mut **tx)
-        .await
-        .map_err(|_| Failure::server_error().into_response())?;
+    pidash_services::domain::tokens::revoke_tokens_for_device_pair(
+        &mut **tx,
+        workspace_id,
+        params.dev_machine_id,
+        now,
+    )
+    .await
+    .map_err(|_| Failure::server_error().into_response())?;
     let raw = format!(
         "{}{}",
         token_kernel::MACHINE_TOKEN_PREFIX,
         token_urlsafe_32()
     );
     let token_id = Uuid::new_v4();
-    sqlx::query(dev_machine::ROTATE_CREATE_SQL)
-        .bind(token_id)
-        .bind(user_id)
-        .bind(params.dev_machine_id)
-        .bind(workspace_id)
-        .bind(dev_machine::rotate_host_label(&params.host_label))
-        .bind(token_kernel::hash_token(&raw, secret_key))
-        .bind(token_kernel::fingerprint(&raw))
-        .bind(dev_machine::machine_token_label(&params.host_label))
-        .bind(true)
-        .bind(now)
-        .bind(None::<DateTime<Utc>>)
-        .bind(None::<DateTime<Utc>>)
-        .execute(&mut **tx)
-        .await
-        .map_err(|_| Failure::server_error().into_response())?;
+    pidash_services::domain::tokens::insert_machine_token(
+        &mut **tx,
+        &pidash_services::domain::tokens::NewMachineToken {
+            id: token_id,
+            user_id,
+            dev_machine_id: Some(params.dev_machine_id),
+            workspace_id,
+            host_label: dev_machine::rotate_host_label(&params.host_label),
+            token_hash: token_kernel::hash_token(&raw, secret_key),
+            token_fingerprint: token_kernel::fingerprint(&raw),
+            label: dev_machine::machine_token_label(&params.host_label),
+            is_service: true,
+            created_at: now,
+        },
+    )
+    .await
+    .map_err(|_| Failure::server_error().into_response())?;
     // The bridge is an in-memory credential: deactivate it for API-key
     // callers, keep machine-token callers on their rotation
     // (`device.py:466-467`).

@@ -132,7 +132,8 @@
 //!
 //! * `close_runner_session`'s active-list select (`pubsub.py:96-99`,
 //!   full-row, default ordering, no `LIMIT`) is PIDASHCONV-553's;
-//!   its per-row revoke reuses [`models::runner_session::REVOKE_SQL`].
+//!   its per-row revoke reuses the domain `revoke_runner_session`
+//!   (`pidash_services::domain::tokens`, PIDASHCONV-1520).
 //! * The `DevMachine.last_seen_at` keyed updates
 //!   (`machine_sessions.py:106-108`, `:201`) execute in the machine
 //!   handlers (PIDASHCONV-559) against the D-13 table.

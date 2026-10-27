@@ -412,22 +412,9 @@ pub fn machine_revoke_sql() -> String {
         .to_string()
 }
 
-/// M6/M7 — machine-token revoke update (`runners.py:198, 238`).
-///
-/// Both call sites run the identical ORM call —
-/// `MachineToken.objects.filter(dev_machine=machine,
-/// revoked_at__isnull=True).update(revoked_at=now)` — so one builder
-/// serves both. `$1` = `now()`, `$2` = machine id.
-pub fn machine_tokens_revoke_sql() -> String {
-    format!(
-        "UPDATE \"{}\" SET \"revoked_at\" = $1 \
-         WHERE (\"{}\".\"dev_machine_id\" = $2 \
-         AND \"{}\".\"revoked_at\" IS NULL)",
-        mt_cols::TABLE,
-        mt_cols::TABLE,
-        mt_cols::TABLE,
-    )
-}
+// NOTE: the M6/M7 machine-token revoke builder lived here; the statement
+// moved to `crate::domain::tokens::revoke_tokens_for_dev_machine`
+// (PIDASHCONV-1520), whose test carries the pin.
 
 /// M6 — locked active-runner list (`runners.py:199`).
 ///
@@ -1127,23 +1114,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn token_revoke_update_serves_revoke_and_rotate() {
-        // runners.py:198 and :238 run the identical ORM call.
-        assert_eq!(
-            machine_tokens_revoke_sql(),
-            "UPDATE \"machine_token\" SET \"revoked_at\" = $1 \
-             WHERE (\"machine_token\".\"dev_machine_id\" = $2 \
-             AND \"machine_token\".\"revoked_at\" IS NULL)",
-        );
-        for fragment in [
-            fixture_fragment("UPDATE \"machine_token\" SET \"revoked_at\" = "),
-            fixture_fragment("\"dev_machine_id\" = "),
-            fixture_fragment("\"revoked_at\" IS NULL"),
-        ] {
-            assert_builder_contains(&machine_tokens_revoke_sql(), &fragment);
-        }
-    }
+    // (The token-revoke pin moved with the statement to
+    // `crate::domain::tokens`; runners.py:198 and :238 still run the
+    // identical call through `revoke_tokens_for_dev_machine`.)
 
     #[test]
     fn m6_locked_runner_list_has_no_limit() {

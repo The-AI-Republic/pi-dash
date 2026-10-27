@@ -1066,10 +1066,7 @@ pub async fn dev_machine_revoke(
         stamped = Some((now, auto_now));
     }
     // Token revoke-all (`:198`).
-    if sqlx::query(&manage_reads::machine_tokens_revoke_sql())
-        .bind(now)
-        .bind(machine_id)
-        .execute(&mut *tx)
+    if pidash_services::domain::tokens::revoke_tokens_for_dev_machine(&mut *tx, machine_id, now)
         .await
         .is_err()
     {
@@ -1226,10 +1223,7 @@ pub async fn dev_machine_rotate(
 
     // Token revoke-all (`:238`).
     let now = now_micros();
-    if sqlx::query(&manage_reads::machine_tokens_revoke_sql())
-        .bind(now)
-        .bind(machine_id)
-        .execute(&mut *tx)
+    if pidash_services::domain::tokens::revoke_tokens_for_dev_machine(&mut *tx, machine_id, now)
         .await
         .is_err()
     {
@@ -2905,9 +2899,7 @@ async fn delete_collected_runner(pool: &PgPool, runner_id: Uuid) -> Result<(), (
         approvals.execute(&mut *tx).await.map_err(|_| ())?;
         dedupes.execute(&mut *tx).await.map_err(|_| ())?;
     }
-    sqlx::query(&delete_kernel::delete_runner_sessions_sql(1))
-        .bind(runner_id)
-        .execute(&mut *tx)
+    pidash_services::domain::tokens::delete_runner_sessions_for_runners(&mut *tx, &[runner_id])
         .await
         .map_err(|_| ())?;
     sqlx::query(&delete_kernel::delete_force_refresh_sql(1))
@@ -3561,9 +3553,9 @@ mod tests {
         assert!(locked.contains("FOR UPDATE"), "{locked}");
         let revoke = normalize_sql(&manage_reads::machine_revoke_sql());
         assert!(revoke.contains(r#"SET "revoked_at" = "#), "{revoke}");
-        let tokens = normalize_sql(&manage_reads::machine_tokens_revoke_sql());
-        assert!(tokens.contains(r#"UPDATE "machine_token""#), "{tokens}");
-        assert!(tokens.contains(r#""revoked_at" IS NULL"#), "{tokens}");
+        // (The token-revoke core moved to
+        // `pidash_services::domain::tokens::revoke_tokens_for_dev_machine`,
+        // whose test carries the pin.)
     }
 
     // ---- D13-F6: revoke cascade --------------------------------------

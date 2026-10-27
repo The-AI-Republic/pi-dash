@@ -1289,13 +1289,13 @@ impl delete_svc::RunnerDeleteStore for DeleteStore<'_, '_> {
         machine_id: Uuid,
         now: DateTime<Utc>,
     ) -> Result<(), RevokeError> {
-        sqlx::query(delete_svc::REVOKE_MACHINE_TOKENS_SQL)
-            .bind(now)
-            .bind(machine_id)
-            .execute(&mut **self.tx)
-            .await
-            .map(|_| ())
-            .map_err(store_err)
+        pidash_services::domain::tokens::revoke_tokens_for_dev_machine(
+            &mut **self.tx,
+            machine_id,
+            now,
+        )
+        .await
+        .map_err(store_err)
     }
 
     async fn lock_machine_runners(
@@ -1404,16 +1404,12 @@ impl delete_svc::RunnerDeleteStore for DeleteStore<'_, '_> {
     }
 
     async fn delete_runner_sessions(&mut self, runner_ids: &[Uuid]) -> Result<(), RevokeError> {
-        let sql = delete_svc::delete_runner_sessions_sql(runner_ids.len());
-        let mut query = sqlx::query(&sql);
-        for id in runner_ids {
-            query = query.bind(*id);
-        }
-        query
-            .execute(&mut **self.tx)
-            .await
-            .map(|_| ())
-            .map_err(store_err)
+        pidash_services::domain::tokens::delete_runner_sessions_for_runners(
+            &mut **self.tx,
+            runner_ids,
+        )
+        .await
+        .map_err(store_err)
     }
 
     async fn delete_force_refresh(&mut self, runner_ids: &[Uuid]) -> Result<(), RevokeError> {
@@ -1548,11 +1544,8 @@ impl delete_svc::RunnerDeleteStore for DeleteStore<'_, '_> {
     }
 
     async fn null_token_machines(&mut self, machine_id: Uuid) -> Result<(), RevokeError> {
-        sqlx::query(delete_svc::NULL_TOKEN_MACHINES_SQL)
-            .bind(machine_id)
-            .execute(&mut **self.tx)
+        pidash_services::domain::tokens::clear_token_dev_machines(&mut **self.tx, machine_id)
             .await
-            .map(|_| ())
             .map_err(store_err)
     }
 

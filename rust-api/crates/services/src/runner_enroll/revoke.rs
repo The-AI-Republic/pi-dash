@@ -168,12 +168,10 @@ pub fn check_revoke_reason(reason: &str) -> (String, Vec<String>) {
 /// the D-14 drain consts).
 pub const MARK_RUNNER_REVOKED_SQL: &str = "UPDATE \"runner\" SET \"status\" = 'revoked', \"revoked_at\" = $1, \"revoked_reason\" = $2 WHERE \"runner\".\"id\" = $3";
 
-/// S2 — revoke active sessions (`:618-620`).
-///
-/// `$1` = now, `$2` = stored reason, `$3` = runner. The `WHERE` order
-/// (`revoked_at IS NULL` first) is Django's `Q`-sorted kwargs, not the
-/// source filter order (`runner=self, revoked_at__isnull=True`).
-pub const REVOKE_ACTIVE_SESSIONS_SQL: &str = "UPDATE \"runner_session\" SET \"revoked_at\" = $1, \"revoked_reason\" = $2 WHERE (\"runner_session\".\"revoked_at\" IS NULL AND \"runner_session\".\"runner_id\" = $3)";
+// NOTE: the S2 revoke const lived here; the statement moved to
+// `crate::domain::tokens::revoke_runner_sessions_for_runner`
+// (PIDASHCONV-1520), whose test carries the pin (including the
+// Q-sorted WHERE order).
 
 /// S3 — lock + list non-terminal runs (`:622-626`).
 ///
@@ -249,7 +247,8 @@ pub trait RevokeStore {
         stored_reason: &str,
     ) -> Result<(), RevokeError>;
 
-    /// S2: revoke active sessions ([`REVOKE_ACTIVE_SESSIONS_SQL`]).
+    /// S2: revoke active sessions
+    /// (`crate::domain::tokens::revoke_runner_sessions_for_runner`).
     async fn revoke_active_sessions(
         &mut self,
         runner_id: Uuid,
@@ -540,13 +539,8 @@ mod tests {
         assert!(sql.contains("updated_at UNCHANGED"), "F5 pins the note");
     }
 
-    #[test]
-    fn s2_where_order_is_q_sorted() {
-        assert_eq!(
-            REVOKE_ACTIVE_SESSIONS_SQL,
-            "UPDATE \"runner_session\" SET \"revoked_at\" = $1, \"revoked_reason\" = $2 WHERE (\"runner_session\".\"revoked_at\" IS NULL AND \"runner_session\".\"runner_id\" = $3)"
-        );
-    }
+    // (The S2 pin moved with the statement to
+    // `crate::domain::tokens`.)
 
     #[test]
     fn s3_renders_non_terminal_statuses_from_guards() {

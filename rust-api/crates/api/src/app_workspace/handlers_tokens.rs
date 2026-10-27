@@ -3250,21 +3250,9 @@ mod tests {
         assert_eq!(py_str(&JVal::Null), None);
     }
 
-    #[test]
-    fn bind_placeholders_vectors() {
-        assert_eq!(
-            bind_placeholders(queries_user::api_token_insert_sql()),
-            "INSERT INTO api_tokens (created_at, updated_at, created_by_id, updated_by_id, deleted_at, id, label, description, is_active, last_used, token, user_id, user_type, workspace_id, expired_at, is_service, allowed_rate_limit) VALUES ($1, $2, $3, NULL, NULL, $4, $5, $6, TRUE, NULL, $7, $8, $9, NULL, $10, FALSE, '60/min')"
-        );
-        assert_eq!(
-            bind_placeholders(queries_user::api_token_soft_delete_sql()),
-            "UPDATE api_tokens SET deleted_at = $1, updated_at = $2 WHERE id = $3"
-        );
-        assert_eq!(
-            bind_placeholders(queries_user::api_token_patch_save_sql()),
-            "UPDATE api_tokens SET label = $1, description = $2, is_service = $3, allowed_rate_limit = $4, deleted_at = $5, created_by_id = $6, updated_at = $7 WHERE id = $8"
-        );
-    }
+    // (The write-builder vector pins moved with the statements to
+    // `pidash_services::domain::tokens`, whose `bind_placeholders_vectors`
+    // test asserts the same three renderings.)
 
     #[test]
     fn field_errors_wire_order() {

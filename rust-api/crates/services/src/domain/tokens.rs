@@ -628,6 +628,242 @@ where
 }
 
 // ---------------------------------------------------------------------------
+// machine_token flows (rotate, mint, sign-out, delete)
+// ---------------------------------------------------------------------------
+
+/// Device rotate revoke (`device.py:113-117`):
+/// `MachineToken.objects.select_for_update().filter(workspace=,
+/// dev_machine=, revoked_at__isnull=True).update(revoked_at=now)`.
+/// Moved verbatim from the device-machine consts: `$1` now, `$2`
+/// workspace, `$3` dev machine, live rows only. The shape differs
+/// from the enroll twin below only in conjunct order (unguarded
+/// parens here vs `Q`-sorted parens there); the two stay separate
+/// functions per D6.
+const ROTATE_REVOKE_FOR_PAIR_SQL: &str =
+    "UPDATE \"machine_token\" SET \"revoked_at\" = $1 WHERE \"machine_token\".\"workspace_id\" = $2 AND \"machine_token\".\"dev_machine_id\" = $3 AND \"machine_token\".\"revoked_at\" IS NULL";
+
+/// Enroll/desktop rotate revoke, machine branch
+/// (`enrollment.py:174-203`, `desktop.py:134-138`): `$1` now, `$2`
+/// dev machine, `$3` workspace, live rows only. Moved verbatim (the
+/// enroll and desktop builders spelled identical text). NOTE the
+/// filter asymmetry vs B1: `user` is NOT in the filter
+/// (BUG-rotate-user-omission, ported as-is).
+const ROTATE_REVOKE_FOR_MACHINE_SQL: &str =
+    "UPDATE \"machine_token\" SET \"revoked_at\" = $1 WHERE (\"machine_token\".\"dev_machine_id\" = $2 AND \"machine_token\".\"revoked_at\" IS NULL AND \"machine_token\".\"workspace_id\" = $3)";
+
+/// Enroll rotate revoke, legacy branch (no dev machine): `$1` now,
+/// `$2` host label, `$3` user, `$4` workspace, over rows with
+/// `dev_machine_id IS NULL`. Moved verbatim.
+const ROTATE_REVOKE_LEGACY_SQL: &str =
+    "UPDATE \"machine_token\" SET \"revoked_at\" = $1 WHERE (\"machine_token\".\"dev_machine_id\" IS NULL AND \"machine_token\".\"host_label\" = $2 AND \"machine_token\".\"revoked_at\" IS NULL AND \"machine_token\".\"user_id\" = $3 AND \"machine_token\".\"workspace_id\" = $4)";
+
+/// Machine revoke-all (`runners.py:198,238`, delete D1): `$1` now,
+/// `$2` dev machine, live rows only, no workspace scope. Moved
+/// verbatim (the manage builder, the delete const and the teardown
+/// callers spelled identical text).
+const REVOKE_TOKENS_FOR_MACHINE_SQL: &str =
+    "UPDATE \"machine_token\" SET \"revoked_at\" = $1 WHERE (\"machine_token\".\"dev_machine_id\" = $2 AND \"machine_token\".\"revoked_at\" IS NULL)";
+
+/// Delete-cascade `SET_NULL` (`delete.py`): token rows SURVIVE with
+/// a NULLed machine link. `$1` dev machine. Moved verbatim.
+const CLEAR_TOKEN_MACHINES_SQL: &str =
+    "UPDATE \"machine_token\" SET \"dev_machine_id\" = NULL WHERE \"machine_token\".\"dev_machine_id\" IN ($1)";
+
+/// Machine-token mint: the plain 12-column `INSERT` in
+/// `mt_cols::COLUMNS` order (`$1..$12`: id, user, dev machine,
+/// workspace, host label, hash, fingerprint, label, is_service,
+/// created, last_used, revoked). The device const, the enroll
+/// builder and the desktop builder spelled identical text; the
+/// column list is rendered from the shared const so drift fails the
+/// pin test, not silently.
+fn machine_token_insert_sql() -> String {
+    let cols = pidash_db::runner_enroll::columns::machine_token::COLUMNS
+        .iter()
+        .map(|col| format!("\"{col}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "INSERT INTO \"{}\" ({cols}) VALUES ({})",
+        pidash_db::runner_enroll::columns::machine_token::TABLE,
+        (1..=pidash_db::runner_enroll::columns::machine_token::COLUMNS.len())
+            .map(|i| format!("${i}"))
+            .collect::<Vec<_>>()
+            .join(", "),
+    )
+}
+
+/// Sign-out revoke over bundled machines (`desktop.py:170-178`):
+/// `$1` now, `$2..` dev-machine ids in list order, live rows only.
+/// Moved verbatim with the builder's contract: empty input is a
+/// caller bug (Django raises `EmptyResultSet`), so the driver
+/// asserts like the builder did.
+fn signout_revoke_tokens_sql(machine_count: usize) -> String {
+    assert!(
+        machine_count > 0,
+        "signout revoke needs at least one machine id (the source returns 204 with no SQL when no machines match)"
+    );
+    format!(
+        "UPDATE \"machine_token\" SET \"revoked_at\" = $1 WHERE (\"machine_token\".\"dev_machine_id\" IN ({}) AND \"machine_token\".\"revoked_at\" IS NULL)",
+        (0..machine_count)
+            .map(|i| format!("${}", 2 + i))
+            .collect::<Vec<_>>()
+            .join(", "),
+    )
+}
+
+/// Revoke every token for one device pair (device rotate shape).
+pub async fn revoke_tokens_for_device_pair<'e, E>(
+    ex: E,
+    workspace_id: Uuid,
+    dev_machine_id: Uuid,
+    now: DateTime<Utc>,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(ROTATE_REVOKE_FOR_PAIR_SQL)
+        .bind(now)
+        .bind(workspace_id)
+        .bind(dev_machine_id)
+        .execute(ex)
+        .await
+        .map(|_| ())
+}
+
+/// Revoke live tokens for one machine in one workspace (enroll and
+/// desktop rotate shape).
+pub async fn revoke_tokens_for_machine_in_workspace<'e, E>(
+    ex: E,
+    dev_machine_id: Uuid,
+    workspace_id: Uuid,
+    now: DateTime<Utc>,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(ROTATE_REVOKE_FOR_MACHINE_SQL)
+        .bind(now)
+        .bind(dev_machine_id)
+        .bind(workspace_id)
+        .execute(ex)
+        .await
+        .map(|_| ())
+}
+
+/// Revoke live legacy tokens by host label (enroll rotate without a
+/// dev machine).
+pub async fn revoke_tokens_legacy_host<'e, E>(
+    ex: E,
+    host_label: &str,
+    user_id: Uuid,
+    workspace_id: Uuid,
+    now: DateTime<Utc>,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(ROTATE_REVOKE_LEGACY_SQL)
+        .bind(now)
+        .bind(host_label)
+        .bind(user_id)
+        .bind(workspace_id)
+        .execute(ex)
+        .await
+        .map(|_| ())
+}
+
+/// Revoke live tokens for one dev machine (manage revoke-all and
+/// delete D1 shape; no workspace scope).
+pub async fn revoke_tokens_for_dev_machine<'e, E>(
+    ex: E,
+    dev_machine_id: Uuid,
+    now: DateTime<Utc>,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(REVOKE_TOKENS_FOR_MACHINE_SQL)
+        .bind(now)
+        .bind(dev_machine_id)
+        .execute(ex)
+        .await
+        .map(|_| ())
+}
+
+/// Revoke live tokens for several dev machines (desktop sign-out).
+/// The only caller returns 204 before reaching here with an empty
+/// list; an empty list here panics, like the moved builder.
+pub async fn revoke_tokens_for_dev_machines<'e, E>(
+    ex: E,
+    dev_machine_ids: &[Uuid],
+    now: DateTime<Utc>,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let sql = signout_revoke_tokens_sql(dev_machine_ids.len());
+    let mut query = sqlx::query(&sql).bind(now);
+    for id in dev_machine_ids {
+        query = query.bind(*id);
+    }
+    query.execute(ex).await.map(|_| ())
+}
+
+/// NULL a deleted machine's link on its token rows (delete cascade;
+/// the rows survive).
+pub async fn clear_token_dev_machines<'e, E>(ex: E, dev_machine_id: Uuid) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(CLEAR_TOKEN_MACHINES_SQL)
+        .bind(dev_machine_id)
+        .execute(ex)
+        .await
+        .map(|_| ())
+}
+
+/// Resolved inputs for [`insert_machine_token`]: the caller mints
+/// the secret, hashes it, derives the labels and stamps the clock;
+/// the driver only writes the row. `dev_machine_id` is `None` on
+/// the legacy enroll path.
+pub struct NewMachineToken {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub dev_machine_id: Option<Uuid>,
+    pub workspace_id: Uuid,
+    pub host_label: String,
+    pub token_hash: String,
+    pub token_fingerprint: String,
+    pub label: String,
+    pub is_service: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Mint one machine token row (device, enroll and desktop share the
+/// 12-column shape; `last_used_at`/`revoked_at` NULL).
+pub async fn insert_machine_token<'e, E>(ex: E, params: &NewMachineToken) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(&machine_token_insert_sql())
+        .bind(params.id)
+        .bind(params.user_id)
+        .bind(params.dev_machine_id)
+        .bind(params.workspace_id)
+        .bind(&params.host_label)
+        .bind(&params.token_hash)
+        .bind(&params.token_fingerprint)
+        .bind(&params.label)
+        .bind(params.is_service)
+        .bind(params.created_at)
+        .bind(None::<DateTime<Utc>>)
+        .bind(None::<DateTime<Utc>>)
+        .execute(ex)
+        .await
+        .map(|_| ())
+}
+
+// ---------------------------------------------------------------------------
 // runner_session
 // ---------------------------------------------------------------------------
 
@@ -742,6 +978,78 @@ fn revoke_sessions_update(session_count: usize) -> String {
     )
 }
 
+/// Session open (`views/sessions.py:169+184`): `create(runner=,
+/// protocol_version=, last_seen_at=now())`. Moved verbatim from the
+/// session model consts: `$1` id (caller-supplied fresh `uuid4`),
+/// `$2` runner, `$3` protocol version, `$4` `created_at`
+/// (`auto_now_add`), `$5` `last_seen_at`, `$6` `revoked_at` (NULL),
+/// `$7` `revoked_reason` (`""` default). No `RETURNING`: the PK is
+/// supplied, so Django fetches nothing back.
+const OPEN_SESSION_SQL: &str =
+    "INSERT INTO \"runner_session\" (\"id\", \"runner_id\", \"protocol_version\", \"created_at\", \"last_seen_at\", \"revoked_at\", \"revoked_reason\") VALUES ($1, $2, $3, $4, $5, $6, $7)";
+
+/// Runner-level session fast delete (delete cascade): `$1..` runner
+/// ids in fetch order. Moved verbatim from the delete kernel.
+fn delete_runner_sessions_sql(runner_count: usize) -> String {
+    format!(
+        "DELETE FROM \"runner_session\" WHERE \"runner_session\".\"runner_id\" IN ({})",
+        (1..=runner_count)
+            .map(|index| format!("${index}"))
+            .collect::<Vec<_>>()
+            .join(", "),
+    )
+}
+
+/// Open one runner session. The two stamps are separate `now()` calls
+/// in Django's evaluation order: the `last_seen_at` kwarg first, then
+/// the `auto_now_add` `created_at` — so `last_seen_at` is never after
+/// `created_at`, like the source.
+pub async fn open_runner_session<'e, E>(
+    ex: E,
+    id: Uuid,
+    runner_id: Uuid,
+    protocol_version: i32,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let last_seen_at = Utc::now();
+    let created_at = Utc::now();
+    sqlx::query(OPEN_SESSION_SQL)
+        .bind(id)
+        .bind(runner_id)
+        .bind(protocol_version)
+        .bind(created_at)
+        .bind(last_seen_at)
+        .bind(None::<DateTime<Utc>>)
+        .bind("")
+        .execute(ex)
+        .await
+        .map(|_| ())
+}
+
+/// Delete every session for several runners (delete cascade). The
+/// drivers never pass an empty list (the collector returns early on
+/// no rows); an empty list here is a no-op rather than an invalid
+/// `IN ()`, like the sweeps bulk revoke.
+pub async fn delete_runner_sessions_for_runners<'e, E>(
+    ex: E,
+    runner_ids: &[Uuid],
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    if runner_ids.is_empty() {
+        return Ok(());
+    }
+    let sql = delete_runner_sessions_sql(runner_ids.len());
+    let mut query = sqlx::query(&sql);
+    for id in runner_ids {
+        query = query.bind(*id);
+    }
+    query.execute(ex).await.map(|_| ())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -843,6 +1151,93 @@ mod tests {
         assert!(!cli_token::is_noop_token(Some("pi_dash_api_x")));
     }
 
+    // Moved S2 pin (the revoke kernel's `s2_where_order_is_q_sorted`
+    // is deleted with the const): the WHERE order is Django's
+    // Q-sorted kwargs, not the source filter order.
+    #[test]
+    fn revoke_runner_sessions_where_order_is_q_sorted() {
+        assert_eq!(
+            REVOKE_RUNNER_SESSIONS_SQL,
+            "UPDATE \"runner_session\" SET \"revoked_at\" = $1, \"revoked_reason\" = $2 WHERE (\"runner_session\".\"revoked_at\" IS NULL AND \"runner_session\".\"runner_id\" = $3)"
+        );
+    }
+
+    // Moved open/delete pins (the session model's `OPEN_INSERT_SQL`
+    // test and the delete kernel's fast-delete test are deleted with
+    // their SQL).
+    #[test]
+    fn session_open_and_delete_sql_pins() {
+        assert_eq!(
+            OPEN_SESSION_SQL,
+            "INSERT INTO \"runner_session\" (\"id\", \"runner_id\", \"protocol_version\", \"created_at\", \"last_seen_at\", \"revoked_at\", \"revoked_reason\") VALUES ($1, $2, $3, $4, $5, $6, $7)"
+        );
+        assert_eq!(
+            delete_runner_sessions_sql(1),
+            "DELETE FROM \"runner_session\" WHERE \"runner_session\".\"runner_id\" IN ($1)"
+        );
+        assert_eq!(
+            delete_runner_sessions_sql(3),
+            "DELETE FROM \"runner_session\" WHERE \"runner_session\".\"runner_id\" IN ($1, $2, $3)"
+        );
+    }
+
+    /// Live-db half: open a session, touch it, revoke it, then delete
+    /// the runner's rows — all inside a rolled-back transaction (the
+    /// `runner_session` FK is deferred, so no parents or cleanup are
+    /// needed).
+    #[tokio::test]
+    async fn runner_session_flow_roundtrip() {
+        let url = match std::env::var("DATABASE_URL") {
+            Ok(url) => url,
+            Err(_) => {
+                eprintln!("skipping live-db test: DATABASE_URL is not set");
+                return;
+            }
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect to scratch DATABASE_URL");
+        let mut tx = pool.begin().await.expect("begin");
+        let sid = Uuid::new_v4();
+        let runner_id = Uuid::new_v4();
+        open_runner_session(&mut *tx, sid, runner_id, 4)
+            .await
+            .expect("open");
+        let row: (i32, Option<DateTime<Utc>>) =
+            sqlx::query_as("SELECT protocol_version, revoked_at FROM runner_session WHERE id = $1")
+                .bind(sid)
+                .fetch_one(&mut *tx)
+                .await
+                .expect("read open row");
+        assert_eq!(row.0, 4);
+        assert_eq!(row.1, None);
+        touch_runner_session(&mut *tx, sid, Utc::now())
+            .await
+            .expect("touch");
+        revoke_runner_session(&mut *tx, sid, Utc::now(), "flow-test")
+            .await
+            .expect("revoke");
+        let reason: (String,) =
+            sqlx::query_as("SELECT revoked_reason FROM runner_session WHERE id = $1")
+                .bind(sid)
+                .fetch_one(&mut *tx)
+                .await
+                .expect("read revoked row");
+        assert_eq!(reason.0, "flow-test");
+        delete_runner_sessions_for_runners(&mut *tx, &[runner_id])
+            .await
+            .expect("delete");
+        let left: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM runner_session WHERE id = $1")
+            .bind(sid)
+            .fetch_one(&mut *tx)
+            .await
+            .expect("count");
+        assert_eq!(left.0, 0);
+        tx.rollback().await.expect("rollback");
+    }
+
     // Moved revoke half of the sweeps byte-exact test (the select
     // half stays with the sweeps module).
     #[test]
@@ -867,6 +1262,151 @@ mod tests {
             REVOKE_MACHINE_BY_ID_SQL,
             "UPDATE \"machine_token\" SET \"revoked_at\" = $1 WHERE \"machine_token\".\"id\" = $2"
         );
+    }
+
+    // Moved machine-flow pins (the enroll/desktop/manage/delete/db
+    // pin tests are deleted with their builders; these carry the
+    // text here).
+    #[test]
+    fn machine_flow_sql_pins() {
+        assert_eq!(
+            ROTATE_REVOKE_FOR_PAIR_SQL,
+            "UPDATE \"machine_token\" SET \"revoked_at\" = $1 WHERE \"machine_token\".\"workspace_id\" = $2 AND \"machine_token\".\"dev_machine_id\" = $3 AND \"machine_token\".\"revoked_at\" IS NULL"
+        );
+        assert_eq!(
+            ROTATE_REVOKE_FOR_MACHINE_SQL,
+            "UPDATE \"machine_token\" SET \"revoked_at\" = $1 WHERE (\"machine_token\".\"dev_machine_id\" = $2 AND \"machine_token\".\"revoked_at\" IS NULL AND \"machine_token\".\"workspace_id\" = $3)"
+        );
+        assert_eq!(
+            ROTATE_REVOKE_LEGACY_SQL,
+            "UPDATE \"machine_token\" SET \"revoked_at\" = $1 WHERE (\"machine_token\".\"dev_machine_id\" IS NULL AND \"machine_token\".\"host_label\" = $2 AND \"machine_token\".\"revoked_at\" IS NULL AND \"machine_token\".\"user_id\" = $3 AND \"machine_token\".\"workspace_id\" = $4)"
+        );
+        assert_eq!(
+            REVOKE_TOKENS_FOR_MACHINE_SQL,
+            "UPDATE \"machine_token\" SET \"revoked_at\" = $1 WHERE (\"machine_token\".\"dev_machine_id\" = $2 AND \"machine_token\".\"revoked_at\" IS NULL)"
+        );
+        assert_eq!(
+            CLEAR_TOKEN_MACHINES_SQL,
+            "UPDATE \"machine_token\" SET \"dev_machine_id\" = NULL WHERE \"machine_token\".\"dev_machine_id\" IN ($1)"
+        );
+        assert_eq!(
+            machine_token_insert_sql(),
+            "INSERT INTO \"machine_token\" (\"id\", \"user_id\", \"dev_machine_id\", \"workspace_id\", \"host_label\", \"token_hash\", \"token_fingerprint\", \"label\", \"is_service\", \"created_at\", \"last_used_at\", \"revoked_at\") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)"
+        );
+        assert_eq!(
+            signout_revoke_tokens_sql(1),
+            "UPDATE \"machine_token\" SET \"revoked_at\" = $1 WHERE (\"machine_token\".\"dev_machine_id\" IN ($2) AND \"machine_token\".\"revoked_at\" IS NULL)"
+        );
+        assert_eq!(
+            signout_revoke_tokens_sql(2),
+            "UPDATE \"machine_token\" SET \"revoked_at\" = $1 WHERE (\"machine_token\".\"dev_machine_id\" IN ($2, $3) AND \"machine_token\".\"revoked_at\" IS NULL)"
+        );
+        assert_eq!(
+            signout_revoke_tokens_sql(3),
+            "UPDATE \"machine_token\" SET \"revoked_at\" = $1 WHERE (\"machine_token\".\"dev_machine_id\" IN ($2, $3, $4) AND \"machine_token\".\"revoked_at\" IS NULL)"
+        );
+        // BUG-rotate-user-omission, ported as-is: no user_id on the
+        // machine branch (moved with the enroll B3 pin).
+        assert!(!ROTATE_REVOKE_FOR_MACHINE_SQL.contains("user_id"));
+        // Revokes every active row in scope — no LIMIT (fixture
+        // rotate_B3_after; moved with the enroll B3 pin).
+        assert!(!ROTATE_REVOKE_FOR_MACHINE_SQL.contains("LIMIT"));
+        assert!(!ROTATE_REVOKE_LEGACY_SQL.contains("LIMIT"));
+    }
+
+    #[test]
+    #[should_panic(expected = "at least one machine id")]
+    fn signout_revoke_builder_rejects_empty() {
+        signout_revoke_tokens_sql(0);
+    }
+
+    /// Live-db half: insert two rows (machine + legacy shapes),
+    /// revoke each through its driver, clear one machine link, and
+    /// read every row back — all inside a rolled-back transaction.
+    /// Every FK on `machine_token` is deferred, so the rollback
+    /// skips the checks and no cleanup is needed.
+    #[tokio::test]
+    async fn machine_token_flow_roundtrip() {
+        let url = match std::env::var("DATABASE_URL") {
+            Ok(url) => url,
+            Err(_) => {
+                eprintln!("skipping live-db test: DATABASE_URL is not set");
+                return;
+            }
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect to scratch DATABASE_URL");
+        let mut tx = pool.begin().await.expect("begin");
+        let now = Utc::now();
+        let user_id = Uuid::new_v4();
+        let workspace_id = Uuid::new_v4();
+        let machine_id = Uuid::new_v4();
+        let machine_row = Uuid::new_v4();
+        let legacy_row = Uuid::new_v4();
+        insert_machine_token(
+            &mut *tx,
+            &NewMachineToken {
+                id: machine_row,
+                user_id,
+                dev_machine_id: Some(machine_id),
+                workspace_id,
+                host_label: "live-host".to_owned(),
+                token_hash: "live-hash".to_owned(),
+                token_fingerprint: "live-fp".to_owned(),
+                label: "live-label".to_owned(),
+                is_service: true,
+                created_at: now,
+            },
+        )
+        .await
+        .expect("insert machine row");
+        insert_machine_token(
+            &mut *tx,
+            &NewMachineToken {
+                id: legacy_row,
+                user_id,
+                dev_machine_id: None,
+                workspace_id,
+                host_label: "legacy-host".to_owned(),
+                token_hash: "legacy-hash".to_owned(),
+                token_fingerprint: "legacy-fp".to_owned(),
+                label: "legacy-label".to_owned(),
+                is_service: true,
+                created_at: now,
+            },
+        )
+        .await
+        .expect("insert legacy row");
+        revoke_tokens_for_machine_in_workspace(&mut *tx, machine_id, workspace_id, now)
+            .await
+            .expect("revoke machine row");
+        revoke_tokens_legacy_host(&mut *tx, "legacy-host", user_id, workspace_id, now)
+            .await
+            .expect("revoke legacy row");
+        clear_token_dev_machines(&mut *tx, machine_id)
+            .await
+            .expect("clear machine link");
+        let rows: Vec<(Uuid, Option<Uuid>, Option<DateTime<Utc>>)> = sqlx::query_as(
+            "SELECT id, dev_machine_id, revoked_at FROM machine_token WHERE id IN ($1, $2)",
+        )
+        .bind(machine_row)
+        .bind(legacy_row)
+        .fetch_all(&mut *tx)
+        .await
+        .expect("read back");
+        assert_eq!(rows.len(), 2);
+        for (id, machine, revoked) in rows {
+            assert!(revoked.is_some(), "row {id} revoked");
+            if id == machine_row {
+                assert_eq!(machine, None, "machine link cleared");
+            } else {
+                assert_eq!(machine, None, "legacy row never had a link");
+            }
+        }
+        tx.rollback().await.expect("rollback");
     }
 
     /// Seed one user row for the FK parents the token writes
