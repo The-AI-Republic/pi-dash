@@ -1570,8 +1570,35 @@ export class WebNewDriver implements ParityDriver {
     return todo("rulesCommentBodyText");
   }
 
-  async rulesCommentMenuOptions(_commentId: string): Promise<string[]> {
-    return todo("rulesCommentMenuOptions");
+  /** One comment card, addressed by the id its deep link points at. */
+  private rulesCard(commentId: string): Locator {
+    return this.page.locator(`#comment-${commentId}`);
+  }
+
+  async rulesCommentMenuOptions(commentId: string): Promise<string[]> {
+    const card = this.rulesCard(commentId);
+    await card.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    // Read-only cards render no menu at all; guests on another author's
+    // card get the viewer entries instead.
+    const trigger = card.locator('button[aria-haspopup="menu"]').first();
+    if ((await trigger.count()) === 0) return [];
+    await trigger.scrollIntoViewIfNeeded();
+    await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    const items = this.page.getByRole("menuitem");
+    await items.first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const keys: string[] = [];
+    for (const raw of await items.allTextContents()) {
+      const title = raw.trim().toLowerCase();
+      if (title === "edit") keys.push("edit");
+      else if (title === "copy link") keys.push("copy_link");
+      else if (title.startsWith("switch to public") || title.startsWith("switch to private"))
+        keys.push("access_switch");
+      else if (title.startsWith("fold comment")) keys.push("fold");
+      else if (title.startsWith("unfold comment")) keys.push("unfold");
+      else if (title === "delete") keys.push("delete");
+    }
+    await this.page.keyboard.press("Escape").catch(() => undefined);
+    return keys;
   }
 
   async rulesChooseCommentMenuOption(_commentId: string, _option: RulesCommentMenuOption): Promise<void> {
@@ -6149,11 +6176,27 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async projectQuickAddVisible(): Promise<boolean> {
-    return todo("projectQuickAddVisible");
+    // Scoped to the list quick-add container: the sidebar create button
+    // shares the trigger's label but is a different control. The trigger
+    // mounts after the rows, so settle before calling absence — and read
+    // the button only, never the disabled variant's span.
+    const trigger = this.page.getByTestId("quick-add").getByRole("button", { name: "New work item" }).first();
+    try {
+      await trigger.waitFor({ state: "visible", timeout: 10_000 });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   async issueTitleInputEnabled(): Promise<boolean> {
-    return todo("issueTitleInputEnabled");
+    // Guests read a static title with no labeled field; members get the
+    // editable input. The field mounts after the detail settles, so wait
+    // for it before calling absence.
+    const field = this.page.getByLabel("Title").first();
+    await field.waitFor({ timeout: 10_000 }).catch(() => undefined);
+    if ((await field.count()) === 0) return false;
+    return field.isEditable().catch(() => false);
   }
 
   async settingsLabelsAccessDenied(): Promise<boolean> {
