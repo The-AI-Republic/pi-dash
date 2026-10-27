@@ -598,25 +598,36 @@ describe("web_new header and page menus", () => {
     expect(plain.grants).toEqual([]);
   });
 
-  it("reads the whole-list menu off the view-menu trigger", async () => {
+  it("reads the whole-list menu off the view header trigger", async () => {
     const stub = pageOf({
-      testId: (id: string) => (id === "workspace-view-menu-trigger" ? node() : node({ count: async () => 0 })),
+      testId: (id: string) =>
+        id === "workspace-view-header"
+          ? node({
+              getByTestId: (inner: string) =>
+                inner === "workspace-view-menu-trigger" ? node() : node({ count: async () => 0 }),
+            })
+          : node({ count: async () => 0 }),
       ...menuRoutes([{ label: "Open in new tab" }, { label: "Copy link" }]),
     });
     await expect(new WebNewDriver(stub.page).layoutsListPageMenuItems()).resolves.toEqual([
       "Open in new tab",
       "Copy link",
     ]);
-    expect(stub.testIds).toContain("workspace-view-menu-trigger");
+    expect(stub.testIds).toEqual(["list-page-actions", "workspace-view-header"]);
     expect(stub.keys).toEqual(["Escape"]);
   });
 
-  it("chooses the whole-list menu off the view-menu trigger", async () => {
+  it("chooses the whole-list menu off the view header trigger", async () => {
     const clicks: string[] = [];
     const stub = pageOf({
       testId: (id: string) =>
-        id === "workspace-view-menu-trigger"
-          ? node({ click: async () => void clicks.push("trigger") })
+        id === "workspace-view-header"
+          ? node({
+              getByTestId: (inner: string) =>
+                inner === "workspace-view-menu-trigger"
+                  ? node({ click: async () => void clicks.push("trigger") })
+                  : node({ count: async () => 0 }),
+            })
           : node({ count: async () => 0 }),
       role: () =>
         collection(
@@ -649,7 +660,7 @@ describe("web_new header and page menus", () => {
     const spy = vi.spyOn(Date, "now").mockImplementation(() => now);
     try {
       const stub = pageOf({
-        testId: () => node({ count: async () => 0 }),
+        testId: () => node({ count: async () => 0, getByTestId: () => node({ count: async () => 0 }) }),
         tick: () => {
           now += 60_000;
         },

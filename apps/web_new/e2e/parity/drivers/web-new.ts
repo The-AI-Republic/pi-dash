@@ -9350,7 +9350,9 @@ export class WebNewDriver implements ParityDriver {
    */
   private async layoutsListPageMenuTrigger(): Promise<Locator> {
     const quick = this.page.getByTestId("list-page-actions");
-    const view = this.page.getByTestId("workspace-view-menu-trigger");
+    // Scoped to the view header: the tab strip repeats the same testid
+    // once per view, and only the header trigger owns this page's menu.
+    const view = this.page.getByTestId("workspace-view-header").getByTestId("workspace-view-menu-trigger");
     const deadline = Date.now() + WebNewDriver.WAIT_MS;
     for (;;) {
       if ((await quick.count()) > 0) return quick;
