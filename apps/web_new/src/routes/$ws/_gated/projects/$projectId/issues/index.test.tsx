@@ -1123,6 +1123,49 @@ describe("project issues screen", () => {
     expect(await screen.findByTestId("issues-skeleton-list")).toBeInTheDocument();
   });
 
+  it("renders the list when a cold issues read resolves (ISS-005)", async () => {
+    // Cold cache: the first commit shows the skeleton, then the held GET
+    // lands and the same fiber must render the screen. A hook below the
+    // cold-cache early return breaks the hook order on this transition and
+    // crashes the route instead (NEWFRONT-947 review defect).
+    let release!: () => void;
+    const gate = new Promise<void>((done) => {
+      release = done;
+    });
+    renderScreen({}, 1, [issueRow()], {
+      seedIssues: false,
+      transport: async (url, init) => {
+        if (url.includes("/issues/")) {
+          await gate;
+          return {
+            status: 200,
+            url,
+            headers: { get: () => null },
+            text: async () =>
+              JSON.stringify({
+                grouped_by: null,
+                sub_grouped_by: null,
+                total_count: 1,
+                next_cursor: "",
+                prev_cursor: "",
+                next_page_results: false,
+                prev_page_results: false,
+                count: 1,
+                total_results: 1,
+                results: [issueRow()],
+              }),
+          };
+        }
+        throw new Error(`unexpected network fetch ${init.method ?? "GET"} ${url}`);
+      },
+    });
+
+    expect(await screen.findByTestId("issues-skeleton-list")).toBeInTheDocument();
+    release();
+    expect(await screen.findByRole("heading", { name: "Website" }, LAZY_WAIT)).toBeInTheDocument();
+    expect(await screen.findByTestId("list-row", undefined, LAZY_WAIT)).toBeInTheDocument();
+  });
+
   it("throws a cold list failure to the route error boundary", async () => {
     class ProbeBoundary extends React.Component<{ children: React.ReactNode }, { failed: boolean }> {
       state = { failed: false };

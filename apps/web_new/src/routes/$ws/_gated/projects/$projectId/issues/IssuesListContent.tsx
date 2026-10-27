@@ -166,6 +166,11 @@ export function IssuesListContent({
     [queryClient, workspaceSlug, projectId, project?.name]
   );
 
+  // A hook, so it runs on every render — including the not-found and
+  // cold-cache commits below — keeping the hook order stable when the
+  // issues read resolves (NEWFRONT-947).
+  const weekStart = useWeekStart();
+
   if (!project) {
     return (
       <section aria-label="Issues" className="flex flex-col items-center gap-(--space-2) p-(--space-12)">
@@ -189,7 +194,6 @@ export function IssuesListContent({
   // Layout slices extend the offered list with their renderer; the
   // Display control resolves the same active layout from it.
   const offered: readonly LayoutKind[] = ["list", "kanban", "gantt_chart", "spreadsheet", "calendar"];
-  const weekStart = useWeekStart();
   const canEdit = canEditInProject({ memberRole: project.member_role, archived: project.archived_at != null });
   const addWorkItem = canCreate ? (
     <Button
