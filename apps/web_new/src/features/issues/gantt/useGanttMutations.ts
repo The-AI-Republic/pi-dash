@@ -17,6 +17,7 @@ import { notifyError } from "../../../shared/shell/index.js";
 import type { IssueListItem } from "@pidash/api-client";
 import { withIssueDates, type IssueDatesInput } from "../api/dates.js";
 import { issueKeys } from "../api/keys.js";
+import { entityListsKeyPart, type IssuesEntity } from "../prefs/entities.js";
 
 /** Notice when a gesture's date write is refused. */
 export const GANTT_DATES_FAILED_TITLE = "Couldn't save the dates";
@@ -60,9 +61,17 @@ export interface GanttMutations {
  * resize and plant differ only in which endpoint receives the same pair;
  * reorder is its own PATCH.
  */
-export function useGanttMutations(workspaceSlug: string, projectId: string): GanttMutations {
+export function useGanttMutations(
+  workspaceSlug: string,
+  projectId: string,
+  entity: IssuesEntity = { scope: "project", projectId }
+): GanttMutations {
   const queryClient = useQueryClient();
-  const listsPrefix = issueKeys.lists(workspaceSlug, projectId);
+  // The chart mounts on project, cycle and module timelines, and each
+  // entity's rows live under its own list prefix. Patching only the
+  // project prefix would leave a cycle or module bar free to snap back
+  // to a pre-drop read (ISS-051).
+  const listsPrefix = issueKeys.lists(workspaceSlug, ...entityListsKeyPart(entity));
 
   const dates = useMutation<void, Error, { issueId: string; input: IssueDatesInput; batch: boolean }>({
     mutationFn: async ({ issueId, input, batch }) => {

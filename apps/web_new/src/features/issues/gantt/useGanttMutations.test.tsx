@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { issueKeys } from "../api/keys.js";
+import { entityListsKeyPart, type IssuesEntity } from "../prefs/entities.js";
 import {
   GANTT_DATES_FAILED_TITLE,
   GANTT_REORDER_FAILED_TITLE,
@@ -90,14 +91,15 @@ function stubClient(status = 200) {
   return { calls, release: () => release?.() };
 }
 
-function setup(status = 200) {
+function setup(status = 200, entity?: IssuesEntity) {
   const stub = stubClient(status);
   const calls = stub.calls;
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  queryClient.setQueryData(issueKeys.lists(SLUG, PROJECT), { results: ROWS, total_count: ROWS.length });
+  const listsKey = issueKeys.lists(SLUG, ...entityListsKeyPart(entity ?? { scope: "project", projectId: PROJECT }));
+  queryClient.setQueryData(listsKey, { results: ROWS, total_count: ROWS.length });
   let handle: GanttMutations | null = null;
   function Probe(): React.ReactElement {
-    handle = useGanttMutations(SLUG, PROJECT);
+    handle = entity === undefined ? useGanttMutations(SLUG, PROJECT) : useGanttMutations(SLUG, PROJECT, entity);
     return <p>{handle.isSaving ? "saving" : "idle"}</p>;
   }
   render(
@@ -105,12 +107,12 @@ function setup(status = 200) {
       <Probe />
     </QueryClientProvider>
   );
-  const data = () =>
-    queryClient.getQueryData(issueKeys.lists(SLUG, PROJECT)) as { results: Array<Record<string, unknown>> };
+  const data = () => queryClient.getQueryData(listsKey) as { results: Array<Record<string, unknown>> };
   return {
     calls,
     release: stub.release,
     queryClient,
+    listsKey,
     data,
     mutations: () => {
       if (handle === null) throw new Error("not mounted");
@@ -165,12 +167,15 @@ describe("useGanttMutations dates", () => {
     act(() => h.release());
   });
 
-  it("keeps the dropped dates when an older list read resolves late (ISS-051)", async () => {
-    const h = setup();
+  /**
+   * Hold a list read open, drop the bar while it is in flight, then let
+   * the pre-drop response land. The cache must keep the dropped pair.
+   */
+  async function expectDroppedDatesSurviveLateRead(h: ReturnType<typeof setup>): Promise<void> {
     let resolveRead: ((value: { results: Array<Record<string, unknown>>; total_count: number }) => void) | null = null;
     let readStarted = false;
     const read = h.queryClient.fetchQuery({
-      queryKey: issueKeys.lists(SLUG, PROJECT),
+      queryKey: h.listsKey,
       queryFn: () => {
         readStarted = true;
         return new Promise((resolve) => {
@@ -193,6 +198,31 @@ describe("useGanttMutations dates", () => {
     });
     expect(h.data().results[0]).toMatchObject({ start_date: "2026-10-04", target_date: "2026-10-06" });
     act(() => h.release());
+  }
+
+  it("keeps the dropped dates when an older project list read resolves late (ISS-051)", async () => {
+    await expectDroppedDatesSurviveLateRead(setup());
+  });
+
+  it("keeps the dropped dates on a cycle timeline when its older read resolves late (ISS-051)", async () => {
+    await expectDroppedDatesSurviveLateRead(setup(200, { scope: "cycle", projectId: PROJECT, cycleId: "cycle-1" }));
+  });
+
+  it("keeps the dropped dates on a module timeline when its older read resolves late (ISS-051)", async () => {
+    await expectDroppedDatesSurviveLateRead(setup(200, { scope: "module", projectId: PROJECT, moduleId: "module-1" }));
+  });
+
+  it("leaves another entity's lists untouched when a cycle bar moves (ISS-051)", async () => {
+    const cycle = setup(200, { scope: "cycle", projectId: PROJECT, cycleId: "cycle-1" });
+    const projectLists = issueKeys.lists(SLUG, PROJECT);
+    cycle.queryClient.setQueryData(projectLists, { results: ROWS, total_count: ROWS.length });
+    act(() => cycle.mutations().moveBar("a", { startDate: "2026-10-04", endDate: "2026-10-06" }));
+    await waitFor(() => expect(cycle.calls.some((call) => call.method === "POST")).toBe(true));
+    expect(cycle.data().results[0]).toMatchObject({ start_date: "2026-10-04", target_date: "2026-10-06" });
+    expect(
+      (cycle.queryClient.getQueryData(projectLists) as { results: Array<Record<string, unknown>> }).results[0]
+    ).toMatchObject({ start_date: "2026-10-01", target_date: "2026-10-03" });
+    act(() => cycle.release());
   });
 
   it("plants a block through the single issue PATCH", async () => {

@@ -25,6 +25,7 @@ import {
 import { WorkItemPreviewHover } from "../lifecycle/WorkItemPreviewCard.js";
 import { todayIsoDay } from "../dropdowns/calendar.js";
 import type { DisplayPrefs } from "../prefs/displayPrefs.js";
+import type { IssuesEntity } from "../prefs/entities.js";
 import type { LayoutPeekProps, PeekSelection } from "../peek/usePeekAddress.js";
 import { usePeekAddress } from "../peek/usePeekAddress.js";
 import { deriveReorder, type DropPlacement } from "./drag.js";
@@ -75,6 +76,12 @@ export interface GanttLayoutProps extends LayoutPeekProps {
   completedCycle?: boolean;
   /** True for a completed module: the quick-add is hidden (MOD-030). */
   completedModule?: boolean;
+  /**
+   * The issues-bearing entity whose list prefix holds these rows (ISS-002).
+   * Cycle and module timelines pass theirs so a drop patches the cache it
+   * reads; absent means the route project's own list.
+   */
+  entity?: IssuesEntity | undefined;
   /** Controlled peeked work-item id (the route owns the URL param). */
   /** Receives the selection the route should write, or null on close (ISS-167). */
   /** Peeked project from the URL, when it differs from the route (ISS-167). */
@@ -129,6 +136,7 @@ export function GanttLayout({
   weekStart,
   completedCycle = false,
   completedModule = false,
+  entity,
   peekKey,
   onPeekChange,
   peekProjectId,
@@ -150,7 +158,7 @@ export function GanttLayout({
   // An archived project hides every edit affordance (ISS-222). The
   // layout reads that from the list the route already holds.
   const archived = useProjectArchived(workspaceSlug, projectId);
-  const mutations = useGanttMutations(workspaceSlug, projectId);
+  const mutations = useGanttMutations(workspaceSlug, projectId, entity ?? { scope: "project", projectId });
   const create = useCreateWorkItem(workspaceSlug);
   const canEdit = canEditTimeline({
     projectRole,

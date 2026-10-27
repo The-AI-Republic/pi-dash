@@ -260,6 +260,7 @@ export function EntityListScreen({
                   issues={flatResults}
                   totalCount={firstPage.total_count}
                   prefs={prefs}
+                  entity={entity}
                   completedModule={resolvedCompletedModule}
                   peekKey={peekKey}
                   onPeekChange={onPeekChange}

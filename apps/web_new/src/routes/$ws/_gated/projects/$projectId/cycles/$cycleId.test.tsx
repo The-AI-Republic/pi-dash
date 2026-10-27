@@ -295,6 +295,7 @@ vi.mock("../../../../../../features/issues/gantt/GanttTimeline.js", () => ({
     <div
       data-testid="gantt-layout"
       data-completed={String(props.completedCycle ?? false)}
+      data-entity={JSON.stringify(props.entity ?? null)}
       data-count={String((props.issues as unknown[]).length)}
       data-peek={String(props.peekKey ?? "")}
       data-peek-project={String(props.peekProjectId ?? "")}
@@ -590,6 +591,17 @@ describe("cycle detail route", () => {
     const timeline = await screen.findByTestId("gantt-layout");
     expect(timeline).toHaveAttribute("data-completed", "false");
     expect(timeline).toHaveAttribute("data-count", "2");
+  });
+
+  it("hands the cycle's list prefix to the timeline so a drop patches it (ISS-051)", async () => {
+    mocks.layout.current = "gantt_chart";
+    renderRoute();
+    const timeline = await screen.findByTestId("gantt-layout");
+    expect(JSON.parse(timeline.getAttribute("data-entity") ?? "null")).toEqual({
+      scope: "cycle",
+      projectId: expect.any(String),
+      cycleId: expect.any(String),
+    });
   });
 
   it("reads grouped pages as empty rows with the server count", async () => {
