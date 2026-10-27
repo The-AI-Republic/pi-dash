@@ -84,6 +84,16 @@ test(
         // oracle keeps pinning its rejection (spec §10 gate alignment).
         if (driver.target === "web_new") {
           await expect.poll(() => driver.lastToast(), { timeout: 60_000 }).toContain("Attachment uploaded");
+          // Settle on the settled txt row, not the toast: the PNG step's
+          // toast can still be showing when this poll starts, which would
+          // assert before the txt completes (gate fix).
+          await expect
+            .poll(
+              async () =>
+                (await driver.widgetRowNames("Attachments")).find((row) => row.includes(`oracle-nope-${ts}.txt`)) ?? "",
+              { timeout: 60_000 }
+            )
+            .toContain("0 KB");
           const assets = await issueAttachments(seed.workspaceSlug, seed.projectId, issue.id, session);
           expect(assets).toHaveLength(2);
           const names = assets.map((row) =>
