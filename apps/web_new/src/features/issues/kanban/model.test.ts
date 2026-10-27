@@ -501,6 +501,44 @@ describe("label ghost reconciliation (ISS-031/NEWFRONT-158)", () => {
     expect(result.lanes[1]?.cells[second]).toEqual({ columnKey: second, rows: [], total: 0 });
   });
 
+  it("creates the None lane when empty groups are hidden and the server omitted it", () => {
+    const ghost = row({ id: "ghost" });
+    const kept = row({ id: "kept", label_ids: [LABEL] });
+    const board = subGroupedBoard(
+      subGrouped({
+        [STATE]: { [LABEL]: { rows: [kept], total: 1 } },
+      }),
+      {
+        groupDimension: "state",
+        subDimension: "labels",
+        groupLabels: labels,
+        subLabels: labels,
+        showEmpty: false,
+      }
+    );
+    // No synthetic None lane with empty groups hidden: the append branch
+    // below is the only way recovery can place the ghost.
+    expect(board.lanes.map((lane) => lane.key)).toEqual([LABEL]);
+    const fallback = groupedBoard(grouped({ [STATE]: { rows: [kept, ghost], total: 2 } }), {
+      dimension: "state",
+      labels,
+      showEmpty: false,
+    });
+    const result = reconcileLabelGhosts(board, fallback, "sub");
+    expect(result.lanes.map((lane) => [lane.key, lane.total])).toEqual([
+      [LABEL, 1],
+      ["None", 1],
+    ]);
+    expect(result.lanes[1]?.cells[STATE]?.rows.map((entry) => entry.id)).toEqual(["ghost"]);
+    expect(result.lanes[1]?.cells[STATE]?.total).toBe(1);
+    expect(result.columns[0]?.total).toBe(2);
+    expect(result.total).toBe(2);
+    // Every count equals the cards behind it.
+    const cards = result.lanes.reduce((sum, lane) => sum + (lane.cells[STATE]?.rows.length ?? 0), 0);
+    expect(result.columns[0]?.total).toBe(cards);
+    expect(result.lanes.reduce((sum, lane) => sum + lane.total, 0)).toBe(cards);
+  });
+
   it("adds a column the labels read dropped entirely so its ghost can render", () => {
     const second = "623e4567-e89b-12d3-a456-426614174005";
     const ghost = row({ id: "ghost", state_id: second });
