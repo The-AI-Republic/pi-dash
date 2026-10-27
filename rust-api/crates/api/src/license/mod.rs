@@ -60,6 +60,11 @@ pub use pidash_compat::response::{json_ok_value as json_response, SERVER_ERROR_B
 pub const MODEL_BACKEND: &str = "django.contrib.auth.backends.ModelBackend";
 
 pub(crate) use pidash_compat::http::verify_session_hash;
+/// Salt for `user.get_session_auth_hash()`, re-exported from its
+/// canonical home (`pidash_compat::http`, OVL-04 part 6) so this public
+/// path — and `pidash-sdk::compat`, which re-exports it until part 8
+/// repoints at the canonical home — keeps resolving.
+pub use pidash_compat::http::SESSION_AUTH_HASH_SALT;
 pub use pidash_compat::http::{query_last, OneOrMany, QueryMap};
 
 /// Exact bytes of the DRF `NotAuthenticated` denial: anonymous on a guarded
