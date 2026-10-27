@@ -3430,9 +3430,8 @@ mod tests {
         // `User` has no `deleted_at` column (`db/models/user.py:56`), so
         // every `users` read must filter on the id alone; PIDASHCONV-237
         // regressed all seven social paths with a guard the schema rejects.
-        assert!(!user_detail_sql().contains("deleted_at"));
-        assert!(user_detail_sql().contains("\"users\".\"id\" = $1"));
-        assert!(!display_name_sql().contains("deleted_at"));
+        // (`user_detail_sql` / `display_name_sql` moved to the read
+        // service with their own pins; see `read::comment` tests.)
         assert_eq!(
             nullable_fk_sql("users"),
             "SELECT id FROM users WHERE id = $1"

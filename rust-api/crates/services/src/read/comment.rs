@@ -758,3 +758,17 @@ pub async fn comment_is_synced(
     .map_err(|error| DbError::new("comment-synced-github", error))?;
     Ok(github.is_some())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn moved_user_reads_carry_no_soft_delete_guard() {
+        // Moved with the render from `space::social`: `User` has no
+        // `deleted_at` column (`db/models/user.py:56`).
+        assert!(!user_detail_sql().contains("deleted_at"));
+        assert!(user_detail_sql().contains("\"users\".\"id\" = $1"));
+        assert!(!display_name_sql().contains("deleted_at"));
+    }
+}
