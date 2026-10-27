@@ -322,6 +322,46 @@ describe("views create dialog", () => {
     expect(heading.waitFor).toHaveBeenCalledWith({ timeout: 30_000 });
   });
 
+  it("dismisses the open dialog Display panel", async () => {
+    const trigger = loc();
+    const dialog = loc({ getByTestId: vi.fn(() => trigger) });
+    const panel = loc();
+    const state = harness((query) => {
+      if (query.kind === "role" && query.value === "dialog") return dialog;
+      if (query.kind === "testid" && query.value === "display-options-panel") return panel;
+      return undefined;
+    });
+    await new WebNewDriver(state.page).viewsDialogDisplayClose();
+    expect(trigger.click).toHaveBeenCalled();
+    expect(panel.waitFor).toHaveBeenCalledWith({ state: "hidden", timeout: 30_000 });
+  });
+
+  it("leaves a closed Display panel alone", async () => {
+    const trigger = loc();
+    const dialog = loc({ getByTestId: vi.fn(() => trigger) });
+    const panel = loc({ isVisible: vi.fn(async () => false) });
+    const state = harness((query) => {
+      if (query.kind === "role" && query.value === "dialog") return dialog;
+      if (query.kind === "testid" && query.value === "display-options-panel") return panel;
+      return undefined;
+    });
+    await new WebNewDriver(state.page).viewsDialogDisplayClose();
+    expect(trigger.click).not.toHaveBeenCalled();
+  });
+
+  it("picks an access option in the cloud selector and waits for it to check", async () => {
+    const radio = loc({ getAttribute: vi.fn(async () => "true") });
+    const field = loc({ getByRole: vi.fn(() => radio) });
+    const dialog = loc({ getByTestId: vi.fn(() => field) });
+    const state = harness((query) => (query.kind === "role" && query.value === "dialog" ? dialog : undefined));
+    await new WebNewDriver(state.page).viewsDialogPickAccess("Owner-only");
+    expect(field.waitFor).toHaveBeenCalledWith({ state: "visible", timeout: 30_000 });
+    expect(radio.click).toHaveBeenCalled();
+    expect(field.getByRole).toHaveBeenCalledWith("radio", { name: /^Owner-only/ });
+    expect(radio.getAttribute).toHaveBeenCalledWith("aria-checked");
+    expect(dialog.getByTestId).toHaveBeenCalledWith("view-access-field");
+  });
+
   it("reads the layout control value", async () => {
     const state = harness();
     (state.node as never as Stub).innerText = vi.fn(async () => "Board");
@@ -439,6 +479,63 @@ describe("views list rows and search", () => {
     await expect(driver.viewsRowOwnerAvatar("Alpha")).resolves.toBe(true);
     await expect(driver.viewsRowLiveVisible("Alpha")).resolves.toBe(true);
     await expect(driver.viewsRowText("Alpha")).resolves.toBe("");
+  });
+
+  it("publishes through the row menu and reads the derived link", async () => {
+    const trigger = loc();
+    const link = loc({ innerText: vi.fn(async () => " https://p.test/views/published/abc ") });
+    const dialog = loc({ getByTestId: vi.fn(() => link) });
+    const row = loc({ getByTestId: vi.fn(() => trigger) });
+    const state = harness((query) => {
+      if (query.kind === "testid" && query.value === "project-views-row") {
+        return loc({ filter: vi.fn(() => row) });
+      }
+      if (query.kind === "role" && query.value === "dialog") return dialog;
+      return undefined;
+    });
+    (state.node as never as Stub).allInnerTexts = vi.fn(async () => [
+      "Edit",
+      "Open in new tab",
+      "Copy link",
+      "Publish",
+      "Delete",
+    ]);
+    await expect(new WebNewDriver(state.page).viewsRowPublish("Alpha")).resolves.toBe(
+      "https://p.test/views/published/abc"
+    );
+    expect(trigger.click).toHaveBeenCalled();
+    expect(dialog.getByTestId).toHaveBeenCalledWith("publish-view-link");
+    expect(link.waitFor).toHaveBeenCalledWith({ state: "visible", timeout: 30_000 });
+    const names = dialog.getByRole.mock.calls.map((call) => String(call[1]?.name ?? ""));
+    expect(names).toContain("Publish");
+  });
+
+  it("refuses to publish when the menu offers no publish entry", async () => {
+    const trigger = loc();
+    const row = loc({ getByTestId: vi.fn(() => trigger) });
+    const state = harness((query) =>
+      query.kind === "testid" && query.value === "project-views-row" ? loc({ filter: vi.fn(() => row) }) : undefined
+    );
+    (state.node as never as Stub).allInnerTexts = vi.fn(async () => ["Edit", "Open in new tab", "Copy link", "Delete"]);
+    await expect(new WebNewDriver(state.page).viewsRowPublish("Alpha")).rejects.toThrow(/no publish entry/);
+  });
+
+  it("unpublishes from the Live marker's dialog", async () => {
+    const marker = loc();
+    const dialog = loc();
+    const row = loc({ getByTestId: vi.fn(() => marker) });
+    const state = harness((query) => {
+      if (query.kind === "testid" && query.value === "project-views-row") {
+        return loc({ filter: vi.fn(() => row) });
+      }
+      if (query.kind === "role" && query.value === "dialog") return dialog;
+      return undefined;
+    });
+    await new WebNewDriver(state.page).viewsRowUnpublish("Alpha");
+    expect(marker.click).toHaveBeenCalled();
+    const names = dialog.getByRole.mock.calls.map((call) => String(call[1]?.name ?? ""));
+    expect(names).toContain("Unpublish");
+    expect(names).toContain("Cancel");
   });
 
   it("returns null for a missing row", async () => {

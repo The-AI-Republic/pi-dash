@@ -4484,6 +4484,13 @@ export interface ParityDriver {
   viewsDialogDescriptionValue(): Promise<string>;
   /** Whether the dialog offers an access selector (cloud-only). */
   viewsDialogAccessPresent(): Promise<boolean>;
+  /**
+   * Choose the dialog's access option by its visible label ("Shared" or
+   * "Owner-only"). Cloud builds only: the OSS dialog mounts no selector,
+   * so an OSS call is a scenario bug and throws here rather than
+   * silently doing nothing (VIEW-019).
+   */
+  viewsDialogPickAccess(label: string): Promise<void>;
   /** Open the dialog icon picker. */
   viewsDialogIconOpen(): Promise<void>;
   /** Icon picker tab names in display order. */
@@ -4494,6 +4501,8 @@ export interface ParityDriver {
   viewsDialogIconPreview(): Promise<string>;
   /** Open the dialog Display dropdown. */
   viewsDialogDisplayOpen(): Promise<void>;
+  /** Dismiss the dialog Display dropdown; a no-op when it is closed. */
+  viewsDialogDisplayClose(): Promise<void>;
   /** Display option texts in the open dropdown. */
   viewsDialogDisplayTexts(): Promise<string[]>;
   /** Whether the work-item filter builder renders expanded in the dialog. */
@@ -4529,6 +4538,18 @@ export interface ParityDriver {
   viewsRowCopyLink(name: string): Promise<string>;
   /** Whether the open menu offers a publish entry (cloud-only). */
   viewsRowMenuPublishPresent(): Promise<boolean>;
+  /**
+   * Publish the row `name` through its overflow menu and resolve to the
+   * public link the dialog shows. Cloud builds only (VIEW-020): the OSS
+   * build offers no publish entry, so this throws there.
+   */
+  viewsRowPublish(name: string): Promise<string>;
+  /**
+   * Unpublish the row `name` from its publish dialog (opened by the row's
+   * Live marker) and resolve once the dialog reports the view back to
+   * unpublished. Cloud builds only (VIEW-020).
+   */
+  viewsRowUnpublish(name: string): Promise<void>;
   /** Open the row `name`'s menu and follow its new-tab entry; resolves with the popup URL. */
   viewsRowOpenNewTabHref(name: string): Promise<string>;
   // --- Project view delete (NEWFRONT-42, VIEW-016). Observed on the

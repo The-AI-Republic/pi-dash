@@ -21204,6 +21204,28 @@ export class WebNewDriver implements ParityDriver {
     // its selector inside this marker.
     return this.isShown(this.viewsDialog().getByTestId("view-access-field"));
   }
+
+  async viewsDialogPickAccess(label: string): Promise<void> {
+    // The cloud selector is a radiogroup of option buttons, each keyed by
+    // its own test id (VIEW-019). An OSS dialog mounts no field at all,
+    // so this fails loudly instead of clicking something else.
+    const field = this.viewsDialog().getByTestId("view-access-field");
+    await field.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await field
+      .getByRole("radio", { name: new RegExp(`^${label}`) })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await expect
+      .poll(
+        async () =>
+          (await field
+            .getByRole("radio", { name: new RegExp(`^${label}`) })
+            .first()
+            .getAttribute("aria-checked")) === "true",
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .toBe(true);
+  }
   async viewsDialogIconOpen(): Promise<void> {
     await this.viewsDialog().getByTestId("view-icon-picker").click();
     await this.page.getByRole("tablist", { name: "Icon type" }).waitFor({ timeout: WebNewDriver.WAIT_MS });
@@ -21227,6 +21249,16 @@ export class WebNewDriver implements ParityDriver {
   async viewsDialogDisplayOpen(): Promise<void> {
     await this.viewsDialog().getByTestId("display-options-trigger").click();
     await this.page.getByRole("region", { name: "Display Properties" }).waitFor({ timeout: WebNewDriver.WAIT_MS });
+  }
+  async viewsDialogDisplayClose(): Promise<void> {
+    // The panel portals outside the dialog and, on a taller dialog (the
+    // cloud access selector adds a section), it can sit over the footer's
+    // submit button. Callers that have read it dismiss it before clicking
+    // anything in the footer.
+    const panel = this.page.getByTestId("display-options-panel");
+    if (!(await this.isShown(panel))) return;
+    await this.viewsDialog().getByTestId("display-options-trigger").click({ timeout: WebNewDriver.WAIT_MS });
+    await panel.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
   }
   async viewsDialogDisplayTexts(): Promise<string[]> {
     // No open-wait here: the caller opens the Display panel first. The
@@ -21357,6 +21389,44 @@ export class WebNewDriver implements ParityDriver {
   async viewsRowMenuPublishPresent(): Promise<boolean> {
     const items = await this.viewsRowMenuItems();
     return items.some((item) => /publish/i.test(item));
+  }
+
+  private viewsPublishDialog(): Locator {
+    return this.page
+      .getByRole("dialog")
+      .filter({ has: this.page.getByRole("heading", { name: /^(Publish view|Published view)$/ }) });
+  }
+
+  async viewsRowPublish(name: string): Promise<string> {
+    // Cloud only (VIEW-020): OSS rows never offer the entry, so the menu
+    // read below is what fails first there.
+    await this.viewsRowMenuOpen(name);
+    if (!(await this.viewsRowMenuPublishPresent())) {
+      throw new Error("[parity] the row menu offers no publish entry (cloud builds only).");
+    }
+    await this.viewsRowMenuPick("Publish");
+    const dialog = this.viewsPublishDialog();
+    await this.page.getByRole("heading", { name: "Publish view" }).waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.getByRole("button", { name: "Publish", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    // The dialog flips to its published state and shows the derived link.
+    const link = dialog.getByTestId("publish-view-link");
+    await link.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const text = ((await link.innerText().catch(() => "")) ?? "").trim();
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
+    return text;
+  }
+
+  async viewsRowUnpublish(name: string): Promise<void> {
+    // The Live marker opens the same dialog as the menu entry.
+    const marker = this.viewsRowByName(name).getByTestId("project-views-row-live");
+    await marker.click({ timeout: WebNewDriver.WAIT_MS });
+    const dialog = this.viewsPublishDialog();
+    await this.page.getByRole("heading", { name: "Published view" }).waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.getByRole("button", { name: "Unpublish", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("heading", { name: "Publish view" }).waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
   }
 
   async viewsRowOpenNewTabHref(name: string): Promise<string> {

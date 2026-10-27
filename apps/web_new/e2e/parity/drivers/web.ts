@@ -23097,6 +23097,10 @@ export class WebDriver implements ParityDriver {
     return this.viewsDialog().getByPlaceholder("Description", { exact: true }).inputValue();
   }
 
+  async viewsDialogPickAccess(_label: string): Promise<void> {
+    throw new Error("[parity] the access selector is cloud/new-only (VIEW-019).");
+  }
+
   async viewsDialogAccessPresent(): Promise<boolean> {
     // The cloud access selector would offer Private/Public choices; the
     // OSS stub renders nothing in its slot.
@@ -23156,6 +23160,14 @@ export class WebDriver implements ParityDriver {
     await this.viewsDialog().getByText("Display Properties").first().waitFor({ timeout: 15_000 });
   }
 
+  async viewsDialogDisplayClose(): Promise<void> {
+    // The oracle closes its Display popover on Escape without closing the
+    // dialog behind it, so callers share one dismissal path on both apps.
+    const panel = this.viewsDialog().getByRole("region", { name: "Display Properties" });
+    if ((await panel.count()) === 0) return;
+    if (await this.isShown(panel)) await this.page.keyboard.press("Escape");
+    await panel.waitFor({ state: "hidden", timeout: 15_000 }).catch(() => undefined);
+  }
   async viewsDialogDisplayTexts(): Promise<string[]> {
     // No open-wait here: the caller opens the Display panel first, and a
     // bare dialog waitFor flakes while the inline panel animates.
@@ -23295,6 +23307,14 @@ export class WebDriver implements ParityDriver {
     await this.viewsRowMenuPick("Copy link");
     await expect.poll(() => this.page.evaluate(() => navigator.clipboard.readText()), { timeout: 15_000 }).not.toBe("");
     return this.page.evaluate(() => navigator.clipboard.readText());
+  }
+
+  async viewsRowPublish(_name: string): Promise<string> {
+    throw new Error("[parity] the publish flow is cloud/new-only (VIEW-020).");
+  }
+
+  async viewsRowUnpublish(_name: string): Promise<void> {
+    throw new Error("[parity] the publish flow is cloud/new-only (VIEW-020).");
   }
 
   async viewsRowMenuPublishPresent(): Promise<boolean> {
