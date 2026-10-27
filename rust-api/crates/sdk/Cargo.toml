@@ -9,6 +9,7 @@ edition = "2021"
 pidash-types = { path = "../types" }
 pidash-db = { path = "../db" }
 pidash-auth = { path = "../auth" }
+pidash-compat = { path = "../compat" }
 pidash-services = { path = "../services" }
 pidash-api = { path = "../api" }
 pidash-jobs = { path = "../jobs" }

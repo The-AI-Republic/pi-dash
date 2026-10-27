@@ -3180,6 +3180,7 @@ version = "0.1.0"
 dependencies = [
  "pidash-api",
  "pidash-auth",
+ "pidash-compat",
  "pidash-db",
  "pidash-jobs",
  "pidash-ops",
