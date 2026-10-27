@@ -587,10 +587,10 @@ function InlinePropertyStripImpl({
 }
 
 /**
- * Label trigger named by the caller; the picker reuses this exact chip.
- * DeferredPicker and the popover both hand trigger props (click and key
- * handlers, ids, the anchor ref) to this element, so anything beyond the
- * named props must land on the button rather than be swallowed here.
+ * Label trigger named by the caller for the deferred path; the mounted
+ * picker renders its own trigger. DeferredPicker hands this element its
+ * click and key handlers, so anything beyond the named props must land
+ * on the button rather than be swallowed here.
  */
 function LabelsTrigger({
   label,
