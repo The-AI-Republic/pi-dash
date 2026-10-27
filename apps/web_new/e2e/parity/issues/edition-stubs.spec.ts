@@ -267,7 +267,9 @@ test(
       await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
       await driver.openIssueDetail(seed.workspaceSlug, projectId, issue.id);
       const dueText = await driver.propertyValueText("Due date");
-      expect(dueText).toContain("May 05, 2020");
+      // The oracle zero-pads the day ("May 05, 2020"); the new app renders
+      // it bare ("May 5, 2020") — same §10 alignment as the range label.
+      expect(dueText).toContain(driver.target === "web_new" ? "May 5, 2020" : "May 05, 2020");
       expect(dueText).not.toMatch(/overdue/i);
       const cycleText = await driver.propertyValueText("Cycle");
       expect(cycleText).toContain("cycle");
