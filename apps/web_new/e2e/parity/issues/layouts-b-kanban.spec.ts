@@ -1006,7 +1006,7 @@ test(
 );
 
 test(
-  specTitle(["ISS-038"], "bug: moves into In Progress land in Backlog (NEWFRONT-160)"),
+  specTitle(["ISS-038"], "bug: moves into In Progress bounce to Backlog with no eligible runner (NEWFRONT-160)"),
   { tag: specTags(["ISS-038"]) },
   async ({ driver, seed }) => {
     const owner = await signInFreshUser(seed.email, seed.password);
@@ -1021,10 +1021,13 @@ test(
     await expect.poll(() => driver.kanbanColumns(), { timeout: 120_000 }).toHaveLength(states.length);
 
     await test.step("the card renders moved but the server kept Backlog", async () => {
-      // Intended: the issue lands in In Progress (UI and server agree).
-      // Pinned: the drop applies optimistically in the UI, but moves into
-      // In Progress, In Review, or In Test silently land in the default
-      // state on the server (NEWFRONT-160).
+      // Pinned: the drop applies optimistically in the UI, but when the
+      // moving user has no eligible runner, moves into In Progress,
+      // In Review, or In Test bounce to the default state on the server:
+      // the platform's deliberate no-eligible-runner bounce
+      // (issue_runner/design.md §6.6), not a state-lookup bug (NEWFRONT-160).
+      // Whether an explicit human move should skip the bounce is an open
+      // platform decision (NEWFRONT-248).
       await driver.kanbanDragCardToColumnEnd(name, "In Progress");
       await expect.poll(() => driver.kanbanColumnCards("In Progress"), { timeout: 60_000 }).toContain(name);
       // The server read right after the drop is racy: it can briefly show
@@ -1108,8 +1111,8 @@ test(
       // State groups render swimlanes but are not a draggable dimension
       // (target_date lanes crash the board: NEWFRONT-159). Gamma moves to
       // Done so the three issues span three groups; beta stays home.
-      // Fixtures must avoid In Progress/In Review/In Test — moves there
-      // silently land in Backlog (NEWFRONT-160).
+      // Fixtures must avoid In Progress/In Review/In Test — with no
+      // eligible runner those moves bounce to Backlog (NEWFRONT-160).
       const completedState = states.find((state) => state.group === "completed");
       if (!completedState) throw new Error("[parity] scratch project lacks a completed state.");
       await serverPatchIssue(seed.workspaceSlug, projectId, gammaId, { state_id: completedState.id }, owner.cookie);
