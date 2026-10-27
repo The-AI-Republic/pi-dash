@@ -126,6 +126,23 @@ describe("ProjectsFilterPanel", () => {
     expect(screen.queryByRole("button", { name: "Clear filter search" })).toBeNull();
   });
 
+  it.each(["Priv", "priv", "PRIV"])("keeps the title-case access option for the query %s", async (query) => {
+    const { user } = await setup();
+
+    await user.type(screen.getByPlaceholderText("Search"), query);
+    expect(screen.getByText("Private")).not.toBeNull();
+    expect(screen.queryByText("Public")).toBeNull();
+  });
+
+  it("folds case when narrowing created-date presets", async () => {
+    const { user } = await setup();
+
+    await user.type(screen.getByPlaceholderText("Search"), "LaSt 7");
+    expect(screen.getByText("Last 7 days")).not.toBeNull();
+    expect(screen.queryByText("Last 30 days")).toBeNull();
+    expect(screen.queryByText("Today")).toBeNull();
+  });
+
   it("reports empty sections while searching", async () => {
     const { user } = await setup();
 
