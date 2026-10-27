@@ -1294,110 +1294,20 @@ impl RunnerPorts for LivePorts {
         pool: &'t PgPool,
         run_id: uuid::Uuid,
     ) -> Result<pidash_db::tx::Transaction<'t>, PortError> {
-        // `_apply_post_run_orchestration` (`run_lifecycle.py:103-139`) on
-        // the caller's transaction. Disarm locks only the ticker, so its
-        // executor runs beside the caller's issue/run locks; the deferred
-        // pause re-locks the issue row and so runs on `tx`.
-        if let Err(error) =
-            pidash_jobs::orchestration::disarm_on_terminal_signal(&self.pool, run_id).await
-        {
-            tracing::error!(
-                ?error,
-                run_id = %run_id,
-                "orchestration.error: run-ended reconcile failed"
-            );
-        }
+        // Thin caller of the public jobs driver (OVL-06).
         let settings = self.state.settings();
-        let deps = pidash_jobs::orchestration::StoreDeps {
-            cloud: settings.cloud_agent.clone(),
-            managed: settings.managed_runner.clone(),
-            cache: crate::project_move_handoff::RedisAdmissionCache {
+        let tx = pidash_jobs::orchestration::post_run_orchestration_in_tx(
+            tx,
+            pool,
+            &settings.cloud_agent,
+            &settings.managed_runner,
+            crate::project_move_handoff::RedisAdmissionCache {
                 client: crate::runner_enroll::teardown::redis_client(&self.state),
             },
-            // The pause path creates no runs: the presence closures are
-            // unread (`maybe_apply_deferred_pause_live`), so the keyless
-            // answers mirror it.
-            has_usable_llm_config: |_actor: uuid::Uuid| false,
-            toolsets: self.state.toolsets().clone(),
-            llm_profile: |_actor: Option<uuid::Uuid>| pidash_services::dispatch::LlmProfile {
-                available: false,
-                reason_code: String::new(),
-            },
-            now_unix_secs: chrono::Utc::now().timestamp(),
-        };
-        let mut store = pidash_jobs::orchestration::LiveCreationStore::new(tx, pool, deps);
-        match pidash_services::orchestration::dispatch::maybe_apply_deferred_pause(
-            &mut store,
+            self.state.toolsets().clone(),
             run_id,
-            chrono::Utc::now(),
-            0.0,
         )
-        .await
-        {
-            Ok(outcome) => {
-                for line in &outcome.logs {
-                    if line.level == "WARNING" {
-                        tracing::warn!("{}", line.message);
-                    } else {
-                        tracing::info!("{}", line.message);
-                    }
-                }
-            }
-            Err(error) => tracing::error!(
-                ?error,
-                run_id = %run_id,
-                "orchestration.error: deferred-pause failed"
-            ),
-        }
-        let (mut tx, _pool, _cache, _dispatches, _deferred, _terminal_effects) = store.into_parts();
-        // `_fire_pending_entry` (`run_lifecycle.py:141-155`): the run's
-        // work item pending ticker, if any, fires now. Read on the
-        // caller's transaction, after the pause's write, through the
-        // public lookups (OVL-06).
-        let work_item_id: Option<uuid::Uuid> =
-            match pidash_jobs::orchestration::run_work_item_id(&mut **tx.inner(), run_id).await {
-                Ok(id) => id,
-                Err(error) => {
-                    tracing::error!(
-                        ?error,
-                        run_id = %run_id,
-                        "orchestration.error: pending-entry lookup failed"
-                    );
-                    None
-                }
-            };
-        let ticker_id: Option<uuid::Uuid> = match work_item_id {
-            Some(work_item_id) => pidash_jobs::orchestration::pending_entry_ticker_for(
-                &mut **tx.inner(),
-                work_item_id,
-            )
-            .await
-            .unwrap_or(None),
-            None => None,
-        };
-        if let Some(ticker_id) = ticker_id {
-            // `_fire_pending_entry` queues `fire_tick.delay` with
-            // `transaction.on_commit`, so a rolled-back hooks transaction
-            // must not publish a tick for it.
-            let pool = self.pool.clone();
-            tx.on_commit(move || {
-                tokio::spawn(async move {
-                    if let Err(error) = emit_celery(
-                        &pool,
-                        pidash_jobs::tasks_ticker::scan::FIRE_TICK_TASK,
-                        vec![Value::String(ticker_id.to_string())],
-                    )
-                    .await
-                    {
-                        tracing::error!(
-                            ?error,
-                            ticker_id = %ticker_id,
-                            "orchestration.error: pending-entry fire failed"
-                        );
-                    }
-                });
-            });
-        }
+        .await;
         Ok(tx)
     }
 
@@ -1472,23 +1382,6 @@ impl RunnerPorts for LivePorts {
     fn redis_client(&self) -> Option<&redis::Client> {
         self.redis.as_ref()
     }
-}
-
-/// Enqueue one task message onto the Postgres-backed queue (`rust_job_queue`),
-/// the `auth_session::email` `publish_message` shape without the broker.
-/// Enqueue errors propagate to the caller, which logs them — every emit site
-/// is isolated in Python.
-async fn emit_celery(pool: &sqlx::PgPool, task: &str, args: Vec<Value>) -> Result<(), String> {
-    let message = pidash_jobs::TaskMessage::new(task, args, Map::new());
-    let job = pidash_jobs::queue::NewJob::new(
-        message.task.clone(),
-        Value::Array(message.args.clone()),
-        Value::Object(message.kwargs.clone()),
-    );
-    pidash_jobs::queue::enqueue(pool, &job)
-        .await
-        .map(|_| ())
-        .map_err(|error| error.to_string())
 }
 
 /// Live enqueue: `_ensure_group` (`outbox.py:139-148`, BUSYGROUP

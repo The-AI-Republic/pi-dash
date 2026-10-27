@@ -31,10 +31,9 @@ use pidash_jobs::dispatch::{
 };
 use pidash_services::assistant::seams as assistant_seams;
 use pidash_services::dispatch::{
-    consume_admission_token, AdmissionCache, DeferredConsume, LlmProfile, UserFlags as SvcUserFlags,
+    consume_admission_token, DeferredConsume, LlmProfile, UserFlags as SvcUserFlags,
 };
 use pidash_services::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
-use pidash_services::ops::boot::cache_key;
 use pidash_services::orchestration::creation::{
     self as creation_kernel, active_run_sql, latest_prior_run_sql, run_insert_returning_sql,
     run_lock_sql, run_select_sql, user_id_for_run, ASSIGNED_POD_SELECT_SQL,
@@ -150,62 +149,10 @@ pub(crate) async fn drain_publish_effects(
 // The D-12 handoff twin seam (the driver is called, never inlined)
 // ---------------------------------------------------------------------------
 
-/// Redis-backed [`AdmissionCache`]: the production implementation of
-/// the sync trait, shared by the handoff twin, the direct-create tail,
-/// and the v1 work-item actions. Each call opens a short sync
-/// connection (the trait is sync; only cloud admission paths touch
-/// it). Keys go through Django's [`cache_key`] (`:1:{key}`), so Rust
-/// and Django count the same buckets. An unset or unusable `REDIS_URL`
-/// fails closed like Python's backend failure.
-#[derive(Clone)]
-pub struct RedisAdmissionCache {
-    pub(crate) client: Option<redis::Client>,
-}
-
-fn cache_unavailable<T>(what: &'static str) -> Result<T, redis::RedisError> {
-    Err(redis::RedisError::from((
-        redis::ErrorKind::Io,
-        what,
-        "redis unavailable".to_owned(),
-    )))
-}
-
-impl AdmissionCache for RedisAdmissionCache {
-    type Error = redis::RedisError;
-
-    fn bucket_count(&self, key: &str) -> Result<Option<i64>, Self::Error> {
-        let Some(client) = &self.client else {
-            return cache_unavailable("bucket_count");
-        };
-        let mut connection = client.get_connection()?;
-        let value: Option<i64> = redis::cmd("GET")
-            .arg(cache_key(key))
-            .query(&mut connection)?;
-        Ok(value)
-    }
-
-    fn add_or_incr(&self, key: &str, timeout_secs: i64) -> Result<(), Self::Error> {
-        let Some(client) = &self.client else {
-            return cache_unavailable("add_or_incr");
-        };
-        let mut connection = client.get_connection()?;
-        // `cache.add(key, 1, timeout) or cache.incr(key)`: set-if-absent
-        // with TTL, else increment.
-        let set: Option<String> = redis::cmd("SET")
-            .arg(cache_key(key))
-            .arg(1)
-            .arg("EX")
-            .arg(timeout_secs)
-            .arg("NX")
-            .query(&mut connection)?;
-        if set.is_none() {
-            let _: i64 = redis::cmd("INCR")
-                .arg(cache_key(key))
-                .query(&mut connection)?;
-        }
-        Ok(())
-    }
-}
+/// Redis-backed admission cache, unified in services (OVL-06):
+/// re-exported here so the handoff twin, the direct-create tail, and
+/// the v1 work-item actions keep their import path.
+pub(crate) use pidash_services::dispatch::admission::RedisAdmissionCache;
 
 /// Pool-backed [`CreationSeam`] + [`FinalizeAgentRunSeam`]: the api-side
 /// twin of `jobs::LiveCreationStore` (same builders, same order, same

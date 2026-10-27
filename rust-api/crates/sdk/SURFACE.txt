@@ -369,6 +369,7 @@ pidash_sdk::ops::PoolPrStore
 pidash_sdk::ops::PoolPubsubStore
 pidash_sdk::ops::PrLinksSurface
 pidash_sdk::ops::ProjectClockPolicy
+pidash_sdk::ops::RedisAdmissionCache
 pidash_sdk::ops::RevokeError
 pidash_sdk::ops::RevokeOutcome
 pidash_sdk::ops::RevokeStore
@@ -415,6 +416,7 @@ pidash_sdk::ops::next_event_seq
 pidash_sdk::ops::next_message_seq
 pidash_sdk::ops::pending_entry_ticker_for
 pidash_sdk::ops::post_run_orchestration
+pidash_sdk::ops::post_run_orchestration_in_tx
 pidash_sdk::ops::py_stripped
 pidash_sdk::ops::reconcile
 pidash_sdk::ops::revoke

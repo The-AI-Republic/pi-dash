@@ -55,7 +55,9 @@ use pidash_services::runner_sessions::live_drains::{drain_pod_by_id, DrainError}
 use pidash_types::orchestration::{StateRef, TickerEventKind};
 
 use super::creation_jobs::StoreDeps;
-use super::creation_jobs::{complete_project_move_handoff as drive_handoff, CreationJobsError};
+use super::creation_jobs::{
+    complete_project_move_handoff as drive_handoff, CreationJobsError, LiveCreationStore,
+};
 use super::fire_tick_seam::{
     create_ticker_sql, emit_logs, lock_ticker_by_issue_sql, map_policy, map_ticker,
     maybe_apply_deferred_pause as drive_pause, save_clock_sql, DispatchJobsError,
@@ -349,6 +351,112 @@ pub async fn post_run_orchestration(
             "orchestration.error: pending-entry fire failed"
         );
     }
+}
+
+/// `_apply_post_run_orchestration` (`run_lifecycle.py:103-139`) on the
+/// caller's transaction. Disarm locks only the ticker, so its
+/// executor runs beside the caller's issue/run locks; the deferred
+/// pause re-locks the issue row and so runs on `tx`. The pending
+/// fire reads on `tx` after the pause's write and publishes through
+/// `on_commit`, so a rolled-back hooks transaction emits no tick.
+/// Moved from the api ports
+/// (`runner_runs::LivePorts::post_run_orchestration_in_tx`, OVL-06
+/// PIDASHCONV-1544); the ports method is now a thin caller.
+/// Re-exported through `pidash-sdk::ops`.
+pub async fn post_run_orchestration_in_tx<'t>(
+    tx: Transaction<'t>,
+    pool: &'t PgPool,
+    cloud: &CloudAgentSettings,
+    managed: &ManagedRunnerSettings,
+    cache: RedisAdmissionCache,
+    toolsets: Arc<dyn CloudAgentToolsetsSeam>,
+    run_id: Uuid,
+) -> Transaction<'t> {
+    if let Err(error) = disarm_on_terminal_signal(pool, run_id).await {
+        tracing::error!(
+            ?error,
+            run_id = %run_id,
+            "orchestration.error: run-ended reconcile failed"
+        );
+    }
+    let deps = StoreDeps {
+        cloud: cloud.clone(),
+        managed: managed.clone(),
+        cache,
+        // The pause path creates no runs: the presence closures are
+        // unread (`maybe_apply_deferred_pause_live`), so the keyless
+        // answers mirror it.
+        has_usable_llm_config: |_actor: Uuid| false,
+        toolsets,
+        llm_profile: |_actor: Option<Uuid>| LlmProfile {
+            available: false,
+            reason_code: String::new(),
+        },
+        now_unix_secs: Utc::now().timestamp(),
+    };
+    let mut store = LiveCreationStore::new(tx, pool, deps);
+    match pidash_services::orchestration::dispatch::maybe_apply_deferred_pause(
+        &mut store,
+        run_id,
+        Utc::now(),
+        0.0,
+    )
+    .await
+    {
+        Ok(outcome) => {
+            for line in &outcome.logs {
+                if line.level == "WARNING" {
+                    tracing::warn!("{}", line.message);
+                } else {
+                    tracing::info!("{}", line.message);
+                }
+            }
+        }
+        Err(error) => tracing::error!(
+            ?error,
+            run_id = %run_id,
+            "orchestration.error: deferred-pause failed"
+        ),
+    }
+    let (mut tx, _pool, _cache, _dispatches, _deferred, _terminal_effects) = store.into_parts();
+    let work_item_id: Option<Uuid> = match run_work_item_id(&mut **tx.inner(), run_id).await {
+        Ok(id) => id,
+        Err(error) => {
+            tracing::error!(
+                ?error,
+                run_id = %run_id,
+                "orchestration.error: pending-entry lookup failed"
+            );
+            None
+        }
+    };
+    let ticker_id: Option<Uuid> = match work_item_id {
+        Some(work_item_id) => pending_entry_ticker_for(&mut **tx.inner(), work_item_id)
+            .await
+            .unwrap_or(None),
+        None => None,
+    };
+    if let Some(ticker_id) = ticker_id {
+        // `_fire_pending_entry` queues `fire_tick.delay` with
+        // `transaction.on_commit`, so a rolled-back hooks transaction
+        // must not publish a tick for it.
+        let pool = pool.clone();
+        tx.on_commit(move || {
+            tokio::spawn(async move {
+                if let Err(error) = crate::tasks_ticker::scan::emit_fire_tick(&pool, ticker_id)
+                    .await
+                    .map_err(|error| error.to_string())
+                {
+                    tracing::error!(
+                        ?error,
+                        ticker_id = %ticker_id,
+                        "orchestration.error: pending-entry fire failed"
+                    );
+                }
+            });
+        });
+    }
+    tx
 }
 
 // ---------------------------------------------------------------------------
