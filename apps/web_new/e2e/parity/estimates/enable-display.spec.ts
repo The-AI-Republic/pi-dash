@@ -152,7 +152,14 @@ test(
       // disable direction even when enabling fails (NEWFRONT-341).
       await driver.estimatesFailProjectUpdate();
       await driver.estimatesEnableSwitchToggle();
-      await expect.poll(() => driver.lastToast(), { timeout: 20_000 }).toContain("Error");
+      // The oracle pins the old "Error" notice title; web_new reports
+      // the same refusal in its own words. The error notice itself is
+      // the parity point, so each leg asserts its own copy.
+      if (driver.target === "web_new") {
+        await expect.poll(() => driver.lastToast(), { timeout: 20_000 }).toMatch(/couldn.t change estimates/i);
+      } else {
+        await expect.poll(() => driver.lastToast(), { timeout: 20_000 }).toContain("Error");
+      }
       expect(await driver.estimatesEnableSwitchOn()).toBe(false);
       expect(await serverProjectEstimateId(seed.workspaceSlug, projectId, session)).toBeNull();
       expect(system.id).not.toBe("");

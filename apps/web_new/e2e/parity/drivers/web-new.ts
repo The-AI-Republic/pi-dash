@@ -27387,6 +27387,10 @@ export class WebNewDriver implements ParityDriver {
     await this.openAnalytics();
   }
   async estimatesAnalyticsYAxisValue(): Promise<string> {
+    // The labels read evaluates immediately; the pickers render after
+    // the dialog mounts, so settle on the trigger first (EST-020 read
+    // "" on a fresh open).
+    await this.page.getByTestId("analytics-custom-trigger-0").waitFor({ timeout: WebNewDriver.WAIT_MS });
     return (await this.analyticsCustomPickerLabels()).metric;
   }
   async estimatesAnalyticsYAxisOptions(): Promise<string[]> {
@@ -27396,6 +27400,8 @@ export class WebNewDriver implements ParityDriver {
     return todo("estimatesAnalyticsPickYAxis");
   }
   async estimatesAnalyticsXAxisValue(): Promise<string> {
+    // Settle first: see estimatesAnalyticsYAxisValue (EST-020).
+    await this.page.getByTestId("analytics-custom-trigger-1").waitFor({ timeout: WebNewDriver.WAIT_MS });
     return (await this.analyticsCustomPickerLabels()).xAxis;
   }
   async estimatesAnalyticsXAxisOptions(): Promise<string[]> {
@@ -29024,18 +29030,59 @@ export class WebNewDriver implements ParityDriver {
       .toContain("Step 2 of 2");
   }
 
+  /**
+   * Drain toasts left by earlier steps before a dialog submit, so only
+   * this submit's own outcome can settle the post-click wait. Runs
+   * before the click: after it, a fresh toast is indistinguishable from
+   * a stale one. Resolves at once when no toast is up.
+   */
+  private async estimatesDrainToasts(): Promise<void> {
+    await this.page
+      .locator('[data-testid="toast-stack"] [data-testid="toast-notification"]')
+      .first()
+      .waitFor({ state: "detached", timeout: 10_000 })
+      .catch(() => undefined);
+  }
+
+  /**
+   * Settle a dialog submit that either closes the dialog (success) or
+   * leaves it open with an error toast (refusal, EST-013/EST-016). A
+   * close wins immediately; the toast only settles once continuously
+   * visible with the dialog still open for 1.5s — the success toast can
+   * appear before the close lands, so settling on its first flash
+   * returns while the dialog is open. Error toasts live 8s, so a
+   * refusal settles with most of its life left for the scenario's poll.
+   */
+  private async estimatesSettleDialogSubmit(dialog: Locator): Promise<void> {
+    const toast = this.page.locator('[data-testid="toast-stack"] [data-testid="toast-notification"]').first();
+    let toastedSince: number | null = null;
+    await expect
+      .poll(
+        async () => {
+          if ((await dialog.count()) === 0) return true;
+          const toasted = await toast.isVisible().catch(() => false);
+          const now = Date.now();
+          if (!toasted) {
+            toastedSince = null;
+            return false;
+          }
+          if (toastedSince === null) toastedSince = now;
+          return now - toastedSince >= 1500;
+        },
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .toBe(true)
+      .catch(() => undefined);
+  }
+
   async estimatesSubmit(): Promise<void> {
     const dialog = this.estimatesCreateDialog();
+    await this.estimatesDrainToasts();
     await dialog
       .getByRole("button", { name: /create estimate/i })
       .first()
       .click();
-    // Success closes the dialog (a toast may linger); a refused or
-    // blocked submit leaves it open.
-    await expect
-      .poll(async () => (await dialog.count()) === 0, { timeout: WebNewDriver.WAIT_MS })
-      .toBe(true)
-      .catch(() => undefined);
+    await this.estimatesSettleDialogSubmit(dialog);
   }
 
   async estimatesActiveRowDeleteClick(): Promise<void> {
@@ -29068,15 +29115,20 @@ export class WebNewDriver implements ParityDriver {
 
   async estimatesEditDeleteConfirmDialogConfirm(): Promise<void> {
     const dialog = this.appDialogs().first();
+    await this.estimatesDrainToasts();
     await dialog.getByRole("button", { name: "Delete", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
-    await dialog.waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
+    await this.estimatesSettleDialogSubmit(dialog);
   }
 
   async estimatesEditDeleteActiveRowEditControlVisible(): Promise<boolean> {
-    // OSS rows offer deletion only (EST-014): no control names an edit.
+    // OSS rows offer deletion only (EST-014): the row's edit control is
+    // the button web_new labels `Edit <name>`. A bare /edit/i substring
+    // match false-positives on the delete control's label, which carries
+    // the system name (EST-029's "noedit" tag tripped it), so anchor on
+    // the leading verb instead.
     const row = this.estimatesActiveRowLocator();
     if ((await row.count()) === 0) return false;
-    return (await row.getByRole("button", { name: /edit/i }).count()) > 0;
+    return (await row.getByRole("button", { name: /^edit\s/i }).count()) > 0;
   }
   // --- Pages gating, list states, URLs, detail shell (NEWFRONT-314,
   // --- PAGE-018-025,079-080). Written against the shipped web_new UI: every
