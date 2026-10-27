@@ -7,7 +7,8 @@
 import { Buffer } from "buffer";
 import type { Extensions, JSONContent } from "@tiptap/core";
 import { getSchema } from "@tiptap/core";
-import { generateHTML, generateJSON } from "@tiptap/html";
+import { generateJSON } from "@tiptap/html";
+import { DOMSerializer, Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { prosemirrorJSONToYDoc, prosemirrorJSONToYXmlFragment, yXmlFragmentToProseMirrorRootNode } from "y-prosemirror";
 import * as Y from "yjs";
 // extensions
@@ -27,6 +28,156 @@ export const TITLE_EDITOR_EXTENSIONS: Extensions = TitleExtensions;
 const richTextEditorSchema = getSchema(RICH_TEXT_EDITOR_EXTENSIONS);
 const documentEditorSchema = getSchema(DOCUMENT_EDITOR_EXTENSIONS);
 const titleEditorSchema = getSchema(TITLE_EDITOR_EXTENSIONS);
+
+/**
+ * HTML void elements: rendered without a closing tag, matching the previous server renderer's output.
+ */
+const VOID_ELEMENTS = new Set([
+  "area",
+  "base",
+  "br",
+  "col",
+  "embed",
+  "hr",
+  "img",
+  "input",
+  "keygen",
+  "link",
+  "meta",
+  "param",
+  "source",
+  "track",
+  "wbr",
+  "command",
+]);
+
+/**
+ * Escapes text and attribute values for HTML output, matching the previous server renderer's output.
+ */
+const escapeHTML = (value: string): string =>
+  value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/'/g, "&apos;")
+    .replace(/"/g, "&quot;")
+    .replace(/\u00a0/g, "&nbsp;")
+    .replace(/\u00ad/g, "&shy;");
+
+type SimpleChild = SimpleElement | SimpleText;
+
+class SimpleText {
+  readonly nodeType = 3;
+  constructor(readonly text: string) {}
+}
+
+/**
+ * Minimal style declaration. The `cssText` setter keeps the declarations a browser would keep:
+ * it drops empty declarations and ones whose value is `null` or `none` (the table specs
+ * interpolate unset colours into the style string, and browsers drop those as invalid), skips the
+ * attribute when nothing remains, and otherwise serialises like a browser (`"; "`-joined with a
+ * trailing semicolon).
+ */
+class SimpleStyle {
+  constructor(private readonly element: SimpleElement) {}
+  set cssText(value: string) {
+    const declarations = value
+      .split(";")
+      .map((part) => part.trim())
+      .filter((part) => {
+        const separator = part.indexOf(":");
+        if (separator === -1) return false;
+        const declarationValue = part
+          .slice(separator + 1)
+          .trim()
+          .toLowerCase();
+        return declarationValue !== "null" && declarationValue !== "none";
+      });
+    if (declarations.length > 0) {
+      this.element.attributes["style"] = `${declarations.join("; ")};`;
+    }
+  }
+}
+
+class SimpleElement {
+  readonly nodeType = 1;
+  readonly attributes: Record<string, unknown> = {};
+  readonly children: SimpleChild[] = [];
+  readonly style: SimpleStyle;
+  constructor(readonly tagName: string) {
+    this.style = new SimpleStyle(this);
+  }
+  setAttribute(name: string, value: unknown): void {
+    this.attributes[name] = value;
+  }
+  appendChild<T extends SimpleChild>(child: T): T {
+    this.children.push(child);
+    return child;
+  }
+}
+
+class SimpleFragment {
+  readonly nodeType = 11;
+  readonly children: SimpleChild[] = [];
+  appendChild<T extends SimpleChild>(child: T): T {
+    this.children.push(child);
+    return child;
+  }
+}
+
+/**
+ * Minimal document for ProseMirror's `DOMSerializer` on the server. It implements only the surface
+ * the serializer touches (`createElement`, `createTextNode`, `createDocumentFragment`); unlike the
+ * DOM `@tiptap/html` renders with, its elements honour the `style.cssText` assignment.
+ */
+class SimpleDocument {
+  createElement(tagName: string): SimpleElement {
+    return new SimpleElement(tagName);
+  }
+  createTextNode(text: string): SimpleText {
+    return new SimpleText(text);
+  }
+  createDocumentFragment(): SimpleFragment {
+    return new SimpleFragment();
+  }
+}
+
+const renderSimpleAttribute = (name: string, value: unknown): string => {
+  if (value === true) return ` ${name}`;
+  if (value === false) return "";
+  return ` ${name}="${escapeHTML(String(value))}"`;
+};
+
+const renderSimpleChild = (child: SimpleChild): string => {
+  if (child instanceof SimpleText) return escapeHTML(child.text);
+  const attributes = Object.entries(child.attributes)
+    .map(([name, value]) => renderSimpleAttribute(name, value))
+    .join("");
+  if (VOID_ELEMENTS.has(child.tagName)) return `<${child.tagName}${attributes}>`;
+  const inner = child.children.map(renderSimpleChild).join("");
+  return `<${child.tagName}${attributes}>${inner}</${child.tagName}>`;
+};
+
+const renderSimpleFragment = (fragment: SimpleFragment): string => fragment.children.map(renderSimpleChild).join("");
+
+/**
+ * @description serialises ProseMirror JSON to HTML on the server, preserving `style` attributes.
+ * `@tiptap/html`'s `generateHTML` renders with a DOM whose element `style` object silently drops
+ * ProseMirror's `style.cssText` assignment, so every schema-emitted `style` (text alignment, custom
+ * colours, table cell colours) is lost from the stored HTML. This runs the same `DOMSerializer`
+ * pass against {@link SimpleDocument} and renders with the same escaping, attribute and
+ * void-element conventions as before; `style` values are serialised like a browser would.
+ * @param {JSONContent} contentJSON
+ * @param {typeof documentEditorSchema} schema
+ * @returns {string}
+ */
+const prosemirrorJSONToHTML = (contentJSON: JSONContent, schema: typeof documentEditorSchema): string => {
+  const contentNode = ProseMirrorNode.fromJSON(schema, contentJSON);
+  const fragment = DOMSerializer.fromSchema(schema).serializeFragment(contentNode.content, {
+    document: new SimpleDocument() as unknown as Document,
+  });
+  return renderSimpleFragment(fragment as unknown as SimpleFragment);
+};
 
 /**
  * @description apply updates to a doc and return the updated doc in binary format
@@ -144,7 +295,7 @@ export const getAllDocumentFormatsFromRichTextEditorBinaryData = (
   const type = yDoc.getXmlFragment("default");
   const contentJSON = yXmlFragmentToProseMirrorRootNode(type, richTextEditorSchema).toJSON();
   // convert to HTML
-  const contentHTML = generateHTML(contentJSON, RICH_TEXT_EDITOR_EXTENSIONS);
+  const contentHTML = prosemirrorJSONToHTML(contentJSON, richTextEditorSchema);
 
   return {
     contentBinaryEncoded: base64Data,
@@ -175,12 +326,12 @@ export const getAllDocumentFormatsFromDocumentEditorBinaryData = (
   const type = yDoc.getXmlFragment("default");
   const contentJSON = yXmlFragmentToProseMirrorRootNode(type, documentEditorSchema).toJSON();
   // convert to HTML
-  const contentHTML = generateHTML(contentJSON, DOCUMENT_EDITOR_EXTENSIONS);
+  const contentHTML = prosemirrorJSONToHTML(contentJSON, documentEditorSchema);
 
   if (updateTitle) {
     const title = yDoc.getXmlFragment("title");
     const titleJSON = yXmlFragmentToProseMirrorRootNode(title, documentEditorSchema).toJSON();
-    const titleHTML = extractTextFromHTML(generateHTML(titleJSON, DOCUMENT_EDITOR_EXTENSIONS));
+    const titleHTML = extractTextFromHTML(prosemirrorJSONToHTML(titleJSON, documentEditorSchema));
 
     return {
       contentBinaryEncoded: base64Data,
