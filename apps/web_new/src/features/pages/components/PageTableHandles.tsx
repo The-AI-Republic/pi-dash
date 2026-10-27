@@ -194,11 +194,19 @@ export function PageTableHandles({ getHandle, onDocumentChange, html }: PageTabl
     onDocumentChange(handle.html());
   };
 
+  // An open menu must paint above the selection bubble (z-30): the menu
+  // lives inside its handle wrapper's stacking context, so the wrapper
+  // holding the open menu rises to z-40 while the other stays at z-20.
+  const rowWrapperClassName =
+    openMenu?.axis === "row" ? "pointer-events-auto fixed z-40" : "pointer-events-auto fixed z-20";
+  const columnWrapperClassName =
+    openMenu?.axis === "column" ? "pointer-events-auto fixed z-40" : "pointer-events-auto fixed z-20";
+
   return (
     <div data-testid={PAGE_TABLE_HANDLES_TEST_ID}>
       {hover === null ? null : (
         <div ref={surfaceRef}>
-          <div className="pointer-events-auto fixed z-20" style={{ top: hover.rowTop, left: hover.rowLeft }}>
+          <div className={rowWrapperClassName} style={{ top: hover.rowTop, left: hover.rowLeft }}>
             <button
               type="button"
               aria-label={PAGE_TABLE_ROW_HANDLE_LABEL}
@@ -221,7 +229,7 @@ export function PageTableHandles({ getHandle, onDocumentChange, html }: PageTabl
               />
             ) : null}
           </div>
-          <div className="pointer-events-auto fixed z-20" style={{ top: hover.colTop, left: hover.colLeft }}>
+          <div className={columnWrapperClassName} style={{ top: hover.colTop, left: hover.colLeft }}>
             <button
               type="button"
               aria-label={PAGE_TABLE_COLUMN_HANDLE_LABEL}

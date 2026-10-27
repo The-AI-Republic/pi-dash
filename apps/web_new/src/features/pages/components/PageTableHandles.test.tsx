@@ -249,6 +249,25 @@ describe("PageTableHandles", () => {
     expect(handle.selectTableRow).toHaveBeenCalledTimes(1);
   });
 
+  it("raises the open menu's wrapper above the selection bubble", () => {
+    setup({ handle: tableHandle() });
+    fireEvent.mouseMove(editorCell());
+    const rowWrapper = screen.getByTestId(PAGE_TABLE_ROW_HANDLE_TEST_ID).parentElement;
+    const columnWrapper = screen.getByTestId(PAGE_TABLE_COLUMN_HANDLE_TEST_ID).parentElement;
+    expect(rowWrapper?.className).toContain("z-20");
+    expect(rowWrapper?.className).not.toContain("z-40");
+    expect(columnWrapper?.className).toContain("z-20");
+    press(screen.getByTestId(PAGE_TABLE_ROW_HANDLE_TEST_ID));
+    expect(screen.getByTestId(PAGE_TABLE_ROW_HANDLE_TEST_ID).parentElement?.className).toContain("z-40");
+    expect(screen.getByTestId(PAGE_TABLE_COLUMN_HANDLE_TEST_ID).parentElement?.className).toContain("z-20");
+    press(screen.getByTestId(PAGE_TABLE_COLUMN_HANDLE_TEST_ID));
+    expect(screen.getByTestId(PAGE_TABLE_ROW_HANDLE_TEST_ID).parentElement?.className).toContain("z-20");
+    expect(screen.getByTestId(PAGE_TABLE_COLUMN_HANDLE_TEST_ID).parentElement?.className).toContain("z-40");
+    press(screen.getByTestId(PAGE_TABLE_COLUMN_HANDLE_TEST_ID));
+    expect(screen.getByTestId(PAGE_TABLE_ROW_HANDLE_TEST_ID).parentElement?.className).toContain("z-20");
+    expect(screen.getByTestId(PAGE_TABLE_COLUMN_HANDLE_TEST_ID).parentElement?.className).toContain("z-20");
+  });
+
   it("runs every row entry against the hovered row and reports the document", () => {
     const handle = tableHandle();
     const { onDocumentChange } = setup({ handle });

@@ -712,11 +712,16 @@ test(
         .poll(() => driver.pagesToolbarTableMenuEntries("column"), { timeout: 15_000 })
         .toEqual(["Insert left", "Insert right", "Duplicate", "Clear contents", "Delete"]);
 
-      // Both drivers open menus off the first cell's handle, so the caret
-      // is in the hovered row (r0c0) after the reads above: assert it, mark
-      // it, then prove duplication copies content (the mark doubles),
-      // deleting the first row drops the original (the mark singles), and
-      // clearing the first row empties it.
+      // Both drivers act on the first row's handle, so the mark must go
+      // into the hovered row: the menu reads leave the caret wherever each
+      // editor drops it, so walk back to r0c0 first (Shift+Tab never
+      // appends a row). Then prove duplication copies content (the mark
+      // doubles), deleting the first row drops the original (the mark
+      // singles), and clearing the first row empties it.
+      for (let walk = 0; walk < 9; walk += 1) {
+        if ((await driver.pagesToolbarCaretCell()) === "r0c0") break;
+        await driver.pagesToolbarPressKey("Shift+Tab");
+      }
       expect(await driver.pagesToolbarCaretCell()).toBe("r0c0");
       await driver.pagesToolbarTypeText("dup-me");
       await driver.pagesToolbarTableMenuPick("row", "Duplicate");
@@ -731,9 +736,15 @@ test(
 
       // Columns mirror rows: the drivers act on the first column's
       // handle, so mark a cell in the hovered column (r1c0), prove the
-      // duplicate carries the mark, then narrow back.
-      for (let walk = 0; walk < 6; walk += 1) {
-        if ((await driver.pagesToolbarCaretCell()) === "r1c0") break;
+      // duplicate carries the mark, then narrow back. Re-anchor on r0c0
+      // first — Tabbing forward from an unknown caret could run off the
+      // last cell and append a row instead of reaching r1c0.
+      for (let walk = 0; walk < 9; walk += 1) {
+        if ((await driver.pagesToolbarCaretCell()) === "r0c0") break;
+        await driver.pagesToolbarPressKey("Shift+Tab");
+      }
+      expect(await driver.pagesToolbarCaretCell()).toBe("r0c0");
+      for (let tab = 0; tab < 3; tab += 1) {
         await driver.pagesToolbarPressKey("Tab");
       }
       expect(await driver.pagesToolbarCaretCell()).toBe("r1c0");

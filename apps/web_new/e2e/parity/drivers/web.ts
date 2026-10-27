@@ -40102,7 +40102,11 @@ export class WebDriver implements ParityDriver {
 
   async pagesToolbarTableMenuPick(axis: "row" | "column", entry: string): Promise<void> {
     const menu = await this.pagesOldTableOpenMenu(axis);
-    await menu.locator(`:scope > button:text-is("${entry}")`).click({ timeout: WebDriver.OPEN_MS });
+    // getByRole, not :scope > button:text-is(): the engine pseudo-class
+    // never matches in this composition even though the entry buttons
+    // are the menu's direct children (verified live), while the
+    // accessible names are exactly the entry labels.
+    await menu.getByRole("button", { name: entry, exact: true }).click({ timeout: WebDriver.OPEN_MS });
   }
 
   async pagesToolbarTablePaint(axis: "row" | "column", index: number): Promise<void> {
