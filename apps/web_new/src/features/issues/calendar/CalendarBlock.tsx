@@ -97,13 +97,16 @@ export function CalendarBlock({
   const pressRef = React.useRef<{ x: number; y: number } | null>(null);
   const dragListenersRef = React.useRef<(() => void) | null>(null);
   const draggedRef = React.useRef(false);
+  const draggingRef = React.useRef(false);
   const identifier = blockIdentifier(projectIdentifier, issue);
   const PriorityIcon = PRIORITY_ICONS[issue.priority];
 
   function openPreview(): void {
     // A tooltip popping open mid-drag would cover the adjacent tile and
-    // blind the drop resolution (ISS-024).
-    if (draggedRef.current) return;
+    // blind the drop resolution (ISS-024). Guard on the in-progress flag,
+    // not the click-swallow flag: the release lands on the destination
+    // tile, so draggedRef may still be set long after the drag ended.
+    if (draggingRef.current) return;
     const anchor = anchorRef.current;
     if (anchor !== null && typeof globalThis.window !== "undefined") {
       setPlacement(
@@ -133,6 +136,10 @@ export function CalendarBlock({
 
   function stopTracking(): void {
     pressRef.current = null;
+    // A release over this block ends the drag (same-tile drop), so the
+    // mid-drag preview guard lifts here; cross-tile releases lift it via
+    // the document watcher installed at drag start (ISS-024).
+    draggingRef.current = false;
     dragListenersRef.current?.();
     dragListenersRef.current = null;
   }
@@ -162,8 +169,23 @@ export function CalendarBlock({
       // drop resolution sees the tile under the pointer (ISS-024).
       clearHoverTimer();
       setPreviewOpen(false);
+      // The release lands on the destination tile, never on this block, so
+      // watch the document for drag end and lift the preview guard then
+      // (ISS-024). The click-swallow flag stays set for a same-tile
+      // release, where the click still reaches this block.
+      draggingRef.current = true;
+      const onDragEnd = (): void => {
+        draggingRef.current = false;
+        globalThis.document.removeEventListener("pointerup", onDragEnd);
+        globalThis.document.removeEventListener("pointercancel", onDragEnd);
+      };
+      globalThis.document.addEventListener("pointerup", onDragEnd);
+      globalThis.document.addEventListener("pointercancel", onDragEnd);
       dragListenersRef.current?.();
-      dragListenersRef.current = null;
+      dragListenersRef.current = () => {
+        globalThis.document.removeEventListener("pointerup", onDragEnd);
+        globalThis.document.removeEventListener("pointercancel", onDragEnd);
+      };
       onDragStart(issue, moveEvent as unknown as React.PointerEvent<HTMLElement>);
     };
     const onEnd = (): void => stopTracking();
@@ -191,6 +213,7 @@ export function CalendarBlock({
       onPointerDown={(event) => {
         if (!draggable || temp) return;
         draggedRef.current = false;
+        draggingRef.current = false;
         pressRef.current = { x: event.clientX, y: event.clientY };
         trackPointer();
       }}
