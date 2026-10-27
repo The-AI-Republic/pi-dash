@@ -83,9 +83,9 @@ describe("CycleTransferDialog", () => {
     setup();
     await user.type(screen.getByPlaceholderText(CYCLE_TRANSFER_SEARCH_PLACEHOLDER), "draft");
     expect(screen.getByRole("option", { name: /^Draft cycle/ })).toBeInTheDocument();
-    expect(screen.queryByText("Target cycle")).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText("Target cycle")).not.toBeInTheDocument());
     await user.clear(screen.getByPlaceholderText(CYCLE_TRANSFER_SEARCH_PLACEHOLDER));
-    expect(screen.getByRole("option", { name: /^Target cycle/ })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("option", { name: /^Target cycle/ })).toBeInTheDocument());
   });
 
   it("explains that an open cycle must be created when no destination exists", () => {
@@ -98,7 +98,7 @@ describe("CycleTransferDialog", () => {
     const user = userEvent.setup();
     setup();
     await user.type(screen.getByPlaceholderText(CYCLE_TRANSFER_SEARCH_PLACEHOLDER), "zzz");
-    expect(screen.getByText(CYCLE_TRANSFER_NO_MATCH)).toBeInTheDocument();
+    expect(await screen.findByText(CYCLE_TRANSFER_NO_MATCH)).toBeInTheDocument();
   });
 
   it("holds the loading line while the picker read flies", () => {
@@ -156,7 +156,7 @@ describe("CycleTransferDialog", () => {
       </QueryClientProvider>
     );
     await user.type(screen.getByPlaceholderText(CYCLE_TRANSFER_SEARCH_PLACEHOLDER), "draft");
-    expect(screen.queryByText("Target cycle")).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText("Target cycle")).not.toBeInTheDocument());
     rerender(
       <QueryClientProvider client={new QueryClient()}>
         <CycleTransferDialog
