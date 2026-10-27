@@ -304,24 +304,36 @@ pidash_api::startup::WorkerBuilder::from_env()
 `with_user_settings_schema`), `with_state` for other state tweaks,
 `merge_routes` (rides the overlay `add_routes` fallback path, so an
 extra route shadows rather than colliding), `wrap` (outside the OSS
-middleware stack), `with_bind`/`with_version`, and `run`. `build`
-returns the pool-less state-plus-router pair for tests and embedding.
+middleware stack), `wrap_inside` (inside the stack, after
+`SessionLayer`, before the route handler — the overlay's JWT,
+federation-guard and quota layers sit here; repeated calls apply in
+call order, tower outside-in, so the JWT → federation → quota request
+order reads quota, federation, JWT), `with_bind`/`with_version`, and
+`run`. `build` returns the pool-less state-plus-router pair for tests
+and embedding.
 
-`WorkerBuilder` extension points: `with_assistant_seam`,
-`with_turn_seam` (the builder is generic over the non-object-safe
-`TurnSeam`; the default is the live OSS seam), `register` for extra
-jobs (the closure gets the registry plus the built `OssWorkerCtx`),
-`schedule` (appends after `default_schedule`), `with_concurrency`, and
-`run`. `build` returns the registry plus context without driving the
-loops. An extra registration over an already-owned task name — OSS or
-an earlier extra — fails the build instead of silently replacing the
-handler.
+`WorkerBuilder` extension points: `with_settings` (mirrors serve's;
+the final settings feed `ctx.settings`, the turn soft limit, and the
+still-default seams, which rebuild — call before `with_turn_seam`),
+`with_assistant_seam`, `with_turn_seam` (the builder is generic over
+the non-object-safe `TurnSeam`; the default is the live OSS seam),
+`register` for extra jobs (the closure gets the registry plus the
+built `OssWorkerCtx`), `schedule` (appends after `default_schedule`),
+`with_concurrency`, and `run`. `build` returns the registry plus
+context without driving the loops. An extra registration over an
+already-owned task name — OSS or an earlier extra — fails the build
+instead of silently replacing the handler.
+
+Both builders run the queue-schema DDL on an optional schema-owner
+pool (`with_queue_schema_owner`, PIDASHCONV-1558): split-role cloud
+deploys pass the migrator's pool — the app role is DML-only and
+Postgres checks `CREATE` on the schema even for
+`CREATE TABLE IF NOT EXISTS`. Unset, both run on the app pool exactly
+as before (this closes the OVL-03 known gap the overlay port waited
+on; no `pidash-sdk` surface change — the three hooks add methods, no
+new public item types).
 
 Both builders re-export through `pidash-sdk` as `startup` (OVL-02).
-Known gap for the overlay port (OVL-09): the cloud deploy splits the
-queue-schema role (`MIGRATOR_DATABASE_URL`) while the builders run
-`ensure_schema` on the app pool; the port carries its pre-step or files
-for a hook.
 
 ## Domain write services (ORM-02)
 

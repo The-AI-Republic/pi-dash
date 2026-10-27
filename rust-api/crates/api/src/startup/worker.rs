@@ -32,9 +32,10 @@ use pidash_jobs::{
 };
 use pidash_services::extensions::AssistantModelSeam;
 
-use super::{seed_data_dir, settings_from_env, shutdown_signal};
+use super::{queue_schema_pool, seed_data_dir, settings_from_env, shutdown_signal};
 use crate::assistant::model_seam::CeAssistantSeam;
 use crate::turn::live::LiveTurnSeam;
+use crate::turn::tools_local_store::RedisClient;
 
 /// One deferred extra registration, run in call order after the OSS and
 /// turn registrations. Receives the registry plus the built worker
@@ -51,6 +52,7 @@ pub struct BuiltWorker<S = LiveTurnSeam> {
     ctx: OssWorkerCtx,
     schedule: Vec<BeatEntry>,
     concurrency: u32,
+    turn_soft_limit: i64,
 }
 
 impl<S> std::fmt::Debug for BuiltWorker<S> {
@@ -85,6 +87,15 @@ impl<S> BuiltWorker<S> {
     pub fn schedule(&self) -> &[BeatEntry] {
         &self.schedule
     }
+
+    /// The configured `assistant.run_turn` soft limit in seconds: the
+    /// final `settings.assistant.turn_soft_limit` (after
+    /// [`with_settings`](WorkerBuilder::with_settings)) the turn
+    /// handler registered with — Celery's `soft_time_limit`
+    /// (PIDASHCONV-1458). (PIDASHCONV-1558.)
+    pub fn turn_soft_limit(&self) -> i64 {
+        self.turn_soft_limit
+    }
 }
 
 /// Owns the `worker` startup sequence; extensions plug in through the
@@ -99,11 +110,14 @@ pub struct WorkerBuilder<S = LiveTurnSeam> {
     mongo: Option<pidash_db::tasks_cleanup::cleanup_queries::MongoSink>,
     seed_dir: PathBuf,
     assistant_seam: Arc<dyn AssistantModelSeam>,
+    assistant_seam_is_default: bool,
     turn_seam: Arc<S>,
+    turn_seam_is_default: bool,
     turn_soft_limit: i64,
     concurrency: u32,
     extras: Vec<ExtraReg>,
     extra_schedule: Vec<BeatEntry>,
+    queue_schema_owner: Option<sqlx::PgPool>,
 }
 
 impl<S> std::fmt::Debug for WorkerBuilder<S> {
@@ -141,25 +155,13 @@ impl WorkerBuilder<LiveTurnSeam> {
         // installs its overlay implementation here instead.
         let assistant_seam = Arc::new(CeAssistantSeam::new(Arc::new(settings.clone())));
         // The live assistant turn seam (PIDASHCONV-863): the multiplexed Redis
-        // client for the cancel key and the SSE publishes (`None` when
-        // `REDIS_URL` is unset, exactly like Django's swallowed
-        // `redis_instance()`), the worker pool, and settings. Construction does
-        // no I/O.
-        let turn_redis = match settings.redis.url.as_deref().filter(|url| !url.is_empty()) {
-            Some(url) => match pidash_db::redis::open_client(url) {
-                Ok(client) => Some(Arc::new(client)),
-                Err(error) => {
-                    tracing::warn!(%error, "assistant: REDIS_URL unparsable; cancel key disabled");
-                    None
-                }
-            },
-            None => None,
-        };
+        // client for the cancel key and the SSE publishes, the worker
+        // pool, and settings. Construction does no I/O.
         let turn_seam = Arc::new(
             LiveTurnSeam::new(
                 pools.primary().clone(),
                 Arc::new(settings.clone()),
-                turn_redis,
+                turn_redis_client(&settings),
             )
             .map_err(|error| format!("assistant turn seam: {error}"))?,
         );
@@ -172,11 +174,14 @@ impl WorkerBuilder<LiveTurnSeam> {
             mongo,
             seed_dir: seed_data_dir(),
             assistant_seam,
+            assistant_seam_is_default: true,
             turn_seam,
+            turn_seam_is_default: true,
             turn_soft_limit,
             concurrency: 4,
             extras: Vec::new(),
             extra_schedule: Vec::new(),
+            queue_schema_owner: None,
         })
     }
 
@@ -199,12 +204,50 @@ impl WorkerBuilder<LiveTurnSeam> {
             mongo: None,
             seed_dir: std::env::temp_dir(),
             assistant_seam: Arc::new(CeAssistantSeam::new(Arc::new(settings))),
+            assistant_seam_is_default: true,
             turn_seam,
+            turn_seam_is_default: true,
             turn_soft_limit,
             concurrency: 4,
             extras: Vec::new(),
             extra_schedule: Vec::new(),
+            queue_schema_owner: None,
         })
+    }
+
+    /// Tweak the resolved settings before the worker is built, mirroring
+    /// [`ServeBuilder::with_settings`](super::serve::ServeBuilder::with_settings).
+    /// The final settings feed `ctx.settings` plus every settings-derived
+    /// capture: the turn soft limit is re-captured, and the assistant and
+    /// turn seams are rebuilt from the mutated settings while still the
+    /// defaults — both seams consult settings at runtime (the turn seam
+    /// reads `assistant.block_private_urls`, one of the overlay's own
+    /// mutations), so leaving the `from_env` captures in place would
+    /// orphan the tweak. (PIDASHCONV-1558.)
+    ///
+    /// Returns `Result` (unlike serve's infallible setter) because the
+    /// default turn-seam rebuild can fail. An explicitly installed seam
+    /// is never rebuilt here, whichever order the calls run in. Call
+    /// before [`with_turn_seam`](WorkerBuilder::with_turn_seam): a
+    /// prebuilt seam is the caller's own construction from the final
+    /// settings, so this setter only exists on the default-seam builder.
+    pub fn with_settings(mut self, f: impl FnOnce(&mut Settings)) -> Result<Self, String> {
+        f(&mut self.settings);
+        self.turn_soft_limit = self.settings.assistant.turn_soft_limit;
+        if self.assistant_seam_is_default {
+            self.assistant_seam = Arc::new(CeAssistantSeam::new(Arc::new(self.settings.clone())));
+        }
+        if self.turn_seam_is_default {
+            self.turn_seam = Arc::new(
+                LiveTurnSeam::new(
+                    self.pools.primary().clone(),
+                    Arc::new(self.settings.clone()),
+                    turn_redis_client(&self.settings),
+                )
+                .map_err(|error| format!("assistant turn seam: {error}"))?,
+            );
+        }
+        Ok(self)
     }
 }
 
@@ -213,15 +256,22 @@ impl<S: TurnSeam + 'static> WorkerBuilder<S> {
     /// runs-creation gates consult (tick, scheduler, handoff executor).
     /// CE default: [`CeAssistantSeam`], the same default `serve`
     /// installs, so both sides gate identically (PIDASHCONV-1054).
+    /// The installed seam is never rebuilt by
+    /// [`with_settings`](WorkerBuilder::with_settings), whichever order
+    /// the calls run in.
     pub fn with_assistant_seam(mut self, seam: Arc<dyn AssistantModelSeam>) -> Self {
         self.assistant_seam = seam;
+        self.assistant_seam_is_default = false;
         self
     }
 
     /// Replace the turn seam driving `assistant.run_turn` with a
     /// prebuilt one. The default is the live OSS seam, built from the
     /// pools, settings and Redis client in
-    /// [`WorkerBuilder::from_env`].
+    /// [`WorkerBuilder::from_env`]. Build the prebuilt seam from the
+    /// final settings (call
+    /// [`with_settings`](WorkerBuilder::with_settings) first): it is
+    /// installed as-is and never rebuilt.
     pub fn with_turn_seam<T: TurnSeam + 'static>(self, seam: Arc<T>) -> WorkerBuilder<T> {
         let Self {
             settings,
@@ -229,11 +279,14 @@ impl<S: TurnSeam + 'static> WorkerBuilder<S> {
             mongo,
             seed_dir,
             assistant_seam,
+            assistant_seam_is_default,
             turn_seam: _,
+            turn_seam_is_default: _,
             turn_soft_limit,
             concurrency,
             extras,
             extra_schedule,
+            queue_schema_owner,
         } = self;
         WorkerBuilder {
             settings,
@@ -241,11 +294,14 @@ impl<S: TurnSeam + 'static> WorkerBuilder<S> {
             mongo,
             seed_dir,
             assistant_seam,
+            assistant_seam_is_default,
             turn_seam: seam,
+            turn_seam_is_default: false,
             turn_soft_limit,
             concurrency,
             extras,
             extra_schedule,
+            queue_schema_owner,
         }
     }
 
@@ -253,6 +309,17 @@ impl<S: TurnSeam + 'static> WorkerBuilder<S> {
     /// flag; default 4, clamped to at least 1 like the CLI path).
     pub fn with_concurrency(mut self, concurrency: u32) -> Self {
         self.concurrency = concurrency;
+        self
+    }
+
+    /// Run the queue-schema DDL in [`WorkerBuilder::run`] on `pool`
+    /// instead of the app pool. Split-role deploys pass the schema
+    /// owner's pool (the migrator role; the app role is DML-only and
+    /// Postgres checks `CREATE` on the schema even for
+    /// `CREATE TABLE IF NOT EXISTS`). Unset, `run` ensures the schema
+    /// on primary, exactly as before. (PIDASHCONV-1558.)
+    pub fn with_queue_schema_owner(mut self, pool: sqlx::PgPool) -> Self {
+        self.queue_schema_owner = Some(pool);
         self
     }
 
@@ -285,11 +352,14 @@ impl<S: TurnSeam + 'static> WorkerBuilder<S> {
             mongo,
             seed_dir,
             assistant_seam,
+            assistant_seam_is_default: _,
             turn_seam,
+            turn_seam_is_default: _,
             turn_soft_limit,
             concurrency,
             extras,
             extra_schedule,
+            queue_schema_owner: _,
         } = self;
         // Task handlers register through the shared OSS composition
         // (`pidash_jobs::register_oss_handlers`, PIDASHCONV-918).
@@ -342,6 +412,7 @@ impl<S: TurnSeam + 'static> WorkerBuilder<S> {
             ctx,
             schedule,
             concurrency,
+            turn_soft_limit,
         })
     }
 
@@ -349,7 +420,11 @@ impl<S: TurnSeam + 'static> WorkerBuilder<S> {
     /// plus scheduler loops until SIGINT/SIGTERM, then drain both loops
     /// inside the 30s grace period — the `worker` sequence.
     pub async fn run(self) -> Result<(), Box<dyn std::error::Error>> {
-        pidash_jobs::queue::ensure_schema(self.pools.primary()).await?;
+        pidash_jobs::queue::ensure_schema(queue_schema_pool(
+            self.queue_schema_owner.as_ref(),
+            self.pools.primary(),
+        ))
+        .await?;
         let built = self.build()?;
         let worker_config = WorkerConfig {
             concurrency: built.concurrency.max(1) as usize,
@@ -397,6 +472,26 @@ impl<S: TurnSeam + 'static> WorkerBuilder<S> {
             }
         }
         Ok(())
+    }
+}
+
+/// The turn seam's multiplexed Redis client for the cancel key and the
+/// SSE publishes (`None` when `REDIS_URL` is unset, exactly like
+/// Django's swallowed `redis_instance()`). Construction parses only,
+/// never dials; an unparsable URL warns and disables the cancel key.
+/// Shared by [`WorkerBuilder::from_env`] and
+/// [`WorkerBuilder::with_settings`](WorkerBuilder::with_settings) so a
+/// settings tweak rebuilds the client from the final URL.
+fn turn_redis_client(settings: &Settings) -> Option<RedisClient> {
+    match settings.redis.url.as_deref().filter(|url| !url.is_empty()) {
+        Some(url) => match pidash_db::redis::open_client(url) {
+            Ok(client) => Some(Arc::new(client)),
+            Err(error) => {
+                tracing::warn!(%error, "assistant: REDIS_URL unparsable; cancel key disabled");
+                None
+            }
+        },
+        None => None,
     }
 }
 
@@ -699,5 +794,85 @@ mod tests {
         assert_eq!(built.schedule().len(), defaults.len() + 1);
         assert_eq!(built.schedule()[..defaults.len()], defaults[..]);
         assert!(built.schedule().contains(&extra));
+    }
+
+    /// `with_settings` feeds the final settings into `ctx.settings` and
+    /// re-captures the turn soft limit: a marker value lands in both.
+    #[tokio::test]
+    async fn with_settings_feeds_ctx_and_turn_limit() {
+        let built = WorkerBuilder::for_tests(lazy_pools(), Settings::test_defaults())
+            .expect("test builder builds")
+            .with_settings(|settings| {
+                settings.debug = true;
+                settings.assistant.turn_soft_limit = 4242;
+            })
+            .expect("settings apply")
+            .build()
+            .expect("build registers");
+        assert!(built.context().settings.debug);
+        assert_eq!(built.context().settings.assistant.turn_soft_limit, 4242);
+        assert_eq!(built.turn_soft_limit(), 4242);
+    }
+
+    /// Without `with_settings` the turn limit is the stock capture from
+    /// the resolved settings — the OSS default path is untouched.
+    #[tokio::test]
+    async fn turn_limit_defaults_to_stock_capture() {
+        let built = WorkerBuilder::for_tests(lazy_pools(), Settings::test_defaults())
+            .expect("test builder builds")
+            .build()
+            .expect("build registers");
+        assert_eq!(
+            built.turn_soft_limit(),
+            Settings::test_defaults().assistant.turn_soft_limit
+        );
+    }
+
+    /// `with_settings` never rebuilds an explicitly installed assistant
+    /// seam: the custom instance survives, while the settings tweak
+    /// still lands in `ctx.settings`.
+    #[tokio::test]
+    async fn with_settings_preserves_explicit_assistant_seam() {
+        let assistant = Arc::new(MarkerAssistantSeam);
+        let built = WorkerBuilder::for_tests(lazy_pools(), Settings::test_defaults())
+            .expect("test builder builds")
+            .with_assistant_seam(assistant.clone())
+            .with_settings(|settings| {
+                settings.debug = true;
+            })
+            .expect("settings apply")
+            .build()
+            .expect("build registers");
+        assert!(Arc::ptr_eq(
+            &built.context().assistant_seam,
+            &(assistant as Arc<dyn AssistantModelSeam>)
+        ));
+        assert!(built.context().settings.debug);
+    }
+
+    /// A prebuilt turn seam installed before `with_settings` survives
+    /// it: only the still-default seam is rebuilt.
+    #[tokio::test]
+    async fn with_settings_preserves_prebuilt_turn_seam() {
+        let pools = lazy_pools();
+        let custom = Arc::new(
+            LiveTurnSeam::new(
+                pools.primary().clone(),
+                Arc::new(Settings::test_defaults()),
+                None,
+            )
+            .expect("prebuilt seam"),
+        );
+        let built = WorkerBuilder::for_tests(pools, Settings::test_defaults())
+            .expect("test builder builds")
+            .with_turn_seam(custom.clone())
+            .with_settings(|settings| {
+                settings.debug = true;
+            })
+            .expect("settings apply")
+            .build()
+            .expect("build registers");
+        assert!(Arc::ptr_eq(built.turn_seam(), &custom));
+        assert!(built.context().settings.debug);
     }
 }

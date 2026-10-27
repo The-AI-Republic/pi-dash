@@ -50,6 +50,20 @@ fn profile_from_settings_module() -> Profile {
     }
 }
 
+/// The pool the queue-schema DDL runs on: the schema-owner pool when
+/// an extension set one (PIDASHCONV-1558:
+/// [`ServeBuilder::with_queue_schema_owner`](serve::ServeBuilder::with_queue_schema_owner),
+/// [`WorkerBuilder::with_queue_schema_owner`](worker::WorkerBuilder::with_queue_schema_owner)),
+/// else the app pool. Split-role deploys pass the migrator's pool —
+/// the app role is DML-only and Postgres checks `CREATE` on the
+/// schema even for `CREATE TABLE IF NOT EXISTS`.
+fn queue_schema_pool<'a>(
+    owner: Option<&'a sqlx::PgPool>,
+    primary: &'a sqlx::PgPool,
+) -> &'a sqlx::PgPool {
+    owner.unwrap_or(primary)
+}
+
 /// Connect the pools `serve` attaches to its state. A missing or
 /// unreachable database is a boot error, never a per-request 500: without
 /// pools every DB-backed handler answers the generic 500 (PIDASHCONV-126),
@@ -127,5 +141,21 @@ mod tests {
         if let Some(value) = saved {
             std::env::set_var("DJANGO_SETTINGS_MODULE", value);
         }
+    }
+
+    /// The queue DDL runs on the schema-owner pool when set, else on
+    /// primary. Hermetic: lazy pools never dial; selection is pointer
+    /// identity. (PIDASHCONV-1558.)
+    #[tokio::test]
+    async fn queue_schema_pool_prefers_owner() {
+        let owner =
+            sqlx::PgPool::connect_lazy("postgres://localhost:1/owner").expect("lazy pool builds");
+        let primary =
+            sqlx::PgPool::connect_lazy("postgres://localhost:1/primary").expect("lazy pool builds");
+        assert!(std::ptr::eq(
+            queue_schema_pool(Some(&owner), &primary),
+            &owner
+        ));
+        assert!(std::ptr::eq(queue_schema_pool(None, &primary), &primary));
     }
 }
