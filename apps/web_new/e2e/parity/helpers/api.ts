@@ -5608,10 +5608,14 @@ export async function serverMe(
 /**
  * Patch an issue through the public REST API (state moves, priority changes).
  *
- * WARNING (NEWFRONT-160): patching state_id to In Progress, In Review, or
- * In Test answers 204 but silently keeps the default state instead — the
- * same happens through UI drags. Fixtures must only target verified
- * states (Backlog, Todo, Done, and created states); Cancelled is untested.
+ * WARNING (NEWFRONT-160): when the moving user has no eligible runner,
+ * patching state_id to In Progress, In Review, or In Test answers 204 but
+ * the server applies the platform's no-eligible-runner bounce back to the
+ * default state instead (issue_runner/design.md §6.6) — the same happens
+ * through UI drags. Whether an explicit human move should skip the bounce
+ * is an open platform decision (NEWFRONT-248). Fixtures must only target
+ * verified states (Backlog, Todo, Done, and created states); Cancelled is
+ * untested.
  */
 export async function serverPatchIssue(
   workspaceSlug: string,

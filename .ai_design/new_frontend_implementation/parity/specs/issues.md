@@ -349,9 +349,12 @@ list fields gain the destination and lose the source (the empty column
 only removes). Cycle and module membership go through their dedicated
 add/remove calls rather than the plain issue update. Dropping where
 the grouping forbids it, or without permission, raises a warning toast
-instead of moving. The oracle pins NEWFRONT-160 (moves into certain
-states silently landing in Backlog though the card animates as moved);
-intended, the issue lands in the requested state. Across swimlanes
+instead of moving. The oracle pins NEWFRONT-160 (when the moving user
+has no eligible runner, moves into In Progress/In Review/In Test bounce
+to Backlog though the card animates as moved — the platform's
+no-eligible-runner bounce, not a state-lookup bug); whether an explicit
+human move should skip the bounce is an open platform decision
+(NEWFRONT-248). Across swimlanes
 (ISS-039) both the group and sub-group values update, provided both
 dimensions are draggable; otherwise the move is refused. The oracle
 pins NEWFRONT-159 (sub-grouping by target date rendering a blank
