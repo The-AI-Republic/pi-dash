@@ -27,6 +27,7 @@ import {
   hasEditMembership,
   isPatchEmpty,
   withStoredBranch,
+  withStoredBranchBaseline,
   type EditableRow,
 } from "./editForm.js";
 
@@ -198,6 +199,21 @@ describe("buildEditPayload", () => {
     const baseline = { ...baselineFor(form), form: { ...baselineFor(form).form, gitWorkBranch: "old/branch" } };
     form.gitWorkBranch = "   ";
     expect(buildEditPayload(form, baseline)).toEqual({ git_work_branch: "" });
+  });
+
+  it("adopts the stored branch as the baseline a save diffs against (ISS-128)", () => {
+    const form = formFromRow(row(), PROJECT);
+    const baseline = baselineFor(form);
+    form.gitWorkBranch = "mine/typed";
+    expect(buildEditPayload(form, withStoredBranchBaseline(baseline, "team/stored")!)).toEqual({
+      git_work_branch: "mine/typed",
+    });
+    const untouched = formFromRow({ ...row(), git_work_branch: "team/stored" }, PROJECT);
+    expect(buildEditPayload(untouched, withStoredBranchBaseline(baseline, "team/stored")!)).toEqual({});
+  });
+
+  it("leaves a missing baseline missing", () => {
+    expect(withStoredBranchBaseline(null, "team/stored")).toBeNull();
   });
 
   it("keeps an untouched empty branch out of the patch", () => {

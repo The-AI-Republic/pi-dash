@@ -214,6 +214,16 @@ export function withStoredBranch(form: CreateFormState, storedBranch: string | u
 }
 
 /**
+ * Make the detail read's stored branch the baseline a save diffs against
+ * (ISS-128), so a typed branch counts as a change and an untouched one
+ * does not. A form opened without a baseline stays without one.
+ */
+export function withStoredBranchBaseline(baseline: EditBaseline | null, storedBranch: string): EditBaseline | null {
+  if (baseline === null) return baseline;
+  return { ...baseline, form: { ...baseline.form, gitWorkBranch: storedBranch } };
+}
+
+/**
  * The PATCH an edit sends (ISS-126): only fields whose value changed.
  * Identity and project never ride along — the caller already knows the
  * address — and the description travels whenever its content changed,

@@ -96,6 +96,7 @@ import {
   formFromSnapshot,
   withStoredDescription,
   withStoredBranch,
+  withStoredBranchBaseline,
   type EditBaseline,
 } from "../create/editForm.js";
 import { ModalDescription } from "../create/ModalDescription.js";
@@ -694,9 +695,7 @@ export function WorkItemCreateDialog({
       setForm((current) => withStoredBranch(current, storedBranch));
       setGitOpen(storedBranch.trim() !== "");
     }
-    setBaseline((current) =>
-      current === null ? current : { ...current, form: { ...current.form, gitWorkBranch: storedBranch } }
-    );
+    setBaseline((current) => withStoredBranchBaseline(current, storedBranch));
   }, [storedBranch, open, edit?.kind, form.gitWorkBranch]);
 
   // The title owns initial focus. Base UI moves focus into the dialog on
