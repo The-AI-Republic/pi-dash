@@ -329,7 +329,9 @@ test(
     expect(await driver.layoutsEmptyActions()).toEqual([{ label: "Set automation", disabled: false }]);
 
     await driver.layoutsEmptyChoose("Set automation");
-    await expect.poll(async () => driver.layoutsCurrentUrl(), { timeout: 300_000 }).toContain("/automations/");
+    // The rebuild's route omits the trailing slash; the pin keeps the
+    // automations destination either way (gate fix, both legs).
+    await expect.poll(async () => driver.layoutsCurrentUrl(), { timeout: 300_000 }).toContain("/automations");
 
     // Filtered-empty needs a non-empty base: archive one issue first.
     const states = await serverListStates(seed.workspaceSlug, seed.projectId, session);

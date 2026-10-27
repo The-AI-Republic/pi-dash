@@ -78,9 +78,19 @@ test(
           mime: "text/plain",
           bytes: Buffer.from("nope"),
         });
-        await expect.poll(() => driver.lastToast(), { timeout: 30_000 }).toMatch(/file could not be attached/i);
-        const assets = await issueAttachments(seed.workspaceSlug, seed.projectId, issue.id, session);
-        expect(assets.map((row) => String(row["name"] ?? ""))).not.toContain(`oracle-nope-${ts}.txt`);
+        // The rebuild applies no file-type restriction (area spec §15: the
+        // old stack's signature-mismatch rejection has no counterpart), so
+        // the new leg proves the .txt uploads like any other file while the
+        // oracle keeps pinning its rejection (spec §10 gate alignment).
+        if (driver.target === "web_new") {
+          await expect.poll(() => driver.lastToast(), { timeout: 60_000 }).toContain("Attachment uploaded");
+          const assets = await issueAttachments(seed.workspaceSlug, seed.projectId, issue.id, session);
+          expect(assets.map((row) => String(row["name"] ?? ""))).toContain(`oracle-nope-${ts}.txt`);
+        } else {
+          await expect.poll(() => driver.lastToast(), { timeout: 30_000 }).toMatch(/file could not be attached/i);
+          const assets = await issueAttachments(seed.workspaceSlug, seed.projectId, issue.id, session);
+          expect(assets.map((row) => String(row["name"] ?? ""))).not.toContain(`oracle-nope-${ts}.txt`);
+        }
       });
     } finally {
       await dropIssue(seed, session, issue.id);
