@@ -215,7 +215,7 @@ describe("issue patch updaters", () => {
     });
   });
 
-  it("leaves write-only and execution-target fields out of the detail paint", () => {
+  it("paints the branch but leaves execution-target fields out of the detail paint", () => {
     const painted = applyIssuePatchDetail(issueRow({ assigned_pod_id: null, agent_executor: "local_runner" }), {
       git_work_branch: "pi-dash/wip",
       assigned_pod_id: "923e4567-e89b-12d3-a456-426614174009",
@@ -225,7 +225,7 @@ describe("issue patch updaters", () => {
     expect(painted?.agent_executor).toBe("local_runner");
     expect(painted?.assigned_pod_id).toBeNull();
     expect(painted?.assigned_runner_id).toBeUndefined();
-    expect(painted).not.toHaveProperty("git_work_branch");
+    expect(painted?.git_work_branch).toBe("pi-dash/wip");
   });
 
   it("paints property fields on the matching list row", () => {

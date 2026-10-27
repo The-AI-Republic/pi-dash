@@ -113,8 +113,7 @@ describe.skipIf(!contractEnabled)("full issue create/update contract", () => {
     expect(detail.target_date).toBe("2026-01-20");
     expect(detail.parent_id).toBe(parentId);
     expect(detail.description_html).toContain("Core probe body");
-    // git_work_branch is write-only (NEWFRONT-140): the accepted write
-    // above is the whole proof — no read returns it.
+    expect(detail.git_work_branch).toBe("contract/core-probe_1.2");
 
     await updateIssue(client, CONTRACT_WORKSPACE, projectId, created.id, {
       name: `${CORE_PROBE} renamed`,
@@ -140,6 +139,7 @@ describe.skipIf(!contractEnabled)("full issue create/update contract", () => {
     expect(patched.parent_id).toBeNull();
     expect(patched.sort_order).toBe(4242.5);
     expect(patched.description_html).toContain("Core probe body edited");
+    expect(patched.git_work_branch).toBe("contract/core-probe_1.3");
 
     await deleteIssue(client, CONTRACT_WORKSPACE, projectId, created.id);
     await expect(getIssue(client, CONTRACT_WORKSPACE, projectId, created.id)).rejects.toMatchObject({

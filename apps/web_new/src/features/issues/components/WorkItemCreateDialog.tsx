@@ -95,6 +95,8 @@ import {
   editMembership,
   formFromSnapshot,
   withStoredDescription,
+  withStoredBranch,
+  withStoredBranchBaseline,
   type EditBaseline,
 } from "../create/editForm.js";
 import { ModalDescription } from "../create/ModalDescription.js";
@@ -546,6 +548,9 @@ export function WorkItemCreateDialog({
   // The description the edit opened with, so a late detail read can tell
   // an untouched editor from one the user already typed into.
   const openedDescription = React.useRef<string | null>(null);
+  // The branch the edit opened with, for the same late-detail comparison.
+  const openedBranch = React.useRef("");
+  const adoptedBranch = React.useRef<string | null>(null);
   // The stored description already folded into the form; the detail read
   // may answer more than once (a refetch), and only the first fold needs
   // to rebuild the editor.
@@ -620,6 +625,8 @@ export function WorkItemCreateDialog({
     if (seededParent !== null) next = { ...next, parentId: seededParent.id };
     routeMembership.current = membershipForForm(next);
     openedDescription.current = starting?.descriptionHtml ?? null;
+    openedBranch.current = starting?.gitWorkBranch ?? "";
+    adoptedBranch.current = starting?.gitWorkBranch ?? "";
     setForm(next);
     // A draft without a project still has a baseline: Save must be able
     // to store a project picked later (or the other changed fields), and
@@ -673,6 +680,23 @@ export function WorkItemCreateDialog({
       current === null ? current : { ...current, form: { ...current.form, descriptionHtml: normalized } }
     );
   }, [storedDescription, open, edit?.kind, form.descriptionHtml]);
+
+  // The detail read also carries the pinned branch. Adopt it only while
+  // the field is still what the edit opened with; a branch the user is
+  // typing stays theirs.
+  const storedBranch = edit?.kind === "issue" ? detailEdit.data?.git_work_branch : undefined;
+  React.useEffect(() => {
+    if (storedBranch === undefined || !open || edit?.kind !== "issue") return;
+    if (adoptedBranch.current === storedBranch) return;
+    const untouched = form.gitWorkBranch === openedBranch.current;
+    openedBranch.current = storedBranch;
+    adoptedBranch.current = storedBranch;
+    if (untouched) {
+      setForm((current) => withStoredBranch(current, storedBranch));
+      setGitOpen(storedBranch.trim() !== "");
+    }
+    setBaseline((current) => withStoredBranchBaseline(current, storedBranch));
+  }, [storedBranch, open, edit?.kind, form.gitWorkBranch]);
 
   // The title owns initial focus. Base UI moves focus into the dialog on
   // a later task (its close button claims it first), so claim the field

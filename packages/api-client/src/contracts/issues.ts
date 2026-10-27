@@ -101,6 +101,8 @@ export type IssueRelationsSummary = z.infer<typeof IssueRelationsSummary>;
 export const Issue = z.object({
   ...issueCoreFields,
   complexity_score: z.number(),
+  /** Branch pinned for this item; absent only from older server builds. */
+  git_work_branch: z.optional(z.string()),
   assigned_pod_id: z.optional(nullableUuid()),
   assigned_runner_detail: z.optional(z.nullable(AssignedRunnerDetail)),
   agent_executor: z.nullable(z.string()),

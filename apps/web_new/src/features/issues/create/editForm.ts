@@ -28,6 +28,8 @@ export interface EditableRow {
   module_ids?: string[] | undefined;
   estimate_point?: string | number | null | undefined;
   parent_id: string | null;
+  /** The branch read from the detail endpoint, when this row is an issue. */
+  git_work_branch?: string | null | undefined;
 }
 
 /** What the modal opened with, kept for diffing on submit. */
@@ -91,7 +93,7 @@ export function formFromRow(row: EditableRow, projectId: string | null): CreateF
     estimatePoint: estimateOf(row.estimate_point),
     execution: null,
     parentId: row.parent_id,
-    gitWorkBranch: "",
+    gitWorkBranch: row.git_work_branch ?? "",
   };
 }
 
@@ -205,6 +207,22 @@ export function withStoredDescription(form: CreateFormState, storedHtml: string 
   return { ...form, descriptionHtml: storedHtml };
 }
 
+/** Fold the detail read's stored branch into an edit form (ISS-128). */
+export function withStoredBranch(form: CreateFormState, storedBranch: string | undefined): CreateFormState {
+  if (storedBranch === undefined) return form;
+  return { ...form, gitWorkBranch: storedBranch };
+}
+
+/**
+ * Make the detail read's stored branch the baseline a save diffs against
+ * (ISS-128), so a typed branch counts as a change and an untouched one
+ * does not. A form opened without a baseline stays without one.
+ */
+export function withStoredBranchBaseline(baseline: EditBaseline | null, storedBranch: string): EditBaseline | null {
+  if (baseline === null) return baseline;
+  return { ...baseline, form: { ...baseline.form, gitWorkBranch: storedBranch } };
+}
+
 /**
  * The PATCH an edit sends (ISS-126): only fields whose value changed.
  * Identity and project never ride along — the caller already knows the
@@ -229,9 +247,8 @@ export function buildEditPayload(form: CreateFormState, baseline: EditBaseline):
   if (form.targetDate !== before.targetDate) patch.target_date = form.targetDate;
   if (form.estimatePoint !== before.estimatePoint) patch.estimate_point = form.estimatePoint;
   if (form.parentId !== before.parentId) patch.parent_id = form.parentId;
-  // The branch is write-only (no read returns it), so the form holds the
-  // only copy; an emptied field is a real change and must reach the
-  // server rather than silently keeping the old branch (ISS-128).
+  // An emptied field is a real change and must reach the server rather
+  // than silently keeping the stored branch (ISS-128).
   const branch = form.gitWorkBranch.trim();
   if (branch !== before.gitWorkBranch) patch.git_work_branch = branch;
   // The execution target is written through the same patch: the pod
@@ -290,6 +307,7 @@ function parseSnapshot(snapshot: unknown): EditableRow | null {
         ? raw["estimate_point"]
         : null,
     parent_id: typeof raw["parent_id"] === "string" ? raw["parent_id"] : null,
+    git_work_branch: typeof raw["git_work_branch"] === "string" ? raw["git_work_branch"] : undefined,
   };
 }
 
