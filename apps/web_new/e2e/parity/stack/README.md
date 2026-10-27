@@ -156,10 +156,11 @@ Rules:
 ## Oracle build: dev or production
 
 By default the oracle is the old app as a production build (`oracle-prod`:
-built by `Dockerfile.oracle-prod`, static files behind nginx). It uses a few
-MB and almost no CPU, and Docker reuses its layers until the old app's own
-sources change, so only the first bring-up pays for the build. The suite was
-confirmed green against it (NEWFRONT-246).
+built by `Dockerfile.oracle-prod`, static files behind nginx). It is also
+the memory-safe choice: it uses a few MB and almost no CPU, and Docker
+reuses its layers until the old app's own sources change, so only the
+first bring-up pays for the build. The suite was confirmed green against
+it (NEWFRONT-246).
 
 ```sh
 PARITY_ORACLE_MODE=dev apps/web_new/e2e/parity/stack/parity-up.sh
@@ -170,6 +171,14 @@ several hundred MB of memory and most of the stack's CPU while a suite runs.
 Use it when triaging a failure that only reproduces there — the dev server
 runs React in StrictMode and without minification, and a few recorded
 old-app bugs exist only in that mode.
+
+Keep the production oracle as the default. On a small host (the shared
+runner's container runtime is capped at roughly 3.8 GB) the dev server's
+one-time dependency-bundling burst can exhaust memory and be killed before
+it serves a single request, which then looks like a scenario failure but is
+not (NEWFRONT-133). `check-oracle-build.mjs` fails the build if a bare
+bring-up stops selecting `oracle-prod`, so a silent flip back to the dev
+server cannot land unnoticed.
 
 One switch selects both frontends: the admin oracle (`oracle-admin-prod`
 by default, `oracle-admin` under `PARITY_ORACLE_MODE=dev`) always matches

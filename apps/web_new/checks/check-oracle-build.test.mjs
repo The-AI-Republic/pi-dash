@@ -1,15 +1,18 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Tests for the oracle build-cost check (NEWFRONT-134). Hermetic: the file
-// reader is injected from in-memory fixtures, so no test touches the real
-// tree (the check itself runs against the real tree in CI).
+// Tests for the oracle build-cost check (NEWFRONT-134) and its oracle
+// capacity default guard (NEWFRONT-133). Hermetic: the file reader is
+// injected from in-memory fixtures, so no test touches the real tree (the
+// check itself runs against the real tree in CI).
+import { execFileSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import { runOracleBuildCheck } from "./check-oracle-build.mjs";
 
 const DOCKERFILE = "apps/web_new/e2e/parity/stack/Dockerfile.oracle";
 const DOCKERFILE_PROD = "apps/web_new/e2e/parity/stack/Dockerfile.oracle-prod";
 const BRING_UP = "apps/web_new/e2e/parity/stack/parity-up.sh";
+const README = "apps/web_new/e2e/parity/stack/README.md";
 
 // Built at runtime, like the check does, so this file never literally
 // contains the banned line.
@@ -35,7 +38,27 @@ const goodBringUp = [
   'if [ "${1:-}" = "--rebuild" ]; then',
   "  PARITY_REBUILD=1",
   "fi",
+  "export ORACLE_SERVICE",
+  'ORACLE_SERVICE="oracle-prod"',
+  "export ORACLE_UPSTREAM",
+  'ORACLE_UPSTREAM="oracle-prod:3000"',
+  'if [ "${PARITY_ORACLE_MODE:-prod}" = "dev" ]; then',
+  '  ORACLE_SERVICE="oracle"',
+  '  ORACLE_UPSTREAM="oracle:3000"',
+  "fi",
+  "# Preflight: ownership and published ports.",
   'echo "[parity] warming the oracle (entry + project routes)"',
+  "",
+].join("\n");
+
+const goodReadme = [
+  "## Oracle build: dev or production",
+  "",
+  "By default the oracle is the old app as a production build.",
+  "",
+  "```sh",
+  "PARITY_ORACLE_MODE=dev apps/web_new/e2e/parity/stack/parity-up.sh",
+  "```",
   "",
 ].join("\n");
 
@@ -51,6 +74,7 @@ function goodTree() {
     [DOCKERFILE]: goodDockerfile,
     [DOCKERFILE_PROD]: goodProdDockerfile,
     [BRING_UP]: goodBringUp,
+    [README]: goodReadme,
   };
 }
 
@@ -113,9 +137,121 @@ describe("check-oracle-build", () => {
       [DOCKERFILE]: `FROM node:22-slim\n${blanket}\nRUN pnpm install --no-frozen-lockfile\n`,
       [DOCKERFILE_PROD]: `FROM node:22-slim\n${blanket}\n`,
       [BRING_UP]: "#!/usr/bin/env bash\necho hi\n",
+      [README]: "",
     });
-    expect(failures).toHaveLength(6);
+    expect(failures).toHaveLength(9);
     expect(failures.filter((f) => f.includes(DOCKERFILE_PROD))).toHaveLength(1);
-    expect(failures.filter((f) => f.includes(BRING_UP))).toHaveLength(2);
+    expect(failures.filter((f) => f.includes(BRING_UP))).toHaveLength(3);
+    expect(failures.filter((f) => f.includes(README))).toHaveLength(2);
+  });
+
+  describe("oracle capacity default (NEWFRONT-133)", () => {
+    it("flags a default flipped back to the dev server", () => {
+      const files = goodTree();
+      files[BRING_UP] = goodBringUp.replace("${PARITY_ORACLE_MODE:-prod}", "${PARITY_ORACLE_MODE:-dev}");
+      const failures = check(files);
+      expect(failures).toHaveLength(1);
+      expect(failures[0]).toContain("defaults to 'dev'");
+    });
+
+    it("flags an inverted assignment that moves the prod oracle into the dev branch", () => {
+      const files = goodTree();
+      files[BRING_UP] = [
+        "#!/usr/bin/env bash",
+        "# usage: parity-up.sh [--rebuild]",
+        'if [ "${1:-}" = "--rebuild" ]; then',
+        "  PARITY_REBUILD=1",
+        "fi",
+        "export ORACLE_SERVICE",
+        'ORACLE_SERVICE="oracle"',
+        'if [ "${PARITY_ORACLE_MODE:-prod}" = "dev" ]; then',
+        '  ORACLE_SERVICE="oracle-prod"',
+        "fi",
+        "# Preflight: ownership and published ports.",
+        'echo "[parity] warming the oracle (entry + project routes)"',
+        "",
+      ].join("\n");
+      const failures = check(files);
+      expect(failures.some((f) => f.includes("inverted"))).toBe(true);
+      expect(failures.some((f) => f.includes("must be assigned before the mode switch"))).toBe(true);
+    });
+
+    it("fails when the selection block is gone", () => {
+      const files = goodTree();
+      files[BRING_UP] = [
+        "#!/usr/bin/env bash",
+        "# usage: parity-up.sh [--rebuild]",
+        'if [ "${1:-}" = "--rebuild" ]; then',
+        "  PARITY_REBUILD=1",
+        "fi",
+        'echo "[parity] warming the oracle (entry + project routes)"',
+        "",
+      ].join("\n");
+      const failures = check(files);
+      expect(failures).toHaveLength(1);
+      expect(failures[0]).toContain("oracle selection block not found");
+    });
+
+    it("fails when the markers appear out of order", () => {
+      const files = goodTree();
+      files[BRING_UP] = `# Preflight: mentioned before the selection\n${goodBringUp}`;
+      const failures = check(files);
+      expect(failures).toHaveLength(1);
+      expect(failures[0]).toContain("oracle selection block not found");
+    });
+
+    it("fails when the dev opt-in disappears", () => {
+      const files = goodTree();
+      files[BRING_UP] = goodBringUp.replace(
+        'if [ "${PARITY_ORACLE_MODE:-prod}" = "dev" ]; then\n  ORACLE_SERVICE="oracle"\n  ORACLE_UPSTREAM="oracle:3000"\nfi\n',
+        ""
+      );
+      const failures = check(files);
+      expect(failures).toHaveLength(1);
+      expect(failures[0]).toContain("missing the dev opt-in guard");
+    });
+
+    it("names the wrong fallback when the opt-in survives with a different default", () => {
+      const files = goodTree();
+      files[BRING_UP] = goodBringUp.replace(
+        'if [ "${PARITY_ORACLE_MODE:-prod}" = "dev" ]; then',
+        'if [ "${PARITY_ORACLE_MODE:-local}" = "dev" ]; then'
+      );
+      const failures = check(files);
+      expect(failures).toHaveLength(1);
+      expect(failures[0]).toContain("defaults to 'local', not 'prod'");
+    });
+
+    it("requires the README to name the dev opt-in and the production default", () => {
+      const noOptIn = goodTree();
+      noOptIn[README] = "## Oracle build\n\nIt uses a few MB.\n";
+      const failures = check(noOptIn);
+      expect(failures).toHaveLength(2);
+      expect(failures.every((f) => f.includes(README))).toBe(true);
+    });
+
+    it("proves the documented bare default really selects the prod service", () => {
+      // Run the real selection block under bash with PARITY_ORACLE_MODE
+      // unset and set to dev. This is the behaviour the guard protects,
+      // proven rather than inferred from the file's text.
+      const script = [
+        "set -euo pipefail",
+        goodBringUp
+          .split("\n")
+          .filter((line) => !line.startsWith("#"))
+          .filter((line) => !line.startsWith("echo "))
+          .join("\n"),
+        'printf "%s\\n" "$ORACLE_SERVICE"',
+      ].join("\n");
+      const resolve = (mode) => {
+        const env = { ...process.env };
+        delete env.PARITY_ORACLE_MODE;
+        if (mode !== null) env.PARITY_ORACLE_MODE = mode;
+        return execFileSync("bash", ["-c", script], { env, encoding: "utf8" }).trim();
+      };
+      expect(resolve(null)).toBe("oracle-prod");
+      expect(resolve("prod")).toBe("oracle-prod");
+      expect(resolve("dev")).toBe("oracle");
+    });
   });
 });
