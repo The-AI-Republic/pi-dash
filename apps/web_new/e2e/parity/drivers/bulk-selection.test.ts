@@ -87,6 +87,9 @@ function pageOf(
     waitForTimeout: async (ms: number) => {
       state.timeouts.push(ms);
     },
+    // No armed leave guard in these scenarios; the armed path is pinned
+    // by the web_new selection tests.
+    evaluate: async () => false,
   } as unknown as Page;
   return { page, state };
 }

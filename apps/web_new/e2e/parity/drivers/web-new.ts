@@ -638,9 +638,6 @@ export class WebNewDriver implements ParityDriver {
   /** How long one body-paint poll waits before reading the column again. */
   private static readonly PAINT_STEP_MS = 250;
 
-  /** Markup hook shared by the row and group selection controls (ISS-108). */
-  private static readonly SELECTION_CONTROL_ID = "selection-checkbox";
-
   // --- Archives shell (NEWFRONT-698, ARCH-001..003). Tab strip and
   // --- navigation, addresses, titles, badge, back control, skeleton
   // --- slot, traffic spy and priming. Other slices call these
