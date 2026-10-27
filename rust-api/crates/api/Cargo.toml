@@ -47,7 +47,10 @@ serde = { version = "1", features = ["derive"] }
 # original text, so Python-int vs float discrimination and the exact decimal
 # display DRF uses both survive parsing (`Number::to_string` echoes input).
 serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# Startup builders (PIDASHCONV-1541): `net` binds the listener, `signal`
+# arms the SIGINT/SIGTERM shutdown, `sync` carries the worker watch
+# channel, `time` bounds the shutdown drain. Features only, no new crates.
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
 # DRF-compatible value rendering (F-07 serializer kernel): aware datetimes in
 # any IANA zone (TimezoneMixin activates the user's zone per request) and
 # Decimal-as-string (DRF COERCE_DECIMAL_TO_STRING).
@@ -108,6 +111,13 @@ tower = { version = "0.5", features = ["util"] }
 # body through a `Stream` adapter (`futures-core`; both already in the
 # lockfile via axum/reqwest, so no new downloads).
 futures-core = "0.3"
+# Assistant turn MCP client (moved from the binary, PIDASHCONV-1541):
+# incremental SSE reads (`StreamExt`, PIDASHCONV-1112) and output-schema
+# validation (`validator_for`, the mcp SDK's _validate_tool_result). Same
+# locked lines the binary built on (no lock churn beyond the edges); no
+# jsonschema default features (remote $refs fail closed, ring only).
+futures-util = { version = "0.3", default-features = false }
+jsonschema = { version = "0.59", default-features = false }
 tracing = "0.1"
 # GitHub App JWT (`build_app_jwt`, RS256): same 9.x line the auth and jobs
 # crates build on, so the lockfile gains no new downloads.

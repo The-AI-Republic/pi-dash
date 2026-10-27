@@ -276,6 +276,53 @@ after the OSS baseline; tables prefixed `private_`; see
 Django-owned or OSS `rust_*` tables — the same rule Django's own
 `pi_dash_cloud/*/migrations/` directories follow.
 
+### Startup builders (OVL-03)
+
+`pidash-api::startup` owns the serve and worker boot sequences, so the
+overlay composes them instead of re-doing each step by hand (the hand
+copies drifted three ways before OVL-03: a double-registered sweep, a
+`sleep` where OSS drains under `timeout`, and a differently-opened
+Redis). The OSS binary's `serve` and `worker` are thin callers of the
+same builders:
+
+```rust
+// serve: resolve, pool, schema, Redis, ORM, state, app, bind, graceful stop.
+pidash_api::startup::ServeBuilder::from_env()?
+    .with_bind(addr)
+    .run()
+    .await?;
+// worker: pools, schema, registry, turn handler, loops, bounded drain.
+pidash_api::startup::WorkerBuilder::from_env()
+    .await?
+    .with_concurrency(4)
+    .run()
+    .await?;
+```
+
+`ServeBuilder` extension points: `with_settings`, the four seams above
+(`with_toolsets`, `with_desktop_gate`, `with_assistant_seam`,
+`with_user_settings_schema`), `with_state` for other state tweaks,
+`merge_routes` (rides the overlay `add_routes` fallback path, so an
+extra route shadows rather than colliding), `wrap` (outside the OSS
+middleware stack), `with_bind`/`with_version`, and `run`. `build`
+returns the pool-less state-plus-router pair for tests and embedding.
+
+`WorkerBuilder` extension points: `with_assistant_seam`,
+`with_turn_seam` (the builder is generic over the non-object-safe
+`TurnSeam`; the default is the live OSS seam), `register` for extra
+jobs (the closure gets the registry plus the built `OssWorkerCtx`),
+`schedule` (appends after `default_schedule`), `with_concurrency`, and
+`run`. `build` returns the registry plus context without driving the
+loops. An extra registration over an already-owned task name — OSS or
+an earlier extra — fails the build instead of silently replacing the
+handler.
+
+Both builders re-export through `pidash-sdk` as `startup` (OVL-02).
+Known gap for the overlay port (OVL-09): the cloud deploy splits the
+queue-schema role (`MIGRATOR_DATABASE_URL`) while the builders run
+`ensure_schema` on the app pool; the port carries its pre-step or files
+for a hook.
+
 ## SeaORM entities (ORM-01)
 
 SeaORM 1.1 (`~1.1.20`, design `.ai_design/rust_orm/design.md` D1) covers

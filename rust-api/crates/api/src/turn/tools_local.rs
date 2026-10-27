@@ -874,7 +874,7 @@ pub async fn execute_get_issue<S: ToolStore>(
                 .as_deref(),
                 &body,
                 body_truncated,
-                &pidash_api::runner_enroll::enroll::render_isoformat(comment.created_at),
+                &crate::runner_enroll::enroll::render_isoformat(comment.created_at),
             )
         })
         .collect();
@@ -995,7 +995,7 @@ pub async fn execute_get_run_status<S: ToolStore>(
         .map(|run| {
             let created_at = run
                 .created_at
-                .map(pidash_api::runner_enroll::enroll::render_isoformat);
+                .map(crate::runner_enroll::enroll::render_isoformat);
             run_row(&run.id.to_string(), &run.status, created_at.as_deref())
         })
         .collect();
