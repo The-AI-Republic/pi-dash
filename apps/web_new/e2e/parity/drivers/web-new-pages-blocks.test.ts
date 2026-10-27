@@ -993,9 +993,12 @@ describe("mentions", () => {
 });
 
 describe("links and the selection bubble", () => {
-  it("drags across a link and waits for the bubble", async () => {
+  it("drags across a link and waits for its Link control", async () => {
     const link = at({ boundingBox: async () => ({ x: 100, y: 50, width: 60, height: 20 }) });
-    const bubble = fake();
+    const linkButton = fake();
+    // The bubble hook is a zero-size positioning shell, so the driver waits
+    // on the Link control it carries rather than on the shell (PAGE-043).
+    const bubble = fake({ getByRole: () => at({ first: () => linkButton.asLocator() }) });
     const { driver, stub } = stage({
       editor: editorOf({ a: at({ first: () => link }) }),
       selectors: { [BUBBLE_SELECTOR]: bubble.asLocator() },
@@ -1005,7 +1008,8 @@ describe("links and the selection bubble", () => {
 
     expect(stub.mouseDown).toHaveBeenCalled();
     expect(stub.mouseUp).toHaveBeenCalled();
-    expect(bubble.waitFor).toHaveBeenCalledWith({ state: "visible", timeout: 30_000 });
+    expect(linkButton.waitFor).toHaveBeenCalledWith({ state: "visible", timeout: 30_000 });
+    expect(bubble.waitFor).not.toHaveBeenCalled();
   });
 
   it("refuses to select a link that has no painted box", async () => {
