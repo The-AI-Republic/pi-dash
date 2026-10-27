@@ -29,7 +29,7 @@ export const COPY_WORK_ITEM_LINK_LABEL = "Copy work item link";
 export function copyWorkItemLinkAddress(workspaceSlug: string, issueKey: string): Promise<boolean> {
   return copyLinkWithToast(
     workItemPath(workspaceSlug, issueKey),
-    { copied: "Copied the work item link.", failed: "Couldn't copy the work item link." },
+    { copied: "Work item link copied to clipboard.", failed: "Couldn't copy the work item link." },
     { success: notifySuccess, error: notifyError }
   );
 }

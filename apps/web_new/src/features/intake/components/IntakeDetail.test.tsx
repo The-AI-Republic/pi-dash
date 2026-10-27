@@ -971,7 +971,7 @@ describe("IntakeDetail mobile header (INT-030)", () => {
     await user.click(screen.getByRole("button", { name: "Request actions" }));
     await user.click(await screen.findByRole("menuitem", { name: "Copy work item link" }));
     expect(writeText).toHaveBeenCalledWith(expect.stringContaining("/acme/browse/APO-7/"));
-    expect(await screen.findByText("Copied the work item link.")).toBeInTheDocument();
+    expect(await screen.findByText("Work item link copied to clipboard.")).toBeInTheDocument();
   });
 });
 
