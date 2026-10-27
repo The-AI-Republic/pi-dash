@@ -7,9 +7,10 @@
 // preferences reads; anything else still throws to the load error. The
 // screen suite proves the route mounts the layout root with the project
 // title, its rows and the interim empty states; layouts themselves belong
-// to the issues area.
+// to the issues area. Filter writes keep the previous page mounted under
+// the floating spinner instead of re-suspending the route (ISS-005).
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { ApiError, createClient } from "@pidash/api-client";
 import type { IssueListItem, IssueListResponse, Project } from "@pidash/api-client";
 import * as React from "react";
@@ -357,6 +358,15 @@ function spreadsheetPrefsSeed(): PrefsRecord {
 
 // Seeded render: the loaders own fetching, so the transport throws if a
 // query misses its seed instead of hanging the suite on a timeout.
+type ScreenTransport = (
+  url: string,
+  init: { method?: string; body?: string }
+) => Promise<{
+  status: number;
+  url: string;
+  headers: { get: (name: string) => string | null };
+  text: () => Promise<string>;
+}>;
 function renderScreen(
   search: IssueSearch,
   totalCount: number,
@@ -369,13 +379,20 @@ function renderScreen(
     unfilteredSheetRows?: IssueListItem[];
     displayFilters?: Record<string, unknown>;
     projects?: Project[];
+    transport?: ScreenTransport;
+    seedIssues?: boolean;
+    wrap?: (tree: React.ReactElement) => React.ReactElement;
   } = {}
 ): ReturnType<typeof render> {
   vi.spyOn(Route, "useParams").mockReturnValue({ ws: PARAMS.ws, projectId: PARAMS.projectId });
   vi.spyOn(Route, "useSearch").mockReturnValue(search);
-  const apiClient = createAppClient("https://api.test", (() => {
-    throw new Error("unexpected network fetch in a seeded render");
-  }) as never);
+  const apiClient = createAppClient(
+    "https://api.test",
+    (options.transport ??
+      (() => {
+        throw new Error("unexpected network fetch in a seeded render");
+      })) as never
+  );
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   vi.spyOn(Route, "useRouteContext").mockReturnValue({ queryClient, apiClient } as never);
   vi.spyOn(Route, "useNavigate").mockReturnValue((() => undefined) as never);
@@ -401,21 +418,23 @@ function renderScreen(
     ...(options.displayFilters === undefined ? {} : { display_filters: options.displayFilters }),
     rich_filters: options.richFilters ?? {},
   };
-  queryClient.setQueryData(
-    issuesQueryOptions(apiClient, PARAMS.ws, PARAMS.projectId, search, prefs.rich_filters, orderByOf(prefs)).queryKey,
-    {
-      grouped_by: null,
-      sub_grouped_by: null,
-      total_count: totalCount,
-      next_cursor: "",
-      prev_cursor: "",
-      next_page_results: false,
-      prev_page_results: false,
-      count: rows.length,
-      total_results: totalCount,
-      results: rows,
-    } satisfies IssueListResponse
-  );
+  if (options.seedIssues !== false) {
+    queryClient.setQueryData(
+      issuesQueryOptions(apiClient, PARAMS.ws, PARAMS.projectId, search, prefs.rich_filters, orderByOf(prefs)).queryKey,
+      {
+        grouped_by: null,
+        sub_grouped_by: null,
+        total_count: totalCount,
+        next_cursor: "",
+        prev_cursor: "",
+        next_page_results: false,
+        prev_page_results: false,
+        count: rows.length,
+        total_results: totalCount,
+        results: rows,
+      } satisfies IssueListResponse
+    );
+  }
   queryClient.setQueryData(prefsQueryOptions(apiClient, PARAMS.ws, ENTITY).queryKey, prefs);
   queryClient.setQueryData(
     sheetIssuesQueryOptions(apiClient, PARAMS.ws, PARAMS.projectId, {
@@ -491,13 +510,14 @@ function renderScreen(
 
   const Component = Route.options.component;
   if (!Component) throw new Error("issues route has no component");
-  return render(
+  const tree = (
     <QueryClientProvider client={queryClient}>
       <React.Suspense fallback={<p>loading</p>}>
         <Component />
       </React.Suspense>
     </QueryClientProvider>
   );
+  return render(options.wrap === undefined ? tree : options.wrap(tree));
 }
 
 // jsdom reports zero element sizes; give the flat list's scroll region and
@@ -1000,5 +1020,179 @@ describe("project issues screen", () => {
 
     expect(await screen.findByTestId("issues-calendar", undefined, LAZY_WAIT)).toBeInTheDocument();
     expect(screen.queryByText("Add work item")).not.toBeInTheDocument();
+  });
+
+  it("keeps the route mounted under the floating spinner while a filter refetch stalls (ISS-005)", async () => {
+    // The parity driver stalls every issues GET; the preference PATCH
+    // resolves at once. Removing a condition changes the list query key,
+    // which must not re-suspend the route: the screen stays mounted with
+    // the floating spinner up while the refetch pends. The layout body
+    // shows its own loading branch meanwhile (useQueries cannot keep
+    // previous data across a key change); the route-level totals keep
+    // the previous page's counts until the refetch lands.
+    const patches: Array<Record<string, unknown>> = [];
+    let releaseStall!: () => void;
+    const stalled = new Promise<void>((done) => {
+      releaseStall = done;
+    });
+    const seedPrefs = { ...prefsSeed(), rich_filters: { priority__in: "urgent" } };
+    renderScreen({}, 1, [issueRow()], {
+      prefs: seedPrefs,
+      transport: async (url, init) => {
+        if (url.endsWith("/auth/get-csrf-token/")) {
+          return { status: 200, url, headers: { get: () => null }, text: async () => '{"csrf_token":"csrf"}' };
+        }
+        if (init.method === "PATCH") {
+          const body = JSON.parse(init.body ?? "{}") as Record<string, unknown>;
+          patches.push(body);
+          return {
+            status: 200,
+            url,
+            headers: { get: () => null },
+            text: async () =>
+              JSON.stringify({
+                ...seedPrefs,
+                ...body,
+                id: ISSUE_UUID,
+                workspace: ISSUE_UUID,
+                user: ISSUE_UUID,
+                project: PARAMS.projectId,
+                preferences: {},
+                sort_order: 1,
+                created_by: null,
+                updated_by: null,
+                created_at: "2024-01-02T03:04:05Z",
+                updated_at: "2024-02-03T04:05:06Z",
+              }),
+          };
+        }
+        if (url.includes("/issues/")) {
+          await stalled;
+          return {
+            status: 200,
+            url,
+            headers: { get: () => null },
+            text: async () =>
+              JSON.stringify({
+                grouped_by: null,
+                sub_grouped_by: null,
+                total_count: 1,
+                next_cursor: "",
+                prev_cursor: "",
+                next_page_results: false,
+                prev_page_results: false,
+                count: 1,
+                total_results: 1,
+                results: [issueRow()],
+              }),
+          };
+        }
+        throw new Error(`unexpected network fetch ${init.method ?? "GET"} ${url}`);
+      },
+    });
+
+    const row = await screen.findByTestId("rich-filter-row", undefined, LAZY_WAIT);
+    expect(await screen.findByRole("heading", { name: "Website" }, LAZY_WAIT)).toBeInTheDocument();
+    expect(screen.queryByTestId("issues-mutation-spinner")).not.toBeInTheDocument();
+    expect(screen.getByTestId("list-row")).toBeInTheDocument();
+
+    fireEvent.click(within(row).getByRole("button", { name: "Remove filter" }));
+    await waitFor(() => expect(patches).toHaveLength(1));
+    await waitFor(() => expect(screen.getByTestId("issues-mutation-spinner")).toBeInTheDocument());
+    // Still the screen, not the suspense fallback: the heading and the
+    // previous totals stay mounted through the stalled refetch.
+    expect(screen.getByRole("heading", { name: "Website" })).toBeInTheDocument();
+    expect(screen.getByText("1 issue")).toBeInTheDocument();
+    expect(screen.getByTestId("list-loading")).toBeInTheDocument();
+
+    releaseStall();
+    await waitFor(() => expect(screen.queryByTestId("issues-mutation-spinner")).not.toBeInTheDocument());
+    expect(patches[0]).toEqual({ rich_filters: {} });
+    expect(await screen.findByTestId("list-row")).toBeInTheDocument();
+  });
+
+  it("shows the list skeleton when the issue list has no cached page yet", async () => {
+    renderScreen({}, 0, [], {
+      seedIssues: false,
+      transport: async (url, init) => {
+        if (url.includes("/issues/")) return new Promise<never>(() => {});
+        throw new Error(`unexpected network fetch ${init.method ?? "GET"} ${url}`);
+      },
+    });
+
+    expect(await screen.findByTestId("issues-skeleton-list")).toBeInTheDocument();
+  });
+
+  it("renders the list when a cold issues read resolves (ISS-005)", async () => {
+    // Cold cache: the first commit shows the skeleton, then the held GET
+    // lands and the same fiber must render the screen. A hook below the
+    // cold-cache early return breaks the hook order on this transition and
+    // crashes the route instead (NEWFRONT-947 review defect).
+    let release!: () => void;
+    const gate = new Promise<void>((done) => {
+      release = done;
+    });
+    renderScreen({}, 1, [issueRow()], {
+      seedIssues: false,
+      transport: async (url, init) => {
+        if (url.includes("/issues/")) {
+          await gate;
+          return {
+            status: 200,
+            url,
+            headers: { get: () => null },
+            text: async () =>
+              JSON.stringify({
+                grouped_by: null,
+                sub_grouped_by: null,
+                total_count: 1,
+                next_cursor: "",
+                prev_cursor: "",
+                next_page_results: false,
+                prev_page_results: false,
+                count: 1,
+                total_results: 1,
+                results: [issueRow()],
+              }),
+          };
+        }
+        throw new Error(`unexpected network fetch ${init.method ?? "GET"} ${url}`);
+      },
+    });
+
+    expect(await screen.findByTestId("issues-skeleton-list")).toBeInTheDocument();
+    release();
+    expect(await screen.findByRole("heading", { name: "Website" }, LAZY_WAIT)).toBeInTheDocument();
+    expect(await screen.findByTestId("list-row", undefined, LAZY_WAIT)).toBeInTheDocument();
+  });
+
+  it("throws a cold list failure to the route error boundary", async () => {
+    class ProbeBoundary extends React.Component<{ children: React.ReactNode }, { failed: boolean }> {
+      state = { failed: false };
+      static getDerivedStateFromError(): { failed: boolean } {
+        return { failed: true };
+      }
+      componentDidCatch(): void {}
+      render(): React.ReactNode {
+        return this.state.failed ? <p>route load error</p> : this.props.children;
+      }
+    }
+    const silence = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      renderScreen({}, 0, [], {
+        seedIssues: false,
+        transport: async (url, init) => {
+          if (url.includes("/issues/")) {
+            return { status: 500, url, headers: { get: () => null }, text: async () => "{}" };
+          }
+          throw new Error(`unexpected network fetch ${init.method ?? "GET"} ${url}`);
+        },
+        wrap: (tree) => <ProbeBoundary>{tree}</ProbeBoundary>,
+      });
+
+      expect(await screen.findByText("route load error")).toBeInTheDocument();
+    } finally {
+      silence.mockRestore();
+    }
   });
 });
