@@ -349,6 +349,43 @@ describe("envelope shaping", () => {
     expect(board.subGrouped).toBe(false);
   });
 
+  it("forwards the reference domain so unused labels draw a column and lane", () => {
+    const label = "623e4567-e89b-12d3-a456-426614174005";
+    const domain = input({
+      groupBy: "labels",
+      groupDomain: [label],
+      groupLabels: new Map([
+        [label, "Unused"],
+        [STATE, "Todo"],
+      ]),
+    });
+    const columns = toBoard(groupedEnvelope as never, domain).columns;
+    // Server keys keep their order; the filled project label joins before
+    // the trailing empty-value bucket.
+    expect(columns.map((column) => [column.title, column.total])).toEqual([
+      ["Todo", 4],
+      ["Unused", 0],
+      ["None", 0],
+    ]);
+    const lanes = toBoard(subEnvelope as never, {
+      ...domain,
+      subGroupBy: "labels",
+      subDomain: [label],
+      subLabels: new Map([[label, "Unused"]]),
+    }).lanes;
+    expect(lanes.map((lane) => [lane.title, lane.total])).toEqual([
+      ["Unused", 0],
+      ["None", 1],
+    ]);
+    const hidden = toBoard(groupedEnvelope as never, { ...domain, showEmpty: false }).columns;
+    expect(hidden.map((column) => column.title)).toEqual(["Todo"]);
+  });
+
+  it("does not put the reference domain in the query key", () => {
+    const base = input({ groupBy: "labels" });
+    expect(boardQueryKey("acme", { ...base, groupDomain: ["a"] })).toEqual(boardQueryKey("acme", base));
+  });
+
   it("shapes a sub-grouped board with lanes", () => {
     const board = toBoard(subEnvelope as never, input({ subGroupBy: "labels" }));
     expect(board.subGrouped).toBe(true);

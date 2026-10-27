@@ -45,11 +45,17 @@ const mocks = vi.hoisted(() => ({
   addExisting: vi.fn(),
   deleteDialog: vi.fn(),
   planBoardMove: vi.fn(),
+  boardInput: vi.fn(),
+  labelNames: new Map<string, string>(),
+  moduleNames: new Map<string, string>(),
+  cycleNames: new Map<string, string>(),
+  assigneeNames: new Map<string, string>(),
 }));
 
 vi.mock("./pages.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./pages.js")>()),
-  useBoard: () => ({
+  useBoard: (_client: unknown, _slug: string, input: unknown) => ({
+    ...(mocks.boardInput(input), {}),
     board: mocks.board,
     isPending: mocks.board === null,
     isFetching: false,
@@ -84,10 +90,10 @@ vi.mock("../list/reference.js", () => ({
     labels: (mocks.groupLabels as unknown as Record<string, Map<string, string>>) ?? {},
     stateRows: [],
     stateNames: new Map(),
-    assigneeNames: new Map(),
-    labelNames: new Map(),
-    cycleNames: new Map(),
-    moduleNames: new Map(),
+    assigneeNames: mocks.assigneeNames as Map<string, string>,
+    labelNames: mocks.labelNames as Map<string, string>,
+    cycleNames: mocks.cycleNames as Map<string, string>,
+    moduleNames: mocks.moduleNames as Map<string, string>,
     openCycleIds: mocks.openCycleIds,
   }),
 }));
@@ -740,6 +746,24 @@ describe("KanbanBoard", () => {
     };
     setup({ peekKey: "WEB-42" });
     expect(screen.getByTestId("issue-preview")).toBeInTheDocument();
+  });
+
+  it("fills label columns from the project label list, not the workspace directory", () => {
+    mocks.board = flatBoard();
+    mocks.labelNames = new Map([["bug", "Bug"]]);
+    mocks.assigneeNames = new Map([["someone-else", "Someone Else"]]);
+    setup({ prefs: prefs({ groupBy: "labels", subGroupBy: null }) });
+    expect(mocks.boardInput).toHaveBeenLastCalledWith(
+      expect.objectContaining({ groupDomain: ["bug"], subDomain: undefined })
+    );
+    setup({ prefs: prefs({ groupBy: "module", subGroupBy: "labels" }) });
+    expect(mocks.boardInput).toHaveBeenLastCalledWith(expect.objectContaining({ groupDomain: [], subDomain: ["bug"] }));
+    // Created-by has no project value list: its columns are the creators
+    // already in the grouped response, never the whole directory.
+    setup({ prefs: prefs({ groupBy: "created_by", subGroupBy: null }) });
+    expect(mocks.boardInput).toHaveBeenLastCalledWith(
+      expect.objectContaining({ groupDomain: undefined, subDomain: undefined })
+    );
   });
 
   it("reads sub-group labels from the sub-group axis", () => {

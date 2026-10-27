@@ -296,8 +296,14 @@ showing the title rotated and the count, hiding the cards. In
 swimlane mode clicking a lane header toggles that lane's cards, with
 the chevron pointing down while collapsed and up while expanded
 (ISS-031). Both collapse states persist per user alongside the kanban
-filters locally and are restored on return. The show-empty display
-filter (default on) hides zero-count columns and lanes when off
+filters locally and are restored on return. A grouped read only carries buckets for labels, modules, cycles and
+assignees that issues use, and a sub-grouped read only carries lanes for
+values some issue holds. With empty groups visible (the default), the
+board therefore fills those axes from the project's own lists (labels,
+modules, cycles, members) and draws a zero-total column or lane for each
+unused value, keeping the server's bucket order and the synthetic empty
+value last. With the filter off, only values that hold work remain. The
+show-empty display filter hides zero-count columns and lanes when off
 (ISS-032). Oracle: `layouts-b-kanban.spec.ts`.
 
 A card is a real link to the work item, so it can be opened in a new

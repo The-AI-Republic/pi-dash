@@ -146,8 +146,55 @@ describe("boardColumns", () => {
   it("skips a bucket key with no bucket behind it", () => {
     const response = grouped({ [LABEL]: { rows: [], total: 1 } });
     Object.defineProperty(response.results, "ghost", { value: undefined, enumerable: true });
-    const columns = boardColumns(response, labels, { dimension: "labels", showEmpty: true });
+    const columns = boardColumns(response, labels, { dimension: "labels", showEmpty: false });
     expect(columns.map((column) => column.key)).toEqual([LABEL]);
+  });
+
+  it("adds an unused project label as a zero-total column with empty groups on", () => {
+    const columns = boardColumns(grouped({ None: { rows: [row(), row(), row()], total: 3 } }), labels, {
+      dimension: "labels",
+      showEmpty: true,
+      domain: [LABEL],
+    });
+    expect(columns).toEqual([
+      { key: LABEL, title: "Bug", total: 0 },
+      { key: "None", title: "None", total: 3 },
+    ]);
+  });
+
+  it("hides the unused label again when empty groups are off", () => {
+    const columns = boardColumns(grouped({ None: { rows: [row()], total: 1 } }), labels, {
+      dimension: "labels",
+      showEmpty: false,
+      domain: [LABEL],
+    });
+    expect(columns.map((column) => column.key)).toEqual(["None"]);
+  });
+
+  it("adds an unused project module and keeps its cell empty", () => {
+    const module = "523e4567-e89b-12d3-a456-426614174004";
+    const board = groupedBoard(grouped({ None: { rows: [row()], total: 1 } }), {
+      dimension: "module",
+      labels: new Map([[module, "Payments"]]),
+      showEmpty: true,
+      domain: [module],
+    });
+    expect(board.columns).toEqual([
+      { key: module, title: "Payments", total: 0 },
+      { key: "None", title: "None", total: 1 },
+    ]);
+    expect(board.lanes[0]?.cells[module]).toEqual({ columnKey: module, rows: [], total: 0 });
+  });
+
+  it("synthesizes the empty cycle column when the board has only cycles", () => {
+    const cycle = "623e4567-e89b-12d3-a456-426614174005";
+    const board = groupedBoard(grouped({ [cycle]: { rows: [row()], total: 1 } }), {
+      dimension: "cycle",
+      labels: new Map([[cycle, "Sprint 8"]]),
+      showEmpty: true,
+      domain: [cycle],
+    });
+    expect(board.columns.map((column) => column.key)).toEqual([cycle, "None"]);
   });
 
   it("falls back to the dimension title when a bucket has no name", () => {
@@ -246,6 +293,40 @@ describe("sub-grouped lanes", () => {
   it("hides lanes with no issues when show-empty is off", () => {
     expect(laneKeys(response, false)).toEqual([LABEL, "None"]);
     expect(laneKeys(subGrouped({ [STATE]: { [LABEL]: { rows: [], total: 0 } } }), false)).toEqual([]);
+  });
+
+  it("adds an unused project label as a zero-total lane with empty groups on", () => {
+    const board = subGroupedBoard(subGrouped({ [STATE]: { None: { rows: [row()], total: 3 } } }), {
+      groupDimension: "state",
+      subDimension: "labels",
+      groupLabels: labels,
+      subLabels: labels,
+      showEmpty: true,
+      subDomain: [LABEL],
+    });
+    expect(board.lanes.map((lane) => [lane.key, lane.title, lane.total])).toEqual([
+      [LABEL, "Bug", 0],
+      ["None", "None", 3],
+    ]);
+    expect(board.lanes[0]?.cells[STATE]).toEqual({ columnKey: STATE, rows: [], total: 0 });
+  });
+
+  it("drops the unused lane again when empty groups are off", () => {
+    const board = subGroupedBoard(subGrouped({ [STATE]: { None: { rows: [row()], total: 3 } } }), {
+      groupDimension: "state",
+      subDimension: "labels",
+      groupLabels: labels,
+      subLabels: labels,
+      showEmpty: false,
+      subDomain: [LABEL],
+    });
+    expect(board.lanes.map((lane) => lane.key)).toEqual(["None"]);
+  });
+
+  it("treats a label already in the envelope as one lane", () => {
+    const response = subGrouped({ [STATE]: { [LABEL]: { rows: [row()], total: 1 } } });
+    expect(laneKeys(response, true, { dimension: "labels", domain: [LABEL] })).toEqual([LABEL, "None"]);
+    expect(laneKeys(response, true, { dimension: "state", domain: [LABEL] })).toEqual([LABEL]);
   });
 
   it("builds columns with server group totals and lanes with their cells", () => {
@@ -415,7 +496,9 @@ describe("label ghost reconciliation (ISS-031/NEWFRONT-158)", () => {
       ["None", 1],
     ]);
     expect(result.columns.map((column) => column.total)).toEqual([2, 1]);
-    expect(result.lanes[1]?.cells[second]).toBeUndefined();
+    // The empty lane already existed (labels always draw their None lane
+    // with empty groups on); the recovered row fills only the first cell.
+    expect(result.lanes[1]?.cells[second]).toEqual({ columnKey: second, rows: [], total: 0 });
   });
 
   it("adds a column the labels read dropped entirely so its ghost can render", () => {
