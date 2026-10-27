@@ -286,7 +286,7 @@ describe("create, copy and edit dialogs", () => {
     expect(recorder.trace().at(-1)).toContain(HEADING);
   });
 
-  it("opens edit by double-clicking the named block, then waits for its heading", async () => {
+  it("opens edit by double-clicking the block name, then waits for its heading", async () => {
     const recorder = new Recorder();
     await new WebNewDriver(recorder.page()).openDraftForEdit("One");
     const [wait, dblclick, heading] = recorder.trace();
@@ -294,6 +294,7 @@ describe("create, copy and edit dialogs", () => {
     expect(wait).toContain(NAME_BLOCK);
     expect(dblclick).toContain("dblclick");
     expect(dblclick).toContain(NAME_BLOCK);
+    expect(dblclick).toContain('locator("p[data-draft-name]")');
     expect(heading).toContain("waitFor");
     expect(heading).toContain(HEADING);
     expect(recorder.trace()).toHaveLength(3);

@@ -421,4 +421,85 @@ describe("ModalDriver", () => {
     await new WebNewDriver(page).openModulePage("ws", "pid", "mid");
     expect(calls).toEqual(["goto:/ws/projects/pid/modules/mid"]);
   });
+
+  it("opens a row menu entry from the fresh strip past the region", async () => {
+    const calls: string[] = [];
+    const page = pageOf({
+      role: (role: string, options?: unknown) => {
+        if (role === "region") {
+          return node({
+            locator: () =>
+              node({
+                filter: () => absent(),
+              }),
+          });
+        }
+        if (role === "menuitem") {
+          const want = (options as { name?: string } | undefined)?.name;
+          return node({
+            click: async () => {
+              calls.push(`pick:${String(want)}`);
+            },
+          });
+        }
+        return absent();
+      },
+      locator: (selector: string) =>
+        selector === 'a[data-row-anchor="true"]'
+          ? node({
+              filter: () =>
+                node({
+                  click: async (opts?: unknown) => {
+                    calls.push(`click:${String((opts as { button?: string } | undefined)?.button ?? "left")}`);
+                  },
+                }),
+            })
+          : absent(),
+    });
+    await new WebNewDriver(page).openRowMenuEntry("Fresh", "Edit");
+    expect(calls).toContain("click:right");
+    expect(calls).toContain("pick:Edit");
+  });
+
+  it("hovers a fresh-strip row past the region", async () => {
+    let hovered = false;
+    const page = pageOf({
+      role: () => absent(),
+      locator: (selector: string) =>
+        selector === 'a[data-row-anchor="true"]'
+          ? node({
+              filter: () =>
+                node({
+                  hover: async () => {
+                    hovered = true;
+                  },
+                }),
+            })
+          : absent(),
+    });
+    await new WebNewDriver(page).hoverIssueRow("Fresh");
+    expect(hovered).toBe(true);
+  });
+
+  it("reads the modal project name without the mark initial", async () => {
+    const chip = node({
+      textContent: async () => "PParity Project",
+      locator: (selector: string) =>
+        selector === "span.truncate" ? node({ textContent: async () => "Parity Project" }) : absent(),
+    });
+    const dialog = dialogMock({
+      onLocator: (selector: string) =>
+        selector === "form" ? node({ getByRole: (role: string) => (role === "button" ? chip : absent()) }) : absent(),
+    });
+    await expect(new WebNewDriver(pageWithDialog(dialog)).modalProjectName()).resolves.toBe("Parity Project");
+  });
+
+  it("falls back to the chip text without a name span", async () => {
+    const chip = node({ textContent: async () => "Parity Project" });
+    const dialog = dialogMock({
+      onLocator: (selector: string) =>
+        selector === "form" ? node({ getByRole: (role: string) => (role === "button" ? chip : absent()) }) : absent(),
+    });
+    await expect(new WebNewDriver(pageWithDialog(dialog)).modalProjectName()).resolves.toBe("Parity Project");
+  });
 });

@@ -2200,12 +2200,29 @@ export class WebNewDriver implements ParityDriver {
   async openDraftForEdit(name: string): Promise<void> {
     const block = this.draftBlock(name);
     await block.waitFor({ timeout: 60_000 });
-    await block.dblclick();
+    // Double-click the name, not the block's center: the center can land
+    // on an inline property control (state, labels, dates), which opens
+    // its picker instead of the edit dialog (ISS-130).
+    await block.locator("p[data-draft-name]").dblclick();
     await this.draftDialogTitle().waitFor({ timeout: 60_000 });
   }
 
   async publishDraft(): Promise<void> {
     await this.createDialog().getByRole("button", { name: "Publish issue", exact: true }).first().click();
+  }
+
+  /** Row anchors naming the issue: the Issues region first, then the
+   * page-wide anchors. Fresh rows (created under 30s ago) bypass the
+   * virtualizer into a strip above the region (ISS-006/NEWFRONT-937),
+   * so a region-only read misses exactly the rows a scenario just
+   * created (ISS-128). */
+  private async issueRowAnchors(issueName: string): Promise<Locator> {
+    const scoped = this.page
+      .getByRole("region", { name: "Issues" })
+      .locator('a[data-row-anchor="true"]')
+      .filter({ hasText: issueName });
+    if ((await scoped.count()) > 0) return scoped;
+    return this.page.locator('a[data-row-anchor="true"]').filter({ hasText: issueName });
   }
 
   async openRowMenuEntry(issueName: string, entry: string): Promise<void> {
@@ -2215,11 +2232,7 @@ export class WebNewDriver implements ParityDriver {
     let lastError: unknown = null;
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        const row = this.page
-          .getByRole("region", { name: "Issues" })
-          .locator('a[data-row-anchor="true"]')
-          .filter({ hasText: issueName })
-          .first();
+        const row = (await this.issueRowAnchors(issueName)).first();
         await row.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
         await row.click({ button: "right", timeout: WebNewDriver.WAIT_MS });
         const item = this.page.getByRole("menuitem", { name: entry, exact: true }).first();
@@ -2296,11 +2309,7 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async hoverIssueRow(issueName: string): Promise<void> {
-    const row = this.page
-      .getByRole("region", { name: "Issues" })
-      .locator('a[data-row-anchor="true"]')
-      .filter({ hasText: issueName })
-      .first();
+    const row = (await this.issueRowAnchors(issueName)).first();
     await row.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
     await row.hover({ timeout: WebNewDriver.WAIT_MS });
   }
@@ -2513,8 +2522,15 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async modalProjectName(): Promise<string> {
+    // Read the chip's name span, not the whole chip: the trigger also
+    // carries the project mark, whose initial would prefix the name
+    // ("PParity Project", ISS-130).
     const chip = this.modalProjectChip();
     await chip.waitFor({ timeout: 30_000 });
+    const label = chip.locator("span.truncate");
+    if ((await label.count()) > 0) {
+      return ((await label.first().textContent()) ?? "").replace(/\s+/g, " ").trim();
+    }
     return ((await chip.textContent()) ?? "").replace(/\s+/g, " ").trim();
   }
 
@@ -3791,12 +3807,9 @@ export class WebNewDriver implements ParityDriver {
   }
   async clickListRow(name: string): Promise<void> {
     // Any visible row that names the work item: the issues list rows are
-    // row-anchor links inside the Issues region (mirroring
-    // visibleIssueNames), the profile list rows are buttons.
-    const issues = this.page
-      .getByRole("region", { name: "Issues" })
-      .locator('a[data-row-anchor="true"]')
-      .filter({ hasText: name });
+    // row-anchor links (the Issues region, or the fresh strip above it),
+    // the profile list rows are buttons.
+    const issues = await this.issueRowAnchors(name);
     const profile = this.page
       .locator('[data-testid="profile-list"] button[data-profile-row]')
       .filter({ hasText: name });
