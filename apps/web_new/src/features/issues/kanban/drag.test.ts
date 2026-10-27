@@ -333,6 +333,14 @@ describe("boardDropRefusal", () => {
     expect(refusal?.toast).toMatch(/ordered by Priority/);
   });
 
+  it("refuses the priority value used by the NEWFRONT-154 repro", () => {
+    const refusal = boardDropRefusal({ ...gate, orderBy: "priority" });
+    expect(refusal?.overlay).toBe("Ordered by priority");
+    expect(refusal?.toast).toBe(
+      "Cards stay put while ordered by priority. Switch back to the manual order to move them."
+    );
+  });
+
   it("falls back to the raw order key without a label", () => {
     expect(boardDropRefusal({ ...gate, orderBy: "mystery" })?.overlay).toBe("Ordered by mystery");
   });
