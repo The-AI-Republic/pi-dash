@@ -7885,11 +7885,15 @@ export class WebNewDriver implements ParityDriver {
   async layoutsReloadIssues(): Promise<void> {
     await this.page.reload({ waitUntil: "domcontentloaded" });
     // Either surface settles the reload: the profile tab, a project
-    // list (project, cycle, module, archived), or one of the board
-    // layouts, rows or empty state.
+    // list (project, cycle, module, archived), one of the board layouts
+    // (rows or empty state), or a loader skeleton. The skeleton arm
+    // matters: loader scenarios reload under a stall and must return
+    // inside the skeleton window, the way the oracle's chrome settle
+    // does — waiting for rows would miss the window and triple the
+    // stall (the sub-issue query fires only after the list resolves).
     await this.page
       .locator(
-        '[data-testid="profile-list"], [data-testid="list-group-header"], [data-testid="list-row"], [data-testid="empty-state"], [data-testid="spreadsheet-scroller"], [data-testid="kanban-layout"], [data-testid="gantt-layout"]'
+        '[data-testid="profile-list"], [data-testid="list-group-header"], [data-testid="list-row"], [data-testid="empty-state"], [data-testid="spreadsheet-scroller"], [data-testid="kanban-layout"], [data-testid="gantt-layout"], [data-testid="list-loading"], [data-testid="section-loading"]'
       )
       .first()
       .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
@@ -8014,16 +8018,24 @@ export class WebNewDriver implements ParityDriver {
 
   /**
    * One section's header, matched on its exact title span (ISS-008); the
-   * first span reads the title, the count follows it.
+   * first span reads the title, the count follows it. Reloads settle on
+   * the skeleton too, so the lookup waits for the headers instead of
+   * throwing on a still-loading list.
    */
   private async layoutsListGroupHeader(title: string): Promise<Locator> {
     const headers = this.page.locator('[data-testid="list-group-header"]');
-    const count = await headers.count();
-    for (let index = 0; index < count; index += 1) {
-      const text = (await headers.nth(index).locator("span").first().innerText()).trim();
-      if (text === title) return headers.nth(index);
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    for (;;) {
+      const count = await headers.count();
+      for (let index = 0; index < count; index += 1) {
+        const text = (await headers.nth(index).locator("span").first().innerText()).trim();
+        if (text === title) return headers.nth(index);
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(`[parity] no list group "${title}".`);
+      }
+      await this.page.waitForTimeout(250);
     }
-    throw new Error(`[parity] no list group "${title}".`);
   }
 
   /** One section, wrapping its header plus rows (ISS-010/011). */

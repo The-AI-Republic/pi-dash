@@ -810,4 +810,11 @@ describe("web_new sheet count and reload", () => {
     expect(stub.selectors[0]).toContain("kanban-layout");
     expect(stub.selectors[0]).toContain("gantt-layout");
   });
+
+  it("settles reloads on loader skeletons too", async () => {
+    const stub = pageOf({ testId: () => node({ count: async () => 0 }) });
+    await new WebNewDriver(stub.page).layoutsReloadIssues();
+    expect(stub.selectors[0]).toContain("list-loading");
+    expect(stub.selectors[0]).toContain("section-loading");
+  });
 });

@@ -182,11 +182,34 @@ describe("web-new list groups", () => {
     await expect(driver.layoutsListGroupExpanded("Doing")).resolves.toBe(false);
   });
 
+  it("waits for headers that arrive after a reload", async () => {
+    const head = headerNode("Todo", true);
+    let calls = 0;
+    const headers = node({
+      count: async () => (calls++ === 0 ? 0 : 1),
+      nth: () => head,
+    });
+    const stub = pageOf({ locator: () => headers });
+    await expect(new WebNewDriver(stub.page).layoutsListGroupExpanded("Todo")).resolves.toBe(true);
+    expect(calls).toBeGreaterThan(1);
+  });
+
   it("throws for an unknown group", async () => {
-    const stub = pageOf({ locator: () => collection([headerNode("Todo", true)]) });
-    await expect(new WebNewDriver(stub.page).layoutsListGroupExpanded("Missing")).rejects.toThrow(
-      '[parity] no list group "Missing".'
-    );
+    let now = 1_000;
+    const spy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    try {
+      const stub = pageOf({
+        locator: () => collection([headerNode("Todo", true)]),
+        tick: () => {
+          now += 60_000;
+        },
+      });
+      await expect(new WebNewDriver(stub.page).layoutsListGroupExpanded("Missing")).rejects.toThrow(
+        '[parity] no list group "Missing".'
+      );
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("toggles through the title span and settles on the flip", async () => {
