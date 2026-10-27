@@ -110,6 +110,7 @@ use sqlx::Row;
 
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
+use pidash_compat::datetime::render_rfc3339_in;
 use pidash_compat::response::json_response;
 use pidash_services::space::guards::{self, AnchorLookup, ErrorBody, ExceptionKind};
 use pidash_services::space::queries::project_meta as queries;
@@ -276,14 +277,6 @@ async fn request_tz(
             .map_err(|_| HandlerError::ServerError),
         _ => Ok(chrono_tz::UTC),
     }
-}
-
-/// Render a `row_to_json` timestamptz value exactly like DRF `DateTimeField`
-/// with the default `iso-8601` format: ISO-8601 in the request's zone with
-/// `+00:00` rewritten to `Z`, microseconds only when nonzero (kernel rule).
-fn render_dt(raw: &str, tz: &chrono_tz::Tz) -> Result<String, HandlerError> {
-    let dt = chrono::DateTime::parse_from_rfc3339(raw).map_err(|_| HandlerError::ServerError)?;
-    Ok(crate::serializer::render_datetime_in(&dt, tz))
 }
 
 // ---------------------------------------------------------------------------
@@ -748,7 +741,7 @@ async fn render_board(
     .await?;
     let deleted_at = match &board.deleted_at {
         None => None,
-        Some(raw) => Some(render_dt(raw, tz)?),
+        Some(raw) => Some(render_rfc3339_in(raw, tz).map_err(|_| HandlerError::ServerError)?),
     };
     let view = BoardView {
         id: board.id.clone(),
@@ -759,8 +752,10 @@ async fn render_board(
             id: workspace.id,
             logo_url,
         },
-        created_at: render_dt(&board.created_at, tz)?,
-        updated_at: render_dt(&board.updated_at, tz)?,
+        created_at: render_rfc3339_in(&board.created_at, tz)
+            .map_err(|_| HandlerError::ServerError)?,
+        updated_at: render_rfc3339_in(&board.updated_at, tz)
+            .map_err(|_| HandlerError::ServerError)?,
         deleted_at,
         entity_identifier: board.entity_identifier.clone(),
         entity_name: board.entity_name.clone(),

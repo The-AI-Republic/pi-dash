@@ -74,6 +74,7 @@ use pidash_auth::scope::TenantScope;
 
 use crate::license::AssetUrl;
 use crate::state::AppState;
+use pidash_compat::datetime::{render_datetime_opt, render_uuid, render_uuid_opt};
 pub use pidash_compat::response::SERVER_ERROR_BODY;
 use pidash_compat::response::{json_created, json_ok, no_content};
 pub use pidash_compat::validate::{
@@ -714,20 +715,6 @@ pub struct ReadAnnotations {
     pub is_deployed: bool,
 }
 
-fn render_uuid(value: uuid::Uuid) -> Value {
-    Value::String(value.to_string())
-}
-
-fn render_uuid_opt(value: Option<uuid::Uuid>) -> Value {
-    value.map(render_uuid).unwrap_or(Value::Null)
-}
-
-fn render_datetime_opt(value: Option<chrono::DateTime<chrono::Utc>>, tz: &Tz) -> Value {
-    value
-        .map(|dt| Value::String(crate::serializer::render_datetime_in(&dt, tz)))
-        .unwrap_or(Value::Null)
-}
-
 fn row_string(row: &sqlx::postgres::PgRow, col: &str) -> Result<String, Denial> {
     row.try_get(col).map_err(|_| Denial::ServerError)
 }
@@ -849,7 +836,7 @@ pub async fn render_project(
     };
 
     let id: uuid::Uuid = row.try_get("id").map_err(|_| Denial::ServerError)?;
-    put(&mut map, "id", render_uuid(id));
+    put(&mut map, "id", render_uuid(&id));
     if let Some(ann) = ann {
         put(&mut map, "total_members", Value::from(ann.total_members));
         put(&mut map, "total_cycles", Value::from(ann.total_cycles));
@@ -907,7 +894,7 @@ pub async fn render_project(
         "updated_at",
         Value::String(crate::serializer::render_datetime_in(&updated_at, tz)),
     );
-    put(&mut map, "deleted_at", render_datetime_opt(deleted_at, tz));
+    put(&mut map, "deleted_at", render_datetime_opt(&deleted_at, tz));
     put(&mut map, "name", Value::String(row_string(row, "name")?));
     put(
         &mut map,
@@ -971,7 +958,7 @@ pub async fn render_project(
     put(
         &mut map,
         "archived_at",
-        render_datetime_opt(archived_at, tz),
+        render_datetime_opt(&archived_at, tz),
     );
     put(
         &mut map,
@@ -1024,37 +1011,37 @@ pub async fn render_project(
     put(
         &mut map,
         "created_by",
-        render_uuid_opt(row_uuid_opt(row, "created_by_id")?),
+        render_uuid_opt(&row_uuid_opt(row, "created_by_id")?),
     );
     put(
         &mut map,
         "updated_by",
-        render_uuid_opt(row_uuid_opt(row, "updated_by_id")?),
+        render_uuid_opt(&row_uuid_opt(row, "updated_by_id")?),
     );
     let workspace_id: uuid::Uuid = row
         .try_get("workspace_id")
         .map_err(|_| Denial::ServerError)?;
-    put(&mut map, "workspace", render_uuid(workspace_id));
+    put(&mut map, "workspace", render_uuid(&workspace_id));
     put(
         &mut map,
         "default_assignee",
-        render_uuid_opt(row_uuid_opt(row, "default_assignee_id")?),
+        render_uuid_opt(&row_uuid_opt(row, "default_assignee_id")?),
     );
     put(
         &mut map,
         "project_lead",
-        render_uuid_opt(row_uuid_opt(row, "project_lead_id")?),
+        render_uuid_opt(&row_uuid_opt(row, "project_lead_id")?),
     );
-    put(&mut map, "cover_image_asset", render_uuid_opt(asset_id));
+    put(&mut map, "cover_image_asset", render_uuid_opt(&asset_id));
     put(
         &mut map,
         "estimate",
-        render_uuid_opt(row_uuid_opt(row, "estimate_id")?),
+        render_uuid_opt(&row_uuid_opt(row, "estimate_id")?),
     );
     put(
         &mut map,
         "default_state",
-        render_uuid_opt(row_uuid_opt(row, "default_state_id")?),
+        render_uuid_opt(&row_uuid_opt(row, "default_state_id")?),
     );
 
     // `BaseSerializer.to_representation` expand (`serializers/base.py:71+`):
@@ -1094,7 +1081,7 @@ pub async fn render_project(
                 _ => {
                     let attname = format!("{key}_id");
                     match row.try_get::<Option<uuid::Uuid>, _>(attname.as_str()) {
-                        Ok(v) => render_uuid_opt(v),
+                        Ok(v) => render_uuid_opt(&v),
                         // `getattr(instance, f"{expand}_id", None)`:
                         // plain columns have no `<key>_id` attribute, so
                         // they render null — never the column text.
@@ -1123,7 +1110,7 @@ async fn expand_workspace(pool: &PgPool, workspace_id: &uuid::Uuid) -> Result<Va
             let mut map = serde_json::Map::with_capacity(3);
             map.insert("name".to_owned(), Value::String(name));
             map.insert("slug".to_owned(), Value::String(slug));
-            map.insert("id".to_owned(), render_uuid(*workspace_id));
+            map.insert("id".to_owned(), render_uuid(workspace_id));
             Value::Object(map)
         }
         None => Value::Null,
@@ -2065,7 +2052,7 @@ pub async fn summary_inner(
         }
     }
     let mut body = serde_json::Map::with_capacity(4);
-    body.insert("id".to_owned(), render_uuid(id));
+    body.insert("id".to_owned(), render_uuid(&id));
     body.insert("name".to_owned(), Value::String(name));
     body.insert("identifier".to_owned(), Value::String(identifier));
     body.insert("counts".to_owned(), Value::Object(counts_map));

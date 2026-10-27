@@ -78,6 +78,7 @@ use pidash_services::v1_work_items::{filter_fields, python_number_str, FieldSpec
 use crate::state::AppState;
 
 use super::perms::{decide, gate_for, resolve_moved_by_run, RunFacts, V1WorkItemsRoute};
+use pidash_compat::datetime::render_datetime_in;
 pub use pidash_compat::response::SERVER_ERROR_BODY;
 use pidash_types::runner_runs::AgentRunStatus;
 
@@ -729,7 +730,7 @@ async fn require_gate(
 }
 
 fn render_dt(dt: &DateTime<Utc>, tz: &Tz) -> String {
-    crate::serializer::render_datetime_in(dt, tz)
+    render_datetime_in(dt, tz)
 }
 
 // ---------------------------------------------------------------------------

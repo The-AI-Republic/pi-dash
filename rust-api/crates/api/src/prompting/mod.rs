@@ -111,6 +111,7 @@ use crate::v1_cycles_modules::body as shared_body;
 use crate::v1_cycles_modules::json::{
     parse_request_bytes_spans, to_serde_publish, JsonFail, JSON_PARSE_PREFIX,
 };
+use pidash_compat::datetime::render_isoformat;
 use pidash_compat::db::is_unique_violation;
 use pidash_compat::response::json_value as json_response;
 use pidash_services::prompting::{composer, context, recipes, registry, validation};
@@ -2544,18 +2545,6 @@ async fn load_comments(
             },
         )
         .collect())
-}
-
-/// Python `datetime.isoformat()` for an aware UTC timestamp: `+00:00`
-/// offset, microseconds only when nonzero (`context.py:322`).
-fn render_isoformat(dt: chrono::DateTime<chrono::Utc>) -> String {
-    // `AutoSi` trims trailing zeros (`.123000` -> `.123`); Python always
-    // prints six digits when microseconds are nonzero.
-    if dt.timestamp_subsec_micros() == 0 {
-        dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, false)
-    } else {
-        dt.to_rfc3339_opts(chrono::SecondsFormat::Micros, false)
-    }
 }
 
 /// `_code_reviews_context` (`context.py:472-494`): attached review links,

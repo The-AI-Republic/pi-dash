@@ -67,6 +67,7 @@ use crate::runner_enroll::serializers::shapes::{
     pod_mini_to_representation, runner_to_representation, PodMiniRow, PodMiniView, RunnerRow,
     RunnerView,
 };
+use pidash_compat::datetime::uuid_string;
 use pidash_db::runner_runs::{
     AgentChatApprovalRequest, AgentChatEvent, AgentChatMessage, AgentChatSession, AgentRun,
     AgentRunEvent, AgentRunToolCall, ApprovalRequest,
@@ -235,10 +236,6 @@ pub fn drf_datetime(dt: &DateTime<Utc>) -> String {
 
 fn drf_datetime_opt(dt: &Option<DateTime<Utc>>) -> Option<String> {
     dt.as_ref().map(drf_datetime)
-}
-
-fn uuid_string(id: &uuid::Uuid) -> String {
-    id.to_string()
 }
 
 fn uuid_opt_string(id: &Option<uuid::Uuid>) -> Option<String> {

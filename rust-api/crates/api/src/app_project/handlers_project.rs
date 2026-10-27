@@ -97,6 +97,7 @@ use crate::state::AppState;
 
 use pidash_auth::permissions::allow::AllowFacts;
 use pidash_auth::permissions::{ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER};
+use pidash_compat::datetime::{django_str_datetime, render_datetime_in};
 use pidash_compat::response::no_content;
 use pidash_services::v1_work_items::python_number_str;
 use pidash_types::WorkspaceId;
@@ -1023,23 +1024,11 @@ fn utc_now_micros() -> DateTime<Utc> {
 /// with `+00:00` rewritten to `Z`, microseconds only when nonzero —
 /// `crate::serializer::render_datetime_in` ports exactly this.
 fn render_dt(value: &DateTime<Utc>, timezone: Tz) -> String {
-    crate::serializer::render_datetime_in(value, &timezone)
+    render_datetime_in(value, &timezone)
 }
 
 fn render_dt_opt(value: Option<DateTime<Utc>>, timezone: Tz) -> Option<String> {
     value.map(|value| render_dt(&value, timezone))
-}
-
-/// `str(archived_at)` (`base.py:441`): space separator, `+00:00` suffix,
-/// microseconds only when nonzero.
-fn render_python_datetime(value: &DateTime<Utc>) -> String {
-    let mut out = value.format("%Y-%m-%d %H:%M:%S").to_string();
-    let nanos = value.timestamp_subsec_nanos();
-    if nanos != 0 {
-        out.push_str(&format!(".{:06}", nanos / 1000));
-    }
-    out.push_str("+00:00");
-    out
 }
 
 /// `str(value)` for a truthy JSON body value, as `validate()` calls it on
@@ -5885,7 +5874,7 @@ async fn archive_post(
     .map_err(db_denial)?;
     Ok(json_ok(format!(
         "{{\"archived_at\":{}}}",
-        json_string(&render_python_datetime(&now))
+        json_string(&django_str_datetime(&now))
     )))
 }
 
@@ -6895,13 +6884,13 @@ mod tests {
             .unwrap()
             .with_timezone(&Utc);
         assert_eq!(
-            render_python_datetime(&zoned),
+            django_str_datetime(&zoned),
             "2026-10-02 22:22:38.379224+00:00"
         );
         let zoned = chrono::DateTime::parse_from_rfc3339("2026-10-02T22:22:38Z")
             .unwrap()
             .with_timezone(&Utc);
-        assert_eq!(render_python_datetime(&zoned), "2026-10-02 22:22:38+00:00");
+        assert_eq!(django_str_datetime(&zoned), "2026-10-02 22:22:38+00:00");
         assert_eq!(python_float(&json!(1.5)), Some(1.5));
         assert_eq!(python_float(&json!(true)), Some(1.0));
         assert_eq!(python_float(&json!(" 2.5 ")), Some(2.5));

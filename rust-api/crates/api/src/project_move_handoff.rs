@@ -61,6 +61,7 @@ use pidash_services::runner_runs::LifecycleEffect;
 use pidash_types::dispatch::AgentExecutorKind;
 
 use crate::state::AppState;
+use pidash_compat::datetime::render_isoformat as twin_render_isoformat;
 
 // ---------------------------------------------------------------------------
 // Clocks + Redis (the `teardown.rs` positions, restated per module)
@@ -804,16 +805,6 @@ async fn twin_gate_allows(
 
 fn twin_db(error: sqlx::Error) -> CreationError {
     CreationError::Db(error.to_string())
-}
-
-/// Python `datetime.isoformat()` for an aware UTC timestamp (`+00:00`,
-/// microseconds only when nonzero — `context.py:322`).
-fn twin_render_isoformat(dt: DateTime<Utc>) -> String {
-    if dt.timestamp_subsec_micros() == 0 {
-        dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, false)
-    } else {
-        dt.to_rfc3339_opts(chrono::SecondsFormat::Micros, false)
-    }
 }
 
 async fn twin_bundle_labels(

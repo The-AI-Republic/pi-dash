@@ -24,6 +24,7 @@ use super::{
 };
 use crate::serializer::{render_datetime, render_datetime_in};
 use crate::state::AppState;
+use pidash_compat::datetime::render_uuid_opt as opt_uuid;
 
 /// One `issue_description_versions` row.
 struct VersionRow {
@@ -62,12 +63,6 @@ impl VersionRow {
             updated_by_id: row.try_get("updated_by_id")?,
         })
     }
-}
-
-fn opt_uuid(value: &Option<Uuid>) -> serde_json::Value {
-    value.map_or(serde_json::Value::Null, |id| {
-        serde_json::Value::String(id.to_string())
-    })
 }
 
 /// `IssueDescriptionVersionDetailSerializer`

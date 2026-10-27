@@ -93,10 +93,10 @@ use rand::Rng;
 
 use crate::license::{resolve_actor, Actor};
 use crate::middleware::SessionHandle;
-use crate::serializer::render_datetime_in;
 use crate::state::AppState;
 
 use super::gates;
+use pidash_compat::datetime::render_datetime_in;
 use pidash_compat::response::{empty_response, json_response};
 
 // ---------------------------------------------------------------------------

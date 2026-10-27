@@ -75,6 +75,7 @@ use sqlx::Row;
 use crate::middleware::body_limit::read_request_bytes;
 use crate::state::AppState;
 use crate::v1_cycles_modules::body as shared_body;
+use pidash_compat::datetime::{render_date, render_datetime_in, render_rfc3339_in};
 use pidash_compat::db::is_integrity_error;
 use pidash_compat::response::{empty_response, json_response};
 use pidash_db::app_pages::strip::ml_strip_tags;
@@ -774,26 +775,16 @@ fn cell_opt_date(
 /// `iso-8601` format: ISO-8601 in the request's zone with `+00:00`
 /// rewritten to `Z` (serializer kernel rule).
 fn render_dt(dt: &chrono::DateTime<chrono::Utc>, tz: &Tz) -> String {
-    crate::serializer::render_datetime_in(&dt.fixed_offset(), tz)
+    render_datetime_in(dt, tz)
 }
 
 fn render_dt_opt(dt: Option<chrono::DateTime<chrono::Utc>>, tz: &Tz) -> Option<String> {
     dt.map(|dt| render_dt(&dt, tz))
 }
 
-/// Render a `row_to_json` timestamptz string (RFC 3339) the same way.
-fn render_dt_str(raw: &str, tz: &Tz) -> Result<String, Denial> {
-    let dt = chrono::DateTime::parse_from_rfc3339(raw).map_err(|_| Denial::ServerError)?;
-    Ok(crate::serializer::render_datetime_in(&dt, tz))
-}
-
 fn render_dt_str_opt(raw: Option<String>, tz: &Tz) -> Result<Option<String>, Denial> {
-    raw.map(|text| render_dt_str(&text, tz)).transpose()
-}
-
-/// DRF `DateField` wire format.
-fn render_date(date: &chrono::NaiveDate) -> String {
-    date.format("%Y-%m-%d").to_string()
+    raw.map(|text| render_rfc3339_in(&text, tz).map_err(|_| Denial::ServerError))
+        .transpose()
 }
 
 // ---------------------------------------------------------------------------
@@ -3744,8 +3735,10 @@ async fn render_comment_reaction_map(
         deleted_at: render_dt_str_opt(opt_str(map, "deleted_at")?, tz)?,
         workspace: req_str(map, "workspace_id")?,
         project: req_str(map, "project_id")?,
-        created_at: render_dt_str(&req_str(map, "created_at")?, tz)?,
-        updated_at: render_dt_str(&req_str(map, "updated_at")?, tz)?,
+        created_at: render_rfc3339_in(&req_str(map, "created_at")?, tz)
+            .map_err(|_| Denial::ServerError)?,
+        updated_at: render_rfc3339_in(&req_str(map, "updated_at")?, tz)
+            .map_err(|_| Denial::ServerError)?,
         created_by: opt_str(map, "created_by_id")?.or(opt_str(map, "created_by")?),
         updated_by: opt_str(map, "updated_by_id")?.or(opt_str(map, "updated_by")?),
     })
