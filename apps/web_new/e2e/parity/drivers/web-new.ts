@@ -6096,6 +6096,12 @@ export class WebNewDriver implements ParityDriver {
     await this.favoriteRowByName(name).locator("a").first().click();
   }
 
+  async favoriteEntryHref(name: string): Promise<string | null> {
+    const anchor = this.favoriteRowByName(name).locator("a").first();
+    if ((await anchor.count()) === 0) return null;
+    return anchor.getAttribute("href");
+  }
+
   async openFavoritesFolder(name: string): Promise<void> {
     await this.favoriteRowByName(name).getByTestId("favorite-folder-toggle").click();
   }

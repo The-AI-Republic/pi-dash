@@ -7,9 +7,10 @@
 // project's default tab, a page favorite on its page, a cycle favorite on
 // its cycle page, and deleting a favorited cycle removes the favorite
 // entry on the server and in the sidebar.
-// Target alignment (NEWFRONT-295 gate): the unknown-type fallback step
+// Target alignment (NEWFRONT-295 gate): the unknown-type fallback now
 // runs live, subsuming NEWFRONT-144 — the old client crashed the whole
-// sidebar there, while web_new renders the fallback. Row: SHELL-057.
+// sidebar there (bug, recorded on the SHELL-057 row), while web_new must
+// render the entry with the workspace-root link. Row: SHELL-057.
 import { test, expect } from "../../fixtures";
 import {
   createFavorite,
@@ -26,6 +27,7 @@ import { specTags, specTitle } from "../../helpers/tags";
 const ROWS = ["SHELL-057"];
 const PAGE_NAME = "Parity Wiki Page";
 const CYCLE_NAME = "Parity Archive Cycle";
+const UNKNOWN_NAME = "Parity Unknown Link";
 
 test(
   specTitle(ROWS, "favorite entries resolve links by entity type"),
@@ -111,28 +113,38 @@ test(
       expect(server.map((fav) => fav.name)).not.toContain(CYCLE_NAME);
     });
 
-    await test.step("unknown entry types never reach the sidebar (NEWFRONT-144 fixed)", async () => {
-      // Live on web_new, subsuming NEWFRONT-144: the old client threw
-      // during render on unknown favorite types and took down the whole
-      // sidebar. Two layers cover it now: the API rejects unknown
-      // entity types (proven here — nothing to restore), and the client
-      // falls back to the workspace root if one ever arrives anyway
-      // (unit-proven in favoriteLinks.test.ts).
-      const result = await createFavorite(seed.workspaceSlug, session, {
-        entity_type: "warp_drive",
-        entity_identifier: "warp-1",
-        project_id: seed.projectId,
-        name: "Parity Unknown Link",
-      }).then(
-        () => "created",
-        (error: unknown) => (error instanceof Error ? error.message : String(error))
-      );
-      expect(result).toContain("HTTP 400");
-      await driver.openWorkspaceHome(seed.workspaceSlug);
-      await driver.setFavoritesOpen(true);
-      // The sidebar renders its core rows with no unknown entry stored.
-      await expect.poll(() => driver.sidebarLinkTexts(), { timeout: 30_000 }).toContain("Home");
-      await expect.poll(() => driver.favoriteEntryNames(), { timeout: 30_000 }).not.toContain("Parity Unknown Link");
+    await test.step("unknown entry types fall back to the workspace root (NEWFRONT-144)", async () => {
+      // The favorites API stores any entity_type string and serializes an
+      // unrecognized one as entity_data: null. The old client read details
+      // off that null during render and took the whole sidebar down; the
+      // recorded bug: step below pins that on the oracle. web_new must
+      // render the row with the stored name and the workspace-root link.
+      const unknown = await createFavorite(seed.workspaceSlug, session, {
+        entity_type: "dashboard",
+        name: UNKNOWN_NAME,
+      });
+      try {
+        // The API stores the unknown type as-is and serializes no entity
+        // payload for it, which is what makes the fallback reachable.
+        expect(unknown.entity_type).toBe("dashboard");
+        expect(unknown.entity_data).toBeNull();
+        if (driver.target !== "web_new") {
+          // The old app must not be loaded with this row: bug NEWFRONT-144,
+          // its details hook reads off the null entity during render and the
+          // error boundary takes the whole sidebar down. Intended (asserted
+          // for web_new below, and recorded on the SHELL-057 row): render
+          // the entry with the workspace-root link instead of crashing.
+          return;
+        }
+        await driver.openWorkspaceHome(seed.workspaceSlug);
+        await driver.setFavoritesOpen(true);
+        await expect.poll(() => driver.favoriteEntryNames(), { timeout: 30_000 }).toContain(UNKNOWN_NAME);
+        expect(await driver.favoriteEntryHref(UNKNOWN_NAME)).toBe(`/${seed.workspaceSlug}`);
+        // The sidebar survives: its built-in rows still render beside it.
+        await expect.poll(() => driver.sidebarLinkTexts(), { timeout: 30_000 }).toContain("Home");
+      } finally {
+        await deleteFavorite(seed.workspaceSlug, session, unknown.id);
+      }
     });
 
     await test.step("restore the seeded baseline", async () => {

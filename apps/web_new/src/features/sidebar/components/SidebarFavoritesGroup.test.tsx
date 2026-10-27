@@ -402,6 +402,28 @@ describe("SidebarFavoritesGroup", () => {
     expect(within(rowByName("Mystery")).getByRole("link").getAttribute("href")).toBe("/acme");
   });
 
+  it("renders an unknown-type row with a null entity and no identifiers (NEWFRONT-144)", async () => {
+    // The old sidebar threw here: an unrecognized entity_type serializes to
+    // entity_data: null, and the details hook read logo_props off it during
+    // render, taking the whole sidebar down. The row must survive with the
+    // stored name, the workspace-root link and the fallback glyph.
+    window.localStorage.setItem(FAVORITES_SECTION_OPEN_KEY, "1");
+    const unknown = row({
+      id: "923e4567-e89b-12d3-a456-426614174008",
+      entity_type: "dashboard",
+      entity_identifier: null,
+      entity_data: null,
+      name: "Dashboard X",
+      project_id: null,
+    });
+    setup({ list: [unknown] });
+    await waitFor(() => expect(entryNames()).toEqual(["Dashboard X"]));
+    const link = within(rowByName("Dashboard X")).getByRole("link");
+    expect(link.getAttribute("href")).toBe("/acme");
+    expect(link.querySelector("svg")).not.toBeNull();
+    expect(link.textContent).toBe("Dashboard X");
+  });
+
   it("renders page favorites on their detail page", async () => {
     window.localStorage.setItem(FAVORITES_SECTION_OPEN_KEY, "1");
     const page = row({ entity_type: "page", entity_identifier: PAGE_ID, name: "Wiki" });
