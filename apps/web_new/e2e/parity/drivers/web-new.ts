@@ -9499,11 +9499,17 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async layoutsSkeletonVisible(): Promise<boolean> {
-    return todo("layoutsSkeletonVisible");
+    // Initial loads paint list-loading; grouped pagination paints
+    // section-loading. The flat pagination sentinel is a footer, not a
+    // loader, so it stays out of the read.
+    return (
+      (await this.isShown(this.page.getByTestId("list-loading"))) ||
+      (await this.isShown(this.page.getByTestId("section-loading")))
+    );
   }
 
   async layoutsMutationSpinnerVisible(): Promise<boolean> {
-    return todo("layoutsMutationSpinnerVisible");
+    return this.isShown(this.page.getByTestId("issues-mutation-spinner"));
   }
 
   async layoutsRowHighlighted(issueName: string): Promise<boolean> {
@@ -9514,23 +9520,45 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async layoutsTempRowVisible(): Promise<boolean> {
-    return todo("layoutsTempRowVisible");
+    // Unconfirmed quick-adds stamp their block while pending.
+    return this.isShown(this.page.locator('article[data-temprow="true"]'));
   }
 
-  async layoutsStallIssuesGet(_delayMs: number): Promise<void> {
-    return todo("layoutsStallIssuesGet");
+  async layoutsStallIssuesGet(delayMs: number): Promise<void> {
+    // Per-request holds: slow hosts only shift the loader window, and
+    // non-GET traffic passes straight through.
+    await this.page.route(/\/issues\//, async (route) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      await route.continue();
+    });
   }
 
-  async layoutsStallIssueMutation(_delayMs: number): Promise<void> {
-    return todo("layoutsStallIssueMutation");
+  private layoutsStalledMutations = 0;
+
+  async layoutsStallIssueMutation(delayMs: number): Promise<void> {
+    this.layoutsStalledMutations = 0;
+    await this.page.route(/\/issues\//, async (route) => {
+      const method = route.request().method();
+      if (method !== "POST" && method !== "PATCH" && method !== "PUT") {
+        await route.continue();
+        return;
+      }
+      this.layoutsStalledMutations += 1;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      await route.continue();
+    });
   }
 
   async layoutsStalledMutationCount(): Promise<number> {
-    return todo("layoutsStalledMutationCount");
+    return this.layoutsStalledMutations;
   }
 
   async layoutsReleaseStalls(): Promise<void> {
-    return todo("layoutsReleaseStalls");
+    await this.page.unrouteAll({ behavior: "wait" });
   }
 
   async layoutsSheetCellSetDueDate(issueName: string, isoDate: string): Promise<void> {
