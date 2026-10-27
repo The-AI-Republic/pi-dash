@@ -13,6 +13,11 @@ sha2 = "0.11"
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio", "uuid", "chrono", "json"] }
 thiserror = "2"
 sea-query = { version = "0.32", default-features = false, features = ["backend-postgres", "with-uuid", "with-chrono"] }
+# ORM-01 (PIDASHCONV-1519, design D1): SeaORM 1.1 entities over the
+# existing sqlx pool. The 1.1 line unifies on the locked sqlx 0.8.6 /
+# sea-query 0.32.7 (`cargo tree -d` must show no second copy); 2.x would
+# move the whole workspace to sqlx 0.9 and is out of scope for stage 8.
+sea-orm = { version = "~1.1.20", default-features = false, features = ["sqlx-postgres", "runtime-tokio", "macros", "with-uuid", "with-chrono", "with-json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # F-07 filter kernels: NaiveDate arithmetic for the legacy relative-date

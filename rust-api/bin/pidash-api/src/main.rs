@@ -189,8 +189,12 @@ async fn serve(bind: &str) -> MainResult {
     if redis.is_some() {
         tracing::info!("redis handle ready (client connects lazily per operation)");
     }
+    // The shared SeaORM connection wraps the primary pool (ORM-01,
+    // design D5): one pool, two handles.
+    let orm = pidash_db::sea_orm_connection(pools.primary());
     let mut state = AppState::with_settings_and_edge(env!("CARGO_PKG_VERSION"), settings, edge)
-        .with_pools(pools);
+        .with_pools(pools)
+        .with_orm(orm);
     if let Some(handle) = redis {
         state = state.with_redis(handle);
     }
@@ -272,6 +276,7 @@ async fn worker(concurrency: u32) -> MainResult {
     pidash_jobs::register_oss_handlers(
         &mut registry,
         &pidash_jobs::OssWorkerCtx {
+            orm: pidash_db::sea_orm_connection(pools.primary()),
             pools: pools.clone(),
             settings,
             mongo,

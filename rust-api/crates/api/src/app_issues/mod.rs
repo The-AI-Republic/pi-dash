@@ -716,7 +716,12 @@ fn bind_sea_value<'q>(
         SeaValue::ChronoTime(_)
         | SeaValue::ChronoDateTime(_)
         | SeaValue::ChronoDateTimeLocal(_)
-        | SeaValue::ChronoDateTimeWithTimeZone(_) => Err(Denial::ServerError),
+        | SeaValue::ChronoDateTimeWithTimeZone(_)
+        // `Json` / `Array` exist only because ORM-01 enables
+        // `sea-query/with-json` workspace-wide (via sea-orm); these
+        // compilers emit scalars, never them.
+        | SeaValue::Json(_)
+        | SeaValue::Array(_, _) => Err(Denial::ServerError),
     }
 }
 

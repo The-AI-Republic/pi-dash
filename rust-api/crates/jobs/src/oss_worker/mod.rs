@@ -62,6 +62,10 @@ use crate::worker::Registry;
 pub struct OssWorkerCtx {
     /// The worker's pools (handlers close over clones).
     pub pools: Pools,
+    /// The shared SeaORM connection (ORM-01, design D5), built with
+    /// [`pidash_db::sea_orm_connection`] over the primary pool. The
+    /// handle wraps the pool (no second pool); handlers clone it.
+    pub orm: pidash_db::DatabaseConnection,
     /// The resolved settings (dispatch + runner + execute slices).
     pub settings: Settings,
     /// The Mongo sink for cleanup tasks, if MongoDB is configured.
@@ -73,6 +77,14 @@ pub struct OssWorkerCtx {
     /// executor). The OSS binary installs the CE default; the cloud
     /// binary installs its overlay implementation.
     pub assistant_seam: std::sync::Arc<dyn AssistantModelSeam>,
+}
+
+impl OssWorkerCtx {
+    /// The shared SeaORM connection. Domain services (stage 8) run
+    /// their writes on this handle's transactions.
+    pub fn orm(&self) -> &pidash_db::DatabaseConnection {
+        &self.orm
+    }
 }
 
 /// Register every OSS-owned task handler on `registry`.
@@ -121,8 +133,10 @@ pub struct OssWorkerCtx {
 /// // the client only parses here — it never dials.
 /// let mut settings = Settings::test_defaults();
 /// settings.redis.url = Some("redis://localhost:1/".to_owned());
+/// let pools = pidash_db::Pools::primary_only(pool);
 /// let ctx = OssWorkerCtx {
-///     pools: pidash_db::Pools::primary_only(pool),
+///     orm: pidash_db::sea_orm_connection(pools.primary()),
+///     pools,
 ///     settings,
 ///     mongo: None,
 ///     seed_dir: std::env::temp_dir(),
@@ -512,8 +526,10 @@ mod tests {
         // the client only parses here — it never dials.
         let mut settings = Settings::test_defaults();
         settings.redis.url = Some("redis://localhost:1/".to_owned());
+        let pools = Pools::primary_only(pool);
         let ctx = OssWorkerCtx {
-            pools: Pools::primary_only(pool),
+            orm: pidash_db::sea_orm_connection(pools.primary()),
+            pools,
             settings,
             mongo: None,
             seed_dir: std::env::temp_dir(),

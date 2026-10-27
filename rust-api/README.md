@@ -257,6 +257,62 @@ after the OSS baseline; tables prefixed `private_`; see
 Django-owned or OSS `rust_*` tables — the same rule Django's own
 `pi_dash_cloud/*/migrations/` directories follow.
 
+## SeaORM entities (ORM-01)
+
+SeaORM 1.1 (`~1.1.20`, design `.ai_design/rust_orm/design.md` D1) covers
+the §4 tables only. The entities live at `crates/db/src/entity/`; Django
+stays the schema owner — there are no SeaORM migrations.
+
+One pool, two handles (D5): the `DatabaseConnection` wraps the existing
+primary sqlx pool and opens no connections of its own. The binary builds
+it once per process:
+
+```rust
+let orm = pidash_db::sea_orm_connection(pools.primary());
+```
+
+It travels on the request and worker contexts next to the pools:
+
+- HTTP: `AppState::with_orm(orm)` at serve boot, read with
+  `state.orm()` (`Option<&DatabaseConnection>`, `None` until the binary
+  connects, like `pools()`). The shadow clone shares the handle.
+- Worker: the `orm` field of `pidash_jobs::OssWorkerCtx`, read with
+  `ctx.orm()`. The overlay binary sets it the same way when it builds
+  its context for `register_oss_handlers`.
+
+Regenerating after a Django sync (the `entity` module doc records the
+exact command and Django SHA of the last generation):
+
+```sh
+export DATABASE_URL=postgresql://<user>@127.0.0.1:<port>/<db-migrated-by-apps/api>
+sea-orm-cli generate entity --database-url "$DATABASE_URL" \
+  --output-dir <staging-dir> \
+  --tables issues,issue_sequences,issue_assignees,issue_comments,descriptions,\
+issue_relations,users,profiles,accounts,user_notification_preferences,workspaces,\
+workspace_members,projects,project_members,states,api_tokens,machine_token,\
+runner_session,assistant_user_llm_config,assistant_message
+```
+
+Then copy the 22 files over `crates/db/src/entity/` and re-apply the
+three mechanical cleanups (the generator rewrites them): delete the
+`belongs_to` relations (plus `Related` impls) pointing at tables outside
+the §4 set — the compiler lists them as unresolved `super::<table>`
+paths; restore the module doc on `mod.rs` with the new Django SHA; and
+restore the `#[cfg(test)] mod parity;` declaration. Finish with
+`cargo fmt`, the `entity::parity` tests below, and the usual clippy run.
+
+Schema parity: `crates/db/src/entity/parity.rs` compares every entity's
+table name, column names, column types and nullability with
+`information_schema.columns` on the migrated database, and fails on any
+drift (missing/extra column, renamed table, type or nullability change).
+Like every live-db test it skips when `DATABASE_URL` is unset and runs
+for real otherwise:
+
+```sh
+export DATABASE_URL=postgresql://<user>@127.0.0.1:<port>/<migrated-db>
+cargo test -p pidash-db entity::parity
+```
+
 ## Serializer + paginator kernel (F-07)
 
 Every domain port serializes and paginates through these kernels:
