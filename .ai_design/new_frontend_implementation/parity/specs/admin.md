@@ -874,7 +874,7 @@ the catch-all not-found screen like any unmatched path (so no page
 mounts, no key field or save renders, and no skeleton shows even while
 a configurations read is stalled), and the breadcrumb label map
 carries no image entry — `image` uppercases like any unknown segment.
-Two unit suites back that up outside the browser: the route test pins
+Three unit suites back that up outside the browser: the route test pins
 the fall-through and the sidebar absence, the shell test pins the
 label map, and the source-level absence scan rejects the Unsplash key
 and the image-page test ids in every admin module.
