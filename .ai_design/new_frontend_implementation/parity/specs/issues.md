@@ -637,10 +637,16 @@ only not-yet-used fields; the new condition joins with AND using that
 field's default operator (negated when the default is a negation).
 When every field is used the picker shows a single disabled exhaustion
 row; a misconfigured field reports an error toast and adds nothing.
-Operators come in plain and negated pairs (ISS-099), stored as a base
-operator plus a negation flag; single-operator properties lock their
-operator control (NEWFRONT-149, pinned). Oracle:
-`filters-rich.spec.ts`.
+Operators come in plain and negated pairs (ISS-099): every enum
+property (state, state group, priority, assignees, mentions,
+created-by, labels) offers `is` and `is not`, and a negated pick is
+stored as the base operator plus a negation flag (`{ not: {
+field__operator: value } }`). Date conditions keep both lookup
+families — `is` / `is not` for one day and `between` / `not between`
+for a range. In the old OSS app the enum controls render locked to
+their positive form because `allowNegative` is hard-coded false
+(bug: NEWFRONT-149, pinned); the rebuild follows this intended pair.
+Oracle: `filters-rich.spec.ts`.
 
 Value slots adapt to the field kind. Searchable single pick
 (ISS-100): lazy-loaded options, re-picking the current value clears

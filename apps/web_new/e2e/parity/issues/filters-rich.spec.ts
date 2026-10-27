@@ -254,11 +254,13 @@ test(
 
 const NEGATION_ROWS = ["ISS-099"];
 test(
-  specTitle(NEGATION_ROWS, "bug: priority operator is locked to Is with no negated form (NEWFRONT-149)"),
+  specTitle(NEGATION_ROWS, "bug:NEWFRONT-149 old OSS locks the enum operator to is; the rebuild offers is / is not"),
   { tag: specTags(NEGATION_ROWS) },
   async ({ driver, seed }) => {
-    // The row wants positive and negated operator forms (is / is not); the
-    // oracle locks single-operator properties instead, so no menu opens.
+    // The row wants plain and negated pairs (is / is not) stored as a base
+    // operator plus a negation flag. The old OSS app hard-codes
+    // allowNegative false, so its enum controls lock to the positive form
+    // (bug: NEWFRONT-149); apps/web_new ships the intended pair.
     await revealRichRow(driver, seed, { and: [{ state_group__in: "unstarted" }] });
     await driver.addRichCondition("Priority");
     // Value before removing the seeded condition: valueless conditions are
@@ -266,17 +268,55 @@ test(
     await driver.pickRichValues(["Urgent"]);
     await driver.removeRichCondition(0);
 
-    await test.step("the lone priority condition offers no operator menu", async () => {
+    await test.step("the lone priority condition behaves as its target ships it", async () => {
       expect(await driver.richConditionCount()).toBe(1);
-      expect(await driver.isSingleRichOperatorLocked()).toBe(true);
       const row = await driver.richFilterRowText();
       expect(row).toContain("Priority");
       expect(row).toContain("Urgent");
-      // The locked operator still stores the picked value normally.
-      await expectStoredRichFilters(seed, "priority", "urgent");
+
+      if (driver.target === "web_new") {
+        expect(await driver.isSingleRichOperatorLocked()).toBe(false);
+        const options = await driver.richOperatorOptions();
+        expect(options).toEqual(expect.arrayContaining(["is", "is not"]));
+        await driver.pickRichOperator("is not");
+        expect(await driver.richFilterRowText()).toContain("is not");
+        // Negation is stored as base operator + flag, not a separate lookup.
+        await expectStoredPriorityLeaf(seed, { negated: true });
+        return;
+      }
+
+      expect(await driver.isSingleRichOperatorLocked()).toBe(true);
+      // The locked operator still stores the picked value normally, with no
+      // negation wrapper around the leaf (the OSS lock's observable).
+      await expectStoredPriorityLeaf(seed, { negated: false });
     });
   }
 );
+
+function containsNotNode(expression: unknown): boolean {
+  if (Array.isArray(expression)) return expression.some(containsNotNode);
+  if (typeof expression !== "object" || expression === null) return false;
+  const record = expression as Record<string, unknown>;
+  return "not" in record || Object.values(record).some(containsNotNode);
+}
+
+/** Poll once for the lone priority leaf and whether a `not` node wraps it. */
+async function expectStoredPriorityLeaf(seed: SeedFacts, expected: { negated: boolean }) {
+  await expect
+    .poll(
+      async () => {
+        const stored = (await serverUserProperties(seed.workspaceSlug, seed.projectId, session)).rich_filters;
+        const json = JSON.stringify(stored);
+        return {
+          negated: containsNotNode(stored),
+          hasPriority: json.includes("priority"),
+          hasUrgent: json.includes("urgent"),
+        };
+      },
+      { timeout: 30_000 }
+    )
+    .toEqual({ ...expected, hasPriority: true, hasUrgent: true });
+}
 
 const SINGLE_ROWS = ["ISS-100"];
 test(

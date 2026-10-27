@@ -97,8 +97,11 @@ When every field is used the picker shows a single disabled
 exhaustion row. A misconfigured field reports an error toast and adds
 nothing.
 
-Operators come in plain and negated pairs, stored as a base operator
-plus a negation flag. Value slots adapt to the field kind: searchable
+Operators come in plain and negated pairs (ISS-099), stored as a base
+operator plus a negation flag; every enum property offers `is` and
+`is not`, while date conditions keep both lookup families (`is` / `is
+not` for one day, `between` / `not between` for a range). Value slots
+adapt to the field kind: searchable
 single pick (re-picking the current value clears it; opens by itself
 when empty; dash placeholder when unset), searchable multi pick (first
 two picks as chips, overflow counted; same empty behavior), single date
@@ -119,8 +122,10 @@ Oracle deviations (observed live on the dev stack; the rebuild follows
 the rows, not these bugs): the header toggle is inert in both
 directions, so the row follows the stored expression instead — a
 non-empty expression shows it on load and clearing the last condition
-hides it (NEWFRONT-146). Single-operator properties lock their
-operator control, so no negated form is offered (NEWFRONT-149). No
+hides it (NEWFRONT-146). In the old OSS build the enum operator
+controls render locked to their positive form (`allowNegative` is
+hard-coded false, bug: NEWFRONT-149); the rebuild offers the `is` /
+`is not` pair described above. No
 chip bar renders on issues surfaces; removal runs through each
 condition's own control (NEWFRONT-148). The legacy dropdown chrome
 (ISS-082–095 Acceptance) renders on no issues surface — the picker
