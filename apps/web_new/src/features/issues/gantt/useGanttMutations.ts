@@ -17,6 +17,7 @@ import { notifyError } from "../../../shared/shell/index.js";
 import type { IssueListItem } from "@pidash/api-client";
 import { withIssueDates, type IssueDatesInput } from "../api/dates.js";
 import { issueKeys } from "../api/keys.js";
+import { entityListsKeyPart, type IssuesEntity } from "../prefs/entities.js";
 
 /** Notice when a gesture's date write is refused. */
 export const GANTT_DATES_FAILED_TITLE = "Couldn't save the dates";
@@ -60,12 +61,24 @@ export interface GanttMutations {
  * resize and plant differ only in which endpoint receives the same pair;
  * reorder is its own PATCH.
  */
-export function useGanttMutations(workspaceSlug: string, projectId: string): GanttMutations {
+export function useGanttMutations(
+  workspaceSlug: string,
+  projectId: string,
+  entity: IssuesEntity = { scope: "project", projectId }
+): GanttMutations {
   const queryClient = useQueryClient();
-  const listsPrefix = issueKeys.lists(workspaceSlug, projectId);
+  // The chart mounts on project, cycle and module timelines, and each
+  // entity's rows live under its own list prefix. Patching only the
+  // project prefix would leave a cycle or module bar free to snap back
+  // to a pre-drop read (ISS-051).
+  const listsPrefix = issueKeys.lists(workspaceSlug, ...entityListsKeyPart(entity));
 
   const dates = useMutation<void, Error, { issueId: string; input: IssueDatesInput; batch: boolean }>({
     mutationFn: async ({ issueId, input, batch }) => {
+      // A list read that started before the drop can resolve after the
+      // optimistic paint and restore the pre-drag dates. Stop those reads
+      // first so the bar settles on the dates this write commits (ISS-051).
+      await queryClient.cancelQueries({ queryKey: listsPrefix });
       const snapshots = snapshotQueries(queryClient, listsPrefix);
       for (const snapshot of snapshots) {
         queryClient.setQueryData(snapshot.queryKey, withIssueDates(snapshot.data, issueId, input));
@@ -84,6 +97,14 @@ export function useGanttMutations(workspaceSlug: string, projectId: string): Gan
             start_date: input.startDate,
             target_date: input.endDate,
           });
+        }
+        // The batch endpoint commits this exact pair. Reassert it after the
+        // write in case a read raced the request's success (ISS-051).
+        for (const snapshot of snapshots) {
+          queryClient.setQueryData(
+            snapshot.queryKey,
+            withIssueDates(queryClient.getQueryData(snapshot.queryKey), issueId, input)
+          );
         }
       } catch (error) {
         rollbackSnapshots(queryClient, snapshots);

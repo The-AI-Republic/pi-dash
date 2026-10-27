@@ -258,6 +258,7 @@ export function CycleDetailContent({
                   issues={flatResults}
                   totalCount={firstPage.total_count}
                   prefs={prefs}
+                  entity={entity}
                   completedCycle={finished}
                   peekKey={peekKey}
                   onPeekChange={onPeekChange}

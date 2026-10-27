@@ -14,6 +14,7 @@ import * as React from "react";
 import { ListSkeleton } from "../loaders/ListSkeleton.js";
 import { useWeekStart } from "../dropdowns/weekStart.js";
 import type { DisplayPrefs } from "../prefs/displayPrefs.js";
+import type { IssuesEntity } from "../prefs/entities.js";
 import type { LayoutPeekProps } from "../peek/usePeekAddress.js";
 
 const LazyGanttLayout = React.lazy(() =>
@@ -38,6 +39,8 @@ export interface GanttTimelineProps extends LayoutPeekProps {
    * stays hidden like a completed cycle's (MOD-030, NEWFRONT-802).
    */
   completedModule?: boolean;
+  /** The entity whose list cache holds these rows (ISS-002, ISS-051). */
+  entity?: IssuesEntity | undefined;
   /** Controlled peeked work-item id (the route owns the URL param). */
   /** Receives the selection the route should write, or null on close. */
   /** Peeked project from the URL, when it differs from the route. */
@@ -53,6 +56,7 @@ export function GanttTimeline({
   prefs,
   completedCycle = false,
   completedModule = false,
+  entity,
   peekKey,
   onPeekChange,
   peekProjectId,
@@ -70,6 +74,7 @@ export function GanttTimeline({
         weekStart={weekStart}
         completedCycle={completedCycle}
         completedModule={completedModule}
+        entity={entity}
         peekKey={peekKey}
         onPeekChange={onPeekChange}
         peekProjectId={peekProjectId}

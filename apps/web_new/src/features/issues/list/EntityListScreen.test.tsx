@@ -117,6 +117,7 @@ vi.mock("../gantt/GanttTimeline.js", () => ({
     <div
       data-testid="gantt-layout"
       data-total={String(props.totalCount)}
+      data-entity={JSON.stringify(props.entity ?? null)}
       data-module-completed={String(props.completedModule ?? false)}
       data-peek={String(props.peekKey ?? "")}
       data-peek-project={String(props.peekProjectId ?? "")}
@@ -788,6 +789,20 @@ describe("EntityListScreen", () => {
     const timeline = await within(screen.getByTestId("gantt-layout-slot")).findByTestId("gantt-layout");
     expect(timeline).toHaveAttribute("data-total", "7");
     expect(timeline).toHaveAttribute("data-module-completed", "true");
+  });
+
+  it("hands the entity's list prefix to the timeline so a drop patches it (ISS-051)", async () => {
+    setup({
+      entity: { scope: "module", projectId: PROJECT, moduleId: MODULE },
+      moduleId: MODULE,
+      title: "Auth",
+    });
+    const timeline = await within(screen.getByTestId("gantt-layout-slot")).findByTestId("gantt-layout");
+    expect(JSON.parse(timeline.getAttribute("data-entity") ?? "null")).toEqual({
+      scope: "module",
+      projectId: PROJECT,
+      moduleId: MODULE,
+    });
   });
 
   it("binds the peek address into the calendar, sheet and timeline (ISS-167)", async () => {
