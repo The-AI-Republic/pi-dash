@@ -6,11 +6,14 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { Issue } from "@pidash/api-client";
+import { ToastHost } from "@pidash/kit";
 import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { edition } from "../../../core/edition/index.js";
+import { getToastManager } from "../../../shared/shell/toaster.js";
+import { DESCRIPTION_SAVE_FAILED_TITLE } from "../api/mutations.js";
 import { ISSUE_DEDUPE_FLAG } from "../edition/flags.js";
 import { EMOJI_PICKER_LABEL } from "../reactions/EmojiPicker.js";
 import { ISSUE_REACTIONS_LABEL } from "../reactions/IssueReactions.js";
@@ -237,12 +240,17 @@ describe("DetailMainColumn", () => {
   it("reverts the view when a restore is refused", async () => {
     const user = userEvent.setup();
     renderColumn({}, { patchStatus: 403 });
+    render(<ToastHost manager={getToastManager()} />);
     await user.click(await screen.findByRole("button", { name: /Edited by/ }));
     await user.click(await screen.findByRole("menuitem", { name: "Ada L 1 hour ago" }));
     const dialog = await screen.findByRole("dialog", { name: "Description history" });
     await within(dialog).findByText("version one");
     await user.click(within(dialog).getByRole("button", { name: "Restore" }));
     await waitFor(() => expect(descriptionView()).toHaveTextContent("Current words"));
+    // The refusal is loud, never silent (ISS-147): the mutation's notice
+    // carries the save-failed title plus the server's refusal detail.
+    expect(await screen.findByText(DESCRIPTION_SAVE_FAILED_TITLE)).toBeInTheDocument();
+    expect(screen.getByText(/Request failed with status 403/)).toBeInTheDocument();
   });
 
   it("reads only for guests, with no history line", () => {
