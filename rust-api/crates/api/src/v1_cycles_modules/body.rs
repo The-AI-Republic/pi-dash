@@ -488,7 +488,7 @@ fn cmp_index_text(a: &str, b: &str) -> std::cmp::Ordering {
 /// Bytes decode as latin-1 (total over what hyper delivers): uvicorn and
 /// wsgiref both surface obs-text bytes as latin-1 chars, so Django's 415
 /// echoes them verbatim (live: `text/pl\xe9in` echoes U+00E9).
-fn header_str(headers: &HeaderMap, name: &str) -> String {
+pub(crate) fn header_str(headers: &HeaderMap, name: &str) -> String {
     headers
         .get(name)
         .map(|v| v.as_bytes().iter().map(|b| *b as char).collect())
