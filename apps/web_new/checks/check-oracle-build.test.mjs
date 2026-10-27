@@ -2,10 +2,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Tests for the oracle build-cost check (NEWFRONT-134) and its oracle
-// capacity default guard (NEWFRONT-133). Hermetic: the file reader is
-// injected from in-memory fixtures, so no test touches the real tree (the
-// check itself runs against the real tree in CI).
+// capacity default guard (NEWFRONT-133). The invariant tests use in-memory
+// fixtures via the injected reader; the outcome test reads the real
+// parity-up.sh and evaluates its selection block under bash, because a
+// fixture there once passed while the shipped script booted the dev oracle.
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { runOracleBuildCheck } from "./check-oracle-build.mjs";
 
@@ -13,6 +17,7 @@ const DOCKERFILE = "apps/web_new/e2e/parity/stack/Dockerfile.oracle";
 const DOCKERFILE_PROD = "apps/web_new/e2e/parity/stack/Dockerfile.oracle-prod";
 const BRING_UP = "apps/web_new/e2e/parity/stack/parity-up.sh";
 const README = "apps/web_new/e2e/parity/stack/README.md";
+const appRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 // Built at runtime, like the check does, so this file never literally
 // contains the banned line.
@@ -32,20 +37,35 @@ const goodDockerfile = [
 
 const goodProdDockerfile = ["FROM node:22-slim", "COPY apps/web apps/web", ""].join("\n");
 
+// Mirrors the shipped selection block: production first, the dev opt-in
+// second, then the cloud edition's own oracle.
+const PROD_ASSIGNMENTS = [
+  "export ORACLE_SERVICE",
+  'ORACLE_SERVICE="oracle-prod"',
+  "export ORACLE_UPSTREAM",
+  'ORACLE_UPSTREAM="oracle-prod:3000"',
+  "export ORACLE_ADMIN_SERVICE",
+  'ORACLE_ADMIN_SERVICE="oracle-admin-prod"',
+  "export ORACLE_ADMIN_UPSTREAM",
+  'ORACLE_ADMIN_UPSTREAM="oracle-admin-prod:3000"',
+];
+const DEV_BRANCH = [
+  'if [ "${PARITY_ORACLE_MODE:-prod}" = "dev" ]; then',
+  '  ORACLE_SERVICE="oracle"',
+  '  ORACLE_UPSTREAM="oracle:3000"',
+  '  ORACLE_ADMIN_SERVICE="oracle-admin"',
+  '  ORACLE_ADMIN_UPSTREAM="oracle-admin:3000"',
+  "fi",
+];
+
 const goodBringUp = [
   "#!/usr/bin/env bash",
   "# usage: parity-up.sh [--rebuild]",
   'if [ "${1:-}" = "--rebuild" ]; then',
   "  PARITY_REBUILD=1",
   "fi",
-  "export ORACLE_SERVICE",
-  'ORACLE_SERVICE="oracle-prod"',
-  "export ORACLE_UPSTREAM",
-  'ORACLE_UPSTREAM="oracle-prod:3000"',
-  'if [ "${PARITY_ORACLE_MODE:-prod}" = "dev" ]; then',
-  '  ORACLE_SERVICE="oracle"',
-  '  ORACLE_UPSTREAM="oracle:3000"',
-  "fi",
+  ...PROD_ASSIGNMENTS,
+  ...DEV_BRANCH,
   "# Preflight: ownership and published ports.",
   'echo "[parity] warming the oracle (entry + project routes)"',
   "",
@@ -150,8 +170,10 @@ describe("check-oracle-build", () => {
       const files = goodTree();
       files[BRING_UP] = goodBringUp.replace("${PARITY_ORACLE_MODE:-prod}", "${PARITY_ORACLE_MODE:-dev}");
       const failures = check(files);
-      expect(failures).toHaveLength(1);
-      expect(failures[0]).toContain("defaults to 'dev'");
+      // The text guard names the flipped fallback; the bash evaluation
+      // also reports that a bare bring-up now boots the dev server.
+      expect(failures.some((f) => f.includes("defaults to 'dev'"))).toBe(true);
+      expect(failures.some((f) => f.includes("bare bring-up resolves to web 'oracle'"))).toBe(true);
     });
 
     it("flags an inverted assignment that moves the prod oracle into the dev branch", () => {
@@ -164,8 +186,17 @@ describe("check-oracle-build", () => {
         "fi",
         "export ORACLE_SERVICE",
         'ORACLE_SERVICE="oracle"',
+        "export ORACLE_UPSTREAM",
+        'ORACLE_UPSTREAM="oracle:3000"',
+        "export ORACLE_ADMIN_SERVICE",
+        'ORACLE_ADMIN_SERVICE="oracle-admin"',
+        "export ORACLE_ADMIN_UPSTREAM",
+        'ORACLE_ADMIN_UPSTREAM="oracle-admin:3000"',
         'if [ "${PARITY_ORACLE_MODE:-prod}" = "dev" ]; then',
         '  ORACLE_SERVICE="oracle-prod"',
+        '  ORACLE_UPSTREAM="oracle-prod:3000"',
+        '  ORACLE_ADMIN_SERVICE="oracle-admin-prod"',
+        '  ORACLE_ADMIN_UPSTREAM="oracle-admin-prod:3000"',
         "fi",
         "# Preflight: ownership and published ports.",
         'echo "[parity] warming the oracle (entry + project routes)"',
@@ -202,13 +233,15 @@ describe("check-oracle-build", () => {
 
     it("fails when the dev opt-in disappears", () => {
       const files = goodTree();
-      files[BRING_UP] = goodBringUp.replace(
-        'if [ "${PARITY_ORACLE_MODE:-prod}" = "dev" ]; then\n  ORACLE_SERVICE="oracle"\n  ORACLE_UPSTREAM="oracle:3000"\nfi\n',
-        ""
-      );
+      files[BRING_UP] = goodBringUp.replace(`${DEV_BRANCH.join("\n")}\n`, "");
       const failures = check(files);
-      expect(failures).toHaveLength(1);
-      expect(failures[0]).toContain("missing the dev opt-in guard");
+      // Without the switch, PARITY_ORACLE_MODE=dev can no longer reach the
+      // dev server either — both the missing guard and the outright
+      // evaluation say so.
+      expect(failures.some((f) => f.includes("missing the dev opt-in guard"))).toBe(true);
+      expect(failures.some((f) => f.includes("PARITY_ORACLE_MODE=dev bring-up resolves to web 'oracle-prod'"))).toBe(
+        true
+      );
     });
 
     it("names the wrong fallback when the opt-in survives with a different default", () => {
@@ -230,28 +263,102 @@ describe("check-oracle-build", () => {
       expect(failures.every((f) => f.includes(README))).toBe(true);
     });
 
-    it("proves the documented bare default really selects the prod service", () => {
-      // Run the real selection block under bash with PARITY_ORACLE_MODE
-      // unset and set to dev. This is the behaviour the guard protects,
-      // proven rather than inferred from the file's text.
-      const script = [
-        "set -euo pipefail",
-        goodBringUp
-          .split("\n")
-          .filter((line) => !line.startsWith("#"))
-          .filter((line) => !line.startsWith("echo "))
-          .join("\n"),
-        'printf "%s\\n" "$ORACLE_SERVICE"',
-      ].join("\n");
+    it("catches an override after the mode switch that silently boots the dev oracle", () => {
+      const files = goodTree();
+      files[BRING_UP] = goodBringUp.replace(
+        "# Preflight: ownership and published ports.",
+        'ORACLE_SERVICE="oracle"\nORACLE_UPSTREAM="oracle:3000"\n# Preflight: ownership and published ports.'
+      );
+      const failures = check(files);
+      expect(failures).toHaveLength(2);
+      expect(failures.every((f) => f.includes("resolves to web 'oracle'"))).toBe(true);
+    });
+
+    it("catches a commented-out production assignment", () => {
+      const files = goodTree();
+      files[BRING_UP] = goodBringUp.replace('ORACLE_SERVICE="oracle-prod"', '# ORACLE_SERVICE="oracle-prod"');
+      const failures = check(files);
+      expect(failures.some((f) => f.includes("web '<unset>'"))).toBe(true);
+    });
+
+    it("catches an upstream that still points at the dev server", () => {
+      const files = goodTree();
+      files[BRING_UP] = goodBringUp.replace('ORACLE_UPSTREAM="oracle-prod:3000"', 'ORACLE_UPSTREAM="oracle:3000"');
+      const failures = check(files);
+      expect(failures.some((f) => f.includes("-> 'oracle:3000'"))).toBe(true);
+    });
+
+    it("catches an admin oracle that follows a different mode than the web oracle", () => {
+      const files = goodTree();
+      files[BRING_UP] = goodBringUp.replace(
+        'ORACLE_ADMIN_SERVICE="oracle-admin-prod"',
+        'ORACLE_ADMIN_SERVICE="oracle-admin"'
+      );
+      const failures = check(files);
+      expect(failures).toHaveLength(2);
+      expect(failures.every((f) => f.includes("admin 'oracle-admin' -> 'oracle-admin-prod:3000'"))).toBe(true);
+    });
+
+    it("rejects a selection block bash cannot evaluate", () => {
+      const files = goodTree();
+      files[BRING_UP] = goodBringUp.replace(`fi\n# Preflight:`, `if true\n# Preflight:`);
+      const failures = check(files);
+      expect(failures.some((f) => f.includes("could not evaluate"))).toBe(true);
+    });
+
+    it("reports a selection block that does not print every oracle variable", () => {
+      const files = goodTree();
+      files[BRING_UP] = goodBringUp.replace("export ORACLE_ADMIN_UPSTREAM", "export ORACLE_ADMIN_UPSTREAM\nexit 0");
+      const failures = check(files);
+      expect(failures.some((f) => f.includes("printed 1 of 4 oracle variables"))).toBe(true);
+    });
+
+    it("proves the shipped parity-up.sh really selects the prod service by default", () => {
+      // Read the real script, not a fixture: a fixture here once passed
+      // while the shipped script (with an override after the `fi`) booted
+      // the dev oracle. Evaluate its selection block the way a bring-up
+      // does — under bash, mode unset / prod / dev — and assert the
+      // resulting web and admin oracle wiring.
+      const script = readFileSync(join(appRoot, "e2e/parity/stack/parity-up.sh"), "utf8");
+      const block = script.slice(script.indexOf("export ORACLE_SERVICE"), script.indexOf("# Preflight:"));
+      expect(block).toContain('ORACLE_SERVICE="oracle-prod"');
+
       const resolve = (mode) => {
         const env = { ...process.env };
         delete env.PARITY_ORACLE_MODE;
+        // The block reads the edition the script resolves further up.
+        env.PARITY_ORACLE_EDITION = "oss";
         if (mode !== null) env.PARITY_ORACLE_MODE = mode;
-        return execFileSync("bash", ["-c", script], { env, encoding: "utf8" }).trim();
+        const out = execFileSync(
+          "bash",
+          [
+            "-c",
+            [
+              "set -euo pipefail",
+              block,
+              'printf "%s\\n" "$ORACLE_SERVICE" "$ORACLE_UPSTREAM" "$ORACLE_ADMIN_SERVICE" "$ORACLE_ADMIN_UPSTREAM"',
+            ].join("\n"),
+          ],
+          { env, encoding: "utf8" }
+        );
+        const [service, upstream, adminService, adminUpstream] = out.trim().split("\n");
+        return { service, upstream, adminService, adminUpstream };
       };
-      expect(resolve(null)).toBe("oracle-prod");
-      expect(resolve("prod")).toBe("oracle-prod");
-      expect(resolve("dev")).toBe("oracle");
+
+      const prod = {
+        service: "oracle-prod",
+        upstream: "oracle-prod:3000",
+        adminService: "oracle-admin-prod",
+        adminUpstream: "oracle-admin-prod:3000",
+      };
+      expect(resolve(null)).toEqual(prod);
+      expect(resolve("prod")).toEqual(prod);
+      expect(resolve("dev")).toEqual({
+        service: "oracle",
+        upstream: "oracle:3000",
+        adminService: "oracle-admin",
+        adminUpstream: "oracle-admin:3000",
+      });
     });
   });
 });

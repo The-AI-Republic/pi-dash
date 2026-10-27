@@ -15,6 +15,7 @@
 // the dev server is opt-in. A bare bring-up that quietly went back to
 // the dev server would reintroduce the OOM, so the default is checked
 // here alongside the build-cost invariants.
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -30,7 +31,6 @@ const README = "apps/web_new/e2e/parity/stack/README.md";
 // parameter expansion must therefore fall back to `prod`, never `dev`.
 const DEV_OPT_IN = '[ "${PARITY_ORACLE_MODE:-prod}" = "dev" ]';
 const PROD_SELECTION = 'ORACLE_SERVICE="oracle-prod"';
-const DEV_SELECTION = 'ORACLE_SERVICE="oracle"';
 // From the oracle-selection assignments down to the preflight section.
 // Only this block decides which frontend serves a bare bring-up.
 const SELECTION_START = "export ORACLE_SERVICE";
@@ -71,6 +71,98 @@ function selectionBlock(text) {
   return text.slice(start, end);
 }
 
+const FIELD_NAMES = ["service", "upstream", "adminService", "adminUpstream"];
+
+// The service AND the upstream the proxy dials: a prod service name with
+// a dev upstream still routes every scenario to the dev server.
+const EXPECTED = {
+  bare: {
+    service: "oracle-prod",
+    upstream: "oracle-prod:3000",
+    adminService: "oracle-admin-prod",
+    adminUpstream: "oracle-admin-prod:3000",
+  },
+  prod: {
+    service: "oracle-prod",
+    upstream: "oracle-prod:3000",
+    adminService: "oracle-admin-prod",
+    adminUpstream: "oracle-admin-prod:3000",
+  },
+  dev: {
+    service: "oracle",
+    upstream: "oracle:3000",
+    adminService: "oracle-admin",
+    adminUpstream: "oracle-admin:3000",
+  },
+};
+
+// Evaluate the real selection block the way a bring-up does: under bash,
+// with the mode and edition variables unset or set. Asserting the file's
+// text is not enough — an unconditional override after the `fi`, a
+// commented-out base assignment or a flipped ORACLE_UPSTREAM all leave the
+// text intact while a bare bring-up boots the OOM-prone dev server
+// (NEWFRONT-133).
+function resolveSelection(block, mode, edition = "oss") {
+  const script = [
+    "set -euo pipefail",
+    block,
+    'printf "%s\\n" "${ORACLE_SERVICE-<unset>}" "${ORACLE_UPSTREAM-<unset>}" "${ORACLE_ADMIN_SERVICE-<unset>}" "${ORACLE_ADMIN_UPSTREAM-<unset>}"',
+  ].join("\n");
+  const env = { ...process.env };
+  delete env.PARITY_ORACLE_MODE;
+  env.PARITY_ORACLE_EDITION = edition;
+  if (mode !== null) env.PARITY_ORACLE_MODE = mode;
+  let out;
+  try {
+    out = execFileSync("bash", ["-c", script], { env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  } catch (error) {
+    return { error: String(error) };
+  }
+  const fields = out.trim().split("\n");
+  if (fields.length !== FIELD_NAMES.length) {
+    return { error: `the selection block printed ${fields.length} of ${FIELD_NAMES.length} oracle variables` };
+  }
+  const [service, upstream, adminService, adminUpstream] = fields;
+  return { service, upstream, adminService, adminUpstream };
+}
+
+function resolvedFailure(label, actual, expected) {
+  if (actual.error !== undefined) {
+    return `${BRING_UP}: could not evaluate the ${label} oracle selection (${actual.error})`;
+  }
+  const matches = FIELD_NAMES.every((key) => actual[key] === expected[key]);
+  if (matches) return null;
+  return `${BRING_UP}: a ${label} bring-up resolves to web '${actual.service}' -> '${actual.upstream}' and admin '${actual.adminService}' -> '${actual.adminUpstream}', expected '${expected.service}' -> '${expected.upstream}' and '${expected.adminService}' -> '${expected.adminUpstream}' (a silent flip away from the memory-safe production oracle reintroduces the dev-server OOM, NEWFRONT-133)`;
+}
+
+// The selection block's text guard: the explicit dev opt-in must stay
+// exactly as documented, and the production assignment must sit before
+// the mode switch so the dev branch can only override it, never supply it.
+function checkGuardText(block) {
+  const failures = [];
+  const guardAt = block.indexOf(DEV_OPT_IN);
+  if (guardAt < 0) {
+    const loose = block.match(/\[ "\$\{PARITY_ORACLE_MODE:-([a-z]+)\}" = "dev" \]/);
+    failures.push(
+      loose
+        ? `${BRING_UP}: PARITY_ORACLE_MODE defaults to '${loose[1]}', not 'prod' (a bare bring-up must use the production oracle, NEWFRONT-133)`
+        : `${BRING_UP}: missing the dev opt-in guard '${DEV_OPT_IN}' (a bare bring-up must use the production oracle)`
+    );
+    return failures;
+  }
+  if (block.slice(guardAt).includes(PROD_SELECTION)) {
+    failures.push(
+      `${BRING_UP}: '${PROD_SELECTION}' appears in the dev branch — the default is inverted (NEWFRONT-133)`
+    );
+  }
+  if (!block.slice(0, guardAt).includes(PROD_SELECTION)) {
+    failures.push(
+      `${BRING_UP}: '${PROD_SELECTION}' must be assigned before the mode switch so a bare bring-up serves the production oracle`
+    );
+  }
+  return failures;
+}
+
 function checkOracleDefault(bringUp, readme) {
   const failures = [];
   const block = selectionBlock(bringUp);
@@ -79,36 +171,18 @@ function checkOracleDefault(bringUp, readme) {
       `${BRING_UP}: oracle selection block not found (looked for '${SELECTION_START}' before '${SELECTION_END}')`
     );
   } else {
-    // A bare bring-up must select the production build. Check the base
-    // assignments before the mode switch, not just anywhere in the
-    // block: a prod assignment inside the dev branch would invert the
-    // default.
-    const guardAt = block.indexOf(DEV_OPT_IN);
-    if (guardAt < 0) {
-      const loose = block.match(/\[ "\$\{PARITY_ORACLE_MODE:-([a-z]+)\}" = "dev" \]/);
-      failures.push(
-        loose
-          ? `${BRING_UP}: PARITY_ORACLE_MODE defaults to '${loose[1]}', not 'prod' (a bare bring-up must use the production oracle, NEWFRONT-133)`
-          : `${BRING_UP}: missing the dev opt-in guard '${DEV_OPT_IN}' (a bare bring-up must use the production oracle)`
-      );
-    } else {
-      const base = block.slice(0, guardAt);
-      const devBranch = block.slice(guardAt);
-      if (!base.includes(PROD_SELECTION)) {
-        failures.push(
-          `${BRING_UP}: '${PROD_SELECTION}' must be assigned before the mode switch so a bare bring-up serves the production oracle`
-        );
-      }
-      if (!devBranch.includes(DEV_SELECTION)) {
-        failures.push(
-          `${BRING_UP}: '${DEV_SELECTION}' must stay in the dev branch so PARITY_ORACLE_MODE=dev still selects the dev server`
-        );
-      }
-      if (devBranch.includes(PROD_SELECTION)) {
-        failures.push(
-          `${BRING_UP}: '${PROD_SELECTION}' appears in the dev branch — the default is inverted (NEWFRONT-133)`
-        );
-      }
+    failures.push(...checkGuardText(block));
+    // Prove the outcome, not just the text: a bare bring-up (mode unset)
+    // and an explicit `prod` must both serve the production oracle; `dev`
+    // is the only mode that may serve the dev server, and it must move the
+    // upstream with the service.
+    for (const [label, mode] of [
+      ["bare", null],
+      ["PARITY_ORACLE_MODE=prod", "prod"],
+      ["PARITY_ORACLE_MODE=dev", "dev"],
+    ]) {
+      const failure = resolvedFailure(label, resolveSelection(block, mode), EXPECTED[mode ?? "bare"]);
+      if (failure !== null) failures.push(failure);
     }
   }
   // The README is the operator's only warning that dev mode is the

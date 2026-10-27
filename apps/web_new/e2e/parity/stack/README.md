@@ -176,9 +176,11 @@ Keep the production oracle as the default. On a small host (the shared
 runner's container runtime is capped at roughly 3.8 GB) the dev server's
 one-time dependency-bundling burst can exhaust memory and be killed before
 it serves a single request, which then looks like a scenario failure but is
-not (NEWFRONT-133). `check-oracle-build.mjs` fails the build if a bare
-bring-up stops selecting `oracle-prod`, so a silent flip back to the dev
-server cannot land unnoticed.
+not (NEWFRONT-133). `check-oracle-build.mjs` evaluates this script's real
+selection block under bash with the mode unset, set to `prod` and set to
+`dev`, and fails if a bare bring-up resolves to anything but
+`oracle-prod` (web and admin, service and upstream alike), so a silent
+flip back to the dev server cannot land unnoticed.
 
 One switch selects both frontends: the admin oracle (`oracle-admin-prod`
 by default, `oracle-admin` under `PARITY_ORACLE_MODE=dev`) always matches
