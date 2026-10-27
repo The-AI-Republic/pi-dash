@@ -129,8 +129,7 @@ use pidash_db::runner_sessions::RunnerSession as DbRunnerSession;
 use pidash_services::runner_enroll::tokens::build_key_ring;
 use pidash_services::runner_runs::finalization as finalize_kernel;
 use pidash_services::runner_runs::{LifecycleEffect, SetValue};
-use pidash_services::runner_sessions::drain as drain_kernel;
-use pidash_services::runner_sessions::guards::{alive_threshold, heartbeat_grace};
+use pidash_services::runner_sessions::guards::heartbeat_grace;
 use pidash_services::runner_sessions::pubsub as pubsub_kernel;
 use pidash_services::runner_sessions::pubsub::PubsubStore;
 use pidash_services::runner_sessions::session_service as session_kernel;
@@ -1090,252 +1089,58 @@ impl PubsubStore for PollPubsubStore<'_, '_> {
 
 /// Log a drain-path cause before it erases into `()` (PIDASHCONV-1563):
 /// the transition fire maps `()` to a 500 with no other trace, so the
-/// storage error must land here while it is still in hand.
+/// storage error must land here while it is still in hand. The dispatch
+/// itself moved to the public `live_drains` executor (OVL-06), so the
+/// per-step sites collapse into the thin caller's single erasure and
+/// the [`DrainError`][pidash_services::runner_sessions::live_drains::DrainError]
+/// `Display` carries the cause.
 fn drain_error<E: std::fmt::Display>(error: E, site: &str, pod_id: &Uuid) {
     tracing::error!(%error, site, %pod_id, "runner drain failure");
-}
-
-/// Dispatch one [`drain_kernel::DrainEffect`] after commit, logging
-/// the swallowed-failure lines. Only the offline error propagates —
-/// the row stays `ASSIGNED` while the caller observes the failure,
-/// exactly as Python (TRACE bug 2).
-async fn dispatch_assign(
-    pool: &sqlx::postgres::PgPool,
-    state: &AppState,
-    effect: &drain_kernel::DrainEffect,
-) -> Result<(), ()> {
-    let pubsub = PollPubsubStore::new(pool, state);
-    let drain_kernel::DrainEffect::SendAssign { runner_id, message } = effect;
-    let outcome = pubsub_kernel::send_to_runner(&pubsub, *runner_id, message)
-        .await
-        .map_err(|error| {
-            tracing::error!(
-                %error,
-                site = "drain-send-assign",
-                %runner_id,
-                "runner drain failure"
-            );
-        })?;
-    for warning in &outcome.warnings {
-        tracing::warn!("{warning}");
-    }
-    Ok(())
-}
-
-/// `drain_for_runner_by_id` (`matcher.py:298-304`): the by-id lookup
-/// (miss ⇒ `Ok(false)`), else the locked drain. Runner-row indices
-/// follow the 32-column projection (`id` 0, `owner_id` 1, `pod_id` 4,
-/// `provisioning` 7, `visibility` 8); run-row indices the 41-column
-/// image (`id` 0, `work_item_id` 7, `prompt` 19, `run_config` 23).
-async fn drain_for_runner_by_id(
-    pool: &sqlx::postgres::PgPool,
-    state: &AppState,
-    runner_id: Uuid,
-) -> Result<bool, ()> {
-    use sqlx::Row;
-    let found: Option<sqlx::postgres::PgRow> =
-        sqlx::query(drain_kernel::DRAIN_FOR_RUNNER_BY_ID_LOOKUP_SQL)
-            .bind(runner_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| ())?;
-    if found.is_none() {
-        return Ok(false);
-    }
-    let mut tx = pool.begin().await.map_err(|_| ())?;
-    let threshold = alive_threshold(now_micros());
-    let locked: Option<sqlx::postgres::PgRow> =
-        sqlx::query(drain_kernel::DRAIN_FOR_RUNNER_LOCK_SQL)
-            .bind(threshold)
-            .bind(runner_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|_| ())?;
-    let Some(locked) = locked else {
-        return Ok(false);
-    };
-    let locked_runner_id: Uuid = locked.try_get(0).map_err(|_| ())?;
-    let owner_id: Uuid = locked.try_get(1).map_err(|_| ())?;
-    let pod_id: Uuid = locked.try_get(4).map_err(|_| ())?;
-    let provisioning: String = locked.try_get(7).map_err(|_| ())?;
-    let visibility: i16 = locked.try_get(8).map_err(|_| ())?;
-    // Non-private runners issue no query (the `qs.none()` arm).
-    let Some(next_sql) = drain_kernel::next_for_runner_sql(&provisioning, i32::from(visibility))
-    else {
-        return Ok(false);
-    };
-    let run: Option<sqlx::postgres::PgRow> = sqlx::query(&next_sql)
-        .bind(pod_id)
-        .bind(locked_runner_id)
-        .bind(owner_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|_| ())?;
-    let Some(run) = run else {
-        return Ok(false);
-    };
-    let run_id: Uuid = run.try_get(0).map_err(|_| ())?;
-    let work_item_id: Option<Uuid> = run.try_get(7).map_err(|_| ())?;
-    let prompt: String = run.try_get(19).map_err(|_| ())?;
-    let run_config: Value = run.try_get(23).map_err(|_| ())?;
-    let Value::Object(run_config) = run_config else {
-        return Err(());
-    };
-    sqlx::query(drain_kernel::ASSIGN_RUN_UPDATE_SQL)
-        .bind(owner_id)
-        .bind(locked_runner_id)
-        .bind(now_micros())
-        .bind(run_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|_| ())?;
-    let plan = drain_kernel::plan_assignment(&drain_kernel::AssignmentFacts {
-        run_id,
-        runner_id: locked_runner_id,
-        owner_id,
-        work_item_id,
-        prompt,
-        run_config,
-    });
-    tx.commit().await.map_err(|_| ())?;
-    // The `on_commit` send fires before the `:294` log line (the
-    // registration runs immediately with no active transaction).
-    dispatch_assign(pool, state, &plan.after_commit).await?;
-    tracing::info!(
-        "{}",
-        drain_kernel::drain_for_runner_log(&locked_runner_id, &run_id)
-    );
-    Ok(true)
-}
-
-/// `drain_pod_by_id` (`matcher.py:242-251`): pod lookup (miss ⇒ `Ok`,
-/// no tx), else the drain loop. A dispatch failure propagates — the
-/// row stays `ASSIGNED` while the caller observes the failure.
-pub(crate) async fn drain_pod_by_id(
-    pool: &sqlx::postgres::PgPool,
-    state: &AppState,
-    pod_id: Uuid,
-) -> Result<(), ()> {
-    let pod: Option<sqlx::postgres::PgRow> = sqlx::query(drain_kernel::DRAIN_POD_BY_ID_LOOKUP_SQL)
-        .bind(pod_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|error| drain_error(error, "drain-pod-lookup", &pod_id))?;
-    if pod.is_none() {
-        return Ok(());
-    }
-    drain_pod(pool, state, pod_id).await
-}
-
-/// `drain_pod` (`matcher.py:194-239`): lock the idle list, then per
-/// runner in list order take the next queued run, write the
-/// assignment, and plan the frame; commit once; then dispatch each
-/// frame in assignment order. The `:237` log line runs after the
-/// sends (the `on_commit` registrations fire immediately).
-async fn drain_pod(
-    pool: &sqlx::postgres::PgPool,
-    state: &AppState,
-    pod_id: Uuid,
-) -> Result<(), ()> {
-    use sqlx::Row;
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|error| drain_error(error, "drain-begin", &pod_id))?;
-    let threshold = alive_threshold(now_micros());
-    let runners = sqlx::query(drain_kernel::DRAIN_POD_IDLE_RUNNERS_SQL)
-        .bind(threshold)
-        .bind(pod_id)
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(|error| drain_error(error, "drain-idle-runners", &pod_id))?;
-    let mut plans: Vec<drain_kernel::AssignmentPlan> = Vec::new();
-    for runner in &runners {
-        let runner_id: Uuid = runner
-            .try_get(0)
-            .map_err(|error| drain_error(error, "drain-runner-row", &pod_id))?;
-        let owner_id: Uuid = runner
-            .try_get(1)
-            .map_err(|error| drain_error(error, "drain-runner-row", &pod_id))?;
-        let provisioning: String = runner
-            .try_get(7)
-            .map_err(|error| drain_error(error, "drain-runner-row", &pod_id))?;
-        let visibility: i16 = runner
-            .try_get(8)
-            .map_err(|error| drain_error(error, "drain-runner-row", &pod_id))?;
-        // Non-private runners issue no query (the `qs.none()` arm).
-        let Some(next_sql) =
-            drain_kernel::next_for_runner_sql(&provisioning, i32::from(visibility))
-        else {
-            continue;
-        };
-        let run: Option<sqlx::postgres::PgRow> = sqlx::query(&next_sql)
-            .bind(pod_id)
-            .bind(runner_id)
-            .bind(owner_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|error| drain_error(error, "drain-next-run", &pod_id))?;
-        let Some(run) = run else {
-            continue;
-        };
-        let run_id: Uuid = run
-            .try_get(0)
-            .map_err(|error| drain_error(error, "drain-run-row", &pod_id))?;
-        let work_item_id: Option<Uuid> = run
-            .try_get(7)
-            .map_err(|error| drain_error(error, "drain-run-row", &pod_id))?;
-        let prompt: String = run
-            .try_get(19)
-            .map_err(|error| drain_error(error, "drain-run-row", &pod_id))?;
-        let run_config: Value = run
-            .try_get(23)
-            .map_err(|error| drain_error(error, "drain-run-row", &pod_id))?;
-        let Value::Object(run_config) = run_config else {
-            tracing::error!(
-                site = "drain-run-config-shape",
-                %pod_id,
-                %run_id,
-                "runner drain failure"
-            );
-            return Err(());
-        };
-        // `$3` is a fresh `timezone.now()` per assignment (`:233`).
-        sqlx::query(drain_kernel::ASSIGN_RUN_UPDATE_SQL)
-            .bind(owner_id)
-            .bind(runner_id)
-            .bind(now_micros())
-            .bind(run_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| drain_error(error, "drain-assign", &pod_id))?;
-        plans.push(drain_kernel::plan_assignment(
-            &drain_kernel::AssignmentFacts {
-                run_id,
-                runner_id,
-                owner_id,
-                work_item_id,
-                prompt,
-                run_config,
-            },
-        ));
-    }
-    tx.commit()
-        .await
-        .map_err(|error| drain_error(error, "drain-commit", &pod_id))?;
-    for plan in &plans {
-        dispatch_assign(pool, state, &plan.after_commit).await?;
-    }
-    if !plans.is_empty() {
-        tracing::info!("{}", drain_kernel::drain_pod_log(&pod_id, plans.len()));
-    }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
 // Post-commit firing (the `on_commit` registrations, in order)
 // ---------------------------------------------------------------------------
 
+/// `drain_for_runner_by_id` (`matcher.py:298-304`): the by-id lookup
+/// (miss ⇒ `Ok(false)`), else the locked drain. Thin caller of the
+/// public executor (OVL-06); the local copy is deleted.
+async fn drain_for_runner_by_id(
+    pool: &sqlx::postgres::PgPool,
+    state: &AppState,
+    runner_id: Uuid,
+) -> Result<bool, ()> {
+    let redis = redis_client(state);
+    pidash_services::runner_sessions::live_drains::drain_for_runner_by_id(
+        pool,
+        redis.as_ref(),
+        &state.settings().runner,
+        runner_id,
+    )
+    .await
+    .map_err(|_| ())
+}
+
+/// `drain_pod_by_id` (`matcher.py:242-251`): pod lookup (miss ⇒ `Ok`,
+/// no tx), else the drain loop. A dispatch failure propagates — the
+/// row stays `ASSIGNED` while the caller observes the failure. Thin
+/// caller of the public executor (OVL-06); the local copy is deleted.
+pub(crate) async fn drain_pod_by_id(
+    pool: &sqlx::postgres::PgPool,
+    state: &AppState,
+    pod_id: Uuid,
+) -> Result<(), ()> {
+    let redis = redis_client(state);
+    pidash_services::runner_sessions::live_drains::drain_pod_by_id(
+        pool,
+        redis.as_ref(),
+        &state.settings().runner,
+        pod_id,
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| drain_error(error, "drain-pod", &pod_id))
+}
 /// Drain one finalized run's publish pair, each effect isolated with
 /// its failure log (`agent_run_finalization.py` `_publish_effects`:
 /// the emit and the inline apply sit in separate `try` blocks).

@@ -348,6 +348,9 @@ pidash_sdk::ops::ClientAuth
 pidash_sdk::ops::ClockIssue
 pidash_sdk::ops::ClockWrite
 pidash_sdk::ops::CreateDispatchRequest
+pidash_sdk::ops::DrainError
+pidash_sdk::ops::EffectBundle
+pidash_sdk::ops::FireOp
 pidash_sdk::ops::GitHubAdapter
 pidash_sdk::ops::GithubClient
 pidash_sdk::ops::GithubError
@@ -358,9 +361,11 @@ pidash_sdk::ops::LiveGithubClient
 pidash_sdk::ops::LlmProfile
 pidash_sdk::ops::LogLine
 pidash_sdk::ops::OpsCommand
+pidash_sdk::ops::OutboxError
 pidash_sdk::ops::PROJECT_SELECT_SQL
 pidash_sdk::ops::ParentCandidate
 pidash_sdk::ops::PoolPrStore
+pidash_sdk::ops::PoolPubsubStore
 pidash_sdk::ops::PrLinksSurface
 pidash_sdk::ops::ProjectClockPolicy
 pidash_sdk::ops::RevokeError
@@ -387,11 +392,15 @@ pidash_sdk::ops::builtins
 pidash_sdk::ops::connect_primary
 pidash_sdk::ops::create_ticker_sql
 pidash_sdk::ops::default_for
+pidash_sdk::ops::dispatch_waiting
+pidash_sdk::ops::drain_for_runner_by_id
 pidash_sdk::ops::drain_pod_by_id
 pidash_sdk::ops::effective_interval_seconds
+pidash_sdk::ops::emit_fire_tick
 pidash_sdk::ops::extend_settings_schema
 pidash_sdk::ops::fallback_creator_select
 pidash_sdk::ops::finalization
+pidash_sdk::ops::fire_plan
 pidash_sdk::ops::get_setting
 pidash_sdk::ops::has_open_blockers_sql
 pidash_sdk::ops::is_ticking_state
@@ -406,6 +415,7 @@ pidash_sdk::ops::run_select_sql
 pidash_sdk::ops::saved_sequence_id
 pidash_sdk::ops::saved_sort_order
 pidash_sdk::ops::select_parent_for_next_run
+pidash_sdk::ops::send_to_runner
 pidash_sdk::ops::summary_list
 pidash_sdk::ops::summary_sql
 pidash_sdk::ops::validate_settings_patch

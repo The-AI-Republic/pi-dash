@@ -1444,7 +1444,7 @@ impl RunnerPorts for LivePorts {
                 tokio::spawn(async move {
                     if let Err(error) = emit_celery(
                         &pool,
-                        FIRE_TICK_TASK,
+                        pidash_jobs::tasks_ticker::scan::FIRE_TICK_TASK,
                         vec![Value::String(ticker_id.to_string())],
                     )
                     .await
@@ -1541,13 +1541,9 @@ impl RunnerPorts for LivePorts {
     }
 
     async fn emit_fire_tick(&self, ticker_id: uuid::Uuid) -> Result<(), PortError> {
-        emit_celery(
-            &self.pool,
-            FIRE_TICK_TASK,
-            vec![Value::String(ticker_id.to_string())],
-        )
-        .await
-        .map_err(PortError::Transport)
+        pidash_jobs::tasks_ticker::scan::emit_fire_tick(&self.pool, ticker_id)
+            .await
+            .map_err(|error| PortError::Transport(error.to_string()))
     }
 
     fn redis_client(&self) -> Option<&redis::Client> {
@@ -1557,8 +1553,6 @@ impl RunnerPorts for LivePorts {
 
 /// `runner.apply_agent_run_terminal_effects` (`runner/tasks.py:333`).
 const TERMINAL_EFFECTS_TASK: &str = "runner.apply_agent_run_terminal_effects";
-/// `pi_dash.bgtasks.agent_ticker.fire_tick` (D-10 task name).
-const FIRE_TICK_TASK: &str = "pi_dash.bgtasks.agent_ticker.fire_tick";
 
 /// Enqueue one task message onto the Postgres-backed queue (`rust_job_queue`),
 /// the `auth_session::email` `publish_message` shape without the broker.
@@ -1730,7 +1724,8 @@ mod ports_tests {
             TERMINAL_EFFECTS_TASK,
             "runner.apply_agent_run_terminal_effects"
         );
-        assert_eq!(FIRE_TICK_TASK, "pi_dash.bgtasks.agent_ticker.fire_tick");
+        // FIRE_TICK_TASK's pin moved with the const to
+        // `pidash_jobs::tasks_ticker::scan` (same assertion there).
     }
 }
 

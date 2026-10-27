@@ -117,7 +117,7 @@ use pidash_services::runner_enroll::revoke as revoke_kernel;
 use pidash_services::runner_enroll::serializers::shapes;
 use pidash_services::runner_enroll::tokens as enroll_tokens;
 use pidash_services::runner_runs::finalization as finalize_kernel;
-use pidash_services::runner_sessions::{drain as drain_kernel, pubsub as pubsub_kernel};
+use pidash_services::runner_sessions::pubsub as pubsub_kernel;
 use pidash_types::{UserId, WorkspaceId};
 
 use super::auth as enroll_auth;
@@ -2204,94 +2204,18 @@ async fn release_pins_for_paused_runner(
 /// `drain_for_runner_by_id` (`matcher.py:253-264`): runner lookup
 /// (miss ⇒ `Ok(false)`, no tx), else the re-lock/next/assign/send
 /// recipe. A dispatch failure propagates — the row stays `ASSIGNED`
-/// while the caller observes the failure. (Teardown-local copy of the
-/// `runner_open`/`runner_poll` drivers.)
+/// while the caller observes the failure. Thin caller of the public
+/// executor (OVL-06); the local copy is deleted.
 async fn drain_runner_by_id(pool: &PgPool, state: &AppState, runner_id: Uuid) -> Result<bool, ()> {
-    use sqlx::Row;
-    let found: Option<sqlx::postgres::PgRow> =
-        sqlx::query(drain_kernel::DRAIN_FOR_RUNNER_BY_ID_LOOKUP_SQL)
-            .bind(runner_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| ())?;
-    if found.is_none() {
-        return Ok(false);
-    }
-    let mut tx = pool.begin().await.map_err(|_| ())?;
-    let threshold = alive_threshold(now_micros());
-    let locked: Option<sqlx::postgres::PgRow> =
-        sqlx::query(drain_kernel::DRAIN_FOR_RUNNER_LOCK_SQL)
-            .bind(threshold)
-            .bind(runner_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|_| ())?;
-    let Some(locked) = locked else {
-        return Ok(false);
-    };
-    let locked_runner_id: Uuid = locked.try_get(0).map_err(|_| ())?;
-    let owner_id: Uuid = locked.try_get(1).map_err(|_| ())?;
-    let pod_id: Uuid = locked.try_get(4).map_err(|_| ())?;
-    let provisioning: String = locked.try_get(7).map_err(|_| ())?;
-    let visibility: i16 = locked.try_get(8).map_err(|_| ())?;
-    // Non-private runners issue no query (the `qs.none()` arm).
-    let Some(next_sql) = drain_kernel::next_for_runner_sql(&provisioning, i32::from(visibility))
-    else {
-        return Ok(false);
-    };
-    let run: Option<sqlx::postgres::PgRow> = sqlx::query(&next_sql)
-        .bind(pod_id)
-        .bind(locked_runner_id)
-        .bind(owner_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|_| ())?;
-    let Some(run) = run else {
-        return Ok(false);
-    };
-    let run_id: Uuid = run.try_get(0).map_err(|_| ())?;
-    let work_item_id: Option<Uuid> = run.try_get(7).map_err(|_| ())?;
-    let prompt: String = run.try_get(19).map_err(|_| ())?;
-    let run_config: Value = run.try_get(23).map_err(|_| ())?;
-    let Value::Object(run_config) = run_config else {
-        return Err(());
-    };
-    sqlx::query(drain_kernel::ASSIGN_RUN_UPDATE_SQL)
-        .bind(owner_id)
-        .bind(locked_runner_id)
-        .bind(now_micros())
-        .bind(run_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|_| ())?;
-    let plan = drain_kernel::plan_assignment(&drain_kernel::AssignmentFacts {
-        run_id,
-        runner_id: locked_runner_id,
-        owner_id,
-        work_item_id,
-        prompt,
-        run_config,
-    });
-    tx.commit().await.map_err(|_| ())?;
-    // The `on_commit` send fires before the `:294` log line (the
-    // registration runs immediately with no active transaction).
-    let pubsub = PoolPubsubStore::new(pool, state);
-    let outcome = match plan.after_commit {
-        drain_kernel::DrainEffect::SendAssign {
-            runner_id,
-            ref message,
-        } => pubsub_kernel::send_to_runner(&pubsub, runner_id, message)
-            .await
-            .map_err(|_| ())?,
-    };
-    for warning in &outcome.warnings {
-        tracing::warn!("{warning}");
-    }
-    tracing::info!(
-        "{}",
-        drain_kernel::drain_for_runner_log(&locked_runner_id, &run_id)
-    );
-    Ok(true)
+    let redis = redis_client(state);
+    pidash_services::runner_sessions::live_drains::drain_for_runner_by_id(
+        pool,
+        redis.as_ref(),
+        &state.settings().runner,
+        runner_id,
+    )
+    .await
+    .map_err(|_| ())
 }
 
 // ---------------------------------------------------------------------------
@@ -2303,23 +2227,12 @@ use pidash_db::runner_sessions::outbox as session_outbox;
 use pidash_db::runner_sessions::outbox::OutboxError as SessionOutboxError;
 use pidash_db::runner_sessions::RunnerSession as DbRunnerSession;
 use pidash_services::runner_enroll::delete as delete_kernel;
+use pidash_services::runner_enroll::fire::{fire_plan, EffectBundle, FireOp};
 use pidash_services::runner_enroll::revoke::{RevokeError, RevokeOutcome, RevokeStore};
 use pidash_services::runner_runs::LifecycleEffect;
 use pidash_services::runner_sessions::pubsub::PubsubStore;
 use pidash_types::dispatch::AgentExecutorKind;
 use pidash_types::runner_runs::{AgentRunStatus, TERMINAL_RUN_STATUSES};
-
-/// One revoke's post-commit effects, in Python's registration order:
-/// the per-run publish pairs (registered during S3, in run order) fire
-/// first, then the handoffs, drains, and stream cleanup (`models.py`
-/// `finalize_agent_run:125` + `Runner.revoke:673-685`).
-struct EffectBundle {
-    runner_id: Uuid,
-    publish: Vec<LifecycleEffect>,
-    handoffs: Vec<Uuid>,
-    drains: Vec<Uuid>,
-    cleanup: Option<Uuid>,
-}
 
 /// Pool-backed [`RevokeStore`]: S1-S4 SQL runs on the caller's
 /// transaction; the finalize's publish pairs and the revoke collectors
@@ -2772,28 +2685,6 @@ impl PubsubStore for TxPubsub<'_, '_, '_> {
     }
 }
 
-/// One post-commit step, in fire order.
-enum FireOp {
-    Publish(LifecycleEffect),
-    Handoff(Uuid),
-    Drain(Uuid),
-    Cleanup(Uuid),
-}
-
-/// Flatten one revoke's bundle into fire order: the publish pairs
-/// first (registered during S3, in run order), then handoffs, drains,
-/// and the stream cleanup (`models.py` `finalize_agent_run:125` +
-/// `Runner.revoke:673-685`). Pure, so the order is unit-pinned.
-fn fire_plan(bundle: EffectBundle) -> Vec<FireOp> {
-    let mut plan =
-        Vec::with_capacity(bundle.publish.len() + bundle.handoffs.len() + bundle.drains.len() + 1);
-    plan.extend(bundle.publish.into_iter().map(FireOp::Publish));
-    plan.extend(bundle.handoffs.into_iter().map(FireOp::Handoff));
-    plan.extend(bundle.drains.into_iter().map(FireOp::Drain));
-    plan.extend(bundle.cleanup.into_iter().map(FireOp::Cleanup));
-    plan
-}
-
 /// Fire one revoke's post-commit bundle (`models.py:597-685`): publish
 /// effects isolated each, handoffs isolated each (swallowed after the
 /// failure log), drains and cleanup propagating (the source registers
@@ -2961,107 +2852,26 @@ async fn delete_collected_runner(pool: &PgPool, runner_id: Uuid) -> Result<(), (
 // Executors: the `drain_pod_by_id` loop (the `drain.rs` recipe, verbatim)
 // ---------------------------------------------------------------------------
 
-use pidash_services::runner_sessions::drain::{AssignmentFacts, AssignmentPlan};
-use pidash_services::runner_sessions::guards::alive_threshold;
-
-/// `drain_pod_by_id` (`matcher.py:242-251`): pod lookup (miss ⇒ `Ok`,
-/// no tx), else the drain loop. A dispatch failure propagates — the row
-/// stays `ASSIGNED` while the caller observes the failure.
+/// `drain_pod_by_id` (`matcher.py:242-251`): pod lookup (miss ⇒
+/// `Ok`, no tx), else the drain loop. Thin caller of the public
+/// executor (OVL-06); the local copy is deleted. The executor's
+/// sends-then-log order also fixes PIDASHCONV-1561 (this twin logged
+/// first).
 pub(crate) async fn drain_pod_by_id(
     pool: &PgPool,
     state: &AppState,
     pod_id: Uuid,
 ) -> Result<(), ()> {
-    let pod: Option<sqlx::postgres::PgRow> = sqlx::query(drain_kernel::DRAIN_POD_BY_ID_LOOKUP_SQL)
-        .bind(pod_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| ())?;
-    if pod.is_none() {
-        return Ok(());
-    }
-    drain_pod(pool, state, pod_id).await
-}
-
-/// `drain_pod` (`matcher.py:194-239`): lock the idle list, then per
-/// runner in list order take the next queued run, write the assignment,
-/// and plan the frame; commit once; then dispatch each frame in
-/// assignment order through the merged `send_to_runner` driver.
-async fn drain_pod(pool: &PgPool, state: &AppState, pod_id: Uuid) -> Result<(), ()> {
-    let mut tx = pool.begin().await.map_err(|_| ())?;
-    let threshold = alive_threshold(now_micros());
-    let runners = sqlx::query(drain_kernel::DRAIN_POD_IDLE_RUNNERS_SQL)
-        .bind(threshold)
-        .bind(pod_id)
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(|_| ())?;
-    let mut plans: Vec<AssignmentPlan> = Vec::new();
-    for runner in &runners {
-        let runner_id: Uuid = runner.try_get(0).map_err(|_| ())?;
-        let owner_id: Uuid = runner.try_get(1).map_err(|_| ())?;
-        let provisioning: String = runner.try_get(7).map_err(|_| ())?;
-        let visibility: i16 = runner.try_get(8).map_err(|_| ())?;
-        // Non-private runners issue no query (the `qs.none()` arm).
-        let Some(next_sql) =
-            drain_kernel::next_for_runner_sql(&provisioning, i32::from(visibility))
-        else {
-            continue;
-        };
-        let run: Option<sqlx::postgres::PgRow> = sqlx::query(&next_sql)
-            .bind(pod_id)
-            .bind(runner_id)
-            .bind(owner_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|_| ())?;
-        let Some(run) = run else {
-            continue;
-        };
-        let run_id: Uuid = run.try_get(0).map_err(|_| ())?;
-        let work_item_id: Option<Uuid> = run.try_get(7).map_err(|_| ())?;
-        let prompt: String = run.try_get(19).map_err(|_| ())?;
-        let run_config: Value = run.try_get(23).map_err(|_| ())?;
-        let Value::Object(run_config) = run_config else {
-            return Err(());
-        };
-        // `$3` is a fresh `timezone.now()` per assignment (`:233`).
-        sqlx::query(drain_kernel::ASSIGN_RUN_UPDATE_SQL)
-            .bind(owner_id)
-            .bind(runner_id)
-            .bind(now_micros())
-            .bind(run_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|_| ())?;
-        plans.push(drain_kernel::plan_assignment(&AssignmentFacts {
-            run_id,
-            runner_id,
-            owner_id,
-            work_item_id,
-            prompt,
-            run_config,
-        }));
-    }
-    tx.commit().await.map_err(|_| ())?;
-    if !plans.is_empty() {
-        tracing::info!("{}", drain_kernel::drain_pod_log(&pod_id, plans.len()));
-    }
-    let pubsub = PoolPubsubStore::new(pool, state);
-    for plan in &plans {
-        let outcome = match plan.after_commit {
-            drain_kernel::DrainEffect::SendAssign {
-                runner_id,
-                ref message,
-            } => pubsub_kernel::send_to_runner(&pubsub, runner_id, message)
-                .await
-                .map_err(|_| ())?,
-        };
-        for warning in &outcome.warnings {
-            tracing::warn!("{warning}");
-        }
-    }
-    Ok(())
+    let redis = redis_client(state);
+    pidash_services::runner_sessions::live_drains::drain_pod_by_id(
+        pool,
+        redis.as_ref(),
+        &state.settings().runner,
+        pod_id,
+    )
+    .await
+    .map(|_| ())
+    .map_err(|_| ())
 }
 
 // ---------------------------------------------------------------------------
@@ -3561,35 +3371,6 @@ mod tests {
     // ---- D13-F6: revoke cascade --------------------------------------
 
     #[test]
-    fn f6_fire_plan_order() {
-        let flows: serde_json::Value = serde_json::from_str(FIXTURE_FLOWS).unwrap();
-        let order = flows["revoke_cascade_steps"]["post_commit_hooks"]
-            .as_str()
-            .unwrap();
-        assert!(order.starts_with("handoffs"), "{order}");
-        let bundle = EffectBundle {
-            runner_id: Uuid::nil(),
-            publish: vec![
-                LifecycleEffect::PublishTerminalEffects {
-                    run_id: Uuid::nil(),
-                },
-                LifecycleEffect::ApplyTerminalEffectsInline {
-                    run_id: Uuid::nil(),
-                },
-            ],
-            handoffs: vec![Uuid::nil()],
-            drains: vec![Uuid::nil()],
-            cleanup: Some(Uuid::nil()),
-        };
-        let plan = fire_plan(bundle);
-        assert_eq!(plan.len(), 5);
-        assert!(matches!(plan[0], FireOp::Publish(_)));
-        assert!(matches!(plan[1], FireOp::Publish(_)));
-        assert!(matches!(plan[2], FireOp::Handoff(_)));
-        assert!(matches!(plan[3], FireOp::Drain(_)));
-        assert!(matches!(plan[4], FireOp::Cleanup(_)));
-    }
-
     #[test]
     fn f6_reason_handling() {
         // Known + short: as-is, silent.

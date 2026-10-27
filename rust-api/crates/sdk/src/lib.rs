@@ -198,6 +198,9 @@ pub mod read {
 /// Operational flows: orchestration, dispatch tools, runners, the
 /// scheduler, user settings, and cloud ops commands.
 pub mod ops {
+    pub use pidash_db::runner_sessions::outbox::OutboxError;
+    pub use pidash_jobs::dispatch::dispatch_waiting;
+    pub use pidash_jobs::tasks_ticker::scan::emit_fire_tick;
     pub use pidash_ops::connect_primary;
     pub use pidash_ops::run;
     pub use pidash_ops::OpsCommand;
@@ -249,6 +252,9 @@ pub mod ops {
     pub use pidash_services::orchestration::creation::TICKER_RESUME_SELECT_SQL;
     pub use pidash_services::orchestration::dispatch::LogLine;
     pub use pidash_services::orchestration::dispatch::LIVE_ASSIGNEE_CANDIDATES_SQL;
+    pub use pidash_services::runner_enroll::fire::fire_plan;
+    pub use pidash_services::runner_enroll::fire::EffectBundle;
+    pub use pidash_services::runner_enroll::fire::FireOp;
     pub use pidash_services::runner_enroll::revoke;
     pub use pidash_services::runner_enroll::revoke::RevokeError;
     pub use pidash_services::runner_enroll::revoke::RevokeOutcome;
@@ -256,7 +262,11 @@ pub mod ops {
     pub use pidash_services::runner_runs::finalization;
     pub use pidash_services::runner_runs::LifecycleEffect;
     pub use pidash_services::runner_runs::SetValue;
+    pub use pidash_services::runner_sessions::live_drains::drain_for_runner_by_id;
     pub use pidash_services::runner_sessions::live_drains::drain_pod_by_id;
+    pub use pidash_services::runner_sessions::live_drains::DrainError;
+    pub use pidash_services::runner_sessions::live_drains::PoolPubsubStore;
+    pub use pidash_services::runner_sessions::pubsub::send_to_runner;
     pub use pidash_services::scheduler::builtins;
     pub use pidash_services::user_settings::base_settings_schema;
     pub use pidash_services::user_settings::default_for;
