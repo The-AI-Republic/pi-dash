@@ -1,0 +1,15 @@
+[package]
+name = "pidash-sdk"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Facade: re-exports only. One path dependency per OSS crate the overlay
+# imports from (OVL-02, PIDASHCONV-1540); no external dependencies.
+pidash-types = { path = "../types" }
+pidash-db = { path = "../db" }
+pidash-auth = { path = "../auth" }
+pidash-services = { path = "../services" }
+pidash-api = { path = "../api" }
+pidash-jobs = { path = "../jobs" }
+pidash-ops = { path = "../ops" }

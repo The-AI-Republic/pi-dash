@@ -9,6 +9,7 @@ members = [
     "crates/jobs",
     "crates/storage",
     "crates/ops",
+    "crates/sdk",
     "bin/pidash-api",
 ]
 

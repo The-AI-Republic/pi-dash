@@ -230,6 +230,22 @@ env, `apply` to mutate the resolved `Settings`), pre-install the registry
 with `try_init_global` when reclassification must be process-wide, and pass
 `Settings::from_map_with(&vars, Profile::Production, &overlay)`.
 
+## Overlay surface (OVL-02)
+
+The cloud overlay depends only on `pidash-sdk` (`crates/sdk`): a logic-free
+facade of `pub use` re-exports grouped into `startup`, `state`, `domain`,
+`read`, `ops`, `compat`, `assistant`, `jobs`, `db` and `testkit`. Every other
+OSS path is internal and may change without notice — including paths that are
+technically `pub` in their home crate.
+
+Seeded with every OSS path the overlay imports (OVL-02, PIDASHCONV-1540);
+OVL-03 (PIDASHCONV-1541)..OVL-07 (PIDASHCONV-1545) add their new public items
+here as they land. The surface is snapshotted in `crates/sdk/SURFACE.txt` and
+enforced by `crates/sdk/tests/surface.rs`: removing or renaming an export
+fails the test, so the change shows up as a reviewed diff instead of a
+surprise overlay breakage. Add an export by editing `src/lib.rs`,
+`tests/surface.rs` and `SURFACE.txt` together (see the crate docs).
+
 ## Extension seams (F-10)
 
 The six `ee/` stubs are traits with CE defaults; the private crate
