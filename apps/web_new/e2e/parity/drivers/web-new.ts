@@ -8012,12 +8012,48 @@ export class WebNewDriver implements ParityDriver {
     return titles.filter((title) => title.length > 0);
   }
 
-  async layoutsListGroupExpanded(_title: string): Promise<boolean> {
-    return todo("layoutsListGroupExpanded");
+  /**
+   * One section's header, matched on its exact title span (ISS-008); the
+   * first span reads the title, the count follows it.
+   */
+  private async layoutsListGroupHeader(title: string): Promise<Locator> {
+    const headers = this.page.locator('[data-testid="list-group-header"]');
+    const count = await headers.count();
+    for (let index = 0; index < count; index += 1) {
+      const text = (await headers.nth(index).locator("span").first().innerText()).trim();
+      if (text === title) return headers.nth(index);
+    }
+    throw new Error(`[parity] no list group "${title}".`);
   }
 
-  async layoutsListToggleGroup(_title: string): Promise<void> {
-    return todo("layoutsListToggleGroup");
+  /** One section, wrapping its header plus rows (ISS-010/011). */
+  private layoutsListSection(title: string): Locator {
+    return this.page
+      .locator("section", {
+        has: this.page.locator('[data-testid="list-group-header"]').filter({ hasText: title }),
+      })
+      .first();
+  }
+
+  async layoutsListGroupExpanded(title: string): Promise<boolean> {
+    const header = await this.layoutsListGroupHeader(title);
+    return (await header.getAttribute("aria-expanded")) === "true";
+  }
+
+  async layoutsListToggleGroup(title: string): Promise<void> {
+    const header = await this.layoutsListGroupHeader(title);
+    const before = await header.getAttribute("aria-expanded");
+    // The title span bubbles to the header's toggle; clicking it keeps
+    // clear of the add control, which stops propagation.
+    await header.locator("span").first().click({ timeout: WebNewDriver.WAIT_MS });
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    for (;;) {
+      if ((await header.getAttribute("aria-expanded")) !== before) return;
+      if (Date.now() >= deadline) {
+        throw new Error(`[parity] list group "${title}" never toggled.`);
+      }
+      await this.page.waitForTimeout(250);
+    }
   }
 
   async layoutsListGroupIssueNames(title: string): Promise<string[]> {
@@ -8051,24 +8087,88 @@ export class WebNewDriver implements ParityDriver {
     return names;
   }
 
-  async layoutsListGroupHasLoadMore(_title: string): Promise<boolean> {
-    return todo("layoutsListGroupHasLoadMore");
+  async layoutsListGroupHasLoadMore(title: string): Promise<boolean> {
+    // A fetch in flight shows the skeleton instead of the button, so the
+    // read settles through it: button means more, a settled section with
+    // no button means done.
+    const section = this.layoutsListSection(title);
+    await section.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const button = section.getByRole("button", { name: "Load more" });
+    const loading = section.getByTestId("section-loading");
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    for (;;) {
+      if ((await button.count()) > 0) return true;
+      if ((await loading.count()) === 0) return false;
+      if (Date.now() >= deadline) {
+        throw new Error(`[parity] list group "${title}" never settled its paging.`);
+      }
+      await this.page.waitForTimeout(250);
+    }
   }
 
-  async layoutsListGroupLoadMore(_title: string): Promise<void> {
-    return todo("layoutsListGroupLoadMore");
+  async layoutsListGroupLoadMore(title: string): Promise<void> {
+    // Grouped rows are unvirtualized, so the appended page grows the row
+    // count the caller can poll.
+    const before = (await this.layoutsListGroupIssueNames(title)).length;
+    const section = this.layoutsListSection(title);
+    await section.getByRole("button", { name: "Load more" }).first().click({ timeout: WebNewDriver.WAIT_MS });
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    for (;;) {
+      if ((await this.layoutsListGroupIssueNames(title)).length > before) return;
+      if (Date.now() >= deadline) {
+        throw new Error(`[parity] list group "${title}" never loaded its next page.`);
+      }
+      await this.page.waitForTimeout(500);
+    }
   }
 
   async layoutsListScrollEnd(): Promise<void> {
-    return todo("layoutsListScrollEnd");
+    // The grouped root and the flat virtualizer both name their scroll
+    // region "Issues"; exactly one renders per layout.
+    const scroller = this.page.getByRole("region", { name: "Issues" }).first();
+    await scroller.evaluate((node) => node.scrollTo({ top: node.scrollHeight }));
+    // The bottom edge triggers the next page fetch; give it a beat
+    // before the caller re-reads.
+    await this.page.waitForTimeout(1000);
   }
 
-  async layoutsListQuickAdd(_title: string, _groupTitle?: string): Promise<void> {
-    return todo("layoutsListQuickAdd");
+  async layoutsListQuickAdd(title: string, groupTitle?: string): Promise<void> {
+    const scope = groupTitle === undefined ? this.page : this.layoutsListSection(groupTitle);
+    const form = scope.getByTestId("quick-add");
+    await form.first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await form.getByRole("button", { name: "New work item" }).first().click({ timeout: WebNewDriver.WAIT_MS });
+    const input = form.getByLabel("New work item title");
+    await input.fill(title, { timeout: WebNewDriver.WAIT_MS });
+    await input.press("Enter", { timeout: WebNewDriver.WAIT_MS });
+    // The create lands asynchronously; the flat list holds everything
+    // under "All work items".
+    const group = groupTitle ?? "All work items";
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    for (;;) {
+      if ((await this.layoutsListGroupIssueNames(group)).includes(title)) return;
+      if (Date.now() >= deadline) {
+        throw new Error(`[parity] quick-add never rendered "${title}".`);
+      }
+      await this.page.waitForTimeout(500);
+    }
   }
 
-  async layoutsRowCanEditState(_issueName: string): Promise<boolean> {
-    return todo("layoutsRowCanEditState");
+  /** The row's state chip wrapper, titled with the rendered state name. */
+  private layoutsRowStateWrap(issueName: string): Locator {
+    return this.layoutsRowByName(issueName).locator('span[title^="State: "]').first();
+  }
+
+  /** The row's priority chip wrapper, titled with the raw level. */
+  private layoutsRowPriorityWrap(issueName: string): Locator {
+    return this.layoutsRowByName(issueName).locator('span[title^="Priority: "]').first();
+  }
+
+  async layoutsRowCanEditState(issueName: string): Promise<boolean> {
+    // Guests get a disabled chip, or no chip at all once settled
+    // (NEWFRONT-339); either shape reads as cannot-edit.
+    const chip = this.layoutsRowStateWrap(issueName).locator("button").first();
+    if ((await chip.count()) === 0) return false;
+    return (await chip.getAttribute("disabled")) === null;
   }
 
   /** The row's anchor: the list row marks it, the global row's link is first. */
@@ -8123,32 +8223,117 @@ export class WebNewDriver implements ParityDriver {
     }
   }
 
-  async layoutsRowHasSubIssueToggle(_issueName: string): Promise<boolean> {
-    return todo("layoutsRowHasSubIssueToggle");
+  async layoutsRowHasSubIssueToggle(issueName: string): Promise<boolean> {
+    // Leaves render a bare gutter slot; only the expand/collapse buttons
+    // count, not the at-cap peek opener.
+    const row = this.layoutsRowByName(issueName);
+    await row.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const expand = await row
+      .getByRole("button", { name: `Expand sub-work items of ${issueName}`, exact: true })
+      .count();
+    const collapse = await row
+      .getByRole("button", { name: `Collapse sub-work items of ${issueName}`, exact: true })
+      .count();
+    return expand + collapse > 0;
   }
 
-  async layoutsRowExpandSubIssues(_issueName: string): Promise<void> {
-    return todo("layoutsRowExpandSubIssues");
+  async layoutsRowExpandSubIssues(issueName: string): Promise<void> {
+    const row = this.layoutsRowByName(issueName);
+    await row.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const collapsed = row.getByRole("button", { name: `Collapse sub-work items of ${issueName}`, exact: true });
+    if ((await collapsed.count()) === 0) {
+      await row
+        .getByRole("button", { name: `Expand sub-work items of ${issueName}`, exact: true })
+        .first()
+        .click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    // Expansion fetches the children, so names arrive asynchronously.
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    for (;;) {
+      if ((await this.layoutsRowSubIssueNames(issueName)).length > 0) return;
+      if (Date.now() >= deadline) {
+        throw new Error(`[parity] sub-issues of "${issueName}" never rendered in the list.`);
+      }
+      await this.page.waitForTimeout(500);
+    }
   }
 
-  async layoutsRowSubIssueNames(_issueName: string): Promise<string[]> {
-    return todo("layoutsRowSubIssueNames");
+  async layoutsRowSubIssueNames(issueName: string): Promise<string[]> {
+    // Children nest under the parent's block: the container's direct
+    // articles are the direct children, each headed by its own row.
+    const row = this.layoutsRowByName(issueName);
+    await row.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const container = row.locator('xpath=ancestor::article[1]/descendant::*[@data-testid="list-row-children"]');
+    if ((await container.count()) === 0) return [];
+    const kids = container.locator("xpath=child::article");
+    const count = await kids.count();
+    const names: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const name = (
+        (await kids
+          .nth(index)
+          .locator('[data-testid="list-row"]')
+          .first()
+          .locator("p[title]")
+          .first()
+          .getAttribute("title")) ?? ""
+      ).trim();
+      if (name !== "") names.push(name);
+    }
+    return names;
   }
 
-  async layoutsRowState(_issueName: string): Promise<string> {
-    return todo("layoutsRowState");
+  async layoutsRowState(issueName: string): Promise<string> {
+    const wrap = this.layoutsRowStateWrap(issueName);
+    await wrap.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    return ((await wrap.getAttribute("title")) ?? "").replace(/^State: /, "").trim();
   }
 
-  async layoutsRowSetState(_issueName: string, _stateName: string): Promise<void> {
-    return todo("layoutsRowSetState");
+  async layoutsRowSetState(issueName: string, stateName: string): Promise<void> {
+    await this.layoutsRowSetChip(issueName, "state", stateName, `State: ${stateName}`);
   }
 
-  async layoutsRowPriority(_issueName: string): Promise<string> {
-    return todo("layoutsRowPriority");
+  async layoutsRowPriority(issueName: string): Promise<string> {
+    const wrap = this.layoutsRowPriorityWrap(issueName);
+    await wrap.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const raw = ((await wrap.getAttribute("title")) ?? "").replace(/^Priority: /, "").trim();
+    // The title carries the raw level (none, high); the label capitalizes it.
+    return raw.charAt(0).toUpperCase() + raw.slice(1);
   }
 
-  async layoutsRowSetPriority(_issueName: string, _priorityName: string): Promise<void> {
-    return todo("layoutsRowSetPriority");
+  async layoutsRowSetPriority(issueName: string, priorityName: string): Promise<void> {
+    await this.layoutsRowSetChip(issueName, "priority", priorityName, `Priority: ${priorityName.toLowerCase()}`);
+  }
+
+  /**
+   * Pick `option` from one row chip's combobox popup, then settle on the
+   * chip's optimistic repaint (`expectTitle`) instead of racing the
+   * spec's immediate read — the popup closes before React paints.
+   */
+  private async layoutsRowSetChip(
+    issueName: string,
+    kind: "state" | "priority",
+    option: string,
+    expectTitle: string
+  ): Promise<void> {
+    const wrap = kind === "state" ? this.layoutsRowStateWrap(issueName) : this.layoutsRowPriorityWrap(issueName);
+    await wrap.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    // Deferred rows mount their picker on first interaction; the click
+    // both mounts and opens it.
+    await wrap.locator("button").first().click({ timeout: WebNewDriver.WAIT_MS });
+    const search = kind === "state" ? "Search states" : "Search priorities";
+    const listbox = this.page.getByRole("listbox").last();
+    await listbox.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("combobox", { name: search }).first().fill(option, { timeout: WebNewDriver.WAIT_MS });
+    await listbox.getByRole("option", { name: option }).first().click({ timeout: WebNewDriver.WAIT_MS });
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    for (;;) {
+      if (((await wrap.getAttribute("title")) ?? "").trim() === expectTitle) return;
+      if (Date.now() >= deadline) {
+        throw new Error(`[parity] row chip for "${issueName}" never showed "${option}".`);
+      }
+      await this.page.waitForTimeout(250);
+    }
   }
 
   /**
