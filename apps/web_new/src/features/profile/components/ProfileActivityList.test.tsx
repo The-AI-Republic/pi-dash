@@ -236,4 +236,13 @@ describe("ProfileActivityTab", () => {
     const list = screen.getByTestId("profile-activity-list");
     expect(within(list).queryAllByRole("listitem")).toHaveLength(0);
   });
+
+  it("keeps the Recent-activity chrome with an empty list and no empty-state card", () => {
+    render(
+      wrap(<ProfileActivityTab workspaceSlug="acme" userId="u-1" currentUserId={null} initialPage={page([], null)} />)
+    );
+    expect(screen.getByRole("heading", { name: "Recent activity" })).toBeInTheDocument();
+    expect(screen.queryByTestId("issues-empty-state")).toBeNull();
+    expect(screen.getByTestId("profile-activity-list")).toBeInTheDocument();
+  });
 });

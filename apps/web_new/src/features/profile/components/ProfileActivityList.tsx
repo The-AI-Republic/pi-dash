@@ -3,10 +3,11 @@
 // See the LICENSE file for details.
 // Activity rows and the full activity tab (parity/specs/profile.md §3,
 // PROF-007). One row renderer serves the summary's recent list and the
-// tab: actor, sentence, work-item link and time. The tab pages one
-// hundred rows at a time and appends further pages through an explicit
-// load-more control that retires on the last page; a quiet member sees
-// neither rows nor the control. The download control lives in
+// tab: actor, sentence, work-item link and time. The tab keeps its
+// Recent-activity heading above the list and pages one hundred rows at
+// a time, appending further pages through an explicit load-more control
+// that retires on the last page; a quiet member sees neither rows nor
+// the control. The download control lives in
 // ProfileActivityDownload and is gated by the caller.
 
 import { getUserProfileActivity, type IssueActivity, type UserActivityPage } from "@pidash/api-client";
@@ -125,6 +126,7 @@ export function ProfileActivityTab({
       {download === undefined ? null : (
         <div className="flex items-center justify-end px-(--space-3) py-(--space-2)">{download}</div>
       )}
+      <h2 className="text-h3 px-(--space-3) pt-(--space-2) text-(--text)">Recent activity</h2>
       <ul
         aria-label="Activity"
         data-testid="profile-activity-list"

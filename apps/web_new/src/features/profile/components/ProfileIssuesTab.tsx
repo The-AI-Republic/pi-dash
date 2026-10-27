@@ -3,7 +3,9 @@
 // See the LICENSE file for details.
 // Assigned / Created / Subscribed tab (parity/specs/profile.md §2,
 // PROF-006). The tab follows the ownership read page by page, renders the
-// stored layout (list by default, board one switch away) and lets the
+// stored layout (list by default, board one switch away), shows the
+// issues area's shared per-tab empty card when the page holds no rows,
+// and lets the
 // display menu change grouping, empty groups, sub-work items and visible
 // columns. Choices live in browser-local storage scoped to the workspace
 // and the viewed member, so a reload restores them. Grouping reads the
@@ -24,9 +26,11 @@ import {
   GROUP_NONE_LABEL,
   LAYOUT_LABELS,
   LayoutIcon,
+  ProfileIssuesEmpty,
   resolveActiveLayout,
   rowDomId,
   type DisplaySwitchKey,
+  type ProfileIssueTab,
 } from "../../issues/index.js";
 import { projectStatesQueryOptions } from "../../home/index.js";
 import { projectsQueryOptions } from "../../projects/index.js";
@@ -287,17 +291,6 @@ function RowButton({ issue, context }: { issue: IssueListItem; context: RowConte
   );
 }
 
-function IssuesEmpty({ showEmptyGroups }: { showEmptyGroups: boolean }): React.ReactElement {
-  return (
-    <section aria-label="Issues" className="flex flex-col items-center gap-(--space-2) p-(--space-12)">
-      <h2 className="text-h3 text-(--text)">No work items</h2>
-      <p className="text-body text-(--text-muted)">
-        {showEmptyGroups ? "No groups carry work items yet." : "Work items in this tab will appear here."}
-      </p>
-    </section>
-  );
-}
-
 function ListBody({
   rows,
   groupBy,
@@ -305,6 +298,7 @@ function ListBody({
   memberNames,
   context,
   stateLookup,
+  tab,
 }: {
   rows: readonly IssueListItem[];
   groupBy: string | null;
@@ -312,10 +306,11 @@ function ListBody({
   memberNames: ReadonlyMap<string, string>;
   context: RowContext;
   stateLookup: ProfileStateLookup;
+  tab: ProfileIssueTab;
 }): React.ReactElement {
   const dimension = isGroupDimension(groupBy) ? groupBy : null;
   const groups = groupIssueRows(rows, dimension, stateLookup, { showEmptyGroups, memberNames });
-  if (groups.length === 0) return <IssuesEmpty showEmptyGroups={showEmptyGroups} />;
+  if (groups.length === 0) return <ProfileIssuesEmpty tab={tab} />;
   return (
     <div data-testid="profile-list" className="flex flex-col">
       {groups.map((group) => (
@@ -339,6 +334,7 @@ function BoardBody({
   memberNames,
   context,
   stateLookup,
+  tab,
 }: {
   rows: readonly IssueListItem[];
   groupBy: string | null;
@@ -346,10 +342,11 @@ function BoardBody({
   memberNames: ReadonlyMap<string, string>;
   context: RowContext;
   stateLookup: ProfileStateLookup;
+  tab: ProfileIssueTab;
 }): React.ReactElement {
   const dimension = isGroupDimension(groupBy) ? groupBy : "priority";
   const groups = groupIssueRows(rows, dimension, stateLookup, { showEmptyGroups, memberNames });
-  if (groups.length === 0) return <IssuesEmpty showEmptyGroups={showEmptyGroups} />;
+  if (groups.length === 0) return <ProfileIssuesEmpty tab={tab} />;
   return (
     <div data-testid="profile-board" className="flex gap-(--space-3) overflow-x-auto p-(--space-3)">
       {groups.map((group) => (
@@ -511,6 +508,7 @@ export function ProfileIssuesTab({
             memberNames={memberNames}
             context={context}
             stateLookup={stateLookup}
+            tab={ownership}
           />
         ) : (
           <ListBody
@@ -520,6 +518,7 @@ export function ProfileIssuesTab({
             memberNames={memberNames}
             context={context}
             stateLookup={stateLookup}
+            tab={ownership}
           />
         )}
         {issues.hasNextPage ? (

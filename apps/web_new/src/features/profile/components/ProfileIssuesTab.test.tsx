@@ -197,19 +197,50 @@ describe("ProfileIssuesTab", () => {
     });
   });
 
+  it("renders the assigned tab's empty copy through the shared card", async () => {
+    vi.mocked(listUserProfileIssues).mockResolvedValue(response([]));
+    renderTab("assigned");
+    const scope = await screen.findByTestId("issues-empty-state");
+    expect(scope).toHaveAttribute("data-context", "profile-assigned");
+    expect(within(scope).getByText("No work items are assigned to you")).toBeInTheDocument();
+    expect(within(scope).queryByRole("button")).toBeNull();
+  });
+
+  it("renders the created tab's empty copy through the shared card", async () => {
+    vi.mocked(listUserProfileIssues).mockResolvedValue(response([]));
+    renderTab("created");
+    const scope = await screen.findByTestId("issues-empty-state");
+    expect(scope).toHaveAttribute("data-context", "profile-created");
+    expect(within(scope).getByText("No work items yet")).toBeInTheDocument();
+    expect(within(scope).queryByRole("button")).toBeNull();
+  });
+
+  it("renders the subscribed tab's empty copy through the shared card", async () => {
+    vi.mocked(listUserProfileIssues).mockResolvedValue(response([]));
+    renderTab("subscribed");
+    const scope = await screen.findByTestId("issues-empty-state");
+    expect(scope).toHaveAttribute("data-context", "profile-subscribed");
+    expect(within(scope).getByText("No work items yet")).toBeInTheDocument();
+    expect(within(scope).queryByRole("button")).toBeNull();
+  });
+
   it("toggles show-empty-groups in the display menu", async () => {
     vi.mocked(listUserProfileIssues).mockResolvedValue(response([]));
     renderTab();
-    await screen.findByText("No work items");
-    expect(screen.getByText("Work items in this tab will appear here.")).toBeInTheDocument();
+    const scope = await screen.findByTestId("issues-empty-state");
+    expect(within(scope).getByText("No work items are assigned to you")).toBeInTheDocument();
     await userEvent.click(screen.getAllByTestId("profile-display-trigger")[0]!);
     const shown = await screen.findByRole("button", { name: "Show empty groups" });
     expect(shown).toHaveAttribute("aria-pressed", "false");
     await userEvent.click(shown);
-    await waitFor(() => expect(screen.getByText("No groups carry work items yet.")).toBeInTheDocument());
-    expect(JSON.parse(localStorage.getItem(profileDisplayKey("acme", "u-1")) ?? "null")).toMatchObject({
-      showEmptyGroups: true,
-    });
+    await waitFor(() =>
+      expect(JSON.parse(localStorage.getItem(profileDisplayKey("acme", "u-1")) ?? "null")).toMatchObject({
+        showEmptyGroups: true,
+      })
+    );
+    expect(
+      within(screen.getByTestId("issues-empty-state")).getByText("No work items are assigned to you")
+    ).toBeInTheDocument();
   });
 
   it("opens the peek host on a row and closes it", async () => {
@@ -242,7 +273,8 @@ describe("ProfileIssuesTab", () => {
     localStorage.setItem(profileDisplayKey("acme", "u-1"), JSON.stringify({ layout: "kanban" }));
     vi.mocked(listUserProfileIssues).mockResolvedValue(response([]));
     renderTab();
-    expect(await screen.findByText("No work items")).toBeInTheDocument();
+    const scope = await screen.findByTestId("issues-empty-state");
+    expect(within(scope).getByText("No work items are assigned to you")).toBeInTheDocument();
     expect(screen.queryByTestId("profile-board")).toBeNull();
   });
 

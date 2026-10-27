@@ -23,6 +23,8 @@ export { ViewLayoutBody, preloadViewLayout } from "./layouts/ViewLayoutBody.js";
 export type { ViewLayoutBodyProps, ViewPeekAddress } from "./layouts/ViewLayoutBody.js";
 export { SavedViewEmptyCard, loadSavedViewEmptyCard } from "./emptyStates/viewEmpty.js";
 export type { SavedViewEmptyCardProps } from "./emptyStates/viewEmpty.js";
+export { ProfileIssuesEmpty } from "./emptyStates/cards.js";
+export type { ProfileIssueTab, ProfileIssuesEmptyProps } from "./emptyStates/cards.js";
 export { entityListsKeyPart, writeEntityPrefs } from "./prefs/entities.js";
 export type { IssuesEntity, PrefsRecord } from "./prefs/entities.js";
 export {
