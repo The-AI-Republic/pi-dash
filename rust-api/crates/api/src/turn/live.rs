@@ -94,9 +94,13 @@ const USER_DISPLAY_SQL: &str =
 
 /// `core.permissions.workspace_role` (`permissions.py:37-45`): the first
 /// active membership role for the workspace; `or 0` at the call site
-/// (`tasks.py:85`).
+/// (`tasks.py:85`). The `deleted_at IS NULL` conjunct is the default
+/// soft-delete-scoped manager, and `.first()` applies
+/// `Meta.ordering = ("-created_at",)` (`workspace.py:227`) — newest
+/// first, so a superseded row never wins.
 const WORKSPACE_ROLE_SQL: &str = "SELECT role FROM workspace_members \
-     WHERE workspace_id = $1 AND member_id = $2 AND is_active LIMIT 1";
+     WHERE workspace_id = $1 AND member_id = $2 AND is_active AND deleted_at IS NULL \
+     ORDER BY created_at DESC LIMIT 1";
 
 /// `UserLLMConfig.objects.filter(user=user).first()` (`llm.py:67-68`).
 const LLM_CONFIG_SQL: &str = "SELECT provider_kind, base_url, model_name, api_key_encrypted \
@@ -988,6 +992,14 @@ impl TurnSeam for LiveTurnSeam {
             .fetch_optional(&self.pool)
             .await
             .map_err(db_error)?;
+        // A missing owner row is corruption, not an empty context:
+        // `thread.user` raises `User.DoesNotExist` out of `_load_context`
+        // (`tasks.py:83`), which parks the turn for the sweep — the
+        // `SeamError` arm does the same. (A missing *role* stays `or 0`,
+        // `tasks.py:84`.)
+        let Some(user_display) = user_display else {
+            return Err(SeamError("User matching query does not exist.".to_owned()));
+        };
         Ok(Some(TurnContext {
             turn_id,
             turn_status: status,
@@ -998,7 +1010,7 @@ impl TurnSeam for LiveTurnSeam {
             workspace_name,
             workspace_role: i32::from(role.unwrap_or(0)),
             user_id,
-            user_display: user_display.unwrap_or_default(),
+            user_display,
             user_text,
         }))
     }
@@ -1575,17 +1587,23 @@ impl TurnSeam for LiveTurnSeam {
         )
         .await
         .map_err(db_error)?;
-        if status != rt::MSG_COMPLETED {
-            return Ok(());
-        }
+        // `message.save(update_fields=[...])` raises `DatabaseError` when
+        // the row is gone (`tasks.py:147`), before the completed check —
+        // so the re-read below is the vanish check on both arms, not just
+        // the envelope read.
         let row: Option<(i64, Value, DateTime<Utc>)> = sqlx::query_as(MESSAGE_ROW_SQL)
             .bind(message_id)
             .fetch_optional(&self.pool)
             .await
             .map_err(db_error)?;
         let Some((seq, payload, created_at)) = row else {
-            return Ok(());
+            return Err(SeamError(
+                "Save with update_fields did not affect any rows.".to_owned(),
+            ));
         };
+        if status != rt::MSG_COMPLETED {
+            return Ok(());
+        }
         self.emit_message_completed(
             ctx,
             message_id,
@@ -1745,8 +1763,11 @@ impl TurnSeam for LiveTurnSeam {
         code: &str,
         detail: &str,
     ) -> Result<(), SeamError> {
-        let code = rt::truncate_code(code).to_owned();
-        let detail = rt::truncate_detail(detail).to_owned();
+        // Only the row truncates (`code[:64]`, `(detail or "")[:2000]`,
+        // `tasks.py:187-188`): the error message and the `turn_failed`
+        // payload carry the full values (`tasks.py:193-200`).
+        let row_code = rt::truncate_code(code);
+        let row_detail = rt::truncate_detail(detail);
         let now = Utc::now();
         let mut tx = self.pool.begin().await.map_err(db_error)?;
         sqlx::query(&rt::lock_turn_select())
@@ -1754,10 +1775,14 @@ impl TurnSeam for LiveTurnSeam {
             .execute(&mut *tx)
             .await
             .map_err(db_error)?;
-        let won =
-            pidash_services::domain::assistant::fail_turn(&mut *tx, ctx.turn_id, &code, &detail)
-                .await
-                .map_err(db_error)?;
+        let won = pidash_services::domain::assistant::fail_turn(
+            &mut *tx,
+            ctx.turn_id,
+            row_code,
+            row_detail,
+        )
+        .await
+        .map_err(db_error)?;
         if won == 0 {
             // Another terminal writer already owned the row (see
             // `complete_turn`): roll back and emit nothing, so a lost race
@@ -1780,19 +1805,15 @@ impl TurnSeam for LiveTurnSeam {
         tx.commit().await.map_err(db_error)?;
         // `events.create_message(..., display_content=detail or code,
         // status=FAILED)` (`tasks.py:191-193`): own transaction, thread
-        // locked, thread-scoped seq.
-        let content = if detail.is_empty() {
-            code.clone()
-        } else {
-            detail.clone()
-        };
+        // locked, thread-scoped seq. Full values — only the row truncates.
+        let content = if detail.is_empty() { code } else { detail };
         let payload = empty_payload();
         let (message_id, _seq) = self
             .create_message(
                 ctx.thread_id,
                 Some(ctx.turn_id),
                 rt::KIND_ERROR,
-                &content,
+                content,
                 &payload,
                 rt::MSG_FAILED,
                 now,
@@ -2244,5 +2265,419 @@ mod tests {
             "the per-turn record is gone after the deadline fires during MCP entry"
         );
         acceptor.abort();
+    }
+
+    // -- live scratch-DB tests (env-gated) ------------------------------------
+    //
+    // `DATABASE_URL` unset (plain `cargo test`, incl. CI) skips these; a
+    // scratch URL runs them. Single connection: TEMP tables isolate per
+    // test (the connections/services precedent, mirrored from the cloud
+    // overlay's `provider.rs` live tests).
+
+    async fn live_pool() -> Option<PgPool> {
+        use sqlx::postgres::PgPoolOptions;
+        match std::env::var("DATABASE_URL") {
+            Ok(url) => Some(
+                PgPoolOptions::new()
+                    .max_connections(1)
+                    .connect(&url)
+                    .await
+                    .expect("connect to scratch DATABASE_URL"),
+            ),
+            Err(_) => {
+                eprintln!("skipping live-db test: DATABASE_URL is not set");
+                None
+            }
+        }
+    }
+
+    /// TEMP schema for the seam tests (transcribed from the Django
+    /// `_meta` column order with real types; no foreign keys — a bare
+    /// scratch database has no referenced tables).
+    const LIVE_USERS_DDL: &str = "CREATE TEMPORARY TABLE users (id UUID PRIMARY KEY, email VARCHAR(255), display_name VARCHAR(255) NOT NULL)";
+    const LIVE_WORKSPACES_DDL: &str = "CREATE TEMPORARY TABLE workspaces (id UUID PRIMARY KEY, name VARCHAR(80) NOT NULL, slug VARCHAR(48) NOT NULL)";
+    const LIVE_MEMBERS_DDL: &str = "CREATE TEMPORARY TABLE workspace_members (id UUID PRIMARY KEY, workspace_id UUID NOT NULL, member_id UUID NOT NULL, role SMALLINT NOT NULL, is_active BOOLEAN NOT NULL, deleted_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL)";
+    const LIVE_THREAD_DDL: &str = "CREATE TEMPORARY TABLE assistant_thread (id UUID PRIMARY KEY, workspace_id UUID NOT NULL, user_id UUID NOT NULL, title VARCHAR(255) NOT NULL, kind VARCHAR(16) NOT NULL, is_archived BOOLEAN NOT NULL, active_turn_id UUID, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL)";
+    const LIVE_TURN_DDL: &str = "CREATE TEMPORARY TABLE assistant_turn (id UUID PRIMARY KEY, thread_id UUID NOT NULL, user_message_id UUID, status VARCHAR(16) NOT NULL, model_messages JSONB, usage JSONB, model_used VARCHAR(255) NOT NULL, error_code VARCHAR(64) NOT NULL, error_detail TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL, started_at TIMESTAMPTZ, completed_at TIMESTAMPTZ)";
+    const LIVE_MESSAGE_DDL: &str = "CREATE TEMPORARY TABLE assistant_message (id UUID PRIMARY KEY, thread_id UUID NOT NULL, turn_id UUID, seq BIGINT NOT NULL, kind VARCHAR(16) NOT NULL, display_content TEXT NOT NULL, payload JSONB NOT NULL, status VARCHAR(16) NOT NULL, created_at TIMESTAMPTZ NOT NULL, completed_at TIMESTAMPTZ)";
+    const LIVE_EVENT_DDL: &str = "CREATE TEMPORARY TABLE assistant_event (id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, thread_id UUID NOT NULL, turn_id UUID, seq BIGINT NOT NULL, kind VARCHAR(64) NOT NULL, message_id UUID, payload JSONB NOT NULL, created_at TIMESTAMPTZ NOT NULL)";
+
+    async fn live_schema(pool: &PgPool) {
+        for ddl in [
+            LIVE_USERS_DDL,
+            LIVE_WORKSPACES_DDL,
+            LIVE_MEMBERS_DDL,
+            LIVE_THREAD_DDL,
+            LIVE_TURN_DDL,
+            LIVE_MESSAGE_DDL,
+            LIVE_EVENT_DDL,
+        ] {
+            sqlx::query(ddl).execute(pool).await.expect("live DDL");
+        }
+    }
+
+    async fn seed_user(pool: &PgPool, id: Uuid, display_name: &str, email: Option<&str>) {
+        sqlx::query("INSERT INTO users (id, email, display_name) VALUES ($1, $2, $3)")
+            .bind(id)
+            .bind(email)
+            .bind(display_name)
+            .execute(pool)
+            .await
+            .expect("seed user");
+    }
+
+    async fn seed_workspace(pool: &PgPool, id: Uuid, slug: &str, name: &str) {
+        sqlx::query("INSERT INTO workspaces (id, name, slug) VALUES ($1, $2, $3)")
+            .bind(id)
+            .bind(name)
+            .bind(slug)
+            .execute(pool)
+            .await
+            .expect("seed workspace");
+    }
+
+    async fn seed_member(pool: &PgPool, workspace_id: Uuid, user_id: Uuid, role: i16) {
+        sqlx::query(
+            "INSERT INTO workspace_members (id, workspace_id, member_id, role, is_active, created_at) VALUES ($1, $2, $3, $4, TRUE, now())",
+        )
+        .bind(Uuid::new_v4())
+        .bind(workspace_id)
+        .bind(user_id)
+        .bind(role)
+        .execute(pool)
+        .await
+        .expect("seed member");
+    }
+
+    async fn seed_thread(pool: &PgPool, id: Uuid, workspace_id: Uuid, user_id: Uuid, kind: &str) {
+        sqlx::query(
+            "INSERT INTO assistant_thread (id, workspace_id, user_id, title, kind, is_archived, active_turn_id, created_at, updated_at) VALUES ($1, $2, $3, '', $4, FALSE, NULL, now(), now())",
+        )
+        .bind(id)
+        .bind(workspace_id)
+        .bind(user_id)
+        .bind(kind)
+        .execute(pool)
+        .await
+        .expect("seed thread");
+    }
+
+    async fn seed_turn(
+        pool: &PgPool,
+        id: Uuid,
+        thread_id: Uuid,
+        user_message_id: Option<Uuid>,
+        status: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO assistant_turn (id, thread_id, user_message_id, status, model_messages, usage, model_used, error_code, error_detail, created_at, started_at, completed_at) VALUES ($1, $2, $3, $4, NULL, NULL, '', '', '', now(), NULL, NULL)",
+        )
+        .bind(id)
+        .bind(thread_id)
+        .bind(user_message_id)
+        .bind(status)
+        .execute(pool)
+        .await
+        .expect("seed turn");
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn seed_message(
+        pool: &PgPool,
+        id: Uuid,
+        thread_id: Uuid,
+        turn_id: Option<Uuid>,
+        seq: i64,
+        kind: &str,
+        display: &str,
+        status: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO assistant_message (id, thread_id, turn_id, seq, kind, display_content, payload, status, created_at, completed_at) VALUES ($1, $2, $3, $4, $5, $6, '{}', $7, now(), NULL)",
+        )
+        .bind(id)
+        .bind(thread_id)
+        .bind(turn_id)
+        .bind(seq)
+        .bind(kind)
+        .bind(display)
+        .bind(status)
+        .execute(pool)
+        .await
+        .expect("seed message");
+    }
+
+    fn live_seam(pool: &PgPool) -> LiveTurnSeam {
+        LiveTurnSeam::new(pool.clone(), Arc::new(Settings::test_defaults()), None)
+            .expect("seam builds")
+    }
+
+    fn live_ctx(turn_id: Uuid, thread_id: Uuid, user_id: Uuid, workspace_id: Uuid) -> TurnContext {
+        TurnContext {
+            turn_id,
+            turn_status: "running".to_owned(),
+            thread_id,
+            thread_kind: "chat".to_owned(),
+            workspace_id,
+            workspace_slug: "live-ws".to_owned(),
+            workspace_name: "Live WS".to_owned(),
+            workspace_role: 15,
+            user_id,
+            user_display: "Live User".to_owned(),
+            user_text: "hello".to_owned(),
+        }
+    }
+
+    /// One turn-owner triple (user + workspace + member + thread): the
+    /// `load_context` tests build on this.
+    async fn seed_owner(pool: &PgPool) -> (Uuid, Uuid, Uuid) {
+        let user_id = Uuid::new_v4();
+        let workspace_id = Uuid::new_v4();
+        let thread_id = Uuid::new_v4();
+        seed_user(pool, user_id, "Live User", Some("live@test.dev")).await;
+        seed_workspace(pool, workspace_id, "live-ws", "Live WS").await;
+        seed_member(pool, workspace_id, user_id, 15).await;
+        seed_thread(pool, thread_id, workspace_id, user_id, "chat").await;
+        (user_id, workspace_id, thread_id)
+    }
+
+    /// `workspace_role` reads the newest ACTIVE row: `.first()` applies
+    /// `Meta.ordering = ("-created_at",)` (`workspace.py:227`), so the
+    /// newest active row wins — never a stale row, never an inactive one.
+    #[tokio::test]
+    async fn live_role_prefers_newest_active() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        live_schema(&pool).await;
+        let (user_id, workspace_id, thread_id) = seed_owner(&pool).await;
+        for (role, active, age) in [
+            (5i16, true, "- interval '2 days'"),
+            (25i16, false, "+ interval '2 days'"),
+        ] {
+            sqlx::query(&format!(
+                "INSERT INTO workspace_members (id, workspace_id, member_id, role, is_active, created_at) VALUES ($1, $2, $3, $4, $5, now() {age})"
+            ))
+            .bind(Uuid::new_v4())
+            .bind(workspace_id)
+            .bind(user_id)
+            .bind(role)
+            .bind(active)
+            .execute(&pool)
+            .await
+            .expect("seed extra member row");
+        }
+        sqlx::query(
+            "INSERT INTO workspace_members (id, workspace_id, member_id, role, is_active, created_at) VALUES ($1, $2, $3, 20, TRUE, now() + interval '1 day')",
+        )
+        .bind(Uuid::new_v4())
+        .bind(workspace_id)
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .expect("seed newest active row");
+        let turn_id = Uuid::new_v4();
+        seed_turn(&pool, turn_id, thread_id, None, "queued").await;
+        let seam = live_seam(&pool);
+        let ctx = seam
+            .load_context(turn_id)
+            .await
+            .expect("load_context")
+            .expect("eligible turn maps");
+        assert_eq!(ctx.workspace_role, 20, "newest active row wins");
+    }
+
+    /// Soft-deleted memberships are invisible to `workspace_role` (the
+    /// default manager adds `deleted_at IS NULL`): with only a
+    /// soft-deleted active admin left, the context role is 0, not 20.
+    #[tokio::test]
+    async fn live_role_ignores_soft_deleted() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        live_schema(&pool).await;
+        let (user_id, workspace_id, thread_id) = seed_owner(&pool).await;
+        sqlx::query("UPDATE workspace_members SET deleted_at = now() WHERE workspace_id = $1 AND member_id = $2")
+            .bind(workspace_id)
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .expect("soft-delete seeded row");
+        sqlx::query(
+            "INSERT INTO workspace_members (id, workspace_id, member_id, role, is_active, deleted_at, created_at) VALUES ($1, $2, $3, 20, TRUE, now(), now() + interval '1 day')",
+        )
+        .bind(Uuid::new_v4())
+        .bind(workspace_id)
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .expect("seed soft-deleted admin row");
+        let turn_id = Uuid::new_v4();
+        seed_turn(&pool, turn_id, thread_id, None, "queued").await;
+        let seam = live_seam(&pool);
+        let ctx = seam
+            .load_context(turn_id)
+            .await
+            .expect("load_context")
+            .expect("eligible turn maps");
+        assert_eq!(
+            ctx.workspace_role, 0,
+            "soft-deleted memberships grant no role"
+        );
+    }
+
+    /// A missing owner row fails loud: Python's `thread.user` raises
+    /// `User.DoesNotExist` out of `_load_context` (`tasks.py:83`), which
+    /// parks the turn for the sweep — the seam must not proceed with an
+    /// empty display name.
+    #[tokio::test]
+    async fn live_load_context_missing_owner_fails_loud() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        live_schema(&pool).await;
+        let (user_id, workspace_id, thread_id) = seed_owner(&pool).await;
+        let seam = live_seam(&pool);
+        // Positive control: the owner triple maps with its display name.
+        let ok_id = Uuid::new_v4();
+        seed_turn(&pool, ok_id, thread_id, None, "queued").await;
+        let ctx = seam
+            .load_context(ok_id)
+            .await
+            .expect("load_context")
+            .expect("eligible turn maps");
+        assert_eq!(ctx.user_display, "Live User");
+        // The member row stays live — only the users row is gone — and
+        // the context still fails loud.
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .expect("delete owner row");
+        let turn_id = Uuid::new_v4();
+        seed_turn(&pool, turn_id, thread_id, None, "queued").await;
+        let error = seam
+            .load_context(turn_id)
+            .await
+            .expect_err("missing owner row fails loud");
+        assert_eq!(error.0, "User matching query does not exist.");
+        let _ = (user_id, workspace_id);
+    }
+
+    /// A vanished message row fails loud on both arms:
+    /// `message.save(update_fields=[...])` raises `DatabaseError` when 0
+    /// rows are affected (`tasks.py:147`), before the completed check.
+    #[tokio::test]
+    async fn live_finalize_row_vanished_fails_loud() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        live_schema(&pool).await;
+        let (user_id, workspace_id, thread_id) = seed_owner(&pool).await;
+        let turn_id = Uuid::new_v4();
+        seed_turn(&pool, turn_id, thread_id, None, "running").await;
+        let seam = live_seam(&pool);
+        let ctx = live_ctx(turn_id, thread_id, user_id, workspace_id);
+        for status in [rt::MSG_COMPLETED, rt::MSG_FAILED] {
+            let error = seam
+                .finalize_row(&ctx, Uuid::new_v4(), "text", status)
+                .await
+                .expect_err("vanished row fails loud");
+            assert_eq!(error.0, "Save with update_fields did not affect any rows.");
+        }
+        // Positive control: a live row finalizes onto completed.
+        let message_id = Uuid::new_v4();
+        seed_message(
+            &pool,
+            message_id,
+            thread_id,
+            Some(turn_id),
+            1,
+            "assistant",
+            "",
+            "streaming",
+        )
+        .await;
+        seam.finalize_row(&ctx, message_id, "done", rt::MSG_COMPLETED)
+            .await
+            .expect("live row finalizes");
+        let row: (String, String) =
+            sqlx::query_as("SELECT display_content, status FROM assistant_message WHERE id = $1")
+                .bind(message_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read finalized");
+        assert_eq!(row.0, "done");
+        assert_eq!(row.1, "completed");
+    }
+
+    /// `_fail_turn` truncates only the row (`tasks.py:187-188`): the
+    /// error message (`display_content=detail or code`) and the
+    /// `turn_failed` payload carry the full values (`tasks.py:193-200`).
+    #[tokio::test]
+    async fn live_fail_turn_keeps_full_values_outside_row() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        live_schema(&pool).await;
+        let (user_id, workspace_id, thread_id) = seed_owner(&pool).await;
+        let seam = live_seam(&pool);
+        let code = "c".repeat(100);
+        let detail = "d".repeat(2500);
+        let turn_id = Uuid::new_v4();
+        seed_turn(&pool, turn_id, thread_id, None, "running").await;
+        let ctx = live_ctx(turn_id, thread_id, user_id, workspace_id);
+        seam.fail_turn(&ctx, &code, &detail)
+            .await
+            .expect("fail_turn");
+        let row: (String, String) =
+            sqlx::query_as("SELECT error_code, error_detail FROM assistant_turn WHERE id = $1")
+                .bind(turn_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read failed turn");
+        assert_eq!(row.0, "c".repeat(64), "row code truncates to 64 chars");
+        assert_eq!(
+            row.1,
+            "d".repeat(2000),
+            "row detail truncates to 2000 chars"
+        );
+        let content: String = sqlx::query_scalar(
+            "SELECT display_content FROM assistant_message WHERE turn_id = $1 AND kind = 'error'",
+        )
+        .bind(turn_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read error message");
+        assert_eq!(content, detail, "error message keeps the full detail");
+        let payload: Value = sqlx::query_scalar(
+            "SELECT payload FROM assistant_event WHERE turn_id = $1 AND kind = 'turn_failed'",
+        )
+        .bind(turn_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read turn_failed event");
+        assert_eq!(
+            payload,
+            json!({
+                "turn_id": turn_id.to_string(),
+                "error_code": code,
+                "detail": detail,
+            }),
+            "turn_failed payload keeps the full values"
+        );
+        // Empty detail falls back to the full code (`detail or code`).
+        let turn_id = Uuid::new_v4();
+        seed_turn(&pool, turn_id, thread_id, None, "running").await;
+        let ctx = live_ctx(turn_id, thread_id, user_id, workspace_id);
+        seam.fail_turn(&ctx, &code, "").await.expect("fail_turn");
+        let content: String = sqlx::query_scalar(
+            "SELECT display_content FROM assistant_message WHERE turn_id = $1 AND kind = 'error'",
+        )
+        .bind(turn_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read error message");
+        assert_eq!(content, code, "empty detail falls back to the full code");
     }
 }
