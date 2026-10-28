@@ -438,6 +438,7 @@ surface_snapshot! {
     ops::RevokeBundle,
     ops::RevokeCollected,
     ops::RevokeCtx,
+    ops::RevokeEffect,
     ops::RevokeError,
     ops::RevokeFireError,
     ops::RevokeOutcome,

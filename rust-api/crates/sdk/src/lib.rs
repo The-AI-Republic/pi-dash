@@ -215,6 +215,7 @@ pub mod ops {
     pub use pidash_jobs::runner_enroll::RevokeBundle;
     pub use pidash_jobs::runner_enroll::RevokeCollected;
     pub use pidash_jobs::runner_enroll::RevokeCtx;
+    pub use pidash_jobs::runner_enroll::RevokeEffect;
     pub use pidash_jobs::runner_enroll::RevokeFireError;
     pub use pidash_jobs::runner_enroll::RevokeScope;
     pub use pidash_jobs::runner_runs::emit_terminal_effects;

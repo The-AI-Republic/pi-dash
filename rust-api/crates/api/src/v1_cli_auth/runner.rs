@@ -329,8 +329,6 @@ async fn proxy_through(
     crate::edge::proxy(State(state), req).await
 }
 
-/// `DELETE /api/v1/runners/<runner_id>/`: by-pk 404, view-guard 404,
-/// manage-guard 403, flag-parse 400, then the delete service and an
 /// The revoke runtime facts: the pool, the api-owned Redis client,
 /// and runner settings. Frames and close run on the revoke tx (see
 /// the jobs module docs).
@@ -343,6 +341,8 @@ fn revoke_ctx(pool: &PgPool, state: &AppState) -> RevokeCtx {
     }
 }
 
+/// `DELETE /api/v1/runners/<runner_id>/`: by-pk 404, view-guard 404,
+/// manage-guard 403, flag-parse 400, then the delete service and an
 /// empty 204.
 pub async fn delete_runner(
     State(state): State<AppState>,

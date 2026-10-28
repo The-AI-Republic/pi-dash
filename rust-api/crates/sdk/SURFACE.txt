@@ -380,6 +380,7 @@ pidash_sdk::ops::RedisAdmissionCache
 pidash_sdk::ops::RevokeBundle
 pidash_sdk::ops::RevokeCollected
 pidash_sdk::ops::RevokeCtx
+pidash_sdk::ops::RevokeEffect
 pidash_sdk::ops::RevokeError
 pidash_sdk::ops::RevokeFireError
 pidash_sdk::ops::RevokeOutcome

@@ -32,9 +32,12 @@
 //!   (warn vs error, `handoff_failure_log` vs static text, the "for
 //!   run" suffix). The service owns fire ORDER; each log line stays in
 //!   its surface's [`fire_revoke_bundle`] callback.
-//! * Row decode: by position (enroll) vs by name (v1, teardown). Same
-//!   values; only a decode-failure message (unreachable on uuid
-//!   columns) could differ. The canonical store decodes by name.
+//! * Row decode: by position (enroll) vs by name (v1, teardown) in
+//!   the finalize and machine reads. Same values; only a
+//!   decode-failure message (unreachable on these columns) could
+//!   differ. Each site follows one surface: the finalize reads by
+//!   name (v1/teardown), the machine/fetch reads by position
+//!   (enroll), the run lock stays `query_as` (v1/teardown).
 //! * Finalize clocks: the enroll/teardown finalizes bind raw
 //!   `Utc::now()` where v1 binds micros-truncated time. sqlx encodes
 //!   `DateTime` via `num_microseconds()` (truncation —
@@ -48,9 +51,14 @@
 //! [`sqlx::Transaction`] (the caller's own begin for deletes, the outer
 //! rotation/machine tx for teardown revokes) and commits it before
 //! firing the bundle — the `HandoffStore` precedent. Post-commit fire
-//! order is the services [`fire_plan`](pidash_services::runner_enroll::fire::fire_plan)
-//! order: publish pairs, handoffs, drains, cleanup; drains and cleanup
-//! propagate (Django's bare `on_commit` chain), everything else is
+//! order is the drivers' registration order (Django's bare
+//! `on_commit` chain fires in registration order): the bundle keeps
+//! one ordered effect list, so a machine delete's nested revokes
+//! fire per-runner groups, not regrouped by kind. Single-nested-revoke
+//! flows still match the services
+//! [`fire_plan`](pidash_services::runner_enroll::fire::fire_plan) order
+//! (publish pairs, handoffs, drains, cleanup), since the driver emits
+//! them grouped. Drains and cleanup propagate; everything else is
 //! isolated.
 //!
 //! Re-exported through `pidash-sdk::ops`.
@@ -122,14 +130,27 @@ pub enum RevokeScope<'a> {
     },
 }
 
-/// One revoke's post-commit effects, in registration order: the
-/// per-run publish pairs (S3 order), handoffs as `(runner_id, run_id)`
-/// pairs, pod drains, and stream cleanups.
+/// One revoke's post-commit effects, in Python's registration order
+/// (Django fires `on_commit` in registration order): the drivers
+/// append as they run — per-run publish pairs during S3, then the
+/// handoffs, pod drains, and stream cleanup per nested revoke. A
+/// machine delete's nested revokes interleave here exactly as they
+/// registered; the fire keeps that order (it must not regroup by
+/// kind — a drain failure aborts what follows, as in Python).
 pub struct RevokeBundle {
-    pub publish: Vec<LifecycleEffect>,
-    pub handoffs: Vec<(Uuid, Uuid)>,
-    pub drains: Vec<Uuid>,
-    pub cleanups: Vec<Uuid>,
+    pub effects: Vec<RevokeEffect>,
+}
+
+/// One collected post-commit effect, in registration order.
+pub enum RevokeEffect {
+    /// A terminal-effects publish pair member.
+    Publish(LifecycleEffect),
+    /// A project-move handoff for one cancelled run.
+    Handoff { runner_id: Uuid, run_id: Uuid },
+    /// A pod drain.
+    Drain { pod_id: Uuid },
+    /// A runner stream cleanup.
+    Cleanup { runner_id: Uuid },
 }
 
 /// The driver's collected post-commit bundle plus its warnings. The
@@ -157,10 +178,7 @@ pub async fn revoke(
         atomic_effects: ctx.atomic_effects,
         current_runner: None,
         s2_revoked: Vec::new(),
-        publish: Vec::new(),
-        handoffs: Vec::new(),
-        drains: Vec::new(),
-        cleanups: Vec::new(),
+        effects: Vec::new(),
     };
     let warnings = match scope {
         RevokeScope::Runner {
@@ -217,15 +235,15 @@ pub enum RevokeFireError {
     Cleanup,
 }
 
-/// Fire one collected bundle in `fire_plan` order: publish pairs,
-/// handoffs, drains, cleanup. Drains run the D-14 live recipe and
-/// cleanup runs the outbox scheduler, both propagating; every other
-/// step runs its surface callback, isolated. Each callback performs
-/// its step and logs its own failure lines (which differ per surface
-/// — see the module docs): `emit_terminal` fires one
-/// `PublishTerminalEffects` pair member, `apply_inline` one
-/// `ApplyTerminalEffectsInline` member, `handoff` one
-/// `(runner_id, run_id)` handoff.
+/// Fire one collected bundle in registration order. Publishes and
+/// handoffs run their surface callbacks, isolated; drains run the
+/// D-14 live recipe and cleanup runs the outbox scheduler, both
+/// propagating (a failure aborts what follows — Django's bare
+/// `on_commit` chain). Each callback performs its step and logs its
+/// own failure lines (which differ per surface — see the module
+/// docs): `emit_terminal` fires one `PublishTerminalEffects` pair
+/// member, `apply_inline` one `ApplyTerminalEffectsInline` member,
+/// `handoff` one `(runner_id, run_id)` handoff.
 #[allow(clippy::too_many_arguments)]
 pub async fn fire_revoke_bundle<E, EFut, A, AFut, H, HFut>(
     ctx: &RevokeCtx,
@@ -242,37 +260,37 @@ where
     H: FnMut(Uuid, Uuid) -> HFut,
     HFut: Future<Output = ()>,
 {
-    for effect in bundle.publish {
+    for effect in bundle.effects {
         match effect {
-            LifecycleEffect::PublishTerminalEffects { run_id } => {
+            RevokeEffect::Publish(LifecycleEffect::PublishTerminalEffects { run_id }) => {
                 emit_terminal(run_id).await;
             }
-            LifecycleEffect::ApplyTerminalEffectsInline { run_id } => {
+            RevokeEffect::Publish(LifecycleEffect::ApplyTerminalEffectsInline { run_id }) => {
                 apply_inline(run_id).await;
             }
             // The bundle holds publish pairs only (see
             // `finalize_cancelled_run`); anything else is ignored, as
             // the enroll drain's wildcard arm does.
-            _ => {}
+            RevokeEffect::Publish(_) => {}
+            RevokeEffect::Handoff { runner_id, run_id } => {
+                handoff(runner_id, run_id).await;
+            }
+            RevokeEffect::Drain { pod_id } => {
+                live_drains::drain_pod_by_id(&ctx.pool, ctx.redis.as_ref(), &ctx.runner, pod_id)
+                    .await
+                    .map(|_| ())
+                    .map_err(|_| RevokeFireError::Drain)?;
+            }
+            RevokeEffect::Cleanup { runner_id } => {
+                runner_outbox::schedule_stream_cleanup_for_runner(
+                    ctx.redis.as_ref(),
+                    &ctx.runner,
+                    &runner_id.to_string(),
+                )
+                .await
+                .map_err(|_| RevokeFireError::Cleanup)?;
+            }
         }
-    }
-    for (runner_id, run_id) in bundle.handoffs {
-        handoff(runner_id, run_id).await;
-    }
-    for pod_id in bundle.drains {
-        live_drains::drain_pod_by_id(&ctx.pool, ctx.redis.as_ref(), &ctx.runner, pod_id)
-            .await
-            .map(|_| ())
-            .map_err(|_| RevokeFireError::Drain)?;
-    }
-    for runner_id in bundle.cleanups {
-        runner_outbox::schedule_stream_cleanup_for_runner(
-            ctx.redis.as_ref(),
-            &ctx.runner,
-            &runner_id.to_string(),
-        )
-        .await
-        .map_err(|_| RevokeFireError::Cleanup)?;
     }
     Ok(())
 }
@@ -298,19 +316,14 @@ struct PoolRevokeStore<'t, 'x, 'c> {
     /// Runners whose S2 ran on this transaction: their pool close is
     /// skipped (see `close_runner_session`).
     s2_revoked: Vec<Uuid>,
-    publish: Vec<LifecycleEffect>,
-    handoffs: Vec<(Uuid, Uuid)>,
-    drains: Vec<Uuid>,
-    cleanups: Vec<Uuid>,
+    /// Collected effects, in driver call (registration) order.
+    effects: Vec<RevokeEffect>,
 }
 
 impl PoolRevokeStore<'_, '_, '_> {
     fn into_bundle(self) -> RevokeBundle {
         RevokeBundle {
-            publish: self.publish,
-            handoffs: self.handoffs,
-            drains: self.drains,
-            cleanups: self.cleanups,
+            effects: self.effects,
         }
     }
 }
@@ -488,8 +501,11 @@ impl RevokeStore for PoolRevokeStore<'_, '_, '_> {
         }
         // D-15's terminal-effects `on_commit` (registered in-tx, fires
         // first post-commit).
-        self.publish
-            .extend(finalize_kernel::plan_publish_effects(run_id));
+        self.effects.extend(
+            finalize_kernel::plan_publish_effects(run_id)
+                .into_iter()
+                .map(RevokeEffect::Publish),
+        );
         Ok(())
     }
 
@@ -515,16 +531,17 @@ impl RevokeStore for PoolRevokeStore<'_, '_, '_> {
 
     fn complete_handoff_after_commit(&mut self, run_id: Uuid) {
         if let Some(runner_id) = self.current_runner {
-            self.handoffs.push((runner_id, run_id));
+            self.effects
+                .push(RevokeEffect::Handoff { runner_id, run_id });
         }
     }
 
     fn drain_pod_after_commit(&mut self, pod_id: Uuid) {
-        self.drains.push(pod_id);
+        self.effects.push(RevokeEffect::Drain { pod_id });
     }
 
     fn schedule_stream_cleanup_after_commit(&mut self, runner_id: Uuid) {
-        self.cleanups.push(runner_id);
+        self.effects.push(RevokeEffect::Cleanup { runner_id });
     }
 }
 
@@ -1062,22 +1079,24 @@ mod tests {
         }
     }
 
-    /// Fire order is the `fire_plan` order (publish pairs, handoffs,
-    /// drains, cleanup), with no I/O on this bundle (empty drains,
-    /// redis-less cleanup).
+    /// Fire order is the bundle order: a single nested revoke
+    /// registers publish pairs, handoff, then cleanup (drains omitted,
+    /// redis-less cleanup needs no I/O).
     #[tokio::test]
     async fn fire_order_is_publish_handoffs_drains_cleanup() {
         let ctx = test_ctx();
         let run = Uuid::new_v4();
         let runner = Uuid::new_v4();
         let bundle = RevokeBundle {
-            publish: vec![
-                LifecycleEffect::PublishTerminalEffects { run_id: run },
-                LifecycleEffect::ApplyTerminalEffectsInline { run_id: run },
+            effects: vec![
+                RevokeEffect::Publish(LifecycleEffect::PublishTerminalEffects { run_id: run }),
+                RevokeEffect::Publish(LifecycleEffect::ApplyTerminalEffectsInline { run_id: run }),
+                RevokeEffect::Handoff {
+                    runner_id: runner,
+                    run_id: run,
+                },
+                RevokeEffect::Cleanup { runner_id: runner },
             ],
-            handoffs: vec![(runner, run)],
-            drains: Vec::new(),
-            cleanups: vec![runner],
         };
         let fired: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let emit_fired = fired.clone();
@@ -1120,16 +1139,83 @@ mod tests {
         );
     }
 
+    /// Registration order survives nested revokes: a machine delete
+    /// collects per-runner groups (Python's `on_commit` chain fires in
+    /// registration order), so the second runner's publish must fire
+    /// before the first runner's handoff — not after all publishes.
+    #[tokio::test]
+    async fn fire_preserves_registration_order_across_nested_revokes() {
+        let ctx = test_ctx();
+        let run_a = Uuid::new_v4();
+        let run_b = Uuid::new_v4();
+        let runner_a = Uuid::new_v4();
+        let runner_b = Uuid::new_v4();
+        // Two nested revokes, each appending publish/handoff in driver
+        // order (drains/cleanups omitted: redis-less, pool-less).
+        let bundle = RevokeBundle {
+            effects: vec![
+                RevokeEffect::Publish(LifecycleEffect::PublishTerminalEffects { run_id: run_a }),
+                RevokeEffect::Handoff {
+                    runner_id: runner_a,
+                    run_id: run_a,
+                },
+                RevokeEffect::Publish(LifecycleEffect::PublishTerminalEffects { run_id: run_b }),
+                RevokeEffect::Handoff {
+                    runner_id: runner_b,
+                    run_id: run_b,
+                },
+            ],
+        };
+        let fired: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let emit_fired = fired.clone();
+        let handoff_fired = fired.clone();
+        let outcome = fire_revoke_bundle(
+            &ctx,
+            bundle,
+            |run_id| {
+                let fired = emit_fired.clone();
+                async move {
+                    fired.lock().unwrap().push(format!("emit {run_id}"));
+                }
+            },
+            |_| async {},
+            |runner_id, run_id| {
+                let fired = handoff_fired.clone();
+                async move {
+                    fired
+                        .lock()
+                        .unwrap()
+                        .push(format!("handoff {runner_id} {run_id}"));
+                }
+            },
+        )
+        .await;
+        assert!(outcome.is_ok());
+        assert_eq!(
+            *fired.lock().unwrap(),
+            vec![
+                format!("emit {run_a}"),
+                format!("handoff {runner_a} {run_a}"),
+                format!("emit {run_b}"),
+                format!("handoff {runner_b} {run_b}"),
+            ]
+        );
+    }
+
     /// A failing drain propagates and skips the cleanup (Django's bare
     /// `on_commit` chain); the lazy pool fails every query.
     #[tokio::test]
     async fn fire_drain_failure_propagates() {
         let ctx = test_ctx();
         let bundle = RevokeBundle {
-            publish: Vec::new(),
-            handoffs: Vec::new(),
-            drains: vec![Uuid::new_v4()],
-            cleanups: vec![Uuid::new_v4()],
+            effects: vec![
+                RevokeEffect::Drain {
+                    pod_id: Uuid::new_v4(),
+                },
+                RevokeEffect::Cleanup {
+                    runner_id: Uuid::new_v4(),
+                },
+            ],
         };
         let outcome =
             fire_revoke_bundle(&ctx, bundle, |_| async {}, |_| async {}, |_, _| async {}).await;
@@ -1145,10 +1231,9 @@ mod tests {
                 .expect("client construction never connects"),
         );
         let bundle = RevokeBundle {
-            publish: Vec::new(),
-            handoffs: Vec::new(),
-            drains: Vec::new(),
-            cleanups: vec![Uuid::new_v4()],
+            effects: vec![RevokeEffect::Cleanup {
+                runner_id: Uuid::new_v4(),
+            }],
         };
         let outcome =
             fire_revoke_bundle(&ctx, bundle, |_| async {}, |_| async {}, |_, _| async {}).await;
