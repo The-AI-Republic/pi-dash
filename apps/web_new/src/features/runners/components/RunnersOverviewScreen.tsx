@@ -16,8 +16,8 @@ import { useRunnersOverview } from "../useOverview.js";
 import { CliSetupPanel } from "./CliSetupPanel.js";
 import { RunnersOverview } from "./RunnersOverview.js";
 
-/** Page title (RUN-005 pins "AI Agents"); one area name per surface. */
-export const RUNNERS_PAGE_TITLE = "AI Agents";
+/** Page title: the canonical area name (D27, RUN-005). */
+export const RUNNERS_PAGE_TITLE = "AI Workers";
 
 export interface RunnersOverviewScreenProps {
   workspaceSlug: string;

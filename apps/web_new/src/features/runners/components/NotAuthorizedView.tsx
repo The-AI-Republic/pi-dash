@@ -24,8 +24,8 @@ export function RunnersNotAuthorized({ scope }: RunnersNotAuthorizedProps): Reac
       <h2 className="text-h3 text-(--text)">{RUNNERS_DENIED_HEADING}</h2>
       <p className="text-body max-w-md text-(--text-muted)">
         {scope === "project"
-          ? "Only admins and members of this project can open its AI runners."
-          : "Only workspace admins and members can open AI runners."}
+          ? "Only admins and members of this project can open its AI Workers."
+          : "Only workspace admins and members can open AI Workers."}
       </p>
     </section>
   );

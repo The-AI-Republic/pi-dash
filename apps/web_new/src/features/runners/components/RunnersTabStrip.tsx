@@ -47,7 +47,7 @@ export function RunnersTabStrip({ scope, pathname }: RunnersTabStripProps): Reac
   const base = runnersBase(scope);
   const active = runnersActiveTabKey(pathname, scope);
   return (
-    <nav aria-label="Runners tabs" data-testid="runners-tabs" className="flex border-b border-(--border)">
+    <nav aria-label="AI Workers tabs" data-testid="runners-tabs" className="flex border-b border-(--border)">
       {RUNNERS_TABS.map((tab) => {
         const href = tab.child === "" ? base : `${base}/${tab.child}`;
         const selected = tab.key === active;

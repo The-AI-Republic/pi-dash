@@ -56,7 +56,7 @@ function pageStub(overrides: Record<string, unknown> = {}): Page {
     getByTestId: vi.fn(() => stubLocator()),
     getByPlaceholder: vi.fn(() => stubLocator()),
     url: () => "https://app.test/acme/runners",
-    title: async () => "Acme - AI Agents",
+    title: async () => "Acme - AI Workers",
     waitForResponse: vi.fn(async () => stubResponse("GET", "https://api.test/api/runners/")),
     waitForURL: vi.fn(async () => undefined),
     waitForFunction: vi.fn(async () => undefined),
@@ -447,7 +447,7 @@ describe("runnersRail", () => {
     });
     const overview = stubLocator({ count: vi.fn(async () => 1), getAttribute: vi.fn(async () => "/acme/runners") });
     const rail = stubLocator({
-      locator: vi.fn(() => stubLocator({ innerText: vi.fn(async () => "AI Agents") })),
+      locator: vi.fn(() => stubLocator({ innerText: vi.fn(async () => "AI Workers") })),
       getByRole: vi.fn((role: string, options?: { name?: string }) =>
         role === "link" && options?.name === undefined
           ? stubLocator({ all: vi.fn(async () => [overview, contact]) })
@@ -460,7 +460,7 @@ describe("runnersRail", () => {
     const driver = new WebNewDriver(page);
 
     await expect(driver.runnersRail()).resolves.toEqual({
-      header: "AI Agents",
+      header: "AI Workers",
       overviewHref: "/acme/runners",
       contacts: [{ name: "alpha", href: "/acme/runners/chat/r-1", hasDot: true }],
       emptyVisible: false,
@@ -470,7 +470,7 @@ describe("runnersRail", () => {
     // also catches the workspace sidebar.
     expect((page.getByRole as unknown as { mock: { calls: unknown[][] } }).mock.calls[0]).toEqual([
       "main",
-      { name: "Runners content" },
+      { name: "AI Workers content" },
     ]);
   });
 });
@@ -478,16 +478,16 @@ describe("runnersRail", () => {
 describe("page facts", () => {
   it("reports the document title", async () => {
     const driver = new WebNewDriver(pageStub());
-    await expect(driver.runnersPageTitle()).resolves.toBe("Acme - AI Agents");
+    await expect(driver.runnersPageTitle()).resolves.toBe("Acme - AI Workers");
   });
 
   it("reports the section headings present in the content main", async () => {
     const main = stubLocator({
-      getByText: vi.fn((title: string) => stubLocator({ count: vi.fn(async () => (title === "Runners" ? 1 : 0)) })),
+      getByText: vi.fn((title: string) => stubLocator({ count: vi.fn(async () => (title === "AI Workers" ? 1 : 0)) })),
     });
     const page = pageStub({ getByRole: vi.fn(() => main) });
     const driver = new WebNewDriver(page);
-    await expect(driver.runnersSectionHeadings()).resolves.toEqual(["Runners"]);
+    await expect(driver.runnersSectionHeadings()).resolves.toEqual(["AI Workers"]);
   });
 
   it("reads the breadcrumb leaf from the trailing-slash link", async () => {

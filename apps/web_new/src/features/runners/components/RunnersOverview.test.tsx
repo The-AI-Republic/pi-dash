@@ -136,6 +136,8 @@ describe("RunnersOverview table", () => {
       runner(),
       runner({ id: "r-2", name: "beta-runner", status: "busy", pod_detail: { id: "p-2", name: "Beta pod" } as never }),
     ]);
+    expect(screen.getByRole("heading", { name: "AI Workers" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "AI Workers" })).toBeInTheDocument();
     const table = screen.getByRole("table");
     expect(
       within(table)

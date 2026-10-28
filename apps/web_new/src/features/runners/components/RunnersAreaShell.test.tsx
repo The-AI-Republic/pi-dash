@@ -59,7 +59,7 @@ describe("RunnersAreaShell", () => {
     expect(screen.getByText("Workspace chrome")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: RUNNERS_DENIED_HEADING })).toBeInTheDocument();
     expect(screen.queryByTestId("runners-rail")).toBeNull();
-    expect(screen.queryByRole("main", { name: "Runners content" })).toBeNull();
+    expect(screen.queryByRole("main", { name: "AI Workers content" })).toBeNull();
     expect(screen.queryByText("child")).toBeNull();
   });
 
@@ -92,7 +92,7 @@ describe("RunnersAreaShell", () => {
     );
     expect(screen.getByText("Workspace chrome")).toBeInTheDocument();
     expect(screen.getByTestId("runners-rail")).toBeInTheDocument();
-    const main = screen.getByRole("main", { name: "Runners content" });
+    const main = screen.getByRole("main", { name: "AI Workers content" });
     expect(main).toContainElement(screen.getByText("child"));
     expect(screen.getByTestId("runners-tabs")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Runs" })).toHaveAttribute("aria-current", "page");

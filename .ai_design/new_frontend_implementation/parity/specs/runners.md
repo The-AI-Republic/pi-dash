@@ -99,12 +99,12 @@ renamed. "AI Agents" is not reused for this area: it was this area's own
 former name, deliberately abandoned by the maintainer in PDASHOSS01-44, so
 re-adopting it would reverse that call.
 
-The rename is deliberately not built here: RUN-005 still pins the current
-split names as the bug the oracle observes, and the rename lands as its own
-follow-up slice (linked as NEWFRONT-946). Until that slice runs, the new
-app keeps rendering "AI Agents" in the title and rail, "AI Workers" in the
-project breadcrumb/sidebar/tab, and "Runners" in the overview heading, exactly
-as the oracle expects. No behavior change is implied by this row.
+The rename landed as its own follow-up slice (NEWFRONT-946): the new app
+now renders "AI Workers" on every surface — title, rail header, project
+breadcrumb/sidebar/tab, and the overview heading — exactly as the oracle
+expects. The three-way split ("AI Agents" title/rail, "AI Workers"
+breadcrumb, "Runners" headings) now describes the old app only; the oracle
+row records that divergence.
 
 Each runner row (RUN-010) links to the runner detail and offers Delete
 always and Revoke only for an enrolled, not-already-revoked runner — the
@@ -682,7 +682,7 @@ silently; each names its tracker.
   in-page headings with the CLI verb. Target: one canonical name on every
   surface (§1). Decided (D27): the name is **AI Workers**; keep "runner" as
   the technical noun for a host (CLI verb, API paths, model, code). The
-  rename itself is a follow-up slice, not this issue (NEWFRONT-946).
+  rename landed as NEWFRONT-946.
 - NEWFRONT-297 (RUN-024): every approval decide call currently errors
   server-side, so the acted card stays with a failure toast. Target: the
   card drops off on refetch with the decision persisted (§5).

@@ -67,7 +67,7 @@ export function RunnersAreaShell({
           isProjectScope={isProjectScope(scope)}
           {...(localContacts === undefined ? {} : { localContacts })}
         />
-        <main aria-label="Runners content" data-testid="runners-content" className="min-w-0 flex-1 overflow-auto">
+        <main aria-label="AI Workers content" data-testid="runners-content" className="min-w-0 flex-1 overflow-auto">
           <RunnersTabStrip scope={scope} pathname={pathname} />
           {children}
         </main>

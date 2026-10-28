@@ -116,12 +116,12 @@ export function RunnersOverview({
 
   return (
     <section
-      aria-label="Runners"
+      aria-label="AI Workers"
       data-testid="runners-overview"
       className="flex flex-col gap-(--space-6) p-(--space-6)"
     >
       <div className="flex items-center justify-between gap-(--space-3)">
-        <h1 className="text-h2 text-(--text)">Runners</h1>
+        <h1 className="text-h2 text-(--text)">AI Workers</h1>
         {action}
       </div>
       <RunnersPods
