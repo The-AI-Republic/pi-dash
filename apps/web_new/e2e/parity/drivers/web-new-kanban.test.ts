@@ -1221,16 +1221,11 @@ describe("kanban hold overlay and toasts", () => {
   function toastPage(entries: Array<{ title: string; message: string }>): Page {
     return pageOf({
       locator: (selector: string) =>
-        selector === '[data-testid="toast-notification"]'
+        selector === 'xpath=//*[@aria-label="Notifications"]//*[@role="dialog" or @role="alertdialog"]'
           ? list(
               entries.map((entry) =>
                 locator({
-                  getByTestId: (id: string) => {
-                    const text = locator({
-                      innerText: async () => (id === "toast-title" ? entry.title : entry.message),
-                    });
-                    return locator({ first: () => text });
-                  },
+                  innerText: async () => `${entry.title}\n${entry.message}`,
                 })
               )
             )
@@ -1250,18 +1245,15 @@ describe("kanban hold overlay and toasts", () => {
 
   it("treats an unreadable toast as empty", async () => {
     const unreadable = locator({
-      getByTestId: () => {
-        const text = locator({
-          innerText: async () => {
-            throw new Error("gone");
-          },
-        });
-        return locator({ first: () => text });
+      innerText: async () => {
+        throw new Error("gone");
       },
     });
     const page = pageOf({
       locator: (selector: string) =>
-        selector === '[data-testid="toast-notification"]' ? list([unreadable]) : locator({ count: async () => 0 }),
+        selector === 'xpath=//*[@aria-label="Notifications"]//*[@role="dialog" or @role="alertdialog"]'
+          ? list([unreadable])
+          : locator({ count: async () => 0 }),
     });
     await expect(new WebNewDriver(page).boardLastToast()).resolves.toBeNull();
   });

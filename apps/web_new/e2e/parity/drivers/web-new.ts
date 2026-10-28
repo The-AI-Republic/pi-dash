@@ -11583,29 +11583,25 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async boardLastToast(): Promise<{ title: string; message: string } | null> {
-    const cards = this.page.locator('[data-testid="toast-notification"]');
-    if ((await cards.count()) === 0) return null;
-    const newest = cards.first();
-    const title = (
-      (await newest
-        .getByTestId("toast-title")
+    // Same surface as lastToast(): the Notifications stack is newest-first,
+    // so .first() is the latest toast. (The toast-notification testid this
+    // read before exists nowhere, so every refusal-toast read returned null;
+    // ISS-037/038.)
+    const toasts = this.webhookToasts();
+    if ((await toasts.count()) === 0) return null;
+    const text = (
+      (await toasts
         .first()
         .innerText()
         .catch(() => null)) ?? ""
-    )
-      .trim()
-      .replace(/\s+/g, " ");
-    const message = (
-      (await newest
-        .getByTestId("toast-description")
-        .first()
-        .innerText()
-        .catch(() => null)) ?? ""
-    )
-      .trim()
-      .replace(/\s+/g, " ");
-    if (title === "" && message === "") return null;
-    return { title, message };
+    ).trim();
+    if (text === "") return null;
+    const [title, ...rest] = text
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+    if (title === undefined || title === "") return null;
+    return { title, message: rest.join(" ") };
   }
 
   async kanbanColumnScrollEnd(columnName: string): Promise<void> {
