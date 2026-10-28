@@ -1763,27 +1763,30 @@ async fn apply_comment_update(
     let old_html = old.comment_html.clone().unwrap_or_default();
     let new_html = html.clone().unwrap_or(old_html.clone());
     let html_value = html.clone().or(old.comment_html.clone());
-    sqlx::query("UPDATE issue_comments SET updated_at = $1, updated_by_id = $2, comment_stripped = $3, comment_json = $4, comment_html = $5, attachments = $6, labels = $7, access = $8, external_source = $9, external_id = $10, speaker_type = $11, speaker_label = $12, speaker_agent_run_id = $13, edited_at = $14, parent_id = $15, description_id = $16 WHERE id = $17 AND deleted_at IS NULL")
-        .bind(now)
-        .bind(actor_id)
-        .bind(&stripped_value)
-        .bind(&comment_json)
-        .bind(html_value)
-        .bind(attachments.as_slice())
-        .bind(labels.as_slice())
-        .bind(access)
-        .bind(external_source)
-        .bind(external_id)
-        .bind(speaker_type)
-        .bind(speaker_label)
-        .bind(speaker_agent_run_id)
-        .bind(edited_at)
-        .bind(parent_id)
-        .bind(description_id)
-        .bind(comment_id)
-        .execute(pool)
-        .await
-        .map_err(integrity_error)?;
+    comment_domain::save_space_comment_update(
+        pool,
+        &comment_domain::SpaceCommentUpdate {
+            id: *comment_id,
+            updated_at: *now,
+            updated_by: *actor_id,
+            stripped: &stripped_value,
+            json: &comment_json,
+            html: html_value.as_deref(),
+            attachments: attachments.as_slice(),
+            labels: labels.as_slice(),
+            access: access.as_deref(),
+            external_source: external_source.as_deref(),
+            external_id: external_id.as_deref(),
+            speaker_type: speaker_type.as_deref(),
+            speaker_label: speaker_label.as_deref(),
+            speaker_agent_run_id,
+            edited_at,
+            parent_id,
+            description_id,
+        },
+    )
+    .await
+    .map_err(integrity_error)?;
     // Mirror tracked-field changes into the description row (`save()`'s
     // change mapping, `:625-641`); untouched when the link is gone.
     let stripped_changed = stripped_value != old.comment_stripped.clone().unwrap_or_default();
@@ -1828,14 +1831,15 @@ async fn apply_comment_update(
             .map_err(|_| HandlerError::ServerError)?;
         let description_id = desc.id;
         let relinked_at = chrono::Utc::now();
-        sqlx::query("UPDATE issue_comments SET description_id = $1, updated_by_id = $2, updated_at = $3 WHERE id = $4 AND deleted_at IS NULL")
-            .bind(description_id)
-            .bind(actor_id)
-            .bind(relinked_at)
-            .bind(comment_id)
-            .execute(pool)
-            .await
-            .map_err(|_| HandlerError::ServerError)?;
+        comment_domain::relink_space_comment_description(
+            pool,
+            *comment_id,
+            description_id,
+            *actor_id,
+            relinked_at,
+        )
+        .await
+        .map_err(|_| HandlerError::ServerError)?;
     } else if stripped_changed || html_changed || json_changed {
         // Queryset `update` bypasses `Description.save` (values land
         // verbatim), but only the changed subset syncs
@@ -1926,16 +1930,9 @@ async fn comment_destroy_inner(
     enqueue_message(pool, publish.message()).await;
     // `comment.delete()` (`db/mixins.py:72-77`): `deleted_at` plus a full
     // `save()` (`updated_at`, CRUM `updated_by`).
-    sqlx::query(
-        "UPDATE issue_comments SET deleted_at = $1, updated_at = $2, updated_by_id = $3 WHERE id = $4 AND deleted_at IS NULL",
-    )
-    .bind(now)
-    .bind(now)
-    .bind(actor.id)
-    .bind(comment_id)
-    .execute(pool)
-    .await
-    .map_err(|_| HandlerError::ServerError)?;
+    comment_domain::soft_delete_space_comment(pool, comment_id, actor.id, now)
+        .await
+        .map_err(|_| HandlerError::ServerError)?;
     enqueue_soft_delete(pool, "issuecomment", &comment_id).await;
     Ok(())
 }

@@ -4511,26 +4511,26 @@ async fn comment_patch_inner(
         .begin()
         .await
         .map_err(|error| db_error(error, "comment-patch-tx"))?;
-    sqlx::query(
-        r#"UPDATE "issue_comments" SET "comment_json" = $1, "comment_html" = $2, "comment_stripped" = $3,
-            "access" = $4, "external_source" = $5, "external_id" = $6, "labels" = $7,
-            "speaker_type" = $8, "speaker_label" = $9, "speaker_agent_run_id" = $10,
-            "updated_at" = $11, "updated_by_id" = $12 WHERE "id" = $13"#,
+    comment_domain::save_v1_comment_update(
+        &mut *tx,
+        &comment_domain::V1CommentUpdate {
+            id: *pk,
+            json: &new_json,
+            html: &new_html,
+            stripped: &new_stripped,
+            access: &new_access,
+            external_source: new_source.as_deref(),
+            external_id: new_external_id.as_deref(),
+            labels: &new_labels,
+            speaker_type: &new_speaker_type,
+            speaker_label: &new_speaker_label,
+            speaker_agent_run_id: new_run_id
+                .as_deref()
+                .and_then(|text| text.parse::<Uuid>().ok()),
+            updated_at: now,
+            updated_by: pre.actor.id,
+        },
     )
-    .bind(&new_json)
-    .bind(&new_html)
-    .bind(&new_stripped)
-    .bind(&new_access)
-    .bind(new_source.as_deref())
-    .bind(new_external_id.as_deref())
-    .bind(&new_labels)
-    .bind(&new_speaker_type)
-    .bind(&new_speaker_label)
-    .bind(new_run_id.as_deref().and_then(|text| text.parse::<Uuid>().ok()))
-    .bind(now)
-    .bind(pre.actor.id)
-    .bind(pk)
-    .execute(&mut *tx)
     .await
     .map_err(|error| db_error(error, "comment-patch-update"))?;
     // The `Description` side of `IssueComment.save` (`db/models/issue.py:623-647`):
@@ -4551,43 +4551,19 @@ async fn comment_patch_inner(
     let stored_description_id = row_uuid_opt(&before, "description_id")?;
     if let Some(description_id) = stored_description_id {
         if html_changed || json_changed || stripped_changed {
-            let mut sets: Vec<String> = Vec::new();
-            if html_changed {
-                sets.push("description_html".to_owned());
-            }
-            if stripped_changed {
-                sets.push("description_stripped".to_owned());
-            }
-            if json_changed {
-                sets.push("description_json".to_owned());
-            }
-            let set_sql = sets
-                .iter()
-                .enumerate()
-                .map(|(idx, col)| format!("\"{col}\" = ${}", idx + 1))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let sql = format!(
-                "UPDATE \"descriptions\" SET {set_sql}, \"updated_by_id\" = ${}, \"updated_at\" = ${} WHERE \"id\" = ${}",
-                sets.len() + 1,
-                sets.len() + 2,
-                sets.len() + 3,
-            );
-            let mut query = sqlx::query(&sql);
-            for col in &sets {
-                query = match col.as_str() {
-                    "description_html" => query.bind(&new_html),
-                    "description_stripped" => query.bind(&new_stripped),
-                    _ => query.bind(&new_json),
-                };
-            }
-            query
-                .bind(pre.actor.id)
-                .bind(now)
-                .bind(description_id)
-                .execute(&mut *tx)
-                .await
-                .map_err(|error| db_error(error, "comment-patch-desc"))?;
+            comment_domain::sync_v1_description_subset(
+                &mut *tx,
+                &comment_domain::V1DescriptionSync {
+                    id: description_id,
+                    html: html_changed.then_some(new_html.as_str()),
+                    stripped: stripped_changed.then_some(new_stripped.as_str()),
+                    json: json_changed.then_some(&new_json),
+                    updated_by: pre.actor.id,
+                    updated_at: now,
+                },
+            )
+            .await
+            .map_err(|error| db_error(error, "comment-patch-desc"))?;
         }
     } else {
         // Unlinked legacy row: `Description.objects.create` over
@@ -4728,16 +4704,9 @@ async fn comment_delete_inner(
     // `updated_at` re-stamps on the `save()`.
     let deleted_at = now_utc();
     let updated_at = now_utc();
-    sqlx::query(
-        r#"UPDATE "issue_comments" SET "deleted_at" = $1, "updated_at" = $2, "updated_by_id" = $3 WHERE "id" = $4"#,
-    )
-    .bind(deleted_at)
-    .bind(updated_at)
-    .bind(pre.actor.id)
-    .bind(pk)
-    .execute(&pre.pool)
-    .await
-    .map_err(|error| db_error(error, "comment-delete"))?;
+    comment_domain::soft_delete_v1_comment(&pre.pool, *pk, pre.actor.id, deleted_at, updated_at)
+        .await
+        .map_err(|error| db_error(error, "comment-delete"))?;
     // `delete()` emits the sweep before the view enqueues the activity
     // (`:2111-2120`): write, sweep, activity.
     let (sweep_args, sweep_kwargs) = soft_delete_sweep("issuecomment", &pk.to_string());

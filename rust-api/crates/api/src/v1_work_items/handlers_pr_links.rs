@@ -1481,32 +1481,15 @@ impl GitStore for ReviewStore {
             .map_err(|error| git_store_error("bind insert", error))?;
         // `project.save(update_fields=...)`: only the changed columns
         // plus `updated_at` (`services.py:341-348`).
-        match (&plan.repo_url_update, &plan.base_branch_update) {
-            (None, None) => {}
-            (repo_url, base_branch) => {
-                let mut sets: Vec<String> = Vec::new();
-                if repo_url.is_some() {
-                    sets.push("repo_url = $2".to_owned());
-                }
-                if base_branch.is_some() {
-                    sets.push(format!("base_branch = ${}", sets.len() + 3));
-                }
-                sets.push(format!("updated_at = ${}", sets.len() + 3));
-                let sql = format!("UPDATE projects SET {} WHERE id = $1", sets.join(", "));
-                let mut query = sqlx::query(&sql).bind(plan.project_id);
-                if let Some(url) = repo_url {
-                    query = query.bind(url);
-                }
-                if let Some(branch) = base_branch {
-                    query = query.bind(branch);
-                }
-                query = query.bind(plan.now);
-                query
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(|error| git_store_error("bind project update", error))?;
-            }
-        }
+        pidash_services::domain::projects::save_bind_project_update(
+            &mut *tx,
+            plan.project_id,
+            plan.repo_url_update.as_deref(),
+            plan.base_branch_update.as_deref(),
+            plan.now,
+        )
+        .await
+        .map_err(|error| git_store_error("bind project update", error))?;
         tx.commit()
             .await
             .map_err(|error| git_store_error("bind commit", error))?;
