@@ -29865,6 +29865,39 @@ export class WebNewDriver implements ParityDriver {
   async pagesToolbarTypographyPick(name: string): Promise<void> {
     await this.page.getByTestId("page-toolbar-typography").click({ timeout: WebNewDriver.WAIT_MS });
     await this.page.getByRole("menuitem", { name, exact: true }).first().click({ timeout: WebNewDriver.WAIT_MS });
+    // The popup hands focus back to the body when it finishes closing. A
+    // keystroke sent while it still owns focus is swallowed by the popup
+    // instead of moving the caret, so wait for the hand-back (PAGE-028).
+    await this.pagesToolbarWaitBodyFocus();
+  }
+
+  /**
+   * Wait until a typed key reaches the document, not a closing popup and
+   * not an editor that has the focus but has not taken it yet. The popup
+   * holds focus until it closes, and the editor's own binding answers a
+   * key only after its `focus` event has run — the `ProseMirror-focused`
+   * class is that moment. A key sent in between is swallowed, which is
+   * exactly the flake the caret step hit (PAGE-028).
+   */
+  private async pagesToolbarWaitBodyFocus(): Promise<void> {
+    const bodyFocused = await this.page
+      .waitForFunction(
+        () => {
+          const document = globalThis.document;
+          const active = document.activeElement;
+          if (active?.closest?.(".editor-container") == null) return false;
+          return (
+            document.querySelector(".editor-container .ProseMirror")?.classList.contains("ProseMirror-focused") === true
+          );
+        },
+        null,
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .then(
+        () => true,
+        () => false
+      );
+    if (!bodyFocused) throw new Error("[parity] the body never took the keyboard back after a typography pick.");
   }
   async pagesToolbarColorOpen(): Promise<void> {
     await this.page.getByTestId("page-toolbar-color").click({ timeout: WebNewDriver.WAIT_MS });
