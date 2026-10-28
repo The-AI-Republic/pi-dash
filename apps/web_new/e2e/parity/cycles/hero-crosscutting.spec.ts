@@ -42,15 +42,22 @@ import {
 import { specTags, specTitle } from "../helpers/tags";
 import type { ParityDriver, ParitySeedFacts } from "../drivers/parity-driver";
 
-/** Cycle dates that read CURRENT on the seeded stack (today is 2026-10-10). */
-const CURRENT_START = "2026-09-01";
-const CURRENT_END = "2026-12-31";
+/** ISO date `days` from today (all cycle ranges derive from this, so the suite never rots). */
+function isoIn(days: number): string {
+  const at = new Date();
+  at.setDate(at.getDate() + days);
+  return `${at.getFullYear()}-${String(at.getMonth() + 1).padStart(2, "0")}-${String(at.getDate()).padStart(2, "0")}`;
+}
+
+/** Cycle dates that read CURRENT. */
+const CURRENT_START = isoIn(-60);
+const CURRENT_END = isoIn(60);
 /** Cycle dates that read COMPLETED (the archive/transfer gate). */
-const DONE_START = "2026-01-01";
-const DONE_END = "2026-02-01";
+const DONE_START = isoIn(-60);
+const DONE_END = isoIn(-30);
 /** Cycle dates that read UPCOMING. */
-const UPCOMING_START = "2026-11-01";
-const UPCOMING_END = "2026-12-31";
+const UPCOMING_START = isoIn(10);
+const UPCOMING_END = isoIn(60);
 
 /** Project role numbers (backend ROLE enum): member edits, guest only reads. */
 const ROLE_MEMBER = 15;
@@ -479,7 +486,8 @@ test(
         await driver.cyclesHeroHoverActiveRowDates();
         const tip = await driver.cyclesHeroTooltipText();
         expect(tip ?? "").toMatch(/your timezone/i);
-        expect(tip ?? "").toContain("2026");
+        // The current cycle spans today, so the current year always renders.
+        expect(tip ?? "").toContain(String(new Date().getFullYear()));
       });
 
       await test.step("detail sidebar shows the offset chip and hover equivalents", async () => {
@@ -489,7 +497,8 @@ test(
         await driver.cyclesHeroHoverSidebarDates();
         const tip = await driver.cyclesHeroTooltipText();
         expect(tip ?? "").toMatch(/your timezone/i);
-        expect(tip ?? "").toContain("2026");
+        // The current cycle spans today, so the current year always renders.
+        expect(tip ?? "").toContain(String(new Date().getFullYear()));
       });
     } finally {
       await serverCleanupProject(seed.workspaceSlug, projectId, ownerSession);
