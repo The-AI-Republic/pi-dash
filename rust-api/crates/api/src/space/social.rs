@@ -1767,12 +1767,11 @@ async fn apply_comment_update(
         Some(items) => items,
         None => string_list(&old.labels)?,
     };
-    let html_changed = input.comment_html.is_some();
-    let stripped_value = if html_changed {
-        stripped.to_owned()
-    } else {
-        old.comment_stripped.clone().unwrap_or_default()
-    };
+    // `save()` recomputes `comment_stripped` from the current
+    // `comment_html` on every save (`issue.py:606`), so the strip of the
+    // resulting html always wins — even when the PATCH omits html and the
+    // stored value is stale (pre-1258/1581 rows, other writers).
+    let stripped_value = stripped.to_owned();
     let old_html = old.comment_html.clone().unwrap_or_default();
     let new_html = html.clone().unwrap_or(old_html.clone());
     let html_value = html.clone().or(old.comment_html.clone());
@@ -1807,9 +1806,12 @@ async fn apply_comment_update(
     let json_changed = comment_json != old.comment_json;
     if old.description_id.is_none() {
         // A missing link creates + links a Description even on update
-        // (`IssueComment.save`, `:618-621`): audit/user defaults are the
-        // pre-save row, the tracked text is the new row, and the link is a
-        // second save stamping `updated_by`/`updated_at` again.
+        // (`IssueComment.save`, `:618-621`): the tracked text is the new
+        // row, and the link is a second save stamping `updated_by`/
+        // `updated_at` again. The create passes the comment's audit
+        // columns as defaults, but `BaseModel.save` overrides them
+        // (`base.py:21-41`): `created_by` is the requesting user and
+        // `updated_by` is NULL.
         let workspace_id = old
             .workspace_id
             .as_deref()
@@ -1831,8 +1833,8 @@ async fn apply_comment_update(
             id: uuid::Uuid::new_v4(),
             created_at: *now,
             updated_at: *now,
-            created_by: parse_old_uuid(&old.created_by)?,
-            updated_by: parse_old_uuid(&old.updated_by)?,
+            created_by: Some(*actor_id),
+            updated_by: None,
             workspace_id,
             project_id,
             json: &comment_json,
