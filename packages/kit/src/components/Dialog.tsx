@@ -5,6 +5,7 @@ import { Dialog as BaseDialog } from "@base-ui-components/react/dialog";
 import { X } from "lucide-react";
 import * as React from "react";
 import { cn } from "../lib/cn";
+import { wrapTabTarget } from "../lib/focusTrap";
 import { pickDefined } from "../lib/props";
 import { POPOVER_LAYER_CLASS } from "../lib/styles";
 import { IconButton } from "./IconButton";
@@ -105,6 +106,10 @@ export function Dialog({
     "transition-[width] duration-(--motion-duration)",
   ];
   const frame = placement === "right" ? ["flex flex-col", ...docked, popupClassName] : [...centered, popupClassName];
+  // The popup is the trap's container: a Tab past its last control wraps
+  // to the first here, synchronously, before Base UI's guards can hand
+  // focus to the page behind the dialog.
+  const popupRef = React.useRef<HTMLDivElement | null>(null);
   return (
     <BaseDialog.Root {...pickDefined({ open })} onOpenChange={handleOpenChange}>
       {trigger ? <BaseDialog.Trigger render={trigger} /> : null}
@@ -117,6 +122,15 @@ export function Dialog({
         />
         <BaseDialog.Popup
           {...pickDefined({ initialFocus })}
+          ref={popupRef}
+          onKeyDown={(event) => {
+            // Another control's handling (a picker closing on Tab) wins.
+            if (event.key !== "Tab" || event.defaultPrevented) return;
+            const target = wrapTabTarget(popupRef.current, event.target as Element | null, event.shiftKey);
+            if (target === null) return;
+            event.preventDefault();
+            target.focus();
+          }}
           className={cn(
             "shadow-dialog fixed border border-(--border) bg-(--bg) p-(--space-12)",
             POPOVER_LAYER_CLASS,
