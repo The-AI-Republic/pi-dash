@@ -98,6 +98,7 @@ use pidash_types::WorkspaceId;
 use super::gates;
 use crate::app_issues::{query_last, Denial, QueryMap};
 use crate::state::AppState;
+use pidash_compat::py::py_repr_string;
 use pidash_compat::response::{empty_response, json_response};
 use pidash_compat::validate::{
     BLANK_MSG, INVALID_BOOL_MSG as BOOL_MSG, INVALID_STR_MSG, NULL_MSG, REQUIRED_MSG,
@@ -1686,31 +1687,6 @@ fn py_repr(value: &Value) -> String {
         Value::Array(_) | Value::Object(_) => py_str(value),
         _ => py_str(value),
     }
-}
-
-fn py_repr_string(text: &str) -> String {
-    let mut out = String::with_capacity(text.len() + 2);
-    let use_double = text.contains('\'') && !text.contains('"');
-    let quote = if use_double { '"' } else { '\'' };
-    out.push(quote);
-    for ch in text.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if c == quote => {
-                out.push('\\');
-                out.push(c);
-            }
-            c if (c as u32) < 0x20 => {
-                out.push_str(&format!("\\x{:02x}", c as u32));
-            }
-            c => out.push(c),
-        }
-    }
-    out.push(quote);
-    out
 }
 
 // ---------------------------------------------------------------------------

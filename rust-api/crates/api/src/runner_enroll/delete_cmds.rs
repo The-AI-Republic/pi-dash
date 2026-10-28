@@ -135,6 +135,7 @@ use crate::runner_runs::run_endpoints::execute_terminal_effects;
 use crate::runner_runs::{json_response, pool_of, server_error, LivePorts, RunnerPorts};
 use crate::state::AppState;
 use crate::v1_cycles_modules::json::{self, JObject, JVal, JsonFail};
+use pidash_compat::py::py_strip;
 
 // ---------------------------------------------------------------------------
 // Error bodies (D13-F7 `handlers/endpoints.golden.json`, key order verbatim
@@ -379,15 +380,6 @@ fn data_get<'a>(data: &'a JVal, key: &str) -> Result<Option<&'a JVal>, Response>
             Err(server_error())
         }
     }
-}
-
-/// Python `str.strip()` parity (the manage.rs twin): Python strips
-/// `str.isspace()` — Unicode `White_Space` plus U+001C-U+001F and
-/// U+0085 — while Rust `trim()` strips `White_Space` only.
-fn py_strip(text: &str) -> &str {
-    text.trim_matches(|c: char| {
-        c.is_whitespace() || c == '\u{85}' || ('\u{1c}'..='\u{1f}').contains(&c)
-    })
 }
 
 /// `(request.data.get(key) or "").strip()`: falsy maps to `""`,

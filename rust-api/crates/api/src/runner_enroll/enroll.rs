@@ -75,6 +75,7 @@ use crate::middleware::SessionHandle;
 use crate::state::AppState;
 pub use pidash_compat::datetime::render_isoformat;
 use pidash_compat::db::is_integrity_error;
+use pidash_compat::py::py_strip;
 pub use pidash_compat::response::{error_body, json_response, server_error, SERVER_ERROR_BODY};
 
 // ---------------------------------------------------------------------------
@@ -288,14 +289,6 @@ pub fn py_truthy(value: &Value) -> bool {
         Value::Array(items) => !items.is_empty(),
         Value::Object(map) => !map.is_empty(),
     }
-}
-
-/// Python `str.strip()`: `str.isspace()` is Unicode `White_Space` plus
-/// U+001C-U+001F and U+0085; Rust `trim()` strips `White_Space` only.
-pub fn py_strip(s: &str) -> &str {
-    s.trim_matches(|c: char| {
-        c.is_whitespace() || c == '\u{85}' || ('\u{1c}'..='\u{1f}').contains(&c)
-    })
 }
 
 /// First `max` Unicode code points (`text[:max]`).

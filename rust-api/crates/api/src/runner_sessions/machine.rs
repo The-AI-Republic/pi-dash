@@ -92,6 +92,7 @@ use crate::runner_enroll::auth::{
 };
 use crate::runner_runs::{is_uuid_path_segment, json_response, pool_of, server_error};
 use crate::state::AppState;
+use pidash_compat::py::py_truthy;
 
 /// Long-poll wait slice (`_POLL_SLICE_MS`, `machine_sessions.py:49`).
 const POLL_SLICE_MS: u64 = 1000;
@@ -158,28 +159,6 @@ fn authed_machine_id(auth: Option<&MachineAuth>, url_id: Uuid) -> Option<Uuid> {
     match auth {
         Some(auth) if auth.token.dev_machine_id == Some(url_id) => Some(url_id),
         _ => None,
-    }
-}
-
-/// Python truthiness for JSON values (`None`/`False`/`0`/`""`/`[]`/`{}`
-/// are falsy; everything else is truthy) — the `or []` half of
-/// `body.get("ack") or []` (`:197`).
-fn py_truthy(value: &Value) -> bool {
-    match value {
-        Value::Null => false,
-        Value::Bool(flag) => *flag,
-        Value::Number(number) => {
-            if let Some(int) = number.as_i64() {
-                int != 0
-            } else if let Some(uint) = number.as_u64() {
-                uint != 0
-            } else {
-                number.as_f64().is_some_and(|float| float != 0.0)
-            }
-        }
-        Value::String(text) => !text.is_empty(),
-        Value::Array(items) => !items.is_empty(),
-        Value::Object(map) => !map.is_empty(),
     }
 }
 

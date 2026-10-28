@@ -69,6 +69,7 @@ use super::{
 };
 use crate::state::AppState;
 use pidash_compat::db::is_unique_violation;
+use pidash_compat::py::py_float_str;
 
 // ---------------------------------------------------------------------------
 // Pure frame helpers (unit-tested against FX-RUN-09)
@@ -202,30 +203,6 @@ fn py_repr_value(value: &Value) -> String {
         Value::String(s) => py_repr_str(s),
         other => py_str_value(other),
     }
-}
-
-fn py_float_str(f: f64) -> String {
-    if f.is_nan() {
-        return "nan".to_owned();
-    }
-    if f.is_infinite() {
-        return if f > 0.0 {
-            "inf".to_owned()
-        } else {
-            "-inf".to_owned()
-        };
-    }
-    let rust = format!("{f:?}");
-    let Some(pos) = rust.find('e') else {
-        return rust;
-    };
-    let (mantissa, exp) = rust.split_at(pos);
-    let exp = &exp[1..];
-    let (sign, digits) = match exp.strip_prefix('-') {
-        Some(digits) => ("-", digits),
-        None => ("+", exp.strip_prefix('+').unwrap_or(exp)),
-    };
-    format!("{mantissa}e{sign}{digits:0>2}")
 }
 
 fn py_repr_str(s: &str) -> String {

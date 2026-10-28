@@ -145,6 +145,7 @@ use crate::assistant::common::py_repr;
 use crate::license::form_body::{self, BodyFail, BodyKind};
 use crate::state::AppState;
 use pidash_compat::datetime::render_uuid_opt as opt_uuid;
+use pidash_compat::py::py_strip;
 pub(crate) use pidash_compat::response::json_response;
 pub use pidash_compat::response::SERVER_ERROR_BODY;
 
@@ -692,14 +693,6 @@ fn drf_type_name(value: &Value) -> &'static str {
         Value::Array(_) => "list",
         Value::Object(_) => "dict",
     }
-}
-
-/// Python `str.strip()` for the `trim_whitespace` pass: Rust's
-/// `char::is_whitespace` already covers `\x1c`-`\x1f` (Unicode
-/// `White_Space`), but the range is spelled out so the parity is explicit
-/// (same helper shape as the `handlers_members` precedent).
-fn py_strip(value: &str) -> &str {
-    value.trim_matches(|c: char| c.is_whitespace() || ('\x1c'..='\x1f').contains(&c))
 }
 
 /// DRF `CharField.run_validation` + `run_validators` (`fields.py:749-767`,

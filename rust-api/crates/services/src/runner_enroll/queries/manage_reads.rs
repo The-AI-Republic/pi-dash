@@ -168,6 +168,7 @@
 //! applies (Porting guide semantic traps — no truncation in this unit,
 //! only `strip()` parity in [`request_workspace_id`]).
 
+use pidash_compat::py::py_strip;
 use pidash_db::app_project::models::project as project_cols;
 use pidash_db::runner_enroll::columns::{
     dev_machine as dm_cols, machine_token as mt_cols, pod as pod_cols, runner as r_cols,
@@ -217,17 +218,6 @@ fn qualified(table: &str, columns: &[&str]) -> String {
         .map(|col| format!("\"{table}\".\"{col}\""))
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-/// Python `str.strip()` parity (same set as
-/// `super::enroll_reads`' private helper, which this module cannot
-/// reuse without touching that file): Python strips `str.isspace()`
-/// characters — Unicode `White_Space` plus U+001C-U+001F and U+0085 —
-/// while Rust `trim()` strips `White_Space` only.
-fn py_strip(s: &str) -> &str {
-    s.trim_matches(|c: char| {
-        c.is_whitespace() || c == '\u{85}' || ('\u{1c}'..='\u{1f}').contains(&c)
-    })
 }
 
 // ---------------------------------------------------------------------------

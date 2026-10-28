@@ -41,6 +41,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Router;
 
 use crate::state::AppState;
+pub use pidash_compat::py::python_dumps;
 pub use pidash_compat::response::{
     json_ok as raw_json_response, json_ok_value as json_response, SERVER_ERROR_BODY,
 };
@@ -147,89 +148,6 @@ pub fn guards_error(error: pidash_services::space::guards::ErrorBody) -> Respons
         .header(header::CONTENT_TYPE, "application/json")
         .body(axum::body::Body::from(body))
         .expect("guard error response")
-}
-
-/// `json.dumps(value)` with CPython defaults: `separators=(', ', ': ')`,
-/// `ensure_ascii=True`, insertion-ordered keys.
-///
-/// The intake views dump `request.data` (create) and the 3-key update
-/// subset (partial_update) into Celery `requested_data` this way
-/// (`views/intake.py:157,221`). The input is client-parsed JSON, so only
-/// JSON-native types occur; floats render shortest-round-trip (Ryu, same
-/// as CPython `repr` for finite values).
-pub fn python_dumps(value: &serde_json::Value) -> String {
-    let mut out = String::new();
-    python_dump_into(&mut out, value);
-    out
-}
-
-fn python_dump_into(out: &mut String, value: &serde_json::Value) {
-    match value {
-        serde_json::Value::Null => out.push_str("null"),
-        serde_json::Value::Bool(true) => out.push_str("true"),
-        serde_json::Value::Bool(false) => out.push_str("false"),
-        serde_json::Value::Number(number) => out.push_str(&number.to_string()),
-        serde_json::Value::String(text) => python_dump_str(out, text),
-        serde_json::Value::Array(items) => {
-            out.push('[');
-            for (index, item) in items.iter().enumerate() {
-                if index > 0 {
-                    out.push_str(", ");
-                }
-                python_dump_into(out, item);
-            }
-            out.push(']');
-        }
-        serde_json::Value::Object(map) => {
-            out.push('{');
-            for (index, (key, item)) in map.iter().enumerate() {
-                if index > 0 {
-                    out.push_str(", ");
-                }
-                python_dump_str(out, key);
-                out.push_str(": ");
-                python_dump_into(out, item);
-            }
-            out.push('}');
-        }
-    }
-}
-
-/// CPython `py_encode_basestring_ascii`: `"`/`\` plus the short escapes,
-/// every other char outside printable ASCII as `\uXXXX` (astral chars as
-/// surrogate pairs). `/`, `<`, `>`, `'` and DEL-adjacent printables pass
-/// through exactly like CPython (only `< 0x20` and `> 0x7E` escape).
-fn python_dump_str(out: &mut String, text: &str) {
-    out.push('"');
-    for ch in text.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{08}' => out.push_str("\\b"),
-            '\u{0C}' => out.push_str("\\f"),
-            ch if (ch as u32) < 0x20 || (ch as u32) == 0x7F => {
-                out.push_str(&format!("\\u{:04x}", ch as u32));
-            }
-            ch if (ch as u32) > 0x7E => {
-                let code = ch as u32;
-                if code > 0xFFFF {
-                    let v = code - 0x10000;
-                    out.push_str(&format!(
-                        "\\u{:04x}\\u{:04x}",
-                        0xD800 + (v >> 10),
-                        0xDC00 + (v & 0x3FF)
-                    ));
-                } else {
-                    out.push_str(&format!("\\u{code:04x}"));
-                }
-            }
-            ch => out.push(ch),
-        }
-    }
-    out.push('"');
 }
 
 /// The owned methods on a space path serve from Rust while every other

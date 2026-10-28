@@ -113,6 +113,7 @@ use super::creation::{
     FinalizeAgentRunSeam, PodView, ProjectView, RenderedTurn, RunView, StateView,
     ERROR_CODE_PROMPT_BUILD_FAILED, RUN_VIEW_COLUMNS,
 };
+use pidash_compat::py::py_uuid_or_none;
 
 // ---------------------------------------------------------------------------
 // Reasons, error strings, signal attributes (all verbatim)
@@ -544,14 +545,9 @@ pub fn fire_error_log_line(
     format!(
         "orchestration.error: handle_issue_state_transition failed \
          for issue={issue_pk} from_state={} to_state={} (total_errors={total_errors})",
-        opt_uuid(prev_state_id),
-        opt_uuid(current_state_id),
+        py_uuid_or_none(&prev_state_id),
+        py_uuid_or_none(&current_state_id),
     )
-}
-
-/// Python `str()` of an optional id for log lines.
-fn opt_uuid(id: Option<Uuid>) -> String {
-    id.map_or_else(|| "None".to_owned(), |id| id.to_string())
 }
 
 // ---------------------------------------------------------------------------

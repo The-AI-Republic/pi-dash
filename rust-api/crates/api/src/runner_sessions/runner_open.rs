@@ -167,6 +167,7 @@ use crate::runner_runs::{
 };
 use crate::state::AppState;
 use crate::v1_cycles_modules::json;
+use pidash_compat::py::py_str;
 
 /// Revoke reason stamped on the prior session at open (`:181`).
 const REASON_EVICTED_BY_NEW_SESSION: &str = "evicted_by_new_session";
@@ -278,119 +279,6 @@ fn quoted_columns(table: &str, columns: &[&str]) -> String {
 // crate is read-only for this issue, so the formula is restated here
 // for the view-level `str(project_slug)` / `str(in_flight)` reads)
 // ---------------------------------------------------------------------------
-
-/// Python `str(value)` for JSON frame values: `None`/`True`/`False`
-/// spellings, integers verbatim, floats in CPython repr form,
-/// strings as-is, containers in single-quote repr form.
-fn py_str(value: &Value) -> String {
-    match value {
-        Value::Null => "None".to_owned(),
-        Value::Bool(true) => "True".to_owned(),
-        Value::Bool(false) => "False".to_owned(),
-        Value::Number(n) => py_num_str(n),
-        Value::String(s) => s.clone(),
-        Value::Array(items) => {
-            let inner: Vec<String> = items.iter().map(py_repr).collect();
-            format!("[{}]", inner.join(", "))
-        }
-        Value::Object(map) => {
-            let inner: Vec<String> = map
-                .iter()
-                .map(|(k, v)| format!("{}: {}", py_repr_str(k), py_repr(v)))
-                .collect();
-            format!("{{{}}}", inner.join(", "))
-        }
-    }
-}
-
-/// CPython `repr` of a number: integers verbatim, floats via
-/// [`py_float_str`].
-fn py_num_str(n: &serde_json::Number) -> String {
-    if let Some(i) = n.as_i64() {
-        return i.to_string();
-    }
-    if let Some(u) = n.as_u64() {
-        return u.to_string();
-    }
-    n.as_f64()
-        .map(py_float_str)
-        .unwrap_or_else(|| n.to_string())
-}
-
-/// CPython `repr(float)`: Rust's `Debug` shortest round-trip with
-/// the exponent normalized to Python's `e±XX` form.
-fn py_float_str(f: f64) -> String {
-    if f.is_nan() {
-        return "nan".to_owned();
-    }
-    if f.is_infinite() {
-        return if f > 0.0 {
-            "inf".to_owned()
-        } else {
-            "-inf".to_owned()
-        };
-    }
-    let rust = format!("{f:?}");
-    let Some(pos) = rust.find('e') else {
-        return rust;
-    };
-    let (mantissa, exp) = rust.split_at(pos);
-    let exp = &exp[1..];
-    let (sign, digits) = match exp.strip_prefix('-') {
-        Some(digits) => ("-", digits),
-        None => ("+", exp.strip_prefix('+').unwrap_or(exp)),
-    };
-    format!("{mantissa}e{sign}{digits:0>2}")
-}
-
-/// Python `repr(value)` for a value nested in a container: identical
-/// to [`py_str`] except strings, which gain quotes.
-fn py_repr(value: &Value) -> String {
-    match value {
-        Value::String(s) => py_repr_str(s),
-        other => py_str(other),
-    }
-}
-
-/// Python `repr(str)`: single quotes unless the string contains
-/// `'` but not `"`, backslash escapes for quotes, backslashes,
-/// whitespace, and non-printables (`\xNN` / `\uNNNN` /
-/// `\U00NNNNNN`).
-fn py_repr_str(s: &str) -> String {
-    let use_double = s.contains('\'') && !s.contains('"');
-    let quote = if use_double { '"' } else { '\'' };
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push(quote);
-    for c in s.chars() {
-        if c == quote {
-            out.push('\\');
-            out.push(c);
-        } else {
-            match c {
-                '\\' => out.push_str("\\\\"),
-                '\n' => out.push_str("\\n"),
-                '\r' => out.push_str("\\r"),
-                '\t' => out.push_str("\\t"),
-                c if py_printable(c) => out.push(c),
-                c if (c as u32) < 0x100 => {
-                    out.push_str(&format!("\\x{:02x}", c as u32));
-                }
-                c if (c as u32) < 0x1_0000 => {
-                    out.push_str(&format!("\\u{:04x}", c as u32));
-                }
-                c => {
-                    out.push_str(&format!("\\U{:08x}", c as u32));
-                }
-            }
-        }
-    }
-    out.push(quote);
-    out
-}
-
-fn py_printable(c: char) -> bool {
-    !(c.is_control() || c == '\u{7f}' || c == '\u{2028}' || c == '\u{2029}')
-}
 
 // ---------------------------------------------------------------------------
 // Protocol header (`_check_protocol_header`, `:97-119`)
@@ -2304,28 +2192,6 @@ mod tests {
             project_slug_mismatch(&serde_json::json!(7), Some("7".to_owned())),
             None
         );
-    }
-
-    /// `py_str` vectors: scalar spellings, float exponents, and
-    /// single-quote container reprs.
-    #[test]
-    fn py_str_vectors() {
-        assert_eq!(py_str(&Value::Null), "None");
-        assert_eq!(py_str(&Value::Bool(true)), "True");
-        assert_eq!(py_str(&Value::Bool(false)), "False");
-        assert_eq!(py_str(&serde_json::json!(5)), "5");
-        assert_eq!(py_str(&serde_json::json!(-42)), "-42");
-        assert_eq!(py_str(&serde_json::json!("CT00003")), "CT00003");
-        assert_eq!(py_str(&serde_json::json!(1.5)), "1.5");
-        assert_eq!(py_str(&serde_json::json!(1e16)), "1e+16");
-        assert_eq!(
-            py_str(&serde_json::json!([1, "a", true, null])),
-            "[1, 'a', True, None]"
-        );
-        assert_eq!(py_str(&serde_json::json!({"k": 1})), "{'k': 1}");
-        assert_eq!(py_repr_str("it\"s"), "'it\"s'");
-        assert_eq!(py_repr_str("it's"), "\"it's\"");
-        assert_eq!(py_repr_str("a'b\"c"), "'a\\'b\"c'");
     }
 
     /// The 401 re-render: the pre-718 capital-`Detail` denial and the

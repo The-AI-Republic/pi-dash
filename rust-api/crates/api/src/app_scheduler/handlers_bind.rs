@@ -107,6 +107,7 @@ use crate::uuid_path::{classify_uuid_segment, UuidSegment};
 use super::gate;
 use super::{json_response, pool_of, resolve_project_id, session_authenticated};
 use pidash_compat::datetime::{render_datetime_opt, render_uuid, render_uuid_opt};
+use pidash_compat::py::py_strip;
 
 // ---------------------------------------------------------------------------
 // Exact bodies
@@ -891,13 +892,6 @@ async fn read_request_data(state: &AppState, req: Request) -> Result<Value, Resp
 // ---------------------------------------------------------------------------
 // Python-compat value helpers (DRF 3.15.2 + Django 4.2 field semantics)
 // ---------------------------------------------------------------------------
-
-/// Python `str.strip()` with no args: Unicode whitespace plus
-/// `\x1c`–`\x1f` (same predicate as the shape layer's private `py_strip`;
-/// services is read-only, so it is mirrored here, not imported).
-fn py_strip(value: &str) -> &str {
-    value.trim_matches(|c: char| c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c))
-}
 
 /// Python `str(value)` over a JSON value, for the `% (value)s`
 /// interpolations in the UUID / choice messages. Strings pass through

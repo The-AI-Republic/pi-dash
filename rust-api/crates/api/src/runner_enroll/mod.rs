@@ -61,6 +61,7 @@ use crate::v1_cycles_modules::json;
 use crate::v1_cycles_modules::json::JObject;
 use crate::v1_cycles_modules::json::JVal;
 use crate::v1_cycles_modules::json::JsonFail;
+use pidash_compat::py::py_strip;
 
 // ---------------------------------------------------------------------------
 // Request bodies (the `manage.rs` envelope over `json`, PIDASHCONV-591)
@@ -155,17 +156,6 @@ pub(crate) fn data_get<'a>(data: &'a JVal, key: &str) -> Result<Option<&'a JVal>
             Err(server_error())
         }
     }
-}
-
-/// Python `str.strip()` parity (the services-layer `py_strip` twin —
-/// services is read-only from this crate's layer boundary, so the predicate
-/// is mirrored, not imported): Python strips `str.isspace()` — Unicode
-/// `White_Space` plus U+001C-U+001F and U+0085 — while Rust `trim()` strips
-/// `White_Space` only.
-pub(crate) fn py_strip(text: &str) -> &str {
-    text.trim_matches(|c: char| {
-        c.is_whitespace() || c == '\u{85}' || ('\u{1c}'..='\u{1f}').contains(&c)
-    })
 }
 
 /// `(request.data.get(key) or "").strip()`: falsy maps to `""`, strings
