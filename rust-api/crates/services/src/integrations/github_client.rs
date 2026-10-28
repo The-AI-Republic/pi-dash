@@ -610,7 +610,9 @@ impl PoolPrStore {
             .await
             .map_err(|error| match error {
                 crate::read::Error::NotFound => StoreError(self.surface.workspace_miss()),
-                crate::read::Error::Db(err) => pr_store_error("project workspace", err.into_source()),
+                crate::read::Error::Db(err) => {
+                    pr_store_error("project workspace", err.into_source())
+                }
                 // Unreachable: the lookup never fails mid-row.
                 crate::read::Error::Failed(site) => {
                     StoreError(format!("project workspace: {site}"))
