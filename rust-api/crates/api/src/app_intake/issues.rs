@@ -4778,7 +4778,7 @@ async fn validate_issue_create(
     };
     // Declared-field order first: state_id, parent_id, assigned_pod_id,
     // label_ids, assignee_ids.
-    let parent_id = match opt_pk_field(issue_data, "parent_id", pool, "issues", true).await {
+    let mut parent_id = match opt_pk_field(issue_data, "parent_id", pool, "issues", true).await {
         Ok(id) => id,
         Err(message) => {
             field_errors.insert("parent_id".to_owned(), serde_json::json!([message]));
@@ -5113,6 +5113,29 @@ async fn validate_issue_create(
             None
         }
     };
+    // `parent`: the auto-generated twin (`Meta.exclude` keeps the model
+    // field, so DRF adds it beside the declared `parent_id`). Same
+    // source, validated under its own key with the default-manager
+    // queryset (`Issue.issue_objects`, shared with `duplicate_to`),
+    // and it wins when both keys are present, because DRF applies
+    // declared fields before auto fields (verified live on POST:
+    // `parent_id`=X + `parent`=Y lands Y, `parent`=null clears over a
+    // valid `parent_id`, and a triage id 400s under `parent` while
+    // 200ing under `parent_id`). Sits after `agent_executor` to match
+    // DRF field order (..., agent_executor, parent, state,
+    // estimate_point, type), so multi-error bodies merge like DRF.
+    if let Some(value) = issue_data.get("parent") {
+        if value.is_null() {
+            parent_id = None;
+        } else {
+            match resolve_pk_sql(pool, value, duplicate_to_live_sql()).await {
+                Ok(id) => parent_id = Some(id),
+                Err(message) => {
+                    field_errors.insert("parent".to_owned(), serde_json::json!([message]));
+                }
+            }
+        }
+    }
     let estimate_point_id =
         match opt_pk_field(issue_data, "estimate_point", pool, "estimate_points", true).await {
             Ok(id) => id,
@@ -5252,23 +5275,14 @@ async fn validate_issue_create(
 // field coercions (DRF to_internal_value, in serializer field order)
 // ---------------------------------------------------------------------------
 
-/// `PrimaryKeyRelatedField.to_internal_value` (`relations.py:252-263`)
-/// with a UUID `pk_field`: bools fail `incorrect_type` up front; strings
-/// parse as UUIDs (curly-quote `not a valid UUID` message); ints go
-/// straight to the lookup (`does_not_exist` — no UUID row ever matches);
-/// floats/dicts/lists fail with the UUID message over their Python
-/// `str()` (`5.5`, `{}`, `[]`).
+/// The `PrimaryKeyRelatedField.to_internal_value` coercion shared by
+/// [`resolve_pk`] and [`resolve_pk_sql`]: `(lookup id, display id)`.
+/// Ints coerce through `UUID(int=n)` (`UUIDField.get_prep_value`):
+/// out-of-range negatives fail `incorrect_type`, the rest look up a
+/// (practically never matching) UUID while the message keeps the
+/// original digits.
 #[allow(clippy::result_large_err)]
-async fn resolve_pk(
-    pool: &PgPool,
-    table: &str,
-    raw: &serde_json::Value,
-    live_only: bool,
-) -> Result<Uuid, String> {
-    // Ints coerce through `UUID(int=n)` (`UUIDField.get_prep_value`):
-    // out-of-range negatives fail `incorrect_type`, the rest look up a
-    // (practically never matching) UUID while the message keeps the
-    // original digits.
+fn parse_pk_key(raw: &serde_json::Value) -> Result<(Uuid, String), String> {
     enum Key {
         Uuid(Uuid),
         Int(Uuid, String),
@@ -5302,16 +5316,32 @@ async fn resolve_pk(
             return Err("Incorrect type. Expected pk value, received NoneType.".to_owned());
         }
     };
+    Ok(match &key {
+        Key::Uuid(id) => (*id, id.to_string()),
+        Key::Int(id, text) => (*id, text.clone()),
+    })
+}
+
+/// `PrimaryKeyRelatedField.to_internal_value` (`relations.py:252-263`)
+/// with a UUID `pk_field`: bools fail `incorrect_type` up front; strings
+/// parse as UUIDs (curly-quote `not a valid UUID` message); ints go
+/// straight to the lookup (`does_not_exist` — no UUID row ever matches);
+/// floats/dicts/lists fail with the UUID message over their Python
+/// `str()` (`5.5`, `{}`, `[]`).
+#[allow(clippy::result_large_err)]
+async fn resolve_pk(
+    pool: &PgPool,
+    table: &str,
+    raw: &serde_json::Value,
+    live_only: bool,
+) -> Result<Uuid, String> {
+    let (id, display) = parse_pk_key(raw)?;
     // Same-table parameterization keeps one helper. `live_only` mirrors
     // the field queryset: the default soft-delete-scoped managers
     // (`Issue.objects`, `Label.objects`, `EstimatePoint.objects`,
     // `IssueType.objects`) hide `deleted_at` rows, while
     // `Pod.all_objects` and the `users` table (no `deleted_at` column)
     // stay unfiltered.
-    let (id, display) = match &key {
-        Key::Uuid(id) => (*id, id.to_string()),
-        Key::Int(id, text) => (*id, text.clone()),
-    };
     let guard = if live_only {
         " AND (\"deleted_at\" IS NULL)"
     } else {
@@ -5325,6 +5355,29 @@ async fn resolve_pk(
     .await
     .map_err(|_| "Incorrect type. Expected pk value, received str.".to_owned())?;
     if !exists {
+        return Err(format!("Invalid pk \"{display}\" - object does not exist."));
+    }
+    Ok(id)
+}
+
+/// [`resolve_pk`] against a caller-supplied queryset: the same coercion
+/// and `does_not_exist` message, for fields whose manager is not a plain
+/// table-plus-`deleted_at` scope (the auto `parent` twin over
+/// `Issue.issue_objects`). The SQL takes the lookup id as `$1` and
+/// returns the row id.
+#[allow(clippy::result_large_err)]
+async fn resolve_pk_sql(
+    pool: &PgPool,
+    raw: &serde_json::Value,
+    queryset_sql: &str,
+) -> Result<Uuid, String> {
+    let (id, display) = parse_pk_key(raw)?;
+    let row: Option<(Uuid,)> = sqlx::query_as(queryset_sql)
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| "Incorrect type. Expected pk value, received str.".to_owned())?;
+    if row.is_none() {
         return Err(format!("Invalid pk \"{display}\" - object does not exist."));
     }
     Ok(id)
