@@ -87,6 +87,7 @@ use super::{actor, owned, parse_id, pool_of, require_workspace_admin, workspace_
 use super::{json_response, Denial};
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
+use pidash_compat::datetime::render_uuid_opt as opt_uuid;
 
 /// Gate-table paths for the four webhook routes, in
 /// [`super::gates::GATES`] spelling.
@@ -932,13 +933,6 @@ fn update_error(error: sqlx::Error) -> Response {
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
-
-fn opt_uuid(value: &Option<Uuid>) -> Value {
-    match value {
-        Some(id) => Value::String(id.to_string()),
-        None => Value::Null,
-    }
-}
 
 fn opt_datetime<Tz: chrono::TimeZone>(value: &Option<DateTime<Tz>>, zone: &chrono_tz::Tz) -> Value
 where

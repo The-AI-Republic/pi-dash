@@ -92,6 +92,7 @@ use super::{
 };
 use crate::serializer::render_datetime_in;
 use crate::state::AppState;
+use pidash_compat::datetime::{render_uuid as uuid_string, render_uuid_opt as opt_uuid};
 use pidash_compat::validate::{char_internal, push_error, validate_char, validate_datetime};
 
 // ---------------------------------------------------------------------------
@@ -2102,12 +2103,6 @@ pub async fn apply_intake_update(
 // Rendering (`IntakeIssueDetailSerializer`, `IssueDetailSerializer`,
 // `IssueIntakeSerializer`, `IntakeIssueSerializer`)
 // ---------------------------------------------------------------------------
-
-fn opt_uuid(value: &Option<Uuid>) -> serde_json::Value {
-    value.map_or(serde_json::Value::Null, |id| {
-        serde_json::Value::String(id.to_string())
-    })
-}
 
 fn opt_string(value: &Option<String>) -> serde_json::Value {
     value
@@ -4718,10 +4713,6 @@ fn db_error(error: sqlx::Error) -> Response {
 // ---------------------------------------------------------------------------
 // bodies and scalars
 // ---------------------------------------------------------------------------
-
-fn uuid_string(id: &Uuid) -> serde_json::Value {
-    serde_json::Value::String(id.to_string())
-}
 
 // ---------------------------------------------------------------------------
 // create: IssueCreateSerializer validation

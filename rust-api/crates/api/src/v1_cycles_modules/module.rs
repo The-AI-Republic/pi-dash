@@ -81,6 +81,7 @@ use sqlx::{PgPool, Row};
 use pidash_auth::permissions::project;
 
 use crate::state::AppState;
+use pidash_compat::datetime::{render_date_opt, render_datetime_opt, render_uuid, render_uuid_opt};
 pub use pidash_compat::response::SERVER_ERROR_BODY;
 use pidash_compat::response::{json_created, json_ok, no_content};
 
@@ -877,33 +878,10 @@ fn render_f64(value: f64) -> Value {
     serde_json::Number::from_f64(value).map_or(Value::Null, Value::Number)
 }
 
-fn render_uuid(value: &uuid::Uuid) -> Value {
-    Value::String(value.to_string())
-}
-
-fn render_uuid_opt(value: &Option<uuid::Uuid>) -> Value {
-    value.as_ref().map_or(Value::Null, render_uuid)
-}
-
 fn render_string_opt(value: &Option<String>) -> Value {
     value
         .as_ref()
         .map_or(Value::Null, |v| Value::String(v.clone()))
-}
-
-fn render_date_opt(value: &Option<chrono::NaiveDate>) -> Value {
-    value
-        .map(|d| Value::String(d.format("%Y-%m-%d").to_string()))
-        .unwrap_or(Value::Null)
-}
-
-/// DRF `DateTimeField` rendering in the request time zone (`Z` for UTC,
-/// six-digit micros only when nonzero): the shared
-/// `crate::serializer::render_datetime_in` kernel.
-fn render_datetime_opt(value: &Option<chrono::DateTime<chrono::Utc>>, timezone: &Tz) -> Value {
-    value.map_or(Value::Null, |dt| {
-        Value::String(crate::serializer::render_datetime_in(&dt, timezone))
-    })
 }
 
 // ---------------------------------------------------------------------------

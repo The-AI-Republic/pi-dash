@@ -99,6 +99,7 @@ use super::{
     filters::{self, FilterValue},
     guards_error, owned, raw_json_response, Denial, QueryMap,
 };
+use pidash_compat::datetime::{render_uuid as uuid_string, render_uuid_opt as opt_uuid};
 use pidash_compat::validate::char_internal;
 
 /// Owned intake routes: the collection (both aliases share the viewset)
@@ -951,16 +952,6 @@ fn render_dt(moment: &DateTime<Utc>, timezone: chrono_tz::Tz) -> String {
     } else {
         text
     }
-}
-
-fn uuid_string(id: &Uuid) -> serde_json::Value {
-    serde_json::Value::String(id.to_string())
-}
-
-fn opt_uuid(id: &Option<Uuid>) -> serde_json::Value {
-    id.as_ref()
-        .map(uuid_string)
-        .unwrap_or(serde_json::Value::Null)
 }
 
 fn opt_string(text: &Option<String>) -> serde_json::Value {

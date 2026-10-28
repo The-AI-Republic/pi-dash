@@ -73,6 +73,7 @@ use super::auth as enroll_auth;
 use super::throttle as enroll_throttle;
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
+pub use pidash_compat::datetime::render_isoformat;
 use pidash_compat::db::is_integrity_error;
 pub use pidash_compat::response::{error_body, json_response, server_error, SERVER_ERROR_BODY};
 
@@ -331,17 +332,6 @@ pub fn frame_text(body: &Value, key: &str, max: usize) -> Result<String, Respons
 /// `(request.data.get(key) or "").strip()` (no truncation).
 pub fn frame_stripped(body: &Value, key: &str) -> Result<String, Response> {
     Ok(py_strip(&frame_raw(body, key)?).to_owned())
-}
-
-/// Python `datetime.isoformat()` for an aware UTC timestamp: `+00:00`
-/// offset, six-digit microseconds only when nonzero (the `prompting`
-/// `render_isoformat` precedent, restated).
-pub fn render_isoformat(dt: DateTime<Utc>) -> String {
-    if dt.timestamp_subsec_micros() == 0 {
-        dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, false)
-    } else {
-        dt.to_rfc3339_opts(chrono::SecondsFormat::Micros, false)
-    }
 }
 
 /// `json.dumps(..., ensure_ascii=True)` over compact `serde_json` output
@@ -2786,17 +2776,6 @@ mod tests {
         assert!(!py_truthy(&serde_json::json!([])));
         assert!(!py_truthy(&serde_json::json!({})));
         assert!(py_truthy(&serde_json::json!([0])));
-    }
-
-    #[test]
-    fn isoformat_matches_django() {
-        let whole = DateTime::from_timestamp(1_700_000_000, 0).expect("ts");
-        assert_eq!(render_isoformat(whole), "2023-11-14T22:13:20+00:00");
-        let micros = DateTime::from_timestamp(1_700_000_000, 123_456_000).expect("ts");
-        assert_eq!(render_isoformat(micros), "2023-11-14T22:13:20.123456+00:00");
-        // Millis-exact micros keep six digits (the PIDASHCONV-716 trap).
-        let millis = DateTime::from_timestamp(1_700_000_000, 123_000_000).expect("ts");
-        assert_eq!(render_isoformat(millis), "2023-11-14T22:13:20.123000+00:00");
     }
 
     #[test]

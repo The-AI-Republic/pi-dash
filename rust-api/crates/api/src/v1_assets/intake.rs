@@ -92,6 +92,7 @@ use crate::space::sanitize::{sanitize_html, Sanitize};
 use crate::state::AppState;
 use crate::uuid_path::{classify_uuid_segment, UuidSegment};
 use crate::v1_cycles_modules::cycle as cycle_mod;
+use pidash_compat::datetime::{render_date_opt, render_datetime_opt, render_uuid_opt as opt_uuid};
 use pidash_compat::db::{is_integrity_error, is_unique_violation};
 pub(crate) use pidash_compat::response::json_response;
 pub use pidash_compat::response::SERVER_ERROR_BODY;
@@ -998,22 +999,8 @@ fn issue_cols_qualified() -> String {
 // Renders (`IntakeIssueSerializer` + `IssueExpandSerializer` read shapes)
 // ---------------------------------------------------------------------------
 
-fn opt_uuid(value: &Option<Uuid>) -> Value {
-    value.map_or(Value::Null, |id| Value::String(id.to_string()))
-}
-
 fn opt_string(value: &Option<String>) -> Value {
     value.clone().map_or(Value::Null, Value::String)
-}
-
-fn render_datetime_opt(value: &Option<DateTime<Utc>>, timezone: &Tz) -> Value {
-    value.map_or(Value::Null, |dt| {
-        Value::String(crate::serializer::render_datetime_in(&dt, timezone))
-    })
-}
-
-fn render_date_opt(value: &Option<NaiveDate>) -> Value {
-    value.map_or(Value::Null, |date| Value::String(date.to_string()))
 }
 
 /// `description_binary` renders through DRF's `ModelField`

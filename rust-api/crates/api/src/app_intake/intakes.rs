@@ -77,6 +77,7 @@ use super::{
 };
 use crate::serializer::render_datetime_in;
 use crate::state::AppState;
+use pidash_compat::datetime::render_uuid_opt as opt_uuid;
 use pidash_compat::validate::{push_error, validate_char, validate_datetime};
 
 /// Python `str.strip()` membership (`db/models/project.py:210`): Rust
@@ -514,11 +515,6 @@ async fn cover_image_url(pool: &PgPool, project: &ProjectRow) -> Result<Option<S
         }
     }
     Ok(project.cover_image.clone())
-}
-
-fn opt_uuid(id: &Option<Uuid>) -> serde_json::Value {
-    id.map(|id| serde_json::Value::String(id.to_string()))
-        .unwrap_or(serde_json::Value::Null)
 }
 
 fn opt_string(text: &Option<String>) -> serde_json::Value {

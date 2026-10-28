@@ -104,6 +104,7 @@ use pidash_types::dispatch::AgentExecutorKind;
 use super::agent::{ToolExecutor, ToolOutcome};
 use super::github::{GithubAppContext, GithubFailure, GithubRestClient};
 use super::validation::ValidatedArgs;
+use pidash_compat::datetime::render_isoformat;
 use pidash_compat::db::is_unique_violation;
 
 // ---------------------------------------------------------------------------
@@ -807,17 +808,6 @@ async fn bound_issue(
     })
     .transpose()
     .map_err(ToolExecError::Db)
-}
-
-/// Python `datetime.isoformat()` for an aware UTC timestamp: `+00:00`
-/// offset, six-digit microseconds only when nonzero (the
-/// `render_isoformat` precedent).
-fn render_isoformat(dt: DateTime<Utc>) -> String {
-    if dt.timestamp_subsec_micros() == 0 {
-        dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, false)
-    } else {
-        dt.to_rfc3339_opts(chrono::SecondsFormat::Micros, false)
-    }
 }
 
 // ---------------------------------------------------------------------------

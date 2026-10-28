@@ -81,6 +81,7 @@ use crate::dispatch::{
     ExecutionFieldsError, ExecutionInputs, ExecutionSeams, ProjectScope,
 };
 use crate::dispatch::{execution_fields as resolve_execution_fields, DeferredAdmissionError};
+use pidash_compat::datetime::render_isoformat;
 
 // ---------------------------------------------------------------------------
 // Store
@@ -725,18 +726,6 @@ fn map_admission_error(error: DeferredAdmissionError) -> ServiceAdmissionError {
 
 fn db(error: sqlx::Error) -> CreationError {
     CreationError::Db(error.to_string())
-}
-
-/// Python `datetime.isoformat()` for an aware UTC timestamp (`+00:00`,
-/// microseconds only when nonzero — `context.py:322`).
-fn render_isoformat(dt: DateTime<Utc>) -> String {
-    // `AutoSi` trims trailing zeros (`.123000` -> `.123`); Python always
-    // prints six digits when microseconds are nonzero.
-    if dt.timestamp_subsec_micros() == 0 {
-        dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, false)
-    } else {
-        dt.to_rfc3339_opts(chrono::SecondsFormat::Micros, false)
-    }
 }
 
 async fn bundle_labels(

@@ -106,6 +106,7 @@ use crate::uuid_path::{classify_uuid_segment, UuidSegment};
 
 use super::gate;
 use super::{json_response, pool_of, resolve_project_id, session_authenticated};
+use pidash_compat::datetime::{render_datetime_opt, render_uuid, render_uuid_opt};
 
 // ---------------------------------------------------------------------------
 // Exact bodies
@@ -2880,20 +2881,6 @@ async fn fetch_pod_display(pool: &PgPool, pod_id: &Uuid) -> Result<Option<String
 // ---------------------------------------------------------------------------
 // Render (`SchedulerBindingSerializer.to_representation`)
 // ---------------------------------------------------------------------------
-
-fn render_uuid(id: &Uuid) -> Value {
-    Value::String(id.to_string())
-}
-
-fn render_uuid_opt(id: &Option<Uuid>) -> Value {
-    id.map(|id| render_uuid(&id)).unwrap_or(Value::Null)
-}
-
-fn render_datetime_opt(instant: &Option<DateTime<Utc>>, timezone: &Tz) -> Value {
-    instant
-        .map(|instant| Value::String(crate::serializer::render_datetime_in(&instant, timezone)))
-        .unwrap_or(Value::Null)
-}
 
 /// The 4 detail-only values (`SchedulerBindingDetailSerializer`,
 /// `474123e5`): `resolved_prompt` (always a string),

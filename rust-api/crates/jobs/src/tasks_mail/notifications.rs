@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 use super::email_notification::py_str;
 use super::mention_ids_in_html;
+use pidash_compat::datetime::django_str_datetime;
 
 /// One `issue_mentions` row to insert: `update_mentions_for_issue` builds
 /// `IssueMention(mention_id=…, issue=…, project=…,
@@ -785,18 +786,6 @@ pub struct LastActivity {
     pub new_value: Option<String>,
     pub old_value: Option<String>,
     pub created_at: DateTime<Utc>,
-}
-
-/// `str(last_activity.created_at)`: Django renders an aware datetime as
-/// `YYYY-MM-DD HH:MM:SS[.ffffff]+HH:MM` (`USE_TZ=True`, so UTC) — the
-/// fractional part appears only when microseconds are nonzero, exactly like
-/// `datetime.isoformat(sep=" ")`.
-pub fn django_str_datetime(moment: &DateTime<Utc>) -> String {
-    if moment.timestamp_subsec_nanos() == 0 {
-        moment.format("%Y-%m-%d %H:%M:%S%:z").to_string()
-    } else {
-        moment.format("%Y-%m-%d %H:%M:%S%.6f%:z").to_string()
-    }
 }
 
 /// Per-subscriber `sender` branch (`:311-317`): the creator reads
@@ -2341,25 +2330,6 @@ mod tests {
         assert!(py_truthy(&json!(true)));
         assert!(py_truthy(&json!("x")));
         assert!(py_truthy(&json!([1])));
-    }
-
-    #[test]
-    fn django_str_datetime_renders_like_python() {
-        // `str()` of an aware UTC datetime: `+00:00`, never `UTC`.
-        let moment =
-            chrono::DateTime::parse_from_rfc3339("2026-09-01T12:00:00Z").expect("test time");
-        assert_eq!(
-            django_str_datetime(&moment.with_timezone(&chrono::Utc)),
-            "2026-09-01 12:00:00+00:00"
-        );
-        // `str()` keeps microseconds when nonzero (`:605`); `created_at`
-        // values from Postgres virtually always carry them.
-        let moment =
-            chrono::DateTime::parse_from_rfc3339("2026-09-01T12:00:00.123456Z").expect("test time");
-        assert_eq!(
-            django_str_datetime(&moment.with_timezone(&chrono::Utc)),
-            "2026-09-01 12:00:00.123456+00:00"
-        );
     }
 
     #[test]

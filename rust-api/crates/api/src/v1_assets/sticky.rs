@@ -144,6 +144,7 @@ use super::permissions as v1_perm;
 use crate::assistant::common::py_repr;
 use crate::license::form_body::{self, BodyFail, BodyKind};
 use crate::state::AppState;
+use pidash_compat::datetime::render_uuid_opt as opt_uuid;
 pub(crate) use pidash_compat::response::json_response;
 pub use pidash_compat::response::SERVER_ERROR_BODY;
 
@@ -587,10 +588,6 @@ impl StickyRow {
             sort_order: row.try_get("sort_order").map_err(|_| Denial::ServerError)?,
         })
     }
-}
-
-fn opt_uuid(value: &Option<Uuid>) -> Value {
-    value.map_or(Value::Null, |id| Value::String(id.to_string()))
 }
 
 fn opt_string(value: &Option<String>) -> Value {

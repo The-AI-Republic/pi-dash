@@ -104,6 +104,7 @@ use sqlx::Row;
 use crate::middleware::body_limit::read_request_bytes;
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
+use pidash_compat::datetime::render_rfc3339_in;
 use pidash_compat::response::json_response;
 use pidash_compat::validate::push_error;
 use pidash_db::app_pages::strip::ml_strip_tags;
@@ -432,16 +433,9 @@ fn req_bool(obj: &serde_json::Map<String, Value>, key: &str) -> Result<bool, Han
     }
 }
 
-/// Render a `row_to_json` timestamptz value exactly like DRF `DateTimeField`
-/// with the default `iso-8601` format: ISO-8601 in the request's zone with
-/// `+00:00` rewritten to `Z` (serializer kernel rule).
-fn render_dt(raw: &str, tz: &chrono_tz::Tz) -> Result<String, HandlerError> {
-    let dt = chrono::DateTime::parse_from_rfc3339(raw).map_err(|_| HandlerError::ServerError)?;
-    Ok(crate::serializer::render_datetime_in(&dt, tz))
-}
-
 fn render_dt_opt(raw: Option<String>, tz: &chrono_tz::Tz) -> Result<Option<String>, HandlerError> {
-    raw.map(|text| render_dt(&text, tz)).transpose()
+    raw.map(|text| render_rfc3339_in(&text, tz).map_err(|_| HandlerError::ServerError))
+        .transpose()
 }
 
 // ---------------------------------------------------------------------------
@@ -2098,8 +2092,10 @@ async fn render_issue_reaction(
     Ok(IssueReactionView {
         id: req_str(o, "id")?,
         actor_detail: render_actor_detail(pool, &actor_id).await?,
-        created_at: render_dt(&req_str(o, "created_at")?, tz)?,
-        updated_at: render_dt(&req_str(o, "updated_at")?, tz)?,
+        created_at: render_rfc3339_in(&req_str(o, "created_at")?, tz)
+            .map_err(|_| HandlerError::ServerError)?,
+        updated_at: render_rfc3339_in(&req_str(o, "updated_at")?, tz)
+            .map_err(|_| HandlerError::ServerError)?,
         created_by: opt_str(o, "created_by_id")?
             .or_else(|| opt_str(o, "created_by").unwrap_or(None)),
         updated_by: opt_str(o, "updated_by_id")?

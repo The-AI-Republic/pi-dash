@@ -144,6 +144,7 @@ use crate::v1_cycles_modules::body as shared_body;
 use crate::v1_cycles_modules::json::{
     parse_json_text, to_serde_publish, JsonFail, JSON_PARSE_PREFIX,
 };
+use pidash_compat::datetime::{render_date, render_datetime_in, render_uuid_opt, uuid_string};
 use pidash_compat::response::escape_u2028 as escape_json_text;
 
 // ---------------------------------------------------------------------------
@@ -494,7 +495,7 @@ fn pool_of(state: &AppState) -> Result<PgPool, Denial> {
 /// to the current timezone, `fields.py:1168-1231`, which `TimezoneMixin`
 /// set to the actor's).
 fn render_dt(dt: &DateTime<Utc>, tz: &Tz) -> String {
-    crate::serializer::render_datetime_in(&dt.fixed_offset(), tz)
+    render_datetime_in(dt, tz)
 }
 
 fn render_dt_opt(dt: Option<DateTime<Utc>>, tz: &Tz) -> Option<String> {
@@ -509,11 +510,6 @@ fn render_dt_utc(dt: &DateTime<Utc>) -> String {
     crate::serializer::render_datetime(dt)
 }
 
-/// DRF `DateField` wire format.
-fn render_date(value: &chrono::NaiveDate) -> String {
-    value.format("%Y-%m-%d").to_string()
-}
-
 /// A finite `sort_order` for the wire; a non-finite one answers 500
 /// (DRF renders with `allow_nan=False` under the default
 /// `STRICT_JSON=True`, so `ValueError` escapes into the generic 500).
@@ -522,17 +518,6 @@ fn render_sort_order(value: f64) -> Result<f64, Denial> {
         Ok(value)
     } else {
         Err(Denial::ServerError)
-    }
-}
-
-fn uuid_string(id: &Uuid) -> String {
-    id.to_string()
-}
-
-fn uuid_string_opt(id: Option<Uuid>) -> Value {
-    match id {
-        Some(id) => Value::String(id.to_string()),
-        None => Value::Null,
     }
 }
 
@@ -680,16 +665,16 @@ fn version_page_row(row: &sqlx::postgres::PgRow, tz: &Tz) -> Result<Value, Denia
     let mut map = Map::with_capacity(VERSION_PAGE_KEYS.len());
     for &key in VERSION_PAGE_KEYS.iter() {
         let value = match key {
-            "id" => uuid_string_opt(id),
-            "workspace" => uuid_string_opt(workspace_id),
-            "project" => uuid_string_opt(project_id),
-            "issue" => uuid_string_opt(issue_id),
+            "id" => render_uuid_opt(&id),
+            "workspace" => render_uuid_opt(&workspace_id),
+            "project" => render_uuid_opt(&project_id),
+            "issue" => render_uuid_opt(&issue_id),
             "last_saved_at" => last_saved_at.clone(),
-            "owned_by" => uuid_string_opt(owned_by_id),
+            "owned_by" => render_uuid_opt(&owned_by_id),
             "created_at" => created_at.clone(),
             "updated_at" => updated_at.clone(),
-            "created_by" => uuid_string_opt(created_by_id),
-            "updated_by" => uuid_string_opt(updated_by_id),
+            "created_by" => render_uuid_opt(&created_by_id),
+            "updated_by" => render_uuid_opt(&updated_by_id),
             _ => unreachable!("VERSION_PAGE_KEYS"),
         };
         map.insert(key.to_owned(), value);
