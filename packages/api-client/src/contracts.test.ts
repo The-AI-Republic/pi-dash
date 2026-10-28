@@ -109,6 +109,7 @@ import {
   listWorkspaceLabels,
   listWorkspaceStates,
 } from "./contracts/reference.js";
+import { createIssueType, listIssueTypes } from "./contracts/issue-types.js";
 import {
   getIssue,
   listCycleIssues,
@@ -1237,6 +1238,51 @@ describe("project contracts", () => {
 });
 
 describe("reference contracts", () => {
+  it("parses project work-item types", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: json([
+        {
+          id: UUID,
+          name: "Bug",
+          description: "",
+          logo_props: {},
+          is_epic: false,
+          is_default: false,
+          is_active: true,
+          level: 1,
+        },
+      ]),
+    });
+    const parsed = await listIssueTypes(client, "acme", UUID2);
+    expect(parsed[0]?.name).toBe("Bug");
+  });
+
+  it("posts the work-item type payload to issue-types", async () => {
+    const transport = recordingTransport(() =>
+      fakeResponse({
+        status: 201,
+        body: JSON.stringify({
+          id: UUID,
+          name: "Epic",
+          description: "",
+          logo_props: {},
+          is_epic: true,
+          is_default: false,
+          is_active: true,
+          level: 0,
+        }),
+        url: "https://api.test/",
+      })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const created = await createIssueType(client, "acme", UUID2, { name: "Epic", is_epic: true });
+    const call = transport.calls.find((entry) => entry.url.includes("/issue-types/"));
+    expect(call?.url).toBe(`https://api.test/api/workspaces/acme/projects/${UUID2}/issue-types/`);
+    expect(call?.init.method).toBe("POST");
+    expect(created.is_epic).toBe(true);
+  });
+
   it("parses states", async () => {
     const client = createClient({
       baseUrl: "https://api.test",
@@ -4722,10 +4768,10 @@ describe("cloud-only issues contracts", () => {
 });
 
 describe("epics-segment contracts (cloud-only)", () => {
-  // The OSS backend has no `epics/` routes, so nothing here can run
-  // against a live local server. These stubs prove the URLs mirror the
-  // issues endpoints (with the two renamed segments) and that the shared
-  // response shapes parse.
+  // The collection, entry and children routes ride the OSS stack API
+  // with live contract tests (NEWFRONT-984); these stubs still prove
+  // the URLs mirror the issues endpoints (with the two renamed
+  // segments) and that the shared response shapes parse.
 
   const issueRow = {
     id: UUID,

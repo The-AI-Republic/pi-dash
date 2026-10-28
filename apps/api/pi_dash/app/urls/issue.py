@@ -15,6 +15,8 @@ from pi_dash.app.views.issue.bulk_operations import (
     BulkOperationIssuesEndpoint,
     BulkSubscribeIssuesEndpoint,
 )
+from pi_dash.app.views.issue.epics import EpicViewSet, EpicWorkItemsEndpoint
+from pi_dash.app.views.issue.types import ProjectIssueTypesEndpoint
 from pi_dash.app.views import (
     BulkCreateIssueLabelsEndpoint,
     BulkDeleteIssuesEndpoint,
@@ -123,6 +125,26 @@ urlpatterns = [
         "workspaces/<str:slug>/projects/<str:project_id>/bulk-subscribe-issues/",
         BulkSubscribeIssuesEndpoint.as_view(),
         name="bulk-subscribe-issues",
+    ),
+    path(
+        "workspaces/<str:slug>/projects/<str:project_id>/epics/",
+        EpicViewSet.as_view({"get": "list", "post": "create"}),
+        name="project-epics",
+    ),
+    path(
+        "workspaces/<str:slug>/projects/<str:project_id>/epics/<uuid:pk>/",
+        EpicViewSet.as_view({"get": "retrieve", "patch": "partial_update", "delete": "destroy"}),
+        name="project-epics",
+    ),
+    path(
+        "workspaces/<str:slug>/projects/<str:project_id>/epics/<uuid:epic_id>/issues/",
+        EpicWorkItemsEndpoint.as_view(),
+        name="epic-work-items",
+    ),
+    path(
+        "workspaces/<str:slug>/projects/<str:project_id>/issue-types/",
+        ProjectIssueTypesEndpoint.as_view(),
+        name="project-issue-types",
     ),
     ##
     path(

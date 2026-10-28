@@ -87,6 +87,11 @@ export interface IssueCreateInput {
   start_date?: string | null;
   target_date?: string | null;
   parent_id?: string | null;
+  /**
+   * Work-item type picked in the create dialog (ISS-129): the server
+   * stores it on the row; absent means the project default.
+   */
+  type?: string | null;
   git_work_branch?: string;
   /**
    * Execution target picked in the create dialog (ISS-117/ISS-218): a

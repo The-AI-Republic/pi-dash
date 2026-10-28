@@ -2065,6 +2065,28 @@ export async function serverIssues(
   });
 }
 
+/** Ids plus names of the project's epics, in API order (NEWFRONT-984). */
+export async function serverEpics(
+  workspaceSlug: string,
+  projectId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParitySeedIssue[]> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/epics/`, {
+    headers: { cookie: sessionCookie },
+  });
+  if (!res.ok) throw new Error(`[parity] epics read failed with HTTP ${res.status}.`);
+  const payload: unknown = await res.json();
+  const rows: unknown[] = Array.isArray(payload) ? payload : ((payload as { results?: unknown[] }).results ?? []);
+  return rows.map((row) => {
+    const record = row as { id?: unknown; name?: unknown; sequence_id?: unknown };
+    if (typeof record.id !== "string" || typeof record.name !== "string" || typeof record.sequence_id !== "number") {
+      throw new Error("[parity] epic row carried no string id/name and numeric sequence_id.");
+    }
+    return { id: record.id, name: record.name, sequenceId: record.sequence_id };
+  });
+}
+
 /** Project identifier string (e.g. PAR) backing work-item URLs (NEWFRONT-115). */
 export async function serverProjectIdentifier(
   workspaceSlug: string,
@@ -6079,6 +6101,36 @@ export async function serverCreateLabel(
   if (!res.ok) throw new Error(`[parity] label create failed with HTTP ${res.status}.`);
   return labelOf((await res.json()) as Record<string, unknown>);
 }
+/** A work-item type row as the issue-types endpoints return it. */
+export interface ParityServerIssueType {
+  id: string;
+  name: string;
+  is_epic: boolean;
+}
+
+/** Mint a work-item type and link it onto the project (admin-only, like labels). */
+export async function serverCreateIssueType(
+  workspaceSlug: string,
+  projectId: string,
+  name: string,
+  sessionCookie: string,
+  options: { isEpic?: boolean } = {},
+  apiBase: string = apiBaseFromEnv()
+): Promise<ParityServerIssueType> {
+  const res = await mutateJSON(
+    "POST",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/issue-types/`,
+    sessionCookie,
+    { name, ...(options.isEpic === true ? { is_epic: true } : {}) }
+  );
+  if (!res.ok) throw new Error(`[parity] issue-type create failed with HTTP ${res.status}.`);
+  const row = (await res.json()) as Record<string, unknown>;
+  if (typeof row["id"] !== "string" || typeof row["name"] !== "string") {
+    throw new Error("[parity] issue-type create carried no id/name.");
+  }
+  return { id: row["id"], name: row["name"], is_epic: row["is_epic"] === true };
+}
+
 /** Strict label PATCH (rename/recolor/reparent/reorder); throws on failure. */
 export async function serverPatchLabel(
   workspaceSlug: string,

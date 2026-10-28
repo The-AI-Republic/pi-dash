@@ -7,15 +7,16 @@
 // `bootstrapIssuesEdition` once at startup; the community build (no issues
 // flag on) registers nothing, so every seam stays empty exactly as the
 // OSS oracle pins. A flag turned on without its provider still renders
-// nothing, so each area below lands independently: team projects and the
-// transfer-hop note now, workflow rules, work-item types and the type
-// detail/modal extensions with their own issues.
+// nothing, so each area below lands independently: team projects, the
+// transfer-hop note, work-item types and the modal type picker now;
+// workflow rules, templates and extra properties with their own issues.
 import * as React from "react";
 
-import { listProjects } from "@pidash/api-client";
+import { listIssueTypes, listProjects } from "@pidash/api-client";
 import { getAppClient } from "../../../core/api/client.js";
 import type { Edition } from "../../../core/edition/index.js";
 import { BULK_OPERATIONS_FLAG } from "../bulk/edition.js";
+import { registerIssueTypeExtension } from "../create/issueTypeSeam.js";
 import { WORKLOG_FLAG } from "../detail/widgets/worklog/worklog.js";
 import {
   DETAIL_BADGES_FLAG,
@@ -27,7 +28,8 @@ import {
   TEAM_PROJECT_FILTER_FLAG,
   WORKFLOW_FLAG,
 } from "./flags.js";
-import type { DetailBadgeInput, TeamProjectOption } from "./providers.js";
+import { IssueTypePicker } from "./IssueTypePicker.js";
+import type { DetailBadgeInput, TeamProjectOption, WorkItemTypeOption } from "./providers.js";
 import { registerEditionIssuesProviders } from "./providers.js";
 
 /** Every issues flag the cloud edition may set (§23). */
@@ -60,6 +62,15 @@ export async function listTeamProjectOptions(input: {
 }): Promise<TeamProjectOption[]> {
   const projects = await listProjects(getAppClient(), input.workspaceSlug);
   return projects.map((project) => ({ id: project.id, name: project.name, identifier: project.identifier }));
+}
+
+/** Project work-item types for the type filter, modal picker and detail badge. */
+export async function listWorkItemTypeOptions(input: {
+  workspaceSlug: string;
+  projectId: string;
+}): Promise<WorkItemTypeOption[]> {
+  const rows = await listIssueTypes(getAppClient(), input.workspaceSlug, input.projectId);
+  return rows.map((row) => ({ id: row.id, name: row.name }));
 }
 
 const TransferHopNoteBody = React.lazy(() =>
@@ -97,7 +108,11 @@ export function bootstrapIssuesEdition(edition: Edition): void {
   registerEditionIssuesProviders({
     teamProjects: listTeamProjectOptions,
     detailBadges: { transferNote: CloudTransferNote },
+    workItemTypes: listWorkItemTypeOptions,
   });
+  // The modal type picker only (ISS-129 type half): templates and extra
+  // properties register with the Part 5 model.
+  registerIssueTypeExtension({ typePicker: IssueTypePicker });
 }
 
 /** For tests: allow the bootstrap to run again. */

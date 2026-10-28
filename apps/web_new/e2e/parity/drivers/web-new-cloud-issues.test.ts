@@ -15,10 +15,12 @@ interface StubLocator {
   isVisible?: () => Promise<boolean>;
   click?: (options?: unknown) => Promise<void>;
   check?: (options?: unknown) => Promise<void>;
+  fill?: (text: string) => Promise<void>;
   hover?: (options?: unknown) => Promise<void>;
   waitFor?: (options?: unknown) => Promise<void>;
   first?: () => StubLocator;
   nth?: (index: number) => StubLocator;
+  filter?: (options?: unknown) => StubLocator;
   getByRole?: (role: string, options?: unknown) => StubLocator;
   getByTestId?: (id: string) => StubLocator;
   [key: string]: unknown;
@@ -30,12 +32,14 @@ function locator(overrides: Partial<StubLocator> = {}): Locator {
     isVisible: async () => true,
     click: async () => undefined,
     check: async () => undefined,
+    fill: async () => undefined,
     hover: async () => undefined,
     waitFor: async () => undefined,
     ...overrides,
   };
   node.first = () => node;
   if (node.nth === undefined) node.nth = () => node;
+  if (node.filter === undefined) node.filter = () => node;
   if (node.getByRole === undefined) node.getByRole = () => node;
   if (node.getByTestId === undefined) node.getByTestId = () => node;
   return node as unknown as Locator;
@@ -56,6 +60,7 @@ function pageOf(
     onRole?: (state: PageState, role: string, options: unknown) => Locator | undefined;
     onLocator?: (state: PageState, selector: string) => Locator;
     clicks?: () => void;
+    fills?: (text: string) => void;
   } = {}
 ): { page: Page; state: PageState } {
   const state: PageState = { testIds: [], roleCalls: [], dialogNames: [], selectors: [], mouse: [], waits: [] };
@@ -65,6 +70,9 @@ function pageOf(
     },
     check: async () => {
       hooks.clicks?.();
+    },
+    fill: async (text: string) => {
+      hooks.fills?.(text);
     },
   });
   const dialog = locator({
@@ -106,6 +114,7 @@ function pageOf(
       if (hooks.onLocator !== undefined) return hooks.onLocator(state, selector);
       return locator();
     },
+    getByPlaceholder: () => locator(),
     mouse: {
       down: async () => {
         state.mouse.push("down");
@@ -245,6 +254,67 @@ describe("web_new issues cloud presence", () => {
     await new WebNewDriver(page).selectFirstRows(2);
     expect(picked).toEqual([0, 1]);
     expect(state.roleCalls).toHaveLength(1);
+  });
+
+  it("creates an epic through the widget action", async () => {
+    const clicks = vi.fn();
+    const fills = vi.fn();
+    const { page, state } = pageOf({ clicks, fills });
+    await new WebNewDriver(page).epicCreateViaWidget("Big rock");
+    expect(state.roleCalls).toEqual([
+      { role: "button", name: "Create epic", exact: true },
+      { role: "dialog", name: "Create epic", exact: undefined },
+      { role: "textbox", name: "Epic name", exact: true },
+      { role: "button", name: "Create epic", exact: true },
+    ]);
+    expect(fills).toHaveBeenCalledWith("Big rock");
+    expect(clicks).toHaveBeenCalledTimes(2);
+    expect(state.waits).toHaveLength(1);
+  });
+
+  it("renames an epic through its relation-row menu", async () => {
+    const clicks = vi.fn();
+    const fills = vi.fn();
+    const { page, state } = pageOf({ clicks, fills });
+    await new WebNewDriver(page).epicRenameRelationRow("Big rock", "Bigger rock");
+    expect(state.roleCalls).toEqual([
+      { role: "button", name: "Actions for Big rock", exact: true },
+      { role: "menuitem", name: "Edit", exact: true },
+      { role: "dialog", name: "Edit epic", exact: undefined },
+      { role: "textbox", name: "Epic name", exact: true },
+      { role: "button", name: "Save epic", exact: true },
+    ]);
+    expect(fills).toHaveBeenCalledWith("Bigger rock");
+    expect(clicks).toHaveBeenCalledTimes(3);
+    expect(state.waits).toHaveLength(1);
+  });
+
+  it("picks a work-item type in the create modal", async () => {
+    const clicks = vi.fn();
+    const { page, state } = pageOf({
+      clicks,
+      onRole: (pageState, role) => {
+        if (role !== "listbox") return undefined;
+        return locator({
+          getByRole: ((optionRole: string, options?: { name?: unknown; exact?: unknown }) => {
+            pageState.roleCalls.push({ role: optionRole, name: options?.name, exact: options?.exact });
+            return locator({
+              click: async () => {
+                clicks();
+              },
+            });
+          }) as StubLocator["getByRole"],
+        });
+      },
+    });
+    await new WebNewDriver(page).modalSelectIssueType("Bug");
+    expect(state.roleCalls).toEqual([
+      { role: "dialog", name: undefined, exact: undefined },
+      { role: "button", name: "No type", exact: true },
+      { role: "listbox", name: "Issue types", exact: undefined },
+      { role: "option", name: "Bug", exact: true },
+    ]);
+    expect(clicks).toHaveBeenCalledTimes(2);
   });
 
   it("links blocks by dragging a handle onto a lane", async () => {

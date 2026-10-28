@@ -45486,6 +45486,29 @@ export class WebNewDriver implements ParityDriver {
     }
   }
 
+  async epicCreateViaWidget(name: string): Promise<void> {
+    await this.page.getByRole("button", { name: "Create epic", exact: true }).click();
+    const dialog = this.page.getByRole("dialog", { name: "Create epic" });
+    await dialog.getByRole("textbox", { name: "Epic name", exact: true }).fill(name);
+    await dialog.getByRole("button", { name: "Create epic", exact: true }).click();
+    await dialog.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async epicRenameRelationRow(currentName: string, nextName: string): Promise<void> {
+    await this.page.getByRole("button", { name: `Actions for ${currentName}`, exact: true }).click();
+    await this.page.getByRole("menuitem", { name: "Edit", exact: true }).click();
+    const dialog = this.page.getByRole("dialog", { name: "Edit epic" });
+    await dialog.getByRole("textbox", { name: "Epic name", exact: true }).fill(nextName);
+    await dialog.getByRole("button", { name: "Save epic", exact: true }).click();
+    await dialog.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async modalSelectIssueType(name: string): Promise<void> {
+    const dialog = this.createDialog();
+    await dialog.getByRole("button", { name: "No type", exact: true }).click();
+    await this.page.getByRole("listbox", { name: "Issue types" }).getByRole("option", { name, exact: true }).click();
+  }
+
   async ganttDependencyArrowCount(): Promise<number> {
     return this.page.getByTestId("gantt-dependency-arrow").count();
   }

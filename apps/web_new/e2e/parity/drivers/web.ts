@@ -59952,6 +59952,18 @@ export class WebDriver implements ParityDriver {
     throw new Error("[parity] issues cloud legs run on web_new only (NEWFRONT-984).");
   }
 
+  async epicCreateViaWidget(): Promise<void> {
+    throw new Error("[parity] issues cloud legs run on web_new only (NEWFRONT-984).");
+  }
+
+  async epicRenameRelationRow(): Promise<void> {
+    throw new Error("[parity] issues cloud legs run on web_new only (NEWFRONT-984).");
+  }
+
+  async modalSelectIssueType(): Promise<void> {
+    throw new Error("[parity] issues cloud legs run on web_new only (NEWFRONT-984).");
+  }
+
   async ganttDependencyArrowCount(): Promise<number> {
     throw new Error("[parity] issues cloud legs run on web_new only (NEWFRONT-984).");
   }

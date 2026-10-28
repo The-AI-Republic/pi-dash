@@ -1,15 +1,18 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Epics: the cloud-only mirror of the issues CRUD surface. The OSS build
-// has no `epics/` routes; the old frontend's issue service swapped the
-// `issues` path segment for `epics` and kept every other segment, so the
-// epics collection, archive record and detail read mirror their issues
-// counterparts. Two segments do change on the epics side: the children
-// collection is `epics/<id>/issues/` and external links live at
-// `epics/<id>/links/`. Move is not mirrored — it stays the shared
-// `work-items/<id>/move/` endpoint. No live contract test is possible
-// without the cloud backend; the stub tests in contracts.test.ts prove
+// Epics: the issues surface scoped to epic-typed rows (an epic is an
+// issue whose type carries is_epic; there is no Epic model). The old
+// frontend's issue service swapped the `issues` path segment for `epics`
+// and kept every other segment, so the epics collection and detail read
+// mirror their issues counterparts. Two segments do change on the epics
+// side: the children collection is `epics/<id>/issues/` and external
+// links live at `epics/<id>/links/`. Move is not mirrored — it stays the
+// shared `work-items/<id>/move/` endpoint. The collection, entry and
+// children routes ride the OSS stack API ungated (NEWFRONT-984) and are
+// proven by live contract tests; the archive and links mirrors stay
+// unserved until a caller needs them. The cloud gate lives in the web_new
+// edition module, not here. The stub tests in contracts.test.ts prove
 // the URLs and payload parsing.
 import * as z from "zod/mini";
 import { ApiClient } from "../client.js";

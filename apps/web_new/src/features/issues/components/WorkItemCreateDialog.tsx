@@ -917,7 +917,7 @@ export function WorkItemCreateDialog({
     create.mutate(
       {
         projectId,
-        payload: buildCreatePayload(named),
+        payload: buildCreatePayload(named, typeId),
         projectIdentifier: offered.find((project) => project.id === projectId)?.identifier ?? projectIdentifier,
       },
       {

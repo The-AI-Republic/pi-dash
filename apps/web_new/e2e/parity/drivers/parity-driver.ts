@@ -11342,6 +11342,12 @@ export interface DeskSigninUpdateLink {
   bulkToolbarSubscribe(): Promise<void>;
   /** Select the first N list rows (cloud legs prove multi-row batches). */
   selectFirstRows(count: number): Promise<void>;
+  /** Create an epic through the relations widget action; resolves once the dialog closes. */
+  epicCreateViaWidget(name: string): Promise<void>;
+  /** Rename an epic through its relation-row menu; resolves once the dialog closes. */
+  epicRenameRelationRow(currentName: string, nextName: string): Promise<void>;
+  /** Pick a work-item type in the open create modal. */
+  modalSelectIssueType(name: string): Promise<void>;
   /** Dependency arrows the timeline draws. */
   ganttDependencyArrowCount(): Promise<number>;
   /** Drag-to-link handles the timeline offers. */

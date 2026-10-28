@@ -194,8 +194,11 @@ export function canGenerateTitle(input: {
 }
 
 /** The create payload: always the title, plus every field the user set (ISS-117). */
-export function buildCreatePayload(form: CreateFormState): IssueCreateInput {
+export function buildCreatePayload(form: CreateFormState, typeId: string | null = null): IssueCreateInput {
   const payload: IssueCreateInput = { name: normalizeTitle(form.name) };
+  // The modal type picker lives outside the form state (ISS-129): a pick
+  // rides the payload, the default sends nothing.
+  if (typeId !== null) payload.type = typeId;
   const description = visibleDescriptionHtml(form.descriptionHtml);
   if (description !== "") payload.description_html = description;
   if (form.stateId !== null) payload.state_id = form.stateId;
