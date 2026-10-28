@@ -538,6 +538,31 @@ describe("web_new hover card reads", () => {
     expect(seen).toEqual(["block"]);
   });
 
+  it("waits for a delayed card mount before reading", async () => {
+    // The calendar hover mounts its card after a short delay (ISS-133);
+    // the read waits for the mount instead of one-shotting the count.
+    const seen: string[] = [];
+    let counts = 0;
+    const { page } = hoverPage({ region: 1, wide: 0, blocks: 0, cardText: "PAR-1 Range issue" }, seen);
+    const real = page.getByTestId.bind(page);
+    (page as unknown as Record<string, unknown>).getByTestId = (id: string) => {
+      const node = real(id);
+      if (id !== "work-item-preview") return node;
+      const delayed = {
+        ...node,
+        count: async () => {
+          counts += 1;
+          return counts <= 2 ? 0 : 1;
+        },
+      } as unknown as Record<string, unknown>;
+      delayed.first = () => delayed;
+      return delayed as unknown as ReturnType<typeof real>;
+    };
+    const card = await new WebNewDriver(page).hoverCardRead("Range issue");
+    expect(card.text).toBe("PAR-1 Range issue");
+    expect(counts).toBe(3);
+  });
+
   it("reports empty fields and skips the dismiss when the hover opens no card", async () => {
     const seen: string[] = [];
     const { page, keys } = hoverPage({ region: 1, wide: 0, blocks: 0, cardText: null }, seen);

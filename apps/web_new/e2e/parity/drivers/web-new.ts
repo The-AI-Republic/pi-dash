@@ -2677,8 +2677,18 @@ export class WebNewDriver implements ParityDriver {
     await this.hoverIssueRow(issueName);
     // The card names the record in its key, title and state, so one open
     // card is the read: no per-name scoping that a redesign could break.
+    // The calendar hover mounts its card after a short delay, so wait for
+    // the mount instead of one-shotting the count (ISS-133).
     const card = this.page.getByTestId("work-item-preview").first();
-    if ((await card.count()) === 0) return empty;
+    let attached = false;
+    for (let waited = 0; waited < 5_000 && !attached; waited += 250) {
+      if ((await card.count()) > 0) {
+        attached = true;
+      } else {
+        await this.page.waitForTimeout(250);
+      }
+    }
+    if (!attached) return empty;
     const waited = await card
       .waitFor({ state: "visible", timeout: 15_000 })
       .then(() => true)
