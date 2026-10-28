@@ -6,16 +6,21 @@ import { createRoot } from "react-dom/client";
 import { createRouter } from "@tanstack/react-router";
 
 import { createAppClient } from "./core/api/index.js";
+import { edition } from "./core/edition/index.js";
 import { platform } from "./core/platform/index.js";
 import { createQueryClient } from "./core/query/index.js";
 import { AppRoot, createAppCachePersistor } from "./features/instance/entry.js";
+import { bootstrapIssuesEdition } from "./features/issues/edition/cloudProviders.js";
 import { routeTree } from "./routeTree.gen";
 import { PIDASH_TARGET } from "./target";
 import "./styles/app.css";
 
 // Bootstrap order: platform → HTTP client (also points the session hooks
-// at it) → query client (+ cache restore) → router.
+// at it) → edition seams → query client (+ cache restore) → router.
 const apiClient = createAppClient();
+// The cloud edition registers its issues providers (team projects, the
+// transfer-hop note); the community build registers nothing (NEWFRONT-984).
+bootstrapIssuesEdition(edition);
 const queryClient = createQueryClient();
 const persistor = createAppCachePersistor(PIDASH_TARGET, queryClient, platform.storage);
 await persistor.restore().catch(() => undefined);
