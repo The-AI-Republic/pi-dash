@@ -101,6 +101,8 @@ from .importer import ImporterSerializer
 
 from .worklog import IssueWorklogSerializer
 
+from .bulk import BulkOperationSerializer, BulkSubscribeSerializer
+
 from .page import (
     PageSerializer,
     PageDetailSerializer,

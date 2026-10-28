@@ -3,13 +3,13 @@
 // See the LICENSE file for details.
 // Cloud scenarios (NEWFRONT-984): the functional bulk toolbar replaces the
 // OSS upgrade banner, and the timeline offers selection checkboxes. Rows:
-// ISS-113 (bulk delete), ISS-114 (bulk archive), ISS-116 (gantt bulk
-// selection). Edition-gated proof per parity/specs/issues.md §23: the OSS
-// legs live in bulk-selection.spec.ts, this file proves the cloud
-// replacement. It runs on the "new" project only — the OSS oracle
-// provably lacks the surface. Auth rides API session cookies (the cloud
-// /login is OIDC-only). ISS-112 (update) and ISS-115 (subscribe) grow
-// their legs once their endpoints land.
+// ISS-112 (bulk update), ISS-113 (bulk delete), ISS-114 (bulk archive),
+// ISS-115 (bulk subscribe), ISS-116 (gantt bulk selection).
+// Edition-gated proof per parity/specs/issues.md §23: the OSS legs live
+// in bulk-selection.spec.ts, this file proves the cloud replacement. It
+// runs on the "new" project only — the OSS oracle provably lacks the
+// surface. Auth rides API session cookies (the cloud /login is
+// OIDC-only).
 import { test, expect } from "../fixtures";
 import {
   parityProjectIdentifier,
@@ -21,6 +21,8 @@ import {
   serverIssue,
   serverPatchIssue,
   serverProjectStates,
+  serverSubscriptionStatus,
+  serverUnsubscribeIssue,
   signInSession,
 } from "../helpers/api";
 import { browserCookiesFromHeader } from "../helpers/cloud-session";
@@ -125,6 +127,113 @@ test(
       });
     } finally {
       await serverCleanupIssueWithSession(seed.workspaceSlug, projectId, issue.id, session).catch(() => {});
+      await serverCleanupProject(seed.workspaceSlug, projectId, session);
+    }
+  }
+);
+
+test(
+  specTitle(["ISS-112"], "cloud: bulk update applies one priority across the selection"),
+  { tag: specTags(["ISS-112"]) },
+  async ({ driver, seed, context }, testInfo) => {
+    test.skip(testInfo.project.name !== "new", "cloud bulk pins the web_new UI only");
+    const tag = `NF984 bulkupd ${Date.now()}`;
+    const session = await signInSession(seed.email, seed.password);
+    const projectId = await serverCreateProjectWithFlags(
+      seed.workspaceSlug,
+      `${tag} project`,
+      parityProjectIdentifier("N984"),
+      {},
+      session
+    );
+    const first = await serverCreateIssueFull(seed.workspaceSlug, projectId, `${tag} one`, session);
+    const second = await serverCreateIssueFull(seed.workspaceSlug, projectId, `${tag} two`, session);
+    try {
+      await context.addCookies(browserCookiesFromHeader(session));
+      await driver.openProjectIssuesSettled(seed.workspaceSlug, projectId);
+      await driver.dismissWelcomeDialog();
+      await expect
+        .poll(() => driver.visibleIssueNames(), { timeout: 120_000 })
+        .toEqual(expect.arrayContaining([`${tag} one`, `${tag} two`]));
+
+      await test.step("the edit dialog arms priority and applies it", async () => {
+        await driver.selectFirstRows(2);
+        expect(await driver.bulkToolbarVisible()).toBe(true);
+        await driver.bulkToolbarUpdatePriority("High");
+      });
+
+      await test.step("both issues carry the new priority server-side", async () => {
+        for (const issue of [first, second]) {
+          await expect
+            .poll(async () => (await serverIssue(seed.workspaceSlug, projectId, issue.id, session)).priority, {
+              timeout: 30_000,
+            })
+            .toBe("high");
+        }
+      });
+    } finally {
+      await serverCleanupIssueWithSession(seed.workspaceSlug, projectId, first.id, session).catch(() => {});
+      await serverCleanupIssueWithSession(seed.workspaceSlug, projectId, second.id, session).catch(() => {});
+      await serverCleanupProject(seed.workspaceSlug, projectId, session);
+    }
+  }
+);
+
+test(
+  specTitle(["ISS-115"], "cloud: bulk subscribe subscribes to the selection"),
+  { tag: specTags(["ISS-115"]) },
+  async ({ driver, seed, context }, testInfo) => {
+    test.skip(testInfo.project.name !== "new", "cloud bulk pins the web_new UI only");
+    const tag = `NF984 bulksub ${Date.now()}`;
+    const session = await signInSession(seed.email, seed.password);
+    const projectId = await serverCreateProjectWithFlags(
+      seed.workspaceSlug,
+      `${tag} project`,
+      parityProjectIdentifier("N984"),
+      {},
+      session
+    );
+    const first = await serverCreateIssueFull(seed.workspaceSlug, projectId, `${tag} one`, session);
+    const second = await serverCreateIssueFull(seed.workspaceSlug, projectId, `${tag} two`, session);
+    // The notifications worker subscribes the creator in the background,
+    // so settle that race first: wait until it lands, unsubscribe, and
+    // only then prove the toolbar flips false back to true.
+    for (const issue of [first, second]) {
+      await expect
+        .poll(() => serverSubscriptionStatus(seed.workspaceSlug, projectId, issue.id, session), {
+          timeout: 60_000,
+        })
+        .toBe(true);
+      await serverUnsubscribeIssue(seed.workspaceSlug, projectId, issue.id, session);
+      await expect
+        .poll(() => serverSubscriptionStatus(seed.workspaceSlug, projectId, issue.id, session), {
+          timeout: 30_000,
+        })
+        .toBe(false);
+    }
+    try {
+      await context.addCookies(browserCookiesFromHeader(session));
+      await driver.openProjectIssuesSettled(seed.workspaceSlug, projectId);
+      await driver.dismissWelcomeDialog();
+      await expect
+        .poll(() => driver.visibleIssueNames(), { timeout: 120_000 })
+        .toEqual(expect.arrayContaining([`${tag} one`, `${tag} two`]));
+
+      await test.step("subscribe flips both rows back on", async () => {
+        await driver.selectFirstRows(2);
+        expect(await driver.bulkToolbarVisible()).toBe(true);
+        await driver.bulkToolbarSubscribe();
+        for (const issue of [first, second]) {
+          await expect
+            .poll(() => serverSubscriptionStatus(seed.workspaceSlug, projectId, issue.id, session), {
+              timeout: 30_000,
+            })
+            .toBe(true);
+        }
+      });
+    } finally {
+      await serverCleanupIssueWithSession(seed.workspaceSlug, projectId, first.id, session).catch(() => {});
+      await serverCleanupIssueWithSession(seed.workspaceSlug, projectId, second.id, session).catch(() => {});
       await serverCleanupProject(seed.workspaceSlug, projectId, session);
     }
   }

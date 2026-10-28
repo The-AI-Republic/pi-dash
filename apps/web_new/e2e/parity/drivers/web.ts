@@ -59940,6 +59940,18 @@ export class WebDriver implements ParityDriver {
     throw new Error("[parity] issues cloud legs run on web_new only (NEWFRONT-984).");
   }
 
+  async bulkToolbarUpdatePriority(): Promise<void> {
+    throw new Error("[parity] issues cloud legs run on web_new only (NEWFRONT-984).");
+  }
+
+  async bulkToolbarSubscribe(): Promise<void> {
+    throw new Error("[parity] issues cloud legs run on web_new only (NEWFRONT-984).");
+  }
+
+  async selectFirstRows(): Promise<void> {
+    throw new Error("[parity] issues cloud legs run on web_new only (NEWFRONT-984).");
+  }
+
   async ganttDependencyArrowCount(): Promise<number> {
     throw new Error("[parity] issues cloud legs run on web_new only (NEWFRONT-984).");
   }

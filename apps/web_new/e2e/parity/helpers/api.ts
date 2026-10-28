@@ -18687,6 +18687,26 @@ export async function serverUserIssues(
   throw new Error("[parity] user-issues row carried no results.");
 }
 
+/** Whether the cookie session owner subscribes to an issue (bulk-subscribe proof). */
+export async function serverSubscriptionStatus(
+  workspaceSlug: string,
+  projectId: string,
+  issueId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<boolean> {
+  const res = await fetch(
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/issues/${issueId}/subscribe/`,
+    { headers: { cookie: sessionCookie } }
+  );
+  if (!res.ok) throw new Error(`[parity] subscription status failed with HTTP ${res.status}.`);
+  const row = (await res.json()) as Record<string, unknown>;
+  if (typeof row["subscribed"] !== "boolean") {
+    throw new Error("[parity] subscription status carried no boolean subscribed.");
+  }
+  return row["subscribed"];
+}
+
 /** Subscribe the session owner to an issue (fixture setup for the subscribed tab). */
 export async function serverSubscribeIssue(
   session: AuthedSession,

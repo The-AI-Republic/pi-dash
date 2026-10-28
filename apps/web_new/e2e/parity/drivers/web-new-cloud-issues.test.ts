@@ -14,9 +14,11 @@ interface StubLocator {
   count?: () => Promise<number>;
   isVisible?: () => Promise<boolean>;
   click?: (options?: unknown) => Promise<void>;
+  check?: (options?: unknown) => Promise<void>;
   hover?: (options?: unknown) => Promise<void>;
   waitFor?: (options?: unknown) => Promise<void>;
   first?: () => StubLocator;
+  nth?: (index: number) => StubLocator;
   getByRole?: (role: string, options?: unknown) => StubLocator;
   getByTestId?: (id: string) => StubLocator;
   [key: string]: unknown;
@@ -27,11 +29,13 @@ function locator(overrides: Partial<StubLocator> = {}): Locator {
     count: async () => 1,
     isVisible: async () => true,
     click: async () => undefined,
+    check: async () => undefined,
     hover: async () => undefined,
     waitFor: async () => undefined,
     ...overrides,
   };
   node.first = () => node;
+  if (node.nth === undefined) node.nth = () => node;
   if (node.getByRole === undefined) node.getByRole = () => node;
   if (node.getByTestId === undefined) node.getByTestId = () => node;
   return node as unknown as Locator;
@@ -49,7 +53,7 @@ interface PageState {
 function pageOf(
   hooks: {
     onTestId?: (state: PageState, id: string) => Locator;
-    onRole?: (state: PageState, role: string, options: unknown) => Locator;
+    onRole?: (state: PageState, role: string, options: unknown) => Locator | undefined;
     onLocator?: (state: PageState, selector: string) => Locator;
     clicks?: () => void;
   } = {}
@@ -57,6 +61,9 @@ function pageOf(
   const state: PageState = { testIds: [], roleCalls: [], dialogNames: [], selectors: [], mouse: [], waits: [] };
   const button = locator({
     click: async () => {
+      hooks.clicks?.();
+    },
+    check: async () => {
       hooks.clicks?.();
     },
   });
@@ -84,7 +91,10 @@ function pageOf(
     },
     getByRole: (role: string, options?: { name?: unknown; exact?: unknown }) => {
       state.roleCalls.push({ role, name: options?.name, exact: options?.exact });
-      if (hooks.onRole !== undefined) return hooks.onRole(state, role, options);
+      if (hooks.onRole !== undefined) {
+        const override = hooks.onRole(state, role, options);
+        if (override !== undefined) return override;
+      }
       if (role === "dialog") {
         state.dialogNames.push(options?.name);
         return dialog;
@@ -170,6 +180,71 @@ describe("web_new issues cloud presence", () => {
     await driver.subIssueFiltersOpen("ws", "p", "i");
     await expect(driver.subIssueFiltersPanelText()).resolves.toBe("Team projects");
     expect(state.testIds).toEqual(["sub-issue-filters-trigger", "sub-issue-filters-panel", "sub-issue-filters-panel"]);
+  });
+
+  it("updates the selection priority through the edit dialog", async () => {
+    const clicks = vi.fn();
+    const { page, state } = pageOf({
+      clicks,
+      onRole: (pageState, role) => {
+        if (role !== "listbox") return undefined;
+        return locator({
+          getByRole: ((optionRole: string, options?: { name?: unknown; exact?: unknown }) => {
+            pageState.roleCalls.push({ role: optionRole, name: options?.name, exact: options?.exact });
+            return locator({
+              click: async () => {
+                clicks();
+              },
+            });
+          }) as StubLocator["getByRole"],
+        });
+      },
+    });
+    await new WebNewDriver(page).bulkToolbarUpdatePriority("High");
+    expect(state.testIds).toEqual(["bulk-toolbar"]);
+    expect(state.roleCalls).toEqual([
+      { role: "button", name: "Edit properties", exact: true },
+      { role: "dialog", name: "Edit selected work items", exact: undefined },
+      { role: "checkbox", name: "Priority", exact: true },
+      { role: "button", name: "None", exact: true },
+      { role: "listbox", name: "Priorities", exact: undefined },
+      { role: "option", name: "High", exact: true },
+      { role: "button", name: "Apply", exact: true },
+    ]);
+    // Edit trigger, arm checkbox, picker trigger, option, apply.
+    expect(clicks).toHaveBeenCalledTimes(5);
+    expect(state.waits).toHaveLength(1);
+  });
+
+  it("subscribes through the toolbar button", async () => {
+    const clicks = vi.fn();
+    const { page, state } = pageOf({ clicks });
+    await new WebNewDriver(page).bulkToolbarSubscribe();
+    expect(state.testIds).toEqual(["bulk-toolbar"]);
+    expect(state.roleCalls).toEqual([{ role: "button", name: "Subscribe", exact: true }]);
+    expect(clicks).toHaveBeenCalledTimes(1);
+  });
+
+  it("selects the first N rows, excluding the group header", async () => {
+    const picked: number[] = [];
+    const { page, state } = pageOf({
+      onRole: (pageState, role, options) => {
+        expect(role).toBe("checkbox");
+        expect(String((options as { name: unknown }).name)).toBe("/^Select (?!all\\b)/");
+        return locator({
+          count: async () => 4,
+          nth: (index: number) => {
+            picked.push(index);
+            return locator({
+              click: async () => undefined,
+            });
+          },
+        });
+      },
+    });
+    await new WebNewDriver(page).selectFirstRows(2);
+    expect(picked).toEqual([0, 1]);
+    expect(state.roleCalls).toHaveLength(1);
   });
 
   it("links blocks by dragging a handle onto a lane", async () => {

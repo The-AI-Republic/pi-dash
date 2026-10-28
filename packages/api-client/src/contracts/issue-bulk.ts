@@ -3,9 +3,8 @@
 // See the LICENSE file for details.
 // Bulk issue operations: one request across a selection. Bulk delete,
 // bulk archive and batch dates run against the OSS backend; bulk update
-// and bulk subscribe are cloud-only endpoints (no OSS route), so their
-// contracts below carry request/response schemas for the cloud backend
-// and are proven by stub unit tests rather than live contract tests.
+// and bulk subscribe ride ungated OSS routes too (NEWFRONT-984) — the
+// cloud gate lives in the web_new edition module, not the API.
 import * as z from "zod/mini";
 import { ApiClient } from "../client.js";
 import { ISSUE_PRIORITIES } from "./issues.js";
@@ -32,19 +31,25 @@ export interface BulkOperationInput {
 }
 
 /**
- * Cloud-only: POST .../bulk-operation-issues/. No OSS route exists, so
- * the cloud response shape is unverified — callers refetch the list
- * after the write and never read this value.
+ * POST .../bulk-operation-issues/ answers 200 with the applied count.
+ * Array-valued properties union onto the stored rows, scalars replace,
+ * and the whole batch validates before anything is written.
  */
+export const BulkOperationResult = z.object({
+  message: z.string(),
+  updated: z.number(),
+});
+export type BulkOperationResult = z.infer<typeof BulkOperationResult>;
+
 export async function bulkUpdateIssues(
   client: ApiClient,
   slug: string,
   projectId: string,
   input: BulkOperationInput
-): Promise<unknown> {
+): Promise<BulkOperationResult> {
   const path = `/api/workspaces/${slug}/projects/${projectId}/bulk-operation-issues/`;
   const envelope = await client.sendJson<unknown>("POST", path, { json: input });
-  return client.parse(z.unknown(), envelope.data, `POST ${path}`);
+  return client.parse(BulkOperationResult, envelope.data, `POST ${path}`);
 }
 
 /** DELETE .../bulk-delete-issues/ answers 200 {message}; admin-only. */
@@ -119,17 +124,23 @@ export async function bulkUpdateIssueDates(
 }
 
 /**
- * Cloud-only: POST .../bulk-subscribe-issues/. No OSS route exists, so
- * the cloud response shape is unverified — callers treat the resolved
- * status as the confirmation.
+ * POST .../bulk-subscribe-issues/ answers 200 with the fresh count.
+ * Already-subscribed issues are skipped, not errors, so repeats are
+ * safe; callers treat the resolved count as the confirmation.
  */
+export const BulkSubscribeResult = z.object({
+  message: z.string(),
+  subscribed: z.number(),
+});
+export type BulkSubscribeResult = z.infer<typeof BulkSubscribeResult>;
+
 export async function bulkSubscribeIssues(
   client: ApiClient,
   slug: string,
   projectId: string,
   issueIds: string[]
-): Promise<unknown> {
+): Promise<BulkSubscribeResult> {
   const path = `/api/workspaces/${slug}/projects/${projectId}/bulk-subscribe-issues/`;
   const envelope = await client.sendJson<unknown>("POST", path, { json: { issue_ids: issueIds } });
-  return client.parse(z.unknown(), envelope.data, `POST ${path}`);
+  return client.parse(BulkSubscribeResult, envelope.data, `POST ${path}`);
 }

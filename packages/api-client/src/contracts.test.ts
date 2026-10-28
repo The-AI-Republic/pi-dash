@@ -4629,13 +4629,18 @@ describe("approvals contracts", () => {
 });
 
 describe("cloud-only issues contracts", () => {
-  // Bulk update, bulk subscribe and epics user-properties have no OSS
-  // route, so no live contract test can reach them. These stub tests
-  // prove the request shapes and response parsing instead.
+  // Bulk update and bulk subscribe ride ungated OSS routes with live
+  // contract tests (NEWFRONT-984); these stub tests still prove their
+  // request shapes. Epics user-properties has no OSS route, so no live
+  // contract test can reach it — its stub proves the shape instead.
 
   it("posts the bulk update payload to bulk-operation-issues", async () => {
     const transport = recordingTransport(() =>
-      fakeResponse({ status: 200, body: JSON.stringify({ message: "ok" }), url: "https://api.test/" })
+      fakeResponse({
+        status: 200,
+        body: JSON.stringify({ message: "ok", updated: 1 }),
+        url: "https://api.test/",
+      })
     );
     const client = createClient({ baseUrl: "https://api.test", transport });
     await bulkUpdateIssues(client, "acme", UUID2, {
@@ -4654,7 +4659,11 @@ describe("cloud-only issues contracts", () => {
 
   it("posts the bulk subscribe payload to bulk-subscribe-issues", async () => {
     const transport = recordingTransport(() =>
-      fakeResponse({ status: 200, body: JSON.stringify({ message: "ok" }), url: "https://api.test/" })
+      fakeResponse({
+        status: 200,
+        body: JSON.stringify({ message: "ok", subscribed: 1 }),
+        url: "https://api.test/",
+      })
     );
     const client = createClient({ baseUrl: "https://api.test", transport });
     await bulkSubscribeIssues(client, "acme", UUID2, [UUID]);

@@ -11336,6 +11336,12 @@ export interface DeskSigninUpdateLink {
   bulkToolbarDelete(): Promise<void>;
   /** Archive the selection through the toolbar. */
   bulkToolbarArchive(): Promise<void>;
+  /** Apply one priority across the selection through the edit dialog; resolves once it closes. */
+  bulkToolbarUpdatePriority(priorityLabel: string): Promise<void>;
+  /** Subscribe to the selection through the toolbar. */
+  bulkToolbarSubscribe(): Promise<void>;
+  /** Select the first N list rows (cloud legs prove multi-row batches). */
+  selectFirstRows(count: number): Promise<void>;
   /** Dependency arrows the timeline draws. */
   ganttDependencyArrowCount(): Promise<number>;
   /** Drag-to-link handles the timeline offers. */

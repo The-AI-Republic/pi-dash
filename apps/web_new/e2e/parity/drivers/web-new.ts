@@ -45455,6 +45455,37 @@ export class WebNewDriver implements ParityDriver {
     await toolbar.getByRole("button", { name: "Archive", exact: true }).click();
   }
 
+  async bulkToolbarUpdatePriority(priorityLabel: string): Promise<void> {
+    const toolbar = this.page.getByTestId("bulk-toolbar");
+    await toolbar.getByRole("button", { name: "Edit properties", exact: true }).click();
+    const dialog = this.page.getByRole("dialog", { name: "Edit selected work items" });
+    await dialog.getByRole("checkbox", { name: "Priority", exact: true }).check();
+    // The picker trigger carries the current level; a fresh selection
+    // starts unprioritized.
+    await dialog.getByRole("button", { name: "None", exact: true }).click();
+    await this.page
+      .getByRole("listbox", { name: "Priorities" })
+      .getByRole("option", { name: priorityLabel, exact: true })
+      .click();
+    await dialog.getByRole("button", { name: "Apply", exact: true }).click();
+    await dialog.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async bulkToolbarSubscribe(): Promise<void> {
+    const toolbar = this.page.getByTestId("bulk-toolbar");
+    await toolbar.getByRole("button", { name: "Subscribe", exact: true }).click();
+  }
+
+  async selectFirstRows(count: number): Promise<void> {
+    // Row controls are named `Select <identifier>`; group controls are
+    // `Select all …`, so this deliberately excludes the group header.
+    const boxes = this.page.getByRole("checkbox", { name: /^Select (?!all\b)/ });
+    const total = await boxes.count();
+    for (let index = 0; index < Math.min(count, total); index += 1) {
+      await boxes.nth(index).click();
+    }
+  }
+
   async ganttDependencyArrowCount(): Promise<number> {
     return this.page.getByTestId("gantt-dependency-arrow").count();
   }
