@@ -284,14 +284,14 @@ pub mod ops {
 
 /// HTTP and Python-compat plumbing: the serializer kernel, `py_*`
 /// repr/format helpers, response headers, CSRF/token/session auth,
-/// and OAuth provider helpers.
+/// and OAuth provider helpers. OVL-04 (PIDASHCONV-1542) added the
+/// `pidash_compat` canonical modules below.
 pub mod compat {
     pub use pidash_api::auth_oauth::oauth_google::is_secure_request;
     pub use pidash_api::auth_session::password::password_routes;
     pub use pidash_api::auth_session::render_csrf_failure;
     pub use pidash_api::license::json_response;
     pub use pidash_api::license::MODEL_BACKEND;
-    pub use pidash_api::license::SESSION_AUTH_HASH_SALT;
     pub use pidash_api::middleware::RequestSession;
     pub use pidash_api::middleware::SessionHandle;
     pub use pidash_api::response_headers::header_value;
@@ -327,6 +327,15 @@ pub mod compat {
     pub use pidash_auth::token::MachineTokenRow;
     pub use pidash_auth::token::TokenKind;
     pub use pidash_auth::token::API_KEY_HEADER;
+    pub use pidash_compat::datetime;
+    pub use pidash_compat::db;
+    pub use pidash_compat::filter;
+    pub use pidash_compat::http;
+    // Moved from `pidash_api::license` by OVL-04 (same value, canonical home).
+    pub use pidash_compat::http::SESSION_AUTH_HASH_SALT;
+    pub use pidash_compat::py;
+    pub use pidash_compat::response;
+    pub use pidash_compat::validate;
     pub use pidash_jobs::json_compact::write_compact_array;
     pub use pidash_jobs::json_compact::write_compact_map;
     pub use pidash_jobs::py_repr;
