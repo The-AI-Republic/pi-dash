@@ -40,7 +40,9 @@ use crate::app_issues::pr_links::{
     ReviewLinkRow, ReviewMirrorFields, StoreError,
 };
 use crate::integrations::adapters_github::{ClientAuth, GithubClient, GithubError};
-use pidash_db::app_integrations::queries_github::{build_app_jwt_claims, normalize_private_key};
+use pidash_db::app_integrations::queries_github::{
+    build_app_jwt_claims, next_url, normalize_private_key,
+};
 
 /// Run an async future to completion from the sync `GithubClient` seam:
 /// a fresh current-thread runtime on a spawned thread. The seam is sync
@@ -322,48 +324,52 @@ impl LiveGithubClient {
         Ok((payload, link))
     }
 
-    /// `_next_url`: the `rel="next"` link, if any.
+    /// `_next_url`: the `rel="next"` link, if any, via the
+    /// [`next_url`][pidash_db::app_integrations::queries_github::next_url]
+    /// canonical (PIDASHCONV-1625).
     fn next_url(link: Option<&str>) -> Option<String> {
-        let link = link?;
-        for part in link.split(',') {
-            let part = part.trim_start();
-            if !part.starts_with('<') {
-                continue;
-            }
-            let Some(end) = part.find('>') else {
-                continue;
-            };
-            let url = &part[1..end];
-            let rest = part[end + 1..].trim_start();
-            if let Some(rest) = rest.strip_prefix(';') {
-                let rest = rest.trim_start();
-                if rest.starts_with("rel=\"next\"") {
-                    return Some(url.to_owned());
-                }
-            }
-        }
-        None
+        link.and_then(next_url)
     }
 
-    async fn paginate(&self, mut url: String) -> Result<Vec<Value>, GithubError> {
-        let mut items = Vec::new();
-        loop {
-            let (payload, link) = self.request_json(reqwest::Method::GET, &url, None).await?;
-            match payload {
-                Value::Array(page) => items.extend(page),
-                Value::Null => {}
-                // A mapping payload iterates its keys, like Python's
-                // `for item in response.json()` (the API never sends
-                // one here, but the iteration is the ported behavior).
-                Value::Object(map) => {
-                    items.extend(map.keys().map(|key| Value::String(key.clone())));
-                }
-                _ => {}
+    async fn paginate(&self, url: String) -> Result<Vec<Value>, GithubError> {
+        paginate_with(url, |next: String| async move {
+            self.request_json(reqwest::Method::GET, &next, None).await
+        })
+        .await
+    }
+}
+
+/// `GithubClient._paginate` (`github_client.py:87-95`) decoupled from the
+/// request layer: `fetch` returns each page's decoded payload plus its
+/// raw `Link` header. A mapping payload iterates its keys, like Python's
+/// `for item in response.json()`; `Null` contributes nothing.
+///
+/// The canonical copy (PIDASHCONV-1625): the services twin delegates
+/// here, and OVL-10 passes the overlay's strict `request_json`. The
+/// jobs twins keep their array-only contract (a deliberate documented
+/// approximation, not this loop).
+pub async fn paginate_with<F, Fut, E>(mut url: String, mut fetch: F) -> Result<Vec<Value>, E>
+where
+    F: FnMut(String) -> Fut,
+    Fut: std::future::Future<Output = Result<(Value, Option<String>), E>>,
+{
+    let mut items = Vec::new();
+    loop {
+        let (payload, link) = fetch(url).await?;
+        match payload {
+            Value::Array(page) => items.extend(page),
+            Value::Null => {}
+            // A mapping payload iterates its keys, like Python's
+            // `for item in response.json()` (the API never sends
+            // one here, but the iteration is the ported behavior).
+            Value::Object(map) => {
+                items.extend(map.keys().map(|key| Value::String(key.clone())));
             }
-            match Self::next_url(link.as_deref()) {
-                Some(next) => url = next,
-                None => return Ok(items),
-            }
+            _ => {}
+        }
+        match link.as_deref().and_then(next_url) {
+            Some(next) => url = next,
+            None => return Ok(items),
         }
     }
 }
@@ -974,6 +980,60 @@ mod tests {
             None
         );
         assert_eq!(LiveGithubClient::next_url(None), None);
+    }
+
+    #[tokio::test]
+    async fn paginate_with_follows_next_and_iterates_mappings() {
+        // Stub fetcher: page 1 (array + next), page 2 (mapping +
+        // next), page 3 (null, no link). No network.
+        let pages: std::collections::HashMap<String, (Value, Option<String>)> = [
+            (
+                "p1".to_owned(),
+                (
+                    serde_json::json!([1, 2]),
+                    Some("<p2>; rel=\"next\"".to_owned()),
+                ),
+            ),
+            (
+                "p2".to_owned(),
+                (
+                    serde_json::json!({"b": 1, "a": 2}),
+                    Some("<p3>; rel=\"next\"".to_owned()),
+                ),
+            ),
+            ("p3".to_owned(), (Value::Null, None)),
+        ]
+        .into_iter()
+        .collect();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_fetch = seen.clone();
+        let items = paginate_with("p1".to_owned(), |url: String| {
+            let pages = pages.clone();
+            let seen_fetch = seen_fetch.clone();
+            async move {
+                seen_fetch.lock().expect("seen").push(url.clone());
+                pages
+                    .get(&url)
+                    .cloned()
+                    .ok_or_else(|| GithubError::Transport("stub miss".to_owned()))
+            }
+        })
+        .await
+        .expect("paginate");
+        // Arrays extend, mappings iterate keys in order, Null adds nothing.
+        assert_eq!(
+            items,
+            vec![
+                serde_json::json!(1),
+                serde_json::json!(2),
+                Value::String("b".to_owned()),
+                Value::String("a".to_owned()),
+            ]
+        );
+        assert_eq!(
+            *seen.lock().expect("seen"),
+            vec!["p1".to_owned(), "p2".to_owned(), "p3".to_owned()]
+        );
     }
 
     #[test]

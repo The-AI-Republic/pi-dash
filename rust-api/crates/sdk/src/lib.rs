@@ -260,6 +260,7 @@ pub mod ops {
     pub use pidash_services::integrations::adapters_github::GitHubAdapter;
     pub use pidash_services::integrations::adapters_github::GithubClient;
     pub use pidash_services::integrations::adapters_github::GithubError;
+    pub use pidash_services::integrations::github_client::paginate_with;
     pub use pidash_services::integrations::github_client::LiveGithubClient;
     pub use pidash_services::integrations::github_client::PoolPrStore;
     pub use pidash_services::integrations::github_client::PrLinksSurface;
@@ -528,9 +529,11 @@ pub mod assistant {
     pub use pidash_jobs::assistant::run_turn::TURN_SOFT_LIMIT_SECS;
     pub use pidash_jobs::assistant::RUN_TURN_TASK;
     pub use pidash_jobs::assistant::SWEEP_TASK;
+    pub use pidash_jobs::oss_worker::model_runtime::github::github_headers;
     pub use pidash_jobs::oss_worker::model_runtime::github::installation_token;
     pub use pidash_jobs::oss_worker::model_runtime::github::GithubAppContext;
     pub use pidash_jobs::oss_worker::model_runtime::github::GithubFailure;
+    pub use pidash_jobs::oss_worker::model_runtime::github::GithubHeadersError;
     pub use pidash_jobs::oss_worker::model_runtime::github::GithubRestClient;
     pub use pidash_jobs::oss_worker::model_runtime::github::CLIENT_USER_AGENT;
     pub use pidash_jobs::oss_worker::model_runtime::keys::KeyResolver;
@@ -642,6 +645,7 @@ pub mod jobs {
 
 /// Database layer: pools, settings/config, transactions, and query helpers.
 pub mod db {
+    pub use pidash_db::app_integrations::queries_github::next_url;
     pub use pidash_db::app_integrations::queries_github::DEFAULT_TIMEOUT_SECONDS;
     pub use pidash_db::app_integrations::queries_github::GITHUB_ACCEPT_HEADER;
     pub use pidash_db::app_integrations::queries_github::GITHUB_API_BASE;
