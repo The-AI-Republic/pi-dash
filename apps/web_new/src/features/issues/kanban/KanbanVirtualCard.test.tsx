@@ -3,9 +3,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Virtualized board card shell (parity/specs/issues.md §5, ISS-043):
-// content while vertically near the viewport at any horizontal distance
-// (ISS-039), a marked placeholder past the vertical overscan, and
-// content while forced or without an observer.
+// content while vertically near the board at any horizontal distance
+// (ISS-039), a marked placeholder past the vertical overscan, content
+// while forced or without an observer, and the board itself as the
+// observer's root — an implicit root is clipped to the board's
+// scrollport, which is what stranded far columns (NEWFRONT-982).
 import { act, render, renderHook, screen } from "@testing-library/react";
 import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -48,12 +50,20 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function shell(forceContent = false): React.ReactElement {
+function shell(forceContent = false, root: HTMLElement | null = null): React.ReactElement {
   return (
-    <KanbanVirtualCard issueId={ISSUE} groupKey={COLUMN} laneKey={null} forceContent={forceContent}>
+    <KanbanVirtualCard issueId={ISSUE} groupKey={COLUMN} laneKey={null} forceContent={forceContent} root={root}>
       <article data-testid="kanban-card">Fix login</article>
     </KanbanVirtualCard>
   );
+}
+
+/** A board scroller element to root the card window at. */
+function boardElement(): HTMLElement {
+  const board = document.createElement("div");
+  board.dataset.testid = "board";
+  document.body.append(board);
+  return board;
 }
 
 describe("KanbanVirtualCard", () => {
@@ -64,9 +74,9 @@ describe("KanbanVirtualCard", () => {
     expect(screen.getByText("Fix login").parentElement).toHaveClass("shrink-0");
   });
 
-  it("mounts content once the shell nears the viewport", () => {
+  it("mounts content once the shell nears the board", () => {
     installObserver();
-    render(shell());
+    render(shell(false, boardElement()));
     expect(screen.queryByText("Fix login")).toBeNull();
     const placeholder = screen.getByTestId("kanban-card");
     expect(placeholder).toHaveAttribute("data-issue-id", ISSUE);
@@ -80,7 +90,7 @@ describe("KanbanVirtualCard", () => {
 
   it("unmounts content past the overscan", () => {
     installObserver();
-    render(shell());
+    render(shell(false, boardElement()));
     act(() => seen.callbacks[0]?.([{ isIntersecting: true }]));
     expect(screen.getByText("Fix login")).toBeVisible();
     act(() => seen.callbacks[0]?.([{ isIntersecting: false }]));
@@ -90,7 +100,7 @@ describe("KanbanVirtualCard", () => {
 
   it("keeps content while forced even past the overscan", () => {
     installObserver();
-    render(shell(true));
+    render(shell(true, boardElement()));
     act(() => seen.callbacks[0]?.([{ isIntersecting: false }]));
     expect(screen.getByText("Fix login")).toBeVisible();
   });
@@ -104,14 +114,58 @@ describe("KanbanVirtualCard", () => {
   it("observes with vertical overscan and unbounded horizontal reach", () => {
     // ISS-039: a lone card in a far column (horizontal distance only)
     // must mount its content, while ISS-043 keeps windowing tall
-    // columns vertically. The browser derives near/far from these
-    // margins, so the margins themselves are the pinned contract.
+    // columns vertically.
     expect(virtualCardRootMargin()).toBe(
       `${VIRTUAL_OVERSCAN_PX}px ${VIRTUAL_CROSS_OVERSCAN_PX}px ${VIRTUAL_OVERSCAN_PX}px ${VIRTUAL_CROSS_OVERSCAN_PX}px`
     );
     expect(VIRTUAL_CROSS_OVERSCAN_PX).toBe(1_000_000);
     installObserver();
-    render(shell());
+    render(shell(false, boardElement()));
     expect(seen.options[0]).toMatchObject({ rootMargin: virtualCardRootMargin() });
+  });
+
+  it("measures against the board scroller rather than the implicit viewport", () => {
+    // NEWFRONT-982: the browser clips an implicit-root intersection to
+    // the nearest scrolling ancestor — the board — so the horizontal
+    // margin never reaches a column the board scrolled out sideways.
+    // Rooting at the board is what makes the reach real.
+    installObserver();
+    const board = boardElement();
+    render(shell(false, board));
+    expect(seen.options[0]).toMatchObject({
+      root: board,
+      rootMargin: virtualCardRootMargin(),
+    });
+  });
+
+  it("keeps windowing vertically while rooted at the board", () => {
+    installObserver();
+    const board = boardElement();
+    render(shell(false, board));
+    expect(screen.queryByText("Fix login")).toBeNull();
+    act(() => seen.callbacks[0]?.([{ isIntersecting: true }]));
+    expect(screen.getByText("Fix login")).toBeVisible();
+    act(() => seen.callbacks[0]?.([{ isIntersecting: false }]));
+    expect(screen.queryByText("Fix login")).toBeNull();
+    expect(screen.getByTestId("kanban-card")).toHaveAttribute("data-virtualized", "true");
+  });
+
+  it("falls back to the implicit root until the board scroller attaches", () => {
+    // The board node arrives one commit after the cards on first mount.
+    // Until then the window observes without a root, exactly as it did
+    // before the board handed its scroller over.
+    installObserver();
+    render(shell(false, null));
+    expect(seen.options[0]).toMatchObject({ root: null });
+  });
+
+  it("re-observes against the board scroller once it attaches", () => {
+    installObserver();
+    const { rerender } = render(<>{shell(false, null)}</>);
+    expect(seen.options).toHaveLength(1);
+    const board = boardElement();
+    rerender(<>{shell(false, board)}</>);
+    expect(seen.options).toHaveLength(2);
+    expect(seen.options[1]).toMatchObject({ root: board });
   });
 });

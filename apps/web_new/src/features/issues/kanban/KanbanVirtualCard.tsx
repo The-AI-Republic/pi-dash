@@ -7,10 +7,21 @@
 // itself mounts while vertically near the viewport and unmounts past
 // the vertical overscan, leaving a height-estimated placeholder behind.
 // Horizontal distance never unmounts: every column mounts its window
-// no matter how far the board scrolled sideways (ISS-039). Without an
-// observer (tests, SSR) shells render content immediately. Both states
-// pin shrink-0: the column body is a flex column and would otherwise
-// crush its rows to nothing, hiding every page past the first (NEWFRONT-968).
+// no matter how far the board scrolled sideways (ISS-039).
+//
+// The window observes with the board's own scroller as its root. The
+// browser clips an observer without an explicit root to the nearest
+// scrolling ancestor, so an implicit root would only ever reach the
+// columns inside the board's scrollport and strand every far column as
+// a content-less shell no matter how wide the margins are. Rooting at
+// the board keeps the horizontal reach meaningful, and the browser
+// still accounts for the column body's clip, so tall columns keep
+// windowing vertically (ISS-043).
+//
+// Without an observer (tests, SSR) shells render content immediately.
+// Both states pin shrink-0: the column body is a flex column and would
+// otherwise crush its rows to nothing, hiding every page past the first
+// (NEWFRONT-968).
 
 import * as React from "react";
 
@@ -30,9 +41,16 @@ export function virtualCardRootMargin(overscan = VIRTUAL_OVERSCAN_PX): string {
   return `${overscan}px ${VIRTUAL_CROSS_OVERSCAN_PX}px ${overscan}px ${VIRTUAL_CROSS_OVERSCAN_PX}px`;
 }
 
-/** Whether the node sits within the card window's vertical overscan. */
+/**
+ * Whether the node sits within the card window's vertical overscan.
+ * `root` names the board scroller the window measures against, so the
+ * browser measures against the board rather than clipping the implicit
+ * viewport root to the board's scrollport. Until the board hands its
+ * scroller over the window falls back to the implicit root.
+ */
 export function useNearViewport<T extends HTMLElement>(
-  overscan = VIRTUAL_OVERSCAN_PX
+  overscan = VIRTUAL_OVERSCAN_PX,
+  root: HTMLElement | null = null
 ): {
   ref: React.RefObject<T | null>;
   near: boolean;
@@ -49,11 +67,11 @@ export function useNearViewport<T extends HTMLElement>(
       (entries) => {
         setNear(entries.some((entry) => entry.isIntersecting));
       },
-      { rootMargin: virtualCardRootMargin(overscan) }
+      { root, rootMargin: virtualCardRootMargin(overscan) }
     );
     observer.observe(node);
     return () => observer.disconnect();
-  }, [overscan]);
+  }, [overscan, root]);
   return { ref, near };
 }
 
@@ -63,6 +81,8 @@ export interface KanbanVirtualCardProps {
   laneKey: string | null;
   /** Mount content regardless of the viewport (drag source, dropped card). */
   forceContent: boolean;
+  /** The board scroller the card window measures against. */
+  root?: HTMLElement | null;
   children: React.ReactNode;
 }
 
@@ -71,9 +91,10 @@ export function KanbanVirtualCard({
   groupKey,
   laneKey,
   forceContent,
+  root = null,
   children,
 }: KanbanVirtualCardProps): React.ReactElement {
-  const { ref, near } = useNearViewport<HTMLDivElement>();
+  const { ref, near } = useNearViewport<HTMLDivElement>(VIRTUAL_OVERSCAN_PX, root);
   if (near || forceContent) {
     return (
       <div ref={ref} className="shrink-0">
