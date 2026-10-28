@@ -908,6 +908,43 @@ where
     Ok(())
 }
 
+/// The MCP `update_comment` row write (`pi_dash_cloud/mcp/tools.py:1168-1209`,
+/// partial serializer save of `comment_html` only): stamps `updated_at` /
+/// `updated_by_id`, rewrites the render pair, and sets `description_id`
+/// (the mint arm links a fresh description; the sync arm re-binds the
+/// linked id). No scope / `actor_id` / `created_by_id` restamp and no
+/// `comment_json` write — unlike [`update_sync_comment`] (git-sync-shaped)
+/// and [`update`] (full-column save). Bind order is the overlay's verbatim
+/// (`tools_relations_comments.rs`, `execute_update_comment`).
+const MCP_COMMENT_UPDATE_SQL: &str = "UPDATE issue_comments SET updated_at = $1, updated_by_id = $2, comment_stripped = $3, comment_html = $4, description_id = $5 WHERE id = $6";
+
+/// See [`MCP_COMMENT_UPDATE_SQL`]: the row `UPDATE` only. The description
+/// mint/sync stays driver-side (the overlay already runs it through
+/// [`insert_description_values`] / the `sync_description_*` fns).
+pub async fn update_comment_row<'e, E>(
+    ex: E,
+    id: Uuid,
+    updated_at: DateTime<Utc>,
+    updated_by: Uuid,
+    stripped: &str,
+    html: &str,
+    description_id: Option<Uuid>,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(MCP_COMMENT_UPDATE_SQL)
+        .bind(updated_at)
+        .bind(updated_by)
+        .bind(stripped)
+        .bind(html)
+        .bind(description_id)
+        .bind(id)
+        .execute(ex)
+        .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -944,6 +981,21 @@ mod tests {
         // The plain create triple: link binds description id second.
         assert!(COMMENT_ROW_INSERT_SQL.contains("description_id, attachments"));
         assert!(COMMENT_LINK_UPDATE_SQL.contains("description_id = $2"));
+    }
+
+    #[test]
+    fn mcp_comment_update_sql_is_byte_identical() {
+        // The overlay MCP `update_comment` row UPDATE, verbatim
+        // (`tools_relations_comments.rs`, `execute_update_comment`): the
+        // overlay source splits the literal with a continuation
+        // backslash, which collapses to single spaces at runtime, so the
+        // executed string is this one line. Full equality (not
+        // `contains`): SET order and `$n` positions are the Tier-1
+        // contract the overlay adopts.
+        assert_eq!(
+            MCP_COMMENT_UPDATE_SQL,
+            "UPDATE issue_comments SET updated_at = $1, updated_by_id = $2, comment_stripped = $3, comment_html = $4, description_id = $5 WHERE id = $6"
+        );
     }
 
     fn activity_spec() -> CommentActivitySpec {
@@ -1710,6 +1762,130 @@ mod tests {
         assert_eq!(after.0, stamp);
         assert_eq!(after.1, None);
         assert_eq!(after.2, before.0);
+    }
+
+    #[tokio::test]
+    async fn live_update_comment_row_writes_mcp_shape_only() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let seed = seed_world(&pool, "mcpupd").await;
+        // A distinct updater: the row must stamp `updated_by_id` with
+        // this user while `created_by_id` keeps the seed actor (no
+        // restamp — unlike the sync shape).
+        let updater = seed_world(&pool, "mcpupdater").await;
+        let json = serde_json::json!({"seed": true});
+        let attachments: Vec<String> = Vec::new();
+        let labels: Vec<String> = Vec::new();
+        let created = chrono::DateTime::parse_from_rfc3339("2020-01-02T03:04:05Z")
+            .expect("created")
+            .with_timezone(&Utc);
+        let values = CommentRows {
+            id: Uuid::new_v4(),
+            description_id: Uuid::new_v4(),
+            created_at: created,
+            updated_at: created,
+            desc_created_at: created,
+            desc_updated_at: created,
+            workspace_id: seed.workspace_id,
+            project_id: seed.project_id,
+            issue_id: seed.issue_id,
+            actor_id: Some(seed.actor),
+            created_by: Some(seed.actor),
+            updated_by: None,
+            deleted_at: None,
+            html: "<p>v1</p>",
+            json: &json,
+            stripped: "v1",
+            desc_stripped: Some("v1"),
+            access: "INTERNAL",
+            speaker_type: "agent",
+            speaker_label: "MCP",
+            speaker_agent_run_id: None,
+            external_id: None,
+            external_source: None,
+            parent_id: None,
+            attachments: &attachments,
+            labels: &labels,
+            edited_at: None,
+        };
+        let mut tx = pool.begin().await.expect("begin");
+        insert_comment_row(&mut *tx, &values).await.expect("insert");
+        insert_description_row(&mut *tx, &values)
+            .await
+            .expect("desc");
+        link_comment_description(&mut *tx, values.id, values.description_id)
+            .await
+            .expect("link");
+        tx.commit().await.expect("commit");
+        // The overlay's mint arm runs before this UPDATE (fresh
+        // description, updater as `created_by`, `updated_by` NULL);
+        // the UPDATE links it.
+        let stamp = chrono::DateTime::parse_from_rfc3339("2021-06-07T08:09:10Z")
+            .expect("stamp")
+            .with_timezone(&Utc);
+        let minted = Uuid::new_v4();
+        let minted_values = DescriptionValues {
+            id: minted,
+            created_at: stamp,
+            updated_at: stamp,
+            created_by: Some(updater.actor),
+            updated_by: None,
+            workspace_id: seed.workspace_id,
+            project_id: seed.project_id,
+            json: &json,
+            html: "<p>v2</p>",
+            stripped: Some("v2"),
+        };
+        insert_description_values(&pool, &minted_values)
+            .await
+            .expect("mint");
+        update_comment_row(
+            &pool,
+            values.id,
+            stamp,
+            updater.actor,
+            "v2",
+            "<p>v2</p>",
+            Some(minted),
+        )
+        .await
+        .expect("update");
+        // Tuple alias keeps the wide `query_as` shape under the
+        // `type_complexity` lint (repo pattern: `prompting` `IssueCols`).
+        type McpRow = (
+            chrono::DateTime<Utc>,
+            Option<Uuid>,
+            String,
+            String,
+            Option<Uuid>,
+            Uuid,
+            Uuid,
+            Option<Uuid>,
+            Option<Uuid>,
+            Value,
+            chrono::DateTime<Utc>,
+        );
+        let row: McpRow = sqlx::query_as(
+            "SELECT updated_at, updated_by_id, comment_stripped, comment_html, description_id, \
+             workspace_id, project_id, actor_id, created_by_id, comment_json, created_at \
+             FROM issue_comments WHERE id = $1",
+        )
+        .bind(values.id)
+        .fetch_one(&pool)
+        .await
+        .expect("read comment");
+        assert_eq!(row.0, stamp);
+        assert_eq!(row.1, Some(updater.actor));
+        assert_eq!(row.2, "v2");
+        assert_eq!(row.3, "<p>v2</p>");
+        assert_eq!(row.4, Some(minted));
+        assert_eq!(row.5, seed.workspace_id);
+        assert_eq!(row.6, seed.project_id);
+        assert_eq!(row.7, Some(seed.actor));
+        assert_eq!(row.8, Some(seed.actor));
+        assert_eq!(row.9, serde_json::json!({"seed": true}));
+        assert_eq!(row.10, created);
     }
 
     #[tokio::test]
