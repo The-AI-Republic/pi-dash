@@ -114,6 +114,7 @@ use pidash_compat::db::is_integrity_error;
 use pidash_compat::py::{py_repr_string, py_strip};
 use pidash_compat::response::json_response;
 pub use pidash_compat::response::SERVER_ERROR_BODY;
+use pidash_services::domain::identity;
 use pidash_services::domain::projects::members as project_members;
 
 // ---------------------------------------------------------------------------
@@ -2454,35 +2455,28 @@ pub async fn me_partial_update(
         Ok(derived) => derived,
         Err(denial) => return denial.into_response(),
     };
-    let update = sqlx::query(
-        "UPDATE users SET last_login = $1, display_name = $2, first_name = $3, last_name = $4, \
-        avatar = $5, avatar_asset_id = $6, cover_image = $7, cover_image_asset_id = $8, \
-        is_password_expired = $9, is_password_reset_required = $10, bot_type = $11, \
-        user_timezone = $12, is_email_valid = $13, masked_at = $14, email = $15, token = $16, \
-        token_updated_at = $17, is_staff = $18, updated_at = $19 WHERE id = $20",
-    )
-    .bind(merged.last_login)
-    .bind(&merged.display_name)
-    .bind(&merged.first_name)
-    .bind(&merged.last_name)
-    .bind(&merged.avatar)
-    .bind(merged.avatar_asset_id)
-    .bind(merged.cover_image.as_deref())
-    .bind(merged.cover_image_asset_id)
-    .bind(merged.is_password_expired)
-    .bind(merged.is_password_reset_required)
-    .bind(merged.bot_type.as_deref())
-    .bind(&merged.user_timezone)
-    .bind(merged.is_email_valid)
-    .bind(merged.masked_at)
-    .bind(&derived.email)
-    .bind(&derived.token)
-    .bind(derived.token_updated_at)
-    .bind(derived.is_staff)
-    .bind(now)
-    .bind(row.id)
-    .execute(pool)
-    .await;
+    let save = identity::MeProfileSave {
+        last_login: merged.last_login,
+        display_name: &merged.display_name,
+        first_name: &merged.first_name,
+        last_name: &merged.last_name,
+        avatar: &merged.avatar,
+        avatar_asset_id: merged.avatar_asset_id,
+        cover_image: merged.cover_image.as_deref(),
+        cover_image_asset_id: merged.cover_image_asset_id,
+        is_password_expired: merged.is_password_expired,
+        is_password_reset_required: merged.is_password_reset_required,
+        bot_type: merged.bot_type.as_deref(),
+        user_timezone: &merged.user_timezone,
+        is_email_valid: merged.is_email_valid,
+        masked_at: merged.masked_at,
+        email: &derived.email,
+        token: &derived.token,
+        token_updated_at: derived.token_updated_at,
+        is_staff: derived.is_staff,
+        updated_at: now,
+    };
+    let update = identity::save_me_profile(pool, row.id, &save).await;
     if let Err(error) = update {
         return write_denial(error).into_response();
     }

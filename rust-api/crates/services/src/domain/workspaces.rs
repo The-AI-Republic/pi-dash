@@ -200,6 +200,111 @@ where
         .map(|_| ())
 }
 
+// patch + soft_delete (PIDASHCONV-1628; executor-generic)
+// ---------------------------------------------------------------------------
+
+/// The validated `PATCH workspaces/<slug>/` columns: every updatable
+/// column the serializer admits, resolved from the merged row. The
+/// `sets` order (validation order) drives the `SET` order.
+pub struct WorkspacePatch<'a> {
+    pub deleted_at: Option<DateTime<Utc>>,
+    pub name: &'a str,
+    pub logo: Option<&'a str>,
+    pub slug: &'a str,
+    pub organization_size: Option<&'a str>,
+    pub timezone: &'a str,
+    pub background_color: &'a str,
+    pub logo_asset_id: Option<Uuid>,
+}
+
+/// Render the stock `update()` statement for one `sets` combination:
+/// the validated columns in order plus the `updated_at`/`updated_by`
+/// re-stamp. Pure; unit-tested byte-for-byte.
+fn patch_sql(sets: &[&str]) -> String {
+    let mut assignments: Vec<String> = sets
+        .iter()
+        .enumerate()
+        .map(|(index, column)| format!("{column} = ${}", index + 1))
+        .collect();
+    assignments.push(format!("updated_at = ${}", sets.len() + 1));
+    assignments.push(format!("updated_by_id = ${}", sets.len() + 2));
+    format!(
+        "UPDATE workspaces SET {} WHERE id = ${}",
+        assignments.join(", "),
+        sets.len() + 3
+    )
+}
+
+/// The stock `update()` write: validated columns plus the
+/// `updated_at`/`updated_by` re-stamp. Moved verbatim from
+/// `api::app_workspace::handlers_workspace` (PIDASHCONV-1628) — the
+/// rendering, the per-column binds and the unknown-column fallback
+/// (unreachable: validation only emits known columns) are unchanged.
+/// Runs on the caller's executor.
+pub async fn patch<'e, E>(
+    ex: E,
+    workspace_id: Uuid,
+    sets: &[&str],
+    patch: &WorkspacePatch<'_>,
+    updated_by: &Uuid,
+    now: DateTime<Utc>,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let sql = patch_sql(sets);
+    let mut query = sqlx::query(&sql);
+    for column in sets {
+        query = match *column {
+            "deleted_at" => query.bind(patch.deleted_at),
+            "name" => query.bind(patch.name),
+            "logo" => query.bind(patch.logo),
+            "slug" => query.bind(patch.slug),
+            "organization_size" => query.bind(patch.organization_size),
+            "timezone" => query.bind(patch.timezone),
+            "background_color" => query.bind(patch.background_color),
+            "logo_asset_id" => query.bind(patch.logo_asset_id),
+            _ => query.bind(Option::<String>::None),
+        };
+    }
+    query
+        .bind(now)
+        .bind(updated_by)
+        .bind(workspace_id)
+        .execute(ex)
+        .await?;
+    Ok(())
+}
+
+/// `super().destroy()` (`mixins.py:72-78` + `workspace.py:107-118`):
+/// soft delete, slug tombstone, `updated_by` re-stamp. The
+/// profile-pointer cleanup and the fan-out enqueues stay at the call
+/// site (not a workspaces write). Runs on the caller's executor.
+const SOFT_DELETE_SQL: &str =
+    "UPDATE workspaces SET deleted_at = $1, updated_at = $1, updated_by_id = $2, slug = $3 WHERE id = $4";
+
+/// Soft-delete one workspace with its slug tombstone. Runs on the
+/// caller's executor.
+pub async fn soft_delete<'e, E>(
+    ex: E,
+    workspace_id: Uuid,
+    deleted_at: DateTime<Utc>,
+    updated_by: Uuid,
+    tombstone_slug: &str,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(SOFT_DELETE_SQL)
+        .bind(deleted_at)
+        .bind(updated_by)
+        .bind(tombstone_slug)
+        .bind(workspace_id)
+        .execute(ex)
+        .await
+        .map(|_| ())
+}
+
 // ---------------------------------------------------------------------------
 // logo asset link (executor-generic; the v2 file-asset writes)
 // ---------------------------------------------------------------------------
@@ -756,6 +861,133 @@ pub mod members {
             .bind(updated_at)
             .bind(false)
             .bind(id)
+            .execute(ex)
+            .await
+            .map(|_| ())
+    }
+
+    /// The validated `PATCH members/<pk>/` columns: every settable
+    /// column the serializer admits, resolved from the validated
+    /// patch. No `updated_by` field: the validated value is dropped
+    /// at the call site — `BaseModel.save` overwrites an explicit
+    /// `updated_by` input with the request user, so the stamp wins
+    /// unconditionally.
+    pub struct MemberPatch {
+        pub role: Option<i32>,
+        pub company_role: Option<Option<String>>,
+        pub view_props: Option<serde_json::Value>,
+        pub default_props: Option<serde_json::Value>,
+        pub issue_props: Option<serde_json::Value>,
+        pub is_active: Option<bool>,
+        pub getting_started_checklist: Option<serde_json::Value>,
+        pub tips: Option<serde_json::Value>,
+        pub explored_features: Option<serde_json::Value>,
+        pub workspace: Option<Uuid>,
+        pub created_by: Option<Option<Uuid>>,
+        pub deleted_at: Option<Option<DateTime<Utc>>>,
+    }
+
+    /// Apply validated PATCH assignments: the dynamic `SET` plus the
+    /// `updated_at`/`updated_by` stamps. Moved verbatim from
+    /// `api::app_workspace::handlers_members` (PIDASHCONV-1628) — the
+    /// `QueryBuilder` rendering, column order and placeholder
+    /// numbering are unchanged. Runs on the caller's executor.
+    pub async fn patch<'e, E>(
+        ex: E,
+        target_id: &Uuid,
+        actor_id: &Uuid,
+        patch: &MemberPatch,
+        now: DateTime<Utc>,
+    ) -> Result<(), sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        let mut qb = sqlx::QueryBuilder::new("UPDATE workspace_members SET ");
+        {
+            // `Separated` inserts the separator before every item after the
+            // first — binds included — so only the `col = ` half is a
+            // separated item; the placeholder half rides unseparated.
+            let mut sep = qb.separated(", ");
+            if let Some(role) = patch.role {
+                sep.push("role = ");
+                sep.push_bind_unseparated(i16::try_from(role).expect("role fits"));
+            }
+            if let Some(company_role) = &patch.company_role {
+                sep.push("company_role = ");
+                sep.push_bind_unseparated(company_role.clone());
+            }
+            if let Some(view_props) = &patch.view_props {
+                sep.push("view_props = ");
+                sep.push_bind_unseparated(view_props.clone());
+            }
+            if let Some(default_props) = &patch.default_props {
+                sep.push("default_props = ");
+                sep.push_bind_unseparated(default_props.clone());
+            }
+            if let Some(issue_props) = &patch.issue_props {
+                sep.push("issue_props = ");
+                sep.push_bind_unseparated(issue_props.clone());
+            }
+            if let Some(is_active) = patch.is_active {
+                sep.push("is_active = ");
+                sep.push_bind_unseparated(is_active);
+            }
+            if let Some(checklist) = &patch.getting_started_checklist {
+                sep.push("getting_started_checklist = ");
+                sep.push_bind_unseparated(checklist.clone());
+            }
+            if let Some(tips) = &patch.tips {
+                sep.push("tips = ");
+                sep.push_bind_unseparated(tips.clone());
+            }
+            if let Some(features) = &patch.explored_features {
+                sep.push("explored_features = ");
+                sep.push_bind_unseparated(features.clone());
+            }
+            if let Some(created_by) = &patch.created_by {
+                sep.push("created_by_id = ");
+                sep.push_bind_unseparated(*created_by);
+            }
+            if let Some(workspace) = &patch.workspace {
+                sep.push("workspace_id = ");
+                sep.push_bind_unseparated(*workspace);
+            }
+            if let Some(deleted_at) = &patch.deleted_at {
+                sep.push("deleted_at = ");
+                sep.push_bind_unseparated(*deleted_at);
+            }
+            sep.push("updated_at = ");
+            sep.push_bind_unseparated(now);
+            sep.push("updated_by_id = ");
+            sep.push_bind_unseparated(*actor_id);
+        }
+        qb.push(" WHERE id = ");
+        qb.push_bind(*target_id);
+        qb.build().execute(ex).await.map(|_| ())
+    }
+
+    pub(crate) const SAVE_VIEW_PROPS_SQL: &str =
+        "UPDATE workspace_members SET view_props = $2, updated_at = $3, updated_by_id = $4 \
+         WHERE id = $1";
+
+    /// `POST workspaces/<slug>/workspace-views/`: `view_props` saved
+    /// as-is plus the `updated_at`/`updated_by` stamps. Runs on the
+    /// caller's executor.
+    pub async fn save_view_props<'e, E>(
+        ex: E,
+        id: Uuid,
+        props: &serde_json::Value,
+        now: DateTime<Utc>,
+        updated_by: Uuid,
+    ) -> Result<(), sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        sqlx::query(SAVE_VIEW_PROPS_SQL)
+            .bind(id)
+            .bind(props)
+            .bind(now)
+            .bind(updated_by)
             .execute(ex)
             .await
             .map(|_| ())
@@ -2076,5 +2308,237 @@ mod tests {
             updated_at: ws.updated_at,
             seed_created_by: ws.seed_created_by,
         }
+    }
+
+    /// PIDASHCONV-1628: the workspace PATCH renderer pins its exact
+    /// bytes (validated columns in order, then the two stamps).
+    #[test]
+    fn patch_sql_renders_sets_in_order_plus_stamps() {
+        assert_eq!(
+            patch_sql(&["name", "slug"]),
+            "UPDATE workspaces SET name = $1, slug = $2, updated_at = $3, \
+             updated_by_id = $4 WHERE id = $5"
+        );
+        assert_eq!(
+            patch_sql(&[]),
+            "UPDATE workspaces SET updated_at = $1, updated_by_id = $2 WHERE id = $3"
+        );
+        assert_eq!(
+            SOFT_DELETE_SQL,
+            "UPDATE workspaces SET deleted_at = $1, updated_at = $1, updated_by_id = $2, \
+             slug = $3 WHERE id = $4"
+        );
+        assert_eq!(
+            SAVE_VIEW_PROPS_SQL,
+            "UPDATE workspace_members SET view_props = $2, updated_at = $3, updated_by_id = $4 \
+             WHERE id = $1"
+        );
+    }
+
+    /// PIDASHCONV-1628: `patch` applies the validated columns plus
+    /// the `updated_at`/`updated_by` re-stamp.
+    #[tokio::test]
+    async fn live_patch_applies_columns_plus_stamps() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        sqlx::query(WORKSPACES_DDL)
+            .execute(&pool)
+            .await
+            .expect("temp workspaces");
+        sqlx::query(SCHEDULERS_DDL)
+            .execute(&pool)
+            .await
+            .expect("temp schedulers");
+        let now: DateTime<Utc> = "2026-10-03T12:00:00+00:00".parse().expect("T0");
+        let later: DateTime<Utc> = "2026-10-04T12:00:00+00:00".parse().expect("T1");
+        let owner = Uuid::new_v4();
+        let id = Uuid::new_v4();
+        create(
+            &pool,
+            &NewWorkspace {
+                id,
+                name: "Acme",
+                slug: "acme",
+                owner_id: owner,
+                created_by: Some(owner),
+                logo: None,
+                logo_asset_id: None,
+                organization_size: None,
+                timezone: "UTC",
+                background_color: "#fff",
+                deleted_at: None,
+                created_at: now,
+                updated_at: now,
+                seed_created_by: Some(owner),
+            },
+        )
+        .await
+        .expect("create");
+        let actor = Uuid::new_v4();
+        super::patch(
+            &pool,
+            id,
+            &["name", "timezone"],
+            &WorkspacePatch {
+                deleted_at: None,
+                name: "Acme 2",
+                logo: None,
+                slug: "acme",
+                organization_size: None,
+                timezone: "UTC",
+                background_color: "#fff",
+                logo_asset_id: None,
+            },
+            &actor,
+            later,
+        )
+        .await
+        .expect("patch");
+        let row: (String, String, DateTime<Utc>, Option<Uuid>) = sqlx::query_as(
+            "SELECT name, timezone, updated_at, updated_by_id FROM workspaces WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .expect("read back");
+        assert_eq!(
+            row,
+            ("Acme 2".to_owned(), "UTC".to_owned(), later, Some(actor))
+        );
+    }
+
+    /// PIDASHCONV-1628: `soft_delete` stamps the delete plus the slug
+    /// tombstone.
+    #[tokio::test]
+    async fn live_soft_delete_stamps_delete_and_tombstone() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        sqlx::query(WORKSPACES_DDL)
+            .execute(&pool)
+            .await
+            .expect("temp workspaces");
+        sqlx::query(SCHEDULERS_DDL)
+            .execute(&pool)
+            .await
+            .expect("temp schedulers");
+        let now: DateTime<Utc> = "2026-10-03T12:00:00+00:00".parse().expect("T0");
+        let id = Uuid::new_v4();
+        create(
+            &pool,
+            &NewWorkspace {
+                id,
+                name: "Acme",
+                slug: "acme",
+                owner_id: Uuid::new_v4(),
+                created_by: None,
+                logo: None,
+                logo_asset_id: None,
+                organization_size: None,
+                timezone: "UTC",
+                background_color: "#fff",
+                deleted_at: None,
+                created_at: now,
+                updated_at: now,
+                seed_created_by: None,
+            },
+        )
+        .await
+        .expect("create");
+        let actor = Uuid::new_v4();
+        soft_delete(&pool, id, now, actor, "acme--deleted")
+            .await
+            .expect("soft_delete");
+        let row: (Option<DateTime<Utc>>, DateTime<Utc>, Option<Uuid>, String) = sqlx::query_as(
+            "SELECT deleted_at, updated_at, updated_by_id, slug FROM workspaces WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .expect("read back");
+        assert_eq!(
+            row,
+            (Some(now), now, Some(actor), "acme--deleted".to_owned())
+        );
+    }
+
+    /// PIDASHCONV-1628: `members::patch` applies the validated columns
+    /// plus the stamps; `save_view_props` saves the props as-is plus
+    /// the stamps.
+    #[tokio::test]
+    async fn live_member_patch_and_view_props() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        sqlx::query(MEMBERS_DDL)
+            .execute(&pool)
+            .await
+            .expect("temp members");
+        let now: DateTime<Utc> = "2026-10-03T12:00:00+00:00".parse().expect("T0");
+        let later: DateTime<Utc> = "2026-10-04T12:00:00+00:00".parse().expect("T1");
+        let view = props();
+        let issue = issue_props();
+        let id = add(
+            &pool,
+            &NewMember {
+                workspace_id: Uuid::new_v4(),
+                user_id: Some(Uuid::new_v4()),
+                role: 5,
+                company_role: None,
+                created_by: None,
+                view_props: &view,
+                default_props: &view,
+                issue_props: &issue,
+                now,
+                ignore_conflicts: false,
+                db_now: false,
+            },
+        )
+        .await
+        .expect("add");
+        let actor = Uuid::new_v4();
+        members::patch(
+            &pool,
+            &id,
+            &actor,
+            &MemberPatch {
+                role: Some(15),
+                company_role: Some(Some("eng".to_owned())),
+                view_props: None,
+                default_props: None,
+                issue_props: None,
+                is_active: Some(false),
+                getting_started_checklist: None,
+                tips: None,
+                explored_features: None,
+                workspace: None,
+                created_by: None,
+                deleted_at: None,
+            },
+            later,
+        )
+        .await
+        .expect("member patch");
+        let row: (i16, Option<String>, bool, DateTime<Utc>, Option<Uuid>) = sqlx::query_as(
+            "SELECT role, company_role, is_active, updated_at, updated_by_id \
+             FROM workspace_members WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .expect("read back");
+        assert_eq!(row, (15, Some("eng".to_owned()), false, later, Some(actor)));
+        let saved = serde_json::json!({"tab": "all"});
+        save_view_props(&pool, id, &saved, later, actor)
+            .await
+            .expect("save view props");
+        let stored: serde_json::Value =
+            sqlx::query_scalar("SELECT view_props FROM workspace_members WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .expect("read back");
+        assert_eq!(stored, saved);
     }
 }

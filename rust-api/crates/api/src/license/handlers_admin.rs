@@ -1281,15 +1281,10 @@ async fn sign_out(
             .await?
             .ok_or(Denial::ServerError)?;
         let now = Utc::now();
-        sqlx::query(
-            "UPDATE users SET last_logout_ip = $1, last_logout_time = $2, updated_at = $2 WHERE id = $3",
-        )
-        .bind(client_ip(&headers))
-        .bind(now)
-        .bind(actor)
-        .execute(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
+        let ip = client_ip(&headers);
+        identity::stamp_logout(pool, actor, Some(ip.as_str()), now)
+            .await
+            .map_err(|_| Denial::ServerError)?;
         // `logout()`: `Session.flush()` drops the presented row (this
         // route always reads the admin cookie); the middleware then
         // answers the cookie deletion because the session reads empty.
@@ -1817,10 +1812,7 @@ fn client_ip_ua(headers: &HeaderMap, peer: Option<&str>) -> (Option<String>, Opt
 /// `user_login` replay) so both success paths and that failure path
 /// match.
 async fn stamp_last_login(pool: &PgPool, user_id: &Uuid, now: DateTime<Utc>) -> Result<(), Denial> {
-    sqlx::query("UPDATE \"users\" SET \"last_login\" = $1 WHERE \"id\" = $2")
-        .bind(now)
-        .bind(user_id)
-        .execute(pool)
+    identity::stamp_last_login(pool, *user_id, now)
         .await
         .map_err(|_| Denial::ServerError)?;
     Ok(())
@@ -2103,10 +2095,7 @@ async fn sign_in(State(state): State<AppState>, req: Request) -> Result<Response
                 if let Some(new_hash) =
                     pidash_auth::password::rehash_if_outdated(candidate, password_field)
                 {
-                    sqlx::query(r#"UPDATE "users" SET "password" = $1 WHERE "id" = $2"#)
-                        .bind(&new_hash)
-                        .bind(*id)
-                        .execute(pool)
+                    identity::rehash_password(pool, *id, &new_hash)
                         .await
                         .map_err(|_| Denial::ServerError)?;
                     *password_field = new_hash;

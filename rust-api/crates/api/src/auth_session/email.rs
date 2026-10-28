@@ -608,74 +608,12 @@ pub(crate) fn fresh_user_token() -> String {
     )
 }
 
-/// Change/set-password `UPDATE`: the password write with the
-/// `User.save()` column effects folded in
-/// (`db/models/user.py:169-187`) — `updated_at` (`auto_now`), the
-/// `token`/`token_updated_at` rotation when a token is already in use
-/// (PB-1079), the empty-`display_name` fill from the email prefix, and
-/// `is_staff` for superusers — plus the `user_logged_in` signal's
-/// `last_login` bump. `$1` is the encoded password, `$2` the user id,
-/// `$3` a fresh token, `$4` the rotation timestamp. The `email`
-/// re-normalization in `save()` is a no-op on these paths (the address
-/// never changes), so it stays out.
-const PASSWORD_WRITE_WITH_LOGIN_SQL: &str = r#"UPDATE users SET password = $1,
-    is_password_autoset = false, last_login = now(), updated_at = now(),
-    token = CASE WHEN token_updated_at IS NOT NULL THEN $3 ELSE token END,
-    token_updated_at = CASE WHEN token_updated_at IS NOT NULL THEN $4 ELSE token_updated_at END,
-    display_name = CASE WHEN COALESCE(display_name, '') = '' THEN split_part(email, '@', 1) ELSE display_name END,
-    is_staff = CASE WHEN is_superuser THEN true ELSE is_staff END
-    WHERE id = $2"#;
-
-/// Reset-password `UPDATE`: same `User.save()` effects as
-/// [`PASSWORD_WRITE_WITH_LOGIN_SQL`] but no `login()` call follows,
-/// so no `last_login` bump. Same binds.
-const PASSWORD_WRITE_SQL: &str = r#"UPDATE users SET password = $1,
-    is_password_autoset = false, updated_at = now(),
-    token = CASE WHEN token_updated_at IS NOT NULL THEN $3 ELSE token END,
-    token_updated_at = CASE WHEN token_updated_at IS NOT NULL THEN $4 ELSE token_updated_at END,
-    display_name = CASE WHEN COALESCE(display_name, '') = '' THEN split_part(email, '@', 1) ELSE display_name END,
-    is_staff = CASE WHEN is_superuser THEN true ELSE is_staff END
-    WHERE id = $2"#;
-
-/// Password write shared by change/set/reset-password: the encoded
-/// password plus the `User.save()` column effects above.
-/// `stamp_last_login` selects the change/set-password twin (the
-/// `user_logged_in` signal bumps `last_login`) over reset-password.
-pub(crate) async fn write_password_with_save_effects(
-    pool: &sqlx::PgPool,
-    user_id: uuid::Uuid,
-    encoded: &str,
-    stamp_last_login: bool,
-) -> Result<(), sqlx::Error> {
-    let sql = if stamp_last_login {
-        PASSWORD_WRITE_WITH_LOGIN_SQL
-    } else {
-        PASSWORD_WRITE_SQL
-    };
-    sqlx::query(sql)
-        .bind(encoded)
-        .bind(user_id)
-        .bind(fresh_user_token())
-        .bind(chrono::Utc::now())
-        .execute(pool)
-        .await?;
-    Ok(())
-}
-
-/// The `user_logged_in` signal (`update_last_login`): `last_login =
-/// now` on every login.
-async fn stamp_last_login(
-    pool: &sqlx::PgPool,
-    user_id: uuid::Uuid,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(r#"UPDATE "users" SET "last_login" = $2 WHERE "id" = $1"#)
-        .bind(user_id)
-        .bind(now)
-        .execute(pool)
-        .await?;
-    Ok(())
-}
+// NOTE: the change/set/reset-password write (the password plus the
+// `User.save()` column effects) moved to
+// `domain::identity::write_password_with_save_effects` (PIDASHCONV-1628),
+// and the `user_logged_in` `last_login` stamp to
+// `domain::identity::stamp_last_login`; the change/set/reset callers live
+// in `password.rs`.
 
 /// `get_random_color` (`utils/color.py:9-14`): `"#"` + six hexdigits.
 /// The uuid draw is lowercase-only (see `domain::identity`); no test can
@@ -1342,10 +1280,7 @@ async fn provider_outcome(
             if let Some(new_hash) =
                 pidash_auth::password::rehash_if_outdated(raw_password, &user.password)
             {
-                sqlx::query(r#"UPDATE "users" SET "password" = $1 WHERE "id" = $2"#)
-                    .bind(&new_hash)
-                    .bind(user.id)
-                    .execute(pool)
+                identity::rehash_password(pool, user.id, &new_hash)
                     .await
                     .map_err(|_| server_error())?;
                 user.password = new_hash;
@@ -1506,7 +1441,7 @@ async fn run_authenticated(
     // `user_login` AFTER `provider.authenticate()` returns
     // (`app/email.py:109-111`) — so the stamp lands after the invitation
     // workflow, never on its 500 path.
-    stamp_last_login(pool, user_id, now)
+    identity::stamp_last_login(pool, user_id, now)
         .await
         .map_err(|_| server_error())?;
     let device_info = serde_json::json!({
@@ -2162,14 +2097,7 @@ async fn serve_signout(state: &AppState, req: axum::extract::Request, space: boo
         return bare();
     };
     let now = chrono::Utc::now();
-    let stamped = sqlx::query(
-        r#"UPDATE "users" SET "last_logout_ip" = $2, "last_logout_time" = $3, "updated_at" = $3 WHERE "id" = $1"#,
-    )
-    .bind(user_id)
-    .bind(prov.ip.clone())
-    .bind(now)
-    .execute(pool)
-    .await;
+    let stamped = identity::stamp_logout(pool, user_id, prov.ip.as_deref(), now).await;
     if stamped.is_err() {
         return bare();
     }

@@ -2938,7 +2938,7 @@ async fn validate_patch(
 /// Apply validated PATCH assignments: the dynamic `SET` plus the
 /// `updated_at`/`updated_by` stamps (`BaseModel.save` overwrites an
 /// explicit `updated_by` input with the request user, so the stamp wins
-/// unconditionally).
+/// unconditionally; `domain::workspaces::members::patch` renders it).
 async fn apply_patch(
     pool: &sqlx::PgPool,
     target_id: &Uuid,
@@ -2946,73 +2946,26 @@ async fn apply_patch(
     sets: &PatchSets,
 ) -> Result<(), Denial> {
     let now = Utc::now();
-    let mut qb = sqlx::QueryBuilder::new("UPDATE workspace_members SET ");
-    {
-        // `Separated` inserts the separator before every item after the
-        // first — binds included — so only the `col = ` half is a
-        // separated item; the placeholder half rides unseparated.
-        let mut sep = qb.separated(", ");
-        if let Some(role) = sets.role {
-            sep.push("role = ");
-            sep.push_bind_unseparated(i16::try_from(role).expect("role fits"));
-        }
-        if let Some(company_role) = &sets.company_role {
-            sep.push("company_role = ");
-            sep.push_bind_unseparated(company_role.clone());
-        }
-        if let Some(view_props) = &sets.view_props {
-            sep.push("view_props = ");
-            sep.push_bind_unseparated(view_props.clone());
-        }
-        if let Some(default_props) = &sets.default_props {
-            sep.push("default_props = ");
-            sep.push_bind_unseparated(default_props.clone());
-        }
-        if let Some(issue_props) = &sets.issue_props {
-            sep.push("issue_props = ");
-            sep.push_bind_unseparated(issue_props.clone());
-        }
-        if let Some(is_active) = sets.is_active {
-            sep.push("is_active = ");
-            sep.push_bind_unseparated(is_active);
-        }
-        if let Some(checklist) = &sets.getting_started_checklist {
-            sep.push("getting_started_checklist = ");
-            sep.push_bind_unseparated(checklist.clone());
-        }
-        if let Some(tips) = &sets.tips {
-            sep.push("tips = ");
-            sep.push_bind_unseparated(tips.clone());
-        }
-        if let Some(features) = &sets.explored_features {
-            sep.push("explored_features = ");
-            sep.push_bind_unseparated(features.clone());
-        }
-        if let Some(created_by) = &sets.created_by {
-            sep.push("created_by_id = ");
-            sep.push_bind_unseparated(*created_by);
-        }
-        if let Some(updated_by) = &sets.updated_by {
-            // Validated (so garbage still 400s above as a field error)
-            // but overwritten by the stamp below, like `BaseModel.save`.
-            let _ = updated_by;
-        }
-        if let Some(workspace) = &sets.workspace {
-            sep.push("workspace_id = ");
-            sep.push_bind_unseparated(*workspace);
-        }
-        if let Some(deleted_at) = &sets.deleted_at {
-            sep.push("deleted_at = ");
-            sep.push_bind_unseparated(*deleted_at);
-        }
-        sep.push("updated_at = ");
-        sep.push_bind_unseparated(now);
-        sep.push("updated_by_id = ");
-        sep.push_bind_unseparated(*actor_id);
-    }
-    qb.push(" WHERE id = ");
-    qb.push_bind(*target_id);
-    qb.build().execute(pool).await.map_err(map_write_error)?;
+    // Validated (so garbage still 400s above as a field error) but
+    // overwritten by the stamp, like `BaseModel.save`.
+    let _ = sets.updated_by;
+    let patch = members::MemberPatch {
+        role: sets.role,
+        company_role: sets.company_role.clone(),
+        view_props: sets.view_props.clone(),
+        default_props: sets.default_props.clone(),
+        issue_props: sets.issue_props.clone(),
+        is_active: sets.is_active,
+        getting_started_checklist: sets.getting_started_checklist.clone(),
+        tips: sets.tips.clone(),
+        explored_features: sets.explored_features.clone(),
+        workspace: sets.workspace,
+        created_by: sets.created_by,
+        deleted_at: sets.deleted_at,
+    };
+    members::patch(pool, target_id, actor_id, &patch, now)
+        .await
+        .map_err(map_write_error)?;
     Ok(())
 }
 
@@ -3362,16 +3315,7 @@ async fn member_views(
         return Denial::BadPayload.into_response();
     }
     let now = Utc::now();
-    let saved = sqlx::query(
-        "UPDATE workspace_members SET view_props = $2, updated_at = $3, updated_by_id = $4 \
-         WHERE id = $1",
-    )
-    .bind(requester.id)
-    .bind(&props)
-    .bind(now)
-    .bind(actor.id)
-    .execute(pool)
-    .await;
+    let saved = members::save_view_props(pool, requester.id, &props, now, actor.id).await;
     if let Err(error) = saved {
         return map_write_error(error).into_response();
     }

@@ -26,6 +26,8 @@ use axum::response::Response;
 use serde_json::Value;
 use sqlx::PgPool;
 
+use pidash_services::domain::identity;
+
 use crate::middleware::SessionHandle;
 
 /// `django.contrib.auth.backends.ModelBackend`: the only configured auth
@@ -122,11 +124,7 @@ pub async fn login_session_keys(
     }
     // `user_logged_in` → `update_last_login` (`auth/models.py`): the
     // signal save, inside `login()` before the session persists.
-    sqlx::query("UPDATE \"users\" SET \"last_login\" = $1 WHERE \"id\" = $2")
-        .bind(now)
-        .bind(user_id)
-        .execute(pool)
-        .await?;
+    identity::stamp_last_login(pool, user_id, now).await?;
     // `rotate_token` half (QUIRK-csrf-rotate): a fresh 32-char secret as
     // the cookie value — `_add_new_csrf_cookie` stores the raw secret
     // (the `auth_session/email.rs` and `auth_session/magic.rs` login

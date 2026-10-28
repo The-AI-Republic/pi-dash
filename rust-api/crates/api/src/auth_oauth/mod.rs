@@ -43,6 +43,8 @@ pub mod oauth_github;
 pub mod oauth_gitlab;
 pub mod oauth_google;
 
+use pidash_services::domain::identity;
+
 pub use guards::{
     device_endpoint_guard, device_start_cache_key, device_start_throttle_rate,
     initiate_session_keys, verification_uri, DeviceEndpointGuard, OauthProvider,
@@ -108,12 +110,7 @@ pub(crate) async fn soft_delete_avatar_asset(
     if let Err(error) = pidash_jobs::queue::enqueue(pool, &job).await {
         tracing::warn!(%error, task = message.task.as_str(), "avatar soft-delete enqueue failed; response stands");
     }
-    let _ = sqlx::query(
-        r#"UPDATE "users" SET "avatar_asset_id" = NULL, "avatar" = '' WHERE "id" = $1"#,
-    )
-    .bind(user_id)
-    .execute(pool)
-    .await;
+    let _ = identity::clear_avatar(pool, user_id).await;
 }
 
 /// Shared `download_and_upload_avatar` (`adapter/base.py:139-218`,

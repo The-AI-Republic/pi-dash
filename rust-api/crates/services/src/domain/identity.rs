@@ -2172,6 +2172,324 @@ pub fn entity_user_save_sql() -> String {
     stmt.to_string(PostgresQueryBuilder)
 }
 
+// login/logout signal stamps + password writes + profile pointers
+// (PIDASHCONV-1628: moved from the api handlers; executor-generic)
+// ---------------------------------------------------------------------------
+
+/// `update_last_login` (`auth/models.py`): `login()` sets
+/// `last_login = now` on every login. One canonical statement serves
+/// the four login paths (email, magic, OAuth, license admin): the
+/// email path's id-first bind order (`SET "last_login" = $2 WHERE
+/// "id" = $1`) and the magic path's qualified `WHERE "users"."id"`
+/// are spelling-only — same column, same row, same value — and are
+/// normalized here (the `login_stamps_sql` precedent: no fixture pins
+/// the spelling).
+const STAMP_LAST_LOGIN_SQL: &str = "UPDATE \"users\" SET \"last_login\" = $1 WHERE \"id\" = $2";
+
+/// Stamp `users.last_login` for one user. Runs on the caller's
+/// executor — the login flows never hold a transaction here.
+pub async fn stamp_last_login<'e, E>(
+    ex: E,
+    user_id: Uuid,
+    now: DateTime<Utc>,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(STAMP_LAST_LOGIN_SQL)
+        .bind(now)
+        .bind(user_id)
+        .execute(ex)
+        .await
+        .map(|_| ())
+}
+
+/// Django's `check_password` setter (`base_user.py:111-123`): a
+/// correct password on an outdated hash re-encodes with the default
+/// hasher at once. `save(update_fields=["password"])` writes only
+/// that column (no `updated_at` bump). One statement on all three
+/// paths (email sign-in, change-password, license admin sign-in).
+const REHASH_PASSWORD_SQL: &str = "UPDATE \"users\" SET \"password\" = $1 WHERE \"id\" = $2";
+
+/// Persist a re-encoded password hash, nothing else. Runs on the
+/// caller's executor.
+pub async fn rehash_password<'e, E>(ex: E, user_id: Uuid, new_hash: &str) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(REHASH_PASSWORD_SQL)
+        .bind(new_hash)
+        .bind(user_id)
+        .execute(ex)
+        .await
+        .map(|_| ())
+}
+
+/// Change/set-password `UPDATE`: the password write with the
+/// `User.save()` column effects folded in
+/// (`db/models/user.py:169-187`) — `updated_at` (`auto_now`), the
+/// `token`/`token_updated_at` rotation when a token is already in use
+/// (PB-1079), the empty-`display_name` fill from the email prefix, and
+/// `is_staff` for superusers — plus the `user_logged_in` signal's
+/// `last_login` bump.
+///
+/// Moved byte-for-byte from `api::auth_session::email`
+/// (PIDASHCONV-1628); `$1` is the encoded password, `$2` the user id,
+/// `$3` a fresh token, `$4` the rotation timestamp. The `email`
+/// re-normalization in `save()` is a no-op on these paths (the address
+/// never changes), so it stays out.
+const PASSWORD_WRITE_WITH_LOGIN_SQL: &str = r#"UPDATE users SET password = $1,
+    is_password_autoset = false, last_login = now(), updated_at = now(),
+    token = CASE WHEN token_updated_at IS NOT NULL THEN $3 ELSE token END,
+    token_updated_at = CASE WHEN token_updated_at IS NOT NULL THEN $4 ELSE token_updated_at END,
+    display_name = CASE WHEN COALESCE(display_name, '') = '' THEN split_part(email, '@', 1) ELSE display_name END,
+    is_staff = CASE WHEN is_superuser THEN true ELSE is_staff END
+    WHERE id = $2"#;
+
+/// Reset-password `UPDATE`: same `User.save()` effects as
+/// [`PASSWORD_WRITE_WITH_LOGIN_SQL`] but no `login()` call follows,
+/// so no `last_login` bump. Same binds. Moved byte-for-byte from
+/// `api::auth_session::email` (PIDASHCONV-1628).
+const PASSWORD_WRITE_SQL: &str = r#"UPDATE users SET password = $1,
+    is_password_autoset = false, updated_at = now(),
+    token = CASE WHEN token_updated_at IS NOT NULL THEN $3 ELSE token END,
+    token_updated_at = CASE WHEN token_updated_at IS NOT NULL THEN $4 ELSE token_updated_at END,
+    display_name = CASE WHEN COALESCE(display_name, '') = '' THEN split_part(email, '@', 1) ELSE display_name END,
+    is_staff = CASE WHEN is_superuser THEN true ELSE is_staff END
+    WHERE id = $2"#;
+
+/// Resolved inputs for [`write_password_with_save_effects`]:
+/// `fresh_token` is caller-generated (`uuid4hex + uuid4hex`,
+/// `user.py:174`); `rotated_at` is the caller's rotation timestamp
+/// (bound only when a token is already in use).
+pub struct PasswordSave<'a> {
+    pub encoded: &'a str,
+    pub fresh_token: &'a str,
+    pub rotated_at: DateTime<Utc>,
+    /// The change/set-password twin (the `user_logged_in` signal bumps
+    /// `last_login`) over reset-password.
+    pub stamp_last_login: bool,
+}
+
+/// Password write shared by change/set/reset-password: the encoded
+/// password plus the `User.save()` column effects above. Runs on the
+/// caller's executor.
+pub async fn write_password_with_save_effects<'e, E>(
+    ex: E,
+    user_id: Uuid,
+    save: &PasswordSave<'_>,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let sql = if save.stamp_last_login {
+        PASSWORD_WRITE_WITH_LOGIN_SQL
+    } else {
+        PASSWORD_WRITE_SQL
+    };
+    sqlx::query(sql)
+        .bind(save.encoded)
+        .bind(user_id)
+        .bind(save.fresh_token)
+        .bind(save.rotated_at)
+        .execute(ex)
+        .await
+        .map(|_| ())
+}
+
+/// The sign-out stamps: `last_logout_ip`/`last_logout_time` plus
+/// `updated_at` (`auto_now`). One canonical statement serves the app
+/// sign-out and the license admin sign-out; the admin path's unquoted
+/// spelling and the app path's id-first bind order are normalized
+/// (same columns, same row — no fixture pins the spelling). The bind
+/// values stay per caller: the app path binds `None` when no IP is
+/// present, the admin path `""`.
+const STAMP_LOGOUT_SQL: &str = "UPDATE \"users\" SET \"last_logout_ip\" = $1, \
+    \"last_logout_time\" = $2, \"updated_at\" = $2 WHERE \"id\" = $3";
+
+/// Stamp the sign-out columns for one user. Runs on the caller's
+/// executor.
+pub async fn stamp_logout<'e, E>(
+    ex: E,
+    user_id: Uuid,
+    ip: Option<&str>,
+    now: DateTime<Utc>,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(STAMP_LOGOUT_SQL)
+        .bind(ip)
+        .bind(now)
+        .bind(user_id)
+        .execute(ex)
+        .await
+        .map(|_| ())
+}
+
+/// The invite-accept user touch (`invite.py:204-205`): `User` has no
+/// `last_workspace_id` column (it lives on `Profile`,
+/// `db/models/user.py:236`), so Django drops the transient attribute
+/// and the save only stamps `updated_at` (ported bug 11,
+/// [`crate::app_workspace::queries_membership::user_touch_sql`]).
+const TOUCH_USER_UPDATED_AT_SQL: &str = "UPDATE users SET updated_at = $1 WHERE id = $2";
+
+/// Touch `users.updated_at` for one user. Runs on the caller's
+/// executor.
+pub async fn touch_user_updated_at<'e, E>(
+    ex: E,
+    user_id: Uuid,
+    now: DateTime<Utc>,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(TOUCH_USER_UPDATED_AT_SQL)
+        .bind(now)
+        .bind(user_id)
+        .execute(ex)
+        .await
+        .map(|_| ())
+}
+
+/// The `PATCH users/me/` `User.save()`: the merged row (validated
+/// patch over the current row) plus the save-derived values
+/// (`save_email`, `save_display_name`, token regeneration,
+/// `save_is_staff`, `user.py:169-187`).
+///
+/// Moved byte-for-byte from `api::app_workspace::handlers_user`
+/// (PIDASHCONV-1628): `$1`-`$14` are the merged columns, `$15`-`$18`
+/// the derived ones, `$19` the `auto_now` stamp, `$20` the id. The
+/// merge and the derivation stay at the call site (pure computation,
+/// not SQL); every resolved value rides this struct.
+pub struct MeProfileSave<'a> {
+    pub last_login: Option<DateTime<Utc>>,
+    pub display_name: &'a str,
+    pub first_name: &'a str,
+    pub last_name: &'a str,
+    pub avatar: &'a str,
+    pub avatar_asset_id: Option<Uuid>,
+    pub cover_image: Option<&'a str>,
+    pub cover_image_asset_id: Option<Uuid>,
+    pub is_password_expired: bool,
+    pub is_password_reset_required: bool,
+    pub bot_type: Option<&'a str>,
+    pub user_timezone: &'a str,
+    pub is_email_valid: bool,
+    pub masked_at: Option<DateTime<Utc>>,
+    pub email: &'a str,
+    pub token: &'a str,
+    pub token_updated_at: Option<DateTime<Utc>>,
+    pub is_staff: bool,
+    pub updated_at: DateTime<Utc>,
+}
+
+const ME_PROFILE_SAVE_SQL: &str =
+    "UPDATE users SET last_login = $1, display_name = $2, first_name = $3, last_name = $4, \
+    avatar = $5, avatar_asset_id = $6, cover_image = $7, cover_image_asset_id = $8, \
+    is_password_expired = $9, is_password_reset_required = $10, bot_type = $11, \
+    user_timezone = $12, is_email_valid = $13, masked_at = $14, email = $15, token = $16, \
+    token_updated_at = $17, is_staff = $18, updated_at = $19 WHERE id = $20";
+
+/// Persist the merged `PATCH users/me/` row. Runs on the caller's
+/// executor.
+pub async fn save_me_profile<'e, E>(
+    ex: E,
+    user_id: Uuid,
+    save: &MeProfileSave<'_>,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(ME_PROFILE_SAVE_SQL)
+        .bind(save.last_login)
+        .bind(save.display_name)
+        .bind(save.first_name)
+        .bind(save.last_name)
+        .bind(save.avatar)
+        .bind(save.avatar_asset_id)
+        .bind(save.cover_image)
+        .bind(save.cover_image_asset_id)
+        .bind(save.is_password_expired)
+        .bind(save.is_password_reset_required)
+        .bind(save.bot_type)
+        .bind(save.user_timezone)
+        .bind(save.is_email_valid)
+        .bind(save.masked_at)
+        .bind(save.email)
+        .bind(save.token)
+        .bind(save.token_updated_at)
+        .bind(save.is_staff)
+        .bind(save.updated_at)
+        .bind(user_id)
+        .execute(ex)
+        .await
+        .map(|_| ())
+}
+
+/// Shared `delete_old_avatar` user leg (`adapter/base.py:244-248`):
+/// clear the FK plus the avatar string after the asset soft-delete
+/// lands. Runs on the caller's executor.
+const CLEAR_AVATAR_SQL: &str =
+    "UPDATE \"users\" SET \"avatar_asset_id\" = NULL, \"avatar\" = '' WHERE \"id\" = $1";
+
+/// Clear one user's avatar FK + string. Runs on the caller's
+/// executor.
+pub async fn clear_avatar<'e, E>(ex: E, user_id: Uuid) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(CLEAR_AVATAR_SQL)
+        .bind(user_id)
+        .execute(ex)
+        .await
+        .map(|_| ())
+}
+
+/// `remove_last_workspace_ids_from_user_settings`: null every profile
+/// pointer at a deleted workspace. Runs on the caller's executor.
+const CLEAR_LAST_WORKSPACE_SQL: &str =
+    "UPDATE profiles SET last_workspace_id = NULL WHERE last_workspace_id = $1";
+
+/// Null the `last_workspace_id` pointers at one workspace. Runs on
+/// the caller's executor.
+pub async fn clear_last_workspace<'e, E>(ex: E, workspace_id: Uuid) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(CLEAR_LAST_WORKSPACE_SQL)
+        .bind(workspace_id)
+        .execute(ex)
+        .await
+        .map(|_| ())
+}
+
+/// The join-request approve pointer write (`join_request.py:204`):
+/// `Profile.last_workspace_id` follows the approved workspace. Runs
+/// on the caller's executor — the approve path holds its own `sqlx`
+/// transaction around the member write, this write and the status
+/// write.
+const SET_LAST_WORKSPACE_SQL: &str =
+    "UPDATE profiles SET last_workspace_id = $1 WHERE user_id = $2";
+
+/// Point one user's profile at a workspace. Runs on the caller's
+/// executor.
+pub async fn set_last_workspace<'e, E>(
+    ex: E,
+    user_id: Uuid,
+    workspace_id: Uuid,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(SET_LAST_WORKSPACE_SQL)
+        .bind(workspace_id)
+        .bind(user_id)
+        .execute(ex)
+        .await
+        .map(|_| ())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4553,5 +4871,375 @@ mod tests {
                 .expect("read back");
         assert_eq!(row.0, "pbkdf2$new");
         assert!(!row.1);
+    }
+
+    /// PIDASHCONV-1628: the moved stamp singles pin their exact
+    /// statements; the password twins differ only in the `last_login`
+    /// bump.
+    #[test]
+    fn moved_stamp_statements_pin() {
+        assert_eq!(
+            STAMP_LAST_LOGIN_SQL,
+            "UPDATE \"users\" SET \"last_login\" = $1 WHERE \"id\" = $2"
+        );
+        assert_eq!(
+            REHASH_PASSWORD_SQL,
+            "UPDATE \"users\" SET \"password\" = $1 WHERE \"id\" = $2"
+        );
+        assert_eq!(
+            STAMP_LOGOUT_SQL,
+            "UPDATE \"users\" SET \"last_logout_ip\" = $1, \"last_logout_time\" = $2, \
+             \"updated_at\" = $2 WHERE \"id\" = $3"
+        );
+        assert_eq!(
+            TOUCH_USER_UPDATED_AT_SQL,
+            "UPDATE users SET updated_at = $1 WHERE id = $2"
+        );
+        assert_eq!(
+            CLEAR_AVATAR_SQL,
+            "UPDATE \"users\" SET \"avatar_asset_id\" = NULL, \"avatar\" = '' WHERE \"id\" = $1"
+        );
+        assert_eq!(
+            CLEAR_LAST_WORKSPACE_SQL,
+            "UPDATE profiles SET last_workspace_id = NULL WHERE last_workspace_id = $1"
+        );
+        assert_eq!(
+            SET_LAST_WORKSPACE_SQL,
+            "UPDATE profiles SET last_workspace_id = $1 WHERE user_id = $2"
+        );
+        assert!(PASSWORD_WRITE_WITH_LOGIN_SQL.contains("last_login = now()"));
+        assert!(!PASSWORD_WRITE_SQL.contains("last_login"));
+        for sql in [PASSWORD_WRITE_WITH_LOGIN_SQL, PASSWORD_WRITE_SQL] {
+            for clause in [
+                "password = $1",
+                "is_password_autoset = false",
+                "updated_at = now()",
+                "token = CASE WHEN token_updated_at IS NOT NULL THEN $3 ELSE token END",
+                "display_name = CASE WHEN COALESCE(display_name, '') = ''",
+                "is_staff = CASE WHEN is_superuser THEN true ELSE is_staff END",
+                "WHERE id = $2",
+            ] {
+                assert!(sql.contains(clause), "{clause} present");
+            }
+        }
+        assert!(
+            ME_PROFILE_SAVE_SQL.starts_with("UPDATE users SET last_login = $1, display_name = $2")
+        );
+        assert!(ME_PROFILE_SAVE_SQL
+            .ends_with("token_updated_at = $17, is_staff = $18, updated_at = $19 WHERE id = $20"));
+        for bind in 1..=20 {
+            assert!(
+                ME_PROFILE_SAVE_SQL.contains(&format!("${bind}")),
+                "bind ${bind} present"
+            );
+        }
+    }
+
+    /// Seed one temp `users` row carrying the columns the stamp tests
+    /// read back.
+    async fn seed_stamp_user(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        user_id: Uuid,
+        now: DateTime<Utc>,
+    ) {
+        sqlx::query(
+            "INSERT INTO users (password, id, username, email, display_name, first_name,
+             last_name, avatar, date_joined, created_at, updated_at, last_location,
+             created_location, is_superuser, is_managed, is_password_expired, is_active,
+             is_staff, is_email_verified, is_password_autoset, is_password_reset_required,
+             token, last_login_ip, last_logout_ip, last_login_medium, last_login_uagent,
+             is_bot, user_timezone, is_email_valid)
+             VALUES ('usable-hash', $1, 'stamp1628', 'stamp1628@example.test', 'stamp',
+             'St', 'Amp', '', $2, $2, $2, '', '', false, false, false, true, false,
+             false, false, false, '', '', '', 'email', '', false, 'UTC', false)",
+        )
+        .bind(user_id)
+        .bind(now)
+        .execute(&mut **tx)
+        .await
+        .expect("seed user");
+    }
+
+    /// PIDASHCONV-1628: each stamp single writes its columns and
+    /// nothing else; the logout `None` arm raises the NOT NULL the app
+    /// sign-out swallows.
+    #[tokio::test]
+    async fn live_moved_stamps_write_their_columns() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let mut tx = pool.begin().await.expect("begin scratch tx");
+        sqlx::query(USERS_DDL)
+            .execute(&mut *tx)
+            .await
+            .expect("temp users");
+        let now: DateTime<Utc> = "2026-10-27T12:00:00+00:00".parse().expect("T0");
+        let later: DateTime<Utc> = "2026-10-28T12:00:00+00:00".parse().expect("T1");
+        let user_id = live_uuid("000000001628");
+        seed_stamp_user(&mut tx, user_id, now).await;
+        stamp_last_login(&mut *tx, user_id, later)
+            .await
+            .expect("stamp last_login");
+        let stamped: Option<DateTime<Utc>> =
+            sqlx::query_scalar("SELECT last_login FROM users WHERE id = $1")
+                .bind(user_id)
+                .fetch_one(&mut *tx)
+                .await
+                .expect("read back");
+        assert_eq!(stamped, Some(later));
+        rehash_password(&mut *tx, user_id, "new-hash")
+            .await
+            .expect("rehash");
+        let row: (String, DateTime<Utc>) =
+            sqlx::query_as("SELECT password, updated_at FROM users WHERE id = $1")
+                .bind(user_id)
+                .fetch_one(&mut *tx)
+                .await
+                .expect("read back");
+        assert_eq!(row, ("new-hash".to_owned(), now));
+        touch_user_updated_at(&mut *tx, user_id, later)
+            .await
+            .expect("touch");
+        let touched: DateTime<Utc> =
+            sqlx::query_scalar("SELECT updated_at FROM users WHERE id = $1")
+                .bind(user_id)
+                .fetch_one(&mut *tx)
+                .await
+                .expect("read back");
+        assert_eq!(touched, later);
+        clear_avatar(&mut *tx, user_id).await.expect("clear avatar");
+        let avatar: String = sqlx::query_scalar("SELECT avatar FROM users WHERE id = $1")
+            .bind(user_id)
+            .fetch_one(&mut *tx)
+            .await
+            .expect("read back");
+        assert_eq!(avatar, "");
+        stamp_logout(&mut *tx, user_id, Some("9.9.9.9"), later)
+            .await
+            .expect("stamp logout");
+        let logged: (String, Option<DateTime<Utc>>) =
+            sqlx::query_as("SELECT last_logout_ip, last_logout_time FROM users WHERE id = $1")
+                .bind(user_id)
+                .fetch_one(&mut *tx)
+                .await
+                .expect("read back");
+        assert_eq!(logged, ("9.9.9.9".to_owned(), Some(later)));
+        // The app sign-out binds `None` when no IP is present: the NOT
+        // NULL column raises, and the caller swallows it (bare redirect).
+        sqlx::query("SAVEPOINT sp_logout_none")
+            .execute(&mut *tx)
+            .await
+            .expect("savepoint");
+        let err = stamp_logout(&mut *tx, user_id, None, later)
+            .await
+            .expect_err("None ip raises");
+        assert_not_null_violation(&err);
+        sqlx::query("ROLLBACK TO SAVEPOINT sp_logout_none")
+            .execute(&mut *tx)
+            .await
+            .expect("rollback to savepoint");
+    }
+
+    /// PIDASHCONV-1628: the password twins write the hash plus the
+    /// `User.save()` effects; rotation fires only when a token is
+    /// already in use, and only the login twin bumps `last_login`.
+    #[tokio::test]
+    async fn live_password_twins_rotation_and_login_arms() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let mut tx = pool.begin().await.expect("begin scratch tx");
+        sqlx::query(USERS_DDL)
+            .execute(&mut *tx)
+            .await
+            .expect("temp users");
+        let now: DateTime<Utc> = "2026-10-27T12:00:00+00:00".parse().expect("T0");
+        let user_id = live_uuid("000000001629");
+        seed_stamp_user(&mut tx, user_id, now).await;
+        // No token in use: the token columns stay put, `last_login`
+        // bumps on the login twin.
+        write_password_with_save_effects(
+            &mut *tx,
+            user_id,
+            &PasswordSave {
+                encoded: "hash-1",
+                fresh_token: "fresh-1",
+                rotated_at: now,
+                stamp_last_login: true,
+            },
+        )
+        .await
+        .expect("login twin");
+        let row: (String, String, Option<DateTime<Utc>>, Option<DateTime<Utc>>) = sqlx::query_as(
+            "SELECT password, token, token_updated_at, last_login FROM users WHERE id = $1",
+        )
+        .bind(user_id)
+        .fetch_one(&mut *tx)
+        .await
+        .expect("read back");
+        assert_eq!(row.0, "hash-1");
+        assert_eq!(row.1, "");
+        assert_eq!(row.2, None);
+        assert!(row.3.is_some(), "login twin bumps last_login");
+        // A token in use rotates; the reset twin leaves `last_login`
+        // alone.
+        sqlx::query("UPDATE users SET token = 'old', token_updated_at = $1 WHERE id = $2")
+            .bind(now)
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await
+            .expect("arm token");
+        sqlx::query("UPDATE users SET last_login = NULL WHERE id = $1")
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await
+            .expect("clear last_login");
+        write_password_with_save_effects(
+            &mut *tx,
+            user_id,
+            &PasswordSave {
+                encoded: "hash-2",
+                fresh_token: "fresh-2",
+                rotated_at: now,
+                stamp_last_login: false,
+            },
+        )
+        .await
+        .expect("reset twin");
+        let row: (String, Option<DateTime<Utc>>, Option<DateTime<Utc>>) =
+            sqlx::query_as("SELECT token, token_updated_at, last_login FROM users WHERE id = $1")
+                .bind(user_id)
+                .fetch_one(&mut *tx)
+                .await
+                .expect("read back");
+        assert_eq!(row.0, "fresh-2");
+        assert_eq!(row.1, Some(now));
+        assert_eq!(row.2, None);
+    }
+
+    /// PIDASHCONV-1628: the profile pointer follows the approved
+    /// workspace and is nulled when that workspace is deleted.
+    #[tokio::test]
+    async fn live_last_workspace_set_and_clear() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let mut tx = pool.begin().await.expect("begin scratch tx");
+        sqlx::query(PROFILES_DDL)
+            .execute(&mut *tx)
+            .await
+            .expect("temp profiles");
+        let now: DateTime<Utc> = "2026-10-27T12:00:00+00:00".parse().expect("T0");
+        let user_id = live_uuid("00000000162a");
+        let ws_id = live_uuid("00000000162b");
+        sqlx::query(
+            "INSERT INTO profiles (id, created_at, updated_at, user_id, theme,
+             is_app_rail_docked, is_tour_completed, onboarding_step, is_onboarded,
+             billing_address_country, has_billing_address, company_name,
+             notification_view_mode, is_smooth_cursor_enabled, is_mobile_onboarded,
+             mobile_onboarding_step, mobile_timezone_auto_set, language,
+             start_of_the_week, goals, background_color,
+             is_navigation_tour_completed, has_marketing_email_consent,
+             is_subscribed_to_changelog, product_tour, settings)
+             VALUES (gen_random_uuid(), $1, $1, $2, '{}', TRUE, FALSE, '{}', FALSE,
+             'INDIA', FALSE, '', 'full', FALSE, FALSE, '{}', FALSE, 'en', 0, '{}',
+             '#ffffff', FALSE, FALSE, FALSE, '{}', '{}')",
+        )
+        .bind(now)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .expect("seed profile");
+        set_last_workspace(&mut *tx, user_id, ws_id)
+            .await
+            .expect("set pointer");
+        let pointed: Option<Uuid> =
+            sqlx::query_scalar("SELECT last_workspace_id FROM profiles WHERE user_id = $1")
+                .bind(user_id)
+                .fetch_one(&mut *tx)
+                .await
+                .expect("read back");
+        assert_eq!(pointed, Some(ws_id));
+        clear_last_workspace(&mut *tx, ws_id)
+            .await
+            .expect("clear pointers");
+        let pointed: Option<Uuid> =
+            sqlx::query_scalar("SELECT last_workspace_id FROM profiles WHERE user_id = $1")
+                .bind(user_id)
+                .fetch_one(&mut *tx)
+                .await
+                .expect("read back");
+        assert_eq!(pointed, None);
+    }
+
+    /// PIDASHCONV-1628: the `PATCH users/me/` save persists the merged
+    /// row plus the derived values.
+    #[tokio::test]
+    async fn live_save_me_profile_persists_merged_row() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let mut tx = pool.begin().await.expect("begin scratch tx");
+        sqlx::query(USERS_DDL)
+            .execute(&mut *tx)
+            .await
+            .expect("temp users");
+        let now: DateTime<Utc> = "2026-10-27T12:00:00+00:00".parse().expect("T0");
+        let later: DateTime<Utc> = "2026-10-28T12:00:00+00:00".parse().expect("T1");
+        let user_id = live_uuid("00000000162c");
+        seed_stamp_user(&mut tx, user_id, now).await;
+        save_me_profile(
+            &mut *tx,
+            user_id,
+            &MeProfileSave {
+                last_login: Some(later),
+                display_name: "Ada",
+                first_name: "Ada",
+                last_name: "Lovelace",
+                avatar: "img",
+                avatar_asset_id: None,
+                cover_image: Some("cover"),
+                cover_image_asset_id: None,
+                is_password_expired: true,
+                is_password_reset_required: false,
+                bot_type: Some("agent"),
+                user_timezone: "UTC",
+                is_email_valid: true,
+                masked_at: None,
+                email: "ada@example.test",
+                token: "tok",
+                token_updated_at: Some(now),
+                is_staff: true,
+                updated_at: later,
+            },
+        )
+        .await
+        .expect("save me profile");
+        let row: (
+            Option<DateTime<Utc>>,
+            String,
+            String,
+            bool,
+            bool,
+            Option<String>,
+        ) = sqlx::query_as(
+            "SELECT last_login, display_name, email, is_password_expired, is_staff, bot_type \
+                 FROM users WHERE id = $1",
+        )
+        .bind(user_id)
+        .fetch_one(&mut *tx)
+        .await
+        .expect("read back");
+        assert_eq!(
+            row,
+            (
+                Some(later),
+                "Ada".to_owned(),
+                "ada@example.test".to_owned(),
+                true,
+                true,
+                Some("agent".to_owned())
+            )
+        );
     }
 }
