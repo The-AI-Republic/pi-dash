@@ -338,6 +338,8 @@ export {
   BulkArchiveResult,
   BulkDeleteResult,
   BulkIssueDatesResult,
+  BulkOperationResult,
+  BulkSubscribeResult,
   bulkArchiveIssues,
   bulkDeleteIssues,
   bulkSubscribeIssues,
@@ -345,6 +347,8 @@ export {
   bulkUpdateIssues,
 } from "./contracts/issue-bulk.js";
 export type { BulkIssueDateUpdate, BulkIssueProperties, BulkOperationInput } from "./contracts/issue-bulk.js";
+export { IssueTypeList, IssueTypeRow, createIssueType, listIssueTypes } from "./contracts/issue-types.js";
+export type { IssueTypeCreateInput } from "./contracts/issue-types.js";
 export {
   CycleUserProperties,
   EpicUserProperties,

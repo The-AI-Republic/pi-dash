@@ -11325,6 +11325,35 @@ export interface DeskSigninUpdateLink {
   deskShellDeviceSubmitCode(code: string): Promise<void>;
   /** Close the page, reopen the entry in a fresh page of the same context; resolves with the landed path. The driver's page stays closed, so only API checks may follow. */
   deskShellCloseReopenPath(): Promise<string>;
+  // --- Issues cloud presence (NEWFRONT-984, ISS-112–116/121/206/231–237
+  // --- cloud legs). Appended; existing methods above are untouched per
+  // --- the shared driver contract. The cloud specs run on web_new only:
+  // --- the OSS oracle provably lacks every surface, so the old-app
+  // --- driver throws on these.
+  /** Whether the functional cloud bulk toolbar renders (the OSS banner is a different reader). */
+  bulkToolbarVisible(): Promise<boolean>;
+  /** Delete the selection through the toolbar; resolves once the confirm closes. */
+  bulkToolbarDelete(): Promise<void>;
+  /** Archive the selection through the toolbar. */
+  bulkToolbarArchive(): Promise<void>;
+  /** Apply one priority across the selection through the edit dialog; resolves once it closes. */
+  bulkToolbarUpdatePriority(priorityLabel: string): Promise<void>;
+  /** Subscribe to the selection through the toolbar. */
+  bulkToolbarSubscribe(): Promise<void>;
+  /** Select the first N list rows (cloud legs prove multi-row batches). */
+  selectFirstRows(count: number): Promise<void>;
+  /** Create an epic through the relations widget action; resolves once the dialog closes. */
+  epicCreateViaWidget(name: string): Promise<void>;
+  /** Rename an epic through its relation-row menu; resolves once the dialog closes. */
+  epicRenameRelationRow(currentName: string, nextName: string): Promise<void>;
+  /** Pick a work-item type in the open create modal. */
+  modalSelectIssueType(name: string): Promise<void>;
+  /** Dependency arrows the timeline draws. */
+  ganttDependencyArrowCount(): Promise<number>;
+  /** Drag-to-link handles the timeline offers. */
+  ganttDependencyHandleCount(): Promise<number>;
+  /** Drag the handle of `fromId` onto the lane of `toId`; resolves once the pointer releases. */
+  ganttLinkBlocks(fromId: string, toId: string): Promise<void>;
 }
 
 /** General-tab field keys for the NEWFRONT-426 settingsProfile readers. */

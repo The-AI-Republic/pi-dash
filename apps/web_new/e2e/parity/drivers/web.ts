@@ -59923,4 +59923,56 @@ export class WebDriver implements ParityDriver {
   async pagesNestedPaletteFind(_query: string): Promise<string[]> {
     return this.pagesNestedNotApplicable();
   }
+
+  // --- Issues cloud presence (NEWFRONT-984). The cloud specs run on
+  // --- web_new only (the OSS oracle provably lacks every surface), so
+  // --- the old-app driver refuses these outright.
+
+  async bulkToolbarVisible(): Promise<boolean> {
+    throw new Error("[parity] issues cloud legs run on web_new only (NEWFRONT-984).");
+  }
+
+  async bulkToolbarDelete(): Promise<void> {
+    throw new Error("[parity] issues cloud legs run on web_new only (NEWFRONT-984).");
+  }
+
+  async bulkToolbarArchive(): Promise<void> {
+    throw new Error("[parity] issues cloud legs run on web_new only (NEWFRONT-984).");
+  }
+
+  async bulkToolbarUpdatePriority(): Promise<void> {
+    throw new Error("[parity] issues cloud legs run on web_new only (NEWFRONT-984).");
+  }
+
+  async bulkToolbarSubscribe(): Promise<void> {
+    throw new Error("[parity] issues cloud legs run on web_new only (NEWFRONT-984).");
+  }
+
+  async selectFirstRows(): Promise<void> {
+    throw new Error("[parity] issues cloud legs run on web_new only (NEWFRONT-984).");
+  }
+
+  async epicCreateViaWidget(): Promise<void> {
+    throw new Error("[parity] issues cloud legs run on web_new only (NEWFRONT-984).");
+  }
+
+  async epicRenameRelationRow(): Promise<void> {
+    throw new Error("[parity] issues cloud legs run on web_new only (NEWFRONT-984).");
+  }
+
+  async modalSelectIssueType(): Promise<void> {
+    throw new Error("[parity] issues cloud legs run on web_new only (NEWFRONT-984).");
+  }
+
+  async ganttDependencyArrowCount(): Promise<number> {
+    throw new Error("[parity] issues cloud legs run on web_new only (NEWFRONT-984).");
+  }
+
+  async ganttDependencyHandleCount(): Promise<number> {
+    throw new Error("[parity] issues cloud legs run on web_new only (NEWFRONT-984).");
+  }
+
+  async ganttLinkBlocks(_fromId: string, _toId: string): Promise<void> {
+    throw new Error("[parity] issues cloud legs run on web_new only (NEWFRONT-984).");
+  }
 }

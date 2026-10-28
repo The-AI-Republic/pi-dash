@@ -163,6 +163,10 @@ def refresh_project_issues(project, workspace, state, user) -> None:
             ("intake_issues", "duplicate_to_id"),
             ("issue_versions", "issue_id"),
             ("issue_description_versions", "issue_id"),
+            # NEWFRONT-984: worklog rows (NEWFRONT-672) reference the
+            # seeded issues; without this a reseed after a worklog run
+            # trips the issue FK.
+            ("issue_worklogs", "issue_id"),
             ("issue_agent_ticker", "issue_id"),
             ("git_code_review_links", "issue_id"),
             ("github_pull_request_links", "issue_id"),

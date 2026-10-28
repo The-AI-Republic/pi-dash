@@ -1,19 +1,34 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Contract: bulk issue delete, archive and batch dates against live
-// Django (NEWFRONT-611). Bulk update and bulk subscribe are cloud-only
-// (no OSS route) and are proven by stub unit tests in contracts.test.ts
-// instead.
+// Contract: bulk issue delete, archive, batch dates, update and
+// subscribe against live Django (NEWFRONT-611, NEWFRONT-984). The update
+// and subscribe routes ride the OSS stack API ungated — the cloud gate
+// lives in the web_new edition module, not here.
 import { describe, expect, it } from "vitest";
 import type { ApiClient } from "../client.js";
-import { bulkArchiveIssues, bulkDeleteIssues, bulkUpdateIssueDates } from "../contracts/issue-bulk.js";
+import {
+  bulkArchiveIssues,
+  bulkDeleteIssues,
+  bulkSubscribeIssues,
+  bulkUpdateIssueDates,
+  bulkUpdateIssues,
+} from "../contracts/issue-bulk.js";
 import { createIssue, deleteIssue, updateIssue } from "../contracts/issue-actions.js";
 import { restoreIssue } from "../contracts/issue-lifecycle.js";
 import { getIssue, listArchivedIssues, listIssues } from "../contracts/issues.js";
 import { listProjects } from "../contracts/projects.js";
 import { listStates } from "../contracts/reference.js";
-import { CONTRACT_PROJECT_IDENTIFIER, CONTRACT_WORKSPACE, contractEnabled, sharedSignedIn } from "./setup.js";
+import { signIn } from "../contracts/auth-entry.js";
+import {
+  CONTRACT_PASSWORD,
+  CONTRACT_PROJECT_IDENTIFIER,
+  CONTRACT_SECONDARY_EMAIL,
+  CONTRACT_WORKSPACE,
+  contractClient,
+  contractEnabled,
+  sharedSignedIn,
+} from "./setup.js";
 
 async function signedIn(): Promise<ApiClient> {
   return sharedSignedIn();
@@ -164,5 +179,104 @@ describe.skipIf(!contractEnabled)("bulk issue dates contract", () => {
     expect(detail.start_date).toBe("2026-03-01");
     expect(detail.target_date).toBe("2026-03-10");
     await deleteIssue(client, CONTRACT_WORKSPACE, projectId, probe.id);
+  });
+});
+
+const BULK_OPERATION_PROBES = ["Contract bulk operation one", "Contract bulk operation two"];
+
+describe.skipIf(!contractEnabled)("bulk issue operation contract", () => {
+  it("applies one properties object across the selection", async () => {
+    const client = await signedIn();
+    const projectId = await seededProjectId(client);
+    await clearProbes(client, projectId, BULK_OPERATION_PROBES);
+    const states = await listStates(client, CONTRACT_WORKSPACE, projectId);
+    const doneState = states.find((state) => state.group === "completed");
+    expect(doneState).toBeDefined();
+    if (!doneState) return;
+    const ids = [];
+    for (const name of BULK_OPERATION_PROBES) {
+      const created = await createIssue(client, CONTRACT_WORKSPACE, projectId, { name });
+      ids.push(created.id);
+    }
+    const result = await bulkUpdateIssues(client, CONTRACT_WORKSPACE, projectId, {
+      issue_ids: ids,
+      properties: {
+        state_id: doneState.id,
+        priority: "urgent",
+        start_date: "2026-05-01",
+        target_date: "2026-05-10",
+      },
+    });
+    expect(result.updated).toBe(2);
+    for (const id of ids) {
+      const detail = await getIssue(client, CONTRACT_WORKSPACE, projectId, id);
+      expect(detail.state_id).toBe(doneState.id);
+      expect(detail.priority).toBe("urgent");
+      expect(detail.start_date).toBe("2026-05-01");
+      expect(detail.target_date).toBe("2026-05-10");
+      await deleteIssue(client, CONTRACT_WORKSPACE, projectId, id);
+    }
+  });
+
+  it("refuses unknown properties and empty selections", async () => {
+    const client = await signedIn();
+    const projectId = await seededProjectId(client);
+    await clearProbes(client, projectId, BULK_OPERATION_PROBES);
+    const probe = await createIssue(client, CONTRACT_WORKSPACE, projectId, {
+      name: BULK_OPERATION_PROBES[0] ?? "",
+    });
+    await expect(
+      bulkUpdateIssues(client, CONTRACT_WORKSPACE, projectId, {
+        issue_ids: [probe.id],
+        properties: { name: "renamed" } as unknown as { priority: "high" },
+      })
+    ).rejects.toMatchObject({ status: 400 });
+    await expect(
+      bulkUpdateIssues(client, CONTRACT_WORKSPACE, projectId, {
+        issue_ids: [],
+        properties: { priority: "high" },
+      })
+    ).rejects.toMatchObject({ status: 400 });
+    // The failed batches wrote nothing.
+    const detail = await getIssue(client, CONTRACT_WORKSPACE, projectId, probe.id);
+    expect(detail.priority).not.toBe("high");
+    await deleteIssue(client, CONTRACT_WORKSPACE, projectId, probe.id);
+  });
+});
+
+const BULK_SUBSCRIBE_PROBES = ["Contract bulk subscribe one", "Contract bulk subscribe two"];
+
+describe.skipIf(!contractEnabled)("bulk issue subscribe contract", () => {
+  it("subscribes once and repeats idempotently", async () => {
+    const client = await signedIn();
+    const projectId = await seededProjectId(client);
+    await clearProbes(client, projectId, BULK_SUBSCRIBE_PROBES);
+    const ids = [];
+    for (const name of BULK_SUBSCRIBE_PROBES) {
+      const created = await createIssue(client, CONTRACT_WORKSPACE, projectId, { name });
+      ids.push(created.id);
+    }
+    // The notifications worker subscribes the issue creator in the
+    // background, so the creator's own count races it. The secondary
+    // member is never auto-subscribed: their count is deterministic.
+    const secondary = contractClient();
+    const signInResult = await signIn(secondary, {
+      email: CONTRACT_SECONDARY_EMAIL,
+      password: CONTRACT_PASSWORD,
+    });
+    expect(signInResult.ok).toBe(true);
+    const first = await bulkSubscribeIssues(secondary, CONTRACT_WORKSPACE, projectId, ids);
+    expect(first.subscribed).toBe(2);
+    const repeat = await bulkSubscribeIssues(secondary, CONTRACT_WORKSPACE, projectId, ids);
+    expect(repeat.subscribed).toBe(0);
+    for (const id of ids) await deleteIssue(client, CONTRACT_WORKSPACE, projectId, id);
+  });
+
+  it("refuses an empty selection", async () => {
+    const client = await signedIn();
+    const projectId = await seededProjectId(client);
+    await expect(bulkSubscribeIssues(client, CONTRACT_WORKSPACE, projectId, [])).rejects.toMatchObject({
+      status: 400,
+    });
   });
 });

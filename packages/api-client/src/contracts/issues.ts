@@ -49,6 +49,9 @@ const issueCoreFields = {
   project_id: uuid(),
   parent_id: nullableUuid(),
   cycle_id: nullableUuid(),
+  // Work-item type (ISS-129/234/235): only the detail serializer and the
+  // sub-issue rows send it, so readers treat absence as "no type".
+  type_id: z.optional(nullableUuid()),
   assigned_runner_id: z.optional(nullableUuid()),
   module_ids: z.array(uuid()),
   label_ids: z.array(uuid()),

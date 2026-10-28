@@ -109,6 +109,7 @@ import {
   listWorkspaceLabels,
   listWorkspaceStates,
 } from "./contracts/reference.js";
+import { createIssueType, listIssueTypes } from "./contracts/issue-types.js";
 import {
   getIssue,
   listCycleIssues,
@@ -1237,6 +1238,51 @@ describe("project contracts", () => {
 });
 
 describe("reference contracts", () => {
+  it("parses project work-item types", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: json([
+        {
+          id: UUID,
+          name: "Bug",
+          description: "",
+          logo_props: {},
+          is_epic: false,
+          is_default: false,
+          is_active: true,
+          level: 1,
+        },
+      ]),
+    });
+    const parsed = await listIssueTypes(client, "acme", UUID2);
+    expect(parsed[0]?.name).toBe("Bug");
+  });
+
+  it("posts the work-item type payload to issue-types", async () => {
+    const transport = recordingTransport(() =>
+      fakeResponse({
+        status: 201,
+        body: JSON.stringify({
+          id: UUID,
+          name: "Epic",
+          description: "",
+          logo_props: {},
+          is_epic: true,
+          is_default: false,
+          is_active: true,
+          level: 0,
+        }),
+        url: "https://api.test/",
+      })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const created = await createIssueType(client, "acme", UUID2, { name: "Epic", is_epic: true });
+    const call = transport.calls.find((entry) => entry.url.includes("/issue-types/"));
+    expect(call?.url).toBe(`https://api.test/api/workspaces/acme/projects/${UUID2}/issue-types/`);
+    expect(call?.init.method).toBe("POST");
+    expect(created.is_epic).toBe(true);
+  });
+
   it("parses states", async () => {
     const client = createClient({
       baseUrl: "https://api.test",
@@ -1561,12 +1607,23 @@ describe("issue contracts", () => {
     expect(parsed.git_work_branch).toBe("team/stored");
     expect(parsed.has_open_blockers).toBe(false);
     expect(parsed.is_epic).toBeUndefined();
+    expect(parsed.type_id).toBeUndefined();
   });
 
   it("parses the epic marker when the detail carries it", async () => {
     const client = createClient({ baseUrl: "https://api.test", transport: json({ ...issueDetail, is_epic: true }) });
     const parsed = await getIssue(client, "acme", UUID2, UUID);
     expect(parsed.is_epic).toBe(true);
+  });
+
+  it("parses the type id when the detail carries it", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: json({ ...issueDetail, type_id: UUID2, is_epic: false }),
+    });
+    const parsed = await getIssue(client, "acme", UUID2, UUID);
+    expect(parsed.type_id).toBe(UUID2);
+    expect(parsed.is_epic).toBe(false);
   });
 
   it("hits the detail URL", async () => {
@@ -4629,13 +4686,18 @@ describe("approvals contracts", () => {
 });
 
 describe("cloud-only issues contracts", () => {
-  // Bulk update, bulk subscribe and epics user-properties have no OSS
-  // route, so no live contract test can reach them. These stub tests
-  // prove the request shapes and response parsing instead.
+  // Bulk update and bulk subscribe ride ungated OSS routes with live
+  // contract tests (NEWFRONT-984); these stub tests still prove their
+  // request shapes. Epics user-properties has no OSS route, so no live
+  // contract test can reach it — its stub proves the shape instead.
 
   it("posts the bulk update payload to bulk-operation-issues", async () => {
     const transport = recordingTransport(() =>
-      fakeResponse({ status: 200, body: JSON.stringify({ message: "ok" }), url: "https://api.test/" })
+      fakeResponse({
+        status: 200,
+        body: JSON.stringify({ message: "ok", updated: 1 }),
+        url: "https://api.test/",
+      })
     );
     const client = createClient({ baseUrl: "https://api.test", transport });
     await bulkUpdateIssues(client, "acme", UUID2, {
@@ -4654,7 +4716,11 @@ describe("cloud-only issues contracts", () => {
 
   it("posts the bulk subscribe payload to bulk-subscribe-issues", async () => {
     const transport = recordingTransport(() =>
-      fakeResponse({ status: 200, body: JSON.stringify({ message: "ok" }), url: "https://api.test/" })
+      fakeResponse({
+        status: 200,
+        body: JSON.stringify({ message: "ok", subscribed: 1 }),
+        url: "https://api.test/",
+      })
     );
     const client = createClient({ baseUrl: "https://api.test", transport });
     await bulkSubscribeIssues(client, "acme", UUID2, [UUID]);
@@ -4713,10 +4779,10 @@ describe("cloud-only issues contracts", () => {
 });
 
 describe("epics-segment contracts (cloud-only)", () => {
-  // The OSS backend has no `epics/` routes, so nothing here can run
-  // against a live local server. These stubs prove the URLs mirror the
-  // issues endpoints (with the two renamed segments) and that the shared
-  // response shapes parse.
+  // The collection, entry and children routes ride the OSS stack API
+  // with live contract tests (NEWFRONT-984); these stubs still prove
+  // the URLs mirror the issues endpoints (with the two renamed
+  // segments) and that the shared response shapes parse.
 
   const issueRow = {
     id: UUID,

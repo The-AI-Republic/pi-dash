@@ -11,20 +11,22 @@
 // log; the member/guest edges stay unit-covered in eligibility.test.ts.
 import { test, expect } from "../fixtures";
 import { serverCreateIssueFull, serverCleanupIssueWithSession, signInSession } from "../helpers/api";
+import { browserCookiesFromHeader } from "../helpers/cloud-session";
 import { specTags, specTitle } from "../helpers/tags";
 
 test(
   specTitle(["ISS-206"], "cloud: log time and see it in the feed and sidebar"),
   { tag: specTags(["ISS-206"]) },
-  async ({ driver, seed, page }, testInfo) => {
+  async ({ driver, seed, page, context }, testInfo) => {
     test.skip(testInfo.project.name !== "new", "cloud worklog pins the web_new UI only");
     const tag = `NF672 worklog ${Date.now()}`;
     const note = `${tag} note`;
     const session = await signInSession(seed.email, seed.password);
     const issue = await serverCreateIssueFull(seed.workspaceSlug, seed.projectId, `${tag} issue`, session);
     try {
-      await driver.openEntry();
-      await driver.signInWithPassword(seed.email, seed.password);
+      // The cloud /login is OIDC-only: act as the seed user through API
+      // session cookies instead of the UI sign-in (NEWFRONT-984).
+      await context.addCookies(browserCookiesFromHeader(session));
       await driver.openIssueDetail(seed.workspaceSlug, seed.projectId, issue.id);
 
       await test.step("log-time control renders in the activity header", async () => {

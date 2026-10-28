@@ -5046,11 +5046,13 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async subIssueFiltersOpen(_workspaceSlug: string, _projectId: string, _parentIssueId: string): Promise<void> {
-    return todo("subIssueFiltersOpen");
+    // The caller opens the detail first; this only drops the filter menu.
+    await this.page.getByTestId("sub-issue-filters-trigger").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByTestId("sub-issue-filters-panel").waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async subIssueFiltersPanelText(): Promise<string> {
-    return todo("subIssueFiltersPanelText");
+    return (await this.page.getByTestId("sub-issue-filters-panel").innerText()).trim();
   }
 
   async detailIdentifierText(): Promise<string> {
@@ -45429,5 +45431,100 @@ export class WebNewDriver implements ParityDriver {
     // (PAGE-090).
     await this.resetPaletteToClosed();
     return rows.filter((row) => row !== "");
+  }
+
+  // --- Issues cloud presence (NEWFRONT-984, ISS-112–116/121/206/231–237
+  // --- cloud legs). The cloud specs run on web_new only; the old-app
+  // --- driver throws on these.
+
+  async bulkToolbarVisible(): Promise<boolean> {
+    const toolbar = this.page.getByTestId("bulk-toolbar");
+    return (await toolbar.count()) > 0 && (await toolbar.first().isVisible());
+  }
+
+  async bulkToolbarDelete(): Promise<void> {
+    const toolbar = this.page.getByTestId("bulk-toolbar");
+    await toolbar.getByRole("button", { name: "Delete", exact: true }).click();
+    const dialog = this.page.getByRole("dialog", { name: "Delete selected work items?" });
+    await dialog.getByRole("button", { name: "Delete", exact: true }).click();
+    await dialog.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async bulkToolbarArchive(): Promise<void> {
+    const toolbar = this.page.getByTestId("bulk-toolbar");
+    await toolbar.getByRole("button", { name: "Archive", exact: true }).click();
+  }
+
+  async bulkToolbarUpdatePriority(priorityLabel: string): Promise<void> {
+    const toolbar = this.page.getByTestId("bulk-toolbar");
+    await toolbar.getByRole("button", { name: "Edit properties", exact: true }).click();
+    const dialog = this.page.getByRole("dialog", { name: "Edit selected work items" });
+    await dialog.getByRole("checkbox", { name: "Priority", exact: true }).check();
+    // The picker trigger carries the current level; a fresh selection
+    // starts unprioritized.
+    await dialog.getByRole("button", { name: "None", exact: true }).click();
+    await this.page
+      .getByRole("listbox", { name: "Priorities" })
+      .getByRole("option", { name: priorityLabel, exact: true })
+      .click();
+    await dialog.getByRole("button", { name: "Apply", exact: true }).click();
+    await dialog.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async bulkToolbarSubscribe(): Promise<void> {
+    const toolbar = this.page.getByTestId("bulk-toolbar");
+    await toolbar.getByRole("button", { name: "Subscribe", exact: true }).click();
+  }
+
+  async selectFirstRows(count: number): Promise<void> {
+    // Row controls are named `Select <identifier>`; group controls are
+    // `Select all …`, so this deliberately excludes the group header.
+    const boxes = this.page.getByRole("checkbox", { name: /^Select (?!all\b)/ });
+    const total = await boxes.count();
+    for (let index = 0; index < Math.min(count, total); index += 1) {
+      await boxes.nth(index).click();
+    }
+  }
+
+  async epicCreateViaWidget(name: string): Promise<void> {
+    await this.page.getByRole("button", { name: "Create epic", exact: true }).click();
+    const dialog = this.page.getByRole("dialog", { name: "Create epic" });
+    await dialog.getByRole("textbox", { name: "Epic name", exact: true }).fill(name);
+    await dialog.getByRole("button", { name: "Create epic", exact: true }).click();
+    await dialog.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async epicRenameRelationRow(currentName: string, nextName: string): Promise<void> {
+    await this.page.getByRole("button", { name: `Actions for ${currentName}`, exact: true }).click();
+    await this.page.getByRole("menuitem", { name: "Edit", exact: true }).click();
+    const dialog = this.page.getByRole("dialog", { name: "Edit epic" });
+    await dialog.getByRole("textbox", { name: "Epic name", exact: true }).fill(nextName);
+    await dialog.getByRole("button", { name: "Save epic", exact: true }).click();
+    await dialog.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async modalSelectIssueType(name: string): Promise<void> {
+    const dialog = this.createDialog();
+    await dialog.getByRole("button", { name: "No type", exact: true }).click();
+    await this.page.getByRole("listbox", { name: "Issue types" }).getByRole("option", { name, exact: true }).click();
+  }
+
+  async ganttDependencyArrowCount(): Promise<number> {
+    return this.page.getByTestId("gantt-dependency-arrow").count();
+  }
+
+  async ganttDependencyHandleCount(): Promise<number> {
+    return this.page.getByTestId("gantt-dependency-handle").count();
+  }
+
+  async ganttLinkBlocks(fromId: string, toId: string): Promise<void> {
+    // The layer links on mouseup over a lane: hover the handle, press,
+    // travel to the target lane, release. The link mutation settles after
+    // the release, so callers poll the arrow count.
+    const handle = this.page.locator(`[data-testid="gantt-dependency-handle"][data-source-id="${fromId}"]`);
+    await handle.hover();
+    await this.page.mouse.down();
+    await this.page.locator(`[data-gantt-lane][data-lane-id="${toId}"]`).hover();
+    await this.page.mouse.up();
   }
 }

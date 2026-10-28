@@ -125,6 +125,15 @@ describe("buildCreatePayload", () => {
     });
   });
 
+  it("carries the picked work-item type and omits the default (ISS-129)", () => {
+    expect(buildCreatePayload(form({ name: "Typed" }), "t-bug")).toEqual({
+      name: "Typed",
+      type: "t-bug",
+    });
+    expect(buildCreatePayload(form({ name: "Typed" }), null)).toEqual({ name: "Typed" });
+    expect(buildCreatePayload(form({ name: "Typed" }))).toEqual({ name: "Typed" });
+  });
+
   it("drops the editor's mount-time empty paragraph", () => {
     expect(buildCreatePayload(form({ name: "Fresh", descriptionHtml: "<p></p>" }))).toEqual({ name: "Fresh" });
   });

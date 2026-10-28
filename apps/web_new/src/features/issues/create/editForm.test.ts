@@ -19,6 +19,7 @@ import {
   changedCycleId,
   changedDraftProject,
   changedModuleIds,
+  changedTypeId,
   editableFromDraft,
   editableFromIssue,
   editMembership,
@@ -366,6 +367,24 @@ describe("changedDraftProject", () => {
   it("reports nothing when the project did not move", () => {
     const form = formFromRow(row(), PROJECT);
     expect(changedDraftProject(form, baselineFor(form))).toBeUndefined();
+  });
+});
+
+describe("changedTypeId", () => {
+  it("sends nothing when the pick never moved (ISS-129)", () => {
+    expect(changedTypeId("type-1", "type-1")).toBeUndefined();
+    expect(changedTypeId(null, null)).toBeUndefined();
+  });
+
+  it("sends the pick when it moved off the stored row (ISS-129)", () => {
+    expect(changedTypeId("type-2", "type-1")).toBe("type-2");
+    expect(changedTypeId("type-1", null)).toBe("type-1");
+  });
+
+  it("sends null when cleared back to No type (ISS-129)", () => {
+    // The server clears the row; omitting the key would silently keep
+    // the stored type while the picker shows none.
+    expect(changedTypeId(null, "type-1")).toBeNull();
   });
 });
 

@@ -50,7 +50,9 @@ function setup() {
     if (fail) {
       return response(400, emptyMessage ? { message: "" } : { detail: "Bulk action refused" });
     }
-    return response(200, { message: "ok", archived_at: "2026-05-01" });
+    // Superset of the four bulk result shapes (NEWFRONT-984 verified the
+    // update/subscribe counts); each schema reads its own fields.
+    return response(200, { message: "ok", archived_at: "2026-05-01", updated: 1, subscribed: 1 });
   }) as never);
   const client = new QueryClient({ defaultOptions: { mutations: { retry: false }, queries: { retry: false } } });
   const wrapper = function Wrapper({ children }: { children?: unknown }): React.ReactElement {
