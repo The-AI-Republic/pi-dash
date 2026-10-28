@@ -51986,86 +51986,225 @@ export class WebNewDriver implements ParityDriver {
 
   // --- Live cycles list (NEWFRONT-249, CYC-001–008). Appended; the stubs
   // --- above are untouched per the shared driver contract.
-  async cyclesOpenList(_workspaceSlug: string, _projectId: string): Promise<void> {
-    return todo("cyclesOpenList");
+  async cyclesOpenList(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/cycles`);
+    await this.page.waitForLoadState("domcontentloaded");
   }
+
   async cyclesVisibleNames(): Promise<string[]> {
-    return todo("cyclesVisibleNames");
+    // Hero row first, then the group rows, in DOM order; the name is
+    // each row link's truncating span.
+    const rows = this.page.locator('div[data-testid="cycle-row"]');
+    const total = await rows.count();
+    const names: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const text = (await rows.nth(i).locator("a span.truncate").first().innerText()).trim();
+      if (text !== "") names.push(text);
+    }
+    return names;
   }
+
+  /** The hero and group disclosure buttons, in DOM order. */
+  private cyclesGroupButtons(): Locator {
+    return this.page.locator("button", { hasText: /^(Active|Upcoming|Completed) cycle/ });
+  }
+
   async cyclesGroupHeadings(): Promise<string[]> {
-    return todo("cyclesGroupHeadings");
+    const buttons = this.cyclesGroupButtons();
+    const total = await buttons.count();
+    const headings: string[] = [];
+    for (let i = 0; i < total; i++) {
+      if (!(await buttons.nth(i).isVisible())) continue;
+      headings.push((await buttons.nth(i).innerText()).replace(/\s+/g, " ").trim());
+    }
+    return headings;
   }
+
   async cyclesGroupCounts(): Promise<{ upcoming: number; completed: number }> {
-    return todo("cyclesGroupCounts");
+    const headings = await this.cyclesGroupHeadings();
+    const countFor = (prefix: string): number => {
+      const heading = headings.find((entry) => entry.startsWith(prefix));
+      if (heading === undefined) return 0;
+      const match = /(\d+)\s*$/.exec(heading);
+      if (match === null) return 0;
+      return Number(match[1]);
+    };
+    return { upcoming: countFor("Upcoming"), completed: countFor("Completed") };
   }
-  async cyclesGroupToggle(_section: string): Promise<void> {
-    return todo("cyclesGroupToggle");
+
+  async cyclesGroupToggle(section: string): Promise<void> {
+    await this.page
+      .locator("button", { hasText: new RegExp(`^${section}`) })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
-  async cyclesGroupExpanded(_section: string): Promise<boolean> {
-    return todo("cyclesGroupExpanded");
+
+  async cyclesGroupExpanded(section: string): Promise<boolean> {
+    const button = this.page.locator("button", { hasText: new RegExp(`^${section}`) }).first();
+    return (await button.getAttribute("aria-expanded")) === "true";
   }
   async cyclesHeroName(): Promise<string | null> {
-    return todo("cyclesHeroName");
+    return this.cyclesEditHeroCycleName();
   }
-  async cyclesRowHref(_name: string): Promise<string | null> {
-    return todo("cyclesRowHref");
+
+  async cyclesRowHref(name: string): Promise<string | null> {
+    return this.cycleRowRoot(name).locator("a").first().getAttribute("href");
   }
-  async cyclesClickRow(_name: string): Promise<void> {
-    return todo("cyclesClickRow");
+
+  async cyclesClickRow(name: string): Promise<void> {
+    await this.cycleRowRoot(name).locator("a").first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.waitForURL(/\/cycles\/[^/]+/, { timeout: WebNewDriver.WAIT_MS });
+    await this.cyclesDetailHeading().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
-  async cyclesOpenDetail(_workspaceSlug: string, _projectId: string, _cycleId: string): Promise<void> {
-    return todo("cyclesOpenDetail");
+
+  async cyclesOpenDetail(workspaceSlug: string, projectId: string, cycleId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/cycles/${cycleId}`);
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.cyclesDetailHeading().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
+
+  /** The detail header's cycle title (the issues header carries it). */
+  private cyclesDetailHeading(): Locator {
+    return this.page.getByTestId("issues-header").locator("h2").first();
+  }
+
   async cyclesDetailName(): Promise<string | null> {
-    return todo("cyclesDetailName");
+    const heading = this.cyclesDetailHeading();
+    if ((await heading.count()) === 0) return null;
+    const text = (await heading.innerText()).trim();
+    return text === "" ? null : text;
   }
+
   async cyclesDetailIssueNames(): Promise<string[]> {
-    return todo("cyclesDetailIssueNames");
+    // The detail hosts the shared issues layouts, so it reads through
+    // the same reader the issues specs use.
+    return this.visibleIssueNames();
   }
-  async cyclesRowFacts(_name: string): Promise<CyclesRowFacts> {
-    return todo("cyclesRowFacts");
+  async cyclesRowFacts(name: string): Promise<CyclesRowFacts> {
+    return this.cycleRowRoot(name).evaluate((el) => {
+      const clean = (node: Element | null): string => (node?.textContent ?? "").replace(/\s+/g, " ").trim();
+      const ring = el.querySelector('[data-testid="cycle-progress-ring"]');
+      const ringText = clean(ring);
+      const progress = ring === null || ringText === "" ? null : ringText === "100%" ? "done" : ringText;
+      const span = el.querySelector('[data-testid="cycle-date-span"]');
+      const dateText = span === null || clean(span) === "" ? null : clean(span);
+      const marker = [...el.querySelectorAll("span.sr-only")].find((node) => clean(node) === "work items") ?? null;
+      let workItemCount: string | null = null;
+      if (marker?.parentElement) {
+        for (const child of marker.parentElement.querySelectorAll("span")) {
+          const value = clean(child);
+          if (/^\d+$/.test(value)) {
+            workItemCount = value;
+            break;
+          }
+        }
+      }
+      const hasCreatorAvatar = [...el.querySelectorAll('span[role="img"]')].some(
+        (node) => !/% complete/.test(node.getAttribute("aria-label") ?? "")
+      );
+      const star = el.querySelector('[data-testid="cycle-favorite-marker"]');
+      const hasFavorite = star !== null;
+      const favoriteSelected = hasFavorite && star.getAttribute("data-favorite") === "true";
+      return { progress, dateText, workItemCount, hasCreatorAvatar, hasFavorite, favoriteSelected };
+    });
   }
-  async cyclesOpenPeek(_name: string): Promise<void> {
-    return todo("cyclesOpenPeek");
+
+  /** The open quick-look frame (CYC-004). */
+  private cyclesPeekPanel(): Locator {
+    return this.page.getByTestId("cycle-preview");
   }
-  async cyclesOpenPeekLink(_workspaceSlug: string, _projectId: string, _cycleId: string): Promise<void> {
-    return todo("cyclesOpenPeekLink");
+
+  async cyclesOpenPeek(name: string): Promise<void> {
+    const root = this.cycleRowRoot(name);
+    await root.hover({ timeout: WebNewDriver.WAIT_MS });
+    await root.getByRole("button", { name: `Quick look at ${name}` }).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.cyclesPeekPanel().locator("h4", { hasText: name }).waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
+
+  async cyclesOpenPeekLink(workspaceSlug: string, projectId: string, cycleId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/cycles?peekCycle=${cycleId}`);
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.cyclesPeekPanel().locator("h4").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+  }
+
   async cyclesPeekName(): Promise<string | null> {
-    return todo("cyclesPeekName");
+    const heading = this.cyclesPeekPanel().locator("h4").first();
+    if ((await heading.count()) === 0 || !(await heading.isVisible())) return null;
+    const text = (await heading.innerText()).trim();
+    return text === "" ? null : text;
   }
+
   async cyclesPeekParam(): Promise<string | null> {
-    return todo("cyclesPeekParam");
+    return new URL(this.page.url()).searchParams.get("peekCycle");
   }
+
   async cyclesClosePeek(): Promise<void> {
-    return todo("cyclesClosePeek");
+    await this.cyclesPeekPanel()
+      .getByRole("button", { name: "Close preview" })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.cyclesPeekPanel().locator("h4").first().waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
+
   async cyclesReload(): Promise<void> {
-    return todo("cyclesReload");
+    await this.page.reload();
+    await this.page.waitForLoadState("domcontentloaded");
   }
+
   async cyclesGoBack(): Promise<void> {
-    return todo("cyclesGoBack");
+    await this.page.goBack();
+    await this.page.waitForLoadState("domcontentloaded");
   }
+  /** The collapsed search magnifier (CYC-005). */
+  private cyclesSearchToggle(): Locator {
+    return this.page.getByTestId("cycles-search-toggle");
+  }
+
+  /** The expanded search box; unmounted while collapsed. */
+  private cyclesSearchBox(): Locator {
+    return this.page.getByTestId("cycles-search-box");
+  }
+
+  /** The expanded box's text field. */
+  private cyclesSearchInput(): Locator {
+    return this.page.getByRole("textbox", { name: "Search cycles" });
+  }
+
   async cyclesSearchExpanded(): Promise<boolean> {
-    return todo("cyclesSearchExpanded");
+    return (await this.cyclesSearchBox().count()) > 0;
   }
+
   async cyclesSearchOpen(): Promise<void> {
-    return todo("cyclesSearchOpen");
+    if (await this.cyclesSearchExpanded()) return;
+    await this.cyclesSearchToggle().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.cyclesSearchBox().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
-  async cyclesSearchFill(_text: string): Promise<void> {
-    return todo("cyclesSearchFill");
+
+  async cyclesSearchFill(text: string): Promise<void> {
+    await this.cyclesSearchInput().fill(text, { timeout: WebNewDriver.WAIT_MS });
   }
+
   async cyclesSearchText(): Promise<string> {
-    return todo("cyclesSearchText");
+    // A collapsed box holds no query, so it reads empty without waiting
+    // for a field that will never mount.
+    if (!(await this.cyclesSearchExpanded())) return "";
+    return this.cyclesSearchInput().inputValue();
   }
+
   async cyclesSearchEscape(): Promise<void> {
-    return todo("cyclesSearchEscape");
+    // The box handles Escape on the field itself: first press clears,
+    // second press collapses.
+    await this.cyclesSearchInput().press("Escape", { timeout: WebNewDriver.WAIT_MS });
   }
+
   async cyclesSearchClear(): Promise<void> {
-    return todo("cyclesSearchClear");
+    await this.page.getByRole("button", { name: "Close search" }).click({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async cyclesClickAway(): Promise<void> {
-    return todo("cyclesClickAway");
+    // Two clicks away from the search box via the filters menu, which
+    // ends closed; an empty box collapses, a filled one stays open.
+    await this.cyclesFiltersOpen();
+    await this.cyclesFiltersClose();
   }
 
   /** The list's Filters trigger (NEWFRONT-709, CYC-006-008). */
@@ -52131,8 +52270,8 @@ export class WebNewDriver implements ParityDriver {
 
   async cyclesFilterPick(section: string, optionName: string): Promise<void> {
     // The title carries the full heading ("Status of the cycle") while
-    // the specs pass its head ("Status"), so match by substring on the
-    // title attribute rather than the section body's text.
+    // the specs pass its head ("Status"), so match the section by
+    // substring; every cycles section offers semantic checkboxes.
     const block = this.cyclesFiltersPanel().locator(`[data-section-title*="${section}"]`);
     // Multi sections render options as checkboxes, single sections as
     // radios; neither carries the button role any more.

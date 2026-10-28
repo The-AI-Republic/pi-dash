@@ -27,17 +27,24 @@ import {
 import { specTags, specTitle } from "../helpers/tags";
 import type { ParityDriver, ParitySeedFacts } from "../drivers/parity-driver";
 
-/** Cycle dates that read CURRENT on the seeded stack (today is 2026-10-10). */
-const CURRENT_START = "2026-09-01";
-const CURRENT_END = "2026-12-31";
+/** ISO date `days` from today (all cycle ranges derive from this, so the suite never rots). */
+function isoIn(days: number): string {
+  const at = new Date();
+  at.setDate(at.getDate() + days);
+  return `${at.getFullYear()}-${String(at.getMonth() + 1).padStart(2, "0")}-${String(at.getDate()).padStart(2, "0")}`;
+}
+
+/** Cycle dates that read CURRENT. */
+const CURRENT_START = isoIn(-60);
+const CURRENT_END = isoIn(60);
 /** Short current end so end-date windows can tell current from upcoming. */
-const CURRENT_END_SHORT = "2026-10-20";
+const CURRENT_END_SHORT = isoIn(10);
 /** Cycle dates that read UPCOMING. */
-const UPCOMING_START = "2026-11-01";
-const UPCOMING_END = "2026-12-31";
+const UPCOMING_START = isoIn(10);
+const UPCOMING_END = isoIn(60);
 /** Cycle dates that read COMPLETED. */
-const DONE_START = "2026-01-01";
-const DONE_END = "2026-02-01";
+const DONE_START = isoIn(-60);
+const DONE_END = isoIn(-30);
 
 /**
  * Create a cycle reading DRAFT: the create call takes dated input, then a
@@ -547,9 +554,7 @@ test(
         await driver.cyclesFilterPick("Status", "Yet to start");
         await driver.cyclesFilterPick("Status", "Draft");
         await driver.cyclesFiltersClose();
-        await expect
-          .poll(() => driver.cyclesVisibleNames(), { timeout: 30_000 })
-          .toContain(done);
+        await expect.poll(() => driver.cyclesVisibleNames(), { timeout: 30_000 }).toContain(done);
         const names = await driver.cyclesVisibleNames();
         expect(names).toContain(current);
         expect(names).toContain(upcoming);
