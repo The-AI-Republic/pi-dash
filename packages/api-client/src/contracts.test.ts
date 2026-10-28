@@ -1607,12 +1607,23 @@ describe("issue contracts", () => {
     expect(parsed.git_work_branch).toBe("team/stored");
     expect(parsed.has_open_blockers).toBe(false);
     expect(parsed.is_epic).toBeUndefined();
+    expect(parsed.type_id).toBeUndefined();
   });
 
   it("parses the epic marker when the detail carries it", async () => {
     const client = createClient({ baseUrl: "https://api.test", transport: json({ ...issueDetail, is_epic: true }) });
     const parsed = await getIssue(client, "acme", UUID2, UUID);
     expect(parsed.is_epic).toBe(true);
+  });
+
+  it("parses the type id when the detail carries it", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: json({ ...issueDetail, type_id: UUID2, is_epic: false }),
+    });
+    const parsed = await getIssue(client, "acme", UUID2, UUID);
+    expect(parsed.type_id).toBe(UUID2);
+    expect(parsed.is_epic).toBe(false);
   });
 
   it("hits the detail URL", async () => {

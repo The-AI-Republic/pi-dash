@@ -1,17 +1,15 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Cloud scenarios (NEWFRONT-984): the modal type picker and the
-// sub-issue type filter section. Rows: ISS-129 (modal type half),
-// ISS-234 (type options half). Edition-gated proof per
+// Cloud scenarios (NEWFRONT-984): the modal type picker, the
+// sub-issue type filter section with its row scoping, and the detail
+// type badge. Rows: ISS-129 (modal type half), ISS-234 (type filter),
+// ISS-235 (detail badge). Edition-gated proof per
 // parity/specs/issues.md §23: the OSS legs live in create-modal.spec.ts
 // and edition-stubs.spec.ts, this file proves the cloud replacement. It
 // runs on the "new" project only — the OSS oracle provably lacks the
 // surface. Auth rides API session cookies (the cloud /login is
-// OIDC-only). Row-scoping and the detail badge wait on the read-side
-// type grant (NEWFRONT-1 process note): no live read exposes the type
-// yet, so these legs prove the picker, the create payload and the
-// filter plumbing.
+// OIDC-only).
 import { test, expect } from "../fixtures";
 import {
   parityProjectIdentifier,
@@ -22,6 +20,7 @@ import {
   serverCreateIssueType,
   serverCreateProjectWithFlags,
   serverIssues,
+  serverPatchIssue,
   signInSession,
 } from "../helpers/api";
 import { browserCookiesFromHeader } from "../helpers/cloud-session";
@@ -118,6 +117,94 @@ test(
     } finally {
       await serverCleanupIssueWithSession(seed.workspaceSlug, projectId, parent.id, session);
       await serverCleanupIssueWithSession(seed.workspaceSlug, projectId, child.id, session);
+      await serverCleanupProject(seed.workspaceSlug, projectId, session);
+    }
+  }
+);
+
+test(
+  specTitle(["ISS-234"], "cloud: the type filter scopes the sub-issue rows"),
+  { tag: specTags(["ISS-234"]) },
+  async ({ driver, seed, page, context }, testInfo) => {
+    test.skip(testInfo.project.name !== "new", "cloud filters pin the web_new UI only");
+    const tag = `NF984 typescope ${Date.now()}`;
+    const session = await signInSession(seed.email, seed.password);
+    const projectId = await serverCreateProjectWithFlags(
+      seed.workspaceSlug,
+      `${tag} project`,
+      parityProjectIdentifier("N984"),
+      {},
+      session
+    );
+    const bug = await serverCreateIssueType(seed.workspaceSlug, projectId, "Bug", session);
+    const parent = await serverCreateIssueFull(seed.workspaceSlug, projectId, `${tag} parent`, session);
+    const typed = await serverCreateIssueFull(seed.workspaceSlug, projectId, `${tag} typed`, session);
+    const plain = await serverCreateIssueFull(seed.workspaceSlug, projectId, `${tag} plain`, session);
+    await serverAddSubIssues(seed.workspaceSlug, projectId, parent.id, [typed.id, plain.id], session);
+    await serverPatchIssue(seed.workspaceSlug, projectId, typed.id, { type: bug.id }, session);
+    try {
+      await context.addCookies(browserCookiesFromHeader(session));
+      await driver.openIssueDetail(seed.workspaceSlug, projectId, parent.id);
+      const section = page.getByTestId("sub-issues-section");
+      await expect(section).toContainText(`${tag} typed`, { timeout: 60_000 });
+      await expect(section).toContainText(`${tag} plain`, { timeout: 60_000 });
+
+      await test.step("applying the type narrows the rows and raises its chip", async () => {
+        await driver.subIssueFiltersOpen(seed.workspaceSlug, projectId, parent.id);
+        const typeSection = page.getByTestId("sub-issue-filter-type");
+        await typeSection.getByRole("checkbox", { name: "Bug" }).click();
+        await expect(page.getByTestId("edition-filter-chips")).toContainText("Bug");
+        await expect(section).toContainText(`${tag} typed`);
+        await expect(section).not.toContainText(`${tag} plain`);
+      });
+
+      await test.step("removing the chip restores the rows", async () => {
+        await page.getByTestId("edition-filter-chips").getByRole("button", { name: "Remove Bug filter" }).click();
+        await expect(section).toContainText(`${tag} plain`, { timeout: 60_000 });
+        await expect(page.getByTestId("edition-filter-chips")).toHaveCount(0);
+      });
+    } finally {
+      await serverCleanupIssueWithSession(seed.workspaceSlug, projectId, parent.id, session);
+      await serverCleanupIssueWithSession(seed.workspaceSlug, projectId, typed.id, session);
+      await serverCleanupIssueWithSession(seed.workspaceSlug, projectId, plain.id, session);
+      await serverCleanupProject(seed.workspaceSlug, projectId, session);
+    }
+  }
+);
+
+test(
+  specTitle(["ISS-235"], "cloud: the detail names the work-item type beside the identifier"),
+  { tag: specTags(["ISS-235"]) },
+  async ({ driver, seed, page, context }, testInfo) => {
+    test.skip(testInfo.project.name !== "new", "cloud badges pin the web_new UI only");
+    const tag = `NF984 typebadge ${Date.now()}`;
+    const session = await signInSession(seed.email, seed.password);
+    const projectId = await serverCreateProjectWithFlags(
+      seed.workspaceSlug,
+      `${tag} project`,
+      parityProjectIdentifier("N984"),
+      {},
+      session
+    );
+    const bug = await serverCreateIssueType(seed.workspaceSlug, projectId, "Bug", session);
+    const typed = await serverCreateIssueFull(seed.workspaceSlug, projectId, `${tag} typed`, session);
+    const plain = await serverCreateIssueFull(seed.workspaceSlug, projectId, `${tag} plain`, session);
+    await serverPatchIssue(seed.workspaceSlug, projectId, typed.id, { type: bug.id }, session);
+    try {
+      await context.addCookies(browserCookiesFromHeader(session));
+
+      await test.step("a typed issue shows its type badge", async () => {
+        await driver.openIssueDetail(seed.workspaceSlug, projectId, typed.id);
+        await expect(page.getByTestId("detail-type-badge-name")).toContainText("Bug", { timeout: 60_000 });
+      });
+
+      await test.step("an untyped issue shows no badge", async () => {
+        await driver.openIssueDetail(seed.workspaceSlug, projectId, plain.id);
+        await expect(page.getByTestId("detail-type-badge-name")).toHaveCount(0, { timeout: 30_000 });
+      });
+    } finally {
+      await serverCleanupIssueWithSession(seed.workspaceSlug, projectId, typed.id, session);
+      await serverCleanupIssueWithSession(seed.workspaceSlug, projectId, plain.id, session);
       await serverCleanupProject(seed.workspaceSlug, projectId, session);
     }
   }

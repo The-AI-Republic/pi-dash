@@ -8,8 +8,9 @@
 // flag on) registers nothing, so every seam stays empty exactly as the
 // OSS oracle pins. A flag turned on without its provider still renders
 // nothing, so each area below lands independently: team projects, the
-// transfer-hop note, work-item types and the modal type picker now;
-// workflow rules, templates and extra properties with their own issues.
+// transfer-hop note, work-item types, the modal type picker, the detail
+// type badge and the provisional dev-only workflow rules now; templates
+// and extra properties with their own issues.
 import * as React from "react";
 
 import { listIssueTypes, listProjects } from "@pidash/api-client";
@@ -31,6 +32,7 @@ import {
 import { IssueTypePicker } from "./IssueTypePicker.js";
 import type { DetailBadgeInput, TeamProjectOption, WorkItemTypeOption } from "./providers.js";
 import { registerEditionIssuesProviders } from "./providers.js";
+import { parityWorkflowRulesProvider } from "./workflowParityRules.js";
 
 /** Every issues flag the cloud edition may set (§23). */
 export const ISSUES_EDITION_FLAGS = [
@@ -95,6 +97,33 @@ export function CloudTransferNote(input: DetailBadgeInput): React.ReactElement {
   );
 }
 
+const DetailTypeBadgeBody = React.lazy(() =>
+  import("./DetailTypeBadgeContent.js").then((module) => ({ default: module.DetailTypeBadgeContent }))
+);
+
+/**
+ * The cloud type badge (ISS-235). The body travels in its own chunk:
+ * the identifier suspends to nothing while it loads, and the community
+ * bundle never downloads it.
+ */
+export function CloudTypeBadge(input: {
+  workspaceSlug: string;
+  projectId: string;
+  issueId: string;
+  editable: boolean;
+}): React.ReactElement {
+  return (
+    <React.Suspense fallback={null}>
+      <DetailTypeBadgeBody
+        workspaceSlug={input.workspaceSlug}
+        projectId={input.projectId}
+        issueId={input.issueId}
+        editable={input.editable}
+      />
+    </React.Suspense>
+  );
+}
+
 let bootstrapped = false;
 
 /**
@@ -109,6 +138,10 @@ export function bootstrapIssuesEdition(edition: Edition): void {
     teamProjects: listTeamProjectOptions,
     detailBadges: { transferNote: CloudTransferNote },
     workItemTypes: listWorkItemTypeOptions,
+    issueTypeDetail: { badge: CloudTypeBadge },
+    // Provisional (ISS-233): dev-only injected rules proving the gate
+    // mechanism; NEWFRONT-994 replaces this provider with the real source.
+    workflowRules: parityWorkflowRulesProvider(),
   });
   // The modal type picker only (ISS-129 type half): templates and extra
   // properties register with the Part 5 model.

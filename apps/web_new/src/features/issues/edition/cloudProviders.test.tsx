@@ -6,6 +6,7 @@
 // options read the OSS lists, the bootstrap registers the providers and
 // the modal type picker exactly once for a flagged edition and never for
 // the community build.
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, render, screen } from "@testing-library/react";
 import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -13,6 +14,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   listProjects: vi.fn(),
   listIssueTypes: vi.fn(),
+  getIssue: vi.fn(),
   useIssueActivities: vi.fn(),
 }));
 
@@ -20,32 +22,37 @@ vi.mock("@pidash/api-client", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@pidash/api-client")>()),
   listProjects: mocks.listProjects,
   listIssueTypes: mocks.listIssueTypes,
+  getIssue: mocks.getIssue,
 }));
 
 vi.mock("../../../core/api/client.js", () => ({ getAppClient: () => ({ stub: true }) }));
 
 vi.mock("../activity/api.js", () => ({ useIssueActivities: mocks.useIssueActivities }));
 
-import type { Edition } from "../../../core/edition/index.js";
+import { edition, type Edition } from "../../../core/edition/index.js";
 import { getIssueTypeExtension, resetIssueTypeExtension } from "../create/issueTypeSeam.js";
 import {
   bootstrapIssuesEdition,
   CloudTransferNote,
+  CloudTypeBadge,
   hasIssuesEditionFlags,
   ISSUES_EDITION_FLAGS,
   listTeamProjectOptions,
   listWorkItemTypeOptions,
   resetIssuesEditionBootstrap,
 } from "./cloudProviders.js";
+import { ISSUE_TYPES_FLAG } from "./flags.js";
 import { getEditionIssuesProviders, resetEditionIssuesProviders } from "./providers.js";
 
 afterEach(() => {
   cleanup();
+  delete edition.flags[ISSUE_TYPES_FLAG];
   resetEditionIssuesProviders();
   resetIssuesEditionBootstrap();
   resetIssueTypeExtension();
   mocks.listProjects.mockReset();
   mocks.listIssueTypes.mockReset();
+  mocks.getIssue.mockReset();
   mocks.useIssueActivities.mockReset();
 });
 
@@ -102,17 +109,19 @@ describe("bootstrapIssuesEdition", () => {
     expect(getIssueTypeExtension()).toBeNull();
   });
 
-  it("registers the team projects, transfer note, types and modal picker for a flagged edition", () => {
+  it("registers the team projects, transfer note, types, type badge, provisional rules and modal picker for a flagged edition", () => {
     bootstrapIssuesEdition(editionWith({ "issue-worklog": true }));
     const providers = getEditionIssuesProviders();
     expect(providers.teamProjects).toBe(listTeamProjectOptions);
     expect(providers.detailBadges?.transferNote).toBe(CloudTransferNote);
     expect(providers.workItemTypes).toBe(listWorkItemTypeOptions);
+    expect(providers.issueTypeDetail?.badge).toBe(CloudTypeBadge);
+    expect(providers.issueTypeDetail?.properties).toBeUndefined();
+    expect(providers.issueTypeDetail?.activity).toBeUndefined();
     expect(getIssueTypeExtension()?.typePicker).toBeDefined();
     expect(getIssueTypeExtension()?.templatePicker).toBeUndefined();
     expect(getIssueTypeExtension()?.additionalProperties).toBeUndefined();
-    expect(providers.workflowRules).toBeUndefined();
-    expect(providers.issueTypeDetail).toBeUndefined();
+    expect(providers.workflowRules?.refusal).toBeTypeOf("function");
   });
 
   it("runs only once", () => {
@@ -139,5 +148,21 @@ describe("CloudTransferNote", () => {
     });
     render(<CloudTransferNote workspaceSlug="acme" projectId="p-1" issueId="i-1" cycleId="cycle-b" />);
     expect(await screen.findByText("Moved from Sprint 3, just now")).toBeInTheDocument();
+  });
+});
+
+describe("CloudTypeBadge", () => {
+  it("renders the type name once its chunk loads", async () => {
+    edition.flags[ISSUE_TYPES_FLAG] = true;
+    mocks.getIssue.mockResolvedValue({ type_id: "t-1" });
+    bootstrapIssuesEdition(editionWith({ "issue-types": true }));
+    mocks.listIssueTypes.mockResolvedValue([{ id: "t-1", name: "Bug" }]);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <CloudTypeBadge workspaceSlug="acme" projectId="p-1" issueId="i-1" editable={false} />
+      </QueryClientProvider>
+    );
+    expect(await screen.findByText("Bug")).toBeInTheDocument();
   });
 });

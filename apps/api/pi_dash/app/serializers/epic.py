@@ -21,7 +21,9 @@ class EpicIssueSerializer(IssueSerializer):
     is_epic = serializers.SerializerMethodField()
 
     class Meta(IssueSerializer.Meta):
-        fields = IssueSerializer.Meta.fields + ["is_epic"]
+        # is_epic already rides the parent fields (read from the type);
+        # the override below only skips that lookup on epic reads.
+        fields = IssueSerializer.Meta.fields
 
     def get_is_epic(self, obj):
         return True
