@@ -183,6 +183,10 @@ async function openDetail(
     `/${seed.workspaceSlug}/projects/${projectId}/cycles/${cycleId}`,
     sessionBrowserCookies(session)
   );
+  // Narrow viewports start the cycle sidebar collapsed on web_new (the
+  // oracle loads it open); expand to the same settled state first. The
+  // oracle dismiss only collapses its own drawer (NEWFRONT-716).
+  if ((driver.page.viewportSize()?.width ?? 1280) < 768) await driver.cyclesHeroDismissSidebar();
   await expect.poll(() => driver.cyclesDetailSidebarName(), { timeout: 120_000 }).toBe(cycleName);
   await driver.layoutsActiveLayout();
 }

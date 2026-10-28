@@ -95,7 +95,7 @@ afterEach(() => {
 interface ProgressHarness {
   cycle?: CycleRow;
   progress?: CycleProgress;
-  issuesAnalytics?: CycleDistribution;
+  issuesAnalytics?: CycleDistribution | null;
   pointsAnalytics?: CycleDistribution | null;
   estimatesEnabled?: boolean;
   estimateType?: string | null;
@@ -115,7 +115,7 @@ function renderProgress(harness: ProgressHarness = {}): void {
         estimatesEnabled={harness.estimatesEnabled ?? false}
         estimateType={harness.estimateType ?? null}
         progress={harness.progress ?? makeCycleProgress()}
-        issuesAnalytics={harness.issuesAnalytics ?? makeCycleDistribution()}
+        issuesAnalytics={harness.issuesAnalytics === undefined ? makeCycleDistribution() : harness.issuesAnalytics}
         pointsAnalytics={harness.pointsAnalytics === undefined ? pointsAnalytics() : harness.pointsAnalytics}
         tab={tab}
         onTabChange={setTab}
@@ -299,6 +299,35 @@ describe("CycleSidebarProgress", () => {
     expect(screen.queryByTestId("cycle-progress-chart")).toBeNull();
     expect(screen.getByTestId("cycle-progress-empty").textContent).toBe("No Data yet");
     expect((await screen.findByTestId(entryTestId("backlog"))).textContent).toContain("Backlog");
+  });
+
+  it("keeps the empty notice when the analytics read fails on an undated cycle", async () => {
+    renderProgress({ cycle: makeCycleRow({ start_date: null, end_date: null }), issuesAnalytics: null });
+    expect(screen.queryByTestId("cycle-progress-chart")).toBeNull();
+    expect(screen.getByTestId("cycle-progress-empty").textContent).toBe("No Data yet");
+    expect((await screen.findByTestId(entryTestId("backlog"))).textContent).toContain("Backlog");
+  });
+
+  it("leaves distribution tabs empty rather than spinning when the read fails", () => {
+    renderProgress({
+      cycle: makeCycleRow({ start_date: null, end_date: null }),
+      issuesAnalytics: null,
+      tab: "Assignees",
+    });
+    expect(screen.queryByTestId("cycle-progress-entries-pending")).toBeNull();
+    expect(screen.getByTestId("cycle-progress-entries").childElementCount).toBe(0);
+  });
+
+  it("keeps the pending marker for a pending points read", async () => {
+    renderProgress({
+      tab: "Assignees",
+      estimatesEnabled: true,
+      estimateType: "points",
+      pointsAnalytics: null,
+    });
+    await userEvent.click(screen.getByTestId("cycle-progress-measure"));
+    await userEvent.click(screen.getByRole("option", { name: "Estimates" }));
+    expect(screen.getByTestId("cycle-progress-entries-pending")).not.toBeNull();
   });
 
   it("hides the chart silently for future-start cycles", async () => {

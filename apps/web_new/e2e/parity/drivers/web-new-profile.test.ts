@@ -550,6 +550,41 @@ describe("shared layout methods on the profile tab", () => {
     expect(reload).toHaveBeenCalledWith({ waitUntil: "domcontentloaded" });
   });
 
+  it("settles on the shared header off the profile tab", async () => {
+    const reload = vi.fn(async () => undefined);
+    const headerWait = vi.fn(async () => undefined);
+    const seen: string[] = [];
+    const page = pageOf({
+      reload,
+      evaluate: async () => false,
+      getByTestId: (id: string) => {
+        seen.push(id);
+        return id === "profile-issues-tab" ? locator({ count: async () => 0 }) : locator({ waitFor: headerWait });
+      },
+    });
+    const driver = new WebNewDriver(page);
+    await driver.layoutsReloadIssues();
+    expect(reload).toHaveBeenCalledWith({ waitUntil: "domcontentloaded" });
+    expect(seen).toContain("issues-header");
+    expect(headerWait).toHaveBeenCalledWith({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+  });
+
+  it("settles on the mobile header on narrow viewports", async () => {
+    const reload = vi.fn(async () => undefined);
+    const seen: string[] = [];
+    const page = pageOf({
+      reload,
+      evaluate: async () => true,
+      getByTestId: (id: string) => {
+        seen.push(id);
+        return id === "profile-issues-tab" ? locator({ count: async () => 0 }) : locator();
+      },
+    });
+    const driver = new WebNewDriver(page);
+    await driver.layoutsReloadIssues();
+    expect(seen).toContain("issues-mobile-header");
+  });
+
   it("reads the list and board surfaces", async () => {
     const page = pageOf({ getByTestId: () => locator({ count: async () => 1, isVisible: async () => true }) });
     const driver = new WebNewDriver(page);
@@ -594,6 +629,51 @@ describe("shared layout methods on the profile tab", () => {
     const page = pageOf({ url: () => "https://app.test/acme/profile/u-1/" });
     const driver = new WebNewDriver(page);
     expect(await driver.layoutsCurrentUrl()).toBe("https://app.test/acme/profile/u-1/");
+  });
+});
+
+describe("shared layout methods on the segmented switcher", () => {
+  function noProfileTrigger(): Record<string, unknown> {
+    return { getByRole: () => locator({ filter: () => locator({ first: () => locator({ count: async () => 0 }) }) }) };
+  }
+
+  it("reads the active layout from the segmented marker", async () => {
+    const page = pageOf({
+      ...noProfileTrigger(),
+      locator: () => locator({ first: () => locator({ getAttribute: async () => "kanban" }) }),
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.layoutsActiveLayout()).toBe("kanban");
+  });
+
+  it("rejects a segmented marker it does not know", async () => {
+    const page = pageOf({
+      ...noProfileTrigger(),
+      locator: () => locator({ first: () => locator({ getAttribute: async () => "timeline" }) }),
+    });
+    const driver = new WebNewDriver(page);
+    await expect(driver.layoutsActiveLayout()).rejects.toThrow('unrecognised active layout "timeline"');
+  });
+
+  it("reads the offered layouts from the segmented choices", async () => {
+    const page = pageOf({
+      getByTestId: () =>
+        locator({
+          locator: () =>
+            locator({
+              count: async () => 5,
+              evaluateAll: async () => ["list", "kanban", "calendar", "spreadsheet", "bogus"],
+            }),
+        }),
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.layoutsOfferedLayouts()).toEqual(["list", "kanban", "calendar", "spreadsheet"]);
+  });
+
+  it("leaves the offered set to its owner when no segmented switcher renders", async () => {
+    const page = pageOf({ getByTestId: () => locator({ locator: () => locator({ count: async () => 0 }) }) });
+    const driver = new WebNewDriver(page);
+    await expect(driver.layoutsOfferedLayouts()).rejects.toThrow("has no layoutsOfferedLayouts yet");
   });
 });
 

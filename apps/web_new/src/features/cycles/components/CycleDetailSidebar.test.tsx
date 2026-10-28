@@ -299,12 +299,16 @@ describe("CycleDetailSidebar", () => {
     expect(screen.getByTestId("cycle-sidebar-dates-trigger")).not.toBeNull();
   });
 
-  it("omits the progress section when the breakdown read fails", async () => {
+  it("shows counts with empty breakdowns when the breakdown read fails", async () => {
     harness.issuesStatus = 500;
     renderSidebar();
     expect(await screen.findByTestId("cycle-sidebar-name")).not.toBeNull();
     await waitFor(() => expect(screen.queryByTestId("cycle-sidebar-skeleton")).toBeNull());
-    expect(screen.queryByTestId("cycle-progress-work-items")).toBeNull();
+    // Undated cycles 400 the analytics read; the section still mounts
+    // with counts and an empty distribution panel (NEWFRONT-716).
+    expect(await screen.findByTestId("cycle-progress-work-items")).not.toBeNull();
+    expect(screen.queryByTestId("cycle-progress-entries-pending")).toBeNull();
+    expect(screen.getByTestId("cycle-progress-entries").childElementCount).toBe(0);
   });
 
   it("remembers the breakdown tab per cycle", async () => {

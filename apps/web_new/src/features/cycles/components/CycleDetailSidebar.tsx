@@ -153,7 +153,7 @@ export function CycleDetailSidebar({
           )}
         </SidebarRow>
       </div>
-      {progress.data === undefined || issues.data === undefined ? null : (
+      {progress.data === undefined || issues.isPending ? null : (
         <CycleSidebarProgress
           workspaceSlug={workspaceSlug}
           projectId={projectId}
@@ -162,7 +162,7 @@ export function CycleDetailSidebar({
           estimatesEnabled={estimatesEnabled}
           estimateType={estimateType}
           progress={progress.data}
-          issuesAnalytics={issues.data}
+          issuesAnalytics={issues.data ?? null}
           pointsAnalytics={points.data ?? null}
           tab={tab}
           onTabChange={setTab}

@@ -23696,6 +23696,13 @@ export class WebNewDriver implements ParityDriver {
   }
   async cyclesSwitcherPick(name: string): Promise<void> {
     await this.page.getByRole("option", { name }).first().click({ timeout: WebNewDriver.WAIT_MS });
+    // The address updates before the new cycle commits; settle on the
+    // trigger showing the picked name like the oracle driver does
+    // (NEWFRONT-716).
+    const trigger = this.page.getByTestId("cycle-switcher-trigger");
+    await expect
+      .poll(async () => (await trigger.innerText().catch(() => "")) ?? "", { timeout: WebNewDriver.WAIT_MS })
+      .toContain(name);
   }
   async cyclesClickCyclesCrumb(): Promise<void> {
     await this.page.getByTestId("cycle-crumb-cycles").click({ timeout: WebNewDriver.WAIT_MS });
