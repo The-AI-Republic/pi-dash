@@ -14,6 +14,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   KanbanVirtualCard,
+  useMeasuredHeight,
   useNearViewport,
   virtualCardRootMargin,
   VIRTUAL_CARD_HEIGHT_PX,
@@ -48,7 +49,20 @@ function installObserver(): void {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  if (originalOffsetHeight !== undefined) {
+    Object.defineProperty(HTMLElement.prototype, "offsetHeight", originalOffsetHeight);
+  }
 });
+
+const originalOffsetHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetHeight");
+
+/** jsdom never lays out, so pin the content height the shell measures. */
+function stubCardHeight(px: number): void {
+  Object.defineProperty(HTMLElement.prototype, "offsetHeight", {
+    configurable: true,
+    get: () => px,
+  });
+}
 
 function shell(forceContent = false, root: HTMLElement | null = null): React.ReactElement {
   return (
@@ -167,5 +181,56 @@ describe("KanbanVirtualCard", () => {
     rerender(<>{shell(false, board)}</>);
     expect(seen.options).toHaveLength(2);
     expect(seen.options[1]).toMatchObject({ root: board });
+  });
+
+  it("re-virtualizes at the measured content height instead of the estimate", () => {
+    // NEWFRONT-983: the placeholder used to snap back to the 120px
+    // estimate, shifting the column and re-tripping the window edge —
+    // the churn that flickered mid-window cards after the end scroll.
+    // Reusing the measured height removes the shift, so the window
+    // settles.
+    stubCardHeight(148);
+    installObserver();
+    render(shell(false, boardElement()));
+    expect(screen.getByTestId("kanban-card")).toHaveStyle({
+      height: `${VIRTUAL_CARD_HEIGHT_PX}px`,
+    });
+    act(() => seen.callbacks[0]?.([{ isIntersecting: true }]));
+    expect(screen.getByText("Fix login")).toBeVisible();
+    act(() => seen.callbacks[0]?.([{ isIntersecting: false }]));
+    expect(screen.queryByText("Fix login")).toBeNull();
+    expect(screen.getByTestId("kanban-card")).toHaveStyle({ height: "148px" });
+  });
+
+  it("tracks content as it settles and keeps the latest height", () => {
+    stubCardHeight(148);
+    installObserver();
+    const board = boardElement();
+    const { rerender } = render(shell(false, board));
+    act(() => seen.callbacks[0]?.([{ isIntersecting: true }]));
+    expect(screen.getByText("Fix login")).toBeVisible();
+    stubCardHeight(200);
+    rerender(shell(false, board));
+    act(() => seen.callbacks[0]?.([{ isIntersecting: false }]));
+    expect(screen.getByTestId("kanban-card")).toHaveStyle({ height: "200px" });
+  });
+
+  it("leaves the estimate in place until content measures", () => {
+    // jsdom reports offsetHeight 0: a zero read must never replace
+    // the estimate, so unmeasured shells keep their 120px height.
+    installObserver();
+    render(shell(false, boardElement()));
+    act(() => seen.callbacks[0]?.([{ isIntersecting: true }]));
+    act(() => seen.callbacks[0]?.([{ isIntersecting: false }]));
+    expect(screen.getByTestId("kanban-card")).toHaveStyle({
+      height: `${VIRTUAL_CARD_HEIGHT_PX}px`,
+    });
+  });
+
+  it("measures nothing while idle or detached", () => {
+    const detached = { current: null };
+    expect(renderHook(() => useMeasuredHeight(detached, true)).result.current).toBeNull();
+    const idle = { current: document.createElement("div") };
+    expect(renderHook(() => useMeasuredHeight(idle, false)).result.current).toBeNull();
   });
 });

@@ -22,6 +22,11 @@
 // Both states pin shrink-0: the column body is a flex column and would
 // otherwise crush its rows to nothing, hiding every page past the first
 // (NEWFRONT-968).
+//
+// A shell that has shown its content keeps the measured height for its
+// placeholder. Snapping back to the estimate on every unmount shifted
+// the column, re-tripped the window edge, and churned the window
+// instead of settling it after the end scroll (NEWFRONT-983).
 
 import * as React from "react";
 
@@ -75,6 +80,25 @@ export function useNearViewport<T extends HTMLElement>(
   return { ref, near };
 }
 
+/**
+ * Last measured content height for a card shell. While active, every
+ * render re-reads the node so the value tracks content as it settles
+ * (async badges, wrapped names); the update only fires when the height
+ * actually changes, so measuring never loops. Zero reads (jsdom,
+ * hidden nodes) never replace a measurement.
+ */
+export function useMeasuredHeight(ref: React.RefObject<HTMLElement | null>, active: boolean): number | null {
+  const [measured, setMeasured] = React.useState<number | null>(null);
+  React.useEffect(() => {
+    if (!active) return;
+    const node = ref.current;
+    if (node === null) return;
+    const height = node.offsetHeight;
+    if (height > 0) setMeasured((prev) => (prev === height ? prev : height));
+  });
+  return measured;
+}
+
 export interface KanbanVirtualCardProps {
   issueId: string;
   groupKey: string;
@@ -95,7 +119,9 @@ export function KanbanVirtualCard({
   children,
 }: KanbanVirtualCardProps): React.ReactElement {
   const { ref, near } = useNearViewport<HTMLDivElement>(VIRTUAL_OVERSCAN_PX, root);
-  if (near || forceContent) {
+  const show = near || forceContent;
+  const measured = useMeasuredHeight(ref, show);
+  if (show) {
     return (
       <div ref={ref} className="shrink-0">
         {children}
@@ -112,7 +138,7 @@ export function KanbanVirtualCard({
       data-lane-key={laneKey ?? ""}
       data-virtualized="true"
       aria-hidden="true"
-      style={{ height: VIRTUAL_CARD_HEIGHT_PX }}
+      style={{ height: measured ?? VIRTUAL_CARD_HEIGHT_PX }}
     />
   );
 }
