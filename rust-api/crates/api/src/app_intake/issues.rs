@@ -1320,8 +1320,17 @@ pub async fn validate_pk_list(
     for (idx, item) in items.iter().enumerate() {
         match resolve_pk_item(pool, item, queryset_sql).await {
             Ok(Some(id)) => ids.push(id),
-            // Lookup outage: silent whole-field drop, like before.
-            Ok(None) => return None,
+            // Lookup outage: silent whole-field drop, like before —
+            // but validation errors already collected still fail.
+            Ok(None) => {
+                if !item_errors.is_empty() {
+                    errors.insert(
+                        field.to_owned(),
+                        serde_json::Value::Object(std::mem::take(&mut item_errors)),
+                    );
+                }
+                return None;
+            }
             Err(message) => {
                 item_errors.insert(idx.to_string(), serde_json::json!([message]));
             }
@@ -5495,11 +5504,12 @@ async fn validate_issue_create(
 /// Ints coerce through `UUID(int=n)` (`UUIDField.get_prep_value`):
 /// out-of-range negatives fail `incorrect_type`, the rest look up a
 /// (practically never matching) UUID while the message keeps the
-/// original digits. `None` is DRF's `RelatedField.run_validation`
-/// empty-string coercion (`relations.py:151-155`): `""` becomes `None`
-/// before validation, so it answers the field's `allow_null` rule
-/// instead of the UUID parse. The match is exact-`""` (no trim), like
-/// DRF's `data == ''`.
+/// original digits. `None` is the empty value: `""` becomes `None`
+/// via DRF's `RelatedField.run_validation` coercion
+/// (`relations.py:151-155`), and JSON null list items arrive raw —
+/// both answer the field's `allow_null` rule instead of the UUID
+/// parse. The empty-string match is exact-`""` (no trim), like DRF's
+/// `data == ''`.
 #[allow(clippy::result_large_err)]
 fn parse_pk_key(raw: &serde_json::Value) -> Result<Option<(Uuid, String)>, String> {
     enum Key {
@@ -5537,7 +5547,11 @@ fn parse_pk_key(raw: &serde_json::Value) -> Result<Option<(Uuid, String)>, Strin
             return Err(uuid_invalid(&python_str_repr(raw)));
         }
         serde_json::Value::Null => {
-            return Err("Incorrect type. Expected pk value, received NoneType.".to_owned());
+            // Raw null reaches here only from list items (every scalar
+            // caller lands missing/null before coercion): like `""` it
+            // answers the field's `allow_null` rule instead of the UUID
+            // parse, so list children fail null, like DRF.
+            return Ok(None);
         }
     };
     Ok(Some(match &key {
@@ -5560,9 +5574,9 @@ async fn resolve_pk(
     live_only: bool,
 ) -> Result<Option<Uuid>, String> {
     let Some((id, display)) = parse_pk_key(raw)? else {
-        // `""` coerced to `None` ([`parse_pk_key`]); the caller applies
-        // the field's `allow_null` rule (scalar fields land `None`,
-        // list children fail null).
+        // Empty value ([`parse_pk_key`]); the caller applies the
+        // field's `allow_null` rule (scalar fields land `None`, list
+        // children fail null).
         return Ok(None);
     };
     // Same-table parameterization keeps one helper. `live_only` mirrors
@@ -5601,8 +5615,8 @@ async fn resolve_pk_sql(
     queryset_sql: &str,
 ) -> Result<Option<Uuid>, String> {
     let Some((id, display)) = parse_pk_key(raw)? else {
-        // `""` coerced to `None` ([`parse_pk_key`]); the caller applies
-        // the field's `allow_null` rule.
+        // Empty value ([`parse_pk_key`]); the caller applies the
+        // field's `allow_null` rule.
         return Ok(None);
     };
     let row: Option<(Uuid,)> = sqlx::query_as(queryset_sql)
@@ -5714,8 +5728,8 @@ async fn opt_uuid_list_field(
     for (idx, item) in items.iter().enumerate() {
         match resolve_pk(pool, table, item, live_only).await {
             Ok(Some(id)) => out.push(id),
-            // List children carry `allow_null=False`, so the `""`-to-None
-            // coercion fails null here, like DRF.
+            // List children carry `allow_null=False`, so the empty
+            // value (`""`, null) fails null here, like DRF.
             Ok(None) => {
                 errors.insert(
                     idx.to_string(),

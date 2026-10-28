@@ -147,6 +147,18 @@ def test_post_empty_list_items_fail_null_indexed(make_tenant, key):
     }
 
 
+@pytest.mark.parametrize("key", LIST_KEYS)
+def test_post_null_list_items_fail_null_indexed(make_tenant, key):
+    # `""` and null answer the same rule (RelatedField coerces `""`
+    # to None first): both fail null per index.
+    tenant = make_tenant()
+    r = tenant["client"].post(
+        _post_create(tenant), json={"issue": {"name": "c", key: [None]}}
+    )
+    assert r.status_code == 400, r.text[:500]
+    assert r.json() == {key: {"0": ["This field may not be null."]}}
+
+
 @pytest.mark.parametrize("key", PATCH_NULL_KEYS)
 def test_patch_empty_scalar_key_clears(make_tenant, key):
     # `""` clears like null on PATCH (present-None, not absent).
@@ -340,6 +352,18 @@ def test_patch_empty_list_items_fail_null_indexed(make_tenant, key):
             "1": [f"\u201c{bogus}\u201d is not a valid UUID."],
         }
     }
+
+
+@pytest.mark.parametrize("key", LIST_KEYS)
+def test_patch_null_list_items_fail_null_indexed(make_tenant, key):
+    # Same `""`-equals-null identity on PATCH: null items fail null
+    # per index, like `""` items.
+    tenant = make_tenant()
+    r = tenant["client"].patch(
+        _detail(tenant), json={"issue": {key: [None]}}
+    )
+    assert r.status_code == 400, r.text[:500]
+    assert r.json() == {key: {"0": ["This field may not be null."]}}
 
 
 @pytest.mark.parametrize("key", LIST_KEYS)
