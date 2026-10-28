@@ -142,6 +142,12 @@ class Recorder {
 
   page(): Page {
     const node: Record<string, unknown> = {};
+    node.keyboard = {
+      press: async (key: string) => {
+        this.calls.push({ path: "page.keyboard", method: "press", args: [key] });
+        return undefined;
+      },
+    };
     for (const method of ["getByRole", "locator"]) {
       node[method] = (...args: unknown[]) => {
         this.calls.push({ path: "page", method, args });

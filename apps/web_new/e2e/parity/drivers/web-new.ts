@@ -22522,6 +22522,10 @@ export class WebNewDriver implements ParityDriver {
 
   /** Open the row menu the way the desktop list does: hover, then the trigger. */
   private async cycleRowMenuOpen(name: string): Promise<void> {
+    // A menu left open by an earlier step inerts the page behind its
+    // portal overlay (CYC-025 opens three in a row); dismiss it the way
+    // a user would first. Harmless when nothing is open.
+    await this.page.keyboard.press("Escape");
     const row = this.cycleRowRoot(name);
     await row.hover({ timeout: WebNewDriver.WAIT_MS });
     await row.getByRole("button", { name: `Cycle actions for ${name}` }).click({ timeout: WebNewDriver.WAIT_MS });
@@ -22622,7 +22626,14 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async cyclesEditHeroCycleName(): Promise<string | null> {
-    return todo("cyclesEditHeroCycleName");
+    // The hero embeds the current cycle's row; the zero-state renders
+    // none. Only the name span truncates, so it reads unambiguously.
+    const row = this.page.getByTestId("cycle-hero").locator('div[data-testid="cycle-row"]').first();
+    if ((await row.count()) === 0) return null;
+    const name = row.locator("a span.truncate").first();
+    if ((await name.count()) === 0) return null;
+    const text = (await name.innerText()).trim();
+    return text.length > 0 ? text : null;
   }
 
   async cyclesEditPressEscape(): Promise<void> {
@@ -24123,27 +24134,103 @@ export class WebNewDriver implements ParityDriver {
   // --- Cycles archive/menu/transfer acceptance (NEWFRONT-252, CYC-025-031
   // --- plus CYC-046). Stage 0 oracle stubs; the cycles build slice lands them.
 
-  async cyclesRowFavoriteState(_name: string): Promise<"starred" | "unstarred" | "absent"> {
-    return todo("cyclesRowFavoriteState");
+  /** The row's favorite star (CYC-029; members on live rows only). */
+  private cyclesFavoriteButton(name: string): Locator {
+    return this.cycleRowRoot(name).getByTestId("cycle-favorite-marker");
   }
-  async cyclesRowFavoriteToggle(_name: string): Promise<void> {
-    return todo("cyclesRowFavoriteToggle");
+
+  async cyclesRowFavoriteState(name: string): Promise<"starred" | "unstarred" | "absent"> {
+    const button = this.cyclesFavoriteButton(name).first();
+    if (!(await this.isShown(button))) return "absent";
+    return (await button.getAttribute("data-favorite")) === "true" ? "starred" : "unstarred";
   }
+
+  async cyclesRowFavoriteToggle(name: string): Promise<void> {
+    // The star disables itself while a write flies; the click's
+    // auto-wait covers a toggle that lands mid-flight.
+    await this.cyclesFavoriteButton(name).first().click({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  /** Poll the row marker for `want` until `rowPollMs` elapses. */
+  private async cyclesFavoritePollWant(
+    name: string,
+    want: "starred" | "unstarred",
+    rowPollMs: number
+  ): Promise<boolean> {
+    const started = Date.now();
+    for (;;) {
+      if ((await this.cyclesRowFavoriteState(name)) === want) return true;
+      if (Date.now() - started >= rowPollMs) return false;
+      await this.page.waitForTimeout(250);
+    }
+  }
+
+  /**
+   * Click the row marker until it reads `want`, at most twice and never
+   * past a flipped server: a second click after the server moved would
+   * drive the opposite toggle, so that split throws instead of clicking.
+   */
   async cyclesRowFavoriteToggleConverge(
-    _name: string,
-    _want: "starred" | "unstarred",
-    _isServerFavorite: () => Promise<boolean>,
-    _rowPollMs: number
+    name: string,
+    want: "starred" | "unstarred",
+    isServerFavorite: () => Promise<boolean>,
+    rowPollMs: number
   ): Promise<void> {
-    return todo("cyclesRowFavoriteToggleConverge");
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      if ((await this.cyclesRowFavoriteState(name)) === want) return;
+      await this.cyclesRowFavoriteToggle(name);
+      if (await this.cyclesFavoritePollWant(name, want, rowPollMs)) return;
+      if ((await isServerFavorite()) === (want === "starred")) {
+        throw new Error(
+          `[parity] cycle row ${name} never showed ${want} although the server did; refusing another toggle.`
+        );
+      }
+    }
+    throw new Error(`[parity] cycle row ${name} never showed ${want} after 2 toggles.`);
   }
+
+  /**
+   * Converge the marker, then hold row/server agreement: a toggle that
+   * lands between the list's reads is overwritten when a stale read
+   * returns, so a split row is healed with one reconciling toggle and
+   * only twelve consecutive agreeing reads return.
+   */
   async cyclesRowFavoriteSettleAgreement(
-    _name: string,
-    _want: "starred" | "unstarred",
-    _isServerFavorite: () => Promise<boolean>,
-    _rowPollMs: number
+    name: string,
+    want: "starred" | "unstarred",
+    isServerFavorite: () => Promise<boolean>,
+    rowPollMs: number
   ): Promise<void> {
-    return todo("cyclesRowFavoriteSettleAgreement");
+    await this.cyclesRowFavoriteToggleConverge(name, want, isServerFavorite, rowPollMs);
+    const wantState = want === "starred";
+    const started = Date.now();
+    let stable = 0;
+    let heals = 0;
+    for (;;) {
+      const row = await this.cyclesRowFavoriteState(name);
+      const server = await isServerFavorite();
+      if (row === want && server === wantState) {
+        stable += 1;
+        if (stable >= 12) return;
+      } else if (row === want) {
+        stable = 0;
+      } else if (server === wantState) {
+        stable = 0;
+        if (heals >= 2) {
+          throw new Error(
+            `[parity] cycle row ${name} never held ${want} although the server did; refusing further toggles.`
+          );
+        }
+        heals += 1;
+        await this.cyclesRowFavoriteToggle(name);
+      } else {
+        stable = 0;
+      }
+      if (Date.now() - started >= rowPollMs) {
+        throw new Error(`[parity] cycle row ${name} never settled on ${want} with the server.`);
+      }
+      await this.page.waitForTimeout(250);
+    }
   }
   async cyclesDelayFavoriteWrites(_delayMs: number): Promise<void> {
     return todo("cyclesDelayFavoriteWrites");
@@ -24170,11 +24257,19 @@ export class WebNewDriver implements ParityDriver {
     await popup.waitForLoadState("domcontentloaded").catch(() => undefined);
     return popup.url();
   }
-  async cyclesTransferSearchFill(_text: string): Promise<void> {
-    return todo("cyclesTransferSearchFill");
+  async cyclesTransferSearchFill(text: string): Promise<void> {
+    await this.page.getByPlaceholder("Search for a cycle...").fill(text, { timeout: WebNewDriver.WAIT_MS });
   }
   async cyclesTransferEmptyText(): Promise<string | null> {
-    return todo("cyclesTransferEmptyText");
+    // Options present means no empty state; the loading line is not one
+    // either, so it reads null and the scenario keeps polling.
+    const box = this.cycleTransferListbox();
+    if ((await box.getByRole("option").count()) > 0) return null;
+    const note = box.locator("p").first();
+    if ((await note.count()) === 0) return null;
+    const text = (await note.innerText()).trim();
+    if (text.length === 0 || text.startsWith("Loading")) return null;
+    return text;
   }
   async cyclesArchivedEmptyDetail(): Promise<string | null> {
     // Contract with NEWFRONT-701's zero-state (CYC-027): the pinned
