@@ -116,13 +116,13 @@ const MESSAGE_ROW_SQL: &str =
 
 /// The turn's last `assistant` row (`_mark_cut_off`, `tasks.py:518-520`):
 /// highest `seq` first, for the payload flag and the re-sent envelope.
-const LAST_ASSISTANT_ROW_SQL: &str = "SELECT id, seq, payload, display_content, status, \
+pub const LAST_ASSISTANT_ROW_SQL: &str = "SELECT id, seq, payload, display_content, status, \
      created_at, completed_at FROM assistant_message \
      WHERE turn_id = $1 AND kind = 'assistant' ORDER BY seq DESC LIMIT 1";
 
 /// Flag the row's payload (`message.save(update_fields=["payload"])`,
 /// `tasks.py:523-524`).
-const MARK_CUT_OFF_SQL: &str = "UPDATE assistant_message SET payload = $2 WHERE id = $1";
+pub const MARK_CUT_OFF_SQL: &str = "UPDATE assistant_message SET payload = $2 WHERE id = $1";
 
 /// [`LAST_ASSISTANT_ROW_SQL`] row: id, seq, payload, display_content,
 /// status, created_at, completed_at.

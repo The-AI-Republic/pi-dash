@@ -103,8 +103,20 @@ pub mod read {
     pub use pidash_services::app_issues::serializers_detail::serialize_drf_datetime; // also imported by the overlay as `pidash_services::app_issues::serialize_drf_datetime`.
     pub use pidash_services::app_issues::RepointTarget;
     pub use pidash_services::app_issues::ASSIGNEE_IDS_SQL;
+    pub use pidash_services::app_issues::ASSIGNEE_PRUNE_SQL;
+    pub use pidash_services::app_issues::ASSIGNEE_REPOINT_SQL;
+    pub use pidash_services::app_issues::CHILDREN_DETACH_SQL;
+    pub use pidash_services::app_issues::COMMENT_IDS_SQL;
+    pub use pidash_services::app_issues::CYCLE_DELETE_SQL;
+    pub use pidash_services::app_issues::DESCRIPTION_IDS_SQL;
+    pub use pidash_services::app_issues::LABEL_DELETE_SQL;
     pub use pidash_services::app_issues::LABEL_IDS_SQL;
+    pub use pidash_services::app_issues::MODULE_DELETE_SQL;
+    pub use pidash_services::app_issues::RELATION_DELETE_SQL;
     pub use pidash_services::app_issues::REPOINT_ORDER;
+    pub use pidash_services::app_issues::SEQUENCE_CREATE_SQL;
+    pub use pidash_services::app_issues::SEQUENCE_DETACH_SQL;
+    pub use pidash_services::app_issues::SOURCE_ISSUE_LOCK_SQL;
     pub use pidash_services::app_project::queries::normalize_resolve_identifier;
     pub use pidash_services::app_views_search::fts;
     pub use pidash_services::app_workspace::models_user::profile;
@@ -445,6 +457,8 @@ pub mod assistant {
     pub use pidash_api::turn::live::LiveStream;
     pub use pidash_api::turn::live::LiveToolset;
     pub use pidash_api::turn::live::LiveTurnSeam;
+    pub use pidash_api::turn::live::LAST_ASSISTANT_ROW_SQL;
+    pub use pidash_api::turn::live::MARK_CUT_OFF_SQL;
     pub use pidash_api::turn::mcp_client::CallResult;
     pub use pidash_api::turn::mcp_client::McpContent;
     pub use pidash_api::turn::mcp_client::McpError;
