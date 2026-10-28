@@ -630,7 +630,6 @@ export class WebNewDriver implements ParityDriver {
   private pagesPaneMemberHooked = false;
   /** A detail body's first paint can trail the record by the socket schedule. */
   private static readonly DETAIL_SETTLE_MS = 120_000;
-
   /** How long one body-paint poll waits before reading the column again. */
   private static readonly PAINT_STEP_MS = 250;
 
@@ -22539,19 +22538,32 @@ export class WebNewDriver implements ParityDriver {
     return ((await content.first().getAttribute("class")) ?? "").includes("wide-layout");
   }
 
+  /**
+   * How long a measured style must hold before it counts as settled. A
+   * reflow that has not started yet reads the old value twice in a row,
+   * so agreement alone proves nothing; the reading has to stand still.
+   */
+  private static readonly SETTLE_MS = 500;
+
   async pagesPrefsCanvasMaxWidth(): Promise<string> {
-    // The canvas measures through a CSS transition, so poll until two
-    // consecutive reads agree instead of catching it mid-flight.
+    // The canvas measures through a CSS transition, so poll until the
+    // reading holds still. Two equal samples are not enough: a sample
+    // taken before the reflow starts and one taken as it begins to move
+    // can both read the old width under load, and returning that early
+    // reports a width the page has already left behind. The width must
+    // stay put across a sustained window instead.
     const measure = this.page.locator(".frame-renderer").first();
     await measure.waitFor({ state: "attached", timeout: 30_000 });
-    let previous = await measure.evaluate((el) => getComputedStyle(el).maxWidth);
+    let settled = await measure.evaluate((el) => getComputedStyle(el).maxWidth);
+    let heldFor = 0;
     for (let attempt = 0; attempt < 25; attempt += 1) {
       await this.page.waitForTimeout(100);
       const current = await measure.evaluate((el) => getComputedStyle(el).maxWidth);
-      if (current === previous) return current;
-      previous = current;
+      heldFor = current === settled ? heldFor + 100 : 0;
+      settled = current;
+      if (heldFor >= WebNewDriver.SETTLE_MS) return current;
     }
-    return previous;
+    return settled;
   }
 
   async pagesPrefsEditorClass(): Promise<string> {

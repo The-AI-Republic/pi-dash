@@ -55,10 +55,10 @@ class FakeLocator {
     this.press = vi.fn(this.options.press ?? (async () => undefined));
     this.inputValue = vi.fn(this.options.inputValue ?? (async () => ""));
     this.scrollIntoViewIfNeeded = vi.fn(this.options.scrollIntoViewIfNeeded ?? (async () => undefined));
-    this.evaluate = vi.fn(
-      this.options.evaluate ?? (async (fn: (node: unknown) => unknown) => fn(undefined))
+    this.evaluate = vi.fn(this.options.evaluate ?? (async (fn: (node: unknown) => unknown) => fn(undefined)));
+    this.isVisible = vi.fn(
+      this.options.isVisible ?? (async () => this.options.visible ?? (this.options.count ?? 0) > 0)
     );
-    this.isVisible = vi.fn(this.options.isVisible ?? (async () => this.options.visible ?? (this.options.count ?? 0) > 0));
   }
 
   count(): Promise<number> {
@@ -151,13 +151,11 @@ function pageDouble(options: PageOptions = {}): PageDouble {
     keyboard: { type, press },
     getByTestId: vi.fn((id: string) => options.testIds?.[id] ?? empty()),
     getByRole: vi.fn((role: string) => options.roles?.[role] ?? empty()),
-    getByText: vi.fn((pattern: RegExp) =>
-      options.texts?.find((entry) => entry.pattern.source === pattern.source)?.value ?? empty()
+    getByText: vi.fn(
+      (pattern: RegExp) => options.texts?.find((entry) => entry.pattern.source === pattern.source)?.value ?? empty()
     ),
     locator: vi.fn((selector: string) => options.selectors?.[selector] ?? empty()),
-    evaluate: vi.fn(
-      options.evaluate ?? (async (fn: (arg: unknown) => unknown, arg?: unknown) => fn(arg))
-    ),
+    evaluate: vi.fn(options.evaluate ?? (async (fn: (arg: unknown) => unknown, arg?: unknown) => fn(arg))),
   } as unknown as Page;
   return { page, goto, reload, route, type, press, waitForTimeout };
 }
@@ -315,7 +313,10 @@ describe("page navigation and editor primitives", () => {
     const driver = new WebNewDriver(
       pageDouble({
         testIds: {
-          "page-detail-title": at({ getByRole: () => field, getAttribute: async () => "page-title-editor text-size-small-font" }),
+          "page-detail-title": at({
+            getByRole: () => field,
+            getAttribute: async () => "page-title-editor text-size-small-font",
+          }),
         },
       }).page
     );
@@ -348,9 +349,15 @@ describe("page navigation and editor primitives", () => {
     const regions: Array<{ active: unknown; expected: string }> = [
       { active: null, expected: "other" },
       { active: { closest: () => null }, expected: "other" },
-      { active: { closest: (selector: string) => (selector.includes("page-detail-title") ? {} : null) }, expected: "title" },
+      {
+        active: { closest: (selector: string) => (selector.includes("page-detail-title") ? {} : null) },
+        expected: "title",
+      },
       { active: { closest: (selector: string) => (selector.includes("Page body") ? {} : null) }, expected: "body" },
-      { active: { closest: (selector: string) => (selector.includes("editor-container") ? {} : null) }, expected: "body" },
+      {
+        active: { closest: (selector: string) => (selector.includes("editor-container") ? {} : null) },
+        expected: "body",
+      },
     ];
     // A real body element is the explicit "other" case.
     vi.stubGlobal("document", { body: {} });
@@ -408,7 +415,10 @@ describe("page display preferences", () => {
     store.set("pages_config", "not json");
     await expect(driver.pagesPrefsLocalConfig()).resolves.toBeNull();
 
-    store.set("pages_config", JSON.stringify({ full_width: true, font_size: "small-font", font_style: "serif", sticky_toolbar: true }));
+    store.set(
+      "pages_config",
+      JSON.stringify({ full_width: true, font_size: "small-font", font_style: "serif", sticky_toolbar: true })
+    );
     await expect(driver.pagesPrefsLocalConfig()).resolves.toEqual({
       fullWidth: true,
       fontSize: "small-font",
@@ -427,7 +437,9 @@ describe("page display preferences", () => {
 
   it("seeds the local config under the historical key", async () => {
     const stored: Array<[string, string]> = [];
-    vi.stubGlobal("window", { localStorage: { getItem: async () => null, setItem: (key: string, value: string) => stored.push([key, value]) } });
+    vi.stubGlobal("window", {
+      localStorage: { getItem: async () => null, setItem: (key: string, value: string) => stored.push([key, value]) },
+    });
     const driver = new WebNewDriver(pageDouble().page);
 
     await driver.pagesPrefsSeedLocalConfig({
@@ -462,9 +474,7 @@ describe("page display preferences", () => {
 
     const plainContent = at({ getAttribute: async () => "page-toolbar-content flex" });
     const plainBar = at({ locator: () => plainContent });
-    const noClassDriver = new WebNewDriver(
-      pageDouble({ testIds: { "page-formatting-bar": plainBar } }).page
-    );
+    const noClassDriver = new WebNewDriver(pageDouble({ testIds: { "page-formatting-bar": plainBar } }).page);
     await expect(noClassDriver.pagesPrefsToolbarWide()).resolves.toBe(false);
 
     const nullContent = at({ getAttribute: async () => null });
@@ -475,8 +485,11 @@ describe("page display preferences", () => {
     expect(visibleBar).toBeDefined();
   });
 
-  it("reads the settled canvas width, including a transition that never settles", async () => {
-    const widths = ["720px", "900px", "1152px", "1152px"];
+  it("reads the canvas width only once it holds still", async () => {
+    // The reflow has not begun for the first two samples, so both read
+    // the old width: agreement alone would report 720px and miss the
+    // 1152px the page settles on a moment later.
+    const widths = ["720px", "720px", "900px", ...Array<string>(6).fill("1152px")];
     let last = "1152px";
     vi.stubGlobal("getComputedStyle", () => ({ maxWidth: widths.shift() ?? last }));
     const measure = at({
@@ -492,6 +505,10 @@ describe("page display preferences", () => {
     const driver = new WebNewDriver(stub.page);
     await expect(driver.pagesPrefsCanvasMaxWidth()).resolves.toBe("1152px");
     expect(measure.waitFor).toHaveBeenCalledWith({ state: "attached", timeout: 30_000 });
+    // The old width reads twice before the reflow starts — the naive
+    // "two matching samples" rule would have returned 720px there — so
+    // the read keeps polling past that point until the 500ms window holds.
+    expect(stub.waitForTimeout.mock.calls.length).toBeGreaterThanOrEqual(5);
 
     let widthRead = 0;
     vi.stubGlobal("getComputedStyle", () => ({ maxWidth: widthRead++ % 2 === 0 ? "720px" : "1152px" }));
@@ -581,7 +598,7 @@ describe("page toolbar key map and list search", () => {
                 : label === "Underline"
                   ? "Underline"
                   : label === "NoTip"
-                    ? (tooltipAvailable = false, "")
+                    ? ((tooltipAvailable = false), "")
                     : "";
         },
       })
@@ -643,9 +660,7 @@ describe("page toolbar key map and list search", () => {
       roles: { tooltip: at({ waitFor: async () => undefined, first: () => tooltip }) },
     });
 
-    await expect(new WebNewDriver(stub.page).pagesKeysToolbarTooltips()).resolves.toEqual([
-      { label: "", keys: "" },
-    ]);
+    await expect(new WebNewDriver(stub.page).pagesKeysToolbarTooltips()).resolves.toEqual([{ label: "", keys: "" }]);
   });
 
   it("presses keys and drives the list search control", async () => {
@@ -705,18 +720,22 @@ describe("page toolbar key map and list search", () => {
   });
 
   it("detects a shortcut reference from text or a button, and otherwise reports none", async () => {
-    const withText = new WebNewDriver(
-      pageDouble({ texts: [{ pattern: /keyboard shortcuts?/i, value: at() }] }).page
-    );
+    const withText = new WebNewDriver(pageDouble({ texts: [{ pattern: /keyboard shortcuts?/i, value: at() }] }).page);
     await expect(withText.pagesKeysShortcutReferenceVisible()).resolves.toBe(true);
 
     const withButton = new WebNewDriver(
-      pageDouble({ roles: { button: at({ count: 1 }) }, texts: [{ pattern: /keyboard shortcuts?/i, value: at({ count: 0 }) }] }).page
+      pageDouble({
+        roles: { button: at({ count: 1 }) },
+        texts: [{ pattern: /keyboard shortcuts?/i, value: at({ count: 0 }) }],
+      }).page
     );
     await expect(withButton.pagesKeysShortcutReferenceVisible()).resolves.toBe(true);
 
     const absent = new WebNewDriver(
-      pageDouble({ roles: { button: at({ count: 0 }) }, texts: [{ pattern: /keyboard shortcuts?/i, value: at({ count: 0 }) }] }).page
+      pageDouble({
+        roles: { button: at({ count: 0 }) },
+        texts: [{ pattern: /keyboard shortcuts?/i, value: at({ count: 0 }) }],
+      }).page
     );
     await expect(absent.pagesKeysShortcutReferenceVisible()).resolves.toBe(false);
   });
@@ -725,13 +744,16 @@ describe("page toolbar key map and list search", () => {
 describe("page assistant and cloud slots", () => {
   it("reports the AI handle and menu only when visible", async () => {
     const shown = new WebNewDriver(
-      pageDouble({ testIds: { "page-ai-handle": at({ visible: true }), "page-assistant-menu": at({ visible: true }) } }).page
+      pageDouble({ testIds: { "page-ai-handle": at({ visible: true }), "page-assistant-menu": at({ visible: true }) } })
+        .page
     );
     await expect(shown.pagesAssistAiHandleVisible()).resolves.toBe(true);
     await expect(shown.pagesAssistAiMenuVisible()).resolves.toBe(true);
 
     const hidden = new WebNewDriver(
-      pageDouble({ testIds: { "page-ai-handle": at({ visible: false }), "page-assistant-menu": at({ visible: false }) } }).page
+      pageDouble({
+        testIds: { "page-ai-handle": at({ visible: false }), "page-assistant-menu": at({ visible: false }) },
+      }).page
     );
     await expect(hidden.pagesAssistAiHandleVisible()).resolves.toBe(false);
     await expect(hidden.pagesAssistAiMenuVisible()).resolves.toBe(false);
@@ -815,7 +837,10 @@ describe("page assistant and cloud slots", () => {
     await closed.pagesCloudPaneOpen();
     expect(closedToggle.click).toHaveBeenCalledWith({ timeout: 30_000 });
 
-    const openTabs = at({ getAttribute: async () => "true", getByRole: () => at({ allInnerTexts: async () => [" Outline ", "Info", ""] }) });
+    const openTabs = at({
+      getAttribute: async () => "true",
+      getByRole: () => at({ allInnerTexts: async () => [" Outline ", "Info", ""] }),
+    });
     await expect(
       new WebNewDriver(pageDouble({ testIds: { "page-navigation-pane": openTabs } }).page).pagesCloudPaneTabNames()
     ).resolves.toEqual(["Outline", "Info"]);
@@ -824,9 +849,7 @@ describe("page assistant and cloud slots", () => {
     await expect(
       new WebNewDriver(pageDouble({ testIds: { "page-navigation-pane": closedTabs } }).page).pagesCloudPaneTabNames()
     ).resolves.toEqual([]);
-    await expect(
-      new WebNewDriver(pageDouble().page).pagesCloudPaneTabNames()
-    ).resolves.toEqual([]);
+    await expect(new WebNewDriver(pageDouble().page).pagesCloudPaneTabNames()).resolves.toEqual([]);
   });
 
   it("clears the body, types a slash and reads palette titles before dismissing it", async () => {
@@ -854,7 +877,9 @@ describe("page assistant and cloud slots", () => {
     });
     const stubborn = new WebNewDriver(
       pageDouble({
-        selectors: { '[aria-label="Page body"][contenteditable="true"]': bodyEditor({ locator: () => at({ count: 0 }) }) },
+        selectors: {
+          '[aria-label="Page body"][contenteditable="true"]': bodyEditor({ locator: () => at({ count: 0 }) }),
+        },
         testIds: { "page-slash-palette": stays },
       }).page
     );
@@ -980,4 +1005,3 @@ describe("page desktop and negative probes", () => {
     await expect(new WebNewDriver(pageDouble().page).pagesNegMarkPresent()).resolves.toBe(false);
   });
 });
-
