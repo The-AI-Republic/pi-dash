@@ -763,6 +763,44 @@ fn validate_uuid_field(
     }
 }
 
+/// One `PrimaryKeyRelatedField` value over a UUID pk: `Ok(Some(id))`
+/// resolved, `Ok(None)` on a lookup outage (silent, like `validate_pk`
+/// before it), `Err(message)` for coercion and existence failures.
+/// Callers pass neither null nor `""` for scalar fields (both clear
+/// outside, since every scalar pk key here is `allow_null=True`); list
+/// items arrive raw and both fail null (`allow_null=False`).
+async fn resolve_pk_item(
+    pool: &PgPool,
+    value: &serde_json::Value,
+    queryset_sql: &str,
+) -> Result<Option<Uuid>, String> {
+    if value.is_null() || is_empty_string(value) {
+        return Err("This field may not be null.".to_owned());
+    }
+    let text = match value {
+        serde_json::Value::String(text) => text.trim().to_string(),
+        _ => return Err("Not a valid string.".to_owned()),
+    };
+    let id = match text.parse::<Uuid>() {
+        Ok(id) => id,
+        Err(_) => {
+            return Err(format!("\u{201c}{text}\u{201d} is not a valid UUID."));
+        }
+    };
+    let row: Option<(Uuid,)> = match sqlx::query_as(queryset_sql)
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+    {
+        Ok(row) => row,
+        Err(_) => return Ok(None),
+    };
+    if row.is_none() {
+        return Err(format!("Invalid pk \"{id}\" - object does not exist."));
+    }
+    Ok(Some(id))
+}
+
 /// DRF `PrimaryKeyRelatedField.to_internal_value` over a UUID pk:
 /// malformed ids fail like the UUID field; well-formed ids must name a
 /// live row in the field queryset.
@@ -774,25 +812,19 @@ pub async fn validate_pk(
     queryset_sql: &str,
     allow_null: bool,
 ) -> Option<Uuid> {
-    let id = validate_uuid_field(errors, field, value, allow_null)?;
     if value.is_null() {
+        if !allow_null {
+            push_error(errors, field, "This field may not be null.".to_owned());
+        }
         return None;
     }
-    let row: Option<(Uuid,)> = sqlx::query_as(queryset_sql)
-        .bind(id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| ())
-        .ok()?;
-    if row.is_none() {
-        push_error(
-            errors,
-            field,
-            format!("Invalid pk \"{id}\" - object does not exist."),
-        );
-        return None;
+    match resolve_pk_item(pool, value, queryset_sql).await {
+        Ok(resolved) => resolved,
+        Err(message) => {
+            push_error(errors, field, message);
+            None
+        }
     }
-    Some(id)
 }
 
 /// Row-existence probes for the FK fields. Queryset notes:
@@ -1070,8 +1102,12 @@ pub async fn validate_issue_fields(
     if let Some(value) = input.get("sequence_id") {
         out.sequence_id = validate_integer(errors, "sequence_id", value, false);
     }
+    // `""` clears like null on every scalar pk arm below: DRF coerces
+    // it to `None` before validation, and each key here is
+    // `allow_null=True` (declared fields say so; the auto twins inherit
+    // it from their null FKs).
     if let Some(value) = input.get("state_id") {
-        if value.is_null() {
+        if value.is_null() || is_empty_string(value) {
             out.state_id = Some(None);
         } else if let Some(id) =
             validate_pk(pool, errors, "state_id", value, state_any_sql(), false).await
@@ -1088,7 +1124,7 @@ pub async fn validate_issue_fields(
     // `state_id`). Runs after the `state_id` arm so the overwrite
     // order matches; errors merge with `state_id` first, like DRF.
     if let Some(value) = input.get("state") {
-        if value.is_null() {
+        if value.is_null() || is_empty_string(value) {
             out.state_id = Some(None);
         } else if let Some(id) =
             validate_pk(pool, errors, "state", value, state_objects_sql(), false).await
@@ -1097,7 +1133,7 @@ pub async fn validate_issue_fields(
         }
     }
     if let Some(value) = input.get("parent_id") {
-        if value.is_null() {
+        if value.is_null() || is_empty_string(value) {
             out.parent_id = Some(None);
         } else if let Some(id) =
             validate_pk(pool, errors, "parent_id", value, issue_live_sql(), false).await
@@ -1116,7 +1152,7 @@ pub async fn validate_issue_fields(
     // overwrite order matches; errors merge with `parent_id` first,
     // like DRF.
     if let Some(value) = input.get("parent") {
-        if value.is_null() {
+        if value.is_null() || is_empty_string(value) {
             out.parent_id = Some(None);
         } else if let Some(id) = validate_pk(
             pool,
@@ -1136,7 +1172,7 @@ pub async fn validate_issue_fields(
     // that key is not a serializer field, so DRF drops it (a bogus
     // `estimate_point_id` PATCH 200s on Django — verified live).
     if let Some(value) = input.get("estimate_point") {
-        if value.is_null() {
+        if value.is_null() || is_empty_string(value) {
             out.estimate_point_id = Some(None);
         } else if let Some(id) = validate_pk(
             pool,
@@ -1152,7 +1188,7 @@ pub async fn validate_issue_fields(
         }
     }
     if let Some(value) = input.get("type") {
-        if value.is_null() {
+        if value.is_null() || is_empty_string(value) {
             out.type_id = Some(None);
         } else if let Some(id) =
             validate_pk(pool, errors, "type", value, issue_type_live_sql(), false).await
@@ -1161,7 +1197,7 @@ pub async fn validate_issue_fields(
         }
     }
     if let Some(value) = input.get("assigned_pod_id") {
-        if value.is_null() {
+        if value.is_null() || is_empty_string(value) {
             out.assigned_pod_id = Some(None);
         } else if let Some(id) = validate_uuid_field(errors, "assigned_pod_id", value, false) {
             // `Pod.all_objects`: tombstoned rows still resolve
@@ -1240,7 +1276,9 @@ fn label_live_sql() -> &'static str {
 }
 
 /// DRF `ListField(child=PrimaryKeyRelatedField)`: non-lists fail with
-/// the type message; null fails; each item resolves like `validate_pk`.
+/// the type message; null fails; each item resolves like `validate_pk`,
+/// with per-item errors keyed by index (`run_child_validation`
+/// collects every index, and any error drops the list).
 pub async fn validate_pk_list(
     pool: &PgPool,
     errors: &mut FieldErrors,
@@ -1278,11 +1316,20 @@ pub async fn validate_pk_list(
         }
     };
     let mut ids = Vec::with_capacity(items.len());
-    for item in items {
-        match validate_pk(pool, errors, field, item, queryset_sql, false).await {
-            Some(id) => ids.push(id),
-            None => return None,
+    let mut item_errors = serde_json::Map::new();
+    for (idx, item) in items.iter().enumerate() {
+        match resolve_pk_item(pool, item, queryset_sql).await {
+            Ok(Some(id)) => ids.push(id),
+            // Lookup outage: silent whole-field drop, like before.
+            Ok(None) => return None,
+            Err(message) => {
+                item_errors.insert(idx.to_string(), serde_json::json!([message]));
+            }
         }
+    }
+    if !item_errors.is_empty() {
+        errors.insert(field.to_owned(), serde_json::Value::Object(item_errors));
+        return None;
     }
     Some(ids)
 }
@@ -1956,7 +2003,9 @@ pub async fn validate_intake_fields(
         out.status = validate_int_choice(errors, "status", value, INTAKE_STATUSES, false);
     }
     if let Some(value) = input.get("duplicate_to") {
-        if value.is_null() {
+        // `""` coerces to `None` before validation (`RelatedField`), and
+        // the auto field is `allow_null=True` (null FK), so it clears.
+        if value.is_null() || is_empty_string(value) {
             out.duplicate_to = Some(None);
         } else if let Some(id) = validate_pk(
             pool,
@@ -5239,7 +5288,9 @@ async fn validate_issue_create(
             parent_id = None;
         } else {
             match resolve_pk_sql(pool, value, duplicate_to_live_sql()).await {
-                Ok(id) => parent_id = Some(id),
+                // `""` coerces to `None` ([`parse_pk_key`]), clearing like
+                // null — the auto twin still wins over `parent_id`.
+                Ok(resolved) => parent_id = resolved,
                 Err(message) => {
                     field_errors.insert("parent".to_owned(), serde_json::json!([message]));
                 }
@@ -5256,11 +5307,15 @@ async fn validate_issue_create(
     // default instead of triage). Sits after `parent` to match DRF field
     // order (..., agent_executor, parent, state, estimate_point, type),
     // so multi-error bodies merge like DRF.
-    let state_key_null = issue_data.get("state").is_some_and(|value| value.is_null());
+    // `""` counts as the null key: DRF coerces it to `None` before
+    // validation, so it replays the save-default fill, like null.
+    let state_key_null = issue_data
+        .get("state")
+        .is_some_and(|value| value.is_null() || is_empty_string(value));
     let state_override = match issue_data.get("state") {
         None | Some(serde_json::Value::Null) => None,
         Some(value) => match resolve_pk_sql(pool, value, state_objects_sql()).await {
-            Ok(id) => Some(id),
+            Ok(resolved) => resolved,
             Err(message) => {
                 field_errors.insert("state".to_owned(), serde_json::json!([message]));
                 None
@@ -5440,9 +5495,13 @@ async fn validate_issue_create(
 /// Ints coerce through `UUID(int=n)` (`UUIDField.get_prep_value`):
 /// out-of-range negatives fail `incorrect_type`, the rest look up a
 /// (practically never matching) UUID while the message keeps the
-/// original digits.
+/// original digits. `None` is DRF's `RelatedField.run_validation`
+/// empty-string coercion (`relations.py:151-155`): `""` becomes `None`
+/// before validation, so it answers the field's `allow_null` rule
+/// instead of the UUID parse. The match is exact-`""` (no trim), like
+/// DRF's `data == ''`.
 #[allow(clippy::result_large_err)]
-fn parse_pk_key(raw: &serde_json::Value) -> Result<(Uuid, String), String> {
+fn parse_pk_key(raw: &serde_json::Value) -> Result<Option<(Uuid, String)>, String> {
     enum Key {
         Uuid(Uuid),
         Int(Uuid, String),
@@ -5451,10 +5510,15 @@ fn parse_pk_key(raw: &serde_json::Value) -> Result<(Uuid, String), String> {
         serde_json::Value::Bool(_) => {
             return Err("Incorrect type. Expected pk value, received bool.".to_owned());
         }
-        serde_json::Value::String(text) => match text.parse::<Uuid>() {
-            Ok(id) => Key::Uuid(id),
-            Err(_) => return Err(uuid_invalid(text)),
-        },
+        serde_json::Value::String(text) => {
+            if text.is_empty() {
+                return Ok(None);
+            }
+            match text.parse::<Uuid>() {
+                Ok(id) => Key::Uuid(id),
+                Err(_) => return Err(uuid_invalid(text)),
+            }
+        }
         serde_json::Value::Number(number) => {
             if let Some(int) = number.as_i64() {
                 if int < 0 {
@@ -5476,10 +5540,10 @@ fn parse_pk_key(raw: &serde_json::Value) -> Result<(Uuid, String), String> {
             return Err("Incorrect type. Expected pk value, received NoneType.".to_owned());
         }
     };
-    Ok(match &key {
+    Ok(Some(match &key {
         Key::Uuid(id) => (*id, id.to_string()),
         Key::Int(id, text) => (*id, text.clone()),
-    })
+    }))
 }
 
 /// `PrimaryKeyRelatedField.to_internal_value` (`relations.py:252-263`)
@@ -5494,8 +5558,13 @@ async fn resolve_pk(
     table: &str,
     raw: &serde_json::Value,
     live_only: bool,
-) -> Result<Uuid, String> {
-    let (id, display) = parse_pk_key(raw)?;
+) -> Result<Option<Uuid>, String> {
+    let Some((id, display)) = parse_pk_key(raw)? else {
+        // `""` coerced to `None` ([`parse_pk_key`]); the caller applies
+        // the field's `allow_null` rule (scalar fields land `None`,
+        // list children fail null).
+        return Ok(None);
+    };
     // Same-table parameterization keeps one helper. `live_only` mirrors
     // the field queryset: the default soft-delete-scoped managers
     // (`Issue.objects`, `Label.objects`, `EstimatePoint.objects`,
@@ -5517,7 +5586,7 @@ async fn resolve_pk(
     if !exists {
         return Err(format!("Invalid pk \"{display}\" - object does not exist."));
     }
-    Ok(id)
+    Ok(Some(id))
 }
 
 /// [`resolve_pk`] against a caller-supplied queryset: the same coercion
@@ -5530,8 +5599,12 @@ async fn resolve_pk_sql(
     pool: &PgPool,
     raw: &serde_json::Value,
     queryset_sql: &str,
-) -> Result<Uuid, String> {
-    let (id, display) = parse_pk_key(raw)?;
+) -> Result<Option<Uuid>, String> {
+    let Some((id, display)) = parse_pk_key(raw)? else {
+        // `""` coerced to `None` ([`parse_pk_key`]); the caller applies
+        // the field's `allow_null` rule.
+        return Ok(None);
+    };
     let row: Option<(Uuid,)> = sqlx::query_as(queryset_sql)
         .bind(id)
         .fetch_optional(pool)
@@ -5540,12 +5613,19 @@ async fn resolve_pk_sql(
     if row.is_none() {
         return Err(format!("Invalid pk \"{display}\" - object does not exist."));
     }
-    Ok(id)
+    Ok(Some(id))
 }
 
 /// DRF `UUIDField` failure message: curly quotes around the input.
 fn uuid_invalid(input: &str) -> String {
     format!("\u{201c}{input}\u{201d} is not a valid UUID.")
+}
+
+/// Exact-`""` JSON string (DRF's `data == ''`, no trim): the input
+/// `RelatedField.run_validation` forces to `None` before validation
+/// (`relations.py:151-155`).
+fn is_empty_string(value: &serde_json::Value) -> bool {
+    value.as_str().is_some_and(str::is_empty)
 }
 
 /// Python `str()` for JSON values (DRF error-message interpolation):
@@ -5587,7 +5667,8 @@ fn python_str_repr(value: &serde_json::Value) -> String {
 }
 
 /// Optional `PrimaryKeyRelatedField`: missing/null → `None`; otherwise
-/// [`resolve_pk`].
+/// [`resolve_pk`]. `""` rides the same `None` (`allow_null=True` on every
+/// scalar pk key here) through the [`parse_pk_key`] coercion.
 #[allow(clippy::result_large_err)]
 async fn opt_pk_field(
     issue_data: &serde_json::Map<String, serde_json::Value>,
@@ -5600,7 +5681,7 @@ async fn opt_pk_field(
         None | Some(serde_json::Value::Null) => return Ok(None),
         Some(raw) => raw,
     };
-    resolve_pk(pool, table, raw, live_only).await.map(Some)
+    resolve_pk(pool, table, raw, live_only).await
 }
 
 /// Optional `ListField(child=PrimaryKeyRelatedField)`: missing → `None`
@@ -5632,7 +5713,15 @@ async fn opt_uuid_list_field(
     let mut errors = serde_json::Map::new();
     for (idx, item) in items.iter().enumerate() {
         match resolve_pk(pool, table, item, live_only).await {
-            Ok(id) => out.push(id),
+            Ok(Some(id)) => out.push(id),
+            // List children carry `allow_null=False`, so the `""`-to-None
+            // coercion fails null here, like DRF.
+            Ok(None) => {
+                errors.insert(
+                    idx.to_string(),
+                    serde_json::json!(["This field may not be null."]),
+                );
+            }
             Err(message) => {
                 errors.insert(idx.to_string(), serde_json::json!([message]));
             }
