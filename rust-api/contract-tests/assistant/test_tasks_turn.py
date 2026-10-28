@@ -36,6 +36,7 @@ from __future__ import annotations
 import ast
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
@@ -77,6 +78,15 @@ SWEEP_CUTOFF_SECS = 390
 SOFT_STREAM_CHUNKS = 20
 SOFT_STREAM_INTERVAL = 20.0
 CONFIGURED_SOFT_LIMIT_SECS = 600
+
+#: MCP-entry timeout (PIDASHCONV-1572): the turn's ten MCP servers accept
+#: the TCP connection but never answer, and toolsets are entered
+#: sequentially at ~10s (the pinned init timeout) each, so entry spans
+#: ~100s. The test-scoped prefork worker boots with a 60s soft limit, which
+#: deterministically lands mid-entry (never past it, never the sweep), and
+#: the turn fails turn_timeout.
+MCP_ENTRY_SOFT_LIMIT_SECS = 60
+MCP_ENTRY_HANGING_SERVERS = 10
 
 TIMEOUT_CODE = "turn_timeout"
 TIMEOUT_DETAIL = "The assistant took too long to respond."
@@ -1256,3 +1266,154 @@ def test_sweep_publishes_turn_failed_on_thread_channel(db_conn, broker_url):
         pubsub.unsubscribe()
         pubsub.close()
         rdb.close()
+
+
+# --------------------------------------------------------------------------- #
+# MCP-entry soft limit (PIDASHCONV-1572)
+# --------------------------------------------------------------------------- #
+
+
+def _hold_open(conn):
+    """Hold one accepted connection open without ever answering.
+
+    Request bytes are consumed and discarded; the client hangs until ITS
+    read timeout — which the test keeps far past the worker's soft limit,
+    so the soft limit deterministically wins.
+    """
+    conn.settimeout(3600)
+    try:
+        while True:
+            if not conn.recv(65536):
+                return
+    except OSError:
+        pass
+    finally:
+        try:
+            conn.close()
+        except OSError:
+            pass
+
+
+class _HangingMcpServer:
+    """An MCP server that accepts the TCP connection but never answers."""
+
+    def __init__(self):
+        self.accepted = []
+        self._sock = None
+        self._thread = None
+
+    def start(self):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(16)
+        port = sock.getsockname()[1]
+        self._sock = sock
+        stub = self
+
+        def serve():
+            while True:
+                try:
+                    conn, _ = sock.accept()
+                except OSError:
+                    return
+                stub.accepted.append(time.time())
+                threading.Thread(target=_hold_open, args=(conn,), daemon=True).start()
+
+        self._thread = threading.Thread(target=serve, daemon=True)
+        self._thread.start()
+        return f"http://127.0.0.1:{port}/mcp"
+
+    def stop(self):
+        if self._sock is not None:
+            try:
+                self._sock.close()
+            except OSError:
+                pass
+            self._sock = None
+
+
+def _seed_mcp_server(db_conn, user, name, url):
+    """One enabled MCP server row for the turn user (raw SQL, like the
+    replay's LLM seeding: the hanging URL is a test double, not endpoint
+    input)."""
+    now = _now_iso()
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO assistant_mcp_server "
+            "(id, user_id, name, url, auth_header_encrypted, is_enabled, "
+            "created_at, updated_at) "
+            "VALUES (%s, %s, %s, %s, NULL, TRUE, %s, %s)",
+            (str(uuid.uuid4()), str(user["id"]), name, url, now, now),
+        )
+    db_conn.commit()
+
+
+def test_mcp_entry_hang_fails_at_soft_limit(db_conn, broker_url):
+    """A turn hung in MCP toolset entry fails turn_timeout at the soft limit (PIDASHCONV-1572).
+
+    The user's ten MCP servers accept the TCP connection but never answer.
+    Toolsets are entered sequentially at ~10s (the pinned init timeout)
+    each, so entry spans ~100s, and the test-scoped prefork worker boots
+    with ASSISTANT_TURN_SOFT_LIMIT=60: the limit deterministically fires
+    mid-entry, and the turn fails with Django's turn_timeout detail before
+    any provider request. The Rust mirror is
+    ``tasks_assistant/test_mcp_entry_soft_limit_rust_replay.py``.
+    """
+    worker = _PreforkWorker(
+        extra_env={"ASSISTANT_TURN_SOFT_LIMIT": str(MCP_ENTRY_SOFT_LIMIT_SECS)}
+    )
+    queue = worker.start()
+    mcp = _HangingMcpServer()
+    mcp_url = mcp.start()
+    stub = _StubProvider()
+    base = stub.start()
+    try:
+        user, workspace, client = _seed_member(db_conn, "mcpentry")
+        _configure_llm(client, base)
+        for n in range(MCP_ENTRY_HANGING_SERVERS):
+            _seed_mcp_server(db_conn, user, f"hang-{n}", mcp_url)
+        thread_id, turn_id, _msg = _seed_turn_trio(db_conn, user, workspace)
+
+        t0 = time.monotonic()
+        celery_wire.publish(RUN_TURN, args=[turn_id], broker_url=broker_url, queue=queue)
+        row = wait_for(
+            lambda: _turn_row(db_conn, turn_id)
+            if _turn_row(db_conn, turn_id)["status"] == "failed"
+            else None,
+            what="mcp-entry turn failed",
+            timeout=MCP_ENTRY_SOFT_LIMIT_SECS + 240,
+        )
+        elapsed = time.monotonic() - t0
+        assert row["error_code"] == TIMEOUT_CODE
+        assert row["error_detail"] == TIMEOUT_DETAIL
+        assert elapsed >= MCP_ENTRY_SOFT_LIMIT_SECS - 5, (
+            f"failed after {elapsed:.0f}s: too early to be the 60s soft limit"
+        )
+        # Past the 10s-per-server entries but nowhere near their ~100s
+        # span: the soft limit won mid-entry (and not the sweep — 390s
+        # locally, 960s in CI).
+        assert elapsed < MCP_ENTRY_SOFT_LIMIT_SECS + 180, (
+            f"failed after {elapsed:.0f}s: too late to be the 60s soft limit"
+        )
+        assert row["completed_at"] is not None
+        assert _thread_row(db_conn, thread_id)["active_turn_id"] is None
+        assert len(mcp.accepted) >= 2, "the turn entered MCP servers in turn"
+        assert not stub.requests, "no provider request happens before MCP entry"
+
+        events = _turn_events(db_conn, turn_id)
+        kinds = [e["kind"] for e in events]
+        assert "turn_started" in kinds
+        failed = [e for e in events if e["kind"] == "turn_failed"]
+        assert len(failed) == 1, "exactly one failure event"
+        assert failed[0]["payload"] == {
+            "turn_id": turn_id,
+            "error_code": TIMEOUT_CODE,
+            "detail": TIMEOUT_DETAIL,
+        }
+        assert "turn_completed" not in kinds, "turn_completed followed turn_failed"
+        assert "assistant_delta" not in kinds, "deltas are pruned on failure"
+    finally:
+        stub.stop()
+        mcp.stop()
+        worker.stop()

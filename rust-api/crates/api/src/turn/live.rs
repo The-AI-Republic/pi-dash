@@ -240,8 +240,42 @@ impl Drop for LiveStream {
         // Release the resolved lane (decrypted BYOK key included) and the
         // toolset as soon as the drive is done with them, like Python's
         // `_run_turn` releasing its `model`/`toolsets` locals.
-        if let Ok(mut runs) = self.runs.lock() {
-            runs.remove(&self.turn_id);
+        reclaim_runs(&self.runs, self.turn_id);
+    }
+}
+
+/// Drop one turn's record from the shared map. Removing an absent record is
+/// a no-op, so the explicit reclaims, the stream's `Drop` and the
+/// [`OpenStreamGuard`] overlap safely.
+fn reclaim_runs(runs: &Mutex<HashMap<Uuid, PreparedTurn>>, turn_id: Uuid) {
+    if let Ok(mut runs) = runs.lock() {
+        runs.remove(&turn_id);
+    }
+}
+
+/// Reclaims the per-turn record when `open_stream` exits without a stream.
+///
+/// `drive_turn` wraps `open_stream` in `timeout_at`: when the soft limit
+/// fires during MCP entry the future is dropped at the `enter()`/`tools()`
+/// awaits, where no explicit reclaim runs and no [`LiveStream`] exists yet.
+/// The guard is defused once the stream takes ownership of the reclaim (its
+/// `Drop`).
+struct OpenStreamGuard {
+    runs: Arc<Mutex<HashMap<Uuid, PreparedTurn>>>,
+    turn_id: Uuid,
+    defused: bool,
+}
+
+impl OpenStreamGuard {
+    fn defuse(mut self) {
+        self.defused = true;
+    }
+}
+
+impl Drop for OpenStreamGuard {
+    fn drop(&mut self) {
+        if !self.defused {
+            reclaim_runs(&self.runs, self.turn_id);
         }
     }
 }
@@ -697,9 +731,7 @@ impl LiveTurnSeam {
     /// exists to own the reclaim (a history read failure), so no path leaves a
     /// record behind.
     fn reclaim_turn(&self, turn_id: Uuid) {
-        if let Ok(mut runs) = self.runs.lock() {
-            runs.remove(&turn_id);
-        }
+        reclaim_runs(&self.runs, turn_id);
     }
 
     /// The tool environment for one run (`ToolEnv`: settings + clock).
@@ -1315,6 +1347,15 @@ impl TurnSeam for LiveTurnSeam {
         history: &Value,
         toolsets: &[ToolsetHandle],
     ) -> Result<Self::Stream, AgentError> {
+        // The record's reclaim on every exit without a stream — including
+        // cancellation: the drive drops this future at the MCP-entry awaits
+        // when the soft limit fires. Defused once the stream below takes
+        // ownership; reclaiming an absent record is a no-op.
+        let reclaim = OpenStreamGuard {
+            runs: self.runs.clone(),
+            turn_id: ctx.turn_id,
+            defused: false,
+        };
         let (lane, tools) = {
             let guard = self.runs.lock().map_err(internal_agent_error)?;
             let resolved = guard
@@ -1324,10 +1365,9 @@ impl TurnSeam for LiveTurnSeam {
             match resolved {
                 Some((lane, Some(tools))) => (lane, tools),
                 // Unreachable in practice (`resolve_model` inserts the record
-                // and `resolve_toolsets` fills `tools`), but a missing record
-                // here still returns before any stream exists to reclaim it.
+                // and `resolve_toolsets` fills `tools`); the guard reclaims
+                // the partial record on return.
                 Some((_, None)) => {
-                    self.reclaim_turn(ctx.turn_id);
                     return Err(AgentError::Typed {
                         code: rt::CODE_INTERNAL.to_owned(),
                         detail: "assistant turn: toolsets were not resolved".to_owned(),
@@ -1360,8 +1400,6 @@ impl TurnSeam for LiveTurnSeam {
             match history::parse_blob(history) {
                 Ok(messages) => messages,
                 Err(error) => {
-                    // No stream exists yet, so reclaim the record here.
-                    self.reclaim_turn(ctx.turn_id);
                     return Err(AgentError::Typed {
                         code: rt::CODE_INTERNAL.to_owned(),
                         detail: error.to_string(),
@@ -1419,6 +1457,8 @@ impl TurnSeam for LiveTurnSeam {
             };
             let _ = tx.send(StreamMessage::End(terminal));
         });
+        // The stream owns the reclaim from here (its `Drop`).
+        reclaim.defuse();
         Ok(LiveStream {
             rx,
             outcome,
@@ -2069,5 +2109,106 @@ mod tests {
             !runs.lock().expect("lock").contains_key(&turn_id),
             "the per-turn record is gone once the stream drops"
         );
+    }
+
+    /// Soft-limit expiry during MCP entry reclaims the per-turn record
+    /// (PIDASHCONV-1572). `drive_turn` drops the `open_stream` future at the
+    /// `session.enter()`/`tools()` awaits, where none of the explicit reclaims
+    /// run and no `LiveStream` exists yet — without the guard the record (the
+    /// decrypted BYOK key and the MCP sessions) stays in the seam's
+    /// process-wide map for the life of the worker.
+    #[tokio::test]
+    async fn open_stream_timeout_during_mcp_entry_reclaims_the_record() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // The hanging MCP server: accepts the TCP connection, then never
+        // answers the initialize request.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("stub binds");
+        let port = listener.local_addr().expect("stub port").port();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let accept_hits = hits.clone();
+        let acceptor = tokio::spawn(async move {
+            loop {
+                let Ok((socket, _)) = listener.accept().await else {
+                    return;
+                };
+                accept_hits.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                    drop(socket);
+                });
+            }
+        });
+
+        let pool = PgPool::connect_lazy("postgres://127.0.0.1:1/unused").expect("lazy pool builds");
+        let seam = LiveTurnSeam::new(pool, Arc::new(Settings::test_defaults()), None)
+            .expect("seam builds");
+        let turn_id = Uuid::new_v4();
+        let spec = mcp_service::build_toolset_spec(
+            &format!("http://127.0.0.1:{port}/mcp"),
+            None,
+            Some("hang"),
+            false,
+            3600.0,
+            3600.0,
+            "hang",
+        );
+        let session = ResilientSession::new(spec).expect("session builds");
+        let tools = LiveToolset {
+            store: seam.tool_store.clone(),
+            deps: tokio::sync::Mutex::new(AssistantDeps::default()),
+            env: seam.run_env(Utc::now()),
+            anthropic: false,
+            local: Vec::new(),
+            legs: vec![McpLeg {
+                server_name: "hang".to_owned(),
+                session: tokio::sync::Mutex::new(session),
+                defs: Mutex::new(Vec::new()),
+            }],
+        };
+        seam.runs.lock().expect("lock").insert(
+            turn_id,
+            PreparedTurn {
+                lane: Lane::Anthropic {
+                    model: "claude-3-5-sonnet".to_owned(),
+                    api_key: "sk-secret".to_owned(),
+                },
+                model_label: "anthropic:claude-3-5-sonnet".to_owned(),
+                tools: Some(Arc::new(tools)),
+            },
+        );
+        let ctx = TurnContext {
+            turn_id,
+            turn_status: "running".to_owned(),
+            thread_id: Uuid::new_v4(),
+            thread_kind: "chat".to_owned(),
+            workspace_id: Uuid::new_v4(),
+            workspace_slug: "ws".to_owned(),
+            workspace_name: "ws".to_owned(),
+            workspace_role: 15,
+            user_id: Uuid::new_v4(),
+            user_display: "user".to_owned(),
+            user_text: "do a thing".to_owned(),
+        };
+        // The drive's soft-limit deadline, far inside the stub's (absent)
+        // answer and the session's hour-long timeouts: the timeout must win.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(500);
+        let outcome =
+            tokio::time::timeout_at(deadline, seam.open_stream(&ctx, &Value::Null, &[])).await;
+        assert!(
+            outcome.is_err(),
+            "the deadline must fire while MCP entry hangs"
+        );
+        assert!(
+            hits.load(Ordering::SeqCst) >= 1,
+            "the turn must have reached MCP entry"
+        );
+        assert!(
+            !seam.runs.lock().expect("lock").contains_key(&turn_id),
+            "the per-turn record is gone after the deadline fires during MCP entry"
+        );
+        acceptor.abort();
     }
 }
