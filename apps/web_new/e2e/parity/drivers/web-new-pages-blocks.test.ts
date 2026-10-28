@@ -1273,11 +1273,20 @@ describe("browser-side callbacks", () => {
 
   it("settles once the body stops mutating, and swallows a detached body", async () => {
     const { driver } = domStage();
-    const start = Date.now();
-
-    await (driver as unknown as { pagesBlocksWaitSettled(): Promise<void> }).pagesBlocksWaitSettled();
-
-    expect(Date.now() - start).toBeGreaterThanOrEqual(600);
+    vi.useFakeTimers();
+    try {
+      const settle = (driver as unknown as { pagesBlocksWaitSettled(): Promise<void> }).pagesBlocksWaitSettled();
+      const before = await Promise.race([settle.then(() => "settled" as const), Promise.resolve("pending" as const)]);
+      expect(before).toBe("pending");
+      await vi.advanceTimersByTimeAsync(699);
+      expect(await Promise.race([settle.then(() => "settled" as const), Promise.resolve("pending" as const)])).toBe(
+        "pending"
+      );
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(settle).resolves.toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
 
     // A body that throws on evaluate is not an error: the wait is best effort.
     const stub = pageDouble();
@@ -1387,7 +1396,14 @@ describe("browser-side callbacks", () => {
       seen.push((event as ClipboardEvent).clipboardData?.getData("text/html") ?? "");
     });
 
-    await driver.pagesBlocksEditorPasteHtml("<h2>Heading</h2>");
+    vi.useFakeTimers();
+    try {
+      const pasting = driver.pagesBlocksEditorPasteHtml("<h2>Heading</h2>");
+      await vi.runAllTimersAsync();
+      await pasting;
+    } finally {
+      vi.useRealTimers();
+    }
 
     expect(seen).toEqual(["<h2>Heading</h2>"]);
     vi.unstubAllGlobals();
@@ -1430,8 +1446,19 @@ describe("browser-side callbacks", () => {
     const landed = (d: WebNewDriver) =>
       (d as unknown as { pagesBlocksWaitPasteLanded(): Promise<void> }).pagesBlocksWaitPasteLanded();
 
-    // Nothing armed, nothing landed: the wait is best effort and returns.
-    await expect(landed(driver)).resolves.toBeUndefined();
+    // Nothing armed, nothing landed: the wait polls until its budget runs out
+    // and then returns instead of failing. The budget is virtual here.
+    vi.useFakeTimers();
+    try {
+      const wait = landed(driver);
+      const outcome = (): Promise<"settled" | "pending"> =>
+        Promise.race([wait.then(() => "settled" as const), Promise.resolve("pending" as const)]);
+      expect(await outcome()).toBe("pending");
+      await vi.advanceTimersByTimeAsync(10_000);
+      await expect(wait).resolves.toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
     expect((window as unknown as { __pagesBlocksPasteState?: unknown }).__pagesBlocksPasteState).toBeUndefined();
   });
 
@@ -1497,13 +1524,21 @@ describe("browser-side callbacks", () => {
     const { driver, editor } = domStage();
     const settle = (d: WebNewDriver) =>
       (d as unknown as { pagesBlocksWaitSettled(): Promise<void> }).pagesBlocksWaitSettled();
-    const start = Date.now();
-    const waiting = settle(driver);
     // A late application re-arms the timer, so the quiet window restarts.
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    editor.append(document.createElement("p"));
-    await waiting;
-    expect(Date.now() - start).toBeGreaterThanOrEqual(900);
+    vi.useFakeTimers();
+    try {
+      const waiting = settle(driver);
+      await vi.advanceTimersByTimeAsync(300);
+      editor.append(document.createElement("p"));
+      await vi.advanceTimersByTimeAsync(699);
+      expect(await Promise.race([waiting.then(() => "settled" as const), Promise.resolve("pending" as const)])).toBe(
+        "pending"
+      );
+      await vi.advanceTimersByTimeAsync(1);
+      await waiting;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("skips a paragraph whose box cannot be measured", async () => {

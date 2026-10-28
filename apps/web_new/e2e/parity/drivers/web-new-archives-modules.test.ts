@@ -297,14 +297,21 @@ describe("the slow-fetch skeleton", () => {
     await expect(new WebNewDriver(fake.asPage()).archivesModulesShowsSkeleton("acme", "p1")).resolves.toBe(true);
     const handler = fake.routes[0]?.handler;
     if (handler === undefined) throw new Error("no route handler armed");
-    await expect(
-      handler({
+    // The driver holds a GET for three seconds before continuing; that hold is
+    // virtual here, so the case asserts the release without waiting it out.
+    vi.useFakeTimers();
+    try {
+      const routed = handler({
         request: () => ({ method: () => "GET" }),
         continue: async () => {
           throw new Error("page closed");
         },
-      })
-    ).resolves.toBeUndefined();
+      });
+      await vi.advanceTimersByTimeAsync(3_000);
+      await expect(routed).resolves.toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
     expect(fake.unroutes).toEqual([fake.routes[0]?.matcher]);
   });
 
