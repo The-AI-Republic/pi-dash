@@ -315,7 +315,14 @@ test(
       await driver.intakeTriageFilterClose();
       await driver.intakeTriageListOpenIssue(`${tag} A`);
       await expect.poll(() => driver.rulesIntakeTriageVisible(), { timeout: 60_000 }).toBe(true);
-      expect(await driver.intakeTriageStatusChipText()).toBeNull();
+      // bug: NEWFRONT-272 — the old app hides the chip once the snooze
+      // lapses. Intended: the chip stays with passed styling. The new
+      // build keeps it (gate NEWFRONT-695), so its leg asserts Overdue.
+      if (driver.target === "web_new") {
+        await expect.poll(() => driver.intakeTriageStatusChipText(), { timeout: 60_000 }).toBe("Overdue");
+      } else {
+        expect(await driver.intakeTriageStatusChipText()).toBeNull();
+      }
     } finally {
       await serverCleanupInboxIssue(seed.workspaceSlug, projectId, inbox.issueId, session);
       await serverCleanupInboxIssue(seed.workspaceSlug, projectId, other.issueId, session);

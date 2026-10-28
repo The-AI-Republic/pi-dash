@@ -333,12 +333,23 @@ test(
       // handler wins over the form's busy guard, so Escape mid-upload
       // closes with no wait notice. Intended: same wait notice as
       // Discard, dialog kept. See NEWFRONT-304 and the INT-016 row.
+      // The new build guards Escape exactly like close (gate
+      // NEWFRONT-695), so its leg asserts the wait, not the close.
+      const onNew = driver.target === "web_new";
       await driver.intakeCreateFillTitle(`${tag} request`);
       await driver.intakeCreateStallNextUpload();
       await driver.intakeCreateInsertImage({ name: "dot.png", mime: "image/png", bytes: tinyPng() });
       await driver.intakeCreatePressEscape();
+      if (onNew) {
+        await expect.poll(() => driver.isToastVisible("still processing"), { timeout: 15_000 }).toBe(true);
+        expect(await driver.intakeCreateDialogOpen()).toBe(true);
+        await driver.intakeCreateReleaseUpload();
+        await expect.poll(() => driver.intakeCreateEditorImageCount(), { timeout: 60_000 }).toBe(1);
+        await driver.intakeCreatePressEscape();
+      } else {
+        await driver.intakeCreateReleaseUpload();
+      }
       await expect.poll(() => driver.intakeCreateDialogOpen(), { timeout: 15_000 }).toBe(false);
-      await driver.intakeCreateReleaseUpload();
       const rows = await serverInboxIssues(seed.workspaceSlug, projectId, session);
       expect(rows).toEqual([]);
     } finally {

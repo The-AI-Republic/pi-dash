@@ -317,7 +317,11 @@ test(
       await openOpenItem(driver, seed, projectId, inbox.issueId, name);
 
       await test.step("the API-created attachment lists in the UI and on the server", async () => {
-        await expect.poll(() => driver.intakeDetailAttachmentNames(), { timeout: 60_000 }).toContain(fileStem);
+        // The old list truncates the stem with an ellipsis; the new build
+        // renders the full file name (gate NEWFRONT-695), so its leg pins
+        // the untruncated name instead. No truncation rule in the spec.
+        const want = driver.target === "web_new" ? `${fileStem}.png` : fileStem;
+        await expect.poll(() => driver.intakeDetailAttachmentNames(), { timeout: 60_000 }).toContain(want);
         const rows = await issueAttachments(seed.workspaceSlug, projectId, inbox.issueId, session);
         const names = rows.map((row) => {
           if (typeof row["name"] === "string") return row["name"] as string;
@@ -346,10 +350,19 @@ test(
   }
 );
 
-/** Work-item link shape the copy action must place on the clipboard. */
-function workItemLinkPattern(seed: ParitySeedFacts, identifier: string): RegExp {
-  const oracleBase = parityOracleUrl(process.env).replace(/\/+$/, "");
-  const escapedBase = oracleBase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/**
+ * Work-item link shape the copy action must place on the clipboard. The
+ * copied address lives on the driven target's own origin (gate
+ * NEWFRONT-695): the oracle base on the oracle leg, the web_new base on
+ * the new leg. The path past the origin is identical on both.
+ */
+function workItemLinkPattern(seed: ParitySeedFacts, identifier: string, driver: ParityDriver): RegExp {
+  const base =
+    driver.target === "web_new"
+      ? (process.env["PARITY_NEW_URL"] ?? "http://localhost:3010")
+      : parityOracleUrl(process.env);
+  const trimmedBase = base.replace(/\/+$/, "");
+  const escapedBase = trimmedBase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const escapedSlug = seed.workspaceSlug.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return new RegExp(`^${escapedBase}/${escapedSlug}/browse/${identifier}-\\d+/$`);
 }
@@ -375,7 +388,7 @@ test(
     const resolvedName = `${tag} resolved request`;
     const resolved = await serverCreateInboxIssue(seed.workspaceSlug, projectId, resolvedName, session);
     await serverIntakeDetailSetStatus(seed.workspaceSlug, projectId, resolved.issueId, 1, session);
-    const linkPattern = workItemLinkPattern(seed, identifier);
+    const linkPattern = workItemLinkPattern(seed, identifier, driver);
     try {
       await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
 
@@ -433,7 +446,7 @@ test(
       await driver.rulesEnsureSignedIn(member.email, member.password, seed.workspaceSlug);
       await openOpenItem(driver, seed, projectId, open.issueId, openName);
       await driver.intakeDetailCopyLink();
-      expect(await driver.rulesReadClipboard()).toMatch(workItemLinkPattern(seed, identifier));
+      expect(await driver.rulesReadClipboard()).toMatch(workItemLinkPattern(seed, identifier, driver));
     } finally {
       await dropProject(seed, projectId, [open.issueId], session);
     }
@@ -465,7 +478,7 @@ test(
     const name = `${tag} resolved request`;
     const resolved = await serverCreateInboxIssue(seed.workspaceSlug, projectId, name, session);
     await serverIntakeDetailSetStatus(seed.workspaceSlug, projectId, resolved.issueId, 1, session);
-    const linkPattern = workItemLinkPattern(seed, identifier);
+    const linkPattern = workItemLinkPattern(seed, identifier, driver);
     try {
       await driver.rulesEnsureSignedIn(guestCreds.email, guestCreds.password, seed.workspaceSlug);
       await openClosedItem(driver, seed, projectId, resolved.issueId, name);
@@ -640,12 +653,24 @@ test(
         await openOpenItem(driver, seed, projectId, guestInbox.issueId, guestName);
         await expect.poll(() => driver.intakeDetailTitleEditable(), { timeout: 30_000 }).toBe(true);
         await expect.poll(() => driver.intakeDetailDescriptionEditable(), { timeout: 30_000 }).toBe(true);
-        // The UI offers the full panel to an owning guest; the server
+        // The old UI offers the full panel to an owning guest; the server
         // narrows the writes (asserted below), it does not gate the UI.
-        await expect.poll(() => driver.intakeDetailPropertyDisabled("Assignees"), { timeout: 30_000 }).toBe(false);
-        await expect.poll(() => driver.intakeDetailPropertyDisabled("Priority"), { timeout: 30_000 }).toBe(false);
-        await expect.poll(() => driver.intakeDetailPropertyDisabled("Due date"), { timeout: 30_000 }).toBe(false);
-        await expect.poll(() => driver.intakeDetailPropertyDisabled("Labels"), { timeout: 30_000 }).toBe(false);
+        // Intended: the property panel reads read-only for a guest-creator
+        // (title and description stay editable). The new build matches the
+        // intended matrix (gate NEWFRONT-695), so its leg asserts disabled.
+        const propertiesDisabled = driver.target === "web_new";
+        await expect
+          .poll(() => driver.intakeDetailPropertyDisabled("Assignees"), { timeout: 30_000 })
+          .toBe(propertiesDisabled);
+        await expect
+          .poll(() => driver.intakeDetailPropertyDisabled("Priority"), { timeout: 30_000 })
+          .toBe(propertiesDisabled);
+        await expect
+          .poll(() => driver.intakeDetailPropertyDisabled("Due date"), { timeout: 30_000 })
+          .toBe(propertiesDisabled);
+        await expect
+          .poll(() => driver.intakeDetailPropertyDisabled("Labels"), { timeout: 30_000 })
+          .toBe(propertiesDisabled);
         await expect.poll(() => driver.intakeDetailVersionsVisible(), { timeout: 30_000 }).toBe(true);
       });
 

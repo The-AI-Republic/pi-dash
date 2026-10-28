@@ -430,16 +430,33 @@ test(
       // bug: NEWFRONT-262 — the default status filter always counts as
       // applied, so the dedicated empty states never render. Intended: empty
       // Open guides with a create action, empty Closed shows its
-      // informational state.
-      await test.step("empty Open shows the no-results state instead of the guidance", async () => {
-        await driver.intakeShellOpen(seed.workspaceSlug, emptyId);
-        await expect.poll(() => driver.intakeShellListEmptyHeading(), { timeout: 60_000 }).toBe("No matching results.");
-      });
+      // informational state. The new build implements the intended
+      // three-way split (gate NEWFRONT-695), so its leg asserts the
+      // guidance and informational headings instead.
+      const onNew = driver.target === "web_new";
+      await test.step(
+        onNew
+          ? "empty Open guides with a create action"
+          : "empty Open shows the no-results state instead of the guidance",
+        async () => {
+          await driver.intakeShellOpen(seed.workspaceSlug, emptyId);
+          await expect
+            .poll(() => driver.intakeShellListEmptyHeading(), { timeout: 60_000 })
+            .toBe(onNew ? "No requests waiting for triage." : "No matching results.");
+        }
+      );
 
-      await test.step("empty Closed shows the no-results state instead of its informational state", async () => {
-        await driver.intakeShellClickTab("closed");
-        await expect.poll(() => driver.intakeShellListEmptyHeading(), { timeout: 60_000 }).toBe("No matching results.");
-      });
+      await test.step(
+        onNew
+          ? "empty Closed shows its informational state"
+          : "empty Closed shows the no-results state instead of its informational state",
+        async () => {
+          await driver.intakeShellClickTab("closed");
+          await expect
+            .poll(() => driver.intakeShellListEmptyHeading(), { timeout: 60_000 })
+            .toBe(onNew ? "Nothing has been resolved yet." : "No matching results.");
+        }
+      );
     } finally {
       await serverCleanupProject(seed.workspaceSlug, projectId, session);
       await serverCleanupProject(seed.workspaceSlug, emptyId, session);

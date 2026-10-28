@@ -1570,6 +1570,7 @@ export class WebNewDriver implements ParityDriver {
     // The intake screen resolves the triage row, then loads its feed;
     // that chain is slow on the dev server.
     await this.intakeShellWaitSettled();
+    await this.intakeDetailTitleSettled();
     await this.page.getByRole("group", { name: "Add comment" }).first().waitFor({ timeout: 300_000 });
   }
 
@@ -5795,7 +5796,9 @@ export class WebNewDriver implements ParityDriver {
   }
 
   private intakeCreateEditor(): Locator {
-    return this.intakeCreateDialog().getByLabel("Description");
+    // Exact: the dialog also holds an "Attach an image to the
+    // description" file input whose label contains Description.
+    return this.intakeCreateDialog().getByLabel("Description", { exact: true });
   }
 
   async intakeCreateOpen(workspaceSlug: string, projectId: string): Promise<void> {
@@ -22440,6 +22443,9 @@ export class WebNewDriver implements ParityDriver {
   }
   async intakeDetailCopyLink(): Promise<void> {
     await this.intakeDetailTitleSettled();
+    // Copying writes to the clipboard, which headless Chromium denies
+    // without an explicit grant; arrange it before the click.
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
     const header = this.page.getByTestId("intake-detail-header");
     const menu = header.getByTestId("intake-detail-menu");
     if ((await menu.count()) > 0 && (await this.isShown(menu))) {
@@ -24904,174 +24910,352 @@ export class WebNewDriver implements ParityDriver {
   }
 
   // --- Intake triage actions (NEWFRONT-259, INT-020/021/022/023/025).
+  // --- Gate implementations (NEWFRONT-695): the header buttons, the
+  // --- overflow menu, and the five triage dialogs. Existing methods
+  // --- above are untouched per the shared driver contract.
+
+  /** The header's overflow trigger (desktop request-actions menu). */
+  private intakeTriageMenuTrigger(): Locator {
+    return this.page.getByTestId("intake-detail-menu").getByRole("button", { name: "Request actions" });
+  }
+
+  /** The overflow menu's entries, wherever the menu portals them. */
+  private intakeTriageMenuItems(): Locator {
+    return this.page.getByRole("menuitem");
+  }
+
+  /** Open the overflow menu unless its entries already render. */
+  private async intakeTriageEnsureMenuOpen(): Promise<void> {
+    await this.intakeDetailTitleSettled();
+    if ((await this.intakeTriageMenuItems().count()) > 0) return;
+    await this.intakeTriageMenuTrigger().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.intakeTriageMenuItems().first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  /** Settle once the address changes (a triage advance moved focus). */
+  private async intakeTriageWaitUrlChange(before: string): Promise<void> {
+    await this.page.waitForFunction((prev) => window.location.href !== prev, before, {
+      timeout: WebNewDriver.WAIT_MS,
+    });
+  }
+
+  /** An open triage dialog, scoped by its title. */
+  private intakeTriageDialog(title: string | RegExp): Locator {
+    return this.page.getByRole("dialog", { name: title });
+  }
 
   async intakeTriageAcceptVisible(): Promise<boolean> {
-    return todo("intakeTriageAcceptVisible");
+    await this.intakeDetailTitleSettled();
+    return this.isShown(this.page.getByTestId("intake-triage-accept"));
   }
 
   async intakeTriageDeclineVisible(): Promise<boolean> {
-    return todo("intakeTriageDeclineVisible");
+    await this.intakeDetailTitleSettled();
+    return this.isShown(this.page.getByTestId("intake-triage-decline"));
   }
 
   async intakeTriageClickAccept(): Promise<void> {
-    return todo("intakeTriageClickAccept");
+    // No dialog wait: a member's click is refused with a notice instead.
+    await this.intakeDetailTitleSettled();
+    await this.page.getByTestId("intake-triage-accept").click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async intakeTriageAcceptDialogVisible(): Promise<boolean> {
-    return todo("intakeTriageAcceptDialogVisible");
+    return this.isShown(this.intakeTriageDialog(/to project work items/));
   }
 
   async intakeTriageAcceptDialogText(): Promise<{ heading: string; confirm: string }> {
-    return todo("intakeTriageAcceptDialogText");
+    const dialog = this.intakeTriageDialog(/to project work items/);
+    await dialog.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const heading = (
+      (await dialog
+        .getByRole("heading")
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+    const confirm = (
+      (await dialog
+        .getByRole("button", { name: "Add to project" })
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+    return { heading, confirm };
   }
 
   async intakeTriageAcceptDialogConfirm(): Promise<void> {
-    return todo("intakeTriageAcceptDialogConfirm");
+    const before = this.page.url();
+    const dialog = this.intakeTriageDialog(/to project work items/);
+    await dialog.getByRole("button", { name: "Add to project" }).click({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
+    await this.intakeTriageWaitUrlChange(before);
   }
 
   async intakeTriageAcceptDialogCancel(): Promise<void> {
-    return todo("intakeTriageAcceptDialogCancel");
+    // An edit never prompts: Discard closes the accept form directly.
+    const dialog = this.intakeTriageDialog(/to project work items/);
+    await dialog.getByRole("button", { name: "Discard" }).click({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
   }
 
   async intakeTriageClickDecline(): Promise<void> {
-    return todo("intakeTriageClickDecline");
+    // No dialog wait: a member's click is refused with a notice instead.
+    await this.intakeDetailTitleSettled();
+    await this.page.getByTestId("intake-triage-decline").click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async intakeTriageDeclineDialogVisible(): Promise<boolean> {
-    return todo("intakeTriageDeclineDialogVisible");
+    return this.isShown(this.intakeTriageDialog("Decline work item"));
   }
 
   async intakeTriageDeclineDialogText(): Promise<{ heading: string; body: string }> {
-    return todo("intakeTriageDeclineDialogText");
+    const dialog = this.intakeTriageDialog("Decline work item");
+    await dialog.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const heading = dialog.getByRole("heading", { name: "Decline work item" }).first();
+    const title = ((await heading.innerText().catch(() => "")) ?? "").trim();
+    const body = ((await heading.evaluate(descriptionAfterHeading).catch(() => "")) ?? "").trim();
+    return { heading: title, body };
   }
 
   async intakeTriageDeclineConfirm(): Promise<void> {
-    return todo("intakeTriageDeclineConfirm");
+    const before = this.page.url();
+    const dialog = this.intakeTriageDialog("Decline work item");
+    await dialog.getByRole("button", { name: "Decline", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
+    await this.intakeTriageWaitUrlChange(before);
   }
 
   async intakeTriageDeclineCancel(): Promise<void> {
-    return todo("intakeTriageDeclineCancel");
+    const dialog = this.intakeTriageDialog("Decline work item");
+    await dialog.getByRole("button", { name: "Cancel" }).click({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
   }
 
   async intakeTriageOverflowVisible(): Promise<boolean> {
-    return todo("intakeTriageOverflowVisible");
+    await this.intakeDetailTitleSettled();
+    return this.isShown(this.intakeTriageMenuTrigger());
   }
 
   async intakeTriageOpenOverflow(): Promise<void> {
-    return todo("intakeTriageOpenOverflow");
+    await this.intakeTriageEnsureMenuOpen();
   }
 
   async intakeTriageOverflowOptions(): Promise<string[]> {
-    return todo("intakeTriageOverflowOptions");
+    await this.intakeTriageEnsureMenuOpen();
+    const texts = await this.intakeTriageMenuItems().allInnerTexts();
+    await this.page.keyboard.press("Escape");
+    await this.intakeTriageMenuItems().first().waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
+    return texts.map((text) => text.replace(/\s+/g, " ").trim()).filter((text) => text.length > 0);
   }
 
   async intakeTriageClickSnooze(): Promise<void> {
-    return todo("intakeTriageClickSnooze");
+    await this.intakeTriageEnsureMenuOpen();
+    await this.page.getByRole("menuitem", { name: "Snooze", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.intakeTriageDialog("Snooze request").waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async intakeTriageSnoozeDialogVisible(): Promise<boolean> {
-    return todo("intakeTriageSnoozeDialogVisible");
+    return this.isShown(this.intakeTriageDialog("Snooze request"));
   }
 
   async intakeTriageSnoozePastDisabled(): Promise<boolean> {
-    return todo("intakeTriageSnoozePastDisabled");
+    const dialog = this.intakeTriageDialog("Snooze request");
+    await dialog.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const days = dialog.getByTestId("intake-snooze-calendar-grid").locator("button[data-day]");
+    const total = await days.count();
+    if (total === 0) return false;
+    // Today in the page's own timezone, matching the calendar's min.
+    const today = await this.page.evaluate(() => {
+      const now = new Date();
+      const pad = (part: number): string => String(part).padStart(2, "0");
+      return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+    });
+    let past = 0;
+    for (let index = 0; index < total; index += 1) {
+      const day = await days.nth(index).getAttribute("data-day");
+      if (day !== null && day < today) {
+        past += 1;
+        if (await days.nth(index).isEnabled()) return false;
+      }
+    }
+    return past > 0;
   }
 
-  async intakeTriageSnoozePickFuture(_daysAhead: number): Promise<void> {
-    return todo("intakeTriageSnoozePickFuture");
+  async intakeTriageSnoozePickFuture(daysAhead: number): Promise<void> {
+    const dialog = this.intakeTriageDialog("Snooze request");
+    await dialog.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const target = new Date();
+    target.setDate(target.getDate() + daysAhead);
+    const pad = (part: number): string => String(part).padStart(2, "0");
+    const iso = `${target.getFullYear()}-${pad(target.getMonth() + 1)}-${pad(target.getDate())}`;
+    // The caption selects jump straight to the target month, so picks
+    // across a month boundary need no chevron walk.
+    await dialog.getByRole("combobox", { name: "Month" }).selectOption(String(target.getMonth()));
+    await dialog.getByRole("combobox", { name: "Year" }).selectOption(String(target.getFullYear()));
+    await dialog.locator(`button[data-day="${iso}"]`).click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async intakeTriageSnoozeConfirm(): Promise<void> {
-    return todo("intakeTriageSnoozeConfirm");
+    const before = this.page.url();
+    const dialog = this.intakeTriageDialog("Snooze request");
+    await dialog.getByRole("button", { name: "Snooze", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
+    await this.intakeTriageWaitUrlChange(before);
   }
 
   async intakeTriageSnoozeCancel(): Promise<void> {
-    return todo("intakeTriageSnoozeCancel");
+    const dialog = this.intakeTriageDialog("Snooze request");
+    await dialog.getByRole("button", { name: "Cancel" }).click({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
   }
 
   async intakeTriageStatusChipText(): Promise<string | null> {
-    return todo("intakeTriageStatusChipText");
+    await this.intakeDetailTitleSettled();
+    const chip = this.page.getByTestId("intake-status-chip");
+    if ((await chip.count()) === 0) return null;
+    const text = (
+      (await chip
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+    return text === "" ? null : text;
   }
 
   async intakeTriageClickUnsnooze(): Promise<void> {
-    return todo("intakeTriageClickUnsnooze");
+    const before = this.page.url();
+    await this.intakeTriageEnsureMenuOpen();
+    await this.page.getByRole("menuitem", { name: "Un snooze", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.intakeTriageWaitUrlChange(before);
   }
 
   async intakeTriageClickMarkDuplicate(): Promise<void> {
-    return todo("intakeTriageClickMarkDuplicate");
+    await this.intakeTriageEnsureMenuOpen();
+    await this.page
+      .getByRole("menuitem", { name: "Mark as duplicate", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.intakeTriageDialog("Mark as duplicate").waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async intakeTriageDuplicateDialogVisible(): Promise<boolean> {
-    return todo("intakeTriageDuplicateDialogVisible");
+    return this.isShown(this.intakeTriageDialog("Mark as duplicate"));
   }
 
-  async intakeTriageDuplicateSearch(_query: string): Promise<void> {
-    return todo("intakeTriageDuplicateSearch");
+  async intakeTriageDuplicateSearch(query: string): Promise<void> {
+    const dialog = this.intakeTriageDialog("Mark as duplicate");
+    await dialog.getByRole("searchbox", { name: "Search work items" }).fill(query, {
+      timeout: WebNewDriver.WAIT_MS,
+    });
+    // The picker debounces 500ms before the search read fires, so
+    // outlast the debounce, then settle on options or the empty state.
+    await this.page.waitForTimeout(900);
+    const settled = dialog.getByTestId("intake-duplicate-option").first().or(dialog.getByText("No work items found."));
+    await settled.first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async intakeTriageDuplicateOptions(): Promise<string[]> {
-    return todo("intakeTriageDuplicateOptions");
+    const dialog = this.intakeTriageDialog("Mark as duplicate");
+    const texts = await dialog.getByTestId("intake-duplicate-option").allInnerTexts();
+    return texts.map((text) => text.replace(/\s+/g, " ").trim()).filter((text) => text.length > 0);
   }
 
-  async intakeTriageDuplicatePick(_name: string): Promise<void> {
-    return todo("intakeTriageDuplicatePick");
+  async intakeTriageDuplicatePick(name: string): Promise<void> {
+    const dialog = this.intakeTriageDialog("Mark as duplicate");
+    await dialog
+      .getByTestId("intake-duplicate-option")
+      .filter({ hasText: name })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
+    // No navigation follows a duplicate write; the properties panel's new
+    // reference is the signal the write landed.
+    await this.page.getByTestId("intake-duplicate-of").waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async intakeTriageDuplicateOfText(): Promise<string | null> {
-    return todo("intakeTriageDuplicateOfText");
+    await this.intakeDetailTitleSettled();
+    const link = this.page.getByTestId("intake-duplicate-of");
+    if ((await link.count()) === 0) return null;
+    const text = (
+      (await link
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+    return text === "" ? null : text;
   }
 
   async intakeTriageClickDelete(): Promise<void> {
-    return todo("intakeTriageClickDelete");
+    await this.intakeTriageEnsureMenuOpen();
+    await this.page.getByRole("menuitem", { name: "Delete", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.intakeTriageDialog(/Delete (work item|request)/).waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async intakeTriageDeleteDialogVisible(): Promise<boolean> {
-    return todo("intakeTriageDeleteDialogVisible");
+    return this.isShown(this.intakeTriageDialog(/Delete (work item|request)/));
   }
 
   async intakeTriageDeleteDialogText(): Promise<{ heading: string; body: string }> {
-    return todo("intakeTriageDeleteDialogText");
+    const dialog = this.intakeTriageDialog(/Delete (work item|request)/);
+    await dialog.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const heading = dialog.getByRole("heading").first();
+    const title = ((await heading.innerText().catch(() => "")) ?? "").trim();
+    const body = ((await heading.evaluate(descriptionAfterHeading).catch(() => "")) ?? "").trim();
+    return { heading: title, body };
   }
 
   async intakeTriageDeleteConfirm(): Promise<void> {
-    return todo("intakeTriageDeleteConfirm");
+    const before = this.page.url();
+    const dialog = this.intakeTriageDialog(/Delete (work item|request)/);
+    await dialog.getByRole("button", { name: "Delete", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
+    await this.intakeTriageWaitUrlChange(before);
   }
 
   async intakeTriageDeleteCancel(): Promise<void> {
-    return todo("intakeTriageDeleteCancel");
+    const dialog = this.intakeTriageDialog(/Delete (work item|request)/);
+    await dialog.getByRole("button", { name: "Cancel" }).click({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
   }
 
   async intakeTriageCurrentIssueId(): Promise<string | null> {
-    return todo("intakeTriageCurrentIssueId");
+    return new URL(this.page.url()).searchParams.get("inboxIssueId");
   }
 
   async intakeTriageCurrentTab(): Promise<string | null> {
-    return todo("intakeTriageCurrentTab");
+    return new URL(this.page.url()).searchParams.get("currentTab");
   }
 
   async intakeTriageOpenIssueOnTab(
-    _workspaceSlug: string,
-    _projectId: string,
-    _issueId: string,
-    _tab: string
+    workspaceSlug: string,
+    projectId: string,
+    issueId: string,
+    tab: string
   ): Promise<void> {
-    return todo("intakeTriageOpenIssueOnTab");
+    // An explicit tab keeps resolved and snoozed rows addressable —
+    // without one the screen falls back to the tab's first item when
+    // the row is outside the default list.
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/intake?currentTab=${tab}&inboxIssueId=${issueId}`);
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.intakeShellWaitSettled();
+    await this.intakeDetailTitleSettled();
   }
 
   async intakeTriageFilterOpen(): Promise<void> {
-    return todo("intakeTriageFilterOpen");
+    await this.intakeListOpenFilters();
   }
 
-  async intakeTriageFilterToggleStatus(_name: string): Promise<void> {
-    return todo("intakeTriageFilterToggleStatus");
+  async intakeTriageFilterToggleStatus(name: string): Promise<void> {
+    await this.intakeListFilterPick("status", name);
   }
 
   async intakeTriageFilterClose(): Promise<void> {
-    return todo("intakeTriageFilterClose");
+    await this.intakeListCloseFilters();
   }
 
-  async intakeTriageListOpenIssue(_name: string): Promise<void> {
-    return todo("intakeTriageListOpenIssue");
+  async intakeTriageListOpenIssue(name: string): Promise<void> {
+    await this.intakeDetailSelectListItem(name);
   }
 
   // --- Pages prefs, key map, assistant, cloud stubs, desktop, negatives
@@ -25568,83 +25752,136 @@ export class WebNewDriver implements ParityDriver {
   }
 
   // --- Intake cross-cutting (NEWFRONT-260, INT-018/030/031/032/034).
-  // --- Appended; existing stubs above are untouched per the shared driver
-  // --- contract.
+  // --- Gate implementations (NEWFRONT-695): thin delegates over the
+  // --- shell/list/detail/create readers plus the mobile and edition
+  // --- probes. Existing methods above are untouched per the shared
+  // --- driver contract.
 
-  async intakeXOpen(_workspaceSlug: string, _projectId: string): Promise<void> {
-    return todo("intakeXOpen");
+  /** Intake API traffic captured since intakeXBeginApiSpy (INT-018/031). */
+  private intakeXTraffic: IntakeXApiRequest[] = [];
+  private intakeXSpyHandler: ((route: Route) => Promise<void>) | undefined;
+
+  async intakeXOpen(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.intakeShellOpen(workspaceSlug, projectId);
   }
 
-  async intakeXOpenDetail(_workspaceSlug: string, _projectId: string, _issueId: string): Promise<void> {
-    return todo("intakeXOpenDetail");
+  async intakeXOpenDetail(workspaceSlug: string, projectId: string, issueId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/intake?currentTab=open&inboxIssueId=${issueId}`);
+    await this.page.waitForLoadState("domcontentloaded");
+    // Either the detail renders, or the screen drops the id and falls back
+    // to the list (a refused or stale target); both are settled outcomes.
+    await this.page.waitForFunction(
+      (want) =>
+        document.querySelector('[data-testid="intake-detail-header"]') !== null ||
+        new URL(window.location.href).searchParams.get("inboxIssueId") !== want,
+      issueId,
+      { timeout: 120_000 }
+    );
   }
 
   async intakeXListTitles(): Promise<string[]> {
-    return todo("intakeXListTitles");
+    return this.intakeShellListTitles();
   }
 
   async intakeXActiveTab(): Promise<IntakeXTab> {
-    return todo("intakeXActiveTab");
+    return this.intakeShellActiveTab();
   }
 
-  async intakeXClickTab(_tab: IntakeXTab): Promise<void> {
-    return todo("intakeXClickTab");
+  async intakeXClickTab(tab: IntakeXTab): Promise<void> {
+    await this.intakeShellClickTab(tab);
   }
 
   async intakeXDetailTitle(): Promise<string | null> {
-    return todo("intakeXDetailTitle");
+    if ((await this.page.getByTestId("intake-detail").count()) === 0) return null;
+    return this.intakeDetailTitle();
   }
 
   async intakeXOpenCreate(): Promise<void> {
-    return todo("intakeXOpenCreate");
+    await this.page.getByTestId("intake-header-create").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.intakeCreateDialog().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
-  async intakeXCreateFillTitle(_title: string): Promise<void> {
-    return todo("intakeXCreateFillTitle");
+  async intakeXCreateFillTitle(title: string): Promise<void> {
+    await this.intakeCreateFillTitle(title);
   }
 
   async intakeXCreateDuplicateDetectionVisible(): Promise<boolean> {
-    return todo("intakeXCreateDuplicateDetectionVisible");
+    const dialog = this.intakeCreateDialog();
+    await dialog.waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS });
+    return this.isShown(dialog.getByTestId("intake-duplicate-indicator"));
   }
 
   async intakeXDetailDuplicateDetectionVisible(): Promise<boolean> {
-    return todo("intakeXDetailDuplicateDetectionVisible");
+    await this.intakeDetailTitleSettled();
+    // The triage "Mark as duplicate" entry is a menu item, never the
+    // indicator testid, so no label exclusion is needed here.
+    return this.isShown(this.page.getByTestId("intake-detail").getByTestId("intake-duplicate-indicator"));
   }
 
-  async intakeXSetViewport(_width: number, _height: number): Promise<void> {
-    return todo("intakeXSetViewport");
+  async intakeXSetViewport(width: number, height: number): Promise<void> {
+    await this.page.setViewportSize({ width, height });
   }
 
   async intakeXMobileHeaderVisible(): Promise<boolean> {
-    return todo("intakeXMobileHeaderVisible");
+    return this.isShown(this.page.getByTestId("intake-mobile-header"));
   }
 
   async intakeXListPaneVisible(): Promise<boolean> {
-    return todo("intakeXListPaneVisible");
+    // The closed overlay unmounts the pane, so visibility is the signal
+    // (no off-canvas geometry to probe, unlike the oracle).
+    return this.isShown(this.page.getByTestId("intake-list-pane"));
   }
 
   async intakeXToggleMobileSidebar(): Promise<void> {
-    return todo("intakeXToggleMobileSidebar");
+    await this.page
+      .getByTestId("intake-mobile-list-toggle")
+      .getByRole("button", { name: "Request list" })
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async intakeXMobileMenuItems(): Promise<string[]> {
-    return todo("intakeXMobileMenuItems");
+    await this.page
+      .getByTestId("intake-mobile-menu")
+      .getByRole("button", { name: "Request actions" })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    const entries = this.page.getByRole("menuitem");
+    await entries.first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const labels = (await entries.allInnerTexts()).map((text) => text.replace(/\s+/g, " ").trim());
+    await this.page.keyboard.press("Escape");
+    await entries.first().waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
+    return labels.filter((label) => label.length > 0);
   }
 
   async intakeXBeginApiSpy(): Promise<void> {
-    return todo("intakeXBeginApiSpy");
+    this.intakeXTraffic = [];
+    if (this.intakeXSpyHandler !== undefined) {
+      await this.page.unroute("**/api/**", this.intakeXSpyHandler).catch(() => undefined);
+    }
+    const handler = async (route: Route): Promise<void> => {
+      const req = route.request();
+      this.intakeXTraffic.push({ method: req.method(), url: req.url() });
+      await route.continue();
+    };
+    this.intakeXSpyHandler = handler;
+    await this.page.route("**/api/**", handler);
   }
 
   async intakeXApiRequests(): Promise<IntakeXApiRequest[]> {
-    return todo("intakeXApiRequests");
+    return [...this.intakeXTraffic];
   }
 
   async intakeXRefocusPage(): Promise<void> {
-    return todo("intakeXRefocusPage");
+    await this.page.evaluate(() => window.dispatchEvent(new Event("blur")));
+    await this.page.waitForTimeout(500);
+    await this.page.bringToFront().catch(() => undefined);
+    await this.page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await this.page.waitForTimeout(1500);
   }
 
   async intakeXSourceIndicatorVisible(): Promise<boolean> {
-    return todo("intakeXSourceIndicatorVisible");
+    const rows = this.page.getByTestId("intake-list");
+    if ((await rows.count()) === 0) return false;
+    return (await rows.getByTestId("intake-source-pill").count()) > 0;
   }
 
   // --- Desktop bare sign-in, deep links, onboarding seam (NEWFRONT-208,
