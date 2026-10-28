@@ -282,6 +282,46 @@ pub fn parse_blob(blob: &Value) -> Result<Vec<TurnMessage>, CodecError> {
     items.iter().map(parse_message).collect()
 }
 
+/// Python truthiness for a stored blob (`history.py:46`, `if not blob`).
+fn is_falsy_blob(blob: &Value) -> bool {
+    match blob {
+        Value::Null => true,
+        Value::Bool(flag) => !flag,
+        Value::Number(number) => number.as_f64() == Some(0.0),
+        Value::String(text) => text.is_empty(),
+        Value::Array(items) => items.is_empty(),
+        Value::Object(map) => map.is_empty(),
+    }
+}
+
+/// Join per-turn blobs for replay (`history.py:45-52`): falsy blobs are
+/// skipped, each remaining blob is validated on its own, and a blob that
+/// fails is skipped with a warning — one undecodable stored turn never
+/// fails the turns replaying after it. The joined list holds the raw
+/// items of the blobs that parsed only, so a later single-pass parse of
+/// the joined list cannot fail on a skipped turn.
+pub fn join_valid_blobs(blobs: &[Value]) -> Vec<Value> {
+    let mut messages = Vec::new();
+    for blob in blobs {
+        if is_falsy_blob(blob) {
+            continue;
+        }
+        match parse_blob(blob) {
+            Ok(_) => {
+                if let Value::Array(items) = blob {
+                    messages.extend(items.iter().cloned());
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "assistant: could not deserialize a stored turn's history; skipping it: {error}"
+                );
+            }
+        }
+    }
+    messages
+}
+
 fn parse_message(message: &Value) -> Result<TurnMessage, CodecError> {
     let object = message
         .as_object()
@@ -1518,6 +1558,55 @@ mod tests {
             "usage": Value::Null,
         }]))
         .is_err());
+    }
+
+    #[test]
+    fn join_valid_blobs_skips_undecodable_turn() {
+        // `history.py:45-52`: each blob validates on its own; a blob that
+        // fails is skipped with a warning, so one undecodable stored turn
+        // never fails the turns replaying after it (PIDASHCONV-1569).
+        let valid = json!([
+            {
+                "kind": "request",
+                "parts": [{"part_kind": "user-prompt", "content": "hi"}],
+            },
+            {
+                "kind": "response",
+                "timestamp": "ts",
+                "parts": [{"part_kind": "text", "content": "hello"}],
+            },
+        ]);
+        let thinking = json!([{
+            "kind": "response",
+            "timestamp": "ts",
+            "parts": [{"part_kind": "thinking", "content": "hmm"}],
+        }]);
+        let blobs = [
+            valid.clone(),
+            thinking,
+            Value::Null,
+            json!([]),
+            json!({"kind": "request"}),
+            valid.clone(),
+        ];
+        let joined = join_valid_blobs(&blobs);
+        let expected: Vec<Value> = valid
+            .as_array()
+            .expect("valid blob is an array")
+            .iter()
+            .cloned()
+            .chain(
+                valid
+                    .as_array()
+                    .expect("valid blob is an array")
+                    .iter()
+                    .cloned(),
+            )
+            .collect();
+        assert_eq!(joined, expected);
+        // The joined list holds only blobs that parsed, so the later
+        // single-pass parse (`open_stream`) cannot fail on a skipped turn.
+        assert!(parse_blob(&Value::Array(joined)).is_ok());
     }
 
     #[test]

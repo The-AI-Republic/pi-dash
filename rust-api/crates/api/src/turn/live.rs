@@ -1259,7 +1259,7 @@ impl TurnSeam for LiveTurnSeam {
         };
         let mut blobs = blobs;
         blobs.reverse();
-        Ok(Value::Array(events::decode_history_blobs(&blobs)))
+        Ok(Value::Array(history::join_valid_blobs(&blobs)))
     }
 
     /// `_model_label` (`tasks.py:329`): `<provider_kind>:<model_name>` of

@@ -254,6 +254,119 @@ def _seed_turn_trio(db_conn, user, workspace, *, status="queued", started_at=Non
     return thread_id, turn_id, message_id
 
 
+#: History blobs for the undecodable-turn test (PIDASHCONV-1569): the exact
+#: ``ModelMessagesTypeAdapter.dump_python(..., mode="json")`` shapes (inner
+#: timestamps are cosmetic). The valid blob is a user-prompt request plus a
+#: text response; the bad blob is a response carrying a ``thinking`` part,
+#: which pydantic-ai stores when a reasoning provider returns
+#: ``reasoning_content``.
+_VALID_USER_TEXT = "valid user text 1569"
+_VALID_ASST_TEXT = "valid assistant text 1569"
+_THINK_TEXT = "thinking deliberation 1569"
+
+_VALID_HISTORY_BLOB = [
+    {
+        "parts": [
+            {
+                "content": _VALID_USER_TEXT,
+                "timestamp": "2026-10-27T10:00:00Z",
+                "part_kind": "user-prompt",
+            }
+        ],
+        "timestamp": None,
+        "instructions": None,
+        "kind": "request",
+        "run_id": None,
+        "conversation_id": None,
+        "metadata": None,
+    },
+    {
+        "parts": [
+            {
+                "content": _VALID_ASST_TEXT,
+                "id": None,
+                "provider_name": None,
+                "provider_details": None,
+                "part_kind": "text",
+            }
+        ],
+        "usage": {
+            "input_tokens": 1,
+            "cache_write_tokens": 0,
+            "cache_read_tokens": 0,
+            "output_tokens": 1,
+            "input_audio_tokens": 0,
+            "cache_audio_read_tokens": 0,
+            "output_audio_tokens": 0,
+            "details": {},
+        },
+        "model_name": "oracle-stub",
+        "timestamp": "2026-10-27T10:00:01Z",
+        "kind": "response",
+        "provider_name": None,
+        "provider_url": None,
+        "provider_details": None,
+        "provider_response_id": None,
+        "finish_reason": None,
+        "run_id": None,
+        "conversation_id": None,
+        "metadata": None,
+        "state": "complete",
+    },
+]
+
+_THINKING_HISTORY_BLOB = [
+    {
+        "parts": [
+            {
+                "content": _THINK_TEXT,
+                "id": None,
+                "signature": None,
+                "provider_name": None,
+                "provider_details": None,
+                "part_kind": "thinking",
+            }
+        ],
+        "usage": {
+            "input_tokens": 0,
+            "cache_write_tokens": 0,
+            "cache_read_tokens": 0,
+            "output_tokens": 0,
+            "input_audio_tokens": 0,
+            "cache_audio_read_tokens": 0,
+            "output_audio_tokens": 0,
+            "details": {},
+        },
+        "model_name": "oracle-stub",
+        "timestamp": "2026-10-27T10:00:02Z",
+        "kind": "response",
+        "provider_name": None,
+        "provider_url": None,
+        "provider_details": None,
+        "provider_response_id": None,
+        "finish_reason": None,
+        "run_id": None,
+        "conversation_id": None,
+        "metadata": None,
+        "state": "complete",
+    },
+]
+
+
+def _seed_completed_turn(db_conn, thread_id, blob, created_at):
+    """A stored COMPLETED turn with the given ``model_messages`` blob."""
+    with db_conn.cursor() as cur:
+        cur.execute(
+            # model_used / error_code / error_detail are Django-side
+            # defaults (""), not DB defaults: raw SQL must pass them.
+            "INSERT INTO assistant_turn (id, thread_id, status, model_used, "
+            "error_code, error_detail, model_messages, created_at, started_at, "
+            "completed_at) VALUES (%s, %s, 'completed', 'oracle-stub', '', '', "
+            "%s::jsonb, %s, %s, %s)",
+            (str(uuid.uuid4()), thread_id, json.dumps(blob), created_at, created_at, created_at),
+        )
+
+
 def _turn_row(db_conn, turn_id):
     with db_conn.cursor(row_factory=dict_row) as cur:
         cur.execute("SELECT * FROM assistant_turn WHERE id = %s", (turn_id,))
@@ -358,7 +471,9 @@ class _StubProvider:
                     payload = json.loads(body or b"{}")
                 except ValueError:
                     payload = {}
-                stub.requests.append({"path": self.path, "stream": payload.get("stream")})
+                stub.requests.append(
+                    {"path": self.path, "stream": payload.get("stream"), "body": payload}
+                )
                 if self.path.endswith("/chat/completions") and payload.get("stream"):
                     self.send_response(200)
                     self.send_header("Content-Type", "text/event-stream")
@@ -726,6 +841,49 @@ def test_complete_turn_streams_and_prunes(db_conn, broker_url):
         assert "assistant_delta" not in kinds, "deltas are pruned on completion"
         completed = next(e for e in _turn_events(db_conn, turn_id) if e["kind"] == "turn_completed")
         assert completed["payload"]["usage"] == row["usage"]
+    finally:
+        stub.stop()
+
+
+def test_undecodable_stored_turn_is_skipped(db_conn, broker_url):
+    """One undecodable stored turn is skipped, not fatal (PIDASHCONV-1569).
+
+    ``history.load_history`` validates each completed turn's blob on its own
+    and skips one that does not deserialize (``history.py:45-52``). The
+    thread here holds one valid completed turn and one completed turn whose
+    blob carries a ``thinking`` part: the new turn completes and the valid
+    turn's messages reach the provider request.
+    """
+    stub = _StubProvider()
+    base = stub.start()
+    try:
+        user, workspace, client = _seed_member(db_conn, "skipbad")
+        _configure_llm(client, base)
+        thread_id, turn_id, _msg = _seed_turn_trio(db_conn, user, workspace)
+        older = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 7200))
+        newer = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 3600))
+        _seed_completed_turn(db_conn, thread_id, _VALID_HISTORY_BLOB, older)
+        _seed_completed_turn(db_conn, thread_id, _THINKING_HISTORY_BLOB, newer)
+
+        celery_wire.publish(RUN_TURN, args=[turn_id], broker_url=broker_url)
+        row = wait_for(
+            lambda: _turn_row(db_conn, turn_id)
+            if _turn_row(db_conn, turn_id)["status"] in ("completed", "failed", "cancelled")
+            else None,
+            what="skipped-history turn terminal",
+        )
+        assert row["status"] == "completed", f"{row['error_code']}: {row['error_detail']}"
+        assert row["error_code"] == ""
+        assert row["error_detail"] == ""
+        assert isinstance(row["model_messages"], list) and row["model_messages"], (
+            "completed content is stored for replay"
+        )
+        assert _thread_row(db_conn, thread_id)["active_turn_id"] is None
+
+        assert stub.requests, "the provider was called"
+        bodies = json.dumps([r["body"] for r in stub.requests])
+        assert _VALID_USER_TEXT in bodies, "the valid turn's user text is replayed"
+        assert _VALID_ASST_TEXT in bodies, "the valid turn's reply is replayed"
     finally:
         stub.stop()
 
