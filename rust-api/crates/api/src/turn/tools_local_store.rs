@@ -3112,6 +3112,79 @@ mod tests {
         assert_eq!(row.2, graph.seed_at, "audit stamps must roll back");
     }
 
+    /// `create_comment_row` binds `attachments` as a typed empty
+    /// `varchar[]` (`issue.py:563`), not jsonb: the comment INSERT, the
+    /// `Description` INSERT and the `description_id` link all land, and
+    /// the stored `attachments` reads back `'{}'` like Django's
+    /// `create_comment` default. Pre-fix this fails: sqlx sends the
+    /// `Value::Array` bind as jsonb and Postgres cannot cast jsonb to
+    /// `varchar[]` (PIDASHCONV-1582).
+    #[tokio::test]
+    #[ignore = "needs migrated scratch DB via DATABASE_URL"]
+    async fn live_create_comment_row_stores_empty_varchar_attachments() {
+        let pool = live_pool().await;
+        let graph = seed_live_graph(&pool).await;
+        let store = PgToolStore::new(
+            pool.clone(),
+            None,
+            live_cloud_settings(),
+            live_managed_settings(),
+        )
+        .expect("build store");
+        let now = DateTime::parse_from_rfc3339("2026-07-01T12:00:00Z")
+            .expect("frozen clock")
+            .with_timezone(&Utc);
+        let input = NewCommentInput {
+            issue_id: graph.issue,
+            project_id: graph.project,
+            workspace_id: graph.ws,
+            actor_id: graph.user,
+            html: "<p>hello</p>".to_owned(),
+            fold: false,
+        };
+        let comment_id = store
+            .create_comment_row(&input, &now)
+            .await
+            .expect("comment insert must succeed");
+        let row: (Vec<String>, Option<Uuid>, String) = sqlx::query_as(
+            "SELECT attachments, description_id, comment_stripped \
+             FROM issue_comments WHERE id = $1",
+        )
+        .bind(comment_id)
+        .fetch_one(&pool)
+        .await
+        .expect("reread comment");
+        let description_id = row.1.expect("description link must be set");
+        let desc: (String, Option<String>) = sqlx::query_as(
+            "SELECT description_html, description_stripped FROM descriptions WHERE id = $1",
+        )
+        .bind(description_id)
+        .fetch_one(&pool)
+        .await
+        .expect("reread description");
+        // Comment before description (the link), description before the
+        // graph (its project FK) — then the shared graph cleanup.
+        sqlx::query("DELETE FROM issue_comments WHERE id = $1")
+            .bind(comment_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup comment");
+        sqlx::query("DELETE FROM descriptions WHERE id = $1")
+            .bind(description_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup description");
+        cleanup_live_graph(&pool, &graph).await;
+        assert!(
+            row.0.is_empty(),
+            "attachments must be '{{}}', got {:?}",
+            row.0
+        );
+        assert_eq!(row.2, "hello", "MLStripper comment_stripped");
+        assert_eq!(desc.0, "<p>hello</p>", "description keeps the HTML");
+        assert_eq!(desc.1.as_deref(), Some("hello"), "strip_tags row");
+    }
+
     /// The inlined FROM/WHERE fragments equal the reviewed services
     /// consts (the row readers only swap the SELECT list).
     #[test]
