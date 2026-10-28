@@ -1608,9 +1608,9 @@ async fn serve_email_form(state: &AppState, req: &EmailRequest, current_site: &s
                     avatar: "",
                     is_email_verified: false,
                     is_password_autoset: false,
-                    // Preserved verbatim (see `domain::identity`): the email
-                    // insert stores `last_active = NULL`.
-                    last_active: None,
+                    // Django's field default (`user.py:105`): the insert
+                    // stores `last_active = now` (PIDASHCONV-1560).
+                    last_active: Some(now),
                     login_ip: Some(""),
                     login_uagent: Some(""),
                     is_bot: false,

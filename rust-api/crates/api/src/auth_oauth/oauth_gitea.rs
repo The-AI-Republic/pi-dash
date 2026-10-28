@@ -58,7 +58,9 @@
 //! and answering 405 in Rust would break the contract).
 #![forbid(unsafe_code)]
 
-use axum::extract::{Query, State};
+use std::net::SocketAddr;
+
+use axum::extract::{ConnectInfo, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Extension;
@@ -872,10 +874,12 @@ pub async fn save_user_data(
         user_id,
         &identity::LoginStamps {
             medium: Some("gitea"),
-            // Preserved verbatim (see `domain::identity`): gitea renders a
-            // missing ip/user-agent as `''`, where the other paths bind NULL.
-            login_ip: Some(ip.unwrap_or("")),
-            login_uagent: Some(user_agent.unwrap_or("")),
+            // A missing ip/user-agent binds NULL into the NOT NULL
+            // columns, raising into the same 500 Django hits
+            // (`adapter/base.py:225-226`; PIDASHCONV-1560) — like every
+            // other path.
+            login_ip: ip,
+            login_uagent: user_agent,
             avatar: Some(avatar),
             avatar_asset_id: Some(avatar_asset_id),
             display_name: Some(identity::DisplayNameUpdate::BackfillCase),
@@ -1862,11 +1866,12 @@ pub struct RequestInputs {
     pub ip: Option<String>,
 }
 
-pub fn request_inputs(headers: &HeaderMap) -> RequestInputs {
-    // `REMOTE_ADDR` (the TCP peer) is invisible to axum handlers without a
-    // `ConnectInfo` extractor, so it reads as absent (a missing IP stays
-    // JSON null in `device_info` and `last_login_ip` stores NULL) — the
-    // same convention the D-01 handlers use for their login stamps.
+pub fn request_inputs(headers: &HeaderMap, remote_addr: Option<&str>) -> RequestInputs {
+    // `get_client_ip` (`utils/ip_address.py`): first `X-Forwarded-For`
+    // entry, unstripped, else `REMOTE_ADDR` (the axum peer, which serve
+    // installs — the github callback threads it the same way).
+    // Absent on both legs stays `None` (same NOT NULL → 500 parity as
+    // the other paths; PIDASHCONV-1560).
     let forwarded = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok());
     RequestInputs {
         host: request_host(headers),
@@ -1875,7 +1880,7 @@ pub fn request_inputs(headers: &HeaderMap) -> RequestInputs {
             .get(header::USER_AGENT)
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned),
-        ip: client_ip(forwarded, None),
+        ip: client_ip(forwarded, remote_addr),
     }
 }
 
@@ -2050,9 +2055,9 @@ pub async fn authenticate_user(
                 avatar: "",
                 is_email_verified: true,
                 is_password_autoset: true,
-                // Preserved verbatim (see `domain::identity`): the gitea
-                // insert stores `last_active = NULL`.
-                last_active: None,
+                // Django's field default (`user.py:105`): the insert
+                // stores `last_active = now` (PIDASHCONV-1560).
+                last_active: Some(now),
                 login_ip: Some(""),
                 login_uagent: Some(""),
                 is_bot: false,
@@ -2351,7 +2356,8 @@ async fn app_initiate(
         let params = initiate_error_params(&exc, raw_next.as_deref(), true);
         return redirect(app_error_location(&base, &params));
     }
-    let inputs = request_inputs(&headers);
+    // Initiate reads host/scheme only; no peer is threaded (no stamps).
+    let inputs = request_inputs(&headers, None);
     let state_hex = uuid::Uuid::new_v4().simple().to_string();
     match gitea_config(&pool, &settings.secret_key).await {
         Err(exc) => {
@@ -2376,6 +2382,7 @@ async fn app_initiate(
 async fn app_callback(
     State(state): State<AppState>,
     Query(query): Query<QueryMap>,
+    peer: ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     extension: Option<Extension<SessionHandle>>,
 ) -> Response {
@@ -2416,7 +2423,8 @@ async fn app_callback(
         Ok(pool) => pool,
         Err(response) => return response,
     };
-    let inputs = request_inputs(&headers);
+    let peer_ip = peer.0.ip().to_string();
+    let inputs = request_inputs(&headers, Some(&peer_ip));
     // `current_site` for the activation mail (`base_host(request)`,
     // `base.py:230`).
     let site = pidash_services::auth_session::shapes::base_host(
@@ -2534,7 +2542,8 @@ async fn space_initiate(
         let params = initiate_error_params(&exc, raw_next.as_deref(), true);
         return redirect(space_error_location(&base, &params));
     }
-    let inputs = request_inputs(&headers);
+    // Initiate reads host/scheme only; no peer is threaded (no stamps).
+    let inputs = request_inputs(&headers, None);
     let state_hex = uuid::Uuid::new_v4().simple().to_string();
     match gitea_config(&pool, &settings.secret_key).await {
         Err(exc) => {
@@ -2563,6 +2572,7 @@ async fn space_initiate(
 async fn space_callback(
     State(state): State<AppState>,
     Query(query): Query<QueryMap>,
+    peer: ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     extension: Option<Extension<SessionHandle>>,
 ) -> Response {
@@ -2597,7 +2607,8 @@ async fn space_callback(
         Ok(pool) => pool,
         Err(response) => return response,
     };
-    let inputs = request_inputs(&headers);
+    let peer_ip = peer.0.ip().to_string();
+    let inputs = request_inputs(&headers, Some(&peer_ip));
     // `current_site` for the activation mail (`base_host(request)`,
     // `base.py:230`).
     let site = pidash_services::auth_session::shapes::base_host(
