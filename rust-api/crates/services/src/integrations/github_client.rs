@@ -21,9 +21,10 @@
 //! # Sentinels
 //!
 //! [`PoolPrStore`] emits per-surface sentinel bytes (see
-//! [`PrLinksSurface`]): each handler maps only its own prefix to
+//! [`PrLinksSurface`]): each REST handler maps only its own prefix to
 //! 404/400, so unifying on one string would flip the other surface to
-//! 500.
+//! 500. MCP surfaces every store failure as untagged `TOOL_ERROR`
+//! text, so its surface carries no prefix and no payload marker.
 //!
 //! Fixture ids: the `pr_links` SQL consts and golden files next to
 //! [`crate::app_issues::pr_links`]; the transport pins are the
@@ -537,55 +538,72 @@ fn pr_store_error(context: &str, error: sqlx::Error) -> StoreError {
 
 /// Which API surface a [`PoolPrStore`] speaks for.
 ///
-/// The two surfaces chose different sentinel prefixes for the same two
-/// store failures (`relations: …` on the app surface,
-/// `pr-links: …` on the v1 surface); each handler maps only its own
-/// prefix to 404/400, so the store must emit the caller's bytes
-/// exactly. There is no default: every construction site names its
-/// surface explicitly.
+/// The two REST surfaces chose different sentinel prefixes for the same
+/// two store failures (`relations: …` on the app surface, `pr-links: …`
+/// on the v1 surface); each handler maps only its own prefix to 404/400,
+/// so the store must emit the caller's bytes exactly. MCP instead
+/// surfaces every store failure as untagged `TOOL_ERROR` text (no
+/// prefix, no payload marker). There is no default: every construction
+/// site names its surface explicitly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrLinksSurface {
     /// `app_issues/handlers_relations.rs` (`relations: …` sentinels).
     Relations,
     /// `v1_work_items/handlers_pr_links.rs` (`pr-links: …` sentinels).
     PrLinks,
+    /// The overlay MCP workpad/PR tools (`tools_workpad_prs.rs`):
+    /// untagged sentinels (PIDASHCONV-1606). The overlay's local
+    /// `McpPrStore` executes the same SQL text with the same binds;
+    /// this surface lets it call the OSS store without changing a
+    /// Tier-2 byte.
+    Mcp,
 }
 
 impl PrLinksSurface {
-    /// The sentinel prefix for this surface (`relations` / `pr-links`).
-    fn tag(self) -> &'static str {
+    /// The sentinel prefix for this surface (`relations` / `pr-links`);
+    /// `None` on MCP, whose failures are untagged.
+    fn tag(self) -> Option<&'static str> {
         match self {
-            PrLinksSurface::Relations => "relations",
-            PrLinksSurface::PrLinks => "pr-links",
+            PrLinksSurface::Relations => Some("relations"),
+            PrLinksSurface::PrLinks => Some("pr-links"),
+            PrLinksSurface::Mcp => None,
         }
     }
 
-    /// The deleted-project lookup miss: the handler maps it to the 404
-    /// `DoesNotExist` body (Python's `self.project` fetch on `save()`).
+    /// The deleted-project lookup miss: the REST handlers map it to the
+    /// 404 `DoesNotExist` body (Python's `self.project` fetch on
+    /// `save()`); MCP surfaces the untagged string as `TOOL_ERROR`
+    /// text.
     fn workspace_miss(self) -> String {
-        format!("{}: project workspace not found", self.tag())
+        match self.tag() {
+            Some(tag) => format!("{tag}: project workspace not found"),
+            None => "project workspace not found".to_owned(),
+        }
     }
 
     /// The mid-attach integrity-failure marker prefix (Python's uncaught
-    /// `IntegrityError` → the payload 400).
-    fn payload_invalid(self) -> String {
-        format!("{}: payload not valid", self.tag())
+    /// `IntegrityError` → the payload 400); `None` on MCP, where
+    /// integrity failures keep the generic `{context}: {error}` shape.
+    fn payload_invalid(self) -> Option<String> {
+        self.tag().map(|tag| format!("{tag}: payload not valid"))
     }
 }
 
-/// Map a mid-attach write failure: integrity violations carry the
-/// payload marker (Python's `IntegrityError` 400), anything else the
-/// generic store error (500).
+/// Map a mid-attach write failure: on the REST surfaces, integrity
+/// violations carry the payload marker (Python's `IntegrityError` 400);
+/// on MCP every failure keeps the generic store error (surfaced as
+/// `TOOL_ERROR` text).
 fn pr_write_error(surface: PrLinksSurface, context: &str, error: sqlx::Error) -> StoreError {
-    if is_integrity_error(&error) {
-        StoreError(format!("{}: {context}: {error}", surface.payload_invalid()))
-    } else {
-        pr_store_error(context, error)
+    match surface.payload_invalid() {
+        Some(marker) if is_integrity_error(&error) => {
+            StoreError(format!("{marker}: {context}: {error}"))
+        }
+        _ => pr_store_error(context, error),
     }
 }
 
-/// The live `PrLinksStore`: pool + request actor, shared by both API
-/// surfaces. Audit columns follow
+/// The live `PrLinksStore`: pool + request actor, shared by the API
+/// surfaces and MCP. Audit columns follow
 /// CRUM (`BaseModel.save`): creates stamp `created_by`, updates stamp
 /// `updated_by`, deletes stamp `updated_by`. The project workspace
 /// resolves at write time (mirroring `save()`'s lazy project fetch),
@@ -816,11 +834,14 @@ impl PrLinksStore for PoolPrStore {
                 pr_updated_at: new.pr_updated_at.clone(),
             }))),
             Err(error) if is_unique_violation(&error) => Ok(CreatePrLinkOutcome::Conflict),
-            Err(error) if is_integrity_error(&error) => Err(StoreError(format!(
-                "{}: pr link insert: {error}",
-                self.surface.payload_invalid()
-            ))),
-            Err(error) => Err(pr_store_error("pr link insert", error)),
+            // MCP has no payload marker: every non-race failure keeps
+            // the generic shape (surfaced as `TOOL_ERROR` text).
+            Err(error) => Err(match self.surface.payload_invalid() {
+                Some(marker) if is_integrity_error(&error) => {
+                    StoreError(format!("{marker}: pr link insert: {error}"))
+                }
+                _ => pr_store_error("pr link insert", error),
+            }),
         }
     }
 
@@ -966,12 +987,100 @@ mod tests {
             "pr-links: project workspace not found"
         );
         assert_eq!(
-            PrLinksSurface::Relations.payload_invalid(),
-            "relations: payload not valid"
+            PrLinksSurface::Relations.payload_invalid().as_deref(),
+            Some("relations: payload not valid")
         );
         assert_eq!(
-            PrLinksSurface::PrLinks.payload_invalid(),
-            "pr-links: payload not valid"
+            PrLinksSurface::PrLinks.payload_invalid().as_deref(),
+            Some("pr-links: payload not valid")
+        );
+    }
+
+    /// Fake [`sqlx::error::DatabaseError`] to pin store-error mapping
+    /// without a live database.
+    #[derive(Debug)]
+    struct FakeDbError {
+        code: &'static str,
+    }
+
+    impl std::fmt::Display for FakeDbError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "fake db error {}", self.code)
+        }
+    }
+
+    impl std::error::Error for FakeDbError {}
+
+    impl sqlx::error::DatabaseError for FakeDbError {
+        fn message(&self) -> &str {
+            "fake db error"
+        }
+
+        fn code(&self) -> Option<std::borrow::Cow<'_, str>> {
+            Some(self.code.into())
+        }
+
+        fn kind(&self) -> sqlx::error::ErrorKind {
+            sqlx::error::ErrorKind::Other
+        }
+
+        fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+
+        fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+
+        fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
+            self
+        }
+    }
+
+    fn db_error(code: &'static str) -> sqlx::Error {
+        sqlx::Error::Database(Box::new(FakeDbError { code }))
+    }
+
+    #[test]
+    fn mcp_surface_failures_are_untagged() {
+        // The overlay's `McpPrStore` strings (`tools_workpad_prs.rs`):
+        // untagged miss, generic `{context}: {error}` for every other
+        // failure (surfaced as TOOL_ERROR text).
+        assert_eq!(
+            PrLinksSurface::Mcp.workspace_miss(),
+            "project workspace not found"
+        );
+        assert_eq!(PrLinksSurface::Mcp.payload_invalid(), None);
+        // Integrity failures (other than the 23505 Conflict race) keep
+        // the generic shape on MCP — no payload marker.
+        let error = pr_write_error(PrLinksSurface::Mcp, "review link insert", db_error("23503"));
+        assert!(
+            error.0.starts_with("review link insert: "),
+            "MCP write error is untagged: {error:?}"
+        );
+        assert!(!error.0.contains("payload not valid"));
+        // The REST surfaces keep their markers (unchanged behavior).
+        let error = pr_write_error(
+            PrLinksSurface::Relations,
+            "review link insert",
+            db_error("23503"),
+        );
+        assert!(
+            error
+                .0
+                .starts_with("relations: payload not valid: review link insert: "),
+            "Relations marker kept: {error:?}"
+        );
+        let error = pr_write_error(
+            PrLinksSurface::PrLinks,
+            "review link insert",
+            db_error("23503"),
+        );
+        assert!(
+            error
+                .0
+                .starts_with("pr-links: payload not valid: review link insert: "),
+            "PrLinks marker kept: {error:?}"
         );
     }
 }
