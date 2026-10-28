@@ -134,15 +134,48 @@ describe("add-existing search", () => {
 });
 
 describe("failureDetail", () => {
-  it("prefers the server's message and falls back when it is empty", () => {
-    expect(failureDetail(new Error("plain"), "fallback")).toBe("fallback");
-    expect(failureDetail({ nope: true }, "fallback")).toBe("fallback");
-  });
-
-  it("uses an API error's message", () => {
+  it("uses the server's message verbatim", () => {
     expect(failureDetail(new ApiError({ status: 500, code: "server", message: "server said no" }), "fallback")).toBe(
       "server said no"
     );
+    expect(
+      failureDetail(new ApiError({ status: 400, code: "validation", message: " Title is required " }), "fallback")
+    ).toBe(" Title is required ");
+  });
+
+  it("falls back when the message is blank", () => {
     expect(failureDetail(new ApiError({ status: 500, code: "server", message: "" }), "fallback")).toBe("fallback");
+    expect(failureDetail(new ApiError({ status: 500, code: "server", message: "   " }), "fallback")).toBe("fallback");
+    expect(failureDetail(new ApiError({ status: 500, code: "server", message: "\n\t " }), "fallback")).toBe("fallback");
+  });
+
+  it("falls back when the message is an empty JSON shell", () => {
+    for (const message of ["{}", "[]", "null", " {} ", "[]\n", "null "]) {
+      expect(failureDetail(new ApiError({ status: 500, code: "http", message }), "fallback")).toBe("fallback");
+    }
+  });
+
+  it("keeps a JSON body that carries content", () => {
+    const cases: Array<[string, string]> = [
+      ['{"detail":"nope"}', '{"detail":"nope"}'],
+      ["[1]", "[1]"],
+      ["true", "true"],
+      ["0", "0"],
+      ['"plain string"', '"plain string"'],
+      ["{", "{"],
+    ];
+    for (const [message, expected] of cases) {
+      expect(failureDetail(new ApiError({ status: 500, code: "http", message }), "fallback")).toBe(expected);
+    }
+  });
+
+  it("ignores errors that are not API errors, and non-string messages", () => {
+    expect(failureDetail(new Error("{}"), "fallback")).toBe("fallback");
+    expect(failureDetail({ nope: true }, "fallback")).toBe("fallback");
+    expect(failureDetail({ message: "looks like one" }, "fallback")).toBe("fallback");
+    expect(failureDetail(undefined, "fallback")).toBe("fallback");
+    const nonString = new ApiError({ status: 500, code: "server", message: "saved" });
+    Object.defineProperty(nonString, "message", { value: 42, configurable: true });
+    expect(failureDetail(nonString, "fallback")).toBe("fallback");
   });
 });
