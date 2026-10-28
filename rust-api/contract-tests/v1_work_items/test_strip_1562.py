@@ -22,7 +22,7 @@ from .conftest import issue_url
 pytestmark = pytest.mark.contract
 
 # Byte evidence (issue): Django/ml yield "R&D" (3 bytes, hex 522644) for the
-# markdown-shaped witness; the old v1 kernel kept "R&amp;D" (8 bytes).
+# markdown-shaped witness; the old v1 kernel kept "R&amp;D" (7 bytes).
 HTML = "<p>R&amp;D</p>"
 DECODED = "R&D"
 
