@@ -51,6 +51,11 @@ sha2 = "0.10.9"
 # Same locked icu_properties 2.3.x the workspace builds via
 # idna_adapter (no lock churn); default features (`compiled_data`).
 icu_properties = "2"
+# Single urlencoded field reads (PIDASHCONV-1626): `serde_urlencoded`
+# parses through the same `form_urlencoded::parse` iterator as the
+# `url` crate, so the OSS and overlay twins read byte-identical
+# pairs. Same locked serde_urlencoded 0.7.1 as pidash-api.
+serde_urlencoded = "0.7.1"
 
 [dev-dependencies]
 # Envelope tests read bodies back with `axum::body::to_bytes`
