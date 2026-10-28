@@ -6237,6 +6237,8 @@ export interface ParityDriver {
   cyclesHeroReload(): Promise<void>;
   /** Delay the next cycle list/detail/progress reads by ms (skeleton shaping). */
   cyclesHeroDelayDetailReads(ms: number): Promise<void>;
+  /** Delay only the sidebar's progress/analytics reads (web_new's loader owns the detail read). */
+  cyclesHeroDelaySidebarReads(ms: number): Promise<void>;
   /** Strip `cycleId` from list reads so the peek mounts on a store miss. */
   cyclesHeroHideCycleFromListReads(cycleId: string): Promise<void>;
   /** Whether the detail sidebar currently shows its loading skeleton. */

@@ -22,7 +22,9 @@ export function CycleSidebarSkeleton({ testId }: CycleSidebarSkeletonProps): Rea
       data-testid={testId}
       role="status"
       aria-label="Loading cycle details"
-      className="flex min-h-64 flex-col gap-(--space-3)"
+      // w-80 mirrors the sidebar it stands in for: without a width the
+      // placeholder collapses to zero (NEWFRONT-716).
+      className="flex min-h-64 w-80 max-w-full shrink-0 flex-col gap-(--space-3)"
     >
       <Skeleton height="14px" width="45%" />
       <Skeleton height="12px" width="75%" />

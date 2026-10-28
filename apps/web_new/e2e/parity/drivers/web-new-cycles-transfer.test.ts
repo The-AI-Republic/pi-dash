@@ -19,7 +19,12 @@ import { WebNewDriver } from "./web-new.js";
 
 type Call = { path: string; method: string; args: unknown[] };
 
-const CHAIN = ["first", "getByRole", "getByTestId", "getByText", "getByPlaceholder", "locator", "filter"];
+const CHAIN = ["first", "nth", "getByRole", "getByTestId", "getByText", "getByPlaceholder", "locator", "filter"];
+
+function nthIndex(path: string): number | null {
+  const match = /\.nth\((\d+)\)/.exec(path);
+  return match === null ? null : Number(match[1]);
+}
 const ACTIONS = [
   "count",
   "click",
@@ -131,6 +136,10 @@ class Recorder {
   private text(path: string): string {
     if (path === TRANSFER_NOTE_PATH) return this.noteText;
     if (path === HERO_NAME_PATH) return this.heroNameText;
+    if (path.startsWith(`${TRANSFER_OPTIONS_PATH}.nth(`) && path.endsWith(`.locator("span").first()`)) {
+      const index = nthIndex(path);
+      return index === null ? "" : (this.optionTexts[index] ?? "");
+    }
     return "";
   }
 
@@ -170,6 +179,10 @@ class Recorder {
 
   callsFor(path: string, method: string): Call[] {
     return this.calls.filter((call) => call.path === path && call.method === method);
+  }
+
+  callsIncluding(substring: string, method: string): Call[] {
+    return this.calls.filter((call) => call.method === method && call.path.includes(substring));
   }
 }
 
@@ -232,11 +245,12 @@ describe("cycleTransferOpen", () => {
 });
 
 describe("cycleTransferOptionNames", () => {
-  it("normalizes the option texts and drops blanks", async () => {
+  it("reads the name span of each option, normalizes, and drops blanks", async () => {
     const script = new Recorder();
-    script.optionTexts = ["  Target A\ncurrent ", "", "Target B\tupcoming"];
-    expect(await script.driver().cycleTransferOptionNames()).toEqual(["Target A current", "Target B upcoming"]);
-    expect(script.callsFor(TRANSFER_OPTIONS_PATH, "allTextContents")).toHaveLength(1);
+    script.optionTexts = ["  Target A\n ", "", "Target B\t"];
+    expect(await script.driver().cycleTransferOptionNames()).toEqual(["Target A", "Target B"]);
+    expect(script.callsFor(TRANSFER_OPTIONS_PATH, "count")).toHaveLength(1);
+    expect(script.callsIncluding(`.locator("span").first()`, "innerText")).toHaveLength(3);
   });
 });
 

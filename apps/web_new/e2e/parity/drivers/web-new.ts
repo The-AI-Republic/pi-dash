@@ -613,6 +613,8 @@ export class WebNewDriver implements ParityDriver {
   private pageEditorTaskRequests: string[] = [];
   /** When this driver was built: the fixture runs at the test's start. */
   private readonly startedAt = Date.now();
+  /** Traffic counters since cyclesHeroBeginTrafficSpy armed them (CYC-045). */
+  private cyclesHeroTraffic: CyclesHeroTrafficCounts = { cycleReads: 0, archivedReads: 0, writes: 0 };
 
   constructor(page: Page) {
     this.page = page;
@@ -29001,7 +29003,7 @@ export class WebNewDriver implements ParityDriver {
     await this.page.waitForLoadState("domcontentloaded");
   }
   async cyclesHeroOpenPeekRaw(workspaceSlug: string, projectId: string, cycleId: string): Promise<void> {
-    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/cycles?peek=${encodeURIComponent(cycleId)}`, {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/cycles?peekCycle=${encodeURIComponent(cycleId)}`, {
       waitUntil: "domcontentloaded",
     });
     await this.page.waitForLoadState("domcontentloaded");
@@ -29016,6 +29018,24 @@ export class WebNewDriver implements ParityDriver {
     let remaining = 24;
     await this.page.route(
       (url) => /\/api\/workspaces\/[^/]+\/projects\/[^/]+\/cycles\/($|\?|[^/]+\/)/.test(url.pathname),
+      async (route) => {
+        if (route.request().method() === "GET" && remaining > 0) {
+          remaining -= 1;
+          await new Promise((resolve) => setTimeout(resolve, ms));
+        }
+        await route.continue();
+      }
+    );
+  }
+  async cyclesHeroDelaySidebarReads(ms: number): Promise<void> {
+    // The detail route's beforeLoad awaits the cycle read before first
+    // commit, so delaying it only pushes the whole page (and its
+    // skeleton window) out; holding the sidebar's own progress and
+    // analytics reads keeps the skeleton observable instead
+    // (NEWFRONT-716).
+    let remaining = 24;
+    await this.page.route(
+      (url) => /\/api\/workspaces\/[^/]+\/projects\/[^/]+\/cycles\/[^/]+\/(progress|analytics)\//.test(url.pathname),
       async (route) => {
         if (route.request().method() === "GET" && remaining > 0) {
           remaining -= 1;
@@ -29063,118 +29083,301 @@ export class WebNewDriver implements ParityDriver {
     if (!(await heading.isVisible().catch(() => false))) return null;
     return ((await heading.innerText()) ?? "").trim() || null;
   }
+  /** The hero disclosure section (CYC-041/042). */
+  private cyclesHeroSection(): Locator {
+    return this.page.getByTestId("cycle-hero");
+  }
   async cyclesHeroGroupHeading(): Promise<string | null> {
-    return todo("cyclesHeroGroupHeading");
+    const button = this.cyclesHeroSection().getByRole("button").first();
+    if ((await button.count()) === 0) return null;
+    return ((await button.innerText().catch(() => "")) ?? "").trim() || null;
   }
   async cyclesHeroActiveName(): Promise<string | null> {
-    return todo("cyclesHeroActiveName");
+    const name = this.cyclesHeroSection().locator('a[href*="/cycles/"] span.truncate').first();
+    if ((await name.count()) === 0) return null;
+    if (!(await name.isVisible().catch(() => false))) return null;
+    return ((await name.innerText().catch(() => "")) ?? "").trim() || null;
   }
   async cyclesHeroEmptyCopy(): Promise<{ title: string; description: string } | null> {
-    return todo("cyclesHeroEmptyCopy");
+    if ((await this.page.getByTestId("cycle-hero-cards").count()) > 0) return null;
+    const panel = this.page.getByTestId("no-active-cycle");
+    if ((await panel.count()) === 0) return null;
+    const title = panel.locator("h2").first();
+    const description = panel.locator("p").first();
+    if ((await title.count()) === 0 || (await description.count()) === 0) return null;
+    return {
+      title: ((await title.innerText().catch(() => "")) ?? "").trim(),
+      description: ((await description.innerText().catch(() => "")) ?? "").trim(),
+    };
+  }
+  /** The hero progress card (CYC-041). */
+  private cyclesHeroProgressCard(): Locator {
+    return this.page.getByTestId("hero-progress-card");
   }
   async cyclesHeroProgressGroups(): Promise<{ closed: string | null; groups: CyclesHeroProgressGroup[] }> {
-    return todo("cyclesHeroProgressGroups");
+    const card = this.cyclesHeroProgressCard();
+    const closedLoc = card.getByTestId("hero-progress-closed");
+    const closed =
+      (await closedLoc.count()) > 0 ? ((await closedLoc.innerText().catch(() => "")) ?? "").trim() || null : null;
+    // Clickable rows only (buttons): zero-count groups render plain divs.
+    const rows = card.locator('button[data-testid="hero-progress-group"]');
+    const total = await rows.count();
+    const groups: CyclesHeroProgressGroup[] = [];
+    for (let index = 0; index < total; index++) {
+      const row = rows.nth(index);
+      if (!(await row.isVisible().catch(() => false))) continue;
+      const name = row.locator("span").first();
+      const text = ((await row.innerText().catch(() => "")) ?? "").trim();
+      groups.push({ name: ((await name.innerText().catch(() => "")) ?? "").trim(), text });
+    }
+    return { closed, groups };
   }
   async cyclesHeroProgressEmptyVisible(): Promise<boolean> {
-    return todo("cyclesHeroProgressEmptyVisible");
+    return this.isShown(this.cyclesHeroProgressCard().locator("div.text-center h3"));
+  }
+  /** The hero burn-down card (CYC-041). */
+  private cyclesHeroBurndownCard(): Locator {
+    return this.page.getByTestId("hero-burndown-card");
   }
   async cyclesHeroBurndown(): Promise<{ heading: string | null; pending: string | null; chart: boolean }> {
-    return todo("cyclesHeroBurndown");
+    const card = this.cyclesHeroBurndownCard();
+    const headingLoc = card.locator("h3").first();
+    const heading =
+      (await headingLoc.count()) > 0 ? ((await headingLoc.innerText().catch(() => "")) ?? "").trim() || null : null;
+    const pendingLoc = card.getByTestId("hero-burndown-pending");
+    const pending =
+      (await pendingLoc.count()) > 0 ? ((await pendingLoc.innerText().catch(() => "")) ?? "").trim() || null : null;
+    return { heading, pending, chart: await this.isShown(card.getByTestId("chart-area")) };
   }
   async cyclesHeroBurndownEmptyVisible(): Promise<boolean> {
-    return todo("cyclesHeroBurndownEmptyVisible");
+    return this.isShown(this.cyclesHeroBurndownCard().locator("div.text-center h3"));
   }
+  /** The hero breakdown card (CYC-041). */
+  private cyclesHeroBreakdownCard(): Locator {
+    return this.page.getByTestId("hero-breakdown-card");
+  }
+  /** Breakdown tab labels to their panel ids (the card's pinned order). */
+  private static readonly HERO_BREAKDOWN_TAB_IDS: Readonly<Record<string, string>> = {
+    "Priority work items": "priority",
+    Assignees: "assignees",
+    Labels: "labels",
+  };
   async cyclesHeroBreakdownTabs(): Promise<string[]> {
-    return todo("cyclesHeroBreakdownTabs");
+    const tabs = this.cyclesHeroBreakdownCard().getByRole("tab");
+    const total = await tabs.count();
+    const labels: string[] = [];
+    for (let index = 0; index < total; index++) {
+      const label = (
+        (await tabs
+          .nth(index)
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (label !== "") labels.push(label);
+    }
+    return labels;
   }
-  async cyclesHeroBreakdownSelectTab(_label: string): Promise<void> {
-    return todo("cyclesHeroBreakdownSelectTab");
+  async cyclesHeroBreakdownSelectTab(label: string): Promise<void> {
+    await this.cyclesHeroBreakdownCard().getByRole("tab", { name: label }).click({ timeout: WebNewDriver.WAIT_MS });
+    // Settle on the panel switch so the next read cannot see the old tab.
+    const tabId = WebNewDriver.HERO_BREAKDOWN_TAB_IDS[label];
+    if (tabId !== undefined) {
+      await this.cyclesHeroBreakdownCard()
+        .locator(`[role="tabpanel"][data-tab="${tabId}"]`)
+        .waitFor({ timeout: WebNewDriver.WAIT_MS });
+    }
   }
   async cyclesHeroBreakdownEntries(): Promise<string[]> {
-    return todo("cyclesHeroBreakdownEntries");
+    // Text lines of the panel, not per-entry blocks: the scenario matches
+    // names and member labels as line members.
+    const panel = this.cyclesHeroBreakdownCard().locator('[role="tabpanel"]').first();
+    if ((await panel.count()) === 0) return [];
+    const text = ((await panel.innerText().catch(() => "")) ?? "").trim();
+    return text
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
   }
   async cyclesHeroBreakdownEmptyVisible(): Promise<boolean> {
-    return todo("cyclesHeroBreakdownEmptyVisible");
+    return this.isShown(this.cyclesHeroBreakdownCard().locator('[role="tabpanel"] div.text-center h3'));
   }
-  async cyclesHeroClickProgressGroup(_group: string): Promise<void> {
-    return todo("cyclesHeroClickProgressGroup");
+  /** One progress group row, button or zero-count div (CYC-041). */
+  private cyclesHeroProgressGroup(group: string): Locator {
+    return this.cyclesHeroProgressCard().locator(`[data-testid="hero-progress-group"][data-group="${group}"]`);
   }
-  async cyclesHeroTapProgressGroup(_group: string): Promise<void> {
-    return todo("cyclesHeroTapProgressGroup");
+  async cyclesHeroClickProgressGroup(group: string): Promise<void> {
+    await this.cyclesHeroProgressGroup(group).first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.waitForURL(/\/cycles\/[^/]+\/?$/, { timeout: WebNewDriver.WAIT_MS });
   }
-  async cyclesHeroClickBreakdownEntry(_index: number): Promise<void> {
-    return todo("cyclesHeroClickBreakdownEntry");
+  async cyclesHeroTapProgressGroup(group: string): Promise<void> {
+    // No navigation wait: the NEWFRONT-266 bug test taps a fresh group
+    // whose write dies before navigating.
+    await this.cyclesHeroProgressGroup(group).first().click({ timeout: WebNewDriver.WAIT_MS });
   }
-  async cyclesHeroOpenWorkspaceActives(_workspaceSlug: string): Promise<void> {
-    return todo("cyclesHeroOpenWorkspaceActives");
+  async cyclesHeroClickBreakdownEntry(index: number): Promise<void> {
+    await this.cyclesHeroBreakdownCard()
+      .locator('[data-testid="hero-breakdown-entry"]')
+      .nth(index)
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.waitForURL(/\/cycles\/[^/]+\/?$/, { timeout: WebNewDriver.WAIT_MS });
+  }
+  async cyclesHeroOpenWorkspaceActives(workspaceSlug: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/active-cycles`, { waitUntil: "domcontentloaded" });
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.page.getByTestId("workspace-actives-upsell").waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
   async cyclesHeroUpsell(): Promise<CyclesHeroUpsell> {
-    return todo("cyclesHeroUpsell");
+    const panel = this.page.getByTestId("workspace-actives-upsell");
+    const headingLoc = panel.locator("h2").first();
+    const heading =
+      (await headingLoc.count()) > 0 ? ((await headingLoc.innerText().catch(() => "")) ?? "").trim() || null : null;
+    const benefits = await panel.getByTestId("workspace-actives-benefits").locator("li").count();
+    const upgrade = panel.locator("a").first();
+    return {
+      heading,
+      benefits,
+      upgradeHref: (await upgrade.count()) > 0 ? await upgrade.getAttribute("href") : null,
+      upgradeTarget: (await upgrade.count()) > 0 ? await upgrade.getAttribute("target") : null,
+    };
   }
   async cyclesHeroUpsellBadgeVisible(): Promise<boolean> {
-    return todo("cyclesHeroUpsellBadgeVisible");
+    return this.isShown(this.page.getByTestId("upgrade-pill"));
   }
   async cyclesHeroActiveRowOffset(): Promise<string | null> {
-    return todo("cyclesHeroActiveRowOffset");
+    const chip = this.cyclesHeroSection().getByTestId("cycle-date-offset").first();
+    if ((await chip.count()) === 0 || !(await chip.isVisible().catch(() => false))) return null;
+    return ((await chip.innerText().catch(() => "")) ?? "").trim() || null;
   }
   async cyclesHeroHoverActiveRowDates(): Promise<void> {
-    return todo("cyclesHeroHoverActiveRowDates");
+    await this.cyclesHeroSection().getByTestId("cycle-date-span").first().hover({ timeout: WebNewDriver.WAIT_MS });
   }
   async cyclesHeroSidebarOffset(): Promise<string | null> {
-    return todo("cyclesHeroSidebarOffset");
+    const chip = this.page.getByTestId("cycle-sidebar-dates").getByTestId("cycle-date-offset").first();
+    if ((await chip.count()) === 0 || !(await chip.isVisible().catch(() => false))) return null;
+    return ((await chip.innerText().catch(() => "")) ?? "").trim() || null;
   }
   async cyclesHeroHoverSidebarDates(): Promise<void> {
-    return todo("cyclesHeroHoverSidebarDates");
+    await this.page.getByTestId("cycle-sidebar-dates-trigger").first().hover({ timeout: WebNewDriver.WAIT_MS });
   }
   async cyclesHeroTooltipText(): Promise<string | null> {
-    return todo("cyclesHeroTooltipText");
+    const popup = this.page.getByRole("tooltip").first();
+    try {
+      await popup.waitFor({ state: "visible", timeout: 10_000 });
+    } catch {
+      return null;
+    }
+    return ((await popup.innerText().catch(() => "")) ?? "").trim() || null;
   }
   async cyclesHeroBeginTrafficSpy(): Promise<void> {
-    return todo("cyclesHeroBeginTrafficSpy");
+    this.cyclesHeroTraffic = { cycleReads: 0, archivedReads: 0, writes: 0 };
+    await this.page.route("**/api/**", async (route) => {
+      const req = route.request();
+      const url = req.url();
+      const method = req.method();
+      if (method === "GET") {
+        if (/\/archived-cycles\/(\?|$)/.test(url)) this.cyclesHeroTraffic.archivedReads += 1;
+        else if (/\/projects\/[^/]+\/cycles\/(\?|$)/.test(url)) this.cyclesHeroTraffic.cycleReads += 1;
+        else if (/\/cycles\/[^/]+\/(\?|$|progress\/|analytics|cycle-issues\/)/.test(url))
+          this.cyclesHeroTraffic.cycleReads += 1;
+      } else if (
+        (method === "POST" || method === "PATCH" || method === "DELETE") &&
+        /\/cycles\/(\?|$|[^/]+\/|date-check\/)/.test(url)
+      ) {
+        this.cyclesHeroTraffic.writes += 1;
+      }
+      await route.continue();
+    });
   }
   async cyclesHeroTrafficCounts(): Promise<CyclesHeroTrafficCounts> {
-    return todo("cyclesHeroTrafficCounts");
+    return { ...this.cyclesHeroTraffic };
   }
   async cyclesHeroOpenCreate(): Promise<void> {
-    return todo("cyclesHeroOpenCreate");
+    // The hero list shares the header create dialog (CYC-045).
+    await this.cyclesCreateOpenFromHeader();
   }
-  async cyclesHeroFillCreateName(_name: string): Promise<void> {
-    return todo("cyclesHeroFillCreateName");
+  async cyclesHeroFillCreateName(name: string): Promise<void> {
+    await this.cyclesCreateFillTitle(name);
   }
   async cyclesHeroSubmitCreate(): Promise<void> {
-    return todo("cyclesHeroSubmitCreate");
+    // The shared submit dismisses stale toasts first, so a create right
+    // after a refusal settles on its own outcome (CYC-016's guard).
+    await this.cyclesCreateSubmit();
   }
   async cyclesHeroCreateOpen(): Promise<boolean> {
-    return todo("cyclesHeroCreateOpen");
+    return this.cyclesCreateDialogOpen();
   }
   async cyclesHeroVisibleNames(): Promise<string[]> {
     return this.cycleRowNames();
   }
-  async cyclesHeroTransferBanner(_name: string): Promise<string | null> {
-    return todo("cyclesHeroTransferBanner");
+  /** A list row, expanding the collapsed completed group when needed. */
+  private async cyclesHeroEnsureRow(name: string): Promise<Locator> {
+    let row = this.cycleRowRoot(name);
+    if ((await row.count()) === 0) {
+      await this.page
+        .getByTestId("cycle-group-completed")
+        .getByRole("button")
+        .first()
+        .click({ timeout: WebNewDriver.WAIT_MS });
+      row = this.cycleRowRoot(name);
+    }
+    await row.first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return row;
   }
-  async cyclesHeroOpenTransfer(_name: string): Promise<void> {
-    return todo("cyclesHeroOpenTransfer");
+  async cyclesHeroTransferBanner(name: string): Promise<string | null> {
+    const row = await this.cyclesHeroEnsureRow(name);
+    // The action reveals on row hover (desktop); guests render none.
+    await row.hover({ timeout: WebNewDriver.WAIT_MS }).catch(() => {});
+    const action = row.getByRole("button", { name: /Transfer \d+ work items/ }).first();
+    if ((await action.count()) === 0 || !(await action.isVisible().catch(() => false))) return null;
+    return ((await action.innerText().catch(() => "")) ?? "").trim() || null;
   }
-  async cyclesHeroTransferSearch(_text: string): Promise<void> {
-    return todo("cyclesHeroTransferSearch");
+  async cyclesHeroOpenTransfer(name: string): Promise<void> {
+    const row = await this.cyclesHeroEnsureRow(name);
+    await row.hover({ timeout: WebNewDriver.WAIT_MS });
+    await row
+      .getByRole("button", { name: /Transfer \d+ work items/ })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByPlaceholder("Search for a cycle...").waitFor({ timeout: WebNewDriver.WAIT_MS });
+  }
+  async cyclesHeroTransferSearch(text: string): Promise<void> {
+    await this.cyclesTransferSearchFill(text);
   }
   async cyclesHeroTransferOptions(): Promise<string[]> {
-    return todo("cyclesHeroTransferOptions");
+    return this.cycleTransferOptionNames();
   }
-  async cyclesHeroTransferPick(_name: string): Promise<void> {
-    return todo("cyclesHeroTransferPick");
+  async cyclesHeroTransferPick(name: string): Promise<void> {
+    await this.cycleTransferPick(name);
   }
   async cyclesHeroFocusWindow(): Promise<void> {
-    return todo("cyclesHeroFocusWindow");
+    await this.page.evaluate(() => {
+      window.dispatchEvent(new Event("focus"));
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
   }
   async cyclesHeroCreateButtonState(): Promise<"absent" | "disabled" | "enabled"> {
-    return todo("cyclesHeroCreateButtonState");
+    const buttons = this.page.getByRole("button", { name: "Add cycle" });
+    const total = await buttons.count();
+    let seenDisabled = false;
+    for (let index = 0; index < total; index++) {
+      const button = buttons.nth(index);
+      if (!(await button.isVisible().catch(() => false))) continue;
+      if (await button.isDisabled().catch(() => false)) seenDisabled = true;
+      else return "enabled";
+    }
+    return seenDisabled ? "disabled" : "absent";
   }
   async cyclesHeroOpenRowMenu(name: string): Promise<void> {
+    // An open peek panel overlays the row triggers; a user dismisses it
+    // first, so Escape before touching the row (CYC-047 copy-link).
+    await this.page.keyboard.press("Escape");
+    await this.page
+      .getByTestId("cycle-preview")
+      .waitFor({ state: "detached", timeout: 5_000 })
+      .catch(() => {});
     // One mount is in the DOM at a time: the inline trigger on
     // narrow screens, the hover trigger on desktop.
-    const row = this.cycleRowRoot(name);
+    const row = await this.cyclesHeroEnsureRow(name);
     const inline = row.getByTestId("cycle-row-menu-inline");
     if ((await inline.count()) > 0) {
       await inline.first().click({ timeout: WebNewDriver.WAIT_MS });
@@ -29191,19 +29394,22 @@ export class WebNewDriver implements ParityDriver {
     return titles.map((text) => text.trim().replace(/\s+/g, " ")).filter((text) => text.length > 0);
   }
   async cyclesHeroCloseMenus(): Promise<void> {
-    return todo("cyclesHeroCloseMenus");
+    await this.page.keyboard.press("Escape");
   }
   async cyclesHeroSidebarDateDisabled(): Promise<boolean> {
-    return todo("cyclesHeroSidebarDateDisabled");
+    const trigger = this.page.getByTestId("cycle-sidebar-dates-trigger").first();
+    if ((await trigger.count()) === 0) return true;
+    return trigger.isDisabled().catch(() => true);
   }
-  async cyclesHeroFavoriteVisible(_name: string): Promise<boolean> {
-    return todo("cyclesHeroFavoriteVisible");
+  async cyclesHeroFavoriteVisible(name: string): Promise<boolean> {
+    return this.isShown(this.cycleRowRoot(name).getByTestId("cycle-favorite-marker"));
   }
   async cyclesHeroSearchVisible(): Promise<boolean> {
-    return todo("cyclesHeroSearchVisible");
+    if (await this.isShown(this.cyclesSearchToggle())) return true;
+    return (await this.cyclesSearchBox().count()) > 0;
   }
   async cyclesHeroFilterVisible(): Promise<boolean> {
-    return todo("cyclesHeroFilterVisible");
+    return this.isShown(this.cyclesFiltersTrigger());
   }
   async cyclesHeroInlineActionsVisible(name: string): Promise<boolean> {
     return this.isShown(this.cycleRowRoot(name).getByTestId("cycle-row-menu-inline"));
@@ -29233,28 +29439,44 @@ export class WebNewDriver implements ParityDriver {
     return this.isShown(this.page.getByTestId("mobile-layout-trigger"));
   }
   async cyclesHeroSearchOpen(): Promise<void> {
-    return todo("cyclesHeroSearchOpen");
+    await this.cyclesSearchOpen();
   }
-  async cyclesHeroSearchType(_text: string): Promise<void> {
-    return todo("cyclesHeroSearchType");
+  async cyclesHeroSearchType(text: string): Promise<void> {
+    await this.cyclesSearchFill(text);
   }
   async cyclesHeroSearchText(): Promise<string> {
-    return todo("cyclesHeroSearchText");
+    return this.cyclesSearchText();
   }
   async cyclesHeroFilterMenuTexts(): Promise<string[]> {
-    return todo("cyclesHeroFilterMenuTexts");
+    await this.cyclesFiltersTrigger().click({ timeout: WebNewDriver.WAIT_MS });
+    const panel = this.cyclesFiltersPanel();
+    await panel.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const text = ((await panel.innerText().catch(() => "")) ?? "").trim();
+    return text
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
   }
-  async cyclesHeroOpenPeek(_name: string): Promise<void> {
-    return todo("cyclesHeroOpenPeek");
+  async cyclesHeroOpenPeek(name: string): Promise<void> {
+    const row = this.cycleRowRoot(name);
+    await row.hover({ timeout: WebNewDriver.WAIT_MS });
+    await row.getByRole("button", { name: `Quick look at ${name}` }).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByTestId("cycle-preview").locator("h4").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
-  async cyclesHeroRowMenuClick(_entry: string): Promise<void> {
-    return todo("cyclesHeroRowMenuClick");
+  async cyclesHeroRowMenuClick(entry: string): Promise<void> {
+    await this.page
+      .getByRole("menuitem")
+      .filter({ has: this.page.locator("h5", { hasText: entry }) })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
   async cyclesHeroGrantClipboard(): Promise<void> {
-    return todo("cyclesHeroGrantClipboard");
+    // Headless clipboard.writeText rejects without an explicit grant,
+    // and the app only toasts on copy success (no catch path).
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
   }
   async cyclesHeroReadClipboard(): Promise<string> {
-    return todo("cyclesHeroReadClipboard");
+    return this.page.evaluate(async () => navigator.clipboard.readText());
   }
   async cyclesHeroDismissSidebar(): Promise<void> {
     // The floating sidebar covers content on narrow viewports only
@@ -29266,11 +29488,29 @@ export class WebNewDriver implements ParityDriver {
     );
     if (!narrow) return;
     const sidebar = this.page.locator('aside[aria-label="Workspace navigation"]');
-    if (!(await this.isShown(sidebar))) return;
-    const toggle = this.page.getByTestId("sidebar-toggle");
-    if ((await toggle.count()) === 0) throw new Error("[parity] floating sidebar open with no sidebar toggle.");
-    await toggle.first().click({ timeout: WebNewDriver.WAIT_MS });
-    await sidebar.first().waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
+    if (await this.isShown(sidebar)) {
+      const toggle = this.page.getByTestId("sidebar-toggle");
+      if ((await toggle.count()) === 0) throw new Error("[parity] floating sidebar open with no sidebar toggle.");
+      await toggle.first().click({ timeout: WebNewDriver.WAIT_MS });
+      await sidebar.first().waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
+    }
+    // A fresh narrow viewport starts the cycle sidebar collapsed by
+    // design; the oracle loads it open, so expand it to the same state.
+    // The toggle mounts with the detail page (absent on the list), so
+    // wait for it only on a detail address — reading it straight after
+    // domcontentloaded races the first commit (NEWFRONT-716).
+    const detailPath = /\/projects\/[^/]+\/cycles\/[^/]+\/?$/.test(new URL(this.page.url()).pathname);
+    if (detailPath) {
+      const cycleToggle = this.page.getByTestId("cycle-sidebar-toggle-narrow").first();
+      await cycleToggle.waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS }).catch(() => {});
+      if ((await cycleToggle.count()) > 0 && (await cycleToggle.getAttribute("aria-expanded")) === "false") {
+        await cycleToggle.click({ timeout: WebNewDriver.WAIT_MS });
+        await this.page
+          .getByTestId("cycle-sidebar")
+          .getByTestId("cycle-sidebar-name")
+          .waitFor({ timeout: WebNewDriver.WAIT_MS });
+      }
+    }
   }
   /** Open the narrow detail layout menu unless it already stands open. */
   private async cyclesDetailLayoutMenuOpen(): Promise<void> {

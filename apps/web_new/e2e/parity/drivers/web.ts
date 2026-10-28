@@ -34640,6 +34640,11 @@ export class WebDriver implements ParityDriver {
       }
     );
   }
+  async cyclesHeroDelaySidebarReads(ms: number): Promise<void> {
+    // The oracle renders its shell client-side, so the full shaping
+    // applies here too; only the new app narrows it (NEWFRONT-716).
+    await this.cyclesHeroDelayDetailReads(ms);
+  }
 
   async cyclesHeroHideCycleFromListReads(cycleId: string): Promise<void> {
     // The live peek only skeletons on a store miss, but the list fetch

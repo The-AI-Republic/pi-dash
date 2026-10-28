@@ -574,7 +574,7 @@ describe("cyclesHeroOpenPeekRaw", () => {
   it("opens the list with the peek query", async () => {
     const script = new Recorder();
     await script.driver().cyclesHeroOpenPeekRaw("acme", "pid", "cid");
-    expect(script.navigations).toEqual(["/acme/projects/pid/cycles?peek=cid"]);
+    expect(script.navigations).toEqual(["/acme/projects/pid/cycles?peekCycle=cid"]);
   });
 });
 
