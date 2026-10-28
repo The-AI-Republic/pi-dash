@@ -6,7 +6,8 @@
 // completed groups with their counts; current cycles never repeat in a
 // group. Rows narrow client-side by the remembered search query and the
 // filter slice's predicate — no narrowing step issues a request — and
-// narrowing to zero rows falls to the no-match view for the cause. The
+// the predicate narrows the hero slot with the groups; narrowing to
+// zero rows falls to the no-match view for the cause. The
 // peeked cycle renders the quick look over the list. The screen owns
 // the gate, zero, skeleton, and error states; this body only renders
 // once cycles exist. On narrow screens a layout menu below the
@@ -146,6 +147,7 @@ export function CyclesListBody({
           canMutate={canMutate}
           onPeek={onPeek}
           currentProject={rowProps.currentProject}
+          cycleFilter={cycleFilter}
         />
       )}
       {noMatch ? (
