@@ -318,6 +318,8 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
     // names are worker-owned with live providers. The drivers also get
     // the worker's transition hook, so sync-created/adopted mirrors run
     // the same post-save legs as every other issue write (PIDASHCONV-1576).
+    // The cloud-agent tools hold the same instance for their domain
+    // write txns (PIDASHCONV-1596).
     let transition_hook: std::sync::Arc<
         dyn pidash_services::domain::transition::IssueTransitionHook,
     > = std::sync::Arc::new(crate::issue_transition::WorkerTransitionHook::new(
@@ -339,7 +341,7 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
         registry,
         ctx.pools.primary().clone(),
         crate::integrations::github_sync::LiveTransports::from_env(),
-        Some(transition_hook),
+        Some(transition_hook.clone()),
     );
     // D-07 send/stack (PIDASHCONV-865; kept in sync with
     // `inventory::tests::mirror_registry_matches_tasks_table`). The live
@@ -443,6 +445,7 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
             toolsets: std::sync::Arc::new(NoExtraToolsets),
             redis: redis.clone(),
             runner: ctx.settings.runner.clone(),
+            transition_hook: transition_hook.clone(),
         },
         keys: model_runtime::keys::KeyResolver::from_env(
             ctx.settings.assistant.key_cache_ttl_secs,

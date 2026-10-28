@@ -59,6 +59,7 @@ use uuid::Uuid;
 
 use crate::admission::RedisAdmissionCache;
 use crate::dispatch::{append_event, dispatch_agent_run, DispatchDecision};
+use crate::issue_transition::WorkerTaskEnqueueHook;
 use crate::orchestration::{
     fire_tick_seam::{
         create_ticker_sql, emit_logs, lock_ticker_by_issue_sql, map_ticker, save_clock_sql,
@@ -83,11 +84,13 @@ use pidash_services::dispatch::tools as plan;
 use pidash_services::dispatch::{
     admission::AdmissionCache, consume_admission_token, DeferredConsume, LlmProfile,
 };
+use pidash_services::domain::activity::TaskEnqueueHook;
 use pidash_services::domain::comments as comment_domain;
 use pidash_services::domain::identity::AgentUserCollisionError;
 use pidash_services::domain::issues as domain_issues;
 use pidash_services::domain::issues::IssueFieldSet;
 use pidash_services::domain::relations as relation_domain;
+use pidash_services::domain::transition::IssueTransitionHook;
 use pidash_services::domain::{self, WriteActor, WriteCtx, WriteScope};
 use pidash_services::extensions::CloudAgentToolsetsSeam;
 use pidash_services::orchestration::clock::{ClockWrite, ProjectClockPolicy};
@@ -310,6 +313,11 @@ pub struct ToolCtx {
     pub redis: Option<redis::Client>,
     /// Runner settings (the create fire's pod drain inputs).
     pub runner: RunnerSettings,
+    /// The worker's transition hook, registered on every domain write
+    /// txn (PIDASHCONV-1596): domain fns resolve it eagerly even when
+    /// the chain stays empty, and an unregistered lookup panics the
+    /// task. The same instance the sync drivers hold.
+    pub transition_hook: Arc<dyn IssueTransitionHook>,
 }
 
 /// The `_scope` outcome (`tools.py:46-73`): the run's tenant position
@@ -1223,11 +1231,20 @@ async fn op_create_project_issue(
             attribute: "project_id",
         });
     };
-    let locked: Option<Uuid> = sqlx::query_scalar(plan::CREATE_PROJECT_LOCK_SQL)
-        .bind(project_id)
-        .fetch_optional(&mut **tx.inner())
-        .await?;
-    if locked.is_none() {
+    // Existence first, lock later: Django takes `select_for_update`
+    // here (`tools.py:351`) and saves in the same transaction, but the
+    // port commits the save in a separate domain transaction whose
+    // deferred FK checks run at COMMIT — holding this row's FOR UPDATE
+    // across that commit stalls the domain COMMIT on the audit txn (a
+    // one-way lock wait; the 60s idle guard then kills the audit
+    // connection, PIDASHCONV-1596). The lock lands after the domain
+    // commit below, still inside the audit transaction.
+    let exists: Option<Uuid> =
+        sqlx::query_scalar("SELECT id FROM projects WHERE id = $1 AND deleted_at IS NULL")
+            .bind(project_id)
+            .fetch_optional(&mut **tx.inner())
+            .await?;
+    if exists.is_none() {
         return Err(ToolExecError::Missing { model: "Project" });
     }
     let tool_state: Option<Uuid> = sqlx::query_scalar(plan::CREATE_DEFAULT_STATE_SQL)
@@ -1258,8 +1275,10 @@ async fn op_create_project_issue(
     // rides through), and strip the html. The fire and the created
     // activity are both skipped: the caller drives the bespoke
     // post-commit fire and Django sends no activity on this path, so the
-    // chain stays empty and no hooks are registered. The issue commits in
-    // the domain transaction, ahead of the audit commit below (the old
+    // chain stays empty. Both hooks are still registered: `create`
+    // resolves them eagerly and an unregistered lookup panics the task
+    // (PIDASHCONV-1596). The issue commits in the domain transaction,
+    // ahead of the audit commit below (the old
     // inline inserts shared the audit transaction — a post-write audit
     // failure now leaves the issue standing; fault-path only).
     // `to_safe_html` never yields `""` (the `<p></p>` fallback), so the
@@ -1311,10 +1330,16 @@ async fn op_create_project_issue(
         now,
     };
     let domain_ctx = write_ctx(scope, project_id);
+    let transition = ctx.transition_hook.clone();
+    let enqueue: Arc<dyn TaskEnqueueHook> = Arc::new(WorkerTaskEnqueueHook::new(&ctx.pool));
     let outcome = domain::run(&domain_ctx, &ctx.orm, |txn| {
         let domain_ctx = domain_ctx.clone();
         let pool = ctx.pool.clone();
+        let transition = transition.clone();
+        let enqueue = enqueue.clone();
         Box::pin(async move {
+            txn.hooks_mut().register(transition);
+            txn.hooks_mut().register(enqueue);
             domain_issues::create(
                 &domain_ctx,
                 txn,
@@ -1340,6 +1365,17 @@ async fn op_create_project_issue(
     })
     .await
     .map_err(domain_error)?;
+    // The deferred `select_for_update` (`tools.py:351`; see above):
+    // still held when the audit commits. A project deleted mid-flight
+    // errors here with the issue standing (fault-path only, like the
+    // audit-aftermath note above).
+    let locked: Option<Uuid> = sqlx::query_scalar(plan::CREATE_PROJECT_LOCK_SQL)
+        .bind(project_id)
+        .fetch_optional(&mut **tx.inner())
+        .await?;
+    if locked.is_none() {
+        return Err(ToolExecError::Missing { model: "Project" });
+    }
     let state_id = outcome.issue.state_id;
     let sequence_id = i64::from(outcome.issue.sequence_id);
     // `{"created": True, **_issue_data(issue)}` (brief, `created`

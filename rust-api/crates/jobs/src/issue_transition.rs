@@ -40,6 +40,7 @@ use pidash_db::tx::Transaction;
 use pidash_services::dispatch::admission::AdmissionCache;
 use pidash_services::dispatch::policy::UserFlags;
 use pidash_services::dispatch::LlmProfile;
+use pidash_services::domain::activity::TaskEnqueueHook;
 use pidash_services::domain::identity::AgentUserCollisionError;
 use pidash_services::domain::transition::IssueTransitionHook;
 use pidash_services::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
@@ -61,7 +62,7 @@ use pidash_services::prompting::composer::{OverrideIndex, OverrideRow};
 use pidash_services::runner_runs::LifecycleEffect;
 use pidash_services::runner_sessions::live_drains::drain_pod_by_id;
 use pidash_types::dispatch::AgentExecutorKind;
-use serde_json::Value;
+use serde_json::{Map, Value};
 use sqlx::postgres::PgRow;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
@@ -889,6 +890,46 @@ impl IssueTransitionHook for WorkerTransitionHook {
                 &drains,
             )
             .await
+        })
+    }
+}
+
+/// The worker's [`TaskEnqueueHook`]: `task.delay(*args, **kwargs)`
+/// through the jobs queue kernel, mirroring the api binary's
+/// `AppTaskEnqueueHook` (`crates/api/src/domain_hooks.rs`), which this
+/// crate cannot name. Worker drivers that drive domain writes (the
+/// cloud-agent tools, PIDASHCONV-1596) register one on the
+/// [`WriteTxn`][pidash_services::domain::WriteTxn] hook registry next
+/// to the [`WorkerTransitionHook`]. Enqueue failures log and the save
+/// stands.
+pub struct WorkerTaskEnqueueHook {
+    pool: PgPool,
+}
+
+impl WorkerTaskEnqueueHook {
+    pub fn new(pool: &PgPool) -> Self {
+        Self { pool: pool.clone() }
+    }
+}
+
+impl TaskEnqueueHook for WorkerTaskEnqueueHook {
+    fn enqueue_task(
+        &self,
+        task: &str,
+        args: Vec<Value>,
+        kwargs: Map<String, Value>,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        let pool = self.pool.clone();
+        let message = crate::TaskMessage::new(task, args, kwargs);
+        Box::pin(async move {
+            let job = crate::queue::NewJob::new(
+                message.task.clone(),
+                Value::Array(message.args.clone()),
+                Value::Object(message.kwargs.clone()),
+            );
+            if let Err(error) = crate::queue::enqueue(&pool, &job).await {
+                tracing::warn!(%error, task = message.task.as_str(), "task enqueue failed; save stands");
+            }
         })
     }
 }
