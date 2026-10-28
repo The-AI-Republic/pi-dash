@@ -5046,11 +5046,13 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async subIssueFiltersOpen(_workspaceSlug: string, _projectId: string, _parentIssueId: string): Promise<void> {
-    return todo("subIssueFiltersOpen");
+    // The caller opens the detail first; this only drops the filter menu.
+    await this.page.getByTestId("sub-issue-filters-trigger").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByTestId("sub-issue-filters-panel").waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async subIssueFiltersPanelText(): Promise<string> {
-    return todo("subIssueFiltersPanelText");
+    return (await this.page.getByTestId("sub-issue-filters-panel").innerText()).trim();
   }
 
   async detailIdentifierText(): Promise<string> {
@@ -45429,5 +45431,46 @@ export class WebNewDriver implements ParityDriver {
     // (PAGE-090).
     await this.resetPaletteToClosed();
     return rows.filter((row) => row !== "");
+  }
+
+  // --- Issues cloud presence (NEWFRONT-984, ISS-112–116/121/206/231–237
+  // --- cloud legs). The cloud specs run on web_new only; the old-app
+  // --- driver throws on these.
+
+  async bulkToolbarVisible(): Promise<boolean> {
+    const toolbar = this.page.getByTestId("bulk-toolbar");
+    return (await toolbar.count()) > 0 && (await toolbar.first().isVisible());
+  }
+
+  async bulkToolbarDelete(): Promise<void> {
+    const toolbar = this.page.getByTestId("bulk-toolbar");
+    await toolbar.getByRole("button", { name: "Delete", exact: true }).click();
+    const dialog = this.page.getByRole("dialog", { name: "Delete selected work items?" });
+    await dialog.getByRole("button", { name: "Delete", exact: true }).click();
+    await dialog.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async bulkToolbarArchive(): Promise<void> {
+    const toolbar = this.page.getByTestId("bulk-toolbar");
+    await toolbar.getByRole("button", { name: "Archive", exact: true }).click();
+  }
+
+  async ganttDependencyArrowCount(): Promise<number> {
+    return this.page.getByTestId("gantt-dependency-arrow").count();
+  }
+
+  async ganttDependencyHandleCount(): Promise<number> {
+    return this.page.getByTestId("gantt-dependency-handle").count();
+  }
+
+  async ganttLinkBlocks(fromId: string, toId: string): Promise<void> {
+    // The layer links on mouseup over a lane: hover the handle, press,
+    // travel to the target lane, release. The link mutation settles after
+    // the release, so callers poll the arrow count.
+    const handle = this.page.locator(`[data-testid="gantt-dependency-handle"][data-source-id="${fromId}"]`);
+    await handle.hover();
+    await this.page.mouse.down();
+    await this.page.locator(`[data-gantt-lane][data-lane-id="${toId}"]`).hover();
+    await this.page.mouse.up();
   }
 }
