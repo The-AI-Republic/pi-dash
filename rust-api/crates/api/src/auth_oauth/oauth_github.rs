@@ -81,6 +81,7 @@ use pidash_db::redis::RedisHandle;
 use pidash_services::auth_oauth::{error as oauth_error, exchange, providers};
 use pidash_services::auth_session::shapes::{self, HostSettings, ParamValue};
 use pidash_services::domain::identity::account as account_queries;
+use pidash_services::domain::workspaces::members;
 
 use crate::auth_session::render::disallowed_redirect;
 use crate::middleware::SessionHandle;
@@ -1340,20 +1341,24 @@ async fn process_invitations(
     .fetch_all(pool)
     .await?;
     for (workspace_id, role, _slug) in &workspace_invites {
-        sqlx::query(
-            r#"INSERT INTO "workspace_members" ("id", "created_at", "updated_at", "workspace_id",
-               "member_id", "role", "view_props", "default_props", "issue_props",
-               "is_active", "explored_features", "getting_started_checklist", "tips")
-               VALUES ($1, $2, $2, $3, $4, $5, $6, $6, $7, TRUE, '{}', '{}', '{}') ON CONFLICT DO NOTHING"#,
+        let view_props = workspace_default_props();
+        let issue_props = serde_json::json!({"subscribed": true, "assigned": true, "created": true, "all_issues": true});
+        members::add(
+            pool,
+            &members::NewMember {
+                workspace_id: *workspace_id,
+                user_id: Some(user_id),
+                role: *role,
+                company_role: None,
+                created_by: None,
+                view_props: &view_props,
+                default_props: &view_props,
+                issue_props: &issue_props,
+                now,
+                ignore_conflicts: true,
+                db_now: false,
+            },
         )
-        .bind(Uuid::new_v4())
-        .bind(now)
-        .bind(workspace_id)
-        .bind(user_id)
-        .bind(role)
-        .bind(workspace_default_props())
-        .bind(serde_json::json!({"subscribed": true, "assigned": true, "created": true, "all_issues": true}))
-        .execute(pool)
         .await?;
     }
     // Per-invite cache invalidation + `track_event`, newest first (the
@@ -1393,21 +1398,24 @@ async fn process_invitations(
     .await?;
     for (workspace_id, role, created_by) in &project_invites {
         let clamped = if *role == 5 || *role == 15 { *role } else { 15 };
-        sqlx::query(
-            r#"INSERT INTO "workspace_members" ("id", "created_at", "updated_at", "workspace_id",
-               "member_id", "role", "created_by_id", "view_props", "default_props", "issue_props",
-               "is_active", "explored_features", "getting_started_checklist", "tips")
-               VALUES ($1, $2, $2, $3, $4, $5, $6, $7, $7, $8, TRUE, '{}', '{}', '{}') ON CONFLICT DO NOTHING"#,
+        let view_props = workspace_default_props();
+        let issue_props = serde_json::json!({"subscribed": true, "assigned": true, "created": true, "all_issues": true});
+        members::add(
+            pool,
+            &members::NewMember {
+                workspace_id: *workspace_id,
+                user_id: Some(user_id),
+                role: clamped,
+                company_role: None,
+                created_by: *created_by,
+                view_props: &view_props,
+                default_props: &view_props,
+                issue_props: &issue_props,
+                now,
+                ignore_conflicts: true,
+                db_now: false,
+            },
         )
-        .bind(Uuid::new_v4())
-        .bind(now)
-        .bind(workspace_id)
-        .bind(user_id)
-        .bind(clamped)
-        .bind(created_by)
-        .bind(workspace_default_props())
-        .bind(serde_json::json!({"subscribed": true, "assigned": true, "created": true, "all_issues": true}))
-        .execute(pool)
         .await?;
     }
     for (workspace_id, role, created_by) in &project_invites {

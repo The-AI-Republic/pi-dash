@@ -117,6 +117,7 @@ use pidash_services::auth_session::{
     allowed_hosts_for, base_host, get_safe_redirect_url, redirection_path_str,
     select_redirection_path, HostSettings, ParamValue, MAX_URL_REDIRECT_LENGTH,
 };
+use pidash_services::domain::workspaces::members;
 
 // ---------------------------------------------------------------------------
 // Route registration: the cutover granularity is the route. Only these four
@@ -1682,39 +1683,18 @@ pub async fn insert_workspace_members(
     }
     let props = default_props();
     let issues = issue_props();
-    let empty = serde_json::json!({});
-    let mut builder = sqlx::QueryBuilder::new(
-        "INSERT INTO \"workspace_members\" (\"id\", \"created_at\", \
-         \"updated_at\", \"created_by_id\", \"updated_by_id\", \
-         \"deleted_at\", \"workspace_id\", \"member_id\", \"role\", \
-         \"company_role\", \"view_props\", \"default_props\", \
-         \"issue_props\", \"is_active\", \"getting_started_checklist\", \
-         \"tips\", \"explored_features\") ",
-    );
-    builder.push_values(rows, |mut bind, row| {
-        let (workspace_id, member_id, role, created_by) = row;
-        bind.push_bind(uuid::Uuid::new_v4())
-            .push_bind(now)
-            .push_bind(now)
-            .push_bind(*created_by)
-            .push_bind(None::<uuid::Uuid>)
-            .push_bind(None::<chrono::DateTime<chrono::Utc>>)
-            .push_bind(*workspace_id)
-            .push_bind(*member_id)
-            .push_bind(*role)
-            .push_bind(None::<String>)
-            .push_bind(props.clone())
-            .push_bind(props.clone())
-            .push_bind(issues.clone())
-            .push_bind(true)
-            .push_bind(empty.clone())
-            .push_bind(empty.clone())
-            .push_bind(empty.clone());
-    });
-    builder.push(" ON CONFLICT DO NOTHING");
-    builder
-        .build()
-        .execute(pool)
+    let bulk_rows: Vec<members::BulkMember> = rows
+        .iter()
+        .map(
+            |(workspace_id, member_id, role, created_by)| members::BulkMember {
+                workspace_id: *workspace_id,
+                user_id: *member_id,
+                role: *role,
+                created_by: *created_by,
+            },
+        )
+        .collect();
+    members::bulk_add(pool, &bulk_rows, &props, &issues, now)
         .await
         .map_err(|_| CallbackError::Internal)?;
     Ok(())

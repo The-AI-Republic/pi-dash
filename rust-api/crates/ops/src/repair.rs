@@ -210,7 +210,8 @@ pub async fn run_slug(args: SlugArgs) {
             name,
             new_slug,
             success_line,
-        } => match db::apply_slug_update(pool, &workspace_id, &new_slug).await {
+        } => match pidash_services::domain::workspaces::rename(pool, workspace_id, &new_slug).await
+        {
             Ok(()) => println!("{success_line}"),
             Err(error) => println!("{}", decisions::slug_save_error_line(&name, &error)),
         },

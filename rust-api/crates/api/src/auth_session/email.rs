@@ -75,6 +75,7 @@ use pidash_services::auth_session::queries as queries_kernel;
 use pidash_services::auth_session::shapes as shapes_kernel;
 use pidash_services::auth_session::tasks as tasks_kernel;
 use pidash_services::domain::identity;
+use pidash_services::domain::workspaces::members;
 
 use crate::assistant::governor::throttle_check;
 use crate::assistant::throttles::ThrottleSpec;
@@ -994,37 +995,16 @@ async fn insert_project_arm_workspace_members(
     }
     let default_props = default_props_json();
     let issue_props = issue_props_json();
-    let empty = serde_json::json!({});
-    let mut builder = sqlx::QueryBuilder::new(
-        "INSERT INTO \"workspace_members\" (\"created_at\", \"updated_at\", \"created_by_id\", \
-         \"updated_by_id\", \"deleted_at\", \"id\", \"workspace_id\", \"member_id\", \"role\", \
-         \"company_role\", \"view_props\", \"default_props\", \"issue_props\", \"is_active\", \
-         \"getting_started_checklist\", \"tips\", \"explored_features\") ",
-    );
-    builder.push_values(rows, |mut bind, row| {
-        let (workspace_id, role, created_by) = row;
-        bind.push_bind(now)
-            .push_bind(now)
-            .push_bind(*created_by)
-            .push_bind(None::<uuid::Uuid>)
-            .push_bind(None::<chrono::DateTime<chrono::Utc>>)
-            .push_bind(uuid::Uuid::new_v4())
-            .push_bind(*workspace_id)
-            .push_bind(user_id)
-            .push_bind(invite_member_role(*role))
-            .push_bind(None::<String>)
-            .push_bind(sqlx::types::Json(default_props.clone()))
-            .push_bind(sqlx::types::Json(default_props.clone()))
-            .push_bind(sqlx::types::Json(issue_props.clone()))
-            .push_bind(true)
-            .push_bind(empty.clone())
-            .push_bind(empty.clone())
-            .push_bind(empty.clone());
-    });
-    builder.push(" ON CONFLICT DO NOTHING");
-    builder
-        .build()
-        .execute(pool)
+    let bulk_rows: Vec<members::BulkMember> = rows
+        .iter()
+        .map(|(workspace_id, role, created_by)| members::BulkMember {
+            workspace_id: *workspace_id,
+            user_id,
+            role: invite_member_role(*role),
+            created_by: *created_by,
+        })
+        .collect();
+    members::bulk_add(pool, &bulk_rows, &default_props, &issue_props, now)
         .await
         .map_err(|_| server_error())?;
     Ok(())
@@ -1111,23 +1091,22 @@ async fn post_user_auth_workflow(
         .await
         .map_err(|_| server_error())?;
     for (workspace_id, role, _slug) in &workspace_invites {
-        sqlx::query(
-            r#"INSERT INTO "workspace_members"
-               ("created_at", "updated_at", "created_by_id", "updated_by_id", "deleted_at",
-                "id", "workspace_id", "member_id", "role", "company_role",
-                "view_props", "default_props", "issue_props", "is_active",
-                "getting_started_checklist", "tips", "explored_features")
-               VALUES ($1,$1,NULL,NULL,NULL, $2,$3,$4,$5,NULL, $6,$6,$7,true, '{}','{}','{}')
-               ON CONFLICT DO NOTHING"#,
+        members::add(
+            pool,
+            &members::NewMember {
+                workspace_id: *workspace_id,
+                user_id: Some(user_id),
+                role: *role,
+                company_role: None,
+                created_by: None,
+                view_props: &default_props,
+                default_props: &default_props,
+                issue_props: &issue_props,
+                now,
+                ignore_conflicts: true,
+                db_now: false,
+            },
         )
-        .bind(now)
-        .bind(uuid::Uuid::new_v4())
-        .bind(workspace_id)
-        .bind(user_id)
-        .bind(role)
-        .bind(sqlx::types::Json(default_props.clone()))
-        .bind(sqlx::types::Json(issue_props.clone()))
-        .execute(pool)
         .await
         .map_err(|_| server_error())?;
     }

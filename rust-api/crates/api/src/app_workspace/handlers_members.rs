@@ -145,6 +145,7 @@ use pidash_services::app_project::ser_member as d25;
 use pidash_services::app_workspace::models_user::user::avatar_url as resolve_avatar_url;
 use pidash_services::app_workspace::queries_membership as qm;
 use pidash_services::app_workspace::{ser_user, ser_workspace};
+use pidash_services::domain::workspaces::members;
 use pidash_types::WorkspaceId;
 
 // ---------------------------------------------------------------------------
@@ -2826,16 +2827,9 @@ async fn deactivate_member(
     actor_id: &Uuid,
     now: &DateTime<Utc>,
 ) -> Result<(), Denial> {
-    sqlx::query(
-        "UPDATE workspace_members SET is_active = FALSE, updated_at = $2, updated_by_id = $3 \
-         WHERE id = $1",
-    )
-    .bind(target_id)
-    .bind(now)
-    .bind(actor_id)
-    .execute(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    members::deactivate(pool, *target_id, *now, *actor_id)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(())
 }
 

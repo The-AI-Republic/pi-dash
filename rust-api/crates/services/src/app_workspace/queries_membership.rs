@@ -269,15 +269,6 @@ pub fn project_deactivate_sql() -> String {
     )
 }
 
-/// R5/R6 member deactivation (`:148-149` + `:203-204`):
-/// `workspace_member.is_active = False; save()` renders an `UPDATE` on the
-/// row (`save()` additionally stamps `updated_by` from the request user via
-/// `BaseModel.save`, `db/models/base.py:23-44` — handler sequencing).
-/// Both paths answer 204.
-pub fn member_deactivate_sql() -> String {
-    "UPDATE workspace_members SET is_active = FALSE, updated_at = :now WHERE id = :pk".to_owned()
-}
-
 /// R6 sole-workspace-admin count (`:167`): active admins in the workspace.
 pub fn sole_workspace_admin_count_sql() -> String {
     format!(
@@ -329,15 +320,6 @@ pub fn me_sql() -> String {
 // ---------------------------------------------------------------------------
 // Views-post view_props save (member.py:208-214)
 // ---------------------------------------------------------------------------
-
-/// Views-post save (`:210-212`): `view_props = ...; save()` → full-row
-/// `UPDATE` stamping `updated_at` (`BaseModel.save` also stamps
-/// `updated_by` from the request user via crum, `db/models/base.py:23-44`
-/// — handler sequencing). The lookup is the [`member_requester_where`]
-/// predicate set (`:210`); the path answers 204.
-pub fn member_view_props_sql() -> String {
-    "UPDATE workspace_members SET view_props = :props, updated_at = :now WHERE id = :pk".to_owned()
-}
 
 // ---------------------------------------------------------------------------
 // R8 project-members dict (member.py:243-265)
@@ -505,23 +487,6 @@ pub fn member_reactivate_lookup_where() -> String {
     "workspace_members.workspace_id = :ws AND workspace_members.member_id = :user AND workspace_members.deleted_at IS NULL".to_owned()
 }
 
-/// R12 reactivate (`:192-194`): `is_active=True, role=invite.role` + save
-/// (`:role` binds the invite's role; R18 binds the request's role via the
-/// same statement shape).
-pub fn member_reactivate_sql() -> String {
-    "UPDATE workspace_members SET is_active = TRUE, role = :role, updated_at = :now WHERE id = :pk"
-        .to_owned()
-}
-
-/// R12 create (`:197-201`): `WorkspaceMember(workspace, member, role)` —
-/// ported bug 12: NO explicit `created_by` (contrast [`my_invite_bulk_insert_sql`]
-/// and [`approve_member_insert_sql`], which set it; `bulk_create` skips
-/// `save()`, so only the explicit value lands there, while this path relies
-/// on `BaseModel.save` crum backfill — `None` for anonymous joins).
-pub fn member_join_insert_sql() -> String {
-    "INSERT INTO workspace_members (id, created_at, updated_at, workspace_id, member_id, role) VALUES (:id, :now, :now, :ws, :user, :role)".to_owned()
-}
-
 /// R12 last-workspace write (`:204-205`): `user.last_workspace_id =
 /// workspace.id; user.save()`. Ported bug 11: `User` HAS no such column
 /// (it lives on `Profile`, `db/models/user.py:236` — the U16 read of it
@@ -581,26 +546,6 @@ pub fn my_invites_bulk_soft_delete_sql() -> String {
         "UPDATE workspace_member_invites SET deleted_at = :now WHERE workspace_member_invites.id IN (:pks) AND {}",
         my_invites_where()
     )
-}
-
-/// R14 per-invite reactivate (`:270-272`): `UPDATE workspace_members SET
-/// is_active=TRUE, role=:role WHERE workspace_id=:ws AND member=:user` —
-/// no `is_active` filter (active rows are rewritten in place) and no
-/// `updated_at` (`QuerySet.update()` writes only the named columns — same
-/// rule as R18's [`profile_last_workspace_sql`]).
-pub fn my_invite_reactivate_sql() -> String {
-    "UPDATE workspace_members SET is_active = TRUE, role = :role WHERE workspace_members.workspace_id = :ws AND workspace_members.member_id = :user AND workspace_members.deleted_at IS NULL".to_owned()
-}
-
-/// R14 bulk-create (`:289-300`): `bulk_create(..., ignore_conflicts=True)`
-/// with `created_by=request.user` explicit and NO `batch_size` (contrast
-/// R10's [`INVITE_BULK_BATCH_SIZE`]). The update-then-create double-write
-/// covers reactivate (alive row updated above) plus new (inserted here);
-/// rows updated above conflict-skip here (ported bug 9). Invite rows are
-/// then soft-deleted ([`my_invites_bulk_soft_delete_sql`]) and the path
-/// answers 204.
-pub fn my_invite_bulk_insert_sql() -> String {
-    "INSERT INTO workspace_members (id, created_at, updated_at, created_by_id, workspace_id, member_id, role) VALUES (:id, :now, :now, :user, :ws, :user, :role) ON CONFLICT DO NOTHING".to_owned()
 }
 
 // ---------------------------------------------------------------------------
@@ -718,15 +663,6 @@ pub fn join_request_pending_blocks(status: &str) -> bool {
     status != JOIN_REQUEST_PENDING
 }
 
-/// R18 member create (`:210-215`): `WorkspaceMember(workspace, requester,
-/// role=request.role, created_by=request.user)` — explicit `created_by`
-/// (contrast R12's [`member_join_insert_sql`]). The reactivate arm reuses
-/// [`member_reactivate_lookup_where`] + [`member_reactivate_sql`] with
-/// `:role` bound to the request's role (default [`JOIN_REQUEST_DEFAULT_ROLE`]).
-pub fn approve_member_insert_sql() -> String {
-    "INSERT INTO workspace_members (id, created_at, updated_at, created_by_id, workspace_id, member_id, role) VALUES (:id, :now, :now, :user, :ws, :requester, :role)".to_owned()
-}
-
 /// R18 profile pointer (`:219`): `Profile.objects.filter(user=:requester)
 /// .update(last_workspace_id=:ws)`. Ported bug 11 (second half): this
 /// `profiles` UPDATE is the path that PERSISTS (contrast R12's
@@ -791,7 +727,6 @@ mod tests {
             my_invites_where(),
             my_invites_accept_lookup_sql(),
             my_invites_bulk_soft_delete_sql(),
-            my_invite_reactivate_sql(),
             own_join_requests_where(),
             join_request_admin_targets_sql(),
             join_request_already_member_sql(),
@@ -808,8 +743,7 @@ mod tests {
         }
         // INSERTs are writes, not reads: their dedupe scope is the partial
         // unique (which excludes deleted rows itself), not a WHERE guard —
-        // so invite_bulk_insert_sql / my_invite_bulk_insert_sql stay out of
-        // the list above.
+        // so invite_bulk_insert_sql stays out of the list above.
         // users/profiles have no deleted_at column — assert absence, not scope.
         assert!(!join_user_lookup_sql().contains("deleted_at"));
         assert!(!profile_last_workspace_sql().contains("deleted_at"));
@@ -899,9 +833,6 @@ mod tests {
         let projects = project_deactivate_sql();
         assert!(projects.contains("SET is_active = FALSE, updated_at = :now"));
         assert!(projects.contains("project_members.is_active = TRUE"));
-        let member = member_deactivate_sql();
-        assert!(member.contains("UPDATE workspace_members SET is_active = FALSE"));
-        assert!(member.contains("WHERE id = :pk"));
     }
 
     #[test]
@@ -1005,9 +936,6 @@ mod tests {
         let probe = member_reactivate_lookup_where();
         assert!(probe.contains("workspace_members.workspace_id = :ws"));
         assert!(!probe.contains("is_active"));
-        assert!(member_reactivate_sql().contains("SET is_active = TRUE, role = :role"));
-        // Ported bug 12 (first half): no created_by on the join insert.
-        assert!(!member_join_insert_sql().contains("created_by"));
         // Ported bug 11 (first half): users UPDATE touches audit only.
         assert_eq!(
             user_touch_sql(),
@@ -1028,30 +956,12 @@ mod tests {
         assert!(lookup.contains("workspace_member_invites.id IN (:pks)"));
         assert!(lookup.contains("workspace_member_invites.email = :email"));
         assert!(lookup.ends_with(&format!("ORDER BY {MY_INVITES_ORDER_SQL}")));
-        // .update() writes only named columns: no updated_at (like R18).
-        let reactivate = my_invite_reactivate_sql();
-        assert!(reactivate.contains("SET is_active = TRUE, role = :role"));
-        assert!(!reactivate.contains("updated_at"));
         // Queryset .delete() = SET deleted_at only, over the accept predicate.
         let bulk_delete = my_invites_bulk_soft_delete_sql();
         assert!(bulk_delete.contains("SET deleted_at = :now WHERE"));
         assert!(!bulk_delete.contains("updated_at"));
         assert!(bulk_delete.contains("workspace_member_invites.id IN (:pks)"));
         assert!(bulk_delete.contains(&my_invites_where()));
-        // Ported bug 12 (second half): bulk sets created_by; update ran first.
-        let bulk = my_invite_bulk_insert_sql();
-        assert!(bulk.contains("created_by_id"));
-        assert!(bulk.ends_with("ON CONFLICT DO NOTHING"));
-    }
-
-    #[test]
-    fn views_post_view_props_save() {
-        // Full save: view_props + updated_at on the member row.
-        let save = member_view_props_sql();
-        assert!(
-            save.contains("UPDATE workspace_members SET view_props = :props, updated_at = :now")
-        );
-        assert!(save.contains("WHERE id = :pk"));
     }
 
     #[test]
@@ -1116,8 +1026,6 @@ mod tests {
         assert_eq!(JOIN_REQUEST_PENDING, "PENDING");
         assert_eq!(JOIN_REQUEST_APPROVED, "APPROVED");
         assert_eq!(JOIN_REQUEST_DENIED, "DENIED");
-        // Approve create sets created_by (contrast R12).
-        assert!(approve_member_insert_sql().contains("created_by_id"));
         // Ported bug 11 (second half): the Profile UPDATE persists.
         assert_eq!(
             profile_last_workspace_sql(),

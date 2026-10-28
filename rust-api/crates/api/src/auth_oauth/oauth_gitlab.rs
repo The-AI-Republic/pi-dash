@@ -81,6 +81,7 @@ use sqlx::PgPool;
 use crate::auth_session::render::disallowed_redirect;
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
+use pidash_services::domain::workspaces::members;
 
 /// App initiate path (`authentication/urls.py:106`).
 pub const APP_INITIATE_PATH: &str = "/auth/gitlab/";
@@ -1599,38 +1600,18 @@ async fn bulk_insert_workspace_members(
     if rows.is_empty() {
         return Ok(());
     }
-    let mut builder: sqlx::QueryBuilder<sqlx::Postgres> = sqlx::QueryBuilder::new(
-        r#"INSERT INTO "workspace_members" ("id", "created_at", "updated_at",
-           "created_by_id", "updated_by_id", "deleted_at",
-           "workspace_id", "member_id", "role", "company_role",
-           "view_props", "default_props", "issue_props", "is_active",
-           "getting_started_checklist", "tips", "explored_features") "#,
-    );
     let view_props = default_props_json();
     let issue_props = issue_props_json();
-    builder.push_values(rows, |mut row, member| {
-        row.push_bind(uuid::Uuid::new_v4())
-            .push_bind(now)
-            .push_bind(now)
-            .push_bind(member.created_by_id)
-            .push_bind(Option::<uuid::Uuid>::None)
-            .push_bind(Option::<chrono::DateTime<Utc>>::None)
-            .push_bind(member.workspace_id)
-            .push_bind(member.member_id)
-            .push_bind(member.role)
-            .push_bind(Option::<String>::None)
-            .push_bind(view_props.clone())
-            .push_bind(view_props.clone())
-            .push_bind(issue_props.clone())
-            .push_bind(true)
-            .push_bind(serde_json::json!({}))
-            .push_bind(serde_json::json!({}))
-            .push_bind(serde_json::json!({}));
-    });
-    builder.push(" ON CONFLICT DO NOTHING");
-    builder
-        .build()
-        .execute(pool)
+    let bulk_rows: Vec<members::BulkMember> = rows
+        .iter()
+        .map(|member| members::BulkMember {
+            workspace_id: member.workspace_id,
+            user_id: member.member_id,
+            role: member.role,
+            created_by: member.created_by_id,
+        })
+        .collect();
+    members::bulk_add(pool, &bulk_rows, &view_props, &issue_props, now)
         .await
         .map_err(|_| Denial::ServerError)?;
     Ok(())

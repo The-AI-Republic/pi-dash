@@ -396,12 +396,13 @@ def _assert_workspace_phases_first(path: Path, fetch_marker: str, end_marker: st
         " rows) — Django commits every invite's workspace row before the"
         " ported PB-1008 500"
     )
-    # Match the INSERT statements, not bare table names (comments name the
-    # tables too).
-    ws_m = re.search(r"INSERT\s+INTO\s+\"?workspace_members\"?", block)
+    # Match the write statements, not bare table names (comments name the
+    # tables too). ORM-07 moved the workspace write into
+    # `domain::workspaces::members`, so the pin matches the domain call.
+    ws_m = re.search(r"members::(add|bulk_add)\b", block)
     proj_m = re.search(r"INSERT\s+INTO\s+\"?project_members\"?", block)
     assert ws_m is not None and proj_m is not None, (
-        "harness: INSERT statements not found in the block"
+        "harness: workspace/project write statements not found in the block"
     )
     ws_at, proj_at = ws_m.start(), proj_m.start()
     assert ws_at < loops[1], (

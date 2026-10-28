@@ -2543,29 +2543,25 @@ async fn create_workspace(
     let workspace_id = uuid::Uuid::new_v4();
     let created_at = chrono::Utc::now();
     let updated_at = chrono::Utc::now();
-    let insert: Result<Option<(uuid::Uuid,)>, sqlx::Error> = sqlx::query_as(
-        r#"INSERT INTO workspaces
-           (created_at, updated_at, created_by_id, updated_by_id, deleted_at,
-            id, name, logo, logo_asset_id, owner_id, slug,
-            organization_size, timezone, background_color)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-           RETURNING id"#,
+    let insert = pidash_services::domain::workspaces::create(
+        &pool,
+        &pidash_services::domain::workspaces::NewWorkspace {
+            id: workspace_id,
+            name: &validated.name,
+            slug: &validated.slug,
+            owner_id: actor.id,
+            created_by: Some(actor.id),
+            logo: validated.logo.as_deref(),
+            logo_asset_id: validated.logo_asset,
+            organization_size: validated.organization_size.as_deref(),
+            timezone: &validated.timezone,
+            background_color: &validated.background_color,
+            deleted_at: validated.deleted_at,
+            created_at,
+            updated_at,
+            seed_created_by: Some(actor.id),
+        },
     )
-    .bind(created_at)
-    .bind(updated_at)
-    .bind(actor.id)
-    .bind(None::<uuid::Uuid>)
-    .bind(validated.deleted_at)
-    .bind(workspace_id)
-    .bind(&validated.name)
-    .bind(&validated.logo)
-    .bind(validated.logo_asset)
-    .bind(actor.id)
-    .bind(&validated.slug)
-    .bind(&validated.organization_size)
-    .bind(&validated.timezone)
-    .bind(&validated.background_color)
-    .fetch_optional(&pool)
     .await;
     match insert {
         Ok(_) => {}
@@ -2584,47 +2580,28 @@ async fn create_workspace(
             return Denial::ServerError.into_response();
         }
     }
-    // `post_save` on `Workspace` (`scheduler/signals.py:28-39`) fires
-    // during the save above, before the member row below: seed the
-    // builtin schedulers. The receiver swallows every failure, so this
-    // never fails the request.
-    pidash_services::scheduler::builtins::seed_builtin_schedulers(
-        &pool,
-        workspace_id,
-        Some(actor.id),
-    )
-    .await;
     // `WorkspaceMember.objects.create(workspace_id, member=user, role=20,
     // company_role=...)`: model `JSONField` defaults apply Python-side.
     let company_role = company_role_value(data.field("company_role"));
     let member_now = chrono::Utc::now();
-    let member_result = sqlx::query(
-        r#"INSERT INTO workspace_members
-           (created_at, updated_at, id, role, member_id, workspace_id,
-            view_props, default_props, issue_props, is_active,
-            explored_features, getting_started_checklist, tips,
-            company_role, created_by_id, updated_by_id, deleted_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-                   $14, $15, $16, $17)"#,
+    let member_view_props = default_view_props();
+    let member_issue_props = default_issue_props();
+    let member_result = pidash_services::domain::workspaces::members::add(
+        &pool,
+        &pidash_services::domain::workspaces::members::NewMember {
+            workspace_id,
+            user_id: Some(actor.id),
+            role: 20,
+            company_role: company_role.as_deref(),
+            created_by: Some(actor.id),
+            view_props: &member_view_props,
+            default_props: &member_view_props,
+            issue_props: &member_issue_props,
+            now: member_now,
+            ignore_conflicts: false,
+            db_now: false,
+        },
     )
-    .bind(member_now)
-    .bind(member_now)
-    .bind(uuid::Uuid::new_v4())
-    .bind(20i16)
-    .bind(actor.id)
-    .bind(workspace_id)
-    .bind(sqlx::types::Json(default_view_props()))
-    .bind(sqlx::types::Json(default_view_props()))
-    .bind(sqlx::types::Json(default_issue_props()))
-    .bind(true)
-    .bind(sqlx::types::Json(serde_json::json!({})))
-    .bind(sqlx::types::Json(serde_json::json!({})))
-    .bind(sqlx::types::Json(serde_json::json!({})))
-    .bind(company_role)
-    .bind(actor.id)
-    .bind(None::<uuid::Uuid>)
-    .bind(None::<chrono::DateTime<chrono::Utc>>)
-    .execute(&pool)
     .await;
     if let Err(err) = member_result {
         // Same `except IntegrityError` as the workspace row: a unique

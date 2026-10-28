@@ -381,11 +381,6 @@ pub const UPDATE_SEQUENCE_SQL: &str = "UPDATE issue_sequences SET sequence = $1 
 pub const FIND_WORKSPACE_SQL: &str =
     "SELECT id, name, slug, deleted_at FROM workspaces WHERE slug = $1 LIMIT 1";
 
-/// `save(update_fields=["slug"])`
-/// (`update_deleted_workspace_slug.py:63-64`): the `slug` column only
-/// (verified — `updated_at` untouched).
-pub const UPDATE_WORKSPACE_SLUG_SQL: &str = "UPDATE workspaces SET slug = $1 WHERE id = $2";
-
 /// Columns of the copy `INSERT`, in bind order.
 const DESCRIPTION_INSERT_COLUMNS: &str = "(id, created_at, updated_at, \
     description_json, description_html, description_stripped, project_id, \
@@ -639,23 +634,6 @@ pub async fn find_workspace(
     .map_err(RepairError::Db)
 }
 
-/// The slug write (`update_deleted_workspace_slug.py:62-64`) in a
-/// transaction: `slug` column only.
-pub async fn apply_slug_update(
-    pool: &PgPool,
-    workspace_id: &Uuid,
-    new_slug: &str,
-) -> Result<(), RepairError> {
-    let mut tx = pool.begin().await?;
-    sqlx::query(UPDATE_WORKSPACE_SLUG_SQL)
-        .bind(new_slug)
-        .bind(workspace_id)
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -849,6 +827,5 @@ mod tests {
         assert!(!UPDATE_SEQUENCE_SQL.contains("updated_at"));
         assert!(FIND_WORKSPACE_SQL.contains("SELECT id, name, slug, deleted_at"));
         assert!(!FIND_WORKSPACE_SQL.contains("deleted_at IS NULL"));
-        assert!(!UPDATE_WORKSPACE_SLUG_SQL.contains("updated_at"));
     }
 }

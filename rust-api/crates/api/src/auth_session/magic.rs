@@ -74,6 +74,7 @@ use pidash_services::auth_session::magic::{
     VerifyOutcome, TOKEN_REJECTION_LIMIT,
 };
 use pidash_services::domain::identity;
+use pidash_services::domain::workspaces::members;
 
 /// Unwrap a `Result`, answering the uncaught-exception 500 on any error
 /// (every fallible I/O on these paths propagates in Python).
@@ -1159,29 +1160,25 @@ async fn process_workspace_project_invitations(
         .collect();
 
     if !invites.is_empty() {
-        let moment = now.to_rfc3339();
-        let mut values: Vec<String> = Vec::with_capacity(invites.len());
-        for invite in &invites {
-            values.push(format!(
-                "('{}', '{moment}', '{moment}', '{}', '{}', {}, NULL, NULL, NULL, \
-                 '{props}', '{props}', '{issue}', TRUE, '{{}}', '{{}}', '{{}}')",
-                uuid::Uuid::new_v4(),
-                invite.workspace_id,
-                user.id,
-                invite.role,
-                props = workspace_default_props(),
-                issue = workspace_issue_props(),
-            ));
-        }
-        let sql = format!(
-            "INSERT INTO \"workspace_members\" (\"id\", \"created_at\", \"updated_at\", \
-             \"workspace_id\", \"member_id\", \"role\", \"created_by_id\", \"updated_by_id\", \
-             \"deleted_at\", \"view_props\", \"default_props\", \"issue_props\", \"is_active\", \
-             \"getting_started_checklist\", \"tips\", \"explored_features\") \
-             VALUES {} ON CONFLICT DO NOTHING",
-            values.join(", ")
-        );
-        sqlx::query(&sql).execute(pool).await.map_err(map_err)?;
+        // The interpolated defaults reparse from the same fixed text
+        // (jsonb storage normalizes key order either way, so the
+        // committed bytes match the old inline literals).
+        let view_props: serde_json::Value =
+            serde_json::from_str(workspace_default_props()).map_err(|_| server_error())?;
+        let issue_props: serde_json::Value =
+            serde_json::from_str(workspace_issue_props()).map_err(|_| server_error())?;
+        let rows: Vec<members::BulkMember> = invites
+            .iter()
+            .map(|invite| members::BulkMember {
+                workspace_id: invite.workspace_id,
+                user_id: user.id,
+                role: invite.role,
+                created_by: None,
+            })
+            .collect();
+        members::bulk_add(pool, &rows, &view_props, &issue_props, now)
+            .await
+            .map_err(map_err)?;
 
         for invite in &invites {
             // `invalidate_cache_directly(path, url_params=False, user=False,
@@ -1235,38 +1232,28 @@ async fn process_workspace_project_invitations(
         .collect();
 
     if !project_invites.is_empty() {
-        let moment = now.to_rfc3339();
-        let mut values: Vec<String> = Vec::with_capacity(project_invites.len());
-        for invite in &project_invites {
-            let created_by = invite
-                .created_by_id
-                .map(|id| format!("'{id}'"))
-                .unwrap_or_else(|| "NULL".to_owned());
-            values.push(format!(
-                "('{}', '{moment}', '{moment}', {created_by}, NULL, NULL, '{}', '{}', {}, \
-                 '{props}', '{props}', '{issue}', TRUE, '{{}}', '{{}}', '{{}}')",
-                uuid::Uuid::new_v4(),
-                invite.workspace_id,
-                user.id,
-                map_invite_role(invite.role),
-                props = workspace_default_props(),
-                issue = workspace_issue_props(),
-            ));
-        }
-        let sql = format!(
-            "INSERT INTO \"workspace_members\" (\"id\", \"created_at\", \"updated_at\", \
-             \"created_by_id\", \"updated_by_id\", \"deleted_at\", \"workspace_id\", \"member_id\", \
-             \"role\", \"view_props\", \"default_props\", \"issue_props\", \"is_active\", \
-             \"getting_started_checklist\", \"tips\", \"explored_features\") \
-             VALUES {} ON CONFLICT DO NOTHING",
-            values.join(", ")
-        );
-        sqlx::query(&sql).execute(pool).await.map_err(map_err)?;
+        let view_props: serde_json::Value =
+            serde_json::from_str(workspace_default_props()).map_err(|_| server_error())?;
+        let issue_props: serde_json::Value =
+            serde_json::from_str(workspace_issue_props()).map_err(|_| server_error())?;
+        let rows: Vec<members::BulkMember> = project_invites
+            .iter()
+            .map(|invite| members::BulkMember {
+                workspace_id: invite.workspace_id,
+                user_id: user.id,
+                role: map_invite_role(invite.role),
+                created_by: invite.created_by_id,
+            })
+            .collect();
+        members::bulk_add(pool, &rows, &view_props, &issue_props, now)
+            .await
+            .map_err(map_err)?;
 
         // Ported bug kept (`workspace_project_join.py:76-87`): the
         // `ProjectMember` write omits `project_id` although the column is
         // NOT NULL — Postgres raises `IntegrityError` despite
         // `ignore_conflicts=True`.
+        let moment = now.to_rfc3339();
         let mut values: Vec<String> = Vec::with_capacity(project_invites.len());
         for invite in &project_invites {
             let created_by = invite
