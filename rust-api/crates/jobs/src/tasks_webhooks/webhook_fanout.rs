@@ -1557,6 +1557,23 @@ mod tests {
         )
         .expect("origin defaults");
         assert_eq!(created_call(&minimal).current_site, None);
+        // Explicit JSON null — the wire shape the MCP move path queues
+        // (Django `.delay(origin=None)`) — maps the same way, never
+        // `Some("")`.
+        let null_origin = bind_model_activity(
+            &json!([]),
+            &json!({
+                "model_name": "issue",
+                "model_id": "iid-1",
+                "requested_data": {},
+                "current_instance": Value::Null,
+                "actor_id": "uid-9",
+                "slug": "ws-slug",
+                "origin": Value::Null,
+            }),
+        )
+        .expect("null origin binds");
+        assert_eq!(created_call(&null_origin).current_site, None);
     }
 
     #[test]
