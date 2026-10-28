@@ -94,6 +94,9 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use crate::state::AppState;
+use pidash_compat::response::{
+    json_response as raw, json_value as json_status, no_content, server_error,
+};
 use pidash_services::space::guards;
 use pidash_services::space::queries::intake_assets as q;
 
@@ -159,35 +162,10 @@ const PAGE_NOT_FOUND_BODY: &str = r#"{"error": "Page not found."}"#;
 // Small responders
 // ---------------------------------------------------------------------------
 
-fn raw(status: StatusCode, body: &'static str) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("static response")
-}
-
-fn json_status(status: StatusCode, body: Value) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(
-            serde_json::to_string(&body).expect("serializable response"),
-        ))
-        .expect("json response")
-}
-
 fn guard_err(err: guards::ErrorBody) -> Response {
     json_status(
         StatusCode::from_u16(err.status).expect("valid guard status"),
         err.body,
-    )
-}
-
-fn server_error() -> Response {
-    raw(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        crate::license::SERVER_ERROR_BODY,
     )
 }
 
@@ -199,10 +177,6 @@ fn does_not_exist() -> Response {
 
 fn page_not_found() -> Response {
     raw(StatusCode::NOT_FOUND, PAGE_NOT_FOUND_BODY)
-}
-
-fn no_content() -> Response {
-    StatusCode::NO_CONTENT.into_response()
 }
 
 fn pool(state: &AppState) -> Option<&sqlx::PgPool> {

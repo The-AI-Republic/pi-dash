@@ -11,8 +11,9 @@ use axum::extract::State;
 use axum::http::{header, StatusCode};
 use axum::response::Response;
 
-use super::{json_response, pool_of, view_response, ALLOW_RUNNER_METRICS, SERVER_ERROR_BODY};
+use super::{pool_of, view_response, ALLOW_RUNNER_METRICS};
 use crate::state::AppState;
+use pidash_compat::response::server_error;
 
 /// Exact content type (`metrics.py:105`): scrapers require it.
 pub const METRICS_CONTENT_TYPE: &str = "text/plain; version=0.0.4";
@@ -167,14 +168,6 @@ async fn metrics_inner(State(state): State<AppState>) -> Response {
         .header(header::CONTENT_TYPE, METRICS_CONTENT_TYPE)
         .body(axum::body::Body::from(body))
         .expect("metrics response")
-}
-
-/// 500 for transport failures (unreachable in `serve`).
-fn server_error() -> Response {
-    json_response(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        SERVER_ERROR_BODY.to_owned(),
-    )
 }
 
 #[cfg(test)]

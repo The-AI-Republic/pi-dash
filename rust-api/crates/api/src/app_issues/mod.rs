@@ -76,6 +76,7 @@ use pidash_services::app_issues::{
     STATE_GROUP_VALUES,
 };
 
+use pidash_compat::response::json_ok as json_response;
 use render::v2_page;
 
 /// Register the app-issues routes: the five list-family GETs, the
@@ -286,8 +287,6 @@ pub const NOT_FOUND_BODY: &str = r#"{"error":"The required object does not exist
 /// found") renders with the resolve message — verified against live
 /// Django, not the bare default.
 pub const PROJECT_NOT_FOUND_BODY: &str = r#"{"detail":"Project not found"}"#;
-/// `handle_exception`'s generic 500 branch.
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// `handle_exception`'s `ValidationError` branch (bad UUID in `issues=`).
 pub const INVALID_DETAIL_BODY: &str = r#"{"error":"Please provide valid detail"}"#;
 
@@ -904,6 +903,7 @@ pub async fn filters_timezone(
 // kernel conditions (`issue` for the base table, `state` for states,
 // the relation aliases for the m2m joins).
 
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 use pidash_db::issue_filters::FilterValue;
 
 /// A legacy predicate compiled to SQL text (placeholders bound inline).
@@ -1979,14 +1979,6 @@ pub async fn group_values(
 // ---- handlers ---------------------------------------------------------------
 
 type HandlerResult = Result<Response, Denial>;
-
-fn json_response(body: String) -> Response {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("json response")
-}
 
 /// Shared preamble: gate + parsed params + filtered set + order key.
 /// `extra_where` carries path-specific predicates (`updated_at__gt`,

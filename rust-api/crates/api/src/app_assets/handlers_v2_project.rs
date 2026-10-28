@@ -94,6 +94,9 @@ use pidash_auth::permissions::allow::AllowFacts;
 use pidash_auth::permissions::{ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER};
 use pidash_auth::scope::TenantScope;
 use pidash_compat::db::is_integrity_error;
+use pidash_compat::response::{
+    json_response as raw, json_value as json_status, no_content, server_error,
+};
 use pidash_services::app_assets::queries_v2_project as q;
 use pidash_types::WorkspaceId;
 
@@ -131,8 +134,6 @@ const DOES_NOT_EXIST_BODY: &str = r#"{"error":"The required object does not exis
 /// `BaseAPIView.handle_exception`: `ValidationError` branch (`:226-230`),
 /// also raised by `UUIDField.to_python` on bad UUID writes.
 const VALID_DETAIL_BODY: &str = r#"{"error":"Please provide valid detail"}"#;
-/// `BaseAPIView.handle_exception`: generic branch (`:238-243`).
-const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// DRF `NotAuthenticated` denial: anonymous on a guarded route.
 const UNAUTHENTICATED_BODY: &str = r#"{"detail":"Authentication credentials were not provided."}"#;
 /// `Project.resolve` miss (`db/models/project.py:190-217` via `Http404`).
@@ -205,28 +206,6 @@ pub fn routes() -> Router<AppState> {
 // Small responders
 // ---------------------------------------------------------------------------
 
-fn raw(status: StatusCode, body: &'static str) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("static response")
-}
-
-fn json_status(status: StatusCode, body: Value) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(
-            serde_json::to_string(&body).expect("serializable response"),
-        ))
-        .expect("json response")
-}
-
-fn server_error() -> Response {
-    raw(StatusCode::INTERNAL_SERVER_ERROR, SERVER_ERROR_BODY)
-}
-
 /// `.get()` miss envelope: Django `ObjectDoesNotExist` through
 /// `BaseAPIView.handle_exception` (`app/views/base.py:232-236`).
 fn does_not_exist() -> Response {
@@ -239,10 +218,6 @@ fn page_not_found() -> Response {
 
 fn valid_detail() -> Response {
     raw(StatusCode::BAD_REQUEST, VALID_DETAIL_BODY)
-}
-
-fn no_content() -> Response {
-    StatusCode::NO_CONTENT.into_response()
 }
 
 fn redirect(location: String) -> Response {

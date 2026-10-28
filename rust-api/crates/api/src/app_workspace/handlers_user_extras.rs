@@ -100,6 +100,7 @@ use pidash_services::user_settings::SettingsSchema;
 use crate::middleware::SessionHandle;
 use crate::serializer::render_datetime_in;
 use crate::state::AppState;
+pub use pidash_compat::response::{json_response, SERVER_ERROR_BODY};
 
 /// Register the owned D-24 user-extras routes. Unowned methods fall
 /// through to Django through the edge fallback (never a Rust 405).
@@ -181,8 +182,6 @@ pub const UNAUTHENTICATED_BODY: &str = super::gates::ANON_BODY;
 /// 404 bytes: `ObjectDoesNotExist` branch
 /// (`app/views/base.py:132-136`).
 pub const NOT_FOUND_BODY: &str = profile_q::OBJECT_NOT_FOUND_BODY;
-/// 500 bytes: generic branch (`app/views/base.py:145-149`).
-pub const SERVER_ERROR_BODY: &str = profile_q::SERVER_ERROR_BODY;
 
 /// Handler failure with its exact status + body.
 #[derive(Debug)]
@@ -225,15 +224,6 @@ impl IntoResponse for HandlerError {
         let (status, body) = self.status_and_body();
         json_response(status, body)
     }
-}
-
-/// Render `body` (already exact JSON bytes) as a JSON response.
-pub fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(axum::http::header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("handler json response")
 }
 
 // ---------------------------------------------------------------------------

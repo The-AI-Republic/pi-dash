@@ -3071,10 +3071,14 @@ dependencies = [
 name = "pidash-compat"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "chrono",
+ "http",
  "sea-query",
+ "serde",
  "serde_json",
  "sqlx",
+ "tokio",
  "uuid",
 ]
 

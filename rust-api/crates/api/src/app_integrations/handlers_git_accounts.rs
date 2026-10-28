@@ -72,6 +72,8 @@ use pidash_db::integrations::git_models::git_provider_account::GitProviderAccoun
 use super::gates::{decide_gate, tenant_context, Gate, GateOutcome};
 use crate::state::AppState;
 use crate::uuid_path::{classify_uuid_segment, UuidSegment};
+use pidash_compat::response::json_response;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 
 /// Exact bytes of the providers payload (`registry.py:45-53`).
 pub const PROVIDERS_BODY: &str = r#"{"providers":[{"key":"github","display_name":"GitHub","code_review_term":"pull request"},{"key":"gitlab","display_name":"GitLab","code_review_term":"merge request"}]}"#;
@@ -85,8 +87,6 @@ pub const WORKSPACE_NOT_FOUND_BODY: &str = r#"{"detail":"Not found."}"#;
 /// `get_object_or_404(GitProviderAccount, ...)` body (`git.py:100,105,120`).
 pub const ACCOUNT_NOT_FOUND_BODY: &str =
     r#"{"detail":"No GitProviderAccount matches the given query."}"#;
-/// Generic 500 (`views/base.py:99-103`).
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 
 /// GitHub API base (`utils/github_client.py:22`): the credential host is
 /// never consulted for github — verification and listing always hit
@@ -199,14 +199,6 @@ impl Denial {
 
 fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
-}
-
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("static json response")
 }
 
 fn denial_response(denial: Denial) -> Response {

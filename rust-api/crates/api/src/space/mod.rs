@@ -41,6 +41,9 @@ use axum::response::{IntoResponse, Response};
 use axum::Router;
 
 use crate::state::AppState;
+pub use pidash_compat::response::{
+    json_ok as raw_json_response, json_ok_value as json_response, SERVER_ERROR_BODY,
+};
 
 pub mod assets;
 pub mod filters;
@@ -56,8 +59,6 @@ pub const UNAUTHENTICATED_BODY: &str =
     r#"{"detail":"Authentication credentials were not provided."}"#;
 /// `views/base.py:86-90` (`ObjectDoesNotExist` branch).
 pub const NOT_FOUND_BODY: &str = r#"{"error":"The required object does not exist."}"#;
-/// `views/base.py:99-103` (generic branch).
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 
 /// One query value, repeated or not. Mirrors the D-26 `app_issues` shape:
 /// `serde_html_form` does not coerce a lone `?key=value` into a sequence,
@@ -146,27 +147,6 @@ pub fn guards_error(error: pidash_services::space::guards::ErrorBody) -> Respons
         .header(header::CONTENT_TYPE, "application/json")
         .body(axum::body::Body::from(body))
         .expect("guard error response")
-}
-
-/// Render a value body as compact JSON (`JSONRenderer`, `COMPACT_JSON`):
-/// no spaces, insertion order preserved (`preserve_order`).
-pub fn json_response<T: serde::Serialize>(value: &T) -> Response {
-    let body = serde_json::to_string(value).expect("serializable response");
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("json response")
-}
-
-/// Render an already-serialized compact JSON body (handlers that assemble
-/// key order by hand produce the string directly).
-pub fn raw_json_response(body: String) -> Response {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("raw json response")
 }
 
 /// `json.dumps(value)` with CPython defaults: `separators=(', ', ': ')`,

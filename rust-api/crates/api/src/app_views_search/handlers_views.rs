@@ -42,6 +42,8 @@ use crate::middleware::SessionHandle;
 use crate::state::AppState;
 use crate::uuid_path::{classify_uuid_segment, UuidSegment};
 
+use pidash_compat::response::json_response;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 use pidash_services::app_views_search::{permissions, queries_views};
 
 // ---------------------------------------------------------------------------
@@ -170,8 +172,6 @@ pub const NOT_FOUND_DETAIL_BODY: &str = r#"{"detail":"Not found."}"#;
 pub const PROJECT_NOT_FOUND_BODY: &str = r#"{"detail":"Project not found"}"#;
 /// `handle_exception`'s `IntegrityError` branch.
 pub const INVALID_PAYLOAD_BODY: &str = r#"{"error":"The payload is not valid"}"#;
-/// `handle_exception`'s generic 500 branch.
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// DRF `get_object()` miss through a viewset queryset: the `Http404`
 /// message carries the model name (`rest_framework/generics.py`).
 pub const VIEW_PUT_MISSING_BODY: &str = r#"{"detail":"No IssueView matches the given query."}"#;
@@ -1931,14 +1931,6 @@ async fn apply_view_update(
         .await?
         .ok_or(Denial::ServerError)?;
     Ok(body)
-}
-
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("view response")
 }
 
 /// Best-effort deferred publish of a retrieve visit (the space intake

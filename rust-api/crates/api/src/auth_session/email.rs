@@ -57,7 +57,6 @@
 //!   exactly Django-with-local-memory-cache behaviour.
 
 use axum::{
-    body::Body,
     extract::State,
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
@@ -85,6 +84,7 @@ use crate::edge;
 use crate::license::handlers_auth_forms::client_ip;
 use crate::middleware::body_limit::read_request_bytes;
 use crate::state::AppState;
+use pidash_compat::response::{redirect_found_cookies, server_error};
 
 /// `AuthenticationThrottle`: 30/minute, scope `authentication`
 /// (`authentication/rate_limit.py:17-19`).
@@ -398,15 +398,7 @@ fn redirect_response(location: String, set_cookies: Vec<String>) -> Response {
     if too_long {
         return disallowed_redirect();
     }
-    let mut builder = Response::builder()
-        .status(StatusCode::FOUND)
-        .header(header::LOCATION, location)
-        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-        .header(header::VARY, "Cookie");
-    for cookie in set_cookies {
-        builder = builder.header(header::SET_COOKIE, cookie);
-    }
-    builder.body(Body::empty()).expect("static redirect")
+    redirect_found_cookies(location, set_cookies)
 }
 
 /// DRF 200 JSON (`Json` renders compact `application/json`).
@@ -459,15 +451,6 @@ pub(crate) fn unsupported_media_type_response(content_type: &str) -> Response {
             "{{\"detail\":\"Unsupported media type \\\"{}\\\" in request.\"}}",
             content_type.replace('\\', "\\\\").replace('"', "\\\"")
         ),
-    )
-        .into_response()
-}
-
-fn server_error() -> Response {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        [(header::CONTENT_TYPE, "application/json")],
-        r#"{"error":"Something went wrong please try again later"}"#,
     )
         .into_response()
 }

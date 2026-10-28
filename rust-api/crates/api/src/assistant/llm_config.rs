@@ -301,7 +301,7 @@ async fn get_config(
         Ok(row) => row,
         Err(_) => return Failure::server_error().into_response(),
     };
-    crate::license::json_response(&serialize_row(row.as_ref()))
+    crate::license::json_response(serialize_row(row.as_ref()))
 }
 
 /// `PUT users/me/ai-assistant/config/` (`llm_config.py:46-74`).
@@ -360,7 +360,7 @@ async fn put_config(
             return Failure::bare_error(StatusCode::BAD_REQUEST, "invalid").into_response()
         }
     };
-    crate::license::json_response(&serialize_row(Some(&saved)))
+    crate::license::json_response(serialize_row(Some(&saved)))
 }
 
 /// `DELETE users/me/ai-assistant/config/` (`llm_config.py:76-78`).
@@ -566,7 +566,7 @@ async fn post_generate_title(
     };
     match state.assistant_seam().generate_title(request).await {
         Ok(title) if !title.is_empty() => {
-            crate::license::json_response(&serde_json::json!({"title": title}))
+            crate::license::json_response(serde_json::json!({"title": title}))
         }
         // `if not title` (`llm_config.py:152`): an empty model reply is
         // the `generation_failed` 502, whatever the provider.

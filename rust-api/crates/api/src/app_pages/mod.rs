@@ -150,6 +150,8 @@ use std::convert::Infallible;
 
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
+use pidash_compat::response::json_response;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 
 // ---------------------------------------------------------------------------
 // Exact bodies
@@ -161,8 +163,6 @@ pub const UNAUTHENTICATED_BODY: &str =
 /// `handle_exception`'s `ObjectDoesNotExist` branch (404): scoped-lookup
 /// misses — unknown/cross-workspace/soft-deleted page or favorite id.
 pub const OBJECT_NOT_FOUND_BODY: &str = r#"{"error":"The required object does not exist."}"#;
-/// `handle_exception`'s generic 500 branch.
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// `Project.resolve` miss (`db/models/project.py:213-217`): verbatim
 /// `Http404` args through DRF's handler (no trailing period).
 pub const PROJECT_NOT_FOUND_BODY: &str = r#"{"detail":"Project not found"}"#;
@@ -301,14 +301,6 @@ impl IntoResponse for Denial {
 
 fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
-}
-
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("json response")
 }
 
 // ---------------------------------------------------------------------------

@@ -55,6 +55,7 @@ use pidash_types::WorkspaceId;
 
 use crate::state::AppState;
 use crate::uuid_path::{classify_uuid_segment, UuidSegment};
+pub use pidash_compat::response::{json_response, SERVER_ERROR_BODY};
 
 /// Owned D-33 app-integration routes (cutover granularity: registered
 /// paths serve from Rust, everything else keeps proxying). Sibling
@@ -76,8 +77,6 @@ pub const UNAUTHENTICATED_BODY: &str =
 /// `handle_exception`'s `ObjectDoesNotExist` branch
 /// (`app/views/base.py`).
 pub const NOT_FOUND_BODY: &str = r#"{"error":"The required object does not exist."}"#;
-/// `handle_exception`'s generic 500 branch.
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// `handle_exception`'s `IntegrityError` branch.
 pub const INVALID_PAYLOAD_BODY: &str = r#"{"error":"The payload is not valid"}"#;
 /// POST duplicate URL (`app/views/webhook/base.py:31-35`).
@@ -136,17 +135,6 @@ impl IntoResponse for Denial {
 
 pub fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
-}
-
-/// Render a `serde_json::Map` built in serializer field order as compact
-/// JSON (`JSONRenderer` default: no spaces; `preserve_order` keeps the
-/// insertion order DRF emits).
-pub fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("json response")
 }
 
 /// Authenticated actor plus time zone (`TimezoneMixin.initial` activates

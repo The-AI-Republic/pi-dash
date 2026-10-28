@@ -127,6 +127,7 @@ use pidash_services::space::queries::project_meta::BOARD_COLUMNS;
 
 use super::{guards_error, owned, QueryMap};
 use crate::paginator::{self, Cursor, PageError, PageResponse};
+use pidash_compat::response::json_ok;
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -1481,15 +1482,6 @@ fn multi_last(multi: &HashMap<String, Vec<String>>, key: &str) -> Option<String>
     multi
         .get(key)
         .and_then(|values| values.iter().last().cloned())
-}
-
-/// Render a 200 JSON response with exact bytes.
-fn json_ok(body: String) -> Response {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("handler json response")
 }
 
 /// Envelope metadata: everything [`PageResponse`] carries besides the

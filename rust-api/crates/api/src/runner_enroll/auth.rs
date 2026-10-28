@@ -78,6 +78,7 @@
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::Response;
 use pidash_auth::jwt::KeyRing;
+pub use pidash_compat::response::server_error;
 use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -209,21 +210,6 @@ pub fn not_authenticated_response(
     builder
         .body(axum::body::Body::from(body))
         .expect("auth denial builds")
-}
-
-/// Unhandled-failure escape (`UnicodeDecodeError` on the header,
-/// `ValidationError` on a non-UUID id, any `sqlx::Error` outside the
-/// best-effort bump): 500. Django renders its HTML error page here; only
-/// the status is contract-pinned, and the body keeps the sibling-handler
-/// JSON text (same position as `crate::runner_runs::SERVER_ERROR_BODY`).
-pub fn server_error() -> Response {
-    Response::builder()
-        .status(StatusCode::INTERNAL_SERVER_ERROR)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(
-            r#"{"error":"Something went wrong please try again later"}"#,
-        ))
-        .expect("server error builds")
 }
 
 // ---------------------------------------------------------------------------

@@ -196,25 +196,11 @@ use serde_json::{Map, Value};
 use sqlx::PgPool;
 
 use crate::state::AppState;
+pub use pidash_compat::response::{json_response, server_error, SERVER_ERROR_BODY};
 
 // ---------------------------------------------------------------------------
 // Shared responses
 // ---------------------------------------------------------------------------
-
-/// Unhandled-failure body (500). Runner views have no custom
-/// `handle_exception`, so Django renders its HTML error page here; only
-/// the status is contract-pinned, and this JSON text keeps the Rust
-/// surface consistent with the sibling handler ports.
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
-
-/// Render a JSON body with the DRF content type.
-pub fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("runner-runs response builds")
-}
 
 /// The request pool, or the 500 when the server runs pool-less
 /// (unreachable in `serve`, which fail-fasts at boot).
@@ -226,14 +212,6 @@ pub fn pool_of(state: &AppState) -> Result<&PgPool, Response> {
             SERVER_ERROR_BODY.to_owned(),
         )),
     }
-}
-
-/// The 500 shortcut for fallible handler paths.
-pub fn server_error() -> Response {
-    json_response(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        SERVER_ERROR_BODY.to_owned(),
-    )
 }
 
 /// DRF `Allow` values (`APIView.default_response_headers`: each view's

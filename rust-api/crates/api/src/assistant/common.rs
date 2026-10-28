@@ -54,6 +54,7 @@ use pidash_services::assistant::ssrf::{is_blocked, SystemResolver};
 use pidash_types::assistant::errors::AssistantError;
 
 use crate::state::AppState;
+pub use pidash_compat::response::{json_response, SERVER_ERROR_BODY};
 
 // ---------------------------------------------------------------------------
 // failure rendering
@@ -1255,12 +1256,6 @@ use crate::middleware::SessionHandle;
 pub const UNAUTHENTICATED_BODY: &str =
     r#"{"detail":"Authentication credentials were not provided."}"#;
 
-/// Generic branch of the app `handle_exception` matrix
-/// (`app/views/base.py:91-95`; same bytes as the license port): unexpected
-/// failures — including the `TypeError`/`AttributeError` a non-string JSON
-/// scalar raises inside the `(value or "")` coercions below — answer 500.
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
-
 /// `ObjectDoesNotExist` branch (`app/views/base.py:79-83`): the
 /// `select_for_update().get(pk)` inside the message-POST transaction raises
 /// this when the thread vanishes between the scope check and the lock.
@@ -1586,15 +1581,6 @@ pub fn pool_ref(state: &AppState) -> HandlerResult<&PgPool> {
         .pools()
         .map(|pools| pools.primary())
         .ok_or_else(server_error)
-}
-
-/// Compact-JSON response with the DRF content type.
-pub fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("handler response builds")
 }
 
 /// The generic-500 envelope (`app/views/base.py:91-95`).

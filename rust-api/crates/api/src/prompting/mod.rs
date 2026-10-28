@@ -112,6 +112,7 @@ use crate::v1_cycles_modules::json::{
     parse_request_bytes_spans, to_serde_publish, JsonFail, JSON_PARSE_PREFIX,
 };
 use pidash_compat::db::is_unique_violation;
+use pidash_compat::response::json_value as json_response;
 use pidash_services::prompting::{composer, context, recipes, registry, validation};
 
 /// `views.py:59`: numeric `WorkspaceMember.role` for the admin role.
@@ -881,16 +882,6 @@ fn ordered_error_detail(error: &str, detail: &str) -> String {
     map.insert("error".to_owned(), Value::String(error.to_owned()));
     map.insert("detail".to_owned(), Value::String(detail.to_owned()));
     serde_json::to_string(&Value::Object(map)).expect("error/detail serializes")
-}
-
-/// Render an exact-JSON response body with its status.
-fn json_response(status: StatusCode, body: &Value) -> Response {
-    let rendered = serde_json::to_string(body).expect("prompting body serializes");
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(rendered))
-        .expect("prompting response")
 }
 
 // ---------------------------------------------------------------------------

@@ -626,7 +626,7 @@ async fn email_credential_check(
         };
         return match stub {
             Some(Ok(())) => {
-                json_response(&serde_json::json!({"message": "Email successfully sent."}))
+                json_response(serde_json::json!({"message": "Email successfully sent."}))
             }
             Some(Err(err)) => Denial::BadError(err.message().to_owned()).into_response(),
             None => Denial::ServerError.into_response(),
@@ -652,7 +652,7 @@ async fn email_credential_check(
     })
     .await
     {
-        Ok(()) => json_response(&serde_json::json!({"message": "Email successfully sent."})),
+        Ok(()) => json_response(serde_json::json!({"message": "Email successfully sent."})),
         Err(err) => Denial::BadError(err.message().to_owned()).into_response(),
     }
 }
@@ -2174,7 +2174,7 @@ async fn workspace_slug_check(
     };
     let restricted = pidash_types::license::serializers_workspace::RESTRICTED_WORKSPACE_SLUGS
         .contains(&slug.as_str());
-    json_response(&serde_json::json!({"status": !(exists || restricted)}))
+    json_response(serde_json::json!({"status": !(exists || restricted)}))
 }
 
 async fn slug_exists(pool: &sqlx::PgPool, slug: &str) -> Result<bool, Denial> {
@@ -2288,7 +2288,7 @@ async fn list_workspaces(
         extra_stats: None,
         results,
     };
-    json_response(&envelope.to_json_value())
+    json_response(envelope.to_json_value())
 }
 
 async fn workspace_total_count(pool: &sqlx::PgPool, search: Option<&str>) -> Result<i64, Denial> {

@@ -97,6 +97,7 @@ use pidash_db::v1_projects::queries_projmem::{self, TenantScope as QueryScope};
 use pidash_types::{ProjectId, WorkspaceId};
 
 use super::perms::{self, V1Route, CLASS_DENIAL_BODY};
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -209,8 +210,6 @@ pub const INVITE_NOT_FOUND_BODY: &str = r#"{"error":"The required object does no
 pub const INVALID_DETAIL_BODY: &str = r#"{"error":"Please provide valid detail"}"#;
 /// `handle_exception` `IntegrityError` (both bases, same text).
 pub const INVALID_PAYLOAD_BODY: &str = r#"{"error":"The payload is not valid"}"#;
-/// The `handle_exception` generic 500 (both bases, same text).
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// The workspace-missing 400 (`views/member.py:77-80,128-132,182-186`).
 pub const NO_WORKSPACE_BODY: &str = r#"{"error":"Provided workspace does not exist"}"#;
 

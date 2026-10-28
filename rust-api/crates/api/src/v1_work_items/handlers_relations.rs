@@ -105,7 +105,7 @@
 use std::collections::HashMap;
 
 use axum::extract::{OriginalUri, Path, Request, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
@@ -133,6 +133,7 @@ use crate::v1_projects::handlers_project::{preamble, project_base_facts, rewrite
 
 use super::perms::{decide, gate_for, V1WorkItemsRoute};
 use pidash_compat::db::is_unique_violation;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 
 // ---------------------------------------------------------------------------
 // Responses
@@ -142,8 +143,6 @@ use pidash_compat::db::is_unique_violation;
 /// (`api/views/base.py:154-158`): every `.get()` miss on these endpoints
 /// (project lookup, `_source`, workpad read/lock).
 pub const RESOURCE_NOT_FOUND_BODY: &str = r#"{"error":"The requested resource does not exist."}"#;
-/// `handle_exception`'s generic branch (`api/views/base.py:166-170`).
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// `handle_exception`'s `IntegrityError` branch
 /// (`api/views/base.py:142-147`): FK violations on the relation create.
 pub const PAYLOAD_NOT_VALID_BODY: &str = r#"{"error":"The payload is not valid"}"#;
@@ -295,14 +294,7 @@ fn json_string(value: &str) -> String {
 /// post-pass escapes U+2028/U+2029 (`rest_framework/renderers.py`); the
 /// `app_project` `escape_u2028` precedent, applied to every JSON body here.
 fn json_response(status: StatusCode, body: String) -> Response {
-    let body = body
-        .replace('\u{2028}', "\\u2028")
-        .replace('\u{2029}', "\\u2029");
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("handler json response")
+    pidash_compat::response::json_response(status, pidash_compat::response::escape_u2028(&body))
 }
 
 /// Render a 201 JSON response with exact bytes.

@@ -93,6 +93,8 @@ use crate::state::AppState;
 use crate::uuid_path::{classify_uuid_segment, UuidSegment};
 use crate::v1_cycles_modules::cycle as cycle_mod;
 use pidash_compat::db::{is_integrity_error, is_unique_violation};
+pub(crate) use pidash_compat::response::json_response;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 use pidash_db::v1_assets::model::sticky::strip_tags_ml;
 
 // ---------------------------------------------------------------------------
@@ -162,8 +164,6 @@ pub const PAGE_NOT_FOUND_BODY: &str = r#"{"error": "Page not found."}"#;
 /// `handle_exception`'s `IntegrityError` branch (`base.py:136-140`): the
 /// triage-creation race (unique `name`+`project`) 400s here.
 pub const PAYLOAD_INVALID_BODY: &str = r#"{"error":"The payload is not valid"}"#;
-/// `handle_exception`'s generic 500 branch.
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// Create pre-check (`views/intake.py:148-149`).
 pub const NAME_REQUIRED_BODY: &str = r#"{"error":"Name is required"}"#;
 /// Create priority allowlist (`views/intake.py:163-169`).
@@ -267,14 +267,6 @@ impl IntoResponse for Denial {
 }
 
 pub(crate) type HandlerResult = Result<Response, Denial>;
-
-pub(crate) fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("view response")
-}
 
 fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("string serializes")

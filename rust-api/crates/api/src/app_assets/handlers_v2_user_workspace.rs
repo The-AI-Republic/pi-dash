@@ -110,6 +110,10 @@ use super::guards;
 use super::quote_filename;
 use crate::state::AppState;
 use crate::uuid_path::{classify_uuid_segment, UuidSegment};
+pub use pidash_compat::response::SERVER_ERROR_BODY;
+use pidash_compat::response::{
+    json_response as raw, json_value as json_status, no_content, server_error,
+};
 
 /// Register the six owned v2 paths. Sibling handler issues merge their own
 /// routers (project/bulk/check/duplicate/downloads, v1); merges keep both
@@ -161,9 +165,6 @@ pub const UNAUTHENTICATED_BODY: &str =
 /// `handle_exception`'s `ObjectDoesNotExist` branch
 /// (`app/views/base.py:129-133`).
 pub const NOT_FOUND_BODY: &str = r#"{"error":"The required object does not exist."}"#;
-/// `handle_exception`'s generic 500 branch (also `ValueError`/`TypeError`
-/// from the unguarded `int(size)`, and any DB error).
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// Resolver 404 for non-UUID `<uuid:asset_id>` segments (global
 /// `handler404`, `pi_dash/urls.py:15`). `JsonResponse` bytes, i.e.
 /// `json.dumps` defaults with the space after the colon.
@@ -174,28 +175,6 @@ pub const PAYLOAD_NOT_VALID_BODY: &str = r#"{"error":"The payload is not valid"}
 /// `allow_permission` fallthrough (`app/permissions/base.py`).
 pub const PERMISSION_DENIED_BODY: &str = r#"{"error":"You don't have the required permissions."}"#;
 
-fn raw(status: StatusCode, body: &'static str) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("static response")
-}
-
-fn json_status(status: StatusCode, body: Value) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(
-            serde_json::to_string(&body).expect("serializable response"),
-        ))
-        .expect("json response")
-}
-
-fn server_error() -> Response {
-    raw(StatusCode::INTERNAL_SERVER_ERROR, SERVER_ERROR_BODY)
-}
-
 /// `.get()` miss envelope: Django `ObjectDoesNotExist` through the base
 /// `handle_exception` (`app/views/base.py:129-133`).
 fn does_not_exist() -> Response {
@@ -204,10 +183,6 @@ fn does_not_exist() -> Response {
 
 fn page_not_found() -> Response {
     raw(StatusCode::NOT_FOUND, PAGE_NOT_FOUND_BODY)
-}
-
-fn no_content() -> Response {
-    StatusCode::NO_CONTENT.into_response()
 }
 
 fn pool(state: &AppState) -> Option<&sqlx::PgPool> {

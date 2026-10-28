@@ -107,6 +107,7 @@ use crate::middleware::SessionHandle;
 use crate::state::AppState;
 use pidash_auth::csrf as csrf_kernel;
 use pidash_auth::session as session_kernel;
+use pidash_compat::response::empty_response_no_content_type;
 
 /// `POST /auth/magic-generate/`.
 pub const APP_GENERATE_PATH: &str = "/auth/magic-generate/";
@@ -204,10 +205,7 @@ fn redirect_302(location: String) -> Response {
 /// the bramched handling): empty body, like the F-08 session layer's
 /// `server_error`.
 fn server_error() -> Response {
-    Response::builder()
-        .status(StatusCode::INTERNAL_SERVER_ERROR)
-        .body(Body::empty())
-        .expect("static 500 response")
+    empty_response_no_content_type(StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 /// Throttle denial: the `auth_exception_handler` rewrite of DRF's

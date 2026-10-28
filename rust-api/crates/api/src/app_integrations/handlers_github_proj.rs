@@ -836,14 +836,14 @@ async fn get_status(
         Err(denial) => return denial.into_response(),
     };
     if let Some(status) = legacy {
-        return json_response(&legacy_body(&status));
+        return json_response(legacy_body(&status));
     }
     let fallback = match fetch_fallback_status(&pool, &project_id, &slug).await {
         Ok(status) => status,
         Err(denial) => return denial.into_response(),
     };
     match fallback {
-        Some(status) => json_response(&fallback_body(&status)),
+        Some(status) => json_response(fallback_body(&status)),
         None => raw_body(StatusCode::OK, UNBOUND_BODY),
     }
 }
@@ -954,7 +954,7 @@ async fn patch_status(
     if sync_id.is_none() && mirrored == 0 {
         return raw_body(StatusCode::NOT_FOUND, NO_BINDING_BODY);
     }
-    json_response(&serde_json::json!({"is_sync_enabled": enabled}))
+    json_response(serde_json::json!({"is_sync_enabled": enabled}))
 }
 
 // ---------------------------------------------------------------------------

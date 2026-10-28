@@ -105,6 +105,9 @@ use crate::serializer::render_datetime_in;
 use crate::state::AppState;
 use crate::uuid_path::is_canonical_uuid;
 use crate::v1_cycles_modules::json::{self, JsonFail};
+use pidash_compat::response::{
+    json_response as json_response_text, json_value as json_response, redirect_found_cookies,
+};
 
 /// Register the seven owned endpoints. Cutover granularity is the
 /// route + method (pilot `owned()` pattern): sibling methods on these
@@ -851,18 +854,6 @@ fn lookup_email(found: BodyField<'_>) -> Result<String, Denial> {
     }
 }
 
-fn json_response(status: StatusCode, body: Value) -> Response {
-    json_response_text(status, body.to_string())
-}
-
-fn json_response_text(status: StatusCode, text: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(text))
-        .expect("json response")
-}
-
 /// Sentinel marking the 201 `role` slot for the echo splice below. NUL
 /// cannot come from Postgres text, and an int-parseable echo literal never
 /// contains one, so the quoted needle is unique in the body.
@@ -1501,17 +1492,7 @@ fn csrf_failure_response(state: &AppState) -> Response {
 /// `Set-Cookie` values the branch issued.
 fn redirect_response(location: &str, set_cookies: Vec<String>) -> Result<Response, Denial> {
     let location = crate::response_headers::header_value(location).ok_or(Denial::ServerError)?;
-    let mut builder = Response::builder()
-        .status(StatusCode::FOUND)
-        .header(header::LOCATION, location)
-        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-        .header(header::VARY, "Cookie");
-    for cookie in set_cookies {
-        builder = builder.header(header::SET_COOKIE, cookie);
-    }
-    Ok(builder
-        .body(axum::body::Body::empty())
-        .expect("static redirect"))
+    Ok(redirect_found_cookies(location, set_cookies))
 }
 
 /// Admin base URL for the redirect targets (`host.py:16-39` through the

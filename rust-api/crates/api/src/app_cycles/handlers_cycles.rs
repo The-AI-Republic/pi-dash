@@ -69,6 +69,8 @@ use crate::middleware::SessionHandle;
 use crate::state::AppState;
 
 use pidash_auth::permissions::allow::AllowFacts;
+use pidash_compat::response::json_response;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -186,8 +188,6 @@ pub const NOT_FOUND_BODY: &str = r#"{"error":"The required object does not exist
 pub const INVALID_DETAIL_BODY: &str = r#"{"error":"Please provide valid detail"}"#;
 /// `handle_exception`'s `IntegrityError` branch.
 pub const INVALID_PAYLOAD_BODY: &str = r#"{"error":"The payload is not valid"}"#;
-/// `handle_exception`'s generic 500 branch.
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// `CycleViewSet.retrieve` miss (`base.py:458-459`).
 pub const CYCLE_NOT_FOUND_BODY: &str = r#"{"error":"Cycle not found"}"#;
 /// `Project.resolve` miss on a non-UUID identifier
@@ -271,14 +271,6 @@ impl IntoResponse for Denial {
             .body(axum::body::Body::from(body))
             .expect("static denial response")
     }
-}
-
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("cycle response")
 }
 
 fn json_string(value: &str) -> String {

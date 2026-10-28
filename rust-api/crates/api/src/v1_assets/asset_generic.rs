@@ -112,6 +112,8 @@ use crate::license::form_body::{select_body_kind, BodyKind};
 use crate::state::AppState;
 use crate::uuid_path::{classify_uuid_segment, UuidSegment};
 use pidash_auth::token as auth_token;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
+use pidash_compat::response::{json_response as raw, json_value as json_body, no_content};
 use pidash_db::v1_assets::asset_queries;
 
 // ---------------------------------------------------------------------------
@@ -139,8 +141,6 @@ pub const POST_WORKSPACE_MISSING_BODY: &str =
 pub const PAYLOAD_NOT_VALID_BODY: &str = r#"{"error":"The payload is not valid"}"#;
 /// `handle_exception` `ValidationError` (`base.py:148-152`).
 pub const INVALID_DETAIL_BODY: &str = r#"{"error":"Please provide valid detail"}"#;
-/// `handle_exception` generic 500 (`base.py:166-171`; `log_exception` + 500).
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// DRF `NotAuthenticated` (`IsAuthenticated` denial on every route here).
 pub const UNAUTHENTICATED_BODY: &str =
     r#"{"detail":"Authentication credentials were not provided."}"#;
@@ -263,24 +263,6 @@ pub fn routes() -> Router<AppState> {
 // Small responders (exact Django bytes)
 // ---------------------------------------------------------------------------
 
-fn raw(status: StatusCode, body: &'static str) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("static response")
-}
-
-fn json_body(status: StatusCode, body: Value) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(
-            serde_json::to_string(&body).expect("serializable response"),
-        ))
-        .expect("json response")
-}
-
 /// GET blanket `except` (`asset.py:461-466`).
 fn get_server_error(error: impl std::fmt::Display) -> Response {
     tracing::warn!(%error, "generic asset GET failed");
@@ -290,11 +272,7 @@ fn get_server_error(error: impl std::fmt::Display) -> Response {
 /// `handle_exception` generic 500 (`base.py:166-171`).
 fn server_error(error: impl std::fmt::Display) -> Response {
     tracing::warn!(%error, "generic asset handler failed");
-    raw(StatusCode::INTERNAL_SERVER_ERROR, SERVER_ERROR_BODY)
-}
-
-fn no_content() -> Response {
-    StatusCode::NO_CONTENT.into_response()
+    pidash_compat::response::server_error()
 }
 
 fn pool(state: &AppState) -> Option<&sqlx::PgPool> {

@@ -105,6 +105,8 @@ use crate::paginator::{self, Cursor, PageResponse};
 use crate::state::AppState;
 use crate::uuid_path::{classify_uuid_segment, UuidSegment};
 use pidash_compat::db::is_unique_violation;
+use pidash_compat::response::json_ok;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 
 /// One `machine_token` auth lookup row: user, workspace, dev-machine, revocation.
 type MachineTokenLookup = Option<(
@@ -279,8 +281,6 @@ pub const INVALID_TOKEN_BODY: &str = r#"{"detail":"Given API token is not valid"
 pub const NOT_FOUND_BODY: &str = r#"{"error":"The requested resource does not exist."}"#;
 /// `handle_exception`'s `IntegrityError` branch (`views/base.py:134-137`).
 pub const INVALID_PAYLOAD_BODY: &str = r#"{"error":"The payload is not valid"}"#;
-/// `handle_exception`'s generic branch (`views/base.py:156-160`).
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 
 /// Handler failure with its exact status + body, mirroring the `handle_exception`
 /// matrix plus the DRF denials these views inherit.
@@ -373,15 +373,6 @@ impl IntoResponse for HandlerError {
 
 fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
-}
-
-/// Render a 200 JSON response with exact bytes (DRF `JSONRenderer`, compact).
-fn json_ok(body: String) -> Response {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("handler json response")
 }
 
 // ---------------------------------------------------------------------------

@@ -87,6 +87,8 @@ use super::gates::{
 };
 use pidash_auth::permissions::allow::AllowFacts;
 use pidash_auth::permissions::{ROLE_ADMIN, ROLE_MEMBER};
+use pidash_compat::response::json_response;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 use pidash_services::app_analytics::queries;
 use pidash_types::WorkspaceId;
 
@@ -173,8 +175,6 @@ pub const OBJECT_NOT_FOUND_BODY: &str = NOT_FOUND_BODY;
 /// DRF `get_object()` miss on the viewset detail routes:
 /// `Http404("No AnalyticView matches the given query.")`.
 pub const VIEW_NOT_FOUND_BODY: &str = r#"{"detail":"No AnalyticView matches the given query."}"#;
-/// `handle_exception`'s generic 500 branch.
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// `handle_exception`'s `ValidationError` branch (bad UUIDs, bad dates).
 pub const INVALID_DETAIL_BODY: &str = r#"{"error":"Please provide valid detail"}"#;
 /// DRF `JSONParser` failure prefix (`rest_framework/parsers.py` raises
@@ -253,15 +253,6 @@ impl IntoResponse for Denial {
         )
             .into_response()
     }
-}
-
-fn json_response(status: StatusCode, body: String) -> Response {
-    (
-        status,
-        [(axum::http::header::CONTENT_TYPE, "application/json")],
-        body,
-    )
-        .into_response()
 }
 
 // ---------------------------------------------------------------------------

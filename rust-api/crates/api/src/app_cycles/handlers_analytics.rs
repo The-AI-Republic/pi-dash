@@ -75,6 +75,8 @@ use crate::middleware::SessionHandle;
 use crate::state::AppState;
 
 use super::gates::{decide_gate, gate_for, tenant_context, GateOutcome, ANON_BODY, FORBIDDEN_BODY};
+use pidash_compat::response::json_response;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -133,9 +135,6 @@ pub const VALIDATION_BODY: &str = r#"{"error":"Please provide valid detail"}"#;
 /// (`db/models/project.py:213-217`) — `_rewrite_project_kwarg`'s
 /// `Http404("Project not found")`.
 pub const PROJECT_NOT_FOUND_BODY: &str = r#"{"detail":"Project not found"}"#;
-/// `handle_exception`'s generic 500 branch — also the missing-cycle
-/// `AttributeError` (B1).
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 
 /// Handler denials with byte-exact bodies.
 pub enum Denial {
@@ -173,15 +172,6 @@ impl IntoResponse for Denial {
         )
             .into_response()
     }
-}
-
-fn json_response(status: StatusCode, body: String) -> Response {
-    (
-        status,
-        [(axum::http::header::CONTENT_TYPE, "application/json")],
-        body,
-    )
-        .into_response()
 }
 
 // ---------------------------------------------------------------------------

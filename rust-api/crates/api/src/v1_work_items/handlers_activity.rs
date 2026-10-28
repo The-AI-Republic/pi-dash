@@ -101,6 +101,7 @@ use super::perms::{
     gate_for, user_has_issue_permission, V1WorkItemsRoute, ATTACHMENT_DELETE_DENIAL_BODY,
     ATTACHMENT_DOWNLOAD_DENIAL_BODY, ATTACHMENT_UPLOAD_DENIAL_BODY,
 };
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 
 // ---------------------------------------------------------------------------
 // Responses
@@ -109,8 +110,6 @@ use super::perms::{
 /// `handle_exception`'s `ObjectDoesNotExist` branch
 /// (`api/views/base.py:156-160`): every `.get()` miss on these endpoints.
 pub const RESOURCE_NOT_FOUND_BODY: &str = r#"{"error":"The requested resource does not exist."}"#;
-/// `handle_exception`'s generic branch (`api/views/base.py:166-170`).
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// Attachment POST nameless/sizeless 400 (`views/issue.py:2339-2343`).
 pub const INVALID_REQUEST_BODY: &str = r#"{"error":"Invalid request.","status":false}"#;
 /// Attachment POST bad-type 400 (`views/issue.py:2347-2351`).
@@ -225,14 +224,7 @@ fn json_string(value: &str) -> String {
 /// post-pass escapes U+2028/U+2029 (`rest_framework/renderers.py`); the
 /// `app_project` `escape_u2028` precedent, applied to every JSON body here.
 fn json_response(status: StatusCode, body: String) -> Response {
-    let body = body
-        .replace('\u{2028}', "\\u2028")
-        .replace('\u{2029}', "\\u2029");
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("handler json response")
+    pidash_compat::response::json_response(status, pidash_compat::response::escape_u2028(&body))
 }
 
 /// Map a database/driver failure to the generic 500 while logging the site

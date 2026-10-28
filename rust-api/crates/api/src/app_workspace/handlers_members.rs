@@ -141,6 +141,8 @@ use super::gates::{
 };
 use pidash_auth::permissions::allow::AllowFacts;
 use pidash_auth::permissions::workspace::WorkspaceFacts;
+use pidash_compat::response::json_response;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 use pidash_services::app_project::ser_member as d25;
 use pidash_services::app_workspace::models_user::user::avatar_url as resolve_avatar_url;
 use pidash_services::app_workspace::queries_membership as qm;
@@ -273,8 +275,6 @@ pub const PAGE_NOT_FOUND_BODY: &str = r#"{"error": "Page not found."}"#;
 /// collisions at save (DRF runs no uniqueness validators for this
 /// serializer, so the database is the only guard).
 pub const INVALID_PAYLOAD_BODY: &str = r#"{"error":"The payload is not valid"}"#;
-/// `handle_exception`'s generic 500 branch — and the last-visited body.
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// Self role change (`member.py:81-85`).
 pub const SELF_ROLE_BODY: &str = r#"{"error":"You cannot update your own role"}"#;
 /// Self remove (`member.py:110-114`).
@@ -357,15 +357,6 @@ impl IntoResponse for Denial {
         )
             .into_response()
     }
-}
-
-fn json_response(status: StatusCode, body: String) -> Response {
-    (
-        status,
-        [(axum::http::header::CONTENT_TYPE, "application/json")],
-        body,
-    )
-        .into_response()
 }
 
 /// DRF `JSONRenderer` post-pass over this project's settings

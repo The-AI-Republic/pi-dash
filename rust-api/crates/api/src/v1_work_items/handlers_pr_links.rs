@@ -76,6 +76,7 @@ use crate::v1_projects::handlers_project::{
     envelope, preamble, project_base_facts, query_last, rewrite_project_id, QueryMap,
 };
 use pidash_compat::db::{is_integrity_error, is_unique_violation};
+use pidash_compat::response::{json_created, json_ok, no_content};
 
 // ---------------------------------------------------------------------------
 // Responses
@@ -95,8 +96,6 @@ pub const NOT_FOUND_BODY: &str = r#"{"error":"The requested resource does not ex
 pub const PROJECT_NOT_FOUND_BODY: &str = r#"{"detail":"Project not found"}"#;
 /// Attach issue probe (`github_pr.py:69`, `git_code_review.py:67`).
 pub const WORK_ITEM_NOT_FOUND_BODY: &str = r#"{"error":"Work item not found."}"#;
-/// `handle_exception`'s generic branch (`api/views/base.py:166-170`).
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// `RequestBodySizeLimitMiddleware` past 5 MiB (the D-26 app-surface
 /// precedent; this module takes the full `Request` for the proxy fallback,
 /// so the limit is enforced here instead of axum's default). Spacing is
@@ -218,33 +217,6 @@ impl From<crate::v1_projects::handlers_project::Denial> for Denial {
 
 fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
-}
-
-/// Render a 200 JSON response with exact bytes.
-fn json_ok(body: String) -> Response {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(axum::http::header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("handler json response")
-}
-
-/// Render a 201 JSON response with exact bytes.
-fn json_created(body: String) -> Response {
-    Response::builder()
-        .status(StatusCode::CREATED)
-        .header(axum::http::header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("handler json response")
-}
-
-/// DRF's 204: empty body with NO content type (Django only sets
-/// `Content-Type` when it renders a body).
-fn no_content() -> Response {
-    Response::builder()
-        .status(StatusCode::NO_CONTENT)
-        .body(axum::body::Body::empty())
-        .expect("handler empty response")
 }
 
 // ---------------------------------------------------------------------------
@@ -2146,6 +2118,7 @@ async fn enqueue_soft_delete(pool: &sqlx::PgPool, model: &str, pk: &uuid::Uuid) 
 // Transports: production `GithubClient` + `GitLabTransport`
 // ---------------------------------------------------------------------------
 
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 use pidash_db::app_integrations::queries_github::{build_app_jwt_claims, normalize_private_key};
 use pidash_db::config::encryption::Keyring;
 use pidash_services::integrations::adapters_github::{

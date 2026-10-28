@@ -97,6 +97,7 @@ use crate::state::AppState;
 
 use pidash_auth::permissions::allow::AllowFacts;
 use pidash_auth::permissions::{ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER};
+use pidash_compat::response::no_content;
 use pidash_services::v1_work_items::python_number_str;
 use pidash_types::WorkspaceId;
 
@@ -756,33 +757,18 @@ fn json_string(value: &str) -> String {
 /// DRF `JSONRenderer.render`: after dumping, `\\u2028`/`\\u2029` are
 /// always escaped (lowercase hex) so the output is a strict JavaScript
 /// subset — `serde_json` emits them raw, so every rendered HTTP body
-/// passes through here.
+/// passes through here. The canonical escape is
+/// `pidash_compat::response::escape_u2028` (OVL-04).
 fn escape_u2028(body: String) -> String {
-    body.replace('\u{2028}', "\\u2028")
-        .replace('\u{2029}', "\\u2029")
-}
-
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("project response")
+    pidash_compat::response::escape_u2028(&body)
 }
 
 fn json_ok(body: String) -> Response {
-    json_response(StatusCode::OK, escape_u2028(body))
+    pidash_compat::response::json_response(StatusCode::OK, escape_u2028(body))
 }
 
 fn json_created(body: String) -> Response {
-    json_response(StatusCode::CREATED, escape_u2028(body))
-}
-
-fn no_content() -> Response {
-    Response::builder()
-        .status(StatusCode::NO_CONTENT)
-        .body(axum::body::Body::empty())
-        .expect("empty 204")
+    pidash_compat::response::json_response(StatusCode::CREATED, escape_u2028(body))
 }
 
 // ---------------------------------------------------------------------------

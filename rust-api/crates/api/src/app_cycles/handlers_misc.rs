@@ -86,6 +86,7 @@ use crate::state::AppState;
 use crate::v1_cycles_modules::body as shared_body;
 use crate::v1_cycles_modules::json::{self, JsonFail};
 use pidash_auth::permissions::allow::AllowFacts;
+pub use pidash_compat::response::{json_ok as raw_json_response, SERVER_ERROR_BODY};
 use pidash_types::WorkspaceId;
 
 // ---------------------------------------------------------------------------
@@ -102,8 +103,6 @@ pub const NOT_FOUND_BODY: &str = r#"{"error":"The required object does not exist
 /// propagated by DRF's exception handler as `NotFound(*exc.args)`
 /// (unresolvable project identifier).
 pub const NOT_FOUND_DETAIL_BODY: &str = r#"{"detail":"Project not found"}"#;
-/// `handle_exception`'s generic 500 branch.
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// `handle_exception`'s `ValidationError` branch
 /// (`app/views/base.py:125-128`).
 pub const INVALID_DETAIL_BODY: &str = r#"{"error":"Please provide valid detail"}"#;
@@ -218,15 +217,6 @@ impl IntoResponse for Denial {
 
 pub fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
-}
-
-/// Render pre-serialized JSON bytes as a 200 response body.
-pub fn raw_json_response(body: String) -> Response {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("json response")
 }
 
 /// Render pre-serialized JSON bytes with an explicit status.

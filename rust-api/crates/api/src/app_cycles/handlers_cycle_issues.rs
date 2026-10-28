@@ -45,7 +45,7 @@
 use std::collections::HashMap;
 
 use axum::extract::{Path, Query, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use axum::Router;
 use serde_json::{Map, Value};
@@ -62,6 +62,7 @@ use crate::state::AppState;
 use crate::v1_cycles_modules::body as shared_body;
 use crate::v1_cycles_modules::json::{self, JsonFail};
 use pidash_auth::permissions::allow::AllowFacts;
+pub(crate) use pidash_compat::response::{empty_response, json_response};
 
 /// `GET` + `POST` on the collection path; `DELETE` on the detail path.
 /// Every other method falls through to Django: the detail
@@ -109,22 +110,6 @@ pub const GROUP_CLASH_MESSAGE: &str = "Group by and sub group by cannot have sam
 // ---------------------------------------------------------------------------
 
 pub(crate) type HandlerResult = Result<Response, Denial>;
-
-pub(crate) fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("view response")
-}
-
-pub(crate) fn empty_response(status: StatusCode) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(Vec::new()))
-        .expect("empty response")
-}
 
 #[cfg(test)]
 fn json_string(value: &str) -> String {

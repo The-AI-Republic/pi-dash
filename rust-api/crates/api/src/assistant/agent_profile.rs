@@ -162,7 +162,7 @@ async fn get_profile(
     };
     json_body(
         StatusCode::OK,
-        &serde_json::json!({
+        serde_json::json!({
             "managed_runner_enabled": enabled,
             "lane": profile.lane,
             "base_url": profile.base_url,
@@ -219,7 +219,7 @@ async fn post_token(
             );
             json_body(
                 StatusCode::OK,
-                &serde_json::json!({"token": token, "expires_at": expires_at}),
+                serde_json::json!({"token": token, "expires_at": expires_at}),
             )
         }
         Err(CredentialError::Unavailable(unavailable)) => {
@@ -235,7 +235,7 @@ async fn post_token(
             };
             error_response(
                 StatusCode::CONFLICT,
-                &serde_json::json!({
+                serde_json::json!({
                     "error": reason,
                     "detail": detail,
                 }),
@@ -252,7 +252,7 @@ async fn post_token(
                 "managed_runner.token_refresh_failed"
             );
             let status = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-            error_response(status, &serde_json::json!({ "error": code }))
+            error_response(status, serde_json::json!({ "error": code }))
         }
     }
 }

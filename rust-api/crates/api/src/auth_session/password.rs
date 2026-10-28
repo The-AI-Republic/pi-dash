@@ -69,6 +69,7 @@ use pidash_services::auth_session::{password as pw, tasks as t, MAX_URL_REDIRECT
 use crate::auth_session::render::disallowed_redirect;
 use crate::auth_session::throttle_ident;
 use crate::state::AppState;
+use pidash_compat::response::{empty_response_no_content_type, json_response};
 
 /// Register the seven password/CSRF routes. Nothing else: sibling paths
 /// stay unmatched and proxy to Django.
@@ -134,14 +135,6 @@ fn owned_post(
 // ---------------------------------------------------------------------------
 // Responses (exact bytes)
 // ---------------------------------------------------------------------------
-
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("password response")
-}
 
 fn json_400(pairs: &[(String, Value)]) -> Response {
     json_response(
@@ -212,10 +205,7 @@ fn throttled(wait: Option<f64>) -> Response {
 /// Empty 500. Django's production 500 page is deployment-specific HTML;
 /// only the status is contractual here (the 500 vectors assert status).
 fn server_error() -> Response {
-    Response::builder()
-        .status(StatusCode::INTERNAL_SERVER_ERROR)
-        .body(axum::body::Body::empty())
-        .expect("static 500 response")
+    empty_response_no_content_type(StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 /// Custom `csrf_failure` page (`common.py:38-44`): `render()` with the

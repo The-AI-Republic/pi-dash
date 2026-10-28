@@ -95,7 +95,7 @@
 use std::collections::HashMap;
 
 use axum::extract::{OriginalUri, Path, Query, Request, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc, Weekday};
 use chrono_tz::Tz;
@@ -121,6 +121,7 @@ use pidash_services::v1_work_items::{filter_fields, python_number_str, FieldSpec
 use crate::state::AppState;
 
 use super::perms::{decide, gate_for, V1WorkItemsRoute};
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 
 // ---------------------------------------------------------------------------
 // Responses
@@ -129,8 +130,6 @@ use super::perms::{decide, gate_for, V1WorkItemsRoute};
 /// `handle_exception`'s `ObjectDoesNotExist` branch
 /// (`api/views/base.py:154-158`): every `.get()` miss on these endpoints.
 pub const RESOURCE_NOT_FOUND_BODY: &str = r#"{"error":"The requested resource does not exist."}"#;
-/// `handle_exception`'s generic branch (`api/views/base.py:166-170`).
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// `handle_exception`'s `IntegrityError` branch
 /// (`api/views/base.py:142-147`): FK violations on the `created_by`
 /// override saves.
@@ -241,14 +240,7 @@ fn json_string(value: &str) -> String {
 /// post-pass escapes U+2028/U+2029 (`rest_framework/renderers.py`); the
 /// `app_project` `escape_u2028` precedent, applied to every JSON body here.
 fn json_response(status: StatusCode, body: String) -> Response {
-    let body = body
-        .replace('\u{2028}', "\\u2028")
-        .replace('\u{2029}', "\\u2029");
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("handler json response")
+    pidash_compat::response::json_response(status, pidash_compat::response::escape_u2028(&body))
 }
 
 /// Render a 201 JSON response with exact bytes.

@@ -11,3 +11,4 @@
 //! byte-identically after migration.
 
 pub mod db;
+pub mod response;

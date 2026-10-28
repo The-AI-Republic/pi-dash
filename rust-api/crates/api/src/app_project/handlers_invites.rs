@@ -117,6 +117,7 @@ use pidash_auth::permissions::allow::AllowFacts;
 use pidash_auth::permissions::project::ProjectFacts;
 use pidash_auth::permissions::{ROLE_ADMIN, ROLE_MEMBER};
 use pidash_compat::db::is_integrity_error;
+use pidash_compat::response::{empty_response, json_response};
 use pidash_services::app_project::ser_member::{
     invite_to_representation, project_lite_to_representation, resolve_project_cover_image_url,
     resolve_workspace_logo_url, workspace_lite_to_representation, ProjectLiteRow,
@@ -323,22 +324,6 @@ impl IntoResponse for Denial {
             .body(axum::body::Body::from(body))
             .expect("static denial response")
     }
-}
-
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("invite response")
-}
-
-fn empty_response(status: StatusCode) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::empty())
-        .expect("empty invite response")
 }
 
 fn json_string(value: &str) -> String {

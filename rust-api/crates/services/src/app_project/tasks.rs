@@ -72,6 +72,7 @@
 
 use base64::Engine as _;
 use hmac::{Hmac, KeyInit, Mac};
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 use serde_json::{Map, Value};
 use sha2::Sha256;
 
@@ -629,9 +630,6 @@ pub const VALIDATION_ERROR_BODY: &str = r#"{"error":"Please provide valid detail
 pub const OBJECT_NOT_FOUND_BODY: &str = r#"{"error":"The required object does not exist."}"#;
 /// `handle_exception`'s `KeyError` branch: 400.
 pub const KEY_ERROR_BODY: &str = r#"{"error":"The required key does not exist."}"#;
-/// `handle_exception`'s generic branch: 500. Also the invite-create and
-/// favorites-list bodies.
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 
 /// The invite-create outcome (`invite.py:54-111`): `:62` raises
 /// `AttributeError` first on every non-empty create (before `bulk_create`,

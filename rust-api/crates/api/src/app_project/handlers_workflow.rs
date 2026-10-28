@@ -97,6 +97,7 @@ use crate::serializer::render_datetime_in;
 use crate::state::AppState;
 
 use super::gates;
+use pidash_compat::response::{empty_response, json_response};
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -317,24 +318,12 @@ fn db_denial(error: sqlx::Error) -> Denial {
     Denial::ServerError
 }
 
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("view response")
-}
-
 fn json_ok(body: String) -> Response {
     json_response(StatusCode::OK, body)
 }
 
 fn no_content() -> Response {
-    Response::builder()
-        .status(StatusCode::NO_CONTENT)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(Vec::new()))
-        .expect("empty 204")
+    empty_response(StatusCode::NO_CONTENT)
 }
 
 // ---------------------------------------------------------------------------

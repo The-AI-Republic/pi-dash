@@ -50,6 +50,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::state::AppState;
+pub use pidash_compat::response::{json_ok as raw_json_response, SERVER_ERROR_BODY};
 
 /// Exact bytes of the DRF `IsAuthenticated` denial.
 pub const UNAUTHENTICATED_BODY: &str =
@@ -57,8 +58,6 @@ pub const UNAUTHENTICATED_BODY: &str =
 /// `handle_exception`'s `ObjectDoesNotExist` branch
 /// (`app/views/base.py:129-133`).
 pub const NOT_FOUND_BODY: &str = r#"{"error":"The required object does not exist."}"#;
-/// `handle_exception`'s generic 500 branch.
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// `handle_exception`'s `ValidationError` branch
 /// (`app/views/base.py:125-128`).
 pub const INVALID_DETAIL_BODY: &str = r#"{"error":"Please provide valid detail"}"#;
@@ -200,15 +199,6 @@ pub fn guards_error(error: pidash_services::app_intake::permissions::ErrorBody) 
             serde_json::to_string(&error.body).expect("serializable guard body"),
         ))
         .expect("guard denial response")
-}
-
-/// Render pre-serialized JSON bytes as the response body.
-pub fn raw_json_response(body: String) -> Response {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("json response")
 }
 
 /// `json.dumps` with CPython defaults (`, ` / `: ` separators): the task

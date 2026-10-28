@@ -144,6 +144,8 @@ use super::permissions as v1_perm;
 use crate::assistant::common::py_repr;
 use crate::license::form_body::{self, BodyFail, BodyKind};
 use crate::state::AppState;
+pub(crate) use pidash_compat::response::json_response;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -205,8 +207,6 @@ pub const STICKY_NOT_FOUND_BODY: &str = r#"{"detail":"No Sticky matches the give
 /// UUID `ValidationError` to a bare `Http404`, so DRF renders its
 /// default `NotFound` detail.
 pub const NOT_FOUND_DETAIL_BODY: &str = r#"{"detail":"Not found."}"#;
-/// `handle_exception`'s generic 500 branch.
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 
 /// Handler failure with its exact status + body.
 #[derive(Debug)]
@@ -281,14 +281,6 @@ impl IntoResponse for Denial {
 }
 
 pub(crate) type HandlerResult = Result<Response, Denial>;
-
-pub(crate) fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("view response")
-}
 
 fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("string serializes")

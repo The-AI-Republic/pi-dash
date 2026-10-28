@@ -95,6 +95,7 @@ use crate::v1_cycles_modules::json::{
     parse_request_data, to_serde_publish, JsonFail, JSON_PARSE_PREFIX,
 };
 
+use pidash_compat::response::{json_created, json_ok, no_content};
 use pidash_db::redis::RedisHandle;
 use pidash_services::app_issues::serializers_label::{
     app_label_to_representation, AppLabelRow, LABEL_NAME_CONFLICT_BODY,
@@ -2115,22 +2116,6 @@ fn is_integrity_violation(error: &sqlx::Error) -> bool {
 
 // ---- responses -----------------------------------------------------------------
 
-fn json_ok(body: String) -> Response {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("json response")
-}
-
-fn json_created(body: String) -> Response {
-    Response::builder()
-        .status(StatusCode::CREATED)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("created response")
-}
-
 fn json_bad_request(body: &str) -> Response {
     Response::builder()
         .status(StatusCode::BAD_REQUEST)
@@ -2145,14 +2130,6 @@ fn json_not_found(body: &str) -> Response {
         .header(header::CONTENT_TYPE, "application/json")
         .body(axum::body::Body::from(body.to_owned()))
         .expect("not-found response")
-}
-
-fn no_content() -> Response {
-    // Probed: DRF's empty 204 carries no content type.
-    Response::builder()
-        .status(StatusCode::NO_CONTENT)
-        .body(axum::body::Body::empty())
-        .expect("no-content response")
 }
 
 fn redirect(location: String) -> Response {

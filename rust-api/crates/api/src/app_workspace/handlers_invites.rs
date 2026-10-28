@@ -86,7 +86,7 @@
 use std::collections::HashMap;
 
 use axum::extract::{Path, Request, State};
-use axum::http::{header, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
@@ -106,6 +106,8 @@ use super::gates;
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
 use pidash_compat::db::is_integrity_error;
+use pidash_compat::response::json_response;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 
 // ---------------------------------------------------------------------------
 // Exact bodies
@@ -151,8 +153,6 @@ pub const INVALID_PAYLOAD_BODY: &str = r#"{"error":"The payload is not valid"}"#
 /// `handle_exception`'s `ValidationError` branch (400, `app/views/base.py:226-230`):
 /// unparseable UUIDs in the accept list.
 pub const VALID_DETAIL_BODY: &str = r#"{"error":"Please provide valid detail"}"#;
-/// `handle_exception`'s fallthrough (500, `app/views/base.py:244-248`).
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// Malformed-JSON 400 (`app_pages` precedent: DRF's `ParseError` prefix;
 /// the `serde_json` suffix is backend-specific and not ported).
 const JSON_PARSE_ERROR: &str = "JSON parse error";
@@ -220,14 +220,6 @@ fn message_envelope(message: &str) -> Value {
     let mut body = Map::new();
     body.insert("message".to_owned(), Value::String(message.to_owned()));
     Value::Object(body)
-}
-
-fn json_response(status: StatusCode, body: &str) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body.to_owned()))
-        .expect("invites-handler response")
 }
 
 impl IntoResponse for Denial {
