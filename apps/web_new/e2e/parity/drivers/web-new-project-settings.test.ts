@@ -456,7 +456,21 @@ describe("WebNewDriver settings shell sockets", () => {
         handler(socketDouble("ws://localhost:18006/ws/live/?token=app"));
       }
     });
-    const count = await new WebNewDriver(stub.page).settingsShellCountSockets(["", "/members"], "acme", "p1");
+    // Each tab's settle rests two seconds before it counts; that rest is what
+    // the case is about, so it runs on a fake clock here.
+    let clock = 0;
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    vi.setSystemTime(0);
+    stub.pageObject.waitForTimeout.mockImplementation(async (ms: number) => {
+      clock += ms;
+      vi.setSystemTime(clock);
+    });
+    let count: number;
+    try {
+      count = await new WebNewDriver(stub.page).settingsShellCountSockets(["", "/members"], "acme", "p1");
+    } finally {
+      vi.useRealTimers();
+    }
     // Two HMR sockets ignored; both app sockets counted even though one
     // carries its own token query (only the root-path HMR shape filters).
     expect(count).toBe(2);
@@ -1428,7 +1442,18 @@ describe("WebNewDriver states tab rows", () => {
       },
     });
     const driver = new WebNewDriver(stub.page);
-    await expect(driver.settingsStatesDragBelow("one", "two")).rejects.toThrow();
+    // The row never reports dragging, so the driver's five-second ignite poll
+    // runs out; that budget is virtual here. The rejection is expected before
+    // the clock moves, so a poll that settles during the advance is never an
+    // unhandled rejection.
+    vi.useFakeTimers();
+    try {
+      const dragging = expect(driver.settingsStatesDragBelow("one", "two")).rejects.toThrow();
+      await vi.advanceTimersByTimeAsync(5_000);
+      await dragging;
+    } finally {
+      vi.useRealTimers();
+    }
     expect(stub.pageObject.mouse.up).toHaveBeenCalledTimes(1);
   });
 

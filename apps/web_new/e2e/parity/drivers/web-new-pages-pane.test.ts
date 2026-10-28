@@ -219,6 +219,34 @@ function paneOf(options: LocatorOptions = {}): Locator {
   });
 }
 
+/**
+ * Run a driver call whose image-removal poll budgets real seconds, with those
+ * budgets virtual: the poll's two-second wait per attempt is time the case is
+ * asserting about, not time it has to spend. The call is started after the
+ * fake clock is installed, so it never arms a real timer.
+ */
+async function withVirtualTime<T>(work: () => Promise<T>): Promise<T> {
+  vi.useFakeTimers();
+  try {
+    let outcome: { ok: true; value: T } | { ok: false; error: unknown } | undefined;
+    const settled = work().then(
+      (value) => {
+        outcome = { ok: true, value };
+      },
+      (error: unknown) => {
+        outcome = { ok: false, error };
+      }
+    );
+    await vi.runAllTimersAsync();
+    await settled;
+    if (outcome === undefined) throw new Error("driver call never settled");
+    if (!outcome.ok) throw outcome.error;
+    return outcome.value;
+  } finally {
+    vi.useRealTimers();
+  }
+}
+
 describe("detail navigation", () => {
   it("opens a detail and waits for the body and the live editor", async () => {
     const editor = fake();
@@ -469,7 +497,7 @@ describe("editor reads and writes", () => {
       presses += 1;
     });
 
-    await new WebNewDriver(stub.page).pagesPaneEditorDeleteImage();
+    await withVirtualTime(() => new WebNewDriver(stub.page).pagesPaneEditorDeleteImage());
 
     expect(block.click).toHaveBeenCalledTimes(2);
     expect(presses).toBe(2);
@@ -481,7 +509,7 @@ describe("editor reads and writes", () => {
       selectors: { [BODY_SELECTOR]: bodyOf(editorOf(), { "image-component": block.asLocator() }) },
     });
 
-    await expect(new WebNewDriver(stub.page).pagesPaneEditorDeleteImage()).rejects.toThrow(
+    await expect(withVirtualTime(() => new WebNewDriver(stub.page).pagesPaneEditorDeleteImage())).rejects.toThrow(
       "survived three delete attempts"
     );
     expect(block.click).toHaveBeenCalledTimes(3);

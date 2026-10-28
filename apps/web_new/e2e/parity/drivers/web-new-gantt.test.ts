@@ -1181,23 +1181,38 @@ describe("gantt driver route delays", () => {
 
   it("continues the delayed issue read and unroutes it afterwards", async () => {
     const { handler, pending } = await installedHandler((driver) => driver.ganttLoadingObservedOnReload());
-    // The stub delays the read briefly; the route continues once it runs.
+    // The stub delays the read briefly; the route continues once it runs. The
+    // delay is virtual, so the case spends no real seconds on it. Only the
+    // timer functions are faked: the polling loop's deadline reads the
+    // Date.now spy installed by installedHandler, which a faked Date would
+    // freeze into an endless loop.
     const cont = vi.fn(async () => undefined);
-    const routed = handler()({ continue: cont });
-    await vi.waitFor(() => expect(cont).toHaveBeenCalledTimes(1), { timeout: 5_000 });
-    await routed;
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const routed = handler()({ continue: cont });
+      await vi.advanceTimersByTimeAsync(2_500);
+      await routed;
+      expect(cont).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
     await expect(pending).resolves.toBe(false);
   }, 15_000);
 
   it("survives a failed route continue and still unroutes", async () => {
     const { handler, pending } = await installedHandler((driver) => driver.ganttLoadingObservedOnReload());
-    await expect(
-      handler()({
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const routed = handler()({
         continue: async () => {
           throw new Error("gone");
         },
-      })
-    ).resolves.toBeUndefined();
+      });
+      await vi.advanceTimersByTimeAsync(2_500);
+      await expect(routed).resolves.toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
     await expect(pending).resolves.toBe(false);
   }, 10_000);
 
@@ -1242,7 +1257,14 @@ describe("gantt driver route delays", () => {
     await expect(driver.ganttLoadMoreObservedOnScroll()).resolves.toBe(false);
     expect(handler).not.toBeNull();
     const cont = vi.fn(async () => undefined);
-    await handler!({ continue: cont });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const routed = handler!({ continue: cont });
+      await vi.advanceTimersByTimeAsync(2_500);
+      await routed;
+    } finally {
+      vi.useRealTimers();
+    }
     expect(cont).toHaveBeenCalledTimes(1);
     // A failed scroll is swallowed, so the loop keeps polling.
     expect(scrolled).toBeGreaterThan(0);

@@ -428,12 +428,28 @@ describe("project settings members read driver", () => {
   it("opens the members address and leaves the roster to the caller", async () => {
     const goto = vi.fn(async () => null);
     // The settle loop reads the denial/shell state through evaluate; report
-    // the settled shell right away.
-    const page = pageOf({ goto, evaluate: async () => "shell" });
-    const driver = new WebNewDriver(page);
-    await driver.settingsMembersOpen("acme", "project-1");
-    expect(goto).toHaveBeenCalledWith("/acme/settings/projects/project-1/members/");
-    expect(page.waitForLoadState).toHaveBeenCalledWith("domcontentloaded");
+    // the settled shell right away. It rests two seconds before it counts as
+    // settled, which is time the assertion is about, so it is spent on a fake
+    // clock here: every poll step jumps the clock past the rest window.
+    let clock = 0;
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    vi.setSystemTime(0);
+    try {
+      const page = pageOf({
+        goto,
+        evaluate: async () => "shell",
+        waitForTimeout: async (ms: number) => {
+          clock += ms;
+          vi.setSystemTime(clock);
+        },
+      });
+      const driver = new WebNewDriver(page);
+      await driver.settingsMembersOpen("acme", "project-1");
+      expect(goto).toHaveBeenCalledWith("/acme/settings/projects/project-1/members/");
+      expect(page.waitForLoadState).toHaveBeenCalledWith("domcontentloaded");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("reads the denial view and the no-match note through their test ids", async () => {
