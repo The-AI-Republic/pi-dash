@@ -4,6 +4,7 @@
 // See the LICENSE file for details.
 // The list body: the hero slot leads, upcoming and completed groups
 // carry their counts and collapse independently, search narrows live,
+// the filter predicate reaches the hero slot with the groups,
 // narrowing to zero falls to the no-match view for the cause, and the
 // peeked cycle renders the quick look over the list.
 
@@ -35,24 +36,30 @@ interface HeroProbeProps {
   canMutate: boolean;
   onPeek: (cycleId: string) => void;
   currentProject: { id: string; name: string; identifier: string };
+  cycleFilter?: ((cycle: CycleRowData) => boolean) | undefined;
 }
 
+const heroSeen = vi.hoisted(() => ({ cycleFilter: undefined as unknown }));
+
 vi.mock("./ActiveCycleHero.js", () => ({
-  ActiveCycleHero: (props: HeroProbeProps) => (
-    <div
-      data-testid="default-hero"
-      data-workspace={props.workspaceSlug}
-      data-project={props.projectId}
-      data-timezone={props.projectTimeZone}
-      data-can-mutate={String(props.canMutate)}
-      data-current-project={JSON.stringify(props.currentProject)}
-      data-directory={JSON.stringify([...props.directory.keys()])}
-    >
-      <button type="button" onClick={() => props.onPeek("323e4567-e89b-12d3-a456-426614174101")}>
-        peek the hero row
-      </button>
-    </div>
-  ),
+  ActiveCycleHero: (props: HeroProbeProps) => {
+    heroSeen.cycleFilter = props.cycleFilter;
+    return (
+      <div
+        data-testid="default-hero"
+        data-workspace={props.workspaceSlug}
+        data-project={props.projectId}
+        data-timezone={props.projectTimeZone}
+        data-can-mutate={String(props.canMutate)}
+        data-current-project={JSON.stringify(props.currentProject)}
+        data-directory={JSON.stringify([...props.directory.keys()])}
+      >
+        <button type="button" onClick={() => props.onPeek("323e4567-e89b-12d3-a456-426614174101")}>
+          peek the hero row
+        </button>
+      </div>
+    );
+  },
 }));
 
 const CURRENT_ID = "323e4567-e89b-12d3-a456-426614174101";
@@ -103,6 +110,7 @@ function seedCycles(): CycleRowData[] {
 
 beforeEach(() => {
   document.body.innerHTML = `<div id="${FULL_SCREEN_PORTAL_ID}"></div>`;
+  heroSeen.cycleFilter = undefined;
   harness = {
     cycles: seedCycles(),
     roles: { [CYCLES_PROJECT_ID]: 20 },
@@ -261,6 +269,13 @@ describe("CyclesListBody", () => {
     expect(await screen.findByText("November push")).toBeInTheDocument();
     expect(screen.queryByText("Draft cycle")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Upcoming cycle 1" })).toBeInTheDocument();
+  });
+
+  it("hands the filter predicate to the default hero slot", async () => {
+    const predicate = (cycle: CycleRowData): boolean => cycle.status !== "draft";
+    renderBody({ cycleFilter: predicate });
+    expect(await screen.findByTestId("default-hero")).toBeInTheDocument();
+    expect(heroSeen.cycleFilter).toBe(predicate);
   });
 
   it("opens the peek from the eye and closes it back to the list", async () => {

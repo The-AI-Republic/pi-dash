@@ -7,11 +7,12 @@
 // cards. Group and entry clicks filter the cycle view through the
 // shared breakdown write; the burn-down and breakdown share one
 // measure. With no cycle covering today the panel becomes the empty
-// view. The hero reads the unfiltered current cycle, so search and
-// filters narrow the groups below without touching it.
+// view. The list's filters narrow the hero with the groups: when the
+// current cycle fails the predicate the panel becomes the empty view.
+// Search narrows the groups below without touching the hero.
 
 import { useQuery } from "@tanstack/react-query";
-import { selectActiveEstimate } from "@pidash/api-client";
+import { selectActiveEstimate, type CycleRow as CycleRowData } from "@pidash/api-client";
 import { ChevronDown } from "lucide-react";
 import * as React from "react";
 
@@ -46,6 +47,8 @@ export interface ActiveCycleHeroProps {
   onPeek: (cycleId: string) => void;
   /** The project in the address: the empty view's creation label. */
   currentProject: CycleProjectRef;
+  /** List-body row predicate; a rejected hero cycle falls to the empty view. */
+  cycleFilter?: ((cycle: CycleRowData) => boolean) | undefined;
 }
 
 export function ActiveCycleHero({
@@ -56,17 +59,19 @@ export function ActiveCycleHero({
   canMutate,
   onPeek,
   currentProject,
+  cycleFilter,
 }: ActiveCycleHeroProps): React.ReactElement {
   const hero = useQuery(heroQueryOptions(getAppClient(), workspaceSlug, projectId));
   const project = useProjectRow(workspaceSlug, projectId);
   const [expanded, setExpanded] = React.useState(true);
   const [measure, setMeasure] = React.useState<HeroMeasure>("issues");
   const current = hero.data?.[0];
-  const breakdown = useApplyBreakdownFilter({ workspaceSlug, projectId, cycleId: current?.id ?? "" });
+  const shown = current !== undefined && (cycleFilter === undefined || cycleFilter(current)) ? current : undefined;
+  const breakdown = useApplyBreakdownFilter({ workspaceSlug, projectId, cycleId: shown?.id ?? "" });
   const estimatesEnabled = project.data?.estimate !== null && project.data?.estimate !== undefined;
   const progress = useQuery({
-    ...heroProgressQueryOptions(getAppClient(), workspaceSlug, projectId, current?.id ?? ""),
-    enabled: current !== undefined,
+    ...heroProgressQueryOptions(getAppClient(), workspaceSlug, projectId, shown?.id ?? ""),
+    enabled: shown !== undefined,
   });
   const pointData = (progress.data?.total_estimate_points ?? 0) > 0;
   // The family decides whether categories hide the switch, so it is
@@ -102,7 +107,7 @@ export function ActiveCycleHero({
       );
     } else if (hero.isError) {
       panel = null;
-    } else if (current === undefined) {
+    } else if (shown === undefined) {
       panel = (
         <NoActiveCycle
           workspaceSlug={workspaceSlug}
@@ -117,7 +122,7 @@ export function ActiveCycleHero({
           <CycleRow
             workspaceSlug={workspaceSlug}
             projectId={projectId}
-            cycle={current}
+            cycle={shown}
             projectTimeZone={projectTimeZone}
             directory={directory}
             showFavoriteMarker={canMutate}
@@ -129,16 +134,16 @@ export function ActiveCycleHero({
             <HeroProgressCard
               workspaceSlug={workspaceSlug}
               projectId={projectId}
-              cycleId={current.id}
+              cycleId={shown.id}
               onGroupClick={onGroupClick}
               disabled={breakdown.pending}
             />
             <HeroBurndownCard
               workspaceSlug={workspaceSlug}
               projectId={projectId}
-              cycleId={current.id}
-              startDate={current.start_date}
-              endDate={current.end_date}
+              cycleId={shown.id}
+              startDate={shown.start_date}
+              endDate={shown.end_date}
               measure={activeMeasure}
               estimatesEnabled={estimatesEnabled}
               estimateType={estimateType}
@@ -147,7 +152,7 @@ export function ActiveCycleHero({
             <HeroBreakdownCard
               workspaceSlug={workspaceSlug}
               projectId={projectId}
-              cycleId={current.id}
+              cycleId={shown.id}
               measure={activeMeasure}
               onEntryClick={onEntryClick}
               disabled={breakdown.pending}
@@ -169,7 +174,7 @@ export function ActiveCycleHero({
         <ChevronDown size={16} strokeWidth={1.5} aria-hidden="true" className={expanded ? undefined : "-rotate-90"} />
         <span className="text-emphasis text-(--text)">{ACTIVE_CYCLE_HEADING}</span>
         <span data-testid="cycle-hero-count" className="text-caption text-(--text-muted)">
-          {current === undefined ? 0 : 1}
+          {shown === undefined ? 0 : 1}
         </span>
       </button>
       {panel}
