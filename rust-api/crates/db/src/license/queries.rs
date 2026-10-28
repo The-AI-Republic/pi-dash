@@ -982,7 +982,7 @@ mod tests {
     #[test]
     fn instance_setup_sql_shapes_byte_identical() {
         // Pinned against the overlay builders these replace
-        // (`cloud-db/src/auth/queries.rs::update_instance_setup_sql`):
+        // (`cloud-db/src/auth/queries.rs::update_instance_setup`):
         // same text, same placeholder numbering, no `updated_at`.
         assert_eq!(
             UPDATE_INSTANCE_SETUP_BOTH_SQL,
@@ -1014,7 +1014,7 @@ mod tests {
     #[test]
     fn soft_delete_configs_sql_byte_identical() {
         // Pinned against the overlay builder this replaces
-        // (`cloud-db/src/auth/queries.rs::soft_delete_configs_sql`): the
+        // (`cloud-db/src/auth/queries.rs::soft_delete_configs_by_keys`): the
         // `CAST`, the bare `WHERE` conjunction and the `$2..` key
         // numbering are its sea-query rendering, kept verbatim.
         assert_eq!(
