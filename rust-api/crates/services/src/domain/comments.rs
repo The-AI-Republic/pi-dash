@@ -18,7 +18,7 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use sea_orm::{ActiveModelTrait, ActiveValue};
+use sea_orm::{ActiveModelTrait, ActiveValue, ConnectionTrait, DbBackend, Statement};
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
@@ -419,25 +419,56 @@ pub async fn update(
                 .map_err(DomainError::Db)?;
             }
             Some(id) => {
-                let mut sync = descriptions::ActiveModel {
-                    id: ActiveValue::Unchanged(id),
-                    updated_at: ActiveValue::Set(input.updated_at.into()),
-                    updated_by_id: ActiveValue::Set(Some(actor)),
-                    ..Default::default()
-                };
+                // `Description.objects.filter(pk).update(...)`
+                // (`issue.py:640-642`): raw statements, not an entity
+                // `.update()` — that would fire
+                // `descriptions::before_save` and recompute
+                // `description_stripped` (Django flavor), where Django
+                // stores the comment's own ML-flavored value verbatim.
                 // Only the changed subset (`issue.py:630-639`) — an
                 // unchanged field keeps the description row's own value,
                 // even when the link just moved to another row.
                 if html_changed {
-                    sync.description_html = ActiveValue::Set(html.clone());
+                    db.execute(Statement::from_sql_and_values(
+                        DbBackend::Postgres,
+                        SYNC_DESCRIPTION_HTML_SQL,
+                        [sea_orm::Value::from(id), sea_orm::Value::from(html.clone())],
+                    ))
+                    .await
+                    .map_err(DomainError::Db)?;
                 }
                 if stripped_changed {
-                    sync.description_stripped = ActiveValue::Set(Some(stripped_now.clone()));
+                    db.execute(Statement::from_sql_and_values(
+                        DbBackend::Postgres,
+                        SYNC_DESCRIPTION_STRIPPED_SQL,
+                        [
+                            sea_orm::Value::from(id),
+                            sea_orm::Value::from(stripped_now.clone()),
+                        ],
+                    ))
+                    .await
+                    .map_err(DomainError::Db)?;
                 }
                 if json_changed {
-                    sync.description_json = ActiveValue::Set(json.clone());
+                    db.execute(Statement::from_sql_and_values(
+                        DbBackend::Postgres,
+                        SYNC_DESCRIPTION_JSON_SQL,
+                        [sea_orm::Value::from(id), sea_orm::Value::from(json.clone())],
+                    ))
+                    .await
+                    .map_err(DomainError::Db)?;
                 }
-                sync.update(&db).await.map_err(DomainError::Db)?;
+                db.execute(Statement::from_sql_and_values(
+                    DbBackend::Postgres,
+                    SYNC_DESCRIPTION_TOUCH_SQL,
+                    [
+                        sea_orm::Value::from(id),
+                        sea_orm::Value::from(actor),
+                        sea_orm::Value::from(input.updated_at),
+                    ],
+                ))
+                .await
+                .map_err(DomainError::Db)?;
             }
         }
     }
@@ -803,6 +834,15 @@ where
 const SYNC_DESCRIPTION_TOUCH_SQL: &str =
     "UPDATE descriptions SET updated_by_id = $2, updated_at = $3 WHERE id = $1";
 
+const SYNC_DESCRIPTION_HTML_SQL: &str =
+    "UPDATE descriptions SET description_html = $2 WHERE id = $1";
+
+const SYNC_DESCRIPTION_STRIPPED_SQL: &str =
+    "UPDATE descriptions SET description_stripped = $2 WHERE id = $1";
+
+const SYNC_DESCRIPTION_JSON_SQL: &str =
+    "UPDATE descriptions SET description_json = $2 WHERE id = $1";
+
 /// The changed-subset description sync (`issue.py:630-639`), one
 /// single-column `UPDATE` per changed field (statement count is
 /// unobservable; rows match Django's one multi-column `UPDATE`). The
@@ -816,7 +856,7 @@ pub async fn sync_description_html<'e, E>(
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
-    sqlx::query("UPDATE descriptions SET description_html = $2 WHERE id = $1")
+    sqlx::query(SYNC_DESCRIPTION_HTML_SQL)
         .bind(description_id)
         .bind(html)
         .execute(ex)
@@ -833,7 +873,7 @@ pub async fn sync_description_stripped<'e, E>(
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
-    sqlx::query("UPDATE descriptions SET description_stripped = $2 WHERE id = $1")
+    sqlx::query(SYNC_DESCRIPTION_STRIPPED_SQL)
         .bind(description_id)
         .bind(stripped)
         .execute(ex)
@@ -850,7 +890,7 @@ pub async fn sync_description_json<'e, E>(
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
-    sqlx::query("UPDATE descriptions SET description_json = $2 WHERE id = $1")
+    sqlx::query(SYNC_DESCRIPTION_JSON_SQL)
         .bind(description_id)
         .bind(json)
         .execute(ex)
@@ -1364,7 +1404,11 @@ mod tests {
         let enqueue = Arc::new(RecordingEnqueue {
             calls: Mutex::new(Vec::new()),
         });
-        let input = create_input(&seed, "<p>v1</p>");
+        // Entity-bearing HTML: the comment hook decodes (`R&D`) while the
+        // description hook keeps entities verbatim (`R&amp;D`) — the sync
+        // below must store the comment's ML value verbatim (Django's
+        // `QuerySet.update` skips `Description.save()`), not recompute it.
+        let input = create_input(&seed, "<p>R&amp;D v1</p>");
         let (id, description_id) = (input.id, input.description_id);
         super::super::run(&ctx, &db, |txn| {
             let enqueue: Arc<dyn TaskEnqueueHook> = enqueue.clone();
@@ -1400,7 +1444,7 @@ mod tests {
                     UpdateComment {
                         stored,
                         updated_at: Utc::now(),
-                        html: Some("<p>v2</p>".to_owned()),
+                        html: Some("<p>R&amp;D v2</p>".to_owned()),
                         json: None,
                         access: None,
                         actor_id: None,
@@ -1418,8 +1462,8 @@ mod tests {
         })
         .await
         .expect("domain::run update");
-        assert_eq!(outcome.comment.comment_html, "<p>v2</p>");
-        assert_eq!(outcome.comment.comment_stripped, "v2");
+        assert_eq!(outcome.comment.comment_html, "<p>R&amp;D v2</p>");
+        assert_eq!(outcome.comment.comment_stripped, "R&D v2");
         let desc: (String, Option<String>, Value) = sqlx::query_as(
             "SELECT description_html, description_stripped, description_json \
              FROM descriptions WHERE id = $1",
@@ -1428,8 +1472,10 @@ mod tests {
         .fetch_one(&pool)
         .await
         .expect("read description");
-        assert_eq!(desc.0, "<p>v2</p>");
-        assert_eq!(desc.1.as_deref(), Some("v2"));
+        assert_eq!(desc.0, "<p>R&amp;D v2</p>");
+        // The comment's ML value verbatim — a `before_save` recompute
+        // would store the Django flavor (`R&amp;D v2`) instead.
+        assert_eq!(desc.1.as_deref(), Some("R&D v2"));
         assert_eq!(desc.2, serde_json::json!({"foreign": true}));
     }
 
