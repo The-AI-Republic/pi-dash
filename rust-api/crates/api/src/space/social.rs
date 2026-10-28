@@ -105,6 +105,7 @@ use crate::middleware::body_limit::read_request_bytes;
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
 use pidash_compat::response::json_response;
+use pidash_compat::validate::push_error;
 use pidash_db::app_pages::strip::ml_strip_tags;
 use pidash_services::read::{self, ActorDetailView, CommentReactionView, CommentRow, CommentView};
 use pidash_services::space::{guards, queries};
@@ -828,15 +829,6 @@ async fn proxy(state: &AppState, req: Request) -> Response {
 // ---------------------------------------------------------------------------
 
 type FieldErrors = serde_json::Map<String, Value>;
-
-fn push_error(errors: &mut FieldErrors, field: &str, message: String) {
-    errors
-        .entry(field.to_owned())
-        .or_insert_with(|| Value::Array(Vec::new()))
-        .as_array_mut()
-        .expect("error entry is an array")
-        .push(Value::String(message));
-}
 
 fn field_errors(errors: FieldErrors) -> Result<(), HandlerError> {
     if errors.is_empty() {

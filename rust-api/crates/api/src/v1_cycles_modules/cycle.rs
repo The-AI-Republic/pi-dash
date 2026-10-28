@@ -84,6 +84,7 @@ use chrono_tz::Tz;
 use serde_json::Value;
 use sqlx::{PgPool, Row};
 
+use super::module::{check_max_length, CoerceFail};
 use pidash_auth::permissions::project;
 use pidash_compat::response::{json_created, json_ok, no_content};
 
@@ -2808,14 +2809,6 @@ fn parse_object_or_500_ct(
     }
 }
 
-/// A single field-coercion failure: the pre-rendered message plus whether it
-/// is a per-field list (the usual shape) or an index-keyed object (list
-/// children, e.g. `members`).
-#[derive(Debug, Clone)]
-pub struct CoerceFail {
-    pub body: String,
-}
-
 /// Python `str(value)` for error echoes, over parsed values: the shared
 /// layer's [`super::json::py_str`] (strings verbatim, true `repr()`
 /// quoting nested; values never nest past serde's recursion limit, so
@@ -2876,18 +2869,6 @@ pub fn coerce_char(
             ))
         }
     }
-}
-
-fn check_max_length(text: &str, max_length: Option<usize>) -> Result<(), CoerceFail> {
-    if let Some(max) = max_length {
-        // DRF counts Unicode scalar values (`len(str)`).
-        if text.chars().count() > max {
-            return Err(CoerceFail {
-                body: format!(r#"["Ensure this field has no more than {max} characters."]"#),
-            });
-        }
-    }
-    Ok(())
 }
 
 /// DRF `CharField` validators in append order (`fields.py` `CharField` plus
