@@ -194,19 +194,9 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
         ctx.assistant_seam.clone(),
     );
     crate::tasks_cleanup::dummy_data::register(registry, ctx.pools.primary().clone());
-    // D-05 integrations groups (PIDASHCONV-238; kept in sync with
-    // `tests::worker_registry_owns_all_d05_local_tasks`). All six task
-    // names are worker-owned with live providers.
-    crate::integrations::git_sync::register_git_sync_tasks(
-        registry,
-        ctx.pools.primary().clone(),
-        crate::integrations::git_sync::LiveProviders::from_env(),
-    );
-    crate::integrations::github_sync::register_github_sync_tasks(
-        registry,
-        ctx.pools.primary().clone(),
-        crate::integrations::github_sync::LiveTransports::from_env(),
-    );
+    // D-05 integrations groups register below, after the shared Redis
+    // client is built (the sync drivers' transition hook drains pods
+    // through it).
     // D-08 sink tasks (PIDASHCONV-260, FX-LOG-01 for `process_logs`;
     // PIDASHCONV-1107 for `track_event`; kept in sync with
     // `tests::worker_registry_owns_sink_tasks`). EXECUTE parity per
@@ -322,6 +312,34 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
             std::sync::Arc::new(NoExtraToolsets),
             ctx.assistant_seam.clone(),
         ),
+    );
+    // D-05 integrations groups (PIDASHCONV-238; kept in sync with
+    // `tests::worker_registry_owns_all_d05_local_tasks`). All six task
+    // names are worker-owned with live providers. The drivers also get
+    // the worker's transition hook, so sync-created/adopted mirrors run
+    // the same post-save legs as every other issue write (PIDASHCONV-1576).
+    let transition_hook: std::sync::Arc<
+        dyn pidash_services::domain::transition::IssueTransitionHook,
+    > = std::sync::Arc::new(crate::issue_transition::WorkerTransitionHook::new(
+        ctx.pools.primary().clone(),
+        ctx.settings.cloud_agent.clone(),
+        ctx.settings.managed_runner.clone(),
+        redis.clone(),
+        ctx.settings.runner.clone(),
+        std::sync::Arc::new(NoExtraToolsets),
+        ctx.assistant_seam.clone(),
+    ));
+    crate::integrations::git_sync::register_git_sync_tasks(
+        registry,
+        ctx.pools.primary().clone(),
+        crate::integrations::git_sync::LiveProviders::from_env(),
+        Some(transition_hook.clone()),
+    );
+    crate::integrations::github_sync::register_github_sync_tasks(
+        registry,
+        ctx.pools.primary().clone(),
+        crate::integrations::github_sync::LiveTransports::from_env(),
+        Some(transition_hook),
     );
     // D-07 send/stack (PIDASHCONV-865; kept in sync with
     // `inventory::tests::mirror_registry_matches_tasks_table`). The live

@@ -32,14 +32,17 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
-use pidash_db::config::CloudAgentSettings;
+use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings, RunnerSettings};
 use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
 use pidash_db::tx::Transaction;
 use pidash_services::dispatch::admission::AdmissionCache;
 use pidash_services::dispatch::policy::UserFlags;
 use pidash_services::dispatch::LlmProfile;
 use pidash_services::domain::identity::AgentUserCollisionError;
+use pidash_services::domain::transition::IssueTransitionHook;
+use pidash_services::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
 use pidash_services::orchestration::clock::{
     ClockWrite, ProjectClockPolicy, CREATE_TICKER_PARAMS, LOCK_TICKER_PARAMS, SAVE_CLOCK_PARAMS,
     SAVE_CLOCK_SQL,
@@ -56,14 +59,20 @@ use pidash_services::orchestration::entries::{
 };
 use pidash_services::prompting::composer::{OverrideIndex, OverrideRow};
 use pidash_services::runner_runs::LifecycleEffect;
+use pidash_services::runner_sessions::live_drains::drain_pod_by_id;
 use pidash_types::dispatch::AgentExecutorKind;
 use serde_json::Value;
 use sqlx::postgres::PgRow;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
+use crate::admission::RedisAdmissionCache;
 use crate::dispatch::{dispatch_agent_run, DispatchDecision};
+use crate::orchestration::live_inputs::{
+    creator_universe, fetch_presence, gate_fn, gate_verdicts, profile_fn, JobsMatcher,
+};
 use crate::orchestration::{LiveCreationStore, StoreDeps};
+use crate::runner_runs::sweeps_chat::terminal_effects_job;
 
 /// Drain finalized runs' publish pairs in order. The api binary implements
 /// this over its `project_move_handoff` drain; a jobs-context caller passes
@@ -709,5 +718,317 @@ where
             executor_kind,
             tool_catalog_version,
         )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Worker hook: the jobs binding over the transition entry points
+// ---------------------------------------------------------------------------
+
+/// The worker's post-commit drains for the transition core (the api
+/// `TransitionDrains` shape over worker inputs): the terminal-effects
+/// publish drain enqueues the effects task and skips the inline apply
+/// (no live `RunnerRunsSeams` here — the queued task covers the hooks
+/// idempotently, PIDASHCONV-859, the `tools_exec` fire precedent); the
+/// pod drain is the live session drain.
+struct WorkerTransitionDrains {
+    pool: PgPool,
+    redis: Option<redis::Client>,
+    runner: RunnerSettings,
+}
+
+impl PublishEffectsDrain for WorkerTransitionDrains {
+    fn drain(
+        &self,
+        effects: Vec<LifecycleEffect>,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        let pool = self.pool.clone();
+        Box::pin(async move {
+            for effect in effects {
+                match effect {
+                    LifecycleEffect::PublishTerminalEffects { run_id } => {
+                        let job = terminal_effects_job(&run_id);
+                        if let Err(error) = crate::queue::enqueue(&pool, &job).await {
+                            tracing::error!(%error, "failed to publish terminal effects for run {run_id}");
+                        }
+                    }
+                    LifecycleEffect::ApplyTerminalEffectsInline { run_id } => {
+                        tracing::warn!(
+                            "skipping inline terminal effects for run {run_id}: no live RunnerRunsSeams \
+                             (PIDASHCONV-859); the queued effects task covers the hooks idempotently"
+                        );
+                    }
+                    // Unreachable: `plan_publish_effects` emits exactly these two.
+                    _ => {}
+                }
+            }
+        })
+    }
+}
+
+impl PodDrain for WorkerTransitionDrains {
+    fn drain_pod(&self, pod_id: Uuid) -> Pin<Box<dyn Future<Output = Result<(), ()>> + Send + '_>> {
+        let pool = self.pool.clone();
+        let redis = self.redis.clone();
+        let runner = self.runner.clone();
+        Box::pin(async move {
+            drain_pod_by_id(&pool, redis.as_ref(), &runner, pod_id)
+                .await
+                .map(|_| ())
+                .map_err(|_| ())
+        })
+    }
+}
+
+/// The worker's [`IssueTransitionHook`]: the public transition entry
+/// points bound to worker settings + seams (the api `AppTransitionHook`
+/// shape). The worker installs one over its pools/settings/seams and
+/// hands it to the sync drivers, so sync-created/adopted mirrors run
+/// the same post-save legs as every other issue write (PIDASHCONV-1576).
+pub struct WorkerTransitionHook {
+    pool: PgPool,
+    cloud: CloudAgentSettings,
+    managed: ManagedRunnerSettings,
+    redis: Option<redis::Client>,
+    runner: RunnerSettings,
+    toolsets: Arc<dyn CloudAgentToolsetsSeam>,
+    assistant_seam: Arc<dyn AssistantModelSeam>,
+}
+
+impl WorkerTransitionHook {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        pool: PgPool,
+        cloud: CloudAgentSettings,
+        managed: ManagedRunnerSettings,
+        redis: Option<redis::Client>,
+        runner: RunnerSettings,
+        toolsets: Arc<dyn CloudAgentToolsetsSeam>,
+        assistant_seam: Arc<dyn AssistantModelSeam>,
+    ) -> Self {
+        Self {
+            pool,
+            cloud,
+            managed,
+            redis,
+            runner,
+            toolsets,
+            assistant_seam,
+        }
+    }
+}
+
+impl IssueTransitionHook for WorkerTransitionHook {
+    fn enqueue_completion_comment(
+        &self,
+        issue_id: Uuid,
+        prev_state_id: Option<Uuid>,
+        current_state_id: Option<Uuid>,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        let pool = self.pool.clone();
+        Box::pin(async move {
+            enqueue_completion_comment(
+                &pool,
+                &issue_id,
+                prev_state_id.as_ref(),
+                current_state_id.as_ref(),
+            )
+            .await;
+        })
+    }
+
+    fn fire(
+        &self,
+        actor_id: Uuid,
+        request: FireRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<FireOutcome, ()>> + Send + '_>> {
+        let pool = self.pool.clone();
+        let cloud = self.cloud.clone();
+        let managed = self.managed.clone();
+        let redis = self.redis.clone();
+        let runner = self.runner.clone();
+        let toolsets = self.toolsets.clone();
+        let assistant_seam = self.assistant_seam.clone();
+        Box::pin(async move {
+            // Per-fire inputs (the fire_tick live shape): the universe
+            // around this fire's actor, LLM-key presence, and the
+            // installed seam's gate verdicts over it. Each erasure logs
+            // its cause first (PIDASHCONV-1563).
+            let universe = creator_universe(&pool, Some(actor_id), request.issue_id)
+                .await
+                .map_err(|error| {
+                    tracing::warn!(%error, "sync transition fire: creator universe lookup failed");
+                })?;
+            let presence = Arc::new(fetch_presence(&pool, &universe).await.map_err(|error| {
+                tracing::warn!(%error, "sync transition fire: presence lookup failed");
+            })?);
+            let verdicts = Arc::new(gate_verdicts(&assistant_seam, &presence).await);
+            let build_deps = || StoreDeps {
+                cloud: cloud.clone(),
+                managed: managed.clone(),
+                cache: RedisAdmissionCache::from_env(),
+                has_usable_llm_config: gate_fn(Arc::clone(&verdicts)),
+                toolsets: Arc::clone(&toolsets),
+                llm_profile: profile_fn(Arc::clone(&presence)),
+                now_unix_secs: request.now.timestamp(),
+            };
+            let matcher = JobsMatcher::new(pool.clone());
+            let drains = WorkerTransitionDrains {
+                pool: pool.clone(),
+                redis,
+                runner,
+            };
+            fire_transition(
+                &pool,
+                build_deps(),
+                build_deps(),
+                matcher,
+                &cloud,
+                request,
+                &drains,
+                &drains,
+            )
+            .await
+        })
+    }
+}
+
+/// Post-save completion comment-back for a sync write (the
+/// `trigger_completion_comment` receiver leg,
+/// `github_signals.py:44-75`). The hook resolves the dispatch (group,
+/// mirror, idempotency guards) and enqueues the provider's
+/// `post_completion_comment` job; best-effort, like the receiver. No
+/// hook installed (direct unit-test calls) or no state change means no
+/// dispatch evaluation at all.
+pub async fn comment_sync_transition(
+    hook: &Option<Arc<dyn IssueTransitionHook>>,
+    issue_id: Uuid,
+    prev_state_id: Option<Uuid>,
+    current_state_id: Option<Uuid>,
+) {
+    let Some(hook) = hook else {
+        return;
+    };
+    if prev_state_id == current_state_id {
+        return;
+    }
+    hook.enqueue_completion_comment(issue_id, prev_state_id, current_state_id)
+        .await;
+}
+
+/// Post-save orchestration fire for a sync write (the
+/// `fire_state_transition` receiver leg, `signals.py:74-107`).
+/// Best-effort — Django swallows orchestration errors into its error
+/// counter, so a failed fire never fails the sync. No hook installed
+/// (direct unit-test calls) or no state change means no fire at all.
+pub async fn fire_sync_transition(
+    hook: &Option<Arc<dyn IssueTransitionHook>>,
+    actor_id: Uuid,
+    issue_id: Uuid,
+    prev_state_id: Option<Uuid>,
+    current_state_id: Option<Uuid>,
+    now: chrono::DateTime<chrono::Utc>,
+) {
+    let Some(hook) = hook else {
+        return;
+    };
+    if prev_state_id == current_state_id {
+        return;
+    }
+    let request = FireRequest {
+        issue_id,
+        prev_state_id,
+        current_state_id,
+        // The sync path never stamps `_DISPATCH_IMMEDIATE_ATTR`, so the
+        // receiver default (`True`) always applies.
+        dispatch_immediate: true,
+        // A sync write is never an agent's own move.
+        moved_by_run: None,
+        now,
+        // Caller-drawn jitter (L5 quirk-5): the worker path draws
+        // none, like the api fires.
+        jitter_secs: 0.0,
+        // System path: no crum user in the sync worker.
+        created_by: None,
+    };
+    match hook.fire(actor_id, request).await {
+        Ok(FireOutcome::Failed { log_line, .. }) => {
+            tracing::error!("{log_line}");
+        }
+        Ok(_) => {}
+        Err(()) => {
+            tracing::warn!(%issue_id, "sync transition fire failed; mirror stands");
+        }
+    }
+}
+
+/// Shared test doubles for the sync-driver leg tests: a recording
+/// [`IssueTransitionHook`] (the services `RecordingHook` shape) that
+/// answers every fire with `NoTransition`, so driver tests pin the
+/// call sites without driving the orchestration.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::Mutex;
+
+    use pidash_services::domain::transition::IssueTransitionHook;
+    use pidash_services::orchestration::entries::{FireOutcome, FireRequest};
+    use uuid::Uuid;
+
+    /// One recorded fire: the actor plus the request's signal fields.
+    pub(crate) type FireCall = (Uuid, Uuid, Option<Uuid>, Option<Uuid>, bool, Option<Uuid>);
+    /// One recorded completion dispatch: issue, previous, current.
+    pub(crate) type CommentCall = (Uuid, Option<Uuid>, Option<Uuid>);
+
+    pub(crate) struct RecordingHook {
+        pub(crate) fires: Mutex<Vec<FireCall>>,
+        pub(crate) comments: Mutex<Vec<CommentCall>>,
+    }
+
+    impl RecordingHook {
+        pub(crate) fn new() -> Self {
+            Self {
+                fires: Mutex::new(Vec::new()),
+                comments: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl Default for RecordingHook {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl IssueTransitionHook for RecordingHook {
+        fn enqueue_completion_comment(
+            &self,
+            issue_id: Uuid,
+            prev_state_id: Option<Uuid>,
+            current_state_id: Option<Uuid>,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            self.comments
+                .lock()
+                .expect("lock")
+                .push((issue_id, prev_state_id, current_state_id));
+            Box::pin(async move {})
+        }
+
+        fn fire(
+            &self,
+            actor_id: Uuid,
+            request: FireRequest,
+        ) -> Pin<Box<dyn Future<Output = Result<FireOutcome, ()>> + Send + '_>> {
+            self.fires.lock().expect("lock").push((
+                actor_id,
+                request.issue_id,
+                request.prev_state_id,
+                request.current_state_id,
+                request.dispatch_immediate,
+                request.created_by,
+            ));
+            Box::pin(async move { Ok(FireOutcome::NoTransition) })
+        }
     }
 }

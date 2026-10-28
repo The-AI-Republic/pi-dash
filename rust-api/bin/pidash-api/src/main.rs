@@ -496,16 +496,19 @@ mod tests {
         let pool =
             sqlx::PgPool::connect_lazy("postgres://localhost:1/unused").expect("lazy pool builds");
         let mut registry = Registry::new();
-        // Real registrations (the same calls the worker builder makes).
+        // Real registrations (the same calls the worker builder makes;
+        // no transition hook — leg coverage lives in the contract suite).
         git_sync::register_git_sync_tasks(
             &mut registry,
             pool.clone(),
             git_sync::LiveProviders::from_env(),
+            None,
         );
         github_sync::register_github_sync_tasks(
             &mut registry,
             pool.clone(),
             github_sync::LiveTransports::from_env(),
+            None,
         );
 
         let mut local: Vec<&str> = git_sync::TASK_NAMES.to_vec();

@@ -156,6 +156,7 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use pidash_db::config::encryption::Keyring;
+use pidash_services::domain::transition::IssueTransitionHook;
 use pidash_services::integrations::adapters_github::GithubError;
 
 use super::super::tasks_mail::mail_send::strip_tags;
@@ -165,6 +166,7 @@ use super::git_sync::{
     pidash_issue_url, retry_countdown_secs, safe_render, save_state_sql, strip_html_text,
     truncate_chars, GITHUB_API_BASE, PROVIDER_TIMEOUT_SECS,
 };
+use crate::issue_transition::{comment_sync_transition, fire_sync_transition};
 use crate::pyformat::format_eta;
 use crate::queue::{enqueue, JobRow, NewJob};
 use crate::task_message::TaskMessage;
@@ -399,12 +401,6 @@ pub const ISSUE_LOOKUP_SQL: &str = "SELECT id FROM issues WHERE project_id = $1 
 /// branch as creation); the stored `completed_at` rides along because
 /// the `state is None` branch never touches it.
 pub const ISSUE_STATE_SQL: &str = "SELECT i.state_id, s.\"group\" AS state_group, i.completed_at FROM issues i LEFT JOIN states s ON s.id = i.state_id WHERE i.id = $1";
-
-/// Adopt the resolved default on a stateless mirror (`Issue.save`,
-/// `issue.py:288-301`): `self.state = default_state` then the full
-/// `save()` persists it. `$1` the issue id, `$2` the resolved state id
-/// (nullable — no default exists, the row stays stateless, as in Python).
-const ADOPT_STATE_SQL: &str = "UPDATE issues SET state_id = $2 WHERE id = $1";
 
 /// `Issue.objects.create(…)` column list, in physical order: the
 /// `Issue.save()` creation path resolves pod/state/sequence/sort-order
@@ -981,7 +977,8 @@ async fn save_default_state(
 /// `github_sync_task.py:135-140`, with the `Issue.save()` creation path
 /// `issue.py:267-340` inlined: workspace derivation, pod default,
 /// non-triage default state, advisory-locked sequence, sort-order seed,
-/// stripped recompute).
+/// stripped recompute). Returns the issue id, the sync id, and the
+/// resolved state (the post-save legs' current value).
 #[allow(clippy::too_many_arguments)]
 async fn create_issue(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -995,7 +992,7 @@ async fn create_issue(
     _description_stripped: &str,
     sync_values: &IssueSyncValues,
     now: &DateTime<Utc>,
-) -> Result<(Uuid, Uuid), String> {
+) -> Result<(Uuid, Uuid, Option<Uuid>), String> {
     let db_error = |error: sqlx::Error| format!("create mirror issue: {error}");
     sqlx::query(ADVISORY_LOCK_SQL)
         .bind(advisory_lock_key(&scan.project_id))
@@ -1068,7 +1065,7 @@ async fn create_issue(
         .map_err(db_error)?;
     let sync_id =
         insert_issue_sync(tx, scan, workspace_id, &issue_id, number, sync_values, now).await?;
-    Ok((issue_id, sync_id))
+    Ok((issue_id, sync_id, state_id))
 }
 
 /// The `GithubIssueSync` defaults decoded once per upsert
@@ -1145,11 +1142,20 @@ pub fn decode_issue_payload(
 /// Create-or-update one local Issue mirror plus its GithubIssueSync row
 /// (`_upsert_issue`, `github_sync_task.py:111-188`). Returns the local
 /// `(issue_id, issue_sync_id)`.
+///
+/// `hook` is the worker's transition entry points (`None` on direct
+/// unit-test calls, where no worker context exists): after a save that
+/// changed state — create (previous `None`) or adopt (stateless row) —
+/// the orchestration fire runs, and after an adopt into completed the
+/// completion comment-back enqueues. Both legs are best-effort (the
+/// receivers never fail the save); the create arm runs no completion
+/// leg (`github_signals.py` skips `created`).
 pub async fn upsert_issue(
     pool: &PgPool,
     scan: &RepoScan,
     gh_issue: &Value,
     now: &DateTime<Utc>,
+    hook: Option<Arc<dyn IssueTransitionHook>>,
 ) -> Result<(Uuid, Uuid), String> {
     let db_error = |error: sqlx::Error| format!("upsert mirror issue: {error}");
     let (number, name, description_html, description_stripped, values) =
@@ -1165,7 +1171,7 @@ pub async fn upsert_issue(
         None => {
             let workspace_id = project_workspace(pool, &scan.project_id).await?;
             let mut tx = pool.begin().await.map_err(db_error)?;
-            let ids = create_issue(
+            let (issue_id, sync_id, state_id) = create_issue(
                 &mut tx,
                 scan,
                 &workspace_id,
@@ -1177,9 +1183,13 @@ pub async fn upsert_issue(
                 now,
             )
             .await?;
-            merge_issue_login(&mut tx, &ids.1, gh_issue).await?;
+            merge_issue_login(&mut tx, &sync_id, gh_issue).await?;
             tx.commit().await.map_err(db_error)?;
-            Ok(ids)
+            // The receiver ignores `created` and compares previous
+            // (`None`) vs current (the default): a ticking default
+            // enters the bucket here.
+            fire_sync_transition(&hook, scan.actor_id, issue_id, None, state_id, *now).await;
+            Ok((issue_id, sync_id))
         }
         Some(issue_id) => {
             // `setattr(defaults)` + full `Issue.save()`:
@@ -1198,26 +1208,28 @@ pub async fn upsert_issue(
                 .await
                 .map_err(db_error)?
                 .unwrap_or((None, None, None));
+            // `self.state is None` (`issue.py:288-296`): resolve the
+            // default for the receivers — in memory only.
+            // `update_or_create` saves the update arm with
+            // `update_fields=set(defaults)+auto` (Django 4.2
+            // `query.py:957-972`), which excludes `state`, so the row
+            // keeps NULL while the post_save legs evaluate against the
+            // adopted default. That branch never touches
+            // `completed_at`, so the stored stamp is preserved (it
+            // stays NULL on every row the sync itself created).
+            let adopted: Option<Uuid> = if state_id.is_none() {
+                let mut tx = pool.begin().await.map_err(db_error)?;
+                let resolved = save_default_state(&mut tx, &scan.project_id).await?;
+                tx.commit().await.map_err(db_error)?;
+                resolved
+            } else {
+                None
+            };
+            let current_state_id = adopted.or(state_id);
             let completed_at: Option<DateTime<Utc>> = match (state_id, state_group.as_deref()) {
                 (Some(_), Some("completed")) => Some(*now),
                 (Some(_), _) => None,
-                (None, _) => {
-                    // `self.state is None` (`issue.py:288-296`): resolve
-                    // the default and store it on the row. That branch
-                    // never touches `completed_at`, so the stored stamp
-                    // is preserved (it stays NULL on every row the sync
-                    // itself created).
-                    let mut tx = pool.begin().await.map_err(db_error)?;
-                    let resolved = save_default_state(&mut tx, &scan.project_id).await?;
-                    tx.commit().await.map_err(db_error)?;
-                    sqlx::query(ADOPT_STATE_SQL)
-                        .bind(issue_id)
-                        .bind(resolved)
-                        .execute(pool)
-                        .await
-                        .map_err(db_error)?;
-                    stored_completed_at
-                }
+                (None, _) => stored_completed_at,
             };
             // `save()` recomputes the stripped form (`issue.py:345-350`).
             let stripped = strip_html_text(&description_html);
@@ -1237,6 +1249,21 @@ pub async fn upsert_issue(
             let sync_id = update_issue_sync(&mut tx, scan, &issue_id, number, &values, now).await?;
             merge_issue_login(&mut tx, &sync_id, gh_issue).await?;
             tx.commit().await.map_err(db_error)?;
+            // Adopt (previous `None` vs the resolved default): the
+            // orchestration leg evaluates the move and the completion
+            // leg enqueues when the adopted default is completed-group
+            // with an unstamped sync row. Both helpers no-op without
+            // an installed hook or without a state change.
+            fire_sync_transition(
+                &hook,
+                scan.actor_id,
+                issue_id,
+                state_id,
+                current_state_id,
+                *now,
+            )
+            .await;
+            comment_sync_transition(&hook, issue_id, state_id, current_state_id).await;
             Ok((issue_id, sync_id))
         }
     }
@@ -1559,6 +1586,7 @@ pub async fn sync_one_repo(
     transports: &LiveTransports,
     sync_id: &str,
     attempts: u32,
+    hook: Option<Arc<dyn IssueTransitionHook>>,
 ) -> Result<Verdict, HandlerError> {
     if !github_sync_enabled() {
         return Ok(Verdict::Ack);
@@ -1639,7 +1667,7 @@ pub async fn sync_one_repo(
     // happen (empty tokens took the missing-credential path above); a
     // build failure arrives as `ScanFault::Setup` and parks as `Fail`,
     // like any error outside the guarded `try`.
-    match run_scan(pool, transports, &scan, &now).await {
+    match run_scan(pool, transports, &scan, &now, hook).await {
         Ok(()) => {
             if let Err(error) = sqlx::query(SYNC_SUCCESS_SQL)
                 .bind(scan.sync_id)
@@ -1703,6 +1731,7 @@ async fn run_scan(
     transports: &LiveTransports,
     scan: &RepoScan,
     now: &DateTime<Utc>,
+    hook: Option<Arc<dyn IssueTransitionHook>>,
 ) -> Result<(), ScanFault> {
     let remote_issues = {
         let (owner, name) = (scan.owner.clone(), scan.name.clone());
@@ -1727,7 +1756,7 @@ async fn run_scan(
         if gh_issue.get("pull_request").is_some() {
             continue;
         }
-        let (issue_id, sync_id) = upsert_issue(pool, scan, gh_issue, now)
+        let (issue_id, sync_id) = upsert_issue(pool, scan, gh_issue, now, hook.clone())
             .await
             .map_err(ScanFault::Unexpected)?;
         let number = gh_issue
@@ -1950,11 +1979,14 @@ pub async fn post_completion_comment(
 /// claimed row; Celery arity is enforced by [`parse_single_id_arg`]
 /// (malformed deliveries ack with a warning, like Celery discarding
 /// invalid signatures). `sync_one_repo` spends the row's retry budget
-/// with [`retry_countdown_secs`]; the other two never retry.
+/// with [`retry_countdown_secs`]; the other two never retry. `hook`
+/// carries the worker's transition entry points into the upserts
+/// (`None` leaves the post-save legs off).
 pub fn register_github_sync_tasks(
     registry: &mut Registry,
     pool: PgPool,
     transports: LiveTransports,
+    hook: Option<Arc<dyn IssueTransitionHook>>,
 ) {
     let scan_pool = pool.clone();
     registry.register(
@@ -1980,11 +2012,13 @@ pub fn register_github_sync_tasks(
     );
     let one_pool = pool.clone();
     let one_transports = transports.clone();
+    let one_hook = hook.clone();
     registry.register(
         SYNC_ONE_REPO_TASK,
         Arc::new(move |job: JobRow| {
             let pool = one_pool.clone();
             let transports = one_transports.clone();
+            let hook = one_hook.clone();
             Box::pin(async move {
                 let id = match parse_single_id_arg(SYNC_ONE_REPO_TASK, &job.args, &job.kwargs) {
                     Ok(id) => id,
@@ -1994,7 +2028,7 @@ pub fn register_github_sync_tasks(
                     }
                 };
                 let attempts = job.attempts.max(0) as u32;
-                sync_one_repo(&pool, &transports, &id, attempts).await
+                sync_one_repo(&pool, &transports, &id, attempts, hook).await
             }) as std::pin::Pin<Box<dyn std::future::Future<Output = _> + Send>>
         }),
     );
@@ -2591,7 +2625,6 @@ mod tests {
             PROJECT_WORKSPACE_SQL,
             ISSUE_LOOKUP_SQL,
             ISSUE_STATE_SQL,
-            ADOPT_STATE_SQL,
             INSERT_ISSUE_SQL,
             UPDATE_ISSUE_SQL,
             INSERT_ISSUE_SYNC_SQL,
@@ -2759,6 +2792,7 @@ mod tests {
             LiveTransports::with_keyring(pidash_db::config::encryption::Keyring::from_secret(
                 "test",
             )),
+            None,
         );
         for task in TASK_NAMES {
             assert_eq!(route_for(&registry, task), Route::Local);
@@ -2972,6 +3006,7 @@ mod live_tests {
             ),
             ("DELETE FROM api_tokens WHERE id = $1", token_id),
             ("DELETE FROM integrations WHERE id = $1", integration_id),
+            ("DELETE FROM states WHERE project_id = $1", scan.project_id),
             ("DELETE FROM projects WHERE id = $1", scan.project_id),
             ("DELETE FROM workspaces WHERE id = $1", scan.workspace_id),
             ("DELETE FROM users WHERE id = $1", scan.actor_id),
@@ -2991,7 +3026,7 @@ mod live_tests {
         };
         let scan = seed_scan(&pool).await;
         let (issue_id, legacy_sync_id) =
-            upsert_issue(&pool, &scan, &gh_issue("Remote title"), &Utc::now())
+            upsert_issue(&pool, &scan, &gh_issue("Remote title"), &Utc::now(), None)
                 .await
                 .expect("seed scan inserts the mirror issue");
         upsert_comment(
@@ -3052,5 +3087,162 @@ mod live_tests {
             "description update lands NULL updated_by"
         );
         cleanup(&pool, &scan, issue_id, comment_id, description_id).await;
+    }
+
+    /// Seed the project's default state (`default = TRUE`): the value
+    /// `Issue.save` resolves on create/adopt.
+    async fn seed_default_state(
+        pool: &sqlx::PgPool,
+        scan: &RepoScan,
+        name: &str,
+        group: &str,
+    ) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO states (id, created_at, updated_at, name, description, color, slug, \
+             project_id, workspace_id, sequence, \"group\", \"default\", is_triage) \
+             VALUES ($1, now(), now(), $2, '', '#000000', $3, $4, $5, 1000.0, $6, true, false)",
+        )
+        .bind(id)
+        .bind(name)
+        .bind(format!("rs1576-{}", Uuid::new_v4().simple()))
+        .bind(scan.project_id)
+        .bind(scan.workspace_id)
+        .bind(group)
+        .execute(pool)
+        .await
+        .expect("seed default state");
+        id
+    }
+
+    /// The create arm fires `None` → default and never runs the
+    /// completion leg (`github_signals.py` skips `created`).
+    #[tokio::test]
+    async fn sync_create_fires_transition_without_completion() {
+        use crate::issue_transition::test_support::RecordingHook;
+
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let scan = seed_scan(&pool).await;
+        let default_id = seed_default_state(&pool, &scan, "Backlog", "backlog").await;
+        let hook = Arc::new(RecordingHook::new());
+        let erased: Arc<dyn IssueTransitionHook> = hook.clone();
+        let (issue_id, _) = upsert_issue(
+            &pool,
+            &scan,
+            &gh_issue("Remote title"),
+            &Utc::now(),
+            Some(erased),
+        )
+        .await
+        .expect("create arm inserts the mirror issue");
+        assert_eq!(
+            *hook.fires.lock().expect("lock"),
+            vec![(scan.actor_id, issue_id, None, Some(default_id), true, None,)],
+            "one fire: previous None vs the adopted default, immediate, system actor"
+        );
+        assert!(
+            hook.comments.lock().expect("lock").is_empty(),
+            "created, not transitioned: no completion dispatch"
+        );
+        cleanup(&pool, &scan, issue_id, Uuid::nil(), Uuid::nil()).await;
+    }
+
+    /// The update arm on a stateless row evaluates both legs against the
+    /// adopted default but persists nothing: `update_or_create` saves
+    /// with `update_fields` that exclude `state` (Django 4.2
+    /// `query.py:957-972`), so the row keeps NULL.
+    #[tokio::test]
+    async fn sync_adopt_fires_transition_and_completion_without_persisting() {
+        use crate::issue_transition::test_support::RecordingHook;
+
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let scan = seed_scan(&pool).await;
+        let default_id = seed_default_state(&pool, &scan, "Done", "completed").await;
+        let (issue_id, _) =
+            upsert_issue(&pool, &scan, &gh_issue("Remote title"), &Utc::now(), None)
+                .await
+                .expect("create arm inserts the mirror issue");
+        sqlx::query("UPDATE issues SET state_id = NULL WHERE id = $1")
+            .bind(issue_id)
+            .execute(&pool)
+            .await
+            .expect("make the mirror stateless");
+        let hook = Arc::new(RecordingHook::new());
+        let erased: Arc<dyn IssueTransitionHook> = hook.clone();
+        let (issue_id2, _) = upsert_issue(
+            &pool,
+            &scan,
+            &gh_issue("Remote title edited"),
+            &Utc::now(),
+            Some(erased),
+        )
+        .await
+        .expect("update arm revisits the mirror issue");
+        assert_eq!(issue_id2, issue_id, "re-sync reuses the mirror issue");
+        assert_eq!(
+            *hook.fires.lock().expect("lock"),
+            vec![(scan.actor_id, issue_id, None, Some(default_id), true, None,)],
+            "one fire: previous None vs the adopted default"
+        );
+        assert_eq!(
+            *hook.comments.lock().expect("lock"),
+            vec![(issue_id, None, Some(default_id))],
+            "adopt into completed dispatches the completion leg"
+        );
+        let stored: Option<Uuid> = sqlx::query_scalar("SELECT state_id FROM issues WHERE id = $1")
+            .bind(issue_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read back the mirror state");
+        assert_eq!(stored, None, "in-memory adopt only: the row keeps NULL");
+        cleanup(&pool, &scan, issue_id, Uuid::nil(), Uuid::nil()).await;
+    }
+
+    /// A stateful re-sync changes no state, so neither leg runs.
+    #[tokio::test]
+    async fn sync_update_without_state_change_fires_nothing() {
+        use crate::issue_transition::test_support::RecordingHook;
+
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let scan = seed_scan(&pool).await;
+        seed_default_state(&pool, &scan, "Backlog", "backlog").await;
+        let hook = Arc::new(RecordingHook::new());
+        let erased: Arc<dyn IssueTransitionHook> = hook.clone();
+        let (issue_id, _) = upsert_issue(
+            &pool,
+            &scan,
+            &gh_issue("Remote title"),
+            &Utc::now(),
+            Some(erased.clone()),
+        )
+        .await
+        .expect("create arm inserts the mirror issue");
+        hook.fires.lock().expect("lock").clear();
+        hook.comments.lock().expect("lock").clear();
+        let (issue_id2, _) = upsert_issue(
+            &pool,
+            &scan,
+            &gh_issue("Remote title edited"),
+            &Utc::now(),
+            Some(erased),
+        )
+        .await
+        .expect("update arm revisits the mirror issue");
+        assert_eq!(issue_id2, issue_id, "re-sync reuses the mirror issue");
+        assert!(
+            hook.fires.lock().expect("lock").is_empty(),
+            "same state: no fire"
+        );
+        assert!(
+            hook.comments.lock().expect("lock").is_empty(),
+            "same state: no completion dispatch"
+        );
+        cleanup(&pool, &scan, issue_id, Uuid::nil(), Uuid::nil()).await;
     }
 }
