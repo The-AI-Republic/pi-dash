@@ -9,7 +9,8 @@
 //! Two execution shapes, by writer kind:
 //!
 //! * Entity saves (`create`, `update`, `partial_update`, `soft_delete`,
-//!   `archive`, `unarchive`) run the row write on the caller's [`WriteTxn`]
+//!   `archive`, `unarchive`, `set_workpad`) run the row write on the
+//!   caller's [`WriteTxn`]
 //!   through `ActiveModel::insert` / `update`, so the `Issue.save()` hooks
 //!   fire ([`pidash_db::entity::issue_hooks`]). The post-commit effects run
 //!   as ONE queued chain step, in the handlers' exact order, because the
@@ -45,7 +46,7 @@ use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, NaiveDate, Timelike, Utc};
 use pidash_db::entity::issues;
-use sea_orm::{ActiveModelTrait, Set};
+use sea_orm::{ActiveModelTrait, ConnectionTrait, DbBackend, DbErr, Set, Statement};
 use serde_json::{Map, Value};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -473,7 +474,13 @@ where
 // ---------------------------------------------------------------------------
 
 /// `issue_activity.delay(type, requested_data, actor_id, issue_id,
-/// project_id, current_instance, epoch, notification, origin[, subscriber])`.
+/// project_id, current_instance, epoch[, notification][, origin][,
+/// subscriber])`. The app views always pass `notification=True` plus an
+/// origin (`app/views/issue/base.py:414-423`); the v1 views pass neither
+/// (`api/views/issue.py:516-525,844-853`) — hence `None` omits the key.
+/// The chain (not this builder) decides whether a missing origin stops
+/// the chain (app) or merely omits the key (v1); see
+/// [`IssueActivitySpec::require_origin`].
 #[allow(clippy::too_many_arguments)]
 fn issue_activity_kwargs(
     activity_type: &str,
@@ -482,7 +489,8 @@ fn issue_activity_kwargs(
     issue_id: &Uuid,
     project_id: &Uuid,
     current_instance: Value,
-    origin: &str,
+    notification: Option<bool>,
+    origin: Option<&str>,
     subscriber: Option<bool>,
 ) -> Map<String, Value> {
     let mut kwargs = Map::new();
@@ -499,8 +507,12 @@ fn issue_activity_kwargs(
         "epoch".to_owned(),
         Value::Number(serde_json::Number::from(Utc::now().timestamp())),
     );
-    kwargs.insert("notification".to_owned(), Value::Bool(true));
-    kwargs.insert("origin".to_owned(), Value::String(origin.to_owned()));
+    if let Some(notification) = notification {
+        kwargs.insert("notification".to_owned(), Value::Bool(notification));
+    }
+    if let Some(origin) = origin {
+        kwargs.insert("origin".to_owned(), Value::String(origin.to_owned()));
+    }
     if let Some(subscriber) = subscriber {
         kwargs.insert("subscriber".to_owned(), Value::Bool(subscriber));
     }
@@ -582,6 +594,14 @@ pub enum ChainStop {
     VisitDelete,
     /// The origin failed to resolve (`base_host` raises past the save).
     Origin,
+    /// The v1 create override `UPDATE` hit an integrity violation — the
+    /// port's `save_error` 400 arm (`PAYLOAD_NOT_VALID_BODY`).
+    OverrideConflict,
+    /// The v1 create override `UPDATE` failed any other way — `ServerError`.
+    OverrideFailed,
+    /// A v1 create override coercion failed — the port's constant
+    /// `BadError("Please provide valid detail")` 400 arm.
+    OverrideDetail,
 }
 
 /// The recorded outcome of one queued chain. The drain precedes
@@ -608,15 +628,21 @@ impl ChainOutcome {
 }
 
 /// The post-save transition fire arguments (one `fire_after_save` call).
+/// `moved_by_run` is the resolved `X-Pi-Dash-Run-Id` run on the v1 patch
+/// path (`views/issue.py:794-807`); every other driver passes `None`.
 #[derive(Debug, Clone)]
 pub struct FireSpec {
     pub dispatch_immediate: bool,
     pub created_by: Option<Uuid>,
+    pub moved_by_run: Option<Uuid>,
     pub now: DateTime<Utc>,
 }
 
 /// An `issue_activity` enqueue with its origin pre-resolved by the driver
-/// at the original point (`base_host` raises past the save).
+/// at the original point (`base_host` raises past the save). `notification`
+/// is `Some(true)` on the app paths and `None` (key omitted) on the v1
+/// paths; `require_origin` keeps the app stop-on-`None` while the v1 legs
+/// enqueue with the key omitted.
 #[derive(Debug, Clone)]
 pub struct IssueActivitySpec {
     pub event: String,
@@ -625,7 +651,9 @@ pub struct IssueActivitySpec {
     pub issue: Uuid,
     pub project: Uuid,
     pub current: Value,
+    pub notification: Option<bool>,
     pub origin: Option<String>,
+    pub require_origin: bool,
     pub subscriber: Option<bool>,
 }
 
@@ -674,6 +702,11 @@ enum ChainEffect {
         workspace_id: Uuid,
         created_by: Option<Uuid>,
     },
+    CreatedOverride {
+        issue_id: Uuid,
+        created_at: Result<Option<DateTime<Utc>>, ChainStop>,
+        created_by: Result<Option<Uuid>, ChainStop>,
+    },
     IssueActivity(IssueActivitySpec),
     ModelActivity(ModelActivitySpec),
     VersionTask {
@@ -698,6 +731,15 @@ const RECENT_VISIT_DELETE_SQL: &str = "DELETE FROM user_recent_visits AS visit \
     USING workspaces AS workspace WHERE visit.workspace_id = workspace.id \
     AND visit.project_id = $1 AND workspace.slug = $2 AND visit.entity_identifier = $3 \
     AND visit.entity_name = 'issue'";
+
+/// The v1 create raw-data overrides (`api/views/issue.py:505-509`), moved
+/// verbatim: a second save limited to `update_fields=["created_at",
+/// "created_by"]` on the refetched row. It stays a chain leg between the
+/// m2m writes and the activity fan-out (it cannot fold into the INSERT:
+/// the fire's entry-run creation reads the pre-override `created_by_id`
+/// from the row).
+const CREATED_OVERRIDE_SQL: &str =
+    r#"UPDATE "issues" SET "created_at" = $1, "created_by_id" = $2 WHERE "id" = $3"#;
 
 async fn run_chain(
     pool: &PgPool,
@@ -735,7 +777,7 @@ async fn run_chain(
                     prev_state_id: prev_state,
                     current_state_id: current_state,
                     dispatch_immediate: spec.dispatch_immediate,
-                    moved_by_run: None,
+                    moved_by_run: spec.moved_by_run,
                     now: spec.now,
                     jitter_secs: 0.0,
                     created_by: spec.created_by,
@@ -803,10 +845,55 @@ async fn run_chain(
                     break;
                 }
             }
+            ChainEffect::CreatedOverride {
+                issue_id,
+                created_at,
+                created_by,
+            } => {
+                // The coercions resolved pre-save (pure), but their errors
+                // surface here, in port order — a bad override 400s/500s
+                // with the issue, fire and m2m legs already persisted.
+                let created_at = match created_at {
+                    Ok(value) => value,
+                    Err(stop) => {
+                        outcome.record(stop);
+                        break;
+                    }
+                };
+                let created_by = match created_by {
+                    Ok(value) => value,
+                    Err(stop) => {
+                        outcome.record(stop);
+                        break;
+                    }
+                };
+                match sqlx::query(CREATED_OVERRIDE_SQL)
+                    .bind(created_at)
+                    .bind(created_by)
+                    .bind(issue_id)
+                    .execute(pool)
+                    .await
+                {
+                    Ok(_) => {}
+                    Err(error) if is_integrity_violation(&error) => {
+                        outcome.record(ChainStop::OverrideConflict);
+                        break;
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "post-commit created-override failed; response fails");
+                        outcome.record(ChainStop::OverrideFailed);
+                        break;
+                    }
+                }
+            }
             ChainEffect::IssueActivity(spec) => {
-                let Some(origin) = spec.origin else {
-                    outcome.record(ChainStop::Origin);
-                    break;
+                let origin = match spec.origin {
+                    Some(origin) => Some(origin),
+                    None if spec.require_origin => {
+                        outcome.record(ChainStop::Origin);
+                        break;
+                    }
+                    None => None,
                 };
                 let kwargs = issue_activity_kwargs(
                     &spec.event,
@@ -815,7 +902,8 @@ async fn run_chain(
                     &spec.issue,
                     &spec.project,
                     spec.current,
-                    &origin,
+                    spec.notification,
+                    origin.as_deref(),
                     spec.subscriber,
                 );
                 enqueue
@@ -898,11 +986,29 @@ pub struct SaveOutcome {
     pub chain: ChainOutcome,
 }
 
+/// The v1 create raw-data overrides (`api/views/issue.py:505-509`): the
+/// driver-resolved coercions of the raw `created_at` / `created_by` (key
+/// absent: now / the actor). A `Result` because the coercions are pure
+/// but their failures surface post-commit, in port order, with the row,
+/// fire and m2m legs already persisted — the `Err` carries the
+/// pre-mapped [`ChainStop`] (`OverrideDetail` for the constant 400,
+/// `OverrideFailed` for the 500 arms).
+#[derive(Debug, Clone)]
+pub struct CreatedOverride {
+    pub created_at: Result<Option<DateTime<Utc>>, ChainStop>,
+    pub created_by: Result<Option<Uuid>, ChainStop>,
+}
+
 /// `POST .../issues/`: the assembled row, its m2m plan, the fire spec and
 /// the created-activity parts. The origin resolves post-save (a `None`
-/// stops the chain ahead of the activity); the driver calls
-/// [`emit_model_activity`] and [`emit_version_task`] after its
-/// response-row fetch.
+/// stops the chain ahead of the activity on the app path); the app driver
+/// calls [`emit_model_activity`] and [`emit_version_task`] after its
+/// response-row fetch, while the v1 driver queues its model activity in
+/// the chain (`model_activity`) and its raw-data overrides ahead of the
+/// activity (`created_override`) — Django runs both before the render.
+/// `activity_notification` / `activity_require_origin` select the
+/// `issue_activity` key shape: `Some(true)` / `true` on the app path,
+/// `None` / `false` on the v1 path (keys omitted).
 pub struct CreateIssue {
     pub fields: IssueFieldSet,
     pub assignees: Vec<Uuid>,
@@ -911,6 +1017,10 @@ pub struct CreateIssue {
     pub fire: FireSpec,
     pub origin: Option<String>,
     pub activity_requested: Value,
+    pub activity_notification: Option<bool>,
+    pub activity_require_origin: bool,
+    pub model_activity: Option<ModelActivitySpec>,
+    pub created_override: Option<CreatedOverride>,
 }
 
 /// `POST .../issues/` (`base.py:397-485`): the atomic sequence/sort INSERT
@@ -977,6 +1087,18 @@ pub async fn create(
             ignore_conflicts: false,
         });
     }
+    // The v1 raw-data overrides land between the m2m writes and the
+    // activity fan-out (`api/views/issue.py:505-525`); the app path has
+    // none. The v1 `issue_activity` omits `notification`/`origin`
+    // (`api/views/issue.py:516-525`); the app leg keeps both plus the
+    // stop-on-`None` origin.
+    if let Some(over) = input.created_override {
+        chain.push(ChainEffect::CreatedOverride {
+            issue_id: model.id,
+            created_at: over.created_at,
+            created_by: over.created_by,
+        });
+    }
     chain.push(ChainEffect::IssueActivity(IssueActivitySpec {
         event: "issue.activity.created".to_owned(),
         requested: input.activity_requested,
@@ -984,9 +1106,14 @@ pub async fn create(
         issue: model.id,
         project: model.project_id,
         current: Value::Null,
+        notification: input.activity_notification,
         origin: input.origin,
+        require_origin: input.activity_require_origin,
         subscriber: None,
     }));
+    if let Some(spec) = input.model_activity {
+        chain.push(ChainEffect::ModelActivity(spec));
+    }
     let outcome = ChainOutcome::new();
     let step = outcome.clone();
     let pool = pool.clone();
@@ -1032,11 +1159,16 @@ pub async fn emit_version_task(
 
 /// The shared full-save input: the post-overlay row, the present m2m keys
 /// with their effective ids (`None` = key absent, leg skipped), the
-/// pre-save state snapshot and the fire spec.
+/// pre-save state snapshot and the fire spec. `m2m_audit` is the PRE-save
+/// row's audit pair: Django reads it off the instance before assigning
+/// the validated values (`serializers/issue.py:375-379`), so a driver
+/// whose overlay can move `created_by` passes the fetched values, not the
+/// overlaid ones.
 pub struct UpdateIssue {
     pub fields: IssueFieldSet,
     pub assignees: Option<Vec<Uuid>>,
     pub labels: Option<Vec<Uuid>>,
+    pub m2m_audit: (Option<Uuid>, Option<Uuid>),
     pub prev_state: Option<Uuid>,
     pub fire: FireSpec,
 }
@@ -1057,6 +1189,8 @@ pub async fn update(
         input.fields,
         input.assignees,
         input.labels,
+        input.m2m_audit,
+        None,
         input.prev_state,
         input.fire,
         None,
@@ -1064,16 +1198,22 @@ pub async fn update(
     .await
 }
 
-/// The PATCH activity trio, built pre-save by the driver: the spaced body
-/// dump, the pre-update detail dump (doubling as the version task's
+/// The PATCH activity fan-out, built pre-save by the driver: the spaced
+/// body dump, the pre-update detail dump (doubling as the version task's
 /// `updated_issue`) and the raw body for `model_activity`. `None` is the
-/// `skip_activity` description-only skip: no task at all.
+/// `skip_activity` description-only skip: no task at all. The v1 views
+/// enqueue no version task (`api/views/issue.py:844-865`) and omit the
+/// `issue_activity` notification/origin keys — `emit_version`,
+/// `notification` and `require_origin` carry those per-view shapes.
 pub struct UpdateActivity {
     pub origin: Option<String>,
     pub requested: String,
     pub current_instance: String,
     pub raw_body: Value,
     pub slug: String,
+    pub notification: Option<bool>,
+    pub require_origin: bool,
+    pub emit_version: bool,
 }
 
 /// `PATCH .../issues/<pk>/` (`base.py:621-721`): like [`update`], plus
@@ -1082,6 +1222,8 @@ pub struct PartialIssue {
     pub fields: IssueFieldSet,
     pub assignees: Option<Vec<Uuid>>,
     pub labels: Option<Vec<Uuid>>,
+    pub m2m_audit: (Option<Uuid>, Option<Uuid>),
+    pub sequence: Option<Result<i32, ()>>,
     pub prev_state: Option<Uuid>,
     pub fire: FireSpec,
     pub activity: Option<UpdateActivity>,
@@ -1100,6 +1242,8 @@ pub async fn partial_update(
         input.fields,
         input.assignees,
         input.labels,
+        input.m2m_audit,
+        input.sequence,
         input.prev_state,
         input.fire,
         input.activity,
@@ -1112,9 +1256,11 @@ async fn update_driver(
     ctx: &WriteCtx,
     txn: &mut WriteTxn,
     pool: &PgPool,
-    fields: IssueFieldSet,
+    mut fields: IssueFieldSet,
     assignees: Option<Vec<Uuid>>,
     labels: Option<Vec<Uuid>>,
+    m2m_audit: (Option<Uuid>, Option<Uuid>),
+    sequence: Option<Result<i32, ()>>,
     prev_state: Option<Uuid>,
     fire: FireSpec,
     activity: Option<UpdateActivity>,
@@ -1122,7 +1268,6 @@ async fn update_driver(
     // The m2m legs run ahead of the row write (`update()` pops them
     // first), on the pool: they persist even when the save fails, so they
     // stay out of the transaction. Audit ids come from the pre-save row.
-    let audit = (fields.created_by_id, fields.updated_by_id);
     if let Some(ids) = &assignees {
         update_m2m_leg(
             pool,
@@ -1133,7 +1278,7 @@ async fn update_driver(
             &fields.id,
             &fields.project_id,
             &fields.workspace_id,
-            audit,
+            m2m_audit,
         )
         .await?;
     }
@@ -1147,9 +1292,17 @@ async fn update_driver(
             &fields.id,
             &fields.project_id,
             &fields.workspace_id,
-            audit,
+            m2m_audit,
         )
         .await?;
+    }
+    // The save-time `sequence_id` int4 check (DRF never range-checks the
+    // integer — the `DataError` surfaces at save, past the m2m legs, as a
+    // 500). The driver pre-computes the coercion; `None` (key absent, or a
+    // driver that validated up front) keeps the assembled value.
+    if let Some(checked) = sequence {
+        fields.sequence_id =
+            checked.map_err(|()| DomainError::Work("sequence_id out of int4 range".to_owned()))?;
     }
     let transition = transition_hook(txn);
     let enqueue = enqueue_hook(txn);
@@ -1181,7 +1334,9 @@ async fn update_driver(
             issue: model.id,
             project: model.project_id,
             current: Value::String(activity.current_instance.clone()),
+            notification: activity.notification,
             origin: activity.origin.clone(),
+            require_origin: activity.require_origin,
             subscriber: None,
         }));
         chain.push(ChainEffect::ModelActivity(ModelActivitySpec {
@@ -1192,12 +1347,14 @@ async fn update_driver(
             slug: activity.slug,
             origin: activity.origin,
         }));
-        chain.push(ChainEffect::VersionTask {
-            updated_issue: activity.current_instance,
-            issue_id: model.id,
-            user_id: actor,
-            is_creating: None,
-        });
+        if activity.emit_version {
+            chain.push(ChainEffect::VersionTask {
+                updated_issue: activity.current_instance,
+                issue_id: model.id,
+                user_id: actor,
+                is_creating: None,
+            });
+        }
     }
     let outcome = ChainOutcome::new();
     let step = outcome.clone();
@@ -1265,7 +1422,9 @@ pub async fn soft_delete(
             issue: model.id,
             project: model.project_id,
             current: Value::Object(Map::new()),
+            notification: Some(true),
             origin: input.origin,
+            require_origin: true,
             subscriber: Some(false),
         }),
     ];
@@ -1279,6 +1438,110 @@ pub async fn soft_delete(
         issue: model,
         chain: outcome,
     })
+}
+
+/// The workpad-PATCH issue read (`api/views/issue.py:3307-3311`), moved
+/// verbatim: `LIMIT 21` (executed `.get()`) + `FOR UPDATE OF issues`
+/// (`of=("self",)` — a bare lock would 500 on the nullable state join).
+/// The triage/archived/draft predicates are load-bearing (a miss 404s);
+/// the projected `state_group` goes unused — the save hook re-reads the
+/// group itself, in the same transaction and snapshot. Public because the
+/// driver probes existence with the SAME text on the pool before
+/// validating (a miss 404s ahead of validation errors, as today) — one
+/// text, so the probe and the lock can never disagree on the match. The
+/// `FOR UPDATE` is harmless in the driver's autocommit probe (the lock
+/// releases at statement end).
+pub const WORKPAD_SELECT_SQL: &str = r#"SELECT "issues"."description_html", "issues"."state_id",
+          "issues"."completed_at", "states"."group" AS "state_group"
+   FROM "issues"
+   LEFT OUTER JOIN "states" ON ("issues"."state_id" = "states"."id")
+   INNER JOIN "projects" ON ("issues"."project_id" = "projects"."id")
+   INNER JOIN "workspaces" ON ("issues"."workspace_id" = "workspaces"."id")
+   WHERE ("issues"."deleted_at" IS NULL
+     AND NOT ("states"."group" = 'triage' AND "states"."group" IS NOT NULL)
+     AND NOT ("issues"."archived_at" IS NOT NULL)
+     AND NOT ("projects"."archived_at" IS NOT NULL)
+     AND NOT ("issues"."is_draft")
+     AND "issues"."id" = $1
+     AND "issues"."project_id" = $2
+     AND "workspaces"."slug" = $3)
+   LIMIT 21 FOR UPDATE OF "issues""#;
+
+/// `PATCH .../workpad/`: the issue, project and slug for the locked read,
+/// the validated workpad text and the driver-stamped `updated_at` (the
+/// response renders the stamp, so the driver owns the clock).
+pub struct SetWorkpad {
+    pub issue_id: Uuid,
+    pub project_id: Uuid,
+    pub slug: String,
+    pub workpad: String,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// `PATCH .../issues/<pk>/workpad/` (`api/views/issue.py:3287-3320`): the
+/// locked read plus the sparse `save()` (workpad, audit and hook
+/// recomputes) inside the domain transaction, then the completion pair
+/// when the state moved. No orchestration fire — the port has none.
+///
+/// The driver probes existence with the same `SELECT` on the pool BEFORE
+/// validating (a miss 404s ahead of validation errors, as today), then
+/// calls this after validation; a lock-read miss here (a mid-flight
+/// delete) is `RecordNotFound`, the drivers' `NotFound` arm.
+pub async fn set_workpad(
+    ctx: &WriteCtx,
+    txn: &mut WriteTxn,
+    pool: &PgPool,
+    input: SetWorkpad,
+) -> Result<ChainOutcome, DomainError> {
+    let row = txn
+        .connection()
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            WORKPAD_SELECT_SQL,
+            [
+                sea_orm::Value::from(input.issue_id),
+                sea_orm::Value::from(input.project_id),
+                sea_orm::Value::from(input.slug),
+            ],
+        ))
+        .await?
+        .ok_or_else(|| DomainError::Db(DbErr::RecordNotFound("workpad issue".to_owned())))?;
+    let description_html: String = row.try_get("", "description_html")?;
+    let prev_state: Option<Uuid> = row.try_get("", "state_id")?;
+    let completed_at: Option<sea_orm::prelude::DateTimeWithTimeZone> =
+        row.try_get("", "completed_at")?;
+    // The sparse save: only the workpad, audit and hook recomputes move —
+    // current values ride `Unchanged` for the hook reads (the archive
+    // shape). Hook-`Set` fields join the `UPDATE`, so `completed_at` /
+    // `description_stripped` (and the default state on the NULL leg) land
+    // exactly the ported columns.
+    let model = issues::ActiveModel {
+        id: sea_orm::Unchanged(input.issue_id),
+        project_id: sea_orm::Unchanged(input.project_id),
+        workpad: Set(input.workpad),
+        description_html: sea_orm::Unchanged(description_html),
+        state_id: sea_orm::Unchanged(prev_state),
+        completed_at: sea_orm::Unchanged(completed_at),
+        updated_at: Set(input.updated_at.into()),
+        updated_by_id: Set(actor_or_none(ctx)),
+        ..Default::default()
+    }
+    .update(&txn.connection())
+    .await?;
+    let transition = transition_hook(txn);
+    let enqueue = enqueue_hook(txn);
+    let outcome = ChainOutcome::new();
+    let step = outcome.clone();
+    let pool = pool.clone();
+    let chain = vec![ChainEffect::CompletionIfChanged {
+        issue_id: model.id,
+        prev_state,
+        current_state: model.state_id,
+    }];
+    txn.on_commit(move || async move {
+        run_chain(&pool, &transition, &enqueue, chain, &step).await;
+    });
+    Ok(outcome)
 }
 
 /// An activity enqueue that runs ahead of the row write (the archive
@@ -1398,7 +1661,8 @@ async fn archive_driver(
         &issue_id,
         &pre_activity.project,
         Value::String(pre_activity.current_instance),
-        &pre_activity.origin,
+        Some(true),
+        Some(&pre_activity.origin),
         pre_activity.subscriber,
     );
     enqueue
@@ -1484,7 +1748,8 @@ pub async fn bulk_archive_activity(
         &row.issue_id,
         &row.project_id,
         Value::String(row.current_instance.clone()),
-        &row.origin,
+        Some(true),
+        Some(&row.origin),
         None,
     );
     enqueue
@@ -1596,7 +1861,8 @@ mod tests {
             &uid(2),
             &uid(3),
             Value::String("cur".to_owned()),
-            "https://app.example",
+            Some(true),
+            Some("https://app.example"),
             Some(false),
         );
         assert_eq!(
@@ -1647,11 +1913,94 @@ mod tests {
             &uid(2),
             &uid(3),
             Value::Null,
-            "https://app.example",
+            Some(true),
+            Some("https://app.example"),
             None,
         );
         assert!(!kwargs.contains_key("subscriber"));
         assert!(kwargs.get("requested_data").unwrap().is_null());
+    }
+
+    #[test]
+    fn v1_activity_kwargs_match_work_tasks_bytes() {
+        // The domain v1-shaped legs must emit byte-identical kwargs to the
+        // `v1_work_items::tasks` builders they replace (`Map` is
+        // insertion-ordered workspace-wide, so key ORDER is load-bearing).
+        // `epoch` stamps twice, so it compares separately.
+        let mine = issue_activity_kwargs(
+            "issue.activity.created",
+            Value::String("req".to_owned()),
+            &uid(1),
+            &uid(2),
+            &uid(3),
+            Value::Null,
+            None,
+            None,
+            None,
+        );
+        let theirs = crate::v1_work_items::tasks::issue_activity_kwargs(
+            "issue.activity.created",
+            Some("req"),
+            &uid(1).to_string(),
+            &uid(2).to_string(),
+            &uid(3).to_string(),
+            None,
+            0,
+        );
+        assert!(mine.get("epoch").and_then(Value::as_i64).unwrap_or(0) > 0);
+        let mut mine = mine;
+        let mut theirs = theirs;
+        mine.shift_remove("epoch");
+        theirs.shift_remove("epoch");
+        assert_eq!(
+            serde_json::to_string(&Value::Object(mine)).expect("json"),
+            serde_json::to_string(&Value::Object(theirs)).expect("json"),
+        );
+        let raw = serde_json::json!({"name": "n"});
+        let mine_model = model_activity_kwargs(
+            &uid(2),
+            raw.clone(),
+            Value::String("cur".to_owned()),
+            &uid(1),
+            "ws",
+            "https://app.example",
+        );
+        let theirs_model = crate::v1_work_items::tasks::issue_model_activity_kwargs(
+            &uid(2).to_string(),
+            raw,
+            Some("cur"),
+            &uid(1).to_string(),
+            "ws",
+            "https://app.example",
+        );
+        assert_eq!(
+            serde_json::to_string(&Value::Object(mine_model)).expect("json"),
+            serde_json::to_string(&Value::Object(theirs_model)).expect("json"),
+        );
+    }
+
+    #[test]
+    fn issue_activity_kwargs_omit_v1_keys() {
+        // The v1 `issue_activity` calls carry neither `notification` nor
+        // `origin` (`api/views/issue.py:516-525,844-853`).
+        let kwargs = issue_activity_kwargs(
+            "issue.activity.created",
+            Value::String("req".to_owned()),
+            &uid(1),
+            &uid(2),
+            &uid(3),
+            Value::Null,
+            None,
+            None,
+            None,
+        );
+        assert!(!kwargs.contains_key("notification"));
+        assert!(!kwargs.contains_key("origin"));
+        assert!(!kwargs.contains_key("subscriber"));
+        assert_eq!(
+            kwargs.get("requested_data").and_then(Value::as_str),
+            Some("req")
+        );
     }
 
     #[test]
@@ -1782,6 +2131,7 @@ mod tests {
         FireSpec {
             dispatch_immediate: true,
             created_by: Some(uid(9)),
+            moved_by_run: None,
             now: Utc::now(),
         }
     }
@@ -1824,7 +2174,9 @@ mod tests {
                     issue: uid(2),
                     project: uid(3),
                     current: Value::Null,
+                    notification: Some(true),
                     origin: Some("https://app.example".to_owned()),
+                    require_origin: true,
                     subscriber: None,
                 }),
             ],
@@ -1905,7 +2257,9 @@ mod tests {
                     issue: uid(2),
                     project: uid(3),
                     current: Value::Null,
+                    notification: Some(true),
                     origin: Some("https://app.example".to_owned()),
+                    require_origin: true,
                     subscriber: None,
                 }),
             ],
@@ -2096,10 +2450,15 @@ mod tests {
                         fire: FireSpec {
                             dispatch_immediate: true,
                             created_by: Some(actor),
+                            moved_by_run: None,
                             now: now_micros(),
                         },
                         origin: Some("https://app.example".to_owned()),
                         activity_requested: Value::String("{\"name\": \"svc issue\"}".to_owned()),
+                        activity_notification: Some(true),
+                        activity_require_origin: true,
+                        model_activity: None,
+                        created_override: None,
                     },
                 )
                 .await
@@ -2157,6 +2516,8 @@ mod tests {
                     txn,
                     &pool,
                     PartialIssue {
+                        m2m_audit: (patched.created_by_id, patched.updated_by_id),
+                        sequence: None,
                         fields: patched,
                         assignees: Some(vec![assignee]),
                         labels: None,
@@ -2164,6 +2525,7 @@ mod tests {
                         fire: FireSpec {
                             dispatch_immediate: true,
                             created_by: Some(actor),
+                            moved_by_run: None,
                             now: now_micros(),
                         },
                         activity: Some(UpdateActivity {
@@ -2172,6 +2534,9 @@ mod tests {
                             current_instance: "{\"name\": \"svc issue\"}".to_owned(),
                             raw_body: serde_json::json!({"priority": "urgent"}),
                             slug: "svc-ws".to_owned(),
+                            notification: Some(true),
+                            require_origin: true,
+                            emit_version: true,
                         }),
                     },
                 )
@@ -2285,7 +2650,9 @@ mod tests {
                     issue: uid(2),
                     project: uid(3),
                     current: Value::Null,
+                    notification: Some(true),
                     origin: None,
+                    require_origin: true,
                     subscriber: None,
                 }),
             ],
@@ -2297,5 +2664,583 @@ mod tests {
         assert_eq!(outcome.stopped(), Some(ChainStop::Origin));
         assert_eq!(transition.fires.lock().expect("lock").len(), 1);
         assert!(enqueue.calls.lock().expect("lock").is_empty());
+    }
+
+    #[tokio::test]
+    async fn fire_request_carries_moved_by_run() {
+        // The v1 patch stamps the resolved header run on the fire
+        // (`views/issue.py:794-807`).
+        let pool = lazy_pool();
+        let transition = Arc::new(RecordingTransition {
+            comments: Mutex::new(Vec::new()),
+            fires: Mutex::new(Vec::new()),
+            fire_result: Mutex::new(Ok(FireOutcome::NoTransition)),
+        });
+        let erased_transition: Arc<dyn IssueTransitionHook> = transition.clone();
+        let enqueue = Arc::new(RecordingEnqueue {
+            calls: Mutex::new(Vec::new()),
+        });
+        let erased_enqueue: Arc<dyn TaskEnqueueHook> = enqueue.clone();
+        let outcome = ChainOutcome::new();
+        let mut spec = fire_spec();
+        spec.moved_by_run = Some(uid(12));
+        run_chain(
+            &pool,
+            &erased_transition,
+            &erased_enqueue,
+            vec![ChainEffect::FireTransition {
+                issue_id: uid(2),
+                prev_state: Some(uid(10)),
+                current_state: Some(uid(11)),
+                spec,
+                actor_id: uid(1),
+            }],
+            &outcome,
+        )
+        .await;
+        assert!(outcome.stopped().is_none());
+        let fires = transition.fires.lock().expect("lock");
+        assert_eq!(fires.len(), 1);
+        assert_eq!(fires[0].moved_by_run, Some(uid(12)));
+        assert!(fires[0].dispatch_immediate);
+    }
+
+    #[tokio::test]
+    async fn v1_activity_leg_omits_keys_without_stopping() {
+        // The v1 legs enqueue with neither key and never stop on the
+        // missing origin — the `?` on `app_origin` runs ahead of the
+        // model leg instead.
+        let pool = lazy_pool();
+        let transition = Arc::new(RecordingTransition {
+            comments: Mutex::new(Vec::new()),
+            fires: Mutex::new(Vec::new()),
+            fire_result: Mutex::new(Ok(FireOutcome::NoTransition)),
+        });
+        let erased_transition: Arc<dyn IssueTransitionHook> = transition.clone();
+        let enqueue = Arc::new(RecordingEnqueue {
+            calls: Mutex::new(Vec::new()),
+        });
+        let erased_enqueue: Arc<dyn TaskEnqueueHook> = enqueue.clone();
+        let outcome = ChainOutcome::new();
+        run_chain(
+            &pool,
+            &erased_transition,
+            &erased_enqueue,
+            vec![ChainEffect::IssueActivity(IssueActivitySpec {
+                event: "issue.activity.created".to_owned(),
+                requested: Value::String("req".to_owned()),
+                actor: uid(1),
+                issue: uid(2),
+                project: uid(3),
+                current: Value::Null,
+                notification: None,
+                origin: None,
+                require_origin: false,
+                subscriber: None,
+            })],
+            &outcome,
+        )
+        .await;
+        assert!(outcome.stopped().is_none());
+        let calls = enqueue.calls.lock().expect("lock");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, ISSUE_ACTIVITY_TASK);
+        assert!(!calls[0].2.contains_key("notification"));
+        assert!(!calls[0].2.contains_key("origin"));
+    }
+
+    /// The save-time `sequence_id` check runs past the m2m legs: a bad
+    /// sequence 500s with the m2m writes already persisted and the row
+    /// untouched; a good one lands on the save.
+    #[tokio::test]
+    async fn partial_update_sequence_check_runs_past_m2m() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let db = pidash_db::sea_orm_connection(&pool);
+        let actor = Uuid::new_v4();
+        let old_link = Uuid::new_v4();
+        let new_link = Uuid::new_v4();
+        let workspace_id = Uuid::new_v4();
+        let project_id = Uuid::new_v4();
+        let backlog_id = Uuid::new_v4();
+        for user_id in [actor, old_link, new_link] {
+            let username = format!("sq-{}", user_id.simple());
+            sqlx::query(
+                "INSERT INTO users (id, password, username, email, first_name, last_name, \
+                 avatar, date_joined, created_at, updated_at, last_location, created_location, \
+                 is_superuser, is_managed, is_password_expired, is_active, is_staff, \
+                 is_email_verified, is_password_autoset, token, user_timezone, last_login_ip, \
+                 last_logout_ip, last_login_medium, last_login_uagent, is_bot, display_name, \
+                 is_email_valid, is_password_reset_required) VALUES ($1, '!', $2, $3, 'CT', \
+                 'User', '', now(), now(), now(), '', '', false, false, false, true, false, \
+                 true, false, $4, 'UTC', '', '', '', '', false, $2, true, false)",
+            )
+            .bind(user_id)
+            .bind(username.clone())
+            .bind(format!("{username}@example.test"))
+            .bind("t".repeat(64))
+            .execute(&pool)
+            .await
+            .expect("seed user");
+        }
+        sqlx::query(
+            "INSERT INTO workspaces (id, created_at, updated_at, name, slug, timezone, \
+             background_color, owner_id) VALUES ($1, now(), now(), 'sq ws', $2, 'UTC', \
+             '#ffffff', $3)",
+        )
+        .bind(workspace_id)
+        .bind(format!("sq-{workspace_id}"))
+        .bind(actor)
+        .execute(&pool)
+        .await
+        .expect("seed workspace");
+        sqlx::query(
+            "INSERT INTO projects (id, name, description, network, identifier, workspace_id, \
+             created_by_id, cycle_view, module_view, issue_views_view, page_view, intake_view, \
+             archive_in, close_in, logo_props, is_time_tracking_enabled, is_issue_type_enabled, \
+             guest_view_all_features, timezone, members_can_edit_states, repo_url, base_branch, \
+             agent_default_interval_seconds, agent_default_max_ticks, agent_ticking_enabled, \
+             is_default, agent_review_default_interval_seconds, default_agent_executor, \
+             agent_test_default_interval_seconds, created_at, updated_at) VALUES ($1, \
+             'sq project', '', 0, $2, $3, $4, true, true, true, true, false, 0, 0, '{}', true, \
+             true, false, 'UTC', false, '', '', 0, 0, false, false, 0, '', 0, now(), now())",
+        )
+        .bind(project_id)
+        .bind(format!(
+            "Q{:08X}",
+            (project_id.as_u128() & 0xffff_ffff) as u32
+        ))
+        .bind(workspace_id)
+        .bind(actor)
+        .execute(&pool)
+        .await
+        .expect("seed project");
+        sqlx::query(
+            "INSERT INTO states (id, created_at, updated_at, name, description, color, \
+             slug, project_id, workspace_id, sequence, \"group\", \"default\", is_triage) \
+             VALUES ($1, now(), now(), 'Backlog', '', '#ff0000', $2, $3, $4, 100.0, \
+             'backlog', true, false)",
+        )
+        .bind(backlog_id)
+        .bind(format!("sq-backlog-{project_id}"))
+        .bind(project_id)
+        .bind(workspace_id)
+        .execute(&pool)
+        .await
+        .expect("seed state");
+        let issue_id = Uuid::new_v4();
+        sqlx::query(
+            r#"INSERT INTO "issues" ("id", "created_at", "updated_at", "deleted_at", "point",
+             "name", "description_json", "description_html", "description_stripped",
+             "description_binary", "priority", "complexity_score", "start_date",
+             "target_date", "sequence_id", "sort_order", "completed_at", "archived_at",
+             "is_draft", "external_source", "external_id", "git_work_branch", "workpad",
+             "created_via", "agent_executor", "created_by_id", "updated_by_id", "project_id",
+             "workspace_id", "parent_id", "state_id", "estimate_point_id", "type_id",
+             "assigned_pod_id")
+             VALUES ($1, now(), now(), NULL, NULL, 'sq issue', '{}', '<p>Hi</p>', 'Hi',
+             NULL, 'none', 0, NULL, NULL, 1, 65535.0, NULL, NULL, false, NULL, NULL, '',
+             '', NULL, NULL, $2, NULL, $3, $4, NULL, $5, NULL, NULL, NULL)"#,
+        )
+        .bind(issue_id)
+        .bind(actor)
+        .bind(project_id)
+        .bind(workspace_id)
+        .bind(backlog_id)
+        .execute(&pool)
+        .await
+        .expect("seed issue");
+        sqlx::query(
+            r#"INSERT INTO "issue_assignees" ("id", "created_at", "updated_at", "created_by_id",
+             "updated_by_id", "deleted_at", "project_id", "workspace_id", "issue_id",
+             "assignee_id") VALUES ($1, now(), now(), $2, NULL, NULL, $3, $4, $5, $6)"#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(actor)
+        .bind(project_id)
+        .bind(workspace_id)
+        .bind(issue_id)
+        .bind(old_link)
+        .execute(&pool)
+        .await
+        .expect("seed assignee link");
+
+        let ctx = WriteCtx::new(super::super::ctx::WriteActor {
+            user_id: actor,
+            timezone: Some("UTC".to_owned()),
+        });
+        let transition = Arc::new(RecordingTransition {
+            comments: Mutex::new(Vec::new()),
+            fires: Mutex::new(Vec::new()),
+            fire_result: Mutex::new(Ok(FireOutcome::NoTransition)),
+        });
+        let enqueue = Arc::new(RecordingEnqueue {
+            calls: Mutex::new(Vec::new()),
+        });
+        let run_patch = |sequence: Option<Result<i32, ()>>| {
+            let transition = transition.clone();
+            let enqueue = enqueue.clone();
+            let pool = pool.clone();
+            let ctx = ctx.clone();
+            let db = db.clone();
+            async move {
+                super::super::run(&ctx, &db, |txn| {
+                    let transition = transition.clone();
+                    let enqueue = enqueue.clone();
+                    let pool = pool.clone();
+                    let ctx = ctx.clone();
+                    Box::pin(async move {
+                        let transition_hook: Arc<dyn IssueTransitionHook> = transition;
+                        let enqueue_hook: Arc<dyn TaskEnqueueHook> = enqueue;
+                        txn.hooks_mut().register(transition_hook);
+                        txn.hooks_mut().register(enqueue_hook);
+                        partial_update(
+                            &ctx,
+                            txn,
+                            &pool,
+                            PartialIssue {
+                                m2m_audit: (Some(actor), None),
+                                sequence,
+                                fields: IssueFieldSet {
+                                    id: issue_id,
+                                    created_at: now_micros(),
+                                    updated_at: now_micros(),
+                                    created_by_id: Some(actor),
+                                    updated_by_id: None,
+                                    deleted_at: None,
+                                    project_id,
+                                    workspace_id,
+                                    parent_id: None,
+                                    state_id: Some(backlog_id),
+                                    point: None,
+                                    estimate_point_id: None,
+                                    name: "sq issue v2".to_owned(),
+                                    description_json: Value::Object(Map::new()),
+                                    description_html: "<p>Hi</p>".to_owned(),
+                                    description_stripped: Some("Hi".to_owned()),
+                                    description_binary: None,
+                                    priority: "none".to_owned(),
+                                    complexity_score: 0,
+                                    start_date: None,
+                                    target_date: None,
+                                    sequence_id: 1,
+                                    sort_order: 65535.0,
+                                    completed_at: None,
+                                    archived_at: None,
+                                    is_draft: false,
+                                    external_source: None,
+                                    external_id: None,
+                                    type_id: None,
+                                    git_work_branch: String::new(),
+                                    workpad: String::new(),
+                                    created_via: None,
+                                    assigned_pod_id: None,
+                                    agent_executor: None,
+                                },
+                                assignees: Some(vec![new_link]),
+                                labels: None,
+                                prev_state: Some(backlog_id),
+                                fire: FireSpec {
+                                    dispatch_immediate: true,
+                                    created_by: Some(actor),
+                                    moved_by_run: None,
+                                    now: now_micros(),
+                                },
+                                activity: None,
+                            },
+                        )
+                        .await
+                    })
+                })
+                .await
+            }
+        };
+
+        // The bad sequence fails the write, but the m2m leg (sweep + new
+        // link) already persisted on the pool, and the row never saved.
+        let failed = run_patch(Some(Err(()))).await;
+        assert!(matches!(failed, Err(DomainError::Work(_))));
+        let swept: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM issue_assignees WHERE issue_id = $1 AND assignee_id = $2 \
+             AND deleted_at IS NOT NULL",
+        )
+        .bind(issue_id)
+        .bind(old_link)
+        .fetch_one(&pool)
+        .await
+        .expect("sweep reread");
+        assert_eq!(swept.0, 1);
+        let live: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM issue_assignees WHERE issue_id = $1 AND assignee_id = $2 \
+             AND deleted_at IS NULL",
+        )
+        .bind(issue_id)
+        .bind(new_link)
+        .fetch_one(&pool)
+        .await
+        .expect("link reread");
+        assert_eq!(live.0, 1);
+        let row: (String, i32) =
+            sqlx::query_as(r#"SELECT "name", "sequence_id" FROM "issues" WHERE "id" = $1"#)
+                .bind(issue_id)
+                .fetch_one(&pool)
+                .await
+                .expect("row reread");
+        assert_eq!(row, ("sq issue".to_owned(), 1));
+
+        // The good sequence lands on the save.
+        let outcome = run_patch(Some(Ok(9))).await.expect("good patch");
+        assert!(outcome.chain.stopped().is_none());
+        assert_eq!(outcome.issue.sequence_id, 9);
+
+        for sql in [
+            "DELETE FROM issue_assignees WHERE issue_id = $1",
+            "DELETE FROM issues WHERE id = $1",
+        ] {
+            sqlx::query(sql)
+                .bind(issue_id)
+                .execute(&pool)
+                .await
+                .expect("cleanup");
+        }
+    }
+
+    #[test]
+    fn created_override_sql_is_the_ported_update() {
+        // The v1 create second save, moved verbatim — the guard fails on
+        // drift, this test fails on silent reshaping.
+        assert_eq!(
+            CREATED_OVERRIDE_SQL,
+            r#"UPDATE "issues" SET "created_at" = $1, "created_by_id" = $2 WHERE "id" = $3"#
+        );
+    }
+
+    /// End-to-end through `domain::run` with recording hooks: a workpad
+    /// write on a live issue lands the text + audit + hook recomputes with
+    /// no completion leg, a NULL-state write takes the default state and
+    /// records the completion pair, and a missing issue is `NotFound`.
+    #[tokio::test]
+    async fn set_workpad_roundtrip() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let db = pidash_db::sea_orm_connection(&pool);
+        let actor = Uuid::new_v4();
+        let workspace_id = Uuid::new_v4();
+        let slug = format!("wp-{workspace_id}");
+        let project_id = Uuid::new_v4();
+        let backlog_id = Uuid::new_v4();
+        let username = format!("wp-{}", actor.simple());
+        sqlx::query(
+            "INSERT INTO users (id, password, username, email, first_name, last_name, \
+             avatar, date_joined, created_at, updated_at, last_location, created_location, \
+             is_superuser, is_managed, is_password_expired, is_active, is_staff, \
+             is_email_verified, is_password_autoset, token, user_timezone, last_login_ip, \
+             last_logout_ip, last_login_medium, last_login_uagent, is_bot, display_name, \
+             is_email_valid, is_password_reset_required) VALUES ($1, '!', $2, $3, 'CT', \
+             'User', '', now(), now(), now(), '', '', false, false, false, true, false, \
+             true, false, $4, 'UTC', '', '', '', '', false, $2, true, false)",
+        )
+        .bind(actor)
+        .bind(username.clone())
+        .bind(format!("{username}@example.test"))
+        .bind("t".repeat(64))
+        .execute(&pool)
+        .await
+        .expect("seed user");
+        sqlx::query(
+            "INSERT INTO workspaces (id, created_at, updated_at, name, slug, timezone, \
+             background_color, owner_id) VALUES ($1, now(), now(), 'wp ws', $2, 'UTC', \
+             '#ffffff', $3)",
+        )
+        .bind(workspace_id)
+        .bind(&slug)
+        .bind(actor)
+        .execute(&pool)
+        .await
+        .expect("seed workspace");
+        sqlx::query(
+            "INSERT INTO projects (id, name, description, network, identifier, workspace_id, \
+             created_by_id, cycle_view, module_view, issue_views_view, page_view, intake_view, \
+             archive_in, close_in, logo_props, is_time_tracking_enabled, is_issue_type_enabled, \
+             guest_view_all_features, timezone, members_can_edit_states, repo_url, base_branch, \
+             agent_default_interval_seconds, agent_default_max_ticks, agent_ticking_enabled, \
+             is_default, agent_review_default_interval_seconds, default_agent_executor, \
+             agent_test_default_interval_seconds, created_at, updated_at) VALUES ($1, \
+             'wp project', '', 0, $2, $3, $4, true, true, true, true, false, 0, 0, '{}', true, \
+             true, false, 'UTC', false, '', '', 0, 0, false, false, 0, '', 0, now(), now())",
+        )
+        .bind(project_id)
+        .bind(format!(
+            "W{:08X}",
+            (project_id.as_u128() & 0xffff_ffff) as u32
+        ))
+        .bind(workspace_id)
+        .bind(actor)
+        .execute(&pool)
+        .await
+        .expect("seed project");
+        sqlx::query(
+            "INSERT INTO states (id, created_at, updated_at, name, description, color, \
+             slug, project_id, workspace_id, sequence, \"group\", \"default\", is_triage) \
+             VALUES ($1, now(), now(), 'Backlog', '', '#ff0000', $2, $3, $4, 100.0, \
+             'backlog', true, false)",
+        )
+        .bind(backlog_id)
+        .bind(format!("wp-backlog-{project_id}"))
+        .bind(project_id)
+        .bind(workspace_id)
+        .execute(&pool)
+        .await
+        .expect("seed state");
+        // Raw inserts (no hooks): one live-state issue, one NULL-state.
+        let live_id = Uuid::new_v4();
+        let bare_id = Uuid::new_v4();
+        for (id, state) in [(live_id, Some(backlog_id)), (bare_id, None)] {
+            sqlx::query(
+                r#"INSERT INTO "issues" ("id", "created_at", "updated_at", "deleted_at", "point",
+                 "name", "description_json", "description_html", "description_stripped",
+                 "description_binary", "priority", "complexity_score", "start_date",
+                 "target_date", "sequence_id", "sort_order", "completed_at", "archived_at",
+                 "is_draft", "external_source", "external_id", "git_work_branch", "workpad",
+                 "created_via", "agent_executor", "created_by_id", "updated_by_id", "project_id",
+                 "workspace_id", "parent_id", "state_id", "estimate_point_id", "type_id",
+                 "assigned_pod_id")
+                 VALUES ($1, now(), now(), NULL, NULL, 'wp issue', '{}', '<p>Hi</p>', NULL,
+                 NULL, 'none', 0, NULL, NULL, 1, 65535.0, NULL, NULL, false, NULL, NULL, '',
+                 '', NULL, NULL, $2, NULL, $3, $4, NULL, $5, NULL, NULL, NULL)"#,
+            )
+            .bind(id)
+            .bind(actor)
+            .bind(project_id)
+            .bind(workspace_id)
+            .bind(state)
+            .execute(&pool)
+            .await
+            .expect("seed issue");
+        }
+
+        let ctx = WriteCtx::new(super::super::ctx::WriteActor {
+            user_id: actor,
+            timezone: Some("UTC".to_owned()),
+        });
+        let transition = Arc::new(RecordingTransition {
+            comments: Mutex::new(Vec::new()),
+            fires: Mutex::new(Vec::new()),
+            fire_result: Mutex::new(Ok(FireOutcome::NoTransition)),
+        });
+        let enqueue = Arc::new(RecordingEnqueue {
+            calls: Mutex::new(Vec::new()),
+        });
+        // `db` clones per call (`DatabaseConnection` is an `Arc` handle):
+        // the `run` future borrows it, so a shared borrow would make the
+        // closure `FnOnce`.
+        let run_workpad = |issue: Uuid, workpad: &str, stamp: DateTime<Utc>| {
+            let transition = transition.clone();
+            let enqueue = enqueue.clone();
+            let pool = pool.clone();
+            let ctx = ctx.clone();
+            let slug = slug.clone();
+            let workpad = workpad.to_owned();
+            let db = db.clone();
+            async move {
+                super::super::run(&ctx, &db, |txn| {
+                    let transition = transition.clone();
+                    let enqueue = enqueue.clone();
+                    let pool = pool.clone();
+                    let ctx = ctx.clone();
+                    let slug = slug.clone();
+                    let workpad = workpad.clone();
+                    Box::pin(async move {
+                        let transition_hook: Arc<dyn IssueTransitionHook> = transition;
+                        let enqueue_hook: Arc<dyn TaskEnqueueHook> = enqueue;
+                        txn.hooks_mut().register(transition_hook);
+                        txn.hooks_mut().register(enqueue_hook);
+                        set_workpad(
+                            &ctx,
+                            txn,
+                            &pool,
+                            SetWorkpad {
+                                issue_id: issue,
+                                project_id,
+                                slug,
+                                workpad,
+                                updated_at: stamp,
+                            },
+                        )
+                        .await
+                    })
+                })
+                .await
+            }
+        };
+
+        // The live-state write: text + audit + stripped recompute, the
+        // backlog state kept, no completion leg, no fire, no tasks.
+        let stamp = now_micros();
+        let outcome = run_workpad(live_id, "live notes", stamp)
+            .await
+            .expect("workpad write");
+        assert!(outcome.stopped().is_none());
+        let row: (String, Option<Uuid>, Option<DateTime<Utc>>) = sqlx::query_as(
+            r#"SELECT "workpad", "state_id", "completed_at" FROM "issues" WHERE "id" = $1"#,
+        )
+        .bind(live_id)
+        .fetch_one(&pool)
+        .await
+        .expect("workpad reread");
+        assert_eq!(row.0, "live notes");
+        assert_eq!(row.1, Some(backlog_id));
+        assert!(row.2.is_none());
+        let audit: (Option<Uuid>, DateTime<Utc>, Option<String>) = sqlx::query_as(
+            r#"SELECT "updated_by_id", "updated_at", "description_stripped"
+             FROM "issues" WHERE "id" = $1"#,
+        )
+        .bind(live_id)
+        .fetch_one(&pool)
+        .await
+        .expect("workpad audit reread");
+        assert_eq!(audit.0, Some(actor));
+        assert_eq!(audit.1, stamp);
+        assert_eq!(audit.2.as_deref(), Some("Hi"));
+        assert!(transition.comments.lock().expect("lock").is_empty());
+        assert!(transition.fires.lock().expect("lock").is_empty());
+        assert!(enqueue.calls.lock().expect("lock").is_empty());
+
+        // The NULL-state write: the default state assigns, `completed_at`
+        // stays untouched, the completion pair records the move.
+        let stamp = now_micros();
+        let outcome = run_workpad(bare_id, "bare notes", stamp)
+            .await
+            .expect("bare workpad write");
+        assert!(outcome.stopped().is_none());
+        let row: (String, Option<Uuid>, Option<DateTime<Utc>>) = sqlx::query_as(
+            r#"SELECT "workpad", "state_id", "completed_at" FROM "issues" WHERE "id" = $1"#,
+        )
+        .bind(bare_id)
+        .fetch_one(&pool)
+        .await
+        .expect("bare reread");
+        assert_eq!(row.0, "bare notes");
+        assert_eq!(row.1, Some(backlog_id));
+        assert!(row.2.is_none());
+        assert_eq!(
+            *transition.comments.lock().expect("lock"),
+            vec![(bare_id, None, Some(backlog_id))]
+        );
+        assert!(transition.fires.lock().expect("lock").is_empty());
+
+        // A missing issue is `NotFound` (the drivers' 404 arm).
+        let missing = run_workpad(Uuid::new_v4(), "gone", now_micros()).await;
+        assert!(missing.is_err_and(|error| error.is_not_found()));
+
+        for id in [live_id, bare_id] {
+            sqlx::query("DELETE FROM issues WHERE id = $1")
+                .bind(id)
+                .execute(&pool)
+                .await
+                .expect("cleanup issue");
+        }
     }
 }

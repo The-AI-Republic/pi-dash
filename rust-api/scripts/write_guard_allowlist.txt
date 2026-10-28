@@ -87,16 +87,11 @@ crates/api/src/v1_projects/handlers_project.rs | UPDATE projects | 99fab9d9592c 
 crates/api/src/v1_projects/handlers_project.rs | UPDATE projects | ba562d530463 | sql
 crates/api/src/v1_projects/handlers_state_estimate.rs | UPDATE states | 77fbc782e50d | sql
 crates/api/src/v1_projects/handlers_state_estimate.rs | UPDATE states | 99f27808da58 | sql
-crates/api/src/v1_work_items/handlers_core.rs | INSERT issue_sequences | 0812b775be41 | sql
-crates/api/src/v1_work_items/handlers_core.rs | INSERT issues | b04f35876299 | sql
 crates/api/src/v1_work_items/handlers_core.rs | UPDATE issues | 4e2a78939527 | sql
-crates/api/src/v1_work_items/handlers_core.rs | UPDATE issues | 4e2a78939527 | sql #2
-crates/api/src/v1_work_items/handlers_core.rs | UPDATE issues | d3c05694fb79 | sql
 crates/api/src/v1_work_items/handlers_pr_links.rs | UPDATE projects | 0b9c0f07e274 | sql
 crates/api/src/v1_work_items/handlers_relations.rs | INSERT issue_relations | 593c3fc0ee60 | sql
 crates/api/src/v1_work_items/handlers_relations.rs | INSERT issue_relations | abf362107edd | sql
 crates/api/src/v1_work_items/handlers_relations.rs | UPDATE issue_relations | 727a182560f4 | sql
-crates/api/src/v1_work_items/handlers_relations.rs | UPDATE issues | 0ef3879d84dd | sql
 crates/api/src/v1_work_items/handlers_social.rs | INSERT descriptions | 45fc67f19a85 | sql
 crates/api/src/v1_work_items/handlers_social.rs | INSERT descriptions | 574ccca17349 | sql
 crates/api/src/v1_work_items/handlers_social.rs | INSERT issue_comments | d5e8a4e34c8c | sql
