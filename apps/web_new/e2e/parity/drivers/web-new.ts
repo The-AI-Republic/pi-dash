@@ -11745,7 +11745,9 @@ export class WebNewDriver implements ParityDriver {
       try {
         source = await this.kanbanCardByName(sourceName);
       } catch {
-        await this.page.waitForTimeout(500);
+        // Gentle cadence: each sample forces layout on every shell, so
+        // sampling faster would only feed the churn being waited out.
+        await this.page.waitForTimeout(1_000);
       }
     }
     if (source === null) throw new Error(`[parity] no kanban card titled ${JSON.stringify(sourceName)}.`);

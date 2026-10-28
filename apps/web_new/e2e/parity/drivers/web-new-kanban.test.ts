@@ -1089,7 +1089,7 @@ describe("kanban drags", () => {
     });
     await new WebNewDriver(page).kanbanDragHoldNearEdge("Last", "right", 10);
     expect(reads).toBe(3);
-    expect(waits).toEqual(expect.arrayContaining([500, 500]));
+    expect(waits).toEqual(expect.arrayContaining([1000, 1000]));
     expect(moves[0]).toEqual({ x: 650, y: 314, steps: undefined });
   });
 
