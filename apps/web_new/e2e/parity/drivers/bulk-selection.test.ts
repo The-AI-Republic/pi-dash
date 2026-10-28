@@ -150,9 +150,11 @@ describe("web_new OSS upgrade banner", () => {
 });
 
 describe("web_new reload leave guard", () => {
-  it("reports a dialog, dismisses it and removes the listener", async () => {
-    const dismiss = vi.fn(async () => undefined);
-    const dialog = { dismiss } as unknown as Dialog;
+  it("reports a dialog, accepts it and removes the listener", async () => {
+    // Accept (not dismiss): dismissing a beforeunload dialog cancels the
+    // navigation and the reload would hang to the test timeout (ISS-110).
+    const accept = vi.fn(async () => undefined);
+    const dialog = { accept } as unknown as Dialog;
     const { page, state } = pageOf({
       onReload: async (current) => {
         const listener = current.listeners[0];
@@ -165,7 +167,7 @@ describe("web_new reload leave guard", () => {
     expect(state.reloads).toBe(1);
     expect(state.loadStates).toEqual(["domcontentloaded"]);
     expect(state.timeouts).toEqual([2000]);
-    expect(dismiss).toHaveBeenCalledTimes(1);
+    expect(accept).toHaveBeenCalledTimes(1);
     expect(state.offCalls).toEqual([{ event: "dialog", handler: state.listeners[0]?.handler }]);
   });
 
@@ -176,13 +178,16 @@ describe("web_new reload leave guard", () => {
     expect(state.offCalls).toHaveLength(1);
   });
 
-  it("removes the listener when the reload fails", async () => {
+  it("resolves and removes the listener when the reload fails", async () => {
+    // A failed reload (cancelled navigation, unsettled load) must not
+    // propagate: the observation still answers armed-or-saw-dialog, and
+    // propagating turned ISS-110 into a 300s hang.
     const { page, state } = pageOf({
       onReload: async () => {
         throw new Error("reload failed");
       },
     });
-    await expect(new WebNewDriver(page).reloadSawDialog()).rejects.toThrow("reload failed");
+    await expect(new WebNewDriver(page).reloadSawDialog()).resolves.toBe(false);
     expect(state.offCalls).toHaveLength(1);
   });
 });
