@@ -366,10 +366,12 @@ def test_dispatch_coding_run_prompt_failure_commits_failed_run(db_conn):
         assert ticker["enabled"] is True
         assert ticker["disarm_reason"] == ""
         assert ticker["next_run_at"] is not None
-        # No created_by pin: Django stamps NULL here (runs.py has no
-        # impersonate, unlike issues.py), while Rust stamps the actor —
-        # a pre-existing ticker-shape divergence outside this issue's
-        # terminal-effects scope (follow-up PIDASHCONV-1589).
+        # PIDASHCONV-1589: Django stamps NULL here — dispatch_coding_run
+        # never enters impersonate(user) (unlike issues.py create/update),
+        # so BaseModel.save() sees no crum user. Rust must match.
+        assert ticker["created_by_id"] is None, (
+            "the dispatch path stamps no crum user on the entry ticker"
+        )
         runs = _run_rows(db_conn, issue_id)
         assert len(runs) == 1, "the failed prompt build still commits its run row"
         run = runs[0]
