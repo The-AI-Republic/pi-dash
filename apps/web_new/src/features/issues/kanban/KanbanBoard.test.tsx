@@ -1668,4 +1668,46 @@ describe("KanbanBoard virtualization", () => {
     act(() => callbacks.forEach((callback) => callback([{ isIntersecting: true }])));
     expect(screen.getAllByTestId("kanban-card-name")).toHaveLength(2);
   });
+
+  function recordingObserver(): Array<{ options: IntersectionObserverInit | undefined }> {
+    const seen: Array<{ options: IntersectionObserverInit | undefined }> = [];
+    vi.stubGlobal(
+      "IntersectionObserver",
+      class {
+        entry: { options: IntersectionObserverInit | undefined };
+        constructor(
+          _callback: (entries: Array<{ isIntersecting: boolean }>) => void,
+          options?: IntersectionObserverInit
+        ) {
+          this.entry = { options };
+          seen.push(this.entry);
+        }
+        observe(): void {}
+        disconnect(): void {}
+      }
+    );
+    return seen;
+  }
+
+  it("roots every flat card's window at the board scroller", () => {
+    // NEWFRONT-982: an implicit observer root is clipped to the board's
+    // scrollport, so a far column never intersects however wide the
+    // margin. The board node itself must be the root.
+    const seen = recordingObserver();
+    setup();
+    const board = screen.getByTestId("kanban-board");
+    const cardObservers = seen.filter((entry) => entry.options?.root instanceof HTMLElement);
+    expect(cardObservers.length).toBeGreaterThan(0);
+    for (const entry of cardObservers) expect(entry.options?.root).toBe(board);
+  });
+
+  it("roots every swimlane card's window at the board scroller", () => {
+    const seen = recordingObserver();
+    mocks.board = swimlaneBoard();
+    setup({ prefs: prefs({ groupBy: "state", subGroupBy: "labels" }) });
+    const board = screen.getByTestId("kanban-board");
+    const cardObservers = seen.filter((entry) => entry.options?.root instanceof HTMLElement);
+    expect(cardObservers.length).toBeGreaterThan(0);
+    for (const entry of cardObservers) expect(entry.options?.root).toBe(board);
+  });
 });

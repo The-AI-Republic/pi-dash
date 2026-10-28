@@ -217,6 +217,14 @@ export function KanbanBoard({
   const [deleteIssue, setDeleteIssue] = React.useState<IssueListItem | null>(null);
   const [droppedId, setDroppedId] = React.useState<string | null>(null);
   const boardRef = React.useRef<HTMLDivElement | null>(null);
+  // The same node as `boardRef`, mirrored into state so the card windows
+  // re-observe once the scroller exists (their observer root). Ref
+  // identity alone would not re-run their effect.
+  const [boardNode, setBoardNode] = React.useState<HTMLDivElement | null>(null);
+  const attachBoard = React.useCallback((node: HTMLDivElement | null) => {
+    boardRef.current = node;
+    setBoardNode(node);
+  }, []);
   const drag = useBoardDrag(boardRef, commitDrop);
 
   const editAllowed = permissions.canEdit && (canEdit ?? true);
@@ -483,6 +491,7 @@ export function KanbanBoard({
         groupKey={groupKey}
         laneKey={laneKey}
         forceContent={dragging || dropped}
+        root={boardNode}
       >
         <KanbanCard
           workspaceSlug={workspaceSlug}
@@ -550,7 +559,7 @@ export function KanbanBoard({
       <KanbanDeleteZone active={drag.dragged !== null} hovered={drag.target?.kind === "delete"} />
       <div
         data-testid="kanban-board"
-        ref={boardRef}
+        ref={attachBoard}
         className={board.subGrouped ? "h-full min-h-0 overflow-auto" : "h-full overflow-x-auto"}
       >
         {board.subGrouped ? (
