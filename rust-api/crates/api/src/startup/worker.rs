@@ -252,6 +252,19 @@ impl WorkerBuilder<LiveTurnSeam> {
 }
 
 impl<S: TurnSeam + 'static> WorkerBuilder<S> {
+    /// The connected pools: `from_env` connected them, `for_tests`
+    /// took the caller's. Build prebuilt seams from
+    /// `pools().primary()` between
+    /// [`with_settings`](WorkerBuilder::with_settings) and
+    /// [`with_turn_seam`](WorkerBuilder::with_turn_seam) — the overlay
+    /// worker installs its pool-dependent assistant and turn seams
+    /// this way (PIDASHCONV-1586). The serve side reads the same pools
+    /// from the built state; the worker side has no deferred-seam
+    /// hook, so the builder exposes them here instead.
+    pub fn pools(&self) -> &pidash_db::Pools {
+        &self.pools
+    }
+
     /// Replace the assistant model-provider seam the worker-side
     /// runs-creation gates consult (tick, scheduler, handoff executor).
     /// CE default: [`CeAssistantSeam`], the same default `serve`
@@ -894,5 +907,51 @@ mod tests {
             .expect("build registers");
         assert!(Arc::ptr_eq(built.turn_seam(), &custom));
         assert!(built.context().settings.debug);
+    }
+
+    /// `pools` reads back the connected pools (PIDASHCONV-1586): the
+    /// getter returns the same pools the builder holds — identical
+    /// connection target, stable across calls — and the OVL-09
+    /// composition builds a prebuilt turn seam from `pools().primary()`
+    /// between `with_settings` and `with_turn_seam`.
+    #[tokio::test]
+    async fn pools_getter_feeds_prebuilt_seam_construction() {
+        let pool =
+            sqlx::PgPool::connect_lazy("postgres://localhost:1/unused").expect("lazy pool builds");
+        let builder = WorkerBuilder::for_tests(
+            pidash_db::Pools::primary_only(pool.clone()),
+            Settings::test_defaults(),
+        )
+        .expect("test builder builds")
+        .with_settings(|settings| {
+            settings.debug = true;
+        })
+        .expect("settings apply");
+        // sqlx `Pool` exposes no identity handle, so same-pool is the
+        // identical connection target plus getter stability (pointer
+        // identity across calls).
+        let options = builder.pools().primary().connect_options();
+        assert_eq!(options.get_host(), pool.connect_options().get_host());
+        assert_eq!(
+            options.get_database(),
+            pool.connect_options().get_database()
+        );
+        assert!(std::ptr::eq(
+            builder.pools().primary(),
+            builder.pools().primary()
+        ));
+        let seam = Arc::new(
+            LiveTurnSeam::new(
+                builder.pools().primary().clone(),
+                Arc::new(Settings::test_defaults()),
+                None,
+            )
+            .expect("prebuilt seam"),
+        );
+        let built = builder
+            .with_turn_seam(seam.clone())
+            .build()
+            .expect("build registers");
+        assert!(Arc::ptr_eq(built.turn_seam(), &seam));
     }
 }

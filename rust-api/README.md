@@ -317,6 +317,9 @@ the final settings feed `ctx.settings`, the turn soft limit, and the
 still-default seams, which rebuild — call before `with_turn_seam`),
 `with_assistant_seam`, `with_turn_seam` (the builder is generic over
 the non-object-safe `TurnSeam`; the default is the live OSS seam),
+`pools` (reads back the connected pools so prebuilt seams construct
+from `pools().primary()` between `with_settings` and `with_turn_seam`;
+PIDASHCONV-1586),
 `register` for extra jobs (the closure gets the registry plus the
 built `OssWorkerCtx`), `schedule` (appends after `default_schedule`),
 `with_concurrency`, and `run`. `build` returns the registry plus
