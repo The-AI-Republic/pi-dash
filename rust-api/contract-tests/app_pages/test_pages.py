@@ -25,6 +25,8 @@ LIST_ROW_KEYS = {
     "access",
     "color",
     "parent",
+    "parent_id",
+    "sub_pages_count",
     "is_favorite",
     "is_locked",
     "archived_at",
@@ -44,10 +46,11 @@ DETAIL_ROW_KEYS = LIST_ROW_KEYS | {"description_html"}
 # partial_update answers with the update-bound PageDetailSerializer over a
 # plain Page.objects.get() instance, while create re-fetches through the
 # annotated get_queryset(). The annotation-backed keys (is_favorite Exists,
-# label_ids/project_ids Coalesce) have no attribute on the plain instance,
-# and all three fields are required=False, so DRF drops them (SkipField) —
-# the PATCH body is always DETAIL minus exactly those three keys.
-PATCH_ROW_KEYS = DETAIL_ROW_KEYS - {"is_favorite", "label_ids", "project_ids"}
+# label_ids/project_ids Coalesce, sub_pages_count Subquery) have no
+# attribute on the plain instance, and all four fields are required=False,
+# so DRF drops them (SkipField) — the PATCH body is always DETAIL minus
+# exactly those four keys (parent_id is a model attribute and stays).
+PATCH_ROW_KEYS = DETAIL_ROW_KEYS - {"is_favorite", "label_ids", "project_ids", "sub_pages_count"}
 
 
 def test_list_shape(user_client, world):
@@ -66,6 +69,8 @@ def test_list_shape(user_client, world):
     assert row["archived_at"] is None
     assert row["label_ids"] == []
     assert row["project_ids"] == [world["project"]["id"]]
+    assert row["parent_id"] is None
+    assert row["sub_pages_count"] == 0
 
 
 def test_list_requires_auth(anon_client, world):
