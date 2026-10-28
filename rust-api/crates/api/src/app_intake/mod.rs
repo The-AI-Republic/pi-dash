@@ -47,6 +47,7 @@ use chrono_tz::Tz;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::edge;
 use crate::state::AppState;
 use pidash_compat::py::python_dumps;
 pub use pidash_compat::response::{json_ok as raw_json_response, SERVER_ERROR_BODY};
@@ -183,30 +184,6 @@ pub fn guards_error(error: pidash_services::app_intake::permissions::ErrorBody) 
         .expect("guard denial response")
 }
 
-/// An intake path: the owned methods serve from Rust, everything else
-/// falls through to Django (its 405-after-auth and metadata responses
-/// live there). List `"HEAD"` alongside the other unowned methods: axum
-/// would auto-serve it from `get`, but Django defines no `head` and 405s
-/// after auth.
-pub fn owned(
-    handler: axum::routing::MethodRouter<AppState>,
-    unowned: &[&str],
-) -> axum::routing::MethodRouter<AppState> {
-    let mut router = handler;
-    for method in unowned {
-        router = match *method {
-            "POST" => router.post(crate::edge::proxy),
-            "PUT" => router.put(crate::edge::proxy),
-            "PATCH" => router.patch(crate::edge::proxy),
-            "DELETE" => router.delete(crate::edge::proxy),
-            "HEAD" => router.head(crate::edge::proxy),
-            "OPTIONS" => router.options(crate::edge::proxy),
-            _ => router.get(crate::edge::proxy),
-        };
-    }
-    router
-}
-
 /// Register the owned intake-issue + versions routes (both aliases share
 /// the viewsets, exactly like the Django URL conf). Sibling handler
 /// issues merge their own routers here; merges keep both sides.
@@ -214,75 +191,75 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route(
             "/api/workspaces/{slug}/projects/{project_id}/intake-issues/",
-            owned(
+            edge::owned(
                 axum::routing::get(issues::collection_list).post(issues::collection_create),
-                &["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+                &["GET", "POST", "TRACE"],
             ),
         )
         .route(
             "/api/workspaces/{slug}/projects/{project_id}/intakes/",
-            owned(
+            edge::owned(
                 axum::routing::get(intakes::list).post(intakes::create),
-                &["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+                &["GET", "POST", "TRACE"],
             ),
         )
         .route(
             "/api/workspaces/{slug}/projects/{project_id}/inbox-issues/",
-            owned(
+            edge::owned(
                 axum::routing::get(issues::collection_list).post(issues::collection_create),
-                &["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+                &["GET", "POST", "TRACE"],
             ),
         )
         .route(
             "/api/workspaces/{slug}/projects/{project_id}/intakes/{pk}/",
-            owned(
+            edge::owned(
                 axum::routing::get(intakes::retrieve)
                     .patch(intakes::partial_update)
                     .delete(intakes::destroy),
-                &["POST", "PUT", "HEAD", "OPTIONS"],
+                &["GET", "PATCH", "DELETE", "TRACE"],
             ),
         )
         .route(
             "/api/workspaces/{slug}/projects/{project_id}/inboxes/",
-            owned(
+            edge::owned(
                 axum::routing::get(intakes::list).post(intakes::create),
-                &["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+                &["GET", "POST", "TRACE"],
             ),
         )
         .route(
             "/api/workspaces/{slug}/projects/{project_id}/inboxes/{pk}/",
-            owned(
+            edge::owned(
                 axum::routing::get(intakes::retrieve)
                     .patch(intakes::partial_update)
                     .delete(intakes::destroy),
-                &["POST", "PUT", "HEAD", "OPTIONS"],
+                &["GET", "PATCH", "DELETE", "TRACE"],
             ),
         )
         .route(
             "/api/workspaces/{slug}/projects/{project_id}/intake-issues/{pk}/",
-            owned(
+            edge::owned(
                 axum::routing::get(issues::retrieve)
                     .patch(issues::partial_update)
                     .delete(issues::destroy),
-                &["POST", "PUT", "HEAD", "OPTIONS"],
+                &["GET", "PATCH", "DELETE", "TRACE"],
             ),
         )
         .route(
             "/api/workspaces/{slug}/projects/{project_id}/inbox-issues/{pk}/",
-            owned(
+            edge::owned(
                 axum::routing::get(issues::retrieve)
                     .patch(issues::partial_update)
                     .delete(issues::destroy),
-                &["POST", "PUT", "HEAD", "OPTIONS"],
+                &["GET", "PATCH", "DELETE", "TRACE"],
             ),
         )
         .route(
             "/api/workspaces/{slug}/projects/{project_id}/intake-work-items/{work_item_id}/description-versions/",
-            owned(axum::routing::get(versions::list), &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]),
+            edge::owned(axum::routing::get(versions::list), &["GET", "TRACE"]),
         )
         .route(
             "/api/workspaces/{slug}/projects/{project_id}/intake-work-items/{work_item_id}/description-versions/{pk}/",
-            owned(axum::routing::get(versions::detail), &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]),
+            edge::owned(axum::routing::get(versions::detail), &["GET", "TRACE"]),
         )
 }
 

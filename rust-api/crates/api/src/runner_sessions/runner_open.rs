@@ -130,6 +130,7 @@ use serde_json::{Map, Value};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use pidash_db::redis::client_from_settings;
 use pidash_db::runner_runs::{
     chat_event, chat_message, chat_session, AgentChatMessage, AgentChatSession,
 };
@@ -249,19 +250,6 @@ fn django_isoformat(now: DateTime<Utc>) -> String {
     let truncated =
         DateTime::from_timestamp_micros(now.timestamp_micros()).expect("micros in range");
     truncated.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, false)
-}
-
-/// Api-crate-owned Redis client (the `LivePorts` precedent):
-/// `None` when `REDIS_URL` is unset, empty, or unparsable, mirroring
-/// `redis_instance()` returning `None`.
-fn redis_client(state: &AppState) -> Option<redis::Client> {
-    state
-        .settings()
-        .redis
-        .url
-        .as_deref()
-        .filter(|url| !url.is_empty())
-        .and_then(|url| pidash_db::redis::open_client(url).ok())
 }
 
 /// Quote an L2 column list for a `SELECT` projection (`"a", "b"`),
@@ -544,7 +532,7 @@ impl PubsubStore for SessionPubsub<'_, '_> {
         runner_id: Uuid,
         message: &Map<String, Value>,
     ) -> Result<Option<String>, OutboxError> {
-        let redis = redis_client(self.state);
+        let redis = client_from_settings(self.state.settings());
         session_outbox::enqueue_for_runner(
             redis.as_ref(),
             self.pool,
@@ -561,7 +549,7 @@ impl PubsubStore for SessionPubsub<'_, '_> {
         message: &Map<String, Value>,
     ) -> Result<Option<String>, pidash_db::runner_sessions::machine_outbox::MachineOutboxError>
     {
-        let redis = redis_client(self.state);
+        let redis = client_from_settings(self.state.settings());
         pidash_db::runner_sessions::machine_outbox::enqueue_for_machine(
             redis.as_ref(),
             self.pool,
@@ -604,7 +592,7 @@ impl PubsubStore for SessionPubsub<'_, '_> {
     }
 
     async fn clear_session_marker(&self, session_id: Uuid) -> Result<(), OutboxError> {
-        let redis = redis_client(self.state);
+        let redis = client_from_settings(self.state.settings());
         session_outbox::clear_session_marker(redis.as_ref(), &session_id.to_string()).await
     }
 
@@ -614,7 +602,7 @@ impl PubsubStore for SessionPubsub<'_, '_> {
         old_session_id: Uuid,
         new_session_id: &str,
     ) -> Result<(), OutboxError> {
-        let redis = redis_client(self.state);
+        let redis = client_from_settings(self.state.settings());
         session_outbox::publish_session_eviction(
             redis.as_ref(),
             &runner_id.to_string(),
@@ -1846,7 +1834,7 @@ async fn runner_session_open_inner(
         }
     }
 
-    let redis = redis_client(&state);
+    let redis = client_from_settings(state.settings());
     let rid_key = rid_str.clone();
     if let Err(response) = side_effect(
         runner_id,
@@ -2018,7 +2006,7 @@ async fn runner_session_delete_inner(
         _ => return render(runner_id_mismatch_drf()),
     }
 
-    let redis = redis_client(&state);
+    let redis = client_from_settings(state.settings());
     // Canonical (lowercase) rendering: the marker key must match what
     // the open/poll paths write however the URL spelled the id.
     let sid_str = sid.to_string();

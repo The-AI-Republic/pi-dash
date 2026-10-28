@@ -121,6 +121,7 @@ use http_body_util::BodyExt as _;
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
+use pidash_db::redis::client_from_settings;
 use pidash_db::runner_enroll::columns::enums::{RUNNER_STATUS_BUSY, RUNNER_STATUS_ONLINE};
 use pidash_db::runner_sessions::models::runner_session::{self, runner_session_from_row};
 use pidash_db::runner_sessions::outbox as session_outbox;
@@ -200,19 +201,6 @@ fn parse_uuid(raw: &str) -> Result<Uuid, ()> {
 /// microsecond-truncated stamps (Django renders at most 6 digits).
 fn django_isoformat(now: DateTime<Utc>) -> String {
     now.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, false)
-}
-
-/// Api-crate-owned Redis client (the `LivePorts` precedent):
-/// `None` when `REDIS_URL` is unset, empty, or unparsable, mirroring
-/// `redis_instance()` / `async_redis_instance()` returning `None`.
-fn redis_client(state: &AppState) -> Option<redis::Client> {
-    state
-        .settings()
-        .redis
-        .url
-        .as_deref()
-        .filter(|url| !url.is_empty())
-        .and_then(|url| pidash_db::redis::open_client(url).ok())
 }
 
 /// One ack-list item to its `XACK` id: strings verbatim, numbers via
@@ -1004,7 +992,7 @@ impl PubsubStore for PollPubsubStore<'_, '_> {
         runner_id: Uuid,
         message: &Map<String, Value>,
     ) -> Result<Option<String>, SessionOutboxError> {
-        let redis = redis_client(self.state);
+        let redis = client_from_settings(self.state.settings());
         session_outbox::enqueue_for_runner(
             redis.as_ref(),
             self.pool,
@@ -1021,7 +1009,7 @@ impl PubsubStore for PollPubsubStore<'_, '_> {
         message: &Map<String, Value>,
     ) -> Result<Option<String>, pidash_db::runner_sessions::machine_outbox::MachineOutboxError>
     {
-        let redis = redis_client(self.state);
+        let redis = client_from_settings(self.state.settings());
         pidash_db::runner_sessions::machine_outbox::enqueue_for_machine(
             redis.as_ref(),
             self.pool,
@@ -1064,7 +1052,7 @@ impl PubsubStore for PollPubsubStore<'_, '_> {
     }
 
     async fn clear_session_marker(&self, session_id: Uuid) -> Result<(), SessionOutboxError> {
-        let redis = redis_client(self.state);
+        let redis = client_from_settings(self.state.settings());
         session_outbox::clear_session_marker(redis.as_ref(), &session_id.to_string()).await
     }
 
@@ -1074,7 +1062,7 @@ impl PubsubStore for PollPubsubStore<'_, '_> {
         old_session_id: Uuid,
         new_session_id: &str,
     ) -> Result<(), SessionOutboxError> {
-        let redis = redis_client(self.state);
+        let redis = client_from_settings(self.state.settings());
         let runner_id = runner_id.to_string();
         let old = old_session_id.to_string();
         session_outbox::publish_session_eviction(
@@ -1110,7 +1098,7 @@ async fn drain_for_runner_by_id(
     state: &AppState,
     runner_id: Uuid,
 ) -> Result<bool, ()> {
-    let redis = redis_client(state);
+    let redis = client_from_settings(state.settings());
     pidash_services::runner_sessions::live_drains::drain_for_runner_by_id(
         pool,
         redis.as_ref(),
@@ -1130,7 +1118,7 @@ pub(crate) async fn drain_pod_by_id(
     state: &AppState,
     pod_id: Uuid,
 ) -> Result<(), ()> {
-    let redis = redis_client(state);
+    let redis = client_from_settings(state.settings());
     pidash_services::runner_sessions::live_drains::drain_pod_by_id(
         pool,
         redis.as_ref(),
@@ -1592,7 +1580,7 @@ pub async fn runner_session_poll(
     }
 
     // XACK explicit ids (`:428-430`).
-    let redis = redis_client(&state);
+    let redis = client_from_settings(state.settings());
     if !ack_ids.is_empty()
         && session_outbox::ack_for_session(redis.as_ref(), &rid, &ack_ids)
             .await

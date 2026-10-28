@@ -28,6 +28,7 @@
 /// OVL-04 (PIDASHCONV-1542)..OVL-07 (PIDASHCONV-1545) extend it.
 pub mod startup {
     pub use pidash_api::build_router_with_overlay;
+    pub use pidash_api::edge::owned; // canonical cutover router (PIDASHCONV-1593).
     pub use pidash_api::edge::proxy;
     pub use pidash_api::edge::EdgeHandle; // also imported by the overlay as `pidash_api::EdgeHandle`.
     pub use pidash_api::stack;
@@ -672,6 +673,7 @@ pub mod db {
     pub use pidash_db::orchestration::runs::active_run_for;
     pub use pidash_db::orchestration::runs::latest_prior_run;
     pub use pidash_db::pool::Pools; // also imported by the overlay as `pidash_db::Pools`.
+    pub use pidash_db::redis::client_from_settings; // canonical settings client (PIDASHCONV-1593).
     pub use pidash_db::redis::RedisHandle;
     pub use pidash_db::runner_enroll::columns::machine_token;
     pub use pidash_db::runner_enroll::columns::runner;

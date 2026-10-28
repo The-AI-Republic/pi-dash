@@ -78,23 +78,6 @@ pub fn routes() -> Router<AppState> {
     handlers_search::routes().merge(handlers_views::routes())
 }
 
-/// A search path: the GET handler owns reads, everything else falls
-/// through to Django. OPTIONS proxies too: DRF answers metadata (401 anon
-/// / 200 authed) where axum would 405. `HEAD` proxies as well: Django
-/// defines no `head` and 405s after auth (axum would auto-serve it from
-/// `get`).
-pub fn owned(
-    get_handler: axum::routing::MethodRouter<AppState>,
-) -> axum::routing::MethodRouter<AppState> {
-    get_handler
-        .post(crate::edge::proxy)
-        .put(crate::edge::proxy)
-        .patch(crate::edge::proxy)
-        .delete(crate::edge::proxy)
-        .head(crate::edge::proxy)
-        .options(crate::edge::proxy)
-}
-
 /// Exact bytes of the DRF `IsAuthenticated` denial.
 pub const UNAUTHENTICATED_BODY: &str =
     r#"{"detail":"Authentication credentials were not provided."}"#;

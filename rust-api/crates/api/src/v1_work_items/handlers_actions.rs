@@ -89,11 +89,11 @@ use uuid::Uuid;
 
 use pidash_auth::permissions::project;
 use pidash_auth::scope::TenantScope;
+use pidash_db::redis::client_from_settings;
 use pidash_types::orchestration::{normalize_outcome, RUN_OUTCOMES};
 use pidash_types::runner_runs::AgentRunStatus;
 
 use crate::project_move_handoff::RedisAdmissionCache;
-use crate::runner_enroll::teardown::redis_client;
 use crate::state::AppState;
 
 use super::perms::{
@@ -1103,7 +1103,7 @@ pub async fn dispatch_deps(
     let presence = fetch_presence(pool, actor_id, issue, project).await?;
     let verdicts = Arc::new(gate_verdicts(state, &presence).await);
     let cache = RedisAdmissionCache {
-        client: redis_client(state),
+        client: client_from_settings(state.settings()),
     };
     Ok((
         pidash_jobs::orchestration::StoreDeps {
@@ -1144,7 +1144,7 @@ pub async fn dispatch_deps_for_ids(
     let presence = Arc::new(fetch_llm_presence(pool, &universe).await?);
     let verdicts = Arc::new(gate_verdicts(state, &presence).await);
     let cache = RedisAdmissionCache {
-        client: redis_client(state),
+        client: client_from_settings(state.settings()),
     };
     Ok((
         pidash_jobs::orchestration::StoreDeps {

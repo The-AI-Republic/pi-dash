@@ -77,6 +77,7 @@ use http_body_util::BodyExt as _;
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
+use pidash_db::redis::client_from_settings;
 use pidash_db::runner_sessions::machine_outbox;
 use pidash_db::runner_sessions::models::machine_session;
 use pidash_db::runner_sessions::models::machine_session::machine_session_from_row;
@@ -138,19 +139,6 @@ fn django_isoformat(now: DateTime<Utc>) -> String {
     let truncated =
         DateTime::from_timestamp_micros(now.timestamp_micros()).expect("micros in range");
     truncated.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, false)
-}
-
-/// Api-crate-owned Redis client (the `LivePorts` precedent):
-/// `None` when `REDIS_URL` is unset, empty, or unparsable, mirroring
-/// `redis_instance()` / `async_redis_instance()` returning `None`.
-fn redis_client(state: &AppState) -> Option<redis::Client> {
-    state
-        .settings()
-        .redis
-        .url
-        .as_deref()
-        .filter(|url| !url.is_empty())
-        .and_then(|url| pidash_db::redis::open_client(url).ok())
 }
 
 /// `_auth_dev_machine` (`machine_sessions.py:54-67`) as data: the URL
@@ -362,7 +350,7 @@ pub async fn machine_session_open(
         return render(dev_machine_mismatch_drf());
     }
 
-    let redis = redis_client(&state);
+    let redis = client_from_settings(state.settings());
     let mid = dev_machine_id.to_string();
     if machine_outbox::ensure_stream_group(redis.as_ref(), &mid)
         .await
@@ -504,7 +492,7 @@ pub async fn machine_session_delete(
         return render(dev_machine_mismatch_drf());
     }
 
-    let redis = redis_client(&state);
+    let redis = client_from_settings(state.settings());
     // Canonical (lowercase) rendering: the marker key must match what
     // the open/poll paths write however the URL spelled the id.
     let sid_str = sid.to_string();
@@ -785,7 +773,7 @@ pub async fn machine_session_poll(
     {
         return server_error();
     }
-    let redis = redis_client(&state);
+    let redis = client_from_settings(state.settings());
     if !ack_ids.is_empty()
         && machine_outbox::ack_for_session(redis.as_ref(), &mid, &ack_ids)
             .await

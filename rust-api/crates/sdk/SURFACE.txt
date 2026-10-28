@@ -274,6 +274,7 @@ pidash_sdk::db::TABLE
 pidash_sdk::db::Transaction
 pidash_sdk::db::active_run_for
 pidash_sdk::db::admin_get_by_instance_user_sql
+pidash_sdk::db::client_from_settings
 pidash_sdk::db::fetch_instance_first
 pidash_sdk::db::fetch_is_workspace_member
 pidash_sdk::db::instance_admin
@@ -597,6 +598,7 @@ pidash_sdk::startup::ServeParts
 pidash_sdk::startup::SessionConfig
 pidash_sdk::startup::WorkerBuilder
 pidash_sdk::startup::build_router_with_overlay
+pidash_sdk::startup::owned
 pidash_sdk::startup::proxy
 pidash_sdk::startup::stack
 pidash_sdk::state::AgentModelProfile

@@ -72,6 +72,7 @@ use chrono_tz::Tz;
 use serde_json::{Map, Value};
 use sqlx::Row;
 
+use crate::edge;
 use crate::middleware::body_limit::read_request_bytes;
 use crate::state::AppState;
 use crate::v1_cycles_modules::body as shared_body;
@@ -127,17 +128,20 @@ pub const COMMENT_REACTION_PATH: &str =
 /// 405-after-auth, `HEAD`, and metadata responses live there).
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route(HISTORY_PATH, owned(axum::routing::get(history), &["GET"]))
+        .route(
+            HISTORY_PATH,
+            edge::owned(axum::routing::get(history), &["GET"]),
+        )
         .route(
             COMMENTS_PATH,
-            owned(
+            edge::owned(
                 axum::routing::get(comment_list).post(comment_create),
                 &["GET", "POST"],
             ),
         )
         .route(
             COMMENT_PATH,
-            owned(
+            edge::owned(
                 axum::routing::get(comment_retrieve)
                     .put(comment_update)
                     .patch(comment_partial_update)
@@ -147,18 +151,18 @@ pub fn routes() -> Router<AppState> {
         )
         .route(
             SUBSCRIBERS_PATH,
-            owned(
+            edge::owned(
                 axum::routing::get(subscriber_list).post(subscriber_create),
                 &["GET", "POST"],
             ),
         )
         .route(
             SUBSCRIBER_PATH,
-            owned(axum::routing::delete(subscriber_destroy), &["DELETE"]),
+            edge::owned(axum::routing::delete(subscriber_destroy), &["DELETE"]),
         )
         .route(
             SUBSCRIBE_PATH,
-            owned(
+            edge::owned(
                 axum::routing::get(subscription_status)
                     .post(subscribe)
                     .delete(unsubscribe),
@@ -167,58 +171,26 @@ pub fn routes() -> Router<AppState> {
         )
         .route(
             REACTIONS_PATH,
-            owned(
+            edge::owned(
                 axum::routing::get(issue_reaction_list).post(issue_reaction_create),
                 &["GET", "POST"],
             ),
         )
         .route(
             REACTION_PATH,
-            owned(axum::routing::delete(issue_reaction_destroy), &["DELETE"]),
+            edge::owned(axum::routing::delete(issue_reaction_destroy), &["DELETE"]),
         )
         .route(
             COMMENT_REACTIONS_PATH,
-            owned(
+            edge::owned(
                 axum::routing::get(comment_reaction_list).post(comment_reaction_create),
                 &["GET", "POST"],
             ),
         )
         .route(
             COMMENT_REACTION_PATH,
-            owned(axum::routing::delete(comment_reaction_destroy), &["DELETE"]),
+            edge::owned(axum::routing::delete(comment_reaction_destroy), &["DELETE"]),
         )
-}
-
-/// An engage path: the owned methods serve from Rust, everything else
-/// falls through to Django (the social-handler cutover shape). `HEAD`
-/// and `TRACE` proxy explicitly: axum's implicit `HEAD`-from-`GET` and
-/// its empty 405 would otherwise diverge from Django (the plain
-/// `APIView` history route 405s `HEAD` as JSON after auth, while the
-/// viewset routes map `head` onto `get` — `viewsets.py:105-106` — and
-/// `TRACE` 405s as JSON everywhere).
-fn owned(
-    methods: axum::routing::MethodRouter<AppState>,
-    owned: &[&str],
-) -> axum::routing::MethodRouter<AppState> {
-    let mut router = methods;
-    for other in [
-        "GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD", "TRACE",
-    ] {
-        if owned.contains(&other) {
-            continue;
-        }
-        router = match other {
-            "GET" => router.get(crate::edge::proxy),
-            "POST" => router.post(crate::edge::proxy),
-            "PUT" => router.put(crate::edge::proxy),
-            "PATCH" => router.patch(crate::edge::proxy),
-            "DELETE" => router.delete(crate::edge::proxy),
-            "HEAD" => router.head(crate::edge::proxy),
-            "TRACE" => router.trace(crate::edge::proxy),
-            _ => router.options(crate::edge::proxy),
-        };
-    }
-    router
 }
 
 // ---------------------------------------------------------------------------

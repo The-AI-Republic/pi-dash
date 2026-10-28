@@ -118,6 +118,7 @@ use pidash_auth::permissions::allow::AllowFacts;
 use pidash_auth::permissions::{ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER};
 use pidash_types::WorkspaceId;
 
+use crate::edge;
 use crate::middleware::body_limit::read_request_bytes;
 use crate::middleware::SessionHandle;
 use crate::paginator::{self, Cursor, PageError, PageResponse};
@@ -342,30 +343,6 @@ fn enforce(outcome: GateOutcome) -> Result<(), Response> {
 // Routes
 // ---------------------------------------------------------------------------
 
-/// An owned path: the owned methods serve from Rust, everything else
-/// falls through to Django (its 405-after-auth and metadata responses
-/// live there). List `"HEAD"` alongside the other unowned methods: axum
-/// would auto-serve it from `get`, but Django defines no `head` and 405s
-/// after auth.
-pub fn owned(
-    handler: axum::routing::MethodRouter<AppState>,
-    unowned: &[&str],
-) -> axum::routing::MethodRouter<AppState> {
-    let mut router = handler;
-    for method in unowned {
-        router = match *method {
-            "POST" => router.post(crate::edge::proxy),
-            "PUT" => router.put(crate::edge::proxy),
-            "PATCH" => router.patch(crate::edge::proxy),
-            "DELETE" => router.delete(crate::edge::proxy),
-            "HEAD" => router.head(crate::edge::proxy),
-            "OPTIONS" => router.options(crate::edge::proxy),
-            _ => router.get(crate::edge::proxy),
-        };
-    }
-    router
-}
-
 /// Register the D-34 routes (all 7, `app/urls/notification.py:16-52`):
 /// the viewset-core triplet (routes 1-3, `:17-31`, PIDASHCONV-301),
 /// the state-transition and unread routes (routes 4-5, `:32-41`,
@@ -376,53 +353,47 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route(
             "/api/workspaces/{slug}/users/notifications/",
-            owned(
-                axum::routing::get(list),
-                &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
-            ),
+            edge::owned(axum::routing::get(list), &["GET", "TRACE"]),
         )
         .route(
             "/api/workspaces/{slug}/users/notifications/{pk}/",
-            owned(
+            edge::owned(
                 axum::routing::get(retrieve)
                     .patch(partial_update)
                     .delete(destroy),
-                &["POST", "PUT", "HEAD", "OPTIONS"],
+                &["GET", "PATCH", "DELETE", "TRACE"],
             ),
         )
         .route(
             "/api/workspaces/{slug}/users/notifications/{pk}/read/",
-            owned(
+            edge::owned(
                 axum::routing::post(mark_read).delete(mark_unread),
-                &["GET", "PUT", "PATCH", "OPTIONS"],
+                &["POST", "DELETE", "HEAD", "TRACE"],
             ),
         )
         .route(
             "/api/workspaces/{slug}/users/notifications/{pk}/archive/",
-            owned(
+            edge::owned(
                 axum::routing::post(archive).delete(unarchive),
-                &["GET", "PUT", "PATCH", "OPTIONS"],
+                &["POST", "DELETE", "HEAD", "TRACE"],
             ),
         )
         .route(
             "/api/workspaces/{slug}/users/notifications/unread/",
-            owned(
-                axum::routing::get(unread_get),
-                &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
-            ),
+            edge::owned(axum::routing::get(unread_get), &["GET", "TRACE"]),
         )
         .route(
             "/api/workspaces/{slug}/users/notifications/mark-all-read/",
-            owned(
+            edge::owned(
                 axum::routing::post(mark_all_read_create),
-                &["GET", "PUT", "PATCH", "DELETE", "OPTIONS"],
+                &["POST", "HEAD", "TRACE"],
             ),
         )
         .route(
             "/api/users/me/notification-preferences/",
-            owned(
+            edge::owned(
                 axum::routing::get(preference_get).patch(preference_patch),
-                &["POST", "PUT", "DELETE", "HEAD", "OPTIONS"],
+                &["GET", "PATCH", "TRACE"],
             ),
         )
 }
