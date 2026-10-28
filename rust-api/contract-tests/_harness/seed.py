@@ -1280,6 +1280,25 @@ class Seeder:
         self._put("cycles", cycle_id)
         return {"id": cycle_id}
 
+    def create_cycle_issue(
+        self,
+        workspace_id: str,
+        project_id: str,
+        cycle_id: str,
+        issue_id: str,
+        *,
+        created_at: str = "2024-01-01T00:00:00+00:00",
+    ) -> dict[str, Any]:
+        link_id = _uid()
+        self.db.execute(
+            """INSERT INTO cycle_issues
+               (id, workspace_id, project_id, cycle_id, issue_id, created_at, updated_at)
+               VALUES (%s,%s,%s,%s,%s,%s::timestamptz,%s::timestamptz)""",
+            (link_id, workspace_id, project_id, cycle_id, issue_id, created_at, created_at),
+        )
+        self._put("cycle_issues", link_id)
+        return {"id": link_id}
+
     def create_module(self, workspace_id: str, project_id: str, *, name: str = "Contract module") -> dict[str, Any]:
         module_id = _uid()
         self.db.execute(
