@@ -15,7 +15,11 @@
 # on rows created only inside a task, so the Django run gets a solo Celery
 # worker (stopped at the reset) and the Rust run gets `pidash-api worker`
 # (PIDASHCONV-983; Rust handlers enqueue-only like Django, and the worker
-# drains rust_job_queue while the tests poll). The task-oracle files inside
+# drains rust_job_queue while the tests poll). Tests that publish tasks
+# directly branch on PIDASH_CONTRACT_BACKEND (django: Celery wire onto the
+# redis broker, rust: rust_job_queue rows); each pytest run sets it for its
+# own half (PIDASHCONV-1579), the Django half explicitly so a leaked
+# environment cannot flip the publish path. The task-oracle files inside
 # mixed suites (TASK_ORACLE_IGNORES.txt) are excluded from both runs with
 # the same --ignore selection. Django is served with runserver except for
 # the suites in ASGI_SUITES.txt, whose SSE/event streams are async
@@ -325,6 +329,7 @@ jobs:
           IGNORES=$(grep "^${{ matrix.suite }}/" TASK_ORACLE_IGNORES.txt | sed 's/^/--ignore=/' | tr '\n' ' ')
           LOG="/tmp/pytest-django-${{ matrix.suite }}.log"
           BASE_URL="$DJANGO_BASE_URL" CONTRACT_WEB_URL="$DJANGO_BASE_URL" \
+            PIDASH_CONTRACT_BACKEND=django \
             python -m pytest "${{ matrix.suite }}" $IGNORES -q --tb=short 2>&1 | tee "$LOG"
           echo "DJANGO_EXIT=${PIPESTATUS[0]}" >> "$GITHUB_ENV"
           echo "DJANGO_SUMMARY=$(tail -n 1 "$LOG")" >> "$GITHUB_ENV"
@@ -471,6 +476,7 @@ jobs:
           IGNORES=$(grep "^${{ matrix.suite }}/" TASK_ORACLE_IGNORES.txt | sed 's/^/--ignore=/' | tr '\n' ' ')
           LOG="/tmp/pytest-rust-${{ matrix.suite }}.log"
           BASE_URL="$RUST_BASE_URL" CONTRACT_WEB_URL="$RUST_BASE_URL" \
+            PIDASH_CONTRACT_BACKEND=rust \
             python -m pytest "${{ matrix.suite }}" $IGNORES -q --tb=short 2>&1 | tee "$LOG"
           echo "RUST_EXIT=${PIPESTATUS[0]}" >> "$GITHUB_ENV"
           echo "RUST_SUMMARY=$(tail -n 1 "$LOG")" >> "$GITHUB_ENV"
