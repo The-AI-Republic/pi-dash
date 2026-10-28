@@ -105,7 +105,7 @@ use crate::middleware::body_limit::read_request_bytes;
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
 use pidash_compat::datetime::render_rfc3339_in;
-use pidash_compat::py::python_dumps;
+use pidash_compat::py::{py_num_str, python_dumps};
 use pidash_compat::response::json_response;
 use pidash_compat::validate::push_error;
 use pidash_db::app_pages::strip::ml_strip_tags;
@@ -780,7 +780,9 @@ fn check_text(
 }
 
 /// Required text input (the reaction name): missing, null, blank and
-/// wrong-typed inputs each fail their own way.
+/// wrong-typed inputs each fail their own way. DRF `CharField` over the
+/// reaction `TextField` (`db/models/issue.py:733,760`): strip first, then
+/// the blank check, and coerce basic numerics via `str(data)`.
 fn check_required_text(
     errors: &mut FieldErrors,
     body: &serde_json::Map<String, Value>,
@@ -796,12 +798,20 @@ fn check_required_text(
             None
         }
         Some(Value::String(text)) => {
-            if text.is_empty() {
+            // DRF `CharField(trim_whitespace=True)`: strip first, then
+            // the blank check — same tail as `check_text` above.
+            let stripped = text.trim();
+            if stripped.is_empty() {
                 push_error(errors, field, "This field may not be blank.".to_owned());
                 None
             } else {
-                Some(text.clone())
+                Some(stripped.to_owned())
             }
+        }
+        Some(Value::Number(number)) => {
+            // DRF `CharField.to_internal_value` coerces ints/floats via
+            // `str(data)`; bools and composites still fail below.
+            Some(py_num_str(number))
         }
         _ => {
             push_error(errors, field, "Not a valid string.".to_owned());
