@@ -109,6 +109,7 @@ use uuid::Uuid;
 use pidash_auth::permissions::membership;
 use pidash_auth::permissions::runner as runner_perm;
 use pidash_auth::scope::TenantScope;
+use pidash_db::redis::client_from_settings;
 use pidash_db::runner_enroll::columns::{
     dev_machine as dm_cols, pod as pod_cols, runner as r_cols,
 };
@@ -503,19 +504,6 @@ fn body_workspace(data: &JVal) -> Result<Option<String>, Response> {
             Err(server_error())
         }
     }
-}
-
-/// Api-crate-owned Redis client (the `machine.rs` `redis_client`
-/// position): `None` when `REDIS_URL` is unset, empty, or unparsable,
-/// mirroring `redis_instance()` returning `None`.
-pub(crate) fn redis_client(state: &AppState) -> Option<redis::Client> {
-    state
-        .settings()
-        .redis
-        .url
-        .as_deref()
-        .filter(|url| !url.is_empty())
-        .and_then(|url| pidash_db::redis::open_client(url).ok())
 }
 
 // ---------------------------------------------------------------------------
@@ -2210,7 +2198,7 @@ async fn release_pins_for_paused_runner(
 /// while the caller observes the failure. Thin caller of the public
 /// executor (OVL-06); the local copy is deleted.
 async fn drain_runner_by_id(pool: &PgPool, state: &AppState, runner_id: Uuid) -> Result<bool, ()> {
-    let redis = redis_client(state);
+    let redis = client_from_settings(state.settings());
     pidash_services::runner_sessions::live_drains::drain_for_runner_by_id(
         pool,
         redis.as_ref(),
@@ -2262,7 +2250,7 @@ impl PubsubStore for PoolPubsubStore<'_, '_> {
         runner_id: Uuid,
         message: &Map<String, Value>,
     ) -> Result<Option<String>, SessionOutboxError> {
-        let redis = redis_client(self.state);
+        let redis = client_from_settings(self.state.settings());
         session_outbox::enqueue_for_runner(
             redis.as_ref(),
             self.pool,
@@ -2279,7 +2267,7 @@ impl PubsubStore for PoolPubsubStore<'_, '_> {
         message: &Map<String, Value>,
     ) -> Result<Option<String>, pidash_db::runner_sessions::machine_outbox::MachineOutboxError>
     {
-        let redis = redis_client(self.state);
+        let redis = client_from_settings(self.state.settings());
         pidash_db::runner_sessions::machine_outbox::enqueue_for_machine(
             redis.as_ref(),
             self.pool,
@@ -2322,7 +2310,7 @@ impl PubsubStore for PoolPubsubStore<'_, '_> {
     }
 
     async fn clear_session_marker(&self, session_id: Uuid) -> Result<(), SessionOutboxError> {
-        let redis = redis_client(self.state);
+        let redis = client_from_settings(self.state.settings());
         session_outbox::clear_session_marker(redis.as_ref(), &session_id.to_string()).await
     }
 
@@ -2332,7 +2320,7 @@ impl PubsubStore for PoolPubsubStore<'_, '_> {
         old_session_id: Uuid,
         new_session_id: &str,
     ) -> Result<(), SessionOutboxError> {
-        let redis = redis_client(self.state);
+        let redis = client_from_settings(self.state.settings());
         let runner_id = runner_id.to_string();
         let old = old_session_id.to_string();
         session_outbox::publish_session_eviction(
@@ -2373,7 +2361,7 @@ impl PubsubStore for TxPubsub<'_, '_, '_> {
     ) -> Result<Option<String>, SessionOutboxError> {
         let mut guard = self.tx.lock().await;
         let tx: &mut sqlx::Transaction<'_, sqlx::Postgres> = &mut guard;
-        let redis = redis_client(self.state);
+        let redis = client_from_settings(self.state.settings());
         session_outbox::enqueue_for_runner(
             redis.as_ref(),
             &mut **tx,
@@ -2392,7 +2380,7 @@ impl PubsubStore for TxPubsub<'_, '_, '_> {
     {
         let mut guard = self.tx.lock().await;
         let tx: &mut sqlx::Transaction<'_, sqlx::Postgres> = &mut guard;
-        let redis = redis_client(self.state);
+        let redis = client_from_settings(self.state.settings());
         pidash_db::runner_sessions::machine_outbox::enqueue_for_machine(
             redis.as_ref(),
             &mut **tx,
@@ -2439,7 +2427,7 @@ impl PubsubStore for TxPubsub<'_, '_, '_> {
     }
 
     async fn clear_session_marker(&self, session_id: Uuid) -> Result<(), SessionOutboxError> {
-        let redis = redis_client(self.state);
+        let redis = client_from_settings(self.state.settings());
         session_outbox::clear_session_marker(redis.as_ref(), &session_id.to_string()).await
     }
 
@@ -2449,7 +2437,7 @@ impl PubsubStore for TxPubsub<'_, '_, '_> {
         old_session_id: Uuid,
         new_session_id: &str,
     ) -> Result<(), SessionOutboxError> {
-        let redis = redis_client(self.state);
+        let redis = client_from_settings(self.state.settings());
         let runner_id = runner_id.to_string();
         let old = old_session_id.to_string();
         session_outbox::publish_session_eviction(
@@ -2500,7 +2488,7 @@ async fn revoke_runner_on_tx(
 fn revoke_ctx(pool: &PgPool, state: &AppState) -> RevokeCtx {
     RevokeCtx {
         pool: pool.clone(),
-        redis: redis_client(state),
+        redis: client_from_settings(state.settings()),
         runner: state.settings().runner.clone(),
         atomic_effects: false,
     }
@@ -2689,7 +2677,7 @@ pub(crate) async fn drain_pod_by_id(
     state: &AppState,
     pod_id: Uuid,
 ) -> Result<(), ()> {
-    let redis = redis_client(state);
+    let redis = client_from_settings(state.settings());
     pidash_services::runner_sessions::live_drains::drain_pod_by_id(
         pool,
         redis.as_ref(),

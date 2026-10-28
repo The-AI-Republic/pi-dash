@@ -15,6 +15,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
+use pidash_db::redis::client_from_settings;
 use pidash_jobs::queue::{self, NewJob};
 use pidash_jobs::TaskMessage;
 use pidash_services::domain::activity::TaskEnqueueHook;
@@ -29,7 +30,6 @@ use crate::orchestration::{
     drain_creation_outboxes, drain_pod_by_id, CreationDrainError, CreationOutboxes, MovePubsub,
 };
 use crate::project_move_handoff::RedisAdmissionCache;
-use crate::runner_enroll::teardown::redis_client;
 use crate::state::AppState;
 
 /// `task.delay(*args, **kwargs)` through the jobs kernel: unported tasks
@@ -117,7 +117,7 @@ impl MovePostCommitHook for AppMovePostCommitHook {
             cache: self.cache.clone(),
         };
         Box::pin(async move {
-            let redis = redis_client(&state);
+            let redis = client_from_settings(state.settings());
             let pubsub = Self::pubsub(&pool, redis.as_ref(), &state);
             drain_creation_outboxes(
                 &pool,
@@ -145,7 +145,7 @@ impl MovePostCommitHook for AppMovePostCommitHook {
         let pool = self.pool.clone();
         let state = self.state.clone();
         Box::pin(async move {
-            let redis = redis_client(&state);
+            let redis = client_from_settings(state.settings());
             let pubsub = Self::pubsub(&pool, redis.as_ref(), &state);
             drain_pod_by_id(&pool, &pubsub, pod_id).await
         })
@@ -159,7 +159,7 @@ impl MovePostCommitHook for AppMovePostCommitHook {
         let pool = self.pool.clone();
         let state = self.state.clone();
         Box::pin(async move {
-            let redis = redis_client(&state);
+            let redis = client_from_settings(state.settings());
             let pubsub = Self::pubsub(&pool, redis.as_ref(), &state);
             let outcome =
                 pidash_services::app_issues::send_project_move_cancel(&pubsub, runner_id, run_id)

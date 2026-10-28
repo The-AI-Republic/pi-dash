@@ -111,6 +111,7 @@ use uuid::Uuid;
 use pidash_auth::permissions::membership;
 use pidash_auth::permissions::runner as runner_perm;
 use pidash_auth::scope::TenantScope;
+use pidash_db::redis::client_from_settings;
 use pidash_db::runner_sessions::machine_outbox;
 use pidash_db::runner_sessions::machine_outbox::MachineOutboxError;
 use pidash_db::runner_sessions::models::runner_session;
@@ -285,19 +286,6 @@ fn now_micros() -> DateTime<Utc> {
 /// nonzero (the machine.rs precedent).
 fn django_isoformat(now: DateTime<Utc>) -> String {
     now.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, false)
-}
-
-/// Api-crate-owned Redis client (the machine.rs precedent): `None`
-/// when `REDIS_URL` is unset, empty, or unparsable, mirroring
-/// `redis_instance()` returning `None`.
-fn redis_client(state: &AppState) -> Option<redis::Client> {
-    state
-        .settings()
-        .redis
-        .url
-        .as_deref()
-        .filter(|url| !url.is_empty())
-        .and_then(|url| pidash_db::redis::open_client(url).ok())
 }
 
 // ---------------------------------------------------------------------------
@@ -976,7 +964,7 @@ async fn emit_celery(pool: &PgPool, task: &str, args: Vec<Value>) -> Result<(), 
 fn revoke_ctx(pool: &PgPool, state: &AppState) -> RevokeCtx {
     RevokeCtx {
         pool: pool.clone(),
-        redis: redis_client(state),
+        redis: client_from_settings(state.settings()),
         runner: state.settings().runner.clone(),
         atomic_effects: false,
     }
@@ -1316,7 +1304,7 @@ pub async fn machine_create_runner(
         &model,
         &reasoning_effort,
     );
-    let redis = redis_client(&state);
+    let redis = client_from_settings(state.settings());
     let pending = pending_marker(&machine_id_str, &django_isoformat(now_micros()));
     if machine_outbox::set_command_result(redis.as_ref(), &request_id.to_string(), &pending)
         .await
@@ -1400,7 +1388,7 @@ pub async fn machine_create_runner_status(
         Ok(_) => {}
         Err(response) => return response,
     }
-    let redis = redis_client(&state);
+    let redis = client_from_settings(state.settings());
     let stored =
         match machine_outbox::get_command_result(redis.as_ref(), &request_id.to_string()).await {
             Ok(stored) => stored,
@@ -1468,7 +1456,7 @@ pub async fn machine_command_result(
     if authed_machine_id(auth.as_ref(), dev_machine_id).is_none() {
         return dev_machine_mismatch();
     }
-    let redis = redis_client(&state);
+    let redis = client_from_settings(state.settings());
     let stored =
         match machine_outbox::get_command_result(redis.as_ref(), &request_id.to_string()).await {
             Ok(stored) => stored,

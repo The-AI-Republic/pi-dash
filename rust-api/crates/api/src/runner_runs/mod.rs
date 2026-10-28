@@ -197,6 +197,7 @@ use sqlx::PgPool;
 
 use crate::state::AppState;
 pub use pidash_compat::response::{json_response, server_error, SERVER_ERROR_BODY};
+use pidash_db::redis::client_from_settings;
 
 // ---------------------------------------------------------------------------
 // Shared responses
@@ -1302,7 +1303,7 @@ impl RunnerPorts for LivePorts {
             &settings.cloud_agent,
             &settings.managed_runner,
             crate::project_move_handoff::RedisAdmissionCache {
-                client: crate::runner_enroll::teardown::redis_client(&self.state),
+                client: client_from_settings(self.state.settings()),
             },
             self.state.toolsets().clone(),
             run_id,

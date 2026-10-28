@@ -82,6 +82,7 @@ use serde_json::{Map, Value};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
+use crate::edge;
 use pidash_services::app_issues::serializers_assoc::{
     issue_description_version_detail_to_representation, issue_version_detail_to_representation,
     IssueDescriptionVersionDetailRow, IssueVersionDetailRow,
@@ -143,50 +144,24 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route(
             VERSIONS_PATH,
-            owned(axum::routing::get(version_list), &["GET"]),
+            edge::owned(axum::routing::get(version_list), &["GET"]),
         )
         .route(
             VERSION_PATH,
-            owned(axum::routing::get(version_detail), &["GET"]),
+            edge::owned(axum::routing::get(version_detail), &["GET"]),
         )
         .route(
             DESC_VERSIONS_PATH,
-            owned(axum::routing::get(desc_version_list), &["GET"]),
+            edge::owned(axum::routing::get(desc_version_list), &["GET"]),
         )
         .route(
             DESC_VERSION_PATH,
-            owned(axum::routing::get(desc_version_detail), &["GET"]),
+            edge::owned(axum::routing::get(desc_version_detail), &["GET"]),
         )
-        .route(MOVE_PATH, owned(axum::routing::post(move_issue), &["POST"]))
-}
-
-/// A versions/move path: the owned methods serve from Rust, everything
-/// else falls through to Django (the engage cutover shape — DRF
-/// authenticates before it checks the method, so proxying reproduces
-/// the 401-anon and Django's own 405s with no per-method logic).
-fn owned(
-    methods: axum::routing::MethodRouter<AppState>,
-    owned: &[&str],
-) -> axum::routing::MethodRouter<AppState> {
-    let mut router = methods;
-    for other in [
-        "GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD", "TRACE",
-    ] {
-        if owned.contains(&other) {
-            continue;
-        }
-        router = match other {
-            "GET" => router.get(crate::edge::proxy),
-            "POST" => router.post(crate::edge::proxy),
-            "PUT" => router.put(crate::edge::proxy),
-            "PATCH" => router.patch(crate::edge::proxy),
-            "DELETE" => router.delete(crate::edge::proxy),
-            "HEAD" => router.head(crate::edge::proxy),
-            "TRACE" => router.trace(crate::edge::proxy),
-            _ => router.options(crate::edge::proxy),
-        };
-    }
-    router
+        .route(
+            MOVE_PATH,
+            edge::owned(axum::routing::post(move_issue), &["POST"]),
+        )
 }
 
 // ---------------------------------------------------------------------------

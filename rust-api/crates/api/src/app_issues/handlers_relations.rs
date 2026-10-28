@@ -96,6 +96,7 @@ use chrono_tz::Tz;
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
+use crate::edge;
 use crate::middleware::body_limit::read_request_bytes;
 use crate::state::AppState;
 use crate::v1_cycles_modules::body as shared_body;
@@ -139,25 +140,25 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route(
             RELATION_PATH,
-            owned(
+            edge::owned(
                 axum::routing::get(relation_list).post(relation_create),
                 &["GET", "POST"],
             ),
         )
         .route(
             REMOVE_RELATION_PATH,
-            owned(axum::routing::post(remove_relation), &["POST"]),
+            edge::owned(axum::routing::post(remove_relation), &["POST"]),
         )
         .route(
             LINKS_PATH,
-            owned(
+            edge::owned(
                 axum::routing::get(link_list).post(link_create),
                 &["GET", "POST"],
             ),
         )
         .route(
             LINK_PATH,
-            owned(
+            edge::owned(
                 axum::routing::get(link_retrieve)
                     .put(link_update)
                     .patch(link_partial_update)
@@ -167,53 +168,26 @@ pub fn routes() -> Router<AppState> {
         )
         .route(
             PR_LINKS_PATH,
-            owned(
+            edge::owned(
                 axum::routing::get(pr_list).post(pr_create),
                 &["GET", "POST"],
             ),
         )
         .route(
             PR_LINK_PATH,
-            owned(axum::routing::delete(pr_destroy), &["DELETE"]),
+            edge::owned(axum::routing::delete(pr_destroy), &["DELETE"]),
         )
         .route(
             REVIEWS_PATH,
-            owned(
+            edge::owned(
                 axum::routing::get(review_list).post(review_create),
                 &["GET", "POST"],
             ),
         )
         .route(
             REVIEW_PATH,
-            owned(axum::routing::delete(review_destroy), &["DELETE"]),
+            edge::owned(axum::routing::delete(review_destroy), &["DELETE"]),
         )
-}
-
-/// A relations path: the owned methods serve from Rust, everything else
-/// falls through to Django (the engage-handler cutover shape).
-fn owned(
-    methods: axum::routing::MethodRouter<AppState>,
-    owned: &[&str],
-) -> axum::routing::MethodRouter<AppState> {
-    let mut router = methods;
-    for other in [
-        "GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD", "TRACE",
-    ] {
-        if owned.contains(&other) {
-            continue;
-        }
-        router = match other {
-            "GET" => router.get(crate::edge::proxy),
-            "POST" => router.post(crate::edge::proxy),
-            "PUT" => router.put(crate::edge::proxy),
-            "PATCH" => router.patch(crate::edge::proxy),
-            "DELETE" => router.delete(crate::edge::proxy),
-            "HEAD" => router.head(crate::edge::proxy),
-            "TRACE" => router.trace(crate::edge::proxy),
-            _ => router.options(crate::edge::proxy),
-        };
-    }
-    router
 }
 
 // ---------------------------------------------------------------------------

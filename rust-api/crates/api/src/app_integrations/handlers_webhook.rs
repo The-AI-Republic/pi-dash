@@ -83,8 +83,9 @@ use pidash_services::app_integrations::serializers::{
     validate_create_url, validate_update_url, SystemResolver, WebhookUrlError,
 };
 
-use super::{actor, owned, parse_id, pool_of, require_workspace_admin, workspace_id_or_404};
+use super::{actor, parse_id, pool_of, require_workspace_admin, workspace_id_or_404};
 use super::{json_response, Denial};
+use crate::edge;
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
 use pidash_compat::datetime::render_uuid_opt as opt_uuid;
@@ -102,33 +103,30 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route(
             "/api/workspaces/{slug}/webhooks/",
-            owned(
+            edge::owned(
                 axum::routing::get(list_webhooks).post(create_webhook),
-                &["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+                &["GET", "POST", "TRACE"],
             ),
         )
         .route(
             "/api/workspaces/{slug}/webhooks/{pk}/",
-            owned(
+            edge::owned(
                 axum::routing::get(retrieve_webhook)
                     .patch(partial_update_webhook)
                     .delete(destroy_webhook),
-                &["POST", "PUT", "HEAD", "OPTIONS"],
+                &["GET", "PATCH", "DELETE", "TRACE"],
             ),
         )
         .route(
             "/api/workspaces/{slug}/webhooks/{pk}/regenerate/",
-            owned(
+            edge::owned(
                 axum::routing::post(regenerate_secret),
-                &["GET", "PUT", "PATCH", "DELETE", "OPTIONS"],
+                &["POST", "HEAD", "TRACE"],
             ),
         )
         .route(
             "/api/workspaces/{slug}/webhook-logs/{webhook_id}/",
-            owned(
-                axum::routing::get(list_webhook_logs),
-                &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
-            ),
+            edge::owned(axum::routing::get(list_webhook_logs), &["GET", "TRACE"]),
         )
 }
 

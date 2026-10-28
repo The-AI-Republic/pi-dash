@@ -65,6 +65,7 @@ use uuid::Uuid;
 use pidash_auth::permissions::runner as runner_perm;
 use pidash_auth::scope::TenantScope;
 use pidash_auth::token as token_kernel;
+use pidash_db::redis::client_from_settings;
 use pidash_db::v1_cli_auth::queries::runner_lookup;
 use pidash_jobs::runner_enroll::{fire_revoke_bundle, revoke, RevokeCtx, RevokeScope};
 use pidash_services::runner_enroll::purge;
@@ -129,16 +130,6 @@ fn pool_of(state: &AppState) -> Result<PgPool, Response> {
 fn now_micros() -> DateTime<Utc> {
     let now = Utc::now();
     DateTime::from_timestamp_micros(now.timestamp_micros()).expect("micros in range")
-}
-
-fn redis_client(state: &AppState) -> Option<redis::Client> {
-    state
-        .settings()
-        .redis
-        .url
-        .as_deref()
-        .filter(|url| !url.is_empty())
-        .and_then(|url| pidash_db::redis::open_client(url).ok())
 }
 
 // ---------------------------------------------------------------------------
@@ -335,7 +326,7 @@ async fn proxy_through(
 fn revoke_ctx(pool: &PgPool, state: &AppState) -> RevokeCtx {
     RevokeCtx {
         pool: pool.clone(),
-        redis: redis_client(state),
+        redis: client_from_settings(state.settings()),
         runner: state.settings().runner.clone(),
         atomic_effects: true,
     }

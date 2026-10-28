@@ -37,6 +37,7 @@ use serde_json::Value;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
+use pidash_db::redis::client_from_settings;
 use pidash_db::runner_runs::pod::Pod;
 use pidash_db::runner_runs::AgentRun;
 use pidash_db::tx::Transaction as DbTransaction;
@@ -71,7 +72,6 @@ use super::runs::{
 };
 use super::{json_response, server_error};
 use crate::project_move_handoff::RedisAdmissionCache;
-use crate::runner_enroll::teardown::redis_client;
 use crate::state::AppState;
 use crate::v1_work_items::handlers_actions::{dispatch_deps, draw_jitter, fetch_project, IssueRow};
 
@@ -1320,7 +1320,7 @@ pub async fn post_direct(
         now_unix_secs: now.timestamp(),
     };
     let cache = RedisAdmissionCache {
-        client: redis_client(state),
+        client: client_from_settings(state.settings()),
     };
     let mut deferred: Vec<DeferredConsume> = Vec::new();
     let mut collect = |consume: DeferredConsume| deferred.push(consume);

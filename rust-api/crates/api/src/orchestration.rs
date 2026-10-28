@@ -37,6 +37,7 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings, RunnerSettings};
+use pidash_db::redis::client_from_settings;
 use pidash_db::runner_sessions::machine_outbox::{self, MachineOutboxError};
 use pidash_db::runner_sessions::models::runner_session;
 use pidash_db::runner_sessions::outbox as runner_outbox;
@@ -56,7 +57,6 @@ use pidash_services::runner_sessions::pubsub::{
     send_to_runner, PubsubStore, CLOSE_ACTIVE_SESSIONS_SQL,
 };
 
-use crate::runner_enroll::teardown::redis_client;
 use crate::state::AppState;
 use pidash_services::dispatch::admission::RedisAdmissionCache;
 
@@ -82,7 +82,7 @@ impl SpanCreationDeps {
             cloud: settings.cloud_agent.clone(),
             managed: settings.managed_runner.clone(),
             cache: RedisAdmissionCache {
-                client: redis_client(state),
+                client: client_from_settings(state.settings()),
             },
             now_unix_secs: unix_now_secs(),
             toolsets: state.toolsets().clone(),

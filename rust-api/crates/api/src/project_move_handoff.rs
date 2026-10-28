@@ -13,18 +13,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::state::AppState;
-
-/// Api-crate-owned Redis client: `None` when `REDIS_URL` is unset,
-/// empty, or unparsable, mirroring `redis_instance()` returning `None`.
-fn redis_client(state: &AppState) -> Option<redis::Client> {
-    state
-        .settings()
-        .redis
-        .url
-        .as_deref()
-        .filter(|url| !url.is_empty())
-        .and_then(|url| pidash_db::redis::open_client(url).ok())
-}
+use pidash_db::redis::client_from_settings;
 
 /// Redis-backed admission cache, unified in services (OVL-06):
 /// re-exported here so the direct-create tail and the v1 work-item
@@ -47,7 +36,7 @@ pub(crate) async fn complete_project_move_handoff(
     let deps = pidash_jobs::orchestration::HandoffInlineDeps {
         cloud: settings.cloud_agent.clone(),
         managed: settings.managed_runner.clone(),
-        redis: redis_client(state),
+        redis: client_from_settings(state.settings()),
         runner: settings.runner.clone(),
         toolsets: state.toolsets().clone(),
         assistant_seam: state.assistant_seam().clone(),

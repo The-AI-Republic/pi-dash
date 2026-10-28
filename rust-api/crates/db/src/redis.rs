@@ -60,6 +60,24 @@ pub fn open_client(url: &str) -> Result<redis::Client, redis::RedisError> {
     redis::Client::open(url)
 }
 
+/// Open a bare [`redis::Client`] from resolved
+/// [`Settings`](crate::config::Settings): the settings-URL-to-client
+/// step shared by every api-crate-owned client (PIDASHCONV-1593).
+///
+/// `None` when `REDIS_URL` is unset, empty, or unparsable — silently,
+/// like the per-module copies this replaces (contrast
+/// [`RedisHandle::from_settings`], which warn-logs the unparsable
+/// case for the shared handle). TLS follows [`open_client`]:
+/// `rediss://`/`valkeys://` skip certificate verification like Django.
+pub fn client_from_settings(settings: &crate::config::Settings) -> Option<redis::Client> {
+    settings
+        .redis
+        .url
+        .as_deref()
+        .filter(|url| !url.is_empty())
+        .and_then(|url| open_client(url).ok())
+}
+
 /// Django's `REDIS_SOCKET_CONNECT_TIMEOUT` default (`2.0` s,
 /// `pi_dash/settings/redis.py` `async_redis_instance`), used when the
 /// resolved setting is not a positive finite float.
@@ -264,6 +282,48 @@ mod tests {
         let mut settings = Settings::test_defaults();
         settings.redis.url = Some(":// not a url".to_owned());
         assert!(RedisHandle::from_settings(&settings).is_none());
+    }
+
+    #[test]
+    fn client_from_settings_matches_copies_semantics() {
+        // The per-module `redis_client` copies this replaces (PIDASHCONV-1593):
+        // unset, empty, or unparsable degrades to `None`, silently —
+        // unlike `RedisHandle::from_settings`, nothing is warn-logged.
+        let settings = Settings::test_defaults();
+        assert!(settings.redis.url.is_none());
+        assert!(client_from_settings(&settings).is_none());
+        let mut settings = Settings::test_defaults();
+        settings.redis.url = Some(String::new());
+        assert!(client_from_settings(&settings).is_none());
+        settings.redis.url = Some(":// not a url".to_owned());
+        assert!(client_from_settings(&settings).is_none());
+        // A plain `redis://` URL parses, plaintext (parse-only, no I/O).
+        settings.redis.url = Some("redis://127.0.0.1:6379/0".to_owned());
+        let client = client_from_settings(&settings).expect("redis url parses");
+        assert!(
+            matches!(
+                client.get_connection_info().addr(),
+                redis::ConnectionAddr::Tcp(..)
+            ),
+            "redis:// must stay plaintext"
+        );
+    }
+
+    #[test]
+    fn client_from_settings_skips_tls_verification_like_django() {
+        // `rediss://` connects without certificate verification
+        // (Django's `ssl_cert_reqs=None`); the overlay copy this
+        // replaces used plain `Client::open` and missed this policy
+        // (PIDASHCONV-1593). Parse-only, no I/O.
+        let mut settings = Settings::test_defaults();
+        settings.redis.url = Some("rediss://127.0.0.1:6390/0".to_owned());
+        let client = client_from_settings(&settings).expect("rediss url parses");
+        match client.get_connection_info().addr() {
+            redis::ConnectionAddr::TcpTls { insecure, .. } => {
+                assert!(*insecure, "rediss:// must skip verification like Django");
+            }
+            other => panic!("expected TcpTls for rediss://, got {other:?}"),
+        }
     }
 
     #[test]
