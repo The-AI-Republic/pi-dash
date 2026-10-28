@@ -237,3 +237,39 @@ pub fn classify_provider_error(
 
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn provider_detail_reads_openai_style_nested_errors() {
+        // Port of Django's `test_provider_detail_reads_openai_style_nested_errors`:
+        // the nested message wins, with whitespace runs collapsed.
+        let body = json!({"error": {"message": "  Insufficient\n credits  ", "code": 402}});
+        assert_eq!(provider_detail(Some(&body)), "Insufficient credits");
+        // A blank top-level message falls through to the nested one.
+        let body = json!({"message": "  ", "error": {"message": "nested"}});
+        assert_eq!(provider_detail(Some(&body)), "nested");
+    }
+
+    #[test]
+    fn provider_detail_is_empty_without_a_structured_body() {
+        // Port of Django's `test_provider_detail_is_empty_without_a_structured_body`.
+        let body = json!("<html>Payment Required</html>");
+        assert_eq!(provider_detail(Some(&body)), "");
+        assert_eq!(provider_detail(None), "");
+    }
+
+    #[test]
+    fn provider_detail_is_capped() {
+        // Port of Django's `test_provider_detail_is_capped`: 299 chars,
+        // rstripped, plus the ellipsis — 300 chars total, counted in
+        // chars like the Python slice.
+        let body = json!({"message": "x".repeat(5000)});
+        let detail = provider_detail(Some(&body));
+        assert_eq!(detail.chars().count(), 300);
+        assert_eq!(detail, format!("{}…", "x".repeat(299)));
+    }
+}

@@ -245,6 +245,10 @@
           "provider_rate_limited",
           "Too many requests to the model provider. Wait a moment and try again."
         ],
+        "gateway_429": [
+          "provider_rate_limited",
+          "Too many requests to the model provider. Wait a moment and try again."
+        ],
         "credit_402_body": [
           "provider_out_of_credit",
           "The provider rejected the request for lack of credit. The provider said: Insufficient credits. Top up at https://example.test/billing."

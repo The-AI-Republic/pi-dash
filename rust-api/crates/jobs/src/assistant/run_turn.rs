@@ -1375,6 +1375,16 @@ mod tests {
                     BYOK,
                     "",
                 ),
+                // Django parametrizes `test_429_asks_the_user_to_retry`
+                // over both connections: a 429 reads as rate-limited on
+                // the gateway too.
+                "gateway_429" => (
+                    Some(429),
+                    "status_code: 429, model_name: m, body: {'message': 'Rate limit exceeded'}",
+                    "",
+                    GATEWAY,
+                    "",
+                ),
                 "credit_402_body" => (
                     Some(402),
                     "status_code: 402, model_name: m, body: {'message': 'Insufficient credits.'}",

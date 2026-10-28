@@ -271,6 +271,7 @@ def test_classifier_vectors_match_new_table():
     vectors = json.loads(fx_path.read_text())["tasks"]["classify_error"]["vectors"]
     assert set(vectors) == {
         "rate_429",
+        "gateway_429",
         "credit_402_body",
         "credit_402_bare",
         "credit_429_quota",
