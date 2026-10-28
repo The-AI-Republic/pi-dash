@@ -133,11 +133,7 @@ use pidash_services::domain::issues as domain_issues;
 use pidash_services::domain::issues::IssueFieldSet as IssueSaveRow;
 use pidash_services::domain::transition::IssueTransitionHook;
 use pidash_services::domain::{self, WriteActor, WriteCtx, WriteScope};
-use pidash_services::orchestration::blockers::{
-    has_open_blockers_sql, relations_summary, summary_sql, BlockerRow,
-};
 use pidash_services::orchestration::clock::ProjectClockPolicy;
-use pidash_services::orchestration::entries::{FireOutcome, FireRequest};
 use pidash_services::read;
 use pidash_types::dispatch::{AgentExecutorKind, ManagedRunnerReason};
 use pidash_types::orchestration::StateRef;
