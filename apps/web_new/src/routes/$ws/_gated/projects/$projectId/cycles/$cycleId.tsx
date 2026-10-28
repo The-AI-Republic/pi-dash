@@ -39,18 +39,20 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/cycles/$cy
     const { prefetchEntityList } = await import("../../../../../../features/issues/list/prefetch.js");
     const entity = { scope: "cycle", projectId: params.projectId, cycleId: params.cycleId } as const;
     try {
-      // Preferences first: the stored flags shape the first page read.
-      await prefetchEntityList(context, params.ws, entity);
-      await context.queryClient.ensureQueryData(projectsQueryOptions(context.apiClient, params.ws));
+      // The detail read goes first: a missing cycle 404s here, before
+      // the prefs prefetch can 400 on the unknown id (CYC-013).
       await context.queryClient.ensureQueryData(
         cycleDetailQueryOptions(context.apiClient, params.ws, params.projectId, params.cycleId)
       );
+      // Preferences next: the stored flags shape the first page read.
+      await prefetchEntityList(context, params.ws, entity);
+      await context.queryClient.ensureQueryData(projectsQueryOptions(context.apiClient, params.ws));
       // The page body, the board and the list/analytics leaves ride their
       // own chunks; await them with the data so the first commit is the
       // screen rather than an intermediate skeleton.
       await Promise.all([loadCycleDetailContent(), loadKanbanLayout(), loadIssueListLeaves()]);
     } catch (error) {
-      // A missing cycle 404s the prefetch: let the gone-away gate own it
+      // A missing cycle 404s the reads: let the gone-away gate own it
       // instead of failing the load (CYC-013).
       if (!isApiError(error) || error.status !== 404) throw error;
     }

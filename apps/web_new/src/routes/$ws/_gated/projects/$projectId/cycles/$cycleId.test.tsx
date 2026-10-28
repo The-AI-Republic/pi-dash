@@ -964,6 +964,62 @@ describe("cycle detail route", () => {
     ).resolves.toBe(undefined);
   });
 
+  it("reads the detail before the prefs prefetch so a missing cycle never trips the prefs 400 (CYC-013)", async () => {
+    const beforeLoad = Route.options.beforeLoad;
+    if (!beforeLoad) throw new Error("missing beforeLoad");
+    // The detail read 404s for an unknown cycle while the
+    // user-properties read 400s on the same id; the detail must win
+    // the race so the gone-away gate owns the failure.
+    mocks.cycle.mockReturnValue({
+      queryKey: ["cycle"],
+      queryFn: async () => {
+        throw new ApiError({ status: 404, code: "http", message: "Cycle not found" });
+      },
+    });
+    mocks.prefs.mockReturnValue({
+      queryKey: ["prefs"],
+      queryFn: async () => {
+        throw new ApiError({ status: 400, code: "http", message: "The payload is not valid" });
+      },
+    });
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
+    });
+    await expect(
+      beforeLoad({
+        context: { queryClient, apiClient: { stub: true } },
+        params: { ws: "acme", projectId: PROJECT, cycleId: CYCLE },
+      } as never)
+    ).resolves.toBe(undefined);
+    expect(mocks.cycle).toHaveBeenCalled();
+    expect(mocks.prefs).not.toHaveBeenCalled();
+  });
+
+  it("rethrows a non-404 detail failure so the page keeps its retry (CYC-013)", async () => {
+    const beforeLoad = Route.options.beforeLoad;
+    if (!beforeLoad) throw new Error("missing beforeLoad");
+    // The detail read runs first now; a server error there is a genuine
+    // load failure and must reach the route's error view, not the
+    // gone-away gate (only the unknown-cycle 404 moves).
+    const failure = new ApiError({ status: 500, code: "http", message: "boom" });
+    mocks.cycle.mockReturnValue({
+      queryKey: ["cycle"],
+      queryFn: async () => {
+        throw failure;
+      },
+    });
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
+    });
+    await expect(
+      beforeLoad({
+        context: { queryClient, apiClient: { stub: true } },
+        params: { ws: "acme", projectId: PROJECT, cycleId: CYCLE },
+      } as never)
+    ).rejects.toBe(failure);
+    expect(mocks.prefs).not.toHaveBeenCalled();
+  });
+
   it("rethrows non-404 prefetch failures", async () => {
     const beforeLoad = Route.options.beforeLoad;
     if (!beforeLoad) throw new Error("missing beforeLoad");
