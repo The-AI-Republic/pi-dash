@@ -630,7 +630,6 @@ export class WebNewDriver implements ParityDriver {
   private pagesPaneMemberHooked = false;
   /** A detail body's first paint can trail the record by the socket schedule. */
   private static readonly DETAIL_SETTLE_MS = 120_000;
-
   /** How long one body-paint poll waits before reading the column again. */
   private static readonly PAINT_STEP_MS = 250;
 
@@ -22434,13 +22433,13 @@ export class WebNewDriver implements ParityDriver {
 
   async pagesPrefsEditorClear(): Promise<void> {
     await this.pagesPrefsEditorClickEnd();
-    await this.page.keyboard.press("Control+a");
+    await this.page.keyboard.press("ControlOrMeta+a");
     await this.page.keyboard.press("Backspace");
   }
 
   async pagesPrefsEditorSelectAll(): Promise<void> {
     await this.pagesPrefsBodyEditor().click({ timeout: 30_000 });
-    await this.page.keyboard.press("Control+a");
+    await this.page.keyboard.press("ControlOrMeta+a");
   }
 
   async pagesPrefsTitleValue(): Promise<string> {
@@ -22451,7 +22450,7 @@ export class WebNewDriver implements ParityDriver {
 
   async pagesPrefsTitleFill(text: string): Promise<void> {
     await this.pagesPrefsTitleField().click({ timeout: 30_000 });
-    await this.page.keyboard.press("Control+a");
+    await this.page.keyboard.press("ControlOrMeta+a");
     await this.page.keyboard.type(text);
   }
 
@@ -22539,19 +22538,32 @@ export class WebNewDriver implements ParityDriver {
     return ((await content.first().getAttribute("class")) ?? "").includes("wide-layout");
   }
 
+  /**
+   * How long a measured style must hold before it counts as settled. A
+   * reflow that has not started yet reads the old value twice in a row,
+   * so agreement alone proves nothing; the reading has to stand still.
+   */
+  private static readonly SETTLE_MS = 500;
+
   async pagesPrefsCanvasMaxWidth(): Promise<string> {
-    // The canvas measures through a CSS transition, so poll until two
-    // consecutive reads agree instead of catching it mid-flight.
+    // The canvas measures through a CSS transition, so poll until the
+    // reading holds still. Two equal samples are not enough: a sample
+    // taken before the reflow starts and one taken as it begins to move
+    // can both read the old width under load, and returning that early
+    // reports a width the page has already left behind. The width must
+    // stay put across a sustained window instead.
     const measure = this.page.locator(".frame-renderer").first();
     await measure.waitFor({ state: "attached", timeout: 30_000 });
-    let previous = await measure.evaluate((el) => getComputedStyle(el).maxWidth);
+    let settled = await measure.evaluate((el) => getComputedStyle(el).maxWidth);
+    let heldFor = 0;
     for (let attempt = 0; attempt < 25; attempt += 1) {
       await this.page.waitForTimeout(100);
       const current = await measure.evaluate((el) => getComputedStyle(el).maxWidth);
-      if (current === previous) return current;
-      previous = current;
+      heldFor = current === settled ? heldFor + 100 : 0;
+      settled = current;
+      if (heldFor >= WebNewDriver.SETTLE_MS) return current;
     }
-    return previous;
+    return settled;
   }
 
   async pagesPrefsEditorClass(): Promise<string> {
@@ -22689,6 +22701,11 @@ export class WebNewDriver implements ParityDriver {
       const button = buttons.nth(index);
       const aria = ((await button.getAttribute("aria-label")) ?? "").trim();
       if (aria === "" || aria === "Navigation pane") continue;
+      // The sibling switcher lives in the header too and carries the
+      // current page title in its accessible name, so a page named with
+      // "share" (or "extra") would pollute the community-absence reads.
+      // It is navigation, not an action: skip it by its marker.
+      if ((await button.locator('[data-testid="page-switcher-current-name"]').count()) > 0) continue;
       names.push(aria);
     }
     return names;
@@ -23050,13 +23067,30 @@ export class WebNewDriver implements ParityDriver {
 
   async pagesPaneEditorPasteHtml(html: string): Promise<void> {
     // A synthetic paste carrying text/html exercises the editor's own
-    // handler (headings, images) without clipboard permissions.
+    // handler (headings, images) without clipboard permissions. The
+    // handler inserts asynchronously and leaves a pasted block
+    // node-selected, so a paste that returns straight away hands the next
+    // step a selection that replaces the block it just added instead of
+    // following it (PAGE-048's image vanishes when the link paragraph
+    // lands on top of it, NEWFRONT-851). The call therefore settles the
+    // insert before it returns: a caret key drops that node selection
+    // without touching the document or the scroll offset (a click at the
+    // end of the body would scroll the canvas there, which four scenarios
+    // read), and two frames let the transaction paint.
     await this.pagesPaneEditorClickEnd();
-    await this.pagesPaneLiveEditor().evaluate((element, markup) => {
+    const editor = this.pagesPaneLiveEditor();
+    await editor.evaluate((element, markup) => {
       const transfer = new DataTransfer();
       transfer.setData("text/html", markup);
       element.dispatchEvent(new ClipboardEvent("paste", { clipboardData: transfer, bubbles: true, cancelable: true }));
     }, html);
+    await this.page.keyboard.press("ArrowRight");
+    await editor.evaluate(
+      () =>
+        new Promise<void>((resolve) => {
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+        })
+    );
   }
 
   async pagesPaneQueryParam(key: string): Promise<string | null> {
@@ -26474,164 +26508,465 @@ export class WebNewDriver implements ParityDriver {
 
   // --- Pages list discovery (NEWFRONT-312, PAGE-001-006).
 
-  async pagesListOpenProjectPages(_workspaceSlug: string, _projectId: string, _query?: string): Promise<void> {
-    return todo("pagesListOpenProjectPages");
+  /** One visibility tab link (Public, Private, Archived). */
+  private pagesListTabLink(tab: PagesListTab): Locator {
+    const label = tab === "public" ? "Public" : tab === "private" ? "Private" : "Archived";
+    return this.page.getByTestId("pages-list-tabs").getByRole("link", { name: label, exact: true });
+  }
+
+  /** One list row by its displayed title (tree and flat rows alike render page-row). */
+  private pagesListRow(title: string): Locator {
+    return this.page
+      .getByTestId("page-row")
+      .filter({ has: this.page.getByRole("link", { name: title, exact: true }) })
+      .first();
+  }
+
+  /** Row titles until two consecutive reads agree (client-side reorder settles). */
+  private async pagesListStableTitles(): Promise<string[]> {
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    let previous: string[] = await this.pagesListRowTitles();
+    for (;;) {
+      await this.page.waitForTimeout(500);
+      const current: string[] = await this.pagesListRowTitles();
+      if (current.join("\u0000") === previous.join("\u0000")) return current;
+      if (Date.now() > deadline) return current;
+      previous = current;
+    }
+  }
+
+  /** Tooltip popup text after hovering `target`; skips stale portal content. */
+  private async pagesListTooltipText(target: Locator, previous: string | null): Promise<string | null> {
+    // A previous popup stays open under the cursor and intercepts the next
+    // hover, so dismiss it first (nothing Escape-sensitive is open here).
+    await this.page.keyboard.press("Escape");
+    await this.page
+      .getByRole("tooltip")
+      .waitFor({ state: "hidden", timeout: 5_000 })
+      .catch(() => undefined);
+    await target.hover({ timeout: WebNewDriver.WAIT_MS });
+    const tip = this.page.getByRole("tooltip").first();
+    try {
+      await tip.waitFor({ state: "visible", timeout: 10_000 });
+    } catch {
+      return null;
+    }
+    // Consecutive hovers swap the shared portal content; wait for text that
+    // is neither empty nor the previous tooltip's.
+    for (let attempt = 0; attempt < 10; attempt++) {
+      const text = (await tip.innerText().catch(() => "")).trim();
+      if (text !== "" && text !== (previous ?? "")) return text;
+      await this.page.waitForTimeout(200);
+    }
+    const text = (await tip.innerText().catch(() => "")).trim();
+    return text === "" ? null : text;
+  }
+
+  /** Inner texts of the currently open menu's items. */
+  private async pagesListMenuLabels(): Promise<string[]> {
+    const items = this.page.getByRole("menuitem");
+    const count = await items.count();
+    const labels: string[] = [];
+    for (let index = 0; index < count; index++) {
+      labels.push(
+        (
+          await items
+            .nth(index)
+            .innerText()
+            .catch(() => "")
+        ).trim()
+      );
+    }
+    return labels.filter((label) => label.length > 0);
+  }
+
+  async pagesListOpenProjectPages(workspaceSlug: string, projectId: string, query?: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/pages${query ?? ""}`, {
+      waitUntil: "domcontentloaded",
+    });
+    // One of four terminal states proves the list route mounted: rows, the
+    // feature-off gate, the zero state, or the no-results state.
+    await Promise.race([
+      this.page
+        .getByTestId("page-row")
+        .first()
+        .waitFor({ timeout: WebNewDriver.WAIT_MS })
+        .catch(() => undefined),
+      this.page
+        .getByTestId("pages-feature-gate")
+        .waitFor({ timeout: WebNewDriver.WAIT_MS })
+        .catch(() => undefined),
+      this.page
+        .getByTestId("pages-empty-state")
+        .waitFor({ timeout: WebNewDriver.WAIT_MS })
+        .catch(() => undefined),
+      this.page
+        .getByTestId("pages-no-results")
+        .waitFor({ timeout: WebNewDriver.WAIT_MS })
+        .catch(() => undefined),
+    ]);
+    await this.pagesListStableTitles().catch(() => []);
   }
 
   async pagesListGateVisible(): Promise<boolean> {
-    return todo("pagesListGateVisible");
+    return this.isShown(this.page.getByTestId("pages-feature-gate"));
   }
 
   async pagesListGateManageEnabled(): Promise<boolean> {
-    return todo("pagesListGateManageEnabled");
+    const button = this.page
+      .getByTestId("pages-feature-gate")
+      .getByRole("button", { name: "Manage features", exact: true });
+    await button.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return button.isEnabled();
   }
 
   async pagesListGateOpenManage(): Promise<void> {
-    return todo("pagesListGateOpenManage");
+    await this.page
+      .getByTestId("pages-feature-gate")
+      .getByRole("button", { name: "Manage features", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.waitForURL(/\/settings\/projects\//, { timeout: WebNewDriver.WAIT_MS });
   }
 
   async pagesListTabsVisible(): Promise<boolean> {
-    return todo("pagesListTabsVisible");
+    return this.isShown(this.page.getByTestId("pages-list-tabs"));
   }
 
   async pagesListTabs(): Promise<string[]> {
-    return todo("pagesListTabs");
+    const labels: string[] = [];
+    for (const tab of ["public", "private", "archived"] as const) {
+      if (await this.isShown(this.pagesListTabLink(tab))) {
+        labels.push(tab === "public" ? "Public" : tab === "private" ? "Private" : "Archived");
+      }
+    }
+    return labels;
   }
 
   async pagesListActiveTab(): Promise<PagesListTab> {
-    return todo("pagesListActiveTab");
+    const type = new URL(this.page.url()).searchParams.get("type");
+    if (type === "private") return "private";
+    if (type === "archived") return "archived";
+    return "public";
   }
 
   async pagesListMarkedTab(): Promise<PagesListTab | null> {
-    return todo("pagesListMarkedTab");
+    for (const tab of ["public", "private", "archived"] as const) {
+      const current = await this.pagesListTabLink(tab)
+        .getAttribute("aria-current")
+        .catch(() => null);
+      if (current === "page") return tab;
+    }
+    return null;
   }
 
-  async pagesListTabHref(_tab: PagesListTab): Promise<string | null> {
-    return todo("pagesListTabHref");
+  async pagesListTabHref(tab: PagesListTab): Promise<string | null> {
+    if (!(await this.isShown(this.pagesListTabLink(tab)))) return null;
+    return this.pagesListTabLink(tab)
+      .getAttribute("href")
+      .catch(() => null);
   }
 
-  async pagesListClickTab(_tab: PagesListTab): Promise<void> {
-    return todo("pagesListClickTab");
+  async pagesListClickTab(tab: PagesListTab): Promise<void> {
+    await this.pagesListTabLink(tab).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.pagesListStableTitles();
   }
 
   async pagesListRowTitles(): Promise<string[]> {
-    return todo("pagesListRowTitles");
+    const links = this.page.getByTestId("page-row").getByRole("link");
+    const count = await links.count();
+    const titles: string[] = [];
+    for (let index = 0; index < count; index++) {
+      const label = await links
+        .nth(index)
+        .getAttribute("aria-label")
+        .catch(() => null);
+      if (label !== null && label.trim().length > 0) titles.push(label.trim());
+    }
+    return titles;
   }
 
   async pagesListSearchOpen(): Promise<void> {
-    return todo("pagesListSearchOpen");
+    if (await this.pagesListSearchExpanded()) return;
+    await this.page
+      .getByRole("button", { name: "Open page search", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .getByRole("textbox", { name: "Search pages", exact: true })
+      .waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async pagesListSearchExpanded(): Promise<boolean> {
-    return todo("pagesListSearchExpanded");
+    return this.isShown(this.page.getByRole("textbox", { name: "Search pages", exact: true }));
   }
 
-  async pagesListSearchType(_text: string): Promise<void> {
-    return todo("pagesListSearchType");
+  async pagesListSearchType(text: string): Promise<void> {
+    await this.pagesListSearchOpen();
+    await this.page
+      .getByRole("textbox", { name: "Search pages", exact: true })
+      .fill(text, { timeout: WebNewDriver.WAIT_MS });
+    await this.pagesListStableTitles();
   }
 
   async pagesListSearchValue(): Promise<string | null> {
-    return todo("pagesListSearchValue");
+    if (!(await this.pagesListSearchExpanded())) return null;
+    return this.page
+      .getByRole("textbox", { name: "Search pages", exact: true })
+      .inputValue()
+      .catch(() => null);
   }
 
   async pagesListSearchEscape(): Promise<void> {
-    return todo("pagesListSearchEscape");
+    await this.page
+      .getByRole("textbox", { name: "Search pages", exact: true })
+      .press("Escape", { timeout: WebNewDriver.WAIT_MS });
+    await this.page.waitForTimeout(500);
   }
 
   async pagesListSearchClear(): Promise<void> {
-    return todo("pagesListSearchClear");
+    await this.page
+      .getByRole("button", { name: "Clear page search", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .getByRole("textbox", { name: "Search pages", exact: true })
+      .waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
 
   async pagesListClickAway(): Promise<void> {
-    return todo("pagesListClickAway");
+    // The active tab is outside the search control and re-selecting it is a
+    // no-op, so it is the neutral click-away target.
+    await this.pagesListTabLink(await this.pagesListActiveTab()).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.waitForTimeout(500);
   }
 
   async pagesListNoResultsVisible(): Promise<boolean> {
-    return todo("pagesListNoResultsVisible");
+    return this.isShown(this.page.getByTestId("pages-no-results"));
   }
 
   async pagesListSortState(): Promise<{ label: string; descending: boolean }> {
-    return todo("pagesListSortState");
+    for (const label of ["Name", "Date created", "Date modified"]) {
+      const button = this.page.getByRole("button", { name: label, exact: true });
+      if (await this.isShown(button)) {
+        const iconClass =
+          (await button
+            .locator("svg")
+            .first()
+            .getAttribute("class")
+            .catch(() => null)) ?? "";
+        return { label, descending: iconClass.includes("arrow-down-wide-narrow") };
+      }
+    }
+    throw new Error("[parity] sort control shows no known key label.");
   }
 
   async pagesListSortOpen(): Promise<void> {
-    return todo("pagesListSortOpen");
+    const { label } = await this.pagesListSortState();
+    await this.page.getByRole("button", { name: label, exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("menuitem", { name: "Name" }).first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async pagesListSortOptions(): Promise<string[]> {
-    return todo("pagesListSortOptions");
+    return this.pagesListMenuLabels();
   }
 
-  async pagesListSortChooseKey(_label: string): Promise<void> {
-    return todo("pagesListSortChooseKey");
+  async pagesListSortChooseKey(label: string): Promise<void> {
+    await this.pagesListSortOpen();
+    await this.page.getByRole("menuitem", { name: label }).first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.pagesListStableTitles();
   }
 
-  async pagesListSortChooseDirection(_label: string): Promise<void> {
-    return todo("pagesListSortChooseDirection");
+  async pagesListSortChooseDirection(label: string): Promise<void> {
+    await this.pagesListSortOpen();
+    await this.page.getByRole("menuitem", { name: label }).first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.pagesListStableTitles();
   }
 
   async pagesListFiltersOpen(): Promise<void> {
-    return todo("pagesListFiltersOpen");
+    if (await this.isShown(this.page.getByTestId("pages-filter-panel"))) return;
+    await this.page.getByRole("button", { name: "Filters", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByTestId("pages-filter-panel").waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async pagesListFiltersClose(): Promise<void> {
-    return todo("pagesListFiltersClose");
+    if (!(await this.isShown(this.page.getByTestId("pages-filter-panel")))) return;
+    await this.page.keyboard.press("Escape");
+    await this.page.getByTestId("pages-filter-panel").waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
   }
 
   async pagesListFilterToggleFavorites(): Promise<void> {
-    return todo("pagesListFilterToggleFavorites");
+    await this.page
+      .getByTestId("pages-filter-panel")
+      .getByRole("button", { name: "Favorites", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.pagesListStableTitles();
   }
 
-  async pagesListFilterChooseDate(_label: string): Promise<void> {
-    return todo("pagesListFilterChooseDate");
+  async pagesListFilterChooseDate(label: string): Promise<void> {
+    await this.page
+      .getByTestId("pages-filter-panel")
+      .getByRole("button", { name: label, exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.pagesListStableTitles();
   }
 
-  async pagesListFilterSearch(_text: string): Promise<void> {
-    return todo("pagesListFilterSearch");
+  async pagesListFilterSearch(text: string): Promise<void> {
+    await this.page
+      .getByTestId("pages-filter-panel")
+      .getByRole("searchbox", { name: "Search filter options", exact: true })
+      .fill(text, { timeout: WebNewDriver.WAIT_MS });
+    await this.page.waitForTimeout(500);
   }
 
   async pagesListFilterCreatorOptions(): Promise<string[]> {
-    return todo("pagesListFilterCreatorOptions");
+    const section = this.page.getByTestId("pages-filter-panel").locator('section[aria-label="Created by"]');
+    const buttons = section.getByRole("button");
+    const count = await buttons.count();
+    const labels: string[] = [];
+    for (let index = 0; index < count; index++) {
+      // Creator buttons pair an avatar with the name div; read the name div
+      // so the avatar never leaks into the label.
+      const text = (
+        await buttons
+          .nth(index)
+          .locator("div.truncate")
+          .innerText()
+          .catch(() => "")
+      ).trim();
+      if (text.length > 0) labels.push(text);
+    }
+    return labels;
   }
 
-  async pagesListFilterPickCreator(_label: string): Promise<void> {
-    return todo("pagesListFilterPickCreator");
+  async pagesListFilterPickCreator(label: string): Promise<void> {
+    await this.page
+      .getByTestId("pages-filter-panel")
+      .locator('section[aria-label="Created by"]')
+      .getByRole("button", { name: label })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.pagesListStableTitles();
   }
 
   async pagesListChips(): Promise<string[]> {
-    return todo("pagesListChips");
+    const row = this.page.getByTestId("pages-filter-chips");
+    if ((await row.count()) === 0) return [];
+    const chips = row.locator('[data-testid^="pages-filter-chip-"]');
+    const count = await chips.count();
+    const texts: string[] = [];
+    for (let index = 0; index < count; index++) {
+      // Label and value read as separate entries, mirroring the oracle's
+      // line-split chip text.
+      const chip = chips.nth(index);
+      const label = (
+        (await chip
+          .locator("span")
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      const value = (
+        (await chip
+          .locator("span")
+          .nth(1)
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (label.length > 0) texts.push(label);
+      if (value.length > 0) texts.push(value);
+    }
+    return texts;
   }
 
-  async pagesListChipRemove(_keyLabel: string): Promise<void> {
-    return todo("pagesListChipRemove");
+  async pagesListChipRemove(keyLabel: string): Promise<void> {
+    const direct = this.page.getByTestId(`pages-filter-chip-${keyLabel.toLowerCase()}`);
+    if ((await direct.count()) > 0) {
+      await direct.getByRole("button").click({ timeout: WebNewDriver.WAIT_MS });
+    } else {
+      // Fall back to the visible remove label (the oracle keys chips by label text).
+      await this.page
+        .getByTestId("pages-filter-chips")
+        .getByRole("button", { name: `Remove ${keyLabel}` })
+        .click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    await this.pagesListStableTitles();
   }
 
   async pagesListClearAll(): Promise<void> {
-    return todo("pagesListClearAll");
+    await this.page
+      .getByTestId("pages-filter-chips")
+      .getByRole("button", { name: "Clear all", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.pagesListStableTitles();
   }
 
-  async pagesListRowDetail(_title: string): Promise<PagesListRowDetail> {
-    return todo("pagesListRowDetail");
+  async pagesListRowDetail(title: string): Promise<PagesListRowDetail> {
+    const row = this.pagesListRow(title);
+    await row.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const link = row.getByRole("link", { name: title, exact: true });
+    const star = row.getByTestId("page-row-star");
+    const starOffered = (await star.count()) > 0;
+    let starred = false;
+    if (starOffered) {
+      starred =
+        (await star
+          .first()
+          .getAttribute("aria-pressed")
+          .catch(() => null)) === "true";
+    }
+    const menuOffered = (await row.getByRole("button", { name: `Page actions for ${title}`, exact: true }).count()) > 0;
+    // Hover reveals each detail as a tooltip; each hover swaps the shared
+    // portal content, so reads pass the previous text to skip stale content.
+    const avatar = link.locator('span[role="img"]').first();
+    const owner = (await avatar.count()) > 0 ? await this.pagesListTooltipText(avatar, null) : null;
+    const glyph = row.getByTestId("page-row-visibility").first();
+    const visibility = (await glyph.count()) > 0 ? await this.pagesListTooltipText(glyph, owner) : null;
+    const date = row.locator('span[aria-label^="Created on"]').first();
+    const createdOn = (await date.count()) > 0 ? await this.pagesListTooltipText(date, visibility) : null;
+    const markOffered = (await link.locator("xpath=./*[1]").count()) > 0;
+    return { title, markOffered, owner, visibility, createdOn, starOffered, starred, menuOffered };
   }
 
-  async pagesListClickRow(_title: string): Promise<void> {
-    return todo("pagesListClickRow");
+  async pagesListClickRow(title: string): Promise<void> {
+    await this.pagesListRow(title)
+      .getByRole("link", { name: title, exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.waitForURL(/\/pages\/[0-9a-fA-F-]{8}/, { timeout: WebNewDriver.WAIT_MS });
+    // Either the detail screen or its loading spinner proves the detail mounted.
+    await Promise.race([
+      this.page
+        .getByTestId("page-detail-screen")
+        .waitFor({ timeout: WebNewDriver.WAIT_MS })
+        .catch(() => undefined),
+      this.page
+        .getByTestId("page-detail-spinner")
+        .waitFor({ timeout: WebNewDriver.WAIT_MS })
+        .catch(() => undefined),
+    ]);
   }
 
   async pagesListDismissMenus(): Promise<void> {
-    return todo("pagesListDismissMenus");
+    await this.page.keyboard.press("Escape");
+    await this.page.waitForTimeout(500);
   }
 
-  async pagesListRowMenuItems(_title: string): Promise<string[]> {
-    return todo("pagesListRowMenuItems");
+  async pagesListRowMenuItems(title: string): Promise<string[]> {
+    const row = this.pagesListRow(title);
+    await row.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await row
+      .getByRole("button", { name: `Page actions for ${title}`, exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return this.pagesListMenuLabels();
   }
 
-  async pagesListRowRightClick(_title: string): Promise<void> {
-    return todo("pagesListRowRightClick");
+  async pagesListRowRightClick(title: string): Promise<void> {
+    await this.pagesListRow(title)
+      .getByRole("link", { name: title, exact: true })
+      .click({ button: "right", timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async pagesListContextMenuItems(): Promise<string[]> {
-    return todo("pagesListContextMenuItems");
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return this.pagesListMenuLabels();
   }
 
   // --- Pages create, star, row actions, move (NEWFRONT-313, PAGE-007-017). ---
@@ -28727,10 +29062,6 @@ export class WebNewDriver implements ParityDriver {
     return this.page.getByRole("dialog").filter({ hasText: "Delete page" }).last();
   }
 
-  private async pagesHeaderMenuLabel(item: Locator): Promise<string> {
-    return ((await item.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
-  }
-
   async pagesHeaderCopyLinkLabel(): Promise<string | null> {
     const header = this.pagesHeaderCluster();
     if ((await header.getByRole("button", { name: "Copied link", exact: true }).count()) > 0) return "Copied link";
@@ -28813,17 +29144,27 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async pagesHeaderMenuItems(): Promise<string[]> {
-    const items = this.pagesHeaderMenuEntries();
-    const labels: string[] = [];
-    const count = await items.count();
-    for (let index = 0; index < count; index += 1) {
-      const label = await this.pagesHeaderMenuLabel(items.nth(index));
-      if (label !== "") labels.push(label);
-    }
-    return labels;
+    // One atomic read: the popup unmounts the moment a dismissal lands
+    // (Escape, an outside press, a select), so counting entries and then
+    // reading each one can straddle the unmount and block on an entry
+    // that no longer exists. `evaluateAll` never waits for a match — it
+    // answers with the entries present at that instant, empty when the
+    // menu is already gone.
+    const labels = await this.pagesHeaderMenuEntries().evaluateAll((items) =>
+      items.map((item) => ((item as HTMLElement).innerText ?? "").replace(/\s+/g, " ").trim())
+    );
+    return labels.filter((label) => label !== "");
   }
 
   async pagesHeaderChooseMenuItem(label: string): Promise<void> {
+    // Headless browsing denies clipboard writes, and the page reports a
+    // denied copy honestly (an error notice, no success toast), so the
+    // copy entry needs the grant before it runs — the same read the
+    // blocks options menu and every other copy control uses. The fixture
+    // context dies with the scenario, so nothing leaks.
+    if (label === "Copy markdown") {
+      await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    }
     await this.pagesHeaderMenuEntries()
       .filter({ hasText: new RegExp(`^${label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`) })
       .first()
@@ -28920,16 +29261,31 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async pagesHeaderCanvasMaxWidth(): Promise<string> {
-    // The canvas eases width changes, so settle on two agreeing reads.
+    // The preference commits a frame or two after the menu click returns,
+    // and the canvas then eases to the new measure (a max-width
+    // transition). A plain read can therefore catch the outgoing width
+    // before the commit lands, or an intermediate width mid-ease — both
+    // looked like the toggle did nothing (NEWFRONT-851, PAGE-060). Each
+    // sample first lets the pending commit paint (two frames) and then
+    // waits for that element's transitions to finish, so a read is always
+    // a settled width; two agreeing settled reads are the answer.
     const canvas = this.page.locator(".frame-renderer").first();
-    let previous = await canvas.evaluate((element) => getComputedStyle(element).maxWidth);
+    let previous: string | null = null;
     for (let attempt = 0; attempt < 25; attempt += 1) {
-      await this.page.waitForTimeout(100);
-      const current = await canvas.evaluate((element) => getComputedStyle(element).maxWidth);
-      if (current === previous) return current;
-      previous = current;
+      const width = (await canvas.evaluate(async (element) => {
+        const node = element as HTMLElement;
+        await new Promise<void>((resolve) => {
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+        });
+        const running = node.getAnimations().filter((animation) => animation.playState !== "idle");
+        await Promise.all(running.map((animation) => animation.finished.catch(() => undefined)));
+        return getComputedStyle(node).maxWidth;
+      })) as string;
+      if (width === previous) return width;
+      previous = width;
+      await this.page.waitForTimeout(50);
     }
-    return previous;
+    return previous ?? "";
   }
 
   async pagesHeaderToolbarVisible(): Promise<boolean> {
@@ -29509,6 +29865,39 @@ export class WebNewDriver implements ParityDriver {
   async pagesToolbarTypographyPick(name: string): Promise<void> {
     await this.page.getByTestId("page-toolbar-typography").click({ timeout: WebNewDriver.WAIT_MS });
     await this.page.getByRole("menuitem", { name, exact: true }).first().click({ timeout: WebNewDriver.WAIT_MS });
+    // The popup hands focus back to the body when it finishes closing. A
+    // keystroke sent while it still owns focus is swallowed by the popup
+    // instead of moving the caret, so wait for the hand-back (PAGE-028).
+    await this.pagesToolbarWaitBodyFocus();
+  }
+
+  /**
+   * Wait until a typed key reaches the document, not a closing popup and
+   * not an editor that has the focus but has not taken it yet. The popup
+   * holds focus until it closes, and the editor's own binding answers a
+   * key only after its `focus` event has run — the `ProseMirror-focused`
+   * class is that moment. A key sent in between is swallowed, which is
+   * exactly the flake the caret step hit (PAGE-028).
+   */
+  private async pagesToolbarWaitBodyFocus(): Promise<void> {
+    const bodyFocused = await this.page
+      .waitForFunction(
+        () => {
+          const document = globalThis.document;
+          const active = document.activeElement;
+          if (active?.closest?.(".editor-container") == null) return false;
+          return (
+            document.querySelector(".editor-container .ProseMirror")?.classList.contains("ProseMirror-focused") === true
+          );
+        },
+        null,
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .then(
+        () => true,
+        () => false
+      );
+    if (!bodyFocused) throw new Error("[parity] the body never took the keyboard back after a typography pick.");
   }
   async pagesToolbarColorOpen(): Promise<void> {
     await this.page.getByTestId("page-toolbar-color").click({ timeout: WebNewDriver.WAIT_MS });
@@ -29548,26 +29937,21 @@ export class WebNewDriver implements ParityDriver {
     return (await body.evaluate((el) => el.innerHTML).catch(() => "")) ?? "";
   }
   async pagesToolbarSelectAll(): Promise<void> {
-    // Keyboard-only, and extended rather than select-all: clicking the body
-    // while a selection exists can leave the DOM caret and the editor's own
-    // selection disagreeing, and the editor's own select-all spans the
-    // document boundaries (endpoints the list lift cannot work with —
-    // NEWFRONT-930), so extend a native range from the document start
-    // instead. Revert to plain select-all once NEWFRONT-930 lands.
-    const mod = process.platform === "darwin" ? "Meta" : "Control";
+    // Focus the body and let the editor's own select-all run. The adapter
+    // repairs the document-boundary endpoints the editor produces
+    // (NEWFRONT-930), so a formatting command acts on the text blocks the
+    // way a native in-text selection would. The chord is the platform's
+    // primary modifier, like every other page gesture; a selection that
+    // never forms means the editor is not focused, so retry once.
     const body = this.pagesTitleBodySurface();
     for (let attempt = 0; attempt < 3; attempt += 1) {
       await body.focus({ timeout: WebNewDriver.WAIT_MS });
-      await this.page.keyboard.press(`${mod}+Home`);
-      await this.page.keyboard.press(`${mod}+Shift+End`);
+      await this.page.keyboard.press("ControlOrMeta+a");
       const selected = await this.page.evaluate(() => {
         const selection = window.getSelection();
         return !!selection && !selection.isCollapsed && selection.toString() !== "";
       });
       if (selected) return;
-      // Collapse through the editor's keymap so both sides agree before
-      // retrying.
-      await this.page.keyboard.press("ArrowRight");
     }
     throw new Error("[parity] body select-all never selected.");
   }
@@ -29680,10 +30064,22 @@ export class WebNewDriver implements ParityDriver {
     return true;
   }
   async pagesToolbarTableClickCell(row: number, col: number): Promise<void> {
-    await this.page
+    const cell = this.page
       .locator(`.editor-container [contenteditable="true"] table tr:nth-child(${row + 1}) > :nth-child(${col + 1})`)
-      .first()
-      .click({ timeout: WebNewDriver.WAIT_MS });
+      .first();
+    // A table-menu command re-applies the line it acted on, so the first
+    // click after one is discarded and the caret stays on that line. Two
+    // clicks a frame apart land the caret in the requested cell on both
+    // editors (the old app behaves identically), and a second click is
+    // inert when the caret already sits there.
+    await cell.click({ timeout: WebNewDriver.WAIT_MS });
+    await cell.evaluate(
+      () =>
+        new Promise<void>((resolve) => {
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+        })
+    );
+    await cell.click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async pagesToolbarImageUpload(filePath: string): Promise<void> {
@@ -45091,9 +45487,11 @@ export class WebNewDriver implements ParityDriver {
   // --- reads; the oracle driver throws a D17 notice for every one.
 
   /**
-   * Every nested-page row: tree lines and the flat search/filter/favourite
-   * results share the title link, so discovery assertions read both
-   * (PAGE-085/090).
+   * Every nested-page row, one element per page. A tree line wraps its
+   * row, so the two markers nest; matching either one separately would
+   * report every tree row twice (PAGE-085/088). The inner row is the page
+   * itself, so it is the one carrier that exists in the tree and in the
+   * flat search/filter/favourite results alike (PAGE-090).
    */
   private pagesNestedRows(): Locator {
     return this.page.locator(PAGES_NESTED_ROW_SELECTOR);
@@ -45101,6 +45499,19 @@ export class WebNewDriver implements ParityDriver {
 
   private pagesNestedRow(title: string): Locator {
     return this.pagesNestedRows()
+      .filter({ has: this.page.getByRole("link", { name: title, exact: true }) })
+      .first();
+  }
+
+  /**
+   * The tree line that owns `title`: the wrapper carries the expand
+   * control, the child count and the depth, none of which sit on the row
+   * inside it (PAGE-085). The flat search/filter results have no wrapper,
+   * so only the tree asserts through this one.
+   */
+  private pagesNestedTreeLine(title: string): Locator {
+    return this.page
+      .getByTestId("page-tree-item")
       .filter({ has: this.page.getByRole("link", { name: title, exact: true }) })
       .first();
   }
@@ -45192,9 +45603,9 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async pagesNestedChildCount(title: string): Promise<number | null> {
-    const row = this.pagesNestedRow(title);
-    if ((await row.count()) === 0) return null;
-    const badge = row.getByTestId("page-tree-count");
+    const line = this.pagesNestedTreeLine(title);
+    if ((await line.count()) === 0) return null;
+    const badge = line.getByTestId("page-tree-count");
     if ((await badge.count()) === 0) return null;
     const text = (await badge.first().textContent()) ?? "";
     const parsed = Number.parseInt(text.trim(), 10);
@@ -45219,15 +45630,15 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async pagesNestedCollapse(title: string): Promise<void> {
-    const row = this.pagesNestedRow(title);
-    await row.scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
-    await row.getByRole("button", { name: `Collapse sub-pages of ${title}` }).click();
+    const line = this.pagesNestedTreeLine(title);
+    await line.scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
+    await line.getByRole("button", { name: `Collapse sub-pages of ${title}` }).click();
   }
 
   async pagesNestedDepth(title: string): Promise<number | null> {
-    const row = this.pagesNestedRow(title);
-    if ((await row.count()) === 0) return null;
-    const depth = await row.getAttribute("data-depth");
+    const line = this.pagesNestedTreeLine(title);
+    if ((await line.count()) === 0) return null;
+    const depth = await line.getAttribute("data-depth");
     const parsed = depth === null ? Number.NaN : Number.parseInt(depth, 10);
     return Number.isNaN(parsed) ? null : parsed;
   }

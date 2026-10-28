@@ -37,7 +37,9 @@
     "/{ws}/schedulers",
     "/{ws}/prompts",
     "/{ws}/assistant/*",
-    "/{ws}/projects/{projectId}/schedulers/*"
+    "/{ws}/projects/{projectId}/schedulers/*",
+    "/{ws}/projects/{projectId}/pages",
+    "/{ws}/projects/{projectId}/pages/*"
   ],
   "reservedTopLevel": [
     "404",

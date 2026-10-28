@@ -29483,13 +29483,13 @@ export class WebDriver implements ParityDriver {
 
   async pagesPrefsEditorClear(): Promise<void> {
     await this.pagesPrefsEditorClickEnd();
-    await this.page.keyboard.press("Control+a");
+    await this.page.keyboard.press("ControlOrMeta+a");
     await this.page.keyboard.press("Backspace");
   }
 
   async pagesPrefsEditorSelectAll(): Promise<void> {
     await this.pagesPrefsLiveEditor().first().click({ timeout: WebDriver.OPEN_MS });
-    await this.page.keyboard.press("Control+a");
+    await this.page.keyboard.press("ControlOrMeta+a");
   }
 
   async pagesPrefsTitleValue(): Promise<string> {
@@ -29501,7 +29501,7 @@ export class WebDriver implements ParityDriver {
   async pagesPrefsTitleFill(text: string): Promise<void> {
     const box = this.pagesPrefsTitleBox();
     await box.click({ timeout: WebDriver.OPEN_MS });
-    await this.page.keyboard.press("Control+a");
+    await this.page.keyboard.press("ControlOrMeta+a");
     await this.page.keyboard.type(text);
   }
 
@@ -40172,12 +40172,23 @@ export class WebDriver implements ParityDriver {
   }
 
   async pagesToolbarTableClickCell(row: number, col: number): Promise<void> {
-    await this.page
+    const cell = this.page
       .locator(
         `.frame-renderer > .editor-container [contenteditable="true"] table tr:nth-child(${row + 1}) > :nth-child(${col + 1})`
       )
-      .first()
-      .click({ timeout: WebDriver.OPEN_MS });
+      .first();
+    // A table-menu command re-applies the line it acted on, so the first
+    // click after one is discarded and the caret stays on that line. Two
+    // clicks a frame apart land the caret in the requested cell on both
+    // editors, and a second click is inert when the caret is already there.
+    await cell.click({ timeout: WebDriver.OPEN_MS });
+    await cell.evaluate(
+      () =>
+        new Promise<void>((resolve) => {
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+        })
+    );
+    await cell.click({ timeout: WebDriver.OPEN_MS });
   }
 
   async pagesToolbarImageUpload(filePath: string): Promise<void> {

@@ -291,22 +291,22 @@ test(
       };
 
       await test.step("the four basic marks toggle", async () => {
-        await fire("Control+b", /<strong>/);
-        await fire("Control+i", /<em>/);
-        await fire("Control+u", /<u>/);
-        await fire("Control+Shift+s", /<s>|<strike>|<del>/);
+        await fire("ControlOrMeta+b", /<strong>/);
+        await fire("ControlOrMeta+i", /<em>/);
+        await fire("ControlOrMeta+u", /<u>/);
+        await fire("ControlOrMeta+Shift+s", /<s>|<strike>|<del>/);
       });
 
       await test.step("the three alignments apply", async () => {
-        await fire("Control+Shift+l", /text-align:\s*left/);
-        await fire("Control+Shift+e", /text-align:\s*center/);
-        await fire("Control+Shift+r", /text-align:\s*right/);
+        await fire("ControlOrMeta+Shift+l", /text-align:\s*left/);
+        await fire("ControlOrMeta+Shift+e", /text-align:\s*center/);
+        await fire("ControlOrMeta+Shift+r", /text-align:\s*right/);
       });
 
       await test.step("the three list kinds wrap the paragraph", async () => {
-        await fire("Control+Shift+7", /<ol/);
-        await fire("Control+Shift+8", /<ul(?![^>]*task-list)/);
-        await fire("Control+Shift+9", /task-?list|todo/i);
+        await fire("ControlOrMeta+Shift+7", /<ol/);
+        await fire("ControlOrMeta+Shift+8", /<ul(?![^>]*task-list)/);
+        await fire("ControlOrMeta+Shift+9", /task-?list|todo/i);
       });
     } finally {
       await serverCleanupProject(seed.workspaceSlug, projectId, session);
@@ -331,7 +331,7 @@ test(
         await driver.pagesPrefsOpenDetail(seed.workspaceSlug, projectId, pageId);
         await driver.pagesPrefsEditorClickEnd();
         await driver.pagesPrefsEditorType("gesture probe");
-        await driver.pagesKeysPress("Control+s");
+        await driver.pagesKeysPress("ControlOrMeta+s");
         await driver.pagesKeysPress("Escape");
         expect(await driver.pagesPrefsEditorText()).toContain("gesture probe");
         expect(await driver.pagesKeysShortcutReferenceVisible()).toBe(false);

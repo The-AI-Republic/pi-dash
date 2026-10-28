@@ -916,7 +916,10 @@ test(
       await driver.pagesLiveWaitSynced();
     }
     await driver.pagesLiveWaitSynced();
-    expect(await driver.pagesHeaderOfflinePill()).toBeNull();
+    // The pill follows connectivity after a short settle beat in both
+    // directions (spec §8.3), so the clear is polled rather than read
+    // the instant the socket reports itself synced.
+    await expect.poll(() => driver.pagesHeaderOfflinePill(), { timeout: 15_000 }).toBeNull();
     // The offline typing reaches the server after the reconnect.
     await expect
       .poll(
@@ -1027,8 +1030,19 @@ test(
     } catch (error) {
       throw new Error(`badge trail: ${badgeTrail.join(" ")} :: ${(error as Error).message}`);
     }
-    // The strip stays absent after the terminal settle too.
-    expect(await driver.pagesHeaderOversizedStrip()).toBeNull();
+    // The oracle keeps pinning the invisible refused save after the
+    // terminal settle too. The new app re-fires the intended
+    // NEWFRONT-338 strip once the fallback save is refused as too
+    // large — but the 413 lands just after the badge settles (observed:
+    // strip absent at the settle read, present in the failure snapshot),
+    // so the new leg polls instead of reading once.
+    if (testInfo.project.name === "oracle") {
+      expect(await driver.pagesHeaderOversizedStrip()).toBeNull();
+    } else {
+      await expect
+        .poll(() => driver.pagesHeaderOversizedStrip(), { timeout: 60_000 })
+        .toContain("Page too large to sync");
+    }
     expect(await driver.pagesHeaderToastText()).toBeNull();
     await driver.pagesLiveUnblockCollaborationSocket();
   }

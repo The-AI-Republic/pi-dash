@@ -31,6 +31,7 @@ interface LocatorOptions {
   nth?: (index: number) => Locator;
   last?: () => Locator;
   evaluate?: (fn: (node: unknown) => unknown, arg?: unknown) => Promise<unknown>;
+  evaluateAll?: (fn: (nodes: unknown[]) => unknown, arg?: unknown) => Promise<unknown>;
   isVisible?: () => Promise<boolean>;
 }
 
@@ -39,6 +40,7 @@ class FakeLocator {
   readonly click: ReturnType<typeof vi.fn>;
   readonly selectOption: ReturnType<typeof vi.fn>;
   readonly evaluate: ReturnType<typeof vi.fn>;
+  readonly evaluateAll: ReturnType<typeof vi.fn>;
   readonly isVisible: ReturnType<typeof vi.fn>;
 
   constructor(private readonly options: LocatorOptions = {}) {
@@ -46,6 +48,9 @@ class FakeLocator {
     this.click = vi.fn(this.options.click ?? (async () => undefined));
     this.selectOption = vi.fn(this.options.selectOption ?? (async () => undefined));
     this.evaluate = vi.fn(this.options.evaluate ?? (async () => undefined));
+    this.evaluateAll = vi.fn(
+      this.options.evaluateAll ?? ((fn: (nodes: unknown[]) => unknown, arg?: unknown) => Promise.resolve(fn([], arg)))
+    );
     this.isVisible = vi.fn(
       this.options.isVisible ?? (async () => this.options.visible ?? (this.options.count ?? 0) > 0)
     );
@@ -105,17 +110,11 @@ function at(options: LocatorOptions = {}): Locator {
 }
 
 function menuOf(labels: Array<string | null>): Locator {
+  // The driver reads the whole popup in one `evaluateAll`; each item is
+  // a node whose `innerText` is the rendered label.
   return at({
     count: labels.length,
-    nth: (index) =>
-      at({
-        innerText:
-          labels[index] === null
-            ? async () => {
-                throw new Error("menu item detached");
-              }
-            : async () => labels[index] ?? "",
-      }),
+    evaluateAll: async (fn) => fn(labels.map((label) => ({ innerText: label === null ? null : label }))),
   });
 }
 
@@ -400,16 +399,21 @@ describe("options menu", () => {
     expect(menuFake.waitFor).toHaveBeenCalledWith({ timeout: 30_000 });
   });
 
-  it("lists menu labels normalized and skips empty or detached entries", async () => {
-    const driver = new WebNewDriver(pageDouble({ roles: { menuitem: menuOf(["  Full   width  ", "", null]) } }).page);
+  it("lists menu labels normalized in one sweep and skips blank entries", async () => {
+    const menuFake = menuOf(["  Full   width  ", "", null]);
+    const stub = pageDouble({ roles: { menuitem: menuFake } });
+    const driver = new WebNewDriver(stub.page);
 
     await expect(driver.pagesHeaderMenuItems()).resolves.toEqual(["Full width"]);
+    // One atomic read: counting and then walking entries can straddle a
+    // dismissal that unmounts the popup mid-walk.
+    expect((menuFake as unknown as FakeLocator).evaluateAll).toHaveBeenCalledTimes(1);
   });
 
-  it("treats a null menu read as empty", async () => {
-    const driver = new WebNewDriver(
-      pageDouble({ roles: { menuitem: at({ count: 1, nth: () => at({ innerText: async () => null }) }) } }).page
-    );
+  it("answers empty as soon as the dismissed popup is gone", async () => {
+    // The popup unmounts on Escape; the read must report no entries
+    // rather than block on an entry that no longer exists.
+    const driver = new WebNewDriver(pageDouble({ roles: { menuitem: menuOf([]) } }).page);
 
     await expect(driver.pagesHeaderMenuItems()).resolves.toEqual([]);
   });
@@ -433,6 +437,22 @@ describe("options menu", () => {
     expect(expression.source).toBe("^Make private \\(a\\+b\\)$");
     expect(expression.test("Make private (a+b)")).toBe(true);
     expect(expression.test("Make private (a+b) plus more")).toBe(false);
+    expect(menuFake.click).toHaveBeenCalledWith({ timeout: 30_000 });
+    // Choosing an ordinary entry never touches permissions.
+    expect(stub.grantPermissions).not.toHaveBeenCalled();
+  });
+
+  it("grants the clipboard before choosing Copy markdown", async () => {
+    // The page reports a denied clipboard write with an error notice and
+    // no success toast, so without the grant the entry can never pass.
+    const menuFake = new FakeLocator({ count: 8 });
+    const stub = pageDouble({ roles: { menuitem: menuFake as unknown as Locator } });
+    const driver = new WebNewDriver(stub.page);
+
+    await driver.pagesHeaderChooseMenuItem("Copy markdown");
+
+    expect(stub.grantPermissions).toHaveBeenCalledTimes(1);
+    expect(stub.grantPermissions).toHaveBeenCalledWith(["clipboard-read", "clipboard-write"]);
     expect(menuFake.click).toHaveBeenCalledWith({ timeout: 30_000 });
   });
 });
@@ -619,17 +639,41 @@ describe("archived marker and delete dialog", () => {
 });
 
 describe("canvas, toolbar and pane", () => {
-  it("settles the canvas max width on two agreeing reads", async () => {
-    const reads = ["720px", "900px", "1152px", "1152px"];
-    const canvasFake = new FakeLocator({ count: 1, evaluate: async () => reads.shift() ?? "1152px" });
+  /**
+   * A canvas double whose reads follow the app's paint order: the click
+   * returns before React commits, so the first reads still report the
+   * outgoing width, then the ease runs at intermediate widths, and only
+   * the settled frame reports the new measure. The driver must skip the
+   * former two and report the latter.
+   */
+  function easingCanvas(widths: readonly string[]): FakeLocator {
+    const reads = [...widths];
+    return new FakeLocator({ count: 1, evaluate: async () => reads.shift() ?? widths.at(-1) ?? "" });
+  }
+
+  it("reports a settled width against the outgoing one right after a toggle", async () => {
+    // First read lands pre-commit (still 1152px), then the settled 720px
+    // pair. A driver that trusted the first two agreeing reads would have
+    // answered 1152px and looked like the toggle was a no-op.
+    const canvasFake = easingCanvas(["1152px", "720px", "720px"]);
     const stub = pageDouble({ selectors: { ".frame-renderer": canvasFake as unknown as Locator } });
     const driver = new WebNewDriver(stub.page);
 
-    await expect(driver.pagesHeaderCanvasMaxWidth()).resolves.toBe("1152px");
+    await expect(driver.pagesHeaderCanvasMaxWidth()).resolves.toBe("720px");
+    expect(canvasFake.evaluate).toHaveBeenCalledTimes(3);
+    expect(stub.waitForTimeout).toHaveBeenCalledWith(50);
+  });
+
+  it("settles the canvas max width on two agreeing reads", async () => {
+    const canvasFake = easingCanvas(["720px", "720px"]);
+    const stub = pageDouble({ selectors: { ".frame-renderer": canvasFake as unknown as Locator } });
+    const driver = new WebNewDriver(stub.page);
+
+    await expect(driver.pagesHeaderCanvasMaxWidth()).resolves.toBe("720px");
     expect(stub.locator).toHaveBeenCalledWith(".frame-renderer");
-    expect(canvasFake.evaluate).toHaveBeenCalledTimes(4);
-    expect(stub.waitForTimeout).toHaveBeenCalledTimes(3);
-    expect(stub.waitForTimeout).toHaveBeenCalledWith(100);
+    expect(canvasFake.evaluate).toHaveBeenCalledTimes(2);
+    // One gap between the two samples; the settling read needs no pause.
+    expect(stub.waitForTimeout).toHaveBeenCalledTimes(1);
   });
 
   it("returns the latest canvas read when the width never settles", async () => {
@@ -638,8 +682,8 @@ describe("canvas, toolbar and pane", () => {
     const stub = pageDouble({ selectors: { ".frame-renderer": canvasFake as unknown as Locator } });
     const driver = new WebNewDriver(stub.page);
 
-    await expect(driver.pagesHeaderCanvasMaxWidth()).resolves.toBe("746px");
-    expect(canvasFake.evaluate).toHaveBeenCalledTimes(26);
+    await expect(driver.pagesHeaderCanvasMaxWidth()).resolves.toBe("745px");
+    expect(canvasFake.evaluate).toHaveBeenCalledTimes(25);
     expect(stub.waitForTimeout).toHaveBeenCalledTimes(25);
   });
 

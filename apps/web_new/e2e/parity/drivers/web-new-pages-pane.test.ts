@@ -352,22 +352,54 @@ describe("editor reads and writes", () => {
     await expect(new WebNewDriver(stub.page).pagesPaneEditorScrollTop()).resolves.toBe(120);
   });
 
-  it("pastes markup through a synthetic paste at the end of the document", async () => {
+  it("pastes markup through a synthetic paste, then drops the node selection", async () => {
+    // The handler commits asynchronously and keeps a pasted block selected,
+    // so the next paste would replace it. A caret key clears that selection
+    // without moving the document or the scroll offset; a click at the end
+    // of the body would scroll there, which the outline row reads.
     const editor = fake({ locator: () => empty() });
-    let pasted: unknown;
-    editor.evaluate.mockImplementation(async (_fn: unknown, markup: unknown) => {
-      pasted = markup;
+    const calls: unknown[] = [];
+    let frames = 0;
+    editor.evaluate.mockImplementation(async (fn: unknown, markup: unknown) => {
+      calls.push(markup);
+      if (markup !== undefined) return undefined;
+      vi.stubGlobal("requestAnimationFrame", (callback: () => void) => {
+        frames += 1;
+        callback();
+        return frames;
+      });
+      await (fn as () => Promise<void>)();
+      vi.unstubAllGlobals();
       return undefined;
     });
     const stub = pageDouble({ selectors: { [BODY_SELECTOR]: bodyOf(editor.asLocator()) } });
 
     await new WebNewDriver(stub.page).pagesPaneEditorPasteHtml("<h1>Hi</h1>");
 
-    expect(stub.press).toHaveBeenCalledWith("End");
-    expect(editor.evaluate).toHaveBeenCalled();
-    expect(pasted).toBe("<h1>Hi</h1>");
+    // The caret only goes to the end before the paste; afterwards the
+    // selection is cleared with a key, never by clicking into the body.
+    expect(stub.press.mock.calls).toEqual([["End"], ["ArrowRight"]]);
+    expect(calls).toEqual(["<h1>Hi</h1>", undefined]);
+    expect(frames).toBe(2);
   });
 
+  it("does not wait for frames inside the paste dispatch itself", async () => {
+    // The settle must run outside the dispatch: the paste handler has not
+    // inserted anything when the event returns, so a frame wait inside the
+    // same evaluate would only measure the pre-paste document.
+    const editor = fake({ locator: () => empty() });
+    const seen: string[] = [];
+    editor.evaluate.mockImplementation(async (_fn: unknown, markup: unknown) => {
+      seen.push(markup === undefined ? "settle" : "dispatch");
+      return undefined;
+    });
+    const stub = pageDouble({ selectors: { [BODY_SELECTOR]: bodyOf(editor.asLocator()) } });
+
+    await new WebNewDriver(stub.page).pagesPaneEditorPasteHtml("<p>Tail</p>");
+
+    expect(seen).toEqual(["dispatch", "settle"]);
+    expect(stub.press.mock.calls).toEqual([["End"], ["ArrowRight"]]);
+  });
   it("clicks editor text by its content", async () => {
     const target = fake();
     const seen: unknown[] = [];
