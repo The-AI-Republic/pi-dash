@@ -455,7 +455,9 @@ test(
       });
 
       await test.step("row gone from the UI and the server", async () => {
-        expect(await driver.archivesCyclesVisibleNames()).not.toContain(name);
+        // The toast fires before the list refetches; poll for the
+        // removal (NEWFRONT-716).
+        await expect.poll(() => driver.archivesCyclesVisibleNames(), { timeout: 30_000 }).not.toContain(name);
         const rows = await serverProjectCycles(seed.workspaceSlug, projectId, session);
         expect(rows.map((row) => row.id)).not.toContain(id);
       });
@@ -650,7 +652,9 @@ test(
         const toast = await toastText(driver);
         expect(toast).toMatch(/archive success/i);
         expect(toast).toMatch(/project archives/i);
-        expect(await driver.archivesCyclesVisibleNames()).not.toContain(name);
+        // The toast fires before the list refetches; poll for the
+        // removal (NEWFRONT-716).
+        await expect.poll(() => driver.archivesCyclesVisibleNames(), { timeout: 30_000 }).not.toContain(name);
         const live = await serverProjectCycles(seed.workspaceSlug, projectId, session);
         expect(live.map((row) => row.id)).not.toContain(id);
         const archived = await serverArchivedCycles(seed.workspaceSlug, projectId, session);
