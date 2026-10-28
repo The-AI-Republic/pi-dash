@@ -215,7 +215,18 @@ test(
       await test.step("copy link writes the clipboard and toasts", async () => {
         await driver.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
         await driver.copyPeekLink();
-        await expect.poll(() => driver.lastToast(), { timeout: 30_000 }).toMatch(/link copied/i);
+        // The toast wording is each app's own copy (spec §13, NEWFRONT-945):
+        // pin the intent — a notice saying the link was copied — so both
+        // pass. Same predicate as the detail copy leg (ISS-160).
+        await expect
+          .poll(
+            async () => {
+              const toast = (await driver.lastToast()) ?? "";
+              return /cop(y|ied)/i.test(toast) && /link/i.test(toast) ? toast : "";
+            },
+            { timeout: 30_000 }
+          )
+          .not.toBe("");
         expect(await driver.readClipboard()).toContain(`/browse/${issue.seq}`);
       });
       await test.step("full-screen link resolves to the detail page", async () => {
