@@ -27718,7 +27718,15 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async intakeListScrollToBottom(): Promise<void> {
-    await this.page.getByTestId("intake-row").last().scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
+    // Drive the pane to its real bottom: the paging handler reads the
+    // scroll position against a 200px threshold, and revealing the last
+    // row alone can stop short of it (gate NEWFRONT-695, INT-007). A
+    // pane whose content never overflows cannot scroll at all — then no
+    // fetch fires and the row-count poll below says so.
+    const pane = this.page.getByTestId("intake-list-pane");
+    await pane.evaluate((node) => {
+      node.scrollTop = node.scrollHeight;
+    });
   }
 
   async intakeListSkeletonsVisible(): Promise<boolean> {
@@ -27946,6 +27954,10 @@ export class WebNewDriver implements ParityDriver {
       }
     }
     await this.page.keyboard.press("Escape");
+    // Escape resolves on dispatch, before React unmounts the popup. A
+    // following open-check would see the doomed menu and skip the trigger
+    // click, then click an item that detaches mid-action (INT-011).
+    await this.intakeListOrderItems().first().waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
     return { field, direction };
   }
 
@@ -27988,8 +28000,13 @@ export class WebNewDriver implements ParityDriver {
 
   private async intakeListPickCalendarDay(calendar: Locator, iso: string): Promise<void> {
     const target = new Date(`${iso}T00:00:00Z`);
-    await calendar.getByLabel("Month").selectOption(String(target.getUTCMonth()), { timeout: WebNewDriver.WAIT_MS });
-    await calendar.getByLabel("Year").selectOption(String(target.getUTCFullYear()), { timeout: WebNewDriver.WAIT_MS });
+    // Exact: the Previous/Next month buttons also carry "month" labels.
+    await calendar
+      .getByLabel("Month", { exact: true })
+      .selectOption(String(target.getUTCMonth()), { timeout: WebNewDriver.WAIT_MS });
+    await calendar
+      .getByLabel("Year", { exact: true })
+      .selectOption(String(target.getUTCFullYear()), { timeout: WebNewDriver.WAIT_MS });
     await calendar.locator(`button[data-day="${iso}"]`).click({ timeout: WebNewDriver.WAIT_MS });
   }
 

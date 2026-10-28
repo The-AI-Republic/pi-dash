@@ -263,22 +263,37 @@ test(
       await driver.intakeListBeginRequestSpy();
       await driver.intakeListDelayNextListReads(5_000);
       await driver.intakeListOpen(seed.workspaceSlug, projectId, "open");
-      await driver.intakeListWaitForRowCount(10);
 
-      await test.step("the first page renders ten rows with placeholders below", async () => {
-        expect(await driver.intakeListRowIds()).toHaveLength(10);
-        expect(await driver.intakeListRowIds()).toEqual(firstPage.rows.map((row) => row.issueId));
-        expect(await driver.intakeListSkeletonsVisible()).toBe(true);
-      });
-
-      await test.step("scrolling appends the next page without duplicates", async () => {
-        await driver.intakeListScrollToBottom();
+      // The new pane fills itself while it does not overflow (gate
+      // NEWFRONT-695): all twelve rows arrive without a scroll, so the
+      // ten-row pins below only hold on the oracle leg.
+      const onNewFill = driver.target === "web_new";
+      if (!onNewFill) {
+        await driver.intakeListWaitForRowCount(10);
+      } else {
         await driver.intakeListWaitForRowCount(12);
-        const ids = await driver.intakeListRowIds();
-        expect(new Set(ids).size).toBe(12);
-        expect(ids).toEqual(serverOrder);
-        expect(await driver.intakeListSkeletonsVisible()).toBe(false);
-      });
+      }
+      if (!onNewFill) {
+        await test.step("the first page renders ten rows with placeholders below", async () => {
+          expect(await driver.intakeListRowIds()).toHaveLength(10);
+          expect(await driver.intakeListRowIds()).toEqual(firstPage.rows.map((row) => row.issueId));
+          expect(await driver.intakeListSkeletonsVisible()).toBe(true);
+        });
+      }
+
+      await test.step(
+        onNewFill
+          ? "the pane fills to all twelve rows without duplicates"
+          : "scrolling appends the next page without duplicates",
+        async () => {
+          if (!onNewFill) await driver.intakeListScrollToBottom();
+          await driver.intakeListWaitForRowCount(12);
+          const ids = await driver.intakeListRowIds();
+          expect(new Set(ids).size).toBe(12);
+          expect(ids).toEqual(serverOrder);
+          expect(await driver.intakeListSkeletonsVisible()).toBe(false);
+        }
+      );
 
       await test.step("the UI pages with the same cursors as the API", async () => {
         const params = await driver.intakeListLastRequestParams();
@@ -316,28 +331,38 @@ test(
         );
       }
       await driver.page.context().addCookies(sessionBrowserCookies(session));
-      await driver.intakeListOpen(seed.workspaceSlug, projectId, "open");
-      await driver.intakeListWaitForRowCount(10);
-
       // The placeholders show while the next page is pending, but the header
       // hint the inventory expects never appears: nothing ever sets the
       // paged-loading loader state it reads (NEWFRONT-269). The new build
       // lights the hint for every in-flight page (gate NEWFRONT-695), so
-      // its leg asserts the hint appears mid-flight and clears on settle.
-      const onNew = driver.target === "web_new";
-      expect(await driver.intakeListSkeletonsVisible()).toBe(true);
-      await driver.intakeListDelayNextListReads(5_000);
-      await driver.intakeListScrollToBottom();
-      await driver.page.waitForTimeout(1_500);
-      expect(await driver.intakeListSkeletonsVisible()).toBe(true);
-      if (onNew) {
-        await expect.poll(() => driver.intakeListSyncingVisible(), { timeout: 4_000 }).toBe(true);
+      // its leg delays the first read, catches the hint mid-flight, and
+      // watches it clear once the pane fills itself (no scroll needed).
+      if (driver.target === "web_new") {
+        // The open fills itself on entry, so catch the hint on the
+        // closed tab's delayed first fetch instead: open resolves on
+        // rows, which would consume a pre-registered delay.
+        await driver.intakeListOpen(seed.workspaceSlug, projectId, "open");
+        await driver.intakeListWaitForRowCount(12);
+        await driver.intakeListDelayNextListReads(5_000);
+        await driver.intakeShellClickTab("closed");
+        await expect.poll(() => driver.intakeListSyncingVisible(), { timeout: 15_000 }).toBe(true);
+        await expect
+          .poll(() => driver.intakeShellListEmptyHeading(), { timeout: 30_000 })
+          .toBe("Nothing has been resolved yet.");
+        await expect.poll(() => driver.intakeListSyncingVisible(), { timeout: 15_000 }).toBe(false);
       } else {
+        await driver.intakeListOpen(seed.workspaceSlug, projectId, "open");
+        await driver.intakeListWaitForRowCount(10);
+        expect(await driver.intakeListSkeletonsVisible()).toBe(true);
+        await driver.intakeListDelayNextListReads(5_000);
+        await driver.intakeListScrollToBottom();
+        await driver.page.waitForTimeout(1_500);
+        expect(await driver.intakeListSkeletonsVisible()).toBe(true);
+        expect(await driver.intakeListSyncingVisible()).toBe(false);
+        await driver.intakeListWaitForRowCount(12);
+        expect(await driver.intakeListSkeletonsVisible()).toBe(false);
         expect(await driver.intakeListSyncingVisible()).toBe(false);
       }
-      await driver.intakeListWaitForRowCount(12);
-      expect(await driver.intakeListSkeletonsVisible()).toBe(false);
-      expect(await driver.intakeListSyncingVisible()).toBe(false);
     } finally {
       await serverCleanupProject(seed.workspaceSlug, projectId, session);
     }

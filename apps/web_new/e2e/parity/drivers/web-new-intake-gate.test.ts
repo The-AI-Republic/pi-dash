@@ -52,6 +52,7 @@ class FakePage {
   readonly selects: string[] = [];
   readonly pageCalls: string[] = [];
   readonly evaluatedFns: string[] = [];
+  readonly waits: string[] = [];
   routeHandler: ((route: unknown) => Promise<void>) | undefined;
   unrouted = 0;
   granted: string[] = [];
@@ -114,7 +115,9 @@ class FakePage {
       selectOption: async (value: string) => {
         self.selects.push(`${id}=${value}`);
       },
-      waitFor: async () => undefined,
+      waitFor: async (options?: { state?: string }) => {
+        self.waits.push(`${id}~${options?.state ?? "visible"}`);
+      },
       evaluate: async (fn: (...args: never[]) => unknown) => {
         self.evaluatedFns.push(String(fn).slice(0, 40));
         return self.answer(id).evaluated ?? "";
@@ -657,5 +660,18 @@ describe("intakeTriageOpenIssueOnTab", () => {
     const { fake, driver } = driverOn();
     await driver.intakeTriageOpenIssueOnTab("parity-ws", "p1", "issue-5", "closed");
     expect(fake.pageCalls).toContain("goto:/parity-ws/projects/p1/intake?currentTab=closed&inboxIssueId=issue-5");
+  });
+});
+
+describe("intakeListOrderState", () => {
+  it("reads the checked marks and waits for the menu to detach after Escape", async () => {
+    const { fake, driver } = driverOn({
+      "page role(menuitem,)": { count: 5 },
+      "page testid(intake-order-field-updated)": { attrs: { "data-order-checked": "true" } },
+      "page testid(intake-order-direction-asc)": { attrs: { "data-order-checked": "true" } },
+    });
+    expect(await driver.intakeListOrderState()).toEqual({ field: "updated", direction: "asc" });
+    expect(fake.pageCalls).toContain("key:Escape");
+    expect(fake.waits).toContain("page role(menuitem,)~detached");
   });
 });
