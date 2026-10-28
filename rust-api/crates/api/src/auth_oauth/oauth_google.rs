@@ -209,7 +209,7 @@ pub const PASSWORD_HASH_ITERATIONS: u32 = 600_000;
 /// characters the final `Location` answers 400 (`DisallowedRedirect`).
 pub fn redirect_response(location: &str) -> Response {
     let too_long = location.chars().count() > MAX_URL_REDIRECT_LENGTH;
-    let encoded = crate::response_headers::iri_to_uri(location);
+    let encoded = pidash_compat::http::iri_to_uri(location);
     let Some(value) = crate::response_headers::header_value(&encoded) else {
         return server_error();
     };

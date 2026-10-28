@@ -13,6 +13,7 @@
 pub mod datetime;
 pub mod db;
 pub mod filter;
+pub mod html;
 pub mod http;
 pub mod py;
 pub mod response;

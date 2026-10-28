@@ -120,7 +120,7 @@ use crate::app_project::tasks::ISSUE_ACTIVITY_TASK;
 use crate::dispatch::tools::{advisory_lock_key, saved_sequence_id};
 use crate::orchestration::blockers::{summary_list, BlockerRow};
 use crate::runner_sessions::pubsub::{send_to_runner, PubsubStore};
-use crate::v1_projects::tasks::MODEL_ACTIVITY_TASK;
+use crate::v1_projects::tasks::{model_activity_kwargs, MODEL_ACTIVITY_TASK};
 use crate::v1_work_items::shape_issue::{
     issue_url, render_issue, BlockerSummary, IssueRow, RepresentationInput, SummaryItem,
 };
@@ -1209,6 +1209,8 @@ pub fn issue_activity_kwargs(
 /// `origin=None`) — the key stays present with JSON null, exactly the
 /// `.delay(origin=None)` wire bytes the webhook worker maps to
 /// `current_site=None`.
+///
+/// Built by the shared [`model_activity_kwargs`] kernel (PIDASHCONV-1623).
 pub fn move_model_activity_kwargs(
     model_id: &Uuid,
     requested_data: Value,
@@ -1217,19 +1219,14 @@ pub fn move_model_activity_kwargs(
     slug: &str,
     origin: Option<&str>,
 ) -> TaskEnqueue {
-    let mut kwargs = Map::with_capacity(7);
-    kwargs.insert("model_name".to_owned(), Value::String("issue".to_owned()));
-    kwargs.insert("model_id".to_owned(), Value::String(model_id.to_string()));
-    kwargs.insert("requested_data".to_owned(), requested_data);
-    kwargs.insert(
-        "current_instance".to_owned(),
-        Value::String(current_instance.to_owned()),
-    );
-    kwargs.insert("actor_id".to_owned(), Value::String(actor_id.to_string()));
-    kwargs.insert("slug".to_owned(), Value::String(slug.to_owned()));
-    kwargs.insert(
-        "origin".to_owned(),
-        origin.map_or(Value::Null, |text| Value::String(text.to_owned())),
+    let kwargs = model_activity_kwargs(
+        "issue",
+        &model_id.to_string(),
+        requested_data,
+        Some(current_instance),
+        &actor_id.to_string(),
+        slug,
+        origin,
     );
     TaskEnqueue {
         task: MODEL_ACTIVITY_TASK,

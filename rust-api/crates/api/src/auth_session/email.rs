@@ -315,7 +315,7 @@ fn csrf_gate(prov: &Provenance, pairs: &[(String, String)]) -> Result<(), CsrfDe
 /// 400 (`DisallowedRedirect`).
 fn redirect_response(location: String, set_cookies: Vec<String>) -> Response {
     let too_long = location.chars().count() > shapes_kernel::MAX_URL_REDIRECT_LENGTH;
-    let encoded = crate::response_headers::iri_to_uri(&location);
+    let encoded = pidash_compat::http::iri_to_uri(&location);
     let Some(location) = crate::response_headers::header_value(&encoded) else {
         return server_error();
     };

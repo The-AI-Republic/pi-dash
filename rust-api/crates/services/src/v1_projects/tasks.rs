@@ -105,9 +105,15 @@ pub use crate::app_integrations::tasks::webhook_activity_kwargs;
 /// Kwargs in call order: `model_name`, `model_id`, `requested_data`,
 /// `current_instance`, `actor_id`, `slug`, `origin`. `requested_data` is
 /// the raw `request.data` object; `current_instance` is `None` on create
-/// and the `json.dumps` snapshot string on update. Values pass through
-/// verbatim (the worker normalizes via `DjangoJSONEncoder`, not the
-/// publisher).
+/// and the `json.dumps` snapshot string on update; `origin` is `None`
+/// for non-HTTP publishers (the MCP layer has no request). Values pass
+/// through verbatim (the worker normalizes via `DjangoJSONEncoder`, not
+/// the publisher).
+///
+/// The shared kernel for every `model_activity` publisher (PIDASHCONV-1623):
+/// the issue/comment wrappers, the `jobs` cycle/module twin, the
+/// `domain::issues` twin and the move helper all delegate here, and the
+/// SDK re-exports it for the overlay.
 #[allow(clippy::too_many_arguments)]
 pub fn model_activity_kwargs(
     model_name: &str,
@@ -116,7 +122,7 @@ pub fn model_activity_kwargs(
     current_instance: Option<&str>,
     actor_id: &str,
     slug: &str,
-    origin: &str,
+    origin: Option<&str>,
 ) -> Map<String, Value> {
     let mut kwargs = Map::with_capacity(7);
     kwargs.insert(
@@ -131,7 +137,10 @@ pub fn model_activity_kwargs(
     );
     kwargs.insert("actor_id".to_owned(), Value::String(actor_id.to_owned()));
     kwargs.insert("slug".to_owned(), Value::String(slug.to_owned()));
-    kwargs.insert("origin".to_owned(), Value::String(origin.to_owned()));
+    kwargs.insert(
+        "origin".to_owned(),
+        origin.map_or(Value::Null, |s| Value::String(s.to_owned())),
+    );
     kwargs
 }
 
@@ -152,7 +161,7 @@ pub fn create_kwargs(
         None,
         actor_id,
         slug,
-        origin,
+        Some(origin),
     )
 }
 
@@ -174,7 +183,7 @@ pub fn update_kwargs(
         Some(snapshot_json),
         actor_id,
         slug,
-        origin,
+        Some(origin),
     )
 }
 
@@ -316,6 +325,30 @@ mod tests {
         assert_eq!(kwargs["requested_data"], json!({"name": "Pinned"}));
         assert_eq!(kwargs["current_instance"], Value::Null);
         assert_eq!(kwargs["origin"], json!("https://app.example"));
+    }
+
+    #[test]
+    fn none_origin_renders_null_for_non_http_publishers() {
+        // The MCP layer has no HTTP request (`tools.py:364-372` passes
+        // `origin=None`); the kernel carries it as JSON null
+        // (PIDASHCONV-1623).
+        let kwargs =
+            model_activity_kwargs("issue", "m1", json!({"title": "t"}), None, "a1", "ws", None);
+        assert_eq!(kwargs["origin"], Value::Null);
+        assert_eq!(kwargs["current_instance"], Value::Null);
+        let keys: Vec<&str> = kwargs.keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            [
+                "model_name",
+                "model_id",
+                "requested_data",
+                "current_instance",
+                "actor_id",
+                "slug",
+                "origin"
+            ]
+        );
     }
 
     #[test]

@@ -328,7 +328,7 @@ pub fn issue_model_activity_kwargs(
         current_instance,
         actor_id,
         slug,
-        origin,
+        Some(origin),
     )
 }
 
@@ -351,7 +351,7 @@ pub fn comment_model_activity_kwargs(
         current_instance,
         actor_id,
         slug,
-        origin,
+        Some(origin),
     )
 }
 

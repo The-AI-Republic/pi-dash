@@ -25,7 +25,12 @@ serde = "1"
 # standalone compat build would sort keys (BTreeMap) and `python_dumps`
 # vectors would fail standalone while passing in-workspace. Feature-only,
 # same locked serde_json 1.x (no lock churn).
-serde_json = { version = "1", features = ["preserve_order"] }
+# `arbitrary_precision` (PIDASHCONV-1623): api/services already build
+# with it, so the workspace unifies it everywhere; without it the
+# standalone compat build would parse big ints as lossy f64 and the
+# `render_number` exact-digit vectors would fail standalone while
+# passing in-workspace. Feature-only, same locked serde_json 1.x.
+serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision"] }
 # Datetime validators (OVL-04 part 3) return `DateTime<Utc>`.
 # Same locked chrono 0.4.x as the workspace (no lock churn).
 # `clock` is for test vectors (`from_timestamp`); the workspace

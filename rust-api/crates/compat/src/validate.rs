@@ -11,6 +11,7 @@
 //! - moved: `push_error` (map, 5 defs), `push_pairs_error` (ordered
 //!   pairs, 2 defs), `char_internal` (3 defs), `validate_char` and
 //!   `validate_datetime` + `datetime_format_message` (2 defs each),
+//!   `uuid_from_json_int` (the DRF `UUIDField` int arm, PIDASHCONV-1623),
 //!   the message consts (3 trios);
 //! - kept local: `validate_char_field` x3, `validate_choice` x2,
 //!   `validate_uuid` x1, `validate_str_choice` x3 (the project/workflow
@@ -22,6 +23,7 @@
 //!   the other; at least one side is a ported bug, out of scope here).
 
 use serde_json::{Map, Value};
+use uuid::Uuid;
 
 /// DRF `required` message.
 pub const REQUIRED_MSG: &str = "This field is required.";
@@ -173,6 +175,29 @@ pub fn validate_datetime(
     None
 }
 
+/// `uuid.UUID(int=…)` over a JSON integer: non-negatives below 2¹²⁸
+/// only (negatives and huge values raise `ValueError`).
+///
+/// Moved from `api::app_issues::handlers_engage` (PIDASHCONV-1623),
+/// which calls it from the DRF `UUIDField` / `PrimaryKeyRelatedField`
+/// int arm. Bools never reach it: both call sites handle `true`/`false`
+/// (`UUID(int=0/1)`) before dispatching on numbers.
+pub fn uuid_from_json_int(number: &serde_json::Number) -> Option<Uuid> {
+    if let Some(int) = number.as_i64() {
+        if int < 0 {
+            return None;
+        }
+        return Some(Uuid::from_u128(int as u128));
+    }
+    if number.as_u64().is_some() {
+        // `u64` always fits the 128-bit space.
+        return number.to_string().parse::<u128>().ok().map(Uuid::from_u128);
+    }
+    // Arbitrary-precision integers past `u64`: `UUID(int=…)` accepts
+    // anything below 2¹²⁸.
+    number.to_string().parse::<u128>().ok().map(Uuid::from_u128)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -310,5 +335,36 @@ mod tests {
         let mut errors = Map::new();
         assert_eq!(validate_datetime(&mut errors, "f", &json!(7), false), None);
         assert_eq!(field(&errors, "f"), vec![datetime_format_message()]);
+    }
+
+    // Moved from `api::app_issues::handlers_engage` with
+    // `uuid_from_json_int` (PIDASHCONV-1623).
+    #[test]
+    fn uuid_from_json_int_matches_uuid_int() {
+        fn num(spelling: &str) -> serde_json::Number {
+            serde_json::from_str::<Value>(spelling)
+                .expect("number")
+                .as_number()
+                .expect("number")
+                .clone()
+        }
+        assert_eq!(uuid_from_json_int(&num("0")), Some(Uuid::from_u128(0)));
+        assert_eq!(uuid_from_json_int(&num("1")), Some(Uuid::from_u128(1)));
+        assert_eq!(
+            uuid_from_json_int(&num("18446744073709551615")),
+            Some(Uuid::from_u128(u64::MAX as u128))
+        );
+        assert_eq!(
+            uuid_from_json_int(&num("340282366920938463463374607431768211455")),
+            Some(Uuid::from_u128(u128::MAX))
+        );
+        // Negatives, huge values and non-integers fail.
+        assert_eq!(uuid_from_json_int(&num("-1")), None);
+        assert_eq!(
+            uuid_from_json_int(&num("340282366920938463463374607431768211456")),
+            None
+        );
+        assert_eq!(uuid_from_json_int(&num("1.5")), None);
+        assert_eq!(uuid_from_json_int(&num("1e3")), None);
     }
 }

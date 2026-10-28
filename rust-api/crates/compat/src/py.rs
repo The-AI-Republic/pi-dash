@@ -9,7 +9,10 @@
 //!   `py_printable` (the runner-sessions trio + `run_endpoints` float,
 //!   19 defs), `py_float_repr` (3 defs), `layout_py_float` (2),
 //!   `py_truthy` (4 defs across 2 textually-different but
-//!   truth-table-identical bodies), `py_strip` (all 23 defs: the
+//!   truth-table-identical bodies), `py_str_value` +
+//!   `py_float_repr_probed` (the engage ChoiceField/UUID family,
+//!   PIDASHCONV-1623), `render_number` + `py_json_float` (the exact
+//!   JSON-number renderer, PIDASHCONV-1623), `py_strip` (all 23 defs: the
 //!   spellings differ and three add a redundant `\u{85}`, which
 //!   `char::is_whitespace` already covers) + `py_is_space` (4),
 //!   `py_json_string` (7), `python_dumps` + `python_dump_into` +
@@ -21,9 +24,10 @@
 //!   the webhooks `py_str` (JSON-array rendering), the invites
 //!   `py_truthy` (`None`-means-inf default), the naive/partial
 //!   `py_repr` pairs, `py_str_repr` x2+x2, the divergent `dumps`
-//!   triples, and every singleton (`py_int`, `py_str_value`,
-//!   `py_repr_value`, `is_truthy` x12 — twelve distinct bodies,
-//!   `py_number_str`, `python_int`, `render_number`, `py_dumps`,
+//!   triples, and every singleton (`py_int`, the license
+//!   `py_str_value` pair (different shapes), `py_repr_value`,
+//!   `is_truthy` x12 — twelve distinct bodies, `py_number_str`,
+//!   `python_int`, the `types` `render_number`, `py_dumps`,
 //!   `py_title`, `*_is_falsy`).
 
 use icu_properties::{props::GeneralCategory, CodePointMapData};
@@ -476,6 +480,373 @@ pub fn py_uuid_or_none(id: &Option<Uuid>) -> String {
     id.map_or_else(|| "None".to_owned(), |id| id.to_string())
 }
 
+// ---------------------------------------------------------------------------
+// CPython `str()` over parsed JSON, precision-probe floats (PIDASHCONV-1623)
+// ---------------------------------------------------------------------------
+
+/// CPython `str()` over a parsed JSON value: `None` / `True` / `False`,
+/// decimal ints, [`py_float_repr_probed`] floats, raw strings, and — for
+/// containers — brackets with `repr()` elements.
+///
+/// Moved from `api::app_issues::handlers_engage` (PIDASHCONV-1623),
+/// which uses it for `ChoiceField` membership input and UUID-error
+/// rendering. This is NOT [`py_str`]: the float arm probes precisions
+/// for the shortest round-trip rendering instead of Rust's `{:?}`
+/// (the two agree on every finite float probed — 300k random patterns
+/// plus edges — but that sampling is not an all-inputs proof, so the
+/// forms stay separate), and the string arm escapes whitespace beyond
+/// the plain space where [`py_repr_str`] passes it through.
+pub fn py_str_value(value: &Value) -> String {
+    match value {
+        Value::Null => "None".to_owned(),
+        Value::Bool(true) => "True".to_owned(),
+        Value::Bool(false) => "False".to_owned(),
+        Value::Number(number) => {
+            if let Some(int) = number.as_i64() {
+                int.to_string()
+            } else if let Some(uint) = number.as_u64() {
+                uint.to_string()
+            } else if number.is_f64() {
+                match number.as_f64() {
+                    Some(float) => py_float_repr_probed(float),
+                    None => number.to_string(),
+                }
+            } else {
+                // Arbitrary-precision integers past `u64`: full digits,
+                // like CPython `str(int)` (never the lossy `as_f64`).
+                number.to_string()
+            }
+        }
+        Value::String(text) => text.clone(),
+        Value::Array(items) => {
+            let inner: Vec<String> = items.iter().map(py_str_value_repr).collect();
+            format!("[{}]", inner.join(", "))
+        }
+        Value::Object(map) => {
+            let inner: Vec<String> = map
+                .iter()
+                .map(|(key, item)| {
+                    format!(
+                        "{}: {}",
+                        py_str_value_repr_str(key),
+                        py_str_value_repr(item)
+                    )
+                })
+                .collect();
+            format!("{{{}}}", inner.join(", "))
+        }
+    }
+}
+
+/// CPython `repr(float)`: the shortest digit string that round-trips,
+/// found by probing precisions `1..=19` (like the OSS port), laid out
+/// per the magnitude rule in [`layout_py_float`]. `nan`/`inf` spelled
+/// the Python way.
+///
+/// Moved from `api::app_issues::handlers_engage` (PIDASHCONV-1623).
+/// Kept under its own name next to [`py_float_repr`] (the ryu form):
+/// same outputs on every input probed, different algorithm.
+pub fn py_float_repr_probed(value: f64) -> String {
+    if value.is_nan() {
+        return "nan".to_owned();
+    }
+    if value.is_infinite() {
+        return if value > 0.0 {
+            "inf".to_owned()
+        } else {
+            "-inf".to_owned()
+        };
+    }
+    if value == 0.0 {
+        return if value.is_sign_negative() {
+            "-0.0".to_owned()
+        } else {
+            "0.0".to_owned()
+        };
+    }
+    for precision in 1..=19usize {
+        let rendered = format!("{value:.dec$e}", dec = precision - 1);
+        if rendered.parse::<f64>().ok() == Some(value) {
+            return layout_py_float(&rendered, value);
+        }
+    }
+    // Unreachable in practice (17 significant digits always identify
+    // an f64); fall back to the longest rendering laid out.
+    layout_py_float(&format!("{value:.18e}"), value)
+}
+
+/// CPython `repr()` over a parsed JSON value (container elements and dict
+/// keys use this; see [`py_str_value`]).
+fn py_str_value_repr(value: &Value) -> String {
+    match value {
+        Value::String(text) => py_str_value_repr_str(text),
+        Value::Array(items) => {
+            let inner: Vec<String> = items.iter().map(py_str_value_repr).collect();
+            format!("[{}]", inner.join(", "))
+        }
+        Value::Object(map) => {
+            let inner: Vec<String> = map
+                .iter()
+                .map(|(key, item)| {
+                    format!(
+                        "{}: {}",
+                        py_str_value_repr_str(key),
+                        py_str_value_repr(item)
+                    )
+                })
+                .collect();
+            format!("{{{}}}", inner.join(", "))
+        }
+        other => py_str_value(other),
+    }
+}
+
+/// CPython `repr()` of a string (see [`py_str_value`]): single quotes
+/// unless the text holds one but no double quote, short escapes plus
+/// `\xhh` / `\uhhhh` / `\Uhhhhhhhh` for non-printables.
+fn py_str_value_repr_str(text: &str) -> String {
+    let use_double = text.contains('\'') && !text.contains('"');
+    let quote = if use_double { '"' } else { '\'' };
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push(quote);
+    for ch in text.chars() {
+        if ch == quote {
+            out.push('\\');
+            out.push(ch);
+            continue;
+        }
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            ch if ch.is_control()
+                || (ch as u32) == 0x7f
+                || ((ch as u32) >= 0x80 && (ch as u32) < 0xa0)
+                || (ch.is_whitespace() && ch != ' ') =>
+            {
+                let code = ch as u32;
+                if code < 0x100 {
+                    out.push_str(&format!("\\x{code:02x}"));
+                } else if code < 0x10000 {
+                    out.push_str(&format!("\\u{code:04x}"));
+                } else {
+                    out.push_str(&format!("\\U{code:08x}"));
+                }
+            }
+            ch => out.push(ch),
+        }
+    }
+    out.push(quote);
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Exact JSON numbers (PIDASHCONV-1623)
+// ---------------------------------------------------------------------------
+
+/// Exact JSON-number rendering into `out`: integers print full digits
+/// (arbitrary-precision past `u64` included — never the lossy `as_f64`
+/// scientific form [`py_num_str`] produces there), floats via
+/// [`py_json_float`].
+///
+/// Canonicalized from the overlay (`cloud-api/src/mcp/protocol.rs`,
+/// PIDASHCONV-1623), which is the Python-correct form: `json.dumps`
+/// prints big ints exactly, and the previous OSS copy in
+/// `jobs::tasks_webhooks::webhook_send` printed them scientifically
+/// (e.g. `2**70` as `1.1805916207174113e+21`). The webhook sender now
+/// calls this. QUIRK (shared, pre-existing, out of scope): a
+/// float-overflow spelling like `1e999` renders as `1e+999` (the
+/// normalized input spelling), where Python prints `Infinity`.
+pub fn render_number(out: &mut String, number: &serde_json::Number) {
+    if let Some(int) = number.as_i64() {
+        out.push_str(&int.to_string());
+    } else if let Some(int) = number.as_u64() {
+        out.push_str(&int.to_string());
+    } else if let Some(float) = number.as_f64().filter(|_| number.is_f64()) {
+        out.push_str(&py_json_float(float));
+    } else {
+        // Arbitrary-precision integer beyond u64 (the workspace unifies
+        // `arbitrary_precision`): `as_f64` still reports `Some` for these,
+        // hence the `is_f64` guard above. Exact digits, like Python's
+        // unbounded ints — never scientific notation.
+        out.push_str(&number.to_string());
+    }
+}
+
+/// CPython `repr` for a float, exactly: Rust's `{:?}` picks the same
+/// fixed-vs-scientific shape and the same shortest digits in every case
+/// probed (300k random bit patterns plus magnitude boundaries), differing
+/// only in exponent spelling (`e16` vs `e+16`, `e-5` vs `e-05`) and in the
+/// round-half-even tie-break when the exact binary value sits exactly
+/// halfway between two shortest candidates (Rust rounds the last digit up,
+/// CPython rounds to even). Non-finite values follow `json.dumps` with the
+/// default `allow_nan` (`Infinity`, `-Infinity`, `NaN`).
+///
+/// Canonicalized from the overlay (`cloud-api/src/mcp/protocol.rs`,
+/// PIDASHCONV-1623) with [`render_number`]; previously named
+/// `python_float_repr` there.
+pub fn py_json_float(value: f64) -> String {
+    if value.is_nan() {
+        return "NaN".to_owned();
+    }
+    if value.is_infinite() {
+        return if value.is_sign_positive() {
+            "Infinity".to_owned()
+        } else {
+            "-Infinity".to_owned()
+        };
+    }
+    let debug = format!("{value:?}");
+    let normalized = normalize_float_exponent(&debug);
+    even_halfway_tie(&normalized, value).unwrap_or(normalized)
+}
+
+/// Rewrite a Rust `{:?}` exponent to CPython spelling: always signed, at
+/// least two digits (`e16` to `e+16`, `e-5` to `e-05`).
+fn normalize_float_exponent(debug: &str) -> String {
+    let Some(exp_at) = debug.find('e') else {
+        return debug.to_owned();
+    };
+    let (mantissa, exponent) = debug.split_at(exp_at);
+    let exponent = exponent.strip_prefix('e').unwrap_or(exponent);
+    let (sign, digits) = match exponent.strip_prefix('-') {
+        Some(digits) => ("-", digits),
+        None => ("+", exponent.strip_prefix('+').unwrap_or(exponent)),
+    };
+    let mut out = String::with_capacity(debug.len() + 2);
+    out.push_str(mantissa);
+    out.push('e');
+    out.push_str(sign);
+    for _ in digits.len()..2 {
+        out.push('0');
+    }
+    out.push_str(digits);
+    out
+}
+
+/// If `rendered` ends in an odd digit, the value is exactly halfway between
+/// `rendered` and its last-digit-decremented sibling, and the sibling still
+/// parses to `value`, return the sibling (CPython's round-half-even pick).
+/// Otherwise return `None` to keep `rendered`.
+///
+/// Exactness without a bignum: a halfway case forces `|exp10| <= 24`
+/// (otherwise `5^|exp10|` cannot divide the 53-bit mantissa or the
+/// 17-digit decimal), so the midpoint equation fits in `u128` after
+/// dividing out the shared power of five; see the inline derivation.
+fn even_halfway_tie(rendered: &str, value: f64) -> Option<String> {
+    let body = rendered.strip_prefix('-').unwrap_or(rendered);
+    let (mantissa, exp_text) = match body.split_once('e') {
+        Some((mantissa, exp_text)) => (mantissa, exp_text),
+        None => (body, "+00"),
+    };
+    let (int_part, frac_part) = match mantissa.split_once('.') {
+        Some(parts) => parts,
+        None => (mantissa, ""),
+    };
+    let full_digits = format!("{int_part}{frac_part}");
+    let mut digits = full_digits.clone();
+    let last = digits.pop()?;
+    if !matches!(last, '1' | '3' | '5' | '7' | '9') {
+        return None;
+    }
+    let explicit_exp: i32 = exp_text.parse().ok()?;
+    let exp10 = explicit_exp - i32::try_from(frac_part.len()).ok()?;
+    if exp10.abs() > 24 {
+        return None;
+    }
+    // Candidate sibling: same shape, last digit decremented (no borrow is
+    // possible from an odd digit, so the digit count is unchanged).
+    let decremented = char::from_digit(last.to_digit(10)? - 1, 10)?;
+    let mut sibling = String::with_capacity(rendered.len());
+    if rendered.starts_with('-') {
+        sibling.push('-');
+    }
+    sibling.push_str(int_part);
+    if !frac_part.is_empty() {
+        sibling.push('.');
+        sibling.push_str(&frac_part[..frac_part.len() - 1]);
+        sibling.push(decremented);
+    } else {
+        sibling.push_str(&digits);
+        sibling.push(decremented);
+    }
+    if body.contains('e') {
+        sibling.push('e');
+        sibling.push_str(exp_text);
+    }
+    if sibling.parse::<f64>().ok()? != value {
+        return None;
+    }
+    // Exact halfway check. R = D * 10^exp10 with D the digit value;
+    // M = (D - 1/2) * 10^exp10; v = m * 2^e. Halfway (v == M) forces
+    // 5^|exp10| to divide m (exp10 >= 0) or 2D-1 (exp10 < 0); dividing it
+    // out keeps every term in u128 (D < 1e17, m < 2^53, 5^24 < 2^56).
+    let bits = value.to_bits();
+    let mantissa_bits = bits & ((1 << 52) - 1);
+    let biased_exp = ((bits >> 52) & 0x7FF) as i32;
+    let (m, e) = if biased_exp == 0 {
+        (mantissa_bits, -1074)
+    } else {
+        (mantissa_bits | (1 << 52), biased_exp - 1075)
+    };
+    let digit_value: u128 = full_digits.parse::<u128>().ok()?;
+    if !is_exact_midpoint(digit_value, exp10, m, e) {
+        return None;
+    }
+    Some(sibling)
+}
+
+/// Decide `v == M` exactly, where `v = m * 2^e` (decoded double bits) and
+/// `M = (D - 1/2) * 10^exp10` (midpoint below the odd rendering `R`).
+fn is_exact_midpoint(digit_value: u128, exp10: i32, m: u64, e: i32) -> bool {
+    if exp10 >= 0 {
+        let Some(pow5) = 5u128.checked_pow(exp10 as u32) else {
+            return false;
+        };
+        let m = m as u128;
+        if !m.is_multiple_of(pow5) {
+            return false;
+        }
+        let reduced = m / pow5;
+        let target = 2 * digit_value - 1;
+        let shift = e - exp10 + 1;
+        if shift >= 0 {
+            let Ok(shift) = u32::try_from(shift) else {
+                return false;
+            };
+            reduced.checked_shl(shift) == Some(target)
+        } else {
+            let Ok(shift) = u32::try_from(-shift) else {
+                return false;
+            };
+            target.checked_shl(shift) == Some(reduced)
+        }
+    } else {
+        let Some(pow5) = 5u128.checked_pow((-exp10) as u32) else {
+            return false;
+        };
+        let odd = 2 * digit_value - 1;
+        if !odd.is_multiple_of(pow5) {
+            return false;
+        }
+        let target = odd / pow5;
+        let shift = e + 1 - exp10;
+        let m = m as u128;
+        if shift >= 0 {
+            let Ok(shift) = u32::try_from(shift) else {
+                return false;
+            };
+            m.checked_shl(shift) == Some(target)
+        } else {
+            let Ok(shift) = u32::try_from(-shift) else {
+                return false;
+            };
+            target.checked_shl(shift) == Some(m)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -711,5 +1082,250 @@ mod tests {
             "12345678-1234-5678-1234-567812345678"
         );
         assert_eq!(py_uuid_or_none(&None), "None");
+    }
+    // Moved from `api::app_issues::handlers_engage` with `py_str_value`.
+    #[test]
+    fn py_str_value_matches_cpython() {
+        assert_eq!(py_str_value(&Value::Null), "None");
+        assert_eq!(py_str_value(&json!(true)), "True");
+        assert_eq!(py_str_value(&json!(77)), "77");
+        assert_eq!(py_str_value(&json!("internal")), "internal");
+        assert_eq!(py_str_value(&json!(["INTERNAL"])), "['INTERNAL']");
+        assert_eq!(py_str_value(&json!({"a": 1})), "{'a': 1}");
+        assert_eq!(py_str_value_repr(&json!("don't")), "\"don't\"");
+        assert_eq!(py_str_value_repr(&json!("say \"hi\"")), "'say \"hi\"'");
+        assert_eq!(py_str_value_repr(&json!("a\nb")), "'a\\nb'");
+        assert_eq!(py_str_value(&json!(1.5)), "1.5");
+        assert_eq!(py_str_value(&json!(1e16)), "1e+16");
+    }
+
+    #[test]
+    fn py_float_repr_probed_matches_cpython_oracle() {
+        // CPython `repr` over edge + random f64s (seed 654): parsing
+        // each spelling must reproduce it exactly.
+        for text in [
+            "0.0",
+            "-0.0",
+            "1.0",
+            "-1.0",
+            "0.1",
+            "-0.1",
+            "0.5",
+            "4.5",
+            "77.0",
+            "1e+16",
+            "-1e+16",
+            "1000000000000000.0",
+            "9999999999999998.0",
+            "0.0001",
+            "9.9999e-05",
+            "1e-05",
+            "1.5e-07",
+            "1.23",
+            "123.456",
+            "1.1",
+            "2.2",
+            "0.3",
+            "1e+300",
+            "1.7976931348623157e+308",
+            "5e-324",
+            "2.2250738585072014e-308",
+            "1e+21",
+            "123456789.12345679",
+            "0.00010000000001",
+            "3.141592653589793",
+            "100.0",
+            "1000000.0",
+            "1000000.0",
+            "1234567890000000.0",
+            "1.0000000000000002",
+            "2.0000000000000004",
+            "3.1969326087014466e+19",
+            "-648.4462954478394",
+            "2.7257935151841477e+19",
+            "579.4076537460154",
+            "8.527238532839549e+19",
+            "-913.3955515106092",
+            "8.896161802149298e+19",
+            "-715.3670336061672",
+            "3.588060462234755e+19",
+            "435.64988671404353",
+            "7.755666951748308e+19",
+            "-689.2765889623878",
+            "-4.330334504373883e+19",
+            "-816.9972547462557",
+            "-7.212821885073056e+19",
+            "-1679.6052986552581",
+            "3.2445178360908284e+19",
+            "-204.03326175159876",
+            "-8.659247373857653e+18",
+            "1208.8390033969868",
+            "-4.647260496917678e+19",
+            "2331.221077226743",
+            "8.5327628826864e+19",
+            "1001.189002479752",
+            "-8.234019824386068e+19",
+            "-495.73367760484905",
+            "9.352414724532316e+19",
+            "346.0259035320625",
+            "-7.1336788737953415e+19",
+            "-956.186083621841",
+            "-7.678412411071945e+19",
+            "743.1470832768787",
+            "-2.5012238015527862e+19",
+            "-151.39194187298384",
+            "5.543620478186435e+19",
+            "-402.4753197702496",
+            "-9.86234000471552e+19",
+            "-1687.6484285668644",
+            "-1.2613779274247045e+19",
+            "295.5344355622931",
+            "-4.708884174573601e+18",
+            "143.2457353449458",
+            "9.272274689849475e+19",
+            "782.9417038372993",
+            "-2.365484285927129e+19",
+            "213.25467548742972",
+            "-4.4287013372000076e+19",
+            "-75.27500601863878",
+            "7.3002688662026355e+19",
+            "-617.7363223782181",
+            "2.8132118711075865e+19",
+            "642.045311657188",
+            "-4.9760184971786445e+19",
+            "-493.23593034675645",
+            "-5.92865673699603e+19",
+            "1271.787532431871",
+            "8.862838211447603e+18",
+            "-102.63510865808792",
+            "2.4099300144340025e+19",
+            "-2281.3345229971756",
+            "-5.346252045636608e+19",
+            "2132.4041415069833",
+            "-6.090543569457227e+19",
+            "1863.0368182127777",
+            "6.0170257457244996e+19",
+            "-182.18689918793999",
+            "6.525439356052767e+17",
+            "-1362.5914219885572",
+            "5.1796889258414604e+19",
+            "-319.24195464384303",
+            "-8.253703237953189e+19",
+            "287.06500363070336",
+            "-2.591301605754159e+19",
+            "1392.893079979731",
+            "2.655060505738576e+18",
+            "2036.4351785039644",
+            "7.427269069333139e+19",
+            "1347.4365990857013",
+            "-8.434791962696217e+19",
+            "-186.0700574057584",
+        ] {
+            let value: f64 = text.parse().unwrap();
+            assert_eq!(py_float_repr_probed(value), text, "{text}");
+        }
+        assert_eq!(py_float_repr_probed(f64::NAN), "nan");
+        assert_eq!(py_float_repr_probed(f64::INFINITY), "inf");
+        assert_eq!(py_float_repr_probed(f64::NEG_INFINITY), "-inf");
+    }
+
+    #[test]
+    fn py_json_float_cases() {
+        let cases: [(f64, &str); 22] = [
+            (0.0, "0.0"),
+            (-0.0, "-0.0"),
+            (1.0, "1.0"),
+            (25.0, "25.0"),
+            (25.9, "25.9"),
+            (-25.9, "-25.9"),
+            (0.1, "0.1"),
+            (2.5, "2.5"),
+            (1e15, "1000000000000000.0"),
+            (1e16, "1e+16"),
+            (-1e16, "-1e+16"),
+            (1e21, "1e+21"),
+            (1e100, "1e+100"),
+            (0.0001, "0.0001"),
+            (1e-5, "1e-05"),
+            (1.5e-7, "1.5e-07"),
+            (5e-324, "5e-324"),
+            (2.2250738585072014e-308, "2.2250738585072014e-308"),
+            (1.7976931348623157e308, "1.7976931348623157e+308"),
+            (123456.789, "123456.789"),
+            (1.23456789012345, "1.23456789012345"),
+            (std::f64::consts::PI, "3.141592653589793"),
+        ];
+        for (value, expected) in cases {
+            assert_eq!(py_json_float(value), expected, "{value:?}");
+        }
+        assert_eq!(py_json_float(f64::INFINITY), "Infinity");
+        assert_eq!(py_json_float(f64::NEG_INFINITY), "-Infinity");
+        assert_eq!(py_json_float(f64::NAN), "NaN");
+    }
+
+    #[test]
+    fn py_json_float_rounds_exact_halfway_to_even() {
+        // Exact-halfway values (true binary value ends in ...25) where
+        // Rust's shortest rendering ends odd and CPython rounds to even.
+        // Bit patterns captured from the 300k-vector equivalence sweep.
+        let cases: [(u64, &str); 6] = [
+            (0x4305edd45e85c45a, "771558860699787.2"),
+            (0x431572bb837eea91, "1509281050376868.2"),
+            (0xc30ace1af568d92a, "-943120572029733.2"),
+            (0xc31e219d2288c649, "-2120302018572690.2"),
+            (0xc309be32f6bf9a22, "-905750064395076.2"),
+            (0xc2eff025ca007cb4, "-280930292859877.62"),
+        ];
+        for (bits, expected) in cases {
+            assert_eq!(py_json_float(f64::from_bits(bits)), expected, "{bits:#x}");
+        }
+        // Controls: odd last digits that are not halfway keep the Rust
+        // rendering.
+        assert_eq!(py_json_float(0.5), "0.5");
+        assert_eq!(py_json_float(2.5), "2.5");
+    }
+
+    // Canonicalized from the overlay (`mcp/protocol.rs`) with
+    // `render_number`; big-int vectors prove the exact form against
+    // `json.dumps` (PIDASHCONV-1623).
+    #[test]
+    fn render_number_prints_exact_digits() {
+        fn render(number: &serde_json::Number) -> String {
+            let mut out = String::new();
+            render_number(&mut out, number);
+            out
+        }
+        fn num(spelling: &str) -> serde_json::Number {
+            serde_json::from_str::<Value>(spelling)
+                .expect("number")
+                .as_number()
+                .expect("number")
+                .clone()
+        }
+        assert_eq!(render(&num("0")), "0");
+        assert_eq!(render(&num("-42")), "-42");
+        assert_eq!(render(&num("9223372036854775807")), "9223372036854775807");
+        assert_eq!(render(&num("-9223372036854775808")), "-9223372036854775808");
+        assert_eq!(render(&num("18446744073709551615")), "18446744073709551615");
+        // Past `u64`: exact digits, never scientific (the previous OSS
+        // webhook copy printed `1.1805916207174113e+21` here).
+        assert_eq!(
+            render(&num("1180591620717411303424")),
+            "1180591620717411303424"
+        );
+        assert_eq!(
+            render(&num("-1180591620717411303424")),
+            "-1180591620717411303424"
+        );
+        assert_eq!(
+            render(&num("340282366920938463463374607431768211455")),
+            "340282366920938463463374607431768211455"
+        );
+        assert_eq!(render(&num("1.5")), "1.5");
+        assert_eq!(render(&num("1e16")), "1e+16");
+        assert_eq!(render(&num("1e-05")), "1e-05");
+        // Shared pre-existing quirk (see `render_number` docs): the
+        // overflow spelling survives instead of `Infinity`.
+        assert_eq!(render(&num("1e999")), "1e+999");
     }
 }
