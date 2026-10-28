@@ -543,6 +543,17 @@ describe("ProjectCard menus", () => {
     expect(defaulted).toBe(false);
     expect(onArchive).toHaveBeenCalledTimes(1);
   });
+
+  it("stops a press on the menu host from reaching the card link", () => {
+    // The trigger opens on pointerdown, so the host stops the press from
+    // bubbling into the anchor while leaving its own default alone; without
+    // it, pressing the trigger would navigate into the project first.
+    renderCard({ onArchive: () => undefined }, project({ member_role: 20 }));
+
+    const host = screen.getByTestId("project-card-menu-host");
+    const pressed = fireEvent.pointerDown(host);
+    expect(pressed).toBe(true);
+  });
 });
 
 describe("ProjectCard footer", () => {
