@@ -100,6 +100,10 @@ sea-orm = { version = "~1.1.20", default-features = false, features = ["sqlx-pos
 # ORM-02 review: the `TxnConn` handle implements SeaORM's `ConnectionTrait`
 # (locked async-trait 0.1.x via sea-orm — no lock churn).
 async-trait = "0.1"
+# PIDASHCONV-1631 v1-asset user-save template: the relocated sea-query
+# builder. Identical spec to pidash-db (locked sea-query 0.32.7 — no
+# lock churn).
+sea-query = { version = "0.32", default-features = false, features = ["backend-postgres", "with-uuid", "with-chrono"] }
 
 [dev-dependencies]
 # PIDASHCONV-1599 probe CA-bundle tests: the custom-CA TLS fake needs

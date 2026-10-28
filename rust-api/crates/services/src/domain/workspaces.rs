@@ -744,6 +744,27 @@ pub mod members {
                 .map(|_| ())
         }
     }
+
+    // The user-deactivate bulk template (PIDASHCONV-1631; relocated
+    // verbatim from `crate::app_workspace::queries_user`, whose
+    // `pub use` shim keeps the handler path stable). The handler
+    // chunks `:pks` and executes per chunk, so the write runs
+    // handler-side until that call site migrates to an executing twin
+    // (contrast the project twin, `domain::projects::members`).
+
+    /// Workspace bulk deactivation write (`:310`):
+    /// `bulk_update(rows, ["is_active"], batch_size=100)`.
+    ///
+    /// Ported bug 5: `bulk_update` bypasses `save()`, so `auto_now` does
+    /// NOT stamp `updated_at`, and the write is pk-direct with NO
+    /// `deleted_at` filter. The handler chunks `:pks` into batches of
+    /// [`crate::app_workspace::queries_user::BULK_DEACTIVATE_BATCH_SIZE`];
+    /// an empty collection issues NO statement at all. (The project
+    /// twin moved to `domain::projects::members`.)
+    pub fn workspace_bulk_deactivate_sql() -> String {
+        "UPDATE workspace_members SET is_active = FALSE WHERE workspace_members.id IN (:pks)"
+            .to_owned()
+    }
 }
 
 #[cfg(test)]

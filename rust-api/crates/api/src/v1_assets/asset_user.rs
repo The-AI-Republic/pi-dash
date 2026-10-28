@@ -15,7 +15,9 @@
 //! fails the build. Consumed layers (all merged, read-only here):
 //! models (`pidash_db::v1_assets::model::file_asset`), queries
 //! (`pidash_db::v1_assets::asset_queries`, incl. `user_scoped_get_sql`,
-//! `soft_delete_*_sql`, `entity_user_*_sql` + `EntityClearTarget`), gates
+//! `soft_delete_*_sql`, `entity_user_select_sql` + `EntityClearTarget`;
+//! the `entity_user_save_sql` twin lives in
+//! `pidash_services::domain::identity`), gates
 //! (`super::permissions`), tasks
 //! (`pidash_jobs::v1_assets::tasks::{metadata_job, storage_metadata_missing}`).
 //!
@@ -57,7 +59,7 @@
 //!   parses `request.data`); DELETE never touches the body at all, so it
 //!   parses nothing.
 //! * Reads reuse `pidash_db::v1_assets::asset_queries`
-//!   (`user_scoped_get_sql`, `soft_delete_*_sql`, `entity_user_*_sql`).
+//!   (`user_scoped_get_sql`, `soft_delete_*_sql`, `entity_user_select_sql`).
 //!   Writes are single statements with the same column semantics as
 //!   `FileAsset.objects.create` / `save(update_fields=[...])` / the
 //!   full-row `user.save()`. `save(update_fields=[...])` writes ONLY
@@ -703,7 +705,8 @@ enum EntityDeleteOutcome {
 /// `avatar_asset_id`, `USER_COVER` clears `cover_image_asset_id`, anything
 /// else returns without touching the profile. The clear is a full-row
 /// `user.save()` — every non-pk column in `_meta` order via
-/// [`asset_queries::entity_user_save_sql`] — after the `User.save()`
+/// [`pidash_services::domain::identity::entity_user_save_sql`] — after the
+/// `User.save()`
 /// value shaping (`db/models/user.py:169-189`): email lower+strip (a null
 /// email raises `AttributeError` → generic 500), token rotation iff
 /// `token_updated_at` is set, the falsy-`display_name` local-part default
@@ -901,10 +904,10 @@ struct ShapedUserRow {
 impl ShapedUserRow {
     /// The full-row `user.save()`: every non-pk column in `_meta` order
     /// (`$1`–`$39`), pk in `WHERE` (`$40`) — the
-    /// [`asset_queries::entity_user_save_sql`] bind contract.
+    /// [`pidash_services::domain::identity::entity_user_save_sql`] bind contract.
     async fn save(&self, pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
         let row = &self.row;
-        sqlx::query(&asset_queries::entity_user_save_sql())
+        sqlx::query(&pidash_services::domain::identity::entity_user_save_sql())
             .bind(&row.password)
             .bind(row.last_login)
             .bind(&row.username)
@@ -1806,7 +1809,7 @@ mod tests {
     // (`$1`–`$40`); the soft-delete helper binds id + two fields.
     #[test]
     fn helper_builders_carry_their_binds() {
-        let save = asset_queries::entity_user_save_sql();
+        let save = pidash_services::domain::identity::entity_user_save_sql();
         assert!(
             save.contains("$1") && save.contains("$39") && save.contains("$40"),
             "{save}"

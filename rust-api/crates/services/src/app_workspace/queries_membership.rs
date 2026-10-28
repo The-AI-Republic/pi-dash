@@ -466,16 +466,8 @@ pub fn member_reactivate_lookup_where() -> String {
     "workspace_members.workspace_id = :ws AND workspace_members.member_id = :user AND workspace_members.deleted_at IS NULL".to_owned()
 }
 
-/// R12 last-workspace write (`:204-205`): `user.last_workspace_id =
-/// workspace.id; user.save()`. Ported bug 11: `User` HAS no such column
-/// (it lives on `Profile`, `db/models/user.py:236` — the U16 read of it
-/// 500s) — Django drops the transient attribute on save, so NO pointer is
-/// persisted; the emitted `users` UPDATE only stamps `updated_at`/audit.
-/// R18's Profile update ([`profile_last_workspace_sql`]) is the path that
-/// persists. Both are kept.
-pub fn user_touch_sql() -> String {
-    "UPDATE users SET updated_at = :now WHERE id = :user".to_owned()
-}
+// NOTE: the R12 touch template lived here; the write executes inline in
+// the invites handler (PIDASHCONV-1628 migrates it to `domain::identity`).
 
 // ---------------------------------------------------------------------------
 // R13 join get (invite.py:238-241)
@@ -642,14 +634,8 @@ pub fn join_request_pending_blocks(status: &str) -> bool {
     status != JOIN_REQUEST_PENDING
 }
 
-/// R18 profile pointer (`:219`): `Profile.objects.filter(user=:requester)
-/// .update(last_workspace_id=:ws)`. Ported bug 11 (second half): this
-/// `profiles` UPDATE is the path that PERSISTS (contrast R12's
-/// [`user_touch_sql`] no-op). Zero matching profiles updates nothing —
-/// no error.
-pub fn profile_last_workspace_sql() -> String {
-    "UPDATE profiles SET last_workspace_id = :ws WHERE user_id = :requester".to_owned()
-}
+// NOTE: the R18 pointer template lived here; the write executes inline in
+// the invites handler (PIDASHCONV-1628 migrates it to `domain::identity`).
 
 /// R18/R19 status transition (`:221-224` + `:250-253`): `status=:status,
 /// responded_at=:now, responded_by=:user` (`:status` binds `APPROVED` /
@@ -723,8 +709,6 @@ mod tests {
         // so invite_bulk_insert_sql stays out of the list above.
         // users/profiles have no deleted_at column — assert absence, not scope.
         assert!(!join_user_lookup_sql().contains("deleted_at"));
-        assert!(!profile_last_workspace_sql().contains("deleted_at"));
-        assert!(!user_touch_sql().contains("deleted_at"));
     }
 
     #[test]
@@ -908,11 +892,6 @@ mod tests {
         let probe = member_reactivate_lookup_where();
         assert!(probe.contains("workspace_members.workspace_id = :ws"));
         assert!(!probe.contains("is_active"));
-        // Ported bug 11 (first half): users UPDATE touches audit only.
-        assert_eq!(
-            user_touch_sql(),
-            "UPDATE users SET updated_at = :now WHERE id = :user"
-        );
         // R13 reuses the R11 lookup.
         assert_eq!(join_detail_where(), invite_lookup_where());
     }
@@ -998,11 +977,6 @@ mod tests {
         assert_eq!(JOIN_REQUEST_PENDING, "PENDING");
         assert_eq!(JOIN_REQUEST_APPROVED, "APPROVED");
         assert_eq!(JOIN_REQUEST_DENIED, "DENIED");
-        // Ported bug 11 (second half): the Profile UPDATE persists.
-        assert_eq!(
-            profile_last_workspace_sql(),
-            "UPDATE profiles SET last_workspace_id = :ws WHERE user_id = :requester"
-        );
         // Shared status transition; atomicity differs (ported bug 16).
         let status = join_request_status_sql();
         assert!(status.contains("status = :status"));

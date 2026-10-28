@@ -3221,6 +3221,7 @@ dependencies = [
  "rustls-pki-types",
  "scraper",
  "sea-orm",
+ "sea-query",
  "serde",
  "serde_json",
  "sha2 0.11.0",
