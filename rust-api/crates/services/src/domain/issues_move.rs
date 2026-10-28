@@ -24,14 +24,11 @@ use uuid::Uuid;
 use crate::app_issues::issue_move::{
     move_work_item_to_project, repoint_sql, HandoffRunRow, MoveError, MoveOptions, MovePostCommit,
     MoveResult, MoveStore, MovedIssueRow, PodRow, ProjectRow, RepointTarget, SourceIssueRow,
-    StateRow, StoreError, ASSIGNEE_IDS_SQL, ASSIGNEE_PRUNE_SQL, ASSIGNEE_REPOINT_SQL,
-    CHILDREN_DETACH_SQL, COMMENT_IDS_SQL, CYCLE_DELETE_SQL, DESCRIPTION_IDS_SQL,
-    HANDOFF_PARENT_UPDATE_SQL, HANDOFF_RUNS_LOCK_SQL, INERT_RUN_UPDATE_SQL, ISSUE_MOVE_UPDATE_SQL,
-    ISSUE_MOVE_UPDATE_STAMP_SQL, LABEL_DELETE_SQL, LABEL_IDS_SQL, MEMBER_EXISTS_SQL,
-    MODULE_DELETE_SQL, MOVED_ISSUE_REFETCH_SQL, PROJECT_IDENTIFIER_SQL,
-    PROJECT_RESOLVE_BY_IDENTIFIER_SQL, PROJECT_RESOLVE_BY_PK_SQL, RELATION_DELETE_SQL,
-    SEQUENCE_CREATE_SQL, SEQUENCE_DETACH_SQL, SOURCE_ISSUE_LOCK_SQL, SOURCE_ISSUE_SQL,
-    WORKSPACE_SLUG_SQL,
+    StateRow, StoreError, ASSIGNEE_IDS_SQL, COMMENT_IDS_SQL, CYCLE_DELETE_SQL, DESCRIPTION_IDS_SQL,
+    HANDOFF_PARENT_UPDATE_SQL, HANDOFF_RUNS_LOCK_SQL, INERT_RUN_UPDATE_SQL, LABEL_DELETE_SQL,
+    LABEL_IDS_SQL, MEMBER_EXISTS_SQL, MODULE_DELETE_SQL, MOVED_ISSUE_REFETCH_SQL,
+    PROJECT_IDENTIFIER_SQL, PROJECT_RESOLVE_BY_IDENTIFIER_SQL, PROJECT_RESOLVE_BY_PK_SQL,
+    SOURCE_ISSUE_LOCK_SQL, SOURCE_ISSUE_SQL, WORKSPACE_SLUG_SQL,
 };
 use crate::dispatch::tools::{
     CREATE_ADVISORY_LOCK_SQL, CREATE_SAVE_DEFAULT_STATE_SQL, CREATE_SAVE_FALLBACK_STATE_SQL,
@@ -47,6 +44,64 @@ use super::issues::{
 };
 use super::txn::{TxnConn, WriteTxn};
 use super::{issues_move_creation, DomainError, WriteCtx};
+
+// ---------------------------------------------------------------------------
+// Move write SQL (moved verbatim from `app_issues::issue_move`,
+// PIDASHCONV-1630): covered-table statements live in domain/ per
+// design D7. The old paths stay as aliases (sdk + pinned overlay).
+// ---------------------------------------------------------------------------
+
+/// Issue save (`:223-235`): exactly the `update_fields`, in list order.
+/// `$1` project, `$2` workspace, `$3` sequence, `$4` state, `$5`
+/// assigned pod (NULL when no handoff and no default), `$6`-`$8` NULL
+/// parent/estimate/type, `$9` updated stamp, `$10` id.
+pub(crate) const ISSUE_MOVE_UPDATE_SQL: &str = "UPDATE \"issues\" SET \"project_id\" = $1, \"workspace_id\" = $2, \"sequence_id\" = $3, \"state_id\" = $4, \"assigned_pod_id\" = $5, \"parent_id\" = $6, \"estimate_point_id\" = $7, \"type_id\" = $8, \"updated_at\" = $9 WHERE \"issues\".\"id\" = $10";
+
+/// Issue save with the actor stamped (`stamp_updated_by`; Django has no
+/// equivalent — `:223-235` never stamps `updated_by_id`): the same
+/// `update_fields` order plus `\"updated_by_id\" = $10`, `$11` the id.
+pub(crate) const ISSUE_MOVE_UPDATE_STAMP_SQL: &str = "UPDATE \"issues\" SET \"project_id\" = $1, \"workspace_id\" = $2, \"sequence_id\" = $3, \"state_id\" = $4, \"assigned_pod_id\" = $5, \"parent_id\" = $6, \"estimate_point_id\" = $7, \"type_id\" = $8, \"updated_at\" = $9, \"updated_by_id\" = $10 WHERE \"issues\".\"id\" = $11";
+
+/// Old sequence rows detached (`:310`): `issue=NULL` where the project
+/// is not the target. `$1` issue id, `$2` target project id.
+pub const SEQUENCE_DETACH_SQL: &str = "UPDATE \"issue_sequences\" SET \"issue_id\" = NULL WHERE (\"issue_sequences\".\"deleted_at\" IS NULL AND \"issue_sequences\".\"issue_id\" = $1 AND NOT (\"issue_sequences\".\"project_id\" = $2))";
+
+/// Target sequence row (`:311`): full create; `workspace_id` resolves
+/// from the already-fetched target project row (Python pays a lazy
+/// `project.workspace` fetch at `save()` — same value, no extra query
+/// here). `$1` id, `$2`/`$3` created/updated, `$4` created_by (the move
+/// actor), `$5` issue, `$6` sequence, `$7` project, `$8` workspace.
+pub const SEQUENCE_CREATE_SQL: &str = "INSERT INTO \"issue_sequences\" (\"id\", \"created_at\", \"updated_at\", \"created_by_id\", \"updated_by_id\", \"deleted_at\", \"project_id\", \"workspace_id\", \"issue_id\", \"sequence\", \"deleted\") VALUES ($1, $2, $3, $4, NULL, NULL, $7, $8, $5, $6, FALSE)";
+
+/// Assignee prune (`:313-319`, soft): drop rows whose assignee is not an
+/// active `role >= MEMBER` member of the TARGET (nested subquery,
+/// verbatim). `$1` deleted stamp, `$2` issue, `$3` target project.
+pub const ASSIGNEE_PRUNE_SQL: &str = "UPDATE \"issue_assignees\" SET \"deleted_at\" = $1 WHERE (\"issue_assignees\".\"deleted_at\" IS NULL AND \"issue_assignees\".\"issue_id\" = $2 AND NOT (\"issue_assignees\".\"assignee_id\" IN (SELECT \"project_members\".\"member_id\" FROM \"project_members\" WHERE (\"project_members\".\"deleted_at\" IS NULL AND \"project_members\".\"project_id\" = $3 AND \"project_members\".\"member_id\" IN (SELECT \"issue_assignees\".\"assignee_id\" FROM \"issue_assignees\" WHERE (\"issue_assignees\".\"deleted_at\" IS NULL AND \"issue_assignees\".\"issue_id\" = $2)) AND \"project_members\".\"role\" >= 15 AND \"project_members\".\"is_active\"))))";
+
+/// Surviving assignees re-pointed (`:320-323`). `$1` target project,
+/// `$2` target workspace, `$3` issue.
+pub const ASSIGNEE_REPOINT_SQL: &str = "UPDATE \"issue_assignees\" SET \"project_id\" = $1, \"workspace_id\" = $2 WHERE (\"issue_assignees\".\"deleted_at\" IS NULL AND \"issue_assignees\".\"issue_id\" = $3)";
+
+/// Relation wipe (`:328`, soft): both directions. `$1` deleted stamp, `$2` issue.
+pub const RELATION_DELETE_SQL: &str = "UPDATE \"issue_relations\" SET \"deleted_at\" = $1 WHERE (\"issue_relations\".\"deleted_at\" IS NULL AND (\"issue_relations\".\"issue_id\" = $2 OR \"issue_relations\".\"related_issue_id\" = $2))";
+
+/// Children of other projects detached (`:329`): `Issue.objects`
+/// (plain soft-delete scope — triage/draft children detach too). `$1`
+/// issue, `$2` target project.
+pub const CHILDREN_DETACH_SQL: &str = "UPDATE \"issues\" SET \"parent_id\" = NULL WHERE (\"issues\".\"deleted_at\" IS NULL AND \"issues\".\"parent_id\" = $1 AND NOT (\"issues\".\"project_id\" = $2))";
+
+/// The [`RepointTarget::IssueComment`] repoint (`:348`): `$1` target
+/// project, `$2` target workspace, `$3` issue id. Moved verbatim from
+/// [`repoint_sql`](crate::app_issues::issue_move::repoint_sql)
+/// (PIDASHCONV-1630).
+pub(crate) const REPOINT_ISSUE_COMMENT_SQL: &str = "UPDATE \"issue_comments\" SET \"project_id\" = $1, \"workspace_id\" = $2 WHERE (\"issue_comments\".\"deleted_at\" IS NULL AND \"issue_comments\".\"issue_id\" = $3)";
+
+/// The [`RepointTarget::Description`] repoint (`:350`): `$1` target
+/// project, `$2` target workspace, `$4` the description id list.
+/// Moved verbatim from
+/// [`repoint_sql`](crate::app_issues::issue_move::repoint_sql)
+/// (PIDASHCONV-1630).
+pub(crate) const REPOINT_DESCRIPTION_SQL: &str = "UPDATE \"descriptions\" SET \"project_id\" = $1, \"workspace_id\" = $2 WHERE (\"descriptions\".\"deleted_at\" IS NULL AND \"descriptions\".\"id\" = ANY($4))";
 
 /// The handoff-creation seam's post-commit outboxes, minus the admission
 /// cache: dispatch ids (collected by `dispatch_after_commit`), deferred

@@ -1161,16 +1161,11 @@ pub fn m2m_insert_sql(
     sql
 }
 
-/// `IssueAssignee.objects.filter(issue).delete()` (`:475`) and the label
-/// twin (`:496`): a SOFT delete — `SoftDeletionQuerySet.delete` defaults to
-/// `soft=True` (`db/mixins.py:48-52`), i.e. `UPDATE … SET deleted_at`,
-/// scoped by the default manager (`deleted_at IS NULL`). `updated_at` is
-/// NOT touched (queryset `update()` skips `auto_now`). Params: `$1`
-/// deletion timestamp, `$2` issue id (uuid).
-pub const ASSIGNEE_CLEAR_SQL: &str =
-    "UPDATE issue_assignees SET deleted_at = $1 WHERE issue_id = $2 AND deleted_at IS NULL";
-/// Label twin of [`ASSIGNEE_CLEAR_SQL`] (`:496`). Params: `$1` deletion
-/// timestamp, `$2` issue id (uuid).
+/// Label twin of the assignee clear
+/// ([`ASSIGNEE_CLEAR_SQL`](crate::domain::issues::ASSIGNEE_CLEAR_SQL),
+/// `:496`): the assignee statement moved to domain/ (PIDASHCONV-1630)
+/// — `issue_assignees` is a covered table, `issue_labels` is not.
+/// Params: `$1` deletion timestamp, `$2` issue id (uuid).
 pub const LABEL_CLEAR_SQL: &str =
     "UPDATE issue_labels SET deleted_at = $1 WHERE issue_id = $2 AND deleted_at IS NULL";
 
@@ -1212,7 +1207,9 @@ pub fn create_default_assignee_fallback(
 pub const CREATE_CONTRACT: &str = "context keys, issue row (models), assignee batches-or-fallback, label batches; one swallowed IntegrityError scope per bulk_create";
 
 /// `update()` (`:464-518`) execution contract: (1) when `assignee_ids` is
-/// present (even `[]`): [`ASSIGNEE_CLEAR_SQL`], then [`m2m_batches`] inserts
+/// present (even `[]`):
+/// [`ASSIGNEE_CLEAR_SQL`](crate::domain::issues::ASSIGNEE_CLEAR_SQL),
+/// then [`m2m_batches`] inserts
 /// via [`m2m_insert_sql`] WITH `ignore_conflicts`, `IntegrityError`
 /// swallowed; absent key leaves rows untouched; (2) same for `label_ids`
 /// with [`LABEL_CLEAR_SQL`]; (3) `instance.updated_at = now()` runs BEFORE
@@ -1223,6 +1220,7 @@ pub const UPDATE_CONTRACT: &str = "per present m2m key: soft-clear then ignore-c
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::issues::ASSIGNEE_CLEAR_SQL;
     use serde_json::Value;
     use std::cell::Cell;
     use std::rc::Rc;

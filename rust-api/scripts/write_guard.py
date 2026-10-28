@@ -190,7 +190,7 @@ def lex(src):
     return "".join(out), spans
 
 
-def mask_cfg_test(code):
+def mask_cfg_test(code, spans=()):
     """Blank #[cfg(test)] items; return (masked_code, file_module_names).
 
     file_module_names holds `mod foo;` names declared under cfg(test), whose
@@ -198,6 +198,7 @@ def mask_cfg_test(code):
     """
     out = list(code)
     file_mods = []
+    span_list = sorted(spans)
 
     def blank(a, b):
         for k in range(a, b):
@@ -217,7 +218,13 @@ def mask_cfg_test(code):
         depth = 0
         in_str = None  # comments are already blanked; strings are intact
         k = j
+        si = 0
         while k < len(code):
+            while si < len(span_list) and span_list[si][1] <= k:
+                si += 1
+            if si < len(span_list) and span_list[si][0] <= k < span_list[si][1]:
+                k = span_list[si][1]
+                continue
             ch = code[k]
             if in_str == "\"":
                 if ch == "\\":
@@ -229,6 +236,18 @@ def mask_cfg_test(code):
                 continue
             if ch == "\"":
                 in_str = "\""
+                k += 1
+                continue
+            if ch == "'":
+                # Char literal ('x', '\n', '\u{...}', '\"'); else a lifetime.
+                nxt = code[k + 1] if k + 1 < len(code) else ""
+                if nxt == "\\":
+                    e = code.find("'", k + 2)
+                    k = (e + 1) if e != -1 else len(code)
+                    continue
+                if k + 2 < len(code) and code[k + 2] == "'":
+                    k += 3
+                    continue
                 k += 1
                 continue
             if ch == "{":
@@ -441,7 +460,7 @@ def collect_hits(root):
             print("warning: skipping %s (%s)" % (rel, exc), file=sys.stderr)
             continue
         code, spans = lex(src)
-        masked, file_mods = mask_cfg_test(code)
+        masked, file_mods = mask_cfg_test(code, spans)
         for mod in file_mods:
             skip_files.add(path.parent / (mod + ".rs"))
             skip_files.add(path.parent / mod / "mod.rs")

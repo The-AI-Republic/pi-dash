@@ -133,20 +133,9 @@ pub fn state_default_flip_requested(default: Option<bool>) -> bool {
     default == Some(true)
 }
 
-/// The default-flip side effect (`state.py:21-22`):
-/// `State.objects.filter(project_id=...).update(default=False)`.
-///
-/// The queryset starts from `StateManager.get_queryset`, which is the
-/// soft-delete filter (`deleted_at IS NULL`, `db/mixins.py:49-51`) plus
-/// the triage exclusion (`db/models/state.py:82-84`) — so triage and
-/// soft-deleted siblings keep their `default`. Django quotes the
-/// identifiers (`"default"` is reserved); `$1` is the project id.
-pub const STATE_DEFAULT_FLIP_SQL: &str = concat!(
-    "UPDATE \"states\" SET \"default\" = false ",
-    "WHERE \"project_id\" = $1 ",
-    "AND \"deleted_at\" IS NULL ",
-    "AND NOT (\"group\" = 'triage')"
-);
+// NOTE: the default-flip write moved to
+// `domain::projects::states::clear_defaults` (PIDASHCONV-1630) —
+// `states` is a covered table, so the statement lives in domain/.
 
 /// Mirrors `data.get("group", None) == StateGroup.TRIAGE.value`
 /// (`state.py:24-25`): exact match only.
@@ -158,8 +147,9 @@ pub fn state_group_rejected(group: Option<&str>) -> bool {
 ///
 /// Returns `(default_flip_armed, validation_error_body)`. The flip flag
 /// is computed first because the Python runs the UPDATE before the
-/// triage check (BUG-4a): callers must execute
-/// [`STATE_DEFAULT_FLIP_SQL`] even when the returned body is `Some`.
+/// triage check (BUG-4a): callers must execute the flip
+/// ([`clear_defaults`](crate::domain::projects::states::clear_defaults))
+/// even when the returned body is `Some`.
 pub fn state_validate(
     default: Option<bool>,
     group: Option<&str>,
@@ -435,6 +425,7 @@ pub fn estimate_point_to_representation<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::projects::states::STATE_DEFAULT_FLIP_SQL;
 
     fn body_string(v: &serde_json::Value) -> String {
         serde_json::to_string(v).expect("error body serializes")

@@ -94,6 +94,7 @@ use pidash_auth::scope::TenantScope;
 use pidash_auth::token as token_kernel;
 use pidash_db::v1_projects::models::state as state_model;
 use pidash_db::v1_projects::queries_stateest as state_q;
+use pidash_services::domain::projects as domain_projects;
 use pidash_services::v1_projects::ser_workflow as ser;
 use pidash_types::{ProjectId, WorkspaceId};
 
@@ -2004,11 +2005,9 @@ fn micros_now() -> chrono::DateTime<chrono::Utc> {
 
 /// The default-flip side effect (`serializers/state.py:21-22`): clear `default`
 /// on every sibling in the project (soft-deleted and triage rows keep theirs,
-/// via the default-manager scope in [`ser::STATE_DEFAULT_FLIP_SQL`]).
+/// via the default-manager scope in the domain twin).
 async fn run_default_flip(pool: &sqlx::PgPool, project_id: Uuid) -> Result<(), HandlerError> {
-    sqlx::query(ser::STATE_DEFAULT_FLIP_SQL)
-        .bind(project_id)
-        .execute(pool)
+    domain_projects::states::clear_defaults(pool, project_id)
         .await
         .map_err(|_| HandlerError::ServerError)?;
     Ok(())

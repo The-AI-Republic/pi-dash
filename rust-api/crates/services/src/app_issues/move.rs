@@ -118,6 +118,7 @@ use super::pr_links::TaskEnqueue;
 use super::serializers_detail::serialize_drf_datetime;
 use crate::app_project::tasks::ISSUE_ACTIVITY_TASK;
 use crate::dispatch::tools::{advisory_lock_key, saved_sequence_id};
+use crate::domain::issues_move::{REPOINT_DESCRIPTION_SQL, REPOINT_ISSUE_COMMENT_SQL};
 use crate::orchestration::blockers::{summary_list, BlockerRow};
 use crate::runner_sessions::pubsub::{send_to_runner, PubsubStore};
 use crate::v1_projects::tasks::{model_activity_kwargs, MODEL_ACTIVITY_TASK};
@@ -331,16 +332,17 @@ pub const LABEL_IDS_SQL: &str = "SELECT \"issue_labels\".\"label_id\" FROM \"iss
 /// `models.Model`: no soft-delete scope. `$1` issue id.
 pub(crate) const HANDOFF_RUNS_LOCK_SQL: &str = "SELECT \"agent_run\".\"id\", \"agent_run\".\"workspace_id\", \"agent_run\".\"owner_id\", \"agent_run\".\"created_by_id\", \"agent_run\".\"pod_id\", \"agent_run\".\"runner_id\", \"agent_run\".\"pinned_runner_id\", \"agent_run\".\"work_item_id\", \"agent_run\".\"scheduler_binding_id\", \"agent_run\".\"parent_run_id\", \"agent_run\".\"status\", \"agent_run\".\"executor_kind\", \"agent_run\".\"dispatch_attempts\", \"agent_run\".\"cancel_requested_at\", \"agent_run\".\"cancel_reason\", \"agent_run\".\"error_code\", \"agent_run\".\"tool_plan\", \"agent_run\".\"terminal_hooks_applied_at\", \"agent_run\".\"terminal_capacity_released_at\", \"agent_run\".\"prompt\", \"agent_run\".\"trigger\", \"agent_run\".\"prompt_manifest\", \"agent_run\".\"phase_kind\", \"agent_run\".\"run_config\", \"agent_run\".\"required_capabilities\", \"agent_run\".\"thread_id\", \"agent_run\".\"agent_metadata\", \"agent_run\".\"lease_expires_at\", \"agent_run\".\"done_payload\", \"agent_run\".\"error\", \"agent_run\".\"refusal_category\", \"agent_run\".\"llm_model\", \"agent_run\".\"usage\", \"agent_run\".\"input_tokens\", \"agent_run\".\"output_tokens\", \"agent_run\".\"total_tokens\", \"agent_run\".\"created_at\", \"agent_run\".\"assigned_at\", \"agent_run\".\"queue_position\", \"agent_run\".\"started_at\", \"agent_run\".\"ended_at\" FROM \"agent_run\" WHERE (\"agent_run\".\"work_item_id\" = $1 AND \"agent_run\".\"status\" IN ('queued', 'assigned', 'waiting_for_worktree', 'running', 'cancel_requested', 'awaiting_approval', 'awaiting_reauth', 'paused_awaiting_input')) ORDER BY \"agent_run\".\"created_at\" DESC FOR UPDATE";
 
-/// Issue save (`:223-235`): exactly the `update_fields`, in list order.
-/// `$1` project, `$2` workspace, `$3` sequence, `$4` state, `$5`
-/// assigned pod (NULL when no handoff and no default), `$6`-`$8` NULL
-/// parent/estimate/type, `$9` updated stamp, `$10` id.
-pub(crate) const ISSUE_MOVE_UPDATE_SQL: &str = "UPDATE \"issues\" SET \"project_id\" = $1, \"workspace_id\" = $2, \"sequence_id\" = $3, \"state_id\" = $4, \"assigned_pod_id\" = $5, \"parent_id\" = $6, \"estimate_point_id\" = $7, \"type_id\" = $8, \"updated_at\" = $9 WHERE \"issues\".\"id\" = $10";
+// ---------------------------------------------------------------------------
+// Covered-table SQL (moved to [`crate::domain::issues_move`],
+// PIDASHCONV-1630, per design D7): the literals live in domain/; these
+// aliases keep the pinned overlay/sdk paths (`app_issues::*`) resolving.
+// ---------------------------------------------------------------------------
 
-/// Issue save with the actor stamped (`stamp_updated_by`; Django has no
-/// equivalent — `:223-235` never stamps `updated_by_id`): the same
-/// `update_fields` order plus `\"updated_by_id\" = $10`, `$11` the id.
-pub(crate) const ISSUE_MOVE_UPDATE_STAMP_SQL: &str = "UPDATE \"issues\" SET \"project_id\" = $1, \"workspace_id\" = $2, \"sequence_id\" = $3, \"state_id\" = $4, \"assigned_pod_id\" = $5, \"parent_id\" = $6, \"estimate_point_id\" = $7, \"type_id\" = $8, \"updated_at\" = $9, \"updated_by_id\" = $10 WHERE \"issues\".\"id\" = $11";
+/// Aliases of the domain-homed move write SQL (moved PIDASHCONV-1630).
+pub use crate::domain::issues_move::{
+    ASSIGNEE_PRUNE_SQL, ASSIGNEE_REPOINT_SQL, CHILDREN_DETACH_SQL, RELATION_DELETE_SQL,
+    SEQUENCE_CREATE_SQL, SEQUENCE_DETACH_SQL,
+};
 
 /// Inert-run close (`:282-284`): `$1` run id, `$2` end stamp.
 pub(crate) const INERT_RUN_UPDATE_SQL: &str = "UPDATE \"agent_run\" SET \"status\" = 'cancelled', \"ended_at\" = $2, \"queue_position\" = NULL WHERE \"agent_run\".\"id\" = $1";
@@ -348,26 +350,6 @@ pub(crate) const INERT_RUN_UPDATE_SQL: &str = "UPDATE \"agent_run\" SET \"status
 /// Executing-parent barrier (`:302`): `$1` run id, `$2` run_config with
 /// the handoff marker merged.
 pub(crate) const HANDOFF_PARENT_UPDATE_SQL: &str = "UPDATE \"agent_run\" SET \"status\" = 'cancel_requested', \"run_config\" = $2, \"queue_position\" = NULL WHERE \"agent_run\".\"id\" = $1";
-
-/// Old sequence rows detached (`:310`): `issue=NULL` where the project
-/// is not the target. `$1` issue id, `$2` target project id.
-pub const SEQUENCE_DETACH_SQL: &str = "UPDATE \"issue_sequences\" SET \"issue_id\" = NULL WHERE (\"issue_sequences\".\"deleted_at\" IS NULL AND \"issue_sequences\".\"issue_id\" = $1 AND NOT (\"issue_sequences\".\"project_id\" = $2))";
-
-/// Target sequence row (`:311`): full create; `workspace_id` resolves
-/// from the already-fetched target project row (Python pays a lazy
-/// `project.workspace` fetch at `save()` — same value, no extra query
-/// here). `$1` id, `$2`/`$3` created/updated, `$4` created_by (the move
-/// actor), `$5` issue, `$6` sequence, `$7` project, `$8` workspace.
-pub const SEQUENCE_CREATE_SQL: &str = "INSERT INTO \"issue_sequences\" (\"id\", \"created_at\", \"updated_at\", \"created_by_id\", \"updated_by_id\", \"deleted_at\", \"project_id\", \"workspace_id\", \"issue_id\", \"sequence\", \"deleted\") VALUES ($1, $2, $3, $4, NULL, NULL, $7, $8, $5, $6, FALSE)";
-
-/// Assignee prune (`:313-319`, soft): drop rows whose assignee is not an
-/// active `role >= MEMBER` member of the TARGET (nested subquery,
-/// verbatim). `$1` deleted stamp, `$2` issue, `$3` target project.
-pub const ASSIGNEE_PRUNE_SQL: &str = "UPDATE \"issue_assignees\" SET \"deleted_at\" = $1 WHERE (\"issue_assignees\".\"deleted_at\" IS NULL AND \"issue_assignees\".\"issue_id\" = $2 AND NOT (\"issue_assignees\".\"assignee_id\" IN (SELECT \"project_members\".\"member_id\" FROM \"project_members\" WHERE (\"project_members\".\"deleted_at\" IS NULL AND \"project_members\".\"project_id\" = $3 AND \"project_members\".\"member_id\" IN (SELECT \"issue_assignees\".\"assignee_id\" FROM \"issue_assignees\" WHERE (\"issue_assignees\".\"deleted_at\" IS NULL AND \"issue_assignees\".\"issue_id\" = $2)) AND \"project_members\".\"role\" >= 15 AND \"project_members\".\"is_active\"))))";
-
-/// Surviving assignees re-pointed (`:320-323`). `$1` target project,
-/// `$2` target workspace, `$3` issue.
-pub const ASSIGNEE_REPOINT_SQL: &str = "UPDATE \"issue_assignees\" SET \"project_id\" = $1, \"workspace_id\" = $2 WHERE (\"issue_assignees\".\"deleted_at\" IS NULL AND \"issue_assignees\".\"issue_id\" = $3)";
 
 /// Label wipe (`:325`, soft). `$1` deleted stamp, `$2` issue.
 pub const LABEL_DELETE_SQL: &str = "UPDATE \"issue_labels\" SET \"deleted_at\" = $1 WHERE (\"issue_labels\".\"deleted_at\" IS NULL AND \"issue_labels\".\"issue_id\" = $2)";
@@ -377,14 +359,6 @@ pub const CYCLE_DELETE_SQL: &str = "UPDATE \"cycle_issues\" SET \"deleted_at\" =
 
 /// Module wipe (`:327`, soft). `$1` deleted stamp, `$2` issue.
 pub const MODULE_DELETE_SQL: &str = "UPDATE \"module_issues\" SET \"deleted_at\" = $1 WHERE (\"module_issues\".\"deleted_at\" IS NULL AND \"module_issues\".\"issue_id\" = $2)";
-
-/// Relation wipe (`:328`, soft): both directions. `$1` deleted stamp, `$2` issue.
-pub const RELATION_DELETE_SQL: &str = "UPDATE \"issue_relations\" SET \"deleted_at\" = $1 WHERE (\"issue_relations\".\"deleted_at\" IS NULL AND (\"issue_relations\".\"issue_id\" = $2 OR \"issue_relations\".\"related_issue_id\" = $2))";
-
-/// Children of other projects detached (`:329`): `Issue.objects`
-/// (plain soft-delete scope — triage/draft children detach too). `$1`
-/// issue, `$2` target project.
-pub const CHILDREN_DETACH_SQL: &str = "UPDATE \"issues\" SET \"parent_id\" = NULL WHERE (\"issues\".\"deleted_at\" IS NULL AND \"issues\".\"parent_id\" = $1 AND NOT (\"issues\".\"project_id\" = $2))";
 
 /// Moved comment ids (`:331`): `-created_at` order (list order feeds the
 /// `IN` lists below; order is unobservable there). `$1` issue.
@@ -452,9 +426,9 @@ pub fn repoint_sql(target: RepointTarget) -> &'static str {
         RepointTarget::IssueVersion => "UPDATE \"issue_versions\" SET \"project_id\" = $1, \"workspace_id\" = $2 WHERE (\"issue_versions\".\"deleted_at\" IS NULL AND \"issue_versions\".\"issue_id\" = $3)",
         RepointTarget::IssueDescriptionVersion => "UPDATE \"issue_description_versions\" SET \"project_id\" = $1, \"workspace_id\" = $2 WHERE (\"issue_description_versions\".\"deleted_at\" IS NULL AND \"issue_description_versions\".\"issue_id\" = $3)",
         RepointTarget::IssueActivity => "UPDATE \"issue_activities\" SET \"project_id\" = $1, \"workspace_id\" = $2 WHERE (\"issue_activities\".\"deleted_at\" IS NULL AND (\"issue_activities\".\"issue_id\" = $3 OR \"issue_activities\".\"issue_comment_id\" = ANY($4)))",
-        RepointTarget::IssueComment => "UPDATE \"issue_comments\" SET \"project_id\" = $1, \"workspace_id\" = $2 WHERE (\"issue_comments\".\"deleted_at\" IS NULL AND \"issue_comments\".\"issue_id\" = $3)",
+        RepointTarget::IssueComment => REPOINT_ISSUE_COMMENT_SQL,
         RepointTarget::CommentReaction => "UPDATE \"comment_reactions\" SET \"project_id\" = $1, \"workspace_id\" = $2 WHERE (\"comment_reactions\".\"deleted_at\" IS NULL AND \"comment_reactions\".\"comment_id\" = ANY($4))",
-        RepointTarget::Description => "UPDATE \"descriptions\" SET \"project_id\" = $1, \"workspace_id\" = $2 WHERE (\"descriptions\".\"deleted_at\" IS NULL AND \"descriptions\".\"id\" = ANY($4))",
+        RepointTarget::Description => REPOINT_DESCRIPTION_SQL,
         RepointTarget::FileAsset => "UPDATE \"file_assets\" SET \"project_id\" = $1, \"workspace_id\" = $2 WHERE (\"file_assets\".\"deleted_at\" IS NULL AND (\"file_assets\".\"issue_id\" = $3 OR \"file_assets\".\"comment_id\" = ANY($4)))",
     }
 }
@@ -552,8 +526,11 @@ pub struct MovedIssueFields {
     pub state_id: Uuid,
     pub assigned_pod_id: Option<Uuid>,
     /// `Some` exactly under `stamp_updated_by`: the actor the store
-    /// writes to `updated_by_id` ([`ISSUE_MOVE_UPDATE_STAMP_SQL`]).
-    /// `None` runs [`ISSUE_MOVE_UPDATE_SQL`] verbatim.
+    /// writes to `updated_by_id`
+    /// ([`ISSUE_MOVE_UPDATE_STAMP_SQL`](crate::domain::issues_move::ISSUE_MOVE_UPDATE_STAMP_SQL)).
+    /// `None` runs
+    /// [`ISSUE_MOVE_UPDATE_SQL`](crate::domain::issues_move::ISSUE_MOVE_UPDATE_SQL)
+    /// verbatim.
     pub updated_by_id: Option<Uuid>,
 }
 
@@ -691,8 +668,11 @@ pub trait MoveStore {
         target_project_id: Uuid,
     ) -> Result<Option<PodRow>, StoreError>;
 
-    /// Issue save ([`ISSUE_MOVE_UPDATE_SQL`], `:223-235`; the
-    /// [`ISSUE_MOVE_UPDATE_STAMP_SQL`] text when
+    /// Issue save
+    /// ([`ISSUE_MOVE_UPDATE_SQL`](crate::domain::issues_move::ISSUE_MOVE_UPDATE_SQL),
+    /// `:223-235`; the
+    /// [`ISSUE_MOVE_UPDATE_STAMP_SQL`](crate::domain::issues_move::ISSUE_MOVE_UPDATE_STAMP_SQL)
+    /// text when
     /// `fields.updated_by_id` is `Some`).
     async fn save_moved_issue(
         &self,
@@ -1685,6 +1665,7 @@ pub async fn move_work_item_to_project<S: MoveStore>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::issues_move::ISSUE_MOVE_UPDATE_SQL;
     use pidash_db::runner_sessions::RunnerSession;
     use std::cell::RefCell;
 

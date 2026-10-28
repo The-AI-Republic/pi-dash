@@ -216,6 +216,69 @@ pub async fn create(pool: &sqlx::PgPool, project: &NewProject<'_>) -> Result<Uui
     Ok(id)
 }
 
+pub(crate) const SAVE_PROJECT_COVER_SQL: &str =
+    "UPDATE \"projects\" SET \"cover_image_asset_id\" = $2, \"updated_at\" = $3, \"updated_by_id\" = $4 WHERE \"projects\".\"id\" = $1";
+
+/// `save_project_cover` (`v2.py:631-634`): stamp
+/// `cover_image_asset_id` on the re-fetched project; the LAST row
+/// wins (the caller loops). The write is a FULL `project.save()`
+/// (`db/models/base.py:24-44`), so it also stamps `updated_by` (CRUM
+/// request user) and `updated_at`. Moved verbatim from
+/// `app_assets::queries_v2_project` (PIDASHCONV-1630). The caller owns
+/// the clock (`Utc::now()` at full precision — Postgres rounds to
+/// micros on store, as today).
+pub async fn save_project_cover<'e, E>(
+    ex: E,
+    project_id: Uuid,
+    asset_id: Uuid,
+    updated_at: DateTime<Utc>,
+    updated_by: Uuid,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(SAVE_PROJECT_COVER_SQL)
+        .bind(project_id)
+        .bind(asset_id)
+        .bind(updated_at)
+        .bind(updated_by)
+        .execute(ex)
+        .await?;
+    Ok(())
+}
+
+/// Project `repo_url`/`base_branch` write (`services.py:341-349`).
+///
+/// Returns the `UPDATE` statement, or `None` when `update_fields` is
+/// empty (Django skips the save). Parameters: `$1` project id, then
+/// one placeholder per `Some` field in order (`repo_url`,
+/// `base_branch`), then `updated_at` last. Moved verbatim from
+/// `integrations::repositories` (PIDASHCONV-1630): `projects` is a
+/// covered table, so the builder lives in domain/.
+pub fn project_repo_update_sql(
+    repo_url: Option<&str>,
+    base_branch: Option<&str>,
+) -> Option<String> {
+    let mut sets = Vec::new();
+    let mut placeholder = 2u8;
+    if repo_url.is_some() {
+        sets.push(format!("repo_url = ${placeholder}"));
+        placeholder += 1;
+    }
+    if base_branch.is_some() {
+        sets.push(format!("base_branch = ${placeholder}"));
+        placeholder += 1;
+    }
+    if sets.is_empty() {
+        return None;
+    }
+    sets.push(format!("updated_at = ${placeholder}"));
+    Some(format!(
+        "UPDATE projects SET {} WHERE id = $1",
+        sets.join(", ")
+    ))
+}
+
 /// The v1 bind arm: positional mapping of [`NewProject`] onto the
 /// literal-heavy v1 text. The v1 caller always passes
 /// `network == 2`, no descriptions, the agent defaults, ticking on,
@@ -2025,6 +2088,37 @@ pub mod states {
             .execute(ex)
             .await?;
         Ok(id)
+    }
+
+    /// The default-flip side effect (`state.py:21-22`):
+    /// `State.objects.filter(project_id=...).update(default=False)`.
+    ///
+    /// The queryset starts from `StateManager.get_queryset`, which is the
+    /// soft-delete filter (`deleted_at IS NULL`, `db/mixins.py:49-51`) plus
+    /// the triage exclusion (`db/models/state.py:82-84`) — so triage and
+    /// soft-deleted siblings keep their `default`. Django quotes the
+    /// identifiers (`"default"` is reserved); `$1` is the project id.
+    /// Moved verbatim from `v1_projects::ser_workflow`
+    /// (PIDASHCONV-1630).
+    pub(crate) const STATE_DEFAULT_FLIP_SQL: &str = concat!(
+        "UPDATE \"states\" SET \"default\" = false ",
+        "WHERE \"project_id\" = $1 ",
+        "AND \"deleted_at\" IS NULL ",
+        "AND NOT (\"group\" = 'triage')"
+    );
+
+    /// Clear `default` on every sibling state in the project
+    /// (soft-deleted and triage rows keep theirs, via the
+    /// default-manager scope in [`STATE_DEFAULT_FLIP_SQL`]).
+    pub async fn clear_defaults<'e, E>(ex: E, project_id: Uuid) -> Result<(), sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        sqlx::query(STATE_DEFAULT_FLIP_SQL)
+            .bind(project_id)
+            .execute(ex)
+            .await?;
+        Ok(())
     }
 
     /// One `DEFAULT_STATES` row: `description`/`slug` `\"\"`,

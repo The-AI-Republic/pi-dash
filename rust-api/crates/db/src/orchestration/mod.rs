@@ -36,4 +36,4 @@ pub use querysets::{
 pub use runs::{
     active_run_for, ingest_into_run, is_terminal_status, latest_prior_run, plan_ingest,
 };
-pub use workpad::{fetch_workpad, set_workpad};
+pub use workpad::fetch_workpad;

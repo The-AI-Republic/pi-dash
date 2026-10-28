@@ -330,11 +330,6 @@ pub const COMMENT_BATCH_SQL: &str = "SELECT id, comment_json, comment_html, \
     FROM issue_comments WHERE deleted_at IS NULL AND description_id IS NULL \
     ORDER BY created_at ASC LIMIT $1";
 
-/// `bulk_update(..., ["description_id"])`
-/// (`copy_issue_comment_to_description.py:51`): one column, no
-/// `updated_at` bump (verified against live Django).
-pub const LINK_COMMENT_SQL: &str = "UPDATE issue_comments SET description_id = $1 WHERE id = $2";
-
 /// `Project.objects.get(identifier__iexact=..., workspace__slug=...)`
 /// (`fix_duplicate_sequences.py:50`): no `LIMIT` — `get()` needs the full
 /// count for the 0/1/N decision, and no `deleted_at` filter on the joined
@@ -365,49 +360,19 @@ pub const PROJECT_SEQUENCES_SQL: &str = "SELECT id, issue_id, sequence \
     FROM issue_sequences WHERE deleted_at IS NULL AND project_id = $1 \
     ORDER BY created_at DESC";
 
-/// `bulk_update(bulk_issues, ["sequence_id"])`
-/// (`fix_duplicate_sequences.py:90`): one column, no `updated_at` bump
-/// (verified against live Django).
-pub const UPDATE_ISSUE_SEQUENCE_ID_SQL: &str = "UPDATE issues SET sequence_id = $1 WHERE id = $2";
-
-/// `bulk_update(bulk_issue_sequences, ["sequence"])`
-/// (`fix_duplicate_sequences.py:91`): one column, no `updated_at` bump
-/// (verified against live Django).
-pub const UPDATE_SEQUENCE_SQL: &str = "UPDATE issue_sequences SET sequence = $1 WHERE id = $2";
+// NOTE: the repair writes moved to `pidash_services::domain`
+// (PIDASHCONV-1630) — covered tables write only from domain/ per
+// design D7. `LINK_COMMENT_SQL`, `descriptions_insert_sql` and
+// `apply_copy_batch` live in `domain::comments`;
+// `UPDATE_ISSUE_SEQUENCE_ID_SQL`, `UPDATE_SEQUENCE_SQL` and the
+// `FixTx::commit_plan` body (as `domain::issues::apply_fix_plan`) in
+// `domain::issues`. This module keeps reads, plans and pure helpers.
 
 /// `Workspace.all_objects.get(slug=...)`
 /// (`update_deleted_workspace_slug.py:31`): the unfiltered manager, so no
 /// `deleted_at` predicate. `slug` is unique, hence `LIMIT 1`.
 pub const FIND_WORKSPACE_SQL: &str =
     "SELECT id, name, slug, deleted_at FROM workspaces WHERE slug = $1 LIMIT 1";
-
-/// Columns of the copy `INSERT`, in bind order.
-const DESCRIPTION_INSERT_COLUMNS: &str = "(id, created_at, updated_at, \
-    description_json, description_html, description_stripped, project_id, \
-    created_by_id, updated_by_id, workspace_id)";
-
-/// Multi-row `INSERT INTO descriptions ... RETURNING id` for `bulk_create`
-/// (`copy_issue_comment_to_description.py:44`): one statement per batch,
-/// Postgres `$N` placeholders, zip-aligned `RETURNING id` like Django's.
-pub fn descriptions_insert_sql(row_count: usize) -> String {
-    let mut sql = format!("INSERT INTO descriptions {DESCRIPTION_INSERT_COLUMNS} VALUES ");
-    for row in 0..row_count {
-        if row > 0 {
-            sql.push_str(", ");
-        }
-        let base = row * 10;
-        sql.push('(');
-        for col in 0..10 {
-            if col > 0 {
-                sql.push_str(", ");
-            }
-            sql.push_str(&format!("${}", base + col + 1));
-        }
-        sql.push(')');
-    }
-    sql.push_str(" RETURNING id");
-    sql
-}
 
 fn map_comment_row(row: &sqlx::postgres::PgRow) -> Result<CommentRow, sqlx::Error> {
     let comment_json: sqlx::types::Json<serde_json::Value> = row.try_get("comment_json")?;
@@ -444,49 +409,6 @@ pub async fn fetch_comment_batch(
         .map(map_comment_row)
         .collect::<Result<Vec<_>, _>>()
         .map_err(RepairError::Db)
-}
-
-/// One copy batch write (`copy_issue_comment_to_description.py:28-51`):
-/// `bulk_create` then the `description_id` backfill in a single
-/// transaction. Returns the inserted ids, zip-aligned with `descriptions`.
-pub async fn apply_copy_batch(
-    pool: &PgPool,
-    descriptions: &[NewDescription],
-    links: &[(Uuid, Uuid)],
-) -> Result<Vec<Uuid>, RepairError> {
-    if descriptions.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut tx = pool.begin().await?;
-    let insert_sql = descriptions_insert_sql(descriptions.len());
-    let mut query = sqlx::query(&insert_sql);
-    for desc in descriptions {
-        query = query
-            .bind(desc.id)
-            .bind(desc.created_at)
-            .bind(desc.updated_at)
-            .bind(sqlx::types::Json(&desc.description_json))
-            .bind(&desc.description_html)
-            .bind(&desc.description_stripped)
-            .bind(desc.project_id)
-            .bind(desc.created_by_id)
-            .bind(desc.updated_by_id)
-            .bind(desc.workspace_id);
-    }
-    let inserted = query.fetch_all(&mut *tx).await?;
-    let mut ids = Vec::with_capacity(inserted.len());
-    for row in &inserted {
-        ids.push(row.try_get::<Uuid, _>("id")?);
-    }
-    for (comment_id, description_id) in links {
-        sqlx::query(LINK_COMMENT_SQL)
-            .bind(description_id)
-            .bind(comment_id)
-            .execute(&mut *tx)
-            .await?;
-    }
-    tx.commit().await?;
-    Ok(ids)
 }
 
 /// Project candidates for `get()` (`fix_duplicate_sequences.py:50`).
@@ -554,27 +476,17 @@ impl FixTx<'_> {
         &self.sequences
     }
 
-    /// The two `bulk_update`s (`:90-91`) plus commit. Each pair is
-    /// `(row_id, new_value)`.
-    pub async fn commit_plan(
-        mut self,
-        issue_updates: &[(Uuid, i64)],
-        sequence_updates: &[(Uuid, i64)],
-    ) -> Result<(), RepairError> {
-        for (issue_id, new_sequence) in issue_updates {
-            sqlx::query(UPDATE_ISSUE_SEQUENCE_ID_SQL)
-                .bind(new_sequence)
-                .bind(issue_id)
-                .execute(&mut *self.tx)
-                .await?;
-        }
-        for (row_id, new_sequence) in sequence_updates {
-            sqlx::query(UPDATE_SEQUENCE_SQL)
-                .bind(new_sequence)
-                .bind(row_id)
-                .execute(&mut *self.tx)
-                .await?;
-        }
+    /// The transaction's connection for the domain-owned write
+    /// (`pidash_services::domain::issues::apply_fix_plan`, the two
+    /// `bulk_update`s `:90-91`); the driver commits afterwards. Split
+    /// from `commit_plan` (PIDASHCONV-1630): covered-table SQL lives in
+    /// domain/, and this crate cannot depend on it.
+    pub fn executor(&mut self) -> &mut sqlx::PgConnection {
+        &mut self.tx
+    }
+
+    /// Commit after [`FixTx::executor`] writes.
+    pub async fn commit(self) -> Result<(), RepairError> {
         self.tx.commit().await?;
         Ok(())
     }
@@ -799,32 +711,16 @@ mod tests {
     }
 
     #[test]
-    fn insert_builder_numbers_placeholders() {
-        let one = descriptions_insert_sql(1);
-        assert!(one.starts_with("INSERT INTO descriptions ("), "{one}");
-        assert!(
-            one.contains("$1, $2, $3, $4, $5, $6, $7, $8, $9, $10"),
-            "{one}"
-        );
-        assert!(one.ends_with(" RETURNING id"), "{one}");
-        let two = descriptions_insert_sql(2);
-        assert!(two.contains("($11, $12, $13"), "{two}");
-        assert!(two.contains("$20) RETURNING id"), "{two}");
-    }
-
-    #[test]
     fn static_sql_pins_clauses() {
+        // (The write-statement pins moved with their SQL to
+        // `domain::comments` / `domain::issues`, PIDASHCONV-1630.)
         assert!(COMMENT_BATCH_SQL.contains("description_id IS NULL"));
         assert!(COMMENT_BATCH_SQL.contains("ORDER BY created_at ASC"));
-        assert!(LINK_COMMENT_SQL.contains("SET description_id = $1"));
-        assert!(!LINK_COMMENT_SQL.contains("updated_at"));
         assert!(FIND_PROJECT_SQL.contains("UPPER(p.identifier) = UPPER($1)"));
         assert!(FIND_PROJECT_SQL.contains("INNER JOIN workspaces"));
         assert!(DUPLICATE_ISSUES_SQL.contains("ORDER BY created_at DESC"));
         assert!(MAX_SEQUENCE_SQL.contains("MAX(sequence)"));
         assert!(PROJECT_SEQUENCES_SQL.contains("ORDER BY created_at DESC"));
-        assert!(!UPDATE_ISSUE_SEQUENCE_ID_SQL.contains("updated_at"));
-        assert!(!UPDATE_SEQUENCE_SQL.contains("updated_at"));
         assert!(FIND_WORKSPACE_SQL.contains("SELECT id, name, slug, deleted_at"));
         assert!(!FIND_WORKSPACE_SQL.contains("deleted_at IS NULL"));
     }
