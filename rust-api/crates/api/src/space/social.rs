@@ -1505,11 +1505,14 @@ async fn comment_create_inner(
         .map_err(integrity_error)?;
     comment_domain::insert_description_row(&mut *tx, &rows)
         .await
-        .map_err(|_| HandlerError::ServerError)?;
+        .map_err(integrity_error)?;
     comment_domain::link_comment_description(&mut *tx, rows.id, rows.description_id)
         .await
-        .map_err(|_| HandlerError::ServerError)?;
-    tx.commit().await.map_err(|_| HandlerError::ServerError)?;
+        .map_err(integrity_error)?;
+    // The `issue_id` FK is `DEFERRABLE INITIALLY DEFERRED`, so a comment
+    // on a missing issue only fails here at commit — map it the same way
+    // as the inserts (`handle_exception`, `views/base.py:74-78`).
+    tx.commit().await.map_err(integrity_error)?;
     let row = fetch_comment_by_id(pool, &comment_id)
         .await?
         .ok_or(HandlerError::ServerError)?;
