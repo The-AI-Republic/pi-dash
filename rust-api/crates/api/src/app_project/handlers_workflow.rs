@@ -1413,23 +1413,20 @@ async fn state_partial_update(
     let description = input.description.unwrap_or(current.description);
     let sequence = input.sequence.unwrap_or(current.sequence);
     let now = utc_now_micros();
-    let update = sqlx::query(
-        r#"UPDATE states SET name = $1, color = $2, "group" = $3, "default" = $4,
-                  description = $5, sequence = $6, slug = $7,
-                  updated_at = $8, updated_by_id = $9 WHERE id = $10"#,
-    )
-    .bind(&name)
-    .bind(&color)
-    .bind(&group)
-    .bind(default)
-    .bind(&description)
-    .bind(sequence)
-    .bind(state_model::slugify_name(&name))
-    .bind(now)
-    .bind(actor.id)
-    .bind(pk)
-    .execute(&pool)
-    .await;
+    use pidash_services::domain::projects::states as project_states;
+    let slug = state_model::slugify_name(&name);
+    let patch = project_states::StatePatch {
+        name: name.as_str(),
+        color: color.as_str(),
+        group: group.as_str(),
+        default,
+        description: description.as_str(),
+        sequence,
+        slug: slug.as_str(),
+        updated_at: now,
+        updated_by: actor.id,
+    };
+    let update = project_states::update(&pool, pk, &patch).await;
     if let Err(error) = update {
         if let sqlx::Error::Database(db_error) = &error {
             if db_error.code().as_deref() == Some("23505") {
@@ -1496,27 +1493,13 @@ async fn state_mark_default(
     let pk = parse_uuid_or_invalid(&pk_raw)?;
     // Plain `.update()`s: no `updated_at`/`updated_by` touch (queryset
     // updates bypass `save()`).
-    sqlx::query(
-        r#"UPDATE states s SET "default" = FALSE FROM workspaces w
-           WHERE s.workspace_id = w.id AND w.slug = $1 AND s.project_id = $2
-             AND s."default" AND s.deleted_at IS NULL AND NOT (s."group" = 'triage')"#,
-    )
-    .bind(&slug)
-    .bind(project_id)
-    .execute(&pool)
-    .await
-    .map_err(db_denial)?;
-    sqlx::query(
-        r#"UPDATE states s SET "default" = TRUE FROM workspaces w
-           WHERE s.workspace_id = w.id AND w.slug = $1 AND s.project_id = $2 AND s.id = $3
-             AND s.deleted_at IS NULL AND NOT (s."group" = 'triage')"#,
-    )
-    .bind(&slug)
-    .bind(project_id)
-    .bind(pk)
-    .execute(&pool)
-    .await
-    .map_err(db_denial)?;
+    use pidash_services::domain::projects::states as project_states;
+    project_states::clear_defaults(&pool, &slug, project_id)
+        .await
+        .map_err(db_denial)?;
+    project_states::mark_default(&pool, &slug, project_id, pk)
+        .await
+        .map_err(db_denial)?;
     Ok(no_content())
 }
 
@@ -1581,16 +1564,9 @@ async fn state_destroy(
     // stamps `updated_at`/`updated_by`) + the `soft_delete_related_objects`
     // publish.
     let now = utc_now_micros();
-    sqlx::query(
-        r#"UPDATE states SET deleted_at = $1, updated_at = $1, updated_by_id = $2
-           WHERE id = $3"#,
-    )
-    .bind(now)
-    .bind(actor.id)
-    .bind(pk)
-    .execute(&pool)
-    .await
-    .map_err(db_denial)?;
+    pidash_services::domain::projects::states::soft_delete_app(&pool, pk, now, actor.id)
+        .await
+        .map_err(db_denial)?;
     enqueue_soft_delete(&pool, "state", &pk).await;
     Ok(no_content())
 }
@@ -2931,18 +2907,9 @@ async fn point_destroy(
                 Some(Ok(id)) => *id,
                 _ => return Err(Denial::BadValidation),
             };
-            sqlx::query(
-                r#"UPDATE issues SET estimate_point_id = $1 WHERE id IN (
-                     SELECT i.id FROM issues i JOIN workspaces w ON w.id = i.workspace_id
-                     WHERE i.deleted_at IS NULL AND i.project_id = $2 AND w.slug = $3
-                       AND i.estimate_point_id = $4
-                   )"#,
+            pidash_services::domain::issues::reassign_estimate_point(
+                &pool, new_uuid, project_id, &slug, point_id,
             )
-            .bind(new_uuid)
-            .bind(project_id)
-            .bind(&slug)
-            .bind(point_id)
-            .execute(&pool)
             .await
             .map_err(db_denial)?;
         }

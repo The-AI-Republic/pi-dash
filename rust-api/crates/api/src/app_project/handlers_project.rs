@@ -4596,6 +4596,7 @@ async fn apply_update(
     now: DateTime<Utc>,
 ) -> Result<(), Denial> {
     use pidash_db::app_project::models::project as m;
+    use pidash_services::domain::projects as domain_projects;
     let new_default = validated.is_default.unwrap_or(instance.is_default);
     // `save()` is atomic (`project.py:292-301`): guard, clear, write.
     let mut tx = pool.begin().await.map_err(|_| Denial::ServerError)?;
@@ -4613,15 +4614,9 @@ async fn apply_update(
             .map_err(|_| Denial::ValidationFailed)?;
     }
     if new_default {
-        sqlx::query(
-            r#"UPDATE projects SET is_default = FALSE
-               WHERE workspace_id = $1 AND is_default AND deleted_at IS NULL AND id <> $2"#,
-        )
-        .bind(instance.workspace_id)
-        .bind(instance.id)
-        .execute(&mut *tx)
-        .await
-        .map_err(db_denial)?;
+        domain_projects::clear_other_defaults(&mut *tx, instance.workspace_id, instance.id)
+            .await
+            .map_err(db_denial)?;
     }
     let identifier = match validated.identifier.as_deref() {
         Some(raw) => m::normalize_identifier(raw),
@@ -4649,158 +4644,106 @@ async fn apply_update(
             .agent_test_default_interval_seconds
             .unwrap_or(instance.agent_test_default_interval_seconds as i64),
     )?;
-    sqlx::query(
-        r#"UPDATE projects SET
-             name = $1, description = $2, description_text = $3, description_html = $4,
-             network = $5, identifier = $6,
-             default_assignee_id = $7, project_lead_id = $8, emoji = $9, icon_prop = $10,
-             module_view = $11, cycle_view = $12, issue_views_view = $13, page_view = $14,
-             intake_view = $15, is_time_tracking_enabled = $16, is_issue_type_enabled = $17,
-             guest_view_all_features = $18,
-             cover_image = $19, cover_image_asset_id = $20, estimate_id = $21,
-             archive_in = $22, close_in = $23, logo_props = $24,
-             default_state_id = $25, archived_at = $26, is_default = $27, timezone = $28,
-             external_source = $29, external_id = $30, repo_url = $31, base_branch = $32,
-             agent_default_interval_seconds = $33, agent_default_max_ticks = $34,
-             agent_review_default_interval_seconds = $35, agent_test_default_interval_seconds = $36,
-             agent_ticking_enabled = $37, default_agent_executor = $38,
-             members_can_edit_states = $39,
-             workspace_id = $40, deleted_at = $41,
-             updated_at = $42, updated_by_id = $43, created_by_id = $44
-           WHERE id = $45"#,
-    )
-    .bind(validated.name.as_deref().unwrap_or(&instance.name))
-    .bind(
-        validated
+    let upd = domain_projects::ProjectUpdate {
+        name: validated.name.as_deref().unwrap_or(&instance.name),
+        description: validated
             .description
             .as_deref()
             .unwrap_or(&instance.description),
-    )
-    .bind(
-        validated
+        description_text: validated
             .description_text
-            .clone()
-            .unwrap_or(instance.description_text.clone()),
-    )
-    .bind(
-        validated
+            .as_ref()
+            .map_or(instance.description_text.as_ref(), |v| v.as_ref()),
+        description_html: validated
             .description_html
-            .clone()
-            .unwrap_or(instance.description_html.clone()),
-    )
-    .bind(validated.network.unwrap_or(instance.network as i32))
-    .bind(identifier)
-    .bind(
-        validated
+            .as_ref()
+            .map_or(instance.description_html.as_ref(), |v| v.as_ref()),
+        network: validated.network.unwrap_or(instance.network as i32),
+        identifier: &identifier,
+        default_assignee: validated
             .default_assignee
             .unwrap_or(instance.default_assignee_id),
-    )
-    .bind(validated.project_lead.unwrap_or(instance.project_lead_id))
-    .bind(validated.emoji.clone().unwrap_or(instance.emoji.clone()))
-    .bind(
-        validated
+        project_lead: validated.project_lead.unwrap_or(instance.project_lead_id),
+        emoji: validated
+            .emoji
+            .as_ref()
+            .map_or(instance.emoji.as_deref(), |v| v.as_deref()),
+        icon_prop: validated
             .icon_prop
-            .clone()
-            .unwrap_or(instance.icon_prop.clone()),
-    )
-    .bind(validated.module_view.unwrap_or(instance.module_view))
-    .bind(validated.cycle_view.unwrap_or(instance.cycle_view))
-    .bind(
-        validated
+            .as_ref()
+            .map_or(instance.icon_prop.as_ref(), |v| v.as_ref()),
+        module_view: validated.module_view.unwrap_or(instance.module_view),
+        cycle_view: validated.cycle_view.unwrap_or(instance.cycle_view),
+        issue_views_view: validated
             .issue_views_view
             .unwrap_or(instance.issue_views_view),
-    )
-    .bind(validated.page_view.unwrap_or(instance.page_view))
-    .bind(validated.intake_view.unwrap_or(instance.intake_view))
-    .bind(
-        validated
+        page_view: validated.page_view.unwrap_or(instance.page_view),
+        intake_view: validated.intake_view.unwrap_or(instance.intake_view),
+        is_time_tracking_enabled: validated
             .is_time_tracking_enabled
             .unwrap_or(instance.is_time_tracking_enabled),
-    )
-    .bind(
-        validated
+        is_issue_type_enabled: validated
             .is_issue_type_enabled
             .unwrap_or(instance.is_issue_type_enabled),
-    )
-    .bind(
-        validated
+        guest_view_all_features: validated
             .guest_view_all_features
             .unwrap_or(instance.guest_view_all_features),
-    )
-    .bind(
-        validated
+        cover_image: validated
             .cover_image
-            .clone()
-            .unwrap_or(instance.cover_image.clone()),
-    )
-    .bind(
-        validated
+            .as_ref()
+            .map_or(instance.cover_image.as_deref(), |v| v.as_deref()),
+        cover_image_asset: validated
             .cover_image_asset
             .unwrap_or(instance.cover_image_asset_id),
-    )
-    .bind(validated.estimate.unwrap_or(instance.estimate_id))
-    .bind(archive_in)
-    .bind(close_in)
-    .bind(
-        validated
+        estimate: validated.estimate.unwrap_or(instance.estimate_id),
+        archive_in,
+        close_in,
+        logo_props: validated
             .logo_props
-            .clone()
-            .unwrap_or_else(|| instance.logo_props.clone()),
-    )
-    .bind(validated.default_state.unwrap_or(instance.default_state_id))
-    .bind(validated.archived_at.unwrap_or(instance.archived_at))
-    .bind(new_default)
-    .bind(validated.timezone.as_deref().unwrap_or(&instance.timezone))
-    .bind(
-        validated
+            .as_ref()
+            .unwrap_or(&instance.logo_props),
+        default_state: validated.default_state.unwrap_or(instance.default_state_id),
+        archived_at: validated.archived_at.unwrap_or(instance.archived_at),
+        is_default: new_default,
+        timezone: validated.timezone.as_deref().unwrap_or(&instance.timezone),
+        external_source: validated
             .external_source
-            .clone()
-            .unwrap_or(instance.external_source.clone()),
-    )
-    .bind(
-        validated
+            .as_ref()
+            .map_or(instance.external_source.as_deref(), |v| v.as_deref()),
+        external_id: validated
             .external_id
-            .clone()
-            .unwrap_or(instance.external_id.clone()),
-    )
-    .bind(validated.repo_url.as_deref().unwrap_or(&instance.repo_url))
-    .bind(
-        validated
+            .as_ref()
+            .map_or(instance.external_id.as_deref(), |v| v.as_deref()),
+        repo_url: validated.repo_url.as_deref().unwrap_or(&instance.repo_url),
+        base_branch: validated
             .base_branch
             .as_deref()
             .unwrap_or(&instance.base_branch),
-    )
-    .bind(agent_interval)
-    .bind(agent_max_ticks)
-    .bind(agent_review)
-    .bind(agent_test)
-    .bind(
-        validated
+        agent_interval,
+        agent_max_ticks,
+        agent_review,
+        agent_test,
+        agent_ticking: validated
             .agent_ticking_enabled
             .unwrap_or(instance.agent_ticking_enabled),
-    )
-    .bind(
-        validated
+        default_executor: validated
             .default_agent_executor
             .as_deref()
             .unwrap_or(&instance.default_agent_executor),
-    )
-    .bind(
-        validated
+        members_can_edit_states: validated
             .members_can_edit_states
             .unwrap_or(instance.members_can_edit_states),
-    )
-    .bind(validated.workspace.unwrap_or(instance.workspace_id))
-    .bind(validated.deleted_at.unwrap_or(None))
-    .bind(now)
-    .bind(actor_id)
-    // `created_by` is writable on both serializers (`update()` persists
-    // it; `save()` overwrites only `updated_by` — `models/base.py`).
-    .bind(validated.created_by.unwrap_or(instance.created_by_id))
-    .bind(instance.id)
-    .execute(&mut *tx)
-    .await
-    .map_err(db_denial)?;
+        workspace_id: validated.workspace.unwrap_or(instance.workspace_id),
+        deleted_at: validated.deleted_at.unwrap_or(None),
+        updated_at: now,
+        updated_by: actor_id,
+        // `created_by` is writable on both serializers (`update()` persists
+        // it; `save()` overwrites only `updated_by` — `models/base.py`).
+        created_by: validated.created_by.unwrap_or(instance.created_by_id),
+    };
+    domain_projects::apply_update(&mut *tx, instance.id, &upd)
+        .await
+        .map_err(db_denial)?;
     tx.commit().await.map_err(|_| Denial::ServerError)?;
     Ok(())
 }
@@ -5758,15 +5701,9 @@ async fn project_destroy(
     }
     let now = utc_now_micros();
     // `project.delete()`: stamps + its `soft_delete_related_objects` emit.
-    sqlx::query(
-        r#"UPDATE projects SET deleted_at = $1, updated_at = $1, updated_by_id = $2 WHERE id = $3"#,
-    )
-    .bind(now)
-    .bind(actor.id)
-    .bind(project_id)
-    .execute(&pool)
-    .await
-    .map_err(db_denial)?;
+    pidash_services::domain::projects::soft_delete(&pool, project_id, now, actor.id)
+        .await
+        .map_err(db_denial)?;
     enqueue_message(&pool, soft_delete_message(&project_id)).await;
     let origin = request_origin(&state)?;
     enqueue_message(
@@ -5833,15 +5770,9 @@ async fn archive_post(
     .map_err(db_denial)?;
     row.ok_or(Denial::ObjectNotFound)?;
     let now = utc_now_micros();
-    sqlx::query(
-        r#"UPDATE projects SET archived_at = $1, updated_at = $1, updated_by_id = $2 WHERE id = $3"#,
-    )
-    .bind(now)
-    .bind(actor.id)
-    .bind(project_id)
-    .execute(&pool)
-    .await
-    .map_err(db_denial)?;
+    pidash_services::domain::projects::archive(&pool, project_id, now, actor.id)
+        .await
+        .map_err(db_denial)?;
     sqlx::query(
         r#"UPDATE user_favorites SET deleted_at = $1
            WHERE project_id = $2 AND deleted_at IS NULL
@@ -5889,15 +5820,9 @@ async fn unarchive_delete(
     .map_err(db_denial)?;
     row.ok_or(Denial::ObjectNotFound)?;
     let now = utc_now_micros();
-    sqlx::query(
-        r#"UPDATE projects SET archived_at = NULL, updated_at = $1, updated_by_id = $2 WHERE id = $3"#,
-    )
-    .bind(now)
-    .bind(actor.id)
-    .bind(project_id)
-    .execute(&pool)
-    .await
-    .map_err(db_denial)?;
+    pidash_services::domain::projects::unarchive(&pool, project_id, now, actor.id)
+        .await
+        .map_err(db_denial)?;
     Ok(no_content())
 }
 

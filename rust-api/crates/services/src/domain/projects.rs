@@ -477,6 +477,339 @@ fn bind_project_update_sql(repo_url: bool, base_branch: bool) -> Option<String> 
     ))
 }
 
+// update (executor-generic; the app PATCH/PUT write)
+// ---------------------------------------------------------------------------
+
+/// `Project.save()` default-clear on the update path
+/// (`project.py:292-301`): the live defaults in the workspace except
+/// the row being saved. The create path ([`CLEAR_DEFAULTS_SQL`]) has
+/// no row to exclude, so Django genuinely differs here (D6:
+/// same-difference, kept as an explicit variant).
+const CLEAR_OTHER_DEFAULTS_SQL: &str = "UPDATE projects SET is_default = FALSE
+               WHERE workspace_id = $1 AND is_default AND deleted_at IS NULL AND id <> $2";
+
+/// Clear every live default in the workspace except this project.
+/// The caller owns the guard probe and the tx (the `save()` atomic
+/// guard-clear-write triple stays caller-sequenced).
+pub async fn clear_other_defaults<'e, E>(
+    ex: E,
+    workspace_id: Uuid,
+    project_id: Uuid,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(CLEAR_OTHER_DEFAULTS_SQL)
+        .bind(workspace_id)
+        .bind(project_id)
+        .execute(ex)
+        .await
+        .map(|_| ())
+}
+
+/// One project row update: every setter column, fully resolved by
+/// the caller (validated-or-instance merge, identifier normalization,
+/// the int4 fencedowns). `workspace_id` and `deleted_at` are
+/// PUT-only writable; `created_by` is writable on update
+/// (`update()` persists it; `save()` overwrites only `updated_by` —
+/// `models/base.py`).
+pub struct ProjectUpdate<'a> {
+    pub name: &'a str,
+    pub description: &'a str,
+    pub description_text: Option<&'a Value>,
+    pub description_html: Option<&'a Value>,
+    pub network: i32,
+    pub identifier: &'a str,
+    pub default_assignee: Option<Uuid>,
+    pub project_lead: Option<Uuid>,
+    pub emoji: Option<&'a str>,
+    pub icon_prop: Option<&'a Value>,
+    pub module_view: bool,
+    pub cycle_view: bool,
+    pub issue_views_view: bool,
+    pub page_view: bool,
+    pub intake_view: bool,
+    pub is_time_tracking_enabled: bool,
+    pub is_issue_type_enabled: bool,
+    pub guest_view_all_features: bool,
+    pub cover_image: Option<&'a str>,
+    pub cover_image_asset: Option<Uuid>,
+    pub estimate: Option<Uuid>,
+    pub archive_in: i32,
+    pub close_in: i32,
+    pub logo_props: &'a Value,
+    pub default_state: Option<Uuid>,
+    pub archived_at: Option<DateTime<Utc>>,
+    pub is_default: bool,
+    pub timezone: &'a str,
+    pub external_source: Option<&'a str>,
+    pub external_id: Option<&'a str>,
+    pub repo_url: &'a str,
+    pub base_branch: &'a str,
+    pub agent_interval: i32,
+    pub agent_max_ticks: i32,
+    pub agent_review: i32,
+    pub agent_test: i32,
+    pub agent_ticking: bool,
+    pub default_executor: &'a str,
+    pub members_can_edit_states: bool,
+    pub workspace_id: Uuid,
+    pub deleted_at: Option<DateTime<Utc>>,
+    pub updated_at: DateTime<Utc>,
+    pub updated_by: &'a Uuid,
+    pub created_by: Option<Uuid>,
+}
+
+const PROJECT_UPDATE_SQL: &str = "UPDATE projects SET
+             name = $1, description = $2, description_text = $3, description_html = $4,
+             network = $5, identifier = $6,
+             default_assignee_id = $7, project_lead_id = $8, emoji = $9, icon_prop = $10,
+             module_view = $11, cycle_view = $12, issue_views_view = $13, page_view = $14,
+             intake_view = $15, is_time_tracking_enabled = $16, is_issue_type_enabled = $17,
+             guest_view_all_features = $18,
+             cover_image = $19, cover_image_asset_id = $20, estimate_id = $21,
+             archive_in = $22, close_in = $23, logo_props = $24,
+             default_state_id = $25, archived_at = $26, is_default = $27, timezone = $28,
+             external_source = $29, external_id = $30, repo_url = $31, base_branch = $32,
+             agent_default_interval_seconds = $33, agent_default_max_ticks = $34,
+             agent_review_default_interval_seconds = $35, agent_test_default_interval_seconds = $36,
+             agent_ticking_enabled = $37, default_agent_executor = $38,
+             members_can_edit_states = $39,
+             workspace_id = $40, deleted_at = $41,
+             updated_at = $42, updated_by_id = $43, created_by_id = $44
+           WHERE id = $45";
+
+/// The app project PATCH/PUT write (`ProjectSerializer.update()` +
+/// `save()`): all 44 setter columns for one row. Runs on the
+/// caller's executor (the update tx also holds the default-clear).
+pub async fn apply_update<'e, E>(
+    ex: E,
+    project_id: Uuid,
+    upd: &ProjectUpdate<'_>,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(PROJECT_UPDATE_SQL)
+        .bind(upd.name)
+        .bind(upd.description)
+        .bind(upd.description_text)
+        .bind(upd.description_html)
+        .bind(upd.network)
+        .bind(upd.identifier)
+        .bind(upd.default_assignee)
+        .bind(upd.project_lead)
+        .bind(upd.emoji)
+        .bind(upd.icon_prop)
+        .bind(upd.module_view)
+        .bind(upd.cycle_view)
+        .bind(upd.issue_views_view)
+        .bind(upd.page_view)
+        .bind(upd.intake_view)
+        .bind(upd.is_time_tracking_enabled)
+        .bind(upd.is_issue_type_enabled)
+        .bind(upd.guest_view_all_features)
+        .bind(upd.cover_image)
+        .bind(upd.cover_image_asset)
+        .bind(upd.estimate)
+        .bind(upd.archive_in)
+        .bind(upd.close_in)
+        .bind(upd.logo_props)
+        .bind(upd.default_state)
+        .bind(upd.archived_at)
+        .bind(upd.is_default)
+        .bind(upd.timezone)
+        .bind(upd.external_source)
+        .bind(upd.external_id)
+        .bind(upd.repo_url)
+        .bind(upd.base_branch)
+        .bind(upd.agent_interval)
+        .bind(upd.agent_max_ticks)
+        .bind(upd.agent_review)
+        .bind(upd.agent_test)
+        .bind(upd.agent_ticking)
+        .bind(upd.default_executor)
+        .bind(upd.members_can_edit_states)
+        .bind(upd.workspace_id)
+        .bind(upd.deleted_at)
+        .bind(upd.updated_at)
+        .bind(upd.updated_by)
+        .bind(upd.created_by)
+        .bind(project_id)
+        .execute(ex)
+        .await
+        .map(|_| ())
+}
+
+// ---------------------------------------------------------------------------
+// soft delete / archive / cover-asset / text-field stamps
+// ---------------------------------------------------------------------------
+
+/// `project.delete()`: the tombstone plus the `save()` stamps. The
+/// `soft_delete_related_objects` emit and the cascades stay
+/// caller-sequenced (not covered-table writes).
+const PROJECT_SOFT_DELETE_SQL: &str =
+    "UPDATE projects SET deleted_at = $1, updated_at = $1, updated_by_id = $2 WHERE id = $3";
+
+/// Soft-delete one project row.
+pub async fn soft_delete<'e, E>(
+    ex: E,
+    project_id: Uuid,
+    now: DateTime<Utc>,
+    actor_id: Uuid,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(PROJECT_SOFT_DELETE_SQL)
+        .bind(now)
+        .bind(actor_id)
+        .bind(project_id)
+        .execute(ex)
+        .await
+        .map(|_| ())
+}
+
+/// `ProjectArchiveUnarchiveEndpoint.post` (`base.py:435-442`): stamp
+/// `archived_at` (+ `updated_at`/`updated_by`). The favorites
+/// soft-delete stays at the caller.
+const PROJECT_ARCHIVE_SQL: &str =
+    "UPDATE projects SET archived_at = $1, updated_at = $1, updated_by_id = $2 WHERE id = $3";
+
+/// Archive one project row.
+pub async fn archive<'e, E>(
+    ex: E,
+    project_id: Uuid,
+    now: DateTime<Utc>,
+    actor_id: Uuid,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(PROJECT_ARCHIVE_SQL)
+        .bind(now)
+        .bind(actor_id)
+        .bind(project_id)
+        .execute(ex)
+        .await
+        .map(|_| ())
+}
+
+/// `ProjectArchiveUnarchiveEndpoint.delete` (`base.py:444-446`):
+/// clear `archived_at` (+ `updated_at`/`updated_by`).
+const PROJECT_UNARCHIVE_SQL: &str =
+    "UPDATE projects SET archived_at = NULL, updated_at = $1, updated_by_id = $2 WHERE id = $3";
+
+/// Unarchive one project row.
+pub async fn unarchive<'e, E>(
+    ex: E,
+    project_id: Uuid,
+    now: DateTime<Utc>,
+    actor_id: Uuid,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(PROJECT_UNARCHIVE_SQL)
+        .bind(now)
+        .bind(actor_id)
+        .bind(project_id)
+        .execute(ex)
+        .await
+        .map(|_| ())
+}
+
+/// `WorkspaceFileAssetEndpoint.entity_asset_save`
+/// (`v2.py:247-284`): the cover link plus the full
+/// `project.save()` stamps (`auto_now` `updated_at`, crum
+/// `updated_by`). The previous-asset delete stays at the caller.
+const PROJECT_COVER_LINK_SQL: &str = "UPDATE \"projects\" SET \"cover_image\" = $1, \"cover_image_asset_id\" = $2, \"updated_at\" = $3, \"updated_by_id\" = $4 WHERE \"id\" = $5";
+
+/// Link a cover asset onto one project row
+/// (`cover_image = ""`, the ported empty-string write).
+pub async fn stamp_cover_image<'e, E>(
+    ex: E,
+    project_id: Uuid,
+    asset_id: Uuid,
+    now: DateTime<Utc>,
+    actor_id: &Uuid,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(PROJECT_COVER_LINK_SQL)
+        .bind("")
+        .bind(asset_id)
+        .bind(now)
+        .bind(actor_id)
+        .bind(project_id)
+        .execute(ex)
+        .await
+        .map(|_| ())
+}
+
+/// `WorkspaceFileAssetEndpoint.entity_asset_delete`
+/// (`v2.py:286-312`): clear the cover link FK plus the full
+/// `project.save()` stamps.
+const PROJECT_COVER_UNLINK_SQL: &str = "UPDATE \"projects\" SET \"cover_image_asset_id\" = NULL, \"updated_at\" = $1, \"updated_by_id\" = $2 WHERE \"id\" = $3";
+
+/// Clear one project row's cover link FK.
+pub async fn clear_cover_image_asset<'e, E>(
+    ex: E,
+    project_id: Uuid,
+    now: DateTime<Utc>,
+    actor_id: &Uuid,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(PROJECT_COVER_UNLINK_SQL)
+        .bind(now)
+        .bind(actor_id)
+        .bind(project_id)
+        .execute(ex)
+        .await
+        .map(|_| ())
+}
+
+/// The two `project.save(update_fields=[...])` single-column stamps
+/// the repo bindings emit: `repo_url` (git connect,
+/// `git/services.py:342-349`, and GitHub bind, `github.py:1058-1061`)
+/// and `base_branch` (git connect only, when the remote has a
+/// default branch and the project has none).
+pub enum ProjectTextField {
+    RepoUrl,
+    BaseBranch,
+}
+
+const PROJECT_REPO_URL_SQL: &str = "UPDATE projects SET repo_url = $1 WHERE id = $2";
+
+const PROJECT_BASE_BRANCH_SQL: &str = "UPDATE projects SET base_branch = $1 WHERE id = $2";
+
+/// Stamp one `repo_url` / `base_branch` value. The column set is
+/// fixed (the two enum arms); the caller's conditional-append loop
+/// keeps its shape, emitting the same bytes per arm.
+pub async fn stamp_text_field<'e, E>(
+    ex: E,
+    field: ProjectTextField,
+    value: &str,
+    project_id: Uuid,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let sql = match field {
+        ProjectTextField::RepoUrl => PROJECT_REPO_URL_SQL,
+        ProjectTextField::BaseBranch => PROJECT_BASE_BRANCH_SQL,
+    };
+    sqlx::query(sql)
+        .bind(value)
+        .bind(project_id)
+        .execute(ex)
+        .await
+        .map(|_| ())
+}
+
 // ---------------------------------------------------------------------------
 // members
 // ---------------------------------------------------------------------------
@@ -1914,6 +2247,129 @@ pub mod states {
 
     pub(crate) const STATE_SOFT_DELETE_SQL: &str =
         "UPDATE states SET deleted_at = $1, updated_by_id = $2 WHERE id = $3";
+    /// One state PATCH write: every setter column, fully resolved by
+    /// the caller (input-or-current merge; the caller slugifies).
+    /// `StateViewSet.partial_update` (`state/base.py:66-82`).
+    pub struct StatePatch<'a> {
+        pub name: &'a str,
+        pub color: &'a str,
+        pub group: &'a str,
+        pub default: bool,
+        pub description: &'a str,
+        pub sequence: f64,
+        pub slug: &'a str,
+        pub updated_at: DateTime<Utc>,
+        pub updated_by: Uuid,
+    }
+
+    pub(crate) const STATE_APP_UPDATE_SQL: &str =
+        "UPDATE states SET name = $1, color = $2, \"group\" = $3, \"default\" = $4,
+                  description = $5, sequence = $6, slug = $7,
+                  updated_at = $8, updated_by_id = $9 WHERE id = $10";
+
+    /// Patch one state row. Errors propagate as `sqlx::Error` — the
+    /// caller owns the 23505 duplicate-name arm.
+    pub async fn update<'e, E>(
+        ex: E,
+        state_id: Uuid,
+        patch: &StatePatch<'_>,
+    ) -> Result<(), sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        sqlx::query(STATE_APP_UPDATE_SQL)
+            .bind(patch.name)
+            .bind(patch.color)
+            .bind(patch.group)
+            .bind(patch.default)
+            .bind(patch.description)
+            .bind(patch.sequence)
+            .bind(patch.slug)
+            .bind(patch.updated_at)
+            .bind(patch.updated_by)
+            .bind(state_id)
+            .execute(ex)
+            .await
+            .map(|_| ())
+    }
+
+    /// `StateViewSet.mark_as_default` (`state/base.py:111-119`): the
+    /// clear leg — plain `.update()`, no `updated_at`/`updated_by`
+    /// touch (queryset updates bypass `save()`).
+    pub(crate) const STATE_CLEAR_DEFAULTS_SQL: &str =
+        "UPDATE states s SET \"default\" = FALSE FROM workspaces w
+           WHERE s.workspace_id = w.id AND w.slug = $1 AND s.project_id = $2
+             AND s.\"default\" AND s.deleted_at IS NULL AND NOT (s.\"group\" = 'triage')";
+
+    /// Clear every live non-triage default in the project.
+    pub async fn clear_defaults<'e, E>(
+        ex: E,
+        slug: &str,
+        project_id: Uuid,
+    ) -> Result<(), sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        sqlx::query(STATE_CLEAR_DEFAULTS_SQL)
+            .bind(slug)
+            .bind(project_id)
+            .execute(ex)
+            .await
+            .map(|_| ())
+    }
+
+    /// `StateViewSet.mark_as_default` (`state/base.py:111-119`): the
+    /// set leg — same scoping plus the `pk`.
+    pub(crate) const STATE_MARK_DEFAULT_SQL: &str =
+        "UPDATE states s SET \"default\" = TRUE FROM workspaces w
+           WHERE s.workspace_id = w.id AND w.slug = $1 AND s.project_id = $2 AND s.id = $3
+             AND s.deleted_at IS NULL AND NOT (s.\"group\" = 'triage')";
+
+    /// Mark one live non-triage state the default.
+    pub async fn mark_default<'e, E>(
+        ex: E,
+        slug: &str,
+        project_id: Uuid,
+        state_id: Uuid,
+    ) -> Result<(), sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        sqlx::query(STATE_MARK_DEFAULT_SQL)
+            .bind(slug)
+            .bind(project_id)
+            .bind(state_id)
+            .execute(ex)
+            .await
+            .map(|_| ())
+    }
+
+    /// `StateViewSet.destroy` (`state/base.py:121-144`):
+    /// `SoftDeleteModel.delete(soft=True)` — tombstone plus the
+    /// `save()` stamps. The veto probes and the
+    /// `soft_delete_related_objects` publish stay at the caller.
+    pub(crate) const STATE_APP_SOFT_DELETE_SQL: &str =
+        "UPDATE states SET deleted_at = $1, updated_at = $1, updated_by_id = $2
+           WHERE id = $3";
+
+    /// Soft-delete one state row.
+    pub async fn soft_delete_app<'e, E>(
+        ex: E,
+        state_id: Uuid,
+        now: DateTime<Utc>,
+        actor_id: Uuid,
+    ) -> Result<(), sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        sqlx::query(STATE_APP_SOFT_DELETE_SQL)
+            .bind(now)
+            .bind(actor_id)
+            .bind(state_id)
+            .execute(ex)
+            .await
+            .map(|_| ())
+    }
 }
 
 #[cfg(test)]
@@ -1921,8 +2377,9 @@ mod tests {
     use super::members::*;
     use super::states::{
         add_default, add_triage, NewDefaultState, NewState, TriageText, DEFAULT_STATE_INSERT_SQL,
-        DEFAULT_STATE_INSERT_V1_SQL, STATE_INSERT_SQL, STATE_INSERT_V1_SQL, TRIAGE_INSERT_FULL_SQL,
-        TRIAGE_INSERT_QUOTED_SQL, TRIAGE_INSERT_SQL,
+        DEFAULT_STATE_INSERT_V1_SQL, STATE_APP_SOFT_DELETE_SQL, STATE_APP_UPDATE_SQL,
+        STATE_CLEAR_DEFAULTS_SQL, STATE_INSERT_SQL, STATE_INSERT_V1_SQL, STATE_MARK_DEFAULT_SQL,
+        TRIAGE_INSERT_FULL_SQL, TRIAGE_INSERT_QUOTED_SQL, TRIAGE_INSERT_SQL,
     };
     use super::*;
 
@@ -2007,6 +2464,70 @@ mod tests {
         assert!(
             CLEAR_DEFAULTS_SQL.contains("is_default = FALSE"),
             "clear flips defaults"
+        );
+    }
+
+    #[test]
+    fn project_update_binds_every_placeholder() {
+        for bind in 1..=45 {
+            assert!(
+                PROJECT_UPDATE_SQL.contains(&format!("${bind}")),
+                "bind ${bind} present"
+            );
+        }
+        assert!(PROJECT_UPDATE_SQL.ends_with("WHERE id = $45"));
+        assert!(PROJECT_UPDATE_SQL.contains("created_by_id = $44"));
+        assert_eq!(
+            CLEAR_OTHER_DEFAULTS_SQL,
+            "UPDATE projects SET is_default = FALSE\n               WHERE workspace_id = $1 AND is_default AND deleted_at IS NULL AND id <> $2"
+        );
+        assert_eq!(
+            PROJECT_SOFT_DELETE_SQL,
+            "UPDATE projects SET deleted_at = $1, updated_at = $1, updated_by_id = $2 WHERE id = $3"
+        );
+        assert_eq!(
+            PROJECT_ARCHIVE_SQL,
+            "UPDATE projects SET archived_at = $1, updated_at = $1, updated_by_id = $2 WHERE id = $3"
+        );
+        assert_eq!(
+            PROJECT_UNARCHIVE_SQL,
+            "UPDATE projects SET archived_at = NULL, updated_at = $1, updated_by_id = $2 WHERE id = $3"
+        );
+        assert_eq!(
+            PROJECT_COVER_LINK_SQL,
+            "UPDATE \"projects\" SET \"cover_image\" = $1, \"cover_image_asset_id\" = $2, \"updated_at\" = $3, \"updated_by_id\" = $4 WHERE \"id\" = $5"
+        );
+        assert_eq!(
+            PROJECT_COVER_UNLINK_SQL,
+            "UPDATE \"projects\" SET \"cover_image_asset_id\" = NULL, \"updated_at\" = $1, \"updated_by_id\" = $2 WHERE \"id\" = $3"
+        );
+        assert_eq!(
+            PROJECT_REPO_URL_SQL,
+            "UPDATE projects SET repo_url = $1 WHERE id = $2"
+        );
+        assert_eq!(
+            PROJECT_BASE_BRANCH_SQL,
+            "UPDATE projects SET base_branch = $1 WHERE id = $2"
+        );
+    }
+
+    #[test]
+    fn state_update_sql_matches_handler_text() {
+        assert_eq!(
+            STATE_APP_UPDATE_SQL,
+            "UPDATE states SET name = $1, color = $2, \"group\" = $3, \"default\" = $4,\n                  description = $5, sequence = $6, slug = $7,\n                  updated_at = $8, updated_by_id = $9 WHERE id = $10"
+        );
+        assert_eq!(
+            STATE_CLEAR_DEFAULTS_SQL,
+            "UPDATE states s SET \"default\" = FALSE FROM workspaces w\n           WHERE s.workspace_id = w.id AND w.slug = $1 AND s.project_id = $2\n             AND s.\"default\" AND s.deleted_at IS NULL AND NOT (s.\"group\" = 'triage')"
+        );
+        assert_eq!(
+            STATE_MARK_DEFAULT_SQL,
+            "UPDATE states s SET \"default\" = TRUE FROM workspaces w\n           WHERE s.workspace_id = w.id AND w.slug = $1 AND s.project_id = $2 AND s.id = $3\n             AND s.deleted_at IS NULL AND NOT (s.\"group\" = 'triage')"
+        );
+        assert_eq!(
+            STATE_APP_SOFT_DELETE_SQL,
+            "UPDATE states SET deleted_at = $1, updated_at = $1, updated_by_id = $2\n           WHERE id = $3"
         );
     }
 
@@ -2352,6 +2873,162 @@ mod tests {
         .await
         .expect("read back");
         assert_eq!(v1_row, (None, None, 10800, true));
+    }
+
+    /// The update-path twins round-trip through the temp table with
+    /// the same binds the handlers pass: self-excluding
+    /// default-clear, full update, archive/unarchive, soft delete,
+    /// cover link/unlink, and both text-field stamps.
+    #[tokio::test]
+    async fn live_update_twins_round_trip() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        sqlx::query(PROJECTS_DDL)
+            .execute(&pool)
+            .await
+            .expect("temp projects");
+        let now: DateTime<Utc> = "2026-10-03T12:00:00+00:00".parse().expect("T0");
+        let ws = Uuid::new_v4();
+        let actor = Uuid::new_v4();
+        let logo = serde_json::json!({});
+        let id = create(&pool, &new_project(ws, actor, now, &logo, false))
+            .await
+            .expect("create");
+        clear_other_defaults(&pool, ws, id)
+            .await
+            .expect("clear others");
+        let flag: bool = sqlx::query_scalar("SELECT is_default FROM projects WHERE id = $1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .expect("read back");
+        assert!(flag, "self excluded from the clear");
+        let upd = ProjectUpdate {
+            name: "Renamed",
+            description: "d",
+            description_text: None,
+            description_html: None,
+            network: 2,
+            identifier: "REN",
+            default_assignee: None,
+            project_lead: None,
+            emoji: Some(":)"),
+            icon_prop: None,
+            module_view: true,
+            cycle_view: false,
+            issue_views_view: false,
+            page_view: true,
+            intake_view: false,
+            is_time_tracking_enabled: true,
+            is_issue_type_enabled: false,
+            guest_view_all_features: false,
+            cover_image: None,
+            cover_image_asset: None,
+            estimate: None,
+            archive_in: 7,
+            close_in: 8,
+            logo_props: &logo,
+            default_state: None,
+            archived_at: None,
+            is_default: false,
+            timezone: "UTC",
+            external_source: None,
+            external_id: None,
+            repo_url: "https://example.test/r",
+            base_branch: "trunk",
+            agent_interval: 1,
+            agent_max_ticks: 2,
+            agent_review: 3,
+            agent_test: 4,
+            agent_ticking: false,
+            default_executor: "x",
+            members_can_edit_states: false,
+            workspace_id: ws,
+            deleted_at: None,
+            updated_at: now,
+            updated_by: &actor,
+            created_by: Some(actor),
+        };
+        apply_update(&pool, id, &upd).await.expect("update");
+        let row: (String, String, bool, i32, String) = sqlx::query_as(
+            "SELECT name, identifier, module_view, archive_in, repo_url FROM projects WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .expect("read back");
+        assert_eq!(row.0, "Renamed");
+        assert_eq!(row.1, "REN");
+        assert!(row.2);
+        assert_eq!(row.3, 7);
+        assert_eq!(row.4, "https://example.test/r");
+        archive(&pool, id, now, actor).await.expect("archive");
+        let stamped: Option<DateTime<Utc>> =
+            sqlx::query_scalar("SELECT archived_at FROM projects WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .expect("read back");
+        assert_eq!(stamped, Some(now));
+        unarchive(&pool, id, now, actor).await.expect("unarchive");
+        let cleared: Option<DateTime<Utc>> =
+            sqlx::query_scalar("SELECT archived_at FROM projects WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .expect("read back");
+        assert_eq!(cleared, None);
+        let asset = Uuid::new_v4();
+        stamp_cover_image(&pool, id, asset, now, &actor)
+            .await
+            .expect("cover link");
+        let cover: (Option<String>, Option<Uuid>) =
+            sqlx::query_as("SELECT cover_image, cover_image_asset_id FROM projects WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .expect("read back");
+        assert_eq!(cover, (Some(String::new()), Some(asset)));
+        clear_cover_image_asset(&pool, id, now, &actor)
+            .await
+            .expect("cover unlink");
+        let unlinked: Option<Uuid> =
+            sqlx::query_scalar("SELECT cover_image_asset_id FROM projects WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .expect("read back");
+        assert_eq!(unlinked, None);
+        stamp_text_field(
+            &pool,
+            ProjectTextField::RepoUrl,
+            "https://example.test/r2",
+            id,
+        )
+        .await
+        .expect("repo stamp");
+        stamp_text_field(&pool, ProjectTextField::BaseBranch, "dev", id)
+            .await
+            .expect("branch stamp");
+        let urls: (String, String) =
+            sqlx::query_as("SELECT repo_url, base_branch FROM projects WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .expect("read back");
+        assert_eq!(
+            urls,
+            ("https://example.test/r2".to_owned(), "dev".to_owned())
+        );
+        soft_delete(&pool, id, now, actor).await.expect("delete");
+        let tomb: Option<DateTime<Utc>> =
+            sqlx::query_scalar("SELECT deleted_at FROM projects WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .expect("read back");
+        assert_eq!(tomb, Some(now));
     }
 
     /// `add` inserts the full row; the ignore arm replays the signup
@@ -3279,6 +3956,66 @@ mod tests {
                 .await
                 .expect("read back");
         assert_eq!(stamps, (now, later));
+        sqlx::query(WORKSPACES_DDL)
+            .execute(&pool)
+            .await
+            .expect("temp workspaces");
+        sqlx::query("INSERT INTO workspaces (id, slug) VALUES ($1, $2)")
+            .bind(ws)
+            .bind("acme")
+            .execute(&pool)
+            .await
+            .expect("workspace row");
+        let patch = states::StatePatch {
+            name: "Doing",
+            color: "#000000",
+            group: "started",
+            default: false,
+            description: "wip",
+            sequence: 26000.0,
+            slug: "doing",
+            updated_at: now,
+            updated_by: actor,
+        };
+        states::update(&pool, app_id, &patch)
+            .await
+            .expect("state patch");
+        let renamed: (String, String, f64) =
+            sqlx::query_as("SELECT name, slug, sequence FROM states WHERE id = $1")
+                .bind(app_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read back");
+        assert_eq!(renamed, ("Doing".to_owned(), "doing".to_owned(), 26000.0));
+        states::clear_defaults(&pool, "acme", project)
+            .await
+            .expect("clear defaults");
+        let cleared: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM states WHERE \"default\" AND deleted_at IS NULL",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count");
+        assert_eq!(cleared, 0);
+        states::mark_default(&pool, "acme", project, app_id)
+            .await
+            .expect("mark default");
+        let marked: bool = sqlx::query_scalar("SELECT \"default\" FROM states WHERE id = $1")
+            .bind(app_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read back");
+        assert!(marked);
+        states::soft_delete_app(&pool, app_id, now, actor)
+            .await
+            .expect("state delete");
+        let tomb: Option<DateTime<Utc>> =
+            sqlx::query_scalar("SELECT deleted_at FROM states WHERE id = $1")
+                .bind(app_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read back");
+        assert_eq!(tomb, Some(now));
     }
 
     /// Field-level copy for the replay probes (`NewState` borrows).

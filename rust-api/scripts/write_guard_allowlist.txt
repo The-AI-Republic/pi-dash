@@ -4,27 +4,6 @@
 # Fingerprints hash the statement, not line numbers: unrelated edits do not churn this list.
 # The list only shrinks: remove the entry in the same PR that removes the site.
 # Seeded at 5e249b4d (399 sites). Do not add new sites; move them into domain/ instead.
-crates/api/src/app_assets/handlers_v2_user_workspace.rs | UPDATE projects | 3deea2681e1d | sql
-crates/api/src/app_assets/handlers_v2_user_workspace.rs | UPDATE projects | d5074490b29f | sql
-crates/api/src/app_assets/handlers_v2_user_workspace.rs | UPDATE users | 010cad7dac70 | sql
-crates/api/src/app_assets/handlers_v2_user_workspace.rs | UPDATE users | 6030f82d0ec0 | sql
-crates/api/src/app_assets/handlers_v2_user_workspace.rs | UPDATE users | a1c00eb24ad8 | sql
-crates/api/src/app_assets/handlers_v2_user_workspace.rs | UPDATE users | a40ebae0af76 | sql
-crates/api/src/app_assets/handlers_v2_user_workspace.rs | UPDATE workspaces | 2ed91ba8f15a | sql
-crates/api/src/app_assets/handlers_v2_user_workspace.rs | UPDATE workspaces | efea18ad1add | sql
-crates/api/src/app_integrations/handlers_git_repo.rs | UPDATE projects | 0ef80849a6bf | sql
-crates/api/src/app_integrations/handlers_github_proj.rs | UPDATE projects | 99a4e1ac4240 | sql
-crates/api/src/app_notifications/mod.rs | UPDATE user_notification_preferences | bebbb9cc7c4c | sql
-crates/api/src/app_project/handlers_project.rs | UPDATE projects | 3391eaac083e | sql
-crates/api/src/app_project/handlers_project.rs | UPDATE projects | ab5acf43e4b2 | sql
-crates/api/src/app_project/handlers_project.rs | UPDATE projects | c1ff5d77a4f7 | sql
-crates/api/src/app_project/handlers_project.rs | UPDATE projects | d3a65611c0f8 | sql
-crates/api/src/app_project/handlers_project.rs | UPDATE projects | e298f3066916 | sql
-crates/api/src/app_project/handlers_workflow.rs | UPDATE issues | 984228dda709 | sql
-crates/api/src/app_project/handlers_workflow.rs | UPDATE states | aff65fbe46b1 | sql
-crates/api/src/app_project/handlers_workflow.rs | UPDATE states | b54cf069476d | sql
-crates/api/src/app_project/handlers_workflow.rs | UPDATE states | ef5c6b4d4dab | sql
-crates/api/src/app_project/handlers_workflow.rs | UPDATE states | f39455f5ba88 | sql
 crates/api/src/app_workspace/handlers_invites.rs | UPDATE profiles | 9ca7d72d49a9 | sql
 crates/api/src/app_workspace/handlers_invites.rs | UPDATE users | 1c0a5c1f0059 | sql
 crates/api/src/app_workspace/handlers_members.rs | UPDATE workspace_members | e1d811590920 | sql

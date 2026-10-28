@@ -1140,6 +1140,176 @@ where
 }
 
 // ---------------------------------------------------------------------------
+// v2 asset link (executor-generic; the file-asset user writes)
+// ---------------------------------------------------------------------------
+
+/// `UserAssetsV2Endpoint.entity_asset_save` (`v2.py:41-78`): the
+/// avatar link plus the full `user.save()` column effects
+/// (`db/models/user.py:169-187`) — normalized email, filled display
+/// name, staff sync, token rotation, `auto_now` `updated_at`. The
+/// caller owns the user-row read, the previous-asset delete and the
+/// [`pidash_db::ops::users::UserSaveWrite`] computation.
+const USER_AVATAR_LINK_SQL: &str = "UPDATE \"users\" SET \"avatar\" = $1, \"avatar_asset_id\" = $2, \"email\" = $3, \"display_name\" = $4, \"is_staff\" = $5, \"token\" = $6, \"token_updated_at\" = $7, \"updated_at\" = $8 WHERE \"id\" = $9";
+
+/// Link an avatar asset onto one user row
+/// (`avatar = ""`, the ported empty-string write).
+pub async fn link_avatar_asset<'e, E>(
+    ex: E,
+    user_id: Uuid,
+    asset_id: Uuid,
+    write: &pidash_db::ops::users::UserSaveWrite,
+    now: DateTime<Utc>,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(USER_AVATAR_LINK_SQL)
+        .bind("")
+        .bind(asset_id)
+        .bind(&write.email)
+        .bind(&write.display_name)
+        .bind(write.is_staff)
+        .bind(&write.token)
+        .bind(write.token_updated_at)
+        .bind(now)
+        .bind(user_id)
+        .execute(ex)
+        .await
+        .map(|_| ())
+}
+
+/// `UserAssetsV2Endpoint.entity_asset_save` (`v2.py:41-78`): the
+/// cover link plus the full `user.save()` column effects.
+/// `cover_image = NULL` here (asymmetry with avatar — ported).
+const USER_COVER_LINK_SQL: &str = "UPDATE \"users\" SET \"cover_image\" = NULL, \"cover_image_asset_id\" = $1, \"email\" = $2, \"display_name\" = $3, \"is_staff\" = $4, \"token\" = $5, \"token_updated_at\" = $6, \"updated_at\" = $7 WHERE \"id\" = $8";
+
+/// Link a cover asset onto one user row.
+pub async fn link_cover_asset<'e, E>(
+    ex: E,
+    user_id: Uuid,
+    asset_id: Uuid,
+    write: &pidash_db::ops::users::UserSaveWrite,
+    now: DateTime<Utc>,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(USER_COVER_LINK_SQL)
+        .bind(asset_id)
+        .bind(&write.email)
+        .bind(&write.display_name)
+        .bind(write.is_staff)
+        .bind(&write.token)
+        .bind(write.token_updated_at)
+        .bind(now)
+        .bind(user_id)
+        .execute(ex)
+        .await
+        .map(|_| ())
+}
+
+/// `UserAssetsV2Endpoint.entity_asset_delete` (`v2.py:80-107`):
+/// clears the avatar link FK only (the `avatar` string is untouched
+/// here), plus the full `user.save()` column effects.
+const USER_AVATAR_UNLINK_SQL: &str = "UPDATE \"users\" SET \"avatar_asset_id\" = NULL, \"email\" = $1, \"display_name\" = $2, \"is_staff\" = $3, \"token\" = $4, \"token_updated_at\" = $5, \"updated_at\" = $6 WHERE \"id\" = $7";
+
+/// Clear one user row's avatar link FK.
+pub async fn unlink_avatar_asset<'e, E>(
+    ex: E,
+    user_id: Uuid,
+    write: &pidash_db::ops::users::UserSaveWrite,
+    now: DateTime<Utc>,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(USER_AVATAR_UNLINK_SQL)
+        .bind(&write.email)
+        .bind(&write.display_name)
+        .bind(write.is_staff)
+        .bind(&write.token)
+        .bind(write.token_updated_at)
+        .bind(now)
+        .bind(user_id)
+        .execute(ex)
+        .await
+        .map(|_| ())
+}
+
+/// `UserAssetsV2Endpoint.entity_asset_delete` (`v2.py:80-107`):
+/// clears the cover link FK only, plus the full `user.save()`
+/// column effects.
+const USER_COVER_UNLINK_SQL: &str = "UPDATE \"users\" SET \"cover_image_asset_id\" = NULL, \"email\" = $1, \"display_name\" = $2, \"is_staff\" = $3, \"token\" = $4, \"token_updated_at\" = $5, \"updated_at\" = $6 WHERE \"id\" = $7";
+
+/// Clear one user row's cover link FK.
+pub async fn unlink_cover_asset<'e, E>(
+    ex: E,
+    user_id: Uuid,
+    write: &pidash_db::ops::users::UserSaveWrite,
+    now: DateTime<Utc>,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(USER_COVER_UNLINK_SQL)
+        .bind(&write.email)
+        .bind(&write.display_name)
+        .bind(write.is_staff)
+        .bind(&write.token)
+        .bind(write.token_updated_at)
+        .bind(now)
+        .bind(user_id)
+        .execute(ex)
+        .await
+        .map(|_| ())
+}
+
+// ---------------------------------------------------------------------------
+// notification-preference PATCH (executor-generic; dynamic SET list)
+// ---------------------------------------------------------------------------
+
+/// One validated PATCH column write for
+/// [`save_preference_columns`].
+pub enum PreferenceColumn {
+    Stamp(Option<DateTime<Utc>>),
+    Id(Option<Uuid>),
+    Flag(bool),
+}
+
+/// `serializer.save()` (`base.py:306`): the validated columns plus
+/// `updated_at`/`updated_by` (`BaseModel.save` stamps the updater
+/// through crum on every update — `db/models/base.py:23-44`). The
+/// SET list is caller-ordered (fixed push order at the call site);
+/// `$1` is the row id, `$2`/`$3` the stamps, `$4+` the columns.
+pub async fn save_preference_columns<'e, E>(
+    ex: E,
+    id: Uuid,
+    now: DateTime<Utc>,
+    user_id: Uuid,
+    columns: &[(&str, PreferenceColumn)],
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let mut sql = String::from(
+        "UPDATE \"user_notification_preferences\" SET \"updated_at\" = $2, \"updated_by_id\" = $3",
+    );
+    for (index, (column, _)) in columns.iter().enumerate() {
+        sql.push_str(&format!(", \"{column}\" = ${}", index + 4));
+    }
+    sql.push_str(" WHERE \"id\" = $1");
+    let mut query = sqlx::query(&sql).bind(id).bind(now).bind(user_id);
+    for (_, value) in columns {
+        query = match value {
+            PreferenceColumn::Stamp(stamp) => query.bind(*stamp),
+            PreferenceColumn::Id(owner) => query.bind(*owner),
+            PreferenceColumn::Flag(flag) => query.bind(*flag),
+        };
+    }
+    query.execute(ex).await.map(|_| ())
+}
+
+// ---------------------------------------------------------------------------
 // get_or_create_profile (login redirection path)
 // ---------------------------------------------------------------------------
 
@@ -2289,6 +2459,26 @@ mod tests {
         assert_eq!(ip, "", "login ip untouched");
     }
 
+    #[test]
+    fn asset_link_sql_matches_handler_text() {
+        assert_eq!(
+            USER_AVATAR_LINK_SQL,
+            "UPDATE \"users\" SET \"avatar\" = $1, \"avatar_asset_id\" = $2, \"email\" = $3, \"display_name\" = $4, \"is_staff\" = $5, \"token\" = $6, \"token_updated_at\" = $7, \"updated_at\" = $8 WHERE \"id\" = $9"
+        );
+        assert_eq!(
+            USER_COVER_LINK_SQL,
+            "UPDATE \"users\" SET \"cover_image\" = NULL, \"cover_image_asset_id\" = $1, \"email\" = $2, \"display_name\" = $3, \"is_staff\" = $4, \"token\" = $5, \"token_updated_at\" = $6, \"updated_at\" = $7 WHERE \"id\" = $8"
+        );
+        assert_eq!(
+            USER_AVATAR_UNLINK_SQL,
+            "UPDATE \"users\" SET \"avatar_asset_id\" = NULL, \"email\" = $1, \"display_name\" = $2, \"is_staff\" = $3, \"token\" = $4, \"token_updated_at\" = $5, \"updated_at\" = $6 WHERE \"id\" = $7"
+        );
+        assert_eq!(
+            USER_COVER_UNLINK_SQL,
+            "UPDATE \"users\" SET \"cover_image_asset_id\" = NULL, \"email\" = $1, \"display_name\" = $2, \"is_staff\" = $3, \"token\" = $4, \"token_updated_at\" = $5, \"updated_at\" = $6 WHERE \"id\" = $7"
+        );
+    }
+
     // -- moved agent-user pins (from db::orchestration::workpad) ---------------
 
     static AGENT_USER_FIXTURE: &str =
@@ -2757,6 +2947,95 @@ mod tests {
             assert_eq!(last_active, Some(now), "insert-time last_active");
             assert_eq!(avatar, "", "insert-time avatar");
         }
+    }
+
+    /// The v2 asset link/unlink twins and the preference-columns
+    /// save round-trip through the temp tables with the same binds
+    /// the handlers pass.
+    #[tokio::test]
+    async fn live_asset_link_and_preference_columns() {
+        let Some(pool) = live_single_pool().await else {
+            return;
+        };
+        for ddl in [USERS_DDL, PREFS_DDL] {
+            sqlx::query(ddl)
+                .execute(&pool)
+                .await
+                .expect("temp identity tables");
+        }
+        let now: DateTime<Utc> = "2026-10-27T12:00:00+00:00".parse().expect("T0");
+        let user = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (password, id, username, display_name, first_name, last_name, avatar, date_joined, created_at, updated_at, last_location, created_location, is_superuser, is_managed, is_password_expired, is_active, is_staff, is_email_verified, is_password_autoset, is_password_reset_required, token, last_login_ip, last_logout_ip, last_login_medium, last_login_uagent, is_bot, user_timezone, is_email_valid) VALUES ('x', $1, 'u', 'U', 'F', 'L', '', $2, $2, $2, '', '', FALSE, FALSE, FALSE, TRUE, FALSE, FALSE, FALSE, FALSE, 'tok', '', '', '', '', FALSE, 'UTC', TRUE)",
+        )
+        .bind(user)
+        .bind(now)
+        .execute(&pool)
+        .await
+        .expect("user row");
+        let write = pidash_db::ops::users::UserSaveWrite {
+            email: "u@example.test".to_owned(),
+            display_name: "U".to_owned(),
+            is_staff: false,
+            token: "tok".to_owned(),
+            token_updated_at: None,
+        };
+        let avatar_asset = Uuid::new_v4();
+        link_avatar_asset(&pool, user, avatar_asset, &write, now)
+            .await
+            .expect("avatar link");
+        let linked: (String, Option<Uuid>, String) =
+            sqlx::query_as("SELECT avatar, avatar_asset_id, email FROM users WHERE id = $1")
+                .bind(user)
+                .fetch_one(&pool)
+                .await
+                .expect("read back");
+        assert_eq!(linked.0, "");
+        assert_eq!(linked.1, Some(avatar_asset));
+        assert_eq!(linked.2, "u@example.test");
+        unlink_avatar_asset(&pool, user, &write, now)
+            .await
+            .expect("avatar unlink");
+        let cover_asset = Uuid::new_v4();
+        link_cover_asset(&pool, user, cover_asset, &write, now)
+            .await
+            .expect("cover link");
+        let cover: (Option<String>, Option<Uuid>, Option<Uuid>) = sqlx::query_as(
+            "SELECT cover_image, cover_image_asset_id, avatar_asset_id FROM users WHERE id = $1",
+        )
+        .bind(user)
+        .fetch_one(&pool)
+        .await
+        .expect("read back");
+        assert_eq!(cover, (None, Some(cover_asset), None));
+        unlink_cover_asset(&pool, user, &write, now)
+            .await
+            .expect("cover unlink");
+        let pref = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO user_notification_preferences (id, created_at, updated_at, user_id, property_change, state_change, comment, mention, issue_completed) VALUES ($1, $2, $2, $3, TRUE, TRUE, TRUE, TRUE, TRUE)",
+        )
+        .bind(pref)
+        .bind(now)
+        .bind(user)
+        .execute(&pool)
+        .await
+        .expect("preference row");
+        let columns = [
+            ("comment", PreferenceColumn::Flag(false)),
+            ("project_id", PreferenceColumn::Id(None)),
+        ];
+        save_preference_columns(&pool, pref, now, user, &columns)
+            .await
+            .expect("preference save");
+        let saved: (bool, Option<Uuid>, Option<Uuid>) = sqlx::query_as(
+            "SELECT comment, project_id, updated_by_id FROM user_notification_preferences WHERE id = $1",
+        )
+        .bind(pref)
+        .fetch_one(&pool)
+        .await
+        .expect("read back");
+        assert_eq!(saved, (false, None, Some(user)));
     }
 
     fn assert_not_null_violation(err: &sqlx::Error) {

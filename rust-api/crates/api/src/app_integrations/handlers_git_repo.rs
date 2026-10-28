@@ -1982,19 +1982,16 @@ async fn bind_transaction(
     .await
     .map_err(|_| RepoDenial::ServerError)?;
     let clone_url = canonical_clone_url(remote, &parsed.clone_url);
-    let mut updates: Vec<(&str, String)> = Vec::new();
+    use pidash_services::domain::projects::ProjectTextField;
+    let mut updates: Vec<(ProjectTextField, String)> = Vec::new();
     if project_repo_url != clone_url {
-        updates.push(("repo_url", clone_url));
+        updates.push((ProjectTextField::RepoUrl, clone_url));
     }
     if !remote.default_branch.is_empty() && project_base_branch.is_empty() {
-        updates.push(("base_branch", remote.default_branch.clone()));
+        updates.push((ProjectTextField::BaseBranch, remote.default_branch.clone()));
     }
-    for (column, value) in updates {
-        let sql = format!("UPDATE projects SET {column} = $1 WHERE id = $2");
-        sqlx::query(&sql)
-            .bind(value)
-            .bind(project_id)
-            .execute(&mut *tx)
+    for (field, value) in updates {
+        pidash_services::domain::projects::stamp_text_field(&mut *tx, field, &value, *project_id)
             .await
             .map_err(|_| RepoDenial::ServerError)?;
     }

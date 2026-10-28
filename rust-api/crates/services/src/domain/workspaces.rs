@@ -201,6 +201,63 @@ where
 }
 
 // ---------------------------------------------------------------------------
+// logo asset link (executor-generic; the v2 file-asset writes)
+// ---------------------------------------------------------------------------
+
+/// `WorkspaceFileAssetEndpoint.entity_asset_save`
+/// (`v2.py:247-284`): the logo link plus the full
+/// `workspace.save()` stamps (`auto_now` `updated_at`, crum
+/// `updated_by`). The previous-asset delete stays at the caller.
+const LOGO_LINK_SQL: &str = "UPDATE \"workspaces\" SET \"logo\" = $1, \"logo_asset_id\" = $2, \"updated_at\" = $3, \"updated_by_id\" = $4 WHERE \"id\" = $5";
+
+/// Link a logo asset onto one workspace row
+/// (`logo = ""`, the ported empty-string write).
+pub async fn stamp_logo<'e, E>(
+    ex: E,
+    workspace_id: Uuid,
+    asset_id: Uuid,
+    now: DateTime<Utc>,
+    actor_id: &Uuid,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(LOGO_LINK_SQL)
+        .bind("")
+        .bind(asset_id)
+        .bind(now)
+        .bind(actor_id)
+        .bind(workspace_id)
+        .execute(ex)
+        .await
+        .map(|_| ())
+}
+
+/// `WorkspaceFileAssetEndpoint.entity_asset_delete`
+/// (`v2.py:286-312`): clear the logo link FK plus the full
+/// `workspace.save()` stamps.
+const LOGO_UNLINK_SQL: &str = "UPDATE \"workspaces\" SET \"logo_asset_id\" = NULL, \"updated_at\" = $1, \"updated_by_id\" = $2 WHERE \"id\" = $3";
+
+/// Clear one workspace row's logo link FK.
+pub async fn clear_logo_asset<'e, E>(
+    ex: E,
+    workspace_id: Uuid,
+    now: DateTime<Utc>,
+    actor_id: &Uuid,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(LOGO_UNLINK_SQL)
+        .bind(now)
+        .bind(actor_id)
+        .bind(workspace_id)
+        .execute(ex)
+        .await
+        .map(|_| ())
+}
+
+// ---------------------------------------------------------------------------
 // members
 // ---------------------------------------------------------------------------
 
@@ -802,6 +859,14 @@ mod tests {
         assert!(!MEMBER_INSERT_DB_NOW_SQL.contains("ON CONFLICT"));
         assert_eq!(RENAME_SQL, "UPDATE workspaces SET slug = $1 WHERE id = $2");
         assert!(!RENAME_SQL.contains("updated_at"));
+        assert_eq!(
+            LOGO_LINK_SQL,
+            "UPDATE \"workspaces\" SET \"logo\" = $1, \"logo_asset_id\" = $2, \"updated_at\" = $3, \"updated_by_id\" = $4 WHERE \"id\" = $5"
+        );
+        assert_eq!(
+            LOGO_UNLINK_SQL,
+            "UPDATE \"workspaces\" SET \"logo_asset_id\" = NULL, \"updated_at\" = $1, \"updated_by_id\" = $2 WHERE \"id\" = $3"
+        );
     }
 
     #[test]
@@ -1001,6 +1066,53 @@ mod tests {
             err.as_database_error().and_then(|db| db.code()).as_deref(),
             Some("23505")
         );
+    }
+
+    /// The logo link/unlink twins stamp the temp row with the same
+    /// binds the v2 asset paths pass.
+    #[tokio::test]
+    async fn live_logo_link_round_trip() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        sqlx::query(WORKSPACES_DDL)
+            .execute(&pool)
+            .await
+            .expect("temp workspaces");
+        let now: DateTime<Utc> = "2026-10-03T12:00:00+00:00".parse().expect("T0");
+        let ws = Uuid::new_v4();
+        let actor = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO workspaces (id, created_at, updated_at, name, owner_id, slug, timezone, background_color) VALUES ($1, $2, $2, 'Acme', $3, 'acme', 'UTC', '#fff')",
+        )
+        .bind(ws)
+        .bind(now)
+        .bind(actor)
+        .execute(&pool)
+        .await
+        .expect("workspace row");
+        let asset = Uuid::new_v4();
+        stamp_logo(&pool, ws, asset, now, &actor)
+            .await
+            .expect("logo link");
+        let linked: (Option<String>, Option<Uuid>, Option<Uuid>) = sqlx::query_as(
+            "SELECT logo, logo_asset_id, updated_by_id FROM workspaces WHERE id = $1",
+        )
+        .bind(ws)
+        .fetch_one(&pool)
+        .await
+        .expect("read back");
+        assert_eq!(linked, (Some(String::new()), Some(asset), Some(actor)));
+        clear_logo_asset(&pool, ws, now, &actor)
+            .await
+            .expect("logo unlink");
+        let unlinked: Option<Uuid> =
+            sqlx::query_scalar("SELECT logo_asset_id FROM workspaces WHERE id = $1")
+                .bind(ws)
+                .fetch_one(&pool)
+                .await
+                .expect("read back");
+        assert_eq!(unlinked, None);
     }
 
     /// `add` inserts the full row; the ignore arm replays Django's
