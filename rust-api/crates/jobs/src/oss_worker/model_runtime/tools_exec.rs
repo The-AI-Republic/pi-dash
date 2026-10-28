@@ -82,9 +82,11 @@ use pidash_services::dispatch::tools as plan;
 use pidash_services::dispatch::{
     admission::AdmissionCache, consume_admission_token, DeferredConsume, LlmProfile,
 };
+use pidash_services::domain::comments as comment_domain;
 use pidash_services::domain::identity::AgentUserCollisionError;
 use pidash_services::domain::issues as domain_issues;
 use pidash_services::domain::issues::IssueFieldSet;
+use pidash_services::domain::relations as relation_domain;
 use pidash_services::domain::{self, WriteActor, WriteCtx, WriteScope};
 use pidash_services::extensions::CloudAgentToolsetsSeam;
 use pidash_services::orchestration::clock::{ClockWrite, ProjectClockPolicy};
@@ -1026,36 +1028,47 @@ async fn op_add_current_issue_comment(
     } else {
         ml_strip_tags(&html)
     };
-    let comment_id = Uuid::new_v4();
-    let description_id = Uuid::new_v4();
+    // Domain executor twins, in Django order. One `now()` read feeds
+    // all four stamps; the description row reuses the comment's
+    // ML-stripped text (a ported quirk — Django's `Description.save`
+    // would recompute with `strip_tags`; see PIDASHCONV-1581).
     let now = Utc::now();
-    sqlx::query(plan::COMMENT_INSERT_SQL)
-        .bind(comment_id)
-        .bind(now)
-        .bind(scope.creator_id)
-        .bind(scope.workspace_id)
-        .bind(issue.project_id)
-        .bind(stripped.as_str())
-        .bind(html.as_str())
-        .bind(issue.id)
-        .bind(scope.run_id)
-        .execute(&mut **tx.inner())
+    let empty_json = Value::Object(Default::default());
+    let empty_list: Vec<String> = Vec::new();
+    let rows = comment_domain::CommentRows {
+        id: Uuid::new_v4(),
+        description_id: Uuid::new_v4(),
+        created_at: now,
+        updated_at: now,
+        desc_created_at: now,
+        desc_updated_at: now,
+        workspace_id: scope.workspace_id,
+        project_id: issue.project_id,
+        issue_id: issue.id,
+        actor_id: Some(scope.creator_id),
+        created_by: Some(scope.creator_id),
+        updated_by: None,
+        deleted_at: None,
+        html: html.as_str(),
+        json: &empty_json,
+        stripped: stripped.as_str(),
+        desc_stripped: Some(stripped.as_str()),
+        access: "INTERNAL",
+        speaker_type: "agent",
+        speaker_label: "Pi Dash Cloud Agent",
+        speaker_agent_run_id: Some(scope.run_id),
+        external_id: None,
+        external_source: None,
+        parent_id: None,
+        attachments: &empty_list,
+        labels: &empty_list,
+        edited_at: None,
+    };
+    comment_domain::insert_comment_row(&mut **tx.inner(), &rows).await?;
+    comment_domain::insert_description_row(&mut **tx.inner(), &rows).await?;
+    comment_domain::link_comment_description(&mut **tx.inner(), rows.id, rows.description_id)
         .await?;
-    sqlx::query(plan::COMMENT_DESCRIPTION_INSERT_SQL)
-        .bind(description_id)
-        .bind(now)
-        .bind(scope.creator_id)
-        .bind(scope.workspace_id)
-        .bind(issue.project_id)
-        .bind(html.as_str())
-        .bind(stripped.as_str())
-        .execute(&mut **tx.inner())
-        .await?;
-    sqlx::query(plan::COMMENT_DESCRIPTION_LINK_SQL)
-        .bind(comment_id)
-        .bind(description_id)
-        .execute(&mut **tx.inner())
-        .await?;
+    let comment_id = rows.id;
     let created = plan::comment_created(&comment_id.to_string());
     serde_json::to_value(created)
         .map_err(|error| ToolExecError::Failure(plan::ToolCallFailure::Failed(error.to_string())))
@@ -2545,34 +2558,23 @@ async fn relate_insert_tx(
     tx: &mut Transaction<'_>,
     row: &rel::RelateInsert,
 ) -> Result<(), ToolExecError> {
-    let sql = render_named_params(
-        &rel::relate_insert_sql(),
-        &[
-            ("related_issue_id", 7),
-            ("workspace_id", 5),
-            ("stored_type", 8),
-            ("project_id", 4),
-            ("actor_id", 3),
-            ("issue_id", 6),
-            ("now", 2),
-            ("id", 1),
-        ],
-    );
     let now = Utc::now();
     sqlx::query("SAVEPOINT relate_target")
         .execute(&mut **tx.inner())
         .await?;
-    let inserted = sqlx::query(&sql)
-        .bind(row.id)
-        .bind(now)
-        .bind(row.created_by_id)
-        .bind(row.project_id)
-        .bind(row.workspace_id)
-        .bind(row.issue_id)
-        .bind(row.related_issue_id)
-        .bind(row.relation_type.as_str())
-        .execute(&mut **tx.inner())
-        .await;
+    let value = relation_domain::RelationRow {
+        id: row.id,
+        created_at: now,
+        updated_at: now,
+        created_by: Some(row.created_by_id),
+        updated_by: row.updated_by_id,
+        project_id: row.project_id,
+        workspace_id: row.workspace_id,
+        issue_id: row.issue_id,
+        related_issue_id: row.related_issue_id,
+        relation_type: row.relation_type.as_str(),
+    };
+    let inserted = relation_domain::relate_row(&mut **tx.inner(), &value).await;
     match inserted {
         Ok(_) => {
             sqlx::query("RELEASE SAVEPOINT relate_target")
@@ -2632,16 +2634,14 @@ async fn op_unrelate_issues(
         }
         for row in matching {
             let now = Utc::now();
-            let sql = render_named_params(
-                &rel::unrelate_delete_sql(),
-                &[("actor_id", 2), ("row_id", 3), ("now", 1)],
-            );
-            sqlx::query(&sql)
-                .bind(now)
-                .bind(scope.creator_id)
-                .bind(row.id)
-                .execute(&mut **tx.inner())
-                .await?;
+            relation_domain::soft_delete_relation_row(
+                &mut **tx.inner(),
+                row.id,
+                scope.creator_id,
+                now,
+                now,
+            )
+            .await?;
             enqueue_sweep(tx, "issuerelation", &row.id.to_string()).await?;
         }
         removed.push(target.identifier());

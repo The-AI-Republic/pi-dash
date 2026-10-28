@@ -109,6 +109,7 @@ use pidash_compat::py::python_dumps;
 use pidash_compat::response::json_response;
 use pidash_compat::validate::push_error;
 use pidash_db::app_pages::strip::ml_strip_tags;
+use pidash_services::domain::comments as comment_domain;
 use pidash_services::read::{self, ActorDetailView, CommentReactionView, CommentRow, CommentView};
 use pidash_services::space::{guards, queries};
 
@@ -1444,53 +1445,60 @@ async fn comment_create_inner(
     // `IssueComment.save` runs the comment insert, the `Description` mirror
     // insert and the link update inside one `transaction.atomic()` block
     // (`db/models/issue.py:598-627`): a mid-save failure leaves no rows.
+    let issue = uuid::Uuid::parse_str(issue_id).map_err(|_| HandlerError::ServerError)?;
+    let edited_at: Option<chrono::DateTime<chrono::Utc>> = input
+        .edited_at
+        .clone()
+        .flatten()
+        .map(|text| parse_input_datetime(&text).ok_or(HandlerError::ServerError))
+        .transpose()?;
+    // Domain twins, in Django order; one `now()` feeds all four stamps.
+    // `access` is always `EXTERNAL`. The old link carried `AND
+    // deleted_at IS NULL`: provably a no-op (the row was inserted
+    // uncommitted in this transaction, so no concurrent delete can land
+    // first), dropped with the shared twin.
+    let external_source = input.external_source.clone().flatten();
+    let external_id = input.external_id.clone().flatten();
+    let desc_stripped = description_stripped_for_create(&html);
+    let rows = comment_domain::CommentRows {
+        id: comment_id,
+        description_id: uuid::Uuid::new_v4(),
+        created_at: now,
+        updated_at: now,
+        desc_created_at: now,
+        desc_updated_at: now,
+        workspace_id,
+        project_id,
+        issue_id: issue,
+        actor_id: Some(actor.id),
+        created_by: Some(actor.id),
+        updated_by: None,
+        deleted_at: None,
+        html: &html,
+        json: &comment_json,
+        stripped: &stripped,
+        desc_stripped: desc_stripped.as_deref(),
+        access: "EXTERNAL",
+        speaker_type: input.speaker_type.as_deref().unwrap_or("human"),
+        speaker_label: input.speaker_label.as_deref().unwrap_or(""),
+        speaker_agent_run_id: input.speaker_agent_run_id.flatten(),
+        external_id: external_id.as_deref(),
+        external_source: external_source.as_deref(),
+        parent_id: input.parent_id.flatten(),
+        attachments: &attachments,
+        labels: &labels,
+        edited_at,
+    };
     let mut tx = pool.begin().await.map_err(|_| HandlerError::ServerError)?;
-    insert_comment(
-        &mut tx,
-        &comment_id,
-        &now,
-        &actor.id,
-        &workspace_id,
-        &project_id,
-        issue_id,
-        &stripped,
-        &comment_json,
-        &html,
-        &attachments,
-        &labels,
-        &input,
-    )
-    .await?;
-    // The `Description` mirror row (`IssueComment.save`, `:604-623`):
-    // workspace/project follow the comment, `created_by` is the actor,
-    // `updated_by` stays NULL on create. `Description.save` recomputes the
-    // stripped text with Django's verbatim `strip_tags`, not the ML value.
-    let description_id = uuid::Uuid::new_v4();
-    sqlx::query("INSERT INTO descriptions (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, project_id, description_stripped, description_json, description_html, description_binary) VALUES ($1, $2, $2, $3, NULL, NULL, $4, $5, $6, $7, $8, NULL)")
-        .bind(description_id)
-        .bind(now)
-        .bind(actor.id)
-        .bind(workspace_id)
-        .bind(project_id)
-        .bind(description_stripped_for_create(&html))
-        .bind(&comment_json)
-        .bind(&html)
-        .execute(&mut *tx)
+    comment_domain::insert_comment_row(&mut *tx, &rows)
+        .await
+        .map_err(integrity_error)?;
+    comment_domain::insert_description_row(&mut *tx, &rows)
         .await
         .map_err(|_| HandlerError::ServerError)?;
-    // The description link is a second `save(update_fields=["description_id"])`
-    // (`IssueComment.save`, `:620-627`): `update_fields` restricts the UPDATE
-    // to exactly that column, so `updated_by`/`updated_at` stay NULL and
-    // `created_at` in the row (same shape as
-    // `app_issues/handlers_engage.rs:5104-5116`).
-    sqlx::query(
-        "UPDATE issue_comments SET description_id = $1 WHERE id = $2 AND deleted_at IS NULL",
-    )
-    .bind(description_id)
-    .bind(comment_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(|_| HandlerError::ServerError)?;
+    comment_domain::link_comment_description(&mut *tx, rows.id, rows.description_id)
+        .await
+        .map_err(|_| HandlerError::ServerError)?;
     tx.commit().await.map_err(|_| HandlerError::ServerError)?;
     let row = fetch_comment_by_id(pool, &comment_id)
         .await?
@@ -1533,57 +1541,6 @@ fn string_list(value: &Value) -> Result<Vec<String>, HandlerError> {
             .collect(),
         _ => Err(HandlerError::ServerError),
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn insert_comment(
-    ex: &mut sqlx::PgConnection,
-    comment_id: &uuid::Uuid,
-    now: &chrono::DateTime<chrono::Utc>,
-    actor_id: &uuid::Uuid,
-    workspace_id: &uuid::Uuid,
-    project_id: &uuid::Uuid,
-    issue_id: &str,
-    stripped: &str,
-    comment_json: &Value,
-    html: &str,
-    attachments: &[String],
-    labels: &[String],
-    input: &CommentInput,
-) -> Result<(), HandlerError> {
-    let issue = uuid::Uuid::parse_str(issue_id).map_err(|_| HandlerError::ServerError)?;
-    let edited_at: Option<chrono::DateTime<chrono::Utc>> = input
-        .edited_at
-        .clone()
-        .flatten()
-        .map(|text| parse_input_datetime(&text).ok_or(HandlerError::ServerError))
-        .transpose()?;
-    let result = sqlx::query("INSERT INTO issue_comments (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, project_id, comment_stripped, comment_json, comment_html, description_id, attachments, labels, issue_id, actor_id, access, external_source, external_id, speaker_type, speaker_label, speaker_agent_run_id, edited_at, parent_id) VALUES ($1, $2, $2, $3, NULL, NULL, $4, $5, $6, $7, $8, NULL, $9, $10, $11, $3, 'EXTERNAL', $12, $13, $14, $15, $16, $17, $18)")
-        .bind(comment_id)
-        .bind(now)
-        .bind(actor_id)
-        .bind(workspace_id)
-        .bind(project_id)
-        .bind(stripped)
-        .bind(comment_json)
-        .bind(html)
-        .bind(attachments)
-        .bind(labels)
-        .bind(issue)
-        .bind(input.external_source.clone().flatten().as_deref())
-        .bind(input.external_id.clone().flatten().as_deref())
-        .bind(input.speaker_type.as_deref().unwrap_or("human"))
-        .bind(input.speaker_label.as_deref().unwrap_or(""))
-        .bind(input.speaker_agent_run_id.flatten())
-        .bind(edited_at)
-        .bind(input.parent_id.flatten())
-        .execute(&mut *ex)
-        .await
-        .map_err(integrity_error)?;
-    if result.rows_affected() != 1 {
-        return Err(HandlerError::ServerError);
-    }
-    Ok(())
 }
 
 async fn fetch_comment_by_id(
@@ -1851,22 +1808,25 @@ async fn apply_comment_update(
             .transpose()
             .map_err(|_| HandlerError::ServerError)?
             .ok_or(HandlerError::ServerError)?;
-        let description_id = uuid::Uuid::new_v4();
-        sqlx::query("INSERT INTO descriptions (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, project_id, description_stripped, description_json, description_html, description_binary) VALUES ($1, $2, $2, $3, $4, NULL, $5, $6, $7, $8, $9, NULL)")
-            .bind(description_id)
-            .bind(now)
-            .bind(parse_old_uuid(&old.created_by)?)
-            .bind(parse_old_uuid(&old.updated_by)?)
-            .bind(workspace_id)
-            .bind(project_id)
-            // A relinked Description is a fresh `create()`, so its stripped
-            // text is the `Description.save` recompute, not the ML value.
-            .bind(description_stripped_for_create(&new_html))
-            .bind(&comment_json)
-            .bind(&new_html)
-            .execute(pool)
+        // A relinked Description is a fresh `create()`, so its stripped
+        // text is the `Description.save` recompute, not the ML value.
+        let desc_stripped = description_stripped_for_create(&new_html);
+        let desc = comment_domain::DescriptionValues {
+            id: uuid::Uuid::new_v4(),
+            created_at: *now,
+            updated_at: *now,
+            created_by: parse_old_uuid(&old.created_by)?,
+            updated_by: parse_old_uuid(&old.updated_by)?,
+            workspace_id,
+            project_id,
+            json: &comment_json,
+            html: &new_html,
+            stripped: desc_stripped.as_deref(),
+        };
+        comment_domain::insert_description_values(pool, &desc)
             .await
             .map_err(|_| HandlerError::ServerError)?;
+        let description_id = desc.id;
         let relinked_at = chrono::Utc::now();
         sqlx::query("UPDATE issue_comments SET description_id = $1, updated_by_id = $2, updated_at = $3 WHERE id = $4 AND deleted_at IS NULL")
             .bind(description_id)

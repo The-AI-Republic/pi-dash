@@ -638,7 +638,7 @@ impl ChainOutcome {
         *self.stop.lock().expect("chain outcome lock")
     }
 
-    fn record(&self, stop: ChainStop) {
+    pub(crate) fn record(&self, stop: ChainStop) {
         *self.stop.lock().expect("chain outcome lock") = Some(stop);
     }
 }

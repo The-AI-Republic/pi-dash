@@ -80,6 +80,7 @@ use pidash_compat::db::is_integrity_error;
 use pidash_compat::py::{layout_py_float, python_dumps};
 use pidash_compat::response::{empty_response, json_response};
 use pidash_db::app_pages::strip::ml_strip_tags;
+use pidash_services::domain::comments as comment_domain;
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -4390,90 +4391,6 @@ fn splice_and(sql: &str, predicate: &str) -> String {
     }
 }
 
-/// Insert a `descriptions` row: the comment-save side effect
-/// (`db/models/issue.py:613-617`). Audit comes from the comment save
-/// (`created_by` is the acting user on create, the comment's original
-/// creator on an update-mint; `updated_by` is set only on the latter);
-/// `stripped` arrives already resolved (`None` when the html is empty —
-/// `Description.save` recomputes it).
-#[allow(clippy::too_many_arguments)]
-async fn insert_description(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    workspace_id: &uuid::Uuid,
-    project_id: &uuid::Uuid,
-    created_by: Option<&uuid::Uuid>,
-    updated_by: Option<&uuid::Uuid>,
-    json: &Value,
-    html: &str,
-    stripped: Option<&str>,
-    now: &chrono::DateTime<chrono::Utc>,
-) -> Result<uuid::Uuid, Denial> {
-    let id = uuid::Uuid::new_v4();
-    sqlx::query(
-        r#"INSERT INTO descriptions (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
-            workspace_id, project_id, description_json, description_html, description_binary, description_stripped)
-           VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, $8, $9, NULL, $10)"#,
-    )
-    .bind(id)
-    .bind(now)
-    .bind(now)
-    .bind(created_by)
-    .bind(updated_by)
-    .bind(workspace_id)
-    .bind(project_id)
-    .bind(json)
-    .bind(html)
-    .bind(stripped)
-    .execute(&mut **tx)
-    .await
-    .map_err(integrity_denial)?;
-    Ok(id)
-}
-
-/// Insert an `issue_comments` row: every concrete column, Django's
-/// `objects.create` shape.
-#[allow(clippy::too_many_arguments)]
-async fn insert_comment(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    base: &CommentBaseOwned,
-) -> Result<(), Denial> {
-    sqlx::query(
-        r#"INSERT INTO issue_comments (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
-            project_id, workspace_id, comment_stripped, comment_json, comment_html, description_id,
-            attachments, labels, issue_id, actor_id, access, external_source, external_id,
-            speaker_type, speaker_label, speaker_agent_run_id, edited_at, parent_id)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)"#,
-    )
-    .bind(base.id)
-    .bind(base.created_at)
-    .bind(base.updated_at)
-    .bind(base.created_by)
-    .bind(base.updated_by)
-    .bind(base.deleted_at)
-    .bind(base.project_id)
-    .bind(base.workspace_id)
-    .bind(&base.stripped)
-    .bind(&base.json)
-    .bind(&base.html)
-    .bind(base.description_id)
-    .bind(&base.attachments)
-    .bind(&base.labels)
-    .bind(base.issue_id)
-    .bind(base.actor_id)
-    .bind(&base.access)
-    .bind(base.external_source.as_deref())
-    .bind(base.external_id.as_deref())
-    .bind(&base.speaker_type)
-    .bind(&base.speaker_label)
-    .bind(base.speaker_run_id)
-    .bind(base.edited_at)
-    .bind(base.parent_id)
-    .execute(&mut **tx)
-    .await
-    .map_err(integrity_denial)?;
-    Ok(())
-}
-
 /// The `IssueComment.save()` update path (`issue.py:598-647`): recompute
 /// `comment_stripped`, sync the `Description` triple for the changed
 /// fields (or mint one when unlinked), stamp audit. Returns the saved
@@ -4516,26 +4433,29 @@ async fn save_comment_update(
     let stripped_changed = stripped != stored.stripped;
     let description_id = if description_id.is_none() {
         // Unlinked (or cleared): mint a fresh Description over the new
-        // triple, `None`-when-empty stripped included.
-        let stripped_for_desc = if html.is_empty() {
-            None
-        } else {
-            Some(stripped.as_str())
+        // triple, `None`-when-empty stripped included. The stripped
+        // value is the comment's ML text (the preserved 1581-item-1
+        // quirk, as on the create path).
+        let desc = comment_domain::DescriptionValues {
+            id: uuid::Uuid::new_v4(),
+            created_at: *now,
+            updated_at: *now,
+            created_by: stored.created_by,
+            updated_by: Some(*user_id),
+            workspace_id: stored.workspace_id,
+            project_id: stored.project_id,
+            json: &json,
+            html: &html,
+            stripped: if html.is_empty() {
+                None
+            } else {
+                Some(stripped.as_str())
+            },
         };
-        Some(
-            insert_description(
-                tx,
-                &stored.workspace_id,
-                &stored.project_id,
-                stored.created_by.as_ref(),
-                Some(user_id),
-                &json,
-                &html,
-                stripped_for_desc,
-                now,
-            )
-            .await?,
-        )
+        comment_domain::insert_description_values(&mut **tx, &desc)
+            .await
+            .map_err(integrity_denial)?;
+        Some(desc.id)
     } else {
         if html_changed || json_changed || stripped_changed {
             // Queryset `update` bypasses `Description.save`: the values
@@ -4911,43 +4831,73 @@ async fn comment_create(
         Ok(tx) => tx,
         Err(_) => return Denial::ServerError.into_response(),
     };
-    if let Err(error) = insert_comment(&mut tx, &base).await {
-        return error.into_response();
+    // Domain twins, in Django order. The description stripped value
+    // is the comment's ML text (a ported quirk — Django's
+    // `Description.save` would recompute with `strip_tags`; see
+    // PIDASHCONV-1581 item 1). `deleted_at` binds validated client
+    // input, as before.
+    let rows = comment_domain::CommentRows {
+        id: base.id,
+        description_id: uuid::Uuid::new_v4(),
+        created_at: base.created_at,
+        updated_at: base.updated_at,
+        desc_created_at: now,
+        desc_updated_at: now,
+        workspace_id: base.workspace_id,
+        project_id: base.project_id,
+        issue_id: base.issue_id,
+        actor_id: base.actor_id,
+        created_by: base.created_by,
+        updated_by: base.updated_by,
+        deleted_at: base.deleted_at,
+        html: &base.html,
+        json: &base.json,
+        stripped: &base.stripped,
+        desc_stripped: if base.html.is_empty() {
+            None
+        } else {
+            Some(base.stripped.as_str())
+        },
+        access: &base.access,
+        speaker_type: &base.speaker_type,
+        speaker_label: &base.speaker_label,
+        speaker_agent_run_id: base.speaker_run_id,
+        external_id: base.external_id.as_deref(),
+        external_source: base.external_source.as_deref(),
+        parent_id: base.parent_id,
+        attachments: &base.attachments,
+        labels: &base.labels,
+        edited_at: base.edited_at,
+    };
+    if let Err(error) = comment_domain::insert_comment_row(&mut *tx, &rows).await {
+        return integrity_denial(error).into_response();
     }
-    let stripped_for_desc = if base.html.is_empty() {
-        None
-    } else {
-        Some(base.stripped.as_str())
+    let desc = comment_domain::DescriptionValues {
+        id: rows.description_id,
+        created_at: now,
+        updated_at: now,
+        created_by: Some(user_id),
+        updated_by: None,
+        workspace_id,
+        project_id,
+        json: &base.json,
+        html: &base.html,
+        stripped: rows.desc_stripped,
     };
-    let description_id = match insert_description(
-        &mut tx,
-        &workspace_id,
-        &project_id,
-        Some(&user_id),
-        None,
-        &base.json,
-        &base.html,
-        stripped_for_desc,
-        &now,
-    )
-    .await
-    {
-        Ok(id) => id,
-        Err(error) => return error.into_response(),
-    };
+    if let Err(error) = comment_domain::insert_description_values(&mut *tx, &desc).await {
+        return integrity_denial(error).into_response();
+    }
     // `update_fields=["description_id"]` writes that column only: the
     // `auto_now` stamp is skipped (in memory AND in the row — Django's
     // well-known `update_fields` gotcha), while `BaseModel.save` still
     // assigns `updated_by` on the in-memory instance.
-    if sqlx::query("UPDATE issue_comments SET description_id = $1 WHERE id = $2")
-        .bind(description_id)
-        .bind(base.id)
-        .execute(&mut *tx)
+    if comment_domain::link_comment_description(&mut *tx, base.id, rows.description_id)
         .await
         .is_err()
     {
         return Denial::ServerError.into_response();
     }
+    let description_id = rows.description_id;
     if tx.commit().await.is_err() {
         return Denial::ServerError.into_response();
     }

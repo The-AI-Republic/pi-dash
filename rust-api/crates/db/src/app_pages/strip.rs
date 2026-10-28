@@ -581,3 +581,133 @@ pub fn sync_description_stripped(description_html: Option<&str>) -> Option<Strin
         Some(html) => Some(ml_strip_tags(html)),
     }
 }
+
+/// Django's `django.utils.html.strip_tags` — what `Description.save()`
+/// (`description.py:23-29`) recomputes `description_stripped` with.
+/// Entities pass through verbatim (the `handle_entityref` arm), unlike
+/// [`ml_strip_tags`] which decodes them: `"a &amp; b"` stays
+/// `"a &amp; b"` here but becomes `"a & b"` there. Loop `_strip_once`
+/// while both `<` and `>` remain, stopping when an iteration stops
+/// removing `<` (verbatim Django algorithm). Canonical home for the
+/// port: the `api::space::sanitize` and
+/// `services::runner_runs::lifecycle` twins delegate here.
+pub fn django_strip_tags(value: &str) -> String {
+    let mut current = value.to_owned();
+    loop {
+        if !(current.contains('<') && current.contains('>')) {
+            break;
+        }
+        let next = django_strip_once(&current);
+        if next.matches('<').count() == current.matches('<').count() {
+            break;
+        }
+        current = next;
+    }
+    current
+}
+
+/// One Django `_strip_once` pass: collect text and verbatim entity
+/// references, skip tags (quote-aware), comments and declarations.
+fn django_strip_once(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = String::with_capacity(value.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte != b'<' {
+            // Copy one full char ('<' is ASCII, so byte detection never
+            // splits a multi-byte sequence; entities pass through verbatim
+            // like HTMLParser's handle_entityref/handle_charref arms).
+            let ch = value[index..].chars().next().expect("char boundary");
+            out.push(ch);
+            index += ch.len_utf8();
+            continue;
+        }
+        // At '<': comments, declarations, and tags are skipped.
+        if value[index..].starts_with("<!--") {
+            if let Some(end) = value[index..].find("-->") {
+                index += end + 3;
+            } else {
+                // Unterminated comment: HTMLParser bogus-comments to EOF.
+                break;
+            }
+            continue;
+        }
+        if value[index..].starts_with("<!") || value[index..].starts_with("<?") {
+            if let Some(end) = django_find_tag_end(&value[index..]) {
+                index += end;
+            } else {
+                out.push('<');
+                index += 1;
+            }
+            continue;
+        }
+        // A '<' followed by ASCII alpha or '/' opens a tag; anything else
+        // is literal text (HTMLParser parse-starttag rules).
+        let rest = &value[index + 1..];
+        let opener = rest.chars().next().unwrap_or('\0');
+        if opener.is_ascii_alphabetic() || opener == '/' {
+            if let Some(end) = django_find_tag_end(&value[index..]) {
+                index += end;
+                continue;
+            }
+        }
+        out.push('<');
+        index += 1;
+    }
+    out
+}
+
+/// Length in bytes of `<...>` starting at `text[0] == '<'`, respecting
+/// single/double quotes; `None` when unterminated.
+fn django_find_tag_end(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut quote: Option<u8> = None;
+    let mut index = 1;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if let Some(q) = quote {
+            if byte == q {
+                quote = None;
+            }
+        } else if byte == b'"' || byte == b'\'' {
+            quote = Some(byte);
+        } else if byte == b'>' {
+            return Some(index + 1);
+        }
+        index += 1;
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn django_strip_tags_matches_django_basics() {
+        // Vectors carried over from the `api::space::sanitize` twin plus
+        // entity cases verified against live `django.utils.html.strip_tags`.
+        assert_eq!(django_strip_tags("<p>why</p>"), "why");
+        assert_eq!(django_strip_tags("plain"), "plain");
+        assert_eq!(django_strip_tags(""), "");
+        assert_eq!(django_strip_tags("<p>a</p><p>b</p>"), "ab");
+        // Entities pass through verbatim (handle_entityref arm).
+        assert_eq!(django_strip_tags("a &amp; b"), "a &amp; b");
+        assert_eq!(django_strip_tags("<p>a &amp; b</p>"), "a &amp; b");
+        assert_eq!(django_strip_tags("R&D"), "R&D");
+        // Bare '<' without '>' is literal; the loop never runs.
+        assert_eq!(django_strip_tags("a < b"), "a < b");
+        // Bare '<' with '>' elsewhere but no tag: kept literally.
+        assert_eq!(django_strip_tags("a < b > c"), "a < b > c");
+    }
+
+    #[test]
+    fn django_and_ml_strippers_differ_on_entities() {
+        // The two save() paths use different strippers on purpose:
+        // `IssueComment.save` (html_processor, decoded) vs
+        // `Description.save` (django.utils, verbatim).
+        assert_eq!(ml_strip_tags("a &amp; b"), "a & b");
+        assert_eq!(django_strip_tags("a &amp; b"), "a &amp; b");
+    }
+}

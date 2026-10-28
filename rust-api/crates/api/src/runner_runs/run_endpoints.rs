@@ -54,6 +54,7 @@ use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use pidash_services::domain::comments as comment_domain;
 use pidash_services::runner_runs::finalization as finalize_kernel;
 use pidash_services::runner_runs::lifecycle as lifecycle_kernel;
 use pidash_services::runner_runs::{LifecycleEffect, LiveStateUsageFacts};
@@ -563,10 +564,13 @@ pub async fn record_dedupe(
 // Comment writes (`IssueComment.objects.create`, both lifecycle paths)
 // ---------------------------------------------------------------------------
 
-/// Insert a planned comment: the comment row, its description row, and
-/// the link-back (`comment_insert_sql`, `description_insert_sql`,
-/// `comment_description_link_sql`). Runs inside the caller's
-/// transaction (the pause path) or savepoint (the failure path).
+/// Insert a planned comment via the domain executor twins
+/// (`insert_comment_row` → `insert_description_row` →
+/// `link_comment_description`, in Django order). Runs inside the
+/// caller's transaction (the pause path) or savepoint (the failure
+/// path). The four `now()` reads keep their positions: two for the
+/// comment stamps, two for the description stamps. The description
+/// stripped value binds verbatim (empty stays `""`, never NULL).
 pub async fn insert_comment(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     insert: &lifecycle_kernel::CommentInsert,
@@ -576,54 +580,38 @@ pub async fn insert_comment(
     // `db/models/issue.py:563-566`), not jsonb: bind typed empty
     // arrays (the v1 social comment insert's binding).
     let empty_list: Vec<String> = Vec::new();
-    sqlx::query(&lifecycle_kernel::comment_insert_sql())
-        .bind(Utc::now())
-        .bind(Utc::now())
-        .bind(insert.created_by_id)
-        .bind(insert.updated_by_id)
-        .bind(None::<DateTime<Utc>>)
-        .bind(insert.comment_id)
-        .bind(insert.project_id)
-        .bind(insert.workspace_id)
-        .bind(&insert.plan.comment_stripped)
-        .bind(&empty_json)
-        .bind(&insert.plan.comment_html)
-        .bind(None::<Uuid>)
-        .bind(&empty_list)
-        .bind(&empty_list)
-        .bind(insert.issue_id)
-        .bind(insert.actor_id)
-        .bind("INTERNAL")
-        .bind(None::<String>)
-        .bind(None::<String>)
-        .bind(insert.plan.speaker.value())
-        .bind(&insert.plan.speaker_label)
-        .bind(insert.plan.speaker_agent_run_id)
-        .bind(None::<DateTime<Utc>>)
-        .bind(None::<Uuid>)
-        .execute(&mut **tx)
-        .await?;
-    let description_id = Uuid::new_v4();
-    sqlx::query(&lifecycle_kernel::description_insert_sql())
-        .bind(Utc::now())
-        .bind(Utc::now())
-        .bind(insert.created_by_id)
-        .bind(insert.updated_by_id)
-        .bind(None::<DateTime<Utc>>)
-        .bind(description_id)
-        .bind(insert.workspace_id)
-        .bind(insert.project_id)
-        .bind(&empty_json)
-        .bind(&insert.plan.comment_html)
-        .bind(None::<Vec<u8>>)
-        .bind(&insert.plan.description_stripped)
-        .execute(&mut **tx)
-        .await?;
-    sqlx::query(lifecycle_kernel::comment_description_link_sql())
-        .bind(description_id)
-        .bind(insert.comment_id)
-        .execute(&mut **tx)
-        .await?;
+    let rows = comment_domain::CommentRows {
+        id: insert.comment_id,
+        description_id: Uuid::new_v4(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        desc_created_at: Utc::now(),
+        desc_updated_at: Utc::now(),
+        workspace_id: insert.workspace_id,
+        project_id: insert.project_id,
+        issue_id: insert.issue_id,
+        actor_id: insert.actor_id,
+        created_by: insert.created_by_id,
+        updated_by: insert.updated_by_id,
+        deleted_at: None,
+        html: &insert.plan.comment_html,
+        json: &empty_json,
+        stripped: &insert.plan.comment_stripped,
+        desc_stripped: Some(&insert.plan.description_stripped),
+        access: "INTERNAL",
+        speaker_type: insert.plan.speaker.value(),
+        speaker_label: &insert.plan.speaker_label,
+        speaker_agent_run_id: insert.plan.speaker_agent_run_id,
+        external_id: None,
+        external_source: None,
+        parent_id: None,
+        attachments: &empty_list,
+        labels: &empty_list,
+        edited_at: None,
+    };
+    comment_domain::insert_comment_row(&mut **tx, &rows).await?;
+    comment_domain::insert_description_row(&mut **tx, &rows).await?;
+    comment_domain::link_comment_description(&mut **tx, rows.id, rows.description_id).await?;
     Ok(())
 }
 

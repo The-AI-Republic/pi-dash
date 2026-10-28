@@ -103,6 +103,7 @@ use uuid::Uuid;
 
 use pidash_auth::permissions::project;
 use pidash_auth::scope::TenantScope;
+use pidash_services::domain::comments as comment_domain;
 use pidash_services::read;
 use pidash_services::v1_work_items::shape_issue::BASE_EXPANSION_NAMES;
 use pidash_services::v1_work_items::shape_links::{
@@ -4095,78 +4096,67 @@ async fn comment_post_inner(
         .unwrap_or(None)
         .map(|text| text.parse().expect("canonical run uuid"));
     // `IssueComment.save` runs in one `transaction.atomic()`: the comment
-    // INSERT, the `Description` INSERT, and the `description_id` UPDATE.
+    // INSERT, the `Description` INSERT, and the `description_id` UPDATE
+    // (domain twins). Four `now()` reads keep their positions (comment
+    // pair, description pair).
     let mut tx = pre
         .pool
         .begin()
         .await
         .map_err(|error| db_error(error, "comment-post-tx"))?;
-    sqlx::query(
-        r#"INSERT INTO "issue_comments" ("id", "created_at", "updated_at", "created_by_id", "updated_by_id",
-            "project_id", "workspace_id", "issue_id", "actor_id", "comment_json", "comment_html",
-            "comment_stripped", "description_id", "attachments", "labels", "access", "external_source",
-            "external_id", "speaker_type", "speaker_label", "speaker_agent_run_id", "edited_at", "parent_id")
-           VALUES ($1, $2, $3, $4, NULL, $5, $6, $7, $4, $8, $9, $10, NULL, $11, $12, $13, $14, $15, $16, $17, $18, NULL, NULL)"#,
-    )
-    .bind(comment_id)
-    .bind(created_at)
-    .bind(updated_at)
-    .bind(pre.actor.id)
-    .bind(project_id)
-    .bind(comment_workspace)
-    .bind(issue_id)
-    .bind(&comment_json)
-    .bind(&comment_html)
-    .bind(&stripped)
-    .bind(Vec::<String>::new())
-    .bind(&labels)
-    .bind(&access)
-    .bind(validated.external_source.clone().unwrap_or(None))
-    .bind(validated.external_id.clone().unwrap_or(None))
-    .bind(&speaker_type)
-    .bind(&speaker_label)
-    .bind(speaker_run_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(|error| {
-        // No issue lookup precedes the create: a bogus `issue_id`
-        // violates the FK, and `handle_exception` answers the
-        // `IntegrityError` 400 (`api/views/base.py:142-147`). The
-        // transaction rolls back on drop, like the failed ORM `save()`.
-        if is_fk_violation(&error) {
-            Denial::FieldErrors(PAYLOAD_NOT_VALID_BODY.to_owned())
-        } else {
-            db_error(error, "comment-post-insert")
-        }
-    })?;
-    let description_id = Uuid::new_v4();
-    let desc_created_at = now_utc();
-    let desc_updated_at = now_utc();
+    let empty_list: Vec<String> = Vec::new();
     let desc_stripped = description_stripped_for_create(&comment_html);
-    sqlx::query(
-        r#"INSERT INTO "descriptions" ("id", "created_at", "updated_at", "created_by_id", "updated_by_id",
-            "workspace_id", "project_id", "description_json", "description_html", "description_binary",
-            "description_stripped")
-           VALUES ($1, $2, $3, $4, NULL, $5, $6, $7, $8, NULL, $9)"#,
-    )
-    .bind(description_id)
-    .bind(desc_created_at)
-    .bind(desc_updated_at)
-    .bind(pre.actor.id)
-    .bind(comment_workspace)
-    .bind(project_id)
-    .bind(&comment_json)
-    .bind(&comment_html)
-    .bind(desc_stripped)
-    .execute(&mut *tx)
-    .await
-    .map_err(|error| db_error(error, "comment-post-desc"))?;
-    sqlx::query(r#"UPDATE "issue_comments" SET "description_id" = $1 WHERE "id" = $2"#)
-        .bind(description_id)
-        .bind(comment_id)
-        .execute(&mut *tx)
+    let external_id = validated.external_id.clone().unwrap_or(None);
+    let external_source = validated.external_source.clone().unwrap_or(None);
+    let rows = comment_domain::CommentRows {
+        id: comment_id,
+        description_id: Uuid::new_v4(),
+        created_at,
+        updated_at,
+        desc_created_at: now_utc(),
+        desc_updated_at: now_utc(),
+        workspace_id: comment_workspace,
+        project_id,
+        issue_id: *issue_id,
+        actor_id: Some(pre.actor.id),
+        created_by: Some(pre.actor.id),
+        updated_by: None,
+        deleted_at: None,
+        html: &comment_html,
+        json: &comment_json,
+        stripped: &stripped,
+        desc_stripped: desc_stripped.as_deref(),
+        access: &access,
+        speaker_type: &speaker_type,
+        speaker_label: &speaker_label,
+        speaker_agent_run_id: speaker_run_id,
+        external_id: external_id.as_deref(),
+        external_source: external_source.as_deref(),
+        parent_id: None,
+        attachments: &empty_list,
+        labels: &labels,
+        edited_at: None,
+    };
+    comment_domain::insert_comment_row(&mut *tx, &rows)
+        .await
+        .map_err(|error| {
+            // No issue lookup precedes the create: a bogus `issue_id`
+            // violates the FK, and `handle_exception` answers the
+            // `IntegrityError` 400 (`api/views/base.py:142-147`). The
+            // transaction rolls back on drop, like the failed ORM `save()`.
+            if is_fk_violation(&error) {
+                Denial::FieldErrors(PAYLOAD_NOT_VALID_BODY.to_owned())
+            } else {
+                db_error(error, "comment-post-insert")
+            }
+        })?;
+    comment_domain::insert_description_row(&mut *tx, &rows)
+        .await
+        .map_err(|error| db_error(error, "comment-post-desc"))?;
+    comment_domain::link_comment_description(&mut *tx, rows.id, rows.description_id)
         .await
         .map_err(|error| db_error(error, "comment-post-desc-link"))?;
+    let description_id = rows.description_id;
     tx.commit().await.map_err(|error| {
         // Every FK here is `DEFERRABLE INITIALLY DEFERRED`, so the bogus
         // `issue_id` violation fires at COMMIT, not at the INSERT — and
@@ -4184,14 +4174,9 @@ async fn comment_post_inner(
     // `update_fields=["created_at","created_by"]`.
     let (db_created_at, response_created_at) = override_created_at(map.get("created_at"), &tz)?;
     let created_by = override_user_id(map.get("created_by"), &pre.actor.id)?;
-    if let Err(error) = sqlx::query(
-        r#"UPDATE "issue_comments" SET "created_at" = $1, "created_by_id" = $2 WHERE "id" = $3"#,
-    )
-    .bind(db_created_at)
-    .bind(created_by)
-    .bind(comment_id)
-    .execute(&pre.pool)
-    .await
+    if let Err(error) =
+        comment_domain::restamp_comment_created(&pre.pool, comment_id, db_created_at, created_by)
+            .await
     {
         if is_fk_violation(&error) {
             return Err(Denial::FieldErrors(PAYLOAD_NOT_VALID_BODY.to_owned()));
@@ -4610,30 +4595,23 @@ async fn comment_patch_inner(
         // stays `created_by`, the acting user is `updated_by` — then the
         // `update_fields=["description_id"]` link write.
         let stored_created_by = row_uuid_opt(&before, "created_by_id")?;
-        let description_id = Uuid::new_v4();
-        sqlx::query(
-            r#"INSERT INTO "descriptions" ("id", "created_at", "updated_at", "created_by_id", "updated_by_id",
-                "workspace_id", "project_id", "description_json", "description_html", "description_binary",
-                "description_stripped")
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, $10)"#,
-        )
-        .bind(description_id)
-        .bind(now_utc())
-        .bind(now_utc())
-        .bind(stored_created_by)
-        .bind(pre.actor.id)
-        .bind(workspace_id)
-        .bind(project_id)
-        .bind(&new_json)
-        .bind(&new_html)
-        .bind(description_stripped_for_create(&new_html))
-        .execute(&mut *tx)
-        .await
-        .map_err(|error| db_error(error, "comment-patch-desc-mint"))?;
-        sqlx::query(r#"UPDATE "issue_comments" SET "description_id" = $1 WHERE "id" = $2"#)
-            .bind(description_id)
-            .bind(pk)
-            .execute(&mut *tx)
+        let desc_stripped = description_stripped_for_create(&new_html);
+        let desc = comment_domain::DescriptionValues {
+            id: Uuid::new_v4(),
+            created_at: now_utc(),
+            updated_at: now_utc(),
+            created_by: stored_created_by,
+            updated_by: Some(pre.actor.id),
+            workspace_id,
+            project_id,
+            json: &new_json,
+            html: &new_html,
+            stripped: desc_stripped.as_deref(),
+        };
+        comment_domain::insert_description_values(&mut *tx, &desc)
+            .await
+            .map_err(|error| db_error(error, "comment-patch-desc-mint"))?;
+        comment_domain::link_comment_description(&mut *tx, *pk, desc.id)
             .await
             .map_err(|error| db_error(error, "comment-patch-desc-link"))?;
     }
