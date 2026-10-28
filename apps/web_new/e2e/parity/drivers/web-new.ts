@@ -11212,15 +11212,14 @@ export class WebNewDriver implements ParityDriver {
     const out: KanbanCard[] = [];
     for (let index = 0; index < total; index += 1) {
       const card = cards.nth(index);
+      // Virtualized shells carry the card markers but no name node
+      // (ISS-043): probe before reading, or the innerText waits for
+      // content that only mounts near the viewport.
+      const nameNode = card.getByTestId("kanban-card-name").first();
+      const name = (await nameNode.count()) === 0 ? "" : ((await nameNode.innerText().catch(() => null)) ?? "").trim();
       out.push({
         issueId: (await card.getAttribute("data-issue-id").catch(() => null)) ?? "",
-        name: (
-          (await card
-            .getByTestId("kanban-card-name")
-            .first()
-            .innerText()
-            .catch(() => null)) ?? ""
-        ).trim(),
+        name,
         groupId: (await card.getAttribute("data-group-key").catch(() => null)) ?? "",
         subGroupId: (await card.getAttribute("data-lane-key").catch(() => null)) ?? "",
       });
@@ -11296,13 +11295,13 @@ export class WebNewDriver implements ParityDriver {
     const total = await cards.count();
     for (let index = 0; index < total; index += 1) {
       const card = cards.nth(index);
-      const name = (
-        (await card
-          .getByTestId("kanban-card-name")
-          .first()
-          .innerText()
-          .catch(() => null)) ?? ""
-      ).trim();
+      // Virtualized shells carry the card markers but no name node
+      // (ISS-043): skip them by probe, or the innerText waits for
+      // content that only mounts near the viewport — forever on a
+      // settled window, which also starves this lookup's retry budget.
+      const nameNode = card.getByTestId("kanban-card-name").first();
+      if ((await nameNode.count()) === 0) continue;
+      const name = ((await nameNode.innerText().catch(() => null)) ?? "").trim();
       if (name === issueName) return card;
     }
     throw new Error(`[parity] no kanban card titled ${JSON.stringify(issueName)}.`);

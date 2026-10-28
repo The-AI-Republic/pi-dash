@@ -410,6 +410,20 @@ describe("kanbanCards", () => {
       { issueId: "issue-1", name: "Fix login", groupId: "todo", subGroupId: "bug" },
     ]);
   });
+
+  it("reads virtualized shells as empty names without reading their content", async () => {
+    const read = vi.fn(async () => "must not run");
+    const shell = element(
+      { "data-issue-id": "issue-far", "data-virtualized": "true" },
+      { "kanban-card-name": locator({ count: async () => 0, innerText: read }) }
+    );
+    const page = boardPage({ cards: list([shell, namedCard("Fix login")]) });
+    await expect(new WebNewDriver(page).kanbanCards()).resolves.toEqual([
+      { issueId: "issue-far", name: "", groupId: "", subGroupId: "" },
+      { issueId: "issue-Fix login", name: "Fix login", groupId: "", subGroupId: "" },
+    ]);
+    expect(read).not.toHaveBeenCalled();
+  });
 });
 
 function namedCard(name: string): Locator {
@@ -664,6 +678,26 @@ describe("card contents and open", () => {
 
   it("throws for a card that is not rendered", async () => {
     await expect(new WebNewDriver(boardPage({})).kanbanCardIdentifier("Nope")).rejects.toThrow(/no kanban card/);
+  });
+
+  it("finds a named card past leading virtualized shells", async () => {
+    const shellReads = vi.fn(async () => "must not run");
+    const shell = element(
+      { "data-issue-id": "issue-far", "data-virtualized": "true" },
+      { "kanban-card-name": locator({ count: async () => 0, innerText: shellReads }) }
+    );
+    const target = element(
+      { "data-issue-id": "issue-1" },
+      {
+        "kanban-card-name": locator({ innerText: async () => "Fix login" }),
+        "kanban-card-link": locator({ innerText: async () => "PAR-12\nFix login" }),
+      }
+    );
+    const page = pageOf({
+      getByTestId: (id: string) => (id === "kanban-card" ? list([shell, target]) : locator({ count: async () => 0 })),
+    });
+    await expect(new WebNewDriver(page).kanbanCardIdentifier("Fix login")).resolves.toBe("PAR-12");
+    expect(shellReads).not.toHaveBeenCalled();
   });
 });
 
