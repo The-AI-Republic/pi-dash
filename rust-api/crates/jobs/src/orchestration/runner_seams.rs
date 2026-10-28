@@ -47,6 +47,7 @@ use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
 use pidash_db::tx::Transaction;
 use pidash_services::assistant::seams::{agent_model_profile_for_user, has_usable_llm_config};
 use pidash_services::dispatch::LlmProfile;
+use pidash_services::domain::clock::apply_clock_write;
 #[cfg(test)]
 use pidash_services::extensions::NoExtraToolsets;
 use pidash_services::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
@@ -59,8 +60,8 @@ use super::creation_jobs::{
     complete_project_move_handoff as drive_handoff, CreationJobsError, LiveCreationStore,
 };
 use super::fire_tick_seam::{
-    create_ticker_sql, emit_logs, lock_ticker_by_issue_sql, map_policy, map_ticker,
-    maybe_apply_deferred_pause as drive_pause, save_clock_sql, DispatchJobsError,
+    emit_logs, lock_ticker_by_issue_sql, map_policy, map_ticker,
+    maybe_apply_deferred_pause as drive_pause, DispatchJobsError,
 };
 use crate::admission::RedisAdmissionCache;
 use crate::dispatch::DispatchDecision;
@@ -564,50 +565,13 @@ pub async fn disarm_on_terminal_signal(pool: &PgPool, run_id: Uuid) -> Result<bo
         jitter,
     );
     if let Some(outcome) = &outcome {
-        match outcome.write {
-            ClockWrite::None => {}
-            ClockWrite::Update => {
-                let ticker = ticker.as_ref().expect("update has a post-lock row");
-                // SAVE_CLOCK_PARAMS order: updated_at, granted,
-                // next_run_at, enabled, disarm_reason, pending_entry,
-                // pending_entry_free, pending_entry_actor_id,
-                // pending_entry_trigger, resume_parent_run_id, id.
-                sqlx::query(&save_clock_sql())
-                    .bind(now)
-                    .bind(ticker.granted)
-                    .bind(ticker.next_run_at)
-                    .bind(ticker.enabled)
-                    .bind(ticker.disarm_reason.as_str())
-                    .bind(ticker.pending_entry)
-                    .bind(ticker.pending_entry_free)
-                    .bind(ticker.pending_entry_actor_id)
-                    .bind(ticker.pending_entry_trigger.as_str())
-                    .bind(ticker.resume_parent_run_id)
-                    .bind(ticker.id)
-                    .execute(&mut **tx.inner())
-                    .await?;
-            }
-            ClockWrite::Insert => {
-                // Unreachable for `RUN_ENDED` (it never creates), kept
-                // so a future create-kind reuse cannot silently drop
-                // the row.
-                let ticker = ticker.as_ref().expect("insert has a post-lock row");
-                sqlx::query(&create_ticker_sql())
-                    .bind(ticker.created_at)
-                    .bind(ticker.created_by_id)
-                    .bind(ticker.id)
-                    .bind(ticker.issue_id)
-                    .bind(ticker.next_run_at)
-                    .bind(ticker.enabled)
-                    .bind(ticker.disarm_reason.as_str())
-                    .bind(ticker.pending_entry)
-                    .bind(ticker.pending_entry_free)
-                    .bind(ticker.pending_entry_actor_id)
-                    .bind(ticker.pending_entry_trigger.as_str())
-                    .bind(ticker.resume_parent_run_id)
-                    .execute(&mut **tx.inner())
-                    .await?;
-            }
+        // Insert is unreachable for `RUN_ENDED` (it never creates);
+        // the shared write keeps the leg so a future create-kind
+        // reuse cannot silently drop the row. A `None` write touches
+        // no row — there may be none (the no-ticker outcome).
+        if outcome.write != ClockWrite::None {
+            let ticker = ticker.as_ref().expect("clock write has a post-lock row");
+            apply_clock_write(&mut **tx.inner(), &outcome.write, ticker, now).await?;
         }
     }
     tx.commit().await?;
@@ -861,5 +825,107 @@ mod tests {
             .await
             .expect("unknown run is Ok");
         assert!(!stopped);
+    }
+
+    /// A terminal run whose issue has no ticker row answers `Ok(false)`
+    /// without touching a row (PIDASHCONV-1610): the `None` clock write
+    /// must not require a post-lock row. The shared-write migration
+    /// briefly unwrapped the row unconditionally, which panicked on
+    /// exactly this shape in the worker.
+    #[tokio::test]
+    #[ignore = "needs migrated scratch DB via DATABASE_URL"]
+    async fn live_disarm_no_ticker_row_is_false() {
+        let pool = pool().await;
+        let tag = Uuid::new_v4().to_string();
+        let user = Uuid::new_v4();
+        let workspace = Uuid::new_v4();
+        let project = Uuid::new_v4();
+        let pod = Uuid::new_v4();
+        let issue = Uuid::new_v4();
+        let run = Uuid::new_v4();
+        let now = Utc::now();
+        sqlx::query(
+            r#"INSERT INTO "users" ("password", "id", "username", "first_name", "last_name", "avatar", "date_joined", "created_at", "updated_at", "last_location", "created_location", "is_superuser", "is_managed", "is_password_expired", "is_active", "is_staff", "is_email_verified", "is_password_autoset", "token", "user_timezone", "last_login_ip", "last_logout_ip", "last_login_medium", "last_login_uagent", "is_bot", "display_name", "is_email_valid", "is_password_reset_required") VALUES ('!', $1, $2, '', '', '', $3, $3, $3, '', '', false, false, false, true, false, false, false, $4, 'UTC', '', '', '', '', false, $2, false, false)"#,
+        )
+        .bind(user)
+        .bind(format!("disarm-{tag}"))
+        .bind(now)
+        .bind(tag.clone())
+        .execute(&pool)
+        .await
+        .expect("seed user");
+        sqlx::query(
+            r#"INSERT INTO "workspaces" ("created_at", "updated_at", "id", "name", "slug", "owner_id", "timezone", "background_color") VALUES ($1, $1, $2, $3, $4, $5, 'UTC', '#fff')"#,
+        )
+        .bind(now)
+        .bind(workspace)
+        .bind(format!("disarm-{tag}"))
+        .bind(format!("disarm-{tag}"))
+        .bind(user)
+        .execute(&pool)
+        .await
+        .expect("seed workspace");
+        sqlx::query(
+            r#"INSERT INTO "projects" ("created_at", "updated_at", "id", "name", "description", "network", "identifier", "workspace_id", "cycle_view", "module_view", "issue_views_view", "page_view", "intake_view", "archive_in", "close_in", "logo_props", "is_time_tracking_enabled", "is_issue_type_enabled", "guest_view_all_features", "timezone", "members_can_edit_states", "repo_url", "base_branch", "agent_default_interval_seconds", "agent_default_max_ticks", "agent_ticking_enabled", "is_default", "agent_review_default_interval_seconds", "default_agent_executor", "agent_test_default_interval_seconds") VALUES ($1, $1, $2, $3, '', 0, 'DSP', $4, false, false, false, false, false, 0, 0, '{}', false, false, false, 'UTC', false, '', 'main', 60, 10, true, false, 60, '', 60)"#,
+        )
+        .bind(now)
+        .bind(project)
+        .bind(format!("disarm-{tag}"))
+        .bind(workspace)
+        .execute(&pool)
+        .await
+        .expect("seed project");
+        sqlx::query(
+            r#"INSERT INTO "pod" ("id", "name", "description", "is_default", "created_at", "updated_at", "workspace_id", "project_id") VALUES ($1, $2, '', false, $3, $3, $4, $5)"#,
+        )
+        .bind(pod)
+        .bind(format!("disarm-{tag}"))
+        .bind(now)
+        .bind(workspace)
+        .bind(project)
+        .execute(&pool)
+        .await
+        .expect("seed pod");
+        sqlx::query(
+            r#"INSERT INTO "issues" ("created_at", "updated_at", "id", "name", "description_json", "priority", "sequence_id", "project_id", "workspace_id", "description_html", "sort_order", "is_draft", "git_work_branch", "workpad", "complexity_score") VALUES ($1, $1, $2, $3, '{}', 'none', 1, $4, $5, '', 0, false, '', '', 0)"#,
+        )
+        .bind(now)
+        .bind(issue)
+        .bind(format!("disarm-{tag}"))
+        .bind(project)
+        .bind(workspace)
+        .execute(&pool)
+        .await
+        .expect("seed issue");
+        sqlx::query(
+            r#"INSERT INTO "agent_run" ("id", "status", "prompt", "run_config", "required_capabilities", "thread_id", "error", "created_at", "workspace_id", "work_item_id", "pod_id", "created_by_id", "llm_model", "refusal_category", "trigger", "executor_kind", "dispatch_attempts", "cancel_reason", "error_code", "tool_plan", "phase_kind", "agent_metadata", "usage") VALUES ($1, 'completed', '', '{}', '{}', '', '', $2, $3, $4, $5, $6, '', '', 'tick', 'local_runner', 0, '', '', '{}', 'coding-task', '{}', '{}')"#,
+        )
+        .bind(run)
+        .bind(now)
+        .bind(workspace)
+        .bind(issue)
+        .bind(pod)
+        .bind(user)
+        .execute(&pool)
+        .await
+        .expect("seed run");
+        let stopped = disarm_on_terminal_signal(&pool, run)
+            .await
+            .expect("no-ticker disarm is Ok");
+        assert!(!stopped);
+        for (table, id) in [
+            ("agent_run", run),
+            ("issues", issue),
+            ("pod", pod),
+            ("projects", project),
+            ("workspaces", workspace),
+            ("users", user),
+        ] {
+            sqlx::query(&format!(r#"DELETE FROM "{table}" WHERE "id" = $1"#))
+                .bind(id)
+                .execute(&pool)
+                .await
+                .expect("cleanup row");
+        }
     }
 }

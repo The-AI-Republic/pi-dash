@@ -53,6 +53,7 @@
 
 pub mod activity;
 pub mod assistant;
+pub mod clock;
 pub mod comments;
 pub mod ctx;
 pub mod error;

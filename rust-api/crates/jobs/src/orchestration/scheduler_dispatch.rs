@@ -38,6 +38,7 @@ use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
 use pidash_db::tx::Transaction;
 use pidash_services::dispatch::admission::AdmissionCache;
 use pidash_services::dispatch::LlmProfile;
+use pidash_services::domain::clock::apply_clock_write;
 use pidash_services::domain::identity::{get_agent_system_user, GetAgentUserError};
 use pidash_services::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
 use pidash_services::orchestration::clock::{ClockWrite, ProjectClockPolicy};
@@ -57,8 +58,7 @@ use pidash_services::runner_sessions::live_drains::drain_pod_by_id;
 
 use super::creation_jobs::{bundle_overrides, map_run_view, LiveCreationStore, StoreDeps};
 use super::fire_tick_seam::{
-    create_ticker_sql, drain_dispatch, lock_ticker_by_issue_sql, map_ticker, save_clock_sql,
-    DispatchJobsError, DispatchOutcome,
+    drain_dispatch, lock_ticker_by_issue_sql, map_ticker, DispatchJobsError, DispatchOutcome,
 };
 use super::live_inputs::{
     fetch_presence, gate_fn, gate_verdicts, order_universe, profile_fn, project_leads,
@@ -137,58 +137,12 @@ where
         row: &IssueAgentTicker,
         write: ClockWrite,
     ) -> Result<(), CreationError> {
-        match write {
-            ClockWrite::None => Ok(()),
-            // CREATE_TICKER_PARAMS order: now, created_by_id, id,
-            // issue_id, next_run_at, enabled, disarm_reason,
-            // pending_entry, pending_entry_free,
-            // pending_entry_actor_id, pending_entry_trigger,
-            // resume_parent_run_id.
-            ClockWrite::Insert => {
-                sqlx::query(&create_ticker_sql())
-                    .bind(row.created_at)
-                    .bind(row.created_by_id)
-                    .bind(row.id)
-                    .bind(row.issue_id)
-                    .bind(row.next_run_at)
-                    .bind(row.enabled)
-                    .bind(row.disarm_reason.as_str())
-                    .bind(row.pending_entry)
-                    .bind(row.pending_entry_free)
-                    .bind(row.pending_entry_actor_id)
-                    .bind(row.pending_entry_trigger.as_str())
-                    .bind(row.resume_parent_run_id)
-                    .execute(&mut **self.dispatch_tx().inner())
-                    .await
-                    .map_err(db)?;
-                Ok(())
-            }
-            // SAVE_CLOCK_PARAMS order: updated_at, granted,
-            // next_run_at, enabled, disarm_reason, pending_entry,
-            // pending_entry_free, pending_entry_actor_id,
-            // pending_entry_trigger, resume_parent_run_id, id.
-            // `updated_at` is now-at-write: reconcile leaves the
-            // locked row's stamp untouched, and Python's `save()`
-            // stamps `auto_now` at write time.
-            ClockWrite::Update => {
-                sqlx::query(&save_clock_sql())
-                    .bind(Utc::now())
-                    .bind(row.granted)
-                    .bind(row.next_run_at)
-                    .bind(row.enabled)
-                    .bind(row.disarm_reason.as_str())
-                    .bind(row.pending_entry)
-                    .bind(row.pending_entry_free)
-                    .bind(row.pending_entry_actor_id)
-                    .bind(row.pending_entry_trigger.as_str())
-                    .bind(row.resume_parent_run_id)
-                    .bind(row.id)
-                    .execute(&mut **self.dispatch_tx().inner())
-                    .await
-                    .map_err(db)?;
-                Ok(())
-            }
-        }
+        // `updated_at` is now-at-write: reconcile leaves the locked
+        // row's stamp untouched, and Python's `save()` stamps
+        // `auto_now` at write time (the pre-consolidation bind).
+        apply_clock_write(&mut **self.dispatch_tx().inner(), &write, row, Utc::now())
+            .await
+            .map_err(db)
     }
 
     fn set_rollback(&mut self) {
