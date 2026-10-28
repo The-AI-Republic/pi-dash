@@ -101,7 +101,7 @@ use crate::state::AppState;
 use crate::uuid_path::{classify_uuid_segment, UuidSegment};
 use crate::v1_cycles_modules::cycle as cycle_mod;
 use pidash_compat::datetime::{render_date_opt, render_datetime_opt, render_uuid_opt as opt_uuid};
-use pidash_compat::db::{is_integrity_error, is_unique_violation};
+use pidash_compat::db::is_unique_violation;
 pub(crate) use pidash_compat::response::json_response;
 pub use pidash_compat::response::SERVER_ERROR_BODY;
 
