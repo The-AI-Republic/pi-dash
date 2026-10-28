@@ -821,6 +821,25 @@ describe("cycle detail route", () => {
     expect(mocks.clearFilters).not.toHaveBeenCalled();
   });
 
+  it("reads the first page under the stored filters (ISS-069)", async () => {
+    const stored = { and: [{ priority__in: "urgent" }] };
+    mocks.prefs.mockReturnValue({
+      queryKey: ["prefs"],
+      queryFn: async () => ({ filters: {}, display_filters: {}, display_properties: {}, rich_filters: stored }),
+    });
+    renderRoute();
+    expect(await screen.findByTestId("layout-root")).toBeInTheDocument();
+    // Without the stored expression the read is unfiltered, so a cycle
+    // holding issues never routes to the filtered card (NEWFRONT-981).
+    expect(mocks.page).toHaveBeenCalledWith(expect.anything(), "acme", {
+      entity: { scope: "cycle", projectId: PROJECT, cycleId: CYCLE },
+      groupBy: null,
+      orderBy: "sort_order",
+      showSubIssues: true,
+      richFilters: stored,
+    });
+  });
+
   it("opens the host dialogs from the empty card with zero issues (ISS-069)", async () => {
     mocks.page.mockReturnValue({
       queryKey: ["page"],
@@ -891,6 +910,7 @@ describe("cycle detail route", () => {
       groupBy: null,
       orderBy: "sort_order",
       showSubIssues: true,
+      richFilters: {},
     });
     expect(mocks.prefs).toHaveBeenCalledWith(expect.anything(), "acme", {
       scope: "cycle",

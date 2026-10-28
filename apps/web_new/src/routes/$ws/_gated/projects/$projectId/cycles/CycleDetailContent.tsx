@@ -116,8 +116,10 @@ export function CycleDetailContent({
   // answers a fixed .values() projection without it (EST-019).
   const estimatesEnabled = projectRow.data?.estimate != null;
   const [sidebarCollapsed, setSidebarCollapsed] = useCycleSidebarCollapsed();
-  // Stored rich filters scope the layouts; the first page only feeds
-  // the totals and the empty-card decision.
+  // The stored rich filters scope this read, as on the project list:
+  // the totals, the badge, the analytics rows and the empty-card decision
+  // all follow the filtered list, so a match-nothing expression routes to
+  // the filtered card instead of an empty layout (ISS-069).
   const { data: preferences } = useSuspenseQuery(prefsQueryOptions(client, workspaceSlug, entity));
   const richFilters = preferences.rich_filters;
   const showSubIssues = selectDisplayPrefs(preferences).showSubIssues;
@@ -127,6 +129,7 @@ export function CycleDetailContent({
       groupBy: null,
       orderBy: "sort_order",
       showSubIssues,
+      richFilters,
     })
   );
   const [createOpen, setCreateOpen] = React.useState(false);

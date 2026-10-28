@@ -32,6 +32,14 @@ function context(displayFilters: Record<string, unknown>) {
   return { context: { queryClient, apiClient: { stub: true } }, queryClient };
 }
 
+function contextWithFilters(displayFilters: Record<string, unknown>, richFilters: Record<string, unknown>) {
+  const queryClient = { ensureQueryData: mocks.ensure };
+  mocks.ensure.mockImplementation(async (options: { queryKey: string[] }) =>
+    options.queryKey[0] === "prefs" ? { display_filters: displayFilters, rich_filters: richFilters } : undefined
+  );
+  return { context: { queryClient, apiClient: { stub: true } }, queryClient };
+}
+
 describe("prefetchEntityList", () => {
   it("reads the stored sub-issue flag before starting the page and layout chunk", async () => {
     const { context: ctx, queryClient } = context({ sub_issue: false });
@@ -56,5 +64,21 @@ describe("prefetchEntityList", () => {
       "acme",
       expect.objectContaining({ showSubIssues: true })
     );
+  });
+
+  it("scopes the prefetched page to the stored expression (ISS-069)", async () => {
+    // The cycle/module screens read their first page under the stored
+    // filters; an unscoped prefetch caches a different key, so the screen
+    // would refetch and flash its skeleton (NEWFRONT-981).
+    const stored = { and: [{ priority__in: "urgent" }] };
+    const { context: ctx } = contextWithFilters({ sub_issue: true }, stored);
+    await prefetchEntityList(ctx as never, "acme", ENTITY);
+    expect(mocks.page).toHaveBeenCalledWith(expect.anything(), "acme", {
+      entity: ENTITY,
+      groupBy: null,
+      orderBy: "sort_order",
+      showSubIssues: true,
+      richFilters: stored,
+    });
   });
 });
