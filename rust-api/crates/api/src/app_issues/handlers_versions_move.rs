@@ -1256,23 +1256,27 @@ async fn read_move_target(req: axum::extract::Request) -> Result<Value, Denial> 
 
 /// `base_host(request, is_app=True)`: `APP_BASE_URL` when set, else the
 /// `WEB_URL or APP_BASE_URL` origin — unset everywhere is a 500
-/// (`ImproperlyConfigured`).
+/// (`ImproperlyConfigured`). Empty strings fall through like Python's
+/// `or`, as in the v1 twin.
 fn move_origin(state: &AppState) -> Result<String, Denial> {
     let urls = &state.settings().urls;
     urls.app_base_url
         .clone()
-        .or_else(|| urls.web_url.clone())
+        .filter(|s| !s.is_empty())
+        .or_else(|| urls.web_url.clone().filter(|s| !s.is_empty()))
         .ok_or(Denial::ServerError)
 }
 
 /// `web_base_url()`: `WEB_URL`, falling back to `APP_BASE_URL`, trailing
 /// slash stripped — `None` when neither is configured, so the
-/// `current_instance` render omits the url.
+/// `current_instance` render omits the url. Empty strings fall through
+/// like Python's `or`, as in the v1 twin.
 fn move_web_base_url(state: &AppState) -> Option<String> {
     let urls = &state.settings().urls;
     urls.web_url
         .clone()
-        .or_else(|| urls.app_base_url.clone())
+        .filter(|s| !s.is_empty())
+        .or_else(|| urls.app_base_url.clone().filter(|s| !s.is_empty()))
         .map(|base| base.trim_end_matches('/').to_owned())
 }
 
@@ -2799,5 +2803,50 @@ mod tests {
         assert_eq!(render_dt_opt(None, &utc), None);
         let date = chrono::NaiveDate::from_ymd_opt(2026, 10, 4).expect("date");
         assert_eq!(render_date(&date), "2026-10-04");
+    }
+
+    fn origin_state(app_base_url: Option<&str>, web_url: Option<&str>) -> AppState {
+        let mut settings = pidash_db::config::Settings::test_defaults();
+        settings.urls.app_base_url = app_base_url.map(str::to_owned);
+        settings.urls.web_url = web_url.map(str::to_owned);
+        AppState::with_settings("test", settings)
+    }
+
+    /// `base_host(request, is_app=True)` treats `""` as missing
+    /// (PIDASHCONV-1577): an empty `APP_BASE_URL` falls through to
+    /// `WEB_URL`, and empty everywhere is the 500.
+    #[test]
+    fn move_origin_falls_through_empty_strings() {
+        let web = "https://web.example.invalid";
+        let state = origin_state(Some(""), Some(web));
+        assert_eq!(move_origin(&state).expect("falls through"), web);
+        let state = origin_state(Some(""), Some(""));
+        assert!(matches!(move_origin(&state), Err(Denial::ServerError)));
+        let state = origin_state(None, None);
+        assert!(matches!(move_origin(&state), Err(Denial::ServerError)));
+        let state = origin_state(Some("https://app.example.invalid"), Some(web));
+        assert_eq!(
+            move_origin(&state).expect("app base wins"),
+            "https://app.example.invalid"
+        );
+    }
+
+    /// `web_base_url()` treats `""` as missing (PIDASHCONV-1577): empty
+    /// everywhere is `None` (callers omit the url), and an empty
+    /// `WEB_URL` falls back to `APP_BASE_URL`.
+    #[test]
+    fn move_web_base_url_falls_through_empty_strings() {
+        let app = "https://app.example.invalid";
+        let state = origin_state(Some(""), Some(""));
+        assert_eq!(move_web_base_url(&state), None);
+        let state = origin_state(None, None);
+        assert_eq!(move_web_base_url(&state), None);
+        let state = origin_state(Some(app), Some(""));
+        assert_eq!(move_web_base_url(&state).as_deref(), Some(app));
+        let state = origin_state(Some(app), Some("https://web.example.invalid/"));
+        assert_eq!(
+            move_web_base_url(&state).as_deref(),
+            Some("https://web.example.invalid")
+        );
     }
 }
