@@ -11735,7 +11735,20 @@ export class WebNewDriver implements ParityDriver {
     edge: "left" | "right" | "top" | "bottom",
     holdMs: number
   ): Promise<void> {
-    const source = await this.kanbanCardByName(sourceName);
+    // The virtualized window churns while it settles after a scroll or
+    // page append: a card readable one moment can flicker out the next,
+    // even mid-window. Ride out the churn instead of grabbing one-shot
+    // (ISS-043).
+    const startedAt = Date.now();
+    let source: Locator | null = null;
+    while (source === null && Date.now() - startedAt < 30_000) {
+      try {
+        source = await this.kanbanCardByName(sourceName);
+      } catch {
+        await this.page.waitForTimeout(500);
+      }
+    }
+    if (source === null) throw new Error(`[parity] no kanban card titled ${JSON.stringify(sourceName)}.`);
     const sourceBox = await source.boundingBox();
     const viewport = this.page.viewportSize() ?? { width: 1280, height: 720 };
     if (!sourceBox) throw new Error("[parity] edge-hold card has no box.");

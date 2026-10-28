@@ -1062,6 +1062,37 @@ describe("kanban drags", () => {
     ]);
   });
 
+  it("rides out window churn when grabbing the held card", async () => {
+    // The virtualized window flickers names while it settles after a
+    // scroll or page append; the grab retries instead of throwing on the
+    // first unreadable sample (ISS-043).
+    let reads = 0;
+    const source = locator({
+      boundingBox: async () => ({ x: 500, y: 300, width: 300, height: 80 }),
+      getByTestId: (id: string) =>
+        id === "kanban-card-name"
+          ? locator({
+              innerText: async () => {
+                reads += 1;
+                return reads <= 2 ? "" : "Last";
+              },
+            })
+          : locator({ count: async () => 0 }),
+    });
+    const waits: Array<number | undefined> = [];
+    const { mouse, moves } = mouseStub();
+    const page = pageOf({
+      mouse,
+      waitForTimeout: async (ms?: number) => void waits.push(ms),
+      viewportSize: () => ({ width: 1280, height: 720 }),
+      getByTestId: (id: string) => (id === "kanban-card" ? list([source]) : list([])),
+    });
+    await new WebNewDriver(page).kanbanDragHoldNearEdge("Last", "right", 10);
+    expect(reads).toBe(3);
+    expect(waits).toEqual(expect.arrayContaining([500, 500]));
+    expect(moves[0]).toEqual({ x: 650, y: 314, steps: undefined });
+  });
+
   it("holds with the fallback viewport and throws without a box", async () => {
     const source = dragCard("Last", { x: 0, y: 0, width: 300, height: 80 });
     const { mouse, moves } = mouseStub();
