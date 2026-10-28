@@ -735,11 +735,13 @@ interface Box {
   height: number;
 }
 
-function dragCard(name: string, rect: Box | null): Locator {
+function dragCard(name: string, rect: Box | null, nameRect: Box | null = null): Locator {
   return locator({
     boundingBox: async () => rect,
     getByTestId: (id: string) =>
-      id === "kanban-card-name" ? locator({ innerText: async () => name }) : locator({ count: async () => 0 }),
+      id === "kanban-card-name"
+        ? locator({ innerText: async () => name, boundingBox: async () => nameRect })
+        : locator({ count: async () => 0 }),
   });
 }
 
@@ -944,7 +946,7 @@ describe("kanban drags", () => {
     const { page, moves, events } = dragPage([source, target]);
     await new WebNewDriver(page).kanbanDragCardBefore("Third", "First");
     expect(events).toEqual(["move", "down", "move", "up"]);
-    expect(moves[0]).toEqual({ x: 150, y: 240, steps: undefined });
+    expect(moves[0]).toEqual({ x: 150, y: 214, steps: undefined });
     expect(moves[1]).toEqual({ x: 150, y: 8, steps: 8 });
   });
 
@@ -995,8 +997,31 @@ describe("kanban drags", () => {
     const { page, moves } = dragPage([source], [column]);
     await new WebNewDriver(page).kanbanDragCardToColumnEnd("Fix login", "Done");
     expect(scrolled).toEqual(["done"]);
-    expect(moves[0]).toEqual({ x: 150, y: 40, steps: undefined });
+    expect(moves[0]).toEqual({ x: 150, y: 14, steps: undefined });
     expect(moves[1]).toEqual({ x: 525, y: 588, steps: 8 });
+  });
+
+  it("presses the name row instead of the card center", async () => {
+    // The geometric center lands on chip buttons once the card is dressed
+    // (labels, due date), and the card ignores presses starting on
+    // controls — so the press goes to the draggable name row (ISS-038).
+    const source = dragCard(
+      "Fix login",
+      { x: 0, y: 0, width: 300, height: 102 },
+      { x: 12, y: 12, width: 200, height: 20 }
+    );
+    const column = dragColumn("Done", { x: 350, y: 0, width: 350, height: 600 }, [dragCard("Fix login", null)]);
+    const { page, moves } = dragPage([source], [column]);
+    await new WebNewDriver(page).kanbanDragCardToColumnEnd("Fix login", "Done");
+    expect(moves[0]).toEqual({ x: 112, y: 22, steps: undefined });
+  });
+
+  it("presses near the top when the name row has no box", async () => {
+    const source = dragCard("Fix login", { x: 0, y: 50, width: 300, height: 102 });
+    const column = dragColumn("Done", { x: 350, y: 0, width: 350, height: 600 }, [dragCard("Fix login", null)]);
+    const { page, moves } = dragPage([source], [column]);
+    await new WebNewDriver(page).kanbanDragCardToColumnEnd("Fix login", "Done");
+    expect(moves[0]).toEqual({ x: 150, y: 64, steps: undefined });
   });
 
   it("throws a column-end drag without boxes", async () => {
@@ -1026,13 +1051,13 @@ describe("kanban drags", () => {
     await driver.kanbanDragHoldNearEdge("Last", "bottom", 500);
     expect(waits).toContain(500);
     expect(moves.map((move) => [move.x, move.y])).toEqual([
-      [650, 340],
-      [1268, 340],
-      [650, 340],
-      [12, 340],
-      [650, 340],
+      [650, 314],
+      [1268, 314],
+      [650, 314],
+      [12, 314],
+      [650, 314],
       [650, 12],
-      [650, 340],
+      [650, 314],
       [650, 708],
     ]);
   });
@@ -1047,7 +1072,7 @@ describe("kanban drags", () => {
       getByTestId: (id: string) => (id === "kanban-card" ? list([source]) : list([])),
     });
     await new WebNewDriver(page).kanbanDragHoldNearEdge("Last", "right", 10);
-    expect(moves[1]).toEqual({ x: 1268, y: 40, steps: 10 });
+    expect(moves[1]).toEqual({ x: 1268, y: 14, steps: 10 });
     const flat = dragCard("Last", null);
     const missing = pageOf({
       mouse: mouseStub().mouse,

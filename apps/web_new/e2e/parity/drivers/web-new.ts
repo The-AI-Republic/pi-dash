@@ -11469,6 +11469,29 @@ export class WebNewDriver implements ParityDriver {
     return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
   }
 
+  /**
+   * Press point for a card drag: the name row's center. The card's geometric
+   * center lands on chip buttons once the card is fully dressed (labels, due
+   * date), and the card ignores presses starting on controls — so a center
+   * press silently starts no drag (ISS-038). The name link may drag.
+   */
+  private async kanbanPressPoint(
+    card: Locator,
+    cardBox: { x: number; y: number; width: number; height: number }
+  ): Promise<{ x: number; y: number }> {
+    try {
+      const name = card.getByTestId("kanban-card-name").first();
+      if ((await name.count()) > 0) {
+        const box = await name.boundingBox();
+        if (box !== null) return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+      }
+    } catch {
+      // Fall through to the top-area press below.
+    }
+    // No readable name row: press near the top, above the chip rows.
+    return { x: cardBox.x + cardBox.width / 2, y: cardBox.y + 14 };
+  }
+
   private async boardMouseDrag(from: { x: number; y: number }, onto: { x: number; y: number }): Promise<void> {
     // The board drag engine is pointer-based: press, a stepped move with
     // a pause so the drop target registers, then release.
@@ -11485,7 +11508,7 @@ export class WebNewDriver implements ParityDriver {
     const sourceBox = await source.boundingBox();
     const targetBox = await target.boundingBox();
     if (!sourceBox || !targetBox) throw new Error("[parity] drag card has no box.");
-    const from = WebNewDriver.boardBoxCenter(sourceBox);
+    const from = await this.kanbanPressPoint(source, sourceBox);
     const onto = { x: targetBox.x + targetBox.width / 2, y: targetBox.y + 8 };
     await this.boardMouseDrag(from, onto);
     await expect
@@ -11508,7 +11531,7 @@ export class WebNewDriver implements ParityDriver {
     const sourceBox = await source.boundingBox();
     const targetBox = await target.boundingBox();
     if (!sourceBox || !targetBox) throw new Error("[parity] drag card has no box.");
-    const from = WebNewDriver.boardBoxCenter(sourceBox);
+    const from = await this.kanbanPressPoint(source, sourceBox);
     const onto = { x: targetBox.x + targetBox.width / 2, y: targetBox.y + 8 };
     await this.boardMouseDrag(from, onto);
     await this.page.waitForTimeout(3_000);
@@ -11521,7 +11544,7 @@ export class WebNewDriver implements ParityDriver {
     await column.scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
     const columnBox = await column.boundingBox();
     if (!sourceBox || !columnBox) throw new Error("[parity] drag card or column has no box.");
-    const from = WebNewDriver.boardBoxCenter(sourceBox);
+    const from = await this.kanbanPressPoint(source, sourceBox);
     const onto = { x: columnBox.x + columnBox.width / 2, y: columnBox.y + columnBox.height - 12 };
     await this.boardMouseDrag(from, onto);
     await expect.poll(() => this.kanbanColumnCards(columnName), { timeout: 120_000 }).toContain(sourceName);
@@ -11534,7 +11557,7 @@ export class WebNewDriver implements ParityDriver {
     // so its box can be read before pressing the card.
     const zoneBox = await this.page.getByTestId("kanban-delete-zone").first().boundingBox();
     if (!sourceBox || !zoneBox) throw new Error("[parity] delete drag has no box.");
-    const from = WebNewDriver.boardBoxCenter(sourceBox);
+    const from = await this.kanbanPressPoint(source, sourceBox);
     const onto = WebNewDriver.boardBoxCenter(zoneBox);
     await this.boardMouseDrag(from, onto);
     await expect.poll(() => this.kanbanDeleteModalVisible(), { timeout: 120_000 }).toBe(true);
@@ -11565,7 +11588,7 @@ export class WebNewDriver implements ParityDriver {
     await column.scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
     const columnBox = await column.boundingBox();
     if (!sourceBox || !columnBox) throw new Error("[parity] overlay drag has no box.");
-    const from = WebNewDriver.boardBoxCenter(sourceBox);
+    const from = await this.kanbanPressPoint(source, sourceBox);
     const onto = WebNewDriver.boardBoxCenter(columnBox);
     await this.page.mouse.move(from.x, from.y);
     await this.page.mouse.down();
@@ -11708,7 +11731,7 @@ export class WebNewDriver implements ParityDriver {
     const sourceBox = await source.boundingBox();
     const viewport = this.page.viewportSize() ?? { width: 1280, height: 720 };
     if (!sourceBox) throw new Error("[parity] edge-hold card has no box.");
-    const from = WebNewDriver.boardBoxCenter(sourceBox);
+    const from = await this.kanbanPressPoint(source, sourceBox);
     const margin = 12;
     // Holds track the grabbed card's own axis so the cursor stays over its
     // column (vertical holds) or its row band (horizontal holds); a centered
