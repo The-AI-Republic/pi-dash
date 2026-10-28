@@ -17,7 +17,8 @@ import { runnersBase, type RunnersScopeInput } from "../scope.js";
 import { runnerDisplayStatus } from "../status.js";
 import { RunnerStatusDot } from "./RunnerStatusBadge.js";
 
-export const RAIL_HEADER = "AI Agents";
+/** Rail header: the canonical area name (D27, RUN-004/RUN-005). */
+export const RAIL_HEADER = "AI Workers";
 export const BUILTIN_SECTION_HEADER = "Built-in";
 
 /** Chat address for one runner; plain string per the router's Link typing. */
@@ -43,7 +44,7 @@ export function RunnersRail({
   const base = runnersBase(scope);
   return (
     <aside
-      aria-label="AI runners navigation"
+      aria-label="AI Workers navigation"
       data-testid="runners-rail"
       className="flex w-64 shrink-0 flex-col border-r border-(--border) bg-(--surface)"
     >

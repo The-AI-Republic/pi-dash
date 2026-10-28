@@ -69,8 +69,10 @@ afterEach(() => {
 describe("RunnersWorkspaceShell", () => {
   it("admits a member and shows the rail from the cached list", () => {
     renderShell(15);
-    expect(screen.getByText("AI Agents")).toBeInTheDocument();
-    expect(screen.getByRole("main", { name: "Runners content" })).toContainElement(screen.getByText("overview child"));
+    expect(screen.getByText("AI Workers")).toBeInTheDocument();
+    expect(screen.getByRole("main", { name: "AI Workers content" })).toContainElement(
+      screen.getByText("overview child")
+    );
     // Both the rail and the tab strip carry an Overview link; the tab is
     // the one inside the tab strip.
     const tabs = within(screen.getByTestId("runners-tabs"));
@@ -79,7 +81,7 @@ describe("RunnersWorkspaceShell", () => {
 
   it("renders an empty rail while the runner list is still absent", () => {
     renderShell(15, false);
-    expect(screen.getByText("AI Agents")).toBeInTheDocument();
+    expect(screen.getByText("AI Workers")).toBeInTheDocument();
     expect(screen.getByText("No runners connected yet.")).toBeInTheDocument();
   });
 

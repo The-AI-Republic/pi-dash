@@ -10096,7 +10096,7 @@ export class WebNewDriver implements ParityDriver {
     // area nests its own content main, so a bare `main` resolves to two
     // rows and `xpath=../aside` also picks up the workspace sidebar. Anchor
     // on the area's named content main so the sibling is the runners rail.
-    return this.page.getByRole("main", { name: "Runners content" }).locator("xpath=../aside");
+    return this.page.getByRole("main", { name: "AI Workers content" }).locator("xpath=../aside");
   }
 
   async runnersRail(): Promise<RunnersRail> {
@@ -10430,7 +10430,7 @@ export class WebNewDriver implements ParityDriver {
   async runnersSectionHeadings(): Promise<string[]> {
     const main = this.page.getByRole("main");
     const out: string[] = [];
-    for (const title of ["Add runner", "Pods", "Runners"]) {
+    for (const title of ["Add runner", "Pods", "AI Workers"]) {
       if ((await main.getByText(title, { exact: true }).count()) > 0) out.push(title);
     }
     return out;

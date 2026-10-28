@@ -14,11 +14,11 @@ describe("RunnersNotAuthorized", () => {
   it("renders the shared heading with the workspace sentence", () => {
     render(<RunnersNotAuthorized scope="workspace" />);
     expect(screen.getByRole("heading", { name: RUNNERS_DENIED_HEADING })).toBeInTheDocument();
-    expect(screen.getByText(/workspace admins and members/)).toBeInTheDocument();
+    expect(screen.getByText(/workspace admins and members can open AI Workers/)).toBeInTheDocument();
   });
 
   it("names the project for the project scope", () => {
     render(<RunnersNotAuthorized scope="project" />);
-    expect(screen.getByText(/admins and members of this project/)).toBeInTheDocument();
+    expect(screen.getByText(/members of this project can open its AI Workers/)).toBeInTheDocument();
   });
 });

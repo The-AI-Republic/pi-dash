@@ -35,9 +35,9 @@ import { RunnersOverviewScreen, RUNNERS_PAGE_TITLE, runnersDocumentTitle } from 
 
 describe("runnersDocumentTitle", () => {
   it("prefixes the workspace name when known", () => {
-    expect(RUNNERS_PAGE_TITLE).toBe("AI Agents");
-    expect(runnersDocumentTitle("Acme")).toBe("Acme - AI Agents");
-    expect(runnersDocumentTitle(undefined)).toBe("AI Agents");
+    expect(RUNNERS_PAGE_TITLE).toBe("AI Workers");
+    expect(runnersDocumentTitle("Acme")).toBe("Acme - AI Workers");
+    expect(runnersDocumentTitle(undefined)).toBe("AI Workers");
   });
 });
 
@@ -61,10 +61,10 @@ describe("RunnersOverviewScreen", () => {
       </QueryClientProvider>
     );
     expect(useRunnersOverview).toHaveBeenCalledWith("acme");
-    expect(screen.getByRole("heading", { name: "Runners" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "AI Workers" })).toBeInTheDocument();
     expect(screen.getByText("alpha")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Filter runners by pod WEB_alpha" })).toBeInTheDocument();
-    expect(document.title).toBe("Acme - AI Agents");
+    expect(document.title).toBe("Acme - AI Workers");
   });
 
   it("mounts the command-line setup panel when the build has the native tool", () => {

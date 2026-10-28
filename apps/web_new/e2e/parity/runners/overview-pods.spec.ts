@@ -432,7 +432,7 @@ test(
         })
         .toEqual(expect.arrayContaining(SEED_RUNNERS));
       const rail = await driver.runnersRail();
-      expect(rail.header).toBe("AI Agents");
+      expect(rail.header).toBe("AI Workers");
       expect(rail.overviewHref).toBe(`/${seed.workspaceSlug}/runners`);
       expect(rail.emptyVisible).toBe(false);
       expect(new Set(rail.contacts.map((contact) => contact.name))).toEqual(new Set(server.map((row) => row.name)));
@@ -536,7 +536,7 @@ test(
 );
 
 test(
-  specTitle(["RUN-005"], "bug: NEWFRONT-191 area naming differs across surfaces"),
+  specTitle(["RUN-005"], "every surface reads the canonical area name (D27)"),
   { tag: specTags(["RUN-005"]) },
   async ({ driver, seed }) => {
     await test.step("sign in as the owner", async () => {
@@ -560,17 +560,16 @@ test(
       leaf = await driver.runnersBreadcrumbLeaf();
     });
 
-    await test.step("the three names disagree (the bug)", async () => {
-      // bug: NEWFRONT-191 has decided the canonical name (D27: "AI
-      // Workers"); this scenario still pins the current split until the
-      // rename slice lands, then it must be replaced by the canonical-name
-      // assertion. The CLI `runner` verb stays the technical noun and is
-      // not part of the display rename (not drivable here).
-      expect(title).toContain("AI Agents");
-      expect(railHeader).toBe("AI Agents");
-      expect(headings).toEqual(expect.arrayContaining(["Pods", "Runners"]));
+    await test.step("every surface agrees on the canonical name", async () => {
+      // D27 (NEWFRONT-191, renamed by NEWFRONT-946): "AI Workers" is the
+      // one user-facing area name. The CLI `runner` verb stays the
+      // technical noun and is not part of the display rename (not drivable
+      // here). The old app still shows its three split names; the oracle
+      // row records that divergence.
+      expect(title).toContain("AI Workers");
+      expect(railHeader).toBe("AI Workers");
+      expect(headings).toEqual(expect.arrayContaining(["Pods", "AI Workers"]));
       expect(leaf).toBe("AI Workers");
-      expect(new Set(["AI Agents", "AI Workers", "Runners"]).size).toBe(3);
     });
   }
 );

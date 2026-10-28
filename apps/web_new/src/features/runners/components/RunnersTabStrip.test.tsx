@@ -56,6 +56,7 @@ describe("runnersActiveTabKey", () => {
 describe("RunnersTabStrip", () => {
   it("offers the three routes with the workspace base", () => {
     render(<RunnersTabStrip scope={workspace} pathname="/acme/runners" />);
+    expect(screen.getByRole("navigation", { name: "AI Workers tabs" })).toBeInTheDocument();
     const links = screen.getAllByRole("link");
     expect(links.map((link) => link.textContent)).toEqual(["Overview", "Runs", "Approvals"]);
     expect(links.map((link) => link.getAttribute("href"))).toEqual([

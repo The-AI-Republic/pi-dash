@@ -41,7 +41,9 @@ describe("RunnersRail", () => {
         isProjectScope={false}
       />
     );
+    expect(RAIL_HEADER).toBe("AI Workers");
     expect(screen.getByText(RAIL_HEADER)).toBeInTheDocument();
+    expect(screen.getByRole("complementary", { name: "AI Workers navigation" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /Overview/ })).toHaveAttribute("href", "/acme/runners");
     const contacts = screen.getAllByTestId("runners-rail-contact");
     expect(contacts.map((node) => node.getAttribute("href"))).toEqual([
