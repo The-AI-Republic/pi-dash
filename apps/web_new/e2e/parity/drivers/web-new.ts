@@ -9018,12 +9018,31 @@ export class WebNewDriver implements ParityDriver {
     }
     // Project, cycle and module pages share the segmented header switcher
     // (data-layout per kind); the choice marks itself active on switch.
+    const changed = (await this.layoutsActiveLayout()) !== layout;
+    // Arm the mutation waiter before the click: the switch PATCH is caused
+    // by it. The waiter binds to the display PATCH body, never a sibling
+    // prefs write in flight (a collapse PATCH answers user-properties too).
+    // No-op switches patch nothing, so only changed layouts arm it.
+    const patchSettled = changed
+      ? this.page.waitForResponse(
+          (response) =>
+            response.request().method() === "PATCH" &&
+            response.url().includes("user-properties") &&
+            (response.request().postData() ?? "").includes("display_filters"),
+          { timeout: WebNewDriver.WAIT_MS }
+        )
+      : null;
     await this.page
       .locator(`[data-layout="${layout}"]`)
       .filter({ visible: true })
       .first()
       .click({ timeout: WebNewDriver.WAIT_MS });
     await this.layoutsWaitForProjectLayout(layout);
+    // Settle the mutation round-trip, not just the optimistic surface: the
+    // switch's success write lands after the surface mounts, and a prefs
+    // write that starts in between (ISS-008's group toggle) is clobbered by
+    // it — server and UI diverge and the toggle never flips.
+    if (patchSettled !== null) await patchSettled;
   }
 
   private async layoutsWaitForProjectLayout(layout: LayoutsLayoutKey): Promise<void> {

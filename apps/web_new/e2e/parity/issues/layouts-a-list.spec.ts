@@ -34,6 +34,22 @@ test.use({ viewport: { width: 1600, height: 900 } });
 async function resetPrefs(workspaceSlug: string, projectId: string, session: string): Promise<void> {
   const seed = seedProjectUserProperties();
   await serverPatchProjectUserProperties(workspaceSlug, projectId, session, {
+    // Collapse lives in filters.kanban_filters, outside the seed helper's
+    // display keys: a red run that dies mid-toggle persists a collapsed
+    // group, which hides rows and the section Load more for every later
+    // grouped test (ISS-008/010). Clear it alongside the display prefs.
+    filters: {
+      state: null,
+      labels: null,
+      priority: null,
+      assignees: null,
+      created_by: null,
+      start_date: null,
+      subscriber: null,
+      state_group: null,
+      target_date: null,
+      kanban_filters: { group_by: [], sub_group_by: [] },
+    },
     display_filters: seed.display_filters,
     display_properties: seed.display_properties,
   });
@@ -125,43 +141,48 @@ test(
   async ({ driver, seed }) => {
     test.setTimeout(720_000);
     const session = await signInSession(seed.email, seed.password);
+    // Start expanded: a red run that dies mid-toggle persists a collapsed
+    // group, and the collapse outlives the display prefs below.
+    await resetPrefs(seed.workspaceSlug, seed.projectId, session);
     await serverPatchProjectUserProperties(seed.workspaceSlug, seed.projectId, session, {
       display_filters: { layout: "list", group_by: "state", order_by: "sort_order" },
     });
-    await driver.openAuthenticated(
-      `/${seed.workspaceSlug}/projects/${seed.projectId}/issues`,
-      sessionBrowserCookies(session)
-    );
-    await expect.poll(async () => driver.layoutsListGroups(), { timeout: 300_000 }).toEqual(["Todo"]);
+    try {
+      await driver.openAuthenticated(
+        `/${seed.workspaceSlug}/projects/${seed.projectId}/issues`,
+        sessionBrowserCookies(session)
+      );
+      await expect.poll(async () => driver.layoutsListGroups(), { timeout: 300_000 }).toEqual(["Todo"]);
 
-    await test.step("collapse hides the rows", async () => {
-      expect(await driver.layoutsListGroupExpanded("Todo")).toEqual(true);
-      await driver.layoutsListToggleGroup("Todo");
-      expect(await driver.layoutsListGroupExpanded("Todo")).toEqual(false);
-      expect(await driver.layoutsListGroupIssueNames("Todo")).toEqual([]);
-    });
+      await test.step("collapse hides the rows", async () => {
+        expect(await driver.layoutsListGroupExpanded("Todo")).toEqual(true);
+        await driver.layoutsListToggleGroup("Todo");
+        expect(await driver.layoutsListGroupExpanded("Todo")).toEqual(false);
+        expect(await driver.layoutsListGroupIssueNames("Todo")).toEqual([]);
+      });
 
-    await test.step("expand shows them again", async () => {
-      await driver.layoutsListToggleGroup("Todo");
-      expect(await driver.layoutsListGroupExpanded("Todo")).toEqual(true);
-      await expect
-        .poll(async () => driver.layoutsListGroupIssueNames("Todo"), { timeout: 300_000 })
-        .toEqual(expect.arrayContaining([...seed.issueNames]));
-    });
+      await test.step("expand shows them again", async () => {
+        await driver.layoutsListToggleGroup("Todo");
+        expect(await driver.layoutsListGroupExpanded("Todo")).toEqual(true);
+        await expect
+          .poll(async () => driver.layoutsListGroupIssueNames("Todo"), { timeout: 300_000 })
+          .toEqual(expect.arrayContaining([...seed.issueNames]));
+      });
 
-    await test.step("the collapsed state survives reload and is shared with the board", async () => {
-      await driver.layoutsListToggleGroup("Todo");
-      await driver.layoutsReloadIssues();
-      expect(await driver.layoutsListGroupExpanded("Todo")).toEqual(false);
-      await driver.layoutsSwitchTo("kanban");
-      const visible = await driver.visibleIssueNames();
-      for (const name of seed.issueNames) expect(visible).not.toContain(name);
-      await driver.layoutsSwitchTo("list");
-      await driver.layoutsListToggleGroup("Todo");
-      expect(await driver.layoutsListGroupExpanded("Todo")).toEqual(true);
-    });
-
-    await resetPrefs(seed.workspaceSlug, seed.projectId, session);
+      await test.step("the collapsed state survives reload and is shared with the board", async () => {
+        await driver.layoutsListToggleGroup("Todo");
+        await driver.layoutsReloadIssues();
+        expect(await driver.layoutsListGroupExpanded("Todo")).toEqual(false);
+        await driver.layoutsSwitchTo("kanban");
+        const visible = await driver.visibleIssueNames();
+        for (const name of seed.issueNames) expect(visible).not.toContain(name);
+        await driver.layoutsSwitchTo("list");
+        await driver.layoutsListToggleGroup("Todo");
+        expect(await driver.layoutsListGroupExpanded("Todo")).toEqual(true);
+      });
+    } finally {
+      await resetPrefs(seed.workspaceSlug, seed.projectId, session);
+    }
   }
 );
 
@@ -200,6 +221,9 @@ test(
   async ({ driver, seed }) => {
     test.setTimeout(720_000);
     const session = await signInSession(seed.email, seed.password);
+    // Start expanded: a persisted collapsed group hides the section rows
+    // and its Load more, which the grouped half reads below.
+    await resetPrefs(seed.workspaceSlug, seed.projectId, session);
     const prefix = `Parity page ${uniqueSuffix()}`;
     const createdIds: string[] = [];
     try {

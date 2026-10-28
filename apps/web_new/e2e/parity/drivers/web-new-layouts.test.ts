@@ -68,6 +68,7 @@ interface PageStub {
   keys: string[];
   filled: string[];
   waits: number;
+  responses: Array<{ predicate: (response: never) => unknown; options: unknown }>;
 }
 
 function pageOf(
@@ -75,6 +76,7 @@ function pageOf(
     locator?: (selector: string) => Locator;
     role?: (role: string, options: Record<string, unknown> | undefined) => Locator;
     placeholder?: (text: string) => Locator;
+    testId?: (id: string) => Locator;
     url?: string;
   } = {}
 ): PageStub {
@@ -85,6 +87,7 @@ function pageOf(
     keys: [],
     filled: [],
     waits: 0,
+    responses: [],
     page: undefined as unknown as Page,
   };
   state.page = {
@@ -98,6 +101,11 @@ function pageOf(
       return parts.role?.(role, options) ?? locator();
     },
     getByPlaceholder: (text: string) => parts.placeholder?.(text) ?? locator(),
+    getByTestId: (id: string) => parts.testId?.(id) ?? locator(),
+    waitForResponse: async (predicate: (response: never) => unknown, options: unknown) => {
+      state.responses.push({ predicate, options });
+      return {};
+    },
     locator: (selector: string) => {
       state.selectors.push(selector);
       return parts.locator?.(selector) ?? locator();
@@ -570,5 +578,53 @@ describe("web_new hover card reads", () => {
     expect(card).toEqual({ text: "", priorityIcon: "", dateColor: "" });
     expect(seen).toEqual(["row"]);
     expect(keys).toEqual([]);
+  });
+});
+
+describe("web_new layout switch settle", () => {
+  const PREFS_URL = "https://api.test/api/workspaces/w/projects/p/user-properties/";
+
+  function switchPage(active: string): PageStub {
+    return pageOf({
+      role: () => locator({ count: async () => 0 }),
+      testId: (id) =>
+        id === "layout-switcher-segmented"
+          ? locator({
+              locator: () =>
+                locator({
+                  count: async () => 1,
+                  getAttribute: async () => active,
+                }),
+            })
+          : locator(),
+    });
+  }
+
+  function fakeResponse(method: string, url: string, body: string | null): never {
+    return {
+      request: () => ({ method: () => method, postData: () => body }),
+      url: () => url,
+    } as never;
+  }
+
+  it("awaits the display PATCH round-trip on a changed switch", async () => {
+    const stub = switchPage("list");
+
+    await new WebNewDriver(stub.page).layoutsSwitchTo("kanban");
+
+    expect(stub.responses).toHaveLength(1);
+    const predicate = stub.responses[0]?.predicate as (response: never) => boolean;
+    expect(predicate(fakeResponse("PATCH", PREFS_URL, '{"display_filters":{"layout":"kanban"}}'))).toBe(true);
+    expect(predicate(fakeResponse("PATCH", PREFS_URL, '{"filters":{"kanban_filters":{}}}'))).toBe(false);
+    expect(predicate(fakeResponse("GET", PREFS_URL, null))).toBe(false);
+    expect(predicate(fakeResponse("PATCH", "https://api.test/api/workspaces/w/projects/p/issues/", "{}"))).toBe(false);
+  });
+
+  it("skips the PATCH wait on a no-op switch", async () => {
+    const stub = switchPage("kanban");
+
+    await new WebNewDriver(stub.page).layoutsSwitchTo("kanban");
+
+    expect(stub.responses).toHaveLength(0);
   });
 });
