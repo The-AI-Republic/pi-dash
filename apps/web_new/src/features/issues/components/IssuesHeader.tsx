@@ -4,7 +4,10 @@
 // Desktop issues header (parity/specs/issues.md §1, ISS-001). Title and
 // count plus the layout switcher; the trailing slot hosts the Display,
 // filter and analytics controls their slices add. Hidden under md, where
-// the compact mobile header takes over.
+// the compact mobile header takes over. The title region is the row's
+// designated shrinker (min-w-0 + truncate); when the column is narrower
+// than the trailing controls even so, the row wraps instead of painting
+// under an open sidebar (NEWFRONT-1012).
 
 import * as React from "react";
 
@@ -40,13 +43,18 @@ export function IssuesHeader({
   return (
     <div
       data-testid="issues-header"
-      className="hidden shrink-0 items-center gap-(--space-3) border-b border-(--border) px-(--space-4) py-(--space-3) md:flex"
+      className="hidden min-w-0 shrink-0 flex-wrap items-center gap-(--space-3) border-b border-(--border) px-(--space-4) py-(--space-3) md:flex"
     >
-      <h2 className="text-h3 text-(--text)">{title}</h2>
-      <span className="text-body text-(--text-muted)">
-        {totalCount} issue{totalCount === 1 ? "" : "s"}
-      </span>
-      <div className="ml-auto flex items-center gap-(--space-2)">
+      <div data-testid="issues-header-title" className="flex min-w-0 flex-1 items-center gap-(--space-3)">
+        <h2 className="text-h3 truncate text-(--text)">{title}</h2>
+        <span className="text-body shrink-0 text-(--text-muted)">
+          {totalCount} issue{totalCount === 1 ? "" : "s"}
+        </span>
+      </div>
+      <div
+        data-testid="issues-header-actions"
+        className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-(--space-2)"
+      >
         {actions}
         {hideSwitcher ? null : <LayoutSwitcher offered={offered} active={active} onSwitch={onSwitch} />}
       </div>
