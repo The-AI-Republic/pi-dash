@@ -232,21 +232,30 @@ pub struct TurnAgentConfig<'a> {
 
 /// What one successful run produced: `result.new_messages()` and
 /// `result.usage()`, plus the text output (the str output for the
-/// turn).
+/// turn) and the final response's finish reason (`result.response`
+/// in `_was_cut_off`, `tasks.py:502-507`).
 #[derive(Debug)]
 pub struct TurnAgentOutcome {
     pub messages: Vec<TurnMessage>,
     pub usage: RunUsage,
-    #[allow(dead_code)] // carried for parity; the seam reads usage/messages only
+    pub finish: Option<TurnFinish>,
+    #[allow(dead_code)] // carried for parity; the seam reads usage/messages/finish only
     pub output: String,
 }
 
-/// How the run ended before producing output; both arms classify the
-/// same way Python's two `except` arms do (`tasks.py:351-361`).
+/// How the run ended before producing output; the arms classify the
+/// same way Python's `except` arms do (`tasks.py:351-361` plus the
+/// `_hit_output_limit` check in `_classify_error`, `tasks.py:489-499`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TurnLoopError {
     /// `UsageLimitExceeded` → `iteration_limit` (verbatim message).
     UsageLimit(String),
+    /// The model ran out of output tokens: length-exhaustion before
+    /// any response (`_agent_graph.py:1110-1114`) or a tool call
+    /// truncated mid-arguments (`check_incomplete_tool_call`,
+    /// `_agent_graph.py:146-160`). Maps to `response_truncated`,
+    /// never text-classified (`_hit_output_limit`, `tasks.py:489-499`).
+    OutputTruncated,
     /// Any other failure, classified from its message (the typed-first
     /// walk has no counterpart here: pydantic-ai raises untyped
     /// errors, and an ee provider's typed error crosses the seam).
@@ -260,6 +269,7 @@ impl From<TurnLoopError> for AgentError {
     fn from(error: TurnLoopError) -> AgentError {
         match error {
             TurnLoopError::UsageLimit(message) => AgentError::UsageLimit(message),
+            TurnLoopError::OutputTruncated => AgentError::OutputTruncated,
             TurnLoopError::Provider {
                 message,
                 status_code,
@@ -312,11 +322,8 @@ impl RunState {
     fn consume_output_retry(&mut self) -> Result<(), TurnLoopError> {
         self.output_retries_used += 1;
         if self.output_retries_used > MAX_RETRIES {
-            if let Some(message) = self.incomplete_tool_call() {
-                return Err(TurnLoopError::Provider {
-                    message,
-                    status_code: None,
-                });
+            if let Some(error) = self.incomplete_tool_call() {
+                return Err(error);
             }
             return Err(TurnLoopError::Provider {
                 message: format!("Exceeded maximum output retries ({MAX_RETRIES})"),
@@ -327,9 +334,12 @@ impl RunState {
     }
 
     /// `check_incomplete_tool_call` (`_agent_graph.py:146-160`): the
-    /// truncated-call message when the last response ended `length` on
-    /// a tool call whose arguments do not parse.
-    fn incomplete_tool_call(&self) -> Option<String> {
+    /// truncation error when the last response ended `length` on a
+    /// tool call whose arguments do not parse (pydantic-ai raises
+    /// `IncompleteToolCall` with its "exceeded while generating a
+    /// tool call" text there; the text never surfaces — Django fails
+    /// the turn with the constant `response_truncated` detail).
+    fn incomplete_tool_call(&self) -> Option<TurnLoopError> {
         let TurnMessage::Response { parts, finish, .. } = self.history.last()? else {
             return None;
         };
@@ -342,20 +352,14 @@ impl RunState {
         if args_as_dict_checked(args).is_ok() {
             return None;
         }
-        Some(
-            "Model token limit (provider default) exceeded while generating a tool call, resulting in incomplete arguments. Increase the `max_tokens` model setting, or simplify the prompt to result in a shorter response that will fit within the limit."
-                .to_owned(),
-        )
+        Some(TurnLoopError::OutputTruncated)
     }
 
     /// `_check_max_retries` (`tool_manager.py:177-181`) for one name.
     fn check_max_retries(&self, name: &str) -> Result<(), TurnLoopError> {
         if self.retries.get(name).copied().unwrap_or(0) == MAX_RETRIES {
-            if let Some(message) = self.incomplete_tool_call() {
-                return Err(TurnLoopError::Provider {
-                    message,
-                    status_code: None,
-                });
+            if let Some(error) = self.incomplete_tool_call() {
+                return Err(error);
             }
             return Err(TurnLoopError::Provider {
                 message: format!("Tool '{name}' exceeded max retries count of {MAX_RETRIES}"),
@@ -503,10 +507,7 @@ where
             // `None` for the turn: no model settings are set.
             match response_finish {
                 Some(Finish::Length) => {
-                    return Err(TurnLoopError::Provider {
-                        message: LENGTH_MESSAGE.to_owned(),
-                        status_code: None,
-                    });
+                    return Err(TurnLoopError::OutputTruncated);
                 }
                 Some(Finish::ContentFilter) => {
                     return Err(TurnLoopError::Provider {
@@ -582,18 +583,26 @@ where
     }
 }
 
-/// The length-exhaustion message (`_agent_graph.py:1123-1128`): the
-/// turn never sets `max_tokens`, so the placeholder is
-/// "provider default".
-const LENGTH_MESSAGE: &str = "Model token limit (provider default) exceeded before any response was generated. Increase the `max_tokens` model setting, or simplify the prompt to result in a shorter response that will fit within the limit.";
-
 /// Close the run: emit the handler's trailing finalize and hand back
-/// the outcome.
+/// the outcome. The finish is the last response's (`result.response`
+/// in `_was_cut_off`, `tasks.py:502-507`); pydantic-ai raises its
+/// "exceeded before any response was generated" text
+/// (`_agent_graph.py:1110-1114`) instead of returning when the limit
+/// lands on an empty response, so that case never reaches here.
 fn finish<F: FnMut(StreamItem)>(state: RunState, output: String, emit: &mut F) -> TurnAgentOutcome {
     emit(StreamItem::End);
+    let finish = state
+        .new_messages
+        .iter()
+        .rev()
+        .find_map(|message| match message {
+            TurnMessage::Response { finish, .. } => Some(*finish),
+            _ => None,
+        });
     TurnAgentOutcome {
         messages: state.new_messages,
         usage: state.usage,
+        finish: finish.flatten(),
         output,
     }
 }
@@ -645,12 +654,23 @@ async fn process_tool_calls<T: Toolset>(
                 parts.push(retry_text_part(&call.name, &message, &call.call_id));
             }
             ToolKind::Function | ToolKind::Mcp => {
-                let args = args_as_dict_checked(&call.args).map_err(|message| {
-                    TurnLoopError::Provider {
-                        message,
-                        status_code: None,
+                let args = match args_as_dict_checked(&call.args) {
+                    Ok(args) => args,
+                    Err(message) => {
+                        // `validate_tool_call` raising out of `_handle_tool_calls`
+                        // (`_agent_graph.py:1728-1732`): the truncated-call
+                        // check runs first, so a response cut off
+                        // mid-tool-call raises `IncompleteToolCall` — only
+                        // otherwise does the validation error propagate.
+                        if state.incomplete_tool_call().is_some() {
+                            return Err(TurnLoopError::OutputTruncated);
+                        }
+                        return Err(TurnLoopError::Provider {
+                            message,
+                            status_code: None,
+                        });
                     }
-                })?;
+                };
                 match toolset.call(&call.name, args, &call.call_id).await {
                     ToolCallOutcome::Ok(value) => {
                         successes += 1;
@@ -1503,5 +1523,54 @@ mod tests {
         assert_eq!(ensure_ascii("—"), "\\u2014");
         assert_eq!(ensure_ascii("😀"), "\\ud83d\\ude00");
         assert_eq!(ensure_ascii("\u{1}"), "\\u0001");
+    }
+
+    /// One scripted SSE reply: `chunks` of `(delta, finish_reason)`
+    /// pairs, then `[DONE]`.
+    fn sse_reply(chunks: &[(&str, &str)]) -> super::super::replay::StubReply {
+        let mut bytes = Vec::new();
+        for (delta, finish) in chunks {
+            let mut line = "data: {\"id\":\"stub\",\"object\":\"chat.completion.chunk\",\
+             \"created\":0,\"model\":\"m\",\"choices\":[{\"index\":0,\
+             \"delta\":"
+                .to_owned();
+            line.push_str(delta);
+            line.push_str(",\"finish_reason\":");
+            line.push_str(finish);
+            line.push_str("}]}\n\n");
+            bytes.extend_from_slice(line.as_bytes());
+        }
+        bytes.extend_from_slice(b"data: [DONE]\n\n");
+        super::super::replay::StubReply {
+            status: 200,
+            headers: vec![("content-type".to_owned(), "text/event-stream".to_owned())],
+            bytes,
+        }
+    }
+
+    /// A text reply ending `length` succeeds, carrying the finish for
+    /// `_was_cut_off` (`tasks.py:502-507`).
+    #[tokio::test]
+    async fn text_reply_ending_length_carries_the_finish() {
+        let fixture = load_fixture("text_openai");
+        let reply = sse_reply(&[("{\"content\":\"hi\"}", "null"), ("{}", "\"length\"")]);
+        let outcome = run_capture(&fixture, 0, &[], vec![reply]).await;
+        let result = outcome.result.expect("length-ended text runs");
+        assert_eq!(result.finish, Some(TurnFinish::Length));
+        assert_eq!(result.output, "hi");
+    }
+
+    /// An empty reply ending `length` is an output-limit failure
+    /// (`_agent_graph.py:1110-1114` → `_hit_output_limit`).
+    #[tokio::test]
+    async fn empty_reply_ending_length_is_output_truncated() {
+        let fixture = load_fixture("text_openai");
+        let reply = sse_reply(&[("{}", "\"length\"")]);
+        let outcome = run_capture(&fixture, 0, &[], vec![reply]).await;
+        assert!(
+            matches!(outcome.result, Err(TurnLoopError::OutputTruncated)),
+            "empty+length is output-truncated: {:?}",
+            outcome.result
+        );
     }
 }
