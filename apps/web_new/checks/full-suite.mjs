@@ -35,7 +35,7 @@
 // install); the summary then holds only { error }.
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { availableParallelism, tmpdir, totalmem } from "node:os";
+import { availableParallelism, loadavg as osLoadavg, tmpdir, totalmem } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -87,17 +87,38 @@ const SUITES = [
 const WORKER_MEMORY_GIB = 1.5;
 const WORKER_CAP = 16;
 
-// Vitest uses one forked worker per CPU by default. A larger pool helps the
-// shared 4-vCPU scheduler host, where the suite spends much of its wall time
-// waiting on contended cores, but the same pool doubles the footprint on an
-// 8-core / 8 GiB host and turns green tests into `Test timed out`. Oversubscribe
-// only as far as the host's memory can support, and otherwise leave vitest's
-// default untouched. Batches (see runSuiteFiles) are what keep one run's heaps
-// from growing across the whole suite; the pool only sets the width.
-function workerArgs({ cpus, memoryGiB }) {
-  const memoryWorkers = Math.floor(memoryGiB / WORKER_MEMORY_GIB);
-  const workers = Math.min(WORKER_CAP, Math.max(cpus, memoryWorkers));
-  return workers > cpus ? [`--maxWorkers=${workers}`] : [];
+// How many fork workers web_new gets. The suite is CPU-bound (transform plus
+// jsdom), so the pool serves two budgets that pull in opposite directions.
+// The per-test budget wants short runqueues: a 120-file batch on 4 pinned
+// CPUs takes the same wall time at 16 workers as at 4 (60 s vs 58 s), while
+// every test's wall time grows with the runqueue (measured p50/p99/max
+// 30 ms/1.4 s/6.0 s at 16 workers vs 7 ms/0.4 s/1.6 s at 4, slowest file 35 s
+// vs 9 s). On a quiet host the extra workers are pure tail latency, and a
+// transient spike then trips unrelated suites (NEWFRONT-985: 7 timeouts, 3 in
+// fully synchronous tests, all green on re-run). The 45-minute budget wants
+// CPU share under sustained contention instead: on a busy shared host 16
+// workers hold ~2 of 4 cores and finish in 38 minutes, while 4 would take
+// twice the budget (NEWFRONT-893). So a quiet host runs one worker per CPU
+// and a contended host oversubscribes up to the cap; memory only ever shrinks
+// the pool, never grows it. Batches (see runSuiteFiles) are what keep one
+// run's heaps from growing across the whole suite; the pool only sets the
+// width. Pure, so the self-test covers every branch.
+// `externalLoad` is the host's sustained load outside this run (the 5-minute
+// average minus the workers the previous batch ran): it follows a regime that
+// lasts minutes and ignores a transient spike, which is exactly when the
+// small pool must hold.
+function workerCount({ cpus, memoryGiB, externalLoad }) {
+  const memoryWorkers = Math.max(1, Math.floor(memoryGiB / WORKER_MEMORY_GIB));
+  const cap = Math.min(WORKER_CAP, memoryWorkers);
+  if (externalLoad < cpus) return Math.min(cpus, cap);
+  return cap;
+}
+
+// The vitest flag for the pool, or nothing when it matches vitest's default
+// of one worker per CPU.
+function workerArgs(host) {
+  const workers = workerCount(host);
+  return workers === host.cpus ? [] : [`--maxWorkers=${workers}`];
 }
 
 function parseArgs(argv) {
@@ -332,11 +353,20 @@ function reportFromFiles(results) {
 }
 
 // Runs one batch and returns its JSON report (null when it did not finish),
-// the progress lines it wrote, and how it ended.
-function runBatch(suite, files, { sh, tmp, root, host, timeoutMs, seq, label = "all" }) {
+// the progress lines it wrote, the pool it ran with, and how it ended.
+function runBatch(
+  suite,
+  files,
+  { sh, tmp, root, host, loadavg = osLoadavg, lastWorkers = 0, timeoutMs, seq, label = "all" }
+) {
   const out = join(tmp, `${suite.name}-${label}-${seq}.json`);
   const progress = join(tmp, `${suite.name}-${label}-${seq}.jsonl`);
   rmSync(progress, { force: true });
+  // Sustained load outside this run: our own previous batch is still inside
+  // the 5-minute average, so it is subtracted back out (clamped: a batch
+  // shorter than a minute never contributed its full width).
+  const externalLoad = suite.name === "web_new" ? Math.max(0, loadavg()[1] - lastWorkers) : 0;
+  const pool = suite.name === "web_new" ? workerArgs({ ...host, externalLoad }) : [];
   const args = [
     "exec",
     "vitest",
@@ -345,7 +375,7 @@ function runBatch(suite, files, { sh, tmp, root, host, timeoutMs, seq, label = "
     "--reporter=json",
     `--outputFile=${out}`,
     `--reporter=${PROGRESS_REPORTER}`,
-    ...(suite.name === "web_new" ? workerArgs(host) : []),
+    ...pool,
     // `vitest list` prints paths relative to the suite's directory.
     ...files.map((file) => resolve(root, suite.dir, file)),
   ];
@@ -362,6 +392,7 @@ function runBatch(suite, files, { sh, tmp, root, host, timeoutMs, seq, label = "
     output: result.output,
     timeoutMs,
     elapsedMs: Date.now() - startedAt,
+    workers: suite.name === "web_new" ? workerCount({ ...host, externalLoad }) : host.cpus,
   };
 }
 
@@ -429,6 +460,7 @@ function runBatchIsolated(suite, batch, ctx, depth = 0) {
   const absoluteOf = (file) => resolve(ctx.root, suite.dir, file);
   const { results, missing } = resultsOfBatch(batch, absoluteOf, run.report, run.finished);
   ctx.lastElapsedMs = run.elapsedMs;
+  ctx.lastWorkers = run.workers;
   // A run that exited non-zero with no failing test to show is a crash: an
   // unhandled rejection, a worker that died, or no test files. It has to reach
   // the summary even though every file it did report passed.
@@ -488,7 +520,17 @@ function runBatchIsolated(suite, batch, ctx, depth = 0) {
 // suite's deadline never reached; `elapsed` is the wall time it took.
 function runSuiteFiles(
   suite,
-  { sh, tmp, root, host, log, files = null, deadline = Date.now() + SUITE_TIMEOUT_MS, label = "all" }
+  {
+    sh,
+    tmp,
+    root,
+    host,
+    log,
+    loadavg = osLoadavg,
+    files = null,
+    deadline = Date.now() + SUITE_TIMEOUT_MS,
+    label = "all",
+  }
 ) {
   // Listing is what names the files a spent budget leaves unrun, so it gets a
   // short allowance even then; it never delays the summary past the run's own.
@@ -512,7 +554,7 @@ function runSuiteFiles(
       output: "",
       elapsedMs: 0,
     };
-  const ctx = { sh, tmp, root, host, deadline, lastElapsedMs: null, seq: 0, label };
+  const ctx = { sh, tmp, root, host, loadavg, deadline, lastElapsedMs: null, lastWorkers: 0, seq: 0, label };
   const startedAt = Date.now();
   const results = [];
   const unfinished = [];
@@ -585,7 +627,7 @@ function emit(summary, opts, write) {
   else process.stdout.write(json);
 }
 
-function runAll(opts, { sh, git, root, tmp, write, log, host }) {
+function runAll(opts, { sh, git, root, tmp, write, log, host, loadavg }) {
   // The budget starts before the install so the whole run, install included,
   // ends inside the scheduler's 45 minutes.
   const startedAt = Date.now();
@@ -615,7 +657,7 @@ function runAll(opts, { sh, git, root, tmp, write, log, host }) {
     if (opts.out && summary.suites.length > 0)
       emit({ ...summary, green: false, seconds: Math.round((Date.now() - startedAt) / 1000) }, opts, write);
     log(`full-suite: running ${suite.name}`);
-    const first = runSuite(suite, { sh, tmp, root, host, log, deadline: suiteDeadline(budgetEndsAt) });
+    const first = runSuite(suite, { sh, tmp, root, host, log, loadavg, deadline: suiteDeadline(budgetEndsAt) });
     const entry = {
       name: suite.name,
       counts: countsOf(first.report),
@@ -636,6 +678,7 @@ function runAll(opts, { sh, git, root, tmp, write, log, host }) {
         root,
         host,
         log,
+        loadavg,
         files: files.map((file) => suiteRelative(suite, file)),
         deadline: rerunDeadline(files.length, budgetEndsAt),
         label: "rerun",
@@ -680,6 +723,7 @@ function main(
     write = writeFileSync,
     log = console.error,
     host = { cpus: availableParallelism(), memoryGiB: totalmem() / 1024 ** 3 },
+    loadavg = osLoadavg,
   } = {}
 ) {
   let opts = { out: null };
@@ -687,7 +731,7 @@ function main(
   const dir = tmp ?? mkdtempSync(join(tmpdir(), "full-suite-"));
   try {
     opts = parseArgs(argv);
-    status = runAll(opts, { sh, git, root, tmp: dir, write, log, host });
+    status = runAll(opts, { sh, git, root, tmp: dir, write, log, host, loadavg });
   } catch (error) {
     log(`full-suite: error: ${error.message}`);
     emit({ error: error.message }, opts, write);
@@ -730,4 +774,5 @@ export {
   suiteRelative,
   uniqueFiles,
   workerArgs,
+  workerCount,
 };
