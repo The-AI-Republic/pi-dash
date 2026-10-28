@@ -119,10 +119,37 @@ export interface SubIssueScope {
   isEpic: boolean;
 }
 
-/** Server detail for a failure notice, falling back when empty. */
+/**
+ * A whole body that parses to an empty JSON shell: `{}`, `[]` or `null`.
+ * The client forwards short unrecognised bodies as the message verbatim,
+ * so an empty shell reaches callers looking like text.
+ */
+function isEmptyJsonShell(text: string): boolean {
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    return false;
+  }
+  if (body === null) return true;
+  return typeof body === "object" && Object.keys(body).length === 0;
+}
+
+/** Whether the surfaced notice says anything a viewer could act on. */
+function hasNotice(message: unknown): boolean {
+  if (typeof message !== "string") return false;
+  const text = message.trim();
+  return text !== "" && !isEmptyJsonShell(text);
+}
+
+/**
+ * Server detail for a failure notice, falling back when the notice is
+ * blank or an empty JSON shell (`{}`, `[]`, `null`). Any other message is
+ * the server's own words and passes through unchanged.
+ */
 export function failureDetail(error: unknown, fallback: string): string {
-  if (isApiError(error) && error.message !== "") return error.message;
-  return fallback;
+  if (!isApiError(error) || !hasNotice(error.message)) return fallback;
+  return error.message;
 }
 
 /** Cache key for the add-existing search under one project. */
