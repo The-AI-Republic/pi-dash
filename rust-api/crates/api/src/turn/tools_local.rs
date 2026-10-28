@@ -1867,7 +1867,10 @@ pub async fn execute_dispatch_coding_run<S: ToolStore>(
                 group: target.group.clone(),
             },
             &actor,
-            Some(actor),
+            // `None`: the dispatch path never impersonates (`runs.py`
+            // has no `impersonate`, unlike `issues.py`), so Django
+            // stamps no crum user on the entry ticker (PIDASHCONV-1589).
+            None,
             &env.now,
         )
         .await?;
