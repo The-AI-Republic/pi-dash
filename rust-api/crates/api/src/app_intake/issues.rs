@@ -2840,12 +2840,11 @@ pub fn render_intake_dump(
 /// `base_host(request, is_app=True)` (`utils/host.py:17`): `WEB_URL`
 /// else `APP_BASE_URL`; unset is `ImproperlyConfigured` → 500.
 fn request_origin(state: &AppState) -> Result<String, Denial> {
-    state
-        .settings()
-        .urls
-        .web_url
+    let urls = &state.settings().urls;
+    urls.web_url
         .clone()
-        .or_else(|| state.settings().urls.app_base_url.clone())
+        .filter(|s| !s.is_empty())
+        .or_else(|| urls.app_base_url.clone().filter(|s| !s.is_empty()))
         .ok_or(Denial::ServerError)
 }
 
@@ -4746,13 +4745,18 @@ async fn ensure_triage_state(
 /// Both unset is `ImproperlyConfigured` (500).
 fn app_origin(state: &AppState) -> Option<String> {
     let settings = state.settings();
-    if let Some(base) = &settings.urls.app_base_url {
-        return Some(base.clone());
+    if let Some(base) = settings
+        .urls
+        .app_base_url
+        .as_deref()
+        .filter(|s| !s.is_empty())
+    {
+        return Some(base.to_owned());
     }
-    if let Some(web) = &settings.urls.web_url {
-        return Some(web.clone());
+    if let Some(web) = settings.urls.web_url.as_deref().filter(|s| !s.is_empty()) {
+        return Some(web.to_owned());
     }
-    settings.urls.app_base_url.clone()
+    settings.urls.app_base_url.clone().filter(|s| !s.is_empty())
 }
 
 /// Map a database failure onto the `handle_exception` matrix: integrity
@@ -6255,6 +6259,49 @@ fn render_created_issue(rows: &CreatedRows, timezone: chrono_tz::Tz) -> serde_js
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn origin_state(app_base_url: Option<&str>, web_url: Option<&str>) -> AppState {
+        let mut settings = pidash_db::config::Settings::test_defaults();
+        settings.urls.app_base_url = app_base_url.map(str::to_owned);
+        settings.urls.web_url = web_url.map(str::to_owned);
+        AppState::with_settings("test", settings)
+    }
+
+    /// `request_origin` treats `""` as missing (PIDASHCONV-1597): an
+    /// empty `WEB_URL` falls through to `APP_BASE_URL`, and empty
+    /// everywhere is the 500.
+    #[test]
+    fn request_origin_falls_through_empty_strings() {
+        let app = "https://app.example.invalid";
+        let state = origin_state(Some(app), Some(""));
+        assert_eq!(request_origin(&state).expect("falls through"), app);
+        let state = origin_state(Some(""), Some(""));
+        assert!(matches!(request_origin(&state), Err(Denial::ServerError)));
+        let state = origin_state(None, None);
+        assert!(matches!(request_origin(&state), Err(Denial::ServerError)));
+        let web = "https://web.example.invalid";
+        let state = origin_state(Some(app), Some(web));
+        assert_eq!(request_origin(&state).expect("web first"), web);
+    }
+
+    /// `base_host(request, is_app=True)` treats `""` as missing
+    /// (PIDASHCONV-1597): an empty `APP_BASE_URL` falls through to
+    /// `WEB_URL`, and empty everywhere is `None` (the caller 500s).
+    #[test]
+    fn app_origin_falls_through_empty_strings() {
+        let web = "https://web.example.invalid";
+        let state = origin_state(Some(""), Some(web));
+        assert_eq!(app_origin(&state).as_deref(), Some(web));
+        let state = origin_state(Some(""), Some(""));
+        assert_eq!(app_origin(&state), None);
+        let state = origin_state(None, None);
+        assert_eq!(app_origin(&state), None);
+        let state = origin_state(Some("https://app.example.invalid"), Some(web));
+        assert_eq!(
+            app_origin(&state).as_deref(),
+            Some("https://app.example.invalid")
+        );
+    }
 
     #[test]
     fn validate_datetime_iso8601_literal_fallback() {

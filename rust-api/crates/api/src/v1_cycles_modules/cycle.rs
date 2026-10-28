@@ -723,11 +723,12 @@ pub async fn preamble(
 /// `base_host(request, is_app=True)` (`utils/host.py:17-67`): the app
 /// origin for task kwargs, never the inbound host.
 pub fn app_origin(state: &AppState) -> String {
-    if let Some(url) = state.settings().urls.app_base_url.clone() {
-        return url;
+    let urls = &state.settings().urls;
+    if let Some(url) = urls.app_base_url.as_deref().filter(|s| !s.is_empty()) {
+        return url.to_owned();
     }
-    if let Some(url) = state.settings().urls.web_url.clone() {
-        return url;
+    if let Some(url) = urls.web_url.as_deref().filter(|s| !s.is_empty()) {
+        return url.to_owned();
     }
     "http://localhost".to_owned()
 }
@@ -7717,6 +7718,28 @@ mod tests {
     use axum::http::StatusCode;
     use std::collections::HashMap;
     use tower::ServiceExt;
+
+    fn origin_state(app_base_url: Option<&str>, web_url: Option<&str>) -> AppState {
+        let mut settings = pidash_db::config::Settings::test_defaults();
+        settings.urls.app_base_url = app_base_url.map(str::to_owned);
+        settings.urls.web_url = web_url.map(str::to_owned);
+        AppState::with_settings("test", settings)
+    }
+
+    /// `base_host(request, is_app=True)` treats `""` as missing
+    /// (PIDASHCONV-1597): an empty `APP_BASE_URL` falls through to
+    /// `WEB_URL`. (The localhost fallback for unset-everywhere is a
+    /// separate, deliberate-looking deviation — out of scope.)
+    #[test]
+    fn app_origin_falls_through_empty_strings() {
+        let web = "https://web.example.invalid";
+        let state = origin_state(Some(""), Some(web));
+        assert_eq!(app_origin(&state), web);
+        let state = origin_state(Some("https://app.example.invalid"), Some(web));
+        assert_eq!(app_origin(&state), "https://app.example.invalid");
+        let state = origin_state(Some(""), Some(""));
+        assert_eq!(app_origin(&state), "http://localhost");
+    }
 
     #[test]
     fn activate_timezone_empty_zone_500s() {

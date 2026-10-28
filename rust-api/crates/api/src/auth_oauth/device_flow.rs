@@ -316,12 +316,11 @@ pub fn canonical_user_code(raw: &str) -> Result<String, UserCodeRejection> {
 /// `base_host(request=request)` (`authentication/utils/host.py:28-64`)
 /// for the device flow: `settings.WEB_URL or settings.APP_BASE_URL`.
 fn verification_base(state: &AppState) -> String {
-    state
-        .settings()
-        .urls
-        .web_url
+    let urls = &state.settings().urls;
+    urls.web_url
         .clone()
-        .or_else(|| state.settings().urls.app_base_url.clone())
+        .filter(|s| !s.is_empty())
+        .or_else(|| urls.app_base_url.clone().filter(|s| !s.is_empty()))
         .unwrap_or_else(|| "http://localhost".to_owned())
 }
 
@@ -859,6 +858,29 @@ fn poll_gap() -> chrono::Duration {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    fn origin_state(app_base_url: Option<&str>, web_url: Option<&str>) -> AppState {
+        let mut settings = pidash_db::config::Settings::test_defaults();
+        settings.urls.app_base_url = app_base_url.map(str::to_owned);
+        settings.urls.web_url = web_url.map(str::to_owned);
+        AppState::with_settings("test", settings)
+    }
+
+    /// `base_host(request=request)` treats `""` as missing
+    /// (PIDASHCONV-1597): an empty `WEB_URL` falls through to
+    /// `APP_BASE_URL`. (The localhost fallback for unset-everywhere is
+    /// a separate, deliberate-looking deviation — out of scope.)
+    #[test]
+    fn verification_base_falls_through_empty_strings() {
+        let app = "https://app.example.invalid";
+        let state = origin_state(Some(app), Some(""));
+        assert_eq!(verification_base(&state), app);
+        let web = "https://web.example.invalid";
+        let state = origin_state(Some(app), Some(web));
+        assert_eq!(verification_base(&state), web);
+        let state = origin_state(Some(""), Some(""));
+        assert_eq!(verification_base(&state), "http://localhost");
+    }
 
     #[test]
     fn peerless_throttle_ident_is_drf_none() {
