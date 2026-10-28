@@ -149,12 +149,17 @@ store). `src/core/` holds `api` (the singleton HTTP client), `query`,
   needs roughly 72 CPU-minutes, so the result depends on how many cores the
   shared host actually grants it. Measured on 2026-10-24, the shared 4-vCPU
   host was running other worktrees at load 15-18 and granted it ~1.2 cores.
-  The runner therefore oversubscribes vitest's fork pool when the host has
-  memory for it: 16 workers on a 4-vCPU host with 30 GiB completed 1 672 files
-  and 19 072 tests in 38 min at load ~29, while the same pool on an 8-core /
-  8 GiB host spent 2.5 GiB and turned green files into `Test timed out`. The
-  pool is sized at 1.5 GiB per worker and is never raised above vitest's
-  CPU-count default when memory cannot support it.
+  The runner sizes vitest's fork pool from the host's sustained load. A quiet
+  host runs one worker per CPU: the suite is CPU-bound, so a 120-file batch on
+  4 pinned CPUs takes the same wall time at 16 workers as at 4 (60 s vs 58 s)
+  while every test's wall time grows with the runqueue (p99 1.4 s vs 0.4 s,
+  slowest file 35 s vs 9 s), and the extra workers only invite `Test timed out`
+  flakes when a transient spike lands (NEWFRONT-985). A contended host
+  oversubscribes up to 16 workers to hold CPU share: 16 workers on a 4-vCPU
+  host with 30 GiB completed 1 672 files and 19 072 tests in 38 min at load
+  ~29. The pool is capped at 1.5 GiB per worker and at 16 workers, and memory
+  only ever shrinks it: on an 8-core / 8 GiB host it drops to 5 instead of
+  spending 2.5 GiB and turning green files into `Test timed out`.
 - The runner works in batches and keeps evidence as it goes. web_new runs 120
   files per batch (200 for kit and api-client); a fast batch grows, a slow one
   halves. Every batch starts a fresh fork pool, so worker heaps do not grow

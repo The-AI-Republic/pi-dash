@@ -32,6 +32,7 @@ import {
   suiteRelative,
   uniqueFiles,
   workerArgs,
+  workerCount,
 } from "./full-suite.mjs";
 import ProgressReporter, {
   PROGRESS_ENV as PROGRESS_PATH_ENV,
@@ -93,17 +94,42 @@ describe("parseArgs", () => {
   });
 });
 
-describe("workerArgs", () => {
-  it("oversubscribes a small CPU pool when memory has room", () => {
-    expect(workerArgs(SCHEDULER_HOST)).toEqual([WEB_WORKERS]);
-    expect(workerArgs({ cpus: 4, memoryGiB: 12 })).toEqual(["--maxWorkers=8"]);
-    expect(workerArgs({ cpus: 2, memoryGiB: 24 })).toEqual([WEB_WORKERS]);
+describe("workerCount", () => {
+  it("runs one worker per CPU on a quiet host", () => {
+    expect(workerCount({ ...SCHEDULER_HOST, externalLoad: 2 })).toBe(4);
+    expect(workerCount({ ...SCHEDULER_HOST, externalLoad: 0 })).toBe(4);
+    expect(workerCount({ cpus: 8, memoryGiB: 30, externalLoad: 7.9 })).toBe(8);
   });
 
-  it("leaves vitest's default pool alone when memory is the constraint", () => {
-    expect(workerArgs({ cpus: 8, memoryGiB: 8 })).toEqual([]);
-    expect(workerArgs({ cpus: 4, memoryGiB: 4 })).toEqual([]);
-    expect(workerArgs({ cpus: 16, memoryGiB: 64 })).toEqual([]);
+  it("oversubscribes up to the cap on a contended host", () => {
+    expect(workerCount({ ...SCHEDULER_HOST, externalLoad: 16 })).toBe(16);
+    // At the threshold the host is already saturated: grab share.
+    expect(workerCount({ ...SCHEDULER_HOST, externalLoad: 4 })).toBe(16);
+    expect(workerCount({ cpus: 2, memoryGiB: 24, externalLoad: 9 })).toBe(16);
+  });
+
+  it("lets memory shrink the pool but never grows it", () => {
+    expect(workerCount({ cpus: 8, memoryGiB: 8, externalLoad: 1 })).toBe(5);
+    expect(workerCount({ cpus: 8, memoryGiB: 8, externalLoad: 20 })).toBe(5);
+    expect(workerCount({ cpus: 24, memoryGiB: 62, externalLoad: 5 })).toBe(16);
+    expect(workerCount({ cpus: 24, memoryGiB: 62, externalLoad: 40 })).toBe(16);
+  });
+
+  it("never drops below one worker", () => {
+    expect(workerCount({ cpus: 4, memoryGiB: 0.5, externalLoad: 0 })).toBe(1);
+    expect(workerCount({ cpus: 4, memoryGiB: 0.5, externalLoad: 9 })).toBe(1);
+  });
+});
+
+describe("workerArgs", () => {
+  it("passes no flag when the pool matches vitest's default", () => {
+    expect(workerArgs({ ...SCHEDULER_HOST, externalLoad: 2 })).toEqual([]);
+  });
+
+  it("passes --maxWorkers when the pool differs from the default", () => {
+    expect(workerArgs({ ...SCHEDULER_HOST, externalLoad: 16 })).toEqual([WEB_WORKERS]);
+    expect(workerArgs({ cpus: 8, memoryGiB: 8, externalLoad: 1 })).toEqual(["--maxWorkers=5"]);
+    expect(workerArgs({ cpus: 24, memoryGiB: 62, externalLoad: 5 })).toEqual([WEB_WORKERS]);
   });
 });
 
@@ -354,7 +380,7 @@ function greenPlan() {
   return ({ files }) => ({ report: report(files.map((file) => fileResult(file))) });
 }
 
-function run(argv, { files, install, git = fakeGit(), plan } = {}) {
+function run(argv, { files, install, git = fakeGit(), plan, loadavg = () => [2, 2, 2] } = {}) {
   const tmp = mkdtempSync(join(tmpdir(), "full-suite-test-"));
   const shell = fakeShell({ files, install, plan });
   const written = {};
@@ -368,6 +394,7 @@ function run(argv, { files, install, git = fakeGit(), plan } = {}) {
     root: ROOT,
     tmp,
     host: SCHEDULER_HOST,
+    loadavg,
     write: (file, text) => {
       written[file] = JSON.parse(text);
       history.push(written[file]);
@@ -426,10 +453,33 @@ describe("main", () => {
       true
     );
     expect(webNew.env.FULL_SUITE_PROGRESS.endsWith(".jsonl")).toBe(true);
-    // Only web_new gets the larger pool; kit and api-client keep vitest's default.
+  });
+
+  it("oversubscribes only web_new on a contended host; kit and api-client keep vitest's default", () => {
+    const { shell } = run(["--out", "s.json"], { loadavg: () => [20, 18, 16] });
+    const [webNew] = vitestCalls(shell);
     expect(webNew.args).toContain(WEB_WORKERS);
     expect(vitestCalls(shell)[1].args).not.toContain(WEB_WORKERS);
     expect(vitestCalls(shell)[2].args).not.toContain(WEB_WORKERS);
+  });
+
+  it("leaves every pool at vitest's default on a quiet host", () => {
+    const { shell } = run(["--out", "s.json"], { loadavg: () => [2, 2, 2] });
+    for (const call of vitestCalls(shell)) {
+      expect(call.args.some((arg) => arg.startsWith("--maxWorkers="))).toBe(false);
+    }
+  });
+
+  it("nets its own pool out of the sustained load before sizing the next batch", () => {
+    const files = Array.from({ length: 250 }, (_, i) => `src/f${i}.test.ts`);
+    const { shell } = run(["--out", "s.json"], { files, plan: greenPlan(), loadavg: () => [18, 18, 18] });
+    const webNewRuns = vitestCalls(shell).filter((call) => call.cwd === `${ROOT}/apps/web_new`);
+    expect(webNewRuns.length).toBeGreaterThan(1);
+    // The first batch sees the raw average and oversubscribes; the next batch
+    // subtracts the 16 workers it just ran, finds only a quiet host underneath,
+    // and drops back to one worker per CPU instead of ratcheting up.
+    expect(webNewRuns[0].args).toContain(WEB_WORKERS);
+    expect(webNewRuns[1].args.some((arg) => arg.startsWith("--maxWorkers="))).toBe(false);
   });
 
   it("splits a suite larger than one batch into several runs", () => {
