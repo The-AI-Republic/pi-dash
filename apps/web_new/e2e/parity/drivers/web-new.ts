@@ -2121,12 +2121,17 @@ export class WebNewDriver implements ParityDriver {
     let sawDialog = false;
     const onDialog = async (dialog: import("@playwright/test").Dialog): Promise<void> => {
       sawDialog = true;
-      await dialog.dismiss();
+      // Accept so the reload proceeds: dismissing a beforeunload dialog
+      // cancels the navigation and page.reload() would hang to the test
+      // timeout (ISS-110).
+      await dialog.accept();
     };
     this.page.on("dialog", onDialog);
     try {
-      await this.page.reload();
-      await this.page.waitForLoadState("domcontentloaded");
+      // Bounded: a cancelled navigation never reaches load, so the
+      // observation must not outlive the dialog itself.
+      await this.page.reload({ timeout: 30_000 }).catch(() => {});
+      await this.page.waitForLoadState("domcontentloaded").catch(() => {});
       await this.page.waitForTimeout(2000);
     } finally {
       this.page.off("dialog", onDialog);

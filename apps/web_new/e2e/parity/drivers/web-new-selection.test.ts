@@ -43,8 +43,9 @@ interface PageStub {
   testIds: string[];
   selectors: string[];
   reloads: number;
+  accepts: number;
   leaveGuardArmed: boolean;
-  dialogHandlers: Array<(dialog: { type: () => string; dismiss: () => Promise<void> }) => void>;
+  dialogHandlers: Array<(dialog: { type: () => string; accept: () => Promise<void> }) => void>;
 }
 
 function pageOf(parts: { testId?: (id: string) => Locator; locator?: (selector: string) => Locator } = {}): PageStub {
@@ -53,6 +54,7 @@ function pageOf(parts: { testId?: (id: string) => Locator; locator?: (selector: 
     testIds: [],
     selectors: [],
     reloads: 0,
+    accepts: 0,
     leaveGuardArmed: false,
     dialogHandlers: [],
   };
@@ -75,7 +77,12 @@ function pageOf(parts: { testId?: (id: string) => Locator; locator?: (selector: 
     reload: async () => {
       state.reloads += 1;
       for (const handler of state.dialogHandlers) {
-        handler({ type: () => "beforeunload", dismiss: async () => undefined });
+        handler({
+          type: () => "beforeunload",
+          accept: async () => {
+            state.accepts += 1;
+          },
+        });
       }
       return null;
     },
@@ -107,10 +114,26 @@ describe("web_new selection reads", () => {
     expect(stub.reloads).toBe(1);
   });
 
+  it("accepts the leave dialog so the reload proceeds", async () => {
+    const stub = pageOf();
+    await new WebNewDriver(stub.page).reloadSawDialog();
+    expect(stub.accepts).toBe(1);
+  });
+
   it("reports no leave dialog when the page arms none", async () => {
     const { page } = pageOf();
     (page as unknown as { reload: () => Promise<null> }).reload = async () => null;
     await expect(new WebNewDriver(page).reloadSawDialog()).resolves.toBe(false);
+  });
+
+  it("resolves instead of hanging when the reload rejects", async () => {
+    const stub = pageOf();
+    (stub.page as unknown as { reload: () => Promise<null> }).reload = async () => {
+      throw new Error("navigation cancelled");
+    };
+    await expect(new WebNewDriver(stub.page).reloadSawDialog()).resolves.toBe(false);
+    stub.leaveGuardArmed = true;
+    await expect(new WebNewDriver(stub.page).reloadSawDialog()).resolves.toBe(true);
   });
 });
 
