@@ -519,6 +519,112 @@ where
 }
 
 // ---------------------------------------------------------------------------
+// instance_setup + config_purge (design D6 gap, PIDASHCONV-1622)
+// ---------------------------------------------------------------------------
+
+/// `instance.save(update_fields=["is_setup_done", "is_signup_screen_visited"])`
+/// (`cloud_complete_setup.py:57`, both flags were false): flip both, `WHERE
+/// id`. Django's `save(update_fields=...)` writes only the listed columns —
+/// `updated_at` is NOT stamped (probe-verified). Byte-identical to the
+/// overlay builder this replaces
+/// (`cloud-db/src/auth/queries.rs::update_instance_setup`, `Both` arm).
+pub const UPDATE_INSTANCE_SETUP_BOTH_SQL: &str = "UPDATE \"instances\" SET \"is_setup_done\" = $1, \"is_signup_screen_visited\" = $2 WHERE \"instances\".\"id\" = $3";
+
+/// Only `is_setup_done` was false (`cloud_complete_setup.py:46-48`).
+/// Byte-identical to the overlay builder's `SetupDoneOnly` arm.
+pub const UPDATE_INSTANCE_SETUP_DONE_SQL: &str =
+    "UPDATE \"instances\" SET \"is_setup_done\" = $1 WHERE \"instances\".\"id\" = $2";
+
+/// Only `is_signup_screen_visited` was false (`cloud_complete_setup.py:49-52`).
+/// Byte-identical to the overlay builder's `SignupVisitedOnly` arm.
+pub const UPDATE_INSTANCE_SETUP_VISITED_SQL: &str =
+    "UPDATE \"instances\" SET \"is_signup_screen_visited\" = $1 WHERE \"instances\".\"id\" = $2";
+
+/// Pick the `SET` shape for the flags the command flips. The command
+/// appends `update_fields` in fixed order (`cloud_complete_setup.py:46-52`),
+/// so these three are exhaustive; `None` is the no-write path (both flags
+/// already true — the command prints "no change" and emits no statement).
+pub fn update_instance_setup_sql(
+    set_setup_done: bool,
+    set_signup_screen_visited: bool,
+) -> Option<&'static str> {
+    match (set_setup_done, set_signup_screen_visited) {
+        (true, true) => Some(UPDATE_INSTANCE_SETUP_BOTH_SQL),
+        (true, false) => Some(UPDATE_INSTANCE_SETUP_DONE_SQL),
+        (false, true) => Some(UPDATE_INSTANCE_SETUP_VISITED_SQL),
+        (false, false) => None,
+    }
+}
+
+/// Flip the listed setup flags from `False` to `True`
+/// (`cloud_complete_setup.py:57`); returns affected rows. The `(false,
+/// false)` shape emits no statement and returns `0`, like the command's
+/// no-change path.
+pub async fn update_instance_setup<'e, E>(
+    ex: E,
+    instance_id: uuid::Uuid,
+    set_setup_done: bool,
+    set_signup_screen_visited: bool,
+) -> Result<u64, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let Some(sql) = update_instance_setup_sql(set_setup_done, set_signup_screen_visited) else {
+        return Ok(0);
+    };
+    let mut query = sqlx::query(sql);
+    if set_setup_done {
+        query = query.bind(true);
+    }
+    if set_signup_screen_visited {
+        query = query.bind(true);
+    }
+    Ok(query.bind(instance_id).execute(ex).await?.rows_affected())
+}
+
+/// Write: `InstanceConfiguration.objects.filter(key__in=...).delete()`
+/// (`cloud_purge_env_configs.py:66`): stamp `deleted_at = now()` over the
+/// scoped queryset (not already deleted, key in the purged set). The
+/// `CAST($1 AS timestamptz)` and the bare (unparenthesized) `WHERE`
+/// conjunction are the overlay builder's sea-query rendering, kept
+/// byte-identical so the swap changes nothing on the wire. Returns `None`
+/// for an empty key set: the command returns before deleting, and Django
+/// would raise `EmptyResultSet` (same short-circuit as
+/// [`config_select_by_keys_sql`]).
+pub fn soft_delete_configs_by_keys_sql(keys: &[&str]) -> Option<String> {
+    if keys.is_empty() {
+        return None;
+    }
+    let placeholders: Vec<String> = (2..=keys.len() + 1).map(|i| format!("${i}")).collect();
+    Some(format!(
+        "UPDATE \"instance_configurations\" SET \"deleted_at\" = CAST($1 AS timestamptz) WHERE \"instance_configurations\".\"deleted_at\" IS NULL AND \"instance_configurations\".\"key\" IN ({})",
+        placeholders.join(", ")
+    ))
+}
+
+/// Stamp `deleted_at = now()` on the live rows whose key is in `keys`
+/// (`cloud_purge_env_configs.py:66`); returns the stamped count, which the
+/// command reads (`deleted, _ = ...delete()` — the unpack crash that
+/// follows is ported driver-side). Empty input returns `0` with no query.
+pub async fn soft_delete_configs_by_keys<'e, E>(
+    ex: E,
+    keys: &[&str],
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<u64, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let Some(sql) = soft_delete_configs_by_keys_sql(keys) else {
+        return Ok(0);
+    };
+    let mut query = sqlx::query(&sql).bind(now);
+    for key in keys {
+        query = query.bind(key);
+    }
+    Ok(query.execute(ex).await?.rows_affected())
+}
+
+// ---------------------------------------------------------------------------
 // workspace_list
 // ---------------------------------------------------------------------------
 
@@ -871,6 +977,55 @@ mod tests {
         assert_eq!(normalize_config_value(Some("")), "");
         assert_eq!(normalize_config_value(Some("   ")), "");
         assert_eq!(normalize_config_value(Some("a  b")), "a  b");
+    }
+
+    #[test]
+    fn instance_setup_sql_shapes_byte_identical() {
+        // Pinned against the overlay builders these replace
+        // (`cloud-db/src/auth/queries.rs::update_instance_setup_sql`):
+        // same text, same placeholder numbering, no `updated_at`.
+        assert_eq!(
+            UPDATE_INSTANCE_SETUP_BOTH_SQL,
+            "UPDATE \"instances\" SET \"is_setup_done\" = $1, \"is_signup_screen_visited\" = $2 WHERE \"instances\".\"id\" = $3"
+        );
+        assert_eq!(
+            UPDATE_INSTANCE_SETUP_DONE_SQL,
+            "UPDATE \"instances\" SET \"is_setup_done\" = $1 WHERE \"instances\".\"id\" = $2"
+        );
+        assert_eq!(
+            UPDATE_INSTANCE_SETUP_VISITED_SQL,
+            "UPDATE \"instances\" SET \"is_signup_screen_visited\" = $1 WHERE \"instances\".\"id\" = $2"
+        );
+        assert_eq!(
+            update_instance_setup_sql(true, true),
+            Some(UPDATE_INSTANCE_SETUP_BOTH_SQL)
+        );
+        assert_eq!(
+            update_instance_setup_sql(true, false),
+            Some(UPDATE_INSTANCE_SETUP_DONE_SQL)
+        );
+        assert_eq!(
+            update_instance_setup_sql(false, true),
+            Some(UPDATE_INSTANCE_SETUP_VISITED_SQL)
+        );
+        assert_eq!(update_instance_setup_sql(false, false), None);
+    }
+
+    #[test]
+    fn soft_delete_configs_sql_byte_identical() {
+        // Pinned against the overlay builder this replaces
+        // (`cloud-db/src/auth/queries.rs::soft_delete_configs_sql`): the
+        // `CAST`, the bare `WHERE` conjunction and the `$2..` key
+        // numbering are its sea-query rendering, kept verbatim.
+        assert_eq!(
+            soft_delete_configs_by_keys_sql(&["K1", "K2"]).as_deref(),
+            Some("UPDATE \"instance_configurations\" SET \"deleted_at\" = CAST($1 AS timestamptz) WHERE \"instance_configurations\".\"deleted_at\" IS NULL AND \"instance_configurations\".\"key\" IN ($2, $3)")
+        );
+        assert_eq!(
+            soft_delete_configs_by_keys_sql(&["K1"]).as_deref(),
+            Some("UPDATE \"instance_configurations\" SET \"deleted_at\" = CAST($1 AS timestamptz) WHERE \"instance_configurations\".\"deleted_at\" IS NULL AND \"instance_configurations\".\"key\" IN ($2)")
+        );
+        assert_eq!(soft_delete_configs_by_keys_sql(&[]), None);
     }
 
     #[test]
@@ -1249,6 +1404,118 @@ mod tests {
             };
             assert_eq!(row.value.as_deref(), Some(want), "key {}", row.key);
         }
+        tx.rollback().await.expect("rollback");
+    }
+
+    #[tokio::test]
+    async fn live_instance_setup_flip() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let mut tx = live_tx(&pool).await;
+        let ts = live_ts(1_700_000_000);
+        for (suffix, done, visited, iid) in [
+            (40u8, false, false, "both"),
+            (41u8, false, true, "done"),
+            (42u8, true, false, "visited"),
+            (43u8, true, true, "noop"),
+        ] {
+            sqlx::query("INSERT INTO instances (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, instance_name, whitelist_emails, instance_id, current_version, latest_version, edition, domain, last_checked_at, namespace, is_telemetry_enabled, is_support_required, is_setup_done, is_signup_screen_visited, is_verified, is_test, is_current_version_deprecated) VALUES ($1, $2, $2, NULL, NULL, NULL, 'Acme', NULL, $3, 'v1', NULL, 'PI_DASH_COMMUNITY', '', $2, NULL, TRUE, TRUE, $4, $5, TRUE, FALSE, FALSE)")
+                .bind(live_uuid(suffix)).bind(ts).bind(iid).bind(done).bind(visited)
+                .execute(&mut *tx).await.expect("seed instance");
+        }
+        // Each reachable subset flips exactly its flags.
+        assert_eq!(
+            update_instance_setup(&mut *tx, live_uuid(40), true, true)
+                .await
+                .expect("both"),
+            1
+        );
+        assert_eq!(
+            update_instance_setup(&mut *tx, live_uuid(41), true, false)
+                .await
+                .expect("done"),
+            1
+        );
+        assert_eq!(
+            update_instance_setup(&mut *tx, live_uuid(42), false, true)
+                .await
+                .expect("visited"),
+            1
+        );
+        // No-write path: no statement, zero rows.
+        assert_eq!(
+            update_instance_setup(&mut *tx, live_uuid(43), false, false)
+                .await
+                .expect("noop"),
+            0
+        );
+        let rows: Vec<(bool, bool, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+            "SELECT is_setup_done, is_signup_screen_visited, updated_at FROM instances ORDER BY instance_id",
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .expect("refetch");
+        assert_eq!(rows.len(), 4);
+        for (done, visited, updated) in &rows {
+            assert!(done, "is_setup_done flipped");
+            assert!(visited, "is_signup_screen_visited flipped");
+            assert_eq!(updated, &ts, "updated_at untouched by the flip");
+        }
+        tx.rollback().await.expect("rollback");
+    }
+
+    #[tokio::test]
+    async fn live_config_purge_by_keys() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let mut tx = live_tx(&pool).await;
+        let ts = live_ts(1_700_000_000);
+        let already_gone = live_ts(1_600_000_000);
+        for (i, (key, deleted)) in [
+            ("K1", None),
+            ("K2", None),
+            ("K3", Some(already_gone)),
+            ("KEEP", None),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            sqlx::query("INSERT INTO instance_configurations (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, key, value, category, is_encrypted) VALUES ($1, $2, $2, NULL, NULL, $3, $4, 'v', 'general', FALSE)")
+                .bind(live_uuid(50 + i as u8)).bind(ts).bind(deleted).bind(key)
+                .execute(&mut *tx).await.expect("seed config");
+        }
+        let now = live_ts(1_800_000_000);
+        // K1 + K2 stamped; K3 already deleted, MISSING has no row.
+        assert_eq!(
+            soft_delete_configs_by_keys(&mut *tx, &["K1", "K2", "K3", "MISSING"], now)
+                .await
+                .expect("purge"),
+            2
+        );
+        let rows: Vec<(String, Option<chrono::DateTime<chrono::Utc>>)> =
+            sqlx::query_as("SELECT key, deleted_at FROM instance_configurations ORDER BY key")
+                .fetch_all(&mut *tx)
+                .await
+                .expect("refetch");
+        for (key, deleted) in &rows {
+            let want = if key == "K1" || key == "K2" {
+                Some(now)
+            } else if key == "K3" {
+                Some(already_gone)
+            } else {
+                None
+            };
+            assert_eq!(deleted, &want, "key {key}");
+        }
+        // Empty key set touches nothing.
+        assert_eq!(
+            soft_delete_configs_by_keys(&mut *tx, &[], now)
+                .await
+                .expect("empty"),
+            0
+        );
         tx.rollback().await.expect("rollback");
     }
 
