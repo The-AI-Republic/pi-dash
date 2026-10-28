@@ -57,10 +57,10 @@ use pidash_services::runner_sessions::pubsub::{
 };
 
 use crate::project_move_handoff::drain_publish_effects;
-use pidash_services::dispatch::admission::RedisAdmissionCache;
 use crate::runner_enroll::teardown::redis_client;
 use crate::state::AppState;
 use pidash_jobs::orchestration::HandoffStore;
+use pidash_services::dispatch::admission::RedisAdmissionCache;
 
 /// The creation runtime facts a span store is built from: executor
 /// settings, the admission cache, and the unix clock for the

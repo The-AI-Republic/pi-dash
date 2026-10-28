@@ -149,6 +149,8 @@ use pidash_services::v1_work_items::shape_issue::{
     BlockerSummary, IssueRow as ApiIssueRow, RepresentationInput, SummaryItem,
 };
 
+use super::handlers_social::{preamble, query_last, rewrite_project_id, QueryMap};
+use super::perms::{gate_for, V1WorkItemsRoute};
 use crate::domain_hooks::{AppMoveAdmissionCache, AppMovePostCommitHook, AppTaskEnqueueHook};
 use crate::issue_transition::AppTransitionHook;
 use crate::middleware::body_limit::read_request_bytes;
@@ -159,8 +161,6 @@ use crate::v1_cycles_modules::body as shared_body;
 use crate::v1_cycles_modules::json::{
     parse_json_text, to_serde_publish, JsonFail, JSON_PARSE_PREFIX,
 };
-use super::handlers_social::{preamble, query_last, rewrite_project_id, QueryMap};
-use super::perms::{gate_for, V1WorkItemsRoute};
 pub use pidash_compat::response::SERVER_ERROR_BODY;
 
 // ---------------------------------------------------------------------------
