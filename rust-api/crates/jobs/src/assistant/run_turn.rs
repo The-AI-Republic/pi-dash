@@ -41,11 +41,12 @@
 //! - `_model_label` (`:422-425`) → [`TurnSeam::model_label`].
 //! - `_extract_usage` (`:428-439`) → [`TurnUsage`] + [`usage_value`]
 //!   (extraction failure → `{}`, never null).
-//! - `_classify_error` (`:442-480` on `origin/main`, past #1126) →
-//!   [`classify_error`] for the text fallback (`:454-480`), same branch
-//!   order: credit (status-code 402 read from the exception, never
-//!   substring-matched) first, then auth, unreachable, model, internal.
-//!   The typed-first branch (`:443-451`) is the [`AgentError::Typed`] arm:
+//! - `_classify_error` (`:447-486` on `origin/main`, past #1430) → the
+//!   [`TurnSeam::turn_error_for_user`] hook with the
+//!   [`classify_provider_error`] fallback: status-first wording (credit,
+//!   auth, rate-limit, model, unreachable), text markers only for
+//!   status-less failures.
+//!   The typed-first branch (`:453-457`) is the [`AgentError::Typed`] arm:
 //!   a typed failure crosses the seam already classified and is used
 //!   verbatim, never text-guessed. The `_hit_output_limit` branch
 //!   (`:489-499`) is the [`AgentError::OutputTruncated`] arm, mapping to
@@ -86,6 +87,7 @@ use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::assistant::provider_errors::{classify_provider_error, BYOK};
 use crate::queue::JobRow;
 use crate::worker::{HandlerError, Registry, Verdict};
 
@@ -198,27 +200,11 @@ pub fn truncate_detail(detail: &str) -> &str {
 }
 
 // --------------------------------------------------------------------------- //
-// Error classification (`tasks.py:442-480` on `origin/main`, past #1126)
+// Error classification (`tasks.py:447-486` on `origin/main`, past #1430)
 // --------------------------------------------------------------------------- //
 
-/// Provider error codes (`tasks.py:469`, `provider_out_of_credit` /
-/// `provider_auth_failed` / `provider_unreachable` / `model_invalid` /
-/// `internal`).
-pub const CODE_OUT_OF_CREDIT: &str = "provider_out_of_credit";
-/// Provider error codes (`tasks.py:469`, `provider_out_of_credit` /
-/// `provider_auth_failed` / `provider_unreachable` / `model_invalid` /
-/// `internal`).
-pub const CODE_AUTH_FAILED: &str = "provider_auth_failed";
-/// Provider error codes (`tasks.py:469`, `provider_out_of_credit` /
-/// `provider_unreachable` / `model_invalid` / `internal`).
-pub const CODE_UNREACHABLE: &str = "provider_unreachable";
-/// Provider error codes (`tasks.py:469`, `provider_out_of_credit` /
-/// `provider_auth_failed` / `provider_unreachable` / `model_invalid` /
-/// `internal`).
-pub const CODE_MODEL_INVALID: &str = "model_invalid";
-/// Provider error codes (`tasks.py:469`, `provider_out_of_credit` /
-/// `provider_auth_failed` / `provider_unreachable` / `model_invalid` /
-/// `internal`).
+/// Unrecognised-failure code: `_classify_error` returns `internal` when the
+/// seam leaves a failure unclassified (`tasks.py:464-465`).
 pub const CODE_INTERNAL: &str = "internal";
 
 /// Iteration-limit code (`tasks.py:354`, `UsageLimitExceeded` branch).
@@ -228,16 +214,7 @@ pub const CODE_TURN_TIMEOUT: &str = "turn_timeout";
 /// Output-limit code (`tasks.py:463`, `_hit_output_limit` branch).
 pub const CODE_RESPONSE_TRUNCATED: &str = "response_truncated";
 
-/// User-facing details, verbatim (`tasks.py:469-480`).
-pub const DETAIL_OUT_OF_CREDIT: &str = "The provider rejected the request for lack of credit.";
-/// User-facing details, verbatim (`tasks.py:469-480`).
-pub const DETAIL_AUTH_FAILED: &str = "Your API key was rejected by the provider.";
-/// User-facing details, verbatim (`tasks.py:469-480`).
-pub const DETAIL_UNREACHABLE: &str = "Could not reach the configured provider endpoint.";
-/// User-facing details, verbatim (`tasks.py:469-480`).
-pub const DETAIL_MODEL_INVALID: &str =
-    "The configured model name was not accepted by the provider.";
-/// User-facing details, verbatim (`tasks.py:469-480`).
+/// Unrecognised-failure detail, verbatim (`tasks.py:465`).
 pub const DETAIL_INTERNAL: &str = "The assistant hit an unexpected error.";
 /// Soft-time-limit detail, verbatim (`tasks.py:489`).
 pub const DETAIL_TURN_TIMEOUT: &str = "The assistant took too long to respond.";
@@ -245,70 +222,40 @@ pub const DETAIL_TURN_TIMEOUT: &str = "The assistant took too long to respond.";
 pub const DETAIL_RESPONSE_TRUNCATED: &str =
     "The reply was cut off because it reached the model's output limit.";
 
-/// Classify an untyped provider failure: the text fallback of
-/// `_classify_error` (`tasks.py:454-480`).
+/// Word an untyped provider failure for the turn's user: the
+/// [`TurnSeam::turn_error_for_user`] hook with the default-classifier
+/// fallback (`tasks.py:447-486`).
 ///
-/// `message` is `str(exc)`; `status_code` is the exception's `status_code`
-/// attribute when present. Branch order is load-bearing: credit is checked
-/// before auth, and the 402 status is read from the exception — never
-/// substring-matched, because "402" appears in request ids and token counts
-/// (`tasks.py:460-464`).
-///
-/// Typed failures never reach this function: `_classify_error` returns an
-/// `AssistantError`'s own code/detail before text matching (`tasks.py:443-451`),
-/// and the Rust equivalent is the [`AgentError::Typed`] arm, used verbatim.
-pub fn classify_error(message: &str, status_code: Option<u16>) -> (&'static str, &'static str) {
-    let text = message.to_lowercase();
-    if status_code == Some(402)
-        || [
-            "payment required",
-            "insufficient_credits",
-            "insufficient credits",
-            "no_credit_account",
-            "quota exceeded",
-        ]
-        .iter()
-        .any(|s| text.contains(s))
+/// A seam failure (an overlay hook raising) never fails the failure path:
+/// like `_turn_error` it logs and falls back to
+/// [`classify_provider_error`] with the BYOK connection. `None` from both
+/// is the generic `internal` bucket. Typed failures never reach here:
+/// `_classify_error` returns an `AssistantError`'s own code/detail first
+/// (`tasks.py:453-457`), and the Rust equivalent is the
+/// [`AgentError::Typed`] arm, used verbatim.
+async fn turn_error_for_user<S: TurnSeam>(
+    seam: &S,
+    ctx: &TurnContext,
+    message: &str,
+    status_code: Option<u16>,
+    body_detail: &str,
+    model_name: &str,
+) -> (String, String) {
+    match seam
+        .turn_error_for_user(ctx, message, status_code, body_detail, model_name)
+        .await
     {
-        return (CODE_OUT_OF_CREDIT, DETAIL_OUT_OF_CREDIT);
+        Ok(Some((code, detail))) => (code, detail),
+        Ok(None) => (CODE_INTERNAL.to_owned(), DETAIL_INTERNAL.to_owned()),
+        Err(error) => {
+            tracing::error!(
+                error = %error.0,
+                "turn_error_for_user failed; using the default classifier"
+            );
+            classify_provider_error(status_code, message, body_detail, BYOK, model_name)
+                .unwrap_or((CODE_INTERNAL.to_owned(), DETAIL_INTERNAL.to_owned()))
+        }
     }
-    if [
-        "401",
-        "unauthorized",
-        "api key",
-        "authentication",
-        "invalid_api_key",
-    ]
-    .iter()
-    .any(|s| text.contains(s))
-    {
-        return (CODE_AUTH_FAILED, DETAIL_AUTH_FAILED);
-    }
-    if [
-        "connection",
-        "timeout",
-        "timed out",
-        "unreachable",
-        "could not connect",
-        "name resolution",
-    ]
-    .iter()
-    .any(|s| text.contains(s))
-    {
-        return (CODE_UNREACHABLE, DETAIL_UNREACHABLE);
-    }
-    if [
-        "model_not_found",
-        "does not exist",
-        "unknown model",
-        "no such model",
-    ]
-    .iter()
-    .any(|s| text.contains(s))
-    {
-        return (CODE_MODEL_INVALID, DETAIL_MODEL_INVALID);
-    }
-    (CODE_INTERNAL, DETAIL_INTERNAL)
 }
 
 // --------------------------------------------------------------------------- //
@@ -718,7 +665,7 @@ pub enum AgentError {
     /// A typed `AssistantError` raised inside the run — by a model adapter
     /// or an ee provider — already carrying its stable code and user-facing
     /// detail. Used verbatim, never text-guessed: the typed-first branch of
-    /// `_classify_error` (`tasks.py:443-451`, #1126).
+    /// `_classify_error` (`tasks.py:453-457`, #1126, kept by #1430).
     ///
     /// Python walks `exc.__cause__` because the agent runtime may re-raise a
     /// provider failure wrapped in its own type. Rust has no exception chain:
@@ -732,13 +679,20 @@ pub enum AgentError {
     /// with the constant cut-off detail: the `_hit_output_limit` branch
     /// (`tasks.py:489-499`), which Django checks after the provider
     /// classifier and before `internal`. The variant bypasses
-    /// [`classify_error`] outright — neither pydantic-ai message matches
+    /// [`classify_provider_error`] outright — neither pydantic-ai message matches
     /// any provider marker, so the bypass classifies identically.
     OutputTruncated,
-    /// Any other provider failure → [`classify_error`] (`tasks.py:356-361`).
+    /// Any other provider failure → [`TurnSeam::turn_error_for_user`]
+    /// (`tasks.py:356-361`). `message` is `str(exc)`; `status_code` the
+    /// exception's HTTP status when it carries one; `body_detail` the
+    /// provider's own one-line explanation from the structured response
+    /// body (`""` when it gave none); `model_name` the model the failing
+    /// call used (`""` when unknown).
     Provider {
         message: String,
         status_code: Option<u16>,
+        body_detail: String,
+        model_name: String,
     },
 }
 
@@ -894,6 +848,24 @@ pub trait TurnSeam: Send + Sync {
         &self,
         ctx: &TurnContext,
     ) -> impl std::future::Future<Output = Result<(), SeamError>> + Send;
+    /// `turn_error_for_user` (`ee/assistant/model_provider.py:72-87`): the
+    /// error to show the turn's user for a failure that is not already a
+    /// typed `AssistantError`. The returned pair supplies the stable code
+    /// and the user-facing detail; `None` leaves the failure as a generic
+    /// internal error. CE: every connection is BYOK, so the wording
+    /// assumes a key the user supplied, and `model_name` falls back to
+    /// the user's configured model when the failure carries none. An
+    /// overlay seam picks the connection kind here; an `Err` (a hook
+    /// that itself fails) falls back to the default classifier, never
+    /// stranding the turn.
+    fn turn_error_for_user(
+        &self,
+        ctx: &TurnContext,
+        message: &str,
+        status_code: Option<u16>,
+        body_detail: &str,
+        model_name: &str,
+    ) -> impl std::future::Future<Output = Result<Option<(String, String)>, SeamError>> + Send;
 }
 
 /// How one turn ended. Variants mirror the `_run_turn` exits
@@ -1108,14 +1080,14 @@ async fn stream_failed<S: TurnSeam>(
 ) -> Result<DriveResult, SeamError> {
     let (code, detail) = match err {
         AgentError::UsageLimit(detail) => (CODE_ITERATION_LIMIT.to_owned(), detail),
-        // Typed-first (`tasks.py:443-451`): the seam already resolved the
-        // cause chain, so the code/detail cross verbatim — text matching
+        // Typed-first (`tasks.py:453-457`): the seam already resolved the
+        // cause chain, so the code/detail cross verbatim — re-wording
         // here would erase both into the generic bucket.
         AgentError::Typed { code, detail } => (code, detail),
         // Output-limit (`tasks.py:489-499`): the constant code/detail —
         // `_hit_output_limit` sits after the provider classifier, and
         // neither pydantic-ai message matches a provider marker, so the
-        // variant bypasses `classify_error` outright.
+        // variant bypasses `classify_provider_error` outright.
         AgentError::OutputTruncated => (
             CODE_RESPONSE_TRUNCATED.to_owned(),
             DETAIL_RESPONSE_TRUNCATED.to_owned(),
@@ -1123,10 +1095,9 @@ async fn stream_failed<S: TurnSeam>(
         AgentError::Provider {
             message,
             status_code,
-        } => {
-            let (code, detail) = classify_error(&message, status_code);
-            (code.to_owned(), detail.to_owned())
-        }
+            body_detail,
+            model_name,
+        } => turn_error_for_user(seam, ctx, &message, status_code, &body_detail, &model_name).await,
     };
     fail_open_row_and_turn(seam, ctx, toolsets, fail_action, open_row, &code, &detail).await?;
     Ok(DriveResult::Failed { code, detail })
@@ -1145,12 +1116,9 @@ async fn seam_failed<S: TurnSeam>(
     open_row: &mut Option<Uuid>,
     err: &SeamError,
 ) -> Result<DriveResult, SeamError> {
-    let (code, detail) = classify_error(&err.0, None);
-    fail_open_row_and_turn(seam, ctx, toolsets, fail_action, open_row, code, detail).await?;
-    Ok(DriveResult::Failed {
-        code: code.to_owned(),
-        detail: detail.to_owned(),
-    })
+    let (code, detail) = turn_error_for_user(seam, ctx, &err.0, None, "", "").await;
+    fail_open_row_and_turn(seam, ctx, toolsets, fail_action, open_row, &code, &detail).await?;
+    Ok(DriveResult::Failed { code, detail })
 }
 
 /// Shared failure tail: report runtime tool failures, fail the open row
@@ -1391,48 +1359,129 @@ mod tests {
     }
 
     #[test]
-    fn classify_error_matches_fixture_vectors() {
+    fn classify_provider_error_matches_fixture_vectors() {
+        use crate::assistant::provider_errors::{classify_provider_error, BYOK, GATEWAY};
         let fx = tasks_fixture();
         let vectors = fx["tasks"]["classify_error"]["vectors"]
             .as_object()
             .expect("vectors map");
         // Every fixture vector pins its (code, detail) pair.
         for (name, pair) in vectors {
-            let (code, detail) = match name.as_str() {
-                "payment_required" => classify_error("Payment Required: top up please", None),
-                "status_402" => classify_error("anything at all", Some(402)),
-                "auth_401" => classify_error("401 Unauthorized", None),
-                "connection" => classify_error("could not connect: timed out", None),
-                "model_not_found" => classify_error("model_not_found: no such model", None),
-                "other" => classify_error("weird boom", None),
+            let (status, text, body_detail, connection, model) = match name.as_str() {
+                "rate_429" => (
+                    Some(429),
+                    "status_code: 429, model_name: m, body: {'message': 'Rate limit exceeded'}",
+                    "",
+                    BYOK,
+                    "",
+                ),
+                // Django parametrizes `test_429_asks_the_user_to_retry`
+                // over both connections: a 429 reads as rate-limited on
+                // the gateway too.
+                "gateway_429" => (
+                    Some(429),
+                    "status_code: 429, model_name: m, body: {'message': 'Rate limit exceeded'}",
+                    "",
+                    GATEWAY,
+                    "",
+                ),
+                "credit_402_body" => (
+                    Some(402),
+                    "status_code: 402, model_name: m, body: {'message': 'Insufficient credits.'}",
+                    "Insufficient credits. Top up at https://example.test/billing.",
+                    BYOK,
+                    "",
+                ),
+                "credit_402_bare" => (Some(402), "anything at all", "", BYOK, ""),
+                "credit_429_quota" => (
+                    Some(429),
+                    "You exceeded your current quota. code: insufficient_quota",
+                    "",
+                    BYOK,
+                    "",
+                ),
+                "auth_401" => (Some(401), "status_code: 401, model_name: m", "", BYOK, ""),
+                "auth_400_text" => (
+                    Some(400),
+                    "API key not valid. Please pass a valid API key.",
+                    "",
+                    BYOK,
+                    "",
+                ),
+                "model_400_named" => (Some(400), "unsupported model: foo", "", BYOK, "oracle-stub"),
+                "model_noname" => (None, "model_not_found: no such model", "", BYOK, ""),
+                "unreachable_500" => (Some(500), "connection reset by upstream", "", BYOK, ""),
+                "unreachable_text" => (None, "Connection timed out", "", BYOK, ""),
+                "gateway_401" => (
+                    Some(401),
+                    "status_code: 401, model_name: m",
+                    "",
+                    GATEWAY,
+                    "",
+                ),
+                "gateway_402_body" => (
+                    Some(402),
+                    "status_code: 402, model_name: m",
+                    "Insufficient credits. Top up at https://example.test/billing.",
+                    GATEWAY,
+                    "",
+                ),
+                "gateway_model" => (Some(400), "Unsupported model", "", GATEWAY, "acme/gone-1"),
                 other => panic!("unknown fixture vector {other}"),
             };
-            assert_eq!(code, pair[0].as_str().unwrap(), "code for {name}");
-            assert_eq!(detail, pair[1].as_str().unwrap(), "detail for {name}");
+            let got = classify_provider_error(status, text, body_detail, connection, model)
+                .unwrap_or_else(|| panic!("vector {name} classified"));
+            assert_eq!(got.0, pair[0].as_str().unwrap(), "code for {name}");
+            assert_eq!(got.1, pair[1].as_str().unwrap(), "detail for {name}");
         }
-        // The 402 status wins even when the message is unrelated: the code
-        // is read from the exception, never substring-matched
-        // (`tasks.py:460-464`). A bare "402" in text alone must NOT route
-        // to credit.
+        // The status is read from the failure, never substring-matched: a
+        // request id containing "401"/"402"/"429" classifies nothing on its
+        // own (`test_a_status_like_number_in_the_text_is_not_a_status`).
+        for request_id in ["req_401abc", "req_402abc", "req_429abc"] {
+            let text = format!("upstream failed, request id {request_id}");
+            assert_eq!(
+                classify_provider_error(Some(500), &text, "", BYOK, ""),
+                None,
+                "{request_id} is not a status"
+            );
+            assert_eq!(
+                classify_provider_error(None, &text, "", BYOK, ""),
+                None,
+                "{request_id} is not a status"
+            );
+        }
+        let classify =
+            |status, text: &str| classify_provider_error(status, text, "", BYOK, "").map(|p| p.0);
+        // A 5xx never counts as auth, and "quota exceeded" alone on a 429
+        // is a per-minute request quota, not an empty balance.
         assert_eq!(
-            classify_error("request id 402 token count 402", None).0,
-            CODE_INTERNAL
+            classify(Some(500), "authentication service returned an error"),
+            None
         );
         assert_eq!(
-            classify_error("request id 402 token count 402", Some(402)).0,
-            CODE_OUT_OF_CREDIT
+            classify(Some(429), "Rate limit quota exceeded, retry in 30s").as_deref(),
+            Some("provider_rate_limited")
+        );
+        // A 400 that is not about the model is left unclassified.
+        assert_eq!(
+            classify(
+                Some(400),
+                "This model's maximum context length is 128000 tokens."
+            ),
+            None
         );
         // Credit beats auth when both markers are present (branch order).
         assert_eq!(
-            classify_error("401 payment required", None).0,
-            CODE_OUT_OF_CREDIT
+            classify(None, "unauthorized: payment required").as_deref(),
+            Some("provider_out_of_credit")
         );
-        // Untyped failures still classify by text
-        // (`test_untyped_errors_are_still_classified_by_text`).
+        // Status-less failures still classify by text
+        // (`test_statusless_failures_are_still_classified_by_text`).
         assert_eq!(
-            classify_error("Connection timed out", None).0,
-            CODE_UNREACHABLE
+            classify(None, "Incorrect API key provided").as_deref(),
+            Some("provider_auth_failed")
         );
+        assert_eq!(classify(None, "something else entirely"), None);
     }
 
     #[test]
@@ -1678,6 +1727,9 @@ mod tests {
         fail_cancel_check: bool,
         /// `fail_turn` raises (a failure path that cannot write).
         fail_turn_write: bool,
+        /// `turn_error_for_user` raises (an overlay hook bug): the drive
+        /// must fall back to the default classifier, not strand the turn.
+        fail_turn_error: bool,
         calls: Mutex<Vec<String>>,
     }
 
@@ -1709,6 +1761,7 @@ mod tests {
                 row_ops: Mutex::new(0),
                 fail_cancel_check: false,
                 fail_turn_write: false,
+                fail_turn_error: false,
                 calls: Mutex::new(Vec::new()),
             }
         }
@@ -1908,6 +1961,27 @@ mod tests {
         async fn cancel_turn(&self, _c: &TurnContext) -> Result<(), SeamError> {
             self.log("cancel_turn".to_owned());
             Ok(())
+        }
+
+        async fn turn_error_for_user(
+            &self,
+            _c: &TurnContext,
+            message: &str,
+            status_code: Option<u16>,
+            body_detail: &str,
+            model_name: &str,
+        ) -> Result<Option<(String, String)>, SeamError> {
+            use crate::assistant::provider_errors::{classify_provider_error, BYOK};
+            if self.fail_turn_error {
+                return Err(SeamError("overlay bug".to_owned()));
+            }
+            Ok(classify_provider_error(
+                status_code,
+                message,
+                body_detail,
+                BYOK,
+                model_name,
+            ))
         }
     }
 
@@ -2197,6 +2271,8 @@ mod tests {
             .push_back(Err(AgentError::Provider {
                 message: "could not connect".to_owned(),
                 status_code: None,
+                body_detail: String::new(),
+                model_name: String::new(),
             }));
         let out = drive_turn(&seam, Uuid::new_v4(), TURN_SOFT_LIMIT_SECS as i64)
             .await
@@ -2204,8 +2280,8 @@ mod tests {
         assert_eq!(
             out,
             DriveResult::Failed {
-                code: CODE_UNREACHABLE.to_owned(),
-                detail: DETAIL_UNREACHABLE.to_owned(),
+                code: "provider_unreachable".to_owned(),
+                detail: "Could not reach the configured provider endpoint.".to_owned(),
             }
         );
         assert!(seam.saw("finalize_row:failed:hi").len() == 1);
@@ -2276,6 +2352,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn drive_failing_turn_error_hook_falls_back_to_default_classifier() {
+        // Port of `test_a_failing_hook_does_not_strand_the_turn`: the seam
+        // hook raises, so the drive falls back to the default classifier
+        // and the turn still fails with the classified code.
+        let mut seam = FakeSeam::ok(vec![]);
+        seam.fail_turn_error = true;
+        seam.open_err = Some(AgentError::Provider {
+            message: "slow down".to_owned(),
+            status_code: Some(429),
+            body_detail: String::new(),
+            model_name: String::new(),
+        });
+        let out = drive_turn(&seam, Uuid::new_v4(), TURN_SOFT_LIMIT_SECS as i64)
+            .await
+            .unwrap();
+        assert_eq!(
+            out,
+            DriveResult::Failed {
+                code: "provider_rate_limited".to_owned(),
+                detail: "Too many requests to the model provider. Wait a moment and try again."
+                    .to_owned(),
+            }
+        );
+        assert!(seam.saw("fail_turn:provider_rate_limited").len() == 1);
+    }
+
+    #[tokio::test]
     async fn drive_typed_errors_keep_code_and_detail() {
         // Port of `test_turn_errors.py::test_typed_errors_keep_their_code_and_detail`
         // (bb3d99c6): the fixture pins Django's exact (code, detail) pairs,
@@ -2315,27 +2418,34 @@ mod tests {
             assert!(seam.saw(&format!("fail_turn:{code}:")).len() == 1);
         }
         // The typed arm is load-bearing, not dead: neither detail
-        // text-guesses to its own code, so without `Typed` both vectors
+        // classifies to its own code, so without `Typed` both vectors
         // would land in the generic bucket. ("Stream ended early." matches
         // no marker at all — Django's own comment on the unreachable case.)
+        use crate::assistant::provider_errors::{classify_provider_error, BYOK};
         assert_eq!(
-            classify_error("Stream ended early.", None),
-            (CODE_INTERNAL, DETAIL_INTERNAL)
+            classify_provider_error(None, "Stream ended early.", "", BYOK, ""),
+            None
         );
         assert_eq!(
-            classify_error("Plan usage is unavailable. Check Settings → Usage.", None).0,
-            CODE_INTERNAL
+            classify_provider_error(
+                None,
+                "Plan usage is unavailable. Check Settings → Usage.",
+                "",
+                BYOK,
+                ""
+            ),
+            None
         );
 
         // Port of `test_a_typed_error_wrapped_by_the_runtime_is_still_recognised`:
         // Django walks `__cause__` past the wrapper; the Rust seam
         // implementor performs that walk at the boundary and emits `Typed`.
-        // The wrapper's own text would text-guess to `internal`, proving the
+        // The wrapper's own text would classify to nothing, proving the
         // typed arm did the work. `open_stream` takes the same path with no
         // row work (nothing streamed yet).
         assert_eq!(
-            classify_error("model request failed", None).0,
-            CODE_INTERNAL
+            classify_provider_error(None, "model request failed", "", BYOK, ""),
+            None
         );
         let quota = &fx["tasks"]["classify_error"]["typed_vectors"]["vectors"]["quota_direct"];
         let mut seam = FakeSeam::ok(vec![]);
@@ -2363,6 +2473,8 @@ mod tests {
         seam.open_err = Some(AgentError::Provider {
             message: "x".to_owned(),
             status_code: None,
+            body_detail: String::new(),
+            model_name: String::new(),
         });
         seam.runtime_failed = vec![SkippedServer {
             name: "dead".to_owned(),

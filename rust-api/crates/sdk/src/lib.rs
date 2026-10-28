@@ -435,11 +435,11 @@ pub mod assistant {
     pub use pidash_db::assistant::models::user_llm_config;
     pub use pidash_db::assistant::models::user_llm_config::UserLLMConfig;
     pub use pidash_db::assistant::models::ThreadKind;
+    pub use pidash_jobs::assistant::classify_provider_error;
     pub use pidash_jobs::assistant::register_assistant_tasks;
     pub use pidash_jobs::assistant::register_turn_handler;
     pub use pidash_jobs::assistant::run_turn::cancel_key;
     pub use pidash_jobs::assistant::run_turn::cancel_turn_update;
-    pub use pidash_jobs::assistant::run_turn::classify_error;
     pub use pidash_jobs::assistant::run_turn::clear_active_turn_update;
     pub use pidash_jobs::assistant::run_turn::context_eligible;
     pub use pidash_jobs::assistant::run_turn::drive_turn;
