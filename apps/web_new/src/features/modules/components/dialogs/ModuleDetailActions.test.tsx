@@ -192,8 +192,16 @@ describe("ModuleDetailActions", () => {
     fireEvent.click(await screen.findByRole("menuitem", { name: "Archive" }));
     expect(await screen.findByRole("heading", { name: "Archive module “Delivery”" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Archive" }));
+    // The landed address keeps the modules list's trailing slash the oracle
+    // pins (archives §5.4), so the dialog navigates by typed route and
+    // params rather than a ready-made path string.
     await waitFor(() =>
-      expect(routerHarness.navigate).toHaveBeenCalledWith({ to: LIST_PATH, search: {}, replace: true })
+      expect(routerHarness.navigate).toHaveBeenCalledWith({
+        to: "/$ws/projects/$projectId/modules/",
+        params: { ws: "acme", projectId: MODULES_PROJECT_ID },
+        search: {},
+        replace: true,
+      })
     );
     expect(notify.notifySuccess).toHaveBeenCalledWith("Archive success", expect.stringContaining("archives"));
   });

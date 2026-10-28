@@ -1669,26 +1669,31 @@ export class WebNewDriver implements ParityDriver {
    * that path ends signed in either way.
    */
   private async entryAdmitsPassword(): Promise<boolean> {
+    try {
+      return await this.probeEntryAdmitsPassword();
+    } catch {
+      // A probe that cannot run (a page that will not load, a marker that
+      // cannot be read) says nothing about the build: keep the credential
+      // path, which is the only one a web build has.
+      return true;
+    }
+  }
+
+  private async probeEntryAdmitsPassword(): Promise<boolean> {
     await this.page.context().clearCookies();
     await this.page.goto("/", { waitUntil: "domcontentloaded", timeout: 60_000 });
-    const formless = this.page
-      .getByRole("heading", { name: "The desktop app can't sign you in yet" })
-      .or(this.page.locator('section[aria-label="Cloud sign-in"]'));
+    const formless = [
+      this.page.getByRole("heading", { name: "The desktop app can't sign you in yet" }).first(),
+      this.page.locator('section[aria-label="Cloud sign-in"]').first(),
+    ];
+    const shown = async (locator: Locator): Promise<boolean> =>
+      (await locator.count()) > 0 && (await locator.isVisible().catch(() => false));
     const deadline = Date.now() + WebNewDriver.WAIT_MS;
     while (Date.now() < deadline) {
-      if (
-        await this.authEmailField()
-          .isVisible()
-          .catch(() => false)
-      )
-        return true;
-      if (
-        await formless
-          .first()
-          .isVisible()
-          .catch(() => false)
-      )
-        return false;
+      if (await shown(this.authEmailField())) return true;
+      for (const marker of formless) {
+        if (await shown(marker)) return false;
+      }
       // Off the entry means a live session bounced to its workspace: this
       // build does not paint the entry card for a signed-out visit, so the
       // caller plants the session it wants.
@@ -1718,12 +1723,13 @@ export class WebNewDriver implements ParityDriver {
     // workspace it asked for. A throttled shared stack can swallow a whole
     // pass, so retry it a bounded number of times.
     // A form-less build is entered with a session and needs no further
-    // steps; the probe leaves a password build signed out on its entry, so
-    // the loop below starts where it always did.
+    // steps: the probe visits the entry itself and leaves a password build
+    // signed out there, so the loop below starts where it always did.
     if (!(await this.entryAdmitsPassword())) {
       await this.enterBySession(email, password, workspaceSlug);
       return;
     }
+    await this.openEntry();
     if (!(await this.isSignedOut().catch(() => false))) {
       await this.signOutViaCommandPalette();
     }

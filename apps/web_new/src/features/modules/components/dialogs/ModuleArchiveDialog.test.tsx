@@ -20,16 +20,10 @@ vi.mock("../../../../shared/shell/index.js", async (importOriginal) => ({
   notifySuccess: notify.notifySuccess,
 }));
 
-const router = vi.hoisted(() => ({
-  navigate: vi.fn(),
-  load: vi.fn(),
-  history: { replace: vi.fn() },
-  state: { location: { pathname: "/acme/projects/p1/issues" } },
-}));
+const router = vi.hoisted(() => ({ navigate: vi.fn() }));
 vi.mock("@tanstack/react-router", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   useNavigate: () => router.navigate,
-  useRouter: () => router,
 }));
 
 import { createAppClient, resetAppClient } from "../../../../core/api/client.js";
@@ -74,10 +68,7 @@ afterEach(() => {
   notify.notifySuccess.mockReset();
   router.navigate.mockReset();
   router.navigate.mockResolvedValue(undefined);
-  router.load.mockReset();
-  router.load.mockResolvedValue(undefined);
-  router.history.replace.mockReset();
-  router.state.location.pathname = "/acme/projects/p1/issues";
+  globalThis.window.history.replaceState(null, "", "/acme/projects/p1/issues");
 });
 
 function renderDialog(overrides: Partial<React.ComponentProps<typeof ModuleArchiveDialog>> = {}) {
@@ -157,25 +148,23 @@ describe("ModuleArchiveDialog", () => {
     // landing navigation is a no-op and the address keeps its entered
     // form; the dialog rewrites it to the canonical list address.
     router.navigate.mockImplementation(async ({ params }: { params: { ws: string; projectId: string } }) => {
-      router.state.location.pathname = `/${params.ws}/projects/${params.projectId}/modules`;
+      globalThis.window.history.replaceState(null, "", `/${params.ws}/projects/${params.projectId}/modules`);
     });
     renderDialog();
     fireEvent.click(screen.getByRole("button", { name: "Archive" }));
     await waitFor(() =>
-      expect(router.history.replace).toHaveBeenCalledWith(`/acme/projects/${MODULES_PROJECT_ID}/modules/`)
+      expect(globalThis.window.location.pathname).toBe(`/acme/projects/${MODULES_PROJECT_ID}/modules/`)
     );
-    expect(router.load).toHaveBeenCalled();
   });
 
   it("leaves an already-canonical address alone", async () => {
     router.navigate.mockImplementation(async ({ params }: { params: { ws: string; projectId: string } }) => {
-      router.state.location.pathname = `/${params.ws}/projects/${params.projectId}/modules/`;
+      globalThis.window.history.replaceState(null, "", `/${params.ws}/projects/${params.projectId}/modules/`);
     });
     renderDialog();
     fireEvent.click(screen.getByRole("button", { name: "Archive" }));
     await waitFor(() => expect(router.navigate).toHaveBeenCalled());
-    expect(router.history.replace).not.toHaveBeenCalled();
-    expect(router.load).not.toHaveBeenCalled();
+    expect(globalThis.window.location.pathname).toBe(`/acme/projects/${MODULES_PROJECT_ID}/modules/`);
   });
 
   it("hands the landed archive to a host that supplies its own landing", async () => {
