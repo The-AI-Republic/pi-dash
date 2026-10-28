@@ -1394,11 +1394,21 @@ describe("kanban cells", () => {
 
   it("reports and activates a cell's load-more entry", async () => {
     const clicks: string[] = [];
+    const names: string[] = [];
     const cell = locator({
-      getByTestId: (id: string) =>
-        id === "kanban-load-more"
-          ? locator({ isVisible: async () => true, click: async () => void clicks.push("more") })
-          : locator({ count: async () => 0 }),
+      getByTestId: (id: string) => {
+        if (id === "kanban-card") return list(names.map((name) => namedCard(name)));
+        if (id === "kanban-load-more") {
+          return locator({
+            isVisible: async () => true,
+            click: async () => {
+              clicks.push("more");
+              names.push("Fix login");
+            },
+          });
+        }
+        return locator({ count: async () => 0 });
+      },
     });
     const lane = locator({
       getByTestId: (id: string) =>

@@ -11704,7 +11704,15 @@ export class WebNewDriver implements ParityDriver {
 
   async kanbanCellLoadMore(columnName: string, laneName: string): Promise<void> {
     const cell = await this.kanbanCellByNames(columnName, laneName);
+    const before = await this.kanbanCellCards(columnName, laneName);
     await cell.getByTestId("kanban-load-more").first().click({ timeout: WebNewDriver.WAIT_MS });
+    // The page fetch races the read that follows: settle like the oracle on
+    // the appended rows, so a missing page fails here loudly (ISS-042).
+    await expect
+      .poll(async () => (await this.kanbanCellCards(columnName, laneName)).length > before.length, {
+        timeout: 120_000,
+      })
+      .toBe(true);
   }
 
   async kanbanBoardScroll(): Promise<{ x: number; y: number }> {
