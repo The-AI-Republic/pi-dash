@@ -259,6 +259,38 @@ export function isGrouped(response: BoardResponse): response is GroupedIssueList
   return typeof first === "object" && first !== null && "results" in first && Array.isArray(first.results);
 }
 
+/**
+ * Board from an envelope the shape sniffers reject that is not a flat
+ * list. A page read past the end answers 200 with an empty record, which
+ * carries no first bucket to sniff (NEWFRONT-992): the shape falls back
+ * to the request input, mirroring readBoard, so the merge folds an empty
+ * contribution instead of crashing on the flat spread. The grouped and
+ * sub-grouped shapers draw domain-only columns with empty cells for {},
+ * and the flat fallback keeps the envelope total with no rows.
+ */
+function emptyResultsBoard(response: BoardResponse, input: BoardReadInput): BoardData {
+  if (serverGroupBy(input.groupBy) === null) {
+    return flatBoard({ results: [], total_count: response.total_count });
+  }
+  if (serverGroupBy(effectiveSubGroup(input.groupBy, input.subGroupBy)) !== null) {
+    return subGroupedBoard(response as SubGroupedIssueListResponse, {
+      groupDimension: input.groupBy,
+      subDimension: effectiveSubGroup(input.groupBy, input.subGroupBy),
+      groupLabels: input.groupLabels,
+      subLabels: input.subLabels,
+      showEmpty: input.showEmpty,
+      groupDomain: input.groupDomain,
+      subDomain: input.subDomain,
+    });
+  }
+  return groupedBoard(response as GroupedIssueListResponse, {
+    dimension: input.groupBy,
+    labels: input.groupLabels,
+    showEmpty: input.showEmpty,
+    domain: input.groupDomain,
+  });
+}
+
 /** Shape one read into the board the renderer draws. */
 export function toBoard(response: BoardResponse, input: BoardReadInput): BoardData {
   if (isSubGrouped(response)) {
@@ -279,6 +311,9 @@ export function toBoard(response: BoardResponse, input: BoardReadInput): BoardDa
       showEmpty: input.showEmpty,
       domain: input.groupDomain,
     });
+  }
+  if (!Array.isArray(response.results)) {
+    return emptyResultsBoard(response, input);
   }
   return flatBoard(response as IssueListResponse);
 }

@@ -14,6 +14,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { resetAppClient } from "../../../core/api/client.js";
 import type { IssuesEntity } from "../prefs/entities.js";
+import { mergeBoardPage } from "./model.js";
 import {
   boardCellKey,
   boardCellOf,
@@ -567,6 +568,53 @@ describe("envelope shaping", () => {
     const board = toBoard(envelope as never, input({ groupBy: null }));
     expect(board.columns).toHaveLength(1);
     expect(board.lanes[0]?.cells["all"]?.rows).toHaveLength(1);
+  });
+
+  it("shapes a past-end empty grouped page from the request input", () => {
+    const pastEnd = { ...envelope, grouped_by: "state_id", results: {} };
+    const board = toBoard(pastEnd as never, input());
+    expect(board.subGrouped).toBe(false);
+    expect(board.columns).toEqual([]);
+    expect(board.lanes).toHaveLength(1);
+    expect(board.lanes[0]?.cells).toEqual({});
+    expect(board.total).toBe(1);
+  });
+
+  it("fills the domain columns on a past-end empty grouped page", () => {
+    const label = "623e4567-e89b-12d3-a456-426614174005";
+    const pastEnd = { ...envelope, grouped_by: "labels__id", results: {} };
+    const board = toBoard(
+      pastEnd as never,
+      input({ groupBy: "labels", groupDomain: [label], groupLabels: new Map([[label, "Unused"]]) })
+    );
+    expect(board.subGrouped).toBe(false);
+    expect(board.columns.map((column) => [column.title, column.total])).toEqual([
+      ["Unused", 0],
+      ["None", 0],
+    ]);
+    expect(board.lanes[0]?.cells[label]?.rows).toEqual([]);
+  });
+
+  it("shapes a past-end empty sub-grouped page with no lanes", () => {
+    const pastEnd = { ...envelope, grouped_by: "state_id", sub_grouped_by: "priority", results: {} };
+    const board = toBoard(pastEnd as never, input({ subGroupBy: "priority" }));
+    expect(board.subGrouped).toBe(true);
+    expect(board.columns).toEqual([]);
+    expect(board.lanes).toEqual([]);
+  });
+
+  it("shapes an empty record with flat input as an empty flat board", () => {
+    const board = toBoard({ ...envelope, results: {} } as never, input({ groupBy: null }));
+    expect(board.columns).toEqual([{ key: "all", title: "All work items", total: 1 }]);
+    expect(board.lanes[0]?.cells["all"]?.rows).toEqual([]);
+  });
+
+  it("folds a past-end empty page as a no-op", () => {
+    const first = toBoard(groupedEnvelope as never, input());
+    const pastEnd = toBoard({ ...envelope, grouped_by: "state_id", total_count: 4, results: {} } as never, input());
+    const merged = mergeBoardPage(first, pastEnd, { kind: "column", columnKey: STATE });
+    expect(merged.lanes[0]?.cells[STATE]?.rows).toHaveLength(1);
+    expect(merged.columns).toEqual(first.columns);
   });
 });
 
