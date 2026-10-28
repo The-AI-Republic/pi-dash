@@ -47,6 +47,7 @@ use sqlx::postgres::PgRow;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
+use pidash_db::entity::comment_hooks::description_stripped_for;
 use pidash_db::orchestration::runs::{active_run_sql, latest_prior_run_sql};
 use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
 use pidash_db::tx::Transaction;
@@ -518,12 +519,14 @@ where
     ) -> Result<(), DispatchError> {
         // The three writes of `IssueComment.save`, in order (any failure
         // propagates so the transaction rolls the move back). One `now()`
-        // feeds all four stamps; the description row reuses the
-        // comment's ML-stripped text (a ported quirk — Django's
-        // `Description.save` would recompute with `strip_tags`; see
-        // PIDASHCONV-1581).
+        // feeds all four stamps; the comment column carries the
+        // MLStripper recompute the driver computed (`issue.py:606`,
+        // PIDASHCONV-1581 item 4), while the description row carries
+        // the `Description.save` recompute (Django's own `strip_tags`,
+        // entities verbatim, `None`-when-empty — `description.py:23-29`).
         let empty_json = serde_json::json!({});
         let empty_list: Vec<String> = Vec::new();
+        let desc_stripped = description_stripped_for(Some(comment.comment_html.as_str()));
         let rows = comment_domain::CommentRows {
             id: comment.id,
             description_id: comment.description_id,
@@ -541,7 +544,7 @@ where
             html: comment.comment_html.as_str(),
             json: &empty_json,
             stripped: comment.comment_stripped.as_str(),
-            desc_stripped: Some(comment.comment_stripped.as_str()),
+            desc_stripped: desc_stripped.as_deref(),
             access: "INTERNAL",
             speaker_type: "agent",
             speaker_label: "",
@@ -2615,6 +2618,62 @@ mod tests {
         assert_eq!(desc.1, row.1);
         assert_eq!(desc.2, graph.ws);
         assert_eq!(desc.3, graph.project);
+    }
+
+    /// The bounce insert strips each column with its own stripper
+    /// (PIDASHCONV-1581 item 4): the comment column carries the
+    /// driver's MLStripper recompute (`issue.py:606`), the
+    /// description mirror the `Description.save` recompute
+    /// (`description.py:23-29`, entities verbatim).
+    #[ignore = "needs migrated scratch DB via DATABASE_URL"]
+    #[tokio::test]
+    async fn live_bounce_insert_splits_strippers_per_column() {
+        let _serial = LIVE_SERIAL.lock().await;
+        let pool = pool().await;
+        let graph = seed_graph(&pool, "bstrip").await;
+        let system = ensure_agent_user(&pool).await;
+        let tx = Transaction::begin(&pool).await.expect("begin");
+        let mut store = LiveCreationStore::new(tx, &pool, deps());
+        let comment_id = Uuid::new_v4();
+        let description_id = Uuid::new_v4();
+        // The driver shape: ML-decoded carried text over entity html.
+        let carried = NewIssueComment {
+            id: comment_id,
+            description_id,
+            now: now(),
+            project_id: graph.project,
+            workspace_id: graph.ws,
+            issue_id: graph.issue,
+            actor_id: system,
+            comment_html: "<p>a &amp; b</p>".to_owned(),
+            comment_stripped: "a & b".to_owned(),
+        };
+        pidash_services::orchestration::dispatch::DispatchSeam::insert_bounce_comment(
+            &mut store, &carried,
+        )
+        .await
+        .expect("insert bounce comment");
+        let (tx, _, _, _, _, _) = store.into_parts();
+        tx.commit().await.expect("commit");
+        let row: (String, String, Option<Uuid>) = sqlx::query_as(
+            "SELECT comment_html, comment_stripped, description_id FROM issue_comments WHERE id = $1",
+        )
+        .bind(comment_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read back the comment");
+        assert_eq!(row.0, "<p>a &amp; b</p>");
+        assert_eq!(row.1, "a & b");
+        assert_eq!(row.2, Some(description_id));
+        let desc: (String, Option<String>) = sqlx::query_as(
+            "SELECT description_html, description_stripped FROM descriptions WHERE id = $1",
+        )
+        .bind(description_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read back the description");
+        assert_eq!(desc.0, "<p>a &amp; b</p>");
+        assert_eq!(desc.1.as_deref(), Some("a &amp; b"));
     }
 
     // -- live: null default fallback (PIDASHCONV-1044) ------------------------

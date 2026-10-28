@@ -79,7 +79,7 @@ pub use dispatch::{
     is_machine_trigger, managed_profile_reason_code, maybe_apply_deferred_pause,
     no_backlog_target_log_line, no_paused_state_log_line, pause_guard_verdict,
     preflight_eligibility_or_bounce, re_tick_ticker, resolve_creator_for_trigger, run_ai_for_human,
-    select_cloud_candidate, skip_dispatch_log_line, strip_tags, ticker_lock_by_id_sql,
+    select_cloud_candidate, skip_dispatch_log_line, ticker_lock_by_id_sql,
     ticker_select_by_issue_sql, wait_activity_comment, wait_rearms, wait_ticker, BounceOutcome,
     CandidateUser, ContinuationDispatchOutcome, DispatchError, DispatchSeam, HumanRunAiOutcome,
     LogLine, NewIssueComment, NewWaitActivity, PauseOutcome, PodRunnerMatcher, PreflightOutcome,

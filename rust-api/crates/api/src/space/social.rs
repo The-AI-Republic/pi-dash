@@ -1837,16 +1837,28 @@ async fn apply_comment_update(
             .await
             .map_err(|_| HandlerError::ServerError)?;
     } else if stripped_changed || html_changed || json_changed {
+        // Queryset `update` bypasses `Description.save` (values land
+        // verbatim), but only the changed subset syncs
+        // (`issue.py:637-646`, PIDASHCONV-1581 item 2) — an unchanged
+        // field keeps the description row's own value.
         let description_id = uuid::Uuid::parse_str(old.description_id.as_deref().unwrap_or(""))
             .map_err(|_| HandlerError::ServerError)?;
-        sqlx::query("UPDATE descriptions SET description_html = $1, description_stripped = $2, description_json = $3, updated_by_id = $4, updated_at = $5 WHERE id = $6")
-            .bind(&new_html)
-            .bind(&stripped_value)
-            .bind(&comment_json)
-            .bind(actor_id)
-            .bind(now)
-            .bind(description_id)
-            .execute(pool)
+        if html_changed {
+            comment_domain::sync_description_html(pool, description_id, &new_html)
+                .await
+                .map_err(|_| HandlerError::ServerError)?;
+        }
+        if stripped_changed {
+            comment_domain::sync_description_stripped(pool, description_id, &stripped_value)
+                .await
+                .map_err(|_| HandlerError::ServerError)?;
+        }
+        if json_changed {
+            comment_domain::sync_description_json(pool, description_id, &comment_json)
+                .await
+                .map_err(|_| HandlerError::ServerError)?;
+        }
+        comment_domain::touch_synced_description(pool, description_id, Some(*actor_id), *now)
             .await
             .map_err(|_| HandlerError::ServerError)?;
     }

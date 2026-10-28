@@ -80,6 +80,7 @@ use pidash_compat::db::is_integrity_error;
 use pidash_compat::py::{layout_py_float, python_dumps};
 use pidash_compat::response::{empty_response, json_response};
 use pidash_db::app_pages::strip::ml_strip_tags;
+use pidash_db::entity::comment_hooks::description_stripped_for;
 use pidash_services::domain::comments as comment_domain;
 
 // ---------------------------------------------------------------------------
@@ -4433,9 +4434,12 @@ async fn save_comment_update(
     let stripped_changed = stripped != stored.stripped;
     let description_id = if description_id.is_none() {
         // Unlinked (or cleared): mint a fresh Description over the new
-        // triple, `None`-when-empty stripped included. The stripped
-        // value is the comment's ML text (the preserved 1581-item-1
-        // quirk, as on the create path).
+        // triple. `Description.objects.create` runs `Description.save`,
+        // which recomputes the stripped text with Django's own
+        // `strip_tags` (entities verbatim, `None`-when-empty —
+        // `description.py:23-29`), discarding the ML value the
+        // comment save passes (PIDASHCONV-1581 item 1).
+        let desc_stripped = description_stripped_for(Some(html.as_str()));
         let desc = comment_domain::DescriptionValues {
             id: uuid::Uuid::new_v4(),
             created_at: *now,
@@ -4446,33 +4450,39 @@ async fn save_comment_update(
             project_id: stored.project_id,
             json: &json,
             html: &html,
-            stripped: if html.is_empty() {
-                None
-            } else {
-                Some(stripped.as_str())
-            },
+            stripped: desc_stripped.as_deref(),
         };
         comment_domain::insert_description_values(&mut **tx, &desc)
             .await
             .map_err(integrity_denial)?;
         Some(desc.id)
     } else {
-        if html_changed || json_changed || stripped_changed {
-            // Queryset `update` bypasses `Description.save`: the values
-            // land verbatim (no `None`-when-empty recompute).
-            sqlx::query(
-                r#"UPDATE descriptions SET description_html = $1, description_stripped = $2,
-                   description_json = $3, updated_by_id = $4, updated_at = $5 WHERE id = $6"#,
-            )
-            .bind(&html)
-            .bind(&stripped)
-            .bind(&json)
-            .bind(user_id)
-            .bind(now)
-            .bind(description_id)
-            .execute(&mut **tx)
-            .await
-            .map_err(|_| Denial::ServerError)?;
+        // Queryset `update` bypasses `Description.save`: the values
+        // land verbatim (no `None`-when-empty recompute) — but only
+        // the changed subset syncs (`issue.py:637-646`, PIDASHCONV-1581
+        // item 2), so an unchanged field keeps the description row's
+        // own value even after a re-link.
+        if let Some(desc_id) = description_id {
+            if html_changed || json_changed || stripped_changed {
+                if html_changed {
+                    comment_domain::sync_description_html(&mut **tx, desc_id, &html)
+                        .await
+                        .map_err(|_| Denial::ServerError)?;
+                }
+                if stripped_changed {
+                    comment_domain::sync_description_stripped(&mut **tx, desc_id, &stripped)
+                        .await
+                        .map_err(|_| Denial::ServerError)?;
+                }
+                if json_changed {
+                    comment_domain::sync_description_json(&mut **tx, desc_id, &json)
+                        .await
+                        .map_err(|_| Denial::ServerError)?;
+                }
+                comment_domain::touch_synced_description(&mut **tx, desc_id, Some(*user_id), *now)
+                    .await
+                    .map_err(|_| Denial::ServerError)?;
+            }
         }
         description_id
     };
@@ -4832,10 +4842,11 @@ async fn comment_create(
         Err(_) => return Denial::ServerError.into_response(),
     };
     // Domain twins, in Django order. The description stripped value
-    // is the comment's ML text (a ported quirk — Django's
-    // `Description.save` would recompute with `strip_tags`; see
-    // PIDASHCONV-1581 item 1). `deleted_at` binds validated client
-    // input, as before.
+    // is the `Description.save` recompute (Django's own `strip_tags`,
+    // entities verbatim, `None`-when-empty — `description.py:23-29`),
+    // not the comment's ML text (PIDASHCONV-1581 item 1).
+    // `deleted_at` binds validated client input, as before.
+    let desc_stripped = description_stripped_for(Some(base.html.as_str()));
     let rows = comment_domain::CommentRows {
         id: base.id,
         description_id: uuid::Uuid::new_v4(),
@@ -4853,11 +4864,7 @@ async fn comment_create(
         html: &base.html,
         json: &base.json,
         stripped: &base.stripped,
-        desc_stripped: if base.html.is_empty() {
-            None
-        } else {
-            Some(base.stripped.as_str())
-        },
+        desc_stripped: desc_stripped.as_deref(),
         access: &base.access,
         speaker_type: &base.speaker_type,
         speaker_label: &base.speaker_label,
