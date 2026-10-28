@@ -293,7 +293,7 @@ pub(crate) const SOURCE_ISSUE_SQL: &str = "SELECT \"issues\".\"id\", \"issues\".
 /// `select_for_update(of=("self",))` — the lock scopes to the base row
 /// (a bare `FOR UPDATE` would ask Postgres to lock the nullable side of
 /// the `states` outer join and 500).
-pub(crate) const SOURCE_ISSUE_LOCK_SQL: &str = "SELECT \"issues\".\"id\", \"issues\".\"created_at\", \"issues\".\"updated_at\", \"issues\".\"created_by_id\", \"issues\".\"updated_by_id\", \"issues\".\"deleted_at\", \"issues\".\"project_id\", \"issues\".\"workspace_id\", \"issues\".\"parent_id\", \"issues\".\"state_id\", \"issues\".\"point\", \"issues\".\"estimate_point_id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"description_stripped\", \"issues\".\"description_binary\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"completed_at\", \"issues\".\"archived_at\", \"issues\".\"is_draft\", \"issues\".\"external_source\", \"issues\".\"external_id\", \"issues\".\"type_id\", \"issues\".\"git_work_branch\", \"issues\".\"workpad\", \"issues\".\"created_via\", \"issues\".\"assigned_pod_id\", \"issues\".\"agent_executor\" FROM \"issues\" INNER JOIN \"projects\" ON (\"issues\".\"project_id\" = \"projects\".\"id\") LEFT OUTER JOIN \"states\" ON (\"issues\".\"state_id\" = \"states\".\"id\") INNER JOIN \"workspaces\" ON (\"issues\".\"workspace_id\" = \"workspaces\".\"id\") WHERE (\"issues\".\"deleted_at\" IS NULL AND \"issues\".\"archived_at\" IS NULL AND NOT (\"issues\".\"is_draft\" = TRUE) AND NOT (\"states\".\"group\" = 'triage' AND \"states\".\"group\" IS NOT NULL) AND \"projects\".\"archived_at\" IS NULL AND \"workspaces\".\"slug\" = $1 AND \"issues\".\"project_id\" = $2 AND \"issues\".\"id\" = $3) LIMIT 1 FOR UPDATE OF \"issues\"";
+pub const SOURCE_ISSUE_LOCK_SQL: &str = "SELECT \"issues\".\"id\", \"issues\".\"created_at\", \"issues\".\"updated_at\", \"issues\".\"created_by_id\", \"issues\".\"updated_by_id\", \"issues\".\"deleted_at\", \"issues\".\"project_id\", \"issues\".\"workspace_id\", \"issues\".\"parent_id\", \"issues\".\"state_id\", \"issues\".\"point\", \"issues\".\"estimate_point_id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"description_stripped\", \"issues\".\"description_binary\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"completed_at\", \"issues\".\"archived_at\", \"issues\".\"is_draft\", \"issues\".\"external_source\", \"issues\".\"external_id\", \"issues\".\"type_id\", \"issues\".\"git_work_branch\", \"issues\".\"workpad\", \"issues\".\"created_via\", \"issues\".\"assigned_pod_id\", \"issues\".\"agent_executor\" FROM \"issues\" INNER JOIN \"projects\" ON (\"issues\".\"project_id\" = \"projects\".\"id\") LEFT OUTER JOIN \"states\" ON (\"issues\".\"state_id\" = \"states\".\"id\") INNER JOIN \"workspaces\" ON (\"issues\".\"workspace_id\" = \"workspaces\".\"id\") WHERE (\"issues\".\"deleted_at\" IS NULL AND \"issues\".\"archived_at\" IS NULL AND NOT (\"issues\".\"is_draft\" = TRUE) AND NOT (\"states\".\"group\" = 'triage' AND \"states\".\"group\" IS NOT NULL) AND \"projects\".\"archived_at\" IS NULL AND \"workspaces\".\"slug\" = $1 AND \"issues\".\"project_id\" = $2 AND \"issues\".\"id\" = $3) LIMIT 1 FOR UPDATE OF \"issues\"";
 
 /// `Project.resolve` pk arm (`project.py:197-199`): minimal projection
 /// (`id`, `workspace_id`, `identifier` — the only columns the move
@@ -351,47 +351,47 @@ pub(crate) const HANDOFF_PARENT_UPDATE_SQL: &str = "UPDATE \"agent_run\" SET \"s
 
 /// Old sequence rows detached (`:310`): `issue=NULL` where the project
 /// is not the target. `$1` issue id, `$2` target project id.
-pub(crate) const SEQUENCE_DETACH_SQL: &str = "UPDATE \"issue_sequences\" SET \"issue_id\" = NULL WHERE (\"issue_sequences\".\"deleted_at\" IS NULL AND \"issue_sequences\".\"issue_id\" = $1 AND NOT (\"issue_sequences\".\"project_id\" = $2))";
+pub const SEQUENCE_DETACH_SQL: &str = "UPDATE \"issue_sequences\" SET \"issue_id\" = NULL WHERE (\"issue_sequences\".\"deleted_at\" IS NULL AND \"issue_sequences\".\"issue_id\" = $1 AND NOT (\"issue_sequences\".\"project_id\" = $2))";
 
 /// Target sequence row (`:311`): full create; `workspace_id` resolves
 /// from the already-fetched target project row (Python pays a lazy
 /// `project.workspace` fetch at `save()` — same value, no extra query
 /// here). `$1` id, `$2`/`$3` created/updated, `$4` created_by (the move
 /// actor), `$5` issue, `$6` sequence, `$7` project, `$8` workspace.
-pub(crate) const SEQUENCE_CREATE_SQL: &str = "INSERT INTO \"issue_sequences\" (\"id\", \"created_at\", \"updated_at\", \"created_by_id\", \"updated_by_id\", \"deleted_at\", \"project_id\", \"workspace_id\", \"issue_id\", \"sequence\", \"deleted\") VALUES ($1, $2, $3, $4, NULL, NULL, $7, $8, $5, $6, FALSE)";
+pub const SEQUENCE_CREATE_SQL: &str = "INSERT INTO \"issue_sequences\" (\"id\", \"created_at\", \"updated_at\", \"created_by_id\", \"updated_by_id\", \"deleted_at\", \"project_id\", \"workspace_id\", \"issue_id\", \"sequence\", \"deleted\") VALUES ($1, $2, $3, $4, NULL, NULL, $7, $8, $5, $6, FALSE)";
 
 /// Assignee prune (`:313-319`, soft): drop rows whose assignee is not an
 /// active `role >= MEMBER` member of the TARGET (nested subquery,
 /// verbatim). `$1` deleted stamp, `$2` issue, `$3` target project.
-pub(crate) const ASSIGNEE_PRUNE_SQL: &str = "UPDATE \"issue_assignees\" SET \"deleted_at\" = $1 WHERE (\"issue_assignees\".\"deleted_at\" IS NULL AND \"issue_assignees\".\"issue_id\" = $2 AND NOT (\"issue_assignees\".\"assignee_id\" IN (SELECT \"project_members\".\"member_id\" FROM \"project_members\" WHERE (\"project_members\".\"deleted_at\" IS NULL AND \"project_members\".\"project_id\" = $3 AND \"project_members\".\"member_id\" IN (SELECT \"issue_assignees\".\"assignee_id\" FROM \"issue_assignees\" WHERE (\"issue_assignees\".\"deleted_at\" IS NULL AND \"issue_assignees\".\"issue_id\" = $2)) AND \"project_members\".\"role\" >= 15 AND \"project_members\".\"is_active\"))))";
+pub const ASSIGNEE_PRUNE_SQL: &str = "UPDATE \"issue_assignees\" SET \"deleted_at\" = $1 WHERE (\"issue_assignees\".\"deleted_at\" IS NULL AND \"issue_assignees\".\"issue_id\" = $2 AND NOT (\"issue_assignees\".\"assignee_id\" IN (SELECT \"project_members\".\"member_id\" FROM \"project_members\" WHERE (\"project_members\".\"deleted_at\" IS NULL AND \"project_members\".\"project_id\" = $3 AND \"project_members\".\"member_id\" IN (SELECT \"issue_assignees\".\"assignee_id\" FROM \"issue_assignees\" WHERE (\"issue_assignees\".\"deleted_at\" IS NULL AND \"issue_assignees\".\"issue_id\" = $2)) AND \"project_members\".\"role\" >= 15 AND \"project_members\".\"is_active\"))))";
 
 /// Surviving assignees re-pointed (`:320-323`). `$1` target project,
 /// `$2` target workspace, `$3` issue.
-pub(crate) const ASSIGNEE_REPOINT_SQL: &str = "UPDATE \"issue_assignees\" SET \"project_id\" = $1, \"workspace_id\" = $2 WHERE (\"issue_assignees\".\"deleted_at\" IS NULL AND \"issue_assignees\".\"issue_id\" = $3)";
+pub const ASSIGNEE_REPOINT_SQL: &str = "UPDATE \"issue_assignees\" SET \"project_id\" = $1, \"workspace_id\" = $2 WHERE (\"issue_assignees\".\"deleted_at\" IS NULL AND \"issue_assignees\".\"issue_id\" = $3)";
 
 /// Label wipe (`:325`, soft). `$1` deleted stamp, `$2` issue.
-pub(crate) const LABEL_DELETE_SQL: &str = "UPDATE \"issue_labels\" SET \"deleted_at\" = $1 WHERE (\"issue_labels\".\"deleted_at\" IS NULL AND \"issue_labels\".\"issue_id\" = $2)";
+pub const LABEL_DELETE_SQL: &str = "UPDATE \"issue_labels\" SET \"deleted_at\" = $1 WHERE (\"issue_labels\".\"deleted_at\" IS NULL AND \"issue_labels\".\"issue_id\" = $2)";
 
 /// Cycle wipe (`:326`, soft). `$1` deleted stamp, `$2` issue.
-pub(crate) const CYCLE_DELETE_SQL: &str = "UPDATE \"cycle_issues\" SET \"deleted_at\" = $1 WHERE (\"cycle_issues\".\"deleted_at\" IS NULL AND \"cycle_issues\".\"issue_id\" = $2)";
+pub const CYCLE_DELETE_SQL: &str = "UPDATE \"cycle_issues\" SET \"deleted_at\" = $1 WHERE (\"cycle_issues\".\"deleted_at\" IS NULL AND \"cycle_issues\".\"issue_id\" = $2)";
 
 /// Module wipe (`:327`, soft). `$1` deleted stamp, `$2` issue.
-pub(crate) const MODULE_DELETE_SQL: &str = "UPDATE \"module_issues\" SET \"deleted_at\" = $1 WHERE (\"module_issues\".\"deleted_at\" IS NULL AND \"module_issues\".\"issue_id\" = $2)";
+pub const MODULE_DELETE_SQL: &str = "UPDATE \"module_issues\" SET \"deleted_at\" = $1 WHERE (\"module_issues\".\"deleted_at\" IS NULL AND \"module_issues\".\"issue_id\" = $2)";
 
 /// Relation wipe (`:328`, soft): both directions. `$1` deleted stamp, `$2` issue.
-pub(crate) const RELATION_DELETE_SQL: &str = "UPDATE \"issue_relations\" SET \"deleted_at\" = $1 WHERE (\"issue_relations\".\"deleted_at\" IS NULL AND (\"issue_relations\".\"issue_id\" = $2 OR \"issue_relations\".\"related_issue_id\" = $2))";
+pub const RELATION_DELETE_SQL: &str = "UPDATE \"issue_relations\" SET \"deleted_at\" = $1 WHERE (\"issue_relations\".\"deleted_at\" IS NULL AND (\"issue_relations\".\"issue_id\" = $2 OR \"issue_relations\".\"related_issue_id\" = $2))";
 
 /// Children of other projects detached (`:329`): `Issue.objects`
 /// (plain soft-delete scope — triage/draft children detach too). `$1`
 /// issue, `$2` target project.
-pub(crate) const CHILDREN_DETACH_SQL: &str = "UPDATE \"issues\" SET \"parent_id\" = NULL WHERE (\"issues\".\"deleted_at\" IS NULL AND \"issues\".\"parent_id\" = $1 AND NOT (\"issues\".\"project_id\" = $2))";
+pub const CHILDREN_DETACH_SQL: &str = "UPDATE \"issues\" SET \"parent_id\" = NULL WHERE (\"issues\".\"deleted_at\" IS NULL AND \"issues\".\"parent_id\" = $1 AND NOT (\"issues\".\"project_id\" = $2))";
 
 /// Moved comment ids (`:331`): `-created_at` order (list order feeds the
 /// `IN` lists below; order is unobservable there). `$1` issue.
-pub(crate) const COMMENT_IDS_SQL: &str = "SELECT \"issue_comments\".\"id\" FROM \"issue_comments\" WHERE (\"issue_comments\".\"deleted_at\" IS NULL AND \"issue_comments\".\"issue_id\" = $1) ORDER BY \"issue_comments\".\"created_at\" DESC";
+pub const COMMENT_IDS_SQL: &str = "SELECT \"issue_comments\".\"id\" FROM \"issue_comments\" WHERE (\"issue_comments\".\"deleted_at\" IS NULL AND \"issue_comments\".\"issue_id\" = $1) ORDER BY \"issue_comments\".\"created_at\" DESC";
 
 /// Moved comment description ids (`:332-334`). `$1` issue.
-pub(crate) const DESCRIPTION_IDS_SQL: &str = "SELECT \"issue_comments\".\"description_id\" FROM \"issue_comments\" WHERE (\"issue_comments\".\"deleted_at\" IS NULL AND \"issue_comments\".\"issue_id\" = $1 AND \"issue_comments\".\"description_id\" IS NOT NULL) ORDER BY \"issue_comments\".\"created_at\" DESC";
+pub const DESCRIPTION_IDS_SQL: &str = "SELECT \"issue_comments\".\"description_id\" FROM \"issue_comments\" WHERE (\"issue_comments\".\"deleted_at\" IS NULL AND \"issue_comments\".\"issue_id\" = $1 AND \"issue_comments\".\"description_id\" IS NOT NULL) ORDER BY \"issue_comments\".\"created_at\" DESC";
 
 /// Final refetch (`:393`): `issue_objects` scope + `select_related`
 /// joins; minimal projection (full issue row + the url parts the
