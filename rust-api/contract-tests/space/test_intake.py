@@ -94,6 +94,26 @@ def test_create_rejects_bad_priority(user_client, world):
     assert response.json() == {"error": "Invalid priority"}
 
 
+def test_create_null_description_json_is_400(user_client, world, db):
+    # PIDASHCONV-1637: an explicit null reaches Issue.objects.create as
+    # None (views/intake.py:147); description_json is NOT NULL
+    # (db/models/issue.py:138), so the insert raises IntegrityError and
+    # BaseViewSet.handle_exception answers 400 (views/base.py:74-78)
+    # with no issue/intake rows written. The triage State row IS
+    # written first (:133-142 runs before the failing insert), so only
+    # the issue and intake_issues tables are counted here.
+    before_issues = db.fetchone("SELECT count(*) AS c FROM issues")["c"]
+    before_intakes = db.fetchone("SELECT count(*) AS c FROM intake_issues")["c"]
+    response = user_client.post(
+        _list_url(world), json={"issue": {"name": "x", "description_json": None}}
+    )
+    assert response.status_code == 400
+    assert response.json() == {"error": "The payload is not valid"}
+    after_issues = db.fetchone("SELECT count(*) AS c FROM issues")["c"]
+    after_intakes = db.fetchone("SELECT count(*) AS c FROM intake_issues")["c"]
+    assert (after_issues, after_intakes) == (before_issues, before_intakes)
+
+
 def test_create_requires_auth(anon_client, world):
     response = anon_client.post(_list_url(world), json={"issue": {"name": "anon idea"}})
     assert response.status_code in (401, 403)
