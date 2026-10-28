@@ -194,6 +194,11 @@ test(
       expect(await driver.pagesNestedOptionsItems()).toContain("Add sub-page");
       await driver.pagesNestedOptionsPick("Add sub-page");
       await driver.pagesNestedWaitDetail();
+      // The source detail's header is already on screen when the menu is
+      // opened, so the header wait alone can settle on the parent. Wait for
+      // the route to name the new page before reading it back.
+      const sourcePath = `/${seed.workspaceSlug}/projects/${projectId}/pages/${parentId}`;
+      await expect.poll(() => driver.currentUrlPath(), { timeout: 30_000 }).not.toBe(sourcePath);
       const rows = await setupRetry("list header child", () =>
         serverListChildPages(seed.workspaceSlug, projectId, parentId, session)
       );
@@ -587,8 +592,12 @@ test(
       await driver.pagesNestedExpand(parentName);
       expect(await driver.pagesNestedRowTitles()).toEqual([parentName, childName]);
       expect(await driver.pagesNestedChildCount(parentName)).toBe(1);
-      const archived = await serverListPages(seed.workspaceSlug, projectId, session, true);
-      expect(archived.map(titleOf)).toEqual(expect.arrayContaining([parentName, childName]));
+      // The top-level archived read answers roots only; a shelved child is
+      // reached through its parent's children read, which keeps the archive
+      // stamp and so shows up when archived rows are asked for.
+      const archivedChildren = await serverListChildPages(seed.workspaceSlug, projectId, parentId, session, true);
+      expect(archivedChildren.map(titleOf)).toEqual([childName]);
+      expect(archivedChildren[0]?.archivedAt).not.toBeNull();
     } finally {
       await cleanupProject(seed, projectId, session);
     }
