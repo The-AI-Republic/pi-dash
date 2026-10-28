@@ -31,6 +31,7 @@ interface LocatorOptions {
   nth?: (index: number) => Locator;
   last?: () => Locator;
   evaluate?: (fn: (node: unknown) => unknown, arg?: unknown) => Promise<unknown>;
+  evaluateAll?: (fn: (nodes: unknown[]) => unknown, arg?: unknown) => Promise<unknown>;
   isVisible?: () => Promise<boolean>;
 }
 
@@ -39,6 +40,7 @@ class FakeLocator {
   readonly click: ReturnType<typeof vi.fn>;
   readonly selectOption: ReturnType<typeof vi.fn>;
   readonly evaluate: ReturnType<typeof vi.fn>;
+  readonly evaluateAll: ReturnType<typeof vi.fn>;
   readonly isVisible: ReturnType<typeof vi.fn>;
 
   constructor(private readonly options: LocatorOptions = {}) {
@@ -46,6 +48,9 @@ class FakeLocator {
     this.click = vi.fn(this.options.click ?? (async () => undefined));
     this.selectOption = vi.fn(this.options.selectOption ?? (async () => undefined));
     this.evaluate = vi.fn(this.options.evaluate ?? (async () => undefined));
+    this.evaluateAll = vi.fn(
+      this.options.evaluateAll ?? ((fn: (nodes: unknown[]) => unknown, arg?: unknown) => Promise.resolve(fn([], arg)))
+    );
     this.isVisible = vi.fn(
       this.options.isVisible ?? (async () => this.options.visible ?? (this.options.count ?? 0) > 0)
     );
@@ -105,17 +110,11 @@ function at(options: LocatorOptions = {}): Locator {
 }
 
 function menuOf(labels: Array<string | null>): Locator {
+  // The driver reads the whole popup in one `evaluateAll`; each item is
+  // a node whose `innerText` is the rendered label.
   return at({
     count: labels.length,
-    nth: (index) =>
-      at({
-        innerText:
-          labels[index] === null
-            ? async () => {
-                throw new Error("menu item detached");
-              }
-            : async () => labels[index] ?? "",
-      }),
+    evaluateAll: async (fn) => fn(labels.map((label) => ({ innerText: label === null ? null : label }))),
   });
 }
 
@@ -400,16 +399,21 @@ describe("options menu", () => {
     expect(menuFake.waitFor).toHaveBeenCalledWith({ timeout: 30_000 });
   });
 
-  it("lists menu labels normalized and skips empty or detached entries", async () => {
-    const driver = new WebNewDriver(pageDouble({ roles: { menuitem: menuOf(["  Full   width  ", "", null]) } }).page);
+  it("lists menu labels normalized in one sweep and skips blank entries", async () => {
+    const menuFake = menuOf(["  Full   width  ", "", null]);
+    const stub = pageDouble({ roles: { menuitem: menuFake } });
+    const driver = new WebNewDriver(stub.page);
 
     await expect(driver.pagesHeaderMenuItems()).resolves.toEqual(["Full width"]);
+    // One atomic read: counting and then walking entries can straddle a
+    // dismissal that unmounts the popup mid-walk.
+    expect((menuFake as unknown as FakeLocator).evaluateAll).toHaveBeenCalledTimes(1);
   });
 
-  it("treats a null menu read as empty", async () => {
-    const driver = new WebNewDriver(
-      pageDouble({ roles: { menuitem: at({ count: 1, nth: () => at({ innerText: async () => null }) }) } }).page
-    );
+  it("answers empty as soon as the dismissed popup is gone", async () => {
+    // The popup unmounts on Escape; the read must report no entries
+    // rather than block on an entry that no longer exists.
+    const driver = new WebNewDriver(pageDouble({ roles: { menuitem: menuOf([]) } }).page);
 
     await expect(driver.pagesHeaderMenuItems()).resolves.toEqual([]);
   });

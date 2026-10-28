@@ -29050,10 +29050,6 @@ export class WebNewDriver implements ParityDriver {
     return this.page.getByRole("dialog").filter({ hasText: "Delete page" }).last();
   }
 
-  private async pagesHeaderMenuLabel(item: Locator): Promise<string> {
-    return ((await item.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
-  }
-
   async pagesHeaderCopyLinkLabel(): Promise<string | null> {
     const header = this.pagesHeaderCluster();
     if ((await header.getByRole("button", { name: "Copied link", exact: true }).count()) > 0) return "Copied link";
@@ -29136,14 +29132,16 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async pagesHeaderMenuItems(): Promise<string[]> {
-    const items = this.pagesHeaderMenuEntries();
-    const labels: string[] = [];
-    const count = await items.count();
-    for (let index = 0; index < count; index += 1) {
-      const label = await this.pagesHeaderMenuLabel(items.nth(index));
-      if (label !== "") labels.push(label);
-    }
-    return labels;
+    // One atomic read: the popup unmounts the moment a dismissal lands
+    // (Escape, an outside press, a select), so counting entries and then
+    // reading each one can straddle the unmount and block on an entry
+    // that no longer exists. `evaluateAll` never waits for a match — it
+    // answers with the entries present at that instant, empty when the
+    // menu is already gone.
+    const labels = await this.pagesHeaderMenuEntries().evaluateAll((items) =>
+      items.map((item) => ((item as HTMLElement).innerText ?? "").replace(/\s+/g, " ").trim())
+    );
+    return labels.filter((label) => label !== "");
   }
 
   async pagesHeaderChooseMenuItem(label: string): Promise<void> {
