@@ -354,3 +354,33 @@ def test_concurrent_creates_get_distinct_sequence_ids(user_client, world, seeder
         (world["project"]["id"], world["issue"]["id"]),
     )
     assert dupes == []
+
+
+def test_create_triage_autocreate_ignores_deleted_and_triage_sequences(
+    user_client, world, seeder, db
+):
+    # PIDASHCONV-1638: the auto-created Triage row's sequence comes from
+    # State.save, which reads MAX(sequence) over State.objects — live,
+    # non-triage project states (db/models/state.py:79-83,131-139) — plus
+    # 15000. Soft-deleted rows (any group) and triage-group rows must not
+    # inflate it: live max 50000 here, so Triage lands on 65000 even with
+    # a deleted backlog state at 100000 and a deleted triage state (the
+    # highest row) at 200000.
+    db.execute("UPDATE states SET sequence=50000 WHERE id=%s", (world["state"]["id"],))
+    dead = seeder.create_state(
+        world["workspace"]["id"], world["project"]["id"], name="Deleted", group="backlog"
+    )
+    db.execute("UPDATE states SET sequence=100000, deleted_at=now() WHERE id=%s", (dead["id"],))
+    dead_triage = seeder.create_state(
+        world["workspace"]["id"], world["project"]["id"], name="Old triage", group="triage"
+    )
+    db.execute(
+        "UPDATE states SET sequence=200000, deleted_at=now() WHERE id=%s", (dead_triage["id"],)
+    )
+    response = user_client.post(_list_url(world), json={"issue": {"name": "triage scope idea"}})
+    assert response.status_code == 200
+    row = db.fetchone(
+        'SELECT sequence FROM states WHERE project_id=%s AND "group"=%s AND deleted_at IS NULL',
+        (world["project"]["id"], "triage"),
+    )
+    assert float(row["sequence"]) == 65000.0
