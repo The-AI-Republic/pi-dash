@@ -105,6 +105,7 @@ use uuid::Uuid;
 
 use pidash_auth::permissions::project;
 use pidash_auth::scope::TenantScope;
+use pidash_services::read;
 use pidash_services::v1_work_items::shape_issue::BASE_EXPANSION_NAMES;
 use pidash_services::v1_work_items::shape_links::{
     render_link, validate_link_create, LinkRow, LinkShowInput, LinkWriteError,
@@ -1234,9 +1235,8 @@ fn render_comment_create_value(decoded: &DecodedComment) -> Result<Value, Denial
     Ok(Value::Object(out))
 }
 
-/// `IssueCommentSerializer.get_url` (`serializers/issue.py:994-999`):
-/// `issue_web_url(workspace.slug, project.identifier, issue.sequence_id)`
-/// over the ROW's FKs (fetched, never the path params).
+/// `IssueCommentSerializer.get_url` via the public read service
+/// (`serializers/issue.py:994-999`).
 async fn comment_url(
     pool: &PgPool,
     workspace_id: &Uuid,
@@ -1244,33 +1244,16 @@ async fn comment_url(
     issue_id: &Uuid,
     web_base: Option<&str>,
 ) -> Result<Option<String>, Denial> {
-    let slug: Option<String> =
-        sqlx::query_scalar(r#"SELECT "slug" FROM "workspaces" WHERE "id" = $1"#)
-            .bind(workspace_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| db_error(error, "comment-url-slug"))?
-            .flatten();
-    let identifier: Option<String> =
-        sqlx::query_scalar(r#"SELECT "identifier" FROM "projects" WHERE "id" = $1"#)
-            .bind(project_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| db_error(error, "comment-url-ident"))?
-            .flatten();
-    let sequence: Option<i32> =
-        sqlx::query_scalar(r#"SELECT "sequence_id" FROM "issues" WHERE "id" = $1"#)
-            .bind(issue_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| db_error(error, "comment-url-seq"))?
-            .flatten();
-    Ok(pidash_services::v1_work_items::shape_issue::issue_url(
-        web_base,
-        slug.as_deref(),
-        identifier.as_deref(),
-        sequence.map(i64::from),
-    ))
+    read::comment_url(pool, workspace_id, project_id, issue_id, web_base)
+        .await
+        .map_err(|error| match error {
+            // Unreachable: this read never 404s or fails mid-row.
+            read::Error::NotFound | read::Error::Failed(_) => Denial::ServerError,
+            read::Error::Db(err) => {
+                let (site, source) = err.split();
+                db_error(source, site)
+            }
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -1301,15 +1284,16 @@ async fn file_asset_url(pool: &PgPool, asset_id: &Uuid) -> Result<Option<String>
         pool: &PgPool,
         workspace_id: Option<Uuid>,
     ) -> Result<Option<String>, Denial> {
-        match workspace_id {
-            Some(id) => sqlx::query_scalar(r#"SELECT "slug" FROM "workspaces" WHERE "id" = $1"#)
-                .bind(id)
-                .fetch_optional(pool)
-                .await
-                .map_err(|error| db_error(error, "file-asset-slug"))
-                .map(|slug: Option<Option<String>>| slug.flatten()),
-            None => Ok(None),
-        }
+        read::workspace_slug(pool, workspace_id)
+            .await
+            .map_err(|error| match error {
+                // Unreachable: this read never 404s or fails mid-row.
+                read::Error::NotFound | read::Error::Failed(_) => Denial::ServerError,
+                read::Error::Db(err) => {
+                    let (site, source) = err.split();
+                    db_error(source, site)
+                }
+            })
     }
     match entity_type.as_deref() {
         Some("WORKSPACE_LOGO")

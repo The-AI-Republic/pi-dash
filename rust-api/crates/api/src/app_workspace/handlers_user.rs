@@ -104,6 +104,7 @@ use std::net::SocketAddr;
 
 use pidash_services::app_workspace::{models_user, queries_user, ser_extras, ser_user, tasks};
 use pidash_services::auth_session::{guards as throttle_kernel, shapes as auth_shapes};
+use pidash_services::read::{self, AssetRow, ProfileRow};
 
 use super::gates;
 use crate::middleware::SessionHandle;
@@ -418,22 +419,15 @@ async fn fetch_user(pool: &PgPool, user_id: uuid::Uuid) -> Result<UserRow, Denia
 
 /// One `profiles` row for the identity paths: the pk plus
 /// `last_workspace_id` (plain nullable UUID, `user.py:236`).
-#[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
-pub struct ProfileRow {
-    pub id: uuid::Uuid,
-    pub last_workspace_id: Option<uuid::Uuid>,
-}
-
-/// `Profile.objects.get(user=...)` (`queries_user::profile_by_user_sql`
-/// shape; `profiles` carries no `deleted_at`). A miss is
-/// [`Denial::ObjectNotFound`].
+/// `Profile.objects.get(user=...)` via the public read service. A miss
+/// is [`Denial::ObjectNotFound`].
 async fn fetch_profile(pool: &PgPool, user_id: uuid::Uuid) -> Result<ProfileRow, Denial> {
-    sqlx::query_as("SELECT id, last_workspace_id FROM profiles WHERE profiles.user_id = $1")
-        .bind(user_id)
-        .fetch_optional(pool)
+    read::fetch_profile(pool, user_id)
         .await
-        .map_err(|_| Denial::ServerError)?
-        .ok_or(Denial::ObjectNotFound)
+        .map_err(|error| match error {
+            read::Error::NotFound => Denial::ObjectNotFound,
+            read::Error::Db(_) | read::Error::Failed(_) => Denial::ServerError,
+        })
 }
 
 /// One `workspaces` row for the settings branches: the re-fetch /
@@ -454,30 +448,16 @@ pub struct InstanceRow {
     pub id: uuid::Uuid,
 }
 
-/// One `file_assets` row for `asset_url` rendering: the plain-manager
-/// columns (forward-FK access runs through `_base_manager`, unscoped —
-/// the `queries_user` bug-13 precedent).
-#[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
-pub struct AssetRow {
-    pub id: uuid::Uuid,
-    pub entity_type: Option<String>,
-    pub workspace_id: Option<uuid::Uuid>,
-    pub project_id: Option<uuid::Uuid>,
-    pub issue_id: Option<uuid::Uuid>,
-}
-
-/// Unscoped asset fetch for one set FK. A dangling FK raises through
-/// the `ObjectDoesNotExist` branch (404), like Django's
-/// `RelatedObjectDoesNotExist`.
+/// Unscoped asset fetch for one set FK via the public read service. A
+/// dangling FK raises through the `ObjectDoesNotExist` branch (404),
+/// like Django's `RelatedObjectDoesNotExist`.
 async fn fetch_asset(pool: &PgPool, asset_id: uuid::Uuid) -> Result<AssetRow, Denial> {
-    sqlx::query_as(
-        "SELECT id, entity_type, workspace_id, project_id, issue_id FROM file_assets WHERE file_assets.id = $1",
-    )
-    .bind(asset_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?
-    .ok_or(Denial::ObjectNotFound)
+    read::fetch_asset(pool, asset_id)
+        .await
+        .map_err(|error| match error {
+            read::Error::NotFound => Denial::ObjectNotFound,
+            read::Error::Db(_) | read::Error::Failed(_) => Denial::ServerError,
+        })
 }
 
 /// Render `FileAsset.asset_url` (`db/models/asset.py:79-109`) through

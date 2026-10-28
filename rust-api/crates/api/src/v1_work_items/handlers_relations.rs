@@ -114,6 +114,7 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use pidash_auth::scope::TenantScope;
+use pidash_services::read;
 use pidash_services::v1_work_items::queries_sub::{
     actual_relation, is_reverse_relation, union_ids,
 };
@@ -2559,17 +2560,10 @@ async fn workpad_patch_inner(
     Ok(json_response(StatusCode::OK, body))
 }
 
-/// The workpad-PATCH `description_stripped` recompute
-/// (`db/models/issue.py:346-350`): `None` for empty HTML, else
-/// `html_processor.strip_tags` — the entity-decoding MLStripper
-/// (`pidash_db::app_pages::strip::ml_strip_tags`), NOT Django's
-/// verbatim-entity kernel.
+/// The workpad-PATCH `description_stripped` recompute via the public
+/// read service (`db/models/issue.py:346-350`).
 fn workpad_stripped(description_html: &str) -> Option<String> {
-    if description_html.is_empty() {
-        None
-    } else {
-        Some(pidash_db::app_pages::strip::ml_strip_tags(description_html))
-    }
+    read::workpad_stripped(description_html)
 }
 
 /// `"body" in request.data` (`:3287`): key membership on objects,
@@ -2586,12 +2580,8 @@ fn workpad_has_body(value: &Value) -> Result<bool, Denial> {
     }
 }
 
-/// The NULL-state arm of `Issue.save` (`db/models/issue.py:288-308`):
-/// default non-triage state first, else the first non-triage state, both
-/// by `Meta.ordering` (`sequence`); with no states at all the issue keeps
-/// its NULL state. `completed_at` is untouched in every NULL-state case —
-/// the recompute runs only when the issue already had a state (the `else`
-/// arm, `issue.py:300-308`).
+/// The NULL-state arm of `Issue.save` via the public read service
+/// (`db/models/issue.py:288-308`).
 async fn resolve_workpad_state(
     txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     project_id: &Uuid,
@@ -2599,45 +2589,16 @@ async fn resolve_workpad_state(
     state_group: Option<&str>,
     completed_at: Option<DateTime<Utc>>,
 ) -> Result<(Option<Uuid>, Option<DateTime<Utc>>), Denial> {
-    if let Some(state_id) = state_id {
-        let group = state_group.unwrap_or_default();
-        if group == "completed" {
-            return Ok((Some(state_id), Some(now_utc())));
-        }
-        return Ok((Some(state_id), None));
-    }
-    let found: Option<(Uuid, String)> = sqlx::query_as(
-        r#"SELECT "id", "group" FROM "states"
-           WHERE "deleted_at" IS NULL AND "group" != 'triage' AND NOT ("is_triage")
-             AND "project_id" = $1 AND "default"
-           ORDER BY "sequence" LIMIT 1"#,
-    )
-    .bind(project_id)
-    .fetch_optional(&mut **txn)
-    .await
-    .map_err(|error| db_error(error, "workpad-default-state"))?;
-    let found = match found {
-        Some(found) => Some(found),
-        None => sqlx::query_as(
-            r#"SELECT "id", "group" FROM "states"
-                   WHERE "deleted_at" IS NULL AND "group" != 'triage' AND NOT ("is_triage")
-                     AND "project_id" = $1
-                   ORDER BY "sequence" LIMIT 1"#,
-        )
-        .bind(project_id)
-        .fetch_optional(&mut **txn)
+    read::resolve_workpad_state(txn, project_id, state_id, state_group, completed_at)
         .await
-        .map_err(|error| db_error(error, "workpad-random-state"))?,
-    };
-    // The `completed_at` recompute lives in the `else` arm of the
-    // `self.state is None` branch (`issue.py:300-308`): a stateless issue
-    // keeps its `completed_at` untouched whether or not a state is found.
-    match found {
-        Some((id, _group)) => Ok((Some(id), completed_at)),
-        // No states at all: `self.state` stays `None`, `completed_at`
-        // untouched (the `else` arm never runs).
-        None => Ok((None, completed_at)),
-    }
+        .map_err(|error| match error {
+            // Unreachable: this read never 404s or fails mid-row.
+            read::Error::NotFound | read::Error::Failed(_) => Denial::ServerError,
+            read::Error::Db(err) => {
+                let (site, source) = err.split();
+                db_error(source, site)
+            }
+        })
 }
 
 #[cfg(test)]

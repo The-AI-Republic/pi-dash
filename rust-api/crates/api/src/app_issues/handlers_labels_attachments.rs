@@ -100,6 +100,7 @@ use pidash_services::app_issues::serializers_label::{
     app_label_to_representation, AppLabelRow, LABEL_NAME_CONFLICT_BODY,
     LABEL_NAME_CONFLICT_EXCLUDING_SELF_PROBE_SQL, LABEL_NAME_CONFLICT_PROBE_SQL,
 };
+use pidash_services::read;
 
 // ---- owned paths ------------------------------------------------------------
 
@@ -1355,16 +1356,15 @@ async fn actor_timezone(pool: &sqlx::PgPool, user_id: &Uuid) -> Result<Tz, Denia
     name.parse::<Tz>().map_err(|_| Denial::ServerError)
 }
 
-/// `Workspace.objects.get(slug=slug)`: 404 `{"error": ...}` on a miss
-/// (default-manager scoped).
+/// `Workspace.objects.get(slug=slug)` via the public read service:
+/// 404 `{"error": ...}` on a miss (default-manager scoped).
 async fn workspace_row(pool: &sqlx::PgPool, slug: &str) -> Result<(Uuid, String), Denial> {
-    let row: Option<(Uuid, String)> =
-        sqlx::query_as("SELECT id, slug FROM workspaces WHERE slug = $1 AND deleted_at IS NULL")
-            .bind(slug)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    row.ok_or(Denial::NotFound)
+    read::workspace_row(pool, slug)
+        .await
+        .map_err(|error| match error {
+            read::Error::NotFound => Denial::NotFound,
+            read::Error::Db(_) | read::Error::Failed(_) => Denial::ServerError,
+        })
 }
 
 /// `Project.objects.get(pk=...)`: 404 `{"error": ...}` on a miss

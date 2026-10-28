@@ -87,6 +87,7 @@ use pidash_db::app_project::models::project::{classify_lookup, ProjectLookup};
 use pidash_db::app_project::models::state as state_model;
 use pidash_services::app_project::ser_workflow as ser;
 use pidash_services::app_project::tasks as t;
+use pidash_services::read::{self, state_row_from, StateRow, StateRowTuple};
 use pidash_types::{ProjectId, WorkspaceId};
 use rand::Rng;
 
@@ -991,64 +992,10 @@ fn key_min_error() -> String {
 // States
 // ---------------------------------------------------------------------------
 
-/// One state row for the read shape (the 9 `STATE_READ_KEYS` columns).
-#[derive(Debug, Clone)]
-struct StateRow {
-    id: uuid::Uuid,
-    project_id: uuid::Uuid,
-    workspace_id: uuid::Uuid,
-    name: String,
-    color: String,
-    group: String,
-    default: bool,
-    description: String,
-    sequence: f64,
-}
-
-/// Render one state through the L3 read shape.
+/// Render one state through the L3 read shape (the public read
+/// service owns the row type and the renderer).
 fn render_state(row: &StateRow) -> Value {
-    let id = row.id.to_string();
-    let project_id = row.project_id.to_string();
-    let workspace_id = row.workspace_id.to_string();
-    let row_view = ser::StateRow {
-        id: &id,
-        project_id: &project_id,
-        workspace_id: &workspace_id,
-        name: &row.name,
-        color: &row.color,
-        group: &row.group,
-        default: row.default,
-        description: &row.description,
-        sequence: row.sequence,
-    };
-    let view = ser::state_to_representation(&row_view);
-    serde_json::to_value(&view).expect("state view serializes")
-}
-
-type StateRowTuple = (
-    uuid::Uuid,
-    uuid::Uuid,
-    uuid::Uuid,
-    String,
-    String,
-    String,
-    bool,
-    String,
-    f64,
-);
-
-fn state_row_from(tuple: StateRowTuple) -> StateRow {
-    StateRow {
-        id: tuple.0,
-        project_id: tuple.1,
-        workspace_id: tuple.2,
-        name: tuple.3,
-        color: tuple.4,
-        group: tuple.5,
-        default: tuple.6,
-        description: tuple.7,
-        sequence: tuple.8,
-    }
+    read::render_state(row)
 }
 
 /// `StateViewSet.list` (`state/base.py:84-109`): the scoped queryset

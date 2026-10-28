@@ -70,7 +70,8 @@ pub mod state {
 pub mod domain {}
 
 /// Reads and render: issue shapes and serializers, workspace, project
-/// and search models, and auth-session shapes.
+/// and search models, and auth-session shapes. OVL-05 (PIDASHCONV-1543)
+/// added the `pidash_services::read` root API here item for item.
 pub mod read {
     pub use pidash_services::app_issues::pr_links::attach_pull_request;
     pub use pidash_services::app_issues::pr_links::AttachError;
@@ -127,6 +128,60 @@ pub mod read {
     pub use pidash_services::auth_session::password::drf_datetime;
     pub use pidash_services::auth_session::shapes::base_host; // also imported by the overlay as `pidash_services::auth_session::base_host`.
     pub use pidash_services::auth_session::shapes::HostSettings; // also imported by the overlay as `pidash_services::auth_session::HostSettings`.
+    pub use pidash_services::read::comment_is_synced;
+    pub use pidash_services::read::comment_url;
+    pub use pidash_services::read::decode_issue;
+    pub use pidash_services::read::expand_estimate_point;
+    pub use pidash_services::read::expand_parent;
+    pub use pidash_services::read::expand_project;
+    pub use pidash_services::read::expand_state;
+    pub use pidash_services::read::expand_user;
+    pub use pidash_services::read::expand_workspace;
+    pub use pidash_services::read::fetch_asset;
+    pub use pidash_services::read::fetch_assignee_ids;
+    pub use pidash_services::read::fetch_assignee_rows;
+    pub use pidash_services::read::fetch_blocker_rows;
+    pub use pidash_services::read::fetch_blocker_summary;
+    pub use pidash_services::read::fetch_expanded_labels;
+    pub use pidash_services::read::fetch_grouped_rows;
+    pub use pidash_services::read::fetch_issue_for_write;
+    pub use pidash_services::read::fetch_label_ids;
+    pub use pidash_services::read::fetch_profile;
+    pub use pidash_services::read::fetch_user;
+    pub use pidash_services::read::render_actor_detail;
+    pub use pidash_services::read::render_comment;
+    pub use pidash_services::read::render_comment_reaction_row;
+    pub use pidash_services::read::render_decoded;
+    pub use pidash_services::read::render_state;
+    pub use pidash_services::read::render_write_response;
+    pub use pidash_services::read::requested_names;
+    pub use pidash_services::read::resolve_workpad_state;
+    pub use pidash_services::read::state_row_from;
+    pub use pidash_services::read::workpad_stripped;
+    pub use pidash_services::read::workspace_of;
+    pub use pidash_services::read::workspace_row;
+    pub use pidash_services::read::workspace_slug;
+    pub use pidash_services::read::ActorDetailView;
+    pub use pidash_services::read::AssetRow;
+    pub use pidash_services::read::BlockerRows;
+    pub use pidash_services::read::CommentReactionView;
+    pub use pidash_services::read::CommentRow;
+    pub use pidash_services::read::CommentView;
+    pub use pidash_services::read::DbError;
+    pub use pidash_services::read::DecodedIssue;
+    pub use pidash_services::read::Error;
+    pub use pidash_services::read::IssueFlatView;
+    pub use pidash_services::read::OwnedAssigneeRow;
+    pub use pidash_services::read::OwnedRelationItem;
+    pub use pidash_services::read::ProfileRow;
+    pub use pidash_services::read::ProjectLiteView;
+    pub use pidash_services::read::RenderRequest;
+    pub use pidash_services::read::StateRow;
+    pub use pidash_services::read::StateRowTuple;
+    pub use pidash_services::read::UserShape;
+    pub use pidash_services::read::WorkspaceLiteView;
+    pub use pidash_services::read::ISSUE_EXTRA_COLS;
+    pub use pidash_services::read::ISSUE_SELECT_COLS;
     pub use pidash_services::v1_work_items::shape_issue;
     pub use pidash_services::v1_work_items::shape_issue::issue_url;
     pub use pidash_services::v1_work_items::shape_issue::plan_create;
