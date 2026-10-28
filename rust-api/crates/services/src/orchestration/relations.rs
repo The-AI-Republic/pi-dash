@@ -15,9 +15,8 @@
 //! for a different one reports `conflicts` with the existing relation
 //! and overwrites nothing.
 //!
-//! The services crate carries no `sqlx` dependency, so — per the
-//! D-27/D-30/D-36 `queries.rs` precedent and the sibling
-//! [`crate::orchestration::blockers`] module — SQL here is text plus
+//! Per the D-27/D-30/D-36 `queries.rs` precedent and the sibling
+//! [`crate::orchestration::blockers`] module, SQL here is text plus
 //! symbolic `:name` placeholders;
 //! handlers translate each `:name` to a positional `$n` in the
 //! statement's `*_PARAMS` order (first appearance) when binding via

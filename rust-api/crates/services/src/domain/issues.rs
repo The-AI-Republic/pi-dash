@@ -54,13 +54,13 @@ use uuid::Uuid;
 use super::activity::{TaskEnqueueHook, ISSUE_ACTIVITY_TASK, MODEL_ACTIVITY_TASK};
 use super::ctx::WriteCtx;
 use super::error::DomainError;
-use super::issues_move::{MoveCreationOutboxes, MovePostCommitHook};
+use super::issues_move::MoveCreationOutboxes;
 use super::transition::IssueTransitionHook;
 use super::txn::WriteTxn;
 
 pub use super::issues_move::{
     move_to_project, CreationDeps, MoveAdmissionCache, MoveDomainOutcome, MoveDrainError,
-    MoveInput, MoveRejection,
+    MoveInput, MovePostCommitHook, MoveRejection,
 };
 use crate::app_issues::issue_move::{
     issue_activity_kwargs as move_issue_activity_kwargs, move_model_activity_kwargs,
