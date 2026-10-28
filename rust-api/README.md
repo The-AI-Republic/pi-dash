@@ -425,7 +425,11 @@ four mechanical cleanups (the generator rewrites them): delete the
 `belongs_to` relations (plus `Related` impls) pointing at tables outside
 the §4 set — the compiler lists them as unresolved `super::<table>`
 paths; restore the module doc on `mod.rs` with the new Django SHA;
-restore the `#[cfg(test)] mod parity;` declaration; and delete the empty
+restore the `#[cfg(test)] mod parity;` declaration; restore the
+`pub mod issue_hooks;` declaration while deleting the empty
+`impl ActiveModelBehavior for ActiveModel {}` the generator emits in
+`issues.rs` (the real hooks live in `issue_hooks`; the compiler rejects
+the duplicate); and delete the empty
 `impl ActiveModelBehavior for ActiveModel {}` the generator restores in
 `users.rs` (the hand-written impl lives in `users_hooks.rs`, which the
 generator never touches — keeping both fails the build with duplicate

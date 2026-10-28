@@ -38,6 +38,7 @@ pub mod assistant;
 pub mod auth_oauth;
 pub mod auth_session;
 pub mod desktop_gate;
+pub mod domain_hooks;
 pub mod edge;
 pub mod edge_shadow;
 pub mod issue_transition;

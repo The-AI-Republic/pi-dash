@@ -23,6 +23,8 @@ sea-orm = { version = "~1.1.20", default-features = false, features = ["sqlx-pos
 # ORM-07 (PIDASHCONV-1525): `#[async_trait]` on the hand-written
 # `ActiveModelBehavior` impls (the trait is async-trait-based, so impls
 # must be too). Locked async-trait 0.1.x via sea-orm — no lock churn.
+# ORM-03 (PIDASHCONV-1521): `#[async_trait]` on the `ActiveModelBehavior`
+# hook impls too.
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

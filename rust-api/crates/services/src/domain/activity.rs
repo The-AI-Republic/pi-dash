@@ -24,6 +24,25 @@ pub const PAGE_TRANSACTION_TASK: &str = "pi_dash.bgtasks.page_transaction_task.p
 /// name.
 pub const TRACK_PAGE_VERSION_TASK: &str = "pi_dash.bgtasks.page_version_task.track_page_version";
 
+/// The task transport as an object-safe hook (the
+/// [`IssueTransitionHook`](super::transition::IssueTransitionHook) precedent:
+/// boxed futures, no generics). `pidash-services` cannot depend on
+/// `pidash-jobs` (the crate graph is `types` → `db` → `services`, and jobs
+/// sits above services), so the binary that owns the queue implements this
+/// over `pidash_jobs::queue::enqueue`, the driver registers it on the
+/// [`HookRegistry`](super::HookRegistry), and domain chains call it from
+/// their after-commit steps. Infallible like the handler-local
+/// `enqueue_task` it replaces: failures warn inside the implementation
+/// and the response stands.
+pub trait TaskEnqueueHook: Send + Sync {
+    fn enqueue_task(
+        &self,
+        task: &str,
+        args: Vec<serde_json::Value>,
+        kwargs: serde_json::Map<String, serde_json::Value>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

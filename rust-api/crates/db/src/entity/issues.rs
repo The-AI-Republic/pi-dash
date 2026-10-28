@@ -142,4 +142,6 @@ impl Related<super::workspaces::Entity> for Entity {
     }
 }
 
-impl ActiveModelBehavior for ActiveModel {}
+// No `ActiveModelBehavior` impl here: the `Issue.save()` hooks live in the
+// hand-written `issue_hooks` module (regeneration restores this line —
+// delete it again; the compiler rejects the duplicate).
