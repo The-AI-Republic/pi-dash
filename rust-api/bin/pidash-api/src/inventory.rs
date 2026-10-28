@@ -1795,11 +1795,13 @@ mod tests {
             &mut registry,
             pool.clone(),
             pidash_jobs::integrations::git_sync::LiveProviders::from_env(),
+            None,
         );
         pidash_jobs::integrations::github_sync::register_github_sync_tasks(
             &mut registry,
             pool.clone(),
             pidash_jobs::integrations::github_sync::LiveTransports::from_env(),
+            None,
         );
         pidash_jobs::license::tasks::register(&mut registry, pool.clone());
         pidash_jobs::assistant::register_sweep_handler(

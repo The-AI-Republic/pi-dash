@@ -87,6 +87,7 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use pidash_db::config::encryption::Keyring;
+use pidash_services::domain::transition::IssueTransitionHook;
 use pidash_services::integrations::accounts::account_credential;
 use pidash_services::integrations::adapters_github::{
     ClientAuth, GitHubAdapter, GithubClient, GithubError,
@@ -100,6 +101,7 @@ use pidash_types::integrations::{
 };
 
 use super::super::tasks_mail::mail_send::{django_escape, strip_tags};
+use crate::issue_transition::fire_sync_transition;
 use crate::pyformat::format_eta;
 use crate::queue::{enqueue, JobRow, NewJob};
 use crate::schedule::{beat_schedule, BeatEntry};
@@ -1821,6 +1823,8 @@ const UPDATE_ISSUE_SYNC_METADATA_SQL: &str =
 /// `git_sync_task.py:91-97`, with the `Issue.save()` creation path
 /// `issue.py:267-340` inlined: pod default, non-triage default state,
 /// advisory-locked sequence, sort-order seed, stripped recompute).
+/// Returns the issue id, the sync id, and the resolved state (the
+/// post-save legs' current value).
 #[allow(clippy::too_many_arguments)]
 async fn create_issue(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -1832,7 +1836,7 @@ async fn create_issue(
     // overwrites it (`_ = default_state`'s sibling dead-input ported bug).
     _description_stripped: &str,
     now: &DateTime<Utc>,
-) -> Result<(Uuid, Uuid), String> {
+) -> Result<(Uuid, Uuid, Option<Uuid>), String> {
     let db_error = |error: sqlx::Error| format!("create mirror issue: {error}");
     sqlx::query(ADVISORY_LOCK_SQL)
         .bind(advisory_lock_key(&scan.project_id))
@@ -1917,7 +1921,7 @@ async fn create_issue(
         .await
         .map_err(db_error)?;
     let sync_id = insert_issue_sync(tx, scan, remote, &issue_id, now).await?;
-    Ok((issue_id, sync_id))
+    Ok((issue_id, sync_id, state_id))
 }
 
 async fn insert_issue_sync(
@@ -1959,11 +1963,19 @@ async fn insert_issue_sync(
 
 /// Create-or-update one mirror issue plus its sync row (`_upsert_issue`,
 /// `git_sync_task.py:66-139`). Returns the local `(issue_id, sync_id)`.
+///
+/// `hook` is the worker's transition entry points (`None` on direct
+/// unit-test calls, where no worker context exists): after a create
+/// (previous `None`) the orchestration fire runs, best-effort (the
+/// receiver never fails the save). The create arm runs no completion
+/// leg (`github_signals.py` skips `created`), and the update arm runs
+/// no legs at all (`filter(pk).update(…)` sends no signals).
 pub async fn upsert_issue(
     pool: &PgPool,
     scan: &BindingScan,
     remote: &RemoteIssue,
     now: &DateTime<Utc>,
+    hook: Option<Arc<dyn IssueTransitionHook>>,
 ) -> Result<(Uuid, Uuid), String> {
     let db_error = |error: sqlx::Error| format!("upsert mirror issue: {error}");
     let issue_iid = remote.external_iid.clone();
@@ -1978,7 +1990,7 @@ pub async fn upsert_issue(
     match existing {
         None => {
             let mut tx = pool.begin().await.map_err(db_error)?;
-            let ids = create_issue(
+            let (issue_id, sync_id, state_id) = create_issue(
                 &mut tx,
                 scan,
                 remote,
@@ -1989,12 +2001,17 @@ pub async fn upsert_issue(
             )
             .await?;
             tx.commit().await.map_err(db_error)?;
-            Ok(ids)
+            // The receiver ignores `created` and compares previous
+            // (`None`) vs current (the default): a ticking default
+            // enters the bucket here.
+            fire_sync_transition(&hook, scan.actor_id, issue_id, None, state_id, *now).await;
+            Ok((issue_id, sync_id))
         }
         Some((sync_id, issue_id)) => {
             // `filter(pk).update(…)` (`git_sync_task.py:100-112`): absolute
             // values, no `save()` side effects — then the audit restamp,
             // collapsed into the same statement (identical final bytes).
+            // No `save()` means no signals: neither leg runs here.
             sqlx::query(UPDATE_ISSUE_SQL)
                 .bind(issue_id)
                 .bind(&name)
@@ -2311,6 +2328,7 @@ pub async fn sync_one_binding(
     providers: &LiveProviders,
     binding_id: &str,
     attempts: u32,
+    hook: Option<Arc<dyn IssueTransitionHook>>,
 ) -> Result<Verdict, HandlerError> {
     if !git_sync_enabled() {
         return Ok(Verdict::Ack);
@@ -2374,7 +2392,7 @@ pub async fn sync_one_binding(
         },
     };
     let now = Utc::now();
-    match run_scan(pool, providers, &scan, &now).await {
+    match run_scan(pool, providers, &scan, &now, hook).await {
         Ok(()) => {
             if let Err(error) = sqlx::query(BINDING_SUCCESS_SQL)
                 .bind(scan.binding_id)
@@ -2444,6 +2462,7 @@ async fn run_scan(
     providers: &LiveProviders,
     scan: &BindingScan,
     now: &DateTime<Utc>,
+    hook: Option<Arc<dyn IssueTransitionHook>>,
 ) -> Result<(), ScanFault> {
     let app_resolution = if needs_github_app_config(&scan.provider, &scan.credential) {
         Some(
@@ -2474,7 +2493,7 @@ async fn run_scan(
         if remote_issue.external_iid.is_empty() {
             continue;
         }
-        let (issue_id, sync_id) = upsert_issue(pool, scan, remote_issue, now)
+        let (issue_id, sync_id) = upsert_issue(pool, scan, remote_issue, now, hook.clone())
             .await
             .map_err(ScanFault::Unexpected)?;
         remote_issue_iids.insert(remote_issue.external_iid.clone());
@@ -2713,8 +2732,15 @@ pub async fn post_completion_comment(
 /// claimed row; Celery arity is enforced by [`parse_single_id_arg`]
 /// (malformed deliveries ack with a warning, like Celery discarding
 /// invalid signatures). `sync_one_binding` spends the row's retry budget
-/// with [`retry_countdown_secs`]; the other two never retry.
-pub fn register_git_sync_tasks(registry: &mut Registry, pool: PgPool, providers: LiveProviders) {
+/// with [`retry_countdown_secs`]; the other two never retry. `hook`
+/// carries the worker's transition entry points into the upserts
+/// (`None` leaves the post-save legs off).
+pub fn register_git_sync_tasks(
+    registry: &mut Registry,
+    pool: PgPool,
+    providers: LiveProviders,
+    hook: Option<Arc<dyn IssueTransitionHook>>,
+) {
     let scan_pool = pool.clone();
     registry.register(
         SYNC_ALL_BINDINGS_TASK,
@@ -2739,11 +2765,13 @@ pub fn register_git_sync_tasks(registry: &mut Registry, pool: PgPool, providers:
     );
     let one_pool = pool.clone();
     let one_providers = providers.clone();
+    let one_hook = hook.clone();
     registry.register(
         SYNC_ONE_BINDING_TASK,
         Arc::new(move |job: JobRow| {
             let pool = one_pool.clone();
             let providers = one_providers.clone();
+            let hook = one_hook.clone();
             Box::pin(async move {
                 let id = match parse_single_id_arg(SYNC_ONE_BINDING_TASK, &job.args, &job.kwargs) {
                     Ok(id) => id,
@@ -2753,7 +2781,7 @@ pub fn register_git_sync_tasks(registry: &mut Registry, pool: PgPool, providers:
                     }
                 };
                 let attempts = job.attempts.max(0) as u32;
-                sync_one_binding(&pool, &providers, &id, attempts).await
+                sync_one_binding(&pool, &providers, &id, attempts, hook).await
             }) as std::pin::Pin<Box<dyn std::future::Future<Output = _> + Send>>
         }),
     );
@@ -4178,6 +4206,7 @@ mod live_tests {
                 "DELETE FROM git_provider_accounts WHERE id = $1",
                 scan.account_id,
             ),
+            ("DELETE FROM states WHERE project_id = $1", scan.project_id),
             ("DELETE FROM projects WHERE id = $1", scan.project_id),
             ("DELETE FROM workspaces WHERE id = $1", scan.workspace_id),
             ("DELETE FROM users WHERE id = $1", scan.actor_id),
@@ -4201,7 +4230,7 @@ mod live_tests {
             "https://github.com/rs-ct/x/issues/4242",
             "open",
         );
-        let (issue_id, sync_id) = upsert_issue(&pool, &scan, &first, &Utc::now())
+        let (issue_id, sync_id) = upsert_issue(&pool, &scan, &first, &Utc::now(), None)
             .await
             .expect("first scan inserts the mirror issue");
         let second = remote_issue(
@@ -4209,7 +4238,7 @@ mod live_tests {
             "https://github.com/rs-ct/x/issues/4242-moved",
             "closed",
         );
-        let (issue_id2, sync_id2) = upsert_issue(&pool, &scan, &second, &Utc::now())
+        let (issue_id2, sync_id2) = upsert_issue(&pool, &scan, &second, &Utc::now(), None)
             .await
             .expect("second scan updates the mirror issue");
         assert_eq!(issue_id2, issue_id, "re-sync reuses the mirror issue");
@@ -4273,7 +4302,7 @@ mod live_tests {
             "https://github.com/rs-ct/x/issues/4242",
             "open",
         );
-        let (issue_id, sync_id) = upsert_issue(&pool, &scan, &first, &Utc::now())
+        let (issue_id, sync_id) = upsert_issue(&pool, &scan, &first, &Utc::now(), None)
             .await
             .expect("first scan inserts the mirror issue");
         let stamps: (Option<Uuid>, Option<Uuid>) = sqlx::query_as(
@@ -4300,7 +4329,7 @@ mod live_tests {
             "https://github.com/rs-ct/x/issues/4242-moved",
             "closed",
         );
-        upsert_issue(&pool, &scan, &second, &Utc::now())
+        upsert_issue(&pool, &scan, &second, &Utc::now(), None)
             .await
             .expect("second scan updates the mirror issue");
         let restamps: (Option<Uuid>, Option<Uuid>) = sqlx::query_as(
@@ -4336,7 +4365,7 @@ mod live_tests {
             "https://github.com/rs-ct/x/issues/4242",
             "open",
         );
-        let (issue_id, sync_id) = upsert_issue(&pool, &scan, &issue, &Utc::now())
+        let (issue_id, sync_id) = upsert_issue(&pool, &scan, &issue, &Utc::now(), None)
             .await
             .expect("seed scan inserts the mirror issue");
         upsert_comment(
@@ -4417,6 +4446,107 @@ mod live_tests {
             "comment sync update lands NULL"
         );
         cleanup_comment(&pool, comment_id, Some(description_id)).await;
+        cleanup(&pool, &scan, repo_id, issue_id).await;
+    }
+
+    /// Seed the project's default state (`default = TRUE`): the value
+    /// `Issue.save` resolves on create.
+    async fn seed_default_state(
+        pool: &sqlx::PgPool,
+        scan: &BindingScan,
+        name: &str,
+        group: &str,
+    ) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO states (id, created_at, updated_at, name, description, color, slug, \
+             project_id, workspace_id, sequence, \"group\", \"default\", is_triage) \
+             VALUES ($1, now(), now(), $2, '', '#000000', $3, $4, $5, 1000.0, $6, true, false)",
+        )
+        .bind(id)
+        .bind(name)
+        .bind(format!("rs1576-{}", Uuid::new_v4().simple()))
+        .bind(scan.project_id)
+        .bind(scan.workspace_id)
+        .bind(group)
+        .execute(pool)
+        .await
+        .expect("seed default state");
+        id
+    }
+
+    /// The create arm fires `None` → default and never runs the
+    /// completion leg (`github_signals.py` skips `created`).
+    #[tokio::test]
+    async fn sync_create_fires_transition_without_completion() {
+        use crate::issue_transition::test_support::RecordingHook;
+
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let (scan, repo_id) = seed_binding(&pool).await;
+        let default_id = seed_default_state(&pool, &scan, "Backlog", "backlog").await;
+        let hook = Arc::new(RecordingHook::new());
+        let erased: Arc<dyn IssueTransitionHook> = hook.clone();
+        let issue = remote_issue(
+            "First title",
+            "https://github.com/rs-ct/x/issues/4242",
+            "open",
+        );
+        let (issue_id, _) = upsert_issue(&pool, &scan, &issue, &Utc::now(), Some(erased))
+            .await
+            .expect("create arm inserts the mirror issue");
+        assert_eq!(
+            *hook.fires.lock().expect("lock"),
+            vec![(scan.actor_id, issue_id, None, Some(default_id), true, None,)],
+            "one fire: previous None vs the adopted default, immediate, system actor"
+        );
+        assert!(
+            hook.comments.lock().expect("lock").is_empty(),
+            "created, not transitioned: no completion dispatch"
+        );
+        cleanup(&pool, &scan, repo_id, issue_id).await;
+    }
+
+    /// The update arm is a signal-free `filter(pk).update(…)`: no legs run.
+    #[tokio::test]
+    async fn sync_update_fires_nothing() {
+        use crate::issue_transition::test_support::RecordingHook;
+
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let (scan, repo_id) = seed_binding(&pool).await;
+        seed_default_state(&pool, &scan, "Backlog", "backlog").await;
+        let hook = Arc::new(RecordingHook::new());
+        let erased: Arc<dyn IssueTransitionHook> = hook.clone();
+        let first = remote_issue(
+            "First title",
+            "https://github.com/rs-ct/x/issues/4242",
+            "open",
+        );
+        let (issue_id, _) = upsert_issue(&pool, &scan, &first, &Utc::now(), Some(erased.clone()))
+            .await
+            .expect("create arm inserts the mirror issue");
+        hook.fires.lock().expect("lock").clear();
+        hook.comments.lock().expect("lock").clear();
+        let second = remote_issue(
+            "Second title",
+            "https://github.com/rs-ct/x/issues/4242-moved",
+            "closed",
+        );
+        let (issue_id2, _) = upsert_issue(&pool, &scan, &second, &Utc::now(), Some(erased))
+            .await
+            .expect("update arm revisits the mirror issue");
+        assert_eq!(issue_id2, issue_id, "re-sync reuses the mirror issue");
+        assert!(
+            hook.fires.lock().expect("lock").is_empty(),
+            "filter().update sends no signals: no fire"
+        );
+        assert!(
+            hook.comments.lock().expect("lock").is_empty(),
+            "filter().update sends no signals: no completion dispatch"
+        );
         cleanup(&pool, &scan, repo_id, issue_id).await;
     }
 }

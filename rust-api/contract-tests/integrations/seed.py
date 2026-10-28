@@ -608,8 +608,27 @@ def cleanup_workspace_mirrors(database_url: str, workspace_id: str) -> None:
     Successful syncs create Issue / sync / comment rows the per-test Scope
     never tracked; deleting them by workspace_id (reverse-FK order) runs
     before Scope teardown, which then removes the seeded rows (chain,
-    bindings, sync triples) itself.
+    bindings, sync triples) itself. Syncs into ticking defaults also arm
+    the issue clock and may create entry runs (PIDASHCONV-1576), so the
+    run/ticker rows go first — raw SQL has no ORM cascade to hide behind.
     """
+    for sql, params in (
+        (
+            "DELETE FROM agent_run_event WHERE agent_run_id IN"
+            " (SELECT id FROM agent_run WHERE workspace_id = %s)",
+            (workspace_id,),
+        ),
+        ("DELETE FROM agent_run WHERE workspace_id = %s", (workspace_id,)),
+        (
+            "DELETE FROM issue_agent_ticker WHERE issue_id IN"
+            " (SELECT id FROM issues WHERE workspace_id = %s)",
+            (workspace_id,),
+        ),
+    ):
+        try:
+            db.execute(database_url, sql, params)
+        except Exception:
+            pass
     for table in (
         "git_comment_syncs",
         "github_comment_syncs",
