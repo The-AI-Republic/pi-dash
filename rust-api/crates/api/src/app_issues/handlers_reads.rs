@@ -1242,65 +1242,20 @@ fn upsert_write<'a>(
 /// signals, `updated_at` untouched. Unset halves keep their stored value
 /// (Django rewrites the same value — a no-op either way).
 async fn apply_bulk_dates(pool: &sqlx::PgPool, writes: &[BulkWrite<'_>]) -> Result<(), Denial> {
-    if writes.is_empty() {
-        return Ok(());
-    }
-    // Placeholder plan: the CASE values in arm order (start arms, then
-    // target arms), then the id list. A side with no arms is omitted
-    // entirely (an armless `CASE` is a syntax error; Django rewrites the
-    // stored value there — a no-op either way).
-    let mut ids: Vec<String> = Vec::new();
-    let mut values: Vec<(String, chrono::NaiveDate)> = Vec::new();
-    let mut target_values: Vec<(String, chrono::NaiveDate)> = Vec::new();
+    // Parsed up front: the twin takes typed ids, and an unparseable id
+    // 500s before any SQL runs, exactly as the inline binds did.
+    let mut parsed_writes = Vec::with_capacity(writes.len());
     for write in writes {
-        ids.push(write.id.to_owned());
-        if let Some(date) = write.start_date {
-            values.push((write.id.to_owned(), date));
-        }
-        if let Some(date) = write.target_date {
-            target_values.push((write.id.to_owned(), date));
-        }
+        let id: uuid::Uuid = write.id.parse().map_err(|_| Denial::ServerError)?;
+        parsed_writes.push(pidash_services::domain::issues::BulkIssueDates {
+            id,
+            start_date: write.start_date,
+            target_date: write.target_date,
+        });
     }
-    let mut sql = String::from("UPDATE issues SET ");
-    let mut placeholder: usize = 1;
-    let mut first_set = true;
-    for (column, arms) in [("start_date", &values), ("target_date", &target_values)] {
-        if arms.is_empty() {
-            continue;
-        }
-        if !first_set {
-            sql.push_str(", ");
-        }
-        first_set = false;
-        sql.push_str(&format!("{column} = CASE id "));
-        for _ in arms {
-            sql.push_str(&format!("WHEN ${} THEN ${} ", placeholder, placeholder + 1));
-            placeholder += 2;
-        }
-        sql.push_str(&format!("ELSE {column} END"));
-    }
-    sql.push_str(" WHERE id IN (");
-    let mut first = true;
-    for _ in &ids {
-        if !first {
-            sql.push(',');
-        }
-        first = false;
-        sql.push_str(&format!("${placeholder}"));
-        placeholder += 1;
-    }
-    sql.push(')');
-    let mut query = sqlx::query(&sql);
-    for (id, date) in values.iter().chain(target_values.iter()) {
-        let parsed: uuid::Uuid = id.parse().map_err(|_| Denial::ServerError)?;
-        query = query.bind(parsed).bind(*date);
-    }
-    for id in &ids {
-        let parsed: uuid::Uuid = id.parse().map_err(|_| Denial::ServerError)?;
-        query = query.bind(parsed);
-    }
-    query.execute(pool).await.map_err(|_| Denial::ServerError)?;
-    Ok(())
+    pidash_services::domain::issues::bulk_update_issue_dates(pool, &parsed_writes)
+        .await
+        .map_err(|_| Denial::ServerError)
 }
 
 /// Python truthiness for the `if start_date:` / `if target_date:` guards.
@@ -2664,23 +2619,9 @@ async fn link_sub_issues(
     parent_id: &uuid::Uuid,
     found: &[uuid::Uuid],
 ) -> Result<(), Denial> {
-    let mut binder = Binder::new();
-    let parent = binder.bind_uuid(*parent_id);
-    let mut holders = Vec::with_capacity(found.len());
-    for id in found {
-        holders.push(binder.bind_uuid(*id));
-    }
-    let sql = format!(
-        "UPDATE issues SET parent_id = {parent} WHERE id IN ({})",
-        holders.join(",")
-    );
-    let mut query = sqlx::query(&sql);
-    query = query.bind(parent_id);
-    for id in found {
-        query = query.bind(id);
-    }
-    query.execute(pool).await.map_err(|_| Denial::ServerError)?;
-    Ok(())
+    pidash_services::domain::issues::link_sub_issue_parents(pool, *parent_id, found)
+        .await
+        .map_err(|_| Denial::ServerError)
 }
 
 const POST_ROW_COLUMNS: &str = "issue.id, issue.name, issue.state_id, issue.sort_order, \

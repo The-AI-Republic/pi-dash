@@ -2223,6 +2223,129 @@ where
 
 const BULK_CLOSE_SQL: &str = "UPDATE issues SET state_id = $1 WHERE id = ANY($2)";
 
+/// One `bulk_update(writes, ["start_date", "target_date"])` row (the app
+/// bulk-dates endpoint): the issue id plus the halves this request wrote
+/// (`None` = untouched — Django rewrites the stored value there, a no-op
+/// either way, so the twin omits the arm).
+pub struct BulkIssueDates {
+    pub id: Uuid,
+    pub start_date: Option<NaiveDate>,
+    pub target_date: Option<NaiveDate>,
+}
+
+/// `bulk_update(writes, ["start_date", "target_date"])`: one statement, no
+/// signals, `updated_at` untouched. Moved verbatim from the app bulk-dates
+/// driver: the CASE arms run in column order (start arms, then target
+/// arms), then the id list; a side with no arms is omitted entirely (an
+/// armless `CASE` is a syntax error). Runs on any executor so the driver
+/// keeps the write on its pool.
+pub async fn bulk_update_issue_dates<'e, E>(
+    ex: E,
+    writes: &[BulkIssueDates],
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    if writes.is_empty() {
+        return Ok(());
+    }
+    let mut ids: Vec<Uuid> = Vec::new();
+    let mut values: Vec<(Uuid, NaiveDate)> = Vec::new();
+    let mut target_values: Vec<(Uuid, NaiveDate)> = Vec::new();
+    for write in writes {
+        ids.push(write.id);
+        if let Some(date) = write.start_date {
+            values.push((write.id, date));
+        }
+        if let Some(date) = write.target_date {
+            target_values.push((write.id, date));
+        }
+    }
+    let sql = bulk_issue_dates_sql(&values, &target_values, &ids);
+    let mut query = sqlx::query(&sql);
+    for (id, date) in values.iter().chain(target_values.iter()) {
+        query = query.bind(*id).bind(*date);
+    }
+    for id in &ids {
+        query = query.bind(*id);
+    }
+    query.execute(ex).await.map(|_| ())
+}
+
+/// The CASE statement for [`bulk_update_issue_dates`]: the CASE values
+/// in arm order (start arms, then target arms), then the id list. A side
+/// with no arms is omitted entirely (an armless `CASE` is a syntax
+/// error).
+fn bulk_issue_dates_sql(
+    values: &[(Uuid, NaiveDate)],
+    target_values: &[(Uuid, NaiveDate)],
+    ids: &[Uuid],
+) -> String {
+    let mut sql = String::from("UPDATE issues SET ");
+    let mut placeholder: usize = 1;
+    let mut first_set = true;
+    for (column, arms) in [("start_date", values), ("target_date", target_values)] {
+        if arms.is_empty() {
+            continue;
+        }
+        if !first_set {
+            sql.push_str(", ");
+        }
+        first_set = false;
+        sql.push_str(&format!("{column} = CASE id "));
+        for _ in arms {
+            sql.push_str(&format!("WHEN ${} THEN ${} ", placeholder, placeholder + 1));
+            placeholder += 2;
+        }
+        sql.push_str(&format!("ELSE {column} END"));
+    }
+    sql.push_str(" WHERE id IN (");
+    let mut first = true;
+    for _ in ids {
+        if !first {
+            sql.push(',');
+        }
+        first = false;
+        sql.push_str(&format!("${placeholder}"));
+        placeholder += 1;
+    }
+    sql.push(')');
+    sql
+}
+
+/// `bulk_update(sub_issues, ["parent"])` (the app sub-issues link): one
+/// statement, no signals, `updated_at` untouched. Moved verbatim from the
+/// driver: the parent binds `$1`, the linked ids `$2…`, in input order.
+pub async fn link_sub_issue_parents<'e, E>(
+    ex: E,
+    parent_id: Uuid,
+    found: &[Uuid],
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let sql = link_sub_issue_parents_sql(found.len());
+    let mut query = sqlx::query(&sql);
+    query = query.bind(parent_id);
+    for id in found {
+        query = query.bind(*id);
+    }
+    query.execute(ex).await.map(|_| ())
+}
+
+/// The link statement for [`link_sub_issue_parents`]: the parent binds
+/// `$1`, the linked ids `$2…`, in input order.
+fn link_sub_issue_parents_sql(found: usize) -> String {
+    let mut holders = Vec::with_capacity(found);
+    for index in 0..found {
+        holders.push(format!("${}", index + 2));
+    }
+    format!(
+        "UPDATE issues SET parent_id = $1 WHERE id IN ({})",
+        holders.join(",")
+    )
+}
+
 /// An activity enqueue that runs ahead of the row write (the archive
 /// endpoints enqueue before saving): the event, the pre-built spaced
 /// dumps, and the origin the driver resolved up front.
@@ -2775,6 +2898,37 @@ mod tests {
         assert_eq!(
             BULK_CLOSE_SQL,
             "UPDATE issues SET state_id = $1 WHERE id = ANY($2)"
+        );
+    }
+
+    #[test]
+    fn app_bulk_writes_sql_shapes() {
+        // Moved verbatim from the retired app bulk drivers: the
+        // bulk-dates CASE (`apply_bulk_dates`) and the sub-issues
+        // parent link (`link_sub_issues`). Full-text pins: the
+        // statements moved byte-for-byte.
+        let id = Uuid::from_u128(11);
+        let other = Uuid::from_u128(12);
+        let date = NaiveDate::from_ymd_opt(2026, 10, 1).expect("date");
+        assert_eq!(
+            bulk_issue_dates_sql(&[(id, date)], &[], &[id]),
+            "UPDATE issues SET start_date = CASE id WHEN $1 THEN $2 ELSE start_date END WHERE id IN ($3)"
+        );
+        // Target-only: the start side is omitted, placeholders restart
+        // at the target arms.
+        assert_eq!(
+            bulk_issue_dates_sql(&[], &[(other, date)], &[other]),
+            "UPDATE issues SET target_date = CASE id WHEN $1 THEN $2 ELSE target_date END WHERE id IN ($3)"
+        );
+        // Both sides: start arms, then target arms, then the id list.
+        assert_eq!(
+            bulk_issue_dates_sql(&[(id, date)], &[(other, date)], &[id, other]),
+            "UPDATE issues SET start_date = CASE id WHEN $1 THEN $2 ELSE start_date END, target_date = CASE id WHEN $3 THEN $4 ELSE target_date END WHERE id IN ($5,$6)"
+        );
+        // The parent binds $1, the linked ids $2… in input order.
+        assert_eq!(
+            link_sub_issue_parents_sql(2),
+            "UPDATE issues SET parent_id = $1 WHERE id IN ($2,$3)"
         );
     }
 

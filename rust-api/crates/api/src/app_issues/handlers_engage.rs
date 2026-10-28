@@ -4486,34 +4486,30 @@ async fn save_comment_update(
         edited_at: edited_at.unwrap_or(stored.edited_at),
         parent_id: parent.unwrap_or(stored.parent_id),
     };
-    sqlx::query(
-        r#"UPDATE issue_comments SET updated_at = $1, updated_by_id = $2, deleted_at = $3,
-           comment_stripped = $4, comment_json = $5, comment_html = $6, description_id = $7,
-           attachments = $8, labels = $9, actor_id = $10, access = $11,
-           external_source = $12, external_id = $13, speaker_type = $14, speaker_label = $15,
-           speaker_agent_run_id = $16, edited_at = $17, parent_id = $18
-           WHERE id = $19"#,
+    comment_domain::save_app_comment_update(
+        &mut **tx,
+        &comment_domain::AppCommentUpdate {
+            id: base.id,
+            updated_at: base.updated_at,
+            updated_by: base.updated_by,
+            deleted_at: base.deleted_at,
+            stripped: &base.stripped,
+            json: &base.json,
+            html: &base.html,
+            description_id: base.description_id,
+            attachments: &base.attachments,
+            labels: &base.labels,
+            actor_id: base.actor_id,
+            access: &base.access,
+            external_source: base.external_source.as_deref(),
+            external_id: base.external_id.as_deref(),
+            speaker_type: &base.speaker_type,
+            speaker_label: &base.speaker_label,
+            speaker_agent_run_id: base.speaker_run_id,
+            edited_at: base.edited_at,
+            parent_id: base.parent_id,
+        },
     )
-    .bind(base.updated_at)
-    .bind(base.updated_by)
-    .bind(base.deleted_at)
-    .bind(&base.stripped)
-    .bind(&base.json)
-    .bind(&base.html)
-    .bind(base.description_id)
-    .bind(&base.attachments)
-    .bind(&base.labels)
-    .bind(base.actor_id)
-    .bind(&base.access)
-    .bind(base.external_source.as_deref())
-    .bind(base.external_id.as_deref())
-    .bind(&base.speaker_type)
-    .bind(&base.speaker_label)
-    .bind(base.speaker_run_id)
-    .bind(base.edited_at)
-    .bind(base.parent_id)
-    .bind(base.id)
-    .execute(&mut **tx)
     .await
     .map_err(integrity_denial)?;
     Ok(base)

@@ -945,6 +945,333 @@ where
     Ok(())
 }
 
+/// The app comment PATCH full-row save: every writable column (`save()`
+/// writes the instance back with only provided attributes changed — the
+/// driver merges first, so this is a plain full-row write). No
+/// `deleted_at` guard: the app destroy path re-saves through here. Runs
+/// on any executor so the driver keeps the write inside its transaction.
+pub struct AppCommentUpdate<'a> {
+    pub id: Uuid,
+    pub updated_at: DateTime<Utc>,
+    pub updated_by: Option<Uuid>,
+    pub deleted_at: Option<DateTime<Utc>>,
+    pub stripped: &'a str,
+    pub json: &'a Value,
+    pub html: &'a str,
+    pub description_id: Option<Uuid>,
+    pub attachments: &'a [String],
+    pub labels: &'a [String],
+    pub actor_id: Option<Uuid>,
+    pub access: &'a str,
+    pub external_source: Option<&'a str>,
+    pub external_id: Option<&'a str>,
+    pub speaker_type: &'a str,
+    pub speaker_label: &'a str,
+    pub speaker_agent_run_id: Option<Uuid>,
+    pub edited_at: Option<DateTime<Utc>>,
+    pub parent_id: Option<Uuid>,
+}
+
+const APP_COMMENT_UPDATE_SQL: &str = "UPDATE issue_comments SET updated_at = $1, updated_by_id = $2, deleted_at = $3, comment_stripped = $4, comment_json = $5, comment_html = $6, description_id = $7, attachments = $8, labels = $9, actor_id = $10, access = $11, external_source = $12, external_id = $13, speaker_type = $14, speaker_label = $15, speaker_agent_run_id = $16, edited_at = $17, parent_id = $18 WHERE id = $19";
+
+/// See [`AppCommentUpdate`]: the comment `UPDATE` only.
+pub async fn save_app_comment_update<'e, E>(
+    ex: E,
+    v: &AppCommentUpdate<'_>,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(APP_COMMENT_UPDATE_SQL)
+        .bind(v.updated_at)
+        .bind(v.updated_by)
+        .bind(v.deleted_at)
+        .bind(v.stripped)
+        .bind(v.json)
+        .bind(v.html)
+        .bind(v.description_id)
+        .bind(v.attachments)
+        .bind(v.labels)
+        .bind(v.actor_id)
+        .bind(v.access)
+        .bind(v.external_source)
+        .bind(v.external_id)
+        .bind(v.speaker_type)
+        .bind(v.speaker_label)
+        .bind(v.speaker_agent_run_id)
+        .bind(v.edited_at)
+        .bind(v.parent_id)
+        .bind(v.id)
+        .execute(ex)
+        .await?;
+    Ok(())
+}
+
+/// The space comment PATCH full-row save (`IssueComment.save`,
+/// `db/models/issue.py:598-647`): the merged row plus the audit touch,
+/// guarded by `deleted_at IS NULL`. The stripped recompute
+/// (`:606`), the missing-link mint (`:618-621`) and the changed-subset
+/// description sync (`:625-641`) stay driver-side, sequenced around it.
+pub struct SpaceCommentUpdate<'a> {
+    pub id: Uuid,
+    pub updated_at: DateTime<Utc>,
+    pub updated_by: Uuid,
+    pub stripped: &'a str,
+    pub json: &'a Value,
+    pub html: Option<&'a str>,
+    pub attachments: &'a [String],
+    pub labels: &'a [String],
+    pub access: Option<&'a str>,
+    pub external_source: Option<&'a str>,
+    pub external_id: Option<&'a str>,
+    pub speaker_type: Option<&'a str>,
+    pub speaker_label: Option<&'a str>,
+    pub speaker_agent_run_id: Option<Uuid>,
+    pub edited_at: Option<DateTime<Utc>>,
+    pub parent_id: Option<Uuid>,
+    pub description_id: Option<Uuid>,
+}
+
+const SPACE_COMMENT_UPDATE_SQL: &str = "UPDATE issue_comments SET updated_at = $1, updated_by_id = $2, comment_stripped = $3, comment_json = $4, comment_html = $5, attachments = $6, labels = $7, access = $8, external_source = $9, external_id = $10, speaker_type = $11, speaker_label = $12, speaker_agent_run_id = $13, edited_at = $14, parent_id = $15, description_id = $16 WHERE id = $17 AND deleted_at IS NULL";
+
+/// See [`SpaceCommentUpdate`]: the comment `UPDATE` only.
+pub async fn save_space_comment_update<'e, E>(
+    ex: E,
+    v: &SpaceCommentUpdate<'_>,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(SPACE_COMMENT_UPDATE_SQL)
+        .bind(v.updated_at)
+        .bind(v.updated_by)
+        .bind(v.stripped)
+        .bind(v.json)
+        .bind(v.html)
+        .bind(v.attachments)
+        .bind(v.labels)
+        .bind(v.access)
+        .bind(v.external_source)
+        .bind(v.external_id)
+        .bind(v.speaker_type)
+        .bind(v.speaker_label)
+        .bind(v.speaker_agent_run_id)
+        .bind(v.edited_at)
+        .bind(v.parent_id)
+        .bind(v.description_id)
+        .bind(v.id)
+        .execute(ex)
+        .await?;
+    Ok(())
+}
+
+/// The space missing-link relink (`db/models/issue.py:618-621`): the
+/// second save stamps `updated_by`/`updated_at` again (a fresh clock
+/// read — the driver's `relinked_at`, not the save stamp).
+pub async fn relink_space_comment_description<'e, E>(
+    ex: E,
+    id: Uuid,
+    description_id: Uuid,
+    updated_by: Uuid,
+    updated_at: DateTime<Utc>,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(SPACE_COMMENT_RELINK_SQL)
+        .bind(description_id)
+        .bind(updated_by)
+        .bind(updated_at)
+        .bind(id)
+        .execute(ex)
+        .await?;
+    Ok(())
+}
+
+const SPACE_COMMENT_RELINK_SQL: &str = "UPDATE issue_comments SET description_id = $1, updated_by_id = $2, updated_at = $3 WHERE id = $4 AND deleted_at IS NULL";
+
+/// `comment.delete()` on space (`db/mixins.py:72-77`): `deleted_at` plus
+/// a full `save()` (`updated_at`, CRUM `updated_by`). One clock read,
+/// bound twice — the one-now shape stays with the driver, so this takes
+/// a single `now`.
+pub async fn soft_delete_space_comment<'e, E>(
+    ex: E,
+    id: Uuid,
+    actor: Uuid,
+    now: DateTime<Utc>,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(SPACE_COMMENT_SOFT_DELETE_SQL)
+        .bind(now)
+        .bind(now)
+        .bind(actor)
+        .bind(id)
+        .execute(ex)
+        .await?;
+    Ok(())
+}
+
+const SPACE_COMMENT_SOFT_DELETE_SQL: &str = "UPDATE issue_comments SET deleted_at = $1, updated_at = $2, updated_by_id = $3 WHERE id = $4 AND deleted_at IS NULL";
+
+/// The v1 comment PATCH save (`IssueComment.save`,
+/// `db/models/issue.py:598-647`): the merged triple plus the audit pair.
+/// The stripped value is the `:606` recompute (even when `comment_html`
+/// is untouched); the `Description` INSERT-or-sync and the link write
+/// stay driver-side inside the same atomic block. Quoted columns, like
+/// the v1 driver.
+pub struct V1CommentUpdate<'a> {
+    pub id: Uuid,
+    pub json: &'a Value,
+    pub html: &'a str,
+    pub stripped: &'a str,
+    pub access: &'a str,
+    pub external_source: Option<&'a str>,
+    pub external_id: Option<&'a str>,
+    pub labels: &'a [String],
+    pub speaker_type: &'a str,
+    pub speaker_label: &'a str,
+    pub speaker_agent_run_id: Option<Uuid>,
+    pub updated_at: DateTime<Utc>,
+    pub updated_by: Uuid,
+}
+
+const V1_COMMENT_UPDATE_SQL: &str = "UPDATE \"issue_comments\" SET \"comment_json\" = $1, \"comment_html\" = $2, \"comment_stripped\" = $3, \"access\" = $4, \"external_source\" = $5, \"external_id\" = $6, \"labels\" = $7, \"speaker_type\" = $8, \"speaker_label\" = $9, \"speaker_agent_run_id\" = $10, \"updated_at\" = $11, \"updated_by_id\" = $12 WHERE \"id\" = $13";
+
+/// See [`V1CommentUpdate`]: the comment `UPDATE` only.
+pub async fn save_v1_comment_update<'e, E>(
+    ex: E,
+    v: &V1CommentUpdate<'_>,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(V1_COMMENT_UPDATE_SQL)
+        .bind(v.json)
+        .bind(v.html)
+        .bind(v.stripped)
+        .bind(v.access)
+        .bind(v.external_source)
+        .bind(v.external_id)
+        .bind(v.labels)
+        .bind(v.speaker_type)
+        .bind(v.speaker_label)
+        .bind(v.speaker_agent_run_id)
+        .bind(v.updated_at)
+        .bind(v.updated_by)
+        .bind(v.id)
+        .execute(ex)
+        .await?;
+    Ok(())
+}
+
+/// The v1 `Description` side of `IssueComment.save`
+/// (`db/models/issue.py:623-647`): only changed tracked fields sync
+/// (`_changes_on_save` compares values), plus `updated_by`/`updated_at`
+/// — via queryset `update()`, so no `save()` override re-strips. Each
+/// `Some` arm joins the SET list in fixed html/stripped/json order; all
+/// `None` is a no-op (the driver guards the call, as Django's
+/// `if creating or ...` branch does).
+pub struct V1DescriptionSync<'a> {
+    pub id: Uuid,
+    pub html: Option<&'a str>,
+    pub stripped: Option<&'a str>,
+    pub json: Option<&'a Value>,
+    pub updated_by: Uuid,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// See [`V1DescriptionSync`]: the changed-subset description `UPDATE`.
+pub async fn sync_v1_description_subset<'e, E>(
+    ex: E,
+    v: &V1DescriptionSync<'_>,
+) -> Result<u64, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let Some(sql) =
+        v1_description_sync_sql(v.html.is_some(), v.stripped.is_some(), v.json.is_some())
+    else {
+        return Ok(0);
+    };
+    let mut query = sqlx::query(&sql);
+    if let Some(html) = v.html {
+        query = query.bind(html);
+    }
+    if let Some(stripped) = v.stripped {
+        query = query.bind(stripped);
+    }
+    if let Some(json) = v.json {
+        query = query.bind(json);
+    }
+    query
+        .bind(v.updated_by)
+        .bind(v.updated_at)
+        .bind(v.id)
+        .execute(ex)
+        .await
+        .map(|done| done.rows_affected())
+}
+
+/// The changed-subset statement for [`sync_v1_description_subset`]:
+/// each `true` arm joins the SET list in fixed html/stripped/json
+/// order, then the audit pair and the id. `None` when no arm runs.
+fn v1_description_sync_sql(html: bool, stripped: bool, json: bool) -> Option<String> {
+    let mut sets: Vec<&str> = Vec::new();
+    if html {
+        sets.push("description_html");
+    }
+    if stripped {
+        sets.push("description_stripped");
+    }
+    if json {
+        sets.push("description_json");
+    }
+    if sets.is_empty() {
+        return None;
+    }
+    let set_sql = sets
+        .iter()
+        .enumerate()
+        .map(|(idx, col)| format!("\"{col}\" = ${}", idx + 1))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "UPDATE \"descriptions\" SET {set_sql}, \"updated_by_id\" = ${}, \"updated_at\" = ${} WHERE \"id\" = ${}",
+        sets.len() + 1,
+        sets.len() + 2,
+        sets.len() + 3,
+    ))
+}
+
+/// `SoftDeleteModel.delete()` on v1 (`views/issue.py:2103-2121`):
+/// `deleted_at` + full `save()` (so `updated_at`/`updated_by` move).
+/// Two `now()` calls like `delete()`: `deleted_at` stamps first,
+/// `updated_at` re-stamps on the `save()` — the two-now shape stays
+/// with the driver, so this takes both stamps.
+pub async fn soft_delete_v1_comment<'e, E>(
+    ex: E,
+    id: Uuid,
+    actor: Uuid,
+    deleted_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(V1_COMMENT_SOFT_DELETE_SQL)
+        .bind(deleted_at)
+        .bind(updated_at)
+        .bind(actor)
+        .bind(id)
+        .execute(ex)
+        .await?;
+    Ok(())
+}
+
+const V1_COMMENT_SOFT_DELETE_SQL: &str = "UPDATE \"issue_comments\" SET \"deleted_at\" = $1, \"updated_at\" = $2, \"updated_by_id\" = $3 WHERE \"id\" = $4";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -996,6 +1323,49 @@ mod tests {
             MCP_COMMENT_UPDATE_SQL,
             "UPDATE issue_comments SET updated_at = $1, updated_by_id = $2, comment_stripped = $3, comment_html = $4, description_id = $5 WHERE id = $6"
         );
+    }
+
+    #[test]
+    fn app_space_v1_update_sql_shapes() {
+        // Moved verbatim from the retired app/space/v1 comment
+        // drivers. Full-text pins: the statements moved byte-for-byte.
+        // The three full-row saves differ per view (design D6 — Django
+        // has the same differences), so they stay separate twins.
+        assert_eq!(
+            APP_COMMENT_UPDATE_SQL,
+            "UPDATE issue_comments SET updated_at = $1, updated_by_id = $2, deleted_at = $3, comment_stripped = $4, comment_json = $5, comment_html = $6, description_id = $7, attachments = $8, labels = $9, actor_id = $10, access = $11, external_source = $12, external_id = $13, speaker_type = $14, speaker_label = $15, speaker_agent_run_id = $16, edited_at = $17, parent_id = $18 WHERE id = $19"
+        );
+        assert_eq!(
+            SPACE_COMMENT_UPDATE_SQL,
+            "UPDATE issue_comments SET updated_at = $1, updated_by_id = $2, comment_stripped = $3, comment_json = $4, comment_html = $5, attachments = $6, labels = $7, access = $8, external_source = $9, external_id = $10, speaker_type = $11, speaker_label = $12, speaker_agent_run_id = $13, edited_at = $14, parent_id = $15, description_id = $16 WHERE id = $17 AND deleted_at IS NULL"
+        );
+        assert_eq!(
+            SPACE_COMMENT_RELINK_SQL,
+            "UPDATE issue_comments SET description_id = $1, updated_by_id = $2, updated_at = $3 WHERE id = $4 AND deleted_at IS NULL"
+        );
+        assert_eq!(
+            SPACE_COMMENT_SOFT_DELETE_SQL,
+            "UPDATE issue_comments SET deleted_at = $1, updated_at = $2, updated_by_id = $3 WHERE id = $4 AND deleted_at IS NULL"
+        );
+        assert_eq!(
+            V1_COMMENT_UPDATE_SQL,
+            "UPDATE \"issue_comments\" SET \"comment_json\" = $1, \"comment_html\" = $2, \"comment_stripped\" = $3, \"access\" = $4, \"external_source\" = $5, \"external_id\" = $6, \"labels\" = $7, \"speaker_type\" = $8, \"speaker_label\" = $9, \"speaker_agent_run_id\" = $10, \"updated_at\" = $11, \"updated_by_id\" = $12 WHERE \"id\" = $13"
+        );
+        assert_eq!(
+            V1_COMMENT_SOFT_DELETE_SQL,
+            "UPDATE \"issue_comments\" SET \"deleted_at\" = $1, \"updated_at\" = $2, \"updated_by_id\" = $3 WHERE \"id\" = $4"
+        );
+        // The description subset: fixed html/stripped/json order, then
+        // the audit pair and the id; empty is no statement.
+        assert_eq!(
+            v1_description_sync_sql(true, true, true).as_deref(),
+            Some("UPDATE \"descriptions\" SET \"description_html\" = $1, \"description_stripped\" = $2, \"description_json\" = $3, \"updated_by_id\" = $4, \"updated_at\" = $5 WHERE \"id\" = $6")
+        );
+        assert_eq!(
+            v1_description_sync_sql(false, true, false).as_deref(),
+            Some("UPDATE \"descriptions\" SET \"description_stripped\" = $1, \"updated_by_id\" = $2, \"updated_at\" = $3 WHERE \"id\" = $4")
+        );
+        assert_eq!(v1_description_sync_sql(false, false, false), None);
     }
 
     fn activity_spec() -> CommentActivitySpec {
