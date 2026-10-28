@@ -536,6 +536,48 @@ describe("web_new header and page menus", () => {
     expect(stub.keys).toEqual(["Escape"]);
   });
 
+  it("settles a painting menu before reading its entries", async () => {
+    const entries = [
+      { label: "Make a copy" },
+      { label: "Open in new tab" },
+      { label: "Move to project" },
+      { label: "Archive" },
+      { label: "Delete" },
+    ];
+    const script = [1, 1, 5, 5, 5, 5];
+    let calls = 0;
+    const counting = node({
+      count: async () => {
+        const seen = script[Math.min(calls, script.length - 1)] ?? 0;
+        calls += 1;
+        return seen;
+      },
+      nth: (index: number) => menuItem(entries[index] ?? { label: "" }),
+      first: () => menuItem(entries[0] ?? { label: "" }),
+    });
+    const stub = pageOf({
+      testId: (id: string) =>
+        id === "detail-menu-trigger" ? node({ first: () => node() }) : node({ count: async () => 0 }),
+      role: (role: string) => (role === "menuitem" ? counting : node({ count: async () => 0 })),
+    });
+    await expect(new WebNewDriver(stub.page).layoutsDetailMenuItems()).resolves.toEqual([
+      "Make a copy",
+      "Open in new tab",
+      "Move to project",
+      "Archive",
+      "Delete",
+    ]);
+  });
+
+  it("reads a closed menu as empty", async () => {
+    const stub = pageOf({
+      testId: (id: string) =>
+        id === "Detail-menu-trigger" ? node({ first: () => node() }) : node({ count: async () => 0 }),
+      ...menuRoutes([]),
+    });
+    await expect(new WebNewDriver(stub.page).layoutsDetailMenuItems()).resolves.toEqual([]);
+  });
+
   it("scopes the peek copy control to the peek panel", async () => {
     const missing = pageOf({ testId: () => node({ count: async () => 0 }) });
     await expect(new WebNewDriver(missing.page).layoutsPeekCopyLinkVisible()).resolves.toBe(false);

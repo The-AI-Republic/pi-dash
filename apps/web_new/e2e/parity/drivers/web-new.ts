@@ -10273,6 +10273,23 @@ export class WebNewDriver implements ParityDriver {
 
   private async layoutsReadOpenMenuItems(): Promise<string[]> {
     const items = this.page.getByRole("menuitem");
+    // Menus paint incrementally: a one-shot count right after the first
+    // entry appears catches 1-of-5 prefixes (ISS-066). Settle on three
+    // consecutive equal counts before reading; a closed menu settles at
+    // zero and still reads as empty.
+    let last = -1;
+    let stable = 0;
+    const deadline = Date.now() + 5_000;
+    for (;;) {
+      const seen = await items.count();
+      if (seen === last) stable += 1;
+      else {
+        last = seen;
+        stable = 0;
+      }
+      if (stable >= 2 || Date.now() >= deadline) break;
+      await this.page.waitForTimeout(100);
+    }
     const count = await items.count();
     const texts: string[] = [];
     for (let index = 0; index < count; index += 1) {
