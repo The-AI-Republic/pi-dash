@@ -130,6 +130,9 @@ const WORKSPACE_ID = "523e4567-e89b-12d3-a456-426614174004";
 const CREATED_ID = "623e4567-e89b-12d3-a456-426614174005";
 const STATE_ID = "723e4567-e89b-12d3-a456-426614174006";
 const PARENT_ID = "823e4567-e89b-12d3-a456-426614174007";
+const TYPE_ONE = "923e4567-e89b-12d3-a456-426614174008";
+const TYPE_TWO = "a23e4567-e89b-12d3-a456-426614174009";
+const TYPE_NINE = "b23e4567-e89b-12d3-a456-42661417400a";
 
 const PROJECTS: WorkItemCreateProject[] = [
   { id: PROJECT_ATLAS, name: "Atlas", identifier: "ATL", memberRole: 15, archived: false },
@@ -2846,6 +2849,96 @@ describe("WorkItemCreateDialog type seam (ISS-129)", () => {
     save();
     await waitFor(() => expect(posts(h.sent)).toHaveLength(1));
     expect(posts(h.sent)[0]).toMatchObject({ name: "From template", priority: "high" });
+  });
+
+  it("seeds an issue edit's picker from the stored type and persists a change", async () => {
+    function TypePicker(props: IssueTypeExtensionProps) {
+      return (
+        <div>
+          <span data-testid="stub-type-id">{props.typeId ?? "none"}</span>
+          <button type="button" onClick={() => props.onTypeChange(TYPE_TWO)}>
+            Pick two
+          </button>
+        </div>
+      );
+    }
+    registerIssueTypeExtension({ typePicker: TypePicker });
+    const user = userEvent.setup();
+    const { props } = editProps();
+    const h = setup({ issueDetail: detailRow("<p>stored words</p>", { type_id: TYPE_ONE }) }, props);
+    await waitFor(() => expect(titleField()).toHaveValue("Existing work"));
+    await waitFor(() => expect(screen.getByTestId("stub-type-id")).toHaveTextContent(TYPE_ONE));
+    await user.click(screen.getByRole("button", { name: "Pick two" }));
+    save();
+    await waitFor(() => expect(patches(h.calls)).toHaveLength(1));
+    expect(patches(h.calls)[0]).toMatchObject({ type: TYPE_TWO });
+  });
+
+  it("leaves type out of the patch when the pick never moved", async () => {
+    registerIssueTypeExtension({ typePicker: () => <span data-testid="stub-type">Type picker</span> });
+    const user = userEvent.setup();
+    const { props } = editProps();
+    const h = setup({ issueDetail: detailRow("<p>stored words</p>", { type_id: TYPE_ONE }) }, props);
+    await waitFor(() => expect(titleField()).toHaveValue("Existing work"));
+    await user.clear(titleField());
+    await user.type(titleField(), "Renamed work");
+    save();
+    await waitFor(() => expect(patches(h.calls)).toHaveLength(1));
+    expect(patches(h.calls)[0]).toMatchObject({ name: "Renamed work" });
+    expect(patches(h.calls)[0]).not.toHaveProperty("type");
+  });
+
+  it("keeps a pick made before the detail read lands", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    function TypePicker(props: IssueTypeExtensionProps) {
+      return (
+        <div>
+          <span data-testid="stub-type-id">{props.typeId ?? "none"}</span>
+          <button type="button" onClick={() => props.onTypeChange(TYPE_NINE)}>
+            Pick nine
+          </button>
+        </div>
+      );
+    }
+    registerIssueTypeExtension({ typePicker: TypePicker });
+    const user = userEvent.setup();
+    const { props } = editProps();
+    const h = setup(
+      { issueDetail: detailRow("<p>detail body</p>", { type_id: TYPE_ONE }), issueDetailGate: gate },
+      props
+    );
+    await waitFor(() => expect(titleField()).toHaveValue("Existing work"));
+    expect(screen.getByTestId("stub-type-id")).toHaveTextContent("none");
+    await user.click(screen.getByRole("button", { name: "Pick nine" }));
+    release();
+    // The detail body proves the read landed; the pick must survive it.
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "Description" })).toHaveValue("detail body"));
+    expect(screen.getByTestId("stub-type-id")).toHaveTextContent(TYPE_NINE);
+    save();
+    await waitFor(() => expect(patches(h.calls)).toHaveLength(1));
+    expect(patches(h.calls)[0]).toMatchObject({ type: TYPE_NINE });
+  });
+
+  it("hides the type slots when editing a draft", async () => {
+    registerIssueTypeExtension({ typePicker: () => <span data-testid="stub-type">Type picker</span> });
+    setup(
+      {},
+      {
+        draftId: "draft-1",
+        edit: { kind: "draft", id: "draft-1", projectId: PROJECT_ATLAS, snapshot: editRow({ name: "Draft edit" }) },
+      }
+    );
+    await waitFor(() => expect(titleField()).toHaveValue("Draft edit"));
+    expect(screen.queryByTestId("stub-type")).not.toBeInTheDocument();
+  });
+
+  it("hides the type slots when filing a draft", () => {
+    registerIssueTypeExtension({ typePicker: () => <span data-testid="stub-type">Type picker</span> });
+    setup({}, { draftSeed: { title: "", input: { name: null } } });
+    expect(screen.queryByTestId("stub-type")).not.toBeInTheDocument();
   });
 });
 

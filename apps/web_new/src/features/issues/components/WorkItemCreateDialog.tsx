@@ -90,6 +90,7 @@ import {
 import {
   baselineFor,
   changedDraftProject,
+  changedTypeId,
   buildEditPayload,
   buildPublishInput,
   editMembership,
@@ -552,6 +553,11 @@ export function WorkItemCreateDialog({
   // The branch the edit opened with, for the same late-detail comparison.
   const openedBranch = React.useRef("");
   const adoptedBranch = React.useRef<string | null>(null);
+  // The type the edit opened with, the last stored type folded in, and
+  // the stored row the save diffs the pick against (ISS-129).
+  const openedType = React.useRef<string | null>(null);
+  const adoptedType = React.useRef<string | null>(null);
+  const baselineTypeId = React.useRef<string | null>(null);
   // The stored description already folded into the form; the detail read
   // may answer more than once (a refetch), and only the first fold needs
   // to rebuild the editor.
@@ -643,6 +649,9 @@ export function WorkItemCreateDialog({
     setDraftError(null);
     setAssetIds([]);
     setTypeId(null);
+    openedType.current = null;
+    adoptedType.current = null;
+    baselineTypeId.current = null;
     setPropertyValues({});
     setEditorGeneration((current) => current + 1);
     setFocusRequest((current) => current + 1);
@@ -698,6 +707,21 @@ export function WorkItemCreateDialog({
     }
     setBaseline((current) => withStoredBranchBaseline(current, storedBranch));
   }, [storedBranch, open, edit?.kind, form.gitWorkBranch]);
+
+  // The detail read also carries the stored type (ISS-129). Adopt it
+  // into the picker while the user hasn't picked; a pick made before
+  // the read lands stays theirs. The baseline tracks the stored row
+  // either way, so the save diffs the pick, not the adoption.
+  const storedType = edit?.kind === "issue" ? (detailEdit.data?.type_id ?? null) : undefined;
+  React.useEffect(() => {
+    if (storedType === undefined || !open || edit?.kind !== "issue") return;
+    if (adoptedType.current === storedType) return;
+    const untouched = typeId === openedType.current;
+    openedType.current = storedType;
+    adoptedType.current = storedType;
+    baselineTypeId.current = storedType;
+    if (untouched) setTypeId(storedType);
+  }, [storedType, open, edit?.kind, typeId]);
 
   // The title owns initial focus. Base UI moves focus into the dialog on
   // a later task (its close button claims it first), so claim the field
@@ -1035,6 +1059,11 @@ export function WorkItemCreateDialog({
         ? ({ kind: "draft", draftId: edit.id } as const)
         : ({ kind: "issue", projectId: baseline.projectId ?? "", issueId: edit?.id ?? "" } as const);
     const patch = buildEditPayload(named, baseline);
+    // The type picker lives outside the form state (ISS-129): a moved
+    // pick rides the patch, an untouched one sends nothing. Draft edits
+    // always diff clean — their slots stay hidden, so neither side moves.
+    const typeChange = changedTypeId(typeId, baselineTypeId.current);
+    if (typeChange !== undefined) patch.type = typeChange;
     writeEdit.mutate(
       {
         target,
@@ -1260,7 +1289,11 @@ export function WorkItemCreateDialog({
             />
             {editing || drafting ? null : <DuplicatePanel matches={duplicates.matches} />}
           </div>
-          {issueType === null ? null : (
+          {/* The type slots need a stored row to seed from and an endpoint
+              that keeps the pick: drafts have neither (no type column),
+              so the picker shows for issue creates and issue edits only
+              (ISS-129). */}
+          {issueType === null || drafting || edit?.kind === "draft" ? null : (
             <IssueTypeSlots
               extension={issueType}
               workspaceSlug={workspaceSlug}

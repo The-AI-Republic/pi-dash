@@ -42,6 +42,12 @@ export interface IssuePatch {
   sort_order?: number;
   /** Branch to pin for this item; empty clears it (ISS-128). */
   git_work_branch?: string;
+  /**
+   * Work-item type change from the edit dialog (ISS-129): the picked
+   * type id, or null when cleared back to "No type" (the server clears
+   * the row). Absent when the pick never moved.
+   */
+  type?: string | null;
 }
 
 /**

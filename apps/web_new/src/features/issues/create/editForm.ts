@@ -197,6 +197,16 @@ export function changedDraftProject(form: CreateFormState, baseline: EditBaselin
 }
 
 /**
+ * The type an edit sends (ISS-129): the pick when it moved off the
+ * stored row, else nothing. Clearing back to "No type" sends null (the
+ * server clears the row). The picker lives outside the form state, so
+ * the dialog carries both sides and diffs them here at submit.
+ */
+export function changedTypeId(typeId: string | null, baselineTypeId: string | null): string | null | undefined {
+  return typeId === baselineTypeId ? undefined : typeId;
+}
+
+/**
  * Fold the detail read into the starting form (ISS-126). The snapshot a
  * caller holds may carry no description at all; the stored row is the
  * authority for the body, so the editor opens with it and the diff
