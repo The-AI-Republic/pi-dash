@@ -495,6 +495,15 @@ export function moduleVisibleTexts(nodes: Element[]): string[] {
   return nodes.map(visibleText).filter((text) => text !== "");
 }
 
+/**
+ * One page per element (NEWFRONT-926). The tree wraps a row inside each
+ * tree item, so naming both ids alone would report every tree row twice;
+ * a search/filter result is the bare row rendered straight into the list,
+ * which the second half scopes to (PAGE-085/090).
+ */
+export const PAGES_NESTED_ROW_SELECTOR =
+  '[data-testid="page-tree-item"], [data-testid="pages-list"] > [data-testid="page-row"]';
+
 export class WebNewDriver implements ParityDriver {
   readonly target: ParityTarget = "web_new";
   readonly page: Page;
@@ -45085,11 +45094,7 @@ export class WebNewDriver implements ParityDriver {
    * (PAGE-085/090).
    */
   private pagesNestedRows(): Locator {
-    // Exactly one element per page. The tree wraps a row inside each item,
-    // so matching both test ids alone reports every tree row twice
-    // (PAGE-085). A search/filter result is the bare row rendered straight
-    // into the list, which is what the second half of this selector scopes to.
-    return this.page.locator('[data-testid="page-tree-item"], [data-testid="pages-list"] > [data-testid="page-row"]');
+    return this.page.locator(PAGES_NESTED_ROW_SELECTOR);
   }
 
   private pagesNestedRow(title: string): Locator {
