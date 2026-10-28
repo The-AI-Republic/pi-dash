@@ -102,7 +102,20 @@ sea-orm = { version = "~1.1.20", default-features = false, features = ["sqlx-pos
 async-trait = "0.1"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt"] }
+# PIDASHCONV-1599 probe CA-bundle tests: the custom-CA TLS fake needs
+# a listener (`net`) plus the async read/write adapters (`io-util`).
+# Test builds only; the shipped lib keeps `time` + `rt` (features are
+# not in the lockfile, no lock churn).
+tokio = { version = "1", features = ["macros", "rt", "net", "io-util"] }
+# PIDASHCONV-1599 probe CA-bundle tests: the custom-CA TLS fake serves
+# the canned 200 over `tokio-rustls`, parsing the fixture PEMs with
+# `rustls-pki-types`. Same locked rustls 0.23.45 + tokio-rustls 0.26.5
+# pair (and the same `ring`, not `aws-lc-rs`) the api and jobs crates
+# already pin; rustls-pki-types resolves to the locked 1.x (no lock
+# churn). Test builds only; the shipped lib is unchanged.
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = "0.26.5"
+rustls-pki-types = "1"
 # D-18 attachment overflow tests (PIDASHCONV-782): the request path
 # publishes numbers through the api crate, which builds serde_json with
 # arbitrary_precision — the overflow-literal pins need the same
