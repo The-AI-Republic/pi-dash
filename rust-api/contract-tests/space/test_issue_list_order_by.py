@@ -91,3 +91,96 @@ def test_issue_list_order_by_relation_fk_field_aliases_are_valid(anon_client, wo
     response = anon_client.get(_issues_url(world), params={"order_by": value})
     assert response.status_code == 200, response.text
     assert [row["name"] for row in response.json()["results"]] == ["Contract issue"]
+
+
+def test_issue_list_order_by_view_annotations_sort(anon_client, world, seeder, db):
+    """PIDASHCONV-1633: ``order_by`` on the view's annotations sorts (200).
+
+    ``space/views/issue.py:98-125`` annotates the public list queryset with
+    ``cycle_id``, ``link_count``, ``attachment_count`` and
+    ``sub_issues_count``; ``order_issue_queryset``'s ``else`` branch
+    (``utils/order_queryset.py:49-57``) resolves those names and orders by
+    ``(annotation, -created_at)``. The Rust port failed closed with a 500.
+    """
+    ws_id = world["workspace"]["id"]
+    proj_id = world["project"]["id"]
+    state_id = world["state"]["id"]
+    owner_id = world["owner"]["id"]
+    cycle_a = seeder.create_cycle(ws_id, proj_id, owner_id, name="Alpha")
+    cycle_b = seeder.create_cycle(ws_id, proj_id, owner_id, name="Beta")
+
+    def stamp(issue_id, minutes_ago):
+        db.execute(
+            "UPDATE issues SET created_at = now() - make_interval(mins => %s) WHERE id = %s",
+            (minutes_ago, issue_id),
+        )
+
+    def add_issue(name, links, attachments, kids, cycle_ids, minutes_ago):
+        issue = seeder.create_issue(ws_id, proj_id, state_id, name=name)
+        issue_id = issue["id"]
+        for _ in range(links):
+            seeder.create_issue_link(ws_id, proj_id, issue_id)
+        for _ in range(attachments):
+            seeder.create_issue_attachment(ws_id, proj_id, issue_id)
+        for num in range(kids):
+            kid = seeder.create_issue(ws_id, proj_id, state_id, name=f"{name}-kid{num}")
+            db.execute(
+                "UPDATE issues SET parent_id = %s WHERE id = %s",
+                (issue_id, kid["id"]),
+            )
+        for cycle_id in cycle_ids:
+            db.execute(
+                """INSERT INTO cycle_issues
+                   (id, workspace_id, project_id, cycle_id, issue_id, created_at, updated_at)
+                   VALUES (gen_random_uuid(),%s,%s,%s,%s,now(),now())""",
+                (ws_id, proj_id, cycle_id, issue_id),
+            )
+        stamp(issue_id, minutes_ago)
+        return issue_id
+
+    # A: 2 links, 1 attachment, 2 kids; live Beta link. B: 0 links,
+    # 3 attachments, 0 kids; live Alpha link plus a *deleted* Beta bridge
+    # (which must not affect its pick). C: 1 link, 0 attachments, 1 kid;
+    # no cycle.
+    add_issue("anno-A", 2, 1, 2, [cycle_b["id"]], 360)
+    issue_b = add_issue("anno-B", 0, 3, 0, [cycle_a["id"]], 300)
+    db.execute(
+        """INSERT INTO cycle_issues
+           (id, workspace_id, project_id, cycle_id, issue_id, created_at, updated_at, deleted_at)
+           VALUES (gen_random_uuid(),%s,%s,%s,%s,now(),now(),now())""",
+        (ws_id, proj_id, cycle_b["id"], issue_b),
+    )
+    add_issue("anno-C", 1, 0, 1, [], 180)
+    # The world's own issue and every kid join the list; pin their
+    # timestamps so the `-created_at` tiebreak is deterministic.
+    stamp(world["issue"]["id"], 240)
+    for minutes_ago, name in ((150, "anno-A-kid0"), (120, "anno-A-kid1"), (90, "anno-C-kid0")):
+        db.execute(
+            "UPDATE issues SET created_at = now() - make_interval(mins => %s)"
+            " WHERE project_id = %s AND name = %s",
+            (minutes_ago, proj_id, name),
+        )
+
+    # `-created_at` order, newest first: C-kid0, A-kid1, A-kid0, C,
+    # Contract, B, A.
+    zeros_newest_first = ["anno-C-kid0", "anno-A-kid1", "anno-A-kid0"]
+    first, second = (
+        ("anno-B", "anno-A") if cycle_a["id"] < cycle_b["id"] else ("anno-A", "anno-B")
+    )
+    expected = {
+        "-link_count": ["anno-A", "anno-C", *zeros_newest_first, "Contract issue", "anno-B"],
+        "link_count": [*zeros_newest_first, "Contract issue", "anno-B", "anno-C", "anno-A"],
+        "-attachment_count": ["anno-B", "anno-A", *zeros_newest_first, "anno-C", "Contract issue"],
+        "attachment_count": [*zeros_newest_first, "anno-C", "Contract issue", "anno-A", "anno-B"],
+        "-sub_issues_count": ["anno-A", "anno-C", *zeros_newest_first, "Contract issue", "anno-B"],
+        "sub_issues_count": [*zeros_newest_first, "Contract issue", "anno-B", "anno-C", "anno-A"],
+        # UUIDs sort ascending; NULL cycles trail by `-created_at`.
+        "cycle_id": [first, second, *zeros_newest_first, "anno-C", "Contract issue"],
+    }
+
+    for order_by, names in expected.items():
+        response = anon_client.get(_issues_url(world), params={"order_by": order_by})
+        assert response.status_code == 200, (order_by, response.text)
+        body = response.json()
+        assert [row["name"] for row in body["results"]] == names, order_by
+        assert body["count"] == 7, order_by
