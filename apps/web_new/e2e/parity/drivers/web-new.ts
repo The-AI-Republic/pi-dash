@@ -22391,7 +22391,8 @@ export class WebNewDriver implements ParityDriver {
     const iso = `${target.getFullYear()}-${String(target.getMonth() + 1).padStart(2, "0")}-${String(target.getDate()).padStart(2, "0")}`;
     const group = this.intakePropertyGroup("Due date");
     await group.getByRole("button", { name: "Due date", exact: true }).first().click();
-    const calendar = group.getByTestId("intake-due-picker-calendar");
+    // The month calendar portals to the document root, outside the group.
+    const calendar = this.page.getByTestId("intake-due-picker-calendar");
     await calendar.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
     if ((await calendar.locator(`[data-day="${iso}"]`).count()) === 0) {
       await calendar.getByRole("combobox", { name: "Month" }).selectOption(String(target.getMonth()));
