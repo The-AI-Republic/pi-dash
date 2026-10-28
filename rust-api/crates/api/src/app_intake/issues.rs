@@ -799,8 +799,14 @@ pub async fn validate_pk(
 /// * `state_id`: `State.all_state_objects` — the plain manager, so
 ///   soft-deleted rows still resolve here (the project check in
 ///   `validate()` rejects them next).
-/// * `parent_id` / `estimate_point_id` / `duplicate_to`: the default
-///   soft-delete-scoped managers.
+/// * `estimate_point`: the auto-generated field binds the model's
+///   `_default_manager` — `EstimatePoint.objects`, soft-delete-scoped
+///   (`db/mixins.py:60-67`). `estimate_point_id` is NOT a declared
+///   field (`serializers/issue.py:137-154` declares only
+///   `state_id`/`parent_id`/`assigned_pod_id`), so DRF drops the key
+///   and it is ignored below, like any unknown key (verified live).
+/// * `parent_id` / `duplicate_to`: the default soft-delete-scoped
+///   managers.
 fn state_any_sql() -> &'static str {
     r#"SELECT id FROM states WHERE id = $1"#
 }
@@ -875,8 +881,8 @@ const AGENT_EXECUTORS: &[&str] = &["local_runner", "managed_runner", "cloud_agen
 /// Field-level validation for the issue branch, in serializer field
 /// order. Unknown and read-only keys (`id`, `project`, `workspace`,
 /// `created_by`, `updated_by`, `created_at`, `updated_at`,
-/// `description_binary`, `workpad`, `labels`, `assignees`) are ignored,
-/// like DRF.
+/// `description_binary`, `workpad`, `labels`, `assignees`,
+/// `estimate_point_id`) are ignored, like DRF.
 pub async fn validate_issue_fields(
     pool: &PgPool,
     input: &serde_json::Map<String, serde_json::Value>,
@@ -1038,13 +1044,17 @@ pub async fn validate_issue_fields(
             out.parent_id = Some(Some(id));
         }
     }
-    if let Some(value) = input.get("estimate_point_id") {
+    // `estimate_point`: the auto-generated FK field, validated under
+    // its own key. There is intentionally no `estimate_point_id` arm:
+    // that key is not a serializer field, so DRF drops it (a bogus
+    // `estimate_point_id` PATCH 200s on Django — verified live).
+    if let Some(value) = input.get("estimate_point") {
         if value.is_null() {
             out.estimate_point_id = Some(None);
         } else if let Some(id) = validate_pk(
             pool,
             errors,
-            "estimate_point_id",
+            "estimate_point",
             value,
             estimate_point_live_sql(),
             false,
