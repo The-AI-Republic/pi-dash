@@ -25,7 +25,11 @@ export interface ListPrefetchContext {
 /**
  * Read the entity's display preferences, then start the list and board
  * layout chunks and the first page together. The stored sub-issue flag
- * decides whether child rows belong in the first page.
+ * decides whether child rows belong in the first page, and the stored
+ * rich expression scopes it exactly as the screen reads it: a cycle or
+ * module keeps its filters across visits, so an unscoped prefetch would
+ * cache a page the screen never asks for and cost it a second read
+ * (ISS-069, NEWFRONT-981).
  */
 export async function prefetchEntityList(
   context: ListPrefetchContext,
@@ -43,6 +47,7 @@ export async function prefetchEntityList(
         groupBy: null,
         orderBy: "sort_order",
         showSubIssues,
+        richFilters: record.rich_filters,
       })
     ),
   ]);

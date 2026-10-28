@@ -910,6 +910,7 @@ describe("cycle detail route", () => {
       groupBy: null,
       orderBy: "sort_order",
       showSubIssues: true,
+      richFilters: {},
     });
     expect(mocks.prefs).toHaveBeenCalledWith(expect.anything(), "acme", {
       scope: "cycle",
