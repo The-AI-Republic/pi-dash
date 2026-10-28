@@ -34,6 +34,14 @@
 assistant/test_tasks_turn.py
 assistant/test_turn_errors.py
 assistant/test_update_issue_completion.py
+# PIDASHCONV-1578: the dispatch_coding_run prompt-failure oracle. It
+# drives a turn through the message POST and waits for a worker to
+# execute the scripted tool call, so the HTTP matrix cannot run it on
+# either backend; its coverage is the worker-plane oracle job in
+# rust-api-contract-tests.yml (this selection), and the Rust half has
+# no serve-booting CI job yet and is verified locally (the same
+# half-covered shape as the update sibling above).
+assistant/test_dispatch_coding_run.py
 # PIDASHCONV-1251: the create_issue post-save orchestration oracle. It
 # publishes assistant.run_turn in Celery wire format and waits for a
 # worker to drive a scripted tool call, so the HTTP matrix cannot run

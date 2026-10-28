@@ -497,7 +497,9 @@ pub trait ToolStore {
     /// `update_issue_row`). `created_by` is the crum user for the
     /// ticker create-shape: `Some(actor)` on the `update_issue` path
     /// (which runs impersonated), `None` on the `dispatch_coding_run`
-    /// path.
+    /// path. A finalized run is a normal outcome, not an error: the
+    /// prompt-build failure path commits the FAILED run with no
+    /// exception, so the drive commits and drains its publish pair.
     async fn drive_transition(
         &self,
         issue_id: &Uuid,
@@ -2028,9 +2030,24 @@ impl ToolStore for PgToolStore {
             other => StoreError::Transition(other.to_string()),
         })?;
         tx.commit().await?;
+        // A finalized run is a normal outcome, not an error: the
+        // prompt-build failure path (`service.py:820-832`) finalizes
+        // the run FAILED and returns `render-failed` with no
+        // exception — Django commits and the tool returns its outcome
+        // normally. Drain each finalized run's publish pair the
+        // jobs-context way (the `oss_worker` precedent,
+        // PIDASHCONV-859): enqueue the terminal-effects task
+        // best-effort; the inline apply is skipped, the queued task
+        // covers the hooks idempotently (PIDASHCONV-1571).
+        for run_id in &terminal_effects {
+            drain_finalized_run(pool, *run_id).await;
+        }
         // Post-commit dispatch drain: unlike D-11 (whose `moved_by_run`
         // makes the outbox unreachable), human moves dispatch here —
-        // after the commit, so the runner read sees the rows.
+        // after the commit, so the runner read sees the rows. A
+        // dispatch failure propagates: Django dispatches from
+        // `on_commit`, outside the signal `try`, so its tool fails
+        // there too (the save stands either way).
         for run_id in dispatches {
             pidash_jobs::dispatch::dispatch_agent_run(pool, &self.cloud, run_id, *now)
                 .await
@@ -2038,13 +2055,6 @@ impl ToolStore for PgToolStore {
         }
         for consume in &deferred {
             pidash_services::dispatch::admission::consume_admission_token(&cache, consume);
-        }
-        if !terminal_effects.is_empty() {
-            // Python's transition never finalizes a run: fail closed.
-            return Err(StoreError::Transition(
-                "turn transition finalized a run: unreachable, no finalization on this path"
-                    .to_owned(),
-            ));
         }
         Ok(TransitionOutcome {
             created_run_id: outcome.created_run,
