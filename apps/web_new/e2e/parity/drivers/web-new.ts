@@ -23918,100 +23918,198 @@ export class WebNewDriver implements ParityDriver {
   // --- CYC-009..016). Oracle-stage stubs; the new-app driver implements
   // --- them when the area is built.
 
-  async cyclesEmptyOpenList(_workspaceSlug: string, _projectId: string): Promise<void> {
-    return todo("cyclesEmptyOpenList");
+  async cyclesEmptyOpenList(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.cyclesOpenList(workspaceSlug, projectId);
   }
 
   async cyclesEmptyVisibleNames(): Promise<string[]> {
-    return todo("cyclesEmptyVisibleNames");
+    return this.cyclesVisibleNames();
   }
 
   async cyclesEmptySkeletonVisible(): Promise<boolean> {
-    return todo("cyclesEmptySkeletonVisible");
+    return this.isShown(this.page.getByTestId("cycles-list-skeleton"));
+  }
+
+  /** The cause-specific no-match view (CYC-009). */
+  private cyclesEmptyNoMatch(): Locator {
+    return this.page.getByTestId("cycles-no-match");
   }
 
   async cyclesEmptyNoMatchHeading(): Promise<string | null> {
-    return todo("cyclesEmptyNoMatchHeading");
+    const title = this.cyclesEmptyNoMatch().locator("h5").first();
+    if ((await title.count()) === 0 || !(await title.isVisible())) return null;
+    const text = (await title.innerText()).trim();
+    return text === "" ? null : text;
   }
 
   async cyclesEmptyNoMatchHint(): Promise<string | null> {
-    return todo("cyclesEmptyNoMatchHint");
+    const box = this.cyclesEmptyNoMatch();
+    if ((await box.count()) === 0 || !(await box.isVisible())) return null;
+    const hint = box.locator("p").first();
+    if ((await hint.count()) === 0) return null;
+    const text = (await hint.innerText()).trim();
+    return text === "" ? null : text;
   }
 
   async cyclesEmptySearchOpen(): Promise<void> {
-    return todo("cyclesEmptySearchOpen");
+    await this.cyclesSearchOpen();
   }
 
-  async cyclesEmptySearchFill(_text: string): Promise<void> {
-    return todo("cyclesEmptySearchFill");
+  async cyclesEmptySearchFill(text: string): Promise<void> {
+    await this.cyclesSearchFill(text);
   }
 
   async cyclesEmptySearchClear(): Promise<void> {
-    return todo("cyclesEmptySearchClear");
+    await this.cyclesSearchClear();
   }
 
   async cyclesEmptyFiltersOpen(): Promise<void> {
-    return todo("cyclesEmptyFiltersOpen");
+    await this.cyclesFiltersOpen();
   }
 
   async cyclesEmptyFiltersClose(): Promise<void> {
-    return todo("cyclesEmptyFiltersClose");
+    await this.cyclesFiltersClose();
   }
 
   async cyclesEmptyFilterSections(): Promise<string[]> {
-    return todo("cyclesEmptyFilterSections");
+    return this.cyclesFilterSections();
   }
 
   async cyclesEmptyFilterOptionNames(): Promise<string[]> {
-    return todo("cyclesEmptyFilterOptionNames");
+    return this.cyclesFilterOptionNames();
   }
 
-  async cyclesEmptyFilterPick(_section: string, _optionName: string): Promise<void> {
-    return todo("cyclesEmptyFilterPick");
+  async cyclesEmptyFilterPick(section: string, optionName: string): Promise<void> {
+    await this.cyclesFilterPick(section, optionName);
   }
 
   async cyclesEmptyFiltersClearAll(): Promise<void> {
-    return todo("cyclesEmptyFiltersClearAll");
+    await this.cyclesFiltersClearAll();
   }
 
-  async cyclesEmptySkeletonShownOnSlowFetch(_workspaceSlug: string, _projectId: string): Promise<boolean> {
-    return todo("cyclesEmptySkeletonShownOnSlowFetch");
+  /** Whether the list skeleton shows within `timeoutMs`. */
+  private async cyclesSkeletonSeen(timeoutMs: number): Promise<boolean> {
+    const started = Date.now();
+    for (;;) {
+      if (await this.cyclesEmptySkeletonVisible()) return true;
+      if (Date.now() - started >= timeoutMs) return false;
+      await this.page.waitForTimeout(250);
+    }
+  }
+
+  /** Wait until the list skeleton clears, failing when it never does. */
+  private async cyclesSkeletonSettled(timeoutMs: number): Promise<void> {
+    const started = Date.now();
+    for (;;) {
+      if (!(await this.cyclesEmptySkeletonVisible())) return;
+      if (Date.now() - started >= timeoutMs) {
+        throw new Error("[parity] cycles list never settled after the slow fetch.");
+      }
+      await this.page.waitForTimeout(250);
+    }
+  }
+
+  async cyclesEmptySkeletonShownOnSlowFetch(workspaceSlug: string, projectId: string): Promise<boolean> {
+    // Two rounds like the spec's openListSettled: a stalled first pass
+    // must not fail the transition assertion.
+    for (let round = 1; round <= 2; round++) {
+      // Hold the entry fetches, then let every later request through:
+      // unrouting mid-hold makes the sleeping handler's continue()
+      // throw "already handled", so the route stays armed until the
+      // list settles instead.
+      let holdsLeft = 2;
+      await this.page.route(
+        (url) => url.pathname.endsWith(`/projects/${projectId}/cycles/`),
+        async (route) => {
+          if (holdsLeft > 0) {
+            holdsLeft -= 1;
+            await new Promise((resolve) => setTimeout(resolve, 5000));
+          }
+          // Swallow "already handled": the catch-path unroute may land
+          // mid-hold, and the request is then already released.
+          await route.continue().catch(() => null);
+        }
+      );
+      try {
+        await this.page.goto(`/${workspaceSlug}/projects/${projectId}/cycles`);
+        await this.page.waitForLoadState("domcontentloaded");
+        // 60s: a cold route compiles for 10s+ before the fetch starts.
+        const seen = await this.cyclesSkeletonSeen(60_000);
+        await this.cyclesSkeletonSettled(60_000);
+        await this.page.unrouteAll({ behavior: "wait" }).catch(() => null);
+        return seen;
+      } catch (error) {
+        await this.page.unrouteAll({ behavior: "wait" }).catch(() => null);
+        if (round === 2) throw error;
+      }
+    }
+    throw new Error("[parity] skeleton slow-fetch never settled.");
+  }
+
+  /** The cycles list screen frame (CYC-010/011 read before it mounts). */
+  private cyclesEmptyScreen(): Locator {
+    return this.page.getByTestId("cycles-list-screen");
+  }
+
+  /** Wait for the list screen to mount and its skeleton to yield. */
+  private async cyclesEmptyListSettled(): Promise<void> {
+    // The specs read these views once, so settle here: first the app
+    // shell mounts the screen, then the skeleton yields to the gate,
+    // the zero-state, or the rows.
+    await this.cyclesEmptyScreen().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await this.cyclesSkeletonSettled(WebNewDriver.WAIT_MS);
   }
 
   async cyclesEmptyFeatureOffVisible(): Promise<boolean> {
-    return todo("cyclesEmptyFeatureOffVisible");
+    await this.cyclesEmptyListSettled();
+    return this.isShown(this.page.getByTestId("cycles-feature-gate"));
   }
 
   async cyclesEmptyFeatureOffActionDisabled(): Promise<boolean> {
-    return todo("cyclesEmptyFeatureOffActionDisabled");
+    return this.page.getByRole("button", { name: "Manage features" }).first().isDisabled();
   }
 
   async cyclesEmptyFeatureOffActionOpen(): Promise<void> {
-    return todo("cyclesEmptyFeatureOffActionOpen");
+    await this.page.getByRole("button", { name: "Manage features" }).first().click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async cyclesEmptyZeroStateVisible(): Promise<boolean> {
-    return todo("cyclesEmptyZeroStateVisible");
+    await this.cyclesEmptyListSettled();
+    return this.isShown(this.page.getByTestId("cycles-zero-state"));
   }
 
   async cyclesEmptyZeroStateCreateDisabled(): Promise<boolean> {
-    return todo("cyclesEmptyZeroStateCreateDisabled");
+    return this.page.getByRole("button", { name: "Set your first cycle" }).first().isDisabled();
   }
 
   async cyclesEmptyZeroStateCreateOpen(): Promise<void> {
-    return todo("cyclesEmptyZeroStateCreateOpen");
+    await this.page
+      .getByRole("button", { name: "Set your first cycle" })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.cycleCreateDialog().locator('input[name="name"]').waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
-  async cyclesEmptyOpenDetail(_workspaceSlug: string, _projectId: string, _cycleId: string): Promise<void> {
-    return todo("cyclesEmptyOpenDetail");
+  async cyclesEmptyOpenDetail(workspaceSlug: string, projectId: string, cycleId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/cycles/${cycleId}`);
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.cyclesEmptyGoneAwayAction().waitFor({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  /** The gone-away view's way back (CYC-013). */
+  private cyclesEmptyGoneAwayAction(): Locator {
+    return this.page.getByRole("button", { name: "View other cycles" }).first();
   }
 
   async cyclesEmptyGoneAwayVisible(): Promise<boolean> {
-    return todo("cyclesEmptyGoneAwayVisible");
+    return this.isShown(this.page.getByTestId("cycles-gone-away"));
   }
 
   async cyclesEmptyGoneAwayBack(): Promise<void> {
-    return todo("cyclesEmptyGoneAwayBack");
+    await this.cyclesEmptyGoneAwayAction().click({ timeout: WebNewDriver.WAIT_MS });
+    // The list path ends at /cycles: the detail address also contains
+    // "/cycles", so a contains-match would pass without navigating.
+    await this.page.waitForURL(/\/cycles\/?$/, { timeout: WebNewDriver.WAIT_MS });
   }
 
   async cyclesCreateOpenFromHeader(): Promise<void> {
@@ -24113,7 +24211,30 @@ export class WebNewDriver implements ParityDriver {
       .waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
 
+  /** Clear visible toasts so a submit's settle sees only its own outcome. */
+  private async dismissVisibleToasts(): Promise<void> {
+    const cards = this.page.locator('[data-testid="toast-notification"]');
+    const total = await cards.count();
+    for (let index = 0; index < total; index++) {
+      const card = cards.nth(index);
+      if (!(await card.isVisible().catch(() => false))) continue;
+      const dismiss = card.getByRole("button", { name: "Dismiss notification" });
+      if ((await dismiss.count()) === 0) continue;
+      await dismiss.click({ timeout: 5_000 }).catch(() => {});
+    }
+    // Best-effort: a card that refuses to leave must not fail the submit;
+    // the settle below still applies, stale card or not.
+    await expect
+      .poll(async () => this.rulesLastToast(), { timeout: 10_000 })
+      .toBe(null)
+      .catch(() => {});
+  }
+
   async cyclesCreateSubmit(): Promise<void> {
+    // A refused submit's error toast (8s) can still show when the next
+    // submit lands; settling on it would return before this submit's own
+    // outcome arrives and hand the stale text to the scenario (CYC-016).
+    await this.dismissVisibleToasts();
     await this.cycleCreateDialog()
       .getByRole("button", { name: "Create cycle" })
       .click({ timeout: WebNewDriver.WAIT_MS });

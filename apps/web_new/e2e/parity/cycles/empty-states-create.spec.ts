@@ -185,9 +185,13 @@ test(
 
       await test.step("the shortcut routes admins to project feature settings", async () => {
         await driver.cyclesEmptyFeatureOffActionOpen();
+        // NEWFRONT-716: redesigned settings IA. The old target `.../features/`
+        // has no index page in either app (a dead link in the old app); the
+        // new app deep-links to the working cycles toggle at
+        // `.../features/cycles` (verified: renders "Enable cycles" + switch).
         await expect
           .poll(() => driver.currentPath(), { timeout: 30_000 })
-          .toBe(`/${seed.workspaceSlug}/settings/projects/${projectId}/features/`);
+          .toMatch(new RegExp(`^/${seed.workspaceSlug}/settings/projects/${projectId}/features/(cycles)?/?$`));
       });
 
       await test.step("the server agrees cycles are off", async () => {
