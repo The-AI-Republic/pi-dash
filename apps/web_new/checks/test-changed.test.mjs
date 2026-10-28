@@ -13,12 +13,22 @@ import { describe, expect, it } from "vitest";
 import {
   changedFilesSince,
   defaultReadBase,
+  hasWorkerFlag,
   isCliEntry,
   main,
   parseArgs,
   planRun,
   skippedFiles,
 } from "./test-changed.mjs";
+
+// Hosts for the worker-pool sizing: a quiet host keeps vitest's default pool
+// (no flag), a contended one oversubscribes to 16, a memory-tight one shrinks
+// to 5. Every main() test injects one so the suite is host-independent.
+const QUIET_HOST = { cpus: 4, memoryGiB: 30 };
+const quietLoadavg = () => [2, 2, 2];
+const CONTENDED_HOST = { cpus: 4, memoryGiB: 30 };
+const contendedLoadavg = () => [20, 18, 16];
+const MEMORY_TIGHT_HOST = { cpus: 8, memoryGiB: 8 };
 
 describe("skippedFiles", () => {
   it("leaves out inputs that reach tests without an import edge", () => {
@@ -107,6 +117,43 @@ describe("planRun", () => {
       args: ["run", "--coverage"],
     });
   });
+
+  it("splices the sized pool ahead of the passthrough args", () => {
+    expect(
+      planRun({
+        full: false,
+        vitestArgs: ["--coverage"],
+        tests: ["apps/web_new/src/a.test.ts"],
+        root: "/repo",
+        pool: ["--maxWorkers=16"],
+      })
+    ).toEqual({
+      mode: "changed",
+      reason: null,
+      args: ["run", "--passWithNoTests", "--maxWorkers=16", "--coverage", "/repo/apps/web_new/src/a.test.ts"],
+    });
+    expect(planRun({ full: true, vitestArgs: ["--coverage"], tests: [], root: "", pool: ["--maxWorkers=5"] })).toEqual({
+      mode: "full",
+      reason: "--full",
+      args: ["run", "--maxWorkers=5", "--coverage"],
+    });
+  });
+});
+
+describe("hasWorkerFlag", () => {
+  it("finds both spellings, joined or split from their value", () => {
+    expect(hasWorkerFlag([])).toBe(false);
+    expect(hasWorkerFlag(["--coverage"])).toBe(false);
+    expect(hasWorkerFlag(["--maxWorkers=4"])).toBe(true);
+    expect(hasWorkerFlag(["--coverage", "--maxWorkers", "4"])).toBe(true);
+    expect(hasWorkerFlag(["--max-workers=8"])).toBe(true);
+    expect(hasWorkerFlag(["--max-workers", "8"])).toBe(true);
+  });
+
+  it("ignores near misses and other options' values", () => {
+    expect(hasWorkerFlag(["--maxWorkers2"])).toBe(false);
+    expect(hasWorkerFlag(["--reporter", "json"])).toBe(false);
+  });
 });
 
 // A fake git that answers the commands the runner issues.
@@ -171,6 +218,8 @@ describe("main", () => {
       read,
       readBaseFiles,
       env,
+      host: QUIET_HOST,
+      loadavg: quietLoadavg,
     });
     expect(status).toBe(1);
     expect(calls[0]).toBe("merge-base HEAD origin/web-new-dev");
@@ -190,6 +239,8 @@ describe("main", () => {
       read,
       readBaseFiles,
       env,
+      host: QUIET_HOST,
+      loadavg: quietLoadavg,
     });
     expect(status).toBe(0);
     expect(calls).not.toContain("merge-base HEAD origin/web-new-dev");
@@ -209,7 +260,14 @@ describe("main", () => {
     const fake = fakeGit({ diff: "packages/kit/src/Avatar.tsx", tracked: `${tracked}\napps/web_new/src/gone.ts` });
     const git = (args) => (args[0] === "rev-parse" ? root : fake.git(args));
     const runs = [];
-    main([], { git, runVitest: (args) => (runs.push(args), 0), log: () => {}, env });
+    main([], {
+      git,
+      runVitest: (args) => (runs.push(args), 0),
+      log: () => {},
+      env,
+      host: QUIET_HOST,
+      loadavg: quietLoadavg,
+    });
     expect(runs).toEqual([["run", "--passWithNoTests", join(root, "apps/web_new/src/uses-avatar.test.tsx")]]);
   });
 
@@ -230,6 +288,8 @@ describe("main", () => {
       read: (file) => big[file] ?? null,
       readBaseFiles,
       env,
+      host: QUIET_HOST,
+      loadavg: quietLoadavg,
     });
     expect(logs).toEqual(["test:changed: full suite (1002 test files selected since mb123)"]);
     expect(runs).toEqual([["run"]]);
@@ -245,6 +305,8 @@ describe("main", () => {
       read: (file) => setup[file] ?? null,
       readBaseFiles,
       env,
+      host: QUIET_HOST,
+      loadavg: quietLoadavg,
     });
     expect(logs.at(-1)).toBe(
       "test:changed: the change reaches src/test-setup.ts, which every test loads; left to the scheduled full suite"
@@ -265,6 +327,8 @@ describe("main", () => {
       read: (file) => edition[file] ?? null,
       readBaseFiles,
       env: { PIDASH_EDITION_MODULE: join(process.cwd(), "src/core/edition/oss.ts") },
+      host: QUIET_HOST,
+      loadavg: quietLoadavg,
     });
     expect(runs).toEqual([]);
   });
@@ -272,9 +336,99 @@ describe("main", () => {
   it("skips the diff entirely on --full", () => {
     const { git, calls } = fakeGit();
     const runs = [];
-    main(["--full", "--base", "x"], { git, runVitest: (args) => (runs.push(args), 0), log: () => {} });
+    main(["--full", "--base", "x"], {
+      git,
+      runVitest: (args) => (runs.push(args), 0),
+      log: () => {},
+      host: QUIET_HOST,
+      loadavg: quietLoadavg,
+    });
     expect(calls).toEqual([]);
     expect(runs).toEqual([["run"]]);
+  });
+
+  it("sizes the pool from sustained load on a contended host", () => {
+    const { git } = fakeGit({ diff: "packages/kit/src/Button.tsx", tracked });
+    const runs = [];
+    const logs = [];
+    main(["--coverage"], {
+      git,
+      runVitest: (args) => (runs.push(args), 0),
+      log: (line) => logs.push(line),
+      read,
+      readBaseFiles,
+      env,
+      host: CONTENDED_HOST,
+      loadavg: contendedLoadavg,
+    });
+    expect(runs).toEqual([
+      ["run", "--passWithNoTests", "--maxWorkers=16", "--coverage", "/repo/apps/web_new/src/uses-button.test.tsx"],
+    ]);
+    expect(logs).toEqual([
+      "test:changed: 1 file(s) changed since mb123 reach 1 test file(s)",
+      "test:changed: 16 workers (--maxWorkers=16; 5-min load 18.0)",
+    ]);
+  });
+
+  it("lets memory shrink the pool on a quiet host", () => {
+    const { git } = fakeGit({ diff: "packages/kit/src/Button.tsx", tracked });
+    const runs = [];
+    const logs = [];
+    main([], {
+      git,
+      runVitest: (args) => (runs.push(args), 0),
+      log: (line) => logs.push(line),
+      read,
+      readBaseFiles,
+      env,
+      host: MEMORY_TIGHT_HOST,
+      loadavg: quietLoadavg,
+    });
+    expect(runs).toEqual([
+      ["run", "--passWithNoTests", "--maxWorkers=5", "/repo/apps/web_new/src/uses-button.test.tsx"],
+    ]);
+    expect(logs).toEqual([
+      "test:changed: 1 file(s) changed since mb123 reach 1 test file(s)",
+      "test:changed: 5 workers (--maxWorkers=5; 5-min load 2.0)",
+    ]);
+  });
+
+  it("keeps an explicit --maxWorkers and adds no sized flag", () => {
+    const { git } = fakeGit({ diff: "packages/kit/src/Button.tsx", tracked });
+    const runs = [];
+    const logs = [];
+    main(["--maxWorkers=4", "--coverage"], {
+      git,
+      runVitest: (args) => (runs.push(args), 0),
+      log: (line) => logs.push(line),
+      read,
+      readBaseFiles,
+      env,
+      host: CONTENDED_HOST,
+      loadavg: contendedLoadavg,
+    });
+    expect(runs).toEqual([
+      ["run", "--passWithNoTests", "--maxWorkers=4", "--coverage", "/repo/apps/web_new/src/uses-button.test.tsx"],
+    ]);
+    expect(logs).toEqual(["test:changed: 1 file(s) changed since mb123 reach 1 test file(s)"]);
+  });
+
+  it("sizes --full runs too", () => {
+    const { git } = fakeGit();
+    const runs = [];
+    const logs = [];
+    main(["--full"], {
+      git,
+      runVitest: (args) => (runs.push(args), 0),
+      log: (line) => logs.push(line),
+      host: CONTENDED_HOST,
+      loadavg: contendedLoadavg,
+    });
+    expect(runs).toEqual([["run", "--maxWorkers=16"]]);
+    expect(logs).toEqual([
+      "test:changed: full suite (--full)",
+      "test:changed: 16 workers (--maxWorkers=16; 5-min load 18.0)",
+    ]);
   });
 });
 
