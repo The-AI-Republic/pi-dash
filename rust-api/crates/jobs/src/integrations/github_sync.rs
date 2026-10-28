@@ -403,7 +403,6 @@ pub const ISSUE_LOOKUP_SQL: &str = "SELECT id FROM issues WHERE project_id = $1 
 /// the `state is None` branch never touches it.
 pub const ISSUE_STATE_SQL: &str = "SELECT i.state_id, s.\"group\" AS state_group, i.completed_at FROM issues i LEFT JOIN states s ON s.id = i.state_id WHERE i.id = $1";
 
-
 /// `GithubIssueSync.objects.update_or_create(repository_sync, issue, …)`
 /// (`github_sync_task.py:168-182`): full-row insert and full-defaults
 /// update (plus `updated_at`, which `save()` touches on the update path).
@@ -2606,7 +2605,6 @@ mod tests {
             PROJECT_WORKSPACE_SQL,
             ISSUE_LOOKUP_SQL,
             ISSUE_STATE_SQL,
-
             INSERT_ISSUE_SYNC_SQL,
             UPDATE_ISSUE_SYNC_SQL,
             GITHUB_SYNC_LOOKUP_SQL,
