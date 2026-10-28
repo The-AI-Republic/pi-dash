@@ -22,6 +22,7 @@ export default [
     route("ai", "./(all)/(dashboard)/ai/page.tsx"),
     route("loop", "./(all)/(dashboard)/loop/page.tsx"),
     route("loop/:jobId", "./(all)/(dashboard)/loop/detail.tsx"),
+    route("runners", "./(all)/(dashboard)/runners/page.tsx"),
     route("image", "./(all)/(dashboard)/image/page.tsx"),
   ]),
   // Catch-all route for 404 handling - must be last
