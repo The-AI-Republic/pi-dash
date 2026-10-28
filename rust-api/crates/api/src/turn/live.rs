@@ -869,6 +869,19 @@ impl LiveTurnSeam {
         )
         .await
     }
+
+    /// The `[], []` toolset (`tasks.py:370-389`): no MCP legs, the local
+    /// schemas kept — what a turn runs with when the MCP lookup fails.
+    fn empty_toolset(&self, ctx: &TurnContext, lane: &Lane) -> LiveToolset {
+        LiveToolset {
+            store: self.tool_store.clone(),
+            deps: tokio::sync::Mutex::new(Self::deps_for(ctx)),
+            env: self.run_env(Utc::now()),
+            anthropic: matches!(lane, Lane::Anthropic { .. }),
+            local: tool_schemas::all_tool_schemas(),
+            legs: Vec::new(),
+        }
+    }
 }
 
 fn internal_model_error(error: impl std::fmt::Display) -> ModelError {
@@ -1055,11 +1068,34 @@ impl TurnSeam for LiveTurnSeam {
         &self,
         ctx: &TurnContext,
     ) -> Result<(Vec<ToolsetHandle>, Vec<SkippedServer>), SeamError> {
-        let rows: Vec<(Uuid, String, String, Option<Vec<u8>>)> = sqlx::query_as(MCP_SERVERS_SQL)
-            .bind(ctx.user_id)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(db_error)?;
+        let rows: Vec<(Uuid, String, String, Option<Vec<u8>>)> =
+            match sqlx::query_as(MCP_SERVERS_SQL)
+                .bind(ctx.user_id)
+                .fetch_all(&self.pool)
+                .await
+            {
+                Ok(rows) => rows,
+                Err(error) => {
+                    // A resolver that blows up entirely costs the turn its
+                    // tools, not its life (`tasks.py:370-389`): install the
+                    // `[], []` toolset so `open_stream` runs with no MCP
+                    // legs, and still return the error so the driver emits
+                    // the pseudo-entry. A poisoned lock or a missing record
+                    // cannot install — the turn then fails as before, with
+                    // nothing left behind that the reclaim would not drop.
+                    tracing::warn!(
+                        %error,
+                        "assistant: MCP lookup failed; running turn without tools"
+                    );
+                    if let Ok(mut runs) = self.runs.lock() {
+                        if let Some(prepared) = runs.get_mut(&ctx.turn_id) {
+                            let toolset = self.empty_toolset(ctx, &prepared.lane);
+                            prepared.tools = Some(Arc::new(toolset));
+                        }
+                    }
+                    return Err(db_error(error));
+                }
+            };
         let server_rows: Vec<mcp_service::ServerRow> = rows
             .iter()
             .map(|(id, name, url, token)| mcp_service::ServerRow {
@@ -1125,27 +1161,21 @@ impl TurnSeam for LiveTurnSeam {
         let Some(prepared) = runs.get_mut(&ctx.turn_id) else {
             return Ok((Vec::new(), skipped));
         };
-        let anthropic = matches!(prepared.lane, Lane::Anthropic { .. });
-        prepared.tools = Some(Arc::new(LiveToolset {
-            store: self.tool_store.clone(),
-            deps: tokio::sync::Mutex::new(Self::deps_for(ctx)),
-            env: self.run_env(Utc::now()),
-            anthropic,
-            local: tool_schemas::all_tool_schemas(),
-            legs: sessions
-                .into_iter()
-                .map(|session| {
-                    // `server_name or url` (`mcp.py:209`); the ported
-                    // session carries the resolved name.
-                    let server_name = session.server_name().to_owned();
-                    McpLeg {
-                        server_name,
-                        session: tokio::sync::Mutex::new(session),
-                        defs: Mutex::new(Vec::new()),
-                    }
-                })
-                .collect(),
-        }));
+        let mut toolset = self.empty_toolset(ctx, &prepared.lane);
+        toolset.legs = sessions
+            .into_iter()
+            .map(|session| {
+                // `server_name or url` (`mcp.py:209`); the ported
+                // session carries the resolved name.
+                let server_name = session.server_name().to_owned();
+                McpLeg {
+                    server_name,
+                    session: tokio::sync::Mutex::new(session),
+                    defs: Mutex::new(Vec::new()),
+                }
+            })
+            .collect();
+        prepared.tools = Some(Arc::new(toolset));
         // `_resolve_toolsets` returns the constructed toolsets themselves;
         // the handle names the turn and the server so
         // `runtime_failures` can read the session's recorded failure back.
