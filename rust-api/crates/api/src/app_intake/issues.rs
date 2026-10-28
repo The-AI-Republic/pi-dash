@@ -810,7 +810,8 @@ pub async fn validate_pk(
 ///   `state_id`/`parent_id`/`assigned_pod_id`), so DRF drops the key
 ///   and it is ignored below, like any unknown key (verified live).
 /// * `parent_id` / `duplicate_to`: the default soft-delete-scoped
-///   managers.
+///   managers. (`parent` is the auto twin over `Issue.issue_objects`,
+///   shared with `duplicate_to`; see `duplicate_to_live_sql`.)
 fn state_any_sql() -> &'static str {
     r#"SELECT id FROM states WHERE id = $1"#
 }
@@ -1100,6 +1101,32 @@ pub async fn validate_issue_fields(
             out.parent_id = Some(None);
         } else if let Some(id) =
             validate_pk(pool, errors, "parent_id", value, issue_live_sql(), false).await
+        {
+            out.parent_id = Some(Some(id));
+        }
+    }
+    // `parent`: the auto-generated twin (`Meta.exclude` keeps the model
+    // field, so DRF adds it beside the declared `parent_id`). Same
+    // source, validated under its own key with the default-manager
+    // queryset (`Issue.issue_objects`, shared with `duplicate_to`),
+    // and it wins when both keys are present, because DRF applies
+    // declared fields before auto fields (verified live: `parent_id`=X
+    // + `parent`=Y lands Y, and a triage id 400s under `parent` while
+    // 200ing under `parent_id`). Runs after the `parent_id` arm so the
+    // overwrite order matches; errors merge with `parent_id` first,
+    // like DRF.
+    if let Some(value) = input.get("parent") {
+        if value.is_null() {
+            out.parent_id = Some(None);
+        } else if let Some(id) = validate_pk(
+            pool,
+            errors,
+            "parent",
+            value,
+            duplicate_to_live_sql(),
+            false,
+        )
+        .await
         {
             out.parent_id = Some(Some(id));
         }
