@@ -148,13 +148,16 @@ pub struct CreationDeps {
 /// The per-call inputs: the URL/body facts, the driver's resolved
 /// origin + web base (each driver keeps its own computation, including
 /// the app empty-string divergence), the frozen clock, the pre-move
-/// state snapshot, the caller options, and the creation facts.
+/// state snapshot, the caller options, and the creation facts. `origin`
+/// is `None` for callers with no request host (the MCP layer: Django
+/// passes `origin=None`), rendering JSON null in the queued
+/// `model_activity` kwargs.
 pub struct MoveInput<'a> {
     pub slug: &'a str,
     pub project_id: Uuid,
     pub pk: Uuid,
     pub target_ref: &'a Value,
-    pub origin: String,
+    pub origin: Option<String>,
     pub web_base_url: Option<&'a str>,
     pub now: DateTime<Utc>,
     pub prev_state: Option<Uuid>,
@@ -1024,7 +1027,7 @@ pub async fn move_to_project(
         input.pk,
         input.target_ref,
         actor_id,
-        &input.origin,
+        input.origin.as_deref(),
         input.web_base_url,
         &input.now,
         &input.options,
@@ -1509,7 +1512,7 @@ mod tests {
                     current: "c".to_owned(),
                     actor: uid(1),
                     slug: "ws".to_owned(),
-                    origin: "https://app.example.test".to_owned(),
+                    origin: Some("https://app.example.test".to_owned()),
                 },
             ],
             &outcome,
@@ -1540,11 +1543,45 @@ mod tests {
             "c",
             &uid(1),
             "ws",
-            "https://app.example.test",
+            Some("https://app.example.test"),
         );
         assert_eq!(calls[1].0, expected_model.task);
         assert_eq!(calls[1].1, expected_model.args);
         assert_eq!(calls[1].2, expected_model.kwargs);
+    }
+
+    /// A `None` move origin (the MCP layer, no request host) still
+    /// enqueues — with the key present and JSON null, exactly Django's
+    /// `.delay(origin=None)` wire bytes — never skipped, never `""`.
+    #[tokio::test]
+    async fn move_model_activity_leg_none_origin_enqueues_null() {
+        let pool = lazy_pool();
+        let (transition, enqueue, drain) = test_hooks();
+        let erased_transition: Arc<dyn IssueTransitionHook> = transition;
+        let erased_enqueue: Arc<dyn TaskEnqueueHook> = enqueue.clone();
+        let erased_drain: Arc<dyn MovePostCommitHook> = drain;
+        let outcome = ChainOutcome::new();
+        run_chain(
+            &pool,
+            &erased_transition,
+            &erased_enqueue,
+            Some(&erased_drain),
+            vec![ChainEffect::MoveModelActivity {
+                model: uid(2),
+                requested: serde_json::json!({"project": uid(3)}),
+                current: "c".to_owned(),
+                actor: uid(1),
+                slug: "ws".to_owned(),
+                origin: None,
+            }],
+            &outcome,
+        )
+        .await;
+        assert_eq!(outcome.stopped(), None);
+        let calls = enqueue.calls.lock().expect("lock");
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].2.contains_key("origin"));
+        assert_eq!(calls[0].2.get("origin"), Some(&Value::Null));
     }
 
     /// A blank target is a 400 with no store touch: the kernel rejects
@@ -1582,7 +1619,7 @@ mod tests {
                         project_id: Uuid::new_v4(),
                         pk: Uuid::new_v4(),
                         target_ref: &target_ref,
-                        origin: "https://app.example.test".to_owned(),
+                        origin: Some("https://app.example.test".to_owned()),
                         web_base_url: None,
                         now: Utc::now(),
                         prev_state: None,
@@ -1642,7 +1679,7 @@ mod tests {
                         project_id: Uuid::new_v4(),
                         pk: Uuid::new_v4(),
                         target_ref: &target_ref,
-                        origin: "https://app.example.test".to_owned(),
+                        origin: Some("https://app.example.test".to_owned()),
                         web_base_url: None,
                         now: Utc::now(),
                         prev_state: None,
@@ -1830,7 +1867,7 @@ mod tests {
                         project_id: source_project,
                         pk: issue_id,
                         target_ref: &target_ref,
-                        origin: "https://app.example.test".to_owned(),
+                        origin: Some("https://app.example.test".to_owned()),
                         web_base_url: None,
                         now,
                         prev_state: Some(source_state),

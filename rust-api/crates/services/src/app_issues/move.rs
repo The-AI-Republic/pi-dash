@@ -1204,13 +1204,18 @@ pub fn issue_activity_kwargs(
 /// (vs `str()` in `issue_activity`) — identical hyphenated strings on
 /// the JSON wire. (The fixture annotates this arg "INT, not str"; the
 /// model says `User.id` is a UUID — the wire bytes agree either way.)
+/// `origin` is `None` for callers with no request host (the MCP layer:
+/// `pi_dash_cloud/mcp/tools.py` `_emit_write_activity` passes
+/// `origin=None`) — the key stays present with JSON null, exactly the
+/// `.delay(origin=None)` wire bytes the webhook worker maps to
+/// `current_site=None`.
 pub fn move_model_activity_kwargs(
     model_id: &Uuid,
     requested_data: Value,
     current_instance: &str,
     actor_id: &Uuid,
     slug: &str,
-    origin: &str,
+    origin: Option<&str>,
 ) -> TaskEnqueue {
     let mut kwargs = Map::with_capacity(7);
     kwargs.insert("model_name".to_owned(), Value::String("issue".to_owned()));
@@ -1222,7 +1227,10 @@ pub fn move_model_activity_kwargs(
     );
     kwargs.insert("actor_id".to_owned(), Value::String(actor_id.to_string()));
     kwargs.insert("slug".to_owned(), Value::String(slug.to_owned()));
-    kwargs.insert("origin".to_owned(), Value::String(origin.to_owned()));
+    kwargs.insert(
+        "origin".to_owned(),
+        origin.map_or(Value::Null, |text| Value::String(text.to_owned())),
+    );
     TaskEnqueue {
         task: MODEL_ACTIVITY_TASK,
         args: Vec::new(),
@@ -1401,10 +1409,12 @@ async fn render_current_instance<S: MoveStore>(
 ///
 /// `target_ref` is the raw JSON value (UUID or workspace-scoped
 /// identifier — coerced per `str(x or "")`); `actor_id` is the acting
-/// user; `origin` is the request host for webhooks; `web_base_url` is
-/// the resolved `WEB_URL`/`APP_BASE_URL` config (`None` when
-/// unconfigured — the `url` key is then omitted); `now` is the frozen
-/// clock (`timezone.now()` — also the `epoch` stamp).
+/// user; `origin` is the request host for webhooks (`None` for callers
+/// with no request host — the MCP layer — rendering JSON null, exactly
+/// Django's `origin=None`); `web_base_url` is the resolved
+/// `WEB_URL`/`APP_BASE_URL` config (`None` when unconfigured — the `url`
+/// key is then omitted); `now` is the frozen clock (`timezone.now()` —
+/// also the `epoch` stamp).
 ///
 /// Returns the refreshed issue. Raises [`MoveError::Issue`] (400/403/409)
 /// for recoverable failures; [`MoveError::IssueNotFound`] /
@@ -1417,7 +1427,7 @@ pub async fn move_work_item_to_project<S: MoveStore>(
     pk: Uuid,
     target_ref: &Value,
     actor_id: Uuid,
-    origin: &str,
+    origin: Option<&str>,
     web_base_url: Option<&str>,
     now: &chrono::DateTime<chrono::Utc>,
     options: &MoveOptions,
@@ -2256,7 +2266,7 @@ mod tests {
             uuid(1),
             target_ref,
             uuid(0x40),
-            ORIGIN,
+            Some(ORIGIN),
             Some("https://app.example.test"),
             &now(),
             options,
@@ -2510,6 +2520,61 @@ mod tests {
         let target = uuid(0x50);
         let bytes = py_dumps(&serde_json::json!({"project": target.to_string()}));
         assert_eq!(bytes, format!("{{\"project\": \"{target}\"}}"));
+    }
+
+    #[test]
+    fn model_activity_kwargs_origin_none_renders_null() {
+        // The MCP layer has no request host: Django passes `origin=None`
+        // (`pi_dash_cloud/mcp/tools.py` `_emit_write_activity`), and the
+        // `.delay` wire bytes carry the key with JSON null (which the
+        // webhook worker maps to `current_site=None` — never `""`).
+        let spec = move_model_activity_kwargs(
+            &uuid(1),
+            serde_json::json!({"project": uuid(0x50).to_string()}),
+            "current",
+            &uuid(0x40),
+            SLUG,
+            None,
+        );
+        assert_eq!(spec.task, MODEL_ACTIVITY_TASK);
+        assert!(spec.kwargs.contains_key("origin"));
+        assert_eq!(spec.kwargs["origin"], Value::Null);
+        // `Some` still renders the string (the REST-driver path).
+        let spec = move_model_activity_kwargs(
+            &uuid(1),
+            serde_json::json!({"project": uuid(0x50).to_string()}),
+            "current",
+            &uuid(0x40),
+            SLUG,
+            Some(ORIGIN),
+        );
+        assert_eq!(spec.kwargs["origin"], serde_json::json!(ORIGIN));
+    }
+
+    #[tokio::test]
+    async fn move_with_none_origin_queues_null_origin() {
+        let store = FakeStore::scripted();
+        let out = move_work_item_to_project(
+            &store,
+            SLUG,
+            uuid(0x10),
+            uuid(1),
+            &serde_json::json!("ENG"),
+            uuid(0x40),
+            None,
+            Some("https://app.example.test"),
+            &now(),
+            &MoveOptions::django(),
+        )
+        .await
+        .expect("moves");
+        let outcome = match out {
+            MoveResult::Moved(outcome) => outcome,
+            MoveResult::AlreadyThere(_) => panic!("expected a move"),
+        };
+        assert_eq!(outcome.enqueues.len(), 2);
+        assert_eq!(outcome.enqueues[1].task, MODEL_ACTIVITY_TASK);
+        assert_eq!(outcome.enqueues[1].kwargs["origin"], Value::Null);
     }
 
     // -- handoff branches --------------------------------------------------
@@ -2892,7 +2957,7 @@ mod tests {
             uuid(1),
             &serde_json::json!("ENG"),
             uuid(0x40),
-            ORIGIN,
+            Some(ORIGIN),
             None,
             &now(),
             &MoveOptions::django(),
