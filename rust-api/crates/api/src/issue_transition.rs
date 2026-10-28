@@ -60,12 +60,15 @@ impl PublishEffectsDrain for TransitionDrains {
         let actor_id = self.actor_id;
         Box::pin(async move {
             // Web request: the crum user is the requester.
-            crate::project_move_handoff::drain_publish_effects(
-                &pool,
-                &state,
-                effects,
-                Some(actor_id),
-            )
+            let ports = crate::runner_runs::LivePorts::new(pool.clone(), &state);
+            pidash_jobs::orchestration::drain_publish_effects(effects, |effect| {
+                crate::runner_runs::run_endpoints::drain_lifecycle_effects(
+                    &pool,
+                    &ports,
+                    vec![effect],
+                    Some(actor_id),
+                )
+            })
             .await;
         })
     }

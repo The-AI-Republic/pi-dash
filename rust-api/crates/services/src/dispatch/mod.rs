@@ -48,6 +48,7 @@ pub use admission::DeferredConsume;
 pub use admission::DesktopSessionRequiredBody;
 pub use admission::LlmProfile;
 pub use admission::PhaseTemplate;
+pub use admission::RedisAdmissionCache;
 pub use admission::CLOUD_AGENT_UNAVAILABLE_HTTP_STATUS;
 pub use admission::CONSUME_TIMEOUT_OVERHANG_SECS;
 pub use admission::ENROLLED_MANAGED_RUNNERS_EXISTS_SQL;

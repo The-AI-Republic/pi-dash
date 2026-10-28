@@ -19,7 +19,9 @@
 //! [`runner`](pidash_auth::permissions::runner) kernel; the flag parses
 //! via [`purge`](pidash_services::runner_enroll::purge) (PIDASHCONV-587);
 //! the delete runs the [`delete`](pidash_services::runner_enroll::delete)
-//! driver (PIDASHCONV-588) on the pool-backed [`DeleteStore`] below.
+//! driver (PIDASHCONV-588) through the jobs revoke service
+//! ([`revoke`](pidash_jobs::runner_enroll::revoke)), which owns the
+//! pool store, the tx execution, and the post-commit fire.
 //! Auth mirrors `device_session.rs` (401/403 DRF rendering); the
 //! `api_tokens` / `workspace_members` lookups keep the managers'
 //! `deleted_at IS NULL` predicate (the `runner_enroll::auth`
@@ -57,22 +59,16 @@ use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::Response;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use pidash_auth::permissions::runner as runner_perm;
 use pidash_auth::scope::TenantScope;
 use pidash_auth::token as token_kernel;
-use pidash_db::runner_sessions::models::runner_session as rs_models;
-use pidash_db::runner_sessions::outbox;
-use pidash_db::runner_sessions::outbox::OutboxError;
 use pidash_db::v1_cli_auth::queries::runner_lookup;
-use pidash_services::runner_enroll::{delete as delete_svc, purge, revoke};
-use pidash_services::runner_runs::{finalization, LifecycleEffect, SetValue};
-use pidash_services::runner_sessions::pubsub;
-use pidash_types::dispatch::AgentExecutorKind;
-use pidash_types::runner_runs::{AgentRunStatus, TERMINAL_RUN_STATUSES};
-use pidash_types::runner_sessions::{remove_runner_frame, revoke_frame};
+use pidash_jobs::runner_enroll::{fire_revoke_bundle, revoke, RevokeCtx, RevokeScope};
+use pidash_services::runner_enroll::purge;
+use pidash_services::runner_runs::LifecycleEffect;
 use pidash_types::{UserId, WorkspaceId};
 
 use crate::license::{query_last, QueryMap, UNAUTHENTICATED_BODY};
@@ -311,594 +307,6 @@ async fn is_member(pool: &PgPool, workspace_id: Uuid, user_id: Uuid) -> Result<b
 }
 
 // ---------------------------------------------------------------------------
-// Delete store: the first pool-backed `RevokeStore + RunnerDeleteStore`
-// ---------------------------------------------------------------------------
-
-/// Storage failure → the executor's 500 detail (Python lets any DB/Redis
-/// exception propagate out of the atomic, rolling it back).
-fn store_err<E: std::fmt::Display>(error: E) -> revoke::RevokeError {
-    revoke::RevokeError::Store(error.to_string())
-}
-
-/// The executing store for [`delete_svc::delete_runner`]: the one open
-/// transaction (the atomic tail — the frame methods touch Redis only, so
-/// calling them first on it is unobservable), the api-owned Redis
-/// client, and the post-commit collectors (per-run terminal-effects
-/// publications, then handoffs → drains → cleanup, in registration
-/// order).
-struct DeleteStore<'t> {
-    tx: sqlx::Transaction<'t, sqlx::Postgres>,
-    redis: Option<redis::Client>,
-    runner_settings: pidash_db::config::RunnerSettings,
-    handoffs: Vec<Uuid>,
-    drains: Vec<Uuid>,
-    cleanups: Vec<Uuid>,
-    run_effects: Vec<LifecycleEffect>,
-}
-
-/// `SET` column order for the revoke finalize (`:52-59` base plus the
-/// `:631-640` updates in dict order); the binds below are positional, so
-/// a mismatch fails loudly instead of binding wrong (the L6a sweeps
-/// precedent).
-const REVOKE_FINALIZE_COLUMNS: [&str; 8] = [
-    "status",
-    "ended_at",
-    "queue_position",
-    "terminal_hooks_applied_at",
-    "terminal_capacity_released_at",
-    "error",
-    "error_code",
-    "cancel_reason",
-];
-
-/// Bind `ids` positionally (`$1..$N`, fetch order) and fetch one UUID
-/// column. Callers skip empty lists (an `IN ()` would be invalid SQL).
-async fn fetch_in_ids(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    sql: &str,
-    ids: &[Uuid],
-) -> Result<Vec<Uuid>, revoke::RevokeError> {
-    debug_assert!(!ids.is_empty(), "callers skip empty id lists");
-    let mut query = sqlx::query_scalar::<_, Uuid>(sql);
-    for id in ids {
-        query = query.bind(id);
-    }
-    query.fetch_all(&mut **tx).await.map_err(store_err)
-}
-
-/// Bind `ids` positionally (`$1..$N`, fetch order) and execute a
-/// collector write. Callers skip empty lists.
-async fn exec_in_ids(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    sql: &str,
-    ids: &[Uuid],
-) -> Result<(), revoke::RevokeError> {
-    debug_assert!(!ids.is_empty(), "callers skip empty id lists");
-    let mut query = sqlx::query(sql);
-    for id in ids {
-        query = query.bind(id);
-    }
-    query.execute(&mut **tx).await.map_err(store_err)?;
-    Ok(())
-}
-
-impl revoke::RevokeStore for DeleteStore<'_> {
-    async fn mark_runner_revoked(
-        &mut self,
-        runner_id: Uuid,
-        now: DateTime<Utc>,
-        stored_reason: &str,
-    ) -> Result<(), revoke::RevokeError> {
-        sqlx::query(revoke::MARK_RUNNER_REVOKED_SQL)
-            .bind(now)
-            .bind(stored_reason)
-            .bind(runner_id)
-            .execute(&mut *self.tx)
-            .await
-            .map_err(store_err)?;
-        Ok(())
-    }
-
-    async fn revoke_active_sessions(
-        &mut self,
-        runner_id: Uuid,
-        now: DateTime<Utc>,
-        stored_reason: &str,
-    ) -> Result<(), revoke::RevokeError> {
-        pidash_services::domain::tokens::revoke_runner_sessions_for_runner(
-            &mut *self.tx,
-            runner_id,
-            now,
-            stored_reason,
-        )
-        .await
-        .map_err(store_err)?;
-        Ok(())
-    }
-
-    async fn lock_active_runs(
-        &mut self,
-        runner_id: Uuid,
-    ) -> Result<Vec<(Uuid, Option<Uuid>)>, revoke::RevokeError> {
-        sqlx::query_as::<_, (Uuid, Option<Uuid>)>(&revoke::active_runs_lock_sql())
-            .bind(runner_id)
-            .fetch_all(&mut *self.tx)
-            .await
-            .map_err(store_err)
-    }
-
-    /// Per-run cancel via the D-15 finalize builders (the
-    /// `runs.rs::finalize_cancelled` precedent): first-writer-wins lock
-    /// (a miss is `Ok(())` — Python ignores the `False`), update,
-    /// cloud-only terminal event, and — on success only — the
-    /// terminal-effects publication captured for the post-commit drain.
-    /// No `done_payload` merge: these updates carry none.
-    async fn finalize_cancelled_run(
-        &mut self,
-        run_id: Uuid,
-        runner_id: Uuid,
-        stored_reason: &str,
-    ) -> Result<(), revoke::RevokeError> {
-        let values = finalization::plan_finalize_values(
-            AgentRunStatus::Cancelled,
-            &[
-                ("error", SetValue::Text(revoke::FINALIZE_ERROR.to_owned())),
-                (
-                    "error_code",
-                    SetValue::Text(revoke::FINALIZE_ERROR_CODE.to_owned()),
-                ),
-                ("cancel_reason", SetValue::Text(stored_reason.to_owned())),
-            ],
-        )
-        .map_err(store_err)?;
-        let columns: Vec<&str> = values.clauses.iter().map(|clause| clause.column).collect();
-        if columns.as_slice() != REVOKE_FINALIZE_COLUMNS {
-            return Err(store_err("revoke finalize column order"));
-        }
-        let lock_sql = finalization::lock_run_for_finalize_sql(true, false);
-        let mut lock = sqlx::query(&lock_sql).bind(run_id);
-        for status in TERMINAL_RUN_STATUSES {
-            lock = lock.bind(status.value());
-        }
-        let locked: Option<sqlx::postgres::PgRow> = lock
-            .bind(runner_id)
-            .fetch_optional(&mut *self.tx)
-            .await
-            .map_err(store_err)?;
-        let Some(row) = locked else {
-            return Ok(());
-        };
-        let executor_kind: String = row.try_get("executor_kind").map_err(store_err)?;
-        sqlx::query(&finalization::finalize_update_sql(&values))
-            .bind(AgentRunStatus::Cancelled.value())
-            .bind(now_micros())
-            .bind(None::<i16>)
-            .bind(None::<DateTime<Utc>>)
-            .bind(None::<DateTime<Utc>>)
-            .bind(revoke::FINALIZE_ERROR)
-            .bind(revoke::FINALIZE_ERROR_CODE)
-            .bind(stored_reason)
-            .bind(run_id)
-            .execute(&mut *self.tx)
-            .await
-            .map_err(store_err)?;
-        if executor_kind == AgentExecutorKind::CloudAgent.value() {
-            let exists = sqlx::query_scalar::<_, i32>(finalization::terminal_event_exists_sql())
-                .bind(run_id)
-                .bind("terminal")
-                .fetch_optional(&mut *self.tx)
-                .await
-                .map_err(store_err)?;
-            if exists.is_none() {
-                let max_seq =
-                    sqlx::query_scalar::<_, i32>(finalization::terminal_event_max_seq_sql())
-                        .bind(run_id)
-                        .fetch_optional(&mut *self.tx)
-                        .await
-                        .map_err(store_err)?;
-                let plan = finalization::plan_terminal_event(
-                    max_seq,
-                    AgentRunStatus::Cancelled,
-                    &finalization::finalize_error_code(&values),
-                );
-                sqlx::query(&finalization::terminal_event_insert_sql())
-                    .bind(run_id)
-                    .bind(plan.seq)
-                    .bind("terminal")
-                    .bind(plan.payload)
-                    .bind(now_micros())
-                    .execute(&mut *self.tx)
-                    .await
-                    .map_err(store_err)?;
-            }
-        }
-        self.run_effects
-            .extend(finalization::plan_publish_effects(run_id));
-        Ok(())
-    }
-
-    async fn pinned_queued_pod_ids(
-        &mut self,
-        runner_id: Uuid,
-    ) -> Result<Vec<Option<Uuid>>, revoke::RevokeError> {
-        sqlx::query_scalar::<_, Option<Uuid>>(revoke::PINNED_QUEUED_PODS_SQL)
-            .bind(runner_id)
-            .fetch_all(&mut *self.tx)
-            .await
-            .map_err(store_err)
-    }
-
-    async fn unpin_queued_runs(&mut self, runner_id: Uuid) -> Result<(), revoke::RevokeError> {
-        sqlx::query(revoke::UNPIN_QUEUED_RUNS_SQL)
-            .bind(runner_id)
-            .execute(&mut *self.tx)
-            .await
-            .map_err(store_err)?;
-        Ok(())
-    }
-
-    fn complete_handoff_after_commit(&mut self, run_id: Uuid) {
-        self.handoffs.push(run_id);
-    }
-
-    fn drain_pod_after_commit(&mut self, pod_id: Uuid) {
-        self.drains.push(pod_id);
-    }
-
-    fn schedule_stream_cleanup_after_commit(&mut self, runner_id: Uuid) {
-        self.cleanups.push(runner_id);
-    }
-}
-
-impl delete_svc::RunnerDeleteStore for DeleteStore<'_> {
-    /// `send_runner_revoke`, mirrored call-for-call on the open
-    /// transaction (frame carries no `mid` — the outbox mints it).
-    async fn send_revoke_frame(
-        &mut self,
-        runner_id: Uuid,
-        reason: &str,
-    ) -> Result<Vec<String>, revoke::RevokeError> {
-        let frame = revoke_frame(reason);
-        match outbox::enqueue_for_runner(
-            self.redis.as_ref(),
-            &mut *self.tx,
-            &self.runner_settings,
-            runner_id,
-            &frame,
-        )
-        .await
-        {
-            Ok(_) => Ok(Vec::new()),
-            Err(OutboxError::RunnerOffline { .. }) => Ok(vec![format!(
-                "revoke enqueue rejected as offline for {runner_id}"
-            )]),
-            Err(error) => Ok(vec![format!(
-                "send_runner_revoke failed for {runner_id}: {error}"
-            )]),
-        }
-    }
-
-    /// `send_runner_remove`, mirrored call-for-call on the open
-    /// transaction (frame carries no `mid` — the outbox mints it).
-    async fn send_remove_frame(
-        &mut self,
-        runner_id: Uuid,
-        reason: &str,
-    ) -> Result<Vec<String>, revoke::RevokeError> {
-        let frame = remove_runner_frame(&runner_id.to_string(), reason);
-        match outbox::enqueue_for_runner(
-            self.redis.as_ref(),
-            &mut *self.tx,
-            &self.runner_settings,
-            runner_id,
-            &frame,
-        )
-        .await
-        {
-            Ok(_) => Ok(Vec::new()),
-            Err(OutboxError::RunnerOffline { .. }) => Ok(vec![format!(
-                "remove_runner enqueue rejected as offline for {runner_id}"
-            )]),
-            Err(error) => Ok(vec![format!(
-                "send_runner_remove failed for {runner_id}: {error}"
-            )]),
-        }
-    }
-
-    /// `close_runner_session`, mirrored call-for-call on the open
-    /// transaction: per active session (newest first) revoke the row
-    /// with a per-row `now()`, clear the PEL marker, publish the
-    /// eviction. The first failure aborts and propagates.
-    async fn close_runner_session(&mut self, runner_id: Uuid) -> Result<(), revoke::RevokeError> {
-        let rows = sqlx::query(pubsub::CLOSE_ACTIVE_SESSIONS_SQL)
-            .bind(runner_id)
-            .fetch_all(&mut *self.tx)
-            .await
-            .map_err(store_err)?;
-        for row in rows {
-            let session = rs_models::runner_session_from_row(&row).map_err(store_err)?;
-            let sid = session.id.to_string();
-            pidash_services::domain::tokens::revoke_runner_session(
-                &mut *self.tx,
-                session.id,
-                now_micros(),
-                pubsub::FORCE_CLOSE_REASON,
-            )
-            .await
-            .map_err(store_err)?;
-            outbox::clear_session_marker(self.redis.as_ref(), &sid)
-                .await
-                .map_err(store_err)?;
-            outbox::publish_session_eviction(
-                self.redis.as_ref(),
-                &runner_id.to_string(),
-                Some(&sid),
-                "",
-            )
-            .await
-            .map_err(store_err)?;
-        }
-        Ok(())
-    }
-
-    async fn revoke_machine_tokens(
-        &mut self,
-        machine_id: Uuid,
-        now: DateTime<Utc>,
-    ) -> Result<(), revoke::RevokeError> {
-        pidash_services::domain::tokens::revoke_tokens_for_dev_machine(
-            &mut *self.tx,
-            machine_id,
-            now,
-        )
-        .await
-        .map_err(store_err)?;
-        Ok(())
-    }
-
-    async fn lock_machine_runners(
-        &mut self,
-        machine_id: Uuid,
-    ) -> Result<Vec<delete_svc::LockedRunner>, revoke::RevokeError> {
-        let rows = sqlx::query(delete_svc::LOCK_MACHINE_RUNNERS_SQL)
-            .bind(machine_id)
-            .fetch_all(&mut *self.tx)
-            .await
-            .map_err(store_err)?;
-        rows.iter()
-            .map(|row| {
-                Ok(delete_svc::LockedRunner {
-                    id: row.try_get("id").map_err(store_err)?,
-                    revoked_at: row.try_get("revoked_at").map_err(store_err)?,
-                })
-            })
-            .collect()
-    }
-
-    async fn fetch_runner_for_delete(
-        &mut self,
-        runner_id: Uuid,
-    ) -> Result<bool, revoke::RevokeError> {
-        let row: Option<sqlx::postgres::PgRow> = sqlx::query(delete_svc::COLLECT_RUNNER_BY_ID_SQL)
-            .bind(runner_id)
-            .fetch_optional(&mut *self.tx)
-            .await
-            .map_err(store_err)?;
-        Ok(row.is_some())
-    }
-
-    async fn fetch_machine_runner_ids_for_delete(
-        &mut self,
-        machine_id: Uuid,
-    ) -> Result<Vec<Uuid>, revoke::RevokeError> {
-        let rows = sqlx::query(delete_svc::COLLECT_RUNNERS_BY_MACHINE_SQL)
-            .bind(machine_id)
-            .fetch_all(&mut *self.tx)
-            .await
-            .map_err(store_err)?;
-        rows.iter()
-            .map(|row| row.try_get("id").map_err(store_err))
-            .collect()
-    }
-
-    async fn fetch_chat_ids(
-        &mut self,
-        runner_ids: &[Uuid],
-    ) -> Result<Vec<Uuid>, revoke::RevokeError> {
-        fetch_in_ids(
-            &mut self.tx,
-            &delete_svc::collect_chat_ids_sql(runner_ids.len()),
-            runner_ids,
-        )
-        .await
-    }
-
-    async fn fetch_message_ids(
-        &mut self,
-        chat_ids: &[Uuid],
-    ) -> Result<Vec<Uuid>, revoke::RevokeError> {
-        fetch_in_ids(
-            &mut self.tx,
-            &delete_svc::collect_message_ids_sql(chat_ids.len()),
-            chat_ids,
-        )
-        .await
-    }
-
-    async fn delete_chat_events(&mut self, chat_ids: &[Uuid]) -> Result<(), revoke::RevokeError> {
-        exec_in_ids(
-            &mut self.tx,
-            &delete_svc::delete_chat_events_sql(chat_ids.len()),
-            chat_ids,
-        )
-        .await
-    }
-
-    async fn delete_chat_approvals(
-        &mut self,
-        chat_ids: &[Uuid],
-    ) -> Result<(), revoke::RevokeError> {
-        exec_in_ids(
-            &mut self.tx,
-            &delete_svc::delete_chat_approvals_sql(chat_ids.len()),
-            chat_ids,
-        )
-        .await
-    }
-
-    async fn delete_chat_dedupes(&mut self, chat_ids: &[Uuid]) -> Result<(), revoke::RevokeError> {
-        exec_in_ids(
-            &mut self.tx,
-            &delete_svc::delete_chat_dedupes_sql(chat_ids.len()),
-            chat_ids,
-        )
-        .await
-    }
-
-    async fn delete_runner_sessions(
-        &mut self,
-        runner_ids: &[Uuid],
-    ) -> Result<(), revoke::RevokeError> {
-        pidash_services::domain::tokens::delete_runner_sessions_for_runners(
-            &mut *self.tx,
-            runner_ids,
-        )
-        .await
-        .map_err(store_err)
-    }
-
-    async fn delete_force_refresh(
-        &mut self,
-        runner_ids: &[Uuid],
-    ) -> Result<(), revoke::RevokeError> {
-        exec_in_ids(
-            &mut self.tx,
-            &delete_svc::delete_force_refresh_sql(runner_ids.len()),
-            runner_ids,
-        )
-        .await
-    }
-
-    async fn delete_live_state(&mut self, runner_ids: &[Uuid]) -> Result<(), revoke::RevokeError> {
-        exec_in_ids(
-            &mut self.tx,
-            &delete_svc::delete_live_state_sql(runner_ids.len()),
-            runner_ids,
-        )
-        .await
-    }
-
-    async fn null_run_runners(&mut self, runner_ids: &[Uuid]) -> Result<(), revoke::RevokeError> {
-        exec_in_ids(
-            &mut self.tx,
-            &delete_svc::null_run_runners_sql(runner_ids.len()),
-            runner_ids,
-        )
-        .await
-    }
-
-    async fn null_run_pins(&mut self, runner_ids: &[Uuid]) -> Result<(), revoke::RevokeError> {
-        exec_in_ids(
-            &mut self.tx,
-            &delete_svc::null_run_pins_sql(runner_ids.len()),
-            runner_ids,
-        )
-        .await
-    }
-
-    async fn null_event_messages(
-        &mut self,
-        message_ids: &[Uuid],
-    ) -> Result<(), revoke::RevokeError> {
-        exec_in_ids(
-            &mut self.tx,
-            &delete_svc::null_event_messages_sql(message_ids.len()),
-            message_ids,
-        )
-        .await
-    }
-
-    async fn delete_chat_messages(
-        &mut self,
-        message_ids: &[Uuid],
-    ) -> Result<(), revoke::RevokeError> {
-        exec_in_ids(
-            &mut self.tx,
-            &delete_svc::delete_chat_messages_sql(message_ids.len()),
-            message_ids,
-        )
-        .await
-    }
-
-    async fn delete_chat_sessions(&mut self, chat_ids: &[Uuid]) -> Result<(), revoke::RevokeError> {
-        exec_in_ids(
-            &mut self.tx,
-            &delete_svc::delete_chat_sessions_sql(chat_ids.len()),
-            chat_ids,
-        )
-        .await
-    }
-
-    async fn delete_runner_rows(&mut self, runner_ids: &[Uuid]) -> Result<(), revoke::RevokeError> {
-        exec_in_ids(
-            &mut self.tx,
-            &delete_svc::delete_runner_rows_sql(runner_ids.len()),
-            runner_ids,
-        )
-        .await
-    }
-
-    async fn fetch_machine_for_delete(
-        &mut self,
-        machine_id: Uuid,
-    ) -> Result<bool, revoke::RevokeError> {
-        let row: Option<sqlx::postgres::PgRow> = sqlx::query(delete_svc::COLLECT_MACHINE_BY_ID_SQL)
-            .bind(machine_id)
-            .fetch_optional(&mut *self.tx)
-            .await
-            .map_err(store_err)?;
-        Ok(row.is_some())
-    }
-
-    async fn delete_machine_sessions(
-        &mut self,
-        machine_id: Uuid,
-    ) -> Result<(), revoke::RevokeError> {
-        sqlx::query(delete_svc::DELETE_MACHINE_SESSIONS_SQL)
-            .bind(machine_id)
-            .execute(&mut *self.tx)
-            .await
-            .map_err(store_err)?;
-        Ok(())
-    }
-
-    async fn null_runner_machines(&mut self, machine_id: Uuid) -> Result<(), revoke::RevokeError> {
-        sqlx::query(delete_svc::NULL_RUNNER_MACHINES_SQL)
-            .bind(machine_id)
-            .execute(&mut *self.tx)
-            .await
-            .map_err(store_err)?;
-        Ok(())
-    }
-
-    async fn null_token_machines(&mut self, machine_id: Uuid) -> Result<(), revoke::RevokeError> {
-        pidash_services::domain::tokens::clear_token_dev_machines(&mut *self.tx, machine_id)
-            .await
-            .map_err(store_err)?;
-        Ok(())
-    }
-
-    async fn delete_machine_row(&mut self, machine_id: Uuid) -> Result<(), revoke::RevokeError> {
-        sqlx::query(delete_svc::DELETE_MACHINE_ROW_SQL)
-            .bind(machine_id)
-            .execute(&mut *self.tx)
-            .await
-            .map_err(store_err)?;
-        Ok(())
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Handler (`views/runner.py:44-57`)
 // ---------------------------------------------------------------------------
 
@@ -919,6 +327,18 @@ async fn proxy_through(
         .expect("rebuild proxy request");
     *req.headers_mut() = headers;
     crate::edge::proxy(State(state), req).await
+}
+
+/// The revoke runtime facts: the pool, the api-owned Redis client,
+/// and runner settings. Frames and close run on the revoke tx (see
+/// the jobs module docs).
+fn revoke_ctx(pool: &PgPool, state: &AppState) -> RevokeCtx {
+    RevokeCtx {
+        pool: pool.clone(),
+        redis: redis_client(state),
+        runner: state.settings().runner.clone(),
+        atomic_effects: true,
+    }
 }
 
 /// `DELETE /api/v1/runners/<runner_id>/`: by-pk 404, view-guard 404,
@@ -1000,80 +420,82 @@ pub async fn delete_runner(
             Ok(flag) => flag,
             Err(_) => return bad_purge_flag(),
         };
-    let mut store = DeleteStore {
-        tx: match pool.begin().await {
-            Ok(tx) => tx,
-            Err(_) => return server_error(),
-        },
-        redis: redis_client(&state),
-        runner_settings: state.settings().runner.clone(),
-        handoffs: Vec::new(),
-        drains: Vec::new(),
-        cleanups: Vec::new(),
-        run_effects: Vec::new(),
+    let ctx = revoke_ctx(&pool, &state);
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(_) => return server_error(),
     };
-    let outcome = match delete_svc::delete_runner(
-        &mut store,
-        runner_id,
-        runner.revoked_at,
-        purge_local,
-        now_micros(),
+    let collected = match revoke(
+        &ctx,
+        &mut tx,
+        RevokeScope::DeleteRunner {
+            runner_id,
+            revoked_at: runner.revoked_at,
+            purge_local,
+            now: now_micros(),
+        },
     )
     .await
     {
-        Ok(outcome) => outcome,
+        Ok(collected) => collected,
         Err(error) => {
             tracing::warn!(%error, "v1_cli_auth delete store failure");
             return server_error();
         }
     };
-    for warning in &outcome.warnings {
+    for warning in &collected.warnings {
         tracing::warn!("{warning}");
     }
-    let DeleteStore {
-        tx,
-        redis,
-        handoffs,
-        drains,
-        cleanups,
-        mut run_effects,
-        ..
-    } = store;
+    let bundle = collected.bundle;
     if tx.commit().await.is_err() {
         return server_error();
     }
     // Post-commit drain in registration order: the per-run
     // terminal-effects publications first, then the handoffs, the pod
     // drains, and the stream-cleanup scheduling.
-    for run_id in handoffs {
-        run_effects.push(LifecycleEffect::CompleteProjectMoveHandoff { run_id });
-    }
-    for pod_id in drains {
-        run_effects.push(LifecycleEffect::DrainPod { pod_id });
-    }
     // API-token request: the crum user is the token owner.
     let terminal_created_by = Some(caller.user_id);
-    if let Err(response) = drain_lifecycle_effects(
-        &pool,
-        &LivePorts::new(pool.clone(), &state),
-        run_effects,
-        terminal_created_by,
+    let ports = LivePorts::new(pool.clone(), &state);
+    let pool_ref = &pool;
+    let ports_ref = &ports;
+    // Each lifecycle arm below never fails (it logs internally and
+    // answers `Ok`), so the results discard, as the merged drain did;
+    // only drains and cleanup propagate, as the server error.
+    if fire_revoke_bundle(
+        &ctx,
+        bundle,
+        |run_id| async move {
+            let _ = drain_lifecycle_effects(
+                pool_ref,
+                ports_ref,
+                vec![LifecycleEffect::PublishTerminalEffects { run_id }],
+                terminal_created_by,
+            )
+            .await;
+        },
+        |run_id| async move {
+            let _ = drain_lifecycle_effects(
+                pool_ref,
+                ports_ref,
+                vec![LifecycleEffect::ApplyTerminalEffectsInline { run_id }],
+                terminal_created_by,
+            )
+            .await;
+        },
+        |_, run_id| async move {
+            let _ = drain_lifecycle_effects(
+                pool_ref,
+                ports_ref,
+                vec![LifecycleEffect::CompleteProjectMoveHandoff { run_id }],
+                terminal_created_by,
+            )
+            .await;
+        },
     )
     .await
+    .is_err()
     {
-        return response;
-    }
-    for runner_id in cleanups {
-        if outbox::schedule_stream_cleanup_for_runner(
-            redis.as_ref(),
-            &state.settings().runner,
-            &runner_id.to_string(),
-        )
-        .await
-        .is_err()
-        {
-            return server_error();
-        }
+        return server_error();
     }
     no_content()
 }

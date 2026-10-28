@@ -3203,6 +3203,7 @@ dependencies = [
  "hmac 0.13.0",
  "html5ever 0.39.0",
  "idna",
+ "jsonwebtoken",
  "markup5ever_rcdom",
  "md-5 0.10.6",
  "minijinja",

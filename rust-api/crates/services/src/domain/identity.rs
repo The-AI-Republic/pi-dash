@@ -528,6 +528,20 @@ pub async fn get_agent_system_user(
     ))
 }
 
+/// [`get_agent_system_user`] (`orchestration/workpad.py:44-71`) on its
+/// own transaction: the id other writers stamp as the ambient crum
+/// user for pause/failure comments. Own transaction, since the flow
+/// issues `SAVEPOINT`s on the insert path. Moved from the api ports
+/// (`runner_runs::LivePorts::agent_system_user_id`, OVL-06
+/// PIDASHCONV-1544); the ports method is now a thin caller.
+/// Re-exported through `pidash-sdk::ops`.
+pub async fn agent_system_user_id(pool: &sqlx::PgPool) -> Result<Uuid, GetAgentUserError> {
+    let mut tx = pool.begin().await?;
+    let (user, _) = get_agent_system_user(&mut tx, Utc::now()).await?;
+    tx.commit().await?;
+    Ok(user.id)
+}
+
 // ---------------------------------------------------------------------------
 // save_user_data (login stamps; dynamic SET over the per-path columns)
 // ---------------------------------------------------------------------------

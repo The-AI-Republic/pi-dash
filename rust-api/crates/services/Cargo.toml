@@ -67,8 +67,14 @@ redis = { version = "1", default-features = false, features = ["tokio-rustls-com
 # pidash-api, minus `stream` which the ops client does not need).
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots"] }
 # D-37 wait loops: sleep/timeout only (the runtime comes from the binary;
-# macros/rt stay dev-only for the async unit tests below).
-tokio = { version = "1", features = ["time"] }
+# macros stay dev-only for the async unit tests below). OVL-06
+# (PIDASHCONV-1544): the GitHub sync transport builds its own
+# current-thread runtime in `run_sync`, so `rt` joins the main build
+# (same locked tokio 1.x — features are not in the lockfile).
+tokio = { version = "1", features = ["time", "rt"] }
+# OVL-06 GitHub App JWT mint (moved from the api twins; same locked
+# jsonwebtoken 9.x as pidash-api — no lock churn).
+jsonwebtoken = "9"
 # D-37 SigV4: reuse the shared hashing helper; the storage crate itself
 # stays read-only (its fixed-shape sign_* helpers cannot sign the
 # query-bearing list/policy requests, so ops signs those itself).
