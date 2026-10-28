@@ -845,6 +845,7 @@ where
 /// is caller-generated (each path keeps its `'#' + six hexdigits`
 /// draw). Returns the fresh `{id, false, None}` on insert — the values
 /// the gitea path used to re-`SELECT`, minus the redundant read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProfilePath {
     pub id: Uuid,
     pub is_onboarded: bool,
@@ -873,6 +874,73 @@ const PROFILE_DEFAULT_INSERT_SQL: &str = "INSERT INTO \"profiles\"
      '{\"work_items\": false, \"cycles\": false, \"modules\": false, \"intake\": false, \
        \"pages\": false}', '{}')";
 
+const SET_PROFILE_LAST_WORKSPACE_SQL: &str =
+    "UPDATE \"profiles\" SET \"updated_at\" = $1, \"last_workspace_id\" = $2 WHERE \"id\" = $3";
+
+async fn fetch_profile_path<'e, E>(ex: E, user_id: Uuid) -> Result<Option<ProfilePath>, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let row: Option<(Uuid, bool, Option<Uuid>)> = sqlx::query_as(PROFILE_PATH_SELECT_SQL)
+        .bind(user_id)
+        .fetch_optional(ex)
+        .await?;
+    Ok(
+        row.map(|(id, is_onboarded, last_workspace_id)| ProfilePath {
+            id,
+            is_onboarded,
+            last_workspace_id,
+        }),
+    )
+}
+
+/// The `get_or_create` create leg on its own: the default profile row
+/// for `user_id` ([`PROFILE_DEFAULT_INSERT_SQL`], same values
+/// [`get_or_create_profile`] inserts). Returns the new row id.
+///
+/// Race contract: a lost create race surfaces SQLSTATE 23505 from the
+/// `user_id` unique index. Callers outside an explicit transaction
+/// re-probe on it (that is [`get_or_create_profile`]); callers inside
+/// one must hold a savepoint across this call — Django's inner
+/// `atomic()` nests to a savepoint there
+/// (`db/models/query.py:get_or_create`) — roll back to it on 23505,
+/// and re-probe. Any other error propagates untouched.
+pub async fn insert_default_profile<'e, E>(
+    ex: E,
+    user_id: Uuid,
+    now: DateTime<Utc>,
+    background_color: &str,
+) -> Result<Uuid, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let id = Uuid::new_v4();
+    sqlx::query(PROFILE_DEFAULT_INSERT_SQL)
+        .bind(id)
+        .bind(now)
+        .bind(user_id)
+        .bind(background_color)
+        .execute(ex)
+        .await?;
+    Ok(id)
+}
+
+/// `Profile.objects.get_or_create(user=user)`, race-tolerant:
+/// probe, else [`insert_default_profile`], else — on a 23505 lost
+/// create race — re-probe and return the winner's row, exactly
+/// Django's `except IntegrityError: return self.get(**kwargs)`
+/// (`db/models/query.py:get_or_create`). When the re-probe still
+/// misses, the original 23505 error is returned, never `RowNotFound`
+/// (Django re-raises there); any non-23505 insert error propagates
+/// without a re-probe.
+///
+/// Race-tolerant on executors outside an explicit transaction (the
+/// pool, which is what every caller passes): a failed `INSERT` there
+/// aborts no transaction, so the re-probe still runs. Callers inside
+/// an explicit transaction must hold a savepoint across the whole
+/// call, or compose the probe with [`insert_default_profile`] under
+/// their own savepoint (its race contract) — otherwise the failed
+/// insert aborts their transaction and the re-probe fails with it.
 pub async fn get_or_create_profile<'e, E>(
     ex: E,
     user_id: Uuid,
@@ -882,30 +950,46 @@ pub async fn get_or_create_profile<'e, E>(
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres> + Copy,
 {
-    let row: Option<(Uuid, bool, Option<Uuid>)> = sqlx::query_as(PROFILE_PATH_SELECT_SQL)
-        .bind(user_id)
-        .fetch_optional(ex)
-        .await?;
-    if let Some((id, is_onboarded, last_workspace_id)) = row {
-        return Ok(ProfilePath {
-            id,
-            is_onboarded,
-            last_workspace_id,
-        });
+    if let Some(path) = fetch_profile_path(ex, user_id).await? {
+        return Ok(path);
     }
-    let id = Uuid::new_v4();
-    sqlx::query(PROFILE_DEFAULT_INSERT_SQL)
-        .bind(id)
+    match insert_default_profile(ex, user_id, now, background_color).await {
+        Ok(id) => Ok(ProfilePath {
+            id,
+            is_onboarded: false,
+            last_workspace_id: None,
+        }),
+        Err(insert) if is_unique_violation(&insert) => match fetch_profile_path(ex, user_id).await?
+        {
+            Some(path) => Ok(path),
+            None => Err(insert),
+        },
+        Err(insert) => Err(insert),
+    }
+}
+
+/// `profile.save(update_fields=["last_workspace_id", "updated_at"])`:
+/// point `last_workspace_id` at `workspace_id`, restamping
+/// `updated_at` to `now`. The `SET` lists `updated_at` first —
+/// `_meta` field order, where the `TimeAuditModel` `auto_now` stamp
+/// (`db/mixins.py:20`) precedes every concrete `Profile` field
+/// (`db/models/user.py:200-273`). Runs on the caller's executor.
+pub async fn set_profile_last_workspace<'e, E>(
+    ex: E,
+    profile_id: Uuid,
+    workspace_id: Uuid,
+    now: DateTime<Utc>,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(SET_PROFILE_LAST_WORKSPACE_SQL)
         .bind(now)
-        .bind(user_id)
-        .bind(background_color)
+        .bind(workspace_id)
+        .bind(profile_id)
         .execute(ex)
-        .await?;
-    Ok(ProfilePath {
-        id,
-        is_onboarded: false,
-        last_workspace_id: None,
-    })
+        .await
+        .map(|_| ())
 }
 
 // ---------------------------------------------------------------------------
@@ -2177,5 +2261,411 @@ mod tests {
             .await
             .expect_err("email shape fails identically");
         assert_not_null_violation(&err);
+    }
+
+    // -- PIDASHCONV-1615: race-tolerant profile get_or_create + setter ----
+
+    #[test]
+    fn profile_path_select_sql_pins() {
+        assert_eq!(
+            PROFILE_PATH_SELECT_SQL,
+            "SELECT \"id\", \"is_onboarded\", \"last_workspace_id\" FROM \"profiles\" \
+             WHERE \"user_id\" = $1 LIMIT 1"
+        );
+    }
+
+    #[test]
+    fn profile_default_insert_sql_pins() {
+        let sql = PROFILE_DEFAULT_INSERT_SQL;
+        assert!(
+            sql.starts_with("INSERT INTO \"profiles\""),
+            "profiles insert"
+        );
+        assert!(
+            sql.contains("VALUES ($1, $2, $2, $3,"),
+            "id, now, now, user binds"
+        );
+        for literal in ["'INDIA'", "'full'", "'en'", "'{}'", "$4"] {
+            assert!(sql.contains(literal), "insert carries {literal}");
+        }
+        assert!(sql.contains(", '', '"), "company_name ''");
+        assert!(
+            sql.contains("\"workspace_invite\": false"),
+            "full onboarding json"
+        );
+        assert!(sql.contains("\"work_items\": false"), "product tour json");
+        assert!(sql.ends_with("'{}')"), "settings {{}} tail");
+    }
+
+    #[test]
+    fn set_profile_last_workspace_sql_pins() {
+        assert_eq!(
+            SET_PROFILE_LAST_WORKSPACE_SQL,
+            "UPDATE \"profiles\" SET \"updated_at\" = $1, \"last_workspace_id\" = $2 WHERE \"id\" = $3"
+        );
+    }
+
+    /// The 30 `profiles` columns both race-table DDLs share: the
+    /// `PROFILES_DDL` column set plus the production `user_id` unique
+    /// index the get_or_create race arm keys on. One const so the
+    /// temp-table tests and the permanent race table cannot drift.
+    const PROFILES_UNIQUE_COLUMNS: &str = "(
+        id UUID PRIMARY KEY, created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL, user_id UUID NOT NULL UNIQUE,
+        theme JSONB NOT NULL, is_app_rail_docked BOOLEAN NOT NULL,
+        is_tour_completed BOOLEAN NOT NULL, onboarding_step JSONB NOT NULL,
+        use_case TEXT, role TEXT, is_onboarded BOOLEAN NOT NULL,
+        last_workspace_id UUID, billing_address_country TEXT NOT NULL,
+        billing_address JSONB, has_billing_address BOOLEAN NOT NULL,
+        company_name TEXT NOT NULL, notification_view_mode TEXT NOT NULL,
+        is_smooth_cursor_enabled BOOLEAN NOT NULL,
+        is_mobile_onboarded BOOLEAN NOT NULL,
+        mobile_onboarding_step JSONB NOT NULL,
+        mobile_timezone_auto_set BOOLEAN NOT NULL, language TEXT NOT NULL,
+        start_of_the_week SMALLINT NOT NULL, goals JSONB NOT NULL,
+        background_color TEXT NOT NULL,
+        is_navigation_tour_completed BOOLEAN NOT NULL,
+        has_marketing_email_consent BOOLEAN NOT NULL,
+        is_subscribed_to_changelog BOOLEAN NOT NULL,
+        product_tour JSONB NOT NULL, settings JSONB NOT NULL)";
+
+    /// Temp-table DDL over [`PROFILES_UNIQUE_COLUMNS`].
+    fn temp_profiles_ddl() -> String {
+        format!("CREATE TEMPORARY TABLE profiles {PROFILES_UNIQUE_COLUMNS}")
+    }
+
+    /// Permanent twin for the true-concurrency race test: temp tables
+    /// are session-private, so racers on separate pool connections
+    /// need a shared table. No FKs — the race inserts a parentless
+    /// row, and the test skips on migrated scratch DBs (see below).
+    fn race_profiles_ddl() -> String {
+        format!("CREATE TABLE IF NOT EXISTS profiles {PROFILES_UNIQUE_COLUMNS}")
+    }
+
+    /// Create leg stores every Django model default
+    /// (`db/models/user.py:200-273`), found leg returns the same row,
+    /// and the JSONB columns land byte-identical to the same values
+    /// spelled differently (compact, scrambled key order — the JSONB
+    /// input spelling is not part of the stored bytes).
+    #[tokio::test]
+    async fn live_profile_get_or_create_roundtrip_pins_defaults() {
+        let Some(pool) = live_single_pool().await else {
+            return;
+        };
+        sqlx::query(&temp_profiles_ddl())
+            .execute(&pool)
+            .await
+            .expect("temp profiles");
+        let now: DateTime<Utc> = "2026-10-28T12:00:00+00:00".parse().expect("T0");
+        let user_id = live_uuid("000000006151");
+        let background = "#a1b2c3";
+        let fresh = get_or_create_profile(&pool, user_id, now, background)
+            .await
+            .expect("create leg");
+        assert!(!fresh.is_onboarded);
+        assert_eq!(fresh.last_workspace_id, None);
+        let row: sqlx::postgres::PgRow = sqlx::query(
+            "SELECT id, created_at, updated_at, user_id, theme, is_app_rail_docked,
+             is_tour_completed, onboarding_step, use_case, role, is_onboarded,
+             last_workspace_id, billing_address_country, billing_address,
+             has_billing_address, company_name, notification_view_mode,
+             is_smooth_cursor_enabled, is_mobile_onboarded, mobile_onboarding_step,
+             mobile_timezone_auto_set, language, start_of_the_week, goals,
+             background_color, is_navigation_tour_completed,
+             has_marketing_email_consent, is_subscribed_to_changelog,
+             product_tour, settings FROM profiles WHERE user_id = $1",
+        )
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read back");
+        let id: Uuid = row.try_get("id").expect("id");
+        assert_eq!(id, fresh.id);
+        let created_at: DateTime<Utc> = row.try_get("created_at").expect("created_at");
+        let updated_at: DateTime<Utc> = row.try_get("updated_at").expect("updated_at");
+        assert_eq!(created_at, now);
+        assert_eq!(updated_at, now);
+        let theme: serde_json::Value = row.try_get("theme").expect("theme");
+        assert_eq!(theme, serde_json::json!({}));
+        let docked: bool = row.try_get("is_app_rail_docked").expect("docked");
+        assert!(docked);
+        let tour: bool = row.try_get("is_tour_completed").expect("tour");
+        assert!(!tour);
+        let onboarding: serde_json::Value = row.try_get("onboarding_step").expect("onboarding");
+        assert_eq!(
+            onboarding,
+            serde_json::json!({
+                "profile_complete": false,
+                "workspace_create": false,
+                "workspace_invite": false,
+                "workspace_join": false,
+            })
+        );
+        let use_case: Option<String> = row.try_get("use_case").expect("use_case");
+        assert_eq!(use_case, None);
+        let role: Option<String> = row.try_get("role").expect("role");
+        assert_eq!(role, None);
+        let onboarded: bool = row.try_get("is_onboarded").expect("onboarded");
+        assert!(!onboarded);
+        let country: String = row.try_get("billing_address_country").expect("country");
+        assert_eq!(country, "INDIA");
+        let address: Option<serde_json::Value> = row.try_get("billing_address").expect("address");
+        assert_eq!(address, None);
+        let has_address: bool = row.try_get("has_billing_address").expect("has_address");
+        assert!(!has_address);
+        let company: String = row.try_get("company_name").expect("company");
+        assert_eq!(company, "");
+        let view_mode: String = row.try_get("notification_view_mode").expect("view_mode");
+        assert_eq!(view_mode, "full");
+        let smooth: bool = row.try_get("is_smooth_cursor_enabled").expect("smooth");
+        assert!(!smooth);
+        let mobile: bool = row.try_get("is_mobile_onboarded").expect("mobile");
+        assert!(!mobile);
+        let mobile_step: serde_json::Value =
+            row.try_get("mobile_onboarding_step").expect("mobile_step");
+        assert_eq!(
+            mobile_step,
+            serde_json::json!({
+                "profile_complete": false,
+                "workspace_create": false,
+                "workspace_join": false,
+            })
+        );
+        let tz_auto: bool = row.try_get("mobile_timezone_auto_set").expect("tz_auto");
+        assert!(!tz_auto);
+        let language: String = row.try_get("language").expect("language");
+        assert_eq!(language, "en");
+        let week_start: i16 = row.try_get("start_of_the_week").expect("week_start");
+        assert_eq!(week_start, 0);
+        let goals: serde_json::Value = row.try_get("goals").expect("goals");
+        assert_eq!(goals, serde_json::json!({}));
+        let stored_bg: String = row.try_get("background_color").expect("bg");
+        assert_eq!(stored_bg, background);
+        let nav_tour: bool = row
+            .try_get("is_navigation_tour_completed")
+            .expect("nav_tour");
+        assert!(!nav_tour);
+        let marketing: bool = row
+            .try_get("has_marketing_email_consent")
+            .expect("marketing");
+        assert!(!marketing);
+        let changelog: bool = row
+            .try_get("is_subscribed_to_changelog")
+            .expect("changelog");
+        assert!(!changelog);
+        let tour_json: serde_json::Value = row.try_get("product_tour").expect("product_tour");
+        assert_eq!(
+            tour_json,
+            serde_json::json!({
+                "work_items": false,
+                "cycles": false,
+                "modules": false,
+                "intake": false,
+                "pages": false,
+            })
+        );
+        let settings: serde_json::Value = row.try_get("settings").expect("settings");
+        assert_eq!(settings, serde_json::json!({}));
+        // The stored JSONB bytes equal the same values spelled
+        // compactly with scrambled key order: literal spelling is not
+        // part of the stored row.
+        let canonical: (bool, bool, bool) = sqlx::query_as(
+            "SELECT onboarding_step::text = '{\"workspace_join\": false, \
+             \"profile_complete\": false, \"workspace_create\": false, \
+             \"workspace_invite\": false}'::jsonb::text,
+             mobile_onboarding_step::text = '{\"workspace_join\": false, \
+             \"profile_complete\": false, \
+             \"workspace_create\": false}'::jsonb::text,
+             product_tour::text = '{\"pages\": false, \"work_items\": false, \
+             \"cycles\": false, \"modules\": false, \
+             \"intake\": false}'::jsonb::text FROM profiles WHERE user_id = $1",
+        )
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .expect("canonical bytes");
+        assert!(canonical.0 && canonical.1 && canonical.2);
+        // Found leg: same row, no second insert.
+        let found = get_or_create_profile(&pool, user_id, now, "#ffffff")
+            .await
+            .expect("found leg");
+        assert_eq!(found, fresh);
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM profiles WHERE user_id = $1")
+            .bind(user_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+        assert_eq!(count.0, 1);
+    }
+
+    /// A racing loser's insert surfaces SQLSTATE 23505 — the trigger
+    /// the [`get_or_create_profile`] re-probe arm and the documented
+    /// [`insert_default_profile`] savepoint contract key on.
+    #[tokio::test]
+    async fn live_profile_insert_duplicate_surfaces_unique_violation() {
+        let Some(pool) = live_single_pool().await else {
+            return;
+        };
+        let mut tx = pool.begin().await.expect("begin scratch tx");
+        sqlx::query(&temp_profiles_ddl())
+            .execute(&mut *tx)
+            .await
+            .expect("temp profiles");
+        let now: DateTime<Utc> = "2026-10-28T12:00:00+00:00".parse().expect("T0");
+        let user_id = live_uuid("000000006152");
+        insert_default_profile(&mut *tx, user_id, now, "#a1b2c3")
+            .await
+            .expect("first insert");
+        sqlx::query("SAVEPOINT sp_profile_race")
+            .execute(&mut *tx)
+            .await
+            .expect("savepoint");
+        let raced = insert_default_profile(&mut *tx, user_id, now, "#d4e5f6").await;
+        sqlx::query("ROLLBACK TO SAVEPOINT sp_profile_race")
+            .execute(&mut *tx)
+            .await
+            .expect("rollback");
+        let err = raced.expect_err("duplicate user_id fails");
+        assert!(is_unique_violation(&err), "got {err:?}");
+    }
+
+    /// Sixteen racers on separate pool connections converge: every
+    /// call returns the same row and exactly one row lands. Skipped on
+    /// migrated scratch DBs, where `profiles` carries FKs to `users`
+    /// and the parentless race row cannot land.
+    #[tokio::test]
+    async fn live_profile_get_or_create_race_converges_one_row() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let fk: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM pg_constraint
+             WHERE conrelid = to_regclass('profiles') AND contype = 'f'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("fk probe");
+        if fk.0 > 0 {
+            eprintln!("skipping race test: scratch profiles carries FKs (migrated DB)");
+            return;
+        }
+        sqlx::query(&race_profiles_ddl())
+            .execute(&pool)
+            .await
+            .expect("race profiles table");
+        let now: DateTime<Utc> = "2026-10-28T12:00:00+00:00".parse().expect("T0");
+        let user_id = Uuid::new_v4();
+        sqlx::query("DELETE FROM profiles WHERE user_id = $1")
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .expect("clean slate");
+        const RACERS: usize = 16;
+        let gate = Arc::new(AtomicUsize::new(0));
+        let mut tasks = Vec::with_capacity(RACERS);
+        for _ in 0..RACERS {
+            let (pool, gate) = (pool.clone(), gate.clone());
+            tasks.push(tokio::spawn(async move {
+                gate.fetch_add(1, Ordering::SeqCst);
+                while gate.load(Ordering::SeqCst) < RACERS {
+                    tokio::task::yield_now().await;
+                }
+                get_or_create_profile(&pool, user_id, now, "#1615a1").await
+            }));
+        }
+        let mut winner: Option<Uuid> = None;
+        for task in tasks {
+            let path = task.await.expect("racer joins").expect("racer gets a row");
+            assert!(!path.is_onboarded);
+            assert_eq!(path.last_workspace_id, None);
+            match winner {
+                Some(id) => assert_eq!(path.id, id, "every racer sees the same row"),
+                None => winner = Some(path.id),
+            }
+        }
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM profiles WHERE user_id = $1")
+            .bind(user_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+        assert_eq!(count.0, 1, "exactly one row wins");
+        sqlx::query("DELETE FROM profiles WHERE user_id = $1")
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup");
+    }
+
+    /// The setter restamps `updated_at` and repoints
+    /// `last_workspace_id`, twice in a row; every other column of the
+    /// row and every other row stays untouched.
+    #[tokio::test]
+    async fn live_set_profile_last_workspace_stamps_two_columns() {
+        let Some(pool) = live_single_pool().await else {
+            return;
+        };
+        sqlx::query(&temp_profiles_ddl())
+            .execute(&pool)
+            .await
+            .expect("temp profiles");
+        let t0: DateTime<Utc> = "2026-10-28T12:00:00+00:00".parse().expect("T0");
+        let t1: DateTime<Utc> = "2026-10-28T12:00:01+00:00".parse().expect("T1");
+        let t2: DateTime<Utc> = "2026-10-28T12:00:02+00:00".parse().expect("T2");
+        let user_a = live_uuid("000000006153");
+        let user_b = live_uuid("000000006154");
+        let background = "#a1b2c3";
+        let a = get_or_create_profile(&pool, user_a, t0, background)
+            .await
+            .expect("row a");
+        let b = get_or_create_profile(&pool, user_b, t0, background)
+            .await
+            .expect("row b");
+        let ws1 = live_uuid("000000006155");
+        let ws2 = live_uuid("000000006156");
+        set_profile_last_workspace(&pool, a.id, ws1, t1)
+            .await
+            .expect("first stamp");
+        let row: sqlx::postgres::PgRow = sqlx::query(
+            "SELECT updated_at, last_workspace_id, is_onboarded, company_name,
+             background_color, created_at FROM profiles WHERE id = $1",
+        )
+        .bind(a.id)
+        .fetch_one(&pool)
+        .await
+        .expect("read back a");
+        let stamped: DateTime<Utc> = row.try_get("updated_at").expect("updated_at");
+        assert_eq!(stamped, t1);
+        let last: Option<Uuid> = row.try_get("last_workspace_id").expect("last");
+        assert_eq!(last, Some(ws1));
+        let onboarded: bool = row.try_get("is_onboarded").expect("onboarded");
+        assert!(!onboarded);
+        let company: String = row.try_get("company_name").expect("company");
+        assert_eq!(company, "");
+        let stored_bg: String = row.try_get("background_color").expect("bg");
+        assert_eq!(stored_bg, background);
+        let created: DateTime<Utc> = row.try_get("created_at").expect("created");
+        assert_eq!(created, t0);
+        let other: (DateTime<Utc>, Option<Uuid>) =
+            sqlx::query_as("SELECT updated_at, last_workspace_id FROM profiles WHERE id = $1")
+                .bind(b.id)
+                .fetch_one(&pool)
+                .await
+                .expect("read back b");
+        assert_eq!(other, (t0, None));
+        set_profile_last_workspace(&pool, a.id, ws2, t2)
+            .await
+            .expect("second stamp");
+        let moved: (DateTime<Utc>, Option<Uuid>) =
+            sqlx::query_as("SELECT updated_at, last_workspace_id FROM profiles WHERE id = $1")
+                .bind(a.id)
+                .fetch_one(&pool)
+                .await
+                .expect("read back a again");
+        assert_eq!(moved, (t2, Some(ws2)));
     }
 }
