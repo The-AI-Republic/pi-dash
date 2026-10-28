@@ -1470,13 +1470,6 @@ pub const COMMENT_DESCRIPTION_INSERT_SQL: &str = "INSERT INTO descriptions \
 pub const COMMENT_DESCRIPTION_LINK_SQL: &str =
     "UPDATE issue_comments SET description_id = $2 WHERE id = $1";
 
-/// `pidash_update_current_issue_workpad` (`tools.py:300-307`):
-/// `Issue.objects.filter(pk, project_id).update(workpad, updated_at)`.
-/// `$1` issue id, `$2` project id, `$3` body, `$4` now.
-pub const WORKPAD_UPDATE_SQL: &str =
-    "UPDATE issues SET workpad = $3, updated_at = $4 WHERE id = $1 AND project_id = $2 \
-     AND deleted_at IS NULL";
-
 /// `pidash_transition_current_issue` target lookup (`tools.py:313`):
 /// `State.objects.get(pk=state_id, project_id)`. `$1` state id, `$2`
 /// project id.
@@ -1492,17 +1485,6 @@ pub const TRANSITION_STATE_GET_SQL: &str = "SELECT states.id, states.name FROM s
 pub const TRANSITION_ISSUE_LOCK_SQL: &str = "SELECT issues.id, issues.state_id FROM issues \
      LEFT OUTER JOIN states ON states.id = issues.state_id \
      WHERE issues.id = $1 AND issues.deleted_at IS NULL FOR UPDATE OF issues";
-
-/// `pidash_transition_current_issue` save (`tools.py:334-335`):
-/// `locked.save(update_fields=["state", "updated_at", "updated_by"])`
-/// under `impersonate(run.created_by)`. `$1` issue, `$2` state, `$3`
-/// now, `$4` actor. The caller then routes through
-/// `orchestration.handle_issue_state_transition` (D-12 seam) with the
-/// run stamped as the mover (`MOVED_BY_RUN_ATTR`, `tools.py:331-340`):
-/// the ticker must treat it as an agent move, like the local runner's
-/// CLI header.
-pub const TRANSITION_ISSUE_SAVE_SQL: &str =
-    "UPDATE issues SET state_id = $2, updated_at = $3, updated_by_id = $4 WHERE id = $1";
 
 /// `pidash_create_project_issue` project lock (`tools.py:351`):
 /// `Project.objects.select_for_update().get(pk)`. `$1` project id.
@@ -1610,44 +1592,6 @@ pub fn saved_sort_order(largest_sort_order: Option<f64>) -> f64 {
 /// soft-delete-excluding `PodManager`. `$1` project id.
 pub const CREATE_DEFAULT_POD_SQL: &str = "SELECT id FROM pod WHERE project_id = $1 \
      AND is_default AND deleted_at IS NULL ORDER BY is_default DESC, created_at ASC LIMIT 1";
-
-/// `pidash_create_project_issue` insert (`tools.py:357-368` through
-/// `Issue.save`, `db/models/issue.py:267-341`): `Issue.objects.create(
-/// workspace, project, state, name=title.strip(),
-/// description_html=to_safe_html(description), description_json={},
-/// sequence_id=seq, created_by, created_via="cloud_agent")`, then
-/// save-derived columns. Full column list with the Django-side defaults
-/// (`priority`, `complexity_score`, `git_work_branch`, `workpad` have no
-/// DB default to fall back on). `$1` id, `$2`/`$3` now, `$4` creator,
-/// `$5` project, `$6` workspace, `$7` state (tool-resolved, else the
-/// save repair), `$8` stripped title, `$9` safe HTML
-/// (assistant-markdown seam), `$10` `description_stripped`
-/// (`strip_tags` of `$9`, NULL when `$9` is empty — Django-side), `$11`
-/// the effective [`saved_sequence_id`] (the tool's `seq` is
-/// overwritten), `$12` `sort_order` ([`saved_sort_order`]), `$13`
-/// `completed_at` (now when a tool-supplied state has group
-/// `completed`, else NULL — a save-resolved state is never stamped),
-/// `$14` `assigned_pod_id` ([`CREATE_DEFAULT_POD_SQL`], NULL when none).
-pub const CREATE_ISSUE_INSERT_SQL: &str = "INSERT INTO issues \
-     (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, \
-     workspace_id, parent_id, state_id, point, estimate_point_id, name, description_json, \
-     description_html, description_stripped, description_binary, priority, complexity_score, \
-     start_date, target_date, sequence_id, sort_order, completed_at, archived_at, is_draft, \
-     external_source, external_id, type_id, git_work_branch, workpad, created_via, \
-     assigned_pod_id, agent_executor) VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, NULL, $7, \
-     NULL, NULL, $8, '{}', $9, $10, NULL, 'none', 0, NULL, NULL, $11, $12, $13, NULL, FALSE, \
-     NULL, NULL, NULL, '', '', 'cloud_agent', $14, NULL)";
-
-/// `Issue.save()` sequence row (`db/models/issue.py:341`):
-/// `IssueSequence.objects.create(issue, sequence, project)` (workspace
-/// follows from the project via `ProjectBaseModel.save`; `created_by_id`
-/// is the actor — the create runs inside `impersonate`). `$1` id, `$2`
-/// now (both audit timestamps), `$3` actor, `$4` project, `$5`
-/// workspace, `$6` issue, `$7` the effective sequence.
-pub const CREATE_ISSUE_SEQUENCE_INSERT_SQL: &str = "INSERT INTO issue_sequences \
-     (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, \
-     workspace_id, issue_id, sequence, deleted) \
-     VALUES ($1, $2, $2, $3, NULL, NULL, $4, $5, $6, $7, FALSE)";
 
 /// `_relation_scope` own-project narrowing (`tools.py:379-384`):
 /// `visible.filter(project_id=...)`, ANDed onto the visible pool. The
@@ -3081,8 +3025,6 @@ mod tests {
             LEDGER_INSERT_READ_SQL,
             COMMENT_INSERT_SQL,
             COMMENT_DESCRIPTION_INSERT_SQL,
-            CREATE_ISSUE_INSERT_SQL,
-            CREATE_ISSUE_SEQUENCE_INSERT_SQL,
         ] {
             assert_eq!(insert_arity(sql).0, insert_arity(sql).1, "{sql}");
         }
@@ -3143,11 +3085,9 @@ mod tests {
         assert!(COMMENT_DESCRIPTION_INSERT_SQL.contains("INSERT INTO descriptions"));
         assert!(COMMENT_DESCRIPTION_INSERT_SQL.contains("description_binary"));
         assert!(COMMENT_DESCRIPTION_LINK_SQL.contains("description_id = $2"));
-        assert!(WORKPAD_UPDATE_SQL.contains("SET workpad = $3"));
         assert!(TRANSITION_STATE_GET_SQL.contains("FROM states"));
         assert!(TRANSITION_ISSUE_LOCK_SQL.contains("FOR UPDATE OF issues"));
         assert!(!TRANSITION_ISSUE_LOCK_SQL.contains("LIMIT"));
-        assert!(TRANSITION_ISSUE_SAVE_SQL.contains("updated_by_id = $4"));
         assert!(CREATE_PROJECT_LOCK_SQL.contains("FOR UPDATE"));
         assert!(CREATE_DEFAULT_STATE_SQL.contains("\"default\""));
         assert!(CREATE_BACKLOG_STATE_SQL.contains("states.group = 'backlog'"));
@@ -3157,11 +3097,6 @@ mod tests {
         assert!(CREATE_SEQ_SCAN_SQL.contains("FROM issue_sequences"));
         assert!(!CREATE_SEQ_SCAN_SQL.contains("deleted ="));
         assert!(CREATE_SORT_ORDER_MAX_SQL.contains("state_id = $2"));
-        assert!(CREATE_ISSUE_INSERT_SQL.contains("'cloud_agent'"));
-        assert!(CREATE_ISSUE_INSERT_SQL.contains("'none', 0"));
-        assert!(CREATE_ISSUE_INSERT_SQL.contains("agent_executor"));
-        assert!(CREATE_ISSUE_SEQUENCE_INSERT_SQL.contains("INSERT INTO issue_sequences"));
-        assert!(CREATE_ISSUE_SEQUENCE_INSERT_SQL.contains(", FALSE)"));
         assert!(GITHUB_BINDING_SQL.contains("git_repository_bindings AS b"));
         assert!(GITHUB_INSTALLATION_SQL.contains("ORDER BY created_at DESC LIMIT 1"));
         assert!(LINKED_PR_SQL.contains("namespace = $2 AND repo_name = $3"));

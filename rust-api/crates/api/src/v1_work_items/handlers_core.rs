@@ -72,13 +72,11 @@ use pidash_services::domain::{self, WriteActor, WriteCtx, WriteScope};
 /// Canonical home of the stored-HTML round-trip (PIDASHCONV-1554); kept as
 /// a re-export so existing `handlers_core::lxml_roundtrip` callers keep working.
 pub use pidash_services::html_normalize::lxml_roundtrip;
-use pidash_services::orchestration::entries::{FireOutcome, FireRequest};
 use pidash_services::read::{
     self, DecodedIssue, RenderRequest, ISSUE_EXTRA_COLS, ISSUE_SELECT_COLS,
 };
 use pidash_services::v1_work_items::queries_core as core_queries;
 use pidash_services::v1_work_items::shape_issue as shape;
-use pidash_services::v1_work_items::tasks as work_tasks;
 use pidash_services::v1_work_items::{filter_fields, python_number_str, FieldSpec};
 
 use crate::domain_hooks::AppTaskEnqueueHook;
@@ -113,10 +111,6 @@ pub const EXTERNAL_DUP_MESSAGE: &str =
     "Issue with the same external id and external source already exists";
 /// Delete 403 (`views/issue.py:894-897`).
 pub const DELETE_DENIAL_MESSAGE: &str = "Only admin or creator can delete the work item";
-/// The related-objects sweep enqueued by `SoftDeleteModel.delete()`
-/// (`db/mixins.py:72-78` over `bgtasks/deletion_task.py:18`).
-pub const SOFT_DELETE_TASK: &str = "pi_dash.bgtasks.deletion_task.soft_delete_related_objects";
-
 /// Handler failure with its exact status + body.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Denial {
@@ -241,42 +235,6 @@ fn pool_of(state: &AppState) -> Result<PgPool, Denial> {
         .pools()
         .map(|pools| pools.primary().clone())
         .ok_or(Denial::ServerError)
-}
-
-/// Best-effort post-write task fan-out (the `.delay()` calls): without a
-/// queue table the response still stands (the `v1_projects`
-/// `enqueue_best_effort` precedent).
-async fn enqueue_best_effort(
-    pool: &PgPool,
-    task: &str,
-    args: Vec<Value>,
-    kwargs: Map<String, Value>,
-) {
-    let message = pidash_jobs::TaskMessage::new(task, args, kwargs);
-    let job = pidash_jobs::queue::NewJob::new(
-        message.task.clone(),
-        Value::Array(message.args.clone()),
-        Value::Object(message.kwargs.clone()),
-    );
-    if let Err(error) = pidash_jobs::queue::enqueue(pool, &job).await {
-        tracing::warn!(%error, task, "task enqueue failed; response stands");
-    }
-}
-
-/// The related-objects sweep payload (`SoftDeleteModel.delete()` calls
-/// `.delay(app_label, model_name, pk, using=None)`): positionals
-/// `("db", model, pk)`, kwargs `{"using": null}`.
-fn soft_delete_sweep(model_name: &str, pk: &str) -> (Vec<Value>, Map<String, Value>) {
-    let mut kwargs = Map::with_capacity(1);
-    kwargs.insert("using".to_owned(), Value::Null);
-    (
-        vec![
-            Value::String("db".to_owned()),
-            Value::String(model_name.to_owned()),
-            Value::String(pk.to_owned()),
-        ],
-        kwargs,
-    )
 }
 
 // ---------------------------------------------------------------------------
@@ -4284,20 +4242,6 @@ fn non_dict_body(value: &Value) -> String {
     )
 }
 
-/// Map a save-time failure (`IntegrityError` → 400, anything else → 500):
-/// Django's `IntegrityError` is pgcode class 23 (not-null 23502, FK 23503,
-/// unique 23505, check 23514), so every `23xxx` answers the
-/// payload-not-valid body.
-fn save_error(error: &sqlx::Error, site: &str) -> Denial {
-    let integrity = matches!(error, sqlx::Error::Database(db) if db.code().as_deref().is_some_and(|code| code.starts_with("23")));
-    if integrity {
-        tracing::warn!(%error, site, "v1_work_items core integrity failure");
-        Denial::FieldErrors(PAYLOAD_NOT_VALID_BODY.to_owned())
-    } else {
-        db_error(error, site)
-    }
-}
-
 /// The project facts the write paths read: `Project.objects.get(pk)`
 /// (`views/issue.py:471,793`) 404s through `handle_exception`, and `post`
 /// passes `workspace_id` / `default_assignee_id` into the serializer
@@ -4321,45 +4265,6 @@ async fn fetch_project_for_write(pool: &PgPool, project_id: &Uuid) -> Result<Wri
         }),
         None => Err(Denial::NotFound(RESOURCE_NOT_FOUND_BODY.to_owned())),
     }
-}
-
-/// `Issue.save`'s default-state resolution (`db/models/issue.py:288-301`):
-/// the `default=True` non-triage state of the project, else the first
-/// non-triage state, both in `Meta.ordering = ("sequence",)`. The
-/// `is_triage` exclusion rides beside the manager's `group != 'triage'`
-/// scope; either miss resolves `None` (kept, never an error).
-async fn fetch_default_state(
-    pool: &PgPool,
-    project_id: &Uuid,
-) -> Result<Option<(Uuid, String)>, Denial> {
-    for default_only in [true, false] {
-        let sql = if default_only {
-            r#"SELECT "id", "group" FROM "states" WHERE "project_id" = $1 AND "deleted_at" IS NULL AND NOT ("group" = 'triage') AND NOT "is_triage" AND "default" ORDER BY "sequence" ASC LIMIT 1"#
-        } else {
-            r#"SELECT "id", "group" FROM "states" WHERE "project_id" = $1 AND "deleted_at" IS NULL AND NOT ("group" = 'triage') AND NOT "is_triage" ORDER BY "sequence" ASC LIMIT 1"#
-        };
-        let row: Option<(Uuid, String)> = sqlx::query_as(sql)
-            .bind(project_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| db_error(error, "write-default-state"))?;
-        if row.is_some() {
-            return Ok(row);
-        }
-    }
-    Ok(None)
-}
-
-/// The `self.state.group` read in `Issue.save`'s completed arm: the
-/// validated state arrives as a model instance, so the group is an
-/// in-memory attribute read (plain by-id lookup, no manager scope).
-async fn fetch_state_group(pool: &PgPool, state_id: &Uuid) -> Result<Option<String>, Denial> {
-    sqlx::query_scalar(r#"SELECT "group" FROM "states" WHERE "id" = $1"#)
-        .bind(state_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|error| db_error(error, "write-state-group"))
-        .map(|row: Option<String>| row)
 }
 
 /// The create-time default type
@@ -4965,6 +4870,8 @@ async fn create_issue_inner(
                     activity_requested: Value::String(requested_text),
                     activity_notification: None,
                     activity_require_origin: false,
+                    skip_activity: false,
+                    skip_fire: false,
                     model_activity: Some(domain_issues::ModelActivitySpec {
                         model: new_id,
                         requested: data,
@@ -5111,53 +5018,6 @@ async fn external_dup_first_nullable(
     .await
     .map_err(|error| db_error(error, "write-dup-first"))
     .map(|row: Option<Uuid>| row)
-}
-
-/// Resolve the post-save `(state_id, completed_at)` pair for the update
-/// and delete saves (`Issue.save`'s state branch, `db/models/issue.py:288-
-/// 310` — no `_state.adding` check, so it runs on every save): a provided
-/// state takes the completed arm; a null state (provided or carried)
-/// resolves the default and leaves `completed_at` untouched; an absent
-/// state recomputes the arm from the current row. Returns the
-/// `SET`-or-skip pair for each column.
-async fn resolve_save_state(
-    pool: &PgPool,
-    project_id: &Uuid,
-    current: &DecodedIssue,
-    parsed_state: Option<Option<Uuid>>,
-) -> Result<(Option<Option<Uuid>>, Option<Option<DateTime<Utc>>>), Denial> {
-    let current_state: Option<Uuid> = current.state.as_deref().and_then(|id| id.parse().ok());
-    match parsed_state {
-        Some(Some(id)) => {
-            // A vanished row (probe passed, row gone) reads as
-            // non-completed and lets the `UPDATE` FK decide the 400.
-            let group = fetch_state_group(pool, &id).await?.unwrap_or_default();
-            let completed_at = if group == "completed" {
-                Some(now_utc())
-            } else {
-                None
-            };
-            Ok((Some(Some(id)), Some(completed_at)))
-        }
-        Some(None) => {
-            let resolved = fetch_default_state(pool, project_id).await?;
-            Ok((Some(resolved.map(|(id, _)| id)), None))
-        }
-        None => match current_state {
-            Some(_) => {
-                let completed_at = if current.state_group.as_deref() == Some("completed") {
-                    Some(now_utc())
-                } else {
-                    None
-                };
-                Ok((None, Some(completed_at)))
-            }
-            None => {
-                let resolved = fetch_default_state(pool, project_id).await?;
-                Ok((Some(resolved.map(|(id, _)| id)), None))
-            }
-        },
-    }
 }
 
 async fn patch_issue_inner(
@@ -5523,97 +5383,72 @@ async fn delete_issue_inner(
     // `issue.delete()` → `SoftDeleteModel.delete` (`db/mixins.py:72-78`):
     // `deleted_at` now plus a FULL `save()` (the state branch resolves or
     // recompletes, `updated_by`/`updated_at` stamp), then the sweep task.
+    // `deleted_at` and `updated_at` stamp separately — two `now()` calls,
+    // as Django's `delete()` + `save()` make.
     let prev_state_id = crate::issue_transition::capture_prior_state_pool(&pre.pool, Some(*pk))
         .await
         .map_err(|_| Denial::ServerError)?;
-    let (set_state, set_completed) =
-        resolve_save_state(&pre.pool, &project_id, &current, None).await?;
-    let current_state_id: Option<Uuid> = match set_state {
-        Some(inner) => inner,
-        None => current.state.as_deref().and_then(|id| id.parse().ok()),
-    };
-    let stripped_new = if current.description_html.is_empty() {
-        None
-    } else {
-        Some(crate::space::sanitize::strip_tags(
-            &current.description_html,
-        ))
-    };
-    let mut qb: sqlx::QueryBuilder<sqlx::Postgres> = sqlx::QueryBuilder::new("");
-    qb.push("UPDATE \"issues\" SET ");
-    let mut sep = qb.separated(", ");
-    sep.push("\"deleted_at\" = ");
-    sep.push_bind_unseparated(now_utc());
-    sep.push("\"updated_at\" = ");
-    sep.push_bind_unseparated(now_utc());
-    sep.push("\"updated_by_id\" = ");
-    sep.push_bind_unseparated(pre.actor.id);
-    sep.push("\"description_stripped\" = ");
-    sep.push_bind_unseparated(stripped_new);
-    if let Some(completed) = set_completed {
-        sep.push("\"completed_at\" = ");
-        sep.push_bind_unseparated(completed);
-    }
-    if let Some(state) = set_state {
-        sep.push("\"state_id\" = ");
-        sep.push_bind_unseparated(state);
-    }
-    qb.push(" WHERE \"id\" = ");
-    qb.push_bind(pk);
-    qb.build()
-        .execute(&pre.pool)
+    // The full-save base row, re-read beside the snapshot (the `DecodedIssue`
+    // above is render-lossy and the save writes every column). A miss 404s —
+    // the port would retarget zero rows and still 204, a mid-flight-delete
+    // race either way.
+    let orm = state.orm().ok_or(Denial::ServerError)?;
+    let Some(base) = issues::Entity::find_by_id(*pk)
+        .one(orm)
         .await
-        .map(|_| ())
-        .map_err(|error| save_error(&error, "write-delete"))?;
-
-    // `github_signals.trigger_completion_comment`
-    // (`bgtasks/github_signals.py:44-75`): the delete's full `save()` runs
-    // the NULL-state default leg, so deleting a mirrored NULL-state issue
-    // whose default state is completed-group enqueues the provider's
-    // `post_completion_comment` — before the orchestration receiver, as
-    // in Django. Best-effort: the delete stands.
-    if prev_state_id != current_state_id {
-        crate::issue_transition::enqueue_completion_comment(
-            &pre.pool,
-            pk,
-            prev_state_id.as_ref(),
-            current_state_id.as_ref(),
-        )
-        .await;
+        .map_err(|error| db_error(error, "write-reread"))?
+    else {
+        return Err(Denial::NotFound(RESOURCE_NOT_FOUND_BODY.to_owned()));
+    };
+    let mut fields = domain_issues::IssueFieldSet::from(&base);
+    fields.deleted_at = Some(now_utc());
+    fields.updated_at = now_utc();
+    let ctx = domain_write_ctx(&pre, &project_id);
+    let actor_id = pre.actor.id;
+    let slug = slug.to_owned();
+    let transition: Arc<dyn IssueTransitionHook> =
+        Arc::new(AppTransitionHook::new(state, &pre.pool));
+    let enqueue: Arc<dyn TaskEnqueueHook> = Arc::new(AppTaskEnqueueHook::new(&pre.pool));
+    let outcome = domain::run(&ctx, orm, |txn| {
+        let transition = transition.clone();
+        let enqueue = enqueue.clone();
+        let pool = pre.pool.clone();
+        let ctx = ctx.clone();
+        Box::pin(async move {
+            txn.hooks_mut().register(transition);
+            txn.hooks_mut().register(enqueue);
+            domain_issues::soft_delete(
+                &ctx,
+                txn,
+                &pool,
+                domain_issues::SoftDeleteIssue {
+                    fields,
+                    prev_state: prev_state_id,
+                    fire: domain_issues::FireSpec {
+                        dispatch_immediate: true,
+                        created_by: Some(actor_id),
+                        moved_by_run: None,
+                        now: Utc::now(),
+                    },
+                    origin: None,
+                    slug,
+                    completion: true,
+                    visit_delete: false,
+                    activity_current: Value::String(current_text),
+                    activity_notification: None,
+                    activity_require_origin: false,
+                    activity_subscriber: None,
+                    skip_activity: false,
+                },
+            )
+            .await
+        })
+    })
+    .await
+    .map_err(domain_save_denial)?;
+    if outcome.chain.stopped().is_some() {
+        return Err(Denial::ServerError);
     }
-    // `issue.delete()` saves the row, so the orchestration receiver fires
-    // (state unchanged on a plain delete → no transition; a state leg that
-    // moves it fires). PIDASHCONV-1216.
-    fire_after_save(
-        state,
-        &pre.pool,
-        *pk,
-        pre.actor.id,
-        prev_state_id,
-        current_state_id,
-        None,
-        Some(pre.actor.id),
-        Utc::now(),
-    )
-    .await?;
-
-    let (sweep_args, sweep_kwargs) = soft_delete_sweep("issue", &pk.to_string());
-    enqueue_best_effort(&pre.pool, SOFT_DELETE_TASK, sweep_args, sweep_kwargs).await;
-    let mut requested = Map::with_capacity(1);
-    requested.insert("issue_id".to_owned(), Value::String(pk.to_string()));
-    let requested_text =
-        pidash_jobs::tasks_webhooks::activity_dispatch::django_dumps(&Value::Object(requested));
-    let kwargs = work_tasks::issue_activity_kwargs(
-        work_tasks::ACTIVITY_ISSUE_DELETED,
-        Some(&requested_text),
-        &pre.actor.id.to_string(),
-        &pk.to_string(),
-        &project_id.to_string(),
-        Some(&current_text),
-        Utc::now().timestamp(),
-    );
-    enqueue_best_effort(&pre.pool, work_tasks::ISSUE_ACTIVITY_TASK, vec![], kwargs).await;
-
     Ok(Response::builder()
         .status(StatusCode::NO_CONTENT)
         .body(axum::body::Body::empty())
@@ -5687,182 +5522,18 @@ pub async fn delete_issue_detail(
 // Orchestration signals (explicit): `capture_prior_state` + `fire_state_transition`
 // ---------------------------------------------------------------------------
 
-/// Build the patch path's post-save fire (`signals.py:74-107`): the
-/// snapshot pair around the save, the resolved header run, and the
-/// receiver defaults this view never overrides. Pure so the fixture
-/// pins the call exactly (`patch_signals.golden.json`).
-fn patch_fire_request(
-    issue_id: Uuid,
-    prev_state_id: Option<Uuid>,
-    current_state_id: Option<Uuid>,
-    moved_by_run: Option<Uuid>,
-    created_by: Option<Uuid>,
-    now: DateTime<Utc>,
-) -> FireRequest {
-    FireRequest {
-        issue_id,
-        prev_state_id,
-        current_state_id,
-        // This view never stamps `_DISPATCH_IMMEDIATE_ATTR`, so the
-        // receiver default (`True`) always applies.
-        dispatch_immediate: true,
-        moved_by_run,
-        now,
-        // Caller-drawn jitter (L5 quirk-5): the request path draws
-        // none, like the D-26 and move fires.
-        jitter_secs: 0.0,
-        created_by,
-    }
-}
-
-/// The post-save fire: a non-transition answers `NoTransition` without
-/// I/O (the pure early return below, before any dispatch input is read — a
-/// plain PATCH pays zero extra queries); a failed handler is logged with the
-/// verbatim line (the counter already bumped inside) and the save stands;
-/// only a *lookup* storage failure propagates to the 500 — exactly the `try`
-/// placement in `fire_state_transition`. Drives the one live seam
-/// (PIDASHCONV-1216).
-#[allow(clippy::too_many_arguments)]
-async fn fire_after_save(
-    state: &AppState,
-    pool: &PgPool,
-    issue_id: Uuid,
-    actor_id: Uuid,
-    prev_state_id: Option<Uuid>,
-    current_state_id: Option<Uuid>,
-    moved_by_run: Option<Uuid>,
-    created_by: Option<Uuid>,
-    now: DateTime<Utc>,
-) -> Result<(), Denial> {
-    if prev_state_id == current_state_id {
-        return Ok(());
-    }
-    let request = patch_fire_request(
-        issue_id,
-        prev_state_id,
-        current_state_id,
-        moved_by_run,
-        created_by,
-        now,
-    );
-    let outcome = crate::issue_transition::fire_issue_transition(state, pool, actor_id, request)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    if let FireOutcome::Failed { log_line, .. } = outcome {
-        tracing::error!("{log_line}");
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod signal_tests {
     use super::*;
-
-    static PATCH_SIGNALS_FIXTURE: &str =
-        include_str!("../../../../fixtures/v1_work_items/handlers/patch_signals.golden.json");
-
-    fn fixture_cases() -> Value {
-        let fixture: Value = serde_json::from_str(PATCH_SIGNALS_FIXTURE).expect("fixture parses");
-        fixture["cases"].clone()
-    }
-
-    fn opt_uuid(value: &Value) -> Option<Uuid> {
-        value
-            .as_str()
-            .map(|text| text.parse().expect("uuid parses"))
-    }
 
     fn uid(n: u128) -> Uuid {
         Uuid::from_u128(n)
     }
 
     use crate::issue_transition::test_support::{LazyStateSeam, UnreachedPreflight};
-    use pidash_services::orchestration::entries::fire_state_transition;
-
-    /// The fixture pins the call: every case's inputs build exactly the
-    /// pinned `FireRequest` — `dispatch_immediate` always true (this
-    /// view never stamps the opt-out), the resolved header run passed
-    /// through as `moved_by_run`, zero caller jitter.
-    #[test]
-    fn patch_fire_request_pins_fixture() {
-        let cases = fixture_cases();
-        let names = [
-            "human_patch_no_transition",
-            "agent_patch_no_transition",
-            "human_patch_transition",
-            "agent_patch_transition",
-        ];
-        assert_eq!(
-            cases.as_object().expect("cases is a map").len(),
-            names.len(),
-            "fixture covers exactly the pinned cases"
-        );
-        for name in names {
-            let case = &cases[name];
-            let now = DateTime::parse_from_rfc3339(case["now"].as_str().expect("now"))
-                .expect("now parses")
-                .to_utc();
-            let request = patch_fire_request(
-                case["issue_id"]
-                    .as_str()
-                    .expect("issue_id")
-                    .parse()
-                    .expect("uuid"),
-                opt_uuid(&case["prev_state_id"]),
-                opt_uuid(&case["current_state_id"]),
-                opt_uuid(&case["moved_by_run"]),
-                opt_uuid(&case["created_by"]),
-                now,
-            );
-            let expected = &case["expected"];
-            assert_eq!(
-                request.issue_id,
-                expected["issue_id"]
-                    .as_str()
-                    .expect("expected issue_id")
-                    .parse::<Uuid>()
-                    .expect("uuid"),
-                "{name}"
-            );
-            assert_eq!(
-                request.prev_state_id,
-                opt_uuid(&expected["prev_state_id"]),
-                "{name}"
-            );
-            assert_eq!(
-                request.current_state_id,
-                opt_uuid(&expected["current_state_id"]),
-                "{name}"
-            );
-            assert_eq!(
-                request.dispatch_immediate,
-                expected["dispatch_immediate"].as_bool().expect("bool"),
-                "{name}"
-            );
-            assert_eq!(
-                request.moved_by_run,
-                opt_uuid(&expected["moved_by_run"]),
-                "{name}"
-            );
-            assert_eq!(
-                request.now,
-                DateTime::parse_from_rfc3339(expected["now"].as_str().expect("now"))
-                    .expect("now parses")
-                    .to_utc(),
-                "{name}"
-            );
-            assert_eq!(
-                request.jitter_secs,
-                expected["jitter_secs"].as_f64().expect("f64"),
-                "{name}"
-            );
-            assert_eq!(
-                request.created_by,
-                opt_uuid(&expected["created_by"]),
-                "{name}"
-            );
-        }
-    }
+    use pidash_services::orchestration::entries::{
+        fire_state_transition, FireOutcome, FireRequest,
+    };
 
     /// The `agent_patch_no_transition` row: the save fires the receiver
     /// and it no-ops (equal states) with zero seam I/O — the lazy pool
@@ -5875,14 +5546,16 @@ mod signal_tests {
         let mut seam = LazyStateSeam { pool: &pool };
         let mut preflight = UnreachedPreflight;
         let now = chrono::Utc::now();
-        let request = patch_fire_request(
-            uid(9),
-            Some(uid(3)),
-            Some(uid(3)),
-            Some(uid(7)),
-            Some(uid(1)),
+        let request = FireRequest {
+            issue_id: uid(9),
+            prev_state_id: Some(uid(3)),
+            current_state_id: Some(uid(3)),
+            dispatch_immediate: true,
+            moved_by_run: Some(uid(7)),
             now,
-        );
+            jitter_secs: 0.0,
+            created_by: Some(uid(1)),
+        };
         let outcome = fire_state_transition(&mut seam, &mut preflight, &request)
             .await
             .expect("no-transition never fails");
@@ -5901,14 +5574,16 @@ mod signal_tests {
         let mut seam = LazyStateSeam { pool: &pool };
         let mut preflight = UnreachedPreflight;
         let now = chrono::Utc::now();
-        let request = patch_fire_request(
-            uid(9),
-            Some(uid(3)),
-            Some(uid(4)),
-            Some(uid(7)),
-            Some(uid(1)),
+        let request = FireRequest {
+            issue_id: uid(9),
+            prev_state_id: Some(uid(3)),
+            current_state_id: Some(uid(4)),
+            dispatch_immediate: true,
+            moved_by_run: Some(uid(7)),
             now,
-        );
+            jitter_secs: 0.0,
+            created_by: Some(uid(1)),
+        };
         let outcome = fire_state_transition(&mut seam, &mut preflight, &request).await;
         assert!(outcome.is_err());
     }

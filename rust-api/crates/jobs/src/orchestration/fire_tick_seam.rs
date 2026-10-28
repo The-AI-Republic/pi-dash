@@ -58,6 +58,7 @@ use pidash_services::domain::identity::{
     AgentUserCollisionError, NewBotUser, AGENT_DISPLAY_NAME, AGENT_USERNAME, AGENT_USER_EMAIL,
     AGENT_USER_FIRST_NAME, AGENT_USER_LAST_NAME,
 };
+use pidash_services::domain::issues as domain_issues;
 use pidash_services::orchestration::clock::{
     CREATE_TICKER_PARAMS, LOCK_TICKER_PARAMS, SAVE_CLOCK_PARAMS, SAVE_CLOCK_SQL,
 };
@@ -68,10 +69,10 @@ use pidash_services::orchestration::dispatch::{
 };
 use pidash_services::orchestration::dispatch::{
     BACKLOG_TARGET_SQL, COMMENT_DESCRIPTION_UPDATE_SQL, COMMENT_INSERT_SQL, DESCRIPTION_INSERT_SQL,
-    IN_PROGRESS_STATE_SQL, ISSUE_STATE_UPDATE_SQL, LIVE_ASSIGNEE_CANDIDATES_SQL, PAUSED_STATE_SQL,
-    PAUSE_ISSUE_LOCK_SQL, PROJECT_CLOCK_POLICY_SQL, PROJECT_DEFAULT_STATE_SQL,
-    PROJECT_ROLE_FACTS_SQL, RETICK_ISSUE_LOCK_SQL, WAIT_ACTIVITY_INSERT_SQL, WAIT_REARM_UPDATE_SQL,
-    WAIT_UPDATE_SQL, WORKSPACE_SLUG_SQL,
+    IN_PROGRESS_STATE_SQL, LIVE_ASSIGNEE_CANDIDATES_SQL, PAUSED_STATE_SQL, PAUSE_ISSUE_LOCK_SQL,
+    PROJECT_CLOCK_POLICY_SQL, PROJECT_DEFAULT_STATE_SQL, PROJECT_ROLE_FACTS_SQL,
+    RETICK_ISSUE_LOCK_SQL, WAIT_ACTIVITY_INSERT_SQL, WAIT_REARM_UPDATE_SQL, WAIT_UPDATE_SQL,
+    WORKSPACE_SLUG_SQL,
 };
 use pidash_types::orchestration::{
     cadence_fields_for, is_ticking_state, StateRef, PAUSED_STATE_NAME,
@@ -455,13 +456,14 @@ where
         state_id: Uuid,
         now: DateTime<Utc>,
     ) -> Result<(), DispatchError> {
-        sqlx::query(ISSUE_STATE_UPDATE_SQL)
-            .bind(state_id)
-            .bind(now)
-            .bind(issue_id)
-            .execute(&mut **self.dispatch_tx().inner())
-            .await
-            .map_err(db)?;
+        domain_issues::update_issue_state_no_audit(
+            &mut **self.dispatch_tx().inner(),
+            issue_id,
+            state_id,
+            now,
+        )
+        .await
+        .map_err(db)?;
         Ok(())
     }
 

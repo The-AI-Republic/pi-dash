@@ -34,6 +34,7 @@ use std::sync::Arc;
 
 use chrono::{Datelike, NaiveDate};
 use pidash_db::RequestContext;
+use pidash_services::app_project::ser_project::next_work_item_sequence;
 use pidash_services::tasks_cleanup::dummy_data as plan;
 use pidash_types::{UserId, WorkspaceId};
 use rand::rngs::StdRng;
@@ -849,7 +850,7 @@ impl PgDummyData {
         .fetch_one(&self.pool)
         .await
         .map_err(db_error)?;
-        let mut last_id = plan::next_sequence(max_sequence);
+        let mut last_id = next_work_item_sequence(max_sequence);
         let probe_state = &state_ids[randint(rng, 0, (state_ids.len() - 1) as u32) as usize];
         let max_sort: Option<f64> = sqlx::query_scalar(
             r#"SELECT MAX(sort_order) FROM issues WHERE project_id = $1::uuid AND state_id = $2::uuid"#,

@@ -4537,6 +4537,8 @@ pub async fn create_issue(
                     activity_requested: Value::String(requested.clone()),
                     activity_notification: Some(true),
                     activity_require_origin: true,
+                    skip_activity: false,
+                    skip_fire: false,
                     model_activity: None,
                     created_override: None,
                 },
@@ -4952,6 +4954,13 @@ pub async fn destroy_issue(
                     },
                     origin,
                     slug: slug.clone(),
+                    completion: false,
+                    visit_delete: true,
+                    activity_current: Value::Object(Map::new()),
+                    activity_notification: Some(true),
+                    activity_require_origin: true,
+                    activity_subscriber: Some(false),
+                    skip_activity: false,
                 },
             )
             .await

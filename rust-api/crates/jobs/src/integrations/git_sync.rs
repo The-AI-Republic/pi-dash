@@ -87,6 +87,7 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use pidash_db::config::encryption::Keyring;
+use pidash_services::domain::issues as domain_issues;
 use pidash_services::domain::transition::IssueTransitionHook;
 use pidash_services::integrations::accounts::account_credential;
 use pidash_services::integrations::adapters_github::{
@@ -1746,20 +1747,6 @@ fn decode_binding_scan(row: sqlx::postgres::PgRow) -> Result<BindingScan, String
     })
 }
 
-/// `Issue.objects.create(…)` column list, in physical order: the
-/// `Issue.save()` creation path resolves pod/state/sequence/sort-order
-/// first (see [`create_issue`]), then writes the full row. Application
-/// defaults with no DB fallback (`priority 'none'`, `complexity_score 0`,
-/// `sequence/sort` resolved, `is_draft false`, `git_work_branch ''`,
-/// `workpad ''`); everything else NULL.
-const INSERT_ISSUE_SQL: &str = "INSERT INTO issues (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, parent_id, state_id, point, estimate_point_id, name, description_json, description_html, description_stripped, description_binary, priority, complexity_score, start_date, target_date, sequence_id, sort_order, completed_at, archived_at, is_draft, external_source, external_id, type_id, git_work_branch, workpad, created_via, assigned_pod_id, agent_executor) VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, NULL, $8, NULL, NULL, $9, $10, $11, $12, NULL, 'none', 0, NULL, NULL, $13, $14, $15, NULL, FALSE, $16, $17, NULL, '', '', NULL, $18, NULL)";
-
-/// `Issue.objects.filter(pk).update(…)` (`git_sync_task.py:100-108`): only
-/// the named columns — `QuerySet.update` bypasses `save()`, so no state,
-/// sequence or description-side-table touch. (Both Python `UPDATE`s
-/// collapse into this one statement; the final bytes are identical.)
-const UPDATE_ISSUE_SQL: &str = "UPDATE issues SET name = $2, description_html = $3, description_stripped = $4, description_json = $5, workspace_id = $6, created_by_id = $7, updated_by_id = $8, external_source = $9, external_id = $10, updated_at = $11 WHERE id = $1";
-
 /// `GitIssueSync.objects.update_or_create(binding, external_iid, …)`
 /// (`git_sync_task.py:134-138`): full-row insert and full-defaults update
 /// (plus `updated_at`, which `save()` touches on the update path).
@@ -1767,10 +1754,6 @@ const UPDATE_ISSUE_SQL: &str = "UPDATE issues SET name = $2, description_html = 
 /// restamp — ported bug, see the module docs).
 const INSERT_ISSUE_SYNC_SQL: &str = "INSERT INTO git_issue_syncs (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, binding_id, issue_id, provider, external_id, external_iid, web_url, remote_state, remote_created_at, remote_updated_at, metadata) VALUES ($1, $2, $3, NULL, NULL, NULL, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)";
 const UPDATE_ISSUE_SYNC_SQL: &str = "UPDATE git_issue_syncs SET issue_id = $2, provider = $3, external_id = $4, web_url = $5, remote_state = $6, remote_created_at = $7, remote_updated_at = $8, workspace_id = $9, project_id = $10, created_by_id = NULL, updated_by_id = NULL, metadata = $11, updated_at = $12 WHERE id = $1";
-
-/// `IssueSequence.objects.create(issue, sequence, project)`
-/// (`issue.py:340`): `ProjectBaseModel` audit columns, `deleted false`.
-const INSERT_ISSUE_SEQUENCE_SQL: &str = "INSERT INTO issue_sequences (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, issue_id, sequence, deleted) VALUES ($1, $2, $3, NULL, NULL, NULL, $4, $5, $6, $7, FALSE)";
 
 /// `Description.objects.create(…)` for a new mirror comment
 /// (`issue.py:625`): `WorkspaceBaseModel` columns; `description_stripped`
@@ -1887,39 +1870,40 @@ async fn create_issue(
     // html_processor stripper, decoding entities.
     let stripped = strip_html_text(description_html);
     let issue_id = Uuid::new_v4();
-    sqlx::query(INSERT_ISSUE_SQL)
-        .bind(issue_id)
-        .bind(*now)
-        .bind(*now)
-        .bind(scan.actor_id)
-        .bind(scan.actor_id)
-        .bind(scan.project_id)
-        .bind(scan.workspace_id)
-        .bind(state_id)
-        .bind(name)
-        .bind(json!({}))
-        .bind(description_html)
-        .bind(stripped)
-        .bind(sequence_id)
-        .bind(sort_order)
-        .bind(completed_at)
-        .bind(scan.provider.clone())
-        .bind(remote.external_iid.clone())
-        .bind(pod_id)
-        .execute(&mut **tx)
-        .await
-        .map_err(db_error)?;
-    sqlx::query(INSERT_ISSUE_SEQUENCE_SQL)
-        .bind(Uuid::new_v4())
-        .bind(*now)
-        .bind(*now)
-        .bind(scan.project_id)
-        .bind(scan.workspace_id)
-        .bind(issue_id)
-        .bind(sequence_id)
-        .execute(&mut **tx)
-        .await
-        .map_err(db_error)?;
+    domain_issues::insert_mirror_issue(
+        &mut **tx,
+        &domain_issues::MirrorIssueInsert {
+            issue_id,
+            now: *now,
+            actor_id: scan.actor_id,
+            project_id: scan.project_id,
+            workspace_id: scan.workspace_id,
+            state_id,
+            name: (*name).to_owned(),
+            description_html: (*description_html).to_owned(),
+            description_stripped: stripped,
+            sequence_id,
+            sort_order,
+            completed_at,
+            external_source: scan.provider.clone(),
+            external_id: remote.external_iid.clone(),
+            pod_id,
+        },
+    )
+    .await
+    .map_err(db_error)?;
+    domain_issues::insert_issue_sequence(
+        &mut **tx,
+        &domain_issues::MirrorIssueSequence {
+            project_id: scan.project_id,
+            workspace_id: scan.workspace_id,
+            issue_id,
+            sequence: sequence_id,
+            now: *now,
+        },
+    )
+    .await
+    .map_err(db_error)?;
     let sync_id = insert_issue_sync(tx, scan, remote, &issue_id, now).await?;
     Ok((issue_id, sync_id, state_id))
 }
@@ -2012,21 +1996,22 @@ pub async fn upsert_issue(
             // values, no `save()` side effects — then the audit restamp,
             // collapsed into the same statement (identical final bytes).
             // No `save()` means no signals: neither leg runs here.
-            sqlx::query(UPDATE_ISSUE_SQL)
-                .bind(issue_id)
-                .bind(&name)
-                .bind(&description_html)
-                .bind(&description_stripped)
-                .bind(json!({}))
-                .bind(scan.workspace_id)
-                .bind(scan.actor_id)
-                .bind(scan.actor_id)
-                .bind(scan.provider.clone())
-                .bind(&issue_iid)
-                .bind(*now)
-                .execute(pool)
-                .await
-                .map_err(db_error)?;
+            domain_issues::update_git_mirror_issue(
+                pool,
+                &domain_issues::GitMirrorIssueUpdate {
+                    issue_id,
+                    name,
+                    description_html,
+                    description_stripped,
+                    workspace_id: scan.workspace_id,
+                    actor_id: scan.actor_id,
+                    external_source: scan.provider.clone(),
+                    external_id: issue_iid,
+                    now: *now,
+                },
+            )
+            .await
+            .map_err(db_error)?;
             let mut tx = pool.begin().await.map_err(db_error)?;
             update_issue_sync(&mut tx, scan, remote, &sync_id, &issue_id, now).await?;
             tx.commit().await.map_err(db_error)?;
@@ -3693,11 +3678,8 @@ mod tests {
             COMMENT_SYNC_LOOKUP_SQL,
             COMPLETION_LOOKUP_SQL,
             RECONCILE_LIST_SQL,
-            INSERT_ISSUE_SQL,
-            UPDATE_ISSUE_SQL,
             INSERT_ISSUE_SYNC_SQL,
             UPDATE_ISSUE_SYNC_SQL,
-            INSERT_ISSUE_SEQUENCE_SQL,
             INSERT_DESCRIPTION_SQL,
             INSERT_ISSUE_COMMENT_SQL,
             UPDATE_ISSUE_COMMENT_SQL,
@@ -3772,17 +3754,9 @@ mod tests {
     // touch only the ORM-named columns (no `save()` side effects).
     #[test]
     fn write_shapes_match_orm_calls() {
-        // Creates carry the resolved application defaults inline.
-        assert!(INSERT_ISSUE_SQL.contains("sequence_id"));
-        assert!(INSERT_ISSUE_SQL.contains("sort_order"));
-        assert!(INSERT_ISSUE_SQL.contains("assigned_pod_id"));
-        assert!(INSERT_ISSUE_SQL.contains("'none', 0"));
-        // The issue refresh never touches state/sequence/sort/description
-        // tables (QuerySet.update bypasses save()).
-        assert!(!UPDATE_ISSUE_SQL.contains("state_id"));
-        assert!(!UPDATE_ISSUE_SQL.contains("sequence_id"));
-        assert!(!UPDATE_ISSUE_SQL.contains("sort_order"));
-        assert!(UPDATE_ISSUE_SQL.contains("updated_at"));
+        // The issue create/refresh shapes moved to `domain::issues` with
+        // the statements (see `sync_bare_sql_shapes` there); this suite
+        // keeps the sync-row pins.
         // Metadata-only writes touch exactly one column.
         assert_eq!(
             UPDATE_ISSUE_SYNC_METADATA_SQL,

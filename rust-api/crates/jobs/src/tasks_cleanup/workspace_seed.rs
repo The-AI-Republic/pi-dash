@@ -70,6 +70,7 @@ use sha2::{Digest, Sha256};
 
 use pidash_db::context::RequestContext;
 use pidash_db::runner_runs::pod::NewProject;
+use pidash_services::app_project::ser_project::next_work_item_sequence;
 use pidash_services::orchestration::creation::CreationError;
 use pidash_services::orchestration::entries::PreflightSeam;
 use pidash_services::tasks_cleanup::workspace_seed as logic;
@@ -902,8 +903,7 @@ pub async fn run<S: SeedStore>(store: &S, input: &RunInput) -> Result<SeedReport
             } else {
                 None
             };
-            let sequence_id =
-                logic::next_issue_sequence_id(store.max_issue_sequence(project_id).await?);
+            let sequence_id = next_work_item_sequence(store.max_issue_sequence(project_id).await?);
             let sort_order = logic::next_issue_sort_order(
                 store.max_issue_sort_order(project_id, state_id).await?,
             )

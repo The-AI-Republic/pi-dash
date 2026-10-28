@@ -335,8 +335,12 @@ mod tests {
     #[test]
     fn lock_key_matches_uuid_vector() {
         // `convert_uuid_to_integer` (`utils/uuid.py:19-26`): sha256 of the
-        // hyphenated id, first 8 bytes big-endian signed. Vector pinned
-        // against CPython's hashlib.
+        // hyphenated id, first 8 bytes big-endian signed. Vectors pinned
+        // against CPython's hashlib (moved here with the single copy).
+        assert_eq!(
+            advisory_lock_key(&Uuid::from_u128(0x11111111111111111111111111111111)),
+            -4972562656765536426
+        );
         assert_eq!(advisory_lock_key(&Uuid::nil()), 1349170572285598868);
     }
 
