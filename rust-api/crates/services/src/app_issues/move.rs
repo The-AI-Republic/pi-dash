@@ -174,8 +174,15 @@ pub const MULTIPLE_ACTIVE_RUNS_MESSAGE: &str =
 /// Failure modes of [`move_work_item_to_project`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MoveError {
-    /// A recoverable 400/403/409 with its exact message.
+    /// A recoverable 400/403/409 with its exact message. Every `Issue`
+    /// arm fires before the issue save, so the caller answers it with
+    /// nothing to roll back; the one post-save recoverable arm is
+    /// [`MoveError::IssuePostWrite`] instead.
     Issue(IssueMoveError),
+    /// The multiple-executing-runs 409 (`:264-267`): the only recoverable
+    /// arm past the issue save (`:223`), so the caller must roll the
+    /// span back before answering it (Django's `atomic` exit on raise).
+    IssuePostWrite(IssueMoveError),
     /// The source issue is not visible (`Issue.DoesNotExist` propagates,
     /// `:140`/`:182`) — the handler renders the standard DRF 404 detail
     /// body.
@@ -183,6 +190,13 @@ pub enum MoveError {
     /// `Project.resolve` raised (`:141`) — the handler renders
     /// [`NOT_FOUND_DETAIL`] (`"Project not found"`) as the 404 detail.
     ProjectNotFound,
+    /// No active `role >= MEMBER` membership in the SOURCE project under
+    /// [`MoveGuards::Dual` (the views' pre-kernel permission check,
+    /// `app/views/issue/move.py:28` / `api/views/issue.py:917`, folded
+    /// into the kernel for callers with no view layer). The caller maps
+    /// it to its own 403 shape; the two view drivers never see it (they
+    /// pass `MoveGuards::TargetOnly` — their views already checked).
+    SourceDenied,
     /// Anything the seam reports (connection, mapping, unexpected
     /// constraint) or a render failure — a 500, as Django's uncaught
     /// exception.
@@ -199,6 +213,67 @@ impl From<StoreError> for MoveError {
 /// `current_instance` render failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoreError(pub String);
+
+/// Which membership probes [`move_work_item_to_project`] enforces
+/// itself (design D6: the Django views check the source project before
+/// the shared kernel checks the target).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MoveGuards {
+    /// The kernel probes the target only (`:146-152`); the caller
+    /// checked the source project up front, as both Django views do
+    /// (`app/views/issue/move.py:28`, `api/views/issue.py:917`).
+    #[default]
+    TargetOnly,
+    /// The kernel probes the source project first (same `role >= MEMBER`
+    /// rule as the target probe, `:146-152`), then runs the usual
+    /// target-only flow — for callers with no view layer. A source
+    /// denial answers [`MoveError::SourceDenied`], which the caller maps
+    /// to its own 403 shape.
+    Dual,
+}
+
+/// Caller options for [`move_work_item_to_project`] (design D6). The
+/// default is exactly the Django behavior; each non-default value
+/// parameterizes the cited Python lines for callers the two views do
+/// not serve (downstream overlays).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MoveOptions {
+    /// Which membership probes the kernel enforces.
+    pub guards: MoveGuards,
+    /// Stamp the actor as `updated_by_id` on the move's save. Django's
+    /// `update_fields` (`:223-235`) never stamps it.
+    pub stamp_updated_by: bool,
+    /// Lock the outstanding runs and run the handoff transitions plus
+    /// the immediate-handoff create (`:189-362`). `false` skips all of
+    /// it: no run is locked, transitioned, or created, and
+    /// `dispatch_immediate` derives true (no runs).
+    pub handoff: bool,
+    /// Override for the orchestration flag. `None` derives it as Django
+    /// does — false exactly when handoff runs exist (`:218-223`, the
+    /// `_orchestration_dispatch_immediate` attribute); `Some` forces the
+    /// value regardless of runs.
+    pub dispatch_immediate: Option<bool>,
+}
+
+impl Default for MoveOptions {
+    /// Exactly the Django behavior.
+    fn default() -> Self {
+        Self::django()
+    }
+}
+
+impl MoveOptions {
+    /// Exactly the Django behavior: target-only guards, no
+    /// `updated_by` stamp, handoff on, derived dispatch flag.
+    pub fn django() -> Self {
+        Self {
+            guards: MoveGuards::TargetOnly,
+            stamp_updated_by: false,
+            handoff: true,
+            dispatch_immediate: None,
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // SQL text (Django shape; the pool implementation executes verbatim)
@@ -268,6 +343,11 @@ pub const HANDOFF_RUNS_LOCK_SQL: &str = "SELECT \"agent_run\".\"id\", \"agent_ru
 /// assigned pod (NULL when no handoff and no default), `$6`-`$8` NULL
 /// parent/estimate/type, `$9` updated stamp, `$10` id.
 pub const ISSUE_MOVE_UPDATE_SQL: &str = "UPDATE \"issues\" SET \"project_id\" = $1, \"workspace_id\" = $2, \"sequence_id\" = $3, \"state_id\" = $4, \"assigned_pod_id\" = $5, \"parent_id\" = $6, \"estimate_point_id\" = $7, \"type_id\" = $8, \"updated_at\" = $9 WHERE \"issues\".\"id\" = $10";
+
+/// Issue save with the actor stamped (`stamp_updated_by`; Django has no
+/// equivalent — `:223-235` never stamps `updated_by_id`): the same
+/// `update_fields` order plus `\"updated_by_id\" = $10`, `$11` the id.
+pub const ISSUE_MOVE_UPDATE_STAMP_SQL: &str = "UPDATE \"issues\" SET \"project_id\" = $1, \"workspace_id\" = $2, \"sequence_id\" = $3, \"state_id\" = $4, \"assigned_pod_id\" = $5, \"parent_id\" = $6, \"estimate_point_id\" = $7, \"type_id\" = $8, \"updated_at\" = $9, \"updated_by_id\" = $10 WHERE \"issues\".\"id\" = $11";
 
 /// Inert-run close (`:282-284`): `$1` run id, `$2` end stamp.
 pub const INERT_RUN_UPDATE_SQL: &str = "UPDATE \"agent_run\" SET \"status\" = 'cancelled', \"ended_at\" = $2, \"queue_position\" = NULL WHERE \"agent_run\".\"id\" = $1";
@@ -478,6 +558,10 @@ pub struct MovedIssueFields {
     pub sequence_id: i64,
     pub state_id: Uuid,
     pub assigned_pod_id: Option<Uuid>,
+    /// `Some` exactly under `stamp_updated_by`: the actor the store
+    /// writes to `updated_by_id` ([`ISSUE_MOVE_UPDATE_STAMP_SQL`]).
+    /// `None` runs [`ISSUE_MOVE_UPDATE_SQL`] verbatim.
+    pub updated_by_id: Option<Uuid>,
 }
 
 /// The refreshed issue (`:393`): the post-move row plus the url parts
@@ -528,6 +612,18 @@ pub trait MoveStore {
         &self,
         slug: &str,
         target_project_id: Uuid,
+        actor_id: Uuid,
+    ) -> Result<bool, StoreError>;
+
+    /// Source-membership probe under [`MoveGuards::Dual`]: the same
+    /// [`MEMBER_EXISTS_SQL`] text with the SOURCE project id (the views'
+    /// pre-kernel permission check, `app/views/issue/move.py:28` /
+    /// `api/views/issue.py:917`, folded into the kernel). The kernel
+    /// only calls it under `Dual`, before every other guard.
+    async fn can_move_from_source(
+        &self,
+        slug: &str,
+        source_project_id: Uuid,
         actor_id: Uuid,
     ) -> Result<bool, StoreError>;
 
@@ -602,7 +698,9 @@ pub trait MoveStore {
         target_project_id: Uuid,
     ) -> Result<Option<PodRow>, StoreError>;
 
-    /// Issue save ([`ISSUE_MOVE_UPDATE_SQL`], `:223-235`).
+    /// Issue save ([`ISSUE_MOVE_UPDATE_SQL`], `:223-235`; the
+    /// [`ISSUE_MOVE_UPDATE_STAMP_SQL`] text when
+    /// `fields.updated_by_id` is `Some`).
     async fn save_moved_issue(
         &self,
         issue_id: Uuid,
@@ -1329,7 +1427,18 @@ pub async fn move_work_item_to_project<S: MoveStore>(
     origin: &str,
     web_base_url: Option<&str>,
     now: &chrono::DateTime<chrono::Utc>,
+    options: &MoveOptions,
 ) -> Result<MoveResult, MoveError> {
+    if options.guards == MoveGuards::Dual
+        && !store
+            .can_move_from_source(slug, project_id, actor_id)
+            .await?
+    {
+        // The views deny before the kernel runs (the decorator /
+        // permission class wraps the whole view), so the source probe
+        // beats every guard below, including the blank-target 400.
+        return Err(MoveError::SourceDenied);
+    }
     let target_text = target_ref_text(target_ref);
     let target_text = target_text.trim();
     if target_text.is_empty() {
@@ -1390,7 +1499,13 @@ pub async fn move_work_item_to_project<S: MoveStore>(
         .advisory_lock_project(advisory_lock_key(&target_project.id))
         .await?;
 
-    let handoff_runs = store.lock_handoff_runs(issue.id).await?;
+    // Without the handoff the runs are never locked (nor, below,
+    // transitioned or recreated): the move reads them as empty.
+    let handoff_runs = if options.handoff {
+        store.lock_handoff_runs(issue.id).await?
+    } else {
+        Vec::new()
+    };
 
     let last_sequence = store.max_target_sequence(target_project.id).await?;
     let next_sequence = saved_sequence_id(last_sequence);
@@ -1412,6 +1527,7 @@ pub async fn move_work_item_to_project<S: MoveStore>(
                 sequence_id: next_sequence,
                 state_id: target_state.id,
                 assigned_pod_id: target_pod.map(|pod| pod.id),
+                updated_by_id: options.stamp_updated_by.then_some(actor_id),
             },
             now,
         )
@@ -1428,7 +1544,8 @@ pub async fn move_work_item_to_project<S: MoveStore>(
         if executing.len() > 1 {
             // Orchestration's one-active-run rule should prevent this.
             // Refuse rather than declare live duplicates cancelled.
-            return Err(MoveError::Issue(IssueMoveError::new(
+            // Past the save, so the caller must roll back.
+            return Err(MoveError::IssuePostWrite(IssueMoveError::new(
                 MULTIPLE_ACTIVE_RUNS_MESSAGE,
                 409,
             )));
@@ -1557,7 +1674,7 @@ pub async fn move_work_item_to_project<S: MoveStore>(
         issue: moved,
         current_instance,
         requested_data,
-        dispatch_immediate: handoff_runs.is_empty(),
+        dispatch_immediate: options.dispatch_immediate.unwrap_or(handoff_runs.is_empty()),
         post_commit,
         enqueues,
     }))
@@ -1652,6 +1769,7 @@ mod tests {
         source: Option<SourceIssueRow>,
         resolve: Option<ProjectRow>,
         member: bool,
+        source_member: bool,
         ws_slug: Option<String>,
         proj_ident: Option<String>,
         assignees: Vec<Uuid>,
@@ -1693,6 +1811,7 @@ mod tests {
                 source: Some(source),
                 resolve: Some(target_project()),
                 member: true,
+                source_member: true,
                 ws_slug: Some(SLUG.to_owned()),
                 proj_ident: Some("ACME_SRC".to_owned()),
                 assignees: vec![uuid(0x40)],
@@ -1755,6 +1874,16 @@ mod tests {
         ) -> Result<bool, StoreError> {
             self.log("can_move_into_target");
             Ok(self.member)
+        }
+
+        async fn can_move_from_source(
+            &self,
+            _slug: &str,
+            _source_project_id: Uuid,
+            _actor_id: Uuid,
+        ) -> Result<bool, StoreError> {
+            self.log("can_move_from_source");
+            Ok(self.source_member)
         }
 
         async fn representation_workspace_slug(
@@ -2117,6 +2246,14 @@ mod tests {
     }
 
     async fn move_call(store: &FakeStore, target_ref: &Value) -> Result<MoveResult, MoveError> {
+        move_call_with(store, target_ref, &MoveOptions::django()).await
+    }
+
+    async fn move_call_with(
+        store: &FakeStore,
+        target_ref: &Value,
+        options: &MoveOptions,
+    ) -> Result<MoveResult, MoveError> {
         move_work_item_to_project(
             store,
             SLUG,
@@ -2127,6 +2264,7 @@ mod tests {
             ORIGIN,
             Some("https://app.example.test"),
             &now(),
+            options,
         )
         .await
     }
@@ -2305,6 +2443,7 @@ mod tests {
                 sequence_id: 8,
                 state_id: uuid(0x70),
                 assigned_pod_id: Some(uuid(0x61)),
+                updated_by_id: None,
             }]
         );
         // Advisory key derives from the TARGET project id.
@@ -2470,7 +2609,7 @@ mod tests {
         ];
         assert_eq!(
             move_call(&store, &target).await.expect_err("two executing"),
-            MoveError::Issue(IssueMoveError::new(MULTIPLE_ACTIVE_RUNS_MESSAGE, 409))
+            MoveError::IssuePostWrite(IssueMoveError::new(MULTIPLE_ACTIVE_RUNS_MESSAGE, 409))
         );
         // Executing WITHOUT a runner is not "executing" (runnerless rows
         // join the inert set).
@@ -2486,6 +2625,157 @@ mod tests {
         assert_eq!(*store.inert_closed.borrow(), vec![uuid(0x90)]);
         assert_eq!(store.parent_marked.borrow().len(), 1);
         assert_eq!(outcome.post_commit.len(), 2);
+    }
+
+    // -- caller options -----------------------------------------------------
+
+    fn dual() -> MoveOptions {
+        MoveOptions {
+            guards: MoveGuards::Dual,
+            ..MoveOptions::django()
+        }
+    }
+
+    #[tokio::test]
+    async fn dual_guards_probe_source_first_and_allow() {
+        let store = FakeStore::scripted();
+        let target = serde_json::json!("ENG");
+        let options = dual();
+        let out = move_call_with(&store, &target, &options)
+            .await
+            .expect("moves");
+        assert!(matches!(out, MoveResult::Moved(_)));
+        let calls = store.calls.borrow();
+        assert_eq!(
+            calls.first().map(String::as_str),
+            Some("can_move_from_source")
+        );
+        assert!(calls.contains(&"can_move_into_target".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn dual_guards_source_denial_beats_every_guard() {
+        let mut store = FakeStore::scripted();
+        store.source_member = false;
+        // Blank target AND denied source: the source probe runs first
+        // (the views deny before the kernel runs).
+        let blank = serde_json::json!("   ");
+        assert_eq!(
+            move_call_with(&store, &blank, &dual())
+                .await
+                .expect_err("denied"),
+            MoveError::SourceDenied
+        );
+        assert_eq!(
+            store.calls.borrow().as_slice(),
+            ["can_move_from_source".to_owned()]
+        );
+    }
+
+    #[tokio::test]
+    async fn target_only_never_probes_source() {
+        let store = FakeStore::scripted();
+        let target = serde_json::json!("ENG");
+        move_call(&store, &target).await.expect("moves");
+        assert!(!store
+            .calls
+            .borrow()
+            .contains(&"can_move_from_source".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn stamp_updated_by_records_the_actor() {
+        let store = FakeStore::scripted();
+        let target = serde_json::json!("ENG");
+        let options = MoveOptions {
+            stamp_updated_by: true,
+            ..MoveOptions::django()
+        };
+        match move_call_with(&store, &target, &options)
+            .await
+            .expect("moves")
+        {
+            MoveResult::Moved(_) => {}
+            MoveResult::AlreadyThere(_) => panic!("expected a move"),
+        }
+        assert_eq!(
+            *store.saved.borrow(),
+            vec![MovedIssueFields {
+                project_id: uuid(0x50),
+                workspace_id: uuid(0x20),
+                sequence_id: 8,
+                state_id: uuid(0x70),
+                assigned_pod_id: Some(uuid(0x61)),
+                updated_by_id: Some(uuid(0x40)),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn handoff_off_skips_locks_transitions_and_create() {
+        let mut store = FakeStore::scripted();
+        // Runs that would 409 (two executing) under the handoff: without
+        // it the move reads them as empty and sails through.
+        store.handoff = vec![
+            handoff_row(0x90, AgentRunStatus::Running, Some(0x95)),
+            handoff_row(0x91, AgentRunStatus::Assigned, Some(0x96)),
+        ];
+        let target = serde_json::json!("ENG");
+        let options = MoveOptions {
+            handoff: false,
+            ..MoveOptions::django()
+        };
+        let outcome = match move_call_with(&store, &target, &options)
+            .await
+            .expect("moves")
+        {
+            MoveResult::Moved(outcome) => outcome,
+            MoveResult::AlreadyThere(_) => panic!("expected a move"),
+        };
+        let calls = store.calls.borrow();
+        assert!(!calls.contains(&"lock_handoff_runs".to_owned()));
+        assert!(!calls.contains(&"cancel_inert_run".to_owned()));
+        assert!(!calls.contains(&"mark_handoff_parent".to_owned()));
+        assert!(!calls.contains(&"create_handoff_run".to_owned()));
+        assert!(store.inert_closed.borrow().is_empty());
+        assert!(store.parent_marked.borrow().is_empty());
+        assert!(store.handoff_created.borrow().is_empty());
+        assert!(outcome.post_commit.is_empty());
+        assert!(outcome.dispatch_immediate);
+    }
+
+    #[tokio::test]
+    async fn dispatch_override_forces_the_flag_either_way() {
+        let target = serde_json::json!("ENG");
+        // Runs present (derived false) forced true.
+        let mut store = FakeStore::scripted();
+        store.handoff = vec![handoff_row(0x90, AgentRunStatus::Queued, None)];
+        let options = MoveOptions {
+            dispatch_immediate: Some(true),
+            ..MoveOptions::django()
+        };
+        let outcome = match move_call_with(&store, &target, &options)
+            .await
+            .expect("moves")
+        {
+            MoveResult::Moved(outcome) => outcome,
+            MoveResult::AlreadyThere(_) => panic!("expected a move"),
+        };
+        assert!(outcome.dispatch_immediate);
+        // No runs (derived true) forced false.
+        let store = FakeStore::scripted();
+        let options = MoveOptions {
+            dispatch_immediate: Some(false),
+            ..MoveOptions::django()
+        };
+        let outcome = match move_call_with(&store, &target, &options)
+            .await
+            .expect("moves")
+        {
+            MoveResult::Moved(outcome) => outcome,
+            MoveResult::AlreadyThere(_) => panic!("expected a move"),
+        };
+        assert!(!outcome.dispatch_immediate);
     }
 
     // -- cancel discernment -------------------------------------------------
@@ -2610,6 +2900,7 @@ mod tests {
             ORIGIN,
             None,
             &now(),
+            &MoveOptions::django(),
         )
         .await
         .expect("moves");

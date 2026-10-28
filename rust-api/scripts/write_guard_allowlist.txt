@@ -125,6 +125,7 @@ crates/services/src/app_issues/move.rs | UPDATE issue_comments | 117467b7c338 | 
 crates/services/src/app_issues/move.rs | UPDATE issue_relations | 580f6906923a | sql
 crates/services/src/app_issues/move.rs | UPDATE issue_sequences | b6f60b367cda | sql
 crates/services/src/app_issues/move.rs | UPDATE issues | 28f60603dcc8 | sql
+crates/services/src/app_issues/move.rs | UPDATE issues | 910c1ca5dae7 | sql
 crates/services/src/app_issues/move.rs | UPDATE issues | 911e38bddad5 | sql
 crates/services/src/app_issues/serializers_create.rs | INSERT issue_assignees | b6326dbfa85d | sql
 crates/services/src/app_issues/serializers_create.rs | UPDATE issue_assignees | 3153bdc23937 | sql

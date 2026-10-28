@@ -102,13 +102,14 @@ use pidash_services::app_issues::serializers_assoc::{
 };
 use pidash_services::app_issues::{
     issue_detail_base_to_representation, issue_is_actively_synced, move_work_item_to_project,
-    repoint_sql, send_project_move_cancel, IssueDetailBaseRow, MoveError, MovePostCommit,
-    MoveResult, MoveStore, MovedIssueFields, MovedIssueRow, PodRow, ProjectRow, SourceIssueRow,
-    StateRow, ASSIGNEE_IDS_SQL, ASSIGNEE_PRUNE_SQL, ASSIGNEE_REPOINT_SQL, CHILDREN_DETACH_SQL,
-    COMMENT_IDS_SQL, CYCLE_DELETE_SQL, DESCRIPTION_IDS_SQL, GITHUB_ISSUE_SYNC_PROBE_SQL,
-    GIT_ISSUE_SYNC_PROBE_SQL, HANDOFF_PARENT_UPDATE_SQL, HANDOFF_RUNS_LOCK_SQL,
-    INERT_RUN_UPDATE_SQL, ISSUE_MOVE_UPDATE_SQL, LABEL_DELETE_SQL, LABEL_IDS_SQL,
-    MEMBER_EXISTS_SQL, MODULE_DELETE_SQL, MOVED_ISSUE_REFETCH_SQL, PROJECT_IDENTIFIER_SQL,
+    repoint_sql, send_project_move_cancel, IssueDetailBaseRow, MoveError, MoveOptions,
+    MovePostCommit, MoveResult, MoveStore, MovedIssueFields, MovedIssueRow, PodRow, ProjectRow,
+    SourceIssueRow, StateRow, ASSIGNEE_IDS_SQL, ASSIGNEE_PRUNE_SQL, ASSIGNEE_REPOINT_SQL,
+    CHILDREN_DETACH_SQL, COMMENT_IDS_SQL, CYCLE_DELETE_SQL, DESCRIPTION_IDS_SQL,
+    GITHUB_ISSUE_SYNC_PROBE_SQL, GIT_ISSUE_SYNC_PROBE_SQL, HANDOFF_PARENT_UPDATE_SQL,
+    HANDOFF_RUNS_LOCK_SQL, INERT_RUN_UPDATE_SQL, ISSUE_MOVE_UPDATE_SQL,
+    ISSUE_MOVE_UPDATE_STAMP_SQL, LABEL_DELETE_SQL, LABEL_IDS_SQL, MEMBER_EXISTS_SQL,
+    MODULE_DELETE_SQL, MOVED_ISSUE_REFETCH_SQL, PROJECT_IDENTIFIER_SQL,
     PROJECT_RESOLVE_BY_IDENTIFIER_SQL, PROJECT_RESOLVE_BY_PK_SQL, RELATION_DELETE_SQL,
     SEQUENCE_CREATE_SQL, SEQUENCE_DETACH_SQL, SOURCE_ISSUE_LOCK_SQL, SOURCE_ISSUE_SQL,
     WORKSPACE_SLUG_SQL,
@@ -1118,6 +1119,7 @@ async fn move_issue(
         &origin,
         web_base_url.as_deref(),
         &now,
+        &MoveOptions::django(),
     )
     .await
     {
@@ -1289,8 +1291,16 @@ fn map_move_error(error: MoveError) -> Denial {
             status: issue.status_code,
             message: issue.message,
         },
+        // Same rejection shape; the driver already aborted the span.
+        MoveError::IssuePostWrite(issue) => Denial::MoveRejection {
+            status: issue.status_code,
+            message: issue.message,
+        },
         MoveError::IssueNotFound => Denial::NotFound,
         MoveError::ProjectNotFound => Denial::ProjectNotFound,
+        // Unreachable: this driver passes `TargetOnly` (the view checked
+        // the source project up front).
+        MoveError::SourceDenied => Denial::Forbidden,
         MoveError::Store(_) => Denial::ServerError,
     }
 }
@@ -1635,6 +1645,22 @@ impl MoveStore for PoolMoveStore<'_> {
         Ok(hit.is_some())
     }
 
+    async fn can_move_from_source(
+        &self,
+        slug: &str,
+        source_project_id: Uuid,
+        actor_id: Uuid,
+    ) -> Result<bool, pidash_services::app_issues::issue_move::StoreError> {
+        let hit: Option<(i32,)> = sqlx::query_as(MEMBER_EXISTS_SQL)
+            .bind(slug)
+            .bind(source_project_id)
+            .bind(actor_id)
+            .fetch_optional(self.pool)
+            .await
+            .map_err(store_error)?;
+        Ok(hit.is_some())
+    }
+
     async fn representation_workspace_slug(
         &self,
         workspace_id: Uuid,
@@ -1851,7 +1877,12 @@ impl MoveStore for PoolMoveStore<'_> {
         let conn = guard
             .as_mut()
             .ok_or_else(|| StoreError("move store: save outside a span".to_owned()))?;
-        sqlx::query(ISSUE_MOVE_UPDATE_SQL)
+        let sql = if fields.updated_by_id.is_some() {
+            ISSUE_MOVE_UPDATE_STAMP_SQL
+        } else {
+            ISSUE_MOVE_UPDATE_SQL
+        };
+        let mut query = sqlx::query(sql)
             .bind(fields.project_id)
             .bind(fields.workspace_id)
             .bind(sequence)
@@ -1860,7 +1891,11 @@ impl MoveStore for PoolMoveStore<'_> {
             .bind(None::<Uuid>)
             .bind(None::<Uuid>)
             .bind(None::<Uuid>)
-            .bind(now)
+            .bind(now);
+        if let Some(updated_by) = fields.updated_by_id {
+            query = query.bind(updated_by);
+        }
+        query
             .bind(issue_id)
             .execute(&mut **conn.inner())
             .await

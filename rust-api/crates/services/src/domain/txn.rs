@@ -133,6 +133,10 @@ impl HookRegistry {
 /// survive it. Until a `WriteTxn` savepoint API with queue scoping exists,
 /// savepoints stay out: `SAVEPOINT`/`RELEASE`/`ROLLBACK TO` SQL through
 /// [`WriteTxn::exec_raw`] is likewise forbidden.
+///
+/// `Copy`: the handle is a shared borrow, so sub-seams (the move's
+/// handoff-creation seam) can hold it alongside the owning store.
+#[derive(Clone, Copy)]
 pub struct TxnConn<'t> {
     inner: &'t DatabaseTransaction,
 }

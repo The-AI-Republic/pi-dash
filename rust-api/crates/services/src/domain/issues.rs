@@ -54,8 +54,18 @@ use uuid::Uuid;
 use super::activity::{TaskEnqueueHook, ISSUE_ACTIVITY_TASK, MODEL_ACTIVITY_TASK};
 use super::ctx::WriteCtx;
 use super::error::DomainError;
+use super::issues_move::{MoveCreationOutboxes, MovePostCommitHook};
 use super::transition::IssueTransitionHook;
 use super::txn::WriteTxn;
+
+pub use super::issues_move::{
+    move_to_project, CreationDeps, MoveAdmissionCache, MoveDomainOutcome, MoveDrainError,
+    MoveInput, MoveRejection,
+};
+use crate::app_issues::issue_move::{
+    issue_activity_kwargs as move_issue_activity_kwargs, move_model_activity_kwargs,
+};
+pub use crate::app_issues::issue_move::{MoveGuards, MoveOptions};
 use crate::app_issues::serializers_create::{
     m2m_batches, m2m_insert_sql, ASSIGNEE_CLEAR_SQL, DEFAULT_ASSIGNEE_EXISTS_SQL, LABEL_CLEAR_SQL,
 };
@@ -602,6 +612,12 @@ pub enum ChainStop {
     /// A v1 create override coercion failed — the port's constant
     /// `BadError("Please provide valid detail")` 400 arm.
     OverrideDetail,
+    /// A move's handoff-creation outbox drain failed — the driver's
+    /// `drain_creation_outboxes` `?` (`ServerError`, move standing).
+    CreationDrain,
+    /// A move's source-pod drain failed — the driver's `run_post_commit`
+    /// `?` (`ServerError`, move standing).
+    PodDrain,
 }
 
 /// The recorded outcome of one queued chain. The drain precedes
@@ -671,7 +687,7 @@ pub struct ModelActivitySpec {
 /// One post-commit effect, in handler order. The chain runs as a single
 /// queued step (see the module docs): fallible legs record a [`ChainStop`]
 /// and skip every later leg.
-enum ChainEffect {
+pub(crate) enum ChainEffect {
     CompletionIfChanged {
         issue_id: Uuid,
         prev_state: Option<Uuid>,
@@ -723,6 +739,46 @@ enum ChainEffect {
         slug: String,
         issue_id: Uuid,
     },
+    /// A move's handoff-creation outbox drain (first, before the move's
+    /// own post-commit work — the driver's `take_creation_outboxes`
+    /// block). Fallible: [`ChainStop::CreationDrain`].
+    CreationDrain {
+        outboxes: MoveCreationOutboxes,
+        terminal_created_by: Option<Uuid>,
+    },
+    /// A move's cancel send (`MovePostCommit::SendCancel`): best-effort
+    /// with logged warnings, never stops the chain.
+    SendCancel {
+        runner_id: Uuid,
+        run_id: Uuid,
+    },
+    /// A move's source-pod drain (`MovePostCommit::DrainPod`).
+    /// Fallible: [`ChainStop::PodDrain`].
+    DrainPod {
+        pod_id: Uuid,
+    },
+    /// A move's `issue_activity` enqueue, built by the move's own kwargs
+    /// builder (frozen-epoch quirk included — not the domain builder's
+    /// chain-time epoch). Best-effort, like every enqueue leg.
+    MoveIssueActivity {
+        event: String,
+        requested: String,
+        actor: Uuid,
+        issue: Uuid,
+        project: Uuid,
+        current: String,
+        epoch: i64,
+    },
+    /// A move's `model_activity` enqueue, built by the move's own kwargs
+    /// builder. Best-effort, like every enqueue leg.
+    MoveModelActivity {
+        model: Uuid,
+        requested: Value,
+        current: String,
+        actor: Uuid,
+        slug: String,
+        origin: String,
+    },
 }
 
 /// The destroy recent-visit delete, moved verbatim: a HARD delete scoped
@@ -741,10 +797,11 @@ const RECENT_VISIT_DELETE_SQL: &str = "DELETE FROM user_recent_visits AS visit \
 const CREATED_OVERRIDE_SQL: &str =
     r#"UPDATE "issues" SET "created_at" = $1, "created_by_id" = $2 WHERE "id" = $3"#;
 
-async fn run_chain(
+pub(crate) async fn run_chain(
     pool: &PgPool,
     transition: &Arc<dyn IssueTransitionHook>,
     enqueue: &Arc<dyn TaskEnqueueHook>,
+    drain: Option<&Arc<dyn MovePostCommitHook>>,
     chain: Vec<ChainEffect>,
     outcome: &ChainOutcome,
 ) {
@@ -957,17 +1014,70 @@ async fn run_chain(
                     break;
                 }
             }
+            ChainEffect::CreationDrain {
+                outboxes,
+                terminal_created_by,
+            } => {
+                let drain = drain.expect("move chain registered MovePostCommitHook");
+                if let Err(error) = drain.drain_creation(outboxes, terminal_created_by).await {
+                    tracing::warn!(%error, "post-commit creation drain failed; response fails");
+                    outcome.record(ChainStop::CreationDrain);
+                    break;
+                }
+            }
+            ChainEffect::SendCancel { runner_id, run_id } => {
+                let drain = drain.expect("move chain registered MovePostCommitHook");
+                drain.send_cancel(runner_id, run_id).await;
+            }
+            ChainEffect::DrainPod { pod_id } => {
+                let drain = drain.expect("move chain registered MovePostCommitHook");
+                if let Err(error) = drain.drain_pod(pod_id).await {
+                    tracing::warn!(%error, "post-commit pod drain failed; response fails");
+                    outcome.record(ChainStop::PodDrain);
+                    break;
+                }
+            }
+            ChainEffect::MoveIssueActivity {
+                event,
+                requested,
+                actor,
+                issue,
+                project,
+                current,
+                epoch,
+            } => {
+                let spec = move_issue_activity_kwargs(
+                    &event, &requested, &actor, &issue, &project, &current, epoch,
+                );
+                enqueue
+                    .enqueue_task(spec.task, spec.args, spec.kwargs)
+                    .await;
+            }
+            ChainEffect::MoveModelActivity {
+                model,
+                requested,
+                current,
+                actor,
+                slug,
+                origin,
+            } => {
+                let spec =
+                    move_model_activity_kwargs(&model, requested, &current, &actor, &slug, &origin);
+                enqueue
+                    .enqueue_task(spec.task, spec.args, spec.kwargs)
+                    .await;
+            }
         }
     }
 }
 
-fn transition_hook(txn: &WriteTxn) -> Arc<dyn IssueTransitionHook> {
+pub(crate) fn transition_hook(txn: &WriteTxn) -> Arc<dyn IssueTransitionHook> {
     txn.hooks()
         .get::<dyn IssueTransitionHook>()
         .expect("driver registered IssueTransitionHook")
 }
 
-fn enqueue_hook(txn: &WriteTxn) -> Arc<dyn TaskEnqueueHook> {
+pub(crate) fn enqueue_hook(txn: &WriteTxn) -> Arc<dyn TaskEnqueueHook> {
     txn.hooks()
         .get::<dyn TaskEnqueueHook>()
         .expect("driver registered TaskEnqueueHook")
@@ -1131,7 +1241,7 @@ pub async fn create(
     let step = outcome.clone();
     let pool = pool.clone();
     txn.on_commit(move || async move {
-        run_chain(&pool, &transition, &enqueue, chain, &step).await;
+        run_chain(&pool, &transition, &enqueue, None, chain, &step).await;
     });
     Ok(SaveOutcome {
         issue: model,
@@ -1373,7 +1483,7 @@ async fn update_driver(
     let step = outcome.clone();
     let pool = pool.clone();
     txn.on_commit(move || async move {
-        run_chain(&pool, &transition, &enqueue, chain, &step).await;
+        run_chain(&pool, &transition, &enqueue, None, chain, &step).await;
     });
     Ok(SaveOutcome {
         issue: model,
@@ -1478,7 +1588,7 @@ pub async fn soft_delete(
     let step = outcome.clone();
     let pool = pool.clone();
     txn.on_commit(move || async move {
-        run_chain(&pool, &transition, &enqueue, chain, &step).await;
+        run_chain(&pool, &transition, &enqueue, None, chain, &step).await;
     });
     Ok(SaveOutcome {
         issue: model,
@@ -1585,7 +1695,7 @@ pub async fn set_workpad(
         current_state: model.state_id,
     }];
     txn.on_commit(move || async move {
-        run_chain(&pool, &transition, &enqueue, chain, &step).await;
+        run_chain(&pool, &transition, &enqueue, None, chain, &step).await;
     });
     Ok(outcome)
 }
@@ -2076,7 +2186,7 @@ async fn archive_driver(
     let step = outcome.clone();
     let pool = pool.clone();
     txn.on_commit(move || async move {
-        run_chain(&pool, &transition, &enqueue, chain, &step).await;
+        run_chain(&pool, &transition, &enqueue, None, chain, &step).await;
     });
     Ok(SaveOutcome {
         issue: model,
@@ -2627,6 +2737,7 @@ mod tests {
             &pool,
             &erased_transition,
             &erased_enqueue,
+            None,
             vec![
                 ChainEffect::CompletionIfChanged {
                     issue_id: uid(2),
@@ -2685,6 +2796,7 @@ mod tests {
             &pool,
             &erased_transition,
             &erased_enqueue,
+            None,
             vec![ChainEffect::CompletionIfChanged {
                 issue_id: uid(2),
                 prev_state: Some(uid(10)),
@@ -2715,6 +2827,7 @@ mod tests {
             &pool,
             &erased_transition,
             &erased_enqueue,
+            None,
             vec![
                 ChainEffect::FireTransition {
                     issue_id: uid(2),
@@ -3110,6 +3223,7 @@ mod tests {
             &pool,
             &erased_transition,
             &erased_enqueue,
+            None,
             vec![
                 ChainEffect::FireTransition {
                     issue_id: uid(2),
@@ -3163,6 +3277,7 @@ mod tests {
             &pool,
             &erased_transition,
             &erased_enqueue,
+            None,
             vec![ChainEffect::FireTransition {
                 issue_id: uid(2),
                 prev_state: Some(uid(10)),
@@ -3201,6 +3316,7 @@ mod tests {
             &pool,
             &erased_transition,
             &erased_enqueue,
+            None,
             vec![ChainEffect::IssueActivity(IssueActivitySpec {
                 event: "issue.activity.created".to_owned(),
                 requested: Value::String("req".to_owned()),
