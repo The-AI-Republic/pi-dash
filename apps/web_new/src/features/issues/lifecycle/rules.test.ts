@@ -117,6 +117,27 @@ describe("delete copy and standing", () => {
     expect(failureDetail(null, "fallback")).toBe("fallback");
     expect(failureDetail("text", "fallback")).toBe("fallback");
   });
+
+  it("falls back on content-free JSON and prefers detail over message", () => {
+    // The reported symptom: an empty-JSON 500 body surfaced as message "{}".
+    expect(failureDetail({ message: "{}" }, "fallback")).toBe("fallback");
+    expect(failureDetail({ message: "  { } " }, "fallback")).toBe("fallback");
+    expect(failureDetail({ message: "[]" }, "fallback")).toBe("fallback");
+    expect(failureDetail({ message: "null" }, "fallback")).toBe("fallback");
+    expect(failureDetail({ detail: "{}" }, "fallback")).toBe("fallback");
+    // An empty detail still falls through to a real message.
+    expect(failureDetail({ detail: "{}", message: "real" }, "fallback")).toBe("real");
+    // Detail beats message when both carry text.
+    expect(failureDetail({ detail: "denied", message: "nope" }, "fallback")).toBe("denied");
+    // Non-empty JSON and JSON scalars keep today's verbatim passthrough.
+    expect(failureDetail({ message: '{"code":"x"}' }, "fallback")).toBe('{"code":"x"}');
+    expect(failureDetail({ message: "42" }, "fallback")).toBe("42");
+    // Braces inside a real sentence are prose, not a payload.
+    expect(failureDetail({ message: "Expected {id} in path" }, "fallback")).toBe("Expected {id} in path");
+    // Non-string candidates are skipped like before.
+    expect(failureDetail({ detail: 42, message: "m" }, "fallback")).toBe("m");
+    expect(failureDetail({ message: 42 }, "fallback")).toBe("fallback");
+  });
 });
 
 describe("move targets", () => {
