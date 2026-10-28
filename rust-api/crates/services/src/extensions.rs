@@ -57,7 +57,8 @@ pub mod reason {
 ///
 /// The credential itself is never part of this object — the desktop is
 /// handed it separately through the agent-token endpoint. `reason_code` is
-/// empty exactly when `available` is true.
+/// empty exactly when `available` is true. `top_up_url` is where a user
+/// adds credit for this lane; the overlay fills it, CE leaves it empty.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentModelProfile {
     pub available: bool,
@@ -65,6 +66,7 @@ pub struct AgentModelProfile {
     pub base_url: String,
     pub model: String,
     pub reason_code: String,
+    pub top_up_url: String,
 }
 
 /// CE credential failure (`ManagedRunnerUnavailable`): raising rather than
@@ -179,6 +181,7 @@ pub trait AssistantModelSeam: Send + Sync + std::fmt::Debug {
                 base_url: profile.base_url,
                 model: profile.model,
                 reason_code: profile.reason_code,
+                top_up_url: profile.top_up_url,
             }
         })
     }
@@ -466,6 +469,8 @@ mod tests {
         assert!(without_key.lane.is_empty());
         assert_eq!(without_key.reason_code, reason::LLM_CONFIG_MISSING);
         assert_eq!(reason::LLM_CONFIG_MISSING, "llm_config_missing");
+        assert!(with_key.top_up_url.is_empty());
+        assert!(without_key.top_up_url.is_empty());
     }
 
     #[tokio::test]
@@ -592,6 +597,7 @@ mod tests {
                     base_url: "https://gateway.example.com".to_string(),
                     model: "hub-default".to_string(),
                     reason_code: String::new(),
+                    top_up_url: "https://gateway.example.com/account/credits".to_string(),
                 }
             })
         }
@@ -668,6 +674,10 @@ mod tests {
         assert_eq!(profile.base_url, "https://gateway.example.com");
         assert_eq!(profile.model, "hub-default");
         assert!(profile.reason_code.is_empty());
+        assert_eq!(
+            profile.top_up_url,
+            "https://gateway.example.com/account/credits"
+        );
         let (token, expires_at) = seam
             .agent_model_credential(user())
             .await

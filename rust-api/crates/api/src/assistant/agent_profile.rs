@@ -167,6 +167,7 @@ async fn get_profile(
             "lane": profile.lane,
             "base_url": profile.base_url,
             "model": profile.model,
+            "top_up_url": profile.top_up_url,
             "available": available,
             "reason_code": reason_code,
             "graceful_stop_seconds": state.settings().managed_runner.graceful_stop_secs,
@@ -486,6 +487,7 @@ mod live_tests {
                     base_url: "https://gateway.example.com".to_owned(),
                     model: "hub-default".to_owned(),
                     reason_code: String::new(),
+                    top_up_url: "https://gateway.example.com/account/credits".to_owned(),
                 }
             })
         }
@@ -667,6 +669,10 @@ mod live_tests {
         assert_eq!(body["lane"], "openhub");
         assert_eq!(body["base_url"], "https://gateway.example.com");
         assert_eq!(body["model"], "hub-default");
+        assert_eq!(
+            body["top_up_url"],
+            "https://gateway.example.com/account/credits"
+        );
         assert_eq!(body["available"], true);
         assert_eq!(body["reason_code"], "");
     }
@@ -688,6 +694,7 @@ mod live_tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["lane"], "");
+        assert_eq!(body["top_up_url"], "");
         assert_eq!(body["available"], false);
         assert_eq!(body["reason_code"], "llm_config_missing");
     }

@@ -7093,6 +7093,7 @@ mod live_tests {
                     base_url: "https://gateway.example.com".to_owned(),
                     model: "hub-default".to_owned(),
                     reason_code: String::new(),
+                    top_up_url: String::new(),
                 }
             })
         }
