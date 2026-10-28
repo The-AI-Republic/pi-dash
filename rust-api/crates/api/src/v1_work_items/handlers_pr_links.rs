@@ -619,7 +619,6 @@ use pidash_services::integrations::code_reviews::{
     NewLegacyLink, ReviewAdapter, ReviewParser,
 };
 use pidash_services::integrations::repositories::{NewRepository, RepositoryDefaults};
-use pidash_services::read;
 
 /// Sentinel for the deleted-project lookup miss inside PR attach: the
 /// handler maps it to the 404 `DoesNotExist` body (Python's

@@ -100,7 +100,7 @@ use crate::middleware::body_limit::read_request_bytes;
 use crate::state::AppState;
 use crate::v1_cycles_modules::body as shared_body;
 
-use pidash_compat::db::{is_integrity_error, is_unique_violation};
+use pidash_compat::db::is_unique_violation;
 use pidash_compat::response::{empty_response_no_content_type as empty_response, json_response};
 use pidash_compat::validate::push_pairs_error as push_error;
 use pidash_services::app_issues::relation_mapper::get_actual_relation;
@@ -3376,7 +3376,6 @@ use pidash_services::integrations::code_reviews::{
     NewLegacyLink, ReviewAdapter, ReviewParser,
 };
 use pidash_services::integrations::repositories::{NewRepository, RepositoryDefaults};
-use pidash_services::read;
 
 /// Sentinel for the deleted-project lookup miss inside PR attach: the
 /// handler maps it to the 404 `DoesNotExist` body (Python's
