@@ -123,13 +123,38 @@ export function isDeletePermissionError(error: unknown): boolean {
   return typeof message === "string" && /only admin or creator/i.test(message);
 }
 
-/** Server detail for a failed write, falling back to the dialog's copy. */
+/**
+ * Whether a detail/message candidate actually says something. Blank text
+ * never does. Neither does content-free JSON: the client surfaces an
+ * unrecognised short body verbatim as the error message, so an empty-JSON
+ * failure arrives here as "{}" (or "[]", or "null") and must fall through
+ * to the caller's copy instead of printing raw. Anything else — prose,
+ * JSON with entries, a JSON scalar — keeps today's verbatim passthrough.
+ */
+function carriesMessage(candidate: string): boolean {
+  const text = candidate.trim();
+  if (text === "") return false;
+  try {
+    const parsed: unknown = JSON.parse(text);
+    if (parsed === null || (typeof parsed === "object" && Object.keys(parsed).length === 0)) return false;
+  } catch {
+    // Not JSON at all: judge it as prose, which always counts.
+  }
+  return true;
+}
+
+/**
+ * Server detail for a failed write, falling back to the dialog's copy.
+ * A blank or content-free ("{}", "[]", "null") candidate counts as
+ * absent, so each step falls through: detail, then message, then the
+ * caller's fallback.
+ */
 export function failureDetail(error: unknown, fallback: string): string {
   if (typeof error === "object" && error !== null) {
     const detail = (error as { detail?: unknown }).detail;
-    if (typeof detail === "string" && detail.trim() !== "") return detail.trim();
+    if (typeof detail === "string" && carriesMessage(detail)) return detail.trim();
     const message = (error as { message?: unknown }).message;
-    if (typeof message === "string" && message.trim() !== "") return message.trim();
+    if (typeof message === "string" && carriesMessage(message)) return message.trim();
   }
   return fallback;
 }
