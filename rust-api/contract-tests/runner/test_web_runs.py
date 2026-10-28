@@ -42,6 +42,50 @@ RUN_KEYS = {
 }
 
 
+@pytest.fixture(autouse=True)
+def _delete_created_runs(seeder):
+    """Remove every run in the test's workspaces afterwards.
+
+    POST create covers all three dispatch tails, so most tests in this
+    file leave server-created runs the seeder never tracked; the global
+    metrics gauges count them, breaking reused databases. Dependents go
+    first (the FKs are checked per statement under autocommit): child
+    rows, the binding/ticker run pointers, then children, then the rest.
+    """
+    yield
+    ws_ids = seeder.track._tracked_ids("workspaces")
+    if not ws_ids:
+        return
+    db = seeder.db
+    db.execute(
+        "UPDATE scheduler_bindings SET last_run_id = NULL WHERE last_run_id IN "
+        "(SELECT id FROM agent_run WHERE workspace_id = ANY(%s))",
+        (ws_ids,),
+    )
+    db.execute(
+        "UPDATE issue_agent_ticker SET resume_parent_run_id = NULL "
+        "WHERE resume_parent_run_id IN "
+        "(SELECT id FROM agent_run WHERE workspace_id = ANY(%s))",
+        (ws_ids,),
+    )
+    for table, column in (
+        ("run_message_dedupe", "run_id"),
+        ("agent_run_event", "agent_run_id"),
+        ("agent_run_approval", "agent_run_id"),
+        ("agent_run_tool_call", "agent_run_id"),
+    ):
+        db.execute(
+            f"DELETE FROM {table} WHERE {column} IN "
+            "(SELECT id FROM agent_run WHERE workspace_id = ANY(%s))",
+            (ws_ids,),
+        )
+    db.execute(
+        "DELETE FROM agent_run WHERE workspace_id = ANY(%s) AND parent_run_id IS NOT NULL",
+        (ws_ids,),
+    )
+    db.execute("DELETE FROM agent_run WHERE workspace_id = ANY(%s)", (ws_ids,))
+
+
 def test_web_runs_list_shape(user_client, daemon_run):
     response = user_client.get(f"{WEB}/runs/")
     assert response.status_code == 200, response.text

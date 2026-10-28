@@ -95,7 +95,32 @@ def _make_online_runner(seeder, owner_id, workspace_id, pod_id):
                    '','',0,'',1,'','','',0,'{}','manual')""",
         (runner_id, f"handoff-{uuid.uuid4().hex[:8]}", owner_id, workspace_id, pod_id),
     )
+    seeder._put("runner", runner_id)
     return runner_id
+
+
+def _delete_child_runs(seeder, run_id):
+    """Remove server-created replacement runs of a seeded run.
+
+    The seed tracker only knows seeded rows, and ``agent_run`` FKs
+    (``parent_run_id``, ``runner_id``, ``pod_id``) silently block the tracked
+    deletes while a replacement survives — so drop each child's event,
+    approval and dedupe rows, then the children themselves.
+    """
+    replacements = seeder.db.fetchall(
+        "SELECT id FROM agent_run WHERE parent_run_id = %s", (run_id,)
+    )
+    for replacement in replacements:
+        seeder.db.execute(
+            "DELETE FROM run_message_dedupe WHERE run_id = %s", (replacement["id"],)
+        )
+        seeder.db.execute(
+            "DELETE FROM agent_run_event WHERE agent_run_id = %s", (replacement["id"],)
+        )
+        seeder.db.execute(
+            "DELETE FROM agent_run_approval WHERE agent_run_id = %s", (replacement["id"],)
+        )
+    seeder.db.execute("DELETE FROM agent_run WHERE parent_run_id = %s", (run_id,))
 
 
 def _complete(machine_client, run_id, done_payload):
@@ -157,6 +182,7 @@ def run_with_issue(seeder, daemon_world, machine_flow, issue_world):
         (issue_world["id"], run["id"]),
     )
     yield run
+    _delete_child_runs(seeder, run["id"])
     seeder.db.execute("DELETE FROM run_message_dedupe WHERE run_id = %s", (run["id"],))
     seeder.db.execute("DELETE FROM agent_run_event WHERE agent_run_id = %s", (run["id"],))
     seeder.db.execute("DELETE FROM agent_run_approval WHERE agent_run_id = %s", (run["id"],))
@@ -344,19 +370,7 @@ def handoff_failure_world(
         "owner_id": daemon_world["owner"]["id"],
     }
     yield world
-    replacements = seeder.db.fetchall(
-        "SELECT id FROM agent_run WHERE parent_run_id = %s", (world["run_id"],)
-    )
-    for replacement in replacements:
-        seeder.db.execute(
-            "DELETE FROM run_message_dedupe WHERE run_id = %s", (replacement["id"],)
-        )
-        seeder.db.execute(
-            "DELETE FROM agent_run_event WHERE agent_run_id = %s", (replacement["id"],)
-        )
-        seeder.db.execute(
-            "DELETE FROM agent_run_approval WHERE agent_run_id = %s", (replacement["id"],)
-        )
+    _delete_child_runs(seeder, world["run_id"])
     descriptions = seeder.db.fetchall(
         "SELECT description_id FROM issue_comments WHERE issue_id = %s",
         (world["issue_id"],),
@@ -369,9 +383,6 @@ def handoff_failure_world(
             seeder.db.execute(
                 "DELETE FROM descriptions WHERE id = %s", (row["description_id"],)
             )
-    seeder.db.execute(
-        "DELETE FROM agent_run WHERE parent_run_id = %s", (world["run_id"],)
-    )
 
 
 def test_complete_move_handoff_failure_comment_stamped_with_requester(
