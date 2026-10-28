@@ -1032,36 +1032,34 @@ async fn insert_project_arm_project_members(
     }
     let default_props = default_props_json();
     let preferences = default_preferences_json();
-    let mut builder = sqlx::QueryBuilder::new(
-        "INSERT INTO \"project_members\" (\"created_at\", \"updated_at\", \"created_by_id\", \
-         \"updated_by_id\", \"deleted_at\", \"id\", \"workspace_id\", \"member_id\", \"comment\", \
-         \"role\", \"view_props\", \"default_props\", \"preferences\", \"sort_order\", \
-         \"is_active\") ",
-    );
-    builder.push_values(rows, |mut bind, row| {
-        let (workspace_id, role, created_by) = row;
-        bind.push_bind(now)
-            .push_bind(now)
-            .push_bind(*created_by)
-            .push_bind(None::<uuid::Uuid>)
-            .push_bind(None::<chrono::DateTime<chrono::Utc>>)
-            .push_bind(uuid::Uuid::new_v4())
-            .push_bind(*workspace_id)
-            .push_bind(user_id)
-            .push_bind(None::<String>)
-            .push_bind(invite_member_role(*role))
-            .push_bind(sqlx::types::Json(default_props.clone()))
-            .push_bind(sqlx::types::Json(default_props.clone()))
-            .push_bind(sqlx::types::Json(preferences.clone()))
-            .push_bind(65535.0f64)
-            .push_bind(true);
-    });
-    builder.push(" ON CONFLICT DO NOTHING");
-    builder
-        .build()
-        .execute(pool)
-        .await
-        .map_err(|_| server_error())?;
+    let bulk: Vec<pidash_services::domain::projects::members::BulkRow> = rows
+        .iter()
+        .map(|(workspace_id, role, created_by)| {
+            pidash_services::domain::projects::members::BulkRow {
+                workspace_id: *workspace_id,
+                // PB-1008: the project arm omits `project_id`; the
+                // explicit `NULL` raises the same 23502 as the omitted
+                // column (identical message, identical effect).
+                project_id: None,
+                user_id,
+                role: pidash_services::domain::projects::members::RoleBind::Int(i64::from(
+                    invite_member_role(*role),
+                )),
+                created_by: *created_by,
+                created_at: now,
+                updated_at: now,
+            }
+        })
+        .collect();
+    pidash_services::domain::projects::members::bulk_add(
+        pool,
+        &bulk,
+        &default_props,
+        &preferences,
+        false,
+    )
+    .await
+    .map_err(|_| server_error())?;
     Ok(())
 }
 

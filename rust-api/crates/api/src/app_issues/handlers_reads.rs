@@ -800,28 +800,27 @@ async fn fetch_or_create_property(
         return Err(Denial::NotFound);
     };
     let now = Utc::now();
-    let id = uuid::Uuid::new_v4();
-    sqlx::query(
-        "INSERT INTO project_user_properties (id, created_at, updated_at, created_by_id, \
-        updated_by_id, deleted_at, project_id, workspace_id, user_id, filters, display_filters, \
-        display_properties, rich_filters, preferences, sort_order) \
-        VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, $7, $8, $9, $10, $11, $12, $13) \
-        ON CONFLICT (user_id, project_id) WHERE deleted_at IS NULL DO NOTHING",
+    let filters = default_filters();
+    let display_filters = default_display_filters();
+    let display_properties = default_display_properties();
+    let rich = Value::Object(Map::new());
+    let preferences = default_preferences();
+    pidash_services::domain::projects::members::get_or_create_property(
+        pool,
+        &pidash_services::domain::projects::members::NewMemberProperty {
+            workspace_id,
+            project_id: gate.project_id,
+            user_id: gate.user_id,
+            filters: &filters,
+            display_filters: &display_filters,
+            display_properties: &display_properties,
+            rich_filters: &rich,
+            preferences: &preferences,
+            sort_order: 65535.0,
+            created_by: Some(gate.user_id),
+            now,
+        },
     )
-    .bind(id)
-    .bind(now)
-    .bind(now)
-    .bind(gate.user_id)
-    .bind(gate.project_id)
-    .bind(workspace_id)
-    .bind(gate.user_id)
-    .bind(default_filters())
-    .bind(default_display_filters())
-    .bind(default_display_properties())
-    .bind(Value::Object(Map::new()))
-    .bind(default_preferences())
-    .bind(65535.0f64)
-    .execute(pool)
     .await
     .map_err(|_| Denial::ServerError)?;
     fetch_property(pool, gate).await?.ok_or(Denial::ServerError)

@@ -1715,35 +1715,21 @@ pub async fn insert_project_members(
     }
     let props = default_props();
     let prefs = default_preferences();
-    let mut builder = sqlx::QueryBuilder::new(
-        "INSERT INTO \"project_members\" (\"id\", \"created_at\", \
-         \"updated_at\", \"created_by_id\", \"updated_by_id\", \
-         \"deleted_at\", \"workspace_id\", \"member_id\", \"comment\", \
-         \"role\", \"view_props\", \"default_props\", \"preferences\", \
-         \"sort_order\", \"is_active\") ",
-    );
-    builder.push_values(rows, |mut bind, row| {
-        let (workspace_id, member_id, role, created_by) = row;
-        bind.push_bind(uuid::Uuid::new_v4())
-            .push_bind(now)
-            .push_bind(now)
-            .push_bind(*created_by)
-            .push_bind(None::<uuid::Uuid>)
-            .push_bind(None::<chrono::DateTime<chrono::Utc>>)
-            .push_bind(*workspace_id)
-            .push_bind(*member_id)
-            .push_bind(None::<String>)
-            .push_bind(*role)
-            .push_bind(props.clone())
-            .push_bind(props.clone())
-            .push_bind(prefs.clone())
-            .push_bind(65535.0f64)
-            .push_bind(true);
-    });
-    builder.push(" ON CONFLICT DO NOTHING");
-    builder
-        .build()
-        .execute(pool)
+    let bulk: Vec<pidash_services::domain::projects::members::BulkRow> = rows
+        .iter()
+        .map(|(workspace_id, member_id, role, created_by)| {
+            pidash_services::domain::projects::members::BulkRow {
+                workspace_id: *workspace_id,
+                project_id: None,
+                user_id: *member_id,
+                role: pidash_services::domain::projects::members::RoleBind::Int(i64::from(*role)),
+                created_by: *created_by,
+                created_at: now,
+                updated_at: now,
+            }
+        })
+        .collect();
+    pidash_services::domain::projects::members::bulk_add(pool, &bulk, &props, &prefs, false)
         .await
         .map_err(|_| CallbackError::Internal)?;
     Ok(())

@@ -430,20 +430,15 @@ pub fn workspace_deactivate_scan_sql() -> String {
 /// `bulk_update` batch size (`:308`, `:310`): `batch_size=100`.
 pub const BULK_DEACTIVATE_BATCH_SIZE: usize = 100;
 
-/// Bulk deactivation write (`:308`, `:310`):
+/// Workspace bulk deactivation write (`:310`):
 /// `bulk_update(rows, ["is_active"], batch_size=100)`.
 ///
 /// Ported bug 5: `bulk_update` bypasses `save()`, so `auto_now` does
 /// NOT stamp `updated_at`, and the write is pk-direct with NO
 /// `deleted_at` filter. The handler chunks `:pks` into batches of
 /// [`BULK_DEACTIVATE_BATCH_SIZE`]; an empty collection issues NO
-/// statement at all.
-pub fn project_bulk_deactivate_sql() -> String {
-    "UPDATE project_members SET is_active = FALSE WHERE project_members.id IN (:pks)".to_owned()
-}
-
-/// Workspace bulk deactivation write (`:310`): same shape as
-/// [`project_bulk_deactivate_sql`].
+/// statement at all. (The project twin moved to
+/// `domain::projects::members`.)
 pub fn workspace_bulk_deactivate_sql() -> String {
     "UPDATE workspace_members SET is_active = FALSE WHERE workspace_members.id IN (:pks)".to_owned()
 }
@@ -781,7 +776,6 @@ mod tests {
         // WHERE; bulk deactivations are pk-direct (ported bug 5);
         // session/account deletes are hard (no soft-delete mixin).
         assert!(deactivate_invite_purge_sql().contains("deleted_at IS NULL"));
-        assert!(!project_bulk_deactivate_sql().contains("deleted_at"));
         assert!(!workspace_bulk_deactivate_sql().contains("deleted_at"));
         // users / profiles / accounts / sessions have no deleted_at
         // column — assert absence, not scope.
@@ -912,12 +906,9 @@ mod tests {
 
     #[test]
     fn unit3_deactivate_writes() {
-        // bulk_update batch 100, is_active only, no stamp, no scope.
+        // bulk_update batch 100, is_active only, no stamp, no scope
+        // (the project twin moved to `domain::projects::members`).
         assert_eq!(BULK_DEACTIVATE_BATCH_SIZE, 100);
-        assert_eq!(
-            project_bulk_deactivate_sql(),
-            "UPDATE project_members SET is_active = FALSE WHERE project_members.id IN (:pks)"
-        );
         assert_eq!(
             workspace_bulk_deactivate_sql(),
             "UPDATE workspace_members SET is_active = FALSE WHERE workspace_members.id IN (:pks)"

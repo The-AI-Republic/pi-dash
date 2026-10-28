@@ -1630,34 +1630,25 @@ async fn bulk_insert_project_members(
     if rows.is_empty() {
         return Ok(());
     }
-    let mut builder: sqlx::QueryBuilder<sqlx::Postgres> = sqlx::QueryBuilder::new(
-        r#"INSERT INTO "project_members" ("id", "created_at", "updated_at",
-           "created_by_id", "updated_by_id", "deleted_at",
-           "workspace_id", "member_id", "comment", "role",
-           "view_props", "default_props", "preferences", "sort_order", "is_active") "#,
-    );
     let view_props = default_props_json();
-    builder.push_values(rows, |mut row, member| {
-        row.push_bind(uuid::Uuid::new_v4())
-            .push_bind(now)
-            .push_bind(now)
-            .push_bind(member.created_by_id)
-            .push_bind(Option::<uuid::Uuid>::None)
-            .push_bind(Option::<chrono::DateTime<Utc>>::None)
-            .push_bind(member.workspace_id)
-            .push_bind(member.member_id)
-            .push_bind(Option::<String>::None)
-            .push_bind(member.role)
-            .push_bind(view_props.clone())
-            .push_bind(view_props.clone())
-            .push_bind(default_preferences_json())
-            .push_bind(65535.0_f64)
-            .push_bind(true);
-    });
-    builder.push(" ON CONFLICT DO NOTHING");
-    builder
-        .build()
-        .execute(pool)
+    let prefs = default_preferences_json();
+    let bulk: Vec<pidash_services::domain::projects::members::BulkRow> = rows
+        .iter()
+        .map(
+            |member| pidash_services::domain::projects::members::BulkRow {
+                workspace_id: member.workspace_id,
+                project_id: None,
+                user_id: member.member_id,
+                role: pidash_services::domain::projects::members::RoleBind::Int(i64::from(
+                    member.role,
+                )),
+                created_by: member.created_by_id,
+                created_at: now,
+                updated_at: now,
+            },
+        )
+        .collect();
+    pidash_services::domain::projects::members::bulk_add(pool, &bulk, &view_props, &prefs, false)
         .await
         .map_err(|_| Denial::ServerError)?;
     Ok(())

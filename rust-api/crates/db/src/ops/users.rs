@@ -386,68 +386,6 @@ pub async fn project_member_exists(
     Ok(exists)
 }
 
-/// `ProjectMember.objects.filter(project=project,
-/// member=user).update(is_active=True, role=role)` (`:57-59`):
-/// queryset `update()` touches ONLY the two columns — no `save()`,
-/// no `auto_now` bump. `None` binds `NULL` (the BUG-2 write, which
-/// Postgres rejects). Bound as `int8`: in-range values assign to
-/// the `smallint` column, out-of-range ones raise the server's
-/// `smallint out of range`, exactly as the psycopg-bound values do.
-pub async fn project_member_update(
-    pool: &sqlx::PgPool,
-    project_id: uuid::Uuid,
-    user_id: uuid::Uuid,
-    role: Option<i64>,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        r#"UPDATE "project_members" SET "is_active" = TRUE, "role" = $3
-           WHERE "project_id" = $1 AND "member_id" = $2 AND "deleted_at" IS NULL"#,
-    )
-    .bind(project_id)
-    .bind(user_id)
-    .bind(role)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
-/// `ProjectMember.objects.create(project=project, member=user,
-/// role=role)` (`:62`): model-default JSON (project-flavored
-/// `view_props`/`default_props`), `comment NULL`, `sort_order
-/// 65535`, `is_active TRUE`. The `save()` hook's property row is a
-/// separate call the `bin` layer runs first, in the same order.
-#[allow(clippy::too_many_arguments)]
-pub async fn project_member_create(
-    pool: &sqlx::PgPool,
-    project_id: uuid::Uuid,
-    workspace_id: uuid::Uuid,
-    user_id: uuid::Uuid,
-    role: Option<i64>,
-    props: &Value,
-    preferences: &Value,
-) -> Result<uuid::Uuid, sqlx::Error> {
-    let id = uuid::Uuid::new_v4();
-    let now = chrono::Utc::now();
-    sqlx::query(
-        r#"INSERT INTO "project_members"
-           ("id", "created_at", "updated_at", "created_by_id", "updated_by_id", "deleted_at",
-            "project_id", "workspace_id", "member_id", "comment", "role",
-            "view_props", "default_props", "preferences", "sort_order", "is_active")
-           VALUES ($1,$2,$2,NULL,NULL,NULL, $3,$4,$5,NULL,$6, $7,$7,$8,65535,TRUE)"#,
-    )
-    .bind(id)
-    .bind(now)
-    .bind(project_id)
-    .bind(workspace_id)
-    .bind(user_id)
-    .bind(role)
-    .bind(sqlx::types::Json(props))
-    .bind(sqlx::types::Json(preferences))
-    .execute(pool)
-    .await?;
-    Ok(id)
-}
-
 /// `ProjectUserProperty.objects.filter(workspace_id=..., user=...)
 /// .aggregate(Min("sort_order"))` — the `ProjectMember.save()` hook
 /// (`db/models/project.py:348-356`): the minimum is per
@@ -488,49 +426,6 @@ pub async fn property_get(
     Ok(id)
 }
 
-/// The hook's `ProjectUserProperty.objects.create(workspace_id=...,
-/// project=..., user=..., sort_order=...)` and the `get_or_create`
-/// fallback insert: identical shapes, so one function serves both.
-/// `rich_filters` is `{}`, `sort_order` is the hook value (or the
-/// `65535` model default on the fallback path).
-#[allow(clippy::too_many_arguments)]
-pub async fn property_create(
-    pool: &sqlx::PgPool,
-    workspace_id: uuid::Uuid,
-    project_id: uuid::Uuid,
-    user_id: uuid::Uuid,
-    sort_order: f64,
-    filters: &Value,
-    display_filters: &Value,
-    display_properties: &Value,
-    preferences: &Value,
-) -> Result<uuid::Uuid, sqlx::Error> {
-    let id = uuid::Uuid::new_v4();
-    let now = chrono::Utc::now();
-    sqlx::query(
-        r#"INSERT INTO "project_user_properties"
-           ("id", "created_at", "updated_at", "created_by_id", "updated_by_id", "deleted_at",
-            "workspace_id", "project_id", "user_id",
-            "filters", "display_filters", "display_properties", "rich_filters",
-            "preferences", "sort_order")
-           VALUES ($1,$2,$2,NULL,NULL,NULL, $3,$4,$5, $6,$7,$8,'{}', $9,$10)"#,
-    )
-    .bind(id)
-    .bind(now)
-    .bind(workspace_id)
-    .bind(project_id)
-    .bind(user_id)
-    .bind(sqlx::types::Json(filters))
-    .bind(sqlx::types::Json(display_filters))
-    .bind(sqlx::types::Json(display_properties))
-    .bind(sqlx::types::Json(preferences))
-    .bind(sort_order)
-    .execute(pool)
-    .await?;
-    Ok(id)
-}
-
-// ---------------------------------------------------------------------------
 // Dummy data scaffolding (`create_dummy_data.py:24-45`)
 // ---------------------------------------------------------------------------
 

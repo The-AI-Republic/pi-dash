@@ -1420,22 +1420,24 @@ async fn process_invitations(
     }
     for (workspace_id, role, created_by) in &project_invites {
         let clamped = if *role == 5 || *role == 15 { *role } else { 15 };
-        sqlx::query(
-            r#"INSERT INTO "project_members" ("id", "created_at", "updated_at", "workspace_id",
-               "member_id", "role", "created_by_id", "view_props", "default_props", "preferences",
-               "sort_order", "is_active")
-               VALUES ($1, $2, $2, $3, $4, $5, $6, $7, $7, $8, 65535, TRUE) ON CONFLICT DO NOTHING"#,
+        let prefs = serde_json::json!({"pages": {"block_display": true},
+                    "navigation": {"default_tab": "work_items", "hide_in_more_menu": []}});
+        pidash_services::domain::projects::members::add(
+            pool,
+            &pidash_services::domain::projects::members::NewProjectMember {
+                workspace_id: *workspace_id,
+                project_id: None,
+                user_id: Some(user_id),
+                role: clamped,
+                created_by: *created_by,
+                view_props: &project_default_props(),
+                default_props: &project_default_props(),
+                preferences: &prefs,
+                now,
+                ignore_conflicts: true,
+                db_now: false,
+            },
         )
-        .bind(Uuid::new_v4())
-        .bind(now)
-        .bind(workspace_id)
-        .bind(user_id)
-        .bind(clamped)
-        .bind(created_by)
-        .bind(project_default_props())
-        .bind(serde_json::json!({"pages": {"block_display": true},
-                    "navigation": {"default_tab": "work_items", "hide_in_more_menu": []}}))
-        .execute(pool)
         .await?;
     }
 

@@ -1970,27 +1970,25 @@ async fn collection_create(
                 Err(_) => return Denial::ServerError.into_response(),
             };
             let sequence = max_sequence.map(|max| max + 15000.0).unwrap_or(65000.0);
-            let new_id = Uuid::new_v4();
             // Full `State.objects.create` row: the queries-layer helper
             // emits only the explicit create kwargs, so the ORM-filled
             // columns (`description=""`, `slug="triage"` from `save()`,
             // `is_triage=False`) are set here (foundation read-only).
-            if let Err(error) = sqlx::query(
-                "INSERT INTO \"states\" (id, created_at, updated_at, created_by_id, name, description, slug, color, project_id, workspace_id, sequence, \"group\", \"default\", is_triage) VALUES ($1, $2, $3, $4, 'Triage', '', 'triage', '#4E5355', $5, $6, $7, 'triage', false, false)",
+            match pidash_services::domain::projects::states::add_triage(
+                pool,
+                board.project_id,
+                board.workspace_id,
+                sequence,
+                actor.id,
+                now,
+                now,
+                pidash_services::domain::projects::states::TriageText::Short,
             )
-            .bind(new_id)
-            .bind(now)
-            .bind(now)
-            .bind(actor.id)
-            .bind(board.project_id)
-            .bind(board.workspace_id)
-            .bind(sequence)
-            .execute(pool)
             .await
             {
-                return db_error(error);
+                Ok(new_id) => new_id,
+                Err(error) => return db_error(error),
             }
-            new_id
         }
     };
     // `Issue.save` backfills (`db/models/issue.py:305-360`): the project

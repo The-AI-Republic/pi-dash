@@ -1689,25 +1689,22 @@ pub async fn process_invitations(
             // `IntegrityError` on Postgres (`project_members.project_id`
             // is NOT NULL) — every app-callback success with accepted
             // project invites 500s after the rows above committed.
-            sqlx::query(
-                r#"INSERT INTO project_members
-                   (id, created_at, updated_at, project_id, workspace_id, member_id,
-                    comment, role, view_props, default_props, preferences,
-                    sort_order, is_active, created_by_id, updated_by_id, deleted_at)
-                   VALUES ($1,$2,$2,NULL,$3,$4,
-                           NULL,$5,$6,$6,$7,
-                           65535,TRUE,$8,NULL,NULL)
-                   ON CONFLICT DO NOTHING"#,
+            pidash_services::domain::projects::members::add(
+                pool,
+                &pidash_services::domain::projects::members::NewProjectMember {
+                    workspace_id: invite.workspace_id,
+                    project_id: None,
+                    user_id: Some(user_id),
+                    role: role as i16,
+                    created_by: invite.created_by_id,
+                    view_props: &props,
+                    default_props: &props,
+                    preferences: &prefs,
+                    now,
+                    ignore_conflicts: true,
+                    db_now: false,
+                },
             )
-            .bind(uuid::Uuid::new_v4())
-            .bind(now)
-            .bind(invite.workspace_id)
-            .bind(user_id)
-            .bind(role)
-            .bind(&props)
-            .bind(&prefs)
-            .bind(invite.created_by_id)
-            .execute(pool)
             .await?;
         }
     }

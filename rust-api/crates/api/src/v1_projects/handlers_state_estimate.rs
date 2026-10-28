@@ -1945,7 +1945,6 @@ async fn create_state_inner(
             None => state_model::DEFAULT_SEQUENCE,
         },
     };
-    let id = Uuid::new_v4();
     let slug_value = state_model::slugify_name(&name);
     let description = input.description.clone().unwrap_or_default();
     let is_triage = input.is_triage.unwrap_or(state_model::DEFAULT_IS_TRIAGE);
@@ -1953,32 +1952,30 @@ async fn create_state_inner(
     // Each external field saves independently (missing or explicit null → null).
     let external_source = input.external_source.clone().flatten();
     let external_id = input.external_id.clone().flatten();
-    let insert = sqlx::query(
-        r#"INSERT INTO states
-           (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
-            project_id, workspace_id, name, description, color, slug, sequence,
-            "group", is_triage, "default", external_source, external_id)
-           VALUES ($1,$2,$3,$4,$5,NULL,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)"#,
+    let insert = pidash_services::domain::projects::states::create(
+        &pool,
+        &pidash_services::domain::projects::states::NewState {
+            project_id: gate.project_id,
+            workspace_id,
+            name: &name,
+            description: &description,
+            color: &color,
+            slug: &slug_value,
+            sequence,
+            group: &group,
+            is_triage,
+            default,
+            external_source: external_source.as_deref(),
+            external_id: external_id.as_deref(),
+            created_by: gate.actor.id,
+            updated_by: None,
+            now,
+            v1: true,
+        },
     )
-    .bind(id)
-    .bind(now)
-    .bind(now)
-    .bind(gate.actor.id)
-    .bind(Option::<Uuid>::None)
-    .bind(gate.project_id)
-    .bind(workspace_id)
-    .bind(&name)
-    .bind(&description)
-    .bind(&color)
-    .bind(&slug_value)
-    .bind(sequence)
-    .bind(&group)
-    .bind(is_triage)
-    .bind(default)
-    .bind(&external_source)
-    .bind(&external_id);
-    match insert.execute(&pool).await {
-        Ok(_) => {}
+    .await;
+    let id = match insert {
+        Ok(id) => id,
         Err(e) if is_unique_violation(&e) => {
             // Name clash: echo the surviving row's id; a lookup miss 500s
             // (Python `AttributeError` on `None.id` → generic branch). The lookup
@@ -1997,7 +1994,7 @@ async fn create_state_inner(
             )));
         }
         Err(_) => return Err(HandlerError::ServerError),
-    }
+    };
     let created = state_model::State {
         id,
         created_at: now,

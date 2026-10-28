@@ -1663,45 +1663,54 @@ pub(crate) async fn create_project_member(
         .await
         .map_err(|_| Denial::ServerError)?;
         let sort_order = min_sort.map(|min| min - 10000.0).unwrap_or(65535.0);
-        sqlx::query(
-            "INSERT INTO project_user_properties (id, workspace_id, project_id, user_id,
-                filters, display_filters, display_properties, rich_filters, preferences,
-                sort_order, created_by_id, updated_by_id, created_at, updated_at, deleted_at)
-             VALUES ($1, $2, $3, $4,
-                $5::jsonb, $6::jsonb, $7::jsonb, '{}', $8::jsonb,
-                $9, $10, NULL, now(), now(), NULL)",
+        let filters: Value =
+            serde_json::from_str(&default_issue_filters_json()).map_err(|_| Denial::ServerError)?;
+        let display_filters: Value = serde_json::from_str(&default_issue_display_filters_json())
+            .map_err(|_| Denial::ServerError)?;
+        let display_properties: Value =
+            serde_json::from_str(&default_issue_display_properties_json())
+                .map_err(|_| Denial::ServerError)?;
+        let prefs: Value =
+            serde_json::from_str(&default_preferences_json()).map_err(|_| Denial::ServerError)?;
+        pidash_services::domain::projects::members::add_property_db_now(
+            pool,
+            &pidash_services::domain::projects::members::NewMemberProperty {
+                workspace_id,
+                project_id: *project_id,
+                user_id: member_id,
+                filters: &filters,
+                display_filters: &display_filters,
+                display_properties: &display_properties,
+                rich_filters: &serde_json::json!({}),
+                preferences: &prefs,
+                sort_order,
+                created_by,
+                now: chrono::Utc::now(),
+            },
         )
-        .bind(uuid::Uuid::new_v4())
-        .bind(workspace_id)
-        .bind(project_id)
-        .bind(member_id)
-        .bind(default_issue_filters_json())
-        .bind(default_issue_display_filters_json())
-        .bind(default_issue_display_properties_json())
-        .bind(default_preferences_json())
-        .bind(sort_order)
-        .bind(created_by)
-        .execute(pool)
         .await
         .map_err(integrity_denial)?;
     }
-    sqlx::query(
-        "INSERT INTO project_members (id, workspace_id, project_id, member_id, role,
-            comment, view_props, default_props, preferences, sort_order,
-            is_active, created_by_id, updated_by_id, created_at, updated_at, deleted_at)
-         VALUES ($1, $2, $3, $4, $5,
-            NULL, $6::jsonb, $6::jsonb, $7::jsonb, 65535,
-            true, $8, NULL, now(), now(), NULL)",
+    let props: Value =
+        serde_json::from_str(&default_member_props_json()).map_err(|_| Denial::ServerError)?;
+    let prefs: Value =
+        serde_json::from_str(&default_preferences_json()).map_err(|_| Denial::ServerError)?;
+    pidash_services::domain::projects::members::add(
+        pool,
+        &pidash_services::domain::projects::members::NewProjectMember {
+            workspace_id,
+            project_id: Some(*project_id),
+            user_id: member_id,
+            role,
+            created_by,
+            view_props: &props,
+            default_props: &props,
+            preferences: &prefs,
+            now: chrono::Utc::now(),
+            ignore_conflicts: false,
+            db_now: true,
+        },
     )
-    .bind(uuid::Uuid::new_v4())
-    .bind(workspace_id)
-    .bind(project_id)
-    .bind(member_id)
-    .bind(role)
-    .bind(default_member_props_json())
-    .bind(default_preferences_json())
-    .bind(created_by)
-    .execute(pool)
     .await
     .map_err(integrity_denial)?;
     Ok(())
@@ -2527,47 +2536,27 @@ async fn bulk_insert_members(
     if project_ids.is_empty() {
         return Ok(());
     }
-    let props = default_member_props_json();
-    let prefs = default_preferences_json();
-    let mut sql = String::from(
-        "INSERT INTO project_members (id, workspace_id, project_id, member_id, role,
-            comment, view_props, default_props, preferences, sort_order,
-            is_active, created_by_id, updated_by_id, created_at, updated_at, deleted_at)
-         VALUES ",
-    );
-    for (index, _) in project_ids.iter().enumerate() {
-        if index > 0 {
-            sql.push_str(", ");
-        }
-        let base = index * 8;
-        sql.push_str(&format!(
-            "(${}, ${}, ${}, ${}, ${}, NULL, ${}::jsonb, ${}::jsonb, ${}::jsonb, \
-             65535, true, ${}, NULL, now(), now(), NULL)",
-            base + 1,
-            base + 2,
-            base + 3,
-            base + 4,
-            base + 5,
-            base + 6,
-            base + 6,
-            base + 7,
-            base + 8,
-        ));
-    }
-    sql.push_str(" ON CONFLICT DO NOTHING");
-    let mut query = sqlx::query(&sql);
-    for project_id in project_ids {
-        query = query
-            .bind(uuid::Uuid::new_v4())
-            .bind(*workspace_id)
-            .bind(*project_id)
-            .bind(*user_id)
-            .bind(role)
-            .bind(props.clone())
-            .bind(prefs.clone())
-            .bind(*user_id);
-    }
-    query.execute(pool).await.map_err(integrity_denial)?;
+    let props: Value =
+        serde_json::from_str(&default_member_props_json()).map_err(|_| Denial::ServerError)?;
+    let prefs: Value =
+        serde_json::from_str(&default_preferences_json()).map_err(|_| Denial::ServerError)?;
+    let rows: Vec<pidash_services::domain::projects::members::BulkRow> = project_ids
+        .iter()
+        .map(
+            |project_id| pidash_services::domain::projects::members::BulkRow {
+                workspace_id: *workspace_id,
+                project_id: Some(*project_id),
+                user_id: *user_id,
+                role: pidash_services::domain::projects::members::RoleBind::Int(i64::from(role)),
+                created_by: Some(*user_id),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            },
+        )
+        .collect();
+    pidash_services::domain::projects::members::bulk_add(pool, &rows, &props, &prefs, true)
+        .await
+        .map_err(integrity_denial)?;
     Ok(())
 }
 
@@ -2583,50 +2572,37 @@ async fn bulk_insert_user_properties(
     if project_ids.is_empty() {
         return Ok(());
     }
-    let filters = default_issue_filters_json();
-    let display_filters = default_issue_display_filters_json();
-    let display_properties = default_issue_display_properties_json();
-    let prefs = default_preferences_json();
-    let mut sql = String::from(
-        "INSERT INTO project_user_properties (id, workspace_id, project_id, user_id,
-            filters, display_filters, display_properties, rich_filters, preferences,
-            sort_order, created_by_id, updated_by_id, created_at, updated_at, deleted_at)
-         VALUES ",
-    );
-    for (index, _) in project_ids.iter().enumerate() {
-        if index > 0 {
-            sql.push_str(", ");
-        }
-        let base = index * 9;
-        sql.push_str(&format!(
-            "(${}, ${}, ${}, ${}, ${}::jsonb, ${}::jsonb, ${}::jsonb, '{{}}', ${}::jsonb, \
-             65535, ${}, NULL, now(), now(), NULL)",
-            base + 1,
-            base + 2,
-            base + 3,
-            base + 4,
-            base + 5,
-            base + 6,
-            base + 7,
-            base + 8,
-            base + 9,
-        ));
-    }
-    sql.push_str(" ON CONFLICT DO NOTHING");
-    let mut query = sqlx::query(&sql);
-    for project_id in project_ids {
-        query = query
-            .bind(uuid::Uuid::new_v4())
-            .bind(*workspace_id)
-            .bind(*project_id)
-            .bind(*user_id)
-            .bind(filters.clone())
-            .bind(display_filters.clone())
-            .bind(display_properties.clone())
-            .bind(prefs.clone())
-            .bind(*user_id);
-    }
-    query.execute(pool).await.map_err(integrity_denial)?;
+    let filters: Value =
+        serde_json::from_str(&default_issue_filters_json()).map_err(|_| Denial::ServerError)?;
+    let display_filters: Value = serde_json::from_str(&default_issue_display_filters_json())
+        .map_err(|_| Denial::ServerError)?;
+    let display_properties: Value = serde_json::from_str(&default_issue_display_properties_json())
+        .map_err(|_| Denial::ServerError)?;
+    let prefs: Value =
+        serde_json::from_str(&default_preferences_json()).map_err(|_| Denial::ServerError)?;
+    let rich = serde_json::json!({});
+    let rows: Vec<pidash_services::domain::projects::members::BulkProperty<'_>> = project_ids
+        .iter()
+        .map(
+            |project_id| pidash_services::domain::projects::members::BulkProperty {
+                workspace_id: *workspace_id,
+                project_id: *project_id,
+                user_id: *user_id,
+                filters: &filters,
+                display_filters: &display_filters,
+                display_properties: &display_properties,
+                rich_filters: &rich,
+                preferences: &prefs,
+                sort_order: 65535.0,
+                created_by: Some(*user_id),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            },
+        )
+        .collect();
+    pidash_services::domain::projects::members::bulk_add_properties(pool, &rows, true)
+        .await
+        .map_err(integrity_denial)?;
     Ok(())
 }
 
@@ -2778,16 +2754,12 @@ async fn user_invite_create(
     }
     if !project_ids.is_empty() {
         // Reactivate live rows (`QuerySet.update` stamps no `updated_at`).
-        sqlx::query(
-            r#"UPDATE project_members pm SET is_active = true
-               FROM workspaces w
-               WHERE pm.workspace_id = w.id AND w.slug = $1 AND pm.project_id = ANY($2)
-                 AND pm.member_id = $3 AND pm.deleted_at IS NULL"#,
+        pidash_services::domain::projects::members::reactivate_slug(
+            &pool,
+            &slug,
+            &project_ids,
+            resolved.id,
         )
-        .bind(&slug)
-        .bind(&project_ids)
-        .bind(resolved.id)
-        .execute(&pool)
         .await
         .map_err(|_| Denial::ServerError)?;
         // `bulk_create(..., ignore_conflicts=True)` — ONE statement
@@ -3012,15 +2984,9 @@ async fn join_post(
         Some((id,)) => {
             // `project_member.role = project_member.role`: the role
             // re-saves unchanged (ported quirk).
-            sqlx::query(
-                "UPDATE project_members SET is_active = true, updated_at = now(), updated_by_id = $1
-                 WHERE id = $2",
-            )
-            .bind(created_by)
-            .bind(id)
-            .execute(&pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
+            pidash_services::domain::projects::members::reactivate_by_id(&pool, id, created_by)
+                .await
+                .map_err(|_| Denial::ServerError)?;
         }
     }
     Ok(json_response(StatusCode::OK, JOIN_ACCEPTED_BODY.to_owned()))

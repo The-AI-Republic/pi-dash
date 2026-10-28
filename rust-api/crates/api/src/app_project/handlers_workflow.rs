@@ -1377,43 +1377,45 @@ async fn state_create(
         .or(input.sequence)
         .unwrap_or(state_model::DEFAULT_SEQUENCE);
     let name = input.name.expect("validated name");
-    let id = uuid::Uuid::new_v4();
+    let description = input.description.expect("validated description");
+    let color = input.color.expect("validated color");
+    let group = input.group.expect("validated group");
+    let default = input.default.expect("validated default");
     let now = utc_now_micros();
-    let insert = sqlx::query(
-        r#"INSERT INTO states
-           (id, project_id, workspace_id, name, description, color, slug, sequence,
-            "group", is_triage, "default", external_source, external_id,
-            created_at, updated_at, created_by_id, updated_by_id, deleted_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, FALSE, $10, NULL, NULL,
-                   $11, $11, $12, NULL, NULL)"#,
+    let insert = pidash_services::domain::projects::states::create(
+        &pool,
+        &pidash_services::domain::projects::states::NewState {
+            project_id,
+            workspace_id,
+            name: &name,
+            description: &description,
+            color: &color,
+            slug: &state_model::slugify_name(&name),
+            sequence,
+            group: &group,
+            is_triage: false,
+            default,
+            external_source: None,
+            external_id: None,
+            created_by: actor.id,
+            updated_by: None,
+            now,
+            v1: false,
+        },
     )
-    .bind(id)
-    .bind(project_id)
-    .bind(workspace_id)
-    .bind(&name)
-    .bind(input.description.expect("validated description"))
-    .bind(input.color.expect("validated color"))
-    .bind(state_model::slugify_name(&name))
-    .bind(sequence)
-    .bind(input.group.expect("validated group"))
-    .bind(input.default.expect("validated default"))
-    .bind(now)
-    .bind(actor.id)
-    .execute(&pool)
     .await;
-    if let Err(error) = insert {
+    let id = match insert {
+        Ok(id) => id,
         // `except IntegrityError: if "already exists"` — the `DETAIL`
         // line fires exactly for `23505`.
-        if let sqlx::Error::Database(db_error) = &error {
-            if db_error.code().as_deref() == Some("23505") {
-                return Ok(json_response(
-                    StatusCode::BAD_REQUEST,
-                    STATE_DUP_NAME_BODY.to_owned(),
-                ));
-            }
+        Err(sqlx::Error::Database(db_error)) if db_error.code().as_deref() == Some("23505") => {
+            return Ok(json_response(
+                StatusCode::BAD_REQUEST,
+                STATE_DUP_NAME_BODY.to_owned(),
+            ));
         }
-        return Err(Denial::ServerError);
-    }
+        Err(_) => return Err(Denial::ServerError),
+    };
     // `serializer.data` renders the saved instance; re-read unscoped by
     // pk (the post-write re-read precedent).
     let row: Option<StateRowTuple> = sqlx::query_as(

@@ -1718,32 +1718,35 @@ async fn pm_create_inner(
         return Err(Denial::ServerError);
     };
 
-    let membership_id = uuid::Uuid::new_v4();
     let mut tx = pool.begin().await.map_err(|_| Denial::ServerError)?;
-    let insert = sqlx::query(
-        "INSERT INTO project_members (id, workspace_id, project_id, member_id, role,
-            comment, view_props, default_props, preferences, sort_order,
-            is_active, created_by_id, updated_by_id, created_at, updated_at, deleted_at)
-         VALUES ($1, $2, $3, $4, $5,
-            NULL, $6::jsonb, $6::jsonb, $7::jsonb, 65535,
-            true, $8, NULL, now(), now(), NULL)",
+    let props: Value =
+        serde_json::from_str(&default_props_json()).map_err(|_| Denial::ServerError)?;
+    let prefs: Value =
+        serde_json::from_str(&default_preferences_json()).map_err(|_| Denial::ServerError)?;
+    let membership_id = match pidash_services::domain::projects::members::add(
+        &mut *tx,
+        &pidash_services::domain::projects::members::NewProjectMember {
+            workspace_id,
+            project_id: Some(project_id),
+            user_id: Some(member_id),
+            role: role as i16,
+            created_by: Some(actor.id),
+            view_props: &props,
+            default_props: &props,
+            preferences: &prefs,
+            now: chrono::Utc::now(),
+            ignore_conflicts: false,
+            db_now: true,
+        },
     )
-    .bind(membership_id)
-    .bind(workspace_id)
-    .bind(project_id)
-    .bind(member_id)
-    // `smallint`: the app-project twin of this INSERT binds i16 and sqlx
-    // shares the prepared statement per connection (PIDASHCONV-1509).
-    .bind(role as i16)
-    .bind(default_props_json())
-    .bind(default_preferences_json())
-    .bind(actor.id)
-    .execute(&mut *tx)
-    .await;
-    if let Err(err) = insert {
-        let _ = tx.rollback().await;
-        return Err(integrity_denial(&err));
-    }
+    .await
+    {
+        Ok(id) => id,
+        Err(err) => {
+            let _ = tx.rollback().await;
+            return Err(integrity_denial(&err));
+        }
+    };
     // `ProjectMember.save` side effect: one `ProjectUserProperty` row with
     // the member's minimum workspace sort order minus 10000.
     if let Err(err) =
@@ -1803,25 +1806,30 @@ async fn create_project_user_property(
     .await
     .map_err(|_| Denial::ServerError)?;
     let sort_order = min_sort.map(|min| min - 10000.0).unwrap_or(65535.0);
-    let insert = sqlx::query(
-        "INSERT INTO project_user_properties (id, workspace_id, project_id, user_id,
-            filters, display_filters, display_properties, rich_filters, preferences,
-            sort_order, created_by_id, updated_by_id, created_at, updated_at, deleted_at)
-         VALUES ($1, $2, $3, $4,
-            $5::jsonb, $6::jsonb, $7::jsonb, '{}', $8::jsonb,
-            $9, $10, NULL, now(), now(), NULL)",
+    let filters: Value =
+        serde_json::from_str(&default_issue_filters_json()).map_err(|_| Denial::ServerError)?;
+    let display_filters: Value = serde_json::from_str(&default_issue_display_filters_json())
+        .map_err(|_| Denial::ServerError)?;
+    let display_properties: Value = serde_json::from_str(&default_issue_display_properties_json())
+        .map_err(|_| Denial::ServerError)?;
+    let prefs: Value =
+        serde_json::from_str(&default_preferences_json()).map_err(|_| Denial::ServerError)?;
+    let insert = pidash_services::domain::projects::members::add_property_db_now(
+        &mut **tx,
+        &pidash_services::domain::projects::members::NewMemberProperty {
+            workspace_id,
+            project_id,
+            user_id: member_id,
+            filters: &filters,
+            display_filters: &display_filters,
+            display_properties: &display_properties,
+            rich_filters: &serde_json::json!({}),
+            preferences: &prefs,
+            sort_order,
+            created_by: Some(actor_id),
+            now: chrono::Utc::now(),
+        },
     )
-    .bind(uuid::Uuid::new_v4())
-    .bind(workspace_id)
-    .bind(project_id)
-    .bind(member_id)
-    .bind(default_issue_filters_json())
-    .bind(default_issue_display_filters_json())
-    .bind(default_issue_display_properties_json())
-    .bind(default_preferences_json())
-    .bind(sort_order)
-    .bind(actor_id)
-    .execute(&mut **tx)
     .await;
     if let Err(err) = insert {
         return Err(integrity_denial(&err));
@@ -2047,16 +2055,13 @@ async fn pm_detail_patch_inner(
     if !errors.is_empty() {
         return Err(Denial::BadJson(errors.body()));
     }
-    sqlx::query(
-        "UPDATE project_members SET member_id = $1, role = $2,
-            updated_by_id = $3, updated_at = now()
-         WHERE id = $4",
+    pidash_services::domain::projects::members::update_member_identity(
+        &pool,
+        membership.id,
+        member_id,
+        role,
+        actor.id,
     )
-    .bind(member_id)
-    .bind(role)
-    .bind(actor.id)
-    .bind(membership.id)
-    .execute(&pool)
     .await
     .map_err(|err| integrity_denial(&err))?;
     // `role` is non-nullable in the model; `member` may be null and renders
@@ -2126,14 +2131,11 @@ async fn pm_detail_delete_inner(
         .await
         .map_err(|_| Denial::ServerError)?
         .ok_or(Denial::MemberNotFound)?;
-    sqlx::query(
-        "UPDATE project_members SET is_active = false,
-            updated_by_id = $1, updated_at = now()
-         WHERE id = $2",
+    pidash_services::domain::projects::members::deactivate_actor_first(
+        &pool,
+        membership.id,
+        actor.id,
     )
-    .bind(actor.id)
-    .bind(membership.id)
-    .execute(&pool)
     .await
     .map_err(|_| Denial::ServerError)?;
     Ok(StatusCode::NO_CONTENT.into_response())

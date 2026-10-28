@@ -1,0 +1,2649 @@
+//! OSS project writes: `projects`, `project_members`, `states` (ORM-07, PIDASHCONV-1525).
+//!
+//! Every OSS write to the three project tables lives in this module; the
+//! app/v1 create flows, the member endpoints, the invite/join paths, the
+//! signup joins, the state endpoints, the intake triage inserts and the
+//! ops commands call these functions instead of executing SQL text. Reads
+//! stay where they are (design D5).
+//!
+//! Execution shapes, by writer kind:
+//!
+//! * [`create`] runs on `&PgPool` and owns the one atomic pair in these
+//!   flows: clearing the workspace default plus the project `INSERT`
+//!   run in an internal `sqlx` transaction, exactly like the two
+//!   callers' current `tx` blocks. Every other create leg (the pod
+//!   `post_save`, the identifier insert, the admin/lead memberships,
+//!   the default states, the `model_activity` enqueue) stays
+//!   caller-sequenced on autocommit: the v1 flow's PB-2023 arm sits
+//!   between the membership leg and the states leg and must keep
+//!   observing the partial commit, so no monolithic create is
+//!   possible. Callers resolve every input (the live-default probe,
+//!   identifier/timezone normalization, the clear condition) and keep
+//!   their own conflict arms (app class-23 vs v1 23505-only BUG-1).
+//! * [`members`] and [`states`] are generic over `sqlx::Executor`,
+//!   like [`super::tokens`]: single-statement writers run on the
+//!   caller's pool or inside the caller's existing `sqlx` transaction
+//!   (the v1 member-create tx) with no restructuring. Multi-row
+//!   writers are single statements too; callers that need several
+//!   writes (member row plus property row) sequence the single-row
+//!   functions, which also preserves the two create flows' opposite
+//!   write orders (property-first on app, member-first on v1).
+//!
+//! Bind-type uniformity (PIDASHCONV-1509): `sqlx` caches prepared
+//! statements by SQL text alone, so one text must always bind the
+//! same types. Every consolidated statement below binds one fixed
+//! signature; callers whose bind types differ keep their own text:
+//! the ops i64 role arms carry a marker comment so their text can
+//! never collide with the i16 arms, and the app bulk builders (mixed
+//! `RoleBind` types per row, like the originals) moved verbatim.
+//!
+//! Ported bugs preserved verbatim: the signup project arms' missing
+//! `project_id` (PB-1008) binds an explicit `NULL`, which raises the
+//! same 23502 with the same message as the omitted column; the v1
+//! lead guard, the dual-now member bulks and the per-arm role clamps
+//! stay at the callers; the `project_identifiers` insert and the
+//! `model_activity`/pod effects are not covered-table writes and stay
+//! caller-sequenced.
+
+use chrono::{DateTime, Utc};
+use uuid::Uuid;
+
+// ---------------------------------------------------------------------------
+// create (pool; the clear-default + INSERT atomic pair)
+// ---------------------------------------------------------------------------
+
+/// One project row to insert: every column without a DB default, fully
+/// resolved by the caller (the live-default probe, identifier and
+/// timezone normalization, the int4 fencedown). `deleted_at` is always
+/// `NULL` and `updated_by` stays `NULL` on both paths.
+pub struct NewProject<'a> {
+    pub name: &'a str,
+    pub description: &'a str,
+    pub description_text: Option<&'a serde_json::Value>,
+    pub description_html: Option<&'a serde_json::Value>,
+    pub network: i32,
+    pub workspace_id: Uuid,
+    pub identifier: &'a str,
+    pub default_assignee: Option<Uuid>,
+    pub project_lead: Option<Uuid>,
+    pub emoji: Option<&'a str>,
+    pub icon_prop: Option<&'a serde_json::Value>,
+    pub module_view: bool,
+    pub cycle_view: bool,
+    pub issue_views_view: bool,
+    pub page_view: bool,
+    pub intake_view: bool,
+    pub is_time_tracking_enabled: bool,
+    pub is_issue_type_enabled: bool,
+    pub guest_view_all_features: bool,
+    pub cover_image: Option<&'a str>,
+    pub cover_image_asset: Option<Uuid>,
+    pub estimate: Option<Uuid>,
+    pub archive_in: i32,
+    pub close_in: i32,
+    pub logo_props: &'a serde_json::Value,
+    pub default_state: Option<Uuid>,
+    pub archived_at: Option<DateTime<Utc>>,
+    pub is_default: bool,
+    /// Clear the workspace's other live defaults first: `is_default`
+    /// on app, `unsets_other_defaults || is_default` on v1.
+    pub clear_others: bool,
+    pub timezone: &'a str,
+    pub external_source: Option<&'a str>,
+    pub external_id: Option<&'a str>,
+    pub repo_url: &'a str,
+    pub base_branch: &'a str,
+    /// `int4` columns: both callers fence their `i64` inputs down
+    /// before the call (`i32_or_500` / `field_int`), so the struct
+    /// carries the fenced values.
+    pub agent_interval: i32,
+    pub agent_max_ticks: i32,
+    pub agent_review: i32,
+    pub agent_test: i32,
+    pub agent_ticking: bool,
+    pub default_executor: &'a str,
+    pub members_can_edit_states: bool,
+    pub created_by: Uuid,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    /// The v1 text: same stored values, but quoted columns and the
+    /// unset-on-v1 fields as literals (`description_text/html`
+    /// `NULL`, `network 2`, the agent knobs, `cover_image_asset`,
+    /// `estimate`, `default_state` and `archived_at` `NULL`).
+    pub v1: bool,
+}
+
+const CLEAR_DEFAULTS_SQL: &str = "UPDATE projects SET is_default = FALSE \
+    WHERE workspace_id = $1 AND is_default AND deleted_at IS NULL";
+
+const PROJECT_INSERT_SQL: &str = "INSERT INTO \"projects\" \
+    (\"id\", \"created_at\", \"updated_at\", \"created_by_id\", \"updated_by_id\", \"deleted_at\", \
+    \"name\", \"description\", \"description_text\", \"description_html\", \"network\", \"workspace_id\", \
+    \"identifier\", \"default_assignee_id\", \"project_lead_id\", \"emoji\", \"icon_prop\", \
+    \"module_view\", \"cycle_view\", \"issue_views_view\", \"page_view\", \"intake_view\", \
+    \"is_time_tracking_enabled\", \"is_issue_type_enabled\", \"guest_view_all_features\", \
+    \"cover_image\", \"cover_image_asset_id\", \"estimate_id\", \"archive_in\", \"close_in\", \
+    \"logo_props\", \"default_state_id\", \"archived_at\", \"is_default\", \"timezone\", \
+    \"external_source\", \"external_id\", \"repo_url\", \"base_branch\", \
+    \"agent_default_interval_seconds\", \"agent_default_max_ticks\", \
+    \"agent_review_default_interval_seconds\", \"agent_test_default_interval_seconds\", \
+    \"agent_ticking_enabled\", \"default_agent_executor\", \"members_can_edit_states\") \
+    VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, \
+    $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, \
+    $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44)";
+
+const PROJECT_INSERT_V1_SQL: &str = "INSERT INTO \"projects\" (\"id\", \"created_at\", \"updated_at\", \
+    \"created_by_id\", \"updated_by_id\", \"name\", \"description\", \"description_text\", \
+    \"description_html\", \"network\", \"workspace_id\", \"identifier\", \"default_assignee_id\", \
+    \"project_lead_id\", \"emoji\", \"icon_prop\", \"module_view\", \"cycle_view\", \"issue_views_view\", \
+    \"page_view\", \"intake_view\", \"is_time_tracking_enabled\", \"is_issue_type_enabled\", \"is_default\", \
+    \"guest_view_all_features\", \"members_can_edit_states\", \"cover_image\", \"cover_image_asset_id\", \
+    \"estimate_id\", \"archive_in\", \"close_in\", \"logo_props\", \"default_state_id\", \"timezone\", \
+    \"external_source\", \"external_id\", \"repo_url\", \"base_branch\", \
+    \"agent_default_interval_seconds\", \"agent_default_max_ticks\", \
+    \"agent_review_default_interval_seconds\", \"agent_test_default_interval_seconds\", \
+    \"agent_ticking_enabled\", \"default_agent_executor\") \
+    VALUES ($1,$2,$3,$4,NULL,$5,$6,NULL,NULL,2,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,\
+    $20,$21,$22,$23,NULL,NULL,$24,$25,$26,NULL,$27,$28,$29,$30,$31,10800,10,10800,10800,TRUE,$32)";
+
+/// `Project.objects.create(...)`: the default-clear plus the row, in
+/// one transaction, returning the new id. Errors propagate as
+/// `sqlx::Error` (the transaction aborts) for the caller's own
+/// conflict arm.
+pub async fn create(pool: &sqlx::PgPool, project: &NewProject<'_>) -> Result<Uuid, sqlx::Error> {
+    let id = Uuid::new_v4();
+    let mut tx = pool.begin().await?;
+    if project.clear_others {
+        sqlx::query(CLEAR_DEFAULTS_SQL)
+            .bind(project.workspace_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    if project.v1 {
+        insert_v1(&mut *tx, id, project).await?;
+        tx.commit().await?;
+        return Ok(id);
+    }
+    sqlx::query(PROJECT_INSERT_SQL)
+        .bind(id)
+        .bind(project.created_at)
+        .bind(project.updated_at)
+        .bind(project.created_by)
+        .bind(project.name)
+        .bind(project.description)
+        .bind(project.description_text)
+        .bind(project.description_html)
+        .bind(project.network)
+        .bind(project.workspace_id)
+        .bind(project.identifier)
+        .bind(project.default_assignee)
+        .bind(project.project_lead)
+        .bind(project.emoji)
+        .bind(project.icon_prop)
+        .bind(project.module_view)
+        .bind(project.cycle_view)
+        .bind(project.issue_views_view)
+        .bind(project.page_view)
+        .bind(project.intake_view)
+        .bind(project.is_time_tracking_enabled)
+        .bind(project.is_issue_type_enabled)
+        .bind(project.guest_view_all_features)
+        .bind(project.cover_image)
+        .bind(project.cover_image_asset)
+        .bind(project.estimate)
+        .bind(project.archive_in)
+        .bind(project.close_in)
+        .bind(project.logo_props)
+        .bind(project.default_state)
+        .bind(project.archived_at)
+        .bind(project.is_default)
+        .bind(project.timezone)
+        .bind(project.external_source)
+        .bind(project.external_id)
+        .bind(project.repo_url)
+        .bind(project.base_branch)
+        .bind(project.agent_interval)
+        .bind(project.agent_max_ticks)
+        .bind(project.agent_review)
+        .bind(project.agent_test)
+        .bind(project.agent_ticking)
+        .bind(project.default_executor)
+        .bind(project.members_can_edit_states)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(id)
+}
+
+/// The v1 bind arm: positional mapping of [`NewProject`] onto the
+/// literal-heavy v1 text. The v1 caller always passes
+/// `network == 2`, no descriptions, the agent defaults, ticking on,
+/// and no asset/estimate/state/archived values, so the literals
+/// store exactly what the app arm would bind.
+async fn insert_v1<'e, E>(ex: E, id: Uuid, project: &NewProject<'_>) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(PROJECT_INSERT_V1_SQL)
+        .bind(id)
+        .bind(project.created_at)
+        .bind(project.updated_at)
+        .bind(project.created_by)
+        .bind(project.name)
+        .bind(project.description)
+        .bind(project.workspace_id)
+        .bind(project.identifier)
+        .bind(project.default_assignee)
+        .bind(project.project_lead)
+        .bind(project.emoji)
+        .bind(project.icon_prop)
+        .bind(project.module_view)
+        .bind(project.cycle_view)
+        .bind(project.issue_views_view)
+        .bind(project.page_view)
+        .bind(project.intake_view)
+        .bind(project.is_time_tracking_enabled)
+        .bind(project.is_issue_type_enabled)
+        .bind(project.is_default)
+        .bind(project.guest_view_all_features)
+        .bind(project.members_can_edit_states)
+        .bind(project.cover_image)
+        .bind(project.archive_in)
+        .bind(project.close_in)
+        .bind(project.logo_props)
+        .bind(project.timezone)
+        .bind(project.external_source)
+        .bind(project.external_id)
+        .bind(project.repo_url)
+        .bind(project.base_branch)
+        .bind(project.default_executor)
+        .execute(ex)
+        .await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// members
+// ---------------------------------------------------------------------------
+
+/// OSS `project_members` writes (plus the `ProjectUserProperty` leg
+/// that rides the member save). Callers sequence the single-row
+/// writers: which legs run, and in which order, differs per path.
+pub mod members {
+    use super::*;
+
+    /// One member row to insert. `comment` is always `NULL`,
+    /// `updated_by`/`deleted_at` stay `NULL` and `sort_order` is the
+    /// 65535 literal on every path; `is_active` is always `TRUE`.
+    pub struct NewProjectMember<'a> {
+        pub workspace_id: Uuid,
+        /// Always `Some` except the signup project arms (PB-1008),
+        /// which bind an explicit `NULL` and raise the same 23502 the
+        /// omitted column raises (identical message, identical effect).
+        pub project_id: Option<Uuid>,
+        /// `None` on the invite path's unknown-email arm (a bare
+        /// `NULL` into the non-null column, like the original bind).
+        pub user_id: Option<Uuid>,
+        pub role: i16,
+        /// The acting user where the path has one (`None` on the
+        /// signup replays and the ops rows).
+        pub created_by: Option<Uuid>,
+        /// Caller-supplied model defaults; each caller module keeps
+        /// its own copy.
+        pub view_props: &'a serde_json::Value,
+        pub default_props: &'a serde_json::Value,
+        pub preferences: &'a serde_json::Value,
+        pub now: DateTime<Utc>,
+        /// `ON CONFLICT DO NOTHING` (the signup per-row replays).
+        pub ignore_conflicts: bool,
+        /// DB-side `now()` stamps (the v1/app invite writes).
+        pub db_now: bool,
+    }
+
+    pub(crate) const MEMBER_INSERT_SQL: &str = "INSERT INTO \"project_members\" \
+        (\"id\", \"created_at\", \"updated_at\", \"created_by_id\", \"updated_by_id\", \"deleted_at\", \
+        \"project_id\", \"workspace_id\", \"member_id\", \"comment\", \"role\", \
+        \"view_props\", \"default_props\", \"preferences\", \"sort_order\", \"is_active\") \
+        VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, $7, NULL, $8, $9, $10, $11, 65535, TRUE)";
+
+    pub(crate) const MEMBER_INSERT_IGNORE_SQL: &str = "INSERT INTO \"project_members\" \
+        (\"id\", \"created_at\", \"updated_at\", \"created_by_id\", \"updated_by_id\", \"deleted_at\", \
+        \"project_id\", \"workspace_id\", \"member_id\", \"comment\", \"role\", \
+        \"view_props\", \"default_props\", \"preferences\", \"sort_order\", \"is_active\") \
+        VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, $7, NULL, $8, $9, $10, $11, 65535, TRUE) \
+        ON CONFLICT DO NOTHING";
+
+    pub(crate) const MEMBER_INSERT_DB_NOW_SQL: &str = "INSERT INTO \"project_members\" \
+        (\"id\", \"created_at\", \"updated_at\", \"created_by_id\", \"updated_by_id\", \"deleted_at\", \
+        \"project_id\", \"workspace_id\", \"member_id\", \"comment\", \"role\", \
+        \"view_props\", \"default_props\", \"preferences\", \"sort_order\", \"is_active\") \
+        VALUES ($1, now(), now(), $2, NULL, NULL, $3, $4, $5, NULL, $6, $7, $8, $9, 65535, TRUE)";
+
+    /// `ProjectMember.objects.create(...)` (and the per-row signup
+    /// replays). Returns the new row id.
+    pub async fn add<'e, E>(ex: E, member: &NewProjectMember<'_>) -> Result<Uuid, sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        let id = Uuid::new_v4();
+        if member.db_now {
+            sqlx::query(MEMBER_INSERT_DB_NOW_SQL)
+                .bind(id)
+                .bind(member.created_by)
+                .bind(member.project_id)
+                .bind(member.workspace_id)
+                .bind(member.user_id)
+                .bind(member.role)
+                .bind(sqlx::types::Json(member.view_props))
+                .bind(sqlx::types::Json(member.default_props))
+                .bind(sqlx::types::Json(member.preferences))
+                .execute(ex)
+                .await?;
+        } else if member.ignore_conflicts {
+            sqlx::query(MEMBER_INSERT_IGNORE_SQL)
+                .bind(id)
+                .bind(member.now)
+                .bind(member.now)
+                .bind(member.created_by)
+                .bind(member.project_id)
+                .bind(member.workspace_id)
+                .bind(member.user_id)
+                .bind(member.role)
+                .bind(sqlx::types::Json(member.view_props))
+                .bind(sqlx::types::Json(member.default_props))
+                .bind(sqlx::types::Json(member.preferences))
+                .execute(ex)
+                .await?;
+        } else {
+            sqlx::query(MEMBER_INSERT_SQL)
+                .bind(id)
+                .bind(member.now)
+                .bind(member.now)
+                .bind(member.created_by)
+                .bind(member.project_id)
+                .bind(member.workspace_id)
+                .bind(member.user_id)
+                .bind(member.role)
+                .bind(sqlx::types::Json(member.view_props))
+                .bind(sqlx::types::Json(member.default_props))
+                .bind(sqlx::types::Json(member.preferences))
+                .execute(ex)
+                .await?;
+        }
+        Ok(id)
+    }
+
+    /// One `ProjectUserProperty` row: the member-save side effect
+    /// (`db/models/project.py:348-364`). `sort_order` is
+    /// caller-resolved (`MIN - 10000`, else 65535).
+    pub struct NewMemberProperty<'a> {
+        pub workspace_id: Uuid,
+        pub project_id: Uuid,
+        pub user_id: Uuid,
+        pub filters: &'a serde_json::Value,
+        pub display_filters: &'a serde_json::Value,
+        pub display_properties: &'a serde_json::Value,
+        pub rich_filters: &'a serde_json::Value,
+        pub preferences: &'a serde_json::Value,
+        pub sort_order: f64,
+        pub created_by: Option<Uuid>,
+        pub now: DateTime<Utc>,
+    }
+
+    pub(crate) const PROPERTY_INSERT_SQL: &str = "INSERT INTO \"project_user_properties\" \
+        (\"id\", \"created_at\", \"updated_at\", \"created_by_id\", \"updated_by_id\", \"deleted_at\", \
+        \"project_id\", \"workspace_id\", \"user_id\", \"filters\", \"display_filters\", \
+        \"display_properties\", \"rich_filters\", \"preferences\", \"sort_order\") \
+        VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, $7, $8, $9, $10, $11, $12, $13)";
+
+    /// The property leg of the member save. Returns the new row id.
+    pub async fn add_property<'e, E>(
+        ex: E,
+        property: &NewMemberProperty<'_>,
+    ) -> Result<Uuid, sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        let id = Uuid::new_v4();
+        sqlx::query(PROPERTY_INSERT_SQL)
+            .bind(id)
+            .bind(property.now)
+            .bind(property.now)
+            .bind(property.created_by)
+            .bind(property.project_id)
+            .bind(property.workspace_id)
+            .bind(property.user_id)
+            .bind(sqlx::types::Json(property.filters))
+            .bind(sqlx::types::Json(property.display_filters))
+            .bind(sqlx::types::Json(property.display_properties))
+            .bind(sqlx::types::Json(property.rich_filters))
+            .bind(sqlx::types::Json(property.preferences))
+            .bind(property.sort_order)
+            .execute(ex)
+            .await?;
+        Ok(id)
+    }
+
+    /// One bulk row: the per-row columns of the multi-row member
+    /// insert. Rows may span workspaces/projects (the invite bulks
+    /// carry one row per project). Stamps are per-row: the app member
+    /// bulk samples `now()` twice per row (`auto_now_add` /
+    /// `auto_now` land microseconds apart), while the bound-now
+    /// callers pass the same instant twice.
+    pub struct BulkRow {
+        pub workspace_id: Uuid,
+        pub project_id: Option<Uuid>,
+        pub user_id: Uuid,
+        pub role: RoleBind,
+        pub created_by: Option<Uuid>,
+        pub created_at: DateTime<Utc>,
+        pub updated_at: DateTime<Utc>,
+    }
+
+    /// Render the multi-row `INSERT ... ON CONFLICT DO NOTHING` for
+    /// `nrows` rows (9 binds per row). Pure; unit-tested.
+    pub(crate) fn bulk_add_sql(nrows: usize) -> String {
+        let mut sql = String::from(
+            "INSERT INTO \"project_members\" \
+            (\"id\", \"created_at\", \"updated_at\", \"created_by_id\", \"updated_by_id\", \"deleted_at\", \
+            \"project_id\", \"workspace_id\", \"member_id\", \"comment\", \"role\", \
+            \"view_props\", \"default_props\", \"preferences\", \"sort_order\", \"is_active\") \
+            VALUES ",
+        );
+        for index in 0..nrows {
+            if index > 0 {
+                sql.push_str(", ");
+            }
+            let base = index * 9 + 1;
+            sql.push_str(&format!(
+                "(gen_random_uuid(), ${c}, ${u}, ${b}, NULL, NULL, ${p}, ${w}, ${m}, NULL, \
+                 ${r}, ${v}, ${v}, ${f}, 65535, TRUE)",
+                c = base,
+                u = base + 1,
+                b = base + 2,
+                p = base + 3,
+                w = base + 4,
+                m = base + 5,
+                r = base + 6,
+                v = base + 7,
+                f = base + 8,
+            ));
+        }
+        sql.push_str(" ON CONFLICT DO NOTHING");
+        sql
+    }
+
+    /// Render the DB-stamped multi-row variant (7 binds per row).
+    /// Pure; unit-tested.
+    pub(crate) fn bulk_add_db_now_sql(nrows: usize) -> String {
+        let mut sql = String::from(
+            "INSERT INTO \"project_members\" \
+            (\"id\", \"created_at\", \"updated_at\", \"created_by_id\", \"updated_by_id\", \"deleted_at\", \
+            \"project_id\", \"workspace_id\", \"member_id\", \"comment\", \"role\", \
+            \"view_props\", \"default_props\", \"preferences\", \"sort_order\", \"is_active\") \
+            VALUES ",
+        );
+        for index in 0..nrows {
+            if index > 0 {
+                sql.push_str(", ");
+            }
+            let base = index * 7 + 1;
+            sql.push_str(&format!(
+                "(gen_random_uuid(), now(), now(), ${c}, NULL, NULL, ${p}, ${w}, ${m}, NULL, \
+                 ${r}, ${v}, ${v}, ${f}, 65535, TRUE)",
+                c = base,
+                p = base + 1,
+                w = base + 2,
+                m = base + 3,
+                r = base + 4,
+                v = base + 5,
+                f = base + 6,
+            ));
+        }
+        sql.push_str(" ON CONFLICT DO NOTHING");
+        sql
+    }
+
+    /// Bind one [`RoleBind`] into the running bulk query (shared by
+    /// both stamp variants and [`update_roles_bulk`]).
+    fn bind_role<'q>(
+        query: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
+        role: &'q RoleBind,
+    ) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
+        match role {
+            RoleBind::Null => query.bind(None::<String>),
+            RoleBind::Int(int) => query.bind(int),
+            RoleBind::Float(float) => query.bind(float),
+            RoleBind::Text(text) => query.bind(text),
+        }
+    }
+
+    /// `ProjectMember.objects.bulk_create([...],
+    /// ignore_conflicts=True)`: one multi-row statement. An empty
+    /// list emits no statement, like `bulk_create([])`. `props`
+    /// serves both `view_props` and `default_props` (every caller
+    /// binds identical content for the two columns). `db_now`
+    /// selects the DB-stamped variant (the invite bulks).
+    pub async fn bulk_add<'e, E>(
+        ex: E,
+        rows: &[BulkRow],
+        props: &serde_json::Value,
+        preferences: &serde_json::Value,
+        db_now: bool,
+    ) -> Result<(), sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        if db_now {
+            let sql = bulk_add_db_now_sql(rows.len());
+            let mut query = sqlx::query(&sql);
+            for row in rows {
+                query = query
+                    .bind(row.created_by)
+                    .bind(row.project_id)
+                    .bind(row.workspace_id)
+                    .bind(row.user_id);
+                query = bind_role(query, &row.role);
+                query = query
+                    .bind(sqlx::types::Json(props))
+                    .bind(sqlx::types::Json(preferences));
+            }
+            query.execute(ex).await?;
+            return Ok(());
+        }
+        let sql = bulk_add_sql(rows.len());
+        let mut query = sqlx::query(&sql);
+        for row in rows {
+            query = query
+                .bind(row.created_at)
+                .bind(row.updated_at)
+                .bind(row.created_by)
+                .bind(row.project_id)
+                .bind(row.workspace_id)
+                .bind(row.user_id);
+            query = bind_role(query, &row.role);
+            query = query
+                .bind(sqlx::types::Json(props))
+                .bind(sqlx::types::Json(preferences));
+        }
+        query.execute(ex).await?;
+        Ok(())
+    }
+
+    pub(crate) const PROPERTY_INSERT_DB_NOW_SQL: &str = "INSERT INTO project_user_properties \
+        (id, workspace_id, project_id, user_id, filters, display_filters, display_properties, \
+        rich_filters, preferences, sort_order, created_by_id, updated_by_id, created_at, \
+        updated_at, deleted_at) \
+        VALUES ($1, $2, $3, $4, $5, $6, $7, '{}', $8, $9, $10, NULL, now(), now(), NULL)";
+
+    pub(crate) const PROPERTY_GET_OR_CREATE_SQL: &str = "INSERT INTO project_user_properties \
+        (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, \
+        workspace_id, user_id, filters, display_filters, display_properties, rich_filters, \
+        preferences, sort_order) \
+        VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, $7, $8, $9, $10, $11, $12, $13) \
+        ON CONFLICT (user_id, project_id) WHERE deleted_at IS NULL DO NOTHING";
+
+    /// The `get_or_create(user, project)` property write: the
+    /// partial-index conflict target swallows a lost race (the
+    /// caller re-reads). Returns the attempted row id.
+    pub async fn get_or_create_property<'e, E>(
+        ex: E,
+        property: &NewMemberProperty<'_>,
+    ) -> Result<Uuid, sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        let id = Uuid::new_v4();
+        sqlx::query(PROPERTY_GET_OR_CREATE_SQL)
+            .bind(id)
+            .bind(property.now)
+            .bind(property.now)
+            .bind(property.created_by)
+            .bind(property.project_id)
+            .bind(property.workspace_id)
+            .bind(property.user_id)
+            .bind(sqlx::types::Json(property.filters))
+            .bind(sqlx::types::Json(property.display_filters))
+            .bind(sqlx::types::Json(property.display_properties))
+            .bind(sqlx::types::Json(property.rich_filters))
+            .bind(sqlx::types::Json(property.preferences))
+            .bind(property.sort_order)
+            .execute(ex)
+            .await?;
+        Ok(id)
+    }
+
+    /// The DB-stamped property leg (the invite member write):
+    /// `rich_filters '{}'`, stamps from `now()`. Returns the new row
+    /// id.
+    pub async fn add_property_db_now<'e, E>(
+        ex: E,
+        property: &NewMemberProperty<'_>,
+    ) -> Result<Uuid, sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        let id = Uuid::new_v4();
+        sqlx::query(PROPERTY_INSERT_DB_NOW_SQL)
+            .bind(id)
+            .bind(property.workspace_id)
+            .bind(property.project_id)
+            .bind(property.user_id)
+            .bind(sqlx::types::Json(property.filters))
+            .bind(sqlx::types::Json(property.display_filters))
+            .bind(sqlx::types::Json(property.display_properties))
+            .bind(sqlx::types::Json(property.preferences))
+            .bind(property.sort_order)
+            .bind(property.created_by)
+            .execute(ex)
+            .await?;
+        Ok(id)
+    }
+
+    /// One bulk property row (the app member-bulk and invite
+    /// property legs). Stamps are per-row, like the member rows.
+    pub struct BulkProperty<'a> {
+        pub workspace_id: Uuid,
+        pub project_id: Uuid,
+        pub user_id: Uuid,
+        pub filters: &'a serde_json::Value,
+        pub display_filters: &'a serde_json::Value,
+        pub display_properties: &'a serde_json::Value,
+        pub rich_filters: &'a serde_json::Value,
+        pub preferences: &'a serde_json::Value,
+        pub sort_order: f64,
+        pub created_by: Option<Uuid>,
+        pub created_at: DateTime<Utc>,
+        pub updated_at: DateTime<Utc>,
+    }
+
+    /// Render the multi-row property `INSERT ... ON CONFLICT DO
+    /// NOTHING` for `nrows` rows (12 binds per row). Pure;
+    /// unit-tested.
+    pub(crate) fn bulk_add_properties_sql(nrows: usize) -> String {
+        let mut sql = String::from(
+            "INSERT INTO \"project_user_properties\" \
+            (\"id\", \"created_at\", \"updated_at\", \"created_by_id\", \"updated_by_id\", \"deleted_at\", \
+            \"project_id\", \"workspace_id\", \"user_id\", \"filters\", \"display_filters\", \
+            \"display_properties\", \"rich_filters\", \"preferences\", \"sort_order\") \
+            VALUES ",
+        );
+        for index in 0..nrows {
+            if index > 0 {
+                sql.push_str(", ");
+            }
+            let base = index * 12 + 1;
+            sql.push_str(&format!(
+                "(gen_random_uuid(), ${c}, ${u}, ${b}, NULL, NULL, ${p}, ${w}, ${m}, \
+                 ${f}, ${d}, ${g}, ${r}, ${e}, ${s})",
+                c = base,
+                u = base + 1,
+                b = base + 2,
+                p = base + 3,
+                w = base + 4,
+                m = base + 5,
+                f = base + 6,
+                d = base + 7,
+                g = base + 8,
+                r = base + 9,
+                e = base + 10,
+                s = base + 11,
+            ));
+        }
+        sql.push_str(" ON CONFLICT DO NOTHING");
+        sql
+    }
+
+    /// Render the DB-stamped multi-row property variant (10 binds per
+    /// row). Pure; unit-tested.
+    pub(crate) fn bulk_add_properties_db_now_sql(nrows: usize) -> String {
+        let mut sql = String::from(
+            "INSERT INTO \"project_user_properties\" \
+            (\"id\", \"created_at\", \"updated_at\", \"created_by_id\", \"updated_by_id\", \"deleted_at\", \
+            \"project_id\", \"workspace_id\", \"user_id\", \"filters\", \"display_filters\", \
+            \"display_properties\", \"rich_filters\", \"preferences\", \"sort_order\") \
+            VALUES ",
+        );
+        for index in 0..nrows {
+            if index > 0 {
+                sql.push_str(", ");
+            }
+            let base = index * 10 + 1;
+            sql.push_str(&format!(
+                "(gen_random_uuid(), now(), now(), ${b}, NULL, NULL, ${p}, ${w}, ${m}, \
+                 ${f}, ${d}, ${g}, ${r}, ${e}, ${s})",
+                b = base,
+                p = base + 1,
+                w = base + 2,
+                m = base + 3,
+                f = base + 4,
+                d = base + 5,
+                g = base + 6,
+                r = base + 7,
+                e = base + 8,
+                s = base + 9,
+            ));
+        }
+        sql.push_str(" ON CONFLICT DO NOTHING");
+        sql
+    }
+
+    /// The property leg of the member bulks: one multi-row
+    /// statement. Empty emits nothing. `db_now` selects the
+    /// DB-stamped variant (the invite bulks).
+    pub async fn bulk_add_properties<'e, E>(
+        ex: E,
+        rows: &[BulkProperty<'_>],
+        db_now: bool,
+    ) -> Result<(), sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        if db_now {
+            let sql = bulk_add_properties_db_now_sql(rows.len());
+            let mut query = sqlx::query(&sql);
+            for row in rows {
+                query = query
+                    .bind(row.created_by)
+                    .bind(row.project_id)
+                    .bind(row.workspace_id)
+                    .bind(row.user_id)
+                    .bind(sqlx::types::Json(row.filters))
+                    .bind(sqlx::types::Json(row.display_filters))
+                    .bind(sqlx::types::Json(row.display_properties))
+                    .bind(sqlx::types::Json(row.rich_filters))
+                    .bind(sqlx::types::Json(row.preferences))
+                    .bind(row.sort_order);
+            }
+            query.execute(ex).await?;
+            return Ok(());
+        }
+        let sql = bulk_add_properties_sql(rows.len());
+        let mut query = sqlx::query(&sql);
+        for row in rows {
+            query = query
+                .bind(row.created_at)
+                .bind(row.updated_at)
+                .bind(row.created_by)
+                .bind(row.project_id)
+                .bind(row.workspace_id)
+                .bind(row.user_id)
+                .bind(sqlx::types::Json(row.filters))
+                .bind(sqlx::types::Json(row.display_filters))
+                .bind(sqlx::types::Json(row.display_properties))
+                .bind(sqlx::types::Json(row.rich_filters))
+                .bind(sqlx::types::Json(row.preferences))
+                .bind(row.sort_order);
+        }
+        query.execute(ex).await?;
+        Ok(())
+    }
+
+    /// The ops member create: compact text (no spaces), `created_by`
+    /// `NULL`, and the role bound as `int8` — in-range values assign
+    /// to the `smallint` column, out-of-range ones raise the server's
+    /// `smallint out of range`, exactly as the psycopg-bound values
+    /// do. `None` binds `NULL` (the BUG-2 write, which Postgres
+    /// rejects). The text differs from [`MEMBER_INSERT_SQL`] so the
+    /// type cache can never confuse the two signatures. Returns the
+    /// new row id.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn ops_add<'e, E>(
+        ex: E,
+        workspace_id: Uuid,
+        project_id: Uuid,
+        user_id: Uuid,
+        role: Option<i64>,
+        props: &serde_json::Value,
+        preferences: &serde_json::Value,
+        now: DateTime<Utc>,
+    ) -> Result<Uuid, sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO \"project_members\" \
+             (\"id\", \"created_at\", \"updated_at\", \"created_by_id\", \"updated_by_id\", \"deleted_at\", \
+             \"project_id\", \"workspace_id\", \"member_id\", \"comment\", \"role\", \
+             \"view_props\", \"default_props\", \"preferences\", \"sort_order\", \"is_active\") \
+             VALUES ($1,$2,$2,NULL,NULL,NULL, $3,$4,$5,NULL,$6, $7,$7,$8,65535,TRUE)",
+        )
+        .bind(id)
+        .bind(now)
+        .bind(project_id)
+        .bind(workspace_id)
+        .bind(user_id)
+        .bind(role)
+        .bind(sqlx::types::Json(props))
+        .bind(sqlx::types::Json(preferences))
+        .execute(ex)
+        .await?;
+        Ok(id)
+    }
+
+    pub(crate) const OPS_UPDATE_ROLE_SQL: &str =
+        "UPDATE \"project_members\" SET \"is_active\" = TRUE, \
+        \"role\" = $3 WHERE \"project_id\" = $1 AND \"member_id\" = $2 AND \"deleted_at\" IS NULL";
+
+    /// The ops role write: queryset `update()` touches ONLY the two
+    /// columns — no `save()`, no `auto_now` bump. Role as `int8`
+    /// (see [`ops_add`]).
+    pub async fn ops_update_role<'e, E>(
+        ex: E,
+        project_id: Uuid,
+        user_id: Uuid,
+        role: Option<i64>,
+    ) -> Result<(), sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        sqlx::query(OPS_UPDATE_ROLE_SQL)
+            .bind(project_id)
+            .bind(user_id)
+            .bind(role)
+            .execute(ex)
+            .await?;
+        Ok(())
+    }
+
+    /// One raw role value for the app member bulk: how the JSON body
+    /// value binds into the `CAST(CASE ... AS smallint)` update.
+    /// `SmallIntegerField.get_prep_value` runs `int(value)` in Python
+    /// first: bools → 0/1, floats truncate, strings parse,
+    /// composites and unparseable text are the 500 arms (typed TEXT
+    /// has no cast to smallint).
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum RoleBind {
+        Null,
+        Int(i64),
+        Float(f64),
+        Text(String),
+    }
+
+    /// Render the app member-bulk `CAST(CASE ...)` update for `nrows`
+    /// rows. Pure; unit-tested. Moved verbatim: role `WHEN`s first,
+    /// then `is_active` `WHEN`s, then the `id IN (...)` list.
+    pub(crate) fn update_roles_bulk_sql(nrows: usize) -> String {
+        let mut sql = String::from("UPDATE project_members SET role = CAST(CASE id");
+        let mut index = 0;
+        for _ in 0..nrows {
+            index += 1;
+            let id_arg = index;
+            index += 1;
+            let role_arg = index;
+            sql.push_str(&format!(" WHEN ${id_arg} THEN ${role_arg}"));
+        }
+        sql.push_str(" END AS smallint), is_active = CASE id");
+        for _ in 0..nrows {
+            index += 1;
+            let id_arg = index;
+            index += 1;
+            let active_arg = index;
+            sql.push_str(&format!(" WHEN ${id_arg} THEN ${active_arg}"));
+        }
+        sql.push_str(" END WHERE id IN (");
+        for position in 0..nrows {
+            if position > 0 {
+                sql.push_str(", ");
+            }
+            index += 1;
+            sql.push_str(&format!("${index}"));
+        }
+        sql.push(')');
+        sql
+    }
+
+    /// `bulk_update(["is_active", "role"])`: one atomic statement
+    /// with Django's `CAST(CASE ... AS smallint)` shape. Skipped
+    /// entirely when there is nothing to reactivate.
+    pub async fn update_roles_bulk<'e, E>(
+        ex: E,
+        updates: &[(Uuid, RoleBind)],
+    ) -> Result<(), sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        if updates.is_empty() {
+            return Ok(());
+        }
+        let sql = update_roles_bulk_sql(updates.len());
+        let mut query = sqlx::query(&sql);
+        for (id, role) in updates {
+            query = bind_role(query.bind(id), role);
+        }
+        for (id, _) in updates {
+            query = query.bind(id).bind(true);
+        }
+        for (id, _) in updates {
+            query = query.bind(id);
+        }
+        query.execute(ex).await?;
+        Ok(())
+    }
+
+    /// One validated partial write: `None` per field means "not
+    /// present". The caller's validator resolves every value
+    /// (including the `updated_by`-ignored rule below).
+    #[derive(Default)]
+    pub struct MemberPatch<'a> {
+        pub deleted_at: Option<Option<DateTime<Utc>>>,
+        pub comment: Option<Option<&'a str>>,
+        pub role: Option<i64>,
+        pub view_props: Option<&'a serde_json::Value>,
+        pub default_props: Option<&'a serde_json::Value>,
+        pub preferences: Option<&'a serde_json::Value>,
+        pub sort_order: Option<f64>,
+        pub is_active: Option<bool>,
+        pub created_by: Option<Option<Uuid>>,
+    }
+
+    /// Render the PATCH `UPDATE` for the present fields: `updated_at`
+    /// / `updated_by_id` first, then the present columns in fixed
+    /// order, `WHERE id` last. Pure; unit-tested.
+    pub(crate) fn patch_member_sql(patch: &MemberPatch<'_>) -> String {
+        let mut sets = vec![
+            "updated_at = $1".to_owned(),
+            "updated_by_id = $2".to_owned(),
+        ];
+        let mut index = 2;
+        if patch.deleted_at.is_some() {
+            index += 1;
+            sets.push(format!("deleted_at = ${index}"));
+        }
+        if patch.comment.is_some() {
+            index += 1;
+            sets.push(format!("comment = ${index}"));
+        }
+        if patch.role.is_some() {
+            index += 1;
+            sets.push(format!("role = ${index}"));
+        }
+        if patch.view_props.is_some() {
+            index += 1;
+            sets.push(format!("view_props = ${index}"));
+        }
+        if patch.default_props.is_some() {
+            index += 1;
+            sets.push(format!("default_props = ${index}"));
+        }
+        if patch.preferences.is_some() {
+            index += 1;
+            sets.push(format!("preferences = ${index}"));
+        }
+        if patch.sort_order.is_some() {
+            index += 1;
+            sets.push(format!("sort_order = ${index}"));
+        }
+        if patch.is_active.is_some() {
+            index += 1;
+            sets.push(format!("is_active = ${index}"));
+        }
+        if patch.created_by.is_some() {
+            index += 1;
+            sets.push(format!("created_by_id = ${index}"));
+        }
+        index += 1;
+        let id_arg = index;
+        format!(
+            "UPDATE project_members SET {} WHERE id = ${id_arg}",
+            sets.join(", ")
+        )
+    }
+
+    /// The app member PATCH: `save()` stamps `updated_at`/`updated_by`
+    /// (a validated `updated_by` is ignored — `save()` overwrites it
+    /// with the request user) while a validated `created_by`
+    /// persists. The `i64` role binds `as i16` (truncation, like the
+    /// original).
+    pub async fn patch_member<'e, E>(
+        ex: E,
+        pk: Uuid,
+        patch: &MemberPatch<'_>,
+        saved_at: DateTime<Utc>,
+        user_id: Uuid,
+    ) -> Result<(), sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        let sql = patch_member_sql(patch);
+        let mut query = sqlx::query(&sql).bind(saved_at).bind(user_id);
+        if let Some(deleted_at) = patch.deleted_at {
+            query = query.bind(deleted_at);
+        }
+        if let Some(comment) = patch.comment {
+            query = query.bind(comment);
+        }
+        if let Some(role) = patch.role {
+            query = query.bind(role as i16);
+        }
+        if let Some(view_props) = patch.view_props {
+            query = query.bind(view_props);
+        }
+        if let Some(default_props) = patch.default_props {
+            query = query.bind(default_props);
+        }
+        if let Some(preferences) = patch.preferences {
+            query = query.bind(preferences);
+        }
+        if let Some(sort_order) = patch.sort_order {
+            query = query.bind(sort_order);
+        }
+        if let Some(is_active) = patch.is_active {
+            query = query.bind(is_active);
+        }
+        if let Some(created_by) = patch.created_by {
+            query = query.bind(created_by);
+        }
+        query = query.bind(pk);
+        query.execute(ex).await?;
+        Ok(())
+    }
+
+    pub(crate) const UPDATE_IDENTITY_SQL: &str =
+        "UPDATE project_members SET member_id = $1, role = $2, \
+        updated_by_id = $3, updated_at = now() WHERE id = $4";
+
+    /// The v1 member PATCH: `member` may go null (renders `null`),
+    /// `role` is non-nullable in the model (a `None` role 500s at the
+    /// caller after the write — the write itself binds it). The role
+    /// binds as `int4`, assigning into the `smallint` column.
+    pub async fn update_member_identity<'e, E>(
+        ex: E,
+        id: Uuid,
+        member_id: Option<Uuid>,
+        role: Option<i32>,
+        actor_id: Uuid,
+    ) -> Result<(), sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        sqlx::query(UPDATE_IDENTITY_SQL)
+            .bind(member_id)
+            .bind(role)
+            .bind(actor_id)
+            .bind(id)
+            .execute(ex)
+            .await?;
+        Ok(())
+    }
+
+    pub(crate) const RESET_PROPS_SQL: &str =
+        "UPDATE project_members SET view_props = $1, default_props = $2, \
+        preferences = $3, sort_order = $4, updated_at = $5, updated_by_id = $6 WHERE id = $7";
+
+    /// The app member-props reset: full JSON replacement plus the
+    /// float `sort_order` (explicit null 400s at the caller, before
+    /// the write).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn reset_props<'e, E>(
+        ex: E,
+        id: Uuid,
+        view_props: &serde_json::Value,
+        default_props: &serde_json::Value,
+        preferences: &serde_json::Value,
+        sort_order: f64,
+        now: DateTime<Utc>,
+        actor_id: Uuid,
+    ) -> Result<(), sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        sqlx::query(RESET_PROPS_SQL)
+            .bind(view_props)
+            .bind(default_props)
+            .bind(preferences)
+            .bind(sort_order)
+            .bind(now)
+            .bind(actor_id)
+            .bind(id)
+            .execute(ex)
+            .await?;
+        Ok(())
+    }
+
+    pub(crate) const SAVE_PREFERENCES_SQL: &str = "UPDATE project_members SET preferences = $1, \
+        updated_at = $2, updated_by_id = $3 WHERE id = $4";
+
+    /// The app member-preferences save: the caller merges the patch
+    /// into the stored document; the merged value binds as jsonb.
+    pub async fn save_preferences<'e, E>(
+        ex: E,
+        id: Uuid,
+        merged: &serde_json::Value,
+        now: DateTime<Utc>,
+        user_id: Uuid,
+    ) -> Result<(), sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        sqlx::query(SAVE_PREFERENCES_SQL)
+            .bind(merged)
+            .bind(now)
+            .bind(user_id)
+            .bind(id)
+            .execute(ex)
+            .await?;
+        Ok(())
+    }
+
+    pub(crate) const DEACTIVATE_BY_ID_SQL: &str = "UPDATE project_members SET is_active = false, \
+        updated_at = $1, updated_by_id = $2 WHERE id = $3";
+
+    /// The app member destroy/leave: bound stamps, row-addressed.
+    pub async fn deactivate_by_id<'e, E>(
+        ex: E,
+        id: Uuid,
+        now: DateTime<Utc>,
+        user_id: Uuid,
+    ) -> Result<(), sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        sqlx::query(DEACTIVATE_BY_ID_SQL)
+            .bind(now)
+            .bind(user_id)
+            .bind(id)
+            .execute(ex)
+            .await?;
+        Ok(())
+    }
+
+    pub(crate) const DEACTIVATE_ACTOR_FIRST_SQL: &str =
+        "UPDATE project_members SET is_active = false, \
+        updated_by_id = $1, updated_at = now() WHERE id = $2";
+
+    /// The v1 member deactivate: DB-stamped, actor-first binds.
+    pub async fn deactivate_actor_first<'e, E>(
+        ex: E,
+        id: Uuid,
+        actor_id: Uuid,
+    ) -> Result<(), sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        sqlx::query(DEACTIVATE_ACTOR_FIRST_SQL)
+            .bind(actor_id)
+            .bind(id)
+            .execute(ex)
+            .await?;
+        Ok(())
+    }
+
+    /// The user-deactivate chunk size (`batch_size=100`).
+    pub(crate) const BULK_DEACTIVATE_CHUNK: usize = 100;
+
+    /// Render one bulk-deactivate chunk: pk-direct, no `updated_at`,
+    /// no `deleted_at` filter (bug 5). Pure; unit-tested.
+    pub(crate) fn deactivate_many_sql(ids: usize) -> String {
+        let placeholders: Vec<String> = (1..=ids).map(|n| format!("${n}")).collect();
+        format!(
+            "UPDATE project_members SET is_active = FALSE WHERE project_members.id IN ({})",
+            placeholders.join(", ")
+        )
+    }
+
+    /// The user-deactivate bulk: chunked at 100, empty chunks issue
+    /// no statement.
+    pub async fn deactivate_many<'e, E>(ex: E, ids: &[Uuid]) -> Result<(), sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres> + Copy,
+    {
+        for chunk in ids.chunks(BULK_DEACTIVATE_CHUNK) {
+            if chunk.is_empty() {
+                continue;
+            }
+            let sql = deactivate_many_sql(chunk.len());
+            let mut query = sqlx::query(&sql);
+            for id in chunk {
+                query = query.bind(*id);
+            }
+            query.execute(ex).await?;
+        }
+        Ok(())
+    }
+
+    pub(crate) const DEMOTE_CASCADE_SQL: &str = "UPDATE project_members SET role = 5 \
+        WHERE project_members.workspace_id = (SELECT id FROM workspaces WHERE slug = $1) \
+        AND project_members.member_id = $2 AND project_members.deleted_at IS NULL";
+
+    /// The R4 guest-demote cascade: `role = 5` over the target's
+    /// project rows in the workspace. Ported bug B6: no `is_active`
+    /// filter — inactive rows are rewritten too.
+    pub async fn demote_cascade<'e, E>(
+        ex: E,
+        slug: &str,
+        target_user_id: Uuid,
+    ) -> Result<(), sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        sqlx::query(DEMOTE_CASCADE_SQL)
+            .bind(slug)
+            .bind(target_user_id)
+            .execute(ex)
+            .await?;
+        Ok(())
+    }
+
+    pub(crate) const CASCADE_DEACTIVATE_WS_SQL: &str =
+        "UPDATE project_members SET is_active = FALSE, \
+        updated_at = $3 WHERE project_members.workspace_id = \
+        (SELECT id FROM workspaces WHERE slug = $1) AND project_members.member_id = $2 \
+        AND project_members.is_active = TRUE AND project_members.deleted_at IS NULL";
+
+    /// The R5/R6 project deactivation: the queryset `update()` stamps
+    /// `updated_at` only (no `updated_by` — unlike the member
+    /// `.save()` beside it).
+    pub async fn cascade_deactivate_ws<'e, E>(
+        ex: E,
+        slug: &str,
+        target_user_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<(), sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        sqlx::query(CASCADE_DEACTIVATE_WS_SQL)
+            .bind(slug)
+            .bind(target_user_id)
+            .bind(now)
+            .execute(ex)
+            .await?;
+        Ok(())
+    }
+
+    pub(crate) const REACTIVATE_SLUG_SQL: &str = "UPDATE project_members pm SET is_active = true \
+        FROM workspaces w WHERE pm.workspace_id = w.id AND w.slug = $1 \
+        AND pm.project_id = ANY($2) AND pm.member_id = $3 AND pm.deleted_at IS NULL";
+
+    /// The invite-join reactivation: `QuerySet.update` stamps no
+    /// `updated_at`.
+    pub async fn reactivate_slug<'e, E>(
+        ex: E,
+        slug: &str,
+        project_ids: &[Uuid],
+        user_id: Uuid,
+    ) -> Result<(), sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        sqlx::query(REACTIVATE_SLUG_SQL)
+            .bind(slug)
+            .bind(project_ids)
+            .bind(user_id)
+            .execute(ex)
+            .await?;
+        Ok(())
+    }
+
+    pub(crate) const REACTIVATE_BY_ID_SQL: &str =
+        "UPDATE project_members SET is_active = true, updated_at = now(), updated_by_id = $1 \
+         WHERE id = $2";
+
+    /// The join-accept reactivation (`project_member.role =
+    /// project_member.role`: the role re-saves unchanged — the
+    /// statement touches only the activity columns). The stamp is
+    /// `None` when the path has no actor (a bare `NULL`, like the
+    /// original bind).
+    pub async fn reactivate_by_id<'e, E>(
+        ex: E,
+        id: Uuid,
+        updated_by: Option<Uuid>,
+    ) -> Result<(), sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        sqlx::query(REACTIVATE_BY_ID_SQL)
+            .bind(updated_by)
+            .bind(id)
+            .execute(ex)
+            .await?;
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// states
+// ---------------------------------------------------------------------------
+
+/// OSS `states` writes: the endpoint creates, the per-row default
+/// inserts (both create flows loop these — `bulk_create` is one
+/// statement in Django but the ports already loop single rows, kept
+/// verbatim), and the intake triage inserts.
+pub mod states {
+    use super::*;
+
+    /// One state row: every column without a DB default. The app
+    /// endpoint passes `is_triage == false`, no externals and no
+    /// `updated_by` (its text carries those as literals); the v1
+    /// endpoint binds them.
+    pub struct NewState<'a> {
+        pub project_id: Uuid,
+        pub workspace_id: Uuid,
+        pub name: &'a str,
+        pub description: &'a str,
+        pub color: &'a str,
+        /// The caller slugifies (`slugify_name`); defaults keep `\"\"`.
+        pub slug: &'a str,
+        pub sequence: f64,
+        pub group: &'a str,
+        pub is_triage: bool,
+        pub default: bool,
+        pub external_source: Option<&'a str>,
+        pub external_id: Option<&'a str>,
+        pub created_by: Uuid,
+        pub updated_by: Option<Uuid>,
+        pub now: DateTime<Utc>,
+        /// The v1 text: audit-first columns, every value bound.
+        pub v1: bool,
+    }
+
+    pub(crate) const STATE_INSERT_SQL: &str = "INSERT INTO states \
+        (id, project_id, workspace_id, name, description, color, slug, sequence, \
+        \"group\", is_triage, \"default\", external_source, external_id, \
+        created_at, updated_at, created_by_id, updated_by_id, deleted_at) \
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, FALSE, $10, NULL, NULL, $11, $11, $12, NULL, NULL)";
+
+    pub(crate) const STATE_INSERT_V1_SQL: &str = "INSERT INTO states \
+        (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, \
+        project_id, workspace_id, name, description, color, slug, sequence, \
+        \"group\", is_triage, \"default\", external_source, external_id) \
+        VALUES ($1,$2,$3,$4,$5,NULL,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)";
+
+    /// `State.objects.create(...)` (both state endpoints). Returns
+    /// the new row id; conflict arms stay at the callers (app dup
+    /// 400 vs v1 holder-echo 409).
+    pub async fn create<'e, E>(ex: E, state: &NewState<'_>) -> Result<Uuid, sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        let id = Uuid::new_v4();
+        if state.v1 {
+            sqlx::query(STATE_INSERT_V1_SQL)
+                .bind(id)
+                .bind(state.now)
+                .bind(state.now)
+                .bind(state.created_by)
+                .bind(state.updated_by)
+                .bind(state.project_id)
+                .bind(state.workspace_id)
+                .bind(state.name)
+                .bind(state.description)
+                .bind(state.color)
+                .bind(state.slug)
+                .bind(state.sequence)
+                .bind(state.group)
+                .bind(state.is_triage)
+                .bind(state.default)
+                .bind(state.external_source)
+                .bind(state.external_id)
+                .execute(ex)
+                .await?;
+            return Ok(id);
+        }
+        sqlx::query(STATE_INSERT_SQL)
+            .bind(id)
+            .bind(state.project_id)
+            .bind(state.workspace_id)
+            .bind(state.name)
+            .bind(state.description)
+            .bind(state.color)
+            .bind(state.slug)
+            .bind(state.sequence)
+            .bind(state.group)
+            .bind(state.default)
+            .bind(state.now)
+            .bind(state.created_by)
+            .execute(ex)
+            .await?;
+        Ok(id)
+    }
+
+    /// One `DEFAULT_STATES` row: `description`/`slug` `\"\"`,
+    /// `is_triage` false, nullables `NULL` (`bulk_create` calls no
+    /// `save()`).
+    pub struct NewDefaultState<'a> {
+        pub project_id: Uuid,
+        pub workspace_id: Uuid,
+        pub name: &'a str,
+        pub color: &'a str,
+        pub sequence: f64,
+        pub group: &'a str,
+        pub default: bool,
+        pub created_by: Uuid,
+        pub now: DateTime<Utc>,
+        /// The v1 text: short quoted column list, `slug` bound.
+        pub v1: bool,
+    }
+
+    pub(crate) const DEFAULT_STATE_INSERT_SQL: &str = "INSERT INTO states \
+        (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, \
+        project_id, workspace_id, name, description, color, slug, sequence, \
+        \"group\", is_triage, \"default\", external_source, external_id) \
+        VALUES ($1, $2, $2, $3, NULL, NULL, $4, $5, $6, '', $7, '', $8, $9, FALSE, $10, NULL, NULL)";
+
+    pub(crate) const DEFAULT_STATE_INSERT_V1_SQL: &str = "INSERT INTO \"states\" (\"id\", \"created_at\", \
+        \"updated_at\", \"created_by_id\", \"project_id\", \"workspace_id\", \"name\", \"description\", \
+        \"color\", \"slug\", \"sequence\", \"group\", \"is_triage\", \"default\") \
+        VALUES ($1,$2,$3,$4,$5,$6,$7,'',$8,$9,$10,$11,FALSE,$12)";
+
+    /// One default-state row (both create flows loop this over
+    /// `DEFAULT_STATES`).
+    pub async fn add_default<'e, E>(ex: E, state: &NewDefaultState<'_>) -> Result<Uuid, sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        let id = Uuid::new_v4();
+        if state.v1 {
+            sqlx::query(DEFAULT_STATE_INSERT_V1_SQL)
+                .bind(id)
+                .bind(state.now)
+                .bind(state.now)
+                .bind(state.created_by)
+                .bind(state.project_id)
+                .bind(state.workspace_id)
+                .bind(state.name)
+                .bind(state.color)
+                .bind("")
+                .bind(state.sequence)
+                .bind(state.group)
+                .bind(state.default)
+                .execute(ex)
+                .await?;
+            return Ok(id);
+        }
+        sqlx::query(DEFAULT_STATE_INSERT_SQL)
+            .bind(id)
+            .bind(state.now)
+            .bind(state.created_by)
+            .bind(state.project_id)
+            .bind(state.workspace_id)
+            .bind(state.name)
+            .bind(state.color)
+            .bind(state.sequence)
+            .bind(state.group)
+            .bind(state.default)
+            .execute(ex)
+            .await?;
+        Ok(id)
+    }
+
+    pub(crate) const TRIAGE_INSERT_SQL: &str = "INSERT INTO \"states\" (id, created_at, updated_at, \
+        created_by_id, name, description, slug, color, project_id, workspace_id, sequence, \
+        \"group\", \"default\", is_triage) \
+        VALUES ($1, $2, $3, $4, 'Triage', '', 'triage', '#4E5355', $5, $6, $7, 'triage', false, false)";
+
+    pub(crate) const TRIAGE_INSERT_QUOTED_SQL: &str = "INSERT INTO \"states\" (\"id\", \"created_at\", \
+        \"updated_at\", \"created_by_id\", \"name\", \"description\", \"slug\", \"color\", \"project_id\", \
+        \"workspace_id\", \"sequence\", \"group\", \"default\", \"is_triage\") \
+        VALUES ($1, $2, $3, $4, 'Triage', '', 'triage', '#4E5355', $5, $6, $7, 'triage', false, false)";
+
+    pub(crate) const TRIAGE_INSERT_FULL_SQL: &str =
+        "INSERT INTO \"states\" (\"id\", \"created_at\", \
+        \"updated_at\", \"created_by_id\", \"updated_by_id\", \"deleted_at\", \"project_id\", \
+        \"workspace_id\", \"name\", \"description\", \"color\", \"slug\", \"sequence\", \"group\", \
+        \"is_triage\", \"default\", \"external_source\", \"external_id\") \
+        VALUES ($1, $2, $3, $6, NULL, NULL, $4, $5, 'Triage', '', '#4E5355', 'triage', $7, \
+        'triage', FALSE, FALSE, NULL, NULL)";
+
+    /// Which triage text to emit: the short column list (space
+    /// intake), the fully-quoted short list (app intake), or the
+    /// full ORM column list (v1 intake). All three store the same
+    /// row.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum TriageText {
+        Short,
+        Quoted,
+        Full,
+    }
+
+    /// The intake triage-state insert (`MAX(sequence) + 15000`, else
+    /// `65000`, resolved by the caller). Stamps are per-leg: the v1
+    /// path samples twice (microseconds apart), the others pass one
+    /// instant twice. Returns the new row id; conflict arms stay at
+    /// the callers.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn add_triage<'e, E>(
+        ex: E,
+        project_id: Uuid,
+        workspace_id: Uuid,
+        sequence: f64,
+        created_by: Uuid,
+        created_at: DateTime<Utc>,
+        updated_at: DateTime<Utc>,
+        style: TriageText,
+    ) -> Result<Uuid, sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        let id = Uuid::new_v4();
+        let sql = match style {
+            TriageText::Short => TRIAGE_INSERT_SQL,
+            TriageText::Quoted => TRIAGE_INSERT_QUOTED_SQL,
+            TriageText::Full => TRIAGE_INSERT_FULL_SQL,
+        };
+        if style == TriageText::Full {
+            sqlx::query(sql)
+                .bind(id)
+                .bind(created_at)
+                .bind(updated_at)
+                .bind(project_id)
+                .bind(workspace_id)
+                .bind(created_by)
+                .bind(sequence)
+                .execute(ex)
+                .await?;
+            return Ok(id);
+        }
+        sqlx::query(sql)
+            .bind(id)
+            .bind(created_at)
+            .bind(updated_at)
+            .bind(created_by)
+            .bind(project_id)
+            .bind(workspace_id)
+            .bind(sequence)
+            .execute(ex)
+            .await?;
+        Ok(id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::members::*;
+    use super::states::{
+        add_default, add_triage, NewDefaultState, NewState, TriageText, DEFAULT_STATE_INSERT_SQL,
+        DEFAULT_STATE_INSERT_V1_SQL, STATE_INSERT_SQL, STATE_INSERT_V1_SQL, TRIAGE_INSERT_FULL_SQL,
+        TRIAGE_INSERT_QUOTED_SQL, TRIAGE_INSERT_SQL,
+    };
+    use super::*;
+
+    #[test]
+    fn project_inserts_bind_every_placeholder() {
+        for bind in 1..=44 {
+            assert!(
+                PROJECT_INSERT_SQL.contains(&format!("${bind}")),
+                "bind ${bind} present"
+            );
+        }
+        for bind in 1..=32 {
+            assert!(
+                PROJECT_INSERT_V1_SQL.contains(&format!("${bind}")),
+                "v1 bind ${bind} present"
+            );
+        }
+        for literal in ["NULL,NULL,2", "10800,10,10800,10800,TRUE"] {
+            assert!(
+                PROJECT_INSERT_V1_SQL.contains(literal),
+                "v1 literal {literal} present"
+            );
+        }
+        assert!(
+            CLEAR_DEFAULTS_SQL.contains("is_default = FALSE"),
+            "clear flips defaults"
+        );
+    }
+
+    #[test]
+    fn member_inserts_share_columns_and_differ_only_in_tail() {
+        for column in [
+            "\"project_id\"",
+            "\"workspace_id\"",
+            "\"member_id\"",
+            "\"role\"",
+            "\"view_props\"",
+            "\"default_props\"",
+            "\"preferences\"",
+        ] {
+            for sql in [
+                MEMBER_INSERT_SQL,
+                MEMBER_INSERT_IGNORE_SQL,
+                MEMBER_INSERT_DB_NOW_SQL,
+            ] {
+                assert!(sql.contains(column), "{column} listed");
+            }
+        }
+        assert!(MEMBER_INSERT_IGNORE_SQL.ends_with("ON CONFLICT DO NOTHING"));
+        assert!(!MEMBER_INSERT_SQL.contains("ON CONFLICT"));
+        assert!(MEMBER_INSERT_DB_NOW_SQL.contains("now(), now()"));
+        assert!(PROPERTY_INSERT_SQL.contains("\"project_user_properties\""));
+        assert!(PROPERTY_INSERT_DB_NOW_SQL.contains("now(), now(), NULL)"));
+    }
+
+    #[test]
+    fn bulk_add_sql_numbers_rows() {
+        let one = bulk_add_sql(1);
+        assert!(one.starts_with("INSERT INTO \"project_members\""));
+        assert!(one.ends_with(" ON CONFLICT DO NOTHING"));
+        for bind in 1..=9 {
+            assert!(one.contains(&format!("${bind}")), "bind ${bind} present");
+        }
+        assert!(!one.contains("$10"));
+        let two = bulk_add_sql(2);
+        assert!(two.contains("$18"));
+        assert!(!two.contains("$19"));
+        // Shared props bind: view and default ride the same placeholder.
+        assert_eq!(two.matches("$8").count() + two.matches("$17").count(), 4);
+        let db_now = bulk_add_db_now_sql(2);
+        assert!(db_now.contains("now(), now()"));
+        assert!(db_now.contains("$14"));
+        assert!(!db_now.contains("$15"));
+        let props = bulk_add_properties_sql(2);
+        assert!(props.starts_with("INSERT INTO \"project_user_properties\""));
+        assert!(props.contains("$24"));
+        assert!(!props.contains("$25"));
+        assert!(props.ends_with(" ON CONFLICT DO NOTHING"));
+        let props_db_now = bulk_add_properties_db_now_sql(2);
+        assert!(props_db_now.contains("now(), now()"));
+        assert!(props_db_now.contains("$20"));
+        assert!(!props_db_now.contains("$21"));
+    }
+
+    #[test]
+    fn update_roles_bulk_sql_matches_django_shape() {
+        assert_eq!(
+            update_roles_bulk_sql(1),
+            "UPDATE project_members SET role = CAST(CASE id WHEN $1 THEN $2 \
+             END AS smallint), is_active = CASE id WHEN $3 THEN $4 END WHERE id IN ($5)"
+        );
+        let two = update_roles_bulk_sql(2);
+        assert!(two.contains("WHEN $3 THEN $4"));
+        assert!(two.contains("WHEN $7 THEN $8"));
+        assert!(two.ends_with("WHERE id IN ($9, $10)"));
+    }
+
+    #[test]
+    fn patch_member_sql_orders_sets_with_id_last() {
+        let patch = MemberPatch {
+            deleted_at: Some(None),
+            comment: Some(Some("hi")),
+            role: Some(20),
+            view_props: Some(&serde_json::json!({})),
+            default_props: Some(&serde_json::json!({})),
+            preferences: Some(&serde_json::json!({})),
+            sort_order: Some(1.0),
+            is_active: Some(true),
+            created_by: Some(None),
+        };
+        assert_eq!(
+            patch_member_sql(&patch),
+            "UPDATE project_members SET updated_at = $1, updated_by_id = $2, deleted_at = $3, \
+             comment = $4, role = $5, view_props = $6, default_props = $7, preferences = $8, \
+             sort_order = $9, is_active = $10, created_by_id = $11 WHERE id = $12"
+        );
+        assert_eq!(
+            patch_member_sql(&MemberPatch::default()),
+            "UPDATE project_members SET updated_at = $1, updated_by_id = $2 WHERE id = $3"
+        );
+    }
+
+    #[test]
+    fn deactivate_many_sql_placeholders() {
+        assert_eq!(
+            deactivate_many_sql(2),
+            "UPDATE project_members SET is_active = FALSE \
+             WHERE project_members.id IN ($1, $2)"
+        );
+        assert_eq!(BULK_DEACTIVATE_CHUNK, 100);
+    }
+
+    #[test]
+    fn state_inserts_bind_every_placeholder() {
+        for bind in 1..=12 {
+            assert!(
+                STATE_INSERT_SQL.contains(&format!("${bind}")),
+                "bind ${bind} present"
+            );
+        }
+        assert!(STATE_INSERT_SQL.contains("FALSE, $10, NULL, NULL"));
+        for bind in 1..=17 {
+            assert!(
+                STATE_INSERT_V1_SQL.contains(&format!("${bind}")),
+                "v1 bind ${bind} present"
+            );
+        }
+        for bind in 1..=10 {
+            assert!(
+                DEFAULT_STATE_INSERT_SQL.contains(&format!("${bind}")),
+                "default bind ${bind} present"
+            );
+        }
+        for bind in 1..=12 {
+            assert!(
+                DEFAULT_STATE_INSERT_V1_SQL.contains(&format!("${bind}")),
+                "default v1 bind ${bind} present"
+            );
+        }
+        assert!(TRIAGE_INSERT_SQL.contains("'Triage'"));
+        assert!(TRIAGE_INSERT_QUOTED_SQL.contains("\"is_triage\""));
+        assert!(TRIAGE_INSERT_FULL_SQL.contains("$7"));
+        assert!(TRIAGE_INSERT_FULL_SQL.contains("'#4E5355'"));
+    }
+
+    /// One-connection scratch pool: temp tables are
+    /// connection-scoped, so a single connection keeps every statement
+    /// in the test on the temp tables (zero writes to real tables).
+    async fn scratch_pool() -> Option<sqlx::PgPool> {
+        match std::env::var("DATABASE_URL") {
+            Ok(url) => Some(
+                sqlx::postgres::PgPoolOptions::new()
+                    .max_connections(1)
+                    .connect(&url)
+                    .await
+                    .expect("connect to scratch DATABASE_URL"),
+            ),
+            Err(_) => {
+                eprintln!("skipping live-db test: DATABASE_URL is not set");
+                None
+            }
+        }
+    }
+
+    const PROJECTS_DDL: &str = "CREATE TEMPORARY TABLE projects (
+        id UUID PRIMARY KEY, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL,
+        created_by_id UUID, updated_by_id UUID, deleted_at TIMESTAMPTZ,
+        name TEXT NOT NULL, description TEXT NOT NULL, description_text JSONB,
+        description_html JSONB, network INTEGER NOT NULL, workspace_id UUID NOT NULL,
+        identifier TEXT NOT NULL, default_assignee_id UUID, project_lead_id UUID,
+        emoji TEXT, icon_prop JSONB, module_view BOOLEAN NOT NULL,
+        cycle_view BOOLEAN NOT NULL, issue_views_view BOOLEAN NOT NULL,
+        page_view BOOLEAN NOT NULL, intake_view BOOLEAN NOT NULL,
+        is_time_tracking_enabled BOOLEAN NOT NULL, is_issue_type_enabled BOOLEAN NOT NULL,
+        guest_view_all_features BOOLEAN NOT NULL, cover_image TEXT,
+        cover_image_asset_id UUID, estimate_id UUID, archive_in INTEGER NOT NULL,
+        close_in INTEGER NOT NULL, logo_props JSONB NOT NULL, default_state_id UUID,
+        archived_at TIMESTAMPTZ, is_default BOOLEAN NOT NULL, timezone TEXT NOT NULL,
+        external_source TEXT, external_id TEXT, repo_url TEXT NOT NULL,
+        base_branch TEXT NOT NULL, agent_default_interval_seconds INTEGER NOT NULL,
+        agent_default_max_ticks INTEGER NOT NULL,
+        agent_review_default_interval_seconds INTEGER NOT NULL,
+        agent_test_default_interval_seconds INTEGER NOT NULL,
+        agent_ticking_enabled BOOLEAN NOT NULL, default_agent_executor TEXT NOT NULL,
+        members_can_edit_states BOOLEAN NOT NULL)";
+
+    const WORKSPACES_DDL: &str = "CREATE TEMPORARY TABLE workspaces (
+        id UUID PRIMARY KEY, slug TEXT NOT NULL)";
+
+    const PMEMBERS_DDL: &str = "CREATE TEMPORARY TABLE project_members (
+        id UUID PRIMARY KEY, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL,
+        created_by_id UUID, updated_by_id UUID, deleted_at TIMESTAMPTZ,
+        project_id UUID NOT NULL, workspace_id UUID NOT NULL, member_id UUID,
+        comment TEXT, role SMALLINT NOT NULL, view_props JSONB NOT NULL,
+        default_props JSONB NOT NULL, preferences JSONB NOT NULL,
+        sort_order DOUBLE PRECISION NOT NULL, is_active BOOLEAN NOT NULL)";
+
+    const PROPS_DDL: &str = "CREATE TEMPORARY TABLE project_user_properties (
+        id UUID PRIMARY KEY, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL,
+        created_by_id UUID, updated_by_id UUID, deleted_at TIMESTAMPTZ,
+        project_id UUID NOT NULL, workspace_id UUID NOT NULL, user_id UUID NOT NULL,
+        filters JSONB NOT NULL, display_filters JSONB NOT NULL,
+        display_properties JSONB NOT NULL, rich_filters JSONB NOT NULL,
+        preferences JSONB NOT NULL, sort_order DOUBLE PRECISION NOT NULL)";
+
+    const STATES_DDL: &str = "CREATE TEMPORARY TABLE states (
+        id UUID PRIMARY KEY, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL,
+        created_by_id UUID, updated_by_id UUID, deleted_at TIMESTAMPTZ,
+        project_id UUID NOT NULL, workspace_id UUID NOT NULL, name TEXT NOT NULL,
+        description TEXT NOT NULL, color TEXT NOT NULL, slug TEXT NOT NULL,
+        sequence DOUBLE PRECISION NOT NULL, \"group\" TEXT NOT NULL,
+        is_triage BOOLEAN NOT NULL, \"default\" BOOLEAN NOT NULL,
+        external_source TEXT, external_id TEXT)";
+
+    fn props() -> serde_json::Value {
+        serde_json::json!({"filters": {}})
+    }
+
+    fn prefs() -> serde_json::Value {
+        serde_json::json!({"theme": "dark"})
+    }
+
+    fn new_project<'a>(
+        ws: Uuid,
+        actor: Uuid,
+        now: DateTime<Utc>,
+        logo: &'a serde_json::Value,
+        v1: bool,
+    ) -> NewProject<'a> {
+        NewProject {
+            name: "Website",
+            description: "",
+            description_text: None,
+            description_html: None,
+            network: 2,
+            workspace_id: ws,
+            identifier: "WEB",
+            default_assignee: None,
+            project_lead: None,
+            emoji: None,
+            icon_prop: None,
+            module_view: false,
+            cycle_view: false,
+            issue_views_view: false,
+            page_view: true,
+            intake_view: false,
+            is_time_tracking_enabled: false,
+            is_issue_type_enabled: false,
+            guest_view_all_features: false,
+            cover_image: None,
+            cover_image_asset: None,
+            estimate: None,
+            archive_in: 0,
+            close_in: 0,
+            logo_props: logo,
+            default_state: None,
+            archived_at: None,
+            is_default: true,
+            clear_others: true,
+            timezone: "UTC",
+            external_source: None,
+            external_id: None,
+            repo_url: "",
+            base_branch: "main",
+            agent_interval: 10800,
+            agent_max_ticks: 10,
+            agent_review: 10800,
+            agent_test: 10800,
+            agent_ticking: true,
+            default_executor: "local_runner",
+            members_can_edit_states: true,
+            created_by: actor,
+            created_at: now,
+            updated_at: now,
+            v1,
+        }
+    }
+
+    /// `create` inserts the row and clears the previous live default
+    /// in the same transaction; the v1 arm stores the same values
+    /// through the literal-heavy text.
+    #[tokio::test]
+    async fn live_create_clears_default_and_inserts() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        sqlx::query(PROJECTS_DDL)
+            .execute(&pool)
+            .await
+            .expect("temp projects");
+        let now: DateTime<Utc> = "2026-10-03T12:00:00+00:00".parse().expect("T0");
+        let ws = Uuid::new_v4();
+        let actor = Uuid::new_v4();
+        let logo = serde_json::json!({});
+        let first = create(&pool, &new_project(ws, actor, now, &logo, false))
+            .await
+            .expect("first create");
+        let second = create(&pool, &new_project(ws, actor, now, &logo, false))
+            .await
+            .expect("second create");
+        for (id, expected) in [(first, false), (second, true)] {
+            let flag: bool = sqlx::query_scalar("SELECT is_default FROM projects WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .expect("read back");
+            assert_eq!(flag, expected);
+        }
+        let row: (String, i32, bool, String) = sqlx::query_as(
+            "SELECT identifier, network, agent_ticking_enabled, default_agent_executor \
+             FROM projects WHERE id = $1",
+        )
+        .bind(second)
+        .fetch_one(&pool)
+        .await
+        .expect("read back");
+        assert_eq!(row, ("WEB".to_owned(), 2, true, "local_runner".to_owned()));
+        let v1_id = create(&pool, &new_project(ws, actor, now, &logo, true))
+            .await
+            .expect("v1 create");
+        let v1_row: (Option<serde_json::Value>, Option<Uuid>, i32, bool) = sqlx::query_as(
+            "SELECT description_text, cover_image_asset_id, agent_default_interval_seconds, \
+             agent_ticking_enabled FROM projects WHERE id = $1",
+        )
+        .bind(v1_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read back");
+        assert_eq!(v1_row, (None, None, 10800, true));
+    }
+
+    /// `add` inserts the full row; the ignore arm replays the signup
+    /// per-row `ON CONFLICT DO NOTHING`; `db_now` stamps from the
+    /// database clock; a `None` project is the PB-1008 23502.
+    #[tokio::test]
+    async fn live_member_add_variants() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        sqlx::query(PMEMBERS_DDL)
+            .execute(&pool)
+            .await
+            .expect("temp members");
+        let now: DateTime<Utc> = "2026-10-03T12:00:00+00:00".parse().expect("T0");
+        let ws = Uuid::new_v4();
+        let project = Uuid::new_v4();
+        let user = Uuid::new_v4();
+        let actor = Uuid::new_v4();
+        let view = props();
+        let prefs = prefs();
+        let member = NewProjectMember {
+            workspace_id: ws,
+            project_id: Some(project),
+            user_id: Some(user),
+            role: 20,
+            created_by: Some(actor),
+            view_props: &view,
+            default_props: &view,
+            preferences: &prefs,
+            now,
+            ignore_conflicts: false,
+            db_now: false,
+        };
+        let id = add(&pool, &member).await.expect("add");
+        let row: (i16, bool, DateTime<Utc>) =
+            sqlx::query_as("SELECT role, is_active, created_at FROM project_members WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .expect("read back");
+        assert_eq!(row, (20, true, now));
+        let ignored = NewProjectMember {
+            project_id: member.project_id,
+            user_id: member.user_id,
+            ignore_conflicts: true,
+            ..member_for_replay(&member)
+        };
+        add(&pool, &ignored).await.expect("ignore replay");
+        let db_now = NewProjectMember {
+            user_id: Some(Uuid::new_v4()),
+            db_now: true,
+            ..member_for_replay(&member)
+        };
+        add(&pool, &db_now).await.expect("db_now add");
+        let stamped: DateTime<Utc> =
+            sqlx::query_scalar("SELECT created_at FROM project_members WHERE member_id = $1")
+                .bind(db_now.user_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read back");
+        assert!(stamped > now, "db clock stamps, got {stamped}");
+        // PB-1008: the missing project binds an explicit NULL into the
+        // NOT NULL column — the same 23502 the omitted column raises.
+        let null_project = NewProjectMember {
+            project_id: None,
+            user_id: Some(Uuid::new_v4()),
+            ..member_for_replay(&member)
+        };
+        let err = add(&pool, &null_project)
+            .await
+            .expect_err("null project 23502");
+        assert_eq!(
+            err.as_database_error().and_then(|db| db.code()).as_deref(),
+            Some("23502")
+        );
+    }
+
+    /// Field-level copy for the replay probes (`NewProjectMember`
+    /// borrows; the replays reuse every value but the flags).
+    fn member_for_replay<'a>(member: &NewProjectMember<'a>) -> NewProjectMember<'a> {
+        NewProjectMember {
+            workspace_id: member.workspace_id,
+            project_id: member.project_id,
+            user_id: member.user_id,
+            role: member.role,
+            created_by: member.created_by,
+            view_props: member.view_props,
+            default_props: member.default_props,
+            preferences: member.preferences,
+            now: member.now,
+            ignore_conflicts: false,
+            db_now: false,
+        }
+    }
+
+    /// `add_property` (both stamp styles) and the two multi-row
+    /// writers insert their rows; empty inputs emit no statement.
+    #[tokio::test]
+    async fn live_properties_and_bulks() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        sqlx::query(PMEMBERS_DDL)
+            .execute(&pool)
+            .await
+            .expect("temp members");
+        sqlx::query(PROPS_DDL)
+            .execute(&pool)
+            .await
+            .expect("temp properties");
+        let now: DateTime<Utc> = "2026-10-03T12:00:00+00:00".parse().expect("T0");
+        let ws = Uuid::new_v4();
+        let project = Uuid::new_v4();
+        let user = Uuid::new_v4();
+        let actor = Uuid::new_v4();
+        let filters = serde_json::json!({});
+        let prefs = prefs();
+        let property = NewMemberProperty {
+            workspace_id: ws,
+            project_id: project,
+            user_id: user,
+            filters: &filters,
+            display_filters: &filters,
+            display_properties: &filters,
+            rich_filters: &filters,
+            preferences: &prefs,
+            sort_order: 65535.0,
+            created_by: Some(actor),
+            now,
+        };
+        add_property(&pool, &property).await.expect("property");
+        add_property_db_now(&pool, &property)
+            .await
+            .expect("db_now property");
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM project_user_properties")
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+        assert_eq!(count, 2);
+        let view = props();
+        let later: DateTime<Utc> = "2026-10-04T12:00:00+00:00".parse().expect("T1");
+        let rows = vec![
+            BulkRow {
+                workspace_id: ws,
+                project_id: Some(project),
+                user_id: Uuid::new_v4(),
+                role: RoleBind::Int(15),
+                created_by: Some(actor),
+                created_at: now,
+                updated_at: later,
+            },
+            BulkRow {
+                workspace_id: ws,
+                project_id: Some(project),
+                user_id: Uuid::new_v4(),
+                role: RoleBind::Int(5),
+                created_by: Some(actor),
+                created_at: now,
+                updated_at: later,
+            },
+        ];
+        bulk_add(&pool, &rows, &view, &prefs, false)
+            .await
+            .expect("bulk");
+        bulk_add(&pool, &rows, &view, &prefs, true)
+            .await
+            .expect("db_now bulk");
+        bulk_add(&pool, &[], &view, &prefs, false)
+            .await
+            .expect("empty bulk is a no-op");
+        let stored: Vec<(i16, DateTime<Utc>, DateTime<Utc>)> = sqlx::query_as(
+            "SELECT role, created_at, updated_at FROM project_members ORDER BY role",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("read back");
+        assert_eq!(stored.len(), 4);
+        assert!(stored.iter().any(|row| row.1 == now && row.2 == later));
+        let prop_rows = vec![BulkProperty {
+            workspace_id: ws,
+            project_id: project,
+            user_id: Uuid::new_v4(),
+            filters: &filters,
+            display_filters: &filters,
+            display_properties: &filters,
+            rich_filters: &filters,
+            preferences: &prefs,
+            sort_order: 55535.0,
+            created_by: Some(actor),
+            created_at: now,
+            updated_at: later,
+        }];
+        bulk_add_properties(&pool, &prop_rows, false)
+            .await
+            .expect("bulk properties");
+        bulk_add_properties(&pool, &prop_rows, true)
+            .await
+            .expect("db_now bulk properties");
+        bulk_add_properties(&pool, &[], false)
+            .await
+            .expect("empty properties bulk is a no-op");
+        let sorts: Vec<f64> = sqlx::query_scalar(
+            "SELECT sort_order FROM project_user_properties ORDER BY sort_order",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("read back");
+        assert_eq!(sorts, vec![55535.0, 55535.0, 65535.0, 65535.0]);
+    }
+
+    /// The `get_or_create` arm inserts on a miss and swallows a
+    /// lost race through the partial-index conflict target.
+    #[tokio::test]
+    async fn live_get_or_create_property() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        sqlx::query(PROPS_DDL)
+            .execute(&pool)
+            .await
+            .expect("temp properties");
+        sqlx::query(
+            "CREATE UNIQUE INDEX props_user_project_uidx ON project_user_properties \
+             (user_id, project_id) WHERE deleted_at IS NULL",
+        )
+        .execute(&pool)
+        .await
+        .expect("partial index");
+        let now: DateTime<Utc> = "2026-10-03T12:00:00+00:00".parse().expect("T0");
+        let filters = serde_json::json!({});
+        let prefs = prefs();
+        let property = NewMemberProperty {
+            workspace_id: Uuid::new_v4(),
+            project_id: Uuid::new_v4(),
+            user_id: Uuid::new_v4(),
+            filters: &filters,
+            display_filters: &filters,
+            display_properties: &filters,
+            rich_filters: &filters,
+            preferences: &prefs,
+            sort_order: 65535.0,
+            created_by: Some(Uuid::new_v4()),
+            now,
+        };
+        get_or_create_property(&pool, &property)
+            .await
+            .expect("get_or_create inserts");
+        get_or_create_property(&pool, &property)
+            .await
+            .expect("get_or_create swallows the race");
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM project_user_properties")
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+        assert_eq!(count, 1);
+    }
+
+    /// The ops arms bind the `int8` role (in-range assigns, `None`
+    /// rejects) and the queryset update touches only its columns.
+    #[tokio::test]
+    async fn live_ops_add_and_update_role() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        sqlx::query(PMEMBERS_DDL)
+            .execute(&pool)
+            .await
+            .expect("temp members");
+        let now: DateTime<Utc> = "2026-10-03T12:00:00+00:00".parse().expect("T0");
+        let ws = Uuid::new_v4();
+        let project = Uuid::new_v4();
+        let user = Uuid::new_v4();
+        let view = props();
+        let prefs = prefs();
+        ops_add(&pool, ws, project, user, Some(15), &view, &prefs, now)
+            .await
+            .expect("ops add");
+        ops_update_role(&pool, project, user, Some(20))
+            .await
+            .expect("ops role");
+        let row: (i16, bool, DateTime<Utc>) =
+            sqlx::query_as("SELECT role, is_active, updated_at FROM project_members")
+                .fetch_one(&pool)
+                .await
+                .expect("read back");
+        assert_eq!(row, (20, true, now));
+        let err = ops_add(&pool, ws, project, Uuid::new_v4(), None, &view, &prefs, now)
+            .await
+            .expect_err("null role 23502");
+        assert_eq!(
+            err.as_database_error().and_then(|db| db.code()).as_deref(),
+            Some("23502")
+        );
+    }
+
+    /// The `CAST(CASE ...)` bulk reactivates with per-row roles;
+    /// the `NULL` arm is the 23502 the caller's 500 arm keys on; the
+    /// PATCH writes the present fields only and always stamps.
+    #[tokio::test]
+    async fn live_update_roles_bulk_and_patch() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        sqlx::query(PMEMBERS_DDL)
+            .execute(&pool)
+            .await
+            .expect("temp members");
+        let now: DateTime<Utc> = "2026-10-03T12:00:00+00:00".parse().expect("T0");
+        let ws = Uuid::new_v4();
+        let project = Uuid::new_v4();
+        let view = props();
+        let prefs = prefs();
+        let first = Uuid::new_v4();
+        let second = Uuid::new_v4();
+        for user in [first, second] {
+            let member = NewProjectMember {
+                workspace_id: ws,
+                project_id: Some(project),
+                user_id: Some(user),
+                role: 5,
+                created_by: None,
+                view_props: &view,
+                default_props: &view,
+                preferences: &prefs,
+                now,
+                ignore_conflicts: false,
+                db_now: false,
+            };
+            add(&pool, &member).await.expect("seed");
+        }
+        let ids: Vec<(Uuid, Uuid)> =
+            sqlx::query_as("SELECT id, member_id FROM project_members ORDER BY member_id")
+                .fetch_all(&pool)
+                .await
+                .expect("ids");
+        let (first_id, second_id) = (ids[0].0, ids[1].0);
+        sqlx::query("UPDATE project_members SET is_active = FALSE")
+            .execute(&pool)
+            .await
+            .expect("deactivate seeds");
+        update_roles_bulk(&pool, &[(first_id, RoleBind::Int(20))])
+            .await
+            .expect("bulk roles");
+        update_roles_bulk(&pool, &[])
+            .await
+            .expect("empty is a no-op");
+        let rows: Vec<(i16, bool)> = sqlx::query_as(
+            "SELECT role, is_active FROM project_members WHERE id = ANY($1) ORDER BY member_id",
+        )
+        .bind(vec![first_id, second_id])
+        .fetch_all(&pool)
+        .await
+        .expect("read back");
+        assert_eq!(rows, vec![(20, true), (5, false)]);
+        // The NULL arm binds NULL into the NOT NULL column: 23502 for
+        // the caller's 500 arm.
+        let err = update_roles_bulk(&pool, &[(second_id, RoleBind::Null)])
+            .await
+            .expect_err("null role 23502");
+        assert_eq!(
+            err.as_database_error().and_then(|db| db.code()).as_deref(),
+            Some("23502")
+        );
+        let patch = MemberPatch {
+            role: Some(15),
+            comment: Some(Some("hello")),
+            ..MemberPatch::default()
+        };
+        let later: DateTime<Utc> = "2026-10-04T12:00:00+00:00".parse().expect("T1");
+        patch_member(&pool, first_id, &patch, later, first)
+            .await
+            .expect("patch");
+        let patched: (i16, Option<String>, DateTime<Utc>, Uuid) = sqlx::query_as(
+            "SELECT role, comment, updated_at, updated_by_id FROM project_members WHERE id = $1",
+        )
+        .bind(first_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read back");
+        assert_eq!(patched, (15, Some("hello".to_owned()), later, first));
+        patch_member(&pool, first_id, &MemberPatch::default(), later, first)
+            .await
+            .expect("empty patch stamps only");
+    }
+
+    /// The v1 identity write, the props reset and the preferences
+    /// save land their columns.
+    #[tokio::test]
+    async fn live_identity_props_prefs() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        sqlx::query(PMEMBERS_DDL)
+            .execute(&pool)
+            .await
+            .expect("temp members");
+        let now: DateTime<Utc> = "2026-10-03T12:00:00+00:00".parse().expect("T0");
+        let ws = Uuid::new_v4();
+        let project = Uuid::new_v4();
+        let user = Uuid::new_v4();
+        let actor = Uuid::new_v4();
+        let view = props();
+        let prefs = prefs();
+        let member = NewProjectMember {
+            workspace_id: ws,
+            project_id: Some(project),
+            user_id: Some(user),
+            role: 5,
+            created_by: Some(actor),
+            view_props: &view,
+            default_props: &view,
+            preferences: &prefs,
+            now,
+            ignore_conflicts: false,
+            db_now: false,
+        };
+        let id = add(&pool, &member).await.expect("seed");
+        let other = Uuid::new_v4();
+        update_member_identity(&pool, id, Some(other), Some(20), actor)
+            .await
+            .expect("identity");
+        let identity: (Uuid, i16) =
+            sqlx::query_as("SELECT member_id, role FROM project_members WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .expect("read back");
+        assert_eq!(identity, (other, 20));
+        let reset = serde_json::json!({"reset": true});
+        reset_props(&pool, id, &reset, &reset, &reset, 12.5, now, actor)
+            .await
+            .expect("reset");
+        let stored: (serde_json::Value, f64) =
+            sqlx::query_as("SELECT view_props, sort_order FROM project_members WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .expect("read back");
+        assert_eq!(stored, (reset, 12.5));
+        let merged = serde_json::json!({"theme": "light"});
+        save_preferences(&pool, id, &merged, now, actor)
+            .await
+            .expect("prefs");
+        let saved: serde_json::Value =
+            sqlx::query_scalar("SELECT preferences FROM project_members WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .expect("read back");
+        assert_eq!(saved, merged);
+    }
+
+    /// Every (de)activation writer: row-addressed, actor-first,
+    /// chunked bulk, the demote cascade, the workspace cascade, and
+    /// the two invite reactivations.
+    #[tokio::test]
+    async fn live_deactivations() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        sqlx::query(WORKSPACES_DDL)
+            .execute(&pool)
+            .await
+            .expect("temp workspaces");
+        sqlx::query(PMEMBERS_DDL)
+            .execute(&pool)
+            .await
+            .expect("temp members");
+        let now: DateTime<Utc> = "2026-10-03T12:00:00+00:00".parse().expect("T0");
+        let ws = Uuid::new_v4();
+        sqlx::query("INSERT INTO workspaces (id, slug) VALUES ($1, 'acme')")
+            .bind(ws)
+            .execute(&pool)
+            .await
+            .expect("workspace");
+        let project = Uuid::new_v4();
+        let other_project = Uuid::new_v4();
+        let user = Uuid::new_v4();
+        let actor = Uuid::new_v4();
+        let view = props();
+        let prefs = prefs();
+        let mut ids = Vec::new();
+        for project_id in [project, other_project] {
+            let member = NewProjectMember {
+                workspace_id: ws,
+                project_id: Some(project_id),
+                user_id: Some(user),
+                role: 20,
+                created_by: Some(actor),
+                view_props: &view,
+                default_props: &view,
+                preferences: &prefs,
+                now,
+                ignore_conflicts: false,
+                db_now: false,
+            };
+            ids.push(add(&pool, &member).await.expect("seed"));
+        }
+        deactivate_by_id(&pool, ids[0], now, actor)
+            .await
+            .expect("deactivate");
+        let active: bool =
+            sqlx::query_scalar("SELECT is_active FROM project_members WHERE id = $1")
+                .bind(ids[0])
+                .fetch_one(&pool)
+                .await
+                .expect("read back");
+        assert!(!active);
+        reactivate_by_id(&pool, ids[0], Some(actor))
+            .await
+            .expect("reactivate");
+        deactivate_actor_first(&pool, ids[1], actor)
+            .await
+            .expect("v1 deactivate");
+        reactivate_slug(&pool, "acme", &[project, other_project], user)
+            .await
+            .expect("slug reactivate");
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM project_members WHERE is_active")
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+        assert_eq!(count, 2);
+        // Ported bug B6: no `is_active` filter — the inactive row is
+        // rewritten too.
+        deactivate_by_id(&pool, ids[0], now, actor)
+            .await
+            .expect("deactivate one");
+        demote_cascade(&pool, "acme", user).await.expect("demote");
+        let demoted: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM project_members WHERE role = 5")
+                .fetch_one(&pool)
+                .await
+                .expect("count");
+        assert_eq!(demoted, 2);
+        let still_inactive: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM project_members WHERE role = 5 AND NOT is_active",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count");
+        assert_eq!(still_inactive, 1);
+        cascade_deactivate_ws(&pool, "acme", user, now)
+            .await
+            .expect("ws cascade");
+        deactivate_many(&pool, &ids).await.expect("bulk");
+        deactivate_many(&pool, &[]).await.expect("empty bulk");
+        let inactive: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM project_members WHERE NOT is_active")
+                .fetch_one(&pool)
+                .await
+                .expect("count");
+        assert_eq!(inactive, 2);
+    }
+
+    /// Endpoint creates (both texts), default rows (both texts) and
+    /// triage rows (both texts) store their rows.
+    #[tokio::test]
+    async fn live_states() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        sqlx::query(STATES_DDL)
+            .execute(&pool)
+            .await
+            .expect("temp states");
+        let now: DateTime<Utc> = "2026-10-03T12:00:00+00:00".parse().expect("T0");
+        let ws = Uuid::new_v4();
+        let project = Uuid::new_v4();
+        let actor = Uuid::new_v4();
+        let app = NewState {
+            project_id: project,
+            workspace_id: ws,
+            name: "Todo",
+            description: "",
+            color: "#60646C",
+            slug: "todo",
+            sequence: 25000.0,
+            group: "unstarted",
+            is_triage: false,
+            default: false,
+            external_source: None,
+            external_id: None,
+            created_by: actor,
+            updated_by: None,
+            now,
+            v1: false,
+        };
+        let app_id = states::create(&pool, &app).await.expect("app state");
+        let stored: (String, bool, Option<String>) =
+            sqlx::query_as("SELECT slug, is_triage, external_source FROM states WHERE id = $1")
+                .bind(app_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read back");
+        assert_eq!(stored, ("todo".to_owned(), false, None));
+        let v1 = NewState {
+            slug: "todo",
+            is_triage: true,
+            external_source: Some("jira"),
+            external_id: Some("T-1"),
+            updated_by: Some(actor),
+            v1: true,
+            ..state_for_replay(&app)
+        };
+        states::create(&pool, &v1).await.expect("v1 state");
+        let external: (bool, Option<String>) = sqlx::query_as(
+            "SELECT is_triage, external_id FROM states WHERE external_source = 'jira'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("read back");
+        assert_eq!(external, (true, Some("T-1".to_owned())));
+        let default = NewDefaultState {
+            project_id: project,
+            workspace_id: ws,
+            name: "Backlog",
+            color: "#60646C",
+            sequence: 15000.0,
+            group: "backlog",
+            default: true,
+            created_by: actor,
+            now,
+            v1: false,
+        };
+        add_default(&pool, &default).await.expect("default");
+        let v1_default = NewDefaultState {
+            v1: true,
+            ..default_for_replay(&default)
+        };
+        add_default(&pool, &v1_default).await.expect("v1 default");
+        let defaults: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM states WHERE name = 'Backlog'")
+                .fetch_one(&pool)
+                .await
+                .expect("count");
+        assert_eq!(defaults, 2);
+        add_triage(
+            &pool,
+            project,
+            ws,
+            65000.0,
+            actor,
+            now,
+            now,
+            TriageText::Short,
+        )
+        .await
+        .expect("triage");
+        add_triage(
+            &pool,
+            project,
+            ws,
+            80000.0,
+            actor,
+            now,
+            now,
+            TriageText::Quoted,
+        )
+        .await
+        .expect("quoted triage");
+        let later: DateTime<Utc> = "2026-10-04T12:00:00+00:00".parse().expect("T1");
+        add_triage(
+            &pool,
+            project,
+            ws,
+            95000.0,
+            actor,
+            now,
+            later,
+            TriageText::Full,
+        )
+        .await
+        .expect("full triage");
+        let triage: Vec<(String, f64)> = sqlx::query_as(
+            "SELECT slug, sequence FROM states WHERE name = 'Triage' ORDER BY sequence",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("read back");
+        assert_eq!(
+            triage,
+            vec![
+                ("triage".to_owned(), 65000.0),
+                ("triage".to_owned(), 80000.0),
+                ("triage".to_owned(), 95000.0)
+            ]
+        );
+        let stamps: (DateTime<Utc>, DateTime<Utc>) =
+            sqlx::query_as("SELECT created_at, updated_at FROM states WHERE sequence = 95000.0")
+                .fetch_one(&pool)
+                .await
+                .expect("read back");
+        assert_eq!(stamps, (now, later));
+    }
+
+    /// Field-level copy for the replay probes (`NewState` borrows).
+    fn state_for_replay<'a>(state: &NewState<'a>) -> NewState<'a> {
+        NewState {
+            project_id: state.project_id,
+            workspace_id: state.workspace_id,
+            name: state.name,
+            description: state.description,
+            color: state.color,
+            slug: state.slug,
+            sequence: state.sequence,
+            group: state.group,
+            is_triage: state.is_triage,
+            default: state.default,
+            external_source: state.external_source,
+            external_id: state.external_id,
+            created_by: state.created_by,
+            updated_by: state.updated_by,
+            now: state.now,
+            v1: false,
+        }
+    }
+
+    /// Field-level copy for the replay probes (`NewDefaultState`
+    /// borrows).
+    fn default_for_replay<'a>(state: &NewDefaultState<'a>) -> NewDefaultState<'a> {
+        NewDefaultState {
+            project_id: state.project_id,
+            workspace_id: state.workspace_id,
+            name: state.name,
+            color: state.color,
+            sequence: state.sequence,
+            group: state.group,
+            default: state.default,
+            created_by: state.created_by,
+            now: state.now,
+            v1: false,
+        }
+    }
+}

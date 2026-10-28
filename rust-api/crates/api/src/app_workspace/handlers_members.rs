@@ -2744,16 +2744,9 @@ async fn guest_demote_cascade(
     slug: &str,
     target_user_id: &Uuid,
 ) -> Result<(), Denial> {
-    sqlx::query(
-        "UPDATE project_members SET role = 5 WHERE project_members.workspace_id = \
-         (SELECT id FROM workspaces WHERE slug = $1) \
-         AND project_members.member_id = $2 AND project_members.deleted_at IS NULL",
-    )
-    .bind(slug)
-    .bind(target_user_id)
-    .execute(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    pidash_services::domain::projects::members::demote_cascade(pool, slug, *target_user_id)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(())
 }
 
@@ -2804,16 +2797,12 @@ async fn deactivate_project_rows(
     target_user_id: &Uuid,
     now: &DateTime<Utc>,
 ) -> Result<(), Denial> {
-    sqlx::query(
-        "UPDATE project_members SET is_active = FALSE, updated_at = $3 \
-         WHERE project_members.workspace_id = (SELECT id FROM workspaces WHERE slug = $1) \
-         AND project_members.member_id = $2 AND project_members.is_active = TRUE \
-         AND project_members.deleted_at IS NULL",
+    pidash_services::domain::projects::members::cascade_deactivate_ws(
+        pool,
+        slug,
+        *target_user_id,
+        *now,
     )
-    .bind(slug)
-    .bind(target_user_id)
-    .bind(now)
-    .execute(pool)
     .await
     .map_err(|_| Denial::ServerError)?;
     Ok(())
