@@ -692,23 +692,7 @@ async fn comment_is_synced(
 // Query strings (Django QueryDict.get: last value wins)
 // ---------------------------------------------------------------------------
 
-/// One query value, repeated or not (the app_issues shape).
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(untagged)]
-enum OneOrMany {
-    One(String),
-    Many(Vec<String>),
-}
-
-type QueryMap = std::collections::HashMap<String, OneOrMany>;
-
-/// Django `QueryDict.get`: the last value, or `None`.
-fn query_last(query: &QueryMap, key: &str) -> Option<String> {
-    query.get(key).and_then(|value| match value {
-        OneOrMany::One(one) => Some(one.clone()),
-        OneOrMany::Many(many) => many.last().cloned(),
-    })
-}
+use pidash_compat::http::{query_last, QueryMap};
 
 // ---------------------------------------------------------------------------
 // Request bodies (DRF JSON parsing)
@@ -2878,6 +2862,7 @@ async fn vote_destroy_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pidash_compat::http::OneOrMany;
     use pidash_services::read::{IssueFlatView, ProjectLiteView, WorkspaceLiteView};
     use tower::ServiceExt;
 

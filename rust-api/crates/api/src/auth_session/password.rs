@@ -844,30 +844,7 @@ async fn get_csrf_token(
     response
 }
 
-/// Session-auth hash for `login()`: `salted_hmac(
-/// "...AbstractBaseUser.get_session_auth_hash", password_field,
-/// SECRET_KEY).hexdigest()` — the same construction `resolve_actor`
-/// verifies.
-fn session_auth_hash(password_field: &str, secret_key: &[u8]) -> String {
-    use hmac::{Hmac, Mac};
-    use sha2::{Digest, Sha256};
-    let key = {
-        let mut hasher = Sha256::new();
-        hasher.update(b"django.contrib.auth.models.AbstractBaseUser.get_session_auth_hash");
-        hasher.update(secret_key);
-        hasher.finalize()
-    };
-    let mut mac = Hmac::<Sha256>::new_from_slice(&key).expect("HMAC-SHA256 accepts any key length");
-    mac.update(password_field.as_bytes());
-    let digest = mac.finalize().into_bytes();
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(digest.len() * 2);
-    for b in digest {
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0x0f) as usize] as char);
-    }
-    out
-}
+use pidash_compat::http::session_auth_hash;
 
 /// `user_login(user, request, is_app=True)` (`utils/login.py:14-28`) over
 /// the request session: Django `login()` re-keys the session, writes

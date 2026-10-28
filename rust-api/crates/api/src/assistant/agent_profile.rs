@@ -611,7 +611,7 @@ mod live_tests {
         use sha2::{Digest, Sha256};
         let key = Sha256::digest(
             [
-                crate::license::SESSION_AUTH_HASH_SALT.as_bytes(),
+                pidash_compat::http::SESSION_AUTH_HASH_SALT.as_bytes(),
                 secret_key.as_bytes(),
             ]
             .concat(),

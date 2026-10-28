@@ -35,6 +35,11 @@ chrono = { version = "0.4", default-features = false, features = ["std", "clock"
 # Same locked chrono-tz 0.10.x / uuid 1.x as the workspace.
 chrono-tz = "0.10"
 uuid = "1"
+# Session auth hash (OVL-04 part 6): HMAC-SHA256 keyed by
+# SHA256(salt || secret_key). Same locked hmac 0.12.x / sha2 0.10.x
+# as pidash-api (no lock churn, edge-only).
+hmac = "0.12.1"
+sha2 = "0.10.9"
 
 [dev-dependencies]
 # Envelope tests read bodies back with `axum::body::to_bytes`

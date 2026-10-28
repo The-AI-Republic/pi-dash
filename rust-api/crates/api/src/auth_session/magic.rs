@@ -60,8 +60,6 @@ use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::Router;
-use hmac::{Hmac, Mac};
-use sha2::{Digest, Sha256};
 
 use pidash_services::auth_session::guards::{
     allow_request, parse_rate, throttle_cache_key, throttle_denied_json,
@@ -343,45 +341,10 @@ enum CsrfDenial {
     BadToken,
 }
 
-/// Where the request token came from (`CsrfViewMiddleware._check_token`:
-/// the `csrfmiddlewaretoken` POST field wins when non-empty, else the
-/// `X-CSRFToken` header).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TokenSource {
-    Post,
-    Header,
-}
-
-impl TokenSource {
-    /// `_bad_token_message` source rendering (`csrf.py:347-352`;
-    /// `CSRF_HEADER_NAME` is the default, parsed as `X-Csrftoken`).
-    fn describe(self) -> &'static str {
-        match self {
-            TokenSource::Post => "POST",
-            TokenSource::Header => "the 'X-Csrftoken' HTTP header",
-        }
-    }
-}
-
-/// Resolve the request token in Django's order: the last
-/// `csrfmiddlewaretoken` form value when non-empty, else the header
-/// when present (even empty — an empty header fails format, it does
-/// not fall through to "missing").
-fn csrf_token_source(
-    pairs: &[(String, String)],
-    header_token: Option<&str>,
-) -> Option<(String, TokenSource)> {
-    if let Some(value) = pairs
-        .iter()
-        .rev()
-        .find(|(k, _)| k == "csrfmiddlewaretoken")
-        .map(|(_, v)| v.as_str())
-        .filter(|v| !v.is_empty())
-    {
-        return Some((value.to_owned(), TokenSource::Post));
-    }
-    header_token.map(|token| (token.to_owned(), TokenSource::Header))
-}
+use pidash_compat::http::{
+    csrf_failure_json, csrf_failure_response, csrf_token_source, hex_encode, session_auth_hash,
+    TokenSource,
+};
 
 /// `_check_token` + `_does_token_match` over one token: the format
 /// gate first (`has incorrect length` / `has invalid characters`),
@@ -435,43 +398,6 @@ fn csrf_gate(
         return Err(CsrfDenial::BadToken);
     };
     csrf_check_token(&secret, &token, source).map_err(|_| CsrfDenial::BadToken)
-}
-
-/// DRF `SessionAuthentication.enforce_csrf` denial
-/// (`authentication.py:148`): 403 with the middleware's reason after
-/// `CSRF Failed: `. Only reachable for authenticated callers —
-/// anonymous requests return `None` before the check. Lowercase
-/// `detail`: DRF 3.15.2's `exception_handler` (`views.py:96`) renders
-/// `{'detail': exc.detail}`, and the project's
-/// `auth_exception_handler` only rewrites `Throttled`/`NotAuthenticated`
-/// (live Django bytes: `{"detail":"CSRF Failed: CSRF cookie not set."}`).
-fn csrf_failure_json(reason: &str) -> Response {
-    (
-        StatusCode::FORBIDDEN,
-        [
-            (header::CONTENT_TYPE, "application/json"),
-            (header::VARY, "Cookie"),
-        ],
-        format!(
-            "{{\"detail\":\"CSRF Failed: {}\"}}",
-            reason.replace('\\', "\\\\").replace('"', "\\\"")
-        ),
-    )
-        .into_response()
-}
-
-/// The `csrf_failure` page: 200 + `text/html`, `root_url` =
-/// `base_host(request)` with no surface flags.
-fn csrf_failure_response(root_url: &str) -> Response {
-    (
-        StatusCode::OK,
-        [
-            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
-            (header::VARY, "Cookie"),
-        ],
-        render_csrf_failure(root_url),
-    )
-        .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -878,32 +804,6 @@ async fn user_exists(pool: &sqlx::PgPool, email: &str) -> Result<bool, sqlx::Err
         .fetch_optional(pool)
         .await?;
     Ok(row.is_some())
-}
-
-/// `user.get_session_auth_hash()`: `salted_hmac(...get_session_auth_hash,
-/// password).hexdigest()` (`django/contrib/auth/base_user.py`). The salt
-/// is shared with the license plumbing ([`crate::license::SESSION_AUTH_HASH_SALT`]).
-fn session_auth_hash(password_field: &str, secret_key: &[u8]) -> String {
-    let key = Sha256::digest(
-        [
-            crate::license::SESSION_AUTH_HASH_SALT.as_bytes(),
-            secret_key,
-        ]
-        .concat(),
-    );
-    let mut mac = Hmac::<Sha256>::new_from_slice(&key).expect("HMAC-SHA256 accepts any key length");
-    mac.update(password_field.as_bytes());
-    hex_encode(&mac.finalize().into_bytes())
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0x0f) as usize] as char);
-    }
-    out
 }
 
 /// Draw `n` characters from Django's `get_random_string` alphabet
@@ -1725,7 +1625,7 @@ async fn sign(
         )
         .is_err()
         {
-            return csrf_failure_response(&root);
+            return csrf_failure_response(render_csrf_failure(&root));
         }
     }
     let form = parse_sign_form(content_type.unwrap_or(""), &body);

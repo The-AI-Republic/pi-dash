@@ -981,7 +981,7 @@ mod tests {
     }
 
     fn auth_hash() -> String {
-        crate::license::make_session_auth_hash("", SECRET)
+        pidash_compat::http::session_auth_hash("", SECRET)
     }
 
     /// Seed one live row carrying the full Django auth trio, through any store.

@@ -72,9 +72,7 @@ use axum::routing::{delete, get, post};
 use axum::Router;
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
-use hmac::Hmac;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use std::net::SocketAddr;
 use uuid::Uuid;
@@ -1262,7 +1260,9 @@ async fn sign_out(
     // never reaches `admin.py:385`.
     let pairs = form_pairs(content_type_of(&headers), &body);
     if csrf_gate(&headers, &pairs).is_err() {
-        return Ok(csrf_failure_response(&state));
+        return Ok(csrf_failure_response(render_csrf_failure(
+            &failure_root_url(&state),
+        )));
     }
     let urls = &state.settings().urls;
     let target = sign_out_redirect(
@@ -1339,11 +1339,9 @@ const PBKDF2_ITERATIONS: u32 = 600_000;
 /// `BasePasswordHasher.salt()` length: 128 bits over the 62-char alphabet.
 const PASSWORD_SALT_LEN: usize = 22;
 
-/// Salt for `user.get_session_auth_hash()` (same construction as
-/// `super::SESSION_AUTH_HASH_SALT`; `auth_session/email.rs` carries its
-/// own copy too).
-const SESSION_AUTH_HASH_SALT: &str =
-    "django.contrib.auth.models.AbstractBaseUser.get_session_auth_hash";
+use pidash_compat::http::{
+    csrf_failure_response, csrf_token_source, hex_encode, session_auth_hash, TokenSource,
+};
 
 /// Why the CSRF gate rejected (Django `REASON_*`; the failure page never
 /// renders the reason, so these are log labels only).
@@ -1351,23 +1349,6 @@ const SESSION_AUTH_HASH_SALT: &str =
 enum CsrfDenial {
     NoCookie,
     BadToken,
-}
-
-/// Where the request token came from (`CsrfViewMiddleware._check_token`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TokenSource {
-    Post,
-    Header,
-}
-
-impl TokenSource {
-    /// `_bad_token_message` source rendering (`csrf.py:347-352`).
-    fn describe(self) -> &'static str {
-        match self {
-            TokenSource::Post => "POST",
-            TokenSource::Header => "the 'X-Csrftoken' HTTP header",
-        }
-    }
 }
 
 fn content_type_of(headers: &HeaderMap) -> Option<&str> {
@@ -1402,26 +1383,6 @@ fn form_last(pairs: &[(String, String)], key: &str) -> Option<String> {
         .rev()
         .find(|(k, _)| k == key)
         .map(|(_, v)| v.clone())
-}
-
-/// Resolve the request token in Django's order: the last
-/// `csrfmiddlewaretoken` form value when non-empty, else the header when
-/// present (even empty — an empty header fails format, it does not fall
-/// through to "missing").
-fn csrf_token_source(
-    pairs: &[(String, String)],
-    header_token: Option<&str>,
-) -> Option<(String, TokenSource)> {
-    if let Some(value) = pairs
-        .iter()
-        .rev()
-        .find(|(k, _)| k == "csrfmiddlewaretoken")
-        .map(|(_, v)| v.as_str())
-        .filter(|v| !v.is_empty())
-    {
-        return Some((value.to_owned(), TokenSource::Post));
-    }
-    header_token.map(|token| (token.to_owned(), TokenSource::Header))
 }
 
 /// `_check_token` + `_does_token_match` over one token: the format gate
@@ -1475,19 +1436,6 @@ fn failure_root_url(state: &AppState) -> String {
         .to_owned()
 }
 
-/// The `csrf_failure` page: 200 + `text/html`.
-fn csrf_failure_response(state: &AppState) -> Response {
-    (
-        StatusCode::OK,
-        [
-            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
-            (header::VARY, "Cookie"),
-        ],
-        render_csrf_failure(&failure_root_url(state)),
-    )
-        .into_response()
-}
-
 /// `HttpResponseRedirect`: 302 + `Location`, `Vary: Cookie`, and any
 /// `Set-Cookie` values the branch issued.
 fn redirect_response(location: &str, set_cookies: Vec<String>) -> Result<Response, Denial> {
@@ -1511,26 +1459,6 @@ fn admin_base(state: &AppState) -> Result<String, Denial> {
         admin_url,
         Some(urls.admin_base_path.as_str()),
     ))
-}
-
-/// `user.get_session_auth_hash()`: `salted_hmac(...get_session_auth_hash,
-/// password).hexdigest()`.
-fn session_auth_hash(password_field: &str, secret_key: &[u8]) -> String {
-    use hmac::Mac as _;
-    let key = Sha256::digest([SESSION_AUTH_HASH_SALT.as_bytes(), secret_key].concat());
-    let mut mac = Hmac::<Sha256>::new_from_slice(&key).expect("HMAC-SHA256 accepts any key length");
-    mac.update(password_field.as_bytes());
-    hex_encode(&mac.finalize().into_bytes())
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0x0f) as usize] as char);
-    }
-    out
 }
 
 /// `get_random_string(22)` over the Django alphabet
@@ -2007,7 +1935,9 @@ async fn sign_up(State(state): State<AppState>, req: Request) -> Result<Response
         .map(|info| info.0.ip().to_string());
     let pairs = form_pairs(content_type_of(headers), &body);
     if csrf_gate(headers, &pairs).is_err() {
-        return Ok(csrf_failure_response(&state));
+        return Ok(csrf_failure_response(render_csrf_failure(
+            &failure_root_url(&state),
+        )));
     }
     let pool = pools(&state)?;
     let base = admin_base(&state)?;
@@ -2129,7 +2059,9 @@ async fn sign_in(State(state): State<AppState>, req: Request) -> Result<Response
         .map(|info| info.0.ip().to_string());
     let pairs = form_pairs(content_type_of(headers), &body);
     if csrf_gate(headers, &pairs).is_err() {
-        return Ok(csrf_failure_response(&state));
+        return Ok(csrf_failure_response(render_csrf_failure(
+            &failure_root_url(&state),
+        )));
     }
     let pool = pools(&state)?;
     let base = admin_base(&state)?;

@@ -40,8 +40,6 @@ pub mod intakes;
 pub mod issues;
 pub mod versions;
 
-use std::collections::HashMap;
-
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
@@ -63,17 +61,7 @@ pub const NOT_FOUND_BODY: &str = r#"{"error":"The required object does not exist
 /// (`app/views/base.py:125-128`).
 pub const INVALID_DETAIL_BODY: &str = r#"{"error":"Please provide valid detail"}"#;
 
-/// One query value, repeated or not. Mirrors the D-26 `app_issues` shape:
-/// callers read last-wins like Django's `QueryDict`.
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(untagged)]
-pub enum OneOrMany {
-    One(String),
-    Many(Vec<String>),
-}
-
-/// The multi-value query map every list handler extracts.
-pub type QueryMap = HashMap<String, OneOrMany>;
+pub use pidash_compat::http::{query_last, OneOrMany, QueryMap};
 
 /// Django `QueryDict.get`: the last value, or `None`.
 /// All values for `key`, in order; `None` when absent.
@@ -81,13 +69,6 @@ pub fn query_values(query: &QueryMap, key: &str) -> Option<Vec<String>> {
     query.get(key).map(|value| match value {
         OneOrMany::One(one) => vec![one.clone()],
         OneOrMany::Many(many) => many.clone(),
-    })
-}
-
-pub fn query_last(query: &QueryMap, key: &str) -> Option<String> {
-    query.get(key).map(|value| match value {
-        OneOrMany::One(one) => one.clone(),
-        OneOrMany::Many(many) => many.last().cloned().unwrap_or_default(),
     })
 }
 

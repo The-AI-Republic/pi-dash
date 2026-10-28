@@ -362,29 +362,7 @@ async fn gated_actor(
 // Query params + issue_filters(GET) SQL
 // ---------------------------------------------------------------------------
 
-/// One query value, repeated or not. `serde_html_form` (axum's `Query`
-/// backend) does not coerce a lone `?key=value` into a sequence, so the
-/// extractor uses this untagged shape and callers read the last value —
-/// mirroring Django's `QueryDict`, where repeats are legal and `.get`
-/// returns the last value.
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(untagged)]
-pub enum OneOrMany {
-    One(String),
-    Many(Vec<String>),
-}
-
-/// The multi-value query map every analytics handler extracts.
-pub type QueryMap = HashMap<String, OneOrMany>;
-
-/// Django `QueryDict.get`: the last value, or `None`.
-pub fn query_last(query: &QueryMap, key: &str) -> Option<String> {
-    match query.get(key) {
-        Some(OneOrMany::One(one)) => Some(one.clone()),
-        Some(OneOrMany::Many(many)) => many.last().cloned(),
-        None => None,
-    }
-}
+pub use pidash_compat::http::{query_last, OneOrMany, QueryMap};
 
 /// Flat last-wins map for the F-04 `pidash_db::issue_filters` kernels
 /// (their `params.get(key)` is Django's `.get`).

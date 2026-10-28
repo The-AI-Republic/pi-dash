@@ -102,8 +102,6 @@ pub use gate::{
     UNAUTHENTICATED_BODY,
 };
 
-use std::collections::HashMap;
-
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -157,24 +155,7 @@ pub const MAX_PER_PAGE: i64 = 1000;
 // Query map (Django QueryDict: repeats legal, .get returns the last)
 // ---------------------------------------------------------------------------
 
-/// One query value, repeated or not.
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(untagged)]
-pub enum OneOrMany {
-    One(String),
-    Many(Vec<String>),
-}
-
-/// The multi-value query map every list handler extracts.
-pub type QueryMap = HashMap<String, OneOrMany>;
-
-/// Django `QueryDict.get`: the last value, or `None` when absent.
-pub fn query_last(query: &QueryMap, key: &str) -> Option<String> {
-    query.get(key).map(|value| match value {
-        OneOrMany::One(one) => one.clone(),
-        OneOrMany::Many(many) => many.last().cloned().unwrap_or_default(),
-    })
-}
+pub use pidash_compat::http::{query_last, OneOrMany, QueryMap};
 
 /// Django truthiness of `request.GET.get(key, False)`: absent is falsy;
 /// a present value is truthy unless it is the empty string

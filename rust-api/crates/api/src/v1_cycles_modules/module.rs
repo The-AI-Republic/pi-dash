@@ -68,7 +68,7 @@
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
@@ -313,42 +313,7 @@ pub fn owned_unarchive(
 // Query params
 // ---------------------------------------------------------------------------
 
-/// One query value, repeated or not (same shape as the D-19 `v1_projects`
-/// family: axum's `Query` backend does not coerce a lone `?key=value` into
-/// a sequence, so callers read first/last like Django's `QueryDict`).
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(untagged)]
-pub enum OneOrMany {
-    One(String),
-    Many(Vec<String>),
-}
-
-/// The multi-value query map every handler extracts.
-pub type QueryMap = HashMap<String, OneOrMany>;
-
-/// Django `QueryDict.get`: the last value, or `None`.
-pub fn query_last(query: &QueryMap, key: &str) -> Option<String> {
-    query.get(key).map(|value| match value {
-        OneOrMany::One(one) => one.clone(),
-        OneOrMany::Many(many) => many.last().cloned().unwrap_or_default(),
-    })
-}
-
-/// `self.fields` / `self.expand` (`api/views/base.py:212-220`): comma
-/// split, empties dropped, `None` when empty.
-pub fn fields_param(query: &QueryMap, key: &str) -> Option<Vec<String>> {
-    let raw = query_last(query, key).unwrap_or_default();
-    let fields: Vec<String> = raw
-        .split(',')
-        .filter(|f| !f.is_empty())
-        .map(str::to_owned)
-        .collect();
-    if fields.is_empty() {
-        None
-    } else {
-        Some(fields)
-    }
-}
+pub use pidash_compat::http::{fields_param, query_last, OneOrMany, QueryMap};
 
 // ---------------------------------------------------------------------------
 // Authentication
@@ -5501,6 +5466,7 @@ pub fn routes() -> axum::Router<AppState> {
 mod tests {
     use super::*;
     use axum::http::StatusCode;
+    use std::collections::HashMap;
     use tower::ServiceExt;
 
     #[test]

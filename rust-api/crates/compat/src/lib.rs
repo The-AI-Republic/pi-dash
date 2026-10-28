@@ -12,6 +12,7 @@
 
 pub mod datetime;
 pub mod db;
+pub mod http;
 pub mod py;
 pub mod response;
 pub mod validate;

@@ -78,8 +78,6 @@
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
-use std::collections::HashMap;
-
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State as AxumState};
 use axum::http::{header, HeaderMap, Method, StatusCode, Uri};
@@ -739,24 +737,7 @@ async fn resolve_state_gate(
 // Query params, `fields` / `expand`, rendering
 // ---------------------------------------------------------------------------
 
-/// One query value, repeated or not (mirrors `app_issues::OneOrMany`: axum's
-/// `Query` backend does not coerce repeats, so callers read last-wins like
-/// Django's `QueryDict.get`).
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(untagged)]
-enum OneOrMany {
-    One(String),
-    Many(Vec<String>),
-}
-
-type QueryMap = HashMap<String, OneOrMany>;
-
-fn query_last(query: &QueryMap, key: &str) -> Option<String> {
-    query.get(key).map(|value| match value {
-        OneOrMany::One(one) => one.clone(),
-        OneOrMany::Many(many) => many.last().cloned().unwrap_or_default(),
-    })
-}
+use pidash_compat::http::{query_last, QueryMap};
 
 /// `BaseAPIView.fields` / `.expand` (`views/base.py:203-211`): comma-split,
 /// empties dropped, `None` when empty.

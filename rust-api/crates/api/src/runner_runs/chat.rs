@@ -1945,13 +1945,7 @@ fn workspace_forbidden() -> Response {
     json_response(StatusCode::FORBIDDEN, r#"{"error":"forbidden"}"#.to_owned())
 }
 
-/// Django `request.query_params.get` for the web filters: the last
-/// value wins on repeats (`QueryDict`), and a missing or empty param
-/// disables the filter (the source's `if workspace_id:` / `if
-/// runner_id:` / `if project_id:` guards).
-fn query_param(params: &crate::license::QueryMap, key: &str) -> Option<String> {
-    crate::license::query_last(params, key).filter(|raw| !raw.is_empty())
-}
+use pidash_compat::http::query_param;
 
 /// `GET /api/runners/chat/sessions/` (`chat.py:140-189`): the
 /// workspace/runner/project filters, the visibility predicate, the
