@@ -891,6 +891,40 @@ describe("kanban header menu", () => {
     await expect(new WebNewDriver(throwing).kanbanHeaderMenuItems("Todo")).resolves.toEqual(["Create work item"]);
   });
 
+  it("waits for a delayed menu mount before reading", async () => {
+    // The menu portal paints a beat after the trigger click (ISS-036);
+    // the read waits for the first entry instead of one-shotting zero.
+    const waits: Array<number | undefined> = [];
+    let counts = 0;
+    const nodes = [
+      locator({ innerText: async () => "Create work item" }),
+      locator({ innerText: async () => "Add an existing work item" }),
+    ];
+    const page = pageOf({
+      waitForTimeout: async (ms?: number) => void waits.push(ms),
+      locator: (selector: string) =>
+        selector === '[role="menuitem"]:visible'
+          ? locator({
+              count: async () => {
+                counts += 1;
+                return counts <= 2 ? 0 : nodes.length;
+              },
+              nth: (index: number) => nodes[index]!,
+            })
+          : locator({ count: async () => 0 }),
+    });
+    await expect(new WebNewDriver(page).kanbanHeaderMenuItems("Todo")).resolves.toEqual([
+      "Create work item",
+      "Add an existing work item",
+    ]);
+    expect(waits).toEqual([250, 250]);
+  });
+
+  it("reports no entries when the menu never opens", async () => {
+    const page = menuPage([]);
+    await expect(new WebNewDriver(page).kanbanHeaderMenuItems("Todo")).resolves.toEqual([]);
+  });
+
   it("chooses the matching entry and throws when missing", async () => {
     const clicks: string[] = [];
     const page = pageOf({

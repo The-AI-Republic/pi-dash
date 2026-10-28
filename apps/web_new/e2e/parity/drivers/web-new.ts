@@ -11433,8 +11433,23 @@ export class WebNewDriver implements ParityDriver {
     return this.page.locator('[role="menuitem"]:visible');
   }
 
+  /**
+   * The header menu portal paints a beat after the trigger click, so a
+   * one-shot count reads zero on a freshly opened menu (ISS-036). Wait
+   * for the first entry instead, bounded; false keeps the absent-menu
+   * semantics for callers that read a closed menu.
+   */
+  private async kanbanHeaderMenuSettled(items: Locator): Promise<boolean> {
+    for (let waited = 0; waited < 5_000; waited += 250) {
+      if ((await items.count()) > 0) return true;
+      await this.page.waitForTimeout(250);
+    }
+    return (await items.count()) > 0;
+  }
+
   async kanbanHeaderMenuItems(_columnName: string): Promise<string[]> {
     const items = this.kanbanHeaderMenuEntries();
+    if (!(await this.kanbanHeaderMenuSettled(items))) return [];
     const count = await items.count();
     const out: string[] = [];
     for (let index = 0; index < count; index += 1) {
@@ -11454,6 +11469,7 @@ export class WebNewDriver implements ParityDriver {
 
   async kanbanHeaderMenuChoose(_columnName: string, item: string): Promise<void> {
     const items = this.kanbanHeaderMenuEntries();
+    await this.kanbanHeaderMenuSettled(items);
     const count = await items.count();
     for (let index = 0; index < count; index += 1) {
       const label = (
