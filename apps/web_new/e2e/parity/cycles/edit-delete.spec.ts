@@ -342,13 +342,16 @@ test(
 );
 
 test(
-  specTitle(["CYC-020"], "bug: NEWFRONT-263 forward tabbing never reaches the project picker"),
+  specTitle(["CYC-020"], "NEWFRONT-263: forward tabbing reaches the project picker and stays trapped"),
   { tag: specTags(["CYC-020"]) },
-  async ({ driver, seed }) => {
-    // bug: NEWFRONT-263 — past submit, focus leaves the dialog into the
-    // row menus' invisible buttons and wraps back to the title without
-    // ever stopping on the project picker. Intended: the picker belongs
-    // in the order and focus stays trapped in the dialog.
+  async ({ driver, seed }, testInfo) => {
+    // Old app (the oracle leg, pinned exactly as recorded before):
+    // past submit, focus leaves the dialog into the invisible controls
+    // behind it and wraps back to the title without ever stopping on the
+    // project picker (bug NEWFRONT-263). New app (spec §6): the picker
+    // stays in the order and focus never leaves the dialog, so the trail
+    // is one cycle — title, description, dates, cancel, submit, picker —
+    // repeating.
     const tag = `NF251 tabbug ${Date.now()}`;
     const session = await signInSession(seed.email, seed.password);
     const projectId = await scratchProject(seed, tag, session);
@@ -359,7 +362,18 @@ test(
       await expect.poll(() => driver.cyclesEditTitleFocused(), { timeout: 15_000 }).toBe(true);
 
       const trail = await driver.cyclesEditFocusTrail(40);
-      expect(trail.join("|")).not.toContain(`${tag} project`);
+      if (testInfo.project.name === "new") {
+        // The sixth stop names the open project (the picker's trigger
+        // carries the project mark and name).
+        const picker = trail[5] ?? "";
+        expect(picker).toContain(`${tag} project`);
+        const cycle = ["Title", "Description", "Start date End date", "Cancel", "Create cycle", picker];
+        // Every stop replays that one cycle: the picker is reached, the
+        // order is the intended one, and no page chrome ever leaks in.
+        expect(trail).toEqual(Array.from({ length: trail.length }, (_, index) => cycle[index % cycle.length]));
+      } else {
+        expect(trail.join("|")).not.toContain(`${tag} project`);
+      }
       await driver.cyclesEditPressEscape();
     } finally {
       await serverCleanupProject(seed.workspaceSlug, projectId, session);

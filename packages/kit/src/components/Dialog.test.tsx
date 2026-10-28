@@ -33,6 +33,145 @@ describe("Dialog", () => {
     expect(dialog.contains(document.activeElement)).toBe(true);
   });
 
+  it("wraps a forward Tab on the last control back to the first inside the dialog", async () => {
+    render(
+      <Dialog title="Order" open onOpenChange={() => undefined} closeButton={false}>
+        <input aria-label="First" />
+        <button type="button">Last</button>
+      </Dialog>
+    );
+    const first = await screen.findByLabelText("First");
+    const last = screen.getByRole("button", { name: "Last" });
+    last.focus();
+    expect(last).toHaveFocus();
+    const event = new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true });
+    last.dispatchEvent(event);
+    // Synchronously, not through Base UI's deferred focus guard: the next
+    // Tab can never land on the page behind the dialog.
+    expect(event.defaultPrevented).toBe(true);
+    expect(first).toHaveFocus();
+  });
+
+  it("wraps a shift-Tab on the first control to the last inside the dialog", async () => {
+    render(
+      <Dialog title="Order" open onOpenChange={() => undefined} closeButton={false}>
+        <input aria-label="First" />
+        <button type="button">Last</button>
+      </Dialog>
+    );
+    const first = await screen.findByLabelText("First");
+    const last = screen.getByRole("button", { name: "Last" });
+    first.focus();
+    const event = new KeyboardEvent("keydown", { key: "Tab", shiftKey: true, bubbles: true, cancelable: true });
+    first.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(true);
+    expect(last).toHaveFocus();
+  });
+
+  it("leaves a Tab inside the dialog to the browser", async () => {
+    render(
+      <Dialog title="Order" open onOpenChange={() => undefined} closeButton={false}>
+        <input aria-label="First" />
+        <button type="button">Last</button>
+      </Dialog>
+    );
+    const first = await screen.findByLabelText("First");
+    first.focus();
+    const event = new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true });
+    first.dispatchEvent(event);
+    // Not the last stop: the browser's own move stays inside the dialog.
+    expect(event.defaultPrevented).toBe(false);
+    expect(first).toHaveFocus();
+  });
+
+  it("leaves a Tab from a nested popup that sits outside the dialog to the popup", async () => {
+    // The project picker's list portals to the body but still bubbles
+    // through the dialog's React tree, like every Base UI popup. Its own
+    // Tab handling closes the list, so the dialog's wrap must stand down.
+    const { createPortal } = await import("react-dom");
+    render(
+      <Dialog title="Order" open onOpenChange={() => undefined} closeButton={false}>
+        <button type="button">First</button>
+        {createPortal(<button type="button">Picker option</button>, document.body)}
+      </Dialog>
+    );
+    const option = document.querySelector<HTMLButtonElement>('body > button[type="button"]')!;
+    expect(option).not.toBeNull();
+    option.focus();
+    expect(option).toHaveFocus();
+    const event = new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true });
+    option.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(false);
+    expect(option).toHaveFocus();
+  });
+
+  it("leaves a Tab alone when another control already handled it", async () => {
+    render(
+      <Dialog title="Order" open onOpenChange={() => undefined} closeButton={false}>
+        <input aria-label="First" />
+        <button type="button">Last</button>
+      </Dialog>
+    );
+    const first = await screen.findByLabelText("First");
+    const last = screen.getByRole("button", { name: "Last" });
+    last.focus();
+    const event = new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true });
+    last.addEventListener("keydown", (own) => own.preventDefault(), { once: true });
+    last.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(true);
+    expect(last).toHaveFocus();
+    expect(first).not.toHaveFocus();
+  });
+
+  it("leaves keys other than Tab untouched", async () => {
+    render(
+      <Dialog title="Order" open onOpenChange={() => undefined} closeButton={false}>
+        <input aria-label="First" />
+        <button type="button">Last</button>
+      </Dialog>
+    );
+    await screen.findByLabelText("First");
+    const last = screen.getByRole("button", { name: "Last" });
+    last.focus();
+    const event = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+    last.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(false);
+    expect(last).toHaveFocus();
+  });
+
+  it("leaves a Tab from the popup's own caret to the browser", async () => {
+    render(
+      <Dialog title="Order" open onOpenChange={() => undefined} closeButton={false}>
+        <input aria-label="First" />
+        <button type="button">Last</button>
+      </Dialog>
+    );
+    await screen.findByLabelText("First");
+    const dialog = screen.getByRole("dialog", { name: "Order" });
+    const event = new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true });
+    dialog.dispatchEvent(event);
+    // The popup's own caret is not the last stop, so the wrapper leaves
+    // the move to the browser's own first-stop behavior.
+    expect(event.defaultPrevented).toBe(false);
+  });
+
+  it("wraps past a disabled control at the end", async () => {
+    render(
+      <Dialog title="Order" open onOpenChange={() => undefined} closeButton={false}>
+        <input aria-label="First" />
+        <button type="button" disabled>
+          Off
+        </button>
+      </Dialog>
+    );
+    const first = await screen.findByLabelText("First");
+    first.focus();
+    const event = new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true });
+    first.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(true);
+    expect(first).toHaveFocus();
+  });
+
   it("closes on Escape and returns focus to the trigger", async () => {
     const user = userEvent.setup();
     setup();
