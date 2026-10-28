@@ -1952,6 +1952,197 @@ where
 
 const GITHUB_MIRROR_UPDATE_SQL: &str = "UPDATE issues SET name = $2, description_html = $3, description_stripped = $4, description_json = $5, created_by_id = $6, updated_by_id = $6, completed_at = $7, updated_at = $8 WHERE id = $1";
 
+// ---------------------------------------------------------------------------
+// Agent-tool twins: the tool's create/update for callers that must stay
+// inside their own `sqlx` transaction (the `insert_mirror_issue`
+// precedent). All hook-adjacent values are resolved driver-side and bound
+// verbatim here.
+// ---------------------------------------------------------------------------
+
+/// The agent-tool issue create (`Issue.objects.create`,
+/// `assistant/tools/issues.py:265-277`, via the `Issue.save()` creation
+/// path `issue.py:267-350`): pod/state/sequence/sort-order/completed
+/// resolved driver-side (the tool's project lock, advisory lock, MAX
+/// reads and the `None`-state quirk), then one row plus the sequence
+/// companion row. The impersonated actor rides `created_by`
+/// (`impersonate(user)`), `updated_by` stays NULL (no follow-up restamp
+/// on this path), `created_via` is the tool's, and `git_work_branch` /
+/// `workpad` are the `''` model defaults. Bare columns, no hooks, no
+/// chain: the driver holds its own `sqlx` transaction around the lock,
+/// the reads and both rows, and runs its own fan-out afterwards — the
+/// same in-transaction justification as [`insert_mirror_issue`].
+pub struct ToolIssueInsert<'a> {
+    pub issue_id: Uuid,
+    pub now: DateTime<Utc>,
+    pub name: &'a str,
+    pub description_html: &'a str,
+    /// The save recompute (`issue.py:341-350`), computed driver-side
+    /// via `ml_strip_tags` — `None` for empty HTML — passed through,
+    /// never re-stripped here.
+    pub description_stripped: Option<&'a str>,
+    pub priority: &'a str,
+    pub sequence_id: i64,
+    pub sort_order: f64,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub created_via: &'a str,
+    pub created_by: Uuid,
+    pub project_id: Uuid,
+    pub workspace_id: Uuid,
+    pub parent_id: Option<Uuid>,
+    pub state_id: Option<Uuid>,
+    pub pod_id: Option<Uuid>,
+}
+
+pub async fn insert_tool_issue<'e, E>(
+    ex: E,
+    insert: &ToolIssueInsert<'_>,
+) -> Result<u64, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(TOOL_ISSUE_INSERT_SQL)
+        .bind(insert.issue_id)
+        .bind(insert.now)
+        .bind(insert.now)
+        .bind(insert.name)
+        .bind(Value::Object(Map::new()))
+        .bind(insert.description_html)
+        .bind(insert.description_stripped)
+        .bind(insert.priority)
+        .bind(insert.sequence_id)
+        .bind(insert.sort_order)
+        .bind(insert.completed_at)
+        .bind(insert.created_via)
+        .bind(insert.created_by)
+        .bind(insert.project_id)
+        .bind(insert.workspace_id)
+        .bind(insert.parent_id)
+        .bind(insert.state_id)
+        .bind(insert.pod_id)
+        .execute(ex)
+        .await
+        .map(|done| done.rows_affected())
+}
+
+const TOOL_ISSUE_INSERT_SQL: &str = "INSERT INTO issues (id, created_at, updated_at, deleted_at, point, name, description_json, description_html, description_stripped, description_binary, priority, complexity_score, start_date, target_date, sequence_id, sort_order, completed_at, archived_at, is_draft, external_source, external_id, git_work_branch, workpad, created_via, agent_executor, created_by_id, updated_by_id, project_id, workspace_id, parent_id, state_id, estimate_point_id, type_id, assigned_pod_id) VALUES ($1, $2, $3, NULL, NULL, $4, $5, $6, $7, NULL, $8, 0, NULL, NULL, $9, $10, $11, NULL, FALSE, NULL, NULL, '', '', $12, NULL, $13, NULL, $14, $15, $16, $17, NULL, NULL, $18)";
+
+/// The `IssueSequence.objects.create(issue, sequence, project)`
+/// companion row of the agent-tool create (`issue.py:340`): the
+/// impersonated actor rides `created_by`, `updated_by` stays NULL (no
+/// follow-up restamp on this path), `deleted` false. Contrast
+/// [`MirrorIssueSequence`], whose worker path binds NULL twice. The row
+/// id is generated here; callers never read it back.
+pub struct ToolIssueSequence {
+    pub project_id: Uuid,
+    pub workspace_id: Uuid,
+    pub issue_id: Uuid,
+    pub sequence: i64,
+    pub created_by: Uuid,
+    pub now: DateTime<Utc>,
+}
+
+pub async fn insert_tool_issue_sequence<'e, E>(
+    ex: E,
+    seq: &ToolIssueSequence,
+) -> Result<u64, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(TOOL_ISSUE_SEQUENCE_INSERT_SQL)
+        .bind(Uuid::new_v4())
+        .bind(seq.now)
+        .bind(seq.now)
+        .bind(seq.created_by)
+        .bind(seq.project_id)
+        .bind(seq.workspace_id)
+        .bind(seq.issue_id)
+        .bind(seq.sequence)
+        .execute(ex)
+        .await
+        .map(|done| done.rows_affected())
+}
+
+const TOOL_ISSUE_SEQUENCE_INSERT_SQL: &str = "INSERT INTO issue_sequences (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, issue_id, sequence, deleted) VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, $7, $8, FALSE)";
+
+/// The agent-tool issue update (`locked.save(update_fields=...)`,
+/// `assistant/tools/issues.py:337-369`): exactly the tool's columns —
+/// name, the description pair, priority, state, parent, plus the audit
+/// pair. `description_stripped` is recomputed in memory but NOT written
+/// (it is absent from `update_fields`), so a description edit leaves
+/// the column stale — ported as-is. `completed_at` is untouched (the
+/// create-only `adding` arm never runs). Bare columns, no hooks, no
+/// chain: the driver keeps the write inside its fused save+drive
+/// transaction (a separate domain transaction would deadlock against
+/// its row lock and cannot carry the drive's savepoints), and routes
+/// the orchestration transition itself — the same in-transaction
+/// justification as [`update_issue_state`].
+pub struct ToolIssueUpdate<'a> {
+    pub issue_id: Uuid,
+    pub name: Option<&'a str>,
+    pub description_html: Option<&'a str>,
+    pub priority: Option<&'a str>,
+    /// Set only when the state arm runs (`to_state is not None`,
+    /// `issues.py:351`): an explicit empty `state_id` that resolves to
+    /// no state skips the arm entirely — no write, no `changed` entry.
+    pub state_given: bool,
+    pub state_id: Option<Uuid>,
+    pub parent_touched: bool,
+    pub parent_id: Option<Uuid>,
+    pub updated_by_id: Uuid,
+    pub now: DateTime<Utc>,
+}
+
+pub async fn update_tool_issue<'e, E>(ex: E, upd: &ToolIssueUpdate<'_>) -> Result<u64, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let mut sets: Vec<String> = Vec::new();
+    if upd.name.is_some() {
+        sets.push(format!("name = ${}", sets.len() + 1));
+    }
+    if upd.description_html.is_some() {
+        sets.push(format!("description_html = ${}", sets.len() + 1));
+        sets.push(format!("description_json = ${}", sets.len() + 1));
+    }
+    if upd.priority.is_some() {
+        sets.push(format!("priority = ${}", sets.len() + 1));
+    }
+    if upd.state_given {
+        sets.push(format!("state_id = ${}", sets.len() + 1));
+    }
+    if upd.parent_touched {
+        sets.push(format!("parent_id = ${}", sets.len() + 1));
+    }
+    sets.push(format!("updated_at = ${}", sets.len() + 1));
+    sets.push(format!("updated_by_id = ${}", sets.len() + 1));
+    let sql = format!(
+        "UPDATE issues SET {} WHERE id = ${}",
+        sets.join(", "),
+        sets.len() + 1
+    );
+    let mut statement = sqlx::query(&sql);
+    if let Some(name) = upd.name {
+        statement = statement.bind(name);
+    }
+    if let Some(html) = upd.description_html {
+        statement = statement.bind(html).bind(Value::Object(Map::new()));
+    }
+    if let Some(priority) = upd.priority {
+        statement = statement.bind(priority);
+    }
+    if upd.state_given {
+        statement = statement.bind(upd.state_id);
+    }
+    if upd.parent_touched {
+        statement = statement.bind(upd.parent_id);
+    }
+    statement = statement
+        .bind(upd.now)
+        .bind(upd.updated_by_id)
+        .bind(upd.issue_id);
+    statement.execute(ex).await.map(|done| done.rows_affected())
+}
+
 /// The ticker state-move write (`scheduling.py:700,1113,1468`):
 /// `save(update_fields=["state", "updated_at"])` — ONLY these columns.
 /// Contrast [`update_issue_state`], which additionally stamps
@@ -2540,6 +2731,23 @@ mod tests {
             "UPDATE issues SET name = $2, description_html = $3, description_stripped = $4, description_json = $5, created_by_id = $6, updated_by_id = $6, completed_at = $7, updated_at = $8 WHERE id = $1"
         );
         assert!(GITHUB_MIRROR_UPDATE_SQL.contains("created_by_id = $6"));
+    }
+
+    #[test]
+    fn tool_bare_sql_shapes() {
+        // Moved verbatim from the retired `PgToolStore` literals: the
+        // tool create's issue row (impersonated `created_by`, `updated_by`
+        // NULL, the tool's `created_via`) plus its sequence companion
+        // row (actor-bound `created_by`, unlike the mirror's NULL pair).
+        // Full-text pins: the statements moved byte-for-byte.
+        assert_eq!(
+            TOOL_ISSUE_INSERT_SQL,
+            "INSERT INTO issues (id, created_at, updated_at, deleted_at, point, name, description_json, description_html, description_stripped, description_binary, priority, complexity_score, start_date, target_date, sequence_id, sort_order, completed_at, archived_at, is_draft, external_source, external_id, git_work_branch, workpad, created_via, agent_executor, created_by_id, updated_by_id, project_id, workspace_id, parent_id, state_id, estimate_point_id, type_id, assigned_pod_id) VALUES ($1, $2, $3, NULL, NULL, $4, $5, $6, $7, NULL, $8, 0, NULL, NULL, $9, $10, $11, NULL, FALSE, NULL, NULL, '', '', $12, NULL, $13, NULL, $14, $15, $16, $17, NULL, NULL, $18)"
+        );
+        assert_eq!(
+            TOOL_ISSUE_SEQUENCE_INSERT_SQL,
+            "INSERT INTO issue_sequences (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, issue_id, sequence, deleted) VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, $7, $8, FALSE)"
+        );
     }
 
     #[test]

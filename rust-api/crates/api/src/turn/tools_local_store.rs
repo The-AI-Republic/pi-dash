@@ -28,6 +28,7 @@ use uuid::Uuid;
 
 use pidash_services::assistant::agent::AssistantDeps;
 use pidash_services::domain::comments as comment_domain;
+use pidash_services::domain::issues as issue_domain;
 use pidash_services::domain::relations as relation_domain;
 
 // ---------------------------------------------------------------------------
@@ -1508,51 +1509,39 @@ impl ToolStore for PgToolStore {
             ))
         };
         let issue_id = Uuid::new_v4();
-        sqlx::query(
-            "INSERT INTO issues (id, created_at, updated_at, deleted_at, point, name, \
-             description_json, description_html, description_stripped, description_binary, \
-             priority, complexity_score, start_date, target_date, sequence_id, sort_order, \
-             completed_at, archived_at, is_draft, external_source, external_id, git_work_branch, \
-             workpad, created_via, agent_executor, created_by_id, updated_by_id, project_id, \
-             workspace_id, parent_id, state_id, estimate_point_id, type_id, assigned_pod_id) \
-             VALUES ($1, $2, $3, NULL, NULL, $4, $5, $6, $7, NULL, $8, 0, NULL, NULL, $9, $10, \
-             $11, NULL, FALSE, NULL, NULL, '', '', $12, NULL, $13, NULL, $14, $15, $16, $17, \
-             NULL, NULL, $18)",
+        issue_domain::insert_tool_issue(
+            &mut *tx,
+            &issue_domain::ToolIssueInsert {
+                issue_id,
+                now: *now,
+                name: &input.name,
+                description_html: &input.description_html,
+                description_stripped: stripped.as_deref(),
+                priority: &input.priority,
+                sequence_id: sequence,
+                sort_order,
+                completed_at,
+                created_via: &input.created_via,
+                created_by: input.created_by,
+                project_id: input.project_id,
+                workspace_id: input.workspace_id,
+                parent_id: input.parent_id,
+                state_id,
+                pod_id: assigned_pod,
+            },
         )
-        .bind(issue_id)
-        .bind(now)
-        .bind(now)
-        .bind(&input.name)
-        .bind(Value::Object(serde_json::Map::new()))
-        .bind(&input.description_html)
-        .bind(&stripped)
-        .bind(&input.priority)
-        .bind(sequence)
-        .bind(sort_order)
-        .bind(completed_at)
-        .bind(&input.created_via)
-        .bind(input.created_by)
-        .bind(input.project_id)
-        .bind(input.workspace_id)
-        .bind(input.parent_id)
-        .bind(state_id)
-        .bind(assigned_pod)
-        .execute(&mut *tx)
         .await?;
-        sqlx::query(
-            "INSERT INTO issue_sequences (id, created_at, updated_at, created_by_id, updated_by_id, \
-             deleted_at, project_id, workspace_id, issue_id, sequence, deleted) \
-             VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, $7, $8, FALSE)",
+        issue_domain::insert_tool_issue_sequence(
+            &mut *tx,
+            &issue_domain::ToolIssueSequence {
+                project_id: input.project_id,
+                workspace_id: input.workspace_id,
+                issue_id,
+                sequence,
+                created_by: input.created_by,
+                now: *now,
+            },
         )
-        .bind(Uuid::new_v4())
-        .bind(now)
-        .bind(now)
-        .bind(input.created_by)
-        .bind(input.project_id)
-        .bind(input.workspace_id)
-        .bind(issue_id)
-        .bind(sequence)
-        .execute(&mut *tx)
         .await?;
         tx.commit().await?;
         Ok(IssueRow {
@@ -1642,55 +1631,24 @@ impl ToolStore for PgToolStore {
             return Err(StoreError::Missing { model: "Issue" });
         };
         // `locked.save(update_fields=...)` (`issues.py:337-361`):
-        // exactly the tool's columns. `description_stripped` is
-        // recomputed in memory but NOT written (it is absent from
-        // `update_fields`), so a description edit leaves the column
-        // stale — ported as-is. `completed_at` is untouched (the
-        // create-only `adding` arm never runs).
-        let mut sets: Vec<String> = Vec::new();
-        if patch.name.is_some() {
-            sets.push(format!("name = ${}", sets.len() + 1));
-        }
-        if patch.description_html.is_some() {
-            sets.push(format!("description_html = ${}", sets.len() + 1));
-            sets.push(format!("description_json = ${}", sets.len() + 1));
-        }
-        if patch.priority.is_some() {
-            sets.push(format!("priority = ${}", sets.len() + 1));
-        }
-        if patch.state_given {
-            sets.push(format!("state_id = ${}", sets.len() + 1));
-        }
-        if patch.parent_touched {
-            sets.push(format!("parent_id = ${}", sets.len() + 1));
-        }
-        sets.push(format!("updated_at = ${}", sets.len() + 1));
-        sets.push(format!("updated_by_id = ${}", sets.len() + 1));
-        let sql = format!(
-            "UPDATE issues SET {} WHERE id = ${}",
-            sets.join(", "),
-            sets.len() + 1
-        );
-        let mut statement = sqlx::query(&sql);
-        if let Some(name) = &patch.name {
-            statement = statement.bind(name);
-        }
-        if let Some(html) = &patch.description_html {
-            statement = statement
-                .bind(html)
-                .bind(Value::Object(serde_json::Map::new()));
-        }
-        if let Some(priority) = &patch.priority {
-            statement = statement.bind(priority);
-        }
-        if patch.state_given {
-            statement = statement.bind(patch.state_id);
-        }
-        if patch.parent_touched {
-            statement = statement.bind(patch.parent_id);
-        }
-        statement = statement.bind(now).bind(actor_id).bind(issue_id);
-        statement.execute(&mut **tx.inner()).await?;
+        // exactly the tool's columns (the write itself lives in
+        // `domain::issues`, on this same fused transaction).
+        issue_domain::update_tool_issue(
+            &mut **tx.inner(),
+            &issue_domain::ToolIssueUpdate {
+                issue_id: *issue_id,
+                name: patch.name.as_deref(),
+                description_html: patch.description_html.as_deref(),
+                priority: patch.priority.as_deref(),
+                state_given: patch.state_given,
+                state_id: patch.state_id,
+                parent_touched: patch.parent_touched,
+                parent_id: patch.parent_id,
+                updated_by_id: *actor_id,
+                now: *now,
+            },
+        )
+        .await?;
         // Post-save read (unscoped: scope was verified pre-lock; this
         // mirrors the in-memory `locked` row plus joined names).
         let row: Option<IssueRowTuple> = sqlx::query_as(&format!(

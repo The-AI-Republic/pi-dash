@@ -324,6 +324,32 @@ where
         .map(|_| ())
 }
 
+/// `message.save(update_fields=["payload"])` (`tasks.py:523`): flag
+/// the turn's last reply as cut off — the payload with `truncated`
+/// merged in. Moved verbatim from the live turn seam. The caller owns
+/// the read and the merge (it needs the row for the re-sent
+/// `message_completed` envelope downstream).
+pub const MESSAGE_PAYLOAD_SAVE_SQL: &str =
+    "UPDATE assistant_message SET payload = $2 WHERE id = $1";
+
+/// Save one message row's payload (the cut-off flag). The caller
+/// merges `truncated` into the payload it read first.
+pub async fn save_message_payload<'e, E>(
+    ex: E,
+    message_id: Uuid,
+    payload: &Value,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(MESSAGE_PAYLOAD_SAVE_SQL)
+        .bind(message_id)
+        .bind(payload)
+        .execute(ex)
+        .await
+        .map(|_| ())
+}
+
 /// Delete a thread's messages (thread-delete cascade leg).
 pub async fn delete_thread_messages<'e, E>(ex: E, thread_id: Uuid) -> Result<(), sqlx::Error>
 where
@@ -653,6 +679,10 @@ mod tests {
             "UPDATE assistant_message SET display_content = $2, status = $3, completed_at = $4 WHERE id = $1"
         );
         assert_eq!(
+            MESSAGE_PAYLOAD_SAVE_SQL,
+            "UPDATE assistant_message SET payload = $2 WHERE id = $1"
+        );
+        assert_eq!(
             DELETE_THREAD_MESSAGES_SQL,
             "DELETE FROM \"assistant_message\" WHERE \"thread_id\" = $1"
         );
@@ -776,6 +806,20 @@ mod tests {
                 .expect("read finalized");
         assert_eq!(done.0, "live final");
         assert_eq!(done.1, "completed");
+        save_message_payload(
+            &mut *tx,
+            created.id,
+            &serde_json::json!({"truncated": true}),
+        )
+        .await
+        .expect("save payload");
+        let flagged: (Value,) =
+            sqlx::query_as("SELECT payload FROM assistant_message WHERE id = $1")
+                .bind(created.id)
+                .fetch_one(&mut *tx)
+                .await
+                .expect("read payload");
+        assert_eq!(flagged.0, serde_json::json!({"truncated": true}));
         finalize_open_messages(&mut *tx, turn_id, "failed")
             .await
             .expect("finalize");

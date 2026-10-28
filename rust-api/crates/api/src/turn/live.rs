@@ -125,8 +125,9 @@ pub const LAST_ASSISTANT_ROW_SQL: &str = "SELECT id, seq, payload, display_conte
      WHERE turn_id = $1 AND kind = 'assistant' ORDER BY seq DESC LIMIT 1";
 
 /// Flag the row's payload (`message.save(update_fields=["payload"])`,
-/// `tasks.py:523-524`).
-pub const MARK_CUT_OFF_SQL: &str = "UPDATE assistant_message SET payload = $2 WHERE id = $1";
+/// `tasks.py:523-524`). Re-exported for the OVL-09 overlay via
+/// `pidash_sdk::assistant`; the SQL lives in `domain::assistant`.
+pub use pidash_services::domain::assistant::MESSAGE_PAYLOAD_SAVE_SQL as MARK_CUT_OFF_SQL;
 
 /// [`LAST_ASSISTANT_ROW_SQL`] row: id, seq, payload, display_content,
 /// status, created_at, completed_at.
@@ -1671,10 +1672,7 @@ impl TurnSeam for LiveTurnSeam {
         let mut flagged = payload.as_object().cloned().unwrap_or_default();
         flagged.insert("truncated".to_owned(), Value::Bool(true));
         let merged = Value::Object(flagged);
-        sqlx::query(MARK_CUT_OFF_SQL)
-            .bind(message_id)
-            .bind(&merged)
-            .execute(&self.pool)
+        pidash_services::domain::assistant::save_message_payload(&self.pool, message_id, &merged)
             .await
             .map_err(db_error)?;
         self.emit_message_completed(
