@@ -13,7 +13,7 @@
 //! runner_session,assistant_user_llm_config,assistant_message
 //! ```
 //!
-//! The generator output is committed verbatim except for three mechanical
+//! The generator output is committed verbatim except for four mechanical
 //! cleanups, all re-applied on every regeneration (see
 //! `rust-api/README.md`, "SeaORM entities"):
 //!
@@ -27,6 +27,10 @@
 //! * This module doc is restored on top of the regenerated `mod.rs`.
 //! * The `#[cfg(test)] mod parity;` declaration at the bottom of this file
 //!   is restored (the parity test itself is hand-written).
+//! * The empty `impl ActiveModelBehavior for ActiveModel {}` the generator
+//!   restores in `users.rs` is deleted again: the hand-written impl lives
+//!   in the (untouched) `users_hooks.rs`, and keeping both fails the build
+//!   with duplicate impls (loud, by design).
 //!
 //! Django stays the schema owner: after a Django sync the entities are
 //! regenerated and the `parity` test proves they still match
@@ -56,6 +60,12 @@ pub mod user_notification_preferences;
 pub mod users;
 pub mod workspace_members;
 pub mod workspaces;
+
+// Hand-written (ORM-07): the `users` hook impl. Re-apply after every
+// regeneration, which rewrites this file (and restores the empty
+// `ActiveModelBehavior` impl in `users.rs`, which the checklist above
+// deletes — forgetting that fails the build with duplicate impls).
+mod users_hooks;
 
 // Hand-written (ORM-01): the `information_schema` parity test. Re-apply
 // after every regeneration, which rewrites this file.

@@ -1475,35 +1475,24 @@ impl SeedStore for PgSeedStore {
     ) -> Result<uuid::Uuid, String> {
         // `User.objects.create :522-532` + `User.save` email/display
         // normalization; every other column at its model default.
-        let id: uuid::Uuid = sqlx::query_scalar(
-            "INSERT INTO users (password, last_login, id, username, mobile_number, email,
-               display_name, first_name, last_name, avatar, avatar_asset_id, cover_image,
-               cover_image_asset_id, date_joined, created_at, updated_at, last_location,
-               created_location, is_superuser, is_managed, is_password_expired, is_active,
-               is_staff, is_email_verified, is_password_autoset, is_password_reset_required,
-               token, user_timezone,
-               last_active, last_login_time, last_logout_time, last_login_ip, last_logout_ip,
-               last_login_medium, last_login_uagent, token_updated_at, is_bot, bot_type,
-               is_email_valid, masked_at)
-             VALUES ($1, NULL, $2, $3, NULL, $4,
-               'Pi Dash', 'Pi Dash', '', '', NULL, NULL,
-               NULL, $5, $5, $5, '',
-               '', false, false, false, true,
-               false, false, true, false, '', 'UTC',
-               $5, NULL, NULL, '', '',
-               'email', '', NULL, true, 'WORKSPACE_SEED',
-               false, NULL)
-             RETURNING id",
+        use pidash_services::domain::identity::{create_bot_user, NewBotUser};
+        create_bot_user(
+            &self.pool,
+            &NewBotUser {
+                id: None,
+                username,
+                email,
+                password_hash,
+                display_name: "Pi Dash",
+                first_name: "Pi Dash",
+                last_name: "",
+                is_password_autoset: true,
+                bot_type: Some("WORKSPACE_SEED"),
+                now: self.now,
+            },
         )
-        .bind(password_hash)
-        .bind(uuid::Uuid::new_v4())
-        .bind(username)
-        .bind(email)
-        .bind(self.now)
-        .fetch_one(&self.pool)
         .await
-        .map_err(Self::db_err)?;
-        Ok(id)
+        .map_err(Self::db_err)
     }
 
     async fn insert_workspace_member(

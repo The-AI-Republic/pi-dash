@@ -861,82 +861,9 @@ pub fn encode_password(password: &str, salt: &str) -> String {
     crate::license::handlers_auth_forms::encode_password(password, salt, 600_000)
 }
 
-/// `post_save` receiver `create_user_notification` (`user.py:307-320`):
-/// a preferences row on every non-bot create (all five flags true).
-/// Same insert as the email/magic/gitlab signup paths.
-async fn insert_notification_prefs(
-    pool: &sqlx::PgPool,
-    now: chrono::DateTime<chrono::Utc>,
-    user_id: &uuid::Uuid,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "INSERT INTO \"user_notification_preferences\" (\"id\", \"created_at\", \"updated_at\", \
-         \"created_by_id\", \"updated_by_id\", \"deleted_at\", \"user_id\", \"workspace_id\", \
-         \"project_id\", \"property_change\", \"state_change\", \"comment\", \"mention\", \
-         \"issue_completed\") \
-         VALUES ($1, $2, $2, NULL, NULL, NULL, $3, NULL, NULL, TRUE, TRUE, TRUE, TRUE, TRUE)",
-    )
-    .bind(uuid::Uuid::new_v4())
-    .bind(now)
-    .bind(user_id)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
-/// New-user row (`base.py:299-328` + `User.save()` side effects,
-/// `user.py:167-187`): every NOT NULL `users` column is supplied —
-/// Django field defaults apply client-side, so the INSERT carries them
-/// verbatim. `display_name` is backfilled from the email local part by
-/// `save()` (never empty at INSERT); `token` stays `""` until
-/// `save_user_data` rotates it (rotation only fires when
-/// `token_updated_at` is set).
-#[allow(clippy::too_many_arguments)]
-pub async fn insert_user(
-    pool: &sqlx::PgPool,
-    id: uuid::Uuid,
-    email: &str,
-    username: &str,
-    password_hash: &str,
-    first_name: &str,
-    last_name: &str,
-    display_name: &str,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        r#"INSERT INTO users
-           (id, username, mobile_number, email, display_name, first_name, last_name,
-            avatar, avatar_asset_id, cover_image, cover_image_asset_id,
-            date_joined, created_at, updated_at,
-            last_location, created_location,
-            is_superuser, is_managed, is_password_expired, is_active, is_staff,
-            is_email_verified, is_password_autoset, is_password_reset_required,
-            token, user_timezone, is_email_valid,
-            last_active, last_login_time, last_logout_time,
-            last_login_ip, last_logout_ip, last_login_medium, last_login_uagent,
-            token_updated_at, is_bot, bot_type, masked_at,
-            password)
-           VALUES ($1,$2,NULL,$3,$4,$5,$6,'',NULL,NULL,NULL,
-                   $7,$7,$7,'','',FALSE,FALSE,FALSE,TRUE,FALSE,
-                   TRUE,TRUE,FALSE,'','UTC',FALSE,
-                   NULL,NULL,NULL,'','',$8,'',NULL,FALSE,NULL,NULL,$9)"#,
-    )
-    .bind(id)
-    .bind(username)
-    .bind(email)
-    .bind(display_name)
-    .bind(first_name)
-    .bind(last_name)
-    .bind(now)
-    .bind("email")
-    .bind(password_hash)
-    .execute(pool)
-    .await?;
-    // `post_save` fires on the first `save()` (`user.py:307`), before the
-    // profile/avatar writes the caller runs next — same as email/magic.
-    insert_notification_prefs(pool, now, &id).await?;
-    Ok(())
-}
+// NOTE: the new-user INSERT and the `create_user_notification`
+// post_save insert moved to `domain::identity::create_user`
+// (PIDASHCONV-1525). The signup arm below calls it directly.
 
 /// `save_user_data` (`base.py:220-234`): login enrichment plus the
 /// activation branch. The UPDATE writes the D-16 `SAVE_USER_DATA_FIELDS`
@@ -959,26 +886,25 @@ pub async fn save_user_data(
     rotated_token: &str,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<bool, sqlx::Error> {
-    sqlx::query(
-        r#"UPDATE users SET
-             last_login_medium = 'gitea',
-             last_active = $2, last_login_time = $2, token_updated_at = $2,
-             token = $3,
-             last_login_ip = $4, last_login_uagent = $5,
-             avatar = $6, avatar_asset_id = $7,
-             is_active = TRUE, updated_at = $2,
-             display_name = CASE WHEN display_name = '' THEN split_part(email, '@', 1) ELSE display_name END,
-             is_staff = is_staff OR is_superuser
-           WHERE id = $1"#,
+    use pidash_services::domain::identity;
+    identity::save_user_data(
+        pool,
+        user_id,
+        &identity::LoginStamps {
+            medium: Some("gitea"),
+            // Preserved verbatim (see `domain::identity`): gitea renders a
+            // missing ip/user-agent as `''`, where the other paths bind NULL.
+            login_ip: Some(ip.unwrap_or("")),
+            login_uagent: Some(user_agent.unwrap_or("")),
+            avatar: Some(avatar),
+            avatar_asset_id: Some(avatar_asset_id),
+            display_name: Some(identity::DisplayNameUpdate::BackfillCase),
+            is_staff: Some(identity::StaffSync::OrSuperuser),
+            touch_updated_at: true,
+            rotated_token,
+            now,
+        },
     )
-    .bind(user_id)
-    .bind(now)
-    .bind(rotated_token)
-    .bind(ip.unwrap_or(""))
-    .bind(user_agent.unwrap_or(""))
-    .bind(avatar)
-    .bind(avatar_asset_id)
-    .execute(pool)
     .await?;
     Ok(!was_active)
 }
@@ -1014,6 +940,7 @@ pub async fn enqueue_activation_email(
 /// the (inverted) signup flag says so. Names + `display_name` (regenerated
 /// when the provider ships none), then the avatar pair via
 /// `delete_old_avatar` + `download_and_upload_avatar`.
+#[allow(clippy::too_many_arguments)]
 pub async fn sync_user_data(
     pool: &sqlx::PgPool,
     user_id: uuid::Uuid,
@@ -1022,22 +949,26 @@ pub async fn sync_user_data(
     email: &str,
     avatar: &str,
     avatar_asset_id: Option<uuid::Uuid>,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), sqlx::Error> {
     // Gitea ships no `display_name` key, so the provider value is always
     // absent and `User.get_display_name(email)` decides (`base.py:268-276`).
     let display_name = display_name_for(email, &mut rand::rng());
-    sqlx::query(
-        r#"UPDATE users SET first_name = $2, last_name = $3, display_name = $4,
-                  avatar = $5, avatar_asset_id = $6
-           WHERE id = $1"#,
+    use pidash_services::domain::identity;
+    identity::sync_user_data(
+        pool,
+        user_id,
+        &identity::SyncUpdate {
+            first_name,
+            last_name,
+            display_name: &display_name,
+            avatar: Some(avatar),
+            avatar_asset_id: Some(avatar_asset_id),
+            is_staff: None,
+            touch_updated_at: false,
+            now,
+        },
     )
-    .bind(user_id)
-    .bind(first_name)
-    .bind(last_name)
-    .bind(display_name)
-    .bind(avatar)
-    .bind(avatar_asset_id)
-    .execute(pool)
     .await?;
     Ok(())
 }
@@ -1812,28 +1743,11 @@ pub async fn process_invitations(
 // §9 Redirection path + profile (`utils/redirection_path.py:8-46`)
 // ---------------------------------------------------------------------------
 
-/// `Profile.objects.get_or_create(user=user)` projected to what the path
-/// decision reads (`is_onboarded`, `last_workspace_id`).
-#[derive(Debug, Clone, sqlx::FromRow)]
-pub struct ProfilePathRow {
-    pub id: uuid::Uuid,
-    pub is_onboarded: bool,
-    pub last_workspace_id: Option<uuid::Uuid>,
-}
-
 /// `get_default_onboarding` (`db/models/user.py:25-31`).
 pub fn default_onboarding_json() -> serde_json::Value {
     serde_json::json!({
         "profile_complete": false, "workspace_create": false,
         "workspace_invite": false, "workspace_join": false,
-    })
-}
-
-/// `get_mobile_default_onboarding` (`user.py:34-39`).
-pub fn default_mobile_onboarding_json() -> serde_json::Value {
-    serde_json::json!({
-        "profile_complete": false, "workspace_create": false,
-        "workspace_join": false,
     })
 }
 
@@ -1850,57 +1764,9 @@ pub fn random_color<R: rand::Rng>(rng: &mut R) -> String {
     out
 }
 
-/// `get_default_product_tour` (`user.py:42-48`).
-pub fn default_product_tour_json() -> serde_json::Value {
-    serde_json::json!({
-        "work_items": false, "cycles": false, "modules": false,
-        "intake": false, "pages": false,
-    })
-}
-
-/// `Profile.objects.create(user=user)` (`base.py:342`): every NOT NULL
-/// `profiles` column with its Django field default. The background draw
-/// happens before any await so no RNG lives across one.
-pub async fn create_profile(
-    pool: &sqlx::PgPool,
-    user_id: uuid::Uuid,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Result<(), sqlx::Error> {
-    let background = random_color(&mut rand::rng());
-    sqlx::query(
-        r#"INSERT INTO profiles
-           (id, created_at, updated_at, theme, is_app_rail_docked,
-            is_tour_completed, onboarding_step, use_case, role,
-            is_onboarded, last_workspace_id,
-            billing_address_country, billing_address, has_billing_address,
-            company_name, notification_view_mode, is_smooth_cursor_enabled,
-            is_mobile_onboarded, mobile_onboarding_step, mobile_timezone_auto_set,
-            language, start_of_the_week, goals, background_color,
-            is_navigation_tour_completed,
-            has_marketing_email_consent, is_subscribed_to_changelog,
-            product_tour, settings, user_id)
-           VALUES ($1,$2,$2,'{}',TRUE,
-                   FALSE,$3,NULL,NULL,
-                   FALSE,NULL,
-                   'INDIA',NULL,FALSE,
-                   '','full',FALSE,
-                   FALSE,$4,FALSE,
-                   'en',0,'{}',$7,
-                   FALSE,
-                   FALSE,FALSE,
-                   $5,'{}',$6)"#,
-    )
-    .bind(uuid::Uuid::new_v4())
-    .bind(now)
-    .bind(default_onboarding_json())
-    .bind(default_mobile_onboarding_json())
-    .bind(default_product_tour_json())
-    .bind(user_id)
-    .bind(background)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
+// NOTE: the signup profile row moved into
+// `domain::identity::create_user`, and the login get-or-create into
+// `domain::identity::get_or_create_profile` (PIDASHCONV-1525).
 
 /// `get_redirection_path` (`redirection_path.py:8-46`): onboarding first,
 /// then the last workspace (only when the membership is active), then the
@@ -1914,25 +1780,14 @@ pub async fn redirection_path(
     email: &str,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<String, sqlx::Error> {
-    let profile: Option<ProfilePathRow> = sqlx::query_as::<_, ProfilePathRow>(
-        r#"SELECT id, is_onboarded, last_workspace_id FROM profiles WHERE user_id = $1 LIMIT 1"#,
-    )
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await?;
-    let profile = match profile {
-        Some(row) => row,
-        None => {
-            create_profile(pool, user_id, now).await?;
-            sqlx::query_as::<_, ProfilePathRow>(
-                r#"SELECT id, is_onboarded, last_workspace_id FROM profiles WHERE user_id = $1 LIMIT 1"#,
-            )
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await?
-            .ok_or(sqlx::Error::RowNotFound)?
-        }
+    use pidash_services::domain::identity;
+    // Drawn before any await: the `rand::rng()` handle must not live
+    // across one (the handler future has to stay `Send`).
+    let background_color = {
+        let mut rng = rand::rng();
+        random_color(&mut rng)
     };
+    let profile = identity::get_or_create_profile(pool, user_id, now, &background_color).await?;
     if !profile.is_onboarded {
         return Ok("onboarding".to_owned());
     }
@@ -2130,6 +1985,7 @@ pub enum AuthError {
 #[allow(clippy::too_many_arguments)]
 pub async fn authenticate_user(
     pool: &sqlx::PgPool,
+    orm: &pidash_db::DatabaseConnection,
     secret_key: &str,
     redis_url: Option<&str>,
     storage: &pidash_db::config::StorageSettings,
@@ -2202,16 +2058,41 @@ pub async fn authenticate_user(
             .unwrap_or("");
         let first = if first.is_empty() { "" } else { first };
         let last = if last.is_empty() { "" } else { last };
-        insert_user(
-            pool,
-            user_id,
-            &email,
-            &username,
-            &password_field,
-            first,
-            last,
-            &display,
-            now,
+        // Drawn before any await: the `rand::rng()` handle must not live
+        // across one (the handler future has to stay `Send`).
+        let background_color = {
+            let mut rng = rand::rng();
+            random_color(&mut rng)
+        };
+        // `User(...)` + first `save()` with the `post_save` preferences
+        // row and the adapter profile row, all inside
+        // `domain::identity::create_user`.
+        use pidash_services::domain::identity;
+        identity::create_user(
+            orm,
+            &identity::NewUser {
+                id: Some(user_id),
+                email: &email,
+                username,
+                password_hash: password_field.clone(),
+                first_name: first,
+                last_name: last,
+                display_name: display.clone(),
+                avatar: "",
+                is_email_verified: true,
+                is_password_autoset: true,
+                // Preserved verbatim (see `domain::identity`): the gitea
+                // insert stores `last_active = NULL`.
+                last_active: None,
+                login_ip: Some(""),
+                login_uagent: Some(""),
+                is_bot: false,
+                now,
+                profile: Some(identity::NewProfile {
+                    company_name: "",
+                    background_color,
+                }),
+            },
         )
         .await
         .map_err(|_| AuthError::Server(Denial::ServerError))?;
@@ -2242,9 +2123,6 @@ pub async fn authenticate_user(
                 None => (avatar_url.to_owned(), None),
             }
         };
-        create_profile(pool, user_id, now)
-            .await
-            .map_err(|_| AuthError::Server(Denial::ServerError))?;
         // IDP sync (`base.py:345`): `check_sync_enabled() and not
         // is_signup` — with the inverted flag this runs for NEW users
         // only, never existing ones (PB-1024). Django order: after
@@ -2289,7 +2167,7 @@ pub async fn authenticate_user(
                 Some(asset_id) => (String::new(), Some(asset_id)),
                 None => (avatar_url.to_owned(), None),
             };
-            sync_user_data(pool, user_id, first, last, &email, &avatar, asset)
+            sync_user_data(pool, user_id, first, last, &email, &avatar, asset, now)
                 .await
                 .map_err(|_| AuthError::Server(Denial::ServerError))?;
         }
@@ -2392,7 +2270,7 @@ async fn finish_authenticated(
         serde_json::Value::Null => None,
         other => Some(other.to_string()),
     };
-    let fields = pidash_db::auth_oauth::queries::account::TokenFields {
+    let fields = pidash_services::domain::identity::account::TokenFields {
         access_token: to_opt_string(&tokens.access_token),
         refresh_token: to_opt_string(&tokens.refresh_token),
         access_token_expired_at: tokens.access_token_expired_at,
@@ -2403,7 +2281,7 @@ async fn finish_authenticated(
     // side (Django's `.save()` rewrites them unchanged); absent, the
     // ported defaults apply (PIDASHCONV-1363, as `oauth_google.rs`).
     let provider_id =
-        pidash_db::auth_oauth::queries::account::lookup_provider_id(user_json).unwrap_or("");
+        pidash_services::domain::identity::account::lookup_provider_id(user_json).unwrap_or("");
     let prior: Option<(chrono::DateTime<chrono::Utc>, serde_json::Value)> = if provider_id
         .is_empty()
     {
@@ -2425,12 +2303,12 @@ async fn finish_authenticated(
         .await
         .map_err(|_| AuthError::Server(Denial::ServerError))?;
     let existing = prior.map(|(created_at, metadata)| {
-        pidash_db::auth_oauth::queries::account::ExistingAccount {
+        pidash_services::domain::identity::account::ExistingAccount {
             created_at,
             metadata,
         }
     });
-    pidash_db::auth_oauth::queries::account::create_update_account(
+    pidash_services::domain::identity::account::create_update_account(
         &mut conn,
         user_id,
         PROVIDER,
@@ -2457,6 +2335,14 @@ fn pool_or_500(state: &AppState) -> Result<sqlx::PgPool, Response> {
     state
         .pools()
         .map(|pools| pools.primary().clone())
+        .ok_or_else(|| Denial::ServerError.into_response())
+}
+
+#[allow(clippy::result_large_err)]
+fn orm_or_500(state: &AppState) -> Result<pidash_db::DatabaseConnection, Response> {
+    state
+        .orm()
+        .cloned()
         .ok_or_else(|| Denial::ServerError.into_response())
 }
 
@@ -2572,8 +2458,13 @@ async fn app_callback(
     );
     let redirect_uri = redirect_uri_for(inputs.is_secure, &inputs.host);
     let now = chrono::Utc::now();
+    let orm = match orm_or_500(&state) {
+        Ok(orm) => orm,
+        Err(response) => return response,
+    };
     let authenticated = authenticate_user(
         &pool,
+        &orm,
         &settings.secret_key,
         settings.redis.url.as_deref(),
         &settings.storage,
@@ -2748,8 +2639,13 @@ async fn space_callback(
     );
     let redirect_uri = redirect_uri_for(inputs.is_secure, &inputs.host);
     let now = chrono::Utc::now();
+    let orm = match orm_or_500(&state) {
+        Ok(orm) => orm,
+        Err(response) => return response,
+    };
     let authenticated = authenticate_user(
         &pool,
+        &orm,
         &settings.secret_key,
         settings.redis.url.as_deref(),
         &settings.storage,

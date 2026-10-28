@@ -219,6 +219,10 @@ fn pool_of(state: &AppState) -> Result<&PgPool, Denial> {
         .ok_or(Denial::ServerError)
 }
 
+fn orm_of(state: &AppState) -> Result<&pidash_db::DatabaseConnection, Denial> {
+    state.orm().ok_or(Denial::ServerError)
+}
+
 /// `HttpResponseRedirect(url)`: 302 with a `Location` header and an
 /// empty body. Django percent-encodes the URL first (`iri_to_uri`,
 /// `django/http/response.py:620`). Past `MAX_URL_REDIRECT_LENGTH`
@@ -1149,138 +1153,10 @@ fn random_color() -> String {
     format!("#{}", &uuid::Uuid::new_v4().simple().to_string()[..6])
 }
 
-/// New-user row (`base.py:299-328` + `User.save()`, `user.py:167-187`):
-/// identity + names + password hash; `display_name` is backfilled
-/// from the local part BEFORE the insert (the `else` arm is dead —
-/// `len(split)` is never 0); `is_active` defaults `True`;
-/// `last_login_medium` keeps the `"email"` default until
-/// `save_user_data` overwrites it.
-#[allow(clippy::too_many_arguments)]
-async fn insert_user(
-    pool: &PgPool,
-    id: uuid::Uuid,
-    email: &str,
-    username: &str,
-    password_hash: &str,
-    first_name: &str,
-    last_name: &str,
-    now: chrono::DateTime<Utc>,
-) -> Result<(), Denial> {
-    let display_name = email.split('@').next().unwrap_or_default();
-    sqlx::query(
-        r#"INSERT INTO "users"
-           ("id", "password", "last_login", "username", "mobile_number", "email",
-            "display_name", "first_name", "last_name", "avatar", "avatar_asset_id",
-            "cover_image", "cover_image_asset_id", "date_joined", "created_at", "updated_at",
-            "last_location", "created_location", "is_superuser", "is_managed",
-            "is_password_expired", "is_active", "is_staff", "is_email_verified",
-            "is_password_autoset", "is_password_reset_required", "token", "last_active",
-            "last_login_time", "last_logout_time", "last_login_ip", "last_logout_ip",
-            "last_login_medium", "last_login_uagent", "token_updated_at", "is_bot",
-            "bot_type", "user_timezone", "is_email_valid", "masked_at")
-           VALUES ($1,$2,NULL,$3,NULL,$4,$5,$6,$7,'',NULL,
-                   NULL,NULL,$8,$8,$8,
-                   '','',FALSE,FALSE,
-                   FALSE,TRUE,FALSE,TRUE,
-                   TRUE,FALSE,'',$8,
-                   NULL,NULL,'','',
-                   'email','',NULL,FALSE,
-                   NULL,'UTC',FALSE,NULL)"#,
-    )
-    .bind(id)
-    .bind(password_hash)
-    .bind(username)
-    .bind(email)
-    .bind(display_name)
-    .bind(first_name)
-    .bind(last_name)
-    .bind(now)
-    .execute(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(())
-}
-
-/// `Profile.objects.create(user=user)` (`base.py:342`): every column
-/// with its Python-side default.
-async fn insert_profile(
-    pool: &PgPool,
-    id: uuid::Uuid,
-    user_id: uuid::Uuid,
-    now: chrono::DateTime<Utc>,
-) -> Result<(), Denial> {
-    sqlx::query(
-        r#"INSERT INTO "profiles"
-           ("id", "user_id", "theme", "is_app_rail_docked", "is_tour_completed",
-            "onboarding_step", "use_case", "role", "is_onboarded", "last_workspace_id",
-            "billing_address_country", "billing_address", "has_billing_address",
-            "company_name", "notification_view_mode", "is_smooth_cursor_enabled",
-            "is_mobile_onboarded", "mobile_onboarding_step", "mobile_timezone_auto_set",
-            "language", "start_of_the_week", "goals", "background_color",
-            "is_navigation_tour_completed", "has_marketing_email_consent",
-            "is_subscribed_to_changelog", "product_tour", "settings",
-            "created_at", "updated_at")
-           VALUES ($1,$2,'{}',TRUE,FALSE,
-                   $3,NULL,NULL,FALSE,NULL,
-                   'INDIA',NULL,FALSE,
-                   '','full',FALSE,
-                   FALSE,$4,FALSE,
-                   'en',0,'{}',$5,
-                   FALSE,FALSE,
-                   FALSE,$6,'{}',
-                   $7,$7)"#,
-    )
-    .bind(id)
-    .bind(user_id)
-    .bind(serde_json::json!({
-        "profile_complete": false,
-        "workspace_create": false,
-        "workspace_invite": false,
-        "workspace_join": false,
-    }))
-    .bind(serde_json::json!({
-        "profile_complete": false,
-        "workspace_create": false,
-        "workspace_join": false,
-    }))
-    .bind(random_color())
-    .bind(serde_json::json!({
-        "work_items": false,
-        "cycles": false,
-        "modules": false,
-        "intake": false,
-        "pages": false,
-    }))
-    .bind(now)
-    .execute(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(())
-}
-
-/// `create_user_notification` post_save receiver
-/// (`user.py:306-317`): fires on user create for non-bots.
-async fn insert_notification_preference(
-    pool: &PgPool,
-    id: uuid::Uuid,
-    user_id: uuid::Uuid,
-    now: chrono::DateTime<Utc>,
-) -> Result<(), Denial> {
-    sqlx::query(
-        r#"INSERT INTO "user_notification_preferences"
-           ("id", "created_at", "updated_at", "created_by_id", "updated_by_id", "deleted_at",
-            "user_id", "workspace_id", "project_id",
-            "property_change", "state_change", "comment", "mention", "issue_completed")
-           VALUES ($1,$2,$2,NULL,NULL,NULL,$3,NULL,NULL,TRUE,TRUE,TRUE,TRUE,TRUE)"#,
-    )
-    .bind(id)
-    .bind(now)
-    .bind(user_id)
-    .execute(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(())
-}
+// NOTE: the new-user INSERT, the signup profile row and the
+// `create_user_notification` post_save insert moved to
+// `domain::identity::create_user` (PIDASHCONV-1525). The signup arm
+// below calls it directly.
 
 /// `get_default_props` (`workspace.py:22-50`): the JSON default for
 /// member `view_props` / `default_props`.
@@ -1367,20 +1243,20 @@ async fn sync_user_data(
     now: chrono::DateTime<Utc>,
 ) -> Result<(), Denial> {
     let is_staff = user.is_staff || user.is_superuser;
-    sqlx::query(
-        r#"UPDATE "users" SET "first_name" = $1, "last_name" = $2, "display_name" = $3,
-                  "avatar" = $4, "avatar_asset_id" = $5, "is_staff" = $6,
-                  "updated_at" = $7 WHERE "id" = $8"#,
+    pidash_services::domain::identity::sync_user_data(
+        pool,
+        user.id,
+        &pidash_services::domain::identity::SyncUpdate {
+            first_name,
+            last_name,
+            display_name,
+            avatar: Some(avatar),
+            avatar_asset_id: Some(asset),
+            is_staff: Some(is_staff),
+            touch_updated_at: true,
+            now,
+        },
     )
-    .bind(first_name)
-    .bind(last_name)
-    .bind(display_name)
-    .bind(avatar)
-    .bind(asset)
-    .bind(is_staff)
-    .bind(now)
-    .bind(user.id)
-    .execute(pool)
     .await
     .map_err(|_| Denial::ServerError)?;
     Ok(())
@@ -1418,22 +1294,26 @@ async fn save_user_data(
         user.display_name.clone()
     };
     let is_staff = user.is_staff || user.is_superuser;
-    sqlx::query(
-        r#"UPDATE "users" SET "last_login_medium" = 'gitlab', "last_active" = $1,
-                  "last_login_time" = $1, "last_login_ip" = $2, "last_login_uagent" = $3,
-                  "token_updated_at" = $1, "token" = $4, "is_active" = TRUE,
-                  "avatar" = $5, "display_name" = $6, "is_staff" = $7, "updated_at" = $1
-           WHERE "id" = $8"#,
+    pidash_services::domain::identity::save_user_data(
+        pool,
+        user.id,
+        &pidash_services::domain::identity::LoginStamps {
+            medium: Some("gitlab"),
+            login_ip: ip,
+            login_uagent: user_agent,
+            avatar: Some(avatar),
+            avatar_asset_id: None,
+            display_name: Some(pidash_services::domain::identity::DisplayNameUpdate::Bound(
+                &display_name,
+            )),
+            is_staff: Some(pidash_services::domain::identity::StaffSync::Value(
+                is_staff,
+            )),
+            touch_updated_at: true,
+            rotated_token: &token,
+            now,
+        },
     )
-    .bind(now)
-    .bind(ip)
-    .bind(user_agent)
-    .bind(token)
-    .bind(avatar)
-    .bind(display_name)
-    .bind(is_staff)
-    .bind(user.id)
-    .execute(pool)
     .await
     .map_err(|_| Denial::ServerError)?;
     Ok(())
@@ -1830,20 +1710,15 @@ async fn redirection_path(
     now: chrono::DateTime<Utc>,
 ) -> Result<String, Denial> {
     // `Profile.objects.get_or_create(user=user)`.
-    let profile: Option<(bool, Option<uuid::Uuid>)> = sqlx::query_as(
-        r#"SELECT "is_onboarded", "last_workspace_id" FROM "profiles" WHERE "user_id" = $1"#,
+    let path = pidash_services::domain::identity::get_or_create_profile(
+        pool,
+        user_id,
+        now,
+        &random_color(),
     )
-    .bind(user_id)
-    .fetch_optional(pool)
     .await
     .map_err(|_| Denial::ServerError)?;
-    let (is_onboarded, last_workspace_id) = match profile {
-        Some(found) => found,
-        None => {
-            insert_profile(pool, uuid::Uuid::new_v4(), user_id, now).await?;
-            (false, None)
-        }
-    };
+    let (is_onboarded, last_workspace_id) = (path.is_onboarded, path.last_workspace_id);
     if !is_onboarded {
         return Ok("onboarding".to_owned());
     }
@@ -2015,17 +1890,35 @@ async fn callback_success(
             );
             let first_name = name_or_empty(&user_data.user.first_name);
             let last_name = name_or_empty(&user_data.user.last_name);
-            insert_user(
-                pool,
-                id,
-                &email,
-                &username,
-                &password_hash,
-                &first_name,
-                &last_name,
-                now,
+            // `User(...)` + first `save()` with the `post_save`
+            // preferences row and the adapter profile row, all inside
+            // `domain::identity::create_user`.
+            pidash_services::domain::identity::create_user(
+                orm_of(state)?,
+                &pidash_services::domain::identity::NewUser {
+                    id: Some(id),
+                    email: &email,
+                    username,
+                    password_hash: password_hash.clone(),
+                    first_name: &first_name,
+                    last_name: &last_name,
+                    display_name: email.split('@').next().unwrap_or_default().to_owned(),
+                    avatar: "",
+                    is_email_verified: true,
+                    is_password_autoset: true,
+                    last_active: Some(now),
+                    login_ip: Some(""),
+                    login_uagent: Some(""),
+                    is_bot: false,
+                    now,
+                    profile: Some(pidash_services::domain::identity::NewProfile {
+                        company_name: "",
+                        background_color: random_color(),
+                    }),
+                },
             )
-            .await?;
+            .await
+            .map_err(|_| Denial::ServerError)?;
             // Avatar (`base.py:330-339`): success sets the FK too, failure
             // keeps the provider URL (persisted by `save_user_data`
             // below). No old avatar exists to delete.
@@ -2049,18 +1942,13 @@ async fn callback_success(
                 )
                 .await
                 {
-                    sqlx::query("UPDATE \"users\" SET \"avatar_asset_id\" = $1 WHERE \"id\" = $2")
-                        .bind(asset_id)
-                        .bind(id)
-                        .execute(pool)
+                    pidash_services::domain::identity::stamp_avatar_asset(pool, id, asset_id)
                         .await
                         .map_err(|_| Denial::ServerError)?;
                     signup_asset = Some(asset_id);
                 }
             }
             let avatar = avatar_url;
-            insert_profile(pool, uuid::Uuid::new_v4(), id, now).await?;
-            insert_notification_preference(pool, uuid::Uuid::new_v4(), id, now).await?;
             let mut created = DbUser {
                 id,
                 email: email.clone(),
@@ -2228,8 +2116,8 @@ async fn create_update_account(
     token_data: &pidash_services::auth_oauth::providers::TokenData,
     now: chrono::DateTime<Utc>,
 ) {
-    use pidash_db::auth_oauth::queries::account::{
-        create_account, find_account_id, update_account, NewAccount, TokenFields,
+    use pidash_services::domain::identity::account::{
+        create_account, find_account_id, rotate_account_tokens, NewAccount, TokenFields,
     };
     let tokens = TokenFields {
         access_token: text_or_none(&token_data.access_token),
@@ -2265,7 +2153,7 @@ async fn create_update_account(
                 .fetch_optional(pool)
                 .await;
             if let Ok(Some((created_at, metadata))) = loaded {
-                let _ = update_account(
+                let _ = rotate_account_tokens(
                     pool,
                     id,
                     created_at,

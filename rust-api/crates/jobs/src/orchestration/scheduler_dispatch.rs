@@ -34,11 +34,11 @@ use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings, RunnerSetting
 use pidash_db::orchestration::querysets::{
     fetch_project_has_allowed_role, fetch_project_is_member, fetch_workspace_admin_by_slug,
 };
-use pidash_db::orchestration::workpad::{get_agent_system_user, GetAgentUserError};
 use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
 use pidash_db::tx::Transaction;
 use pidash_services::dispatch::admission::AdmissionCache;
 use pidash_services::dispatch::LlmProfile;
+use pidash_services::domain::identity::{get_agent_system_user, GetAgentUserError};
 use pidash_services::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
 use pidash_services::orchestration::clock::{ClockWrite, ProjectClockPolicy};
 use pidash_services::orchestration::creation::{
@@ -353,7 +353,7 @@ where
     async fn agent_system_user(
         &mut self,
     ) -> Result<
-        Result<Uuid, pidash_db::orchestration::workpad::AgentUserCollisionError>,
+        Result<Uuid, pidash_services::domain::identity::AgentUserCollisionError>,
         CreationError,
     > {
         match get_agent_system_user(self.dispatch_tx().inner(), Utc::now()).await {

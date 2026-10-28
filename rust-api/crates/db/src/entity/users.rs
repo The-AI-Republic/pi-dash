@@ -88,4 +88,6 @@ impl Related<super::profiles::Entity> for Entity {
     }
 }
 
-impl ActiveModelBehavior for ActiveModel {}
+// No `ActiveModelBehavior` impl here: the hand-written one lives in
+// `users_hooks.rs` (regen checklist in `mod.rs` re-deletes the empty
+// impl the generator restores).

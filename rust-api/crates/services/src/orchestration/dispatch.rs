@@ -68,8 +68,8 @@ use std::pin::Pin;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
+use crate::domain::identity::AgentUserCollisionError;
 use pidash_auth::permissions::membership::{check_project_role, ProjectRoleFacts};
-use pidash_db::orchestration::workpad::AgentUserCollisionError;
 use pidash_db::tasks_ticker::models::issue_agent_ticker::{
     IssueAgentTicker, COLUMNS as TICKER_COLUMNS,
 };

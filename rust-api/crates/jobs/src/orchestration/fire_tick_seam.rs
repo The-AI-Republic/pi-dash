@@ -48,15 +48,15 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use pidash_db::orchestration::runs::{active_run_sql, latest_prior_run_sql};
-use pidash_db::orchestration::workpad::{
-    find_agent_user, make_unusable_password, AgentUserCollisionError, AGENT_DISPLAY_NAME,
-    AGENT_USERNAME, AGENT_USER_EMAIL, AGENT_USER_FIRST_NAME, AGENT_USER_INSERT_SQL,
-    AGENT_USER_LAST_NAME, AGENT_USER_PASSWORD_SQL,
-};
 use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
 use pidash_db::tx::Transaction;
 use pidash_services::dispatch::{
     consume_admission_token, AdmissionCache, DeferredConsume, LlmProfile,
+};
+use pidash_services::domain::identity::{
+    create_bot_user, find_agent_user, make_unusable_password, stamp_bot_unusable_password,
+    AgentUserCollisionError, NewBotUser, AGENT_DISPLAY_NAME, AGENT_USERNAME, AGENT_USER_EMAIL,
+    AGENT_USER_FIRST_NAME, AGENT_USER_LAST_NAME,
 };
 use pidash_services::orchestration::clock::{
     CREATE_TICKER_PARAMS, LOCK_TICKER_PARAMS, SAVE_CLOCK_PARAMS, SAVE_CLOCK_SQL,
@@ -478,71 +478,35 @@ where
             }
             return Ok(found.id);
         }
-        let id = Uuid::new_v4();
         let at = Utc::now();
-        // AGENT_USER_INSERT_SQL order (40 cols): password, last_login,
-        // id, username, mobile_number, email, display_name, first_name,
-        // last_name, avatar, avatar_asset_id, cover_image,
-        // cover_image_asset_id, date_joined, created_at, updated_at,
-        // last_location, created_location, is_superuser, is_managed,
-        // is_password_expired, is_active, is_staff, is_email_verified,
-        // is_password_autoset, is_password_reset_required, token,
-        // last_active, last_login_time, last_logout_time, last_login_ip,
-        // last_logout_ip, last_login_medium, last_login_uagent,
-        // token_updated_at, is_bot, bot_type, user_timezone,
-        // is_email_valid, masked_at. Values are the Django field
-        // defaults (`db/models/user.py`): blank CharFields land `""`,
-        // nullable ones NULL, `last_active` evaluates `timezone.now`.
-        sqlx::query(AGENT_USER_INSERT_SQL)
-            .bind("")
-            .bind(None::<DateTime<Utc>>)
-            .bind(id)
-            .bind(AGENT_USERNAME)
-            .bind(None::<String>)
-            .bind(AGENT_USER_EMAIL)
-            .bind(AGENT_DISPLAY_NAME)
-            .bind(AGENT_USER_FIRST_NAME)
-            .bind(AGENT_USER_LAST_NAME)
-            .bind("")
-            .bind(None::<Uuid>)
-            .bind(None::<String>)
-            .bind(None::<Uuid>)
-            .bind(at)
-            .bind(at)
-            .bind(at)
-            .bind("")
-            .bind("")
-            .bind(false)
-            .bind(false)
-            .bind(false)
-            .bind(true)
-            .bind(false)
-            .bind(false)
-            .bind(false)
-            .bind(false)
-            .bind("")
-            .bind(at)
-            .bind(None::<DateTime<Utc>>)
-            .bind(None::<DateTime<Utc>>)
-            .bind("")
-            .bind("")
-            .bind("email")
-            .bind("")
-            .bind(None::<DateTime<Utc>>)
-            .bind(true)
-            .bind(None::<String>)
-            .bind("UTC")
-            .bind(false)
-            .bind(None::<DateTime<Utc>>)
-            .execute(&mut **self.dispatch_tx().inner())
-            .await
-            .map_err(db)?;
-        sqlx::query(AGENT_USER_PASSWORD_SQL)
-            .bind(make_unusable_password())
-            .bind(id)
-            .execute(&mut **self.dispatch_tx().inner())
-            .await
-            .map_err(db)?;
+        // Values are the Django field defaults (`db/models/user.py`):
+        // blank CharFields land `""`, nullable ones NULL, `last_active`
+        // evaluates `timezone.now`; the unusable hash lands right after
+        // (`workpad.py:62-65`).
+        let id = create_bot_user(
+            &mut **self.dispatch_tx().inner(),
+            &NewBotUser {
+                id: None,
+                username: AGENT_USERNAME,
+                email: AGENT_USER_EMAIL,
+                password_hash: "",
+                display_name: AGENT_DISPLAY_NAME,
+                first_name: AGENT_USER_FIRST_NAME,
+                last_name: AGENT_USER_LAST_NAME,
+                is_password_autoset: false,
+                bot_type: None,
+                now: at,
+            },
+        )
+        .await
+        .map_err(db)?;
+        stamp_bot_unusable_password(
+            &mut **self.dispatch_tx().inner(),
+            id,
+            &make_unusable_password(),
+        )
+        .await
+        .map_err(db)?;
         Ok(id)
     }
 

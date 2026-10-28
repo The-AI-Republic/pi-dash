@@ -74,6 +74,7 @@ use pidash_services::auth_session::guards as guards_kernel;
 use pidash_services::auth_session::queries as queries_kernel;
 use pidash_services::auth_session::shapes as shapes_kernel;
 use pidash_services::auth_session::tasks as tasks_kernel;
+use pidash_services::domain::identity;
 
 use crate::assistant::governor::throttle_check;
 use crate::assistant::throttles::ThrottleSpec;
@@ -666,72 +667,13 @@ fn display_name_for(email: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// User writes (`adapter/base.py:220-360`)
+// User writes (`adapter/base.py:220-360`, via `domain::identity`)
 // ---------------------------------------------------------------------------
-
-/// `User(...)` + first `save()` for a sign-up
-/// (`base.py:296-328`): identity + names + the `set_password` hash;
-/// every other column takes its model default (`save()` then fills
-/// `display_name` from the email local part and leaves `token` empty
-/// — `token_updated_at` is still null).
-async fn create_user(
-    pool: &sqlx::PgPool,
-    email: &str,
-    password: &str,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Result<uuid::Uuid, sqlx::Error> {
-    let id = uuid::Uuid::new_v4();
-    let username = uuid::Uuid::new_v4().simple().to_string();
-    sqlx::query(
-        r#"INSERT INTO "users"
-           ("id", "password", "username", "email", "first_name", "last_name",
-            "avatar", "date_joined", "created_at", "updated_at", "last_location",
-            "created_location", "is_superuser", "is_managed", "is_password_expired",
-            "is_active", "is_staff", "is_email_verified", "is_password_autoset",
-            "is_password_reset_required", "token", "last_active", "last_login_time",
-            "last_logout_time", "last_login_ip", "last_logout_ip", "last_login_medium",
-            "last_login_uagent", "token_updated_at", "is_bot", "bot_type",
-            "user_timezone", "is_email_valid", "masked_at", "display_name",
-            "mobile_number", "cover_image")
-           VALUES ($1,$2,$3,$4,'','', '', $5, $5, $5, '', '',
-            false,false,false, true,false,false,false,false, '', NULL, NULL,
-            NULL, '', '', 'email', '', NULL, false, NULL,
-            'UTC', false, NULL, $6,
-            NULL, NULL)"#,
-    )
-    .bind(id)
-    .bind(encode_password(password))
-    .bind(&username)
-    .bind(email)
-    .bind(now)
-    .bind(display_name_for(email))
-    .execute(pool)
-    .await?;
-    Ok(id)
-}
-
-/// `post_save` receiver `create_user_notification` (`user.py:307-321`):
-/// a preferences row on every non-bot create (all five flags true).
-/// Same insert as the magic sign-up path (`magic.rs`).
-async fn insert_notification_prefs(
-    pool: &sqlx::PgPool,
-    now: chrono::DateTime<chrono::Utc>,
-    user_id: &uuid::Uuid,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "INSERT INTO \"user_notification_preferences\" (\"id\", \"created_at\", \"updated_at\", \
-         \"created_by_id\", \"updated_by_id\", \"deleted_at\", \"user_id\", \"workspace_id\", \
-         \"project_id\", \"property_change\", \"state_change\", \"comment\", \"mention\", \
-         \"issue_completed\") \
-         VALUES ($1, $2, $2, NULL, NULL, NULL, $3, NULL, NULL, TRUE, TRUE, TRUE, TRUE, TRUE)",
-    )
-    .bind(uuid::Uuid::new_v4())
-    .bind(now)
-    .bind(user_id)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
+// NOTE: user create, the `create_user_notification` post_save insert and
+// the signup profile row moved to `domain::identity::create_user`
+// (PIDASHCONV-1525), which runs the entity insert (the `after_save` hook
+// fires) plus the service-level profile row. The signup arm below calls
+// it directly.
 
 /// `save_user_data` (`base.py:220-234`): the login stamps plus the
 /// `is_active` flip in one `UPDATE`. The activation mail is published by
@@ -746,20 +688,25 @@ async fn save_user_data(
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), sqlx::Error> {
     let token = fresh_user_token();
-    sqlx::query(
-        r#"UPDATE "users" SET "last_login_medium" = 'email', "last_active" = $2,
-           "last_login_time" = $2, "last_login_ip" = $3, "last_login_uagent" = $4,
-           "token_updated_at" = $2, "token" = $5, "is_active" = true
-           WHERE "id" = $1"#,
+    identity::save_user_data(
+        pool,
+        user_id,
+        &identity::LoginStamps {
+            medium: Some("email"),
+            login_ip: ip.as_deref(),
+            login_uagent: user_agent.as_deref(),
+            avatar: None,
+            avatar_asset_id: None,
+            display_name: None,
+            is_staff: None,
+            // The email stamps never bump `updated_at` (preserved verbatim;
+            // see `domain::identity`).
+            touch_updated_at: false,
+            rotated_token: &token,
+            now,
+        },
     )
-    .bind(user_id)
-    .bind(now)
-    .bind(ip)
-    .bind(user_agent)
-    .bind(token)
-    .execute(pool)
-    .await?;
-    Ok(())
+    .await
 }
 
 /// Fresh `User.save()` token: `uuid4().hex + uuid4().hex`
@@ -841,25 +788,10 @@ async fn stamp_last_login(
     Ok(())
 }
 
-/// `Profile.objects.get_or_create(user=user)` for
-/// `get_redirection_path` (`redirection_path.py:11`): the insert
-/// carries every model default. Also serves the adapter
-/// `Profile.objects.create(user=user)` (`base.py:342`) at signup,
-/// where the SELECT always misses on the fresh user id.
-async fn get_or_create_profile(
-    pool: &sqlx::PgPool,
-    user_id: uuid::Uuid,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Result<(bool, Option<uuid::Uuid>), sqlx::Error> {
-    let row: Option<(bool, Option<uuid::Uuid>)> = sqlx::query_as(
-        r#"SELECT "is_onboarded", "last_workspace_id" FROM "profiles" WHERE "user_id" = $1"#,
-    )
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await?;
-    if let Some(found) = row {
-        return Ok(found);
-    }
+/// `get_random_color` (`utils/color.py:9-14`): `"#"` + six hexdigits.
+/// The uuid draw is lowercase-only (see `domain::identity`); no test can
+/// pin a random color.
+fn profile_background_color() -> String {
     let color_suffix: String = uuid::Uuid::new_v4()
         .simple()
         .to_string()
@@ -867,34 +799,7 @@ async fn get_or_create_profile(
         .filter(|c| c.is_ascii_hexdigit())
         .take(6)
         .collect();
-    sqlx::query(
-        r#"INSERT INTO "profiles"
-           ("id", "user_id", "created_at", "updated_at", "theme", "is_app_rail_docked",
-            "is_tour_completed", "onboarding_step", "use_case", "role", "is_onboarded",
-            "last_workspace_id", "billing_address_country", "billing_address",
-            "has_billing_address", "company_name", "notification_view_mode",
-            "is_smooth_cursor_enabled", "is_mobile_onboarded", "mobile_onboarding_step",
-            "mobile_timezone_auto_set", "language", "start_of_the_week", "goals",
-            "background_color", "is_navigation_tour_completed",
-            "has_marketing_email_consent", "is_subscribed_to_changelog",
-            "product_tour", "settings")
-           VALUES ($1,$2,$3,$3, '{}', true,
-            false, '{"profile_complete": false, "workspace_create": false, "workspace_invite": false, "workspace_join": false}'::jsonb, NULL, NULL, false,
-            NULL, 'INDIA', NULL,
-            false, '', 'full',
-            false, false, '{"profile_complete": false, "workspace_create": false, "workspace_join": false}'::jsonb,
-            false, 'en', 0, '{}',
-            $4, false,
-            false, false,
-            '{"work_items": false, "cycles": false, "modules": false, "intake": false, "pages": false}'::jsonb, '{}') "#,
-    )
-    .bind(uuid::Uuid::new_v4())
-    .bind(user_id)
-    .bind(now)
-    .bind(format!("#{color_suffix}"))
-    .execute(pool)
-    .await?;
-    Ok((false, None))
+    format!("#{color_suffix}")
 }
 
 /// `get_redirection_path` (`redirection_path.py:8-46`): onboarding
@@ -905,8 +810,14 @@ async fn redirection_path(
     user_id: uuid::Uuid,
     user_email: &str,
 ) -> Result<String, sqlx::Error> {
-    let (is_onboarded, last_workspace_id) =
-        get_or_create_profile(pool, user_id, chrono::Utc::now()).await?;
+    let path = identity::get_or_create_profile(
+        pool,
+        user_id,
+        chrono::Utc::now(),
+        &profile_background_color(),
+    )
+    .await?;
+    let (is_onboarded, last_workspace_id) = (path.is_onboarded, path.last_workspace_id);
     if !is_onboarded {
         return Ok("onboarding".to_owned());
     }
@@ -1812,37 +1723,54 @@ async fn serve_email_form(state: &AppState, req: &EmailRequest, current_site: &s
         }
         kernel::EmailForm::SignUp => {
             let now = chrono::Utc::now();
-            let (user_id, password_field) =
-                match create_user(pool, &normalized, &raw_password, now).await {
-                    Ok(id) => {
-                        let row = match user_by_email(pool, &normalized).await {
-                            Ok(row) => row,
-                            Err(_) => return server_error(),
-                        };
-                        match row {
-                            Some(row) => (id, row.password),
-                            None => return server_error(),
-                        }
+            let Some(orm) = state.orm() else {
+                return server_error();
+            };
+            // `User(...)` + first `save()` (`base.py:296-328`) with the
+            // `post_save` preferences row (`user.py:307`) and the adapter
+            // `Profile.objects.create(user=user)` (`base.py:342`), all inside
+            // `domain::identity::create_user`. The profile lands for every
+            // new user on both surfaces (PIDASHCONV-879).
+            let created = identity::create_user(
+                orm,
+                &identity::NewUser {
+                    id: None,
+                    email: &normalized,
+                    username: uuid::Uuid::new_v4().simple().to_string(),
+                    password_hash: encode_password(&raw_password),
+                    first_name: "",
+                    last_name: "",
+                    display_name: display_name_for(&normalized),
+                    avatar: "",
+                    is_email_verified: false,
+                    is_password_autoset: false,
+                    // Preserved verbatim (see `domain::identity`): the email
+                    // insert stores `last_active = NULL`.
+                    last_active: None,
+                    login_ip: Some(""),
+                    login_uagent: Some(""),
+                    is_bot: false,
+                    now,
+                    profile: Some(identity::NewProfile {
+                        company_name: "",
+                        background_color: profile_background_color(),
+                    }),
+                },
+            )
+            .await;
+            let (user_id, password_field) = match created {
+                Ok(id) => {
+                    let row = match user_by_email(pool, &normalized).await {
+                        Ok(row) => row,
+                        Err(_) => return server_error(),
+                    };
+                    match row {
+                        Some(row) => (id, row.password),
+                        None => return server_error(),
                     }
-                    Err(_) => return server_error(),
-                };
-            // `post_save` fires on the first `save()` (`user.py:307`),
-            // before the authenticated tail below.
-            if insert_notification_prefs(pool, now, &user_id)
-                .await
-                .is_err()
-            {
-                return server_error();
-            }
-            // `Profile.objects.create(user=user)` (`adapter/base.py:342`):
-            // the adapter creates the profile for every new user on both
-            // surfaces. The app branch used to get it only incidentally via
-            // `redirection_path`'s get-or-create, and the space branch never
-            // did (PIDASHCONV-879). `user_id` is fresh, so the SELECT inside
-            // always misses and this is exactly Django's create.
-            if get_or_create_profile(pool, user_id, now).await.is_err() {
-                return server_error();
-            }
+                }
+                Err(_) => return server_error(),
+            };
             run_authenticated(
                 pool,
                 state,

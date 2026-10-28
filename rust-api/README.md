@@ -421,12 +421,16 @@ runner_session,assistant_user_llm_config,assistant_message
 ```
 
 Then copy the 22 files over `crates/db/src/entity/` and re-apply the
-three mechanical cleanups (the generator rewrites them): delete the
+four mechanical cleanups (the generator rewrites them): delete the
 `belongs_to` relations (plus `Related` impls) pointing at tables outside
 the §4 set — the compiler lists them as unresolved `super::<table>`
-paths; restore the module doc on `mod.rs` with the new Django SHA; and
-restore the `#[cfg(test)] mod parity;` declaration. Finish with
-`cargo fmt`, the `entity::parity` tests below, and the usual clippy run.
+paths; restore the module doc on `mod.rs` with the new Django SHA;
+restore the `#[cfg(test)] mod parity;` declaration; and delete the empty
+`impl ActiveModelBehavior for ActiveModel {}` the generator restores in
+`users.rs` (the hand-written impl lives in `users_hooks.rs`, which the
+generator never touches — keeping both fails the build with duplicate
+impls, loud by design). Finish with `cargo fmt`, the `entity::parity`
+tests below, and the usual clippy run.
 
 Schema parity: `crates/db/src/entity/parity.rs` compares every entity's
 table name, column names, column types and nullability with

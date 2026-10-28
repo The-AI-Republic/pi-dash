@@ -1526,7 +1526,7 @@ impl RunnerPorts for LivePorts {
             .await
             .map_err(|error| PortError::Transport(error.to_string()))?;
         let (user, _) =
-            pidash_db::orchestration::workpad::get_agent_system_user(&mut tx, chrono::Utc::now())
+            pidash_services::domain::identity::get_agent_system_user(&mut tx, chrono::Utc::now())
                 .await
                 .map_err(|error| PortError::Transport(error.to_string()))?;
         tx.commit()

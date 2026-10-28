@@ -34,12 +34,12 @@ use std::future::Future;
 use std::pin::Pin;
 
 use pidash_db::config::CloudAgentSettings;
-use pidash_db::orchestration::workpad::AgentUserCollisionError;
 use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
 use pidash_db::tx::Transaction;
 use pidash_services::dispatch::admission::AdmissionCache;
 use pidash_services::dispatch::policy::UserFlags;
 use pidash_services::dispatch::LlmProfile;
+use pidash_services::domain::identity::AgentUserCollisionError;
 use pidash_services::orchestration::clock::{
     ClockWrite, ProjectClockPolicy, CREATE_TICKER_PARAMS, LOCK_TICKER_PARAMS, SAVE_CLOCK_PARAMS,
     SAVE_CLOCK_SQL,
