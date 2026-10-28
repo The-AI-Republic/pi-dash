@@ -15,7 +15,7 @@
 //! Only the methods above are owned: `PUT`/`PATCH`/`DELETE` on the
 //! collection and `POST`/`PUT` on the detail proxy to Django (its
 //! 405-after-auth and metadata responses live there), as do `OPTIONS`
-//! and `HEAD`-adjacent handling per [`super::owned`].
+//! and `HEAD`-adjacent handling per [`crate::edge::owned`].
 //!
 //! Layering: permission gates in
 //! `pidash_services::app_intake::permissions`, serializer key order in
