@@ -26,6 +26,7 @@
 //!   `py_number_str`, `python_int`, `render_number`, `py_dumps`,
 //!   `py_title`, `*_is_falsy`).
 
+use icu_properties::{props::GeneralCategory, CodePointMapData};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -294,10 +295,33 @@ pub fn layout_py_float(rendered: &str, value: f64) -> String {
     out
 }
 
-/// Python printability for `repr()` escaping: controls, DEL and the
-/// U+2028/2029 line boundaries are non-printable.
+/// Python printability for `repr()` escaping: a char is printable
+/// unless its Unicode general category is Other (`Cc`/`Cf`/`Cs`/
+/// `Co`/`Cn`) or Separator (`Zl`/`Zp`/`Zs`) — except the ASCII
+/// space, which stays printable. This is CPython
+/// `str.isprintable` per char (PIDASHCONV-1624; the rule holds
+/// with zero mismatches against the 3.12 interpreter over the
+/// full BMP plus astral `E0000`–`E0FFF`/`F0000`–`10FFFF`).
+/// Categories come from the linked ICU4X tables (Unicode 16), so a
+/// code point assigned after CPython 3.12's Unicode 15 prints raw
+/// here while 3.12 escapes it — no caller input is near that
+/// boundary. (`Surrogate` is unreachable: Rust `char` never holds
+/// one; it is listed so the category rule reads complete.)
 pub fn py_printable(c: char) -> bool {
-    !(c.is_control() || c == '\u{7f}' || c == '\u{2028}' || c == '\u{2029}')
+    if c == ' ' {
+        return true;
+    }
+    !matches!(
+        CodePointMapData::<GeneralCategory>::new().get(c),
+        GeneralCategory::Control
+            | GeneralCategory::Format
+            | GeneralCategory::Surrogate
+            | GeneralCategory::PrivateUse
+            | GeneralCategory::Unassigned
+            | GeneralCategory::LineSeparator
+            | GeneralCategory::ParagraphSeparator
+            | GeneralCategory::SpaceSeparator
+    )
 }
 
 /// Python truthiness over a JSON value.
@@ -494,6 +518,41 @@ mod tests {
         // them through — that divergence stays local).
         assert_eq!(py_repr_str("\u{2028}"), "'\\u2028'");
         assert_eq!(py_repr_str("\u{2029}"), "'\\u2029'");
+    }
+
+    // PIDASHCONV-1624: printability follows CPython `str.isprintable`
+    // (general category C*/Z* except U+0020). Every vector below was
+    // verified against the 3.12 interpreter; the rule itself swept
+    // clean over the full BMP plus astral E0000-E0FFF/F0000-10FFFF.
+    #[test]
+    fn py_repr_str_escapes_cpython_nonprintables() {
+        // The issue's vectors: nbsp, unassigned, private-use.
+        assert_eq!(py_repr_str("\u{a0}"), "'\\xa0'");
+        assert_eq!(py_repr_str("\u{378}"), "'\\u0378'");
+        assert_eq!(py_repr_str("\u{e000}"), "'\\ue000'");
+        // One escape per remaining category: Cf (soft hyphen, ZWJ,
+        // BOM), Zs (ogham space, en quad), astral Co/Cn.
+        assert_eq!(py_repr_str("\u{ad}"), "'\\xad'");
+        assert_eq!(py_repr_str("\u{200d}"), "'\\u200d'");
+        assert_eq!(py_repr_str("\u{feff}"), "'\\ufeff'");
+        assert_eq!(py_repr_str("\u{1680}"), "'\\u1680'");
+        assert_eq!(py_repr_str("\u{2000}"), "'\\u2000'");
+        assert_eq!(py_repr_str("\u{f0000}"), "'\\U000f0000'");
+        assert_eq!(py_repr_str("\u{e0000}"), "'\\U000e0000'");
+        // Printable near-misses stay raw: the ASCII space, U+0377
+        // (Ll, next to unassigned U+0378), U+FE00 (Mn variation
+        // selector), accented letters, emoji, the empty string.
+        assert_eq!(py_repr_str(" "), "' '");
+        assert_eq!(py_repr_str("\u{377}"), "'\u{377}'");
+        assert_eq!(py_repr_str("\u{fe00}"), "'\u{fe00}'");
+        assert_eq!(py_repr_str("é"), "'é'");
+        assert_eq!(py_repr_str("😀"), "'😀'");
+        assert_eq!(py_repr_str(""), "''");
+        // NUL + CR: the overlay's `repr_string_matches_cpython_quoting`
+        // pins these through its own copy today; the OVL-10 SDK swap
+        // (PIDASHCONV-1548) re-pins them onto this function.
+        assert_eq!(py_repr_str("\u{0}"), "'\\x00'");
+        assert_eq!(py_repr_str("a\nb\tc\rd"), "'a\\nb\\tc\\rd'");
     }
 
     #[test]

@@ -40,6 +40,12 @@ uuid = "1"
 # as pidash-api (no lock churn, edge-only).
 hmac = "0.12.1"
 sha2 = "0.10.9"
+# Printability table for `py_printable` (PIDASHCONV-1624): CPython
+# `str.isprintable` is a general-category rule (C*/Z* except U+0020),
+# which needs real Unicode tables for unassigned/private-use.
+# Same locked icu_properties 2.3.x the workspace builds via
+# idna_adapter (no lock churn); default features (`compiled_data`).
+icu_properties = "2"
 
 [dev-dependencies]
 # Envelope tests read bodies back with `axum::body::to_bytes`
