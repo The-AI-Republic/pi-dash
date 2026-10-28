@@ -1842,32 +1842,6 @@ where
 
 const GITHUB_MIRROR_UPDATE_SQL: &str = "UPDATE issues SET name = $2, description_html = $3, description_stripped = $4, description_json = $5, created_by_id = $6, updated_by_id = $6, completed_at = $7, updated_at = $8 WHERE id = $1";
 
-/// Adopt the resolved default on a stateless mirror (the `state is None`
-/// branch, `issue.py:288-301`, reached from the github update arm's full
-/// `save()`): `self.state = default_state`, persisted bare — no
-/// `updated_at` touch here, because in Python the touch comes from the
-/// same `save()`'s `auto_now`, which the sibling
-/// [`update_github_mirror_issue`] call carries. The driver calls adopt
-/// first, then the full update, exactly as today; a NULL state keeps the
-/// row stateless, as in Python.
-pub async fn adopt_issue_state<'e, E>(
-    ex: E,
-    issue_id: Uuid,
-    state_id: Option<Uuid>,
-) -> Result<u64, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(ADOPT_ISSUE_STATE_SQL)
-        .bind(issue_id)
-        .bind(state_id)
-        .execute(ex)
-        .await
-        .map(|done| done.rows_affected())
-}
-
-const ADOPT_ISSUE_STATE_SQL: &str = "UPDATE issues SET state_id = $2 WHERE id = $1";
-
 /// The ticker state-move write (`scheduling.py:700,1113,1468`):
 /// `save(update_fields=["state", "updated_at"])` — ONLY these columns.
 /// Contrast [`update_issue_state`], which additionally stamps
@@ -2456,11 +2430,6 @@ mod tests {
             "UPDATE issues SET name = $2, description_html = $3, description_stripped = $4, description_json = $5, created_by_id = $6, updated_by_id = $6, completed_at = $7, updated_at = $8 WHERE id = $1"
         );
         assert!(GITHUB_MIRROR_UPDATE_SQL.contains("created_by_id = $6"));
-        // Adopt: state only, no `updated_at` (the sibling save carries it).
-        assert_eq!(
-            ADOPT_ISSUE_STATE_SQL,
-            "UPDATE issues SET state_id = $2 WHERE id = $1"
-        );
     }
 
     #[test]
@@ -3779,11 +3748,11 @@ mod tests {
 
     /// The sync/ticker/automation bare writes land their exact columns:
     /// the mirror INSERT carries every sentinel (a bind-order swap fails),
-    /// adopt sets state without touching `updated_at`, the github arm
-    /// rewrites the render triple + `completed_at`, the git arm passes its
-    /// stripped value through untouched, the ticker move leaves
-    /// `updated_by_id` alone, and the bulks touch one column each
-    /// (including the NULL-state QUIRK-5 close).
+    /// the github arm rewrites the render triple + `completed_at`, the git
+    /// arm passes its stripped value through untouched, the ticker move
+    /// leaves `updated_by_id` alone, and the bulks touch one column each
+    /// (including the NULL-state QUIRK-5 close). (Adopt is in-memory only
+    /// per PIDASHCONV-1576 — no persist, no leg here.)
     #[tokio::test]
     async fn sync_ticker_automation_bare_roundtrip() {
         let Some(pool) = live_pool().await else {
@@ -3947,19 +3916,6 @@ mod tests {
         .expect("sequence reread");
         assert_eq!(seq, (issue_id, 7, None, false));
 
-        // Adopt: state lands, `updated_at` untouched.
-        let rows = adopt_issue_state(&pool, issue_id, Some(done_id))
-            .await
-            .expect("adopt");
-        assert_eq!(rows, 1);
-        let adopted: (Option<Uuid>, DateTime<Utc>) =
-            sqlx::query_as("SELECT state_id, updated_at FROM issues WHERE id = $1")
-                .bind(issue_id)
-                .fetch_one(&pool)
-                .await
-                .expect("adopt reread");
-        assert_eq!(adopted, (Some(done_id), t0));
-
         // Github arm: render triple + completed + auto_now; state kept.
         let t1 = now_micros();
         let rows = update_github_mirror_issue(
@@ -3992,7 +3948,7 @@ mod tests {
                 "<p>gh</p>".to_owned(),
                 "gh-stripped".to_owned(),
                 Some(t1),
-                Some(done_id),
+                None,
                 t1,
             )
         );
@@ -4031,7 +3987,7 @@ mod tests {
                 "raw safe_render value".to_owned(),
                 Some("gitlab".to_owned()),
                 Some("99".to_owned()),
-                Some(done_id),
+                None,
             )
         );
 
