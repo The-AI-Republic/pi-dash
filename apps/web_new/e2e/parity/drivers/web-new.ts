@@ -495,6 +495,15 @@ export function moduleVisibleTexts(nodes: Element[]): string[] {
   return nodes.map(visibleText).filter((text) => text !== "");
 }
 
+/**
+ * One page per element (NEWFRONT-926). The tree wraps a row inside each
+ * tree item, so naming both ids alone would report every tree row twice;
+ * a search/filter result is the bare row rendered straight into the list,
+ * which the second half scopes to (PAGE-085/090).
+ */
+export const PAGES_NESTED_ROW_SELECTOR =
+  '[data-testid="page-tree-item"], [data-testid="pages-list"] > [data-testid="page-row"]';
+
 export class WebNewDriver implements ParityDriver {
   readonly target: ParityTarget = "web_new";
   readonly page: Page;
@@ -45085,7 +45094,7 @@ export class WebNewDriver implements ParityDriver {
    * (PAGE-085/090).
    */
   private pagesNestedRows(): Locator {
-    return this.page.getByTestId("page-tree-item").or(this.page.getByTestId("page-row"));
+    return this.page.locator(PAGES_NESTED_ROW_SELECTOR);
   }
 
   private pagesNestedRow(title: string): Locator {
@@ -45193,13 +45202,15 @@ export class WebNewDriver implements ParityDriver {
   async pagesNestedExpand(title: string): Promise<void> {
     const row = this.pagesNestedRow(title);
     await row.scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
-    const before = await this.pagesNestedRows().count();
+    // Count the tree structure only: a tree item wraps a row, so counting
+    // both test ids would read two per page and a "grew" check would pass
+    // before the children arrive (PAGE-085).
+    const before = await this.page.getByTestId("page-tree-item").count();
     await row.getByRole("button", { name: `Expand sub-pages of ${title}` }).click();
     // The children arrive on their own read, so the expansion only settles
     // once the row count grows (PAGE-085).
     await this.page.waitForFunction(
-      (expected: number) =>
-        document.querySelectorAll('[data-testid="page-tree-item"], [data-testid="page-row"]').length > expected,
+      (expected: number) => document.querySelectorAll('[data-testid="page-tree-item"]').length > expected,
       before,
       { timeout: WebNewDriver.WAIT_MS }
     );
@@ -45398,22 +45409,25 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async pagesNestedPaletteFind(query: string): Promise<string[]> {
-    await this.page.keyboard.press("Control+k");
-    const box = this.page.getByRole("combobox");
+    // The shell opens the palette on mod+k — Cmd on macOS, Control
+    // elsewhere (SHELL-080). The picker is a dialog whose filter input
+    // takes the query directly; the nested page action steps into the page
+    // picker, where each option names the page and its parent path
+    // (PAGE-090).
+    await this.pressPaletteOpenChord();
+    const box = this.paletteInput();
     await box.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
     // Step into the page picker, then filter it by the page name.
     await box.fill("Open a page");
     await this.page.waitForTimeout(300);
     await box.press("Enter");
-    await this.page
-      .getByRole("listbox", { name: "Options" })
-      .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
     await box.fill(query);
     await this.page.waitForTimeout(300);
-    const rows = await this.page
-      .getByRole("option")
-      .evaluateAll((nodes) => nodes.map((node) => (node.textContent ?? "").trim()));
-    await this.page.keyboard.press("Escape");
+    const rows = await this.paletteItems().evaluateAll((nodes) => nodes.map((node) => (node.textContent ?? "").trim()));
+    // The first Escape only clears the filter query; close the palette
+    // fully so the next scenario step acts on the list, not on the dialog
+    // (PAGE-090).
+    await this.resetPaletteToClosed();
     return rows.filter((row) => row !== "");
   }
 }

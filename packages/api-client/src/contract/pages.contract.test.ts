@@ -5,10 +5,11 @@
 // parity/specs/pages.md §11.1–§11.5). Every write runs on a probe page
 // created for this suite and archived then deleted in finally, so the
 // seeded "Contract page" is never mutated. The nested fields and the
-// `parent` children read are the backend delta recorded in
-// parity/api-client-contracts.md (NEWFRONT-850 / PDASHOSS01-270), so this
-// suite deliberately asserts only the live surface: the current list
-// ignores `parent` and answers top-level rows.
+// `parent` children read are the nested backend delta recorded in
+// parity/api-client-contracts.md (NEWFRONT-850 / PDASHOSS01-270). That
+// contract is live now, so the suite asserts it: every row carries
+// `parent_id` and `sub_pages_count`, and `?parent=` answers that page's
+// children instead of the top-level collection.
 import { describe, expect, it } from "vitest";
 import type { ApiClient } from "../client.js";
 import {
@@ -94,19 +95,20 @@ describe.skipIf(!contractEnabled)("pages REST contract", () => {
       expect(created.logo_props.in_use).toBe("emoji");
       expect(created.description_html).toContain("Probe body");
 
-      // The nested delta: the live list ignores `parent` and answers the
-      // top-level collection, the page is in it, and no nested fields yet.
+      // The nested delta: a top-level row is in the top-level collection,
+      // carries a null parent and counts no children, and the fields are
+      // present rather than absent.
       const rows = await listPages(client, CONTRACT_WORKSPACE, projectId);
       const listed = rows.find((row) => row.id === created.id);
       expect(listed).toBeDefined();
       expect(listed?.is_favorite).toBe(false);
       expect(listed?.project_ids).toContain(projectId);
-      expect(listed?.parent_id).toBeUndefined();
-      expect(listed?.sub_pages_count).toBeUndefined();
-      // Until PDASHOSS01-270 the live list ignores `parent` and answers the
-      // same top-level collection, so a children read is not a child list.
+      expect(listed?.parent_id).toBeNull();
+      expect(listed?.sub_pages_count).toBe(0);
+      // `?parent=` scopes the read to that page's children, so a leaf
+      // answers an empty list rather than the top-level collection.
       const byParent = await listPages(client, CONTRACT_WORKSPACE, projectId, { parent: created.id });
-      expect(byParent.map((row) => row.id).sort()).toEqual(rows.map((row) => row.id).sort());
+      expect(byParent).toEqual([]);
 
       const searched = await listPages(client, CONTRACT_WORKSPACE, projectId, { search: `${PROBE} create` });
       expect(searched.map((row) => row.id)).toContain(created.id);
@@ -115,6 +117,8 @@ describe.skipIf(!contractEnabled)("pages REST contract", () => {
       expect(detail.id).toBe(created.id);
       expect(detail.name).toBe(`${PROBE} create`);
       expect(detail.description_html).toContain("Probe body");
+      expect(detail.parent_id).toBeNull();
+      expect(detail.sub_pages_count).toBe(0);
       expect(detail.issue_ids).toEqual([]);
       expect(detail.label_ids).toEqual([]);
     } finally {
