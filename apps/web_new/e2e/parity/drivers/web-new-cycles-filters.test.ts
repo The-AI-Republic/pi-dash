@@ -14,7 +14,7 @@ import { WebNewDriver } from "./web-new.js";
 
 type Call = { path: string; method: string; args: unknown[] };
 
-const CHAIN = ["first", "last", "nth", "getByRole", "locator", "getByTestId"];
+const CHAIN = ["first", "last", "nth", "getByRole", "locator", "getByTestId", "or"];
 const ACTIONS = ["count", "click", "innerText", "getAttribute", "isVisible", "waitFor"];
 
 function render(args: unknown[]): string {
@@ -197,9 +197,15 @@ describe("cyclesFilterPick", () => {
     await script.driver().cyclesFilterPick("Status", "Yet to start");
     const block = pickBlockPath("Status");
     const picks = script.calls.filter((call) => call.path === block && call.method === "getByRole");
-    expect(picks).toHaveLength(1);
-    expect(picks[0]?.args).toEqual(["button", { name: "Yet to start" }]);
-    expect(script.callsFor(`${block}.getByRole("button",{"name":"Yet to start"})`, "click")).toHaveLength(1);
+    expect(picks.map((call) => call.args)).toEqual([
+      ["checkbox", { name: "Yet to start" }],
+      ["radio", { name: "Yet to start" }],
+    ]);
+    const checked = `${block}.getByRole("checkbox",{"name":"Yet to start"})`;
+    // The checkbox attempt is widened with the radio fallback, and the
+    // click lands on that combined locator rather than either alone.
+    expect(script.calls.filter((call) => call.path === checked && call.method === "or")).toHaveLength(1);
+    expect(script.callsFor(`${checked}.or({})`, "click")).toHaveLength(1);
   });
 });
 

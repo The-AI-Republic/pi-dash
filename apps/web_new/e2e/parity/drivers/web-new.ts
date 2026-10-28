@@ -9,6 +9,7 @@ import { readFileSync, statSync } from "node:fs";
 
 import { expect, test, type CDPSession, type Locator, type Page, type Route, type WebSocket } from "@playwright/test";
 
+import { sessionBrowserCookies, signInSessionRetry } from "../helpers/api";
 import { bridgeParityAssetBucket } from "../helpers/asset-bucket.js";
 import { calendarDayLabel, isoDayOffset, localTodayISO } from "../helpers/calendar-dates.js";
 import { descriptionAfterHeading } from "./modal-copy.js";
@@ -1659,6 +1660,53 @@ export class WebNewDriver implements ParityDriver {
     return todo("rulesReload");
   }
 
+  /**
+   * Whether this build admits a signed-out visitor with a password. A web
+   * build paints the credential card; the desktop build and a cloud build
+   * have no password form at all (identity comes from the provider or the
+   * shell), so they are entered by planting the session instead. Probing
+   * with cookies cleared is safe: only the ensure-signed-in path asks, and
+   * that path ends signed in either way.
+   */
+  private async entryAdmitsPassword(): Promise<boolean> {
+    await this.page.context().clearCookies();
+    await this.page.goto("/", { waitUntil: "domcontentloaded", timeout: 60_000 });
+    const formless = this.page
+      .getByRole("heading", { name: "The desktop app can't sign you in yet" })
+      .or(this.page.locator('section[aria-label="Cloud sign-in"]'));
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    while (Date.now() < deadline) {
+      if (
+        await this.authEmailField()
+          .isVisible()
+          .catch(() => false)
+      )
+        return true;
+      if (
+        await formless
+          .first()
+          .isVisible()
+          .catch(() => false)
+      )
+        return false;
+      // Off the entry means a live session bounced to its workspace: this
+      // build does not paint the entry card for a signed-out visit, so the
+      // caller plants the session it wants.
+      if (new URL(this.page.url()).pathname !== "/") return false;
+      await this.page.waitForTimeout(250);
+    }
+    return true;
+  }
+
+  /** Enter a build with no password form by planting a minted session. */
+  private async enterBySession(email: string, password: string, workspaceSlug: string): Promise<void> {
+    const session = await signInSessionRetry(email, password);
+    await this.page.context().clearCookies();
+    await this.page.context().addCookies(sessionBrowserCookies(session));
+    await this.gotoShell(`/${workspaceSlug}/`);
+    await this.dismissTourIfShown();
+  }
+
   async rulesEnsureSignedIn(email: string, password: string, workspaceSlug: string): Promise<void> {
     // Shared by the rules and intake scenarios, which need any role landed
     // on one workspace before driving its surface. Sign-in is a no-op for a
@@ -1669,7 +1717,13 @@ export class WebNewDriver implements ParityDriver {
     // palette to press. Then sign out so the caller always ends on the
     // workspace it asked for. A throttled shared stack can swallow a whole
     // pass, so retry it a bounded number of times.
-    await this.openEntry();
+    // A form-less build is entered with a session and needs no further
+    // steps; the probe leaves a password build signed out on its entry, so
+    // the loop below starts where it always did.
+    if (!(await this.entryAdmitsPassword())) {
+      await this.enterBySession(email, password, workspaceSlug);
+      return;
+    }
     if (!(await this.isSignedOut().catch(() => false))) {
       await this.signOutViaCommandPalette();
     }
@@ -3536,9 +3590,12 @@ export class WebNewDriver implements ParityDriver {
     return this.page.evaluate(() => navigator.clipboard.readText());
   }
   async subscribeToggle(): Promise<string | null> {
+    // The detail header's bell button; the archived detail renders none,
+    // and a refused subscription read hides it too.
     const toggle = this.page.getByRole("button", { name: /^(Subscribe|Unsubscribe)$/ }).first();
-    if ((await toggle.count()) === 0) return null;
-    return ((await toggle.innerText()) ?? "").trim() || null;
+    if (!(await this.isShown(toggle))) return null;
+    const label = ((await toggle.innerText()) ?? "").trim();
+    return label === "" ? null : label;
   }
   async clickSubscribeToggle(): Promise<void> {
     await this.page
@@ -3918,12 +3975,17 @@ export class WebNewDriver implements ParityDriver {
   async clickListRow(name: string): Promise<void> {
     // Any visible row that names the work item: the issues list rows are
     // row-anchor links (the Issues region, or the fresh strip above it),
-    // the profile list rows are buttons.
+    // and the profile list rows are buttons.
     const issues = await this.issueRowAnchors(name);
-    const profile = this.page
+    if ((await issues.count()) > 0) {
+      await issues.first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+      await issues.first().click({ timeout: WebNewDriver.WAIT_MS });
+      return;
+    }
+    const row = this.page
       .locator('[data-testid="profile-list"] button[data-profile-row]')
-      .filter({ hasText: name });
-    const row = (await issues.count()) > 0 ? issues.first() : profile.first();
+      .filter({ hasText: name })
+      .first();
     await row.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
     await row.click({ timeout: WebNewDriver.WAIT_MS });
   }
@@ -5372,23 +5434,43 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async openArchivedIssueDetail(workspaceSlug: string, projectId: string, issueId: string): Promise<void> {
-    // Archived issues render on the archives URL itself (no browse
-    // redirect) with an archive banner above the locked detail.
-    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/archives/issues/${issueId}`);
-    await this.page.waitForLoadState("domcontentloaded");
-    const activity = this.page.getByRole("heading", { name: "Activity", exact: true });
-    const deadline = Date.now() + 75_000;
+    // The archived address renders the detail inside the archives frame:
+    // the banner proves the item loaded and the short-key crumb rendered.
+    const path = `/${workspaceSlug}/projects/${projectId}/archives/issues/${issueId}`;
+    if (!new URL(this.page.url()).pathname.replace(/\/$/, "").endsWith(`/archives/issues/${issueId}`)) {
+      await this.page.goto(path, { waitUntil: "domcontentloaded", timeout: 120_000 });
+    }
+    const content = this.archivesContent();
+    const deadline = Date.now() + 120_000;
     for (;;) {
       if ((await this.page.getByText(/not found|does not exist|went wrong/i).count()) > 0)
         throw new Error(`[parity] archived detail for ${issueId} rendered an error state (${this.page.url()}).`);
-      try {
-        await activity.first().waitFor({ timeout: Math.max(1_000, deadline - Date.now()) });
-        return;
-      } catch {
-        if (Date.now() >= deadline)
-          throw new Error(`[parity] Activity never rendered for archived ${issueId} (current: ${this.page.url()}).`);
-      }
+      const ready = await this.page
+        .waitForFunction(
+          () => {
+            const root = document.querySelector('[data-testid="archives-content"]');
+            if (root === null) return false;
+            return root.querySelector('[data-testid="archived-detail-banner"]') !== null;
+          },
+          undefined,
+          { timeout: Math.max(1_000, Math.min(5_000, deadline - Date.now())) }
+        )
+        .then(
+          () => true,
+          () => false
+        );
+      if (ready) break;
+      if (Date.now() >= deadline)
+        throw new Error(`[parity] archived detail for ${issueId} never rendered (current: ${this.page.url()}).`);
     }
+    // The detail body reads once; the loading skeleton must give way to
+    // either the record or the shared missing state before a caller reads
+    // the page, so a held fetch never reads as an empty detail.
+    await content
+      .getByRole("status", { name: "Loading work item" })
+      .first()
+      .waitFor({ state: "hidden", timeout: 120_000 })
+      .catch(() => undefined);
   }
 
   /** Any open date calendar: every picker testids its calendar *-calendar, and closed popovers unmount. */
@@ -7478,12 +7560,15 @@ export class WebNewDriver implements ParityDriver {
       return;
     }
     await this.page.keyboard.press("Escape");
-    await this.profileDisplayPanel()
+    const panels = this.page.getByTestId("display-options-panel").or(this.profileDisplayPanel());
+    await panels
+      .first()
       .waitFor({ state: "hidden", timeout: 10_000 })
       .catch(async () => {
         // Focus can sit outside the popover, so fall back to the trigger.
-        await this.profileDisplayTrigger().click({ timeout: WebNewDriver.WAIT_MS });
-        await this.profileDisplayPanel().waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
+        await this.openDisplayPanelAny();
+        await this.page.keyboard.press("Escape");
+        await panels.first().waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
       });
   }
 
@@ -7517,92 +7602,152 @@ export class WebNewDriver implements ParityDriver {
     return (await this.profileDisplayTrigger().count()) > 0;
   }
 
+  /**
+   * The open Display panel. Two components render one: the shared issues
+   * DisplayControl and the profile tab's own menu, each under its own
+   * testid, so a page carrying one never matches the other. Opening goes
+   * through whichever trigger the page offers.
+   */
+  private async openDisplayPanelAny(): Promise<Locator> {
+    if (await this.isProfileDisplaySurface()) {
+      await this.profileDisplayTrigger().click({ timeout: WebNewDriver.WAIT_MS });
+      const profile = this.profileDisplayPanel();
+      await profile.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+      return profile;
+    }
+    const shared = this.page.getByTestId("display-options-panel").first();
+    if (await this.isShown(shared)) return shared;
+    await this.projectDisplayTrigger().click({ timeout: WebNewDriver.WAIT_MS });
+    await shared.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    return shared;
+  }
+
+  /**
+   * Activate one panel row. The shared panel portals its popover and the
+   * options re-render on every write, so a real mouse click can land on a
+   * moving target; a dispatched click after a visible-wait cannot.
+   */
+  private async clickDisplayRow(target: Locator): Promise<void> {
+    try {
+      await target.waitFor({ state: "visible", timeout: 15_000 });
+    } catch {
+      await this.openDisplayPanelAny();
+      await target.waitFor({ state: "visible", timeout: 15_000 });
+    }
+    await target.dispatchEvent("click");
+    await this.page.waitForTimeout(200);
+  }
+
+  /**
+   * One row inside a named panel section. Some names repeat across
+   * sections (a property pill and an ordering row both read "Start date"),
+   * so each picker scopes to the section it owns.
+   */
+  private displaySectionRow(panel: Locator, section: string, option: string): Locator {
+    const scope = panel.getByTestId(`display-section-${section}`);
+    return scope
+      .getByRole("radio", { name: option, exact: true })
+      .or(scope.getByRole("button", { name: option, exact: true }));
+  }
+
   async displayPanelText(): Promise<string> {
-    const panel = (await this.isProfileDisplaySurface()) ? this.profileDisplayPanel() : this.projectDisplayPanel();
-    return ((await panel.first().innerText()) ?? "").trim();
+    const panel = await this.openDisplayPanelAny();
+    return ((await panel.first().innerText()) ?? "").replace(/\s+/g, " ").trim();
   }
 
   async setDisplayGroupBy(option: string): Promise<void> {
-    if (!(await this.isProfileDisplaySurface())) {
-      const choice = this.projectDisplaySection("group").getByRole("button", { name: option, exact: true });
+    if (await this.isProfileDisplaySurface()) {
+      const choice = this.profileDisplayPanel().getByRole("radio", { name: option, exact: true });
       await choice.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
       await choice.click({ timeout: WebNewDriver.WAIT_MS });
       return;
     }
-    const choice = this.profileDisplayPanel().getByRole("radio", { name: option, exact: true });
-    await choice.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
-    await choice.click({ timeout: WebNewDriver.WAIT_MS });
+    const panel = await this.openDisplayPanelAny();
+    await this.clickDisplayRow(this.displaySectionRow(panel, "group", option));
   }
 
   async setDisplayOrderBy(option: string): Promise<void> {
-    if (!(await this.isProfileDisplaySurface())) {
-      const choice = this.projectDisplaySection("order").getByRole("button", { name: option, exact: true });
+    if (await this.isProfileDisplaySurface()) {
+      const choice = this.profileDisplayOption(option);
       await choice.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
       await choice.click({ timeout: WebNewDriver.WAIT_MS });
       return;
     }
-    const choice = this.profileDisplayOption(option);
-    await choice.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
-    await choice.click({ timeout: WebNewDriver.WAIT_MS });
+    const panel = await this.openDisplayPanelAny();
+    await this.clickDisplayRow(this.displaySectionRow(panel, "order", option));
   }
 
   async setDisplayExtraOption(option: string, enabled: boolean): Promise<void> {
-    if (!(await this.isProfileDisplaySurface())) {
-      const target = this.projectDisplaySection("options").getByRole("button", { name: option, exact: true });
+    if (await this.isProfileDisplaySurface()) {
+      const target = this.profileDisplayOption(option);
       await target.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
       if ((await this.isDisplayOptionChecked(option)) !== enabled) {
         await target.click({ timeout: WebNewDriver.WAIT_MS });
       }
       return;
     }
-    const target = this.profileDisplayOption(option);
+    const panel = await this.openDisplayPanelAny();
+    const target = panel
+      .getByRole("radio", { name: option, exact: true })
+      .or(panel.getByRole("button", { name: option, exact: true }));
     await target.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
-    if ((await this.isDisplayOptionChecked(option)) !== enabled) {
-      await target.click({ timeout: WebNewDriver.WAIT_MS });
-    }
+    if ((await this.isDisplayOptionChecked(option)) !== enabled) await this.clickDisplayRow(target);
   }
 
   async isDisplayOptionChecked(option: string): Promise<boolean> {
-    if (!(await this.isProfileDisplaySurface())) {
-      // Grouping, ordering and switch rows are all aria-pressed buttons;
-      // section order disambiguates labels the panel repeats ("Priority" is
-      // a group row, an order row and a pill). Pills have their own reader
-      // and are skipped here.
-      for (const section of ["group", "subGroup", "order", "options"]) {
-        const target = this.projectDisplaySection(section).getByRole("button", { name: option, exact: true });
-        if ((await target.count()) > 0) return (await target.first().getAttribute("aria-pressed")) === "true";
-      }
-      const missing = this.projectDisplayPanel().getByRole("button", { name: option, exact: true });
-      await missing.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
-      return (await missing.first().getAttribute("aria-pressed")) === "true";
+    if (await this.isProfileDisplaySurface()) {
+      return (await this.profileDisplayOption(option).getAttribute("aria-pressed")) === "true";
     }
-    return (await this.profileDisplayOption(option).getAttribute("aria-pressed")) === "true";
+    const panel = await this.openDisplayPanelAny();
+    // Grouping, ordering and switch rows are all aria-pressed buttons;
+    // a semantic radio carries aria-checked instead. Pills have their own
+    // reader and are skipped here.
+    for (const section of ["group", "subGroup", "order", "options"]) {
+      const scope = panel.getByTestId(`display-section-${section}`);
+      const target = scope
+        .getByRole("radio", { name: option, exact: true })
+        .or(scope.getByRole("button", { name: option, exact: true }));
+      if ((await target.count()) === 0) continue;
+      return (await this.isDisplayRowChecked(target));
+    }
+    const missing = panel
+      .getByRole("radio", { name: option, exact: true })
+      .or(panel.getByRole("button", { name: option, exact: true }));
+    await missing.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    return this.isDisplayRowChecked(missing);
+  }
+
+  /** A single-choice row marks itself checked, pressed, or (profile menu) with a glyph. */
+  private async isDisplayRowChecked(target: Locator): Promise<boolean> {
+    if ((await target.getAttribute("aria-checked")) === "true") return true;
+    if ((await target.getAttribute("aria-pressed")) === "true") return true;
+    return (await target.locator("svg").count()) > 0;
   }
 
   async toggleDisplayProperty(option: string): Promise<void> {
-    if (!(await this.isProfileDisplaySurface())) {
-      const pill = this.projectDisplaySection("properties").getByRole("button", { name: option, exact: true });
-      await pill.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
-      await pill.click({ timeout: WebNewDriver.WAIT_MS });
+    if (await this.isProfileDisplaySurface()) {
+      const target = this.profileDisplayOption(option);
+      await target.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+      await target.click({ timeout: WebNewDriver.WAIT_MS });
       return;
     }
-    const target = this.profileDisplayOption(option);
-    await target.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
-    await target.click({ timeout: WebNewDriver.WAIT_MS });
+    const panel = await this.openDisplayPanelAny();
+    await this.clickDisplayRow(this.displaySectionRow(panel, "properties", option));
   }
 
   async isDisplayPropertyActive(option: string): Promise<boolean> {
-    if (!(await this.isProfileDisplaySurface())) {
-      const pill = this.projectDisplaySection("properties").getByRole("button", { name: option, exact: true });
-      await pill.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
-      return (await pill.first().getAttribute("aria-pressed")) === "true";
+    if (await this.isProfileDisplaySurface()) {
+      return (await this.profileDisplayOption(option).getAttribute("aria-pressed")) === "true";
     }
-    return (await this.profileDisplayOption(option).getAttribute("aria-pressed")) === "true";
+    const panel = await this.openDisplayPanelAny();
+    const pill = this.displaySectionRow(panel, "properties", option);
+    await pill.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    return (await pill.getAttribute("aria-pressed")) === "true";
   }
 
   /** The condition row, present only while the builder shows it. */
   private richRow(): Locator {
-    return this.page.getByTestId("rich-filter-row");
+    return this.page.getByTestId("rich-filter-row").first();
   }
 
   /** Every condition's own remove control, in row order. */
@@ -7632,19 +7777,25 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async toggleRichFilterRow(): Promise<void> {
-    await this.page.getByTestId("rich-filter-toggle").first().click({ timeout: WebNewDriver.WAIT_MS });
+    const toggle = this.page.getByTestId("rich-filter-toggle").first();
+    if ((await toggle.count()) > 0) {
+      await toggle.click({ timeout: WebNewDriver.WAIT_MS });
+      return;
+    }
+    // A page with no expression mounts the Add filter control instead
+    // (the archived tab and any list on its first visit).
+    await this.page.getByTestId("rich-filter-add").first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("option").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async isRichFilterRowVisible(): Promise<boolean> {
-    const row = this.richRow();
-    if ((await row.count()) === 0) return false;
-    return row.first().isVisible();
+    return this.isShown(this.richFilterRow());
   }
 
   async richFilterRowText(): Promise<string> {
-    const row = this.richRow();
+    const row = this.richFilterRow();
     if ((await row.count()) === 0) return "";
-    return ((await row.first().innerText()) ?? "").trim();
+    return ((await row.innerText()) ?? "").replace(/\s+/g, " ").trim();
   }
 
   /**
@@ -7817,7 +7968,11 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async clearRichFilters(): Promise<void> {
-    await this.richRow().getByTestId("rich-clear-all").click({ timeout: WebNewDriver.WAIT_MS });
+    // Pages with no expression page-wide still mount clear-all inside the
+    // condition row; the page-wide read covers both shapes.
+    const inRow = this.richRow().getByTestId("rich-clear-all");
+    const target = (await inRow.count()) > 0 ? inRow : this.page.getByTestId("rich-clear-all").first();
+    await target.click({ timeout: WebNewDriver.WAIT_MS });
     await this.settleRichWrite();
   }
 
@@ -8377,6 +8532,9 @@ export class WebNewDriver implements ParityDriver {
     await this.page.goto(`/${workspaceSlug}/projects/archives`);
     await this.page.waitForLoadState("domcontentloaded");
     await this.page.locator("#main-sidebar").waitFor({ state: "attached", timeout: 45_000 });
+    // A fresh account lands behind its first-run tour, which covers the
+    // archived cards the caller is about to read.
+    await this.dismissTourIfShown();
   }
 
   async visibleProjectCardNames(): Promise<string[]> {
@@ -8775,12 +8933,31 @@ export class WebNewDriver implements ParityDriver {
     return this.isShown(this.page.getByRole("heading", { name: "Leave project", exact: true }));
   }
 
-  async openArchiveProjectDialog(_workspaceSlug: string, projectId: string): Promise<void> {
-    // Archive is offered from the card menu for project admins; find
-    // the card by its work-items address since only the id is known.
+  async openArchiveProjectDialog(workspaceSlug: string, projectId: string): Promise<void> {
+    // Archive is offered from the card menu, and cards live on the
+    // projects list, not on the home screen a signed-in entry lands on.
+    await this.page.goto(`/${workspaceSlug}/projects/`);
+    await this.page.locator("#main-sidebar").waitFor({ state: "attached", timeout: 45_000 });
+    // A new account's first visit is covered by the tour overlay until it
+    // is declined; the card underneath is otherwise unreachable. The tour
+    // can also pop in a beat after the list paints, so decline it right
+    // before every attempt to reach the card, not only once.
     const card = this.page.locator(`[data-testid="project-card"][href*="/projects/${projectId}/"]`).first();
-    await card.locator('[data-testid="project-card-actions"]').click();
-    await this.page.getByRole("menuitem", { name: "Archive", exact: true }).click();
+    const actions = card.locator('[data-testid="project-card-actions"]');
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await this.dismissTourIfShown();
+      try {
+        await actions.click({ timeout: 30_000 });
+        await this.page.getByRole("menuitem", { name: "Archive", exact: true }).click({ timeout: 30_000 });
+        return;
+      } catch {
+        await this.page.keyboard.press("Escape").catch(() => {});
+      }
+    }
+    // Last attempt outside the retry loop so the real failure surfaces.
+    await this.dismissTourIfShown();
+    await actions.click({ timeout: 60_000 });
+    await this.page.getByRole("menuitem", { name: "Archive", exact: true }).click({ timeout: 60_000 });
   }
 
   async archiveDialogBodyText(): Promise<string | null> {
@@ -10433,7 +10610,8 @@ export class WebNewDriver implements ParityDriver {
       const entry = await this.layoutsOpenMenuItem(item);
       // Base-ui marks disabled items both ways; either marker counts.
       if ((await entry.getAttribute("aria-disabled")) === "true") return true;
-      return (await entry.getAttribute("data-disabled")) !== null;
+      if ((await entry.getAttribute("data-disabled")) !== null) return true;
+      return entry.isDisabled().catch(() => false);
     } finally {
       await this.layoutsCloseOpenMenu();
     }
@@ -10445,7 +10623,8 @@ export class WebNewDriver implements ParityDriver {
       const entry = await this.layoutsOpenMenuItem(item);
       const note = entry.locator('[data-menu-description="true"]');
       if ((await note.count()) === 0) return null;
-      return (await note.first().innerText()).trim().replace(/\s+/g, " ") || null;
+      const text = ((await note.first().innerText()) ?? "").trim().replace(/\s+/g, " ");
+      return text === "" ? null : text;
     } finally {
       await this.layoutsCloseOpenMenu();
     }
@@ -10525,10 +10704,20 @@ export class WebNewDriver implements ParityDriver {
   async layoutsDeleteModalConfirm(): Promise<void> {
     const dialog = this.page.getByRole("dialog", { name: "Delete work item" });
     await dialog.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const toasts = this.page.locator('[data-testid="toast-notification"]');
+    const seenToasts = await toasts.count();
     await dialog.getByRole("button", { name: "Delete", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
-    // The dialog closes once the write lands; settle before returning
-    // so an immediate visibility read sees the outcome, not the flight.
-    await dialog.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
+    // Settle on the write's outcome: a landed delete closes the dialog, a
+    // failure keeps it open (so the caller can retry) and raises a
+    // confirmation. Resolve on either signal instead of only detaching,
+    // or a failed write would burn the whole wait and outlive its toast.
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    for (;;) {
+      if (!(await this.layoutsDeleteModalVisible())) return;
+      if ((await toasts.count()) > seenToasts) return;
+      if (Date.now() >= deadline) return;
+      await this.page.waitForTimeout(300);
+    }
   }
 
   /**
@@ -10550,7 +10739,13 @@ export class WebNewDriver implements ParityDriver {
     const dialog = this.layoutsArchiveDialog();
     await dialog.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
     await dialog.getByRole("button", { name: "Archive", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
-    await dialog.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
+    // A landed archive unmounts the dialog; a portal can linger a beat
+    // after the write, so detaching is the final settle.
+    await dialog.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS }).catch(async () => {
+      await dialog
+        .waitFor({ state: "detached", timeout: 120_000 })
+        .catch(() => undefined);
+    });
   }
 
   async layoutsMoveModalVisible(): Promise<boolean> {
@@ -10599,19 +10794,40 @@ export class WebNewDriver implements ParityDriver {
     }
   }
 
-  async layoutsDetailMenuItems(): Promise<string[]> {
-    // The detail and peek headers share one menu control (ISS-066).
-    await this.page.getByTestId("detail-menu-trigger").first().click({ timeout: WebNewDriver.WAIT_MS });
+  private async layoutsOpenDetailMenu(): Promise<void> {
+    // The detail and peek headers share one menu control (ISS-066); the
+    // visible twin is the live one.
+    const trigger = this.page.getByTestId("detail-menu-trigger").filter({ visible: true }).first();
+    await trigger.waitFor({ state: "visible", timeout: WEB_NEW_LAYOUTS_WAIT_MS });
+    await trigger.click({ timeout: WebNewDriver.WAIT_MS });
     await this.page.getByRole("menuitem").first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async layoutsDetailMenuItems(): Promise<string[]> {
+    await this.layoutsOpenDetailMenu();
     try {
       return await this.layoutsReadOpenMenuItems();
     } finally {
-      await this.layoutsCloseOpenMenu();
+      await this.page.keyboard.press("Escape");
+      await this.page
+        .getByRole("menuitem")
+        .first()
+        .waitFor({ state: "detached", timeout: 15_000 })
+        .catch(() => undefined);
     }
   }
 
-  async layoutsDetailMenuChoose(_item: string): Promise<void> {
-    return todo("layoutsDetailMenuChoose");
+  async layoutsDetailMenuChoose(item: string): Promise<void> {
+    if (item === "Copy link") await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await this.layoutsOpenDetailMenu();
+    const entry = this.page.getByRole("menuitem").filter({ hasText: item }).first();
+    await entry.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await entry.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .getByRole("menuitem")
+      .first()
+      .waitFor({ state: "detached", timeout: 15_000 })
+      .catch(() => undefined);
   }
 
   async layoutsPeekCopyLinkVisible(): Promise<boolean> {
@@ -19873,7 +20089,11 @@ export class WebNewDriver implements ParityDriver {
     await this.archivedCyclesSearchBox().waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
   async archivesCyclesClickAway(): Promise<void> {
-    await this.page.getByTestId("archived-cycles-header-spacer").click({ timeout: WebNewDriver.WAIT_MS });
+    // The header spacer is a visually empty, aria-hidden flex filler;
+    // Playwright refuses to click it. A pointerdown on the screen root
+    // is a genuine outside press for the box's document listener and
+    // never lands on a control that would change state.
+    await this.page.getByTestId("archived-cycles-screen").dispatchEvent("pointerdown");
   }
   async archivesCyclesFiltersOpen(): Promise<void> {
     await this.cyclesFiltersOpen();
@@ -20169,9 +20389,13 @@ export class WebNewDriver implements ParityDriver {
     await this.archivedModulesSearchInput().press("Escape", { timeout: WebNewDriver.WAIT_MS });
   }
   async archivesClearModuleSearch(): Promise<void> {
+    // The clear control empties the query and collapses the box in one
+    // gesture, so the field detaches: read the empty state from the box's
+    // absence (a collapsed box filters by no query) rather than polling
+    // an input that is gone.
     const box = this.page.getByTestId("modules-search-field").first();
     await box.getByRole("button", { name: "Clear search" }).click({ timeout: WebNewDriver.WAIT_MS });
-    await expect.poll(() => this.archivedModulesSearchText(), { timeout: WebNewDriver.WAIT_MS }).toBe("");
+    await expect.poll(() => this.archivesModuleSearchText(), { timeout: WebNewDriver.WAIT_MS }).toBe("");
   }
   async archivesCollapseSearchOutside(): Promise<void> {
     // Re-selecting the current tab trips the search box's outside-click
@@ -20357,6 +20581,13 @@ export class WebNewDriver implements ParityDriver {
     if (!(await this.isShown(panel))) {
       return { name: null, statusLocked: true, addLinkOffered: false, summaryShown: false };
     }
+    // The panel opens before its detail read lands; keep its loading
+    // line from the reader is not the settled body the caller asks for.
+    await panel
+      .getByRole("status")
+      .first()
+      .waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => undefined);
     const name = await this.archivesModulePeekName();
     const status = panel.locator(
       'button[aria-label="Backlog"], button[aria-label="Planned"], button[aria-label="In Progress"], button[aria-label="Paused"], button[aria-label="Completed"], button[aria-label="Cancelled"]'
@@ -20399,6 +20630,15 @@ export class WebNewDriver implements ParityDriver {
     // no add-link/attach control. With no peek open the name, the
     // offer and the summary are all absent while the lock holds.
     const panel = this.archivedCyclePeekPanel();
+    if (!(await this.isShown(panel))) {
+      return { name: null, statusLocked: true, addLinkOffered: false, summaryShown: false };
+    }
+    // The peek skeleton is its own loading body; read the settled one.
+    await panel
+      .getByTestId("archived-cycle-peek-skeleton")
+      .first()
+      .waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => undefined);
     const name = await this.archivedCyclePeekName();
     const statusLocked = (await panel.getByRole("button", { name: /status/i }).count()) === 0;
     const addLinkOffered = (await panel.getByRole("button", { name: /add link|attach/i }).count()) > 0;
@@ -20453,8 +20693,12 @@ export class WebNewDriver implements ParityDriver {
     await this.modulesOpenRowMenu(name);
     await this.modulesMenuChoose(title);
   }
+  /** The module archive confirmation; toasts also carry role="dialog". */
+  private archivesArchiveDialogBox(): Locator {
+    return this.page.getByRole("dialog").filter({ hasText: "Archive module" }).first();
+  }
   async archivesArchiveDialog(): Promise<ArchivesArchiveDialog | null> {
-    const dialog = this.page.locator('[role="dialog"]').first();
+    const dialog = this.archivesArchiveDialogBox();
     // The dialog mounts a beat after the menu click; wait briefly so a
     // genuine dialog is never missed, then report absence honestly.
     await dialog.waitFor({ timeout: 3_000 }).catch(() => undefined);
@@ -20478,7 +20722,7 @@ export class WebNewDriver implements ParityDriver {
     return { title, body, confirmLabel };
   }
   async archivesConfirmArchiveDialog(): Promise<void> {
-    const dialog = this.page.locator('[role="dialog"]').first();
+    const dialog = this.archivesArchiveDialogBox();
     await dialog.waitFor({ timeout: WebNewDriver.WAIT_MS });
     const toasts = this.page.locator('[data-testid="toast-notification"]');
     const seenToasts = await toasts.count();
@@ -20495,7 +20739,7 @@ export class WebNewDriver implements ParityDriver {
     }
   }
   async archivesCancelArchiveDialog(): Promise<void> {
-    const dialog = this.page.locator('[role="dialog"]').first();
+    const dialog = this.archivesArchiveDialogBox();
     await dialog.getByRole("button", { name: "Cancel", exact: true }).first().click({ timeout: WebNewDriver.WAIT_MS });
     await dialog.waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
   }
@@ -20646,8 +20890,18 @@ export class WebNewDriver implements ParityDriver {
     return (await picker.count()) > 0;
   }
   async archivesWaitForListQuery(): Promise<ArchivesListQuery> {
+    // The header badge reads the same endpoint with no query at all, and
+    // that read can settle first; only a list read (one carrying the list
+    // query) answers this waiter.
+    const isListRead = (candidate: URL): boolean =>
+      ["per_page", "cursor", "order_by", "group_by", "sub_group_by", "filters"].some((key) =>
+        candidate.searchParams.has(key)
+      );
     const response = await this.page.waitForResponse(
-      (candidate) => candidate.url().includes("/archived-issues/") && candidate.request().method() === "GET",
+      (candidate) =>
+        candidate.url().includes("/archived-issues/") &&
+        candidate.request().method() === "GET" &&
+        isListRead(new URL(candidate.url())),
       { timeout: 60_000 }
     );
     const url = response.url();
@@ -21646,9 +21900,10 @@ export class WebNewDriver implements ParityDriver {
     const tab = this.archivesTabFromUrl();
     if (tab === "cycles") return this.page.getByTestId("archived-cycle-preview");
     if (tab === "modules") {
-      return this.page
-        .locator('[data-testid="archived-module-preview"], [data-testid="modules-analytics-sidebar"]')
-        .first();
+      // The archived module peek is the shared modules peek chrome. It
+      // mounts in the full-screen portal (not a descendant of the
+      // archives content), so reuse the modules area's own locator.
+      return this.modulesPeekPanel();
     }
     return this.page.getByTestId("issue-preview");
   }
@@ -21660,14 +21915,28 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async archivesPeekOpenFirst(name: string): Promise<void> {
+    // An open row menu puts an inert overlay over the row (the kit menu's
+    // guard), so a click on the peek control would be intercepted. Close
+    // it first; a caller that just read the menu entries leaves it open.
+    if ((await this.page.getByRole("menuitem").count()) > 0) {
+      await this.page.keyboard.press("Escape");
+      await expect.poll(async () => this.page.getByRole("menuitem").count(), { timeout: WebNewDriver.WAIT_MS }).toBe(0);
+    }
     const tab = this.archivesTabFromUrl();
     const row = this.archivesNamedRow(name);
     await row.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
     await row.scrollIntoViewIfNeeded().catch(() => undefined);
     if (tab === "issues") {
       await row.locator("p").first().click({ timeout: WebNewDriver.WAIT_MS });
+    } else if (tab === "modules") {
+      // A module row opens its peek from the labelled preview control; the
+      // name link would navigate to the detail instead.
+      await row
+        .getByRole("button", { name: new RegExp(`^Open preview of ${escapeRegExp(name)}$`) })
+        .first()
+        .click({ timeout: WebNewDriver.WAIT_MS });
     } else {
-      // Cycle and module rows open their peek from a labelled control; a
+      // Cycle rows open their peek from the labelled quick-look control; a
       // row without one falls back to its own title surface.
       const quickLook = row.getByRole("button", { name: /quick look/i }).first();
       if ((await quickLook.count()) > 0) {
@@ -22635,8 +22904,13 @@ export class WebNewDriver implements ParityDriver {
     if (current) await this.page.unroute(current.matches, current.handler).catch(() => {});
   }
 
+  /** The first real modal; kit toasts also carry role="dialog". */
+  private modalDialog(): Locator {
+    return this.page.locator('div[role="dialog"]:not([data-testid="toast-notification"])').first();
+  }
+
   async archivesArchiveModalTitle(): Promise<string | null> {
-    const dialog = this.page.locator('[role="dialog"]').first();
+    const dialog = this.modalDialog();
     if ((await dialog.count()) === 0) return null;
     const title = (
       await dialog
@@ -22649,7 +22923,7 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async archivesArchiveModalBody(): Promise<string | null> {
-    const dialog = this.page.locator('[role="dialog"]').first();
+    const dialog = this.modalDialog();
     if ((await dialog.count()) === 0) return null;
     const body = (
       await dialog
@@ -22662,7 +22936,7 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async archivesArchiveModalCancel(): Promise<void> {
-    const dialog = this.page.locator('[role="dialog"]').first();
+    const dialog = this.modalDialog();
     await dialog.getByRole("button", { name: "Cancel", exact: true }).first().click({ timeout: WebNewDriver.WAIT_MS });
     await dialog.waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
   }
@@ -22711,6 +22985,7 @@ export class WebNewDriver implements ParityDriver {
     bannerDuringHold: string | null;
     breadcrumbDuringHold: string;
     activityDuringHold: boolean;
+    loaderDuringHold: boolean;
     settled: boolean;
   }> {
     // Gate the detail record read while entering, sampling what the screen
@@ -22755,12 +23030,22 @@ export class WebNewDriver implements ParityDriver {
       const bannerDuringHold = await this.archivesMutationDetailBannerText();
       const breadcrumbDuringHold = await this.archivesDetailBreadcrumbText();
       const activityDuringHold = (await this.archivesContent().locator('section[aria-label="Activity"]').count()) > 0;
+      const loaderDuringHold = await this.isShown(
+        this.archivesContent().getByRole("status", { name: "Loading work item" })
+      );
       release();
       await this.archivesContent()
         .locator('section[aria-label="Activity"]')
         .first()
         .waitFor({ timeout: WebNewDriver.WAIT_MS });
-      return { heldRequests, bannerDuringHold, breadcrumbDuringHold, activityDuringHold, settled: true };
+      return {
+        heldRequests,
+        bannerDuringHold,
+        breadcrumbDuringHold,
+        activityDuringHold,
+        loaderDuringHold,
+        settled: true,
+      };
     } finally {
       release();
       await this.page.unroute(matches, handler).catch(() => {});
@@ -48363,7 +48648,10 @@ export class WebNewDriver implements ParityDriver {
     // the specs pass its head ("Status"), so match by substring on the
     // title attribute rather than the section body's text.
     const block = this.cyclesFiltersPanel().locator(`[data-section-title*="${section}"]`);
-    await block.getByRole("button", { name: optionName }).click({ timeout: WebNewDriver.WAIT_MS });
+    // Multi sections render options as checkboxes, single sections as
+    // radios; neither carries the button role any more.
+    const option = block.getByRole("checkbox", { name: optionName }).or(block.getByRole("radio", { name: optionName }));
+    await option.click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async cyclesFilterChipTexts(): Promise<string[]> {

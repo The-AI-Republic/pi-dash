@@ -25,12 +25,18 @@ export interface ProjectArchiveDialogProps {
   onNavigate: (href: string) => void;
 }
 
-/** Warning copy per direction; the archive line names the archived state. */
+/**
+ * Warning copy per direction; the archive line names the archived state.
+ * Archiving takes the whole project with it — work items, cycles, modules
+ * and pages leave the lists and search together (parity/specs/archives.md
+ * §6, ARCH-026) — so the warning spells each out instead of naming only
+ * the work items.
+ */
 export function selectArchiveBody(mode: ArchiveDialogMode, projectName: string): string {
   if (mode === "restore") {
     return `Restoring a project brings ${projectName} back to the projects list and makes it visible to its members again.`;
   }
-  return `${projectName} will be archived: it leaves the projects list and its work items disappear from search until a project admin restores it.`;
+  return `${projectName} will be archived: it leaves the projects list, and its work items, cycles, modules and pages disappear from search until a project admin restores it.`;
 }
 
 export function ProjectArchiveDialog({

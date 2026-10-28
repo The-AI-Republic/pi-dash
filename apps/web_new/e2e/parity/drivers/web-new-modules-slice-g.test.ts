@@ -414,7 +414,9 @@ describe("the archive confirmation", () => {
   });
 
   it("reads the open confirmation through the shared archives trio", async () => {
-    const DIALOG = "page css([role=\"dialog\"])";
+    // The shared trio scopes the module confirmation by its heading
+    // prefix, so a kit toast (also role=dialog) never answers for it.
+    const DIALOG = "page role(dialog,) filter(Archive module)";
     const fake = new FakePage({
       [DIALOG]: { count: 1 },
       [`${DIALOG} role(heading,)`]: { text: " Archive “Atlas” " },

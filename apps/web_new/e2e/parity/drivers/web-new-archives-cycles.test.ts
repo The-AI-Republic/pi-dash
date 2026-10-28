@@ -32,6 +32,8 @@ function loc(
     byTestId?: (id: string) => Locator;
     byRole?: (role: string, options?: unknown) => Locator;
     filtered?: (options?: unknown) => Locator;
+    or?: (other: Locator) => Locator;
+    dispatchEvent?: (type: string, init?: unknown) => Promise<void>;
   } = {}
 ): Locator {
   const node: Record<string, unknown> = {};
@@ -62,6 +64,8 @@ function loc(
   node["getByTestId"] = (id: string) => overrides.byTestId?.(id) ?? self;
   node["getByRole"] = (role: string, options?: unknown) => overrides.byRole?.(role, options) ?? self;
   node["filter"] = (options?: unknown) => overrides.filtered?.(options) ?? self;
+  node["or"] = (other: Locator) => overrides.or?.(other) ?? self;
+  node["dispatchEvent"] = overrides.dispatchEvent ?? (async () => undefined);
   return self;
 }
 
@@ -610,16 +614,22 @@ describe("archived-cycles search", () => {
     expect(waits).toEqual([{ state: "detached", timeout: 30_000 }]);
   });
 
-  it("clicks away through the header spacer", async () => {
-    const clicks: string[] = [];
+  it("presses away on the screen root instead of the hidden spacer", async () => {
+    const presses: string[] = [];
     const { page } = stubPage({
       testIdFor: (id) =>
-        id === "archived-cycles-header-spacer" ? loc({ click: async () => void clicks.push(id) }) : loc(),
+        id === "archived-cycles-screen"
+          ? loc({
+              dispatchEvent: async (type) => {
+                presses.push(`${id}:${type}`);
+              },
+            })
+          : loc(),
     });
 
     await new WebNewDriver(page).archivesCyclesClickAway();
 
-    expect(clicks).toEqual(["archived-cycles-header-spacer"]);
+    expect(presses).toEqual(["archived-cycles-screen:pointerdown"]);
   });
 });
 

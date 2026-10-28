@@ -14,7 +14,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { Button, Dialog } from "@pidash/kit";
 import { archiveModule, type ModuleRow } from "@pidash/api-client";
-import { useNavigate } from "@tanstack/react-router";
+import { useNavigate, useRouter } from "@tanstack/react-router";
 import * as React from "react";
 
 import { getAppClient } from "../../../../core/api/client.js";
@@ -27,6 +27,8 @@ import {
   moduleArchiveDialogBody,
   moduleArchiveDialogTitle,
   moduleArchiveLanding,
+  modulesListLandingHref,
+  modulesListLandingNeedsSlash,
 } from "../../lib/moduleArchive.js";
 import { MODULE_FAILURE_TITLE, moduleFailureBody } from "../../lib/moduleForm.js";
 
@@ -53,6 +55,7 @@ export function ModuleArchiveDialog({
 }: ModuleArchiveDialogProps): React.ReactElement | null {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
+  const router = useRouter();
   const [submitting, setSubmitting] = React.useState(false);
 
   async function confirm(target: ModuleArchiveTarget): Promise<void> {
@@ -64,7 +67,14 @@ export function ModuleArchiveDialog({
       onClose();
       if (onArchived === undefined) {
         const landing = moduleArchiveLanding(workspaceSlug, projectId);
-        void navigate({ to: landing.to, search: landing.search, replace: landing.replace });
+        await navigate({ to: landing.to, params: landing.params, search: landing.search, replace: landing.replace });
+        // Landing from the live list only changes the trailing slash, which
+        // the router treats as the same location: rewrite the address so it
+        // reads the canonical list form the spec pins (§7.4).
+        if (modulesListLandingNeedsSlash(router.state.location.pathname, workspaceSlug, projectId)) {
+          router.history.replace(modulesListLandingHref(workspaceSlug, projectId));
+          await router.load();
+        }
       } else {
         onArchived(target);
       }

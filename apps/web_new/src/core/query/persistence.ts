@@ -5,6 +5,14 @@
 // the full cache and renders from it on launch; the web build persists
 // reference data only. Payloads carry a version buster: a mismatch
 // discards the stored cache instead of hydrating stale shapes.
+//
+// A restored row is a preview, never an answer: the desktop promise is to
+// open on cached data and then refresh (Platform and editions). TanStack
+// keeps the saved `dataUpdatedAt`, so a payload written a moment before
+// launch could sit inside a read's `staleTime` and never refetch — another
+// member's archive, restore or edit would stay invisible until the entry
+// aged out. Restore therefore marks every entry stale so its first
+// subscriber refetches while the saved rows stay on screen.
 
 import { dehydrate, hydrate, type DehydratedState, type QueryClient } from "@tanstack/react-query";
 
@@ -65,6 +73,14 @@ function settledStatus(status: unknown): boolean {
 
 function restorableQuery(entry: DehydratedState["queries"][number]): boolean {
   return settledStatus(entry.state?.status) && entry.promise === undefined;
+}
+
+/**
+ * One restored entry, aged so the read counts as stale: the saved rows
+ * still paint, and the first subscriber fetches the live answer over them.
+ */
+function stalePreview(entry: DehydratedState["queries"][number]): DehydratedState["queries"][number] {
+  return { ...entry, state: { ...entry.state, dataUpdatedAt: 0 } };
 }
 
 export function createCachePersistor(
@@ -131,7 +147,7 @@ export function createCachePersistor(
     // entry, so drop them here and restore the rest.
     const state: DehydratedState = {
       ...payload.state,
-      queries: (payload.state.queries ?? []).filter(restorableQuery),
+      queries: (payload.state.queries ?? []).filter(restorableQuery).map(stalePreview),
     };
     hydrate(client, state);
   }

@@ -138,7 +138,7 @@ afterEach(() => {
 
 describe("archives archive dialog drivers", () => {
   it("reports no dialog when none is open", async () => {
-    const { page } = stubPage({ locatorFor: () => loc({ count: async () => 0 }) });
+    const { page } = stubPage({ roleFor: () => loc({ count: async () => 0 }) });
     const driver = new WebNewDriver(page);
 
     expect(await driver.archivesArchiveDialog()).toBeNull();
@@ -150,7 +150,7 @@ describe("archives archive dialog drivers", () => {
         role === "heading" ? loc({ innerText: async () => "Archive Work item Web 42" }) : loc({ count: async () => 1 }),
       nested: () => loc({ innerText: async () => "Archived work items can be restored later." }),
     });
-    const { page } = stubPage({ locatorFor: () => dialog });
+    const { page } = stubPage({ roleFor: () => dialog });
     const driver = new WebNewDriver(page);
 
     const found = await driver.archivesArchiveDialog();
@@ -161,7 +161,7 @@ describe("archives archive dialog drivers", () => {
 
   it("reports no dialog when the open one has no heading", async () => {
     const dialog = loc({ byRole: () => loc({ innerText: async () => "  " }) });
-    const { page } = stubPage({ locatorFor: () => dialog });
+    const { page } = stubPage({ roleFor: () => dialog });
     const driver = new WebNewDriver(page);
 
     expect(await driver.archivesArchiveDialog()).toBeNull();
@@ -177,7 +177,7 @@ describe("archives archive dialog drivers", () => {
       },
       nested: () => loc({ innerText: async () => "body" }),
     });
-    const { page } = stubPage({ locatorFor: () => dialog });
+    const { page } = stubPage({ roleFor: () => dialog });
     const driver = new WebNewDriver(page);
 
     expect((await driver.archivesArchiveDialog())?.confirmLabel).toBe("Archiving…");
@@ -193,7 +193,7 @@ describe("archives archive dialog drivers", () => {
       },
       nested: () => loc({ innerText: async () => "body" }),
     });
-    const { page } = stubPage({ locatorFor: () => dialog });
+    const { page } = stubPage({ roleFor: () => dialog });
     const driver = new WebNewDriver(page);
 
     expect((await driver.archivesArchiveDialog())?.confirmLabel).toBe("Confirm");
@@ -204,7 +204,7 @@ describe("archives archive dialog drivers", () => {
       byRole: () => loc({ innerText: async () => "Archive Work item Web 42" }),
       nested: () => loc({ innerText: async () => Promise.reject(new Error("detached")) }),
     });
-    const { page } = stubPage({ locatorFor: () => dialog });
+    const { page } = stubPage({ roleFor: () => dialog });
     const driver = new WebNewDriver(page);
 
     const found = await driver.archivesArchiveDialog();
@@ -215,15 +215,15 @@ describe("archives archive dialog drivers", () => {
   it("confirms the dialog and settles when it closes", async () => {
     let open = true;
     const { page } = stubPage({
-      locatorFor: (selector) => {
-        if (selector === '[role="dialog"]') {
-          return loc({
-            count: async () => (open ? 1 : 0),
-            byRole: () => loc({ count: async () => 1, click: async () => void (open = false) }),
-          });
-        }
-        return loc({ count: async () => 0 });
-      },
+      // The archive confirmation is the module dialog, not a kit toast.
+      roleFor: (role) =>
+        role === "dialog"
+          ? loc({
+              count: async () => (open ? 1 : 0),
+              byRole: () => loc({ count: async () => 1, click: async () => void (open = false) }),
+            })
+          : loc({ count: async () => 0 }),
+      locatorFor: () => loc({ count: async () => 0 }),
     });
     const driver = new WebNewDriver(page);
 
@@ -237,11 +237,12 @@ describe("archives archive dialog drivers", () => {
     const { page } = stubPage({
       locatorFor: (selector) => {
         if (selector === '[data-testid="toast-notification"]') return loc({ count: async () => toasts });
-        if (selector === '[role="dialog"]') {
-          return loc({ byRole: () => loc({ count: async () => 1, click: async () => void (toasts += 1) }) });
-        }
         return loc();
       },
+      roleFor: (role) =>
+        role === "dialog"
+          ? loc({ byRole: () => loc({ count: async () => 1, click: async () => void (toasts += 1) }) })
+          : loc(),
     });
     const driver = new WebNewDriver(page);
 
@@ -267,7 +268,7 @@ describe("archives archive dialog drivers", () => {
         if (!detached) throw new Error("still open");
       },
     });
-    const { page } = stubPage({ locatorFor: () => dialog });
+    const { page } = stubPage({ roleFor: () => dialog });
     const driver = new WebNewDriver(page);
 
     await driver.archivesCancelArchiveDialog();
@@ -280,7 +281,7 @@ describe("archives archive dialog drivers", () => {
       byRole: () => loc(),
       waitFor: async () => Promise.reject(new Error("still open")),
     });
-    const { page } = stubPage({ locatorFor: () => dialog });
+    const { page } = stubPage({ roleFor: () => dialog });
     const driver = new WebNewDriver(page);
 
     await driver.archivesCancelArchiveDialog();
@@ -492,7 +493,7 @@ describe("archives archive modal drivers", () => {
   function dialogPage(heading: string | null, body: string | null, tornDown: "title" | "body" | null = null) {
     return stubPage({
       locatorFor: (selector) => {
-        if (selector !== '[role="dialog"]') return loc();
+        if (selector !== 'div[role="dialog"]:not([data-testid="toast-notification"])') return loc();
         if (heading === null && body === null) return loc({ count: async () => 0 });
         return loc({
           byRole: () =>
@@ -549,7 +550,10 @@ describe("archives archive modal drivers", () => {
         if (!detached) throw new Error("still open");
       },
     });
-    const { page } = stubPage({ locatorFor: () => dialog });
+    const { page } = stubPage({
+      locatorFor: (selector) =>
+        selector === 'div[role="dialog"]:not([data-testid="toast-notification"])' ? dialog : loc(),
+    });
     const driver = new WebNewDriver(page);
 
     await driver.archivesArchiveModalCancel();
@@ -562,7 +566,10 @@ describe("archives archive modal drivers", () => {
       byRole: () => loc(),
       waitFor: async () => Promise.reject(new Error("still open")),
     });
-    const { page } = stubPage({ locatorFor: () => dialog });
+    const { page } = stubPage({
+      locatorFor: (selector) =>
+        selector === 'div[role="dialog"]:not([data-testid="toast-notification"])' ? dialog : loc(),
+    });
     const driver = new WebNewDriver(page);
 
     await driver.archivesArchiveModalCancel();

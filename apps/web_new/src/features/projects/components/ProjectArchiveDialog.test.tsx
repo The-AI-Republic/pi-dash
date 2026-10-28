@@ -73,10 +73,17 @@ afterEach(() => {
 });
 
 describe("selectArchiveBody", () => {
-  it("warns that archiving hides the project from lists and search", () => {
+  it("warns that archiving hides the project, its work items, cycles, modules and pages from lists and search", () => {
     const body = selectArchiveBody("archive", "Website relaunch");
+    expect(body).toContain("Website relaunch");
     expect(body).toContain("archived");
+    expect(body).toContain("projects list");
+    expect(body).toContain("work items");
+    expect(body).toContain("cycles");
+    expect(body).toContain("modules");
+    expect(body).toContain("pages");
     expect(body).toContain("search");
+    expect(body).toContain("project admin restores");
   });
 
   it("explains that restoring returns the project", () => {

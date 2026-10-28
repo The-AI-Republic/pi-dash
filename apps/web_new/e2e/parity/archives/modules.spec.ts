@@ -25,9 +25,11 @@ import {
   browserSessionCookies,
   createWorkspaceForProjects,
   markOnboardedForProjects,
+  parityProjectIdentifier,
   seatFreshMember,
   serverCreateCycle,
   serverCreateModule,
+  serverCleanupProject,
   serverCreateProjectWithFlags,
   serverProjectModules,
   setLastWorkspaceForProjects,
@@ -306,13 +308,15 @@ test(
 
     await enterArchivesModules(driver, world, world.owner);
 
-    // The filter applies (chip renders, list narrows) but the menu
-    // button's wide variant never displays, so no dot ever shows.
+    // The filter applies (chip renders, list narrows). The old app's
+    // menu button never shows an active marker; web_new shows the visible
+    // marker the intended behavior calls for.
+    const oracle = driver.target !== "web_new";
     await driver.archivesOpenModuleFilters();
     await driver.archivesToggleLeadFilter("You");
     await driver.archivesCloseModuleFilters();
     expect(await driver.archivesModuleChips()).not.toEqual([]);
-    expect(await driver.archivesModuleFiltersActive()).toBe(false);
+    expect(await driver.archivesModuleFiltersActive()).toBe(!oracle);
   }
 );
 
@@ -353,7 +357,23 @@ test(
     });
 
     await test.step("a skeleton loader shows while the list fetches", async () => {
-      expect(await driver.archivesModulesShowsSkeleton(world.workspaceSlug, world.projectId)).toBe(true);
+      // A surface's skeleton belongs to its first read. This session has
+      // already read this project's archived modules above, and a read
+      // younger than the list freshness window is served from the cache
+      // without a fetch — no skeleton, by design. So prove the rule where
+      // it applies: a project this session has never opened.
+      const unseenProjectId = await serverCreateProjectWithFlags(
+        world.workspaceSlug,
+        "Archive Modules fresh",
+        parityProjectIdentifier("AMF"),
+        { moduleView: true, cycleView: true },
+        world.owner.cookie
+      );
+      try {
+        expect(await driver.archivesModulesShowsSkeleton(world.workspaceSlug, unseenProjectId)).toBe(true);
+      } finally {
+        await serverCleanupProject(world.workspaceSlug, unseenProjectId, world.owner.cookie);
+      }
     });
   }
 );
@@ -494,14 +514,29 @@ test(
     );
     await driver.archivesAwaitModuleRow("Dialog Fail");
 
-    // The store swallows the write error, so the dialog runs its success
-    // path: success confirmation, close, navigate — module stays live.
+    // The old app's store swallows the write error, so the dialog runs its
+    // success path: success confirmation, close, navigate — module stays
+    // live. web_new reports the failure instead, closes, and stays put.
+    const oracle = driver.target !== "web_new";
     await driver.archivesFailNextModuleWrite();
     await driver.archivesChooseLiveModuleMenuEntry("Dialog Fail", "Archive");
     await driver.archivesConfirmArchiveDialog();
-    await expect.poll(() => driver.rulesLastToast(), { timeout: 30_000 }).toMatchObject({ title: "Archive success" });
-    expect(await driver.archivesArchiveDialog()).toBeNull();
-    expect(await driver.currentUrlPath()).toBe(`/${world.workspaceSlug}/projects/${world.projectId}/modules/`);
+    if (oracle) {
+      await expect.poll(() => driver.rulesLastToast(), { timeout: 30_000 }).toMatchObject({ title: "Archive success" });
+    } else {
+      const toast = await expect
+        .poll(() => driver.rulesLastToast(), { timeout: 30_000 })
+        .not.toBeNull()
+        .then(() => driver.rulesLastToast());
+      expect(toast?.title).not.toMatch(/success/i);
+      expect(toast?.title).toMatch(/error|went wrong/i);
+    }
+    await expect.poll(() => driver.archivesArchiveDialog(), { timeout: 30_000 }).toBeNull();
+    // No navigation either way: the old app re-enters the live list (its
+    // success branch, trailing slash), web_new simply stays where it is.
+    expect((await driver.currentUrlPath()).replace(/\/$/, "")).toBe(
+      `/${world.workspaceSlug}/projects/${world.projectId}/modules`
+    );
     expect(await archivesModuleIsArchived(world.workspaceSlug, world.projectId, failing, world.owner.cookie)).toBe(
       false
     );
@@ -578,11 +613,22 @@ test(
     await enterArchivesModules(driver, world, world.owner);
     await driver.archivesAwaitModuleRow("Restore Fail");
 
-    // The store swallows the write error, so the menu runs its success
-    // path: success confirmation, same-tab stay — module stays archived.
+    // The old app's store swallows the write error, so the menu runs its
+    // success path: success confirmation, same-tab stay — module stays
+    // archived. web_new reports the failure and keeps the row.
+    const oracle = driver.target !== "web_new";
     await driver.archivesFailNextModuleWrite();
     await driver.archivesChooseArchivedModuleMenuEntry("Restore Fail", "Restore");
-    await expect.poll(() => driver.rulesLastToast(), { timeout: 30_000 }).toMatchObject({ title: "Restore success" });
+    if (oracle) {
+      await expect.poll(() => driver.rulesLastToast(), { timeout: 30_000 }).toMatchObject({ title: "Restore success" });
+    } else {
+      const toast = await expect
+        .poll(() => driver.rulesLastToast(), { timeout: 30_000 })
+        .not.toBeNull()
+        .then(() => driver.rulesLastToast());
+      expect(toast?.title).not.toMatch(/success/i);
+      expect(toast?.title).toMatch(/error|went wrong/i);
+    }
     expect(await driver.currentUrlPath()).toBe(`/${world.workspaceSlug}/projects/${world.projectId}/archives/modules/`);
     expect(await archivesModuleIsArchived(world.workspaceSlug, world.projectId, failing, world.owner.cookie)).toBe(
       true
@@ -674,13 +720,19 @@ test(
       (await archivesArchivedModules(world.workspaceSlug, world.projectId, world.owner.cookie)).map((row) => row.name)
     ).toContain("Direct Bug");
 
-    // A fresh session with no prior live visit: the list fetch completes
-    // (200 with rows) but the tab stays on the skeleton. Every other
-    // scenario enters through the live screen until NEWFRONT-228 is fixed.
+    // A fresh session with no prior live visit: the old app's list fetch
+    // completes (200 with rows) but the tab stays on the skeleton
+    // (NEWFRONT-228). web_new settles from its own fetch and renders the
+    // archived row. Every other scenario enters through the live screen so
+    // both towers start from the same place.
     await driver.openAuthenticated(
       `/${world.workspaceSlug}/projects/${world.projectId}/archives/modules`,
       browserSessionCookies(world.owner)
     );
-    expect(await driver.archivesDirectLoadRenders(world.workspaceSlug, world.projectId)).toBe(false);
+    const oracle = driver.target !== "web_new";
+    expect(await driver.archivesDirectLoadRenders(world.workspaceSlug, world.projectId)).toBe(!oracle);
+    if (!oracle) {
+      await expect.poll(() => driver.archivesModuleRowNames()).toContain("Direct Bug");
+    }
   }
 );

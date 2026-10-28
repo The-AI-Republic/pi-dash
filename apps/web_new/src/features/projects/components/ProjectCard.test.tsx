@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import * as React from "react";
 import type { ProjectDetails, WorkspaceMember } from "@pidash/api-client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -527,6 +527,21 @@ describe("ProjectCard menus", () => {
     openOverflow();
     fireEvent.click(screen.getByRole("menuitem", { name: "Archive" }));
     expect(onArchive).toHaveBeenCalledWith(expect.objectContaining({ id: PROJECT_ID }));
+  });
+
+  it("keeps a menu choice from navigating through the card's own link", () => {
+    // The menu renders in a portal, but React bubbles its events up the
+    // component tree into the card anchor, so without a boundary the
+    // click would navigate into the project and unmount the dialog the
+    // entry just opened (ARCH-026).
+    const onArchive = vi.fn();
+    renderCard({ onArchive }, project({ member_role: 20 }));
+
+    openOverflow();
+    const entry = within(screen.getByRole("menu")).getByRole("menuitem", { name: "Archive" });
+    const defaulted = fireEvent.click(entry);
+    expect(defaulted).toBe(false);
+    expect(onArchive).toHaveBeenCalledTimes(1);
   });
 });
 

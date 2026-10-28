@@ -421,64 +421,88 @@ describe("shared peek methods on the profile list", () => {
 
 describe("shared display methods on the profile tab", () => {
   function displayPage(overrides: { pressed?: string | null; closeFails?: boolean } = {}) {
-    const click = vi.fn(async () => undefined);
-    const radioClick = vi.fn(async () => undefined);
+    const clicks: string[] = [];
+    const dispatched: string[] = [];
     const escape = vi.fn(async () => undefined);
     let panelWaits = 0;
-    const button = locator({
-      click,
+    let profileOpen = false;
+    const row = locator({
+      dispatchEvent: async (type: string) => {
+        dispatched.push(type);
+      },
+      // No check glyph: the pressed attribute alone decides the state.
+      locator: () => locator({ count: async () => 0 }),
       getAttribute: async () => overrides.pressed ?? "false",
-      waitFor: async () => undefined,
     });
+    const scope = locator({ getByRole: (role: string) => locator({ or: () => (role === "radio" ? row : row) }) });
     const panel = locator({
-      getByRole: (role: string) => (role === "radio" ? locator({ click: radioClick }) : button),
+      count: async () => 1,
+      isVisible: async () => profileOpen,
+      getByRole: () => locator({ or: () => row }),
+      getByTestId: (id: string) => (id.startsWith("display-section-") ? scope : locator()),
       waitFor: async (options?: unknown) => {
         panelWaits += 1;
         if (overrides.closeFails === true && panelWaits === 1) throw new Error("still open");
+        profileOpen = true;
         return options;
       },
     });
-    const trigger = locator({ click, waitFor: async () => undefined });
+    const trigger = locator({
+      count: async () => 1,
+      click: async (options?: unknown) => {
+        clicks.push("trigger");
+        profileOpen = true;
+        return options;
+      },
+    });
     const page = pageOf({
-      getByTestId: (id: string) => (id === "profile-display-panel" ? panel : trigger),
+      getByTestId: (id: string) => {
+        // When the shared panel is absent the union falls through to the
+        // profile tab's own menu.
+        if (id === "display-options-panel") return locator({ count: async () => 0, or: () => panel });
+        if (id === "profile-display-panel") return panel;
+        if (id === "display-options-trigger") return locator({ count: async () => 0 });
+        return trigger;
+      },
       keyboard: { press: escape },
     });
-    return { driver: new WebNewDriver(page), click, radioClick, escape };
+    return { driver: new WebNewDriver(page), clicks, dispatched, escape };
   }
 
   it("opens the visible trigger and waits for the panel", async () => {
-    const { driver, click } = displayPage();
+    const { driver, clicks } = displayPage();
     await driver.openDisplayOptions();
-    expect(click).toHaveBeenCalledWith({ timeout: WebNewDriver.WAIT_MS });
+    expect(clicks).toEqual(["trigger"]);
   });
 
   it("closes on Escape and falls back to the trigger when the panel stays open", async () => {
-    const { driver, click, escape } = displayPage({ closeFails: true });
+    const { driver, clicks, escape } = displayPage({ closeFails: true });
     await driver.closeDisplayOptions();
     expect(escape).toHaveBeenCalledWith("Escape");
-    expect(click).toHaveBeenCalledWith({ timeout: WebNewDriver.WAIT_MS });
+    // The failed close reopened through the trigger, then Escape again.
+    expect(clicks).toEqual(["trigger"]);
   });
 
   it("stops after Escape when the panel closes", async () => {
-    const { driver, click, escape } = displayPage();
+    const { driver, clicks, escape } = displayPage();
     await driver.closeDisplayOptions();
     expect(escape).toHaveBeenCalledWith("Escape");
-    expect(click).not.toHaveBeenCalled();
+    expect(clicks).toEqual([]);
   });
 
-  it("chooses a group-by radio", async () => {
-    const { driver, radioClick } = displayPage();
+  it("chooses a group-by row inside its own section", async () => {
+    const { driver, dispatched } = displayPage();
     await driver.setDisplayGroupBy("Priority");
-    expect(radioClick).toHaveBeenCalledWith({ timeout: WebNewDriver.WAIT_MS });
+    expect(dispatched).toEqual(["click"]);
   });
 
   it("toggles an option only when it is not already in the wanted state", async () => {
     const offPage = displayPage({ pressed: "false" });
     await offPage.driver.setDisplayExtraOption("Show empty groups", true);
-    expect(offPage.click).toHaveBeenCalledTimes(1);
+    expect(offPage.dispatched).toEqual(["click"]);
     const onPage = displayPage({ pressed: "true" });
     await onPage.driver.setDisplayExtraOption("Show empty groups", true);
-    expect(onPage.click).not.toHaveBeenCalled();
+    expect(onPage.dispatched).toEqual([]);
     expect(await onPage.driver.isDisplayOptionChecked("Show empty groups")).toBe(true);
   });
 });

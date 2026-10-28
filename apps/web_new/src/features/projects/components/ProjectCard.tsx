@@ -230,19 +230,33 @@ export function ProjectCard({
           </IconButton>
         ) : null}
         {entries.length > 0 ? (
-          <Menu
-            trigger={
-              <IconButton
-                label={`Actions for ${project.name}`}
-                size="small"
-                data-testid="project-card-actions"
-                onClick={halt}
-              >
-                <Ellipsis size={16} strokeWidth={1.5} aria-hidden="true" />
-              </IconButton>
-            }
-            items={entries}
-          />
+          // The menu renders in a portal, but React still bubbles its
+          // events up this tree — through the card's own anchor. Without
+          // this boundary, choosing an entry would also navigate into the
+          // project and take the opened dialog down with it.
+          <span
+            data-testid="project-card-menu-host"
+            onClick={halt}
+            onPointerDown={(event) => {
+              // Stop the press reaching the anchor, but keep its default:
+              // the menu trigger relies on the press to open.
+              event.stopPropagation();
+            }}
+          >
+            <Menu
+              trigger={
+                <IconButton
+                  label={`Actions for ${project.name}`}
+                  size="small"
+                  data-testid="project-card-actions"
+                  onClick={halt}
+                >
+                  <Ellipsis size={16} strokeWidth={1.5} aria-hidden="true" />
+                </IconButton>
+              }
+              items={entries}
+            />
+          </span>
         ) : null}
       </div>
       <p data-testid="project-card-subtext" className="text-body line-clamp-2 break-words text-(--text-muted)">

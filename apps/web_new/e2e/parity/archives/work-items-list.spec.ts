@@ -335,13 +335,16 @@ test(
         await driver.archivesCloseMenus();
       });
 
-      await test.step("each row offers restore, open, and copy-link — but no Delete (bug NEWFRONT-234)", async () => {
+      await test.step("each row offers restore, open, copy-link and Delete", async () => {
+        // Old app: the read-only gate hides the wired Delete entry
+        // (NEWFRONT-234). web_new renders the intended four-entry menu.
+        const oracle = driver.target !== "web_new";
         await driver.archivesOpenRowMenu(second.name);
         try {
-          // Live menu carries three entries: the read-only gate hides the
-          // wired Delete entry (NEWFRONT-234). Intended: Delete renders
-          // fourth and opens the delete confirmation.
-          expect(await driver.archivesRowMenuEntries()).toEqual(["Restore", "Open in new tab", "Copy link"]);
+          const entries = await driver.archivesRowMenuEntries();
+          expect(entries).toEqual(
+            oracle ? ["Restore", "Open in new tab", "Copy link"] : ["Restore", "Open in new tab", "Copy link", "Delete"]
+          );
         } finally {
           await driver.archivesCloseMenus();
         }
