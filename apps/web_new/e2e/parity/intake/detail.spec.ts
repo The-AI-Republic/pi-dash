@@ -1007,6 +1007,39 @@ test(
       };
 
       await test.step("each version opens for viewing with its stored text", async () => {
+        if (driver.target === "web_new") {
+          // The intake list endpoint carries no ordering while the new
+          // history lists newest-first, so server indices do not map to
+          // menu positions: open each entry and match by stored text
+          // (gate NEWFRONT-695). The backend order gap is noted in the
+          // gate report; this step depends on neither order.
+          const readVersionText = async (): Promise<string> => {
+            let text = "";
+            await expect
+              .poll(
+                async () => {
+                  text = (await driver.intakeDetailVersionModalText()) ?? "";
+                  return text.includes(firstBody) || text.includes(secondBody);
+                },
+                { timeout: 30_000 }
+              )
+              .toBe(true);
+            return text;
+          };
+          const seen: string[] = [];
+          for (let uiIndex = 0; uiIndex < 2; uiIndex++) {
+            await driver.intakeDetailOpenVersion(uiIndex);
+            seen.push(await readVersionText());
+            await driver.intakeDetailCloseVersionModal();
+            await driver.intakeDetailOpenVersions();
+          }
+          expect(seen.some((text) => text.includes(secondBody))).toBe(true);
+          expect(seen.some((text) => text.includes(firstBody))).toBe(true);
+          // Leave the first revision open for the restore step below.
+          await driver.intakeDetailOpenVersion(seen.findIndex((text) => text.includes(firstBody)));
+          await expect.poll(() => driver.intakeDetailVersionModalText(), { timeout: 30_000 }).toContain(firstBody);
+          return;
+        }
         const secondIndex = await indexWith(secondBody);
         await driver.intakeDetailOpenVersion(secondIndex);
         await expect.poll(() => driver.intakeDetailVersionModalText(), { timeout: 30_000 }).toContain(secondBody);

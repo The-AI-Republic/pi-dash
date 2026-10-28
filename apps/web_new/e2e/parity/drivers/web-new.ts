@@ -22226,7 +22226,10 @@ export class WebNewDriver implements ParityDriver {
   async intakeDetailDescriptionText(): Promise<string> {
     await this.intakeDetailTitleSettled();
     const root = this.page.getByTestId("intake-detail");
-    const editor = root.locator(".ProseMirror");
+    // Scoped to the description surface: the comment composer below
+    // mounts its own ProseMirror, which a bare class lookup reads first
+    // once the description editor closes (gate NEWFRONT-695, INT-029).
+    const editor = root.locator('.ProseMirror[aria-label="Description"]');
     if (
       (await editor.count()) > 0 &&
       (await editor
@@ -22253,7 +22256,7 @@ export class WebNewDriver implements ParityDriver {
   async intakeDetailDescriptionEditable(): Promise<boolean> {
     await this.intakeDetailTitleSettled();
     const root = this.page.getByTestId("intake-detail");
-    if ((await root.locator(".ProseMirror").count()) > 0) return true;
+    if ((await root.locator('.ProseMirror[aria-label="Description"]').count()) > 0) return true;
     const add = root.getByRole("button", { name: "Add a description" });
     if ((await add.count()) > 0 && (await this.isShown(add))) return true;
     const edit = root.getByRole("button", { name: "Edit description" });
@@ -22265,9 +22268,16 @@ export class WebNewDriver implements ParityDriver {
     const add = root.getByRole("button", { name: "Add a description" });
     if ((await add.count()) > 0 && (await this.isShown(add))) await add.first().click();
     else await root.getByRole("button", { name: "Edit description" }).first().click();
-    const editor = root.locator(".ProseMirror");
+    const editor = root.locator('.ProseMirror[aria-label="Description"]');
     await editor.first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
-    await editor.first().fill(text);
+    // Tiptap schedules its autosave from real key input only; fill()
+    // swaps the DOM without firing the model's update, so the save
+    // pipeline never dirties and the server keeps the old HTML. Select
+    // all plus sequential typing goes through the model (gate
+    // NEWFRONT-695, INT-019).
+    await editor.first().click({ timeout: WebNewDriver.WAIT_MS });
+    await editor.first().press("ControlOrMeta+a", { timeout: WebNewDriver.WAIT_MS });
+    await editor.first().pressSequentially(text, { timeout: WebNewDriver.WAIT_MS });
     await editor.first().blur();
     await this.intakeDetailSaved();
   }
@@ -22277,7 +22287,7 @@ export class WebNewDriver implements ParityDriver {
     const add = root.getByRole("button", { name: "Add a description" });
     if ((await add.count()) > 0 && (await this.isShown(add))) await add.first().click();
     else await root.getByRole("button", { name: "Edit description" }).first().click();
-    const editor = root.locator(".ProseMirror");
+    const editor = root.locator('.ProseMirror[aria-label="Description"]');
     await editor.first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
     await editor.first().focus();
   }

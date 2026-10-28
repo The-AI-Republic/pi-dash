@@ -102,6 +102,15 @@ class FakePage {
       pressSequentially: async (value: string) => {
         self.fills.push(`${id}~${value}`);
       },
+      press: async (key: string) => {
+        self.pageCalls.push(`press:${id}:${key}`);
+      },
+      blur: async () => {
+        self.pageCalls.push(`blur:${id}`);
+      },
+      focus: async () => {
+        self.pageCalls.push(`focus:${id}`);
+      },
       selectOption: async (value: string) => {
         self.selects.push(`${id}=${value}`);
       },
@@ -403,6 +412,40 @@ describe("intakeDetailCopyLink", () => {
       "page testid(intake-detail-header) testid(intake-detail-menu) role(button,Request actions)",
       "page role(menuitem,Copy work item link)",
     ]);
+  });
+});
+
+describe("intakeDetailDescriptionText", () => {
+  const editor = 'page testid(intake-detail) css(.ProseMirror[aria-label="Description"])';
+
+  it("reads the scoped description editor while it is open", async () => {
+    const { driver } = driverOn({
+      [editor]: { count: 1, visible: true, text: "Edited body" },
+    });
+    expect(await driver.intakeDetailDescriptionText()).toBe("Edited body");
+  });
+
+  it("falls back to the rendered region once the editor closes", async () => {
+    const { driver } = driverOn({
+      [editor]: { count: 0 },
+      "page testid(intake-detail) role(region,Description)": { count: 1, text: "Restored body" },
+    });
+    expect(await driver.intakeDetailDescriptionText()).toBe("Restored body");
+  });
+});
+
+describe("intakeDetailSetDescription", () => {
+  it("types through the model instead of filling the DOM", async () => {
+    const { fake, driver } = driverOn({
+      "page testid(intake-detail) role(button,Add a description)": { count: 0 },
+    });
+    await driver.intakeDetailSetDescription("New body");
+    const editor = 'page testid(intake-detail) css(.ProseMirror[aria-label="Description"])';
+    expect(fake.clicks).toContain(editor);
+    expect(fake.pageCalls).toContain(`press:${editor}:ControlOrMeta+a`);
+    expect(fake.fills).toContain(`${editor}~New body`);
+    expect(fake.fills.every((entry) => entry.includes("~"))).toBe(true);
+    expect(fake.pageCalls).toContain(`blur:${editor}`);
   });
 });
 
