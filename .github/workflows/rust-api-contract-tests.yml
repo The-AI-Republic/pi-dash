@@ -307,7 +307,7 @@ jobs:
         # job serves Django from the frozen checkout, so the file stays out
         # of the selection until the next main-sync merges main into
         # rust-dev, then is added next to assistant/test_turn_errors.py.
-        run: env -u DJANGO_SETTINGS_MODULE pytest -p no:django --ignore-glob='*/test_rust_replay*.py' --ignore-glob='*/test_s3_stall.py' --ignore-glob='*/test_mongo_write_error.py' tasks_mail tasks_webhooks tasks_cleanup tasks_ticker assistant/test_tasks_turn.py assistant/test_turn_errors.py assistant/test_update_issue_completion.py assistant/test_create_issue_transition.py
+        run: env -u DJANGO_SETTINGS_MODULE pytest -p no:django --ignore-glob='*/test_rust_replay*.py' --ignore-glob='*/test_s3_stall.py' --ignore-glob='*/test_mongo_write_error.py' tasks_mail tasks_webhooks tasks_cleanup tasks_ticker assistant/test_tasks_turn.py assistant/test_turn_errors.py assistant/test_update_issue_completion.py assistant/test_create_issue_transition.py assistant/test_dispatch_coding_run.py
 
       - name: Upload service logs on failure
         if: failure()
