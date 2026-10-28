@@ -43,15 +43,94 @@ import {
 import { specTags, specTitle } from "../helpers/tags";
 import type { ParityDriver, ParitySeedFacts } from "../drivers/parity-driver";
 
-/** Cycle dates that read CURRENT on the seeded stack (today is 2026-10-10). */
-const CURRENT_START = "2026-09-01";
-const CURRENT_END = "2026-12-31";
+/** ISO date `days` from today (all cycle ranges derive from this, so the suite never rots). */
+function isoIn(days: number): string {
+  const at = new Date();
+  at.setDate(at.getDate() + days);
+  return `${at.getFullYear()}-${String(at.getMonth() + 1).padStart(2, "0")}-${String(at.getDate()).padStart(2, "0")}`;
+}
+
+/** Cycle dates that read CURRENT. */
+const CURRENT_START = isoIn(-60);
+const CURRENT_END = isoIn(60);
 /** Cycle dates that read COMPLETED (finished cycles hide creation). */
-const DONE_START = "2026-01-01";
-const DONE_END = "2026-02-01";
+const DONE_START = isoIn(-60);
+const DONE_END = isoIn(-30);
 /** Cycle dates that read UPCOMING (a future start hides the chart). */
-const UPCOMING_START = "2026-11-01";
-const UPCOMING_END = "2026-11-30";
+const UPCOMING_START = isoIn(10);
+const UPCOMING_END = isoIn(60);
+
+const MONTH_FULL = [
+  "January",
+  "February",
+  "March",
+  "April",
+  "May",
+  "June",
+  "July",
+  "August",
+  "September",
+  "October",
+  "November",
+  "December",
+];
+
+const MONTH_SHORT = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/**
+ * ISO date for day `n` (1-based) of next month. The sidebar calendar shows
+ * one month starting at today's, so next month's first days always render
+ * as trailing outside days — picks never need month navigation.
+ */
+function isoNextMonthDay(n: number): string {
+  const now = new Date();
+  const at = new Date(now.getFullYear(), now.getMonth() + 1, n);
+  return `${at.getFullYear()}-${String(at.getMonth() + 1).padStart(2, "0")}-${String(at.getDate()).padStart(2, "0")}`;
+}
+
+/** Inline-edit pick days and the overlap target: DAY1 < B_START < DAY2 < B_END, all future. */
+const PICK_DAY1 = isoNextMonthDay(1);
+const CYCLE_B_START = isoNextMonthDay(2);
+const PICK_DAY2 = isoNextMonthDay(3);
+const CYCLE_B_END = isoNextMonthDay(4);
+
+function ordinal(day: number): string {
+  if (day >= 11 && day <= 13) return `${day}th`;
+  switch (day % 10) {
+    case 1:
+      return `${day}st`;
+    case 2:
+      return `${day}nd`;
+    case 3:
+      return `${day}rd`;
+    default:
+      return `${day}th`;
+  }
+}
+
+/** "October 15th, 2026" label the calendar day buttons carry, for an ISO day. */
+function spelledDay(iso: string): string {
+  const [year, month, day] = iso.split("-").map(Number);
+  return `${MONTH_FULL[(month ?? 1) - 1]} ${ordinal(day ?? 1)}, ${year}`;
+}
+
+function shortDay(iso: string): string {
+  const [, month, day] = iso.split("-").map(Number);
+  return `${MONTH_SHORT[(month ?? 1) - 1]} ${String(day ?? 1).padStart(2, "0")}`;
+}
+
+/** Sidebar range text for two ISO days ("Sep 01 - Oct 18, 2026" shape). */
+function spanText(startIso: string, endIso: string): string {
+  const [startYear, startMonth] = startIso.split("-").map(Number);
+  const [endYear, endMonth, endDay] = endIso.split("-").map(Number);
+  if (startYear === endYear && startMonth === endMonth) {
+    return `${shortDay(startIso)} - ${String(endDay ?? 1).padStart(2, "0")}, ${startYear}`;
+  }
+  if (startYear === endYear) {
+    return `${shortDay(startIso)} - ${shortDay(endIso)}, ${startYear}`;
+  }
+  return `${shortDay(startIso)}, ${startYear} - ${shortDay(endIso)}, ${endYear}`;
+}
 
 function requireGuest(seed: ParitySeedFacts): { email: string; password: string } {
   if (!seed.guestEmail || !seed.guestPassword)
@@ -602,13 +681,13 @@ test.describe("cycle detail on desktop", () => {
       const nameA = `${tag} cycle A`;
       const nameB = `${tag} cycle B`;
       const idA = await serverCreateCycle(seed.workspaceSlug, projectA, nameA, CURRENT_START, CURRENT_END, session);
-      const idB = await serverCreateCycle(seed.workspaceSlug, projectB, nameB, "2026-10-20", "2026-10-30", session);
+      const idB = await serverCreateCycle(seed.workspaceSlug, projectB, nameB, CYCLE_B_START, CYCLE_B_END, session);
       try {
         await openDetail(driver, seed, projectA, idA, nameA, session);
 
         await test.step("the control is editable for members", async () => {
           expect(await driver.cyclesSidebarDateDisabled()).toBe(false);
-          expect(await driver.cyclesSidebarDateText()).toContain("Sep 01");
+          expect(await driver.cyclesSidebarDateText()).toContain(shortDay(CURRENT_START));
         });
 
         await test.step("moving the end saves with a success confirmation", async () => {
@@ -616,36 +695,36 @@ test.describe("cycle detail on desktop", () => {
           // fires unordered writes, so the server must reflect one click
           // before the next lands.
           await driver.cyclesSidebarOpenDatePicker();
-          await driver.cyclesPickDateDay("October 15th, 2026");
+          await driver.cyclesPickDateDay(spelledDay(PICK_DAY1));
           await expect
             .poll(() => cycleDateParts(seed, projectA, idA, session), { timeout: 30_000 })
-            .toEqual({ start: "2026-09-01", end: "2026-10-15" });
-          await driver.cyclesPickDateDay("October 18th, 2026");
+            .toEqual({ start: CURRENT_START, end: PICK_DAY1 });
+          await driver.cyclesPickDateDay(spelledDay(PICK_DAY2));
           await expect
             .poll(() => cycleDateParts(seed, projectA, idA, session), { timeout: 30_000 })
-            .toEqual({ start: "2026-09-01", end: "2026-10-18" });
+            .toEqual({ start: CURRENT_START, end: PICK_DAY2 });
           await driver.cyclesDismissDatePicker();
           expect(await toastText(driver)).toContain("Cycle updated successfully.");
-          expect(await driver.cyclesSidebarDateText()).toBe("Sep 01 - Oct 18, 2026");
+          expect(await driver.cyclesSidebarDateText()).toBe(spanText(CURRENT_START, PICK_DAY2));
           expect(
-            await serverCycleDateCheckEdit(seed.workspaceSlug, projectA, "2026-09-01", "2026-10-18", idA, session)
+            await serverCycleDateCheckEdit(seed.workspaceSlug, projectA, CURRENT_START, PICK_DAY2, idA, session)
           ).toBe(true);
         });
 
         await test.step("moving the start saves too", async () => {
           await openDetail(driver, seed, projectB, idB, nameB, session);
           await driver.cyclesSidebarOpenDatePicker();
-          await driver.cyclesPickDateDay("October 15th, 2026");
+          await driver.cyclesPickDateDay(spelledDay(PICK_DAY1));
           await expect
             .poll(async () => (await cycleDateParts(seed, projectB, idB, session)).start, { timeout: 30_000 })
-            .toBe("2026-10-15");
-          await driver.cyclesPickDateDay("October 25th, 2026");
+            .toBe(PICK_DAY1);
+          await driver.cyclesPickDateDay(spelledDay(PICK_DAY2));
           await expect
             .poll(() => cycleDateParts(seed, projectB, idB, session), { timeout: 30_000 })
-            .toEqual({ start: "2026-10-15", end: "2026-10-25" });
+            .toEqual({ start: PICK_DAY1, end: PICK_DAY2 });
           await driver.cyclesDismissDatePicker();
           expect(await toastText(driver)).toContain("Cycle updated successfully.");
-          expect(await driver.cyclesSidebarDateText()).toBe("Oct 15 - 25, 2026");
+          expect(await driver.cyclesSidebarDateText()).toBe(spanText(PICK_DAY1, PICK_DAY2));
         });
       } finally {
         await serverCleanupProject(seed.workspaceSlug, projectA, session);
@@ -663,16 +742,16 @@ test.describe("cycle detail on desktop", () => {
       const projectId = await createCycleProject(seed, `${tag} project`, session);
       const nameA = `${tag} cycle A`;
       const idA = await serverCreateCycle(seed.workspaceSlug, projectId, nameA, CURRENT_START, CURRENT_END, session);
-      await serverCreateCycle(seed.workspaceSlug, projectId, `${tag} cycle B`, "2026-10-20", "2026-10-30", session);
+      await serverCreateCycle(seed.workspaceSlug, projectId, `${tag} cycle B`, CYCLE_B_START, CYCLE_B_END, session);
       try {
         await openDetail(driver, seed, projectId, idA, nameA, session);
         await driver.cyclesSidebarOpenDatePicker();
 
         await test.step("a clear range saves first", async () => {
-          await driver.cyclesPickDateDay("October 15th, 2026");
+          await driver.cyclesPickDateDay(spelledDay(PICK_DAY1));
           await expect
             .poll(() => cycleDateParts(seed, projectId, idA, session), { timeout: 30_000 })
-            .toEqual({ start: "2026-09-01", end: "2026-10-15" });
+            .toEqual({ start: CURRENT_START, end: PICK_DAY1 });
           expect(await toastText(driver)).toContain("Cycle updated successfully.");
         });
 
@@ -681,7 +760,7 @@ test.describe("cycle detail on desktop", () => {
           // is still visible (NEWFRONT-264), so the success toast must
           // dismiss before the overlap click lands.
           await expect.poll(() => driver.rulesLastToast(), { timeout: 20_000 }).toBe(null);
-          await driver.cyclesPickDateDay("October 25th, 2026");
+          await driver.cyclesPickDateDay(spelledDay(PICK_DAY2));
           let text = "";
           await expect
             .poll(
@@ -696,9 +775,9 @@ test.describe("cycle detail on desktop", () => {
           expect(text).toContain("Error!");
           await driver.cyclesDismissDatePicker();
           const parts = await cycleDateParts(seed, projectId, idA, session);
-          expect(parts.end).toBe("2026-10-15");
+          expect(parts.end).toBe(PICK_DAY1);
           expect(
-            await serverCycleDateCheckEdit(seed.workspaceSlug, projectId, "2026-09-01", "2026-10-25", idA, session)
+            await serverCycleDateCheckEdit(seed.workspaceSlug, projectId, CURRENT_START, PICK_DAY2, idA, session)
           ).toBe(false);
         });
       } finally {
