@@ -18,13 +18,17 @@
 // Any other option (e.g. --coverage) is passed through to vitest. Path
 // filters are refused: the selection is the filter. Past MAX_TEST_FILES
 // selected files the list could outgrow the OS argument limit, so the whole
-// suite runs.
+// suite runs. The fork pool is sized from the host's sustained load the way
+// the full-suite runner sizes it (see workerCount in full-suite.mjs); an
+// explicit --maxWorkers passes through untouched and disables the sizing.
 import { execFileSync, spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { availableParallelism, loadavg as osLoadavg, totalmem } from "node:os";
 import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { resolveEditionModule } from "../tools/edition-module.mjs";
+import { workerArgs, workerCount } from "./full-suite.mjs";
 import { SOURCE_ROOTS, affectedTests, aliasesFor } from "./test-impact.mjs";
 
 const webNewDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -67,17 +71,28 @@ function parseArgs(argv) {
   return opts;
 }
 
+// Vitest spellings of the worker-pool flag. When the user passes one
+// explicitly it wins and no sized flag is added.
+const WORKER_FLAGS = ["--maxWorkers", "--max-workers"];
+
+function hasWorkerFlag(vitestArgs) {
+  return vitestArgs.some((arg) => WORKER_FLAGS.some((flag) => arg === flag || arg.startsWith(`${flag}=`)));
+}
+
 // Decide what to run from the selected test files. Pure, so the self-test
 // covers every branch. Paths are repo-relative; vitest gets them absolute.
-function planRun({ full, vitestArgs, tests, root }) {
-  if (full) return { mode: "full", reason: "--full", args: ["run", ...vitestArgs] };
+// `pool` is the sized worker-pool flag (empty when it matches vitest's
+// default or the user passed their own); it precedes the passthrough args so
+// a user spelling this file does not know still wins by position.
+function planRun({ full, vitestArgs, tests, root, pool = [] }) {
+  if (full) return { mode: "full", reason: "--full", args: ["run", ...pool, ...vitestArgs] };
   if (tests.length > MAX_TEST_FILES)
-    return { mode: "full", reason: `${tests.length} test files selected`, args: ["run", ...vitestArgs] };
+    return { mode: "full", reason: `${tests.length} test files selected`, args: ["run", ...pool, ...vitestArgs] };
   if (tests.length === 0) return { mode: "none", reason: null, args: null };
   return {
     mode: "changed",
     reason: null,
-    args: ["run", "--passWithNoTests", ...vitestArgs, ...tests.map((file) => resolve(root, file))],
+    args: ["run", "--passWithNoTests", ...pool, ...vitestArgs, ...tests.map((file) => resolve(root, file))],
   };
 }
 
@@ -164,12 +179,25 @@ function main(
     read = null,
     readBaseFiles = defaultReadBase,
     env = process.env,
+    host = { cpus: availableParallelism(), memoryGiB: totalmem() / 1024 ** 3 },
+    loadavg = osLoadavg,
   } = {}
 ) {
   const opts = parseArgs(argv);
+  // One vitest invocation, so the whole 5-minute average is load outside this
+  // run (the full-suite runner subtracts its previous batch; there is none
+  // here). An explicit user flag disables the sizing.
+  const externalLoad = loadavg()[1];
+  const workers = workerCount({ ...host, externalLoad });
+  const pool = hasWorkerFlag(opts.vitestArgs) ? [] : workerArgs({ ...host, externalLoad });
+  const poolNote =
+    pool.length > 0
+      ? `test:changed: ${workers} workers (--maxWorkers=${workers}; 5-min load ${externalLoad.toFixed(1)})`
+      : null;
   if (opts.full) {
     log("test:changed: full suite (--full)");
-    return runVitest(planRun({ ...opts, tests: [], root: "" }).args);
+    if (poolNote) log(poolNote);
+    return runVitest(planRun({ ...opts, tests: [], root: "", pool }).args);
   }
   const base = opts.base ?? git(["merge-base", "HEAD", DEFAULT_BASE_BRANCH]);
   const root = git(["rev-parse", "--show-toplevel"]);
@@ -182,10 +210,11 @@ function main(
     readBaseFiles,
     env,
   });
-  const plan = planRun({ ...opts, tests, root });
+  const plan = planRun({ ...opts, tests, root, pool });
   const skipped = skippedFiles(changedFiles);
   if (plan.mode === "full") log(`test:changed: full suite (${plan.reason} since ${base})`);
   else log(`test:changed: ${changedFiles.length} file(s) changed since ${base} reach ${tests.length} test file(s)`);
+  if (poolNote) log(poolNote);
   if (skipped.length > 0) log(`test:changed: no import edge, left to the scheduled full suite: ${skipped.join(", ")}`);
   if (setupReached)
     log("test:changed: the change reaches src/test-setup.ts, which every test loads; left to the scheduled full suite");
@@ -206,4 +235,4 @@ if (isCliEntry()) {
   process.exit(main());
 }
 
-export { changedFilesSince, defaultReadBase, isCliEntry, main, parseArgs, planRun, skippedFiles };
+export { changedFilesSince, defaultReadBase, hasWorkerFlag, isCliEntry, main, parseArgs, planRun, skippedFiles };
