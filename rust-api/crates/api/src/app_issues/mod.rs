@@ -687,53 +687,14 @@ pub fn render_condition(cond: &Condition) -> (String, Vec<sea_query::Value>) {
     (fragment, values.0)
 }
 
-fn bind_sea_value<'q>(
-    query: sqlx::query::Query<'q, Postgres, PgArguments>,
-    value: &sea_query::Value,
-) -> Result<sqlx::query::Query<'q, Postgres, PgArguments>, Denial> {
-    use sea_query::Value as SeaValue;
-    match value {
-        SeaValue::Bool(value) => Ok(query.bind(*value)),
-        SeaValue::TinyInt(value) => Ok(query.bind(*value)),
-        SeaValue::SmallInt(value) => Ok(query.bind(*value)),
-        SeaValue::Int(value) => Ok(query.bind(*value)),
-        SeaValue::BigInt(value) => Ok(query.bind(*value)),
-        SeaValue::TinyUnsigned(value) => Ok(query.bind(value.map(i16::from))),
-        SeaValue::SmallUnsigned(value) => Ok(query.bind(value.map(i32::from))),
-        SeaValue::Unsigned(value) => Ok(query.bind(value.map(|v| v as i64))),
-        SeaValue::BigUnsigned(value) => Ok(query.bind(value.map(|v| v as i64))),
-        SeaValue::Float(value) => Ok(query.bind(*value)),
-        SeaValue::Double(value) => Ok(query.bind(*value)),
-        SeaValue::String(value) => Ok(query.bind(value.clone().map(|text| *text))),
-        SeaValue::Char(value) => Ok(query.bind(value.map(|char| char.to_string()))),
-        SeaValue::Bytes(value) => Ok(query.bind(value.clone().map(|bytes| (*bytes).clone()))),
-        SeaValue::Uuid(value) => Ok(query.bind(value.clone().map(|id| *id))),
-        // Rich date / datetime filters bind typed params (`DATE` /
-        // `timestamptz`), like the ORM. The remaining chrono variants are
-        // never emitted; they only keep the match exhaustive.
-        SeaValue::ChronoDate(value) => Ok(query.bind(value.clone().map(|date| *date))),
-        SeaValue::ChronoDateTimeUtc(value) => Ok(query.bind(value.clone().map(|moment| *moment))),
-        SeaValue::ChronoTime(_)
-        | SeaValue::ChronoDateTime(_)
-        | SeaValue::ChronoDateTimeLocal(_)
-        | SeaValue::ChronoDateTimeWithTimeZone(_)
-        // `Json` / `Array` exist only because ORM-01 enables
-        // `sea-query/with-json` workspace-wide (via sea-orm); these
-        // compilers emit scalars, never them.
-        | SeaValue::Json(_)
-        | SeaValue::Array(_, _) => Err(Denial::ServerError),
-    }
-}
-
+/// Bind a `sea_query::Value` vec to raw SQL: the canonical binder now
+/// lives in `pidash_compat::db` (OVL-04); this wrapper only maps its
+/// error to the local 500, exactly as the previous inline copy did.
 fn bind_all<'a>(
     sql: &'a str,
     values: Vec<sea_query::Value>,
 ) -> Result<sqlx::query::Query<'a, Postgres, PgArguments>, Denial> {
-    let mut query = sqlx::query(sql);
-    for value in &values {
-        query = bind_sea_value(query, value)?;
-    }
-    Ok(query)
+    pidash_compat::db::bind_all(sql, values).map_err(|_| Denial::ServerError)
 }
 
 /// Fetch every row of `inner_sql` as a JSON map each, via `row_to_json`.

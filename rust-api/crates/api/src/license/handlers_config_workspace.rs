@@ -110,6 +110,7 @@ use super::{
 };
 use crate::state::AppState;
 use crate::v1_cycles_modules::json::{self, JsonFail};
+use pidash_compat::db::is_unique_violation;
 
 /// Register the five configuration/workspace paths. Sibling license paths
 /// stay unmatched and proxy to Django; unowned methods on these paths
@@ -2693,18 +2694,6 @@ fn json_len(found: BodyField<'_>) -> Option<usize> {
         Some(Value::Object(map)) => Some(map.len()),
         _ => None,
     }
-}
-
-/// True when `err` takes Django's `"already exists" in str(e)` branch:
-/// every Postgres unique violation renders a `Key (...) already exists.`
-/// DETAIL line (which is what psycopg's `str` matches on), and `sqlx`
-/// exposes no `DETAIL` accessor — hence the kind check instead of a
-/// string match (the `app_integrations` `is_duplicate_url` precedent).
-fn is_unique_violation(err: &sqlx::Error) -> bool {
-    let sqlx::Error::Database(db_error) = err else {
-        return false;
-    };
-    db_error.is_unique_violation()
 }
 
 /// `request.data.get("company_role", "")` into `CharField`: missing

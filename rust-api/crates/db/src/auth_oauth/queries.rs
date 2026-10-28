@@ -245,11 +245,9 @@ pub mod dev_machine {
         }
     }
 
-    /// `true` for a Postgres unique-violation (`23505`) — the concurrent
-    /// `create` that sends the loser down the re-lock path.
-    pub fn is_unique_violation(err: &sqlx::Error) -> bool {
-        matches!(err, sqlx::Error::Database(db) if db.code().as_deref() == Some("23505"))
-    }
+    /// Canonical unique-violation classifier, re-exported from
+    /// `pidash_compat::db` (OVL-04) so this public path keeps working.
+    pub use pidash_compat::db::is_unique_violation;
 
     /// The locked-row working set the touch path needs.
     pub struct LockedMachine {

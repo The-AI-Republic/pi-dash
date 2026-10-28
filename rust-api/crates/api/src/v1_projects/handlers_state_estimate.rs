@@ -104,6 +104,7 @@ use crate::license::AssetUrl;
 use crate::paginator::{self, Cursor, PageResponse};
 use crate::state::AppState;
 use crate::uuid_path::{classify_uuid_segment, UuidSegment};
+use pidash_compat::db::is_unique_violation;
 
 /// One `machine_token` auth lookup row: user, workspace, dev-machine, revocation.
 type MachineTokenLookup = Option<(
@@ -2134,14 +2135,6 @@ async fn fetch_state_by_name(
 fn state_conflict_body(error: &str, id: &str) -> String {
     serde_json::to_string(&serde_json::json!({"error": error, "id": id}))
         .expect("conflict body serializes")
-}
-
-/// True for unique/partial-unique violations (SQLSTATE 23505): the only
-/// `IntegrityError` the name-constraint INSERT can raise deterministically.
-fn is_unique_violation(e: &sqlx::Error) -> bool {
-    e.as_database_error()
-        .and_then(|db| db.code())
-        .is_some_and(|code| code == "23505")
 }
 
 /// Rebuild a request from its parts and proxy it to Django (the resolver

@@ -49,6 +49,7 @@
 //! inside `save()`). Final rows are identical.
 
 use chrono::{DateTime, Utc};
+use pidash_compat::db::is_unique_violation;
 use sea_orm::ActiveValue::Set;
 use sea_orm::{ActiveModelTrait, EntityTrait};
 use uuid::Uuid;
@@ -441,10 +442,6 @@ pub fn make_unusable_password() -> String {
 /// not starting with `!` counts as usable (including `""`).
 pub fn is_password_usable(encoded: &str) -> bool {
     !encoded.starts_with('!')
-}
-
-fn is_unique_violation(err: &sqlx::Error) -> bool {
-    matches!(err, sqlx::Error::Database(db) if db.code().as_deref() == Some("23505"))
 }
 
 /// Return (and create on first call) the dedicated bot user

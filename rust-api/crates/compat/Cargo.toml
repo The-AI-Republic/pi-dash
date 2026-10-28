@@ -1,0 +1,23 @@
+[package]
+name = "pidash-compat"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# OVL-04 (PIDASHCONV-1542): the public home of the Python/DRF parity
+# plumbing every api module used to keep privately. A leaf crate: only
+# third-party deps, so api/services/jobs/db can all depend on it.
+# sqlx features mirror pidash-db (locked sqlx 0.8.x, no lock churn);
+# sea-query features match the union the workspace builds with
+# (ORM-01 enables with-json and postgres-array via sea-orm), so the
+# exhaustive binder compiles standalone exactly as it does in the
+# full workspace.
+sqlx = { version = "0.8", features = ["postgres", "runtime-tokio", "uuid", "chrono"] }
+sea-query = { version = "0.32", default-features = false, features = ["backend-postgres", "postgres-array", "with-uuid", "with-chrono", "with-json"] }
+
+[dev-dependencies]
+# Unit tests only (the library names no chrono/uuid/serde_json types
+# directly). All three are already in rust-api/Cargo.lock.
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+uuid = "1"

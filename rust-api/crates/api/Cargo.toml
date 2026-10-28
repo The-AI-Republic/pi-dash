@@ -5,6 +5,9 @@ edition = "2021"
 
 [dependencies]
 pidash-types = { path = "../types" }
+# OVL-04 (PIDASHCONV-1542): canonical Python/DRF parity plumbing
+# (sea-query binder, error classifiers, ...). A leaf crate, so no cycle.
+pidash-compat = { path = "../compat" }
 pidash-db = { path = "../db" }
 pidash-auth = { path = "../auth" }
 pidash-services = { path = "../services" }

@@ -104,6 +104,7 @@ use pidash_types::dispatch::AgentExecutorKind;
 use super::agent::{ToolExecutor, ToolOutcome};
 use super::github::{GithubAppContext, GithubFailure, GithubRestClient};
 use super::validation::ValidatedArgs;
+use pidash_compat::db::is_unique_violation;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -2417,14 +2418,6 @@ async fn pair_rows_tx(
             })
         })
         .collect()
-}
-
-/// Whether `error` is a unique violation (the relate race's 23505).
-fn is_unique_violation(error: &sqlx::Error) -> bool {
-    error
-        .as_database_error()
-        .and_then(|db| db.code())
-        .is_some_and(|code| code.as_ref() == "23505")
 }
 
 /// `pidash_relate_issues` (`tools.py:416-424` over

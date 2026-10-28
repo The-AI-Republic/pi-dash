@@ -110,6 +110,7 @@ use super::gates;
 use crate::middleware::SessionHandle;
 use crate::paginator::py_float_str;
 use crate::state::AppState;
+use pidash_compat::db::is_integrity_error;
 use pidash_services::domain::projects::members as project_members;
 
 // ---------------------------------------------------------------------------
@@ -276,15 +277,6 @@ async fn read_json_body(req: Request) -> Result<Value, Denial> {
     }
     serde_json::from_slice(&bytes)
         .map_err(|error| Denial::BadDetail(format!("{JSON_PARSE_ERROR} - {error}")))
-}
-
-/// Whether a sqlx failure is an integrity violation (SQLSTATE class
-/// `23`), which Django's `handle_exception` answers 400 for.
-fn is_integrity_error(error: &sqlx::Error) -> bool {
-    error
-        .as_database_error()
-        .and_then(|db| db.code())
-        .is_some_and(|code| code.starts_with("23"))
 }
 
 /// Map a write failure through `handle_exception`: integrity → 400

@@ -100,6 +100,7 @@ use crate::middleware::body_limit::read_request_bytes;
 use crate::state::AppState;
 use crate::v1_cycles_modules::body as shared_body;
 
+use pidash_compat::db::{is_integrity_error, is_unique_violation};
 use pidash_services::app_issues::relation_mapper::get_actual_relation;
 
 // ---- owned paths ------------------------------------------------------------
@@ -373,17 +374,6 @@ fn integrity_denial(error: sqlx::Error) -> Denial {
     }
     let _ = error;
     Denial::ServerError
-}
-
-/// True when the failure is an integrity violation (SQLSTATE class 23).
-fn is_integrity_error(error: &sqlx::Error) -> bool {
-    matches!(error, sqlx::Error::Database(db) if db.code().is_some_and(|code| code.starts_with("23")))
-}
-
-/// True when the failure is a unique violation (SQLSTATE 23505): the
-/// `ignore_conflicts` / create-race arm.
-fn is_unique_violation(error: &sqlx::Error) -> bool {
-    matches!(error, sqlx::Error::Database(db) if db.code().is_some_and(|code| code == "23505"))
 }
 
 // ---------------------------------------------------------------------------

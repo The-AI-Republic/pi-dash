@@ -73,6 +73,7 @@ use super::auth as enroll_auth;
 use super::throttle as enroll_throttle;
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
+use pidash_compat::db::is_integrity_error;
 
 // ---------------------------------------------------------------------------
 // Wire consts (`enrollment.py`, `register.py`)
@@ -221,16 +222,6 @@ pub fn not_authenticated() -> Response {
         serde_json::json!({ "detail": "Authentication credentials were not provided." })
             .to_string(),
     )
-}
-
-/// Integrity errors (`IntegrityError`, Postgres class 23): unique / FK /
-/// not-null violations. Django catches these around the D2/B2 savepoint
-/// inserts and the create attempt body; anything else escapes to 500.
-fn is_integrity_error(err: &sqlx::Error) -> bool {
-    match err {
-        sqlx::Error::Database(db) => db.code().is_some_and(|code| code.starts_with("23")),
-        _ => false,
-    }
 }
 
 // ---------------------------------------------------------------------------

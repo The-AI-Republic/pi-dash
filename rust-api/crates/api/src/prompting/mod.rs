@@ -111,6 +111,7 @@ use crate::v1_cycles_modules::body as shared_body;
 use crate::v1_cycles_modules::json::{
     parse_request_bytes_spans, to_serde_publish, JsonFail, JSON_PARSE_PREFIX,
 };
+use pidash_compat::db::is_unique_violation;
 use pidash_services::prompting::{composer, context, recipes, registry, validation};
 
 /// `views.py:59`: numeric `WorkspaceMember.role` for the admin role.
@@ -1686,15 +1687,6 @@ async fn apply_update(
     .await
     .map_err(|_| Denial::ServerError)?;
     updated.map(record_from_row).ok_or(Denial::ServerError)
-}
-
-/// SQLSTATE 23505 carries the lost-create race (the `IntegrityError`
-/// branch); anything else on the create path is a generic failure.
-fn is_unique_violation(err: &sqlx::Error) -> bool {
-    if let sqlx::Error::Database(db) = err {
-        return db.code().as_deref() == Some("23505");
-    }
-    false
 }
 
 /// `PromptSectionDetailEndpoint.delete` (`views.py:292-319`):

@@ -75,6 +75,7 @@ use crate::state::AppState;
 use crate::v1_projects::handlers_project::{
     envelope, preamble, project_base_facts, query_last, rewrite_project_id, QueryMap,
 };
+use pidash_compat::db::{is_integrity_error, is_unique_violation};
 
 // ---------------------------------------------------------------------------
 // Responses
@@ -301,18 +302,6 @@ pub fn owned_detail(
 fn db_error<E: std::fmt::Display>(error: E, site: &str) -> Denial {
     tracing::warn!(%error, site, "v1_work_items pr-links database failure");
     Denial::ServerError
-}
-
-/// True when the failure is an integrity violation (SQLSTATE class 23):
-/// Python's `IntegrityError` arm answers the payload 400.
-fn is_integrity_error(error: &sqlx::Error) -> bool {
-    matches!(error, sqlx::Error::Database(db) if db.code().is_some_and(|code| code.starts_with("23")))
-}
-
-/// True when the failure is a unique violation (SQLSTATE 23505): the
-/// create-race arm.
-fn is_unique_violation(error: &sqlx::Error) -> bool {
-    matches!(error, sqlx::Error::Database(db) if db.code().is_some_and(|code| code == "23505"))
 }
 
 /// Django's `<uuid:...>` path converter: strict lowercase hyphenated hex.

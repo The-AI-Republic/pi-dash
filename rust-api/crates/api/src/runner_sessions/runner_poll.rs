@@ -147,6 +147,7 @@ use crate::runner_enroll::now_micros;
 use crate::runner_runs::run_endpoints::drain_lifecycle_effects;
 use crate::runner_runs::{is_uuid_path_segment, json_response, pool_of, server_error, LivePorts};
 use crate::state::AppState;
+use pidash_compat::db::is_unique_violation;
 
 /// Long-poll wait slice (`_POLL_SLICE_MS`, `sessions.py:42`).
 const POLL_SLICE_MS: u64 = 1000;
@@ -682,12 +683,6 @@ async fn reap_stale_busy_runs(
 // ---------------------------------------------------------------------------
 // Live-state upsert (`_poll_bookkeeping`, `:413-426`)
 // ---------------------------------------------------------------------------
-
-/// Whether an insert failure is a lost `get_or_create` race
-/// (Django retries on `IntegrityError` only): SQLSTATE `23505`.
-fn is_unique_violation(error: &sqlx::Error) -> bool {
-    matches!(error, sqlx::Error::Database(db) if db.code().is_some_and(|code| code.as_ref() == "23505"))
-}
 
 /// Whether the entry carries any observability key (the `:400-404`
 /// `has_snapshot` gate): `observed_run_id`, a snapshot field,

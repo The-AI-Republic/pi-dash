@@ -2984,6 +2984,7 @@ dependencies = [
  "markup5ever_rcdom",
  "md-5 0.10.6",
  "pidash-auth",
+ "pidash-compat",
  "pidash-db",
  "pidash-jobs",
  "pidash-services",
@@ -3067,6 +3068,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "pidash-compat"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "sea-query",
+ "serde_json",
+ "sqlx",
+ "uuid",
+]
+
+[[package]]
 name = "pidash-db"
 version = "0.1.0"
 dependencies = [
@@ -3078,6 +3090,7 @@ dependencies = [
  "futures-util",
  "mongodb",
  "pbkdf2",
+ "pidash-compat",
  "pidash-types",
  "rand 0.8.8",
  "redis",
@@ -3111,6 +3124,7 @@ dependencies = [
  "jsonwebtoken",
  "md-5 0.10.6",
  "minijinja",
+ "pidash-compat",
  "pidash-db",
  "pidash-services",
  "pidash-storage",
@@ -3184,6 +3198,7 @@ dependencies = [
  "md-5 0.10.6",
  "minijinja",
  "pidash-auth",
+ "pidash-compat",
  "pidash-db",
  "pidash-storage",
  "pidash-types",

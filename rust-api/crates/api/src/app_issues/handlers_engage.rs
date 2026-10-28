@@ -75,6 +75,7 @@ use sqlx::Row;
 use crate::middleware::body_limit::read_request_bytes;
 use crate::state::AppState;
 use crate::v1_cycles_modules::body as shared_body;
+use pidash_compat::db::is_integrity_error;
 use pidash_db::app_pages::strip::ml_strip_tags;
 
 // ---------------------------------------------------------------------------
@@ -362,11 +363,6 @@ fn integrity_denial(error: sqlx::Error) -> Denial {
     }
     let _ = error;
     Denial::ServerError
-}
-
-/// True when the failure is an integrity violation (SQLSTATE class 23).
-fn is_integrity_error(error: &sqlx::Error) -> bool {
-    matches!(error, sqlx::Error::Database(db) if db.code().is_some_and(|code| code.starts_with("23")))
 }
 
 // ---------------------------------------------------------------------------
