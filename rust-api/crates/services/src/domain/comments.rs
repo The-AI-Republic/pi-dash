@@ -748,16 +748,18 @@ where
     Ok(())
 }
 
-/// The `update_or_create` update branch (`git_sync_task.py:151-173`,
-/// `github_sync_task.py` twin) as the Rust sync writers issue it:
-/// render triple + scope + `actor_id` restamp + audit restamp.
-/// Django's update path is `setattr` + `save(update_fields=defaults)`
-/// with NO `actor_id` in `defaults` — the restamp is a ported quirk
-/// (PIDASHCONV-1581 item 3), preserved byte-for-byte. The git text
-/// binds created/updated via `$8`/`$9`, the github text via a shared
-/// `$8`; both bind the scan actor twice, so one shared `$8` preserves
-/// both. The description refresh ([`sync_description_full`]) and its
-/// `changed` gate stay driver-side.
+/// The `update_or_create` update branch (`git_sync_task.py:156-170`,
+/// `github_sync_task.py:208-219` twin): render triple + scope +
+/// `actor_id` restamp + audit restamp. Django's update path is
+/// `setattr` over every default + `save(update_fields=...)`, and
+/// `actor_id` IS in `defaults` (`git_sync_task.py:165`,
+/// `github_sync_task.py:217`) — the restamp matches Django
+/// (PIDASHCONV-1581 item 3 was filed on a misread and disproven:
+/// no divergence). The git text binds created/updated via
+/// `$8`/`$9`, the github text via a shared `$8`; both bind the
+/// scan actor twice, so one shared `$8` preserves both. The
+/// description subset refresh and its `changed` gate stay
+/// driver-side.
 pub struct SyncCommentUpdate<'a> {
     pub id: Uuid,
     pub updated_at: DateTime<Utc>,
@@ -768,7 +770,7 @@ pub struct SyncCommentUpdate<'a> {
     pub workspace_id: Uuid,
     pub project_id: Uuid,
     /// The scan actor: restamps `actor_id`, `created_by_id` and
-    /// `updated_by_id` (the 1581-item-3 quirk).
+    /// `updated_by_id` (matching Django's defaults restamp).
     pub actor: Uuid,
 }
 
@@ -788,43 +790,6 @@ where
         .bind(v.project_id)
         .bind(v.actor)
         .bind(v.actor)
-        .bind(v.updated_at)
-        .execute(ex)
-        .await?;
-    Ok(())
-}
-
-/// The sync-mirror description refresh: the FULL render triple in one
-/// `UPDATE` (`updated_by_id = NULL`, the worker-crum quirk), issued
-/// whenever ANY tracked field changed. Django syncs only the changed
-/// subset — the full overwrite is a ported quirk (PIDASHCONV-1581 item
-/// 2), preserved byte-for-byte. Both sync texts are identical.
-pub struct SyncDescriptionFull<'a> {
-    pub id: Uuid,
-    pub updated_at: DateTime<Utc>,
-    pub html: &'a str,
-    /// Caller-computed stripped value (bound verbatim; the sync
-    /// writers bind the comment's ML-ish stripped text here, NOT a
-    /// Django-strip recompute — part of the item-2 quirk).
-    pub stripped: &'a str,
-    pub json: &'a Value,
-}
-
-const SYNC_DESCRIPTION_FULL_SQL: &str = "UPDATE descriptions SET description_html = $2, description_stripped = $3, description_json = $4, updated_by_id = NULL, updated_at = $5 WHERE id = $1";
-
-/// See [`SyncDescriptionFull`].
-pub async fn sync_description_full<'e, E>(
-    ex: E,
-    v: &SyncDescriptionFull<'_>,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(SYNC_DESCRIPTION_FULL_SQL)
-        .bind(v.id)
-        .bind(v.html)
-        .bind(v.stripped)
-        .bind(v.json)
         .bind(v.updated_at)
         .execute(ex)
         .await?;
@@ -900,10 +865,13 @@ where
 
 /// The audit pair Django's sync `UPDATE` always carries
 /// (`updated_by_id`, `updated_at`, `issue.py:640-642`).
+/// Request writers pass the actor; the sync writers pass `None`
+/// (`BaseModel.save` blanks `updated_by` with no crum user, and the
+/// sync reads `self.updated_by_id` after that — `issue.py:644-646`).
 pub async fn touch_synced_description<'e, E>(
     ex: E,
     description_id: Uuid,
-    updated_by: Uuid,
+    updated_by: Option<Uuid>,
     updated_at: DateTime<Utc>,
 ) -> Result<(), sqlx::Error>
 where
@@ -958,21 +926,21 @@ mod tests {
     fn sync_sql_shapes() {
         // Moved with the retired sync consts (`git_sync` /
         // `github_sync`): the linked create INSERT (description id
-        // inline), the actor-restamping comment UPDATE (the github
+        // inline) and the actor-restamping comment UPDATE (the github
         // `$8`-shared text; git bound the same actor twice via
-        // `$8`/`$9`), and the full-triple description refresh. The
-        // `created_by_id = $8` pin is the github parse-suite pin,
-        // carried over verbatim.
+        // `$8`/`$9`). The `created_by_id = $8` pin is the github
+        // parse-suite pin, carried over verbatim. The restamp matches
+        // Django (`actor_id` is in the sync `defaults`); only the
+        // retired full-triple refresh diverged (PIDASHCONV-1581 item
+        // 2), and the subset twins below replaced it.
         assert!(SYNC_COMMENT_LINKED_INSERT_SQL.contains("description_id"));
         assert!(SYNC_COMMENT_LINKED_INSERT_SQL.contains("$13"));
         assert!(SYNC_COMMENT_UPDATE_SQL.contains("actor_id = $7"));
         assert!(SYNC_COMMENT_UPDATE_SQL.contains("created_by_id = $8"));
         assert!(SYNC_COMMENT_UPDATE_SQL.contains("updated_by_id = $8"));
         assert!(SYNC_COMMENT_UPDATE_SQL.contains("updated_at = $9"));
-        assert!(SYNC_DESCRIPTION_FULL_SQL.contains("description_html = $2"));
-        assert!(SYNC_DESCRIPTION_FULL_SQL.contains("description_stripped = $3"));
-        assert!(SYNC_DESCRIPTION_FULL_SQL.contains("description_json = $4"));
-        assert!(SYNC_DESCRIPTION_FULL_SQL.contains("updated_by_id = NULL"));
+        assert!(SYNC_DESCRIPTION_TOUCH_SQL.contains("updated_by_id = $2"));
+        assert!(SYNC_DESCRIPTION_TOUCH_SQL.contains("updated_at = $3"));
         // The plain create triple: link binds description id second.
         assert!(COMMENT_ROW_INSERT_SQL.contains("description_id, attachments"));
         assert!(COMMENT_LINK_UPDATE_SQL.contains("description_id = $2"));
@@ -1745,7 +1713,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn live_sync_pair_restamps_actor_and_full_triple() {
+    async fn live_sync_pair_restamps_actor_and_subset_triple() {
         let Some(pool) = live_pool().await else {
             return;
         };
@@ -1819,10 +1787,19 @@ mod tests {
                 .await
                 .expect("read link");
         assert_eq!(linked.0, Some(values.description_id));
+        // Independently diverge the description json: the subset
+        // refresh must preserve it when only html/stripped change
+        // (PIDASHCONV-1581 item 2).
+        sqlx::query("UPDATE descriptions SET description_json = $2 WHERE id = $1")
+            .bind(values.description_id)
+            .bind(serde_json::json!({"foreign": true}))
+            .execute(&pool)
+            .await
+            .expect("diverge description");
         // Re-sync: the scan actor restamps actor_id + both audit
-        // columns (the preserved 1581-item-3 quirk); the description
-        // refresh overwrites the full triple with updated_by NULL
-        // (the preserved item-2 quirk).
+        // columns (matching Django's defaults restamp — 1581 item 3
+        // was disproven); the description refresh syncs only the
+        // changed subset with updated_by NULL (the worker-crum read).
         let new_json = serde_json::json!({});
         let update = SyncCommentUpdate {
             id: values.id,
@@ -1834,18 +1811,20 @@ mod tests {
             project_id: seed.project_id,
             actor: seed.actor,
         };
-        let full = SyncDescriptionFull {
-            id: values.description_id,
-            updated_at: Utc::now(),
-            html: "<p>v2</p>",
-            stripped: "v2",
-            json: &new_json,
-        };
         let mut tx = pool.begin().await.expect("begin");
         update_sync_comment(&mut *tx, &update)
             .await
             .expect("update");
-        sync_description_full(&mut *tx, &full).await.expect("full");
+        let synced_at = Utc::now();
+        sync_description_html(&mut *tx, values.description_id, "<p>v2</p>")
+            .await
+            .expect("sync html");
+        sync_description_stripped(&mut *tx, values.description_id, "v2")
+            .await
+            .expect("sync stripped");
+        touch_synced_description(&mut *tx, values.description_id, None, synced_at)
+            .await
+            .expect("touch");
         tx.commit().await.expect("commit");
         let row: (Option<Uuid>, Option<Uuid>, Option<Uuid>, String) = sqlx::query_as(
             "SELECT actor_id, created_by_id, updated_by_id, comment_stripped \
@@ -1869,7 +1848,7 @@ mod tests {
         .expect("read description");
         assert_eq!(desc.0, "<p>v2</p>");
         assert_eq!(desc.1.as_deref(), Some("v2"));
-        assert_eq!(desc.2, serde_json::json!({}));
+        assert_eq!(desc.2, serde_json::json!({"foreign": true}));
         assert_eq!(desc.3, None);
     }
 }

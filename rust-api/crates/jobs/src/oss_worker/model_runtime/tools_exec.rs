@@ -71,6 +71,7 @@ use crate::runner_runs::sweeps_chat::terminal_effects_job;
 use crate::tasks_cleanup::deletion::SOFT_DELETE_TASK;
 use pidash_db::app_pages::strip::ml_strip_tags;
 use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings, RunnerSettings};
+use pidash_db::entity::comment_hooks::description_stripped_for;
 use pidash_db::orchestration::querysets::MEMBER_PROJECT_ISSUES_SQL;
 use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
 use pidash_db::tx::Transaction;
@@ -1029,12 +1030,14 @@ async fn op_add_current_issue_comment(
         ml_strip_tags(&html)
     };
     // Domain executor twins, in Django order. One `now()` read feeds
-    // all four stamps; the description row reuses the comment's
-    // ML-stripped text (a ported quirk — Django's `Description.save`
-    // would recompute with `strip_tags`; see PIDASHCONV-1581).
+    // all four stamps; the description stripped value is the
+    // `Description.save` recompute (Django's own `strip_tags`,
+    // entities verbatim, `None`-when-empty — `description.py:23-29`),
+    // not the comment's ML text (PIDASHCONV-1581 item 1).
     let now = Utc::now();
     let empty_json = Value::Object(Default::default());
     let empty_list: Vec<String> = Vec::new();
+    let desc_stripped = description_stripped_for(Some(html.as_str()));
     let rows = comment_domain::CommentRows {
         id: Uuid::new_v4(),
         description_id: Uuid::new_v4(),
@@ -1052,7 +1055,7 @@ async fn op_add_current_issue_comment(
         html: html.as_str(),
         json: &empty_json,
         stripped: stripped.as_str(),
-        desc_stripped: Some(stripped.as_str()),
+        desc_stripped: desc_stripped.as_deref(),
         access: "INTERNAL",
         speaker_type: "agent",
         speaker_label: "Pi Dash Cloud Agent",
@@ -3825,5 +3828,181 @@ mod tests {
         assert_eq!(render_isoformat(micro), "2026-03-04T05:06:07.123456+00:00");
         let milli = whole + chrono::Duration::milliseconds(120);
         assert_eq!(render_isoformat(milli), "2026-03-04T05:06:07.120000+00:00");
+    }
+}
+
+#[cfg(test)]
+mod live_tests {
+    use super::*;
+
+    async fn live_pool() -> Option<sqlx::PgPool> {
+        match std::env::var("DATABASE_URL") {
+            Ok(url) => Some(
+                sqlx::postgres::PgPoolOptions::new()
+                    .max_connections(5)
+                    .connect(&url)
+                    .await
+                    .expect("connect to scratch DATABASE_URL"),
+            ),
+            Err(_) => {
+                eprintln!("skipping live-db test: DATABASE_URL is not set");
+                None
+            }
+        }
+    }
+
+    struct Seed {
+        scope: ToolScope,
+    }
+
+    /// Seed user → workspace → project → issue. Column lists mirror
+    /// the contract-suite factories (`_harness/seed.py`); every
+    /// unique column carries a random tag so reruns never collide.
+    async fn seed_world(pool: &sqlx::PgPool) -> Seed {
+        let tag: String = Uuid::new_v4().simple().to_string()[..10].to_owned();
+        let user_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (id, password, email, username, display_name, first_name, last_name, avatar, date_joined, created_at, updated_at, last_location, created_location, is_superuser, is_managed, is_password_expired, is_active, is_staff, is_email_verified, is_password_autoset, is_password_reset_required, token, last_active, last_login_ip, last_logout_ip, last_login_medium, last_login_uagent, is_bot, user_timezone, is_email_valid) VALUES ($1, 'pbkdf2_sha256$600000$salt$hash', $2, $3, '', '', '', '', now(), now(), now(), '', '', false, false, false, true, false, false, false, false, '', now(), '', '', 'email', '', false, 'UTC', true)",
+        )
+        .bind(user_id)
+        .bind(format!("rs1581-{tag}@example.com"))
+        .bind(format!("rs1581_{tag}"))
+        .execute(pool)
+        .await
+        .expect("seed user");
+        let workspace_id = Uuid::new_v4();
+        let slug = format!("rs1581-{tag}");
+        sqlx::query(
+            "INSERT INTO workspaces (id, name, owner_id, slug, timezone, background_color, created_at, updated_at) VALUES ($1, $2, $3, $4, 'UTC', '#ffffff', now(), now())",
+        )
+        .bind(workspace_id)
+        .bind(format!("RS1581 {tag}"))
+        .bind(user_id)
+        .bind(&slug)
+        .execute(pool)
+        .await
+        .expect("seed workspace");
+        let project_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO projects (id, name, description, network, workspace_id, identifier, module_view, cycle_view, issue_views_view, page_view, intake_view, is_time_tracking_enabled, is_issue_type_enabled, is_default, guest_view_all_features, members_can_edit_states, archive_in, close_in, logo_props, timezone, repo_url, base_branch, agent_default_interval_seconds, agent_default_max_ticks, agent_review_default_interval_seconds, agent_test_default_interval_seconds, agent_ticking_enabled, default_agent_executor, created_at, updated_at) VALUES ($1, $2, '', 2, $3, $4, false, false, false, true, false, false, false, false, false, true, 0, 0, '{}', 'UTC', '', 'main', 10800, 10, 10800, 10800, true, 'local_runner', now(), now())",
+        )
+        .bind(project_id)
+        .bind(format!("RS1581 {tag}"))
+        .bind(workspace_id)
+        .bind(format!("RS{}", tag.to_uppercase()))
+        .execute(pool)
+        .await
+        .expect("seed project");
+        let state_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO states (id, workspace_id, project_id, name, description, color, slug, sequence, \"group\", is_triage, \"default\", created_at, updated_at) VALUES ($1, $2, $3, 'Backlog', '', '#ff0000', '', 65535, 'backlog', false, false, now(), now())",
+        )
+        .bind(state_id)
+        .bind(workspace_id)
+        .bind(project_id)
+        .execute(pool)
+        .await
+        .expect("seed state");
+        let issue_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO issues (id, workspace_id, project_id, state_id, name, description_json, description_html, priority, complexity_score, sequence_id, sort_order, is_draft, git_work_branch, workpad, created_at, updated_at) VALUES ($1, $2, $3, $4, 'Tool issue', '{}', '<p></p>', 'none', 0, 1, 65535, false, '', '', now(), now())",
+        )
+        .bind(issue_id)
+        .bind(workspace_id)
+        .bind(project_id)
+        .bind(state_id)
+        .execute(pool)
+        .await
+        .expect("seed issue");
+        Seed {
+            scope: ToolScope {
+                run_id: Uuid::new_v4(),
+                workspace_id,
+                workspace_slug: slug,
+                creator_id: user_id,
+                work_item_id: Some(issue_id),
+                scheduler_binding_id: None,
+                project_id,
+            },
+        }
+    }
+
+    async fn cleanup(pool: &sqlx::PgPool, scope: &ToolScope, comment_id: Uuid) {
+        let description_id: Option<Uuid> =
+            sqlx::query_scalar("SELECT description_id FROM issue_comments WHERE id = $1")
+                .bind(comment_id)
+                .fetch_optional(pool)
+                .await
+                .expect("read back description link")
+                .flatten();
+        sqlx::query("DELETE FROM issue_comments WHERE id = $1")
+            .bind(comment_id)
+            .execute(pool)
+            .await
+            .expect("teardown comment");
+        if let Some(description_id) = description_id {
+            sqlx::query("DELETE FROM descriptions WHERE id = $1")
+                .bind(description_id)
+                .execute(pool)
+                .await
+                .expect("teardown description");
+        }
+        for (sql, id) in [
+            (
+                "DELETE FROM issues WHERE id = $1",
+                scope.work_item_id.expect("bound issue"),
+            ),
+            ("DELETE FROM states WHERE project_id = $1", scope.project_id),
+            ("DELETE FROM projects WHERE id = $1", scope.project_id),
+            ("DELETE FROM workspaces WHERE id = $1", scope.workspace_id),
+            ("DELETE FROM users WHERE id = $1", scope.creator_id),
+        ] {
+            sqlx::query(sql)
+                .bind(id)
+                .execute(pool)
+                .await
+                .expect("teardown delete");
+        }
+    }
+
+    /// `pidash_add_current_issue_comment` strips each column with its
+    /// own stripper (PIDASHCONV-1581 item 1): the comment column
+    /// decodes entities (MLStripper, `issue.py:606`), the description
+    /// mirror keeps them verbatim (`Description.save`,
+    /// `description.py:23-29`).
+    #[tokio::test]
+    async fn add_comment_splits_strippers_per_column() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let seed = seed_world(&pool).await;
+        let mut tx = Transaction::begin(&pool).await.expect("begin");
+        let out = op_add_current_issue_comment(&mut tx, &seed.scope, "a & b")
+            .await
+            .expect("add comment");
+        tx.commit().await.expect("commit");
+        let comment_id: Uuid = out["comment_id"]
+            .as_str()
+            .expect("comment_id renders")
+            .parse()
+            .expect("comment_id parses");
+        let row: (String, String, Option<Uuid>) = sqlx::query_as(
+            "SELECT comment_html, comment_stripped, description_id FROM issue_comments WHERE id = $1",
+        )
+        .bind(comment_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read back the comment");
+        assert_eq!(row.0, "<p>a &amp; b</p>");
+        assert_eq!(row.1, "a & b");
+        let description_id = row.2.expect("comment links a description");
+        let desc: (Option<String>,) =
+            sqlx::query_as("SELECT description_stripped FROM descriptions WHERE id = $1")
+                .bind(description_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read back the description");
+        assert_eq!(desc.0.as_deref(), Some("a &amp; b"));
+        cleanup(&pool, &seed.scope, comment_id).await;
     }
 }

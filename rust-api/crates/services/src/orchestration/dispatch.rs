@@ -70,6 +70,7 @@ use uuid::Uuid;
 
 use crate::domain::identity::AgentUserCollisionError;
 use pidash_auth::permissions::membership::{check_project_role, ProjectRoleFacts};
+use pidash_db::entity::comment_hooks::comment_stripped_for;
 use pidash_db::tasks_ticker::models::issue_agent_ticker::{
     IssueAgentTicker, COLUMNS as TICKER_COLUMNS,
 };
@@ -325,28 +326,6 @@ pub fn agent_wait_log_line(
 // ---------------------------------------------------------------------------
 // Pure units
 // ---------------------------------------------------------------------------
-
-/// Django `strip_tags` (`django.utils.html.strip_tags`, the
-/// `tasks_cleanup::versions` algorithm as a per-module copy): scan for
-/// `<...>` spans and drop them; an unclosed `<` is kept verbatim.
-/// ASCII-only delimiters, so every slice lands on a char boundary.
-pub fn strip_tags(html: &str) -> String {
-    let mut out = String::with_capacity(html.len());
-    let mut rest = html;
-    while let Some(lt) = rest.find('<') {
-        out.push_str(&rest[..lt]);
-        rest = &rest[lt..];
-        match rest.find('>') {
-            Some(rel) => rest = &rest[rel + 1..],
-            None => {
-                out.push_str(rest);
-                return out;
-            }
-        }
-    }
-    out.push_str(rest);
-    out
-}
 
 /// `triggered_by in _MACHINE_TRIGGERS` (`:868, :895`): the clock's own
 /// triggers resolve like a tick.
@@ -1247,6 +1226,11 @@ pub async fn bounce_issue_no_eligible_runner<S: DispatchSeam>(
     }
 
     let actor_id = seam.agent_system_user_id().await?;
+    // The bounce posts via `IssueComment.objects.create`
+    // (`scheduling.py:1122-1129`), so `save()` recomputes the comment
+    // column with MLStripper (entities decoded — `issue.py:606`),
+    // even though the fixed bodies below carry no entities today
+    // (PIDASHCONV-1581 item 4).
     seam.insert_bounce_comment(&NewIssueComment {
         id: Uuid::new_v4(),
         description_id: Uuid::new_v4(),
@@ -1256,7 +1240,7 @@ pub async fn bounce_issue_no_eligible_runner<S: DispatchSeam>(
         issue_id,
         actor_id,
         comment_html: body.to_owned(),
-        comment_stripped: strip_tags(body),
+        comment_stripped: comment_stripped_for(body),
     })
     .await?;
     Ok(BounceOutcome { moved_to, logs })
@@ -2713,14 +2697,24 @@ mod tests {
     }
 
     #[test]
-    fn strip_tags_b9_golden() {
+    fn bounce_stripped_ml_golden() {
+        // The bounce comment column is the `save()` MLStripper
+        // recompute (`issue.py:606`, PIDASHCONV-1581 item 4): entities
+        // decode. The B9 body carries none, so the golden bytes equal
+        // the retired Django-strip port's — the entity case pins the
+        // stripper the bounce now rides.
         let row = &fixture(BOUNCE)["cases"]["B9_comment_row"]["row"];
         let html = row["comment_html"].as_str().unwrap();
         assert_eq!(html, BOUNCE_BODY_DEFAULT);
-        assert_eq!(strip_tags(html), row["comment_stripped"].as_str().unwrap());
-        // The Django edge: an unclosed `<` is kept verbatim.
-        assert_eq!(strip_tags("a<b"), "a<b");
-        assert_eq!(strip_tags(""), "");
+        assert_eq!(
+            comment_stripped_for(html),
+            row["comment_stripped"].as_str().unwrap()
+        );
+        assert_eq!(
+            comment_stripped_for("<p>Run R&amp;D failed</p>"),
+            "Run R&D failed"
+        );
+        assert_eq!(comment_stripped_for(""), "");
     }
 
     #[test]

@@ -2120,9 +2120,10 @@ pub async fn upsert_comment(
             linked.id
         }
         Some((comment_id, old_html, old_stripped, old_json, description_id)) => {
-            // The scan actor restamps `actor_id` + both audit columns
-            // (a ported quirk — Django's update path leaves `actor_id`
-            // alone; see PIDASHCONV-1581 item 3).
+            // The scan actor restamps `actor_id` + both audit columns,
+            // matching Django: `actor_id` is in the `update_or_create`
+            // `defaults` (`git_sync_task.py:165`), so the update path
+            // rewrites it (PIDASHCONV-1581 item 3 was disproven).
             let update = comment_domain::SyncCommentUpdate {
                 id: comment_id,
                 updated_at: *now,
@@ -2140,22 +2141,43 @@ pub async fn upsert_comment(
             // only the render triple, only when it changed, only with a
             // description row to write to. The comparison runs against the
             // save()-recomputed values (decoded, unstripped), which is what
-            // the database holds. The refresh overwrites the FULL triple
-            // (Django syncs only the changed subset — a ported quirk, see
-            // PIDASHCONV-1581 item 2).
-            let changed = old_html != comment_html
-                || old_stripped != comment_stripped
-                || old_json != json!({});
-            if changed {
+            // the database holds. Only the changed subset syncs, with
+            // `updated_by` NULL (the worker-crum read — PIDASHCONV-1581
+            // item 2); the values land verbatim (queryset `update`
+            // bypasses `Description.save`).
+            let html_changed = old_html != comment_html;
+            let stripped_changed = old_stripped != comment_stripped;
+            let json_changed = old_json != json!({});
+            if html_changed || stripped_changed || json_changed {
                 if let Some(description_id) = description_id {
-                    let full = comment_domain::SyncDescriptionFull {
-                        id: description_id,
-                        updated_at: *now,
-                        html: &comment_html,
-                        stripped: &comment_stripped,
-                        json: &empty_json,
-                    };
-                    comment_domain::sync_description_full(&mut *tx, &full)
+                    if html_changed {
+                        comment_domain::sync_description_html(
+                            &mut *tx,
+                            description_id,
+                            &comment_html,
+                        )
+                        .await
+                        .map_err(db_error)?;
+                    }
+                    if stripped_changed {
+                        comment_domain::sync_description_stripped(
+                            &mut *tx,
+                            description_id,
+                            &comment_stripped,
+                        )
+                        .await
+                        .map_err(db_error)?;
+                    }
+                    if json_changed {
+                        comment_domain::sync_description_json(
+                            &mut *tx,
+                            description_id,
+                            &empty_json,
+                        )
+                        .await
+                        .map_err(db_error)?;
+                    }
+                    comment_domain::touch_synced_description(&mut *tx, description_id, None, *now)
                         .await
                         .map_err(db_error)?;
                 }
@@ -4506,6 +4528,92 @@ mod live_tests {
             hook.comments.lock().expect("lock").is_empty(),
             "filter().update sends no signals: no completion dispatch"
         );
+        cleanup(&pool, &scan, repo_id, issue_id).await;
+    }
+
+    /// Re-sync refreshes only the changed description subset
+    /// (PIDASHCONV-1581 item 2): `IssueComment.save` syncs
+    /// `{desc_field: ...}` for the tracked fields in
+    /// `_changes_on_save` only (`issue.py:637-646`), with
+    /// `updated_by` NULL (the worker-crum read).
+    #[tokio::test]
+    async fn resync_description_syncs_changed_subset_only() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let (scan, repo_id) = seed_binding(&pool).await;
+        let issue = remote_issue(
+            "First title",
+            "https://github.com/rs-ct/x/issues/4242",
+            "open",
+        );
+        let (issue_id, sync_id) = upsert_issue(&pool, &scan, &issue, &Utc::now(), None)
+            .await
+            .expect("seed scan inserts the mirror issue");
+        upsert_comment(
+            &pool,
+            &scan,
+            &remote_comment("First body"),
+            &issue_id,
+            &sync_id,
+            &Utc::now(),
+        )
+        .await
+        .expect("first scan inserts the mirror comment");
+        let ids: (Uuid, Option<Uuid>) =
+            sqlx::query_as("SELECT id, description_id FROM issue_comments WHERE issue_id = $1")
+                .bind(issue_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read back the mirror comment ids");
+        let (comment_id, description_id) = ids;
+        let description_id = description_id.expect("mirror comment has a description row");
+        // Independently diverge the description json: the subset
+        // refresh must preserve it when only the render text changes.
+        sqlx::query("UPDATE descriptions SET description_json = $2 WHERE id = $1")
+            .bind(description_id)
+            .bind(json!({"foreign": true}))
+            .execute(&pool)
+            .await
+            .expect("diverge description");
+        upsert_comment(
+            &pool,
+            &scan,
+            &remote_comment("Edited body"),
+            &issue_id,
+            &sync_id,
+            &Utc::now(),
+        )
+        .await
+        .expect("re-sync updates the mirror comment");
+        let comment: (String, String, Value) = sqlx::query_as(
+            "SELECT comment_html, comment_stripped, comment_json FROM issue_comments WHERE id = $1",
+        )
+        .bind(comment_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read back the mirror comment");
+        let desc: (String, Option<String>, Value, Option<Uuid>) = sqlx::query_as(
+            "SELECT description_html, description_stripped, description_json, updated_by_id \
+             FROM descriptions WHERE id = $1",
+        )
+        .bind(description_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read back the description");
+        assert_eq!(desc.0, comment.0, "changed html syncs");
+        assert_eq!(
+            desc.1.as_deref(),
+            Some(comment.1.as_str()),
+            "changed stripped syncs"
+        );
+        assert_eq!(
+            desc.2,
+            json!({"foreign": true}),
+            "unchanged json keeps the description row's own value"
+        );
+        assert_eq!(desc.3, None, "touch binds updated_by NULL");
+        cleanup_comment(&pool, comment_id, Some(description_id)).await;
         cleanup(&pool, &scan, repo_id, issue_id).await;
     }
 }
