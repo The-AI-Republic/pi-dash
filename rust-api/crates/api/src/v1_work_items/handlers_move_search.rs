@@ -159,10 +159,6 @@ use crate::v1_cycles_modules::body as shared_body;
 use crate::v1_cycles_modules::json::{
     parse_json_text, to_serde_publish, JsonFail, JSON_PARSE_PREFIX,
 };
-use pidash_jobs::orchestration::{
-    MoveIssueDeps, MoveIssueError, MoveIssueParams, PoolMoveStore, TransitionFire,
-};
-
 use super::handlers_social::{preamble, query_last, rewrite_project_id, QueryMap};
 use super::perms::{gate_for, V1WorkItemsRoute};
 pub use pidash_compat::response::SERVER_ERROR_BODY;

@@ -203,7 +203,6 @@ pub mod ops {
     pub use pidash_jobs::orchestration::complete_project_move_handoff_inline;
     pub use pidash_jobs::orchestration::drain_publish_effects;
     pub use pidash_jobs::orchestration::fire_pending_entry;
-    pub use pidash_jobs::orchestration::move_issue;
     pub use pidash_jobs::orchestration::pending_entry_ticker_for;
     pub use pidash_jobs::orchestration::post_run_orchestration;
     pub use pidash_jobs::orchestration::post_run_orchestration_in_tx;
