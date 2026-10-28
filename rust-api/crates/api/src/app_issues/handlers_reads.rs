@@ -538,13 +538,13 @@ const RECENT_VISITED_TASK: &str = "pi_dash.bgtasks.recent_visited_task.recent_vi
 /// `base_host(request, is_app=True)` (`utils/host.py:17`): `WEB_URL` else
 /// `APP_BASE_URL`; unset skips the enqueue (the cycles precedent — Django
 /// would 500, but every merged handler treats the queue as best-effort).
+/// Empty strings fall through like Python's `or` (PIDASHCONV-1587).
 fn request_origin(state: &AppState) -> Option<String> {
-    state
-        .settings()
-        .urls
-        .web_url
+    let urls = &state.settings().urls;
+    urls.web_url
         .clone()
-        .or_else(|| state.settings().urls.app_base_url.clone())
+        .filter(|s| !s.is_empty())
+        .or_else(|| urls.app_base_url.clone().filter(|s| !s.is_empty()))
 }
 
 /// Best-effort deferred publish (the space intake precedent): without the
@@ -2768,6 +2768,30 @@ async fn render_post_row(
 mod tests {
     use super::*;
     use crate::app_issues::OneOrMany;
+
+    fn origin_state(app_base_url: Option<&str>, web_url: Option<&str>) -> AppState {
+        let mut settings = pidash_db::config::Settings::test_defaults();
+        settings.urls.app_base_url = app_base_url.map(str::to_owned);
+        settings.urls.web_url = web_url.map(str::to_owned);
+        AppState::with_settings("test", settings)
+    }
+
+    /// `request_origin` treats `""` as missing (PIDASHCONV-1587): an
+    /// empty `WEB_URL` falls back to `APP_BASE_URL`, and empty
+    /// everywhere is `None` (the enqueue is skipped).
+    #[test]
+    fn request_origin_falls_through_empty_strings() {
+        let app = "https://app.example.invalid";
+        let web = "https://web.example.invalid";
+        let state = origin_state(Some(app), Some(""));
+        assert_eq!(request_origin(&state).as_deref(), Some(app));
+        let state = origin_state(Some(""), Some(""));
+        assert_eq!(request_origin(&state), None);
+        let state = origin_state(None, None);
+        assert_eq!(request_origin(&state), None);
+        let state = origin_state(Some(app), Some(web));
+        assert_eq!(request_origin(&state).as_deref(), Some(web));
+    }
 
     #[test]
     fn strict_int_matrix() {

@@ -1432,13 +1432,13 @@ use pidash_services::domain::activity::ISSUE_ACTIVITY_TASK;
 
 /// `base_host(request, is_app=True)` (`utils/host.py:17-66`): `APP_BASE_URL`
 /// wins when set, else `WEB_URL`; unset is `ImproperlyConfigured` → 500.
+/// Empty strings fall through like Python's `or` (PIDASHCONV-1587).
 fn request_origin(state: &AppState) -> Result<String, Denial> {
-    state
-        .settings()
-        .urls
-        .app_base_url
+    let urls = &state.settings().urls;
+    urls.app_base_url
         .clone()
-        .or_else(|| state.settings().urls.web_url.clone())
+        .filter(|s| !s.is_empty())
+        .or_else(|| urls.web_url.clone().filter(|s| !s.is_empty()))
         .ok_or(Denial::ServerError)
 }
 
@@ -3427,6 +3427,32 @@ pub async fn v2_delete(
 mod tests {
     use super::*;
     use pidash_db::config::StorageSettings;
+
+    fn origin_state(app_base_url: Option<&str>, web_url: Option<&str>) -> AppState {
+        let mut settings = pidash_db::config::Settings::test_defaults();
+        settings.urls.app_base_url = app_base_url.map(str::to_owned);
+        settings.urls.web_url = web_url.map(str::to_owned);
+        AppState::with_settings("test", settings)
+    }
+
+    /// `base_host(request, is_app=True)` treats `""` as missing
+    /// (PIDASHCONV-1587): an empty `APP_BASE_URL` falls through to
+    /// `WEB_URL`, and empty everywhere is the 500.
+    #[test]
+    fn request_origin_falls_through_empty_strings() {
+        let web = "https://web.example.invalid";
+        let state = origin_state(Some(""), Some(web));
+        assert_eq!(request_origin(&state).expect("falls through"), web);
+        let state = origin_state(Some(""), Some(""));
+        assert!(matches!(request_origin(&state), Err(Denial::ServerError)));
+        let state = origin_state(None, None);
+        assert!(matches!(request_origin(&state), Err(Denial::ServerError)));
+        let state = origin_state(Some("https://app.example.invalid"), Some(web));
+        assert_eq!(
+            request_origin(&state).expect("app base wins"),
+            "https://app.example.invalid"
+        );
+    }
 
     fn json_data(text: &str) -> RequestData {
         RequestData {
