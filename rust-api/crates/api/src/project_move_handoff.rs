@@ -13,7 +13,6 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::state::AppState;
-use pidash_compat::datetime::render_isoformat as twin_render_isoformat;
 
 /// Api-crate-owned Redis client: `None` when `REDIS_URL` is unset,
 /// empty, or unparsable, mirroring `redis_instance()` returning `None`.
