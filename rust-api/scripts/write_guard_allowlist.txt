@@ -54,6 +54,12 @@ crates/api/src/space/social.rs | UPDATE descriptions | d46a5b53abbe | sql
 crates/api/src/space/social.rs | UPDATE issue_comments | 01c1d5c56858 | sql
 crates/api/src/space/social.rs | UPDATE issue_comments | 6a0805c12eee | sql
 crates/api/src/space/social.rs | UPDATE issue_comments | 833b6f189399 | sql
+# PIDASHCONV-1595: turn cut-off payload flag (new SQL, PIDASHCONV-1567); domain::assistant has no payload-update fn.
+crates/api/src/turn/live.rs | UPDATE assistant_message | 046ee8afdb6d | sql
+# PIDASHCONV-1595: PgToolStore fused create/update (moved by #2491 from bin/, previously outside the scan root); needs a WriteTxn-compatible domain seam.
+crates/api/src/turn/tools_local_store.rs | INSERT issue_sequences | 9d218ebccbf6 | sql
+crates/api/src/turn/tools_local_store.rs | INSERT issues | b9612d0141dc | sql
+crates/api/src/turn/tools_local_store.rs | UPDATE issues | b47a2b42db9c | sql
 crates/api/src/v1_projects/handlers_project.rs | UPDATE projects | 13a902850983 | sql
 crates/api/src/v1_projects/handlers_project.rs | UPDATE projects | 6a507dbf7b5e | sql
 crates/api/src/v1_projects/handlers_project.rs | UPDATE projects | 9162da44cd01 | sql
