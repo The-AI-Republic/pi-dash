@@ -1078,6 +1078,23 @@ pub async fn validate_issue_fields(
             out.state_id = Some(Some(id));
         }
     }
+    // `state`: the auto-generated twin (`Meta.exclude` keeps the model
+    // field, so DRF adds it beside the declared `state_id`). Same
+    // source, validated under its own key — and it wins when both
+    // keys are present, because DRF applies declared fields before
+    // auto fields (verified live: `state_id`=triage + `state`=backlog
+    // 400s on the backlog value, and `state`=null clears over a valid
+    // `state_id`). Runs after the `state_id` arm so the overwrite
+    // order matches; errors merge with `state_id` first, like DRF.
+    if let Some(value) = input.get("state") {
+        if value.is_null() {
+            out.state_id = Some(None);
+        } else if let Some(id) =
+            validate_pk(pool, errors, "state", value, state_objects_sql(), false).await
+        {
+            out.state_id = Some(Some(id));
+        }
+    }
     if let Some(value) = input.get("parent_id") {
         if value.is_null() {
             out.parent_id = Some(None);
@@ -1460,12 +1477,15 @@ pub async fn validate_issue_object(
     // State / parent / estimate project checks
     // (`serializers/issue.py:357-379`).
     if let Some(Some(state_id)) = validated.state_id.as_ref() {
-        // `allow_triage_state` is always true on this path, so the
-        // triage manager (triage + live) and the default manager
-        // (non-triage + live) jointly cover every live project state.
+        // `allow_triage_state` is always true on this path, so
+        // `validate()` uses the triage manager only: the state must be
+        // a live TRIAGE row in this project
+        // (`serializers/issue.py:207-208,357-364`; verified live — a
+        // live backlog id 400s here on Django).
         let row: Option<(Uuid,)> = sqlx::query_as(
             r#"SELECT s.id FROM states s
-               WHERE s.project_id = $1 AND s.id = $2 AND s.deleted_at IS NULL"#,
+               WHERE s.project_id = $1 AND s.id = $2 AND s.deleted_at IS NULL
+                 AND s."group" = 'triage'"#,
         )
         .bind(project_id)
         .bind(state_id)
