@@ -8,6 +8,7 @@
 // the community build.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -35,6 +36,7 @@ import {
   bootstrapIssuesEdition,
   CloudTransferNote,
   CloudTypeBadge,
+  CloudTypePicker,
   hasIssuesEditionFlags,
   ISSUES_EDITION_FLAGS,
   listTeamProjectOptions,
@@ -118,7 +120,7 @@ describe("bootstrapIssuesEdition", () => {
     expect(providers.issueTypeDetail?.badge).toBe(CloudTypeBadge);
     expect(providers.issueTypeDetail?.properties).toBeUndefined();
     expect(providers.issueTypeDetail?.activity).toBeUndefined();
-    expect(getIssueTypeExtension()?.typePicker).toBeDefined();
+    expect(getIssueTypeExtension()?.typePicker).toBe(CloudTypePicker);
     expect(getIssueTypeExtension()?.templatePicker).toBeUndefined();
     expect(getIssueTypeExtension()?.additionalProperties).toBeUndefined();
     expect(providers.workflowRules?.refusal).toBeTypeOf("function");
@@ -164,5 +166,32 @@ describe("CloudTypeBadge", () => {
       </QueryClientProvider>
     );
     expect(await screen.findByText("Bug")).toBeInTheDocument();
+  });
+});
+
+describe("CloudTypePicker", () => {
+  it("renders the lazy picker and passes the pick through", async () => {
+    bootstrapIssuesEdition(editionWith({ "issue-types": true }));
+    mocks.listIssueTypes.mockResolvedValue([{ id: "t-1", name: "Bug" }]);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const onTypeChange = vi.fn();
+    render(
+      <QueryClientProvider client={client}>
+        <CloudTypePicker
+          workspaceSlug="acme"
+          projectId="p-1"
+          disabled={false}
+          typeId={null}
+          onTypeChange={onTypeChange}
+          onTemplateApply={() => undefined}
+          propertyValues={{}}
+          onPropertyValuesChange={() => undefined}
+        />
+      </QueryClientProvider>
+    );
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "No type" }));
+    await user.click(await screen.findByRole("option", { name: "Bug" }));
+    expect(onTypeChange).toHaveBeenCalledWith("t-1");
   });
 });
