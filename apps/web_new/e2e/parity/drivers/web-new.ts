@@ -45487,9 +45487,11 @@ export class WebNewDriver implements ParityDriver {
   // --- reads; the oracle driver throws a D17 notice for every one.
 
   /**
-   * Every nested-page row: tree lines and the flat search/filter/favourite
-   * results share the title link, so discovery assertions read both
-   * (PAGE-085/090).
+   * Every nested-page row, one element per page. A tree line wraps its
+   * row, so the two markers nest; matching either one separately would
+   * report every tree row twice (PAGE-085/088). The inner row is the page
+   * itself, so it is the one carrier that exists in the tree and in the
+   * flat search/filter/favourite results alike (PAGE-090).
    */
   private pagesNestedRows(): Locator {
     return this.page.locator(PAGES_NESTED_ROW_SELECTOR);
@@ -45497,6 +45499,19 @@ export class WebNewDriver implements ParityDriver {
 
   private pagesNestedRow(title: string): Locator {
     return this.pagesNestedRows()
+      .filter({ has: this.page.getByRole("link", { name: title, exact: true }) })
+      .first();
+  }
+
+  /**
+   * The tree line that owns `title`: the wrapper carries the expand
+   * control, the child count and the depth, none of which sit on the row
+   * inside it (PAGE-085). The flat search/filter results have no wrapper,
+   * so only the tree asserts through this one.
+   */
+  private pagesNestedTreeLine(title: string): Locator {
+    return this.page
+      .getByTestId("page-tree-item")
       .filter({ has: this.page.getByRole("link", { name: title, exact: true }) })
       .first();
   }
@@ -45588,9 +45603,9 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async pagesNestedChildCount(title: string): Promise<number | null> {
-    const row = this.pagesNestedRow(title);
-    if ((await row.count()) === 0) return null;
-    const badge = row.getByTestId("page-tree-count");
+    const line = this.pagesNestedTreeLine(title);
+    if ((await line.count()) === 0) return null;
+    const badge = line.getByTestId("page-tree-count");
     if ((await badge.count()) === 0) return null;
     const text = (await badge.first().textContent()) ?? "";
     const parsed = Number.parseInt(text.trim(), 10);
@@ -45615,15 +45630,15 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async pagesNestedCollapse(title: string): Promise<void> {
-    const row = this.pagesNestedRow(title);
-    await row.scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
-    await row.getByRole("button", { name: `Collapse sub-pages of ${title}` }).click();
+    const line = this.pagesNestedTreeLine(title);
+    await line.scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
+    await line.getByRole("button", { name: `Collapse sub-pages of ${title}` }).click();
   }
 
   async pagesNestedDepth(title: string): Promise<number | null> {
-    const row = this.pagesNestedRow(title);
-    if ((await row.count()) === 0) return null;
-    const depth = await row.getAttribute("data-depth");
+    const line = this.pagesNestedTreeLine(title);
+    if ((await line.count()) === 0) return null;
+    const depth = await line.getAttribute("data-depth");
     const parsed = depth === null ? Number.NaN : Number.parseInt(depth, 10);
     return Number.isNaN(parsed) ? null : parsed;
   }
