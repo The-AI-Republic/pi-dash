@@ -799,6 +799,10 @@ pub async fn validate_pk(
 /// * `state_id`: `State.all_state_objects` — the plain manager, so
 ///   soft-deleted rows still resolve here (the project check in
 ///   `validate()` rejects them next).
+/// * `state`: the auto-generated twin binds the model's
+///   `_default_manager` — `State.objects`, live rows minus the triage
+///   group (`db/models/state.py:79-83`). A soft-deleted or triage id
+///   answers `does_not_exist` here, verified live.
 /// * `estimate_point`: the auto-generated field binds the model's
 ///   `_default_manager` — `EstimatePoint.objects`, soft-delete-scoped
 ///   (`db/mixins.py:60-67`). `estimate_point_id` is NOT a declared
@@ -809,6 +813,45 @@ pub async fn validate_pk(
 ///   managers.
 fn state_any_sql() -> &'static str {
     r#"SELECT id FROM states WHERE id = $1"#
+}
+
+/// `State.objects` (`db/models/state.py:79-83`): live rows minus the
+/// triage group. The `$1` lookup id returns the row id.
+fn state_objects_sql() -> &'static str {
+    r#"SELECT id FROM states WHERE id = $1 AND deleted_at IS NULL AND "group" != 'triage'"#
+}
+
+/// `Issue.save`'s state fill (`db/models/issue.py:287-299`) when the
+/// validated state is `None`: the project's default non-triage state,
+/// else the first non-triage state in `Meta.ordering` (`sequence`).
+/// Both legs scope `State.objects` (`deleted_at IS NULL`, triage group
+/// excluded) plus `~Q(is_triage=True)`. Returns the row id and whether
+/// its group is `completed` (`save` stamps `completed_at = now()`
+/// then, else NULL); `(None, false)` when no row fills, in which case
+/// `save` leaves the input `completed_at` untouched.
+#[allow(clippy::result_large_err)]
+async fn default_state_fill(
+    pool: &PgPool,
+    project_id: Uuid,
+) -> Result<(Option<Uuid>, bool), Response> {
+    for default_only in [true, false] {
+        let default_guard = if default_only {
+            r#" AND "default" = TRUE"#
+        } else {
+            ""
+        };
+        let row: Option<(Uuid, String)> = sqlx::query_as(&format!(
+            r#"SELECT id, "group" FROM states WHERE project_id = $1 AND deleted_at IS NULL AND "group" != 'triage' AND is_triage IS NOT TRUE{default_guard} ORDER BY sequence LIMIT 1"#
+        ))
+        .bind(project_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| Denial::ServerError.into_response())?;
+        if let Some((id, group)) = row {
+            return Ok((Some(id), group == "completed"));
+        }
+    }
+    Ok((None, false))
 }
 
 fn issue_live_sql() -> &'static str {
@@ -4391,10 +4434,12 @@ pub async fn collection_create(
     let now = Utc::now();
     // `IssueCreateSerializer.create` + `Issue.save` ride
     // `domain::issues::create`: the hooks resolve the pod default,
-    // `completed_at` (triage, so NULL), stripped text, sequence and sort
-    // order, and the post-commit chain runs the `post_save` fire plus the
-    // m2m legs in handler order. The created activity keeps its
-    // driver-side emit below (the intake `intake=` extra kwarg).
+    // stripped text, sequence and sort order, and the post-commit chain
+    // runs the `post_save` fire plus the m2m legs in handler order. The
+    // created activity keeps its driver-side emit below (the intake
+    // `intake=` extra kwarg). `state_id`/`completed_at` replay `save`
+    // directly (validated above): triage, so NULL, unless explicit null
+    // filled another state.
     let Some(description_html) = validated.description_html.clone() else {
         // Unreachable post-validation (absent defaults, null/invalid
         // 400s in the serializer): the old NULL bind would trip the
@@ -4412,7 +4457,7 @@ pub async fn collection_create(
         project_id: gate.project_id,
         workspace_id: gate.workspace_id,
         parent_id: validated.parent_id,
-        state_id: Some(triage_id),
+        state_id: validated.state_id,
         point: validated.point,
         estimate_point_id: validated.estimate_point_id,
         name: validated.name.clone(),
@@ -4426,7 +4471,13 @@ pub async fn collection_create(
         target_date: validated.target_date,
         sequence_id: 0,
         sort_order: validated.sort_order.unwrap_or(65535.0),
-        completed_at: None,
+        // `Issue.save` stamps now() for a completed-group state, NULL
+        // otherwise; only a fill miss (NULL state) keeps the input.
+        completed_at: match validated.state_id {
+            None => validated.completed_at,
+            Some(_) if validated.state_completed => Some(now),
+            Some(_) => None,
+        },
         archived_at: validated.archived_at,
         is_draft: validated.is_draft,
         external_source: validated.external_source.clone(),
@@ -4722,6 +4773,14 @@ fn fire_spec(actor_id: &Uuid, now: DateTime<Utc>) -> domain_issues::FireSpec {
 /// are implemented; every arm cites its source.
 #[derive(Debug, Clone)]
 struct ValidatedCreate {
+    // The created row's state: the server-set triage row when the
+    // `state` key is absent, else the auto twin's resolution (`None`
+    // only when explicit null finds no default-fill row, in which
+    // case `Issue.save` inserts NULL).
+    state_id: Option<Uuid>,
+    // Whether the resolved state sits in the completed group
+    // (`Issue.save` stamps `completed_at = now()` then, else NULL).
+    state_completed: bool,
     parent_id: Option<Uuid>,
     assigned_pod_id: Option<Uuid>,
     label_ids: Option<Vec<Uuid>>,
@@ -4739,10 +4798,10 @@ struct ValidatedCreate {
     #[allow(dead_code)]
     sequence_id: Option<i32>,
     sort_order: Option<f64>,
-    // Validated then discarded: `Issue.save` clears `completed_at`
-    // whenever the state group is not completed, and this path always
-    // assigns the triage state.
-    #[allow(dead_code)]
+    // Validated then usually discarded: `Issue.save` overwrites
+    // `completed_at` whenever a state resolves (now() for the completed
+    // group, else NULL). Only when explicit null finds no fill row does
+    // the input survive onto the NULL-state row.
     completed_at: Option<DateTime<Utc>>,
     archived_at: Option<chrono::NaiveDate>,
     is_draft: bool,
@@ -5136,6 +5195,27 @@ async fn validate_issue_create(
             }
         }
     }
+    // `state`: the auto-generated twin (`Meta.exclude` keeps the model
+    // field, so DRF adds it beside the declared `state_id`). Same
+    // source, validated under its own key with the default-manager
+    // queryset (`State.objects`, shared with nothing else), and it wins
+    // over the server-set `state_id` because DRF applies declared fields
+    // before auto fields (verified live on POST: bogus, soft-deleted and
+    // triage ids 400 under `state`, and `state`=null lands the save()
+    // default instead of triage). Sits after `parent` to match DRF field
+    // order (..., agent_executor, parent, state, estimate_point, type),
+    // so multi-error bodies merge like DRF.
+    let state_key_null = issue_data.get("state").is_some_and(|value| value.is_null());
+    let state_override = match issue_data.get("state") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(value) => match resolve_pk_sql(pool, value, state_objects_sql()).await {
+            Ok(id) => Some(id),
+            Err(message) => {
+                field_errors.insert("state".to_owned(), serde_json::json!([message]));
+                None
+            }
+        },
+    };
     let estimate_point_id =
         match opt_pk_field(issue_data, "estimate_point", pool, "estimate_points", true).await {
             Ok(id) => id,
@@ -5207,9 +5287,36 @@ async fn validate_issue_create(
         }
         _ => None,
     };
-    // `state` is the server-set triage row: the project check always
-    // passes on this path (`allow_triage_state` context).
-    let _ = triage_id;
+    // `state` is the server-set triage row unless the auto twin fired:
+    // explicit null replays `Issue.save`'s default-state fill, and a
+    // valid id runs the `validate()` project check first (`:355-362`,
+    // `allow_triage_state` context, so the triage manager).
+    let (mut state_id, mut state_completed) = if state_key_null {
+        default_state_fill(pool, gate.project_id).await?
+    } else {
+        (triage_id, false)
+    };
+    if let Some(state) = state_override {
+        let in_triage: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM \"states\" WHERE (\"states\".\"project_id\" = $1 AND \"states\".\"id\" = $2 AND \"states\".\"deleted_at\" IS NULL AND \"states\".\"group\" = 'triage'))",
+        )
+        .bind(gate.project_id)
+        .bind(state)
+        .fetch_one(pool)
+        .await
+        .map_err(|_| Denial::ServerError.into_response())?;
+        if !in_triage {
+            return Err(Denial::BadJson(serde_json::json!({
+                "non_field_errors": ["State is not valid please pass a valid state_id"]
+            }))
+            .into_response());
+        }
+        // Unreachable short of a concurrent group flip between the two
+        // reads (the field queryset excludes the triage group the gate
+        // requires): the gate-passed id lands, like `validate()`.
+        state_id = Some(state);
+        state_completed = false;
+    }
     if let Some(parent) = parent_id {
         let in_project: bool = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM \"issues\" WHERE (\"issues\".\"project_id\" = $1 AND \"issues\".\"id\" = $2 AND \"issues\".\"deleted_at\" IS NULL))",
@@ -5243,6 +5350,8 @@ async fn validate_issue_create(
         }
     }
     Ok(ValidatedCreate {
+        state_id,
+        state_completed,
         parent_id,
         assigned_pod_id,
         label_ids,
@@ -5363,8 +5472,8 @@ async fn resolve_pk(
 /// [`resolve_pk`] against a caller-supplied queryset: the same coercion
 /// and `does_not_exist` message, for fields whose manager is not a plain
 /// table-plus-`deleted_at` scope (the auto `parent` twin over
-/// `Issue.issue_objects`). The SQL takes the lookup id as `$1` and
-/// returns the row id.
+/// `Issue.issue_objects`, the auto `state` twin over `State.objects`).
+/// The SQL takes the lookup id as `$1` and returns the row id.
 #[allow(clippy::result_large_err)]
 async fn resolve_pk_sql(
     pool: &PgPool,
