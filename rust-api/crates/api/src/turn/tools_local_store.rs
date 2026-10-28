@@ -2723,6 +2723,7 @@ async fn drain_finalized_run(pool: &PgPool, run_id: Uuid) {
                      (PIDASHCONV-859); the queued effects task covers the hooks idempotently"
                 );
             }
+            // Unreachable: `plan_publish_effects` emits exactly these two.
             _ => {}
         }
     }
