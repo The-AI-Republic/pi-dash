@@ -10,14 +10,16 @@
 // nothing, so each area below lands independently: team projects, the
 // transfer-hop note, work-item types, the modal type picker, the detail
 // type badge and the provisional dev-only workflow rules now; templates
-// and extra properties with their own issues.
+// and extra properties with their own issues. Registration stays
+// synchronous at startup while every heavy body loads lazily (lazy
+// components, dynamic contract imports), so this module adds only its
+// shells to the initial chunk (NEWFRONT-999).
 import * as React from "react";
 
-import { listIssueTypes, listProjects } from "@pidash/api-client";
 import { getAppClient } from "../../../core/api/client.js";
 import type { Edition } from "../../../core/edition/index.js";
 import { BULK_OPERATIONS_FLAG } from "../bulk/edition.js";
-import { registerIssueTypeExtension } from "../create/issueTypeSeam.js";
+import { registerIssueTypeExtension, type IssueTypeExtensionProps } from "../create/issueTypeSeam.js";
 import { WORKLOG_FLAG } from "../detail/widgets/worklog/worklog.js";
 import {
   DETAIL_BADGES_FLAG,
@@ -29,7 +31,6 @@ import {
   TEAM_PROJECT_FILTER_FLAG,
   WORKFLOW_FLAG,
 } from "./flags.js";
-import { IssueTypePicker } from "./IssueTypePicker.js";
 import type { DetailBadgeInput, TeamProjectOption, WorkItemTypeOption } from "./providers.js";
 import { registerEditionIssuesProviders } from "./providers.js";
 import { parityWorkflowRulesProvider } from "./workflowParityRules.js";
@@ -56,21 +57,29 @@ export function hasIssuesEditionFlags(flags: Record<string, boolean>): boolean {
 /**
  * Team projects the sub-issue filter offers (ISS-234): the workspace's
  * projects as the OSS list answers them. Rows from the current project
- * match as usual; nothing here filters the server answer.
+ * match as usual; nothing here filters the server answer. The contract
+ * loads on first call so its schemas stay out of the initial chunk
+ * (NEWFRONT-999).
  */
 export async function listTeamProjectOptions(input: {
   workspaceSlug: string;
   projectId: string;
 }): Promise<TeamProjectOption[]> {
+  const { listProjects } = await import("@pidash/api-client");
   const projects = await listProjects(getAppClient(), input.workspaceSlug);
   return projects.map((project) => ({ id: project.id, name: project.name, identifier: project.identifier }));
 }
 
-/** Project work-item types for the type filter, modal picker and detail badge. */
+/**
+ * Project work-item types for the type filter, modal picker and detail
+ * badge. The contract loads on first call so its schemas stay out of the
+ * initial chunk (NEWFRONT-999).
+ */
 export async function listWorkItemTypeOptions(input: {
   workspaceSlug: string;
   projectId: string;
 }): Promise<WorkItemTypeOption[]> {
+  const { listIssueTypes } = await import("@pidash/api-client");
   const rows = await listIssueTypes(getAppClient(), input.workspaceSlug, input.projectId);
   return rows.map((row) => ({ id: row.id, name: row.name }));
 }
@@ -124,6 +133,32 @@ export function CloudTypeBadge(input: {
   );
 }
 
+const TypePickerBody = React.lazy(() =>
+  import("./IssueTypePicker.js").then((module) => ({ default: module.IssueTypePicker }))
+);
+
+/**
+ * The cloud modal type picker (ISS-129 type half). The picker travels in
+ * its own chunk: the modal suspends to nothing while it loads, and the
+ * initial bundle never downloads it (NEWFRONT-999).
+ */
+export function CloudTypePicker(props: IssueTypeExtensionProps): React.ReactElement {
+  return (
+    <React.Suspense fallback={null}>
+      <TypePickerBody
+        workspaceSlug={props.workspaceSlug}
+        projectId={props.projectId}
+        disabled={props.disabled}
+        typeId={props.typeId}
+        onTypeChange={props.onTypeChange}
+        onTemplateApply={props.onTemplateApply}
+        propertyValues={props.propertyValues}
+        onPropertyValuesChange={props.onPropertyValuesChange}
+      />
+    </React.Suspense>
+  );
+}
+
 let bootstrapped = false;
 
 /**
@@ -144,8 +179,9 @@ export function bootstrapIssuesEdition(edition: Edition): void {
     workflowRules: parityWorkflowRulesProvider(),
   });
   // The modal type picker only (ISS-129 type half): templates and extra
-  // properties register with the Part 5 model.
-  registerIssueTypeExtension({ typePicker: IssueTypePicker });
+  // properties register with the Part 5 model. The lazy shell keeps the
+  // picker chunk out of the initial bundle (NEWFRONT-999).
+  registerIssueTypeExtension({ typePicker: CloudTypePicker });
 }
 
 /** For tests: allow the bootstrap to run again. */
