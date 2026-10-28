@@ -95,14 +95,10 @@ def select_runner_in_pod(pod: Pod) -> Optional[Runner]:
     """
     from pi_dash.runner.models import RunnerProvisioning
 
-    alive_threshold = timezone.now() - HEARTBEAT_GRACE
     return (
         Runner.objects.select_for_update(skip_locked=True)
-        .filter(
-            pod=pod,
-            status=RunnerStatus.ONLINE,
-            last_heartbeat_at__gte=alive_threshold,
-        )
+        .assignable()
+        .filter(pod=pod)
         # Desktop-bundled runners serve only work pinned to them. Handing them
         # unpinned pod work would make one person's laptop the team's build
         # server, and it would vanish when they close the lid.
@@ -205,16 +201,12 @@ def drain_pod(pod: Pod) -> int:
     """
     from pi_dash.runner.services.pubsub import send_to_runner
 
-    alive_threshold = timezone.now() - HEARTBEAT_GRACE
     assignments: list[tuple[Runner, AgentRun]] = []
     with transaction.atomic():
         idle_runners = list(
             Runner.objects.select_for_update(skip_locked=True)
-            .filter(
-                pod=pod,
-                status=RunnerStatus.ONLINE,
-                last_heartbeat_at__gte=alive_threshold,
-            )
+            .assignable()
+            .filter(pod=pod)
             .exclude(agent_runs__status__in=BUSY_STATUSES)
             # An active chat no longer excludes a runner from issue assignment:
             # chat and issue runs are concurrent (design §3.4). BUSY_STATUSES
@@ -259,18 +251,14 @@ def drain_for_runner(runner: Runner) -> bool:
     """
     from pi_dash.runner.services.pubsub import send_to_runner
 
-    alive_threshold = timezone.now() - HEARTBEAT_GRACE
     assignment: Optional[tuple[Runner, AgentRun]] = None
     with transaction.atomic():
         # Re-select the runner under lock so two concurrent drain calls
         # for the same runner can't both assign it.
         locked = (
             Runner.objects.select_for_update(skip_locked=True)
-            .filter(
-                pk=runner.pk,
-                status=RunnerStatus.ONLINE,
-                last_heartbeat_at__gte=alive_threshold,
-            )
+            .assignable()
+            .filter(pk=runner.pk)
             .exclude(agent_runs__status__in=BUSY_STATUSES)
             # An active chat no longer excludes a runner from issue assignment:
             # chat and issue runs are concurrent (design §3.4). BUSY_STATUSES
@@ -342,15 +330,10 @@ def select_runner_for_run(run: AgentRun) -> Optional[Runner]:
     instead. This function filters by ``owner=run.owner``, which was the old
     access-gating rule. Phase 3 migrates callers.
     """
-    alive_threshold = timezone.now() - HEARTBEAT_GRACE
     return (
         Runner.objects.select_for_update(skip_locked=True)
-        .filter(
-            owner=run.owner,
-            workspace=run.workspace,
-            status=RunnerStatus.ONLINE,
-            last_heartbeat_at__gte=alive_threshold,
-        )
+        .assignable()
+        .filter(owner=run.owner, workspace=run.workspace)
         .exclude(agent_runs__status__in=BUSY_STATUSES)
         # An active chat no longer excludes a runner from issue assignment:
         # chat and issue runs are concurrent (design §3.4). BUSY_STATUSES still
@@ -392,10 +375,10 @@ def pod_has_runner_for_issue_principal(pod, issue, run_creator_id) -> bool:
     dispatch gate it shadows (``filter_runs_usable_by_runner``) applies the
     same ``deleted_at`` condition, so preflight and dispatch stay consistent.
 
-    Transient status is **deliberately ignored** — OFFLINE / BUSY runners
-    still count as "registered" because the owner can flip them back on and
-    ``drain_pod`` re-fires on heartbeat. REVOKED runners, however, are
-    **permanent** — a revoked runner can never be un-revoked and
+    Transient status is **deliberately ignored** — OFFLINE / BUSY / paused
+    runners still count as "registered" because the owner can flip them back
+    on and ``drain_pod`` re-fires on heartbeat or resume. REVOKED runners,
+    however, are **permanent** — a revoked runner can never be un-revoked and
     ``drain_pod`` only ever assigns ONLINE runners, so a REVOKED-only match
     would let the run be created and then jam in QUEUED forever (the exact
     silent-jam this preflight exists to prevent). They are therefore
@@ -462,4 +445,4 @@ def count_active(user_id, workspace_id) -> int:
 
 def eligible_for_assignment(runner: Runner) -> Q:
     """Convenience predicate for assertions/tests."""
-    return Q(pk=runner.pk, status=RunnerStatus.ONLINE)
+    return Q(pk=runner.pk, status=RunnerStatus.ONLINE, paused_at__isnull=True)
