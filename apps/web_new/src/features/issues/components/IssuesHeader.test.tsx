@@ -55,7 +55,26 @@ describe("IssuesHeader", () => {
     expect(titleRegion).toHaveClass("min-w-0");
     expect(screen.getByRole("heading")).toHaveClass("truncate");
     expect(screen.getByText("12 issues")).toHaveClass("shrink-0");
-    expect(screen.getByTestId("issues-header-actions")).toHaveClass("shrink-0");
+  });
+
+  it("wraps trailing controls instead of overflowing a narrowed column", () => {
+    render(
+      <IssuesHeader
+        title="Cycle"
+        totalCount={12}
+        offered={LAYOUT_ORDER}
+        active="list"
+        onSwitch={() => {}}
+        actions={<button type="button">Display</button>}
+      />
+    );
+    expect(screen.getByTestId("issues-header")).toHaveClass("flex-wrap");
+    const actions = screen.getByTestId("issues-header-actions");
+    expect(actions).toHaveClass("flex-wrap");
+    expect(actions).toHaveClass("justify-end");
+    // shrink-0 would pin the row at its min-content and defeat the wrap.
+    expect(actions).toHaveClass("min-w-0");
+    expect(actions).not.toHaveClass("shrink-0");
   });
 
   it("hides the switcher while keeping the title, count and actions", () => {
