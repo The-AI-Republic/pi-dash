@@ -1778,6 +1778,9 @@ async fn token_create(
             user_id,
             user_type,
             expired_at,
+            // The request user is always the owner on this endpoint
+            // (`views/api.py:31` stamps it as `created_by_id`).
+            created_by: Some(user_id),
         },
     )
     .await
