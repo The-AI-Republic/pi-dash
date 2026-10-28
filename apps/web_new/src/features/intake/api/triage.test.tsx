@@ -369,6 +369,7 @@ describe("useTriageControls", () => {
       isAuthorized: true,
       isCreator: false,
       onAdvance: vi.fn(() => false),
+      onStay: vi.fn(),
       ...overrides,
     };
   }
@@ -621,6 +622,7 @@ describe("useTriageControls", () => {
     expect(server.patches).toEqual([{ status: INTAKE_STATUS.duplicate, duplicate_to: TARGET }]);
     expect(notifySuccess).toHaveBeenCalledWith("Marked as duplicate");
     expect(current.onAdvance).not.toHaveBeenCalled();
+    expect(current.onStay).toHaveBeenCalledWith(ISSUE);
     expect(result.current.openDialog).toBeNull();
   });
 

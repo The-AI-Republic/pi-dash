@@ -156,12 +156,29 @@ export function IntakeScreen({
   const openTotal = intakeTotal(pages);
   const rowIds = React.useMemo(() => rows.map((row) => row.issue.id), [rows]);
 
+  // A duplicate write pins its selection across the refetch that takes
+  // the row out of the tab (INT-023): the detail stays so the
+  // duplicate-of link renders, instead of the settle below dropping a
+  // selection the new first page no longer contains.
+  const stayIdRef = React.useRef<string | null>(null);
+  const stayOnSelection = React.useCallback((issueId: string) => {
+    stayIdRef.current = issueId;
+  }, []);
   // Settle the address once the active tab's first page has landed
   // (INT-005/INT-028). A filter or order change drops a selection the
   // new first page no longer contains through the same path.
   const settled = list.isSuccess;
   React.useEffect(() => {
     if (!settled) return;
+    if (search.inboxIssueId !== stayIdRef.current) stayIdRef.current = null;
+    if (
+      stayIdRef.current !== null &&
+      search.inboxIssueId === stayIdRef.current &&
+      !rowIds.includes(stayIdRef.current)
+    ) {
+      stayIdRef.current = null;
+      return;
+    }
     const next = settleIntakeSearch({ search, rowIds });
     if (next !== null) onSearchChange(next, { replace: true });
   }, [settled, search, rowIds, onSearchChange]);
@@ -328,6 +345,7 @@ export function IntakeScreen({
               onToggleList={toggleMobileList}
               onMissing={dropMissing}
               onAdvance={advanceAfterTriage}
+              onStay={stayOnSelection}
             />
           </React.Suspense>
         )

@@ -208,6 +208,13 @@ export interface TriageControlsScope {
    * The screen computes the neighbour from its cached rows.
    */
   onAdvance: (removedId: string) => boolean;
+  /**
+   * A duplicate write landed and the detail stays on the request: the
+   * screen pins the selection across the refetch that takes the row out
+   * of the tab, so the duplicate-of link renders (gate NEWFRONT-695,
+   * INT-023).
+   */
+  onStay: (issueId: string) => void;
 }
 
 export interface TriageControls {
@@ -444,13 +451,16 @@ export function useTriageControls(scope: TriageControlsScope): TriageControls {
           onSuccess: () => {
             // Marking duplicate stays on the request so the duplicate-of
             // link is one step away; focus stays on the resolved detail.
+            // The stay pins the selection across the refetch that takes
+            // the row out of the tab (gate NEWFRONT-695, INT-023).
+            scope.onStay(scope.issueId);
             setOpenDialog(null);
             scheduleTriageFocus(false);
           },
         }
       );
     },
-    [duplicateMove]
+    [duplicateMove, scope.issueId, scope.onStay]
   );
 
   const confirmDelete = React.useCallback(() => {

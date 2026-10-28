@@ -24,6 +24,7 @@ interface StubAcceptProps {
   open?: boolean;
   editTitle?: string;
   editSaveLabel?: string;
+  projects?: { id: string; name: string; identifier: string; memberRole: number | null }[];
   edit?: { kind: string; id: string; projectId: string | null; snapshot: unknown };
   onBeforeEditSubmit?: () => Promise<void>;
   onEditSaved?: (changedFields: readonly string[]) => void;
@@ -165,6 +166,7 @@ function scope(overrides: Partial<TriageControlsScope> = {}): TriageControlsScop
     isAuthorized: true,
     isCreator: false,
     onAdvance: vi.fn(() => false),
+    onStay: vi.fn(),
     ...overrides,
   };
 }
@@ -182,6 +184,7 @@ function Harness({ current }: { current: TriageControlsScope }) {
       projectName={current.projectName}
       projectIdentifier={current.projectIdentifier}
       issueId={current.issueId}
+      memberRole={20}
     />
   );
 }
@@ -225,6 +228,9 @@ describe("IntakeTriageActions", () => {
     expect(props.editSaveLabel).toBe(ACCEPT_SAVE_LABEL);
     expect(props.edit).toMatchObject({ kind: "issue", id: ISSUE, projectId: PROJECT });
     expect(props.edit?.snapshot).toEqual(detailItem());
+    // The locked row carries the viewer role, or the shared form
+    // filters it out and degrades to its no-project notice (INT-020).
+    expect(props.projects).toEqual([{ id: PROJECT, name: "Atlas", identifier: "APO", memberRole: 20 }]);
 
     await React.act(async () => {
       await props.onBeforeEditSubmit?.();
@@ -320,6 +326,7 @@ describe("IntakeTriageActions", () => {
     await user.click(screen.getByTestId("intake-duplicate-option"));
     await waitFor(() => expect(server.patches).toEqual([{ status: INTAKE_STATUS.duplicate, duplicate_to: TARGET }]));
     expect(current.onAdvance).not.toHaveBeenCalled();
+    expect(current.onStay).toHaveBeenCalledWith(ISSUE);
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   });
 
