@@ -170,15 +170,182 @@ def enrich_run_error(error: str, *, runner: Any = None, model: Any = None) -> st
     )
 
 
-def classify_run_error(error: str) -> dict[str, Any] | None:
+# Display routing for the stored canonical taxonomy
+# (``pi_dash.runner.failure.RunFailureReason``): reason → (kind, source,
+# source_label, action). ``kind`` keeps the pre-taxonomy token where one
+# existed (``agent_authentication``, ``agent_model_access``,
+# ``runner_lifecycle``, ``agent_stalled``) so existing UI switches keep
+# matching; new reasons introduce new tokens, which the UI renders via its
+# raw-token fallback. Deriving this from the stored reason is what keeps
+# the display and the ticker policy from drifting (PDASHOSS01-183).
+_REASON_DISPLAY: dict[str, tuple[str, str, str, str]] = {
+    "workspace_setup": (
+        "workspace_setup",
+        "pidash_runner",
+        "Pi Dash runner",
+        "Fix the runner machine's workspace / repository clone configuration, then re-run.",
+    ),
+    "git_auth": (
+        "git_auth",
+        "pidash_runner",
+        "Pi Dash runner",
+        "Fix the runner machine's git credentials for this repository, then re-run.",
+    ),
+    "network": (
+        "runner_network",
+        "pidash_runner",
+        "Pi Dash runner",
+        "Retried automatically — check the runner machine's network if it persists.",
+    ),
+    "runner_offline": (
+        "runner_lifecycle",
+        "pidash_runner",
+        "Pi Dash runner",
+        "Check runner service status and restart the runner if it should still accept work.",
+    ),
+    "daemon_restart": (
+        "runner_lifecycle",
+        "pidash_runner",
+        "Pi Dash runner",
+        "The runner daemon restarted; the next run picks the work back up.",
+    ),
+    "assign_rejected_busy": (
+        "runner_lifecycle",
+        "pidash_runner",
+        "Pi Dash runner",
+        "Retried automatically — the runner was still finishing its previous run.",
+    ),
+    "timeout": (
+        "agent_stalled",
+        "agent",
+        "Agent CLI",
+        "Inspect the runner machine for a stuck agent process or long-running tool call.",
+    ),
+    "max_turns": (
+        "max_turns",
+        "agent",
+        "Agent CLI",
+        "The agent hit its turn budget; re-run to continue, or split the task.",
+    ),
+    "internal": ("internal", "pidash_cloud", "Pi Dash cloud", ""),
+    "agent_error.provider_auth_or_access": (
+        "agent_authentication",
+        "agent",
+        "Agent CLI",
+        "",  # action is composed with the inferred agent label below
+    ),
+    "agent_error.provider_quota_limit": (
+        "agent_quota",
+        "agent",
+        "Agent CLI",
+        "The provider account is out of quota or credits. Add credits or raise the limit, then re-run.",
+    ),
+    "agent_error.provider_capacity_or_rate_limit": (
+        "agent_rate_limit",
+        "agent",
+        "Agent CLI",
+        "The provider is rate-limiting or at capacity; this usually clears on its own. Re-run later.",
+    ),
+    "agent_error.provider_server_error": (
+        "provider_server_error",
+        "agent",
+        "Agent CLI",
+        "Provider-side server error; re-run later.",
+    ),
+    "agent_error.provider_network": (
+        "provider_network",
+        "agent",
+        "Agent CLI",
+        "Retried automatically — check the runner machine's network if it persists.",
+    ),
+    "agent_error.context_overflow": (
+        "agent_context_overflow",
+        "agent",
+        "Agent CLI",
+        "The session outgrew the model's context window; the next run starts a fresh session automatically.",
+    ),
+    "agent_error.model_not_found_or_unavailable": (
+        "agent_model_access",
+        "agent",
+        "Agent CLI",
+        "Choose a model the agent account can access, then retry the run.",
+    ),
+    "agent_error.missing_executable": (
+        "agent_missing_executable",
+        "agent",
+        "Agent CLI",
+        "Install the agent CLI on the runner machine (or fix its PATH), then restart the Pi Dash runner.",
+    ),
+    "agent_error.missing_config": (
+        "agent_missing_config",
+        "agent",
+        "Agent CLI",
+        "Fix the agent CLI's configuration (API key / config file) on the runner machine, then re-run.",
+    ),
+    "agent_error.unsupported_version": (
+        "agent_unsupported_version",
+        "agent",
+        "Agent CLI",
+        "Update the agent CLI on the runner machine to a supported version, then re-run.",
+    ),
+    "agent_error.empty_or_unparseable_output": (
+        "agent_output",
+        "agent",
+        "Agent CLI",
+        "The agent produced no parseable output; re-run. If it persists, inspect the agent CLI on the runner machine.",
+    ),
+    "agent_error.process_failure": (
+        "agent_crash",
+        "agent",
+        "Agent CLI",
+        "Inspect the run's error detail / stderr tail on the runner machine.",
+    ),
+    "agent_error.unknown": ("unknown", "unknown", "Unknown", ""),
+}
+
+
+def _diagnostic_from_reason(reason: str, detail: str) -> dict[str, Any] | None:
+    display = _REASON_DISPLAY.get(reason)
+    if display is None:
+        return None
+    kind, source, source_label, action = display
+    summary = _first_non_empty_line(detail)
+    agent_label = _agent_label_from_enriched_error(detail)
+    if kind == "agent_authentication":
+        action_agent = agent_label or "the agent CLI"
+        action = f"Re-authenticate {action_agent} on the runner machine, then restart the Pi Dash runner."
+    if source == "agent" and agent_label:
+        source_label = agent_label
+    return {
+        "source": source,
+        "source_label": source_label,
+        "kind": kind,
+        "summary": summary,
+        "action": action,
+        "failure_reason": reason,
+    }
+
+
+def classify_run_error(error: str, failure_reason: str = "") -> dict[str, Any] | None:
     """Return a compact diagnostic for a stored run error.
 
     ``source`` answers the operator question "did Pi Dash fail, or did the
     spawned agent fail?" while ``kind`` is a stable-ish category the UI can
     render without brittle text matching.
+
+    When the run carries a stored ``failure_reason`` (every run failed
+    since PDASHOSS01-183, plus the backfill), the diagnostic is derived
+    from it — the same value the ticker policy reads — so display and
+    policy cannot drift. The text rules below remain as the fallback for
+    rows without one.
     """
 
     detail = (error or "").strip()
+    reason = str(failure_reason or "").strip()
+    if reason:
+        diagnostic = _diagnostic_from_reason(reason, detail)
+        if diagnostic is not None:
+            return diagnostic
     if not detail:
         return None
 
