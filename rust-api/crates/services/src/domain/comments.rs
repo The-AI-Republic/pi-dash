@@ -94,19 +94,20 @@ fn comment_activity_kwargs(spec: &CommentActivitySpec) -> Map<String, Value> {
     kwargs
 }
 
+/// Shared [`crate::v1_projects::tasks::model_activity_kwargs`] kernel
+/// with `model_name="issue_comment"` (PIDASHCONV-1623): the same seven
+/// keys in the same order. `current_instance` is `Null` or a string at
+/// every producer, so `.as_str()` maps it exactly.
 fn comment_model_kwargs(spec: &CommentModelSpec, origin: &str) -> Map<String, Value> {
-    let mut kwargs = Map::new();
-    kwargs.insert(
-        "model_name".to_owned(),
-        Value::String("issue_comment".to_owned()),
-    );
-    kwargs.insert("model_id".to_owned(), Value::String(spec.model.to_string()));
-    kwargs.insert("requested_data".to_owned(), spec.requested.clone());
-    kwargs.insert("current_instance".to_owned(), spec.current.clone());
-    kwargs.insert("actor_id".to_owned(), Value::String(spec.actor.to_string()));
-    kwargs.insert("slug".to_owned(), Value::String(spec.slug.clone()));
-    kwargs.insert("origin".to_owned(), Value::String(origin.to_owned()));
-    kwargs
+    crate::v1_projects::tasks::model_activity_kwargs(
+        "issue_comment",
+        &spec.model.to_string(),
+        spec.requested.clone(),
+        spec.current.as_str(),
+        &spec.actor.to_string(),
+        &spec.slug,
+        Some(origin),
+    )
 }
 
 fn sweep_kwargs() -> Map<String, Value> {

@@ -155,6 +155,7 @@ use serde_json::{json, Value};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
+use pidash_compat::http::percent_encode;
 use pidash_db::config::encryption::Keyring;
 use pidash_services::domain::comments as comment_domain;
 use pidash_services::domain::issues as domain_issues;
@@ -723,21 +724,6 @@ fn response_json_list(response: reqwest::blocking::Response) -> Result<Vec<Value
             .cloned()
             .ok_or_else(|| GithubError::Transport("GitHub API returned a non-list page".to_owned()))
     })
-}
-
-/// Minimal percent-encoding for query values (mirrors `urlencode` for the
-/// ASCII parameter values used here: `open`, digits, `updated`/`desc`).
-fn percent_encode(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(byte as char);
-            }
-            _ => out.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    out
 }
 
 impl GithubSyncTransport for GithubRestClient {

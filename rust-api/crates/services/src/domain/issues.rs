@@ -529,10 +529,13 @@ fn issue_activity_kwargs(
     kwargs
 }
 
-/// `model_activity.delay(model_name, model_id, requested_data,
-/// current_instance, actor_id, slug, origin)`: `requested_data` is the RAW
-/// object (never JSON-encoded at these sites); the UUID actor rides as a
-/// string, exactly as Celery's encoder would carry the UUID object.
+/// `model_activity.delay(...)` for the issue domain legs: the shared
+/// [`crate::v1_projects::tasks::model_activity_kwargs`] kernel with
+/// `model_name="issue"`. `requested_data` is the RAW object (never
+/// JSON-encoded at these sites); the UUIDs ride as hyphenated strings,
+/// exactly as Celery's encoder would carry the UUID objects; the
+/// `current_instance` `Value` is `Null` or a string at every producer
+/// (verified), so `.as_str()` maps it exactly (PIDASHCONV-1623).
 fn model_activity_kwargs(
     model_id: &Uuid,
     requested_data: Value,
@@ -541,15 +544,15 @@ fn model_activity_kwargs(
     slug: &str,
     origin: &str,
 ) -> Map<String, Value> {
-    let mut kwargs = Map::new();
-    kwargs.insert("model_name".to_owned(), Value::String("issue".to_owned()));
-    kwargs.insert("model_id".to_owned(), Value::String(model_id.to_string()));
-    kwargs.insert("requested_data".to_owned(), requested_data);
-    kwargs.insert("current_instance".to_owned(), current_instance);
-    kwargs.insert("actor_id".to_owned(), Value::String(actor_id.to_string()));
-    kwargs.insert("slug".to_owned(), Value::String(slug.to_owned()));
-    kwargs.insert("origin".to_owned(), Value::String(origin.to_owned()));
-    kwargs
+    crate::v1_projects::tasks::model_activity_kwargs(
+        "issue",
+        &model_id.to_string(),
+        requested_data,
+        current_instance.as_str(),
+        &actor_id.to_string(),
+        slug,
+        Some(origin),
+    )
 }
 
 /// `issue_description_version_task.delay(updated_issue, issue_id, user_id[,

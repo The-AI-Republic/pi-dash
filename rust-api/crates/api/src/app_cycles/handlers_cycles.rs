@@ -1598,6 +1598,9 @@ use pidash_services::domain::activity::ISSUE_ACTIVITY_TASK;
 /// `request.data` object; `current_instance` is `None` on create and the
 /// before-image JSON string on update. UUIDs render as strings (kombu's
 /// JSON encoder does that in Python).
+///
+/// Built by the shared `model_activity_kwargs` kernel (PIDASHCONV-1623):
+/// the same seven keys in the same order.
 fn model_activity_message(
     model_id: &uuid::Uuid,
     requested_data: Value,
@@ -1606,17 +1609,15 @@ fn model_activity_message(
     slug: &str,
     origin: &str,
 ) -> pidash_jobs::TaskMessage {
-    let mut kwargs = Map::with_capacity(7);
-    kwargs.insert("model_name".to_owned(), Value::String("cycle".to_owned()));
-    kwargs.insert("model_id".to_owned(), Value::String(model_id.to_string()));
-    kwargs.insert("requested_data".to_owned(), requested_data);
-    kwargs.insert(
-        "current_instance".to_owned(),
-        current_instance.map_or(Value::Null, Value::String),
+    let kwargs = pidash_services::v1_projects::tasks::model_activity_kwargs(
+        "cycle",
+        &model_id.to_string(),
+        requested_data,
+        current_instance.as_deref(),
+        &actor_id.to_string(),
+        slug,
+        Some(origin),
     );
-    kwargs.insert("actor_id".to_owned(), Value::String(actor_id.to_string()));
-    kwargs.insert("slug".to_owned(), Value::String(slug.to_owned()));
-    kwargs.insert("origin".to_owned(), Value::String(origin.to_owned()));
     pidash_jobs::TaskMessage::new(MODEL_ACTIVITY_TASK, vec![], kwargs)
 }
 

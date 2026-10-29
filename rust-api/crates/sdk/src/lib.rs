@@ -321,6 +321,7 @@ pub mod ops {
     pub use pidash_services::user_settings::CeUserSettings;
     pub use pidash_services::user_settings::SettingsSchema;
     pub use pidash_services::user_settings::UserSettingsSchema;
+    pub use pidash_services::v1_projects::tasks::model_activity_kwargs;
     pub use pidash_types::orchestration::is_ticking_state;
     pub use pidash_types::orchestration::StateRef;
     pub use pidash_types::orchestration::TickerDecision;
@@ -378,6 +379,7 @@ pub mod compat {
     pub use pidash_compat::datetime;
     pub use pidash_compat::db;
     pub use pidash_compat::filter;
+    pub use pidash_compat::html;
     pub use pidash_compat::http;
     // Moved from `pidash_api::license` by OVL-04 (same value, canonical home).
     pub use pidash_compat::http::SESSION_AUTH_HASH_SALT;
@@ -388,6 +390,7 @@ pub mod compat {
     pub use pidash_jobs::json_compact::write_compact_map;
     pub use pidash_jobs::py_repr;
     pub use pidash_jobs::pyformat::dict_repr;
+    pub use pidash_jobs::pyformat::py_str_or_empty;
     pub use pidash_services::auth_oauth::providers::json_truthy;
     pub use pidash_services::auth_oauth::providers::urlencode;
 }

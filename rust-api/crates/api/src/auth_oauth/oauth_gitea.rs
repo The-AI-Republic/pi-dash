@@ -400,7 +400,7 @@ impl IntoResponse for Denial {
             Denial::Redirect(location) => {
                 let too_long = location.chars().count()
                     > pidash_services::auth_session::MAX_URL_REDIRECT_LENGTH;
-                let encoded = crate::response_headers::iri_to_uri(&location);
+                let encoded = pidash_compat::http::iri_to_uri(&location);
                 match crate::response_headers::header_value(&encoded) {
                     Some(value) if !too_long => {
                         (StatusCode::FOUND, [(header::LOCATION, value)]).into_response()
@@ -424,7 +424,7 @@ impl IntoResponse for Denial {
 pub fn redirect(location: String) -> Response {
     let too_long =
         location.chars().count() > pidash_services::auth_session::MAX_URL_REDIRECT_LENGTH;
-    let encoded = crate::response_headers::iri_to_uri(&location);
+    let encoded = pidash_compat::http::iri_to_uri(&location);
     match crate::response_headers::header_value(&encoded) {
         Some(value) if !too_long => {
             (StatusCode::FOUND, [(header::LOCATION, value)]).into_response()

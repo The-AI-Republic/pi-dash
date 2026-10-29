@@ -2615,7 +2615,7 @@ pub async fn chat_message_create(
     // verbatim JSON.
     let content = match content_raw {
         Some(Value::String(content)) => content.clone(),
-        Some(other) => super::run_endpoints::py_str_value(other),
+        Some(other) => pidash_compat::py::py_str(other),
         None => String::new(),
     };
     let seq = match chat_kernel::next_message_seq(&mut *tx, session_id).await {
@@ -3718,7 +3718,7 @@ pub async fn daemon_chat_approval(
     let reason = match obj.get("reason") {
         Some(reason) if py_truthy(reason) => match reason.as_str() {
             Some(reason) => reason.to_owned(),
-            None => super::run_endpoints::py_str_value(reason),
+            None => pidash_compat::py::py_str(reason),
         },
         _ => String::new(),
     };
@@ -3918,7 +3918,7 @@ pub async fn daemon_chat_message_complete(
     let assistant_text = match obj.get("assistant_message") {
         Some(text) if py_truthy(text) => match text.as_str() {
             Some(text) => text.to_owned(),
-            None => super::run_endpoints::py_str_value(text),
+            None => pidash_compat::py::py_str(text),
         },
         _ => String::new(),
     };

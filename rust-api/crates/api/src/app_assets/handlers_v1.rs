@@ -319,7 +319,7 @@ fn absolute_asset_url(base: &str, stored: &str) -> String {
     let mut joined = String::with_capacity(base.len() + stored.len());
     joined.push_str(base);
     joined.push_str(stored);
-    crate::response_headers::iri_to_uri(&joined)
+    pidash_compat::http::iri_to_uri(&joined)
 }
 
 /// Map one `SELECT *` row onto the 24-key serializer shape. Datetimes

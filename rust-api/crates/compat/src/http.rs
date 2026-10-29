@@ -13,6 +13,11 @@
 //! `csrf_failure_response` (3), `TokenSource` + `csrf_token_source` (3),
 //! `normalize_email` (2).
 //!
+//! PIDASHCONV-1623 moved `iri_to_uri` (from
+//! `api::response_headers`, the `HttpResponseRedirect` encoder) and
+//! `percent_encode` (from the `jobs::integrations::{git_sync,
+//! github_sync}` twins, the strict segment/query encoder) here.
+//!
 //! Shapes that stay local: the test-only `body_bytes` / `set_cookies` /
 //! nested `hex_encode` helpers; `csrf_gate`, `csrf_check_token` and
 //! `csrf_rotate_cookie` (thin adapters over the `pidash_auth` kernels
@@ -223,6 +228,84 @@ pub fn csrf_failure_response(body: String) -> Response {
 /// Trim and lowercase an email address (login/registration forms).
 pub fn normalize_email(raw: &str) -> String {
     raw.trim().to_lowercase()
+}
+
+// ---------------------------------------------------------------------------
+// URL encoders
+// ---------------------------------------------------------------------------
+
+/// `django.utils.encoding.iri_to_uri` (`quote(iri,
+/// safe="/#%[]=:;$&()+,!?*@'~")`, Django 4.2 `utils/encoding.py:110-138`):
+/// `quote` always spares ASCII alphanumerics plus `-_.~`; the safe set
+/// spares the RFC 3986 reserved marks and `%`. Every other byte — UTF-8
+/// multibyte included — becomes uppercase `%XX`.
+///
+/// Django's `HttpResponseRedirect` applies this to the URL before storing
+/// `Location` (`django/http/response.py:620`); every `HttpResponseRedirect`
+/// emulation must call it before building the header value. It must
+/// NOT be applied to other headers: a hand-set `response["Location"]`
+/// skips it in Django.
+///
+/// Moved from `api::response_headers` (PIDASHCONV-1623); the OSS call
+/// sites import it and the old path keeps a `pub use` shim.
+pub fn iri_to_uri(joined: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut out = String::with_capacity(joined.len());
+    for byte in joined.bytes() {
+        let keep = byte.is_ascii_alphanumeric()
+            || matches!(byte, b'-' | b'_' | b'.' | b'~')
+            || matches!(
+                byte,
+                b'/' | b'#'
+                    | b'%'
+                    | b'['
+                    | b']'
+                    | b'='
+                    | b':'
+                    | b';'
+                    | b'$'
+                    | b'&'
+                    | b'('
+                    | b')'
+                    | b'+'
+                    | b','
+                    | b'!'
+                    | b'?'
+                    | b'*'
+                    | b'@'
+                    | b'\''
+            );
+        if keep {
+            out.push(byte as char);
+        } else {
+            out.push('%');
+            out.push(HEX[(byte >> 4) as usize] as char);
+            out.push(HEX[(byte & 15) as usize] as char);
+        }
+    }
+    out
+}
+
+/// `urllib.parse.quote(value, safe="")`: the RFC 3986 unreserved set
+/// (`A-Z a-z 0-9 - _ . ~`) passes through, every other byte of the
+/// UTF-8 form becomes uppercase `%XX`.
+///
+/// Moved from the `jobs::integrations::{git_sync, github_sync}` twins
+/// (PIDASHCONV-1623), which used it for GitHub query values. This is
+/// NOT `percent_encode_path` (the `services::assistant::tools_github`
+/// path-segment encoder): same byte behavior today, but that twin is
+/// out of scope here and keeps its own copy.
+pub fn percent_encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char);
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -451,5 +534,46 @@ mod tests {
             "admin@example.com"
         );
         assert_eq!(normalize_email("a@b.com"), "a@b.com");
+    }
+
+    // Moved from `api::response_headers` with `iri_to_uri`.
+    #[test]
+    fn iri_to_uri_matches_django_vectors() {
+        // Oracle: `django.utils.encoding.iri_to_uri` on the venv Django
+        // (moved from `app_assets::handlers_v1`; CR/LF rows added for
+        // PIDASHCONV-1356: `HttpResponseRedirect` percent-encodes them,
+        // so they stay a 302 instead of `BadHeaderError` 500s).
+        for (raw, expected) in [
+            ("http://h/p/a b", "http://h/p/a%20b"),
+            ("http://h/p/caf\u{e9}", "http://h/p/caf%C3%A9"),
+            ("http://h/p/100%25x", "http://h/p/100%25x"),
+            ("http://h/p/a?b#c", "http://h/p/a?b#c"),
+            ("http://h/p/a+b", "http://h/p/a+b"),
+            ("http://h/p/a\"b<c>d", "http://h/p/a%22b%3Cc%3Ed"),
+            (
+                "http://h/p/\u{4e2d}\u{6587}",
+                "http://h/p/%E4%B8%AD%E6%96%87",
+            ),
+            ("http://h/p/a\nb", "http://h/p/a%0Ab"),
+            ("http://h/p/a\rb", "http://h/p/a%0Db"),
+        ] {
+            assert_eq!(iri_to_uri(raw), expected, "iri_to_uri({raw:?})");
+        }
+    }
+
+    #[test]
+    fn percent_encode_strict_segment_set() {
+        assert_eq!(percent_encode(""), "");
+        assert_eq!(percent_encode("AZaz09-_.~"), "AZaz09-_.~");
+        assert_eq!(percent_encode("a b"), "a%20b");
+        assert_eq!(
+            percent_encode("owner,collaborator,organization_member"),
+            "owner%2Ccollaborator%2Corganization_member"
+        );
+        assert_eq!(percent_encode("open"), "open");
+        assert_eq!(percent_encode("100"), "100");
+        assert_eq!(percent_encode("/"), "%2F");
+        assert_eq!(percent_encode("%"), "%25");
+        assert_eq!(percent_encode("caf\u{e9}"), "caf%C3%A9");
     }
 }

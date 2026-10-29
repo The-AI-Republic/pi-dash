@@ -70,7 +70,7 @@ use super::{
 };
 use crate::state::AppState;
 use pidash_compat::db::is_unique_violation;
-use pidash_compat::py::py_float_str;
+use pidash_compat::py::py_str;
 
 // ---------------------------------------------------------------------------
 // Pure frame helpers (unit-tested against FX-RUN-09)
@@ -164,75 +164,8 @@ pub fn event_batch_items(data: &Value) -> Result<Vec<&Value>, FrameError> {
     }
 }
 
-/// `str(value)` for a truthy frame value (`reason`, `TextField`
-/// storage): strings verbatim, ints raw, floats in CPython repr
-/// form, bools as `True`/`False`, containers in single-quote repr
-/// form. Only called on truthy values (every call site gates first).
-pub fn py_str_value(value: &Value) -> String {
-    match value {
-        Value::Null => "None".to_owned(),
-        Value::Bool(true) => "True".to_owned(),
-        Value::Bool(false) => "False".to_owned(),
-        Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                return i.to_string();
-            }
-            if let Some(u) = n.as_u64() {
-                return u.to_string();
-            }
-            n.as_f64()
-                .map(py_float_str)
-                .unwrap_or_else(|| n.to_string())
-        }
-        Value::String(s) => s.clone(),
-        Value::Array(items) => {
-            let inner: Vec<String> = items.iter().map(py_repr_value).collect();
-            format!("[{}]", inner.join(", "))
-        }
-        Value::Object(map) => {
-            let inner: Vec<String> = map
-                .iter()
-                .map(|(k, v)| format!("{}: {}", py_repr_str(k), py_repr_value(v)))
-                .collect();
-            format!("{{{}}}", inner.join(", "))
-        }
-    }
-}
-
-fn py_repr_value(value: &Value) -> String {
-    match value {
-        Value::String(s) => py_repr_str(s),
-        other => py_str_value(other),
-    }
-}
-
-fn py_repr_str(s: &str) -> String {
-    let use_double = s.contains('\'') && !s.contains('"');
-    let quote = if use_double { '"' } else { '\'' };
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push(quote);
-    for c in s.chars() {
-        if c == quote {
-            out.push('\\');
-            out.push(c);
-        } else {
-            match c {
-                '\\' => out.push_str("\\\\"),
-                '\n' => out.push_str("\\n"),
-                '\r' => out.push_str("\\r"),
-                '\t' => out.push_str("\\t"),
-                c if !(c.is_control() || c == '\u{7f}' || c == '\u{2028}' || c == '\u{2029}') => {
-                    out.push(c)
-                }
-                c if (c as u32) < 0x100 => out.push_str(&format!("\\x{:02x}", c as u32)),
-                c if (c as u32) < 0x1_0000 => out.push_str(&format!("\\u{:04x}", c as u32)),
-                c => out.push_str(&format!("\\U{:08x}", c as u32)),
-            }
-        }
-    }
-    out.push(quote);
-    out
-}
+// `py_str_value`/`py_repr_value`/`py_repr_str` moved to
+// `pidash_compat::py::py_str` (identical body, PIDASHCONV-1623).
 
 /// `(request.data.get("reason") or "")` then `== name`
 /// (`run_endpoints.py:356,380,403`): falsy maps to `""`, strings
@@ -1973,7 +1906,7 @@ async fn run_approval_inner(
         _ => Value::Object(Default::default()),
     };
     let reason = match preamble.data.get("reason") {
-        Some(reason) if py_truthy(reason) => py_str_value(reason),
+        Some(reason) if py_truthy(reason) => py_str(reason),
         _ => String::new(),
     };
     let expires_at = match expires_at_text(&preamble.data) {
@@ -3151,17 +3084,6 @@ mod tests {
         assert!(expires_at_text(&json!({"expires_at": 5})).is_err());
         assert!(expires_at_text(&json!({"expires_at": [1]})).is_err());
         assert!(expires_at_text(&json!({"expires_at": {"a": 1}})).is_err());
-    }
-
-    #[test]
-    fn py_str_value_matches_python_str() {
-        assert_eq!(py_str_value(&json!("need it")), "need it");
-        assert_eq!(py_str_value(&json!(5)), "5");
-        assert_eq!(py_str_value(&json!(-5)), "-5");
-        assert_eq!(py_str_value(&json!(true)), "True");
-        assert_eq!(py_str_value(&json!(1.5)), "1.5");
-        assert_eq!(py_str_value(&json!([1, "a"])), "[1, 'a']");
-        assert_eq!(py_str_value(&json!({"a": 1})), "{'a': 1}");
     }
 
     #[test]

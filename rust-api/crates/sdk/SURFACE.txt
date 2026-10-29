@@ -221,6 +221,7 @@ pidash_sdk::compat::filter
 pidash_sdk::compat::gate_fn
 pidash_sdk::compat::hash_token
 pidash_sdk::compat::header_value
+pidash_sdk::compat::html
 pidash_sdk::compat::http
 pidash_sdk::compat::http_date
 pidash_sdk::compat::is_secure_request
@@ -234,6 +235,7 @@ pidash_sdk::compat::password_routes
 pidash_sdk::compat::profile_fn
 pidash_sdk::compat::py
 pidash_sdk::compat::py_repr
+pidash_sdk::compat::py_str_or_empty
 pidash_sdk::compat::render_csrf_failure
 pidash_sdk::compat::render_datetime
 pidash_sdk::compat::render_datetime_in
@@ -435,6 +437,7 @@ pidash_sdk::ops::is_ticking_state
 pidash_sdk::ops::latest_prior_run_sql
 pidash_sdk::ops::lock_ticker_sql
 pidash_sdk::ops::merge_settings
+pidash_sdk::ops::model_activity_kwargs
 pidash_sdk::ops::move_to_project
 pidash_sdk::ops::next_event_seq
 pidash_sdk::ops::next_message_seq

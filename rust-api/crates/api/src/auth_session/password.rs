@@ -149,7 +149,7 @@ fn json_400(pairs: &[(String, Value)]) -> Response {
 /// 400 (`DisallowedRedirect`).
 fn redirect_302(location: String) -> Response {
     let too_long = location.chars().count() > MAX_URL_REDIRECT_LENGTH;
-    let encoded = crate::response_headers::iri_to_uri(&location);
+    let encoded = pidash_compat::http::iri_to_uri(&location);
     let Some(location) = crate::response_headers::header_value(&encoded) else {
         return server_error();
     };

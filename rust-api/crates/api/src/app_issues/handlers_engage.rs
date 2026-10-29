@@ -78,11 +78,13 @@ use crate::state::AppState;
 use crate::v1_cycles_modules::body as shared_body;
 use pidash_compat::datetime::{render_date, render_datetime_in, render_rfc3339_in};
 use pidash_compat::db::is_integrity_error;
-use pidash_compat::py::{layout_py_float, python_dumps};
+use pidash_compat::py::{py_float_repr_probed, py_str_value, python_dumps};
 use pidash_compat::response::{empty_response, json_response};
+use pidash_compat::validate::uuid_from_json_int;
 use pidash_db::app_pages::strip::ml_strip_tags;
 use pidash_db::entity::comment_hooks::description_stripped_for;
 use pidash_services::domain::comments as comment_domain;
+use pidash_services::v1_projects::tasks::model_activity_kwargs;
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -1085,149 +1087,6 @@ fn json_type_name(value: &Value) -> &'static str {
 // CPython value semantics (`str` / `repr` / `==` / float rendering)
 // ---------------------------------------------------------------------------
 
-/// CPython `repr(float)`: the shortest spelling that round-trips,
-/// `.0` for integral plain values, `e±XX` exponents with a sign and
-/// at least two digits, exponent form outside `[1e-4, 1e16)`.
-/// Verified live: `77.0` → `"77.0"`, `1e16` → `"1e+16"`,
-/// `1e-5` → `"1e-05"` — plus a 116-value CPython oracle unit test.
-///
-/// Render precisions 1..=19 and take the first that parses back to
-/// `value` (greedy right-trimming from a long rendering is unsound:
-/// intermediate prefixes can round to a neighbor while a shorter one
-/// hits — e.g. `1.5e-07`), then lay out per the CPython magnitude
-/// rule.
-fn py_float_repr(value: f64) -> String {
-    if value.is_nan() {
-        return "nan".to_owned();
-    }
-    if value.is_infinite() {
-        return if value > 0.0 {
-            "inf".to_owned()
-        } else {
-            "-inf".to_owned()
-        };
-    }
-    if value == 0.0 {
-        return if value.is_sign_negative() {
-            "-0.0".to_owned()
-        } else {
-            "0.0".to_owned()
-        };
-    }
-    for precision in 1..=19usize {
-        let rendered = format!("{value:.dec$e}", dec = precision - 1);
-        if rendered.parse::<f64>().ok() == Some(value) {
-            return layout_py_float(&rendered, value);
-        }
-    }
-    // Unreachable in practice (17 significant digits always identify
-    // an f64); fall back to the longest rendering laid out.
-    layout_py_float(&format!("{value:.18e}"), value)
-}
-
-/// CPython `str()` over a parsed JSON value: `None` / `True` / `False`,
-/// decimal ints, [`py_float_repr`] floats, raw strings, and — for
-/// containers — brackets with `repr()` elements (verified live:
-/// `"['INTERNAL']"`, `"{'a': 1}"`).
-fn py_str_value(value: &Value) -> String {
-    match value {
-        Value::Null => "None".to_owned(),
-        Value::Bool(true) => "True".to_owned(),
-        Value::Bool(false) => "False".to_owned(),
-        Value::Number(number) => {
-            if let Some(int) = number.as_i64() {
-                int.to_string()
-            } else if let Some(uint) = number.as_u64() {
-                uint.to_string()
-            } else if number.is_f64() {
-                match number.as_f64() {
-                    Some(float) => py_float_repr(float),
-                    None => number.to_string(),
-                }
-            } else {
-                // Arbitrary-precision integers past `u64`: full digits,
-                // like CPython `str(int)` (never the lossy `as_f64`).
-                number.to_string()
-            }
-        }
-        Value::String(text) => text.clone(),
-        Value::Array(items) => {
-            let inner: Vec<String> = items.iter().map(py_repr_value).collect();
-            format!("[{}]", inner.join(", "))
-        }
-        Value::Object(map) => {
-            let inner: Vec<String> = map
-                .iter()
-                .map(|(key, item)| format!("{}: {}", py_repr_string(key), py_repr_value(item)))
-                .collect();
-            format!("{{{}}}", inner.join(", "))
-        }
-    }
-}
-
-/// CPython `repr()` over a parsed JSON value (container elements and dict
-/// keys use this; see [`py_str_value`]).
-fn py_repr_value(value: &Value) -> String {
-    match value {
-        Value::String(text) => py_repr_string(text),
-        Value::Array(items) => {
-            let inner: Vec<String> = items.iter().map(py_repr_value).collect();
-            format!("[{}]", inner.join(", "))
-        }
-        Value::Object(map) => {
-            let inner: Vec<String> = map
-                .iter()
-                .map(|(key, item)| format!("{}: {}", py_repr_string(key), py_repr_value(item)))
-                .collect();
-            format!("{{{}}}", inner.join(", "))
-        }
-        other => py_str_value(other),
-    }
-}
-
-/// CPython `repr()` of a string: single quotes unless the text holds a
-/// single quote but no double quote (then double quotes), with the
-/// short escapes plus `\xhh` / `\uhhhh` / `\Uhhhhhhhh` for
-/// non-printables (controls, DEL, C1, non-space whitespace; format and
-/// unassigned codepoints stay literal — an accepted approximation, only
-/// reachable inside choice/UUID error text).
-fn py_repr_string(text: &str) -> String {
-    let use_double = text.contains('\'') && !text.contains('"');
-    let quote = if use_double { '"' } else { '\'' };
-    let mut out = String::with_capacity(text.len() + 2);
-    out.push(quote);
-    for ch in text.chars() {
-        if ch == quote {
-            out.push('\\');
-            out.push(ch);
-            continue;
-        }
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            ch if ch.is_control()
-                || (ch as u32) == 0x7f
-                || ((ch as u32) >= 0x80 && (ch as u32) < 0xa0)
-                || (ch.is_whitespace() && ch != ' ') =>
-            {
-                let code = ch as u32;
-                if code < 0x100 {
-                    out.push_str(&format!("\\x{code:02x}"));
-                } else if code < 0x10000 {
-                    out.push_str(&format!("\\u{code:04x}"));
-                } else {
-                    out.push_str(&format!("\\U{code:08x}"));
-                }
-            }
-            ch => out.push(ch),
-        }
-    }
-    out.push(quote);
-    out
-}
-
 /// CPython `==` over parsed JSON values (the sync-lock and
 /// `_changes_on_save` comparisons): `True == 1`, `1 == 1.0`, objects
 /// order-insensitive, arrays ordered, `1 == "1"` false.
@@ -1272,14 +1131,14 @@ fn json_number_to_f64(number: &serde_json::Number) -> Option<f64> {
         .or_else(|| number.as_f64())
 }
 
-/// Rewrite every float in a parsed body to its [`py_float_repr`]
+/// Rewrite every float in a parsed body to its [`py_float_repr_probed`]
 /// literal (kept as a `Number`, so ints stay ints and dumps/responses
 /// render the CPython spelling: `1e16` in, `1e+16` out).
 fn normalize_parse_floats(value: &mut Value) {
     match value {
         Value::Number(number) if number.is_f64() => {
             if let Some(float) = number.as_f64() {
-                let literal = py_float_repr(float);
+                let literal = py_float_repr_probed(float);
                 if let Ok(Value::Number(replacement)) = serde_json::from_str::<Value>(&literal) {
                     *number = replacement;
                 }
@@ -2512,33 +2371,6 @@ fn check_uuid(
             Presence::Missing
         }
     }
-}
-
-/// `uuid.UUID(int=…)` over a JSON integer: non-negatives below 2¹²⁸
-/// only (negatives and huge values raise `ValueError`).
-fn uuid_from_json_int(number: &serde_json::Number) -> Option<uuid::Uuid> {
-    if let Some(int) = number.as_i64() {
-        if int < 0 {
-            return None;
-        }
-        return Some(uuid::Uuid::from_u128(int as u128));
-    }
-    if let Some(uint) = number.as_u64() {
-        // `u64` always fits the 128-bit space.
-        let _ = uint;
-        return number
-            .to_string()
-            .parse::<u128>()
-            .ok()
-            .map(uuid::Uuid::from_u128);
-    }
-    // Arbitrary-precision integers past `u64`: `UUID(int=…)` accepts
-    // anything below 2¹²⁸.
-    number
-        .to_string()
-        .parse::<u128>()
-        .ok()
-        .map(uuid::Uuid::from_u128)
 }
 
 /// `uuid.UUID(hex=…)` over a string: dashed, plain-hex, braced, and
@@ -4913,23 +4745,23 @@ async fn comment_create(
     activity.insert("notification".to_owned(), Value::Bool(true));
     activity.insert("origin".to_owned(), Value::String(origin.clone()));
     enqueue_kwargs(&pool, ISSUE_ACTIVITY_TASK, activity).await;
-    let mut model = Map::new();
-    model.insert(
-        "model_name".to_owned(),
-        Value::String("issue_comment".to_owned()),
-    );
-    model.insert("model_id".to_owned(), Value::String(base.id.to_string()));
     // Task bytes render the raw QueryDict (PIDASHCONV-763): form list
     // fields dump as last-wins scalars. In place — validation is done
     // and `body` moves into the payload below.
     if is_html {
         shared_body::project_list_scalars(&mut body, ENGAGE_BODY_SPEC.list_fields);
     }
-    model.insert("requested_data".to_owned(), Value::Object(body));
-    model.insert("current_instance".to_owned(), Value::Null);
-    model.insert("actor_id".to_owned(), Value::String(user_id.to_string()));
-    model.insert("slug".to_owned(), Value::String(slug));
-    model.insert("origin".to_owned(), Value::String(origin));
+    // Shared `model_activity` kernel (PIDASHCONV-1623): the same seven
+    // keys in the same order (`current_instance` is `None` on create).
+    let model = model_activity_kwargs(
+        "issue_comment",
+        &base.id.to_string(),
+        Value::Object(body),
+        None,
+        &user_id.to_string(),
+        &slug,
+        Some(&origin),
+    );
     enqueue_kwargs(&pool, MODEL_ACTIVITY_TASK, model).await;
     match serde_json::to_string(&rendered) {
         Ok(text) => json_response(StatusCode::CREATED, text),
@@ -5268,25 +5100,23 @@ async fn comment_partial_update(
     activity.insert("notification".to_owned(), Value::Bool(true));
     activity.insert("origin".to_owned(), Value::String(origin.clone()));
     enqueue_kwargs(&pool, ISSUE_ACTIVITY_TASK, activity).await;
-    let mut model = Map::new();
-    model.insert(
-        "model_name".to_owned(),
-        Value::String("issue_comment".to_owned()),
-    );
-    model.insert("model_id".to_owned(), Value::String(pk.to_string()));
     // Same QueryDict projection as `requested_data` above (PIDASHCONV-763).
     // In place — validation is done and `body` moves below.
     if is_html {
         shared_body::project_list_scalars(&mut body, ENGAGE_BODY_SPEC.list_fields);
     }
-    model.insert("requested_data".to_owned(), Value::Object(body));
-    model.insert(
-        "current_instance".to_owned(),
-        Value::String(current_instance),
+    // Shared `model_activity` kernel (PIDASHCONV-1623): the same seven
+    // keys in the same order (the before-image snapshot string rides
+    // `current_instance` on update).
+    let model = model_activity_kwargs(
+        "issue_comment",
+        &pk.to_string(),
+        Value::Object(body),
+        Some(&current_instance),
+        &user_id.to_string(),
+        &slug,
+        Some(&origin),
     );
-    model.insert("actor_id".to_owned(), Value::String(user_id.to_string()));
-    model.insert("slug".to_owned(), Value::String(slug));
-    model.insert("origin".to_owned(), Value::String(origin));
     enqueue_kwargs(&pool, MODEL_ACTIVITY_TASK, model).await;
     match render_base_comment(&pool, &base, &tenant.timezone, None).await {
         Ok(value) => match serde_json::to_string(&value) {
@@ -6743,17 +6573,10 @@ mod tests {
         }
     }
 
+    // The `str`/`repr` asserts moved to `pidash_compat::py` with
+    // `py_str_value` (PIDASHCONV-1623); the equality asserts stay.
     #[test]
-    fn py_value_semantics_match_cpython() {
-        assert_eq!(py_str_value(&Value::Null), "None");
-        assert_eq!(py_str_value(&json!(true)), "True");
-        assert_eq!(py_str_value(&json!(77)), "77");
-        assert_eq!(py_str_value(&json!("internal")), "internal");
-        assert_eq!(py_str_value(&json!(["INTERNAL"])), "['INTERNAL']");
-        assert_eq!(py_str_value(&json!({"a": 1})), "{'a': 1}");
-        assert_eq!(py_repr_value(&json!("don't")), "\"don't\"");
-        assert_eq!(py_repr_value(&json!("say \"hi\"")), "'say \"hi\"'");
-        assert_eq!(py_repr_value(&json!("a\nb")), "'a\\nb'");
+    fn py_json_eq_matches_cpython() {
         assert!(py_json_eq(&json!(true), &json!(1)));
         assert!(py_json_eq(&json!(1), &json!(1.0)));
         assert!(py_json_eq(
@@ -6844,136 +6667,6 @@ mod tests {
         ] {
             assert!(!is_valid_url(bad), "{bad}");
         }
-    }
-
-    #[test]
-    fn py_float_repr_matches_cpython_oracle() {
-        // CPython `repr` over edge + random f64s (seed 654): parsing
-        // each spelling must reproduce it exactly.
-        for text in [
-            "0.0",
-            "-0.0",
-            "1.0",
-            "-1.0",
-            "0.1",
-            "-0.1",
-            "0.5",
-            "4.5",
-            "77.0",
-            "1e+16",
-            "-1e+16",
-            "1000000000000000.0",
-            "9999999999999998.0",
-            "0.0001",
-            "9.9999e-05",
-            "1e-05",
-            "1.5e-07",
-            "1.23",
-            "123.456",
-            "1.1",
-            "2.2",
-            "0.3",
-            "1e+300",
-            "1.7976931348623157e+308",
-            "5e-324",
-            "2.2250738585072014e-308",
-            "1e+21",
-            "123456789.12345679",
-            "0.00010000000001",
-            "3.141592653589793",
-            "100.0",
-            "1000000.0",
-            "1000000.0",
-            "1234567890000000.0",
-            "1.0000000000000002",
-            "2.0000000000000004",
-            "3.1969326087014466e+19",
-            "-648.4462954478394",
-            "2.7257935151841477e+19",
-            "579.4076537460154",
-            "8.527238532839549e+19",
-            "-913.3955515106092",
-            "8.896161802149298e+19",
-            "-715.3670336061672",
-            "3.588060462234755e+19",
-            "435.64988671404353",
-            "7.755666951748308e+19",
-            "-689.2765889623878",
-            "-4.330334504373883e+19",
-            "-816.9972547462557",
-            "-7.212821885073056e+19",
-            "-1679.6052986552581",
-            "3.2445178360908284e+19",
-            "-204.03326175159876",
-            "-8.659247373857653e+18",
-            "1208.8390033969868",
-            "-4.647260496917678e+19",
-            "2331.221077226743",
-            "8.5327628826864e+19",
-            "1001.189002479752",
-            "-8.234019824386068e+19",
-            "-495.73367760484905",
-            "9.352414724532316e+19",
-            "346.0259035320625",
-            "-7.1336788737953415e+19",
-            "-956.186083621841",
-            "-7.678412411071945e+19",
-            "743.1470832768787",
-            "-2.5012238015527862e+19",
-            "-151.39194187298384",
-            "5.543620478186435e+19",
-            "-402.4753197702496",
-            "-9.86234000471552e+19",
-            "-1687.6484285668644",
-            "-1.2613779274247045e+19",
-            "295.5344355622931",
-            "-4.708884174573601e+18",
-            "143.2457353449458",
-            "9.272274689849475e+19",
-            "782.9417038372993",
-            "-2.365484285927129e+19",
-            "213.25467548742972",
-            "-4.4287013372000076e+19",
-            "-75.27500601863878",
-            "7.3002688662026355e+19",
-            "-617.7363223782181",
-            "2.8132118711075865e+19",
-            "642.045311657188",
-            "-4.9760184971786445e+19",
-            "-493.23593034675645",
-            "-5.92865673699603e+19",
-            "1271.787532431871",
-            "8.862838211447603e+18",
-            "-102.63510865808792",
-            "2.4099300144340025e+19",
-            "-2281.3345229971756",
-            "-5.346252045636608e+19",
-            "2132.4041415069833",
-            "-6.090543569457227e+19",
-            "1863.0368182127777",
-            "6.0170257457244996e+19",
-            "-182.18689918793999",
-            "6.525439356052767e+17",
-            "-1362.5914219885572",
-            "5.1796889258414604e+19",
-            "-319.24195464384303",
-            "-8.253703237953189e+19",
-            "287.06500363070336",
-            "-2.591301605754159e+19",
-            "1392.893079979731",
-            "2.655060505738576e+18",
-            "2036.4351785039644",
-            "7.427269069333139e+19",
-            "1347.4365990857013",
-            "-8.434791962696217e+19",
-            "-186.0700574057584",
-        ] {
-            let value: f64 = text.parse().unwrap();
-            assert_eq!(py_float_repr(value), text, "{text}");
-        }
-        assert_eq!(py_float_repr(f64::NAN), "nan");
-        assert_eq!(py_float_repr(f64::INFINITY), "inf");
-        assert_eq!(py_float_repr(f64::NEG_INFINITY), "-inf");
     }
 
     #[test]
