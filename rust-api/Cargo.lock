@@ -3195,6 +3195,7 @@ dependencies = [
 name = "pidash-services"
 version = "0.1.0"
 dependencies = [
+ "ammonia",
  "async-trait",
  "base64 0.22.1",
  "chrono",
@@ -3214,6 +3215,7 @@ dependencies = [
  "pidash-db",
  "pidash-storage",
  "pidash-types",
+ "pulldown-cmark",
  "rand 0.9.5",
  "redis",
  "regex",

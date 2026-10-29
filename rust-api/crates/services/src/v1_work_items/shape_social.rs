@@ -1799,6 +1799,60 @@ pub fn render_activity(
     Ok(out)
 }
 
+// ---------------------------------------------------------------------------
+// `render_comment_value`: moved from
+// `pidash_api::v1_work_items::handlers_social` by OVL-14
+// (PIDASHCONV-1649).
+// ---------------------------------------------------------------------------
+
+pub fn render_comment_value(
+    decoded: &crate::read::DecodedComment,
+    url: Option<String>,
+    field_specs: Option<&[FieldSpec]>,
+    expand_refs: &[&str],
+    expansions: &[(&str, Option<Value>)],
+) -> Result<Value, SocialRenderError> {
+    let attachments: Vec<Option<&str>> = decoded
+        .attachments
+        .iter()
+        .map(|item| item.as_deref())
+        .collect();
+    let labels: Vec<Option<&str>> = decoded.labels.iter().map(|item| item.as_deref()).collect();
+    let row = CommentRow {
+        id: &decoded.id,
+        is_member: decoded.is_member,
+        url,
+        created_at: &decoded.created_at,
+        updated_at: &decoded.updated_at,
+        deleted_at: decoded.deleted_at.as_deref(),
+        comment_html: &decoded.comment_html,
+        attachments: &attachments,
+        labels: &labels,
+        access: &decoded.access,
+        external_source: decoded.external_source.as_deref(),
+        external_id: decoded.external_id.as_deref(),
+        speaker_type: &decoded.speaker_type,
+        speaker_label: &decoded.speaker_label,
+        speaker_agent_run_id: decoded.speaker_agent_run_id.as_deref(),
+        edited_at: decoded.edited_at.as_deref(),
+        created_by: decoded.created_by.as_deref(),
+        updated_by: decoded.updated_by.as_deref(),
+        project: &decoded.project,
+        workspace: &decoded.workspace,
+        description: decoded.description.as_deref(),
+        issue: &decoded.issue,
+        actor: decoded.actor.as_deref(),
+        parent: decoded.parent.as_deref(),
+    };
+    let out = render_comment(&CommentRepresentationInput {
+        row: &row,
+        fields: field_specs,
+        expand: expand_refs,
+        expansions,
+    })?;
+    Ok(Value::Object(out))
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::shape_issue::{

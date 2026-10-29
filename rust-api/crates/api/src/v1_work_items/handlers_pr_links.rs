@@ -60,6 +60,7 @@
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -70,13 +71,19 @@ use uuid::Uuid;
 
 use pidash_auth::scope::TenantScope;
 
+use crate::domain_hooks::AppTaskEnqueueHook;
+use crate::issue_transition::AppTransitionHook;
 use crate::middleware::body_limit::read_request_bytes;
 use crate::state::AppState;
 use crate::v1_projects::handlers_project::{
-    envelope, preamble, project_base_facts, query_last, rewrite_project_id, QueryMap,
+    envelope, preamble, project_base_facts, query_last, rewrite_project_id, Preamble, QueryMap,
 };
 use pidash_compat::db::{is_integrity_error, is_unique_violation};
 use pidash_compat::response::{json_created, json_ok, no_content};
+use pidash_services::domain::activity::TaskEnqueueHook;
+use pidash_services::domain::transition::IssueTransitionHook;
+use pidash_services::domain::{WriteActor, WriteCtx, WriteScope};
+use pidash_services::operations;
 
 // ---------------------------------------------------------------------------
 // Responses
@@ -219,6 +226,56 @@ fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
 }
 
+/// Map an operation failure onto the `Denial` arms the moved handler
+/// used (OVL-14, PIDASHCONV-1649). The attach operation reports its
+/// 404/409 misses as [`operations::Error::Rejection`] (message +
+/// status), which land on this module's message-carrying 404/409 arms;
+/// the body-carrying variants it never returns 500 instead.
+impl From<operations::Error> for Denial {
+    fn from(error: operations::Error) -> Self {
+        match error {
+            operations::Error::BadError(message) => Denial::BadError(message),
+            operations::Error::Rejection {
+                status: 404,
+                message,
+            } => Denial::NotFoundError(message),
+            operations::Error::Rejection {
+                status: 409,
+                message,
+            } => Denial::Conflict(message),
+            operations::Error::NotFound => Denial::NotFound,
+            operations::Error::ServerError => Denial::ServerError,
+            operations::Error::FieldErrors(_)
+            | operations::Error::NotFoundBody(_)
+            | operations::Error::Conflict(_)
+            | operations::Error::ProjectNotFound
+            | operations::Error::Rejection { .. } => Denial::ServerError,
+        }
+    }
+}
+
+/// Wrap an operation outcome in the v1 response (201 on create, 200
+/// when the link already covered this issue).
+fn op_response(outcome: operations::Outcome) -> Result<Response, Denial> {
+    match outcome.status {
+        200 => Ok(json_ok(outcome.body)),
+        201 => Ok(json_created(outcome.body)),
+        _ => Err(Denial::ServerError),
+    }
+}
+
+/// The actor/scope context the attach operation runs with.
+fn domain_write_ctx(pre: &Preamble, project_id: &Uuid) -> WriteCtx {
+    WriteCtx::new(WriteActor {
+        user_id: pre.actor.id,
+        timezone: pre.actor.timezone.clone(),
+    })
+    .with_scope(WriteScope {
+        workspace_id: pre.workspace_id,
+        project_id: Some(*project_id),
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Cutover wiring
 // ---------------------------------------------------------------------------
@@ -296,26 +353,6 @@ fn path_uuid(raw: &str) -> Result<uuid::Uuid, ()> {
     raw.parse::<uuid::Uuid>().map_err(|_| ())
 }
 
-/// Python `bool()` over a JSON value (the `(raw_url or "")` collapse).
-fn is_python_truthy(value: &Value) -> bool {
-    match value {
-        Value::Null => false,
-        Value::Bool(flag) => *flag,
-        Value::Number(number) => {
-            if let Some(int) = number.as_i64() {
-                int != 0
-            } else if let Some(uint) = number.as_u64() {
-                uint != 0
-            } else {
-                number.as_f64().is_some_and(|float| float != 0.0)
-            }
-        }
-        Value::String(text) => !text.is_empty(),
-        Value::Array(items) => !items.is_empty(),
-        Value::Object(map) => !map.is_empty(),
-    }
-}
-
 fn page_denial(error: crate::paginator::PageError) -> Denial {
     use crate::paginator::PageError as E;
     match error {
@@ -389,19 +426,6 @@ fn parse_json_body(raw: &[u8]) -> Result<Map<String, Value>, Denial> {
     }
 }
 
-/// `(request.data.get("url") or "")` (`github_pr.py:61`,
-/// `git_code_review.py:59`, `code_reviews.py:168`): missing/null and falsy
-/// non-strings collapse to `""` (the invalid-URL 400 below); truthy
-/// non-strings 500 on `.strip()`; strings strip inside the port's parser.
-fn extract_raw_url(body: &Map<String, Value>) -> Result<String, Denial> {
-    match body.get("url").unwrap_or(&Value::Null) {
-        Value::Null => Ok(String::new()),
-        Value::String(text) => Ok(text.clone()),
-        other if !is_python_truthy(other) => Ok(String::new()),
-        _ => Err(Denial::ServerError),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // List / detail SQL (Q2 semantics, executable `$n` binds)
 // ---------------------------------------------------------------------------
@@ -428,84 +452,6 @@ const REVIEW_DETAIL_SQL: &str = r#"SELECT "git_code_review_links"."created_at", 
 // ---------------------------------------------------------------------------
 // Row rendering (S3 shapes)
 // ---------------------------------------------------------------------------
-
-/// Render one PR-link row through `GithubPullRequestLinkSerializer`
-/// (S3 [`render_pr_link`](pidash_services::v1_work_items::shape_links::render_pr_link)):
-/// full field set, no `fields=`/`expand=` (the view passes neither).
-fn render_pr_row(row: &sqlx::postgres::PgRow, tz: &Tz) -> Result<Value, Denial> {
-    use pidash_services::v1_work_items::shape_links as shape;
-    use sqlx::Row as _;
-    let dt = |key: &str| -> Result<String, Denial> {
-        row.try_get::<chrono::DateTime<chrono::Utc>, _>(key)
-            .map(|stamp| crate::serializer::render_datetime_in(&stamp, tz))
-            .map_err(|error| db_error(error, "pr row datetime"))
-    };
-    let dt_opt = |key: &str| -> Result<Option<String>, Denial> {
-        row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>(key)
-            .map(|stamp| stamp.map(|stamp| crate::serializer::render_datetime_in(&stamp, tz)))
-            .map_err(|error| db_error(error, "pr row datetime"))
-    };
-    let id: Uuid = row
-        .try_get("id")
-        .map_err(|error| db_error(error, "pr row map"))?;
-    let issue_id: Uuid = row
-        .try_get("issue_id")
-        .map_err(|error| db_error(error, "pr row map"))?;
-    let created_by: Option<Uuid> = row
-        .try_get("created_by_id")
-        .map_err(|error| db_error(error, "pr row map"))?;
-    let id = id.to_string();
-    let issue = issue_id.to_string();
-    let created_by = created_by.map(|id| id.to_string());
-    let pr_updated_at = dt_opt("pr_updated_at")?;
-    let created_at = dt("created_at")?;
-    let updated_at = dt("updated_at")?;
-    let repo_owner: String = row
-        .try_get("repo_owner")
-        .map_err(|error| db_error(error, "pr row map"))?;
-    let repo_name: String = row
-        .try_get("repo_name")
-        .map_err(|error| db_error(error, "pr row map"))?;
-    let url: String = row
-        .try_get("url")
-        .map_err(|error| db_error(error, "pr row map"))?;
-    let title: String = row
-        .try_get("title")
-        .map_err(|error| db_error(error, "pr row map"))?;
-    let state: String = row
-        .try_get("state")
-        .map_err(|error| db_error(error, "pr row map"))?;
-    let shape_row = shape::PrLinkRow {
-        id: &id,
-        issue: &issue,
-        repo_owner: &repo_owner,
-        repo_name: &repo_name,
-        pr_number: row
-            .try_get("pr_number")
-            .map_err(|error| db_error(error, "pr row map"))?,
-        url: &url,
-        title: &title,
-        state: &state,
-        merged: row
-            .try_get("merged")
-            .map_err(|error| db_error(error, "pr row map"))?,
-        draft: row
-            .try_get("draft")
-            .map_err(|error| db_error(error, "pr row map"))?,
-        pr_updated_at: pr_updated_at.as_deref(),
-        created_at: &created_at,
-        updated_at: &updated_at,
-        created_by: created_by.as_deref(),
-    };
-    let map = shape::render_pr_link(&shape::PrLinkShowInput {
-        row: &shape_row,
-        fields: None,
-        expand: &[],
-        expansions: &[],
-    })
-    .map_err(|error| db_error(error, "pr row render"))?;
-    Ok(Value::Object(map))
-}
 
 /// Render one review-link row through `GitCodeReviewLinkSerializer` (S3).
 fn render_review_row(row: &sqlx::postgres::PgRow, tz: &Tz) -> Result<Value, Denial> {
@@ -608,9 +554,6 @@ fn render_review_row(row: &sqlx::postgres::PgRow, tz: &Tz) -> Result<Value, Deni
 // Stores: the `pr_links` + `code_reviews` seams over sqlx
 // ---------------------------------------------------------------------------
 
-use pidash_services::app_issues::pr_links::{
-    AttachError as PrAttachError, StoreError as PrStoreError,
-};
 use pidash_services::integrations::accounts::{
     GitStore, NewProviderAccount, StoreError as GitStoreError,
 };
@@ -619,20 +562,6 @@ use pidash_services::integrations::code_reviews::{
     NewLegacyLink, ReviewAdapter, ReviewParser,
 };
 use pidash_services::integrations::repositories::{NewRepository, RepositoryDefaults};
-
-/// Sentinel for the deleted-project lookup miss inside PR attach: the
-/// handler maps it to the 404 `DoesNotExist` body (Python's
-/// `self.project` fetch on `save()`).
-const PROJECT_WORKSPACE_MISS: &str = "pr-links: project workspace not found";
-
-/// Sentinel for the lost create race when the re-lookup also misses:
-/// Python re-raises the `IntegrityError` → the payload 400.
-const PR_RACE_MISS: &str = "pr link lost the create race";
-
-/// Marker prefix for mid-attach integrity failures (FK races on the
-/// mirror writes): Python's uncaught `IntegrityError` → the payload
-/// 400, so the handler maps these to 400, not 500.
-const PR_PAYLOAD_INVALID: &str = "pr-links: payload not valid";
 
 /// Marker prefix for the same class on the review-link writes
 /// (`insert_code_review_link` non-unique integrity,
@@ -1899,12 +1828,6 @@ impl AdapterSource for V1Adapters<'_> {
 // Handlers
 // ---------------------------------------------------------------------------
 
-/// Re-read one PR link by id for the create response (the serializer
-/// reads the saved instance, whose audit columns the store stamped).
-const PR_OWNED_SQL: &str = r#"SELECT id, issue_id, repo_owner, repo_name, pr_number, url, title, state,
-              merged, draft, pr_updated_at, created_at, updated_at, created_by_id
-       FROM github_pull_request_links WHERE id = $1 LIMIT 1"#;
-
 /// Re-read one review link by id for the create response.
 const REVIEW_OWNED_SQL: &str = r#"SELECT id, issue_id, provider, host_url, namespace, repo_name, repo_external_id,
               external_id, external_iid, url, title, state, merged, draft,
@@ -2204,7 +2127,7 @@ pub async fn pr_list_inner(
         tz: &timezone,
         query,
         sql: PR_LIST_SQL,
-        render: render_pr_row,
+        render: |row, tz| operations::pull_requests::render_pr_row(row, tz).map_err(Denial::from),
     })
     .await
 }
@@ -2273,73 +2196,31 @@ pub async fn pr_create_inner(
         "POST",
     )
     .await?;
-    let timezone = activate_timezone(pre.actor.timezone.as_deref())?;
+    // `TimezoneMixin.initial` precedes the view body: an unknown stored
+    // zone 400s here, before body parsing below.
+    activate_timezone(pre.actor.timezone.as_deref())?;
     let body = parse_json_body(raw_body)?;
-    let raw_url = extract_raw_url(&body)?;
-    let ctx = TransportContext {
+    let orm = state.orm().ok_or(Denial::ServerError)?;
+    let ctx = domain_write_ctx(&pre, &project_id);
+    let transition: Arc<dyn IssueTransitionHook> =
+        Arc::new(AppTransitionHook::new(state, &pre.pool));
+    let enqueue: Arc<dyn TaskEnqueueHook> = Arc::new(AppTaskEnqueueHook::new(&pre.pool));
+    let deps = operations::Deps {
         pool: pre.pool.clone(),
+        orm: orm.clone(),
+        transition,
+        enqueue,
+    };
+    let write = operations::pull_requests::PullRequestWrite {
+        slug,
+        project_id,
+        issue_id,
+        body: &body,
         redis: state.redis().cloned(),
         secret: state.settings().secret_key.clone(),
     };
-    let _guard = TransportGuard::install(ctx);
-    let store = PoolPrStore::new(pre.pool.clone(), PrLinksSurface::PrLinks);
-    let now = chrono::Utc::now();
-    let outcome = tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(
-            pidash_services::app_issues::pr_links::attach_pull_request::<
-                PoolPrStore,
-                LiveGithubClient,
-            >(
-                &store,
-                project_id,
-                issue_id,
-                slug,
-                &raw_url,
-                &now,
-                Some(pre.actor.id),
-            ),
-        )
-    });
-    drop(_guard);
-    let (link, created) = match outcome {
-        Ok(attached) => (attached.link, attached.created),
-        Err(PrAttachError::InvalidUrl(_)) => {
-            return Err(Denial::BadError(
-                "A valid github.com pull request URL is required.".to_owned(),
-            ))
-        }
-        Err(PrAttachError::IssueNotFound(_)) => return Err(Denial::WorkItemNotFound),
-        Err(PrAttachError::AlreadyLinked(conflict)) => {
-            return Err(Denial::Conflict(format!(
-                "This pull request is already linked to issue {}.",
-                conflict.issue_id
-            )))
-        }
-        Err(PrAttachError::Store(PrStoreError(message))) => {
-            if message == PROJECT_WORKSPACE_MISS {
-                return Err(Denial::NotFound);
-            }
-            if message.starts_with(PR_PAYLOAD_INVALID) || message.contains(PR_RACE_MISS) {
-                return Err(Denial::BadError("The payload is not valid".to_owned()));
-            }
-            return Err(Denial::ServerError);
-        }
-    };
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(PR_OWNED_SQL)
-        .bind(link.id)
-        .fetch_optional(&pre.pool)
-        .await
-        .map_err(|error| db_error(error, "pr create reread"))?;
-    let Some(row) = row else {
-        return Err(Denial::ServerError);
-    };
-    let shape = render_pr_row(&row, &timezone)?;
-    let text = serde_json::to_string(&shape).map_err(|_| Denial::ServerError)?;
-    if created {
-        Ok(json_created(text))
-    } else {
-        Ok(json_ok(text))
-    }
+    let outcome = operations::pull_requests::attach(&deps, &ctx, &write).await?;
+    op_response(outcome)
 }
 
 /// `DELETE github/pull-requests/<pk>/` (`github_pr.py:97-100`): scoped
@@ -2436,7 +2317,7 @@ pub async fn review_create_inner(
     .await?;
     let timezone = activate_timezone(pre.actor.timezone.as_deref())?;
     let body = parse_json_body(raw_body)?;
-    let raw_url = extract_raw_url(&body)?;
+    let raw_url = operations::pull_requests::extract_raw_url(&body)?;
     let ctx = TransportContext {
         pool: pre.pool.clone(),
         redis: state.redis().cloned(),
@@ -2703,59 +2584,6 @@ mod tests {
             body.starts_with(r#"{"detail":"JSON parse error - "#),
             "{body}"
         );
-    }
-
-    #[test]
-    fn raw_url_extraction_collapses_falsy_and_rejects_truthy_non_strings() {
-        let url_of = |value: Value| {
-            let mut map = Map::new();
-            map.insert("url".to_owned(), value);
-            extract_raw_url(&map)
-        };
-        // Missing / null / falsy → "" (the invalid-URL 400 downstream).
-        assert_eq!(
-            extract_raw_url(&Map::new()).expect("missing"),
-            String::new()
-        );
-        for value in [
-            Value::Null,
-            Value::Bool(false),
-            Value::Number(0.into()),
-            Value::Number(serde_json::Number::from_f64(0.0).expect("zero")),
-            Value::String(String::new()),
-            Value::Array(vec![]),
-            Value::Object(Map::new()),
-        ] {
-            assert_eq!(
-                url_of(value.clone()).expect("falsy"),
-                String::new(),
-                "{value}"
-            );
-        }
-        // Strings pass through (the parser strips).
-        assert_eq!(
-            url_of(Value::String(
-                "  https://github.com/a/b/pull/1  ".to_owned()
-            ))
-            .expect("string"),
-            "  https://github.com/a/b/pull/1  "
-        );
-        // Truthy non-strings 500 on `.strip()`.
-        for value in [
-            Value::Bool(true),
-            Value::Number(42.into()),
-            Value::Array(vec![Value::Null]),
-            Value::Object({
-                let mut map = Map::new();
-                map.insert("a".to_owned(), Value::Null);
-                map
-            }),
-        ] {
-            assert!(
-                is_server_error(url_of(value.clone()).expect_err("truthy non-string")),
-                "{value}"
-            );
-        }
     }
 
     // -- timezone ------------------------------------------------------------

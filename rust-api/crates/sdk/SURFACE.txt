@@ -341,6 +341,16 @@ pidash_sdk::jobs::preflight_eligibility_or_bounce
 pidash_sdk::jobs::register_oss_handlers
 pidash_sdk::jobs::run_scheduler
 pidash_sdk::jobs::run_worker
+pidash_sdk::operations::Deps
+pidash_sdk::operations::Error
+pidash_sdk::operations::Outcome
+pidash_sdk::operations::comments
+pidash_sdk::operations::issues
+pidash_sdk::operations::pull_requests
+pidash_sdk::operations::relations
+pidash_sdk::operations::requested_data_text
+pidash_sdk::operations::requested_data_value
+pidash_sdk::operations::workpad
 pidash_sdk::ops::AgentRunStatus
 pidash_sdk::ops::AgentRunTrigger
 pidash_sdk::ops::BlockerRow

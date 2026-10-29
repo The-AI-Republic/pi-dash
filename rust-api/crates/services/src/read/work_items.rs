@@ -140,30 +140,36 @@ type ExpandUserLookup = (
     Option<String>,
 );
 
-fn row_uuid(row: &sqlx::postgres::PgRow, column: &str) -> Result<Uuid, Error> {
+/// Row decode helper (made public by OVL-14, PIDASHCONV-1649).
+pub fn row_uuid(row: &sqlx::postgres::PgRow, column: &str) -> Result<Uuid, Error> {
     row.try_get(column).map_err(|_| Error::Failed("row-uuid"))
 }
 
-fn row_uuid_opt(row: &sqlx::postgres::PgRow, column: &str) -> Result<Option<Uuid>, Error> {
+/// Row decode helper (made public by OVL-14, PIDASHCONV-1649).
+pub fn row_uuid_opt(row: &sqlx::postgres::PgRow, column: &str) -> Result<Option<Uuid>, Error> {
     row.try_get(column)
         .map_err(|_| Error::Failed("row-uuid-opt"))
 }
 
-fn row_string(row: &sqlx::postgres::PgRow, column: &str) -> Result<String, Error> {
+/// Row decode helper (made public by OVL-14, PIDASHCONV-1649).
+pub fn row_string(row: &sqlx::postgres::PgRow, column: &str) -> Result<String, Error> {
     row.try_get(column).map_err(|_| Error::Failed("row-string"))
 }
 
-fn row_string_opt(row: &sqlx::postgres::PgRow, column: &str) -> Result<Option<String>, Error> {
+/// Row decode helper (made public by OVL-14, PIDASHCONV-1649).
+pub fn row_string_opt(row: &sqlx::postgres::PgRow, column: &str) -> Result<Option<String>, Error> {
     row.try_get(column)
         .map_err(|_| Error::Failed("row-string-opt"))
 }
 
-fn row_datetime(row: &sqlx::postgres::PgRow, column: &str) -> Result<DateTime<Utc>, Error> {
+/// Row decode helper (made public by OVL-14, PIDASHCONV-1649).
+pub fn row_datetime(row: &sqlx::postgres::PgRow, column: &str) -> Result<DateTime<Utc>, Error> {
     row.try_get(column)
         .map_err(|_| Error::Failed("row-datetime"))
 }
 
-fn row_datetime_opt(
+/// Row decode helper (made public by OVL-14, PIDASHCONV-1649).
+pub fn row_datetime_opt(
     row: &sqlx::postgres::PgRow,
     column: &str,
 ) -> Result<Option<DateTime<Utc>>, Error> {
@@ -1214,6 +1220,35 @@ pub async fn fetch_issue_for_write(
     }
 }
 
+/// The project row the issue-write paths need: the stored workspace id
+/// plus the default assignee (`Project.objects.get`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WriteProject {
+    pub workspace_id: Uuid,
+    pub default_assignee_id: Option<Uuid>,
+}
+
+/// Fetch the project row for an issue write: a miss is [`Error::NotFound`].
+/// (Moved from the v1 work-items handlers by OVL-14, PIDASHCONV-1649.)
+pub async fn fetch_project_for_write(
+    pool: &PgPool,
+    project_id: &Uuid,
+) -> Result<WriteProject, Error> {
+    let row: Option<(Uuid, Option<Uuid>)> =
+        sqlx::query_as(r#"SELECT "workspace_id", "default_assignee_id" FROM "projects" WHERE "id" = $1 AND "deleted_at" IS NULL"#)
+            .bind(project_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| DbError::new("write-project", error))?;
+    match row {
+        Some((workspace_id, default_assignee_id)) => Ok(WriteProject {
+            workspace_id,
+            default_assignee_id,
+        }),
+        None => Err(Error::NotFound),
+    }
+}
+
 /// Render a write response / `current_instance` image: the full
 /// representation (`serializer.data` with no `fields`/`expand`, no viewer
 /// — relations omitted, blocker keys present).
@@ -1240,6 +1275,105 @@ pub async fn render_write_response(
         },
     )
     .await
+}
+
+// ---------------------------------------------------------------------------
+// Comment rows (moved from `pidash_api::v1_work_items::handlers_social`
+// by OVL-14, PIDASHCONV-1649).
+// ---------------------------------------------------------------------------
+
+/// Comment patch/delete direct lookup (`:2040`, `:2109`): live + slug +
+/// project + issue + pk. (Moved from the v1 work-items handlers by
+/// OVL-14, PIDASHCONV-1649.)
+pub async fn fetch_comment_direct(
+    pool: &PgPool,
+    slug: &str,
+    project_id: &Uuid,
+    issue_id: &Uuid,
+    pk: &Uuid,
+) -> Result<Option<sqlx::postgres::PgRow>, Error> {
+    let row = sqlx::query(
+        r#"SELECT c.* FROM "issue_comments" c
+           WHERE c."deleted_at" IS NULL
+             AND c."workspace_id" = (SELECT "id" FROM "workspaces" WHERE "slug" = $1)
+             AND c."project_id" = $2 AND c."issue_id" = $3 AND c."id" = $4"#,
+    )
+    .bind(slug)
+    .bind(project_id)
+    .bind(issue_id)
+    .bind(pk)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| DbError::new("comment-direct", error))?;
+    Ok(row)
+}
+
+/// One decoded comment row: owned strings the [`CommentRow`] borrows.
+pub struct DecodedComment {
+    pub id: String,
+    pub is_member: Option<bool>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub deleted_at: Option<String>,
+    pub comment_json: Value,
+    pub comment_html: String,
+    pub attachments: Vec<Option<String>>,
+    pub labels: Vec<Option<String>>,
+    pub access: String,
+    pub external_source: Option<String>,
+    pub external_id: Option<String>,
+    pub speaker_type: String,
+    pub speaker_label: String,
+    pub speaker_agent_run_id: Option<String>,
+    pub edited_at: Option<String>,
+    pub created_by: Option<String>,
+    pub updated_by: Option<String>,
+    pub project: String,
+    pub workspace: String,
+    pub description: Option<String>,
+    pub issue: String,
+    pub actor: Option<String>,
+    pub parent: Option<String>,
+}
+
+pub fn decode_comment(row: &sqlx::postgres::PgRow, tz: &Tz) -> Result<DecodedComment, Error> {
+    let attachments: Vec<Option<String>> = row
+        .try_get("attachments")
+        .map_err(|_| Error::Failed("row-attachments"))?;
+    let labels: Vec<Option<String>> = row
+        .try_get("labels")
+        .map_err(|_| Error::Failed("row-labels"))?;
+    let comment_json: Value = row
+        .try_get("comment_json")
+        .map_err(|_| Error::Failed("row-comment-json"))?;
+    let is_member: Option<bool> = row.try_get("is_member").unwrap_or(None);
+    Ok(DecodedComment {
+        id: row_uuid(row, "id")?.to_string(),
+        is_member,
+        created_at: super::render_datetime_in(&row_datetime(row, "created_at")?, tz),
+        updated_at: super::render_datetime_in(&row_datetime(row, "updated_at")?, tz),
+        deleted_at: row_datetime_opt(row, "deleted_at")?
+            .map(|dt| super::render_datetime_in(&dt, tz)),
+        comment_json,
+        comment_html: row_string(row, "comment_html")?,
+        attachments,
+        labels,
+        access: row_string(row, "access")?,
+        external_source: row_string_opt(row, "external_source")?,
+        external_id: row_string_opt(row, "external_id")?,
+        speaker_type: row_string(row, "speaker_type")?,
+        speaker_label: row_string(row, "speaker_label")?,
+        speaker_agent_run_id: row_uuid_opt(row, "speaker_agent_run_id")?.map(|id| id.to_string()),
+        edited_at: row_datetime_opt(row, "edited_at")?.map(|dt| super::render_datetime_in(&dt, tz)),
+        created_by: row_uuid_opt(row, "created_by_id")?.map(|id| id.to_string()),
+        updated_by: row_uuid_opt(row, "updated_by_id")?.map(|id| id.to_string()),
+        project: row_uuid(row, "project_id")?.to_string(),
+        workspace: row_uuid(row, "workspace_id")?.to_string(),
+        description: row_uuid_opt(row, "description_id")?.map(|id| id.to_string()),
+        issue: row_uuid(row, "issue_id")?.to_string(),
+        actor: row_uuid_opt(row, "actor_id")?.map(|id| id.to_string()),
+        parent: row_uuid_opt(row, "parent_id")?.map(|id| id.to_string()),
+    })
 }
 
 #[cfg(test)]

@@ -104,6 +104,13 @@ async-trait = "0.1"
 # builder. Identical spec to pidash-db (locked sea-query 0.32.7 — no
 # lock churn).
 sea-query = { version = "0.32", default-features = false, features = ["backend-postgres", "with-uuid", "with-chrono"] }
+# OVL-14 (PIDASHCONV-1649): `space::sanitize` moved here from pidash-api.
+# Identical spec to pidash-api (locked ammonia 4.2.0 — no lock churn).
+ammonia = "4"
+# OVL-14 (PIDASHCONV-1649): the markdown→HTML port moved here from the v1
+# work-items handlers. Identical spec to pidash-api (locked
+# pulldown-cmark 0.13.4 — no lock churn).
+pulldown-cmark = "0.13.4"
 
 [dev-dependencies]
 # PIDASHCONV-1599 probe CA-bundle tests: the custom-CA TLS fake needs
