@@ -107,12 +107,6 @@ const LLM_CONFIG_SQL: &str = "SELECT provider_kind, base_url, model_name, api_ke
      FROM assistant_user_llm_config WHERE user_id = $1 \
      ORDER BY created_at ASC LIMIT 1";
 
-/// `AssistantMCPServer.objects.filter(user=user, is_enabled=True)`
-/// (`mcp.py:250`) in the model's default `created_at` order.
-const MCP_SERVERS_SQL: &str = "SELECT id, name, url, auth_header_encrypted \
-     FROM assistant_mcp_server WHERE user_id = $1 AND is_enabled \
-     ORDER BY created_at ASC, id ASC";
-
 /// Read back one message row for the `message_completed` envelope
 /// (`events.message_envelope(message)`, `tasks.py:150-153`).
 const MESSAGE_ROW_SQL: &str =
@@ -1113,12 +1107,8 @@ impl TurnSeam for LiveTurnSeam {
         &self,
         ctx: &TurnContext,
     ) -> Result<(Vec<ToolsetHandle>, Vec<SkippedServer>), SeamError> {
-        let rows: Vec<(Uuid, String, String, Option<Vec<u8>>)> =
-            match sqlx::query_as(MCP_SERVERS_SQL)
-                .bind(ctx.user_id)
-                .fetch_all(&self.pool)
-                .await
-            {
+        let rows: Vec<mcp_service::EnabledMcpServerRow> =
+            match mcp_service::fetch_enabled_mcp_servers(&self.pool, ctx.user_id).await {
                 Ok(rows) => rows,
                 Err(error) => {
                     // A resolver that blows up entirely costs the turn its
@@ -1143,16 +1133,15 @@ impl TurnSeam for LiveTurnSeam {
             };
         let server_rows: Vec<mcp_service::ServerRow> = rows
             .iter()
-            .map(|(id, name, url, token)| mcp_service::ServerRow {
-                pk: id.to_string(),
-                name: name.clone(),
-                url: url.clone(),
-                has_auth_header: token.as_deref().map(|t| !t.is_empty()).unwrap_or(false),
-                url_blocked: ssrf::is_blocked(
-                    url,
-                    self.settings.assistant.block_private_urls,
-                    self.ssrf_resolver.as_ref(),
-                ),
+            .map(|row| {
+                mcp_service::to_server_row(
+                    row,
+                    ssrf::is_blocked(
+                        &row.url,
+                        self.settings.assistant.block_private_urls,
+                        self.ssrf_resolver.as_ref(),
+                    ),
+                )
             })
             .collect();
         let (plans, skipped) = mcp_service::plan_servers(&server_rows, mcp_max_servers());
@@ -1162,8 +1151,8 @@ impl TurnSeam for LiveTurnSeam {
         for plan in &plans {
             let token = rows
                 .iter()
-                .find(|(id, _, _, _)| id.to_string() == plan.pk)
-                .and_then(|(_, _, _, token)| token.clone());
+                .find(|row| row.id.to_string() == plan.pk)
+                .and_then(|row| row.auth_header_encrypted.clone());
             let resolved = match (plan.needs_auth, token) {
                 (false, _) => Ok(None),
                 (true, Some(token)) => match self.decrypt(&token).await {

@@ -26,6 +26,7 @@ pidash_sdk::assistant::EVENT_TURN_CANCELLED
 pidash_sdk::assistant::EVENT_TURN_COMPLETED
 pidash_sdk::assistant::EVENT_TURN_FAILED
 pidash_sdk::assistant::EVENT_TURN_STARTED
+pidash_sdk::assistant::EnabledMcpServerRow
 pidash_sdk::assistant::EventParts
 pidash_sdk::assistant::Failure
 pidash_sdk::assistant::GithubAppContext
@@ -47,6 +48,7 @@ pidash_sdk::assistant::Lane
 pidash_sdk::assistant::LiveStream
 pidash_sdk::assistant::LiveToolset
 pidash_sdk::assistant::LiveTurnSeam
+pidash_sdk::assistant::LlmConfigFullRow
 pidash_sdk::assistant::LlmConfigRow
 pidash_sdk::assistant::MARK_CUT_OFF_SQL
 pidash_sdk::assistant::MAX_RETRIES
@@ -136,6 +138,8 @@ pidash_sdk::assistant::dump_message
 pidash_sdk::assistant::encrypt
 pidash_sdk::assistant::encrypt_api_key
 pidash_sdk::assistant::fail_turn
+pidash_sdk::assistant::fetch_enabled_mcp_servers
+pidash_sdk::assistant::fetch_llm_config_full
 pidash_sdk::assistant::finalize_open_messages
 pidash_sdk::assistant::get_config
 pidash_sdk::assistant::github_headers
@@ -187,6 +191,7 @@ pidash_sdk::assistant::spec_for
 pidash_sdk::assistant::strip_reasoning_blocks
 pidash_sdk::assistant::thread_lock_select
 pidash_sdk::assistant::throttles
+pidash_sdk::assistant::to_server_row
 pidash_sdk::assistant::truncate_code
 pidash_sdk::assistant::truncate_detail
 pidash_sdk::assistant::truncate_kind
