@@ -245,8 +245,11 @@ export function ListLayout({
 
   /**
    * Recency bypass (ISS-006): fresh rows mount in an unvirtualized strip
-   * above the flat list so a create lands without scrolling. Grouped
-   * sections mount every row already, so they bypass nothing.
+   * above the flat list so a create lands without scrolling. The bypass
+   * is capped (bug NEWFRONT-1014): overflow fresh rows virtualize with
+   * the rest, so a screenful of fresh rows cannot squeeze the region to
+   * zero height. Grouped sections mount every row already, so they
+   * bypass nothing.
    */
   const flatBypass = React.useMemo(
     () => partitionFresh(pages.grouped ? [] : (pages.sections[0]?.rows ?? [])),
