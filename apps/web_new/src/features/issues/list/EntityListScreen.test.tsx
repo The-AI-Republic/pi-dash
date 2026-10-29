@@ -211,6 +211,7 @@ vi.mock("./lazy.js", async (importOriginal) => {
 });
 
 import { EntityListScreen, type EntityListScreenProps } from "./EntityListScreen.js";
+import { authKeys } from "../../auth/queries.js";
 import { COMPLETED_CYCLE_NOTE } from "../transfer/TransferIssuesPrompt.js";
 import type { IssuesEntity } from "../prefs/entities.js";
 import { transferKeys } from "../transfer/api.js";
@@ -237,10 +238,17 @@ function project(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function setup(overrides: Partial<EntityListScreenProps> = {}, projects: Array<Record<string, unknown>> = [project()]) {
+function setup(
+  overrides: Partial<EntityListScreenProps> = {},
+  projects: Array<Record<string, unknown>> = [project()],
+  projectRow: Record<string, unknown> = {}
+) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   (globalThis as { __entityQueryClient?: QueryClient }).__entityQueryClient = queryClient;
   queryClient.setQueryData(PROJECTS_KEY, projects);
+  // The estimate link is answered by the project's own row, never the
+  // workspace list projection (EST-018). Absent means unlinked.
+  queryClient.setQueryData(authKeys.project("acme", PROJECT), { ...project(), ...projectRow });
   queryClient.setQueryData(PREFS_KEY, {
     filters: {},
     display_filters: {},
@@ -765,7 +773,7 @@ describe("EntityListScreen", () => {
 
   it("mounts the sheet with the entity, flags and week start", async () => {
     setup({ entity: { scope: "module", projectId: PROJECT, moduleId: MODULE }, moduleId: MODULE, title: "Auth" }, [
-      project({ cycle_view: false, module_view: true, estimate: null }),
+      project({ cycle_view: false, module_view: true }),
     ]);
     const sheet = await within(screen.getByTestId("spreadsheet-layout-slot")).findByTestId("spreadsheet-layout");
     expect(sheet).toHaveAttribute(
@@ -777,6 +785,26 @@ describe("EntityListScreen", () => {
     expect(sheet).toHaveAttribute("data-module", "true");
     expect(sheet).toHaveAttribute("data-estimate", "true");
     expect(sheet).toHaveAttribute("data-week-start", "0");
+  });
+
+  it("shows the sheet's estimate column when the project row links a system", async () => {
+    setup(undefined, undefined, { estimate: "623e4567-e89b-12d3-a456-426614174005" });
+    const sheet = await within(screen.getByTestId("spreadsheet-layout-slot")).findByTestId("spreadsheet-layout");
+    expect(sheet).toHaveAttribute("data-estimate", "false");
+  });
+
+  it("hides the sheet's estimate column when the project row clears the link", async () => {
+    setup(undefined, undefined, { estimate: null });
+    const sheet = await within(screen.getByTestId("spreadsheet-layout-slot")).findByTestId("spreadsheet-layout");
+    expect(sheet).toHaveAttribute("data-estimate", "true");
+  });
+
+  it("ignores a stale estimate column on the workspace list row", async () => {
+    // The list projection has no estimate at all; a row that happened to
+    // carry one must not turn the column on by itself (EST-018).
+    setup(undefined, [project({ estimate: "623e4567-e89b-12d3-a456-426614174005" })], { estimate: null });
+    const sheet = await within(screen.getByTestId("spreadsheet-layout-slot")).findByTestId("spreadsheet-layout");
+    expect(sheet).toHaveAttribute("data-estimate", "true");
   });
 
   it("mounts the timeline with the total and the completed-module status", async () => {

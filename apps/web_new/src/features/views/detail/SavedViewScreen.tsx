@@ -49,7 +49,9 @@ import {
   type ViewSnapshot,
   type WorkItemCreateProject,
 } from "../../issues/index.js";
+import { useProjectRow } from "../../auth/index.js";
 import { projectsQueryOptions } from "../../projects/index.js";
+import { hasEstimateLink } from "../../../shared/lib/estimateLink.js";
 import { projectViewDetailQueryOptions } from "../api/detail.js";
 import { viewKeys } from "../api/keys.js";
 import { projectViewsQueryOptions } from "../api/queries.js";
@@ -90,6 +92,9 @@ export function SavedViewScreen({ params, search }: SavedViewScreenProps): React
 
   const projects = useQuery(projectsQueryOptions(client, params.ws));
   const project = projects.data?.find((entry) => entry.id === params.projectId) ?? null;
+  // The estimate link lives on the project row alone; the workspace list
+  // omits it, so a saved view reads the row for its sheet column (EST-018).
+  const projectRow = useProjectRow(params.ws, params.projectId);
   const view = useQuery(projectViewDetailQueryOptions(client, params.ws, params.projectId, params.viewId));
   const views = useQuery(projectViewsQueryOptions(client, params.ws, params.projectId));
 
@@ -136,7 +141,7 @@ export function SavedViewScreen({ params, search }: SavedViewScreenProps): React
       projectArchived={project?.archived_at != null}
       cycleView={project?.cycle_view === true}
       moduleView={project?.module_view === true}
-      estimateEnabled={project !== null && project.estimate !== null}
+      estimateEnabled={hasEstimateLink(projectRow.data)}
       viewsEnabled={project?.issue_views_view === true}
       search={search}
       weekStart={weekStart}

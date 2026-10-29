@@ -43,6 +43,8 @@ const LazyCalendarEntry = React.lazy(() =>
 // leaves in `beforeLoad` so the layout mounts once (Quality gates).
 import { orderByOf } from "../../../../../../features/issues/prefs/prefsQuery.js";
 import type { PeekRequest } from "../../../../../../features/issues/peek/peekUrl.js";
+import { useProjectRow } from "../../../../../../features/auth/queries.js";
+import { hasEstimateLink } from "../../../../../../shared/lib/estimateLink.js";
 import { canEditInProject } from "../../../../../../shared/shell/contextual/index.js";
 
 // The list layout is a separate chunk so the route stays inside the
@@ -106,6 +108,11 @@ export function IssuesListContent({
 }: IssuesListContentProps): React.ReactElement {
   const { data: projects } = useSuspenseQuery(projectsQueryOptions(apiClient, workspaceSlug));
   const project = projects.find((entry) => entry.id === projectId) ?? null;
+  // The estimate link rides the project row only: the workspace list above
+  // answers a fixed column set without it, so reading the flag there would
+  // leave every estimate control on (EST-018).
+  const projectRow = useProjectRow(workspaceSlug, projectId);
+  const hideEstimate = !hasEstimateLink(projectRow.data);
   const [createOpen, setCreateOpen] = React.useState(false);
   const creatable: WorkItemCreateProject[] = React.useMemo(
     () =>
@@ -281,7 +288,7 @@ export function IssuesListContent({
                   canEdit={canEdit}
                   hideCycle={!project.cycle_view}
                   hideModule={!project.module_view}
-                  hideEstimate={project.estimate === null}
+                  hideEstimate={hideEstimate}
                   richExpression={preferences.rich_filters}
                   weekStart={weekStart}
                   peekKey={peekKey}
