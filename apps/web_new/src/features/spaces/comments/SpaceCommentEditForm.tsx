@@ -56,12 +56,12 @@ export function SpaceCommentEditForm({
     getHandle: () => handleRef.current,
     busy,
     empty,
-    submit: (liveHtml) => void save(liveHtml ?? undefined),
+    submit: (liveHtml) => void save(liveHtml),
   });
 
   // `liveHtml` is the draft as the editing surface holds it right now;
   // Enter lands before React renders the keystroke before it (ISS-197).
-  const save = async (liveHtml?: string): Promise<void> => {
+  const save = async (liveHtml?: string | null): Promise<void> => {
     const draft = liveHtml ?? html;
     if (busy || isSpaceCommentBodyEmpty(draft) || draft === comment.comment_html) return;
     setSaving(true);

@@ -75,7 +75,7 @@ export function CommentComposer({
     getHandle: () => handleRef.current,
     busy,
     empty,
-    submit: (liveHtml) => void post(onCreate, liveHtml ?? undefined),
+    submit: (liveHtml) => void post(onCreate, liveHtml),
   });
 
   function clearDraft(): void {
@@ -89,7 +89,7 @@ export function CommentComposer({
   // Enter arrives before React renders the keystroke that filled the
   // draft, so the `html` snapshot can still be the empty one while the
   // editor already holds words (ISS-197).
-  async function post(via: (input: ComposerPost) => Promise<unknown>, liveHtml?: string): Promise<void> {
+  async function post(via: (input: ComposerPost) => Promise<unknown>, liveHtml?: string | null): Promise<void> {
     if (busy) return;
     const body = liveHtml ?? html;
     if (isCommentBodyEmpty(body)) return;

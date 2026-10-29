@@ -462,6 +462,21 @@ describe("CommentComposer", () => {
     expect(await editor()).toHaveValue("Hello @ad");
   });
 
+  it("keeps the draft when Escape lands with no mention popup open (CMT-019)", async () => {
+    const user = userEvent.setup();
+    const { onCreate } = renderComposer();
+    const box = await editor();
+    box.focus();
+    await user.keyboard("Plain words");
+    await waitFor(() => expect(box).toHaveValue("Plain words"));
+    expect(screen.queryByRole("list", { name: "Mention suggestions" })).not.toBeInTheDocument();
+    fireEvent.keyDown(box, { key: "Escape" });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(onCreate).not.toHaveBeenCalled();
+    expect(box).toHaveValue("Plain words");
+    expect(screen.getByRole("button", { name: "Comment" })).not.toBeDisabled();
+  });
+
   it("shows the access switch only on published projects and posts the choice", async () => {
     const user = userEvent.setup();
     const { onCreate } = renderComposer();

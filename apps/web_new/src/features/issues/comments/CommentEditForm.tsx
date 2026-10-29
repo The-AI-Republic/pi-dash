@@ -68,7 +68,7 @@ export function CommentEditForm({
   // `liveHtml` is the draft as the editing surface holds it right now;
   // Enter lands before React renders the keystroke before it, so the
   // snapshot can trail the draft (ISS-197, CMT-003).
-  const save = async (liveHtml?: string): Promise<void> => {
+  const save = async (liveHtml?: string | null): Promise<void> => {
     const draft = liveHtml ?? html;
     if (busy || isCommentBodyEmpty(draft) || draft === comment.comment_html) return;
     setSaving(true);
@@ -102,7 +102,7 @@ export function CommentEditForm({
     getHandle: () => handleRef.current,
     busy,
     empty,
-    submit: (liveHtml) => void save(liveHtml ?? undefined),
+    submit: (liveHtml) => void save(liveHtml),
   });
 
   const uploadImage = (file: File): void => {

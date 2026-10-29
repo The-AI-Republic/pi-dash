@@ -45,7 +45,7 @@ export function SpaceCommentComposer({ anchor, issueId }: SpaceCommentComposerPr
     getHandle: () => handleRef.current,
     busy,
     empty,
-    submit: (liveHtml) => void post(liveHtml ?? undefined),
+    submit: (liveHtml) => void post(liveHtml),
   });
 
   const clearDraft = (): void => {
@@ -57,7 +57,7 @@ export function SpaceCommentComposer({ anchor, issueId }: SpaceCommentComposerPr
 
   // `liveHtml` is the draft as the editing surface holds it right now;
   // Enter lands before React renders the keystroke before it (ISS-197).
-  const post = async (liveHtml?: string): Promise<void> => {
+  const post = async (liveHtml?: string | null): Promise<void> => {
     const body = liveHtml ?? html;
     if (busy || isSpaceCommentBodyEmpty(body)) return;
     setSending(true);
