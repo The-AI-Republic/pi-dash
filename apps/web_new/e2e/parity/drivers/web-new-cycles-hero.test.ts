@@ -27,6 +27,7 @@ const ACTIONS = [
   "innerText",
   "inputValue",
   "allTextContents",
+  "allInnerTexts",
   "getAttribute",
   "waitFor",
   "isVisible",
@@ -67,6 +68,8 @@ const FILTER_PANEL_PATH = `page.getByTestId("cycles-filters-panel")`;
 const SIDEBAR_DATES_PATH = `page.getByTestId("cycle-sidebar-dates")`;
 const SIDEBAR_TRIGGER_PATH = `page.getByTestId("cycle-sidebar-dates-trigger").first()`;
 const TRANSFER_LISTBOX_PATH = `page.getByRole("listbox",{"name":"Cycles"})`;
+const TRANSFER_OPTIONS_PATH = `${TRANSFER_LISTBOX_PATH}.getByRole("option")`;
+const TRANSFER_NAME_SPANS_PATH = `${TRANSFER_OPTIONS_PATH}.locator(":scope > span.truncate")`;
 
 function rowPath(name: string): string {
   return `${rowFilterPath(name)}.first()`;
@@ -182,6 +185,7 @@ class Recorder {
     if (method === "innerText") return this.text(path);
     if (method === "inputValue") return this.inputValue(path);
     if (method === "allTextContents") return this.allTexts(path);
+    if (method === "allInnerTexts") return path === TRANSFER_NAME_SPANS_PATH ? [...this.transferOptionTexts] : [];
     if (method === "isVisible") return this.visible(path);
     if (method === "isDisabled") return this.disabled(path);
     if (method === "getAttribute") return this.attribute(path, args[0]);
@@ -227,7 +231,6 @@ class Recorder {
     if (path.endsWith(`.locator("input[name=\\"name\\"]")`)) return this.dialogInputCount;
     if (path.endsWith(`.getByRole("alert")`)) return this.dialogAlertCount;
     if (path.includes('getByRole("button",{"name":{}}') && path.includes("cycle-row")) return this.transferActionCount;
-    if (path === `${TRANSFER_LISTBOX_PATH}.getByRole("option")`) return this.transferOptionTexts.length;
     if (path === SEARCH_TOGGLE_PATH) return this.searchToggleCount;
     if (path === SEARCH_BOX_PATH) return this.searchBoxCount;
     if (path === FILTER_TRIGGER_PATH) return this.filterTriggerCount;
@@ -261,13 +264,6 @@ class Recorder {
     if (path === TOOLTIP_PATH) return this.tooltipText;
     if (path.includes('getByRole("button",{"name":{}}') && path.includes("cycle-row")) return this.transferActionText;
     if (path === FILTER_PANEL_PATH) return this.filterPanelText;
-    if (
-      path.startsWith(`${TRANSFER_LISTBOX_PATH}.getByRole("option").nth(`) &&
-      path.endsWith(`.locator("span").first()`)
-    ) {
-      const index = nthIndex(path);
-      return index === null ? "" : (this.transferOptionTexts[index] ?? "");
-    }
     return "";
   }
 
@@ -276,8 +272,7 @@ class Recorder {
     return "";
   }
 
-  private allTexts(path: string): string[] {
-    if (path === `${TRANSFER_LISTBOX_PATH}.getByRole("option")`) return [...this.transferOptionTexts];
+  private allTexts(_path: string): string[] {
     return [];
   }
 
@@ -746,11 +741,12 @@ describe("cyclesHero transfer action", () => {
 
   it("searches, lists, and picks transfer targets", async () => {
     const script = new Recorder();
-    // The driver reads the name span, so the status pill never leaks in.
+    // The driver reads the name spans, so the status pill never leaks in.
     script.transferOptionTexts = ["Target", "Other"];
     await script.driver().cyclesHeroTransferSearch("Targ");
     expect(script.fills).toHaveLength(1);
     expect(await script.driver().cyclesHeroTransferOptions()).toEqual(["Target", "Other"]);
+    expect(script.callsFor(TRANSFER_NAME_SPANS_PATH, "allInnerTexts")).toHaveLength(1);
     await script.driver().cyclesHeroTransferPick("Target");
     expect(script.callsIncluding(`getByRole("option",{"name":{}})`, "click")).toHaveLength(1);
   });

@@ -21,16 +21,13 @@ type Call = { path: string; method: string; args: unknown[] };
 
 const CHAIN = ["first", "nth", "getByRole", "getByTestId", "getByText", "getByPlaceholder", "locator", "filter"];
 
-function nthIndex(path: string): number | null {
-  const match = /\.nth\((\d+)\)/.exec(path);
-  return match === null ? null : Number(match[1]);
-}
 const ACTIONS = [
   "count",
   "click",
   "fill",
   "innerText",
   "allTextContents",
+  "allInnerTexts",
   "getAttribute",
   "hover",
   "waitFor",
@@ -54,6 +51,7 @@ const TRANSFER_BUTTON_PATH = `page.getByRole("button",${JSON.stringify({ name: "
 const TRANSFER_SEARCH_PATH = `page.getByPlaceholder("Search for a cycle...")`;
 const TRANSFER_LISTBOX_PATH = `page.getByRole("listbox",${JSON.stringify({ name: "Cycles" })})`;
 const TRANSFER_OPTIONS_PATH = `${TRANSFER_LISTBOX_PATH}.getByRole("option")`;
+const TRANSFER_NAME_SPANS_PATH = `${TRANSFER_OPTIONS_PATH}.locator(":scope > span.truncate")`;
 const TRANSFER_NOTE_PATH = `${TRANSFER_LISTBOX_PATH}.locator("p").first()`;
 const HERO_PATH = `page.getByTestId("cycle-hero")`;
 const HERO_ROW_PATH = `${HERO_PATH}.locator("div[data-testid=\\"cycle-row\\"]").first()`;
@@ -111,6 +109,7 @@ class Recorder {
     if (method === "count") return this.count(path);
     if (method === "innerText") return this.text(path);
     if (method === "allTextContents") return path === TRANSFER_OPTIONS_PATH ? [...this.optionTexts] : [];
+    if (method === "allInnerTexts") return path === TRANSFER_NAME_SPANS_PATH ? [...this.optionTexts] : [];
     if (method === "isVisible") return this.visible(path);
     if (method === "getAttribute")
       return path === starPath("Cycle 7") && args[0] === "data-favorite" ? this.starAttr : null;
@@ -136,10 +135,6 @@ class Recorder {
   private text(path: string): string {
     if (path === TRANSFER_NOTE_PATH) return this.noteText;
     if (path === HERO_NAME_PATH) return this.heroNameText;
-    if (path.startsWith(`${TRANSFER_OPTIONS_PATH}.nth(`) && path.endsWith(`.locator("span").first()`)) {
-      const index = nthIndex(path);
-      return index === null ? "" : (this.optionTexts[index] ?? "");
-    }
     return "";
   }
 
@@ -245,12 +240,11 @@ describe("cycleTransferOpen", () => {
 });
 
 describe("cycleTransferOptionNames", () => {
-  it("reads the name span of each option, normalizes, and drops blanks", async () => {
+  it("reads the name spans in bulk, trims, and drops blanks", async () => {
     const script = new Recorder();
     script.optionTexts = ["  Target A\n ", "", "Target B\t"];
     expect(await script.driver().cycleTransferOptionNames()).toEqual(["Target A", "Target B"]);
-    expect(script.callsFor(TRANSFER_OPTIONS_PATH, "count")).toHaveLength(1);
-    expect(script.callsIncluding(`.locator("span").first()`, "innerText")).toHaveLength(3);
+    expect(script.callsFor(TRANSFER_NAME_SPANS_PATH, "allInnerTexts")).toHaveLength(1);
   });
 });
 
