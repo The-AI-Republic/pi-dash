@@ -128,7 +128,7 @@ covering row are explained instead.
 ## Gate notes (NEWFRONT-788)
 
 Proven on `apps/web_new` by the drafts area gate, both legs on the same
-rebased head (`21e629ec4` + route migration):
+rebased head (`227002e13`, base `8ba1f9d0d` + route migration):
 
 - **OSS (full suite):** 38/38 scenarios green across all 12 spec files
   (`pnpm test:parity:new e2e/parity/drafts`, PARITY_NS=839).
