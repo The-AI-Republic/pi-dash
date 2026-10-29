@@ -106,7 +106,7 @@ docker run --name myaio --rm -it \
 
 #### API Configuration
 
-- `API_KEY_RATE_LIMIT`: API key rate limit (default: `60/minute`)
+- `API_KEY_RATE_LIMIT`: API key rate limit (default: `120/minute`)
 
 ## Port Mapping
 
