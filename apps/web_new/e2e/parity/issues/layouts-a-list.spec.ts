@@ -442,6 +442,10 @@ test(
         `/${seed.workspaceSlug}/projects/${seed.projectId}/issues`,
         sessionBrowserCookies(guestSession)
       );
+      // resetPrefs patches the owner's row; the guest keeps whatever
+      // layout an earlier run persisted, so settle on the list before
+      // reading its rows (best-effort on both legs).
+      await driver.ensureListLayout();
       // Orientation without the chip: the guest row renders (name and
       // identifier show) and links the issue, ...
       expect(await driver.layoutsRowHref(first)).toContain("/browse/");
