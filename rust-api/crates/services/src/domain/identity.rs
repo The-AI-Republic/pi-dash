@@ -1371,6 +1371,35 @@ pub mod account {
     /// `metadata` falls back to `{}`, timestamps to `now`.
     pub(crate) const INSERT_SQL: &str = "INSERT INTO \"accounts\" (\"id\", \"created_at\", \"updated_at\", \"user_id\", \"provider_account_id\", \"provider\", \"access_token\", \"access_token_expired_at\", \"refresh_token\", \"refresh_token_expired_at\", \"last_connected_at\", \"id_token\", \"metadata\") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)";
 
+    /// The cloud sync update side (`Account.objects.update_or_create`,
+    /// `pi_dash_cloud/airepublic/sync.py:146-159`): the eight `defaults`
+    /// columns plus `created_at` (re-set to its stored value) and
+    /// `updated_at` (re-stamped), in Django `_meta` order. The lookup
+    /// columns (`provider`, `provider_account_id`) are excluded —
+    /// probe-verified Django behavior, and why the overlay cannot use
+    /// [`rotate_account_tokens`]: that OSS `oauth.py` full save rewrites
+    /// all 13 columns including the Tier-1 provider pair. The `SET`
+    /// list matches the overlay `update_account_upsert` builder column
+    /// for column; only the sea-query `CAST(...)` wrappers are gone
+    /// (Django emits none, and they are identity for typed binds).
+    pub(crate) const UPDATE_ACCOUNT_UPSERT_SQL: &str = "UPDATE \"accounts\" SET \"created_at\" = $1, \"updated_at\" = $2, \"user_id\" = $3, \"access_token\" = $4, \"access_token_expired_at\" = $5, \"refresh_token\" = $6, \"refresh_token_expired_at\" = $7, \"last_connected_at\" = $8, \"id_token\" = $9, \"metadata\" = $10 WHERE \"accounts\".\"id\" = $11";
+
+    /// `persist_rotated_tokens`
+    /// (`pi_dash_cloud/airepublic/token_store.py:139-150`, twin at
+    /// `refresh.py:154-164`): `save(update_fields=["access_token",
+    /// "refresh_token", "access_token_expired_at"])`, emitted in `_meta`
+    /// order with no `updated_at` stamp (probe-verified). The `SET`
+    /// list matches the overlay `update_account_rotated_tokens`
+    /// builder column for column.
+    pub(crate) const UPDATE_ACCOUNT_ROTATED_SQL: &str = "UPDATE \"accounts\" SET \"access_token\" = $1, \"access_token_expired_at\" = $2, \"refresh_token\" = $3 WHERE \"accounts\".\"id\" = $4";
+
+    /// `_persist_plan_snapshot`
+    /// (`pi_dash_cloud/airepublic/refresh.py:167-197`):
+    /// `save(update_fields=["metadata"])`. Matches the overlay
+    /// `update_account_metadata` builder.
+    pub(crate) const UPDATE_ACCOUNT_METADATA_SQL: &str =
+        "UPDATE \"accounts\" SET \"metadata\" = $1 WHERE \"accounts\".\"id\" = $2";
+
     /// The five token fields every provider's `set_token_data` stores
     /// (fixture F4 `token_fields_consumed_downstream`).
     #[derive(Debug, Clone, PartialEq)]
@@ -1596,6 +1625,101 @@ pub mod account {
         pub metadata: serde_json::Value,
     }
 
+    // -----------------------------------------------------------------------
+    // Cloud account update legs (design D6; the overlay calls these instead
+    // of its cloud-db builders)
+    // -----------------------------------------------------------------------
+
+    /// Parameters for [`update_account_upsert`]: the row as fetched and
+    /// mutated by the caller (Django's `obj.save()` shape), plus the row
+    /// id. `created_at` re-binds the stored value, exactly like Django;
+    /// `now` stamps `updated_at`. Field for field, this is what the
+    /// overlay `update_account_upsert` builder reads off its
+    /// `IdentityAccount`.
+    pub struct AccountUpsert<'a> {
+        pub id: uuid::Uuid,
+        pub created_at: chrono::DateTime<chrono::Utc>,
+        pub user_id: uuid::Uuid,
+        pub access_token: &'a str,
+        pub access_token_expired_at: Option<chrono::DateTime<chrono::Utc>>,
+        pub refresh_token: Option<&'a str>,
+        pub refresh_token_expired_at: Option<chrono::DateTime<chrono::Utc>>,
+        pub last_connected_at: chrono::DateTime<chrono::Utc>,
+        pub id_token: &'a str,
+        pub metadata: Option<&'a serde_json::Value>,
+    }
+
+    /// The cloud sync update side (`sync.py:146-159`): ten columns, the
+    /// lookup pair excluded. Runs on the caller's pool or transaction
+    /// (the overlay sync holds one for the whole
+    /// `update_or_create`).
+    pub async fn update_account_upsert<'e, E>(
+        ex: E,
+        row: &AccountUpsert<'_>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        sqlx::query(UPDATE_ACCOUNT_UPSERT_SQL)
+            .bind(row.created_at)
+            .bind(now)
+            .bind(row.user_id)
+            .bind(row.access_token)
+            .bind(row.access_token_expired_at)
+            .bind(row.refresh_token)
+            .bind(row.refresh_token_expired_at)
+            .bind(row.last_connected_at)
+            .bind(row.id_token)
+            .bind(row.metadata)
+            .bind(row.id)
+            .execute(ex)
+            .await?;
+        Ok(())
+    }
+
+    /// The token-rotation write (`token_store.py:139-150`): always all
+    /// three columns, never `updated_at`. The keep-vs-replace value
+    /// rules (empty grant token, zero `expires_in`) live with the
+    /// caller, which passes the resolved values in.
+    pub async fn update_account_rotated_tokens<'e, E>(
+        ex: E,
+        account_id: uuid::Uuid,
+        access_token: &str,
+        access_token_expired_at: Option<chrono::DateTime<chrono::Utc>>,
+        refresh_token: Option<&str>,
+    ) -> Result<(), sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        sqlx::query(UPDATE_ACCOUNT_ROTATED_SQL)
+            .bind(access_token)
+            .bind(access_token_expired_at)
+            .bind(refresh_token)
+            .bind(account_id)
+            .execute(ex)
+            .await?;
+        Ok(())
+    }
+
+    /// The plan-snapshot write (`refresh.py:167-197`): `metadata` only.
+    /// The unchanged-skip check lives with the caller.
+    pub async fn update_account_metadata<'e, E>(
+        ex: E,
+        account_id: uuid::Uuid,
+        metadata: &serde_json::Value,
+    ) -> Result<(), sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        sqlx::query(UPDATE_ACCOUNT_METADATA_SQL)
+            .bind(metadata)
+            .bind(account_id)
+            .execute(ex)
+            .await?;
+        Ok(())
+    }
+
     /// Pure row transform mirroring the update side for fixture
     /// before/after assertions: assign the token fields + `last_connected_at`
     /// over a JSON row shaped like F6 `before_state.case_a_exists`.
@@ -1773,6 +1897,54 @@ mod tests {
         assert_eq!(
             format!("{:?}", account::UpsertOutcome::ErrorSwallowed),
             "ErrorSwallowed"
+        );
+    }
+
+    // -- cloud account update legs (D6; SET lists mirror the overlay builders)
+
+    #[test]
+    fn cloud_upsert_sql_pins_provider_excluding_shape() {
+        // Column for column, the overlay `update_account_upsert`
+        // render minus the sea-query `CAST(...)` wrappers: ten `SET`
+        // entries in `_meta` order, the lookup pair excluded, the row
+        // id last.
+        assert_eq!(
+            account::UPDATE_ACCOUNT_UPSERT_SQL,
+            "UPDATE \"accounts\" SET \"created_at\" = $1, \"updated_at\" = $2, \
+             \"user_id\" = $3, \"access_token\" = $4, \"access_token_expired_at\" = $5, \
+             \"refresh_token\" = $6, \"refresh_token_expired_at\" = $7, \
+             \"last_connected_at\" = $8, \"id_token\" = $9, \"metadata\" = $10 \
+             WHERE \"accounts\".\"id\" = $11"
+        );
+        assert!(
+            !account::UPDATE_ACCOUNT_UPSERT_SQL.contains("provider"),
+            "lookup columns excluded"
+        );
+    }
+
+    #[test]
+    fn cloud_rotated_sql_pins_triple_without_stamp() {
+        // The overlay `update_account_rotated_tokens` render minus the
+        // `CAST(...)` wrapper: three `SET` entries, no `updated_at`.
+        assert_eq!(
+            account::UPDATE_ACCOUNT_ROTATED_SQL,
+            "UPDATE \"accounts\" SET \"access_token\" = $1, \
+             \"access_token_expired_at\" = $2, \"refresh_token\" = $3 \
+             WHERE \"accounts\".\"id\" = $4"
+        );
+        assert!(
+            !account::UPDATE_ACCOUNT_ROTATED_SQL.contains("updated_at"),
+            "rotation stamps nothing"
+        );
+    }
+
+    #[test]
+    fn cloud_metadata_sql_pins_single_column() {
+        // The overlay `update_account_metadata` render minus the
+        // `CAST(... AS jsonb)` wrapper.
+        assert_eq!(
+            account::UPDATE_ACCOUNT_METADATA_SQL,
+            "UPDATE \"accounts\" SET \"metadata\" = $1 WHERE \"accounts\".\"id\" = $2"
         );
     }
 
@@ -3464,5 +3636,271 @@ mod tests {
             .expect("empty update no-ops");
         let row = user_json(&mut tx, sync_id).await;
         assert_eq!(row["updated_at"], serde_json::json!(stamp_later));
+    }
+    // -- cloud account update legs: live behavior ---------------------------
+
+    /// Temp `accounts`: production nullability in `_meta` order.
+    const ACCOUNTS_DDL: &str = "CREATE TEMPORARY TABLE accounts (
+        id UUID PRIMARY KEY, created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL, user_id UUID NOT NULL,
+        provider_account_id TEXT NOT NULL, provider TEXT NOT NULL,
+        access_token TEXT NOT NULL, access_token_expired_at TIMESTAMPTZ,
+        refresh_token TEXT, refresh_token_expired_at TIMESTAMPTZ,
+        last_connected_at TIMESTAMPTZ NOT NULL, id_token TEXT NOT NULL,
+        metadata JSONB NOT NULL)";
+
+    fn cloud_ts(text: &str) -> DateTime<Utc> {
+        text.parse().expect("fixed timestamp")
+    }
+
+    async fn seed_account(pool: &sqlx::PgPool, id: Uuid, now: DateTime<Utc>) {
+        let tokens = account::TokenFields {
+            access_token: Some("at-1".to_owned()),
+            refresh_token: Some("rt-1".to_owned()),
+            access_token_expired_at: Some(now),
+            refresh_token_expired_at: Some(now),
+            id_token: Some("idt-1".to_owned()),
+        };
+        account::create_account(
+            pool,
+            &account::NewAccount {
+                id,
+                user_id: live_uuid("aaaaaaaaaaaa"),
+                provider: "airepublic",
+                provider_account_id: "sub-1",
+                tokens: &tokens,
+                now,
+                metadata: Some(serde_json::json!({"seeded": true})),
+            },
+        )
+        .await
+        .expect("seed account");
+    }
+
+    async fn read_account(pool: &sqlx::PgPool, id: Uuid) -> sqlx::postgres::PgRow {
+        sqlx::query("SELECT * FROM accounts WHERE id = $1")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .expect("read back account")
+    }
+
+    /// The upsert leg rewrites its ten columns (re-binding `created_at`,
+    /// stamping `updated_at`) and leaves the lookup pair alone — on the
+    /// pool and on the caller's transaction alike.
+    #[tokio::test]
+    async fn live_update_account_upsert_rewrites_ten_not_lookups() {
+        let Some(pool) = live_single_pool().await else {
+            return;
+        };
+        sqlx::query(ACCOUNTS_DDL)
+            .execute(&pool)
+            .await
+            .expect("temp accounts");
+        let t0 = cloud_ts("2026-10-03T12:00:00+00:00");
+        let t1 = cloud_ts("2026-10-04T12:00:00+00:00");
+        let id = live_uuid("bbbbbbbbbbbb");
+        seed_account(&pool, id, t0).await;
+        let meta = serde_json::json!({"x": 1});
+        account::update_account_upsert(
+            &pool,
+            &account::AccountUpsert {
+                id,
+                created_at: t0,
+                user_id: live_uuid("cccccccccccc"),
+                access_token: "at-2",
+                access_token_expired_at: Some(t1),
+                refresh_token: Some("rt-2"),
+                refresh_token_expired_at: None,
+                last_connected_at: t1,
+                id_token: "idt-2",
+                metadata: Some(&meta),
+            },
+            t1,
+        )
+        .await
+        .expect("upsert update");
+        let row = read_account(&pool, id).await;
+        assert_eq!(
+            row.try_get::<DateTime<Utc>, _>("created_at").expect("c"),
+            t0
+        );
+        assert_eq!(
+            row.try_get::<DateTime<Utc>, _>("updated_at").expect("u"),
+            t1
+        );
+        assert_eq!(
+            row.try_get::<Uuid, _>("user_id").expect("uid"),
+            live_uuid("cccccccccccc")
+        );
+        assert_eq!(
+            row.try_get::<String, _>("access_token").expect("at"),
+            "at-2"
+        );
+        assert_eq!(
+            row.try_get::<Option<DateTime<Utc>>, _>("access_token_expired_at")
+                .expect("aexp"),
+            Some(t1)
+        );
+        assert_eq!(
+            row.try_get::<Option<String>, _>("refresh_token")
+                .expect("rt"),
+            Some("rt-2".to_owned())
+        );
+        assert_eq!(
+            row.try_get::<Option<DateTime<Utc>>, _>("refresh_token_expired_at")
+                .expect("rexp"),
+            None
+        );
+        assert_eq!(
+            row.try_get::<DateTime<Utc>, _>("last_connected_at")
+                .expect("lca"),
+            t1
+        );
+        assert_eq!(row.try_get::<String, _>("id_token").expect("idt"), "idt-2");
+        assert_eq!(
+            row.try_get::<serde_json::Value, _>("metadata").expect("md"),
+            meta
+        );
+        assert_eq!(
+            row.try_get::<String, _>("provider").expect("prov"),
+            "airepublic"
+        );
+        assert_eq!(
+            row.try_get::<String, _>("provider_account_id")
+                .expect("pid"),
+            "sub-1"
+        );
+        // The executor-generic shape: the same write on the caller's
+        // transaction lands on commit.
+        let t2 = cloud_ts("2026-10-05T12:00:00+00:00");
+        let mut tx = pool.begin().await.expect("tx");
+        let meta2 = serde_json::json!({"x": 2});
+        account::update_account_upsert(
+            &mut *tx,
+            &account::AccountUpsert {
+                id,
+                created_at: t0,
+                user_id: live_uuid("cccccccccccc"),
+                access_token: "at-3",
+                access_token_expired_at: None,
+                refresh_token: None,
+                refresh_token_expired_at: Some(t2),
+                last_connected_at: t2,
+                id_token: "idt-3",
+                metadata: Some(&meta2),
+            },
+            t2,
+        )
+        .await
+        .expect("upsert update on tx");
+        tx.commit().await.expect("commit");
+        let row = read_account(&pool, id).await;
+        assert_eq!(
+            row.try_get::<String, _>("access_token").expect("at"),
+            "at-3"
+        );
+        assert_eq!(
+            row.try_get::<Option<String>, _>("refresh_token")
+                .expect("rt"),
+            None
+        );
+        assert_eq!(
+            row.try_get::<DateTime<Utc>, _>("updated_at").expect("u"),
+            t2
+        );
+        assert_eq!(
+            row.try_get::<serde_json::Value, _>("metadata").expect("md"),
+            meta2
+        );
+    }
+
+    /// The rotation leg writes its triple and stamps nothing else — not
+    /// even `updated_at`.
+    #[tokio::test]
+    async fn live_update_account_rotated_tokens_writes_triple_only() {
+        let Some(pool) = live_single_pool().await else {
+            return;
+        };
+        sqlx::query(ACCOUNTS_DDL)
+            .execute(&pool)
+            .await
+            .expect("temp accounts");
+        let t0 = cloud_ts("2026-10-03T12:00:00+00:00");
+        let t1 = cloud_ts("2026-10-04T12:00:00+00:00");
+        let id = live_uuid("dddddddddddd");
+        seed_account(&pool, id, t0).await;
+        let mut tx = pool.begin().await.expect("tx");
+        account::update_account_rotated_tokens(&mut *tx, id, "at-9", Some(t1), Some("rt-9"))
+            .await
+            .expect("rotate");
+        tx.commit().await.expect("commit");
+        let row = read_account(&pool, id).await;
+        assert_eq!(
+            row.try_get::<String, _>("access_token").expect("at"),
+            "at-9"
+        );
+        assert_eq!(
+            row.try_get::<Option<DateTime<Utc>>, _>("access_token_expired_at")
+                .expect("aexp"),
+            Some(t1)
+        );
+        assert_eq!(
+            row.try_get::<Option<String>, _>("refresh_token")
+                .expect("rt"),
+            Some("rt-9".to_owned())
+        );
+        assert_eq!(
+            row.try_get::<DateTime<Utc>, _>("updated_at").expect("u"),
+            t0,
+            "rotation stamps nothing"
+        );
+        assert_eq!(
+            row.try_get::<Option<DateTime<Utc>>, _>("refresh_token_expired_at")
+                .expect("rexp"),
+            Some(t0)
+        );
+        assert_eq!(row.try_get::<String, _>("id_token").expect("idt"), "idt-1");
+        assert_eq!(
+            row.try_get::<serde_json::Value, _>("metadata").expect("md"),
+            serde_json::json!({"seeded": true})
+        );
+    }
+
+    /// The snapshot leg writes `metadata` and nothing else.
+    #[tokio::test]
+    async fn live_update_account_metadata_writes_metadata_only() {
+        let Some(pool) = live_single_pool().await else {
+            return;
+        };
+        sqlx::query(ACCOUNTS_DDL)
+            .execute(&pool)
+            .await
+            .expect("temp accounts");
+        let t0 = cloud_ts("2026-10-03T12:00:00+00:00");
+        let id = live_uuid("eeeeeeeeeeee");
+        seed_account(&pool, id, t0).await;
+        let snapshot = serde_json::json!({"user_type": 2});
+        account::update_account_metadata(&pool, id, &snapshot)
+            .await
+            .expect("snapshot");
+        let row = read_account(&pool, id).await;
+        assert_eq!(
+            row.try_get::<serde_json::Value, _>("metadata").expect("md"),
+            snapshot
+        );
+        assert_eq!(
+            row.try_get::<String, _>("access_token").expect("at"),
+            "at-1"
+        );
+        assert_eq!(
+            row.try_get::<DateTime<Utc>, _>("updated_at").expect("u"),
+            t0
+        );
+        assert_eq!(
+            row.try_get::<DateTime<Utc>, _>("last_connected_at")
+                .expect("lca"),
+            t0
+        );
     }
 }
