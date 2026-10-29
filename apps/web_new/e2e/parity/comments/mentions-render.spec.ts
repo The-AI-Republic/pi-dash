@@ -43,10 +43,16 @@ test(
     });
 
     await test.step("the feed shows the mention as a reference to that member", async () => {
-      const refs = await driver.mentionsVisibleReferences();
-      const match = refs.find((ref) => ref.text === `@${member.displayName}`);
-      expect(match).toBeDefined();
-      expect(match!.href).toBe(`/${seed.workspaceSlug}/profile/${member.id}`);
+      // The posted comment reaches the feed a beat after the mutation
+      // resolves; the oracle paints it in the same tick. Either way the
+      // reference must appear with the member address, so poll for it.
+      await expect
+        .poll(
+          async () =>
+            (await driver.mentionsVisibleReferences()).find((ref) => ref.text === `@${member.displayName}`)?.href,
+          { timeout: 30_000 }
+        )
+        .toBe(`/${seed.workspaceSlug}/profile/${member.id}`);
     });
 
     let commentId = "";

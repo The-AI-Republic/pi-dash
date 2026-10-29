@@ -4151,12 +4151,11 @@ export class WebDriver implements ParityDriver {
   }
 
   async composerEditAppend(text: string): Promise<void> {
-    // Document start then line end lands the caret at the end of the
-    // opening text block whatever the click selected, keeping embedded
-    // nodes; a bare Home would stop in the clicked block.
+    // Click inside the opening paragraph, then line end: the caret
+    // lands at the end of that block whatever the editor holds after
+    // it, keeping embedded nodes.
     const editor = this.commentEditEditor();
-    await editor.click({ timeout: 30_000 });
-    await editor.press("ControlOrMeta+Home", { timeout: 30_000 });
+    await editor.locator("p").first().click({ timeout: 30_000 });
     await editor.press("End", { timeout: 30_000 });
     await editor.pressSequentially(text, { timeout: 30_000 });
   }

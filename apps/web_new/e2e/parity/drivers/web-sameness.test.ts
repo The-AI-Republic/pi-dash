@@ -254,12 +254,15 @@ describe("composerEditAppend", () => {
     const steps: string[] = [];
     const spy = spyPage({
       commentCard: locator({
-        click: async () => void steps.push("click"),
+        locator: (selector: string) => {
+          expect(selector).toBe("p");
+          return locator({ first: () => locator({ click: async () => void steps.push("click:lead") }) });
+        },
         press: async (key: string) => void steps.push(`press:${key}`),
         pressSequentially: async (value: string) => void steps.push(`type:${value}`),
       }),
     });
     await new WebDriver(spy.page).composerEditAppend(" kept");
-    expect(steps).toEqual(["click", "press:ControlOrMeta+Home", "press:End", "type: kept"]);
+    expect(steps).toEqual(["click:lead", "press:End", "type: kept"]);
   });
 });

@@ -4097,13 +4097,13 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async composerEditAppend(text: string): Promise<void> {
-    // Document start then line end lands the caret at the end of the
-    // opening text block whatever the click selected, so embedded
-    // nodes after it survive the keystrokes (NEWFRONT-147 keeps its
-    // image this way); a bare Home would stop in the clicked block.
+    // Click inside the opening paragraph, then line end: the caret
+    // lands at the end of that block whatever the editor holds after
+    // it, so embedded nodes survive the keystrokes (NEWFRONT-147 keeps
+    // its image this way). Clicking the editor root can select a node
+    // instead, and document keys from a node selection misbehave.
     const editor = this.commentEditEditor();
-    await editor.click({ timeout: WebNewDriver.WAIT_MS });
-    await editor.press("ControlOrMeta+Home", { timeout: WebNewDriver.WAIT_MS });
+    await editor.locator("p").first().click({ timeout: WebNewDriver.WAIT_MS });
     await editor.press("End", { timeout: WebNewDriver.WAIT_MS });
     await editor.pressSequentially(text, { timeout: WebNewDriver.WAIT_MS });
   }
