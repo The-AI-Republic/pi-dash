@@ -231,17 +231,38 @@ describe("bundled list", () => {
       expect(isMigratedPath(path), path).toBe(true);
     }
     // Sibling project areas stay on the old app until their own gates land.
+    // (Project intake moved with its own area gate, NEWFRONT-695, and is
+    // asserted in the intake block below.)
     for (const path of [
       "/acme/projects/00000000-0000-0000-0000-000000000000",
       "/acme/projects/00000000-0000-0000-0000-000000000000/cycles",
       "/acme/projects/00000000-0000-0000-0000-000000000000/modules",
       "/acme/projects/00000000-0000-0000-0000-000000000000/views",
-      "/acme/projects/00000000-0000-0000-0000-000000000000/intake",
       "/acme/projects/00000000-0000-0000-0000-000000000000/issues-archive",
     ]) {
       expect(isMigratedPath(path), path).toBe(false);
     }
     expect(resolveLinkKind("/acme/projects/00000000-0000-0000-0000-000000000000/issues")).toBe("router");
+    expect(resolveLinkKind("/acme/projects/00000000-0000-0000-0000-000000000000/cycles")).toBe("anchor");
+  });
+
+  it("serves project intake and the retired inbox redirect from web_new", () => {
+    for (const path of [
+      "/acme/projects/00000000-0000-0000-0000-000000000000/intake",
+      "/acme/projects/00000000-0000-0000-0000-000000000000/intake/",
+      "/acme/projects/00000000-0000-0000-0000-000000000000/inbox",
+      "/acme/projects/00000000-0000-0000-0000-000000000000/inbox/",
+    ]) {
+      expect(isMigratedPath(path), path).toBe(true);
+    }
+    // Near-miss spellings stay on the old app.
+    for (const path of [
+      "/acme/projects/00000000-0000-0000-0000-000000000000/intakes",
+      "/acme/projects/00000000-0000-0000-0000-000000000000/inboxes",
+    ]) {
+      expect(isMigratedPath(path), path).toBe(false);
+    }
+    expect(resolveLinkKind("/acme/projects/00000000-0000-0000-0000-000000000000/intake")).toBe("router");
     expect(resolveLinkKind("/acme/projects/00000000-0000-0000-0000-000000000000/cycles")).toBe("anchor");
   });
 
