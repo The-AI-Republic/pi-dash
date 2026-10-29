@@ -1503,29 +1503,23 @@ impl SeedStore for PgSeedStore {
         company_role: &str,
     ) -> Result<uuid::Uuid, String> {
         // `.objects.create` without `created_by`: NULL audit.
-        let id: uuid::Uuid = sqlx::query_scalar(
-            "INSERT INTO workspace_members (created_at, updated_at, id, role, created_by_id,
-               member_id, updated_by_id, workspace_id, company_role, view_props,
-               default_props, issue_props, is_active, deleted_at, explored_features,
-               getting_started_checklist, tips)
-             VALUES ($1, $1, $2, $3, NULL,
-               $4, NULL, $5, $6, $7,
-               $7, $8, true, NULL, '{}',
-               '{}', '{}')
-             RETURNING id",
+        use pidash_services::domain::workspaces::members::{add_seed, SeedMember};
+        let view_props = ws_default_props();
+        let issue_props = ws_issue_props();
+        add_seed(
+            &self.pool,
+            &SeedMember {
+                workspace_id,
+                member_id,
+                role,
+                company_role,
+                view_props: &view_props,
+                issue_props: &issue_props,
+                now: self.now,
+            },
         )
-        .bind(self.now)
-        .bind(uuid::Uuid::new_v4())
-        .bind(role)
-        .bind(member_id)
-        .bind(workspace_id)
-        .bind(company_role)
-        .bind(sqlx::types::Json(ws_default_props()))
-        .bind(sqlx::types::Json(ws_issue_props()))
-        .fetch_one(&self.pool)
         .await
-        .map_err(Self::db_err)?;
-        Ok(id)
+        .map_err(Self::db_err)
     }
 
     async fn insert_project(
@@ -1537,62 +1531,27 @@ impl SeedStore for PgSeedStore {
         // `Project(...) :101-111` + `save` in one transaction: the
         // demote-others update (`project.py:292-298`) and the insert are
         // atomic, like `Project.save`'s `transaction.atomic` block.
+        use pidash_services::domain::projects::{create_seed_project, SeedProject};
         let actor = ctx_actor(ctx)?;
-        let mut tx = self.pool.begin().await.map_err(Self::db_err)?;
-        let id: uuid::Uuid = sqlx::query_scalar(
-            "INSERT INTO projects (created_at, updated_at, id, name, description,
-               description_text, description_html, network, identifier, created_by_id,
-               default_assignee_id, project_lead_id, updated_by_id, workspace_id, emoji,
-               cycle_view, module_view, cover_image, issue_views_view, page_view,
-               estimate_id, icon_prop, intake_view, archive_in, close_in, default_state_id,
-               logo_props, archived_at, is_time_tracking_enabled, is_issue_type_enabled,
-               deleted_at, guest_view_all_features, timezone, cover_image_asset_id,
-               external_id, external_source, members_can_edit_states, repo_url, base_branch,
-               agent_default_interval_seconds, agent_default_max_ticks, agent_ticking_enabled,
-               is_default, agent_review_default_interval_seconds, default_agent_executor,
-               agent_test_default_interval_seconds)
-             VALUES ($1, $1, $2, $3, $4,
-               NULL, NULL, $5, $6, $7,
-               NULL, NULL, NULL, $8, NULL,
-               true, true, $9, true, true,
-               NULL, NULL, false, 0, 0, NULL,
-               $10, NULL, false, false,
-               NULL, false, $11, NULL,
-               NULL, NULL, true, '', 'main',
-               10800, 10, true,
-               $12, 10800, $13,
-               10800)
-             RETURNING id",
+        create_seed_project(
+            &self.pool,
+            &SeedProject {
+                workspace_id,
+                name: &project.name,
+                identifier: &project.identifier,
+                timezone: &project.timezone,
+                is_default: project.is_default,
+                description: &project.description,
+                network: project.network,
+                cover_image: project.cover_image.as_deref(),
+                logo_props: &project.logo_props,
+                default_agent_executor: &project.default_agent_executor,
+                created_by: actor,
+                now: self.now,
+            },
         )
-        .bind(self.now)
-        .bind(uuid::Uuid::new_v4())
-        .bind(&project.name)
-        .bind(&project.description)
-        .bind(project.network)
-        .bind(&project.identifier)
-        .bind(actor)
-        .bind(workspace_id)
-        .bind(project.cover_image.as_deref())
-        .bind(sqlx::types::Json(project.logo_props.clone()))
-        .bind(project.timezone.clone())
-        .bind(project.is_default)
-        .bind(project.default_agent_executor.clone())
-        .fetch_one(&mut *tx)
         .await
-        .map_err(Self::db_err)?;
-        if project.is_default {
-            sqlx::query(
-                "UPDATE projects SET is_default = false
-                 WHERE workspace_id = $1 AND is_default AND deleted_at IS NULL AND id <> $2",
-            )
-            .bind(workspace_id)
-            .bind(id)
-            .execute(&mut *tx)
-            .await
-            .map_err(Self::db_err)?;
-        }
-        tx.commit().await.map_err(Self::db_err)?;
-        Ok(id)
+        .map_err(Self::db_err)
     }
 
     async fn ensure_default_pod(&self, project: &NewProject) -> Result<Option<uuid::Uuid>, String> {
@@ -1611,29 +1570,25 @@ impl SeedStore for PgSeedStore {
     ) -> Result<uuid::Uuid, String> {
         // One `bulk_create` row (`:115-126`): `bulk_create` skips
         // `ProjectMember.save`, so no auto `ProjectUserProperty` row here.
+        use pidash_services::domain::projects::members::{add_seed, SeedProjectMember};
         let actor = ctx_actor(ctx)?;
-        let id: uuid::Uuid = sqlx::query_scalar(
-            "INSERT INTO project_members (created_at, updated_at, id, comment, role,
-               created_by_id, member_id, project_id, updated_by_id, workspace_id,
-               view_props, default_props, sort_order, preferences, is_active, deleted_at)
-             VALUES ($1, $1, $2, NULL, $3,
-               $4, $5, $6, NULL, $7,
-               $8, $8, 65535, $9, true, NULL)
-             RETURNING id",
+        let view_props = project_default_props();
+        let preferences = default_preferences();
+        add_seed(
+            &self.pool,
+            &SeedProjectMember {
+                project_id,
+                workspace_id,
+                member_id,
+                role,
+                created_by: actor,
+                view_props: &view_props,
+                preferences: &preferences,
+                now: self.now,
+            },
         )
-        .bind(self.now)
-        .bind(uuid::Uuid::new_v4())
-        .bind(role)
-        .bind(actor)
-        .bind(member_id)
-        .bind(project_id)
-        .bind(workspace_id)
-        .bind(sqlx::types::Json(project_default_props()))
-        .bind(sqlx::types::Json(default_preferences()))
-        .fetch_one(&self.pool)
         .await
-        .map_err(Self::db_err)?;
-        Ok(id)
+        .map_err(Self::db_err)
     }
 
     async fn insert_project_user_property(
@@ -1679,31 +1634,25 @@ impl SeedStore for PgSeedStore {
         project_id: uuid::Uuid,
         state: &StateInsert,
     ) -> Result<uuid::Uuid, String> {
+        use pidash_services::domain::projects::states::{add_seed, SeedState};
         let actor = ctx_actor(ctx)?;
-        let id: uuid::Uuid = sqlx::query_scalar(
-            "INSERT INTO states (created_at, updated_at, id, name, description, color,
-               slug, created_by_id, project_id, updated_by_id, workspace_id, sequence,
-               \"group\", \"default\", external_id, external_source, is_triage, deleted_at)
-             VALUES ($1, $1, $2, $3, '', $4,
-               $5, $6, $7, NULL, $8, $9,
-               $10, $11, NULL, NULL, false, NULL)
-             RETURNING id",
+        add_seed(
+            &self.pool,
+            &SeedState {
+                workspace_id,
+                project_id,
+                created_by: actor,
+                name: &state.name,
+                color: &state.color,
+                slug: &state.slug,
+                group: &state.group,
+                sequence: state.sequence,
+                is_default: state.is_default,
+                now: self.now,
+            },
         )
-        .bind(self.now)
-        .bind(uuid::Uuid::new_v4())
-        .bind(&state.name)
-        .bind(&state.color)
-        .bind(&state.slug)
-        .bind(actor)
-        .bind(project_id)
-        .bind(workspace_id)
-        .bind(state.sequence)
-        .bind(&state.group)
-        .bind(state.is_default)
-        .fetch_one(&self.pool)
         .await
-        .map_err(Self::db_err)?;
-        Ok(id)
+        .map_err(Self::db_err)
     }
 
     async fn insert_label(
@@ -1819,42 +1768,28 @@ impl SeedStore for PgSeedStore {
         project_id: uuid::Uuid,
         issue: &IssueInsert,
     ) -> Result<uuid::Uuid, String> {
+        use pidash_services::domain::issues::{insert_seed_issue, SeedIssue};
         let actor = ctx_actor(ctx)?;
-        let id: uuid::Uuid = sqlx::query_scalar(
-            "INSERT INTO issues (created_at, updated_at, id, name, description_json,
-               priority, start_date, target_date, sequence_id, created_by_id, parent_id,
-               project_id, state_id, updated_by_id, workspace_id, description_html,
-               description_stripped, completed_at, sort_order, point, archived_at,
-               is_draft, external_id, external_source, description_binary,
-               estimate_point_id, type_id, deleted_at, git_work_branch, assigned_pod_id,
-               workpad, created_via, agent_executor, complexity_score)
-             VALUES ($1, $1, $2, $3, '{}',
-               $4, NULL, NULL, $5, $6, NULL,
-               $7, $8, NULL, $9, $10,
-               $11, $12, $13, NULL, NULL,
-               false, NULL, NULL, NULL,
-               NULL, NULL, NULL, '', $14,
-               '', NULL, NULL, 0)
-             RETURNING id",
+        insert_seed_issue(
+            &self.pool,
+            &SeedIssue {
+                workspace_id,
+                project_id,
+                state_id: issue.state_id,
+                created_by: actor,
+                name: &issue.name,
+                description_html: &issue.description_html,
+                description_stripped: issue.description_stripped.as_deref(),
+                priority: &issue.priority,
+                sequence_id: issue.sequence_id,
+                sort_order: issue.sort_order,
+                completed_at: issue.completed_at,
+                assigned_pod_id: issue.assigned_pod_id,
+                now: self.now,
+            },
         )
-        .bind(self.now)
-        .bind(uuid::Uuid::new_v4())
-        .bind(&issue.name)
-        .bind(&issue.priority)
-        .bind(issue.sequence_id)
-        .bind(actor)
-        .bind(project_id)
-        .bind(issue.state_id)
-        .bind(workspace_id)
-        .bind(&issue.description_html)
-        .bind(issue.description_stripped.as_deref())
-        .bind(issue.completed_at)
-        .bind(issue.sort_order)
-        .bind(issue.assigned_pod_id)
-        .fetch_one(&self.pool)
         .await
-        .map_err(Self::db_err)?;
-        Ok(id)
+        .map_err(Self::db_err)
     }
 
     async fn drive_seed_transition(
@@ -2108,23 +2043,19 @@ impl SeedStore for PgSeedStore {
     ) -> Result<uuid::Uuid, String> {
         // The `Issue.save` row (`issue.py:343`): NULL audit, workspace set
         // from the project by `ProjectBaseModel.save`.
-        let id: uuid::Uuid = sqlx::query_scalar(
-            "INSERT INTO issue_sequences (created_at, updated_at, id, sequence, deleted,
-               created_by_id, issue_id, project_id, updated_by_id, workspace_id, deleted_at)
-             VALUES ($1, $1, $2, $3, false,
-               NULL, $4, $5, NULL, $6, NULL)
-             RETURNING id",
+        use pidash_services::domain::issues::{insert_seed_issue_sequence, SeedIssueSequence};
+        insert_seed_issue_sequence(
+            &self.pool,
+            &SeedIssueSequence {
+                issue_id,
+                project_id,
+                workspace_id,
+                sequence,
+                now: self.now,
+            },
         )
-        .bind(self.now)
-        .bind(uuid::Uuid::new_v4())
-        .bind(sequence)
-        .bind(issue_id)
-        .bind(project_id)
-        .bind(workspace_id)
-        .fetch_one(&self.pool)
         .await
-        .map_err(Self::db_err)?;
-        Ok(id)
+        .map_err(Self::db_err)
     }
 
     async fn insert_issue_sequence(
@@ -2137,22 +2068,19 @@ impl SeedStore for PgSeedStore {
         // The explicit `.objects.create` row (`:293-298`): NULL audit
         // (`BaseModel.save` wipes the constructor arg, no crum user),
         // default `sequence = 1`.
-        let id: uuid::Uuid = sqlx::query_scalar(
-            "INSERT INTO issue_sequences (created_at, updated_at, id, sequence, deleted,
-               created_by_id, issue_id, project_id, updated_by_id, workspace_id, deleted_at)
-             VALUES ($1, $1, $2, 1, false,
-               NULL, $3, $4, NULL, $5, NULL)
-             RETURNING id",
+        use pidash_services::domain::issues::{insert_seed_issue_sequence, SeedIssueSequence};
+        insert_seed_issue_sequence(
+            &self.pool,
+            &SeedIssueSequence {
+                issue_id,
+                project_id,
+                workspace_id,
+                sequence: 1,
+                now: self.now,
+            },
         )
-        .bind(self.now)
-        .bind(uuid::Uuid::new_v4())
-        .bind(issue_id)
-        .bind(project_id)
-        .bind(workspace_id)
-        .fetch_one(&self.pool)
         .await
-        .map_err(Self::db_err)?;
-        Ok(id)
+        .map_err(Self::db_err)
     }
 
     async fn insert_issue_activity(

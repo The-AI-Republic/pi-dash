@@ -873,6 +873,140 @@ where
         .map(|_| ())
 }
 
+// seed + demo project inserts (PIDASHCONV-1632)
+// ---------------------------------------------------------------------------
+
+/// One workspace-seed project row: `Project(...) :101-111` plus the
+/// `save` in `bgtasks/workspace_seed_task.py` — identifier already
+/// stripped/upper-cased and timezone already copied from the workspace
+/// by the caller, first-project `is_default` already probed. Moved
+/// verbatim from the seed store; `updated_by`/`deleted_at` stay NULL.
+pub struct SeedProject<'a> {
+    pub workspace_id: Uuid,
+    pub name: &'a str,
+    pub identifier: &'a str,
+    pub timezone: &'a str,
+    pub is_default: bool,
+    pub description: &'a str,
+    pub network: i16,
+    pub cover_image: Option<&'a str>,
+    pub logo_props: &'a serde_json::Value,
+    pub default_agent_executor: &'a str,
+    pub created_by: Uuid,
+    pub now: DateTime<Utc>,
+}
+
+pub(crate) const SEED_PROJECT_INSERT_SQL: &str = "INSERT INTO projects \
+    (created_at, updated_at, id, name, description, description_text, description_html, \
+    network, identifier, created_by_id, default_assignee_id, project_lead_id, updated_by_id, \
+    workspace_id, emoji, cycle_view, module_view, cover_image, issue_views_view, page_view, \
+    estimate_id, icon_prop, intake_view, archive_in, close_in, default_state_id, logo_props, \
+    archived_at, is_time_tracking_enabled, is_issue_type_enabled, deleted_at, \
+    guest_view_all_features, timezone, cover_image_asset_id, external_id, external_source, \
+    members_can_edit_states, repo_url, base_branch, agent_default_interval_seconds, \
+    agent_default_max_ticks, agent_ticking_enabled, is_default, \
+    agent_review_default_interval_seconds, default_agent_executor, \
+    agent_test_default_interval_seconds) \
+    VALUES ($1, $1, $2, $3, $4, NULL, NULL, $5, $6, $7, NULL, NULL, NULL, $8, NULL, \
+    true, true, $9, true, true, NULL, NULL, false, 0, 0, NULL, $10, NULL, false, false, \
+    NULL, false, $11, NULL, NULL, NULL, true, '', 'main', 10800, 10, true, $12, 10800, \
+    $13, 10800) \
+    RETURNING id";
+
+pub(crate) const SEED_PROJECT_DEMOTE_SQL: &str = "UPDATE projects SET is_default = false \
+    WHERE workspace_id = $1 AND is_default AND deleted_at IS NULL AND id <> $2";
+
+/// The seed project `save`: the row plus the atomic demote-others
+/// update (`project.py:292-298`), in one transaction like `Project.save`'s
+/// `transaction.atomic` block. Returns the new row id.
+pub async fn create_seed_project(
+    pool: &sqlx::PgPool,
+    project: &SeedProject<'_>,
+) -> Result<Uuid, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let id: Uuid = sqlx::query_scalar(SEED_PROJECT_INSERT_SQL)
+        .bind(project.now)
+        .bind(Uuid::new_v4())
+        .bind(project.name)
+        .bind(project.description)
+        .bind(project.network)
+        .bind(project.identifier)
+        .bind(project.created_by)
+        .bind(project.workspace_id)
+        .bind(project.cover_image)
+        .bind(sqlx::types::Json(project.logo_props))
+        .bind(project.timezone)
+        .bind(project.is_default)
+        .bind(project.default_agent_executor)
+        .fetch_one(&mut *tx)
+        .await?;
+    if project.is_default {
+        sqlx::query(SEED_PROJECT_DEMOTE_SQL)
+            .bind(project.workspace_id)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(id)
+}
+
+/// One dummy-data project row: `create_project (:44-60)` in
+/// `bgtasks/dummy_data_task.py` — the creator call passes only
+/// project/member/role, `save()` derives the workspace, fills the
+/// model defaults and nulls the audit user (no request user in a
+/// task); the timezone inherits the workspace's and `is_default` is
+/// the caller's first-project probe. Ids are the task's `::uuid`
+/// strings. Moved verbatim from the dummy store (PIDASHCONV-1632).
+/// No demote-others leg: a first project demotes zero rows and a
+/// later one inserts `is_default = false`, so the update is a
+/// guaranteed no-op on this path.
+pub struct DemoProject<'a> {
+    pub workspace_id: &'a str,
+    pub name: &'a str,
+    pub identifier: &'a str,
+    pub is_default: bool,
+    pub timezone: &'a str,
+    pub default_agent_executor: &'a str,
+    pub now: DateTime<Utc>,
+}
+
+pub(crate) const DEMO_PROJECT_INSERT_SQL: &str = "INSERT INTO projects \
+    (id, workspace_id, name, identifier, created_by_id, intake_view, created_at, updated_at, \
+    description, network, cycle_view, module_view, issue_views_view, page_view, archive_in, \
+    close_in, logo_props, is_time_tracking_enabled, is_issue_type_enabled, is_default, \
+    guest_view_all_features, timezone, members_can_edit_states, repo_url, base_branch, \
+    agent_default_interval_seconds, agent_default_max_ticks, \
+    agent_review_default_interval_seconds, agent_test_default_interval_seconds, \
+    agent_ticking_enabled, default_agent_executor) \
+    VALUES ($1::uuid, $2::uuid, $3, $4, NULL, TRUE, $5, $5, '', 2, FALSE, FALSE, FALSE, \
+    TRUE, 0, 0, '{}', FALSE, FALSE, $6, FALSE, $7, TRUE, '', 'main', 10800, 10, 10800, \
+    10800, TRUE, $8)";
+
+/// The dummy-data project insert. Generates the row id client-side
+/// (as Django does) and returns it for the pod/member legs.
+pub async fn insert_demo_project<'e, E>(
+    ex: E,
+    project: &DemoProject<'_>,
+) -> Result<String, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let id = Uuid::new_v4().to_string();
+    sqlx::query(DEMO_PROJECT_INSERT_SQL)
+        .bind(&id)
+        .bind(project.workspace_id)
+        .bind(project.name)
+        .bind(project.identifier)
+        .bind(project.now)
+        .bind(project.is_default)
+        .bind(project.timezone)
+        .bind(project.default_agent_executor)
+        .execute(ex)
+        .await?;
+    Ok(id)
+}
+
 // ---------------------------------------------------------------------------
 // members
 // ---------------------------------------------------------------------------
@@ -1991,6 +2125,119 @@ pub mod members {
             .await
             .map(|_| ())
     }
+
+    /// One workspace-seed project-member row: one `bulk_create` row
+    /// (`:115-126` in `bgtasks/workspace_seed_task.py`).
+    /// `bulk_create` skips `ProjectMember.save`, so no auto
+    /// `ProjectUserProperty` row rides this insert. Moved verbatim
+    /// from the seed store (PIDASHCONV-1632); the caller keeps its
+    /// props copy (`get_default_props` without `display_properties`,
+    /// `db/models/project.py:43`, plus `get_default_preferences`,
+    /// `db/models/project.py:68`).
+    pub struct SeedProjectMember<'a> {
+        pub project_id: Uuid,
+        pub workspace_id: Uuid,
+        pub member_id: Uuid,
+        pub role: i16,
+        pub created_by: Uuid,
+        pub view_props: &'a serde_json::Value,
+        pub preferences: &'a serde_json::Value,
+        pub now: DateTime<Utc>,
+    }
+
+    pub(crate) const SEED_MEMBER_INSERT_SQL: &str = "INSERT INTO project_members \
+        (created_at, updated_at, id, comment, role, created_by_id, member_id, project_id, \
+        updated_by_id, workspace_id, view_props, default_props, sort_order, preferences, \
+        is_active, deleted_at) \
+        VALUES ($1, $1, $2, NULL, $3, $4, $5, $6, NULL, $7, $8, $8, 65535, $9, true, NULL) \
+        RETURNING id";
+
+    /// The seed member-row insert. Returns the new row id.
+    pub async fn add_seed<'e, E>(ex: E, member: &SeedProjectMember<'_>) -> Result<Uuid, sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        let id: Uuid = sqlx::query_scalar(SEED_MEMBER_INSERT_SQL)
+            .bind(member.now)
+            .bind(Uuid::new_v4())
+            .bind(member.role)
+            .bind(member.created_by)
+            .bind(member.member_id)
+            .bind(member.project_id)
+            .bind(member.workspace_id)
+            .bind(sqlx::types::Json(member.view_props))
+            .bind(sqlx::types::Json(member.preferences))
+            .fetch_one(ex)
+            .await?;
+        Ok(id)
+    }
+
+    /// One dummy-data project-member row: the `create_project`
+    /// creator row (`ProjectMember.objects.create`, NULL audit) and
+    /// the `create_project_members` loop rows (`:63-79` in
+    /// `bgtasks/dummy_data_task.py`: role 20, random sort,
+    /// `bulk_create(..., ignore_conflicts=True)` replayed one row at
+    /// a time). Ids are the task's `::uuid` strings. Moved verbatim
+    /// from the dummy store (PIDASHCONV-1632).
+    pub struct DemoProjectMember<'a> {
+        pub project_id: &'a str,
+        pub workspace_id: &'a str,
+        pub member_id: &'a str,
+        pub role: i32,
+        pub sort_order: f64,
+        pub view_props: &'a serde_json::Value,
+        pub preferences: &'a serde_json::Value,
+        pub now: DateTime<Utc>,
+        /// Per-row `ON CONFLICT DO NOTHING` (the members loop only).
+        pub ignore_conflicts: bool,
+    }
+
+    pub(crate) const DEMO_MEMBER_INSERT_SQL: &str = "INSERT INTO project_members \
+        (id, project_id, workspace_id, member_id, role, created_at, updated_at, view_props, \
+        default_props, preferences, sort_order, is_active) \
+        VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6, $6, $7, $7, $8, 65535, TRUE)";
+
+    pub(crate) const DEMO_MEMBER_INSERT_IGNORE_SQL: &str = "INSERT INTO project_members \
+        (id, project_id, workspace_id, member_id, role, sort_order, created_at, updated_at, \
+        view_props, default_props, preferences, is_active) \
+        VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6, $7, $7, $8, $8, $9, TRUE) \
+        ON CONFLICT DO NOTHING";
+
+    /// The dummy-data member-row insert. The id is generated
+    /// client-side (as Django does); the row id is never read back.
+    pub async fn add_demo<'e, E>(ex: E, member: &DemoProjectMember<'_>) -> Result<(), sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        let id = Uuid::new_v4().to_string();
+        if member.ignore_conflicts {
+            sqlx::query(DEMO_MEMBER_INSERT_IGNORE_SQL)
+                .bind(&id)
+                .bind(member.project_id)
+                .bind(member.workspace_id)
+                .bind(member.member_id)
+                .bind(member.role)
+                .bind(member.sort_order)
+                .bind(member.now)
+                .bind(sqlx::types::Json(member.view_props))
+                .bind(sqlx::types::Json(member.preferences))
+                .execute(ex)
+                .await?;
+        } else {
+            sqlx::query(DEMO_MEMBER_INSERT_SQL)
+                .bind(&id)
+                .bind(member.project_id)
+                .bind(member.workspace_id)
+                .bind(member.member_id)
+                .bind(member.role)
+                .bind(member.now)
+                .bind(sqlx::types::Json(member.view_props))
+                .bind(sqlx::types::Json(member.preferences))
+                .execute(ex)
+                .await?;
+        }
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2314,6 +2561,97 @@ pub mod states {
             .bind(v.external_source)
             .bind(v.external_id)
             .bind(v.id)
+            .execute(ex)
+            .await?;
+        Ok(())
+    }
+
+    /// One workspace-seed state row: `create_project_states` in
+    /// `bgtasks/workspace_seed_task.py` (max-sequence probe through
+    /// the triage-excluding `StateManager`, then the insert).
+    /// `description` is `''`, `is_triage` false, `updated_by` NULL.
+    /// Moved verbatim from the seed store (PIDASHCONV-1632).
+    pub struct SeedState<'a> {
+        pub workspace_id: Uuid,
+        pub project_id: Uuid,
+        pub created_by: Uuid,
+        pub name: &'a str,
+        pub color: &'a str,
+        pub slug: &'a str,
+        pub group: &'a str,
+        pub sequence: f64,
+        pub is_default: bool,
+        pub now: DateTime<Utc>,
+    }
+
+    pub(crate) const SEED_STATE_INSERT_SQL: &str = "INSERT INTO states \
+        (created_at, updated_at, id, name, description, color, slug, created_by_id, project_id, \
+        updated_by_id, workspace_id, sequence, \"group\", \"default\", external_id, \
+        external_source, is_triage, deleted_at) \
+        VALUES ($1, $1, $2, $3, '', $4, $5, $6, $7, NULL, $8, $9, $10, $11, NULL, NULL, \
+        false, NULL) \
+        RETURNING id";
+
+    /// The seed state-row insert. Returns the new row id.
+    pub async fn add_seed<'e, E>(ex: E, state: &SeedState<'_>) -> Result<Uuid, sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        let id: Uuid = sqlx::query_scalar(SEED_STATE_INSERT_SQL)
+            .bind(state.now)
+            .bind(Uuid::new_v4())
+            .bind(state.name)
+            .bind(state.color)
+            .bind(state.slug)
+            .bind(state.created_by)
+            .bind(state.project_id)
+            .bind(state.workspace_id)
+            .bind(state.sequence)
+            .bind(state.group)
+            .bind(state.is_default)
+            .fetch_one(ex)
+            .await?;
+        Ok(id)
+    }
+
+    /// One dummy-data state row: `create_states (:82-123)` in
+    /// `bgtasks/dummy_data_task.py` — the five-row literal, no
+    /// conflict clause. Ids are the task's `::uuid` strings. Moved
+    /// verbatim from the dummy store (PIDASHCONV-1632).
+    pub struct DemoState<'a> {
+        pub project_id: &'a str,
+        pub workspace_id: &'a str,
+        pub created_by: &'a str,
+        pub name: &'a str,
+        pub color: &'a str,
+        pub sequence: f64,
+        pub group: &'a str,
+        pub default: bool,
+        pub now: DateTime<Utc>,
+    }
+
+    pub(crate) const DEMO_STATE_INSERT_SQL: &str = "INSERT INTO states \
+        (id, name, color, project_id, sequence, workspace_id, \"group\", \"default\", \
+        created_by_id, created_at, updated_at, description, slug, is_triage) \
+        VALUES ($1::uuid, $2, $3, $4::uuid, $5, $6::uuid, $7, $8, $9::uuid, $10, $10, '', \
+        '', FALSE)";
+
+    /// The dummy-data state-row insert.
+    pub async fn add_demo<'e, E>(ex: E, state: &DemoState<'_>) -> Result<(), sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        sqlx::query(DEMO_STATE_INSERT_SQL)
+            .bind(Uuid::new_v4().to_string())
+            .bind(state.name)
+            .bind(state.color)
+            .bind(state.project_id)
+            .bind(state.sequence)
+            .bind(state.workspace_id)
+            .bind(state.group)
+            .bind(state.default)
+            .bind(state.created_by)
+            .bind(state.now)
             .execute(ex)
             .await?;
         Ok(())

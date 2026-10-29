@@ -708,6 +708,23 @@ pub mod members {
         pub now: DateTime<Utc>,
     }
 
+    /// One workspace-seed member row (`WorkspaceMember.objects.create
+    /// :535-540` in `bgtasks/workspace_seed_task.py`: role 20,
+    /// `company_role=""`, no `created_by` so NULL audit). Both props
+    /// columns bind the one `get_default_props` value
+    /// (`db/models/workspace.py:22`); `issue_props` is `get_issue_props`
+    /// (`db/models/workspace.py:110-111`). Moved verbatim from the
+    /// seed store (PIDASHCONV-1632); the caller keeps its props copy.
+    pub struct SeedMember<'a> {
+        pub workspace_id: Uuid,
+        pub member_id: Uuid,
+        pub role: i16,
+        pub company_role: &'a str,
+        pub view_props: &'a serde_json::Value,
+        pub issue_props: &'a serde_json::Value,
+        pub now: DateTime<Utc>,
+    }
+
     /// The overlay `INSERT` text verbatim (unquoted identifiers kept;
     /// D6 gap PIDASHCONV-1613).
     pub(crate) const MEMBER_INSERT_ACTIVE_SQL: &str = "INSERT INTO workspace_members \
@@ -1053,6 +1070,33 @@ pub mod members {
     pub fn workspace_bulk_deactivate_sql() -> String {
         "UPDATE workspace_members SET is_active = FALSE WHERE workspace_members.id IN (:pks)"
             .to_owned()
+    }
+
+    pub(crate) const SEED_MEMBER_INSERT_SQL: &str = "INSERT INTO workspace_members \
+        (created_at, updated_at, id, role, created_by_id, member_id, updated_by_id, \
+        workspace_id, company_role, view_props, default_props, issue_props, is_active, \
+        deleted_at, explored_features, getting_started_checklist, tips) \
+        VALUES ($1, $1, $2, $3, NULL, $4, NULL, $5, $6, $7, $7, $8, true, NULL, '{}', \
+        '{}', '{}') \
+        RETURNING id";
+
+    /// The seed bot membership insert. Returns the new row id.
+    pub async fn add_seed<'e, E>(ex: E, member: &SeedMember<'_>) -> Result<Uuid, sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        let id: Uuid = sqlx::query_scalar(SEED_MEMBER_INSERT_SQL)
+            .bind(member.now)
+            .bind(Uuid::new_v4())
+            .bind(member.role)
+            .bind(member.member_id)
+            .bind(member.workspace_id)
+            .bind(member.company_role)
+            .bind(sqlx::types::Json(member.view_props))
+            .bind(sqlx::types::Json(member.issue_props))
+            .fetch_one(ex)
+            .await?;
+        Ok(id)
     }
 }
 

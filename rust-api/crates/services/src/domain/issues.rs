@@ -2257,6 +2257,278 @@ pub async fn apply_fix_plan(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// seed + demo inserts (PIDASHCONV-1632)
+// ---------------------------------------------------------------------------
+
+/// One workspace-seed issue row: `create_project_issues` in
+/// `bgtasks/workspace_seed_task.py` — `Issue.save` with the sequence
+/// id, sort order, pod and `completed_at` already resolved by the
+/// caller (the advisory lock, the state-group completion rule and
+/// the post-save transition drive stay caller-sequenced).
+/// `description_json` is `'{}'`, `updated_by` NULL. Moved verbatim
+/// from the seed store.
+pub struct SeedIssue<'a> {
+    pub workspace_id: Uuid,
+    pub project_id: Uuid,
+    pub state_id: Uuid,
+    pub created_by: Uuid,
+    pub name: &'a str,
+    pub description_html: &'a str,
+    pub description_stripped: Option<&'a str>,
+    pub priority: &'a str,
+    pub sequence_id: i64,
+    pub sort_order: f64,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub assigned_pod_id: Option<Uuid>,
+    pub now: DateTime<Utc>,
+}
+
+const SEED_ISSUE_INSERT_SQL: &str = "INSERT INTO issues \
+    (created_at, updated_at, id, name, description_json, priority, start_date, target_date, \
+    sequence_id, created_by_id, parent_id, project_id, state_id, updated_by_id, workspace_id, \
+    description_html, description_stripped, completed_at, sort_order, point, archived_at, \
+    is_draft, external_id, external_source, description_binary, estimate_point_id, type_id, \
+    deleted_at, git_work_branch, assigned_pod_id, workpad, created_via, agent_executor, \
+    complexity_score) \
+    VALUES ($1, $1, $2, $3, '{}', $4, NULL, NULL, $5, $6, NULL, $7, $8, NULL, $9, $10, \
+    $11, $12, $13, NULL, NULL, false, NULL, NULL, NULL, NULL, NULL, NULL, '', $14, '', \
+    NULL, NULL, 0) \
+    RETURNING id";
+
+/// The seed issue-row insert. Returns the new row id.
+pub async fn insert_seed_issue<'e, E>(ex: E, issue: &SeedIssue<'_>) -> Result<Uuid, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let id: Uuid = sqlx::query_scalar(SEED_ISSUE_INSERT_SQL)
+        .bind(issue.now)
+        .bind(Uuid::new_v4())
+        .bind(issue.name)
+        .bind(issue.priority)
+        .bind(issue.sequence_id)
+        .bind(issue.created_by)
+        .bind(issue.project_id)
+        .bind(issue.state_id)
+        .bind(issue.workspace_id)
+        .bind(issue.description_html)
+        .bind(issue.description_stripped)
+        .bind(issue.completed_at)
+        .bind(issue.sort_order)
+        .bind(issue.assigned_pod_id)
+        .fetch_one(ex)
+        .await?;
+    Ok(id)
+}
+
+/// One workspace-seed sequence row: the `Issue.save` row
+/// (`issue.py:343`, NULL audit, workspace from the project) and the
+/// explicit `IssueSequence.objects.create` row (`:293-298`, NULL
+/// audit, default `sequence = 1`) share one statement shape — the
+/// caller passes the resolved sequence. Moved verbatim from the
+/// seed store.
+pub struct SeedIssueSequence {
+    pub issue_id: Uuid,
+    pub project_id: Uuid,
+    pub workspace_id: Uuid,
+    pub sequence: i64,
+    pub now: DateTime<Utc>,
+}
+
+const SEED_ISSUE_SEQUENCE_INSERT_SQL: &str = "INSERT INTO issue_sequences \
+    (created_at, updated_at, id, sequence, deleted, created_by_id, issue_id, project_id, \
+    updated_by_id, workspace_id, deleted_at) \
+    VALUES ($1, $1, $2, $3, false, NULL, $4, $5, NULL, $6, NULL) \
+    RETURNING id";
+
+/// The seed sequence-row insert. Returns the new row id.
+pub async fn insert_seed_issue_sequence<'e, E>(
+    ex: E,
+    seq: &SeedIssueSequence,
+) -> Result<Uuid, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let id: Uuid = sqlx::query_scalar(SEED_ISSUE_SEQUENCE_INSERT_SQL)
+        .bind(seq.now)
+        .bind(Uuid::new_v4())
+        .bind(seq.sequence)
+        .bind(seq.issue_id)
+        .bind(seq.project_id)
+        .bind(seq.workspace_id)
+        .fetch_one(ex)
+        .await?;
+    Ok(id)
+}
+
+/// One dummy-data issue row: `create_issues (:267-355)` in
+/// `bgtasks/dummy_data_task.py` — `bulk_create(...,
+/// ignore_conflicts=True)` replayed one row at a time, `ON
+/// CONFLICT DO NOTHING`. The caller resolves the truncated name,
+/// the `<p>` html, the sequence/sort counters and the draws. Ids
+/// are the task's `::uuid` strings. Moved verbatim from the dummy
+/// store (PIDASHCONV-1632).
+pub struct DemoIssue<'a> {
+    pub state_id: &'a str,
+    pub project_id: &'a str,
+    pub workspace_id: &'a str,
+    pub created_by: &'a str,
+    pub name: &'a str,
+    pub description_html: &'a str,
+    pub description_stripped: &'a str,
+    pub sequence_id: i32,
+    pub sort_order: f64,
+    pub start_date: Option<NaiveDate>,
+    pub target_date: Option<NaiveDate>,
+    pub priority: &'a str,
+    pub now: DateTime<Utc>,
+}
+
+const DEMO_ISSUE_INSERT_SQL: &str = "INSERT INTO issues \
+    (id, state_id, project_id, workspace_id, name, description_html, description_stripped, \
+    sequence_id, sort_order, start_date, target_date, priority, created_by_id, created_at, \
+    updated_at, description_json, is_draft, git_work_branch, workpad, complexity_score) \
+    VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6, $7, $8, $9, $10, $11, $12, \
+    $13::uuid, $14, $14, '{}', FALSE, '', '', 0) \
+    ON CONFLICT DO NOTHING";
+
+/// The dummy-data issue-row insert. Generates the row id
+/// client-side (as Django does) and returns it for the sequence,
+/// activity and link legs (pushed even on conflict, as today).
+pub async fn insert_demo_issue<'e, E>(ex: E, issue: &DemoIssue<'_>) -> Result<String, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let id = Uuid::new_v4().to_string();
+    sqlx::query(DEMO_ISSUE_INSERT_SQL)
+        .bind(&id)
+        .bind(issue.state_id)
+        .bind(issue.project_id)
+        .bind(issue.workspace_id)
+        .bind(issue.name)
+        .bind(issue.description_html)
+        .bind(issue.description_stripped)
+        .bind(issue.sequence_id)
+        .bind(issue.sort_order)
+        .bind(issue.start_date)
+        .bind(issue.target_date)
+        .bind(issue.priority)
+        .bind(issue.created_by)
+        .bind(issue.now)
+        .execute(ex)
+        .await?;
+    Ok(id)
+}
+
+/// One dummy-data sequence row: the per-issue
+/// `IssueSequence.objects.create` in `create_issues`. Ids are the
+/// task's `::uuid` strings. Moved verbatim from the dummy store.
+pub struct DemoIssueSequence<'a> {
+    pub issue_id: &'a str,
+    pub project_id: &'a str,
+    pub workspace_id: &'a str,
+    pub sequence: i64,
+    pub now: DateTime<Utc>,
+}
+
+const DEMO_ISSUE_SEQUENCE_INSERT_SQL: &str = "INSERT INTO issue_sequences \
+    (id, issue_id, sequence, project_id, workspace_id, created_at, updated_at, deleted) \
+    VALUES ($1::uuid, $2::uuid, $3, $4::uuid, $5::uuid, $6, $6, FALSE)";
+
+/// The dummy-data sequence-row insert.
+pub async fn insert_demo_issue_sequence<'e, E>(
+    ex: E,
+    seq: &DemoIssueSequence<'_>,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(DEMO_ISSUE_SEQUENCE_INSERT_SQL)
+        .bind(Uuid::new_v4().to_string())
+        .bind(seq.issue_id)
+        .bind(seq.sequence)
+        .bind(seq.project_id)
+        .bind(seq.workspace_id)
+        .bind(seq.now)
+        .execute(ex)
+        .await?;
+    Ok(())
+}
+
+/// One dummy-data assignee row: `create_issue_assignees (:391-413)`
+/// in `bgtasks/dummy_data_task.py` — `bulk_create(...,
+/// ignore_conflicts=True)` replayed one row at a time. Ids are the
+/// task's `::uuid` strings. Moved verbatim from the dummy store.
+pub struct DemoIssueAssignee<'a> {
+    pub issue_id: &'a str,
+    pub assignee_id: &'a str,
+    pub project_id: &'a str,
+    pub workspace_id: &'a str,
+    pub now: DateTime<Utc>,
+}
+
+const DEMO_ISSUE_ASSIGNEE_INSERT_SQL: &str = "INSERT INTO issue_assignees \
+    (id, issue_id, assignee_id, project_id, workspace_id, created_at, updated_at) \
+    VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6, $7) \
+    ON CONFLICT DO NOTHING";
+
+/// The dummy-data assignee-row insert.
+pub async fn insert_demo_issue_assignee<'e, E>(
+    ex: E,
+    row: &DemoIssueAssignee<'_>,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(DEMO_ISSUE_ASSIGNEE_INSERT_SQL)
+        .bind(Uuid::new_v4().to_string())
+        .bind(row.issue_id)
+        .bind(row.assignee_id)
+        .bind(row.project_id)
+        .bind(row.workspace_id)
+        .bind(row.now)
+        .bind(row.now)
+        .execute(ex)
+        .await?;
+    Ok(())
+}
+
+const TOUCH_ISSUE_SQL: &str = "UPDATE issues SET updated_at = NOW() WHERE id = $1";
+
+/// The `issue_activity` issue touch (`issue.updated_at =
+/// timezone.now(); save(update_fields=["updated_at"])`,
+/// `issue_activities_task.py:1535-1536`): no soft-delete guard —
+/// the caller probes the live row first. Moved verbatim from the
+/// dispatcher (PIDASHCONV-1632).
+pub async fn touch_issue<'e, E>(ex: E, issue_id: Uuid) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(TOUCH_ISSUE_SQL)
+        .bind(issue_id)
+        .execute(ex)
+        .await?;
+    Ok(())
+}
+
+const TOUCH_ISSUES_SQL: &str =
+    "UPDATE issues SET updated_at = NOW() WHERE id = ANY($1) AND deleted_at IS NULL";
+
+/// The per-record `updated_at` touches from the cycle/module
+/// builders, one statement over the soft-filtered set — same final
+/// rows as the per-record guarded saves. Moved verbatim from the
+/// dispatcher (PIDASHCONV-1632).
+pub async fn touch_issues<'e, E>(ex: E, issue_ids: &[Uuid]) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(TOUCH_ISSUES_SQL)
+        .bind(issue_ids)
+        .execute(ex)
+        .await?;
+    Ok(())
+}
+
 /// The ticker state-move write (`scheduling.py:700,1113,1468`):
 /// `save(update_fields=["state", "updated_at"])` — ONLY these columns.
 /// Contrast [`update_issue_state`], which additionally stamps
