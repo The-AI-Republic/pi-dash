@@ -221,8 +221,10 @@ where
 }
 
 /// [`fetch_state_list`] over [`state_list_sql_with`]: `true` is the v1
-/// scope; `false` is the MCP `list_states` scope (BUG-944-1).
-pub async fn fetch_state_list_with<'e, E>(
+/// scope; `false` is the MCP `list_states` scope (BUG-944-1). Private:
+/// the MCP-facing read is the services layer's `fetch_state_columns`
+/// (raw rows + sequence order), which builds on [`state_list_sql_with`].
+async fn fetch_state_list_with<'e, E>(
     ex: E,
     workspace_slug: &str,
     project_id: uuid::Uuid,
