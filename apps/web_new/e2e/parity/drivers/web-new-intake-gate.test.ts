@@ -16,6 +16,7 @@ import { WebNewDriver } from "./web-new";
 interface Answer {
   count?: number;
   visible?: boolean;
+  waitRejects?: boolean;
   texts?: string[];
   text?: string;
   value?: string;
@@ -117,6 +118,7 @@ class FakePage {
       },
       waitFor: async (options?: { state?: string }) => {
         self.waits.push(`${id}~${options?.state ?? "visible"}`);
+        if (self.answer(id).waitRejects === true) throw new Error(`never settled: ${id}`);
       },
       evaluate: async (fn: (...args: never[]) => unknown) => {
         self.evaluatedFns.push(String(fn).slice(0, 40));
@@ -457,6 +459,23 @@ describe("rulesOpenIntakeIssue", () => {
     const { fake, driver } = driverOn();
     await driver.rulesOpenIntakeIssue("parity-ws", "p1", "issue-7");
     expect(fake.pageCalls).toContain("goto:/parity-ws/projects/p1/intake?inboxIssueId=issue-7");
+  });
+
+  it("settles on the read-only heading when the title field never paints", async () => {
+    const { driver } = driverOn({
+      "page testid(intake-detail) role(textbox,Title)": { waitRejects: true },
+    });
+    await expect(driver.rulesOpenIntakeIssue("parity-ws", "p1", "issue-7")).resolves.toBeUndefined();
+  });
+
+  it("refuses when neither the title field nor the heading paints", async () => {
+    const { driver } = driverOn({
+      "page testid(intake-detail) role(textbox,Title)": { waitRejects: true },
+      "page testid(intake-detail) role(heading,)": { waitRejects: true },
+    });
+    await expect(driver.rulesOpenIntakeIssue("parity-ws", "p1", "issue-7")).rejects.toThrow(
+      "intake detail title never became visible"
+    );
   });
 });
 

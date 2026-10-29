@@ -22145,9 +22145,23 @@ export class WebNewDriver implements ParityDriver {
   private async intakeDetailTitleSettled(): Promise<void> {
     const root = this.page.getByTestId("intake-detail");
     await root.getByTestId("intake-detail-header").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
-    const field = root.getByRole("textbox", { name: "Title" });
-    const heading = root.getByRole("heading", { level: 1 });
-    await field.or(heading).first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    // The title is an editable field for editors and a static heading
+    // for readers; either one proves the detail settled. Race the two
+    // waits so whichever paints first wins, and fail only when neither
+    // appears within the budget.
+    const field = root.getByRole("textbox", { name: "Title" }).first();
+    const heading = root.getByRole("heading", { level: 1 }).first();
+    const fieldReady = field.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS }).then(
+      () => true,
+      () => false
+    );
+    const headingReady = heading.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS }).then(
+      () => true,
+      () => false
+    );
+    if (await Promise.race([fieldReady, headingReady])) return;
+    const settled = await Promise.all([fieldReady, headingReady]);
+    if (!settled.some(Boolean)) throw new Error("intake detail title never became visible");
   }
 
   /** The shared save indicator reports Saved after a title/description write lands. */
