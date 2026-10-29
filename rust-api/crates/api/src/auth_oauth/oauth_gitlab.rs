@@ -49,7 +49,8 @@
 //! - B4 (`adapter/base.py:299`, also in `PORTED_BUGS`): `is_signup =
 //!   bool(user)` is inverted as written (existing user reports `True`);
 //!   kept verbatim, including the `check_sync_enabled() and not
-//!   is_signup` gate that therefore syncs existing users only.
+//!   is_signup` gate that therefore syncs newly created users only,
+//!   never existing ones.
 //! - B5 (`workspace_project_join.py:76-87`, also in `PORTED_BUGS`):
 //!   `ProjectMember` bulk_create omits the non-nullable `project_id`, so
 //!   any accepted project invite turns the callback into a 500.
@@ -60,14 +61,12 @@
 //! Deferred to follow-up issues (this issue's units are the four view
 //! functions; these need transports other domains own):
 //!
-//! - avatar S3 upload + `FileAsset` create (`adapter/base.py:145-217`):
-//!   download + content-type/size validation are ported; the SigV4 PUT
-//!   belongs to the asset domain (no S3 client exists in `rust-api/`).
-//!   Until it lands the port keeps Python's own upload-failure
-//!   behaviour (avatar URL fallback, no asset row).
 //! - invite-join cache invalidation (`workspace_project_join.py:38-44`):
 //!   `RedisHandle` exposes no key-delete API; the deletes are recorded
 //!   in the invite-join spec for the owning issue.
+//!
+//! The avatar S3 upload + `FileAsset` create (`adapter/base.py:139-218`)
+//! runs through the shared `auth_oauth` helper (PIDASHCONV-1323).
 //!
 //! Sibling provider issues (PIDASHCONV-335/336/341) merge their routers
 //! in `super::routes`; merges keep both sides.
@@ -79,8 +78,12 @@ use axum::Router;
 use chrono::Utc;
 use sqlx::PgPool;
 
+use crate::auth_session::render::disallowed_redirect;
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
+use pidash_compat::response::redirect_found;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
+use pidash_services::domain::workspaces::members;
 
 /// App initiate path (`authentication/urls.py:106`).
 pub const APP_INITIATE_PATH: &str = "/auth/gitlab/";
@@ -189,10 +192,6 @@ fn owned(
     router
 }
 
-/// `handle_exception`'s generic 500 branch (same body the sibling
-/// handler ports use; the contract pins the status, not the page).
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
-
 /// Handler failure with its exact status + body.
 #[derive(Debug)]
 enum Denial {
@@ -219,17 +218,25 @@ fn pool_of(state: &AppState) -> Result<&PgPool, Denial> {
         .ok_or(Denial::ServerError)
 }
 
+fn orm_of(state: &AppState) -> Result<&pidash_db::DatabaseConnection, Denial> {
+    state.orm().ok_or(Denial::ServerError)
+}
+
 /// `HttpResponseRedirect(url)`: 302 with a `Location` header and an
-/// empty body.
+/// empty body. Django percent-encodes the URL first (`iri_to_uri`,
+/// `django/http/response.py:620`). Past `MAX_URL_REDIRECT_LENGTH`
+/// characters the final `Location` answers 400 (`DisallowedRedirect`).
 fn redirect_response(location: String) -> Response {
-    let Some(location) = crate::response_headers::header_value(&location) else {
+    let too_long =
+        location.chars().count() > pidash_services::auth_session::MAX_URL_REDIRECT_LENGTH;
+    let encoded = pidash_compat::http::iri_to_uri(&location);
+    let Some(location) = crate::response_headers::header_value(&encoded) else {
         return Denial::ServerError.into_response();
     };
-    Response::builder()
-        .status(StatusCode::FOUND)
-        .header(header::LOCATION, location)
-        .body(axum::body::Body::empty())
-        .expect("redirect response")
+    if too_long {
+        return disallowed_redirect();
+    }
+    redirect_found(location)
 }
 
 /// Django `QueryDict.get` (last wins) over the raw query pairs.
@@ -704,9 +711,12 @@ async fn app_callback(
     let allowed: Vec<&str> = allowed_owned.iter().map(String::as_str).collect();
     let callback = read_callback_session(&session);
     let code = query_last(&query, "code");
-    let query_state = query_last(&query, "state").unwrap_or_default();
+    // `request.GET.get("state")` is `None` when the param is absent, and
+    // `None != ""` always mismatches (`views/app/gitlab.py:63-66`): keep
+    // the `Option` so a missing param never equals the `""` default.
+    let query_state = query_last(&query, "state");
 
-    if query_state != callback.state {
+    if query_state.as_deref() != Some(callback.state.as_str()) {
         return Ok(redirect_response(plain_error_location(
             &base,
             callback.next_path.as_deref(),
@@ -743,7 +753,11 @@ async fn app_callback(
     )
     .await
     {
-        Ok(path) => Ok(redirect_response(success_location(&base, &path, &allowed))),
+        Ok((path, csrf_cookie)) => {
+            let mut response = redirect_response(success_location(&base, &path, &allowed));
+            super::login::push_cookie(&mut response, csrf_cookie);
+            Ok(response)
+        }
         Err(CallbackOutcome::Provider(error)) => {
             let payload: Vec<(&str, serde_json::Value)> = error
                 .payload
@@ -805,9 +819,13 @@ async fn space_callback(
 ) -> Result<Response, Denial> {
     let callback = read_callback_session(&session);
     let code = query_last(&query, "code");
-    let query_state = query_last(&query, "state").unwrap_or_default();
+    // Same `None != ""` rule as the app twin (`views/space/gitlab.py:61-65`):
+    // a missing param must not match the `""` session default.
+    let query_state = query_last(&query, "state");
 
-    if query_state == callback.state && !code.as_deref().unwrap_or("").is_empty() {
+    if query_state.as_deref() == Some(callback.state.as_str())
+        && !code.as_deref().unwrap_or("").is_empty()
+    {
         let handle = session
             .as_ref()
             .map(|axum::Extension(handle)| handle.clone());
@@ -952,8 +970,10 @@ fn invalid_email_sanitized(sanitized: &str) -> ProviderError {
 
 /// `sanitize_email` (`base.py:60-84`): falsy → `INVALID_EMAIL` (raw
 /// payload); else `str().lower().strip()` + Django `validate_email`
-/// → `INVALID_EMAIL` (sanitized payload).
+/// → `INVALID_EMAIL` (sanitized payload). Reuses the D-01 email kernel
+/// (verified against Django 4.2.30), like the Gitea twin.
 fn sanitize_email(raw: &serde_json::Value) -> Result<String, ProviderError> {
+    use crate::license::handlers_auth_forms::email_is_valid;
     if !pidash_services::auth_oauth::providers::json_truthy(raw) {
         return Err(invalid_email_raw(raw));
     }
@@ -969,203 +989,10 @@ fn sanitize_email(raw: &serde_json::Value) -> Result<String, ProviderError> {
     };
     let sanitized = sanitized.to_lowercase();
     let sanitized = sanitized.trim().to_owned();
-    if !validate_email_address(&sanitized) {
+    if !email_is_valid(&sanitized) {
         return Err(invalid_email_sanitized(&sanitized));
     }
     Ok(sanitized)
-}
-
-/// Django `EmailValidator` (`django.core.validators`, Django 6.0):
-/// 320-char cap, `@` split from the right, dot-atom/quoted-string
-/// user part, hostname + TLD domain part (no trailing dot), IP
-/// literal, `localhost` allowlist. Hand-rolled: the domain patterns
-/// use lookarounds (`(?!-)`, `(?<!-)`) the `regex` crate cannot
-/// express.
-fn validate_email_address(value: &str) -> bool {
-    // `len(value) > 320` counts characters, not bytes (Semantic trap).
-    if value.is_empty() || !value.contains('@') || value.chars().count() > 320 {
-        return false;
-    }
-    let (user_part, domain_part) = match value.rsplit_once('@') {
-        Some(pair) => pair,
-        None => return false,
-    };
-    if !valid_email_user_part(user_part) {
-        return false;
-    }
-    if domain_part == "localhost" {
-        return true;
-    }
-    valid_email_domain_part(domain_part)
-}
-
-/// `user_regex`, `re.IGNORECASE`: dot-atom or quoted-string, full
-/// match (`\Z`-anchored).
-fn valid_email_user_part(user: &str) -> bool {
-    if user.is_empty() {
-        return false;
-    }
-    if user.starts_with('"') && user.ends_with('"') && user.len() >= 2 {
-        return valid_quoted_string(&user[1..user.len() - 1]);
-    }
-    valid_dot_atom(user)
-}
-
-fn is_atom_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || "-!#$%&'*+/=?^_`{}|~".contains(c)
-}
-
-/// dot-atom: `atom(.atom)*`, ASCII case-insensitive.
-fn valid_dot_atom(user: &str) -> bool {
-    if user.is_empty() {
-        return false;
-    }
-    for atom in user.split('.') {
-        if atom.is_empty() || !atom.chars().all(is_atom_char) {
-            return false;
-        }
-    }
-    true
-}
-
-/// quoted-string inner: `([\001-\010\013\014\016-\037!#-\[\]-\177] |
-/// \\[\001-\011\013\014\016-\177])*`.
-fn valid_quoted_char(c: char) -> bool {
-    ('\u{1}'..='\u{8}').contains(&c)
-        || c == '\u{b}'
-        || c == '\u{c}'
-        || ('\u{e}'..='\u{1f}').contains(&c)
-        || ('!'..='[').contains(&c)
-        || (']'..='\u{7f}').contains(&c)
-}
-
-fn valid_quoted_escape(c: char) -> bool {
-    ('\u{1}'..='\u{9}').contains(&c)
-        || c == '\u{b}'
-        || c == '\u{c}'
-        || ('\u{e}'..='\u{7f}').contains(&c)
-}
-
-fn valid_quoted_string(inner: &str) -> bool {
-    let mut chars = inner.chars();
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            match chars.next() {
-                Some(escaped) if valid_quoted_escape(escaped) => continue,
-                _ => return false,
-            }
-        } else if valid_quoted_char(c) {
-            continue;
-        } else {
-            return false;
-        }
-    }
-    true
-}
-
-/// Unicode-letter range in the hostname patterns
-/// (`ul = "\u00a1-\uffff"`).
-fn is_hostname_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || ('\u{a1}'..='\u{10ffff}').contains(&c)
-}
-
-/// One domain label, 1-63 chars, no leading/trailing hyphen
-/// (`hostname_re` for the first label; `domain_re` interiors share
-/// the shape).
-fn valid_domain_label(label: &str) -> bool {
-    let count = label.chars().count();
-    if count == 0 || count > 63 {
-        return false;
-    }
-    let mut chars = label.chars();
-    let first = chars.next().unwrap_or('\0');
-    let last = label.chars().next_back().unwrap_or('\0');
-    if !is_hostname_char(first) || !is_hostname_char(last) {
-        return false;
-    }
-    if first == '-' || last == '-' {
-        return false;
-    }
-    label.chars().all(|c| is_hostname_char(c) || c == '-')
-}
-
-/// TLD label: `[a-z\ul-]{2,63}` (no digits) or `xn--[a-z0-9]{1,59}`,
-/// no leading/trailing hyphen (`tld_no_fqdn_re`, IGNORECASE — the
-/// `xn--` test lowercases first).
-fn valid_tld_label(label: &str) -> bool {
-    let lower = label.to_lowercase();
-    if let Some(rest) = lower.strip_prefix("xn--") {
-        let count = rest.chars().count();
-        return (1..=59).contains(&count) && rest.chars().all(|c| c.is_ascii_alphanumeric());
-    }
-    let count = label.chars().count();
-    if !(2..=63).contains(&count) {
-        return false;
-    }
-    let first = label.chars().next().unwrap_or('\0');
-    let last = label.chars().next_back().unwrap_or('\0');
-    if first == '-' || last == '-' {
-        return false;
-    }
-    label
-        .chars()
-        .all(|c| c.is_ascii_alphabetic() || ('\u{a1}'..='\u{10ffff}').contains(&c) || c == '-')
-}
-
-/// `domain_regex` + IP literal (`validate_domain_part`).
-fn valid_email_domain_part(domain: &str) -> bool {
-    if domain.is_empty() {
-        return false;
-    }
-    if let Some(inner) = domain
-        .strip_prefix('[')
-        .and_then(|rest| rest.strip_suffix(']'))
-    {
-        return valid_ipv46_literal(inner);
-    }
-    let labels: Vec<&str> = domain.split('.').collect();
-    if labels.len() < 2 {
-        return false;
-    }
-    let (tld, host) = labels.split_last().expect("at least two labels");
-    if !valid_tld_label(tld) {
-        // Case-insensitivity: the patterns compile with IGNORECASE;
-        // the char checks above are case-agnostic except ASCII
-        // alpha, which accepts both cases already.
-        return false;
-    }
-    if host.is_empty() {
-        return false;
-    }
-    if !valid_domain_label(host[0]) {
-        return false;
-    }
-    host[1..].iter().all(|label| valid_domain_label(label))
-}
-
-/// `validate_ipv46_address` for `[...]` literals: dotted quad (each
-/// octet `25[0-5]|2[0-4]\d|[0-1]?\d?\d`, leading zeros accepted) or
-/// an IPv6 address.
-fn valid_ipv46_literal(literal: &str) -> bool {
-    if valid_ipv4_literal(literal) {
-        return true;
-    }
-    literal.parse::<std::net::Ipv6Addr>().is_ok()
-}
-
-fn valid_ipv4_octet(octet: &str) -> bool {
-    if octet.is_empty() || octet.len() > 3 || !octet.bytes().all(|b| b.is_ascii_digit()) {
-        return false;
-    }
-    match octet.parse::<u32>() {
-        Ok(v) => v <= 255,
-        Err(_) => false,
-    }
-}
-
-fn valid_ipv4_literal(literal: &str) -> bool {
-    let parts: Vec<&str> = literal.split('.').collect();
-    parts.len() == 4 && parts.iter().all(|part| valid_ipv4_octet(part))
 }
 
 // ---------------------------------------------------------------------------
@@ -1230,8 +1057,9 @@ pub const SIGNUP_DISABLED_CODE: i32 = 5015;
 pub const SIGNUP_DISABLED_NAME: &str = "SIGNUP_DISABLED";
 
 /// `__check_signup` (`base.py:103-122`): with signups disabled
-/// (`ENABLE_SIGNUP == "0"`, legacy default `"1"`) a missing workspace
-/// invite raises `SIGNUP_DISABLED` (payload: the sanitized email). A
+/// (`ENABLE_SIGNUP == "0"`, legacy default `"1"`) a missing live workspace
+/// invite raises `SIGNUP_DISABLED` (payload: the sanitized email). The
+/// default manager excludes soft-deleted invites. A
 /// config-store or DB failure escapes (Django 500), it is not a
 /// provider error.
 async fn check_signup(pool: &PgPool, secret_key: &str, email: &str) -> Result<(), CallbackOutcome> {
@@ -1262,12 +1090,13 @@ async fn check_signup(pool: &PgPool, secret_key: &str, email: &str) -> Result<()
     if enabled != "0" {
         return Ok(());
     }
-    let invited: Option<(i32,)> =
-        sqlx::query_as(r#"SELECT 1 FROM "workspace_member_invites" WHERE email = $1 LIMIT 1"#)
-            .bind(email)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| CallbackOutcome::Server)?;
+    let invited: Option<(i32,)> = sqlx::query_as(
+        r#"SELECT 1 FROM "workspace_member_invites" WHERE email = $1 AND deleted_at IS NULL LIMIT 1"#,
+    )
+    .bind(email)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| CallbackOutcome::Server)?;
     if invited.is_none() {
         return Err(CallbackOutcome::Provider(ProviderError::with_payload(
             SIGNUP_DISABLED_CODE,
@@ -1319,192 +1148,10 @@ fn random_color() -> String {
     format!("#{}", &uuid::Uuid::new_v4().simple().to_string()[..6])
 }
 
-/// New-user row (`base.py:299-328` + `User.save()`, `user.py:167-187`):
-/// identity + names + password hash; `display_name` is backfilled
-/// from the local part BEFORE the insert (the `else` arm is dead —
-/// `len(split)` is never 0); `is_active` defaults `True`;
-/// `last_login_medium` keeps the `"email"` default until
-/// `save_user_data` overwrites it.
-#[allow(clippy::too_many_arguments)]
-async fn insert_user(
-    pool: &PgPool,
-    id: uuid::Uuid,
-    email: &str,
-    username: &str,
-    password_hash: &str,
-    first_name: &str,
-    last_name: &str,
-    now: chrono::DateTime<Utc>,
-) -> Result<(), Denial> {
-    let display_name = email.split('@').next().unwrap_or_default();
-    sqlx::query(
-        r#"INSERT INTO "users"
-           ("id", "password", "last_login", "username", "mobile_number", "email",
-            "display_name", "first_name", "last_name", "avatar", "avatar_asset_id",
-            "cover_image", "cover_image_asset_id", "date_joined", "created_at", "updated_at",
-            "last_location", "created_location", "is_superuser", "is_managed",
-            "is_password_expired", "is_active", "is_staff", "is_email_verified",
-            "is_password_autoset", "is_password_reset_required", "token", "last_active",
-            "last_login_time", "last_logout_time", "last_login_ip", "last_logout_ip",
-            "last_login_medium", "last_login_uagent", "token_updated_at", "is_bot",
-            "bot_type", "user_timezone", "is_email_valid", "masked_at")
-           VALUES ($1,$2,NULL,$3,NULL,$4,$5,$6,$7,'',NULL,
-                   NULL,NULL,$8,$8,$8,
-                   '','',FALSE,FALSE,
-                   FALSE,TRUE,FALSE,TRUE,
-                   TRUE,FALSE,'',$8,
-                   NULL,NULL,'','',
-                   'email','',NULL,FALSE,
-                   NULL,'UTC',FALSE,NULL)"#,
-    )
-    .bind(id)
-    .bind(password_hash)
-    .bind(username)
-    .bind(email)
-    .bind(display_name)
-    .bind(first_name)
-    .bind(last_name)
-    .bind(now)
-    .execute(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(())
-}
-
-/// `Profile.objects.create(user=user)` (`base.py:342`): every column
-/// with its Python-side default.
-async fn insert_profile(
-    pool: &PgPool,
-    id: uuid::Uuid,
-    user_id: uuid::Uuid,
-    now: chrono::DateTime<Utc>,
-) -> Result<(), Denial> {
-    sqlx::query(
-        r#"INSERT INTO "profiles"
-           ("id", "user_id", "theme", "is_app_rail_docked", "is_tour_completed",
-            "onboarding_step", "use_case", "role", "is_onboarded", "last_workspace_id",
-            "billing_address_country", "billing_address", "has_billing_address",
-            "company_name", "notification_view_mode", "is_smooth_cursor_enabled",
-            "is_mobile_onboarded", "mobile_onboarding_step", "mobile_timezone_auto_set",
-            "language", "start_of_the_week", "goals", "background_color",
-            "is_navigation_tour_completed", "has_marketing_email_consent",
-            "is_subscribed_to_changelog", "product_tour", "settings",
-            "created_at", "updated_at")
-           VALUES ($1,$2,'{}',TRUE,FALSE,
-                   $3,NULL,NULL,FALSE,NULL,
-                   'INDIA',NULL,FALSE,
-                   '','full',FALSE,
-                   FALSE,$4,FALSE,
-                   'en',0,'{}',$5,
-                   FALSE,FALSE,
-                   FALSE,$6,'{}',
-                   $7,$7)"#,
-    )
-    .bind(id)
-    .bind(user_id)
-    .bind(serde_json::json!({
-        "profile_complete": false,
-        "workspace_create": false,
-        "workspace_invite": false,
-        "workspace_join": false,
-    }))
-    .bind(serde_json::json!({
-        "profile_complete": false,
-        "workspace_create": false,
-        "workspace_join": false,
-    }))
-    .bind(random_color())
-    .bind(serde_json::json!({
-        "work_items": false,
-        "cycles": false,
-        "modules": false,
-        "intake": false,
-        "pages": false,
-    }))
-    .bind(now)
-    .execute(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(())
-}
-
-/// `create_user_notification` post_save receiver
-/// (`user.py:306-317`): fires on user create for non-bots.
-async fn insert_notification_preference(
-    pool: &PgPool,
-    id: uuid::Uuid,
-    user_id: uuid::Uuid,
-    now: chrono::DateTime<Utc>,
-) -> Result<(), Denial> {
-    sqlx::query(
-        r#"INSERT INTO "user_notification_preferences"
-           ("id", "created_at", "updated_at", "created_by_id", "updated_by_id", "deleted_at",
-            "user_id", "workspace_id", "project_id",
-            "property_change", "state_change", "comment", "mention", "issue_completed")
-           VALUES ($1,$2,$2,NULL,NULL,NULL,$3,NULL,NULL,TRUE,TRUE,TRUE,TRUE,TRUE)"#,
-    )
-    .bind(id)
-    .bind(now)
-    .bind(user_id)
-    .execute(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(())
-}
-
-/// Avatar content types (`base.py:170-176`).
-fn avatar_extension(content_type: &str) -> Option<&'static str> {
-    match content_type {
-        "image/jpeg" | "image/jpg" => Some("jpg"),
-        "image/png" => Some("png"),
-        "image/gif" => Some("gif"),
-        "image/webp" => Some("webp"),
-        _ => None,
-    }
-}
-
-/// `download_and_upload_avatar` (`base.py:145-217`): downloads (10s
-/// timeout), enforces the content-length / content-type / total-size
-/// gates, then uploads to storage. The SigV4 PUT + `FileAsset` create
-/// need the asset domain's S3 transport (follow-up issue); until it
-/// lands the port keeps Python's own upload-failure behaviour — the
-/// avatar URL fallback with no asset row.
-async fn download_avatar_bytes(avatar_url: &str, max_size: u64) -> Option<(Vec<u8>, String)> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .ok()?;
-    let response = client.get(avatar_url).send().await.ok()?;
-    if !response.status().is_success() {
-        return None;
-    }
-    if let Some(length) = response
-        .headers()
-        .get(reqwest::header::CONTENT_LENGTH)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse::<u64>().ok())
-    {
-        if length > max_size {
-            return None;
-        }
-    }
-    let content_type = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("image/jpeg")
-        .split(';')
-        .next()
-        .unwrap_or("image/jpeg")
-        .trim()
-        .to_owned();
-    avatar_extension(&content_type)?;
-    let bytes = response.bytes().await.ok()?.to_vec();
-    if bytes.len() as u64 > max_size {
-        return None;
-    }
-    Some((bytes, content_type))
-}
+// NOTE: the new-user INSERT, the signup profile row and the
+// `create_user_notification` post_save insert moved to
+// `domain::identity::create_user` (PIDASHCONV-1525). The signup arm
+// below calls it directly.
 
 /// `get_default_props` (`workspace.py:22-50`): the JSON default for
 /// member `view_props` / `default_props`.
@@ -1573,10 +1220,13 @@ async fn gitlab_sync_enabled(pool: &PgPool, secret_key: &str) -> Result<bool, De
     }))
 }
 
-/// `sync_user_data` (`base.py:256-287`, existing user + sync
-/// enabled): names, `display_name` (stored or derived), avatar URL
-/// fallback (S3 upload is the follow-up gap — old-asset delete is
-/// skipped with it), then a full-row save with its side effects.
+/// `sync_user_data` (`base.py:256-287`, new user + sync enabled): names,
+/// `display_name` (stored or derived), then the avatar pair the call site
+/// resolved: on upload success `asset` carries the new FK and `avatar` is
+/// `""` when a signup asset existed (what `delete_old_avatar` wrote) or
+/// the provider URL otherwise (the delete was a no-op); on failure
+/// `avatar` is the provider URL and `asset` is `None` (`base.py:278-284`).
+#[allow(clippy::too_many_arguments)]
 async fn sync_user_data(
     pool: &PgPool,
     user: &DbUser,
@@ -1584,21 +1234,24 @@ async fn sync_user_data(
     last_name: &str,
     display_name: &str,
     avatar: &str,
+    asset: Option<uuid::Uuid>,
     now: chrono::DateTime<Utc>,
 ) -> Result<(), Denial> {
     let is_staff = user.is_staff || user.is_superuser;
-    sqlx::query(
-        r#"UPDATE "users" SET "first_name" = $1, "last_name" = $2, "display_name" = $3,
-                  "avatar" = $4, "is_staff" = $5, "updated_at" = $6 WHERE "id" = $7"#,
+    pidash_services::domain::identity::sync_user_data(
+        pool,
+        user.id,
+        &pidash_services::domain::identity::SyncUpdate {
+            first_name,
+            last_name,
+            display_name,
+            avatar: Some(avatar),
+            avatar_asset_id: Some(asset),
+            is_staff: Some(is_staff),
+            touch_updated_at: true,
+            now,
+        },
     )
-    .bind(first_name)
-    .bind(last_name)
-    .bind(display_name)
-    .bind(avatar)
-    .bind(is_staff)
-    .bind(now)
-    .bind(user.id)
-    .execute(pool)
     .await
     .map_err(|_| Denial::ServerError)?;
     Ok(())
@@ -1636,22 +1289,26 @@ async fn save_user_data(
         user.display_name.clone()
     };
     let is_staff = user.is_staff || user.is_superuser;
-    sqlx::query(
-        r#"UPDATE "users" SET "last_login_medium" = 'gitlab', "last_active" = $1,
-                  "last_login_time" = $1, "last_login_ip" = $2, "last_login_uagent" = $3,
-                  "token_updated_at" = $1, "token" = $4, "is_active" = TRUE,
-                  "avatar" = $5, "display_name" = $6, "is_staff" = $7, "updated_at" = $1
-           WHERE "id" = $8"#,
+    pidash_services::domain::identity::save_user_data(
+        pool,
+        user.id,
+        &pidash_services::domain::identity::LoginStamps {
+            medium: Some("gitlab"),
+            login_ip: ip,
+            login_uagent: user_agent,
+            avatar: Some(avatar),
+            avatar_asset_id: None,
+            display_name: Some(pidash_services::domain::identity::DisplayNameUpdate::Bound(
+                &display_name,
+            )),
+            is_staff: Some(pidash_services::domain::identity::StaffSync::Value(
+                is_staff,
+            )),
+            touch_updated_at: true,
+            rotated_token: &token,
+            now,
+        },
     )
-    .bind(now)
-    .bind(ip)
-    .bind(user_agent)
-    .bind(token)
-    .bind(avatar)
-    .bind(display_name)
-    .bind(is_staff)
-    .bind(user.id)
-    .execute(pool)
     .await
     .map_err(|_| Denial::ServerError)?;
     Ok(())
@@ -1937,38 +1594,18 @@ async fn bulk_insert_workspace_members(
     if rows.is_empty() {
         return Ok(());
     }
-    let mut builder: sqlx::QueryBuilder<sqlx::Postgres> = sqlx::QueryBuilder::new(
-        r#"INSERT INTO "workspace_members" ("id", "created_at", "updated_at",
-           "created_by_id", "updated_by_id", "deleted_at",
-           "workspace_id", "member_id", "role", "company_role",
-           "view_props", "default_props", "issue_props", "is_active",
-           "getting_started_checklist", "tips", "explored_features") "#,
-    );
     let view_props = default_props_json();
     let issue_props = issue_props_json();
-    builder.push_values(rows, |mut row, member| {
-        row.push_bind(uuid::Uuid::new_v4())
-            .push_bind(now)
-            .push_bind(now)
-            .push_bind(member.created_by_id)
-            .push_bind(Option::<uuid::Uuid>::None)
-            .push_bind(Option::<chrono::DateTime<Utc>>::None)
-            .push_bind(member.workspace_id)
-            .push_bind(member.member_id)
-            .push_bind(member.role)
-            .push_bind(Option::<String>::None)
-            .push_bind(view_props.clone())
-            .push_bind(view_props.clone())
-            .push_bind(issue_props.clone())
-            .push_bind(true)
-            .push_bind(serde_json::json!({}))
-            .push_bind(serde_json::json!({}))
-            .push_bind(serde_json::json!({}));
-    });
-    builder.push(" ON CONFLICT DO NOTHING");
-    builder
-        .build()
-        .execute(pool)
+    let bulk_rows: Vec<members::BulkMember> = rows
+        .iter()
+        .map(|member| members::BulkMember {
+            workspace_id: member.workspace_id,
+            user_id: member.member_id,
+            role: member.role,
+            created_by: member.created_by_id,
+        })
+        .collect();
+    members::bulk_add(pool, &bulk_rows, &view_props, &issue_props, now)
         .await
         .map_err(|_| Denial::ServerError)?;
     Ok(())
@@ -1987,34 +1624,25 @@ async fn bulk_insert_project_members(
     if rows.is_empty() {
         return Ok(());
     }
-    let mut builder: sqlx::QueryBuilder<sqlx::Postgres> = sqlx::QueryBuilder::new(
-        r#"INSERT INTO "project_members" ("id", "created_at", "updated_at",
-           "created_by_id", "updated_by_id", "deleted_at",
-           "workspace_id", "member_id", "comment", "role",
-           "view_props", "default_props", "preferences", "sort_order", "is_active") "#,
-    );
     let view_props = default_props_json();
-    builder.push_values(rows, |mut row, member| {
-        row.push_bind(uuid::Uuid::new_v4())
-            .push_bind(now)
-            .push_bind(now)
-            .push_bind(member.created_by_id)
-            .push_bind(Option::<uuid::Uuid>::None)
-            .push_bind(Option::<chrono::DateTime<Utc>>::None)
-            .push_bind(member.workspace_id)
-            .push_bind(member.member_id)
-            .push_bind(Option::<String>::None)
-            .push_bind(member.role)
-            .push_bind(view_props.clone())
-            .push_bind(view_props.clone())
-            .push_bind(default_preferences_json())
-            .push_bind(65535.0_f64)
-            .push_bind(true);
-    });
-    builder.push(" ON CONFLICT DO NOTHING");
-    builder
-        .build()
-        .execute(pool)
+    let prefs = default_preferences_json();
+    let bulk: Vec<pidash_services::domain::projects::members::BulkRow> = rows
+        .iter()
+        .map(
+            |member| pidash_services::domain::projects::members::BulkRow {
+                workspace_id: member.workspace_id,
+                project_id: None,
+                user_id: member.member_id,
+                role: pidash_services::domain::projects::members::RoleBind::Int(i64::from(
+                    member.role,
+                )),
+                created_by: member.created_by_id,
+                created_at: now,
+                updated_at: now,
+            },
+        )
+        .collect();
+    pidash_services::domain::projects::members::bulk_add(pool, &bulk, &view_props, &prefs, false)
         .await
         .map_err(|_| Denial::ServerError)?;
     Ok(())
@@ -2024,57 +1652,13 @@ async fn bulk_insert_project_members(
 // Login + redirection
 // ---------------------------------------------------------------------------
 
-/// `user.get_session_auth_hash()`: the make side of
-/// `verify_session_hash` (`license/mod.rs`): HMAC-SHA256 over the
-/// password field, keyed by SHA256(salt + secret), hex-encoded.
-fn make_session_auth_hash(password_field: &str, secret_key: &[u8]) -> String {
-    use hmac::{Hmac, Mac};
-    use sha2::{Digest, Sha256};
-    let key = Sha256::digest(
-        [
-            crate::license::SESSION_AUTH_HASH_SALT.as_bytes(),
-            secret_key,
-        ]
-        .concat(),
-    );
-    let mut mac = Hmac::<Sha256>::new_from_slice(&key).expect("HMAC-SHA256 accepts any key length");
-    mac.update(password_field.as_bytes());
-    let bytes = mac.finalize().into_bytes();
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0x0f) as usize] as char);
-    }
-    out
-}
-
-/// `user_login` (`authentication/utils/login.py:13-28`) with
-/// `is_app=True`: Django `login()` keys plus the `device_info` dict.
-/// (Django also cycles the session key; the session layer exposes no
-/// cycle operation, so the keys land on the current session — the
-/// cookie behaviour is unchanged: a mutated session is persisted.)
-fn user_login(
-    handle: &SessionHandle,
-    user: &DbUser,
-    user_agent: Option<&str>,
-    ip: Option<&str>,
-    domain: &str,
-    secret_key: &[u8],
-) {
+/// `device_info` half of `user_login`
+/// (`authentication/utils/login.py:21-25`): the `login()` half (rotation,
+/// the auth trio, `last_login`, the CSRF cookie) runs first via
+/// [`super::login::login_session_keys`]; this writes only the
+/// `device_info` dict.
+fn user_login(handle: &SessionHandle, user_agent: Option<&str>, ip: Option<&str>, domain: &str) {
     let mut session = handle.lock();
-    session.set(
-        "_auth_user_id".to_owned(),
-        serde_json::Value::String(user.id.to_string()),
-    );
-    session.set(
-        "_auth_user_hash".to_owned(),
-        serde_json::Value::String(make_session_auth_hash(&user.password, secret_key)),
-    );
-    session.set(
-        "_auth_user_backend".to_owned(),
-        serde_json::Value::String(crate::license::MODEL_BACKEND.to_owned()),
-    );
     session.set(
         "device_info".to_owned(),
         crate::license::handlers_auth_forms::device_info(user_agent.unwrap_or(""), ip, domain),
@@ -2092,20 +1676,15 @@ async fn redirection_path(
     now: chrono::DateTime<Utc>,
 ) -> Result<String, Denial> {
     // `Profile.objects.get_or_create(user=user)`.
-    let profile: Option<(bool, Option<uuid::Uuid>)> = sqlx::query_as(
-        r#"SELECT "is_onboarded", "last_workspace_id" FROM "profiles" WHERE "user_id" = $1"#,
+    let path = pidash_services::domain::identity::get_or_create_profile(
+        pool,
+        user_id,
+        now,
+        &random_color(),
     )
-    .bind(user_id)
-    .fetch_optional(pool)
     .await
     .map_err(|_| Denial::ServerError)?;
-    let (is_onboarded, last_workspace_id) = match profile {
-        Some(found) => found,
-        None => {
-            insert_profile(pool, uuid::Uuid::new_v4(), user_id, now).await?;
-            (false, None)
-        }
-    };
+    let (is_onboarded, last_workspace_id) = (path.is_onboarded, path.last_workspace_id);
     if !is_onboarded {
         return Ok("onboarding".to_owned());
     }
@@ -2177,7 +1756,8 @@ fn name_or_empty(value: &serde_json::Value) -> String {
 /// → `user_login` → redirect path, `views/app/gitlab.py:92-104`):
 /// token exchange, user fetch, login-or-signup, account upsert,
 /// session login. Returns the redirect `path` (`next_path or
-/// get_redirection_path(user)`).
+/// get_redirection_path(user)`) plus the rotated `csrftoken` `Set-Cookie`
+/// value for the success redirect.
 #[allow(clippy::too_many_arguments)]
 async fn callback_success(
     state: &AppState,
@@ -2187,7 +1767,7 @@ async fn callback_success(
     handle: Option<SessionHandle>,
     peer: Option<std::net::SocketAddr>,
     is_space: bool,
-) -> Result<String, CallbackOutcome> {
+) -> Result<(String, String), CallbackOutcome> {
     let pool = pool_of(state)?;
     let settings = state.settings();
     let secret = settings.secret_key.clone();
@@ -2241,7 +1821,10 @@ async fn callback_success(
     let email = sanitize_email(&user_data.email).map_err(CallbackOutcome::Provider)?;
     let found = find_user_by_email(pool, &email).await?;
     // B4: `is_signup = bool(user)` — inverted as written.
-    let _is_signup = found.is_some();
+    let is_signup = found.is_some();
+    // Avatar I/O client (`S3Storage(request)` signs the public host,
+    // `base.py:198` — `is_server=False`).
+    let client = reqwest::Client::new();
 
     let user_agent = headers
         .get(header::USER_AGENT)
@@ -2273,29 +1856,66 @@ async fn callback_success(
             );
             let first_name = name_or_empty(&user_data.user.first_name);
             let last_name = name_or_empty(&user_data.user.last_name);
-            insert_user(
-                pool,
-                id,
-                &email,
-                &username,
-                &password_hash,
-                &first_name,
-                &last_name,
-                now,
+            // `User(...)` + first `save()` with the `post_save`
+            // preferences row and the adapter profile row, all inside
+            // `domain::identity::create_user`.
+            pidash_services::domain::identity::create_user(
+                orm_of(state)?,
+                &pidash_services::domain::identity::NewUser {
+                    id: Some(id),
+                    email: &email,
+                    username,
+                    password_hash: password_hash.clone(),
+                    first_name: &first_name,
+                    last_name: &last_name,
+                    display_name: email.split('@').next().unwrap_or_default().to_owned(),
+                    avatar: "",
+                    is_email_verified: true,
+                    is_password_autoset: true,
+                    last_active: Some(now),
+                    login_ip: Some(""),
+                    login_uagent: Some(""),
+                    is_bot: false,
+                    now,
+                    profile: Some(pidash_services::domain::identity::NewProfile {
+                        company_name: "",
+                        background_color: random_color(),
+                    }),
+                },
             )
-            .await?;
-            // Avatar: attempt the download for side-effect parity,
-            // keep the URL fallback (S3 upload is the follow-up gap).
-            let avatar = match &user_data.user.avatar {
-                serde_json::Value::String(url) if !url.is_empty() => {
-                    let _ = download_avatar_bytes(url, max_avatar).await;
-                    url.clone()
-                }
+            .await
+            .map_err(|_| Denial::ServerError)?;
+            // Avatar (`base.py:330-339`): success sets the FK too, failure
+            // keeps the provider URL (persisted by `save_user_data`
+            // below). No old avatar exists to delete.
+            let avatar_url = match &user_data.user.avatar {
+                serde_json::Value::String(url) if !url.is_empty() => url.clone(),
                 _ => String::new(),
             };
-            insert_profile(pool, uuid::Uuid::new_v4(), id, now).await?;
-            insert_notification_preference(pool, uuid::Uuid::new_v4(), id, now).await?;
-            DbUser {
+            let mut signup_asset = None;
+            if !avatar_url.is_empty() {
+                if let Some(asset_id) = super::download_and_upload_avatar(
+                    &client,
+                    pool,
+                    &settings.storage,
+                    if is_secure { "https" } else { "http" },
+                    &host,
+                    PROVIDER,
+                    &avatar_url,
+                    id,
+                    max_avatar,
+                    now,
+                )
+                .await
+                {
+                    pidash_services::domain::identity::stamp_avatar_asset(pool, id, asset_id)
+                        .await
+                        .map_err(|_| Denial::ServerError)?;
+                    signup_asset = Some(asset_id);
+                }
+            }
+            let avatar = avatar_url;
+            let mut created = DbUser {
                 id,
                 email: email.clone(),
                 password: password_hash,
@@ -2304,39 +1924,77 @@ async fn callback_success(
                 is_staff: false,
                 display_name: email.split('@').next().unwrap_or_default().to_owned(),
                 avatar,
-            }
-        }
-        Some(existing) => {
-            if gitlab_sync_enabled(pool, secret.as_str()).await? {
+            };
+            // IDP sync (`base.py:345`): `check_sync_enabled() and not
+            // is_signup` — with the inverted flag this runs for NEW
+            // users only, never existing ones (PB-1024).
+            if !is_signup && gitlab_sync_enabled(pool, secret.as_str()).await? {
                 let first_name = name_or_empty(&user_data.user.first_name);
                 let last_name = name_or_empty(&user_data.user.last_name);
                 let display_name = get_display_name(&email);
-                let avatar = match &user_data.user.avatar {
-                    serde_json::Value::String(url) if !url.is_empty() => {
-                        let _ = download_avatar_bytes(url, max_avatar).await;
-                        url.clone()
-                    }
+                let avatar_url = match &user_data.user.avatar {
+                    serde_json::Value::String(url) if !url.is_empty() => url.clone(),
                     _ => String::new(),
+                };
+                // `delete_old_avatar` + `download_and_upload_avatar`
+                // (`base.py:278-284`): the signup asset is the old avatar.
+                // On success only the FK moves — Django never writes
+                // `avatar` here, so it keeps the `''` the delete wrote
+                // when a signup asset existed, and the signup provider
+                // URL otherwise (the delete is a no-op without one).
+                // The provider URL lands only when the upload fails.
+                super::delete_old_avatar(
+                    &client,
+                    pool,
+                    &settings.storage,
+                    if is_secure { "https" } else { "http" },
+                    &host,
+                    id,
+                    signup_asset,
+                    now,
+                )
+                .await;
+                let (avatar, asset) = match super::download_and_upload_avatar(
+                    &client,
+                    pool,
+                    &settings.storage,
+                    if is_secure { "https" } else { "http" },
+                    &host,
+                    PROVIDER,
+                    &avatar_url,
+                    id,
+                    max_avatar,
+                    now,
+                )
+                .await
+                {
+                    Some(asset_id) => (
+                        if signup_asset.is_some() {
+                            String::new()
+                        } else {
+                            avatar_url.clone()
+                        },
+                        Some(asset_id),
+                    ),
+                    None => (avatar_url, None),
                 };
                 sync_user_data(
                     pool,
-                    &existing,
+                    &created,
                     &first_name,
                     &last_name,
                     &display_name,
                     &avatar,
+                    asset,
                     now,
                 )
                 .await?;
-                DbUser {
-                    display_name,
-                    avatar,
-                    ..existing
-                }
-            } else {
-                existing
+                created.display_name = display_name;
+                created.avatar = avatar;
             }
+            created
         }
+        Some(existing) => existing,
     };
 
     // `save_user_data()`: stamps (+ activation mail) and the save.
@@ -2375,32 +2033,39 @@ async fn callback_success(
     // `create_update_account(user)` (B6: DB errors are swallowed).
     create_update_account(pool, &user.id, &user_data, &token_data, now).await;
 
-    // `user_login(request, user, is_app=True)` on the app path,
-    // `user_login(request, user, is_space=True)` on the space path
-    // (`utils/login.py:21-25` records the matching base as the
-    // `device_info` domain).
+    // `user_login(request, user, ...)` (`utils/login.py:13-28`): the
+    // shared `login()` half first (rotation, trio, `last_login`, CSRF
+    // cookie), then the `device_info` dict (`login.py:21-25` records the
+    // matching base as the domain).
     let handle = handle.ok_or(CallbackOutcome::Server)?;
     let domain = if is_space {
         space_base(settings)
     } else {
         app_base(settings)
     };
-    user_login(
+    let csrf_cookie = super::login::login_session_keys(
         &handle,
-        &user,
-        user_agent.as_deref(),
-        ip.as_deref(),
-        &domain,
+        pool,
+        user.id,
+        &user.password,
         secret.as_bytes(),
-    );
+        settings,
+        now,
+    )
+    .await
+    .map_err(|_| CallbackOutcome::Server)?;
+    user_login(&handle, user_agent.as_deref(), ip.as_deref(), &domain);
 
     // `path = next_path or get_redirection_path(user)`.
     if let Some(next) = session_next_path {
         if !next.is_empty() {
-            return Ok(next);
+            return Ok((next, csrf_cookie));
         }
     }
-    Ok(redirection_path(pool, user.id, &email, now).await?)
+    Ok((
+        redirection_path(pool, user.id, &email, now).await?,
+        csrf_cookie,
+    ))
 }
 
 /// `create_update_account` (`adapter/oauth.py:107-140`, gitlab
@@ -2417,8 +2082,8 @@ async fn create_update_account(
     token_data: &pidash_services::auth_oauth::providers::TokenData,
     now: chrono::DateTime<Utc>,
 ) {
-    use pidash_db::auth_oauth::queries::account::{
-        create_account, find_account_id, update_account, NewAccount, TokenFields,
+    use pidash_services::domain::identity::account::{
+        create_account, find_account_id, rotate_account_tokens, NewAccount, TokenFields,
     };
     let tokens = TokenFields {
         access_token: text_or_none(&token_data.access_token),
@@ -2454,7 +2119,7 @@ async fn create_update_account(
                 .fetch_optional(pool)
                 .await;
             if let Ok(Some((created_at, metadata))) = loaded {
-                let _ = update_account(
+                let _ = rotate_account_tokens(
                     pool,
                     id,
                     created_at,
@@ -2489,6 +2154,16 @@ async fn create_update_account(
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn overlong_redirect_location_answers_400() {
+        let long = format!("http://app.test/?{}", "a".repeat(17_000));
+        assert_eq!(redirect_response(long).status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            redirect_response("http://app.test/?next_path=/x".to_owned()).status(),
+            StatusCode::FOUND
+        );
+    }
 
     fn fixtures_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/auth_oauth")
@@ -2706,87 +2381,53 @@ mod tests {
         );
     }
 
-    // -- email validator (vectors verified against Django 6.0.5) -----------
+    // -- email validator (vectors verified against Django 4.2.30) -----------
+    // The verdicts below run through `sanitize_email`, so they pin the
+    // wiring to the shared kernel too. The kernel's own suite
+    // (`handlers_auth_forms`) pins the full 4.2.30 matrix (quoted
+    // strings, IP literals, IDN, 64-char labels, the 320-char cap).
 
     #[test]
     fn email_validator_matches_django() {
-        let valid = [
-            "a@b.com",
-            "A@B.COM",
-            "a.b+c@sub.example.co",
-            "x@localhost",
-            "\"a\\\"b\"@c.com",
-            "a@[1.2.3.4]",
-            "a@[::1]",
-            "x@[127.0.0.1]",
-            "a@xn--nxasmq6b.example",
-            "a@XN--NXASMQ6B.example",
-            "test@münchen.de",
-            "x@y.zz",
-        ];
+        // Django 4.2.30 allows digits in the TLD; the old Django-6
+        // port rejected every address here (PIDASHCONV-1360).
+        for address in ["dev@corp.k8s", "ops@host.lan2", "x@y.z1"] {
+            assert_eq!(
+                sanitize_email(&serde_json::Value::String(address.to_owned())).expect("valid"),
+                address,
+                "valid: {address}",
+            );
+        }
+        let valid = ["a@b.com", "x@localhost", "a.b+c@sub.example.co"];
         for address in valid {
-            assert!(validate_email_address(address), "valid: {address}");
+            sanitize_email(&serde_json::Value::String(address.to_owned())).expect("valid");
         }
         let invalid = [
-            "LOCALHOST@LOCALHOST",
+            "plainaddress",
             "a@b",
             "a@b.c",
-            "a@-b.com",
-            "a@b-.com",
             "a@b..com",
-            ".a@b.com",
-            "a.@b.com",
-            "a..b@c.com",
-            "\"a b\"@c.com",
-            "a b@c.com",
             "@c.com",
             "a@",
+            "a b@c.com",
             "a@[999.1.1.1]",
-            "a@[not-an-ip]",
-            "plainaddress",
-            "a@b@c.com",
             "user@tld",
-            "üñîçødé@example.com",
-            "x@y.z1",
             "x@1.2.3.4",
         ];
         for address in invalid {
-            assert!(!validate_email_address(address), "invalid: {address}");
+            let error = sanitize_email(&serde_json::Value::String(address.to_owned()))
+                .expect_err("invalid");
+            assert_eq!(error.code, INVALID_EMAIL_CODE, "invalid: {address}");
         }
-        // 64-char labels and the 320-char cap.
-        assert!(!validate_email_address(&format!(
-            "a@{}",
-            "b".repeat(64) + ".com"
-        )));
-        assert!(!validate_email_address(&format!("a@b.{}", "c".repeat(64))));
-        assert!(!validate_email_address(
-            "u@toolonglabeltoolonglabeltoolonglabeltoolonglabeltoolonglabeltoolonglabel.com"
-        ));
-    }
-
-    // -- session hash ------------------------------------------------------
-
-    #[test]
-    fn session_auth_hash_matches_django_salted_hmac() {
-        // Oracle: Django 6.0 `salted_hmac(...get_session_auth_hash,
-        // "pbkdf2_sha256$1200000$abc$def", secret="topsecret",
-        // algorithm="sha256")` (the default `algorithm="sha1"` is a
-        // trap — `get_session_auth_hash` passes sha256 explicitly).
-        assert_eq!(
-            make_session_auth_hash("pbkdf2_sha256$1200000$abc$def", b"topsecret"),
-            "9c9a3cd895ca244f0c1fc8a4d24cd83d65287bb3353f39d69ab926a0d240b079"
-        );
     }
 
     // -- misc pure helpers ---------------------------------------------------
 
     #[test]
     fn helpers_match_python_shapes() {
-        assert_eq!(avatar_extension("image/jpeg"), Some("jpg"));
-        assert_eq!(avatar_extension("image/png"), Some("png"));
-        assert_eq!(avatar_extension("image/gif"), Some("gif"));
-        assert_eq!(avatar_extension("image/webp"), Some("webp"));
-        assert_eq!(avatar_extension("image/svg+xml"), None);
+        // The avatar extension allowlist now lives in the shared
+        // `pidash_storage::avatar_extension` (covered by the storage
+        // crate's own golden tests).
         assert_eq!(get_display_name("ada@example.com"), "ada");
         assert_eq!(get_display_name("no-at-sign").len(), 6);
         assert_eq!(name_or_empty(&serde_json::json!("Ada")), "Ada");

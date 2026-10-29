@@ -7,7 +7,7 @@ Merges past ``AgentRun`` rows (``kind=past``) with future RRULE expansion
 import datetime
 
 from . import seed_scheduler as seed_s
-from .test_project_bindings import bind_list
+from .test_project_bindings import _install, _scheduler, bind_list
 from .test_workspace_schedulers import sched_list
 
 
@@ -229,3 +229,47 @@ def test_cap_truncates(org):
     assert len(body["occurrences"]) == 5000
     assert body["has_more"] is True
     assert isinstance(body["next_window_start"], str)
+
+
+def test_rdate_coinciding_with_rule_is_not_duplicated(org):
+    # PIDASHCONV-1476: an rdate coinciding with an RRULE occurrence, and a
+    # duplicated rdate, must each surface once — dateutil's rruleset dedups
+    # consecutive equal instants, the rrule crate's RRuleSet iterator does not.
+    sched = _scheduler(org, slug="rdup")
+    base = (
+        datetime.datetime.now(datetime.timezone.utc)
+        + datetime.timedelta(days=1)
+    ).replace(hour=9, minute=0, second=0, microsecond=0)
+    rdate_on_rule = base + datetime.timedelta(days=2)
+    rdate_extra = base + datetime.timedelta(days=4, hours=3)
+    r = _install(
+        org, sched["id"], dtstart=base.isoformat(), rrule="FREQ=DAILY",
+        rdates=[
+            rdate_on_rule.isoformat(),
+            rdate_extra.isoformat(), rdate_extra.isoformat(),
+        ],
+    )
+    assert r.status_code == 201, r.text
+    binding = r.json()
+    # `to` is midnight so the last covered daily fire is base+4d at 09:00,
+    # mirroring the issue's 11-01T00:00→11-06T00:00 window (6 rows on Django).
+    to = (base + datetime.timedelta(days=5)).replace(
+        hour=0, minute=0, second=0, microsecond=0)
+    r = org.request(
+        "GET", occurrences(org), "guest",
+        params={
+            "from": (base - datetime.timedelta(days=1)).isoformat(),
+            "to": to.isoformat(),
+        },
+    )
+    assert r.status_code == 200, r.text
+    rows = r.json()["occurrences"]
+    assert len(rows) == 6
+    pairs = [(o["binding_id"], o["dtstart"]) for o in rows]
+    assert len(set(pairs)) == 6
+    assert {o["binding_id"] for o in rows} == {binding["id"]}
+    expected = {base + datetime.timedelta(days=i) for i in range(5)}
+    expected.add(rdate_extra)
+    assert {
+        datetime.datetime.fromisoformat(o["dtstart"]) for o in rows
+    } == expected

@@ -411,6 +411,19 @@ pointing at the same broker the worker consumes, and the server must run
 with `CLOUD_AGENT_ENABLED=true` (dispatch execution branches and the
 queue scanner are kill-switched otherwise).
 
+Page-write suites (`v1_work_items`) additionally need the backend booted with
+`LIVE_BASE_URL` pointing at the stub live-document server the tests bind
+(`LIVE_DOC_STUB_BASE`, default `http://127.0.0.1:18096`):
+
+```sh
+LIVE_BASE_URL=http://127.0.0.1:18096  # on the backend under test (Django or Rust)
+```
+
+The stub (`_harness/sinks.py: LiveDocStub`) answers
+`POST /live/convert-document/` with a fixed usable document and is up only
+inside the create tests that hold it; with the stub down conversion fails,
+so the 503 contract tests keep passing unchanged.
+
 ## Backend under test (assistant domain)
 
 The assistant suite needs a live backend plus the Postgres it reads/writes.
@@ -436,6 +449,18 @@ and for the suite itself:
 export CONTRACT_DJANGO_SECRET_KEY=<same fixed contract secret>
 ```
 
+The DeepSeek title regression test captures the provider wire body through a
+recording HTTP proxy. Start the backend with these variables so both the
+Django OpenAI SDK and Rust `reqwest` route the provider call through the
+proxy, while the suite's own requests stay direct:
+
+```sh
+export HTTP_PROXY=http://127.0.0.1:18097
+export http_proxy=$HTTP_PROXY
+export NO_PROXY=127.0.0.1,localhost
+export no_proxy=$NO_PROXY
+```
+
 Notes:
 
 - Use private Redis DB numbers: the default DB is shared with other local
@@ -450,8 +475,13 @@ Notes:
 - `ASSISTANT_BLOCK_PRIVATE_URLS=True` is cloud parity; the SSRF cases pin
   the guard, and all other saved URLs are literal public IPs so no DNS is
   needed.
+- The title regression test keeps the provider on the public
+  `api.deepseek.com` host (the SSRF guard rejects loopback URLs) and starts
+  a recording proxy on `127.0.0.1:18097`. `HTTP_PROXY` must be present in the
+  backend process environment when the assistant suite runs.
 - Every test seeds uniquely-suffixed rows and never tears down: the suite is
-  re-runnable and parallel-safe (`pytest -n auto` works).
+  re-runnable. The fixed recording-proxy port means the assistant suite must
+  run serially.
 
 ## Conventions for new domains
 
@@ -461,8 +491,8 @@ Notes:
 - Every endpoint gets a response-shape assertion, plus one denied-permission
   case and one tenant-isolation case per domain; the suite must fail if a
   permission class is removed.
-- Outbound-provider behaviour that needs a live third party stays out;
-  cover those endpoints through their deterministic gates and error shapes.
+- Outbound-provider behaviour that needs a live third party stays out; cover
+  it with a local stub/proxy when the wire shape is the contract.
 
 ## Domain: v1_cycles_modules (D-20 oracle, PIDASHCONV-78)
 

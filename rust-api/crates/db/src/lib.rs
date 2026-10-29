@@ -28,6 +28,7 @@
 //! - [`v1_projects`]: api-v1 projects/members/states/estimates models (D-19).
 //! - [`runner_runs`]: runner run/chat/dedupe/live-state models (D-15).
 //! - [`runner_sessions`]: runner/machine session rows + SQL (D-14).
+//! - [`entity`]: SeaORM entities for the design §4 covered tables (ORM-01).
 //!
 //! Write paths take a [`context::RequestContext`]; there is no unscoped
 //! handle for writes.
@@ -46,6 +47,7 @@ pub mod auth_oauth;
 pub mod config;
 pub mod context;
 pub mod dispatch;
+pub mod entity;
 pub mod filter;
 pub mod filterset;
 pub mod integrations;
@@ -73,4 +75,12 @@ pub mod v1_projects;
 
 pub use config::DbConfig;
 pub use context::RequestContext;
-pub use pool::{is_write_method, replica_scope, route_for, should_use_read_replica, Pools, Route};
+pub use pool::{
+    is_write_method, replica_scope, route_for, sea_orm_connection, should_use_read_replica, Pools,
+    Route,
+};
+/// The shared SeaORM connection type (ORM-01, PIDASHCONV-1519).
+/// Re-exported so `api` and `jobs` name the `AppState` / `OssWorkerCtx`
+/// field without their own `sea-orm` dependency; the version pin lives
+/// on this crate alone.
+pub use sea_orm::DatabaseConnection;

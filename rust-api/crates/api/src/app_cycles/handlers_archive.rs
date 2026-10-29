@@ -82,6 +82,8 @@ use crate::state::AppState;
 
 use pidash_auth::permissions::allow::AllowFacts;
 use pidash_auth::permissions::{ROLE_ADMIN, ROLE_MEMBER};
+use pidash_compat::response::json_response;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 use pidash_types::WorkspaceId;
 
 // ---------------------------------------------------------------------------
@@ -158,9 +160,6 @@ pub const NOT_FOUND_BODY: &str = r#"{"error":"The required object does not exist
 /// `Project.resolve` miss on a non-UUID identifier
 /// (`db/models/project.py:213-217`).
 pub const PROJECT_NOT_FOUND_BODY: &str = r#"{"detail":"Project not found"}"#;
-/// `handle_exception`'s generic 500 branch: the POST `None >= now`
-/// `TypeError` (Q2) and the detail `None[...]` `TypeError` (Q4) land here.
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// The archive POST date guard (`archive.py:590-594`).
 pub const ARCHIVE_REFUSED_BODY: &str = r#"{"error":"Only completed cycles can be archived"}"#;
 
@@ -216,14 +215,6 @@ impl IntoResponse for Denial {
 
 fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
-}
-
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("archive response")
 }
 
 // ---------------------------------------------------------------------------
@@ -844,6 +835,18 @@ fn estimate_join() -> String {
         .to_owned()
 }
 
+/// Distribution-only estimate join (PIDASHCONV-1185): Django's points
+/// distributions annotate `Sum("estimate_point__value")` over the full
+/// `Issue.issue_objects` base with no `estimate_point` filter, so the ORM
+/// emits a LEFT OUTER JOIN against the nullable FK (`db/models/issue.py:130-136`)
+/// and issues without an estimate point keep their group with NULL sums.
+/// The `estimates.type = 'points'` predicate the burndown needs does not
+/// belong here — Django's points check is the separate project-level
+/// `exists()` (see project_estimates_points).
+fn estimate_left_join() -> String {
+    "LEFT JOIN estimate_points ep ON ep.id = i.estimate_point_id".to_owned()
+}
+
 /// Assignee estimate distribution (`archive.py:367-419`): one row per
 /// assignee (plus the NULL row for unassigned issues), ordered by
 /// display name. The joins are LEFT (annotation-side) with no
@@ -861,7 +864,7 @@ fn assignee_estimate_sql() -> String {
         avatar = avatar_url_case(),
         sums = estimate_sums_select(),
         from = distribution_from(),
-        est = estimate_join(),
+        est = estimate_left_join(),
         scope = distribution_scope_where(),
     )
 }
@@ -880,7 +883,7 @@ fn label_estimate_sql() -> String {
          ORDER BY l.name ASC",
         sums = estimate_sums_select(),
         from = distribution_from(),
-        est = estimate_join(),
+        est = estimate_left_join(),
         scope = distribution_scope_where(),
     )
 }
@@ -922,8 +925,8 @@ fn label_count_sql() -> String {
 }
 
 /// Whether the project estimates in points (`archive.py:358-363`):
-/// `Project.objects` is the plain manager — no deleted guards, ported
-/// literally.
+/// `Project.objects` is the soft-deletion manager (`mixins.py:61-67`), so a
+/// soft-deleted project is excluded.
 async fn project_estimates_points(
     pool: &sqlx::PgPool,
     slug: &str,
@@ -933,7 +936,8 @@ async fn project_estimates_points(
         "SELECT EXISTS (SELECT 1 FROM projects p \
            JOIN workspaces w ON w.id = p.workspace_id \
            JOIN estimates e ON e.id = p.estimate_id \
-          WHERE w.slug = $1 AND p.id = $2 AND e.type = 'points')",
+          WHERE w.slug = $1 AND p.id = $2 AND e.type = 'points' \
+            AND p.deleted_at IS NULL)",
     )
     .bind(slug)
     .bind(project_id)

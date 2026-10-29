@@ -15,7 +15,7 @@
 //! Only the methods above are owned: `PUT`/`PATCH`/`DELETE` on the
 //! collection and `POST`/`PUT` on the detail proxy to Django (its
 //! 405-after-auth and metadata responses live there), as do `OPTIONS`
-//! and `HEAD`-adjacent handling per [`super::owned`].
+//! and `HEAD`-adjacent handling per [`crate::edge::owned`].
 //!
 //! Layering: permission gates in
 //! `pidash_services::app_intake::permissions`, serializer key order in
@@ -77,6 +77,8 @@ use super::{
 };
 use crate::serializer::render_datetime_in;
 use crate::state::AppState;
+use pidash_compat::datetime::render_uuid_opt as opt_uuid;
+use pidash_compat::validate::{push_error, validate_char, validate_datetime};
 
 /// Python `str.strip()` membership (`db/models/project.py:210`): Rust
 /// `White_Space` plus U+001C-U+001F (verified by exhaustively diffing
@@ -138,68 +140,6 @@ pub fn parse_pk(raw: &str) -> Result<Uuid, Response> {
 /// multi-field bodies are deterministic.
 pub type FieldErrors = serde_json::Map<String, serde_json::Value>;
 
-fn push_error(errors: &mut FieldErrors, field: &str, message: String) {
-    errors
-        .entry(field.to_owned())
-        .or_insert_with(|| serde_json::Value::Array(Vec::new()))
-        .as_array_mut()
-        .expect("error list")
-        .push(serde_json::Value::String(message));
-}
-
-/// DRF `CharField.to_internal_value`: bools, lists and dicts fail;
-/// numbers stringify; strings trim. `None` is rejected upstream with
-/// the null message.
-fn char_internal(value: &serde_json::Value) -> Result<String, ()> {
-    match value {
-        serde_json::Value::String(text) => Ok(text.trim().to_string()),
-        serde_json::Value::Number(number) => Ok(number.to_string().trim().to_string()),
-        serde_json::Value::Bool(_) | serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
-            Err(())
-        }
-        serde_json::Value::Null => Err(()),
-    }
-}
-
-fn validate_char(
-    errors: &mut FieldErrors,
-    field: &str,
-    value: &serde_json::Value,
-    max_length: usize,
-    allow_blank: bool,
-    allow_null: bool,
-) -> Option<String> {
-    if value.is_null() {
-        if !allow_null {
-            push_error(errors, field, "This field may not be null.".to_owned());
-        }
-        return None;
-    }
-    match char_internal(value) {
-        Err(()) => {
-            push_error(errors, field, "Not a valid string.".to_owned());
-            None
-        }
-        Ok(text) => {
-            if text.is_empty() && !allow_blank {
-                push_error(errors, field, "This field may not be blank.".to_owned());
-                return None;
-            }
-            // `[:255]` counts code points; over-long is a 400, never a
-            // panic.
-            if text.chars().count() > max_length {
-                push_error(
-                    errors,
-                    field,
-                    format!("Ensure this field has no more than {max_length} characters."),
-                );
-                return None;
-            }
-            Some(text)
-        }
-    }
-}
-
 /// DRF `BooleanField.to_internal_value` (`fields.py:665-707`): the
 /// `TRUE_VALUES` / `FALSE_VALUES` sets, matched case-insensitively for
 /// strings; JSON numbers compare numerically, so `1.0`/`0.0` count.
@@ -250,56 +190,6 @@ fn is_one(number: &serde_json::Number) -> bool {
 /// Numeric `0` in any JSON number shape (`0`, `0.0`).
 fn is_zero(number: &serde_json::Number) -> bool {
     number.as_i64() == Some(0) || number.as_u64() == Some(0) || number.as_f64() == Some(0.0)
-}
-
-/// DRF `DateTimeField.to_internal_value`: ISO-8601 with `Z`/offsets
-/// (plus a bare date, read as midnight UTC, like DRF's date fallback).
-fn validate_datetime(
-    errors: &mut FieldErrors,
-    field: &str,
-    value: &serde_json::Value,
-    allow_null: bool,
-) -> Option<DateTime<Utc>> {
-    if value.is_null() {
-        if !allow_null {
-            push_error(errors, field, "This field may not be null.".to_owned());
-        }
-        return None;
-    }
-    let raw = match value {
-        serde_json::Value::String(text) => text,
-        _ => {
-            push_error(errors, field, datetime_format_message());
-            return None;
-        }
-    };
-    let text = raw.trim().to_string();
-    if let Ok(date) = chrono::NaiveDate::parse_from_str(&text, "%Y-%m-%d") {
-        return Some(date.and_hms_opt(0, 0, 0).expect("midnight").and_utc());
-    }
-    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&text) {
-        return Some(dt.with_timezone(&Utc));
-    }
-    // DRF's `strptime(value, 'iso-8601')` fallthrough (`to_internal_value`
-    // runs it when `parse_datetime` returns `None` — PIDASHCONV-773):
-    // the literal matches case-insensitively and yields naive
-    // 1900-01-01, read as UTC like the date arm above. Checked on the RAW
-    // text — Django's `strptime` sees the value before any strip (this
-    // port's trim is a pre-existing quirk), so a padded literal still
-    // fails. Exact match (probed); ASCII-only (765 unicode-gap family).
-    if raw.eq_ignore_ascii_case("iso-8601") {
-        let naive = chrono::NaiveDate::from_ymd_opt(1900, 1, 1)
-            .and_then(|date| date.and_hms_opt(0, 0, 0))
-            .expect("1900-01-01 valid");
-        return Some(naive.and_utc());
-    }
-    push_error(errors, field, datetime_format_message());
-    None
-}
-
-fn datetime_format_message() -> String {
-    "Datetime has wrong format. Use one of these formats instead: YYYY-MM-DDThh:mm[:ss[.uuuuuu]][+HH:MM|-HH:MM|Z]."
-        .to_owned()
 }
 
 /// DRF `JSONField.to_internal_value` (`view_props`, `logo_props`,
@@ -625,11 +515,6 @@ async fn cover_image_url(pool: &PgPool, project: &ProjectRow) -> Result<Option<S
         }
     }
     Ok(project.cover_image.clone())
-}
-
-fn opt_uuid(id: &Option<Uuid>) -> serde_json::Value {
-    id.map(|id| serde_json::Value::String(id.to_string()))
-        .unwrap_or(serde_json::Value::Null)
 }
 
 fn opt_string(text: &Option<String>) -> serde_json::Value {

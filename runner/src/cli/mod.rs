@@ -225,6 +225,7 @@ async fn run_default(paths: &crate::util::paths::Paths) -> Result<()> {
                 url: None,
                 no_browser: false,
                 workspace: None,
+                force: false,
                 device_code_stdin: false,
             }),
         };

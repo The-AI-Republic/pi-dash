@@ -6,14 +6,18 @@
 //!
 //! - (a) the client bytes are unchanged with the flag on,
 //! - (b) a mismatch is logged and counted,
-//! - (c) writes are never shadowed,
-//! - (d) secrets are redacted from logs and the ring.
+//! - (c) writes are never shadowed and leave no trace in metrics,
+//! - (d) secrets are redacted from logs; the ring carries no excerpts.
 //!
 //! Plus: the flag defaults off end to end, `X-Api-Key` reads never shadow
-//! (both backends stamp `last_used`), and sampling/cap zero skip.
+//! (both backends stamp `last_used`), sampling/cap zero skip, and the
+//! metrics endpoint answers 404 without the shared token.
 
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc, Mutex, OnceLock,
+};
 
 use axum::extract::{Request, State};
 use axum::response::{IntoResponse, Response};
@@ -130,12 +134,22 @@ async fn stub_app() -> axum::Router {
         )
             .into_response()
     }
+    async fn stub_slow() -> Response {
+        // Side A for the 1306 probe: Django answers fast; the Rust side
+        // never answers, so the shadow dispatch must time out.
+        (
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            STUB_BODY,
+        )
+            .into_response()
+    }
     axum::Router::new()
         .route("/", any(root))
         .route("/robots.txt", any(robots))
         .route("/api/v1/things", any(echo))
         .route(PROBE_PATH, any(stub_secret))
         .route("/encoded/", any(encoded))
+        .route(SLOW_PATH, any(stub_slow))
         .fallback((axum::http::StatusCode::NOT_FOUND, "stub 404"))
 }
 
@@ -215,20 +229,34 @@ async fn spawn_edge(
     }
 }
 
+const METRICS_TOKEN: &str = "test-token-1305";
+
 fn enabled() -> ShadowConfig {
-    ShadowConfig::enabled_for_tests()
+    ShadowConfig {
+        metrics_token: Some(METRICS_TOKEN.to_owned()),
+        ..ShadowConfig::enabled_for_tests()
+    }
 }
 
 fn client() -> reqwest::Client {
     reqwest::Client::new()
 }
 
+async fn metrics_response(
+    client: &reqwest::Client,
+    base: &str,
+    token: Option<&str>,
+) -> reqwest::Response {
+    let mut request = client.get(format!("{base}{SHADOW_METRICS_PATH}"));
+    if let Some(token) = token {
+        request = request.header("x-shadow-metrics-token", token);
+    }
+    request.send().await.expect("metrics")
+}
+
 async fn metrics(client: &reqwest::Client, base: &str) -> serde_json::Value {
-    let body = client
-        .get(format!("{base}{SHADOW_METRICS_PATH}"))
-        .send()
+    let body = metrics_response(client, base, Some(METRICS_TOKEN))
         .await
-        .expect("metrics")
         .bytes()
         .await
         .expect("metrics body");
@@ -242,10 +270,21 @@ async fn wait_for_metrics(
     base: &str,
     ready: impl Fn(&serde_json::Value) -> bool,
 ) -> serde_json::Value {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    wait_for_metrics_with_deadline(client, base, std::time::Duration::from_secs(5), ready).await
+}
+
+/// Same, with an explicit deadline. Timeout-path tests need longer than 5s:
+/// a shadow dispatch budget is 10s.
+async fn wait_for_metrics_with_deadline(
+    client: &reqwest::Client,
+    base: &str,
+    deadline: std::time::Duration,
+    ready: impl Fn(&serde_json::Value) -> bool,
+) -> serde_json::Value {
+    let end = std::time::Instant::now() + deadline;
     loop {
         let snapshot = metrics(client, base).await;
-        if ready(&snapshot) || std::time::Instant::now() >= deadline {
+        if ready(&snapshot) || std::time::Instant::now() >= end {
             return snapshot;
         }
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
@@ -352,12 +391,13 @@ async fn writes_are_never_shadowed() {
         assert_eq!(response.status(), 200, "{method}");
     }
 
-    let snapshot = wait_for_metrics(&client, &edge.base, |snapshot| {
-        snapshot["totals"]["skipped"] == 4
-    })
-    .await;
+    // Writes leave no trace in metrics at all: counting happens
+    // synchronously in precheck, so by the time the responses are back any
+    // write counting would already be visible. No wait needed.
+    let snapshot = metrics(&client, &edge.base).await;
     assert_eq!(snapshot["totals"]["compared"], 0, "{snapshot}");
-    assert_eq!(snapshot["totals"]["skipped"], 4, "{snapshot}");
+    assert_eq!(snapshot["totals"]["skipped"], 0, "{snapshot}");
+    assert_eq!(snapshot["routes"], serde_json::json!({}), "{snapshot}");
 }
 
 // ---------------------------------------------------------------------------
@@ -387,17 +427,11 @@ async fn secrets_are_redacted() {
     })
     .await;
     assert_eq!(snapshot["totals"]["mismatched"], 1, "{snapshot}");
-    let diff = snapshot["recent_mismatches"][0]["diff"]
-        .as_str()
-        .expect("diff");
-    // The bodies differ only in the token (secret) and the presigned
-    // parameters (volatile): the diff says so instead of showing values.
-    assert!(
-        diff.contains("only in redacted or volatile values"),
-        "{diff}"
-    );
-    // Full secrets, presigned values, and credential fragments: nothing
-    // secret-bearing may appear, whole or split across the trim.
+    // The ring carries route/method/status tuples only: no excerpt key at
+    // all, and none of the secret material anywhere in the served JSON.
+    let entry = &snapshot["recent_mismatches"][0];
+    assert!(entry.get("diff").is_none(), "{snapshot}");
+    let served = snapshot.to_string();
     for secret in [
         "sk-probe-AAA-822",
         "sk-probe-BBB-822",
@@ -406,7 +440,7 @@ async fn secrets_are_redacted() {
         "AAA-822",
         "BBB-822",
     ] {
-        assert!(!diff.contains(secret), "{diff}");
+        assert!(!served.contains(secret), "{served}");
     }
 
     // The log line carries the same excerpt, so it must be clean too.
@@ -434,6 +468,7 @@ async fn shadow_defaults_off_end_to_end() {
         pidash_api::edge_shadow::SHADOW_ENV,
         pidash_api::edge_shadow::SHADOW_MAX_INFLIGHT_ENV,
         pidash_api::edge_shadow::SHADOW_SAMPLE_ENV,
+        pidash_api::edge_shadow::METRICS_TOKEN_ENV,
     ] {
         std::env::remove_var(var);
     }
@@ -449,19 +484,15 @@ async fn shadow_defaults_off_end_to_end() {
         .expect("get /");
     assert_eq!(root.bytes().await.expect("body").as_ref(), STUB_BODY);
 
-    let snapshot = metrics(&client, &edge.base).await;
-    assert_eq!(snapshot["enabled"], false, "{snapshot}");
-    assert_eq!(
-        snapshot["totals"],
-        serde_json::json!({
-            "compared": 0,
-            "matched": 0,
-            "mismatched": 0,
-            "skipped": 0,
-            "errored": 0,
-        }),
-        "{snapshot}"
-    );
+    // No token configured: the endpoint answers 404 to everyone, even
+    // with a header presented (fail closed).
+    for token in [None, Some(METRICS_TOKEN), Some("wrong-token")] {
+        let response = metrics_response(&client, &edge.base, token).await;
+        assert_eq!(response.status(), 404);
+        let body = response.bytes().await.expect("body");
+        let text = String::from_utf8_lossy(&body);
+        assert!(!text.contains("routes"), "{text}");
+    }
 }
 
 #[tokio::test]
@@ -572,4 +603,135 @@ async fn metrics_endpoint_shape() {
     }
     assert!(snapshot["routes"].is_object(), "{snapshot}");
     assert!(snapshot["recent_mismatches"].is_array(), "{snapshot}");
+}
+
+#[tokio::test]
+async fn metrics_endpoint_requires_token() {
+    let (stub_base, _stub) = spawn(stub_app().await).await;
+    let edge = spawn_edge(&stub_base, Some(enabled()), axum::Router::new()).await;
+    let client = client();
+
+    // No header or a wrong one: 404, exactly as if the route did not
+    // exist (which is what Django serves for /internal/*).
+    for token in [None, Some("wrong-token"), Some("")] {
+        let response = metrics_response(&client, &edge.base, token).await;
+        assert_eq!(response.status(), 404, "{token:?}");
+        let body = response.bytes().await.expect("body");
+        let text = String::from_utf8_lossy(&body);
+        assert!(!text.contains("routes"), "{text}");
+    }
+
+    // The configured token unlocks the JSON body.
+    let response = metrics_response(&client, &edge.base, Some(METRICS_TOKEN)).await;
+    assert_eq!(response.status(), 200);
+    let body = response.bytes().await.expect("body");
+    let snapshot: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(snapshot["enabled"], true, "{snapshot}");
+
+    // Disabled shadow with a token still serves the all-zeros wiring
+    // check to authorized callers.
+    let off = ShadowConfig {
+        enabled: false,
+        ..enabled()
+    };
+    let edge = spawn_edge(&stub_base, Some(off), axum::Router::new()).await;
+    let response = metrics_response(&client, &edge.base, Some(METRICS_TOKEN)).await;
+    assert_eq!(response.status(), 200);
+    let body = response.bytes().await.expect("body");
+    let snapshot: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(snapshot["enabled"], false, "{snapshot}");
+    assert_eq!(
+        snapshot["totals"],
+        serde_json::json!({
+            "compared": 0,
+            "matched": 0,
+            "mismatched": 0,
+            "skipped": 0,
+            "errored": 0,
+        }),
+        "{snapshot}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// PIDASHCONV-1306: a timed-out shadow aborts the Rust handler
+// ---------------------------------------------------------------------------
+
+/// Probe path for the timeout test. The stub answers fast (side A); the
+/// Rust side blocks past the shadow budget, so every shadow must time out.
+const SLOW_PATH: &str = "/slow-1306/";
+
+/// Live slow-handler dispatches, and the most ever alive at once. Only the
+/// 1306 test registers `slow_probe`, so no per-test marker is needed.
+static SLOW_LIVE: AtomicUsize = AtomicUsize::new(0);
+static SLOW_MAX: AtomicUsize = AtomicUsize::new(0);
+
+/// A flag-gated test double like [`secret_probe`], but side B blocks past
+/// the 10s shadow budget. The `LiveGuard` drops when the dispatch future is
+/// dropped — an abort — and only then: a detached task keeps sleeping and
+/// keeps its count.
+async fn slow_probe(State(state): State<AppState>, req: Request) -> Response {
+    if state.edge().flags().is_rust(pidash_api::Prefix::Web) {
+        struct LiveGuard;
+        impl Drop for LiveGuard {
+            fn drop(&mut self) {
+                SLOW_LIVE.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        let live = SLOW_LIVE.fetch_add(1, Ordering::SeqCst) + 1;
+        SLOW_MAX.fetch_max(live, Ordering::SeqCst);
+        let _guard = LiveGuard;
+        // Far past the shadow budget: only an abort gets us out of here.
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        (
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            RUST_BODY,
+        )
+            .into_response()
+    } else {
+        pidash_api::edge::proxy(State(state), req).await
+    }
+}
+
+#[tokio::test]
+async fn shadow_timeout_aborts_rust_handler() {
+    SLOW_LIVE.store(0, Ordering::SeqCst);
+    SLOW_MAX.store(0, Ordering::SeqCst);
+    let (stub_base, _stub) = spawn(stub_app().await).await;
+    let config = ShadowConfig {
+        max_inflight: 1,
+        ..enabled()
+    };
+    let extra = axum::Router::new().route(SLOW_PATH, get(slow_probe));
+    let edge = spawn_edge(&stub_base, Some(config), extra).await;
+    let client = client();
+
+    // Two sequential shadows, each blocked past the 10s budget (~10s per
+    // iteration). Sequential on purpose: with max_inflight=1 a second live
+    // dispatch proves the first timeout leaked its handler instead of
+    // stopping it.
+    for i in 1..=2u64 {
+        let response = client
+            .get(format!("{}{SLOW_PATH}", edge.base))
+            .send()
+            .await
+            .expect("get slow");
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.bytes().await.expect("body").as_ref(), STUB_BODY);
+        let snapshot = wait_for_metrics_with_deadline(
+            &client,
+            &edge.base,
+            std::time::Duration::from_secs(20),
+            |snapshot| snapshot["totals"]["errored"] == i,
+        )
+        .await;
+        assert_eq!(snapshot["totals"]["errored"], i, "{snapshot}");
+    }
+
+    let snapshot = metrics(&client, &edge.base).await;
+    assert_eq!(snapshot["totals"]["skipped"], 0, "{snapshot}");
+    // The timed-out handler was cancelled: at most max_inflight=1 was ever
+    // alive at once, and none lingers now. Pre-fix both fail (2 alive).
+    assert_eq!(SLOW_MAX.load(Ordering::SeqCst), 1);
+    assert_eq!(SLOW_LIVE.load(Ordering::SeqCst), 0);
 }

@@ -53,7 +53,7 @@
 //!   SECOND `now()` call, which may differ from the stored value
 //!   (double-now); owned by the handlers issue, noted here only.
 
-use axum::http::{header, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 
 use pidash_auth::permissions::page::{decide_page, PageFacts, PageLookup, PageOutcome, PageRef};
@@ -62,6 +62,8 @@ use pidash_auth::scope::TenantScope;
 use pidash_types::{ProjectId, WorkspaceId};
 
 use crate::state::AppState;
+use pidash_compat::response::json_response;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 
 /// Exact bytes of the DRF `IsAuthenticated` denial (401): what anonymous
 /// callers on every page route receive before any gate runs.
@@ -71,9 +73,6 @@ pub const UNAUTHENTICATED_BODY: &str =
 /// workspace-scoped permission lookup miss — unknown, cross-workspace, or
 /// soft-deleted page id (`app/views/base.py:133-136`).
 pub const OBJECT_NOT_FOUND_BODY: &str = r#"{"error":"The required object does not exist."}"#;
-/// `handle_exception`'s generic 500 branch (`app/views/base.py:144-148`):
-/// what the retrieve guest-before-None `AttributeError` renders as.
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// `Page.PRIVATE_ACCESS` / `PUBLIC_ACCESS` (`db/models/page.py:24-25`).
 pub const PRIVATE_ACCESS: i32 = 1;
 /// See [`PRIVATE_ACCESS`].
@@ -143,14 +142,6 @@ pub enum Denial {
     ObjectNotFound,
     /// Database failure: 500 [`SERVER_ERROR_BODY`].
     ServerError,
-}
-
-fn json_response(status: StatusCode, body: &'static str) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("static page-gate response")
 }
 
 impl IntoResponse for Denial {

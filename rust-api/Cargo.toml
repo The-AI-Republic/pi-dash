@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/types",
+    "crates/compat",
     "crates/db",
     "crates/auth",
     "crates/services",
@@ -9,6 +10,7 @@ members = [
     "crates/jobs",
     "crates/storage",
     "crates/ops",
+    "crates/sdk",
     "bin/pidash-api",
 ]
 

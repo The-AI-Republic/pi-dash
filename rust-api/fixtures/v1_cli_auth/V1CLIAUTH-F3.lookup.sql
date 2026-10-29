@@ -20,16 +20,17 @@ SELECT "runner"."id", "runner"."owner_id", "runner"."workspace_id",
   "runner"."capabilities", "runner"."status", "runner"."os", "runner"."arch",
   "runner"."runner_version", "runner"."dev_metadata", "runner"."protocol_version",
   "runner"."last_heartbeat_at", "runner"."free_worktrees", "runner"."created_at",
-  "runner"."updated_at", "runner"."revoked_at", "runner"."revoked_reason"
+  "runner"."updated_at", "runner"."revoked_at", "runner"."revoked_reason",
+  "runner"."paused_at", "runner"."paused_by_id"
 FROM "runner"
 WHERE "runner"."id" = %(runner_id)s
 ORDER BY "runner"."last_heartbeat_at" DESC, "runner"."created_at" DESC
 LIMIT 1;
 
--- Q1 port shape (same semantics; fetch_optional): the full 30-column row is
+-- Q1 port shape (same semantics; fetch_optional): the full 32-column row is
 -- needed downstream — the guard reads (visibility, owner_id) off it and
 -- delete_runner takes the row itself — so there is no narrow projection.
--- SELECT <30 cols> FROM runner WHERE id = $1
+-- SELECT <32 cols> FROM runner WHERE id = $1
 
 -- Q2 guard-facts read: NO second query. can_view_runner reads runner.visibility
 -- + runner.owner_id (permissions.py:74-75) and can_manage_runner re-reads the

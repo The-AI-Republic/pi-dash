@@ -518,13 +518,6 @@ pub fn should_dispatch_transition(state_given: bool, from_state: &str, to_state:
     state_given && from_state != to_state
 }
 
-/// `create_issue` sequence allocation (`issues.py:256-264`): the project
-/// row is locked first, then `MAX(sequence_id) + 1` (0 when empty).
-/// Returns the next sequence for a locked project row.
-pub fn next_sequence(max_sequence_id: Option<i64>) -> i64 {
-    max_sequence_id.unwrap_or(0) + 1
-}
-
 /// Columns written by `Issue.objects.create` (`issues.py:265-277`):
 /// `description_html` comes from `to_safe_html` (`None` renders `<p></p>`)
 /// and `description_json` is always empty (no Tiptap converter).
@@ -563,11 +556,13 @@ pub fn parse_scoped_issue_id(raw: &str) -> Result<Uuid, ToolError> {
 /// which additionally excludes triage states, archived rows/projects, and
 /// drafts). Every read tool ANDs these predicates.
 ///
-/// Triage trap: Django renders `.exclude(state__group='triage')` as
-/// `NOT (states.group = 'triage')`, and `NOT NULL` is `NULL` — so issues
-/// with *no* state are excluded too. The fragment below keeps the exact
-/// `NOT (...)` form instead of the "equivalent" `IS NULL OR !=` rewrite,
-/// which would wrongly admit stateless issues. The queried model is
+/// Triage trap: Django renders `.exclude(state__group='triage')` over the
+/// nullable state FK null-safely, as `NOT (states.group = 'triage' AND
+/// states.group IS NOT NULL)` — the inner `AND` is `FALSE` (not `NULL`)
+/// for a stateless issue, so issues with *no* state are kept. The
+/// fragment below keeps the exact null-safe form; the simpler
+/// `NOT (states.group = 'triage')` rewrite would wrongly drop stateless
+/// issues (PIDASHCONV-1250). The queried model is
 /// `Issue.issue_objects` (soft-delete base, like [`MEMBER_PROJECTS_SQL`]),
 /// hence `issues.deleted_at IS NULL`; joined tables carry no such
 /// predicate.
@@ -579,7 +574,7 @@ pub const SCOPED_ISSUES_SQL: &str = "SELECT DISTINCT issues.* FROM issues \
      LEFT OUTER JOIN states ON states.id = issues.state_id \
      WHERE workspaces.slug = $2 \
      AND issues.deleted_at IS NULL \
-     AND NOT (states.group = 'triage') \
+     AND NOT (states.group = 'triage' AND states.group IS NOT NULL) \
      AND NOT (issues.archived_at IS NOT NULL) \
      AND NOT (projects.archived_at IS NOT NULL) \
      AND NOT (issues.is_draft)";
@@ -1302,7 +1297,7 @@ pub fn relation_item(
 /// (`relations.py:219-225,251-260`): `relate` logs per created target,
 /// `unrelate` logs per removed target. Celery dispatches, not audit rows —
 /// the handler fires them after the write transaction commits (same
-/// post-commit wrapper as [`RECORD_MESSAGE_INSERT_SQL`]), or the activity
+/// post-commit wrapper as `record_write`), or the activity
 /// feed silently loses these entries.
 pub const RELATION_CREATED_ACTIVITY: &str = "issue_relation.activity.created";
 /// See [`RELATION_CREATED_ACTIVITY`].
@@ -1410,28 +1405,6 @@ pub fn updated_summary(identifier: &str, changed: &[&str]) -> String {
 pub const RECORD_MESSAGE_SQL: &str =
     "SELECT assistant_thread.id FROM assistant_thread WHERE assistant_thread.id = $1 FOR UPDATE";
 
-/// `created_at` is `auto_now_add` (`models.py:138`), `NOT NULL` with no
-/// database default (`migrations/0001_initial.py`), so the insert must
-/// supply it — `$6` binds it as an explicit `now` (`events.create_message`
-/// stamps it Python-side), the same convention the PIDASHCONV-1137 fix
-/// (`jobs::assistant::run_turn::error_message_insert`) uses.
-pub const RECORD_MESSAGE_INSERT_SQL: &str =
-    "INSERT INTO assistant_message (id, thread_id, turn_id, seq, kind, display_content, payload, status, created_at) \
-     VALUES ($1, $2, $3, \
-     (SELECT COALESCE(MAX(seq), 0) + 1 FROM assistant_message WHERE thread_id = $2), \
-     'tool_result', $4, $5, 'completed', $6) RETURNING id, seq, created_at";
-
-/// `AssistantEvent.id` is a `BigAutoField` (`models.py:154`) — the insert
-/// omits it, unlike the message insert (UUID PK with an ORM-side default).
-/// `created_at` is `auto_now_add` (`models.py:166`) with no database
-/// default, so `$5` binds it (`events.append_event`), mirroring the
-/// PIDASHCONV-1137 `turn_failed_event_insert` fix.
-pub const RECORD_EVENT_INSERT_SQL: &str =
-    "INSERT INTO assistant_event (thread_id, turn_id, seq, kind, message_id, payload, created_at) \
-     VALUES ($1, $2, \
-     (SELECT COALESCE(MAX(seq), 0) + 1 FROM assistant_event WHERE thread_id = $1), \
-     'tool_result', $3, $4, $5) RETURNING id, seq, created_at";
-
 /// `message_envelope` (`events.py:128-140`): `kind → role`,
 /// `display_content → content`. Nine parameters mirror the nine envelope
 /// keys one-to-one (see the `message_envelope` fixture vector), so they
@@ -1460,27 +1433,6 @@ pub fn message_envelope(
         "completed_at": completed_at_iso,
     })
 }
-
-/// `create_issue` write transaction (`issues.py:256-277`): impersonation
-/// makes `BaseModel.save()` attribute `created_by` to the acting user
-/// (the tool runs with no request, so crum's current user is `None`);
-/// the project row is locked, the sequence allocated, and the issue
-/// inserted atomically. `created_via` comes from the deps mode
-/// (`assistant` for chat, `loop` otherwise).
-pub const CREATE_ISSUE_SQL: &str = "SELECT id FROM projects WHERE id = $1 FOR UPDATE";
-
-/// `Issue.objects` is the soft-delete default manager, so the maximum is
-/// taken over live rows only — a sequence held by a soft-deleted row can
-/// be reallocated, exactly as in Python (ported behavior, not fixed).
-pub const CREATE_ISSUE_MAX_SEQ_SQL: &str =
-    "SELECT COALESCE(MAX(sequence_id), 0) FROM issues WHERE project_id = $1 AND deleted_at IS NULL";
-
-pub const CREATE_ISSUE_INSERT_SQL: &str =
-    "INSERT INTO issues (id, name, description_html, description_json, priority, \
-     sequence_id, state_id, project_id, workspace_id, parent_id, \
-     created_by_id, updated_by_id, created_via) \
-     VALUES ($1, $2, $3, '{}', $4, $5, $6, $7, $8, $9, $10, $10, $11) \
-     RETURNING id";
 
 /// `update_issue` write transaction (`issues.py:334-381`): the row is
 /// re-fetched under `SELECT ... FOR UPDATE` so concurrent UI edits are
@@ -2405,13 +2357,15 @@ mod tests {
     fn sql_fragments_name_real_tables() {
         assert!(SCOPED_ISSUES_SQL.contains("FROM issues"));
         assert!(SCOPED_ISSUES_SQL.contains("project_members"));
-        assert!(SCOPED_ISSUES_SQL.contains("NOT (states.group = 'triage')"));
+        assert!(SCOPED_ISSUES_SQL
+            .contains("NOT (states.group = 'triage' AND states.group IS NOT NULL)"));
         assert!(MEMBER_PROJECTS_SQL.contains("FROM projects"));
         assert!(RESOLVE_IDENTIFIER_SQL.contains("UPPER(projects.identifier)"));
         assert!(PAIR_ROWS_SQL.contains("FROM issue_relations"));
         assert!(GROUPED_RELATIONS_SQL.contains("workspace_id = $2"));
         assert!(ISSUE_COMMENTS_SQL.contains("ORDER BY issue_comments.created_at DESC LIMIT 10"));
-        assert!(CREATE_ISSUE_INSERT_SQL.contains("created_via"));
+        // The dead `create_issue` write consts (lock, MAX probe, INSERT)
+        // were deleted with the statements (ORM-03 C6).
     }
 
     #[test]
@@ -2419,8 +2373,9 @@ mod tests {
         assert!(should_dispatch_transition(true, "a", "b"));
         assert!(!should_dispatch_transition(true, "a", "a"));
         assert!(!should_dispatch_transition(false, "a", "b"));
-        assert_eq!(next_sequence(None), 1);
-        assert_eq!(next_sequence(Some(41)), 42);
+        // The sequence kernel folded into
+        // `app_project::ser_project::next_work_item_sequence` (pinned by
+        // `next_sequence_kernel_matches_fixture` there).
     }
 
     #[test]
@@ -2443,33 +2398,6 @@ mod tests {
     }
 
     #[test]
-    fn seq_starts_at_one_on_empty_threads() {
-        // `(MAX(seq) or 0) + 1` (`events.py:73-80`): the first message /
-        // event in a thread takes seq 1, not 0.
-        assert!(RECORD_MESSAGE_INSERT_SQL.contains("COALESCE(MAX(seq), 0) + 1"));
-        assert!(RECORD_EVENT_INSERT_SQL.contains("COALESCE(MAX(seq), 0) + 1"));
-        assert!(!RECORD_MESSAGE_INSERT_SQL.contains("MAX(seq), -1"));
-        assert!(!RECORD_EVENT_INSERT_SQL.contains("MAX(seq), -1"));
-    }
-
-    #[test]
-    fn tool_result_inserts_stamp_created_at() {
-        // `created_at` is `auto_now_add` (`models.py:138,166`), `NOT NULL`
-        // with no database default, so both inserts must carry the column
-        // or every live row violates NOT NULL (PIDASHCONV-1137 class). The
-        // assertion targets the insert column list, not the trailing
-        // `RETURNING id, seq, created_at` (which is always present).
-        assert!(
-            RECORD_MESSAGE_INSERT_SQL.contains(", payload, status, created_at)"),
-            "message insert stamps created_at: {RECORD_MESSAGE_INSERT_SQL}"
-        );
-        assert!(
-            RECORD_EVENT_INSERT_SQL.contains(", message_id, payload, created_at)"),
-            "event insert stamps created_at: {RECORD_EVENT_INSERT_SQL}"
-        );
-    }
-
-    #[test]
     fn soft_delete_predicates_match_default_managers() {
         // Every `.objects` query in the ported Python runs under
         // `SoftDeleteModel.objects` (`db/mixins.py:56-58`); joins never
@@ -2477,7 +2405,6 @@ mod tests {
         assert!(SCOPED_ISSUES_SQL.contains("issues.deleted_at IS NULL"));
         assert!(MEMBER_PROJECTS_SQL.contains("projects.deleted_at IS NULL"));
         assert!(RESOLVE_IDENTIFIER_SQL.contains("issues.deleted_at IS NULL"));
-        assert!(CREATE_ISSUE_MAX_SEQ_SQL.contains("deleted_at IS NULL"));
         assert!(PROJECT_WRITE_GATE_SQL.contains("project_members.deleted_at IS NULL"));
         assert!(PROJECT_WRITE_GATE_SQL.contains("workspace_members.deleted_at IS NULL"));
         // M2M traversals join the through tables with no manager filter

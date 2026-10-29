@@ -16,9 +16,13 @@ user-profile for a non-member is 404; quick-link retrieve 404s with {"error"}
 while partial_update 404s with {"detail"}.
 """
 
+import json
 import uuid
 
 import pytest
+
+from _harness import env
+from _harness.seed import Seed
 
 THEME_KEYS = {
     "actor",
@@ -420,6 +424,104 @@ def test_user_issues_shape(user_api, space, world):
     assert body["results"] == []
 
 
+def test_user_issues_state_id_in_filter(user_api, space, world):
+    # PIDASHCONV-1317: the profile-issues list runs the same rich-filter
+    # compiler; UUID lists must bind typed (pre-fix Rust 500d). Issues
+    # land in scope via created_by; the suite wipes them before each test.
+    conn = env.connect()
+    try:
+        seed = Seed(conn)
+        uid, ws_id = world["user"]["id"], space["id"]
+        project_id = seed.project(ws_id)
+        seed.project_member(project_id, ws_id, uid, role=20)
+        state_a = seed.state(project_id, ws_id, name="Profile A",
+                             group="unstarted")
+        state_b = seed.state(project_id, ws_id, name="Profile B",
+                             group="started")
+        issue_a = seed.issue(ws_id, project_id, name="Profile filter A",
+                             state_id=state_a)
+        issue_b = seed.issue(ws_id, project_id, name="Profile filter B",
+                             state_id=state_b)
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE issues SET created_by_id = %s WHERE id IN (%s, %s)",
+                (uid, issue_a, issue_b),
+            )
+    finally:
+        conn.close()
+    url = f"/api/workspaces/{space['slug']}/user-issues/{world['user']['id']}/"
+    res = user_api.get(
+        url, params={"filters": json.dumps({"and": [{"state_id__in": state_a}]})})
+    assert res.status_code == 200, res.text
+    assert {row["id"] for row in res.json()["results"]} == {issue_a}
+    res = user_api.get(
+        url,
+        params={"filters": json.dumps(
+            {"and": [{"state_id__in": f"{state_a},{state_b}"}]})})
+    assert res.status_code == 200, res.text
+    assert {row["id"] for row in res.json()["results"]} == {issue_a, issue_b}
+
+
+def test_user_issues_assignees_filter_keeps_duplicate_rows(user_api, space, world):
+    # PIDASHCONV-1372: legacy ?assignees=A,B fans out over the m2m join and
+    # Django counts/returns every copy (no .distinct() on this endpoint), so
+    # an issue assigned to both A and B appears twice with total_count == 2.
+    conn = env.connect()
+    try:
+        seed = Seed(conn)
+        uid, ws_id = world["user"]["id"], space["id"]
+        project_id = seed.project(ws_id)
+        seed.project_member(project_id, ws_id, uid, role=20)
+        issue_id = seed.issue(ws_id, project_id, name="Dual assigned")
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE issues SET created_by_id = %s WHERE id = %s",
+                (uid, issue_id),
+            )
+        other_id, bot_id = world["other"]["id"], world["bot"]["id"]
+        seed.issue_assignee(ws_id, project_id, issue_id, other_id)
+        seed.issue_assignee(ws_id, project_id, issue_id, bot_id)
+    finally:
+        conn.close()
+    url = f"/api/workspaces/{space['slug']}/user-issues/{world['user']['id']}/"
+    res = user_api.get(url, params={"assignees": f"{other_id},{bot_id}"})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["total_count"] == 2
+    assert body["count"] == 2
+    assert body["total_results"] == 2
+    assert [row["id"] for row in body["results"]] == [issue_id, issue_id]
+
+
+def test_user_issues_labels_filter_keeps_duplicate_rows(user_api, space, world):
+    # PIDASHCONV-1372: same fan-out for ?labels=L1,L2 on an issue carrying
+    # both labels.
+    conn = env.connect()
+    try:
+        seed = Seed(conn)
+        uid, ws_id = world["user"]["id"], space["id"]
+        project_id = seed.project(ws_id)
+        seed.project_member(project_id, ws_id, uid, role=20)
+        issue_id = seed.issue(ws_id, project_id, name="Dual labeled")
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE issues SET created_by_id = %s WHERE id = %s",
+                (uid, issue_id),
+            )
+        label_a = seed.label(ws_id, project_id, name="Dual A")
+        label_b = seed.label(ws_id, project_id, name="Dual B")
+        seed.issue_label(ws_id, project_id, issue_id, label_a)
+        seed.issue_label(ws_id, project_id, issue_id, label_b)
+    finally:
+        conn.close()
+    url = f"/api/workspaces/{space['slug']}/user-issues/{world['user']['id']}/"
+    res = user_api.get(url, params={"labels": f"{label_a},{label_b}"})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["total_count"] == 2
+    assert [row["id"] for row in body["results"]] == [issue_id, issue_id]
+
+
 def test_user_issues_non_member_denied(other_api, space, world):
     res = other_api.get(f"/api/workspaces/{space['slug']}/user-issues/{world['user']['id']}/")
     assert res.status_code == 403
@@ -718,6 +820,62 @@ def test_drafts_non_member_denied(other_api, space):
 def test_drafts_anon(anon_api, space):
     res = anon_api.get(f"/api/workspaces/{space['slug']}/draft-issues/")
     assert res.status_code == 401
+
+
+# --- draft date filters follow the actor timezone (PIDASHCONV-1373) ---
+
+# 2026-01-01T20:00:00Z is 2026-01-02 05:00 in Asia/Tokyo: Django's
+# `created_at__date` / `completed_at__date` lookups (TruncDate in the
+# TimezoneMixin-activated actor zone) read 2026-01-02, while a UTC
+# `CAST(col AS DATE)` reads 2026-01-01.
+_TZ_DRAFT_AT = "2026-01-01T20:00:00+00:00"
+
+
+def _seed_tokyo_draft(world, space):
+    db = world["db"]
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE users SET user_timezone = %s WHERE id = %s;",
+                ("Asia/Tokyo", world["user"]["id"]),
+            )
+            cur.execute(
+                """INSERT INTO draft_issues
+                   (id, name, description_json, description_html, priority,
+                    sort_order, workspace_id, created_by_id,
+                    created_at, updated_at, completed_at)
+                   VALUES (%s, 'TZ Draft', '{}', '<p></p>', 'none',
+                           0, %s, %s, %s, %s, %s)""",
+                (
+                    str(uuid.uuid4()),
+                    space["id"],
+                    world["user"]["id"],
+                    _TZ_DRAFT_AT,
+                    _TZ_DRAFT_AT,
+                    _TZ_DRAFT_AT,
+                ),
+            )
+        conn.commit()
+
+
+def test_drafts_created_at_filter_uses_actor_timezone(user_api, space, world):
+    _seed_tokyo_draft(world, space)
+    res = user_api.get(f"/api/workspaces/{space['slug']}/draft-issues/?created_at=2026-01-02;after")
+    assert res.status_code == 200
+    assert res.json()["total_count"] == 1
+    res = user_api.get(f"/api/workspaces/{space['slug']}/draft-issues/?created_at=2026-01-01;before")
+    assert res.status_code == 200
+    assert res.json()["total_count"] == 0
+
+
+def test_drafts_completed_at_filter_uses_actor_timezone(user_api, space, world):
+    _seed_tokyo_draft(world, space)
+    res = user_api.get(f"/api/workspaces/{space['slug']}/draft-issues/?completed_at=2026-01-02;after")
+    assert res.status_code == 200
+    assert res.json()["total_count"] == 1
+    res = user_api.get(f"/api/workspaces/{space['slug']}/draft-issues/?completed_at=2026-01-01;before")
+    assert res.status_code == 200
+    assert res.json()["total_count"] == 0
 
 
 # --- quick links ---

@@ -205,3 +205,25 @@ def test_sse_bad_after_falls_back_to_zero(world, member):
     )
     assert status == 200
     assert _data_payload(frames[0])["seq"] == 1
+
+
+def test_sse_replay_renders_integer_payloads_verbatim(world, member):
+    # PIDASHCONV-1241: integer payload values must replay exactly (0, not
+    # 0.0; no scientific notation for >= 1e16), matching Django's
+    # json.dumps. Asserted on the raw data: bytes: parsed JSON cannot tell
+    # 0 from 0.0 (0.0 == 0), so a decoded comparison would pass on broken
+    # output.
+    base = threads_url(world)
+    tid = _new_thread(member, base)
+    expected = ["0", "7", "12345678901234567"]
+    for seq, index in enumerate(expected, start=1):
+        _seed_event(tid, seq, kind="probe", payload={"index": int(index)})
+
+    status, _, frames = _read_frames(
+        member, f"{base}/threads/{tid}/events/", max_frames=3
+    )
+    assert status == 200
+    assert len(frames) == 3
+    for frame, index in zip(frames, expected):
+        data = [ln for ln in frame.splitlines() if ln.startswith("data: ")][0]
+        assert f'"payload": {{"index": {index}}}' in data, data

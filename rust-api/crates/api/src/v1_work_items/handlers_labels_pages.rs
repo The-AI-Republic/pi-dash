@@ -98,10 +98,8 @@
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
-use std::collections::HashMap;
-
 use axum::extract::{OriginalUri, Path, Query, Request, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
@@ -126,6 +124,8 @@ use pidash_services::v1_work_items::{filter_fields, FieldSpec};
 use super::perms::{check_can_archive, decide, gate_for, ArchiveDecision, V1WorkItemsRoute};
 use crate::state::AppState;
 use ego_tree::NodeRef;
+use pidash_compat::db::is_integrity_error;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 use pulldown_cmark::{
     CodeBlockKind, CowStr, Event, HeadingLevel, LinkType, Options, Parser, Tag, TagEnd,
 };
@@ -139,8 +139,6 @@ use std::borrow::Cow;
 /// `handle_exception`'s `ObjectDoesNotExist` branch
 /// (`api/views/base.py:154-158`): every `.get()` miss on these endpoints.
 pub const RESOURCE_NOT_FOUND_BODY: &str = r#"{"error":"The requested resource does not exist."}"#;
-/// `handle_exception`'s generic branch (`api/views/base.py:166-170`).
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// `handle_exception`'s `IntegrityError` branch
 /// (`api/views/base.py:142-147`): label PATCH saves and the page-create
 /// transaction.
@@ -263,14 +261,7 @@ fn json_string(value: &str) -> String {
 /// post-pass escapes U+2028/U+2029 (`rest_framework/renderers.py`); the
 /// `app_project` `escape_u2028` precedent, applied to every JSON body here.
 fn json_response(status: StatusCode, body: String) -> Response {
-    let body = body
-        .replace('\u{2028}', "\\u2028")
-        .replace('\u{2029}', "\\u2029");
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("handler json response")
+    pidash_compat::response::json_response(status, pidash_compat::response::escape_u2028(&body))
 }
 
 /// Render a 201 JSON response with exact bytes.
@@ -322,18 +313,6 @@ async fn enqueue_best_effort(
     );
     if let Err(error) = pidash_jobs::queue::enqueue(pool, &job).await {
         tracing::warn!(%error, task, "task enqueue failed; response stands");
-    }
-}
-
-/// A Postgres integrity failure (`IntegrityError` in Python): any `23xxx`
-/// SQLSTATE (unique, FK, not-null, check).
-fn is_integrity_error(error: &sqlx::Error) -> bool {
-    match error {
-        sqlx::Error::Database(db) => db
-            .code()
-            .as_deref()
-            .is_some_and(|code| code.starts_with("23")),
-        _ => false,
     }
 }
 
@@ -413,42 +392,7 @@ pub fn owned_page_archive(
 // Query params
 // ---------------------------------------------------------------------------
 
-/// One query value, repeated or not (the `v1_projects` shape: axum's
-/// `Query` backend does not coerce a lone `?key=value` into a sequence, so
-/// callers read last like Django's `QueryDict`).
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(untagged)]
-pub enum OneOrMany {
-    One(String),
-    Many(Vec<String>),
-}
-
-/// The multi-value query map every handler extracts.
-pub type QueryMap = HashMap<String, OneOrMany>;
-
-/// Django `QueryDict.get`: the last value, or `None`.
-pub fn query_last(query: &QueryMap, key: &str) -> Option<String> {
-    query.get(key).map(|value| match value {
-        OneOrMany::One(one) => one.clone(),
-        OneOrMany::Many(many) => many.last().cloned().unwrap_or_default(),
-    })
-}
-
-/// `self.fields` / `self.expand` (`api/views/base.py:212-220`): comma
-/// split, empties dropped, `None` when empty.
-pub fn fields_param(query: &QueryMap, key: &str) -> Option<Vec<String>> {
-    let raw = query_last(query, key).unwrap_or_default();
-    let fields: Vec<String> = raw
-        .split(',')
-        .filter(|f| !f.is_empty())
-        .map(str::to_owned)
-        .collect();
-    if fields.is_empty() {
-        None
-    } else {
-        Some(fields)
-    }
-}
+pub use pidash_compat::http::{fields_param, query_last, OneOrMany, QueryMap};
 
 // ---------------------------------------------------------------------------
 // Authentication
@@ -504,10 +448,8 @@ pub async fn actor(pool: &PgPool, headers: &HeaderMap, secret_key: &[u8]) -> Res
     // (`api_authentication.py:41-44`); machine tokens stamp `last_used_at`.
     // Best-effort: a failed stamp must not fail the request.
     if !raw.starts_with(pidash_auth::token::MACHINE_TOKEN_PREFIX) {
-        let _ = sqlx::query(r#"UPDATE "api_tokens" SET "last_used" = now() WHERE "token" = $1"#)
-            .bind(raw)
-            .execute(pool)
-            .await;
+        let _ =
+            pidash_services::domain::tokens::touch_api_token_last_used_by_token(pool, raw).await;
     }
     // The token loggers stamp this id on the `process_logs` payload
     // (Django reads `request.user` post-view; PIDASHCONV-937).
@@ -594,19 +536,16 @@ async fn resolve_machine_token(
     if !member {
         // `revoke()` stamps `revoked_at` only (`runner/models.py:865-869`);
         // `last_used_at` is stamped on success only.
-        let _ = sqlx::query(
-            r#"UPDATE "machine_token" SET "revoked_at" = now() WHERE "token_hash" = $1"#,
-        )
-        .bind(&presented_hash)
-        .execute(pool)
-        .await;
+        let _ =
+            pidash_services::domain::tokens::revoke_machine_token_by_hash(pool, &presented_hash)
+                .await;
         return Err(Denial::InvalidToken);
     }
-    let _ =
-        sqlx::query(r#"UPDATE "machine_token" SET "last_used_at" = now() WHERE "token_hash" = $1"#)
-            .bind(&presented_hash)
-            .execute(pool)
-            .await;
+    let _ = pidash_services::domain::tokens::touch_machine_token_last_used_by_hash(
+        pool,
+        &presented_hash,
+    )
+    .await;
     Ok(user_id)
 }
 
@@ -1643,7 +1582,7 @@ struct WriteBody {
 /// exists here — an unpinned edge; Python would 400 them as non-strings).
 fn parse_write_body(headers: &HeaderMap, body: &[u8]) -> Result<WriteBody, Denial> {
     use crate::v1_cycles_modules::body::{negotiate_body, BodyError, NegotiatedBody};
-    use crate::v1_cycles_modules::json_cpython::{
+    use crate::v1_cycles_modules::json::{
         parse_json_text_spans, to_serde_publish, to_serde_publish_map, JsonFail,
     };
     match negotiate_body(headers, body, &WRITE_BODY_SPEC) {
@@ -1719,9 +1658,8 @@ fn apply_form_blanks(body: &mut Value, skip: &[&str], to_null: &[&str]) {
 // ---------------------------------------------------------------------------
 
 async fn read_body(body: axum::body::Body) -> Result<Vec<u8>, Denial> {
-    axum::body::to_bytes(body, usize::MAX)
+    pidash_compat::http::read_body(body)
         .await
-        .map(|bytes| bytes.to_vec())
         .map_err(|error| db_error(error, "read-body"))
 }
 
@@ -3250,7 +3188,7 @@ async fn page_post_inner(
             "description_stripped", "owned_by_id", "access", "color", "parent_id", "archived_at",
             "is_locked", "view_props", "logo_props", "is_global", "moved_to_page", "moved_to_project",
             "sort_order", "external_id", "external_source")
-           VALUES ($1, $2, $3, $4, NULL, $5, $6, $7, $8, $9, $10, $11, $12, '', NULL, NULL,
+           VALUES ($1, $2, $3, $4, NULL, $5, $6, $7, $8, $9, $10, $11, $12, '', $13, NULL,
             FALSE, '{"full_width": false}', '{}', FALSE, NULL, NULL, 65535, NULL, NULL)"#,
     )
     .bind(page_id)
@@ -3786,18 +3724,15 @@ async fn page_archive_inner(
                 return Err(Denial::NotFound(RESOURCE_NOT_FOUND_BODY.to_owned()));
             };
             if parent_archived.is_some() {
-                // `page.save(update_fields=["parent"])`: the auto_now
-                // `updated_at` and the crum `updated_by` still stamp
-                // (the D-30 merged precedent ports the same line).
-                sqlx::query(
-                    r#"UPDATE pages SET parent_id = NULL, updated_at = now(), updated_by_id = $1
-                       WHERE id = $2"#,
-                )
-                .bind(pre.actor.id)
-                .bind(page_id)
-                .execute(&pre.pool)
-                .await
-                .map_err(|error| db_error(error, "unarchive-detach"))?;
+                // `save(update_fields=["parent"])` restricts the UPDATE to the
+                // listed column, so Django persists ONLY `parent_id`: the
+                // in-memory `updated_at` (auto_now) and `updated_by` (
+                // `BaseModel.save`) are set on the instance but never written.
+                sqlx::query(r#"UPDATE pages SET parent_id = NULL WHERE id = $1"#)
+                    .bind(page_id)
+                    .execute(&pre.pool)
+                    .await
+                    .map_err(|error| db_error(error, "unarchive-detach"))?;
             }
         }
         sqlx::query(crate::app_pages::STATE_CTE_SQL)

@@ -65,6 +65,7 @@ pub use shapes::{
     error_pairs, get_safe_redirect_url, is_password_too_weak, netloc_of, not_authenticated_body,
     python_bool, quote_plus, redirection_path_str, select_redirection_path, throttle_error_pairs,
     url_has_allowed_host_and_scheme, validate_next_path, EndpointKind, HostSettings, ParamValue,
-    RedirectionTarget, AUTHENTICATION_ERROR_CODES, JSON_400_SLUGS, PASSWORD_MIN_SCORE,
-    REDIRECT_302_SLUGS, USER_SERIALIZER_FIELDS, USER_SERIALIZER_READ_ONLY_FIELDS,
+    RedirectionTarget, AUTHENTICATION_ERROR_CODES, JSON_400_SLUGS, MAX_URL_REDIRECT_LENGTH,
+    PASSWORD_MIN_SCORE, REDIRECT_302_SLUGS, USER_SERIALIZER_FIELDS,
+    USER_SERIALIZER_READ_ONLY_FIELDS,
 };

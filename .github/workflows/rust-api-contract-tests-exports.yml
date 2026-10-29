@@ -13,10 +13,6 @@ on:
     paths:
       - "rust-api/**"
       - ".github/workflows/rust-api-contract-tests-exports.yml"
-  pull_request:
-    paths:
-      - "rust-api/**"
-      - ".github/workflows/rust-api-contract-tests-exports.yml"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
