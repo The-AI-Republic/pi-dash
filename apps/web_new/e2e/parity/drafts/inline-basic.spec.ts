@@ -15,6 +15,7 @@ import {
   serverCreateLabel,
   serverCreateState,
   serverDraftRecord,
+  serverProjectStates,
 } from "../helpers/api";
 import { specTags, specTitle } from "../helpers/tags";
 import { draftsHarness, draftsOpenAs, draftsSeat } from "./support";
@@ -32,8 +33,16 @@ test(
 
     await test.step("the new state renders immediately and persists", async () => {
       await draftsOpenAs(driver, harness);
+      // The property strip paints its "State" placeholder until the
+      // project's states load; wait for the row to name a real state
+      // before reading the value this scenario moves away from.
+      const stateNames = (await serverProjectStates(workspaceSlug, projectId, owner.cookie)).map((state) => state.name);
+      await expect
+        .poll(async () => stateNames.includes(await driver.draftStateText(name)), { timeout: 30_000 })
+        .toBe(true);
       initialName = await driver.draftStateText(name);
       expect(initialName.length).toBeGreaterThan(0);
+      expect(initialName).not.toBe("Doing");
       await driver.draftOpenStatePicker(name);
       const options = await driver.pickerOptionTexts();
       expect(options).toContain("Doing");
@@ -50,6 +59,14 @@ test(
 
     await test.step("a rejected save rolls the row back (silently — see the bug: scenario below)", async () => {
       try {
+        // The row's state just moved; arming a one-shot failure before the
+        // server holds "Doing" would fail that save instead (it paints
+        // optimistically), so wait for the stored value first.
+        await expect
+          .poll(async () => (await serverDraftRecord(workspaceSlug, draft.id, owner.cookie)).stateId, {
+            timeout: 30_000,
+          })
+          .toBe(doingId);
         await driver.draftFailNextPatch(500, 1500);
         await driver.draftOpenStatePicker(name);
         await driver.pickerPick(initialName);
@@ -82,7 +99,20 @@ test(
       isTarget ? "a rejected save snaps back and names the failure" : "a rejected save snaps back with no notice",
       async () => {
         await draftsOpenAs(driver, harness);
+        const stateNames = (await serverProjectStates(workspaceSlug, projectId, owner.cookie)).map(
+          (state) => state.name
+        );
+        await expect
+          .poll(
+            async () => {
+              const text = await driver.draftStateText(name);
+              return stateNames.includes(text) && text !== "Doing";
+            },
+            { timeout: 30_000 }
+          )
+          .toBe(true);
         const initialName = await driver.draftStateText(name);
+        expect(initialName.length).toBeGreaterThan(0);
         await driver.draftOpenStatePicker(name);
         await driver.pickerPick("Doing");
         await expect.poll(() => driver.draftStateText(name), { timeout: 30_000 }).toBe("Doing");
