@@ -36003,8 +36003,17 @@ export class WebNewDriver implements ParityDriver {
 
   async exportsSettingsAccess(): Promise<"form" | "not-authorized" | "no-workspace"> {
     if ((await this.page.getByTestId("workspace-settings-not-authorized").count()) > 0) return "not-authorized";
-    if ((await this.page.getByTestId("workspace-exports-settings").count()) > 0) return "form";
-    return "no-workspace";
+    if ((await this.page.getByTestId("workspace-exports-settings").count()) === 0) return "no-workspace";
+    // The exports guide mounts asynchronously behind the settings frame:
+    // the surface testid above can read present while the form controls
+    // are still landing, and reads taken immediately after "form" then
+    // race the mount (empty labels, tab sweeps finding nothing). Settle
+    // on the submit — the form's anchor — first; when it never lands,
+    // still report "form" so the downstream read fails loudly as before.
+    await this.exportsSubmitEither()
+      .waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => undefined);
+    return "form";
   }
 
   async exportsSettingsHeading(): Promise<{ title: string; description: string }> {

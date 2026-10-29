@@ -89,6 +89,10 @@ class Recorder {
   popupsStuck = false;
   gateHits: Array<{ role: string; visible: boolean }> = [];
   gateHeadings: string[] = [];
+  /** Which exports-settings surface the access read sees. */
+  accessSurface: "form" | "not-authorized" | "no-workspace" = "form";
+  /** When true, locator waitFor rejects (a mount that never lands). */
+  waitForRejects = false;
 
   locator(path: string): Locator {
     const node: Record<string, unknown> = { __path: path };
@@ -146,7 +150,10 @@ class Recorder {
       if (path === SEARCH_BOX) this.projectFilter = String(args[0] ?? "");
       return undefined;
     }
-    if (method === "waitFor") return undefined;
+    if (method === "waitFor") {
+      if (this.waitForRejects) throw new Error("[fake] mount never landed");
+      return undefined;
+    }
     if (method === "getAttribute") return null;
     if (method === "textContent") return this.text(path);
     if (method === "evaluate") return this.evaluateLocator(path);
@@ -189,6 +196,12 @@ class Recorder {
     if (path.startsWith(MAIN) && path.includes('getByRole("button"')) return this.gateHits.length;
     if (path.startsWith(MAIN) && path.includes('getByRole("link"')) return 0;
     if (path.startsWith(MAIN) && path.includes('getByRole("menuitem"')) return 0;
+    if (path.includes('getByTestId("workspace-settings-not-authorized")')) {
+      return this.accessSurface === "not-authorized" ? 1 : 0;
+    }
+    if (path.includes('getByTestId("workspace-exports-settings")')) {
+      return this.accessSurface === "form" ? 1 : 0;
+    }
     return 0;
   }
 
@@ -499,6 +512,33 @@ describe("exportsSettingsFormatSelect", () => {
     expect(rec.format).toBe("JSON");
     expect(rec.formatOpen).toBe(false);
     await expect(rec.driver().exportsSettingsFormatLabel()).resolves.toBe("JSON");
+  });
+});
+
+describe("exportsSettingsAccess", () => {
+  it("settles on the submit before reporting the form", async () => {
+    const rec = new Recorder();
+    await expect(rec.driver().exportsSettingsAccess()).resolves.toBe("form");
+    const waits = rec.calls.filter((call) => call.method === "waitFor");
+    expect(waits.length).toBe(1);
+    expect(waits[0]?.args).toEqual([{ state: "attached", timeout: WebNewDriver.WAIT_MS }]);
+  });
+
+  it("still reports the form when the guide never lands", async () => {
+    const rec = new Recorder();
+    rec.waitForRejects = true;
+    await expect(rec.driver().exportsSettingsAccess()).resolves.toBe("form");
+  });
+
+  it("reports the guard branches without waiting", async () => {
+    const refused = new Recorder();
+    refused.accessSurface = "not-authorized";
+    await expect(refused.driver().exportsSettingsAccess()).resolves.toBe("not-authorized");
+    const missing = new Recorder();
+    missing.accessSurface = "no-workspace";
+    await expect(missing.driver().exportsSettingsAccess()).resolves.toBe("no-workspace");
+    expect(refused.calls.some((call) => call.method === "waitFor")).toBe(false);
+    expect(missing.calls.some((call) => call.method === "waitFor")).toBe(false);
   });
 });
 
