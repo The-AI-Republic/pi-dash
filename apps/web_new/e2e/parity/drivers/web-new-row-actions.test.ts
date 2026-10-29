@@ -426,21 +426,53 @@ describe("web_new lifecycle modals", () => {
     const hidden = pageOf(dialogRoutes("Delete work item", node({ count: async () => 0 })));
     await expect(new WebNewDriver(hidden.page).layoutsDeleteModalVisible()).resolves.toBe(false);
 
-    let confirmed: unknown;
-    const states: unknown[] = [];
-    const dialog = node({
-      waitFor: async (options?: unknown) => {
-        states.push((options as { state?: unknown } | undefined)?.state);
+    const confirms: unknown[] = [];
+    const dialogFor = (node_: Locator): Locator =>
+      node({
+        waitFor: async () => undefined,
+        getByRole: (role: string, options?: unknown) => {
+          if (role === "button") confirms.push(options);
+          return node_;
+        },
+      });
+    // A completed delete closes the dialog: the settle's first read still
+    // sees it, the next does not, and the confirm returns there instead of
+    // waiting out the dialog's own hide.
+    let reads = 0;
+    const closing = node({
+      count: async () => (reads++ === 0 ? 1 : 0),
+      // The settle's visibility read goes through `first()`; the node must
+      // answer from the same live count, not a sibling stub.
+      first: () => closing as unknown as Locator,
+    });
+    const completed = pageOf({
+      role: (role: string, options?: unknown) => {
+        const name = (options as { name?: unknown } | undefined)?.name;
+        if (role === "dialog" && name === "Delete work item") return closing;
+        return dialogFor(node({ count: async () => 0 }));
       },
-      getByRole: (role: string, options?: unknown) => {
-        confirmed = options;
-        return role === "button" ? node() : node({ count: async () => 0 });
+      locator: () => node({ count: async () => 0 }),
+    });
+    await new WebNewDriver(completed.page).layoutsDeleteModalConfirm();
+    expect(reads).toBe(2);
+    // A failed delete keeps the dialog up and raises a toast: the settle
+    // returns on that toast instead of polling to its deadline, so the
+    // caller reads the message while it is still on screen.
+    let toasts = 0;
+    const failed = pageOf({
+      role: (role: string, options?: unknown) => {
+        const name = (options as { name?: unknown } | undefined)?.name;
+        if (role === "dialog" && name === "Delete work item") return dialogFor(node({ count: async () => 1 }));
+        return node({ count: async () => 0 });
+      },
+      locator: (selector: string) => {
+        if (!selector.includes("toast-notification")) return node({ count: async () => 0 });
+        return node({ count: async () => (toasts++ === 0 ? 0 : 1) });
       },
     });
-    const stub = pageOf(dialogRoutes("Delete work item", dialog));
-    await new WebNewDriver(stub.page).layoutsDeleteModalConfirm();
-    expect(confirmed).toEqual({ name: "Delete", exact: true });
-    expect(states).toEqual(["visible", "hidden"]);
+    await new WebNewDriver(failed.page).layoutsDeleteModalConfirm();
+    expect(toasts).toBe(2);
+    expect(confirms).toEqual([{ name: "Delete", exact: true }]);
   });
 
   it("matches the archive dialog on its heading prefix", async () => {

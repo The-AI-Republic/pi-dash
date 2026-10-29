@@ -50,6 +50,8 @@ interface PageParts {
   getByRole?: (role: string, options?: unknown) => Locator;
   getByTestId?: (id: string | RegExp) => Locator;
   getByText?: (text: string | RegExp, options?: unknown) => Locator;
+  locator?: (selector: string) => Locator;
+  waitForFunction?: (fn: unknown, arg?: unknown, options?: unknown) => Promise<unknown>;
   route?: (matches: (url: URL) => boolean, handler: RouteHandler) => Promise<void>;
   unroute?: (matches: (url: URL) => boolean, handler: RouteHandler) => Promise<void>;
 }
@@ -62,6 +64,9 @@ function pageOf(parts: PageParts = {}): Page {
     getByRole: (role: string, options?: unknown) => parts.getByRole?.(role, options) ?? locator(),
     getByTestId: (id: string | RegExp) => parts.getByTestId?.(id) ?? locator(),
     getByText: (text: string | RegExp, options?: unknown) => parts.getByText?.(text, options) ?? locator(),
+    locator: (selector: string) => parts.locator?.(selector) ?? locator(),
+    waitForFunction: (fn: unknown, arg?: unknown, options?: unknown) =>
+      parts.waitForFunction?.(fn, arg, options) ?? Promise.resolve(undefined),
     route: parts.route ?? (async () => undefined),
     unroute: parts.unroute ?? (async () => undefined),
   } as unknown as Page;
@@ -93,14 +98,19 @@ describe("cross-cutting singles", () => {
     await expect(new WebNewDriver(oneHidden).rulesIntakeTriageVisible()).resolves.toBe(false);
   });
 
-  it("opens the archived detail on the archives URL", async () => {
+  it("opens the archived detail on the archives URL and settles its body", async () => {
     const gotos: string[] = [];
+    const waits: unknown[] = [];
     const page = pageOf({
       goto: async (url: string) => void gotos.push(url),
       getByText: () => locator({ count: async () => 0 }),
+      waitForFunction: async () => undefined,
+      locator: () =>
+        locator({ getByRole: () => locator({ waitFor: async (options?: unknown) => void waits.push(options) }) }),
     });
     await new WebNewDriver(page).openArchivedIssueDetail("ws", "pid", "iid");
     expect(gotos).toEqual(["/ws/projects/pid/archives/issues/iid"]);
+    expect(waits).toEqual([{ state: "hidden", timeout: 120_000 }]);
   });
 
   it("refuses an archived detail that renders an error state", async () => {
