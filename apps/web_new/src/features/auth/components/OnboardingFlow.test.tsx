@@ -244,7 +244,7 @@ describe("OnboardingFlow", () => {
 
   it("opens on the CLI step with no back and full progress", async () => {
     renderFlow({});
-    expect(await screen.findByRole("heading", { name: "Install the Pi Dash CLI" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Connect your AI agents with Pi Dash" })).toBeInTheDocument();
     expect(screen.getByText("1/6")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Back" })).toBeNull();
     expect(screen.getByRole("button", { name: "Account: Ada Byron" })).toBeInTheDocument();
@@ -261,7 +261,7 @@ describe("OnboardingFlow", () => {
     expect(profilePatches).toHaveLength(0);
 
     await user.click(screen.getByRole("button", { name: "Back" }));
-    expect(await screen.findByRole("heading", { name: "Install the Pi Dash CLI" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Connect your AI agents with Pi Dash" })).toBeInTheDocument();
     expect(screen.getByText("1/6")).toBeInTheDocument();
     expect(profilePatches).toHaveLength(0);
   });
@@ -277,7 +277,7 @@ describe("OnboardingFlow", () => {
     const user = userEvent.setup();
     const profilePatches: string[] = [];
     renderFlow({ profilePatches });
-    await screen.findByRole("heading", { name: "Install the Pi Dash CLI" });
+    await screen.findByRole("heading", { name: "Connect your AI agents with Pi Dash" });
     await user.click(screen.getByRole("button", { name: "Continue" }));
     await submitProfileName(user, "Ada Byron");
 
@@ -292,7 +292,7 @@ describe("OnboardingFlow", () => {
     const user = userEvent.setup();
     const profilePatches: string[] = [];
     renderFlow({ profilePatches });
-    await screen.findByRole("heading", { name: "Install the Pi Dash CLI" });
+    await screen.findByRole("heading", { name: "Connect your AI agents with Pi Dash" });
     await user.click(screen.getByRole("button", { name: "Continue" }));
     await submitProfileName(user, "Ada Byron");
     await screen.findByRole("heading", { name: "What's your role?" });
@@ -322,7 +322,7 @@ describe("OnboardingFlow", () => {
     const user = userEvent.setup();
     const profilePatches: string[] = [];
     renderFlow({ profilePatches });
-    await screen.findByRole("heading", { name: "Install the Pi Dash CLI" });
+    await screen.findByRole("heading", { name: "Connect your AI agents with Pi Dash" });
     await user.click(screen.getByRole("button", { name: "Continue" }));
     await submitProfileName(user, "Ada Byron");
     await screen.findByRole("heading", { name: "What's your role?" });
@@ -351,7 +351,7 @@ describe("OnboardingFlow", () => {
     const user = userEvent.setup();
     const profilePatches: string[] = [];
     renderFlow({ selfManaged: true, profilePatches });
-    await screen.findByRole("heading", { name: "Install the Pi Dash CLI" });
+    await screen.findByRole("heading", { name: "Connect your AI agents with Pi Dash" });
     await user.click(screen.getByRole("button", { name: "Continue" }));
     await submitProfileName(user, "Ada Byron");
 
@@ -366,7 +366,7 @@ describe("OnboardingFlow", () => {
   it("finishes at once for self-managed members and lands home", async () => {
     const user = userEvent.setup();
     renderFlow({ selfManaged: true, workspaces: [ACME] });
-    await screen.findByRole("heading", { name: "Install the Pi Dash CLI" });
+    await screen.findByRole("heading", { name: "Connect your AI agents with Pi Dash" });
     await user.click(screen.getByRole("button", { name: "Continue" }));
     await submitProfileName(user, "Ada Byron");
 
@@ -382,7 +382,7 @@ describe("OnboardingFlow", () => {
   it("toasts but still moves when a progress stamp fails", async () => {
     const user = userEvent.setup();
     renderFlow({ selfManaged: true, failProfilePatch: true });
-    await screen.findByRole("heading", { name: "Install the Pi Dash CLI" });
+    await screen.findByRole("heading", { name: "Connect your AI agents with Pi Dash" });
     await user.click(screen.getByRole("button", { name: "Continue" }));
     await submitProfileName(user, "Ada Byron");
 
@@ -393,7 +393,7 @@ describe("OnboardingFlow", () => {
   it("stays on the step when finishing fails", async () => {
     const user = userEvent.setup();
     renderFlow({ selfManaged: true, workspaces: [ACME], failOnboard: true });
-    await screen.findByRole("heading", { name: "Install the Pi Dash CLI" });
+    await screen.findByRole("heading", { name: "Connect your AI agents with Pi Dash" });
     await user.click(screen.getByRole("button", { name: "Continue" }));
     await submitProfileName(user, "Ada Byron");
 
@@ -433,7 +433,7 @@ describe("OnboardingFlow", () => {
       </QueryClientProvider>
     );
     // Fresh-user defaults: the CLI step first, no invitations, no workspaces.
-    expect(await screen.findByRole("heading", { name: "Install the Pi Dash CLI" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Connect your AI agents with Pi Dash" })).toBeInTheDocument();
     expect(screen.getByText("1/6")).toBeInTheDocument();
   });
 

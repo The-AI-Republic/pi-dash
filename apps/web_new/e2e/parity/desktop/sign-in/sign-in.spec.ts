@@ -590,7 +590,9 @@ async function desk027Positive(driver: ParityDriver): Promise<void> {
   });
 
   await test.step("onboarding opens on profile setup with no CLI step", async () => {
-    expect(await driver.pageText()).not.toContain("Install the Pi Dash CLI");
+    for (const heading of ["Connect your AI agents with Pi Dash", "Install the Pi Dash CLI"]) {
+      expect(await driver.pageText()).not.toContain(heading);
+    }
     const progress = parseProgress(await driver.deskSigninOnboardingProgress());
     expect(progress.current).toBe(1);
     expect(progress.total).toBeGreaterThanOrEqual(2);

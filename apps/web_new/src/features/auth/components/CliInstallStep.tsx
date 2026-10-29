@@ -37,10 +37,11 @@ export function CliInstallStep({ onAdvance }: CliInstallStepProps): React.ReactE
     <section aria-labelledby="cli-install-heading" className="flex flex-col gap-(--space-6)">
       <div className="flex flex-col gap-(--space-2)">
         <h1 id="cli-install-heading" className="text-h2 text-(--text)">
-          Install the Pi Dash CLI
+          Connect your AI agents with Pi Dash
         </h1>
         <p className="text-body text-(--text-muted)">
-          The command line connects your terminal to Pi Dash. Pick your system, run the command, then continue.
+          The Pi Dash CLI is the link between your AI agents and Pi Dash: it is how you hand tasks to those agents. It
+          has to live on whichever machine hosts your coding agent, because that is where the work happens.
         </p>
       </div>
 

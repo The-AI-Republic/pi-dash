@@ -29,7 +29,9 @@ describe("CliInstallStep", () => {
     const onAdvance = vi.fn();
     render(<CliInstallStep onAdvance={onAdvance} />);
 
-    expect(screen.getByRole("heading", { name: "Install the Pi Dash CLI" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Connect your AI agents with Pi Dash" })).toBeInTheDocument();
+    expect(screen.getByText(/hand tasks to those agents/)).toBeInTheDocument();
+    expect(screen.getByText(/whichever machine hosts your coding agent/)).toBeInTheDocument();
     expect(screen.getByText(CLI_INSTALL_TABS.unix.commands[0]?.command ?? "")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "macOS / Linux" })).toHaveAttribute("aria-pressed", "true");
 
