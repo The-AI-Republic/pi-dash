@@ -97,6 +97,7 @@ use pidash_auth::permissions::{ROLE_ADMIN, ROLE_MEMBER};
 use pidash_services::app_workspace::{
     models_workspace, queries_core, ser_invite, ser_workspace, tasks,
 };
+use pidash_services::domain::identity;
 use pidash_services::domain::workspaces::{self, members};
 use pidash_types::license::serializers_workspace::RESTRICTED_WORKSPACE_SLUGS;
 use pidash_types::WorkspaceId;
@@ -3869,7 +3870,8 @@ async fn update_workspace_inner(
 }
 
 /// The stock `update()` write: validated columns plus the
-/// `updated_at`/`updated_by` re-stamp.
+/// `updated_at`/`updated_by` re-stamp
+/// (`domain::workspaces::patch` renders the statement).
 async fn apply_workspace_update(
     pool: &sqlx::PgPool,
     data: &WorkspaceRowData,
@@ -3877,39 +3879,18 @@ async fn apply_workspace_update(
     user_id: &uuid::Uuid,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), sqlx::Error> {
-    let mut assignments: Vec<String> = sets
-        .iter()
-        .enumerate()
-        .map(|(index, column)| format!("{column} = ${}", index + 1))
-        .collect();
-    assignments.push(format!("updated_at = ${}", sets.len() + 1));
-    assignments.push(format!("updated_by_id = ${}", sets.len() + 2));
-    let sql = format!(
-        "UPDATE workspaces SET {} WHERE id = ${}",
-        assignments.join(", "),
-        sets.len() + 3
-    );
-    let mut query = sqlx::query(&sql);
-    for column in sets {
-        query = match column.as_str() {
-            "deleted_at" => query.bind(data.deleted_at),
-            "name" => query.bind(&data.name),
-            "logo" => query.bind(data.logo.as_deref()),
-            "slug" => query.bind(&data.slug),
-            "organization_size" => query.bind(data.organization_size.as_deref()),
-            "timezone" => query.bind(&data.timezone),
-            "background_color" => query.bind(&data.background_color),
-            "logo_asset_id" => query.bind(data.logo_asset_id),
-            _ => query.bind(Option::<String>::None),
-        };
-    }
-    query
-        .bind(now)
-        .bind(user_id)
-        .bind(data.id)
-        .execute(pool)
-        .await?;
-    Ok(())
+    let cols: Vec<&str> = sets.iter().map(String::as_str).collect();
+    let patch = workspaces::WorkspacePatch {
+        deleted_at: data.deleted_at,
+        name: &data.name,
+        logo: data.logo.as_deref(),
+        slug: &data.slug,
+        organization_size: data.organization_size.as_deref(),
+        timezone: &data.timezone,
+        background_color: &data.background_color,
+        logo_asset_id: data.logo_asset_id,
+    };
+    workspaces::patch(pool, data.id, &cols, &patch, user_id, now).await
 }
 
 /// DELETE `workspaces/<slug>/` (`:183-201`): profile-pointer cleanup,
@@ -3939,9 +3920,7 @@ pub async fn destroy_workspace(
         Err(response) => return Ok(response),
     };
     // `remove_last_workspace_ids_from_user_settings` (`:187`).
-    sqlx::query("UPDATE profiles SET last_workspace_id = NULL WHERE last_workspace_id = $1")
-        .bind(data.id)
-        .execute(&pool)
+    identity::clear_last_workspace(&pool, data.id)
         .await
         .map_err(|_| Denial::ServerError)?;
     // `str(timezone.now().isoformat())`: micros-truncated UTC, `+00:00`.
@@ -3959,16 +3938,9 @@ pub async fn destroy_workspace(
     // `super().destroy()` (`mixins.py:72-78` + `workspace.py:107-118`):
     // soft delete, slug tombstone, `updated_by` re-stamp, fan-out.
     let tombstone = models_workspace::workspace::soft_deleted_slug(&data.slug, now);
-    sqlx::query(
-        "UPDATE workspaces SET deleted_at = $1, updated_at = $1, updated_by_id = $2, slug = $3 WHERE id = $4",
-    )
-    .bind(now)
-    .bind(user_id)
-    .bind(&tombstone)
-    .bind(data.id)
-    .execute(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    workspaces::soft_delete(&pool, data.id, now, user_id, &tombstone)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     enqueue_soft_delete_related(&pool, "db", "workspace", &data.id).await;
     Ok(empty_response(StatusCode::NO_CONTENT))
 }

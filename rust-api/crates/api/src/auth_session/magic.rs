@@ -1346,10 +1346,7 @@ async fn login_user(request: LoginRequest<'_>) -> Result<String, Response> {
     }
     // `user_logged_in` → `update_last_login` (`auth/models.py`): the
     // signal save, inside `login()` before the session persists.
-    if sqlx::query("UPDATE \"users\" SET \"last_login\" = $1 WHERE \"users\".\"id\" = $2")
-        .bind(now)
-        .bind(user.id)
-        .execute(pool)
+    if identity::stamp_last_login(pool, user.id, now)
         .await
         .is_err()
     {

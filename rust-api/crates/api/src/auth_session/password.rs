@@ -65,6 +65,7 @@ use axum::Router;
 use serde_json::Value;
 
 use pidash_services::auth_session::{password as pw, tasks as t, MAX_URL_REDIRECT_LENGTH};
+use pidash_services::domain::identity;
 
 use crate::auth_session::render::disallowed_redirect;
 use crate::auth_session::throttle_ident;
@@ -957,6 +958,31 @@ async fn password_row(
     .transpose()
 }
 
+/// Change/set/reset-password write: the encoded password plus the
+/// `User.save()` column effects
+/// (`domain::identity::write_password_with_save_effects`), with a
+/// caller-generated rotation token. `stamp_last_login` selects the
+/// change/set-password twin over reset-password.
+async fn write_password(
+    pool: &sqlx::PgPool,
+    user_id: uuid::Uuid,
+    encoded: &str,
+    stamp_last_login: bool,
+) -> Result<(), sqlx::Error> {
+    let token = crate::auth_session::email::fresh_user_token();
+    identity::write_password_with_save_effects(
+        pool,
+        user_id,
+        &identity::PasswordSave {
+            encoded,
+            fresh_token: &token,
+            rotated_at: chrono::Utc::now(),
+            stamp_last_login,
+        },
+    )
+    .await
+}
+
 /// `POST /auth/change-password/` (`ChangePasswordEndpoint`,
 /// `common.py:47-96`).
 async fn change_password(
@@ -1044,10 +1070,7 @@ async fn change_password(
     if !is_autoset && old_present && new_present && old_matches {
         if let Field::Text(candidate) = &old {
             if let Some(new_hash) = pidash_auth::password::rehash_if_outdated(candidate, &stored) {
-                if sqlx::query(r#"UPDATE "users" SET "password" = $1 WHERE "id" = $2"#)
-                    .bind(&new_hash)
-                    .bind(actor.id)
-                    .execute(&pool)
+                if identity::rehash_password(&pool, actor.id, &new_hash)
                     .await
                     .is_err()
                 {
@@ -1080,7 +1103,7 @@ async fn change_password(
     );
     // `set_password` + `is_password_autoset = False` + `save()`; the
     // `user_logged_in` signal bumps `last_login` (`update_last_login`).
-    if crate::auth_session::email::write_password_with_save_effects(&pool, actor.id, &encoded, true)
+    if write_password(&pool, actor.id, &encoded, true)
         .await
         .is_err()
     {
@@ -1202,7 +1225,7 @@ async fn set_password(
     );
     // `set_password` + `is_password_autoset = False` + `save()`; the
     // `user_logged_in` signal bumps `last_login` (`update_last_login`).
-    if crate::auth_session::email::write_password_with_save_effects(&pool, actor.id, &encoded, true)
+    if write_password(&pool, actor.id, &encoded, true)
         .await
         .is_err()
     {
@@ -1666,7 +1689,7 @@ async fn reset_password(
         &salt,
         pidash_auth::password::PBKDF2_DEFAULT_ITERATIONS,
     );
-    if crate::auth_session::email::write_password_with_save_effects(&pool, user_id, &encoded, false)
+    if write_password(&pool, user_id, &encoded, false)
         .await
         .is_err()
     {

@@ -100,6 +100,7 @@ use pidash_services::app_project::ser_shared as lite_user;
 use pidash_services::app_workspace::{
     models_workspace, queries_membership as queries, ser_invite, ser_workspace, tasks,
 };
+use pidash_services::domain::identity;
 use pidash_services::domain::workspaces::members;
 
 use super::gates;
@@ -3259,10 +3260,7 @@ async fn join_post(
     // `user.last_workspace_id = ...; user.save()` (`:204-205`): `User`
     // has no such column, so Django drops the pointer and the save only
     // stamps `updated_at` ([`queries::user_touch_sql`]).
-    if sqlx::query("UPDATE users SET updated_at = $1 WHERE id = $2")
-        .bind(now)
-        .bind(user_id)
-        .execute(pool)
+    if identity::touch_user_updated_at(pool, user_id, now)
         .await
         .is_err()
     {
@@ -4174,11 +4172,7 @@ async fn join_request_approve(
             )
             .await?;
         }
-        sqlx::query("UPDATE profiles SET last_workspace_id = $1 WHERE user_id = $2")
-            .bind(workspace_id)
-            .bind(requester_id)
-            .execute(&mut *tx)
-            .await?;
+        identity::set_last_workspace(&mut *tx, requester_id, workspace_id).await?;
         // The status `.save()` stamps `updated_by` with the approver
         // (`db/models/base.py:42`).
         sqlx::query(

@@ -4,26 +4,6 @@
 # Fingerprints hash the statement, not line numbers: unrelated edits do not churn this list.
 # The list only shrinks: remove the entry in the same PR that removes the site.
 # Seeded at 5e249b4d (399 sites). Do not add new sites; move them into domain/ instead.
-crates/api/src/app_workspace/handlers_invites.rs | UPDATE profiles | 9ca7d72d49a9 | sql
-crates/api/src/app_workspace/handlers_invites.rs | UPDATE users | 1c0a5c1f0059 | sql
-crates/api/src/app_workspace/handlers_members.rs | UPDATE workspace_members | e1d811590920 | sql
-crates/api/src/app_workspace/handlers_members.rs | UPDATE workspace_members | e1ff4194a18d | sql
-crates/api/src/app_workspace/handlers_user.rs | UPDATE users | 19e8f24f1468 | sql
-crates/api/src/app_workspace/handlers_workspace.rs | UPDATE profiles | a47927e8a305 | sql
-crates/api/src/app_workspace/handlers_workspace.rs | UPDATE workspaces | 3aff5d4fad30 | sql
-crates/api/src/app_workspace/handlers_workspace.rs | UPDATE workspaces | e9a8018f9963 | sql
-crates/api/src/auth_oauth/login.rs | UPDATE users | f9ca47c65665 | sql
-crates/api/src/auth_oauth/mod.rs | UPDATE users | 7bd990973d04 | sql
-crates/api/src/auth_session/email.rs | UPDATE users | 23815f22f245 | sql
-crates/api/src/auth_session/email.rs | UPDATE users | 4380bec4759f | sql
-crates/api/src/auth_session/email.rs | UPDATE users | c83e0aa5a562 | sql
-crates/api/src/auth_session/email.rs | UPDATE users | f0bf0484e7a2 | sql
-crates/api/src/auth_session/email.rs | UPDATE users | f531915831a5 | sql
-crates/api/src/auth_session/magic.rs | UPDATE users | fc63fc8839fa | sql
-crates/api/src/auth_session/password.rs | UPDATE users | c83e0aa5a562 | sql
-crates/api/src/license/handlers_admin.rs | UPDATE users | 09eb2fbe56c7 | sql
-crates/api/src/license/handlers_admin.rs | UPDATE users | c83e0aa5a562 | sql
-crates/api/src/license/handlers_admin.rs | UPDATE users | f9ca47c65665 | sql
 crates/db/src/ops/repair.rs | INSERT descriptions | f1a2da93f870 | sql
 crates/db/src/ops/repair.rs | UPDATE issue_comments | 210caaf40f84 | sql
 crates/db/src/ops/repair.rs | UPDATE issue_sequences | 3717ad044d93 | sql
