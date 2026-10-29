@@ -9,20 +9,26 @@ import { observer } from "mobx-react";
 import { useParams, useRouter } from "next/navigation";
 import { ChevronsUpDown, Globe, LogOut, Settings } from "lucide-react";
 // pi dash imports
-import { GOD_MODE_URL } from "@pi-dash/constants";
+import { EUserPermissionsLevel, GOD_MODE_URL, WORKSPACE_SIDEBAR_STATIC_NAVIGATION_ITEMS } from "@pi-dash/constants";
 import { useTranslation } from "@pi-dash/i18n";
+import { YourWorkIcon } from "@pi-dash/propel/icons";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import { Avatar, CustomMenu } from "@pi-dash/ui";
-import { cn, getFileURL } from "@pi-dash/utils";
+import { cn, getFileURL, joinUrlPath } from "@pi-dash/utils";
 // components
 import { AppSidebarItem } from "@/components/sidebar/sidebar-item";
 // hooks
 import { useAppTheme } from "@/hooks/store/use-app-theme";
-import { useUser } from "@/hooks/store/user";
+import { useUser, useUserPermissions } from "@/hooks/store/user";
 
 type Props = {
   variant?: "compact" | "sidebar";
 };
+
+// The "Your work" entry is reused from the shared navigation constants rather
+// than hardcoded here, so its label, route and access list stay in one place
+// even though the entry is no longer rendered as a sidebar row.
+const yourWorkItem = WORKSPACE_SIDEBAR_STATIC_NAVIGATION_ITEMS["your-work"];
 
 export const UserMenuRoot = observer(function UserMenuRoot({ variant = "compact" }: Props) {
   // states
@@ -34,8 +40,16 @@ export const UserMenuRoot = observer(function UserMenuRoot({ variant = "compact"
   const { toggleAnySidebarDropdown } = useAppTheme();
   const { data: currentUser } = useUser();
   const { signOut } = useUser();
+  const { allowPermissions } = useUserPermissions();
   // derived values
   const isUserInstanceAdmin = false;
+  const slug = workspaceSlug?.toString() ?? "";
+  // The route is per-user, so it can only be built once the current user is
+  // loaded — same shape as the sidebar row this entry replaced.
+  const yourWorkHref = currentUser?.id ? joinUrlPath(slug, yourWorkItem.href, currentUser.id) : undefined;
+  // "Your work" is a member-and-above page (parity with the sidebar row it
+  // replaced, and with the backend 403), so guests never see the entry.
+  const canSeeYourWork = !!yourWorkHref && allowPermissions(yourWorkItem.access, EUserPermissionsLevel.WORKSPACE, slug);
   // translation
   const { t } = useTranslation();
 
@@ -138,6 +152,12 @@ export const UserMenuRoot = observer(function UserMenuRoot({ variant = "compact"
             <p className="truncate text-caption-md-regular">{currentUser?.email}</p>
           </div>
         </div>
+        {canSeeYourWork && (
+          <CustomMenu.MenuItem onClick={() => router.push(yourWorkHref)} className="flex items-center gap-2">
+            <YourWorkIcon className="size-3.5 shrink-0" />
+            {t(yourWorkItem.labelTranslationKey)}
+          </CustomMenu.MenuItem>
+        )}
         <div>
           <CustomMenu.MenuItem
             onClick={() => router.push(`/${workspaceSlug}/settings/account/general`)}
