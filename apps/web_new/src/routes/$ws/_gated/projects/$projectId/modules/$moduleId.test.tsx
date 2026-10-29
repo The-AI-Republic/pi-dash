@@ -263,6 +263,63 @@ describe("module detail route", () => {
     20000
   );
 
+  it("reads the detail before the prefs prefetch so an unknown module reaches the gone-away gate (MOD-029, MOD-038)", async () => {
+    const beforeLoad = Route.options.beforeLoad;
+    if (!beforeLoad) throw new Error("missing beforeLoad");
+    // The live detail read 404s for an unknown or deleted module while the
+    // user-properties read answers 400 for the same id (the backend's
+    // IntegrityError). The detail must win so the gate, not the route
+    // error screen, answers "this module does not exist".
+    mocks.detail.mockReturnValue({
+      queryKey: ["detail"],
+      queryFn: async () => {
+        throw new ApiError({ status: 404, code: "http", message: "Module not found" });
+      },
+    });
+    mocks.prefs.mockReturnValue({
+      queryKey: ["prefs"],
+      queryFn: async () => {
+        throw new ApiError({ status: 400, code: "http", message: "The payload is not valid" });
+      },
+    });
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
+    });
+    await expect(
+      beforeLoad({
+        context: { queryClient, apiClient: { stub: true } },
+        params: { ws: "acme", projectId: PROJECT, moduleId: MODULE },
+      } as never)
+    ).resolves.toBe(undefined);
+    expect(mocks.detail).toHaveBeenCalled();
+    expect(mocks.prefs).not.toHaveBeenCalled();
+  }, 20000);
+
+  it("rethrows a genuine detail failure so the page keeps its retry, before any prefs read (MOD-029)", async () => {
+    const beforeLoad = Route.options.beforeLoad;
+    if (!beforeLoad) throw new Error("missing beforeLoad");
+    // The detail read runs first now; a server error there is a real load
+    // failure and must reach the route's error view, not the gone-away
+    // gate, and the prefs prefetch never runs behind it.
+    const failure = new ApiError({ status: 500, code: "http", message: "boom" });
+    mocks.detail.mockReturnValue({
+      queryKey: ["detail"],
+      queryFn: async () => {
+        throw failure;
+      },
+    });
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
+    });
+    await expect(
+      beforeLoad({
+        context: { queryClient, apiClient: { stub: true } },
+        params: { ws: "acme", projectId: PROJECT, moduleId: MODULE },
+      } as never)
+    ).rejects.toBe(failure);
+    expect(mocks.prefs).not.toHaveBeenCalled();
+  }, 20000);
+
   it("rethrows a failure no gate owns", async () => {
     mocks.prefs.mockReturnValue({
       queryKey: ["prefs"],
