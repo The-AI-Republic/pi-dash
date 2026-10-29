@@ -208,10 +208,13 @@ test(
     });
 
     await test.step("the button reads Add on small screens", async () => {
+      // Polled: the new label follows a matchMedia signal through React
+      // state, so the flip lands a frame after the resize (the old
+      // button answers synchronously and passes first try).
       await page.setViewportSize({ width: 500, height: 800 });
-      expect(await driver.modulesAddLabel()).toBe("Add");
+      await expect.poll(() => driver.modulesAddLabel()).toBe("Add");
       await page.setViewportSize({ width: 1280, height: 800 });
-      expect(await driver.modulesAddLabel()).toBe("Add Module");
+      await expect.poll(() => driver.modulesAddLabel()).toBe("Add Module");
     });
 
     await test.step("activating it opens the create dialog", async () => {

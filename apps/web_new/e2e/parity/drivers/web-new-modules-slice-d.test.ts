@@ -276,6 +276,27 @@ describe("modulesListArchivedRowClickOpensPeek", () => {
     await new WebNewDriver(fake.asPage()).modulesListArchivedRowClickOpensPeek("Gone");
     expect(fake.clicks.some((click) => click.includes("testid(modules-row-progress)"))).toBe(true);
   });
+
+  it("ignores the router's trailing-slash normalization (MOD-012)", async () => {
+    const fake = new FakePage({
+      [ROW]: { visible: true },
+      [`${ROW} testid(modules-row-progress)`]: {},
+      "page testid(modules-peek)": { visible: true },
+      "page testid(modules-peek) role(heading,)": { text: "Gone" },
+    });
+    fake.path = "/acme/projects/p1/archives/modules";
+    const page = fake.asPage();
+    let reads = 0;
+    Object.defineProperty(page, "url", {
+      value: () => {
+        reads += 1;
+        return reads === 1
+          ? "https://app.test/acme/projects/p1/archives/modules"
+          : "https://app.test/acme/projects/p1/archives/modules/";
+      },
+    });
+    await expect(new WebNewDriver(page).modulesListArchivedRowClickOpensPeek("Gone")).resolves.toBe(undefined);
+  });
 });
 
 describe("modulesListRowMenuVisible", () => {

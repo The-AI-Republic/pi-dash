@@ -24279,18 +24279,22 @@ export class WebNewDriver implements ParityDriver {
     // click lands on the intended cell even across month boundaries.
     const calendar = this.modulesDatesCalendar().first();
     await calendar.waitFor({ timeout: WebNewDriver.WAIT_MS });
-    const month0 = Number(await calendar.getByLabel("Month").inputValue());
-    const year = Number(await calendar.getByLabel("Year").inputValue());
+    const month0 = Number(await calendar.getByLabel("Month", { exact: true }).inputValue());
+    const year = Number(await calendar.getByLabel("Year", { exact: true }).inputValue());
     const iso = `${year}-${String(month0 + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
     await calendar.locator(`button[data-day="${iso}"]`).click({ timeout: WebNewDriver.WAIT_MS });
   }
   async modulesCalendarGotoMonth(monthLabel: string, yearLabel: string): Promise<void> {
     const calendar = this.modulesDatesCalendar().first();
-    await calendar.getByLabel("Month").selectOption({ label: monthLabel }, { timeout: WebNewDriver.WAIT_MS });
-    await calendar.getByLabel("Year").selectOption({ label: yearLabel }, { timeout: WebNewDriver.WAIT_MS });
+    await calendar
+      .getByLabel("Month", { exact: true })
+      .selectOption({ label: monthLabel }, { timeout: WebNewDriver.WAIT_MS });
+    await calendar
+      .getByLabel("Year", { exact: true })
+      .selectOption({ label: yearLabel }, { timeout: WebNewDriver.WAIT_MS });
     const shown = async (): Promise<[string, string]> => {
-      const month = (await calendar.getByLabel("Month").locator("option:checked").innerText()).trim();
-      const year = (await calendar.getByLabel("Year").locator("option:checked").innerText()).trim();
+      const month = (await calendar.getByLabel("Month", { exact: true }).locator("option:checked").innerText()).trim();
+      const year = (await calendar.getByLabel("Year", { exact: true }).locator("option:checked").innerText()).trim();
       return [month, year];
     };
     await expect.poll(shown, { timeout: WebNewDriver.WAIT_MS }).toEqual([monthLabel, yearLabel]);
@@ -32016,12 +32020,15 @@ export class WebNewDriver implements ParityDriver {
   async modulesListArchivedRowClickOpensPeek(name: string): Promise<void> {
     const row = this.modulesRow(name);
     await row.waitFor({ timeout: WebNewDriver.WAIT_MS });
-    const before = new URL(this.page.url()).pathname;
+    // Slash-tolerant: the router normalizes a trailing slash on client
+    // hops, which is not a navigation away from the archives screen.
+    const path = (): string => new URL(this.page.url()).pathname.replace(/\/$/, "");
+    const before = path();
     // The progress marker is part of the row body, never a control, so a
     // press there is the body press an archived row turns into a peek.
     await row.getByTestId("modules-row-progress").first().click({ timeout: WebNewDriver.WAIT_MS });
     await this.modulesAwaitPeekName(name);
-    const after = new URL(this.page.url()).pathname;
+    const after = path();
     if (after !== before) throw new Error(`[parity] archived row navigated to ${after} instead of peeking.`);
   }
 
