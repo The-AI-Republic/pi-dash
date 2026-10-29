@@ -235,6 +235,40 @@ export interface CreateCommentInput {
   assetIds?: readonly string[];
 }
 
+/** How long a create waits for attached pictures to reach the stored body. */
+export interface CommentImageWait {
+  /** Pause between re-reads. Defaults to 500ms. */
+  intervalMs?: number;
+  /** Give up after this long. Defaults to 30s. */
+  timeoutMs?: number;
+}
+
+/**
+ * Re-read a comment until its stored body carries the attached pictures
+ * (CMT-009). The bulk link answers 204 before the rewritten body is
+ * readable, so the first re-read usually still shows the pre-attach
+ * HTML; caching that row would hide the pictures until a reload (the
+ * feed's delta refresh only adds newer rows). Resolves with the first
+ * row whose body embeds an image, or the last row read when the wait
+ * runs out; rejects when no re-read succeeds.
+ */
+export async function readCommentWithImages(
+  client: ApiClient,
+  scope: CommentScope,
+  commentId: string,
+  wait: CommentImageWait = {}
+): Promise<IssueComment> {
+  const intervalMs = wait.intervalMs ?? 500;
+  const timeoutMs = wait.timeoutMs ?? 30_000;
+  const started = Date.now();
+  for (;;) {
+    const row = await getIssueComment(client, scope.workspaceSlug, scope.projectId, scope.issueId, commentId);
+    if (row.comment_html.includes("image-component")) return row;
+    if (Date.now() - started >= timeoutMs) return row;
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+}
+
 /** Post a comment, attach its images, and refresh the list (ISS-197). */
 export function useCreateComment(scope: CommentScope) {
   const client = getAppClient();
@@ -252,14 +286,11 @@ export function useCreateComment(scope: CommentScope) {
         notifyError(COMMENT_ATTACH_FAILED_TITLE, commentFailureDetail(error));
         return comment;
       }
-      // The bulk link rewrites the stored body but answers 204: the
-      // create response still carries the pre-attach HTML, and the
-      // feed's delta refresh only adds newer rows, so caching it would
-      // show the new comment without its pictures until a reload. A
-      // refused re-read keeps the create response rather than failing
-      // the post (CMT-009).
+      // The bulk link answers 204 before the rewritten body is
+      // readable: wait for the pictures, and keep the create response
+      // when no re-read succeeds rather than failing the post (CMT-009).
       try {
-        return await getIssueComment(client, scope.workspaceSlug, scope.projectId, scope.issueId, comment.id);
+        return await readCommentWithImages(client, scope, comment.id);
       } catch {
         return comment;
       }

@@ -36,6 +36,7 @@ import {
   foldPatch,
   paintComment,
   pendingCommentPatch,
+  readCommentWithImages,
   removeCommentRow,
   requestCommentMentions,
   useCommentMentionSearch,
@@ -461,11 +462,18 @@ describe("useDeleteComment", () => {
 describe("useCreateComment", () => {
   it("posts, attaches parked images by comment id, and appends in order", async () => {
     const created = comment({ id: "823e4567-e89b-12d3-a456-426614174008", created_at: "2026-10-17T00:00:00Z" });
+    const attached = comment({
+      ...created,
+      comment_html: '<p>Hi</p><image-component src="asset-1"></image-component>',
+    });
     const { queryClient, wrapper } = harness();
     queryClient.setQueryData(issueKeys.comments(SLUG, PROJECT, ISSUE), [comment()]);
-    const { calls } = stubClient((call) =>
-      call.url.includes("/history/") ? { status: 200, body: [comment(), created] } : { status: 201, body: created }
-    );
+    const { calls } = stubClient((call) => {
+      if (call.url.includes("/history/")) return { status: 200, body: [comment(), attached] };
+      if (call.url.includes("/bulk/")) return { status: 204, body: "" };
+      if (call.method === "GET") return { status: 200, body: attached };
+      return { status: 201, body: created };
+    });
     const { result } = renderHook(() => useCreateComment(SCOPE), { wrapper });
     await result.current.mutateAsync({ html: "<p>Hi</p>", access: "EXTERNAL", assetIds: ["asset-1"] });
     expect(notifySuccess).toHaveBeenCalledTimes(1);
@@ -510,6 +518,29 @@ describe("useCreateComment", () => {
       expect(rows.map((entry) => entry.id)).toEqual([COMMENT, created.id]);
       expect(rows[1]?.comment_html).toContain("image-component");
     });
+  });
+
+  it("waits for the bulk rewrite before caching the row", async () => {
+    const created = comment({ id: "823e4567-e89b-12d3-a456-426614174008", comment_html: "<p>Hi</p>" });
+    const attached = comment({
+      ...created,
+      comment_html: '<p>Hi</p><image-component src="asset-1"></image-component>',
+    });
+    const { wrapper } = harness();
+    let reads = 0;
+    stubClient((call) => {
+      if (call.url.includes("/history/")) return { status: 200, body: [attached] };
+      if (call.method === "GET") {
+        reads += 1;
+        return { status: 200, body: reads < 3 ? created : attached };
+      }
+      if (call.url.includes("/bulk/")) return { status: 204, body: "" };
+      return { status: 201, body: created };
+    });
+    const { result } = renderHook(() => useCreateComment(SCOPE), { wrapper });
+    const row = await result.current.mutateAsync({ html: "<p>Hi</p>", access: "INTERNAL", assetIds: ["asset-1"] });
+    expect(row.comment_html).toContain("image-component");
+    expect(reads).toBe(3);
   });
 
   it("keeps the create response when the post-attach re-read is refused", async () => {
@@ -573,6 +604,35 @@ describe("useCreateComment", () => {
       "Guests may only comment on work items they created."
     );
     expect(queryClient.getQueryData(issueKeys.comments(SLUG, PROJECT, ISSUE))).toBeUndefined();
+  });
+});
+
+describe("readCommentWithImages", () => {
+  it("resolves with the first row whose body embeds an image", async () => {
+    const plain = comment({ comment_html: "<p>Hi</p>" });
+    const attached = comment({
+      comment_html: '<p>Hi</p><image-component src="asset-1"></image-component>',
+    });
+    let reads = 0;
+    const { client } = stubClient(() => {
+      reads += 1;
+      return { status: 200, body: reads < 3 ? plain : attached };
+    });
+    const row = await readCommentWithImages(client, SCOPE, COMMENT, { intervalMs: 5, timeoutMs: 1_000 });
+    expect(row.comment_html).toContain("image-component");
+    expect(reads).toBe(3);
+  });
+
+  it("returns the last row read when the wait runs out", async () => {
+    const plain = comment({ comment_html: "<p>Hi</p>" });
+    const { client } = stubClient(() => ({ status: 200, body: plain }));
+    const row = await readCommentWithImages(client, SCOPE, COMMENT, { intervalMs: 5, timeoutMs: 20 });
+    expect(row.comment_html).toBe("<p>Hi</p>");
+  });
+
+  it("rejects when no re-read succeeds", async () => {
+    const { client } = stubClient(() => ({ status: 500, body: { error: "boom" } }));
+    await expect(readCommentWithImages(client, SCOPE, COMMENT, { intervalMs: 5, timeoutMs: 20 })).rejects.toBeTruthy();
   });
 });
 
