@@ -60,12 +60,14 @@ export function statusLabel(status: TAgentRunStatus, t: TranslationFn): string {
 type Props = {
   status: TAgentRunStatus;
   t: TranslationFn;
+  /** Overrides the default status label (e.g. "Waiting for your desktop"). */
+  label?: string;
 };
 
-export function RunStatusBadge({ status, t }: Props) {
+export function RunStatusBadge({ status, t, label }: Props) {
   return (
     <Badge variant={statusBadgeVariant(status)} size="sm">
-      {statusLabel(status, t)}
+      {label ?? statusLabel(status, t)}
     </Badge>
   );
 }
