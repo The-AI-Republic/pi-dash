@@ -535,16 +535,17 @@ use pidash_services::domain::activity::ISSUE_ACTIVITY_TASK;
 /// Celery wire name for `recent_visited_task` (bare `@shared_task` default).
 const RECENT_VISITED_TASK: &str = "pi_dash.bgtasks.recent_visited_task.recent_visited_task";
 
-/// `base_host(request, is_app=True)` (`utils/host.py:17`): `WEB_URL` else
-/// `APP_BASE_URL`; unset skips the enqueue (the cycles precedent — Django
-/// would 500, but every merged handler treats the queue as best-effort).
-/// Empty strings fall through like Python's `or` (PIDASHCONV-1587).
+/// `base_host(request, is_app=True)` (`utils/host.py:17-66`):
+/// `APP_BASE_URL` wins when set, else `WEB_URL`; unset skips the enqueue
+/// (the cycles precedent — Django would 500, but every merged handler
+/// treats the queue as best-effort). Empty strings fall through like
+/// Python's `or` (PIDASHCONV-1587).
 fn request_origin(state: &AppState) -> Option<String> {
     let urls = &state.settings().urls;
-    urls.web_url
+    urls.app_base_url
         .clone()
         .filter(|s| !s.is_empty())
-        .or_else(|| urls.app_base_url.clone().filter(|s| !s.is_empty()))
+        .or_else(|| urls.web_url.clone().filter(|s| !s.is_empty()))
 }
 
 /// Best-effort deferred publish (the space intake precedent): without the
@@ -2717,13 +2718,17 @@ mod tests {
         AppState::with_settings("test", settings)
     }
 
-    /// `request_origin` treats `""` as missing (PIDASHCONV-1587): an
-    /// empty `WEB_URL` falls back to `APP_BASE_URL`, and empty
-    /// everywhere is `None` (the enqueue is skipped).
+    /// `base_host(request, is_app=True)` treats `""` as missing
+    /// (PIDASHCONV-1587): an empty `APP_BASE_URL` falls back to
+    /// `WEB_URL`, and empty everywhere is `None` (the enqueue is
+    /// skipped). `APP_BASE_URL` wins when both are set
+    /// (PIDASHCONV-1641).
     #[test]
     fn request_origin_falls_through_empty_strings() {
         let app = "https://app.example.invalid";
         let web = "https://web.example.invalid";
+        let state = origin_state(Some(""), Some(web));
+        assert_eq!(request_origin(&state).as_deref(), Some(web));
         let state = origin_state(Some(app), Some(""));
         assert_eq!(request_origin(&state).as_deref(), Some(app));
         let state = origin_state(Some(""), Some(""));
@@ -2731,7 +2736,7 @@ mod tests {
         let state = origin_state(None, None);
         assert_eq!(request_origin(&state), None);
         let state = origin_state(Some(app), Some(web));
-        assert_eq!(request_origin(&state).as_deref(), Some(web));
+        assert_eq!(request_origin(&state).as_deref(), Some(app));
     }
 
     #[test]
