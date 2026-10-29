@@ -1,0 +1,263 @@
+name: rust-api-contract-tests-app-integrations-bind-redirect
+
+# PIDASHCONV-1513: renamed-repo binds follow GitHub 301s; GitLab 3xx fails closed.
+# Each job boots its server pointed at the test's redirect stub and runs only
+# the bind-redirect suite (no shared server):
+#
+# - Django job: runserver boots with HTTPS_PROXY at the test's MITM proxy
+#   (fixed BIND_REDIRECT_MITM_PORT) and REQUESTS_CA_BUNDLE at the bundle the
+#   test module mints (test CA + system roots). The proxy MITMs api.github.com
+#   and serves the 301 routes in-tunnel. Django follows redirects, so this leg
+#   is the oracle: it proves the cases encode real Django behavior. The GitLab
+#   leg reuses the same MITM (account host_url=https://api.github.com, added
+#   to GITLAB_ALLOWED_HOSTS).
+# - Rust job: pidash-api serve boots with PIDASH_GITHUB_API_BASE at the
+#   test's plain-HTTP stub (fixed BIND_REDIRECT_STUB_PORT), which rustls
+#   never has to verify. Fails on Policy::none (HTTP 301 mapped to 400),
+#   passes on Policy::limited(10). Django upstream stays a pure backstop
+#   (all PIDASH_RUST_* flags on).
+#
+# Fixed ports follow the STALL_S3_PORT precedent: each server dials a base
+# baked into its boot env, and the test module binds the listener itself at
+# run time (both backends dial lazily per bind, so each listener only needs
+# to exist while its tests run).
+
+on:
+  push:
+    branches: [rust-dev]
+    paths:
+      - "rust-api/**"
+      - ".github/workflows/rust-api-contract-tests-app-integrations-bind-redirect.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  bind-redirect-django:
+    name: bind-redirect suite vs Django
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: pidash_contract
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/pidash_contract
+      REDIS_URL: redis://localhost:6379/0
+      AMQP_URL: redis://localhost:6379/1
+      WEB_URL: http://127.0.0.1:8000
+      APP_BASE_URL: http://127.0.0.1:8000
+      EMAIL_HOST: localhost
+      API_KEY_RATE_LIMIT: 100000/minute
+      LLM_API_KEY: dummy-contract-key
+      GITHUB_APP_PRIVATE_KEY: dummy-private-key
+      GITHUB_APP_WEBHOOK_SECRET: contract91-webhook-secret
+      GITHUB_APP_CLIENT_SECRET: dummy-client-secret
+      DJANGO_SETTINGS_MODULE: pi_dash.settings.test
+      BASE_URL: http://127.0.0.1:8000
+      SECRET_KEY: "contract-tests-fixed-secret"
+      GITLAB_ALLOWED_HOSTS: https://api.github.com
+      BIND_REDIRECT_MITM_PORT: "15132"
+      BIND_REDIRECT_CA_BUNDLE: /tmp/pidash-1513-ca-bundle.pem
+      HTTPS_PROXY: http://127.0.0.1:15132
+      REQUESTS_CA_BUNDLE: /tmp/pidash-1513-ca-bundle.pem
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12.x"
+          cache: pip
+          cache-dependency-path: |
+            apps/api/requirements/base.txt
+            rust-api/contract-tests/requirements.txt
+
+      - name: Install system deps for psycopg-c
+        run: sudo apt-get update -y && sudo apt-get install -y libpq-dev
+
+      - name: Install Django server and contract-test deps
+        run: >-
+          python -m pip install
+          -r apps/api/requirements/base.txt
+          -r rust-api/contract-tests/requirements.txt
+
+      - name: Migrate contract database
+        working-directory: apps/api
+        run: python manage.py migrate --noinput
+
+      - name: Start live Django server (MITM proxy env)
+        working-directory: apps/api
+        run: |
+          python manage.py runserver 127.0.0.1:8000 --noreload > /tmp/django-bind-redirect.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -fsS -o /dev/null "$BASE_URL/"; then
+              echo "Django is up"; exit 0
+            fi
+            sleep 4
+          done
+          echo "Django did not start:"; tail -n 50 /tmp/django-bind-redirect.log; exit 1
+
+      - name: Run bind-redirect oracle (Django)
+        working-directory: rust-api/contract-tests
+        # Same plugin dodge as the integrations-redirect job: the API install
+        # puts pytest-django in this interpreter; the oracle never touches Django.
+        run: env -u DJANGO_SETTINGS_MODULE pytest -p no:django app_integrations/test_repo_bind_redirect.py -v
+
+      - name: Upload server log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: contract-bind-redirect-django-log
+          path: /tmp/django-bind-redirect.log
+
+  bind-redirect-rust:
+    name: bind-redirect suite vs Rust serve
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: pidash_contract
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/pidash_contract
+      REDIS_URL: redis://localhost:6379/0
+      AMQP_URL: redis://localhost:6379/1
+      WEB_URL: http://127.0.0.1:8080
+      APP_BASE_URL: http://127.0.0.1:8080
+      EMAIL_HOST: localhost
+      API_KEY_RATE_LIMIT: 100000/minute
+      LLM_API_KEY: dummy-contract-key
+      GITHUB_APP_PRIVATE_KEY: dummy-private-key
+      GITHUB_APP_WEBHOOK_SECRET: contract91-webhook-secret
+      GITHUB_APP_CLIENT_SECRET: dummy-client-secret
+      DJANGO_SETTINGS_MODULE: pi_dash.settings.test
+      BASE_URL: http://127.0.0.1:8080
+      SECRET_KEY: "contract-tests-fixed-secret"
+      BIND_REDIRECT_STUB_PORT: "15131"
+      PIDASH_GITHUB_API_BASE: http://127.0.0.1:15131
+      PIDASH_DJANGO_UPSTREAM: http://127.0.0.1:8000
+      PIDASH_RUST_WEB: "1"
+      PIDASH_RUST_APP: "1"
+      PIDASH_RUST_ASSISTANT: "1"
+      PIDASH_RUST_LOOP: "1"
+      PIDASH_RUST_PROMPTING: "1"
+      PIDASH_RUST_SPACE: "1"
+      PIDASH_RUST_LICENSE: "1"
+      PIDASH_RUST_RUNNER_WEB: "1"
+      PIDASH_RUST_API_V1: "1"
+      PIDASH_RUST_RUNNER: "1"
+      PIDASH_RUST_AUTH: "1"
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12.x"
+          cache: pip
+          cache-dependency-path: |
+            apps/api/requirements/base.txt
+            rust-api/contract-tests/requirements.txt
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust-api
+
+      - name: Install system deps for psycopg-c
+        run: sudo apt-get update -y && sudo apt-get install -y libpq-dev
+
+      - name: Install Django server and contract-test deps
+        run: >-
+          python -m pip install
+          -r apps/api/requirements/base.txt
+          -r rust-api/contract-tests/requirements.txt
+
+      - name: Migrate contract database
+        working-directory: apps/api
+        run: python manage.py migrate --noinput
+
+      - name: Build Rust server
+        working-directory: rust-api
+        run: cargo build --bin pidash-api
+
+      - name: Start Django upstream (proxy backstop)
+        working-directory: apps/api
+        run: |
+          python manage.py runserver 127.0.0.1:8000 --noreload > /tmp/django-bind-redirect-upstream.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -fsS -o /dev/null "http://127.0.0.1:8000/"; then
+              echo "Django upstream is up"; exit 0
+            fi
+            sleep 4
+          done
+          echo "Django upstream did not start:"; tail -n 50 /tmp/django-bind-redirect-upstream.log; exit 1
+
+      - name: Start Rust serve (redirect-stub env)
+        working-directory: rust-api
+        run: |
+          nohup ./target/debug/pidash-api serve --bind 127.0.0.1:8080 \
+            > /tmp/rust-bind-redirect-serve.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -fsS -o /dev/null "http://127.0.0.1:8080/healthz"; then
+              echo "Rust serve is up"; exit 0
+            fi
+            sleep 4
+          done
+          echo "Rust serve did not start:"; tail -n 50 /tmp/rust-bind-redirect-serve.log; exit 1
+
+      - name: Run bind-redirect replay (Rust)
+        working-directory: rust-api/contract-tests
+        # Same plugin dodge as the Django oracle job: the API install puts
+        # pytest-django in this interpreter; the replay never touches Django.
+        run: env -u DJANGO_SETTINGS_MODULE pytest -p no:django app_integrations/test_rust_replay_bind_redirect.py -v
+
+      - name: Upload server logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: contract-bind-redirect-rust-logs
+          path: |
+            /tmp/rust-bind-redirect-serve.log
+            /tmp/django-bind-redirect-upstream.log

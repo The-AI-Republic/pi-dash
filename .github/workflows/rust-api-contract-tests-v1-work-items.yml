@@ -51,6 +51,10 @@ jobs:
       API_KEY_RATE_LIMIT: 100000/minute
       DJANGO_SETTINGS_MODULE: pi_dash.settings.test
       BASE_URL: http://127.0.0.1:8000
+      # Stub live-document server the page-create tests bind (PIDASHCONV-1503):
+      # the backend converts through it only while a test holds it up; with
+      # the stub down conversion fails and the 503 tests still pass.
+      LIVE_BASE_URL: http://127.0.0.1:18096
       # Dummy S3 settings for the attachment-presign tests (PIDASHCONV-789):
       # presigning is offline (no S3 service needed), but without a
       # key/secret/region/bucket botocore raises NoCredentialsError and

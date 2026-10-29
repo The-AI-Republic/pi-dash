@@ -45,7 +45,6 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings};
-use pidash_db::dispatch::status::AgentRunStatus;
 use pidash_db::tx::Transaction;
 use pidash_services::dispatch::{
     consume_admission_token, AdmissionCache, DeferredConsume, LlmProfile, UserFlags,
@@ -67,10 +66,10 @@ use pidash_services::orchestration::creation::{
     WORK_ITEM_ID_SELECT_SQL,
 };
 use pidash_services::orchestration::creation::{
-    finalize_lock_sql, AdmissionError as ServiceAdmissionError, CreationError, CreationSeam,
-    ExecutionError, ExecutionFields as ServiceExecutionFields, ExecutionRequest,
+    finalize_lock_sql, map_run_view, AdmissionError as ServiceAdmissionError, CreationError,
+    CreationSeam, ExecutionError, ExecutionFields as ServiceExecutionFields, ExecutionRequest,
     FinalizeAgentRunSeam, IssueView, LockedIssue, NewAgentRun, PodView, ProjectView, RenderBundle,
-    RunView, RunnerView, StateView, TickerBudget,
+    RunView, RunnerSelectRow, RunnerView, StateView, TickerBudget,
 };
 use pidash_services::prompting::{composer, context};
 use pidash_types::dispatch::AgentExecutorKind;
@@ -81,6 +80,7 @@ use crate::dispatch::{
     ExecutionFieldsError, ExecutionInputs, ExecutionSeams, ProjectScope,
 };
 use crate::dispatch::{execution_fields as resolve_execution_fields, DeferredAdmissionError};
+use pidash_compat::datetime::render_isoformat;
 
 // ---------------------------------------------------------------------------
 // Store
@@ -231,54 +231,6 @@ pub enum CreationJobsError {
 // Row mappers
 // ---------------------------------------------------------------------------
 
-fn decode_error(column: &str, value: &str) -> sqlx::Error {
-    sqlx::Error::Decode(format!("unknown agent_run.{column} {value:?}").into())
-}
-
-fn map_status(value: String) -> Result<AgentRunStatus, sqlx::Error> {
-    AgentRunStatus::from_value(&value).ok_or_else(|| decode_error("status", &value))
-}
-
-fn map_executor(value: String) -> Result<AgentExecutorKind, sqlx::Error> {
-    // Strictness is safe here (unlike the trigger): the
-    // `agent_run_cloud_has_no_local_assignment` check constraint
-    // (`runner/models.py:1065-1075`, migration 0024) admits only the
-    // three members, so an unknown stored value is unreachable.
-    AgentExecutorKind::from_value(&value).ok_or_else(|| decode_error("executor_kind", &value))
-}
-
-/// Map one [`RUN_VIEW_COLUMNS`][pidash_services::orchestration::creation::RUN_VIEW_COLUMNS]
-/// row onto the services view. The trigger is carried through
-/// unparsed: Django's `TextChoices` are choices-only (no DB check),
-/// so the stored value may sit outside `AgentRunTrigger`
-/// (migration 0029) and every read path must tolerate it.
-pub(crate) fn map_run_view(row: &PgRow) -> Result<RunView, sqlx::Error> {
-    let status: String = row.try_get("status")?;
-    let trigger: String = row.try_get("trigger")?;
-    let executor_kind: String = row.try_get("executor_kind")?;
-    Ok(RunView {
-        id: row.try_get("id")?,
-        workspace_id: row.try_get("workspace_id")?,
-        created_by_id: row.try_get("created_by_id")?,
-        pod_id: row.try_get("pod_id")?,
-        runner_id: row.try_get("runner_id")?,
-        pinned_runner_id: row.try_get("pinned_runner_id")?,
-        parent_run_id: row.try_get("parent_run_id")?,
-        work_item_id: row.try_get("work_item_id")?,
-        status: map_status(status)?,
-        trigger,
-        executor_kind: map_executor(executor_kind)?,
-        phase_kind: row.try_get("phase_kind")?,
-        run_config: row.try_get("run_config")?,
-        tool_plan: row.try_get("tool_plan")?,
-        error_code: row.try_get("error_code")?,
-        error: row.try_get("error")?,
-        prompt: row.try_get("prompt")?,
-        prompt_manifest: row.try_get("prompt_manifest")?,
-        ended_at: row.try_get("ended_at")?,
-    })
-}
-
 /// Map one [`ISSUE_SELECT_SQL`] row.
 #[allow(clippy::type_complexity)]
 fn map_issue(row: &PgRow) -> Result<IssueView, sqlx::Error> {
@@ -402,20 +354,20 @@ where
     }
 
     async fn runner(&mut self, runner_id: Uuid) -> Result<Option<RunnerView>, CreationError> {
-        let row: Option<(Uuid, Uuid, String, Option<DateTime<Utc>>)> =
-            sqlx::query_as(RUNNER_SELECT_SQL)
-                .bind(runner_id)
-                .fetch_optional(&mut **self.tx.inner())
-                .await
-                .map_err(Self::db)?;
-        Ok(
-            row.map(|(id, pod_id, status, last_heartbeat_at)| RunnerView {
+        let row: Option<RunnerSelectRow> = sqlx::query_as(RUNNER_SELECT_SQL)
+            .bind(runner_id)
+            .fetch_optional(&mut **self.tx.inner())
+            .await
+            .map_err(Self::db)?;
+        Ok(row.map(
+            |(id, pod_id, status, last_heartbeat_at, paused_at)| RunnerView {
                 id,
                 pod_id,
                 status,
                 last_heartbeat_at,
-            }),
-        )
+                paused_at,
+            },
+        ))
     }
 
     async fn assigned_pod(&mut self, pod_id: Uuid) -> Result<Option<PodView>, CreationError> {
@@ -725,18 +677,6 @@ fn map_admission_error(error: DeferredAdmissionError) -> ServiceAdmissionError {
 
 fn db(error: sqlx::Error) -> CreationError {
     CreationError::Db(error.to_string())
-}
-
-/// Python `datetime.isoformat()` for an aware UTC timestamp (`+00:00`,
-/// microseconds only when nonzero — `context.py:322`).
-fn render_isoformat(dt: DateTime<Utc>) -> String {
-    // `AutoSi` trims trailing zeros (`.123000` -> `.123`); Python always
-    // prints six digits when microseconds are nonzero.
-    if dt.timestamp_subsec_micros() == 0 {
-        dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, false)
-    } else {
-        dt.to_rfc3339_opts(chrono::SecondsFormat::Micros, false)
-    }
 }
 
 async fn bundle_labels(
@@ -1238,6 +1178,10 @@ async fn load_render_bundle(
         Some(id) => bundle_done_payload(tx, id).await?,
         None => None,
     };
+    // A parent run with a NULL payload must render the fallback, never
+    // the ticker payload — so its existence travels separately from the
+    // payload itself (PIDASHCONV-1232).
+    let has_parent_run = parent_run_id.is_some();
     let ticker_parent_payload = {
         let resume: Option<(Option<Uuid>,)> = sqlx::query_as(TICKER_RESUME_SELECT_SQL)
             .bind(issue_id)
@@ -1281,6 +1225,7 @@ async fn load_render_bundle(
             enabled,
         }),
         direct_parent_payload,
+        has_parent_run,
         ticker_parent_payload,
         override_rows,
     })

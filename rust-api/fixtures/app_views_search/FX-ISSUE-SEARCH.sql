@@ -58,18 +58,24 @@ SELECT id FROM issues
 WHERE id <> :x AND parent_id IS NULL AND id <> :parent_id;
 
 -- 7. cycle == 'true' -> exclude_issues_in_cycles (issue.py:83-88):
--- WHERE NOT (issue_cycle IS NOT NULL AND issue_cycle.deleted_at IS NULL)
+-- the compiler splits this the same way as §8, but with no module pin
+-- a live row implies a row, so the split collapses EXACTLY to one
+-- NOT EXISTS (verified against the Django 4.2.30 compiler).
 SELECT id FROM issues i
 WHERE NOT EXISTS (SELECT 1 FROM cycle_issues c
   WHERE c.issue_id = i.id AND c.deleted_at IS NULL);
 
 -- 8. module truthy (a module UUID string) -> exclude_issues_in_module
--- (issue.py:90-95):
--- WHERE NOT (issue_module.module = :module AND deleted_at IS NULL)
+-- (issue.py:90-95): multi-valued exclude() SPLITS (Django 4.2.30
+-- compiler output) — any link row to M AND any live link to *any*
+-- module. Unlike §7, pinning M does NOT collapse to one pinned
+-- NOT EXISTS (PIDASHCONV-1449).
 SELECT id FROM issues i
-WHERE NOT EXISTS (SELECT 1 FROM module_issues m
-  WHERE m.issue_id = i.id AND m.module_id = :module
-    AND m.deleted_at IS NULL);
+WHERE NOT (EXISTS (SELECT 1 FROM module_issues m
+  WHERE m.issue_id = i.id AND m.module_id = :module)
+  AND EXISTS (SELECT 1 FROM issues U0
+  LEFT JOIN module_issues U1 ON U0.id = U1.issue_id
+  WHERE U1.deleted_at IS NULL AND U0.id = i.id));
 
 -- 9. target_date == 'none' -> filter(target_date__isnull=True)
 -- (issue.py:97-102; default True never equals 'none').

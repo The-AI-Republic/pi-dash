@@ -67,12 +67,13 @@
 //! and the shared DRF counter kernel against the app redis cache —
 //! fail-open without a cache, answering the rewritten 429 like Django.
 
-use axum::body::{Body, Bytes};
+use axum::body::Bytes;
 use axum::extract::{Extension, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
 
+use crate::auth_session::throttle_ident;
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
 use pidash_db::auth_oauth::models::{api_token_device_flow, cli_device_code};
@@ -83,6 +84,9 @@ use super::guards::{
     DEVICE_CODE_MIN_POLL_GAP_SECS, DEVICE_CODE_POLL_INTERVAL_SECS, DEVICE_CODE_START_MAX_RETRIES,
     DEVICE_CODE_TTL_SECS,
 };
+use pidash_compat::db::is_unique_violation;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
+use pidash_compat::response::{error_body, json_response};
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -139,8 +143,6 @@ fn owned_token() -> axum::routing::MethodRouter<AppState> {
 /// `IsAuthenticated` gate, no `WWW-Authenticate` header).
 pub const UNAUTHENTICATED_DETAIL_BODY: &str =
     r#"{"detail":"Authentication credentials were not provided."}"#;
-/// `handle_exception`'s generic 500 branch.
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 
 // ---------------------------------------------------------------------------
 // Denial / error mapping
@@ -181,14 +183,6 @@ impl Denial {
     }
 }
 
-/// `{"error": message}` with DRF-compact rendering.
-fn error_body(message: &str) -> String {
-    format!(
-        "{{\"error\":{}}}",
-        serde_json::to_string(message).expect("error message serializes")
-    )
-}
-
 impl IntoResponse for Denial {
     fn into_response(self) -> Response {
         if matches!(self, Denial::ServerError) {
@@ -197,14 +191,6 @@ impl IntoResponse for Denial {
         let (status, body) = self.status_and_body();
         json_response(status, body)
     }
-}
-
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(body))
-        .expect("device-flow json response")
 }
 
 /// Successful body: `serde_json` with `preserve_order` keeps the `json!`
@@ -219,12 +205,6 @@ fn pool_of(state: &AppState) -> Result<sqlx::PgPool, Denial> {
         .pools()
         .map(|pools| pools.primary().clone())
         .ok_or(Denial::ServerError)
-}
-
-/// `true` for a Postgres unique-violation (`23505`) — the concurrent
-/// generator collision the start retry converts instead of 500ing.
-fn is_unique_violation(err: &sqlx::Error) -> bool {
-    matches!(err, sqlx::Error::Database(db) if db.code().as_deref() == Some("23505"))
 }
 
 // ---------------------------------------------------------------------------
@@ -336,12 +316,11 @@ pub fn canonical_user_code(raw: &str) -> Result<String, UserCodeRejection> {
 /// `base_host(request=request)` (`authentication/utils/host.py:28-64`)
 /// for the device flow: `settings.WEB_URL or settings.APP_BASE_URL`.
 fn verification_base(state: &AppState) -> String {
-    state
-        .settings()
-        .urls
-        .web_url
+    let urls = &state.settings().urls;
+    urls.web_url
         .clone()
-        .or_else(|| state.settings().urls.app_base_url.clone())
+        .filter(|s| !s.is_empty())
+        .or_else(|| urls.app_base_url.clone().filter(|s| !s.is_empty()))
         .unwrap_or_else(|| "http://localhost".to_owned())
 }
 
@@ -373,18 +352,6 @@ where
     }
 }
 
-/// DRF `get_ident` (`throttling.py:23-41`, `NUM_PROXIES` unset): the
-/// `X-Forwarded-For` header with all whitespace stripped, else the peer
-/// address.
-fn throttle_ident(headers: &HeaderMap, peer: Option<std::net::SocketAddr>) -> String {
-    if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-        if !xff.is_empty() {
-            return xff.split_whitespace().collect();
-        }
-    }
-    peer.map(|p| p.ip().to_string()).unwrap_or_default()
-}
-
 fn now_secs_f64() -> f64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -411,7 +378,10 @@ async fn check_start_throttle(
         Some(parsed) => parsed,
         None => return Ok(()),
     };
-    let key = match device_start_cache_key(false, &throttle_ident(headers, peer)) {
+    let key = match device_start_cache_key(
+        false,
+        &throttle_ident(headers, peer.map(|p| p.ip().to_string())),
+    ) {
         Some(key) => key,
         None => return Ok(()),
     };
@@ -809,22 +779,18 @@ async fn post_token(State(state): State<AppState>, body: Bytes) -> Response {
     // distinguishable from user-created PATs (`device.py:340-349`).
     let user_id = row_user_id.expect("approved row carries a user");
     let api_token = format!("pi_dash_api_{}", uuid::Uuid::new_v4().simple());
-    let minted = sqlx::query(
-        r#"INSERT INTO api_tokens
-           (id, created_at, updated_at, token, label, description,
-            is_active, user_type, user_id, workspace_id,
-            is_service, allowed_rate_limit)
-           VALUES ($1, $2, $3, $4, $5, $6, true, 0, $7, $8, false, '60/min')"#,
+    let minted = pidash_services::domain::tokens::issue_device_token(
+        &mut *tx,
+        &pidash_services::domain::tokens::NewDeviceToken {
+            id: uuid::Uuid::new_v4(),
+            token: api_token.clone(),
+            label: api_token_device_flow::device_flow_label(&now),
+            description: api_token_device_flow::DEVICE_FLOW_DESCRIPTION.to_string(),
+            user_id,
+            workspace_id: row_workspace_id,
+            now,
+        },
     )
-    .bind(uuid::Uuid::new_v4())
-    .bind(now)
-    .bind(now)
-    .bind(&api_token)
-    .bind(api_token_device_flow::device_flow_label(&now))
-    .bind(api_token_device_flow::DEVICE_FLOW_DESCRIPTION)
-    .bind(user_id)
-    .bind(row_workspace_id)
-    .execute(&mut *tx)
     .await;
     if minted.is_err() {
         return Denial::ServerError.into_response();
@@ -892,6 +858,37 @@ fn poll_gap() -> chrono::Duration {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    fn origin_state(app_base_url: Option<&str>, web_url: Option<&str>) -> AppState {
+        let mut settings = pidash_db::config::Settings::test_defaults();
+        settings.urls.app_base_url = app_base_url.map(str::to_owned);
+        settings.urls.web_url = web_url.map(str::to_owned);
+        AppState::with_settings("test", settings)
+    }
+
+    /// `base_host(request=request)` treats `""` as missing
+    /// (PIDASHCONV-1597): an empty `WEB_URL` falls through to
+    /// `APP_BASE_URL`. (The localhost fallback for unset-everywhere is
+    /// a separate, deliberate-looking deviation — out of scope.)
+    #[test]
+    fn verification_base_falls_through_empty_strings() {
+        let app = "https://app.example.invalid";
+        let state = origin_state(Some(app), Some(""));
+        assert_eq!(verification_base(&state), app);
+        let web = "https://web.example.invalid";
+        let state = origin_state(Some(app), Some(web));
+        assert_eq!(verification_base(&state), web);
+        let state = origin_state(Some(""), Some(""));
+        assert_eq!(verification_base(&state), "http://localhost");
+    }
+
+    #[test]
+    fn peerless_throttle_ident_is_drf_none() {
+        // PIDASHCONV-1419: with no XFF and no peer, DRF's `cache_format
+        // % {'ident': None}` renders "None", never "".
+        let headers = axum::http::HeaderMap::new();
+        assert_eq!(throttle_ident(&headers, None), "None");
+    }
 
     fn fixtures_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/auth_oauth")

@@ -50,11 +50,13 @@
 //!   `assistant_user_llm_config` row.
 //! * `extra_toolsets_enabled` is `false`, exactly as CE
 //!   (`ee/cloud_agent/toolsets.py:23-32`).
-//! * The admission cache is request-scoped memory: the sync
-//!   `AdmissionCache` trait cannot reach the async Redis client, and it is
-//!   consulted only when building a cloud-executor run, so every CE/local
-//!   path answers identically to Django; only concurrent cloud load could
-//!   over-admit versus the shared cache.
+//! * The admission cache is the shared Redis (PIDASHCONV-1487): the
+//!   sync `AdmissionCache` trait opens a short sync connection per call
+//!   (the `project_move_handoff::RedisAdmissionCache` position), so the
+//!   per-user / per-workspace minute buckets match Django's exactly,
+//!   sequentially as well as under concurrent load. The drivers consult
+//!   it only when building a cloud-executor run, so every CE/local path
+//!   answers identically with no Redis traffic.
 //!
 //! Ported bugs: none found in these four units on read-through (the
 //! agent-guard ownership bug is P1's, listed on PIDASHCONV-671).
@@ -77,7 +79,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use axum::extract::{Path, Request, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -90,15 +92,19 @@ use uuid::Uuid;
 
 use pidash_auth::permissions::project;
 use pidash_auth::scope::TenantScope;
+use pidash_db::redis::client_from_settings;
 use pidash_types::orchestration::{normalize_outcome, RUN_OUTCOMES};
 use pidash_types::runner_runs::AgentRunStatus;
 
+use crate::project_move_handoff::RedisAdmissionCache;
 use crate::state::AppState;
 
 use super::perms::{
     gate_for, refuse_agent_action, refuse_agent_retick, resolve_moved_by_run, run_belongs_to,
     RunFacts, V1WorkItemsRoute,
 };
+use pidash_compat::response::json_response;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 
 // ---------------------------------------------------------------------------
 // Responses
@@ -111,8 +117,6 @@ pub const UNAUTHENTICATED_BODY: &str =
 /// `APIKeyAuthentication` failure (`api/middleware/api_authentication.py`):
 /// every token rejection maps to this single 403 body.
 pub const INVALID_TOKEN_BODY: &str = r#"{"detail":"Given API token is not valid"}"#;
-/// `handle_exception`'s generic branch (`api/views/base.py:166-170`).
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// The three issue-scoped endpoints' lookup miss
 /// (`views/issue.py:963,1042,1231`).
 pub const WORK_ITEM_NOT_FOUND_BODY: &str = r#"{"error":"Work item not found"}"#;
@@ -214,20 +218,37 @@ fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
 }
 
-/// Render a JSON response with exact bytes and status.
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(axum::http::header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("handler json response")
-}
-
 /// Map a database/driver failure to the generic 500 while logging the site
 /// and error for operators (no secrets: messages never include tokens).
 fn db_error<E: std::fmt::Display>(error: E, site: &str) -> Denial {
     tracing::warn!(%error, site, "v1_work_items actions database failure");
     Denial::ServerError
+}
+
+/// Drain the creation driver's post-commit pod decisions. Django
+/// drains the pod inline (`dispatch.py:61-70`, via `on_commit`); the
+/// jobs driver only *returns* the decision, so a `PodDrain` must be
+/// acted on here or the new run stays QUEUED (PIDASHCONV-1494). A
+/// drain failure is the generic 500 with the committed rows
+/// standing, exactly like an `on_commit` raise.
+async fn drain_dispatch_decisions(
+    pool: &PgPool,
+    state: &AppState,
+    decisions: &[(Uuid, pidash_jobs::dispatch::DispatchDecision)],
+    site: &str,
+) -> Result<(), Denial> {
+    for (_, decision) in decisions {
+        if let pidash_jobs::dispatch::DispatchDecision::PodDrain { pod_id } = decision {
+            if crate::runner_sessions::runner_poll::drain_pod_by_id(pool, state, *pod_id)
+                .await
+                .is_err()
+            {
+                tracing::warn!(site, "v1_work_items actions pod-drain failure");
+                return Err(Denial::ServerError);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn pool_of(state: &AppState) -> Result<PgPool, Denial> {
@@ -331,10 +352,8 @@ pub async fn actor(pool: &PgPool, headers: &HeaderMap, secret_key: &[u8]) -> Res
     // (`api_authentication.py:41-44`); machine tokens stamp `last_used_at`.
     // Best-effort: a failed stamp must not fail the request.
     if !raw.starts_with(pidash_auth::token::MACHINE_TOKEN_PREFIX) {
-        let _ = sqlx::query(r#"UPDATE "api_tokens" SET "last_used" = now() WHERE "token" = $1"#)
-            .bind(raw)
-            .execute(pool)
-            .await;
+        let _ =
+            pidash_services::domain::tokens::touch_api_token_last_used_by_token(pool, raw).await;
     }
     // The token loggers stamp this id on the `process_logs` payload
     // (Django reads `request.user` post-view; PIDASHCONV-937).
@@ -421,19 +440,16 @@ async fn resolve_machine_token(
     if !member {
         // `revoke()` stamps `revoked_at` only (`runner/models.py:865-869`);
         // `last_used_at` is stamped on success only.
-        let _ = sqlx::query(
-            r#"UPDATE "machine_token" SET "revoked_at" = now() WHERE "token_hash" = $1"#,
-        )
-        .bind(&presented_hash)
-        .execute(pool)
-        .await;
+        let _ =
+            pidash_services::domain::tokens::revoke_machine_token_by_hash(pool, &presented_hash)
+                .await;
         return Err(Denial::InvalidToken);
     }
-    let _ =
-        sqlx::query(r#"UPDATE "machine_token" SET "last_used_at" = now() WHERE "token_hash" = $1"#)
-            .bind(&presented_hash)
-            .execute(pool)
-            .await;
+    let _ = pidash_services::domain::tokens::touch_machine_token_last_used_by_hash(
+        pool,
+        &presented_hash,
+    )
+    .await;
     Ok(user_id)
 }
 
@@ -861,49 +877,6 @@ pub async fn fetch_project(pool: &PgPool, project_id: &Uuid) -> Result<Option<Pr
     .transpose()
 }
 
-/// Request-scoped admission cache: the sync `AdmissionCache` trait cannot
-/// reach the async Redis client, and the drivers consult it only when
-/// building a cloud-executor run, so a per-request map answers identically
-/// to Django on every CE/local path (see the module docs).
-#[derive(Debug, Default)]
-pub struct RequestCache {
-    buckets: Mutex<HashMap<String, i64>>,
-}
-
-#[derive(Debug)]
-pub struct CacheError(pub String);
-
-impl std::fmt::Display for CacheError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl std::error::Error for CacheError {}
-
-impl pidash_services::dispatch::admission::AdmissionCache for RequestCache {
-    type Error = CacheError;
-
-    fn bucket_count(&self, key: &str) -> Result<Option<i64>, Self::Error> {
-        self.buckets
-            .lock()
-            .map(|buckets| buckets.get(key).copied())
-            .map_err(|e| CacheError(e.to_string()))
-    }
-
-    fn add_or_incr(&self, key: &str, _timeout_secs: i64) -> Result<(), Self::Error> {
-        self.buckets
-            .lock()
-            .map(|mut buckets| {
-                buckets
-                    .entry(key.to_owned())
-                    .and_modify(|n| *n += 1)
-                    .or_insert(1);
-            })
-            .map_err(|e| CacheError(e.to_string()))
-    }
-}
-
 /// LLM-key presence for the D-11 closures: the actor plus every
 /// fallback-creator candidate the drivers may query (issue creator,
 /// project lead, default assignee, live assignees), read from
@@ -1113,7 +1086,7 @@ pub fn profile_fn(
 
 /// Live [`StoreDeps`](pidash_jobs::orchestration::StoreDeps): settings from
 /// the app state, LLM presence for the creator universe, the installed
-/// toolsets seam, and the request admission cache.
+/// toolsets seam, and the shared Redis admission cache.
 /// Returns the opaque struct so each driver call site keeps its concrete
 /// closure types.
 #[allow(clippy::too_many_arguments)]
@@ -1127,7 +1100,7 @@ pub async fn dispatch_deps(
 ) -> Result<
     (
         pidash_jobs::orchestration::StoreDeps<
-            RequestCache,
+            RedisAdmissionCache,
             impl Fn(Uuid) -> bool + Clone + Send + Sync,
             impl Fn(Option<Uuid>) -> pidash_services::dispatch::LlmProfile + Clone + Send + Sync,
         >,
@@ -1137,11 +1110,14 @@ pub async fn dispatch_deps(
 > {
     let presence = fetch_presence(pool, actor_id, issue, project).await?;
     let verdicts = Arc::new(gate_verdicts(state, &presence).await);
+    let cache = RedisAdmissionCache {
+        client: client_from_settings(state.settings()),
+    };
     Ok((
         pidash_jobs::orchestration::StoreDeps {
             cloud: state.settings().cloud_agent.clone(),
             managed: state.settings().managed_runner.clone(),
-            cache: RequestCache::default(),
+            cache,
             has_usable_llm_config: gate_fn(verdicts),
             toolsets: state.toolsets().clone(),
             llm_profile: profile_fn(presence),
@@ -1164,7 +1140,7 @@ pub async fn dispatch_deps_for_ids(
 ) -> Result<
     (
         pidash_jobs::orchestration::StoreDeps<
-            RequestCache,
+            RedisAdmissionCache,
             impl Fn(Uuid) -> bool + Clone + Send + Sync,
             impl Fn(Option<Uuid>) -> pidash_services::dispatch::LlmProfile + Clone + Send + Sync,
         >,
@@ -1175,11 +1151,14 @@ pub async fn dispatch_deps_for_ids(
     let universe = creator_universe_for_ids(pool, actor_id, issue_id).await?;
     let presence = Arc::new(fetch_llm_presence(pool, &universe).await?);
     let verdicts = Arc::new(gate_verdicts(state, &presence).await);
+    let cache = RedisAdmissionCache {
+        client: client_from_settings(state.settings()),
+    };
     Ok((
         pidash_jobs::orchestration::StoreDeps {
             cloud: state.settings().cloud_agent.clone(),
             managed: state.settings().managed_runner.clone(),
-            cache: RequestCache::default(),
+            cache,
             has_usable_llm_config: gate_fn(verdicts),
             toolsets: state.toolsets().clone(),
             llm_profile: profile_fn(presence),
@@ -1496,9 +1475,8 @@ pub fn truncate_note(note: &str) -> Option<String> {
 
 /// Read the whole body.
 async fn read_body(body: axum::body::Body) -> Result<Vec<u8>, Denial> {
-    axum::body::to_bytes(body, usize::MAX)
+    pidash_compat::http::read_body(body)
         .await
-        .map(|bytes| bytes.to_vec())
         .map_err(|error| db_error(error, "read-body"))
 }
 
@@ -1602,6 +1580,10 @@ async fn retick_inner(
         outcome.run_id,
         outcome.ticker.as_ref().map(|ticker| (ticker, pool)),
     );
+    // Drain after the body is built: the re-tick body carries no run
+    // status, and the committed row must be assigned before the
+    // response returns (PIDASHCONV-1494).
+    drain_dispatch_decisions(&pre.pool, state, &out.dispatch_decisions, "retick-drain").await?;
     Ok(json_response(status, body))
 }
 
@@ -1700,6 +1682,7 @@ async fn wait_inner(
         epoch_secs,
         issue.id,
         run_id,
+        Some(pre.actor.id),
         Some(pre.actor.id),
     )
     .await
@@ -1820,6 +1803,10 @@ async fn run_ai_inner(
         return Err(Denial::ServerError);
     };
     let (status, body) = run_ai_created(id, &status_text, &executor);
+    // Drain after the readback: the body renders the stale pre-drain
+    // row exactly as Django's in-memory run does, while the committed
+    // row is assigned before the response returns (PIDASHCONV-1494).
+    drain_dispatch_decisions(&pre.pool, state, &out.dispatch_decisions, "run-ai-drain").await?;
     Ok(json_response(status, body))
 }
 

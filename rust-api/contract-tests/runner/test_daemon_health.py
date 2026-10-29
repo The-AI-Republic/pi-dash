@@ -32,6 +32,7 @@ def test_daemon_metrics_shape_and_content_type(settings, anon_client):
         "pi_dash_runner_online",
         "pi_dash_runner_busy",
         "pi_dash_runner_offline",
+        "pi_dash_runner_paused",
         "pi_dash_runs_active",
         "pi_dash_approvals_pending",
     ):
@@ -67,6 +68,37 @@ def test_daemon_metrics_counts_reflect_seeded_state(seeder, daemon_world, anon_c
     assert values["pi_dash_runner_busy"] == 1
     assert values["pi_dash_runner_offline"] == 0
     assert values["pi_dash_runs_active"] == 1
+
+
+def test_daemon_metrics_paused_excluded_from_online(seeder, daemon_world, anon_client):
+    """Paused runners leave the online gauge and land on the paused gauge
+    (which counts every connectivity state)."""
+    owner_id = daemon_world["owner"]["id"]
+    ws_id = daemon_world["workspace"]["id"]
+    pod_id = daemon_world["pod"]["id"]
+    live = seeder.enroll_runner(owner_id, ws_id, pod_id, f"apd_en_{seeder.tag}health-p1")
+    paused_online = seeder.enroll_runner(owner_id, ws_id, pod_id, f"apd_en_{seeder.tag}health-p2")
+    paused_busy = seeder.enroll_runner(owner_id, ws_id, pod_id, f"apd_en_{seeder.tag}health-p3")
+    seeder.db.execute("UPDATE runner SET status = 'online' WHERE id = %s", (live["id"],))
+    seeder.db.execute(
+        "UPDATE runner SET status = 'online', paused_at = now() WHERE id = %s",
+        (paused_online["id"],),
+    )
+    seeder.db.execute(
+        "UPDATE runner SET status = 'busy', paused_at = now() WHERE id = %s",
+        (paused_busy["id"],),
+    )
+
+    response = anon_client.get(f"{DAEMON}/metrics/")
+    assert response.status_code == 200
+    values = {}
+    for line in response.text.splitlines():
+        if line.startswith("pi_dash_") and not line.startswith("#"):
+            name, value = line.split(" ")
+            values[name] = int(value)
+    assert values["pi_dash_runner_online"] == 1
+    assert values["pi_dash_runner_busy"] == 1
+    assert values["pi_dash_runner_paused"] == 2
 
 
 def test_daemon_health_no_auth_header_sent(settings):

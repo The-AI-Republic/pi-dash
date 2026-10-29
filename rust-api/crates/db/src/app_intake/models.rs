@@ -37,7 +37,7 @@
 //!
 //! The recorded intake bugs all live outside this layer: the
 //! missing-`None`-check default-intake delete guard
-//! (`app/views/intake/base.py:83-85`), the raw-`order_by`-into-`ORDER BY`
+//! (`app/views/intake/base.py:83-85`), the unknown-`order_by`
 //! `FieldError`-as-500 (`base.py:198`), and the falsy-status-CSV skip
 //! (`base.py:200-202`) are views-layer behavior owned by
 //! PIDASHCONV-314/329/360/385/395. This module ports no behavior that

@@ -31,11 +31,12 @@ use pidash_types::runner_runs::{ApprovalKind, ApprovalStatus};
 use super::runs::RowError;
 use super::{
     is_uuid_path_segment, json_response, pool_of, proxy_with_body, view_response, ALLOW_APPROVALS,
-    ALLOW_APPROVAL_DECIDE, SERVER_ERROR_BODY,
+    ALLOW_APPROVAL_DECIDE,
 };
 use crate::license::{query_last, resolve_actor, QueryMap, UNAUTHENTICATED_BODY};
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
+use pidash_compat::response::server_error;
 
 /// Approval list (`approvals.py:31-40`): creator-routed PENDING rows,
 /// `-requested_at`, `LIMIT 200`. Params: `$1` requester; `$2` the raw
@@ -111,14 +112,6 @@ impl ApprovalRecord {
 /// 401 for anonymous callers (DRF `NotAuthenticated`).
 fn unauthorized() -> Response {
     json_response(StatusCode::UNAUTHORIZED, UNAUTHENTICATED_BODY.to_owned())
-}
-
-/// 500 for transport / model-violation failures on owned branches.
-fn server_error() -> Response {
-    json_response(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        SERVER_ERROR_BODY.to_owned(),
-    )
 }
 
 /// `GET /api/runners/approvals/` — pending approvals routed to the run
