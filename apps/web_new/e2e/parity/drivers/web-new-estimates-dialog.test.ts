@@ -1,10 +1,11 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Unit coverage for the WebNewDriver estimates creation-dialog, active-row
-// and analytics-axis methods (NEWFRONT-748, EST-008..013, EST-016, EST-020).
-// A small Locator/Page double proves the selectors, read/action branches
-// and the settle pollers without bringing up the parity stack.
+// Unit coverage for the WebNewDriver estimates creation-dialog, active-row,
+// analytics-axis and cloud update-dialog methods (NEWFRONT-748,
+// EST-008..016, EST-020, EST-029). A small Locator/Page double proves the
+// selectors, read/action branches and the settle pollers without bringing
+// up the parity stack.
 
 import type { Page, Route } from "@playwright/test";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -14,7 +15,7 @@ import { WebNewDriver } from "./web-new";
 afterEach(() => vi.restoreAllMocks());
 
 interface FakeOptions {
-  count?: number;
+  count?: number | (() => number);
   visible?: boolean;
   text?: string;
   input?: string;
@@ -28,11 +29,15 @@ interface FakeOptions {
   onDblClick?: () => void;
   onFill?: (value: string) => void;
   onPressSequentially?: (value: string) => void;
+  onCheck?: () => void;
+  onSelectOption?: (values: unknown) => void;
   role?: (role: string, options?: { name?: string | RegExp; exact?: boolean }) => FakeLocator;
   textLocator?: (text: string | RegExp, options?: { exact?: boolean }) => FakeLocator;
   testId?: (testId: string) => FakeLocator;
+  label?: (label: string | RegExp) => FakeLocator;
   locator?: (selector: string) => FakeLocator;
   filtered?: FakeLocator;
+  filterFn?: (options: unknown) => FakeLocator;
   derived?: FakeLocator;
 }
 
@@ -49,6 +54,12 @@ class FakeLocator {
   readonly pressSequentially = vi.fn(async (value: string, _options?: unknown) => {
     this.options.onPressSequentially?.(value);
   });
+  readonly check = vi.fn(async () => {
+    this.options.onCheck?.();
+  });
+  readonly selectOption = vi.fn(async (values: unknown) => {
+    this.options.onSelectOption?.(values);
+  });
   readonly waitFor = vi.fn(async (_options?: unknown) => {
     if (this.options.waitForRejects === true) throw new Error("timed out");
   });
@@ -56,7 +67,10 @@ class FakeLocator {
   constructor(private readonly options: FakeOptions = {}) {}
 
   count(): Promise<number> {
-    return Promise.resolve(this.options.items?.length ?? this.options.count ?? 1);
+    if (this.options.items !== undefined) return Promise.resolve(this.options.items.length);
+    const count = this.options.count;
+    if (typeof count === "function") return Promise.resolve(count());
+    return Promise.resolve(count ?? 1);
   }
 
   isVisible(): Promise<boolean> {
@@ -99,8 +113,13 @@ class FakeLocator {
     return this.options.items?.[index] ?? absent();
   }
 
-  filter(_options: unknown): FakeLocator {
+  filter(options: unknown): FakeLocator {
+    if (this.options.filterFn !== undefined) return this.options.filterFn(options);
     return this.options.filtered ?? this;
+  }
+
+  getByLabel(label: string | RegExp): FakeLocator {
+    return this.options.label?.(label) ?? absent();
   }
 
   getByRole(role: string, options?: { name?: string | RegExp; exact?: boolean }): FakeLocator {
@@ -351,8 +370,188 @@ function dialogDouble(state: EstimatesDialogState): DialogDoubles {
   return { dialog, backButton, footerCancel, addButton, inputPresses };
 }
 
+/** Mutable update-dialog state the doubles read; clicks mutate it like the dialog would. */
+interface UpdateDialogState {
+  open: boolean;
+  name: string;
+  values: string[];
+  form: { index: number; value: string } | null;
+  confirming: string | null;
+  choice: "move" | "clear";
+  replacement: string;
+}
+
+function defaultUpdateState(): UpdateDialogState {
+  return {
+    open: true,
+    name: "Points",
+    values: ["1", "2", "3"],
+    form: null,
+    confirming: null,
+    choice: "clear",
+    replacement: "",
+  };
+}
+
+interface UpdateDoubles {
+  dialog: FakeLocator;
+  selectedOptions: unknown[];
+}
+
+function labelMatches(label: string | RegExp, text: string): boolean {
+  if (typeof label === "string") return text.toLowerCase().includes(label.toLowerCase());
+  return label.test(text);
+}
+
+function updateDialogDouble(state: UpdateDialogState): UpdateDoubles {
+  const selectedOptions: unknown[] = [];
+  const valueCollection = (): FakeLocator =>
+    new FakeLocator({
+      items: state.values.map((value) => new FakeLocator({ text: value })),
+    });
+  const dialog = new FakeLocator({
+    count: () => (state.open ? 1 : 0),
+    role: (role, options) => {
+      if (role === "radio") {
+        const name = options?.name;
+        if (name !== undefined && nameMatches(name, undefined, "Move affected work items to another value")) {
+          return new FakeLocator({
+            onCheck: () => {
+              state.choice = "move";
+            },
+          });
+        }
+        if (name !== undefined && nameMatches(name, undefined, "Clear the estimate on affected work items")) {
+          return new FakeLocator({
+            onCheck: () => {
+              state.choice = "clear";
+            },
+          });
+        }
+        return absent();
+      }
+      if (role !== "button") return absent();
+      const name = options?.name;
+      const exact = options?.exact;
+      if (nameMatches(name, exact, "Save changes")) {
+        return new FakeLocator({
+          onClick: () => {
+            state.open = false;
+          },
+        });
+      }
+      if (nameMatches(name, exact, "Remove value")) {
+        // The staged removal drops its row and returns to the list.
+        return new FakeLocator({
+          onClick: () => {
+            if (state.confirming !== null) {
+              state.values = state.values.filter((entry) => entry !== state.confirming);
+              state.confirming = null;
+            }
+          },
+        });
+      }
+      if (nameMatches(name, exact, "Cancel")) {
+        return new FakeLocator({
+          onClick: () => {
+            state.open = false;
+          },
+        });
+      }
+      const editMatch = /^Edit value (\d+)$/.exec(typeof name === "string" ? name : "");
+      if (editMatch !== null && exact === true) {
+        const at = Number(editMatch[1]) - 1;
+        if (state.values[at] === undefined) return absent();
+        return new FakeLocator({
+          onClick: () => {
+            state.form = { index: at, value: state.values[at] ?? "" };
+          },
+        });
+      }
+      const removeMatch = /^Remove value (\d+)$/.exec(typeof name === "string" ? name : "");
+      if (removeMatch !== null && exact === true) {
+        const at = Number(removeMatch[1]) - 1;
+        if (state.values.length <= 2 || state.values[at] === undefined) return absent();
+        return new FakeLocator({
+          onClick: () => {
+            state.confirming = state.values[at] ?? null;
+            state.choice = "clear";
+          },
+        });
+      }
+      return absent();
+    },
+    textLocator: (text) => {
+      if (state.confirming === null) return absent();
+      const title = `Remove ${state.confirming}?`;
+      if (typeof text === "string" ? title === text : text.test(title)) return new FakeLocator({ text: title });
+      return absent();
+    },
+    testId: (testId) => {
+      if (testId === "estimate-edit-value") return valueCollection();
+      return absent();
+    },
+    label: (label) => {
+      if (labelMatches(label, "System name")) {
+        return new FakeLocator({
+          input: state.name,
+          onFill: (value) => {
+            state.name = value;
+          },
+        });
+      }
+      if (labelMatches(label, "Replacement value")) {
+        return new FakeLocator({
+          onSelectOption: (values) => {
+            selectedOptions.push(values);
+            const picked = values as { label?: unknown };
+            if (typeof picked.label === "string") state.replacement = picked.label;
+          },
+        });
+      }
+      return absent();
+    },
+    locator: (selector) => {
+      if (selector === "form input") {
+        return new FakeLocator({
+          count: state.form === null ? 0 : 1,
+          input: state.form?.value ?? "",
+          onFill: (value) => {
+            if (state.form !== null) state.form.value = value;
+          },
+        });
+      }
+      if (selector === "form") {
+        return new FakeLocator({
+          count: state.form === null ? 0 : 1,
+          waitForRejects: state.form === null,
+          locator: (inner) => {
+            if (inner === 'button[type="submit"]') {
+              return new FakeLocator({
+                onClick: () => {
+                  if (state.form !== null && state.form.value !== "") {
+                    state.values = state.values.map((entry, at) =>
+                      at === (state.form?.index ?? -1) ? (state.form?.value ?? entry) : entry
+                    );
+                    state.form = null;
+                  }
+                },
+              });
+            }
+            return absent();
+          },
+        });
+      }
+      return absent();
+    },
+  });
+  return { dialog, selectedOptions };
+}
+
 interface PageStubOptions {
   dialogState?: () => EstimatesDialogState;
+  updateState?: () => UpdateDialogState;
+  cloudRow?: boolean;
   activeRow?: { name: string; values: string } | null;
   analyticsOpen?: boolean;
   pickerLabels?: { metric: string; xAxis: string; split: string };
@@ -380,6 +579,8 @@ interface PageStub {
   };
   state: EstimatesDialogState;
   doubles: DialogDoubles;
+  update: UpdateDialogState;
+  updateDoubles: UpdateDoubles;
   analyticsButton: FakeLocator;
   tableDouble: FakeLocator;
   triggerClicks: string[];
@@ -390,6 +591,8 @@ interface PageStub {
 function pageDouble(options: PageStubOptions = {}): PageStub {
   const state = options.dialogState?.() ?? defaultDialogState();
   const doubles = dialogDouble(state);
+  const update = options.updateState?.() ?? defaultUpdateState();
+  const updateDoubles = updateDialogDouble(update);
   const analyticsButton = new FakeLocator();
   const triggerClicks: string[] = [];
   const listboxClicks: string[] = [];
@@ -429,11 +632,32 @@ function pageDouble(options: PageStubOptions = {}): PageStub {
             if (selector === "p") return new FakeLocator({ text: activeRow.values });
             return absent();
           },
+          role: (role, roleOptions) => {
+            if (role !== "button") return absent();
+            // OSS rows offer deletion only; the edit control exists on
+            // cloud rows, and clicking it opens the update dialog.
+            if (options.cloudRow !== true) return absent();
+            const name = roleOptions?.name;
+            if (typeof name !== "object" || !(name instanceof RegExp)) return absent();
+            if (name.test(`Edit ${activeRow.name}`)) {
+              return new FakeLocator({
+                onClick: () => {
+                  update.open = true;
+                },
+              });
+            }
+            return absent();
+          },
         });
 
   const dialogRoot = new FakeLocator({
-    count: state.open || options.analyticsOpen === true ? 1 : 0,
+    count: state.open || update.open || options.analyticsOpen === true ? 1 : 0,
     waitForRejects: options.dialogWaitForRejects ?? false,
+    filterFn: (filterOptions) => {
+      const hasText = (filterOptions as { hasText?: unknown })?.hasText;
+      if (hasText instanceof RegExp && hasText.test("Edit estimate system")) return updateDoubles.dialog;
+      return doubles.dialog;
+    },
     filtered: doubles.dialog,
   });
 
@@ -504,6 +728,8 @@ function pageDouble(options: PageStubOptions = {}): PageStub {
     pageObject,
     state,
     doubles,
+    update,
+    updateDoubles,
     analyticsButton,
     tableDouble,
     triggerClicks,
@@ -518,6 +744,13 @@ function pageDouble(options: PageStubOptions = {}): PageStub {
 }
 
 describe("WebNewDriver estimates dialog shell", () => {
+  it("opens the creation dialog through the empty-state control", async () => {
+    const stub = pageDouble();
+    const driver = new WebNewDriver(stub.page);
+    await driver.estimatesOpenCreateDialog();
+    expect(stub.pageObject.getByRole).toHaveBeenCalledWith("button", { name: /add estimate system/i });
+  });
+
   it("reads the step counter from the dialog", async () => {
     const stub = pageDouble({ dialogState: () => ({ ...defaultDialogState(), step: 1 }) });
     const driver = new WebNewDriver(stub.page);
@@ -595,6 +828,22 @@ describe("WebNewDriver estimates family choice", () => {
     const driver = new WebNewDriver(stub.page);
     await driver.estimatesSelectFamily("categories");
     expect(stub.state.families.map((family) => family.checked)).toEqual([false, true]);
+  });
+
+  it("selects the cloud-only time family the same way", async () => {
+    const stub = pageDouble({
+      dialogState: () => ({
+        ...defaultDialogState(),
+        families: [
+          { value: "points", label: "Points", checked: true, disabled: false },
+          { value: "categories", label: "Categories", checked: false, disabled: false },
+          { value: "time", label: "Time", checked: false, disabled: false },
+        ],
+      }),
+    });
+    const driver = new WebNewDriver(stub.page);
+    await driver.estimatesSelectFamily("time");
+    expect(stub.state.families.map((family) => family.checked)).toEqual([false, false, true]);
   });
 });
 
@@ -872,5 +1121,103 @@ describe("WebNewDriver estimates analytics axis", () => {
       ["1", "1"],
       ["3", "1"],
     ]);
+  });
+});
+
+describe("WebNewDriver estimates cloud update dialog", () => {
+  it("sees no edit control on OSS rows", async () => {
+    const stub = pageDouble();
+    const driver = new WebNewDriver(stub.page);
+    await expect(driver.estimatesEditDeleteActiveRowEditControlVisible()).resolves.toBe(false);
+  });
+
+  it("sees the edit control on cloud rows and opens the dialog through it", async () => {
+    const stub = pageDouble({
+      cloudRow: true,
+      updateState: () => ({ ...defaultUpdateState(), open: false }),
+    });
+    const driver = new WebNewDriver(stub.page);
+    await expect(driver.estimatesEditDeleteActiveRowEditControlVisible()).resolves.toBe(true);
+    await expect(driver.estimatesUpdateDialogOpen()).resolves.toBe(false);
+    await driver.estimatesActiveRowEditClick();
+    await expect(driver.estimatesUpdateDialogOpen()).resolves.toBe(true);
+  });
+
+  it("reads the update dialog values in row order", async () => {
+    const stub = pageDouble();
+    const driver = new WebNewDriver(stub.page);
+    await expect(driver.estimatesUpdateDialogValues()).resolves.toEqual(["1", "2", "3"]);
+  });
+
+  it("renames the system through the name field", async () => {
+    const stub = pageDouble();
+    const driver = new WebNewDriver(stub.page);
+    await driver.estimatesUpdateDialogSetName("Renamed");
+    expect(stub.update.name).toBe("Renamed");
+  });
+
+  it("rewrites one value through its edit control", async () => {
+    const stub = pageDouble();
+    const driver = new WebNewDriver(stub.page);
+    await driver.estimatesUpdateDialogEditValue(1, "5");
+    expect(stub.update.values).toEqual(["1", "5", "3"]);
+  });
+
+  it("saves the dialog and settles on its close", async () => {
+    const stub = pageDouble();
+    const driver = new WebNewDriver(stub.page);
+    await driver.estimatesUpdateDialogSave();
+    expect(stub.update.open).toBe(false);
+  });
+
+  it("cancels the dialog without saving", async () => {
+    const stub = pageDouble();
+    const driver = new WebNewDriver(stub.page);
+    await driver.estimatesUpdateDialogCancel();
+    expect(stub.update.open).toBe(false);
+  });
+
+  it("reads no removal title outside a confirmation", async () => {
+    const stub = pageDouble();
+    const driver = new WebNewDriver(stub.page);
+    await expect(driver.estimatesUpdateDialogRemovalTitle()).resolves.toBe("");
+  });
+
+  it("opens the reassignment confirmation for a saved value", async () => {
+    const stub = pageDouble();
+    const driver = new WebNewDriver(stub.page);
+    await driver.estimatesUpdateDialogRemoveValue(1);
+    await expect(driver.estimatesUpdateDialogRemovalTitle()).resolves.toBe("Remove 2?");
+    expect(stub.update.choice).toBe("clear");
+  });
+
+  it("chooses the move reassignment with its replacement", async () => {
+    const stub = pageDouble({
+      updateState: () => ({ ...defaultUpdateState(), confirming: "2" }),
+    });
+    const driver = new WebNewDriver(stub.page);
+    await driver.estimatesUpdateDialogChooseMove("3");
+    expect(stub.update.choice).toBe("move");
+    expect(stub.update.replacement).toBe("3");
+    expect(stub.updateDoubles.selectedOptions).toEqual([{ label: "3" }]);
+  });
+
+  it("chooses clearing for the pending removal", async () => {
+    const stub = pageDouble({
+      updateState: () => ({ ...defaultUpdateState(), confirming: "2", choice: "move" }),
+    });
+    const driver = new WebNewDriver(stub.page);
+    await driver.estimatesUpdateDialogChooseClear();
+    expect(stub.update.choice).toBe("clear");
+  });
+
+  it("confirms the removal and returns to the value list", async () => {
+    const stub = pageDouble({
+      updateState: () => ({ ...defaultUpdateState(), confirming: "2" }),
+    });
+    const driver = new WebNewDriver(stub.page);
+    await driver.estimatesUpdateDialogConfirmRemoval();
+    expect(stub.update.values).toEqual(["1", "3"]);
+    await expect(driver.estimatesUpdateDialogRemovalTitle()).resolves.toBe("");
   });
 });

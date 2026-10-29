@@ -28950,6 +28950,13 @@ export class WebNewDriver implements ParityDriver {
       .first();
   }
 
+  private estimatesUpdateDialog(): Locator {
+    return this.page
+      .getByRole("dialog")
+      .filter({ hasText: /edit estimate system/i })
+      .first();
+  }
+
   async estimatesEnableSwitchVisible(): Promise<boolean> {
     return this.isShown(this.page.getByRole("switch", { name: "Enable estimates for this project" }));
   }
@@ -28975,10 +28982,14 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async estimatesOpenCreateDialog(): Promise<void> {
+    // The add control lives in the empty state only: a project with a
+    // system has no such button. Bound the click so calling this on a
+    // non-empty project fails loudly instead of burning the test
+    // budget (EST-029 cloud).
     await this.page
       .getByRole("button", { name: /add estimate system/i })
       .first()
-      .click();
+      .click({ timeout: WebNewDriver.WAIT_MS });
     await this.estimatesCreateDialog().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
@@ -29003,7 +29014,7 @@ export class WebNewDriver implements ParityDriver {
     return options;
   }
 
-  async estimatesSelectFamily(family: "points" | "categories"): Promise<void> {
+  async estimatesSelectFamily(family: "points" | "categories" | "time"): Promise<void> {
     const dialog = this.estimatesCreateDialog();
     await dialog.locator(`input[name="estimate-family"][value="${family}"]`).click();
     await expect
@@ -29129,6 +29140,120 @@ export class WebNewDriver implements ParityDriver {
     const row = this.estimatesActiveRowLocator();
     if ((await row.count()) === 0) return false;
     return (await row.getByRole("button", { name: /^edit\s/i }).count()) > 0;
+  }
+
+  async estimatesActiveRowEditClick(): Promise<void> {
+    // Same leading-verb anchor as the visibility check above: the
+    // delete control's label carries the system name.
+    await this.estimatesActiveRowLocator()
+      .getByRole("button", { name: /^edit\s/i })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.estimatesUpdateDialog().waitFor({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async estimatesUpdateDialogOpen(): Promise<boolean> {
+    return this.isShown(this.estimatesUpdateDialog());
+  }
+
+  async estimatesUpdateDialogValues(): Promise<string[]> {
+    const rows = this.estimatesUpdateDialog().getByTestId("estimate-edit-value");
+    const count = await rows.count();
+    const values: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      values.push(
+        (
+          (await rows
+            .nth(index)
+            .innerText()
+            .catch(() => "")) ?? ""
+        )
+          .replace(/\s+/g, " ")
+          .trim()
+      );
+    }
+    return values;
+  }
+
+  async estimatesUpdateDialogSetName(name: string): Promise<void> {
+    const dialog = this.estimatesUpdateDialog();
+    await dialog.getByLabel(/system name/i).fill(name);
+    await expect
+      .poll(
+        async () =>
+          (await dialog
+            .getByLabel(/system name/i)
+            .inputValue()
+            .catch(() => "")) ?? "",
+        {
+          timeout: WebNewDriver.WAIT_MS,
+        }
+      )
+      .toBe(name);
+  }
+
+  async estimatesUpdateDialogEditValue(index: number, value: string): Promise<void> {
+    const dialog = this.estimatesUpdateDialog();
+    await dialog.getByRole("button", { name: `Edit value ${index + 1}`, exact: true }).click();
+    const input = dialog.locator("form input").first();
+    await input.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await input.fill(value);
+    await dialog.locator("form").first().locator('button[type="submit"]').first().click();
+    // The commit folds the draft into the row list; settle on the
+    // rewritten label so the edit is atomic (EST-014).
+    await expect
+      .poll(async () => (await this.estimatesUpdateDialogValues().catch(() => [] as string[])).join("|"), {
+        timeout: WebNewDriver.WAIT_MS,
+      })
+      .toContain(value);
+  }
+
+  async estimatesUpdateDialogSave(): Promise<void> {
+    const dialog = this.estimatesUpdateDialog();
+    await this.estimatesDrainToasts();
+    await dialog.getByRole("button", { name: "Save changes", exact: true }).click();
+    await this.estimatesSettleDialogSubmit(dialog);
+  }
+
+  async estimatesUpdateDialogCancel(): Promise<void> {
+    const dialog = this.estimatesUpdateDialog();
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
+  }
+
+  async estimatesUpdateDialogRemoveValue(index: number): Promise<void> {
+    const dialog = this.estimatesUpdateDialog();
+    await dialog.getByRole("button", { name: `Remove value ${index + 1}`, exact: true }).click();
+    await expect
+      .poll(async () => this.estimatesUpdateDialogRemovalTitle(), { timeout: WebNewDriver.WAIT_MS })
+      .toMatch(/^remove .+\?$/i);
+  }
+
+  async estimatesUpdateDialogRemovalTitle(): Promise<string> {
+    const dialog = this.estimatesUpdateDialog();
+    if ((await dialog.count()) === 0) return "";
+    const title = dialog.getByText(/^remove .+\?$/i).first();
+    if ((await title.count()) === 0) return "";
+    return ((await title.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+  }
+
+  async estimatesUpdateDialogChooseMove(replacementLabel: string): Promise<void> {
+    const dialog = this.estimatesUpdateDialog();
+    await dialog.getByRole("radio", { name: /move affected work items/i }).check();
+    await dialog.getByLabel(/replacement value/i).selectOption({ label: replacementLabel });
+  }
+
+  async estimatesUpdateDialogChooseClear(): Promise<void> {
+    const dialog = this.estimatesUpdateDialog();
+    await dialog.getByRole("radio", { name: /clear the estimate/i }).check();
+  }
+
+  async estimatesUpdateDialogConfirmRemoval(): Promise<void> {
+    const dialog = this.estimatesUpdateDialog();
+    await dialog.getByRole("button", { name: "Remove value", exact: true }).click();
+    // The confirmation stages the choice and returns to the value
+    // list; settle on the list rather than the dialog close (EST-015).
+    await expect.poll(async () => this.estimatesUpdateDialogRemovalTitle(), { timeout: WebNewDriver.WAIT_MS }).toBe("");
   }
   // --- Pages gating, list states, URLs, detail shell (NEWFRONT-314,
   // --- PAGE-018-025,079-080). Written against the shipped web_new UI: every
