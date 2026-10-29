@@ -10,6 +10,11 @@
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
+import {
+  CHUNK_LOAD_ATTEMPTS,
+  CHUNK_LOAD_RETRY_DELAY_MS,
+  loadWithRetry,
+} from "../../../../../../features/exports/chunkRetry.js";
 import { ExportsSettingsPage } from "../../../../../../features/workspace-settings/components/ExportsSettingsPage.js";
 import { registerWorkspaceSettingsPage } from "../../../../../../features/workspace-settings/lib/registry.js";
 import { SettingsSectionOutlet } from "../../../../../../features/workspace-settings/components/SettingsSectionOutlet.js";
@@ -26,9 +31,14 @@ function WorkspaceSettingsSectionPage(): React.ReactElement {
   React.useLayoutEffect(() => registerWorkspaceSettingsPage("exports", ExportsSettingsPage), []);
   // The guide chunk registers itself into the frame's seam on import, so
   // the load starts from the route body and the form + history stay out of
-  // the initial bundle (NEWFRONT-768).
+  // the initial bundle (NEWFRONT-768). A transient load failure retries
+  // instead of pinning the pending slot (NEWFRONT-772, EXP-023).
   React.useEffect(() => {
-    void import("../../../../../../features/exports/register.js");
+    void loadWithRetry(
+      () => import("../../../../../../features/exports/register.js"),
+      CHUNK_LOAD_ATTEMPTS,
+      CHUNK_LOAD_RETRY_DELAY_MS
+    );
   }, []);
   return <SettingsSectionOutlet workspaceSlug={ws} section="exports" />;
 }
