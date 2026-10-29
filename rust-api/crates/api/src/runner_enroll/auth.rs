@@ -75,6 +75,7 @@
 //!   error page there, so only the status is contract-pinned (same position
 //!   as `crate::runner_runs::SERVER_ERROR_BODY`).
 
+use crate::runner_runs::runs::parse_py_uuid;
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::Response;
 use pidash_auth::jwt::KeyRing;
@@ -99,8 +100,16 @@ pub const CODE_MEMBERSHIP_REVOKED: &str = "membership_revoked";
 /// `mt_` path: neither URL `runner_id` nor `X-Runner-Id`
 /// (`authentication.py:136`).
 pub const CODE_RUNNER_ID_REQUIRED: &str = "runner_id_required";
-/// No `Runner` row for the id (`authentication.py:94,140`).
+/// The runner id is not a UUID, so it cannot name any runner
+/// (`authentication.py:117,167`).
 pub const CODE_RUNNER_NOT_FOUND: &str = "runner_not_found";
+/// A verified caller asked for a runner id that no longer exists: a
+/// MachineToken that passed every token, dev-machine and membership check,
+/// or a legacy JWT whose signature and expiry verified. Runner ids are
+/// server-generated UUIDs, so the runner was deleted; the daemon counts
+/// these answers and purges the runner locally (PDASHOSS01-306,
+/// `authentication.py:58-60,123,174`).
+pub const CODE_RUNNER_GONE: &str = "runner_gone";
 /// `Runner.revoked_at` set — the per-request live check, `design.md` §5.4
 /// (`authentication.py:100,142`).
 pub const CODE_RUNNER_REVOKED: &str = "runner_revoked";
@@ -670,14 +679,17 @@ async fn authenticate_access_jwt(
         Ok(claims) => claims,
         Err(error) => return Err(bearer_failure_response(error.code(), allow)),
     };
-    // `Runner.objects...get(id=sub)` (`:91-94`): a non-UUID `sub` is the
-    // source's `ValidationError` (500); a missing row is `runner_not_found`.
-    let runner_id: Uuid = payload.sub.parse().map_err(|_| server_error())?;
+    // `_is_uuid(sub)` then `Runner.objects...get(id=sub)` (`:116-123`): a
+    // non-UUID `sub` is `runner_not_found`. The signature verified, so a
+    // missing row is an id this server minted: `runner_gone`.
+    let Some(runner_id) = parse_py_uuid(&payload.sub) else {
+        return Err(bearer_failure_response(CODE_RUNNER_NOT_FOUND, allow));
+    };
     let row = fetch_runner_for_auth(pool, runner_id)
         .await
         .map_err(|_| server_error())?;
     let Some(row) = row else {
-        return Err(bearer_failure_response(CODE_RUNNER_NOT_FOUND, allow));
+        return Err(bearer_failure_response(CODE_RUNNER_GONE, allow));
     };
     if row.revoked_at.is_some() {
         return Err(bearer_failure_response(CODE_RUNNER_REVOKED, allow));
@@ -747,15 +759,19 @@ async fn authenticate_access_machine_token(
     let Some(runner_raw) = runner_raw else {
         return Err(bearer_failure_response(CODE_RUNNER_ID_REQUIRED, allow));
     };
-    // `Runner.objects...get(id=runner_id)` (`:137-140`): a non-UUID id
-    // (only reachable via `X-Runner-Id`; the URL converter 404s first) is
-    // the source's `ValidationError` (500).
-    let runner_id: Uuid = runner_raw.parse().map_err(|_| server_error())?;
+    // `_is_uuid(runner_id)` then `Runner.objects...get(id=runner_id)`
+    // (`:166-174`): a non-UUID id (only reachable via `X-Runner-Id`; the
+    // URL converter 404s first) is `runner_not_found`. Token, dev machine
+    // and membership all checked out above, so a missing row means the
+    // runner was deleted: `runner_gone`.
+    let Some(runner_id) = parse_py_uuid(&runner_raw) else {
+        return Err(bearer_failure_response(CODE_RUNNER_NOT_FOUND, allow));
+    };
     let row = fetch_runner_for_auth(pool, runner_id)
         .await
         .map_err(|_| server_error())?;
     let Some(row) = row else {
-        return Err(bearer_failure_response(CODE_RUNNER_NOT_FOUND, allow));
+        return Err(bearer_failure_response(CODE_RUNNER_GONE, allow));
     };
     if row.revoked_at.is_some() {
         return Err(bearer_failure_response(CODE_RUNNER_REVOKED, allow));
