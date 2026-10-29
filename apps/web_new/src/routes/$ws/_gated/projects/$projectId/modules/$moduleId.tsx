@@ -53,21 +53,26 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/modules/$m
     ]);
     const entity = { scope: "module", projectId: params.projectId, moduleId: params.moduleId } as const;
     try {
-      // Preferences first: the stored flags shape the first page read.
-      await prefetchEntityList(context, params.ws, entity);
-      await context.queryClient.ensureQueryData(projectsQueryOptions(context.apiClient, params.ws));
+      // The detail read goes first: an unknown or deleted module 404s
+      // here, before the prefs prefetch can answer 400 on the same id
+      // (MOD-029, MOD-038), so the gone-away gate owns the missing id
+      // instead of the route's load error.
       await context.queryClient.ensureQueryData(
         moduleDetailQueryOptions(context.apiClient, params.ws, params.projectId, params.moduleId)
       );
+      // Preferences next: the stored flags shape the first page read.
+      await prefetchEntityList(context, params.ws, entity);
+      await context.queryClient.ensureQueryData(projectsQueryOptions(context.apiClient, params.ws));
       // The board and the list/analytics leaves ride their own chunks;
       // await them with the data so the first commit is the screen.
       await Promise.all([loadKanbanLayout(), loadIssueListLeaves(), loadModuleDetailGate()]);
     } catch (error) {
-      // A missing module 404s the prefetch, and a reader without project
-      // access is refused with 403/409: both belong to a gate, not to the
-      // route's error screen. The module gate splits them — missing state
-      // for the id, the shared project access wall for the refusal
-      // (MOD-029, MOD-038) — so the load completes and that gate renders.
+      // A missing module 404s the detail read, and a reader without
+      // project access is refused with 403/409: both belong to a gate,
+      // not to the route's error screen. The module gate splits them —
+      // missing state for the id, the shared project access wall for the
+      // refusal (MOD-029, MOD-038) — so the load completes and that gate
+      // renders.
       if (!isProjectGateError(error)) throw error;
     }
   },
