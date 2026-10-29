@@ -1017,9 +1017,23 @@ async fn unrelate_op(
     let mut not_related: Vec<String> = Vec::new();
     for target in &targets {
         let rows = fetch_pair_rows(pool, &source.id, &target.id).await?;
+        // Self targets only arrive in raw mode (the default refuses
+        // them in `check_targets`): the MCP queryset names the stored
+        // endpoints and the canonical type
+        // (`pi_dash_cloud/mcp/tools.py:726-732`), so a reverse-named
+        // request (`blocking`) still matches the canonically stored
+        // self row (`blocked_by`) — the viewpoint classifier would
+        // only echo the stored name from the issue side.
+        let self_target = target.id == source.id;
         let mut matching: Vec<&PairRow> = rows
             .iter()
-            .filter(|row| type_from(row, &source.id) == relation_type)
+            .filter(|row| {
+                if self_target {
+                    row.relation_type == actual_relation(relation_type)
+                } else {
+                    type_from(row, &source.id) == relation_type
+                }
+            })
             .collect();
         if matching.is_empty() {
             not_related.push(target.identifier());
@@ -2416,5 +2430,103 @@ mod tests {
         assert_eq!(out.get("not_related"), Some(&Value::Array(vec![])));
         assert!(deleted_at_of(&pool, first).await.is_some());
         assert!(deleted_at_of(&pool, second).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn live_raw_targets_unrelate_self_deletes_row() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let scope = seed_scope(&pool, "rawunself").await;
+        let (deps, _enqueue) = op_deps(&pool);
+        relate_op(
+            &deps,
+            &scope.source(),
+            "duplicate",
+            scope.source_targets(),
+            &scope.actor,
+            false,
+            true,
+            true,
+        )
+        .await
+        .expect("raw self relate");
+        // The MCP unrelate combo (newest-only + raw): [S, S] deletes
+        // the live self row on the first iteration and reports the
+        // second under `not_related`
+        // (`pi_dash_cloud/mcp/tools.py:722-734`).
+        let mut twice = scope.source_targets();
+        twice.extend(scope.source_targets());
+        let out = unrelate_op(
+            &deps,
+            &scope.source(),
+            "duplicate",
+            twice,
+            &scope.actor,
+            false,
+            true,
+            true,
+        )
+        .await
+        .expect("raw self unrelate dupes");
+        let item = Value::String(scope.source_identifier());
+        assert_eq!(out.get("removed"), Some(&Value::Array(vec![item.clone()])));
+        assert_eq!(out.get("not_related"), Some(&Value::Array(vec![item])));
+        assert!(live_pair_rows(&pool, scope.source_id, scope.source_id)
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn live_raw_targets_unrelate_self_reverse_type_deletes_row() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let scope = seed_scope(&pool, "rawunrev").await;
+        let (deps, _enqueue) = op_deps(&pool);
+        // Relating self under the reverse name stores the canonical
+        // row (the endpoint swap is a no-op when both ends are the
+        // source).
+        relate_op(
+            &deps,
+            &scope.source(),
+            "blocking",
+            scope.source_targets(),
+            &scope.actor,
+            false,
+            true,
+            true,
+        )
+        .await
+        .expect("raw self relate reverse");
+        assert_eq!(
+            live_pair_rows(&pool, scope.source_id, scope.source_id).await,
+            vec![(scope.source_id, scope.source_id, "blocked_by".to_owned())]
+        );
+        // The MCP queryset names the canonical stored type
+        // (`pi_dash_cloud/mcp/tools.py:729-732`), so the
+        // reverse-named request matches the self row.
+        let out = unrelate_op(
+            &deps,
+            &scope.source(),
+            "blocking",
+            scope.source_targets(),
+            &scope.actor,
+            false,
+            true,
+            true,
+        )
+        .await
+        .expect("raw self unrelate reverse");
+        assert_eq!(
+            out.get("removed"),
+            Some(&Value::Array(vec![Value::String(
+                scope.source_identifier()
+            )]))
+        );
+        assert_eq!(out.get("not_related"), Some(&Value::Array(vec![])));
+        assert!(live_pair_rows(&pool, scope.source_id, scope.source_id)
+            .await
+            .is_empty());
     }
 }
