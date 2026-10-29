@@ -13,7 +13,7 @@
 use anyhow::Result;
 use clap::Args as ClapArgs;
 
-use crate::ipc::protocol::{Request, Response};
+use crate::ipc::probe::{legacy_daemon, status_at, unreachable_detail};
 use crate::util::paths::Paths;
 
 #[derive(Debug, ClapArgs)]
@@ -30,39 +30,54 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
         Err(e) => format!("error: {e}"),
     };
 
-    let daemon = match crate::ipc::client::Client::connect(paths.ipc_socket_path()).await {
-        Ok(mut c) => match c.call(Request::StatusGet).await {
-            Ok(Response::Status(s)) => Some(s),
-            // A running daemon that explicitly reports an error is very
-            // different from "socket unreachable" — surface it distinctly so
-            // operators don't chase a phantom "service stopped" diagnosis.
-            Ok(Response::Error(e)) => {
-                eprintln!("daemon reported error: {}", e.message);
-                None
-            }
-            Ok(other) => {
-                eprintln!("unexpected IPC response: {other:?}");
-                None
-            }
-            Err(e) => {
-                eprintln!("IPC call failed: {e}");
-                None
-            }
+    let socket = paths.ipc_socket_path();
+    // Keep the attempted socket and the underlying error: "not reachable"
+    // alone can't tell a stopped daemon from a CLI looking at the wrong
+    // socket (PDASHOSS01-311).
+    let (daemon, ipc_error, legacy_socket) = match status_at(&socket).await {
+        Ok(s) => (Some(s), None, None),
+        Err(e) => match legacy_daemon(paths).await {
+            Some((legacy, s)) => (Some(s), None, Some(legacy)),
+            None => (None, Some(e), None),
         },
-        Err(_) => None,
     };
 
     if args.json {
         let payload = serde_json::json!({
             "service": service_state,
             "daemon": daemon,
+            "ipc_socket": socket,
+            "ipc_error": ipc_error.as_ref().map(|e| format!("{e:#}")),
+            "legacy_socket": legacy_socket,
         });
         println!("{}", serde_json::to_string_pretty(&payload)?);
     } else {
         println!("service: {service_state}");
-        match daemon {
-            Some(s) => s.print_compact(),
-            None => println!("daemon: not reachable via IPC (service may be stopped)"),
+        match (&daemon, &ipc_error) {
+            (Some(s), _) => {
+                s.print_compact();
+                if let Some(legacy) = &legacy_socket {
+                    eprintln!(
+                        "note: reached the daemon at legacy socket {} (started by an older \
+                         pidash); run `pidash restart` to move it to {}",
+                        legacy.display(),
+                        socket.display()
+                    );
+                }
+            }
+            (None, Some(e)) => {
+                println!("daemon: not reachable via IPC (service may be stopped)");
+                for line in unreachable_detail(&socket, e, None).lines() {
+                    println!("  {line}");
+                }
+                if service_state == "active" {
+                    println!(
+                        "  The service is active but no daemon answers at this socket. If it \
+                         runs with a custom data dir, pass the same --data-dir / PIDASH_DATA_DIR."
+                    );
+                }
+            }
+            (None, None) => unreachable!("an unreachable daemon always carries its error"),
         }
     }
     Ok(())

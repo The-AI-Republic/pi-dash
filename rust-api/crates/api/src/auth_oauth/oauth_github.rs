@@ -11,7 +11,7 @@
 //! never re-derived: the provider constructor/mapping half (PIDASHCONV-325,
 //! `pidash_services::auth_oauth::{providers, error, exchange}`), the
 //! account upsert (PIDASHCONV-327,
-//! `pidash_db::auth_oauth::queries::account`), the redirect/host kernels
+//! `pidash_services::domain::identity::account`), the redirect/host kernels
 //! (D-16, `pidash_services::auth_session::shapes`), the view auth shape
 //! (PIDASHCONV-331, `super::guards`, AUTHOAUTH-F9), and Django
 //! `validate_email` (D-16, `crate::license::handlers_auth_forms`).
@@ -77,13 +77,16 @@ use axum::{
 use serde_json::Value;
 use uuid::Uuid;
 
-use pidash_db::auth_oauth::queries::account as account_queries;
 use pidash_db::redis::RedisHandle;
 use pidash_services::auth_oauth::{error as oauth_error, exchange, providers};
 use pidash_services::auth_session::shapes::{self, HostSettings, ParamValue};
+use pidash_services::domain::identity::account as account_queries;
+use pidash_services::domain::workspaces::members;
 
+use crate::auth_session::render::disallowed_redirect;
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
+use pidash_compat::response::redirect_found_html;
 
 /// `GITHUB_NOT_CONFIGURED` code (fixture F5 `OAUTH_ERROR_ROWS` order).
 fn github_not_configured() -> oauth_error::AuthenticationException {
@@ -153,18 +156,18 @@ pub fn routes() -> Router<AppState> {
 
 /// `HttpResponseRedirect(url)`: 302 with a `Location` header. Django
 /// percent-encodes the URL first (`iri_to_uri`,
-/// `django/http/response.py:620`).
+/// `django/http/response.py:620`). Past `MAX_URL_REDIRECT_LENGTH`
+/// characters the final `Location` answers 400 (`DisallowedRedirect`).
 fn redirect_response(location: String) -> Response {
-    let encoded = crate::response_headers::iri_to_uri(&location);
+    let too_long = location.chars().count() > shapes::MAX_URL_REDIRECT_LENGTH;
+    let encoded = pidash_compat::http::iri_to_uri(&location);
     let Some(location) = crate::response_headers::header_value(&encoded) else {
         return server_error();
     };
-    Response::builder()
-        .status(StatusCode::FOUND)
-        .header(header::LOCATION, location)
-        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-        .body(axum::body::Body::empty())
-        .expect("redirect response")
+    if too_long {
+        return disallowed_redirect();
+    }
+    redirect_found_html(location)
 }
 
 /// Uncaught-exception answer: Django's 500 page. The contract suite pins
@@ -781,57 +784,6 @@ fn encode_password(password: &str) -> String {
     pidash_auth::password::hash_password(password, &password_salt(), 600_000)
 }
 
-/// `user.get_session_auth_hash()`: `salted_hmac` over the password field
-/// (`django/contrib/auth/__init__.py`, salt
-/// `AbstractBaseUser.get_session_auth_hash` — the construction the D-16
-/// port verifies in `license/mod.rs`).
-fn session_auth_hash(password_field: &str, secret_key: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    const SALT: &[u8] = b"django.contrib.auth.models.AbstractBaseUser.get_session_auth_hash";
-    let key = Sha256::digest([SALT, secret_key].concat());
-    use hmac::{Hmac, Mac};
-    let mut mac = Hmac::<Sha256>::new_from_slice(&key).expect("HMAC accepts any key length");
-    mac.update(password_field.as_bytes());
-    let bytes = mac.finalize().into_bytes();
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0x0f) as usize] as char);
-    }
-    out
-}
-
-/// `onboarding_step` default (`db/models/user.py:get_default_onboarding`).
-fn default_onboarding_step() -> Value {
-    serde_json::json!({
-        "profile_complete": false,
-        "workspace_create": false,
-        "workspace_invite": false,
-        "workspace_join": false,
-    })
-}
-
-/// `mobile_onboarding_step` default (`user.py:get_mobile_default_onboarding`).
-fn default_mobile_onboarding_step() -> Value {
-    serde_json::json!({
-        "profile_complete": false,
-        "workspace_create": false,
-        "workspace_join": false,
-    })
-}
-
-/// `product_tour` default (`user.py:get_default_product_tour`).
-fn default_product_tour() -> Value {
-    serde_json::json!({
-        "work_items": false,
-        "cycles": false,
-        "modules": false,
-        "intake": false,
-        "pages": false,
-    })
-}
-
 /// Member `view_props`/`default_props` (`workspace.py:get_default_props`,
 /// identical in `project.py:get_default_props` minus `display_properties`).
 fn workspace_default_props() -> Value {
@@ -895,6 +847,10 @@ fn coerce_provider_id(user_data: &mut Value) {
     }
 }
 
+// NOTE: the new-user INSERT, the `create_user_notification` post_save
+// insert and the signup profile row moved to
+// `domain::identity::create_user` (PIDASHCONV-1525).
+
 /// `complete_login_or_signup` (`adapter/base.py`) for the github callback:
 /// sanitize → find-or-create (signup gate, profile, avatar URL) → optional
 /// IDP sync → login-stamp save → invite callback → account upsert.
@@ -903,11 +859,11 @@ fn coerce_provider_id(user_data: &mut Value) {
 ///   provider: `is_password_autoset` is hardcoded `true` in
 ///   `github_user_data` (`github.py:179`), so creation always takes the
 ///   autoset arm (`set_password(uuid4hex)`, verified + autoset flags).
-/// * Avatar upload (`download_and_upload_avatar`, `base.py`) needs the S3
-///   storage domain, which has no Rust facility in this crate: the
-///   provider URL is stored as `avatar` with no `FileAsset` row — the
-///   same value Python stores in `user.avatar` on every path, including
-///   its upload-failure fallback.
+/// * Avatar upload (`download_and_upload_avatar`, `base.py`) runs through
+///   the shared `auth_oauth` helper (SigV4 PUT + `FileAsset` row, exact
+///   content-type match, `FILE_SIZE_LIMIT` cap): success sets
+///   `avatar_asset_id`, any failure keeps the provider URL. The sync arm
+///   deletes the old asset first (`delete_old_avatar`), like Python.
 /// * `user_activation_email.delay` fires before the active flip for
 ///   pre-existing inactive users, and `track_event.delay` fires per
 ///   joined workspace next to its cache invalidation — real Postgres
@@ -917,6 +873,7 @@ fn coerce_provider_id(user_data: &mut Value) {
 #[allow(clippy::too_many_arguments)]
 async fn complete_login_or_signup(
     pool: &sqlx::PgPool,
+    orm: &pidash_db::DatabaseConnection,
     secret_key: &str,
     headers: &HeaderMap,
     remote_addr: Option<&str>,
@@ -924,7 +881,13 @@ async fn complete_login_or_signup(
     email: &str,
     site: &str,
     redis: Option<&RedisHandle>,
+    client: &reqwest::Client,
+    storage: &pidash_db::config::StorageSettings,
+    scheme: &str,
+    host: &str,
+    max_bytes: u64,
 ) -> Result<ResolvedUser, CallbackFailure> {
+    use pidash_services::domain::identity;
     let now = chrono::Utc::now();
     let user_data = &auth.user_data;
     let user_obj = &user_data.user;
@@ -942,120 +905,148 @@ async fn complete_login_or_signup(
     .map_err(|_| CallbackFailure::Server)?;
     let is_signup = existing.is_some();
 
-    let (user_id, password_field, was_active, mut display_name, is_superuser, is_staff) =
-        if let Some((id, active, password, display_name, is_superuser, is_staff)) = existing {
-            (id, password, active, display_name, is_superuser, is_staff)
-        } else {
-            // `__check_signup`: `ENABLE_SIGNUP == "0"` with no invite → 5030.
-            let enable_signup = config_value(
-                pool,
-                secret_key,
-                "ENABLE_SIGNUP",
-                std::env::var("ENABLE_SIGNUP").ok(),
-            )
-            .await
-            .map_err(|_| CallbackFailure::Server)?;
-            if enable_signup.as_deref() == Some("0") {
-                let invited: Option<(i64,)> = sqlx::query_as(
+    let (
+        user_id,
+        password_field,
+        was_active,
+        mut display_name,
+        is_superuser,
+        is_staff,
+        signup_asset,
+    ) = if let Some((id, active, password, display_name, is_superuser, is_staff)) = existing {
+        (
+            id,
+            password,
+            active,
+            display_name,
+            is_superuser,
+            is_staff,
+            None,
+        )
+    } else {
+        // `__check_signup`: `ENABLE_SIGNUP == "0"` with no invite → 5030.
+        let enable_signup = config_value(
+            pool,
+            secret_key,
+            "ENABLE_SIGNUP",
+            std::env::var("ENABLE_SIGNUP").ok(),
+        )
+        .await
+        .map_err(|_| CallbackFailure::Server)?;
+        if enable_signup.as_deref() == Some("0") {
+            let invited: Option<(i64,)> = sqlx::query_as(
                 "SELECT 1 FROM workspace_member_invites WHERE email = $1 AND deleted_at IS NULL LIMIT 1",
             )
             .bind(email)
             .fetch_optional(pool)
             .await
             .map_err(|_| CallbackFailure::Server)?;
-                if invited.is_none() {
-                    return Err(CallbackFailure::Auth(
-                        oauth_error::AuthenticationException::new(
-                            pidash_services::auth_session::shapes::error_code("SIGNUP_DISABLED")
-                                .unwrap_or(5035),
-                            "SIGNUP_DISABLED".to_owned(),
-                            vec![("email".to_owned(), Value::String(email.to_owned()))],
-                        ),
-                    ));
-                }
+            if invited.is_none() {
+                return Err(CallbackFailure::Auth(
+                    oauth_error::AuthenticationException::new(
+                        pidash_services::auth_session::shapes::error_code("SIGNUP_DISABLED")
+                            .unwrap_or(5035),
+                        "SIGNUP_DISABLED".to_owned(),
+                        vec![("email".to_owned(), Value::String(email.to_owned()))],
+                    ),
+                ));
             }
+        }
 
-            // Autoset arm (`base.py:complete_login_or_signup` new-user branch):
-            // `username = uuid4().hex`, `set_password(uuid4().hex)`.
-            let id = Uuid::new_v4();
-            let username = Uuid::new_v4().simple().to_string();
-            let password = encode_password(&Uuid::new_v4().simple().to_string());
-            let first_name = user_obj
-                .first_name
-                .as_str()
-                .map(str::to_owned)
-                .unwrap_or_default();
-            let last_name = user_obj
-                .last_name
-                .as_str()
-                .map(str::to_owned)
-                .unwrap_or_default();
-            let avatar = user_obj.avatar.as_str().unwrap_or("").to_owned();
-            // `User.save()` (`user.py:177-182`) backfills the blank
-            // `display_name` from the email local part on the create save
-            // (`base.py:328`); the row is inserted already backfilled.
-            let display_name = backfill_display_name(email);
-            sqlx::query(
-            r#"INSERT INTO "users" ("id", "password", "last_login", "username", "mobile_number", "email",
-                "display_name", "first_name", "last_name", "avatar", "avatar_asset_id",
-                "cover_image", "cover_image_asset_id", "date_joined", "created_at", "updated_at",
-                "last_location", "created_location", "is_superuser", "is_managed", "is_password_expired",
-                "is_active", "is_staff", "is_email_verified", "is_password_autoset", "is_password_reset_required",
-                "token", "last_active", "last_login_time", "last_logout_time", "last_login_ip", "last_logout_ip",
-                "last_login_medium", "last_login_uagent", "token_updated_at", "is_bot", "bot_type",
-                "user_timezone", "is_email_valid", "masked_at")
-               VALUES ($1, $2, NULL, $3, NULL, $4, $9, $5, $6, $7, NULL, NULL, NULL, $8, $8, $8,
-                '', '', FALSE, FALSE, FALSE, TRUE, FALSE, TRUE, TRUE, FALSE,
-                '', $8, NULL, NULL, '', '', 'email', '', NULL, FALSE, NULL, 'UTC', FALSE, NULL)"#,
+        // Autoset arm (`base.py:complete_login_or_signup` new-user branch):
+        // `username = uuid4().hex`, `set_password(uuid4().hex)`.
+        let id = Uuid::new_v4();
+        let username = Uuid::new_v4().simple().to_string();
+        let password = encode_password(&Uuid::new_v4().simple().to_string());
+        let first_name = user_obj
+            .first_name
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or_default();
+        let last_name = user_obj
+            .last_name
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or_default();
+        let avatar = user_obj.avatar.as_str().unwrap_or("").to_owned();
+        // `User.save()` (`user.py:177-182`) backfills the blank
+        // `display_name` from the email local part on the create save
+        // (`base.py:328`); the row is inserted already backfilled.
+        let display_name = backfill_display_name(email);
+        // `User(...)` + first `save()` with the `post_save` preferences
+        // row (`user.py:307`, before the avatar write below — same as the
+        // email signup) and the adapter profile row, all inside
+        // `domain::identity::create_user`.
+        identity::create_user(
+            orm,
+            &identity::NewUser {
+                id: Some(id),
+                email,
+                username,
+                password_hash: password.clone(),
+                first_name: &first_name,
+                last_name: &last_name,
+                display_name: display_name.clone(),
+                // Django inserts `''` (the field default, `user.py:68`)
+                // and persists the provider URL after the insert
+                // (`base.py:330-340`; PIDASHCONV-1560).
+                avatar: "",
+                is_email_verified: true,
+                is_password_autoset: true,
+                last_active: Some(now),
+                login_ip: Some(""),
+                login_uagent: Some(""),
+                is_bot: false,
+                now,
+                profile: Some(identity::NewProfile {
+                    company_name: "",
+                    background_color: format!(
+                        "#{}",
+                        Uuid::new_v4()
+                            .simple()
+                            .to_string()
+                            .chars()
+                            .take(6)
+                            .collect::<String>()
+                    ),
+                }),
+            },
         )
-        .bind(id)
-        .bind(&password)
-        .bind(&username)
-        .bind(email)
-        .bind(&first_name)
-        .bind(&last_name)
-        .bind(&avatar)
-        .bind(now)
-        .bind(&display_name)
-        .execute(pool)
         .await
         .map_err(|_| CallbackFailure::Server)?;
 
-            // `Profile.objects.create(user=user)` (`user.py:200-275` defaults).
-            let background = format!(
-                "#{}",
-                Uuid::new_v4()
-                    .simple()
-                    .to_string()
-                    .chars()
-                    .take(6)
-                    .collect::<String>()
-            );
-            sqlx::query(
-            r#"INSERT INTO "profiles" ("id", "created_at", "updated_at", "user_id", "theme",
-                "is_app_rail_docked", "is_tour_completed", "onboarding_step", "use_case", "role",
-                "is_onboarded", "last_workspace_id", "billing_address_country", "billing_address",
-                "has_billing_address", "company_name", "notification_view_mode", "is_smooth_cursor_enabled",
-                "is_mobile_onboarded", "mobile_onboarding_step", "mobile_timezone_auto_set", "language",
-                "start_of_the_week", "goals", "background_color", "is_navigation_tour_completed",
-                "has_marketing_email_consent", "is_subscribed_to_changelog", "product_tour", "settings")
-               VALUES ($1, $2, $2, $3, '{}', TRUE, FALSE, $4, NULL, NULL, FALSE, NULL, 'INDIA', NULL,
-                FALSE, '', 'full', FALSE, FALSE, $5, FALSE, 'en', 0, '{}', $6, FALSE, FALSE, FALSE, $7, '{}')"#,
+        // `avatar_asset = download_and_upload_avatar(...)` (`base.py:330-339`):
+        // the provider URL lands first (the INSERT stored `''`), then
+        // success sets the FK too; failure keeps the stamped URL. No old
+        // avatar exists to delete (same shape as the google signup).
+        let mut created_asset = None;
+        if !avatar.is_empty() {
+            identity::stamp_avatar_url(pool, id, &avatar)
+                .await
+                .map_err(|_| CallbackFailure::Server)?;
+            if let Some(asset_id) = super::download_and_upload_avatar(
+                client, pool, storage, scheme, host, "github", &avatar, id, max_bytes, now,
+            )
+            .await
+            {
+                identity::stamp_avatar_asset(pool, id, asset_id)
+                    .await
+                    .map_err(|_| CallbackFailure::Server)?;
+                created_asset = Some(asset_id);
+            }
+        }
+        // Created active (`is_active` defaults True, `user.py`), so the
+        // activation branch below never fires for new users — as in Python.
+        (
+            id,
+            password,
+            true,
+            display_name,
+            false,
+            false,
+            created_asset,
         )
-        .bind(Uuid::new_v4())
-        .bind(now)
-        .bind(id)
-        .bind(default_onboarding_step())
-        .bind(default_mobile_onboarding_step())
-        .bind(&background)
-        .bind(default_product_tour())
-        .execute(pool)
-        .await
-        .map_err(|_| CallbackFailure::Server)?;
-            // Created active (`is_active` defaults True, `user.py`), so the
-            // activation branch below never fires for new users — as in Python.
-            (id, password, true, display_name, false, false)
-        };
+    };
 
     // IDP sync (`base.py:sync_user_data`): `check_sync_enabled() and not
     // is_signup` — with the inverted flag this runs for NEW users.
@@ -1083,19 +1074,64 @@ async fn complete_login_or_signup(
         // `get_display_name`; its `is_staff` arm no-ops (only new,
         // never-superuser rows reach this branch).
         display_name = display_name_for_email(email);
-        sqlx::query(
-            r#"UPDATE "users" SET "first_name" = $1, "last_name" = $2, "display_name" = $3,
-               "avatar" = $4, "updated_at" = $5 WHERE "id" = $6"#,
+        // `delete_old_avatar` + `download_and_upload_avatar`
+        // (`base.py:278-284`): the just-uploaded signup asset is the old
+        // avatar here. On success only the FK moves — `avatar` keeps the
+        // `''` the delete wrote; the provider URL lands only when the
+        // upload fails.
+        super::delete_old_avatar(
+            client,
+            pool,
+            storage,
+            scheme,
+            host,
+            user_id,
+            signup_asset,
+            now,
         )
-        .bind(&first_name)
-        .bind(&last_name)
-        .bind(&display_name)
-        .bind(&avatar)
-        .bind(now)
-        .bind(user_id)
-        .execute(pool)
+        .await;
+        match super::download_and_upload_avatar(
+            client, pool, storage, scheme, host, "github", &avatar, user_id, max_bytes, now,
+        )
         .await
-        .map_err(|_| CallbackFailure::Server)?;
+        {
+            Some(asset_id) => {
+                identity::sync_user_data(
+                    pool,
+                    user_id,
+                    &identity::SyncUpdate {
+                        first_name: &first_name,
+                        last_name: &last_name,
+                        display_name: &display_name,
+                        avatar: None,
+                        avatar_asset_id: Some(Some(asset_id)),
+                        is_staff: None,
+                        touch_updated_at: true,
+                        now,
+                    },
+                )
+                .await
+                .map_err(|_| CallbackFailure::Server)?;
+            }
+            None => {
+                identity::sync_user_data(
+                    pool,
+                    user_id,
+                    &identity::SyncUpdate {
+                        first_name: &first_name,
+                        last_name: &last_name,
+                        display_name: &display_name,
+                        avatar: Some(&avatar),
+                        avatar_asset_id: None,
+                        is_staff: None,
+                        touch_updated_at: true,
+                        now,
+                    },
+                )
+                .await
+                .map_err(|_| CallbackFailure::Server)?;
+            }
+        }
     }
 
     // `save_user_data` (`base.py:220-234`): login stamps; inactive users
@@ -1121,20 +1157,22 @@ async fn complete_login_or_signup(
         display_name
     };
     let is_staff = is_staff || is_superuser;
-    sqlx::query(
-        r#"UPDATE "users" SET "last_login_medium" = 'github', "last_active" = $1, "last_login_time" = $1,
-           "last_login_ip" = $2, "last_login_uagent" = $3, "token_updated_at" = $1, "token" = $5,
-           "display_name" = $6, "is_staff" = $7,
-           "is_active" = TRUE, "updated_at" = $1 WHERE "id" = $4"#,
+    identity::save_user_data(
+        pool,
+        user_id,
+        &identity::LoginStamps {
+            medium: Some("github"),
+            login_ip: ip.as_deref(),
+            login_uagent: uagent.as_deref(),
+            avatar: None,
+            avatar_asset_id: None,
+            display_name: Some(identity::DisplayNameUpdate::Bound(&display_name)),
+            is_staff: Some(identity::StaffSync::Value(is_staff)),
+            touch_updated_at: true,
+            rotated_token: &token,
+            now,
+        },
     )
-    .bind(now)
-    .bind(ip.as_deref())
-    .bind(uagent.as_deref())
-    .bind(user_id)
-    .bind(token)
-    .bind(display_name)
-    .bind(is_staff)
-    .execute(pool)
     .await
     .map_err(|_| CallbackFailure::Server)?;
 
@@ -1159,7 +1197,29 @@ async fn complete_login_or_signup(
     let mut user_data_value =
         serde_json::to_value(&auth.user_data).map_err(|_| CallbackFailure::Server)?;
     coerce_provider_id(&mut user_data_value);
+    // The looked-up row's `created_at`/`metadata` ride into the update
+    // side (Django's `.save()` rewrites them unchanged); absent, the
+    // ported defaults apply (PIDASHCONV-1363, as `oauth_google.rs`).
+    let provider_id = account_queries::lookup_provider_id(&user_data_value).unwrap_or("");
+    let prior: Option<(chrono::DateTime<chrono::Utc>, Value)> = if provider_id.is_empty() {
+        None
+    } else {
+        sqlx::query_as(
+            "SELECT \"created_at\", \"metadata\" FROM \"accounts\" \
+             WHERE \"user_id\" = $1 AND \"provider\" = $2 AND \"provider_account_id\" = $3 LIMIT 1",
+        )
+        .bind(user_id)
+        .bind("github")
+        .bind(provider_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| CallbackFailure::Server)?
+    };
     let mut conn = pool.acquire().await.map_err(|_| CallbackFailure::Server)?;
+    let existing = prior.map(|(created_at, metadata)| account_queries::ExistingAccount {
+        created_at,
+        metadata,
+    });
     account_queries::create_update_account(
         &mut conn,
         user_id,
@@ -1168,7 +1228,7 @@ async fn complete_login_or_signup(
         &tokens,
         now,
         Uuid::new_v4(),
-        None,
+        existing,
     )
     .await
     .map_err(|_| CallbackFailure::Server)?;
@@ -1282,20 +1342,24 @@ async fn process_invitations(
     .fetch_all(pool)
     .await?;
     for (workspace_id, role, _slug) in &workspace_invites {
-        sqlx::query(
-            r#"INSERT INTO "workspace_members" ("id", "created_at", "updated_at", "workspace_id",
-               "member_id", "role", "view_props", "default_props", "issue_props",
-               "is_active", "explored_features", "getting_started_checklist", "tips")
-               VALUES ($1, $2, $2, $3, $4, $5, $6, $6, $7, TRUE, '{}', '{}', '{}') ON CONFLICT DO NOTHING"#,
+        let view_props = workspace_default_props();
+        let issue_props = serde_json::json!({"subscribed": true, "assigned": true, "created": true, "all_issues": true});
+        members::add(
+            pool,
+            &members::NewMember {
+                workspace_id: *workspace_id,
+                user_id: Some(user_id),
+                role: *role,
+                company_role: None,
+                created_by: None,
+                view_props: &view_props,
+                default_props: &view_props,
+                issue_props: &issue_props,
+                now,
+                ignore_conflicts: true,
+                db_now: false,
+            },
         )
-        .bind(Uuid::new_v4())
-        .bind(now)
-        .bind(workspace_id)
-        .bind(user_id)
-        .bind(role)
-        .bind(workspace_default_props())
-        .bind(serde_json::json!({"subscribed": true, "assigned": true, "created": true, "all_issues": true}))
-        .execute(pool)
         .await?;
     }
     // Per-invite cache invalidation + `track_event`, newest first (the
@@ -1316,7 +1380,11 @@ async fn process_invitations(
     }
 
     // Accepted project invites → workspace members (role clamped to 5/15)
-    // + project members, `ignore_conflicts=True` on both.
+    // + project members, `ignore_conflicts=True` on both. Two phases, not
+    // one loop: Django commits every project-arm `workspace_members` row
+    // before the `project_members` bulk below raises (PIDASHCONV-1359 —
+    // a per-invite loop aborts on `?` after the first workspace, so a
+    // user invited in several workspaces only ever joins the first).
     // Ported bug PB-1008 (`workspace_project_join.py:76-87`): the
     // `ProjectMember` bulk omits `project` although
     // `project_members.project_id` is NOT NULL, so any accepted project
@@ -1331,38 +1399,46 @@ async fn process_invitations(
     .await?;
     for (workspace_id, role, created_by) in &project_invites {
         let clamped = if *role == 5 || *role == 15 { *role } else { 15 };
-        sqlx::query(
-            r#"INSERT INTO "workspace_members" ("id", "created_at", "updated_at", "workspace_id",
-               "member_id", "role", "created_by_id", "view_props", "default_props", "issue_props",
-               "is_active", "explored_features", "getting_started_checklist", "tips")
-               VALUES ($1, $2, $2, $3, $4, $5, $6, $7, $7, $8, TRUE, '{}', '{}', '{}') ON CONFLICT DO NOTHING"#,
+        let view_props = workspace_default_props();
+        let issue_props = serde_json::json!({"subscribed": true, "assigned": true, "created": true, "all_issues": true});
+        members::add(
+            pool,
+            &members::NewMember {
+                workspace_id: *workspace_id,
+                user_id: Some(user_id),
+                role: clamped,
+                company_role: None,
+                created_by: *created_by,
+                view_props: &view_props,
+                default_props: &view_props,
+                issue_props: &issue_props,
+                now,
+                ignore_conflicts: true,
+                db_now: false,
+            },
         )
-        .bind(Uuid::new_v4())
-        .bind(now)
-        .bind(workspace_id)
-        .bind(user_id)
-        .bind(clamped)
-        .bind(created_by)
-        .bind(workspace_default_props())
-        .bind(serde_json::json!({"subscribed": true, "assigned": true, "created": true, "all_issues": true}))
-        .execute(pool)
         .await?;
-        sqlx::query(
-            r#"INSERT INTO "project_members" ("id", "created_at", "updated_at", "workspace_id",
-               "member_id", "role", "created_by_id", "view_props", "default_props", "preferences",
-               "sort_order", "is_active")
-               VALUES ($1, $2, $2, $3, $4, $5, $6, $7, $7, $8, 65535, TRUE) ON CONFLICT DO NOTHING"#,
+    }
+    for (workspace_id, role, created_by) in &project_invites {
+        let clamped = if *role == 5 || *role == 15 { *role } else { 15 };
+        let prefs = serde_json::json!({"pages": {"block_display": true},
+                    "navigation": {"default_tab": "work_items", "hide_in_more_menu": []}});
+        pidash_services::domain::projects::members::add(
+            pool,
+            &pidash_services::domain::projects::members::NewProjectMember {
+                workspace_id: *workspace_id,
+                project_id: None,
+                user_id: Some(user_id),
+                role: clamped,
+                created_by: *created_by,
+                view_props: &project_default_props(),
+                default_props: &project_default_props(),
+                preferences: &prefs,
+                now,
+                ignore_conflicts: true,
+                db_now: false,
+            },
         )
-        .bind(Uuid::new_v4())
-        .bind(now)
-        .bind(workspace_id)
-        .bind(user_id)
-        .bind(clamped)
-        .bind(created_by)
-        .bind(project_default_props())
-        .bind(serde_json::json!({"pages": {"block_display": true},
-                    "navigation": {"default_tab": "work_items", "hide_in_more_menu": []}}))
-        .execute(pool)
         .await?;
     }
 
@@ -1444,32 +1520,20 @@ async fn redirection_path(
     Ok("create-workspace".to_owned())
 }
 
-/// `user_login` (`authentication/utils/login.py:15-27`): `login()` writes
-/// the auth trio, then `device_info`, then the session saves (the layer
-/// persists the mutated handle on response).
+/// `device_info` half of `user_login`
+/// (`authentication/utils/login.py:21-25`): the `login()` half (rotation,
+/// the auth trio, `last_login`, the CSRF cookie) runs first via
+/// [`super::login::login_session_keys`]; this writes only `device_info`,
+/// then the session saves (the layer persists the mutated handle on
+/// response).
 fn login_session(
     handle: &SessionHandle,
     settings: &pidash_db::config::Settings,
     headers: &HeaderMap,
     remote_addr: Option<&str>,
-    user: &ResolvedUser,
     is_app: bool,
     is_space: bool,
 ) {
-    session_set(handle, "_auth_user_id", Value::String(user.id.to_string()));
-    session_set(
-        handle,
-        "_auth_user_backend",
-        Value::String("django.contrib.auth.backends.ModelBackend".to_owned()),
-    );
-    session_set(
-        handle,
-        "_auth_user_hash",
-        Value::String(session_auth_hash(
-            &user.password_field,
-            settings.secret_key.as_bytes(),
-        )),
-    );
     let domain = if is_space {
         space_base(settings)
     } else if is_app {
@@ -1532,6 +1596,9 @@ async fn app_callback(
     let Some(pool) = pool_of(&state) else {
         return server_error();
     };
+    let Some(orm) = state.orm().cloned() else {
+        return server_error();
+    };
     // `current_site` for the activation mail (`base_host(request)`,
     // `base.py:230`) and the cache handle for the per-invite member-list
     // invalidation (a missing handle 500s, like Python with its cache
@@ -1555,7 +1622,7 @@ async fn app_callback(
         &request_host(&headers),
         "github",
     );
-    let outcome: Result<String, CallbackFailure> = async {
+    let outcome: Result<(String, String), CallbackFailure> = async {
         if !providers::github_configured(
             config.client_id.as_deref(),
             config.client_secret.as_deref(),
@@ -1571,8 +1638,19 @@ async fn app_callback(
         )
         .await?;
         let email = sanitize_email(&auth.user_data.email).map_err(CallbackFailure::Auth)?;
+        // Avatar I/O inputs (`S3Storage(request)`, `base.py:198` —
+        // `is_server=False` signs the public host; the cap is
+        // `DATA_UPLOAD_MAX_MEMORY_SIZE`, i.e. `FILE_SIZE_LIMIT`).
+        let avatar_http = reqwest::Client::new();
+        let avatar_scheme = if is_secure_request(&headers, settings) {
+            "https"
+        } else {
+            "http"
+        };
+        let avatar_host = request_host(&headers);
         let user = complete_login_or_signup(
             &pool,
+            &orm,
             &secret,
             &headers,
             remote_addr,
@@ -1580,9 +1658,27 @@ async fn app_callback(
             &email,
             &site,
             redis,
+            &avatar_http,
+            &settings.storage,
+            avatar_scheme,
+            &avatar_host,
+            settings.file_size_limit.max(0) as u64,
         )
         .await?;
-        login_session(&handle, settings, &headers, remote_addr, &user, true, false);
+        // `user_login(is_app=True)`: the shared `login()` half first
+        // (rotation, trio, `last_login`, CSRF cookie), then `device_info`.
+        let csrf_cookie = super::login::login_session_keys(
+            &handle,
+            &pool,
+            user.id,
+            &user.password_field,
+            secret.as_bytes(),
+            settings,
+            chrono::Utc::now(),
+        )
+        .await
+        .map_err(|_| CallbackFailure::Server)?;
+        login_session(&handle, settings, &headers, remote_addr, true, false);
         // `path = next_path or get_redirection_path(user)`
         // (`github.py:98-101`): the RAW session value (possibly "").
         let path = match session_next.as_deref() {
@@ -1592,16 +1688,18 @@ async fn app_callback(
                 .map_err(|_| CallbackFailure::Server)?,
         };
         let allowed_refs: Vec<&str> = allowed.iter().map(String::as_str).collect();
-        Ok(shapes::get_safe_redirect_url(
-            &base,
-            &path,
-            &[],
-            &allowed_refs,
+        Ok((
+            shapes::get_safe_redirect_url(&base, &path, &[], &allowed_refs),
+            csrf_cookie,
         ))
     }
     .await;
     match outcome {
-        Ok(url) => redirect_response(url),
+        Ok((url, csrf_cookie)) => {
+            let mut response = redirect_response(url);
+            super::login::push_cookie(&mut response, csrf_cookie);
+            response
+        }
         Err(CallbackFailure::Auth(exc)) => redirect_response(error_location(
             &base,
             session_next.as_deref(),
@@ -1637,6 +1735,16 @@ async fn space_callback(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overlong_redirect_location_answers_400() {
+        let long = format!("http://app.test/?{}", "a".repeat(17_000));
+        assert_eq!(redirect_response(long).status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            redirect_response("http://app.test/?next_path=/x".to_owned()).status(),
+            StatusCode::FOUND
+        );
+    }
 
     fn test_settings() -> pidash_db::config::Settings {
         // No `WEB_URL`: `get_allowed_hosts` allows only
@@ -1830,19 +1938,7 @@ mod tests {
     fn login_device_info_absent_header_defaults() {
         let settings = test_settings();
         let handle = SessionHandle::new(crate::middleware::RequestSession::empty());
-        let user = ResolvedUser {
-            id: Uuid::new_v4(),
-            password_field: "pw".to_owned(),
-        };
-        login_session(
-            &handle,
-            &settings,
-            &HeaderMap::new(),
-            None,
-            &user,
-            true,
-            false,
-        );
+        login_session(&handle, &settings, &HeaderMap::new(), None, true, false);
         let info = handle
             .lock()
             .get("device_info")
@@ -1966,6 +2062,13 @@ mod tests {
     /// `CREATE TABLE IF NOT EXISTS` can collide on the sequence.
     static SCHEMA_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+    /// Serializes the live-kernel tests: the sync test seeds the global
+    /// `ENABLE_GITHUB_SYNC` row, which a sibling kernel would otherwise
+    /// read mid-flight under default parallel `cargo test`
+    /// (PIDASHCONV-1323 F2). Each kernel holds it for the whole body,
+    /// including teardown (which deletes the flag row again).
+    static KERNEL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     async fn kernel_pool() -> Option<sqlx::PgPool> {
         match std::env::var("DATABASE_URL") {
             Ok(url) => {
@@ -1989,6 +2092,21 @@ mod tests {
         let url =
             std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379/6".to_owned());
         pidash_db::redis::RedisHandle::from_url(&url).expect("redis url parses")
+    }
+
+    /// Storage with no backend: avatar uploads fall back to the provider
+    /// URL, pinning the non-avatar behavior of the older kernels.
+    fn kernel_storage() -> pidash_db::config::StorageSettings {
+        pidash_db::config::StorageSettings {
+            use_minio: false,
+            minio_endpoint_ssl: false,
+            access_key_id: String::new(),
+            secret_access_key: String::new(),
+            bucket_name: String::new(),
+            region: "us-east-1".to_owned(),
+            endpoint_url: None,
+            signed_url_expiration_secs: 3600,
+        }
     }
 
     fn kernel_auth(email: &str) -> GithubAuth {
@@ -2098,6 +2216,11 @@ mod tests {
                 .await
                 .unwrap_or_default();
         for user_id in &user_ids {
+            sqlx::query(r#"DELETE FROM "user_notification_preferences" WHERE "user_id" = $1"#)
+                .bind(user_id)
+                .execute(pool)
+                .await
+                .ok();
             sqlx::query(r#"DELETE FROM "accounts" WHERE "user_id" = $1"#)
                 .bind(user_id)
                 .execute(pool)
@@ -2151,6 +2274,7 @@ mod tests {
     /// workspace, and evicts the member-list cache keys.
     #[tokio::test]
     async fn github_kernel_inactive_invited_user_emits_mail_event_and_evicts() {
+        let _kernel = KERNEL_LOCK.lock().await;
         let Some(pool) = kernel_pool().await else {
             return;
         };
@@ -2167,8 +2291,10 @@ mod tests {
 
         let auth = kernel_auth(&email);
         let headers = kernel_headers();
+        let orm = pidash_db::sea_orm_connection(&pool);
         let outcome = complete_login_or_signup(
             &pool,
+            &orm,
             "kernel-test-secret",
             &headers,
             Some("127.0.0.1"),
@@ -2176,6 +2302,11 @@ mod tests {
             &email,
             "http://kernel.test",
             Some(&redis),
+            &reqwest::Client::new(),
+            &kernel_storage(),
+            "http",
+            "kernel.test",
+            5_242_880,
         )
         .await;
 
@@ -2259,6 +2390,7 @@ mod tests {
     /// New user, no invites: the login succeeds and emits nothing.
     #[tokio::test]
     async fn github_kernel_new_user_without_invites_emits_nothing() {
+        let _kernel = KERNEL_LOCK.lock().await;
         let Some(pool) = kernel_pool().await else {
             return;
         };
@@ -2267,8 +2399,10 @@ mod tests {
         let auth = kernel_auth(&email);
         let headers = kernel_headers();
         // No invites: no cache handle is needed and none is touched.
+        let orm = pidash_db::sea_orm_connection(&pool);
         let outcome = complete_login_or_signup(
             &pool,
+            &orm,
             "kernel-test-secret",
             &headers,
             Some("127.0.0.1"),
@@ -2276,6 +2410,11 @@ mod tests {
             &email,
             "http://kernel.test",
             None,
+            &reqwest::Client::new(),
+            &kernel_storage(),
+            "http",
+            "kernel.test",
+            5_242_880,
         )
         .await;
 
@@ -2303,5 +2442,741 @@ mod tests {
         let (_, is_active) = user_row.expect("user row created");
         assert!(is_active, "new user is active");
         assert_eq!(queue_rows, 0, "no emits without invites or prior inactive");
+    }
+
+    /// New-user signup creates the notification-preferences row
+    /// (`create_user_notification` post_save, `user.py:307-320`): one
+    /// row, all five flags true, NULL audit/scope columns, live.
+    /// PIDASHCONV-1528: the github signup skipped it.
+    #[tokio::test]
+    async fn github_kernel_signup_creates_notification_prefs() {
+        let _kernel = KERNEL_LOCK.lock().await;
+        let Some(pool) = kernel_pool().await else {
+            return;
+        };
+        let tag = Uuid::new_v4().simple().to_string()[..8].to_owned();
+        let email = format!("gh1528-{tag}@example.test");
+        let auth = kernel_auth(&email);
+        let headers = kernel_headers();
+        // No invites: no cache handle is needed and none is touched.
+        let orm = pidash_db::sea_orm_connection(&pool);
+        let outcome = complete_login_or_signup(
+            &pool,
+            &orm,
+            "kernel-test-secret",
+            &headers,
+            Some("127.0.0.1"),
+            &auth,
+            &email,
+            "http://kernel.test",
+            None,
+            &reqwest::Client::new(),
+            &kernel_storage(),
+            "http",
+            "kernel.test",
+            5_242_880,
+        )
+        .await;
+
+        // Observe everything before cleanup so a failure still sweeps.
+        let user_id: Option<Uuid> =
+            sqlx::query_scalar(r#"SELECT "id" FROM "users" WHERE "email" = $1"#)
+                .bind(&email)
+                .fetch_optional(&pool)
+                .await
+                .expect("read user");
+        let flags: Vec<(bool, bool, bool, bool, bool)> = if let Some(id) = user_id {
+            sqlx::query_as(
+                r#"SELECT "property_change", "state_change", "comment", "mention", "issue_completed"
+                   FROM "user_notification_preferences" WHERE "user_id" = $1"#,
+            )
+            .bind(id)
+            .fetch_all(&pool)
+            .await
+            .expect("read prefs")
+        } else {
+            Vec::new()
+        };
+        let live_unscoped: i64 = if let Some(id) = user_id {
+            sqlx::query_scalar(
+                r#"SELECT COUNT(*) FROM "user_notification_preferences"
+                   WHERE "user_id" = $1 AND "deleted_at" IS NULL AND "workspace_id" IS NULL
+                     AND "project_id" IS NULL AND "created_by_id" IS NULL
+                     AND "updated_by_id" IS NULL"#,
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .expect("read prefs scope")
+        } else {
+            0
+        };
+        cleanup_kernel_world(&pool, &email, &format!("gh1528-{tag}")).await;
+
+        assert!(outcome.is_ok(), "kernel must succeed");
+        user_id.expect("user row created");
+        assert_eq!(flags.len(), 1, "exactly one prefs row");
+        let (property_change, state_change, comment, mention, issue_completed) = flags[0];
+        assert!(property_change, "property_change defaults true");
+        assert!(state_change, "state_change defaults true");
+        assert!(comment, "comment defaults true");
+        assert!(mention, "mention defaults true");
+        assert!(issue_completed, "issue_completed defaults true");
+        assert_eq!(live_unscoped, 1, "prefs row is live with NULL audit/scope");
+    }
+
+    /// Seed an active user + two workspaces, each with a project and an
+    /// accepted project invite for the email (roles 5 and 20 — the
+    /// latter clamps to 15). Column lists mirror
+    /// `_harness.db.Database.make_user/make_workspace/make_project` plus
+    /// the `project_member_invites` seed in
+    /// `test_github_project_invite_join.py`.
+    async fn seed_active_user_two_project_invites(
+        pool: &sqlx::PgPool,
+        email: &str,
+        slug: &str,
+    ) -> (Uuid, Vec<Uuid>) {
+        let user_id = Uuid::new_v4();
+        let now = chrono::Utc::now();
+        sqlx::query(
+            r#"INSERT INTO "users" ("password", "id", "username", "email", "first_name", "last_name",
+                "avatar", "date_joined", "created_at", "updated_at", "last_location",
+                "created_location", "is_superuser", "is_managed", "is_password_expired",
+                "is_active", "is_staff", "is_email_verified", "is_password_autoset",
+                "token", "user_timezone", "last_login_ip", "last_logout_ip",
+                "last_login_medium", "last_login_uagent", "is_bot", "display_name",
+                "is_email_valid", "is_password_reset_required")
+               VALUES ('pbkdf2_sha256$600000$kernelseed$kernelhash', $1, $2, $3, 'Kernel', 'User',
+                '', $4, $4, $4, '', '', FALSE, FALSE, FALSE, TRUE, FALSE, TRUE, FALSE,
+                '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+                'UTC', '', '', 'email', '', FALSE, 'Kernel User', TRUE, FALSE)"#,
+        )
+        .bind(user_id)
+        .bind(format!("u-{}", &user_id.simple().to_string()[..8]))
+        .bind(email)
+        .bind(now)
+        .execute(pool)
+        .await
+        .expect("seed user");
+        let mut workspace_ids = Vec::new();
+        for (index, role) in [(1, 5), (2, 20)] {
+            let workspace_id = Uuid::new_v4();
+            let project_id = Uuid::new_v4();
+            let ws_slug = format!("{slug}-w{index}");
+            sqlx::query(
+                r#"INSERT INTO "workspaces" ("created_at", "updated_at", "id", "name", "slug",
+                    "owner_id", "timezone", "background_color")
+                   VALUES ($1, $1, $2, $3, $4, $5, 'UTC', '#ffffff')"#,
+            )
+            .bind(now)
+            .bind(workspace_id)
+            .bind(format!("kernel ws {ws_slug}"))
+            .bind(&ws_slug)
+            .bind(user_id)
+            .execute(pool)
+            .await
+            .expect("seed workspace");
+            sqlx::query(
+                r#"INSERT INTO "projects"
+                   ("created_at", "updated_at", "id", "name", "description", "network",
+                    "identifier", "workspace_id", "cycle_view", "module_view",
+                    "issue_views_view", "page_view", "intake_view", "archive_in",
+                    "close_in", "logo_props", "is_time_tracking_enabled",
+                    "is_issue_type_enabled", "guest_view_all_features", "timezone",
+                    "members_can_edit_states", "repo_url", "base_branch",
+                    "agent_default_interval_seconds", "agent_default_max_ticks",
+                    "agent_ticking_enabled", "is_default",
+                    "agent_review_default_interval_seconds",
+                    "default_agent_executor",
+                    "agent_test_default_interval_seconds")
+                   VALUES ($1,$1,$2,$3,'',0,$4,$5,true,true,true,true,true,
+                           365,365,'{}',true,false,false,'UTC',true,'','',
+                           10800,10,true,false,10800,'local_runner',10800)"#,
+            )
+            .bind(now)
+            .bind(project_id)
+            .bind(format!("kernel proj {ws_slug}"))
+            .bind(format!("k9{index}{}", tag_suffix()))
+            .bind(workspace_id)
+            .execute(pool)
+            .await
+            .expect("seed project");
+            sqlx::query(
+                r#"INSERT INTO "project_member_invites" ("id", "created_at", "updated_at",
+                    "project_id", "workspace_id", "email", "accepted", "token", "role")
+                   VALUES ($1, $2, $2, $3, $4, $5, TRUE, $6, $7)"#,
+            )
+            .bind(Uuid::new_v4())
+            .bind(now)
+            .bind(project_id)
+            .bind(workspace_id)
+            .bind(email)
+            .bind(format!(
+                "tok-1359-{}",
+                &Uuid::new_v4().simple().to_string()[..8]
+            ))
+            .bind(role)
+            .execute(pool)
+            .await
+            .expect("seed project invite");
+            workspace_ids.push(workspace_id);
+        }
+        (user_id, workspace_ids)
+    }
+
+    fn tag_suffix() -> String {
+        Uuid::new_v4().simple().to_string()[..6].to_owned()
+    }
+
+    async fn cleanup_project_kernel_world(
+        pool: &sqlx::PgPool,
+        email: &str,
+        workspace_ids: &[Uuid],
+    ) {
+        let user_ids: Vec<Uuid> =
+            sqlx::query_scalar(r#"SELECT "id" FROM "users" WHERE "email" = $1"#)
+                .bind(email)
+                .fetch_all(pool)
+                .await
+                .unwrap_or_default();
+        for user_id in &user_ids {
+            for table in ["accounts", "profiles"] {
+                sqlx::query(&format!(r#"DELETE FROM "{table}" WHERE "user_id" = $1"#))
+                    .bind(user_id)
+                    .execute(pool)
+                    .await
+                    .ok();
+            }
+            for (table, column) in [
+                ("workspace_members", "member_id"),
+                ("project_members", "member_id"),
+            ] {
+                sqlx::query(&format!(r#"DELETE FROM "{table}" WHERE "{column}" = $1"#))
+                    .bind(user_id)
+                    .execute(pool)
+                    .await
+                    .ok();
+            }
+        }
+        sqlx::query(r#"DELETE FROM "project_member_invites" WHERE "email" = $1"#)
+            .bind(email)
+            .execute(pool)
+            .await
+            .ok();
+        for workspace_id in workspace_ids {
+            sqlx::query(r#"DELETE FROM "projects" WHERE "workspace_id" = $1"#)
+                .bind(workspace_id)
+                .execute(pool)
+                .await
+                .ok();
+            sqlx::query(r#"DELETE FROM "workspaces" WHERE "id" = $1"#)
+                .bind(workspace_id)
+                .execute(pool)
+                .await
+                .ok();
+        }
+        for user_id in &user_ids {
+            sqlx::query(r#"DELETE FROM "users" WHERE "id" = $1"#)
+                .bind(user_id)
+                .execute(pool)
+                .await
+                .ok();
+        }
+    }
+
+    /// Two accepted project invites in two workspaces: the kernel fails
+    /// into `Server` (the ported PB-1008 500) only AFTER committing both
+    /// workspace-member rows (PIDASHCONV-1359 — the pre-fix per-invite
+    /// loop aborted on `?` after the first workspace, so the user never
+    /// joined the second). Zero project-member rows, both invites intact.
+    #[tokio::test]
+    async fn github_kernel_two_project_invites_join_both_workspaces() {
+        let _kernel = KERNEL_LOCK.lock().await;
+        let Some(pool) = kernel_pool().await else {
+            return;
+        };
+        let tag = Uuid::new_v4().simple().to_string()[..8].to_owned();
+        let email = format!("gh1359-{tag}@example.test");
+        let slug = format!("gh1359-{tag}");
+        let (user_id, workspace_ids) =
+            seed_active_user_two_project_invites(&pool, &email, &slug).await;
+
+        let auth = kernel_auth(&email);
+        let headers = kernel_headers();
+        // No workspace invites: no cache handle is needed and none is touched.
+        let orm = pidash_db::sea_orm_connection(&pool);
+        let outcome = complete_login_or_signup(
+            &pool,
+            &orm,
+            "kernel-test-secret",
+            &headers,
+            Some("127.0.0.1"),
+            &auth,
+            &email,
+            "http://kernel.test",
+            None,
+            &reqwest::Client::new(),
+            &kernel_storage(),
+            "http",
+            "kernel.test",
+            5_242_880,
+        )
+        .await;
+
+        // Observe everything before cleanup so a failure still sweeps.
+        let members: Vec<(Uuid, i16)> = sqlx::query_as(
+            r#"SELECT "workspace_id", "role" FROM "workspace_members"
+               WHERE "member_id" = $1"#,
+        )
+        .bind(user_id)
+        .fetch_all(&pool)
+        .await
+        .expect("read members");
+        let project_rows: i64 =
+            sqlx::query_scalar(r#"SELECT COUNT(*) FROM "project_members" WHERE "member_id" = $1"#)
+                .bind(user_id)
+                .fetch_one(&pool)
+                .await
+                .expect("count project members");
+        let invites: Vec<(bool, Option<chrono::DateTime<chrono::Utc>>)> = sqlx::query_as(
+            r#"SELECT "accepted", "deleted_at" FROM "project_member_invites"
+               WHERE "email" = $1"#,
+        )
+        .bind(&email)
+        .fetch_all(&pool)
+        .await
+        .expect("read invites");
+        cleanup_project_kernel_world(&pool, &email, &workspace_ids).await;
+
+        assert!(
+            matches!(outcome, Err(CallbackFailure::Server)),
+            "kernel fails into the ported 500"
+        );
+        let mut got = members;
+        got.sort();
+        let mut want = vec![(workspace_ids[0], 5), (workspace_ids[1], 15)];
+        want.sort();
+        assert_eq!(
+            got, want,
+            "both invite workspaces joined (role 20 clamps to 15)"
+        );
+        assert_eq!(
+            project_rows, 0,
+            "project bulk raised before writing anything"
+        );
+        assert_eq!(invites.len(), 2, "both invites survive");
+        assert!(
+            invites.iter().all(|(accepted, _)| *accepted),
+            "invites stay accepted"
+        );
+        assert!(
+            invites.iter().all(|(_, deleted_at)| deleted_at.is_none()),
+            "invites stay live"
+        );
+    }
+
+    /// Returning user with an old linked account: the upsert keeps the
+    /// row's `created_at`/`metadata` and only rewrites the token fields
+    /// + `last_connected_at`/`updated_at` (PIDASHCONV-1363). Django's
+    /// shared `OauthAdapter.create_update_account` loads the row and
+    /// `.save()`s it back, so both columns survive every login; passing
+    /// `existing: None` into the kernel resets them to now/`{}`.
+    /// FAILS pre-fix (created_at reset to now, metadata to `{}`).
+    #[tokio::test]
+    async fn github_kernel_returning_login_preserves_account_history() {
+        use chrono::TimeZone;
+        let _kernel = KERNEL_LOCK.lock().await;
+        let Some(pool) = kernel_pool().await else {
+            return;
+        };
+        let tag = Uuid::new_v4().simple().to_string()[..8].to_owned();
+        let email = format!("gh1363-{tag}@example.test");
+        let provider_id = format!("gh1363-{tag}");
+        let slug = format!("gh1363-{tag}");
+        let old_created = chrono::Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap();
+        let old_metadata = serde_json::json!({"k": 1});
+        let user_id = Uuid::new_v4();
+        sqlx::query(
+            r#"INSERT INTO "users" ("password", "id", "username", "email", "first_name", "last_name",
+                "avatar", "date_joined", "created_at", "updated_at", "last_location",
+                "created_location", "is_superuser", "is_managed", "is_password_expired",
+                "is_active", "is_staff", "is_email_verified", "is_password_autoset",
+                "token", "user_timezone", "last_login_ip", "last_logout_ip",
+                "last_login_medium", "last_login_uagent", "is_bot", "display_name",
+                "is_email_valid", "is_password_reset_required")
+               VALUES ('pbkdf2_sha256$600000$kernelseed$kernelhash', $1, $2, $3, 'Kernel', 'User',
+                '', $4, $4, $4, '', '', FALSE, FALSE, FALSE, TRUE, FALSE, TRUE, TRUE,
+                '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+                'UTC', '', '', 'email', '', FALSE, 'Kernel User', TRUE, FALSE)"#,
+        )
+        .bind(user_id)
+        .bind(format!("u-{tag}"))
+        .bind(&email)
+        .bind(chrono::Utc::now())
+        .execute(&pool)
+        .await
+        .expect("seed user");
+        sqlx::query(
+            r#"INSERT INTO "accounts" ("id", "created_at", "updated_at", "user_id",
+                "provider_account_id", "provider", "access_token",
+                "access_token_expired_at", "refresh_token",
+                "refresh_token_expired_at", "last_connected_at", "id_token", "metadata")
+               VALUES ($1, $2, $2, $3, $4, 'github', 'old-access', NULL,
+                       'old-refresh', NULL, $2, '', $5)"#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(old_created)
+        .bind(user_id)
+        .bind(&provider_id)
+        .bind(&old_metadata)
+        .execute(&pool)
+        .await
+        .expect("seed account");
+
+        let mut auth = kernel_auth(&email);
+        auth.user_data.user.provider_id = Value::String(provider_id.clone());
+        let headers = kernel_headers();
+        let orm = pidash_db::sea_orm_connection(&pool);
+        let outcome = complete_login_or_signup(
+            &pool,
+            &orm,
+            "kernel-test-secret",
+            &headers,
+            Some("127.0.0.1"),
+            &auth,
+            &email,
+            "http://kernel.test",
+            None,
+            &reqwest::Client::new(),
+            &kernel_storage(),
+            "http",
+            "kernel.test",
+            5_242_880,
+        )
+        .await;
+
+        let row: Option<(chrono::DateTime<chrono::Utc>, Value, String)> = sqlx::query_as(
+            r#"SELECT "created_at", "metadata", "access_token" FROM "accounts"
+               WHERE "user_id" = $1 AND "provider" = 'github'
+                 AND "provider_account_id" = $2"#,
+        )
+        .bind(user_id)
+        .bind(&provider_id)
+        .fetch_optional(&pool)
+        .await
+        .expect("read account");
+        cleanup_kernel_world(&pool, &email, &slug).await;
+
+        assert!(outcome.is_ok(), "kernel must succeed");
+        let (created_at, metadata, access_token) = row.expect("account row survives");
+        assert_eq!(created_at, old_created, "created_at preserved");
+        assert_eq!(metadata, old_metadata, "metadata preserved");
+        assert_eq!(access_token, "kernel-access-token", "token fields update");
+    }
+
+    // -- live kernel tests: avatar upload (PIDASHCONV-1323) ---------------
+    // GitHub's HTTP success path is sealed on both backends (hardcoded
+    // `https` provider endpoints), so these drive
+    // `complete_login_or_signup` directly with a fabricated `GithubAuth`
+    // (the PIDASHCONV-1083 seam), a loopback avatar stub serving a tiny
+    // PNG, and a loopback S3 stub answering 200 to PUT/HEAD/DELETE.
+
+    /// Loopback avatar stub: serves `body` as `image/png` for every
+    /// request. Returns the base URL plus a hit counter.
+    fn avatar_stub_png() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::io::{Read, Write};
+        // 1x1 transparent PNG (accepted by Content-Type alone; never decoded).
+        const PNG: &[u8] = &[
+            137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1,
+            8, 6, 0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 13, 73, 68, 65, 84, 120, 156, 99, 100, 248,
+            207, 208, 15, 0, 3, 134, 0, 128, 90, 55, 125, 108, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66,
+            96, 130,
+        ];
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind avatar stub");
+        let port = listener.local_addr().expect("stub addr").port();
+        let counted = std::sync::Arc::clone(&hits);
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(8) {
+                let Ok(mut socket) = stream else {
+                    break;
+                };
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = socket.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+                let mut buf = [0u8; 4096];
+                let _ = socket.read(&mut buf);
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    PNG.len()
+                );
+                let _ = socket.write_all(header.as_bytes());
+                let _ = socket.write_all(PNG);
+            }
+        });
+        (format!("http://127.0.0.1:{port}"), hits)
+    }
+
+    /// Loopback S3 stub: answers `200` with an empty body to every
+    /// request (PUT/HEAD/DELETE). Returns the base URL plus a hit counter.
+    fn s3_stub_200() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::io::{Read, Write};
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind s3 stub");
+        let port = listener.local_addr().expect("stub addr").port();
+        let counted = std::sync::Arc::clone(&hits);
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(16) {
+                let Ok(mut socket) = stream else {
+                    break;
+                };
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = socket.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+                let mut buf = [0u8; 4096];
+                let _ = socket.read(&mut buf);
+                let _ = socket.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+            }
+        });
+        (format!("http://127.0.0.1:{port}"), hits)
+    }
+
+    /// `kernel_auth` with the avatar URL pointed at the caller's stub.
+    fn kernel_auth_with_avatar(email: &str, avatar_url: &str) -> GithubAuth {
+        let mut auth = kernel_auth(email);
+        auth.user_data.user.avatar = Value::String(avatar_url.to_owned());
+        auth
+    }
+
+    /// World teardown for the avatar kernels: `file_assets` first (its
+    /// user FK has no DB-level cascade), then the login rows, the user,
+    /// and this run's queue emits.
+    async fn cleanup_avatar_world(pool: &sqlx::PgPool, email: &str) {
+        let user_ids: Vec<Uuid> =
+            sqlx::query_scalar(r#"SELECT "id" FROM "users" WHERE "email" = $1"#)
+                .bind(email)
+                .fetch_all(pool)
+                .await
+                .unwrap_or_default();
+        for user_id in &user_ids {
+            for table in ["file_assets", "accounts", "profiles"] {
+                sqlx::query(&format!(r#"DELETE FROM "{table}" WHERE "user_id" = $1"#))
+                    .bind(user_id)
+                    .execute(pool)
+                    .await
+                    .ok();
+            }
+            sqlx::query(r#"DELETE FROM "users" WHERE "id" = $1"#)
+                .bind(user_id)
+                .execute(pool)
+                .await
+                .ok();
+            sqlx::query(
+                r#"DELETE FROM "rust_job_queue"
+                   WHERE "args"::text LIKE $1 OR "kwargs"::text LIKE $1"#,
+            )
+            .bind(format!("%{user_id}%"))
+            .execute(pool)
+            .await
+            .ok();
+        }
+        sqlx::query(r#"DELETE FROM "instance_configurations" WHERE "key" = 'ENABLE_GITHUB_SYNC'"#)
+            .execute(pool)
+            .await
+            .ok();
+    }
+
+    /// Signup uploads the provider avatar: one live `USER_AVATAR` row, the
+    /// FK set, the S3 object stored. Pre-fix the callback keeps only the
+    /// provider URL (no row, FK NULL).
+    #[tokio::test]
+    async fn github_kernel_signup_uploads_avatar() {
+        let _kernel = KERNEL_LOCK.lock().await;
+        let Some(pool) = kernel_pool().await else {
+            return;
+        };
+        let (avatar_base, avatar_hits) = avatar_stub_png();
+        let (s3_base, s3_hits) = s3_stub_200();
+        let storage = pidash_db::config::StorageSettings {
+            use_minio: false,
+            minio_endpoint_ssl: false,
+            access_key_id: "kernel-access".to_owned(),
+            secret_access_key: "kernel-secret".to_owned(),
+            bucket_name: "uploads".to_owned(),
+            region: "us-east-1".to_owned(),
+            endpoint_url: Some(s3_base),
+            signed_url_expiration_secs: 3600,
+        };
+        let client = reqwest::Client::new();
+        let tag = Uuid::new_v4().simple().to_string()[..8].to_owned();
+        let email = format!("gh1323-{tag}@example.test");
+        let avatar_url = format!("{avatar_base}/avatar.png");
+        let auth = kernel_auth_with_avatar(&email, &avatar_url);
+        let headers = kernel_headers();
+        let orm = pidash_db::sea_orm_connection(&pool);
+        let outcome = complete_login_or_signup(
+            &pool,
+            &orm,
+            "kernel-test-secret",
+            &headers,
+            Some("127.0.0.1"),
+            &auth,
+            &email,
+            "http://kernel.test",
+            None,
+            &client,
+            &storage,
+            "http",
+            "kernel.test",
+            5_242_880,
+        )
+        .await;
+
+        let user_row: Option<(Uuid, String, Option<Uuid>)> = sqlx::query_as(
+            r#"SELECT "id", "avatar", "avatar_asset_id" FROM "users" WHERE "email" = $1"#,
+        )
+        .bind(&email)
+        .fetch_optional(&pool)
+        .await
+        .expect("read user");
+        let asset_rows: Vec<(Uuid, String, String, bool, Value)> = sqlx::query_as(
+            r#"SELECT "id", "asset", "entity_type", "is_uploaded", "attributes"
+               FROM "file_assets" WHERE "user_id" = (SELECT "id" FROM "users" WHERE "email" = $1)"#,
+        )
+        .bind(&email)
+        .fetch_all(&pool)
+        .await
+        .expect("read assets");
+        cleanup_avatar_world(&pool, &email).await;
+
+        assert!(outcome.is_ok(), "kernel must succeed");
+        assert_eq!(
+            avatar_hits.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "avatar downloaded exactly once"
+        );
+        let (user_id, avatar, asset_id) = user_row.expect("user row created");
+        assert_eq!(avatar, avatar_url, "avatar keeps the provider URL");
+        assert_eq!(asset_rows.len(), 1, "one USER_AVATAR row lands");
+        let (row_id, key, entity, uploaded, attributes) = &asset_rows[0];
+        assert_eq!(entity, "USER_AVATAR");
+        assert!(uploaded, "row is uploaded");
+        assert_eq!(Some(*row_id), asset_id, "FK points at the row");
+        assert_eq!(
+            attributes.get("name"),
+            Some(&Value::String("github-avatar.png".to_owned())),
+            "attributes name carries the provider"
+        );
+        assert!(key.ends_with("-user-avatar.png"), "key shape: {key}");
+        assert_eq!(
+            s3_hits.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "S3 PUT + HEAD"
+        );
+        let _ = user_id;
+    }
+
+    /// Signup with sync on: the signup asset is replaced — the old row
+    /// soft-deletes, the user points at the live replacement with a blank
+    /// avatar string. Pre-fix no row ever lands and the FK stays NULL.
+    #[tokio::test]
+    async fn github_kernel_signup_sync_replaces_avatar() {
+        let _kernel = KERNEL_LOCK.lock().await;
+        let Some(pool) = kernel_pool().await else {
+            return;
+        };
+        let (avatar_base, avatar_hits) = avatar_stub_png();
+        let (s3_base, s3_hits) = s3_stub_200();
+        let storage = pidash_db::config::StorageSettings {
+            use_minio: false,
+            minio_endpoint_ssl: false,
+            access_key_id: "kernel-access".to_owned(),
+            secret_access_key: "kernel-secret".to_owned(),
+            bucket_name: "uploads".to_owned(),
+            region: "us-east-1".to_owned(),
+            endpoint_url: Some(s3_base),
+            signed_url_expiration_secs: 3600,
+        };
+        let client = reqwest::Client::new();
+        let tag = Uuid::new_v4().simple().to_string()[..8].to_owned();
+        let email = format!("gh1323s-{tag}@example.test");
+        sqlx::query(
+            r#"INSERT INTO "instance_configurations"
+               ("id", "key", "value", "category", "is_encrypted", "created_at", "updated_at")
+               VALUES ($1, 'ENABLE_GITHUB_SYNC', '1', 'general', false, now(), now())
+               ON CONFLICT ("key") DO UPDATE SET "value" = '1',
+                 "is_encrypted" = false, "deleted_at" = NULL, "updated_at" = now()"#,
+        )
+        .bind(Uuid::new_v4())
+        .execute(&pool)
+        .await
+        .expect("seed sync flag");
+        let avatar_url = format!("{avatar_base}/avatar.png");
+        let auth = kernel_auth_with_avatar(&email, &avatar_url);
+        let headers = kernel_headers();
+        let orm = pidash_db::sea_orm_connection(&pool);
+        let outcome = complete_login_or_signup(
+            &pool,
+            &orm,
+            "kernel-test-secret",
+            &headers,
+            Some("127.0.0.1"),
+            &auth,
+            &email,
+            "http://kernel.test",
+            None,
+            &client,
+            &storage,
+            "http",
+            "kernel.test",
+            5_242_880,
+        )
+        .await;
+
+        let user_row: Option<(String, Option<Uuid>)> =
+            sqlx::query_as(r#"SELECT "avatar", "avatar_asset_id" FROM "users" WHERE "email" = $1"#)
+                .bind(&email)
+                .fetch_optional(&pool)
+                .await
+                .expect("read user");
+        // Both assets share one `now`, so `created_at` ties; the
+        // soft-deleted signup asset sorts first deterministically instead.
+        let asset_rows: Vec<(Uuid, Option<chrono::DateTime<chrono::Utc>>)> = sqlx::query_as(
+            r#"SELECT "id", "deleted_at" FROM "file_assets"
+               WHERE "user_id" = (SELECT "id" FROM "users" WHERE "email" = $1)
+               ORDER BY "deleted_at" NULLS LAST"#,
+        )
+        .bind(&email)
+        .fetch_all(&pool)
+        .await
+        .expect("read assets");
+        cleanup_avatar_world(&pool, &email).await;
+
+        assert!(outcome.is_ok(), "kernel must succeed");
+        assert_eq!(
+            avatar_hits.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "signup + sync each download the avatar"
+        );
+        let (avatar, asset_id) = user_row.expect("user row created");
+        assert_eq!(asset_rows.len(), 2, "signup asset + sync replacement");
+        assert!(
+            asset_rows[0].1.is_some(),
+            "replaced avatar asset soft-deletes"
+        );
+        assert!(asset_rows[1].1.is_none(), "replacement asset stays live");
+        assert_eq!(
+            Some(asset_rows[1].0),
+            asset_id,
+            "user points at the replacement"
+        );
+        assert_eq!(avatar, "", "avatar string blank after sync upload");
+        // Signup PUT + HEAD, sync DELETE + PUT + HEAD.
+        assert_eq!(
+            s3_hits.load(std::sync::atomic::Ordering::SeqCst),
+            5,
+            "S3 traffic shape"
+        );
+        let _ = avatar_url;
     }
 }

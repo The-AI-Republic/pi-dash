@@ -36,6 +36,7 @@ use chrono_tz::Tz;
 use serde_json::Value;
 
 use crate::state::AppState;
+use pidash_compat::datetime::{render_uuid as uuid_string, render_uuid_opt as opt_uuid};
 
 use super::{
     activate_timezone, db_error, ensure_feature_enabled, envelope, fields_param,
@@ -236,14 +237,6 @@ const ISSUES_BY_RUN_SQL: &str = r#"SELECT DISTINCT "c"."speaker_agent_run_id", "
 // ---------------------------------------------------------------------------
 // Renders (`Meta.fields` order, DRF value rules)
 // ---------------------------------------------------------------------------
-
-fn uuid_string(id: &uuid::Uuid) -> Value {
-    Value::String(id.to_string())
-}
-
-fn opt_uuid(id: &Option<uuid::Uuid>) -> Value {
-    id.as_ref().map(uuid_string).unwrap_or(Value::Null)
-}
 
 fn opt_string(value: &Option<String>) -> Value {
     value

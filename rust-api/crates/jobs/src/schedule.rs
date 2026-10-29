@@ -13,9 +13,9 @@
 //!   `n` seconds passed since the last run.
 //! - `crontab(...)` → [`Cadence::Crontab`]: due when the current minute
 //!   matches every field (Celery's `crontab.is_due` requires all five of
-//!   minute, hour, day-of-month, month and day-of-week to match) and the
-//!   entry did not already fire in this minute — the once-per-minute
-//!   guard that replaces beat's precise next-due bookkeeping.
+//!   minute, hour, day-of-month, month and day-of-week to match), or —
+//!   when previously run — when a matching minute passed after the last
+//!   run: the Celery beat catch-up, firing once per missed stretch.
 //!
 //! Last-run state persists in [`SCHEDULE_TABLE`] so a restart does not
 //! refire entries (the `DatabaseScheduler` half of the Python setup).
@@ -400,27 +400,49 @@ pub fn beat_schedule() -> Vec<BeatEntry> {
 /// True when `entry` is due at `now` given its last fire time.
 ///
 /// - Intervals fire when never run or when `n` seconds elapsed.
-/// - Crontabs fire when the minute matches and the entry did not already
-///   fire in this minute (the singleton-tick guard).
+/// - Crontabs fire when the current minute matches (never run), or —
+///   when previously run — when a matching minute passed after the last
+///   run: the Celery beat catch-up, firing once.
 pub fn is_due(entry: &BeatEntry, now: &DateTime<Utc>, last_run: Option<&DateTime<Utc>>) -> bool {
     match &entry.cadence {
         Cadence::IntervalSecs(secs) => match last_run {
             None => true,
             Some(last) => now.signed_duration_since(*last).num_seconds() >= *secs as i64,
         },
-        Cadence::Crontab(cron) => {
-            if !cron.matches(now) {
-                return false;
-            }
-            match last_run {
-                None => true,
-                Some(last) => {
-                    last.date_naive() != now.date_naive()
-                        || last.hour() != now.hour()
-                        || last.minute() != now.minute()
+        Cadence::Crontab(cron) => match last_run {
+            // First sight: django_celery_beat initializes a missing
+            // last_run_at to now, so there is no catch-up — fire only
+            // when the current minute matches.
+            None => cron.matches(now),
+            // Catch-up (Celery beat semantics): due when some minute
+            // strictly after the last run, up to and including the
+            // current one, matches the crontab. Firing records now as
+            // the last run, so the next tick finds nothing missed and
+            // the entry fires once, not once per missed occurrence.
+            // The scan stops at the first match; every entry in
+            // `beat_schedule` matches at least daily, so it walks at
+            // most ~1441 minutes per tick.
+            Some(last) => {
+                let last_minute = last
+                    .date_naive()
+                    .and_hms_opt(last.hour(), last.minute(), 0)
+                    .expect("last_run carries a valid minute")
+                    .and_utc();
+                let now_minute = now
+                    .date_naive()
+                    .and_hms_opt(now.hour(), now.minute(), 0)
+                    .expect("now carries a valid minute")
+                    .and_utc();
+                let mut candidate = last_minute + chrono::Duration::minutes(1);
+                while candidate <= now_minute {
+                    if cron.matches(&candidate) {
+                        return true;
+                    }
+                    candidate += chrono::Duration::minutes(1);
                 }
+                false
             }
-        }
+        },
     }
 }
 
@@ -603,6 +625,102 @@ mod tests {
             },
             &now,
             None
+        ));
+    }
+
+    #[test]
+    fn crontab_due_catches_up_missed_occurrence_once() {
+        // Celery beat parity (PIDASHCONV-1328): an occurrence missed while
+        // the scheduler was down fires once on recovery, not never.
+        let entry = BeatEntry {
+            name: "check-every-day-to-delete-hard-delete",
+            task: "pi_dash.bgtasks.deletion_task.hard_delete",
+            cadence: Cadence::Crontab(Crontab::daily(0, 0)),
+        };
+        // Scheduler restarts at 00:05, a day after the last fire.
+        let now = utc(2026, 10, 21, 0, 5, 0);
+        let stale = utc(2026, 10, 20, 0, 0, 0);
+        assert!(is_due(&entry, &now, Some(&stale)));
+        // Once fired, the next tick is quiet: catch-up fires once, not
+        // once per missed occurrence.
+        assert!(!is_due(&entry, &now, Some(&now)));
+        assert!(!is_due(&entry, &utc(2026, 10, 21, 0, 5, 1), Some(&now)));
+    }
+
+    #[test]
+    fn crontab_due_catches_up_sub_daily_cadences() {
+        // The 4-hourly sync and 6-hourly traces skip a cycle the same way
+        // without catch-up; a 5-minute entry pins the general case.
+        let every_five = BeatEntry {
+            name: "x",
+            task: "t",
+            cadence: Cadence::Crontab(Crontab::parse("*/5", "*", "*", "*", "*").unwrap()),
+        };
+        assert!(is_due(
+            &every_five,
+            &utc(2026, 10, 21, 12, 6, 10),
+            Some(&utc(2026, 10, 21, 12, 0, 0))
+        ));
+        // No occurrence passed since the last fire: quiet.
+        assert!(!is_due(
+            &every_five,
+            &utc(2026, 10, 21, 12, 3, 10),
+            Some(&utc(2026, 10, 21, 12, 0, 0))
+        ));
+        let every_6h = BeatEntry {
+            name: "y",
+            task: "t",
+            cadence: Cadence::Crontab(Crontab::parse("0", "*/6", "*", "*", "*").unwrap()),
+        };
+        assert!(is_due(
+            &every_6h,
+            &utc(2026, 10, 21, 6, 5, 0),
+            Some(&utc(2026, 10, 21, 0, 0, 0))
+        ));
+    }
+
+    #[test]
+    fn crontab_due_never_double_fires_a_minute() {
+        // Same-minute de-dup survives the catch-up change, for dense and
+        // daily cadences alike.
+        let every_minute = BeatEntry {
+            name: "x",
+            task: "t",
+            cadence: Cadence::Crontab(Crontab::parse("*", "*", "*", "*", "*").unwrap()),
+        };
+        assert!(!is_due(
+            &every_minute,
+            &utc(2026, 10, 21, 12, 0, 45),
+            Some(&utc(2026, 10, 21, 12, 0, 5))
+        ));
+        let daily = BeatEntry {
+            name: "y",
+            task: "t",
+            cadence: Cadence::Crontab(Crontab::daily(0, 0)),
+        };
+        // Fired on time this morning: nothing missed, nothing due.
+        assert!(!is_due(
+            &daily,
+            &utc(2026, 10, 21, 0, 5, 0),
+            Some(&utc(2026, 10, 21, 0, 0, 30))
+        ));
+    }
+
+    #[test]
+    fn crontab_due_ignores_future_last_run() {
+        // A last-run in the future (clock skew, manual seeding) has no
+        // missed minute strictly after it, so nothing is due — matching
+        // Celery, whose remaining estimate from a future last run is
+        // positive.
+        let daily = BeatEntry {
+            name: "y",
+            task: "t",
+            cadence: Cadence::Crontab(Crontab::daily(0, 0)),
+        };
+        assert!(!is_due(
+            &daily,
+            &utc(2026, 10, 21, 0, 0, 30),
+            Some(&utc(2026, 10, 22, 0, 0, 0))
         ));
     }
 

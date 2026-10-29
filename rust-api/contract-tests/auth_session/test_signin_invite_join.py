@@ -11,12 +11,14 @@ rows committed before the ported ``project_id`` IntegrityError), the
 ``-created_at`` order, and the activation mail published before the
 ``is_active`` save.
 
-Run like the rest of the suite (see ``conftest.py``), plus the two broker
-URLs the backends publish ``.delay()`` side effects to: ``AMQP_URL``
-(redis; the Django server publishes here) and the ``RABBITMQ_*`` parts
-(the Rust publisher is AMQP-only, so the Rust server publishes there).
-CI provides both; the order test drains both queues and asserts on
-whichever backend's messages arrive.
+Run like the rest of the suite (see ``conftest.py``), plus the broker
+URLs (``AMQP_URL`` redis, ``RABBITMQ_*``) the Django server publishes
+``.delay()`` side effects to. PIDASHCONV-1108 removed the Rust AMQP
+publisher, so the Rust server enqueues the same side effects onto the
+``rust_job_queue`` Postgres table instead of publishing to a broker.
+Each publish test below collects from both planes — the broker drains
+(Django) and the queue rows (Rust, id order) — and asserts on the
+union; exactly one plane fires per backend run.
 """
 
 import os
@@ -84,10 +86,10 @@ def _drain_redis() -> list:
 def _drain_rabbit() -> list:
     """Consume every pending ``celery`` queue entry on the AMQP broker.
 
-    An unreachable broker yields no messages instead of raising: the
-    Django run never publishes here, so a missing RabbitMQ must not fail
-    the Django side (on a Rust run the 302 assertion below already fails
-    honestly when the backend cannot publish).
+    An unreachable broker yields no messages instead of raising: neither
+    backend publishes here (Django publishes to redis; since
+    PIDASHCONV-1108 the Rust server enqueues to Postgres instead of
+    publishing to AMQP), so a missing RabbitMQ must not fail either side.
     """
     import json
 
@@ -159,6 +161,51 @@ def _drain_task_messages(task: str, timeout: float = 10.0) -> list:
         else:
             time.sleep(0.2)
     return [(args, kwargs) for args, kwargs, _embed in seen]
+
+
+def _queue_rows(db, task: str, where: str = "", params: tuple = ()) -> list:
+    """``(args, kwargs)`` rows the Rust plane enqueued for ``task`` (id order).
+
+    The PIDASHCONV-1108 D3 pattern: the Rust server enqueues ``.delay()``
+    side effects onto ``rust_job_queue`` instead of publishing to a
+    broker. The Django plane never writes this table (on a Django-only
+    run it may not exist at all), so a missing table yields no rows.
+    ``auth_session`` is not a worker suite, so no worker drains the rows
+    mid-run.
+    """
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT to_regclass('public.rust_job_queue') AS t")
+            if cur.fetchone()[0] is None:
+                return []
+            cur.execute(
+                "SELECT args, kwargs FROM rust_job_queue"
+                f" WHERE task = %s{where} ORDER BY id",
+                (task, *params),
+            )
+            return cur.fetchall()
+
+
+def _queue_track_event_kwargs(db, *slugs: str) -> list:
+    """``track_event`` kwargs rows the Rust plane enqueued (id order).
+
+    Scoped to this test's workspace slugs (unique per test), so rows
+    from other tests in the same run never leak in.
+    """
+    return [
+        kwargs
+        for _args, kwargs in _queue_rows(
+            db, TRACK_EVENT_TASK, " AND kwargs ->> 'slug' = ANY(%s)", (list(slugs),)
+        )
+    ]
+
+
+def _queue_task_calls(db, task: str, user_id: str) -> list:
+    """``(args, kwargs)`` rows the Rust plane enqueued for ``task`` (id order).
+
+    Scoped to this test's user id (``args[1]``, unique per test).
+    """
+    return _queue_rows(db, task, " AND args ->> 1 = %s", (user_id,))
 
 
 @pytest.fixture()
@@ -294,7 +341,9 @@ def test_workspace_invites_publish_track_event_newest_first(browser, db, user, i
     res = browser().post("/auth/sign-in/", data={"email": email, "password": user["password"]})
     assert res.status_code == 302, res.text[:300]
 
-    track_events = _drain_track_events()
+    track_events = _drain_track_events() + _queue_track_event_kwargs(
+        db, new_ws["slug"], old_ws["slug"]
+    )
     assert [kw.get("slug") for kw in track_events] == [new_ws["slug"], old_ws["slug"]]
 
     with db.connect() as conn:
@@ -340,8 +389,10 @@ def test_inactive_user_signin_publishes_activation_and_succeeds(browser, db, use
     )
     assert res.status_code == 302, res.text[:300]
 
-    activations = _drain_task_messages(ACTIVATION_TASK)
-    # Kombu decodes the user-id arg back to UUID; the Rust publish path
+    activations = _drain_task_messages(ACTIVATION_TASK) + _queue_task_calls(
+        db, ACTIVATION_TASK, user["id"]
+    )
+    # Kombu decodes the user-id arg back to UUID; the Rust queue row
     # carries the plain string -- compare stringified on both.
     assert [str(args[1]) for args, _kwargs in activations] == [user["id"]]
 

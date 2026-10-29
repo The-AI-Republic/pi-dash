@@ -8,14 +8,17 @@ project_invitation_task}.py (project_invitation revived by Django d656243d;
 see NOTE on MAIL_TASKS.)
 """
 
+import json
 import uuid
+from datetime import datetime, timezone
+from email import message_from_bytes, policy
 
 import pytest
 from psycopg.rows import dict_row
 
 from _harness import broker_probe, celery_wire, redis_cache, taskspec
 from _harness import seed as seed_helpers
-from _harness.db import diff, snapshot, wait_for_condition as wait_for
+from _harness.db import diff, insert_row, snapshot, wait_for_condition as wait_for
 
 M = "pi_dash.bgtasks"
 
@@ -299,6 +302,89 @@ def test_auth_mail_full_capture(db_conn, broker_url, smtp_sink, task_name, args,
     assert diff(before, snapshot(db_conn, ["users", "email_notification_logs"])) == {}
 
 
+# PIDASHCONV-1287: mention content carrying editor-emitted entities and
+# voids must arrive normalized exactly like Django's BeautifulSoup
+# round-trip — in the HTML part, and with no literal entities in the
+# text/plain part. Mirrored case-for-case by
+# test_rust_replay.py::test_rust_send_mention_mail_normalized_like_bs4.
+MENTION_HTML_TEMPLATE = (
+    '<p>a&nbsp;&nbsp;b<br>c <img src="x.png"> it&#39;s &quot;q&quot; '
+    '<mention-component entity_identifier="{user_id}" '
+    'label="x"></mention-component></p>'
+)
+# bs4 output for the template above: entities decoded to characters,
+# void tags self-closed, attributes double-quoted, mention → @name.
+MENTION_HTML_EXPECTED = (
+    '<p>a\xa0\xa0b<br/>c <img src="x.png"/> it\'s "q" @{display}</p>'
+)
+
+
+def _mail_parts(mail):
+    """Decode the text/plain + text/html parts (transfer-encoding agnostic).
+
+    Both planes send valid UTF-8 wire bytes (Django: 8bit), so the sink's
+    `str` re-encodes exactly; parsing bytes (not `str`) keeps `get_content`
+    from mangling 8bit parts. Bytes the sender emitted outside UTF-8 stay
+    U+FFFD and fail the assertions below, as they should.
+    """
+    html_part, text_part = None, None
+    raw_bytes = mail["raw"].encode("utf-8")
+    for part in message_from_bytes(raw_bytes, policy=policy.default).walk():
+        ctype = part.get_content_type()
+        if ctype == "text/html":
+            html_part = part.get_content()
+        elif ctype == "text/plain":
+            text_part = part.get_content()
+    assert html_part is not None, "mail has no text/html part"
+    assert text_part is not None, "mail has no text/plain part"
+    return html_part, text_part
+
+
+def assert_mention_mail_normalized(mail, display_name):
+    """Pin the bs4-normalized mention fragment in both MIME parts."""
+    html_part, text_part = _mail_parts(mail)
+    expected = MENTION_HTML_EXPECTED.format(display=display_name)
+    assert expected in html_part, (
+        f"HTML part misses the normalized fragment:\n{expected!r}\n"
+        f"HTML head: {html_part[:600]!r}"
+    )
+    assert f"@{display_name}" in text_part
+    assert 'it\'s "q"' in text_part
+    assert "\xa0\xa0" in text_part
+    for leaked in ("&nbsp;", "&#39;", "&quot;"):
+        assert leaked not in text_part, f"text/plain leaks {leaked}"
+
+
+def test_mention_mail_html_normalized_like_bs4(db_conn, broker_url, smtp_sink):
+    """Mention mail: entities/voids normalized like BeautifulSoup (Django)."""
+    chain = seed_helpers.issue_chain(db_conn, "mailmention")
+    receiver = seed_helpers.user(db_conn, "contract-mention-receiver")
+    mentioned = seed_helpers.user(db_conn, "Bob")
+    issue_id = str(chain["issue"]["id"])
+    seed_helpers.email_log(
+        db_conn,
+        receiver["id"],
+        chain["owner"]["id"],
+        issue_id,
+        data={
+            "issue_activity": {
+                "field": "mention",
+                "old_value": "",
+                "new_value": MENTION_HTML_TEMPLATE.format(user_id=mentioned["id"]),
+                "activity_time": datetime.now(timezone.utc).isoformat(),
+            }
+        },
+    )
+    redis_cache.setex(issue_id, "http://localhost")
+    smtp_sink.clear()
+
+    celery_wire.publish(f"{M}.email_notification_task.stack_email_notification")
+    delivered = smtp_sink.wait_for_count(1, what="mention notification mail")
+    matches = [m for m in delivered if receiver["email"] in m["rcpt_tos"]]
+    assert matches, "stack sent no mail to the mention receiver"
+    assert_mention_mail_normalized(matches[0], mentioned["display_name"])
+
+
 def _processed(conn, log_ids) -> bool:
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
@@ -307,3 +393,398 @@ def _processed(conn, log_ids) -> bool:
             ([str(i) for i in log_ids],),
         )
         return cur.fetchone()["n"] == len(log_ids)
+
+
+def _mention_html(mentioned_id) -> str:
+    """Comment HTML with a multi-byte char straddling byte 17 after a tag
+    start (the é sits at bytes 16..18 of the rest after ``<``), plus one
+    real ``<mention-component>`` to rewrite."""
+    return (
+        "<p>Merci beaucoupé pour la revue</p>"
+        f'<mention-component entity_identifier="{mentioned_id}">X</mention-component>'
+    )
+
+
+def test_stack_sends_non_ascii_mention_mail(db_conn, broker_url, smtp_sink):
+    """PIDASHCONV-1284 oracle: non-ASCII mention HTML still delivers.
+
+    The mention slot's ``new_value``/``old_value`` is comment HTML
+    (``notification_task.py``): BeautifulSoup rewrites the component to
+    ``@display_name`` and the mail is sent with ``sent_at`` marked. The
+    Rust replay (``test_rust_replay.py``) mirrors these pins exactly.
+    """
+    chain = seed_helpers.issue_chain(db_conn, "mailnonascii")
+    receiver = seed_helpers.user(db_conn, "contract-nonascii-rcv")
+    mentioned = seed_helpers.user(db_conn, "contract-mentioned")
+    issue_id = str(chain["issue"]["id"])
+    html = _mention_html(mentioned["id"])
+    log_id = seed_helpers.email_log(
+        db_conn,
+        receiver["id"],
+        chain["owner"]["id"],
+        issue_id,
+        data={
+            "issue_activity": {
+                "field": "mention",
+                "old_value": html,
+                "new_value": html,
+                "activity_time": datetime.now(timezone.utc).isoformat(),
+            }
+        },
+    )["id"]
+    redis_cache.setex(issue_id, "http://localhost")
+    smtp_sink.clear()
+
+    celery_wire.publish(f"{M}.email_notification_task.stack_email_notification")
+    wait_for(
+        lambda: _processed(db_conn, [log_id]),
+        what="stack_email_notification marking processed_at",
+    )
+    delivered = smtp_sink.wait_for_count(1, what="non-ascii mention mail")
+    matches = [m for m in delivered if receiver["email"] in m["rcpt_tos"]]
+    assert matches, "stacked mention mail never arrived"
+    raw = matches[0]["raw"]
+    # ASCII-only markers: the é itself may QP-encode in the raw MIME.
+    assert f"@{mentioned['display_name']}" in raw, "mention not rewritten to @name"
+    assert "mention-component" not in raw, "raw mention-component leaked into the mail"
+    wait_for(
+        lambda: _sent(db_conn, [log_id]),
+        what="send_email_notification marking sent_at",
+    )
+
+
+def _sent(conn, log_ids) -> bool:
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT count(*) AS n FROM email_notification_logs "
+            "WHERE id = ANY(%s::uuid[]) AND sent_at IS NOT NULL",
+            ([str(i) for i in log_ids],),
+        )
+        return cur.fetchone()["n"] == len(log_ids)
+
+
+# PIDASHCONV-1288: the subscriber email log keeps
+# ``data.issue_activity.issue_comment`` on non-comment activities — Django
+# (notification_task.py:426-447) always writes it, as "" when the activity
+# names no comment. The replay mirror lives in test_rust_replay.py.
+def _seed_1288_world(conn, slug):
+    """Issue chain + email-enabled subscriber S (not the actor).
+
+    S is an active project member subscribed to the issue, with
+    ``property_change`` email allowed (every other email gate off, so the
+    log row below can only come from the property-change gate).
+    """
+    chain = seed_helpers.issue_chain(conn, slug)
+    project, ws, issue = chain["project"], chain["workspace"], chain["issue"]
+    subscriber = seed_helpers.user(conn, f"contract-notif1288-{slug}")
+    seed_helpers.project_member(conn, project["id"], ws["id"], subscriber["id"])
+    insert_row(
+        conn,
+        "issue_subscribers",
+        {
+            "workspace_id": str(ws["id"]),
+            "project_id": str(project["id"]),
+            "issue_id": str(issue["id"]),
+            "subscriber_id": str(subscriber["id"]),
+        },
+    )
+    insert_row(
+        conn,
+        "user_notification_preferences",
+        {
+            "user_id": str(subscriber["id"]),
+            "property_change": True,
+            "state_change": False,
+            "comment": False,
+            "mention": False,
+            "issue_completed": False,
+        },
+    )
+    return chain, subscriber
+
+
+def _priority_1288_activity(issue_id, actor_id):
+    """A non-comment property-change activity (no ``issue_comment`` key)."""
+    return {
+        "id": str(uuid.uuid4()),
+        "verb": "updated",
+        "field": "priority",
+        "actor_id": str(actor_id),
+        "new_value": "high",
+        "old_value": "low",
+        "comment": "changed the priority",
+        "created_at": seed_helpers.now_iso(),
+        "old_identifier": None,
+        "new_identifier": None,
+        "issue_detail": {"id": str(issue_id)},
+    }
+
+
+def _notifications_1288_args(chain, activity):
+    issue, project, owner = chain["issue"], chain["project"], chain["owner"]
+    plain = json.dumps({"description_html": "<p>plain</p>"})
+    return [
+        "issue.activity.created",
+        str(issue["id"]),
+        str(project["id"]),
+        str(owner["id"]),
+        [],
+        json.dumps([activity]),
+        plain,
+        plain,
+    ]
+
+
+def _fetch_1288_row(conn, table, receiver_id, issue_id):
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            f"SELECT data FROM {table} "
+            "WHERE receiver_id = %s AND entity_identifier = %s "
+            "ORDER BY created_at DESC LIMIT 1",
+            (str(receiver_id), str(issue_id)),
+        )
+        row = cur.fetchone()
+        return row["data"] if row else None
+
+
+def _assert_1288_issue_comment_empty(data, where):
+    assert data is not None, f"{where}: no row written"
+    block = data["issue_activity"]
+    assert "issue_comment" in block, f"{where}: keys {sorted(block)}"
+    assert block["issue_comment"] == "", f"{where}: {block['issue_comment']!r}"
+
+
+def test_notifications_email_log_keeps_issue_comment(db_conn, broker_url):
+    """Django: email log carries ``issue_comment == ""`` on priority change.
+
+    The in-app Notification row is asserted too — the control, already
+    correct on both planes.
+    """
+    chain, subscriber = _seed_1288_world(db_conn, "notif1288o")
+    issue = chain["issue"]
+    celery_wire.publish(
+        f"{M}.notification_task.notifications",
+        args=_notifications_1288_args(
+            chain, _priority_1288_activity(issue["id"], chain["owner"]["id"])
+        ),
+    )
+    email_data = wait_for(
+        lambda: _fetch_1288_row(
+            db_conn, "email_notification_logs", subscriber["id"], issue["id"]
+        ),
+        what="oracle email log for notif1288o",
+    )
+    app_data = wait_for(
+        lambda: _fetch_1288_row(
+            db_conn, "notifications", subscriber["id"], issue["id"]
+        ),
+        what="oracle in-app notification for notif1288o",
+    )
+    _assert_1288_issue_comment_empty(email_data, "oracle email log")
+    _assert_1288_issue_comment_empty(app_data, "oracle in-app notification")
+
+
+# PIDASHCONV-1285: description mention on an issue with NO other
+# subscribers. Django (notification_task.py:522-570) still writes the
+# single "You have been mentioned" Notification (identifiers read from the
+# last activity — the :249 loop binds issue_activity whatever the
+# subscriber count), creates the IssueMention row, and soft-deletes
+# removed mentions. With preference.mention the email-log batch dies to
+# the bool-receiver FK error and is swallowed (:672-674): no email log
+# row either way. The replay mirror lives in test_rust_replay.py.
+def _mention_1285_html(user_id) -> str:
+    """Description HTML mentioning one user (extract_mentions shape)."""
+    return (
+        '<p>hi <mention-component entity_name="user_mention" '
+        f'entity_identifier="{user_id}"></mention-component></p>'
+    )
+
+
+def _seed_1285_world(conn, slug, mention_pref):
+    """Issue chain + mentioned B (unsubscribed) + removed-mention C.
+
+    No IssueSubscriber rows at all: the actor and B are both excluded
+    from the subscriber list, the normal state of a fresh issue.
+    """
+    chain = seed_helpers.issue_chain(conn, slug)
+    project, ws, issue, owner = (
+        chain["project"],
+        chain["workspace"],
+        chain["issue"],
+        chain["owner"],
+    )
+    mentioned = seed_helpers.user(conn, f"contract-notif1285-{slug}-b")
+    seed_helpers.project_member(conn, project["id"], ws["id"], mentioned["id"])
+    seed_helpers.notification_preference(
+        conn, mentioned["id"], mention=mention_pref
+    )
+    removed = seed_helpers.user(conn, f"contract-notif1285-{slug}-c")
+    seed_helpers.project_member(conn, project["id"], ws["id"], removed["id"])
+    insert_row(
+        conn,
+        "issue_mentions",
+        {
+            "workspace_id": str(ws["id"]),
+            "project_id": str(project["id"]),
+            "issue_id": str(issue["id"]),
+            "mention_id": str(removed["id"]),
+        },
+    )
+    # last_activity: the actor's description row, so the single-row
+    # branch (:525-529) runs. Raw SQL: attachments is varchar[] and
+    # insert_row wraps lists in Json().
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO issue_activities (id, created_at, updated_at, "
+            "deleted_at, workspace_id, project_id, issue_id, verb, field, "
+            "old_value, new_value, comment, attachments, actor_id) VALUES "
+            "(gen_random_uuid(), now(), now(), NULL, %s, %s, %s, "
+            "'updated', 'description', '<p>plain</p>', %s, "
+            "'updated the description', %s, %s)",
+            (
+                str(ws["id"]),
+                str(project["id"]),
+                str(issue["id"]),
+                _mention_1285_html(mentioned["id"]),
+                [],
+                str(owner["id"]),
+            ),
+        )
+    conn.commit()
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT count(*) AS n FROM issue_subscribers "
+            "WHERE deleted_at IS NULL AND issue_id = %s",
+            (str(issue["id"]),),
+        )
+        assert cur.fetchone()["n"] == 0, "1285 world needs zero subscribers"
+    return chain, mentioned, removed
+
+
+def _description_1285_activity(issue_id, actor_id):
+    """Description-change activity with non-null identifiers.
+
+    The DB last_activity row carries NULL identifiers, so asserting the
+    wire UUIDs below pins the stale read to the last activity.
+    """
+    return {
+        "id": str(uuid.uuid4()),
+        "verb": "updated",
+        "field": "description",
+        "actor_id": str(actor_id),
+        "new_value": "desc new",
+        "old_value": "desc old",
+        "comment": "updated the description",
+        "created_at": seed_helpers.now_iso(),
+        "old_identifier": str(uuid.uuid4()),
+        "new_identifier": str(uuid.uuid4()),
+        "issue_detail": {"id": str(issue_id)},
+        "issue_comment": None,
+    }
+
+
+def _notifications_1285_args(chain, activity, mentioned_id, removed_id):
+    issue, project, owner = chain["issue"], chain["project"], chain["owner"]
+    requested = json.dumps(
+        {"description_html": _mention_1285_html(mentioned_id)}
+    )
+    current = json.dumps({"description_html": _mention_1285_html(removed_id)})
+    return [
+        "issue.activity.created",
+        str(issue["id"]),
+        str(project["id"]),
+        str(owner["id"]),
+        True,
+        json.dumps([activity]),
+        requested,
+        current,
+    ]
+
+
+def _fetch_1285_notifications(conn, receiver_id, issue_id):
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT sender, message, data FROM notifications "
+            "WHERE deleted_at IS NULL AND receiver_id = %s "
+            "AND entity_identifier = %s ORDER BY created_at",
+            (str(receiver_id), str(issue_id)),
+        )
+        return cur.fetchall()
+
+
+def _fetch_1285_mentions(conn, mention_id, issue_id):
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT id, deleted_at FROM issue_mentions "
+            "WHERE mention_id = %s AND issue_id = %s",
+            (str(mention_id), str(issue_id)),
+        )
+        return cur.fetchall()
+
+
+def _count_1285_email_logs(conn, issue_id) -> int:
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT count(*) AS n FROM email_notification_logs "
+            "WHERE deleted_at IS NULL AND entity_identifier = %s",
+            (str(issue_id),),
+        )
+        return cur.fetchone()["n"]
+
+
+def _assert_1285_write_set(conn, chain, activity, mentioned, removed, where):
+    issue = chain["issue"]
+    rows = _fetch_1285_notifications(conn, mentioned["id"], issue["id"])
+    assert len(rows) == 1, f"{where}: B notifications {len(rows)}"
+    row = rows[0]
+    assert row["sender"] == "in_app:issue_activities:mentioned", where
+    assert row["message"] == (
+        f"You have been mentioned in the issue {issue['name']}"
+    ), where
+    block = row["data"]["issue_activity"]
+    assert block["old_identifier"] == activity["old_identifier"], where
+    assert block["new_identifier"] == activity["new_identifier"], where
+    live = [
+        r for r in _fetch_1285_mentions(conn, mentioned["id"], issue["id"])
+        if r["deleted_at"] is None
+    ]
+    assert len(live) == 1, f"{where}: B live IssueMention rows {len(live)}"
+    gone = _fetch_1285_mentions(conn, removed["id"], issue["id"])
+    assert len(gone) == 1 and gone[0]["deleted_at"] is not None, (
+        f"{where}: removed mention not soft-deleted: {gone!r}"
+    )
+    assert _count_1285_email_logs(conn, issue["id"]) == 0, (
+        f"{where}: expected no email log rows"
+    )
+
+
+@pytest.mark.parametrize("mention_pref", [False, True])
+def test_notifications_no_subscriber_description_mention(
+    db_conn, broker_url, mention_pref
+):
+    """Django: B is notified + tracked even with zero subscribers.
+
+    mention=True additionally pins the swallowed bool-receiver FK bug:
+    the Notification and IssueMention writes commit, the email batch is
+    lost, and nothing is retried.
+    """
+    slug = f"notif1285o{'t' if mention_pref else 'f'}"
+    chain, mentioned, removed = _seed_1285_world(db_conn, slug, mention_pref)
+    issue = chain["issue"]
+    activity = _description_1285_activity(issue["id"], chain["owner"]["id"])
+    celery_wire.publish(
+        f"{M}.notification_task.notifications",
+        args=_notifications_1285_args(
+            chain, activity, mentioned["id"], removed["id"]
+        ),
+    )
+    wait_for(
+        lambda: _fetch_1285_notifications(
+            db_conn, mentioned["id"], issue["id"]
+        )
+        or None,
+        what=f"oracle mention notification for {slug}",
+    )
+    _assert_1285_write_set(
+        db_conn, chain, activity, mentioned, removed, "oracle"
+    )

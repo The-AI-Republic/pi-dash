@@ -118,13 +118,22 @@ def test_email_check_live_send_success(admin_api, world):
 def test_email_check_bad_header_receiver(admin_api, world):
     # Header validation still runs on the non-network backends: the
     # newline raises BadHeaderError inside msg.send(), inside the try.
+    # Under the SMTP backend Django dials before _send ever runs, so
+    # this unroutable seed answers the Network 400 there instead
+    # (PIDASHCONV-1445, probed live on Django 4.2.30 against an
+    # aiosmtpd sink); a routable seed would answer the generic 400
+    # (the envelope ValueError precedes the header render,
+    # `smtp.py:144-150`). Both listed answers are Django's.
     _seed_unroutable_mail(world["db"])
     res = admin_api.post(
         "/api/instances/email-credentials-check/",
         json={"receiver_email": "a@b.com\nBcc: x@example.com"},
     )
     assert res.status_code == 400
-    assert res.json() == {"error": "Invalid email header."}
+    assert res.json() in (
+        {"error": "Invalid email header."},
+        {"error": "Network connection error. Please check your internet connection."},
+    )
 
 
 def test_email_check_unparsable_port_is_500(admin_api, world):

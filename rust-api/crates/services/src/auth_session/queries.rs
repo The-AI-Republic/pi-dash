@@ -49,7 +49,7 @@
 
 use serde_json::Value;
 
-use super::models::{PASSWORD_HASH_ALGORITHM, PASSWORD_HASH_ITERATIONS};
+use super::models::PASSWORD_HASH_ALGORITHM;
 
 // ---------------------------------------------------------------------------
 // User reads
@@ -479,8 +479,8 @@ pub fn workspace_join_track_event_call(
 // ---------------------------------------------------------------------------
 
 /// Call sites, as records — the crypto is F-05 library semantics
-/// ([`PASSWORD_HASH_ALGORITHM`] `pbkdf2_sha256`,
-/// [`PASSWORD_HASH_ITERATIONS`] `1500000`; fixture `password` section):
+/// ([`PASSWORD_HASH_ALGORITHM`] `pbkdf2_sha256` plus F-05
+/// `PBKDF2_DEFAULT_ITERATIONS`; fixture `password` section):
 /// `common.py:74` check (skipped when `is_password_autoset`),
 /// `common.py:92,131` + `password_management` views set +
 /// `is_password_autoset = False` + `save()`.
@@ -522,12 +522,12 @@ impl PasswordOp {
             PasswordOp::Check => (
                 "check_password",
                 PASSWORD_HASH_ALGORITHM,
-                PASSWORD_HASH_ITERATIONS,
+                pidash_auth::password::PBKDF2_DEFAULT_ITERATIONS,
             ),
             PasswordOp::Set => (
                 "set_password",
                 PASSWORD_HASH_ALGORITHM,
-                PASSWORD_HASH_ITERATIONS,
+                pidash_auth::password::PBKDF2_DEFAULT_ITERATIONS,
             ),
         }
     }
@@ -756,7 +756,7 @@ mod tests {
                 .expect("iterations recorded as string")
                 .parse::<u32>()
                 .expect("iterations numeric"),
-            PASSWORD_HASH_ITERATIONS
+            pidash_auth::password::PBKDF2_DEFAULT_ITERATIONS
         );
         assert_eq!(fx["password"]["set_check"]["check_true"], json!(true));
         assert_eq!(fx["password"]["set_check"]["check_false"], json!(false));

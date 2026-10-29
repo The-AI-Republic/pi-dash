@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{RwLock, mpsc, oneshot, watch};
 
-use crate::agent::{AgentBridge, AgentCursor, BridgeEvent, RunPayload};
+use crate::agent::{AgentBridge, AgentCursor, BridgeEvent, RunPayload, within_startup_deadline};
 use crate::approval::policy::Policy;
 use crate::approval::router::{ApprovalRecord, ApprovalRouter, ApprovalStatus, DecisionSource};
 use crate::cloud::http::{
@@ -19,11 +19,12 @@ use crate::cloud::protocol::{
 use crate::config::schema::{
     AgentKind, Config, Credentials, DaemonConfig, RunnerConfig, canonical_for_compare,
 };
+use crate::daemon::activity_watchdog::{ActivityWatchdog, WatchdogAction, describe_threshold};
 use crate::daemon::drain_journal;
 use crate::daemon::run_event_mirror::RunEventMirror;
 use crate::daemon::runner_instance::RunnerInstance;
 use crate::daemon::runner_out::RunnerOut;
-use crate::daemon::state::StateHandle;
+use crate::daemon::state::{AgentHealthReport, StateHandle};
 use crate::history::index::{RunSummary, RunsIndex};
 use crate::history::jsonl::{HistoryEntry, HistoryWriter};
 use crate::ipc::protocol::{CurrentRunSummary, version_lt};
@@ -2231,7 +2232,7 @@ impl ChatWorker {
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("chat bridge missing"))?;
         let warm_started = Instant::now();
-        let warmed_thread_id = bridge.warm(workspace_path).await?;
+        let warmed_thread_id = within_startup_deadline(bridge.warm(workspace_path)).await?;
         self.send_timing_event(
             chat_session_id,
             bridge_seq,
@@ -2277,6 +2278,7 @@ impl ChatWorker {
         bridge_seq: &mut u64,
         started_sent: &mut bool,
     ) -> Result<bool> {
+        let bridge_slot = bridge;
         let message_id = turn.message_id;
         self.send_timing_event(
             chat_session_id,
@@ -2300,8 +2302,8 @@ impl ChatWorker {
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("chat workspace missing"))?;
 
-        if bridge.as_ref().is_some_and(bridge_has_exited) {
-            if let Some(bridge) = bridge.take() {
+        if bridge_slot.as_ref().is_some_and(bridge_has_exited) {
+            if let Some(bridge) = bridge_slot.take() {
                 bridge.shutdown(Duration::from_secs(1)).await.ok();
             }
             *started_sent = false;
@@ -2311,9 +2313,9 @@ impl ChatWorker {
             turn.local_session_id.as_deref(),
             turn.local_thread_id.as_deref(),
         );
-        if bridge.is_none() {
+        if bridge_slot.is_none() {
             let spawn_started = Instant::now();
-            *bridge = Some(
+            *bridge_slot = Some(
                 AgentBridge::spawn_from_config_with_resume(
                     &self.runner_config,
                     workspace_path,
@@ -2347,7 +2349,7 @@ impl ChatWorker {
             )
             .await;
         }
-        let bridge = bridge
+        let bridge = bridge_slot
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("chat bridge missing"))?;
         let payload = RunPayload {
@@ -2356,7 +2358,69 @@ impl ChatWorker {
             model: turn.model,
         };
         let turn_started_at = Instant::now();
-        let mut cursor = bridge.run(&payload, workspace_path).await?;
+        // Keep reading commands while the engine starts up so a Cancel/Close
+        // is honoured mid-handshake instead of queueing behind it.
+        let interrupt = {
+            let command_rx = &mut self.command_rx;
+            async move {
+                loop {
+                    match command_rx.recv().await {
+                        Some(ChatCommand::Warm(_)) => {
+                            tracing::debug!(
+                                %chat_session_id,
+                                "chat warm ignored while turn is starting"
+                            );
+                        }
+                        Some(ChatCommand::Message(_)) => {
+                            tracing::warn!(
+                                %chat_session_id,
+                                "chat runtime received a second message while a turn is starting"
+                            );
+                        }
+                        other => return other,
+                    }
+                }
+            }
+        };
+        let started = tokio::select! {
+            biased;
+            command = interrupt => Err(command),
+            r = within_startup_deadline(bridge.run(&payload, workspace_path)) => Ok(r),
+        };
+        let mut cursor = match started {
+            Ok(r) => r?,
+            Err(command) => {
+                // The handshake was abandoned mid-flight, so the bridge is in
+                // an unknown state: discard it and let the next turn respawn.
+                let close_after_turn = matches!(command, Some(ChatCommand::Close { .. }));
+                tracing::info!(?command, %chat_session_id, "chat turn interrupted during engine startup");
+                if let Some(bridge) = bridge_slot.take() {
+                    bridge.shutdown(Duration::from_secs(5)).await.ok();
+                }
+                *started_sent = false;
+                self.out
+                    .send(ClientMsg::ChatMessageCompleted {
+                        chat_session_id,
+                        message_id: turn.message_id,
+                        turn_id: None,
+                        assistant_message: None,
+                        status: "cancelled".into(),
+                        completed_at: Utc::now(),
+                    })
+                    .await
+                    .ok();
+                if close_after_turn {
+                    let _ = self
+                        .out
+                        .send(ClientMsg::ChatClosed {
+                            chat_session_id,
+                            closed_at: Utc::now(),
+                        })
+                        .await;
+                }
+                return Ok(close_after_turn);
+            }
+        };
         let turn_id = cursor.thread_id().to_string();
         self.send_timing_event(
             chat_session_id,
@@ -2926,6 +2990,11 @@ struct RunMetadata {
     model: Option<String>,
 }
 
+/// How often `pump_events` re-checks a pending approval. A run waiting on a
+/// human is never stalled, but the loop must notice the approval resolving even
+/// when no agent event follows it.
+const APPROVAL_WATCHDOG_RECHECK: Duration = Duration::from_secs(30);
+
 impl AssignWorker {
     async fn run_metadata(&self) -> RunMetadata {
         let snapshot = self.state.observability_snapshot().await;
@@ -3125,7 +3194,46 @@ impl AssignWorker {
             prompt,
             model: expected_codex_model,
         };
-        let mut cursor = match bridge.run_one_shot(&payload, &workspace_path).await {
+        // Race the startup handshake against cancel and shutdown: a cold
+        // engine may take up to `ENGINE_STARTUP_TIMEOUT` to answer, and a
+        // Cancel must not sit unobserved for that long. The `Notified` future
+        // is created before the race so a `notify_waiters()` that fires while
+        // startup is in flight is not missed.
+        let shutdown = self.state.shutdown_notified();
+        let shutdown_fut = shutdown.notified();
+        let started = tokio::select! {
+            biased;
+            _ = shutdown_fut => None,
+            _ = self.cancel.cancelled() => None,
+            r = within_startup_deadline(bridge.run_one_shot(&payload, &workspace_path)) => Some(r),
+        };
+        let Some(started) = started else {
+            // The handshake was abandoned mid-flight, so the bridge is
+            // discarded. On shutdown the daemon's drain reports the run as
+            // `DaemonRestart`; only an explicit cancel is reported here.
+            bridge.shutdown(Duration::from_secs(5)).await.ok();
+            let cancelled = self.cancel.is_cancelled();
+            hist.append(&HistoryEntry::Footer {
+                ts: Utc::now(),
+                final_status: "cancelled".to_string(),
+                done_payload: None,
+                error: None,
+            })
+            .await
+            .ok();
+            self.state.set_current_run(None).await;
+            if cancelled {
+                self.send(ClientMsg::RunCancelled {
+                    run_id,
+                    cancelled_at: Utc::now(),
+                    tokens: None,
+                    model: None,
+                })
+                .await;
+            }
+            return Ok(());
+        };
+        let mut cursor = match started {
             Ok(c) => c,
             Err(e) => {
                 let detail = self.build_failure_detail(&format!("{e:#}"), &bridge).await;
@@ -3217,16 +3325,18 @@ impl AssignWorker {
         hist: &mut HistoryWriter,
         workspace_root: &std::path::Path,
     ) -> Result<Outcome> {
-        // Stall watchdog: if the agent emits no frames for this long AND
-        // no approval is in flight (a human-wait is legitimate silence),
-        // give up and fail the run. Without this, an unrecognised wait —
-        // e.g. a future codex protocol change — leaves the runner blocked
-        // on stdout and the cloud showing "running" indefinitely.
-        //
-        // Threshold is per-agent because Codex emits continuous token-
-        // count events while Claude can be silent for the full
-        // duration of a single tool call (see `AgentKind::stall_timeout`).
-        let stall_timeout = self.runner_config.agent.kind.stall_timeout();
+        // Passive-kill activity watchdog (see `daemon::activity_watchdog`).
+        // A quiet agent is never killed for being quiet a while: it may be
+        // inside a long tool call. Only after `unhealthy_after` with no agent
+        // event is the run reported unhealthy, and only after `kill_after` is
+        // it failed. Provable deaths (stdout closing, terminal agent errors,
+        // turn end) are handled in the event branch below, not here.
+        let mut watchdog = ActivityWatchdog::new(
+            self.state.agent_watchdog(),
+            tokio::time::Instant::now(),
+            Utc::now(),
+        );
+        self.publish_agent_health(&watchdog).await;
 
         let shutdown = self.state.shutdown_notified();
         let cancel = self.cancel.clone();
@@ -3234,13 +3344,26 @@ impl AssignWorker {
         let mut run_events = RunEventMirror::new(cursor.run_id());
         let mut token_meter = crate::daemon::observability::RunTokenMeter::default();
         loop {
-            // Re-evaluate at every loop entry: an approval that opened on
-            // the previous iteration disarms the watchdog; one that just
-            // resolved re-arms it.
-            let stall_deadline = if self.approvals.list_pending().await.is_empty() {
-                Some(tokio::time::Instant::now() + stall_timeout)
+            // Re-evaluate at every loop entry. A pending approval is a
+            // human-wait, which is legitimate silence: it keeps the activity
+            // clock fresh, so the clock restarts when the approval resolves.
+            // While one is pending the deadline is only a short re-check, so
+            // an approval answered with no agent event after it still re-arms
+            // the watchdog instead of leaving the loop without a deadline.
+            let awaiting_approval = !self.approvals.list_pending().await.is_empty();
+            let watchdog_deadline = if !awaiting_approval {
+                watchdog.next_deadline().0
             } else {
-                None
+                if watchdog.on_activity(tokio::time::Instant::now(), Utc::now()) {
+                    self.note_agent_health_change(
+                        &watchdog,
+                        cursor.run_id(),
+                        &mut run_events,
+                        hist,
+                    )
+                    .await;
+                }
+                tokio::time::Instant::now() + APPROVAL_WATCHDOG_RECHECK
             };
             let run_event_flush_deadline = run_events.flush_deadline();
             tokio::select! {
@@ -3298,6 +3421,12 @@ impl AssignWorker {
                         }).await?;
                         return Ok(Outcome { status_label: "failed".into() });
                     };
+                    if watchdog.on_activity(tokio::time::Instant::now(), Utc::now()) {
+                        self.note_agent_health_change(&watchdog, cursor.run_id(), &mut run_events, hist)
+                            .await;
+                    } else {
+                        self.publish_agent_health(&watchdog).await;
+                    }
                     for ev in events {
                         if let Some(out) = self
                             .handle_bridge_event(
@@ -3314,14 +3443,17 @@ impl AssignWorker {
                         }
                     }
                 }
-                _ = async {
-                    match stall_deadline {
-                        Some(d) => tokio::time::sleep_until(d).await,
-                        None => std::future::pending::<()>().await,
+                _ = tokio::time::sleep_until(watchdog_deadline) => {
+                    if awaiting_approval {
+                        continue;
                     }
-                } => {
-                    let mins = stall_timeout.as_secs() / 60;
-                    let base = format!("agent stalled for {mins} minutes without new agent events");
+                    if watchdog.on_deadline() == WatchdogAction::MarkUnhealthy {
+                        self.note_agent_health_change(&watchdog, cursor.run_id(), &mut run_events, hist)
+                            .await;
+                        continue;
+                    }
+                    let idle = describe_threshold(watchdog.kill_after());
+                    let base = format!("agent stalled: no agent events for {idle}");
                     let detail = self.build_failure_detail(&base, bridge).await;
                     run_events.flush_before_lifecycle(&self.out).await;
                     let metadata = self.run_metadata().await;
@@ -3343,6 +3475,59 @@ impl AssignWorker {
                 }
             }
         }
+    }
+
+    /// Stamp the watchdog's view of the run on the daemon state, which the
+    /// poll status reports to the cloud.
+    async fn publish_agent_health(&self, watchdog: &ActivityWatchdog) {
+        self.state
+            .set_agent_health(AgentHealthReport {
+                last_activity_at: Some(watchdog.last_activity_at()),
+                unhealthy: watchdog.is_unhealthy(),
+            })
+            .await;
+    }
+
+    /// Report a healthy ↔ unhealthy transition everywhere an operator looks:
+    /// the poll status (cloud health field), the run's event timeline, the
+    /// local run history and the daemon log. The run keeps going either way.
+    async fn note_agent_health_change(
+        &self,
+        watchdog: &ActivityWatchdog,
+        run_id: uuid::Uuid,
+        run_events: &mut RunEventMirror,
+        hist: &mut HistoryWriter,
+    ) {
+        self.publish_agent_health(watchdog).await;
+        let last_activity_at = watchdog.last_activity_at();
+        let (health, detail) = if watchdog.is_unhealthy() {
+            let idle = describe_threshold(watchdog.unhealthy_after());
+            tracing::warn!(
+                %run_id,
+                %last_activity_at,
+                "agent run unhealthy: no agent events for {idle}; leaving it running"
+            );
+            ("unhealthy", format!("no agent events for {idle}"))
+        } else {
+            tracing::info!(%run_id, "agent run healthy again: agent events resumed");
+            ("healthy", "agent events resumed".to_string())
+        };
+        run_events.push_content(
+            "runner/agent_health".to_string(),
+            serde_json::json!({
+                "schema": "runner_agent_health_v1",
+                "health": health,
+                "last_activity_at": last_activity_at.to_rfc3339(),
+            }),
+        );
+        run_events.flush(&self.out).await;
+        hist.append(&HistoryEntry::Lifecycle {
+            ts: Utc::now(),
+            state: health.into(),
+            detail: Some(detail),
+        })
+        .await
+        .ok();
     }
 
     /// Build a `RunFailed.detail` string that includes whatever local
@@ -3719,6 +3904,7 @@ mod tests {
             config_dir: root.join("config"),
             data_dir: root.join("data"),
             runtime_dir: root.join("runtime"),
+            machine_context_dir: root.join("config"),
         }
     }
 

@@ -941,7 +941,7 @@ async fn run_shadow(plan: ShadowPlan, django: DjangoCapture, parts: ShadowReques
     let django_status = django_response.status;
 
     let app = gate.shadow_app.clone();
-    let dispatch = tokio::spawn(async move {
+    let mut dispatch = tokio::spawn(async move {
         let rust_http = app
             .oneshot(parts.into_request())
             .await
@@ -972,7 +972,11 @@ async fn run_shadow(plan: ShadowPlan, django: DjangoCapture, parts: ShadowReques
         DispatchOutcome::Compared(compare(&django_response, &rust_response), rust_status)
     });
 
-    match tokio::time::timeout(SHADOW_TIMEOUT, dispatch).await {
+    // Borrow the handle so a timeout still owns it below: dropping a
+    // `JoinHandle` detaches the task instead of stopping it, which would
+    // leak the handler past the inflight cap while holding its pool
+    // connection (PIDASHCONV-1306).
+    match tokio::time::timeout(SHADOW_TIMEOUT, &mut dispatch).await {
         Ok(Ok(DispatchOutcome::Compared(Verdict::Match, _))) => {
             gate.count(&template, Outcome::Matched);
         }
@@ -1005,6 +1009,11 @@ async fn run_shadow(plan: ShadowPlan, django: DjangoCapture, parts: ShadowReques
             gate.count(&template, Outcome::Errored);
         }
         Err(_) => {
+            // Stop the dispatch and wait until it is actually gone before
+            // counting: this task still holds the permit, so live
+            // dispatches never exceed max_inflight.
+            dispatch.abort();
+            let _ = dispatch.await;
             gate.count(&template, Outcome::Errored);
         }
     }
@@ -1283,8 +1292,10 @@ fn redact_key(text: &str, key: &str) -> String {
             Some((value_start, value_end, quoted)) => {
                 out.push_str(&text[cursor..value_start]);
                 out.push_str("[REDACTED]");
-                if quoted {
+                if quoted && value_end < text.len() {
                     // Keep the closing quote; the opening quote is already out.
+                    // An unterminated quote runs to the end of the text, so
+                    // there is no closing quote to keep.
                     out.push_str(&text[value_end..value_end + 1]);
                     cursor = value_end + 1;
                 } else {
@@ -1790,6 +1801,30 @@ mod tests {
             redact_secrets(r#"{"token": "v"}"#),
             r#"{"token": "[REDACTED]"}"#
         );
+    }
+
+    #[test]
+    fn redaction_redacts_unterminated_quoted_value() {
+        assert_eq!(
+            redact_secrets("note: token='abc"),
+            "note: token='[REDACTED]"
+        );
+        assert_eq!(
+            redact_secrets("note: token=\"abc"),
+            "note: token=\"[REDACTED]"
+        );
+    }
+
+    #[test]
+    fn mismatch_with_unterminated_quoted_secret_is_recorded() {
+        let django = captured(200, "text/plain", b"note: token='abc");
+        let rust = captured(200, "text/plain", b"note: token='abd");
+        let Verdict::Mismatch { diff } = compare(&django, &rust) else {
+            panic!("bodies differ, must mismatch");
+        };
+        for leaked in ["abc", "abd"] {
+            assert!(!diff.contains(leaked), "{diff}");
+        }
     }
 
     #[test]

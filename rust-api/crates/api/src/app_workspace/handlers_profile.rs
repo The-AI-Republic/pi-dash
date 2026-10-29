@@ -69,6 +69,10 @@
 //!   edge); here they answer the `ValidationError` 400, the same body the
 //!   kernels render for badly-formed UUIDs inside filters (cycle-issues
 //!   precedent).
+//! * The flat list keeps duplicate rows from legacy m2m filters
+//!   (`?assignees=A,B`, `?labels=L1,L2`): no `.distinct()` anywhere on
+//!   this endpoint, so each joined copy counts and renders
+//!   (PIDASHCONV-1372).
 //!
 //! # Deliberate pilot divergences (faithful to the Python source)
 //!
@@ -105,11 +109,13 @@ use serde_json::{Map, Value};
 use sqlx::Row;
 
 use crate::app_issues::{
-    complex_filter, fetch_count, fetch_json_rows, legacy_sql, multi_map, order_key, page_denial,
-    query_last, query_values, render_condition, shape_row, Binder, Denial, FilteredSet, QueryMap,
+    complex_filter, fetch_count, fetch_json_rows, filters_timezone, legacy_sql, multi_map,
+    order_key, page_denial, query_last, query_values, render_condition, shape_row, Binder, Denial,
+    FilteredSet, QueryMap,
 };
 use crate::app_workspace::gates;
 use crate::state::AppState;
+use pidash_compat::response::json_response;
 use pidash_db::issue_filters::FilterValue;
 use pidash_services::app_issues::params::{ListParams, ParseOptions};
 use pidash_services::app_issues::shape::{envelope, on_results_fields};
@@ -201,14 +207,6 @@ pub const ME_ACTIVITIES_PATH: &str = "/api/users/me/activities/";
 // ---------------------------------------------------------------------------
 
 type HandlerResult = Result<Response, Denial>;
-
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("view response")
-}
 
 fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
@@ -761,8 +759,9 @@ fn group_member_select(group_by: &str) -> &'static str {
 /// scope, manager scope applied twice) plus the `ComplexFilterBackend`
 /// tree plus the legacy `issue_filters(params, "GET")` predicates, over
 /// the pilot `issue` / `state` aliases so every compiled fragment splices
-/// verbatim. Downstream consumers are all `DISTINCT issue.id`-based, so
-/// the id-set wrap is equivalent to Django's single queryset.
+/// verbatim. The flat consumer counts and returns every joined row (no
+/// `.distinct()` on this endpoint, PIDASHCONV-1372); only the grouped
+/// consumers are `DISTINCT issue.id`-based.
 fn profile_filtered_set(
     user_id: &uuid::Uuid,
     slug: &str,
@@ -770,6 +769,7 @@ fn profile_filtered_set(
     query: &QueryMap,
     group_by: Option<&str>,
     sub_group_by: Option<&str>,
+    tz: &chrono_tz::Tz,
 ) -> Result<FilteredSet, Denial> {
     let mut binder = Binder::new();
     // Bind order is the QRY-C contract: `$1` target, `$2` slug, `$3`
@@ -783,7 +783,7 @@ fn profile_filtered_set(
         "issue.id IN (SELECT i.id {})",
         qp::profile_issues_from_where()
     )];
-    if let Some(cond) = complex_filter(query)? {
+    if let Some(cond) = complex_filter(query, tz)? {
         let (fragment, values) = render_condition(&cond);
         fragments.push(binder.splice(&fragment, values));
     }
@@ -796,7 +796,9 @@ fn profile_filtered_set(
         .map_err(|_| Denial::ServerError)?;
     let mut legacy_sql_text = String::new();
     for (name, value) in legacy.predicates() {
-        let fragment = legacy_sql(&mut binder, name, value)?;
+        // UTC keeps this slice's current truncation; its own actor-zone
+        // fix follows the app_issues pattern separately.
+        let fragment = legacy_sql(&mut binder, name, value, &chrono_tz::UTC)?;
         if legacy_sql_text.is_empty() {
             legacy_sql_text = fragment;
         } else {
@@ -900,16 +902,46 @@ async fn user_profile_issues(
     }
     let group_by = params.group_by.as_deref();
     let sub_group_by = params.sub_group_by.as_deref();
-    let filtered = profile_filtered_set(&user_id, &slug, &viewer, &query, group_by, sub_group_by)?;
-    // Total count over the pre-annotation set (the `deepcopy` at `:157`).
-    let total_sql = format!("SELECT COUNT(DISTINCT issue.id) {}", filtered.from_where);
-    let total_count = fetch_count(&pool, &total_sql, filtered.values.clone()).await?;
-    // `order_issue_queryset` (`:162-165`), default `-created_at`.
+    // The *viewer's* zone: Django activates `request.user.user_timezone`,
+    // not the profile target's.
+    let timezone = filters_timezone(&pool, &viewer, &query).await?;
+    let filtered = profile_filtered_set(
+        &user_id,
+        &slug,
+        &viewer,
+        &query,
+        group_by,
+        sub_group_by,
+        &timezone,
+    )?;
+    // `order_issue_queryset` (`:162-165`), default `-created_at`. The
+    // profile list annotates the plain `Func(Count)` form (empty counts
+    // render `0`), so its count keys order `0`-style. A filter that
+    // referenced the cycle bridge lends its join to the cycle-name
+    // traversal (Django reuses it, scope included, instead of joining
+    // again); otherwise the traversal joins fresh.
     let order_spec = qp::profile_issues_order(Some(&params.order_by), "state.\"group\"", |name| {
         format!("min_{}", name.replace("__", "_"))
     });
-    let (key_expr, descending) = order_key(&order_spec.out_param, &params.order_by)?;
-    let direction = if descending { "DESC" } else { "ASC" };
+    let cycle_bridge =
+        crate::app_issues::has_issue_cycle_join(&filtered.from_where).then_some("issue_cycle");
+    let key = order_key(&order_spec.out_param, &params.order_by, cycle_bridge, false)?;
+    let direction = if key.descending { "DESC" } else { "ASC" };
+    // Total count over the pre-annotation set (the `deepcopy` at `:157`).
+    // The flat branch counts every joined row: there is no `.distinct()`
+    // on this endpoint, so legacy m2m filters fan out and each copy
+    // counts (PIDASHCONV-1372). The grouped branch keeps its shape.
+    let total_sql = if group_by.is_none() {
+        format!("SELECT COUNT(*) {}", filtered.from_where)
+    } else if !key.joins.is_empty() {
+        format!(
+            "SELECT COUNT(*) {}",
+            crate::app_issues::with_order_joins(&filtered.from_where, &key.joins)
+        )
+    } else {
+        format!("SELECT COUNT(DISTINCT issue.id) {}", filtered.from_where)
+    };
+    let total_count = fetch_count(&pool, &total_sql, filtered.values.clone()).await?;
     let per_page = params.per_page;
     let cursor = crate::paginator::Cursor::from_string(&params.cursor_raw).map_err(page_denial)?;
     if group_by.is_some() {
@@ -919,30 +951,34 @@ async fn user_profile_issues(
             &filtered,
             group_by.unwrap_or_default(),
             sub_group_by.map(str::to_owned),
-            &key_expr,
+            &key.expr,
             direction,
             per_page,
             cursor,
             total_count,
+            &key.joins,
         )
         .await;
     }
     profile_flat_response(
         &pool,
         &filtered,
-        &key_expr,
+        &key.expr,
         direction,
         per_page,
         cursor,
         total_count,
+        &key.joins,
     )
     .await
 }
 
-/// Plain `paginate` branch (`user.py:243-250`): distinct rows, the
-/// rewritten order key `NULLS LAST` plus `-created_at`, offset window.
-/// The total over the pre-annotation set arrives from the caller (the
-/// `deepcopy` at `:157`), like the grouped branch — no second count.
+/// Plain `paginate` branch (`user.py:243-250`): every joined row (no
+/// `DISTINCT` — duplicates from legacy m2m filters render, like Django),
+/// the rewritten order key `NULLS LAST` plus `-created_at`, offset
+/// window. The total over the pre-annotation set arrives from the caller
+/// (the `deepcopy` at `:157`), like the grouped branch — no second count.
+#[allow(clippy::too_many_arguments)]
 async fn profile_flat_response(
     pool: &sqlx::PgPool,
     filtered: &FilteredSet,
@@ -951,6 +987,7 @@ async fn profile_flat_response(
     per_page: i64,
     cursor: crate::paginator::Cursor,
     total_count: i64,
+    order_joins: &str,
 ) -> HandlerResult {
     use crate::paginator::{
         apply_offset_window, max_hits, next_cursor, offset_window, prev_cursor,
@@ -959,9 +996,12 @@ async fn profile_flat_response(
     let window = offset_window(limit, cursor.offset, cursor.value, cursor.is_prev, None)
         .map_err(page_denial)?;
     let selects = profile_row_selects(&[]);
+    // The cycle-name traversal joins ride on the row query only; every
+    // joined row is returned (Django slices the queryset with no
+    // `.distinct()`, so fan-out copies stay).
+    let row_where = crate::app_issues::with_order_joins(&filtered.from_where, order_joins);
     let inner = format!(
-        "SELECT DISTINCT {selects}, ({key_expr}) AS __order_key {} ORDER BY __order_key {direction} NULLS LAST, issue.created_at DESC LIMIT {} OFFSET {}",
-        filtered.from_where,
+        "SELECT {selects}, ({key_expr}) AS __order_key {row_where} ORDER BY __order_key {direction} NULLS LAST, issue.created_at DESC LIMIT {} OFFSET {}",
         window.stop - window.offset,
         window.offset
     );
@@ -1135,6 +1175,7 @@ async fn profile_grouped_response(
     per_page: i64,
     cursor: crate::paginator::Cursor,
     total_count: i64,
+    order_joins: &str,
 ) -> HandlerResult {
     use crate::paginator::{
         grouped_max_hits, grouped_window, next_cursor, prev_cursor, process_grouped_results,
@@ -1154,13 +1195,15 @@ async fn profile_grouped_response(
         Some(sub) => format!("{group_expr}, {sub}"),
         None => group_expr.clone(),
     };
+    // The cycle-name traversal joins ride on the row query: the window
+    // numbers fan-out rows like Django's, and the final order is global.
+    let row_where = crate::app_issues::with_order_joins(&filtered.from_where, order_joins);
     let inner = format!(
         "SELECT * FROM (SELECT DISTINCT {selects}{member_select}, ({key_expr}) AS __order_key,
          ROW_NUMBER() OVER (PARTITION BY {partition} ORDER BY ({key_expr}) {direction} NULLS LAST, issue.created_at DESC) AS __rn
-         {from_where}) __w
+         {row_where}) __w
          WHERE __w.__rn > {offset} AND __w.__rn <= {stop}
          ORDER BY __w.__order_key {direction} NULLS LAST, __w.created_at DESC",
-        from_where = filtered.from_where,
         offset = window.offset,
         stop = window.stop,
     );
@@ -1535,7 +1578,9 @@ fn compile_stats_legacy(query: &QueryMap) -> Result<(CompiledLegacy, CompiledLeg
     let mut sub_binder = Binder::new();
     let mut sub_text = String::new();
     for (name, value) in legacy.predicates() {
-        let fragment = legacy_sql(&mut issue_binder, name, value)?;
+        // UTC keeps this slice's current truncation; its own actor-zone
+        // fix follows the app_issues pattern separately.
+        let fragment = legacy_sql(&mut issue_binder, name, value, &chrono_tz::UTC)?;
         if issue_text.is_empty() {
             issue_text = fragment;
         } else {
@@ -2722,8 +2767,16 @@ mod tests {
             ),
         );
         query.insert("priority".to_owned(), OneOrMany::One("high".to_owned()));
-        let filtered = profile_filtered_set(&uid, "acme", &viewer, &query, Some("priority"), None)
-            .expect("filtered set");
+        let filtered = profile_filtered_set(
+            &uid,
+            "acme",
+            &viewer,
+            &query,
+            Some("priority"),
+            None,
+            &chrono_tz::UTC,
+        )
+        .expect("filtered set");
         // Scope binds first, then the compiled legacy binds.
         assert_eq!(filtered.values.len(), 3 + 2 + 1);
         assert_holders_continuous(&filtered.from_where, &filtered.values);
@@ -2761,6 +2814,7 @@ mod tests {
             &query,
             Some("priority"),
             Some("state__group"),
+            &chrono_tz::UTC,
         )
         .expect("filtered set");
         let count_filter = qp::grouped_count_filter_sql("issue");
@@ -2809,6 +2863,7 @@ mod tests {
             &mut scratch,
             "labels__in",
             &FilterValue::Uuids(vec![label]),
+            &chrono_tz::UTC,
         )
         .expect("compile");
         let legacy = CompiledLegacy {
