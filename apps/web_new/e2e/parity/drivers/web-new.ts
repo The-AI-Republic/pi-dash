@@ -1020,8 +1020,8 @@ export class WebNewDriver implements ParityDriver {
     // A suggestion popup left open by a previous query covers the composer
     // and would intercept the click; dismiss it first.
     await this.page.keyboard.press("Escape").catch(() => undefined);
-    await composer.scrollIntoViewIfNeeded();
-    await composer.click();
+    await composer.scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
+    await composer.click({ timeout: WebNewDriver.WAIT_MS });
     // Start from an empty composer so repeated calls re-query instead of
     // appending to the previous trigger text.
     await this.page.keyboard.press("ControlOrMeta+a");
@@ -1070,8 +1070,8 @@ export class WebNewDriver implements ParityDriver {
   async mentionsPostComment(displayName: string, bodyText: string): Promise<void> {
     const composer = this.composerEditor();
     await this.page.keyboard.press("Escape").catch(() => undefined);
-    await composer.scrollIntoViewIfNeeded();
-    await composer.click();
+    await composer.scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
+    await composer.click({ timeout: WebNewDriver.WAIT_MS });
     await composer.pressSequentially(`@${displayName}`, { delay: 90 });
     await this.mentionSuggestionsList().getByRole("button").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
     // Enter picks the popup's first row; the mention node lands at the caret.
@@ -1113,7 +1113,11 @@ export class WebNewDriver implements ParityDriver {
       .getByRole("button", { name: "Save comment" })
       .first()
       .click({ timeout: WebNewDriver.WAIT_MS });
-    // The plain replacement showing in the feed proves the save landed.
+    // The form closing proves the save landed: the open form itself
+    // contains the new text, so waiting on the card alone would match
+    // the unsaved draft. A refused save keeps the form open and fails
+    // here instead of at a confusing server readback.
+    await editor.waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
     await this.commentCard(plainText).waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 

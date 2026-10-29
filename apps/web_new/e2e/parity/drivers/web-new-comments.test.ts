@@ -831,6 +831,8 @@ describe("web_new comments gate driver (NEWFRONT-818)", () => {
     const steps: string[] = [];
     const editor = locator({
       pressSequentially: async (value: string) => void steps.push(`type:${value}`),
+      waitFor: async (options?: unknown) =>
+        void steps.push(`editor:${String((options as { state?: string }).state ?? "visible")}`),
       locator: (selector: string) => {
         expect(selector).toBe("xpath=ancestor::form[1]");
         return locator({
@@ -871,7 +873,16 @@ describe("web_new comments gate driver (NEWFRONT-818)", () => {
       return inner(role, options);
     }) as Page["getByRole"];
     await new WebNewDriver(page.page).mentionsEditRemovingMention("@Parity Mention hi", "plain words");
-    expect(steps).toEqual(["hover", "trigger", "menu", "menu:Edit", "type:plain words", "save", "card"]);
+    expect(steps).toEqual([
+      "hover",
+      "trigger",
+      "menu",
+      "menu:Edit",
+      "type:plain words",
+      "save",
+      "editor:detached",
+      "card",
+    ]);
   });
 
   it("renames the title and blurs back to the feed", async () => {
