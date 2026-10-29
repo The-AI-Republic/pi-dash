@@ -13,12 +13,14 @@ export {
 } from "./optimistic.js";
 export {
   createCachePersistor,
+  isOwnerScopedQuery,
   isReferenceQueryKey,
+  ownerScopedMeta,
   persistEverything,
   persistReferenceOnly,
   QUERY_CACHE_STORAGE_KEY,
   QUERY_CACHE_VERSION,
 } from "./persistence.js";
-export type { CachePersistor, PersistorOptions } from "./persistence.js";
+export type { CachePersistor, OwnerScopedMeta, PersistorOptions } from "./persistence.js";
 export { createRealtimeHub, getRealtimeHub, resetRealtimeHub } from "./realtime.js";
 export type { RealtimeEvent, RealtimeHandler, RealtimeHub } from "./realtime.js";
