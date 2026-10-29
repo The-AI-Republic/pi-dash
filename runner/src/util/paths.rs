@@ -120,6 +120,13 @@ impl Paths {
         self.config_dir.join("credentials.toml")
     }
 
+    /// `<config_dir>/parked/`: one `<user_id>.toml` per signed-out (or
+    /// switched-away) user, holding that user's `[[runner]]` blocks until
+    /// they sign in on this host again.
+    pub fn parked_dir(&self) -> PathBuf {
+        self.config_dir.join("parked")
+    }
+
     /// Daemon-level logs directory. Used only for service-supervisor
     /// stdout/stderr (launchd / systemd unit redirection); per-runner
     /// logs live under `RunnerPaths::logs_dir()`.

@@ -218,6 +218,7 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
             host_label: &host_label,
             name: runner_name,
             pod: args.pod.as_deref(),
+            provisioning: None,
         },
     )
     .await
@@ -351,6 +352,7 @@ async fn ensure_cli_token(
             workspace: workspace.map(str::to_string),
             force: false,
             device_code_stdin: false,
+            yes: false,
         },
         paths,
     )

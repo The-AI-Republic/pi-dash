@@ -1,16 +1,18 @@
 //! `pidash auth <login|status|logout>` — user-identity flow.
 //!
 //! Mints, inspects, and revokes the `[cli].token` written to
-//! `~/.config/pidash/config.toml`. Strictly the user-identity side: it
-//! does not touch `[[runner]]` blocks or `credentials.toml`. Runner
-//! credentials are minted separately by `pidash runner add`, which uses
-//! the CLI token populated here to authorise itself to the cloud.
+//! `~/.config/pidash/config.toml`. Runner credentials are minted
+//! separately by `pidash runner add`, which uses the CLI token populated
+//! here to authorise itself to the cloud. The only effect on `[[runner]]`
+//! blocks is ownership: signing out, or in as another user, parks the
+//! current user's runners until they sign in again (see [`session`]).
 
 use anyhow::Result;
 use clap::{Args as ClapArgs, Subcommand};
 
 pub mod login;
 pub mod logout;
+pub mod session;
 pub mod status;
 
 use crate::util::paths::Paths;
@@ -29,8 +31,8 @@ pub enum AuthCommand {
     /// Show who this host is logged in as and which runners are
     /// registered here.
     Status(status::Args),
-    /// Revoke the CLI token server-side and clear it locally. Leaves
-    /// runner registrations untouched.
+    /// Revoke the CLI token server-side and clear it locally. This
+    /// account's runners are set aside until it signs in here again.
     Logout(logout::Args),
 }
 

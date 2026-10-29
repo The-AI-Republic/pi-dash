@@ -43,6 +43,184 @@ pub struct Supervisor {
 type HelloRunner = (RunnerOut, StateHandle, Option<String>);
 type HelloRunnerMap = HashMap<uuid::Uuid, HelloRunner>;
 
+/// How often the daemon re-reads `config.toml` for changes made behind its
+/// back (`pidash auth login/logout`, the desktop app, a hand edit).
+const CONFIG_POLL_INTERVAL: Duration = Duration::from_secs(2);
+/// How long a reload waits for cancelled runs to wind down before tearing
+/// their tasks down anyway.
+const RELOAD_CANCEL_GRACE: Duration = Duration::from_secs(10);
+
+/// Why [`Supervisor::run`] returned.
+#[derive(Debug)]
+pub enum SupervisorExit {
+    /// Shutdown requested (signal or IPC). The process should exit.
+    Shutdown,
+    /// `config.toml` changed the daemon's identity (cloud, machine token)
+    /// or dropped a running runner. Everything was torn down; the caller
+    /// starts a fresh supervisor in-process from the carried config, which
+    /// has already been parsed and validated — an invalid edit never gets
+    /// this far (see [`ConfigWatch`]).
+    Reload(Box<Config>),
+}
+
+/// The parts of `config.toml` a running supervisor is bound to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RunningIdentity {
+    cloud_url: String,
+    shared_machine_token: Option<String>,
+    dev_machine_id: Option<uuid::Uuid>,
+}
+
+impl RunningIdentity {
+    fn of(config: &Config) -> Self {
+        Self {
+            cloud_url: config.daemon.cloud_url.clone(),
+            shared_machine_token: shared_machine_token_of(config),
+            dev_machine_id: config.daemon.dev_machine_id,
+        }
+    }
+}
+
+/// `[cli].token` when it is a shared dev-machine token (`mt_…`).
+fn shared_machine_token_of(config: &Config) -> Option<String> {
+    config
+        .cli
+        .as_ref()
+        .and_then(|cli| cli.token.as_deref())
+        .filter(|token| token.starts_with("mt_"))
+        .map(str::to_string)
+}
+
+/// What a freshly read `config.toml` means for the running daemon.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ConfigChange {
+    Unchanged,
+    /// Only the dev-machine id moved (a merge, or a sign-in that resolved
+    /// to another record): reopen the machine session against it.
+    DevMachineId(Option<uuid::Uuid>),
+    /// Restart the supervisor in-process.
+    Reload(&'static str),
+}
+
+fn classify_config_change(
+    running: &RunningIdentity,
+    live_runners: &[uuid::Uuid],
+    new: &Config,
+) -> ConfigChange {
+    if new.daemon.cloud_url != running.cloud_url {
+        return ConfigChange::Reload("cloud URL changed");
+    }
+    // Sign-out, sign-in, account switch: every runner authenticates with
+    // this token, so they all have to come back up with the new one.
+    if shared_machine_token_of(new) != running.shared_machine_token {
+        return ConfigChange::Reload("machine token changed");
+    }
+    // A runner the daemon is running vanished from the config (parked on
+    // sign-out, dropped by the desktop app). Runners removed through the
+    // cloud / `pidash runner remove` leave the live set first, so they
+    // don't land here.
+    if live_runners
+        .iter()
+        .any(|id| !new.runners.iter().any(|r| r.runner_id == *id))
+    {
+        return ConfigChange::Reload("runner removed from config");
+    }
+    if new.daemon.dev_machine_id != running.dev_machine_id {
+        return ConfigChange::DevMachineId(new.daemon.dev_machine_id);
+    }
+    ConfigChange::Unchanged
+}
+
+/// Re-reads `config.toml` when its bytes change. A change only counts once
+/// it loads (with the loader's legacy migrations) *and* validates: a broken
+/// or half-written edit is logged and ignored, and the daemon keeps running
+/// on its last good config instead of tearing its runners down for it.
+struct ConfigWatch {
+    paths: Paths,
+    last_text: Option<String>,
+}
+
+impl ConfigWatch {
+    fn new(paths: &Paths) -> Self {
+        let last_text = std::fs::read_to_string(paths.config_path()).ok();
+        Self {
+            paths: paths.clone(),
+            last_text,
+        }
+    }
+
+    /// The config, if the file changed since the last call, parses and
+    /// validates.
+    fn changed(&mut self) -> Option<Config> {
+        let text = std::fs::read_to_string(self.paths.config_path()).ok()?;
+        if self.last_text.as_deref() == Some(text.as_str()) {
+            return None;
+        }
+        let loaded = crate::config::file::parse_config(&self.paths, &text).and_then(|cfg| {
+            cfg.validate()
+                .map_err(|e| anyhow::anyhow!("invalid config: {e}"))?;
+            Ok(cfg)
+        });
+        self.last_text = Some(text);
+        match loaded {
+            Ok(cfg) => Some(cfg),
+            Err(e) => {
+                tracing::error!(
+                    "config.toml changed but cannot be used; keeping the running config until it is fixed: {e:#}"
+                );
+                None
+            }
+        }
+    }
+}
+
+/// The dev-machine id the live machine control session addresses. The
+/// session moves it itself when the cloud reports a merge (and persists the
+/// survivor to `config.toml`), so the config watcher can tell that
+/// self-inflicted change apart from an outside one and leave the session
+/// alone.
+pub(crate) type SessionDevMachineId = Arc<std::sync::Mutex<Option<uuid::Uuid>>>;
+
+/// Fold a dev-machine id the machine session adopted on its own into the
+/// running identity, so the config watcher doesn't mistake the session's
+/// own `config.toml` write for an outside change and restart it.
+fn sync_session_dev_machine_id(identity: &mut RunningIdentity, session: &SessionDevMachineId) {
+    if let Some(id) = *session.lock().expect("session dev machine id poisoned") {
+        identity.dev_machine_id = Some(id);
+    }
+}
+
+/// Start the machine-level control session, when this config supports one.
+fn spawn_machine_control(
+    transport: Option<&SharedHttpTransport>,
+    identity: &RunningIdentity,
+    session_dev_machine_id: &SessionDevMachineId,
+    spawn_ctx: &RunnerSpawnCtx,
+    state: &StateHandle,
+) -> Option<tokio::task::JoinHandle<()>> {
+    *session_dev_machine_id
+        .lock()
+        .expect("session dev machine id poisoned") = None;
+    let (Some(shared), Some(token), Some(dev_machine_id)) = (
+        transport,
+        identity.shared_machine_token.clone(),
+        identity.dev_machine_id,
+    ) else {
+        return None;
+    };
+    *session_dev_machine_id
+        .lock()
+        .expect("session dev machine id poisoned") = Some(dev_machine_id);
+    let client = MachineClient::new(shared.clone(), dev_machine_id, token);
+    let control = crate::daemon::machine_control::MachineControl::new(
+        client,
+        spawn_ctx.clone(),
+        state.clone(),
+        session_dev_machine_id.clone(),
+    );
+    Some(tokio::spawn(async move { control.run().await }))
+}
+
 impl Supervisor {
     pub fn new(
         config: Config,
@@ -62,7 +240,7 @@ impl Supervisor {
         }
     }
 
-    pub async fn run(self) -> Result<()> {
+    pub async fn run(self) -> Result<SupervisorExit> {
         self.paths.ensure()?;
         // Re-run config validation here so any future entry path that
         // bypasses `cli::run` (tests, IPC reload, embedded callers)
@@ -90,12 +268,8 @@ impl Supervisor {
             Some(SharedHttpTransport::new(config.daemon.cloud_url.clone())?)
         };
 
-        let shared_machine_token = config
-            .cli
-            .as_ref()
-            .and_then(|cli| cli.token.as_deref())
-            .filter(|token| token.starts_with("mt_"))
-            .map(str::to_string);
+        let mut identity = RunningIdentity::of(&config);
+        let shared_machine_token = identity.shared_machine_token.clone();
 
         let mut instances: Vec<RunnerInstance> = Vec::new();
         for runner_cfg in &config.runners {
@@ -164,7 +338,9 @@ impl Supervisor {
             daemon_state: state.clone(),
             instances: ipc_instances.clone(),
             activation_lock: Arc::new(tokio::sync::Mutex::new(())),
+            detached_tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
         };
+        let ipc_cancel = tokio_util::sync::CancellationToken::new();
 
         let ipc = IpcServer {
             path: paths.ipc_socket_path(),
@@ -175,6 +351,7 @@ impl Supervisor {
             paths: paths.clone(),
             instances: ipc_instances,
             spawn_ctx: spawn_ctx.clone(),
+            cancel: ipc_cancel.clone(),
         };
         let ipc_handle = tokio::spawn(async move {
             if let Err(e) = ipc.run().await {
@@ -216,40 +393,74 @@ impl Supervisor {
         // machine token and a persisted dev_machine_id — both written
         // by `pidash auth login` / modern enrollments; legacy installs
         // without them simply don't get the channel.
-        let machine_handle = match (
-            transport.clone(),
-            shared_machine_token.clone(),
-            config.daemon.dev_machine_id,
-        ) {
-            (Some(shared), Some(token), Some(dev_machine_id)) => {
-                let client = MachineClient::new(shared, dev_machine_id, token);
-                let control = crate::daemon::machine_control::MachineControl::new(
-                    client,
-                    spawn_ctx.clone(),
-                    state.clone(),
-                );
-                Some(tokio::spawn(async move { control.run().await }))
-            }
-            _ => {
-                if !opts.offline {
-                    tracing::info!(
-                        "machine control session disabled (missing dev_machine_id or mt_ token in config)"
-                    );
+        let session_dev_machine_id: SessionDevMachineId = Arc::default();
+        let mut machine_handle = spawn_machine_control(
+            transport.as_ref(),
+            &identity,
+            &session_dev_machine_id,
+            &spawn_ctx,
+            &state,
+        );
+        if machine_handle.is_none() && !opts.offline {
+            tracing::info!(
+                "machine control session disabled (missing dev_machine_id or mt_ token in config)"
+            );
+        }
+
+        // Wait for shutdown, watching config.toml meanwhile: `pidash auth
+        // login/logout` and the desktop app rewrite it while the daemon
+        // runs, and the daemon must follow (stop parked runners, pick up a
+        // new account, reopen the machine session under a merged id).
+        let shutdown = state.shutdown_notified();
+        let shutdown_fut = shutdown.notified();
+        tokio::pin!(shutdown_fut);
+        let sig = crate::util::signal::shutdown();
+        tokio::pin!(sig);
+        let mut config_watch = ConfigWatch::new(&paths);
+        let mut config_tick = tokio::time::interval(CONFIG_POLL_INTERVAL);
+        config_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let exit = loop {
+            tokio::select! {
+                _ = &mut shutdown_fut => {
+                    tracing::info!("shutdown requested via IPC");
+                    break SupervisorExit::Shutdown;
                 }
-                None
+                r = &mut sig => {
+                    if let Err(e) = r { tracing::warn!("signal watcher failed: {e:#}"); }
+                    break SupervisorExit::Shutdown;
+                }
+                _ = config_tick.tick() => {
+                    let Some(new_cfg) = config_watch.changed() else { continue };
+                    let live: Vec<uuid::Uuid> =
+                        hello_runners.read().await.keys().copied().collect();
+                    sync_session_dev_machine_id(&mut identity, &session_dev_machine_id);
+                    match classify_config_change(&identity, &live, &new_cfg) {
+                        ConfigChange::Unchanged => {}
+                        ConfigChange::DevMachineId(id) => {
+                            tracing::info!(
+                                dev_machine_id = ?id,
+                                "dev_machine_id changed in config.toml; reopening machine session"
+                            );
+                            if let Some(h) = machine_handle.take() {
+                                h.abort();
+                            }
+                            identity.dev_machine_id = id;
+                            machine_handle = spawn_machine_control(
+                                transport.as_ref(),
+                                &identity,
+                                &session_dev_machine_id,
+                                &spawn_ctx,
+                                &state,
+                            );
+                        }
+                        ConfigChange::Reload(why) => {
+                            tracing::info!("{why}; reloading the daemon in-process");
+                            break SupervisorExit::Reload(Box::new(new_cfg));
+                        }
+                    }
+                }
             }
         };
-
-        let shutdown = state.shutdown_notified();
-        let sig = crate::util::signal::shutdown();
-        tokio::select! {
-            _ = shutdown.notified() => {
-                tracing::info!("shutdown requested via IPC");
-            }
-            r = sig => {
-                if let Err(e) = r { tracing::warn!("signal watcher failed: {e:#}"); }
-            }
-        }
 
         // Stop the journal replay retry task BEFORE draining: a retry
         // pass running concurrently with the drain could remove() an
@@ -279,6 +490,14 @@ impl Supervisor {
             tracing::warn!("drain of in-flight runs timed out at 5s");
         }
 
+        // A reload keeps the process (and so every detached task) alive:
+        // stop the agents explicitly instead of relying on process exit to
+        // kill them. The drain above already told the cloud these runs
+        // failed.
+        if matches!(exit, SupervisorExit::Reload(_)) {
+            cancel_in_flight_runs(&hello_runners, &mailboxes).await;
+        }
+
         for h in loop_handles {
             h.abort();
         }
@@ -288,12 +507,72 @@ impl Supervisor {
         for h in refresh_handles {
             h.abort();
         }
+        for h in spawn_ctx.take_detached_tasks() {
+            h.abort();
+        }
         if let Some(h) = machine_handle {
             h.abort();
         }
+        ipc_cancel.cancel();
         ipc_handle.abort();
-        Ok(())
+        // Let the listener drop before a reload rebinds the socket / pipe.
+        let _ = ipc_handle.await;
+        Ok(exit)
     }
+}
+
+/// Send a local `Cancel` for every in-flight run and wait (bounded) for the
+/// runners to report idle, so a reload doesn't leave agent processes
+/// running under a torn-down supervisor.
+async fn cancel_in_flight_runs(
+    runners: &Arc<RwLock<HelloRunnerMap>>,
+    mailboxes: &Arc<RwLock<HashMap<uuid::Uuid, mpsc::Sender<InboundEnvelope>>>>,
+) {
+    let busy: Vec<(uuid::Uuid, uuid::Uuid, StateHandle)> = {
+        let guard = runners.read().await;
+        guard
+            .iter()
+            .filter_map(|(rid, (_, state, _))| {
+                let run_id = (*state.rx_in_flight.borrow())?;
+                Some((*rid, run_id, state.clone()))
+            })
+            .collect()
+    };
+    if busy.is_empty() {
+        return;
+    }
+    {
+        let boxes = mailboxes.read().await;
+        for (runner_id, run_id, _) in &busy {
+            let Some(tx) = boxes.get(runner_id) else {
+                continue;
+            };
+            let envelope = crate::cloud::protocol::Envelope::for_runner(
+                *runner_id,
+                ServerMsg::Cancel {
+                    run_id: *run_id,
+                    reason: Some("daemon reloading after a config change".to_string()),
+                },
+            );
+            let _ = tx
+                .send(InboundEnvelope {
+                    stream_id: None,
+                    env: envelope,
+                })
+                .await;
+        }
+    }
+    let deadline = tokio::time::Instant::now() + RELOAD_CANCEL_GRACE;
+    while tokio::time::Instant::now() < deadline {
+        if busy
+            .iter()
+            .all(|(_, _, state)| state.rx_in_flight.borrow().is_none())
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    tracing::warn!("some runs did not stop within the reload grace period");
 }
 
 /// Construct (but don't start) a `RunnerInstance` from its config
@@ -335,6 +614,9 @@ pub(crate) struct RunnerSpawnCtx {
     daemon_state: StateHandle,
     instances: Arc<std::sync::RwLock<HashMap<uuid::Uuid, RunnerInstance>>>,
     activation_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Tasks of runners hot-added after startup. Kept so a supervisor
+    /// reload can stop them; a plain shutdown ends them with the process.
+    detached_tasks: Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
 }
 
 impl RunnerSpawnCtx {
@@ -342,8 +624,10 @@ impl RunnerSpawnCtx {
         let cfg = crate::config::file::load_config(&self.paths)?;
         cfg.validate()
             .map_err(|e| anyhow::anyhow!("invalid config: {e}"))?;
+        // The dev-machine id is not part of this check: runners don't use
+        // it, and a merge moves it while the daemon keeps running (only the
+        // machine session reopens).
         if cfg.daemon.cloud_url != self.daemon.cloud_url
-            || cfg.daemon.dev_machine_id != self.daemon.dev_machine_id
             || cfg.cli.as_ref().and_then(|cli| cli.token.as_deref())
                 != self.shared_machine_token.as_deref()
         {
@@ -361,12 +645,22 @@ impl RunnerSpawnCtx {
         self.daemon.cloud_url.clone()
     }
 
+    fn take_detached_tasks(&self) -> Vec<tokio::task::JoinHandle<()>> {
+        std::mem::take(
+            &mut *self
+                .detached_tasks
+                .lock()
+                .expect("detached task list poisoned"),
+        )
+    }
+
     /// Hot-add: bring a freshly configured runner up in-process.
     ///
     /// Registers the instance in the shared mailbox / hello maps and
-    /// spawns the same three tasks the startup loop spawns. Handles are
-    /// deliberately detached: on daemon shutdown the tasks die with the
-    /// process, and the graceful drain and IPC registry include hot-added runners.
+    /// spawns the same three tasks the startup loop spawns. On daemon
+    /// shutdown the tasks die with the process (a reload aborts them via
+    /// `detached_tasks`), and the graceful drain and IPC registry include
+    /// hot-added runners.
     pub(crate) async fn add_runner(&self, runner_cfg: RunnerConfig) -> Result<()> {
         let _activation = self.activation_lock.lock().await;
         if self
@@ -400,7 +694,15 @@ impl RunnerSpawnCtx {
                 ),
             );
         }
-        let _tasks = spawn_instance_tasks(&inst, self).await;
+        let tasks = spawn_instance_tasks(&inst, self).await;
+        self.detached_tasks
+            .lock()
+            .expect("detached task list poisoned")
+            .extend(
+                [tasks.runner_loop, tasks.http_loop, tasks.refresh]
+                    .into_iter()
+                    .flatten(),
+            );
         self.instances
             .write()
             .expect("runner registry poisoned")
@@ -1153,8 +1455,12 @@ struct ChatWarm {
 enum ChatCommand {
     Warm(ChatWarm),
     Message(ChatTurn),
-    Cancel { reason: Option<String> },
-    Close { reason: Option<String> },
+    Cancel {
+        reason: Option<String>,
+    },
+    Close {
+        reason: Option<String>,
+    },
     /// Tear down this runtime to make room for another session (or to free the
     /// runner's working dir for an assign) WITHOUT closing the
     /// cloud session: it stays open and a later warm/message revives it via
@@ -3673,7 +3979,11 @@ impl AssignWorker {
                 reason,
             } => {
                 run_events.flush_before_lifecycle(&self.out).await;
-                let policy = Policy::new(&self.runner_config.approval_policy, workspace_root, crate::cloud::protocol::ApprovalMode::Ask);
+                let policy = Policy::new(
+                    &self.runner_config.approval_policy,
+                    workspace_root,
+                    crate::cloud::protocol::ApprovalMode::Ask,
+                );
                 let decision = policy.evaluate(kind, &payload);
                 if let Some(auto) = decision.into_cloud() {
                     bridge.send_approval(&approval_id, auto).await.ok();
@@ -3951,7 +4261,11 @@ mod tests {
             let mut config = runner_config("general-tasks", "TEST", wd.clone());
             config.project_slug = None; // no cloud context lookup in this test
             config.agent.kind = kind;
-            let missing_binary = tmp.path().join("missing-agent").to_string_lossy().into_owned();
+            let missing_binary = tmp
+                .path()
+                .join("missing-agent")
+                .to_string_lossy()
+                .into_owned();
             config.codex.binary = missing_binary.clone();
             config.claude_code.binary = missing_binary;
             let runner_paths = paths.for_runner(config.runner_id);
@@ -4660,5 +4974,181 @@ mod tests {
         let delivered = replay_drain_journal_once(&paths, &runners).await;
         assert_eq!(delivered, 0);
         assert!(drain_journal::load(&paths).is_empty());
+    }
+
+    fn identity_config(token: Option<&str>, runners: Vec<RunnerConfig>) -> Config {
+        Config {
+            version: 2,
+            daemon: DaemonConfig {
+                cloud_url: "https://cloud.example".into(),
+                dev_machine_id: Some(uuid::Uuid::from_u128(1)),
+                ..DaemonConfig::default()
+            },
+            runners,
+            cli: Some(crate::config::schema::CliSection {
+                token: token.map(str::to_string),
+                ..Default::default()
+            }),
+        }
+    }
+
+    #[test]
+    fn config_change_classification() {
+        let r = runner_config("a", "P", PathBuf::from("/tmp/a"));
+        let base = identity_config(Some("mt_one"), vec![r.clone()]);
+        let running = RunningIdentity::of(&base);
+        let live = vec![r.runner_id];
+
+        assert_eq!(
+            classify_config_change(&running, &live, &base),
+            ConfigChange::Unchanged
+        );
+
+        // Sign-out: token cleared and runners parked.
+        let signed_out = identity_config(None, vec![]);
+        assert!(matches!(
+            classify_config_change(&running, &live, &signed_out),
+            ConfigChange::Reload(_)
+        ));
+
+        // Same-user re-login minting a new token.
+        let relogin = identity_config(Some("mt_two"), vec![r.clone()]);
+        assert!(matches!(
+            classify_config_change(&running, &live, &relogin),
+            ConfigChange::Reload(_)
+        ));
+
+        // A running runner dropped from config.
+        let dropped = identity_config(Some("mt_one"), vec![]);
+        assert!(matches!(
+            classify_config_change(&running, &live, &dropped),
+            ConfigChange::Reload(_)
+        ));
+        // ...but not one the daemon already tore down itself.
+        assert_eq!(
+            classify_config_change(&running, &[], &dropped),
+            ConfigChange::Unchanged
+        );
+
+        // Only the dev machine moved (merge): reopen the machine session.
+        let mut merged = base.clone();
+        merged.daemon.dev_machine_id = Some(uuid::Uuid::from_u128(2));
+        assert_eq!(
+            classify_config_change(&running, &live, &merged),
+            ConfigChange::DevMachineId(Some(uuid::Uuid::from_u128(2)))
+        );
+
+        // A non-machine token (legacy APIToken) counts as no shared token.
+        let legacy = identity_config(Some("pi_dash_api_x"), vec![r.clone()]);
+        assert_eq!(RunningIdentity::of(&legacy).shared_machine_token, None);
+
+        // Added runners don't force a reload (they are activated over IPC).
+        let added = identity_config(
+            Some("mt_one"),
+            vec![r, runner_config("b", "P", PathBuf::from("/tmp/b"))],
+        );
+        assert_eq!(
+            classify_config_change(&running, &live, &added),
+            ConfigChange::Unchanged
+        );
+    }
+
+    #[test]
+    fn config_watch_reports_only_real_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let cfg = identity_config(Some("mt_one"), vec![]);
+        crate::config::file::write_config(&paths, &cfg).unwrap();
+        let mut watch = ConfigWatch::new(&paths);
+        assert!(
+            watch.changed().is_none(),
+            "startup contents are the baseline"
+        );
+        crate::config::file::write_config(&paths, &cfg).unwrap();
+        assert!(
+            watch.changed().is_none(),
+            "identical rewrite is not a change"
+        );
+        let signed_out = identity_config(None, vec![]);
+        crate::config::file::write_config(&paths, &signed_out).unwrap();
+        let seen = watch.changed().expect("change detected");
+        assert!(seen.cli.unwrap().token.is_none());
+        assert!(watch.changed().is_none());
+        std::fs::write(paths.config_path(), "not = [valid").unwrap();
+        assert!(watch.changed().is_none(), "unparseable config is ignored");
+    }
+
+    #[test]
+    fn config_watch_ignores_a_config_that_fails_validation() {
+        // A reload must never be triggered by a config the next supervisor
+        // would refuse: the daemon keeps running on its last good config.
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let r = runner_config("a", "P", PathBuf::from("/tmp/a"));
+        let good = identity_config(Some("mt_one"), vec![r.clone()]);
+        crate::config::file::write_config(&paths, &good).unwrap();
+        let mut watch = ConfigWatch::new(&paths);
+
+        // Parses, but two runners share a name.
+        let mut dup = r.clone();
+        dup.runner_id = uuid::Uuid::new_v4();
+        dup.workspace.working_dir = PathBuf::from("/tmp/b");
+        let invalid = identity_config(Some("mt_two"), vec![r.clone(), dup]);
+        assert!(invalid.validate().is_err(), "fixture must be invalid");
+        crate::config::file::write_config(&paths, &invalid).unwrap();
+        assert!(watch.changed().is_none(), "invalid config is not a change");
+        assert!(watch.changed().is_none(), "and is not re-reported");
+
+        // Fixed: now it counts, and it is the validated config.
+        let fixed = identity_config(Some("mt_two"), vec![r]);
+        crate::config::file::write_config(&paths, &fixed).unwrap();
+        let seen = watch.changed().expect("valid change detected");
+        assert_eq!(
+            seen.cli.unwrap().token.as_deref(),
+            Some("mt_two"),
+            "the fixed config is reported"
+        );
+    }
+
+    #[test]
+    fn machine_session_adopting_a_merged_id_does_not_restart_itself() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let base = identity_config(Some("mt_one"), vec![]);
+        crate::config::file::write_config(&paths, &base).unwrap();
+        let mut identity = RunningIdentity::of(&base);
+        let mut watch = ConfigWatch::new(&paths);
+        let session: SessionDevMachineId =
+            Arc::new(std::sync::Mutex::new(base.daemon.dev_machine_id));
+
+        // The session learns of a merge (409) and persists the survivor.
+        let survivor = uuid::Uuid::from_u128(2);
+        crate::daemon::machine_control::persist_adopted_dev_machine_id(&paths, &session, survivor)
+            .unwrap();
+        assert_eq!(
+            crate::config::file::load_config(&paths)
+                .unwrap()
+                .daemon
+                .dev_machine_id,
+            Some(survivor)
+        );
+        let seen = watch.changed().expect("config.toml was rewritten");
+        sync_session_dev_machine_id(&mut identity, &session);
+        assert_eq!(
+            classify_config_change(&identity, &[], &seen),
+            ConfigChange::Unchanged,
+            "the session's own write must not abort it"
+        );
+
+        // A change the session didn't make still reopens it.
+        let mut moved = seen.clone();
+        moved.daemon.dev_machine_id = Some(uuid::Uuid::from_u128(3));
+        crate::config::file::write_config(&paths, &moved).unwrap();
+        let seen = watch.changed().unwrap();
+        sync_session_dev_machine_id(&mut identity, &session);
+        assert_eq!(
+            classify_config_change(&identity, &[], &seen),
+            ConfigChange::DevMachineId(Some(uuid::Uuid::from_u128(3)))
+        );
     }
 }

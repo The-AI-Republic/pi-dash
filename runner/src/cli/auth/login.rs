@@ -8,7 +8,12 @@
 //! 3. Poll `POST /api/v1/auth/device/token/` at the cloud-specified
 //!    interval until the user approves in the browser, hits a terminal
 //!    error, or the grant expires.
-//! 4. Write the returned `APIToken` to `[cli].token` in `config.toml`.
+//! 4. Exchange the returned `APIToken` for the shared dev-machine
+//!    `MachineToken` (`POST /api/v1/auth/machine-token/`, with this
+//!    computer's fingerprint) and write it, the signed-in user and the
+//!    surviving `dev_machine_id` to `config.toml`. Signing in as a different
+//!    user than the stored one parks the previous user's runners first (see
+//!    [`super::session`]).
 //!
 //! The cloud to talk to comes from `--url`, else this host's existing
 //! `[daemon].cloud_url`, else [`crate::DEFAULT_CLOUD_URL`] — never from a
@@ -24,6 +29,7 @@ use serde::Deserialize;
 use std::io::Write;
 use std::time::Duration;
 
+use crate::cli::auth::{logout, session, status};
 use crate::cli::runner_ops;
 use crate::config::file;
 use crate::util::paths::Paths;
@@ -66,6 +72,12 @@ pub struct Args {
     /// else), and argv is visible to other local processes.
     #[arg(long, hide = true)]
     pub device_code_stdin: bool,
+
+    /// Don't ask before switching this host to a different account. An
+    /// account switch parks the current user's runners (stopping any runs in
+    /// progress) until that user signs in here again.
+    #[arg(long)]
+    pub yes: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -93,6 +105,22 @@ struct TokenSuccess {
 struct MachineTokenResponse {
     machine_token: String,
     workspace_slug: String,
+    /// The dev machine the cloud resolved this host to. May differ from the
+    /// id we sent (records merged by fingerprint); always persist it.
+    #[serde(default)]
+    dev_machine_id: Option<uuid::Uuid>,
+    #[serde(default)]
+    user: Option<MachineTokenUser>,
+    /// `dhk_…`, only for an interactive (device-flow) sign-in.
+    #[serde(default)]
+    handoff_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MachineTokenUser {
+    id: String,
+    #[serde(default)]
+    email: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -128,6 +156,45 @@ async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOut
         println!("(Self-hosted? Cancel and run `pidash auth login --url <YOUR-URL>` instead.)");
     }
 
+    // Fail before the browser dance rather than after it.
+    let mut previous = session::current_identity(paths)?;
+    if let Some(existing) = previous.cloud_url.as_deref()
+        && existing != cloud_url
+        && !args.force
+    {
+        anyhow::bail!(
+            "this host is already enrolled with cloud {existing} — refusing to overwrite [cli] for a different cloud {cloud_url} (pass --force to re-enroll against the new cloud)"
+        );
+    }
+    // A config signed in before user ids were recorded can't tell whether
+    // this sign-in switches accounts. Ask the cloud who the stored token
+    // belongs to; if it still can't be told, the sign-in is treated as a
+    // switch and the stored runners are parked under an `unknown-…` key.
+    if previous.user_unknown() && status::backfill_user(paths).await {
+        previous = session::current_identity(paths)?;
+    }
+    // Signing in rewrites the machine token (the cloud rotates it, revoking
+    // the old one, even for the same user), so a running daemon reloads and
+    // stops its runs. Ask *before* anything is minted: declining afterwards
+    // would leave this host with no valid token at all. The desktop app
+    // (`--device-code-stdin`) has already warned the user; `--yes` is the
+    // scripted opt-out.
+    if !(args.yes || args.device_code_stdin) {
+        let active_runs = session::daemon_activity(paths).await.active_runs;
+        if needs_confirmation(active_runs, false) {
+            let stored_who = previous
+                .user_email
+                .as_deref()
+                .or(previous.user_id.as_deref());
+            println!();
+            for line in preflight_notice(active_runs, stored_who, previous.runner_count) {
+                println!("{line}");
+            }
+            if !crate::util::confirm::ask("Sign in anyway?", false) {
+                anyhow::bail!("login cancelled — nothing was changed");
+            }
+        }
+    }
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()
@@ -165,13 +232,6 @@ async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOut
 
     let token = poll_for_token(&client, &cloud_url, &start).await?;
 
-    // Persist the short-lived bridge APIToken just long enough to seed the
-    // local config and workspace binding. It is replaced below by a shared
-    // dev-machine MachineToken, which is the credential used by both the CLI
-    // and all runners hosted by this install.
-    runner_ops::write_cli_token(paths, &cloud_url, &token.access_token, args.force)
-        .context("writing temporary [cli].token to config.toml")?;
-
     println!();
     if let Some(email) = token.user_email.as_deref() {
         println!("✓ Logged in as {email}.");
@@ -180,8 +240,8 @@ async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOut
     }
 
     // v1: a CLI install is bound to one workspace. Resolve which one
-    // (auto-pick if there's only one membership; prompt otherwise),
-    // persist the choice, and use it for any subsequent runner-add.
+    // (auto-pick if there's only one membership; prompt otherwise); it is
+    // persisted with the rest of the sign-in below.
     let workspace_slug = resolve_workspace_binding(
         paths,
         &cloud_url,
@@ -189,25 +249,128 @@ async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOut
         args.workspace.as_deref(),
     )
     .await?;
-    let dev_machine_id =
-        runner_ops::ensure_dev_machine_id(paths).context("ensuring local dev-machine identity")?;
+    // Who is signing in, before anything is minted: the stored
+    // dev_machine_id may only be presented on behalf of the user it belongs
+    // to (the cloud answers 404 `dev_machine_not_found` for anyone else's).
+    let signing_in = status::whoami(&cloud_url, &token.access_token).await;
+    let signing_in_id = signing_in.as_ref().and_then(|me| me.id.clone());
+
+    // Trade the short-lived device-flow APIToken for the shared dev-machine
+    // MachineToken, which is the credential used by both the CLI and all
+    // runners hosted by this install. The cloud resolves (and may merge) the
+    // dev-machine record by fingerprint and tells us which id survived. On
+    // an account switch, or when either user is unknown, we send a fresh id
+    // instead of the stored one and let the fingerprint find this computer.
+    let reusable_machine_id = previous.dev_machine_id.filter(|_| {
+        session::may_reuse_dev_machine_id(previous.user_id.as_deref(), signing_in_id.as_deref())
+    });
     let host_label = crate::util::hostname::default_hostname();
-    let machine_token = exchange_for_machine_token(
+    let fingerprint = crate::util::machine_fingerprint::machine_fingerprint();
+    let mut requested_machine_id = reusable_machine_id.unwrap_or_else(uuid::Uuid::new_v4);
+    let mut exchanged = exchange_for_machine_token(
         &client,
         &cloud_url,
         &token.access_token,
         &workspace_slug,
-        &dev_machine_id,
+        &requested_machine_id,
         &host_label,
+        fingerprint.as_deref(),
     )
-    .await?;
-    runner_ops::write_cli_token(paths, &cloud_url, &machine_token.machine_token, args.force)
-        .context("writing dev-machine token to config.toml")?;
-    if machine_token.workspace_slug != workspace_slug {
-        runner_ops::write_cli_workspace(paths, &machine_token.workspace_slug)
-            .context("writing returned workspace binding to config.toml")?;
+    .await;
+    if reusable_machine_id.is_some()
+        && let Err(e) = &exchanged
+        && is_dev_machine_not_found(e)
+    {
+        // The stored record is gone or no longer ours (deleted in the web
+        // app, config copied from another account): start over without it.
+        tracing::warn!("stored dev_machine_id was refused ({e:#}); retrying without it");
+        requested_machine_id = uuid::Uuid::new_v4();
+        exchanged = exchange_for_machine_token(
+            &client,
+            &cloud_url,
+            &token.access_token,
+            &workspace_slug,
+            &requested_machine_id,
+            &host_label,
+            fingerprint.as_deref(),
+        )
+        .await;
     }
+    let machine_token = exchanged?;
+    let new_user_id = machine_token
+        .user
+        .as_ref()
+        .map(|u| u.id.clone())
+        .or(signing_in_id);
+    let new_user_email = machine_token
+        .user
+        .as_ref()
+        .and_then(|u| u.email.clone())
+        .or_else(|| signing_in.as_ref().and_then(|me| me.email.clone()))
+        .or_else(|| token.user_email.clone());
+
+    let switching = session::is_account_switch(previous.user_id.as_deref(), new_user_id.as_deref())
+        || previous.user_unknown();
+    if switching {
+        // Best-effort: the old user's machine token (and its handoff keys)
+        // must not outlive the switch. The cloud usually revoked it already
+        // when it minted ours; an unreachable cloud = warn and go on.
+        if let (Some(old_url), Some(old_token)) =
+            (previous.cloud_url.as_deref(), previous.token.as_deref())
+        {
+            match logout::revoke_token(old_url, old_token).await {
+                Ok(Ok(())) => {}
+                Ok(Err(detail)) => tracing::warn!(
+                    "could not revoke the previous account's machine token: {detail}"
+                ),
+                Err(e) => {
+                    tracing::warn!("could not revoke the previous account's machine token: {e:#}")
+                }
+            }
+        }
+    }
+
+    let switched_from_who = previous
+        .user_email
+        .clone()
+        .or_else(|| previous.user_id.clone())
+        .unwrap_or_else(|| "another account".to_string());
+    let switched_to_who = new_user_email
+        .clone()
+        .or_else(|| new_user_id.clone())
+        .unwrap_or_else(|| "this account".to_string());
+    let outcome = session::apply_sign_in(
+        paths,
+        &session::SignIn {
+            cloud_url: cloud_url.clone(),
+            force: args.force,
+            machine_token: machine_token.machine_token.clone(),
+            workspace_slug: machine_token.workspace_slug.clone(),
+            dev_machine_id: machine_token.dev_machine_id.unwrap_or(requested_machine_id),
+            user_id: new_user_id,
+            user_email: new_user_email,
+            handoff_key: machine_token.handoff_key.clone(),
+        },
+    )
+    .context("writing dev-machine token to config.toml")?;
     println!("  Workspace: {}", machine_token.workspace_slug);
+    if outcome.switched_from.is_some() {
+        println!(
+            "  Switched this machine from {switched_from_who} to {switched_to_who}; {} runner(s) parked.",
+            outcome.parked
+        );
+    } else if let Some(key) = outcome.parked_unknown.as_deref() {
+        let parked_file = session::parked_path(paths, key)
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| key.to_string());
+        println!(
+            "  This machine was signed in as an account that could not be identified; its {} runner(s) were set aside in {parked_file}.",
+            outcome.parked
+        );
+    }
+    if outcome.restored > 0 {
+        println!("  Restored {} runner(s).", outcome.restored);
+    }
 
     // Best-effort: write the machine-level ~/.pidash/context.md now that the
     // dev-machine token and workspace binding are persisted. A failure here is
@@ -219,6 +382,29 @@ async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOut
     }
 
     Ok(LoginOutcome { cloud_url })
+}
+
+/// Whether an interactive sign-in must ask before starting: only when the
+/// daemon has runs in progress that the credential change will stop.
+fn needs_confirmation(active_runs: usize, skip_prompt: bool) -> bool {
+    !skip_prompt && active_runs > 0
+}
+
+/// The warning shown before an interactive sign-in that will stop runs.
+fn preflight_notice(
+    active_runs: usize,
+    stored_who: Option<&str>,
+    stored_runner_count: usize,
+) -> Vec<String> {
+    let mut lines = vec![format!(
+        "{active_runs} run(s) in progress will be stopped when you sign in."
+    )];
+    if let Some(who) = stored_who {
+        lines.push(format!(
+            "This host is signed in as {who}. Signing in as a different account parks {who}'s {stored_runner_count} runner(s) until {who} signs in here again."
+        ));
+    }
+    lines
 }
 
 /// Where the cloud URL we're about to authenticate against came from.
@@ -365,8 +551,8 @@ async fn poll_for_token(
     }
 }
 
-/// Pick which workspace this CLI install is bound to and persist it
-/// to `[cli].workspace_slug`. Always reaches out to the cloud (even if
+/// Pick which workspace this CLI install is bound to (the caller persists
+/// it to `[cli].workspace_slug` with the rest of the sign-in). Always reaches out to the cloud (even if
 /// a stored binding exists) so a stale slug from a removed membership
 /// gets corrected.
 ///
@@ -421,8 +607,6 @@ async fn resolve_workspace_binding(
         picked.slug.clone()
     };
 
-    runner_ops::write_cli_workspace(paths, &chosen_slug)
-        .context("writing [cli].workspace_slug to config.toml")?;
     Ok(chosen_slug)
 }
 
@@ -465,16 +649,21 @@ async fn exchange_for_machine_token(
     workspace_slug: &str,
     dev_machine_id: &uuid::Uuid,
     host_label: &str,
+    machine_fingerprint: Option<&str>,
 ) -> Result<MachineTokenResponse> {
     let url = format!("{cloud_url}/api/v1/auth/machine-token/");
+    let mut body = serde_json::json!({
+        "workspace_slug": workspace_slug,
+        "dev_machine_id": dev_machine_id,
+        "host_label": host_label,
+    });
+    if let Some(fp) = machine_fingerprint {
+        body["machine_fingerprint"] = serde_json::Value::String(fp.to_string());
+    }
     let resp = client
         .post(&url)
         .header("X-Api-Key", api_token)
-        .json(&serde_json::json!({
-            "workspace_slug": workspace_slug,
-            "dev_machine_id": dev_machine_id,
-            "host_label": host_label,
-        }))
+        .json(&body)
         .send()
         .await
         .with_context(|| format!("POST {url}"))?;
@@ -486,6 +675,11 @@ async fn exchange_for_machine_token(
     resp.json::<MachineTokenResponse>()
         .await
         .context("parsing machine-token exchange response")
+}
+
+/// The cloud refused the dev_machine_id we sent as someone else's (or gone).
+fn is_dev_machine_not_found(e: &anyhow::Error) -> bool {
+    format!("{e:#}").contains("dev_machine_not_found")
 }
 
 fn pick_workspace(workspaces: &[WorkspaceRow]) -> Result<&WorkspaceRow> {
@@ -531,6 +725,7 @@ mod tests {
             workspace: None,
             force: false,
             device_code_stdin: false,
+            yes: false,
         }
     }
 
@@ -571,6 +766,28 @@ mod tests {
         let (url, source) = resolve_cloud_url(&args_with_url(None), &paths).unwrap();
         assert_eq!(url, "https://self.example.com");
         assert_eq!(source, CloudUrlSource::Config);
+    }
+
+    #[test]
+    fn confirmation_only_with_active_runs_unless_skipped() {
+        // Same-user re-login with runs in progress still asks: the token
+        // rotation reloads the daemon and stops them.
+        assert!(needs_confirmation(2, false));
+        assert!(!needs_confirmation(0, false));
+        // `--yes` / `--device-code-stdin`.
+        assert!(!needs_confirmation(2, true));
+    }
+
+    #[test]
+    fn preflight_notice_mentions_parking_when_a_user_is_stored() {
+        let lines = preflight_notice(3, None, 0);
+        assert_eq!(
+            lines,
+            vec!["3 run(s) in progress will be stopped when you sign in."]
+        );
+        let lines = preflight_notice(1, Some("a@example.com"), 2);
+        assert_eq!(lines.len(), 2);
+        assert!(lines[1].contains("different account parks a@example.com's 2 runner(s)"));
     }
 
     #[test]

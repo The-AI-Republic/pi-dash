@@ -425,6 +425,7 @@ mod resolve_tests {
                 token: Some(token.into()),
                 workspace_slug: None,
                 default_project: None,
+                ..Default::default()
             }),
         }
     }

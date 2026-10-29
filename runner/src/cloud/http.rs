@@ -71,6 +71,11 @@ pub enum TransportError {
     InvalidRefreshToken,
     #[error("session_evicted: {reason}")]
     SessionEvicted { reason: String },
+    /// HTTP 409 `dev_machine_merged`: the dev machine this request addressed
+    /// was merged into `dev_machine_id` (same computer, same owner). The
+    /// caller persists the survivor's id and retries against it.
+    #[error("dev_machine_merged: now {dev_machine_id}")]
+    DevMachineMerged { dev_machine_id: Uuid },
     #[error("concurrent_poll")]
     ConcurrentPoll,
     #[error("rate_limited")]
@@ -665,6 +670,9 @@ impl RunnerCloudClient {
         let status = resp.status();
         if status == StatusCode::CONFLICT {
             let body = resp.text().await.unwrap_or_default();
+            if let Some(merged) = dev_machine_merged(status, &body) {
+                return Err(merged);
+            }
             return Err(TransportError::SessionEvicted { reason: body });
         }
         if !status.is_success() {
@@ -1844,7 +1852,26 @@ fn classify_send_error(e: reqwest::Error) -> TransportError {
     }
 }
 
+/// `409 {"error": "dev_machine_merged", "dev_machine_id": "<survivor>"}`.
+fn dev_machine_merged(status: StatusCode, body: &str) -> Option<TransportError> {
+    #[derive(Deserialize)]
+    struct Merged {
+        error: String,
+        dev_machine_id: Uuid,
+    }
+    if status != StatusCode::CONFLICT {
+        return None;
+    }
+    let parsed: Merged = serde_json::from_str(body).ok()?;
+    (parsed.error == "dev_machine_merged").then_some(TransportError::DevMachineMerged {
+        dev_machine_id: parsed.dev_machine_id,
+    })
+}
+
 fn map_auth_error(status: StatusCode, body: &str) -> TransportError {
+    if let Some(merged) = dev_machine_merged(status, body) {
+        return merged;
+    }
     if status == StatusCode::UNAUTHORIZED {
         if body.contains("access_token_expired") {
             return TransportError::AccessTokenExpired;
@@ -1881,6 +1908,9 @@ fn map_auth_error(status: StatusCode, body: &str) -> TransportError {
 }
 
 fn map_session_error(status: StatusCode, body: &str) -> TransportError {
+    if let Some(merged) = dev_machine_merged(status, body) {
+        return merged;
+    }
     if status == StatusCode::CONFLICT {
         return TransportError::SessionEvicted {
             reason: body.chars().take(256).collect(),
@@ -1898,7 +1928,17 @@ pub struct CreateRunnerRequest<'a> {
     pub host_label: &'a str,
     pub name: Option<&'a str>,
     pub pod: Option<&'a str>,
+    /// `Runner.provisioning` on the cloud. `None` (every user-created
+    /// runner) lets the cloud default to [`PROVISIONING_MANUAL`]; the
+    /// desktop app's `__managed enroll` sends
+    /// [`PROVISIONING_DESKTOP_BUNDLED`].
+    pub provisioning: Option<&'a str>,
 }
+
+/// Stored values of the cloud's `RunnerProvisioning` enum
+/// (`apps/api/pi_dash/runner/models.py`).
+pub const PROVISIONING_MANUAL: &str = "manual";
+pub const PROVISIONING_DESKTOP_BUNDLED: &str = "desktop_bundled";
 
 /// Public helper to create a runner with the user-scoped CLI `APIToken`.
 ///
@@ -1911,20 +1951,10 @@ pub async fn create_runner(
     req: CreateRunnerRequest<'_>,
 ) -> Result<EnrollResponse, TransportError> {
     let url = format!("{}/api/v1/runner/runners/", transport.cloud_url());
-    let mut body = serde_json::json!({
-        "project": req.project,
-        "dev_machine_id": req.dev_machine_id,
-        "host_label": req.host_label,
-    });
-    if let Some(ws) = req.workspace_slug {
-        body["workspace_slug"] = Json::String(ws.to_string());
-    }
-    if let Some(n) = req.name {
-        body["name"] = Json::String(n.to_string());
-    }
-    if let Some(p) = req.pod {
-        body["pod"] = Json::String(p.to_string());
-    }
+    let body = create_runner_body(
+        &req,
+        crate::util::machine_fingerprint::machine_fingerprint(),
+    );
     let resp = transport
         .http()
         .post(&url)
@@ -1943,6 +1973,31 @@ pub async fn create_runner(
         .map_err(|e| TransportError::Protocol(format!("create_runner body: {e}")))
 }
 
+/// JSON body of `POST /api/v1/runner/runners/`.
+fn create_runner_body(req: &CreateRunnerRequest<'_>, machine_fingerprint: Option<String>) -> Json {
+    let mut body = serde_json::json!({
+        "project": req.project,
+        "dev_machine_id": req.dev_machine_id,
+        "host_label": req.host_label,
+    });
+    if let Some(fp) = machine_fingerprint {
+        body["machine_fingerprint"] = Json::String(fp);
+    }
+    if let Some(ws) = req.workspace_slug {
+        body["workspace_slug"] = Json::String(ws.to_string());
+    }
+    if let Some(n) = req.name {
+        body["name"] = Json::String(n.to_string());
+    }
+    if let Some(p) = req.pod {
+        body["pod"] = Json::String(p.to_string());
+    }
+    if let Some(p) = req.provisioning {
+        body["provisioning"] = Json::String(p.to_string());
+    }
+    body
+}
+
 pub async fn enroll_runner(
     transport: &SharedHttpTransport,
     enrollment_token: &str,
@@ -1954,6 +2009,9 @@ pub async fn enroll_runner(
         "enrollment_token": enrollment_token,
         "host_label": host_label,
     });
+    if let Some(fp) = crate::util::machine_fingerprint::machine_fingerprint() {
+        body["machine_fingerprint"] = Json::String(fp);
+    }
     if let Some(n) = name {
         body["name"] = Json::String(n.to_string());
     }
@@ -2018,6 +2076,15 @@ impl MachineClient {
         self.dev_machine_id
     }
 
+    /// Same credentials, addressed to another dev-machine record (the
+    /// survivor of a merge).
+    pub fn with_dev_machine_id(&self, dev_machine_id: Uuid) -> Self {
+        Self {
+            dev_machine_id,
+            ..self.clone()
+        }
+    }
+
     pub fn transport(&self) -> &SharedHttpTransport {
         &self.transport
     }
@@ -2035,14 +2102,22 @@ impl MachineClient {
     }
 
     /// `POST …/sessions/` — open (or take over) the machine session.
+    ///
+    /// Sends this computer's fingerprint (so the cloud can fold duplicate
+    /// records of it into this one) and who supervises the daemon. A merged
+    /// record answers 409 → [`TransportError::DevMachineMerged`].
     pub async fn open_session(&self) -> Result<MachineOpenResponse, TransportError> {
         let url = format!("{}/sessions/", self.base());
+        let mut body = serde_json::json!({ "supervisor": supervisor_kind() });
+        if let Some(fp) = crate::util::machine_fingerprint::machine_fingerprint() {
+            body["machine_fingerprint"] = Json::String(fp);
+        }
         let resp = self
             .transport
             .http()
             .post(&url)
             .header(AUTHORIZATION, format!("Bearer {}", self.machine_token))
-            .json(&serde_json::json!({}))
+            .json(&body)
             .send()
             .await
             .map_err(classify_send_error)?;
@@ -2126,6 +2201,20 @@ impl MachineClient {
             return Err(map_auth_error(status, &body));
         }
         Ok(())
+    }
+}
+
+/// Who runs this daemon, as reported on machine-session open: `"desktop"`
+/// when the desktop app runs it as its own child process (it sets
+/// `PIDASH_SUPERVISOR=desktop`), otherwise the OS service manager.
+pub fn supervisor_kind() -> &'static str {
+    supervisor_kind_from(std::env::var("PIDASH_SUPERVISOR").ok().as_deref())
+}
+
+fn supervisor_kind_from(value: Option<&str>) -> &'static str {
+    match value.map(str::trim) {
+        Some(v) if v.eq_ignore_ascii_case("desktop") => "desktop",
+        _ => "service",
     }
 }
 
@@ -2230,11 +2319,70 @@ pub struct EnrollResponse {
     pub machine_token: Option<String>,
     #[serde(default)]
     pub machine_token_minted: bool,
+    /// The dev machine the cloud resolved this host to (may differ from the
+    /// id sent when records were merged by fingerprint). Persisted locally.
+    #[serde(default)]
+    pub dev_machine_id: Option<Uuid>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn create_runner_body_carries_provisioning_only_when_set() {
+        let machine = Uuid::from_u128(7);
+        let mut req = CreateRunnerRequest {
+            api_token: "mt_x",
+            dev_machine_id: &machine,
+            workspace_slug: Some("acme"),
+            project: "PROJ",
+            host_label: "host",
+            name: Some("r1"),
+            pod: None,
+            provisioning: None,
+        };
+        let body = create_runner_body(&req, Some("ab".repeat(32)));
+        assert!(body.get("provisioning").is_none(), "{body}");
+        assert_eq!(body["machine_fingerprint"], "ab".repeat(32));
+        assert!(body.get("pod").is_none());
+
+        req.provisioning = Some(PROVISIONING_DESKTOP_BUNDLED);
+        let body = create_runner_body(&req, None);
+        assert_eq!(body["provisioning"], "desktop_bundled");
+        assert!(body.get("machine_fingerprint").is_none());
+        assert_eq!(PROVISIONING_MANUAL, "manual");
+    }
+
+    #[test]
+    fn dev_machine_merged_409_carries_the_survivor() {
+        let survivor = Uuid::new_v4();
+        let body = format!(r#"{{"error": "dev_machine_merged", "dev_machine_id": "{survivor}"}}"#);
+        for err in [
+            map_session_error(StatusCode::CONFLICT, &body),
+            map_auth_error(StatusCode::CONFLICT, &body),
+        ] {
+            match err {
+                TransportError::DevMachineMerged { dev_machine_id } => {
+                    assert_eq!(dev_machine_id, survivor)
+                }
+                other => panic!("expected DevMachineMerged, got {other:?}"),
+            }
+        }
+        // A plain session conflict is still an eviction.
+        assert!(matches!(
+            map_session_error(StatusCode::CONFLICT, "superseded"),
+            TransportError::SessionEvicted { .. }
+        ));
+    }
+
+    #[test]
+    fn supervisor_kind_defaults_to_service() {
+        assert_eq!(supervisor_kind_from(None), "service");
+        assert_eq!(supervisor_kind_from(Some("")), "service");
+        assert_eq!(supervisor_kind_from(Some("desktop")), "desktop");
+        assert_eq!(supervisor_kind_from(Some("Desktop\n")), "desktop");
+    }
 
     #[test]
     fn access_token_expiry_logic() {

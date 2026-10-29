@@ -9,7 +9,15 @@ use crate::util::paths::Paths;
 pub fn load_config(paths: &Paths) -> Result<Config> {
     let path = paths.config_path();
     let text = fs::read_to_string(&path).with_context(|| format!("reading config at {path:?}"))?;
-    let mut cfg: Config = toml::from_str(&text).with_context(|| format!("parsing {path:?}"))?;
+    parse_config(paths, &text)
+}
+
+/// Parse `config.toml` contents already read from [`Paths::config_path`],
+/// applying the same legacy migrations as [`load_config`]. Does not
+/// validate.
+pub fn parse_config(paths: &Paths, text: &str) -> Result<Config> {
+    let path = paths.config_path();
+    let mut cfg: Config = toml::from_str(text).with_context(|| format!("parsing {path:?}"))?;
     // Migrate the prior hardcoded default. `gpt-5-codex` was written into
     // every config produced by older runner builds; on ChatGPT-account auth
     // the codex app-server 400s on it. Treat the literal string as a
@@ -29,7 +37,7 @@ pub fn load_config(paths: &Paths) -> Result<Config> {
     // directory. Only a structurally broken config (a `workdir` reference no
     // `[[workdir]]` defines) still errors out.
     let raw: toml::Value =
-        toml::from_str(&text).with_context(|| format!("parsing {path:?} for migration"))?;
+        toml::from_str(text).with_context(|| format!("parsing {path:?} for migration"))?;
     match super::migrate::migrate_legacy_pool(&mut cfg, &raw, &paths.data_dir) {
         Ok(Some(migration)) => {
             for line in &migration.report {
@@ -189,7 +197,8 @@ pub fn remove_all(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
-fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+/// Atomically write `bytes` to `path` with owner-only (0600) permissions.
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("creating {parent:?}"))?;
     }
@@ -289,7 +298,7 @@ mod tests {
                 auto_update: true,
             },
             runners: vec![sample_runner("t", tmp.path().join("wd"))],
-        cli: None,
+            cli: None,
         };
         write_config(&paths, &cfg).unwrap();
         let loaded = load_config(&paths).unwrap();
@@ -521,7 +530,7 @@ model_default = "o4-mini"
                 sample_runner("a", tmp.path().join("wd-a")),
                 sample_runner("b", tmp.path().join("wd-b")),
             ],
-        cli: None,
+            cli: None,
         };
         write_config(&paths, &cfg).unwrap();
 
@@ -604,7 +613,7 @@ model_default = "o4-mini"
                 auto_update: true,
             },
             runners: vec![sample_runner("keep", tmp.path().join("wd"))],
-        cli: None,
+            cli: None,
         };
         write_config(&paths, &cfg).unwrap();
 

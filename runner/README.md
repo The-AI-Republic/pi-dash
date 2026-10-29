@@ -139,7 +139,7 @@ Useful follow-ups:
 
 ```bash
 pidash auth status               # who am I logged in as; runner list
-pidash auth logout               # revoke the CLI token server-side
+pidash auth logout               # revoke the CLI token; park this account's runners
 pidash runner add --project X    # add another runner
 pidash runner list / remove      # manage runners
 ```

@@ -26,7 +26,9 @@ use std::io::Read;
 use std::path::PathBuf;
 
 use crate::cli::runner_ops::{self, ApplyEnrollOptions};
-use crate::cloud::http::{CreateRunnerRequest, SharedHttpTransport, create_runner};
+use crate::cloud::http::{
+    CreateRunnerRequest, PROVISIONING_DESKTOP_BUNDLED, SharedHttpTransport, create_runner,
+};
 use crate::config::file;
 use crate::config::schema::AgentKind;
 use crate::util::paths::Paths;
@@ -49,6 +51,18 @@ pub enum ManagedCommand {
     ModelToken(ModelTokenArgs),
     /// Refresh host-owned paths for all projects before starting the daemon.
     Rebind(EnginePathsArgs),
+    /// Move a legacy desktop-managed config's runners into this (default)
+    /// config — only those of the workspace this config is signed in to.
+    /// Prints `{"adopted": [...], "skipped": [...], "fully_adopted": bool}`.
+    Adopt(AdoptArgs),
+}
+
+#[derive(Debug, ClapArgs)]
+pub struct AdoptArgs {
+    /// The legacy per-workspace config directory (holding `config.toml`)
+    /// the desktop app used to run its own daemon from.
+    #[arg(long)]
+    pub from_config_dir: PathBuf,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -120,6 +134,7 @@ pub async fn run(args: ManagedArgs, paths: &Paths) -> Result<()> {
         ManagedCommand::Enroll(a) => enroll(a, paths).await,
         ManagedCommand::Remove(a) => remove(a, paths),
         ManagedCommand::Rebind(a) => set_engine_paths(paths, &a, None),
+        ManagedCommand::Adopt(a) => adopt(a, paths).await,
         ManagedCommand::ModelToken(a) => {
             let token = std::fs::read_to_string(&a.file)
                 .context("managed model credential unavailable; reconnect Pi Dash Desktop")?;
@@ -164,15 +179,18 @@ async fn enroll(args: EnrollArgs, paths: &Paths) -> Result<()> {
         .and_then(|c| c.token.clone())
         .context("no [cli].token — run `__managed bootstrap` first")?;
 
-    // Reuse an existing runner for this project rather than minting a second:
-    // the desktop calls enroll every time it opens a project, and the cloud
-    // caps bundled runners per project anyway.
+    // Reuse an existing built-in-engine runner for this project rather than
+    // minting a second: the desktop calls enroll every time it opens a
+    // project, and the cloud caps bundled runners per project anyway. The
+    // config is shared with the user's own `pidash` runners, so only a
+    // managed runner qualifies — a user's runner on the same project is never
+    // reused or rewritten.
     if let Some(existing) = cfg
         .runners
         .iter()
-        .find(|r| r.project_slug.as_deref() == Some(args.project.as_str()))
+        .find(|r| r.project_slug.as_deref() == Some(args.project.as_str()) && is_managed_runner(r))
     {
-        set_managed_codex_fields(paths, &args)?;
+        set_managed_codex_fields(paths, &args, existing.runner_id)?;
         activate_if_running(paths, &existing.name).await?;
         println!(
             "{{\"ok\":true,\"reused\":true,\"runner_id\":\"{}\",\"name\":{:?}}}",
@@ -201,6 +219,7 @@ async fn enroll(args: EnrollArgs, paths: &Paths) -> Result<()> {
             host_label: &host_label,
             name: Some(&name),
             pod: None,
+            provisioning: Some(PROVISIONING_DESKTOP_BUNDLED),
         },
     )
     .await
@@ -224,7 +243,7 @@ async fn enroll(args: EnrollArgs, paths: &Paths) -> Result<()> {
     // deliberately not part of ApplyEnrollOptions: no other caller has a
     // bundled engine, and threading them through would put desktop-only
     // concepts into the shared enrollment path.
-    set_managed_codex_fields(paths, &args)?;
+    set_managed_codex_fields(paths, &args, applied.runner.runner_id)?;
     activate_if_running(paths, &applied.runner.name).await?;
 
     println!(
@@ -237,8 +256,11 @@ async fn enroll(args: EnrollArgs, paths: &Paths) -> Result<()> {
 fn remove(args: RemoveArgs, paths: &Paths) -> Result<()> {
     let mut cfg = file::load_config(paths).context("loading config.toml")?;
     let before = cfg.runners.len();
-    cfg.runners
-        .retain(|r| r.project_slug.as_deref() != Some(args.project.as_str()));
+    // Only the desktop's own (managed) runners; the user's runners on the
+    // same project stay.
+    cfg.runners.retain(|r| {
+        r.project_slug.as_deref() != Some(args.project.as_str()) || !is_managed_runner(r)
+    });
     if cfg.runners.len() == before {
         println!("{{\"ok\":true,\"removed\":0}}");
         return Ok(());
@@ -246,6 +268,203 @@ fn remove(args: RemoveArgs, paths: &Paths) -> Result<()> {
     file::write_config(paths, &cfg).context("rewriting config.toml")?;
     println!("{{\"ok\":true,\"removed\":{}}}", before - cfg.runners.len());
     Ok(())
+}
+
+/// Adopt a legacy desktop-managed config. JSON on stdout either way; a
+/// failure is `{"error": "adopt_failed", "message": ...}` with exit 1.
+/// Success prints the [`AdoptReport`]:
+///
+/// ```json
+/// {"adopted": [{"name": "...", "workspace_id": "..."}],
+///  "skipped": [{"name": "...", "workspace_id": "...", "reason": "workspace_mismatch"}],
+///  "fully_adopted": false}
+/// ```
+///
+/// `workspace_id` is the runner's workspace as the config records it (its
+/// slug), or null when the legacy config doesn't say. The legacy config is
+/// never modified; the caller may delete it only when `fully_adopted`.
+async fn adopt(args: AdoptArgs, paths: &Paths) -> Result<()> {
+    match adopt_runners(&args.from_config_dir, paths) {
+        Ok(report) => {
+            // Bring the adopted runners up in a daemon that is already
+            // running; with no daemon (or one that must reload first) the
+            // next start picks them up from config.toml.
+            for runner in &report.adopted {
+                if let Err(e) = activate_if_running(paths, &runner.name).await {
+                    tracing::warn!(runner = %runner.name, "adopted runner not activated: {e:#}");
+                }
+            }
+            println!("{}", serde_json::to_string(&report)?);
+            Ok(())
+        }
+        Err(e) => {
+            println!(
+                "{}",
+                serde_json::json!({ "error": "adopt_failed", "message": format!("{e:#}") })
+            );
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Why a legacy runner was not adopted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdoptSkipReason {
+    /// Already in the default config (same id or name) — nothing is lost.
+    AlreadyPresent,
+    /// The default config has no machine token: there is no credential the
+    /// runner could use.
+    NotSignedIn,
+    /// Registered in a workspace other than the one the default config's
+    /// machine token is for; it would fail to authenticate.
+    WorkspaceMismatch,
+    /// Neither side records a workspace to compare.
+    WorkspaceUnknown,
+    /// Registered against a different cloud.
+    CloudMismatch,
+    /// Would make the default config invalid (e.g. a working directory
+    /// already used by another runner).
+    InvalidConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AdoptedRunner {
+    pub name: String,
+    pub workspace_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SkippedRunner {
+    pub name: String,
+    pub workspace_id: Option<String>,
+    pub reason: AdoptSkipReason,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AdoptReport {
+    pub adopted: Vec<AdoptedRunner>,
+    pub skipped: Vec<SkippedRunner>,
+    /// Nothing is left behind: every legacy runner was adopted now or is
+    /// already in the default config, so the legacy dir is safe to delete.
+    pub fully_adopted: bool,
+}
+
+impl AdoptReport {
+    fn finish(mut self) -> Self {
+        self.fully_adopted = self
+            .skipped
+            .iter()
+            .all(|s| s.reason == AdoptSkipReason::AlreadyPresent);
+        self
+    }
+}
+
+/// Merge the `[[runner]]` blocks (managed Codex fields included) of
+/// `<from_dir>/config.toml` into the default config — only runners of the
+/// workspace the default config is signed in to, because its one
+/// `[cli].token` is a machine token for that workspace and every runner
+/// authenticates with it. Runners of other workspaces, of another cloud,
+/// already present (same id or name), or that would make the config invalid
+/// are skipped. A default config that isn't signed in adopts nothing. Never
+/// copies the legacy token or `dev_machine_id`, and never modifies the
+/// legacy config. Idempotent — a second run reports what the first adopted
+/// as `already_present`.
+pub fn adopt_runners(from_dir: &std::path::Path, paths: &Paths) -> Result<AdoptReport> {
+    let same_dir = match (from_dir.canonicalize(), paths.config_dir.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    };
+    if same_dir {
+        anyhow::bail!("{from_dir:?} is this host's own config directory");
+    }
+    let legacy_path = from_dir.join("config.toml");
+    let text = std::fs::read_to_string(&legacy_path)
+        .with_context(|| format!("reading {legacy_path:?}"))?;
+    let legacy: crate::config::schema::Config =
+        toml::from_str(&text).with_context(|| format!("parsing {legacy_path:?}"))?;
+    let mut report = AdoptReport::default();
+    if legacy.runners.is_empty() {
+        return Ok(report.finish());
+    }
+    let legacy_cloud = legacy.daemon.cloud_url.trim_end_matches('/').to_string();
+    let legacy_workspace = legacy.cli.as_ref().and_then(|c| c.workspace_slug.clone());
+    let workspace_of = |r: &crate::config::schema::RunnerConfig| {
+        r.workspace_slug
+            .clone()
+            .or_else(|| legacy_workspace.clone())
+    };
+    let skip_all = |report: &mut AdoptReport, reason| {
+        for runner in &legacy.runners {
+            report.skipped.push(SkippedRunner {
+                name: runner.name.clone(),
+                workspace_id: workspace_of(runner),
+                reason,
+            });
+        }
+    };
+
+    // No default config means not signed in: adopt nothing, write nothing.
+    if file::load_config_opt(paths)?.is_none() {
+        skip_all(&mut report, AdoptSkipReason::NotSignedIn);
+        return Ok(report.finish());
+    }
+    file::mutate_config(paths, |cfg| {
+        let signed_in_workspace = cfg
+            .cli
+            .as_ref()
+            .filter(|c| c.token.as_deref().is_some_and(|t| !t.is_empty()))
+            .map(|c| c.workspace_slug.clone());
+        let cloud_matches = cfg.daemon.cloud_url.trim_end_matches('/') == legacy_cloud;
+        for runner in &legacy.runners {
+            let workspace_id = workspace_of(runner);
+            let present = cfg
+                .runners
+                .iter()
+                .any(|r| r.runner_id == runner.runner_id || r.name == runner.name);
+            let reason = if present {
+                Some(AdoptSkipReason::AlreadyPresent)
+            } else {
+                match &signed_in_workspace {
+                    None => Some(AdoptSkipReason::NotSignedIn),
+                    Some(_) if !cloud_matches => Some(AdoptSkipReason::CloudMismatch),
+                    Some(Some(ws)) if workspace_id.as_deref() == Some(ws.as_str()) => None,
+                    Some(Some(_)) if workspace_id.is_some() => {
+                        Some(AdoptSkipReason::WorkspaceMismatch)
+                    }
+                    Some(_) => Some(AdoptSkipReason::WorkspaceUnknown),
+                }
+            };
+            let reason = reason.or_else(|| {
+                let mut adopted = runner.clone();
+                // Keep the binding explicit now that the runner lives in a
+                // config whose own workspace may change at the next sign-in.
+                adopted.workspace_slug = workspace_id.clone();
+                cfg.runners.push(adopted);
+                match cfg.validate() {
+                    Ok(()) => None,
+                    Err(e) => {
+                        cfg.runners.pop();
+                        tracing::warn!(runner = %runner.name, "not adopting runner: {e}");
+                        Some(AdoptSkipReason::InvalidConfig)
+                    }
+                }
+            });
+            match reason {
+                None => report.adopted.push(AdoptedRunner {
+                    name: runner.name.clone(),
+                    workspace_id,
+                }),
+                Some(reason) => report.skipped.push(SkippedRunner {
+                    name: runner.name.clone(),
+                    workspace_id,
+                    reason,
+                }),
+            }
+        }
+        Ok(())
+    })?;
+    Ok(report.finish())
 }
 
 /// A new project joins the already-running daemon instead of waiting for an
@@ -276,24 +495,35 @@ async fn activate_if_running(paths: &Paths, name: &str) -> Result<()> {
 /// Refresh all host-owned engine paths before the daemon starts. AppImage
 /// resource paths change on every launch, including for projects not reopened.
 /// Working directories and user-installed runners are deliberately preserved.
-fn set_managed_codex_fields(paths: &Paths, args: &EnrollArgs) -> Result<()> {
-    set_engine_paths(paths, &args.engine_paths, Some(&args.project))
+fn set_managed_codex_fields(paths: &Paths, args: &EnrollArgs, runner_id: uuid::Uuid) -> Result<()> {
+    set_engine_paths(paths, &args.engine_paths, Some(runner_id))
 }
 
-fn set_engine_paths(paths: &Paths, args: &EnginePathsArgs, project: Option<&str>) -> Result<()> {
+/// A runner the desktop app provisioned for its bundled engine: a Codex
+/// runner carrying the managed Codex fields (`codex_home` /
+/// `model_token_file`, which `Config::validate` keeps all-or-nothing). The
+/// user's own runners never have them.
+pub fn is_managed_runner(runner: &crate::config::schema::RunnerConfig) -> bool {
+    runner.agent.kind == AgentKind::Codex
+        && (runner.codex.codex_home.is_some() || runner.codex.model_token_file.is_some())
+}
+
+/// Point managed runners at the current engine paths: every existing managed
+/// runner, plus `target` (a runner just created by enroll, which has no
+/// managed fields yet). User runners are never touched.
+fn set_engine_paths(
+    paths: &Paths,
+    args: &EnginePathsArgs,
+    target: Option<uuid::Uuid>,
+) -> Result<()> {
     file::mutate_config(paths, |cfg| {
-        if project.is_some_and(|project| {
-            !cfg.runners
-                .iter()
-                .any(|r| r.project_slug.as_deref() == Some(project))
-        }) {
-            anyhow::bail!("enrolled runner for {project:?} not found in config");
+        if let Some(id) = target
+            && !cfg.runners.iter().any(|r| r.runner_id == id)
+        {
+            anyhow::bail!("enrolled runner {id} not found in config");
         }
         for runner in &mut cfg.runners {
-            if (project.is_some() && runner.project_slug.as_deref() == project)
-                || runner.codex.codex_home.is_some()
-                || runner.codex.model_token_file.is_some()
-            {
+            if Some(runner.runner_id) == target || is_managed_runner(runner) {
                 runner.codex.binary = args.engine.to_string_lossy().into_owned();
                 runner.codex.codex_home = Some(args.codex_home.clone());
                 runner.codex.path_prepend = Some(args.path_prepend.clone());

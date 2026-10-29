@@ -386,4 +386,7 @@ async fn runner_add_auth_bootstrap_uses_explicit_workspace_without_prompt() {
     let body: serde_json::Value =
         serde_json::from_str(&create_req.body).expect("runner create body should be JSON");
     assert_eq!(body["workspace_slug"], "beta");
+    // A user-created runner leaves provisioning to the cloud's default
+    // (manual); only the desktop app's managed enroll names one.
+    assert!(body.get("provisioning").is_none(), "{body}");
 }

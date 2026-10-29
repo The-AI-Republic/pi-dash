@@ -28,7 +28,7 @@ use crate::cloud::http::{
 use crate::cloud::protocol::{CreateRunnerCmd, MachineMsg};
 use crate::config::schema::AgentKind;
 use crate::daemon::state::StateHandle;
-use crate::daemon::supervisor::RunnerSpawnCtx;
+use crate::daemon::supervisor::{RunnerSpawnCtx, SessionDevMachineId};
 
 /// Server default; the open response's welcome frame can override it.
 const DEFAULT_LONG_POLL_SECS: u64 = 25;
@@ -40,6 +40,10 @@ pub(crate) struct MachineControl {
     client: MachineClient,
     spawn_ctx: RunnerSpawnCtx,
     daemon_state: StateHandle,
+    /// Shared with the supervisor's config watcher: the id this session
+    /// addresses. Updated *before* a merged id is written to `config.toml`
+    /// so the watcher recognises that write as ours.
+    session_dev_machine_id: SessionDevMachineId,
 }
 
 impl MachineControl {
@@ -47,18 +51,26 @@ impl MachineControl {
         client: MachineClient,
         spawn_ctx: RunnerSpawnCtx,
         daemon_state: StateHandle,
+        session_dev_machine_id: SessionDevMachineId,
     ) -> Self {
         Self {
             client,
             spawn_ctx,
             daemon_state,
+            session_dev_machine_id,
         }
     }
 
     /// Session lifecycle: open with backoff → poll until evicted or a
     /// fatal auth error → reopen. Mirrors `HttpLoop::run`'s inline
     /// 1→30s doubling with reset-on-success.
-    pub async fn run(self) {
+    ///
+    /// The open request carries this computer's fingerprint, so the cloud
+    /// may fold duplicate records into ours — or tell us (409
+    /// `dev_machine_merged`) that ours was folded into another. Then the
+    /// survivor's id is persisted to `config.toml` and the session reopens
+    /// against it.
+    pub async fn run(mut self) {
         let shutdown = self.daemon_state.shutdown_notified();
         let shutdown_fut = shutdown.notified();
         tokio::pin!(shutdown_fut);
@@ -85,6 +97,10 @@ impl MachineControl {
                     backoff_secs = 1;
                     tracing::info!(session_id = %resp.session_id, "machine control session open");
                     resp.session_id
+                }
+                Err(TransportError::DevMachineMerged { dev_machine_id }) => {
+                    self.adopt_survivor(dev_machine_id).await;
+                    continue;
                 }
                 Err(e) => {
                     if is_fatal(&e) {
@@ -133,6 +149,10 @@ impl MachineControl {
                         tracing::info!("machine session evicted ({reason}); reopening");
                         break 'poll;
                     }
+                    Err(TransportError::DevMachineMerged { dev_machine_id }) => {
+                        self.adopt_survivor(dev_machine_id).await;
+                        break 'poll;
+                    }
                     Err(e) => {
                         if is_fatal(&e) {
                             tracing::error!("machine control session unrecoverable: {e}");
@@ -149,6 +169,26 @@ impl MachineControl {
                 }
             }
         }
+    }
+
+    /// Our dev-machine record was merged into `survivor`: remember the new
+    /// id (config first, so the next daemon start uses it too) and address
+    /// it from now on.
+    async fn adopt_survivor(&mut self, survivor: Uuid) {
+        let previous = self.client.dev_machine_id();
+        tracing::info!(%previous, %survivor, "dev machine merged; switching to the surviving record");
+        let paths = self.spawn_ctx.paths.clone();
+        let session = self.session_dev_machine_id.clone();
+        let persisted = tokio::task::spawn_blocking(move || {
+            persist_adopted_dev_machine_id(&paths, &session, survivor)
+        })
+        .await;
+        match persisted {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => tracing::warn!("could not persist merged dev_machine_id: {e:#}"),
+            Err(e) => tracing::warn!("persisting merged dev_machine_id panicked: {e}"),
+        }
+        self.client = self.client.with_dev_machine_id(survivor);
     }
 
     async fn handle_message(&self, msg: PollMessage) {
@@ -215,6 +255,7 @@ impl MachineControl {
                 host_label: &host_label,
                 name: (!cmd.name.is_empty()).then_some(cmd.name.as_str()),
                 pod: (!cmd.pod.is_empty()).then_some(cmd.pod.as_str()),
+                provisioning: None,
             },
         )
         .await
@@ -276,6 +317,24 @@ fn parse_agent_kind(raw: &str) -> Result<AgentKind> {
     }
     <AgentKind as clap::ValueEnum>::from_str(raw, false)
         .map_err(|_| anyhow::anyhow!("unknown agent kind {raw:?}"))
+}
+
+/// Record `survivor` as the session's dev machine, then persist it to
+/// `config.toml`. The order matters: the supervisor's config watcher
+/// compares what it reads against the session's id, so publishing the id
+/// first keeps the watcher from treating our own write as an outside change
+/// and restarting this session.
+pub(crate) fn persist_adopted_dev_machine_id(
+    paths: &crate::util::paths::Paths,
+    session: &SessionDevMachineId,
+    survivor: Uuid,
+) -> Result<()> {
+    *session.lock().expect("session dev machine id poisoned") = Some(survivor);
+    crate::config::file::mutate_config(paths, |cfg| {
+        cfg.daemon.dev_machine_id = Some(survivor);
+        Ok(())
+    })?;
+    Ok(())
 }
 
 /// Errors that no amount of retrying fixes: the credential itself is
