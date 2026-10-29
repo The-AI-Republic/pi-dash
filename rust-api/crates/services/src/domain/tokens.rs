@@ -109,12 +109,19 @@ where
 /// validation decides (label fallback, description default, bot
 /// `user_type`, `expired_at` parsing). Id, token string and stamps are
 /// generated inside, like the model layer.
+///
+/// `created_by` is the `created_by_id` stamp (D6, PIDASHCONV-1609):
+/// the endpoint passes the owner (`views/api.py:20-35` stamps the
+/// request user, who is always the owner there), while the cloud MCP
+/// OAuth exchange passes the session user — or `None` on a cookieless
+/// POST — which may differ from the grant user (`oauth.py:357-374`).
 pub struct NewApiToken {
     pub label: String,
     pub description: String,
     pub user_id: Uuid,
     pub user_type: i16,
     pub expired_at: Option<DateTime<Utc>>,
+    pub created_by: Option<Uuid>,
 }
 
 /// What [`issue_token`] generated: the row id, the plaintext token (only
@@ -130,9 +137,10 @@ pub struct IssuedApiToken {
 /// `APIToken.objects.create(...)` with model defaults (`token` is
 /// `generate_token()`, `is_active` TRUE, `is_service` FALSE,
 /// `workspace_id` NULL, `allowed_rate_limit` `"60/min"`,
-/// `created_by_id` from the request user, `updated_by_id` NULL).
-/// `created`/`updated` are two separate `now()` calls, like the
-/// endpoint's, so captured micros differ.
+/// `updated_by_id` NULL). `created_by_id` is the caller's
+/// [`NewApiToken::created_by`] stamp (`None` binds `NULL`, like the
+/// PATCH input's). `created`/`updated` are two separate `now()`
+/// calls, like the endpoint's, so captured micros differ.
 pub async fn issue_token<'e, E>(ex: E, params: &NewApiToken) -> Result<IssuedApiToken, sqlx::Error>
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
@@ -145,7 +153,7 @@ where
     sqlx::query(&sql)
         .bind(created_at)
         .bind(updated_at)
-        .bind(params.user_id)
+        .bind(params.created_by)
         .bind(id)
         .bind(&params.label)
         .bind(&params.description)
@@ -1415,9 +1423,12 @@ mod tests {
 
     /// Seed one user row for the FK parents the token writes
     /// reference (the workspace-seed bot-user column set, trimmed to a
-    /// plain user).
-    async fn seed_user(pool: &sqlx::PgPool) -> Uuid {
+    /// plain user). `tag` keeps usernames unique: live tests share one
+    /// scratch DB and run in parallel.
+    async fn seed_user(pool: &sqlx::PgPool, tag: &str) -> Uuid {
         let now = Utc::now();
+        let username = format!("domain-tokens-{tag}");
+        let email = format!("domain-tokens-{tag}@example.test");
         sqlx::query_scalar(
             "INSERT INTO users (password, last_login, id, username, mobile_number, email,
                display_name, first_name, last_name, avatar, avatar_asset_id, cover_image,
@@ -1428,7 +1439,7 @@ mod tests {
                last_active, last_login_time, last_logout_time, last_login_ip, last_logout_ip,
                last_login_medium, last_login_uagent, token_updated_at, is_bot, bot_type,
                is_email_valid, masked_at)
-             VALUES ('!', NULL, $1, 'domain-tokens-live', NULL, 'domain-tokens-live@example.test',
+             VALUES ('!', NULL, $1, $3, NULL, $4,
                'Live', 'Live', '', '', NULL, NULL,
                NULL, $2, $2, $2, '',
                '', false, false, false, true,
@@ -1440,9 +1451,93 @@ mod tests {
         )
         .bind(Uuid::new_v4())
         .bind(now)
+        .bind(&username)
+        .bind(&email)
         .fetch_one(pool)
         .await
         .expect("seed user")
+    }
+
+    /// Live-db `created_by` option (D6, PIDASHCONV-1609): the MCP
+    /// OAuth exchange stamps the session user — or `NULL` on a
+    /// cookieless POST — while the token owner is the grant user
+    /// (`oauth.py:357-374`). Both shapes round-trip through
+    /// [`issue_token`]; model defaults stay as they are.
+    #[tokio::test]
+    async fn issue_token_created_by_override() {
+        let url = match std::env::var("DATABASE_URL") {
+            Ok(url) => url,
+            Err(_) => {
+                eprintln!("skipping live-db test: DATABASE_URL is not set");
+                return;
+            }
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect to scratch DATABASE_URL");
+        let granter = seed_user(&pool, "cb-grant").await;
+        let stamper = seed_user(&pool, "cb-stamp").await;
+        // Cookieless POST: `created_by_id` stays NULL.
+        let anonymous = issue_token(
+            &pool,
+            &NewApiToken {
+                label: "MCP client".to_owned(),
+                description: String::new(),
+                user_id: granter,
+                user_type: 1,
+                expired_at: None,
+                created_by: None,
+            },
+        )
+        .await
+        .expect("issue anonymous");
+        assert!(anonymous.token.starts_with("pi_dash_api_"));
+        // Session user differs from the grant user.
+        let stamped = issue_token(
+            &pool,
+            &NewApiToken {
+                label: "MCP client".to_owned(),
+                description: String::new(),
+                user_id: granter,
+                user_type: 1,
+                expired_at: None,
+                created_by: Some(stamper),
+            },
+        )
+        .await
+        .expect("issue stamped");
+        type Row = (Uuid, Option<Uuid>, i16, bool, String);
+        for (id, want_created_by) in [(anonymous.id, None), (stamped.id, Some(stamper))] {
+            let row: Row = sqlx::query_as(
+                r#"SELECT user_id, created_by_id, user_type, is_service, allowed_rate_limit
+                   FROM api_tokens WHERE id = $1"#,
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .expect("read back");
+            assert_eq!(row.0, granter, "owner is the grant user");
+            assert_eq!(row.1, want_created_by, "created_by stamp");
+            assert_eq!(row.2, 1, "bot user_type");
+            assert!(!row.3, "is_service FALSE");
+            assert_eq!(row.4, "60/min", "default rate");
+        }
+        for id in [anonymous.id, stamped.id] {
+            sqlx::query("DELETE FROM api_tokens WHERE id = $1")
+                .bind(id)
+                .execute(&pool)
+                .await
+                .expect("cleanup");
+        }
+        for id in [granter, stamper] {
+            sqlx::query("DELETE FROM users WHERE id = $1")
+                .bind(id)
+                .execute(&pool)
+                .await
+                .expect("cleanup");
+        }
     }
 
     /// Live-db half: the endpoint lifecycle round-trips through the
@@ -1463,7 +1558,7 @@ mod tests {
             .connect(&url)
             .await
             .expect("connect to scratch DATABASE_URL");
-        let user_id = seed_user(&pool).await;
+        let user_id = seed_user(&pool, "live").await;
         let issued = issue_token(
             &pool,
             &NewApiToken {
@@ -1472,11 +1567,19 @@ mod tests {
                 user_id,
                 user_type: 0,
                 expired_at: None,
+                created_by: Some(user_id),
             },
         )
         .await
         .expect("issue");
         assert!(issued.token.starts_with("pi_dash_api_"));
+        let (created_by,): (Option<Uuid>,) =
+            sqlx::query_as("SELECT created_by_id FROM api_tokens WHERE id = $1")
+                .bind(issued.id)
+                .fetch_one(&pool)
+                .await
+                .expect("read back");
+        assert_eq!(created_by, Some(user_id));
         touch_api_token_last_used_by_token(&pool, &issued.token)
             .await
             .expect("touch by token");
