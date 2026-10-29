@@ -49,9 +49,12 @@ test(
       // keystroke lands: only a content change can be saved through the UI.
       for (let sample = 0; sample < 2; sample += 1) {
         await page.waitForTimeout(5_000);
+        // Both apps render exactly one live editor inside a comment card
+        // container; only the container element differs (div versus
+        // article), so the tag qualifier stays off (NEWFRONT-818).
         const editText =
           (await page
-            .locator('div[id^="comment-"] [contenteditable="true"]')
+            .locator('[id^="comment-"] [contenteditable="true"]')
             .innerText()
             .catch(() => "")) ?? "";
         expect(editText).toContain(original);
