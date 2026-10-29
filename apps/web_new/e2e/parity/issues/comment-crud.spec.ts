@@ -118,10 +118,13 @@ test(
         await driver.activityOpenCommentMenu(body);
         expect(await driver.activityMenuItems()).toContain("Delete");
         await driver.activityClickMenuItem("Delete");
+        // Observe the transient first: the toast lives only seconds while
+        // the feed refetch can lag behind it, so polling the feed first
+        // can start the toast poll after dismissal (gate hardening).
+        await expect.poll(() => driver.sawToast("Comment removed successfully"), { timeout: 15_000 }).toBe(true);
         // No confirmation dialog exists: the card detaches with no further
         // clicks, which a modal would stall past this timeout.
         await expect.poll(() => driver.activityCommentTexts(), { timeout: 10_000 }).toEqual([]);
-        await expect.poll(() => driver.sawToast("Comment removed successfully"), { timeout: 15_000 }).toBe(true);
         const comments = await serverComments(seed.workspaceSlug, seed.projectId, issue.id, session);
         expect(comments.find((c) => c.id === posted.id)).toBeUndefined();
       });
