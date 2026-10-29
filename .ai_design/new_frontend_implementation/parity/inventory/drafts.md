@@ -128,7 +128,8 @@ covering row are explained instead.
 ## Gate notes (NEWFRONT-788)
 
 Proven on `apps/web_new` by the drafts area gate, both legs on the same
-rebased head (`227002e13`, base `8ba1f9d0d` + route migration):
+rebased head (`b64b0bff6`, base `c04ee57db` after the Analytics gate, plus
+the `/{ws}/drafts` route migration):
 
 - **OSS (full suite):** 38/38 scenarios green across all 12 spec files
   (`pnpm test:parity:new e2e/parity/drafts`, PARITY_NS=839).
@@ -155,3 +156,7 @@ behaviour on the new leg.
 No DRAFT row is edition-specific (DRAFT-027). Editions are proven by the
 absence of edition-specific drafts code plus the DRAFT-001/027 smoke on the
 cloud and desktop legs; the route, endpoints and outcomes do not branch.
+The desktop smoke additionally confirmed the owner-scoped cache rule
+(DRAFT-001): a desktop profile persisted only reference data, never the
+viewer's drafts list, and the next account on the machine opened empty
+both fresh and after a relaunch.
