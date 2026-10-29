@@ -19,7 +19,7 @@ import { CommentRichTextEditor, type RichTextEditorHandle } from "../../../share
 import { spaceRuntime } from "../api/client.js";
 import { spaceMessage } from "../lib/spaceMessages.js";
 import { useUploadSpaceCommentImage } from "./api.js";
-import { isSpaceCommentBodyEmpty, SPACE_COMMENT_IMAGE_UPLOADED_STATUS, spaceCommentEnterAction } from "./model.js";
+import { isSpaceCommentBodyEmpty, SPACE_COMMENT_IMAGE_UPLOADED_STATUS } from "./model.js";
 import { SpaceMentionSuggestions, useSpaceMentionPicker } from "./SpaceMentionSuggestions.js";
 
 export interface SpaceCommentEditFormProps {
@@ -56,13 +56,17 @@ export function SpaceCommentEditForm({
     getHandle: () => handleRef.current,
     busy,
     empty,
+    submit: (liveHtml) => void save(liveHtml ?? undefined),
   });
 
-  const save = async (): Promise<void> => {
-    if (busy || empty || pristine) return;
+  // `liveHtml` is the draft as the editing surface holds it right now;
+  // Enter lands before React renders the keystroke before it (ISS-197).
+  const save = async (liveHtml?: string): Promise<void> => {
+    const draft = liveHtml ?? html;
+    if (busy || isSpaceCommentBodyEmpty(draft) || draft === comment.comment_html) return;
     setSaving(true);
     try {
-      await onSave(html);
+      await onSave(draft);
     } catch {
       // The caller raised its own notice; the draft stays for a retry.
     } finally {
@@ -99,28 +103,22 @@ export function SpaceCommentEditForm({
       <div
         onKeyDown={(event) => {
           if (event.key === "Escape") {
-            if (mentions.mentionOpen) {
-              event.preventDefault();
-              mentions.dismiss();
-            }
+            if (!mentions.mentionOpen) return;
+            event.preventDefault();
+            mentions.dismiss();
             return;
           }
-          // Enter with a pristine draft saves nothing: the chain below
-          // reaches save(), which holds pristine as well as busy and
-          // empty.
+          // Inside the editing surface the surface owns plain Enter, at
+          // key time and from the live document: it consumes the key
+          // itself and a pick or no-op is already decided by then
+          // (SPC-053, ISS-197). An Enter elsewhere in the form still
+          // saves; save() still holds a pristine body.
           if (event.key !== "Enter" || event.shiftKey || event.ctrlKey || event.metaKey) return;
-          if (event.defaultPrevented) {
-            // The editing surface already swallowed this Enter (a pick
-            // or a no-op); only a pick still needs its insertion.
-            if (spaceCommentEnterAction({ mentionOpen: mentions.mentionOpen, busy, empty }) === "pick-mention") {
-              mentions.pickFirst();
-            }
-            return;
-          }
+          if (event.defaultPrevented) return;
           // IME composition commits with Enter: leave that Enter to the input.
           if (event.nativeEvent.isComposing) return;
           event.preventDefault();
-          void save();
+          void save(handleRef.current?.getHtml());
         }}
       >
         <React.Suspense fallback={<div className="min-h-24 rounded-(--radius-control) bg-(--subtle)" />}>

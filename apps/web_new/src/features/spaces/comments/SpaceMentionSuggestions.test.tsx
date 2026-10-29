@@ -19,12 +19,14 @@ function Harness({
   busy = false,
   empty = false,
   probe,
+  submit = () => undefined,
 }: {
   client: ReturnType<typeof createClient>;
   handle: RichTextEditorHandle | null;
   busy?: boolean;
   empty?: boolean;
   probe: { state?: PickerState };
+  submit?: (liveHtml: string | null) => void;
 }) {
   const picker = useSpaceMentionPicker({
     client,
@@ -32,6 +34,7 @@ function Harness({
     getHandle: () => handle,
     busy,
     empty,
+    submit,
   });
   probe.state = picker;
   return (
@@ -43,12 +46,15 @@ function member(rowId: string, id: string, name: string, avatar: string) {
   return { id: rowId, member: id, member__display_name: name, member__avatar: avatar };
 }
 
-function fakeHandle(): RichTextEditorHandle & { insertMention: Mock<(target: { id: string; name: string }) => void> } {
+function fakeHandle(
+  liveHtml = "<p>Draft</p>"
+): RichTextEditorHandle & { insertMention: Mock<(target: { id: string; name: string }) => void> } {
   return {
     insertImage: () => undefined,
     insertMention: vi.fn(),
     insertHtml: () => undefined,
     textBeforeCaret: () => "",
+    getHtml: () => liveHtml,
   };
 }
 
@@ -191,9 +197,10 @@ describe("useSpaceMentionPicker", () => {
     expect(calls).toHaveLength(1);
   });
 
-  it("swallows only the Enter the form must not see (SPC-053)", async () => {
+  it("holds a plain Enter while busy and lets the other shapes through (SPC-053)", async () => {
+    const submit = vi.fn();
     const handle = fakeHandle();
-    const { state } = renderPicker({ handle, busy: true }, [
+    const { state } = renderPicker({ handle, busy: true, submit }, [
       member("723e4567-e89b-12d3-a456-426614174006", ADA, "Ada L", ""),
     ]);
     const key = (init: KeyboardEventInit): KeyboardEvent => new KeyboardEvent("keydown", init);
@@ -208,13 +215,33 @@ describe("useSpaceMentionPicker", () => {
     expect(state().handleEditorKeyDown(key({ key: "Enter" }))).toBe(true);
     act(() => state().onMentionQuery("ada"));
     await screen.findByRole("list", { name: "Mention suggestions" });
-    // An open popup swallows the Enter so the form can pick instead.
+    // An open popup picks its first row instead of submitting.
     expect(state().handleEditorKeyDown(key({ key: "Enter" }))).toBe(true);
+    expect(handle.insertMention).toHaveBeenCalledTimes(1);
+    expect(submit).not.toHaveBeenCalled();
   });
 
-  it("lets a submit Enter reach the form (SPC-053)", () => {
-    const handle = fakeHandle();
-    const { state } = renderPicker({ handle, busy: false, empty: false });
-    expect(state().handleEditorKeyDown(new KeyboardEvent("keydown", { key: "Enter" }))).toBe(false);
+  it("submits a plain Enter from the live draft (SPC-053, ISS-197)", () => {
+    const submit = vi.fn();
+    const { state } = renderPicker({ handle: fakeHandle("<p>Fresh words</p>"), empty: false, submit });
+    expect(state().handleEditorKeyDown(new KeyboardEvent("keydown", { key: "Enter" }))).toBe(true);
+    expect(submit).toHaveBeenCalledWith("<p>Fresh words</p>");
+  });
+
+  it("trusts the live draft over a stale empty snapshot (ISS-197)", () => {
+    const submit = vi.fn();
+    const { state } = renderPicker({ handle: fakeHandle("<p>Just typed</p>"), empty: true, submit });
+    expect(state().handleEditorKeyDown(new KeyboardEvent("keydown", { key: "Enter" }))).toBe(true);
+    expect(submit).toHaveBeenCalledWith("<p>Just typed</p>");
+  });
+
+  it("holds an empty draft and a missing handle (SPC-053)", () => {
+    const submit = vi.fn();
+    const empty = renderPicker({ handle: fakeHandle("<p></p>"), empty: true, submit });
+    expect(empty.state().handleEditorKeyDown(new KeyboardEvent("keydown", { key: "Enter" }))).toBe(true);
+    expect(submit).not.toHaveBeenCalled();
+    const gone = renderPicker({ handle: null, empty: true, submit });
+    expect(gone.state().handleEditorKeyDown(new KeyboardEvent("keydown", { key: "Enter" }))).toBe(true);
+    expect(submit).not.toHaveBeenCalled();
   });
 });

@@ -139,12 +139,14 @@ export function spaceCommentEnterAction(state: SpaceCommentEnterState): SpaceCom
 }
 
 /**
- * Whether the editing surface swallows a plain Enter before it reaches
- * the form. A swallowed Enter inserts no newline: picks and no-ops
- * leave the draft byte-identical, and only a submit bubbles on.
+ * Whether a public draft is empty, asking the React snapshot and the
+ * live editing surface (SPC-053, ISS-197). A keystroke reaches the
+ * editor before React renders its output, so an Enter in that gap still
+ * reads an empty snapshot; the live document wins.
  */
-export function swallowSpaceCommentEnter(state: SpaceCommentEnterState): boolean {
-  return spaceCommentEnterAction(state) !== "submit";
+export function isSpaceCommentDraftEmpty(snapshotEmpty: boolean, liveHtml: string | null): boolean {
+  if (!snapshotEmpty) return false;
+  return liveHtml === null || isSpaceCommentBodyEmpty(liveHtml);
 }
 
 /** How many people one mention search may offer (SPC-054). */

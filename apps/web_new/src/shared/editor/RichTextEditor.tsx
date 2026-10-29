@@ -44,6 +44,12 @@ export interface RichTextEditorHandle {
   insertHtml: (html: string) => void;
   /** Text between the paragraph start and the caret, for @-queries. */
   textBeforeCaret: () => string;
+  /**
+   * The live document as stored HTML. Read at key and submit time: the
+   * surface's React snapshot can still be the one from before the
+   * keystroke that filled the draft (CMT-011, ISS-197).
+   */
+  getHtml: () => string;
 }
 
 export interface RichTextEditorProps {
@@ -96,6 +102,8 @@ interface EditorSelectionLike {
 interface EditorLike {
   chain: () => TiptapChain;
   state: { selection: EditorSelectionLike };
+  /** The document serialized as stored HTML. */
+  getHTML: () => string;
 }
 
 function insertImage(editor: EditorLike, src: string, stored?: StoredImageInsert): void {
@@ -159,6 +167,7 @@ function toHandle(editor: EditorLike): RichTextEditorHandle {
     insertMention: (target: { id: string; name: string }) => insertMention(editor, target),
     insertHtml: (html: string) => insertHtml(editor, html),
     textBeforeCaret: () => textBeforeCaret(editor),
+    getHtml: () => editor.getHTML(),
   };
 }
 

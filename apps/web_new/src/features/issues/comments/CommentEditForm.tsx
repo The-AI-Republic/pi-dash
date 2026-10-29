@@ -18,7 +18,7 @@ import * as React from "react";
 import { getAppClient } from "../../../core/api/client.js";
 import { CommentRichTextEditor, descriptionAssetSrc, type RichTextEditorHandle } from "../../../shared/editor/index.js";
 import { notifyError } from "../../../shared/shell/index.js";
-import { commentEnterAction, COMMENT_IMAGE_UPLOADED_STATUS, isCommentBodyEmpty } from "./model.js";
+import { COMMENT_IMAGE_UPLOADED_STATUS, isCommentBodyEmpty } from "./model.js";
 import {
   COMMENT_UPDATE_FAILED_TITLE,
   commentFailureDetail,
@@ -57,13 +57,6 @@ export function CommentEditForm({
   const pristine = html === comment.comment_html;
   const busy = saving || uploads > 0;
   const upload = useUploadCommentImage({ workspaceSlug, projectId });
-  const mentions = useCommentMentionPicker({
-    workspaceSlug,
-    projectId,
-    getHandle: () => handleRef.current,
-    busy,
-    empty,
-  });
   // Stored bodies keep bare asset ids; the editor paints the resolved
   // picture and carries the id back out, so opening and saving never
   // rewrites a kept image into a plain tag (CMT-009).
@@ -72,8 +65,12 @@ export function CommentEditForm({
     [workspaceSlug, projectId]
   );
 
-  const save = async (): Promise<void> => {
-    if (busy || empty || pristine) return;
+  // `liveHtml` is the draft as the editing surface holds it right now;
+  // Enter lands before React renders the keystroke before it, so the
+  // snapshot can trail the draft (ISS-197, CMT-003).
+  const save = async (liveHtml?: string): Promise<void> => {
+    const draft = liveHtml ?? html;
+    if (busy || isCommentBodyEmpty(draft) || draft === comment.comment_html) return;
     setSaving(true);
     let next: string;
     try {
@@ -81,7 +78,7 @@ export function CommentEditForm({
         getAppClient(),
         { workspaceSlug, projectId, commentId: comment.id },
         comment.comment_html,
-        html
+        draft
       );
     } catch (error) {
       // The duplicate runs before the mutation owns the save, so this
@@ -98,6 +95,15 @@ export function CommentEditForm({
       setSaving(false);
     }
   };
+
+  const mentions = useCommentMentionPicker({
+    workspaceSlug,
+    projectId,
+    getHandle: () => handleRef.current,
+    busy,
+    empty,
+    submit: (liveHtml) => void save(liveHtml ?? undefined),
+  });
 
   const uploadImage = (file: File): void => {
     setUploads((count) => count + 1);
@@ -126,28 +132,22 @@ export function CommentEditForm({
       <div
         onKeyDown={(event) => {
           if (event.key === "Escape") {
-            if (mentions.mentionOpen) {
-              event.preventDefault();
-              mentions.dismiss();
-            }
+            if (!mentions.mentionOpen) return;
+            event.preventDefault();
+            mentions.dismiss();
             return;
           }
-          // Enter with a pristine draft saves nothing: the chain below
-          // reaches save(), which holds pristine as well as busy and
-          // empty (CMT-003/011).
+          // Inside the editing surface the surface owns plain Enter, at
+          // key time and from the live document: it consumes the key
+          // itself and a pick or no-op is already decided by then
+          // (CMT-003/011, ISS-197). An Enter from elsewhere in the form
+          // still saves; save() still holds a pristine body.
           if (event.key !== "Enter" || event.shiftKey || event.ctrlKey || event.metaKey) return;
-          if (event.defaultPrevented) {
-            // The editing surface already swallowed this Enter (a pick
-            // or a no-op); only a pick still needs its insertion.
-            if (commentEnterAction({ mentionOpen: mentions.mentionOpen, busy, empty }) === "pick-mention") {
-              mentions.pickFirst();
-            }
-            return;
-          }
+          if (event.defaultPrevented) return;
           // IME composition commits with Enter: leave that Enter to the input.
           if (event.nativeEvent.isComposing) return;
           event.preventDefault();
-          void save();
+          void save(handleRef.current?.getHtml());
         }}
       >
         <React.Suspense fallback={<div className="min-h-24 rounded-(--radius-control) bg-(--subtle)" />}>

@@ -26,6 +26,11 @@ import {
 
 // The Tiptap chunk is lazy; the composer's own behaviors are what this
 // suite pins, and unit tests elsewhere cover the editor surface.
+// Test seam: while held, the fake editor keeps its live document current
+// but withholds React's copy of the edit, exactly the frame between a
+// keystroke and the render that publishes it (ISS-197).
+const pendingChanges = vi.hoisted(() => ({ held: false }));
+
 vi.mock("../../../shared/editor/RichTextEditor.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("../../../shared/editor/RichTextEditor.js")>();
   function FakeEditor({
@@ -42,6 +47,7 @@ vi.mock("../../../shared/editor/RichTextEditor.js", async (importOriginal) => {
     onReady?: (handle: {
       insertImage: (src: string) => void;
       insertMention: (target: { id: string; name: string }) => void;
+      getHtml: () => string;
     }) => void;
     onMentionQuery?: (query: string | null) => void;
     handleKeyDown?: (event: KeyboardEvent) => boolean;
@@ -51,6 +57,7 @@ vi.mock("../../../shared/editor/RichTextEditor.js", async (importOriginal) => {
     const boxRef = React.useRef<HTMLTextAreaElement>(null);
     const [, rerender] = React.useReducer((value: number) => value + 1, 0);
     const text = React.useRef("");
+    const htmlRef = React.useRef("<p></p>");
     const emit = (): void => {
       const markup =
         images.current.map((src) => `<img src="${src}">`).join("") +
@@ -60,7 +67,12 @@ vi.mock("../../../shared/editor/RichTextEditor.js", async (importOriginal) => {
               `<mention-component id="${mention.id}" entity_identifier="${mention.id}" entity_name="user_mention" data-name="${mention.name}"></mention-component>`
           )
           .join("");
-      onChange(text.current.trim() === "" && markup === "" ? "<p></p>" : `<p>${text.current}${markup}</p>`);
+      const nextHtml = text.current.trim() === "" && markup === "" ? "<p></p>" : `<p>${text.current}${markup}</p>`;
+      htmlRef.current = nextHtml;
+      // The live document is always current; React's snapshot is not.
+      // A held change reproduces the frame between the keystroke and
+      // the render that publishes it (ISS-197).
+      if (!pendingChanges.held) onChange(nextHtml);
       onMentionQuery?.(mentionQueryAt(text.current)?.text ?? null);
     };
     React.useEffect(
@@ -80,6 +92,8 @@ vi.mock("../../../shared/editor/RichTextEditor.js", async (importOriginal) => {
             rerender();
             emit();
           },
+          // The live document, as the real handle reads it at key time.
+          getHtml: () => htmlRef.current,
         }),
       [onReady]
     );
@@ -164,6 +178,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
   resetAppClient();
   vi.mocked(notifyError).mockClear();
+  pendingChanges.held = false;
 });
 
 // The lazy Tiptap chunk loads once per worker; under the full suite
@@ -181,6 +196,26 @@ describe("CommentComposer", () => {
     await waitFor(() =>
       expect(onCreate).toHaveBeenCalledWith({ html: "<p>Hello there</p>", access: "INTERNAL", assetIds: [] })
     );
+  });
+
+  it("posts on Enter typed before React rendered the draft (ISS-197)", async () => {
+    // The keystroke that fills the draft and the Enter share one task:
+    // the editing surface already holds the words, but the composer's
+    // `html` state is still the empty one from the render before them.
+    const { onCreate } = renderComposer();
+    const box = await editor();
+    box.focus();
+    pendingChanges.held = true;
+    fireEvent.input(box, { target: { value: "Fresh words" } });
+    expect(screen.getByRole("button", { name: "Comment" })).toBeDisabled();
+    fireEvent.keyDown(box, { key: "Enter" });
+    await waitFor(() =>
+      expect(onCreate).toHaveBeenCalledWith({ html: "<p>Fresh words</p>", access: "INTERNAL", assetIds: [] })
+    );
+    expect(onCreate).toHaveBeenCalledTimes(1);
+    // The draft cleared: the surface unmounts and the next Enter is empty.
+    pendingChanges.held = false;
+    await waitFor(() => expect((document.querySelector("textarea") as HTMLTextAreaElement).value).toBe(""));
   });
 
   it("newlines on Shift+Enter and leaves Ctrl/Cmd+Enter inert (CMT-011)", async () => {

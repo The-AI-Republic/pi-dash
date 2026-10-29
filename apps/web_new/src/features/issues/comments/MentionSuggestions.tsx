@@ -13,7 +13,7 @@ import * as React from "react";
 
 import type { RichTextEditorHandle } from "../../../shared/editor/index.js";
 import { COMMENT_MENTION_LIMIT, useCommentMentionSearch, type CommentMentionPerson } from "./api.js";
-import { swallowCommentEnter } from "./model.js";
+import { commentEnterAction, isCommentDraftEmpty } from "./model.js";
 
 /** Accessible name of the suggestion popup. */
 export const MENTION_SUGGESTIONS_LABEL = "Mention suggestions";
@@ -29,6 +29,11 @@ export interface CommentMentionPicker {
   busy: boolean;
   /** The draft holds neither words nor a stored content node. */
   empty: boolean;
+  /**
+   * Post/save the draft. The live document HTML comes along because the
+   * React snapshot lags the keystroke that filled it (ISS-197).
+   */
+  submit: (liveHtml: string | null) => void;
 }
 
 export interface CommentMentionPickerState {
@@ -57,6 +62,7 @@ export function useCommentMentionPicker({
   getHandle,
   busy,
   empty,
+  submit,
 }: CommentMentionPicker): CommentMentionPickerState {
   const [mentionQuery, setMentionQuery] = React.useState<string | null>(null);
   const [dismissed, setDismissed] = React.useState<string | null>(null);
@@ -97,12 +103,26 @@ export function useCommentMentionPicker({
     setDismissed(null);
   }, []);
 
+  // The editing surface calls this first for every key and always wins
+  // the decision on a plain Enter: ProseMirror consumes Enter itself
+  // (splitting the paragraph and preventing the default), so nothing
+  // reaches the form unless this guard lets it (ISS-197, CMT-011). A
+  // submit therefore acts here, at key time, from the live document:
+  // the `empty` snapshot can still predate the keystroke that filled it.
   const handleEditorKeyDown = React.useCallback(
     (event: KeyboardEvent) => {
       if (event.key !== "Enter" || event.shiftKey || event.ctrlKey || event.metaKey || event.isComposing) return false;
-      return swallowCommentEnter({ mentionOpen, busy, empty });
+      const liveHtml = getHandle()?.getHtml() ?? null;
+      const action = commentEnterAction({ mentionOpen, busy, empty: isCommentDraftEmpty(empty, liveHtml) });
+      if (action === "pick-mention") {
+        pickFirst();
+        return true;
+      }
+      if (action === "none") return true;
+      submit(liveHtml);
+      return true;
     },
-    [mentionOpen, busy, empty]
+    [getHandle, mentionOpen, busy, empty, pickFirst, submit]
   );
 
   return { people, mentionOpen, onMentionQuery, pick, pickFirst, dismiss, reset, handleEditorKeyDown };

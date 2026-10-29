@@ -39,14 +39,18 @@ vi.mock("../../../shared/editor/RichTextEditor.js", async (importOriginal) => {
     onReady?: (handle: {
       insertImage: (src: string) => void;
       insertMention: (target: { id: string; name: string }) => void;
+      getHtml: () => string;
     }) => void;
     onMentionQuery?: (query: string | null) => void;
     handleKeyDown?: (event: KeyboardEvent) => boolean;
   }) {
     const boxRef = React.useRef<HTMLTextAreaElement>(null);
     const text = React.useRef(initialHtml.replace(/<[^>]*>/g, "").trim());
+    const htmlRef = React.useRef(initialHtml);
     const emit = (): void => {
-      onChange(text.current.trim() === "" ? "<p></p>" : `<p>${text.current}</p>`);
+      const nextHtml = text.current.trim() === "" ? "<p></p>" : `<p>${text.current}</p>`;
+      htmlRef.current = nextHtml;
+      onChange(nextHtml);
       onMentionQuery?.(mentionQueryAt(text.current)?.text ?? null);
     };
     React.useEffect(
@@ -61,6 +65,7 @@ vi.mock("../../../shared/editor/RichTextEditor.js", async (importOriginal) => {
             if (boxRef.current !== null) boxRef.current.value = text.current;
             emit();
           },
+          getHtml: () => htmlRef.current,
         }),
       [onReady]
     );

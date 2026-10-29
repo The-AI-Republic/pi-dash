@@ -16,10 +16,10 @@ import {
   commentMenuEntries,
   isCommentAuthor,
   isCommentBodyEmpty,
+  isCommentDraftEmpty,
   isCommentFolded,
   patchCommentList,
   rewriteCommentImageSrcs,
-  swallowCommentEnter,
   toggledAccess,
   withFold,
 } from "./model.js";
@@ -280,11 +280,18 @@ describe("comment Enter decision (CMT-011)", () => {
     expect(commentEnterAction({ mentionOpen: false, busy: true, empty: true })).toBe("none");
   });
 
-  it("swallows every Enter except a submit", () => {
-    expect(swallowCommentEnter({ mentionOpen: true, busy: false, empty: false })).toBe(true);
-    expect(swallowCommentEnter({ mentionOpen: false, busy: true, empty: false })).toBe(true);
-    expect(swallowCommentEnter({ mentionOpen: false, busy: false, empty: true })).toBe(true);
-    expect(swallowCommentEnter({ mentionOpen: false, busy: false, empty: false })).toBe(false);
+  it("treats a stale empty snapshot as filled once the live draft has words (ISS-197)", () => {
+    // The keystroke reached the editor before React rendered its output.
+    expect(isCommentDraftEmpty(true, "<p>Fresh words</p>")).toBe(false);
+    // Stored content nodes count too: an image-only draft posts.
+    expect(isCommentDraftEmpty(true, '<p><img src="asset-9"></p>')).toBe(false);
+    expect(isCommentDraftEmpty(true, "<p></p>")).toBe(true);
+    expect(isCommentDraftEmpty(true, "<p> </p>")).toBe(true);
+    // No live surface yet: the snapshot stands.
+    expect(isCommentDraftEmpty(true, null)).toBe(true);
+    // A filled snapshot never needs the live answer.
+    expect(isCommentDraftEmpty(false, "<p></p>")).toBe(false);
+    expect(isCommentDraftEmpty(false, null)).toBe(false);
   });
 });
 

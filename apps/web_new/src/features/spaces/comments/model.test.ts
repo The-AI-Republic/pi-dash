@@ -24,7 +24,7 @@ import {
   spaceCommentImageSrc,
   spaceCommentSpeakerLabel,
   spaceMentionPerson,
-  swallowSpaceCommentEnter,
+  isSpaceCommentDraftEmpty,
   viewerSpaceCommentReacted,
   type SpaceCommentReactionRow,
 } from "./model.js";
@@ -211,10 +211,12 @@ describe("comment Enter rule", () => {
     expect(spaceCommentEnterAction({ mentionOpen: false, busy: false, empty: true })).toBe("none");
   });
 
-  it("swallows every Enter except a submit (SPC-053)", () => {
-    expect(swallowSpaceCommentEnter({ mentionOpen: false, busy: false, empty: false })).toBe(false);
-    expect(swallowSpaceCommentEnter({ mentionOpen: true, busy: false, empty: false })).toBe(true);
-    expect(swallowSpaceCommentEnter({ mentionOpen: false, busy: true, empty: false })).toBe(true);
+  it("treats a stale empty snapshot as filled once the live draft has words (ISS-197)", () => {
+    expect(isSpaceCommentDraftEmpty(true, "<p>Fresh words</p>")).toBe(false);
+    expect(isSpaceCommentDraftEmpty(true, '<p><img src="asset-1"></p>')).toBe(false);
+    expect(isSpaceCommentDraftEmpty(true, "<p></p>")).toBe(true);
+    expect(isSpaceCommentDraftEmpty(true, null)).toBe(true);
+    expect(isSpaceCommentDraftEmpty(false, null)).toBe(false);
   });
 });
 

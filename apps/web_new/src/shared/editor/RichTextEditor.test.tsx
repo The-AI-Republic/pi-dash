@@ -151,6 +151,33 @@ describe("RichTextEditor", { timeout: EDITOR_TEST_TIMEOUT }, () => {
     expect(document.querySelector("img")?.getAttribute("src")).toBe("https://cdn.test/shot.png");
   });
 
+  it("hands out the live document for the key-time Enter decision (ISS-197)", async () => {
+    const handles: import("./RichTextEditor.js").RichTextEditorHandle[] = [];
+    const onChange = vi.fn();
+    render(
+      <React.Suspense fallback={<p>loading</p>}>
+        <CommentRichTextEditor
+          initialHtml="<p></p>"
+          label="CommentLive"
+          onChange={onChange}
+          onReady={(ready) => {
+            handles.push(ready);
+          }}
+        />
+      </React.Suspense>
+    );
+    const editable = await editorSurface("CommentLive");
+    await vi.waitFor(() => expect(handles.length).toBeGreaterThan(0));
+    const handle = handles[handles.length - 1];
+    expect(handle?.getHtml()).toBe("<p></p>");
+    // A word typed into the surface is readable from the handle right
+    // away, before any re-render publishes it to the caller.
+    editable.focus();
+    await userEvent.setup().keyboard("Fresh");
+    expect(onChange).toHaveBeenLastCalledWith("<p>Fresh</p>");
+    expect(handle?.getHtml()).toBe("<p>Fresh</p>");
+  });
+
   it("stores an uploaded comment picture as image-component with its status (CMT-009)", async () => {
     const onChange = vi.fn();
     const handles: import("./RichTextEditor.js").RichTextEditorHandle[] = [];
