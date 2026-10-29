@@ -47,7 +47,11 @@ test(
       await test.step("enter posts with toast, reset and server state", async () => {
         await driver.activityPostComment(body);
         await expect.poll(() => driver.sawToast("Comment created successfully"), { timeout: 15_000 }).toBe(true);
-        expect(await driver.activityComposerText()).toBe("");
+        // The composer clears on the post-success render, a frame behind
+        // the toast the line above settled on: poll past the paint instead
+        // of reading once (gate hardening; the post itself is proven by the
+        // toast plus the server read below).
+        await expect.poll(() => driver.activityComposerText(), { timeout: 15_000 }).toBe("");
         const comments = await serverComments(seed.workspaceSlug, seed.projectId, issue.id, session);
         expect(comments).toHaveLength(1);
         expect(commentText(comments[0]!.comment_html)).toContain(body);
