@@ -202,6 +202,9 @@ export function DraftProperties({
             value={draft.module_ids}
             disabled={disabled}
             placeholder="Modules"
+            // A stored module must name itself on the row: the list is
+            // read lazily on open, so preload whenever one is attached.
+            preload={draft.module_ids.length > 0}
             onChange={(moduleIds) => onWrite(modulePatch(moduleIds))}
           />
         </div>
@@ -214,6 +217,9 @@ export function DraftProperties({
             value={draft.cycle_id}
             disabled={disabled}
             placeholder="Cycle"
+            // Same lazy-read rule as the modules: an attached cycle reads
+            // its name from the preloaded list, never the bare placeholder.
+            preload={draft.cycle_id !== null}
             onChange={(cycleId) => onWrite(cyclePatch(cycleId))}
           />
         </div>

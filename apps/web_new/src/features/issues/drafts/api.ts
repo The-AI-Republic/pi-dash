@@ -24,6 +24,7 @@ import {
 
 import { getAppClient } from "../../../core/api/client.js";
 import { LIST_STALE_TIME_MS, workspaceScope } from "../../../core/query/client.js";
+import { ownerScopedMeta } from "../../../core/query/persistence.js";
 import { rollbackSnapshots, snapshotQueries, type QuerySnapshot } from "../../../core/query/optimistic.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
 
@@ -63,6 +64,10 @@ export const draftKeys = {
 export function draftListQueryOptions(client: ApiClient, workspaceSlug: string) {
   return infiniteQueryOptions({
     queryKey: draftKeys.list(workspaceSlug),
+    // The rows are the caller's own drafts, not the workspace's: the
+    // desktop build keeps its cache on disk across accounts, so this list
+    // is never written there or read back from it (DRAFT-001).
+    meta: ownerScopedMeta(),
     queryFn: ({ pageParam }) =>
       listDraftIssues(client, workspaceSlug, {
         perPage: DRAFT_PAGE_SIZE,

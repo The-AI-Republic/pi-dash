@@ -139,7 +139,11 @@ test(
 
 // The update and retrieve actions declare a creator bypass but point it
 // at work-item rows, so it never matches a draft id; DRAFT-025 requires
-// admin-or-creator. Pinned here until NEWFRONT-299 lands the fix.
+// admin-or-creator. The fix is backend work owned by NEWFRONT-299 and
+// filed as PDASHOSS01-320, which is still open — so this reproduces the
+// refusal on whichever app is under test rather than asserting a target
+// the server cannot yet meet. DRAFT-025 stays oracle green, never new
+// green, until PDASHOSS01-320 lands; the gate flips it then.
 test(
   specTitle(["DRAFT-025"], "bug: creator bypass refuses owned-draft edits and fetches (NEWFRONT-299)"),
   { tag: specTags(["DRAFT-025"]) },

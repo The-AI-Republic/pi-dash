@@ -33,6 +33,8 @@ interface ModulePickerBase {
   triggerId?: string | undefined;
   open?: boolean | undefined;
   onOpenChange?: ((open: boolean) => void) | undefined;
+  /** Read the list up front so a set value names itself before the popup opens. */
+  preload?: boolean;
 }
 
 export type ModulePickerProps = ModulePickerBase &
@@ -102,6 +104,7 @@ export function ModulePicker(props: ModulePickerProps): React.ReactElement {
     triggerId,
     open: controlledOpen,
     onOpenChange,
+    preload = false,
   } = props;
   const multiple = props.multiple ?? false;
   const [uncontrolledOpen, setUncontrolledOpen] = React.useState(false);
@@ -112,7 +115,7 @@ export function ModulePicker(props: ModulePickerProps): React.ReactElement {
     onOpenChange?.(next);
   }
 
-  const modules = usePickerModules(workspaceSlug, projectId, open && !disabled);
+  const modules = usePickerModules(workspaceSlug, projectId, (open && !disabled) || preload);
   const options = React.useMemo(
     () =>
       selectModuleOptions({

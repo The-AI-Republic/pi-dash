@@ -13,13 +13,24 @@
 // member's archive, restore or edit would stay invisible until the entry
 // aged out. Restore therefore marks every entry stale so its first
 // subscriber refetches while the saved rows stay on screen.
+//
+// One store, one disk file, many accounts: the desktop profile survives a
+// sign-out only until the next person signs in, so a query whose rows
+// belong to the signed-in viewer is marked owner-scoped and never written
+// or restored. Without that mark the next account on the machine opens
+// the previous account's rows with no read of its own (DRAFT-001). The
+// mark wins over the preview: an owner-scoped row is dropped, not aged.
 
 import { dehydrate, hydrate, type DehydratedState, type QueryClient } from "@tanstack/react-query";
 
 import type { KeyValueStore } from "../platform/types.js";
 
-/** Bump when a stored cache must no longer hydrate (schema/shape change). */
-export const QUERY_CACHE_VERSION = 1;
+/**
+ * Bump when a stored cache must no longer hydrate (schema/shape change).
+ * 2: payloads from build 1 carry the previous account's viewer-owned rows
+ * (the drafts list) with no owner-scoped mark, so they are discarded.
+ */
+export const QUERY_CACHE_VERSION = 2;
 
 export const QUERY_CACHE_STORAGE_KEY = "tanstack-query-cache";
 
@@ -30,6 +41,26 @@ export const QUERY_CACHE_STORAGE_KEY = "tanstack-query-cache";
  */
 export function isReferenceQueryKey(queryKey: readonly unknown[]): boolean {
   return queryKey.includes("reference");
+}
+
+/**
+ * Marks a query whose cached rows belong to the signed-in viewer rather
+ * than to the workspace. Such a query is never written to disk or read
+ * back from it, even in the persist-everything build.
+ */
+export interface OwnerScopedMeta {
+  [key: string]: unknown;
+  ownerScoped: true;
+}
+
+/** The `meta` to pass on an owner-scoped query's options. */
+export function ownerScopedMeta(): OwnerScopedMeta {
+  return { ownerScoped: true };
+}
+
+/** True when the query's `meta` marks its rows as viewer-owned. */
+export function isOwnerScopedQuery(meta: unknown): boolean {
+  return typeof meta === "object" && meta !== null && (meta as { ownerScoped?: unknown }).ownerScoped === true;
 }
 
 /** Desktop persists everything; web persists reference data only. */
@@ -112,7 +143,8 @@ export function createCachePersistor(
     // rows yet, and `dehydrate` would attach its in-flight promise, which
     // JSON turns into `{}` and which then breaks the whole restore below.
     const full = dehydrate(client, {
-      shouldDehydrateQuery: (query) => settledStatus(query.state.status) && shouldPersist(query.queryKey),
+      shouldDehydrateQuery: (query) =>
+        settledStatus(query.state.status) && !isOwnerScopedQuery(query.meta) && shouldPersist(query.queryKey),
     });
     const payload: StoredPayload = { version, state: full };
     try {
@@ -147,7 +179,9 @@ export function createCachePersistor(
     // entry, so drop them here and restore the rest.
     const state: DehydratedState = {
       ...payload.state,
-      queries: (payload.state.queries ?? []).filter(restorableQuery).map(stalePreview),
+      queries: (payload.state.queries ?? [])
+        .filter((entry) => restorableQuery(entry) && !isOwnerScopedQuery(entry.meta))
+        .map(stalePreview),
     };
     hydrate(client, state);
   }

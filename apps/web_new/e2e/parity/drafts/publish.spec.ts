@@ -17,6 +17,7 @@ import {
   serverCreateModule,
   serverCreateState,
   serverDraftNames,
+  serverDraftsPage,
   serverFetchDraftStatus,
   serverFileAsset,
   serverHistory,
@@ -158,12 +159,29 @@ test(
     const name = `D21 No Project ${harness.tag}`;
     const draft = await serverCreateDraft(workspaceSlug, owner.cookie, { name });
 
-    // bug: the draft counts toward the server total but renders no row
-    // (NEWFRONT-305); the row should render with an empty project slot.
-    await test.step("the project-less draft renders no row (NEWFRONT-305)", async () => {
-      await draftsOpenAs(driver, harness);
-      expect(await driver.draftRowNames()).not.toContain(name);
-    });
+    // bug: the old app counts the draft toward the server total but
+    // renders no row (NEWFRONT-305). Spec §7 makes the rendered row the
+    // target, so the oracle leg pins the missing row and the web_new leg
+    // asserts the row is there with its project slot left empty.
+    const isTarget = driver.target === "web_new";
+    await test.step(
+      isTarget
+        ? "the project-less draft renders with an empty project slot"
+        : "the project-less draft renders no row (NEWFRONT-305)",
+      async () => {
+        await draftsOpenAs(driver, harness);
+        const names = await driver.draftRowNames();
+        if (isTarget) {
+          expect(names).toContain(name);
+          expect(await driver.draftRowProjectMarker(name).catch(() => "")).toBe("");
+          expect(await driver.draftsCountChip()).toBe(
+            String((await serverDraftsPage(workspaceSlug, owner.cookie, "")).total)
+          );
+        } else {
+          expect(names).not.toContain(name);
+        }
+      }
+    );
 
     await test.step("converting is refused and nothing is created", async () => {
       const attempt = await serverConvertDraftStatus(workspaceSlug, draft.id, owner.cookie, {});

@@ -131,9 +131,11 @@ test(
   }
 );
 
-// The drafts screen reads projects through the list payload, which never
-// carries the estimate link, so the picker never renders even where
-// enabled. Pinned here until NEWFRONT-300 lands the fix.
+// The drafts screen on the old app reads projects through the list
+// payload, which never carries the estimate link, so the picker never
+// renders even where enabled. Spec §7 makes the picker the target, so
+// the oracle leg pins the old behavior and the web_new leg asserts the
+// fixed one (NEWFRONT-300).
 test(
   specTitle(["DRAFT-017"], "bug: enabled projects never offer the estimate picker (NEWFRONT-300)"),
   { tag: specTags(["DRAFT-017"]) },
@@ -151,12 +153,31 @@ test(
     });
     expect(draft.estimatePoint).toBe(system.points[1]?.id);
 
-    await test.step("the linked project still offers no control", async () => {
-      await draftsOpenAs(driver, harness);
-      await expect.poll(() => driver.draftRowNames(), { timeout: 60_000 }).toContain(name);
-      expect(await driver.draftEstimatePickerVisible(name)).toBe(false);
-      expect(await driver.draftEstimateText(name)).toBe("");
-      expect((await serverDraftRecord(workspaceSlug, draft.id, owner.cookie)).estimatePoint).toBe(system.points[1]?.id);
-    });
+    if (driver.target === "web_new") {
+      await test.step("the linked project offers the picker with the stored point and persists a pick", async () => {
+        await draftsOpenAs(driver, harness);
+        await expect.poll(() => driver.draftRowNames(), { timeout: 60_000 }).toContain(name);
+        expect(await driver.draftEstimatePickerVisible(name)).toBe(true);
+        const third = system.points[2];
+        expect(third).toBeDefined();
+        await driver.draftOpenEstimatePicker(name);
+        await driver.pickerPick(String(third?.value));
+        await expect
+          .poll(async () => (await serverDraftRecord(workspaceSlug, draft.id, owner.cookie)).estimatePoint, {
+            timeout: 30_000,
+          })
+          .toBe(third?.id);
+      });
+    } else {
+      await test.step("the linked project still offers no control", async () => {
+        await draftsOpenAs(driver, harness);
+        await expect.poll(() => driver.draftRowNames(), { timeout: 60_000 }).toContain(name);
+        expect(await driver.draftEstimatePickerVisible(name)).toBe(false);
+        expect(await driver.draftEstimateText(name)).toBe("");
+        expect((await serverDraftRecord(workspaceSlug, draft.id, owner.cookie)).estimatePoint).toBe(
+          system.points[1]?.id
+        );
+      });
+    }
   }
 );

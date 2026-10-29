@@ -15,6 +15,7 @@ import {
   serverCreateLabel,
   serverCreateState,
   serverDraftRecord,
+  serverProjectStates,
 } from "../helpers/api";
 import { specTags, specTitle } from "../helpers/tags";
 import { draftsHarness, draftsOpenAs, draftsSeat } from "./support";
@@ -32,8 +33,16 @@ test(
 
     await test.step("the new state renders immediately and persists", async () => {
       await draftsOpenAs(driver, harness);
+      // The property strip paints its "State" placeholder until the
+      // project's states load; wait for the row to name a real state
+      // before reading the value this scenario moves away from.
+      const stateNames = (await serverProjectStates(workspaceSlug, projectId, owner.cookie)).map((state) => state.name);
+      await expect
+        .poll(async () => stateNames.includes(await driver.draftStateText(name)), { timeout: 30_000 })
+        .toBe(true);
       initialName = await driver.draftStateText(name);
       expect(initialName.length).toBeGreaterThan(0);
+      expect(initialName).not.toBe("Doing");
       await driver.draftOpenStatePicker(name);
       const options = await driver.pickerOptionTexts();
       expect(options).toContain("Doing");
@@ -50,6 +59,14 @@ test(
 
     await test.step("a rejected save rolls the row back (silently — see the bug: scenario below)", async () => {
       try {
+        // The row's state just moved; arming a one-shot failure before the
+        // server holds "Doing" would fail that save instead (it paints
+        // optimistically), so wait for the stored value first.
+        await expect
+          .poll(async () => (await serverDraftRecord(workspaceSlug, draft.id, owner.cookie)).stateId, {
+            timeout: 30_000,
+          })
+          .toBe(doingId);
         await driver.draftFailNextPatch(500, 1500);
         await driver.draftOpenStatePicker(name);
         await driver.pickerPick(initialName);
@@ -64,8 +81,9 @@ test(
 );
 
 // The oracle rolls a rejected inline save back without any error
-// notice; DRAFT-012 requires one. Pinned here until NEWFRONT-303 lands
-// the fix.
+// notice; DRAFT-012 requires one. Spec §7 makes the notice the target,
+// so the oracle leg pins the silent rollback (NEWFRONT-303) and the
+// web_new leg asserts the fixed behavior.
 test(
   specTitle(["DRAFT-012"], "bug: rejected inline save rolls back silently (NEWFRONT-303)"),
   { tag: specTags(["DRAFT-012"]) },
@@ -75,25 +93,56 @@ test(
     const name = `D12 Silent ${harness.tag}`;
     const draft = await serverCreateDraft(workspaceSlug, owner.cookie, { name, project_id: projectId });
     const doingId = await serverCreateState(workspaceSlug, projectId, "Doing", "started", owner.cookie);
+    const isTarget = driver.target === "web_new";
 
-    await test.step("a rejected save snaps back with no notice", async () => {
-      await draftsOpenAs(driver, harness);
-      const initialName = await driver.draftStateText(name);
-      await driver.draftOpenStatePicker(name);
-      await driver.pickerPick("Doing");
-      await expect.poll(() => driver.draftStateText(name), { timeout: 30_000 }).toBe("Doing");
-      try {
-        await driver.draftFailNextPatch(500, 1500);
+    await test.step(
+      isTarget ? "a rejected save snaps back and names the failure" : "a rejected save snaps back with no notice",
+      async () => {
+        await draftsOpenAs(driver, harness);
+        const stateNames = (await serverProjectStates(workspaceSlug, projectId, owner.cookie)).map(
+          (state) => state.name
+        );
+        await expect
+          .poll(
+            async () => {
+              const text = await driver.draftStateText(name);
+              return stateNames.includes(text) && text !== "Doing";
+            },
+            { timeout: 30_000 }
+          )
+          .toBe(true);
+        const initialName = await driver.draftStateText(name);
+        expect(initialName.length).toBeGreaterThan(0);
         await driver.draftOpenStatePicker(name);
-        await driver.pickerPick(initialName);
-        await expect.poll(() => driver.draftStateText(name), { timeout: 30_000 }).toBe(initialName);
+        await driver.pickerPick("Doing");
         await expect.poll(() => driver.draftStateText(name), { timeout: 30_000 }).toBe("Doing");
-        expect(await driver.toastText()).toBeNull();
-        expect((await serverDraftRecord(workspaceSlug, draft.id, owner.cookie)).stateId).toBe(doingId);
-      } finally {
-        await driver.draftClearPatchFailure().catch(() => {});
+        // The row shows "Doing" optimistically; arm the failure only once
+        // the server holds it, or the armed failure can land on this
+        // still-queued save instead of the one under test.
+        await expect
+          .poll(async () => (await serverDraftRecord(workspaceSlug, draft.id, owner.cookie)).stateId, {
+            timeout: 30_000,
+          })
+          .toBe(doingId);
+        try {
+          await driver.draftFailNextPatch(500, 1500);
+          await driver.draftOpenStatePicker(name);
+          await driver.pickerPick(initialName);
+          await expect.poll(() => driver.draftStateText(name), { timeout: 30_000 }).toBe(initialName);
+          await expect.poll(() => driver.draftStateText(name), { timeout: 30_000 }).toBe("Doing");
+          if (isTarget) {
+            // Target (NEWFRONT-303): the rollback is accompanied by a visible
+            // notice telling the viewer the change did not stick.
+            await expect.poll(() => driver.toastText(), { timeout: 30_000 }).toContain("Couldn't save the change");
+          } else {
+            expect(await driver.toastText()).toBeNull();
+          }
+          expect((await serverDraftRecord(workspaceSlug, draft.id, owner.cookie)).stateId).toBe(doingId);
+        } finally {
+          await driver.draftClearPatchFailure().catch(() => {});
+        }
       }
-    });
+    );
   }
 );
 

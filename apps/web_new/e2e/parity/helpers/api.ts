@@ -7933,7 +7933,28 @@ export interface ParityDraftWrite {
   label_ids?: string[];
   assignee_ids?: string[];
   parent_id?: string | null;
+  /** The create endpoint names the work type `type`; reads report `type_id`. */
+  type?: string | null;
   type_id?: string | null;
+}
+
+/**
+ * Seed one workspace work type (DRAFT-007). No HTTP route creates a work type
+ * on a plain workspace, and the parity seed ships none, so the scenario plants
+ * one through the stack's own Django shell — the same route the stack seed
+ * itself uses for data the API cannot mint.
+ */
+export async function serverSeedWorkType(workspaceSlug: string, name: string): Promise<string> {
+  const python = [
+    "from pi_dash.db.models import IssueType, Workspace",
+    `ws = Workspace.objects.get(slug=${JSON.stringify(workspaceSlug)})`,
+    `type_row = IssueType.objects.create(workspace=ws, name=${JSON.stringify(name)}, is_active=True)`,
+    'print("PARITY_WORK_TYPE=" + str(type_row.id))',
+  ].join("\n");
+  const out = await apiShell(python);
+  const match = /PARITY_WORK_TYPE=([0-9a-f-]{36})/.exec(out);
+  if (match === null) throw new Error(`[parity] work-type seed did not report an id; output: ${out}`);
+  return match[1];
 }
 
 /** Create a workspace draft; resolves with the stored record (HTTP 201). */

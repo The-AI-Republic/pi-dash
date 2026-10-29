@@ -363,6 +363,26 @@ describe("DraftProperties", () => {
     expect(estimate?.["preload"]).toBe(true);
   });
 
+  it("preloads only the attached cycle and modules so each names itself (DRAFT-018/019)", () => {
+    states.mockReturnValue({ data: [] } as never);
+    stubClient();
+    const attached = renderStrip(
+      draft({ module_ids: ["module-1"], cycle_id: "cycle-1" }),
+      project({ module_view: true, cycle_view: true })
+    );
+    expect(attached.calls.find((call) => call.name === "module")?.["preload"]).toBe(true);
+    expect(attached.calls.find((call) => call.name === "cycle")?.["preload"]).toBe(true);
+    attached.unmount();
+
+    const empty = renderStrip(
+      draft({ module_ids: [], cycle_id: null }),
+      project({ module_view: true, cycle_view: true })
+    );
+    // Nothing attached: the list stays lazy and reads on open.
+    expect(empty.calls.find((call) => call.name === "module")?.["preload"]).toBe(false);
+    expect(empty.calls.find((call) => call.name === "cycle")?.["preload"]).toBe(false);
+  });
+
   it("hides the estimate picker for a project without a point scale", () => {
     states.mockReturnValue({ data: [] } as never);
     stubClient();

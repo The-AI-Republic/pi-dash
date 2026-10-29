@@ -4,6 +4,14 @@
 // See the LICENSE file for details.
 import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import {
+  createMemoryHistory,
+  createRootRoute,
+  createRoute,
+  createRouter,
+  Outlet,
+  RouterProvider,
+} from "@tanstack/react-router";
 import * as React from "react";
 import { describe, expect, it, vi } from "vitest";
 
@@ -35,6 +43,42 @@ function sidebar(overrides: Partial<SidebarProps> = {}) {
     ...overrides,
   };
   return <Sidebar {...props} />;
+}
+
+/**
+ * Mount the sidebar inside a minimal router whose workspace tree carries
+ * the migrated screens the personal rows link to. The Drafts row is a
+ * migrated route (F-09), so it renders as a router link rather than a
+ * plain anchor; without a router that link cannot paint at all.
+ */
+function sidebarInRouter(overrides: Partial<SidebarProps> = {}) {
+  const rootRoute = createRootRoute({ component: () => <Outlet /> });
+  const wsRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "$ws",
+    component: () => (
+      <>
+        {sidebar(overrides)}
+        <Outlet />
+      </>
+    ),
+  });
+  const sectionRoute = createRoute({
+    getParentRoute: () => wsRoute,
+    path: "$section",
+    component: () => null,
+  });
+  const nestedRoute = createRoute({
+    getParentRoute: () => wsRoute,
+    path: "$section/$rest",
+    component: () => null,
+  });
+  const router = createRouter({
+    routeTree: rootRoute.addChildren([wsRoute.addChildren([sectionRoute, nestedRoute])]),
+    history: createMemoryHistory({ initialEntries: [overrides.currentPath ?? "/acme/"] }),
+    defaultPreload: false,
+  });
+  return <RouterProvider router={router} />;
 }
 
 describe("Sidebar", () => {
@@ -183,14 +227,15 @@ describe("Sidebar", () => {
     expect(container.querySelector("#main-sidebar")).toBe(landmark);
   });
 
-  it("lists personal entries above the projects group", () => {
+  it("lists personal entries above the projects group", async () => {
     render(
-      sidebar({
+      sidebarInRouter({
         personalEntries: [{ key: "drafts", label: "Drafts", href: "/acme/drafts/" }],
         currentPath: "/acme/drafts/",
         projectsGroup: <p>group content</p>,
       })
     );
+    await screen.findByRole("navigation", { name: "Personal" });
     const personal = screen.getByRole("navigation", { name: "Personal" });
     expect(personal).toHaveTextContent("Drafts");
     expect(personal.querySelector('[aria-current="page"]')).toHaveTextContent("Drafts");
@@ -202,11 +247,14 @@ describe("Sidebar", () => {
     expect(screen.getByTestId("sidebar-quick-actions")).toHaveTextContent("New work item");
   });
 
-  it("leaves personal entries unmarked off their address or without a path", () => {
+  it("leaves personal entries unmarked off their address or without a path", async () => {
     const personalEntries = [{ key: "drafts", label: "Drafts", href: "/acme/drafts/" }];
-    const { rerender } = render(sidebar({ personalEntries, currentPath: "/acme/" }));
+    const offAddress = render(sidebarInRouter({ personalEntries, currentPath: "/acme/" }));
+    await screen.findByRole("link", { name: "Drafts" });
     expect(screen.getByRole("link", { name: "Drafts" })).not.toHaveAttribute("aria-current");
-    rerender(sidebar({ personalEntries }));
+    offAddress.unmount();
+    render(sidebarInRouter({ personalEntries }));
+    await screen.findByRole("link", { name: "Drafts" });
     expect(screen.getByRole("link", { name: "Drafts" })).not.toHaveAttribute("aria-current");
   });
 

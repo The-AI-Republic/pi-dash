@@ -126,8 +126,12 @@ test(
 );
 
 // The oracle renders the row-menu titles untranslated; DRAFT-009 (as
-// amended to the main#532 target) requires translated labels. Pinned
-// here until NEWFRONT-298 lands the fix.
+// amended to the main#532 target) requires translated labels. Spec §7
+// makes the labels the target for the new app, so the oracle leg pins
+// the old keys and the web_new leg asserts the translated catalog
+// (NEWFRONT-298).
+const DRAFT_MENU_TARGET_LABELS = ["Edit", "Make a copy", "Move to project", "Delete"];
+
 test(
   specTitle(["DRAFT-009"], "bug: row menus render raw i18n keys (NEWFRONT-298)"),
   { tag: specTags(["DRAFT-009"]) },
@@ -136,11 +140,18 @@ test(
     const { owner, workspaceSlug, projectId } = harness;
     const name = `D9 Keys ${harness.tag}`;
     await serverCreateDraft(workspaceSlug, owner.cookie, { name, project_id: projectId });
+    const expected =
+      driver.target === "web_new" ? DRAFT_MENU_TARGET_LABELS : ["edit", "make_a_copy", "move_to_project", "delete"];
 
-    await test.step("both openers expose the raw keys in order", async () => {
-      await draftsOpenAs(driver, harness);
-      expect(await driver.draftRowMenuEntries(name)).toEqual(["edit", "make_a_copy", "move_to_project", "delete"]);
-      expect(await driver.draftContextMenuEntries(name)).toEqual(["edit", "make_a_copy", "move_to_project", "delete"]);
-    });
+    await test.step(
+      driver.target === "web_new"
+        ? "both openers expose the translated labels in order"
+        : "both openers expose the raw keys in order",
+      async () => {
+        await draftsOpenAs(driver, harness);
+        expect(await driver.draftRowMenuEntries(name)).toEqual(expected);
+        expect(await driver.draftContextMenuEntries(name)).toEqual(expected);
+      }
+    );
   }
 );

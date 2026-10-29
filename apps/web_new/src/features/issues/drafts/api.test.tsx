@@ -191,6 +191,15 @@ describe("draftListQueryOptions", () => {
     expect(draftKeys.list(WS)).toEqual([...draftKeys.all(WS), "list"]);
   });
 
+  it("marks the list owner-scoped so the desktop cache never keeps it", () => {
+    // DRAFT-001: the rows are the viewer's own drafts. The desktop bundle
+    // keeps its query cache on disk for the next launch, so this list must
+    // be excluded from that payload; otherwise the next account on the
+    // machine paints the previous account's drafts without a read.
+    const options = draftListQueryOptions({} as never, WS);
+    expect(options.meta).toEqual({ ownerScoped: true });
+  });
+
   it("reads with the shared list freshness and inherits the app's no-refocus reads", async () => {
     // DRAFT-026: outside changes appear only on a fresh fetch. The app
     // client pins refetchOnWindowFocus/refetchOnReconnect false (ISS-221);

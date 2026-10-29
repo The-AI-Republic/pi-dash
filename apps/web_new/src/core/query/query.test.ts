@@ -12,7 +12,13 @@ import {
   rollbackSnapshots,
   snapshotQueries,
 } from "./optimistic.js";
-import { createCachePersistor, isReferenceQueryKey, persistReferenceOnly, QUERY_CACHE_VERSION } from "./persistence.js";
+import {
+  createCachePersistor,
+  isReferenceQueryKey,
+  ownerScopedMeta,
+  persistReferenceOnly,
+  QUERY_CACHE_VERSION,
+} from "./persistence.js";
 import { createMemoryStore } from "../platform/storage.js";
 import { createRealtimeHub } from "./realtime.js";
 
@@ -275,6 +281,62 @@ describe("cache persistence", () => {
     await emptyLoader.restore();
     emptyLoader.stop();
     expect(empty.getQueryCache().getAll()).toEqual([]);
+  });
+
+  it("never saves or restores a query marked owner-scoped", async () => {
+    // The drafts list is one viewer's rows under the workspace scope, and
+    // the desktop build keeps the whole cache on disk between launches.
+    // Restoring that list hands the next account on the machine the
+    // previous one's drafts (DRAFT-001), so an owner-scoped entry is
+    // dropped on both sides of the payload, even in the persist-all build.
+    const storage = createMemoryStore();
+    const writer = createQueryClient();
+    const drafts = writer.getQueryCache().build(writer, {
+      queryKey: ["ws", "acme", "issue-drafts", "list"],
+      queryFn: () => Promise.resolve({ pages: [{ results: [{ id: "own-draft" }] }], pageParams: [""] }),
+      meta: ownerScopedMeta(),
+    });
+    drafts.setState({
+      status: "success",
+      fetchStatus: "idle",
+      data: { pages: [{ results: [{ id: "own-draft" }] }], pageParams: [""] },
+      dataUpdatedAt: Date.now(),
+    });
+    writer.setQueryData(["ws", "acme", "reference", "states"], [{ id: "s1" }]);
+    const persistor = createCachePersistor(writer, storage, { saveDelayMs: 1 });
+    await persistor.save();
+    persistor.stop();
+
+    const raw = (await storage.get("tanstack-query-cache")) ?? "";
+    const stored = JSON.parse(raw) as {
+      state: {
+        queries: Array<{
+          queryKey: unknown[];
+          queryHash?: string;
+          dehydratedAt?: number;
+          meta?: unknown;
+          state?: unknown;
+        }>;
+      };
+    };
+    expect(stored.state.queries.map((entry) => entry.queryKey)).toEqual([["ws", "acme", "reference", "states"]]);
+
+    // A payload written by an older build can still carry the entry.
+    stored.state.queries.push({
+      dehydratedAt: Date.now(),
+      queryKey: ["ws", "acme", "issue-drafts", "list"],
+      queryHash: JSON.stringify(["ws", "acme", "issue-drafts", "list"]),
+      meta: ownerScopedMeta(),
+      state: { status: "success", fetchStatus: "idle", data: { pages: [] }, dataUpdatedAt: 1 },
+    });
+    await storage.set("tanstack-query-cache", JSON.stringify(stored));
+
+    const reader = createQueryClient();
+    const loader = createCachePersistor(reader, storage, { saveDelayMs: 1 });
+    await loader.restore();
+    loader.stop();
+    expect(reader.getQueryCache().find({ queryKey: ["ws", "acme", "issue-drafts", "list"] })).toBeUndefined();
+    expect(reader.getQueryData(["ws", "acme", "reference", "states"])).toEqual([{ id: "s1" }]);
   });
 
   it("marks reference keys by convention", () => {

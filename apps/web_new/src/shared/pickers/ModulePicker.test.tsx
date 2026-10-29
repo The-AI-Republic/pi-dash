@@ -267,6 +267,42 @@ describe("ModuleChips", () => {
     expect(screen.getByText("Alpha")).toBeInTheDocument();
   });
 
+  it("reads the module list up front when asked to preload", async () => {
+    const { queryClient, calls } = harness(MODULES);
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ModulePicker workspaceSlug="acme" projectId={PROJECT} multiple value={[ALPHA]} onChange={vi.fn()} preload />
+      </QueryClientProvider>
+    );
+    // The trigger names the stored module before any popup opens.
+    expect(await screen.findByRole("button", { name: "Alpha" })).toBeInTheDocument();
+    expect(calls.some((url) => url.endsWith("/modules/"))).toBe(true);
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+  });
+
+  it("names a stored module on a read-only row without letting the popup open", async () => {
+    const { queryClient, calls } = harness(MODULES);
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ModulePicker
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          multiple
+          value={[ALPHA]}
+          onChange={vi.fn()}
+          preload
+          disabled
+        />
+      </QueryClientProvider>
+    );
+    // A read-only row still reads the list to name what it holds…
+    expect(await screen.findByRole("button", { name: "Alpha" })).toBeInTheDocument();
+    expect(calls.some((url) => url.endsWith("/modules/"))).toBe(true);
+    // …but the control stays shut for a viewer who may not edit.
+    fireEvent.click(screen.getByRole("button", { name: "Alpha" }));
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+  });
+
   it("disables removal on request", () => {
     render(<ModuleChips modules={[{ id: ALPHA, name: "Alpha" }]} onRemove={() => undefined} disabled />);
     expect(screen.getByRole("button", { name: "Remove Alpha" })).toBeDisabled();
