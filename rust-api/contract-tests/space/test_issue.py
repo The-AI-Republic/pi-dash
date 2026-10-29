@@ -15,6 +15,8 @@ flip from 401/403 to 200. Removing only the ``BaseViewSet`` line is a no-op —
 the global default still denies — so the tripwire demo must cover both.
 """
 
+import uuid
+
 import pytest
 
 pytestmark = pytest.mark.contract
@@ -137,6 +139,27 @@ def test_comment_create_on_soft_deleted_issue_returns_201(user_client, world, db
         (world["project"]["id"], world["owner"]["id"]),
     )
     assert member is not None
+
+
+def test_comment_create_on_missing_issue_is_invalid_payload(user_client, world, db):
+    # PIDASHCONV-1635: the create takes issue_id from the URL with no
+    # existence check (views/issue.py:257-294); the issue_id FK is
+    # DEFERRABLE INITIALLY DEFERRED, so the violation surfaces at commit
+    # and handle_exception maps it to 400 (base.py:74-78). Rust must map
+    # its tx.commit() failure the same way — never a 500 — and roll the
+    # comment, description and link writes back together.
+    missing = str(uuid.uuid4())
+    assert missing != world["issue"]["id"]
+    url = f"{BASE}/anchor/{world['anchor']}/issues/{missing}/comments/"
+    before_comments = db.fetchone("SELECT count(*) AS n FROM issue_comments")["n"]
+    before_descriptions = db.fetchone("SELECT count(*) AS n FROM descriptions")["n"]
+    response = user_client.post(url, json={"comment_html": "<p>x</p>"})
+    assert response.status_code == 400
+    assert response.content == b'{"error":"The payload is not valid"}'
+    after_comments = db.fetchone("SELECT count(*) AS n FROM issue_comments")["n"]
+    after_descriptions = db.fetchone("SELECT count(*) AS n FROM descriptions")["n"]
+    assert after_comments == before_comments
+    assert after_descriptions == before_descriptions
 
 
 def test_comment_retrieve_patch_delete_owned(user_client, world):
