@@ -52,6 +52,7 @@
 //! (`views/state.py`, handler layer, PIDASHCONV-372).
 
 use serde::Serialize;
+use serde_json::Value;
 
 /// `StateSerializer.Meta.read_only_fields` (`state.py:30-40`).
 pub const STATE_READ_ONLY_FIELDS: [&str; 9] = [
@@ -278,6 +279,112 @@ pub fn state_to_representation<'a>(row: &'a StateRow<'a>) -> StateView<'a> {
         external_source: row.external_source,
         external_id: row.external_id,
     }
+}
+
+/// All `StateSerializer` wire fields, in live-DRF order (probed 2026-09-30 against
+/// Django 4.2.30: declared `id`, the time/soft-delete columns, the plain model
+/// fields in definition order, then the four FKs — `created_by`, `updated_by`,
+/// `project`, `workspace` — last).
+///
+/// NOTE: this differs from [`StateView`], which documents "declared `id`, then
+/// model definition order" (foundation, PIDASHCONV-351). The order below is
+/// what Django actually emits; [`state_base_map`] follows the wire, not the doc.
+///
+/// Moved verbatim from `pidash_api::v1_projects::handlers_state_estimate` by
+/// OVL-10 (PIDASHCONV-1656) so the v1 handlers and `pidash_sdk::read` share one
+/// `__all__` renderer.
+pub const STATE_FIELDS: &[&str] = &[
+    "id",
+    "created_at",
+    "updated_at",
+    "deleted_at",
+    "name",
+    "description",
+    "color",
+    "slug",
+    "sequence",
+    "group",
+    "is_triage",
+    "default",
+    "external_source",
+    "external_id",
+    "created_by",
+    "updated_by",
+    "project",
+    "workspace",
+];
+
+/// One rendered state object as an ordered map, before `fields`/`expand`.
+///
+/// Moved verbatim from `pidash_api::v1_projects::handlers_state_estimate` by
+/// OVL-10 (PIDASHCONV-1656); the v1 handlers call it through `ser::` and the
+/// cloud overlay (MCP `list_states`) through `pidash_sdk::read`.
+#[allow(clippy::too_many_arguments)]
+pub fn state_base_map(
+    id: &str,
+    created_at: &str,
+    updated_at: &str,
+    created_by: Option<String>,
+    updated_by: Option<String>,
+    deleted_at: Option<String>,
+    project: &str,
+    workspace: &str,
+    name: &str,
+    description: &str,
+    color: &str,
+    slug: &str,
+    sequence: f64,
+    group: &str,
+    is_triage: bool,
+    default: bool,
+    external_source: Option<&str>,
+    external_id: Option<&str>,
+) -> serde_json::Map<String, Value> {
+    let mut map = serde_json::Map::with_capacity(STATE_FIELDS.len());
+    let opt = |v: Option<String>| v.map(Value::String).unwrap_or(Value::Null);
+    map.insert("id".to_owned(), Value::String(id.to_owned()));
+    map.insert(
+        "created_at".to_owned(),
+        Value::String(created_at.to_owned()),
+    );
+    map.insert(
+        "updated_at".to_owned(),
+        Value::String(updated_at.to_owned()),
+    );
+    map.insert("deleted_at".to_owned(), opt(deleted_at));
+    map.insert("name".to_owned(), Value::String(name.to_owned()));
+    map.insert(
+        "description".to_owned(),
+        Value::String(description.to_owned()),
+    );
+    map.insert("color".to_owned(), Value::String(color.to_owned()));
+    map.insert("slug".to_owned(), Value::String(slug.to_owned()));
+    map.insert(
+        "sequence".to_owned(),
+        serde_json::Number::from_f64(sequence)
+            .map(Value::Number)
+            .unwrap_or(Value::Null),
+    );
+    map.insert("group".to_owned(), Value::String(group.to_owned()));
+    map.insert("is_triage".to_owned(), Value::Bool(is_triage));
+    map.insert("default".to_owned(), Value::Bool(default));
+    map.insert(
+        "external_source".to_owned(),
+        external_source
+            .map(|v| Value::String(v.to_owned()))
+            .unwrap_or(Value::Null),
+    );
+    map.insert(
+        "external_id".to_owned(),
+        external_id
+            .map(|v| Value::String(v.to_owned()))
+            .unwrap_or(Value::Null),
+    );
+    map.insert("created_by".to_owned(), opt(created_by));
+    map.insert("updated_by".to_owned(), opt(updated_by));
+    map.insert("project".to_owned(), Value::String(project.to_owned()));
+    map.insert("workspace".to_owned(), Value::String(workspace.to_owned()));
+    map
 }
 
 /// A database row for the lite state shape.
@@ -719,5 +826,40 @@ mod tests {
             serde_json::to_string(&estimate_to_representation(&row)).expect("view serializes");
         assert!(rendered.contains(r#""type":"points""#));
         assert!(rendered.contains(r#""last_used":false"#));
+    }
+
+    #[test]
+    fn state_base_map_pins_all_key_order() {
+        // OVL-10 (PIDASHCONV-1656): the `__all__` wire renderer MCP
+        // `list_states` calls through `pidash_sdk::read` — 18 keys in
+        // live-DRF order (`STATE_FIELDS`), null FKs as null.
+        let map = state_base_map(
+            "11111111-1111-1111-1111-111111111111",
+            "2026-01-02T03:04:05+00:00",
+            "2026-01-03T04:05:06+00:00",
+            Some("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".to_owned()),
+            None,
+            None,
+            "22222222-2222-2222-2222-222222222222",
+            "33333333-3333-3333-3333-333333333333",
+            "CT State",
+            "desc",
+            "#fff",
+            "ct-state",
+            15000.0,
+            "backlog",
+            false,
+            true,
+            Some("github"),
+            None,
+        );
+        let keys: Vec<&str> = map.keys().map(String::as_str).collect();
+        assert_eq!(keys, STATE_FIELDS);
+        assert_eq!(map.len(), 18);
+        assert_eq!(map["sequence"], serde_json::json!(15000.0));
+        assert_eq!(map["default"], serde_json::Value::Bool(true));
+        assert_eq!(map["updated_by"], serde_json::Value::Null);
+        assert_eq!(map["deleted_at"], serde_json::Value::Null);
+        assert_eq!(map["external_id"], serde_json::Value::Null);
     }
 }

@@ -3900,3 +3900,145 @@ mod tests {
         );
     }
 }
+
+/// Live scratch-DB render (env-gated, the `handlers_members::live_tests`
+/// precedent): without `DATABASE_URL` (plain `cargo test`) this skips; the
+/// runbook sets `export DATABASE_URL=postgresql://…` for the real check.
+/// The row is a synthetic single-row `SELECT` (no seeding, no teardown);
+/// with no cover asset and no `expand`, the pool is never touched.
+#[cfg(test)]
+mod live_tests {
+    use super::*;
+    use chrono_tz::Tz;
+
+    async fn live_pool() -> Option<sqlx::PgPool> {
+        match std::env::var("DATABASE_URL") {
+            Ok(url) => Some(
+                sqlx::postgres::PgPoolOptions::new()
+                    .max_connections(1)
+                    .connect(&url)
+                    .await
+                    .expect("connect to scratch DATABASE_URL"),
+            ),
+            Err(_) => {
+                eprintln!("skipping live-db test: DATABASE_URL is not set");
+                None
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn render_project_with_annotations_pins_list_shape() {
+        // OVL-10 (PIDASHCONV-1656): the MCP `list_project`/`get_project`
+        // combination — an annotated row renders all 8 annotation keys in
+        // order, `sort_order` only for the list queryset; the v1 handlers
+        // and `pidash_sdk::read::render_project` share this one renderer.
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let row: sqlx::postgres::PgRow = sqlx::query(
+            r#"SELECT
+                '11111111-1111-1111-1111-111111111111'::uuid AS id,
+                NULL::uuid AS cover_image_asset_id,
+                NULL::text AS cover_image,
+                '2026-01-02T03:04:05Z'::timestamptz AS created_at,
+                '2026-01-03T04:05:06Z'::timestamptz AS updated_at,
+                NULL::timestamptz AS deleted_at,
+                'CT Project'::text AS name,
+                NULL::text AS description,
+                NULL::jsonb AS description_text,
+                NULL::jsonb AS description_html,
+                2::smallint AS network,
+                'CT'::text AS identifier,
+                NULL::text AS emoji,
+                NULL::jsonb AS icon_prop,
+                false AS module_view,
+                false AS cycle_view,
+                false AS issue_views_view,
+                false AS page_view,
+                false AS intake_view,
+                true AS is_time_tracking_enabled,
+                true AS is_issue_type_enabled,
+                false AS is_default,
+                false AS guest_view_all_features,
+                true AS members_can_edit_states,
+                1 AS archive_in,
+                2 AS close_in,
+                NULL::jsonb AS logo_props,
+                NULL::timestamptz AS archived_at,
+                'UTC'::text AS timezone,
+                NULL::text AS external_source,
+                NULL::text AS external_id,
+                NULL::text AS repo_url,
+                NULL::text AS base_branch,
+                300 AS agent_default_interval_seconds,
+                10 AS agent_default_max_ticks,
+                300 AS agent_review_default_interval_seconds,
+                300 AS agent_test_default_interval_seconds,
+                true AS agent_ticking_enabled,
+                'codex'::text AS default_agent_executor,
+                NULL::uuid AS created_by_id,
+                NULL::uuid AS updated_by_id,
+                '22222222-2222-2222-2222-222222222222'::uuid AS workspace_id,
+                NULL::uuid AS default_assignee_id,
+                NULL::uuid AS project_lead_id,
+                NULL::uuid AS estimate_id,
+                NULL::uuid AS default_state_id"#,
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("synthetic row");
+        let ann = ReadAnnotations {
+            total_members: 7,
+            total_cycles: 3,
+            total_modules: 2,
+            is_member: true,
+            sort_order: Some(15000.0),
+            member_role: Some(20),
+            is_deployed: false,
+        };
+        let tz: Tz = chrono_tz::UTC;
+
+        // List combination: all 8 annotation keys, in wire order.
+        let text = render_project(&pool, &row, Some(&ann), true, &tz, None, None)
+            .await
+            .expect("renders");
+        let body: serde_json::Value = serde_json::from_str(&text).expect("json");
+        let obj = body.as_object().expect("object");
+        let keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        assert_eq!(
+            &keys[..9],
+            &[
+                "id",
+                "total_members",
+                "total_cycles",
+                "total_modules",
+                "is_member",
+                "sort_order",
+                "member_role",
+                "is_deployed",
+                "cover_image_url",
+            ]
+        );
+        assert_eq!(obj["total_members"], serde_json::json!(7));
+        assert_eq!(obj["is_member"], serde_json::Value::Bool(true));
+        assert_eq!(obj["sort_order"], serde_json::json!(15000.0));
+        assert_eq!(obj["member_role"], serde_json::json!(20));
+        assert_eq!(obj["cover_image_url"], serde_json::Value::Null);
+        assert_eq!(obj["network"], serde_json::json!(2));
+        assert_eq!(
+            obj["workspace"],
+            serde_json::Value::String("22222222-2222-2222-2222-222222222222".to_owned())
+        );
+
+        // Detail combination (`get_project`): `sort_order` omitted, the
+        // other 7 annotation keys kept.
+        let text = render_project(&pool, &row, Some(&ann), false, &tz, None, None)
+            .await
+            .expect("renders");
+        let body: serde_json::Value = serde_json::from_str(&text).expect("json");
+        let obj = body.as_object().expect("object");
+        assert!(!obj.contains_key("sort_order"));
+        assert_eq!(obj["total_members"], serde_json::json!(7));
+    }
+}

@@ -3442,4 +3442,58 @@ mod tests {
         assert_eq!(py_str(&tiny), "1e-05");
         assert_eq!(py_str(&neg), "1e-07");
     }
+
+    #[test]
+    fn comment_value_unannotated_drops_is_member() {
+        // OVL-10 (PIDASHCONV-1656): the MCP `list_comments` combination —
+        // an un-annotated row (`is_member: None`) with no url, no
+        // `fields=`, no `expand`: DRF `SkipField` drops `is_member` and
+        // the null `url` is omitted (`issue.py:1001-1007`).
+        use crate::read::DecodedComment;
+
+        let decoded = DecodedComment {
+            id: "44444444-4444-4444-4444-444444444444".to_owned(),
+            is_member: None,
+            created_at: "2026-10-01T00:00:00Z".to_owned(),
+            updated_at: "2026-10-01T00:00:00Z".to_owned(),
+            deleted_at: None,
+            comment_json: serde_json::json!({}),
+            comment_html: "<p>hi</p>".to_owned(),
+            attachments: vec![],
+            labels: vec![],
+            access: "external".to_owned(),
+            external_source: None,
+            external_id: None,
+            speaker_type: "user".to_owned(),
+            speaker_label: "Ct User".to_owned(),
+            speaker_agent_run_id: None,
+            edited_at: None,
+            created_by: None,
+            updated_by: None,
+            project: "22222222-2222-2222-2222-222222222222".to_owned(),
+            workspace: "33333333-3333-3333-3333-333333333333".to_owned(),
+            description: None,
+            issue: "55555555-5555-5555-5555-555555555555".to_owned(),
+            actor: None,
+            parent: None,
+        };
+        let value = render_comment_value(&decoded, None, None, &[], &[]).expect("renders");
+        let obj = value.as_object().expect("object");
+        assert!(!obj.contains_key("is_member"));
+        assert!(!obj.contains_key("url"));
+        assert_eq!(
+            obj["id"],
+            Value::String("44444444-4444-4444-4444-444444444444".to_owned())
+        );
+        assert_eq!(obj["comment_html"], Value::String("<p>hi</p>".to_owned()));
+        assert_eq!(
+            obj["project"],
+            Value::String("22222222-2222-2222-2222-222222222222".to_owned())
+        );
+        assert_eq!(
+            obj["issue"],
+            Value::String("55555555-5555-5555-5555-555555555555".to_owned())
+        );
+        assert_eq!(obj["attachments"], Value::Array(vec![]));
+    }
 }

@@ -74,6 +74,9 @@ pub mod domain {}
 /// and search models, and auth-session shapes. OVL-05 (PIDASHCONV-1543)
 /// added the `pidash_services::read` root API here item for item.
 pub mod read {
+    pub use pidash_api::v1_projects::handlers_project::render_project;
+    pub use pidash_api::v1_projects::handlers_project::Denial;
+    pub use pidash_api::v1_projects::handlers_project::ReadAnnotations;
     pub use pidash_services::app_issues::pr_links::attach_pull_request;
     pub use pidash_services::app_issues::pr_links::AttachError;
     pub use pidash_services::app_issues::pr_links::CreatePrLinkOutcome;
@@ -169,6 +172,7 @@ pub mod read {
     pub use pidash_services::read::CommentRow;
     pub use pidash_services::read::CommentView;
     pub use pidash_services::read::DbError;
+    pub use pidash_services::read::DecodedComment;
     pub use pidash_services::read::DecodedIssue;
     pub use pidash_services::read::Error;
     pub use pidash_services::read::IssueFlatView;
@@ -183,6 +187,7 @@ pub mod read {
     pub use pidash_services::read::WorkspaceLiteView;
     pub use pidash_services::read::ISSUE_EXTRA_COLS;
     pub use pidash_services::read::ISSUE_SELECT_COLS;
+    pub use pidash_services::v1_projects::ser_workflow::state_base_map;
     pub use pidash_services::v1_work_items::shape_issue;
     pub use pidash_services::v1_work_items::shape_issue::issue_url;
     pub use pidash_services::v1_work_items::shape_issue::plan_create;
@@ -204,6 +209,8 @@ pub mod read {
     pub use pidash_services::v1_work_items::shape_labels::validate_workpad_write;
     pub use pidash_services::v1_work_items::shape_labels::WorkpadRow;
     pub use pidash_services::v1_work_items::shape_labels::WorkpadWriteInput;
+    pub use pidash_services::v1_work_items::shape_social::render_comment_value;
+    pub use pidash_services::v1_work_items::shape_social::SocialRenderError;
     pub use pidash_types::v1_assets::file_asset::asset_url;
     pub use pidash_types::v1_assets::file_asset::is_description_asset_type;
 }
@@ -747,5 +754,91 @@ mod tests {
     fn compat_py_float_is_exported() {
         assert_eq!(crate::compat::py::py_json_float(0.5), "0.5");
         assert_eq!(crate::compat::py::py_json_float(f64::INFINITY), "Infinity");
+    }
+
+    /// OVL-10 (PIDASHCONV-1656): the v1 project renderer and its
+    /// input/error types resolve through the SDK facade. Behaviour is
+    /// pinned by `pidash_api`'s `render_project_with_annotations` live
+    /// test (the renderer needs a pool); this only locks the paths.
+    #[test]
+    fn read_project_renderer_is_exported() {
+        let _ = std::mem::size_of_val(&crate::read::render_project);
+        let ann = crate::read::ReadAnnotations {
+            total_members: 7,
+            total_cycles: 3,
+            total_modules: 2,
+            is_member: true,
+            sort_order: Some(15000.0),
+            member_role: Some(20),
+            is_deployed: false,
+        };
+        assert_eq!(ann.total_members, 7);
+        let error = crate::read::Denial::ServerError;
+        assert_eq!(format!("{error:?}"), "ServerError");
+    }
+
+    /// OVL-10 (PIDASHCONV-1656): the state `__all__` renderer resolves
+    /// through the SDK facade with the same 18-key wire bytes MCP
+    /// `list_states` ports today.
+    #[test]
+    fn read_state_all_renderer_is_exported() {
+        let map = crate::read::state_base_map(
+            "11111111-1111-1111-1111-111111111111",
+            "2026-01-02T03:04:05+00:00",
+            "2026-01-03T04:05:06+00:00",
+            Some("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".to_owned()),
+            None,
+            None,
+            "22222222-2222-2222-2222-222222222222",
+            "33333333-3333-3333-3333-333333333333",
+            "CT State",
+            "desc",
+            "#fff",
+            "ct-state",
+            15000.0,
+            "backlog",
+            false,
+            true,
+            Some("github"),
+            None,
+        );
+        let keys: Vec<&str> = map.keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            [
+                "id",
+                "created_at",
+                "updated_at",
+                "deleted_at",
+                "name",
+                "description",
+                "color",
+                "slug",
+                "sequence",
+                "group",
+                "is_triage",
+                "default",
+                "external_source",
+                "external_id",
+                "created_by",
+                "updated_by",
+                "project",
+                "workspace",
+            ]
+        );
+        assert!(map["updated_by"].is_null());
+        assert_eq!(map["default"].as_bool(), Some(true));
+    }
+
+    /// OVL-10 (PIDASHCONV-1656): the v1 comment renderer and its input
+    /// row type resolve through the SDK facade. Behaviour is pinned by
+    /// `shape_social`'s `comment_value_unannotated` test (building a
+    /// `DecodedComment` needs a `serde_json::Value`, which the dep-free
+    /// facade cannot name); this only locks the paths.
+    #[test]
+    fn read_comment_value_is_exported() {
+        let _ = std::mem::size_of_val(&crate::read::render_comment_value);
+        let _ = std::mem::size_of::<crate::read::DecodedComment>();
+        let _ = std::mem::size_of::<crate::read::SocialRenderError>();
     }
 }

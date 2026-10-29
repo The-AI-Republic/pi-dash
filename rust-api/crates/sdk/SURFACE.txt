@@ -494,7 +494,9 @@ pidash_sdk::read::CreatePrLinkOutcome
 pidash_sdk::read::DEFAULT_ASSIGNEE_EXISTS_SQL
 pidash_sdk::read::DESCRIPTION_IDS_SQL
 pidash_sdk::read::DbError
+pidash_sdk::read::DecodedComment
 pidash_sdk::read::DecodedIssue
+pidash_sdk::read::Denial
 pidash_sdk::read::DescriptionHtmlFacts
 pidash_sdk::read::Error
 pidash_sdk::read::HostSettings
@@ -530,6 +532,7 @@ pidash_sdk::read::REVIEW_LINK_INSERT_SQL
 pidash_sdk::read::REVIEW_LINK_LOOKUP_SQL
 pidash_sdk::read::REVIEW_LINK_SOFT_DELETE_SQL
 pidash_sdk::read::REVIEW_LINK_UPDATE_SQL
+pidash_sdk::read::ReadAnnotations
 pidash_sdk::read::RenderError
 pidash_sdk::read::RenderRequest
 pidash_sdk::read::RepointTarget
@@ -540,6 +543,7 @@ pidash_sdk::read::SEQUENCE_CREATE_SQL
 pidash_sdk::read::SEQUENCE_DETACH_SQL
 pidash_sdk::read::SOURCE_ISSUE_LOCK_SQL
 pidash_sdk::read::STATE_EXISTS_SQL
+pidash_sdk::read::SocialRenderError
 pidash_sdk::read::StateRow
 pidash_sdk::read::StateRowTuple
 pidash_sdk::read::StoreError
@@ -584,8 +588,10 @@ pidash_sdk::read::profile
 pidash_sdk::read::render_actor_detail
 pidash_sdk::read::render_comment
 pidash_sdk::read::render_comment_reaction_row
+pidash_sdk::read::render_comment_value
 pidash_sdk::read::render_decoded
 pidash_sdk::read::render_issue
+pidash_sdk::read::render_project
 pidash_sdk::read::render_state
 pidash_sdk::read::render_workpad
 pidash_sdk::read::render_write_response
@@ -596,6 +602,7 @@ pidash_sdk::read::run_validate
 pidash_sdk::read::serialize_drf_datetime
 pidash_sdk::read::serialize_iso_datetime
 pidash_sdk::read::shape_issue
+pidash_sdk::read::state_base_map
 pidash_sdk::read::state_row_from
 pidash_sdk::read::user
 pidash_sdk::read::validate_workpad_write
