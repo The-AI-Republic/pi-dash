@@ -22,6 +22,8 @@ from pi_dash.app.serializers.base import BaseSerializer
 from pi_dash.bgtasks._rrule import RRuleValidationError, validate_rrule_string
 from pi_dash.db.models.scheduler import Scheduler, SchedulerBinding
 from pi_dash.runner.models import Pod
+from pi_dash.scheduler.builtins import BUILTINS
+from pi_dash.scheduler.slug import derive_scheduler_slug
 
 
 EXTRA_CONTEXT_MAX_LENGTH = 16 * 1024
@@ -30,6 +32,11 @@ EXTRA_CONTEXT_MAX_LENGTH = 16 * 1024
 # expanded on every fire and every occurrences-endpoint request. A
 # pathological 10k-entry list would slow each tick.
 RDATE_EXDATE_MAX_LENGTH = 256
+
+DUPLICATE_NAME_MESSAGE = "A scheduler with the same name already exists in this workspace."
+NAME_NEEDS_ALNUM_MESSAGE = "Name must contain at least one letter or digit."
+
+BUILTIN_SLUGS = frozenset(builtin.slug for builtin in BUILTINS)
 
 _HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 
@@ -93,6 +100,7 @@ class SchedulerSerializer(BaseSerializer):
         read_only_fields = [
             "id",
             "workspace",
+            "slug",
             "source",
             "active_binding_count",
             "created_at",
@@ -110,28 +118,48 @@ class SchedulerSerializer(BaseSerializer):
     def validate_color(self, value: str) -> str:
         return _validate_color(value)
 
-    def validate_slug(self, value: str) -> str:
-        # Mirror the conditional DB constraint
-        # ``scheduler_unique_workspace_slug_when_active`` so a duplicate slug
-        # comes back as a field error ({"slug": [...]}) instead of an
-        # IntegrityError that BaseAPIView flattens to a generic 400. DRF does
-        # not auto-validate conditional UniqueConstraints. ``objects`` is the
-        # soft-delete manager, so tombstoned slugs stay reusable, matching
-        # the constraint's ``deleted_at__isnull`` condition.
-        workspace = (
+    def _workspace(self):
+        return (
             self.instance.workspace
             if self.instance is not None
             else self.context.get("workspace")
         )
+
+    def _keeps_slug_on_rename(self) -> bool:
+        # Built-ins keep their slug: ``ensure_builtin_schedulers`` matches
+        # rows by slug, so re-deriving it on rename would make the next sync
+        # create a duplicate. The ``source`` column can't tell them apart
+        # (API-created rows get the model default), so match the registry.
+        return self.instance is not None and self.instance.slug in BUILTIN_SLUGS
+
+    def validate_name(self, value: str) -> str:
+        # The slug is derived from the name on the server (PDASHOSS01-319),
+        # so name collisions are checked on the derived slug: names that
+        # differ only in case or punctuation are the same name. The check
+        # mirrors the conditional DB constraint
+        # ``scheduler_unique_workspace_slug_when_active`` so a duplicate comes
+        # back as a field error instead of an IntegrityError that BaseAPIView
+        # flattens to a generic 400. ``objects`` is the soft-delete manager,
+        # so tombstoned slugs stay reusable.
+        slug = derive_scheduler_slug(value)
+        if not slug:
+            raise serializers.ValidationError(NAME_NEEDS_ALNUM_MESSAGE)
+        workspace = self._workspace()
         if workspace is not None:
-            existing = Scheduler.objects.filter(workspace=workspace, slug=value)
+            existing = Scheduler.objects.filter(workspace=workspace, slug=slug)
             if self.instance is not None:
                 existing = existing.exclude(pk=self.instance.pk)
             if existing.exists():
-                raise serializers.ValidationError(
-                    "This slug is already in use in this workspace."
-                )
+                raise serializers.ValidationError(DUPLICATE_NAME_MESSAGE)
         return value
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        # ``slug`` is read-only on the wire: set on create, re-derived when a
+        # user-created scheduler is renamed, left alone on a built-in.
+        if "name" in attrs and not self._keeps_slug_on_rename():
+            attrs["slug"] = derive_scheduler_slug(attrs["name"])
+        return attrs
 
 
 class SchedulerBindingSerializer(BaseSerializer):
