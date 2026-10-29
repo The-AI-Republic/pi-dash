@@ -31876,7 +31876,16 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async modulesListSwitchLayout(layout: ModulesListLayout): Promise<void> {
-    await this.modulesLayoutOption(layout).click({ timeout: WebNewDriver.WAIT_MS });
+    const option = this.modulesLayoutOption(layout);
+    try {
+      await option.click({ timeout: WebNewDriver.WAIT_MS });
+    } catch {
+      // An open peek panel overlays the switcher (MOD-019 measures
+      // board density with the peek open): a keyboard user tabs to the
+      // covered option and presses Enter, which needs no click point.
+      await option.focus({ timeout: WebNewDriver.WAIT_MS });
+      await option.press("Enter", { timeout: WebNewDriver.WAIT_MS });
+    }
     await expect.poll(() => this.modulesListActiveLayout(), { timeout: WebNewDriver.WAIT_MS }).toBe(layout);
     await this.modulesListWaitSettled();
   }

@@ -123,6 +123,10 @@ async function pickRange(driver: ParityDriver, reopen: () => Promise<void>, from
   await driver.modulesCalendarGotoMonth(monthCaption(from), String(from.getFullYear()));
   await driver.modulesCalendarPickDay(from.getDate());
   await driver.modulesAwaitToast("Module updated successfully.");
+  // The second save's toast wait matches any visible notice, so drain
+  // the first save's toast before the second pick — otherwise it
+  // matches stale and the caller reads the first save's record.
+  await expect.poll(() => driver.modulesLastToast(), { timeout: 30_000 }).toBe(null);
   await reopen();
   await driver.modulesCalendarGotoMonth(monthCaption(to), String(to.getFullYear()));
   await driver.modulesCalendarPickDay(to.getDate());
