@@ -18,6 +18,15 @@ The CLI reads the following from the process environment — never pass them as 
 - `PIDASH_RUN_ID` — this agent run (`{{ run.id }}`). The CLI sends it with every write so Pi Dash knows a state move or an outcome report came from *this run* rather than from a human. Never unset or override it.
 {% else %}- `PIDASH_PROJECT` — the project (`{{ project.identifier }}`) this scheduled run is scoped to. There is no single current issue — you operate across the project. Pass `--project {{ project.identifier }}` explicitly to commands that need it.
 {% endif %}
+### Working context files (`context.md`)
+
+Two `context.md` files on the dev machine describe the Pi Dash projects available to you. Both carry a `generated_at` RFC 3339 UTC stamp so you can judge staleness, and each project entry carries a `repo_url` you can match against a local checkout.
+
+- **Working-dir** `<working_dir>/.pidash/context.md` (`scope: "project"`) — the single project this working directory belongs to. This is **authoritative for "which project am I working in"**.
+- **Machine-level** `~/.pidash/context.md` (`scope: "machine"`) — every project in every workspace this machine is bound to, grouped under a `workspaces:` list keyed by slug. This is the **lookup table for "what else exists in this workspace"** — use it to find a related issue's project or file a follow-up in a different project — and the **fallback** when there is no working-dir file.
+
+Precedence: trust the working-dir file for your current project; consult the machine-level file for everything else. If the machine-level file looks stale or is missing, run `pidash context refresh` to rewrite it for the bound workspace. (Its path follows `PIDASH_CONFIG_DIR` when set, otherwise `~/.pidash`.)
+
 ### Output contract
 
 On success every command prints a single JSON document to stdout and exits `0`. On failure, a JSON object with an `error` field is printed to stderr and the exit code is non-zero. Parse the stderr JSON rather than pattern-matching the human message. Retry only transient failures; never retry the same command more than twice.
@@ -93,6 +102,14 @@ pidash issue patch {{ ident }} --remove-label needs-design         # detach one
 #### States
 
 - `pidash state list{% if run.kind == "scheduler" %} --project {{ project.identifier }}{% endif %}` — list the states available in {% if run.kind == "scheduler" %}this project{% else %}this issue's project{% endif %} with `name`, `group` (`backlog | unstarted | started | review | test | completed | cancelled`), and `description`.{% if run.kind != "scheduler" %} Uses `PIDASH_ISSUE_IDENTIFIER` by default; pass `pidash state list <issue-identifier>` or `pidash state list <project-uuid>` to override. Already rendered below under "Available states"; only call again if something looks stale.{% endif %}
+
+#### Schedulers (read-only)
+
+Schedulers are the workspace's recurring agent jobs — a prompt plus a cadence, installed onto a project, firing agent runs on a timer (this may include the run you are in). Use these commands to *audit* scheduled automation: what is installed, whether it is enabled, when it fires next, and what its recent runs actually did. There is no write access — creating, editing, enabling/disabling, or triggering a scheduler is a human action in the web app.
+
+- `pidash scheduler list [--project <PROJ-or-UUID>]` — with `--project`, the schedulers installed on that project, each with its install's cadence (`dtstart`/`rrule`/`tzid`), `enabled`, `next_run_at`, and last-run summary (`last_run`, `last_run_status`, `last_error`); without, every scheduler definition in the workspace (bindings shown only for projects you can access). Returns the usual paginated envelope.
+- `pidash scheduler get <scheduler-uuid> [--project <PROJ-or-UUID>]` — one scheduler's full definition: `prompt`, `description`, `source` (`builtin`/`manifest`), `is_enabled`, and its install on the project (cadence, `outcome_mode` — what its runs do with findings, `pod`, `extra_context`, `last_error`). 404 when the scheduler is not installed on that project.
+- `pidash scheduler runs <scheduler-uuid> [--limit <N>] [--project <PROJ-or-UUID>]` — recent agent runs the scheduler fired on that project, newest first: `status`, `trigger`, `created_at`/`started_at`/`ended_at`, `error_code`, and `issues` — the work items the run wrote comments to, so you can trace what a scheduled run touched. Default 30, max 100.
 
 {% if run.kind != "scheduler" %}#### Run outcome
 

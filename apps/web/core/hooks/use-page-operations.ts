@@ -9,11 +9,11 @@ import { useMemo } from "react";
 import { IS_FAVORITE_MENU_OPEN } from "@pi-dash/constants";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import { EPageAccess } from "@pi-dash/types";
-import { copyUrlToClipboard } from "@pi-dash/utils";
 // hooks
 import { useCollaborativePageActions } from "@/hooks/use-collaborative-page-actions";
 // store types
 import type { TPageInstance } from "@/store/pages/base-page";
+import { copyShareUrl } from "@/utils/share-url";
 // local storage
 import useLocalStorage from "./use-local-storage";
 
@@ -61,7 +61,7 @@ export const usePageOperations = (
 
     return {
       copyLink: async () => {
-        await copyUrlToClipboard(pageLink);
+        await copyShareUrl(pageLink);
         setToast({
           type: TOAST_TYPE.SUCCESS,
           title: "Link Copied!",
