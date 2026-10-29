@@ -62,8 +62,17 @@ export interface IRunnerLiveState {
   total_tokens: number | null;
   llm_model: string | null;
   turn_count: number | null;
+  /** Activity-watchdog health the runner reports while a run is in flight.
+   * ``null`` means the runner predates the passive-kill watchdog. */
+  agent_health: TAgentHealth | null;
+  /** When the agent last emitted an event, as the watchdog saw it. */
+  agent_last_activity_at: string | null;
   updated_at: string;
 }
+
+/** ``unhealthy``: no agent event for the runner's unhealthy threshold (24h by
+ * default). The run keeps running until the kill threshold (48h). */
+export type TAgentHealth = "healthy" | "unhealthy";
 
 export interface IDevMachine {
   id: string;
@@ -137,8 +146,19 @@ export interface IRunner {
    * from the target machine with `pidash runner add`. */
   revoked_at: string | null;
   revoked_reason: string;
+  /** Set while an operator has paused the runner. Orthogonal to ``status``:
+   * a paused runner keeps heartbeating and finishes its in-flight run, but
+   * the cloud assigns it no new work. Null = not paused. */
+  paused_at: string | null;
+  paused_by: string | null;
   created_at: string;
   updated_at: string;
+}
+
+/** ``POST /api/runners/<id>/pause/`` response: the runner plus the runs it
+ * already holds, which pausing does not stop. */
+export interface IRunnerPauseResult extends IRunner {
+  in_flight_runs: { id: string; status: TAgentRunStatus }[];
 }
 
 export type TAgentRunStatus =

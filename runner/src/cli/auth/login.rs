@@ -41,6 +41,12 @@ pub struct Args {
     #[arg(long)]
     pub no_browser: bool,
 
+    /// Re-enroll this host against a different cloud, overwriting the
+    /// existing `[daemon].cloud_url`. Without this, login refuses to
+    /// rebind a host that's already enrolled with another cloud.
+    #[arg(long)]
+    pub force: bool,
+
     /// Workspace slug to bind this CLI install to after login.
     #[arg(long, hide = true)]
     pub workspace: Option<String>,
@@ -54,8 +60,12 @@ pub struct Args {
     /// Everything after the exchange — the machine token, the workspace
     /// binding, the config file — stays here rather than being reimplemented
     /// in the app.
-    #[arg(long, hide = true, value_name = "CODE")]
-    pub device_code: Option<String>,
+    ///
+    /// The code is read from **stdin**, never taken as an argument: once
+    /// approved it is a bearer credential (the token endpoint asks for nothing
+    /// else), and argv is visible to other local processes.
+    #[arg(long, hide = true)]
+    pub device_code_stdin: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -123,13 +133,18 @@ async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOut
         .build()
         .context("building HTTP client")?;
 
-    let start = match args.device_code.as_deref() {
+    let device_code = if args.device_code_stdin {
+        Some(read_device_code(std::io::stdin().lock())?)
+    } else {
+        None
+    };
+    let start = match device_code {
         // Pre-approved by the desktop app: nothing to show and nobody to ask,
         // just the exchange. `expires_in` bounds the polling; the server is
         // authoritative and ends the poll with a terminal error if the grant
         // is already gone.
         Some(code) => StartResponse {
-            device_code: code.to_string(),
+            device_code: code,
             user_code: String::new(),
             verification_uri: format!("{cloud_url}/auth/device/"),
             expires_in: 300,
@@ -154,7 +169,7 @@ async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOut
     // local config and workspace binding. It is replaced below by a shared
     // dev-machine MachineToken, which is the credential used by both the CLI
     // and all runners hosted by this install.
-    runner_ops::write_cli_token(paths, &cloud_url, &token.access_token)
+    runner_ops::write_cli_token(paths, &cloud_url, &token.access_token, args.force)
         .context("writing temporary [cli].token to config.toml")?;
 
     println!();
@@ -186,13 +201,22 @@ async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOut
         &host_label,
     )
     .await?;
-    runner_ops::write_cli_token(paths, &cloud_url, &machine_token.machine_token)
+    runner_ops::write_cli_token(paths, &cloud_url, &machine_token.machine_token, args.force)
         .context("writing dev-machine token to config.toml")?;
     if machine_token.workspace_slug != workspace_slug {
         runner_ops::write_cli_workspace(paths, &machine_token.workspace_slug)
             .context("writing returned workspace binding to config.toml")?;
     }
     println!("  Workspace: {}", machine_token.workspace_slug);
+
+    // Best-effort: write the machine-level ~/.pidash/context.md now that the
+    // dev-machine token and workspace binding are persisted. A failure here is
+    // a note, not a login failure — the file can be refreshed later with
+    // `pidash context refresh`.
+    match crate::cli::context::write_machine_context_for_paths(paths).await {
+        Ok(path) => println!("  Machine context: {}", path.display()),
+        Err(err) => println!("  (Machine context was not written: {err})"),
+    }
 
     Ok(LoginOutcome { cloud_url })
 }
@@ -230,6 +254,20 @@ fn resolve_cloud_url(args: &Args, paths: &Paths) -> Result<(String, CloudUrlSour
         crate::DEFAULT_CLOUD_URL.trim_end_matches('/').to_string(),
         CloudUrlSource::Default,
     ))
+}
+
+/// Read the pre-approved device code the desktop app pipes in for
+/// `--device-code-stdin`.
+fn read_device_code(mut input: impl std::io::Read) -> Result<String> {
+    let mut buf = String::new();
+    input
+        .read_to_string(&mut buf)
+        .context("reading device code from stdin")?;
+    let code = buf.trim();
+    if code.is_empty() {
+        anyhow::bail!("--device-code-stdin was given but no device code arrived on stdin");
+    }
+    Ok(code.to_string())
 }
 
 async fn start_device_code(client: &reqwest::Client, cloud_url: &str) -> Result<StartResponse> {
@@ -482,6 +520,7 @@ mod tests {
             config_dir: root.join("config"),
             data_dir: root.join("data"),
             runtime_dir: root.join("runtime"),
+            machine_context_dir: root.join("config"),
         }
     }
 
@@ -490,7 +529,8 @@ mod tests {
             url: url.map(str::to_string),
             no_browser: true,
             workspace: None,
-            device_code: None,
+            force: false,
+            device_code_stdin: false,
         }
     }
 
@@ -527,17 +567,29 @@ mod tests {
         // Re-login on an enrolled self-hosted box must stay on that cloud.
         let tmp = tempdir().unwrap();
         let paths = paths_for(tmp.path());
-        runner_ops::write_cli_token(&paths, "https://self.example.com", "tok").unwrap();
+        runner_ops::write_cli_token(&paths, "https://self.example.com", "tok", false).unwrap();
         let (url, source) = resolve_cloud_url(&args_with_url(None), &paths).unwrap();
         assert_eq!(url, "https://self.example.com");
         assert_eq!(source, CloudUrlSource::Config);
     }
 
     #[test]
+    fn device_code_is_read_from_stdin_and_trimmed() {
+        assert_eq!(read_device_code(&b"DEV-123\n"[..]).unwrap(), "DEV-123");
+        assert_eq!(read_device_code(&b"DEV-123"[..]).unwrap(), "DEV-123");
+    }
+
+    #[test]
+    fn empty_stdin_is_an_error_rather_than_an_empty_code() {
+        assert!(read_device_code(&b""[..]).is_err());
+        assert!(read_device_code(&b" \n"[..]).is_err());
+    }
+
+    #[test]
     fn explicit_url_flag_wins_over_existing_config() {
         let tmp = tempdir().unwrap();
         let paths = paths_for(tmp.path());
-        runner_ops::write_cli_token(&paths, "https://self.example.com", "tok").unwrap();
+        runner_ops::write_cli_token(&paths, "https://self.example.com", "tok", false).unwrap();
         let args = args_with_url(Some("https://other.example.com"));
         let (url, source) = resolve_cloud_url(&args, &paths).unwrap();
         assert_eq!(url, "https://other.example.com");
