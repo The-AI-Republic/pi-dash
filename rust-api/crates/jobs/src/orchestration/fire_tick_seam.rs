@@ -47,28 +47,29 @@ use sqlx::postgres::PgRow;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
+use pidash_db::entity::comment_hooks::description_stripped_for;
 use pidash_db::orchestration::runs::{active_run_sql, latest_prior_run_sql};
-use pidash_db::orchestration::workpad::{
-    find_agent_user, make_unusable_password, AgentUserCollisionError, AGENT_DISPLAY_NAME,
-    AGENT_USERNAME, AGENT_USER_EMAIL, AGENT_USER_FIRST_NAME, AGENT_USER_INSERT_SQL,
-    AGENT_USER_LAST_NAME, AGENT_USER_PASSWORD_SQL,
-};
 use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
 use pidash_db::tx::Transaction;
 use pidash_services::dispatch::{
     consume_admission_token, AdmissionCache, DeferredConsume, LlmProfile,
 };
-use pidash_services::orchestration::clock::{
-    CREATE_TICKER_PARAMS, LOCK_TICKER_PARAMS, SAVE_CLOCK_PARAMS, SAVE_CLOCK_SQL,
+use pidash_services::domain::clock::apply_clock_write;
+use pidash_services::domain::comments as comment_domain;
+use pidash_services::domain::identity::{
+    create_bot_user, find_agent_user, make_unusable_password, stamp_bot_unusable_password,
+    AgentUserCollisionError, NewBotUser, AGENT_DISPLAY_NAME, AGENT_USERNAME, AGENT_USER_EMAIL,
+    AGENT_USER_FIRST_NAME, AGENT_USER_LAST_NAME,
 };
+use pidash_services::domain::issues as domain_issues;
+use pidash_services::orchestration::clock::{ClockWrite, LOCK_TICKER_PARAMS};
 use pidash_services::orchestration::dispatch::{
     BounceOutcome, CandidateUser, ContinuationDispatchOutcome, DispatchError, DispatchSeam,
     HumanRunAiOutcome, LogLine, NewIssueComment, NewWaitActivity, PauseOutcome, PodRunnerMatcher,
     PreflightOutcome, RetickOutcome, RunAiOutcome, ThinRunAiOutcome, WaitOutcome,
 };
 use pidash_services::orchestration::dispatch::{
-    BACKLOG_TARGET_SQL, COMMENT_DESCRIPTION_UPDATE_SQL, COMMENT_INSERT_SQL, DESCRIPTION_INSERT_SQL,
-    IN_PROGRESS_STATE_SQL, ISSUE_STATE_UPDATE_SQL, LIVE_ASSIGNEE_CANDIDATES_SQL, PAUSED_STATE_SQL,
+    BACKLOG_TARGET_SQL, IN_PROGRESS_STATE_SQL, LIVE_ASSIGNEE_CANDIDATES_SQL, PAUSED_STATE_SQL,
     PAUSE_ISSUE_LOCK_SQL, PROJECT_CLOCK_POLICY_SQL, PROJECT_DEFAULT_STATE_SQL,
     PROJECT_ROLE_FACTS_SQL, RETICK_ISSUE_LOCK_SQL, WAIT_ACTIVITY_INSERT_SQL, WAIT_REARM_UPDATE_SQL,
     WAIT_UPDATE_SQL, WORKSPACE_SLUG_SQL,
@@ -197,17 +198,6 @@ pub(crate) fn lock_ticker_by_issue_sql() -> String {
     )
 }
 
-pub(crate) fn create_ticker_sql() -> String {
-    translate_clock_sql(
-        &pidash_services::orchestration::clock::create_ticker_sql(),
-        CREATE_TICKER_PARAMS,
-    )
-}
-
-pub(crate) fn save_clock_sql() -> String {
-    translate_clock_sql(SAVE_CLOCK_SQL, SAVE_CLOCK_PARAMS)
-}
-
 // ---------------------------------------------------------------------------
 // DispatchSeam over the L6 store
 // ---------------------------------------------------------------------------
@@ -299,51 +289,29 @@ where
         ticker: &IssueAgentTicker,
         now: DateTime<Utc>,
     ) -> Result<(), DispatchError> {
-        // SAVE_CLOCK_PARAMS order: updated_at, granted, next_run_at,
-        // enabled, disarm_reason, pending_entry, pending_entry_free,
-        // pending_entry_actor_id, pending_entry_trigger,
-        // resume_parent_run_id, id.
-        sqlx::query(&save_clock_sql())
-            .bind(now)
-            .bind(ticker.granted)
-            .bind(ticker.next_run_at)
-            .bind(ticker.enabled)
-            .bind(ticker.disarm_reason.as_str())
-            .bind(ticker.pending_entry)
-            .bind(ticker.pending_entry_free)
-            .bind(ticker.pending_entry_actor_id)
-            .bind(ticker.pending_entry_trigger.as_str())
-            .bind(ticker.resume_parent_run_id)
-            .bind(ticker.id)
-            .execute(&mut **self.dispatch_tx().inner())
-            .await
-            .map_err(db)?;
+        apply_clock_write(
+            &mut **self.dispatch_tx().inner(),
+            &ClockWrite::Update,
+            ticker,
+            now,
+        )
+        .await
+        .map_err(db)?;
         Ok(())
     }
 
     async fn insert_ticker(&mut self, ticker: &IssueAgentTicker) -> Result<(), DispatchError> {
-        // CREATE_TICKER_PARAMS order: now, created_by_id, id,
-        // issue_id, next_run_at, enabled, disarm_reason, pending_entry,
-        // pending_entry_free, pending_entry_actor_id,
-        // pending_entry_trigger, resume_parent_run_id (`used` /
-        // `granted` / `waited` / `user_disabled` are 0/0/0/FALSE
-        // literals — no create-path handler changes them).
-        sqlx::query(&create_ticker_sql())
-            .bind(ticker.created_at)
-            .bind(ticker.created_by_id)
-            .bind(ticker.id)
-            .bind(ticker.issue_id)
-            .bind(ticker.next_run_at)
-            .bind(ticker.enabled)
-            .bind(ticker.disarm_reason.as_str())
-            .bind(ticker.pending_entry)
-            .bind(ticker.pending_entry_free)
-            .bind(ticker.pending_entry_actor_id)
-            .bind(ticker.pending_entry_trigger.as_str())
-            .bind(ticker.resume_parent_run_id)
-            .execute(&mut **self.dispatch_tx().inner())
-            .await
-            .map_err(db)?;
+        // Insert ignores `now` (it stamps the row's own `created_at`,
+        // the pre-consolidation bind); pass the row stamp so the call
+        // reads honestly.
+        apply_clock_write(
+            &mut **self.dispatch_tx().inner(),
+            &ClockWrite::Insert,
+            ticker,
+            ticker.created_at,
+        )
+        .await
+        .map_err(db)?;
         Ok(())
     }
 
@@ -455,13 +423,14 @@ where
         state_id: Uuid,
         now: DateTime<Utc>,
     ) -> Result<(), DispatchError> {
-        sqlx::query(ISSUE_STATE_UPDATE_SQL)
-            .bind(state_id)
-            .bind(now)
-            .bind(issue_id)
-            .execute(&mut **self.dispatch_tx().inner())
-            .await
-            .map_err(db)?;
+        domain_issues::update_issue_state_no_audit(
+            &mut **self.dispatch_tx().inner(),
+            issue_id,
+            state_id,
+            now,
+        )
+        .await
+        .map_err(db)?;
         Ok(())
     }
 
@@ -478,71 +447,35 @@ where
             }
             return Ok(found.id);
         }
-        let id = Uuid::new_v4();
         let at = Utc::now();
-        // AGENT_USER_INSERT_SQL order (40 cols): password, last_login,
-        // id, username, mobile_number, email, display_name, first_name,
-        // last_name, avatar, avatar_asset_id, cover_image,
-        // cover_image_asset_id, date_joined, created_at, updated_at,
-        // last_location, created_location, is_superuser, is_managed,
-        // is_password_expired, is_active, is_staff, is_email_verified,
-        // is_password_autoset, is_password_reset_required, token,
-        // last_active, last_login_time, last_logout_time, last_login_ip,
-        // last_logout_ip, last_login_medium, last_login_uagent,
-        // token_updated_at, is_bot, bot_type, user_timezone,
-        // is_email_valid, masked_at. Values are the Django field
-        // defaults (`db/models/user.py`): blank CharFields land `""`,
-        // nullable ones NULL, `last_active` evaluates `timezone.now`.
-        sqlx::query(AGENT_USER_INSERT_SQL)
-            .bind("")
-            .bind(None::<DateTime<Utc>>)
-            .bind(id)
-            .bind(AGENT_USERNAME)
-            .bind(None::<String>)
-            .bind(AGENT_USER_EMAIL)
-            .bind(AGENT_DISPLAY_NAME)
-            .bind(AGENT_USER_FIRST_NAME)
-            .bind(AGENT_USER_LAST_NAME)
-            .bind("")
-            .bind(None::<Uuid>)
-            .bind(None::<String>)
-            .bind(None::<Uuid>)
-            .bind(at)
-            .bind(at)
-            .bind(at)
-            .bind("")
-            .bind("")
-            .bind(false)
-            .bind(false)
-            .bind(false)
-            .bind(true)
-            .bind(false)
-            .bind(false)
-            .bind(false)
-            .bind(false)
-            .bind("")
-            .bind(at)
-            .bind(None::<DateTime<Utc>>)
-            .bind(None::<DateTime<Utc>>)
-            .bind("")
-            .bind("")
-            .bind("email")
-            .bind("")
-            .bind(None::<DateTime<Utc>>)
-            .bind(true)
-            .bind(None::<String>)
-            .bind("UTC")
-            .bind(false)
-            .bind(None::<DateTime<Utc>>)
-            .execute(&mut **self.dispatch_tx().inner())
-            .await
-            .map_err(db)?;
-        sqlx::query(AGENT_USER_PASSWORD_SQL)
-            .bind(make_unusable_password())
-            .bind(id)
-            .execute(&mut **self.dispatch_tx().inner())
-            .await
-            .map_err(db)?;
+        // Values are the Django field defaults (`db/models/user.py`):
+        // blank CharFields land `""`, nullable ones NULL, `last_active`
+        // evaluates `timezone.now`; the unusable hash lands right after
+        // (`workpad.py:62-65`).
+        let id = create_bot_user(
+            &mut **self.dispatch_tx().inner(),
+            &NewBotUser {
+                id: None,
+                username: AGENT_USERNAME,
+                email: AGENT_USER_EMAIL,
+                password_hash: "",
+                display_name: AGENT_DISPLAY_NAME,
+                first_name: AGENT_USER_FIRST_NAME,
+                last_name: AGENT_USER_LAST_NAME,
+                is_password_autoset: false,
+                bot_type: None,
+                now: at,
+            },
+        )
+        .await
+        .map_err(db)?;
+        stamp_bot_unusable_password(
+            &mut **self.dispatch_tx().inner(),
+            id,
+            &make_unusable_password(),
+        )
+        .await
+        .map_err(db)?;
         Ok(id)
     }
 
@@ -551,37 +484,57 @@ where
         comment: &NewIssueComment,
     ) -> Result<(), DispatchError> {
         // The three writes of `IssueComment.save`, in order (any failure
-        // propagates so the transaction rolls the move back).
-        sqlx::query(COMMENT_INSERT_SQL)
-            .bind(comment.now)
-            .bind(comment.now)
-            .bind(comment.id)
-            .bind(comment.project_id)
-            .bind(comment.workspace_id)
-            .bind(comment.comment_stripped.as_str())
-            .bind(comment.comment_html.as_str())
-            .bind(comment.issue_id)
-            .bind(comment.actor_id)
-            .execute(&mut **self.dispatch_tx().inner())
+        // propagates so the transaction rolls the move back). One `now()`
+        // feeds all four stamps; the comment column carries the
+        // MLStripper recompute the driver computed (`issue.py:606`,
+        // PIDASHCONV-1581 item 4), while the description row carries
+        // the `Description.save` recompute (Django's own `strip_tags`,
+        // entities verbatim, `None`-when-empty — `description.py:23-29`).
+        let empty_json = serde_json::json!({});
+        let empty_list: Vec<String> = Vec::new();
+        let desc_stripped = description_stripped_for(Some(comment.comment_html.as_str()));
+        let rows = comment_domain::CommentRows {
+            id: comment.id,
+            description_id: comment.description_id,
+            created_at: comment.now,
+            updated_at: comment.now,
+            desc_created_at: comment.now,
+            desc_updated_at: comment.now,
+            workspace_id: comment.workspace_id,
+            project_id: comment.project_id,
+            issue_id: comment.issue_id,
+            actor_id: Some(comment.actor_id),
+            created_by: None,
+            updated_by: None,
+            deleted_at: None,
+            html: comment.comment_html.as_str(),
+            json: &empty_json,
+            stripped: comment.comment_stripped.as_str(),
+            desc_stripped: desc_stripped.as_deref(),
+            access: "INTERNAL",
+            speaker_type: "agent",
+            speaker_label: "",
+            speaker_agent_run_id: None,
+            external_id: None,
+            external_source: None,
+            parent_id: None,
+            attachments: &empty_list,
+            labels: &empty_list,
+            edited_at: None,
+        };
+        comment_domain::insert_comment_row(&mut **self.dispatch_tx().inner(), &rows)
             .await
             .map_err(db)?;
-        sqlx::query(DESCRIPTION_INSERT_SQL)
-            .bind(comment.now)
-            .bind(comment.now)
-            .bind(comment.description_id)
-            .bind(comment.workspace_id)
-            .bind(comment.project_id)
-            .bind(comment.comment_html.as_str())
-            .bind(comment.comment_stripped.as_str())
-            .execute(&mut **self.dispatch_tx().inner())
+        comment_domain::insert_description_row(&mut **self.dispatch_tx().inner(), &rows)
             .await
             .map_err(db)?;
-        sqlx::query(COMMENT_DESCRIPTION_UPDATE_SQL)
-            .bind(comment.description_id)
-            .bind(comment.id)
-            .execute(&mut **self.dispatch_tx().inner())
-            .await
-            .map_err(db)?;
+        comment_domain::link_comment_description(
+            &mut **self.dispatch_tx().inner(),
+            rows.id,
+            rows.description_id,
+        )
+        .await
+        .map_err(db)?;
         Ok(())
     }
 
@@ -606,6 +559,7 @@ where
             ))
             .bind(activity.actor_id)
             .bind(activity.epoch_secs)
+            .bind(activity.created_by)
             .execute(&mut **self.dispatch_tx().inner())
             .await
             .map_err(db)?;
@@ -923,7 +877,8 @@ where
 /// Open the insertion transaction, run
 /// [`wait_ticker`][pidash_services::orchestration::dispatch::wait_ticker],
 /// commit, then emit the agent-wait line. `epoch_secs` is `time.time()`
-/// for the activity row.
+/// for the activity row; `created_by` is the crum user for it (the HTTP
+/// caller).
 #[allow(clippy::too_many_arguments)]
 pub async fn wait_ticker<C, H, P>(
     pool: &PgPool,
@@ -934,6 +889,7 @@ pub async fn wait_ticker<C, H, P>(
     issue_id: Uuid,
     run_id: Option<Uuid>,
     actor: Option<Uuid>,
+    created_by: Option<Uuid>,
 ) -> Result<DispatchOutcome<WaitOutcome>, DispatchJobsError>
 where
     C: AdmissionCache,
@@ -951,6 +907,7 @@ where
         now,
         jitter_secs,
         epoch_secs,
+        created_by,
     )
     .await?;
     let (tx, pool, cache, dispatches, deferred, terminal_effects) = store.into_parts();
@@ -1166,41 +1123,13 @@ mod tests {
 
     #[test]
     fn clock_sql_translation() {
-        // `:name` → `$n` in PARAMS order, longest names first.
+        // `:name` → `$n` in PARAMS order, longest names first. The
+        // save/create goldens moved to `domain::clock` with the
+        // shared write; the seams keep only the lock query.
         assert_eq!(
             lock_ticker_by_issue_sql(),
             pidash_services::orchestration::clock::lock_ticker_sql().replace(":issue_id", "$1")
         );
-        let save = save_clock_sql();
-        assert!(!save.contains(':'));
-        for (index, name) in SAVE_CLOCK_PARAMS.iter().enumerate() {
-            let placeholder = format!("${}", index + 1);
-            assert!(
-                save.contains(&placeholder),
-                "missing {placeholder} for {name}"
-            );
-        }
-        // Spot-check the bind order against the const text.
-        let set = save
-            .split("SET ")
-            .nth(1)
-            .unwrap()
-            .split(" WHERE")
-            .next()
-            .unwrap();
-        let cols: Vec<&str> = set.split(", ").collect();
-        assert_eq!(cols.len(), SAVE_CLOCK_PARAMS.len() - 1);
-        assert!(cols[0].starts_with("updated_at = $1"));
-        assert!(save.ends_with("WHERE id = $11"));
-        let create = create_ticker_sql();
-        assert!(!create.contains(':'));
-        for (index, name) in CREATE_TICKER_PARAMS.iter().enumerate() {
-            let placeholder = format!("${}", index + 1);
-            assert!(
-                create.contains(&placeholder),
-                "missing {placeholder} for {name}"
-            );
-        }
     }
 
     #[test]
@@ -2629,6 +2558,62 @@ mod tests {
         assert_eq!(desc.3, graph.project);
     }
 
+    /// The bounce insert strips each column with its own stripper
+    /// (PIDASHCONV-1581 item 4): the comment column carries the
+    /// driver's MLStripper recompute (`issue.py:606`), the
+    /// description mirror the `Description.save` recompute
+    /// (`description.py:23-29`, entities verbatim).
+    #[ignore = "needs migrated scratch DB via DATABASE_URL"]
+    #[tokio::test]
+    async fn live_bounce_insert_splits_strippers_per_column() {
+        let _serial = LIVE_SERIAL.lock().await;
+        let pool = pool().await;
+        let graph = seed_graph(&pool, "bstrip").await;
+        let system = ensure_agent_user(&pool).await;
+        let tx = Transaction::begin(&pool).await.expect("begin");
+        let mut store = LiveCreationStore::new(tx, &pool, deps());
+        let comment_id = Uuid::new_v4();
+        let description_id = Uuid::new_v4();
+        // The driver shape: ML-decoded carried text over entity html.
+        let carried = NewIssueComment {
+            id: comment_id,
+            description_id,
+            now: now(),
+            project_id: graph.project,
+            workspace_id: graph.ws,
+            issue_id: graph.issue,
+            actor_id: system,
+            comment_html: "<p>a &amp; b</p>".to_owned(),
+            comment_stripped: "a & b".to_owned(),
+        };
+        pidash_services::orchestration::dispatch::DispatchSeam::insert_bounce_comment(
+            &mut store, &carried,
+        )
+        .await
+        .expect("insert bounce comment");
+        let (tx, _, _, _, _, _) = store.into_parts();
+        tx.commit().await.expect("commit");
+        let row: (String, String, Option<Uuid>) = sqlx::query_as(
+            "SELECT comment_html, comment_stripped, description_id FROM issue_comments WHERE id = $1",
+        )
+        .bind(comment_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read back the comment");
+        assert_eq!(row.0, "<p>a &amp; b</p>");
+        assert_eq!(row.1, "a & b");
+        assert_eq!(row.2, Some(description_id));
+        let desc: (String, Option<String>) = sqlx::query_as(
+            "SELECT description_html, description_stripped FROM descriptions WHERE id = $1",
+        )
+        .bind(description_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read back the description");
+        assert_eq!(desc.0, "<p>a &amp; b</p>");
+        assert_eq!(desc.1.as_deref(), Some("a &amp; b"));
+    }
+
     // -- live: null default fallback (PIDASHCONV-1044) ------------------------
 
     #[ignore = "needs migrated scratch DB via DATABASE_URL"]
@@ -2750,6 +2735,7 @@ mod tests {
             graph.issue,
             Some(run),
             Some(graph.user),
+            Some(graph.user),
         )
         .await
         .expect("wait");
@@ -2757,9 +2743,19 @@ mod tests {
         assert_eq!(out.outcome.reason, "waited");
         let ticker = ticker_json(&pool, graph.issue).await;
         assert_eq!(ticker["waited"], json!(1));
-        let row: (String, String, String, String, String, Uuid, f64) = sqlx::query_as(
-            "SELECT verb, field, old_value, new_value, comment, actor_id, epoch \
-             FROM issue_activities WHERE issue_id = $1",
+        let row: (
+            String,
+            String,
+            String,
+            String,
+            String,
+            Uuid,
+            f64,
+            Option<Uuid>,
+            Option<Uuid>,
+        ) = sqlx::query_as(
+            "SELECT verb, field, old_value, new_value, comment, actor_id, epoch, \
+             created_by_id, updated_by_id FROM issue_activities WHERE issue_id = $1",
         )
         .bind(graph.issue)
         .fetch_one(&pool)
@@ -2772,6 +2768,8 @@ mod tests {
         assert_eq!(row.4, format!("Waited on a blocker (1 of 10); run {run}"));
         assert_eq!(row.5, graph.user);
         assert_eq!(row.6, 1_780_000_000.0);
+        assert_eq!(row.7, Some(graph.user));
+        assert_eq!(row.8, None);
     }
 
     #[ignore = "needs migrated scratch DB via DATABASE_URL"]

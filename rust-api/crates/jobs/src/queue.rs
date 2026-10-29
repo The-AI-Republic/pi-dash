@@ -17,6 +17,9 @@
 //! stays in the table as `failed` with its `last_error` for diagnosis
 //! (Celery without a result backend discards successes the same way).
 //! [`purge_failed`] removes old failures; it runs from the scheduler loop.
+//! A `running` row whose worker died before settlement is reclaimed past
+//! [`STALE_CLAIM_LEASE_SECS`] by [`reclaim_stale_running`] (worker boot
+//! plus the scheduler loop), so no row sits `running` forever.
 //!
 //! The tables are owned by the Rust backend and created at worker boot by
 //! [`ensure_schema`]. Django stays schema owner for its own tables until
@@ -57,6 +60,14 @@ pub const DEFAULT_QUEUE: &str = "celery";
 /// The payload is the queue name; the worker claims its own queue after any
 /// wake, so a foreign-queue notification costs at most one empty claim.
 pub const JOB_NOTIFY_CHANNEL: &str = "rust_job_queue";
+
+/// How long a `running` claim may go unsettled before it is presumed
+/// orphaned (PIDASHCONV-1327): one hour, far beyond any legitimate job.
+/// [`reclaim_stale_running`] returns older rows to the queue (or parks
+/// them once the budget is spent). It runs at worker boot and every
+/// minute from the scheduler loop, so a dead worker's rows wait at most
+/// about a minute past the lease.
+pub const STALE_CLAIM_LEASE_SECS: f64 = 3600.0;
 
 /// Row states. There is no `done`: acknowledged jobs are deleted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -374,6 +385,32 @@ pub async fn fail(pool: &PgPool, id: i64, last_error: &str) -> Result<(), sqlx::
     Ok(())
 }
 
+fn reclaim_sql() -> &'static str {
+    "UPDATE rust_job_queue \
+     SET status = CASE WHEN attempts < max_retries THEN 'queued' ELSE 'failed' END, \
+         attempts = CASE WHEN attempts < max_retries THEN attempts + 1 ELSE attempts END, \
+         visible_at = CASE WHEN attempts < max_retries THEN now() ELSE visible_at END, \
+         claimed_at = NULL, claimed_by = NULL, \
+         last_error = 'reclaimed stale running job claimed by ' \
+             || COALESCE(claimed_by, 'unknown') \
+     WHERE status = 'running' AND claimed_at < now() - make_interval(secs => $1)"
+}
+
+/// Reclaim rows orphaned by a worker that died before settlement (panic
+/// without the dispatch guard, SIGKILL, OOM, crash, redeploy): every
+/// `running` row claimed longer ago than `lease_secs` returns to `queued`
+/// with `attempts + 1` and an immediate `visible_at` — or parks as
+/// `failed` once the retry budget is spent, exactly like [`retry`] and
+/// [`fail`]. Single statement, so concurrent workers reclaiming at once
+/// are safe (the loser matches nothing). Returns the rows moved.
+pub async fn reclaim_stale_running(pool: &PgPool, lease_secs: f64) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query(reclaim_sql())
+        .bind(lease_secs)
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected())
+}
+
 fn purge_failed_sql() -> &'static str {
     "DELETE FROM rust_job_queue \
      WHERE status = 'failed' AND created_at < now() - make_interval(secs => $1)"
@@ -442,6 +479,7 @@ mod tests {
             ack_sql(),
             retry_sql(),
             fail_sql(),
+            reclaim_sql(),
             purge_failed_sql(),
             crate::schedule::ensure_schedule_schema_sql(),
             crate::schedule::fetch_last_runs_sql(),
@@ -472,5 +510,145 @@ mod tests {
         assert!(enqueue_sql().contains("pg_notify"));
         assert!(enqueue_sql().contains(JOB_NOTIFY_CHANNEL));
         assert!(enqueue_sql().contains("RETURNING id"));
+    }
+
+    #[test]
+    fn reclaim_only_touches_stale_running_rows() {
+        // PIDASHCONV-1327: fresh claims and non-running rows must never
+        // move; the budget branch mirrors `retry` (requeue + 1) and
+        // `fail` (park, attempts untouched).
+        let sql = reclaim_sql();
+        assert!(sql.contains("status = 'running'"));
+        assert!(sql.contains("claimed_at < now() - make_interval(secs => $1)"));
+        assert!(sql
+            .contains("status = CASE WHEN attempts < max_retries THEN 'queued' ELSE 'failed' END"));
+        assert!(sql.contains("claimed_at = NULL, claimed_by = NULL"));
+        assert!(sql.contains("reclaimed stale running job claimed by"));
+    }
+
+    /// Reclaim settlement (PIDASHCONV-1327): a stale `running` row with
+    /// budget left returns to `queued` with `attempts + 1` and the cause
+    /// recorded; a stale row with a spent budget parks as `failed`; fresh
+    /// `running` rows and `queued` rows are untouched. Needs a live
+    /// Postgres; ignored by default.
+    #[tokio::test]
+    #[ignore = "needs live Postgres via DATABASE_URL"]
+    async fn reclaim_stale_running_restores_queued_or_failed() {
+        let url =
+            std::env::var("DATABASE_URL").expect("export DATABASE_URL for the live queue tests");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(5)
+            .connect(&url)
+            .await
+            .expect("connect scratch database");
+        ensure_schema(&pool).await.expect("ensure queue schema");
+        let tag = uuid::Uuid::new_v4();
+        let queue = format!("test-reclaim-fn-{tag}");
+        async fn seed(
+            pool: &sqlx::PgPool,
+            queue: &str,
+            task: &str,
+            max_retries: i32,
+            attempts: i32,
+            claim_age: &str,
+        ) -> i64 {
+            let job = NewJob {
+                task: task.to_owned(),
+                args: json!([]),
+                kwargs: json!({}),
+                queue: queue.to_owned(),
+                visible_at: None,
+                max_retries,
+            };
+            let id = enqueue(pool, &job).await.expect("enqueue probe job");
+            // One statement: a parallel test's boot reclaim must see the
+            // final attempts value, never a half-set row.
+            sqlx::query(
+                "UPDATE rust_job_queue \
+                 SET status = 'running', attempts = $3, \
+                     claimed_at = now() - $2::interval, \
+                     claimed_by = 'dead-worker' \
+                 WHERE id = $1",
+            )
+            .bind(id)
+            .bind(claim_age)
+            .bind(attempts)
+            .execute(pool)
+            .await
+            .expect("mark running with age");
+            id
+        }
+        let stale_id = seed(
+            &pool,
+            &queue,
+            "test.stale",
+            DEFAULT_MAX_RETRIES,
+            0,
+            "2 hours",
+        )
+        .await;
+        let fresh_id = seed(
+            &pool,
+            &queue,
+            "test.fresh",
+            DEFAULT_MAX_RETRIES,
+            0,
+            "1 minute",
+        )
+        .await;
+        let spent_id = seed(
+            &pool,
+            &queue,
+            "test.spent",
+            DEFAULT_MAX_RETRIES,
+            DEFAULT_MAX_RETRIES,
+            "2 hours",
+        )
+        .await;
+        let queued_id = enqueue(
+            &pool,
+            &NewJob {
+                task: "test.queued".to_owned(),
+                args: json!([]),
+                kwargs: json!({}),
+                queue: queue.clone(),
+                visible_at: None,
+                max_retries: DEFAULT_MAX_RETRIES,
+            },
+        )
+        .await
+        .expect("enqueue queued probe");
+        // No exact moved-count assertion: reclaim is global, so a
+        // parallel test's worker boot may move these rows first (or this
+        // call moves another test's stale rows) — the per-row end states
+        // below are deterministic either way.
+        reclaim_stale_running(&pool, STALE_CLAIM_LEASE_SECS)
+            .await
+            .expect("reclaim");
+        async fn state(pool: &sqlx::PgPool, id: i64) -> (String, i32, Option<String>) {
+            sqlx::query_as("SELECT status, attempts, last_error FROM rust_job_queue WHERE id = $1")
+                .bind(id)
+                .fetch_one(pool)
+                .await
+                .expect("fetch row state")
+        }
+        let (status, attempts, last_error) = state(&pool, stale_id).await;
+        assert_eq!(status, "queued");
+        assert_eq!(attempts, 1);
+        let error = last_error.expect("reclaim records its cause");
+        assert!(
+            error.contains("reclaimed stale running job claimed by dead-worker"),
+            "unexpected last_error: {error}"
+        );
+        let (status, attempts, _) = state(&pool, fresh_id).await;
+        assert_eq!((status.as_str(), attempts), ("running", 0));
+        let (status, attempts, last_error) = state(&pool, spent_id).await;
+        assert_eq!(status, "failed");
+        assert_eq!(attempts, DEFAULT_MAX_RETRIES, "a park spends no attempt");
+        assert!(last_error
+            .expect("park records its cause")
+            .contains("reclaimed stale"));
+        let (status, _, _) = state(&pool, queued_id).await;
+        assert_eq!(status, "queued");
     }
 }

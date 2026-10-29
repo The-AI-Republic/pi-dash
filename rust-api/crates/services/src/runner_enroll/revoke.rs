@@ -10,15 +10,17 @@
 //!
 //! # Shape: store seam, not inline SQL
 //!
-//! The services crate has no `sqlx` dependency, so — following the
-//! sibling [`RunCreationStore`](super::validation::RunCreationStore)
-//! precedent — the reads/writes live behind [`RevokeStore`]: one async
-//! method per Django ORM call, with the SQL text in the adjacent `*_SQL`
-//! consts (plus [`active_runs_lock_sql`]), which the pool implementation
-//! must execute verbatim. [`revoke_runner`] keeps the full orchestration
-//! (including the conditional-step and registration order), so the
-//! executing layer issues exactly the statements Python issues, in the
-//! same order.
+//! Following the sibling
+//! [`RunCreationStore`](super::validation::RunCreationStore) precedent,
+//! the reads/writes live behind [`RevokeStore`]: one async method per
+//! Django ORM call, with the SQL text in the adjacent `*_SQL` consts
+//! (plus [`active_runs_lock_sql`]). Each write leg has one
+//! executor-generic performer — S2 in
+//! [`domain::tokens`](crate::domain::tokens), the rest below — which
+//! every pool implementation calls, so the executing layers issue
+//! exactly the statements Python issues, in the same order.
+//! [`revoke_runner`] keeps the full orchestration (including the
+//! conditional-step and registration order).
 //!
 //! # Transactions
 //!
@@ -96,6 +98,7 @@ use pidash_db::runner_enroll::columns::revoke_reasons::{
     KNOWN_REVOKE_REASONS, REVOKE_REASON_MAX_LEN,
 };
 
+use crate::runner_runs::finalization::{finalize_update_sql, FinalizeValues};
 use crate::runner_sessions::guards;
 
 // ---------------------------------------------------------------------------
@@ -168,12 +171,10 @@ pub fn check_revoke_reason(reason: &str) -> (String, Vec<String>) {
 /// the D-14 drain consts).
 pub const MARK_RUNNER_REVOKED_SQL: &str = "UPDATE \"runner\" SET \"status\" = 'revoked', \"revoked_at\" = $1, \"revoked_reason\" = $2 WHERE \"runner\".\"id\" = $3";
 
-/// S2 — revoke active sessions (`:618-620`).
-///
-/// `$1` = now, `$2` = stored reason, `$3` = runner. The `WHERE` order
-/// (`revoked_at IS NULL` first) is Django's `Q`-sorted kwargs, not the
-/// source filter order (`runner=self, revoked_at__isnull=True`).
-pub const REVOKE_ACTIVE_SESSIONS_SQL: &str = "UPDATE \"runner_session\" SET \"revoked_at\" = $1, \"revoked_reason\" = $2 WHERE (\"runner_session\".\"revoked_at\" IS NULL AND \"runner_session\".\"runner_id\" = $3)";
+// NOTE: the S2 revoke const lived here; the statement moved to
+// `crate::domain::tokens::revoke_runner_sessions_for_runner`
+// (PIDASHCONV-1520), whose test carries the pin (including the
+// Q-sorted WHERE order).
 
 /// S3 — lock + list non-terminal runs (`:622-626`).
 ///
@@ -213,6 +214,89 @@ pub const FINALIZE_ERROR: &str = "runner revoked";
 pub const FINALIZE_ERROR_CODE: &str = "runner_revoked";
 
 // ---------------------------------------------------------------------------
+// Executor-generic performers (design D6)
+//
+// One async fn per write leg, generic over `sqlx::Executor` so pool and
+// transaction callers share them (the S2
+// `domain::tokens::revoke_runner_sessions_for_runner` precedent). SQL
+// text and binds are byte-identical to the inlined executes they
+// replace; the savepoint/race/cloud-event flow stays with the driver.
+// ---------------------------------------------------------------------------
+
+/// S1 performer: mark the runner revoked ([`MARK_RUNNER_REVOKED_SQL`]).
+///
+/// Params: `$1` now, `$2` stored reason, `$3` runner.
+pub async fn stamp_runner_revoked<'e, E>(
+    ex: E,
+    runner_id: Uuid,
+    now: DateTime<Utc>,
+    stored_reason: &str,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(MARK_RUNNER_REVOKED_SQL)
+        .bind(now)
+        .bind(stored_reason)
+        .bind(runner_id)
+        .execute(ex)
+        .await
+        .map(|_| ())
+}
+
+/// S4b performer: unpin QUEUED follow-ups ([`UNPIN_QUEUED_RUNS_SQL`]).
+///
+/// Param: `$1` runner. The driver calls this only when S4a is
+/// non-empty.
+pub async fn unpin_queued_runs_for_runner<'e, E>(ex: E, runner_id: Uuid) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(UNPIN_QUEUED_RUNS_SQL)
+        .bind(runner_id)
+        .execute(ex)
+        .await
+        .map(|_| ())
+}
+
+/// Revoke-finalize `UPDATE` performer: render
+/// [`finalize_update_sql`] from the planned `values` and bind the
+/// revoke extras in clause order.
+///
+/// `values` is the revoke plan (`status`, `ended_at`, `queue_position`,
+/// both markers, `cancel_reason`, then the folded `error_details`
+/// patch carrying `error` / `error_code`); the
+/// caller pins that column order before the finalize lock, and the
+/// binds below follow it. `ended_at` binds the caller's own clock
+/// (each driver stamps its own `now`, never hoisted across legs).
+/// `run_id` binds last (the locked primary key).
+pub async fn execute_revoke_finalize_update<'e, E>(
+    ex: E,
+    values: &FinalizeValues,
+    run_id: Uuid,
+    stored_reason: &str,
+    ended_at: DateTime<Utc>,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(&finalize_update_sql(values))
+        .bind(FINALIZE_TO_STATUS)
+        .bind(ended_at)
+        .bind(None::<i16>)
+        .bind(None::<DateTime<Utc>>)
+        .bind(None::<DateTime<Utc>>)
+        .bind(stored_reason)
+        .bind(crate::runner_runs::finalization::error_details_patch(
+            values,
+        ))
+        .bind(run_id)
+        .execute(ex)
+        .await
+        .map(|_| ())
+}
+
+// ---------------------------------------------------------------------------
 // Seam + driver
 // ---------------------------------------------------------------------------
 
@@ -233,15 +317,16 @@ pub enum RevokeError {
 ///
 /// Methods mirror the Django ORM calls in `Runner.revoke`, one per
 /// statement shape, plus the D-15 finalize step and the three
-/// post-commit collectors. The SQL text for each lives in the adjacent
-/// `*_SQL` consts, which the pool implementation must execute verbatim.
+/// post-commit collectors. Each write leg has one executor-generic
+/// performer (named on the method); pool implementations call it
+/// rather than re-issuing the SQL.
 ///
 /// Native `async fn` in trait (stable since 1.75): no `async-trait`
 /// dependency enters the lockfile for this seam (the `GitStore`
 /// precedent).
 #[allow(async_fn_in_trait)]
 pub trait RevokeStore {
-    /// S1: mark the runner revoked ([`MARK_RUNNER_REVOKED_SQL`]).
+    /// S1: mark the runner revoked, via [`stamp_runner_revoked`].
     async fn mark_runner_revoked(
         &mut self,
         runner_id: Uuid,
@@ -249,7 +334,8 @@ pub trait RevokeStore {
         stored_reason: &str,
     ) -> Result<(), RevokeError>;
 
-    /// S2: revoke active sessions ([`REVOKE_ACTIVE_SESSIONS_SQL`]).
+    /// S2: revoke active sessions
+    /// (`crate::domain::tokens::revoke_runner_sessions_for_runner`).
     async fn revoke_active_sessions(
         &mut self,
         runner_id: Uuid,
@@ -274,13 +360,15 @@ pub trait RevokeStore {
     /// partial-rollback path, the 586 precedent):
     /// `lock_run_for_finalize_sql(with_runner=true)` first-writer-wins
     /// (a miss is `Ok(())` — Python ignores the `False`),
-    /// `finalize_update_sql` with
+    /// [`execute_revoke_finalize_update`] with
     /// [`FINALIZE_ERROR`]/[`FINALIZE_ERROR_CODE`]/`cancel_reason`, the
-    /// cloud-only terminal event, and — on success only — the
-    /// terminal-effects publication captured into the executor's
-    /// post-commit drain (`plan_publish_effects`; it registers before
-    /// this driver's own collectors, as in Python). No `done_payload`
-    /// merge: these updates carry none.
+    /// cloud-only terminal event (via
+    /// [`insert_terminal_event`](crate::runner_runs::finalization::insert_terminal_event)),
+    /// and — on success only — the terminal-effects publication
+    /// captured into the executor's post-commit drain
+    /// (`plan_publish_effects`; it registers before this driver's own
+    /// collectors, as in Python). No `done_payload` merge: these
+    /// updates carry none.
     async fn finalize_cancelled_run(
         &mut self,
         run_id: Uuid,
@@ -295,8 +383,9 @@ pub trait RevokeStore {
         runner_id: Uuid,
     ) -> Result<Vec<Option<Uuid>>, RevokeError>;
 
-    /// S4b: unpin QUEUED follow-ups ([`UNPIN_QUEUED_RUNS_SQL`]). The
-    /// driver calls this only when S4a is non-empty.
+    /// S4b: unpin QUEUED follow-ups, via
+    /// [`unpin_queued_runs_for_runner`]. The driver calls this only
+    /// when S4a is non-empty.
     async fn unpin_queued_runs(&mut self, runner_id: Uuid) -> Result<(), RevokeError>;
 
     /// Collect one project-move handoff for the post-commit drain
@@ -540,13 +629,8 @@ mod tests {
         assert!(sql.contains("updated_at UNCHANGED"), "F5 pins the note");
     }
 
-    #[test]
-    fn s2_where_order_is_q_sorted() {
-        assert_eq!(
-            REVOKE_ACTIVE_SESSIONS_SQL,
-            "UPDATE \"runner_session\" SET \"revoked_at\" = $1, \"revoked_reason\" = $2 WHERE (\"runner_session\".\"revoked_at\" IS NULL AND \"runner_session\".\"runner_id\" = $3)"
-        );
-    }
+    // (The S2 pin moved with the statement to
+    // `crate::domain::tokens`.)
 
     #[test]
     fn s3_renders_non_terminal_statuses_from_guards() {

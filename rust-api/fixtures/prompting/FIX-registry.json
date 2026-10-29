@@ -2,8 +2,8 @@
   "bugs": [],
   "data": {
     "fragments": {
-      "assembled_len": 53594,
-      "assembled_sha256": "c4a63023bb1ca4f249017b7e99f2403b7e51cbf9bf8b9910e00bba2e6f0e3331",
+      "assembled_len": 54780,
+      "assembled_sha256": "eea2ba89650f68ca0e1a7e919ef803dddb373b7c9c9086a8bcb3776c1c9a9b2a",
       "fragment_count": 14,
       "fragments_in_order": [
         "01_intro.md",
@@ -295,8 +295,8 @@
         {
           "allows_personal_override": false,
           "allows_workspace_override": false,
-          "body_len": 26864,
-          "body_sha256": "0437791d7c674fbcfc2362601d818ac17e57e9ec6da6a7949862e08588605ce0",
+          "body_len": 28050,
+          "body_sha256": "5efbf4a32a81ca68c6d859617b6e6e80a4d4ab3a71b3422824b42792ffda639b",
           "customizable": "locked",
           "is_locked": true,
           "is_overridable": false,
@@ -496,9 +496,9 @@
     }
   },
   "fixture_id": "FIX-registry",
-  "how_produced": "executed against the real Python under pi_dash.settings.test (Django 4.2): pure units with no DB; DB-backed units against scratch database pidash_prompt_fx (migrated from this tree). Throwaway generators: /tmp/fxP_nodb.py, /tmp/fxP_nodb2.py, /tmp/fxP_db1.py, /tmp/fxP_db2.py (+ /tmp/fxP_setup.py world). PIDASHCONV-1058 re-sync: content-derived fields regenerated from origin/main@3267ceb9 via /tmp/fx1058_gen.py (registry.py + recipes.py loaded by path; stdlib-only, no Django).",
+  "how_produced": "executed against the real Python under pi_dash.settings.test (Django 4.2): pure units with no DB; DB-backed units against scratch database pidash_prompt_fx (migrated from this tree). Throwaway generators: /tmp/fxP_nodb.py, /tmp/fxP_nodb2.py, /tmp/fxP_db1.py, /tmp/fxP_db2.py (+ /tmp/fxP_setup.py world). PIDASHCONV-1058 re-sync: content-derived fields regenerated from origin/main@3267ceb9 via /tmp/fx1058_gen.py (registry.py + recipes.py loaded by path; stdlib-only, no Django). PIDASHCONV-1534 re-sync: pidash-cli body_len/body_sha256 + fragments assembled_len/assembled_sha256 regenerated from origin/main@0a6fb8eca via /tmp/fx1534_gen.py (registry.py + fragments/__init__.py loaded by path; stdlib-only, no Django).",
   "notes": [],
-  "ported_from": "3267ceb9cda65c90e6cb66e4a3ef8aaa26ca3a4e",
+  "ported_from": "0a6fb8eca0f459802045f22e02af5748a6bdc768",
   "trace": [
     "prompting/registry.py:26 (SECTIONS_DIR), 28-56 (tiers), 62-66 (MAX_SECTION_BODY_LENGTH), 102-147 (_parse_front_matter), 150-161 (_load_registry), 166-178 (REGISTRY/get_section/all_sections)",
     "prompting/fragments/__init__.py:37-55 (FRAGMENT_GLOB, fragment_paths, assemble)"

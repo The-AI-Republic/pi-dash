@@ -437,12 +437,6 @@ pub fn next_issue_sort_order(max_sort_order: Option<f64>) -> Option<f64> {
     max_sort_order.map(|largest| largest + 10_000.0)
 }
 
-/// `Issue.save` (`issue.py:324-328`): `sequence_id = max + 1`, else `1` —
-/// always overwritten, even though the seed row carries `sequence_id`.
-pub fn next_issue_sequence_id(max_sequence: Option<i64>) -> i64 {
-    max_sequence.map(|largest| largest + 1).unwrap_or(1)
-}
-
 /// `Issue.save` (`issue.py:303-310`, the `state is not None` branch — seed
 /// issues always carry a state): `completed_at = now` iff the state's group
 /// is `completed`, else `NULL`.
@@ -937,8 +931,9 @@ mod tests {
         assert_eq!(next_view_sort_order(Some(75_535.0)), Some(85_535.0));
         assert_eq!(next_issue_sort_order(None), None);
         assert_eq!(next_issue_sort_order(Some(1_000.0)), Some(11_000.0));
-        assert_eq!(next_issue_sequence_id(None), 1);
-        assert_eq!(next_issue_sequence_id(Some(7)), 8);
+        // The sequence kernel folded into
+        // `app_project::ser_project::next_work_item_sequence` (pinned by
+        // `next_sequence_kernel_matches_fixture` there).
         assert!(issue_completed("completed"));
         assert!(!issue_completed("started"));
         assert!(!issue_completed("backlog"));

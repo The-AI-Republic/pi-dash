@@ -79,6 +79,7 @@
 //! 500s, so failures are traced and the response stands.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -88,10 +89,16 @@ use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-use pidash_db::app_pages::strip::{ml_strip_tags, sync_description_stripped};
+use pidash_services::domain::activity::TaskEnqueueHook;
+use pidash_services::domain::issues as domain_issues;
+use pidash_services::domain::issues::IssueFieldSet;
+use pidash_services::domain::transition::IssueTransitionHook;
+use pidash_services::domain::{self, WriteActor, WriteCtx, WriteScope};
 use pidash_services::space::guards::{self, AnchorLookup, ExceptionKind};
 use pidash_services::space::queries::intake_assets as queries;
 
+use crate::domain_hooks::AppTaskEnqueueHook;
+use crate::issue_transition::AppTransitionHook;
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
 
@@ -99,6 +106,8 @@ use super::{
     filters::{self, FilterValue},
     guards_error, owned, raw_json_response, Denial, QueryMap,
 };
+use pidash_compat::datetime::{render_uuid as uuid_string, render_uuid_opt as opt_uuid};
+use pidash_compat::validate::char_internal;
 
 /// Owned intake routes: the collection (both aliases share the viewset)
 /// and the detail. Every other method proxies to Django.
@@ -248,6 +257,42 @@ fn db_error(error: sqlx::Error) -> Response {
     Denial::ServerError.into_response()
 }
 
+/// Map a domain-write failure onto the same matrix: integrity → the
+/// invalid-payload body, anything else → 500. No `NotFound` arm: every
+/// fetch miss answers 404 driver-side ahead of the write, and the
+/// hook's dangling-state miss is the race Django 500s
+/// (`State.DoesNotExist` uncaught in `save()`).
+fn domain_response(error: domain::DomainError) -> Response {
+    if error.is_integrity_violation() {
+        guards_error(guards::handle_exception(ExceptionKind::IntegrityError))
+    } else {
+        Denial::ServerError.into_response()
+    }
+}
+
+fn write_ctx(actor: &Actor, board: &Board) -> WriteCtx {
+    WriteCtx::new(WriteActor {
+        user_id: actor.id,
+        timezone: Some(actor.timezone.name().to_owned()),
+    })
+    .with_scope(WriteScope {
+        workspace_id: Some(board.workspace_id),
+        project_id: Some(board.project_id),
+    })
+}
+
+/// The post-save fire arguments, one `post_save` receiver run: the space
+/// intake views never set Django's `_orchestration_dispatch_immediate`
+/// attr and carry no moved-by run, so the defaults apply on every path.
+fn fire_spec(actor_id: &Uuid, now: DateTime<Utc>) -> domain_issues::FireSpec {
+    domain_issues::FireSpec {
+        dispatch_immediate: true,
+        created_by: Some(*actor_id),
+        moved_by_run: None,
+        now,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Rows: issues plus the relations the serializers render
 // ---------------------------------------------------------------------------
@@ -287,6 +332,7 @@ struct IssueRow {
     created_via: Option<String>,
     assigned_pod_id: Option<Uuid>,
     agent_executor: Option<String>,
+    workpad: String,
 }
 
 impl IssueRow {
@@ -325,11 +371,53 @@ impl IssueRow {
             created_via: row.try_get("created_via")?,
             assigned_pod_id: row.try_get("assigned_pod_id")?,
             agent_executor: row.try_get("agent_executor")?,
+            workpad: row.try_get("workpad")?,
         })
+    }
+
+    /// The full-save field set: every column, for the domain write the
+    /// update driver runs after overlaying its validated input.
+    fn field_set(&self) -> IssueFieldSet {
+        IssueFieldSet {
+            id: self.id,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+            created_by_id: self.created_by_id,
+            updated_by_id: self.updated_by_id,
+            deleted_at: self.deleted_at,
+            project_id: self.project_id,
+            workspace_id: self.workspace_id,
+            parent_id: self.parent_id,
+            state_id: self.state_id,
+            point: self.point,
+            estimate_point_id: self.estimate_point_id,
+            name: self.name.clone(),
+            description_json: self.description_json.clone(),
+            description_html: self.description_html.clone(),
+            description_stripped: self.description_stripped.clone(),
+            description_binary: self.description_binary.clone(),
+            priority: self.priority.clone(),
+            complexity_score: self.complexity_score,
+            start_date: self.start_date,
+            target_date: self.target_date,
+            sequence_id: self.sequence_id,
+            sort_order: self.sort_order,
+            completed_at: self.completed_at,
+            archived_at: self.archived_at,
+            is_draft: self.is_draft,
+            external_source: self.external_source.clone(),
+            external_id: self.external_id.clone(),
+            type_id: self.type_id,
+            git_work_branch: self.git_work_branch.clone(),
+            workpad: self.workpad.clone(),
+            created_via: self.created_via.clone(),
+            assigned_pod_id: self.assigned_pod_id,
+            agent_executor: self.agent_executor.clone(),
+        }
     }
 }
 
-const ISSUE_COLUMNS: &str = "id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, parent_id, state_id, point, estimate_point_id, name, description_json, description_html, description_stripped, description_binary, priority, complexity_score, start_date, target_date, sequence_id, sort_order, completed_at, archived_at, is_draft, external_source, external_id, type_id, git_work_branch, created_via, assigned_pod_id, agent_executor";
+const ISSUE_COLUMNS: &str = "id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, parent_id, state_id, point, estimate_point_id, name, description_json, description_html, description_stripped, description_binary, priority, complexity_score, start_date, target_date, sequence_id, sort_order, completed_at, archived_at, is_draft, external_source, external_id, type_id, git_work_branch, created_via, assigned_pod_id, agent_executor, workpad";
 
 /// `Issue.objects.get(pk, workspace_id, project_id)` (`:199-203,:250-254`).
 async fn fetch_issue(
@@ -950,16 +1038,6 @@ fn render_dt(moment: &DateTime<Utc>, timezone: chrono_tz::Tz) -> String {
     } else {
         text
     }
-}
-
-fn uuid_string(id: &Uuid) -> serde_json::Value {
-    serde_json::Value::String(id.to_string())
-}
-
-fn opt_uuid(id: &Option<Uuid>) -> serde_json::Value {
-    id.as_ref()
-        .map(uuid_string)
-        .unwrap_or(serde_json::Value::Null)
 }
 
 fn opt_string(text: &Option<String>) -> serde_json::Value {
@@ -1647,44 +1725,74 @@ fn json_truthy(value: &serde_json::Value) -> bool {
     }
 }
 
-/// DRF `CharField.to_internal_value` (`trim_whitespace=True`): bools,
-/// dicts and lists fail; numbers stringify; strings strip. `None` is
-/// rejected upstream (`may not be null`).
-fn char_internal(value: &serde_json::Value) -> Result<String, ()> {
+/// Coerce the raw `name` JSON scalar exactly as the retired typed bind
+/// did: the database spelled ints/uints/floats/bools server-side, so the
+/// driver renders those spellings. A uint past `i64::MAX` wraps (the old
+/// `uint as i64` bind — ported quirk); a bool renders lowercase
+/// (`true`/`false`, where Django `str()` spells `True`/`False` — ported
+/// Tier-3 divergence, no client sends bool names). Containers and null
+/// have no adaptation (Django raises → 500).
+fn coerce_name(value: &serde_json::Value) -> Option<String> {
     match value {
-        serde_json::Value::String(text) => Ok(text.trim().to_string()),
-        serde_json::Value::Number(number) => Ok(number.to_string().trim().to_string()),
-        serde_json::Value::Bool(_) | serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
-            Err(())
+        serde_json::Value::String(text) => Some(text.clone()),
+        serde_json::Value::Number(number) => {
+            if let Some(int) = number.as_i64() {
+                Some(int.to_string())
+            } else if let Some(uint) = number.as_u64() {
+                Some((uint as i64).to_string())
+            } else {
+                number.as_f64().map(pg_float_text)
+            }
         }
-        serde_json::Value::Null => Err(()),
+        serde_json::Value::Bool(flag) => Some(flag.to_string()),
+        _ => None,
     }
 }
 
-/// Bind a JSON scalar the way psycopg adapts the Python value: typed
-/// binds coerce server-side exactly like inline literals. Containers have
-/// no adaptation (Django raises → 500).
-#[allow(clippy::result_large_err)]
-fn bind_text<'q>(
-    query: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
-    value: &serde_json::Value,
-) -> Result<sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>, Response> {
-    match value {
-        serde_json::Value::String(text) => Ok(query.bind(text.clone())),
-        serde_json::Value::Number(number) => {
-            if let Some(int) = number.as_i64() {
-                Ok(query.bind(int))
-            } else if let Some(uint) = number.as_u64() {
-                Ok(query.bind(uint as i64))
-            } else if let Some(float) = number.as_f64() {
-                Ok(query.bind(float))
+/// `float8::text` (`float8out`, `extra_float_digits = 1`): shortest
+/// roundtrip digits, exponent form when the decimal exponent is below
+/// -4 or at/above 17, two-digit exponents (`1e+20`, `1e-05`). Rust's
+/// `Display` already emits the shortest digits; only the exponent
+/// decision differs. Vectors verified against Postgres 16.
+fn pg_float_text(float: f64) -> String {
+    if float.is_infinite() {
+        return if float.is_sign_negative() {
+            "-Infinity".to_owned()
+        } else {
+            "Infinity".to_owned()
+        };
+    }
+    if float.is_nan() {
+        return "NaN".to_owned();
+    }
+    let plain = format!("{float}");
+    let sign = if plain.starts_with('-') { "-" } else { "" };
+    let digits: String = plain.chars().filter(|c| c.is_ascii_digit()).collect();
+    let sig = digits.trim_start_matches('0');
+    if sig.is_empty() {
+        return "0".to_owned();
+    }
+    let point = plain.find('.');
+    let exp = match point {
+        Some(dot) => {
+            let int_digits = plain[..dot]
+                .trim_start_matches('-')
+                .trim_start_matches('0')
+                .len();
+            if int_digits > 0 {
+                int_digits as i32 - 1
             } else {
-                Err(Denial::ServerError.into_response())
+                -(digits.len() as i32 - sig.len() as i32)
             }
         }
-        serde_json::Value::Bool(flag) => Ok(query.bind(*flag)),
-        _ => Err(Denial::ServerError.into_response()),
+        None => plain.trim_start_matches('-').trim_start_matches('0').len() as i32 - 1,
+    };
+    if !(-4..17).contains(&exp) {
+        let mantissa = format!("{}.{}", &sig[..1], sig[1..].trim_end_matches('0'));
+        let mantissa = mantissa.trim_end_matches('.');
+        return format!("{sign}{mantissa}e{exp:+03}");
     }
+    plain
 }
 
 /// The git-sync lock message (`app/serializers/issue.py:225`).
@@ -1937,7 +2045,9 @@ async fn collection_create(
         _ => "low".to_string(),
     };
     // Triage auto-create (`:128-143`): reuse the state, else insert with
-    // the `State.save` resequence (`max+15000`, `65000` on empty).
+    // the `State.save` resequence (`max+15000`, `65000` on empty). The max
+    // runs over `State.objects` — live, non-triage project states
+    // (`db/models/state.py:79-83,131-139`; PIDASHCONV-1638).
     // The queries-layer lookup selects `states.*`; decoding that row as a
     // scalar fails whenever a triage row exists, so read the `id` column
     // off the row instead (foundation read-only).
@@ -1960,7 +2070,7 @@ async fn collection_create(
         Some(id) => id,
         None => {
             let max_sequence: Option<f64> = match sqlx::query_scalar(
-                "SELECT MAX(sequence) FROM \"states\" WHERE \"states\".\"project_id\" = $1",
+                "SELECT MAX(sequence) FROM \"states\" WHERE \"states\".\"project_id\" = $1 AND \"states\".\"deleted_at\" IS NULL AND NOT (\"states\".\"group\" = 'triage')",
             )
             .bind(board.project_id)
             .fetch_one(pool)
@@ -1970,68 +2080,44 @@ async fn collection_create(
                 Err(_) => return Denial::ServerError.into_response(),
             };
             let sequence = max_sequence.map(|max| max + 15000.0).unwrap_or(65000.0);
-            let new_id = Uuid::new_v4();
             // Full `State.objects.create` row: the queries-layer helper
             // emits only the explicit create kwargs, so the ORM-filled
             // columns (`description=""`, `slug="triage"` from `save()`,
             // `is_triage=False`) are set here (foundation read-only).
-            if let Err(error) = sqlx::query(
-                "INSERT INTO \"states\" (id, created_at, updated_at, created_by_id, name, description, slug, color, project_id, workspace_id, sequence, \"group\", \"default\", is_triage) VALUES ($1, $2, $3, $4, 'Triage', '', 'triage', '#4E5355', $5, $6, $7, 'triage', false, false)",
+            match pidash_services::domain::projects::states::add_triage(
+                pool,
+                board.project_id,
+                board.workspace_id,
+                sequence,
+                actor.id,
+                now,
+                now,
+                pidash_services::domain::projects::states::TriageText::Short,
             )
-            .bind(new_id)
-            .bind(now)
-            .bind(now)
-            .bind(actor.id)
-            .bind(board.project_id)
-            .bind(board.workspace_id)
-            .bind(sequence)
-            .execute(pool)
             .await
             {
-                return db_error(error);
+                Ok(new_id) => new_id,
+                Err(error) => return db_error(error),
             }
-            new_id
         }
     };
-    // `Issue.save` backfills (`db/models/issue.py:305-360`): the project
-    // default pod (or NULL), the next sequence, tag-stripped text, and
-    // triage sort order — all inside the advisory lock the save takes.
-    let issue_id = Uuid::new_v4();
-    let sequence_id: i32 = match sqlx::query_scalar::<_, Option<i64>>(
-        "SELECT MAX(sequence) FROM \"issue_sequences\" WHERE \"issue_sequences\".\"project_id\" = $1",
-    )
-    .bind(board.project_id)
-    .fetch_one(pool)
-    .await
-    {
-        Ok(max) => max.map(|max| max + 1).unwrap_or(1) as i32,
-        Err(_) => return Denial::ServerError.into_response(),
+    // `Issue.objects.create(...)` + `Issue.save` ride
+    // `domain::issues::create`: the hooks resolve the pod default,
+    // `completed_at` (triage, so NULL), stripped text, sequence and sort
+    // order, and the post-commit chain runs the `post_save` fire Django's
+    // create fires (no m2m legs on this endpoint). The bare created emit
+    // stays driver-side below.
+    // `issue_data.get("description_json", {})` (`:147`): an explicit
+    // null arrives as None and the NOT NULL jsonb column rejects it —
+    // the invalid-payload 400, same as the description_html null arm
+    // below. Any other JSON value stores as-is.
+    let description_json = match issue_data.get("description_json") {
+        Some(serde_json::Value::Null) => {
+            return guards_error(guards::handle_exception(ExceptionKind::IntegrityError));
+        }
+        Some(value) => value.clone(),
+        None => super::sanitize::default_description_json(),
     };
-    let pod_id: Option<Uuid> = match sqlx::query_scalar(
-        "SELECT id FROM \"pod\" WHERE \"pod\".\"deleted_at\" IS NULL AND \"pod\".\"project_id\" = $1 AND \"pod\".\"is_default\" = TRUE ORDER BY \"pod\".\"created_at\" ASC LIMIT 1",
-    )
-    .bind(board.project_id)
-    .fetch_optional(pool)
-    .await
-    {
-        Ok(pod) => pod,
-        Err(_) => return Denial::ServerError.into_response(),
-    };
-    let sort_order: f64 = match sqlx::query_scalar::<_, Option<f64>>(
-        "SELECT MAX(sort_order) FROM \"issues\" WHERE \"issues\".\"deleted_at\" IS NULL AND \"issues\".\"project_id\" = $1 AND \"issues\".\"state_id\" = $2",
-    )
-    .bind(board.project_id)
-    .bind(state_id)
-    .fetch_one(pool)
-    .await
-    {
-        Ok(max) => max.map(|max| max + 10000.0).unwrap_or(65535.0),
-        Err(_) => return Denial::ServerError.into_response(),
-    };
-    let description_json = issue_data
-        .get("description_json")
-        .cloned()
-        .unwrap_or_else(super::sanitize::default_description_json);
     // `issue_data.get("description_html", DEFAULT_DESCRIPTION)` (`:148`):
     // an explicit null stores NULL (no serializer validation on create).
     let description_html: Option<String> = match issue_data.get("description_html") {
@@ -2040,58 +2126,102 @@ async fn collection_create(
         Some(serde_json::Value::String(html)) => Some(html.clone()),
         Some(_) => return Denial::ServerError.into_response(),
     };
-    // `Issue.save` (`db/models/issue.py:330-334` over
-    // `utils/html_processor.py`): `None` only when the *input* html is
-    // `""`/`None`, else MLStripper-decoded text — an empty strip (e.g. the
-    // `"<p></p>"` default) is stored as `""`, not collapsed to `None`.
-    let description_stripped = sync_description_stripped(description_html.as_deref());
-    // The advisory lock serializes sequence assignment
-    // (`db/models/issue.py:336`); failure degrades to the plain path.
-    let lock_key = advisory_key(&board.project_id);
-    let _ = sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(lock_key)
-        .execute(pool)
-        .await;
-    let mut insert = sqlx::query(
-        "INSERT INTO \"issues\" (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, parent_id, state_id, point, estimate_point_id, name, description_json, description_html, description_stripped, description_binary, priority, complexity_score, start_date, target_date, sequence_id, sort_order, completed_at, archived_at, is_draft, external_source, external_id, type_id, git_work_branch, workpad, created_via, assigned_pod_id, agent_executor) VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, NULL, $7, NULL, NULL, $8, $9, $10, $11, NULL, $12, 0, NULL, NULL, $13, $14, NULL, NULL, FALSE, NULL, NULL, NULL, '', '', NULL, $15, NULL)",
-    )
-    .bind(issue_id)
-    .bind(now)
-    .bind(now)
-    .bind(actor.id)
-    .bind(board.project_id)
-    .bind(board.workspace_id)
-    .bind(state_id);
-    insert = match bind_text(insert, &name_value) {
-        Ok(query) => query,
-        Err(response) => return response,
+    // The old INSERT bound the raw JSON scalar and let Postgres coerce
+    // server-side (psycopg adaptation parity): ints/uints/floats/bools
+    // render exactly as the database spells them. Containers and null
+    // have no adaptation (Django raises → 500).
+    let Some(name) = coerce_name(&name_value) else {
+        return Denial::ServerError.into_response();
     };
-    insert = insert
-        .bind(description_json)
-        .bind(description_html)
-        .bind(description_stripped)
-        .bind(priority_insert)
-        .bind(sequence_id)
-        .bind(sort_order)
-        .bind(pod_id);
-    if let Err(error) = insert.execute(pool).await {
-        return db_error(error);
-    }
-    if let Err(error) = sqlx::query(
-        "INSERT INTO \"issue_sequences\" (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, issue_id, sequence, deleted) VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, $7, $8, FALSE)",
-    )
-    .bind(Uuid::new_v4())
-    .bind(now)
-    .bind(now)
-    .bind(actor.id)
-    .bind(board.project_id)
-    .bind(board.workspace_id)
-    .bind(issue_id)
-    .bind(i64::from(sequence_id))
-    .execute(pool)
-    .await
-    {
-        return db_error(error);
+    let Some(description_html) = description_html else {
+        // The old NULL bind tripped the not-null check into the
+        // invalid-payload 400 — same body, without the round trip.
+        return guards_error(guards::handle_exception(ExceptionKind::IntegrityError));
+    };
+    let issue_id = Uuid::new_v4();
+    let fields = IssueFieldSet {
+        id: issue_id,
+        created_at: now,
+        updated_at: now,
+        created_by_id: Some(actor.id),
+        updated_by_id: None,
+        deleted_at: None,
+        project_id: board.project_id,
+        workspace_id: board.workspace_id,
+        parent_id: None,
+        state_id: Some(state_id),
+        point: None,
+        estimate_point_id: None,
+        name: name.clone(),
+        description_json,
+        description_html,
+        description_stripped: None,
+        description_binary: None,
+        priority: priority_insert,
+        complexity_score: 0,
+        start_date: None,
+        target_date: None,
+        sequence_id: 0,
+        sort_order: 65535.0,
+        completed_at: None,
+        archived_at: None,
+        is_draft: false,
+        external_source: None,
+        external_id: None,
+        type_id: None,
+        git_work_branch: String::new(),
+        workpad: String::new(),
+        created_via: None,
+        assigned_pod_id: None,
+        agent_executor: None,
+    };
+    let fire = fire_spec(&actor.id, now);
+    let Some(orm) = state.orm() else {
+        return Denial::ServerError.into_response();
+    };
+    let ctx = write_ctx(&actor, &board);
+    let transition: Arc<dyn IssueTransitionHook> = Arc::new(AppTransitionHook::new(&state, pool));
+    let enqueue: Arc<dyn TaskEnqueueHook> = Arc::new(AppTaskEnqueueHook::new(pool));
+    let outcome = domain::run(&ctx, orm, |txn| {
+        let transition = transition.clone();
+        let enqueue = enqueue.clone();
+        let ctx = ctx.clone();
+        // The driver pool is a borrow; the chain needs an owned handle
+        // (`PgPool` is an `Arc` clone, unobservable).
+        let pool = (*pool).clone();
+        Box::pin(async move {
+            txn.hooks_mut().register(transition);
+            txn.hooks_mut().register(enqueue);
+            domain_issues::create(
+                &ctx,
+                txn,
+                &pool,
+                domain_issues::CreateIssue {
+                    fields,
+                    assignees: Vec::new(),
+                    default_assignee: None,
+                    labels: Vec::new(),
+                    fire,
+                    origin: None,
+                    activity_requested: serde_json::Value::Null,
+                    activity_notification: None,
+                    activity_require_origin: false,
+                    skip_activity: true,
+                    skip_fire: false,
+                    model_activity: None,
+                    created_override: None,
+                },
+            )
+            .await
+        })
+    })
+    .await;
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(error) => return domain_response(error),
+    };
+    if outcome.chain.stopped().is_some() {
+        return Denial::ServerError.into_response();
     }
     // `issue_activity.delay` (`:155-163`): `requested_data` is the full
     // `request.data` dump, `current_instance` is `None`.
@@ -2432,49 +2562,58 @@ async fn detail_partial_update(
     );
     enqueue_message(pool, publish.message()).await;
     // `update()`: the 3 attrs plus the save backfills (`updated_at`,
-    // `updated_by`, recomputed stripped text, `completed_at`).
+    // `updated_by`, recomputed stripped text, `completed_at`). It rides
+    // `domain::issues::partial_update` with no m2m legs and no activity
+    // trio — the bare `issue.activity.updated` fired driver-side above,
+    // ahead of the save, exactly where Django's view puts it.
     let now = Utc::now();
-    let description_stripped = if description_html.is_empty() {
-        None
-    } else {
-        let stripped = ml_strip_tags(&description_html);
-        if stripped.is_empty() {
-            None
-        } else {
-            Some(stripped)
-        }
+    let mut fields = pre_save.issue.field_set();
+    fields.name = name;
+    fields.description_html = description_html;
+    fields.description_json = json_raw;
+    fields.updated_at = now;
+    let prev_state = pre_save.issue.state_id;
+    let m2m_audit = (pre_save.issue.created_by_id, pre_save.issue.updated_by_id);
+    let fire = fire_spec(&actor.id, now);
+    let Some(orm) = state.orm() else {
+        return Denial::ServerError.into_response();
     };
-    // `Issue.save`: `completed_at = now` only when the state group is
-    // `completed`, else `None` (the state never changes on this path).
-    let completed_at = match pre_save.issue.state_id {
-        Some(state_id) => match fetch_state(pool, &state_id).await {
-            Ok(state)
-                if state
-                    .as_ref()
-                    .is_some_and(|state| state.group == "completed") =>
-            {
-                Some(now)
-            }
-            Ok(_) => None,
-            Err(_) => return Denial::ServerError.into_response(),
-        },
-        None => None,
+    let ctx = write_ctx(&actor, &board);
+    let transition: Arc<dyn IssueTransitionHook> = Arc::new(AppTransitionHook::new(&state, pool));
+    let enqueue: Arc<dyn TaskEnqueueHook> = Arc::new(AppTaskEnqueueHook::new(pool));
+    let outcome = domain::run(&ctx, orm, |txn| {
+        let transition = transition.clone();
+        let enqueue = enqueue.clone();
+        let ctx = ctx.clone();
+        let pool = (*pool).clone();
+        Box::pin(async move {
+            txn.hooks_mut().register(transition);
+            txn.hooks_mut().register(enqueue);
+            domain_issues::partial_update(
+                &ctx,
+                txn,
+                &pool,
+                domain_issues::PartialIssue {
+                    fields,
+                    assignees: None,
+                    labels: None,
+                    m2m_audit,
+                    sequence: None,
+                    prev_state,
+                    fire,
+                    activity: None,
+                },
+            )
+            .await
+        })
+    })
+    .await;
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(error) => return domain_response(error),
     };
-    if let Err(error) = sqlx::query(
-        "UPDATE \"issues\" SET name = $1, description_html = $2, description_json = $3, description_stripped = $4, updated_at = $5, updated_by_id = $6, completed_at = $7 WHERE \"issues\".\"id\" = $8",
-    )
-    .bind(name)
-    .bind(description_html)
-    .bind(json_raw)
-    .bind(description_stripped)
-    .bind(now)
-    .bind(actor.id)
-    .bind(completed_at)
-    .bind(issue_id)
-    .execute(pool)
-    .await
-    {
-        return db_error(error);
+    if outcome.chain.stopped().is_some() {
+        return Denial::ServerError.into_response();
     }
     let issue = match fetch_issue(pool, &issue_id, &board).await {
         Ok(Some(issue)) => issue,
@@ -2560,15 +2699,6 @@ async fn detail_destroy(
     StatusCode::NO_CONTENT.into_response()
 }
 
-/// `convert_uuid_to_integer` (`db/models/issue.py:22-26`): first 8 bytes
-/// of `sha256(str(project_id))` as a signed big-endian integer — the
-/// advisory-lock key `Issue.save` takes.
-fn advisory_key(project_id: &Uuid) -> i64 {
-    use sha2::Digest;
-    let digest = sha2::Sha256::digest(project_id.to_string().as_bytes());
-    i64::from_be_bytes(digest[..8].try_into().expect("eight bytes"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2591,5 +2721,55 @@ mod tests {
         );
         assert_eq!(message.kwargs.get("using"), Some(&serde_json::Value::Null));
         assert_eq!(message.kwargs.len(), 1);
+    }
+
+    #[test]
+    fn coerce_name_matches_retired_typed_binds() {
+        use serde_json::{Number, Value};
+        // Strings pass through; ints/uints spell decimally.
+        assert_eq!(
+            coerce_name(&Value::String("x".to_owned())),
+            Some("x".to_owned())
+        );
+        assert_eq!(
+            coerce_name(&Value::Number(Number::from(12345))),
+            Some("12345".to_owned())
+        );
+        assert_eq!(
+            coerce_name(&Value::Number(Number::from(-7))),
+            Some("-7".to_owned())
+        );
+        // A uint past i64::MAX wraps, as the old `uint as i64` bind did.
+        assert_eq!(
+            coerce_name(&Value::Number(Number::from(u64::MAX))),
+            Some("-1".to_owned())
+        );
+        // Bools render lowercase (Postgres spelling, not Django's `True`).
+        assert_eq!(coerce_name(&Value::Bool(true)), Some("true".to_owned()));
+        assert_eq!(coerce_name(&Value::Bool(false)), Some("false".to_owned()));
+        // Containers and null have no adaptation.
+        assert_eq!(coerce_name(&Value::Null), None);
+        assert_eq!(coerce_name(&Value::Array(vec![])), None);
+        assert_eq!(coerce_name(&Value::Object(serde_json::Map::new())), None);
+    }
+
+    #[test]
+    fn pg_float_text_matches_float8out() {
+        // Vectors verified against Postgres 16 (`SELECT x::float8::text`).
+        for (input, expected) in [
+            (1.5, "1.5"),
+            (100000.0, "100000"),
+            (1e20, "1e+20"),
+            (0.00001, "1e-05"),
+            (123.456, "123.456"),
+            (0.1, "0.1"),
+            (0.0001, "0.0001"),
+            (-1e20, "-1e+20"),
+            (0.0, "0"),
+        ] {
+            assert_eq!(pg_float_text(input), expected, "float {input}");
+        }
+        assert_eq!(pg_float_text(f64::INFINITY), "Infinity");
+        assert_eq!(pg_float_text(f64::NEG_INFINITY), "-Infinity");
     }
 }

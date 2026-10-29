@@ -276,20 +276,10 @@ pub fn idle_sessions_select() -> String {
         .to_owned()
 }
 
-/// Idle-session revoke (`tasks.py:133`): `SET` in `update()` call order.
-/// Binds: `$1` now, `$2` `idle_timeout`, `$3..` session ids.
-/// The driver returns early on an empty set, so the live layer never
-/// builds this with zero ids.
-pub fn revoke_sessions_update(session_count: usize) -> String {
-    let placeholders = (0..session_count)
-        .map(|i| format!("${}", i + 3))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "UPDATE \"runner_session\" SET \"revoked_at\" = $1, \"revoked_reason\" = $2 WHERE \
-         \"runner_session\".\"id\" IN ({placeholders})"
-    )
-}
+// NOTE: the idle-session revoke builder lived here; the statement moved
+// to `pidash_services::domain::tokens::revoke_runner_sessions_by_ids`
+// (PIDASHCONV-1520), whose tests carry the pins (including the
+// empty-set early return).
 
 /// Active `(runner_id, session_id)` pairs (`tasks.py:171`), in
 /// `values_list` order. No binds.
@@ -1005,16 +995,14 @@ impl SweepsRunsStore for LiveSweepsRunsStore {
         session_ids: &[Uuid],
         now: DateTime<Utc>,
     ) -> Result<u64, SweepsError> {
-        if session_ids.is_empty() {
-            return Ok(0);
-        }
-        let revoke_sql = revoke_sessions_update(session_ids.len());
-        let mut revoke = sqlx::query(&revoke_sql).bind(now).bind(REVOKED_REASON_IDLE);
-        for sid in session_ids {
-            revoke = revoke.bind(*sid);
-        }
-        let result = revoke.execute(&self.pool).await?;
-        Ok(result.rows_affected())
+        pidash_services::domain::tokens::revoke_runner_sessions_by_ids(
+            &self.pool,
+            session_ids,
+            now,
+            REVOKED_REASON_IDLE,
+        )
+        .await
+        .map_err(SweepsError::from)
     }
 
     async fn active_session_pairs(&self) -> Result<Vec<(Uuid, Uuid)>, SweepsError> {
@@ -1514,16 +1502,8 @@ mod tests {
              (\"runner_session\".\"last_seen_at\" < $1 AND \"runner_session\".\"revoked_at\" IS NULL) \
              ORDER BY \"runner_session\".\"created_at\" DESC"
         );
-        assert_eq!(
-            revoke_sessions_update(1),
-            "UPDATE \"runner_session\" SET \"revoked_at\" = $1, \"revoked_reason\" = $2 WHERE \
-             \"runner_session\".\"id\" IN ($3)"
-        );
-        assert_eq!(
-            revoke_sessions_update(3),
-            "UPDATE \"runner_session\" SET \"revoked_at\" = $1, \"revoked_reason\" = $2 WHERE \
-             \"runner_session\".\"id\" IN ($3, $4, $5)"
-        );
+        // (The revoke-update pins moved with the statement to
+        // `pidash_services::domain::tokens`.)
     }
 
     #[test]

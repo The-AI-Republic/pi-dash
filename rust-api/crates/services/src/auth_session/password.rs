@@ -830,9 +830,18 @@ pub const CSRF_COOKIE_AGE_SECS: i64 = 31_449_600;
 /// `CSRFTokenEndpoint.get` (or a `login()` rotation): Django `set_cookie`
 /// field order (`expires`, `Max-Age`, `Path`, then flags), `HttpOnly`
 /// forced on by this project (`settings/common.py:611`), `SameSite=Lax`.
-pub fn csrf_set_cookie_value(secret: &str, expires_http_date: &str, secure: bool) -> String {
+/// `domain` is `CSRF_COOKIE_DOMAIN` (`settings/common.py:618`); Django's
+/// `_set_csrf_cookie` always passes it, and `Morsel` renders `Domain`
+/// first, so it goes right after the value.
+pub fn csrf_set_cookie_value(
+    secret: &str,
+    expires_http_date: &str,
+    secure: bool,
+    domain: Option<&str>,
+) -> String {
+    let domain_attr = domain.map(|d| format!("; Domain={d}")).unwrap_or_default();
     let mut out = format!(
-        "csrftoken={secret}; expires={expires_http_date}; Max-Age={CSRF_COOKIE_AGE_SECS}; Path=/"
+        "csrftoken={secret}{domain_attr}; expires={expires_http_date}; Max-Age={CSRF_COOKIE_AGE_SECS}; Path=/"
     );
     if secure {
         out.push_str("; Secure");
@@ -1235,10 +1244,23 @@ mod tests {
             "abcdefghijABCDEFGHIJ0123456789ab",
             "Wed, 30 Sep 2026 12:00:00 GMT",
             false,
+            None,
         );
         assert_eq!(
             cookie,
             "csrftoken=abcdefghijABCDEFGHIJ0123456789ab; expires=Wed, 30 Sep 2026 12:00:00 GMT; Max-Age=31449600; Path=/; HttpOnly; SameSite=Lax"
+        );
+        // With `CSRF_COOKIE_DOMAIN` set, `Domain` renders right after the
+        // value, where Django's `Morsel` puts it.
+        let cookie = csrf_set_cookie_value(
+            "abcdefghijABCDEFGHIJ0123456789ab",
+            "Wed, 30 Sep 2026 12:00:00 GMT",
+            false,
+            Some(".example.test"),
+        );
+        assert_eq!(
+            cookie,
+            "csrftoken=abcdefghijABCDEFGHIJ0123456789ab; Domain=.example.test; expires=Wed, 30 Sep 2026 12:00:00 GMT; Max-Age=31449600; Path=/; HttpOnly; SameSite=Lax"
         );
     }
 }

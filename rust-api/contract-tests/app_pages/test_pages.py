@@ -25,6 +25,8 @@ LIST_ROW_KEYS = {
     "access",
     "color",
     "parent",
+    "parent_id",
+    "sub_pages_count",
     "is_favorite",
     "is_locked",
     "archived_at",
@@ -44,10 +46,11 @@ DETAIL_ROW_KEYS = LIST_ROW_KEYS | {"description_html"}
 # partial_update answers with the update-bound PageDetailSerializer over a
 # plain Page.objects.get() instance, while create re-fetches through the
 # annotated get_queryset(). The annotation-backed keys (is_favorite Exists,
-# label_ids/project_ids Coalesce) have no attribute on the plain instance,
-# and all three fields are required=False, so DRF drops them (SkipField) —
-# the PATCH body is always DETAIL minus exactly those three keys.
-PATCH_ROW_KEYS = DETAIL_ROW_KEYS - {"is_favorite", "label_ids", "project_ids"}
+# label_ids/project_ids Coalesce, sub_pages_count Subquery) have no
+# attribute on the plain instance, and all four fields are required=False,
+# so DRF drops them (SkipField) — the PATCH body is always DETAIL minus
+# exactly those four keys (parent_id is a model attribute and stays).
+PATCH_ROW_KEYS = DETAIL_ROW_KEYS - {"is_favorite", "label_ids", "project_ids", "sub_pages_count"}
 
 
 def test_list_shape(user_client, world):
@@ -66,6 +69,8 @@ def test_list_shape(user_client, world):
     assert row["archived_at"] is None
     assert row["label_ids"] == []
     assert row["project_ids"] == [world["project"]["id"]]
+    assert row["parent_id"] is None
+    assert row["sub_pages_count"] == 0
 
 
 def test_list_requires_auth(anon_client, world):
@@ -169,6 +174,28 @@ def test_create_search_mismatch_404s_but_row_exists(user_client, world, db):
         "SELECT count(*) FROM pages WHERE name=%s AND deleted_at IS NULL", (name,)
     )
     assert count == 1
+
+
+def test_create_in_archived_project_404s_but_rows_exist(member_client, world, db):
+    # An archived URL project makes the create re-read miss: get_queryset()
+    # filters projects__archived_at__isnull=True together with the active
+    # membership (page/base.py:92-96), so .get() raises DoesNotExist, which
+    # BaseViewSet.handle_exception maps to 404 — even though the pages row
+    # and the project_pages link were written and page_transaction published
+    # (page/base.py:141-149). Write-then-404, like the ?search= mismatch
+    # above (PIDASHCONV-1411).
+    db.execute("UPDATE projects SET archived_at = now() WHERE id=%s", (world["project"]["id"],))
+    name = f"Archived project {uuid.uuid4().hex[:8]}"
+    response = member_client.post(page_url(world), json={"name": name})
+    assert response.status_code == 404
+    assert response.json() == {"error": "The required object does not exist."}
+    page_id = db.fetchval("SELECT id FROM pages WHERE name=%s AND deleted_at IS NULL", (name,))
+    assert page_id is not None
+    links = db.fetchval(
+        "SELECT count(*) FROM project_pages WHERE page_id=%s AND project_id=%s AND deleted_at IS NULL",
+        (str(page_id), world["project"]["id"]),
+    )
+    assert links == 1
 
 
 def test_search_nul_rejected_on_list_and_retrieve(user_client, world):

@@ -54,6 +54,7 @@ use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use pidash_services::domain::comments as comment_domain;
 use pidash_services::runner_runs::finalization as finalize_kernel;
 use pidash_services::runner_runs::lifecycle as lifecycle_kernel;
 use pidash_services::runner_runs::{LifecycleEffect, LiveStateUsageFacts};
@@ -63,11 +64,13 @@ use pidash_types::runner_runs::{
 };
 
 use super::{
-    authenticate_daemon, frame_model, frame_text, json_response, pool_of, py_truthy,
-    read_request_data, resolve_runner_for_run, server_error, truncate_chars, view_response,
-    DaemonRunner, LivePorts, RunnerPorts, ALLOW_RUN_DAEMON,
+    authenticate_daemon, frame_model, frame_text, is_uuid_path_segment, json_response, pool_of,
+    py_truthy, read_request_data, resolve_runner_for_run, server_error, truncate_chars,
+    view_response, DaemonRunner, LivePorts, RunnerPorts, ALLOW_RUN_DAEMON,
 };
 use crate::state::AppState;
+use pidash_compat::db::is_unique_violation;
+use pidash_compat::py::py_str;
 
 // ---------------------------------------------------------------------------
 // Pure frame helpers (unit-tested against FX-RUN-09)
@@ -161,99 +164,8 @@ pub fn event_batch_items(data: &Value) -> Result<Vec<&Value>, FrameError> {
     }
 }
 
-/// `str(value)` for a truthy frame value (`reason`, `TextField`
-/// storage): strings verbatim, ints raw, floats in CPython repr
-/// form, bools as `True`/`False`, containers in single-quote repr
-/// form. Only called on truthy values (every call site gates first).
-pub fn py_str_value(value: &Value) -> String {
-    match value {
-        Value::Null => "None".to_owned(),
-        Value::Bool(true) => "True".to_owned(),
-        Value::Bool(false) => "False".to_owned(),
-        Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                return i.to_string();
-            }
-            if let Some(u) = n.as_u64() {
-                return u.to_string();
-            }
-            n.as_f64()
-                .map(py_float_str)
-                .unwrap_or_else(|| n.to_string())
-        }
-        Value::String(s) => s.clone(),
-        Value::Array(items) => {
-            let inner: Vec<String> = items.iter().map(py_repr_value).collect();
-            format!("[{}]", inner.join(", "))
-        }
-        Value::Object(map) => {
-            let inner: Vec<String> = map
-                .iter()
-                .map(|(k, v)| format!("{}: {}", py_repr_str(k), py_repr_value(v)))
-                .collect();
-            format!("{{{}}}", inner.join(", "))
-        }
-    }
-}
-
-fn py_repr_value(value: &Value) -> String {
-    match value {
-        Value::String(s) => py_repr_str(s),
-        other => py_str_value(other),
-    }
-}
-
-fn py_float_str(f: f64) -> String {
-    if f.is_nan() {
-        return "nan".to_owned();
-    }
-    if f.is_infinite() {
-        return if f > 0.0 {
-            "inf".to_owned()
-        } else {
-            "-inf".to_owned()
-        };
-    }
-    let rust = format!("{f:?}");
-    let Some(pos) = rust.find('e') else {
-        return rust;
-    };
-    let (mantissa, exp) = rust.split_at(pos);
-    let exp = &exp[1..];
-    let (sign, digits) = match exp.strip_prefix('-') {
-        Some(digits) => ("-", digits),
-        None => ("+", exp.strip_prefix('+').unwrap_or(exp)),
-    };
-    format!("{mantissa}e{sign}{digits:0>2}")
-}
-
-fn py_repr_str(s: &str) -> String {
-    let use_double = s.contains('\'') && !s.contains('"');
-    let quote = if use_double { '"' } else { '\'' };
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push(quote);
-    for c in s.chars() {
-        if c == quote {
-            out.push('\\');
-            out.push(c);
-        } else {
-            match c {
-                '\\' => out.push_str("\\\\"),
-                '\n' => out.push_str("\\n"),
-                '\r' => out.push_str("\\r"),
-                '\t' => out.push_str("\\t"),
-                c if !(c.is_control() || c == '\u{7f}' || c == '\u{2028}' || c == '\u{2029}') => {
-                    out.push(c)
-                }
-                c if (c as u32) < 0x100 => out.push_str(&format!("\\x{:02x}", c as u32)),
-                c if (c as u32) < 0x1_0000 => out.push_str(&format!("\\u{:04x}", c as u32)),
-                c => out.push_str(&format!("\\U{:08x}", c as u32)),
-            }
-        }
-    }
-    out.push(quote);
-    out
-}
+// `py_str_value`/`py_repr_value`/`py_repr_str` moved to
+// `pidash_compat::py::py_str` (identical body, PIDASHCONV-1623).
 
 /// `(request.data.get("reason") or "")` then `== name`
 /// (`run_endpoints.py:356,380,403`): falsy maps to `""`, strings
@@ -581,76 +493,58 @@ pub async fn record_dedupe(
     }
 }
 
-/// Whether a sqlx error is a unique violation (SQLSTATE 23505).
-fn is_unique_violation(error: &sqlx::Error) -> bool {
-    error
-        .as_database_error()
-        .and_then(|db| db.code())
-        .is_some_and(|code| code == "23505")
-}
-
 // ---------------------------------------------------------------------------
 // Comment writes (`IssueComment.objects.create`, both lifecycle paths)
 // ---------------------------------------------------------------------------
 
-/// Insert a planned comment: the comment row, its description row, and
-/// the link-back (`comment_insert_sql`, `description_insert_sql`,
-/// `comment_description_link_sql`). Runs inside the caller's
-/// transaction (the pause path) or savepoint (the failure path).
+/// Insert a planned comment via the domain executor twins
+/// (`insert_comment_row` → `insert_description_row` →
+/// `link_comment_description`, in Django order). Runs inside the
+/// caller's transaction (the pause path) or savepoint (the failure
+/// path). The four `now()` reads keep their positions: two for the
+/// comment stamps, two for the description stamps. The description
+/// stripped value binds verbatim (empty stays `""`, never NULL).
 pub async fn insert_comment(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     insert: &lifecycle_kernel::CommentInsert,
 ) -> Result<(), sqlx::Error> {
     let empty_json = Value::Object(Default::default());
-    let empty_list = Value::Array(Vec::new());
-    sqlx::query(&lifecycle_kernel::comment_insert_sql())
-        .bind(Utc::now())
-        .bind(Utc::now())
-        .bind(insert.created_by_id)
-        .bind(insert.updated_by_id)
-        .bind(None::<DateTime<Utc>>)
-        .bind(insert.comment_id)
-        .bind(insert.project_id)
-        .bind(insert.workspace_id)
-        .bind(&insert.plan.comment_stripped)
-        .bind(&empty_json)
-        .bind(&insert.plan.comment_html)
-        .bind(None::<Uuid>)
-        .bind(&empty_list)
-        .bind(&empty_list)
-        .bind(insert.issue_id)
-        .bind(insert.actor_id)
-        .bind("INTERNAL")
-        .bind(None::<String>)
-        .bind(None::<String>)
-        .bind(insert.plan.speaker.value())
-        .bind(&insert.plan.speaker_label)
-        .bind(insert.plan.speaker_agent_run_id)
-        .bind(None::<DateTime<Utc>>)
-        .bind(None::<Uuid>)
-        .execute(&mut **tx)
-        .await?;
-    let description_id = Uuid::new_v4();
-    sqlx::query(&lifecycle_kernel::description_insert_sql())
-        .bind(Utc::now())
-        .bind(Utc::now())
-        .bind(insert.created_by_id)
-        .bind(insert.updated_by_id)
-        .bind(None::<DateTime<Utc>>)
-        .bind(description_id)
-        .bind(insert.workspace_id)
-        .bind(insert.project_id)
-        .bind(&empty_json)
-        .bind(&insert.plan.comment_html)
-        .bind(None::<Vec<u8>>)
-        .bind(&insert.plan.description_stripped)
-        .execute(&mut **tx)
-        .await?;
-    sqlx::query(lifecycle_kernel::comment_description_link_sql())
-        .bind(description_id)
-        .bind(insert.comment_id)
-        .execute(&mut **tx)
-        .await?;
+    // `attachments` / `labels` are Postgres `varchar[]` (`ArrayField`,
+    // `db/models/issue.py:563-566`), not jsonb: bind typed empty
+    // arrays (the v1 social comment insert's binding).
+    let empty_list: Vec<String> = Vec::new();
+    let rows = comment_domain::CommentRows {
+        id: insert.comment_id,
+        description_id: Uuid::new_v4(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        desc_created_at: Utc::now(),
+        desc_updated_at: Utc::now(),
+        workspace_id: insert.workspace_id,
+        project_id: insert.project_id,
+        issue_id: insert.issue_id,
+        actor_id: insert.actor_id,
+        created_by: insert.created_by_id,
+        updated_by: insert.updated_by_id,
+        deleted_at: None,
+        html: &insert.plan.comment_html,
+        json: &empty_json,
+        stripped: &insert.plan.comment_stripped,
+        desc_stripped: Some(&insert.plan.description_stripped),
+        access: "INTERNAL",
+        speaker_type: insert.plan.speaker.value(),
+        speaker_label: &insert.plan.speaker_label,
+        speaker_agent_run_id: insert.plan.speaker_agent_run_id,
+        external_id: None,
+        external_source: None,
+        parent_id: None,
+        attachments: &empty_list,
+        labels: &empty_list,
+        edited_at: None,
+    };
+    comment_domain::insert_comment_row(&mut **tx, &rows).await?;
+    comment_domain::insert_description_row(&mut **tx, &rows).await?;
+    comment_domain::link_comment_description(&mut **tx, rows.id, rows.description_id).await?;
     Ok(())
 }
 
@@ -911,6 +805,10 @@ pub async fn execute_apply_paused(
                 .agent_system_user_id()
                 .await
                 .map_err(|_| server_error())?;
+            // `BaseModel.save` stamps the crum request user (`runner.owner`
+            // on daemon endpoints, `authentication.py:118`) as `created_by`
+            // and leaves `updated_by` NULL on create — including the
+            // `Description` row `IssueComment.save` creates.
             insert_comment(
                 tx,
                 &lifecycle_kernel::CommentInsert {
@@ -919,7 +817,7 @@ pub async fn execute_apply_paused(
                     project_id,
                     workspace_id,
                     actor_id: Some(actor_id),
-                    created_by_id: None,
+                    created_by_id: Some(runner.owner_id),
                     updated_by_id: None,
                     plan,
                 },
@@ -1033,11 +931,15 @@ pub enum TerminalEffectsError {
 /// `Err` propagates to the `_publish_effects` log (isolated there),
 /// except the capacity dispatch/drains, which propagate with the
 /// marker unset for the reconciler — also via `Err`, since the
-/// caller logs without writing anything.
+/// caller logs without writing anything. `created_by` is the ambient
+/// crum request user the failure comment (and its description) bind
+/// as `created_by_id`: the runner owner on daemon endpoints, the web
+/// requester on web paths, `None` on worker paths.
 pub async fn execute_terminal_effects(
     pool: &PgPool,
     ports: &impl RunnerPorts,
     run_id: Uuid,
+    created_by: Option<Uuid>,
 ) -> Result<bool, TerminalEffectsError> {
     let db = |error: sqlx::Error| TerminalEffectsError::Database(error.to_string());
     let mut hooks = pidash_db::tx::Transaction::begin(pool).await.map_err(db)?;
@@ -1096,7 +998,8 @@ pub async fn execute_terminal_effects(
                 .execute(&mut **hooks.inner())
                 .await
                 .map_err(db)?;
-            let commented = post_failure_comment(hooks.inner(), ports, run_id, &error).await;
+            let commented =
+                post_failure_comment(hooks.inner(), ports, run_id, &error, created_by).await;
             match commented {
                 Ok(()) => {
                     sqlx::query("RELEASE SAVEPOINT failure_comment")
@@ -1191,7 +1094,10 @@ pub async fn execute_terminal_effects(
         // After the hooks transaction (lock order), isolated: the
         // terminal transition already committed, so a handoff
         // failure must not strand capacity release.
-        if let Err(error) = ports.complete_project_move_handoff(run_id).await {
+        if let Err(error) = ports
+            .complete_project_move_handoff(run_id, created_by)
+            .await
+        {
             tracing::error!(
                 ?error,
                 run_id = %run_id,
@@ -1253,12 +1159,14 @@ pub async fn execute_terminal_effects(
 /// failure savepoint: suppressed for infra noise, silent without a
 /// work item or on a dedupe hit, otherwise one `SYSTEM` comment from
 /// the agent user. `Err` rolls back to the savepoint (logged by the
-/// caller).
+/// caller). `created_by` is the ambient crum request user (see
+/// [`execute_terminal_effects`]).
 async fn post_failure_comment(
     hooks: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     ports: &impl RunnerPorts,
     run_id: Uuid,
     error: &str,
+    created_by: Option<Uuid>,
 ) -> Result<(), TerminalEffectsError> {
     let db = |error: sqlx::Error| TerminalEffectsError::Database(error.to_string());
     // Suppression returns before any SQL (`finalization.py:136-147`).
@@ -1295,6 +1203,10 @@ async fn post_failure_comment(
         .agent_system_user_id()
         .await
         .map_err(|error| TerminalEffectsError::Ports(format!("{error:?}")))?;
+    // `created_by` is the ambient crum request user (`BaseModel.save`):
+    // the runner owner on daemon endpoints, the web requester on web
+    // paths, `None` on worker paths (which carry no crum user).
+    // `updated_by` stays NULL on create.
     insert_comment(
         hooks,
         &lifecycle_kernel::CommentInsert {
@@ -1303,7 +1215,7 @@ async fn post_failure_comment(
             project_id,
             workspace_id,
             actor_id: Some(actor_id),
-            created_by_id: None,
+            created_by_id: created_by,
             updated_by_id: None,
             plan,
         },
@@ -1378,11 +1290,14 @@ async fn apply_scheduler_hook(
 ///
 /// The returns are the source's isolation semantics, not dead arms: a
 /// real drain (or dispatch) failure propagates (`server_error()`), and
-/// the isolated effects log and continue.
+/// the isolated effects log and continue. `terminal_created_by` is the
+/// ambient crum request user for the inline terminal effects (see
+/// [`execute_terminal_effects`]).
 pub async fn drain_lifecycle_effects(
     pool: &PgPool,
     ports: &impl RunnerPorts,
     effects: Vec<LifecycleEffect>,
+    terminal_created_by: Option<Uuid>,
 ) -> Result<(), Response> {
     for effect in effects {
         match effect {
@@ -1435,7 +1350,10 @@ pub async fn drain_lifecycle_effects(
                     .map_err(|_| server_error())?;
             }
             LifecycleEffect::CompleteProjectMoveHandoff { run_id } => {
-                if let Err(error) = ports.complete_project_move_handoff(run_id).await {
+                if let Err(error) = ports
+                    .complete_project_move_handoff(run_id, terminal_created_by)
+                    .await
+                {
                     tracing::error!(
                         ?error,
                         run_id = %run_id,
@@ -1453,7 +1371,9 @@ pub async fn drain_lifecycle_effects(
                 }
             }
             LifecycleEffect::ApplyTerminalEffectsInline { run_id } => {
-                if let Err(error) = execute_terminal_effects(pool, ports, run_id).await {
+                if let Err(error) =
+                    execute_terminal_effects(pool, ports, run_id, terminal_created_by).await
+                {
                     tracing::error!(
                         ?error,
                         run_id = %run_id,
@@ -1480,13 +1400,6 @@ struct DaemonRequest {
     key: String,
 }
 
-fn run_not_found() -> Response {
-    json_response(
-        StatusCode::NOT_FOUND,
-        r#"{"error":"run_not_found"}"#.to_owned(),
-    )
-}
-
 /// Authenticate (DRF `initial`, before parsing) and read
 /// `request.data`. Used by the eight endpoints that touch the body;
 /// the other four ([`daemon_preamble_nobody`]) never parse, so a
@@ -1496,8 +1409,15 @@ async fn daemon_preamble(
     run_id_raw: &str,
     req: Request<axum::body::Body>,
 ) -> Result<(PgPool, DaemonRequest), Response> {
+    // Resolver first (Django 404s non-converter segments before any
+    // view code — and before touching the database): proxy the
+    // untouched request so Django's framework 404 answers byte for
+    // byte (the `runner_poll.rs` `parse_uuid` precedent).
+    if !is_uuid_path_segment(run_id_raw) {
+        return Err(crate::edge::proxy(State(state.clone()), req).await);
+    }
     let pool = pool_of(state)?.clone();
-    let run_id: Uuid = run_id_raw.parse().map_err(|_| run_not_found())?;
+    let run_id: Uuid = run_id_raw.parse().expect("checked segment");
     let secret = state.settings().secret_key.clone();
     let runner = authenticate_daemon(&pool, secret.as_bytes(), req.headers()).await?;
     let key = idempotency_key(req.headers());
@@ -1515,16 +1435,22 @@ async fn daemon_preamble(
 
 /// [`daemon_preamble`] without the body read, for `accept`, `queued`,
 /// `awaiting-reauth` and `resumed`, which never touch `request.data`.
+/// Takes the whole request (headers only are read) so a non-converter
+/// run id can fall through to Django's resolver 404.
 async fn daemon_preamble_nobody(
     state: &AppState,
     run_id_raw: &str,
-    headers: &HeaderMap,
+    req: Request<axum::body::Body>,
 ) -> Result<(PgPool, DaemonRunner, Uuid, String), Response> {
+    // Resolver first (see [`daemon_preamble`]).
+    if !is_uuid_path_segment(run_id_raw) {
+        return Err(crate::edge::proxy(State(state.clone()), req).await);
+    }
     let pool = pool_of(state)?.clone();
-    let run_id: Uuid = run_id_raw.parse().map_err(|_| run_not_found())?;
+    let run_id: Uuid = run_id_raw.parse().expect("checked segment");
     let secret = state.settings().secret_key.clone();
-    let runner = authenticate_daemon(&pool, secret.as_bytes(), headers).await?;
-    let key = idempotency_key(headers);
+    let runner = authenticate_daemon(&pool, secret.as_bytes(), req.headers()).await?;
+    let key = idempotency_key(req.headers());
     // `_resolve` runs next and 403s anonymous callers; unwrap here
     // would mistranslate that into a 500, so resolve inline.
     let run = resolve_run(&pool, run_id, runner.as_ref()).await?;
@@ -1547,10 +1473,10 @@ async fn commit_tx(tx: sqlx::Transaction<'_, sqlx::Postgres>) -> Result<(), Resp
 pub async fn run_accept(
     State(state): State<AppState>,
     Path(run_id): Path<String>,
-    headers: HeaderMap,
+    req: Request<axum::body::Body>,
 ) -> Response {
     view_response(
-        run_accept_inner(State(state), Path(run_id), headers).await,
+        run_accept_inner(State(state), Path(run_id), req).await,
         ALLOW_RUN_DAEMON,
     )
 }
@@ -1558,10 +1484,9 @@ pub async fn run_accept(
 async fn run_accept_inner(
     State(state): State<AppState>,
     Path(run_id): Path<String>,
-    headers: HeaderMap,
+    req: Request<axum::body::Body>,
 ) -> Response {
-    let (pool, _runner, run_id, key) = match daemon_preamble_nobody(&state, &run_id, &headers).await
-    {
+    let (pool, _runner, run_id, key) = match daemon_preamble_nobody(&state, &run_id, req).await {
         Ok(preamble) => preamble,
         Err(response) => return response,
     };
@@ -1620,10 +1545,10 @@ async fn run_accept_inner(
 pub async fn run_queued(
     State(state): State<AppState>,
     Path(run_id): Path<String>,
-    headers: HeaderMap,
+    req: Request<axum::body::Body>,
 ) -> Response {
     view_response(
-        run_queued_inner(State(state), Path(run_id), headers).await,
+        run_queued_inner(State(state), Path(run_id), req).await,
         ALLOW_RUN_DAEMON,
     )
 }
@@ -1631,13 +1556,12 @@ pub async fn run_queued(
 async fn run_queued_inner(
     State(state): State<AppState>,
     Path(run_id): Path<String>,
-    headers: HeaderMap,
+    req: Request<axum::body::Body>,
 ) -> Response {
-    let (pool, _runner, _run_id, _key) =
-        match daemon_preamble_nobody(&state, &run_id, &headers).await {
-            Ok(preamble) => preamble,
-            Err(response) => return response,
-        };
+    let (pool, _runner, _run_id, _key) = match daemon_preamble_nobody(&state, &run_id, req).await {
+        Ok(preamble) => preamble,
+        Err(response) => return response,
+    };
     let _ = pool;
     json_response(StatusCode::OK, r#"{"ok":true,"ignored":true}"#.to_owned())
 }
@@ -1984,7 +1908,7 @@ async fn run_approval_inner(
         _ => Value::Object(Default::default()),
     };
     let reason = match preamble.data.get("reason") {
-        Some(reason) if py_truthy(reason) => py_str_value(reason),
+        Some(reason) if py_truthy(reason) => py_str(reason),
         _ => String::new(),
     };
     let expires_at = match expires_at_text(&preamble.data) {
@@ -2072,10 +1996,10 @@ async fn run_approval_inner(
 pub async fn run_awaiting_reauth(
     State(state): State<AppState>,
     Path(run_id): Path<String>,
-    headers: HeaderMap,
+    req: Request<axum::body::Body>,
 ) -> Response {
     view_response(
-        run_awaiting_reauth_inner(State(state), Path(run_id), headers).await,
+        run_awaiting_reauth_inner(State(state), Path(run_id), req).await,
         ALLOW_RUN_DAEMON,
     )
 }
@@ -2083,10 +2007,9 @@ pub async fn run_awaiting_reauth(
 async fn run_awaiting_reauth_inner(
     State(state): State<AppState>,
     Path(run_id): Path<String>,
-    headers: HeaderMap,
+    req: Request<axum::body::Body>,
 ) -> Response {
-    let (pool, _runner, run_id, key) = match daemon_preamble_nobody(&state, &run_id, &headers).await
-    {
+    let (pool, _runner, run_id, key) = match daemon_preamble_nobody(&state, &run_id, req).await {
         Ok(preamble) => preamble,
         Err(response) => return response,
     };
@@ -2212,7 +2135,9 @@ async fn run_completed_inner(
     }
     if !effects.is_empty() {
         let ports = LivePorts::new(pool.clone(), &state);
-        if drain_lifecycle_effects(&pool, &ports, effects)
+        // Daemon request: the crum user is the runner owner.
+        let terminal_created_by = preamble.runner.as_ref().map(|runner| runner.owner_id);
+        if drain_lifecycle_effects(&pool, &ports, effects, terminal_created_by)
             .await
             .is_err()
         {
@@ -2310,7 +2235,7 @@ async fn run_paused_inner(
         return server_error();
     }
     if !effects.is_empty()
-        && drain_lifecycle_effects(&pool, &ports, effects)
+        && drain_lifecycle_effects(&pool, &ports, effects, Some(runner.owner_id))
             .await
             .is_err()
     {
@@ -2410,7 +2335,7 @@ async fn run_failed_inner(
             return server_error();
         }
         if !effects.is_empty()
-            && drain_lifecycle_effects(&pool, &ports, effects)
+            && drain_lifecycle_effects(&pool, &ports, effects, Some(runner.owner_id))
                 .await
                 .is_err()
         {
@@ -2438,7 +2363,7 @@ async fn run_failed_inner(
         return server_error();
     }
     if !effects.is_empty()
-        && drain_lifecycle_effects(&pool, &ports, effects)
+        && drain_lifecycle_effects(&pool, &ports, effects, Some(runner.owner_id))
             .await
             .is_err()
     {
@@ -2459,6 +2384,8 @@ async fn run_failed_requeue(
     run_id: Uuid,
     busy_flip: bool,
 ) -> Response {
+    // Daemon request: the crum user is the runner owner.
+    let terminal_created_by = Some(runner.owner_id);
     let locked = match lock_non_terminal(&mut tx, run_id).await {
         Ok(locked) => locked,
         Err(closed) => {
@@ -2491,7 +2418,11 @@ async fn run_failed_requeue(
         if commit_tx(tx).await.is_err() {
             return server_error();
         }
-        if !effects.is_empty() && drain_lifecycle_effects(pool, ports, effects).await.is_err() {
+        if !effects.is_empty()
+            && drain_lifecycle_effects(pool, ports, effects, terminal_created_by)
+                .await
+                .is_err()
+        {
             return server_error();
         }
         return json_response(StatusCode::OK, r#"{"ok":true,"cancelled":true}"#.to_owned());
@@ -2510,7 +2441,11 @@ async fn run_failed_requeue(
     if commit_tx(tx).await.is_err() {
         return server_error();
     }
-    if !effects.is_empty() && drain_lifecycle_effects(pool, ports, effects).await.is_err() {
+    if !effects.is_empty()
+        && drain_lifecycle_effects(pool, ports, effects, terminal_created_by)
+            .await
+            .is_err()
+    {
         return server_error();
     }
     json_response(
@@ -2591,7 +2526,9 @@ async fn run_cancelled_inner(
     }
     if !effects.is_empty() {
         let ports = LivePorts::new(pool.clone(), &state);
-        if drain_lifecycle_effects(&pool, &ports, effects)
+        // Daemon request: the crum user is the runner owner.
+        let terminal_created_by = preamble.runner.as_ref().map(|runner| runner.owner_id);
+        if drain_lifecycle_effects(&pool, &ports, effects, terminal_created_by)
             .await
             .is_err()
         {
@@ -2606,10 +2543,10 @@ async fn run_cancelled_inner(
 pub async fn run_resumed(
     State(state): State<AppState>,
     Path(run_id): Path<String>,
-    headers: HeaderMap,
+    req: Request<axum::body::Body>,
 ) -> Response {
     view_response(
-        run_resumed_inner(State(state), Path(run_id), headers).await,
+        run_resumed_inner(State(state), Path(run_id), req).await,
         ALLOW_RUN_DAEMON,
     )
 }
@@ -2617,10 +2554,9 @@ pub async fn run_resumed(
 async fn run_resumed_inner(
     State(state): State<AppState>,
     Path(run_id): Path<String>,
-    headers: HeaderMap,
+    req: Request<axum::body::Body>,
 ) -> Response {
-    let (pool, _runner, run_id, key) = match daemon_preamble_nobody(&state, &run_id, &headers).await
-    {
+    let (pool, _runner, run_id, key) = match daemon_preamble_nobody(&state, &run_id, req).await {
         Ok(preamble) => preamble,
         Err(response) => return response,
     };
@@ -3150,17 +3086,6 @@ mod tests {
         assert!(expires_at_text(&json!({"expires_at": 5})).is_err());
         assert!(expires_at_text(&json!({"expires_at": [1]})).is_err());
         assert!(expires_at_text(&json!({"expires_at": {"a": 1}})).is_err());
-    }
-
-    #[test]
-    fn py_str_value_matches_python_str() {
-        assert_eq!(py_str_value(&json!("need it")), "need it");
-        assert_eq!(py_str_value(&json!(5)), "5");
-        assert_eq!(py_str_value(&json!(-5)), "-5");
-        assert_eq!(py_str_value(&json!(true)), "True");
-        assert_eq!(py_str_value(&json!(1.5)), "1.5");
-        assert_eq!(py_str_value(&json!([1, "a"])), "[1, 'a']");
-        assert_eq!(py_str_value(&json!({"a": 1})), "{'a': 1}");
     }
 
     #[test]

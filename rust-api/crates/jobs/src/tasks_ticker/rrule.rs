@@ -1151,7 +1151,18 @@ pub fn occurrences_between(
         if occ > end {
             break;
         }
-        out.push(from_engine(occ));
+        // `dateutil`'s `rruleset._iter` yields an instant only when it
+        // differs from the last one, so an rdate coinciding with a rule
+        // occurrence (or with another rdate) surfaces once. The crate's
+        // `RRuleSet` iterator merges by comparison only and emits every
+        // equal instant; skip repeats here, before the cap check, so
+        // duplicates neither list twice nor consume the cap. The merged
+        // stream is sorted, so equal instants are always consecutive.
+        let occ = from_engine(occ);
+        if out.last() == Some(&occ) {
+            continue;
+        }
+        out.push(occ);
         if out.len() >= cap {
             return (out, true);
         }

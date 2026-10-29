@@ -281,7 +281,7 @@ async fn render_nested(
         },
         "created_by" => match anchor.created_by_id {
             Some(id) => render_user_lite(pool, id).await,
-            None => Ok(Value::Object(Map::new())),
+            None => Ok(user_lite_initial()),
         },
         "parent" => match anchor.parent_id {
             Some(id) => render_issue_lite(pool, id).await,
@@ -350,6 +350,20 @@ async fn render_user_lite(pool: &PgPool, user_id: Uuid) -> Result<Value, Denial>
         .await
         .map_err(|_| Denial::ServerError)?;
     super::handlers_engage::user_lite_value(&row).map_err(|_| Denial::ServerError)
+}
+
+/// `UserLiteSerializer(None).data`: DRF's unbound `.data` falls back to
+/// `get_initial()`, which keeps every writable field in field order.
+/// `first_name`, `last_name`, `avatar` and `display_name` are writable
+/// CharFields with `initial = ''`; `id`/`is_bot` are read-only and
+/// `avatar_url` is a model property (`app/serializers/user.py:141-153`).
+fn user_lite_initial() -> Value {
+    let mut initial = Map::with_capacity(4);
+    initial.insert("first_name".to_owned(), Value::String(String::new()));
+    initial.insert("last_name".to_owned(), Value::String(String::new()));
+    initial.insert("avatar".to_owned(), Value::String(String::new()));
+    initial.insert("display_name".to_owned(), Value::String(String::new()));
+    Value::Object(initial)
 }
 
 async fn render_state_lite(pool: &PgPool, state_id: Uuid) -> Result<Value, Denial> {

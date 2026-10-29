@@ -52,7 +52,7 @@
 //! * QUIRK-surrogate: DRF's `ProhibitSurrogateCharactersValidator` reports
 //!   lone surrogates per field, but lone surrogates never survive JSON
 //!   parsing into this layer (`serde_json` rejects them at the envelope,
-//!   like the D-20 `json_cpython` precedent in the api crate). Envelope
+//!   like the D-20 `json` precedent in the api crate). Envelope
 //!   acceptance is the handler layer's concern, not this kernel's.
 //! * QUIRK-coerce-inf: `coerce_token(float('inf'))` raises an uncaught
 //!   `OverflowError` in Python (only `TypeError`/`ValueError` are caught).
@@ -63,6 +63,7 @@
 //! writes, of which this port has none; the enroll request serializer is
 //! the only write shape here.
 
+use pidash_compat::validate::push_error;
 use pidash_types::runner_runs::flat_token_fields;
 use serde::Serialize;
 use serde_json::Value;
@@ -133,7 +134,7 @@ pub const POD_MINI_WIRE_FIELDS: [&str; 5] =
 pub const DEV_MACHINE_MINI_WIRE_FIELDS: [&str; 3] = ["id", "host_label", "label"];
 
 /// `RunnerSerializer.Meta.fields` (`serializers.py:165-190`), wire order.
-pub const RUNNER_WIRE_FIELDS: [&str; 24] = [
+pub const RUNNER_WIRE_FIELDS: [&str; 26] = [
     "id",
     "name",
     "status",
@@ -156,6 +157,8 @@ pub const RUNNER_WIRE_FIELDS: [&str; 24] = [
     "enrolled_at",
     "revoked_at",
     "revoked_reason",
+    "paused_at",
+    "paused_by",
     "created_at",
     "updated_at",
 ];
@@ -453,6 +456,10 @@ pub struct RunnerRow<'a> {
     pub enrolled_at: Option<&'a str>,
     pub revoked_at: Option<&'a str>,
     pub revoked_reason: &'a str,
+    /// Operator-pause stamp (`09738d222`): rendered datetime or null.
+    pub paused_at: Option<&'a str>,
+    /// Pausing user id (`09738d222`): uuid string or null.
+    pub paused_by: Option<&'a str>,
     pub created_at: &'a str,
     pub updated_at: &'a str,
 }
@@ -482,6 +489,8 @@ pub struct RunnerView<'a> {
     pub enrolled_at: Option<&'a str>,
     pub revoked_at: Option<&'a str>,
     pub revoked_reason: &'a str,
+    pub paused_at: Option<&'a str>,
+    pub paused_by: Option<&'a str>,
     pub created_at: &'a str,
     pub updated_at: &'a str,
 }
@@ -514,6 +523,8 @@ pub fn runner_to_representation<'a>(row: &'a RunnerRow<'a>) -> RunnerView<'a> {
         enrolled_at: row.enrolled_at,
         revoked_at: row.revoked_at,
         revoked_reason: row.revoked_reason,
+        paused_at: row.paused_at,
+        paused_by: row.paused_by,
         created_at: row.created_at,
         updated_at: row.updated_at,
     }
@@ -904,16 +915,6 @@ const OS_ARCH_VERSION_SPEC: CharSpec = CharSpec {
     allow_blank: true,
     charset: false,
 };
-
-/// Push one message onto a field's error list (DRF collects per field).
-fn push_error(errors: &mut serde_json::Map<String, Value>, field: &str, message: String) {
-    errors
-        .entry(field.to_owned())
-        .or_insert_with(|| Value::Array(Vec::new()))
-        .as_array_mut()
-        .expect("error list")
-        .push(Value::String(message));
-}
 
 /// Port of DRF 3.15.2 `CharField` validation (`fields.py:749-766`):
 /// missing -> required/default; `None` -> null; whitespace-only (Python
@@ -1434,6 +1435,8 @@ mod tests {
             enrolled_at: Some("2026-10-01T00:00:01+00:00"),
             revoked_at: None,
             revoked_reason: "",
+            paused_at: Some("2026-10-02T01:02:04+00:00"),
+            paused_by: Some("88888888-8888-4888-8888-888888888888"),
             created_at: "2026-10-01T00:00:00+00:00",
             updated_at: "2026-10-02T01:02:03+00:00",
         }
@@ -1464,6 +1467,11 @@ mod tests {
         assert_eq!(body["live_state"]["total_tokens"], Value::Null);
         assert_eq!(body["revoked_at"], Value::Null);
         assert_eq!(body["revoked_reason"], json!(""));
+        assert_eq!(body["paused_at"], json!("2026-10-02T01:02:04+00:00"));
+        assert_eq!(
+            body["paused_by"],
+            json!("88888888-8888-4888-8888-888888888888")
+        );
     }
 
     #[test]
@@ -1478,11 +1486,15 @@ mod tests {
         row.live_state = None;
         row.last_heartbeat_at = None;
         row.enrolled_at = None;
+        row.paused_at = None;
+        row.paused_by = None;
         let body = serde_json::to_value(runner_to_representation(&row)).unwrap();
         assert_eq!(keys(&body), RUNNER_WIRE_FIELDS);
         assert_eq!(body["dev_machine"], Value::Null);
         assert_eq!(body["dev_machine_detail"], Value::Null);
         assert_eq!(body["live_state"], Value::Null);
+        assert_eq!(body["paused_at"], Value::Null);
+        assert_eq!(body["paused_by"], Value::Null);
         // `pod_detail` is always present (non-null FK).
         assert_eq!(body["pod_detail"]["name"], json!("default"));
     }

@@ -64,10 +64,13 @@ use serde_json::{Map, Value};
 use sqlx::Row;
 
 use crate::app_cycles::gates::{decide_gate, gate_for, GateOutcome};
+use crate::middleware::body_limit::read_request_bytes;
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
 
 use pidash_auth::permissions::allow::AllowFacts;
+use pidash_compat::response::json_response;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -143,10 +146,7 @@ pub(crate) async fn detail_body(
 ) -> Result<Value, Response> {
     use axum::extract::FromRequest;
     let (parts, body) = req.into_parts();
-    // Same default limit as axum's `Json` (2 MiB).
-    let bytes = axum::body::to_bytes(body, 2 * 1024 * 1024)
-        .await
-        .map_err(|_| Denial::ServerError.into_response())?;
+    let bytes = read_request_bytes(body).await?;
     if bytes.is_empty() {
         return Ok(Value::Object(Map::new()));
     }
@@ -188,8 +188,6 @@ pub const NOT_FOUND_BODY: &str = r#"{"error":"The required object does not exist
 pub const INVALID_DETAIL_BODY: &str = r#"{"error":"Please provide valid detail"}"#;
 /// `handle_exception`'s `IntegrityError` branch.
 pub const INVALID_PAYLOAD_BODY: &str = r#"{"error":"The payload is not valid"}"#;
-/// `handle_exception`'s generic 500 branch.
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// `CycleViewSet.retrieve` miss (`base.py:458-459`).
 pub const CYCLE_NOT_FOUND_BODY: &str = r#"{"error":"Cycle not found"}"#;
 /// `Project.resolve` miss on a non-UUID identifier
@@ -273,14 +271,6 @@ impl IntoResponse for Denial {
             .body(axum::body::Body::from(body))
             .expect("static denial response")
     }
-}
-
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("cycle response")
 }
 
 fn json_string(value: &str) -> String {
@@ -1596,21 +1586,21 @@ async fn validate_and_rewrite(
 // Task publishes (deferred, best-effort)
 // ---------------------------------------------------------------------------
 
-/// Celery wire name for `model_activity`
-/// (`bgtasks/webhook_task.py:463`).
-const MODEL_ACTIVITY_TASK: &str = "pi_dash.bgtasks.webhook_task.model_activity";
+// Canonical task names live in `pidash_services::domain::activity`.
+use pidash_services::domain::activity::MODEL_ACTIVITY_TASK;
 /// Celery wire name for `recent_visited_task` (bare `@shared_task`
 /// default).
 const RECENT_VISITED_TASK: &str = "pi_dash.bgtasks.recent_visited_task.recent_visited_task";
-/// Celery wire name for `issue_activity`
-/// (`bgtasks/issue_activities_task.py:1504`).
-const ISSUE_ACTIVITY_TASK: &str = "pi_dash.bgtasks.issue_activities_task.issue_activity";
+use pidash_services::domain::activity::ISSUE_ACTIVITY_TASK;
 
 /// One `model_activity.delay(...)` enqueue (`base.py:318-326`,
 /// `:397-405`): kwargs in call order; `requested_data` is the raw
 /// `request.data` object; `current_instance` is `None` on create and the
 /// before-image JSON string on update. UUIDs render as strings (kombu's
 /// JSON encoder does that in Python).
+///
+/// Built by the shared `model_activity_kwargs` kernel (PIDASHCONV-1623):
+/// the same seven keys in the same order.
 fn model_activity_message(
     model_id: &uuid::Uuid,
     requested_data: Value,
@@ -1619,17 +1609,15 @@ fn model_activity_message(
     slug: &str,
     origin: &str,
 ) -> pidash_jobs::TaskMessage {
-    let mut kwargs = Map::with_capacity(7);
-    kwargs.insert("model_name".to_owned(), Value::String("cycle".to_owned()));
-    kwargs.insert("model_id".to_owned(), Value::String(model_id.to_string()));
-    kwargs.insert("requested_data".to_owned(), requested_data);
-    kwargs.insert(
-        "current_instance".to_owned(),
-        current_instance.map_or(Value::Null, Value::String),
+    let kwargs = pidash_services::v1_projects::tasks::model_activity_kwargs(
+        "cycle",
+        &model_id.to_string(),
+        requested_data,
+        current_instance.as_deref(),
+        &actor_id.to_string(),
+        slug,
+        Some(origin),
     );
-    kwargs.insert("actor_id".to_owned(), Value::String(actor_id.to_string()));
-    kwargs.insert("slug".to_owned(), Value::String(slug.to_owned()));
-    kwargs.insert("origin".to_owned(), Value::String(origin.to_owned()));
     pidash_jobs::TaskMessage::new(MODEL_ACTIVITY_TASK, vec![], kwargs)
 }
 

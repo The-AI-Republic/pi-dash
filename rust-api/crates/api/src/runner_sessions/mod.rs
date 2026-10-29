@@ -66,7 +66,8 @@ use crate::state::AppState;
 
 /// A session path: the owned methods serve from Rust, everything else
 /// falls through to Django (its dispatch-405 and metadata responses
-/// live there). The `app_intake::owned` precedent, restated per domain.
+/// live there). The cutover shape (canonical: `crate::edge::owned`),
+/// restated per domain.
 pub fn owned(
     handler: axum::routing::MethodRouter<AppState>,
     unowned: &[&str],

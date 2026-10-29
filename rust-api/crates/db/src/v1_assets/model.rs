@@ -74,8 +74,6 @@
 
 use crate::license::models::OnDelete;
 
-use super::entities;
-
 /// Base columns every table inherits, in Django `_meta` field order:
 /// `BaseModel.id` (`db/models/base.py:17-18`), then the audit columns
 /// (`TimeAuditModel.created_at/updated_at`, `db/mixins.py:16-23`;
@@ -449,140 +447,11 @@ pub mod sticky {
         Stripper::new(html).run()
     }
 
-    /// `html.unescape` (CPython 3.12 `html/__init__.py`): decode every
-    /// `&...` reference in a tag-free chunk — full `html5` table
-    /// ([`super::entities::lookup`]) with longest-prefix fallback, numeric
-    /// references with the invalid-charref/codepoint tables. Unknown or
-    /// unterminated sequences stay verbatim; single left-to-right pass
-    /// with no rescan (`&amp;amp;` → `&amp;`).
+    /// `html.unescape` for a tag-free chunk: the shared
+    /// `pidash_types::html_entities` decoder (full `html5` table with
+    /// longest-prefix fallback, numeric refs with the invalid tables).
     pub fn unescape(text: &str) -> String {
-        if !text.contains('&') {
-            return text.to_owned();
-        }
-        let b = text.as_bytes();
-        let mut out = String::with_capacity(text.len());
-        let mut pos = 0;
-        let mut i = 0;
-        while i < b.len() {
-            if b[i] != b'&' {
-                i += 1;
-                continue;
-            }
-            if let Some((body, end)) = scan_reference(b, i + 1) {
-                out.push_str(&text[pos..i]);
-                replace_reference(&mut out, body);
-                pos = end;
-                i = end;
-            } else {
-                i += 1;
-            }
-        }
-        out.push_str(&text[pos..]);
-        out
-    }
-
-    /// Scan one `&...` reference body starting at `start` (just past the
-    /// `&`), mirroring `_charref =
-    /// &(#[0-9]+;?|#[xX][0-9a-fA-F]+;?|[^\t\n\f <&#;]{1,32};?)`.
-    /// Returns the body (WITHOUT `&`, WITH trailing `;` when present) and
-    /// the byte offset just past it. `None` means "no reference here" —
-    /// the `&` stays literal.
-    fn scan_reference(b: &[u8], start: usize) -> Option<(&str, usize)> {
-        let rest = b.get(start..)?;
-        if rest.first() == Some(&b'#') {
-            if rest.get(1) == Some(&b'x') || rest.get(1) == Some(&b'X') {
-                let mut k = start + 2;
-                while k < b.len() && b[k].is_ascii_hexdigit() {
-                    k += 1;
-                }
-                if k == start + 2 {
-                    return None;
-                }
-                let mut end = k;
-                if b.get(end) == Some(&b';') {
-                    end += 1;
-                }
-                std::str::from_utf8(&b[start..end]).ok().map(|s| (s, end))
-            } else {
-                let mut k = start + 1;
-                while k < b.len() && b[k].is_ascii_digit() {
-                    k += 1;
-                }
-                if k == start + 1 {
-                    return None;
-                }
-                let mut end = k;
-                if b.get(end) == Some(&b';') {
-                    end += 1;
-                }
-                std::str::from_utf8(&b[start..end]).ok().map(|s| (s, end))
-            }
-        } else {
-            let mut k = start;
-            while k < b.len()
-                && (k - start) < 32
-                && !matches!(
-                    b[k],
-                    b'\t' | b'\n' | 0x0C | b' ' | b'<' | b'&' | b'#' | b';'
-                )
-            {
-                k += 1;
-            }
-            if k == start {
-                return None;
-            }
-            let mut end = k;
-            if b.get(end) == Some(&b';') {
-                end += 1;
-            }
-            std::str::from_utf8(&b[start..end]).ok().map(|s| (s, end))
-        }
-    }
-
-    /// Render one scanned reference body (`_replace_charref`): numeric
-    /// bodies decode with the invalid tables, named bodies hit the
-    /// [`super::entities`] map with longest-prefix fallback, and anything
-    /// else stays verbatim (`&` + body).
-    fn replace_reference(out: &mut String, body: &str) {
-        if let Some(rest) = body.strip_prefix('#') {
-            let num: u64 = if let Some(hex) = rest.strip_prefix(['x', 'X']) {
-                u64::from_str_radix(hex.trim_end_matches(';'), 16).unwrap_or(u64::MAX)
-            } else {
-                rest.trim_end_matches(';').parse().unwrap_or(u64::MAX)
-            };
-            if let Some(mapped) = super::entities::invalid_charref(num) {
-                out.push_str(mapped);
-            } else if (0xD800..=0xDFFF).contains(&num) || num > 0x10FFFF {
-                out.push('\u{FFFD}');
-            } else if super::entities::is_invalid_codepoint(num) {
-                // Invalid code points decode to the empty string: the
-                // reference vanishes.
-            } else if let Some(ch) = char::from_u32(num as u32) {
-                out.push(ch);
-            } else {
-                out.push('\u{FFFD}');
-            }
-            return;
-        }
-        if let Some(hit) = super::entities::lookup(body) {
-            out.push_str(hit);
-            return;
-        }
-        // Longest-prefix fallback (`range(len(s)-1, 1, -1)`): prefixes
-        // are ASCII table keys, so iterate char boundaries.
-        let chars: Vec<(usize, char)> = body.char_indices().collect();
-        let mut x = chars.len().saturating_sub(1);
-        while x >= 2 {
-            let end = chars[x].0;
-            if let Some(hit) = super::entities::lookup(&body[..end]) {
-                out.push_str(hit);
-                out.push_str(&body[end..]);
-                return;
-            }
-            x -= 1;
-        }
-        out.push('&');
-        out.push_str(body);
+        pidash_types::html_entities::html_unescape(text)
     }
 
     /// CDATA elements (`HTMLParser.CDATA_CONTENT_ELEMENTS`, 3.12):

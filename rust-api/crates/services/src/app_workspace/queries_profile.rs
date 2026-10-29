@@ -171,6 +171,7 @@ pub mod tables {
     pub const MODULES: &str = "modules";
 }
 
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 use tables::*;
 
 // ---------------------------------------------------------------------------
@@ -914,8 +915,6 @@ pub const MONTH_DEFAULT: i64 = 1;
 /// `ValidationError`, so `handle_exception` falls through to the 500
 /// branch (`app/views/base.py:145-149`), not the 400 one.
 pub const MONTH_INVALID_STATUS: u16 = 500;
-/// 500 body (`app/views/base.py:146-149`).
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 
 /// Parse `?month=` with Python `int(str)` semantics: surrounding
 /// whitespace stripped, optional `+`/`-` sign, ASCII digits with single

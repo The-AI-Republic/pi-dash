@@ -26,7 +26,7 @@
 //!
 //! # Seams
 //!
-//! The services crate carries no `sqlx` dependency, so — per the
+//! This module executes no SQL, so — per the
 //! `GitStore` precedent (`integrations/accounts.rs`) — every effect in
 //! the Python control flow arrives through a seam trait, and the Python
 //! order stays here, verbatim:
@@ -88,6 +88,8 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Duration, Utc};
 use serde_json::{Map, Value};
+use sqlx::postgres::PgRow;
+use sqlx::Row;
 use uuid::Uuid;
 
 use crate::runner_sessions::guards::HEARTBEAT_GRACE_SECS;
@@ -248,7 +250,17 @@ pub fn run_select_sql() -> String {
 /// The parent's runner for pinning (`service.py:538-540`:
 /// `parent.runner`). `$1` is the runner id.
 pub const RUNNER_SELECT_SQL: &str =
-    "SELECT id, pod_id, status, last_heartbeat_at FROM runner WHERE id = $1";
+    "SELECT id, pod_id, status, last_heartbeat_at, paused_at FROM runner WHERE id = $1";
+
+/// The decoded [`RUNNER_SELECT_SQL`] row
+/// (`id, pod_id, status, last_heartbeat_at, paused_at`).
+pub type RunnerSelectRow = (
+    Uuid,
+    Uuid,
+    String,
+    Option<DateTime<Utc>>,
+    Option<DateTime<Utc>>,
+);
 
 /// The assigned pod (`service.py:329`): the default `Pod.objects`
 /// manager excludes soft-deleted rows (`runner/models.py:42-49`). `$1`
@@ -631,6 +643,60 @@ impl RunView {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Row mappers
+// ---------------------------------------------------------------------------
+
+fn decode_error(column: &str, value: &str) -> sqlx::Error {
+    sqlx::Error::Decode(format!("unknown agent_run.{column} {value:?}").into())
+}
+
+fn map_status(value: String) -> Result<AgentRunStatus, sqlx::Error> {
+    AgentRunStatus::from_value(&value).ok_or_else(|| decode_error("status", &value))
+}
+
+fn map_executor(value: String) -> Result<AgentExecutorKind, sqlx::Error> {
+    // Strictness is safe here (unlike the trigger): the
+    // `agent_run_cloud_has_no_local_assignment` check constraint
+    // (`runner/models.py:1065-1075`, migration 0024) admits only the
+    // three members, so an unknown stored value is unreachable.
+    AgentExecutorKind::from_value(&value).ok_or_else(|| decode_error("executor_kind", &value))
+}
+
+/// Map one [`RUN_VIEW_COLUMNS`] row onto the services view. The trigger is carried through
+/// unparsed: Django's `TextChoices` are choices-only (no DB check),
+/// so the stored value may sit outside `AgentRunTrigger`
+/// (migration 0029) and every read path must tolerate it.
+///
+/// Canonical home of the jobs-side mapper (PIDASHCONV-1645): the
+/// jobs drivers and the overlay (`pidash_sdk::ops::map_run_view`)
+/// share this implementation.
+pub fn map_run_view(row: &PgRow) -> Result<RunView, sqlx::Error> {
+    let status: String = row.try_get("status")?;
+    let trigger: String = row.try_get("trigger")?;
+    let executor_kind: String = row.try_get("executor_kind")?;
+    Ok(RunView {
+        id: row.try_get("id")?,
+        workspace_id: row.try_get("workspace_id")?,
+        created_by_id: row.try_get("created_by_id")?,
+        pod_id: row.try_get("pod_id")?,
+        runner_id: row.try_get("runner_id")?,
+        pinned_runner_id: row.try_get("pinned_runner_id")?,
+        parent_run_id: row.try_get("parent_run_id")?,
+        work_item_id: row.try_get("work_item_id")?,
+        status: map_status(status)?,
+        trigger,
+        executor_kind: map_executor(executor_kind)?,
+        phase_kind: row.try_get("phase_kind")?,
+        run_config: row.try_get("run_config")?,
+        tool_plan: row.try_get("tool_plan")?,
+        error_details: row.try_get("error_details")?,
+        prompt: row.try_get("prompt")?,
+        prompt_manifest: row.try_get("prompt_manifest")?,
+        ended_at: row.try_get("ended_at")?,
+    })
+}
+
 /// The consumed `runner` projection ([`RUNNER_SELECT_SQL`]). The status
 /// stays a string: runner models are unmerged, so `revoked`/`offline`
 /// are the fixture-pinned [`RUNNER_STATUS_REVOKED`] /
@@ -642,6 +708,8 @@ pub struct RunnerView {
     pub status: String,
     /// `70d684af`: the pin check needs the heartbeat freshness.
     pub last_heartbeat_at: Option<DateTime<Utc>>,
+    /// `09738d222`: the pin check skips operator-paused runners.
+    pub paused_at: Option<DateTime<Utc>>,
 }
 
 /// The consumed `pod` projection (live rows only, per `PodManager`).
@@ -921,7 +989,9 @@ pub fn run_config_for_issue(
 /// eligible: only the pinned runner may take a pinned run, so pinning
 /// to a runner that is gone would park the run in QUEUED and block
 /// every later run on the issue. A BUSY runner is alive and stays
-/// eligible; the pinned run waits for it.
+/// eligible; the pinned run waits for it. `09738d222`: an
+/// operator-paused runner is not eligible either — its pins would only
+/// wait out the pause.
 pub fn pinned_runner_for(
     runner: Option<&RunnerView>,
     target_pod_id: Option<Uuid>,
@@ -935,6 +1005,9 @@ pub fn pinned_runner_for(
         .last_heartbeat_at
         .is_none_or(|hb| hb < now - Duration::seconds(HEARTBEAT_GRACE_SECS))
     {
+        return None;
+    }
+    if runner.paused_at.is_some() {
         return None;
     }
     if target_pod_id.is_some_and(|pod| runner.pod_id != pod) {
@@ -2689,6 +2762,7 @@ mod tests {
             pod_id: uid(0x50),
             status: "online".to_owned(),
             last_heartbeat_at: Some(clock),
+            paused_at: None,
         };
         // M1: no runner.
         assert_eq!(pinned_runner_for(None, Some(uid(0x50)), clock), None);
@@ -2772,6 +2846,15 @@ mod tests {
         assert_eq!(
             pinned_runner_for(Some(&edge), Some(uid(0x50)), clock),
             Some(uid(0x60))
+        );
+        // M11 (`09738d222`): paused otherwise-fresh runners hold no pin.
+        let paused = RunnerView {
+            paused_at: Some(clock),
+            ..runner.clone()
+        };
+        assert_eq!(
+            pinned_runner_for(Some(&paused), Some(uid(0x50)), clock),
+            None
         );
     }
 
@@ -3116,6 +3199,7 @@ mod tests {
                 pod_id: uid(0x50),
                 status: "online".to_owned(),
                 last_heartbeat_at: Some(now()),
+                paused_at: None,
             },
         );
         let outcome = create_and_dispatch_run(&mut seam, &dispatch_req(Some(parent)))
@@ -3143,6 +3227,7 @@ mod tests {
                 pod_id: uid(0x50),
                 status: "online".to_owned(),
                 last_heartbeat_at: Some(now()),
+                paused_at: None,
             },
         );
         let mut req = dispatch_req(Some(parent));
@@ -3264,6 +3349,7 @@ mod tests {
                 pod_id: uid(0x50),
                 status: "online".to_owned(),
                 last_heartbeat_at: Some(now()),
+                paused_at: None,
             },
         );
         let outcome = create_continuation_run(&mut seam, &continuation_req(parent))
@@ -3401,6 +3487,7 @@ mod tests {
                 pod_id: uid(0x50),
                 status: "online".to_owned(),
                 last_heartbeat_at: Some(now()),
+                paused_at: None,
             },
         );
         seam.execution = Some(Ok(ExecutionFields {
@@ -3428,6 +3515,7 @@ mod tests {
                 pod_id: uid(0x50),
                 status: "online".to_owned(),
                 last_heartbeat_at: Some(now()),
+                paused_at: None,
             },
         );
         seam.execution = Some(Ok(ExecutionFields {

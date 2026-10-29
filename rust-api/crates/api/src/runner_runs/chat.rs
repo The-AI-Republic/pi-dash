@@ -78,8 +78,9 @@ use pidash_types::runner_runs::{
 
 use super::run_endpoints::{idempotency_key as daemon_idempotency_key, FrameError};
 use super::{
-    authenticate_daemon, frame_text, json_response, pool_of, publish_chat_event, py_truthy,
-    read_request_data, server_error, truncate_chars, DaemonRunner, LivePorts, RunnerPorts,
+    authenticate_daemon, frame_text, is_uuid_path_segment, json_response, pool_of,
+    publish_chat_event, py_truthy, read_request_data, server_error, truncate_chars, DaemonRunner,
+    LivePorts, RunnerPorts,
 };
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
@@ -161,6 +162,21 @@ pub fn chat_approval_kind(raw: &Value) -> Result<&'static str, FrameError> {
         "network_access" => "network_access",
         _ => "other",
     })
+}
+
+/// `_runner_unavailable_error` (`chat.py:119-130`, `09738d222` adds the
+/// paused arm): the 409 body for a runner that cannot take chat, or
+/// `None` when it can. Offline/revoked (and, by the callers, missing)
+/// runners report `runner_unavailable`; a paused runner reports
+/// `runner_paused`.
+pub fn runner_unavailable_error(status: &str, paused: bool) -> Option<&'static str> {
+    if status == "offline" || status == "revoked" {
+        Some(r#"{"error":"runner_unavailable"}"#)
+    } else if paused {
+        Some(r#"{"error":"runner_paused"}"#)
+    } else {
+        None
+    }
 }
 
 /// `_runner_unavailable` (`chat.py:119-120`): `OFFLINE` or `REVOKED`.
@@ -680,15 +696,6 @@ pub async fn resolve_chat_session(
     Ok(ResolvedChatSession { id, runner_id })
 }
 
-/// `chat_session_not_found` for unparseable daemon ids (the
-/// `assistant/events.rs` precedent: the endpoint's 404 body).
-fn daemon_chat_not_found() -> Response {
-    json_response(
-        StatusCode::NOT_FOUND,
-        r#"{"error":"chat_session_not_found"}"#.to_owned(),
-    )
-}
-
 /// The project's deploy-admin role floor (`ROLE_ADMIN`, 20).
 const ROLE_ADMIN: i32 = 20;
 
@@ -723,6 +730,8 @@ pub struct RunnerDetailOwned {
     pub enrolled_at: Option<String>,
     pub revoked_at: Option<String>,
     pub revoked_reason: String,
+    pub paused_at: Option<String>,
+    pub paused_by: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -840,6 +849,8 @@ impl RunnerDetailOwned {
             enrolled_at: self.enrolled_at.as_deref(),
             revoked_at: self.revoked_at.as_deref(),
             revoked_reason: &self.revoked_reason,
+            paused_at: self.paused_at.as_deref(),
+            paused_by: self.paused_by.as_deref(),
             created_at: &self.created_at,
             updated_at: &self.updated_at,
         }
@@ -856,17 +867,18 @@ pub async fn fetch_runner_detail(
 ) -> Result<RunnerDetailOwned, Response> {
     use pidash_services::runner_runs::shape::drf_datetime;
     use sqlx::Row;
-    // Twenty-one columns exceed sqlx's 16-tuple `FromRow`: decode by
+    // Twenty-three columns exceed sqlx's 16-tuple `FromRow`: decode by
     // position. Order: id, name, status, host_label, provisioning,
     // os, arch, runner_version, dev_metadata, protocol_version,
     // capabilities, last_heartbeat_at, owner, dev_machine,
     // visibility, pod, enrolled_at, revoked_at, revoked_reason,
-    // created_at, updated_at.
+    // created_at, updated_at, paused_at, paused_by_id.
     let row: Option<sqlx::postgres::PgRow> = sqlx::query(
         r#"SELECT "id", "name", "status", "host_label", "provisioning", "os", "arch",
               "runner_version", "dev_metadata", "protocol_version", "capabilities",
               "last_heartbeat_at", "owner_id", "dev_machine_id", "visibility", "pod_id",
-              "enrolled_at", "revoked_at", "revoked_reason", "created_at", "updated_at"
+              "enrolled_at", "revoked_at", "revoked_reason", "created_at", "updated_at",
+              "paused_at", "paused_by_id"
            FROM "runner" WHERE "id" = $1"#,
     )
     .bind(runner_id)
@@ -973,6 +985,8 @@ pub async fn fetch_runner_detail(
     let revoked_reason = get_string(18)?;
     let created_at = get_moment(19)?;
     let updated_at = get_moment(20)?;
+    let paused_at = get_opt_moment(21)?;
+    let paused_by_id = get_opt_uuid(22)?;
     Ok(RunnerDetailOwned {
         id: id.to_string(),
         name,
@@ -1016,6 +1030,8 @@ pub async fn fetch_runner_detail(
         enrolled_at: drf_opt(&enrolled_at),
         revoked_at: drf_opt(&revoked_at),
         revoked_reason,
+        paused_at: drf_opt(&paused_at),
+        paused_by: paused_by_id.map(|id| id.to_string()),
         created_at: drf_datetime(&created_at),
         updated_at: drf_datetime(&updated_at),
     })
@@ -1059,37 +1075,6 @@ async fn commit_tx(tx: sqlx::Transaction<'_, sqlx::Postgres>) -> Result<(), Resp
     tx.commit().await.map_err(|_| server_error())
 }
 
-/// `next_event_seq` (`chat.py:218-224`): one past the session max.
-async fn next_event_seq(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    session_id: Uuid,
-) -> Result<i32, Response> {
-    let max: Option<i32> =
-        sqlx::query_scalar(r#"SELECT MAX("seq") FROM "agent_chat_event" WHERE "session_id" = $1"#)
-            .bind(session_id)
-            .fetch_optional(&mut **tx)
-            .await
-            .map_err(|_| server_error())?
-            .flatten();
-    Ok(chat_kernel::next_seq_after_max(max))
-}
-
-/// `next_message_seq` (`chat.py:227-233`): one past the session max.
-async fn next_message_seq(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    session_id: Uuid,
-) -> Result<i32, Response> {
-    let max: Option<i32> = sqlx::query_scalar(
-        r#"SELECT MAX("seq") FROM "agent_chat_message" WHERE "session_id" = $1"#,
-    )
-    .bind(session_id)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(|_| server_error())?
-    .flatten();
-    Ok(chat_kernel::next_seq_after_max(max))
-}
-
 /// `append_event_locked` (`services/chat.py:149-173`): the
 /// idempotent event insert. An existing `source_key` returns the
 /// stored row without queuing a publish; otherwise the row inserts
@@ -1121,7 +1106,9 @@ pub async fn append_event(
             return event_from_row(existing);
         }
     }
-    let seq = next_event_seq(tx, session_id).await?;
+    let seq = chat_kernel::next_event_seq(&mut **tx, session_id)
+        .await
+        .map_err(|_| server_error())?;
     let created_at = Utc::now();
     let id: i64 = sqlx::query_scalar(
         r#"INSERT INTO "agent_chat_event"
@@ -1200,7 +1187,9 @@ pub async fn create_assistant(
 ) -> Result<AgentChatMessage, Response> {
     let inputs =
         chat_kernel::create_assistant_inputs(local_turn_id, "", AgentChatMessageStatus::Streaming);
-    let seq = next_message_seq(tx, session_id).await?;
+    let seq = chat_kernel::next_message_seq(&mut **tx, session_id)
+        .await
+        .map_err(|_| server_error())?;
     let id = Uuid::new_v4();
     let created_at = Utc::now();
     sqlx::query(
@@ -1929,13 +1918,7 @@ fn workspace_forbidden() -> Response {
     json_response(StatusCode::FORBIDDEN, r#"{"error":"forbidden"}"#.to_owned())
 }
 
-/// Django `request.query_params.get` for the web filters: the last
-/// value wins on repeats (`QueryDict`), and a missing or empty param
-/// disables the filter (the source's `if workspace_id:` / `if
-/// runner_id:` / `if project_id:` guards).
-fn query_param(params: &crate::license::QueryMap, key: &str) -> Option<String> {
-    crate::license::query_last(params, key).filter(|raw| !raw.is_empty())
-}
+use pidash_compat::http::query_param;
 
 /// `GET /api/runners/chat/sessions/` (`chat.py:140-189`): the
 /// workspace/runner/project filters, the visibility predicate, the
@@ -2111,6 +2094,10 @@ pub async fn chat_sessions_list(
     json_response(StatusCode::OK, format!("[{}]", rendered.join(",")))
 }
 
+/// The locked runner row for session create
+/// (`id, owner_id, visibility, status, pod_id, paused_at`).
+type ChatCreateRunnerRow = (Uuid, Uuid, i16, String, Uuid, Option<DateTime<Utc>>);
+
 /// `POST /api/runners/chat/sessions/` (`chat.py:192-237`): scope to a
 /// live membership, lock the runner, reuse an empty open session
 /// (200) or create one (201).
@@ -2161,8 +2148,8 @@ pub async fn chat_session_create(
         Ok(tx) => tx,
         Err(_) => return server_error(),
     };
-    let runner: Option<(Uuid, Uuid, i16, String, Uuid)> = match sqlx::query_as(
-        r#"SELECT "id", "owner_id", "visibility", "status", "pod_id" FROM "runner"
+    let runner: Option<ChatCreateRunnerRow> = match sqlx::query_as(
+        r#"SELECT "id", "owner_id", "visibility", "status", "pod_id", "paused_at" FROM "runner"
            WHERE ("id" = $1 AND "workspace_id" = $2) LIMIT 1 FOR UPDATE"#,
     )
     .bind(runner_id)
@@ -2179,7 +2166,7 @@ pub async fn chat_session_create(
             r#"{"error":"runner_not_found"}"#.to_owned(),
         )
     };
-    let Some((_, owner_id, visibility, status, pod_id)) = runner else {
+    let Some((_, owner_id, visibility, status, pod_id, paused_at)) = runner else {
         return not_found();
     };
     if visibility != pidash_auth::permissions::runner::VISIBILITY_PRIVATE as i16
@@ -2187,11 +2174,8 @@ pub async fn chat_session_create(
     {
         return not_found();
     }
-    if runner_unavailable(&status) {
-        return json_response(
-            StatusCode::CONFLICT,
-            r#"{"error":"runner_unavailable"}"#.to_owned(),
-        );
+    if let Some(body) = runner_unavailable_error(&status, paused_at.is_some()) {
+        return json_response(StatusCode::CONFLICT, body.to_owned());
     }
     // Empty-session reuse: the newest open session by this user on
     // this runner with no messages at all.
@@ -2303,15 +2287,19 @@ pub async fn chat_session_detail(
     State(state): State<AppState>,
     extension: Option<Extension<SessionHandle>>,
     Path(session_id): Path<String>,
+    req: Request<axum::body::Body>,
 ) -> Response {
+    // Resolver first (Django 404s non-converter segments before auth):
+    // proxy the untouched request so Django's framework 404 answers
+    // byte for byte (the `runner_poll.rs` `parse_uuid` precedent).
+    if !is_uuid_path_segment(&session_id) {
+        return crate::edge::proxy(State(state), req).await;
+    }
     let (pool, user_id) = match web_actor(&state, extension).await {
         Ok(preamble) => preamble,
         Err(response) => return response,
     };
-    let session_id: Uuid = match session_id.parse() {
-        Ok(session_id) => session_id,
-        Err(_) => return chat_not_found(),
-    };
+    let session_id: Uuid = session_id.parse().expect("checked segment");
     let fetched = match fetch_session_with_runner(&pool, session_id).await {
         Ok(fetched) => fetched,
         Err(response) => return response,
@@ -2379,15 +2367,17 @@ pub async fn chat_session_warm(
     State(state): State<AppState>,
     extension: Option<Extension<SessionHandle>>,
     Path(session_id): Path<String>,
+    req: Request<axum::body::Body>,
 ) -> Response {
+    // Resolver first (see `chat_session_detail`).
+    if !is_uuid_path_segment(&session_id) {
+        return crate::edge::proxy(State(state), req).await;
+    }
     let (pool, user_id) = match web_actor(&state, extension).await {
         Ok(preamble) => preamble,
         Err(response) => return response,
     };
-    let session_id: Uuid = match session_id.parse() {
-        Ok(session_id) => session_id,
-        Err(_) => return chat_not_found(),
-    };
+    let session_id: Uuid = session_id.parse().expect("checked segment");
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
         Err(_) => return server_error(),
@@ -2402,8 +2392,8 @@ pub async fn chat_session_warm(
     if !can_send_session(&pool, user_id, &locked.session, &locked.runner).await {
         return chat_not_found();
     }
-    let runner_status: Option<String> = match sqlx::query_scalar(
-        r#"SELECT "status" FROM "runner" WHERE "id" = $1 LIMIT 1 FOR UPDATE"#,
+    let runner_state: Option<(String, Option<DateTime<Utc>>)> = match sqlx::query_as(
+        r#"SELECT "status", "paused_at" FROM "runner" WHERE "id" = $1 LIMIT 1 FOR UPDATE"#,
     )
     .bind(locked.session.runner_id)
     .fetch_optional(&mut *tx)
@@ -2420,9 +2410,15 @@ pub async fn chat_session_warm(
             r#"{"error":"chat_session_closed"}"#.to_owned(),
         );
     }
-    match runner_status {
-        Some(status) if !runner_unavailable(&status) => {}
-        _ => {
+    match runner_state {
+        Some((status, paused_at)) => {
+            if let Some(body) = runner_unavailable_error(&status, paused_at.is_some()) {
+                return json_response(StatusCode::CONFLICT, body.to_owned());
+            }
+        }
+        // A deleted runner reads as unavailable, exactly as the source
+        // reports a missing runner.
+        None => {
             return json_response(
                 StatusCode::CONFLICT,
                 r#"{"error":"runner_unavailable"}"#.to_owned(),
@@ -2468,15 +2464,17 @@ pub async fn chat_messages_list(
     State(state): State<AppState>,
     extension: Option<Extension<SessionHandle>>,
     Path(session_id): Path<String>,
+    req: Request<axum::body::Body>,
 ) -> Response {
+    // Resolver first (see `chat_session_detail`).
+    if !is_uuid_path_segment(&session_id) {
+        return crate::edge::proxy(State(state), req).await;
+    }
     let (pool, user_id) = match web_actor(&state, extension).await {
         Ok(preamble) => preamble,
         Err(response) => return response,
     };
-    let session_id: Uuid = match session_id.parse() {
-        Ok(session_id) => session_id,
-        Err(_) => return chat_not_found(),
-    };
+    let session_id: Uuid = session_id.parse().expect("checked segment");
     let fetched = match fetch_session_with_runner(&pool, session_id).await {
         Ok(fetched) => fetched,
         Err(response) => return response,
@@ -2520,14 +2518,15 @@ pub async fn chat_message_create(
     Path(session_id): Path<String>,
     req: Request<axum::body::Body>,
 ) -> Response {
+    // Resolver first (see `chat_session_detail`).
+    if !is_uuid_path_segment(&session_id) {
+        return crate::edge::proxy(State(state), req).await;
+    }
     let (pool, user_id) = match web_actor(&state, extension).await {
         Ok(preamble) => preamble,
         Err(response) => return response,
     };
-    let session_id: Uuid = match session_id.parse() {
-        Ok(session_id) => session_id,
-        Err(_) => return chat_not_found(),
-    };
+    let session_id: Uuid = session_id.parse().expect("checked segment");
     // The brake runs before parsing and validation, exactly as
     // `check_throttles` does in `initial()`.
     if let ChatSendVerdict::Deny { retry_after_secs } =
@@ -2575,8 +2574,8 @@ pub async fn chat_message_create(
     if !can_send_session(&pool, user_id, &locked.session, &locked.runner).await {
         return chat_not_found();
     }
-    let runner_status: Option<String> = match sqlx::query_scalar(
-        r#"SELECT "status" FROM "runner" WHERE "id" = $1 LIMIT 1 FOR UPDATE"#,
+    let runner_state: Option<(String, Option<DateTime<Utc>>)> = match sqlx::query_as(
+        r#"SELECT "status", "paused_at" FROM "runner" WHERE "id" = $1 LIMIT 1 FOR UPDATE"#,
     )
     .bind(locked.session.runner_id)
     .fetch_optional(&mut *tx)
@@ -2591,9 +2590,15 @@ pub async fn chat_message_create(
             r#"{"error":"chat_session_closed"}"#.to_owned(),
         );
     }
-    match runner_status {
-        Some(status) if !runner_unavailable(&status) => {}
-        _ => {
+    match runner_state {
+        Some((status, paused_at)) => {
+            if let Some(body) = runner_unavailable_error(&status, paused_at.is_some()) {
+                return json_response(StatusCode::CONFLICT, body.to_owned());
+            }
+        }
+        // A deleted runner reads as unavailable, exactly as the source
+        // reports a missing runner.
+        None => {
             return json_response(
                 StatusCode::CONFLICT,
                 r#"{"error":"runner_unavailable"}"#.to_owned(),
@@ -2610,12 +2615,12 @@ pub async fn chat_message_create(
     // verbatim JSON.
     let content = match content_raw {
         Some(Value::String(content)) => content.clone(),
-        Some(other) => super::run_endpoints::py_str_value(other),
+        Some(other) => pidash_compat::py::py_str(other),
         None => String::new(),
     };
-    let seq = match next_message_seq(&mut tx, session_id).await {
+    let seq = match chat_kernel::next_message_seq(&mut *tx, session_id).await {
         Ok(seq) => seq,
-        Err(response) => return response,
+        Err(_) => return server_error(),
     };
     let message_id = Uuid::new_v4();
     let message_created_at = Utc::now();
@@ -2726,14 +2731,15 @@ pub async fn chat_session_cancel(
     Path(session_id): Path<String>,
     req: Request<axum::body::Body>,
 ) -> Response {
+    // Resolver first (see `chat_session_detail`).
+    if !is_uuid_path_segment(&session_id) {
+        return crate::edge::proxy(State(state), req).await;
+    }
     let (pool, user_id) = match web_actor(&state, extension).await {
         Ok(preamble) => preamble,
         Err(response) => return response,
     };
-    let session_id: Uuid = match session_id.parse() {
-        Ok(session_id) => session_id,
-        Err(_) => return chat_not_found(),
-    };
+    let session_id: Uuid = session_id.parse().expect("checked segment");
     let data = match read_request_data(&state, req).await {
         Ok(data) => data,
         Err(response) => return response,
@@ -2799,14 +2805,15 @@ pub async fn chat_session_close(
     Path(session_id): Path<String>,
     req: Request<axum::body::Body>,
 ) -> Response {
+    // Resolver first (see `chat_session_detail`).
+    if !is_uuid_path_segment(&session_id) {
+        return crate::edge::proxy(State(state), req).await;
+    }
     let (pool, user_id) = match web_actor(&state, extension).await {
         Ok(preamble) => preamble,
         Err(response) => return response,
     };
-    let session_id: Uuid = match session_id.parse() {
-        Ok(session_id) => session_id,
-        Err(_) => return chat_not_found(),
-    };
+    let session_id: Uuid = session_id.parse().expect("checked segment");
     let data = match read_request_data(&state, req).await {
         Ok(data) => data,
         Err(response) => return response,
@@ -3060,14 +3067,15 @@ pub async fn chat_approval_decide(
     Path(approval_id): Path<String>,
     req: Request<axum::body::Body>,
 ) -> Response {
+    // Resolver first (see `chat_session_detail`).
+    if !is_uuid_path_segment(&approval_id) {
+        return crate::edge::proxy(State(state), req).await;
+    }
     let (pool, user_id) = match web_actor(&state, extension).await {
         Ok(preamble) => preamble,
         Err(response) => return response,
     };
-    let approval_id: Uuid = match approval_id.parse() {
-        Ok(approval_id) => approval_id,
-        Err(_) => return chat_not_found(),
-    };
+    let approval_id: Uuid = approval_id.parse().expect("checked segment");
     let data = match read_request_data(&state, req).await {
         Ok(data) => data,
         Err(response) => return response,
@@ -3244,8 +3252,15 @@ async fn daemon_chat_preamble(
     session_raw: &str,
     req: Request<axum::body::Body>,
 ) -> Result<(PgPool, DaemonChatRequest), Response> {
+    // Resolver first (Django 404s non-converter segments before any
+    // view code — and before touching the database): proxy the
+    // untouched request so Django's framework 404 answers byte for
+    // byte (the `runner_poll.rs` `parse_uuid` precedent).
+    if !is_uuid_path_segment(session_raw) {
+        return Err(crate::edge::proxy(State(state.clone()), req).await);
+    }
     let pool = pool_of(state)?.clone();
-    let session_id: Uuid = session_raw.parse().map_err(|_| daemon_chat_not_found())?;
+    let session_id: Uuid = session_raw.parse().expect("checked segment");
     let secret = state.settings().secret_key.clone();
     let runner = authenticate_daemon(&pool, secret.as_bytes(), req.headers()).await?;
     let resolved = resolve_chat_session(&pool, session_id, runner.as_ref()).await?;
@@ -3388,14 +3403,17 @@ pub async fn daemon_chat_message_started(
     Path((session_id, message_id)): Path<(String, String)>,
     req: Request<axum::body::Body>,
 ) -> Response {
+    // Resolver first: Django 404s a non-converter message id before
+    // auth, ahead of the session preamble below (the
+    // `daemon_chat_preamble` gate covers the session id).
+    if !is_uuid_path_segment(&message_id) {
+        return crate::edge::proxy(State(state), req).await;
+    }
     let (pool, preamble) = match daemon_chat_preamble(&state, &session_id, req).await {
         Ok(preamble) => preamble,
         Err(response) => return response,
     };
-    let message_id: Uuid = match message_id.parse() {
-        Ok(message_id) => message_id,
-        Err(_) => return daemon_chat_not_found(),
-    };
+    let message_id: Uuid = message_id.parse().expect("checked segment");
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
         Err(_) => return server_error(),
@@ -3700,7 +3718,7 @@ pub async fn daemon_chat_approval(
     let reason = match obj.get("reason") {
         Some(reason) if py_truthy(reason) => match reason.as_str() {
             Some(reason) => reason.to_owned(),
-            None => super::run_endpoints::py_str_value(reason),
+            None => pidash_compat::py::py_str(reason),
         },
         _ => String::new(),
     };
@@ -3856,14 +3874,17 @@ pub async fn daemon_chat_message_complete(
     Path((session_id, message_id)): Path<(String, String)>,
     req: Request<axum::body::Body>,
 ) -> Response {
+    // Resolver first: Django 404s a non-converter message id before
+    // auth, ahead of the session preamble below (the
+    // `daemon_chat_preamble` gate covers the session id).
+    if !is_uuid_path_segment(&message_id) {
+        return crate::edge::proxy(State(state), req).await;
+    }
     let (pool, preamble) = match daemon_chat_preamble(&state, &session_id, req).await {
         Ok(preamble) => preamble,
         Err(response) => return response,
     };
-    let message_id: Uuid = match message_id.parse() {
-        Ok(message_id) => message_id,
-        Err(_) => return daemon_chat_not_found(),
-    };
+    let message_id: Uuid = message_id.parse().expect("checked segment");
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
         Err(_) => return server_error(),
@@ -3897,7 +3918,7 @@ pub async fn daemon_chat_message_complete(
     let assistant_text = match obj.get("assistant_message") {
         Some(text) if py_truthy(text) => match text.as_str() {
             Some(text) => text.to_owned(),
-            None => super::run_endpoints::py_str_value(text),
+            None => pidash_compat::py::py_str(text),
         },
         _ => String::new(),
     };
@@ -4500,6 +4521,30 @@ mod tests {
         assert!(!runner_unavailable("online"));
         assert!(!runner_unavailable("busy"));
         assert!(!runner_unavailable(""));
+    }
+
+    #[test]
+    fn runner_unavailable_error_reports_paused() {
+        assert_eq!(
+            runner_unavailable_error("offline", false),
+            Some(r#"{"error":"runner_unavailable"}"#)
+        );
+        // Offline/revoked win over paused (checked first, as in Python).
+        assert_eq!(
+            runner_unavailable_error("revoked", true),
+            Some(r#"{"error":"runner_unavailable"}"#)
+        );
+        assert_eq!(
+            runner_unavailable_error("online", true),
+            Some(r#"{"error":"runner_paused"}"#)
+        );
+        assert_eq!(
+            runner_unavailable_error("busy", true),
+            Some(r#"{"error":"runner_paused"}"#)
+        );
+        assert_eq!(runner_unavailable_error("online", false), None);
+        assert_eq!(runner_unavailable_error("busy", false), None);
+        assert_eq!(runner_unavailable_error("", false), None);
     }
 
     #[test]

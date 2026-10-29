@@ -104,11 +104,18 @@ use std::net::SocketAddr;
 
 use pidash_services::app_workspace::{models_user, queries_user, ser_extras, ser_user, tasks};
 use pidash_services::auth_session::{guards as throttle_kernel, shapes as auth_shapes};
+use pidash_services::read::{self, AssetRow, ProfileRow};
 
 use super::gates;
 use crate::middleware::SessionHandle;
 use crate::paginator::py_float_str;
 use crate::state::AppState;
+use pidash_compat::db::is_integrity_error;
+use pidash_compat::py::{py_repr_string, py_strip};
+use pidash_compat::response::json_response;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
+use pidash_services::domain::identity;
+use pidash_services::domain::projects::members as project_members;
 
 // ---------------------------------------------------------------------------
 // Exact bodies (F-W24-15 `errors`, byte-pinned in `tests` below)
@@ -117,8 +124,6 @@ use crate::state::AppState;
 /// `ObjectDoesNotExist` branch (`app/views/base.py:132-136,232-236`):
 /// bare `.get()` misses (profile reads, session re-read, dangling FKs).
 pub const OBJECT_NOT_FOUND_BODY: &str = r#"{"error":"The required object does not exist."}"#;
-/// Generic branch (`app/views/base.py:145-149,244-248`).
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// `IntegrityError` branch (`app/views/base.py:120-124,220-224`).
 pub const INVALID_PAYLOAD_BODY: &str = r#"{"error":"The payload is not valid"}"#;
 /// Django `ValidationError` branch (`app/views/base.py:126-130,226-230`):
@@ -199,14 +204,6 @@ fn error_envelope(message: String) -> Value {
     Value::Object(body)
 }
 
-fn json_response(status: StatusCode, body: &str) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body.to_owned()))
-        .expect("user-handler response")
-}
-
 impl IntoResponse for Denial {
     fn into_response(self) -> Response {
         match self {
@@ -276,15 +273,6 @@ async fn read_json_body(req: Request) -> Result<Value, Denial> {
         .map_err(|error| Denial::BadDetail(format!("{JSON_PARSE_ERROR} - {error}")))
 }
 
-/// Whether a sqlx failure is an integrity violation (SQLSTATE class
-/// `23`), which Django's `handle_exception` answers 400 for.
-fn is_integrity_error(error: &sqlx::Error) -> bool {
-    error
-        .as_database_error()
-        .and_then(|db| db.code())
-        .is_some_and(|code| code.starts_with("23"))
-}
-
 /// Map a write failure through `handle_exception`: integrity → 400
 /// payload-invalid, everything else → 500.
 fn write_denial(error: sqlx::Error) -> Denial {
@@ -327,13 +315,6 @@ pub fn positional(sql: &str, params: &[&str]) -> String {
 
 fn is_ident_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_'
-}
-
-/// Python `str.strip()` with no arguments: Unicode whitespace plus
-/// `\x1c`-`\x1f`, which Rust's `char::is_whitespace` does not cover
-/// (the `v1_projects` `py_strip` precedent, verified against CPython).
-fn py_strip(value: &str) -> &str {
-    value.trim_matches(|c: char| c.is_whitespace() || ('\x1c'..='\x1f').contains(&c))
 }
 
 /// `request.data.get("email", "").strip().lower()`
@@ -417,22 +398,15 @@ async fn fetch_user(pool: &PgPool, user_id: uuid::Uuid) -> Result<UserRow, Denia
 
 /// One `profiles` row for the identity paths: the pk plus
 /// `last_workspace_id` (plain nullable UUID, `user.py:236`).
-#[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
-pub struct ProfileRow {
-    pub id: uuid::Uuid,
-    pub last_workspace_id: Option<uuid::Uuid>,
-}
-
-/// `Profile.objects.get(user=...)` (`queries_user::profile_by_user_sql`
-/// shape; `profiles` carries no `deleted_at`). A miss is
-/// [`Denial::ObjectNotFound`].
+/// `Profile.objects.get(user=...)` via the public read service. A miss
+/// is [`Denial::ObjectNotFound`].
 async fn fetch_profile(pool: &PgPool, user_id: uuid::Uuid) -> Result<ProfileRow, Denial> {
-    sqlx::query_as("SELECT id, last_workspace_id FROM profiles WHERE profiles.user_id = $1")
-        .bind(user_id)
-        .fetch_optional(pool)
+    read::fetch_profile(pool, user_id)
         .await
-        .map_err(|_| Denial::ServerError)?
-        .ok_or(Denial::ObjectNotFound)
+        .map_err(|error| match error {
+            read::Error::NotFound => Denial::ObjectNotFound,
+            read::Error::Db(_) | read::Error::Failed(_) => Denial::ServerError,
+        })
 }
 
 /// One `workspaces` row for the settings branches: the re-fetch /
@@ -453,30 +427,16 @@ pub struct InstanceRow {
     pub id: uuid::Uuid,
 }
 
-/// One `file_assets` row for `asset_url` rendering: the plain-manager
-/// columns (forward-FK access runs through `_base_manager`, unscoped —
-/// the `queries_user` bug-13 precedent).
-#[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
-pub struct AssetRow {
-    pub id: uuid::Uuid,
-    pub entity_type: Option<String>,
-    pub workspace_id: Option<uuid::Uuid>,
-    pub project_id: Option<uuid::Uuid>,
-    pub issue_id: Option<uuid::Uuid>,
-}
-
-/// Unscoped asset fetch for one set FK. A dangling FK raises through
-/// the `ObjectDoesNotExist` branch (404), like Django's
-/// `RelatedObjectDoesNotExist`.
+/// Unscoped asset fetch for one set FK via the public read service. A
+/// dangling FK raises through the `ObjectDoesNotExist` branch (404),
+/// like Django's `RelatedObjectDoesNotExist`.
 async fn fetch_asset(pool: &PgPool, asset_id: uuid::Uuid) -> Result<AssetRow, Denial> {
-    sqlx::query_as(
-        "SELECT id, entity_type, workspace_id, project_id, issue_id FROM file_assets WHERE file_assets.id = $1",
-    )
-    .bind(asset_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?
-    .ok_or(Denial::ObjectNotFound)
+    read::fetch_asset(pool, asset_id)
+        .await
+        .map_err(|error| match error {
+            read::Error::NotFound => Denial::ObjectNotFound,
+            read::Error::Db(_) | read::Error::Failed(_) => Denial::ServerError,
+        })
 }
 
 /// Render `FileAsset.asset_url` (`db/models/asset.py:79-109`) through
@@ -1384,31 +1344,6 @@ fn py_repr(value: &Value) -> String {
         Value::Array(_) | Value::Object(_) => py_str(value),
         _ => py_str(value),
     }
-}
-
-fn py_repr_string(text: &str) -> String {
-    let mut out = String::with_capacity(text.len() + 2);
-    let use_double = text.contains('\'') && !text.contains('"');
-    let quote = if use_double { '"' } else { '\'' };
-    out.push(quote);
-    for ch in text.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if c == quote => {
-                out.push('\\');
-                out.push(c);
-            }
-            c if (c as u32) < 0x20 => {
-                out.push_str(&format!("\\x{:02x}", c as u32));
-            }
-            c => out.push(c),
-        }
-    }
-    out.push(quote);
-    out
 }
 
 /// Pure input half of the asset-FK check (DB-free, unit-tested):
@@ -2520,35 +2455,28 @@ pub async fn me_partial_update(
         Ok(derived) => derived,
         Err(denial) => return denial.into_response(),
     };
-    let update = sqlx::query(
-        "UPDATE users SET last_login = $1, display_name = $2, first_name = $3, last_name = $4, \
-        avatar = $5, avatar_asset_id = $6, cover_image = $7, cover_image_asset_id = $8, \
-        is_password_expired = $9, is_password_reset_required = $10, bot_type = $11, \
-        user_timezone = $12, is_email_valid = $13, masked_at = $14, email = $15, token = $16, \
-        token_updated_at = $17, is_staff = $18, updated_at = $19 WHERE id = $20",
-    )
-    .bind(merged.last_login)
-    .bind(&merged.display_name)
-    .bind(&merged.first_name)
-    .bind(&merged.last_name)
-    .bind(&merged.avatar)
-    .bind(merged.avatar_asset_id)
-    .bind(merged.cover_image.as_deref())
-    .bind(merged.cover_image_asset_id)
-    .bind(merged.is_password_expired)
-    .bind(merged.is_password_reset_required)
-    .bind(merged.bot_type.as_deref())
-    .bind(&merged.user_timezone)
-    .bind(merged.is_email_valid)
-    .bind(merged.masked_at)
-    .bind(&derived.email)
-    .bind(&derived.token)
-    .bind(derived.token_updated_at)
-    .bind(derived.is_staff)
-    .bind(now)
-    .bind(row.id)
-    .execute(pool)
-    .await;
+    let save = identity::MeProfileSave {
+        last_login: merged.last_login,
+        display_name: &merged.display_name,
+        first_name: &merged.first_name,
+        last_name: &merged.last_name,
+        avatar: &merged.avatar,
+        avatar_asset_id: merged.avatar_asset_id,
+        cover_image: merged.cover_image.as_deref(),
+        cover_image_asset_id: merged.cover_image_asset_id,
+        is_password_expired: merged.is_password_expired,
+        is_password_reset_required: merged.is_password_reset_required,
+        bot_type: merged.bot_type.as_deref(),
+        user_timezone: &merged.user_timezone,
+        is_email_valid: merged.is_email_valid,
+        masked_at: merged.masked_at,
+        email: &derived.email,
+        token: &derived.token,
+        token_updated_at: derived.token_updated_at,
+        is_staff: derived.is_staff,
+        updated_at: now,
+    };
+    let update = identity::save_me_profile(pool, row.id, &save).await;
     if let Err(error) = update {
         return write_denial(error).into_response();
     }
@@ -2896,23 +2824,13 @@ fn encode_random_password() -> String {
 
 /// Bulk-deactivate statement for one pk chunk: the builder's `IN
 /// (:pks)` expands to a positional list. An empty chunk issues no
-/// statement (the caller skips it).
-fn bulk_deactivate_statement(table: &str, chunk_len: usize) -> String {
+/// statement (the caller skips it). Workspace rows only — the
+/// project arm moved to `domain::projects::members`.
+fn bulk_deactivate_statement(chunk_len: usize) -> String {
     let placeholders: Vec<String> = (1..=chunk_len).map(|n| format!("${n}")).collect();
-    let (prefix, suffix) = if table == "project_members" {
-        (
-            queries_user::project_bulk_deactivate_sql(),
-            "project_members.id IN (:pks)",
-        )
-    } else {
-        (
-            queries_user::workspace_bulk_deactivate_sql(),
-            "workspace_members.id IN (:pks)",
-        )
-    };
-    prefix.replace(
-        suffix,
-        &format!("{table}.id IN ({})", placeholders.join(", ")),
+    queries_user::workspace_bulk_deactivate_sql().replace(
+        "workspace_members.id IN (:pks)",
+        &format!("workspace_members.id IN ({})", placeholders.join(", ")),
     )
 }
 
@@ -2931,12 +2849,12 @@ fn invite_purge_statement() -> String {
 
 /// Run the bulk deactivation in `batch_size=100` chunks (bug 5: no
 /// `updated_at`, no `deleted_at` filter, pk-direct).
-async fn bulk_deactivate(pool: &PgPool, table: &str, ids: &[uuid::Uuid]) -> Result<(), Denial> {
+async fn bulk_deactivate(pool: &PgPool, ids: &[uuid::Uuid]) -> Result<(), Denial> {
     for chunk in ids.chunks(queries_user::BULK_DEACTIVATE_BATCH_SIZE) {
         if chunk.is_empty() {
             continue;
         }
-        let sql = bulk_deactivate_statement(table, chunk.len());
+        let sql = bulk_deactivate_statement(chunk.len());
         let mut query = sqlx::query(&sql);
         for id in chunk {
             query = query.bind(*id);
@@ -3054,10 +2972,13 @@ pub async fn me_deactivate(
             );
         }
     }
-    if let Err(denial) = bulk_deactivate(pool, "project_members", &project_ids).await {
+    if let Err(denial) = project_members::deactivate_many(pool, &project_ids)
+        .await
+        .map_err(|_| Denial::ServerError)
+    {
         return denial.into_response();
     }
-    if let Err(denial) = bulk_deactivate(pool, "workspace_members", &workspace_ids).await {
+    if let Err(denial) = bulk_deactivate(pool, &workspace_ids).await {
         return denial.into_response();
     }
     // One `:now` sample for the run (the `queries_user` contract —
@@ -3793,14 +3714,10 @@ mod tests {
     #[test]
     fn bulk_statement_expands_one_placeholder_per_id() {
         assert_eq!(
-            bulk_deactivate_statement("project_members", 2),
-            "UPDATE project_members SET is_active = FALSE WHERE project_members.id IN ($1, $2)"
-        );
-        assert_eq!(
-            bulk_deactivate_statement("workspace_members", 1),
+            bulk_deactivate_statement(1),
             "UPDATE workspace_members SET is_active = FALSE WHERE workspace_members.id IN ($1)"
         );
-        let wide = bulk_deactivate_statement("project_members", 100);
+        let wide = bulk_deactivate_statement(100);
         assert!(wide.contains("$100"));
         assert!(!wide.contains("$101"));
     }

@@ -15,7 +15,9 @@
 //! fails the build. Consumed layers (all merged, read-only here):
 //! models (`pidash_db::v1_assets::model::file_asset`), queries
 //! (`pidash_db::v1_assets::asset_queries`, incl. `user_scoped_get_sql`,
-//! `soft_delete_*_sql`, `entity_user_*_sql` + `EntityClearTarget`), gates
+//! `soft_delete_*_sql`, `entity_user_select_sql` + `EntityClearTarget`;
+//! the `entity_user_save_sql` twin lives in
+//! `pidash_services::domain::identity`), gates
 //! (`super::permissions`), tasks
 //! (`pidash_jobs::v1_assets::tasks::{metadata_job, storage_metadata_missing}`).
 //!
@@ -57,7 +59,7 @@
 //!   parses `request.data`); DELETE never touches the body at all, so it
 //!   parses nothing.
 //! * Reads reuse `pidash_db::v1_assets::asset_queries`
-//!   (`user_scoped_get_sql`, `soft_delete_*_sql`, `entity_user_*_sql`).
+//!   (`user_scoped_get_sql`, `soft_delete_*_sql`, `entity_user_select_sql`).
 //!   Writes are single statements with the same column semantics as
 //!   `FileAsset.objects.create` / `save(update_fields=[...])` / the
 //!   full-row `user.save()`. `save(update_fields=[...])` writes ONLY
@@ -119,6 +121,9 @@ use crate::license::form_body::{select_body_kind, BodyKind};
 use crate::state::AppState;
 use crate::uuid_path::{classify_uuid_segment, UuidSegment};
 use pidash_auth::token as auth_token;
+use pidash_compat::py::py_json_string;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
+use pidash_compat::response::{json_response as raw, json_value as json_body, no_content};
 use pidash_db::v1_assets::asset_queries;
 
 // ---------------------------------------------------------------------------
@@ -135,8 +140,6 @@ pub const INVALID_TYPE_BODY: &str =
 pub const NOT_FOUND_BODY: &str = r#"{"error":"The requested resource does not exist."}"#;
 /// `handle_exception` `IntegrityError` (`base.py:142-146`).
 pub const PAYLOAD_NOT_VALID_BODY: &str = r#"{"error":"The payload is not valid"}"#;
-/// `handle_exception` generic 500 (`base.py:166-170`; `log_exception` + 500).
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// DRF `NotAuthenticated` (`IsAuthenticated` denial on every route here).
 pub const UNAUTHENTICATED_BODY: &str =
     r#"{"detail":"Authentication credentials were not provided."}"#;
@@ -184,32 +187,10 @@ pub fn routes() -> Router<AppState> {
 // Small responders (exact Django bytes)
 // ---------------------------------------------------------------------------
 
-fn raw(status: StatusCode, body: &'static str) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("static response")
-}
-
-fn json_body(status: StatusCode, body: Value) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(
-            serde_json::to_string(&body).expect("serializable response"),
-        ))
-        .expect("json response")
-}
-
 /// `handle_exception` generic 500 (`base.py:166-170`).
 fn server_error(error: impl std::fmt::Display) -> Response {
     tracing::warn!(%error, "user asset handler failed");
-    raw(StatusCode::INTERNAL_SERVER_ERROR, SERVER_ERROR_BODY)
-}
-
-fn no_content() -> Response {
-    StatusCode::NO_CONTENT.into_response()
+    pidash_compat::response::server_error()
 }
 
 fn pool(state: &AppState) -> Option<&sqlx::PgPool> {
@@ -360,9 +341,7 @@ async fn authenticate_api_token(pool: &sqlx::PgPool, presented: &str) -> Result<
     auth_token::validate_api_token(Some(&kernel_row), presented, now.timestamp())
         .map_err(|_| Denial::InvalidToken)?;
     // `api_token.last_used = now; save(update_fields=["last_used"])`.
-    sqlx::query("UPDATE api_tokens SET last_used = now() WHERE token = $1")
-        .bind(presented)
-        .execute(pool)
+    pidash_services::domain::tokens::touch_api_token_last_used_by_token(pool, presented)
         .await
         .map_err(|_| Denial::ServerError)?;
     Ok(user_id)
@@ -408,16 +387,12 @@ async fn authenticate_machine_token(
     .await
     .map_err(|_| Denial::ServerError)?;
     if !member {
-        sqlx::query("UPDATE machine_token SET revoked_at = now() WHERE id = $1")
-            .bind(row.id)
-            .execute(pool)
+        pidash_services::domain::tokens::revoke_machine_token_by_id_now(pool, row.id)
             .await
             .map_err(|_| Denial::ServerError)?;
         return Err(Denial::InvalidToken);
     }
-    sqlx::query("UPDATE machine_token SET last_used_at = now() WHERE id = $1")
-        .bind(row.id)
-        .execute(pool)
+    pidash_services::domain::tokens::touch_machine_token_last_used_by_id_now(pool, row.id)
         .await
         .map_err(|_| Denial::ServerError)?;
     Ok(row.user_id)
@@ -730,7 +705,8 @@ enum EntityDeleteOutcome {
 /// `avatar_asset_id`, `USER_COVER` clears `cover_image_asset_id`, anything
 /// else returns without touching the profile. The clear is a full-row
 /// `user.save()` — every non-pk column in `_meta` order via
-/// [`asset_queries::entity_user_save_sql`] — after the `User.save()`
+/// [`pidash_services::domain::identity::entity_user_save_sql`] — after the
+/// `User.save()`
 /// value shaping (`db/models/user.py:169-189`): email lower+strip (a null
 /// email raises `AttributeError` → generic 500), token rotation iff
 /// `token_updated_at` is set, the falsy-`display_name` local-part default
@@ -928,10 +904,10 @@ struct ShapedUserRow {
 impl ShapedUserRow {
     /// The full-row `user.save()`: every non-pk column in `_meta` order
     /// (`$1`–`$39`), pk in `WHERE` (`$40`) — the
-    /// [`asset_queries::entity_user_save_sql`] bind contract.
+    /// [`pidash_services::domain::identity::entity_user_save_sql`] bind contract.
     async fn save(&self, pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
         let row = &self.row;
-        sqlx::query(&asset_queries::entity_user_save_sql())
+        sqlx::query(&pidash_services::domain::identity::entity_user_save_sql())
             .bind(&row.password)
             .bind(row.last_login)
             .bind(&row.username)
@@ -1164,22 +1140,37 @@ pub(crate) async fn handle_patch(
         Ok(None) => return Denial::NotFound.into_response(),
         Err(error) => return server_error(error),
     };
+    // `if not asset.storage_metadata: delay` — BEFORE `request.data`
+    // parses, exactly like Python (`asset.py:214-217`: the `.delay`
+    // precedes the first `request.data` access because DRF parses
+    // lazily). A rejected body (415/500) still starts the back-fill
+    // (PIDASHCONV-1408). The proxy arm stays publish-free: the Django
+    // upstream enqueues there itself, so publishing first would queue
+    // the job twice.
+    let storage_metadata = asset.storage_metadata.unwrap_or(Value::Null);
+    let metadata_missing =
+        pidash_jobs::v1_assets::tasks::storage_metadata_missing(&storage_metadata);
     // `request.data` parses here — after the lookup, like Python.
     let data = match parse_object(&headers, &body) {
         Ok(data) => data,
         Err(ProxyOr500::Proxy) => {
             return proxy_through(state, method, uri, headers, body).await;
         }
-        Err(ProxyOr500::ServerError) => return server_error("request.data has no .get"),
+        Err(ProxyOr500::ServerError) => {
+            if metadata_missing {
+                publish_metadata(pool, &asset_id).await;
+            }
+            return server_error("request.data has no .get");
+        }
         Err(ProxyOr500::Unsupported(content_type)) => {
+            if metadata_missing {
+                publish_metadata(pool, &asset_id).await;
+            }
             return crate::v1_assets::sticky::Denial::UnsupportedMediaType(content_type)
                 .into_response();
         }
     };
-    // `if not asset.storage_metadata: delay` — before the save, exactly
-    // like Python (`asset.py:214-215`).
-    let storage_metadata = asset.storage_metadata.unwrap_or(Value::Null);
-    if pidash_jobs::v1_assets::tasks::storage_metadata_missing(&storage_metadata) {
+    if metadata_missing {
         publish_metadata(pool, &asset_id).await;
     }
     // `asset.attributes = request.data.get("attributes", current)` —
@@ -1472,37 +1463,6 @@ fn presigned_post(
     fields.insert("policy".to_owned(), Value::String(policy_b64));
     fields.insert("x-amz-signature".to_owned(), Value::String(signature));
     Ok(serde_json::json!({"url": url, "fields": fields}))
-}
-
-/// CPython `json.dumps` string encoding (`ensure_ascii`): `"` and
-/// `\` escaped, C0 controls short/`\u00XX`, everything else non-ASCII
-/// as `\uXXXX` (surrogate pairs past the BMP).
-fn py_json_string(input: &str) -> String {
-    let mut out = String::with_capacity(input.len() + 2);
-    out.push('"');
-    for c in input.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{08}' => out.push_str("\\b"),
-            '\u{0c}' => out.push_str("\\f"),
-            c if (c as u32) < 0x20 => {
-                out.push_str(&format!("\\u{:04x}", c as u32));
-            }
-            c if (c as u32) < 0x7f => out.push(c),
-            c => {
-                let mut buf = [0u16; 2];
-                for unit in c.encode_utf16(&mut buf) {
-                    out.push_str(&format!("\\u{unit:04x}"));
-                }
-            }
-        }
-    }
-    out.push('"');
-    out
 }
 
 /// Standard base64 with padding (policy documents).
@@ -1849,7 +1809,7 @@ mod tests {
     // (`$1`–`$40`); the soft-delete helper binds id + two fields.
     #[test]
     fn helper_builders_carry_their_binds() {
-        let save = asset_queries::entity_user_save_sql();
+        let save = pidash_services::domain::identity::entity_user_save_sql();
         assert!(
             save.contains("$1") && save.contains("$39") && save.contains("$40"),
             "{save}"

@@ -21,6 +21,12 @@ Three dispatch shapes, all asserted row-for-row:
 - pod with a user-owned runner: the ticker arms and one queued entry run
   dispatches immediately.
 
+PIDASHCONV-1444 adds a fourth shape over the same driver: pod without a
+runner but WITH a Backlog state seeded, so the bounce moves the row to
+Backlog. The oracle pins the DB move and the tool-result JSON together —
+Django's bounce mutates the in-memory issue, so the tool result reports
+the Backlog state, not the requested ticking state.
+
 The Rust mirror lives in ``tasks_assistant/test_rust_replay.py`` (same
 cases over ``rust_job_queue``). Live tests need the task-oracle stack:
 Django + a Celery worker on ``CELERY_BROKER_URL``, Postgres at
@@ -58,6 +64,14 @@ BOUNCE_STRIPPED = (
     "Add a runner under your account, or assign this issue to a workspace "
     "member whose runner is registered here."
 )
+
+#: Override body that fails to parse on both template engines (Jinja2 on
+#: Django, minijinja strict on Rust), so the entry-run prompt build raises
+#: inside the post-save orchestration (PIDASHCONV-1571). ``default-posture``
+#: is an ``overridable`` coding-task section, so a workspace-level row wins
+#: over the registry default on both backends.
+BROKEN_OVERRIDE_SECTION = "default-posture"
+BROKEN_OVERRIDE_BODY = "{% if %}\n"
 
 
 # --------------------------------------------------------------------------- #
@@ -313,11 +327,28 @@ class _ScriptedStub:
 # --------------------------------------------------------------------------- #
 
 
-def _drive_create_issue(db_conn, broker_url, tag, *, pod=False, runner=False):
+def _drive_create_issue(db_conn, broker_url, tag, *, pod=False, runner=False, backlog=False,
+                        broken_prompt=False):
     """Seed, drive one ``create_issue`` tool call, wait for the terminal
-    turn. Returns (user, project_id, state_id, pod_id, turn_id)."""
+    turn. Returns (user, project_id, state_id, pod_id, turn_id, requests),
+    where requests are the provider stub's captured payloads (the
+    follow-up request carries the tool result). ``backlog`` seeds one
+    Backlog state so the bounce has a target (PIDASHCONV-1444).
+    ``broken_prompt`` seeds a workspace override whose body fails to parse,
+    so the entry-run prompt build raises inside the post-save orchestration
+    (PIDASHCONV-1571)."""
     user, workspace = _seed_member(db_conn, tag)
     project_id, state_id = _seed_ticking_project(db_conn, user, workspace)
+    if backlog:
+        seed_helpers.Seed(db_conn).state(
+            project_id, workspace["id"], name="Backlog", group="backlog"
+        )
+        db_conn.commit()
+    if broken_prompt:
+        seed_helpers.Seed(db_conn).override(
+            str(workspace["id"]), BROKEN_OVERRIDE_SECTION, BROKEN_OVERRIDE_BODY
+        )
+        db_conn.commit()
     pod_id = _seed_pod(db_conn, workspace, project_id) if pod else None
     if runner:
         assert pod_id is not None
@@ -346,7 +377,7 @@ def _drive_create_issue(db_conn, broker_url, tag, *, pod=False, runner=False):
         )
     finally:
         stub.stop()
-    return user, project_id, state_id, pod_id, turn_id
+    return user, project_id, state_id, pod_id, turn_id, stub.requests
 
 
 def _terminal_turn(db_conn, turn_id):
@@ -386,9 +417,32 @@ def _assert_ticker_armed(db_conn, issue, user_id):
     return ticker
 
 
+def _backlog_state_id(db_conn, project_id):
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "SELECT id FROM states WHERE project_id = %s AND \"group\" = 'backlog'",
+            (project_id,),
+        )
+        return cur.fetchone()[0]
+
+
+def _tool_result(requests):
+    """The tool call's result dict, from the follow-up request's tool message.
+
+    Both lanes send the executed tool's return back to the model as an
+    OpenAI ``role: tool`` message whose content is the result JSON, so the
+    stub's captured payloads observe exactly what the tool returned.
+    """
+    assert len(requests) >= 2, "the turn makes a follow-up request after the tool call"
+    messages = requests[1].get("messages") or []
+    tools = [m for m in messages if isinstance(m, dict) and m.get("role") == "tool"]
+    assert len(tools) == 1, "the follow-up carries exactly one tool result"
+    return json.loads(tools[0]["content"])
+
+
 def test_create_issue_arms_ticker_without_pod(db_conn, broker_url):
     """No pod: the fire arms the clock, no entry run (``no-pod-available``)."""
-    user, project_id, state_id, _pod_id, _turn_id = _drive_create_issue(
+    user, project_id, state_id, _pod_id, _turn_id, _requests = _drive_create_issue(
         db_conn, broker_url, "nopod"
     )
     issue = _assert_tool_created_issue(db_conn, project_id, state_id, "nopod")
@@ -404,7 +458,7 @@ def test_create_issue_bounces_without_runner(db_conn, broker_url):
     place and the ticker is disarmed explicitly (``scheduling.py``
     ``_bounce_issue_no_eligible_runner``).
     """
-    user, project_id, state_id, _pod_id, _turn_id = _drive_create_issue(
+    user, project_id, state_id, _pod_id, _turn_id, _requests = _drive_create_issue(
         db_conn, broker_url, "bounce", pod=True
     )
     issue = _assert_tool_created_issue(db_conn, project_id, state_id, "bounce")
@@ -424,7 +478,7 @@ def test_create_issue_bounces_without_runner(db_conn, broker_url):
 
 def test_create_issue_dispatches_entry_run(db_conn, broker_url):
     """Pod with a user-owned runner: an entry run dispatches immediately."""
-    user, project_id, state_id, pod_id, _turn_id = _drive_create_issue(
+    user, project_id, state_id, pod_id, _turn_id, _requests = _drive_create_issue(
         db_conn, broker_url, "dispatch", pod=True, runner=True
     )
     issue = _assert_tool_created_issue(db_conn, project_id, state_id, "dispatch")
@@ -453,3 +507,79 @@ def test_create_issue_dispatches_entry_run(db_conn, broker_url):
     assert "transition probe dispatch" in run["prompt"]
     assert _run_event_count(db_conn, run["id"]) == 0
     assert _comment_rows(db_conn, issue["id"]) == []
+
+
+def test_create_issue_bounce_reports_backlog_tool_result(db_conn, broker_url):
+    """Bounce to a Backlog target: the DB row AND the tool result say Backlog.
+
+    PIDASHCONV-1444: Django's bounce mutates the in-memory issue
+    (``scheduling.py:1111-1113``), so the tool result built after the
+    atomic block (``issues.py:284``) reports the Backlog state — not the
+    requested ticking state. The sibling no-target bounce above stays in
+    place and cannot see the difference; this case seeds the target.
+    """
+    user, project_id, _state_id, _pod_id, _turn_id, requests = _drive_create_issue(
+        db_conn, broker_url, "bouncereport", pod=True, backlog=True
+    )
+    backlog_id = _backlog_state_id(db_conn, project_id)
+    issues = _issue_rows(db_conn, project_id)
+    assert len(issues) == 1, "the tool call created exactly one issue"
+    issue = issues[0]
+    assert issue["name"] == "transition probe bouncereport"
+    assert str(issue["state_id"]) == str(backlog_id), "the bounce moves the row to Backlog"
+    assert issue["sequence_id"] == 1
+    result = _tool_result(requests)
+    assert result["created"] is True
+    assert str(result["id"]) == str(issue["id"])
+    assert result["state"] == "Backlog"
+    assert result["state_group"] == "backlog"
+    tickers = _ticker_rows(db_conn, issue["id"])
+    assert len(tickers) == 1
+    ticker = tickers[0]
+    assert ticker["enabled"] is False
+    assert ticker["disarm_reason"] == "left_ticking_state"
+    assert ticker["next_run_at"] is None
+    assert str(ticker["created_by_id"]) == str(user["id"])
+    comments = _comment_rows(db_conn, issue["id"])
+    assert len(comments) == 1, "the bounce posts exactly one comment"
+    assert comments[0]["comment_stripped"] == BOUNCE_STRIPPED
+    assert _run_rows(db_conn, issue["id"]) == []
+
+
+def test_create_issue_prompt_failure_completes_turn(db_conn, broker_url):
+    """Broken prompt template: post-insert orchestration fails, tool still briefs.
+
+    PIDASHCONV-1571: the entry-run prompt build raises inside
+    ``handle_issue_state_transition``. Django's ``post_save`` receiver
+    swallows every handler error (``orchestration/signals.py:98-107``), so
+    the save stands and the tool returns its normal brief: the issue
+    exists, the ticker stays armed, the entry run row commits as
+    failed/``prompt_build_failed``, and the turn completes.
+    """
+    user, project_id, state_id, _pod_id, _turn_id, requests = _drive_create_issue(
+        db_conn, broker_url, "promptfail", pod=True, runner=True, broken_prompt=True
+    )
+    issue = _assert_tool_created_issue(db_conn, project_id, state_id, "promptfail")
+    _assert_ticker_armed(db_conn, issue, user["id"])
+    runs = _run_rows(db_conn, issue["id"])
+    assert len(runs) == 1, "the failed prompt build still commits its run row"
+    run = runs[0]
+    assert run["status"] == "failed"
+    assert run["error_code"] == "prompt_build_failed"
+    assert run["trigger"] == "state_transition"
+    assert run["error"].startswith("prompt build failed:")
+    result = _tool_result(requests)
+    assert result["created"] is True
+    assert str(result["id"]) == str(issue["id"])
+    assert result["state"] == TICKING_STATE
+    assert result["state_group"] == TICKING_GROUP
+    # The failed run's terminal effects post one "Run failed" comment
+    # (``run_lifecycle._post_failure_comment``). Its tail is the template
+    # engine's own render error, so only the engine-independent head is
+    # pinned here.
+    comments = _comment_rows(db_conn, issue["id"])
+    assert len(comments) == 1, "the failed run posts exactly one comment"
+    stripped = comments[0]["comment_stripped"]
+    assert stripped.startswith("Run failed.")
+    assert "prompt build failed" in stripped
+    assert "default-posture" in stripped

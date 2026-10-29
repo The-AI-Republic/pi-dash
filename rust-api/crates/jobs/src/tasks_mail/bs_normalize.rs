@@ -18,9 +18,7 @@
 //! CDATA sections or attribute values are never elements — exactly like
 //! `soup.find_all("mention-component")`.
 
-use std::cmp::Ordering;
-
-use super::bs_entities_generated::{ATTR_INVALID_CODEPOINTS, C1_MAP, HTML5_ENTITIES};
+use pidash_types::html_entities::{c1_remap, html_unescape, lookup_bare_entity};
 
 /// What [`normalize_bs`] found: the normalized HTML plus every
 /// `<mention-component>` span in output coordinates, document order
@@ -137,57 +135,6 @@ fn is_pre(name: &str) -> bool {
     matches!(name, "pre" | "textarea")
 }
 
-/// Look up an entity `name` (exact key, with or without `;`).
-fn lookup_entity(name: &str) -> Option<&'static str> {
-    HTML5_ENTITIES
-        .binary_search_by(|probe| probe.0.as_bytes().cmp(name.as_bytes()))
-        .ok()
-        .map(|idx| HTML5_ENTITIES[idx].1)
-}
-
-/// Look up `name`, then `name;` (probed fallback: `&notin<x` → `∉`),
-/// without allocating the `;` form.
-fn lookup_entity_then_semi(name: &str) -> Option<&'static str> {
-    if let Some(value) = lookup_entity(name) {
-        return Some(value);
-    }
-    let want = name.as_bytes();
-    // Binary search for the target `name;`, comparing each key against
-    // the unmaterialized target (`want` + one `;` byte).
-    let found = HTML5_ENTITIES
-        .binary_search_by(|probe| {
-            let key = probe.0.as_bytes();
-            let shared = key.len().min(want.len());
-            match key[..shared].cmp(&want[..shared]) {
-                Ordering::Equal => {
-                    if shared < want.len() {
-                        // Key is a strict prefix of `name`: shorter than
-                        // the target.
-                        Ordering::Less
-                    } else if key.len() == want.len() {
-                        // Key equals `name`: shorter than `name;`.
-                        Ordering::Less
-                    } else {
-                        // `name` is a strict prefix of the key: compare
-                        // the next key byte against `;`.
-                        match key[want.len()].cmp(&b';') {
-                            Ordering::Equal => key.len().cmp(&(want.len() + 1)),
-                            ord => ord,
-                        }
-                    }
-                }
-                ord => ord,
-            }
-        })
-        .ok()?;
-    Some(HTML5_ENTITIES[found].1)
-}
-
-/// C1 control remap shared by both decoders (`html._invalid_charrefs`).
-fn c1_remap(n: u32) -> char {
-    C1_MAP[(n - 0x80) as usize]
-}
-
 /// Text-path numeric value (`html.parser` greedy rule, probed):
 /// C1 remapped, NUL kept, huge → U+FFFD. Surrogates cannot live in a
 /// Rust `String`, so they map to U+FFFD (Python keeps the lone
@@ -200,28 +147,6 @@ fn text_numeric(n: u64) -> char {
         return '\u{fffd}';
     }
     char::from_u32(n as u32).unwrap_or('\u{fffd}')
-}
-
-/// Attribute-path numeric value (`html.unescape`, exact):
-/// `_invalid_charrefs` first, then `_invalid_codepoints` → empty,
-/// then surrogates/range → U+FFFD. `None` is the empty case.
-fn attr_numeric(n: u64) -> Option<char> {
-    if n == 0 {
-        return Some('\u{fffd}');
-    }
-    if n == 13 {
-        return Some('\r');
-    }
-    if (0x80..=0x9f).contains(&n) {
-        return Some(c1_remap(n as u32));
-    }
-    if n <= 0x10ffff && ATTR_INVALID_CODEPOINTS.binary_search(&(n as u32)).is_ok() {
-        return None;
-    }
-    if n > 0x10ffff {
-        return Some('\u{fffd}');
-    }
-    Some(char::from_u32(n as u32).unwrap_or('\u{fffd}'))
 }
 
 /// Escape text exactly like bs4 serializes a text node: only `&`, `<`,
@@ -415,7 +340,7 @@ impl<'a> Parser<'a> {
         }
         let name = self.slice(self.pos + 1, k);
         let semi = self.bytes[k] == b';';
-        match lookup_entity_then_semi(name) {
+        match lookup_bare_entity(name) {
             Some(v) => {
                 self.pending.push_str(v);
             }
@@ -533,127 +458,6 @@ enum EntityFlow {
     Normal,
     /// The `&#` break fired: remainder is raw, input exhausted.
     Break,
-}
-
-/// `html.unescape`, exact port (attribute values — probed): greedy
-/// numerics with optional `;`, named longest-prefix with backtracking
-/// (`&copyx;` → `©x;`), no terminator requirement, invalid numerics via
-/// the CPython tables.
-fn unescape_attr(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = String::with_capacity(s.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] != b'&' {
-            let c = s[i..].chars().next().unwrap_or('\0');
-            out.push(c);
-            i += c.len_utf8().max(1);
-            continue;
-        }
-        if let Some((value, end)) = attr_numeric_at(bytes, i) {
-            if let Some(c) = value {
-                out.push(c);
-            }
-            i = end;
-            continue;
-        }
-        // Named span: `[^\t\n\f <&#;]{1,32}` + optional `;`
-        // (`\r` allowed, `\x0b` allowed — the exclusion set is exact).
-        let mut k = i + 1;
-        let mut chars = 0;
-        while k < bytes.len()
-            && chars < 32
-            && !matches!(
-                bytes[k],
-                b'\t' | b'\n' | 0x0c | b' ' | b'<' | b'&' | b'#' | b';'
-            )
-        {
-            let c = s[k..].chars().next().unwrap_or('\0');
-            k += c.len_utf8().max(1);
-            chars += 1;
-        }
-        if k < bytes.len() && bytes[k] == b';' {
-            k += 1;
-        }
-        if k == i + 1 {
-            out.push('&');
-            i += 1;
-            continue;
-        }
-        let span = &s[i + 1..k];
-        // Longest prefix that is a table key (exact-with-`;` wins when
-        // longest: `&notin;` → `∉`, while `&notit;` → `¬it;`).
-        let mut hit: Option<(&str, &str)> = None;
-        let mut end = span.len();
-        while end > 0 {
-            while end > 0 && !span.is_char_boundary(end) {
-                end -= 1;
-            }
-            if end == 0 {
-                break;
-            }
-            if let Some(value) = lookup_entity(&span[..end]) {
-                hit = Some((value, &span[end..]));
-                break;
-            }
-            end -= 1;
-        }
-        match hit {
-            Some((value, rest)) => {
-                out.push_str(value);
-                out.push_str(rest);
-                i = k;
-            }
-            None => {
-                out.push('&');
-                i += 1;
-            }
-        }
-    }
-    out
-}
-
-/// Greedy attr numeric at `&`: `#[0-9]+;?` or `#[xX][hex]+;?`.
-/// The `Option<char>` is `None` for the empty-string invalids.
-fn attr_numeric_at(bytes: &[u8], i: usize) -> Option<(Option<char>, usize)> {
-    if i + 2 > bytes.len() || bytes[i] != b'&' || bytes[i + 1] != b'#' {
-        return None;
-    }
-    let mut k = i + 2;
-    let hex = k < bytes.len() && (bytes[k] == b'x' || bytes[k] == b'X');
-    if hex {
-        k += 1;
-    }
-    let digits = k;
-    let mut n: u64 = 0;
-    if hex {
-        while k < bytes.len() && bytes[k].is_ascii_hexdigit() {
-            let d = u64::from(
-                bytes[k].to_ascii_lowercase()
-                    - if bytes[k].is_ascii_digit() {
-                        b'0'
-                    } else {
-                        b'a' - 10
-                    },
-            );
-            n = n.saturating_mul(16).saturating_add(d);
-            k += 1;
-        }
-    } else {
-        while k < bytes.len() && bytes[k].is_ascii_digit() {
-            n = n
-                .saturating_mul(10)
-                .saturating_add(u64::from(bytes[k] - b'0'));
-            k += 1;
-        }
-    }
-    if k == digits {
-        return None;
-    }
-    if k < bytes.len() && bytes[k] == b';' {
-        k += 1;
-    }
-    Some((attr_numeric(n), k))
 }
 
 /// Quote an attribute value exactly like bs4: single quotes when the
@@ -890,7 +694,7 @@ impl<'a> Parser<'a> {
                             return None;
                         }
                     } else {
-                        value = unescape_attr(self.slice(k + 1, n));
+                        value = html_unescape(self.slice(k + 1, n));
                         k = n + 1;
                     }
                 } else {
@@ -900,7 +704,7 @@ impl<'a> Parser<'a> {
                     while n < len && !is_html_ws(self.bytes[n]) && self.bytes[n] != b'>' {
                         n += 1;
                     }
-                    value = unescape_attr(self.slice(k, n));
+                    value = html_unescape(self.slice(k, n));
                     k = n;
                 }
             }
@@ -1752,18 +1556,6 @@ mod tests {
             "<p a=\"2\" m=\"3\" z=\"1\">x</p>"
         );
         assert_eq!(norm("<p a=\"1\" a=\"2\">x</p>"), "<p a=\"2\">x</p>");
-    }
-
-    #[test]
-    fn unescape_attr_backtracks_and_maps_invalids() {
-        assert_eq!(unescape_attr("&copyx;"), "©x;");
-        assert_eq!(unescape_attr("&notit;"), "¬it;");
-        assert_eq!(unescape_attr("&unknown;"), "&unknown;");
-        assert_eq!(unescape_attr("&#65"), "A");
-        assert_eq!(unescape_attr("&#0;"), "\u{fffd}");
-        assert_eq!(unescape_attr("&#1;"), "");
-        assert_eq!(unescape_attr("&#128;"), "€");
-        assert_eq!(unescape_attr("&#129;"), "\u{81}");
     }
 
     #[test]
