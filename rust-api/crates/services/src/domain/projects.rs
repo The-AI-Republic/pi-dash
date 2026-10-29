@@ -1307,6 +1307,79 @@ pub mod members {
             .await?;
         Ok(())
     }
+
+    /// The overlay bulk-deactivate texts verbatim (D6 gap
+    /// PIDASHCONV-1617): the workspace scope and the
+    /// workspace+member scope of `_deactivate_local_access`.
+    pub(crate) const DEACTIVATE_BY_WORKSPACE_SQL: &str = "UPDATE project_members \
+        SET is_active = FALSE \
+        WHERE workspace_id = $1 AND deleted_at IS NULL AND is_active = TRUE";
+
+    pub(crate) const DEACTIVATE_BY_WORKSPACE_MEMBER_SQL: &str = "UPDATE project_members \
+        SET is_active = FALSE \
+        WHERE workspace_id = $1 AND deleted_at IS NULL AND is_active = TRUE AND member_id = $2";
+
+    /// The platform bulk deactivation (`pi_dash_cloud` `service.py:480-489`):
+    /// `ProjectMember.objects.filter(workspace, is_active=True)[.filter(member)]
+    /// .update(is_active=False)`. A queryset `update()`, so `SET` only — no
+    /// `updated_at` stamp and no `updated_by` (unlike the id-addressed
+    /// deactivations above, and unlike [`cascade_deactivate_ws`], which
+    /// scopes by slug and stamps `updated_at`); the soft-delete scope
+    /// comes from the default manager. Runs on the caller's executor
+    /// (the overlay holds its own transaction).
+    pub async fn deactivate_by_workspace<'e, E>(
+        ex: E,
+        workspace_id: Uuid,
+        member_id: Option<Uuid>,
+    ) -> Result<(), sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        if let Some(user) = member_id {
+            sqlx::query(DEACTIVATE_BY_WORKSPACE_MEMBER_SQL)
+                .bind(workspace_id)
+                .bind(user)
+                .execute(ex)
+                .await
+                .map(|_| ())
+        } else {
+            sqlx::query(DEACTIVATE_BY_WORKSPACE_SQL)
+                .bind(workspace_id)
+                .execute(ex)
+                .await
+                .map(|_| ())
+        }
+    }
+
+    /// The overlay role-sync text verbatim (D6 gap PIDASHCONV-1617).
+    pub(crate) const SYNC_ACTIVE_ROLE_SQL: &str = "UPDATE project_members \
+        SET role = $1 \
+        WHERE workspace_id = $2 AND deleted_at IS NULL AND member_id = $3 AND is_active = TRUE";
+
+    /// The active-member project role sync (`pi_dash_cloud`
+    /// `service.py:622-625`): `ProjectMember.objects.filter(workspace,
+    /// member, is_active=True).update(role=role)`. A queryset
+    /// `update()`, so `SET role` only — no `updated_at` stamp and no
+    /// `is_active` flip (unlike [`ops_update_role`], which also
+    /// activates and scopes by project). The role binds `int2`, as
+    /// the overlay does. Runs on the caller's executor.
+    pub async fn sync_active_role<'e, E>(
+        ex: E,
+        workspace_id: Uuid,
+        user_id: Uuid,
+        role: i16,
+    ) -> Result<(), sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        sqlx::query(SYNC_ACTIVE_ROLE_SQL)
+            .bind(role)
+            .bind(workspace_id)
+            .bind(user_id)
+            .execute(ex)
+            .await
+            .map(|_| ())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1616,6 +1689,28 @@ mod tests {
         assert!(MEMBER_INSERT_DB_NOW_SQL.contains("now(), now()"));
         assert!(PROPERTY_INSERT_SQL.contains("\"project_user_properties\""));
         assert!(PROPERTY_INSERT_DB_NOW_SQL.contains("now(), now(), NULL)"));
+    }
+
+    #[test]
+    fn bulk_platform_statements_match_overlay() {
+        assert_eq!(
+            DEACTIVATE_BY_WORKSPACE_SQL,
+            "UPDATE project_members SET is_active = FALSE \
+            WHERE workspace_id = $1 AND deleted_at IS NULL AND is_active = TRUE"
+        );
+        assert_eq!(
+            DEACTIVATE_BY_WORKSPACE_MEMBER_SQL,
+            "UPDATE project_members SET is_active = FALSE \
+            WHERE workspace_id = $1 AND deleted_at IS NULL AND is_active = TRUE AND member_id = $2"
+        );
+        assert_eq!(
+            SYNC_ACTIVE_ROLE_SQL,
+            "UPDATE project_members SET role = $1 \
+            WHERE workspace_id = $2 AND deleted_at IS NULL AND member_id = $3 AND is_active = TRUE"
+        );
+        assert!(!DEACTIVATE_BY_WORKSPACE_SQL.contains("updated_at"));
+        assert!(!DEACTIVATE_BY_WORKSPACE_MEMBER_SQL.contains("updated_at"));
+        assert!(!SYNC_ACTIVE_ROLE_SQL.contains("updated_at"));
     }
 
     #[test]
@@ -2296,6 +2391,239 @@ mod tests {
         patch_member(&pool, first_id, &MemberPatch::default(), later, first)
             .await
             .expect("empty patch stamps only");
+    }
+
+    /// `deactivate_by_workspace` flips only live active rows in the
+    /// workspace (both scopes), leaves `updated_at` untouched, and
+    /// skips inactive, soft-deleted and foreign-workspace rows.
+    #[tokio::test]
+    async fn live_deactivate_by_workspace_scopes() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        sqlx::query(PMEMBERS_DDL)
+            .execute(&pool)
+            .await
+            .expect("temp members");
+        let now: DateTime<Utc> = "2026-10-03T12:00:00+00:00".parse().expect("T0");
+        let ws_a = Uuid::new_v4();
+        let ws_b = Uuid::new_v4();
+        let project = Uuid::new_v4();
+        let view = props();
+        let prefs = prefs();
+        let user_1 = Uuid::new_v4();
+        let user_2 = Uuid::new_v4();
+        let user_3 = Uuid::new_v4();
+        let user_4 = Uuid::new_v4();
+        for (ws, user) in [
+            (ws_a, user_1),
+            (ws_a, user_2),
+            (ws_a, user_3),
+            (ws_a, user_4),
+            (ws_b, user_1),
+        ] {
+            let member = NewProjectMember {
+                workspace_id: ws,
+                project_id: Some(project),
+                user_id: Some(user),
+                role: 5,
+                created_by: None,
+                view_props: &view,
+                default_props: &view,
+                preferences: &prefs,
+                now,
+                ignore_conflicts: false,
+                db_now: false,
+            };
+            add(&pool, &member).await.expect("seed");
+        }
+        // Already-inactive and soft-deleted (but active-flagged) rows.
+        sqlx::query("UPDATE project_members SET is_active = FALSE WHERE member_id = $1")
+            .bind(user_3)
+            .execute(&pool)
+            .await
+            .expect("inactive seed");
+        sqlx::query("UPDATE project_members SET deleted_at = $1 WHERE member_id = $2")
+            .bind(now)
+            .bind(user_4)
+            .execute(&pool)
+            .await
+            .expect("deleted seed");
+        async fn read_back(pool: &sqlx::PgPool, ws: Uuid, user: Uuid) -> (bool, DateTime<Utc>) {
+            sqlx::query_as(
+                "SELECT is_active, updated_at FROM project_members \
+                WHERE workspace_id = $1 AND member_id = $2",
+            )
+            .bind(ws)
+            .bind(user)
+            .fetch_one(pool)
+            .await
+            .expect("read back")
+        }
+        // Member scope: only that user's live row flips.
+        deactivate_by_workspace(&pool, ws_a, Some(user_1))
+            .await
+            .expect("member scope");
+        assert_eq!(read_back(&pool, ws_a, user_1).await, (false, now));
+        assert_eq!(read_back(&pool, ws_a, user_2).await, (true, now));
+        assert_eq!(read_back(&pool, ws_b, user_1).await, (true, now));
+        // Workspace scope: every live active row in the workspace
+        // flips; inactive, deleted and foreign rows are untouched.
+        sqlx::query("UPDATE project_members SET is_active = TRUE WHERE member_id = $1")
+            .bind(user_1)
+            .execute(&pool)
+            .await
+            .expect("restore");
+        deactivate_by_workspace(&pool, ws_a, None)
+            .await
+            .expect("workspace scope");
+        assert_eq!(read_back(&pool, ws_a, user_1).await, (false, now));
+        assert_eq!(read_back(&pool, ws_a, user_2).await, (false, now));
+        assert_eq!(read_back(&pool, ws_a, user_3).await, (false, now));
+        assert_eq!(read_back(&pool, ws_a, user_4).await, (true, now));
+        assert_eq!(read_back(&pool, ws_b, user_1).await, (true, now));
+    }
+
+    /// `sync_active_role` rewrites the role on the member's live
+    /// active project rows only — same workspace and member, but an
+    /// inactive, soft-deleted or foreign-workspace row keeps its
+    /// role, and `updated_at` is untouched everywhere.
+    #[tokio::test]
+    async fn live_sync_active_role_sets_role_only() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        sqlx::query(PMEMBERS_DDL)
+            .execute(&pool)
+            .await
+            .expect("temp members");
+        let now: DateTime<Utc> = "2026-10-03T12:00:00+00:00".parse().expect("T0");
+        let ws_a = Uuid::new_v4();
+        let ws_b = Uuid::new_v4();
+        let project = Uuid::new_v4();
+        let other_project = Uuid::new_v4();
+        let view = props();
+        let prefs = prefs();
+        let user = Uuid::new_v4();
+        let other_user = Uuid::new_v4();
+        // Two live rows for the member (role sync spans projects),
+        // one inactive, one deleted, one foreign-workspace, one
+        // foreign-member.
+        for (ws, member_project, member, role) in [
+            (ws_a, project, user, 5),
+            (ws_a, other_project, user, 5),
+            (ws_a, project, other_user, 5),
+            (ws_b, project, user, 5),
+        ] {
+            let row = NewProjectMember {
+                workspace_id: ws,
+                project_id: Some(member_project),
+                user_id: Some(member),
+                role,
+                created_by: None,
+                view_props: &view,
+                default_props: &view,
+                preferences: &prefs,
+                now,
+                ignore_conflicts: false,
+                db_now: false,
+            };
+            add(&pool, &row).await.expect("seed");
+        }
+        let inactive_id = add(
+            &pool,
+            &NewProjectMember {
+                workspace_id: ws_a,
+                project_id: Some(project),
+                user_id: Some(user),
+                role: 5,
+                created_by: None,
+                view_props: &view,
+                default_props: &view,
+                preferences: &prefs,
+                now,
+                ignore_conflicts: false,
+                db_now: false,
+            },
+        )
+        .await
+        .expect("inactive seed");
+        sqlx::query("UPDATE project_members SET is_active = FALSE WHERE id = $1")
+            .bind(inactive_id)
+            .execute(&pool)
+            .await
+            .expect("deactivate one");
+        let deleted_id = add(
+            &pool,
+            &NewProjectMember {
+                workspace_id: ws_a,
+                project_id: Some(project),
+                user_id: Some(user),
+                role: 5,
+                created_by: None,
+                view_props: &view,
+                default_props: &view,
+                preferences: &prefs,
+                now,
+                ignore_conflicts: false,
+                db_now: false,
+            },
+        )
+        .await
+        .expect("deleted seed");
+        sqlx::query("UPDATE project_members SET deleted_at = $1 WHERE id = $2")
+            .bind(now)
+            .bind(deleted_id)
+            .execute(&pool)
+            .await
+            .expect("soft-delete one");
+        sync_active_role(&pool, ws_a, user, 20)
+            .await
+            .expect("sync role");
+        let seeded: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM project_members WHERE workspace_id = $1 AND member_id = $2",
+        )
+        .bind(ws_a)
+        .bind(user)
+        .fetch_one(&pool)
+        .await
+        .expect("count");
+        assert_eq!(seeded, 4);
+        // Both live rows (both projects) take the new role with no
+        // stamp move; the inactive and deleted rows are selected
+        // below by id.
+        let live: Vec<(i16, DateTime<Utc>)> = sqlx::query_as(
+            "SELECT role, updated_at FROM project_members \
+            WHERE workspace_id = $1 AND member_id = $2 AND is_active AND deleted_at IS NULL",
+        )
+        .bind(ws_a)
+        .bind(user)
+        .fetch_all(&pool)
+        .await
+        .expect("read back");
+        assert_eq!(live.len(), 2);
+        assert!(live
+            .iter()
+            .all(|(role, stamped)| *role == 20 && *stamped == now));
+        let skipped: Vec<(i16, DateTime<Utc>)> = sqlx::query_as(
+            "SELECT role, updated_at FROM project_members WHERE id = ANY($1) ORDER BY id",
+        )
+        .bind(vec![inactive_id, deleted_id])
+        .fetch_all(&pool)
+        .await
+        .expect("read back");
+        assert_eq!(skipped, vec![(5, now), (5, now)]);
+        let others: Vec<(i16, DateTime<Utc>)> = sqlx::query_as(
+            "SELECT role, updated_at FROM project_members \
+            WHERE (workspace_id = $1 AND member_id = $2) OR workspace_id = $3 ORDER BY member_id",
+        )
+        .bind(ws_a)
+        .bind(other_user)
+        .bind(ws_b)
+        .fetch_all(&pool)
+        .await
+        .expect("read back");
+        assert_eq!(others, vec![(5, now), (5, now)]);
     }
 
     /// The v1 identity write, the props reset and the preferences

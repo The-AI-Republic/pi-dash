@@ -26,10 +26,11 @@
 //!   [`super::tokens`]: the row-only workspace insert, the member
 //!   insert, the bulk insert, the role / reactivate / deactivate
 //!   updates, the platform insert / overwrite / sync /
-//!   no-stamp-deactivate shapes, the slug rename and the name sync all
-//!   run on the caller's pool or on the caller's existing `sqlx`
-//!   transaction (the join-request approve path holds one; the overlay
-//!   platform ensure holds one) with no restructuring.
+//!   no-stamp-deactivate shapes, the bulk workspace deactivations,
+//!   the slug rename and the name sync all run on the caller's pool
+//!   or on the caller's existing `sqlx` transaction (the
+//!   join-request approve path holds one; the overlay platform
+//!   ensure holds one) with no restructuring.
 //!
 //! Per-caller deltas (design D6) ride on the input structs. Two Rust-side
 //! divergences the survey found are preserved verbatim:
@@ -205,7 +206,8 @@ where
 
 /// OSS `workspace_members` writes: add / bulk-add / role / reactivate /
 /// deactivate, plus the platform insert / overwrite / sync /
-/// no-stamp-deactivate shapes (D6 gap PIDASHCONV-1613). Reads (the
+/// no-stamp-deactivate shapes (D6 gap PIDASHCONV-1613) and the bulk
+/// workspace deactivations (D6 gap PIDASHCONV-1617). Reads (the
 /// pre-write existence probes, the role guards) stay at the call
 /// sites.
 pub mod members {
@@ -701,6 +703,47 @@ pub mod members {
             .await
             .map(|_| ())
     }
+
+    /// The overlay bulk-deactivate texts verbatim (D6 gap
+    /// PIDASHCONV-1617): the workspace scope and the
+    /// workspace+member scope of `_deactivate_local_access`.
+    pub(crate) const DEACTIVATE_BY_WORKSPACE_SQL: &str = "UPDATE workspace_members \
+        SET is_active = FALSE \
+        WHERE workspace_id = $1 AND deleted_at IS NULL AND is_active = TRUE";
+
+    pub(crate) const DEACTIVATE_BY_WORKSPACE_MEMBER_SQL: &str = "UPDATE workspace_members \
+        SET is_active = FALSE \
+        WHERE workspace_id = $1 AND deleted_at IS NULL AND is_active = TRUE AND member_id = $2";
+
+    /// The platform bulk deactivation (`pi_dash_cloud` `service.py:480-489`):
+    /// `WorkspaceMember.objects.filter(workspace, is_active=True)[.filter(member)]
+    /// .update(is_active=False)`. A queryset `update()`, so `SET` only — no
+    /// `updated_at` stamp and no `updated_by` (unlike [`deactivate`]); the
+    /// soft-delete scope comes from the default manager. Runs on the
+    /// caller's executor (the overlay holds its own transaction).
+    pub async fn deactivate_by_workspace<'e, E>(
+        ex: E,
+        workspace_id: Uuid,
+        member_id: Option<Uuid>,
+    ) -> Result<(), sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        if let Some(user) = member_id {
+            sqlx::query(DEACTIVATE_BY_WORKSPACE_MEMBER_SQL)
+                .bind(workspace_id)
+                .bind(user)
+                .execute(ex)
+                .await
+                .map(|_| ())
+        } else {
+            sqlx::query(DEACTIVATE_BY_WORKSPACE_SQL)
+                .bind(workspace_id)
+                .execute(ex)
+                .await
+                .map(|_| ())
+        }
+    }
 }
 
 #[cfg(test)]
@@ -822,6 +865,22 @@ mod tests {
         // text, and the sweep deactivate is the active-only sync text.
         assert_eq!(SYNC_ROLE_ACTIVE_SQL, OVERWRITE_SQL);
         assert_eq!(DEACTIVATE_NO_STAMP_SQL, SYNC_ACTIVE_SQL);
+    }
+
+    #[test]
+    fn bulk_deactivate_statements_match_overlay() {
+        assert_eq!(
+            DEACTIVATE_BY_WORKSPACE_SQL,
+            "UPDATE workspace_members SET is_active = FALSE \
+            WHERE workspace_id = $1 AND deleted_at IS NULL AND is_active = TRUE"
+        );
+        assert_eq!(
+            DEACTIVATE_BY_WORKSPACE_MEMBER_SQL,
+            "UPDATE workspace_members SET is_active = FALSE \
+            WHERE workspace_id = $1 AND deleted_at IS NULL AND is_active = TRUE AND member_id = $2"
+        );
+        assert!(!DEACTIVATE_BY_WORKSPACE_SQL.contains("updated_at"));
+        assert!(!DEACTIVATE_BY_WORKSPACE_MEMBER_SQL.contains("updated_at"));
     }
 
     /// One-connection scratch pool: temp tables are
@@ -1550,6 +1609,100 @@ mod tests {
         .await
         .expect("read back");
         assert_eq!(row, (false, later, None));
+    }
+
+    /// `deactivate_by_workspace` flips only live active rows in the
+    /// workspace (both scopes), leaves `updated_at` untouched, and
+    /// skips inactive, soft-deleted and foreign-workspace rows.
+    #[tokio::test]
+    async fn live_deactivate_by_workspace_scopes() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        sqlx::query(MEMBERS_DDL)
+            .execute(&pool)
+            .await
+            .expect("temp members");
+        let now: DateTime<Utc> = "2026-10-03T12:00:00+00:00".parse().expect("T0");
+        let view = props();
+        let issue = issue_props();
+        let ws_a = Uuid::new_v4();
+        let ws_b = Uuid::new_v4();
+        let user_1 = Uuid::new_v4();
+        let user_2 = Uuid::new_v4();
+        let user_3 = Uuid::new_v4();
+        let user_4 = Uuid::new_v4();
+        for (ws, user) in [
+            (ws_a, user_1),
+            (ws_a, user_2),
+            (ws_a, user_3),
+            (ws_a, user_4),
+            (ws_b, user_1),
+        ] {
+            add(
+                &pool,
+                &NewMember {
+                    workspace_id: ws,
+                    user_id: Some(user),
+                    role: 5,
+                    company_role: None,
+                    created_by: None,
+                    view_props: &view,
+                    default_props: &view,
+                    issue_props: &issue,
+                    now,
+                    ignore_conflicts: false,
+                    db_now: false,
+                },
+            )
+            .await
+            .expect("seed");
+        }
+        // Already-inactive and soft-deleted (but active-flagged) rows.
+        sqlx::query("UPDATE workspace_members SET is_active = FALSE WHERE member_id = $1")
+            .bind(user_3)
+            .execute(&pool)
+            .await
+            .expect("inactive seed");
+        sqlx::query("UPDATE workspace_members SET deleted_at = $1 WHERE member_id = $2")
+            .bind(now)
+            .bind(user_4)
+            .execute(&pool)
+            .await
+            .expect("deleted seed");
+        async fn read_back(pool: &sqlx::PgPool, ws: Uuid, user: Uuid) -> (bool, DateTime<Utc>) {
+            sqlx::query_as(
+                "SELECT is_active, updated_at FROM workspace_members \
+                WHERE workspace_id = $1 AND member_id = $2",
+            )
+            .bind(ws)
+            .bind(user)
+            .fetch_one(pool)
+            .await
+            .expect("read back")
+        }
+        // Member scope: only that user's live row flips.
+        deactivate_by_workspace(&pool, ws_a, Some(user_1))
+            .await
+            .expect("member scope");
+        assert_eq!(read_back(&pool, ws_a, user_1).await, (false, now));
+        assert_eq!(read_back(&pool, ws_a, user_2).await, (true, now));
+        assert_eq!(read_back(&pool, ws_b, user_1).await, (true, now));
+        // Workspace scope: every live active row in the workspace
+        // flips; inactive, deleted and foreign rows are untouched.
+        sqlx::query("UPDATE workspace_members SET is_active = TRUE WHERE member_id = $1")
+            .bind(user_1)
+            .execute(&pool)
+            .await
+            .expect("restore");
+        deactivate_by_workspace(&pool, ws_a, None)
+            .await
+            .expect("workspace scope");
+        assert_eq!(read_back(&pool, ws_a, user_1).await, (false, now));
+        assert_eq!(read_back(&pool, ws_a, user_2).await, (false, now));
+        assert_eq!(read_back(&pool, ws_a, user_3).await, (false, now));
+        assert_eq!(read_back(&pool, ws_a, user_4).await, (true, now));
+        assert_eq!(read_back(&pool, ws_b, user_1).await, (true, now));
     }
 
     /// `rename` rewrites the slug and touches nothing else.
