@@ -10,7 +10,7 @@ import { readFileSync, statSync } from "node:fs";
 import { expect, test, type CDPSession, type Locator, type Page, type Route, type WebSocket } from "@playwright/test";
 
 import { bridgeParityAssetBucket } from "../helpers/asset-bucket.js";
-import { calendarDayLabel, isoDayOffset, localTodayISO, zonedTodayISO } from "../helpers/calendar-dates.js";
+import { calendarDayLabel, isoDayOffset, localTodayISO } from "../helpers/calendar-dates.js";
 import { descriptionAfterHeading } from "./modal-copy.js";
 import type {
   AdminAbsenceFacts,
@@ -20638,10 +20638,10 @@ export class WebNewDriver implements ParityDriver {
       .click({ timeout: WebNewDriver.WAIT_MS });
     const calendar = this.page.getByTestId("cycle-date-range-calendar");
     await calendar.waitFor({ timeout: WebNewDriver.WAIT_MS });
-    // The dialog disables past days against the project's today, so both
-    // boundary days derive from the project timezone, not the runner's.
-    const timeZone = await this.cyclesDialogProjectTimezone();
-    const today = zonedTodayISO(timeZone);
+    // The dialog disables days before the viewer's own today (ISS-215:
+    // the oracle passes the client's `new Date()`), so both boundary days
+    // come from the runner's local clock, never the project timezone.
+    const today = localTodayISO();
     const yesterdayDisabled = await this.cycleRangeDayDisabled(calendar, isoDayOffset(today, -1));
     const todayEnabled = !(await this.cycleRangeDayDisabled(calendar, today));
     await this.page.keyboard.press("Escape");
@@ -20658,21 +20658,6 @@ export class WebNewDriver implements ParityDriver {
     const cell = calendar.locator(`button[data-day="${iso}"]`);
     await cell.waitFor({ timeout: WebNewDriver.WAIT_MS });
     return cell.isDisabled();
-  }
-
-  /** The open dialog's project timezone from the workspace details read. */
-  private async cyclesDialogProjectTimezone(): Promise<string | null> {
-    const match = this.page.url().match(/\/([^/]+)\/projects\/([^/]+)\/cycles/);
-    const slug = match?.[1];
-    const projectId = match?.[2];
-    if (slug === undefined || projectId === undefined) {
-      throw new Error("[parity] the past-day probe needs a project cycles page.");
-    }
-    const response = await this.page.request.get(`/api/workspaces/${slug}/projects/details/`);
-    if (!response.ok()) throw new Error(`[parity] projects/details read failed with HTTP ${response.status()}.`);
-    const rows = (await response.json()) as Array<Record<string, unknown>>;
-    const zone = rows.find((row) => row["id"] === projectId)?.["timezone"];
-    return typeof zone === "string" && zone.length > 0 ? zone : null;
   }
 
   async cyclesCreatePickProject(projectName: string): Promise<void> {

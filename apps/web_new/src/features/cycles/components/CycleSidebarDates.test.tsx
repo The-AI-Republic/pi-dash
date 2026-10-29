@@ -9,7 +9,7 @@
 // the in-flight disabled state (CYC-036).
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { CycleRow } from "@pidash/api-client";
 import * as React from "react";
@@ -60,6 +60,13 @@ function shiftDay(base: string, delta: number): string {
 
 function todayUtc(): string {
   return new Date().toISOString().slice(0, 10);
+}
+
+/** The browser's own calendar day for an instant, as `yyyy-MM-dd`. */
+function localDayOf(at: Date): string {
+  const month = String(at.getMonth() + 1).padStart(2, "0");
+  const day = String(at.getDate()).padStart(2, "0");
+  return `${at.getFullYear()}-${month}-${day}`;
 }
 
 function asInstant(day: string): string {
@@ -172,7 +179,10 @@ describe("CycleSidebarDates", () => {
     renderDates(storedCycle(shiftDay(today, 10), shiftDay(today, 30)));
     const calendar = await openCalendar();
     fireEvent.click(screen.getByRole("button", { name: "Previous month" }));
-    const past = calendar.querySelector(`button[data-day="${shiftDay(today, -1)}"]`);
+    // The picker's floor is the viewer's own today (ISS-215), not the
+    // project day the stored range is read in.
+    const localToday = localDayOf(new Date());
+    const past = calendar.querySelector(`button[data-day="${shiftDay(localToday, -1)}"]`);
     expect(past?.getAttribute("disabled")).not.toBeNull();
   });
 
@@ -338,4 +348,77 @@ describe("CycleSidebarDates", () => {
     await waitFor(() => expect(patchCalls).toHaveLength(1));
     expect(patchCalls[0]!.body).toEqual({ start_date: moved, end_date: shiftDay(today, 20) });
   });
+});
+
+/** Freeze the clock only; real timers keep user-event interaction working. */
+function freezeClock(at: string): void {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date(at));
+}
+
+/** Turn the grid to one month through its caption selects. */
+async function showMonth(calendar: HTMLElement, month: string, year: string): Promise<void> {
+  const user = userEvent.setup();
+  await user.selectOptions(within(calendar).getByLabelText("Month", { exact: true }), month);
+  await user.selectOptions(within(calendar).getByLabelText("Year", { exact: true }), year);
+}
+
+/** Run one body with the browser's zone set to `zone`. */
+function inViewerZone(zone: string, body: () => Promise<void>): () => Promise<void> {
+  return async () => {
+    const previous = process.env["TZ"];
+    process.env["TZ"] = zone;
+    try {
+      await body();
+    } finally {
+      if (previous === undefined) delete process.env["TZ"];
+      else process.env["TZ"] = previous;
+    }
+  };
+}
+
+describe("CycleSidebarDates minimum day (ISS-215)", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it(
+    "offers the viewer's today from a project zone already past midnight",
+    inViewerZone("America/Los_Angeles", async () => {
+      // 04:00 UTC is the evening of Oct 28 in California while a UTC
+      // project is already on Oct 29.
+      freezeClock("2026-10-29T04:00:00Z");
+      renderDates(storedCycle("2026-11-02", "2026-11-20"), true, "UTC");
+      const calendar = await openCalendar();
+      await showMonth(calendar, "October", "2026");
+      expect(calendar.querySelector('button[data-day="2026-10-27"]')).toBeDisabled();
+      expect(calendar.querySelector('button[data-day="2026-10-28"]')).toBeEnabled();
+      expect(calendar.querySelector('button[data-day="2026-10-29"]')).toBeEnabled();
+    })
+  );
+
+  it(
+    "follows the viewer's day when the project zone still shows yesterday",
+    inViewerZone("Pacific/Auckland", async () => {
+      // 04:00 UTC is the late afternoon of Oct 29 in Auckland while a
+      // Los Angeles project is still on Oct 28.
+      freezeClock("2026-10-29T04:00:00Z");
+      renderDates(storedCycle("2026-11-02", "2026-11-20"), true, "America/Los_Angeles");
+      const calendar = await openCalendar();
+      await showMonth(calendar, "October", "2026");
+      expect(calendar.querySelector('button[data-day="2026-10-28"]')).toBeDisabled();
+      expect(calendar.querySelector('button[data-day="2026-10-29"]')).toBeEnabled();
+    })
+  );
+
+  it(
+    "leaves the month grid anchored at the viewer's today",
+    inViewerZone("America/Los_Angeles", async () => {
+      freezeClock("2026-10-29T04:00:00Z");
+      renderDates(storedCycle("2026-11-02", "2026-11-20"), true, "UTC");
+      const calendar = await openCalendar();
+      await showMonth(calendar, "October", "2026");
+      expect(calendar.querySelector('button[data-day="2026-10-28"]')).toHaveAttribute("data-today");
+    })
+  );
 });
