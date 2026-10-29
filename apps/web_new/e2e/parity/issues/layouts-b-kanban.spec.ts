@@ -673,9 +673,11 @@ test(
 
       await test.step("the ghosted issue is missing from every lane", async () => {
         // Intended: the ghost renders under None (lanes live:1, None:2).
-        // Pinned: the deleted label's through-row still excludes it from
-        // the grouped read, so None holds only the never-labeled issue and
-        // the ghost card renders nowhere (NEWFRONT-158).
+        // Pinned on the oracle: the deleted label's through-row still
+        // excludes it from the grouped read, so None holds only the
+        // never-labeled issue and the ghost card renders nowhere
+        // (NEWFRONT-158). Fixed on web_new (NEWFRONT-961 rewrite), which
+        // pins the intended shape below (spec §10).
         // The delete can settle a beat after its 204 — a lane for the
         // deleted label lingered past two consecutive reads in two of eight
         // probes — so poll until the lanes settle instead of reading once.
@@ -691,12 +693,21 @@ test(
             hasPlain: names.includes(plainName),
           };
         };
-        await expect.poll(laneSettled, { timeout: 120_000 }).toEqual({
-          lanes: [`${live.name}:1`, "None:1"].sort(),
-          hasGhost: false,
-          hasKept: true,
-          hasPlain: true,
-        });
+        await expect.poll(laneSettled, { timeout: 120_000 }).toEqual(
+          driver.target === "web_new"
+            ? {
+                lanes: [`${live.name}:1`, "None:2"].sort(),
+                hasGhost: true,
+                hasKept: true,
+                hasPlain: true,
+              }
+            : {
+                lanes: [`${live.name}:1`, "None:1"].sort(),
+                hasGhost: false,
+                hasKept: true,
+                hasPlain: true,
+              }
+        );
         // Server state: the ghost row exists and is unlabeled — only the
         // grouped read drops it.
         const rows = await serverIssues(seed.workspaceSlug, projectId, owner.cookie);

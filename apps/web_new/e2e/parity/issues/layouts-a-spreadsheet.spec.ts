@@ -217,9 +217,20 @@ test(
       // stepwise expansion plus the depth-3 peek assertion.
       expect(await driver.layoutsSheetHasSubIssueToggle(names[1] ?? "")).toEqual(true);
       await driver.layoutsSheetToggleSubIssues(names[1] ?? "");
-      await new Promise((resolve) => setTimeout(resolve, 15_000));
-      expect(await driver.layoutsSheetSubIssueNames(names[1] ?? "")).not.toContain(names[2]);
-      expect(await driver.layoutsSheetRowNames()).not.toContain(names[2]);
+      // bug:NEWFRONT-162 — the oracle fetches grandchildren but never
+      // renders them; the new app renders them inline (intended cap-3
+      // behavior), so the web_new leg pins presence (spec §10 gate
+      // alignment) instead of the absence below.
+      if (driver.target === "web_new") {
+        await expect
+          .poll(async () => driver.layoutsSheetSubIssueNames(names[1] ?? ""), { timeout: 60_000 })
+          .toContain(names[2]);
+        expect(await driver.layoutsSheetRowNames()).toContain(names[2]);
+      } else {
+        await new Promise((resolve) => setTimeout(resolve, 15_000));
+        expect(await driver.layoutsSheetSubIssueNames(names[1] ?? "")).not.toContain(names[2]);
+        expect(await driver.layoutsSheetRowNames()).not.toContain(names[2]);
+      }
       expect(await driver.layoutsPeekVisible()).toEqual(false);
     } finally {
       for (const id of [...ids].reverse()) await serverDeleteIssue(seed.workspaceSlug, seed.projectId, id, session);

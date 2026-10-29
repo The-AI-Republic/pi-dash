@@ -558,6 +558,11 @@ export class WebNewDriver implements ParityDriver {
     | { matches: (url: URL) => boolean; handler: (route: Route) => Promise<void> }
     | undefined = undefined;
 
+  /** The armed one-shot issue PATCH failure, if failNextIssuePatch set one. */
+  private issuePatchFailureRoute:
+    | { matches: (url: URL) => boolean; handler: (route: Route) => Promise<void> }
+    | undefined = undefined;
+
   // Runner-chat stubs and counters (NEWFRONT-549); set by the chat methods.
   private runnerChatSessionCreateFailRemaining = 0;
   private runnerChatSessionCreateDelayMs = 0;
@@ -1559,16 +1564,48 @@ export class WebNewDriver implements ParityDriver {
     return todo("rulesOpenIssueDetail");
   }
 
-  async rulesOpenIntakeIssue(_workspaceSlug: string, _projectId: string, _inboxIssueId: string): Promise<void> {
-    return todo("rulesOpenIntakeIssue");
+  async rulesOpenIntakeIssue(workspaceSlug: string, projectId: string, inboxIssueId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/intake?inboxIssueId=${inboxIssueId}`);
+    await this.page.waitForLoadState("domcontentloaded");
+    // The intake screen resolves the triage row, then loads its feed;
+    // that chain is slow on the dev server.
+    await this.intakeShellWaitSettled();
+    await this.page.getByRole("group", { name: "Add comment" }).first().waitFor({ timeout: 300_000 });
   }
 
   async rulesCommentBodyText(_commentId: string): Promise<string | null> {
     return todo("rulesCommentBodyText");
   }
 
-  async rulesCommentMenuOptions(_commentId: string): Promise<string[]> {
-    return todo("rulesCommentMenuOptions");
+  /** One comment card, addressed by the id its deep link points at. */
+  private rulesCard(commentId: string): Locator {
+    return this.page.locator(`#comment-${commentId}`);
+  }
+
+  async rulesCommentMenuOptions(commentId: string): Promise<string[]> {
+    const card = this.rulesCard(commentId);
+    await card.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    // Read-only cards render no menu at all; guests on another author's
+    // card get the viewer entries instead.
+    const trigger = card.locator('button[aria-haspopup="menu"]').first();
+    if ((await trigger.count()) === 0) return [];
+    await trigger.scrollIntoViewIfNeeded();
+    await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    const items = this.page.getByRole("menuitem");
+    await items.first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const keys: string[] = [];
+    for (const raw of await items.allTextContents()) {
+      const title = raw.trim().toLowerCase();
+      if (title === "edit") keys.push("edit");
+      else if (title === "copy link") keys.push("copy_link");
+      else if (title.startsWith("switch to public") || title.startsWith("switch to private"))
+        keys.push("access_switch");
+      else if (title.startsWith("fold comment")) keys.push("fold");
+      else if (title.startsWith("unfold comment")) keys.push("unfold");
+      else if (title === "delete") keys.push("delete");
+    }
+    await this.page.keyboard.press("Escape").catch(() => undefined);
+    return keys;
   }
 
   async rulesChooseCommentMenuOption(_commentId: string, _option: RulesCommentMenuOption): Promise<void> {
@@ -1576,7 +1613,10 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async rulesReadClipboard(): Promise<string> {
-    return todo("rulesReadClipboard");
+    // Copying writes to the clipboard, which headless Chromium denies
+    // without an explicit grant; arrange it before the read.
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    return this.page.evaluate(() => navigator.clipboard.readText());
   }
 
   async rulesOpenDeepLink(_url: string): Promise<void> {
@@ -1668,7 +1708,14 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async rulesIntakeTriageVisible(): Promise<boolean> {
-    return todo("rulesIntakeTriageVisible");
+    // Accept/Decline prove the intake variant; each is awaited so a slow
+    // triage chain cannot read as absent, then confirmed visible so a
+    // prerendered-but-hidden control cannot pass.
+    const accept = this.page.getByTestId("intake-triage-accept").first();
+    const decline = this.page.getByTestId("intake-triage-decline").first();
+    await accept.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await decline.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return (await accept.isVisible()) && (await decline.isVisible());
   }
 
   // Shell chrome (NEWFRONT-126, rows SHELL-001/002; NEWFRONT-288): the
@@ -2066,20 +2113,30 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async reloadSawDialog(): Promise<boolean> {
+    // A live selection also publishes its armed state on the root
+    // element: headless Chromium does not raise the native prompt
+    // without user activation, so either signal means the confirmation
+    // was armed (ISS-110).
+    const armed = await this.page.evaluate(() => document.documentElement.hasAttribute("data-leave-guard"));
     let sawDialog = false;
     const onDialog = async (dialog: import("@playwright/test").Dialog): Promise<void> => {
       sawDialog = true;
-      await dialog.dismiss();
+      // Accept so the reload proceeds: dismissing a beforeunload dialog
+      // cancels the navigation and page.reload() would hang to the test
+      // timeout (ISS-110).
+      await dialog.accept();
     };
     this.page.on("dialog", onDialog);
     try {
-      await this.page.reload();
-      await this.page.waitForLoadState("domcontentloaded");
+      // Bounded: a cancelled navigation never reaches load, so the
+      // observation must not outlive the dialog itself.
+      await this.page.reload({ timeout: 30_000 }).catch(() => {});
+      await this.page.waitForLoadState("domcontentloaded").catch(() => {});
       await this.page.waitForTimeout(2000);
     } finally {
       this.page.off("dialog", onDialog);
     }
-    return sawDialog;
+    return armed || sawDialog;
   }
 
   async dismissWelcomeDialog(): Promise<void> {
@@ -2137,7 +2194,8 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async enableCreateMore(): Promise<void> {
-    return todo("enableCreateMore");
+    const toggle = this.createDialog().getByRole("switch", { name: "Create more" }).first();
+    await toggle.click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async modalPrimaryButtonLabel(): Promise<string> {
@@ -2149,7 +2207,9 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async gitBranchValue(): Promise<string> {
-    return todo("gitBranchValue");
+    const input = this.createDialog().locator("#git_work_branch").first();
+    if ((await input.count()) === 0) return "";
+    return input.inputValue();
   }
 
   async createTitleFocused(): Promise<boolean> {
@@ -2160,7 +2220,10 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async modalTextContains(text: string): Promise<boolean> {
-    return (await this.createDialog().getByText(text, { exact: false }).count()) > 0;
+    // Search every open dialog like the oracle: pickers mount as sibling
+    // dialogs above the create form, and confirm dialogs carry no Title
+    // field at all, so the create-dialog scope misses both (ISS-122/134/135/136).
+    return (await this.page.getByRole("dialog").getByText(text, { exact: false }).count()) > 0;
   }
 
   async confirmSaveDraft(): Promise<void> {
@@ -2186,7 +2249,10 @@ export class WebNewDriver implements ParityDriver {
   async openDraftForEdit(name: string): Promise<void> {
     const block = this.draftBlock(name);
     await block.waitFor({ timeout: 60_000 });
-    await block.dblclick();
+    // Double-click the name, not the block's center: the center can land
+    // on an inline property control (state, labels, dates), which opens
+    // its picker instead of the edit dialog (ISS-130).
+    await block.locator("p[data-draft-name]").dblclick();
     await this.draftDialogTitle().waitFor({ timeout: 60_000 });
   }
 
@@ -2194,32 +2260,80 @@ export class WebNewDriver implements ParityDriver {
     await this.createDialog().getByRole("button", { name: "Publish issue", exact: true }).first().click();
   }
 
-  async openRowMenuEntry(_issueName: string, _entry: string): Promise<void> {
-    return todo("openRowMenuEntry");
+  /** Row anchors naming the issue: the Issues region first, then the
+   * page-wide anchors. Fresh rows (created under 30s ago) bypass the
+   * virtualizer into a strip above the region (ISS-006/NEWFRONT-937),
+   * so a region-only read misses exactly the rows a scenario just
+   * created (ISS-128). */
+  private async issueRowAnchors(issueName: string): Promise<Locator> {
+    const scoped = this.page
+      .getByRole("region", { name: "Issues" })
+      .locator('a[data-row-anchor="true"]')
+      .filter({ hasText: issueName });
+    if ((await scoped.count()) > 0) return scoped;
+    const pageWide = this.page.locator('a[data-row-anchor="true"]').filter({ hasText: issueName });
+    if ((await pageWide.count()) > 0) return pageWide;
+    // Calendar blocks carry issue ids but no row anchors (ISS-133).
+    return this.page.locator('a[id^="issue-"]').filter({ hasText: issueName });
   }
 
-  async modalButtonDisabled(_name: string): Promise<boolean> {
-    return todo("modalButtonDisabled");
+  async openRowMenuEntry(issueName: string, entry: string): Promise<void> {
+    // Right-click the row anchor: the row's context menu carries the
+    // same entries as its hover ellipsis. Retry once past live
+    // re-render detaches.
+    let lastError: unknown = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const row = (await this.issueRowAnchors(issueName)).first();
+        await row.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+        await row.click({ button: "right", timeout: WebNewDriver.WAIT_MS });
+        const item = this.page.getByRole("menuitem", { name: entry, exact: true }).first();
+        await item.waitFor({ timeout: WebNewDriver.WAIT_MS });
+        await item.click({ timeout: WebNewDriver.WAIT_MS });
+        return;
+      } catch (error) {
+        lastError = error;
+        await this.page.keyboard.press("Escape").catch(() => {});
+      }
+    }
+    throw lastError;
+  }
+
+  async modalButtonDisabled(name: string): Promise<boolean> {
+    return this.createDialog().getByRole("button", { name, exact: true }).first().isDisabled();
   }
 
   async openParentPicker(): Promise<void> {
-    return todo("openParentPicker");
+    const dialog = this.createDialog();
+    await dialog
+      .getByRole("button", { name: "Add parent", exact: true })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    // The search popover portals outside the dialog.
+    await this.page.getByLabel("Search work items").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
-  async searchParentInModal(_query: string): Promise<void> {
-    return todo("searchParentInModal");
+  async searchParentInModal(query: string): Promise<void> {
+    const search = this.page.getByLabel("Search work items").first();
+    await search.fill(query, { timeout: WebNewDriver.WAIT_MS });
   }
 
-  async selectParentResult(_issueName: string): Promise<void> {
-    return todo("selectParentResult");
+  async selectParentResult(issueName: string): Promise<void> {
+    // Candidate rows are plain buttons (identifier plus name), not
+    // options; the popover portals outside the dialog.
+    const row = this.page.locator("li").filter({ hasText: issueName }).getByRole("button").first();
+    await row.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.createDialog().getByTestId("parent-tag").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async parentResultNewTabLinks(): Promise<number> {
-    return todo("parentResultNewTabLinks");
+    return this.page.locator('a[target="_blank"]').count();
   }
 
-  async removeParentInModal(_issueName: string): Promise<void> {
-    return todo("removeParentInModal");
+  async removeParentInModal(issueName: string): Promise<void> {
+    const tag = this.createDialog().getByTestId("parent-tag").filter({ hasText: issueName }).first();
+    await tag.getByRole("button").first().click({ timeout: WebNewDriver.WAIT_MS });
+    await tag.waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
 
   async openLabelsPicker(): Promise<void> {
@@ -2246,8 +2360,10 @@ export class WebNewDriver implements ParityDriver {
     return (await option.getAttribute("aria-pressed")) === "true";
   }
 
-  async hoverIssueRow(_issueName: string): Promise<void> {
-    return todo("hoverIssueRow");
+  async hoverIssueRow(issueName: string): Promise<void> {
+    const row = (await this.issueRowAnchors(issueName)).first();
+    await row.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await row.hover({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async openToastViewAction(): Promise<string> {
@@ -2291,27 +2407,70 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async expandListRows(): Promise<boolean> {
-    return todo("expandListRows");
+    // Scroll first: section pagination can also trip on an intersection
+    // sentinel with no visible affordance.
+    await this.page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+    await this.page.waitForTimeout(2000);
+    const more = this.page.getByRole("button", { name: "Load more", exact: true });
+    const count = await more.count();
+    for (let i = 0; i < count; i++) {
+      await more
+        .nth(i)
+        .click()
+        .catch(() => undefined);
+      await this.page.waitForTimeout(1500);
+    }
+    return count > 0;
   }
 
-  async switchIssueLayout(_label: string): Promise<void> {
-    return todo("switchIssueLayout");
+  async switchIssueLayout(label: string): Promise<void> {
+    // Specs name the control by its tooltip/aria text ("Timeline Layout").
+    // Map that back to a stored layout key and use the same switcher path
+    // the layouts rows exercise.
+    const kind = WebNewDriver.layoutKeyFromLabel(label);
+    await this.layoutsSwitchTo(kind);
   }
 
   async ensureListLayout(): Promise<void> {
-    return todo("ensureListLayout");
+    // Best effort: a page without the switcher (an empty state, a dead
+    // navigation) leaves the layout alone for the caller's polling.
+    try {
+      await this.layoutsSwitchTo("list");
+    } catch {
+      // Nothing to switch.
+    }
+  }
+
+  /** The stored layout key a switcher label names, defaulting to list. */
+  private static layoutKeyFromLabel(label: string): LayoutsLayoutKey {
+    const wanted = label
+      .trim()
+      .replace(/\s+layout$/i, "")
+      .toLowerCase();
+    for (const [key, text] of Object.entries(WebNewDriver.CYCLE_LAYOUT_LABELS)) {
+      if (text.toLowerCase() === wanted) return key as LayoutsLayoutKey;
+    }
+    return "list";
   }
 
   async toggleAdvancedGit(): Promise<void> {
-    return todo("toggleAdvancedGit");
+    const toggle = this.createDialog().getByRole("button", { name: "Advanced — git" }).first();
+    await toggle.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.createDialog().locator("#git_work_branch").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
-  async fillGitBranch(_branch: string): Promise<void> {
-    return todo("fillGitBranch");
+  async fillGitBranch(branch: string): Promise<void> {
+    const input = this.createDialog().locator("#git_work_branch").first();
+    await input.click({ timeout: WebNewDriver.WAIT_MS });
+    await input.press("ControlOrMeta+a");
+    await input.press("Backspace");
+    await input.pressSequentially(branch, { timeout: WebNewDriver.WAIT_MS });
   }
 
   async gitBranchError(): Promise<string> {
-    return todo("gitBranchError");
+    const alert = this.createDialog().locator("#git_work_branch-error").first();
+    if ((await alert.count()) === 0) return "";
+    return ((await alert.textContent()) ?? "").trim();
   }
 
   async fillDescription(text: string): Promise<void> {
@@ -2415,8 +2574,15 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async modalProjectName(): Promise<string> {
+    // Read the chip's name span, not the whole chip: the trigger also
+    // carries the project mark, whose initial would prefix the name
+    // ("PParity Project", ISS-130).
     const chip = this.modalProjectChip();
     await chip.waitFor({ timeout: 30_000 });
+    const label = chip.locator("span.truncate");
+    if ((await label.count()) > 0) {
+      return ((await label.first().textContent()) ?? "").replace(/\s+/g, " ").trim();
+    }
     return ((await chip.textContent()) ?? "").replace(/\s+/g, " ").trim();
   }
 
@@ -2503,31 +2669,71 @@ export class WebNewDriver implements ParityDriver {
     return this.createDialog().locator("form").getByRole("button").first();
   }
 
-  async hoverCardRead(_issueName: string): Promise<{ text: string; priorityIcon: string; dateColor: string }> {
+  async hoverCardRead(issueName: string): Promise<{ text: string; priorityIcon: string; dateColor: string }> {
+    const empty = { text: "", priorityIcon: "", dateColor: "" };
+    // Mirror the oracle: hover the row (or calendar block) first. A
+    // failed hover propagates; only a successful hover with no card
+    // (undated rows) reports empty fields.
+    await this.hoverIssueRow(issueName);
     // The card names the record in its key, title and state, so one open
     // card is the read: no per-name scoping that a redesign could break.
+    // The calendar hover mounts its card after a short delay, so wait for
+    // the mount instead of one-shotting the count (ISS-133).
     const card = this.page.getByTestId("work-item-preview").first();
-    if ((await card.count()) === 0) return { text: "", priorityIcon: "", dateColor: "" };
+    let attached = false;
+    for (let waited = 0; waited < 5_000 && !attached; waited += 250) {
+      if ((await card.count()) > 0) {
+        attached = true;
+      } else {
+        await this.page.waitForTimeout(250);
+      }
+    }
+    if (!attached) return empty;
     const waited = await card
       .waitFor({ state: "visible", timeout: 15_000 })
       .then(() => true)
       .catch(() => false);
-    if (!waited) return { text: "", priorityIcon: "", dateColor: "" };
-    return card.evaluate((element: HTMLElement) => {
-      const text = (element.textContent ?? "").replace(/\s+/g, " ").trim();
-      const glyph = element.querySelector('[data-testid="preview-card-priority"] svg');
-      const priorityIcon = (glyph?.getAttribute("class") ?? "")
-        .split(/\s+/)
-        .filter((name) => name.startsWith("lucide-") && name !== "lucide")
-        .join(" ");
-      const dates = element.querySelector('[data-testid="preview-card-dates"]');
-      const dateColor = dates === null ? "" : getComputedStyle(dates).color;
-      return { text, priorityIcon, dateColor };
-    });
+    if (!waited) return empty;
+    try {
+      return await card.evaluate((element: HTMLElement) => {
+        const text = (element.textContent ?? "").replace(/\s+/g, " ").trim();
+        const glyph = element.querySelector('[data-testid="preview-card-priority"] svg');
+        const priorityIcon = (glyph?.getAttribute("class") ?? "")
+          .split(/\s+/)
+          .filter((name) => name.startsWith("lucide-") && name !== "lucide")
+          .join(" ");
+        const dates = element.querySelector('[data-testid="preview-card-dates"]');
+        const dateColor = dates === null ? "" : getComputedStyle(dates).color;
+        return { text, priorityIcon, dateColor };
+      });
+    } finally {
+      // Close the popover so an open card never covers the next hover
+      // target; a missing card leaves nothing to close.
+      await this.page.keyboard.press("Escape").catch(() => undefined);
+    }
   }
 
   async modalTabOrder(): Promise<string[]> {
-    return todo("modalTabOrder");
+    const dialog = this.createDialog();
+    return dialog.evaluate((element: HTMLElement) => {
+      const stops = Array.from(element.querySelectorAll("[tabindex]"));
+      const labelOf = (node: Element): string => {
+        const html = node as HTMLElement;
+        const labelled = html.getAttribute("aria-label")?.trim();
+        if (labelled) return labelled;
+        const placeholder =
+          (node as HTMLInputElement).placeholder?.trim() || (node as HTMLTextAreaElement).placeholder?.trim();
+        if (placeholder) return placeholder;
+        const id = html.id?.trim();
+        if (id) return id;
+        return (html.textContent ?? "").trim();
+      };
+      return stops.map((node) => {
+        const index = (node as HTMLElement).tabIndex;
+        const tag = node.tagName.toLowerCase();
+        return `${tag}#${index}:${labelOf(node)}`;
+      });
+    });
   }
 
   async focusCreateTitle(): Promise<void> {
@@ -2537,6 +2743,16 @@ export class WebNewDriver implements ParityDriver {
   async openCyclePage(workspaceSlug: string, projectId: string, cycleId: string): Promise<void> {
     await this.page.goto(`/${workspaceSlug}/projects/${projectId}/cycles/${cycleId}`, { timeout: 60_000 });
     await this.page.waitForLoadState("domcontentloaded");
+    await this.openContextSettled();
+  }
+
+  async openModulePage(workspaceSlug: string, projectId: string, moduleId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/modules/${moduleId}`, { timeout: 60_000 });
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.openContextSettled();
+  }
+
+  private async openContextSettled(): Promise<void> {
     // Settle on whatever the guard decides, the way project issues do:
     // the shared list header mounts with the rows, empty and error twins
     // alike (the labelled list box only wraps the not-found branches, so
@@ -2560,10 +2776,6 @@ export class WebNewDriver implements ParityDriver {
         await this.page.waitForTimeout(1_000);
       }
     }
-  }
-
-  async openModulePage(_workspaceSlug: string, _projectId: string, _moduleId: string): Promise<void> {
-    return todo("openModulePage");
   }
 
   // --- NEWFRONT-123 (home) stubs: mirror of the oracle driver additions. ---
@@ -3116,6 +3328,19 @@ export class WebNewDriver implements ParityDriver {
   async openIssueDetail(workspaceSlug: string, issueSeqOrProjectId: string, issueId?: string): Promise<void> {
     if (issueId === undefined) {
       await this.page.goto(`/${workspaceSlug}/browse/${issueSeqOrProjectId}`);
+      // Same stall class as the short link: the browse route's chunks can
+      // abort under vite pressure and the detail never settles. Settle on
+      // the Activity heading like the id form; a rendered missing state
+      // returns without retrying (callers assert it via seesDetailMissing).
+      const activity = this.page.getByRole("heading", { name: "Activity", exact: true });
+      try {
+        await activity.waitFor({ timeout: WebNewDriver.WAIT_MS });
+      } catch {
+        if ((await this.page.getByText(/No work item matches this address/).count()) > 0) return;
+        await this.page.reload();
+        await activity.waitFor({ timeout: WebNewDriver.WAIT_MS });
+      }
+      return;
     } else {
       // The id route is the legacy short link; it redirects to the
       // canonical browse address once the server resolves the key.
@@ -3124,16 +3349,45 @@ export class WebNewDriver implements ParityDriver {
         await this.page.goto(`/${workspaceSlug}/projects/${issueSeqOrProjectId}/issues/${issueId}`);
         await this.page.waitForLoadState("domcontentloaded");
       }
-      await this.page.waitForURL(/\/browse\//, { timeout: WebNewDriver.WAIT_MS }).catch(() => {
-        throw new Error(`[parity] detail for ${issueId} never reached the browse view (current: ${this.page.url()}).`);
-      });
+      // The short-link loader resolves through a dynamic import; under
+      // vite dev-transform pressure the import occasionally aborts and
+      // the loader never settles (no resolve request fires at all).
+      // Retry once through a reload — but a rendered missing state means
+      // the issue is genuinely unknown, so that throws without retrying.
+      const unreachable = (): Error =>
+        new Error(`[parity] detail for ${issueId} never reached the browse view (current: ${this.page.url()}).`);
+      try {
+        await this.page.waitForURL(/\/browse\//, { timeout: WebNewDriver.WAIT_MS });
+      } catch {
+        if ((await this.page.getByText("Back to the project issues").count()) > 0) throw unreachable();
+        await this.page.reload();
+        await this.page.waitForURL(/\/browse\//, { timeout: WebNewDriver.WAIT_MS }).catch(() => {
+          throw unreachable();
+        });
+      }
     }
     await this.page.getByRole("heading", { name: "Activity", exact: true }).waitFor({
       timeout: WebNewDriver.WAIT_MS,
     });
   }
-  async openReadOnlyIssueDetail(_workspaceSlug: string, _issueSeq: string): Promise<void> {
-    return todo("openReadOnlyIssueDetail");
+  async openReadOnlyIssueDetail(workspaceSlug: string, issueSeq: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/browse/${issueSeq}`);
+    // No title field renders on read-only detail (static title instead),
+    // so the identifier plus a hydrated sidebar row decide.
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    let loops = 0;
+    for (;;) {
+      if ((await this.issueDetailIdentifier()) === issueSeq) {
+        if ((await this.sidebarProperty("State")) !== null) return;
+      }
+      if ((await this.page.getByPlaceholder("name@company.com").count()) > 0) {
+        throw new Error("[parity] session lost while opening the read-only detail page.");
+      }
+      loops++;
+      if (Date.now() > deadline) throw new Error(`[parity] read-only detail did not hydrate for ${issueSeq}.`);
+      if (loops % 15 === 0) await this.page.reload().catch(() => {});
+      else await this.page.waitForTimeout(2000);
+    }
   }
   async issueDetailTitle(): Promise<string | null> {
     // Editable detail carries the title field; anything else is not a
@@ -3143,19 +3397,68 @@ export class WebNewDriver implements ParityDriver {
     return field.inputValue().catch(() => null);
   }
   async issueDetailIdentifier(): Promise<string | null> {
-    return todo("issueDetailIdentifier");
+    // The header renders the key as a copy button; scope to buttons so
+    // sidebar keys never win.
+    const id = this.page.getByRole("button", { name: /^[A-Z0-9]{2,}-\d+$/ }).first();
+    if ((await id.count()) === 0) return null;
+    return ((await id.innerText()) ?? "").trim();
   }
-  async editIssueTitle(_name: string): Promise<void> {
-    return todo("editIssueTitle");
+  async editIssueTitle(name: string): Promise<void> {
+    const field = this.page.getByLabel("Title").first();
+    await field.fill(name, { timeout: WebNewDriver.WAIT_MS });
+    // Blur so the debounced autosave flushes; Tab avoids the header
+    // copy button, which would toast on click.
+    await field.press("Tab", { timeout: WebNewDriver.WAIT_MS });
   }
   async saveIndicator(): Promise<string | null> {
-    return todo("saveIndicator");
+    const saving = this.page.getByText(/^Saving…$/).first();
+    if ((await saving.count()) > 0) return "Saving…";
+    const saved = this.page.getByText(/^Saved$/).first();
+    if ((await saved.count()) > 0) return "Saved";
+    return null;
   }
+  /** The description editor, labelled apart from the composer's draft. */
+  private descriptionEditor(): Locator {
+    return this.page.locator("[contenteditable='true'][aria-label='Description']").first();
+  }
+
   async descriptionText(): Promise<string | null> {
-    return todo("descriptionText");
+    // Editing renders the description editor; the settled view renders
+    // the "Edit description" surface; an untouched issue shows the add
+    // button, which reads as empty. The editor is label-scoped because
+    // the comment composer mounts its own always-on editor: a restore
+    // closes the description editor, leaving the composer's empty draft
+    // as the first bare contenteditable (ISS-147).
+    const editor = this.descriptionEditor();
+    if ((await editor.count()) > 0) return ((await editor.innerText()) ?? "").trim();
+    const view = this.page.getByRole("button", { name: "Edit description" }).first();
+    if ((await view.count()) > 0) return ((await view.innerText()) ?? "").trim();
+    const add = this.page.getByRole("button", { name: "Add a description" }).first();
+    if ((await add.count()) > 0) return "";
+    return null;
   }
-  async setDescription(_text: string): Promise<void> {
-    return todo("setDescription");
+  async setDescription(text: string): Promise<void> {
+    const add = this.page.getByRole("button", { name: "Add a description" }).first();
+    if ((await add.count()) > 0) await add.click({ timeout: WebNewDriver.WAIT_MS });
+    else {
+      const view = this.page.getByRole("button", { name: "Edit description" }).first();
+      if ((await view.count()) > 0) await view.click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    // Label-scoped: waiting on a bare contenteditable returns at once
+    // (the composer is always mounted) and types into the wrong editor.
+    const editor = this.descriptionEditor();
+    await editor.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await editor.click({ timeout: WebNewDriver.WAIT_MS });
+    // fill() never reaches the rich editor's state; type instead.
+    await this.page.keyboard.press("ControlOrMeta+a");
+    if (text.length === 0) {
+      await this.page.keyboard.press("Backspace");
+    } else {
+      await editor.pressSequentially(text, { timeout: WebNewDriver.WAIT_MS });
+    }
+    // Blur out so the debounced autosave flushes; Tab avoids the
+    // header copy button, which would toast on click.
+    await editor.press("Tab", { timeout: WebNewDriver.WAIT_MS });
   }
   async sidebarProperty(label: string): Promise<string | null> {
     // Read the row's value half: the label span is the row's accessible
@@ -3174,11 +3477,17 @@ export class WebNewDriver implements ParityDriver {
     if ((await row.count()) === 0) return false;
     return (await row.first().getByRole("button").count()) > 0;
   }
-  async pickState(_name: string): Promise<void> {
-    return todo("pickState");
+  async pickState(name: string): Promise<void> {
+    await this.pickSidebarOption("State", name);
   }
-  async pickPriority(_name: string): Promise<void> {
-    return todo("pickPriority");
+  async pickPriority(name: string): Promise<void> {
+    await this.pickSidebarOption("Priority", name);
+  }
+  /** Open a single-select sidebar picker, choose an option, settle on the popup closing. */
+  private async pickSidebarOption(label: string, name: string): Promise<void> {
+    await this.propertyOpenPicker(label);
+    await this.pickerPick(name);
+    await this.pickerListbox().waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
   async copyIssueLink(): Promise<void> {
     // Detail header's shared copy control (DESK-019): copies the hosted
@@ -3226,25 +3535,62 @@ export class WebNewDriver implements ParityDriver {
     return this.page.evaluate(() => navigator.clipboard.readText());
   }
   async subscribeToggle(): Promise<string | null> {
-    return todo("subscribeToggle");
+    const toggle = this.page.getByRole("button", { name: /^(Subscribe|Unsubscribe)$/ }).first();
+    if ((await toggle.count()) === 0) return null;
+    return ((await toggle.innerText()) ?? "").trim() || null;
   }
   async clickSubscribeToggle(): Promise<void> {
-    return todo("clickSubscribeToggle");
+    await this.page
+      .getByRole("button", { name: /^(Subscribe|Unsubscribe)$/ })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
   async quickActionNames(): Promise<string[]> {
-    return todo("quickActionNames");
+    const items = await this.openDetailQuickActions();
+    return (await items.allTextContents()).map((t) => t.trim()).filter((t) => t.length > 0);
   }
-  async clickQuickAction(_name: string): Promise<void> {
-    return todo("clickQuickAction");
+  async clickQuickAction(name: string): Promise<void> {
+    // A click swallowed by a re-render leaves the menu open with no
+    // effect, so retry until the menu closes (every item closes it).
+    for (let attempt = 0; ; attempt++) {
+      const items = await this.openDetailQuickActions();
+      await items.filter({ hasText: name }).first().click({ timeout: WebNewDriver.WAIT_MS });
+      try {
+        await this.page.getByRole("menuitem").first().waitFor({ state: "detached", timeout: 5000 });
+        return;
+      } catch {
+        if (attempt >= 2) throw new Error(`[parity] quick action ${JSON.stringify(name)} did not land.`);
+        await this.page.keyboard.press("Escape").catch(() => {});
+      }
+    }
   }
-  async quickActionDisabled(_name: string): Promise<boolean> {
-    return todo("quickActionDisabled");
+  async quickActionDisabled(name: string): Promise<boolean> {
+    const items = await this.openDetailQuickActions();
+    const disabled = await items.filter({ hasText: name }).first().isDisabled();
+    await this.page.keyboard.press("Escape").catch(() => {});
+    return disabled;
   }
-  async openLegacyIssueRoute(_workspaceSlug: string, _projectId: string, _issueId: string): Promise<void> {
-    return todo("openLegacyIssueRoute");
+  private async openDetailQuickActions(): Promise<Locator> {
+    // The header's icon-only menu button; retry past re-render
+    // swallows until the items show.
+    const trigger = this.page.getByTestId("detail-menu-trigger").first();
+    const visibleItems = this.page.locator('[role="menuitem"]:visible');
+    for (let attempt = 0; ; attempt++) {
+      await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+      try {
+        await visibleItems.first().waitFor({ timeout: 5000 });
+        return visibleItems;
+      } catch {
+        if (attempt >= 2) throw new Error("[parity] detail quick-action menu did not open.");
+      }
+    }
+  }
+  async openLegacyIssueRoute(workspaceSlug: string, projectId: string, issueId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/issues/${issueId}`);
+    await this.page.waitForURL(/\/browse\//, { timeout: WebNewDriver.WAIT_MS });
   }
   async seesDetailMissing(): Promise<boolean> {
-    return todo("seesDetailMissing");
+    return (await this.page.getByText(/No work item matches this address/).count()) > 0;
   }
   async signedIn(): Promise<boolean> {
     // The entry card is the only signed-out surface; a workspace shell,
@@ -3253,13 +3599,61 @@ export class WebNewDriver implements ParityDriver {
     return !(await this.authEmailField().isVisible());
   }
   async openDescriptionHistory(): Promise<void> {
-    return todo("openDescriptionHistory");
+    const trigger = this.page.getByRole("button", { name: /Edited by/ }).first();
+    const visibleItems = this.page.locator('[role="menuitem"]:visible');
+    for (let attempt = 0; ; attempt++) {
+      await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+      try {
+        await visibleItems.first().waitFor({ timeout: 5000 });
+        return;
+      } catch {
+        if (attempt >= 2) throw new Error("[parity] description history menu did not open.");
+      }
+    }
   }
   async historyVersionNames(): Promise<string[]> {
-    return todo("historyVersionNames");
+    const items = this.page.locator('[role="menuitem"]:visible');
+    return (await items.allTextContents()).map((t) => t.trim()).filter((t) => t.length > 0);
   }
-  async restoreHistoryVersion(_name: string): Promise<void> {
-    return todo("restoreHistoryVersion");
+  async restoreHistoryVersion(name: string): Promise<void> {
+    const key = (text: string): string =>
+      text
+        .replace(
+          /(less than a minute ago|\d+\s+(second|minute|hour|day|week|month|year)s?\s+ago|just now|yesterday)/gi,
+          ""
+        )
+        .replace(/\s+/g, "")
+        .toLowerCase();
+    const want = key(name);
+    for (let attempt = 0; ; attempt++) {
+      const candidates = this.page.locator('[role="menuitem"]:visible');
+      const count = await candidates.count();
+      let targetIndex = -1;
+      for (let i = 0; i < count; i++) {
+        const text = ((await candidates.nth(i).textContent()) ?? "").trim();
+        if (want.length > 0 && key(text).includes(want)) {
+          targetIndex = i;
+          break;
+        }
+      }
+      if (targetIndex < 0) {
+        if (attempt >= 2) throw new Error(`[parity] no history version matched "${name}".`);
+        await this.page.waitForTimeout(500);
+        continue;
+      }
+      const target = candidates.nth(targetIndex);
+      try {
+        await target.click({ timeout: WebNewDriver.WAIT_MS });
+      } catch {
+        await target.click({ force: true });
+      }
+      break;
+    }
+    const dialog = this.page.getByRole("dialog", { name: /Description history/ });
+    await dialog.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.getByRole("button", { name: /^Restore$/ }).click();
+    await dialog.waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
+    await this.page.waitForLoadState("networkidle").catch(() => {});
   }
 
   // --- Comment composer and CRUD (NEWFRONT-112). Stubs mirror the
@@ -3349,56 +3743,150 @@ export class WebNewDriver implements ParityDriver {
   async composerVisibleNotices(): Promise<{ message: string; kind: "success" | "error" | "unknown" }[]> {
     return todo("composerVisibleNotices");
   }
-  async pickAssignee(_displayName: string): Promise<void> {
-    return todo("pickAssignee");
+  async pickAssignee(displayName: string): Promise<void> {
+    await this.propertyOpenPicker("Assignees");
+    await this.pickerPick(displayName);
+    // Multi-select stays open after a pick; dismiss it so later reads
+    // see the settled row.
+    await this.page.keyboard.press("Escape").catch(() => {});
   }
-  async pickRunsOn(_name: string): Promise<void> {
-    return todo("pickRunsOn");
+  async pickRunsOn(name: string): Promise<void> {
+    await this.pickSidebarOption("Runs on", name);
   }
   async runsOnOptions(): Promise<string[]> {
-    return todo("runsOnOptions");
+    await this.propertyOpenPicker("Runs on");
+    // Full option text, reasons included: the label-only read drops the
+    // trailing "unavailable / not enabled" notes the scenario pins.
+    const listbox = this.page.getByRole("listbox").last();
+    const names = (await listbox.getByRole("option").allInnerTexts())
+      .map((t) => t.trim().replace(/\s+/g, " "))
+      .filter((t) => t.length > 0);
+    await this.page.keyboard.press("Escape").catch(() => {});
+    return names;
   }
-  async pickDate(_label: string, _day: string): Promise<void> {
-    return todo("pickDate");
+  async pickDate(label: string, day: string): Promise<void> {
+    const trigger = this.propertyRow(label).getByRole("button", { name: label }).first();
+    await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    // In-month cells only: adjacent-month days repeat the same numbers.
+    const cell = this.page
+      .locator('button[data-in-month="true"]')
+      .filter({ hasText: new RegExp(`^${day}$`) })
+      .first();
+    await cell.click({ timeout: WebNewDriver.WAIT_MS });
+    await cell.waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
   async calendarDayDisabled(_day: string): Promise<boolean> {
     return todo("calendarDayDisabled");
   }
-  async clearDate(_label: string): Promise<void> {
-    return todo("clearDate");
+  async clearDate(label: string): Promise<void> {
+    const row = this.propertyRow(label);
+    await row.hover({ timeout: WebNewDriver.WAIT_MS }).catch(() => {});
+    const clear = row.getByRole("button", { name: `Clear ${label}` }).first();
+    await clear.click({ timeout: WebNewDriver.WAIT_MS });
   }
-  async pickCycle(_name: string): Promise<void> {
-    return todo("pickCycle");
+  async pickCycle(name: string): Promise<void> {
+    await this.pickSidebarOption("Cycle", name);
   }
   async clearCycle(): Promise<void> {
-    return todo("clearCycle");
+    await this.pickSidebarOption("Cycle", "No cycle");
   }
-  async toggleModule(_name: string): Promise<void> {
-    return todo("toggleModule");
+  async toggleModule(name: string): Promise<void> {
+    await this.propertyOpenPicker("Modules");
+    await this.pickerPick(name);
+    // The multi-select menu stays open after a toggle; dismiss it so later
+    // reads see the settled row rather than the open menu.
+    await this.page.keyboard.press("Escape").catch(() => {});
   }
-  async setParentByName(_name: string): Promise<void> {
-    return todo("setParentByName");
+  async setParentByName(name: string): Promise<void> {
+    const trigger = this.propertyTrigger("Parent");
+    await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    const dialog = this.page.getByRole("dialog", { name: "Set parent work item" });
+    await dialog.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.getByLabel("Search work items").fill(name, { timeout: WebNewDriver.WAIT_MS });
+    // The search debounces; the click timeout covers the query round-trip.
+    const option = dialog.getByRole("option", { name: new RegExp(escapeRegExp(name)) });
+    await option.first().click({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
   async parentBanner(_childSeq: string): Promise<string | null> {
-    return todo("parentBanner");
+    // One banner per page; the child key only disambiguates on the oracle.
+    const banner = this.page.getByTestId("parent-banner").first();
+    if ((await banner.count()) === 0) return null;
+    return ((await banner.innerText().catch(() => "")) ?? "").trim() || null;
   }
   async bannerMenuNames(_childSeq: string): Promise<string[]> {
-    return todo("bannerMenuNames");
+    const items = await this.openBannerMenu();
+    // Ends with the menu open; the scenario dismisses it.
+    return (await items.allTextContents()).map((t) => t.trim()).filter((t) => t.length > 0);
+  }
+  /** Open the banner ellipsis menu; ends with its items visible. Retries past re-render swallows. */
+  private async openBannerMenu(): Promise<Locator> {
+    const trigger = this.page.getByRole("button", { name: "Parent options" }).first();
+    const visibleItems = this.page.locator('[role="menuitem"]:visible');
+    for (let attempt = 0; ; attempt++) {
+      await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+      try {
+        await visibleItems.first().waitFor({ timeout: 5000 });
+        return visibleItems;
+      } catch {
+        if (attempt >= 2) throw new Error("[parity] parent banner menu did not open.");
+      }
+    }
   }
   async removeParent(): Promise<void> {
-    return todo("removeParent");
+    await this.openBannerMenu();
+    await this.page
+      .getByRole("menuitem", { name: /Remove parent work item/i })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("menuitem").first().waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
   async openParentFromBanner(): Promise<void> {
-    return todo("openParentFromBanner");
+    const banner = this.page.getByTestId("parent-banner").first();
+    await banner.getByRole("link").first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("heading", { name: "Activity", exact: true }).waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
-  async addLabel(_name: string): Promise<void> {
-    return todo("addLabel");
+  async addLabel(name: string): Promise<void> {
+    // The label picker renders no listbox, so open it by hand rather
+    // than through propertyOpenPicker.
+    const trigger = this.propertyTrigger("Labels");
+    await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    const search = this.page.getByTestId("label-picker-search").first();
+    await search.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await search.fill(name, { timeout: WebNewDriver.WAIT_MS });
+    // Selecting the filtered option assigns; the create button covers
+    // a name no label carries yet.
+    const option = this.page
+      .getByTestId("label-picker-option")
+      .filter({ hasText: new RegExp(`^${escapeRegExp(name)}$`) })
+      .first();
+    try {
+      await option.waitFor({ timeout: 5000 });
+      await option.click({ timeout: WebNewDriver.WAIT_MS });
+    } catch {
+      await this.page.getByTestId("label-picker-create").first().click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    await this.page.keyboard.press("Escape").catch(() => {});
   }
-  async removeLabel(_name: string): Promise<void> {
-    return todo("removeLabel");
+  async removeLabel(name: string): Promise<void> {
+    // Chips remove inline without opening the picker; make sure no
+    // picker is open first so its options cannot intercept the click.
+    await this.page.keyboard.press("Escape").catch(() => {});
+    const chip = this.page.getByRole("button", { name: `Remove ${name}` }).first();
+    await chip.click({ timeout: WebNewDriver.WAIT_MS });
+    await chip.waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
-  async openPeek(_workspaceSlug: string, _projectId: string, _issueId: string): Promise<void> {
-    return todo("openPeek");
+  async openPeek(workspaceSlug: string, projectId: string, issueId: string): Promise<void> {
+    // The issues address carries the peek id, so a deep link auto-opens the
+    // same panel the in-page opener mounts (ISS-167). The route validates
+    // the param before the layout sees it.
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/issues?peekIssueId=${issueId}`, {
+      waitUntil: "domcontentloaded",
+    });
+    await this.page
+      .getByTestId("issue-preview")
+      .first()
+      .waitFor({ state: "visible", timeout: WEB_NEW_LAYOUTS_WAIT_MS });
   }
   async peekOpen(): Promise<boolean> {
     // The peek hosts mount only while a selection is open; the profile
@@ -3411,7 +3899,10 @@ export class WebNewDriver implements ParityDriver {
     return await field.first().inputValue();
   }
   async peekIdentifier(): Promise<string | null> {
-    return todo("peekIdentifier");
+    const preview = this.page.getByTestId("issue-preview").first();
+    const id = preview.getByRole("button", { name: /^[A-Z0-9]{2,}-\d+$/ }).first();
+    if ((await id.count()) === 0) return null;
+    return ((await id.innerText()) ?? "").trim();
   }
   async closePeek(): Promise<void> {
     // The panel shell decorates its close control by accessible name, so
@@ -3420,35 +3911,72 @@ export class WebNewDriver implements ParityDriver {
     await this.page.getByTestId("issue-preview").waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
   }
   async peekCloseVisible(): Promise<boolean> {
-    return todo("peekCloseVisible");
+    const preview = this.page.getByTestId("issue-preview").first();
+    return this.isShown(preview.getByRole("button", { name: "Close preview" }));
   }
   async clickListRow(name: string): Promise<void> {
     // Any visible row that names the work item: the issues list rows are
-    // links, the profile list rows are buttons.
-    const row = this.page
-      .locator('[data-testid="issue-list"] a[id^="issue-"], [data-testid="profile-list"] button[data-profile-row]')
-      .filter({ hasText: name })
-      .first();
+    // row-anchor links (the Issues region, or the fresh strip above it),
+    // the profile list rows are buttons.
+    const issues = await this.issueRowAnchors(name);
+    const profile = this.page
+      .locator('[data-testid="profile-list"] button[data-profile-row]')
+      .filter({ hasText: name });
+    const row = (await issues.count()) > 0 ? issues.first() : profile.first();
     await row.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
     await row.click({ timeout: WebNewDriver.WAIT_MS });
   }
-  async setPeekMode(_mode: string): Promise<void> {
-    return todo("setPeekMode");
+  async setPeekMode(mode: string): Promise<void> {
+    const preview = this.page.getByTestId("issue-preview").first();
+    await preview.getByTestId("peek-mode-trigger").first().click({ timeout: WebNewDriver.WAIT_MS });
+    // The labels title-case "screen" ("Full screen") while the scenario
+    // says "Full Screen"; match either.
+    const item = this.page.getByRole("menuitem", { name: new RegExp(`^${escapeRegExp(mode)}$`, "i") }).first();
+    await item.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("menuitem").first().waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
   async peekPanelBox(): Promise<{ x: number; y: number; width: number; height: number } | null> {
-    return todo("peekPanelBox");
+    const panel = this.page.getByTestId("issue-preview").first();
+    if ((await panel.count()) === 0) return null;
+    const box = await panel.boundingBox().catch(() => null);
+    if (!box) return null;
+    return { x: box.x, y: box.y, width: box.width, height: box.height };
   }
   async copyPeekLink(): Promise<void> {
-    return todo("copyPeekLink");
+    const preview = this.page.getByTestId("issue-preview").first();
+    await preview
+      .getByRole("button", { name: "Copy work item link", exact: true })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
   async peekFullScreenHref(): Promise<string | null> {
-    return todo("peekFullScreenHref");
+    const link = this.page.getByTestId("peek-fullscreen-link").first();
+    if ((await link.count()) === 0) return null;
+    return link.getAttribute("href").catch(() => null);
   }
   async peekQuickActionNames(): Promise<string[]> {
-    return todo("peekQuickActionNames");
+    const preview = this.page.getByTestId("issue-preview").first();
+    const trigger = preview.getByTestId("detail-menu-trigger").first();
+    const visibleItems = this.page.locator('[role="menuitem"]:visible');
+    for (let attempt = 0; ; attempt++) {
+      await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+      try {
+        await visibleItems.first().waitFor({ timeout: 5000 });
+        break;
+      } catch {
+        if (attempt >= 2) throw new Error("[parity] peek quick-action menu did not open.");
+      }
+    }
+    const names = (await visibleItems.allTextContents()).map((t) => t.trim()).filter((t) => t.length > 0);
+    await this.page.keyboard.press("Escape").catch(() => {});
+    return names;
   }
   async peekErrorTitle(): Promise<string | null> {
-    return todo("peekErrorTitle");
+    const preview = this.page.getByTestId("issue-preview").first();
+    if ((await preview.count()) === 0) return null;
+    const text = ((await preview.innerText().catch(() => "")) ?? "").trim();
+    const match = /Work item does not exist/.exec(text);
+    return match ? match[0] : null;
   }
   async widgetTitles(): Promise<string[]> {
     // Section titles are the headers this slice and the sub-issues root
@@ -3476,6 +4004,12 @@ export class WebNewDriver implements ParityDriver {
   private static readonly SUB_ISSUES_WIDGET = "Sub-work items";
 
   private widgetSection(widget: string): Locator {
+    if (widget === "Relations" || widget === "Links") {
+      // Relations and Links mount the shared WidgetSection, whose
+      // testid derives from the title — not the data-widget root the
+      // attachment slices carry.
+      return this.page.getByTestId(`widget-${widget.toLowerCase()}`).first();
+    }
     return this.page.locator(`[data-widget-root="${widget}"]`).first();
   }
 
@@ -3488,6 +4022,11 @@ export class WebNewDriver implements ParityDriver {
     if (widget === WebNewDriver.SUB_ISSUES_WIDGET || widget === "Work items") {
       return this.page.locator('[data-testid="sub-issues-collapsible"]').first();
     }
+    if (widget === "Relations" || widget === "Links") {
+      // The shared section's disclosure is the first button of its
+      // header row (any add control follows it).
+      return this.widgetSection(widget).locator(":scope > div").first().getByRole("button").first();
+    }
     return this.page.locator(`[data-widget-header="${widget}"]`).first();
   }
 
@@ -3495,17 +4034,39 @@ export class WebNewDriver implements ParityDriver {
     if (widget === WebNewDriver.SUB_ISSUES_WIDGET || widget === "Work items") {
       return this.page.locator('[data-testid="sub-issues-section"]').first();
     }
+    if (widget === "Relations" || widget === "Links") {
+      return this.widgetSection(widget);
+    }
     return this.page.locator(`[data-widget-rows="${widget}"]`).first();
+  }
+
+  /**
+   * The disclosure to drive. Relations and Links mount the shared
+   * WidgetSection, whose disclosure is its section button — but a shared
+   * header element wins when one is present, so the generic header reads
+   * keep working wherever that markup exists.
+   */
+  private async widgetHeaderFor(widget: string): Promise<Locator> {
+    if (widget === "Relations" || widget === "Links") {
+      const shared = this.page.locator(`[data-widget-header="${widget}"]`).first();
+      if ((await shared.count()) > 0) return shared;
+    }
+    return this.widgetHeader(widget);
   }
 
   async widgetRowNames(widget: string): Promise<string[]> {
     // Sub-work items render one row block per child (nested children
-    // included); the attachment and code-review panels mark their direct
-    // rows instead.
+    // included); relations and links prefix their row testids per row;
+    // the attachment and code-review panels mark their direct rows
+    // instead.
     const rows =
       widget === WebNewDriver.SUB_ISSUES_WIDGET || widget === "Work items"
         ? this.widgetPanel(widget).locator("[data-sub-issue-row]")
-        : this.widgetPanel(widget).locator(":scope > [data-widget-row]");
+        : widget === "Relations"
+          ? this.widgetPanel(widget).locator('[data-testid^="relation-row-"]')
+          : widget === "Links"
+            ? this.widgetPanel(widget).locator('[data-testid^="link-row-"]')
+            : this.widgetPanel(widget).locator(":scope > [data-widget-row]");
     const count = await rows.count();
     const out: string[] = [];
     for (let i = 0; i < count; i++) {
@@ -3522,23 +4083,49 @@ export class WebNewDriver implements ParityDriver {
     return out;
   }
   async widgetProgress(widget: string): Promise<string | null> {
-    const header = this.widgetHeader(widget);
+    const header = await this.widgetHeaderFor(widget);
     if ((await header.count()) === 0) return null;
     const text = ((await header.innerText().catch(() => "")) ?? "").trim();
     const match = /(\d+\s*\/\s*\d+\s*Done)/.exec(text);
     return match ? match[1].replace(/\s+/g, " ").replace(/\s*\/\s*/, "/") : null;
   }
-  async widgetGroupNames(_widget: string): Promise<string[]> {
-    return todo("widgetGroupNames");
+  async widgetGroupNames(widget: string): Promise<string[]> {
+    // Only Relations groups its rows (one collapsible per present kind);
+    // every other widget is ungrouped.
+    if (widget !== "Relations") return [];
+    const groups = this.widgetPanel(widget).locator('[data-testid^="relation-group-"]');
+    const count = await groups.count();
+    const out: string[] = [];
+    for (let i = 0; i < count; i++) {
+      const text = (
+        (await groups
+          .nth(i)
+          .getByRole("button")
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      )
+        .trim()
+        .replace(/\s+/g, " ");
+      if (text !== "") out.push(text);
+    }
+    return out;
   }
   async openWidgetSection(widget: string): Promise<void> {
-    if (await this.widgetExpanded(widget)) return;
-    await this.widgetHeader(widget).click({ timeout: WebNewDriver.WAIT_MS });
+    // A header click can land on a remounting node and never toggle
+    // (peek nested ISS-165: aria stays false after the click while the
+    // header count reads fine). Verify and re-click, bounded, and never
+    // click an open section shut.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (await this.widgetExpanded(widget)) return;
+      await (await this.widgetHeaderFor(widget)).click({ timeout: WebNewDriver.WAIT_MS });
+      await this.page.waitForTimeout(250);
+    }
   }
   async widgetExpanded(widget: string): Promise<boolean> {
     // The header's aria flag and the mounted panel agree; the panel is
     // the proof because a collapsed parent unmounts it entirely.
-    const header = this.widgetHeader(widget);
+    const header = await this.widgetHeaderFor(widget);
     if ((await header.count()) === 0) return false;
     return (await header.getAttribute("aria-expanded")) === "true";
   }
@@ -3640,34 +4227,98 @@ export class WebNewDriver implements ParityDriver {
       .poll(async () => ((await control.innerText().catch(() => "")) ?? "").trim(), { timeout: WebNewDriver.WAIT_MS })
       .not.toBe("Loading more…");
   }
-  async widgetHeaderControlCount(_widget: string): Promise<number> {
-    return todo("widgetHeaderControlCount");
+  async widgetHeaderControlCount(widget: string): Promise<number> {
+    // The disclosure button nests no controls itself; the header row
+    // around it holds the disclosure plus the display, filter and add
+    // menu triggers.
+    const header = await this.widgetHeaderFor(widget);
+    if ((await header.count()) === 0) return 0;
+    return header.locator("xpath=ancestor::div[1]").locator("button").count();
   }
   async toggleWidgetSection(widget: string): Promise<void> {
-    await this.widgetHeader(widget).click({ timeout: WebNewDriver.WAIT_MS });
+    await (await this.widgetHeaderFor(widget)).click({ timeout: WebNewDriver.WAIT_MS });
   }
-  async widgetAddMenuNames(_widget: string): Promise<string[]> {
-    return todo("widgetAddMenuNames");
+  /** Widget action-row buttons by section title. */
+  private static readonly WIDGET_ADD_ACTIONS: Record<string, string> = {
+    "Sub-work items": "Add sub-work item",
+    Relations: "Add relation",
+    Links: "Add link",
+    Attachments: "Attach",
+  };
+
+  async widgetAddMenuNames(widget: string): Promise<string[]> {
+    const action = WebNewDriver.WIDGET_ADD_ACTIONS[widget];
+    if (!action) throw new Error(`[parity] no add menu for widget ${JSON.stringify(widget)}.`);
+    await this.page.locator(`[data-widget-action="${action}"]`).first().click({ timeout: WebNewDriver.WAIT_MS });
+    const items = this.page.locator('[role="menuitem"]:visible');
+    await items.first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    // The menu stays open for the caller, which closes it.
+    return (await items.allTextContents()).map((text) => text.trim()).filter((text) => text.length > 0);
   }
+  /** The widget action-row button that opens the sub-issue add menu. */
+  private subIssueAddAction(): Locator {
+    return this.page.locator('[data-widget-action="Add sub-work item"]').first();
+  }
+
+  /** Pick one entry of the open widget add menu. */
+  private async pickWidgetAddEntry(label: string): Promise<void> {
+    const entry = this.page.getByRole("menuitem", { name: label, exact: true });
+    await entry.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await entry.click({ timeout: WebNewDriver.WAIT_MS });
+  }
+
   async openSubIssueCreateModal(): Promise<void> {
-    return todo("openSubIssueCreateModal");
+    await this.subIssueAddAction().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.pickWidgetAddEntry("Create new");
+    await this.createDialog().first().waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS });
   }
   async createModalParentName(): Promise<string | null> {
-    return todo("createModalParentName");
+    const tag = this.createDialog().getByTestId("parent-tag").first();
+    if ((await tag.count()) === 0) return null;
+    const text = ((await tag.innerText()) ?? "").trim().replace(/\s+/g, " ");
+    return text === "" ? null : text;
   }
   async createModalProjectLocked(): Promise<boolean> {
-    return todo("createModalProjectLocked");
+    const chip = this.modalProjectChip();
+    if ((await chip.count()) === 0) return false;
+    return chip.first().isDisabled();
   }
-  async createModalSubmit(_name: string): Promise<void> {
-    return todo("createModalSubmit");
+  async createModalSubmit(name: string): Promise<void> {
+    await this.fillCreateTitle(name);
+    await this.submitCreateModal();
+    await this.createDialog().waitFor({ state: "detached", timeout: 60_000 });
   }
-  async addExistingSubIssue(_search: string, _name: string): Promise<void> {
-    return todo("addExistingSubIssue");
+  async addExistingSubIssue(search: string, name: string): Promise<void> {
+    await this.subIssueAddAction().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.pickWidgetAddEntry("Add existing");
+    const dialog = this.page.getByRole("dialog", { name: "Add existing work items" });
+    await dialog.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.getByLabel("Search work items").first().fill(search, { timeout: WebNewDriver.WAIT_MS });
+    // The search debounces 500ms, then the picked option ticks the row;
+    // the dialog stays open for more picks until the submit lands.
+    const option = dialog.getByRole("option", { name }).first();
+    await option.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await option.click({ timeout: WebNewDriver.WAIT_MS });
+    await dialog
+      .getByRole("button", { name: "Add selected work items", exact: true })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.waitFor({ state: "detached", timeout: 60_000 });
+    // Ends with the row rendered: the attach invalidates the section.
+    await expect
+      .poll(async () => (await this.widgetRowNames(WebNewDriver.SUB_ISSUES_WIDGET)).some((row) => row.includes(name)), {
+        timeout: WebNewDriver.WAIT_MS,
+      })
+      .toBe(true);
   }
   async clickWidgetRow(_widget: string, _rowName: string): Promise<void> {
     return todo("clickWidgetRow");
   }
   private widgetRow(widget: string, rowName: string): Locator {
+    if (widget === "Relations" || widget === "Links") {
+      const prefix = widget === "Relations" ? "relation-row-" : "link-row-";
+      return this.widgetPanel(widget).locator(`[data-testid^="${prefix}"]`).filter({ hasText: rowName }).first();
+    }
     return this.widgetPanel(widget).locator(":scope > [data-widget-row]").filter({ hasText: rowName }).first();
   }
 
@@ -3756,20 +4407,76 @@ export class WebNewDriver implements ParityDriver {
     if (dialog === null) throw new Error("[parity] no open confirmation dialog.");
     await dialog.getByRole("button", { name: label, exact: true }).first().click({ timeout: WebNewDriver.WAIT_MS });
   }
-  async addRelationViaModal(_type: string, _search: string, _name: string): Promise<void> {
-    return todo("addRelationViaModal");
+  async addRelationViaModal(type: string, search: string, name: string): Promise<void> {
+    await this.page.locator('[data-widget-action="Add relation"]').first().click({ timeout: WebNewDriver.WAIT_MS });
+    // Substring match: the scenario passes "Blocked" for the
+    // "Blocked by" entry ("Blocking" never contains "Blocked").
+    const entry = this.page.getByRole("menuitem").filter({ hasText: type }).first();
+    await entry.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await entry.click({ timeout: WebNewDriver.WAIT_MS });
+    const searchBox = this.page.getByLabel("Search work items").first();
+    await searchBox.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await searchBox.fill(search, { timeout: WebNewDriver.WAIT_MS });
+    const option = this.page
+      .getByRole("listbox", { name: "Work item candidates" })
+      .getByRole("option", { name })
+      .first();
+    await option.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await option.click({ timeout: WebNewDriver.WAIT_MS });
+    const submit = this.page.getByRole("button", { name: "Add selected work items", exact: true }).first();
+    await submit.click({ timeout: WebNewDriver.WAIT_MS });
+    await submit.waitFor({ state: "detached", timeout: 60_000 });
+    // Ends with the edge rendered: the add invalidates the widget.
+    await expect
+      .poll(async () => (await this.widgetRowNames("Relations")).join("\n"), { timeout: WebNewDriver.WAIT_MS })
+      .toContain(name);
   }
-  async addLinkModal(_url: string, _title?: string): Promise<void> {
-    return todo("addLinkModal");
+  async addLinkModal(url: string, title?: string): Promise<void> {
+    await this.page.locator('[data-widget-action="Add link"]').first().click({ timeout: WebNewDriver.WAIT_MS });
+    const dialog = this.page.getByRole("dialog", { name: "Add link" });
+    await dialog.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.getByLabel("URL").first().fill(url, { timeout: WebNewDriver.WAIT_MS });
+    if (title !== undefined) {
+      await dialog.getByLabel("Display title (optional)").first().fill(title, { timeout: WebNewDriver.WAIT_MS });
+    }
+    await dialog
+      .getByRole("button", { name: "Add link", exact: true })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.waitFor({ state: "detached", timeout: 60_000 });
   }
-  async clickLinkCopy(_rowName: string): Promise<void> {
-    return todo("clickLinkCopy");
+  async clickLinkCopy(rowName: string): Promise<void> {
+    // The row's anchor opens the URL, so copy through the row's own
+    // control; the caller reads the clipboard and toast itself.
+    await this.widgetRow("Links", rowName)
+      .getByRole("button", { name: /^Copy link / })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
-  async editLinkTitle(_rowName: string, _title: string): Promise<void> {
-    return todo("editLinkTitle");
+  async editLinkTitle(rowName: string, title: string): Promise<void> {
+    const row = this.widgetRow("Links", rowName);
+    await row
+      .getByRole("button", { name: /^Link actions for / })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    const entry = this.page.getByRole("menuitem", { name: "Edit", exact: true });
+    await entry.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await entry.click({ timeout: WebNewDriver.WAIT_MS });
+    const dialog = this.page.getByRole("dialog", { name: "Edit link" });
+    await dialog.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.getByLabel("Display title (optional)").first().fill(title, { timeout: WebNewDriver.WAIT_MS });
+    await dialog
+      .getByRole("button", { name: "Save link", exact: true })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.waitFor({ state: "detached", timeout: 60_000 });
   }
-  async linkRowTarget(_rowName: string): Promise<{ href: string; target: string | null } | null> {
-    return todo("linkRowTarget");
+  async linkRowTarget(rowName: string): Promise<{ href: string; target: string | null } | null> {
+    const link = this.widgetRow("Links", rowName).locator("a[href]").first();
+    if ((await link.count()) === 0) return null;
+    const href = await link.getAttribute("href");
+    if (!href) return null;
+    return { href, target: await link.getAttribute("target") };
   }
   async uploadAttachment(file: { name: string; mime: string; bytes: Buffer }): Promise<void> {
     const chooserWait = this.page.waitForEvent("filechooser", { timeout: WebNewDriver.WAIT_MS }).catch(() => null);
@@ -3783,20 +4490,32 @@ export class WebNewDriver implements ParityDriver {
     await input.waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS });
     await input.setInputFiles([{ name: file.name, mimeType: file.mime, buffer: file.bytes }]);
   }
-  async clickWidgetAction(_name: string): Promise<void> {
-    return todo("clickWidgetAction");
+  async clickWidgetAction(name: string): Promise<void> {
+    // The Run AI slot renders its own dispatch button instead of the
+    // generic action-row button, so fall back to it by testid.
+    if (name === "Manually Run AI" && (await this.page.getByTestId("issue-run-ai").count()) > 0) {
+      await this.page.getByTestId("issue-run-ai").first().click({ timeout: WebNewDriver.WAIT_MS });
+      return;
+    }
+    await this.page.locator(`[data-widget-action="${name}"]`).first().click({ timeout: WebNewDriver.WAIT_MS });
   }
   async postComment(_text: string): Promise<void> {
     return todo("postComment");
   }
-  async typeComment(_text: string): Promise<void> {
-    return todo("typeComment");
+  async typeComment(text: string): Promise<void> {
+    // Type like a user: fill() never reaches the rich editor's state.
+    // No submit — the draft stays editable for the run control.
+    const editor = this.composerEditor();
+    await editor.click({ timeout: WebNewDriver.WAIT_MS });
+    await editor.pressSequentially(text, { timeout: WebNewDriver.WAIT_MS });
   }
   async clickCommentAndRun(): Promise<void> {
-    return todo("clickCommentAndRun");
+    await this.page.getByRole("button", { name: "Comment & Run" }).first().click({ timeout: WebNewDriver.WAIT_MS });
   }
   async commentAndRunDisabled(): Promise<boolean> {
-    return todo("commentAndRunDisabled");
+    const button = this.page.getByRole("button", { name: "Comment & Run" }).first();
+    await button.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return button.isDisabled().catch(() => true);
   }
 
   async sidebarBrandVisible(): Promise<boolean> {
@@ -4002,7 +4721,16 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async activityOpenFirstEntryLink(): Promise<string> {
-    return todo("activityOpenFirstEntryLink");
+    // Member actors link to their profile from every entry row; the
+    // first such link is the feed's way into the member surface
+    // (EST-023). Product-authored rows render no link.
+    const link = this.activitySection().locator('a[href*="/profile/"]').first();
+    await link.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await Promise.all([
+      this.page.waitForURL(/profile/, { timeout: WebNewDriver.WAIT_MS }),
+      link.click({ timeout: WebNewDriver.WAIT_MS }),
+    ]);
+    return this.page.url();
   }
 
   // --- Issue activity & comments (NEWFRONT-122, ISS-194–206). The
@@ -4057,15 +4785,36 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async activityCommentTexts(): Promise<string[]> {
+    // The feed paints after the timeline query settles, so an immediate
+    // read races a freshly opened issue and reports []. Wait for the first
+    // timeline row (every feed state keeps at least one: the creation entry
+    // or a comment), then read. On timeout return whatever is there so a
+    // genuinely empty feed still reads as [].
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    for (;;) {
+      if ((await this.activityFeedRows().count()) > 0) break;
+      if (Date.now() > deadline) break;
+      await this.page.waitForTimeout(250);
+    }
     return this.page.locator('[id^="comment-"]').allInnerTexts();
   }
 
   async activityHasCreationEntry(): Promise<boolean> {
-    return (
-      (await this.activitySection()
-        .getByText(/created the work item/i)
-        .count()) > 0
-    );
+    // The feed paints its first row after the timeline query settles, so a
+    // one-shot count races a freshly opened issue. Poll until the entry
+    // appears or the driver's normal wait budget runs out.
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    for (;;) {
+      if (
+        (await this.activitySection()
+          .getByText(/created the work item/i)
+          .count()) > 0
+      ) {
+        return true;
+      }
+      if (Date.now() > deadline) return false;
+      await this.page.waitForTimeout(250);
+    }
   }
 
   private async openActivityFilterMenu(): Promise<void> {
@@ -4113,11 +4862,12 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async activityPostComment(bodyText: string): Promise<void> {
-    const editor = this.composerEditor();
-    await editor.waitFor({ timeout: WebNewDriver.WAIT_MS });
-    await editor.click({ timeout: WebNewDriver.WAIT_MS });
-    await editor.fill(bodyText, { timeout: WebNewDriver.WAIT_MS });
-    await editor.press("Enter", { timeout: WebNewDriver.WAIT_MS });
+    // Type like a user (fill() never reaches the rich editor's state) and
+    // submit with the Comment button. Enter is NOT used: the editing
+    // surface swallows it as a newline, so it never posts (suspected
+    // product bug, Comments-area-owned; CMT composer-keyboard pins Enter).
+    await this.activityComposerType(bodyText);
+    await this.activityComposerSubmit();
     await this.commentCard(bodyText).waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
@@ -4477,6 +5227,16 @@ export class WebNewDriver implements ParityDriver {
   /** Gate on the popup settling: options, the empty line, or a load error. */
   private async waitForPickerOptions(): Promise<void> {
     const popup = this.pickerPopup();
+    // Loading and settled-empty both carry role=status; only loading shows
+    // the spinner. Wait it out first: lazy lists resolve on open, and the
+    // old gate settled on the loading status while zero options existed,
+    // so the first option read raced the fetch (ISS-212/ISS-213). A spinner
+    // that never clears degrades to the old gate instead of hanging.
+    await popup
+      .locator(".animate-spin")
+      .first()
+      .waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => {});
     const settled = this.pickerListbox()
       .getByRole("option")
       .first()
@@ -4610,20 +5370,49 @@ export class WebNewDriver implements ParityDriver {
       .catch(() => {});
   }
 
-  async openArchivedIssueDetail(_workspaceSlug: string, _projectId: string, _issueId: string): Promise<void> {
-    return todo("openArchivedIssueDetail");
+  async openArchivedIssueDetail(workspaceSlug: string, projectId: string, issueId: string): Promise<void> {
+    // Archived issues render on the archives URL itself (no browse
+    // redirect) with an archive banner above the locked detail.
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/archives/issues/${issueId}`);
+    await this.page.waitForLoadState("domcontentloaded");
+    const activity = this.page.getByRole("heading", { name: "Activity", exact: true });
+    const deadline = Date.now() + 75_000;
+    for (;;) {
+      if ((await this.page.getByText(/not found|does not exist|went wrong/i).count()) > 0)
+        throw new Error(`[parity] archived detail for ${issueId} rendered an error state (${this.page.url()}).`);
+      try {
+        await activity.first().waitFor({ timeout: Math.max(1_000, deadline - Date.now()) });
+        return;
+      } catch {
+        if (Date.now() >= deadline)
+          throw new Error(`[parity] Activity never rendered for archived ${issueId} (current: ${this.page.url()}).`);
+      }
+    }
   }
 
-  async datePickerOpen(_label: string): Promise<void> {
-    return todo("datePickerOpen");
+  /** Any open date calendar: every picker testids its calendar *-calendar, and closed popovers unmount. */
+  private dateCalendar(): Locator {
+    return this.page.locator('[data-testid$="-calendar"]');
+  }
+
+  async datePickerOpen(label: string): Promise<void> {
+    const trigger = this.propertyTrigger(label);
+    await trigger.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.dateCalendar().last().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
 
   async datePickerVisible(): Promise<boolean> {
-    return todo("datePickerVisible");
+    return (await this.dateCalendar().count()) > 0;
   }
 
   async datePickerVisibleMonth(): Promise<{ month: string; year: string }> {
-    return todo("datePickerVisibleMonth");
+    const calendar = this.dateCalendar().last();
+    const month = calendar.getByLabel("Month", { exact: true });
+    const year = calendar.getByLabel("Year", { exact: true });
+    await month.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const selected = (select: Locator): Promise<string> => select.locator("option:checked").first().innerText();
+    return { month: ((await selected(month)) ?? "").trim(), year: ((await selected(year)) ?? "").trim() };
   }
 
   /** One in-month calendar day button, by its day number. */
@@ -4639,12 +5428,22 @@ export class WebNewDriver implements ParityDriver {
     return this.calendarDay(day).isDisabled();
   }
 
-  async datePickerPortalAttached(_label: string): Promise<boolean> {
-    return todo("datePickerPortalAttached");
+  async datePickerPortalAttached(label: string): Promise<boolean> {
+    const row = this.propertyRow(label).first();
+    const calendar = this.dateCalendar().last();
+    if ((await row.count()) === 0 || (await calendar.count()) === 0) return false;
+    const handle = await calendar.elementHandle();
+    if (handle === null) return false;
+    return row.evaluate((rowEl, calendarEl) => !rowEl.contains(calendarEl as unknown as Node), handle);
   }
 
-  async datePickerClear(_label: string): Promise<void> {
-    return todo("datePickerClear");
+  async datePickerClear(label: string): Promise<void> {
+    const row = this.propertyRow(label);
+    await this.propertyTrigger(label).hover({ timeout: WebNewDriver.WAIT_MS });
+    await row
+      .getByRole("button", { name: `Clear ${label}`, exact: true })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async propertyRowPresent(label: string): Promise<boolean> {
@@ -4652,7 +5451,15 @@ export class WebNewDriver implements ParityDriver {
     // a missing row.
     const heading = this.page.getByText("Properties", { exact: true }).first();
     await heading.waitFor({ timeout: WebNewDriver.WAIT_MS }).catch(() => {});
-    return (await this.propertyRow(label).count()) > 0;
+    // Rows mount after the heading (pods/estimates resolve late), so settle
+    // before calling absence — the oracle reads once because its rows mount
+    // with the heading. A truly absent row costs the full budget.
+    try {
+      await this.propertyRow(label).first().waitFor({ state: "visible", timeout: 10_000 });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /** The inline API rejection the pod picker renders under its trigger. */
@@ -4738,52 +5545,125 @@ export class WebNewDriver implements ParityDriver {
     );
   }
 
+  /** The modal project picker's option list (kit Combobox popup). */
+  private issueModalProjectListbox(): Locator {
+    return this.page.getByRole("listbox", { name: "Projects" });
+  }
+
+  /** The picker's search box; mounted whenever its popup is open. */
+  private issueModalProjectSearchBox(): Locator {
+    return this.page.getByRole("combobox", { name: "Search projects" });
+  }
+
   async issueModalProjectValue(): Promise<string> {
-    return todo("issueModalProjectValue");
+    return this.modalProjectName();
   }
 
   async issueModalProjectOpenPicker(): Promise<void> {
-    return todo("issueModalProjectOpenPicker");
+    // Idempotent: Escape-after-search leaves the popup open (it only
+    // clears the query), so a step that follows one must not toggle it
+    // shut with a blind click — and an open-but-empty popup has no
+    // listbox, so the search box is the open signal.
+    if ((await this.issueModalProjectSearchBox().count()) > 0) return;
+    await this.modalProjectChip().click({ timeout: WebNewDriver.WAIT_MS });
+    // Settle: options or the empty line — the project read is lazy on
+    // open, so a bare attached-wait races the loading row.
+    const listbox = this.issueModalProjectListbox();
+    const settled = listbox
+      .getByRole("option")
+      .first()
+      .or(this.page.getByRole("status").filter({ hasText: "No matching results" }));
+    await settled.first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async issueModalProjectOptionTexts(): Promise<string[]> {
-    return todo("issueModalProjectOptionTexts");
+    // Kit options pair an aria-hidden glyph with the label, so only the
+    // label spans are read: mark initials would otherwise glue onto
+    // project names.
+    const texts = await this.issueModalProjectListbox()
+      .getByRole("option")
+      .locator(':scope > span:not([aria-hidden="true"])')
+      .allInnerTexts();
+    return texts.map((text) => text.trim()).filter((text) => text.length > 0);
   }
 
-  async issueModalProjectSearch(_query: string): Promise<void> {
-    return todo("issueModalProjectSearch");
+  async issueModalProjectSearch(query: string): Promise<void> {
+    const input = this.issueModalProjectSearchBox();
+    await input.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await input.pressSequentially(query, { timeout: WebNewDriver.WAIT_MS });
   }
 
   async issueModalProjectEmptyText(): Promise<string> {
-    return todo("issueModalProjectEmptyText");
+    if ((await this.issueModalProjectListbox().getByRole("option").count()) > 0) return "";
+    const empty = this.page.getByRole("status").filter({ hasText: "No matching results" }).first();
+    if ((await empty.count()) === 0) return "";
+    return ((await empty.innerText()) ?? "").trim();
   }
 
-  async issueModalProjectPick(_text: string): Promise<void> {
-    return todo("issueModalProjectPick");
+  async issueModalProjectPick(text: string): Promise<void> {
+    await this.issueModalProjectListbox()
+      .getByRole("option", { name: text })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async issueModalProjectPressEscape(): Promise<void> {
-    return todo("issueModalProjectPressEscape");
+    await this.page.keyboard.press("Escape");
+    // Escape in a non-empty search box only clears the query (the popup
+    // stays open), so close again when it is still attached after a
+    // bounded wait; never press blindly twice — a stray Escape would
+    // dismiss the whole create modal.
+    const listbox = this.issueModalProjectListbox();
+    const stillOpen = await listbox.waitFor({ state: "detached", timeout: 3_000 }).then(
+      () => false,
+      () => true
+    );
+    if (stillOpen) await this.page.keyboard.press("Escape");
+    await listbox.waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
 
-  async issueModalFillTitle(_title: string): Promise<void> {
-    return todo("issueModalFillTitle");
+  async issueModalFillTitle(title: string): Promise<void> {
+    await this.fillCreateTitle(title);
   }
 
   async issueModalSubmit(): Promise<void> {
-    return todo("issueModalSubmit");
+    await this.submitCreateModal();
+    await this.createDialog().waitFor({ state: "detached", timeout: 60_000 });
   }
 
-  async rangeMergedCellText(_issueName: string): Promise<string> {
-    return todo("rangeMergedCellText");
+  /**
+   * The list row naming the issue (list, or the fresh strip above it).
+   * The merged cell sits beside the row anchor, not inside it, so scope
+   * to the ancestor article.
+   */
+  private async rangeMergedRow(issueName: string): Promise<Locator> {
+    const anchors = await this.issueRowAnchors(issueName);
+    return anchors.first().locator("xpath=ancestor::article[1]");
   }
 
-  async rangeMergedCellOpen(_issueName: string): Promise<void> {
-    return todo("rangeMergedCellOpen");
+  /** The merged-dates cell trigger in the row naming the issue. */
+  private async rangeMergedCell(issueName: string): Promise<Locator> {
+    return (await this.rangeMergedRow(issueName)).getByTestId("row-dates-trigger");
   }
 
-  async rangeMergedCellClear(_issueName: string): Promise<void> {
-    return todo("rangeMergedCellClear");
+  async rangeMergedCellText(issueName: string): Promise<string> {
+    const cell = await this.rangeMergedCell(issueName);
+    await cell.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return ((await cell.innerText()) ?? "").trim();
+  }
+
+  async rangeMergedCellOpen(issueName: string): Promise<void> {
+    // Click the label span, not the button box: a box click near the end
+    // lands on the clear control and wipes the dates instead of opening.
+    const cell = await this.rangeMergedCell(issueName);
+    await cell.locator("span").first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.webNewRangeCalendar().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async rangeMergedCellClear(issueName: string): Promise<void> {
+    const row = await this.rangeMergedRow(issueName);
+    await row.getByTestId("row-dates-trigger").hover({ timeout: WebNewDriver.WAIT_MS });
+    await row.getByTestId("row-dates-clear").first().click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   /**
@@ -4944,8 +5824,13 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async intakeStateOpenPicker(): Promise<void> {
+    // Idempotent: Escape-after-search leaves the popup open (ISS-207
+    // clears the query and holds it), so never toggle an open popup
+    // shut with a blind click.
+    if (await this.pickerOpen()) return;
     await this.intakeCreateStateTrigger().click({ timeout: WebNewDriver.WAIT_MS });
     await this.intakeCreateOptionList().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await this.intakeCreateOptionList().getByRole("option").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async intakeStateOptionTexts(): Promise<string[]> {
@@ -5004,70 +5889,140 @@ export class WebNewDriver implements ParityDriver {
     return this.intakeDetailPropertyDisabled("State");
   }
 
-  async viewsOpenList(_workspaceSlug: string, _projectId: string): Promise<void> {
-    return todo("viewsOpenList");
+  /** The view-create form the layout picker lives in. */
+  private viewsForm(): Locator {
+    return this.page.getByTestId("create-view-form");
+  }
+
+  /** The form's layout trigger: the button naming the current layout. */
+  private viewsLayoutTrigger(): Locator {
+    return this.viewsForm()
+      .getByRole("button", { name: /List|Board|Calendar|Spreadsheet|Timeline/ })
+      .first();
+  }
+
+  /** The open layout picker's option list. */
+  private viewsLayoutListbox(): Locator {
+    return this.page.locator('ul[aria-label="Layouts"]');
+  }
+
+  async viewsOpenList(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/views`);
+    await this.page.waitForLoadState("domcontentloaded");
+    // Settles on the create entry (zero-state action or header), so the
+    // list screen has mounted before the caller drives it.
+    await this.page.getByRole("button", { name: "Create view" }).first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async viewsOpenCreate(): Promise<void> {
-    return todo("viewsOpenCreate");
+    await this.page.getByRole("button", { name: "Create view" }).first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("heading", { name: "Create View" }).waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async viewsLayoutValue(): Promise<string> {
-    return todo("viewsLayoutValue");
+    return ((await this.viewsLayoutTrigger().innerText()) ?? "").trim();
   }
 
   async viewsLayoutOpenPicker(): Promise<void> {
-    return todo("viewsLayoutOpenPicker");
+    // Idempotent: never toggle an open popup shut with a blind click.
+    if (await this.pickerOpen()) return;
+    const trigger = this.viewsLayoutTrigger();
+    await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.viewsLayoutListbox().waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS });
+    await this.viewsLayoutListbox().getByRole("option").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async viewsLayoutOptionTexts(): Promise<string[]> {
-    return todo("viewsLayoutOptionTexts");
+    // Options pair aria-hidden glyphs with the label span, so the
+    // button text is the label alone.
+    const texts = await this.viewsLayoutListbox().getByRole("option").allInnerTexts();
+    return texts.map((text) => text.trim()).filter((text) => text.length > 0);
   }
 
   async viewsLayoutHasSearch(): Promise<boolean> {
-    return todo("viewsLayoutHasSearch");
+    // The search field (when enabled) is a direct child of the popup
+    // beside the list, so scope to the list's own popup.
+    const popup = this.viewsLayoutListbox().locator("xpath=ancestor::div[1]");
+    return (await popup.getByRole("combobox").count()) > 0;
   }
 
-  async viewsLayoutSelectedMarked(_text: string): Promise<boolean> {
-    return todo("viewsLayoutSelectedMarked");
+  async viewsLayoutSelectedMarked(text: string): Promise<boolean> {
+    const marked = this.viewsLayoutListbox().getByRole("option", { name: text, selected: true });
+    if ((await marked.count()) === 0) return false;
+    await marked.first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return true;
   }
 
-  async viewsLayoutPick(_text: string): Promise<void> {
-    return todo("viewsLayoutPick");
+  async viewsLayoutPick(text: string): Promise<void> {
+    const pattern = new RegExp(text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+    await this.viewsLayoutListbox()
+      .getByRole("option", { name: pattern })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    // Single-select closes on pick; a refusal leaves it open and fails
+    // the wait honestly.
+    await this.viewsLayoutListbox().waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
 
-  async viewsFillName(_name: string): Promise<void> {
-    return todo("viewsFillName");
+  async viewsFillName(name: string): Promise<void> {
+    await this.viewsForm().getByLabel("Title").fill(name, { timeout: WebNewDriver.WAIT_MS });
   }
 
   async viewsSubmit(): Promise<void> {
-    return todo("viewsSubmit");
+    await this.viewsForm().getByRole("button", { name: "Create View" }).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .getByRole("heading", { name: "Create View" })
+      .waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
   }
 
-  async subIssueFiltersOpen(_workspaceSlug: string, _projectId: string, _parentIssueId: string): Promise<void> {
-    // The caller opens the detail first; this only drops the filter menu.
-    await this.page.getByTestId("sub-issue-filters-trigger").click({ timeout: WebNewDriver.WAIT_MS });
-    await this.page.getByTestId("sub-issue-filters-panel").waitFor({ timeout: WebNewDriver.WAIT_MS });
+  async subIssueFiltersOpen(workspaceSlug: string, projectId: string, parentIssueId: string): Promise<void> {
+    await this.openIssueDetail(workspaceSlug, projectId, parentIssueId);
+    await this.page.getByTestId("sub-issues-collapsible").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByTestId("sub-issue-filters-trigger").first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByTestId("sub-issue-filters-panel").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async subIssueFiltersPanelText(): Promise<string> {
-    return (await this.page.getByTestId("sub-issue-filters-panel").innerText()).trim();
+    const panel = this.page.getByTestId("sub-issue-filters-panel").first();
+    await panel.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return ((await panel.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+  }
+
+  /** The header's key copy button; sidebar keys never win the scope. */
+  private identifierBadge(): Locator {
+    return this.page.getByRole("button", { name: /^[A-Z0-9]{2,}-\d+$/ }).first();
   }
 
   async detailIdentifierText(): Promise<string> {
-    return todo("detailIdentifierText");
+    const badge = this.identifierBadge();
+    await badge.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return ((await badge.innerText()) ?? "").trim();
   }
 
   async detailIdentifierCopy(): Promise<void> {
-    return todo("detailIdentifierCopy");
+    // The clipboard grant is arranged by the caller's read, not here.
+    await this.identifierBadge().click({ timeout: WebNewDriver.WAIT_MS });
   }
 
-  async viewsOpenDetail(_workspaceSlug: string, _projectId: string, _viewId: string): Promise<void> {
-    return todo("viewsOpenDetail");
+  async viewsOpenDetail(workspaceSlug: string, projectId: string, viewId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/views/${viewId}`);
+    await this.page.waitForLoadState("domcontentloaded");
   }
 
-  async ganttShowsIssue(_issueName: string): Promise<boolean> {
-    return todo("ganttShowsIssue");
+  async ganttShowsIssue(issueName: string): Promise<boolean> {
+    // The sidebar lists every issue in the view, dated or not, and the
+    // oracle settles on the name text — so a present row link means shown.
+    // Bars exist only for dated issues and must not gate this read.
+    const deadline = Date.now() + 60_000;
+    for (;;) {
+      const shown = await this.ganttRowLink(issueName).then(
+        () => true,
+        () => false
+      );
+      if (shown) return true;
+      if (Date.now() >= deadline) return false;
+      await this.page.waitForTimeout(500);
+    }
   }
 
   // --- Project settings labels (NEWFRONT-393, PSET-036–042; new-app surface
@@ -5078,6 +6033,9 @@ export class WebNewDriver implements ParityDriver {
     // nest their children, so match the row whose own name span reads
     // exactly: the group header's span precedes its children in the DOM.
     const rows = this.page.locator('[data-testid="label-row"]');
+    // Open settles on the heading while the list still loads, so every
+    // row read waits for the first row itself.
+    await rows.first().waitFor({ timeout: 30_000 });
     const total = await rows.count();
     for (let i = 0; i < total; i++) {
       const row = rows.nth(i);
@@ -5119,7 +6077,10 @@ export class WebNewDriver implements ParityDriver {
       settle(this.page.getByRole("heading", { name: /don.t have access/i }).first()),
     ]);
     if (!settled) throw new Error("[parity] labels settings settled on neither the list nor the denial view.");
-    if ((await listSettled) && options.awaitRows !== false) {
+    // Heading-only by default, like the oracle: the skeleton scenario
+    // needs Open to return while the list still loads. Row readers wait
+    // for their own rows, so only explicit opt-ins await them here.
+    if ((await listSettled) && options.awaitRows === true) {
       // The heading paints before the labels query resolves; the skeleton
       // occupies the list slot until rows or the empty state replace it.
       await Promise.race([
@@ -5279,7 +6240,10 @@ export class WebNewDriver implements ParityDriver {
     // the whole flow. Center drops nest; near-top drops slot above.
     const row = await this.labelsRowByName(source);
     await row.scrollIntoViewIfNeeded();
-    await row.hover({ timeout: 30_000 });
+    // Hover the row's own slot: a group row's box spans its nested
+    // children, so hovering the row lands on a child and the group
+    // handle never reveals.
+    await row.locator("div[data-label-slot]").first().hover({ timeout: 30_000 });
     const handle = row.getByTestId("label-drag-handle").first();
     await handle.waitFor({ timeout: 30_000 });
     const from = await handle.boundingBox();
@@ -5346,16 +6310,44 @@ export class WebNewDriver implements ParityDriver {
     await this.page.route("**/api/workspaces/*/labels/", hold);
   }
 
+  /** The open issue picker lists project labels with no listbox role. */
+  private issueLabelOptions(): Locator {
+    return this.page.locator('ul[aria-label="Project labels"]').getByTestId("label-picker-option");
+  }
+
   async issueLabelsOpenPicker(): Promise<void> {
-    return todo("issueLabelsOpenPicker");
+    await this.propertyTrigger("Labels").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByTestId("label-picker-search").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    // Either an option or the empty note proves the list settled; the
+    // empty project would hang an option-only wait.
+    const option = this.issueLabelOptions().first();
+    const empty = this.page.getByTestId("label-picker-empty").first();
+    await option.or(empty).waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async issueLabelsOptionTexts(): Promise<string[]> {
-    return todo("issueLabelsOptionTexts");
+    // Options pair an aria-hidden color dot with the name span, so the
+    // button text is the name alone.
+    const texts = await this.issueLabelOptions().allInnerTexts();
+    return texts.map((text) => text.trim()).filter((text) => text.length > 0);
   }
 
   async issueLabelsRowText(): Promise<string> {
-    return todo("issueLabelsRowText");
+    const row = this.propertyRow("Labels");
+    await row.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    // The trigger shows a count ("1 selected"); the names render on the
+    // chips once the labels list lands, so wait for the chips when the
+    // count promises them. Stale ids render no chips and read as the
+    // bare count after the wait expires.
+    const selected = /(\d+)\s+selected/.exec((await row.innerText().catch(() => "")) ?? "");
+    if (selected !== null && Number(selected[1]) > 0) {
+      await this.page
+        .locator('ul[aria-label="Selected labels"]')
+        .first()
+        .waitFor({ timeout: WebNewDriver.WAIT_MS })
+        .catch(() => {});
+    }
+    return ((await row.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
   }
 
   async settingsLabelsNameValue(): Promise<string> {
@@ -5391,47 +6383,128 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async projectQuickAddVisible(): Promise<boolean> {
-    return todo("projectQuickAddVisible");
+    // Scoped to the list quick-add container: the sidebar create button
+    // shares the trigger's label but is a different control. The trigger
+    // mounts after the rows, so settle before calling absence — and read
+    // the button only, never the disabled variant's span.
+    const trigger = this.page.getByTestId("quick-add").getByRole("button", { name: "New work item" }).first();
+    try {
+      await trigger.waitFor({ state: "visible", timeout: 10_000 });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   async issueTitleInputEnabled(): Promise<boolean> {
-    return todo("issueTitleInputEnabled");
+    // Guests read a static title with no labeled field; members get the
+    // editable input. The field mounts after the detail settles, so wait
+    // for it before calling absence.
+    const field = this.page.getByLabel("Title").first();
+    await field.waitFor({ timeout: 10_000 }).catch(() => undefined);
+    if ((await field.count()) === 0) return false;
+    return field.isEditable().catch(() => false);
   }
 
   async settingsLabelsAccessDenied(): Promise<boolean> {
     return (await this.page.getByRole("heading", { name: /not authorized/i }).count()) > 0;
   }
 
-  async globalViewIssueVisible(_name: string): Promise<boolean> {
-    return todo("globalViewIssueVisible");
+  async globalViewIssueVisible(name: string): Promise<boolean> {
+    // Layout-agnostic: an exact-text match anywhere on the page.
+    // Scenario issue names never equal a project name exactly, so
+    // sidebar project entries cannot false-positive this.
+    return (await this.page.getByText(name, { exact: true }).count()) > 0;
   }
 
-  async openCycleIssues(_workspaceSlug: string, _projectId: string, _cycleId: string): Promise<void> {
-    return todo("openCycleIssues");
+  async openCycleIssues(workspaceSlug: string, projectId: string, cycleId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/cycles/${cycleId}`, {
+      waitUntil: "domcontentloaded",
+    });
+    // Settle on any mounted cycle content — the layout switcher, the
+    // issues skeleton, or the transfer prompt itself. Callers poll the
+    // prompt separately, so the deadline is a backstop, not a verdict.
+    const deadline = Date.now() + 60_000;
+    for (;;) {
+      const switcher = this.page.getByTestId(/^layout-switcher-(segmented|dropdown)$/);
+      if ((await switcher.count()) > 0) return;
+      if ((await this.page.getByTestId("issues-skeleton-list").count()) > 0) return;
+      if (await this.cycleTransferButtonVisible()) return;
+      if (Date.now() > deadline) return;
+      await this.page.waitForTimeout(1_000);
+    }
   }
 
   async cycleTransferButtonVisible(): Promise<boolean> {
-    return todo("cycleTransferButtonVisible");
+    return (await this.page.getByRole("button", { name: "Transfer work items", exact: true }).count()) > 0;
+  }
+
+  /** The open transfer dialog's cycle list. */
+  private cycleTransferListbox(): Locator {
+    return this.page.getByRole("listbox", { name: "Cycles" });
   }
 
   async cycleTransferOpen(): Promise<void> {
-    return todo("cycleTransferOpen");
+    await this.page
+      .getByRole("button", { name: "Transfer work items", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByPlaceholder("Search for a cycle...").waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async cycleTransferOptionNames(): Promise<string[]> {
-    return todo("cycleTransferOptionNames");
+    // Options pair the name with a status pill; only the name spans
+    // are read, so the pill never glues onto the cycle name.
+    const texts = await this.cycleTransferListbox()
+      .getByRole("option")
+      .locator(":scope > span.truncate")
+      .allInnerTexts();
+    return texts.map((text) => text.trim()).filter((text) => text.length > 0);
   }
 
-  async cycleTransferPick(_name: string): Promise<void> {
-    return todo("cycleTransferPick");
+  async cycleTransferPick(name: string): Promise<void> {
+    const pattern = new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+    await this.cycleTransferListbox()
+      .getByRole("option", { name: pattern })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    // A successful pick closes the dialog; a refusal leaves it open and
+    // fails the wait honestly.
+    await this.page.getByPlaceholder("Search for a cycle...").waitFor({ state: "detached", timeout: 60_000 });
   }
 
-  async failNextIssuePatch(_status: number, _delayMs: number): Promise<void> {
-    return todo("failNextIssuePatch");
+  async failNextIssuePatch(status: number, delayMs: number): Promise<void> {
+    // Only the next issue PATCH fails, once: reads and other writes pass
+    // through, and the handler removes itself after answering so a
+    // retried save goes to the real server. The delay keeps the
+    // optimistic value on screen long enough to poll for it. A URL
+    // predicate (not a glob) routes the request.
+    const matches = (url: URL): boolean =>
+      url.pathname.includes("/api/workspaces/") &&
+      url.pathname.includes("/projects/") &&
+      url.pathname.includes("/issues/");
+    const handler = async (route: Route): Promise<void> => {
+      if (route.request().method() !== "PATCH") {
+        await route.continue();
+        return;
+      }
+      // Answer first, unroute after: removing the handler from inside
+      // itself finalizes the route and a later fulfill throws
+      // "already handled".
+      try {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        await route.fulfill({ status, contentType: "application/json", body: "{}" });
+      } finally {
+        await this.clearIssuePatchFailure();
+      }
+    };
+    this.issuePatchFailureRoute = { matches, handler };
+    await this.page.route(matches, handler);
   }
 
   async clearIssuePatchFailure(): Promise<void> {
-    return todo("clearIssuePatchFailure");
+    const current = this.issuePatchFailureRoute;
+    this.issuePatchFailureRoute = undefined;
+    if (current) await this.page.unroute(current.matches, current.handler).catch(() => {});
   }
 
   /** Wait for the signed-out entry card after a sign-out round-trip. */
@@ -6377,12 +7450,30 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async openDisplayOptions(): Promise<void> {
+    if (!(await this.isProfileDisplaySurface())) {
+      // Project, archived, module and cycle surfaces share DisplayControl;
+      // its trigger and panel carry their own testids.
+      await this.projectDisplayTrigger().click({ timeout: WebNewDriver.WAIT_MS });
+      await this.projectDisplayPanel().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+      return;
+    }
     // The visible profile tab's trigger; the narrow header carries its own.
     await this.profileDisplayTrigger().click({ timeout: WebNewDriver.WAIT_MS });
     await this.profileDisplayPanel().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
 
   async closeDisplayOptions(): Promise<void> {
+    if (!(await this.isProfileDisplaySurface())) {
+      await this.page.keyboard.press("Escape");
+      await this.projectDisplayPanel()
+        .waitFor({ state: "hidden", timeout: 10_000 })
+        .catch(async () => {
+          // Focus can sit outside the popover, so fall back to the trigger.
+          await this.projectDisplayTrigger().click({ timeout: WebNewDriver.WAIT_MS });
+          await this.projectDisplayPanel().waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
+        });
+      return;
+    }
     await this.page.keyboard.press("Escape");
     await this.profileDisplayPanel()
       .waitFor({ state: "hidden", timeout: 10_000 })
@@ -6405,21 +7496,62 @@ export class WebNewDriver implements ParityDriver {
     return this.profileDisplayPanel().getByRole("button", { name: option, exact: true });
   }
 
+  private projectDisplayTrigger(): Locator {
+    return this.page.getByTestId("display-options-trigger").filter({ visible: true }).first();
+  }
+
+  private projectDisplayPanel(): Locator {
+    return this.page.getByTestId("display-options-panel");
+  }
+
+  /** A DisplayControl section by its testid suffix (properties, group, subGroup, order, options). */
+  private projectDisplaySection(section: string): Locator {
+    return this.projectDisplayPanel().getByTestId(`display-section-${section}`);
+  }
+
+  /** True while the profile tab's own Display panel is the live one; every other surface shares DisplayControl. */
+  private async isProfileDisplaySurface(): Promise<boolean> {
+    return (await this.profileDisplayTrigger().count()) > 0;
+  }
+
   async displayPanelText(): Promise<string> {
-    return todo("displayPanelText");
+    const panel = (await this.isProfileDisplaySurface()) ? this.profileDisplayPanel() : this.projectDisplayPanel();
+    return ((await panel.first().innerText()) ?? "").trim();
   }
 
   async setDisplayGroupBy(option: string): Promise<void> {
+    if (!(await this.isProfileDisplaySurface())) {
+      const choice = this.projectDisplaySection("group").getByRole("button", { name: option, exact: true });
+      await choice.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+      await choice.click({ timeout: WebNewDriver.WAIT_MS });
+      return;
+    }
     const choice = this.profileDisplayPanel().getByRole("radio", { name: option, exact: true });
     await choice.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
     await choice.click({ timeout: WebNewDriver.WAIT_MS });
   }
 
-  async setDisplayOrderBy(_option: string): Promise<void> {
-    return todo("setDisplayOrderBy");
+  async setDisplayOrderBy(option: string): Promise<void> {
+    if (!(await this.isProfileDisplaySurface())) {
+      const choice = this.projectDisplaySection("order").getByRole("button", { name: option, exact: true });
+      await choice.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+      await choice.click({ timeout: WebNewDriver.WAIT_MS });
+      return;
+    }
+    const choice = this.profileDisplayOption(option);
+    await choice.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await choice.click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async setDisplayExtraOption(option: string, enabled: boolean): Promise<void> {
+    if (!(await this.isProfileDisplaySurface())) {
+      const target = this.projectDisplaySection("options").getByRole("button", { name: option, exact: true });
+      await target.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+      if ((await this.isDisplayOptionChecked(option)) !== enabled) {
+        await target.click({ timeout: WebNewDriver.WAIT_MS });
+      }
+      return;
+    }
     const target = this.profileDisplayOption(option);
     await target.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
     if ((await this.isDisplayOptionChecked(option)) !== enabled) {
@@ -6428,91 +7560,314 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async isDisplayOptionChecked(option: string): Promise<boolean> {
+    if (!(await this.isProfileDisplaySurface())) {
+      // Grouping, ordering and switch rows are all aria-pressed buttons;
+      // section order disambiguates labels the panel repeats ("Priority" is
+      // a group row, an order row and a pill). Pills have their own reader
+      // and are skipped here.
+      for (const section of ["group", "subGroup", "order", "options"]) {
+        const target = this.projectDisplaySection(section).getByRole("button", { name: option, exact: true });
+        if ((await target.count()) > 0) return (await target.first().getAttribute("aria-pressed")) === "true";
+      }
+      const missing = this.projectDisplayPanel().getByRole("button", { name: option, exact: true });
+      await missing.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+      return (await missing.first().getAttribute("aria-pressed")) === "true";
+    }
     return (await this.profileDisplayOption(option).getAttribute("aria-pressed")) === "true";
   }
 
-  async toggleDisplayProperty(_option: string): Promise<void> {
-    return todo("toggleDisplayProperty");
+  async toggleDisplayProperty(option: string): Promise<void> {
+    if (!(await this.isProfileDisplaySurface())) {
+      const pill = this.projectDisplaySection("properties").getByRole("button", { name: option, exact: true });
+      await pill.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+      await pill.click({ timeout: WebNewDriver.WAIT_MS });
+      return;
+    }
+    const target = this.profileDisplayOption(option);
+    await target.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await target.click({ timeout: WebNewDriver.WAIT_MS });
   }
 
-  async isDisplayPropertyActive(_option: string): Promise<boolean> {
-    return todo("isDisplayPropertyActive");
+  async isDisplayPropertyActive(option: string): Promise<boolean> {
+    if (!(await this.isProfileDisplaySurface())) {
+      const pill = this.projectDisplaySection("properties").getByRole("button", { name: option, exact: true });
+      await pill.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+      return (await pill.first().getAttribute("aria-pressed")) === "true";
+    }
+    return (await this.profileDisplayOption(option).getAttribute("aria-pressed")) === "true";
+  }
+
+  /** The condition row, present only while the builder shows it. */
+  private richRow(): Locator {
+    return this.page.getByTestId("rich-filter-row");
+  }
+
+  /** Every condition's own remove control, in row order. */
+  private richRemoveControls(): Locator {
+    return this.richRow().getByRole("button", { name: "Remove filter" });
+  }
+
+  /**
+   * Settle after an expression write. The optimistic prefs write
+   * re-suspends the route (NEWFRONT-947), so the row hides behind the
+   * list skeleton until the refetch lands — seconds on a shared stack.
+   * Two consecutive stable samples (visible, or absent after a clearing
+   * write) 500ms apart; gives up silently at 30s so a genuinely wedged
+   * app still fails on the caller's own read, not here.
+   */
+  private async settleRichWrite(): Promise<void> {
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    let last = "";
+    for (;;) {
+      const row = this.richRow();
+      const state = (await row.count()) === 0 ? "absent" : (await row.first().isVisible()) ? "visible" : "hidden";
+      if (state !== "hidden" && state === last) return;
+      last = state;
+      if (Date.now() > deadline) return;
+      await this.page.waitForTimeout(500);
+    }
   }
 
   async toggleRichFilterRow(): Promise<void> {
-    return todo("toggleRichFilterRow");
+    await this.page.getByTestId("rich-filter-toggle").first().click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async isRichFilterRowVisible(): Promise<boolean> {
-    return todo("isRichFilterRowVisible");
+    const row = this.richRow();
+    if ((await row.count()) === 0) return false;
+    return row.first().isVisible();
   }
 
   async richFilterRowText(): Promise<string> {
-    return todo("richFilterRowText");
+    const row = this.richRow();
+    if ((await row.count()) === 0) return "";
+    return ((await row.first().innerText()) ?? "").trim();
   }
 
-  async addRichCondition(_property: string): Promise<void> {
-    return todo("addRichCondition");
+  /**
+   * The row's trailing field picker. Reading a condition's pill again would
+   * mix the two add entries up, so the picker trigger keeps its own label.
+   */
+  private richAddControl(): Locator {
+    return this.richRow().getByRole("button", { name: "Add filter", exact: true }).last();
   }
 
-  async pickRichValues(_values: string[]): Promise<void> {
-    return todo("pickRichValues");
+  private async openRichFieldPicker(): Promise<void> {
+    await this.richAddControl().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("option").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
-  async pickRichValuesContaining(_values: string[]): Promise<void> {
-    return todo("pickRichValuesContaining");
+  /** The picker closes on selection for a single choice; re-click otherwise. */
+  private async closeRichFieldPicker(): Promise<void> {
+    if ((await this.page.getByRole("option").count()) === 0) return;
+    await this.richAddControl().click({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async addRichCondition(property: string): Promise<void> {
+    const before = await this.richConditionCount();
+    await this.openRichFieldPicker();
+    await this.page.getByRole("option", { name: property, exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    // Picking a property commits a condition; a value slot may pop open
+    // behind the picker, which is expected rather than a failure.
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    while ((await this.richConditionCount()) <= before) {
+      if (Date.now() > deadline) throw new Error(`[parity] picking ${property} added no condition.`);
+      await this.page.waitForTimeout(250);
+    }
+    await this.settleRichWrite();
   }
 
   async listRichPickerOptions(): Promise<string[]> {
-    return todo("listRichPickerOptions");
+    await this.openRichFieldPicker();
+    const names = await this.page.getByRole("option").allTextContents();
+    await this.closeRichFieldPicker();
+    return names.map((text) => text.trim()).filter((text) => text.length > 0);
+  }
+
+  /**
+   * Value options are the section's semantic checkboxes and radios. Scope
+   * to the value sections so another open panel's controls cannot leak in.
+   */
+  private richValueChoices(): Locator {
+    const sections = this.page.locator('[data-testid^="rich-section-"]');
+    return sections.getByRole("checkbox").or(sections.getByRole("radio"));
   }
 
   async richValueOptions(): Promise<string[]> {
-    return todo("richValueOptions");
+    const names = await this.richValueChoices().allTextContents();
+    return names.map((text) => text.trim()).filter((text) => text.length > 0);
+  }
+
+  /** Click the last condition's value trigger to open or shut its slot. */
+  private async toggleRichValueSlot(): Promise<void> {
+    await this.richRow().getByTestId("rich-value-trigger").last().click({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  private async closeRichValueSlot(): Promise<void> {
+    if ((await this.richValueChoices().count()) === 0) return;
+    await this.toggleRichValueSlot();
+  }
+
+  /** A value slot opens by itself for a new condition; reopen a shut one. */
+  private async ensureRichValueSlotOpen(): Promise<void> {
+    if ((await this.richValueChoices().count()) > 0) return;
+    await this.toggleRichValueSlot();
+    await this.richValueChoices().first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async pickRichValues(values: string[]): Promise<void> {
+    await this.ensureRichValueSlotOpen();
+    for (const value of values) {
+      await this.richValueChoices()
+        .filter({ hasText: new RegExp(`^\\s*${value}\\s*$`) })
+        .first()
+        .click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    await this.closeRichValueSlot();
+    await this.settleRichWrite();
+  }
+
+  async pickRichValuesContaining(values: string[]): Promise<void> {
+    await this.ensureRichValueSlotOpen();
+    for (const value of values) {
+      await this.richValueChoices().filter({ hasText: value }).first().click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    await this.closeRichValueSlot();
+    await this.settleRichWrite();
+  }
+
+  /**
+   * The lone condition's controls, in render order: property picker,
+   * operator combobox, value slot, remove. The value slot keeps a testid
+   * and the remove control an accessible name, so the two name-less
+   * buttons with text are the property and operator entries.
+   */
+  private async singleConditionOperator(): Promise<Locator> {
+    const pill = this.richRow().getByTestId("rich-condition").first();
+    const buttons = await pill.getByRole("button").all();
+    const named: Locator[] = [];
+    for (const button of buttons) {
+      if ((await button.getAttribute("aria-label")) !== null) continue;
+      if ((await button.getAttribute("data-testid")) === "rich-value-trigger") continue;
+      const text = ((await button.innerText().catch(() => "")) ?? "").trim();
+      if (text === "") continue;
+      named.push(button);
+    }
+    const operator = named[1];
+    if (operator === undefined) throw new Error("[parity] condition operator control not found.");
+    return operator;
   }
 
   async richOperatorOptions(): Promise<string[]> {
-    return todo("richOperatorOptions");
+    const operator = await this.singleConditionOperator();
+    await operator.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("option").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const names = await this.page.getByRole("option").allTextContents();
+    await (await this.singleConditionOperator()).click({ timeout: WebNewDriver.WAIT_MS });
+    return names.map((text) => text.trim()).filter((text) => text.length > 0);
   }
 
-  async pickRichOperator(_option: string): Promise<void> {
-    return todo("pickRichOperator");
+  async pickRichOperator(option: string): Promise<void> {
+    await (await this.singleConditionOperator()).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("option", { name: option, exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.settleRichWrite();
   }
 
   async isSingleRichOperatorLocked(): Promise<boolean> {
-    return todo("isSingleRichOperatorLocked");
+    return (await this.singleConditionOperator()).isDisabled();
+  }
+
+  private richCalendar(): Locator {
+    return this.page.locator('[data-testid="rich-date-calendar"], [data-testid="rich-range-calendar"]');
   }
 
   async isRichCalendarOpen(): Promise<boolean> {
-    return todo("isRichCalendarOpen");
+    const calendar = this.richCalendar();
+    if ((await calendar.count()) === 0) return false;
+    return calendar.first().isVisible();
   }
 
-  async pickRichDay(_day: string): Promise<void> {
-    return todo("pickRichDay");
+  async pickRichDay(day: string): Promise<void> {
+    // A fresh date condition opens its calendar by itself; a slot a
+    // previous pick shut has to be reopened through its value trigger.
+    if (!(await this.isRichCalendarOpen())) {
+      await this.toggleRichValueSlot();
+      await this.richCalendar().first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    }
+    // Cells carry the day number as text and the ISO date as data-day; the
+    // out-of-month repeats are excluded so "15" resolves once.
+    const cell = this.page
+      .locator('button[data-day][data-in-month="true"]')
+      .filter({ hasText: new RegExp(`^\\s*${day}\\s*$`) })
+      .first();
+    await cell.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.settleRichWrite();
   }
 
   async richConditionCount(): Promise<number> {
-    return todo("richConditionCount");
+    return this.richRemoveControls().count();
   }
 
-  async removeRichCondition(_index: number): Promise<void> {
-    return todo("removeRichCondition");
+  async removeRichCondition(index: number): Promise<void> {
+    await this.richRemoveControls().nth(index).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.settleRichWrite();
   }
 
   async clearRichFilters(): Promise<void> {
-    return todo("clearRichFilters");
+    await this.richRow().getByTestId("rich-clear-all").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.settleRichWrite();
   }
 
-  async openProjectView(_workspaceSlug: string, _projectId: string, _viewId: string): Promise<void> {
-    return todo("openProjectView");
+  async openProjectView(workspaceSlug: string, projectId: string, viewId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/views/${viewId}`, {
+      waitUntil: "domcontentloaded",
+    });
+    // Settle like openProjectIssues: the filter row, any settled layout
+    // twin, or the signed-out entry after a bounce. Callers poll the row
+    // themselves, so the bounce check is the contract here.
+    const deadline = Date.now() + 60_000;
+    for (;;) {
+      if ((await this.richRow().count()) > 0) return;
+      const switcher = this.page.getByTestId(/^layout-switcher-(segmented|dropdown)$/);
+      if ((await switcher.count()) > 0) return;
+      if ((await this.authEmailField().count()) > 0) {
+        throw new Error("[parity] view page bounced to sign-in; the session did not survive.");
+      }
+      if (Date.now() > deadline) return;
+      await this.page.waitForTimeout(1_000);
+    }
   }
 
-  async saveRichViewAs(_name: string): Promise<void> {
-    return todo("saveRichViewAs");
+  /** The save-view dialog, scoped by its title field. */
+  private saveViewDialog(): Locator {
+    return this.page
+      .getByRole("dialog")
+      .filter({ has: this.page.getByPlaceholder("Title") })
+      .first();
+  }
+
+  async saveRichViewAs(name: string): Promise<void> {
+    await this.page.getByTestId("rich-save-view").first().click({ timeout: WebNewDriver.WAIT_MS });
+    const dialog = this.saveViewDialog();
+    const field = dialog.getByPlaceholder("Title").first();
+    await field.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await field.fill(name);
+    await dialog
+      .getByRole("button", { name: "Create View", exact: true })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    // The issues surface does not navigate on save (no onViewCreated
+    // host), so the closing dialog — not a views URL — is the commit
+    // signal; a failed write keeps it open and fails the wait honestly.
+    await dialog.waitFor({ state: "detached", timeout: 60_000 });
   }
 
   async updateRichView(): Promise<void> {
-    return todo("updateRichView");
+    // Generous: the Update affordance appears only once the dirty state
+    // propagates after the PATCH round-trip, slow on a hot shared stack.
+    const target = this.page.getByTestId("rich-view-actions").getByRole("button", { name: "Update view" });
+    await target.waitFor({ state: "visible", timeout: 60_000 });
+    await target.click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async openAnalytics(): Promise<void> {
@@ -7631,21 +8986,56 @@ export class WebNewDriver implements ParityDriver {
   // --- NEWFRONT-117 (layouts A). Throwing stubs per the shared driver
   // --- contract; the layouts area fills these in when it lands.
 
+  /** The desktop header switcher; the dropdown twin carries no data hooks. */
+  private layoutsSegmentedSwitcher(): Locator {
+    return this.page.getByTestId("layout-switcher-segmented").filter({ visible: true }).first();
+  }
+
+  private static layoutsLayoutKey(value: string): LayoutsLayoutKey {
+    const keys: readonly string[] = ["list", "kanban", "calendar", "spreadsheet", "gantt_chart"];
+    if ((keys as readonly string[]).includes(value)) return value as LayoutsLayoutKey;
+    throw new Error(`[parity] unrecognised layout key "${value}".`);
+  }
+
   async layoutsOfferedLayouts(): Promise<LayoutsLayoutKey[]> {
-    return todo("layoutsOfferedLayouts");
+    // Canonical order comes free: the switcher filters LAYOUT_ORDER by
+    // the registered set, so DOM order is the asserted order.
+    const switcher = this.layoutsSegmentedSwitcher();
+    await switcher.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const buttons = switcher.locator("[data-layout]");
+    const count = await buttons.count();
+    const keys: LayoutsLayoutKey[] = [];
+    for (let index = 0; index < count; index += 1) {
+      keys.push(WebNewDriver.layoutsLayoutKey((await buttons.nth(index).getAttribute("data-layout")) ?? ""));
+    }
+    return keys;
   }
 
   async layoutsActiveLayout(): Promise<LayoutsLayoutKey> {
-    // The profile tab's switcher trigger names the live layout.
-    const trigger = this.page
-      .getByRole("button", { name: /^Issue layout, current / })
-      .filter({ visible: true })
-      .first();
-    await trigger.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
-    const label = (await trigger.getAttribute("aria-label")) ?? "";
-    const key = WebNewDriver.PROFILE_LAYOUT_LABELS.find((entry) => label.endsWith(entry.label))?.key;
-    if (key === undefined) throw new Error(`[parity] unrecognised layout trigger label "${label}".`);
-    return key;
+    // The profile tab names the live layout on its switcher trigger;
+    // project surfaces mark the active segmented choice instead. The
+    // segmented read is visibility-blind on purpose: below lg the group
+    // hides while the mobile menu takes over visibly, but its data
+    // marks still name the same active layout. Either hook wins its race.
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    for (;;) {
+      const trigger = this.page
+        .getByRole("button", { name: /^Issue layout, current / })
+        .filter({ visible: true })
+        .first();
+      if ((await trigger.count()) > 0) {
+        const label = (await trigger.getAttribute("aria-label")) ?? "";
+        const key = WebNewDriver.PROFILE_LAYOUT_LABELS.find((entry) => label.endsWith(entry.label))?.key;
+        if (key === undefined) throw new Error(`[parity] unrecognised layout trigger label "${label}".`);
+        return key;
+      }
+      const active = this.page.getByTestId("layout-switcher-segmented").locator('[data-layout][data-active="true"]');
+      if ((await active.count()) > 0) {
+        return WebNewDriver.layoutsLayoutKey((await active.first().getAttribute("data-layout")) ?? "");
+      }
+      if (Date.now() >= deadline) throw new Error("[parity] no layout switcher rendered.");
+      await this.page.waitForTimeout(500);
+    }
   }
 
   async layoutsSwitchTo(layout: LayoutsLayoutKey): Promise<void> {
@@ -7661,15 +9051,42 @@ export class WebNewDriver implements ParityDriver {
     }
     // Project, cycle and module pages share the segmented header switcher
     // (data-layout per kind); the choice marks itself active on switch.
+    const changed = (await this.layoutsActiveLayout()) !== layout;
+    // Arm the mutation waiter before the click: the switch PATCH is caused
+    // by it. The waiter binds to the display PATCH body, never a sibling
+    // prefs write in flight (a collapse PATCH answers user-properties too).
+    // No-op switches patch nothing, so only changed layouts arm it.
+    const patchSettled = changed
+      ? this.page.waitForResponse(
+          (response) =>
+            response.request().method() === "PATCH" &&
+            response.url().includes("user-properties") &&
+            (response.request().postData() ?? "").includes("display_filters"),
+          { timeout: WebNewDriver.WAIT_MS }
+        )
+      : null;
     await this.page
       .locator(`[data-layout="${layout}"]`)
       .filter({ visible: true })
       .first()
       .click({ timeout: WebNewDriver.WAIT_MS });
     await this.layoutsWaitForProjectLayout(layout);
+    // Settle the mutation round-trip, not just the optimistic surface: the
+    // switch's success write lands after the surface mounts, and a prefs
+    // write that starts in between (ISS-008's group toggle) is clobbered by
+    // it — server and UI diverge and the toggle never flips.
+    // Best-effort: the surface mount above is the commit signal. A switch
+    // that never PATCHes display prefs (another area's prefs shape, a slow
+    // network) must not hang and throw here — without the settle the ISS-008
+    // clobber window simply stays open, as before this gate fix.
+    if (patchSettled !== null) await patchSettled.catch(() => undefined);
   }
 
   private async layoutsWaitForProjectLayout(layout: LayoutsLayoutKey): Promise<void> {
+    // Settle on the mounted surface, not the chooser mark: the switcher
+    // flips active optimistically while lazy layouts still load, and
+    // one-shot visibility reads right after a switch would race the
+    // mount. Each branch waits its layout's own root.
     if (layout === "calendar") {
       await this.page.getByTestId("issues-calendar").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
       return;
@@ -7683,6 +9100,18 @@ export class WebNewDriver implements ParityDriver {
         .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
       return;
     }
+    if (layout === "spreadsheet") {
+      await this.layoutsSheetScroller().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+      return;
+    }
+    if (layout === "kanban") {
+      await this.page.getByTestId("kanban-layout").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+      return;
+    }
+    if (layout === "gantt_chart") {
+      await this.page.getByTestId("gantt-layout").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+      return;
+    }
     await this.page
       .locator(`[data-layout="${layout}"][data-active="true"]`)
       .first()
@@ -7691,6 +9120,20 @@ export class WebNewDriver implements ParityDriver {
 
   async layoutsReloadIssues(): Promise<void> {
     await this.page.reload({ waitUntil: "domcontentloaded" });
+    // Either surface settles the reload: the profile tab, a project
+    // list (project, cycle, module, archived), one of the board layouts
+    // (rows or empty state), or a loader skeleton. The skeleton arm
+    // matters: loader scenarios reload under a stall and must return
+    // inside the skeleton window, the way the oracle's chrome settle
+    // does — waiting for rows would miss the window and triple the
+    // stall (the sub-issue query fires only after the list resolves).
+    await this.page
+      .locator(
+        '[data-testid="profile-list"], [data-testid="list-group-header"], [data-testid="list-row"], [data-testid="empty-state"], [data-testid="spreadsheet-scroller"], [data-testid="kanban-layout"], [data-testid="gantt-layout"], [data-testid="calendar-layout"], [data-testid="issues-calendar"], [data-testid="list-loading"], [data-testid="section-loading"]'
+      )
+      .first()
+      .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    if ((await this.page.getByTestId("profile-list").count()) === 0) return;
     await this.page.getByTestId("profile-issues-tab").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
     await this.page
       .locator('[data-testid="profile-list"], [data-testid="profile-board"]')
@@ -7699,7 +9142,10 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async layoutsListVisible(): Promise<boolean> {
-    return this.isShown(this.page.getByTestId("profile-list"));
+    if (await this.isShown(this.page.getByTestId("profile-list"))) return true;
+    // Project surfaces render a group header per section whenever the
+    // list layout has rows; empty and other layouts render none.
+    return this.isShown(this.page.getByTestId("list-group-header").first());
   }
 
   async layoutsCalendarVisible(): Promise<boolean> {
@@ -7708,12 +9154,50 @@ export class WebNewDriver implements ParityDriver {
     return this.isShown(this.page.getByTestId("issues-calendar"));
   }
 
+  /** The sheet's scroll container; the sheet reads ready when it shows. */
+  private layoutsSheetScroller(): Locator {
+    return this.page.getByTestId("spreadsheet-scroller");
+  }
+
+  private layoutsSheetTable(): Locator {
+    return this.layoutsSheetScroller().locator("table").first();
+  }
+
+  /**
+   * One property cell, addressed the way its label names it
+   * ("State for Parity first issue").
+   */
+  private layoutsSheetCell(issueName: string, column: string): Locator {
+    const escaped = `${column} for ${issueName}`.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    return this.page.locator(`td[aria-label="${escaped}"]`).first();
+  }
+
+  /** First-column cells in row order; spacers carry no such id. */
+  private layoutsSheetFirstCells(): Locator {
+    return this.layoutsSheetTable().locator('tbody td[id^="issue-"]');
+  }
+
+  /**
+   * The name a first-column cell shows: the title link, or the plain
+   * span while the row is still optimistic. Spacer and skeleton rows
+   * read blank.
+   */
+  private async layoutsSheetFirstCellName(cell: Locator): Promise<string> {
+    if ((await cell.count()) === 0) return "";
+    const link = cell.locator("a").first();
+    if ((await link.count()) > 0) return (await link.innerText()).trim();
+    const named = cell.locator("div.truncate").first();
+    if ((await named.count()) > 0) return (await named.innerText()).trim();
+    return "";
+  }
+
   async layoutsSpreadsheetVisible(): Promise<boolean> {
-    return todo("layoutsSpreadsheetVisible");
+    return this.isShown(this.layoutsSheetScroller());
   }
 
   async layoutsKanbanVisible(): Promise<boolean> {
-    return this.isShown(this.page.getByTestId("profile-board"));
+    if (await this.isShown(this.page.getByTestId("profile-board"))) return true;
+    return this.isShown(this.page.getByTestId("kanban-layout"));
   }
 
   /** Profile layout names as the switcher trigger reads them. */
@@ -7746,330 +9230,1222 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async layoutsGanttVisible(): Promise<boolean> {
-    return todo("layoutsGanttVisible");
+    return this.isShown(this.page.getByTestId("gantt-layout"));
   }
 
   async layoutsListGroups(): Promise<string[]> {
-    const groups = this.page.locator('[data-testid="profile-list"] [data-profile-group]');
-    const count = await groups.count();
+    // The profile surface keeps its own groups; every project surface
+    // (project, cycle, module lists) reads its section headers instead.
+    if ((await this.page.getByTestId("profile-list").count()) > 0) {
+      const groups = this.page.locator('[data-testid="profile-list"] [data-profile-group]');
+      const count = await groups.count();
+      const titles: string[] = [];
+      for (let index = 0; index < count; index += 1) {
+        titles.push(((await groups.nth(index).getAttribute("data-profile-group")) ?? "").trim());
+      }
+      return titles.filter((title) => title.length > 0);
+    }
+    // The header's spans are the title then the count; the glyph is an
+    // svg and the selection control an input, so the first span reads it.
+    const headers = this.page.locator('[data-testid="list-group-header"]');
+    const count = await headers.count();
     const titles: string[] = [];
     for (let index = 0; index < count; index += 1) {
-      titles.push(((await groups.nth(index).getAttribute("data-profile-group")) ?? "").trim());
+      titles.push((await headers.nth(index).locator("span").first().innerText()).trim());
     }
     return titles.filter((title) => title.length > 0);
   }
 
-  async layoutsListGroupExpanded(_title: string): Promise<boolean> {
-    return todo("layoutsListGroupExpanded");
+  /**
+   * One section's header, matched on its exact title span (ISS-008); the
+   * first span reads the title, the count follows it. Reloads settle on
+   * the skeleton too, so the lookup waits for the headers instead of
+   * throwing on a still-loading list.
+   */
+  private async layoutsListGroupHeader(title: string): Promise<Locator> {
+    const headers = this.page.locator('[data-testid="list-group-header"]');
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    for (;;) {
+      const count = await headers.count();
+      for (let index = 0; index < count; index += 1) {
+        const text = (await headers.nth(index).locator("span").first().innerText()).trim();
+        if (text === title) return headers.nth(index);
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(`[parity] no list group "${title}".`);
+      }
+      await this.page.waitForTimeout(250);
+    }
   }
 
-  async layoutsListToggleGroup(_title: string): Promise<void> {
-    return todo("layoutsListToggleGroup");
+  /** One section, wrapping its header plus rows (ISS-010/011). */
+  private layoutsListSection(title: string): Locator {
+    return this.page
+      .locator("section", {
+        has: this.page.locator('[data-testid="list-group-header"]').filter({ hasText: title }),
+      })
+      .first();
+  }
+
+  async layoutsListGroupExpanded(title: string): Promise<boolean> {
+    const header = await this.layoutsListGroupHeader(title);
+    return (await header.getAttribute("aria-expanded")) === "true";
+  }
+
+  async layoutsListToggleGroup(title: string): Promise<void> {
+    const header = await this.layoutsListGroupHeader(title);
+    const before = await header.getAttribute("aria-expanded");
+    // The title span bubbles to the header's toggle; clicking it keeps
+    // clear of the add control, which stops propagation.
+    await header.locator("span").first().click({ timeout: WebNewDriver.WAIT_MS });
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    for (;;) {
+      if ((await header.getAttribute("aria-expanded")) !== before) return;
+      if (Date.now() >= deadline) {
+        throw new Error(`[parity] list group "${title}" never toggled.`);
+      }
+      await this.page.waitForTimeout(250);
+    }
   }
 
   async layoutsListGroupIssueNames(title: string): Promise<string[]> {
-    const group = this.page.locator(`[data-testid="profile-list"] [data-profile-group="${title}"]`).first();
-    await group.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
-    const rows = group.locator("[data-profile-row]");
+    if ((await this.page.getByTestId("profile-list").count()) > 0) {
+      const group = this.page.locator(`[data-testid="profile-list"] [data-profile-group="${title}"]`).first();
+      await group.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+      const rows = group.locator("[data-profile-row]");
+      const count = await rows.count();
+      const names: string[] = [];
+      for (let index = 0; index < count; index += 1) {
+        const name = (await rows.nth(index).locator("span").nth(1).innerText()).trim();
+        if (name !== "") names.push(name);
+      }
+      return names;
+    }
+    // Project surfaces wrap each section (header plus rows) in its own
+    // section element; the row's name paragraph carries the exact title.
+    const section = this.page
+      .locator("section", {
+        has: this.page.locator('[data-testid="list-group-header"]').filter({ hasText: title }),
+      })
+      .first();
+    await section.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const rows = section.locator('[data-testid="list-row"]');
     const count = await rows.count();
     const names: string[] = [];
     for (let index = 0; index < count; index += 1) {
-      const name = (await rows.nth(index).locator("span").nth(1).innerText()).trim();
+      const name = ((await rows.nth(index).locator("p[title]").first().getAttribute("title")) ?? "").trim();
       if (name !== "") names.push(name);
     }
     return names;
   }
 
-  async layoutsListGroupHasLoadMore(_title: string): Promise<boolean> {
-    return todo("layoutsListGroupHasLoadMore");
+  async layoutsListGroupHasLoadMore(title: string): Promise<boolean> {
+    // A fetch in flight shows the skeleton instead of the button, so the
+    // read settles through it: button means more, a settled section with
+    // no button means done.
+    const section = this.layoutsListSection(title);
+    await section.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const button = section.getByRole("button", { name: "Load more" });
+    const loading = section.getByTestId("section-loading");
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    for (;;) {
+      if ((await button.count()) > 0) return true;
+      if ((await loading.count()) === 0) return false;
+      if (Date.now() >= deadline) {
+        throw new Error(`[parity] list group "${title}" never settled its paging.`);
+      }
+      await this.page.waitForTimeout(250);
+    }
   }
 
-  async layoutsListGroupLoadMore(_title: string): Promise<void> {
-    return todo("layoutsListGroupLoadMore");
+  async layoutsListGroupLoadMore(title: string): Promise<void> {
+    // Grouped rows are unvirtualized, so the appended page grows the row
+    // count the caller can poll.
+    const before = (await this.layoutsListGroupIssueNames(title)).length;
+    const section = this.layoutsListSection(title);
+    await section.getByRole("button", { name: "Load more" }).first().click({ timeout: WebNewDriver.WAIT_MS });
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    for (;;) {
+      if ((await this.layoutsListGroupIssueNames(title)).length > before) return;
+      if (Date.now() >= deadline) {
+        throw new Error(`[parity] list group "${title}" never loaded its next page.`);
+      }
+      await this.page.waitForTimeout(500);
+    }
   }
 
   async layoutsListScrollEnd(): Promise<void> {
-    return todo("layoutsListScrollEnd");
+    // The grouped root and the flat virtualizer both name their scroll
+    // region "Issues"; exactly one renders per layout.
+    const scroller = this.page.getByRole("region", { name: "Issues" }).first();
+    await scroller.evaluate((node) => node.scrollTo({ top: node.scrollHeight }));
+    // The bottom edge triggers the next page fetch; give it a beat
+    // before the caller re-reads.
+    await this.page.waitForTimeout(1000);
   }
 
-  async layoutsListQuickAdd(_title: string, _groupTitle?: string): Promise<void> {
-    return todo("layoutsListQuickAdd");
+  async layoutsListQuickAdd(title: string, groupTitle?: string): Promise<void> {
+    const scope = groupTitle === undefined ? this.page : this.layoutsListSection(groupTitle);
+    const form = scope.getByTestId("quick-add");
+    await form.first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await form.getByRole("button", { name: "New work item" }).first().click({ timeout: WebNewDriver.WAIT_MS });
+    const input = form.getByLabel("New work item title");
+    await input.fill(title, { timeout: WebNewDriver.WAIT_MS });
+    await input.press("Enter", { timeout: WebNewDriver.WAIT_MS });
+    // The create lands asynchronously; the flat list holds everything
+    // under "All work items".
+    const group = groupTitle ?? "All work items";
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    for (;;) {
+      if ((await this.layoutsListGroupIssueNames(group)).includes(title)) return;
+      if (Date.now() >= deadline) {
+        throw new Error(`[parity] quick-add never rendered "${title}".`);
+      }
+      await this.page.waitForTimeout(500);
+    }
   }
 
-  async layoutsRowCanEditState(_issueName: string): Promise<boolean> {
-    return todo("layoutsRowCanEditState");
+  /** The row's state chip wrapper, titled with the rendered state name. */
+  private layoutsRowStateWrap(issueName: string): Locator {
+    return this.layoutsRowByName(issueName).locator('span[title^="State: "]').first();
   }
 
-  async layoutsRowHref(_issueName: string): Promise<string | null> {
-    return todo("layoutsRowHref");
+  /** The row's priority chip wrapper, titled with the raw level. */
+  private layoutsRowPriorityWrap(issueName: string): Locator {
+    return this.layoutsRowByName(issueName).locator('span[title^="Priority: "]').first();
   }
 
-  async layoutsRowOpenPeek(_issueName: string): Promise<void> {
-    return todo("layoutsRowOpenPeek");
+  async layoutsRowCanEditState(issueName: string): Promise<boolean> {
+    // The strip mounts on idle after the rows paint, so the read waits
+    // for the chip instead of racing it. Guests settle with a disabled
+    // chip, or none at all (NEWFRONT-339); either shape reads as
+    // cannot-edit.
+    const chip = this.layoutsRowStateWrap(issueName).locator("button").first();
+    const settled = await chip.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS }).then(
+      () => true,
+      () => false
+    );
+    if (!settled) return false;
+    return (await chip.getAttribute("disabled")) === null;
+  }
+
+  /** The row's anchor: the list row marks it, the global row's link is first. */
+  private async layoutsRowAnchor(issueName: string): Promise<Locator> {
+    const row = this.layoutsRowByName(issueName);
+    await row.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const marked = row.locator("a[data-row-anchor]");
+    if ((await marked.count()) > 0) return marked.first();
+    return row.locator("a").first();
+  }
+
+  async layoutsRowHref(issueName: string): Promise<string | null> {
+    const anchor = await this.layoutsRowAnchor(issueName);
+    if ((await anchor.count()) === 0) return null;
+    return anchor.getAttribute("href");
+  }
+
+  async layoutsRowOpenPeek(issueName: string): Promise<void> {
+    // A plain click on the row's name opens the peek (ISS-066): the
+    // anchor keeps its href for modified clicks and reports through
+    // the peek address param.
+    const anchor = await this.layoutsRowAnchor(issueName);
+    await anchor.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.waitForURL((url) => url.href.includes("peekIssueId"), {
+      timeout: WebNewDriver.WAIT_MS,
+    });
+    await this.page.getByTestId("issue-preview").first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
 
   async layoutsPeekVisible(): Promise<boolean> {
-    return todo("layoutsPeekVisible");
+    // A closed peek strips its address, so the URL alone settles it; the
+    // panel check keeps a stale param from reading as open.
+    if (!this.page.url().includes("peekIssueId")) return false;
+    return this.isShown(this.page.getByTestId("issue-preview").first());
   }
 
   async layoutsPeekTitle(): Promise<string | null> {
-    return todo("layoutsPeekTitle");
+    const panel = this.page.getByTestId("issue-preview").first();
+    if (!(await this.isShown(panel))) return null;
+    const field = panel.getByLabel("Work item title").first();
+    if ((await field.count()) === 0) return null;
+    return ((await field.inputValue()) ?? "").trim() || null;
   }
 
   async layoutsPeekClose(): Promise<void> {
-    return todo("layoutsPeekClose");
+    await this.page.getByRole("button", { name: "Close preview", exact: true }).first().click({ timeout: 15_000 });
+    const deadline = Date.now() + 15_000;
+    for (;;) {
+      if (!this.page.url().includes("peekIssueId")) return;
+      if (Date.now() >= deadline) throw new Error("[parity] peek panel never closed.");
+      await this.page.waitForTimeout(200);
+    }
   }
 
-  async layoutsRowHasSubIssueToggle(_issueName: string): Promise<boolean> {
-    return todo("layoutsRowHasSubIssueToggle");
+  async layoutsRowHasSubIssueToggle(issueName: string): Promise<boolean> {
+    // Leaves render a bare gutter slot; only the expand/collapse buttons
+    // count, not the at-cap peek opener.
+    const row = this.layoutsRowByName(issueName);
+    await row.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const expand = await row
+      .getByRole("button", { name: `Expand sub-work items of ${issueName}`, exact: true })
+      .count();
+    const collapse = await row
+      .getByRole("button", { name: `Collapse sub-work items of ${issueName}`, exact: true })
+      .count();
+    return expand + collapse > 0;
   }
 
-  async layoutsRowExpandSubIssues(_issueName: string): Promise<void> {
-    return todo("layoutsRowExpandSubIssues");
+  async layoutsRowExpandSubIssues(issueName: string): Promise<void> {
+    const row = this.layoutsRowByName(issueName);
+    await row.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const collapsed = row.getByRole("button", { name: `Collapse sub-work items of ${issueName}`, exact: true });
+    if ((await collapsed.count()) === 0) {
+      await row
+        .getByRole("button", { name: `Expand sub-work items of ${issueName}`, exact: true })
+        .first()
+        .click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    // Expansion fetches the children, so names arrive asynchronously.
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    for (;;) {
+      if ((await this.layoutsRowSubIssueNames(issueName)).length > 0) return;
+      if (Date.now() >= deadline) {
+        throw new Error(`[parity] sub-issues of "${issueName}" never rendered in the list.`);
+      }
+      await this.page.waitForTimeout(500);
+    }
   }
 
-  async layoutsRowSubIssueNames(_issueName: string): Promise<string[]> {
-    return todo("layoutsRowSubIssueNames");
+  async layoutsRowSubIssueNames(issueName: string): Promise<string[]> {
+    // Children nest under the parent's block: the container's direct
+    // articles are the direct children, each headed by its own row.
+    const row = this.layoutsRowByName(issueName);
+    await row.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const container = row.locator('xpath=ancestor::article[1]/descendant::*[@data-testid="list-row-children"]');
+    if ((await container.count()) === 0) return [];
+    const kids = container.locator("xpath=child::article");
+    const count = await kids.count();
+    const names: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const name = (
+        (await kids
+          .nth(index)
+          .locator('[data-testid="list-row"]')
+          .first()
+          .locator("p[title]")
+          .first()
+          .getAttribute("title")) ?? ""
+      ).trim();
+      if (name !== "") names.push(name);
+    }
+    return names;
   }
 
-  async layoutsRowState(_issueName: string): Promise<string> {
-    return todo("layoutsRowState");
+  async layoutsRowState(issueName: string): Promise<string> {
+    const wrap = this.layoutsRowStateWrap(issueName);
+    await wrap.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    return ((await wrap.getAttribute("title")) ?? "").replace(/^State: /, "").trim();
   }
 
-  async layoutsRowSetState(_issueName: string, _stateName: string): Promise<void> {
-    return todo("layoutsRowSetState");
+  async layoutsRowSetState(issueName: string, stateName: string): Promise<void> {
+    await this.layoutsRowSetChip(issueName, "state", stateName, `State: ${stateName}`);
   }
 
-  async layoutsRowPriority(_issueName: string): Promise<string> {
-    return todo("layoutsRowPriority");
+  async layoutsRowPriority(issueName: string): Promise<string> {
+    const wrap = this.layoutsRowPriorityWrap(issueName);
+    await wrap.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const raw = ((await wrap.getAttribute("title")) ?? "").replace(/^Priority: /, "").trim();
+    // The title carries the raw level (none, high); the label capitalizes it.
+    return raw.charAt(0).toUpperCase() + raw.slice(1);
   }
 
-  async layoutsRowSetPriority(_issueName: string, _priorityName: string): Promise<void> {
-    return todo("layoutsRowSetPriority");
+  async layoutsRowSetPriority(issueName: string, priorityName: string): Promise<void> {
+    await this.layoutsRowSetChip(issueName, "priority", priorityName, `Priority: ${priorityName.toLowerCase()}`);
   }
 
-  async layoutsRowMenuItems(_issueName: string): Promise<string[]> {
-    return todo("layoutsRowMenuItems");
+  /**
+   * Pick `option` from one row chip's combobox popup, then settle on the
+   * chip's optimistic repaint (`expectTitle`) instead of racing the
+   * spec's immediate read — the popup closes before React paints.
+   */
+  private async layoutsRowSetChip(
+    issueName: string,
+    kind: "state" | "priority",
+    option: string,
+    expectTitle: string
+  ): Promise<void> {
+    const wrap = kind === "state" ? this.layoutsRowStateWrap(issueName) : this.layoutsRowPriorityWrap(issueName);
+    await wrap.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const search = kind === "state" ? "Search states" : "Search priorities";
+    const listbox = this.page.getByRole("listbox").last();
+    // Deferred rows mount their picker on first interaction; the click
+    // both mounts and opens it.
+    await this.layoutsRowOpenChipPicker(wrap, listbox, kind);
+    await this.page.getByRole("combobox", { name: search }).first().fill(option, { timeout: WebNewDriver.WAIT_MS });
+    await listbox.getByRole("option", { name: option }).first().click({ timeout: WebNewDriver.WAIT_MS });
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    for (;;) {
+      if (((await wrap.getAttribute("title")) ?? "").trim() === expectTitle) return;
+      if (Date.now() >= deadline) {
+        throw new Error(`[parity] row chip for "${issueName}" never showed "${option}".`);
+      }
+      await this.page.waitForTimeout(250);
+    }
   }
 
-  async layoutsRowMenuChoose(_issueName: string, _item: string): Promise<void> {
-    return todo("layoutsRowMenuChoose");
+  /**
+   * Open one row chip's picker, retrying the click while no popup shows.
+   * A preceding pick's re-render can detach the chip between mousedown
+   * and mouseup — focus lands but the click never fires — and a popup
+   * left open eats the next click as an outside dismiss. Either way the
+   * popup stays hidden, so the click repeats until it shows.
+   */
+  private async layoutsRowOpenChipPicker(wrap: Locator, listbox: Locator, kind: string): Promise<void> {
+    const trigger = wrap.locator("button").first();
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    for (;;) {
+      await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+      const opened = await listbox.waitFor({ state: "visible", timeout: 5_000 }).then(
+        () => true,
+        () => false
+      );
+      // A popup that mounts just after the wait gives up still counts;
+      // without this the retry would toggle it shut again.
+      if (opened || (await listbox.isVisible().catch(() => false))) return;
+      if (Date.now() >= deadline) {
+        throw new Error(`[parity] row ${kind} picker never opened.`);
+      }
+      await this.page.waitForTimeout(500);
+    }
   }
 
-  async layoutsRowContextMenuItems(_issueName: string): Promise<string[]> {
-    return todo("layoutsRowContextMenuItems");
+  /**
+   * Project-shape row for `name` (ISS-060): the list row's name paragraph
+   * carries the exact title, and the global list stamps it on the row
+   * itself, so both shapes resolve without substring guessing.
+   */
+  private layoutsRowByName(issueName: string): Locator {
+    const escaped = issueName.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    return this.page
+      .locator(`[data-testid="list-row"]:has(p[title="${escaped}"]), [data-row-name="${escaped}"]`)
+      .first();
+  }
+
+  /** Opens the row's ellipsis menu and waits for its popup (ISS-060). */
+  private async layoutsOpenRowMenu(issueName: string): Promise<void> {
+    const row = this.layoutsRowByName(issueName);
+    await row.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    // The trigger reveals on hover; hovering the row first matches the eye.
+    await row.hover({ timeout: WebNewDriver.WAIT_MS });
+    await row.getByTestId("row-menu-trigger").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("menuitem").first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+  }
+
+  /**
+   * One open item's label: the title span when it carries a note,
+   * otherwise the full text, whitespace-collapsed like the menu reads.
+   */
+  private async layoutsMenuItemLabel(item: Locator): Promise<string> {
+    const titled = item.locator('[data-menu-title="true"]');
+    if ((await titled.count()) > 0) {
+      return (await titled.first().innerText()).trim().replace(/\s+/g, " ");
+    }
+    return (await item.innerText()).trim().replace(/\s+/g, " ");
+  }
+
+  /** The open menu's entry for `label`, matched on its title (ISS-060). */
+  private async layoutsOpenMenuItem(label: string): Promise<Locator> {
+    const items = this.page.getByRole("menuitem");
+    const count = await items.count();
+    for (let index = 0; index < count; index += 1) {
+      if ((await this.layoutsMenuItemLabel(items.nth(index))) === label) return items.nth(index);
+    }
+    throw new Error(`[parity] open menu has no ${label}.`);
+  }
+
+  /** Dismisses the open popup the way a reader leaves it. */
+  private async layoutsCloseOpenMenu(): Promise<void> {
+    await this.page.keyboard.press("Escape");
+  }
+
+  async layoutsRowMenuItems(issueName: string): Promise<string[]> {
+    await this.layoutsOpenRowMenu(issueName);
+    try {
+      return await this.layoutsReadOpenMenuItems();
+    } finally {
+      await this.layoutsCloseOpenMenu();
+    }
+  }
+
+  async layoutsRowMenuChoose(issueName: string, item: string): Promise<void> {
+    // Copying writes to the clipboard, which headless Chromium denies
+    // without an explicit grant; arrange it before the pick.
+    if (item === "Copy link") await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await this.layoutsOpenRowMenu(issueName);
+    await (await this.layoutsOpenMenuItem(item)).click({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async layoutsRowContextMenuItems(issueName: string): Promise<string[]> {
+    // The row wraps itself in the shared context menu (ISS-060): a
+    // right-click on the row raises the same entries as the ellipsis.
+    const row = this.layoutsRowByName(issueName);
+    await row.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await row.click({ button: "right", timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("menuitem").first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    try {
+      return await this.layoutsReadOpenMenuItems();
+    } finally {
+      await this.layoutsCloseOpenMenu();
+    }
   }
 
   async layoutsSheetHeaders(): Promise<string[]> {
-    return todo("layoutsSheetHeaders");
+    const table = this.layoutsSheetTable();
+    await table.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const heads = table.locator("thead th");
+    const count = await heads.count();
+    const labels: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      labels.push((await heads.nth(index).innerText()).trim().replace(/\s+/g, " "));
+    }
+    return labels.filter((label) => label.length > 0);
   }
 
   async layoutsSheetRowNames(): Promise<string[]> {
-    return todo("layoutsSheetRowNames");
+    const table = this.layoutsSheetTable();
+    await table.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const cells = this.layoutsSheetFirstCells();
+    const count = await cells.count();
+    const names: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const name = await this.layoutsSheetFirstCellName(cells.nth(index));
+      if (name !== "") names.push(name);
+    }
+    return names;
   }
 
   async layoutsSheetFirstColumnSticky(): Promise<boolean> {
-    return todo("layoutsSheetFirstColumnSticky");
+    const table = this.layoutsSheetTable();
+    await table.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const first = table.locator("thead th").first();
+    return (await first.evaluate((node) => getComputedStyle(node).position)) === "sticky";
   }
 
   async layoutsSheetFirstColumnShadowed(): Promise<boolean> {
-    return todo("layoutsSheetFirstColumnShadowed");
+    const first = this.layoutsSheetFirstCells().first();
+    await first.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const shadow = await first.evaluate((node) => (node as HTMLElement).style.boxShadow);
+    return shadow !== "" && shadow !== "none";
   }
 
   async layoutsSheetScrollRight(): Promise<void> {
-    return todo("layoutsSheetScrollRight");
+    const scroller = this.layoutsSheetScroller();
+    await scroller.evaluate((node) => node.scrollTo({ left: node.scrollWidth }));
   }
 
   async layoutsSheetHeaderSticky(): Promise<boolean> {
-    return todo("layoutsSheetHeaderSticky");
+    const table = this.layoutsSheetTable();
+    await table.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const head = table.locator("thead").first();
+    return (await head.evaluate((node) => getComputedStyle(node).position)) === "sticky";
   }
 
-  async layoutsSheetCellText(_issueName: string, _column: string): Promise<string> {
-    return todo("layoutsSheetCellText");
+  async layoutsSheetCellText(issueName: string, column: string): Promise<string> {
+    const cell = this.layoutsSheetCell(issueName, column);
+    await cell.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    return (await cell.innerText()).trim().replace(/\s+/g, " ");
   }
 
-  async layoutsSheetCellEditable(_issueName: string, _column: string): Promise<boolean> {
-    return todo("layoutsSheetCellEditable");
+  async layoutsSheetCellEditable(issueName: string, column: string): Promise<boolean> {
+    const cell = this.layoutsSheetCell(issueName, column);
+    await cell.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    // Editable cells host their picker's trigger; read-only cells render
+    // bare values with no controls.
+    return (await cell.locator("button:not([disabled]), input, [role=combobox]").count()) > 0;
   }
 
-  async layoutsSheetCellSetState(_issueName: string, _stateName: string): Promise<void> {
-    return todo("layoutsSheetCellSetState");
+  /**
+   * Pick `option` from the cell's combobox popup, then settle it closed.
+   * Single-pick cells paint the value optimistically, so callers that
+   * render the picked name pass `settleValue` and the pick waits for the
+   * paint instead of racing the spec's immediate read. Multi-pick popups
+   * stay open after a pick, so Escape follows only while one is open —
+   * never blindly, where it could swallow an uncommitted selection.
+   */
+  private async layoutsSheetCellPick(
+    issueName: string,
+    column: string,
+    option: string,
+    settleValue: boolean
+  ): Promise<void> {
+    const cell = this.layoutsSheetCell(issueName, column);
+    await cell.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const trigger = cell.locator("button:not([disabled])").first();
+    await trigger.scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
+    await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    const listbox = this.page.getByRole("listbox").last();
+    await listbox.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await listbox.getByRole("option", { name: option }).first().click({ timeout: WebNewDriver.WAIT_MS });
+    if (settleValue) {
+      const deadline = Date.now() + WebNewDriver.WAIT_MS;
+      for (;;) {
+        const text = (await cell.innerText()).trim().replace(/\s+/g, " ");
+        if (text.includes(option)) break;
+        if (Date.now() >= deadline) {
+          throw new Error(`[parity] sheet cell "${column}" for "${issueName}" never showed "${option}".`);
+        }
+        await this.page.waitForTimeout(250);
+      }
+    }
+    if (await listbox.isVisible()) {
+      await this.page.keyboard.press("Escape");
+    }
+    await listbox.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
   }
 
-  async layoutsSheetCellSetPriority(_issueName: string, _priorityName: string): Promise<void> {
-    return todo("layoutsSheetCellSetPriority");
+  async layoutsSheetCellSetState(issueName: string, stateName: string): Promise<void> {
+    await this.layoutsSheetCellPick(issueName, "State", stateName, true);
   }
 
-  async layoutsSheetFocusCell(_issueName: string, _column: string): Promise<void> {
-    return todo("layoutsSheetFocusCell");
+  async layoutsSheetCellSetPriority(issueName: string, priorityName: string): Promise<void> {
+    await this.layoutsSheetCellPick(issueName, "Priority", priorityName, true);
   }
 
-  async layoutsSheetPressArrow(_arrow: "up" | "down" | "left" | "right"): Promise<void> {
-    return todo("layoutsSheetPressArrow");
+  async layoutsSheetFocusCell(issueName: string, column: string): Promise<void> {
+    const cell = this.layoutsSheetCell(issueName, column);
+    await cell.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await cell.scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
+    // The grid owns arrows only while the cell itself holds focus, so
+    // focus it directly instead of clicking (which would land in the
+    // picker's trigger).
+    await cell.focus({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async layoutsSheetPressArrow(arrow: "up" | "down" | "left" | "right"): Promise<void> {
+    const key = { up: "ArrowUp", down: "ArrowDown", left: "ArrowLeft", right: "ArrowRight" }[arrow];
+    await this.page.keyboard.press(key);
   }
 
   async layoutsSheetFocusedCell(): Promise<{ issueName: string; column: string } | null> {
-    return todo("layoutsSheetFocusedCell");
+    // Focus lives on the cell elements; their labels name the column
+    // first ("State for Parity first issue"), so the first separator
+    // splits them even when the issue name carries its own " for ".
+    const label = await this.page.evaluate(() => {
+      const active = document.activeElement;
+      const cell = active?.closest("td[data-column-index]");
+      return cell?.getAttribute("aria-label") ?? null;
+    });
+    if (label === null) return null;
+    const split = label.indexOf(" for ");
+    if (split < 0) return null;
+    return { column: label.slice(0, split), issueName: label.slice(split + 5) };
   }
 
-  async layoutsSheetSortMenu(_column: string): Promise<string[]> {
-    return todo("layoutsSheetSortMenu");
+  /** The header cell for `column`, matched on its label. */
+  private layoutsSheetHeader(column: string): Locator {
+    return this.page.locator("thead th").filter({ hasText: column }).first();
   }
 
-  async layoutsSheetSort(_column: string, _direction: "ascending" | "descending"): Promise<void> {
-    return todo("layoutsSheetSort");
+  /** Open the sort menu for `column`; the caller closes it. */
+  private async layoutsSheetOpenSortMenu(column: string): Promise<void> {
+    const header = this.layoutsSheetHeader(column);
+    await header.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await header.getByRole("button").first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("menuitem").first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
 
-  async layoutsSheetClearSort(_column: string): Promise<void> {
-    return todo("layoutsSheetClearSort");
+  async layoutsSheetSortMenu(column: string): Promise<string[]> {
+    await this.layoutsSheetOpenSortMenu(column);
+    try {
+      return await this.layoutsReadOpenMenuItems();
+    } finally {
+      await this.layoutsCloseOpenMenu();
+    }
   }
 
-  async layoutsSheetSortMarker(_column: string): Promise<"ascending" | "descending" | "none"> {
-    return todo("layoutsSheetSortMarker");
+  async layoutsSheetSort(column: string, direction: "ascending" | "descending"): Promise<void> {
+    await this.layoutsSheetOpenSortMenu(column);
+    await (
+      await this.layoutsOpenMenuItem(direction === "ascending" ? "Ascending" : "Descending")
+    ).click({
+      timeout: WebNewDriver.WAIT_MS,
+    });
   }
 
-  async layoutsSheetQuickAdd(_title: string): Promise<void> {
-    return todo("layoutsSheetQuickAdd");
+  async layoutsSheetClearSort(column: string): Promise<void> {
+    await this.layoutsSheetOpenSortMenu(column);
+    await (await this.layoutsOpenMenuItem("Clear sorting")).click({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async layoutsSheetSortMarker(column: string): Promise<"ascending" | "descending" | "none"> {
+    const header = this.layoutsSheetHeader(column);
+    await header.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const marker = header.locator("div.rounded-full svg").first();
+    if ((await marker.count()) === 0) return "none";
+    const cls = (await marker.getAttribute("class")) ?? "";
+    // The sorted header carries a direction glyph (lucide names its icon
+    // classes): wide-to-narrow marks ascending, narrow-to-wide descending.
+    if (cls.includes("arrow-down-wide-narrow")) return "ascending";
+    if (cls.includes("arrow-up-narrow-wide")) return "descending";
+    throw new Error(`[parity] unknown sort marker classes "${cls}".`);
+  }
+
+  async layoutsSheetQuickAdd(title: string): Promise<void> {
+    const trigger = this.page.getByRole("button", { name: "Add work item", exact: true }).last();
+    await trigger.scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
+    await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    const field = this.page.getByPlaceholder("Work item title");
+    await field.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await field.fill(title);
+    await field.press("Enter");
+    // Creation lands asynchronously; settle so an immediate row read
+    // sees the new row, not the flight.
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    for (;;) {
+      if ((await this.layoutsSheetRowNames()).includes(title)) return;
+      if (Date.now() >= deadline) throw new Error("[parity] sheet quick-add never rendered its row.");
+      await this.page.waitForTimeout(500);
+    }
   }
 
   async layoutsSheetScrollEnd(): Promise<void> {
-    return todo("layoutsSheetScrollEnd");
+    const scroller = this.layoutsSheetScroller();
+    await scroller.evaluate((node) => node.scrollTo({ top: node.scrollHeight }));
+    // The bottom edge triggers the next page fetch; give it a beat
+    // before the caller re-reads.
+    await this.page.waitForTimeout(1000);
   }
 
-  async layoutsSheetHasSubIssueToggle(_issueName: string): Promise<boolean> {
-    return todo("layoutsSheetHasSubIssueToggle");
+  /** The row container for `name`, matched on its first cell. */
+  private async layoutsSheetRow(issueName: string): Promise<Locator> {
+    const cells = this.layoutsSheetFirstCells();
+    const count = await cells.count();
+    for (let index = 0; index < count; index += 1) {
+      const cell = cells.nth(index);
+      if ((await this.layoutsSheetFirstCellName(cell)) === issueName) {
+        return cell.locator("xpath=ancestor::tr[1]");
+      }
+    }
+    throw new Error(`[parity] no sheet row "${issueName}".`);
   }
 
-  async layoutsSheetExpandSubIssues(_issueName: string): Promise<void> {
-    return todo("layoutsSheetExpandSubIssues");
+  /** Either toggle label; expansion flips it. */
+  private layoutsSheetToggle(row: Locator): Locator {
+    return row
+      .locator('button[aria-label="Expand sub-work items"], button[aria-label="Collapse sub-work items"]')
+      .first();
   }
 
-  async layoutsSheetSubIssueNames(_issueName: string): Promise<string[]> {
-    return todo("layoutsSheetSubIssueNames");
+  async layoutsSheetHasSubIssueToggle(issueName: string): Promise<boolean> {
+    const row = await this.layoutsSheetRow(issueName);
+    return (await this.layoutsSheetToggle(row).count()) > 0;
   }
 
-  async layoutsSheetOpenSubIssueCount(_issueName: string): Promise<void> {
-    return todo("layoutsSheetOpenSubIssueCount");
+  async layoutsSheetExpandSubIssues(issueName: string): Promise<void> {
+    const cells = this.layoutsSheetFirstCells();
+    const before = await cells.count();
+    const row = await this.layoutsSheetRow(issueName);
+    await row
+      .getByRole("button", { name: "Expand sub-work items", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    // Expansion fetches the children, so new rows arrive asynchronously.
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    for (;;) {
+      if ((await cells.count()) > before) return;
+      if (Date.now() >= deadline) {
+        throw new Error(`[parity] sub-issues of "${issueName}" never rendered in the sheet.`);
+      }
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  async layoutsSheetSubIssueNames(issueName: string): Promise<string[]> {
+    // Children render as the rows directly after the parent; each row
+    // stamps its depth, so names are collected while rows stay deeper
+    // than the parent's own.
+    const table = this.layoutsSheetTable();
+    await table.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const rows = table.locator("tbody tr");
+    const count = await rows.count();
+    const pairs: Array<{ name: string; depth: number }> = [];
+    for (let index = 0; index < count; index += 1) {
+      const row = rows.nth(index);
+      pairs.push({
+        name: await this.layoutsSheetFirstCellName(row.locator('td[id^="issue-"]').first()),
+        depth: Number.parseInt((await row.getAttribute("data-depth")) ?? "0", 10) || 0,
+      });
+    }
+    const children: string[] = [];
+    let collecting = false;
+    let parentDepth = 0;
+    for (const pair of pairs) {
+      if (!collecting) {
+        if (pair.name === issueName) {
+          collecting = true;
+          parentDepth = pair.depth;
+        }
+        continue;
+      }
+      if (pair.depth <= parentDepth) break;
+      children.push(pair.name);
+    }
+    if (!collecting) throw new Error(`[parity] no sheet row "${issueName}".`);
+    return children;
+  }
+
+  async layoutsSheetOpenSubIssueCount(issueName: string): Promise<void> {
+    const before = this.page.url();
+    const cell = this.layoutsSheetCell(issueName, "Sub-work item");
+    await cell.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await cell.getByRole("button").first().click({ timeout: WebNewDriver.WAIT_MS });
+    // The count navigates to the browse path; settle so an immediate
+    // URL read sees the destination, not the departure.
+    await this.page.waitForURL((url) => url.href !== before, { timeout: WebNewDriver.WAIT_MS });
+  }
+
+  /** The mounted calendar root, or null when another layout is showing. */
+  private layoutsCalRoot(): Locator {
+    return this.page.getByTestId("issues-calendar").first();
+  }
+
+  /** Every rendered day tile, including adjacent-month filler. */
+  private layoutsCalTiles(): Locator {
+    return this.layoutsCalRoot().locator("[data-calendar-day]");
+  }
+
+  /**
+   * The one in-month tile whose day number matches. Parity fixtures only
+   * use days strictly inside the month, so the in-month filter makes the
+   * day number unambiguous even though the grid also paints filler tiles
+   * with the same numbers.
+   */
+  private async layoutsCalTile(dayNumber: number): Promise<Locator> {
+    const tiles = this.layoutsCalTiles();
+    const deadline = Date.now() + WEB_NEW_LAYOUTS_WAIT_MS;
+    for (;;) {
+      const count = await tiles.count();
+      for (let index = 0; index < count; index += 1) {
+        const tile = tiles.nth(index);
+        const inMonth = (await tile.getAttribute("data-in-month")) === "true";
+        const number = (await tile.getAttribute("data-calendar-day-number")) ?? "";
+        if (inMonth && number === String(dayNumber)) return tile;
+      }
+      if (Date.now() >= deadline) throw new Error(`[parity] calendar has no in-month day ${dayNumber}.`);
+      await this.page.waitForTimeout(250);
+    }
+  }
+
+  /** The tile's block anchors, in render order. */
+  private layoutsCalBlocks(tile: Locator): Locator {
+    return tile.locator('a[id^="issue-"]');
+  }
+
+  /** One block's work-item name; the block's own anchor names the key. */
+  private layoutsCalBlockName(block: Locator): Locator {
+    return block.locator("div.truncate").first();
   }
 
   async layoutsCalMode(): Promise<"month" | "week"> {
-    return todo("layoutsCalMode");
+    // A month grid paints more than ten tiles; a week row paints five or
+    // seven. Both render together once the window read settles.
+    const tiles = this.layoutsCalTiles();
+    await tiles.first().waitFor({ state: "visible", timeout: WEB_NEW_LAYOUTS_WAIT_MS });
+    return (await tiles.count()) > 10 ? "month" : "week";
   }
 
   async layoutsCalTitle(): Promise<string> {
-    return todo("layoutsCalTitle");
+    const title = this.page.getByTestId("calendar-title").first();
+    await title.waitFor({ state: "visible", timeout: WEB_NEW_LAYOUTS_WAIT_MS });
+    return ((await title.innerText()) ?? "").trim().replace(/\s+/g, " ");
+  }
+
+  private async layoutsCalStepPrev(): Promise<void> {
+    const before = await this.layoutsCalTitle();
+    await this.layoutsCalRoot().getByRole("button", { name: "Previous", exact: true }).first().click();
+    await this.layoutsCalWaitForTitleChange(before, "prev");
+  }
+
+  private async layoutsCalStepNext(): Promise<void> {
+    const before = await this.layoutsCalTitle();
+    await this.layoutsCalRoot().getByRole("button", { name: "Next", exact: true }).first().click();
+    await this.layoutsCalWaitForTitleChange(before, "next");
+  }
+
+  private async layoutsCalWaitForTitleChange(before: string, direction: string): Promise<void> {
+    const deadline = Date.now() + WEB_NEW_LAYOUTS_WAIT_MS;
+    for (;;) {
+      if ((await this.layoutsCalTitle()) !== before) return;
+      if (Date.now() >= deadline) throw new Error(`[parity] calendar ${direction} never moved the title.`);
+      await this.page.waitForTimeout(250);
+    }
   }
 
   async layoutsCalPrev(): Promise<void> {
-    return todo("layoutsCalPrev");
+    await this.layoutsCalStepPrev();
   }
 
   async layoutsCalNext(): Promise<void> {
-    return todo("layoutsCalNext");
+    await this.layoutsCalStepNext();
   }
 
   async layoutsCalToday(): Promise<void> {
-    return todo("layoutsCalToday");
+    await this.layoutsCalRoot().getByRole("button", { name: "Today", exact: true }).first().click();
+  }
+
+  private async layoutsCalOpenMonthPicker(): Promise<Locator> {
+    const panel = this.page.getByTestId("calendar-month-picker").first();
+    // The title toggles the panel: clicking while it is already open
+    // (left open by a previous read) shuts it and the wait below times
+    // out. Only click when the panel is not visible.
+    if (!(await panel.isVisible())) {
+      await this.page.getByTestId("calendar-title").first().click();
+      await panel.waitFor({ state: "visible", timeout: 15_000 });
+    }
+    return panel;
+  }
+
+  private async layoutsCalCloseOverlay(): Promise<void> {
+    // Escape does not dismiss this panel (probed: it stays open), while
+    // a title click toggles it shut. Close by toggling only when open.
+    const panel = this.page.getByTestId("calendar-month-picker").first();
+    if (await panel.isVisible()) {
+      await this.page.getByTestId("calendar-title").first().click();
+      await panel.waitFor({ state: "hidden", timeout: 15_000 });
+    }
   }
 
   async layoutsCalMonthPickerMonths(): Promise<string[]> {
-    return todo("layoutsCalMonthPickerMonths");
+    const panel = await this.layoutsCalOpenMonthPicker();
+    try {
+      const buttons = panel.getByTestId("calendar-picker-month");
+      const count = await buttons.count();
+      const months: string[] = [];
+      for (let index = 0; index < count; index += 1) months.push(((await buttons.nth(index).innerText()) ?? "").trim());
+      return months;
+    } finally {
+      await this.layoutsCalCloseOverlay();
+    }
   }
 
   async layoutsCalMonthPickerYear(): Promise<number> {
-    return todo("layoutsCalMonthPickerYear");
+    const panel = await this.layoutsCalOpenMonthPicker();
+    try {
+      const year = panel.getByTestId("calendar-picker-year").first();
+      await year.waitFor({ state: "visible", timeout: 15_000 });
+      return Number.parseInt(((await year.innerText()) ?? "").trim(), 10);
+    } finally {
+      await this.layoutsCalCloseOverlay();
+    }
   }
 
-  async layoutsCalMonthPickerYearStep(_direction: "prev" | "next"): Promise<void> {
-    return todo("layoutsCalMonthPickerYearStep");
+  async layoutsCalMonthPickerYearStep(direction: "prev" | "next"): Promise<void> {
+    const panel = await this.layoutsCalOpenMonthPicker();
+    try {
+      const year = panel.getByTestId("calendar-picker-year").first();
+      const before = ((await year.innerText()) ?? "").trim();
+      await panel
+        .getByRole("button", { name: direction === "prev" ? "Previous year" : "Next year", exact: true })
+        .first()
+        .click();
+      const deadline = Date.now() + 15_000;
+      for (;;) {
+        if (((await year.innerText()) ?? "").trim() !== before) return;
+        if (Date.now() >= deadline) throw new Error("[parity] calendar month picker year never stepped.");
+        await this.page.waitForTimeout(200);
+      }
+    } finally {
+      await this.layoutsCalCloseOverlay();
+    }
   }
 
-  async layoutsCalMonthPickerChoose(_month: string): Promise<void> {
-    return todo("layoutsCalMonthPickerChoose");
+  async layoutsCalMonthPickerChoose(month: string): Promise<void> {
+    const panel = await this.layoutsCalOpenMonthPicker();
+    try {
+      const before = await this.layoutsCalTitle();
+      await panel.getByTestId("calendar-picker-month").filter({ hasText: month }).first().click();
+      await this.layoutsCalWaitForTitleChange(before, "month picker");
+    } finally {
+      await this.layoutsCalCloseOverlay();
+    }
   }
 
   async layoutsCalMonthPickerEnabled(): Promise<boolean> {
-    return todo("layoutsCalMonthPickerEnabled");
+    const title = this.page.getByTestId("calendar-title").first();
+    await title.waitFor({ state: "visible", timeout: WEB_NEW_LAYOUTS_WAIT_MS });
+    return title.isEnabled();
   }
 
-  async layoutsCalSetMode(_mode: "month" | "week"): Promise<void> {
-    return todo("layoutsCalSetMode");
+  private async layoutsCalPickOption(name: string): Promise<void> {
+    const option = this.page.getByRole("button", { name, exact: true }).first();
+    // The Options control toggles its panel: clicking it while the panel
+    // is still open from a previous pick shuts the panel and the option
+    // never appears. When the option is already visible, click it
+    // directly; only open the panel when it is not.
+    if (!(await option.isVisible())) {
+      await this.layoutsCalRoot()
+        .getByRole("button", { name: "Options", exact: true })
+        .first()
+        .click({ timeout: WEB_NEW_LAYOUTS_WAIT_MS })
+        .catch(async () => {
+          await this.page.getByLabel("Calendar options").first().click({ timeout: WEB_NEW_LAYOUTS_WAIT_MS });
+        });
+      await option.waitFor({ state: "visible", timeout: 15_000 });
+    }
+    await option.click({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async layoutsCalSetMode(mode: "month" | "week"): Promise<void> {
+    await this.layoutsCalPickOption(mode === "month" ? "Month layout" : "Week layout");
+    const deadline = Date.now() + WEB_NEW_LAYOUTS_WAIT_MS;
+    for (;;) {
+      if ((await this.layoutsCalMode()) === mode) return;
+      if (Date.now() >= deadline) throw new Error(`[parity] calendar never switched to ${mode} mode.`);
+      await this.page.waitForTimeout(250);
+    }
   }
 
   async layoutsCalWeekendsVisible(): Promise<boolean> {
-    return todo("layoutsCalWeekendsVisible");
+    const cells = this.page.getByTestId("calendar-weekdays").locator("[data-calendar-weekday]");
+    await cells.first().waitFor({ state: "visible", timeout: WEB_NEW_LAYOUTS_WAIT_MS });
+    const count = await cells.count();
+    for (let index = 0; index < count; index += 1) {
+      if (((await cells.nth(index).innerText()) ?? "").trim() === "Sat") return true;
+    }
+    return false;
   }
 
-  async layoutsCalSetWeekends(_show: boolean): Promise<void> {
-    return todo("layoutsCalSetWeekends");
+  async layoutsCalSetWeekends(show: boolean): Promise<void> {
+    if ((await this.layoutsCalWeekendsVisible()) === show) return;
+    await this.layoutsCalPickOption("Show weekends");
+    const deadline = Date.now() + WEB_NEW_LAYOUTS_WAIT_MS;
+    for (;;) {
+      if ((await this.layoutsCalWeekendsVisible()) === show) return;
+      if (Date.now() >= deadline) throw new Error("[parity] calendar weekends toggle never applied.");
+      await this.page.waitForTimeout(250);
+    }
   }
 
   async layoutsCalColumnCount(): Promise<number> {
-    return todo("layoutsCalColumnCount");
+    const cells = this.page.getByTestId("calendar-weekdays").locator("[data-calendar-weekday]");
+    await cells.first().waitFor({ state: "visible", timeout: WEB_NEW_LAYOUTS_WAIT_MS });
+    return cells.count();
   }
 
-  async layoutsCalDayIssueNames(_dayNumber: number): Promise<string[]> {
-    return todo("layoutsCalDayIssueNames");
+  async layoutsCalDayIssueNames(dayNumber: number): Promise<string[]> {
+    const tile = await this.layoutsCalTile(dayNumber);
+    const blocks = this.layoutsCalBlocks(tile);
+    const count = await blocks.count();
+    const names: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      names.push(((await this.layoutsCalBlockName(blocks.nth(index)).innerText()) ?? "").trim());
+    }
+    return names;
   }
 
-  async layoutsCalDayIsToday(_dayNumber: number): Promise<boolean> {
-    return todo("layoutsCalDayIsToday");
+  async layoutsCalDayIsToday(dayNumber: number): Promise<boolean> {
+    const tile = await this.layoutsCalTile(dayNumber);
+    return (await tile.getAttribute("data-today")) === "true";
   }
 
-  async layoutsCalDayHasLoadMore(_dayNumber: number): Promise<boolean> {
-    return todo("layoutsCalDayHasLoadMore");
+  async layoutsCalDayHasLoadMore(dayNumber: number): Promise<boolean> {
+    const tile = await this.layoutsCalTile(dayNumber);
+    return (await tile.getByRole("button", { name: "Load more", exact: true }).count()) > 0;
   }
 
-  async layoutsCalDayLoadMore(_dayNumber: number): Promise<void> {
-    return todo("layoutsCalDayLoadMore");
+  async layoutsCalDayLoadMore(dayNumber: number): Promise<void> {
+    const tile = await this.layoutsCalTile(dayNumber);
+    await tile.getByRole("button", { name: "Load more", exact: true }).first().click({ timeout: 15_000 });
   }
 
-  async layoutsCalDragBlock(_issueName: string, _toDayNumber: number): Promise<void> {
-    return todo("layoutsCalDragBlock");
+  /** Step a press across the board so pointer-driven drags register. */
+  private async layoutsCalPointerTravel(from: { x: number; y: number }, to: { x: number; y: number }): Promise<void> {
+    const mouse = this.page.mouse;
+    await mouse.move(from.x, from.y);
+    await mouse.down();
+    const steps = 12;
+    for (let step = 1; step <= steps; step += 1) {
+      await mouse.move(from.x + ((to.x - from.x) * step) / steps, from.y + ((to.y - from.y) * step) / steps);
+    }
+    await mouse.up();
   }
 
-  async layoutsCalTileDrag(_fromDayNumber: number, _toDayNumber: number): Promise<void> {
-    return todo("layoutsCalTileDrag");
+  async layoutsCalDragBlock(issueName: string, toDayNumber: number): Promise<void> {
+    const block = this.page.locator('a[id^="issue-"]', { hasText: issueName }).first();
+    await block.waitFor({ state: "visible", timeout: WEB_NEW_LAYOUTS_WAIT_MS });
+    await block.scrollIntoViewIfNeeded({ timeout: 15_000 });
+    const tile = await this.layoutsCalTile(toDayNumber);
+    await tile.scrollIntoViewIfNeeded({ timeout: 15_000 });
+    const from = await block.boundingBox();
+    const to = await tile.boundingBox();
+    if (from === null || to === null) throw new Error("[parity] calendar drag endpoints have no bounding box.");
+    await this.layoutsCalPointerTravel(
+      { x: from.x + from.width / 2, y: from.y + from.height / 2 },
+      { x: to.x + to.width / 2, y: to.y + to.height / 2 }
+    );
   }
 
-  async layoutsCalBlockText(_issueName: string): Promise<string> {
-    return todo("layoutsCalBlockText");
+  async layoutsCalTileDrag(fromDayNumber: number, toDayNumber: number): Promise<void> {
+    const from = await this.layoutsCalTile(fromDayNumber);
+    const to = await this.layoutsCalTile(toDayNumber);
+    const fromBox = await from.boundingBox();
+    const toBox = await to.boundingBox();
+    if (fromBox === null || toBox === null)
+      throw new Error("[parity] calendar tile drag endpoints have no bounding box.");
+    await this.layoutsCalPointerTravel(
+      { x: fromBox.x + fromBox.width / 2, y: fromBox.y + fromBox.height / 2 },
+      { x: toBox.x + toBox.width / 2, y: toBox.y + toBox.height / 2 }
+    );
   }
 
-  async layoutsCalBlockHoverPreview(_issueName: string): Promise<boolean> {
-    return todo("layoutsCalBlockHoverPreview");
+  async layoutsCalBlockText(issueName: string): Promise<string> {
+    const block = this.page.locator('a[id^="issue-"]', { hasText: issueName }).first();
+    await block.waitFor({ state: "visible", timeout: WEB_NEW_LAYOUTS_WAIT_MS });
+    return ((await block.innerText()) ?? "").trim().replace(/\s+/g, " ");
   }
 
-  async layoutsCalBlockOpenPeek(_issueName: string): Promise<void> {
-    return todo("layoutsCalBlockOpenPeek");
+  async layoutsCalBlockHoverPreview(issueName: string): Promise<boolean> {
+    const block = this.page.locator('a[id^="issue-"]', { hasText: issueName }).first();
+    await block.waitFor({ state: "visible", timeout: WEB_NEW_LAYOUTS_WAIT_MS });
+    await block.hover();
+    const card = block.getByRole("tooltip");
+    try {
+      await card.waitFor({ state: "visible", timeout: 15_000 });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
-  async layoutsCalBlockQuickActions(_issueName: string): Promise<string[]> {
-    return todo("layoutsCalBlockQuickActions");
+  async layoutsCalBlockOpenPeek(issueName: string): Promise<void> {
+    const block = this.page.locator('a[id^="issue-"]', { hasText: issueName }).first();
+    await block.waitFor({ state: "visible", timeout: WEB_NEW_LAYOUTS_WAIT_MS });
+    await block.click();
+    await this.page.waitForURL((url) => url.href.includes("peekIssueId"), { timeout: WEB_NEW_LAYOUTS_WAIT_MS });
+    await this.page
+      .getByTestId("issue-preview")
+      .first()
+      .waitFor({ state: "visible", timeout: WEB_NEW_LAYOUTS_WAIT_MS });
   }
 
-  async layoutsCalDayQuickAdd(_dayNumber: number, _title: string): Promise<void> {
-    return todo("layoutsCalDayQuickAdd");
+  private async layoutsReadOpenMenuItems(): Promise<string[]> {
+    const items = this.page.getByRole("menuitem");
+    // Menus paint incrementally: a one-shot count right after the first
+    // entry appears catches 1-of-5 prefixes (ISS-066). Settle on three
+    // consecutive equal counts before reading; a closed menu settles at
+    // zero and still reads as empty.
+    let last = -1;
+    let stable = 0;
+    const deadline = Date.now() + 5_000;
+    for (;;) {
+      const seen = await items.count();
+      if (seen === last) stable += 1;
+      else {
+        last = seen;
+        stable = 0;
+      }
+      if (stable >= 2 || Date.now() >= deadline) break;
+      await this.page.waitForTimeout(100);
+    }
+    const count = await items.count();
+    const texts: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      texts.push(await this.layoutsMenuItemLabel(items.nth(index)));
+    }
+    return texts;
   }
 
-  async layoutsCalDayAddMenu(_dayNumber: number): Promise<string[]> {
-    return todo("layoutsCalDayAddMenu");
+  async layoutsCalBlockQuickActions(issueName: string): Promise<string[]> {
+    const block = this.page.locator('a[id^="issue-"]', { hasText: issueName }).first();
+    await block.waitFor({ state: "visible", timeout: WEB_NEW_LAYOUTS_WAIT_MS });
+    await block.hover();
+    await block.getByRole("button", { name: "Quick actions", exact: true }).first().click({ timeout: 15_000 });
+    await this.page.getByRole("menuitem").first().waitFor({ state: "visible", timeout: 15_000 });
+    try {
+      return await this.layoutsReadOpenMenuItems();
+    } finally {
+      await this.page.keyboard.press("Escape");
+    }
   }
 
-  async layoutsCalTapDay(_dayNumber: number): Promise<void> {
-    return todo("layoutsCalTapDay");
+  private async layoutsCalOpenDayAddMenu(dayNumber: number): Promise<void> {
+    const tile = await this.layoutsCalTile(dayNumber);
+    await tile.hover();
+    await tile.getByText("Add work item", { exact: true }).first().click({ timeout: 15_000 });
+    await this.page.getByRole("menuitem").first().waitFor({ state: "visible", timeout: 15_000 });
+  }
+
+  async layoutsCalDayQuickAdd(dayNumber: number, title: string): Promise<void> {
+    await this.layoutsCalOpenDayAddMenu(dayNumber);
+    await this.page.getByRole("menuitem", { name: "Add work item", exact: true }).first().click();
+    const field = this.page.getByPlaceholder("Work item Title").first();
+    await field.waitFor({ state: "visible", timeout: 15_000 });
+    await field.fill(title);
+    await field.press("Enter");
+    await this.page.keyboard.press("Escape");
+  }
+
+  async layoutsCalDayAddMenu(dayNumber: number): Promise<string[]> {
+    await this.layoutsCalOpenDayAddMenu(dayNumber);
+    try {
+      return await this.layoutsReadOpenMenuItems();
+    } finally {
+      await this.page.keyboard.press("Escape");
+    }
+  }
+
+  async layoutsCalDayAddExisting(dayNumber: number): Promise<void> {
+    await this.layoutsCalOpenDayAddMenu(dayNumber);
+    await this.page.getByRole("menuitem", { name: "Add existing work item", exact: true }).first().click();
+    const deadline = Date.now() + WEB_NEW_LAYOUTS_WAIT_MS;
+    for (;;) {
+      if (await this.layoutsAddExistingModalVisible()) return;
+      if (Date.now() >= deadline) throw new Error("[parity] add-existing modal never opened from the calendar.");
+      await this.page.waitForTimeout(250);
+    }
+  }
+
+  async layoutsCalTapDay(dayNumber: number): Promise<void> {
+    const tile = await this.layoutsCalTile(dayNumber);
+    // Bounded: an untimed click hangs to the test timeout when the tile
+    // never settles instead of failing the step in seconds.
+    await tile.locator('div[role="button"]').first().click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async layoutsCalDayDetailNames(): Promise<string[]> {
-    return todo("layoutsCalDayDetailNames");
+    const section = this.page.getByRole("region", { name: /^Issues on / }).first();
+    if ((await section.count()) === 0) return [];
+    const rows = section.locator("div.relative.flex.items-center");
+    const count = await rows.count();
+    const names: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const text = ((await rows.nth(index).locator("div.truncate").first().innerText()) ?? "").trim();
+      if (text !== "") names.push(text);
+    }
+    return [...new Set(names)];
   }
 
-  async layoutsRowMenuItemDisabled(_issueName: string, _item: string): Promise<boolean> {
-    return todo("layoutsRowMenuItemDisabled");
+  async layoutsRowMenuItemDisabled(issueName: string, item: string): Promise<boolean> {
+    await this.layoutsOpenRowMenu(issueName);
+    try {
+      const entry = await this.layoutsOpenMenuItem(item);
+      // Base-ui marks disabled items both ways; either marker counts.
+      if ((await entry.getAttribute("aria-disabled")) === "true") return true;
+      return (await entry.getAttribute("data-disabled")) !== null;
+    } finally {
+      await this.layoutsCloseOpenMenu();
+    }
   }
 
-  async layoutsRowMenuItemNote(_issueName: string, _item: string): Promise<string | null> {
-    return todo("layoutsRowMenuItemNote");
+  async layoutsRowMenuItemNote(issueName: string, item: string): Promise<string | null> {
+    await this.layoutsOpenRowMenu(issueName);
+    try {
+      const entry = await this.layoutsOpenMenuItem(item);
+      const note = entry.locator('[data-menu-description="true"]');
+      if ((await note.count()) === 0) return null;
+      return (await note.first().innerText()).trim().replace(/\s+/g, " ") || null;
+    } finally {
+      await this.layoutsCloseOpenMenu();
+    }
   }
 
   // The work-item dialog (create, edit, draft) is the one carrying the
@@ -8140,27 +10516,53 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async layoutsDeleteModalVisible(): Promise<boolean> {
-    return todo("layoutsDeleteModalVisible");
+    return this.isShown(this.page.getByRole("dialog", { name: "Delete work item" }));
   }
 
   async layoutsDeleteModalConfirm(): Promise<void> {
-    return todo("layoutsDeleteModalConfirm");
+    const dialog = this.page.getByRole("dialog", { name: "Delete work item" });
+    await dialog.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await dialog.getByRole("button", { name: "Delete", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    // The dialog closes once the write lands; settle before returning
+    // so an immediate visibility read sees the outcome, not the flight.
+    await dialog.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
+  }
+
+  /**
+   * The archive confirmation (ISS-061): its heading names the record
+   * ("Archive work item WEB 42"), so the dialog matches on the heading
+   * prefix rather than an exact title.
+   */
+  private layoutsArchiveDialog(): Locator {
+    return this.page
+      .getByRole("dialog")
+      .filter({ has: this.page.getByRole("heading", { name: /^Archive work item/ }) });
   }
 
   async layoutsArchiveModalVisible(): Promise<boolean> {
-    return todo("layoutsArchiveModalVisible");
+    return this.isShown(this.layoutsArchiveDialog());
   }
 
   async layoutsArchiveModalConfirm(): Promise<void> {
-    return todo("layoutsArchiveModalConfirm");
+    const dialog = this.layoutsArchiveDialog();
+    await dialog.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await dialog.getByRole("button", { name: "Archive", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
   }
 
   async layoutsMoveModalVisible(): Promise<boolean> {
-    return todo("layoutsMoveModalVisible");
+    return this.isShown(this.page.getByRole("dialog", { name: "Move to project" }));
   }
 
-  async layoutsMoveModalChoose(_projectName: string): Promise<void> {
-    return todo("layoutsMoveModalChoose");
+  async layoutsMoveModalChoose(projectName: string): Promise<void> {
+    const dialog = this.page.getByRole("dialog", { name: "Move to project" });
+    await dialog.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await dialog
+      .getByTestId("move-target")
+      .filter({ hasText: projectName })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
   }
 
   private layoutsAddExistingDialog(): Locator {
@@ -8195,7 +10597,14 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async layoutsDetailMenuItems(): Promise<string[]> {
-    return todo("layoutsDetailMenuItems");
+    // The detail and peek headers share one menu control (ISS-066).
+    await this.page.getByTestId("detail-menu-trigger").first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("menuitem").first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    try {
+      return await this.layoutsReadOpenMenuItems();
+    } finally {
+      await this.layoutsCloseOpenMenu();
+    }
   }
 
   async layoutsDetailMenuChoose(_item: string): Promise<void> {
@@ -8203,15 +10612,68 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async layoutsPeekCopyLinkVisible(): Promise<boolean> {
-    return todo("layoutsPeekCopyLinkVisible");
+    // Scoped to the peek panel, which is absent on the full page: the
+    // header's standalone copy control names the work-item link.
+    const panel = this.page.getByTestId("issue-preview").first();
+    if ((await panel.count()) === 0) return false;
+    return this.isShown(panel.getByRole("button", { name: "Copy work item link" }));
+  }
+
+  /**
+   * The whole-list ellipsis trigger on either host: view pages hang it
+   * off the view menu, every other list surface off the list-page quick
+   * actions. Both open the same Open/Copy pair.
+   */
+  private async layoutsListPageMenuTrigger(): Promise<Locator> {
+    const quick = this.page.getByTestId("list-page-actions");
+    // Scoped to the view header: the tab strip repeats the same testid
+    // once per view, and only the header trigger owns this page's menu.
+    const view = this.page.getByTestId("workspace-view-header").getByTestId("workspace-view-menu-trigger");
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    for (;;) {
+      if ((await quick.count()) > 0) return quick;
+      if ((await view.count()) > 0) return view;
+      if (Date.now() >= deadline) throw new Error("[parity] whole-list menu trigger never rendered.");
+      await this.page.waitForTimeout(500);
+    }
   }
 
   async layoutsListPageMenuItems(): Promise<string[]> {
-    return todo("layoutsListPageMenuItems");
+    await (await this.layoutsListPageMenuTrigger()).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("menuitem").first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    try {
+      return await this.layoutsReadOpenMenuItems();
+    } finally {
+      await this.layoutsCloseOpenMenu();
+    }
   }
 
-  async layoutsGroupHeaderAddMenu(_groupTitle: string): Promise<string[] | null> {
-    return todo("layoutsGroupHeaderAddMenu");
+  /** Section header for `title` on a project surface (ISS-012). */
+  private layoutsGroupHeader(groupTitle: string): Locator {
+    return this.page.locator('[data-testid="list-group-header"]').filter({ hasText: groupTitle }).first();
+  }
+
+  private async layoutsGroupHeaderAddControl(groupTitle: string): Promise<{ menu: boolean; control: Locator }> {
+    // Cycle/module headers wrap the plus in a menu trigger (span); plain
+    // project headers render it as a bare div opening create directly.
+    const header = this.layoutsGroupHeader(groupTitle);
+    await header.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const labelled = `Add to ${groupTitle}`;
+    const menuPlus = header.locator(`span[aria-label="${labelled}"]`);
+    if ((await menuPlus.count()) > 0) return { menu: true, control: menuPlus.first() };
+    return { menu: false, control: header.locator(`div[aria-label="${labelled}"]`).first() };
+  }
+
+  async layoutsGroupHeaderAddMenu(groupTitle: string): Promise<string[] | null> {
+    const { menu, control } = await this.layoutsGroupHeaderAddControl(groupTitle);
+    if (!menu) return null;
+    await control.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("menuitem").first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    try {
+      return await this.layoutsReadOpenMenuItems();
+    } finally {
+      await this.layoutsCloseOpenMenu();
+    }
   }
 
   /**
@@ -8228,6 +10690,12 @@ export class WebNewDriver implements ParityDriver {
     if ((await scope.count()) === 0) return null;
     const heading = scope.getByRole("heading").first();
     if ((await heading.count()) === 0) return null;
+    // The kit renders title + description as sibling spans inside one h3
+    // (EmptyState detailed tier); the oracle's h3 holds the title alone.
+    // Read the title span so both drivers return the title, falling back
+    // to the whole heading when no span exists.
+    const titleSpan = heading.locator(":scope > span").first();
+    if ((await titleSpan.count()) > 0) return ((await titleSpan.innerText()) ?? "").trim();
     return ((await heading.innerText()) ?? "").trim();
   }
 
@@ -8290,18 +10758,35 @@ export class WebNewDriver implements ParityDriver {
     if (before === 0) throw new Error("[parity] no filter pill: seed one before adding a condition.");
     await this.page.getByRole("button", { name: "Add filter", exact: true }).last().click();
     await this.layoutsPickMenuEntry(propertyLabel);
-    // A static value set (state group, priority) lists itself right after
-    // the property is picked; a workflow state needs its list opened.
-    const pick = this.page.getByRole("checkbox", { name: valueLabel, exact: true }).first();
-    if ((await pick.count()) === 0) {
+    // A fresh field auto-opens its value popup on mount, so the values
+    // are usually already there — and clicking `--` while open would
+    // dismiss the popup again. Only open it by hand when no value
+    // section appears; a workflow state's slow fetch keeps the popup
+    // (loading) open, which also skips the click.
+    const popup = async (): Promise<number> => this.page.locator('[data-testid^="rich-section-"]').count();
+    const opened = await this.layoutsWaitForCount(popup, 1, 10_000);
+    if (opened === 0) {
       await this.page.getByRole("button", { name: "--", exact: true }).last().click();
+      await this.layoutsWaitForCount(popup, 1, WEB_NEW_LAYOUTS_WAIT_MS);
     }
-    const found = await this.layoutsWaitForCount(
-      async () => this.page.getByRole("checkbox", { name: valueLabel, exact: true }).count(),
-      1,
-      WEB_NEW_LAYOUTS_WAIT_MS
-    );
-    if (found === 0) throw new Error(`[parity] no filter value ${valueLabel}.`);
+    // Long value lists cap at five rows behind "View all", so a wanted
+    // value past the cap needs one expansion first. The click fires at
+    // most once: re-clicking while React re-renders would collapse the
+    // list again and oscillate forever.
+    const values = async (): Promise<number> =>
+      this.page.getByRole("checkbox", { name: valueLabel, exact: true }).count();
+    const viewAll = this.page.getByRole("button", { name: "View all", exact: true });
+    const deadline = Date.now() + WEB_NEW_LAYOUTS_WAIT_MS;
+    let expanded = false;
+    for (;;) {
+      if ((await values()) > 0) break;
+      if (!expanded && (await viewAll.count()) > 0) {
+        await viewAll.first().click({ timeout: WebNewDriver.WAIT_MS });
+        expanded = true;
+      }
+      if (Date.now() >= deadline) throw new Error(`[parity] no filter value ${valueLabel}.`);
+      await this.page.waitForTimeout(500);
+    }
     await this.page.getByRole("checkbox", { name: valueLabel, exact: true }).first().click();
   }
 
@@ -8331,64 +10816,169 @@ export class WebNewDriver implements ParityDriver {
     return (await this.page.getByRole("heading", { name: "Recent activity" }).count()) > 0;
   }
 
+  /** Mobile layout menu names (LAYOUT_LABELS, as the menu reads them). */
+  private static readonly MOBILE_LAYOUT_LABELS: ReadonlyArray<{ key: LayoutsLayoutKey; label: string }> = [
+    { key: "list", label: "List" },
+    { key: "kanban", label: "Board" },
+    { key: "calendar", label: "Calendar" },
+    { key: "spreadsheet", label: "Spreadsheet" },
+    { key: "gantt_chart", label: "Timeline" },
+  ];
+
+  /** The compact header bar; the desktop header duplicates its controls. */
+  private layoutsMobileHeader(): Locator {
+    return this.page.getByTestId("issues-mobile-header").first();
+  }
+
   async layoutsMobileOfferedLayouts(): Promise<LayoutsLayoutKey[]> {
-    return todo("layoutsMobileOfferedLayouts");
+    await this.layoutsMobileHeader().getByTestId("mobile-layout-trigger").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("menuitem").first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    try {
+      const keys: LayoutsLayoutKey[] = [];
+      for (const label of await this.layoutsReadOpenMenuItems()) {
+        const key = WebNewDriver.MOBILE_LAYOUT_LABELS.find((entry) => entry.label === label)?.key;
+        if (key === undefined) throw new Error(`[parity] unrecognised mobile layout "${label}".`);
+        keys.push(key);
+      }
+      return keys;
+    } finally {
+      await this.layoutsCloseOpenMenu();
+    }
   }
 
   async layoutsMobileDisplayVisible(): Promise<boolean> {
+    // Project surfaces hang Display off the compact bar; the profile tab
+    // keeps its own trigger. Either visible control satisfies the read.
+    if (
+      await this.isShown(
+        this.layoutsMobileHeader().getByTestId("display-options-trigger").filter({ visible: true }).first()
+      )
+    ) {
+      return true;
+    }
     return this.isShown(this.page.getByTestId("profile-display-trigger").filter({ visible: true }).first());
   }
 
   async layoutsMobileAnalyticsVisible(): Promise<boolean> {
-    return todo("layoutsMobileAnalyticsVisible");
+    // Scoped to the compact bar: the desktop header renders the same
+    // entry node, hidden by viewport classes.
+    return this.isShown(
+      this.layoutsMobileHeader().getByTestId("issues-analytics-entry").filter({ visible: true }).first()
+    );
   }
 
   async layoutsSkeletonVisible(): Promise<boolean> {
-    return todo("layoutsSkeletonVisible");
+    // Initial loads paint list-loading; grouped pagination paints
+    // section-loading. The flat pagination sentinel is a footer, not a
+    // loader, so it stays out of the read.
+    return (
+      (await this.isShown(this.page.getByTestId("list-loading"))) ||
+      (await this.isShown(this.page.getByTestId("section-loading")))
+    );
   }
 
   async layoutsMutationSpinnerVisible(): Promise<boolean> {
-    return todo("layoutsMutationSpinnerVisible");
+    return this.isShown(this.page.getByTestId("issues-mutation-spinner"));
   }
 
-  async layoutsRowHighlighted(_issueName: string): Promise<boolean> {
-    return todo("layoutsRowHighlighted");
+  async layoutsRowHighlighted(issueName: string): Promise<boolean> {
+    // A fresh re-date marks its row with data-highlight; the row anchor is
+    // the same one both the list and the calendar paint.
+    const row = this.page.locator('[data-highlight="true"]', { hasText: issueName }).first();
+    return (await row.count()) > 0 && (await row.isVisible());
   }
 
   async layoutsTempRowVisible(): Promise<boolean> {
-    return todo("layoutsTempRowVisible");
+    // Unconfirmed quick-adds stamp their block while pending.
+    return this.isShown(this.page.locator('article[data-temprow="true"]'));
   }
 
-  async layoutsStallIssuesGet(_delayMs: number): Promise<void> {
-    return todo("layoutsStallIssuesGet");
+  /**
+   * Issue API calls (and only those): the oracle's bare /issues/ pattern
+   * also matches vite dev module URLs (/src/.../issues/...), which stalls
+   * the app boot itself and breaks held chunk loads.
+   */
+  private static readonly ISSUES_API_PATTERN = /\/api\/.*\/issues\//;
+
+  async layoutsStallIssuesGet(delayMs: number): Promise<void> {
+    // Per-request holds: slow hosts only shift the loader window, and
+    // non-GET traffic passes straight through.
+    await this.page.route(WebNewDriver.ISSUES_API_PATTERN, async (route) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      await route.continue();
+    });
   }
 
-  async layoutsStallIssueMutation(_delayMs: number): Promise<void> {
-    return todo("layoutsStallIssueMutation");
+  private layoutsStalledMutations = 0;
+
+  async layoutsStallIssueMutation(delayMs: number): Promise<void> {
+    this.layoutsStalledMutations = 0;
+    await this.page.route(WebNewDriver.ISSUES_API_PATTERN, async (route) => {
+      const method = route.request().method();
+      if (method !== "POST" && method !== "PATCH" && method !== "PUT") {
+        await route.continue();
+        return;
+      }
+      this.layoutsStalledMutations += 1;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      await route.continue();
+    });
   }
 
   async layoutsStalledMutationCount(): Promise<number> {
-    return todo("layoutsStalledMutationCount");
+    return this.layoutsStalledMutations;
   }
 
   async layoutsReleaseStalls(): Promise<void> {
-    return todo("layoutsReleaseStalls");
+    await this.page.unrouteAll({ behavior: "wait" });
   }
 
-  async layoutsSheetCellSetDueDate(_issueName: string, _isoDate: string): Promise<void> {
-    return todo("layoutsSheetCellSetDueDate");
+  async layoutsSheetCellSetDueDate(issueName: string, isoDate: string): Promise<void> {
+    // The due-date cell opens a month calendar: native month/year
+    // selects plus a day grid whose buttons stamp their ISO day, so the
+    // click addresses the exact day, not the bare number.
+    const cell = this.layoutsSheetCell(issueName, "Due date");
+    await cell.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const trigger = cell.locator("button:not([disabled])").first();
+    await trigger.scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
+    await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    const [year, month] = isoDate.split("-").map((part) => Number.parseInt(part, 10));
+    const monthNames = [
+      "January",
+      "February",
+      "March",
+      "April",
+      "May",
+      "June",
+      "July",
+      "August",
+      "September",
+      "October",
+      "November",
+      "December",
+    ];
+    const monthCombo = this.page.getByRole("combobox", { name: "Month" }).first();
+    await monthCombo.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await monthCombo.selectOption({ label: monthNames[(month ?? 1) - 1] ?? "" });
+    const yearCombo = this.page.getByRole("combobox", { name: "Year" }).first();
+    await yearCombo.selectOption({ label: String(year) });
+    const day = this.page.locator(`button[data-day="${isoDate}"]`).first();
+    await day.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await day.click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async layoutsCurrentUrl(): Promise<string> {
     return this.page.url();
   }
 
-  async layoutsSheetCellSetAssignee(_issueName: string, _memberName: string): Promise<void> {
-    return todo("layoutsSheetCellSetAssignee");
-  }
-
-  async layoutsCalDayAddExisting(_dayNumber: number): Promise<void> {
-    return todo("layoutsCalDayAddExisting");
+  async layoutsSheetCellSetAssignee(issueName: string, memberName: string): Promise<void> {
+    // Assignee cells render avatars, not the member name, so there is no
+    // painted value to settle on; the spec polls the server instead.
+    await this.layoutsSheetCellPick(issueName, "Assignees", memberName, false);
   }
 
   async layoutsAddExistingModalIssueNames(): Promise<string[]> {
@@ -8411,16 +11001,44 @@ export class WebNewDriver implements ParityDriver {
     return names;
   }
 
-  async layoutsMobileSwitchTo(_layout: LayoutsLayoutKey): Promise<void> {
-    return todo("layoutsMobileSwitchTo");
+  async layoutsMobileSwitchTo(layout: LayoutsLayoutKey): Promise<void> {
+    const label = WebNewDriver.MOBILE_LAYOUT_LABELS.find((entry) => entry.key === layout)?.label;
+    if (label === undefined) throw new Error(`[parity] cannot switch mobile to "${layout}".`);
+    await this.layoutsMobileHeader().getByTestId("mobile-layout-trigger").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("menuitem").first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await (await this.layoutsOpenMenuItem(label)).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.layoutsWaitForProjectLayout(layout);
   }
 
   async layoutsMobileDisplayCycleModuleDisabled(): Promise<{ cycleDisabled: boolean; moduleDisabled: boolean }> {
-    return todo("layoutsMobileDisplayCycleModuleDisabled");
+    // Off features hide their group-by rows (hideCycle/hideModule), so a
+    // missing row reads as disabled. The panel portals to the body; only
+    // the trigger needs the mobile scope.
+    await this.layoutsMobileHeader().getByTestId("display-options-trigger").click({ timeout: WebNewDriver.WAIT_MS });
+    const panel = this.page.getByTestId("display-options-panel");
+    await panel.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    try {
+      const group = panel.getByTestId("display-section-group");
+      const cycleDisabled = (await group.getByRole("button", { name: "Cycle", exact: true }).count()) === 0;
+      const moduleDisabled = (await group.getByRole("button", { name: "Module", exact: true }).count()) === 0;
+      return { cycleDisabled, moduleDisabled };
+    } finally {
+      await this.layoutsCloseOpenMenu();
+    }
   }
 
-  async layoutsRowMenuOpenNewTabUrl(_issueName: string): Promise<string> {
-    return todo("layoutsRowMenuOpenNewTabUrl");
+  async layoutsRowMenuOpenNewTabUrl(issueName: string): Promise<string> {
+    // window.open lands in a popup page: read its URL without waiting
+    // for the app to boot there, then close it again.
+    await this.layoutsOpenRowMenu(issueName);
+    const entry = await this.layoutsOpenMenuItem("Open in new tab");
+    const [popup] = await Promise.all([
+      this.page.context().waitForEvent("page", { timeout: 15_000 }),
+      entry.click({ timeout: WebNewDriver.WAIT_MS }),
+    ]);
+    const url = popup.url();
+    await popup.close();
+    return url;
   }
 
   async layoutsWorkItemModalHasText(text: string): Promise<boolean> {
@@ -8434,16 +11052,39 @@ export class WebNewDriver implements ParityDriver {
     }, text);
   }
 
-  async layoutsListPageMenuChoose(_item: string): Promise<void> {
-    return todo("layoutsListPageMenuChoose");
+  async layoutsListPageMenuChoose(item: string): Promise<void> {
+    if (item === "Copy link") await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await (await this.layoutsListPageMenuTrigger()).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("menuitem").first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await (await this.layoutsOpenMenuItem(item)).click({ timeout: WebNewDriver.WAIT_MS });
   }
 
-  async layoutsGroupHeaderAddChoose(_groupTitle: string, _item: string | null): Promise<void> {
-    return todo("layoutsGroupHeaderAddChoose");
+  async layoutsGroupHeaderAddChoose(groupTitle: string, item: string | null): Promise<void> {
+    const { menu, control } = await this.layoutsGroupHeaderAddControl(groupTitle);
+    if (!menu || item === null) {
+      // The plain-project plus (and a null pick) opens create directly.
+      await control.click({ timeout: WebNewDriver.WAIT_MS });
+    } else {
+      await control.click({ timeout: WebNewDriver.WAIT_MS });
+      await this.page.getByRole("menuitem").first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+      await (await this.layoutsOpenMenuItem(item)).click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    // Both dialogs lazy-load their chunk on first open; settle so an
+    // immediate visibility read sees the outcome, not the flight.
+    if (item === "Add an existing work item") {
+      await this.page
+        .getByRole("button", { name: "Add selected work items", exact: true })
+        .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    } else {
+      await this.layoutsWorkItemDialog().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    }
   }
 
-  async layoutsSheetToggleSubIssues(_issueName: string): Promise<void> {
-    return todo("layoutsSheetToggleSubIssues");
+  async layoutsSheetToggleSubIssues(issueName: string): Promise<void> {
+    // A bare toggle: unlike expansion it settles nothing, so absence
+    // pins (the nested-rendering bug) read the outcome, not a throw.
+    const row = await this.layoutsSheetRow(issueName);
+    await this.layoutsSheetToggle(row).click({ timeout: WebNewDriver.WAIT_MS });
   }
   // --- NEWFRONT-118 (layouts B): kanban board + gantt timeline stubs.
   // --- Appended; existing stubs above are untouched.
@@ -8644,15 +11285,14 @@ export class WebNewDriver implements ParityDriver {
     const out: KanbanCard[] = [];
     for (let index = 0; index < total; index += 1) {
       const card = cards.nth(index);
+      // Virtualized shells carry the card markers but no name node
+      // (ISS-043): probe before reading, or the innerText waits for
+      // content that only mounts near the viewport.
+      const nameNode = card.getByTestId("kanban-card-name").first();
+      const name = (await nameNode.count()) === 0 ? "" : ((await nameNode.innerText().catch(() => null)) ?? "").trim();
       out.push({
         issueId: (await card.getAttribute("data-issue-id").catch(() => null)) ?? "",
-        name: (
-          (await card
-            .getByTestId("kanban-card-name")
-            .first()
-            .innerText()
-            .catch(() => null)) ?? ""
-        ).trim(),
+        name,
         groupId: (await card.getAttribute("data-group-key").catch(() => null)) ?? "",
         subGroupId: (await card.getAttribute("data-lane-key").catch(() => null)) ?? "",
       });
@@ -8728,13 +11368,13 @@ export class WebNewDriver implements ParityDriver {
     const total = await cards.count();
     for (let index = 0; index < total; index += 1) {
       const card = cards.nth(index);
-      const name = (
-        (await card
-          .getByTestId("kanban-card-name")
-          .first()
-          .innerText()
-          .catch(() => null)) ?? ""
-      ).trim();
+      // Virtualized shells carry the card markers but no name node
+      // (ISS-043): skip them by probe, or the innerText waits for
+      // content that only mounts near the viewport — forever on a
+      // settled window, which also starves this lookup's retry budget.
+      const nameNode = card.getByTestId("kanban-card-name").first();
+      if ((await nameNode.count()) === 0) continue;
+      const name = ((await nameNode.innerText().catch(() => null)) ?? "").trim();
       if (name === issueName) return card;
     }
     throw new Error(`[parity] no kanban card titled ${JSON.stringify(issueName)}.`);
@@ -8865,8 +11505,23 @@ export class WebNewDriver implements ParityDriver {
     return this.page.locator('[role="menuitem"]:visible');
   }
 
+  /**
+   * The header menu portal paints a beat after the trigger click, so a
+   * one-shot count reads zero on a freshly opened menu (ISS-036). Wait
+   * for the first entry instead, bounded; false keeps the absent-menu
+   * semantics for callers that read a closed menu.
+   */
+  private async kanbanHeaderMenuSettled(items: Locator): Promise<boolean> {
+    for (let waited = 0; waited < 5_000; waited += 250) {
+      if ((await items.count()) > 0) return true;
+      await this.page.waitForTimeout(250);
+    }
+    return (await items.count()) > 0;
+  }
+
   async kanbanHeaderMenuItems(_columnName: string): Promise<string[]> {
     const items = this.kanbanHeaderMenuEntries();
+    if (!(await this.kanbanHeaderMenuSettled(items))) return [];
     const count = await items.count();
     const out: string[] = [];
     for (let index = 0; index < count; index += 1) {
@@ -8886,6 +11541,7 @@ export class WebNewDriver implements ParityDriver {
 
   async kanbanHeaderMenuChoose(_columnName: string, item: string): Promise<void> {
     const items = this.kanbanHeaderMenuEntries();
+    await this.kanbanHeaderMenuSettled(items);
     const count = await items.count();
     for (let index = 0; index < count; index += 1) {
       const label = (
@@ -8911,6 +11567,29 @@ export class WebNewDriver implements ParityDriver {
     return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
   }
 
+  /**
+   * Press point for a card drag: the name row's center. The card's geometric
+   * center lands on chip buttons once the card is fully dressed (labels, due
+   * date), and the card ignores presses starting on controls — so a center
+   * press silently starts no drag (ISS-038). The name link may drag.
+   */
+  private async kanbanPressPoint(
+    card: Locator,
+    cardBox: { x: number; y: number; width: number; height: number }
+  ): Promise<{ x: number; y: number }> {
+    try {
+      const name = card.getByTestId("kanban-card-name").first();
+      if ((await name.count()) > 0) {
+        const box = await name.boundingBox();
+        if (box !== null) return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+      }
+    } catch {
+      // Fall through to the top-area press below.
+    }
+    // No readable name row: press near the top, above the chip rows.
+    return { x: cardBox.x + cardBox.width / 2, y: cardBox.y + 14 };
+  }
+
   private async boardMouseDrag(from: { x: number; y: number }, onto: { x: number; y: number }): Promise<void> {
     // The board drag engine is pointer-based: press, a stepped move with
     // a pause so the drop target registers, then release.
@@ -8927,7 +11606,7 @@ export class WebNewDriver implements ParityDriver {
     const sourceBox = await source.boundingBox();
     const targetBox = await target.boundingBox();
     if (!sourceBox || !targetBox) throw new Error("[parity] drag card has no box.");
-    const from = WebNewDriver.boardBoxCenter(sourceBox);
+    const from = await this.kanbanPressPoint(source, sourceBox);
     const onto = { x: targetBox.x + targetBox.width / 2, y: targetBox.y + 8 };
     await this.boardMouseDrag(from, onto);
     await expect
@@ -8950,7 +11629,7 @@ export class WebNewDriver implements ParityDriver {
     const sourceBox = await source.boundingBox();
     const targetBox = await target.boundingBox();
     if (!sourceBox || !targetBox) throw new Error("[parity] drag card has no box.");
-    const from = WebNewDriver.boardBoxCenter(sourceBox);
+    const from = await this.kanbanPressPoint(source, sourceBox);
     const onto = { x: targetBox.x + targetBox.width / 2, y: targetBox.y + 8 };
     await this.boardMouseDrag(from, onto);
     await this.page.waitForTimeout(3_000);
@@ -8963,7 +11642,7 @@ export class WebNewDriver implements ParityDriver {
     await column.scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
     const columnBox = await column.boundingBox();
     if (!sourceBox || !columnBox) throw new Error("[parity] drag card or column has no box.");
-    const from = WebNewDriver.boardBoxCenter(sourceBox);
+    const from = await this.kanbanPressPoint(source, sourceBox);
     const onto = { x: columnBox.x + columnBox.width / 2, y: columnBox.y + columnBox.height - 12 };
     await this.boardMouseDrag(from, onto);
     await expect.poll(() => this.kanbanColumnCards(columnName), { timeout: 120_000 }).toContain(sourceName);
@@ -8976,7 +11655,7 @@ export class WebNewDriver implements ParityDriver {
     // so its box can be read before pressing the card.
     const zoneBox = await this.page.getByTestId("kanban-delete-zone").first().boundingBox();
     if (!sourceBox || !zoneBox) throw new Error("[parity] delete drag has no box.");
-    const from = WebNewDriver.boardBoxCenter(sourceBox);
+    const from = await this.kanbanPressPoint(source, sourceBox);
     const onto = WebNewDriver.boardBoxCenter(zoneBox);
     await this.boardMouseDrag(from, onto);
     await expect.poll(() => this.kanbanDeleteModalVisible(), { timeout: 120_000 }).toBe(true);
@@ -9007,7 +11686,7 @@ export class WebNewDriver implements ParityDriver {
     await column.scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
     const columnBox = await column.boundingBox();
     if (!sourceBox || !columnBox) throw new Error("[parity] overlay drag has no box.");
-    const from = WebNewDriver.boardBoxCenter(sourceBox);
+    const from = await this.kanbanPressPoint(source, sourceBox);
     const onto = WebNewDriver.boardBoxCenter(columnBox);
     await this.page.mouse.move(from.x, from.y);
     await this.page.mouse.down();
@@ -9025,29 +11704,25 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async boardLastToast(): Promise<{ title: string; message: string } | null> {
-    const cards = this.page.locator('[data-testid="toast-notification"]');
-    if ((await cards.count()) === 0) return null;
-    const newest = cards.first();
-    const title = (
-      (await newest
-        .getByTestId("toast-title")
+    // Same surface as lastToast(): the Notifications stack is newest-first,
+    // so .first() is the latest toast. (The toast-notification testid this
+    // read before exists nowhere, so every refusal-toast read returned null;
+    // ISS-037/038.)
+    const toasts = this.webhookToasts();
+    if ((await toasts.count()) === 0) return null;
+    const text = (
+      (await toasts
         .first()
         .innerText()
         .catch(() => null)) ?? ""
-    )
-      .trim()
-      .replace(/\s+/g, " ");
-    const message = (
-      (await newest
-        .getByTestId("toast-description")
-        .first()
-        .innerText()
-        .catch(() => null)) ?? ""
-    )
-      .trim()
-      .replace(/\s+/g, " ");
-    if (title === "" && message === "") return null;
-    return { title, message };
+    ).trim();
+    if (text === "") return null;
+    const [title, ...rest] = text
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+    if (title === undefined || title === "") return null;
+    return { title, message: rest.join(" ") };
   }
 
   async kanbanColumnScrollEnd(columnName: string): Promise<void> {
@@ -9056,6 +11731,9 @@ export class WebNewDriver implements ParityDriver {
     await body.evaluate((node) => {
       node.scrollTop = node.scrollHeight;
     });
+    // The auto-load races the read that follows: settle like the oracle
+    // (2s) so the next page has landed before the caller samples.
+    await this.page.waitForTimeout(2_000);
   }
 
   /** Flat columns page behind a scroll sentinel, never an explicit entry. */
@@ -9124,7 +11802,15 @@ export class WebNewDriver implements ParityDriver {
 
   async kanbanCellLoadMore(columnName: string, laneName: string): Promise<void> {
     const cell = await this.kanbanCellByNames(columnName, laneName);
+    const before = await this.kanbanCellCards(columnName, laneName);
     await cell.getByTestId("kanban-load-more").first().click({ timeout: WebNewDriver.WAIT_MS });
+    // The page fetch races the read that follows: settle like the oracle on
+    // the appended rows, so a missing page fails here loudly (ISS-042).
+    await expect
+      .poll(async () => (await this.kanbanCellCards(columnName, laneName)).length > before.length, {
+        timeout: 120_000,
+      })
+      .toBe(true);
   }
 
   async kanbanBoardScroll(): Promise<{ x: number; y: number }> {
@@ -9147,11 +11833,26 @@ export class WebNewDriver implements ParityDriver {
     edge: "left" | "right" | "top" | "bottom",
     holdMs: number
   ): Promise<void> {
-    const source = await this.kanbanCardByName(sourceName);
+    // The virtualized window churns while it settles after a scroll or
+    // page append: a card readable one moment can flicker out the next,
+    // even mid-window. Ride out the churn instead of grabbing one-shot
+    // (ISS-043).
+    const startedAt = Date.now();
+    let source: Locator | null = null;
+    while (source === null && Date.now() - startedAt < 30_000) {
+      try {
+        source = await this.kanbanCardByName(sourceName);
+      } catch {
+        // Gentle cadence: each sample forces layout on every shell, so
+        // sampling faster would only feed the churn being waited out.
+        await this.page.waitForTimeout(1_000);
+      }
+    }
+    if (source === null) throw new Error(`[parity] no kanban card titled ${JSON.stringify(sourceName)}.`);
     const sourceBox = await source.boundingBox();
     const viewport = this.page.viewportSize() ?? { width: 1280, height: 720 };
     if (!sourceBox) throw new Error("[parity] edge-hold card has no box.");
-    const from = WebNewDriver.boardBoxCenter(sourceBox);
+    const from = await this.kanbanPressPoint(source, sourceBox);
     const margin = 12;
     // Holds track the grabbed card's own axis so the cursor stays over its
     // column (vertical holds) or its row band (horizontal holds); a centered
@@ -9349,7 +12050,9 @@ export class WebNewDriver implements ParityDriver {
       )
         .trim()
         .replace(/\s+/g, " ");
-      if (text.replace(/^[A-Z]+-\d+\s+/, "") === issueName) return links.nth(index);
+      // Identifiers carry digits in the prefix (N122ZDUQCM-1), not just
+      // letters — the strip must accept both (live-proven ISS-237).
+      if (text.replace(/^[A-Z0-9]+-\d+\s+/, "") === issueName) return links.nth(index);
     }
     throw new Error(`[parity] no timeline row titled ${JSON.stringify(issueName)}.`);
   }
@@ -9361,8 +12064,8 @@ export class WebNewDriver implements ParityDriver {
     for (let index = 0; index < total; index += 1) {
       const row = rows.nth(index);
       const text = ((await row.innerText().catch(() => null)) ?? "").trim().replace(/\s+/g, " ");
-      const identifier = /^([A-Z]+-\d+)\s+/.exec(text)?.[1] ?? null;
-      const name = identifier === null ? text : text.replace(/^[A-Z]+-\d+\s+/, "").replace(/\s+\d+ days?$/, "");
+      const identifier = /^([A-Z0-9]+-\d+)\s+/.exec(text)?.[1] ?? null;
+      const name = identifier === null ? text : text.replace(/^[A-Z0-9]+-\d+\s+/, "").replace(/\s+\d+ days?$/, "");
       const duration = row.getByTestId("gantt-row-duration");
       const durationText = (await duration.count()) > 0 ? (await duration.innerText()).trim() || null : null;
       out.push({ identifier, name, duration: durationText });
@@ -9447,7 +12150,18 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async ganttBarExists(issueName: string): Promise<boolean> {
-    const issueId = await this.ganttIssueIdByName(issueName);
+    let issueId: string;
+    try {
+      issueId = await this.ganttIssueIdByName(issueName);
+    } catch (error) {
+      // A quick-added row renders after its create lands; polls must
+      // read "not yet" rather than abort on the transient lookup miss
+      // (expect.poll does not retry a throwing predicate, ISS-055).
+      // Anything else — a malformed row id, a detached page — still
+      // throws.
+      if (error instanceof Error && error.message.includes("no timeline row titled")) return false;
+      throw error;
+    }
     const bar = this.page.locator(`#gantt-block-${issueId}`).first();
     if ((await bar.count()) === 0) return false;
     const box = await bar.boundingBox();
@@ -9541,17 +12255,25 @@ export class WebNewDriver implements ParityDriver {
   }
 
   private async ganttChartPointForRow(issueName: string, dayOffset: number): Promise<{ x: number; y: number }> {
+    // Sidebar rows align vertically with chart rows, so the sidebar
+    // row's center is the lane's center. Anchor x to the visible
+    // sidebar edge like the oracle: the chart mounts scrolled to
+    // center today, so the day-column strip's box sits off-viewport
+    // (live probe: strip.x=-231) and a strip-anchored hover lands on
+    // nothing (ISS-044/054 read false, ISS-049/055-059 cascaded).
     const dayWidth = await this.ganttDayWidth();
     const { box } = await this.ganttRowBox(issueName);
-    const strip = await this.page.getByTestId("gantt-day-columns").first().boundingBox();
-    if (strip === null) throw new Error("[parity] timeline strip has no box.");
-    return { x: strip.x + dayOffset * dayWidth + 2, y: box.y + box.height / 2 };
+    const sidebar = await this.page.getByTestId("gantt-sidebar-column").first().boundingBox();
+    if (sidebar === null) throw new Error("[parity] timeline sidebar has no box.");
+    return { x: sidebar.x + sidebar.width + dayOffset * dayWidth, y: box.y + box.height / 2 };
   }
 
   async ganttRowAddVisible(issueName: string): Promise<boolean> {
     const at = await this.ganttChartPointForRow(issueName, 2);
     await this.page.mouse.move(at.x, at.y);
-    await this.page.waitForTimeout(300);
+    // The "+" mounts under the cursor on row hover; the oracle settles
+    // 800ms for it (my 300ms mistranslation read false, ISS-054).
+    await this.page.waitForTimeout(800);
     const add = this.page.getByTestId("gantt-add-block").first();
     return (await add.count()) > 0 && (await add.isVisible());
   }
@@ -9582,32 +12304,72 @@ export class WebNewDriver implements ParityDriver {
     return await entry.isVisible();
   }
 
-  async ganttBarInfo(_issueName: string): Promise<{ tinted: boolean; masked: boolean; namePinned: boolean } | null> {
-    return todo("ganttBarInfo");
+  /** One issue's timeline bar block, addressed by row id. */
+  private ganttBar(issueId: string): Locator {
+    return this.page.locator(`#gantt-block-${issueId}`).first();
   }
 
-  async ganttHoverBar(_issueName: string): Promise<void> {
-    return todo("ganttHoverBar");
+  async ganttBarInfo(issueName: string): Promise<{ tinted: boolean; masked: boolean; namePinned: boolean } | null> {
+    if (!(await this.ganttBarExists(issueName))) return null;
+    const issueId = await this.ganttIssueIdByName(issueName);
+    return await this.ganttBar(issueId).evaluate((bar) => {
+      const body = bar.querySelector('[data-testid="gantt-bar-body"]') as HTMLElement | null;
+      if (!body) return null;
+      const tint = window.getComputedStyle(body).backgroundColor;
+      const mask = window.getComputedStyle(body).maskImage ?? "";
+      const name = bar.querySelector('[data-testid="gantt-bar-name"]') as HTMLElement | null;
+      const pinned = !!name && window.getComputedStyle(name).position === "sticky";
+      return {
+        tinted: !!tint && tint !== "rgba(0, 0, 0, 0)" && tint !== "transparent",
+        masked: mask.includes("gradient"),
+        namePinned: pinned && window.getComputedStyle(name as HTMLElement).left !== "auto",
+      };
+    });
+  }
+
+  async ganttHoverBar(issueName: string): Promise<void> {
+    const issueId = await this.ganttIssueIdByName(issueName);
+    const bar = this.ganttBar(issueId);
+    await bar.scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
+    await bar.hover({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.waitForTimeout(600);
   }
 
   async ganttPreviewVisible(): Promise<boolean> {
-    return todo("ganttPreviewVisible");
+    return this.isShown(this.page.getByTestId("work-item-preview").first());
   }
 
-  async ganttOpenBarPeek(_issueName: string): Promise<void> {
-    return todo("ganttOpenBarPeek");
+  async ganttOpenBarPeek(issueName: string): Promise<void> {
+    const issueId = await this.ganttIssueIdByName(issueName);
+    const bar = this.ganttBar(issueId);
+    await bar.scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
+    await bar.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByTestId("issue-preview").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await expect.poll(() => this.issuePeekTitle(), { timeout: WebNewDriver.WAIT_MS }).toBe(issueName);
   }
 
-  async ganttScrollArrowVisible(_issueName: string): Promise<boolean> {
-    return todo("ganttScrollArrowVisible");
+  async ganttScrollArrowVisible(issueName: string): Promise<boolean> {
+    // One sticky arrow per off-screen bar, labelled for its row.
+    const arrow = this.ganttContainer().getByRole("button", { name: `Scroll to ${issueName}` });
+    if ((await arrow.count()) === 0) return false;
+    return await arrow.first().isVisible();
   }
 
-  async ganttClickScrollArrow(_issueName: string): Promise<void> {
-    return todo("ganttClickScrollArrow");
+  async ganttClickScrollArrow(issueName: string): Promise<void> {
+    const arrow = this.ganttContainer()
+      .getByRole("button", { name: `Scroll to ${issueName}` })
+      .first();
+    if ((await arrow.count()) === 0) throw new Error(`[parity] no scroll arrow for ${JSON.stringify(issueName)}.`);
+    await arrow.click({ timeout: WebNewDriver.WAIT_MS });
+    await expect.poll(() => this.ganttBarInView(issueName), { timeout: WebNewDriver.WAIT_MS }).toBe(true);
   }
 
-  async ganttBarInView(_issueName: string): Promise<boolean> {
-    return todo("ganttBarInView");
+  async ganttBarInView(issueName: string): Promise<boolean> {
+    const issueId = await this.ganttIssueIdByName(issueName);
+    const box = await this.ganttBar(issueId).boundingBox();
+    if (!box) return false;
+    const viewport = this.page.viewportSize() ?? { width: 1280, height: 720 };
+    return box.x < viewport.width && box.x + box.width > 0;
   }
 
   async ganttSidebarLoading(): Promise<boolean> {
@@ -9630,7 +12392,12 @@ export class WebNewDriver implements ParityDriver {
       await this.page.reload();
       const deadline = Date.now() + 120_000;
       for (;;) {
-        const loader = this.page.locator("div.animate-pulse").first();
+        // The new app's reload loader is the route pending skeleton
+        // (the kit shimmer spans carry no animate-pulse div, and the
+        // sidebar's own pulse is the unconfirmed-row overlay, ISS-059).
+        const loader = this.page
+          .locator('[data-testid="issues-skeleton-list"], [data-testid="issues-skeleton-gantt"]')
+          .first();
         if ((await loader.count()) > 0 && (await loader.isVisible().catch(() => false))) return true;
         if (Date.now() > deadline) return false;
         await this.page.waitForTimeout(250);

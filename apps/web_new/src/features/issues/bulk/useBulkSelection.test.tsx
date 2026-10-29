@@ -5,7 +5,7 @@
 import { act, renderHook } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import { SELECTION_ROW_ATTR, useBulkSelection } from "./useBulkSelection.js";
+import { LEAVE_GUARD_ATTR, SELECTION_ROW_ATTR, useBulkSelection } from "./useBulkSelection.js";
 import type { SelectionItem } from "./model.js";
 
 const ITEMS: SelectionItem[] = [
@@ -174,6 +174,15 @@ describe("useBulkSelection", () => {
     });
     expect(node.scrollIntoView).toHaveBeenCalled();
     node.remove();
+  });
+
+  it("publishes the armed leave guard on the root only while a selection exists", () => {
+    const { result } = renderHook(() => useBulkSelection(ITEMS));
+    expect(document.documentElement.hasAttribute(LEAVE_GUARD_ATTR)).toBe(false);
+    act(() => result.current.onRowToggle("a", false));
+    expect(document.documentElement.getAttribute(LEAVE_GUARD_ATTR)).toBe("armed");
+    act(() => result.current.clear());
+    expect(document.documentElement.hasAttribute(LEAVE_GUARD_ATTR)).toBe(false);
   });
 
   it("delegates reveal to the surface when one is supplied", () => {

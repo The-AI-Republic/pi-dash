@@ -6,7 +6,7 @@
 // selectors the methods read, so a markup change that breaks the parity
 // hooks fails here before the parity stack is ever brought up.
 import type { Locator, Page } from "@playwright/test";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { WebNewDriver } from "./web-new";
 
@@ -73,6 +73,7 @@ function pageOf(
     locator?: (selector: string) => Locator;
     role?: (role: string, options?: unknown) => Locator;
     evaluate?: (fn: (arg?: unknown) => unknown, arg?: unknown) => unknown;
+    waitForTimeout?: (ms: number) => Promise<void>;
   } = {}
 ): { page: Page; recorded: Recorded } {
   const recorded: Recorded = { selectors: [], roles: [], clicks: [], hovers: [], keys: [], evaluated: 0 };
@@ -95,6 +96,7 @@ function pageOf(
       return parts.evaluate === undefined ? fn(arg) : parts.evaluate(fn, arg);
     },
     waitForFunction: async () => undefined,
+    waitForTimeout: parts.waitForTimeout ?? (async () => undefined),
     url: () => "https://p.test/acme/browse/WEB-1",
   } as unknown as Page;
   return { page, recorded };
@@ -323,6 +325,122 @@ describe("activity feed driver methods", () => {
     await expect(new WebNewDriver(page).activityHasCreationEntry()).resolves.toBe(true);
     expect(recorded.roles).toContain("region");
   });
+
+  it("keeps polling while the feed paints, then reports the entry", async () => {
+    let reads = 0;
+    const { page } = pageOf({
+      role: (role) =>
+        role === "region"
+          ? locator({
+              getByText: () => {
+                reads += 1;
+                // The timeline query has not settled on the first read.
+                return locator({ count: async () => (reads === 1 ? 0 : 1) });
+              },
+            })
+          : locator(),
+    });
+    await expect(new WebNewDriver(page).activityHasCreationEntry()).resolves.toBe(true);
+    expect(reads).toBe(2);
+  });
+
+  it("gives up and reports no entry once the wait budget is spent", async () => {
+    let polls = 0;
+    vi.useFakeTimers();
+    try {
+      const { page } = pageOf({
+        role: (role) =>
+          role === "region" ? locator({ getByText: () => locator({ count: async () => 0 }) }) : locator(),
+        waitForTimeout: async () => {
+          polls += 1;
+          vi.advanceTimersByTime(250);
+        },
+      });
+      await expect(new WebNewDriver(page).activityHasCreationEntry()).resolves.toBe(false);
+      expect(polls).toBeGreaterThan(1);
+      expect(polls).toBeLessThan(1000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("posts a comment by typing then clicking the submit button", async () => {
+    const typed: string[] = [];
+    let submitted = 0;
+    let cardWaited = 0;
+    const editor = locator({
+      pressSequentially: async (text: string) => {
+        typed.push(text);
+      },
+    });
+    const { page } = pageOf({
+      role: (role, options) => {
+        if (role === "group") {
+          return locator({
+            locator: () => editor,
+            getByRole: (inner: string, innerOptions?: unknown) => {
+              expect(inner).toBe("button");
+              expect((innerOptions as { name?: unknown }).name).toBe("Comment");
+              return locator({
+                click: async () => {
+                  submitted += 1;
+                },
+              });
+            },
+          });
+        }
+        if (role === "article") {
+          expect((options as { hasText?: unknown }).hasText).toBe("hello");
+          return locator({
+            waitFor: async () => {
+              cardWaited += 1;
+            },
+          });
+        }
+        return locator();
+      },
+    });
+    await new WebNewDriver(page).activityPostComment("hello");
+    expect(typed).toEqual(["hello"]);
+    expect(submitted).toBe(1);
+    expect(cardWaited).toBe(1);
+  });
+
+  it("waits for the first feed row before reading comment texts", async () => {
+    let reads = 0;
+    const { page } = pageOf({
+      role: (role) =>
+        role === "region"
+          ? locator({
+              locator: (selector: string) => {
+                expect(selector).toBe('[data-feed-row="true"]');
+                reads += 1;
+                return locator({ count: async () => (reads === 1 ? 0 : 2) });
+              },
+            })
+          : locator(),
+      locator: (selector: string) =>
+        selector === '[id^="comment-"]' ? locator({ allInnerTexts: async () => ["a", "b"] }) : locator(),
+    });
+    await expect(new WebNewDriver(page).activityCommentTexts()).resolves.toEqual(["a", "b"]);
+    expect(reads).toBe(2);
+  });
+
+  it("reads an empty feed as [] once the wait budget is spent", async () => {
+    vi.useFakeTimers();
+    try {
+      const { page } = pageOf({
+        role: (role) => (role === "region" ? locator({ locator: () => locator({ count: async () => 0 }) }) : locator()),
+        locator: () => locator({ allInnerTexts: async () => [] }),
+        waitForTimeout: async () => {
+          vi.advanceTimersByTime(250);
+        },
+      });
+      await expect(new WebNewDriver(page).activityCommentTexts()).resolves.toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("reaction driver methods", () => {
@@ -396,5 +514,50 @@ describe("chip parsing", () => {
           : locator(),
     });
     await expect(new WebNewDriver(page).reactionsArchivedCommentClusterVisible("Body")).resolves.toBe(false);
+  });
+
+  it("opens the first entry profile link and returns the url", async () => {
+    const clicked: string[] = [];
+    const seen: unknown[] = [];
+    const link = locator({ click: async () => void clicked.push("profile") });
+    const { page } = pageOf({
+      role: (role) =>
+        role === "region"
+          ? locator({
+              locator: (selector) => {
+                expect(selector).toBe('a[href*="/profile/"]');
+                return link;
+              },
+            })
+          : locator(),
+    });
+    const mutable = page as unknown as Record<string, unknown>;
+    mutable.waitForURL = async (pattern: unknown) => void seen.push(pattern);
+    mutable.url = () => "https://p.test/acme/profile/member-1";
+    await expect(new WebNewDriver(page).activityOpenFirstEntryLink()).resolves.toBe(
+      "https://p.test/acme/profile/member-1"
+    );
+    expect(clicked).toEqual(["profile"]);
+    expect(String(seen[0])).toContain("profile");
+  });
+
+  it("throws when the feed carries no profile link", async () => {
+    const { page } = pageOf({
+      role: (role) =>
+        role === "region"
+          ? locator({
+              locator: () =>
+                locator({
+                  first: () =>
+                    locator({
+                      waitFor: async () => {
+                        throw new Error("no link");
+                      },
+                    }),
+                }),
+            })
+          : locator(),
+    });
+    await expect(new WebNewDriver(page).activityOpenFirstEntryLink()).rejects.toThrow("no link");
   });
 });

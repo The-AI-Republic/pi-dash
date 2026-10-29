@@ -106,6 +106,9 @@ export function CalendarDay({
     <div
       className={`group relative flex h-full w-full flex-col border border-(--border) ${cell.weekend ? "bg-(--subtle)" : "bg-(--bg)"} ${cell.inMonth ? "" : "opacity-60"} ${isDropTarget ? "ring-2 ring-(--accent)" : ""}`}
       data-calendar-day={cell.iso}
+      data-calendar-day-number={cell.day}
+      data-in-month={cell.inMonth ? "true" : "false"}
+      data-today={cell.isToday ? "true" : undefined}
       onPointerEnter={() => onDragOver(cell.iso)}
     >
       <div className={headerClass}>

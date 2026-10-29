@@ -202,11 +202,14 @@ test(
           async () => (await serverIssue(seed.workspaceSlug, projectId, issue.id, session)).target_date,
           isoDay(11)
         );
+        // The oracle zero-pads the from-day ("05"); the new smart label
+        // renders it bare ("Oct 5 - 11, 2026", spec §10 gate alignment).
+        const fromSnippet = driver.target === "web_new" ? "5 - 11" : "05";
         await pickUntilServerSettles(
           driver,
           5,
           issue.name,
-          "05",
+          fromSnippet,
           reopen,
           async () => (await serverIssue(seed.workspaceSlug, projectId, issue.id, session)).start_date,
           isoDay(5)
@@ -214,7 +217,7 @@ test(
         // The from-click re-sends the current to-end, so it stays put.
         expect((await serverIssue(seed.workspaceSlug, projectId, issue.id, session)).target_date).toBe(isoDay(11));
         const cell = await driver.rangeMergedCellText(issue.name);
-        expect(cell).toContain("05");
+        expect(cell).toContain(fromSnippet);
         expect(cell).toContain("11");
       });
     } finally {

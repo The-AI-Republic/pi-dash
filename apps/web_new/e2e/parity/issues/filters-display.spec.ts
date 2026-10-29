@@ -260,23 +260,26 @@ test(
 
     await test.step("both switches flip on and off, persisted server-side", async () => {
       await driver.openDisplayOptions();
-      // The reset omits both keys, which renders unchecked; flip on, prove
-      // it stored, then flip back off and prove that too.
+      // The reset omits both keys, which the old app renders unchecked.
+      // ISS-079 intends sub-work items default-on, so the new app renders
+      // it checked after a reset (spec §10 gate alignment); both legs
+      // still prove both directions persisted server-side.
+      const subDefault = driver.target === "web_new";
       expect(await driver.isDisplayOptionChecked("Show empty groups")).toBe(false);
-      expect(await driver.isDisplayOptionChecked("Show sub-work items")).toBe(false);
+      expect(await driver.isDisplayOptionChecked("Show sub-work items")).toBe(subDefault);
       await driver.setDisplayExtraOption("Show empty groups", true);
-      await driver.setDisplayExtraOption("Show sub-work items", true);
+      await driver.setDisplayExtraOption("Show sub-work items", !subDefault);
       expect(await driver.isDisplayOptionChecked("Show empty groups")).toBe(true);
-      expect(await driver.isDisplayOptionChecked("Show sub-work items")).toBe(true);
+      expect(await driver.isDisplayOptionChecked("Show sub-work items")).toBe(!subDefault);
       await expectStoredDisplayFilter(seed, "show_empty_groups", true);
-      await expectStoredDisplayFilter(seed, "sub_issue", true);
+      await expectStoredDisplayFilter(seed, "sub_issue", !subDefault);
       await driver.setDisplayExtraOption("Show empty groups", false);
-      await driver.setDisplayExtraOption("Show sub-work items", false);
+      await driver.setDisplayExtraOption("Show sub-work items", subDefault);
       expect(await driver.isDisplayOptionChecked("Show empty groups")).toBe(false);
-      expect(await driver.isDisplayOptionChecked("Show sub-work items")).toBe(false);
+      expect(await driver.isDisplayOptionChecked("Show sub-work items")).toBe(subDefault);
       await driver.closeDisplayOptions();
       await expectStoredDisplayFilter(seed, "show_empty_groups", false);
-      await expectStoredDisplayFilter(seed, "sub_issue", false);
+      await expectStoredDisplayFilter(seed, "sub_issue", subDefault);
       await expect
         .poll(() => driver.visibleIssueNames(), LIST_POLL)
         .toEqual(expect.arrayContaining([...seed.issueNames]));
@@ -327,6 +330,40 @@ test(
       for (const name of seed.issueNames) expect(cards).toContain(name);
       await expectStoredDisplayFilter(seed, "layout", "kanban");
       await expectStoredDisplayFilter(seed, "group_by", "state");
+    });
+  }
+);
+
+const SUBGROUP_ABSENT_ROWS = ["ISS-077"];
+test(
+  specTitle(SUBGROUP_ABSENT_ROWS, "kanban without a grouping hides sub-group by"),
+  { tag: specTags(SUBGROUP_ABSENT_ROWS) },
+  async ({ driver, seed }) => {
+    await test.step("sign in and open the ungrouped board", async () => {
+      const attempt = async () => {
+        await driver.openEntry();
+        await driver.signInWithPassword(seed.email, seed.password);
+        await resetIssueUserProperties(seed.workspaceSlug, seed.projectId, session);
+        await setIssueDisplayFilters(seed.workspaceSlug, seed.projectId, session, {
+          layout: "kanban",
+        });
+        await driver.openProjectIssues(seed.workspaceSlug, seed.projectId);
+      };
+      try {
+        await attempt();
+      } catch {
+        await attempt();
+      }
+    });
+
+    await test.step("the panel hides sub-group by until a grouping is chosen", async () => {
+      // Gate probe (NEWFRONT-658): both apps hide the section with
+      // group-by null, matching the spec ("visible only once a
+      // grouping is chosen"), so both legs pin the absence.
+      await driver.openDisplayOptions();
+      const panel = await driver.displayPanelText();
+      expect(panel).not.toContain("Sub-group by");
+      await driver.closeDisplayOptions();
     });
   }
 );

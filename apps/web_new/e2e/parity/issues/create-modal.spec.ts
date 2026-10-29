@@ -287,8 +287,18 @@ test(
       const all = await serverIssues(seed.workspaceSlug, seed.projectId, session);
       const mine = all.find((issue) => issue.name === NAME);
       expect(mine).toBeDefined();
+      // The new app attaches route membership in a bridge write after
+      // the create lands; poll for it rather than reading once (gate:
+      // a one-shot read flaked red under host load, ISS-124).
+      await expect
+        .poll(
+          async () =>
+            ((await serverIssueRecord(seed.workspaceSlug, seed.projectId, mine!.id, session))["module_ids"] ??
+              []) as unknown[],
+          { timeout: 30_000 }
+        )
+        .toContain(module.id);
       const detail = await serverIssueRecord(seed.workspaceSlug, seed.projectId, mine!.id, session);
-      expect((detail["module_ids"] ?? []) as unknown[]).toContain(module.id);
       expect(detail["cycle_id"] ?? null).toBeNull();
       await deleteServerIssue(seed.workspaceSlug, seed.projectId, mine!.id, session);
     });
@@ -333,8 +343,15 @@ test(
       const all = await serverIssues(seed.workspaceSlug, seed.projectId, session);
       const mine = all.find((issue) => issue.name === NAME);
       expect(mine).toBeDefined();
+      // Same bridge-write race as the module leg (gate, ISS-124).
+      await expect
+        .poll(
+          async () =>
+            String((await serverIssueRecord(seed.workspaceSlug, seed.projectId, mine!.id, session))["cycle_id"] ?? ""),
+          { timeout: 30_000 }
+        )
+        .toBe(cycle.id);
       const detail = await serverIssueRecord(seed.workspaceSlug, seed.projectId, mine!.id, session);
-      expect(String(detail["cycle_id"] ?? "")).toBe(cycle.id);
       expect(((detail["module_ids"] ?? []) as unknown[]).length).toBe(0);
       await deleteServerIssue(seed.workspaceSlug, seed.projectId, mine!.id, session);
     });

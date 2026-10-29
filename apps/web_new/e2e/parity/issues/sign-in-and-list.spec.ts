@@ -19,6 +19,11 @@ test(specTitle(ROWS, "sign in and list a project's issues"), { tag: specTags(ROW
 
   await test.step("open the seeded project issues list", async () => {
     await driver.openProjectIssues(seed.workspaceSlug, seed.projectId);
+    // The scenario wants the flat list, but the layout persists per user
+    // across runs in this namespace (a board run leaves kanban behind and
+    // the list reader sees no rows). Settle on the list first; the oracle
+    // reads every layout, so this is a no-op there (gate fix).
+    await driver.ensureListLayout();
   });
 
   // The list populates asynchronously after navigation; poll the

@@ -410,6 +410,20 @@ describe("kanbanCards", () => {
       { issueId: "issue-1", name: "Fix login", groupId: "todo", subGroupId: "bug" },
     ]);
   });
+
+  it("reads virtualized shells as empty names without reading their content", async () => {
+    const read = vi.fn(async () => "must not run");
+    const shell = element(
+      { "data-issue-id": "issue-far", "data-virtualized": "true" },
+      { "kanban-card-name": locator({ count: async () => 0, innerText: read }) }
+    );
+    const page = boardPage({ cards: list([shell, namedCard("Fix login")]) });
+    await expect(new WebNewDriver(page).kanbanCards()).resolves.toEqual([
+      { issueId: "issue-far", name: "", groupId: "", subGroupId: "" },
+      { issueId: "issue-Fix login", name: "Fix login", groupId: "", subGroupId: "" },
+    ]);
+    expect(read).not.toHaveBeenCalled();
+  });
 });
 
 function namedCard(name: string): Locator {
@@ -665,6 +679,26 @@ describe("card contents and open", () => {
   it("throws for a card that is not rendered", async () => {
     await expect(new WebNewDriver(boardPage({})).kanbanCardIdentifier("Nope")).rejects.toThrow(/no kanban card/);
   });
+
+  it("finds a named card past leading virtualized shells", async () => {
+    const shellReads = vi.fn(async () => "must not run");
+    const shell = element(
+      { "data-issue-id": "issue-far", "data-virtualized": "true" },
+      { "kanban-card-name": locator({ count: async () => 0, innerText: shellReads }) }
+    );
+    const target = element(
+      { "data-issue-id": "issue-1" },
+      {
+        "kanban-card-name": locator({ innerText: async () => "Fix login" }),
+        "kanban-card-link": locator({ innerText: async () => "PAR-12\nFix login" }),
+      }
+    );
+    const page = pageOf({
+      getByTestId: (id: string) => (id === "kanban-card" ? list([shell, target]) : locator({ count: async () => 0 })),
+    });
+    await expect(new WebNewDriver(page).kanbanCardIdentifier("Fix login")).resolves.toBe("PAR-12");
+    expect(shellReads).not.toHaveBeenCalled();
+  });
 });
 
 describe("kanban quick-add", () => {
@@ -735,11 +769,13 @@ interface Box {
   height: number;
 }
 
-function dragCard(name: string, rect: Box | null): Locator {
+function dragCard(name: string, rect: Box | null, nameRect: Box | null = null): Locator {
   return locator({
     boundingBox: async () => rect,
     getByTestId: (id: string) =>
-      id === "kanban-card-name" ? locator({ innerText: async () => name }) : locator({ count: async () => 0 }),
+      id === "kanban-card-name"
+        ? locator({ innerText: async () => name, boundingBox: async () => nameRect })
+        : locator({ count: async () => 0 }),
   });
 }
 
@@ -889,6 +925,40 @@ describe("kanban header menu", () => {
     await expect(new WebNewDriver(throwing).kanbanHeaderMenuItems("Todo")).resolves.toEqual(["Create work item"]);
   });
 
+  it("waits for a delayed menu mount before reading", async () => {
+    // The menu portal paints a beat after the trigger click (ISS-036);
+    // the read waits for the first entry instead of one-shotting zero.
+    const waits: Array<number | undefined> = [];
+    let counts = 0;
+    const nodes = [
+      locator({ innerText: async () => "Create work item" }),
+      locator({ innerText: async () => "Add an existing work item" }),
+    ];
+    const page = pageOf({
+      waitForTimeout: async (ms?: number) => void waits.push(ms),
+      locator: (selector: string) =>
+        selector === '[role="menuitem"]:visible'
+          ? locator({
+              count: async () => {
+                counts += 1;
+                return counts <= 2 ? 0 : nodes.length;
+              },
+              nth: (index: number) => nodes[index]!,
+            })
+          : locator({ count: async () => 0 }),
+    });
+    await expect(new WebNewDriver(page).kanbanHeaderMenuItems("Todo")).resolves.toEqual([
+      "Create work item",
+      "Add an existing work item",
+    ]);
+    expect(waits).toEqual([250, 250]);
+  });
+
+  it("reports no entries when the menu never opens", async () => {
+    const page = menuPage([]);
+    await expect(new WebNewDriver(page).kanbanHeaderMenuItems("Todo")).resolves.toEqual([]);
+  });
+
   it("chooses the matching entry and throws when missing", async () => {
     const clicks: string[] = [];
     const page = pageOf({
@@ -944,7 +1014,7 @@ describe("kanban drags", () => {
     const { page, moves, events } = dragPage([source, target]);
     await new WebNewDriver(page).kanbanDragCardBefore("Third", "First");
     expect(events).toEqual(["move", "down", "move", "up"]);
-    expect(moves[0]).toEqual({ x: 150, y: 240, steps: undefined });
+    expect(moves[0]).toEqual({ x: 150, y: 214, steps: undefined });
     expect(moves[1]).toEqual({ x: 150, y: 8, steps: 8 });
   });
 
@@ -995,8 +1065,31 @@ describe("kanban drags", () => {
     const { page, moves } = dragPage([source], [column]);
     await new WebNewDriver(page).kanbanDragCardToColumnEnd("Fix login", "Done");
     expect(scrolled).toEqual(["done"]);
-    expect(moves[0]).toEqual({ x: 150, y: 40, steps: undefined });
+    expect(moves[0]).toEqual({ x: 150, y: 14, steps: undefined });
     expect(moves[1]).toEqual({ x: 525, y: 588, steps: 8 });
+  });
+
+  it("presses the name row instead of the card center", async () => {
+    // The geometric center lands on chip buttons once the card is dressed
+    // (labels, due date), and the card ignores presses starting on
+    // controls — so the press goes to the draggable name row (ISS-038).
+    const source = dragCard(
+      "Fix login",
+      { x: 0, y: 0, width: 300, height: 102 },
+      { x: 12, y: 12, width: 200, height: 20 }
+    );
+    const column = dragColumn("Done", { x: 350, y: 0, width: 350, height: 600 }, [dragCard("Fix login", null)]);
+    const { page, moves } = dragPage([source], [column]);
+    await new WebNewDriver(page).kanbanDragCardToColumnEnd("Fix login", "Done");
+    expect(moves[0]).toEqual({ x: 112, y: 22, steps: undefined });
+  });
+
+  it("presses near the top when the name row has no box", async () => {
+    const source = dragCard("Fix login", { x: 0, y: 50, width: 300, height: 102 });
+    const column = dragColumn("Done", { x: 350, y: 0, width: 350, height: 600 }, [dragCard("Fix login", null)]);
+    const { page, moves } = dragPage([source], [column]);
+    await new WebNewDriver(page).kanbanDragCardToColumnEnd("Fix login", "Done");
+    expect(moves[0]).toEqual({ x: 150, y: 64, steps: undefined });
   });
 
   it("throws a column-end drag without boxes", async () => {
@@ -1026,15 +1119,46 @@ describe("kanban drags", () => {
     await driver.kanbanDragHoldNearEdge("Last", "bottom", 500);
     expect(waits).toContain(500);
     expect(moves.map((move) => [move.x, move.y])).toEqual([
-      [650, 340],
-      [1268, 340],
-      [650, 340],
-      [12, 340],
-      [650, 340],
+      [650, 314],
+      [1268, 314],
+      [650, 314],
+      [12, 314],
+      [650, 314],
       [650, 12],
-      [650, 340],
+      [650, 314],
       [650, 708],
     ]);
+  });
+
+  it("rides out window churn when grabbing the held card", async () => {
+    // The virtualized window flickers names while it settles after a
+    // scroll or page append; the grab retries instead of throwing on the
+    // first unreadable sample (ISS-043).
+    let reads = 0;
+    const source = locator({
+      boundingBox: async () => ({ x: 500, y: 300, width: 300, height: 80 }),
+      getByTestId: (id: string) =>
+        id === "kanban-card-name"
+          ? locator({
+              innerText: async () => {
+                reads += 1;
+                return reads <= 2 ? "" : "Last";
+              },
+            })
+          : locator({ count: async () => 0 }),
+    });
+    const waits: Array<number | undefined> = [];
+    const { mouse, moves } = mouseStub();
+    const page = pageOf({
+      mouse,
+      waitForTimeout: async (ms?: number) => void waits.push(ms),
+      viewportSize: () => ({ width: 1280, height: 720 }),
+      getByTestId: (id: string) => (id === "kanban-card" ? list([source]) : list([])),
+    });
+    await new WebNewDriver(page).kanbanDragHoldNearEdge("Last", "right", 10);
+    expect(reads).toBe(3);
+    expect(waits).toEqual(expect.arrayContaining([1000, 1000]));
+    expect(moves[0]).toEqual({ x: 650, y: 314, steps: undefined });
   });
 
   it("holds with the fallback viewport and throws without a box", async () => {
@@ -1047,7 +1171,7 @@ describe("kanban drags", () => {
       getByTestId: (id: string) => (id === "kanban-card" ? list([source]) : list([])),
     });
     await new WebNewDriver(page).kanbanDragHoldNearEdge("Last", "right", 10);
-    expect(moves[1]).toEqual({ x: 1268, y: 40, steps: 10 });
+    expect(moves[1]).toEqual({ x: 1268, y: 14, steps: 10 });
     const flat = dragCard("Last", null);
     const missing = pageOf({
       mouse: mouseStub().mouse,
@@ -1221,16 +1345,11 @@ describe("kanban hold overlay and toasts", () => {
   function toastPage(entries: Array<{ title: string; message: string }>): Page {
     return pageOf({
       locator: (selector: string) =>
-        selector === '[data-testid="toast-notification"]'
+        selector === 'xpath=//*[@aria-label="Notifications"]//*[@role="dialog" or @role="alertdialog"]'
           ? list(
               entries.map((entry) =>
                 locator({
-                  getByTestId: (id: string) => {
-                    const text = locator({
-                      innerText: async () => (id === "toast-title" ? entry.title : entry.message),
-                    });
-                    return locator({ first: () => text });
-                  },
+                  innerText: async () => `${entry.title}\n${entry.message}`,
                 })
               )
             )
@@ -1250,18 +1369,15 @@ describe("kanban hold overlay and toasts", () => {
 
   it("treats an unreadable toast as empty", async () => {
     const unreadable = locator({
-      getByTestId: () => {
-        const text = locator({
-          innerText: async () => {
-            throw new Error("gone");
-          },
-        });
-        return locator({ first: () => text });
+      innerText: async () => {
+        throw new Error("gone");
       },
     });
     const page = pageOf({
       locator: (selector: string) =>
-        selector === '[data-testid="toast-notification"]' ? list([unreadable]) : locator({ count: async () => 0 }),
+        selector === 'xpath=//*[@aria-label="Notifications"]//*[@role="dialog" or @role="alertdialog"]'
+          ? list([unreadable])
+          : locator({ count: async () => 0 }),
     });
     await expect(new WebNewDriver(page).boardLastToast()).resolves.toBeNull();
   });
@@ -1279,10 +1395,15 @@ describe("kanban column paging and scroll", () => {
             })
           : locator({ count: async () => 0 }),
     });
-    const page = pageOf({ getByTestId: (id: string) => (id === "kanban-column" ? list([column]) : list([])) });
+    const waits: Array<number | undefined> = [];
+    const page = pageOf({
+      getByTestId: (id: string) => (id === "kanban-column" ? list([column]) : list([])),
+      waitForTimeout: async (ms?: number) => void waits.push(ms),
+    });
     const driver = new WebNewDriver(page);
     await driver.kanbanColumnScrollEnd("Todo");
     expect(node.scrollTop).toBe(600);
+    expect(waits).toEqual([2_000]);
     await driver.kanbanColumnLoadMore("Todo");
     expect(node.scrollTop).toBe(600);
   });
@@ -1372,11 +1493,21 @@ describe("kanban cells", () => {
 
   it("reports and activates a cell's load-more entry", async () => {
     const clicks: string[] = [];
+    const names: string[] = [];
     const cell = locator({
-      getByTestId: (id: string) =>
-        id === "kanban-load-more"
-          ? locator({ isVisible: async () => true, click: async () => void clicks.push("more") })
-          : locator({ count: async () => 0 }),
+      getByTestId: (id: string) => {
+        if (id === "kanban-card") return list(names.map((name) => namedCard(name)));
+        if (id === "kanban-load-more") {
+          return locator({
+            isVisible: async () => true,
+            click: async () => {
+              clicks.push("more");
+              names.push("Fix login");
+            },
+          });
+        }
+        return locator({ count: async () => 0 });
+      },
     });
     const lane = locator({
       getByTestId: (id: string) =>

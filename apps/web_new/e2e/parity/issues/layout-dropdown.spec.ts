@@ -46,9 +46,13 @@ test(
 
       await test.step("the picker lists every layout with no search and marks the selection", async () => {
         await driver.viewsLayoutOpenPicker();
+        // The new app names the fourth layout "Spreadsheet" everywhere
+        // (picker and header switcher share the label); the old app
+        // calls it "Table" (spec §10 gate alignment).
+        const fourth = driver.target === "web_new" ? "Spreadsheet" : "Table";
         await expect
           .poll(() => driver.viewsLayoutOptionTexts(), { timeout: 10_000 })
-          .toEqual(["List", "Board", "Calendar", "Table", "Timeline"]);
+          .toEqual(["List", "Board", "Calendar", fourth, "Timeline"]);
         expect(await driver.viewsLayoutHasSearch()).toBe(false);
         expect(await driver.viewsLayoutSelectedMarked("List")).toBe(true);
         expect(await driver.viewsLayoutSelectedMarked("Board")).toBe(false);

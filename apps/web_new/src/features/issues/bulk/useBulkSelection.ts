@@ -25,6 +25,9 @@ import {
 /** Attribute the hook uses to find a row's DOM node for scrolling. */
 export const SELECTION_ROW_ATTR = "data-selection-id";
 
+/** Root attribute while a live selection arms the leave confirmation (ISS-110). */
+export const LEAVE_GUARD_ATTR = "data-leave-guard";
+
 export interface BulkSelection {
   selectedIds: ReadonlySet<string>;
   activeId: string | null;
@@ -113,7 +116,15 @@ export function useBulkSelection(
       event.returnValue = "";
     };
     window.addEventListener("beforeunload", handleBeforeUnload, true);
-    return () => window.removeEventListener("beforeunload", handleBeforeUnload, true);
+    // A headless browser does not raise the native prompt without user
+    // activation, so the armed state is published on the root element
+    // where a scenario (and a reader) can observe it directly.
+    const root = document.documentElement;
+    root.setAttribute(LEAVE_GUARD_ATTR, "armed");
+    return () => {
+      window.removeEventListener("beforeunload", handleBeforeUnload, true);
+      root.removeAttribute(LEAVE_GUARD_ATTR);
+    };
   }, [selectedIds.size]);
 
   const clear = React.useCallback(() => {

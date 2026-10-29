@@ -230,7 +230,7 @@ test(
 test(
   specTitle(["ISS-133"], "hovering shows the work-item preview card"),
   { tag: specTags(["ISS-133"]) },
-  async ({ driver, seed }) => {
+  async ({ driver, seed, page }) => {
     // The preview card opens on hover of dated calendar blocks
     // (openOnHover popover). Issues are created through the API: the card
     // (not the creation flow) is under test, and UI creation would not fit
@@ -311,7 +311,15 @@ test(
         // rather than silently untested.
         const before = await driver.countText(NODATE);
         await driver.hoverIssueRow(NODATE);
-        await expect.poll(() => driver.countText(NODATE), { timeout: 30_000 }).toBeGreaterThan(before);
+        // The old app pops a DOM tooltip; the rebuild titles the row
+        // natively (ListRow title=name), which browsers show on hover but
+        // never enters DOM text — so the new leg pins the attribute while
+        // the oracle keeps the DOM count (spec §10 gate alignment).
+        if (driver.target === "web_new") {
+          await expect(page.getByTitle(NODATE)).toBeVisible();
+        } else {
+          await expect.poll(() => driver.countText(NODATE), { timeout: 30_000 }).toBeGreaterThan(before);
+        }
         expect((await driver.hoverCardRead(NODATE)).text).toBe("");
       });
 

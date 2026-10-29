@@ -638,6 +638,7 @@ function SheetRow({
   const rowNode = (
     <tr
       {...{ [SELECTION_ROW_ATTR]: issue.id }}
+      data-depth={depth}
       data-highlight={highlighted ? "true" : undefined}
       data-temprow={temp ? "true" : undefined}
       data-active={active ? "true" : undefined}

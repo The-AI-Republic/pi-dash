@@ -118,10 +118,20 @@ test(specTitle(["ISS-150"], "sidebar runs-on property"), { tag: specTags(["ISS-1
       await driver.openIssueDetail(seed.workspaceSlug, issueSeq);
       await expect.poll(() => driver.issueDetailTitle(), { timeout: 120_000 }).toBe(issue?.name ?? "");
       await expect.poll(() => driver.sidebarProperty("State"), { timeout: 30_000 }).not.toBeNull();
-      expect(await driver.sidebarProperty("Runs on")).toContain("PAR_pod_1");
+      // Polled on both legs: the new app resolves the pod name
+      // asynchronously after the row mounts.
+      await expect.poll(() => driver.sidebarProperty("Runs on"), { timeout: 30_000 }).toContain("PAR_pod_1");
       const options = await driver.runsOnOptions();
       expect(options.some((name) => name.includes("PAR_pod_1"))).toBe(true);
-      expect(options.some((name) => /unavailable|not enabled/i.test(name))).toBe(true);
+      // The new app renders the shared availability vocabulary (cloud.md
+      // CLOUD-040): unavailable executors list with reason sentences
+      // ("switched off", "No model", ...) rather than the oracle's
+      // "unavailable / not enabled" tags. Same outcome, own sentences.
+      const reasonPattern =
+        driver.target === "web_new"
+          ? /switched off|no model is configured|not connected|missing|not enrolled/i
+          : /unavailable|not enabled/i;
+      expect(options.some((name) => reasonPattern.test(name))).toBe(true);
     });
     await test.step("picking another target patches the issue", async () => {
       await driver.pickRunsOn(pod2Name);

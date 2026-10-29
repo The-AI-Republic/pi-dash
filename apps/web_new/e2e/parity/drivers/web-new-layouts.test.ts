@@ -68,6 +68,7 @@ interface PageStub {
   keys: string[];
   filled: string[];
   waits: number;
+  responses: Array<{ predicate: (response: never) => unknown; options: unknown }>;
 }
 
 function pageOf(
@@ -75,6 +76,7 @@ function pageOf(
     locator?: (selector: string) => Locator;
     role?: (role: string, options: Record<string, unknown> | undefined) => Locator;
     placeholder?: (text: string) => Locator;
+    testId?: (id: string) => Locator;
     url?: string;
   } = {}
 ): PageStub {
@@ -85,6 +87,7 @@ function pageOf(
     keys: [],
     filled: [],
     waits: 0,
+    responses: [],
     page: undefined as unknown as Page,
   };
   state.page = {
@@ -98,6 +101,11 @@ function pageOf(
       return parts.role?.(role, options) ?? locator();
     },
     getByPlaceholder: (text: string) => parts.placeholder?.(text) ?? locator(),
+    getByTestId: (id: string) => parts.testId?.(id) ?? locator(),
+    waitForResponse: async (predicate: (response: never) => unknown, options: unknown) => {
+      state.responses.push({ predicate, options });
+      return {};
+    },
     locator: (selector: string) => {
       state.selectors.push(selector);
       return parts.locator?.(selector) ?? locator();
@@ -124,6 +132,42 @@ describe("web_new empty-state driver", () => {
     });
     await expect(new WebNewDriver(page).layoutsEmptyTitle()).resolves.toBe("No project");
     expect(selectors).toContain('[data-testid="issues-empty-state"]:visible');
+  });
+
+  it("reads the title span when the heading also carries the description", async () => {
+    const { page } = pageOf({
+      locator: (selector) => {
+        if (selector === '[data-testid="issues-empty-state"]:visible') {
+          return locator({
+            getByRole: () =>
+              locator({
+                innerText: async () => "Start with your first work item.\nWork items are the building blocks.",
+                locator: () => locator({ innerText: async () => "Start with your first work item." }),
+              }),
+          });
+        }
+        return locator();
+      },
+    });
+    await expect(new WebNewDriver(page).layoutsEmptyTitle()).resolves.toBe("Start with your first work item.");
+  });
+
+  it("falls back to the heading text when no title span exists", async () => {
+    const { page } = pageOf({
+      locator: (selector) => {
+        if (selector === '[data-testid="issues-empty-state"]:visible') {
+          return locator({
+            getByRole: () =>
+              locator({
+                innerText: async () => "No matching results.",
+                locator: () => locator({ count: async () => 0 }),
+              }),
+          });
+        }
+        return locator();
+      },
+    });
+    await expect(new WebNewDriver(page).layoutsEmptyTitle()).resolves.toBe("No matching results.");
   });
 
   it("reads nothing when no card is mounted", async () => {
@@ -379,5 +423,221 @@ describe("web_new visible issue names", () => {
       "Cloud second issue",
     ]);
     expect(roles).toContainEqual({ role: "main", name: undefined });
+  });
+});
+
+describe("web_new calendar options picker", () => {
+  function optionsPage(optionVisible: boolean, clicks: string[]): Page {
+    const option = locator({
+      isVisible: async () => optionVisible,
+      click: async () => {
+        clicks.push("option");
+      },
+    });
+    const optionsButton = locator({
+      click: async () => {
+        clicks.push("options");
+      },
+    });
+    const root = locator({ getByRole: () => optionsButton });
+    return {
+      getByRole: (role: string, options?: Record<string, unknown>) =>
+        role === "button" && options?.["name"] !== "Options" ? option : locator(),
+      getByTestId: () => root,
+      waitForTimeout: async () => undefined,
+    } as unknown as Page;
+  }
+
+  it("clicks an already-visible option without toggling Options shut", async () => {
+    const clicks: string[] = [];
+    await new WebNewDriver(optionsPage(true, clicks)).layoutsCalSetMode("week");
+    expect(clicks).toEqual(["option"]);
+  });
+
+  it("opens the panel first when the option is not visible", async () => {
+    const clicks: string[] = [];
+    await new WebNewDriver(optionsPage(false, clicks)).layoutsCalSetMode("week");
+    expect(clicks).toEqual(["options", "option"]);
+  });
+});
+
+describe("web_new calendar month picker", () => {
+  function pickerPage(initiallyOpen: boolean, clicks: string[]): Page {
+    let open = initiallyOpen;
+    const months = locator({
+      count: async () => 2,
+      nth: (index: number) => locator({ innerText: async () => ["Jan", "Feb"][index] ?? "" }),
+    });
+    const panel = locator({
+      isVisible: async () => open,
+      getByTestId: () => months,
+    });
+    const title = locator({
+      click: async () => {
+        clicks.push("title");
+        open = !open;
+      },
+    });
+    return {
+      getByTestId: (id: string) => (id === "calendar-month-picker" ? panel : title),
+      waitForTimeout: async () => undefined,
+    } as unknown as Page;
+  }
+
+  it("opens a closed picker and toggles it shut on close", async () => {
+    const clicks: string[] = [];
+    const driver = new WebNewDriver(pickerPage(false, clicks));
+    await expect(driver.layoutsCalMonthPickerMonths()).resolves.toEqual(["Jan", "Feb"]);
+    expect(clicks).toEqual(["title", "title"]);
+  });
+
+  it("reuses an open picker and only clicks to close it", async () => {
+    const clicks: string[] = [];
+    const driver = new WebNewDriver(pickerPage(true, clicks));
+    await expect(driver.layoutsCalMonthPickerMonths()).resolves.toEqual(["Jan", "Feb"]);
+    expect(clicks).toEqual(["title"]);
+  });
+});
+
+describe("web_new hover card reads", () => {
+  function hoverPage(
+    opts: { region: number; wide: number; blocks: number; cardText: string | null },
+    seen: string[]
+  ): PageStub {
+    const stub = pageOf({
+      role: () =>
+        locator({
+          locator: () => locator({ count: async () => opts.region, hover: async () => void seen.push("row") }),
+        }),
+      locator: (selector: string) => {
+        if (selector === 'a[data-row-anchor="true"]') {
+          return locator({ count: async () => opts.wide, hover: async () => void seen.push("wide") });
+        }
+        if (selector === 'a[id^="issue-"]') {
+          return locator({ count: async () => opts.blocks, hover: async () => void seen.push("block") });
+        }
+        return locator();
+      },
+    });
+    const card =
+      opts.cardText === null
+        ? locator({ count: async () => 0 })
+        : locator({
+            evaluate: async () => ({ text: opts.cardText, priorityIcon: "circle-alert", dateColor: "red" }),
+          });
+    (stub.page as unknown as Record<string, unknown>).getByTestId = () => card;
+    return stub;
+  }
+
+  it("hovers the row anchor, reads the open card, and dismisses it", async () => {
+    const seen: string[] = [];
+    const { page, keys } = hoverPage({ region: 1, wide: 0, blocks: 0, cardText: "PAR-1 Range issue" }, seen);
+    const card = await new WebNewDriver(page).hoverCardRead("Range issue");
+    expect(card.text).toBe("PAR-1 Range issue");
+    expect(seen).toEqual(["row"]);
+    expect(keys).toEqual(["Escape"]);
+  });
+
+  it("falls back to calendar blocks when no row anchor matches", async () => {
+    const seen: string[] = [];
+    const { page } = hoverPage({ region: 0, wide: 0, blocks: 1, cardText: "PAR-1 Range issue" }, seen);
+    const card = await new WebNewDriver(page).hoverCardRead("Range issue");
+    expect(card.text).toBe("PAR-1 Range issue");
+    expect(seen).toEqual(["block"]);
+  });
+
+  it("waits for a delayed card mount before reading", async () => {
+    // The calendar hover mounts its card after a short delay (ISS-133);
+    // the read waits for the mount instead of one-shotting the count.
+    const seen: string[] = [];
+    let counts = 0;
+    const { page } = hoverPage({ region: 1, wide: 0, blocks: 0, cardText: "PAR-1 Range issue" }, seen);
+    const real = page.getByTestId.bind(page);
+    (page as unknown as Record<string, unknown>).getByTestId = (id: string) => {
+      const node = real(id);
+      if (id !== "work-item-preview") return node;
+      const delayed = {
+        ...node,
+        count: async () => {
+          counts += 1;
+          return counts <= 2 ? 0 : 1;
+        },
+      } as unknown as Record<string, unknown>;
+      delayed.first = () => delayed;
+      return delayed as unknown as ReturnType<typeof real>;
+    };
+    const card = await new WebNewDriver(page).hoverCardRead("Range issue");
+    expect(card.text).toBe("PAR-1 Range issue");
+    expect(counts).toBe(3);
+  });
+
+  it("reports empty fields and skips the dismiss when the hover opens no card", async () => {
+    const seen: string[] = [];
+    const { page, keys } = hoverPage({ region: 1, wide: 0, blocks: 0, cardText: null }, seen);
+    const card = await new WebNewDriver(page).hoverCardRead("Undated issue");
+    expect(card).toEqual({ text: "", priorityIcon: "", dateColor: "" });
+    expect(seen).toEqual(["row"]);
+    expect(keys).toEqual([]);
+  });
+});
+
+describe("web_new layout switch settle", () => {
+  const PREFS_URL = "https://api.test/api/workspaces/w/projects/p/user-properties/";
+
+  function switchPage(active: string): PageStub {
+    return pageOf({
+      role: () => locator({ count: async () => 0 }),
+      testId: (id) =>
+        id === "layout-switcher-segmented"
+          ? locator({
+              locator: () =>
+                locator({
+                  count: async () => 1,
+                  getAttribute: async () => active,
+                }),
+            })
+          : locator(),
+    });
+  }
+
+  function fakeResponse(method: string, url: string, body: string | null): never {
+    return {
+      request: () => ({ method: () => method, postData: () => body }),
+      url: () => url,
+    } as never;
+  }
+
+  it("awaits the display PATCH round-trip on a changed switch", async () => {
+    const stub = switchPage("list");
+
+    await new WebNewDriver(stub.page).layoutsSwitchTo("kanban");
+
+    expect(stub.responses).toHaveLength(1);
+    const predicate = stub.responses[0]?.predicate as (response: never) => boolean;
+    expect(predicate(fakeResponse("PATCH", PREFS_URL, '{"display_filters":{"layout":"kanban"}}'))).toBe(true);
+    expect(predicate(fakeResponse("PATCH", PREFS_URL, '{"filters":{"kanban_filters":{}}}'))).toBe(false);
+    expect(predicate(fakeResponse("GET", PREFS_URL, null))).toBe(false);
+    expect(predicate(fakeResponse("PATCH", "https://api.test/api/workspaces/w/projects/p/issues/", "{}"))).toBe(false);
+  });
+
+  it("skips the PATCH wait on a no-op switch", async () => {
+    const stub = switchPage("kanban");
+
+    await new WebNewDriver(stub.page).layoutsSwitchTo("kanban");
+
+    expect(stub.responses).toHaveLength(0);
+  });
+
+  it("tolerates a changed switch that never PATCHes display prefs", async () => {
+    const stub = switchPage("list");
+    const armed = stub.page.waitForResponse.bind(stub.page);
+    stub.page.waitForResponse = (async (predicate: (response: never) => unknown, options: unknown) => {
+      await armed(predicate, options);
+      throw new Error("Timeout 30000ms exceeded.");
+    }) as Page["waitForResponse"];
+
+    await expect(new WebNewDriver(stub.page).layoutsSwitchTo("kanban")).resolves.toBeUndefined();
+
+    expect(stub.responses).toHaveLength(1);
   });
 });

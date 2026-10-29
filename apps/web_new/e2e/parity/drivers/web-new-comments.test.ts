@@ -184,6 +184,124 @@ describe("web_new comment driver", () => {
     expect(visited).toEqual(["reload", "url", "comments"]);
   });
 
+  it("retries the short-link redirect once through a reload on a stall", async () => {
+    const visited: string[] = [];
+    const page = pageOf();
+    page.page.goto = (async (url: string) => {
+      visited.push(url);
+      return null;
+    }) as Page["goto"];
+    page.page.waitForLoadState = (async () => {
+      visited.push("load");
+    }) as Page["waitForLoadState"];
+    let urls = 0;
+    page.page.waitForURL = (async () => {
+      urls += 1;
+      visited.push(`url${urls}`);
+      if (urls === 1) throw new Error("stall");
+      return null;
+    }) as Page["waitForURL"];
+    page.page.getByText = ((text: string) => {
+      expect(text).toBe("Back to the project issues");
+      return locator({ count: async () => 0 });
+    }) as unknown as Page["getByText"];
+    page.page.reload = (async () => {
+      visited.push("reload");
+      return null;
+    }) as Page["reload"];
+    page.page.getByRole = ((role: string, options?: { name?: string }) => {
+      if (role === "heading" && options?.name === "Activity") {
+        return locator({ waitFor: async () => void visited.push("comments") });
+      }
+      return locator();
+    }) as Page["getByRole"];
+    await new WebNewDriver(page.page).openIssueDetail("acme", "p-1", "i-1");
+    expect(visited).toEqual(["/acme/projects/p-1/issues/i-1", "load", "url1", "reload", "url2", "comments"]);
+  });
+
+  it("throws without retrying when the missing state rendered", async () => {
+    const visited: string[] = [];
+    const page = pageOf();
+    page.page.goto = (async (url: string) => {
+      visited.push(url);
+      return null;
+    }) as Page["goto"];
+    page.page.waitForLoadState = (async () => {
+      visited.push("load");
+    }) as Page["waitForLoadState"];
+    page.page.waitForURL = (async () => {
+      visited.push("url");
+      throw new Error("stall");
+    }) as Page["waitForURL"];
+    page.page.getByText = (() => locator({ count: async () => 1 })) as unknown as Page["getByText"];
+    page.page.reload = (async () => {
+      visited.push("reload");
+      return null;
+    }) as Page["reload"];
+    await expect(new WebNewDriver(page.page).openIssueDetail("acme", "p-1", "i-1")).rejects.toThrow(
+      "never reached the browse view"
+    );
+    expect(visited).not.toContain("reload");
+  });
+
+  it("retries the browse settle once through a reload on a stall", async () => {
+    const visited: string[] = [];
+    const page = pageOf();
+    page.page.goto = (async (url: string) => {
+      visited.push(url);
+      return null;
+    }) as Page["goto"];
+    let settles = 0;
+    page.page.getByRole = ((role: string, options?: { name?: string }) => {
+      if (role === "heading" && options?.name === "Activity") {
+        return locator({
+          waitFor: async () => {
+            settles += 1;
+            visited.push(`settle${settles}`);
+            if (settles === 1) throw new Error("stall");
+          },
+        });
+      }
+      return locator();
+    }) as Page["getByRole"];
+    page.page.getByText = (() => locator({ count: async () => 0 })) as unknown as Page["getByText"];
+    page.page.reload = (async () => {
+      visited.push("reload");
+      return null;
+    }) as Page["reload"];
+    await new WebNewDriver(page.page).openIssueDetail("acme", "WEB-1");
+    expect(visited).toEqual(["/acme/browse/WEB-1", "settle1", "reload", "settle2"]);
+  });
+
+  it("returns without retrying when the browse missing state rendered", async () => {
+    const visited: string[] = [];
+    const page = pageOf();
+    page.page.goto = (async (url: string) => {
+      visited.push(url);
+      return null;
+    }) as Page["goto"];
+    page.page.getByRole = ((role: string, options?: { name?: string }) => {
+      if (role === "heading" && options?.name === "Activity") {
+        return locator({
+          waitFor: async () => {
+            throw new Error("stall");
+          },
+        });
+      }
+      return locator();
+    }) as Page["getByRole"];
+    page.page.getByText = ((text: string | RegExp) => {
+      expect(String(text)).toContain("No work item matches this address");
+      return locator({ count: async () => 1 });
+    }) as unknown as Page["getByText"];
+    page.page.reload = (async () => {
+      visited.push("reload");
+      return null;
+    }) as Page["reload"];
+    await new WebNewDriver(page.page).openIssueDetail("acme", "WEB-1");
+    expect(visited).toEqual(["/acme/browse/WEB-1"]);
+  });
+
   it("reads the card texts in feed order", async () => {
     const page = pageOf({
       locator: (selector) =>
@@ -215,15 +333,21 @@ describe("web_new comment driver", () => {
     await expect(new WebNewDriver(page.page).activityComposerText()).resolves.toBe("a draft");
   });
 
-  it("types into the composer, presses Enter and waits for the card", async () => {
+  it("types into the composer, clicks Comment and waits for the card", async () => {
     const steps: string[] = [];
     const editor = locator({
       click: async () => void steps.push("click"),
-      fill: async (value: string) => void steps.push(`fill:${value}`),
-      press: async (key: string) => void steps.push(`press:${key}`),
+      pressSequentially: async (value: string) => void steps.push(`type:${value}`),
     });
     const page = pageOf({
-      composer: locator({ locator: () => editor }),
+      composer: locator({
+        locator: () => editor,
+        getByRole: (role: string, options?: unknown) => {
+          expect(role).toBe("button");
+          expect((options as { name?: unknown }).name).toBe("Comment");
+          return locator({ click: async () => void steps.push("submit") });
+        },
+      }),
       cards: (text) =>
         locator({
           waitFor: async () => {
@@ -232,7 +356,7 @@ describe("web_new comment driver", () => {
         }),
     });
     await new WebNewDriver(page.page).activityPostComment("Hello there");
-    expect(steps).toEqual(["click", "fill:Hello there", "press:Enter", "card:Hello there"]);
+    expect(steps).toEqual(["click", "type:Hello there", "submit", "card:Hello there"]);
   });
 
   it("hovers the card, opens the menu trigger and waits for an item", async () => {

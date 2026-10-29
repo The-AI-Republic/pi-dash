@@ -52,6 +52,7 @@ interface PageState {
   selectors: string[];
   mouse: string[];
   waits: unknown[];
+  gotos: string[];
 }
 
 function pageOf(
@@ -63,7 +64,15 @@ function pageOf(
     fills?: (text: string) => void;
   } = {}
 ): { page: Page; state: PageState } {
-  const state: PageState = { testIds: [], roleCalls: [], dialogNames: [], selectors: [], mouse: [], waits: [] };
+  const state: PageState = {
+    testIds: [],
+    roleCalls: [],
+    dialogNames: [],
+    selectors: [],
+    mouse: [],
+    waits: [],
+    gotos: [],
+  };
   const button = locator({
     click: async () => {
       hooks.clicks?.();
@@ -115,6 +124,12 @@ function pageOf(
       return locator();
     },
     getByPlaceholder: () => locator(),
+    url: () => "https://parity.test/ws/projects/p",
+    goto: async (url: string) => {
+      state.gotos.push(url);
+    },
+    waitForLoadState: async () => undefined,
+    waitForURL: async () => undefined,
     mouse: {
       down: async () => {
         state.mouse.push("down");
@@ -188,7 +203,15 @@ describe("web_new issues cloud presence", () => {
     const driver = new WebNewDriver(page);
     await driver.subIssueFiltersOpen("ws", "p", "i");
     await expect(driver.subIssueFiltersPanelText()).resolves.toBe("Team projects");
-    expect(state.testIds).toEqual(["sub-issue-filters-trigger", "sub-issue-filters-panel", "sub-issue-filters-panel"]);
+    // The accessor opens the detail itself (oracle contract), so the
+    // navigation plus the collapsible settle precede the trigger reads.
+    expect(state.gotos).toEqual(["/ws/projects/p/issues/i"]);
+    expect(state.testIds).toEqual([
+      "sub-issues-collapsible",
+      "sub-issue-filters-trigger",
+      "sub-issue-filters-panel",
+      "sub-issue-filters-panel",
+    ]);
   });
 
   it("updates the selection priority through the edit dialog", async () => {

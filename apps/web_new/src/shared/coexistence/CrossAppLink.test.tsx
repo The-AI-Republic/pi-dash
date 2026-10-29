@@ -24,14 +24,16 @@ import { CrossAppLink } from "./CrossAppLink.js";
 describe("CrossAppLink", () => {
   it("renders an unmigrated screen as a plain anchor, with no router required", () => {
     // No RouterProvider here on purpose: old-app links must work anywhere.
+    // Cycles stand in for the unmigrated screen: project issues moved with
+    // the Issues area gate (NEWFRONT-658).
     render(
-      <CrossAppLink to="/acme/projects/1/issues" className="nav" target="_self">
-        Issues
+      <CrossAppLink to="/acme/projects/1/cycles" className="nav" target="_self">
+        Cycles
       </CrossAppLink>
     );
-    const link = screen.getByRole("link", { name: "Issues" });
+    const link = screen.getByRole("link", { name: "Cycles" });
     expect(link.tagName).toBe("A");
-    expect(link).toHaveAttribute("href", "/acme/projects/1/issues");
+    expect(link).toHaveAttribute("href", "/acme/projects/1/cycles");
     expect(link).toHaveAttribute("class", "nav");
     expect(link).not.toHaveAttribute("data-router-link");
   });
@@ -99,16 +101,16 @@ describe("CrossAppLink", () => {
     const seen: Array<HTMLAnchorElement | null> = [];
     render(
       <CrossAppLink
-        to="/acme/projects/1/issues"
+        to="/acme/projects/1/cycles"
         ref={(element) => {
           seen.push(element);
         }}
       >
-        Issues
+        Cycles
       </CrossAppLink>
     );
     expect(seen).toHaveLength(1);
     expect(seen[0]?.tagName).toBe("A");
-    expect(seen[0]).toHaveAttribute("href", "/acme/projects/1/issues");
+    expect(seen[0]).toHaveAttribute("href", "/acme/projects/1/cycles");
   });
 });

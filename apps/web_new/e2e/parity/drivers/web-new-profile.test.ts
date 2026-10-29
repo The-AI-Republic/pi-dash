@@ -71,6 +71,7 @@ function pageOf(overrides: Partial<Record<string, unknown>> = {}): Page {
     locator: () => locator(),
     keyboard: { press: async () => undefined },
     waitForTimeout: async () => undefined,
+    waitForResponse: async () => ({}),
     on: () => undefined,
     removeListener: () => undefined,
     viewportSize: () => ({ width: 1280, height: 720 }),
@@ -387,20 +388,33 @@ describe("shared peek methods on the profile list", () => {
   it("clicks the row that names the work item in either list", async () => {
     const click = vi.fn(async () => undefined);
     const filters: unknown[] = [];
+    const row = locator({ click, waitFor: async () => undefined });
+    const filtered = (options?: unknown) => {
+      filters.push(options);
+      return locator({ first: () => row, count: async () => 1 });
+    };
+    const anchored = locator({ filter: filtered });
     const page = pageOf({
+      getByRole: () => locator({ locator: () => anchored }),
       locator: (selector: string) =>
-        selector === '[data-testid="issue-list"] a[id^="issue-"], [data-testid="profile-list"] button[data-profile-row]'
-          ? locator({
-              filter: (options?: unknown) => {
-                filters.push(options);
-                return locator({ first: () => locator({ click }) });
-              },
-            })
-          : locator(),
+        selector === 'a[data-row-anchor="true"]' ? anchored : locator({ filter: filtered }),
     });
     const driver = new WebNewDriver(page);
     await driver.clickListRow("Prof persist urgent");
-    expect(filters).toEqual([{ hasText: "Prof persist urgent" }]);
+    expect(filters).toContainEqual({ hasText: "Prof persist urgent" });
+    expect(click).toHaveBeenCalledWith({ timeout: WebNewDriver.WAIT_MS });
+  });
+
+  it("falls back to the profile list when no anchor names the work item", async () => {
+    const click = vi.fn(async () => undefined);
+    const row = locator({ click, waitFor: async () => undefined });
+    const absent = locator({ filter: () => locator({ count: async () => 0 }) });
+    const page = pageOf({
+      getByRole: () => locator({ locator: () => absent }),
+      locator: (selector: string) =>
+        selector === 'a[data-row-anchor="true"]' ? absent : locator({ filter: () => locator({ first: () => row }) }),
+    });
+    await new WebNewDriver(page).clickListRow("Prof persist urgent");
     expect(click).toHaveBeenCalledWith({ timeout: WebNewDriver.WAIT_MS });
   });
 });
@@ -1246,7 +1260,10 @@ describe("settings preferences (NEWFRONT-586, PROF-016..018)", () => {
           first: () => locator({ waitFor }),
         });
       },
-      getByTestId: () => locator({ waitFor, isVisible: async () => true }),
+      getByTestId: (id: string) =>
+        id === "layout-switcher-segmented"
+          ? locator({ locator: () => locator({ getAttribute: async () => "kanban" }) })
+          : locator({ waitFor, isVisible: async () => true }),
     });
     const driver = new WebNewDriver(page);
     await driver.layoutsSwitchTo("calendar");
@@ -2493,5 +2510,134 @@ describe("settings cross-cutting probes (NEWFRONT-586, PROF-027..028)", () => {
     expect(await driver.settingsProfileImportExportMentions()).toEqual(["Export the workspace", "import wizard"]);
     const bare = new WebNewDriver(pageOf({ locator: () => locator({ innerText: async () => "Settings\nplain" }) }));
     expect(await bare.settingsProfileImportExportMentions()).toEqual([]);
+  });
+});
+
+describe("project display methods on DisplayControl surfaces", () => {
+  function projectPage(
+    options: {
+      pressed?: Record<string, string>;
+      offered?: Record<string, string[]>;
+      panelText?: string;
+      closeFails?: boolean;
+    } = {}
+  ) {
+    const clicks: string[] = [];
+    const waits: unknown[] = [];
+    const escape = vi.fn(async () => undefined);
+    const triggerClick = vi.fn(async () => undefined);
+    const pressed = options.pressed ?? {};
+    const offered = options.offered ?? {};
+    const sectionNode = (section: string) =>
+      locator({
+        getByRole: (_role: string, roleOptions?: unknown) => {
+          const name = (roleOptions as { name?: string } | undefined)?.name ?? "";
+          const key = `${section}:${name}`;
+          if (!(offered[section] ?? []).includes(name)) return locator({ count: async () => 0 });
+          return locator({
+            count: async () => 1,
+            waitFor: async (waitOptions?: unknown) => {
+              waits.push(waitOptions);
+            },
+            click: async () => {
+              clicks.push(key);
+            },
+            getAttribute: async () => pressed[key] ?? "false",
+          });
+        },
+      });
+    const panel = locator({
+      innerText: async () => options.panelText ?? "",
+      getByTestId: (id: string) => sectionNode(id.replace("display-section-", "")),
+      waitFor: async (waitOptions?: unknown) => {
+        waits.push(waitOptions);
+        if (options.closeFails === true && waits.length === 1) throw new Error("still open");
+      },
+    });
+    const page = pageOf({
+      getByTestId: (id: string) => {
+        if (id === "profile-display-trigger") return locator({ count: async () => 0 });
+        if (id === "display-options-trigger") return locator({ click: triggerClick });
+        if (id === "display-options-panel") return panel;
+        return locator({ count: async () => 0 });
+      },
+      keyboard: { press: escape },
+    });
+    return { driver: new WebNewDriver(page), clicks, waits, escape, triggerClick };
+  }
+
+  it("opens the project trigger and waits for the project panel", async () => {
+    const { driver, triggerClick, waits } = projectPage();
+    await driver.openDisplayOptions();
+    expect(triggerClick).toHaveBeenCalledWith({ timeout: WebNewDriver.WAIT_MS });
+    expect(waits).toContainEqual({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+  });
+
+  it("closes on Escape and falls back to the project trigger when the panel stays open", async () => {
+    const { driver, escape, triggerClick, waits } = projectPage({ closeFails: true });
+    await driver.closeDisplayOptions();
+    expect(escape).toHaveBeenCalledWith("Escape");
+    expect(triggerClick).toHaveBeenCalledWith({ timeout: WebNewDriver.WAIT_MS });
+    expect(waits.filter((wait) => (wait as { state?: string })?.state === "hidden")).toHaveLength(2);
+  });
+
+  it("reads the project panel text trimmed", async () => {
+    const { driver } = projectPage({ panelText: "  Display Properties\nGroup by  " });
+    expect(await driver.displayPanelText()).toBe("Display Properties\nGroup by");
+  });
+
+  it("picks group-by and order-by rows in their own sections", async () => {
+    const { driver, clicks } = projectPage({ offered: { group: ["States"], order: ["Last created"] } });
+    await driver.setDisplayGroupBy("States");
+    await driver.setDisplayOrderBy("Last created");
+    expect(clicks).toEqual(["group:States", "order:Last created"]);
+  });
+
+  it("toggles a pill and reads its pressed state", async () => {
+    const { driver, clicks } = projectPage({
+      offered: { properties: ["Assignee"] },
+      pressed: { "properties:Assignee": "true" },
+    });
+    expect(await driver.isDisplayPropertyActive("Assignee")).toBe(true);
+    await driver.toggleDisplayProperty("Assignee");
+    expect(clicks).toEqual(["properties:Assignee"]);
+    const off = projectPage({
+      offered: { properties: ["Assignee"] },
+      pressed: { "properties:Assignee": "false" },
+    });
+    expect(await off.driver.isDisplayPropertyActive("Assignee")).toBe(false);
+  });
+
+  it("prefers the group section for labels the panel repeats", async () => {
+    const { driver } = projectPage({
+      offered: { group: ["Priority"], order: ["Priority"] },
+      pressed: { "group:Priority": "true", "order:Priority": "false" },
+    });
+    expect(await driver.isDisplayOptionChecked("Priority")).toBe(true);
+  });
+
+  it("toggles a project switch only when it is not already in the wanted state", async () => {
+    const offPage = projectPage({
+      offered: { options: ["Show empty groups"] },
+      pressed: { "options:Show empty groups": "false" },
+    });
+    await offPage.driver.setDisplayExtraOption("Show empty groups", true);
+    expect(offPage.clicks).toEqual(["options:Show empty groups"]);
+    const onPage = projectPage({
+      offered: { options: ["Show empty groups"] },
+      pressed: { "options:Show empty groups": "true" },
+    });
+    await onPage.driver.setDisplayExtraOption("Show empty groups", true);
+    expect(onPage.clicks).toEqual([]);
+  });
+
+  it("reads the profile panel text on the profile surface", async () => {
+    const page = pageOf({
+      getByTestId: (id: string) =>
+        id === "profile-display-trigger"
+          ? locator({ count: async () => 1 })
+          : locator({ innerText: async () => "  Profile panel  " }),
+    });
+    expect(await new WebNewDriver(page).displayPanelText()).toBe("Profile panel");
   });
 });

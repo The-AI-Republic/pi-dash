@@ -286,7 +286,7 @@ describe("create, copy and edit dialogs", () => {
     expect(recorder.trace().at(-1)).toContain(HEADING);
   });
 
-  it("opens edit by double-clicking the named block, then waits for its heading", async () => {
+  it("opens edit by double-clicking the block name, then waits for its heading", async () => {
     const recorder = new Recorder();
     await new WebNewDriver(recorder.page()).openDraftForEdit("One");
     const [wait, dblclick, heading] = recorder.trace();
@@ -294,6 +294,7 @@ describe("create, copy and edit dialogs", () => {
     expect(wait).toContain(NAME_BLOCK);
     expect(dblclick).toContain("dblclick");
     expect(dblclick).toContain(NAME_BLOCK);
+    expect(dblclick).toContain('locator("p[data-draft-name]")');
     expect(heading).toContain("waitFor");
     expect(heading).toContain(HEADING);
     expect(recorder.trace()).toHaveLength(3);
@@ -323,6 +324,15 @@ describe("create, copy and edit dialogs", () => {
     await expect(driver.modalTextContains("Add to project")).resolves.toBe(true);
     await expect(driver.createModalOpen()).resolves.toBe(true);
     expectTrace(recorder.trace(), ['count page.getByRole("dialog")', 'getByText("Add to project"', "count", DIALOG]);
+  });
+
+  it("searches every open dialog, not just the create form", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method }) => (method === "count" ? 1 : undefined);
+    await expect(new WebNewDriver(recorder.page()).modalTextContains("Set a parent")).resolves.toBe(true);
+    // Picker and confirm dialogs carry no Title field; a create-dialog
+    // filter would blind the read to them (ISS-122/134/135/136).
+    expect(recorder.trace().join("\n")).not.toContain(".filter(");
   });
 
   it("reads the dialog heading, or blank when it is closed", async () => {

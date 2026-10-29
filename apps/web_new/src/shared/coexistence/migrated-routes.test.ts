@@ -159,7 +159,8 @@ describe("bundled list", () => {
     expect(isMigratedPath("/profile/general")).toBe(true);
     expect(isMigratedPath("/acme")).toBe(true);
     expect(isMigratedPath("/acme/projects")).toBe(true);
-    expect(isMigratedPath("/acme/projects/1/issues")).toBe(false);
+    // Project issues moved with the Issues area gate (NEWFRONT-658).
+    expect(isMigratedPath("/acme/projects/1/issues")).toBe(true);
     expect(isMigratedPath("/acme/browse/ACME-1")).toBe(true);
     expect(isMigratedPath("/acme/browse/ACME-1/")).toBe(true);
     expect(isMigratedPath("/acme/browse")).toBe(false);
@@ -206,10 +207,11 @@ describe("bundled list", () => {
     }
     // The project runner subtree is scoped to the runners segment: sibling
     // project pages and other workspaces' runner-looking segments stay on
-    // the old app.
+    // the old app. (Project issues moved with their own area gate,
+    // NEWFRONT-658, and are asserted in the issues block below.)
     for (const path of [
       "/acme/projects/00000000-0000-0000-0000-000000000000",
-      "/acme/projects/00000000-0000-0000-0000-000000000000/issues",
+      "/acme/projects/00000000-0000-0000-0000-000000000000/cycles",
       "/acme/runner",
       "/acme/runs",
       "/acme/ai-dev-machine",
@@ -218,6 +220,29 @@ describe("bundled list", () => {
     }
     expect(resolveLinkKind("/acme/runners/approvals")).toBe("router");
     expect(resolveLinkKind("/acme/runner")).toBe("anchor");
+  });
+
+  it("serves project issues and the issue detail subtree from web_new", () => {
+    for (const path of [
+      "/acme/projects/00000000-0000-0000-0000-000000000000/issues",
+      "/acme/projects/00000000-0000-0000-0000-000000000000/issues/",
+      "/acme/projects/00000000-0000-0000-0000-000000000000/issues/00000000-0000-0000-0000-000000000000",
+    ]) {
+      expect(isMigratedPath(path), path).toBe(true);
+    }
+    // Sibling project areas stay on the old app until their own gates land.
+    for (const path of [
+      "/acme/projects/00000000-0000-0000-0000-000000000000",
+      "/acme/projects/00000000-0000-0000-0000-000000000000/cycles",
+      "/acme/projects/00000000-0000-0000-0000-000000000000/modules",
+      "/acme/projects/00000000-0000-0000-0000-000000000000/views",
+      "/acme/projects/00000000-0000-0000-0000-000000000000/intake",
+      "/acme/projects/00000000-0000-0000-0000-000000000000/issues-archive",
+    ]) {
+      expect(isMigratedPath(path), path).toBe(false);
+    }
+    expect(resolveLinkKind("/acme/projects/00000000-0000-0000-0000-000000000000/issues")).toBe("router");
+    expect(resolveLinkKind("/acme/projects/00000000-0000-0000-0000-000000000000/cycles")).toBe("anchor");
   });
 
   it("keeps workspace matching out of reserved top-level names and the bare root", () => {

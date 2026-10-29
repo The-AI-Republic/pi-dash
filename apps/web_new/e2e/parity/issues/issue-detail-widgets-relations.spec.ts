@@ -200,8 +200,14 @@ test(
             timeout: 30_000,
           })
           .toBe(0);
-        const rows = await issueFacts(seed.workspaceSlug, seed.projectId, session);
-        expect(rows.map((row) => row.name)).not.toContain(destroyed.name);
+        // The destroy trails the detach by two more round trips (detail
+        // read, then delete), so poll for convergence instead of reading
+        // once — on a shared stack the delete lands seconds later.
+        await expect
+          .poll(async () => (await issueFacts(seed.workspaceSlug, seed.projectId, session)).map((row) => row.name), {
+            timeout: 60_000,
+          })
+          .not.toContain(destroyed.name);
       });
     } finally {
       await dropIssue(seed, session, destroyed.id).catch(() => {});
