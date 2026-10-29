@@ -697,18 +697,18 @@ pub async fn update(
         }
     } else {
         // Unlinked legacy row: `Description.objects.create` over
-        // `description_defaults` (`:607-627`) — the comment's own creator
-        // stays `created_by`, the acting user is `updated_by` — then the
+        // `description_defaults` (`:607-627`) runs `BaseModel.save`'s
+        // creating arm (`db/models/base.py:36-39`), which overwrites the
+        // passed defaults from crum — the acting user is `created_by`,
+        // `updated_by` is NULL — then the
         // `update_fields=["description_id"]` link write.
-        let stored_created_by =
-            read::row_uuid_opt(before, "created_by_id").map_err(map_read_error)?;
         let desc_stripped = description_stripped_for_create(&new_html);
         let desc = comment_domain::DescriptionValues {
             id: Uuid::new_v4(),
             created_at: now_utc(),
             updated_at: now_utc(),
-            created_by: stored_created_by,
-            updated_by: Some(actor_id),
+            created_by: Some(actor_id),
+            updated_by: None,
             workspace_id,
             project_id,
             json: &new_json,
@@ -1269,5 +1269,156 @@ mod tests {
             Some("https://app.example.test".to_owned())
         );
         assert_eq!(webhook_origin(true, None), Err(Error::ServerError));
+    }
+
+    // --- Live-DB legacy-mint stamp test (PIDASHCONV-1658) ---
+
+    use crate::domain::activity::TaskEnqueueHook;
+    use crate::domain::transition::IssueTransitionHook;
+    use crate::domain::{WriteActor, WriteCtx};
+    use crate::orchestration::entries::{FireOutcome, FireRequest};
+    use crate::read::test_support::{pool, seed_world};
+    use std::sync::{Arc, Mutex};
+
+    type EnqueueCall = (String, Vec<Value>, Map<String, Value>);
+
+    struct RecordingEnqueue {
+        calls: Mutex<Vec<EnqueueCall>>,
+    }
+
+    impl TaskEnqueueHook for RecordingEnqueue {
+        fn enqueue_task(
+            &self,
+            task: &str,
+            args: Vec<Value>,
+            kwargs: Map<String, Value>,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+            self.calls
+                .lock()
+                .expect("calls lock")
+                .push((task.to_owned(), args, kwargs));
+            Box::pin(async move {})
+        }
+    }
+
+    struct NoopTransition;
+
+    impl IssueTransitionHook for NoopTransition {
+        fn enqueue_completion_comment(
+            &self,
+            _issue_id: Uuid,
+            _prev_state_id: Option<Uuid>,
+            _current_state_id: Option<Uuid>,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+            Box::pin(async move {})
+        }
+
+        fn fire(
+            &self,
+            _actor_id: Uuid,
+            _request: FireRequest,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<FireOutcome, ()>> + Send + '_>>
+        {
+            Box::pin(async move { Ok(FireOutcome::NoTransition) })
+        }
+    }
+
+    #[tokio::test]
+    async fn live_update_mints_legacy_description_with_actor_stamps() {
+        let Some(pool) = pool().await else {
+            return;
+        };
+        let world = seed_world(&pool).await;
+        // A second user plays the updater; the seeded user stays the
+        // comment's stored creator, so the two stamps diverge.
+        let updater = Uuid::new_v4();
+        let username = format!("mint-{}", updater.simple());
+        sqlx::query(
+            "INSERT INTO users (id, password, username, email, first_name, last_name, avatar,\
+             date_joined, created_at, updated_at, last_location, created_location,\
+             is_superuser, is_managed, is_password_expired, is_active, is_staff,\
+             is_email_verified, is_password_autoset, token, user_timezone,\
+             last_login_ip, last_logout_ip, last_login_medium, last_login_uagent,\
+             is_bot, display_name, is_email_valid, is_password_reset_required)\
+             VALUES ($1,'!',$2,$3,'Mint','User','',\
+             now(), now(), now(), '','', false,false,false,true,false,false,false,'','UTC',\
+             '','','email','',false,'Mint User',false,false)",
+        )
+        .bind(updater)
+        .bind(&username)
+        .bind(format!("{username}@example.test"))
+        .execute(&pool)
+        .await
+        .expect("seed updater");
+        // The seeded comment is unlinked (`description_id` NULL, the
+        // pre-0109 shape); stamp it as created by the seeded user.
+        sqlx::query("UPDATE issue_comments SET created_by_id = $1 WHERE id = $2")
+            .bind(world.user_id)
+            .bind(world.comment_id)
+            .execute(&pool)
+            .await
+            .expect("stamp comment creator");
+        let before = read::fetch_comment_direct(
+            &pool,
+            &world.workspace_slug,
+            &world.project_id,
+            &world.issue_id,
+            &world.comment_id,
+        )
+        .await
+        .expect("fetch before")
+        .expect("comment row");
+        let body = serde_json::json!({"comment_html": "<p>minted</p>"});
+        let deps = Deps {
+            pool: pool.clone(),
+            orm: sea_orm::SqlxPostgresConnector::from_sqlx_postgres_pool(pool.clone()),
+            transition: Arc::new(NoopTransition),
+            enqueue: Arc::new(RecordingEnqueue {
+                calls: Mutex::new(Vec::new()),
+            }),
+        };
+        let ctx = WriteCtx::new(WriteActor {
+            user_id: updater,
+            timezone: None,
+        });
+        let write = CommentUpdate {
+            slug: &world.workspace_slug,
+            project_id: world.project_id,
+            workspace_id: world.workspace_id,
+            issue_id: world.issue_id,
+            pk: world.comment_id,
+            before: &before,
+            body: &body,
+            from_form: false,
+            origin: None,
+            web_base: None,
+        };
+        let outcome = update(
+            &deps,
+            &ctx,
+            &write,
+            CommentUpdateOptions {
+                emit_activity: false,
+                emit_model_activity: false,
+            },
+        )
+        .await
+        .expect("update succeeds");
+        assert_eq!(outcome.status, 200);
+        // `Description.objects.create` runs `BaseModel.save`'s creating
+        // arm (`db/models/base.py:36-39`), which overwrites the passed
+        // defaults from crum: `created_by` is the acting user and
+        // `updated_by` is NULL — not the comment's stored creator.
+        let minted: (Uuid, Option<Uuid>, Option<Uuid>) = sqlx::query_as(
+            r#"SELECT d."id", d."created_by_id", d."updated_by_id" FROM "descriptions" d
+               JOIN "issue_comments" c ON c."description_id" = d."id" WHERE c."id" = $1"#,
+        )
+        .bind(world.comment_id)
+        .fetch_one(&pool)
+        .await
+        .expect("minted description");
+        assert_ne!(world.user_id, updater);
+        assert_eq!(minted.1, Some(updater));
+        assert_eq!(minted.2, None);
     }
 }
