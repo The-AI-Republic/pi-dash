@@ -84,6 +84,7 @@ use pidash_compat::validate::uuid_from_json_int;
 use pidash_db::app_pages::strip::ml_strip_tags;
 use pidash_db::entity::comment_hooks::description_stripped_for;
 use pidash_services::domain::comments as comment_domain;
+use pidash_services::v1_projects::tasks::model_activity_kwargs;
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -4744,23 +4745,23 @@ async fn comment_create(
     activity.insert("notification".to_owned(), Value::Bool(true));
     activity.insert("origin".to_owned(), Value::String(origin.clone()));
     enqueue_kwargs(&pool, ISSUE_ACTIVITY_TASK, activity).await;
-    let mut model = Map::new();
-    model.insert(
-        "model_name".to_owned(),
-        Value::String("issue_comment".to_owned()),
-    );
-    model.insert("model_id".to_owned(), Value::String(base.id.to_string()));
     // Task bytes render the raw QueryDict (PIDASHCONV-763): form list
     // fields dump as last-wins scalars. In place — validation is done
     // and `body` moves into the payload below.
     if is_html {
         shared_body::project_list_scalars(&mut body, ENGAGE_BODY_SPEC.list_fields);
     }
-    model.insert("requested_data".to_owned(), Value::Object(body));
-    model.insert("current_instance".to_owned(), Value::Null);
-    model.insert("actor_id".to_owned(), Value::String(user_id.to_string()));
-    model.insert("slug".to_owned(), Value::String(slug));
-    model.insert("origin".to_owned(), Value::String(origin));
+    // Shared `model_activity` kernel (PIDASHCONV-1623): the same seven
+    // keys in the same order (`current_instance` is `None` on create).
+    let model = model_activity_kwargs(
+        "issue_comment",
+        &base.id.to_string(),
+        Value::Object(body),
+        None,
+        &user_id.to_string(),
+        &slug,
+        Some(&origin),
+    );
     enqueue_kwargs(&pool, MODEL_ACTIVITY_TASK, model).await;
     match serde_json::to_string(&rendered) {
         Ok(text) => json_response(StatusCode::CREATED, text),
@@ -5099,25 +5100,23 @@ async fn comment_partial_update(
     activity.insert("notification".to_owned(), Value::Bool(true));
     activity.insert("origin".to_owned(), Value::String(origin.clone()));
     enqueue_kwargs(&pool, ISSUE_ACTIVITY_TASK, activity).await;
-    let mut model = Map::new();
-    model.insert(
-        "model_name".to_owned(),
-        Value::String("issue_comment".to_owned()),
-    );
-    model.insert("model_id".to_owned(), Value::String(pk.to_string()));
     // Same QueryDict projection as `requested_data` above (PIDASHCONV-763).
     // In place — validation is done and `body` moves below.
     if is_html {
         shared_body::project_list_scalars(&mut body, ENGAGE_BODY_SPEC.list_fields);
     }
-    model.insert("requested_data".to_owned(), Value::Object(body));
-    model.insert(
-        "current_instance".to_owned(),
-        Value::String(current_instance),
+    // Shared `model_activity` kernel (PIDASHCONV-1623): the same seven
+    // keys in the same order (the before-image snapshot string rides
+    // `current_instance` on update).
+    let model = model_activity_kwargs(
+        "issue_comment",
+        &pk.to_string(),
+        Value::Object(body),
+        Some(&current_instance),
+        &user_id.to_string(),
+        &slug,
+        Some(&origin),
     );
-    model.insert("actor_id".to_owned(), Value::String(user_id.to_string()));
-    model.insert("slug".to_owned(), Value::String(slug));
-    model.insert("origin".to_owned(), Value::String(origin));
     enqueue_kwargs(&pool, MODEL_ACTIVITY_TASK, model).await;
     match render_base_comment(&pool, &base, &tenant.timezone, None).await {
         Ok(value) => match serde_json::to_string(&value) {
