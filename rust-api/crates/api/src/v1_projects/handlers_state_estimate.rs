@@ -756,37 +756,6 @@ fn csv_param(raw: Option<String>) -> Option<Vec<String>> {
     }
 }
 
-/// All `StateSerializer` wire fields, in live-DRF order (probed 2026-09-30 against
-/// Django 4.2.30: declared `id`, the time/soft-delete columns, the plain model
-/// fields in definition order, then the four FKs — `created_by`, `updated_by`,
-/// `project`, `workspace` — last).
-///
-/// NOTE: this differs from
-/// [`pidash_services::v1_projects::ser_workflow::StateView`], which documents
-/// "declared `id`, then model definition order" (foundation, PIDASHCONV-351,
-/// read-only here). The order below is what Django actually emits; rendering
-/// lives in this module, so the port follows the wire, not the doc.
-const STATE_FIELDS: &[&str] = &[
-    "id",
-    "created_at",
-    "updated_at",
-    "deleted_at",
-    "name",
-    "description",
-    "color",
-    "slug",
-    "sequence",
-    "group",
-    "is_triage",
-    "default",
-    "external_source",
-    "external_id",
-    "created_by",
-    "updated_by",
-    "project",
-    "workspace",
-];
-
 /// Expansion map applicable to states (`serializers/base.py:53-94`):
 /// `project` → `ProjectLiteSerializer`, `workspace` → `WorkspaceLiteSerializer`,
 /// `created_by` / `updated_by` → `UserLiteSerializer`.
@@ -797,75 +766,6 @@ fn expand_lite_kind(name: &str) -> Option<&'static str> {
         "created_by" | "updated_by" => Some("user"),
         _ => None,
     }
-}
-
-/// One rendered state object as an ordered map, before `fields`/`expand`.
-#[allow(clippy::too_many_arguments)]
-fn state_base_map(
-    id: &str,
-    created_at: &str,
-    updated_at: &str,
-    created_by: Option<String>,
-    updated_by: Option<String>,
-    deleted_at: Option<String>,
-    project: &str,
-    workspace: &str,
-    name: &str,
-    description: &str,
-    color: &str,
-    slug: &str,
-    sequence: f64,
-    group: &str,
-    is_triage: bool,
-    default: bool,
-    external_source: Option<&str>,
-    external_id: Option<&str>,
-) -> serde_json::Map<String, Value> {
-    let mut map = serde_json::Map::with_capacity(STATE_FIELDS.len());
-    let opt = |v: Option<String>| v.map(Value::String).unwrap_or(Value::Null);
-    map.insert("id".to_owned(), Value::String(id.to_owned()));
-    map.insert(
-        "created_at".to_owned(),
-        Value::String(created_at.to_owned()),
-    );
-    map.insert(
-        "updated_at".to_owned(),
-        Value::String(updated_at.to_owned()),
-    );
-    map.insert("deleted_at".to_owned(), opt(deleted_at));
-    map.insert("name".to_owned(), Value::String(name.to_owned()));
-    map.insert(
-        "description".to_owned(),
-        Value::String(description.to_owned()),
-    );
-    map.insert("color".to_owned(), Value::String(color.to_owned()));
-    map.insert("slug".to_owned(), Value::String(slug.to_owned()));
-    map.insert(
-        "sequence".to_owned(),
-        serde_json::Number::from_f64(sequence)
-            .map(Value::Number)
-            .unwrap_or(Value::Null),
-    );
-    map.insert("group".to_owned(), Value::String(group.to_owned()));
-    map.insert("is_triage".to_owned(), Value::Bool(is_triage));
-    map.insert("default".to_owned(), Value::Bool(default));
-    map.insert(
-        "external_source".to_owned(),
-        external_source
-            .map(|v| Value::String(v.to_owned()))
-            .unwrap_or(Value::Null),
-    );
-    map.insert(
-        "external_id".to_owned(),
-        external_id
-            .map(|v| Value::String(v.to_owned()))
-            .unwrap_or(Value::Null),
-    );
-    map.insert("created_by".to_owned(), opt(created_by));
-    map.insert("updated_by".to_owned(), opt(updated_by));
-    map.insert("project".to_owned(), Value::String(project.to_owned()));
-    map.insert("workspace".to_owned(), Value::String(workspace.to_owned()));
-    map
 }
 
 /// Render one state row (`StateSerializer.to_representation`, `state.py:11-41`):
@@ -887,7 +787,7 @@ async fn render_state(
         .deleted_at
         .as_ref()
         .map(|dt| crate::serializer::render_datetime_in(dt, tz));
-    let mut map = state_base_map(
+    let mut map = ser::state_base_map(
         &row.id.to_string(),
         &created_at,
         &updated_at,
@@ -1657,7 +1557,12 @@ fn validate_state_input(
         })
     } else {
         // Error order is serializer field order (DRF `errors` dict).
-        let order = |name: &str| STATE_FIELDS.iter().position(|f| *f == name).unwrap_or(99);
+        let order = |name: &str| {
+            ser::STATE_FIELDS
+                .iter()
+                .position(|f| *f == name)
+                .unwrap_or(99)
+        };
         errors.sort_by_key(|(name, _)| order(name));
         Err(errors)
     }
@@ -2651,7 +2556,7 @@ mod tests {
         // Probed live order: id, created_at, updated_at, deleted_at, then the
         // plain model fields, then the four FKs last.
         assert_eq!(
-            STATE_FIELDS,
+            ser::STATE_FIELDS,
             &[
                 "id",
                 "created_at",
