@@ -167,7 +167,9 @@ test(
         return JSON.stringify(detail.rich_filters);
       }, POLL)
       .toContain("urgent");
-    expect(await driver.lastToast()).toContain("updated successfully");
+    // The toast lands when the PATCH resolves, which can trail the stored
+    // query the poll above already sees; wait for it rather than sample.
+    await expect.poll(async () => driver.lastToast(), POLL).toContain("updated successfully");
   }
 );
 
@@ -247,12 +249,17 @@ test(
     await viewsOpenDetailAs(driver, harness, viewId);
     await expect.poll(() => driver.viewsDetailTabTitle(), POLL).toContain(name);
     await expect.poll(() => driver.viewsDetailEmptyTitle(), POLL).toBe("View work items will appear here");
+    // The filter row (and Save as with it) mounts once the project detail
+    // that carries the views feature flag resolves, so the "no unsaved
+    // query, no Save as" half waits for the row's own affordance instead of
+    // reading the header in a single shot and catching it still pending.
+    await expect.poll(() => driver.viewsDetailFiltersToggleVisible(), POLL).toBe(true);
     expect(await driver.viewsDetailSaveAsVisible()).toBe(false);
 
     await driver.viewsDetailFilterAdd("Priority", "Urgent");
-    expect(await driver.viewsDetailSaveAsVisible()).toBe(true);
+    await expect.poll(() => driver.viewsDetailSaveAsVisible(), POLL).toBe(true);
     await driver.viewsDetailSaveAsClick();
-    expect(await driver.viewsDialogTitleValue()).toBe(`${name} 2`);
+    await expect.poll(() => driver.viewsDialogTitleValue(), POLL).toBe(`${name} 2`);
     await driver.viewsDialogSubmit();
     await expect.poll(() => driver.viewsDetailTabTitle(), POLL).toContain(`${name} 2`);
 
