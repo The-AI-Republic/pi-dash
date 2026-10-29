@@ -4084,6 +4084,17 @@ export class WebNewDriver implements ParityDriver {
     await editor.pressSequentially(text, { timeout: WebNewDriver.WAIT_MS });
   }
 
+  async composerEditAppend(text: string): Promise<void> {
+    // Home then End lands the caret at the end of the opening text
+    // block whatever the click selected, so embedded nodes after it
+    // survive the keystrokes (NEWFRONT-147 keeps its image this way).
+    const editor = this.commentEditEditor();
+    await editor.click({ timeout: WebNewDriver.WAIT_MS });
+    await editor.press("Home", { timeout: WebNewDriver.WAIT_MS });
+    await editor.press("End", { timeout: WebNewDriver.WAIT_MS });
+    await editor.pressSequentially(text, { timeout: WebNewDriver.WAIT_MS });
+  }
+
   async composerEditSaveDisabled(): Promise<boolean> {
     return this.commentEditEditor()
       .locator("xpath=ancestor::form[1]")

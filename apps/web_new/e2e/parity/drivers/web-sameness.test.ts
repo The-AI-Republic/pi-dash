@@ -248,3 +248,18 @@ describe("reaction control presence", () => {
     await expect(new WebDriver(spy.page).issueReactionControlVisible()).resolves.toBe(true);
   });
 });
+
+describe("composerEditAppend", () => {
+  it("appends to the oracle edit draft without selecting it first", async () => {
+    const steps: string[] = [];
+    const spy = spyPage({
+      commentCard: locator({
+        click: async () => void steps.push("click"),
+        press: async (key: string) => void steps.push(`press:${key}`),
+        pressSequentially: async (value: string) => void steps.push(`type:${value}`),
+      }),
+    });
+    await new WebDriver(spy.page).composerEditAppend(" kept");
+    expect(steps).toEqual(["click", "press:Home", "press:End", "type: kept"]);
+  });
+});

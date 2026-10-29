@@ -121,8 +121,10 @@ test(
         await driver.composerMenuClick("Edit");
         // Type before asserting the control arms: a pristine draft
         // legitimately leaves save disabled (CMT-003), so the arm
-        // assertion only holds past the first keystroke.
-        await driver.composerEditType(`${marker} kept`);
+        // assertion only holds past the first keystroke. Appended, not
+        // replaced: a select-all retype would drop the embedded image
+        // from the draft before the save this step means to keep.
+        await driver.composerEditAppend(" kept");
         await expect.poll(() => driver.composerEditSaveDisabled(), { timeout: 30_000 }).toBe(false);
         await driver.composerEditSave();
         await expect

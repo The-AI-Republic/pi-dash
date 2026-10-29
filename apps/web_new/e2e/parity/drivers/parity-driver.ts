@@ -718,6 +718,8 @@ export interface ParityDriver {
   composerMenuClick(item: string): Promise<void>;
   /** Replace the inline edit form content with the given text. */
   composerEditType(text: string): Promise<void>;
+  /** Append text to the inline edit draft, keeping its embedded nodes (CMT-009). */
+  composerEditAppend(text: string): Promise<void>;
   /** Whether the inline edit form's save control is currently disabled. */
   composerEditSaveDisabled(): Promise<boolean>;
   /** Save the inline edit form through its save control. */

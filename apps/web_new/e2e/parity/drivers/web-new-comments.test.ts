@@ -1267,6 +1267,20 @@ describe("web_new comments gate driver (NEWFRONT-818)", () => {
     ]);
   });
 
+  it("appends to the edit draft without selecting it first", async () => {
+    const steps: string[] = [];
+    const editor = locator({
+      click: async () => void steps.push("click"),
+      press: async (key: string) => void steps.push(`press:${key}`),
+      pressSequentially: async (value: string) => void steps.push(`type:${value}`),
+    });
+    const page = pageOf({
+      locator: (selector) => (selector === '[id^="comment-"] [contenteditable="true"]' ? editor : locator()),
+    });
+    await new WebNewDriver(page.page).composerEditAppend(" kept");
+    expect(steps).toEqual(["click", "press:Home", "press:End", "type: kept"]);
+  });
+
   it("presses Enter from the focused edit form", async () => {
     const focused: string[] = [];
     const page = pageOf({
