@@ -51,10 +51,6 @@ vi.mock("@pi-dash/ui", () => ({
   Avatar: AvatarMock,
 }));
 
-vi.mock("@/components/common/cover-image", () => ({
-  CoverImage: () => <span />,
-}));
-
 vi.mock("@/components/sidebar/sidebar-item", () => ({
   AppSidebarItem: () => <span />,
 }));
@@ -63,17 +59,9 @@ vi.mock("@/hooks/store/use-app-theme", () => ({
   useAppTheme: () => ({ toggleAnySidebarDropdown: vi.fn() }),
 }));
 
-vi.mock("@/hooks/store/use-command-palette", () => ({
-  useCommandPalette: () => ({ toggleProfileSettingsModal: vi.fn() }),
-}));
-
 vi.mock("@/hooks/store/user", () => ({
   useUser: () => ({ data: currentUser, signOut: vi.fn() }),
   useUserPermissions: () => ({ allowPermissions }),
-}));
-
-vi.mock("@/pi-dash-web/components/license", () => ({
-  PaidPlanUpgradeModal: () => <span />,
 }));
 
 const { UserMenuRoot } = await import("@/components/workspace/sidebar/user-menu-root");

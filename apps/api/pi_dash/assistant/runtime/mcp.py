@@ -185,9 +185,18 @@ def build_toolset(
     """Build one streamable-HTTP MCP toolset.
 
     ``include_instructions`` forwards the server's ``instructions`` to the
-    model. It defaults to False in pydantic-ai; a server that uses
-    instructions to describe a discovery protocol needs it on or the model
-    never learns the protocol exists.
+    model. It is left at its pydantic-ai default of False and stays there:
+    ``build_toolsets`` never overrides it and there is no user-facing setting
+    or per-server column that could, so in production it is always False. That
+    is deliberate. Instructions are free-form text supplied by a third-party
+    server, and the assistant already treats tool *results* as untrusted; a
+    server's instructions would enter the model's context as untrusted content
+    too, so turning them on globally is a prompt-injection surface we do not
+    accept without a per-server opt-in that puts the trust decision with the
+    person who added the server. Until that opt-in exists, servers that rely on
+    instructions to advertise a discovery protocol are unsupported: the model
+    never sees those instructions. The parameter is kept for that future opt-in
+    and for tests. (See PDASHOSS01-124 for the product discussion.)
 
     Uses ``MCPToolset`` rather than the deprecated ``MCPServerStreamableHTTP``
     (removed in pydantic-ai v2); streamable HTTP is its default for http URLs.

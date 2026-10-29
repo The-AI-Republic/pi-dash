@@ -17,6 +17,7 @@ pub mod label;
 // `pub` so the CLI contract tests can drive the page subcommands directly.
 pub mod page;
 mod project;
+mod reconnect;
 mod remove;
 pub mod resolve;
 mod restart;
@@ -27,6 +28,7 @@ pub mod run_cmd;
 pub mod runner;
 pub mod runner_ops;
 mod start;
+mod scheduler;
 mod state;
 mod status;
 mod stop;
@@ -106,6 +108,10 @@ pub enum Command {
     /// Restart the installed service.
     Restart(restart::Args),
 
+    /// Retry the cloud connection now instead of waiting out the backoff
+    /// (all runners, or just `<runner>`).
+    Reconnect(reconnect::Args),
+
     /// Print service + daemon status.
     Status(status::Args),
 
@@ -142,6 +148,10 @@ pub enum Command {
 
     /// Inspect workflow states on a project.
     State(state::StateArgs),
+
+    /// Read project schedulers (read-only): `scheduler list` /
+    /// `scheduler get <id>` / `scheduler runs <id>`.
+    Scheduler(scheduler::SchedulerArgs),
 
     /// Read or overwrite the coding agent's per-issue workpad.
     Workpad(workpad::WorkpadArgs),
@@ -188,6 +198,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Start(args) => start::run(args, &paths).await,
         Command::Stop(args) => stop::run(args, &paths).await,
         Command::Restart(args) => restart::run(args, &paths).await,
+        Command::Reconnect(args) => reconnect::run(args, &paths).await,
         Command::Status(args) => status::run(args, &paths).await,
         Command::Tui(args) => tui::run(args, &paths).await,
         Command::Doctor(args) => doctor::run(args, &paths).await,
@@ -199,6 +210,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Comment(args) => run_crud(comment::run(args, &paths).await),
         Command::Page(args) => run_crud(page::run(args, &paths).await),
         Command::State(args) => run_crud(state::run(args, &paths).await),
+        Command::Scheduler(args) => run_crud(scheduler::run(args, &paths).await),
         Command::Workpad(args) => run_crud(workpad::run(args, &paths).await),
         Command::Workspace(args) => run_crud(workspace::run(args, &paths).await),
         Command::RunCmd(args) => run_crud(run_cmd::run(args, &paths).await),
@@ -219,7 +231,8 @@ async fn run_default(paths: &crate::util::paths::Paths) -> Result<()> {
                 url: None,
                 no_browser: false,
                 workspace: None,
-                device_code: None,
+                force: false,
+                device_code_stdin: false,
             }),
         };
         return auth::run(args, paths).await;

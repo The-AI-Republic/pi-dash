@@ -935,6 +935,7 @@ mod tests {
                 log_level: "info".into(),
                 log_retention_days: 14,
                 agent_observability_v1: false,
+                agent_watchdog: Default::default(),
                 auto_update: true,
             },
             runners: vec![runner],
