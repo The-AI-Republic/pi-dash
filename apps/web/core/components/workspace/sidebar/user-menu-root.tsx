@@ -18,7 +18,6 @@ import { cn, getFileURL } from "@pi-dash/utils";
 import { AppSidebarItem } from "@/components/sidebar/sidebar-item";
 // hooks
 import { useAppTheme } from "@/hooks/store/use-app-theme";
-import { useCommandPalette } from "@/hooks/store/use-command-palette";
 import { useUser } from "@/hooks/store/user";
 
 type Props = {
@@ -34,7 +33,6 @@ export const UserMenuRoot = observer(function UserMenuRoot({ variant = "compact"
   const { toggleAnySidebarDropdown } = useAppTheme();
   const { data: currentUser } = useUser();
   const { signOut } = useUser();
-  const { toggleProfileSettingsModal } = useCommandPalette();
   // derived values
   const isUserInstanceAdmin = false;
   // translation
@@ -141,12 +139,7 @@ export const UserMenuRoot = observer(function UserMenuRoot({ variant = "compact"
         </div>
         <div>
           <CustomMenu.MenuItem
-            onClick={() =>
-              toggleProfileSettingsModal({
-                activeTab: "general",
-                isOpen: true,
-              })
-            }
+            onClick={() => router.push("/settings/profile/general")}
             className="flex items-center gap-2"
           >
             <Settings className="size-3.5 shrink-0" />
