@@ -7,9 +7,9 @@
 //!
 //! Execution shapes, by writer kind:
 //!
-//! * [`create`] runs on `&PgPool`: the workspace `INSERT` plus the
-//!   `post_save` seeding effect (`scheduler/signals.py:28-39`) as a
-//!   direct same-crate call to
+//! * [`create`] runs on `&PgPool`: the workspace `INSERT` (via
+//!   [`insert`]) plus the `post_save` seeding effect
+//!   (`scheduler/signals.py:28-39`) as a direct same-crate call to
 //!   [`seed_builtin_schedulers`](crate::scheduler::builtins::seed_builtin_schedulers).
 //!   All three create entry points (app, license-config, dummy-data)
 //!   are pool-autocommit, so no caller needs a transaction here; the
@@ -23,11 +23,13 @@
 //!   ([`super::HookRegistry`], which names this exact case); until a
 //!   caller needs that shape, the direct call is the whole mechanism.
 //! * Everything else is generic over `sqlx::Executor`, like
-//!   [`super::tokens`]: the member insert, the bulk insert, the role /
-//!   reactivate / deactivate updates, the platform insert / overwrite /
-//!   sync / no-stamp-deactivate shapes and the slug rename all run on
-//!   the caller's pool or on the caller's existing `sqlx` transaction
-//!   (the join-request approve path holds one) with no restructuring.
+//!   [`super::tokens`]: the row-only workspace insert, the member
+//!   insert, the bulk insert, the role / reactivate / deactivate
+//!   updates, the platform insert / overwrite / sync /
+//!   no-stamp-deactivate shapes, the slug rename and the name sync all
+//!   run on the caller's pool or on the caller's existing `sqlx`
+//!   transaction (the join-request approve path holds one; the overlay
+//!   platform ensure holds one) with no restructuring.
 //!
 //! Per-caller deltas (design D6) ride on the input structs. Two Rust-side
 //! divergences the survey found are preserved verbatim:
@@ -43,7 +45,7 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
-// create (pool; INSERT + post_save seeding)
+// insert (executor-generic; row only) + create (pool; INSERT + post_save seeding)
 // ---------------------------------------------------------------------------
 
 /// One workspace row to insert: every column without a DB default.
@@ -68,6 +70,8 @@ pub struct NewWorkspace<'a> {
     /// The seeding `created_by`: `Some` request user on the HTTP paths
     /// (`BaseModel.save` stamps the crum user on the scheduler rows
     /// too), `None` on crum-less entry points (Django stamps `NULL`).
+    /// Only [`create`] reads this; [`insert`] leaves seeding to the
+    /// caller and ignores it.
     pub seed_created_by: Option<Uuid>,
 }
 
@@ -86,14 +90,22 @@ const WORKSPACE_INSERT_SQL: &str = "INSERT INTO \"workspaces\" \
     VALUES ($1, $2, $3, $4, NULL, $5, $6, $7, $8, $9, $10, $11, $12, $13) \
     RETURNING \"created_at\", \"updated_at\"";
 
-/// `Workspace.objects.create(...)`: the row plus the `post_save`
-/// seeding effect. Unique violations propagate as `sqlx::Error` so
-/// each caller keeps its own 409 arm (app JSON vs license `Conflict`).
-/// The `None` arm preserves the app path's `fetch_optional` shape.
-pub async fn create(
-    pool: &sqlx::PgPool,
+/// `Workspace.objects.create(...)`: the row, and nothing else. The
+/// overlay platform ensure
+/// (`_get_or_create_platform_workspace`, `service.py:335-339`) runs
+/// this on its own `sqlx` transaction next to the unique-slug probe
+/// and the link insert, then seeds the builtins itself after commit;
+/// adopting [`create`] would split that transaction and move the
+/// seeding. Unique violations propagate as `sqlx::Error` for the
+/// caller's 409 arm. The `None` arm preserves the app path's
+/// `fetch_optional` shape.
+pub async fn insert<'e, E>(
+    ex: E,
     ws: &NewWorkspace<'_>,
-) -> Result<Option<WorkspaceStamps>, sqlx::Error> {
+) -> Result<Option<WorkspaceStamps>, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
     let row: Option<(DateTime<Utc>, DateTime<Utc>)> = sqlx::query_as(WORKSPACE_INSERT_SQL)
         .bind(ws.id)
         .bind(ws.created_at)
@@ -108,17 +120,29 @@ pub async fn create(
         .bind(ws.organization_size)
         .bind(ws.timezone)
         .bind(ws.background_color)
-        .fetch_optional(pool)
+        .fetch_optional(ex)
         .await?;
-    // `post_save` on `Workspace` (`scheduler/signals.py:28-39`) fires
-    // during the save above, before the member row below. The receiver
-    // swallows every failure, so this never fails the request.
-    crate::scheduler::builtins::seed_builtin_schedulers(pool, ws.id, ws.seed_created_by).await;
     Ok(row.map(|(created_at, updated_at)| WorkspaceStamps {
         id: ws.id,
         created_at,
         updated_at,
     }))
+}
+
+/// `Workspace.objects.create(...)`: the row plus the `post_save`
+/// seeding effect. Unique violations propagate as `sqlx::Error` so
+/// each caller keeps its own 409 arm (app JSON vs license `Conflict`).
+/// The `None` arm preserves the app path's `fetch_optional` shape.
+pub async fn create(
+    pool: &sqlx::PgPool,
+    ws: &NewWorkspace<'_>,
+) -> Result<Option<WorkspaceStamps>, sqlx::Error> {
+    let stamps = insert(pool, ws).await?;
+    // `post_save` on `Workspace` (`scheduler/signals.py:28-39`) fires
+    // during the save above, before the member row below. The receiver
+    // swallows every failure, so this never fails the request.
+    crate::scheduler::builtins::seed_builtin_schedulers(pool, ws.id, ws.seed_created_by).await;
+    Ok(stamps)
 }
 
 // ---------------------------------------------------------------------------
@@ -138,6 +162,37 @@ where
 {
     sqlx::query(RENAME_SQL)
         .bind(new_slug)
+        .bind(workspace_id)
+        .execute(ex)
+        .await
+        .map(|_| ())
+}
+
+// ---------------------------------------------------------------------------
+// set_name (executor-generic; the platform name sync)
+// ---------------------------------------------------------------------------
+
+/// `workspace.save(update_fields=["name", "updated_at"])`
+/// (`platform_federation/service.py:332` in the ensure,
+/// `platform_federation/service.py:381` in the metadata sync):
+/// Django's `_meta` order runs `updated_at` first, so the `SET`
+/// lists it before `name`. Replaces the two overlay
+/// `sync_workspace_name` helpers.
+const SET_NAME_SQL: &str = "UPDATE workspaces SET updated_at = $1, name = $2 WHERE id = $3";
+
+/// Sync one workspace name plus the `updated_at` stamp, nothing else.
+pub async fn set_name<'e, E>(
+    ex: E,
+    workspace_id: Uuid,
+    name: &str,
+    updated_at: DateTime<Utc>,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(SET_NAME_SQL)
+        .bind(updated_at)
+        .bind(name)
         .bind(workspace_id)
         .execute(ex)
         .await
@@ -704,6 +759,18 @@ mod tests {
         assert!(!MEMBER_INSERT_DB_NOW_SQL.contains("ON CONFLICT"));
         assert_eq!(RENAME_SQL, "UPDATE workspaces SET slug = $1 WHERE id = $2");
         assert!(!RENAME_SQL.contains("updated_at"));
+    }
+
+    #[test]
+    fn set_name_sql_pins_platform_sync_shape() {
+        // Byte-identical to the overlay `sync_workspace_name` render
+        // (`UPDATE {TABLE} SET updated_at = $1, name = $2 WHERE id =
+        // $3` with `TABLE = "workspaces"`); binds stay (now, name,
+        // id).
+        assert_eq!(
+            SET_NAME_SQL,
+            "UPDATE workspaces SET updated_at = $1, name = $2 WHERE id = $3"
+        );
     }
 
     #[test]
@@ -1530,6 +1597,178 @@ mod tests {
                 .await
                 .expect("read back");
         assert_eq!(row, ("acme-2".to_owned(), now));
+    }
+
+    /// `insert` lands the full row on the pool and on the caller's
+    /// transaction alike, and seeds nothing (the overlay ensure seeds
+    /// itself after commit).
+    #[tokio::test]
+    async fn live_insert_row_only_no_seed() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        sqlx::query(WORKSPACES_DDL)
+            .execute(&pool)
+            .await
+            .expect("temp workspaces");
+        sqlx::query(SCHEDULERS_DDL)
+            .execute(&pool)
+            .await
+            .expect("temp schedulers");
+        let now: DateTime<Utc> = "2026-10-03T12:00:00+00:00".parse().expect("T0");
+        let owner = Uuid::new_v4();
+        let id = Uuid::new_v4();
+        let stamps = insert(
+            &pool,
+            &NewWorkspace {
+                id,
+                name: "Acme",
+                slug: "acme",
+                owner_id: owner,
+                created_by: None,
+                logo: None,
+                logo_asset_id: None,
+                organization_size: None,
+                timezone: "UTC",
+                background_color: "#a1b2c3",
+                deleted_at: None,
+                created_at: now,
+                updated_at: now,
+                seed_created_by: Some(owner),
+            },
+        )
+        .await
+        .expect("insert")
+        .expect("stamps");
+        assert_eq!(stamps.id, id);
+        assert_eq!(stamps.created_at, now);
+        assert_eq!(stamps.updated_at, now);
+        let row: (String, String, Uuid, String, String) = sqlx::query_as(
+            "SELECT name, slug, owner_id, timezone, background_color \
+             FROM workspaces WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .expect("read back");
+        assert_eq!(
+            row,
+            (
+                "Acme".to_owned(),
+                "acme".to_owned(),
+                owner,
+                "UTC".to_owned(),
+                "#a1b2c3".to_owned(),
+            )
+        );
+        let audit: (Option<Uuid>, Option<Uuid>) =
+            sqlx::query_as("SELECT created_by_id, updated_by_id FROM workspaces WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .expect("read back");
+        assert_eq!(audit, (None, None));
+        let deleted: Option<DateTime<Utc>> =
+            sqlx::query_scalar("SELECT deleted_at FROM workspaces WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .expect("read back");
+        assert_eq!(deleted, None);
+        let opts: (Option<String>, Option<Uuid>, Option<String>) = sqlx::query_as(
+            "SELECT logo, logo_asset_id, organization_size FROM workspaces WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .expect("read back");
+        assert_eq!(opts, (None, None, None));
+        // The seeding input is ignored: no scheduler rows appear.
+        let seeded: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM schedulers")
+            .fetch_one(&pool)
+            .await
+            .expect("seeded count");
+        assert_eq!(seeded, 0);
+        // The executor-generic shape: the same insert on the caller's
+        // transaction lands on commit.
+        let tx_id = Uuid::new_v4();
+        let mut tx = pool.begin().await.expect("tx");
+        insert(
+            &mut *tx,
+            &NewWorkspace {
+                id: tx_id,
+                name: "Tx",
+                slug: "tx",
+                owner_id: owner,
+                created_by: None,
+                logo: None,
+                logo_asset_id: None,
+                organization_size: None,
+                timezone: "UTC",
+                background_color: "#000000",
+                deleted_at: None,
+                created_at: now,
+                updated_at: now,
+                seed_created_by: None,
+            },
+        )
+        .await
+        .expect("insert on tx");
+        tx.commit().await.expect("commit");
+        let name: String = sqlx::query_scalar("SELECT name FROM workspaces WHERE id = $1")
+            .bind(tx_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read back");
+        assert_eq!(name, "Tx");
+    }
+
+    /// `set_name` rewrites the name plus `updated_at` and touches
+    /// nothing else.
+    #[tokio::test]
+    async fn live_set_name_updates_name_and_stamp() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        sqlx::query(WORKSPACES_DDL)
+            .execute(&pool)
+            .await
+            .expect("temp workspaces");
+        let now: DateTime<Utc> = "2026-10-03T12:00:00+00:00".parse().expect("T0");
+        let later: DateTime<Utc> = "2026-10-04T12:00:00+00:00".parse().expect("T1");
+        let id = Uuid::new_v4();
+        insert(
+            &pool,
+            &NewWorkspace {
+                id,
+                name: "Acme",
+                slug: "acme",
+                owner_id: Uuid::new_v4(),
+                created_by: None,
+                logo: None,
+                logo_asset_id: None,
+                organization_size: None,
+                timezone: "UTC",
+                background_color: "#fff",
+                deleted_at: None,
+                created_at: now,
+                updated_at: now,
+                seed_created_by: None,
+            },
+        )
+        .await
+        .expect("insert");
+        set_name(&pool, id, "Acme Org", later)
+            .await
+            .expect("set_name");
+        let row: (String, DateTime<Utc>, String, DateTime<Utc>) = sqlx::query_as(
+            "SELECT name, updated_at, slug, created_at FROM workspaces WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .expect("read back");
+        assert_eq!(row, ("Acme Org".to_owned(), later, "acme".to_owned(), now));
     }
 
     /// Field-level copy for the clash probe (`NewWorkspace` borrows;
