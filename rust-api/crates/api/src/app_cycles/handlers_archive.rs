@@ -82,6 +82,8 @@ use crate::state::AppState;
 
 use pidash_auth::permissions::allow::AllowFacts;
 use pidash_auth::permissions::{ROLE_ADMIN, ROLE_MEMBER};
+use pidash_compat::response::json_response;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 use pidash_types::WorkspaceId;
 
 // ---------------------------------------------------------------------------
@@ -158,9 +160,6 @@ pub const NOT_FOUND_BODY: &str = r#"{"error":"The required object does not exist
 /// `Project.resolve` miss on a non-UUID identifier
 /// (`db/models/project.py:213-217`).
 pub const PROJECT_NOT_FOUND_BODY: &str = r#"{"detail":"Project not found"}"#;
-/// `handle_exception`'s generic 500 branch: the POST `None >= now`
-/// `TypeError` (Q2) and the detail `None[...]` `TypeError` (Q4) land here.
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// The archive POST date guard (`archive.py:590-594`).
 pub const ARCHIVE_REFUSED_BODY: &str = r#"{"error":"Only completed cycles can be archived"}"#;
 
@@ -216,14 +215,6 @@ impl IntoResponse for Denial {
 
 fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
-}
-
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("archive response")
 }
 
 // ---------------------------------------------------------------------------

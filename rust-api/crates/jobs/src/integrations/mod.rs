@@ -13,3 +13,16 @@
 pub mod git_sync;
 pub mod github_signals;
 pub mod github_sync;
+
+/// `PIDASH_GITHUB_API_BASE` override for the two job GitHub transports
+/// (PIDASHCONV-1472): contract tests point a redirect stub here. `None`
+/// when unset or empty, which is the production state — Django has no
+/// equivalent knob (its contract leg reaches the stub through an HTTPS
+/// MITM proxy instead), so behavior with the variable unset is exactly
+/// `GithubClient(token=…)` against `https://api.github.com`.
+pub(crate) fn github_api_base_override() -> Option<String> {
+    std::env::var("PIDASH_GITHUB_API_BASE")
+        .ok()
+        .map(|value| value.trim_end_matches('/').to_owned())
+        .filter(|value| !value.is_empty())
+}

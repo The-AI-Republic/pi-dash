@@ -76,6 +76,7 @@ use pidash_services::app_issues::{
     STATE_GROUP_VALUES,
 };
 
+use pidash_compat::response::json_ok as json_response;
 use render::v2_page;
 
 /// Register the app-issues routes: the five list-family GETs, the
@@ -286,25 +287,10 @@ pub const NOT_FOUND_BODY: &str = r#"{"error":"The required object does not exist
 /// found") renders with the resolve message — verified against live
 /// Django, not the bare default.
 pub const PROJECT_NOT_FOUND_BODY: &str = r#"{"detail":"Project not found"}"#;
-/// `handle_exception`'s generic 500 branch.
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// `handle_exception`'s `ValidationError` branch (bad UUID in `issues=`).
 pub const INVALID_DETAIL_BODY: &str = r#"{"error":"Please provide valid detail"}"#;
 
-/// One query value, repeated or not. `serde_html_form` (axum's `Query`
-/// backend) does not coerce a lone `?key=value` into a sequence, so the
-/// extractor uses this untagged shape and callers read first/last —
-/// mirroring Django's `QueryDict`, where repeats are legal and `.get`
-/// returns the last value.
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(untagged)]
-pub enum OneOrMany {
-    One(String),
-    Many(Vec<String>),
-}
-
-/// The multi-value query map every list handler extracts.
-pub type QueryMap = HashMap<String, OneOrMany>;
+pub use pidash_compat::http::{query_last, OneOrMany, QueryMap};
 
 /// All values for `key`, in order; `None` when absent.
 pub fn query_values(query: &QueryMap, key: &str) -> Option<Vec<String>> {
@@ -312,11 +298,6 @@ pub fn query_values(query: &QueryMap, key: &str) -> Option<Vec<String>> {
         OneOrMany::One(one) => vec![one.clone()],
         OneOrMany::Many(many) => many.clone(),
     })
-}
-
-/// Django `QueryDict.get`: the last value, or `None`.
-pub fn query_last(query: &QueryMap, key: &str) -> Option<String> {
-    query_values(query, key).and_then(|values| values.into_iter().last())
 }
 
 /// Plain multi-map for the services layer (pure, axum-free).
@@ -347,6 +328,8 @@ pub enum Denial {
     BadError(String),
     /// 400, `{"message": ..., "code": ...}` (filter validation).
     BadFilter(String, String),
+    /// 502, truncated request-body read (the shared bad-gateway shape).
+    TruncatedBody,
     /// 500, generic branch.
     ServerError,
 }
@@ -380,6 +363,10 @@ impl Denial {
                     json_string(message),
                     json_string(code)
                 ),
+            ),
+            Denial::TruncatedBody => (
+                StatusCode::BAD_GATEWAY,
+                crate::edge::BAD_GATEWAY_BODY.to_owned(),
             ),
             Denial::ServerError => (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -681,48 +668,14 @@ pub fn render_condition(cond: &Condition) -> (String, Vec<sea_query::Value>) {
     (fragment, values.0)
 }
 
-fn bind_sea_value<'q>(
-    query: sqlx::query::Query<'q, Postgres, PgArguments>,
-    value: &sea_query::Value,
-) -> Result<sqlx::query::Query<'q, Postgres, PgArguments>, Denial> {
-    use sea_query::Value as SeaValue;
-    match value {
-        SeaValue::Bool(value) => Ok(query.bind(*value)),
-        SeaValue::TinyInt(value) => Ok(query.bind(*value)),
-        SeaValue::SmallInt(value) => Ok(query.bind(*value)),
-        SeaValue::Int(value) => Ok(query.bind(*value)),
-        SeaValue::BigInt(value) => Ok(query.bind(*value)),
-        SeaValue::TinyUnsigned(value) => Ok(query.bind(value.map(i16::from))),
-        SeaValue::SmallUnsigned(value) => Ok(query.bind(value.map(i32::from))),
-        SeaValue::Unsigned(value) => Ok(query.bind(value.map(|v| v as i64))),
-        SeaValue::BigUnsigned(value) => Ok(query.bind(value.map(|v| v as i64))),
-        SeaValue::Float(value) => Ok(query.bind(*value)),
-        SeaValue::Double(value) => Ok(query.bind(*value)),
-        SeaValue::String(value) => Ok(query.bind(value.clone().map(|text| *text))),
-        SeaValue::Char(value) => Ok(query.bind(value.map(|char| char.to_string()))),
-        SeaValue::Bytes(value) => Ok(query.bind(value.clone().map(|bytes| (*bytes).clone()))),
-        SeaValue::Uuid(value) => Ok(query.bind(value.clone().map(|id| *id))),
-        // Rich date / datetime filters bind typed params (`DATE` /
-        // `timestamptz`), like the ORM. The remaining chrono variants are
-        // never emitted; they only keep the match exhaustive.
-        SeaValue::ChronoDate(value) => Ok(query.bind(value.clone().map(|date| *date))),
-        SeaValue::ChronoDateTimeUtc(value) => Ok(query.bind(value.clone().map(|moment| *moment))),
-        SeaValue::ChronoTime(_)
-        | SeaValue::ChronoDateTime(_)
-        | SeaValue::ChronoDateTimeLocal(_)
-        | SeaValue::ChronoDateTimeWithTimeZone(_) => Err(Denial::ServerError),
-    }
-}
-
+/// Bind a `sea_query::Value` vec to raw SQL: the canonical binder now
+/// lives in `pidash_compat::db` (OVL-04); this wrapper only maps its
+/// error to the local 500, exactly as the previous inline copy did.
 fn bind_all<'a>(
     sql: &'a str,
     values: Vec<sea_query::Value>,
 ) -> Result<sqlx::query::Query<'a, Postgres, PgArguments>, Denial> {
-    let mut query = sqlx::query(sql);
-    for value in &values {
-        query = bind_sea_value(query, value)?;
-    }
-    Ok(query)
+    pidash_compat::db::bind_all(sql, values).map_err(|_| Denial::ServerError)
 }
 
 /// Fetch every row of `inner_sql` as a JSON map each, via `row_to_json`.
@@ -932,6 +885,7 @@ pub async fn filters_timezone(
 // kernel conditions (`issue` for the base table, `state` for states,
 // the relation aliases for the m2m joins).
 
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 use pidash_db::issue_filters::FilterValue;
 
 /// A legacy predicate compiled to SQL text (placeholders bound inline).
@@ -939,10 +893,16 @@ use pidash_db::issue_filters::FilterValue;
 /// list applies the same `issue_filters(params, "GET")` stack over the
 /// same `issue` alias — referenced, never re-ported. Visibility only; no
 /// behavior change.
+/// `timezone` is the truncation zone for the `__date` terms: Django's
+/// `__date` lookup is `TruncDate`, whose `get_tzname()` returns the
+/// `TimezoneMixin`-activated actor zone. Callers whose slice still
+/// truncates in UTC pass `chrono_tz::UTC` until their own actor-zone
+/// fix lands (identical wherever the session zone is UTC).
 pub(crate) fn legacy_sql(
     binder: &mut Binder,
     name: &str,
     value: &FilterValue,
+    timezone: &Tz,
 ) -> Result<String, Denial> {
     // `__isnull` flags.
     if let Some(path) = name.strip_suffix("__isnull") {
@@ -1008,10 +968,11 @@ pub(crate) fn legacy_sql(
             }
             Ok(format!("{column} IN ({})", holders.join(",")))
         }
-        FilterValue::Text(text) => legacy_text_sql(binder, name, text),
+        FilterValue::Text(text) => legacy_text_sql(binder, name, text, timezone),
         FilterValue::Flag(_) => Err(Denial::ServerError),
         FilterValue::Day(day) => {
-            let (column, operator) = day_comparison(name).ok_or(Denial::ServerError)?;
+            let (column, operator) =
+                day_comparison(binder, name, timezone).ok_or(Denial::ServerError)?;
             let holder = binder.bind_string(day.to_string());
             Ok(format!("{column} {operator} {holder}::date"))
         }
@@ -1073,14 +1034,30 @@ fn strings_in_column(name: &str) -> Option<&'static str> {
     })
 }
 
+/// A `__date` term truncated in `timezone`: `(issue.<column> AT TIME
+/// ZONE $N)::date` with the zone bound as a parameter (it comes from a
+/// parsed `Tz`, so it is a valid IANA name either way). Django's
+/// `__date` lookup is `TruncDate`, whose `get_tzname()` returns the
+/// `TimezoneMixin`-activated actor zone.
+fn zoned_date_column(binder: &mut Binder, column: &str, timezone: &Tz) -> String {
+    let holder = binder.bind_string(timezone.name().to_owned());
+    format!("(issue.{column} AT TIME ZONE {holder})::date")
+}
+
 /// `(column, operator)` for `Day` predicates (`__gte` / `__lte`).
-fn day_comparison(name: &str) -> Option<(&'static str, &'static str)> {
+/// The `__date` terms truncate in `timezone`; `start_date` /
+/// `target_date` are plain date columns and need no truncation.
+fn day_comparison(
+    binder: &mut Binder,
+    name: &str,
+    timezone: &Tz,
+) -> Option<(String, &'static str)> {
     let (term, operator) = name.rsplit_once("__")?;
     let column = match term {
-        "created_at__date" => "issue.created_at::date",
-        "completed_at__date" => "issue.completed_at::date",
-        "start_date" => "issue.start_date",
-        "target_date" => "issue.target_date",
+        "created_at__date" => zoned_date_column(binder, "created_at", timezone),
+        "completed_at__date" => zoned_date_column(binder, "completed_at", timezone),
+        "start_date" => "issue.start_date".to_owned(),
+        "target_date" => "issue.target_date".to_owned(),
         _ => return None,
     };
     let operator = match operator {
@@ -1093,8 +1070,14 @@ fn day_comparison(name: &str) -> Option<(&'static str, &'static str)> {
 
 /// Text predicates: `name__icontains`, explicit date bounds
 /// (`__gte`/`__lte` on a `__date` term or plain date term), and the
-/// single-value `__contains` form.
-fn legacy_text_sql(binder: &mut Binder, name: &str, text: &str) -> Result<String, Denial> {
+/// single-value `__contains` form. The `__date` terms truncate in
+/// `timezone` (Django `TruncDate` under the activated actor zone).
+fn legacy_text_sql(
+    binder: &mut Binder,
+    name: &str,
+    text: &str,
+    timezone: &Tz,
+) -> Result<String, Denial> {
     if name == "name__icontains" {
         // Django `icontains`: LIKE with `\`, `%`, `_` escaped.
         let escaped = text
@@ -1115,10 +1098,10 @@ fn legacy_text_sql(binder: &mut Binder, name: &str, text: &str) -> Result<String
             _ => return Err(Denial::ServerError),
         };
         let column = match term {
-            "created_at__date" => "issue.created_at::date",
-            "completed_at__date" => "issue.completed_at::date",
-            "start_date" => "issue.start_date",
-            "target_date" => "issue.target_date",
+            "created_at__date" => zoned_date_column(binder, "created_at", timezone),
+            "completed_at__date" => zoned_date_column(binder, "completed_at", timezone),
+            "start_date" => "issue.start_date".to_owned(),
+            "target_date" => "issue.target_date".to_owned(),
             _ => return Err(Denial::ServerError),
         };
         // Explicit bounds must parse as dates: Django's `get_prep_value`
@@ -1463,7 +1446,9 @@ pub fn filtered_set(
     }
     // Legacy filters. Relative dates resolve against the UTC date, exactly
     // like `timezone.now().date()` in `issue_filters.py` (`now()` is always
-    // UTC; the request tz activation only affects `localtime()`).
+    // UTC; the request tz activation only affects `localtime()`). The
+    // `__date` truncations use the gate's actor zone instead (Django's
+    // `TruncDate` under the `TimezoneMixin`-activated user zone).
     let mut legacy_sql_text = String::new();
     if layers.legacy {
         let flat: HashMap<String, String> = query
@@ -1474,7 +1459,7 @@ pub fn filtered_set(
         let legacy = pidash_db::issue_filters::issue_filters_get(&flat, "", today)
             .map_err(|_| Denial::ServerError)?;
         for (name, value) in legacy.predicates() {
-            let fragment = legacy_sql(&mut binder, name, value)?;
+            let fragment = legacy_sql(&mut binder, name, value, &gate.timezone)?;
             if legacy_sql_text.is_empty() {
                 legacy_sql_text = fragment;
             } else {
@@ -1550,18 +1535,65 @@ pub fn filtered_set(
 // `NULLS LAST` plus a `-created_at` tiebreak (`OffsetPaginator.get_result`
 // and the grouped variants). This resolves the rewritten key to SQL.
 
-/// `(key expression, descending)` for the rewritten `order_by` param.
+/// The resolved `ORDER BY` key: the value expression, the direction, and
+/// any extra `FROM`-clause joins the expression needs. Only
+/// `issue_cycle__cycle__name` needs joins; every other key is a column or
+/// a self-contained scalar subquery over the base tables.
+pub struct OrderKey {
+    pub expr: String,
+    pub descending: bool,
+    pub joins: String,
+}
+
+/// The resolved `ORDER BY` key for the rewritten `order_by` param.
 /// The default branch of `order_issue_queryset` orders by the raw param,
 /// so any valid ORM path works in Python and only a truly invalid path
 /// raises `FieldError` (generic 500). FK names order by their id column
 /// (`estimate_point` → `estimate_point_id`, `project` → `project_id`,
 /// `parent` → `parent_id`, `state` → `state_id`); `state__name` resolves
-/// through the state join. Deeper relation traversals beyond the
-/// `min_values` trio stay a 500 (out of pilot scope; the suite never sends
-/// them).
-pub fn order_key(out_param: &str, orig_param: &str) -> Result<(String, bool), Denial> {
+/// through the state join.
+/// `link_count` / `attachment_count` / `sub_issues_count` are the
+/// `Count` subquery annotations the issue lists apply
+/// (`apply_annotations`). Most lists use the plain `Func(Count)` form:
+/// the bare `COUNT(*)` always returns one row, so an empty set orders
+/// as `0`, never `NULL`. The project list (`IssueViewSet.list`) uses the
+/// grouped `Subquery` form instead, which yields no row — SQL `NULL` —
+/// when empty, so empties sort `NULLS LAST` in both directions (pinned
+/// live); its callers pass `null_counts`. The sub-issue scope is the
+/// `IssueManager` one either way: `NULL`-state children count, triage
+/// children do not — even when the triage state row itself is
+/// soft-deleted, because joins never apply the related manager's guard
+/// (pinned live).
+/// `estimate_point__key` is the forward-FK value (`NULL` when the issue
+/// has no estimate; the FK join filters nothing).
+/// `issue_cycle__cycle__name` is Django's plain join, not an annotation:
+/// `LEFT JOIN` over the bridge and the cycle with no `deleted_at` guard
+/// on either (soft-deleted bridge rows and soft-deleted cycles both
+/// sort), which fans a multi-linked issue out into one row per link
+/// (pinned live: identical dicts, flat totals stay distinct-issue
+/// counts). Callers splice [`OrderKey::joins`] into the row query's
+/// `FROM` only — never into the flat totals. `cycle_bridge` carries an
+/// already-joined bridge alias to resolve over instead of joining fresh:
+/// Django reuses a same-path join for the traversal, scope included
+/// (pinned live: the cycle list reuses its filtered `bridge`, so no
+/// extra fan-out there; a cycle filter's `issue_cycle` join wins over
+/// the base one; a filtered module sort stays within the filter).
+/// Callers whose `FROM` has no bridge join pass `None`. Deeper relation
+/// traversals beyond these stay a 500.
+pub fn order_key(
+    out_param: &str,
+    orig_param: &str,
+    cycle_bridge: Option<&str>,
+    null_counts: bool,
+) -> Result<OrderKey, Denial> {
     let descending = out_param.starts_with('-');
     let key = out_param.trim_start_matches('-');
+    let mut joins = String::new();
+    let count = if null_counts {
+        "NULLIF(COUNT(*), 0)"
+    } else {
+        "COUNT(*)"
+    };
     let expr = match key {
         "priority_order" => pidash_services::app_issues::ordering::priority_case_sql(),
         "state_order" => {
@@ -1581,9 +1613,34 @@ pub fn order_key(out_param: &str, orig_param: &str) -> Result<(String, bool), De
         "state__name" => "state.name".to_owned(),
         "created_by" => "issue.created_by_id".to_owned(),
         "updated_by" => "issue.updated_by_id".to_owned(),
+        "link_count" => format!(
+            "(SELECT {count} FROM issue_links il WHERE il.issue_id = issue.id AND il.deleted_at IS NULL)"
+        ),
+        "attachment_count" => format!(
+            "(SELECT {count} FROM file_assets fa WHERE fa.issue_id = issue.id AND fa.entity_type = 'ISSUE_ATTACHMENT' AND fa.deleted_at IS NULL)"
+        ),
+        "sub_issues_count" => format!(
+            "(SELECT {count} FROM issues c LEFT JOIN states cs ON cs.id = c.state_id JOIN projects cp ON cp.id = c.project_id WHERE c.parent_id = issue.id AND c.deleted_at IS NULL AND NOT (cs.\"group\" = 'triage' AND cs.\"group\" IS NOT NULL) AND c.archived_at IS NULL AND cp.archived_at IS NULL AND c.is_draft = FALSE)"
+        ),
+        "estimate_point__key" => {
+            "(SELECT ep.key FROM estimate_points ep WHERE ep.id = issue.estimate_point_id)".to_owned()
+        }
+        "issue_cycle__cycle__name" => {
+            joins = match cycle_bridge {
+                Some(alias) => format!(
+                    "LEFT JOIN cycles AS __order_c ON __order_c.id = {alias}.cycle_id"
+                ),
+                None => "LEFT JOIN cycle_issues AS __order_ci ON __order_ci.issue_id = issue.id LEFT JOIN cycles AS __order_c ON __order_c.id = __order_ci.cycle_id".to_owned(),
+            };
+            "__order_c.name".to_owned()
+        }
         _ => return Err(Denial::ServerError),
     };
-    Ok((expr, descending))
+    Ok(OrderKey {
+        expr,
+        descending,
+        joins,
+    })
 }
 
 /// The `Min(...)` annotation for the assignee/label/module order branch,
@@ -1595,6 +1652,34 @@ fn min_order_subquery(relation: &str) -> Result<String, Denial> {
         "assignees__first_name" => Ok("(SELECT MIN(u.first_name) FROM issue_assignees ia JOIN users u ON u.id = ia.assignee_id WHERE ia.issue_id = issue.id AND ia.deleted_at IS NULL)".to_owned()),
         "issue_module__module__name" => Ok("(SELECT MIN(m.name) FROM module_issues mi JOIN modules m ON m.id = mi.module_id AND m.deleted_at IS NULL WHERE mi.issue_id = issue.id AND mi.deleted_at IS NULL)".to_owned()),
         _ => Err(Denial::ServerError),
+    }
+}
+
+/// True when a `FROM ... WHERE ...` fragment already joins the cycle
+/// bridge as `issue_cycle` (a filter or group key referenced it). Django
+/// reuses that same-path join for the cycle-name traversal instead of
+/// joining again — including the filter's scope (pinned live: a filtered
+/// sort does not fan out beyond the filter) — so the order key resolves
+/// over it. Matches only the join clause, never filter markers (those
+/// quote the alias: `"issue_cycle".`).
+pub fn has_issue_cycle_join(from_where: &str) -> bool {
+    from_where.contains("cycle_issues AS issue_cycle ON")
+}
+
+/// Splice [`OrderKey::joins`] into a row query's `FROM ... WHERE ...`
+/// fragment, ahead of the top-level `WHERE`. Empty joins return the
+/// fragment untouched, so every existing key renders byte-identical SQL.
+pub fn with_order_joins(from_where: &str, order_joins: &str) -> String {
+    if order_joins.is_empty() {
+        return from_where.to_owned();
+    }
+    match from_where.find(" WHERE ") {
+        Some(at) => format!(
+            "{} {order_joins} {}",
+            &from_where[..at],
+            &from_where[at + 1..]
+        ),
+        None => format!("{from_where} {order_joins}"),
     }
 }
 
@@ -1877,14 +1962,6 @@ pub async fn group_values(
 
 type HandlerResult = Result<Response, Denial>;
 
-fn json_response(body: String) -> Response {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("json response")
-}
-
 /// Shared preamble: gate + parsed params + filtered set + order key.
 /// `extra_where` carries path-specific predicates (`updated_at__gt`,
 /// `pk__in`); callers splice their binds through `extra_binds`.
@@ -1996,8 +2073,18 @@ pub async fn list_issues(
         false,
         FilterLayers::FULL,
     )?;
-    let (key_expr, descending) = order_key(&order_spec.out_param, &context.params.order_by)?;
-    let direction = if descending { "DESC" } else { "ASC" };
+    // The project list annotates the grouped `Subquery` count form (empty
+    // counts render `NULL`), so its count keys order `NULL`-style. Its
+    // `FROM` always carries the unfiltered `issue_cycle` bridge join,
+    // which the cycle-name traversal reuses like Django (fresh joins
+    // would fan every link out twice).
+    let key = order_key(
+        &order_spec.out_param,
+        &context.params.order_by,
+        Some("issue_cycle"),
+        true,
+    )?;
+    let direction = if key.descending { "DESC" } else { "ASC" };
     // `per_page` already validated by the strict preamble; the cursor
     // parses here with the paginator kernel's exact errors.
     let per_page = context.params.per_page;
@@ -2011,10 +2098,11 @@ pub async fn list_issues(
             &filtered,
             &group,
             sub_group_by.clone(),
-            &key_expr,
+            &key.expr,
             direction,
             per_page,
             cursor,
+            &key.joins,
         )
         .await;
     }
@@ -2022,7 +2110,8 @@ pub async fn list_issues(
     let selects = annotation_selects(true, None, false, true, false);
     let fields = on_results_fields(None, None);
     flat_paginated_response(
-        &context, &filtered, &key_expr, direction, per_page, cursor, selects, fields, false, None,
+        &context, &filtered, &key.expr, direction, per_page, cursor, selects, fields, false, None,
+        &key.joins,
     )
     .await
 }
@@ -2043,6 +2132,7 @@ async fn flat_paginated_response(
     fields: Vec<String>,
     shift: bool,
     expands: Option<&[String]>,
+    order_joins: &str,
 ) -> HandlerResult {
     use crate::paginator::{
         apply_offset_window, max_hits, next_cursor, offset_window, prev_cursor,
@@ -2050,9 +2140,12 @@ async fn flat_paginated_response(
     let limit = per_page.min(1000);
     let window = offset_window(limit, cursor.offset, cursor.value, cursor.is_prev, None)
         .map_err(page_denial)?;
+    // The cycle-name traversal joins ride on the row query only: fan-out
+    // rows differ in `__order_key`, so `DISTINCT` keeps one row per link
+    // like Django, while the totals below stay distinct-issue counts.
+    let row_where = with_order_joins(&filtered.from_where, order_joins);
     let inner = format!(
-        "SELECT DISTINCT {selects}, ({key_expr}) AS __order_key {} ORDER BY __order_key {direction} NULLS LAST, issue.created_at DESC LIMIT {} OFFSET {}",
-        filtered.from_where,
+        "SELECT DISTINCT {selects}, ({key_expr}) AS __order_key {row_where} ORDER BY __order_key {direction} NULLS LAST, issue.created_at DESC LIMIT {} OFFSET {}",
         window.stop - window.offset,
         window.offset
     );
@@ -2133,6 +2226,7 @@ async fn grouped_response(
     direction: &str,
     per_page: i64,
     cursor: crate::paginator::Cursor,
+    order_joins: &str,
 ) -> HandlerResult {
     use crate::paginator::{
         grouped_max_hits, grouped_window, next_cursor, prev_cursor, process_grouped_results,
@@ -2152,13 +2246,15 @@ async fn grouped_response(
         Some(sub) => format!("{group_expr}, {sub}"),
         None => group_expr.clone(),
     };
+    // The cycle-name traversal joins ride on the row query: the window
+    // numbers fan-out rows like Django's, and the final order is global.
+    let row_where = with_order_joins(&filtered.from_where, order_joins);
     let inner = format!(
         "SELECT * FROM (SELECT DISTINCT {selects}{member_select}, ({key_expr}) AS __order_key,
          ROW_NUMBER() OVER (PARTITION BY {partition} ORDER BY ({key_expr}) {direction} NULLS LAST, issue.created_at DESC) AS __rn
-         {from_where}) __w
+         {row_where}) __w
          WHERE __w.__rn > {offset} AND __w.__rn <= {stop}
          ORDER BY __w.__order_key {direction} NULLS LAST, __w.created_at DESC",
-        from_where = filtered.from_where,
         offset = window.offset,
         stop = window.stop,
     );
@@ -2192,8 +2288,19 @@ async fn grouped_response(
     let totals = total_dict(&group_totals);
     let next = next_cursor(limit, window.page, has_more);
     let prev = prev_cursor(limit, window.page);
+    // Grouped `total_count`/`total_results` are `queryset.count()` over
+    // the order-joined rows (pinned live: fan-out links count, so a
+    // 5-issue list with two doubled issues answers 7). Without traversal
+    // joins the sets coincide and the distinct count stands.
     let total_count = {
-        let sql = format!("SELECT COUNT(DISTINCT issue.id) {}", filtered.from_where);
+        let sql = if order_joins.is_empty() {
+            format!("SELECT COUNT(DISTINCT issue.id) {}", filtered.from_where)
+        } else {
+            format!(
+                "SELECT COUNT(*) {}",
+                with_order_joins(&filtered.from_where, order_joins)
+            )
+        };
         fetch_count(&context.pool, &sql, filtered.values.clone()).await?
     };
     let fields = on_results_fields(Some(group_by), sub_group_by.as_deref());
@@ -2290,7 +2397,7 @@ fn shape_json_value(field: &str, value: &Value, timezone: &Tz, shift: bool) -> V
             },
             _ => value.clone(),
         },
-        "completed_at" | "deleted_at" => match value {
+        "created_at" | "updated_at" | "completed_at" | "deleted_at" => match value {
             Value::String(text) => match chrono::DateTime::parse_from_rfc3339(text) {
                 Ok(aware) => Value::String(crate::serializer::render_datetime(
                     &aware.with_timezone(&chrono::Utc),
@@ -2302,7 +2409,9 @@ fn shape_json_value(field: &str, value: &Value, timezone: &Tz, shift: bool) -> V
         "sort_order" => match value {
             Value::Number(number) => {
                 let float = number.as_f64().unwrap_or(f64::NAN);
-                Value::String(crate::paginator::py_float_str(float))
+                serde_json::Number::from_f64(float)
+                    .map(Value::Number)
+                    .unwrap_or_else(|| value.clone())
             }
             _ => value.clone(),
         },
@@ -2456,13 +2565,13 @@ pub async fn flat_list(
     }
     // Flat ordering: the `order_issue_queryset` fragment directly — no
     // paginator re-ordering, no `NULLS LAST` (Postgres defaults apply).
-    let order_clause = flat_order_sql(&order_spec, &context.params.order_by)?;
+    // The cycle-name traversal joins ride on the row query's `FROM`, so a
+    // multi-linked issue fans out into one row per link like Django.
+    let (order_clause, order_joins) = flat_order_sql(&order_spec, &context.params.order_by)?;
     // Scalar `Func(Count)` annotations: empty counts render 0.
     let selects = annotation_selects(true, None, false, true, true);
-    let inner = format!(
-        "SELECT {selects} {} ORDER BY {order_clause}",
-        filtered.from_where
-    );
+    let row_where = with_order_joins(&filtered.from_where, &order_joins);
+    let inner = format!("SELECT {selects} {row_where} ORDER BY {order_clause}");
     let rows = fetch_json_rows(&context.pool, &inner, filtered.values.clone()).await?;
     // The flat `.values()` shape: 26 keys with `deleted_at`, no `state__group`.
     let fields: Vec<String> = LIST_VALUES_FIELDS
@@ -2635,29 +2744,38 @@ fn serializer_row_map(
 /// `ORDER BY` for the unpaginated flat endpoint: the rewritten branches
 /// carry complete SQL; the default branch resolves the raw param without
 /// the paginator's `NULLS LAST` or forced tiebreak.
-fn flat_order_sql(order_spec: &OrderSpec, orig_param: &str) -> Result<String, Denial> {
+fn flat_order_sql(order_spec: &OrderSpec, orig_param: &str) -> Result<(String, String), Denial> {
     let out = order_spec.out_param.as_str();
     if out == "priority_order"
         || out == "-priority_order"
         || out == "state_order"
         || out == "-state_order"
     {
-        return Ok(order_spec.order_by_sql.clone());
+        return Ok((order_spec.order_by_sql.clone(), String::new()));
     }
     if out == "min_values" || out == "-min_values" {
         let descending = out.starts_with('-');
         let sub = min_order_subquery(orig_param.trim_start_matches('-'))?;
-        return Ok(format!(
-            "{sub} {}, created_at DESC",
-            if descending { "DESC" } else { "ASC" }
+        return Ok((
+            format!(
+                "{sub} {}, created_at DESC",
+                if descending { "DESC" } else { "ASC" }
+            ),
+            String::new(),
         ));
     }
-    let (expr, descending) = order_key(out, orig_param)?;
-    let mut sql = format!("{expr} {}", if descending { "DESC" } else { "ASC" });
+    // The flat `FROM` always carries the unfiltered `issue_cycle`
+    // bridge join, which the cycle-name traversal reuses like Django.
+    let key = order_key(out, orig_param, Some("issue_cycle"), false)?;
+    let mut sql = format!(
+        "{expr} {}",
+        if key.descending { "DESC" } else { "ASC" },
+        expr = key.expr,
+    );
     if !orig_param.contains("created_at") {
         sql.push_str(", created_at DESC");
     }
-    Ok(sql)
+    Ok((sql, key.joins))
 }
 
 /// The `IssueDetailEndpoint.get` permission subquery: the issue survives
@@ -2740,8 +2858,17 @@ pub async fn detail_list(
         true,
         FilterLayers::NO_GUEST,
     )?;
-    let (key_expr, descending) = order_key(&order_spec.out_param, &params.order_by)?;
-    let direction = if descending { "DESC" } else { "ASC" };
+    // The detail endpoint annotates the plain `Func(Count)` form (empty
+    // counts render `0`), so its count keys order `0`-style. Its `FROM`
+    // always carries the unfiltered `issue_cycle` bridge join, which the
+    // cycle-name traversal reuses like Django.
+    let key = order_key(
+        &order_spec.out_param,
+        &params.order_by,
+        Some("issue_cycle"),
+        false,
+    )?;
+    let direction = if key.descending { "DESC" } else { "ASC" };
     // `per_page` already validated by the strict preamble; the cursor
     // parses here with the paginator kernel's exact errors.
     let per_page = params.per_page;
@@ -2756,7 +2883,7 @@ pub async fn detail_list(
     flat_paginated_response(
         &context,
         &filtered,
-        &key_expr,
+        &key.expr,
         direction,
         per_page,
         cursor,
@@ -2764,6 +2891,7 @@ pub async fn detail_list(
         fields,
         false,
         context.params.expand.as_deref(),
+        &key.joins,
     )
     .await
 }
@@ -3061,6 +3189,45 @@ mod tests {
     }
 
     #[test]
+    fn grouped_rows_render_like_ungrouped() {
+        // PIDASHCONV-1510: Django serves grouped rows through the same
+        // `issue_on_results` `.values()` dicts as the flat list, so
+        // `sort_order` is a JSON number and datetimes carry `Z` — not the
+        // `row_to_json` string/`+00:00` spellings.
+        let mut row = Map::new();
+        row.insert(
+            "sort_order".to_owned(),
+            Value::Number(serde_json::Number::from(10000)),
+        );
+        row.insert(
+            "created_at".to_owned(),
+            Value::String("2026-10-26T06:51:00.235877+00:00".to_owned()),
+        );
+        row.insert(
+            "updated_at".to_owned(),
+            Value::String("2026-10-26T06:51:00.235877+00:00".to_owned()),
+        );
+        let fields = vec![
+            "sort_order".to_owned(),
+            "created_at".to_owned(),
+            "updated_at".to_owned(),
+        ];
+        let shaped = shape_map(&row, &fields, &chrono_tz::UTC, false);
+        assert_eq!(
+            serde_json::to_string(&shaped["sort_order"]).unwrap(),
+            "10000.0"
+        );
+        assert_eq!(
+            shaped["created_at"],
+            Value::String("2026-10-26T06:51:00.235877Z".to_owned())
+        );
+        assert_eq!(
+            shaped["updated_at"],
+            Value::String("2026-10-26T06:51:00.235877Z".to_owned())
+        );
+    }
+
+    #[test]
     fn count_annotations_grouped_paths_render_null_when_empty() {
         // `IssueViewSet.apply_annotations` + `IssuePaginatedViewSet`: the
         // grouped `Count` subquery has no `Coalesce`, so zero related rows
@@ -3229,17 +3396,18 @@ mod tests {
 
     #[test]
     fn order_key_resolves_fk_and_state_names() {
-        let (expr, descending) = order_key("estimate_point", "estimate_point").expect("key");
-        assert_eq!(expr, "issue.estimate_point_id");
-        assert!(!descending);
-        let (expr, _) = order_key("-project", "-project").expect("key");
-        assert_eq!(expr, "issue.project_id");
-        let (expr, _) = order_key("parent", "parent").expect("key");
-        assert_eq!(expr, "issue.parent_id");
-        let (expr, _) = order_key("-deleted_at", "-deleted_at").expect("key");
-        assert_eq!(expr, "issue.\"deleted_at\"");
-        let (expr, _) = order_key("state__name", "state__name").expect("key");
-        assert_eq!(expr, "state.name");
+        let key = order_key("estimate_point", "estimate_point", None, false).expect("key");
+        assert_eq!(key.expr, "issue.estimate_point_id");
+        assert!(!key.descending);
+        assert!(key.joins.is_empty());
+        let key = order_key("-project", "-project", None, false).expect("key");
+        assert_eq!(key.expr, "issue.project_id");
+        let key = order_key("parent", "parent", None, false).expect("key");
+        assert_eq!(key.expr, "issue.parent_id");
+        let key = order_key("-deleted_at", "-deleted_at", None, false).expect("key");
+        assert_eq!(key.expr, "issue.\"deleted_at\"");
+        let key = order_key("state__name", "state__name", None, false).expect("key");
+        assert_eq!(key.expr, "state.name");
     }
 
     #[test]
@@ -3277,10 +3445,22 @@ mod tests {
     #[test]
     fn legacy_isnull_and_in_predicates() {
         let mut binder = Binder::new();
-        let sql = legacy_sql(&mut binder, "labels__isnull", &FilterValue::Flag(true)).expect("sql");
+        let sql = legacy_sql(
+            &mut binder,
+            "labels__isnull",
+            &FilterValue::Flag(true),
+            &chrono_tz::UTC,
+        )
+        .expect("sql");
         assert_eq!(sql, "label_issue.label_id IS NULL");
         let id = uuid::Uuid::nil();
-        let sql = legacy_sql(&mut binder, "state__in", &FilterValue::Uuids(vec![id])).expect("sql");
+        let sql = legacy_sql(
+            &mut binder,
+            "state__in",
+            &FilterValue::Uuids(vec![id]),
+            &chrono_tz::UTC,
+        )
+        .expect("sql");
         assert!(sql.starts_with("issue.state_id IN ($"));
     }
 
@@ -3291,20 +3471,153 @@ mod tests {
             &mut binder,
             "logged_by__in",
             &FilterValue::Uuids(vec![uuid::Uuid::nil()]),
+            &chrono_tz::UTC,
         )
         .unwrap_err();
         assert!(matches!(denial, Denial::ServerError));
     }
 
     #[test]
+    fn legacy_date_terms_truncate_in_the_actor_zone() {
+        // Django's `__date` lookup is `TruncDate` in the activated actor
+        // zone; the zone rides as a bound parameter, never interpolated.
+        let mut binder = Binder::new();
+        let tokyo: Tz = "Asia/Tokyo".parse().expect("tz");
+        let sql = legacy_sql(
+            &mut binder,
+            "created_at__date__gte",
+            &FilterValue::Text("2026-01-02".to_owned()),
+            &tokyo,
+        )
+        .expect("sql");
+        assert_eq!(sql, "(issue.created_at AT TIME ZONE $1)::date >= $2::date");
+        assert_eq!(binder.values().len(), 2);
+        // Plain date columns truncate nothing and bind no zone.
+        let mut binder = Binder::new();
+        let sql = legacy_sql(
+            &mut binder,
+            "start_date__lte",
+            &FilterValue::Text("2026-01-02".to_owned()),
+            &tokyo,
+        )
+        .expect("sql");
+        assert_eq!(sql, "issue.start_date <= $1::date");
+        // The single-value `__contains` form LIKEs the zoned date text.
+        let mut binder = Binder::new();
+        let sql = legacy_sql(
+            &mut binder,
+            "created_at__date__contains",
+            &FilterValue::Text("2026-01-02".to_owned()),
+            &tokyo,
+        )
+        .expect("sql");
+        assert_eq!(
+            sql,
+            "(issue.created_at AT TIME ZONE $1)::date::text LIKE $3"
+        );
+    }
+
+    #[test]
     fn order_key_resolves_rewritten_params() {
-        let (expr, descending) = order_key("-created_at", "-created_at").expect("key");
-        assert_eq!(expr, "issue.\"created_at\"");
-        assert!(descending);
-        let (expr, descending) = order_key("priority_order", "-priority").expect("key");
-        assert!(expr.contains("CASE"));
-        assert!(!descending);
-        assert!(order_key("nope", "nope").is_err());
+        let key = order_key("-created_at", "-created_at", None, false).expect("key");
+        assert_eq!(key.expr, "issue.\"created_at\"");
+        assert!(key.descending);
+        assert!(key.joins.is_empty());
+        let key = order_key("priority_order", "-priority", None, false).expect("key");
+        assert!(key.expr.contains("CASE"));
+        assert!(!key.descending);
+        assert!(order_key("nope", "nope", None, false).is_err());
+    }
+
+    #[test]
+    fn order_key_resolves_spreadsheet_sort_keys() {
+        // Plain `Func(Count)` form: bare `COUNT(*)`, `0` on empty.
+        let key = order_key("link_count", "link_count", None, false).expect("key");
+        assert!(key.expr.contains("COUNT(*) FROM issue_links"));
+        assert!(!key.expr.contains("NULLIF"));
+        assert!(!key.descending);
+        assert!(key.joins.is_empty());
+        let key = order_key("-attachment_count", "-attachment_count", None, false).expect("key");
+        assert!(key.expr.contains("COUNT(*) FROM file_assets"));
+        assert!(key.expr.contains("entity_type = 'ISSUE_ATTACHMENT'"));
+        assert!(key.descending);
+        // The `IssueManager` scope: triage excluded, `NULL` states kept.
+        let key = order_key("sub_issues_count", "sub_issues_count", None, false).expect("key");
+        assert!(key.expr.contains("COUNT(*) FROM issues c"));
+        assert!(key.expr.contains("NOT (cs.\"group\" = 'triage'"));
+        // Project-list form: grouped `Subquery`, `NULL` on empty.
+        let key = order_key("-link_count", "-link_count", None, true).expect("key");
+        assert!(key.expr.contains("NULLIF(COUNT(*), 0) FROM issue_links"));
+        assert!(key.descending);
+        // The estimate traversal is a forward-FK scalar, `NULL` when unset.
+        let key =
+            order_key("estimate_point__key", "estimate_point__key", None, false).expect("key");
+        assert_eq!(
+            key.expr,
+            "(SELECT ep.key FROM estimate_points ep WHERE ep.id = issue.estimate_point_id)"
+        );
+        assert!(!key.descending);
+        assert!(key.joins.is_empty());
+    }
+
+    #[test]
+    fn order_key_cycle_name_joins_plain_and_scoped() {
+        // The default traversal joins the bridge and the cycle with no
+        // guards, so soft-deleted rows sort and multi-linked issues fan out.
+        let key = order_key(
+            "-issue_cycle__cycle__name",
+            "-issue_cycle__cycle__name",
+            None,
+            false,
+        )
+        .expect("key");
+        assert_eq!(key.expr, "__order_c.name");
+        assert!(key.descending);
+        assert!(key
+            .joins
+            .contains("LEFT JOIN cycle_issues AS __order_ci ON __order_ci.issue_id = issue.id"));
+        assert!(key
+            .joins
+            .contains("LEFT JOIN cycles AS __order_c ON __order_c.id = __order_ci.cycle_id"));
+        assert!(!key.joins.contains("deleted_at"));
+        // The cycle-issue list reuses its filtered bridge alias instead.
+        let key = order_key(
+            "issue_cycle__cycle__name",
+            "issue_cycle__cycle__name",
+            Some("bridge"),
+            false,
+        )
+        .expect("key");
+        assert_eq!(key.expr, "__order_c.name");
+        assert!(!key.joins.contains("__order_ci"));
+        assert!(key
+            .joins
+            .contains("LEFT JOIN cycles AS __order_c ON __order_c.id = bridge.cycle_id"));
+    }
+
+    #[test]
+    fn has_issue_cycle_join_matches_join_clause_only() {
+        assert!(has_issue_cycle_join(
+            "FROM issues AS issue LEFT JOIN cycle_issues AS issue_cycle ON issue_cycle.issue_id = issue.id WHERE x = $1"
+        ));
+        assert!(has_issue_cycle_join(
+            "FROM issues AS issue INNER JOIN cycle_issues AS issue_cycle ON issue_cycle.issue_id = issue.id WHERE x = $1"
+        ));
+        // A filter marker quoting the alias is not a join clause.
+        assert!(!has_issue_cycle_join(
+            "FROM issues AS issue WHERE \"issue_cycle\".cycle_id = $1"
+        ));
+        assert!(!has_issue_cycle_join("FROM issues AS issue WHERE x = $1"));
+    }
+
+    #[test]
+    fn with_order_joins_splices_ahead_of_where() {
+        let base = "FROM issues AS issue WHERE issue.id = $1";
+        assert_eq!(with_order_joins(base, ""), base);
+        assert_eq!(
+            with_order_joins(base, "LEFT JOIN t AS x ON x.id = issue.id"),
+            "FROM issues AS issue LEFT JOIN t AS x ON x.id = issue.id WHERE issue.id = $1"
+        );
     }
 
     #[test]

@@ -67,15 +67,23 @@ pub fn unscoped_scope() -> Condition {
 ///
 /// Single-table conjuncts: not soft-deleted, `archived_at IS NULL`,
 /// `is_draft = false`, plus the joined-states conjunct
-/// `states.group != 'triage'` (the queries layer joins `states` under the
-/// `states` alias). The remaining `project__archived_at IS NULL` conjunct
-/// needs the `projects` join and is applied by the queries layer.
+/// `NOT (states.group = 'triage' AND states.group IS NOT NULL)` —
+/// Django's `.exclude(state__group='triage')` negates null-safely over the
+/// nullable state FK (PB-0343), so stateless rows are kept (the queries
+/// layer joins `states` under the `states` alias). The remaining
+/// `project__archived_at IS NULL` conjunct needs the `projects` join and
+/// is applied by the queries layer.
 pub fn issue_objects_scope() -> Condition {
     Condition::all()
         .add(Expr::col(Alias::new("deleted_at")).is_null())
         .add(Expr::col(Alias::new("archived_at")).is_null())
         .add(Expr::col(Alias::new("is_draft")).eq(false))
-        .add(Expr::col((Alias::new("states"), Alias::new("group"))).ne(STATE_GROUP_TRIAGE))
+        .add(
+            Condition::all()
+                .add(Expr::col((Alias::new("states"), Alias::new("group"))).eq(STATE_GROUP_TRIAGE))
+                .add(Expr::col((Alias::new("states"), Alias::new("group"))).is_not_null())
+                .not(),
+        )
 }
 
 /// `State.objects` (`db/models/state.py:79-83,109`): live rows whose group
@@ -1291,7 +1299,7 @@ mod tests {
     fn issue_objects_scope_excludes_triage_archived_draft() {
         assert_eq!(
             select_where("issues", issue_objects_scope()),
-            r#"SELECT "id" FROM "issues" WHERE "deleted_at" IS NULL AND "archived_at" IS NULL AND "is_draft" = FALSE AND "states"."group" <> 'triage'"#
+            r#"SELECT "id" FROM "issues" WHERE "deleted_at" IS NULL AND "archived_at" IS NULL AND "is_draft" = FALSE AND (NOT ("states"."group" = 'triage' AND "states"."group" IS NOT NULL))"#
         );
     }
 

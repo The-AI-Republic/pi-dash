@@ -743,15 +743,19 @@ pub fn resolve_options_user(user: Option<UserFlags>, is_authenticated: bool) -> 
 /// D-11's [`agent_executor_options`](crate::dispatch::policy::agent_executor_options):
 /// the cloud verdict consults the `has_usable_llm_config` EE seam only for
 /// authenticated users on configured instances (see D-11 docs);
-/// `local_runner_exists` is the queries-layer
-/// `LOCAL_RUNNER_EXISTS_SQL` verdict and `managed` the L4
-/// `managed_runner_availability` verdict, both passed through verbatim.
-/// Rows are always `[cloud_agent, local_runner, managed_runner]`.
+/// `local_runner_available` is the queries-layer
+/// `LOCAL_RUNNER_AVAILABLE_EXISTS_SQL` verdict, `local_runner_exists`
+/// the `LOCAL_RUNNER_EXISTS_SQL` verdict (online incl. paused —
+/// evaluated only when unavailable, as Python's `elif`), and
+/// `managed` the L4 `managed_runner_availability` verdict, all passed
+/// through verbatim. Rows are always
+/// `[cloud_agent, local_runner, managed_runner]`.
 pub fn project_executor_options<F>(
     cloud: &CloudAgentSettings,
     user: Option<UserFlags>,
     is_authenticated: bool,
     has_usable_llm_config: F,
+    local_runner_available: bool,
     local_runner_exists: bool,
     managed: ManagedAvailability,
 ) -> [ExecutorOption; 3]
@@ -762,6 +766,7 @@ where
         cloud,
         resolve_options_user(user, is_authenticated),
         has_usable_llm_config,
+        local_runner_available,
         local_runner_exists,
         managed,
     )
@@ -2632,6 +2637,7 @@ mod tests {
                 authed,
                 || panic!("seam must not run while cloud is off"),
                 false,
+                false,
                 managed_disabled(),
             );
             let actual: Value = serde_json::to_value(&rows).expect("serializes");
@@ -2646,6 +2652,7 @@ mod tests {
             None,
             false,
             || panic!("seam must not run while cloud is off"),
+            false,
             false,
             managed_disabled(),
         );

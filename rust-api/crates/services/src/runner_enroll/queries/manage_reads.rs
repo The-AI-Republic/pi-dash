@@ -168,6 +168,7 @@
 //! applies (Porting guide semantic traps — no truncation in this unit,
 //! only `strip()` parity in [`request_workspace_id`]).
 
+use pidash_compat::py::py_strip;
 use pidash_db::app_project::models::project as project_cols;
 use pidash_db::runner_enroll::columns::{
     dev_machine as dm_cols, machine_token as mt_cols, pod as pod_cols, runner as r_cols,
@@ -217,17 +218,6 @@ fn qualified(table: &str, columns: &[&str]) -> String {
         .map(|col| format!("\"{table}\".\"{col}\""))
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-/// Python `str.strip()` parity (same set as
-/// `super::enroll_reads`' private helper, which this module cannot
-/// reuse without touching that file): Python strips `str.isspace()`
-/// characters — Unicode `White_Space` plus U+001C-U+001F and U+0085 —
-/// while Rust `trim()` strips `White_Space` only.
-fn py_strip(s: &str) -> &str {
-    s.trim_matches(|c: char| {
-        c.is_whitespace() || c == '\u{85}' || ('\u{1c}'..='\u{1f}').contains(&c)
-    })
 }
 
 // ---------------------------------------------------------------------------
@@ -412,22 +402,9 @@ pub fn machine_revoke_sql() -> String {
         .to_string()
 }
 
-/// M6/M7 — machine-token revoke update (`runners.py:198, 238`).
-///
-/// Both call sites run the identical ORM call —
-/// `MachineToken.objects.filter(dev_machine=machine,
-/// revoked_at__isnull=True).update(revoked_at=now)` — so one builder
-/// serves both. `$1` = `now()`, `$2` = machine id.
-pub fn machine_tokens_revoke_sql() -> String {
-    format!(
-        "UPDATE \"{}\" SET \"revoked_at\" = $1 \
-         WHERE (\"{}\".\"dev_machine_id\" = $2 \
-         AND \"{}\".\"revoked_at\" IS NULL)",
-        mt_cols::TABLE,
-        mt_cols::TABLE,
-        mt_cols::TABLE,
-    )
-}
+// NOTE: the M6/M7 machine-token revoke builder lived here; the statement
+// moved to `crate::domain::tokens::revoke_tokens_for_dev_machine`
+// (PIDASHCONV-1520), whose test carries the pin.
 
 /// M6 — locked active-runner list (`runners.py:199`).
 ///
@@ -843,6 +820,8 @@ mod tests {
         "updated_at",
         "revoked_at",
         "revoked_reason",
+        "paused_at",
+        "paused_by_id",
     ];
     const POD_COLS: &[&str] = &[
         "id",
@@ -1126,23 +1105,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn token_revoke_update_serves_revoke_and_rotate() {
-        // runners.py:198 and :238 run the identical ORM call.
-        assert_eq!(
-            machine_tokens_revoke_sql(),
-            "UPDATE \"machine_token\" SET \"revoked_at\" = $1 \
-             WHERE (\"machine_token\".\"dev_machine_id\" = $2 \
-             AND \"machine_token\".\"revoked_at\" IS NULL)",
-        );
-        for fragment in [
-            fixture_fragment("UPDATE \"machine_token\" SET \"revoked_at\" = "),
-            fixture_fragment("\"dev_machine_id\" = "),
-            fixture_fragment("\"revoked_at\" IS NULL"),
-        ] {
-            assert_builder_contains(&machine_tokens_revoke_sql(), &fragment);
-        }
-    }
+    // (The token-revoke pin moved with the statement to
+    // `crate::domain::tokens`; runners.py:198 and :238 still run the
+    // identical call through `revoke_tokens_for_dev_machine`.)
 
     #[test]
     fn m6_locked_runner_list_has_no_limit() {

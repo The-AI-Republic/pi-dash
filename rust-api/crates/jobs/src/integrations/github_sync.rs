@@ -108,6 +108,11 @@
 //!   `.update()` restamp afterwards (`github_sync_task.py:168-188,
 //!   :230-240`). On the update arm the NULLs additionally clobber the
 //!   values a previous arm wrote.
+//! * The mirror comment's `Description` row lands NULL/NULL on create
+//!   (`Description.objects.create` runs `BaseModel.save` itself,
+//!   `issue.py:625`) and NULL `updated_by_id` on the change-tracked
+//!   update, which reads `self.updated_by_id` after `save()` set it to
+//!   None (`issue.py:644-646`).
 //! * The metadata read-modify-writes (`_reconcile_upstream_gone`, the
 //!   completion guard, the login merge) are non-atomic, as in Python.
 //! * A truthy non-string `config["token"]` raises out of `_resolve_token`
@@ -150,7 +155,11 @@ use serde_json::{json, Value};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
+use pidash_compat::http::percent_encode;
 use pidash_db::config::encryption::Keyring;
+use pidash_services::domain::comments as comment_domain;
+use pidash_services::domain::issues as domain_issues;
+use pidash_services::domain::transition::IssueTransitionHook;
 use pidash_services::integrations::adapters_github::GithubError;
 
 use super::super::tasks_mail::mail_send::strip_tags;
@@ -160,6 +169,7 @@ use super::git_sync::{
     pidash_issue_url, retry_countdown_secs, safe_render, save_state_sql, strip_html_text,
     truncate_chars, GITHUB_API_BASE, PROVIDER_TIMEOUT_SECS,
 };
+use crate::issue_transition::{comment_sync_transition, fire_sync_transition};
 use crate::pyformat::format_eta;
 use crate::queue::{enqueue, JobRow, NewJob};
 use crate::task_message::TaskMessage;
@@ -395,30 +405,6 @@ pub const ISSUE_LOOKUP_SQL: &str = "SELECT id FROM issues WHERE project_id = $1 
 /// the `state is None` branch never touches it.
 pub const ISSUE_STATE_SQL: &str = "SELECT i.state_id, s.\"group\" AS state_group, i.completed_at FROM issues i LEFT JOIN states s ON s.id = i.state_id WHERE i.id = $1";
 
-/// Adopt the resolved default on a stateless mirror (`Issue.save`,
-/// `issue.py:288-301`): `self.state = default_state` then the full
-/// `save()` persists it. `$1` the issue id, `$2` the resolved state id
-/// (nullable — no default exists, the row stays stateless, as in Python).
-const ADOPT_STATE_SQL: &str = "UPDATE issues SET state_id = $2 WHERE id = $1";
-
-/// `Issue.objects.create(…)` column list, in physical order: the
-/// `Issue.save()` creation path resolves pod/state/sequence/sort-order
-/// first (see [`create_issue`]), then writes the full row. Application
-/// defaults with no DB fallback (`priority 'none'`, `complexity_score 0`,
-/// `sequence/sort` resolved, `is_draft false`, `git_work_branch ''`,
-/// `workpad ''`); everything else NULL. `workspace_id` comes from
-/// `ProjectBaseModel.save` (`project.workspace`), not the task defaults.
-const INSERT_ISSUE_SQL: &str = "INSERT INTO issues (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, parent_id, state_id, point, estimate_point_id, name, description_json, description_html, description_stripped, description_binary, priority, complexity_score, start_date, target_date, sequence_id, sort_order, completed_at, archived_at, is_draft, external_source, external_id, type_id, git_work_branch, workpad, created_via, assigned_pod_id, agent_executor, work_type) VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, NULL, $8, NULL, NULL, $9, $10, $11, $12, NULL, 'none', 0, NULL, NULL, $13, $14, $15, NULL, FALSE, $16, $17, NULL, '', '', NULL, $18, NULL, NULL)";
-
-/// `update_or_create` issue UPDATE arm (`github_sync_task.py:135-140` via
-/// `Issue.save`, `issue.py:288-350`): `save()` rewrites the whole row,
-/// but only the render triple, the recomputed `completed_at` and the
-/// audit restamp can differ — `name`, state and `updated_at` (auto_now)
-/// aside, every other column keeps its value. (The two Python writes —
-/// `save()` then `filter(pk).update(created_by, updated_by)` — collapse
-/// into this one statement; the final bytes are identical.)
-const UPDATE_ISSUE_SQL: &str = "UPDATE issues SET name = $2, description_html = $3, description_stripped = $4, description_json = $5, created_by_id = $6, updated_by_id = $6, completed_at = $7, updated_at = $8 WHERE id = $1";
-
 /// `GithubIssueSync.objects.update_or_create(repository_sync, issue, …)`
 /// (`github_sync_task.py:168-182`): full-row insert and full-defaults
 /// update (plus `updated_at`, which `save()` touches on the update path).
@@ -433,12 +419,6 @@ const UPDATE_ISSUE_SYNC_SQL: &str = "UPDATE github_issue_syncs SET repo_issue_id
 /// issue)` — metadata is read for the login merge below. `$1` the sync
 /// id, `$2` the issue id.
 pub const GITHUB_SYNC_LOOKUP_SQL: &str = "SELECT id, metadata FROM github_issue_syncs WHERE repository_sync_id = $1 AND issue_id = $2 AND deleted_at IS NULL";
-
-/// `IssueSequence.objects.create(issue, sequence, project)`
-/// (`issue.py:340`): `ProjectBaseModel` audit columns, `deleted false`.
-/// `workspace_id` derives from `project.workspace` via
-/// `ProjectBaseModel.save`, same as the issue row.
-const INSERT_ISSUE_SEQUENCE_SQL: &str = "INSERT INTO issue_sequences (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, issue_id, sequence, deleted) VALUES ($1, $2, $3, NULL, NULL, NULL, $4, $5, $6, $7, FALSE)";
 
 /// Next per-project sequence (`Issue.save`, `issue.py:314-327`): the max
 /// over the scoped `IssueSequence` rows. `$1` is the project id; NULL
@@ -472,25 +452,6 @@ pub const DEFAULT_POD_SQL: &str = "SELECT id FROM pod WHERE project_id = $1 AND 
 /// change-tracker comparison for the description side-table. `$1` the
 /// issue id, `$2` the upstream comment id.
 pub const ISSUE_COMMENT_LOOKUP_SQL: &str = "SELECT id, comment_html, comment_stripped, comment_json, description_id FROM issue_comments WHERE issue_id = $1 AND external_source = 'github' AND external_id = $2 AND deleted_at IS NULL";
-
-/// `Description.objects.create(…)` for a new mirror comment
-/// (`issue.py:625`): `WorkspaceBaseModel` columns; `description_stripped`
-/// recomputed by `Description.save` — which imports DJANGO's `strip_tags`
-/// (`description.py:6`, entities kept), overwriting the decoded value the
-/// caller passed (`description.py:22-28`). Hence the Django
-/// [`strip_tags`] call here, unlike every other stripped write in this
-/// module.
-const INSERT_DESCRIPTION_SQL: &str = "INSERT INTO descriptions (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, project_id, description_json, description_html, description_binary, description_stripped) VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, $8, $9, NULL, $10)";
-
-/// `IssueComment.objects.create` column list: array defaults `'{}'`,
-/// `access 'INTERNAL'`, `speaker_type 'human'`, `speaker_label ''`.
-const INSERT_ISSUE_COMMENT_SQL: &str = "INSERT INTO issue_comments (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, comment_stripped, comment_json, comment_html, description_id, attachments, labels, issue_id, actor_id, access, external_source, external_id, speaker_type, speaker_label, speaker_agent_run_id, edited_at, parent_id) VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, $8, $9, $10, $11, '{}', '{}', $12, $13, 'INTERNAL', 'github', $14, 'human', '', NULL, NULL, NULL)";
-
-/// Existing mirror comment refresh (`issue.py:606-646`): the render
-/// triple plus audit restamp and `updated_at` (full `save()`); the
-/// description side-table updates only when a tracked field changed.
-const UPDATE_ISSUE_COMMENT_SQL: &str = "UPDATE issue_comments SET comment_html = $2, comment_stripped = $3, comment_json = $4, workspace_id = $5, project_id = $6, actor_id = $7, created_by_id = $8, updated_by_id = $8, updated_at = $9 WHERE id = $1";
-const UPDATE_COMMENT_DESCRIPTION_SQL: &str = "UPDATE descriptions SET description_html = $2, description_stripped = $3, description_json = $4, updated_by_id = $5, updated_at = $6 WHERE id = $1";
 
 /// Comment-sync lookup (`github_sync_task.py:230-232`):
 /// `GithubCommentSync.objects.update_or_create(issue_sync, comment, …)` —
@@ -632,8 +593,11 @@ impl GithubRestClient {
         if token.is_empty() {
             return Err(GithubError::Auth("empty token".to_owned()));
         }
+        // Redirects follow `requests` (up to 10 hops; `requests` allows
+        // 30): GitHub answers 301 (GET) or 307 (POST) for a
+        // renamed/transferred repo (PIDASHCONV-1472).
         let http = reqwest::blocking::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
+            .redirect(reqwest::redirect::Policy::limited(10))
             .build()
             .map_err(|error| GithubError::Transport(error.to_string()))?;
         Ok(Self {
@@ -647,7 +611,8 @@ impl GithubRestClient {
     /// The default construction (`GithubClient(token=token)`):
     /// 30-second timeout against `https://api.github.com`.
     pub fn live(token: &str) -> Result<Self, GithubError> {
-        Self::connect(token, PROVIDER_TIMEOUT_SECS, GITHUB_API_BASE)
+        let base = super::github_api_base_override().unwrap_or_else(|| GITHUB_API_BASE.to_owned());
+        Self::connect(token, PROVIDER_TIMEOUT_SECS, &base)
     }
 
     fn send(
@@ -761,21 +726,6 @@ fn response_json_list(response: reqwest::blocking::Response) -> Result<Vec<Value
     })
 }
 
-/// Minimal percent-encoding for query values (mirrors `urlencode` for the
-/// ASCII parameter values used here: `open`, digits, `updated`/`desc`).
-fn percent_encode(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(byte as char);
-            }
-            _ => out.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    out
-}
-
 impl GithubSyncTransport for GithubRestClient {
     /// Paginated `/issues?state=open` (`github_client.py:133-140`).
     fn list_all_open_issues(&self, owner: &str, name: &str) -> Result<Vec<Value>, GithubError> {
@@ -829,11 +779,15 @@ impl GithubSyncTransport for GithubRestClient {
 
 /// Scan-section fault (`github_sync_task.py:327-335`): provider 4xx faults
 /// record `last_sync_error` and ack; anything else records and takes the
-/// `self.retry(countdown)` path.
+/// `self.retry(countdown)` path. `Setup` is the client-construction
+/// failure (`GithubClient(token=…)` built inside the `spawn_blocking`
+/// closures); it parks as `Fail` without recording, exactly like the
+/// pre-`spawn_blocking` construction it replaces.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScanFault {
     Recordable(GithubError),
     Unexpected(String),
+    Setup(String),
 }
 
 impl ScanFault {
@@ -872,6 +826,10 @@ impl LiveTransports {
     }
 
     /// `GithubClient(token=token)` (`github_sync_task.py:292`).
+    ///
+    /// Call only on a blocking thread (inside `spawn_blocking`): the
+    /// returned client owns a `reqwest::blocking::Client`, whose
+    /// construction and last drop panic in async context (PIDASHCONV-1512).
     pub fn client(&self, token: &str) -> Result<GithubRestClient, GithubError> {
         GithubRestClient::live(token)
     }
@@ -958,7 +916,8 @@ async fn save_default_state(
 /// `github_sync_task.py:135-140`, with the `Issue.save()` creation path
 /// `issue.py:267-340` inlined: workspace derivation, pod default,
 /// non-triage default state, advisory-locked sequence, sort-order seed,
-/// stripped recompute).
+/// stripped recompute). Returns the issue id, the sync id, and the
+/// resolved state (the post-save legs' current value).
 #[allow(clippy::too_many_arguments)]
 async fn create_issue(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -972,7 +931,7 @@ async fn create_issue(
     _description_stripped: &str,
     sync_values: &IssueSyncValues,
     now: &DateTime<Utc>,
-) -> Result<(Uuid, Uuid), String> {
+) -> Result<(Uuid, Uuid, Option<Uuid>), String> {
     let db_error = |error: sqlx::Error| format!("create mirror issue: {error}");
     sqlx::query(ADVISORY_LOCK_SQL)
         .bind(advisory_lock_key(&scan.project_id))
@@ -1010,42 +969,43 @@ async fn create_issue(
     // html_processor stripper, decoding entities.
     let stripped = strip_html_text(description_html);
     let issue_id = Uuid::new_v4();
-    sqlx::query(INSERT_ISSUE_SQL)
-        .bind(issue_id)
-        .bind(*now)
-        .bind(*now)
-        .bind(scan.actor_id)
-        .bind(scan.actor_id)
-        .bind(scan.project_id)
-        .bind(*workspace_id)
-        .bind(state_id)
-        .bind(name)
-        .bind(json!({}))
-        .bind(description_html)
-        .bind(stripped)
-        .bind(sequence_id)
-        .bind(sort_order)
-        .bind(completed_at)
-        .bind("github")
-        .bind(number.to_string())
-        .bind(pod_id)
-        .execute(&mut **tx)
-        .await
-        .map_err(db_error)?;
-    sqlx::query(INSERT_ISSUE_SEQUENCE_SQL)
-        .bind(Uuid::new_v4())
-        .bind(*now)
-        .bind(*now)
-        .bind(scan.project_id)
-        .bind(*workspace_id)
-        .bind(issue_id)
-        .bind(sequence_id)
-        .execute(&mut **tx)
-        .await
-        .map_err(db_error)?;
+    domain_issues::insert_mirror_issue(
+        &mut **tx,
+        &domain_issues::MirrorIssueInsert {
+            issue_id,
+            now: *now,
+            actor_id: scan.actor_id,
+            project_id: scan.project_id,
+            workspace_id: *workspace_id,
+            state_id,
+            name: (*name).to_owned(),
+            description_html: (*description_html).to_owned(),
+            description_stripped: stripped,
+            sequence_id,
+            sort_order,
+            completed_at,
+            external_source: "github".to_owned(),
+            external_id: number.to_string(),
+            pod_id,
+        },
+    )
+    .await
+    .map_err(db_error)?;
+    domain_issues::insert_issue_sequence(
+        &mut **tx,
+        &domain_issues::MirrorIssueSequence {
+            project_id: scan.project_id,
+            workspace_id: *workspace_id,
+            issue_id,
+            sequence: sequence_id,
+            now: *now,
+        },
+    )
+    .await
+    .map_err(db_error)?;
     let sync_id =
         insert_issue_sync(tx, scan, workspace_id, &issue_id, number, sync_values, now).await?;
-    Ok((issue_id, sync_id))
+    Ok((issue_id, sync_id, state_id))
 }
 
 /// The `GithubIssueSync` defaults decoded once per upsert
@@ -1122,11 +1082,20 @@ pub fn decode_issue_payload(
 /// Create-or-update one local Issue mirror plus its GithubIssueSync row
 /// (`_upsert_issue`, `github_sync_task.py:111-188`). Returns the local
 /// `(issue_id, issue_sync_id)`.
+///
+/// `hook` is the worker's transition entry points (`None` on direct
+/// unit-test calls, where no worker context exists): after a save that
+/// changed state — create (previous `None`) or adopt (stateless row) —
+/// the orchestration fire runs, and after an adopt into completed the
+/// completion comment-back enqueues. Both legs are best-effort (the
+/// receivers never fail the save); the create arm runs no completion
+/// leg (`github_signals.py` skips `created`).
 pub async fn upsert_issue(
     pool: &PgPool,
     scan: &RepoScan,
     gh_issue: &Value,
     now: &DateTime<Utc>,
+    hook: Option<Arc<dyn IssueTransitionHook>>,
 ) -> Result<(Uuid, Uuid), String> {
     let db_error = |error: sqlx::Error| format!("upsert mirror issue: {error}");
     let (number, name, description_html, description_stripped, values) =
@@ -1142,7 +1111,7 @@ pub async fn upsert_issue(
         None => {
             let workspace_id = project_workspace(pool, &scan.project_id).await?;
             let mut tx = pool.begin().await.map_err(db_error)?;
-            let ids = create_issue(
+            let (issue_id, sync_id, state_id) = create_issue(
                 &mut tx,
                 scan,
                 &workspace_id,
@@ -1154,9 +1123,13 @@ pub async fn upsert_issue(
                 now,
             )
             .await?;
-            merge_issue_login(&mut tx, &ids.1, gh_issue).await?;
+            merge_issue_login(&mut tx, &sync_id, gh_issue).await?;
             tx.commit().await.map_err(db_error)?;
-            Ok(ids)
+            // The receiver ignores `created` and compares previous
+            // (`None`) vs current (the default): a ticking default
+            // enters the bucket here.
+            fire_sync_transition(&hook, scan.actor_id, issue_id, None, state_id, *now).await;
+            Ok((issue_id, sync_id))
         }
         Some(issue_id) => {
             // `setattr(defaults)` + full `Issue.save()`:
@@ -1175,45 +1148,64 @@ pub async fn upsert_issue(
                 .await
                 .map_err(db_error)?
                 .unwrap_or((None, None, None));
+            // `self.state is None` (`issue.py:288-296`): resolve the
+            // default for the receivers — in memory only.
+            // `update_or_create` saves the update arm with
+            // `update_fields=set(defaults)+auto` (Django 4.2
+            // `query.py:957-972`), which excludes `state`, so the row
+            // keeps NULL while the post_save legs evaluate against the
+            // adopted default. That branch never touches
+            // `completed_at`, so the stored stamp is preserved (it
+            // stays NULL on every row the sync itself created).
+            let adopted: Option<Uuid> = if state_id.is_none() {
+                let mut tx = pool.begin().await.map_err(db_error)?;
+                let resolved = save_default_state(&mut tx, &scan.project_id).await?;
+                tx.commit().await.map_err(db_error)?;
+                resolved
+            } else {
+                None
+            };
+            let current_state_id = adopted.or(state_id);
             let completed_at: Option<DateTime<Utc>> = match (state_id, state_group.as_deref()) {
                 (Some(_), Some("completed")) => Some(*now),
                 (Some(_), _) => None,
-                (None, _) => {
-                    // `self.state is None` (`issue.py:288-296`): resolve
-                    // the default and store it on the row. That branch
-                    // never touches `completed_at`, so the stored stamp
-                    // is preserved (it stays NULL on every row the sync
-                    // itself created).
-                    let mut tx = pool.begin().await.map_err(db_error)?;
-                    let resolved = save_default_state(&mut tx, &scan.project_id).await?;
-                    tx.commit().await.map_err(db_error)?;
-                    sqlx::query(ADOPT_STATE_SQL)
-                        .bind(issue_id)
-                        .bind(resolved)
-                        .execute(pool)
-                        .await
-                        .map_err(db_error)?;
-                    stored_completed_at
-                }
+                (None, _) => stored_completed_at,
             };
             // `save()` recomputes the stripped form (`issue.py:345-350`).
             let stripped = strip_html_text(&description_html);
-            sqlx::query(UPDATE_ISSUE_SQL)
-                .bind(issue_id)
-                .bind(&name)
-                .bind(&description_html)
-                .bind(&stripped)
-                .bind(json!({}))
-                .bind(scan.actor_id)
-                .bind(completed_at)
-                .bind(*now)
-                .execute(pool)
-                .await
-                .map_err(db_error)?;
+            domain_issues::update_github_mirror_issue(
+                pool,
+                &domain_issues::GithubMirrorIssueUpdate {
+                    issue_id,
+                    name,
+                    description_html,
+                    description_stripped: stripped,
+                    actor_id: scan.actor_id,
+                    completed_at,
+                    now: *now,
+                },
+            )
+            .await
+            .map_err(db_error)?;
             let mut tx = pool.begin().await.map_err(db_error)?;
             let sync_id = update_issue_sync(&mut tx, scan, &issue_id, number, &values, now).await?;
             merge_issue_login(&mut tx, &sync_id, gh_issue).await?;
             tx.commit().await.map_err(db_error)?;
+            // Adopt (previous `None` vs the resolved default): the
+            // orchestration leg evaluates the move and the completion
+            // leg enqueues when the adopted default is completed-group
+            // with an unstamped sync row. Both helpers no-op without
+            // an installed hook or without a state change.
+            fire_sync_transition(
+                &hook,
+                scan.actor_id,
+                issue_id,
+                state_id,
+                current_state_id,
+                *now,
+            )
+            .await;
+            comment_sync_transition(&hook, issue_id, state_id, current_state_id).await;
             Ok((issue_id, sync_id))
         }
     }
@@ -1344,76 +1336,117 @@ pub async fn upsert_comment(
             .await
             .map_err(db_error)?;
     let mut tx = pool.begin().await.map_err(db_error)?;
+    let empty_json = json!({});
+    let empty_list: Vec<String> = Vec::new();
     let comment_id = match existing {
         None => {
-            let description_id = Uuid::new_v4();
-            sqlx::query(INSERT_DESCRIPTION_SQL)
-                .bind(description_id)
-                .bind(*now)
-                .bind(*now)
-                .bind(scan.actor_id)
-                .bind(scan.actor_id)
-                .bind(scan.workspace_id)
-                .bind(scan.project_id)
-                .bind(json!({}))
-                .bind(&comment_html)
-                .bind(strip_tags(&comment_html))
-                .execute(&mut *tx)
+            // Domain twins, description first with the id bound inline
+            // (no link step). The description audit stays NULL (the
+            // worker-crum quirk) while the comment audit restamps the
+            // scan actor twice; one `now()` feeds all four stamps.
+            let desc_stripped = strip_tags(&comment_html);
+            let rows = comment_domain::CommentRows {
+                id: Uuid::new_v4(),
+                description_id: Uuid::new_v4(),
+                created_at: *now,
+                updated_at: *now,
+                desc_created_at: *now,
+                desc_updated_at: *now,
+                workspace_id: scan.workspace_id,
+                project_id: scan.project_id,
+                issue_id: *issue_id,
+                actor_id: Some(scan.actor_id),
+                created_by: None,
+                updated_by: None,
+                deleted_at: None,
+                html: &comment_html,
+                json: &empty_json,
+                stripped: &comment_stripped,
+                desc_stripped: Some(&desc_stripped),
+                access: "INTERNAL",
+                speaker_type: "human",
+                speaker_label: "",
+                speaker_agent_run_id: None,
+                external_id: Some(&remote_id_text),
+                external_source: Some("github"),
+                parent_id: None,
+                attachments: &empty_list,
+                labels: &empty_list,
+                edited_at: None,
+            };
+            comment_domain::insert_description_row(&mut *tx, &rows)
                 .await
                 .map_err(db_error)?;
-            let comment_id = Uuid::new_v4();
-            sqlx::query(INSERT_ISSUE_COMMENT_SQL)
-                .bind(comment_id)
-                .bind(*now)
-                .bind(*now)
-                .bind(scan.actor_id)
-                .bind(scan.actor_id)
-                .bind(scan.project_id)
-                .bind(scan.workspace_id)
-                .bind(&comment_stripped)
-                .bind(json!({}))
-                .bind(&comment_html)
-                .bind(description_id)
-                .bind(*issue_id)
-                .bind(scan.actor_id)
-                .bind(&remote_id_text)
-                .execute(&mut *tx)
+            let linked = comment_domain::CommentRows {
+                created_by: Some(scan.actor_id),
+                updated_by: Some(scan.actor_id),
+                deleted_at: None,
+                ..rows
+            };
+            comment_domain::insert_comment_row_linked(&mut *tx, &linked)
                 .await
                 .map_err(db_error)?;
-            comment_id
+            linked.id
         }
         Some((comment_id, old_html, old_stripped, old_json, description_id)) => {
-            sqlx::query(UPDATE_ISSUE_COMMENT_SQL)
-                .bind(comment_id)
-                .bind(&comment_html)
-                .bind(&comment_stripped)
-                .bind(json!({}))
-                .bind(scan.workspace_id)
-                .bind(scan.project_id)
-                .bind(scan.actor_id)
-                .bind(scan.actor_id)
-                .bind(*now)
-                .execute(&mut *tx)
+            // The scan actor restamps `actor_id` + both audit columns,
+            // matching Django: `actor_id` is in the `update_or_create`
+            // `defaults` (`github_sync_task.py:217`), so the update path
+            // rewrites it (PIDASHCONV-1581 item 3 was disproven).
+            let update = comment_domain::SyncCommentUpdate {
+                id: comment_id,
+                updated_at: *now,
+                html: &comment_html,
+                stripped: &comment_stripped,
+                json: &empty_json,
+                workspace_id: scan.workspace_id,
+                project_id: scan.project_id,
+                actor: scan.actor_id,
+            };
+            comment_domain::update_sync_comment(&mut *tx, &update)
                 .await
                 .map_err(db_error)?;
             // Change-tracked description refresh (`issue.py:629-646`):
             // only the render triple, only when it changed, only with a
             // description row to write to. The comparison runs against the
             // save()-recomputed values (decoded, unstripped), which is what
-            // the database holds.
-            let changed = old_html != comment_html
-                || old_stripped != comment_stripped
-                || old_json != json!({});
-            if changed {
+            // the database holds. Only the changed subset syncs, with
+            // `updated_by` NULL (the worker-crum read — PIDASHCONV-1581
+            // item 2); the values land verbatim (queryset `update`
+            // bypasses `Description.save`).
+            let html_changed = old_html != comment_html;
+            let stripped_changed = old_stripped != comment_stripped;
+            let json_changed = old_json != json!({});
+            if html_changed || stripped_changed || json_changed {
                 if let Some(description_id) = description_id {
-                    sqlx::query(UPDATE_COMMENT_DESCRIPTION_SQL)
-                        .bind(description_id)
-                        .bind(&comment_html)
-                        .bind(&comment_stripped)
-                        .bind(json!({}))
-                        .bind(scan.actor_id)
-                        .bind(*now)
-                        .execute(&mut *tx)
+                    if html_changed {
+                        comment_domain::sync_description_html(
+                            &mut *tx,
+                            description_id,
+                            &comment_html,
+                        )
+                        .await
+                        .map_err(db_error)?;
+                    }
+                    if stripped_changed {
+                        comment_domain::sync_description_stripped(
+                            &mut *tx,
+                            description_id,
+                            &comment_stripped,
+                        )
+                        .await
+                        .map_err(db_error)?;
+                    }
+                    if json_changed {
+                        comment_domain::sync_description_json(
+                            &mut *tx,
+                            description_id,
+                            &empty_json,
+                        )
+                        .await
+                        .map_err(db_error)?;
+                    }
+                    comment_domain::touch_synced_description(&mut *tx, description_id, None, *now)
                         .await
                         .map_err(db_error)?;
                 }
@@ -1539,6 +1572,7 @@ pub async fn sync_one_repo(
     transports: &LiveTransports,
     sync_id: &str,
     attempts: u32,
+    hook: Option<Arc<dyn IssueTransitionHook>>,
 ) -> Result<Verdict, HandlerError> {
     if !github_sync_enabled() {
         return Ok(Verdict::Ack);
@@ -1611,22 +1645,15 @@ pub async fn sync_one_repo(
             }
         },
     };
-    let transport = match transports.client(&scan.token) {
-        Ok(client) => client,
-        Err(error) => {
-            // `GithubClient(token="")` cannot happen (empty tokens took
-            // the missing-credential path above); a build failure is a
-            // setup fault, like any error outside the guarded `try`.
-            return Ok(Verdict::Fail {
-                error: format!(
-                    "{SYNC_ONE_REPO_TASK}: client build failed: {}",
-                    error.message()
-                ),
-            });
-        }
-    };
     let now = Utc::now();
-    match run_scan(pool, &transport, &scan, &now).await {
+    // The blocking client is built inside `run_scan`'s `spawn_blocking`
+    // closures, never in async context: `reqwest::blocking::Client`
+    // owns a tokio runtime, and both construction and the last drop
+    // panic there (PIDASHCONV-1512). `GithubClient(token="")` cannot
+    // happen (empty tokens took the missing-credential path above); a
+    // build failure arrives as `ScanFault::Setup` and parks as `Fail`,
+    // like any error outside the guarded `try`.
+    match run_scan(pool, transports, &scan, &now, hook).await {
         Ok(()) => {
             if let Err(error) = sqlx::query(SYNC_SUCCESS_SQL)
                 .bind(scan.sync_id)
@@ -1670,6 +1697,12 @@ pub async fn sync_one_repo(
                 delay_secs: retry_countdown_secs(attempts),
             })
         }
+        // Client-construction failure (`GithubClient(token=…)`): a setup
+        // fault, identical to the pre-`spawn_blocking` mapping — parks
+        // as `Fail` without recording.
+        Err(ScanFault::Setup(message)) => Ok(Verdict::Fail {
+            error: format!("{SYNC_ONE_REPO_TASK}: client build failed: {message}"),
+        }),
     }
 }
 
@@ -1681,17 +1714,25 @@ pub async fn sync_one_repo(
 /// Exception`).
 async fn run_scan(
     pool: &PgPool,
-    transport: &GithubRestClient,
+    transports: &LiveTransports,
     scan: &RepoScan,
     now: &DateTime<Utc>,
+    hook: Option<Arc<dyn IssueTransitionHook>>,
 ) -> Result<(), ScanFault> {
     let remote_issues = {
         let (owner, name) = (scan.owner.clone(), scan.name.clone());
-        let transport = transport.clone();
-        tokio::task::spawn_blocking(move || transport.list_all_open_issues(&owner, &name))
-            .await
-            .map_err(|error| ScanFault::Unexpected(format!("provider call failed: {error}")))?
-            .map_err(ScanFault::classify)?
+        let transports = transports.clone();
+        let token = scan.token.clone();
+        tokio::task::spawn_blocking(move || {
+            let transport = transports
+                .client(&token)
+                .map_err(|error| ScanFault::Setup(error.message().to_owned()))?;
+            transport
+                .list_all_open_issues(&owner, &name)
+                .map_err(ScanFault::classify)
+        })
+        .await
+        .map_err(|error| ScanFault::Unexpected(format!("provider call failed: {error}")))??
     };
     let mut remote_issue_numbers = HashSet::new();
     let mut pairs: Vec<(i64, Uuid, Uuid)> = Vec::new();
@@ -1701,7 +1742,7 @@ async fn run_scan(
         if gh_issue.get("pull_request").is_some() {
             continue;
         }
-        let (issue_id, sync_id) = upsert_issue(pool, scan, gh_issue, now)
+        let (issue_id, sync_id) = upsert_issue(pool, scan, gh_issue, now, hook.clone())
             .await
             .map_err(ScanFault::Unexpected)?;
         let number = gh_issue
@@ -1713,11 +1754,18 @@ async fn run_scan(
     }
     let remote_comments = {
         let (owner, name) = (scan.owner.clone(), scan.name.clone());
-        let transport = transport.clone();
-        tokio::task::spawn_blocking(move || transport.list_all_repo_comments(&owner, &name))
-            .await
-            .map_err(|error| ScanFault::Unexpected(format!("provider call failed: {error}")))?
-            .map_err(ScanFault::classify)?
+        let transports = transports.clone();
+        let token = scan.token.clone();
+        tokio::task::spawn_blocking(move || {
+            let transport = transports
+                .client(&token)
+                .map_err(|error| ScanFault::Setup(error.message().to_owned()))?;
+            transport
+                .list_all_repo_comments(&owner, &name)
+                .map_err(ScanFault::classify)
+        })
+        .await
+        .map_err(|error| ScanFault::Unexpected(format!("provider call failed: {error}")))??
     };
     // Repo-wide enumeration (`github_sync_task.py:310-318`): the parent
     // must be in this scan's remote set AND have a local pair, else the
@@ -1847,24 +1895,35 @@ pub async fn post_completion_comment(
         &project_id,
         &issue_id,
     ));
-    let transport = match transports.client(&token) {
-        Ok(client) => client,
-        Err(error) => {
-            return Ok(Verdict::Fail {
-                error: format!(
-                    "{POST_COMPLETION_COMMENT_TASK}: client build failed: {}",
-                    error.message()
-                ),
-            });
-        }
-    };
+    // Built inside `spawn_blocking`, never in async context: the
+    // blocking client owns a tokio runtime, and both construction and
+    // the last drop panic there (PIDASHCONV-1512).
     let posted = {
-        let transport = transport.clone();
+        let transports = transports.clone();
         tokio::task::spawn_blocking(move || {
-            transport.post_issue_comment(&owner, &name, repo_issue_id, &body)
+            let transport = transports
+                .client(&token)
+                .map_err(|error| error.message().to_owned())?;
+            Ok::<Result<Value, GithubError>, String>(transport.post_issue_comment(
+                &owner,
+                &name,
+                repo_issue_id,
+                &body,
+            ))
         })
         .await
         .map_err(|error| format!("{POST_COMPLETION_COMMENT_TASK}: provider call failed: {error}"))?
+    };
+    // Client-construction failure (`GithubClient(token=…)`): a setup
+    // fault, identical to the pre-`spawn_blocking` mapping — parks as
+    // `Fail` without recording.
+    let posted = match posted {
+        Ok(posted) => posted,
+        Err(message) => {
+            return Ok(Verdict::Fail {
+                error: format!("{POST_COMPLETION_COMMENT_TASK}: client build failed: {message}"),
+            });
+        }
     };
     let mut metadata = metadata;
     match posted {
@@ -1906,11 +1965,14 @@ pub async fn post_completion_comment(
 /// claimed row; Celery arity is enforced by [`parse_single_id_arg`]
 /// (malformed deliveries ack with a warning, like Celery discarding
 /// invalid signatures). `sync_one_repo` spends the row's retry budget
-/// with [`retry_countdown_secs`]; the other two never retry.
+/// with [`retry_countdown_secs`]; the other two never retry. `hook`
+/// carries the worker's transition entry points into the upserts
+/// (`None` leaves the post-save legs off).
 pub fn register_github_sync_tasks(
     registry: &mut Registry,
     pool: PgPool,
     transports: LiveTransports,
+    hook: Option<Arc<dyn IssueTransitionHook>>,
 ) {
     let scan_pool = pool.clone();
     registry.register(
@@ -1936,11 +1998,13 @@ pub fn register_github_sync_tasks(
     );
     let one_pool = pool.clone();
     let one_transports = transports.clone();
+    let one_hook = hook.clone();
     registry.register(
         SYNC_ONE_REPO_TASK,
         Arc::new(move |job: JobRow| {
             let pool = one_pool.clone();
             let transports = one_transports.clone();
+            let hook = one_hook.clone();
             Box::pin(async move {
                 let id = match parse_single_id_arg(SYNC_ONE_REPO_TASK, &job.args, &job.kwargs) {
                     Ok(id) => id,
@@ -1950,7 +2014,7 @@ pub fn register_github_sync_tasks(
                     }
                 };
                 let attempts = job.attempts.max(0) as u32;
-                sync_one_repo(&pool, &transports, &id, attempts).await
+                sync_one_repo(&pool, &transports, &id, attempts, hook).await
             }) as std::pin::Pin<Box<dyn std::future::Future<Output = _> + Send>>
         }),
     );
@@ -2432,6 +2496,111 @@ mod tests {
         server.join().expect("server drains");
     }
 
+    // Rename redirects follow `requests` (`github_client.py:62-73`, no
+    // `allow_redirects` override): a renamed repo's 301 on the issues
+    // listing and 307 on the comment POST resolve to the new location,
+    // with `Authorization` kept and the POST body re-sent
+    // (PIDASHCONV-1472).
+    #[test]
+    fn transport_follows_rename_redirects() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::Mutex;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("binds");
+        let port = listener.local_addr().expect("addr").port();
+        let base = format!("http://127.0.0.1:{port}");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_server = seen.clone();
+        let server = std::thread::spawn(move || {
+            for stream in listener.incoming().take(4) {
+                let mut stream = stream.expect("accepts");
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    if stream.read(&mut byte).expect("reads") == 0 {
+                        break;
+                    }
+                    head.push(byte[0]);
+                }
+                let head_text = String::from_utf8_lossy(&head).into_owned();
+                // Header names arrive lowercase on the wire (hyper
+                // normalizes them), so match case-insensitively.
+                let header = |name: &str| {
+                    head_text.lines().skip(1).find_map(|line| {
+                        let (key, value) = line.split_once(':')?;
+                        (key.trim().eq_ignore_ascii_case(name)).then(|| value.trim().to_owned())
+                    })
+                };
+                let content_length = header("content-length")
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap_or(0);
+                let mut body = vec![0u8; content_length];
+                stream.read_exact(&mut body).expect("reads body");
+                let auth = header("authorization").unwrap_or_default();
+                seen_server.lock().expect("locks").push((
+                    head_text.lines().next().unwrap_or("").to_owned(),
+                    auth,
+                    body,
+                ));
+                let (status, location, body) = if head_text.starts_with("GET /repos/old/r/issues") {
+                    (
+                        "301 Moved Permanently",
+                        Some(format!("{base}/repositories/1/issues?state=open")),
+                        "".to_owned(),
+                    )
+                } else if head_text.starts_with("GET /repositories/1/issues") {
+                    ("200 OK", None, r#"[{"number": 7}]"#.to_owned())
+                } else if head_text.starts_with("POST /repos/old/r/issues/7/comments") {
+                    (
+                        "307 Temporary Redirect",
+                        Some(format!("{base}/repositories/1/issues/7/comments")),
+                        "".to_owned(),
+                    )
+                } else if head_text.starts_with("POST /repositories/1/issues/7/comments") {
+                    ("201 Created", None, r#"{"id": 4242}"#.to_owned())
+                } else {
+                    ("404 Not Found", None, "no route".to_owned())
+                };
+                let mut response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
+                    body.len()
+                );
+                if let Some(target) = location {
+                    response.push_str(&format!("Location: {target}\r\n"));
+                }
+                response.push_str(&format!("\r\n{body}"));
+                stream.write_all(response.as_bytes()).expect("writes");
+            }
+        });
+
+        let client =
+            GithubRestClient::connect("t", 5, &format!("http://127.0.0.1:{port}")).expect("builds");
+        let issues = client
+            .list_all_open_issues("old", "r")
+            .expect("lists through 301");
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0]["number"], json!(7));
+        let posted = client
+            .post_issue_comment("old", "r", 7, "done!")
+            .expect("posts through 307");
+        assert_eq!(posted["id"], json!(4242));
+        server.join().expect("server drains");
+
+        let hits = seen.lock().expect("locks");
+        assert_eq!(hits.len(), 4);
+        assert!(hits[0].0.starts_with("GET /repos/old/r/issues?"));
+        assert!(hits[1].0.starts_with("GET /repositories/1/issues?"));
+        assert!(hits[2].0.starts_with("POST /repos/old/r/issues/7/comments"));
+        assert!(hits[3]
+            .0
+            .starts_with("POST /repositories/1/issues/7/comments"));
+        for (_, auth, _) in hits.iter() {
+            assert_eq!(auth, "Bearer t");
+        }
+        assert_eq!(hits[3].2, br#"{"body":"done!"}"#.to_vec());
+    }
+
     // Every statement parses as Postgres, and the read statements are
     // SELECTs over the exact tables the ORM touches.
     #[test]
@@ -2442,22 +2611,14 @@ mod tests {
             PROJECT_WORKSPACE_SQL,
             ISSUE_LOOKUP_SQL,
             ISSUE_STATE_SQL,
-            ADOPT_STATE_SQL,
-            INSERT_ISSUE_SQL,
-            UPDATE_ISSUE_SQL,
             INSERT_ISSUE_SYNC_SQL,
             UPDATE_ISSUE_SYNC_SQL,
             GITHUB_SYNC_LOOKUP_SQL,
-            INSERT_ISSUE_SEQUENCE_SQL,
             MAX_SEQUENCE_SQL,
             MAX_SORT_ORDER_SQL,
             ADVISORY_LOCK_SQL,
             DEFAULT_POD_SQL,
             ISSUE_COMMENT_LOOKUP_SQL,
-            INSERT_DESCRIPTION_SQL,
-            INSERT_ISSUE_COMMENT_SQL,
-            UPDATE_ISSUE_COMMENT_SQL,
-            UPDATE_COMMENT_DESCRIPTION_SQL,
             COMMENT_SYNC_LOOKUP_SQL,
             INSERT_COMMENT_SYNC_SQL,
             UPDATE_COMMENT_SYNC_SQL,
@@ -2537,9 +2698,10 @@ mod tests {
         assert!(INSERT_COMMENT_SYNC_SQL.contains("NULL, NULL, NULL"));
         assert!(UPDATE_COMMENT_SYNC_SQL.contains("created_by_id = NULL"));
 
-        // Mirror rows: actor restamp collapsed into the update.
-        assert!(UPDATE_ISSUE_SQL.contains("created_by_id = $6"));
-        assert!(UPDATE_ISSUE_COMMENT_SQL.contains("created_by_id = $8"));
+        // Mirror rows: actor restamp collapsed into the update (the
+        // issue pin moved to `domain::issues::sync_bare_sql_shapes` with
+        // the statement; the comment pins moved to
+        // `domain::comments::sync_sql_shapes` with the twins).
 
         // Metadata-only writes touch nothing else.
         assert_eq!(
@@ -2610,6 +2772,7 @@ mod tests {
             LiveTransports::with_keyring(pidash_db::config::encryption::Keyring::from_secret(
                 "test",
             )),
+            None,
         );
         for task in TASK_NAMES {
             assert_eq!(route_for(&registry, task), Route::Local);
@@ -2618,5 +2781,529 @@ mod tests {
             route_for(&registry, "pi_dash.bgtasks.other.task"),
             Route::Unknown
         );
+    }
+}
+
+/// Live scratch-DB proof that a mirrored legacy comment's `descriptions`
+/// row lands NULL (PIDASHCONV-1473), env-gated like the `git_sync`
+/// live tests: without `DATABASE_URL` these skip. `upsert_comment` runs
+/// twice with the same remote id and a changed body — the first call
+/// takes the INSERT arm, the second the change-tracked UPDATE arm
+/// (`issue.py:598-646`), mirroring the Django `_upsert_comment` control.
+/// Pre-fix both arms stamp the binding actor; Django writes NULL on both
+/// (`Description.objects.create` runs `BaseModel.save`, `issue.py:625`;
+/// the update reads `self.updated_by_id` after `save()` set it to None,
+/// `issue.py:644-646`).
+#[cfg(test)]
+mod live_tests {
+    use serde_json::json;
+
+    use super::*;
+
+    async fn live_pool() -> Option<sqlx::PgPool> {
+        match std::env::var("DATABASE_URL") {
+            Ok(url) => Some(
+                sqlx::postgres::PgPoolOptions::new()
+                    .max_connections(5)
+                    .connect(&url)
+                    .await
+                    .expect("connect to scratch DATABASE_URL"),
+            ),
+            Err(_) => {
+                eprintln!("skipping live-db test: DATABASE_URL is not set");
+                None
+            }
+        }
+    }
+
+    /// Seed user → workspace → project → integration → api token →
+    /// workspace integration → github repository → repository sync. Every
+    /// unique column carries a random tag so reruns never collide.
+    /// Returns the scan closure for [`upsert_issue`]/[`upsert_comment`].
+    async fn seed_scan(pool: &sqlx::PgPool) -> RepoScan {
+        let tag: String = Uuid::new_v4().simple().to_string()[..10].to_owned();
+        let user_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (id, password, email, username, display_name, first_name, last_name, avatar, date_joined, created_at, updated_at, last_location, created_location, is_superuser, is_managed, is_password_expired, is_active, is_staff, is_email_verified, is_password_autoset, is_password_reset_required, token, last_active, last_login_ip, last_logout_ip, last_login_medium, last_login_uagent, is_bot, user_timezone, is_email_valid) VALUES ($1, 'pbkdf2_sha256$600000$salt$hash', $2, $3, '', '', '', '', now(), now(), now(), '', '', false, false, false, true, false, false, false, false, '', now(), '', '', 'email', '', false, 'UTC', true)",
+        )
+        .bind(user_id)
+        .bind(format!("rs1473-{tag}@example.com"))
+        .bind(format!("rs1473_{tag}"))
+        .execute(pool)
+        .await
+        .expect("seed user");
+        let workspace_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO workspaces (id, name, owner_id, slug, timezone, background_color, created_at, updated_at) VALUES ($1, $2, $3, $4, 'UTC', '#ffffff', now(), now())",
+        )
+        .bind(workspace_id)
+        .bind(format!("RS1473 {tag}"))
+        .bind(user_id)
+        .bind(format!("rs1473-{tag}"))
+        .execute(pool)
+        .await
+        .expect("seed workspace");
+        let project_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO projects (id, name, description, network, workspace_id, identifier, module_view, cycle_view, issue_views_view, page_view, intake_view, is_time_tracking_enabled, is_issue_type_enabled, is_default, guest_view_all_features, members_can_edit_states, archive_in, close_in, logo_props, timezone, repo_url, base_branch, agent_default_interval_seconds, agent_default_max_ticks, agent_review_default_interval_seconds, agent_test_default_interval_seconds, agent_ticking_enabled, default_agent_executor, created_at, updated_at) VALUES ($1, $2, '', 2, $3, $4, false, false, false, true, false, false, false, false, false, true, 0, 0, '{}', 'UTC', '', 'main', 10800, 10, 10800, 10800, true, 'local_runner', now(), now())",
+        )
+        .bind(project_id)
+        .bind(format!("RS1473 {tag}"))
+        .bind(workspace_id)
+        .bind(format!("RS{}", tag.to_uppercase()))
+        .execute(pool)
+        .await
+        .expect("seed project");
+        let integration_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO integrations (id, created_at, updated_at, title, provider, network, description, author, webhook_url, webhook_secret, redirect_url, metadata, verified, avatar_url) VALUES ($1, now(), now(), $2, $3, 1, '{}', '', '', '', '', '{}', false, NULL)",
+        )
+        .bind(integration_id)
+        .bind(format!("RS1473 {tag}"))
+        .bind(format!("rs1473-{tag}"))
+        .execute(pool)
+        .await
+        .expect("seed integration");
+        let token_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO api_tokens (id, created_at, updated_at, label, description, is_active, last_used, token, user_id, user_type, workspace_id, expired_at, is_service, allowed_rate_limit) VALUES ($1, now(), now(), $2, '', true, NULL, $3, $4, 1, $5, NULL, false, '60/min')",
+        )
+        .bind(token_id)
+        .bind(format!("rs1473-{tag}"))
+        .bind(format!("rs1473-token-{tag}"))
+        .bind(user_id)
+        .bind(workspace_id)
+        .execute(pool)
+        .await
+        .expect("seed api token");
+        let ws_integration_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO workspace_integrations (id, created_at, updated_at, workspace_id, actor_id, integration_id, api_token_id, metadata, config) VALUES ($1, now(), now(), $2, $3, $4, $5, '{}', '{}')",
+        )
+        .bind(ws_integration_id)
+        .bind(workspace_id)
+        .bind(user_id)
+        .bind(integration_id)
+        .bind(token_id)
+        .execute(pool)
+        .await
+        .expect("seed workspace integration");
+        let repo_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO github_repositories (id, created_at, updated_at, project_id, workspace_id, name, url, config, repository_id, owner) VALUES ($1, now(), now(), $2, $3, $4, NULL, '{}', 99, 'rs-ct')",
+        )
+        .bind(repo_id)
+        .bind(project_id)
+        .bind(workspace_id)
+        .bind(format!("rs{tag}"))
+        .execute(pool)
+        .await
+        .expect("seed github repository");
+        let sync_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO github_repository_syncs (id, created_at, updated_at, project_id, workspace_id, repository_id, credentials, actor_id, workspace_integration_id, label_id, is_sync_enabled, last_synced_at, last_sync_error) VALUES ($1, now(), now(), $2, $3, $4, '{}', $5, $6, NULL, true, NULL, '')",
+        )
+        .bind(sync_id)
+        .bind(project_id)
+        .bind(workspace_id)
+        .bind(repo_id)
+        .bind(user_id)
+        .bind(ws_integration_id)
+        .execute(pool)
+        .await
+        .expect("seed repository sync");
+        RepoScan {
+            sync_id,
+            project_id,
+            workspace_id,
+            actor_id: user_id,
+            owner: "rs-ct".to_owned(),
+            name: format!("rs{tag}"),
+            token: "x".to_owned(),
+        }
+    }
+
+    fn gh_issue(title: &str) -> Value {
+        json!({
+            "number": 7,
+            "id": 1001,
+            "title": title,
+            "body": "Remote body",
+            "state": "open",
+            "html_url": "https://github.com/rs-ct/x/issues/7",
+            "created_at": "2026-01-02T03:04:05Z",
+            "updated_at": "2026-01-03T04:05:06Z",
+        })
+    }
+
+    fn gh_comment(body: &str) -> Value {
+        json!({"id": 5001, "body": body})
+    }
+
+    async fn cleanup(
+        pool: &sqlx::PgPool,
+        scan: &RepoScan,
+        issue_id: Uuid,
+        comment_id: Uuid,
+        description_id: Uuid,
+    ) {
+        let row: (Uuid, Uuid) = sqlx::query_as(
+            "SELECT repository_id, workspace_integration_id FROM github_repository_syncs WHERE id = $1",
+        )
+        .bind(scan.sync_id)
+        .fetch_one(pool)
+        .await
+        .expect("read back seed ids");
+        let (repo_id, ws_integration_id) = row;
+        let (integration_id, token_id): (Uuid, Uuid) = sqlx::query_as(
+            "SELECT integration_id, api_token_id FROM workspace_integrations WHERE id = $1",
+        )
+        .bind(ws_integration_id)
+        .fetch_one(pool)
+        .await
+        .expect("read back integration ids");
+        for (sql, id) in [
+            (
+                "DELETE FROM github_comment_syncs WHERE comment_id = $1",
+                comment_id,
+            ),
+            ("DELETE FROM issue_comments WHERE id = $1", comment_id),
+            ("DELETE FROM descriptions WHERE id = $1", description_id),
+            (
+                "DELETE FROM github_issue_syncs WHERE issue_id = $1",
+                issue_id,
+            ),
+            ("DELETE FROM issue_sequences WHERE issue_id = $1", issue_id),
+            ("DELETE FROM issues WHERE id = $1", issue_id),
+            (
+                "DELETE FROM github_repository_syncs WHERE id = $1",
+                scan.sync_id,
+            ),
+            ("DELETE FROM github_repositories WHERE id = $1", repo_id),
+            (
+                "DELETE FROM workspace_integrations WHERE id = $1",
+                ws_integration_id,
+            ),
+            ("DELETE FROM api_tokens WHERE id = $1", token_id),
+            ("DELETE FROM integrations WHERE id = $1", integration_id),
+            ("DELETE FROM states WHERE project_id = $1", scan.project_id),
+            ("DELETE FROM projects WHERE id = $1", scan.project_id),
+            ("DELETE FROM workspaces WHERE id = $1", scan.workspace_id),
+            ("DELETE FROM users WHERE id = $1", scan.actor_id),
+        ] {
+            sqlx::query(sql)
+                .bind(id)
+                .execute(pool)
+                .await
+                .expect("teardown delete");
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_comment_description_audit_columns_land_null() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let scan = seed_scan(&pool).await;
+        let (issue_id, legacy_sync_id) =
+            upsert_issue(&pool, &scan, &gh_issue("Remote title"), &Utc::now(), None)
+                .await
+                .expect("seed scan inserts the mirror issue");
+        upsert_comment(
+            &pool,
+            &scan,
+            &gh_comment("First body"),
+            &issue_id,
+            &legacy_sync_id,
+            &Utc::now(),
+        )
+        .await
+        .expect("first scan inserts the mirror comment");
+        let ids: (Uuid, Option<Uuid>) =
+            sqlx::query_as("SELECT id, description_id FROM issue_comments WHERE issue_id = $1")
+                .bind(issue_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read back the mirror comment ids");
+        let (comment_id, description_id) = ids;
+        let description_id = description_id.expect("mirror comment has a description row");
+        let desc_stamps: (Option<Uuid>, Option<Uuid>) =
+            sqlx::query_as("SELECT created_by_id, updated_by_id FROM descriptions WHERE id = $1")
+                .bind(description_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read back the description stamps");
+        assert_eq!(desc_stamps, (None, None), "description insert lands NULL");
+        let comment_stamps: (Option<Uuid>, Option<Uuid>) =
+            sqlx::query_as("SELECT created_by_id, updated_by_id FROM issue_comments WHERE id = $1")
+                .bind(comment_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read back the mirror comment stamps");
+        assert_eq!(
+            comment_stamps,
+            (Some(scan.actor_id), Some(scan.actor_id)),
+            "mirror comment keeps the actor restamp"
+        );
+        upsert_comment(
+            &pool,
+            &scan,
+            &gh_comment("Edited body"),
+            &issue_id,
+            &legacy_sync_id,
+            &Utc::now(),
+        )
+        .await
+        .expect("re-sync updates the mirror comment");
+        let redesc_stamps: (Option<Uuid>, Option<Uuid>) =
+            sqlx::query_as("SELECT created_by_id, updated_by_id FROM descriptions WHERE id = $1")
+                .bind(description_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read back the description stamps after re-sync");
+        assert_eq!(
+            redesc_stamps,
+            (None, None),
+            "description update lands NULL updated_by"
+        );
+        cleanup(&pool, &scan, issue_id, comment_id, description_id).await;
+    }
+
+    /// Seed the project's default state (`default = TRUE`): the value
+    /// `Issue.save` resolves on create/adopt.
+    async fn seed_default_state(
+        pool: &sqlx::PgPool,
+        scan: &RepoScan,
+        name: &str,
+        group: &str,
+    ) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO states (id, created_at, updated_at, name, description, color, slug, \
+             project_id, workspace_id, sequence, \"group\", \"default\", is_triage) \
+             VALUES ($1, now(), now(), $2, '', '#000000', $3, $4, $5, 1000.0, $6, true, false)",
+        )
+        .bind(id)
+        .bind(name)
+        .bind(format!("rs1576-{}", Uuid::new_v4().simple()))
+        .bind(scan.project_id)
+        .bind(scan.workspace_id)
+        .bind(group)
+        .execute(pool)
+        .await
+        .expect("seed default state");
+        id
+    }
+
+    /// The create arm fires `None` → default and never runs the
+    /// completion leg (`github_signals.py` skips `created`).
+    #[tokio::test]
+    async fn sync_create_fires_transition_without_completion() {
+        use crate::issue_transition::test_support::RecordingHook;
+
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let scan = seed_scan(&pool).await;
+        let default_id = seed_default_state(&pool, &scan, "Backlog", "backlog").await;
+        let hook = Arc::new(RecordingHook::new());
+        let erased: Arc<dyn IssueTransitionHook> = hook.clone();
+        let (issue_id, _) = upsert_issue(
+            &pool,
+            &scan,
+            &gh_issue("Remote title"),
+            &Utc::now(),
+            Some(erased),
+        )
+        .await
+        .expect("create arm inserts the mirror issue");
+        assert_eq!(
+            *hook.fires.lock().expect("lock"),
+            vec![(scan.actor_id, issue_id, None, Some(default_id), true, None,)],
+            "one fire: previous None vs the adopted default, immediate, system actor"
+        );
+        assert!(
+            hook.comments.lock().expect("lock").is_empty(),
+            "created, not transitioned: no completion dispatch"
+        );
+        cleanup(&pool, &scan, issue_id, Uuid::nil(), Uuid::nil()).await;
+    }
+
+    /// The update arm on a stateless row evaluates both legs against the
+    /// adopted default but persists nothing: `update_or_create` saves
+    /// with `update_fields` that exclude `state` (Django 4.2
+    /// `query.py:957-972`), so the row keeps NULL.
+    #[tokio::test]
+    async fn sync_adopt_fires_transition_and_completion_without_persisting() {
+        use crate::issue_transition::test_support::RecordingHook;
+
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let scan = seed_scan(&pool).await;
+        let default_id = seed_default_state(&pool, &scan, "Done", "completed").await;
+        let (issue_id, _) =
+            upsert_issue(&pool, &scan, &gh_issue("Remote title"), &Utc::now(), None)
+                .await
+                .expect("create arm inserts the mirror issue");
+        sqlx::query("UPDATE issues SET state_id = NULL WHERE id = $1")
+            .bind(issue_id)
+            .execute(&pool)
+            .await
+            .expect("make the mirror stateless");
+        let hook = Arc::new(RecordingHook::new());
+        let erased: Arc<dyn IssueTransitionHook> = hook.clone();
+        let (issue_id2, _) = upsert_issue(
+            &pool,
+            &scan,
+            &gh_issue("Remote title edited"),
+            &Utc::now(),
+            Some(erased),
+        )
+        .await
+        .expect("update arm revisits the mirror issue");
+        assert_eq!(issue_id2, issue_id, "re-sync reuses the mirror issue");
+        assert_eq!(
+            *hook.fires.lock().expect("lock"),
+            vec![(scan.actor_id, issue_id, None, Some(default_id), true, None,)],
+            "one fire: previous None vs the adopted default"
+        );
+        assert_eq!(
+            *hook.comments.lock().expect("lock"),
+            vec![(issue_id, None, Some(default_id))],
+            "adopt into completed dispatches the completion leg"
+        );
+        let stored: Option<Uuid> = sqlx::query_scalar("SELECT state_id FROM issues WHERE id = $1")
+            .bind(issue_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read back the mirror state");
+        assert_eq!(stored, None, "in-memory adopt only: the row keeps NULL");
+        cleanup(&pool, &scan, issue_id, Uuid::nil(), Uuid::nil()).await;
+    }
+
+    /// A stateful re-sync changes no state, so neither leg runs.
+    #[tokio::test]
+    async fn sync_update_without_state_change_fires_nothing() {
+        use crate::issue_transition::test_support::RecordingHook;
+
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let scan = seed_scan(&pool).await;
+        seed_default_state(&pool, &scan, "Backlog", "backlog").await;
+        let hook = Arc::new(RecordingHook::new());
+        let erased: Arc<dyn IssueTransitionHook> = hook.clone();
+        let (issue_id, _) = upsert_issue(
+            &pool,
+            &scan,
+            &gh_issue("Remote title"),
+            &Utc::now(),
+            Some(erased.clone()),
+        )
+        .await
+        .expect("create arm inserts the mirror issue");
+        hook.fires.lock().expect("lock").clear();
+        hook.comments.lock().expect("lock").clear();
+        let (issue_id2, _) = upsert_issue(
+            &pool,
+            &scan,
+            &gh_issue("Remote title edited"),
+            &Utc::now(),
+            Some(erased),
+        )
+        .await
+        .expect("update arm revisits the mirror issue");
+        assert_eq!(issue_id2, issue_id, "re-sync reuses the mirror issue");
+        assert!(
+            hook.fires.lock().expect("lock").is_empty(),
+            "same state: no fire"
+        );
+        assert!(
+            hook.comments.lock().expect("lock").is_empty(),
+            "same state: no completion dispatch"
+        );
+        cleanup(&pool, &scan, issue_id, Uuid::nil(), Uuid::nil()).await;
+    }
+
+    /// Re-sync refreshes only the changed description subset
+    /// (PIDASHCONV-1581 item 2): `IssueComment.save` syncs
+    /// `{desc_field: ...}` for the tracked fields in
+    /// `_changes_on_save` only (`issue.py:637-646`), with
+    /// `updated_by` NULL (the worker-crum read).
+    #[tokio::test]
+    async fn resync_description_syncs_changed_subset_only() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let scan = seed_scan(&pool).await;
+        let (issue_id, legacy_sync_id) =
+            upsert_issue(&pool, &scan, &gh_issue("Remote title"), &Utc::now(), None)
+                .await
+                .expect("seed scan inserts the mirror issue");
+        upsert_comment(
+            &pool,
+            &scan,
+            &gh_comment("First body"),
+            &issue_id,
+            &legacy_sync_id,
+            &Utc::now(),
+        )
+        .await
+        .expect("first scan inserts the mirror comment");
+        let ids: (Uuid, Option<Uuid>) =
+            sqlx::query_as("SELECT id, description_id FROM issue_comments WHERE issue_id = $1")
+                .bind(issue_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read back the mirror comment ids");
+        let (comment_id, description_id) = ids;
+        let description_id = description_id.expect("mirror comment has a description row");
+        // Independently diverge the description json: the subset
+        // refresh must preserve it when only the render text changes.
+        sqlx::query("UPDATE descriptions SET description_json = $2 WHERE id = $1")
+            .bind(description_id)
+            .bind(json!({"foreign": true}))
+            .execute(&pool)
+            .await
+            .expect("diverge description");
+        upsert_comment(
+            &pool,
+            &scan,
+            &gh_comment("Edited body"),
+            &issue_id,
+            &legacy_sync_id,
+            &Utc::now(),
+        )
+        .await
+        .expect("re-sync updates the mirror comment");
+        let comment: (String, String) = sqlx::query_as(
+            "SELECT comment_html, comment_stripped FROM issue_comments WHERE id = $1",
+        )
+        .bind(comment_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read back the mirror comment");
+        let desc: (String, Option<String>, Value, Option<Uuid>) = sqlx::query_as(
+            "SELECT description_html, description_stripped, description_json, updated_by_id \
+             FROM descriptions WHERE id = $1",
+        )
+        .bind(description_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read back the description");
+        assert_eq!(desc.0, comment.0, "changed html syncs");
+        assert_eq!(
+            desc.1.as_deref(),
+            Some(comment.1.as_str()),
+            "changed stripped syncs"
+        );
+        assert_eq!(
+            desc.2,
+            json!({"foreign": true}),
+            "unchanged json keeps the description row's own value"
+        );
+        assert_eq!(desc.3, None, "touch binds updated_by NULL");
+        cleanup(&pool, &scan, issue_id, comment_id, description_id).await;
     }
 }

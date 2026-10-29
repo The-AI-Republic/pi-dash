@@ -88,15 +88,16 @@
 //!
 //! # Orchestration fire (draft-to-issue)
 //!
-//! `Issue.save()` fires the orchestration `post_save` receiver (`capture_prior_state` +
-//! `fire_state_transition`). This module calls the merged
-//! `pidash_services::orchestration::entries` drivers through the one live seam
-//! (`crate::issue_transition`): the ticker reconcile, preflight and run creation all run
-//! live against the request pool, exactly like Django's receiver. The
-//! `github_signals` completion-comment leg fires only on updates
-//! (`created → return`), never on this path.
+//! The draft-to-issue save rides `domain::issues::create` (ORM-03):
+//! the `Issue.save()` hooks resolve the pod/state defaults,
+//! `completed_at`, stripped text, sequence and sort order, and the
+//! post-commit chain runs the orchestration fire, the m2m legs and the
+//! created activity in handler order. The `github_signals`
+//! completion-comment leg fires only on updates (`created → return`),
+//! never on this path.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use axum::extract::State;
 use axum::http::{header, HeaderMap, StatusCode};
@@ -105,7 +106,6 @@ use axum::Router;
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use chrono_tz::Tz;
 use serde_json::{Map, Value};
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use pidash_auth::permissions::allow::AllowFacts;
@@ -116,10 +116,10 @@ use pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK;
 use pidash_jobs::TaskMessage;
 use pidash_services::app_issues::serializers_create::{
     assignee_member_filter_sql, issue_create_to_representation, issue_create_validate,
-    label_filter_null_project_sql, label_filter_sql, m2m_batches, m2m_insert_sql,
-    CreateValidateError, ExecutorPolicy, IssueCreateRow, LockedIssueAttrs, PodRef, ResolvedProject,
-    ValidateAttrs, ValidateContext, ValidateProbes, ValidatedAttrs, DEFAULT_ASSIGNEE_EXISTS_SQL,
-    ESTIMATE_EXISTS_SQL, PARENT_EXISTS_SQL, POD_FETCH_SQL, PROJECT_FETCH_SQL, STATE_EXISTS_SQL,
+    label_filter_null_project_sql, label_filter_sql, m2m_insert_sql, CreateValidateError,
+    ExecutorPolicy, IssueCreateRow, LockedIssueAttrs, PodRef, ResolvedProject, ValidateAttrs,
+    ValidateContext, ValidateProbes, ValidatedAttrs, ESTIMATE_EXISTS_SQL, PARENT_EXISTS_SQL,
+    POD_FETCH_SQL, PROJECT_FETCH_SQL, STATE_EXISTS_SQL,
 };
 use pidash_services::app_issues::shape::envelope;
 use pidash_services::app_workspace::queries_extras as qx;
@@ -127,26 +127,36 @@ use pidash_services::app_workspace::ser_account_token as fav;
 use pidash_services::app_workspace::tasks as wtask;
 use pidash_services::auth_session::shapes::{base_host, HostSettings};
 use pidash_services::dispatch::admission::{
-    LlmProfile, ENROLLED_MANAGED_RUNNERS_EXISTS_SQL, HEARTBEAT_GRACE_SECS,
-    ONLINE_MANAGED_RUNNER_SQL,
+    LlmProfile, ENROLLED_MANAGED_RUNNERS_EXISTS_SQL, ENROLLED_PAUSED_MANAGED_RUNNERS_EXISTS_SQL,
+    HEARTBEAT_GRACE_SECS, ONLINE_MANAGED_RUNNER_SQL,
 };
 use pidash_services::dispatch::policy::{
     cloud_agent_is_configured, managed_runner_is_enabled, UserFlags,
 };
-use pidash_services::orchestration::entries::{FireOutcome, FireRequest};
+use pidash_services::domain::activity::TaskEnqueueHook;
+use pidash_services::domain::issues as domain_issues;
+use pidash_services::domain::issues::IssueFieldSet as IssueSaveRow;
+use pidash_services::domain::transition::IssueTransitionHook;
+use pidash_services::domain::{self, WriteActor, WriteCtx, WriteScope};
 use pidash_types::dispatch::{AgentExecutorKind, ManagedRunnerReason};
 use pidash_types::v1_assets::sticky as sticky_kernel;
 use pidash_types::WorkspaceId;
 
 use super::gates;
 use crate::app_issues::Denial;
+use crate::domain_hooks::AppTaskEnqueueHook;
+use crate::issue_transition::AppTransitionHook;
 use crate::middleware::gzip::{accepts_gzip, compress_if_shorter, MIN_COMPRESS_BYTES};
 use crate::serializer::render_datetime_in;
 use crate::state::AppState;
 use crate::v1_cycles_modules::body as shared_body;
-use crate::v1_cycles_modules::json_cpython::{
+use crate::v1_cycles_modules::json::{
     parse_request_data_spans, to_serde_publish, JsonFail, JSON_PARSE_PREFIX,
 };
+use pidash_compat::datetime::{
+    parse_digits, parse_iso_date_part, parse_iso_datetime, split_tz_suffix,
+};
+use pidash_compat::response::{json_response, no_content as empty_response, SERVER_ERROR_BODY};
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -242,8 +252,6 @@ const PAGE_NOT_FOUND_BODY: &str = r#"{"error": "Page not found."}"#;
 const INVALID_PAYLOAD_BODY: &str = r#"{"error":"The payload is not valid"}"#;
 /// `handle_exception`'s `ValidationError` branch (`app/views/base.py:126-130`).
 const INVALID_DETAIL_BODY: &str = r#"{"error":"Please provide valid detail"}"#;
-/// `handle_exception`'s generic 500 branch (`app/views/base.py:145-149`).
-const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// `handle_exception`'s `KeyError` branch (`app/views/base.py:137-141`).
 const KEY_ERROR_BODY: &str = r#"{"error":"The required key does not exist."}"#;
 /// `DraftIssueCreateSerializer.validate` project-membership messages
@@ -264,22 +272,6 @@ const FAVORITE_EXISTS_BODY: &str = r#"{"error":"Favorite already exists"}"#;
 // ---------------------------------------------------------------------------
 
 type HandlerResult = Result<Response, Denial>;
-
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("view response")
-}
-
-/// 204 with NO `Content-Type`: Django strips it on empty responses (verified live).
-fn empty_response() -> Response {
-    Response::builder()
-        .status(StatusCode::NO_CONTENT)
-        .body(axum::body::Body::empty())
-        .expect("204 response")
-}
 
 fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
@@ -1271,15 +1263,6 @@ fn py_repr_string(text: &str) -> String {
     out
 }
 
-/// Strict ASCII-digits `u32` parse: Rust's `parse` accepts a leading `+`,
-/// which `fromisoformat` (and the Django `date_re`s) reject.
-fn parse_digits(text: &str) -> Option<u32> {
-    if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    text.parse().ok()
-}
-
 /// `DateField.to_internal_value` (`fields.py` + Django `parse_date`): the
 /// `fromisoformat` surface first, then the `date_re` fallback
 /// (`YYYY-M-D`, 1-2-digit fields).
@@ -1300,76 +1283,6 @@ fn parse_drf_date(text: &str) -> Option<NaiveDate> {
         parse_digits(month)?,
         parse_digits(day)?,
     )
-}
-
-/// ISO weekday 1-7 → `chrono::Weekday` (day 0 or 8+ reject).
-fn iso_weekday(day: u32) -> Option<chrono::Weekday> {
-    chrono::Weekday::try_from(u8::try_from(day).ok()?.checked_sub(1)?).ok()
-}
-
-/// The `fromisoformat` date half: `YYYY-MM-DD`, `YYYYMMDD`,
-/// `YYYY-Www[-D]`, `YYYYWww[D]` (week without day → Monday). Ordinals reject.
-fn parse_iso_date_part(text: &str) -> Option<NaiveDate> {
-    if text.len() >= 4 && text.as_bytes().get(4) == Some(&b'W') {
-        // `YYYYWww[D]` basic week.
-        if !(text.len() == 7 || text.len() == 8) || !text.is_ascii() {
-            return None;
-        }
-        let year = parse_digits(&text[0..4])? as i32;
-        let week = parse_digits(&text[5..7])?;
-        let weekday = if text.len() == 8 {
-            parse_digits(&text[7..8])?
-        } else {
-            1
-        };
-        return NaiveDate::from_isoywd_opt(year, week, iso_weekday(weekday)?);
-    }
-    if text.contains('W') {
-        // `YYYY-Www[-D]` extended week (a short year like `24W05` rejects).
-        let mut parts = text.split('W');
-        let year_text = parts.next()?;
-        let year_digits = year_text.strip_suffix('-')?;
-        if year_digits.len() != 4 {
-            return None;
-        }
-        let year = parse_digits(year_digits)? as i32;
-        let rest = parts.next()?;
-        if parts.next().is_some() || !rest.is_ascii() {
-            return None;
-        }
-        let (week_text, weekday) = match rest.split_once('-') {
-            Some((week, day)) => (week, parse_digits(day)?),
-            None if rest.len() == 2 => (rest, 1),
-            None if rest.len() == 3 => (&rest[0..2], parse_digits(&rest[2..3])?),
-            None => return None,
-        };
-        if week_text.len() != 2 {
-            return None;
-        }
-        let week = parse_digits(week_text)?;
-        return NaiveDate::from_isoywd_opt(year, week, iso_weekday(weekday)?);
-    }
-    if text.len() == 8 && text.bytes().all(|b| b.is_ascii_digit()) {
-        // `YYYYMMDD` basic.
-        return NaiveDate::from_ymd_opt(
-            text[0..4].parse().ok()?,
-            text[4..6].parse().ok()?,
-            text[6..8].parse().ok()?,
-        );
-    }
-    if text.len() == 10 {
-        // `YYYY-MM-DD` extended (strictly zero-padded here; 1-2-digit shapes
-        // fall through to the `date_re`/`datetime_re` fallbacks).
-        let bytes = text.as_bytes();
-        if bytes[4] == b'-' && bytes[7] == b'-' {
-            return NaiveDate::from_ymd_opt(
-                parse_digits(&text[0..4])? as i32,
-                parse_digits(&text[5..7])?,
-                parse_digits(&text[8..10])?,
-            );
-        }
-    }
-    None
 }
 
 /// Django `parse_datetime` + DRF `enforce_timezone` in one: the
@@ -1423,206 +1336,6 @@ fn parse_drf_datetime(text: &str, timezone: &Tz) -> Result<DateTime<Utc>, Vec<St
                 "Invalid datetime for the timezone \"{timezone}\"."
             )]),
         },
-    }
-}
-
-/// Split a trailing tz designator: `Z` (uppercase only), `±HH:MM[:SS[.f]]`,
-/// `±HHMM`, `±HH`, with an optional single space before it. Returns the head
-/// and the offset in seconds (fractional offset seconds truncate).
-fn split_tz_suffix(text: &str) -> (&str, Option<i64>) {
-    if let Some(head) = text.strip_suffix('Z') {
-        if !head.is_empty() {
-            return (head, Some(0));
-        }
-    }
-    // The last `+`/`-` that starts the offset (not the date's dashes): scan
-    // from the end for the last sign with only offset chars after it,
-    // stopping at any time/date separator.
-    let bytes = text.as_bytes();
-    let mut sign_at = None;
-    for (index, byte) in bytes.iter().enumerate().rev() {
-        if *byte == b'+' || *byte == b'-' {
-            let tail = &text[index + 1..];
-            if !tail.is_empty()
-                && tail
-                    .bytes()
-                    .all(|b| b.is_ascii_digit() || b == b':' || b == b'.')
-            {
-                sign_at = Some(index);
-                break;
-            }
-        }
-        if *byte == b'T' || *byte == b't' || *byte == b' ' || *byte == b'W' {
-            break;
-        }
-    }
-    let Some(at) = sign_at else {
-        return (text, None);
-    };
-    let head = text[..at].trim_end();
-    let tail = text[at + 1..].trim_start();
-    if tail.is_empty() {
-        return (text, None);
-    }
-    let sign: i64 = if bytes[at] == b'-' { -1 } else { 1 };
-    let digits: String = tail.chars().filter(|ch| ch.is_ascii_digit()).collect();
-    // Colon offsets are strict: exactly-two-digit hours/minutes, seconds of
-    // exactly two digits plus an optional `.`/`,` fraction (truncated).
-    let offset = if tail.contains(':') {
-        let mut parts = tail.split(':');
-        let (Some(hours_text), Some(minutes_text)) = (parts.next(), parts.next()) else {
-            return (text, None);
-        };
-        let seconds_text = parts.next();
-        if parts.next().is_some() || hours_text.len() != 2 || minutes_text.len() != 2 {
-            return (text, None);
-        }
-        let (Some(hours), Some(minutes)) = (parse_digits(hours_text), parse_digits(minutes_text))
-        else {
-            return (text, None);
-        };
-        let seconds: i64 = match seconds_text {
-            None => 0,
-            Some(sec_text) => {
-                let (int, frac) = match sec_text.split_once(['.', ',']) {
-                    None => (sec_text, None),
-                    Some((int, frac)) => (int, Some(frac)),
-                };
-                if int.len() != 2 {
-                    return (text, None);
-                }
-                let Some(seconds) = parse_digits(int) else {
-                    return (text, None);
-                };
-                if frac.is_some_and(|f| f.is_empty() || !f.bytes().all(|b| b.is_ascii_digit())) {
-                    return (text, None);
-                }
-                seconds as i64
-            }
-        };
-        hours as i64 * 3600 + minutes as i64 * 60 + seconds
-    } else if digits.len() == tail.len() && (tail.len() == 2 || tail.len() == 4) {
-        let hours: i64 = tail[0..2].parse().unwrap_or(-1);
-        let minutes: i64 = if tail.len() == 4 {
-            tail[2..4].parse().unwrap_or(-1)
-        } else {
-            0
-        };
-        if hours < 0 || minutes < 0 {
-            return (text, None);
-        }
-        hours * 3600 + minutes * 60
-    } else {
-        return (text, None);
-    };
-    // Offsets beyond ±23:59 raise in `fromisoformat` (surfacing as `invalid`
-    // through DRF's suppress).
-    if offset.abs() >= 24 * 3600 {
-        return (head, Some(i64::MAX));
-    }
-    (head, Some(sign * offset))
-}
-
-/// The `fromisoformat` surface: extended/basic/week dates, any single-char
-/// separator, `HH[:MM[:SS[.ffffff]]]` / basic `HHMM[SS]` times, comma-or-dot
-/// fractions (truncated past 6 digits), optional tz.
-fn parse_iso_datetime(text: &str) -> Option<(chrono::NaiveDateTime, Option<i64>)> {
-    use chrono::NaiveDateTime;
-    let (head, offset) = split_tz_suffix(text);
-    if offset == Some(i64::MAX) {
-        return None;
-    }
-    // Date-only (midnight); a trailing bare separator (`'...T'`) rejects.
-    if let Some(date) = parse_iso_date_part(head) {
-        return Some((date.and_hms_opt(0, 0, 0)?, offset));
-    }
-    let (date_text, _sep, time_text) = split_date_time(head)?;
-    let date = parse_iso_date_part(date_text)?;
-    let naive_time = parse_iso_time(time_text)?;
-    Some((NaiveDateTime::new(date, naive_time), offset))
-}
-
-/// Split `head` into date/separator/time: candidate date lengths
-/// `YYYY-MM-DD` (10), `YYYYMMDD`/`YYYYWwwD` (8), `YYYY-Www` (7), `YYYYWww` (6);
-/// the separator is any single (possibly multibyte) non-digit char.
-fn split_date_time(head: &str) -> Option<(&str, char, &str)> {
-    for len in [10usize, 8, 7, 6] {
-        if head.len() <= len {
-            continue;
-        }
-        let Some((date_text, rest)) = head.split_at_checked(len) else {
-            continue;
-        };
-        if parse_iso_date_part(date_text).is_none() {
-            continue;
-        }
-        let mut chars = rest.chars();
-        let sep = chars.next()?;
-        if sep.is_ascii_digit() {
-            continue;
-        }
-        let time_text = &rest[sep.len_utf8()..];
-        if time_text.is_empty() {
-            continue;
-        }
-        return Some((date_text, sep, time_text));
-    }
-    None
-}
-
-/// `fromisoformat` time half: `HH[:MM[:SS[.ffffff]]]` (colons),
-/// `HHMM[SS]` (basic), hour-only `HH`; comma-or-dot fractions truncate past
-/// 6 digits. Colon fields must be zero-padded 2-digit (1-digit shapes fall
-/// through to the `datetime_re` fallback).
-fn parse_iso_time(text: &str) -> Option<chrono::NaiveTime> {
-    use chrono::NaiveTime;
-    let (clock, micros) = match text.find(['.', ',']) {
-        Some(dot) => {
-            let (clock, frac) = text.split_at(dot);
-            let digits = &frac[1..];
-            if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
-                return None;
-            }
-            let padded = format!("{digits:0<6}");
-            let micros: u32 = padded[..6].parse().ok()?;
-            (clock, micros)
-        }
-        None => (text, 0),
-    };
-    if clock.contains(':') {
-        let mut parts = clock.split(':');
-        let hour: u32 = parse_digits(parts.next()?)?;
-        let minute: u32 = parts.next().map(parse_digits).unwrap_or(Some(0))?;
-        let second: u32 = parts.next().map(parse_digits).unwrap_or(Some(0))?;
-        if parts.next().is_some() {
-            return None;
-        }
-        for part in clock.split(':') {
-            if part.len() != 2 {
-                return None;
-            }
-        }
-        NaiveTime::from_hms_micro_opt(hour, minute, second, micros)
-    } else {
-        if !clock.is_ascii() {
-            return None;
-        }
-        match clock.len() {
-            2 => NaiveTime::from_hms_micro_opt(parse_digits(clock)?, 0, 0, micros),
-            4 => NaiveTime::from_hms_micro_opt(
-                parse_digits(&clock[0..2])?,
-                parse_digits(&clock[2..4])?,
-                0,
-                micros,
-            ),
-            6 => NaiveTime::from_hms_micro_opt(
-                parse_digits(&clock[0..2])?,
-                parse_digits(&clock[2..4])?,
-                parse_digits(&clock[4..6])?,
-                micros,
-            ),
-            _ => None,
-        }
     }
 }
 
@@ -3221,6 +2934,7 @@ enum FilterPredicate {
 fn compile_draft_filters(
     pairs: &[(String, String)],
     now: &DateTime<Utc>,
+    timezone: &Tz,
 ) -> Result<String, StatusCode> {
     // Ordered map: key → predicate (later assignments overwrite the value,
     // keeping the first position).
@@ -3387,13 +3101,15 @@ fn compile_draft_filters(
                     );
                 }
             }
-            "created_at" => compile_date_param(&mut insert, "created_at__date", raw, now),
+            "created_at" => compile_date_param(&mut insert, "created_at__date", raw, now, timezone),
             // BUG: the `updated_at` param filters `created_at`
             // (`issue_filters.py:236`), overwriting that param's keys.
-            "updated_at" => compile_date_param(&mut insert, "created_at__date", raw, now),
-            "start_date" => compile_date_param(&mut insert, "start_date", raw, now),
-            "target_date" => compile_date_param(&mut insert, "target_date", raw, now),
-            "completed_at" => compile_date_param(&mut insert, "completed_at__date", raw, now),
+            "updated_at" => compile_date_param(&mut insert, "created_at__date", raw, now, timezone),
+            "start_date" => compile_date_param(&mut insert, "start_date", raw, now, timezone),
+            "target_date" => compile_date_param(&mut insert, "target_date", raw, now, timezone),
+            "completed_at" => {
+                compile_date_param(&mut insert, "completed_at__date", raw, now, timezone)
+            }
             "type" => {
                 let groups: &[&str] = match raw {
                     "backlog" => &["backlog"],
@@ -3553,21 +3269,35 @@ fn escape_like(text: &str) -> String {
 /// `;`-parts route to relative / `__gte` / `__lte` / `__contains`; later
 /// queries overwrite earlier keys. `__gte`/`__lte` values convert as DATES
 /// (fail → 400); `__contains` is a LIKE (never fails).
+///
+/// The `__date` terms truncate in the actor zone: Django's `__date` lookup
+/// is `TruncDate`, whose `get_tzname()` returns the `TimezoneMixin`-activated
+/// user zone, giving `(col AT TIME ZONE '<user tz>')::date`. The plain
+/// `start_date` / `target_date` terms are date columns (no truncation), and
+/// the relative-date bound (`today`) stays UTC (`timezone.now().date()`).
 fn compile_date_param(
     insert: &mut impl FnMut(String, FilterPredicate),
     term: &str,
     raw: &str,
     now: &DateTime<Utc>,
+    timezone: &Tz,
 ) {
     let queries: Vec<&str> = raw.split(',').collect();
     if queries.is_empty() || queries.contains(&"") {
         return;
     }
+    // The zone comes from a parsed `Tz`, so it is a valid IANA name; the
+    // quotes are doubled anyway because this SQL is interpolated, not bound.
+    let zone = timezone.name().replace('\'', "''");
     let column = match term {
-        "created_at__date" => "CAST(draft_issues.created_at AS DATE)",
-        "completed_at__date" => "CAST(draft_issues.completed_at AS DATE)",
-        "start_date" => "draft_issues.start_date",
-        "target_date" => "draft_issues.target_date",
+        "created_at__date" => {
+            format!("(draft_issues.created_at AT TIME ZONE '{zone}')::date")
+        }
+        "completed_at__date" => {
+            format!("(draft_issues.completed_at AT TIME ZONE '{zone}')::date")
+        }
+        "start_date" => "draft_issues.start_date".to_owned(),
+        "target_date" => "draft_issues.target_date".to_owned(),
         _ => unreachable!("date term {term}"),
     };
     for query in queries {
@@ -3807,8 +3537,12 @@ async fn draft_list(
         return Ok(gzip_body(&headers, status, text));
     }
     let pairs = query_pairs(raw_query.as_deref().unwrap_or(""));
+    // The actor zone feeds the `__date` filter truncation (Django's
+    // `TimezoneMixin.initial` activates it before the view runs), so it
+    // resolves before the filters compile; the same value renders rows below.
+    let timezone = actor_timezone(&pool, &user_id).await?;
     // `.filter(**filters)` runs BEFORE `paginate` (`:100-105`).
-    let filters = match compile_draft_filters(&pairs, &utc_now_micros()) {
+    let filters = match compile_draft_filters(&pairs, &utc_now_micros(), &timezone) {
         Ok(sql) => sql,
         Err(StatusCode::INTERNAL_SERVER_ERROR) => {
             return Ok(gzip_body(
@@ -3835,7 +3569,6 @@ async fn draft_list(
     let limit = per_page.min(1000);
     let window = offset_window(limit, cursor.offset, cursor.value, cursor.is_prev, None)
         .map_err(page_denial)?;
-    let timezone = actor_timezone(&pool, &user_id).await?;
     // The window and count share one filter text: scope + own rows + legacy.
     let where_sql = format!(
         "{} AND draft_issues.created_by_id = '{}'{}",
@@ -6218,6 +5951,23 @@ async fn online_runner(
     Ok(row.is_some())
 }
 
+/// The paused tiebreaker (`policy.py:88-91`, `09738d222`).
+async fn paused_runner(
+    pool: &sqlx::PgPool,
+    user_id: &Uuid,
+    project_id: &Uuid,
+    workspace_id: &Uuid,
+) -> Result<bool, Denial> {
+    let row: Option<(i32,)> = sqlx::query_as(ENROLLED_PAUSED_MANAGED_RUNNERS_EXISTS_SQL)
+        .bind(user_id)
+        .bind(project_id)
+        .bind(workspace_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(row.is_some())
+}
+
 /// `request.user` flags for the executor arm (in-memory on Django; one
 /// read here, issued only past a managed pin + resolved project).
 async fn viewer_user_flags(pool: &sqlx::PgPool, user_id: &Uuid) -> Result<UserFlags, Denial> {
@@ -6344,6 +6094,7 @@ async fn run_issue_create_validate(
     };
     let mut enrolled_exists = false;
     let mut online_exists = false;
+    let mut paused_exists = false;
     let mut viewer: Option<UserFlags> = None;
     if !pod_pure_fail {
         if let Some(Some(executor)) = agent_executor {
@@ -6392,6 +6143,18 @@ async fn run_issue_create_validate(
                                     )
                                     .await
                                     .map_err(|_| db_error())?;
+                                    // `09738d222`: the paused tiebreaker
+                                    // runs only when nothing is online.
+                                    if !online_exists {
+                                        paused_exists = paused_runner(
+                                            pool,
+                                            actor,
+                                            &resolved.project_id,
+                                            &resolved.workspace_id,
+                                        )
+                                        .await
+                                        .map_err(|_| db_error())?;
+                                    }
                                 }
                             }
                         }
@@ -6478,6 +6241,7 @@ async fn run_issue_create_validate(
         llm_profile: &|| llm_profile.clone(),
         enrolled_exists: &|| enrolled_exists,
         online_exists: &|| online_exists,
+        paused_exists: &|| paused_exists,
     };
     let ctx = ValidateContext {
         project_id: Some(*project_id),
@@ -6489,44 +6253,21 @@ async fn run_issue_create_validate(
     }
 }
 
-/// Every `issues` column in `COLUMNS` order, as owned values — the
-/// INSERT binds from here, and the 201 body renders off it.
-struct IssueSaveRow {
-    id: Uuid,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-    created_by_id: Option<Uuid>,
-    updated_by_id: Option<Uuid>,
-    deleted_at: Option<DateTime<Utc>>,
-    project_id: Uuid,
-    workspace_id: Uuid,
-    parent_id: Option<Uuid>,
-    state_id: Option<Uuid>,
-    point: Option<i32>,
-    estimate_point_id: Option<Uuid>,
-    name: String,
-    description_json: Value,
-    description_html: String,
-    description_stripped: Option<String>,
-    description_binary: Option<Vec<u8>>,
-    priority: String,
-    complexity_score: i32,
-    start_date: Option<NaiveDate>,
-    target_date: Option<NaiveDate>,
-    sequence_id: i32,
-    sort_order: f64,
-    completed_at: Option<DateTime<Utc>>,
-    archived_at: Option<NaiveDate>,
-    is_draft: bool,
-    external_source: Option<String>,
-    external_id: Option<String>,
-    type_id: Option<Uuid>,
-    git_work_branch: String,
-    workpad: String,
-    created_via: Option<String>,
-    assigned_pod_id: Option<Uuid>,
-    agent_executor: Option<String>,
-    work_type: Option<String>,
+// The save row is the domain's `IssueFieldSet` (imported at the top):
+// every `issues` column as owned values. Assembly keeps building it
+// here (validation-adjacent); the INSERT moved to `domain::issues`
+// (ORM-03).
+/// Map a domain-write failure onto the save arms: a dangling-row miss
+/// 404s, an integrity violation is the invalid-payload 400, anything else
+/// 500s.
+fn domain_denial(error: domain::DomainError) -> Denial {
+    if error.is_not_found() {
+        Denial::NotFound
+    } else if error.is_integrity_violation() {
+        Denial::BadError("The payload is not valid".to_owned())
+    } else {
+        Denial::ServerError
+    }
 }
 
 /// The fresh-row assembly: the row plus the raw m2m inputs.
@@ -6594,219 +6335,6 @@ fn assemble_new_issue(
         opt_ids(values, "assignee_ids"),
         opt_ids(values, "label_ids"),
     ))
-}
-
-/// `convert_uuid_to_integer` (`utils/uuid.py:19-26`): sha256 of the
-/// hyphenated-lowercase id, first 8 bytes big-endian signed.
-fn advisory_lock_key(project_id: &Uuid) -> i64 {
-    let mut hasher = Sha256::new();
-    hasher.update(project_id.to_string().as_bytes());
-    let digest = hasher.finalize();
-    let mut bytes = [0u8; 8];
-    bytes.copy_from_slice(&digest[..8]);
-    i64::from_be_bytes(bytes)
-}
-
-/// `Pod.default_for_project_id` (`runner/models.py:174-176`):
-/// `Pod.objects` (live), project-default first (probed live:
-/// `ORDER BY is_default DESC, created_at ASC`).
-async fn default_pod_for_project(
-    pool: &sqlx::PgPool,
-    project_id: &Uuid,
-) -> Result<Option<Uuid>, Denial> {
-    let row: Option<(Uuid,)> = sqlx::query_as(
-        "SELECT id FROM pod WHERE project_id = $1 AND is_default AND deleted_at IS NULL ORDER BY is_default DESC, created_at ASC LIMIT 1",
-    )
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(row.map(|row| row.0))
-}
-
-/// `Issue.objects.create(...)`: the 35-column INSERT in `COLUMNS` order.
-/// An `IntegrityError` is the 400 payload branch; anything else 500s.
-async fn insert_issue_row(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    row: &IssueSaveRow,
-) -> Result<(), Denial> {
-    sqlx::query(
-        "INSERT INTO issues (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, parent_id, state_id, point, estimate_point_id, name, description_json, description_html, description_stripped, description_binary, priority, complexity_score, start_date, target_date, sequence_id, sort_order, completed_at, archived_at, is_draft, external_source, external_id, type_id, git_work_branch, workpad, created_via, assigned_pod_id, agent_executor, work_type) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35)",
-    )
-    .bind(row.id)
-    .bind(row.created_at)
-    .bind(row.updated_at)
-    .bind(row.created_by_id)
-    .bind(row.updated_by_id)
-    .bind(row.deleted_at)
-    .bind(row.project_id)
-    .bind(row.workspace_id)
-    .bind(row.parent_id)
-    .bind(row.state_id)
-    .bind(row.point)
-    .bind(row.estimate_point_id)
-    .bind(row.name.as_str())
-    .bind(row.description_json.clone())
-    .bind(row.description_html.as_str())
-    .bind(row.description_stripped.as_deref())
-    .bind(row.description_binary.as_deref())
-    .bind(row.priority.as_str())
-    .bind(row.complexity_score)
-    .bind(row.start_date)
-    .bind(row.target_date)
-    .bind(row.sequence_id)
-    .bind(row.sort_order)
-    .bind(row.completed_at)
-    .bind(row.archived_at)
-    .bind(row.is_draft)
-    .bind(row.external_source.as_deref())
-    .bind(row.external_id.as_deref())
-    .bind(row.type_id)
-    .bind(row.git_work_branch.as_str())
-    .bind(row.workpad.as_str())
-    .bind(row.created_via.as_deref())
-    .bind(row.assigned_pod_id)
-    .bind(row.agent_executor.as_deref())
-    .bind(row.work_type.as_deref())
-    .execute(&mut **tx)
-    .await
-    .map_err(|error| {
-        if is_integrity_violation(&error) {
-            Denial::BadError("The payload is not valid".to_owned())
-        } else {
-            Denial::ServerError
-        }
-    })?;
-    Ok(())
-}
-
-/// One m2m `bulk_create(batch_size=10)` leg in one transaction: a multi-row
-/// INSERT per 10-chunk in input order; an `IntegrityError` rolls the WHOLE
-/// leg back and swallows (`except: pass` wraps the atomic call — earlier
-/// batches do NOT persist), any other error 500s.
-#[allow(clippy::too_many_arguments)]
-async fn write_issue_m2m_batches(
-    pool: &sqlx::PgPool,
-    table: &str,
-    member_column: &str,
-    ids: &[Uuid],
-    issue_id: &Uuid,
-    project_id: &Uuid,
-    workspace_id: &Uuid,
-    created_by_id: Option<Uuid>,
-    updated_by_id: Option<Uuid>,
-) -> Result<(), Denial> {
-    let mut tx = pool.begin().await.map_err(|_| Denial::ServerError)?;
-    for batch in m2m_batches(ids) {
-        let sql = m2m_insert_sql(table, member_column, batch.len(), false);
-        let mut query = sqlx::query(&sql);
-        for member_id in batch {
-            // `auto_now_add` + `auto_now`: two `now()` calls per row, like
-            // the per-object instantiation Django bulk-saves.
-            let created = utc_now_micros();
-            let updated = utc_now_micros();
-            query = query
-                .bind(Uuid::new_v4())
-                .bind(created)
-                .bind(updated)
-                .bind(created_by_id)
-                .bind(updated_by_id)
-                .bind(project_id)
-                .bind(workspace_id)
-                .bind(issue_id)
-                .bind(member_id);
-        }
-        match query.execute(&mut *tx).await {
-            Ok(_) => {}
-            // Drop without commit: the leg rolls back, then swallows.
-            Err(error) if is_integrity_violation(&error) => return Ok(()),
-            Err(_) => return Err(Denial::ServerError),
-        }
-    }
-    tx.commit().await.map_err(|_| Denial::ServerError)?;
-    Ok(())
-}
-
-/// The create default-assignee fallback (`serializers/issue.py:419-444`):
-/// empty/missing assignees + a valid project-default member → one
-/// `IssueAssignee` row, `IntegrityError` swallowed.
-async fn write_default_assignee(
-    pool: &sqlx::PgPool,
-    default_assignee_id: &Uuid,
-    issue_id: &Uuid,
-    project_id: &Uuid,
-    workspace_id: &Uuid,
-    created_by_id: Option<Uuid>,
-) -> Result<(), Denial> {
-    let member: Option<(i32,)> = sqlx::query_as(DEFAULT_ASSIGNEE_EXISTS_SQL)
-        .bind(default_assignee_id)
-        .bind(project_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    if member.is_none() {
-        return Ok(());
-    }
-    let sql = m2m_insert_sql("issue_assignees", "assignee_id", 1, false);
-    let created = utc_now_micros();
-    let updated = utc_now_micros();
-    match sqlx::query(&sql)
-        .bind(Uuid::new_v4())
-        .bind(created)
-        .bind(updated)
-        .bind(created_by_id)
-        .bind(None::<Uuid>)
-        .bind(project_id)
-        .bind(workspace_id)
-        .bind(issue_id)
-        .bind(default_assignee_id)
-        .execute(pool)
-        .await
-    {
-        Ok(_) => Ok(()),
-        Err(error) if is_integrity_violation(&error) => Ok(()),
-        Err(_) => Err(Denial::ServerError),
-    }
-}
-
-/// The post-save fire: a non-transition answers `NoTransition` without
-/// I/O; a failed handler is logged with the verbatim line (the counter
-/// already bumped inside) and the save stands; only a *lookup* storage
-/// failure propagates to the 500 — exactly the `try` placement in
-/// `fire_state_transition`. Drives the one live seam (PIDASHCONV-1216).
-#[allow(clippy::too_many_arguments)]
-async fn fire_after_save(
-    state: &AppState,
-    pool: &sqlx::PgPool,
-    actor_id: Uuid,
-    issue_id: Uuid,
-    prev_state_id: Option<Uuid>,
-    current_state_id: Option<Uuid>,
-    dispatch_immediate: bool,
-    created_by: Option<Uuid>,
-    now: DateTime<Utc>,
-) -> Result<(), Denial> {
-    let outcome = crate::issue_transition::fire_issue_transition(
-        state,
-        pool,
-        actor_id,
-        FireRequest {
-            issue_id,
-            prev_state_id,
-            current_state_id,
-            dispatch_immediate,
-            moved_by_run: None,
-            now,
-            jitter_secs: 0.0,
-            created_by,
-        },
-    )
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    if let FireOutcome::Failed { log_line, .. } = outcome {
-        tracing::error!("{log_line}");
-    }
-    Ok(())
 }
 
 fn host_settings_of(state: &AppState) -> HostSettings<'_> {
@@ -7150,7 +6678,7 @@ async fn draft_to_issue(
         Ok(filtered) => filtered,
         Err(response) => return Ok(response),
     };
-    let (mut row, raw_assignees, raw_labels) = assemble_new_issue(
+    let (row, raw_assignees, raw_labels) = assemble_new_issue(
         &values,
         &filtered,
         assigned_pod.flatten().map(|pod| pod.id),
@@ -7158,163 +6686,17 @@ async fn draft_to_issue(
         &project.workspace_id,
         &user_id,
     )?;
-    if row.assigned_pod_id.is_none() {
-        row.assigned_pod_id = default_pod_for_project(&pool, &draft_project).await?;
-    }
-    if row.state_id.is_none() {
-        // The `self.project` touch runs inside the atomic block on the
-        // state-given leg (the lock key); hoisted here — a `SELECT`'s
-        // transaction membership is unobservable.
-        touch_save_project(&pool, &draft_project).await?;
-        row.state_id = default_draft_state_opt(&pool, Some(draft_project)).await?;
-    } else {
-        // The group rides the field-cached instance on Django (no query);
-        // a race miss 500s (the state validated live seconds ago).
-        let state_id = row.state_id.ok_or(Denial::ServerError)?;
-        let group = state_row(&pool, &state_id)
-            .await?
-            .map(|row| row.group)
-            .ok_or(Denial::ServerError)?;
-        if group == "completed" {
-            row.completed_at = Some(utc_now_micros());
-        } else {
-            row.completed_at = None;
-        }
-    }
-    let mut tx = pool.begin().await.map_err(|_| Denial::ServerError)?;
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(advisory_lock_key(&draft_project))
-        .execute(&mut *tx)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    let max_sequence: (Option<i64>,) = sqlx::query_as(
-        "SELECT MAX(sequence) FROM issue_sequences WHERE project_id = $1 AND deleted_at IS NULL",
-    )
-    .bind(draft_project)
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    row.sequence_id = i32::try_from(max_sequence.0.map(|max| max + 1).unwrap_or(1))
-        .map_err(|_| Denial::ServerError)?;
-    let max_sort: (Option<f64>,) = match row.state_id {
-        Some(state_id) => sqlx::query_as(
-            "SELECT MAX(sort_order) FROM issues WHERE project_id = $1 AND state_id = $2 AND deleted_at IS NULL",
-        )
-        .bind(draft_project)
-        .bind(state_id)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(|_| Denial::ServerError)?,
-        None => sqlx::query_as(
-            "SELECT MAX(sort_order) FROM issues WHERE project_id = $1 AND state_id IS NULL AND deleted_at IS NULL",
-        )
-        .bind(draft_project)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(|_| Denial::ServerError)?,
-    };
-    if let Some(largest) = max_sort.0 {
-        row.sort_order = largest + 10000.0;
-    }
-    row.description_stripped = sync_description_stripped(Some(&row.description_html));
-    insert_issue_row(&mut tx, &row).await?;
-    sqlx::query(
-        "INSERT INTO issue_sequences (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, issue_id, sequence, deleted) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
-    )
-    .bind(Uuid::new_v4())
-    .bind(utc_now_micros())
-    .bind(utc_now_micros())
-    .bind(Some(user_id))
-    .bind(None::<Uuid>)
-    .bind(None::<DateTime<Utc>>)
-    .bind(draft_project)
-    .bind(project.workspace_id)
-    .bind(row.id)
-    .bind(i64::from(row.sequence_id))
-    .bind(false)
-    .execute(&mut *tx)
-    .await
-    .map_err(|error| {
-        if is_integrity_violation(&error) {
-            Denial::BadError("The payload is not valid".to_owned())
-        } else {
-            Denial::ServerError
-        }
-    })?;
-    tx.commit().await.map_err(|_| Denial::ServerError)?;
-    // The m2m legs run post-commit in autocommit (each `bulk_create`
-    // wrapped in its own `except IntegrityError: pass`).
+    // The m2m plan resolves pre-save (pure reads of validated input).
     let assignees = filtered
         .assignee_ids
         .clone()
         .or(raw_assignees)
         .unwrap_or_default();
-    if assignees.is_empty() {
-        if let Some(default) = project.default_assignee_id {
-            write_default_assignee(
-                &pool,
-                &default,
-                &row.id,
-                &draft_project,
-                &project.workspace_id,
-                row.created_by_id,
-            )
-            .await?;
-        }
-    } else {
-        write_issue_m2m_batches(
-            &pool,
-            "issue_assignees",
-            "assignee_id",
-            &assignees,
-            &row.id,
-            &draft_project,
-            &project.workspace_id,
-            row.created_by_id,
-            None,
-        )
-        .await?;
-    }
     let labels = filtered
         .label_ids
         .clone()
         .or(raw_labels)
         .unwrap_or_default();
-    if !labels.is_empty() {
-        write_issue_m2m_batches(
-            &pool,
-            "issue_labels",
-            "label_id",
-            &labels,
-            &row.id,
-            &draft_project,
-            &project.workspace_id,
-            row.created_by_id,
-            None,
-        )
-        .await?;
-    }
-    let prev = crate::issue_transition::capture_prior_state_pool(&pool, None)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    fire_after_save(
-        &state,
-        &pool,
-        user_id,
-        row.id,
-        prev,
-        row.state_id,
-        true,
-        Some(user_id),
-        utc_now_micros(),
-    )
-    .await?;
-    // `base_host` raises past the save (the issue persists on a
-    // misconfigured host), so the origin resolves here, not up front.
-    let origin = request_origin(&state)?;
-    let actor_text = user_id.to_string();
-    let issue_text = row.id.to_string();
-    let project_text = draft_project.to_string();
     // Task bytes render the raw QueryDict (PIDASHCONV-763): form list
     // fields dump as last-wins scalars. A projected COPY — `input`
     // still feeds the cycle/module branches below.
@@ -7327,18 +6709,78 @@ async fn draft_to_issue(
     } else {
         python_dumps(&input.value)
     };
-    enqueue_activity_emit(
-        &pool,
-        &wtask::draft_issue_created_activity(
-            requested.clone(),
-            &actor_text,
-            &issue_text,
-            &project_text,
-            Utc::now().timestamp(),
-            &origin,
-        ),
-    )
-    .await;
+    // `base_host` raises past the save (the issue persists on a
+    // misconfigured host): `request_origin` is pure over settings, so it
+    // resolves here but only takes effect past the fire + m2m legs — the
+    // chain stops ahead of the activity when it is `None`.
+    let origin = request_origin(&state).ok();
+    let actor_text = user_id.to_string();
+    // The atomic sequence/sort INSERT (save hooks) plus the post-commit
+    // chain — transition fire, m2m + default-assignee legs, created
+    // activity — in handler order. Django's `post_save` fires inside
+    // `Issue.objects.create`, before the assignee/label `bulk_create`s,
+    // so the entry prompt sees empty m2m.
+    let orm = state.orm().ok_or(Denial::ServerError)?;
+    let ctx = WriteCtx::new(WriteActor {
+        user_id,
+        timezone: Some(timezone.name().to_owned()),
+    })
+    .with_scope(WriteScope {
+        workspace_id: Some(draft_workspace),
+        project_id: Some(draft_project),
+    });
+    let transition: Arc<dyn IssueTransitionHook> = Arc::new(AppTransitionHook::new(&state, &pool));
+    let enqueue: Arc<dyn TaskEnqueueHook> = Arc::new(AppTaskEnqueueHook::new(&pool));
+    let outcome = domain::run(&ctx, orm, |txn| {
+        let transition = transition.clone();
+        let enqueue = enqueue.clone();
+        let pool = pool.clone();
+        let ctx = ctx.clone();
+        let origin = origin.clone();
+        Box::pin(async move {
+            txn.hooks_mut().register(transition);
+            txn.hooks_mut().register(enqueue);
+            domain_issues::create(
+                &ctx,
+                txn,
+                &pool,
+                domain_issues::CreateIssue {
+                    fields: row,
+                    assignees,
+                    default_assignee: project.default_assignee_id,
+                    labels,
+                    fire: domain_issues::FireSpec {
+                        dispatch_immediate: true,
+                        created_by: Some(user_id),
+                        moved_by_run: None,
+                        now: utc_now_micros(),
+                    },
+                    origin,
+                    activity_requested: Value::String(requested),
+                    activity_notification: Some(true),
+                    activity_require_origin: true,
+                    skip_activity: false,
+                    skip_fire: false,
+                    model_activity: None,
+                    created_override: None,
+                },
+            )
+            .await
+        })
+    })
+    .await
+    .map_err(domain_denial)?;
+    if outcome.chain.stopped().is_some() {
+        return Err(Denial::ServerError);
+    }
+    // A `None` origin stopped the chain above, so this is `Some` — the
+    // `ok_or` is unreachable, kept for the type.
+    let origin = origin.ok_or(Denial::ServerError)?;
+    // The 201 body renders off the saved row (hook outputs included),
+    // exactly the in-memory row the direct save used to leave behind.
+    let row = IssueSaveRow::from(&outcome.issue);
+    let issue_text = row.id.to_string();
+    let project_text = draft_project.to_string();
     // The cycle branch (`:240-265`): a truthy RAW `cycle_id`
     // (`objects.create` — `save()` overwrites the audit ids with the
     // actor/`None`), then `cycle.activity.created` with the `"None"`
@@ -7700,15 +7142,6 @@ mod tests {
         ] {
             assert!(parse_drf_datetime(text, &utc).is_err(), "{text:?}");
         }
-    }
-
-    #[test]
-    fn advisory_lock_key_vectors() {
-        assert_eq!(
-            advisory_lock_key(&uuid("11111111-1111-1111-1111-111111111111")),
-            -4972562656765536426
-        );
-        assert_eq!(advisory_lock_key(&Uuid::nil()), 1349170572285598868);
     }
 
     #[test]

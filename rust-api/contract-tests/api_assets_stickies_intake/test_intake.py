@@ -11,8 +11,11 @@ also deletes the underlying issue.
 """
 
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+
+from _harness import http
 
 from . import seed_d21
 
@@ -186,6 +189,36 @@ def test_intake_accept_without_default_state_400(org):
     assert r.status_code == 400
     assert r.json() == {
         "status": ["Cannot accept intake issue: No default state found for the project"]
+    }
+
+
+def test_intake_patch_parent_project_check_message(org):
+    """PIDASHCONV-1499: the issue-half parent check reports Django's exact
+    message. The endpoint runs ``IssueSerializer`` with an empty context, so
+    any parent passing the field-level gate (non-triage, non-archived,
+    non-draft) fails the object-level project check with this body."""
+    backlog = seed_d21.create_state(
+        org.conn, workspace_id=org.workspace["id"], project_id=org.project["id"],
+        name="Backlog", group="backlog",
+    )
+    parent_id = str(uuid.uuid4())
+    org.conn.execute(
+        """INSERT INTO issues (id, created_at, updated_at, name, description_json,
+               priority, sequence_id, project_id, state_id,
+               workspace_id, description_html, sort_order,
+               is_draft, git_work_branch, workpad, complexity_score)
+           VALUES (%s, now(), now(), 'parent', '{}', 'high', 901,
+               %s, %s, %s, '', 65536, false, '', '', 0)""",
+        (parent_id, org.project["id"], backlog["id"], org.workspace["id"]),
+    )
+    created = org.create_intake_issue(name="child")
+    r = org.request(
+        "PATCH", f"{_base(org)}{created['issue']}/", "admin",
+        json={"issue": {"parent": parent_id}},
+    )
+    assert r.status_code == 400
+    assert r.json() == {
+        "non_field_errors": ["Parent is not valid issue_id please pass a valid issue_id"]
     }
 
 
@@ -553,3 +586,79 @@ def test_intake_denied_caller_bad_zone_still_403(org):
     _set_user_timezone(org, org.outsider["id"], BAD_ZONE)
     r = _call_intake(org, "GET", _base(org), None, role="outsider")
     assert r.status_code == 403, r.text
+
+
+def test_intake_create_triage_state_resequenced_and_stamped(org):
+    """PIDASHCONV-1404: the auto-created Triage state is resequenced to
+    ``max(live non-triage project states) + 15000`` (``State.save``) and
+    ``created_by`` is stamped with the caller (``BaseModel.save`` via crum),
+    not the 65000/NULL literals of the ``State.objects.create`` call."""
+    for name, group, sequence in (
+        ("Backlog", "backlog", 15000.0),
+        ("Todo", "unstarted", 25000.0),
+        ("In Progress", "started", 35000.0),
+        ("In Review", "review", 40000.0),
+        ("In Test", "test", 42500.0),
+        ("Done", "completed", 45000.0),
+        ("Cancelled", "cancelled", 55000.0),
+    ):
+        seed_d21.create_state(
+            org.conn,
+            workspace_id=org.workspace["id"],
+            project_id=org.project["id"],
+            name=name,
+            group=group,
+            sequence=sequence,
+        )
+    org.create_intake_issue(name="first in triage")
+    sequence, created_by_id = org.conn.execute(
+        'SELECT sequence, created_by_id FROM states WHERE project_id = %s AND "group" = %s',
+        (org.project["id"], "triage"),
+    ).fetchone()
+    assert sequence == 70000.0
+    assert str(created_by_id) == org.admin["id"]
+
+
+def test_concurrent_creates_get_distinct_sequence_ids(org):
+    # PIDASHCONV-1406: ``Issue.save`` takes a per-project advisory lock and
+    # assigns ``MAX(sequence)+1`` inside one transaction
+    # (``db/models/issue.py:311-336``), so N concurrent v1 intake creates
+    # must yield N distinct ``sequence_id``s. The triage state is
+    # pre-seeded so every create takes the reuse path — the triage
+    # get-or-create race is separate Django behavior, out of scope here.
+    seed_d21.create_state(
+        org.conn,
+        workspace_id=org.workspace["id"],
+        project_id=org.project["id"],
+        name="Triage",
+        group="triage",
+    )
+    url = _base(org)
+    token = org.tokens["admin"]
+    count = 20
+
+    def _one(n):
+        with http.make_client() as client:
+            r = client.post(
+                url,
+                json={"issue": {"name": f"race idea {n}"}},
+                headers={"X-Api-Key": token},
+            )
+            assert r.status_code == 201, r.text[:200]
+            return r.json()["issue_detail"]["sequence_id"]
+
+    with ThreadPoolExecutor(max_workers=count) as pool:
+        sequence_ids = list(pool.map(_one, range(count)))
+    assert len(set(sequence_ids)) == count, f"shared sequence_ids: {sorted(sequence_ids)}"
+    dupes = org.conn.execute(
+        "SELECT sequence_id, count(*) AS c FROM issues WHERE project_id = %s"
+        " GROUP BY 1 HAVING count(*) > 1",
+        (org.project["id"],),
+    ).fetchall()
+    assert dupes == []
+    orphans = org.conn.execute(
+        "SELECT i.id FROM issues i LEFT JOIN issue_sequences s ON s.issue_id = i.id"
+        " WHERE i.project_id = %s AND s.id IS NULL",
+        (org.project["id"],),
+    ).fetchall()
+    assert orphans == []

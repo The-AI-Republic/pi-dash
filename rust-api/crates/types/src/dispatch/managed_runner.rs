@@ -1,9 +1,10 @@
 //! Managed runner refusal reasons (D-11, stage 5).
 //!
-//! Port of `apps/api/pi_dash/managed_runner/errors.py:15-45`:
+//! Port of `apps/api/pi_dash/managed_runner/errors.py:15-49`
+//! (`09738d222` adds `RUNNER_PAUSED`):
 //!
-//! * `ManagedRunnerReason` (`:15-33`) → [`ManagedRunnerReason`].
-//! * `ManagedRunnerUnavailable` (`:36-45`) → [`ManagedRunnerUnavailable`].
+//! * `ManagedRunnerReason` (`:15-37`) → [`ManagedRunnerReason`].
+//! * `ManagedRunnerUnavailable` (`:40-49`) → [`ManagedRunnerUnavailable`].
 //!
 //! Translation notes:
 //!
@@ -13,7 +14,7 @@
 //!   `{"error": code, "detail": str}` 409 body
 //!   (`assistant/views/agent_profile.py:89-95`); that surfacing lives with
 //!   the handlers layer, not here.
-//! * `str(exc)` is `detail or code` (`errors.py:45`); [`Display`] reproduces
+//! * `str(exc)` is `detail or code` (`errors.py:49`); [`Display`] reproduces
 //!   the fallback while [`ManagedRunnerUnavailable::detail`] stays raw.
 //!   `ValueError` becomes `std::error::Error`.
 //!
@@ -42,6 +43,10 @@ impl ManagedRunnerReason {
     /// The desktop is connected but has not enrolled a runner for this project
     /// yet. The desktop resolves this silently by enrolling and retrying.
     pub const NO_RUNNER_FOR_PROJECT: &'static str = "no_managed_runner_for_project";
+    /// The desktop is connected but its runner for this project was paused by
+    /// an operator (`09738d222`). Structural until resumed, so automatic runs
+    /// are refused rather than parked waiting for it.
+    pub const RUNNER_PAUSED: &'static str = "managed_runner_paused";
 }
 
 /// Raised at creation when a managed run cannot be admitted
@@ -56,7 +61,7 @@ pub struct ManagedRunnerUnavailable {
 }
 
 impl ManagedRunnerUnavailable {
-    /// `ManagedRunnerUnavailable(code, detail="")` (`errors.py:43-45`).
+    /// `ManagedRunnerUnavailable(code, detail="")` (`errors.py:47-49`).
     pub fn new(code: impl Into<String>, detail: impl Into<String>) -> Self {
         ManagedRunnerUnavailable {
             code: code.into(),
@@ -76,7 +81,7 @@ impl ManagedRunnerUnavailable {
 }
 
 impl std::fmt::Display for ManagedRunnerUnavailable {
-    /// `str(exc)`: the detail, or the code when empty (`errors.py:45`).
+    /// `str(exc)`: the detail, or the code when empty (`errors.py:49`).
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.detail.is_empty() {
             write!(f, "{}", self.code)
@@ -122,7 +127,8 @@ mod tests {
             codes["NO_RUNNER_FOR_PROJECT"],
             ManagedRunnerReason::NO_RUNNER_FOR_PROJECT
         );
-        assert_eq!(codes.as_object().expect("codes").len(), 6);
+        assert_eq!(codes["RUNNER_PAUSED"], ManagedRunnerReason::RUNNER_PAUSED);
+        assert_eq!(codes.as_object().expect("codes").len(), 7);
     }
 
     #[test]

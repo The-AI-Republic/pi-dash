@@ -73,8 +73,8 @@
 //! * BUG-rotate-user-omission (`enrollment.py:181-186`): `_rotate_machine_token`
 //!   with a dev machine filters on workspace + machine only — `user` is
 //!   dropped — while `_maybe_mint_machine_token` keeps it. Ported as-is
-//!   ([`rotate_revoke_sql`] takes no user param in the machine branch);
-//!   listed as a suspected bug.
+//!   (the domain `revoke_tokens_for_machine_in_workspace` takes no user
+//!   param); listed as a suspected bug.
 //! * QUIRK-pod-fallthrough (`:671-675`): when `pod_name` is given but
 //!   matches nothing, `pod` stays `None` and the code falls through to
 //!   the default pod — an unknown `?pod=` is silently ignored, no 404.
@@ -89,7 +89,8 @@
 //!   `PodManager` scope — Django emits the conjunct twice. Kept.
 //! * QUIRK-lock-before-update (B3): the source calls
 //!   `select_for_update()` before `.update(...)`; Django drops the lock
-//!   on update queries, so [`rotate_revoke_sql`] is a plain `UPDATE`.
+//!   on update queries, so the rotate revoke is a plain `UPDATE` (now in
+//!   `crate::domain::tokens`).
 //! * QUIRK-rotation-value-binds (E5): the rotation copies are computed
 //!   Python-side from the locked row (`generation + 1`, previous ←
 //!   current), so the `UPDATE` binds plain values — there is no
@@ -130,6 +131,7 @@
 //! `app_assets/queries_v2_user_workspace.rs`); char-boundary-safe
 //! `[:N]` slicing (Porting guide semantic traps).
 
+use pidash_compat::py::py_strip;
 use pidash_db::app_project::models::project as project_cols;
 use pidash_db::runner_enroll::columns::{
     dev_machine as dm_cols, machine_token as mt_cols, pod as pod_cols, runner as r_cols,
@@ -544,7 +546,7 @@ pub fn managed_cap_count_sql() -> String {
 /// `Runner.objects.create(owner, workspace_id, dev_machine, pod, name,
 /// host_label, provisioning, enrolled_at=now())`. `Runner.save()`'s
 /// single-project auto-resolve is a no-op here (`pod` is always set —
-/// `:676-680` 409s otherwise), so this is a plain 30-column `INSERT`
+/// `:676-680` 409s otherwise), so this is a plain 32-column `INSERT`
 /// with every column bound (`$1..$30` in [`r_cols::COLUMNS`] order):
 /// `$1` id (fresh uuid4), `$2` owner, `$3` workspace, `$4` dev machine
 /// (or NULL — legacy path), `$5` pod, `$6` name (explicit or
@@ -614,64 +616,12 @@ pub fn bootstrap_probe_sql(with_dev_machine: bool) -> String {
     }
 }
 
-/// B2 — bootstrap insert (`enrollment.py:157-171`), in a savepoint.
-///
-/// `MachineToken.objects.create(user, dev_machine, workspace,
-/// host_label, token_hash, token_fingerprint, label, is_service=True)`:
-/// plain 12-column `INSERT`, `$1..$12` in [`mt_cols::COLUMNS`] order —
-/// `$1` id (fresh uuid4), `$2` user, `$3` dev machine (or NULL), `$4`
-/// workspace, `$5` host label, `$6` token hash, `$7` fingerprint, `$8`
-/// label ([`machine_token_label`]), `$9` is_service (`TRUE`), `$10`
-/// created_at (`now()`), `$11-12` last_used/revoked (NULL).
-///
-/// Unique violation (the two partial unique indexes) → `ROLLBACK TO
-/// SAVEPOINT`, return `None` (`:169-170`). `_rotate_machine_token`
-/// reuses this same shape for its insert (`:193-202`).
-pub fn machine_token_insert_sql() -> String {
-    let cols = mt_cols::COLUMNS
-        .iter()
-        .map(|col| format!("\"{col}\""))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "INSERT INTO \"{}\" ({cols}) VALUES ({})",
-        mt_cols::TABLE,
-        placeholders(mt_cols::COLUMNS.len()),
-    )
-}
-
-/// B3 — rotate revoke (`_rotate_machine_token`, `enrollment.py:174-203`),
-/// in the caller tx (NOT savepoint-guarded).
-///
-/// `MachineToken.objects.select_for_update().filter(**filters).update(revoked_at=now())`.
-/// The `select_for_update()` is a no-op on updates
-/// (QUIRK-lock-before-update). The `SET` bind comes first, then the
-/// `Q`-sorted `WHERE`.
-///
-/// With a dev machine — `$1` revoked_at (`now()`), `$2` dev_machine_id,
-/// `$3` workspace_id. NOTE the filter asymmetry vs B1: `user` is NOT in
-/// the filter (BUG-rotate-user-omission, ported as-is). Legacy — `$1`
-/// revoked_at, `$2` host_label, `$3` user_id, `$4` workspace_id (plus
-/// the unbound `revoked_at IS NULL AND dev_machine_id IS NULL`).
-///
-/// The follow-up insert is [`machine_token_insert_sql`].
-pub fn rotate_revoke_sql(with_dev_machine: bool) -> String {
-    if with_dev_machine {
-        "UPDATE \"machine_token\" SET \"revoked_at\" = $1 \
-         WHERE (\"machine_token\".\"dev_machine_id\" = $2 \
-         AND \"machine_token\".\"revoked_at\" IS NULL \
-         AND \"machine_token\".\"workspace_id\" = $3)"
-            .to_string()
-    } else {
-        "UPDATE \"machine_token\" SET \"revoked_at\" = $1 \
-         WHERE (\"machine_token\".\"dev_machine_id\" IS NULL \
-         AND \"machine_token\".\"host_label\" = $2 \
-         AND \"machine_token\".\"revoked_at\" IS NULL \
-         AND \"machine_token\".\"user_id\" = $3 \
-         AND \"machine_token\".\"workspace_id\" = $4)"
-            .to_string()
-    }
-}
+// NOTE: the B2 bootstrap insert and the B3 rotate revoke builders lived
+// here; the statements moved to `crate::domain::tokens`
+// (`insert_machine_token`, `revoke_tokens_for_machine_in_workspace`,
+// `revoke_tokens_legacy_host`; PIDASHCONV-1520), whose tests carry the
+// pins. The unique-violation → savepoint-rollback contract stays with
+// the enroll handler.
 
 // ---------------------------------------------------------------------------
 // D1/D2/D3/D4. Dev-machine get-or-create
@@ -802,17 +752,6 @@ pub fn truncate_chars(s: &str, max_chars: usize) -> String {
         return s.to_string();
     }
     s.chars().take(max_chars).collect()
-}
-
-/// Python `str.strip()` parity: Python strips `str.isspace()`
-/// characters — Unicode `White_Space` plus U+001C-U+001F and U+0085 —
-/// while Rust `trim()` strips `White_Space` only. (In-domain precedent:
-/// `runner_enroll::serializers::shapes` documents the same gap for its
-/// `py_trim`; this also covers U+0085, which Python strips too.)
-fn py_strip(s: &str) -> &str {
-    s.trim_matches(|c: char| {
-        c.is_whitespace() || c == '\u{85}' || ('\u{1c}'..='\u{1f}').contains(&c)
-    })
 }
 
 /// D-path host label (`_get_or_create_dev_machine:78`,
@@ -969,6 +908,8 @@ mod tests {
         "updated_at",
         "revoked_at",
         "revoked_reason",
+        "paused_at",
+        "paused_by_id",
     ];
     const POD_COLS: &[&str] = &[
         "id",
@@ -1365,7 +1306,7 @@ mod tests {
     }
 
     #[test]
-    fn e7_insert_binds_all_thirty_columns() {
+    fn e7_insert_binds_all_thirty_two_columns() {
         let sql = runner_insert_sql();
         let cols = RUNNER_COLS
             .iter()
@@ -1376,7 +1317,7 @@ mod tests {
             sql,
             format!(
                 "INSERT INTO \"runner\" ({cols}) VALUES ({})",
-                (1..=30)
+                (1..=32)
                     .map(|i| format!("${i}"))
                     .collect::<Vec<_>>()
                     .join(", "),
@@ -1423,65 +1364,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn b2_insert_binds_all_twelve_columns() {
-        let sql = machine_token_insert_sql();
-        let cols = TOKEN_COLS
-            .iter()
-            .map(|c| format!("\"{c}\""))
-            .collect::<Vec<_>>()
-            .join(", ");
-        assert_eq!(
-            sql,
-            format!(
-                "INSERT INTO \"machine_token\" ({cols}) VALUES ({})",
-                (1..=12)
-                    .map(|i| format!("${i}"))
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            )
-        );
-        for fragment in [
-            fixture_fragment("INSERT INTO \"machine_token\""),
-            fixture_fragment("\"token_hash\""),
-            fixture_fragment("\"is_service\""),
-        ] {
-            assert_builder_contains(&sql, &fragment);
-        }
-    }
-
-    #[test]
-    fn b3_revoke_omits_user_on_machine_branch() {
-        // Suspected bug, ported as-is: no user_id on the machine branch.
-        assert_eq!(
-            rotate_revoke_sql(true),
-            "UPDATE \"machine_token\" SET \"revoked_at\" = $1 \
-             WHERE (\"machine_token\".\"dev_machine_id\" = $2 \
-             AND \"machine_token\".\"revoked_at\" IS NULL \
-             AND \"machine_token\".\"workspace_id\" = $3)",
-        );
-        assert!(!rotate_revoke_sql(true).contains("user_id"));
-        assert_eq!(
-            rotate_revoke_sql(false),
-            "UPDATE \"machine_token\" SET \"revoked_at\" = $1 \
-             WHERE (\"machine_token\".\"dev_machine_id\" IS NULL \
-             AND \"machine_token\".\"host_label\" = $2 \
-             AND \"machine_token\".\"revoked_at\" IS NULL \
-             AND \"machine_token\".\"user_id\" = $3 AND \"machine_token\".\"workspace_id\" = $4)",
-        );
-        // Revokes every active row in scope — no LIMIT (fixture rotate_B3_after).
-        assert!(!rotate_revoke_sql(true).contains("LIMIT"));
-        assert!(!rotate_revoke_sql(false).contains("LIMIT"));
-        for fragment in [
-            fixture_fragment("\"revoked_at\" = "),
-            fixture_fragment("\"workspace_id\" = "),
-        ] {
-            assert_builder_contains(
-                &format!("{} {}", rotate_revoke_sql(true), rotate_revoke_sql(false)),
-                &fragment,
-            );
-        }
-    }
+    // (The B2/B3 SQL pins moved with the statements to
+    // `crate::domain::tokens`; the no-`LIMIT` contract rides the same
+    // pin test there.)
 
     // -- D1/D2/D3/D4 --
 

@@ -25,15 +25,6 @@
 //!   plus `is_activated = True`, then discards it (`data = {}`); the
 //!   instance branch never carries `is_activated`. Reproduced: the
 //!   response `instance` object has no such key.
-//! * Partial-update null-skip: DRF drops `None` values when the serializer
-//!   is `partial` (`validate_empty_values` raises `SkipField`), so an
-//!   explicit `null` on PATCH is silently ignored for every field —
-//!   including non-nullable ones. Reproduced in [`validate_partial`].
-//!   Exception: `deleted_at` (PIDASHCONV-1099) is the one field with
-//!   DRF-correct null handling — an explicit `null` clears it
-//!   (`allow_null`, from `null=True`), a missing key is skipped. The
-//!   blanket skip for the other fields is a known port divergence
-//!   (DRF would 400 on non-nullable `null`s), left untouched.
 //! * `read_only_fields` (`instance.py:17`) lists `email`, a model field
 //!   that does not exist: unknown input keys are ignored, so `email` (and
 //!   any other unknown key) never validates and never writes.
@@ -85,7 +76,7 @@ use super::form_body::{
 use super::handlers_base::{json_response, resolve_request_tz, HandlerError, CACHE_CONTROL_VALUE};
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
-use crate::v1_cycles_modules::json_cpython::{self, JsonFail};
+use crate::v1_cycles_modules::json::{self, JsonFail};
 
 /// Register the owned D-01 instance routes. Unowned methods fall through
 /// to Django through the edge fallback (never a Rust 405).
@@ -650,7 +641,7 @@ fn as_bool(value: &serde_json::Value) -> Result<bool, &'static str> {
 }
 
 /// Validate one writable text field (`blank` / `max_length` in that order,
-/// after the partial null-skip resolved by the caller). `max_length` is
+/// after the caller resolved explicit `null`s). `max_length` is
 /// `Some` for `CharField`s, `None` for `TextField`s (no length validator).
 /// An uploaded file is never a string (`CharField` takes `str`/`int`/
 /// `float` only — probed).
@@ -698,16 +689,15 @@ fn check_text(
 }
 
 /// `InstanceSerializer(instance, data, partial=True)` validation
-/// (`instance.py:179-180`): unknown and read-only keys ignored, explicit
-/// `null`s skipped (partial `SkipField`), the rest validated in wire
-/// order with every error collected.
+/// (`instance.py:179-180`): unknown and read-only keys ignored, missing
+/// keys skipped (partial `SkipField`), explicit `null`s validated per
+/// field — `allow_null` fields clear to NULL, the rest 400 with "This
+/// field may not be null." — all in model order with every error collected.
 ///
 /// `deleted_at` goes first: DRF validates writable fields in model
 /// order and the audit column precedes the instance fields
-/// (`db/mixins.py:85`, `serializers/instance.py:11-17`). It is also the
-/// one field with DRF-correct null handling — an explicit `null` clears
-/// (`allow_null`) while a missing key is skipped — unlike the blanket
-/// null-skip below (a known port divergence for the other fields).
+/// (`db/mixins.py:85`, `serializers/instance.py:11-17`); `created_by` /
+/// `updated_by` go last.
 ///
 /// On form bodies the HTML-form `get_value` rules apply (`fields.py`):
 /// an empty string on an `allow_null` field arrives as `None`
@@ -734,7 +724,6 @@ fn validate_partial(body: &ParsedBody, timezone: Tz) -> Result<Vec<Assignment>, 
     let get = |field: &str| -> Option<BodyField<'_>> {
         match body.field(field) {
             BodyField::Missing => None,
-            BodyField::Json(serde_json::Value::Null) => None,
             BodyField::Json(serde_json::Value::String(text))
                 if body.is_form() && text.is_empty() && skips_blank_form_value(field) =>
             {
@@ -743,46 +732,86 @@ fn validate_partial(body: &ParsedBody, timezone: Tz) -> Result<Vec<Assignment>, 
             other => Some(other),
         }
     };
+    // DRF `validate_empty_values`: an explicit `null` is a value, not a
+    // skip — only a missing key raises `SkipField` under partial=True.
+    let is_null = |found: &BodyField<'_>| -> bool {
+        matches!(found, BodyField::Json(serde_json::Value::Null))
+    };
 
     // `CharField(max_length=255)` vs `TextField` (no length validator).
+    // `allow_null` follows `model_field.null`: `whitelist_emails`,
+    // `latest_version` and `namespace` clear on explicit `null`; `domain`
+    // is `blank=True` without `null=True`, so it 400s like the rest.
     const CAPPED: Option<usize> = Some(MAX_NAME_LEN);
     if let Some(value) = get("instance_name") {
-        if let Some(text) = check_text("instance_name", value, false, CAPPED, &mut errors) {
+        if is_null(&value) {
+            errors.push((
+                "instance_name".to_owned(),
+                vec!["This field may not be null.".to_owned()],
+            ));
+        } else if let Some(text) = check_text("instance_name", value, false, CAPPED, &mut errors) {
             sets.push(Assignment::Text("instance_name", text));
         }
     }
     if let Some(value) = get("whitelist_emails") {
-        if let Some(text) = check_text("whitelist_emails", value, true, None, &mut errors) {
+        if is_null(&value) {
+            sets.push(Assignment::NullableText("whitelist_emails", None));
+        } else if let Some(text) = check_text("whitelist_emails", value, true, None, &mut errors) {
             sets.push(Assignment::NullableText("whitelist_emails", Some(text)));
         }
     }
     if let Some(value) = get("instance_id") {
-        if let Some(text) = check_text("instance_id", value, false, CAPPED, &mut errors) {
+        if is_null(&value) {
+            errors.push((
+                "instance_id".to_owned(),
+                vec!["This field may not be null.".to_owned()],
+            ));
+        } else if let Some(text) = check_text("instance_id", value, false, CAPPED, &mut errors) {
             sets.push(Assignment::Text("instance_id", text));
         }
     }
     if let Some(value) = get("current_version") {
-        if let Some(text) = check_text("current_version", value, false, CAPPED, &mut errors) {
+        if is_null(&value) {
+            errors.push((
+                "current_version".to_owned(),
+                vec!["This field may not be null.".to_owned()],
+            ));
+        } else if let Some(text) = check_text("current_version", value, false, CAPPED, &mut errors)
+        {
             sets.push(Assignment::Text("current_version", text));
         }
     }
     if let Some(value) = get("latest_version") {
-        if let Some(text) = check_text("latest_version", value, true, CAPPED, &mut errors) {
+        if is_null(&value) {
+            sets.push(Assignment::NullableText("latest_version", None));
+        } else if let Some(text) = check_text("latest_version", value, true, CAPPED, &mut errors) {
             sets.push(Assignment::NullableText("latest_version", Some(text)));
         }
     }
     if let Some(value) = get("edition") {
-        if let Some(text) = check_text("edition", value, false, CAPPED, &mut errors) {
+        if is_null(&value) {
+            errors.push((
+                "edition".to_owned(),
+                vec!["This field may not be null.".to_owned()],
+            ));
+        } else if let Some(text) = check_text("edition", value, false, CAPPED, &mut errors) {
             sets.push(Assignment::Text("edition", text));
         }
     }
     if let Some(value) = get("domain") {
-        if let Some(text) = check_text("domain", value, true, None, &mut errors) {
+        if is_null(&value) {
+            errors.push((
+                "domain".to_owned(),
+                vec!["This field may not be null.".to_owned()],
+            ));
+        } else if let Some(text) = check_text("domain", value, true, None, &mut errors) {
             sets.push(Assignment::Text("domain", text));
         }
     }
     if let Some(value) = get("namespace") {
-        if let Some(text) = check_text("namespace", value, true, CAPPED, &mut errors) {
+        if is_null(&value) {
+            sets.push(Assignment::NullableText("namespace", None));
+        } else if let Some(text) = check_text("namespace", value, true, CAPPED, &mut errors) {
             sets.push(Assignment::NullableText("namespace", Some(text)));
         }
     }
@@ -795,6 +824,13 @@ fn validate_partial(body: &ParsedBody, timezone: Tz) -> Result<Vec<Assignment>, 
         "is_current_version_deprecated",
     ] {
         if let Some(found) = get(field) {
+            if is_null(&found) {
+                errors.push((
+                    field.to_owned(),
+                    vec!["This field may not be null.".to_owned()],
+                ));
+                continue;
+            }
             let parsed = match found {
                 // An uploaded file is never a boolean (probed).
                 BodyField::File(_) => Err("Must be a valid boolean."),
@@ -820,6 +856,13 @@ fn validate_partial(body: &ParsedBody, timezone: Tz) -> Result<Vec<Assignment>, 
     // invalid UUID.
     for field in ["created_by", "updated_by"] {
         if let Some(found) = get(field) {
+            // Both FKs are `null=True`, so `allow_null` clears on explicit
+            // `null` (`updated_by` is validated here and dropped at write —
+            // `BaseModel.save` overwrites it with the actor).
+            if is_null(&found) {
+                sets.push(Assignment::NullableUuid(field, None));
+                continue;
+            }
             match found {
                 // The lookup stringifies the file, so its name lands in
                 // the message (`get_prep_value` — probed).
@@ -1029,9 +1072,10 @@ async fn fetch_instance_by_id(
 /// content-type selects the parser in `select_parser` order (JSON, form,
 /// multipart — `form_body::select_body_kind`). JSON and multipart framing
 /// errors → 400 `detail`; unmatched types → 415. JSON bodies parse through
-/// the shared CPython layer (`json_cpython`, PIDASHCONV-1128), so malformed
-/// JSON, strict constants, int-limit and codec errors carry CPython's exact
-/// text; past the depth cap is Django's JSON 500.
+/// the shared JSON layer (`json`, PIDASHCONV-1128), so malformed JSON is
+/// a 400 with serde's text (tier 3 since PIDASHCONV-1555; the
+/// strict-constant, int-limit and depth-cap texts are gone); codec errors
+/// keep CPython's text; depth failures are 400s, never Django's JSON 500.
 fn patch_body(
     headers: &HeaderMap,
     body: &[u8],
@@ -1047,10 +1091,10 @@ fn patch_body(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     match select_body_kind(content_type) {
-        Some(BodyKind::Json) => match json_cpython::parse_request_bytes(body) {
-            Ok(jval) => Ok(ParsedBody::json(json_cpython::to_serde_publish(&jval))),
+        Some(BodyKind::Json) => match json::parse_request_bytes(body) {
+            Ok(jval) => Ok(ParsedBody::json(json::to_serde_publish(&jval))),
             Err(JsonFail::Message(detail)) => Err(HandlerError::BadDetail(
-                serde_json::json!({"detail": format!("{}{detail}", json_cpython::JSON_PARSE_PREFIX)})
+                serde_json::json!({"detail": format!("{}{detail}", json::JSON_PARSE_PREFIX)})
                     .to_string(),
             )),
             Err(JsonFail::Recursion) => Err(HandlerError::ServerError),
@@ -1505,16 +1549,36 @@ mod tests {
     }
 
     #[test]
-    fn patch_skips_explicit_nulls_like_partial_serializers() {
+    fn patch_null_means_400_or_clear_like_drf() {
+        // Non-nullable explicit `null`s 400 in model order (text group
+        // before bools), exactly like DRF `validate_empty_values` — wire
+        // order does not matter.
         let body = obj(serde_json::json!({
-            "instance_name": null,
-            "whitelist_emails": null,
             "is_verified": null,
+            "instance_name": null,
+        }));
+        let Err(PatchRejection::FieldErrors(errors)) = validate_partial(&body, Tz::UTC) else {
+            panic!("expected field errors");
+        };
+        assert_eq!(
+            render_field_errors(&errors),
+            r#"{"instance_name":["This field may not be null."],"is_verified":["This field may not be null."]}"#
+        );
+        // Nullable explicit `null`s clear (`allow_null` from `null=True`).
+        let body = obj(serde_json::json!({
+            "whitelist_emails": null,
+            "latest_version": null,
+            "namespace": null,
             "created_by": null,
         }));
         assert_eq!(
-            validate_partial(&body, Tz::UTC).expect("nulls skipped"),
-            vec![]
+            validate_partial(&body, Tz::UTC).expect("nulls clear"),
+            vec![
+                Assignment::NullableText("whitelist_emails", None),
+                Assignment::NullableText("latest_version", None),
+                Assignment::NullableText("namespace", None),
+                Assignment::NullableUuid("created_by", None),
+            ]
         );
     }
 
@@ -1974,8 +2038,8 @@ mod tests {
                 )
             )]
         );
-        // Explicit `null` clears — the one field exempt from the blanket
-        // partial null-skip (DRF `allow_null`).
+        // Explicit `null` clears (`allow_null` from `null=True`), like
+        // the other nullable fields.
         let body = obj(serde_json::json!({"deleted_at": null}));
         assert_eq!(
             validate_partial(&body, Tz::UTC).expect("null clears"),

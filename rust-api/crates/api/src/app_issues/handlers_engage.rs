@@ -72,9 +72,19 @@ use chrono_tz::Tz;
 use serde_json::{Map, Value};
 use sqlx::Row;
 
+use crate::edge;
+use crate::middleware::body_limit::read_request_bytes;
 use crate::state::AppState;
 use crate::v1_cycles_modules::body as shared_body;
+use pidash_compat::datetime::{render_date, render_datetime_in, render_rfc3339_in};
+use pidash_compat::db::is_integrity_error;
+use pidash_compat::py::{py_float_repr_probed, py_str_value, python_dumps};
+use pidash_compat::response::{empty_response, json_response};
+use pidash_compat::validate::uuid_from_json_int;
 use pidash_db::app_pages::strip::ml_strip_tags;
+use pidash_db::entity::comment_hooks::description_stripped_for;
+use pidash_services::domain::comments as comment_domain;
+use pidash_services::v1_projects::tasks::model_activity_kwargs;
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -120,17 +130,20 @@ pub const COMMENT_REACTION_PATH: &str =
 /// 405-after-auth, `HEAD`, and metadata responses live there).
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route(HISTORY_PATH, owned(axum::routing::get(history), &["GET"]))
+        .route(
+            HISTORY_PATH,
+            edge::owned(axum::routing::get(history), &["GET"]),
+        )
         .route(
             COMMENTS_PATH,
-            owned(
+            edge::owned(
                 axum::routing::get(comment_list).post(comment_create),
                 &["GET", "POST"],
             ),
         )
         .route(
             COMMENT_PATH,
-            owned(
+            edge::owned(
                 axum::routing::get(comment_retrieve)
                     .put(comment_update)
                     .patch(comment_partial_update)
@@ -140,18 +153,18 @@ pub fn routes() -> Router<AppState> {
         )
         .route(
             SUBSCRIBERS_PATH,
-            owned(
+            edge::owned(
                 axum::routing::get(subscriber_list).post(subscriber_create),
                 &["GET", "POST"],
             ),
         )
         .route(
             SUBSCRIBER_PATH,
-            owned(axum::routing::delete(subscriber_destroy), &["DELETE"]),
+            edge::owned(axum::routing::delete(subscriber_destroy), &["DELETE"]),
         )
         .route(
             SUBSCRIBE_PATH,
-            owned(
+            edge::owned(
                 axum::routing::get(subscription_status)
                     .post(subscribe)
                     .delete(unsubscribe),
@@ -160,58 +173,26 @@ pub fn routes() -> Router<AppState> {
         )
         .route(
             REACTIONS_PATH,
-            owned(
+            edge::owned(
                 axum::routing::get(issue_reaction_list).post(issue_reaction_create),
                 &["GET", "POST"],
             ),
         )
         .route(
             REACTION_PATH,
-            owned(axum::routing::delete(issue_reaction_destroy), &["DELETE"]),
+            edge::owned(axum::routing::delete(issue_reaction_destroy), &["DELETE"]),
         )
         .route(
             COMMENT_REACTIONS_PATH,
-            owned(
+            edge::owned(
                 axum::routing::get(comment_reaction_list).post(comment_reaction_create),
                 &["GET", "POST"],
             ),
         )
         .route(
             COMMENT_REACTION_PATH,
-            owned(axum::routing::delete(comment_reaction_destroy), &["DELETE"]),
+            edge::owned(axum::routing::delete(comment_reaction_destroy), &["DELETE"]),
         )
-}
-
-/// An engage path: the owned methods serve from Rust, everything else
-/// falls through to Django (the social-handler cutover shape). `HEAD`
-/// and `TRACE` proxy explicitly: axum's implicit `HEAD`-from-`GET` and
-/// its empty 405 would otherwise diverge from Django (the plain
-/// `APIView` history route 405s `HEAD` as JSON after auth, while the
-/// viewset routes map `head` onto `get` — `viewsets.py:105-106` — and
-/// `TRACE` 405s as JSON everywhere).
-fn owned(
-    methods: axum::routing::MethodRouter<AppState>,
-    owned: &[&str],
-) -> axum::routing::MethodRouter<AppState> {
-    let mut router = methods;
-    for other in [
-        "GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD", "TRACE",
-    ] {
-        if owned.contains(&other) {
-            continue;
-        }
-        router = match other {
-            "GET" => router.get(crate::edge::proxy),
-            "POST" => router.post(crate::edge::proxy),
-            "PUT" => router.put(crate::edge::proxy),
-            "PATCH" => router.patch(crate::edge::proxy),
-            "DELETE" => router.delete(crate::edge::proxy),
-            "HEAD" => router.head(crate::edge::proxy),
-            "TRACE" => router.trace(crate::edge::proxy),
-            _ => router.options(crate::edge::proxy),
-        };
-    }
-    router
 }
 
 // ---------------------------------------------------------------------------
@@ -243,8 +224,8 @@ pub(crate) enum Denial {
     BadJson(Value),
     /// 415, `UnsupportedMediaType` (content negotiation).
     UnsupportedMediaType(String),
-    /// 413, `RequestBodySizeLimitMiddleware` past 5 MiB.
-    RequestTooLarge,
+    /// 502, truncated request-body read (the shared bad-gateway shape).
+    TruncatedBody,
     /// 500, generic branch.
     ServerError,
 }
@@ -295,9 +276,9 @@ impl Denial {
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
                 format!("{{\"detail\":{}}}", json_string(message)),
             ),
-            Denial::RequestTooLarge => (
-                StatusCode::PAYLOAD_TOO_LARGE,
-                r#"{"error":"REQUEST_BODY_TOO_LARGE","detail":"The size of the request body exceeds the maximum allowed size."}"#.to_owned(),
+            Denial::TruncatedBody => (
+                StatusCode::BAD_GATEWAY,
+                crate::edge::BAD_GATEWAY_BODY.to_owned(),
             ),
             Denial::ServerError => (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -325,24 +306,6 @@ fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
 }
 
-/// Render `body` (already exact JSON bytes) with an explicit status.
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("engage json response")
-}
-
-/// DRF's 204: empty body with the JSON content type.
-fn empty_response(status: StatusCode) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::empty())
-        .expect("engage empty response")
-}
-
 fn pool_of(state: &AppState) -> Result<sqlx::PgPool, Denial> {
     state
         .pools()
@@ -361,11 +324,6 @@ fn integrity_denial(error: sqlx::Error) -> Denial {
     }
     let _ = error;
     Denial::ServerError
-}
-
-/// True when the failure is an integrity violation (SQLSTATE class 23).
-fn is_integrity_error(error: &sqlx::Error) -> bool {
-    matches!(error, sqlx::Error::Database(db) if db.code().is_some_and(|code| code.starts_with("23")))
 }
 
 // ---------------------------------------------------------------------------
@@ -794,35 +752,21 @@ fn cell_opt_date(
 /// `iso-8601` format: ISO-8601 in the request's zone with `+00:00`
 /// rewritten to `Z` (serializer kernel rule).
 fn render_dt(dt: &chrono::DateTime<chrono::Utc>, tz: &Tz) -> String {
-    crate::serializer::render_datetime_in(&dt.fixed_offset(), tz)
+    render_datetime_in(dt, tz)
 }
 
 fn render_dt_opt(dt: Option<chrono::DateTime<chrono::Utc>>, tz: &Tz) -> Option<String> {
     dt.map(|dt| render_dt(&dt, tz))
 }
 
-/// Render a `row_to_json` timestamptz string (RFC 3339) the same way.
-fn render_dt_str(raw: &str, tz: &Tz) -> Result<String, Denial> {
-    let dt = chrono::DateTime::parse_from_rfc3339(raw).map_err(|_| Denial::ServerError)?;
-    Ok(crate::serializer::render_datetime_in(&dt, tz))
-}
-
 fn render_dt_str_opt(raw: Option<String>, tz: &Tz) -> Result<Option<String>, Denial> {
-    raw.map(|text| render_dt_str(&text, tz)).transpose()
-}
-
-/// DRF `DateField` wire format.
-fn render_date(date: &chrono::NaiveDate) -> String {
-    date.format("%Y-%m-%d").to_string()
+    raw.map(|text| render_rfc3339_in(&text, tz).map_err(|_| Denial::ServerError))
+        .transpose()
 }
 
 // ---------------------------------------------------------------------------
 // Request bodies (DRF JSON parsing)
 // ---------------------------------------------------------------------------
-
-/// Django's `DATA_UPLOAD_MAX_MEMORY_SIZE` (5 MiB): past it the
-/// `RequestBodySizeLimitMiddleware` answers 413 before the view runs.
-const MAX_BODY: usize = 5_242_880;
 
 /// Engage form semantics for the shared body negotiator: the two
 /// `ArrayField`s arrive as arrays; `access`/`speaker_type` (not
@@ -836,7 +780,7 @@ const ENGAGE_BODY_SPEC: shared_body::BodySpec = shared_body::BodySpec {
 /// Read the request body the way DRF does: content negotiation (JSON /
 /// form / multipart, 415 otherwise), empty → `{}`, malformed JSON →
 /// `ParseError` 400, non-object JSON → the `non_field_errors` 400.
-/// Past 5 MiB → the middleware 413.
+/// Over-limit bodies never reach here (`BodyLimitLayer` 413'd them).
 ///
 /// Form notes: `comment_json` form strings are JSON-*parsed* (DRF
 /// `JSONString` — `""` → "Value must be valid JSON."); blank form
@@ -855,9 +799,9 @@ struct RequestBody {
 
 async fn read_body(req: axum::extract::Request) -> Result<RequestBody, Denial> {
     let (parts, body) = req.into_parts();
-    let bytes = axum::body::to_bytes(body, MAX_BODY)
+    let bytes = read_request_bytes(body)
         .await
-        .map_err(|_| Denial::RequestTooLarge)?;
+        .map_err(|_| Denial::TruncatedBody)?;
     match shared_body::negotiate_body(&parts.headers, &bytes, &ENGAGE_BODY_SPEC) {
         Ok(shared_body::NegotiatedBody::Empty) => Ok(RequestBody {
             map: Map::new(),
@@ -1134,81 +1078,6 @@ fn json_type_name(value: &Value) -> &'static str {
 // `json.dumps` with CPython defaults (Celery `requested_data` payloads)
 // ---------------------------------------------------------------------------
 
-/// `json.dumps(value)`: `separators=(', ', ': ')`, `ensure_ascii=True`,
-/// insertion-ordered keys. Same implementation as the social handlers'
-/// `python_dumps` (convergent copy; that module's is private).
-fn python_dumps(value: &serde_json::Value) -> String {
-    let mut out = String::new();
-    python_dump_into(&mut out, value);
-    out
-}
-
-fn python_dump_into(out: &mut String, value: &serde_json::Value) {
-    match value {
-        serde_json::Value::Null => out.push_str("null"),
-        serde_json::Value::Bool(true) => out.push_str("true"),
-        serde_json::Value::Bool(false) => out.push_str("false"),
-        serde_json::Value::Number(number) => out.push_str(&number.to_string()),
-        serde_json::Value::String(text) => python_dump_str(out, text),
-        serde_json::Value::Array(items) => {
-            out.push('[');
-            for (index, item) in items.iter().enumerate() {
-                if index > 0 {
-                    out.push_str(", ");
-                }
-                python_dump_into(out, item);
-            }
-            out.push(']');
-        }
-        serde_json::Value::Object(map) => {
-            out.push('{');
-            for (index, (key, item)) in map.iter().enumerate() {
-                if index > 0 {
-                    out.push_str(", ");
-                }
-                python_dump_str(out, key);
-                out.push_str(": ");
-                python_dump_into(out, item);
-            }
-            out.push('}');
-        }
-    }
-}
-
-/// CPython `py_encode_basestring_ascii`.
-fn python_dump_str(out: &mut String, text: &str) {
-    out.push('"');
-    for ch in text.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{08}' => out.push_str("\\b"),
-            '\u{0C}' => out.push_str("\\f"),
-            ch if (ch as u32) < 0x20 || (ch as u32) == 0x7F => {
-                out.push_str(&format!("\\u{:04x}", ch as u32));
-            }
-            ch if (ch as u32) > 0x7E => {
-                let code = ch as u32;
-                if code > 0xFFFF {
-                    let v = code - 0x10000;
-                    out.push_str(&format!(
-                        "\\u{:04x}\\u{:04x}",
-                        0xD800 + (v >> 10),
-                        0xDC00 + (v & 0x3FF)
-                    ));
-                } else {
-                    out.push_str(&format!("\\u{code:04x}"));
-                }
-            }
-            ch => out.push(ch),
-        }
-    }
-    out.push('"');
-}
-
 // Comment `save()` computes `comment_stripped` through
 // `pi_dash.utils.html_processor.strip_tags` (`MLStripper`,
 // `db/models/issue.py:606`; `""` stays `""`) — the shared
@@ -1217,209 +1086,6 @@ fn python_dump_str(out: &mut String, text: &str) {
 // ---------------------------------------------------------------------------
 // CPython value semantics (`str` / `repr` / `==` / float rendering)
 // ---------------------------------------------------------------------------
-
-/// CPython `repr(float)`: the shortest spelling that round-trips,
-/// `.0` for integral plain values, `e±XX` exponents with a sign and
-/// at least two digits, exponent form outside `[1e-4, 1e16)`.
-/// Verified live: `77.0` → `"77.0"`, `1e16` → `"1e+16"`,
-/// `1e-5` → `"1e-05"` — plus a 116-value CPython oracle unit test.
-///
-/// Render precisions 1..=19 and take the first that parses back to
-/// `value` (greedy right-trimming from a long rendering is unsound:
-/// intermediate prefixes can round to a neighbor while a shorter one
-/// hits — e.g. `1.5e-07`), then lay out per the CPython magnitude
-/// rule.
-fn py_float_repr(value: f64) -> String {
-    if value.is_nan() {
-        return "nan".to_owned();
-    }
-    if value.is_infinite() {
-        return if value > 0.0 {
-            "inf".to_owned()
-        } else {
-            "-inf".to_owned()
-        };
-    }
-    if value == 0.0 {
-        return if value.is_sign_negative() {
-            "-0.0".to_owned()
-        } else {
-            "0.0".to_owned()
-        };
-    }
-    for precision in 1..=19usize {
-        let rendered = format!("{value:.dec$e}", dec = precision - 1);
-        if rendered.parse::<f64>().ok() == Some(value) {
-            return layout_py_float(&rendered, value);
-        }
-    }
-    // Unreachable in practice (17 significant digits always identify
-    // an f64); fall back to the longest rendering laid out.
-    layout_py_float(&format!("{value:.18e}"), value)
-}
-
-/// Lay out a `d.dddde±xx` rendering per the CPython magnitude rule
-/// (plain inside `[1e-4, 1e16)`, exponent outside).
-fn layout_py_float(rendered: &str, value: f64) -> String {
-    let (mantissa, exp) = match rendered.split_once(['e', 'E']) {
-        Some((mantissa, exp)) => (mantissa, exp.parse::<i32>().unwrap_or(0)),
-        None => (rendered, 0),
-    };
-    let negative = mantissa.starts_with('-');
-    let digits: String = mantissa.chars().filter(|ch| ch.is_ascii_digit()).collect();
-    let digits = digits.trim_start_matches('0');
-    let digits = digits.trim_end_matches('0');
-    let digits = if digits.is_empty() { "0" } else { digits };
-    // Decimal exponent of `0.digits × 10^E`.
-    let point_at = mantissa
-        .find('.')
-        .map(|pos| pos - usize::from(negative))
-        .unwrap_or_else(|| mantissa.len() - usize::from(negative));
-    let exp10 = exp + point_at as i32;
-    let abs = value.abs();
-    let mut out = String::new();
-    if negative {
-        out.push('-');
-    }
-    if (1e-4..1e16).contains(&abs) {
-        // Plain layout.
-        if exp10 <= 0 {
-            out.push_str("0.");
-            out.push_str(&"0".repeat((-exp10) as usize));
-            out.push_str(digits);
-        } else if exp10 as usize >= digits.len() {
-            out.push_str(digits);
-            out.push_str(&"0".repeat(exp10 as usize - digits.len()));
-            out.push_str(".0");
-        } else {
-            let at = exp10 as usize;
-            out.push_str(&digits[..at]);
-            out.push('.');
-            out.push_str(&digits[at..]);
-        }
-        return out;
-    }
-    // Exponent layout: `d[.ddd]e±XX`.
-    let head: String = digits.chars().take(1).collect();
-    let tail: String = digits.chars().skip(1).collect();
-    out.push_str(&head);
-    if !tail.is_empty() {
-        out.push('.');
-        out.push_str(&tail);
-    }
-    let exp = exp10 - 1;
-    out.push('e');
-    out.push(if exp < 0 { '-' } else { '+' });
-    let mag = exp.abs().to_string();
-    if mag.len() < 2 {
-        out.push('0');
-    }
-    out.push_str(&mag);
-    out
-}
-
-/// CPython `str()` over a parsed JSON value: `None` / `True` / `False`,
-/// decimal ints, [`py_float_repr`] floats, raw strings, and — for
-/// containers — brackets with `repr()` elements (verified live:
-/// `"['INTERNAL']"`, `"{'a': 1}"`).
-fn py_str_value(value: &Value) -> String {
-    match value {
-        Value::Null => "None".to_owned(),
-        Value::Bool(true) => "True".to_owned(),
-        Value::Bool(false) => "False".to_owned(),
-        Value::Number(number) => {
-            if let Some(int) = number.as_i64() {
-                int.to_string()
-            } else if let Some(uint) = number.as_u64() {
-                uint.to_string()
-            } else if number.is_f64() {
-                match number.as_f64() {
-                    Some(float) => py_float_repr(float),
-                    None => number.to_string(),
-                }
-            } else {
-                // Arbitrary-precision integers past `u64`: full digits,
-                // like CPython `str(int)` (never the lossy `as_f64`).
-                number.to_string()
-            }
-        }
-        Value::String(text) => text.clone(),
-        Value::Array(items) => {
-            let inner: Vec<String> = items.iter().map(py_repr_value).collect();
-            format!("[{}]", inner.join(", "))
-        }
-        Value::Object(map) => {
-            let inner: Vec<String> = map
-                .iter()
-                .map(|(key, item)| format!("{}: {}", py_repr_string(key), py_repr_value(item)))
-                .collect();
-            format!("{{{}}}", inner.join(", "))
-        }
-    }
-}
-
-/// CPython `repr()` over a parsed JSON value (container elements and dict
-/// keys use this; see [`py_str_value`]).
-fn py_repr_value(value: &Value) -> String {
-    match value {
-        Value::String(text) => py_repr_string(text),
-        Value::Array(items) => {
-            let inner: Vec<String> = items.iter().map(py_repr_value).collect();
-            format!("[{}]", inner.join(", "))
-        }
-        Value::Object(map) => {
-            let inner: Vec<String> = map
-                .iter()
-                .map(|(key, item)| format!("{}: {}", py_repr_string(key), py_repr_value(item)))
-                .collect();
-            format!("{{{}}}", inner.join(", "))
-        }
-        other => py_str_value(other),
-    }
-}
-
-/// CPython `repr()` of a string: single quotes unless the text holds a
-/// single quote but no double quote (then double quotes), with the
-/// short escapes plus `\xhh` / `\uhhhh` / `\Uhhhhhhhh` for
-/// non-printables (controls, DEL, C1, non-space whitespace; format and
-/// unassigned codepoints stay literal — an accepted approximation, only
-/// reachable inside choice/UUID error text).
-fn py_repr_string(text: &str) -> String {
-    let use_double = text.contains('\'') && !text.contains('"');
-    let quote = if use_double { '"' } else { '\'' };
-    let mut out = String::with_capacity(text.len() + 2);
-    out.push(quote);
-    for ch in text.chars() {
-        if ch == quote {
-            out.push('\\');
-            out.push(ch);
-            continue;
-        }
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            ch if ch.is_control()
-                || (ch as u32) == 0x7f
-                || ((ch as u32) >= 0x80 && (ch as u32) < 0xa0)
-                || (ch.is_whitespace() && ch != ' ') =>
-            {
-                let code = ch as u32;
-                if code < 0x100 {
-                    out.push_str(&format!("\\x{code:02x}"));
-                } else if code < 0x10000 {
-                    out.push_str(&format!("\\u{code:04x}"));
-                } else {
-                    out.push_str(&format!("\\U{code:08x}"));
-                }
-            }
-            ch => out.push(ch),
-        }
-    }
-    out.push(quote);
-    out
-}
 
 /// CPython `==` over parsed JSON values (the sync-lock and
 /// `_changes_on_save` comparisons): `True == 1`, `1 == 1.0`, objects
@@ -1465,14 +1131,14 @@ fn json_number_to_f64(number: &serde_json::Number) -> Option<f64> {
         .or_else(|| number.as_f64())
 }
 
-/// Rewrite every float in a parsed body to its [`py_float_repr`]
+/// Rewrite every float in a parsed body to its [`py_float_repr_probed`]
 /// literal (kept as a `Number`, so ints stay ints and dumps/responses
 /// render the CPython spelling: `1e16` in, `1e+16` out).
 fn normalize_parse_floats(value: &mut Value) {
     match value {
         Value::Number(number) if number.is_f64() => {
             if let Some(float) = number.as_f64() {
-                let literal = py_float_repr(float);
+                let literal = py_float_repr_probed(float);
                 if let Ok(Value::Number(replacement)) = serde_json::from_str::<Value>(&literal) {
                     *number = replacement;
                 }
@@ -1497,11 +1163,8 @@ fn normalize_parse_floats(value: &mut Value) {
 // Tasks: best-effort publishing through the queue
 // ---------------------------------------------------------------------------
 
-/// `issue_activity` Celery wire name (bare `@shared_task` default:
-/// `bgtasks/issue_activities_task.py:1503-1504`).
-pub const ISSUE_ACTIVITY_TASK: &str = "pi_dash.bgtasks.issue_activities_task.issue_activity";
-/// `model_activity` Celery wire name (`bgtasks/webhook_task.py:463-464`).
-pub const MODEL_ACTIVITY_TASK: &str = "pi_dash.bgtasks.webhook_task.model_activity";
+/// Re-exports of the canonical [`pidash_services::domain::activity`] task names.
+pub use pidash_services::domain::activity::{ISSUE_ACTIVITY_TASK, MODEL_ACTIVITY_TASK};
 
 /// Enqueue a worker message for the worker to forward to the broker
 /// (Python-owned task). Best-effort: without a queue the response still
@@ -1542,13 +1205,15 @@ async fn enqueue_soft_delete(pool: &sqlx::PgPool, model: &str, pk: &uuid::Uuid) 
 }
 
 /// `base_host(request, is_app=True)` (`utils/host.py:17-67`): the app
-/// origin for task kwargs, never the inbound host.
+/// origin for task kwargs, never the inbound host. Empty strings fall
+/// through like Python's `or` (PIDASHCONV-1587).
 fn app_origin(state: &AppState) -> String {
-    if let Some(url) = state.settings().urls.app_base_url.clone() {
-        return url;
+    let urls = &state.settings().urls;
+    if let Some(url) = urls.app_base_url.as_deref().filter(|s| !s.is_empty()) {
+        return url.to_owned();
     }
-    if let Some(url) = state.settings().urls.web_url.clone() {
-        return url;
+    if let Some(url) = urls.web_url.as_deref().filter(|s| !s.is_empty()) {
+        return url.to_owned();
     }
     "http://localhost".to_owned()
 }
@@ -2708,33 +2373,6 @@ fn check_uuid(
     }
 }
 
-/// `uuid.UUID(int=…)` over a JSON integer: non-negatives below 2¹²⁸
-/// only (negatives and huge values raise `ValueError`).
-fn uuid_from_json_int(number: &serde_json::Number) -> Option<uuid::Uuid> {
-    if let Some(int) = number.as_i64() {
-        if int < 0 {
-            return None;
-        }
-        return Some(uuid::Uuid::from_u128(int as u128));
-    }
-    if let Some(uint) = number.as_u64() {
-        // `u64` always fits the 128-bit space.
-        let _ = uint;
-        return number
-            .to_string()
-            .parse::<u128>()
-            .ok()
-            .map(uuid::Uuid::from_u128);
-    }
-    // Arbitrary-precision integers past `u64`: `UUID(int=…)` accepts
-    // anything below 2¹²⁸.
-    number
-        .to_string()
-        .parse::<u128>()
-        .ok()
-        .map(uuid::Uuid::from_u128)
-}
-
 /// `uuid.UUID(hex=…)` over a string: dashed, plain-hex, braced, and
 /// `urn:uuid:` spellings (all four probed live through the PK path).
 fn uuid_from_json_hex(text: &str) -> Option<uuid::Uuid> {
@@ -3771,8 +3409,10 @@ async fn render_comment_reaction_map(
         deleted_at: render_dt_str_opt(opt_str(map, "deleted_at")?, tz)?,
         workspace: req_str(map, "workspace_id")?,
         project: req_str(map, "project_id")?,
-        created_at: render_dt_str(&req_str(map, "created_at")?, tz)?,
-        updated_at: render_dt_str(&req_str(map, "updated_at")?, tz)?,
+        created_at: render_rfc3339_in(&req_str(map, "created_at")?, tz)
+            .map_err(|_| Denial::ServerError)?,
+        updated_at: render_rfc3339_in(&req_str(map, "updated_at")?, tz)
+            .map_err(|_| Denial::ServerError)?,
         created_by: opt_str(map, "created_by_id")?.or(opt_str(map, "created_by")?),
         updated_by: opt_str(map, "updated_by_id")?.or(opt_str(map, "updated_by")?),
     })
@@ -4558,90 +4198,6 @@ fn splice_and(sql: &str, predicate: &str) -> String {
     }
 }
 
-/// Insert a `descriptions` row: the comment-save side effect
-/// (`db/models/issue.py:613-617`). Audit comes from the comment save
-/// (`created_by` is the acting user on create, the comment's original
-/// creator on an update-mint; `updated_by` is set only on the latter);
-/// `stripped` arrives already resolved (`None` when the html is empty —
-/// `Description.save` recomputes it).
-#[allow(clippy::too_many_arguments)]
-async fn insert_description(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    workspace_id: &uuid::Uuid,
-    project_id: &uuid::Uuid,
-    created_by: Option<&uuid::Uuid>,
-    updated_by: Option<&uuid::Uuid>,
-    json: &Value,
-    html: &str,
-    stripped: Option<&str>,
-    now: &chrono::DateTime<chrono::Utc>,
-) -> Result<uuid::Uuid, Denial> {
-    let id = uuid::Uuid::new_v4();
-    sqlx::query(
-        r#"INSERT INTO descriptions (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
-            workspace_id, project_id, description_json, description_html, description_binary, description_stripped)
-           VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, $8, $9, NULL, $10)"#,
-    )
-    .bind(id)
-    .bind(now)
-    .bind(now)
-    .bind(created_by)
-    .bind(updated_by)
-    .bind(workspace_id)
-    .bind(project_id)
-    .bind(json)
-    .bind(html)
-    .bind(stripped)
-    .execute(&mut **tx)
-    .await
-    .map_err(integrity_denial)?;
-    Ok(id)
-}
-
-/// Insert an `issue_comments` row: every concrete column, Django's
-/// `objects.create` shape.
-#[allow(clippy::too_many_arguments)]
-async fn insert_comment(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    base: &CommentBaseOwned,
-) -> Result<(), Denial> {
-    sqlx::query(
-        r#"INSERT INTO issue_comments (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
-            project_id, workspace_id, comment_stripped, comment_json, comment_html, description_id,
-            attachments, labels, issue_id, actor_id, access, external_source, external_id,
-            speaker_type, speaker_label, speaker_agent_run_id, edited_at, parent_id)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)"#,
-    )
-    .bind(base.id)
-    .bind(base.created_at)
-    .bind(base.updated_at)
-    .bind(base.created_by)
-    .bind(base.updated_by)
-    .bind(base.deleted_at)
-    .bind(base.project_id)
-    .bind(base.workspace_id)
-    .bind(&base.stripped)
-    .bind(&base.json)
-    .bind(&base.html)
-    .bind(base.description_id)
-    .bind(&base.attachments)
-    .bind(&base.labels)
-    .bind(base.issue_id)
-    .bind(base.actor_id)
-    .bind(&base.access)
-    .bind(base.external_source.as_deref())
-    .bind(base.external_id.as_deref())
-    .bind(&base.speaker_type)
-    .bind(&base.speaker_label)
-    .bind(base.speaker_run_id)
-    .bind(base.edited_at)
-    .bind(base.parent_id)
-    .execute(&mut **tx)
-    .await
-    .map_err(integrity_denial)?;
-    Ok(())
-}
-
 /// The `IssueComment.save()` update path (`issue.py:598-647`): recompute
 /// `comment_stripped`, sync the `Description` triple for the changed
 /// fields (or mint one when unlinked), stamp audit. Returns the saved
@@ -4684,43 +4240,55 @@ async fn save_comment_update(
     let stripped_changed = stripped != stored.stripped;
     let description_id = if description_id.is_none() {
         // Unlinked (or cleared): mint a fresh Description over the new
-        // triple, `None`-when-empty stripped included.
-        let stripped_for_desc = if html.is_empty() {
-            None
-        } else {
-            Some(stripped.as_str())
+        // triple. `Description.objects.create` runs `Description.save`,
+        // which recomputes the stripped text with Django's own
+        // `strip_tags` (entities verbatim, `None`-when-empty —
+        // `description.py:23-29`), discarding the ML value the
+        // comment save passes (PIDASHCONV-1581 item 1).
+        let desc_stripped = description_stripped_for(Some(html.as_str()));
+        let desc = comment_domain::DescriptionValues {
+            id: uuid::Uuid::new_v4(),
+            created_at: *now,
+            updated_at: *now,
+            created_by: stored.created_by,
+            updated_by: Some(*user_id),
+            workspace_id: stored.workspace_id,
+            project_id: stored.project_id,
+            json: &json,
+            html: &html,
+            stripped: desc_stripped.as_deref(),
         };
-        Some(
-            insert_description(
-                tx,
-                &stored.workspace_id,
-                &stored.project_id,
-                stored.created_by.as_ref(),
-                Some(user_id),
-                &json,
-                &html,
-                stripped_for_desc,
-                now,
-            )
-            .await?,
-        )
-    } else {
-        if html_changed || json_changed || stripped_changed {
-            // Queryset `update` bypasses `Description.save`: the values
-            // land verbatim (no `None`-when-empty recompute).
-            sqlx::query(
-                r#"UPDATE descriptions SET description_html = $1, description_stripped = $2,
-                   description_json = $3, updated_by_id = $4, updated_at = $5 WHERE id = $6"#,
-            )
-            .bind(&html)
-            .bind(&stripped)
-            .bind(&json)
-            .bind(user_id)
-            .bind(now)
-            .bind(description_id)
-            .execute(&mut **tx)
+        comment_domain::insert_description_values(&mut **tx, &desc)
             .await
-            .map_err(|_| Denial::ServerError)?;
+            .map_err(integrity_denial)?;
+        Some(desc.id)
+    } else {
+        // Queryset `update` bypasses `Description.save`: the values
+        // land verbatim (no `None`-when-empty recompute) — but only
+        // the changed subset syncs (`issue.py:637-646`, PIDASHCONV-1581
+        // item 2), so an unchanged field keeps the description row's
+        // own value even after a re-link.
+        if let Some(desc_id) = description_id {
+            if html_changed || json_changed || stripped_changed {
+                if html_changed {
+                    comment_domain::sync_description_html(&mut **tx, desc_id, &html)
+                        .await
+                        .map_err(|_| Denial::ServerError)?;
+                }
+                if stripped_changed {
+                    comment_domain::sync_description_stripped(&mut **tx, desc_id, &stripped)
+                        .await
+                        .map_err(|_| Denial::ServerError)?;
+                }
+                if json_changed {
+                    comment_domain::sync_description_json(&mut **tx, desc_id, &json)
+                        .await
+                        .map_err(|_| Denial::ServerError)?;
+                }
+                comment_domain::touch_synced_description(&mut **tx, desc_id, Some(*user_id), *now)
+                    .await
+                    .map_err(|_| Denial::ServerError)?;
+            }
         }
         description_id
     };
@@ -4750,34 +4318,30 @@ async fn save_comment_update(
         edited_at: edited_at.unwrap_or(stored.edited_at),
         parent_id: parent.unwrap_or(stored.parent_id),
     };
-    sqlx::query(
-        r#"UPDATE issue_comments SET updated_at = $1, updated_by_id = $2, deleted_at = $3,
-           comment_stripped = $4, comment_json = $5, comment_html = $6, description_id = $7,
-           attachments = $8, labels = $9, actor_id = $10, access = $11,
-           external_source = $12, external_id = $13, speaker_type = $14, speaker_label = $15,
-           speaker_agent_run_id = $16, edited_at = $17, parent_id = $18
-           WHERE id = $19"#,
+    comment_domain::save_app_comment_update(
+        &mut **tx,
+        &comment_domain::AppCommentUpdate {
+            id: base.id,
+            updated_at: base.updated_at,
+            updated_by: base.updated_by,
+            deleted_at: base.deleted_at,
+            stripped: &base.stripped,
+            json: &base.json,
+            html: &base.html,
+            description_id: base.description_id,
+            attachments: &base.attachments,
+            labels: &base.labels,
+            actor_id: base.actor_id,
+            access: &base.access,
+            external_source: base.external_source.as_deref(),
+            external_id: base.external_id.as_deref(),
+            speaker_type: &base.speaker_type,
+            speaker_label: &base.speaker_label,
+            speaker_agent_run_id: base.speaker_run_id,
+            edited_at: base.edited_at,
+            parent_id: base.parent_id,
+        },
     )
-    .bind(base.updated_at)
-    .bind(base.updated_by)
-    .bind(base.deleted_at)
-    .bind(&base.stripped)
-    .bind(&base.json)
-    .bind(&base.html)
-    .bind(base.description_id)
-    .bind(&base.attachments)
-    .bind(&base.labels)
-    .bind(base.actor_id)
-    .bind(&base.access)
-    .bind(base.external_source.as_deref())
-    .bind(base.external_id.as_deref())
-    .bind(&base.speaker_type)
-    .bind(&base.speaker_label)
-    .bind(base.speaker_run_id)
-    .bind(base.edited_at)
-    .bind(base.parent_id)
-    .bind(base.id)
-    .execute(&mut **tx)
     .await
     .map_err(integrity_denial)?;
     Ok(base)
@@ -5079,43 +4643,70 @@ async fn comment_create(
         Ok(tx) => tx,
         Err(_) => return Denial::ServerError.into_response(),
     };
-    if let Err(error) = insert_comment(&mut tx, &base).await {
-        return error.into_response();
+    // Domain twins, in Django order. The description stripped value
+    // is the `Description.save` recompute (Django's own `strip_tags`,
+    // entities verbatim, `None`-when-empty — `description.py:23-29`),
+    // not the comment's ML text (PIDASHCONV-1581 item 1).
+    // `deleted_at` binds validated client input, as before.
+    let desc_stripped = description_stripped_for(Some(base.html.as_str()));
+    let rows = comment_domain::CommentRows {
+        id: base.id,
+        description_id: uuid::Uuid::new_v4(),
+        created_at: base.created_at,
+        updated_at: base.updated_at,
+        desc_created_at: now,
+        desc_updated_at: now,
+        workspace_id: base.workspace_id,
+        project_id: base.project_id,
+        issue_id: base.issue_id,
+        actor_id: base.actor_id,
+        created_by: base.created_by,
+        updated_by: base.updated_by,
+        deleted_at: base.deleted_at,
+        html: &base.html,
+        json: &base.json,
+        stripped: &base.stripped,
+        desc_stripped: desc_stripped.as_deref(),
+        access: &base.access,
+        speaker_type: &base.speaker_type,
+        speaker_label: &base.speaker_label,
+        speaker_agent_run_id: base.speaker_run_id,
+        external_id: base.external_id.as_deref(),
+        external_source: base.external_source.as_deref(),
+        parent_id: base.parent_id,
+        attachments: &base.attachments,
+        labels: &base.labels,
+        edited_at: base.edited_at,
+    };
+    if let Err(error) = comment_domain::insert_comment_row(&mut *tx, &rows).await {
+        return integrity_denial(error).into_response();
     }
-    let stripped_for_desc = if base.html.is_empty() {
-        None
-    } else {
-        Some(base.stripped.as_str())
+    let desc = comment_domain::DescriptionValues {
+        id: rows.description_id,
+        created_at: now,
+        updated_at: now,
+        created_by: Some(user_id),
+        updated_by: None,
+        workspace_id,
+        project_id,
+        json: &base.json,
+        html: &base.html,
+        stripped: rows.desc_stripped,
     };
-    let description_id = match insert_description(
-        &mut tx,
-        &workspace_id,
-        &project_id,
-        Some(&user_id),
-        None,
-        &base.json,
-        &base.html,
-        stripped_for_desc,
-        &now,
-    )
-    .await
-    {
-        Ok(id) => id,
-        Err(error) => return error.into_response(),
-    };
+    if let Err(error) = comment_domain::insert_description_values(&mut *tx, &desc).await {
+        return integrity_denial(error).into_response();
+    }
     // `update_fields=["description_id"]` writes that column only: the
     // `auto_now` stamp is skipped (in memory AND in the row — Django's
     // well-known `update_fields` gotcha), while `BaseModel.save` still
     // assigns `updated_by` on the in-memory instance.
-    if sqlx::query("UPDATE issue_comments SET description_id = $1 WHERE id = $2")
-        .bind(description_id)
-        .bind(base.id)
-        .execute(&mut *tx)
+    if comment_domain::link_comment_description(&mut *tx, base.id, rows.description_id)
         .await
         .is_err()
     {
         return Denial::ServerError.into_response();
     }
+    let description_id = rows.description_id;
     if tx.commit().await.is_err() {
         return Denial::ServerError.into_response();
     }
@@ -5150,23 +4741,23 @@ async fn comment_create(
     activity.insert("notification".to_owned(), Value::Bool(true));
     activity.insert("origin".to_owned(), Value::String(origin.clone()));
     enqueue_kwargs(&pool, ISSUE_ACTIVITY_TASK, activity).await;
-    let mut model = Map::new();
-    model.insert(
-        "model_name".to_owned(),
-        Value::String("issue_comment".to_owned()),
-    );
-    model.insert("model_id".to_owned(), Value::String(base.id.to_string()));
     // Task bytes render the raw QueryDict (PIDASHCONV-763): form list
     // fields dump as last-wins scalars. In place — validation is done
     // and `body` moves into the payload below.
     if is_html {
         shared_body::project_list_scalars(&mut body, ENGAGE_BODY_SPEC.list_fields);
     }
-    model.insert("requested_data".to_owned(), Value::Object(body));
-    model.insert("current_instance".to_owned(), Value::Null);
-    model.insert("actor_id".to_owned(), Value::String(user_id.to_string()));
-    model.insert("slug".to_owned(), Value::String(slug));
-    model.insert("origin".to_owned(), Value::String(origin));
+    // Shared `model_activity` kernel (PIDASHCONV-1623): the same seven
+    // keys in the same order (`current_instance` is `None` on create).
+    let model = model_activity_kwargs(
+        "issue_comment",
+        &base.id.to_string(),
+        Value::Object(body),
+        None,
+        &user_id.to_string(),
+        &slug,
+        Some(&origin),
+    );
     enqueue_kwargs(&pool, MODEL_ACTIVITY_TASK, model).await;
     match serde_json::to_string(&rendered) {
         Ok(text) => json_response(StatusCode::CREATED, text),
@@ -5505,25 +5096,23 @@ async fn comment_partial_update(
     activity.insert("notification".to_owned(), Value::Bool(true));
     activity.insert("origin".to_owned(), Value::String(origin.clone()));
     enqueue_kwargs(&pool, ISSUE_ACTIVITY_TASK, activity).await;
-    let mut model = Map::new();
-    model.insert(
-        "model_name".to_owned(),
-        Value::String("issue_comment".to_owned()),
-    );
-    model.insert("model_id".to_owned(), Value::String(pk.to_string()));
     // Same QueryDict projection as `requested_data` above (PIDASHCONV-763).
     // In place — validation is done and `body` moves below.
     if is_html {
         shared_body::project_list_scalars(&mut body, ENGAGE_BODY_SPEC.list_fields);
     }
-    model.insert("requested_data".to_owned(), Value::Object(body));
-    model.insert(
-        "current_instance".to_owned(),
-        Value::String(current_instance),
+    // Shared `model_activity` kernel (PIDASHCONV-1623): the same seven
+    // keys in the same order (the before-image snapshot string rides
+    // `current_instance` on update).
+    let model = model_activity_kwargs(
+        "issue_comment",
+        &pk.to_string(),
+        Value::Object(body),
+        Some(&current_instance),
+        &user_id.to_string(),
+        &slug,
+        Some(&origin),
     );
-    model.insert("actor_id".to_owned(), Value::String(user_id.to_string()));
-    model.insert("slug".to_owned(), Value::String(slug));
-    model.insert("origin".to_owned(), Value::String(origin));
     enqueue_kwargs(&pool, MODEL_ACTIVITY_TASK, model).await;
     match render_base_comment(&pool, &base, &tenant.timezone, None).await {
         Ok(value) => match serde_json::to_string(&value) {
@@ -6858,6 +6447,28 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn origin_state(app_base_url: Option<&str>, web_url: Option<&str>) -> AppState {
+        let mut settings = pidash_db::config::Settings::test_defaults();
+        settings.urls.app_base_url = app_base_url.map(str::to_owned);
+        settings.urls.web_url = web_url.map(str::to_owned);
+        AppState::with_settings("test", settings)
+    }
+
+    /// `base_host(request, is_app=True)` treats `""` as missing
+    /// (PIDASHCONV-1587): an empty `APP_BASE_URL` falls through to
+    /// `WEB_URL`. (The localhost fallback for unset-everywhere is a
+    /// separate, deliberate-looking deviation — out of scope.)
+    #[test]
+    fn app_origin_falls_through_empty_strings() {
+        let web = "https://web.example.invalid";
+        let state = origin_state(Some(""), Some(web));
+        assert_eq!(app_origin(&state), web);
+        let state = origin_state(Some("https://app.example.invalid"), Some(web));
+        assert_eq!(app_origin(&state), "https://app.example.invalid");
+        let state = origin_state(Some(""), Some(""));
+        assert_eq!(app_origin(&state), "http://localhost");
+    }
+
     /// The positional offsets transcribe the builder select lists; pin
     /// the column counts so drift fails loudly.
     #[test]
@@ -6935,19 +6546,6 @@ mod tests {
     }
 
     #[test]
-    fn python_dumps_matches_cpython() {
-        let value = json!({"b": [1, "x\ny"], "a": Value::Null, "u": "caf\u{e9}"});
-        assert_eq!(
-            python_dumps(&value),
-            r#"{"b": [1, "x\ny"], "a": null, "u": "caf\u00e9"}"#
-        );
-        assert_eq!(
-            python_dumps(&json!({"comment_id": "abc"})),
-            r#"{"comment_id": "abc"}"#
-        );
-    }
-
-    #[test]
     fn parse_body_shapes_match_drf() {
         assert!(parse_body(b"").unwrap().is_empty());
         let map = parse_body(br#"{"reaction": "+1"}"#).unwrap();
@@ -6971,17 +6569,10 @@ mod tests {
         }
     }
 
+    // The `str`/`repr` asserts moved to `pidash_compat::py` with
+    // `py_str_value` (PIDASHCONV-1623); the equality asserts stay.
     #[test]
-    fn py_value_semantics_match_cpython() {
-        assert_eq!(py_str_value(&Value::Null), "None");
-        assert_eq!(py_str_value(&json!(true)), "True");
-        assert_eq!(py_str_value(&json!(77)), "77");
-        assert_eq!(py_str_value(&json!("internal")), "internal");
-        assert_eq!(py_str_value(&json!(["INTERNAL"])), "['INTERNAL']");
-        assert_eq!(py_str_value(&json!({"a": 1})), "{'a': 1}");
-        assert_eq!(py_repr_value(&json!("don't")), "\"don't\"");
-        assert_eq!(py_repr_value(&json!("say \"hi\"")), "'say \"hi\"'");
-        assert_eq!(py_repr_value(&json!("a\nb")), "'a\\nb'");
+    fn py_json_eq_matches_cpython() {
         assert!(py_json_eq(&json!(true), &json!(1)));
         assert!(py_json_eq(&json!(1), &json!(1.0)));
         assert!(py_json_eq(
@@ -7072,136 +6663,6 @@ mod tests {
         ] {
             assert!(!is_valid_url(bad), "{bad}");
         }
-    }
-
-    #[test]
-    fn py_float_repr_matches_cpython_oracle() {
-        // CPython `repr` over edge + random f64s (seed 654): parsing
-        // each spelling must reproduce it exactly.
-        for text in [
-            "0.0",
-            "-0.0",
-            "1.0",
-            "-1.0",
-            "0.1",
-            "-0.1",
-            "0.5",
-            "4.5",
-            "77.0",
-            "1e+16",
-            "-1e+16",
-            "1000000000000000.0",
-            "9999999999999998.0",
-            "0.0001",
-            "9.9999e-05",
-            "1e-05",
-            "1.5e-07",
-            "1.23",
-            "123.456",
-            "1.1",
-            "2.2",
-            "0.3",
-            "1e+300",
-            "1.7976931348623157e+308",
-            "5e-324",
-            "2.2250738585072014e-308",
-            "1e+21",
-            "123456789.12345679",
-            "0.00010000000001",
-            "3.141592653589793",
-            "100.0",
-            "1000000.0",
-            "1000000.0",
-            "1234567890000000.0",
-            "1.0000000000000002",
-            "2.0000000000000004",
-            "3.1969326087014466e+19",
-            "-648.4462954478394",
-            "2.7257935151841477e+19",
-            "579.4076537460154",
-            "8.527238532839549e+19",
-            "-913.3955515106092",
-            "8.896161802149298e+19",
-            "-715.3670336061672",
-            "3.588060462234755e+19",
-            "435.64988671404353",
-            "7.755666951748308e+19",
-            "-689.2765889623878",
-            "-4.330334504373883e+19",
-            "-816.9972547462557",
-            "-7.212821885073056e+19",
-            "-1679.6052986552581",
-            "3.2445178360908284e+19",
-            "-204.03326175159876",
-            "-8.659247373857653e+18",
-            "1208.8390033969868",
-            "-4.647260496917678e+19",
-            "2331.221077226743",
-            "8.5327628826864e+19",
-            "1001.189002479752",
-            "-8.234019824386068e+19",
-            "-495.73367760484905",
-            "9.352414724532316e+19",
-            "346.0259035320625",
-            "-7.1336788737953415e+19",
-            "-956.186083621841",
-            "-7.678412411071945e+19",
-            "743.1470832768787",
-            "-2.5012238015527862e+19",
-            "-151.39194187298384",
-            "5.543620478186435e+19",
-            "-402.4753197702496",
-            "-9.86234000471552e+19",
-            "-1687.6484285668644",
-            "-1.2613779274247045e+19",
-            "295.5344355622931",
-            "-4.708884174573601e+18",
-            "143.2457353449458",
-            "9.272274689849475e+19",
-            "782.9417038372993",
-            "-2.365484285927129e+19",
-            "213.25467548742972",
-            "-4.4287013372000076e+19",
-            "-75.27500601863878",
-            "7.3002688662026355e+19",
-            "-617.7363223782181",
-            "2.8132118711075865e+19",
-            "642.045311657188",
-            "-4.9760184971786445e+19",
-            "-493.23593034675645",
-            "-5.92865673699603e+19",
-            "1271.787532431871",
-            "8.862838211447603e+18",
-            "-102.63510865808792",
-            "2.4099300144340025e+19",
-            "-2281.3345229971756",
-            "-5.346252045636608e+19",
-            "2132.4041415069833",
-            "-6.090543569457227e+19",
-            "1863.0368182127777",
-            "6.0170257457244996e+19",
-            "-182.18689918793999",
-            "6.525439356052767e+17",
-            "-1362.5914219885572",
-            "5.1796889258414604e+19",
-            "-319.24195464384303",
-            "-8.253703237953189e+19",
-            "287.06500363070336",
-            "-2.591301605754159e+19",
-            "1392.893079979731",
-            "2.655060505738576e+18",
-            "2036.4351785039644",
-            "7.427269069333139e+19",
-            "1347.4365990857013",
-            "-8.434791962696217e+19",
-            "-186.0700574057584",
-        ] {
-            let value: f64 = text.parse().unwrap();
-            assert_eq!(py_float_repr(value), text, "{text}");
-        }
-        assert_eq!(py_float_repr(f64::NAN), "nan");
-        assert_eq!(py_float_repr(f64::INFINITY), "inf");
-        assert_eq!(py_float_repr(f64::NEG_INFINITY), "-inf");
     }
 
     #[test]

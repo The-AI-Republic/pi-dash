@@ -270,3 +270,38 @@ def test_issue_patch_strips_ammonia_default_tag_attributes(api, world):
     )
     assert response.status_code == 200, response.text
     assert response.json()["description_html"] == SANITIZER_PROBE_CLEAN
+
+
+def test_advanced_search_datetimes_utc_for_non_utc_user(api, db, world):
+    """PIDASHCONV-1382: ``IssueAdvancedSearchEndpoint`` copies raw
+    ``.values()`` datetimes into a plain dict (issue.py:2912-2914) with no
+    DRF ``DateTimeField``, so ``TimezoneMixin`` has no effect and DRF's
+    ``JSONEncoder`` renders them UTC with a ``Z`` suffix no matter what
+    zone the API-key user is in.
+    """
+    db.execute(
+        "UPDATE users SET user_timezone = %s WHERE id = %s",
+        ("Asia/Kolkata", world["owner"]["id"]),
+    )
+    db.execute(
+        "UPDATE issues SET completed_at = %s WHERE id = %s",
+        ("2026-10-02T23:17:12.025108+00:00", world["issue"]["id"]),
+    )
+    response = api.get(
+        f"/api/v1/workspaces/{world['workspace']['slug']}/work-items/search/advanced/",
+        params={"q": "Contract"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["count"] >= 1
+    assert len(body["results"]) >= 1
+    for row in body["results"]:
+        assert row["created_at"].endswith("Z"), row["created_at"]
+        assert row["updated_at"].endswith("Z"), row["updated_at"]
+        if row["completed_at"] is not None:
+            assert row["completed_at"].endswith("Z"), row["completed_at"]
+    completed = [row for row in body["results"] if row["completed_at"] is not None]
+    assert completed, "expected at least one completed row"
+    assert "2026-10-02T23:17:12.025108Z" in [
+        row["completed_at"] for row in completed
+    ]

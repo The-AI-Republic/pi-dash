@@ -460,6 +460,80 @@ def test_invitations_create_empty_400(world):
     assert resp.json() == {"error": "Emails are required"}
 
 
+def test_invitations_create_bad_later_batch_writes_nothing(world, db):
+    # PIDASHCONV-1376: bulk_create(batch_size=10) runs inside one
+    # transaction, so a bad row in batch 2 rolls back batch 1: the
+    # whole request writes all invitations or none.
+    import uuid
+    client, _, ws, project = world.full_stack()
+    tag = uuid.uuid4().hex[:8]
+    emails = [
+        {"email": "atomic%s-%02d@example.com" % (tag, n), "role": 15}
+        for n in range(1, 11)
+    ]
+    emails.append({"email": "atomic%s-11@example.com" % tag, "role": None})
+    resp = client.post(
+        f"/api/workspaces/{ws['slug']}/projects/{project['id']}/invitations/",
+        json={"emails": emails})
+    assert resp.status_code == 400
+    assert resp.json() == {"error": "The payload is not valid"}
+    with db.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT COUNT(*) AS n FROM project_member_invites WHERE project_id=%s",
+            (str(project["id"]),))
+        assert cur.fetchone()["n"] == 0
+
+
+def test_invitations_create_bad_role_string_in_later_batch_writes_nothing(world, db):
+    # PIDASHCONV-1376: a role int() conversion failure in batch 2
+    # (ValueError -> 500) rolls back batch 1.
+    import uuid
+    client, _, ws, project = world.full_stack()
+    tag = uuid.uuid4().hex[:8]
+    emails = [
+        {"email": "atomic%s-%02d@example.com" % (tag, n), "role": 15}
+        for n in range(1, 11)
+    ]
+    emails.append({"email": "atomic%s-11@example.com" % tag, "role": "abc"})
+    resp = client.post(
+        f"/api/workspaces/{ws['slug']}/projects/{project['id']}/invitations/",
+        json={"emails": emails})
+    assert resp.status_code == 500
+    assert resp.json() == {"error": "Something went wrong please try again later"}
+    with db.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT COUNT(*) AS n FROM project_member_invites WHERE project_id=%s",
+            (str(project["id"]),))
+        assert cur.fetchone()["n"] == 0
+
+
+def test_invitations_create_batch1_db_error_beats_batch2_conversion_error(world, db):
+    # PIDASHCONV-1376: Django prepares each batch's values just before
+    # inserting that batch, so a batch-1 INSERT failure (400) wins over
+    # a batch-2 role conversion failure (500). There is no upfront
+    # validation of all roles; an implementation that validates every
+    # role before the first INSERT answers 500 here instead of 400.
+    import uuid
+    client, _, ws, project = world.full_stack()
+    tag = uuid.uuid4().hex[:8]
+    emails = [
+        {"email": "atomic%s-%02d@example.com" % (tag, n), "role": 15}
+        for n in range(1, 11)
+    ]
+    emails[4] = {"email": "atomic%s-05@example.com" % tag, "role": None}
+    emails.append({"email": "atomic%s-11@example.com" % tag, "role": "abc"})
+    resp = client.post(
+        f"/api/workspaces/{ws['slug']}/projects/{project['id']}/invitations/",
+        json={"emails": emails})
+    assert resp.status_code == 400
+    assert resp.json() == {"error": "The payload is not valid"}
+    with db.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT COUNT(*) AS n FROM project_member_invites WHERE project_id=%s",
+            (str(project["id"]),))
+        assert cur.fetchone()["n"] == 0
+
+
 def test_invitations_destroy_204(world, db):
     from _harness import seed as _seed
     client, _, ws, project = world.full_stack()
@@ -549,6 +623,38 @@ def test_join_declined_message(world):
         json={"email": user["email"], "accepted": False})
     assert resp.status_code == 200
     assert resp.json() == {"message": "Project Invitation was not accepted"}
+
+
+def test_join_accepted_string_false_accepts(world, db):
+    # PIDASHCONV-1377: Django stores "False" as false (BooleanField)
+    # but branches on the raw string's truthiness, so it accepts and
+    # creates the memberships (the workspace join keeps this too).
+    from _harness import seed as _seed
+    client, _, ws, project = world.full_stack()
+    newcomer = world.user("strfalse")
+    inv = _seed.project_invite(world.conn, project["id"], ws["id"],
+                               email=newcomer["email"])
+    newcomer_client = world.client(newcomer)
+    resp = newcomer_client.post(
+        f"/api/workspaces/{ws['slug']}/projects/{project['id']}/join/{inv['id']}/",
+        json={"email": newcomer["email"], "accepted": "False"})
+    assert resp.status_code == 200
+    assert resp.json() == {"message": "Project Invitation Accepted"}
+    with db.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT accepted, responded_at FROM project_member_invites WHERE id=%s",
+            (str(inv["id"]),))
+        row = cur.fetchone()
+        assert row["accepted"] is False
+        assert row["responded_at"] is not None
+        cur.execute(
+            "SELECT is_active FROM workspace_members WHERE workspace_id=%s AND member_id=%s",
+            (str(ws["id"]), str(newcomer["id"])))
+        assert cur.fetchone()["is_active"] is True
+        cur.execute(
+            "SELECT role FROM project_members WHERE project_id=%s AND member_id=%s",
+            (str(project["id"]), str(newcomer["id"])))
+        assert cur.fetchone()["role"] == 15
 
 
 def test_join_wrong_email_403(world):

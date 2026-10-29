@@ -40,7 +40,10 @@ use sqlx::Row;
 
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
+use crate::uuid_path::{classify_uuid_segment, UuidSegment};
 
+use pidash_compat::response::json_response;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 use pidash_services::app_views_search::{permissions, queries_views};
 
 // ---------------------------------------------------------------------------
@@ -169,8 +172,6 @@ pub const NOT_FOUND_DETAIL_BODY: &str = r#"{"detail":"Not found."}"#;
 pub const PROJECT_NOT_FOUND_BODY: &str = r#"{"detail":"Project not found"}"#;
 /// `handle_exception`'s `IntegrityError` branch.
 pub const INVALID_PAYLOAD_BODY: &str = r#"{"error":"The payload is not valid"}"#;
-/// `handle_exception`'s generic 500 branch.
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// DRF `get_object()` miss through a viewset queryset: the `Http404`
 /// message carries the model name (`rest_framework/generics.py`).
 pub const VIEW_PUT_MISSING_BODY: &str = r#"{"detail":"No IssueView matches the given query."}"#;
@@ -537,6 +538,24 @@ fn shape_datetime(value: Option<&Value>, timezone: &Tz) -> String {
     match chrono::DateTime::parse_from_rfc3339(text) {
         Ok(aware) => {
             let rendered = crate::serializer::render_datetime_in(&aware, timezone);
+            serde_json::to_string(&rendered).unwrap_or("null".to_owned())
+        }
+        Err(_) => serde_json::to_string(value.unwrap_or(&Value::Null)).unwrap_or("null".to_owned()),
+    }
+}
+
+/// Render one `row_to_json` datetime in UTC with a trailing `Z`, matching
+/// DRF's `JSONEncoder` fallback for a raw `datetime` (no `DateTimeField`
+/// zone conversion). `ViewIssueListSerializer.to_representation` returns the
+/// model's raw datetimes, so the actor zone must not be applied here.
+fn shape_datetime_utc(value: Option<&Value>) -> String {
+    let text = match value {
+        Some(Value::String(text)) => text,
+        _ => return "null".to_owned(),
+    };
+    match chrono::DateTime::parse_from_rfc3339(text) {
+        Ok(aware) => {
+            let rendered = crate::serializer::render_datetime(&aware);
             serde_json::to_string(&rendered).unwrap_or("null".to_owned())
         }
         Err(_) => serde_json::to_string(value.unwrap_or(&Value::Null)).unwrap_or("null".to_owned()),
@@ -1414,34 +1433,68 @@ struct ViewWrite {
 
 /// DRF field errors for `name`: required, non-blank, max 255. DRF renders
 /// `serializer.errors` as `{"name": [...]}` with `ErrorDetail` strings.
+/// `IssueViewSerializer` makes `name` a `CharField` with the default
+/// `trim_whitespace=True` (`app/serializers/view.py:56-69`): numbers coerce
+/// via `str()`, the value strips with Python `str.strip`, a blank
+/// remainder is `blank`, and `max_length` applies to the stripped value
+/// (`rest_framework/fields.py` `CharField.run_validation` /
+/// `to_internal_value`).
 fn validate_name(body: &Map<String, Value>, partial: bool) -> Result<Option<String>, Denial> {
-    match body.get("name") {
-        None if partial => Ok(None),
-        None => Err(Denial::Raw(
-            StatusCode::BAD_REQUEST,
-            r#"{"name":["This field is required."]}"#.to_owned(),
-        )),
-        Some(Value::Null) => Err(Denial::Raw(
-            StatusCode::BAD_REQUEST,
-            r#"{"name":["This field may not be null."]}"#.to_owned(),
-        )),
-        Some(Value::String(name)) if name.is_empty() => Err(Denial::Raw(
+    let raw = match body.get("name") {
+        None if partial => return Ok(None),
+        None => {
+            return Err(Denial::Raw(
+                StatusCode::BAD_REQUEST,
+                r#"{"name":["This field is required."]}"#.to_owned(),
+            ));
+        }
+        Some(Value::Null) => {
+            return Err(Denial::Raw(
+                StatusCode::BAD_REQUEST,
+                r#"{"name":["This field may not be null."]}"#.to_owned(),
+            ));
+        }
+        Some(Value::String(name)) => name.clone(),
+        Some(Value::Number(number)) => number.to_string(),
+        Some(_) => {
+            return Err(Denial::Raw(
+                StatusCode::BAD_REQUEST,
+                r#"{"name":["Not a valid string."]}"#.to_owned(),
+            ));
+        }
+    };
+    let stripped = raw.trim_matches(is_py_strip_ws);
+    if stripped.is_empty() {
+        return Err(Denial::Raw(
             StatusCode::BAD_REQUEST,
             r#"{"name":["This field may not be blank."]}"#.to_owned(),
-        )),
-        Some(Value::String(name))
-            if name.chars().count()
-                > pidash_db::app_views_search::models::issue_view::NAME_MAX_LENGTH =>
-        {
-            Err(Denial::Raw(
-                StatusCode::BAD_REQUEST,
-                r#"{"name":["Ensure this field has no more than 255 characters."]}"#.to_owned(),
-            ))
-        }
-        Some(Value::String(name)) => Ok(Some(name.clone())),
-        Some(_) => Err(Denial::Raw(
+        ));
+    }
+    if stripped.chars().count() > pidash_db::app_views_search::models::issue_view::NAME_MAX_LENGTH {
+        return Err(Denial::Raw(
             StatusCode::BAD_REQUEST,
-            r#"{"name":["Not a valid string."]}"#.to_owned(),
+            r#"{"name":["Ensure this field has no more than 255 characters."]}"#.to_owned(),
+        ));
+    }
+    Ok(Some(stripped.to_owned()))
+}
+
+/// DRF `description` coercion (`TextField(blank=True)` becomes a
+/// `CharField` with `allow_blank=True` and no `max_length`): numbers
+/// coerce via `str()`, the value strips with Python `str.strip`, and a
+/// blank remainder stores as `""`. Shared by create and update so every
+/// write path matches Django (PIDASHCONV-1447).
+fn coerce_description(value: &Value) -> Result<String, Denial> {
+    match value {
+        Value::String(text) => Ok(text.trim_matches(is_py_strip_ws).to_owned()),
+        Value::Number(number) => Ok(number.to_string()),
+        Value::Null => Err(Denial::Raw(
+            StatusCode::BAD_REQUEST,
+            r#"{"description":["This field may not be null."]}"#.to_owned(),
+        )),
+        _ => Err(Denial::Raw(
+            StatusCode::BAD_REQUEST,
+            r#"{"description":["Not a valid string."]}"#.to_owned(),
         )),
     }
 }
@@ -1686,19 +1739,7 @@ async fn insert_view(
     ))?;
     let description = match &write.description {
         None => String::new(),
-        Some(Value::String(text)) => text.clone(),
-        Some(Value::Null) => {
-            return Err(Denial::Raw(
-                StatusCode::BAD_REQUEST,
-                r#"{"description":["This field may not be null."]}"#.to_owned(),
-            ));
-        }
-        Some(_) => {
-            return Err(Denial::Raw(
-                StatusCode::BAD_REQUEST,
-                r#"{"description":["Not a valid string."]}"#.to_owned(),
-            ));
-        }
+        Some(value) => coerce_description(value)?,
     };
     // `archived_at`: writable DRF `DateTimeField` (`null=True`), so a
     // missing or explicit-null value stores NULL; strings parse through
@@ -1841,24 +1882,9 @@ async fn apply_view_update(
         }
     }
     if let Some(description) = &write.description {
-        match description {
-            Value::String(text) => {
-                binds.push(text.clone());
-                sets.push(format!("description = ${}", binds.len() + 4));
-            }
-            Value::Null => {
-                return Err(Denial::Raw(
-                    StatusCode::BAD_REQUEST,
-                    r#"{"description":["This field may not be null."]}"#.to_owned(),
-                ));
-            }
-            _ => {
-                return Err(Denial::Raw(
-                    StatusCode::BAD_REQUEST,
-                    r#"{"description":["Not a valid string."]}"#.to_owned(),
-                ));
-            }
-        }
+        let text = coerce_description(description)?;
+        binds.push(text);
+        sets.push(format!("description = ${}", binds.len() + 4));
     }
     maybe_set!(write.filters, "filters");
     maybe_set!(write.display_filters, "display_filters");
@@ -1905,14 +1931,6 @@ async fn apply_view_update(
         .await?
         .ok_or(Denial::ServerError)?;
     Ok(body)
-}
-
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("view response")
 }
 
 /// Best-effort deferred publish of a retrieve visit (the space intake
@@ -2121,8 +2139,10 @@ async fn workspace_retrieve(
     extension: Option<axum::Extension<SessionHandle>>,
     req: axum::extract::Request,
 ) -> Result<Response, Denial> {
-    // Routing first (Django's `<uuid:pk>` 404 precedes auth).
-    if pk.parse::<uuid::Uuid>().is_err() {
+    // Routing first (Django's `<uuid:pk>` 404 precedes auth): only the
+    // canonical spelling is served; any other spelling proxies to Django
+    // for its own resolver 404.
+    if !matches!(classify_uuid_segment(&pk), UuidSegment::Canonical(_)) {
         return Ok(crate::edge::proxy(State(state), req).await);
     }
     let resolved = actor(&state, extension).await?;
@@ -2185,7 +2205,10 @@ async fn workspace_patch(
     extension: Option<axum::Extension<SessionHandle>>,
     req: axum::extract::Request,
 ) -> Result<Response, Denial> {
-    if pk.parse::<uuid::Uuid>().is_err() {
+    // Routing first (Django's `<uuid:pk>` 404 precedes auth): only the
+    // canonical spelling is served; any other spelling proxies to Django
+    // for its own resolver 404.
+    if !matches!(classify_uuid_segment(&pk), UuidSegment::Canonical(_)) {
         return Ok(crate::edge::proxy(State(state), req).await);
     }
     let resolved = actor(&state, extension).await?;
@@ -2229,7 +2252,10 @@ async fn workspace_put(
     extension: Option<axum::Extension<SessionHandle>>,
     req: axum::extract::Request,
 ) -> Result<Response, Denial> {
-    if pk.parse::<uuid::Uuid>().is_err() {
+    // Routing first (Django's `<uuid:pk>` 404 precedes auth): only the
+    // canonical spelling is served; any other spelling proxies to Django
+    // for its own resolver 404.
+    if !matches!(classify_uuid_segment(&pk), UuidSegment::Canonical(_)) {
         return Ok(crate::edge::proxy(State(state), req).await);
     }
     let resolved = actor(&state, extension).await?;
@@ -2273,7 +2299,10 @@ async fn workspace_destroy(
     extension: Option<axum::Extension<SessionHandle>>,
     req: axum::extract::Request,
 ) -> Result<Response, Denial> {
-    if pk.parse::<uuid::Uuid>().is_err() {
+    // Routing first (Django's `<uuid:pk>` 404 precedes auth): only the
+    // canonical spelling is served; any other spelling proxies to Django
+    // for its own resolver 404.
+    if !matches!(classify_uuid_segment(&pk), UuidSegment::Canonical(_)) {
         return Ok(crate::edge::proxy(State(state), req).await);
     }
     let resolved = actor(&state, extension).await?;
@@ -2489,7 +2518,10 @@ async fn project_retrieve(
     extension: Option<axum::Extension<SessionHandle>>,
     req: axum::extract::Request,
 ) -> Result<Response, Denial> {
-    if pk.parse::<uuid::Uuid>().is_err() {
+    // Routing first (Django's `<uuid:pk>` 404 precedes auth): only the
+    // canonical spelling is served; any other spelling proxies to Django
+    // for its own resolver 404.
+    if !matches!(classify_uuid_segment(&pk), UuidSegment::Canonical(_)) {
         return Ok(crate::edge::proxy(State(state), req).await);
     }
     let resolved = actor(&state, extension).await?;
@@ -2582,7 +2614,10 @@ async fn project_patch(
     extension: Option<axum::Extension<SessionHandle>>,
     req: axum::extract::Request,
 ) -> Result<Response, Denial> {
-    if pk.parse::<uuid::Uuid>().is_err() {
+    // Routing first (Django's `<uuid:pk>` 404 precedes auth): only the
+    // canonical spelling is served; any other spelling proxies to Django
+    // for its own resolver 404.
+    if !matches!(classify_uuid_segment(&pk), UuidSegment::Canonical(_)) {
         return Ok(crate::edge::proxy(State(state), req).await);
     }
     let resolved = actor(&state, extension).await?;
@@ -2625,7 +2660,10 @@ async fn project_put(
     extension: Option<axum::Extension<SessionHandle>>,
     req: axum::extract::Request,
 ) -> Result<Response, Denial> {
-    if pk.parse::<uuid::Uuid>().is_err() {
+    // Routing first (Django's `<uuid:pk>` 404 precedes auth): only the
+    // canonical spelling is served; any other spelling proxies to Django
+    // for its own resolver 404.
+    if !matches!(classify_uuid_segment(&pk), UuidSegment::Canonical(_)) {
         return Ok(crate::edge::proxy(State(state), req).await);
     }
     let resolved = actor(&state, extension).await?;
@@ -2675,7 +2713,10 @@ async fn project_destroy(
     extension: Option<axum::Extension<SessionHandle>>,
     req: axum::extract::Request,
 ) -> Result<Response, Denial> {
-    if pk.parse::<uuid::Uuid>().is_err() {
+    // Routing first (Django's `<uuid:pk>` 404 precedes auth): only the
+    // canonical spelling is served; any other spelling proxies to Django
+    // for its own resolver 404.
+    if !matches!(classify_uuid_segment(&pk), UuidSegment::Canonical(_)) {
         return Ok(crate::edge::proxy(State(state), req).await);
     }
     let resolved = actor(&state, extension).await?;
@@ -2863,7 +2904,10 @@ async fn favorite_destroy(
     extension: Option<axum::Extension<SessionHandle>>,
     req: axum::extract::Request,
 ) -> Result<Response, Denial> {
-    if view_id.parse::<uuid::Uuid>().is_err() {
+    // Routing first (Django's `<uuid:view_id>` 404 precedes auth): only
+    // the canonical spelling is served; any other spelling proxies to
+    // Django for its own resolver 404.
+    if !matches!(classify_uuid_segment(&view_id), UuidSegment::Canonical(_)) {
         return Ok(crate::edge::proxy(State(state), req).await);
     }
     let resolved = actor(&state, extension).await?;
@@ -2922,37 +2966,85 @@ const FILTER_JOINS: &[(&str, &str)] = &[
     ("issue_subscribers", "issue_subscribers"),
 ];
 
-/// True when every `"alias".` reference in the filter SQL is an
-/// `IS NULL` / `IS NOT NULL` test (the `__isnull` predicates): Django
-/// LEFT-joins those, INNER-joins everything else.
-fn alias_nullable_only(where_sql: &str, alias: &str) -> bool {
-    let marker = format!("\"{alias}\".");
+/// True when the column right after an `alias.` reference is followed by
+/// an `IS NULL` / `IS NOT NULL` test (a `__isnull` predicate).
+fn ref_is_null_test(after: &str) -> bool {
+    let ident_len = after
+        .chars()
+        .take_while(|char| char.is_alphanumeric() || *char == '_' || *char == '"')
+        .map(|char| char.len_utf8())
+        .sum::<usize>();
+    let tail = after[ident_len..].trim_start();
+    tail.starts_with("IS NULL") || tail.starts_with("IS NOT NULL")
+}
+
+/// Byte offsets of every `alias.` reference in the filter SQL, in either
+/// fragment spelling: quoted (`"alias".`, the sea-query filterset kernel)
+/// or unquoted (`alias.`, `legacy_sql` columns). The unquoted spelling
+/// needs a word boundary before the alias: without it the `issue_mentions`
+/// table name would match the `issue_mention` alias (and `issue_assignees`
+/// the `issue_assignee` one).
+fn alias_ref_starts(where_sql: &str, alias: &str) -> Vec<usize> {
+    let mut starts = Vec::new();
+    let quoted = format!("\"{alias}\".");
     let mut rest = where_sql;
-    while let Some(start) = rest.find(&marker) {
-        let after = &rest[start + marker.len()..];
-        let ident_len = after
-            .chars()
-            .take_while(|char| char.is_alphanumeric() || *char == '_' || *char == '"')
-            .map(|char| char.len_utf8())
-            .sum::<usize>();
-        let tail = after[ident_len..].trim_start();
-        if !(tail.starts_with("IS NULL") || tail.starts_with("IS NOT NULL")) {
-            return false;
-        }
-        rest = &after[ident_len..];
+    let mut offset = 0;
+    while let Some(start) = rest.find(&quoted) {
+        starts.push(offset + start);
+        let consumed = start + quoted.len();
+        rest = &rest[consumed..];
+        offset += consumed;
     }
-    true
+    let bare = format!("{alias}.");
+    let mut rest = where_sql;
+    let mut offset = 0;
+    while let Some(start) = rest.find(&bare) {
+        let absolute = offset + start;
+        let boundary = absolute == 0
+            || !matches!(
+                where_sql[..absolute].chars().next_back(),
+                Some(char) if char.is_alphanumeric() || char == '_'
+            );
+        if boundary {
+            starts.push(absolute);
+        }
+        let consumed = start + bare.len();
+        rest = &rest[consumed..];
+        offset += consumed;
+    }
+    starts
+}
+
+/// True when the filter SQL references `alias.` in either spelling
+/// (see [`alias_ref_starts`]).
+fn alias_referenced(where_sql: &str, alias: &str) -> bool {
+    !alias_ref_starts(where_sql, alias).is_empty()
+}
+
+/// True when every `alias.` reference in the filter SQL is an
+/// `IS NULL` / `IS NOT NULL` test (the `__isnull` predicates): Django
+/// LEFT-joins those, INNER-joins everything else. Both spellings count
+/// (see [`alias_ref_starts`]).
+fn alias_nullable_only(where_sql: &str, alias: &str) -> bool {
+    alias_ref_starts(where_sql, alias).iter().all(|start| {
+        let marker_len = if where_sql[*start..].starts_with('"') {
+            alias.len() + 3
+        } else {
+            alias.len() + 1
+        };
+        ref_is_null_test(&where_sql[start + marker_len..])
+    })
 }
 
 /// Shape one view-issues row in `ViewIssueListSerializer` source order
-/// (`app/serializers/view.py:28-55`): datetimes re-render in the request
-/// zone, `sort_order` through Python-float formatting, `estimate_point`
+/// (`app/serializers/view.py:28-55`): the four datetimes render as raw UTC
+/// `...Z` (DRF `JSONEncoder`, not a `DateTimeField`), `sort_order` through
+/// Python-float formatting, `estimate_point`
 /// / `created_by` / `updated_by` from their `*_id` columns, `state__group`
 /// None-guarded, and the three id arrays from the prefetch maps.
 #[allow(clippy::too_many_arguments)]
 fn shape_view_issue(
     row: &Map<String, Value>,
-    timezone: &Tz,
     assignees: &[String],
     labels: &[String],
     modules: &[String],
@@ -2974,7 +3066,7 @@ fn shape_view_issue(
     let _ = write!(
         out,
         ",\"completed_at\":{}",
-        shape_datetime(row.get("completed_at"), timezone)
+        shape_datetime_utc(row.get("completed_at"))
     );
     let _ = write!(out, ",\"estimate_point\":{}", str_of("estimate_point"));
     let _ = write!(out, ",\"priority\":{}", str_of("priority"));
@@ -2994,12 +3086,12 @@ fn shape_view_issue(
     let _ = write!(
         out,
         ",\"created_at\":{}",
-        shape_datetime(row.get("created_at"), timezone)
+        shape_datetime_utc(row.get("created_at"))
     );
     let _ = write!(
         out,
         ",\"updated_at\":{}",
-        shape_datetime(row.get("updated_at"), timezone)
+        shape_datetime_utc(row.get("updated_at"))
     );
     let _ = write!(out, ",\"created_by\":{}", str_of("created_by"));
     let _ = write!(out, ",\"updated_by\":{}", str_of("updated_by"));
@@ -3012,7 +3104,7 @@ fn shape_view_issue(
     let _ = write!(
         out,
         ",\"archived_at\":{}",
-        shape_datetime(row.get("archived_at"), timezone)
+        shape_datetime_utc(row.get("archived_at"))
     );
     let _ = write!(out, ",\"state__group\":{}", str_of("state__group"));
     let _ = write!(
@@ -3093,7 +3185,9 @@ async fn view_issues_list(
         .map_err(|_| Denial::ServerError)?;
     let mut legacy_parts: Vec<String> = Vec::new();
     for (name, value) in legacy.predicates() {
-        let fragment = crate::app_issues::legacy_sql(&mut binder, name, value)
+        // UTC keeps this slice's current truncation; its own actor-zone
+        // fix follows the app_issues pattern separately.
+        let fragment = crate::app_issues::legacy_sql(&mut binder, name, value, &chrono_tz::UTC)
             .map_err(|_| Denial::ServerError)?;
         legacy_parts.push(fragment);
     }
@@ -3105,32 +3199,56 @@ async fn view_issues_list(
 
     // Ordering (`:242-244`): the rewritten paginator key over the
     // annotation expressions, `NULLS LAST`, `issue.created_at` tiebreak —
-    // exactly `OffsetPaginator.get_result`.
+    // exactly `OffsetPaginator.get_result`. The view annotates the plain
+    // `Func(Count)` form (empty counts render `0`), so its count keys
+    // order `0`-style. A filter that referenced the cycle bridge lends
+    // its join to the cycle-name traversal (Django reuses it, scope
+    // included, instead of joining again); otherwise the traversal joins
+    // fresh.
     let order_param =
         crate::app_issues::query_last(&query, "order_by").unwrap_or("-created_at".to_owned());
     let spec = queries_views::view_issues_order_sql(&order_param);
-    let (key_expr, descending) = crate::app_issues::order_key(&spec.out_param, &order_param)
-        .map_err(|_| Denial::ServerError)?;
-    let direction = if descending { "DESC" } else { "ASC" };
-    let order_by_sql = format!("({key_expr}) {direction} NULLS LAST, issue.created_at DESC");
-
-    let mut list_sql = queries_views::view_issues_list_sql(
-        complex_where.as_deref(),
-        legacy_where.as_deref(),
-        &order_by_sql,
+    let filter_sql = format!(
+        "{} {}",
+        complex_where.as_deref().unwrap_or(""),
+        legacy_where.as_deref().unwrap_or(""),
     );
-    let mut count_sql =
-        queries_views::view_issues_count_sql(complex_where.as_deref(), legacy_where.as_deref());
+    // Both alias spellings count: legacy predicates spell the bridge
+    // unquoted (`issue_cycle.`), and the traversal must reuse the
+    // filter's scoped join for those too — a cycle filter's `issue_cycle`
+    // join wins over joining fresh (see [`alias_referenced`]).
+    let cycle_bridge = alias_referenced(&filter_sql, "issue_cycle").then_some("issue_cycle");
+    let key = crate::app_issues::order_key(&spec.out_param, &order_param, cycle_bridge, false)
+        .map_err(|_| Denial::ServerError)?;
+    let direction = if key.descending { "DESC" } else { "ASC" };
+    let order_by_sql = format!(
+        "({expr}) {direction} NULLS LAST, issue.created_at DESC",
+        expr = key.expr,
+    );
+
     // Relation joins for filter references (Django's `filter()` joins):
     // INNER when referenced positively, LEFT when only `__isnull`-tested.
-    let where_probe = format!("{list_sql} {count_sql}");
+    // The probe is the filter fragments only: the base statement never
+    // mentions these aliases, and the ORDER BY key resolves to `issue.*`,
+    // `state.*`, self-contained subqueries, or the cycle-name traversal
+    // over the filter's own bridge join (`order_key`) — never a new
+    // alias of its own. The builders splice the fragment after the `pm`
+    // join, before WHERE — appending it after the WHERE clause is a
+    // syntax error.
+    let mut filter_probe = String::new();
+    if let Some(complex) = complex_where.as_deref() {
+        filter_probe.push_str(complex);
+        filter_probe.push(' ');
+    }
+    if let Some(legacy) = legacy_where.as_deref() {
+        filter_probe.push_str(legacy);
+    }
     let mut joins = String::new();
     for (table, alias) in FILTER_JOINS {
-        let marker = format!("\"{alias}\".");
-        if !where_probe.contains(&marker) {
+        if !alias_referenced(&filter_probe, alias) {
             continue;
         }
-        let kind = if alias_nullable_only(&where_probe, alias) {
+        let kind = if alias_nullable_only(&filter_probe, alias) {
             "LEFT JOIN"
         } else {
             "INNER JOIN"
@@ -3139,15 +3257,34 @@ async fn view_issues_list(
             " {kind} {table} AS {alias} ON {alias}.issue_id = issue.id"
         ));
     }
-    if where_probe.contains("\"issue_intake\".") {
+    if alias_referenced(&filter_probe, "issue_intake") {
         joins.push_str(
             " INNER JOIN intake_issues AS issue_intake ON issue_intake.issue_id = issue.id",
         );
     }
-    if !joins.is_empty() {
-        list_sql = list_sql.replacen(" ORDER BY ", &format!("{joins} ORDER BY "), 1);
-        count_sql = format!("{count_sql}{joins}");
+    let mut list_sql = queries_views::view_issues_list_sql(
+        complex_where.as_deref(),
+        legacy_where.as_deref(),
+        &order_by_sql,
+        &joins,
+    );
+    // The cycle-name traversal joins ride on the row query only, ahead of
+    // the top-level `WHERE` (anchored on the builder's slug predicate —
+    // the annotation subqueries carry their own `WHERE`s, so a plain
+    // first-`WHERE` splice would land inside the select list). Fan-out
+    // rows flow through the `LIMIT`/`OFFSET` window like Django's.
+    if !key.joins.is_empty() {
+        list_sql = list_sql.replacen(
+            "WHERE w.slug = ($1)",
+            &format!("{} WHERE w.slug = ($1)", key.joins),
+            1,
+        );
     }
+    let count_sql = queries_views::view_issues_count_sql(
+        complex_where.as_deref(),
+        legacy_where.as_deref(),
+        &joins,
+    );
     // The queries layer's `project_permission_filter` names the issue
     // alias `i`, but every statement it composes into aliases the table
     // `issue` — the fragment as shipped references a missing alias and no
@@ -3252,7 +3389,6 @@ async fn view_issues_list(
             .unwrap_or_default();
         shaped.push(shape_view_issue(
             row,
-            &timezone,
             assignee_map.get(id).unwrap_or(&empty),
             label_map.get(id).unwrap_or(&empty),
             module_map.get(id).unwrap_or(&empty),
@@ -3489,5 +3625,147 @@ mod pidashconv_923_tests {
         );
         assert_eq!(message.kwargs.len(), 1);
         assert_eq!(message.kwargs.get("using"), Some(&Value::Null));
+    }
+}
+
+#[cfg(test)]
+mod pidashconv_1446_tests {
+    use super::{alias_nullable_only, alias_referenced};
+
+    #[test]
+    fn alias_detection_covers_quoted_and_unquoted_spellings() {
+        // Rich `filters=` fragments quote the alias (sea-query);
+        // `legacy_sql` columns spell it bare. Both must trigger the join.
+        assert!(alias_referenced(
+            "\"issue_assignee\".\"assignee_id\" = 'x'",
+            "issue_assignee"
+        ));
+        assert!(alias_referenced(
+            "issue_assignee.assignee_id IN ($3)",
+            "issue_assignee"
+        ));
+        assert!(alias_referenced(
+            "(issue_subscribers.subscriber_id IN ($3))",
+            "issue_subscribers"
+        ));
+        assert!(!alias_referenced(
+            "issue.state_id IN ($3)",
+            "issue_assignee"
+        ));
+        // Table names must not match their alias prefix: `issue_mentions`
+        // / `issue_assignees` carry no dot after the alias text.
+        assert!(!alias_referenced(
+            "SELECT 1 FROM issue_mentions WHERE issue_id = $1",
+            "issue_mention"
+        ));
+        assert!(!alias_referenced(
+            "x_issue_assignee.assignee_id IN ($3)",
+            "issue_assignee"
+        ));
+    }
+
+    #[test]
+    fn nullable_only_covers_both_spellings() {
+        // `__isnull` predicates LEFT-join; anything else INNER-joins.
+        assert!(alias_nullable_only(
+            "issue_assignee.assignee_id IS NULL",
+            "issue_assignee"
+        ));
+        assert!(alias_nullable_only(
+            "\"issue_assignee\".\"deleted_at\" IS NOT NULL",
+            "issue_assignee"
+        ));
+        assert!(!alias_nullable_only(
+            "issue_assignee.assignee_id IN ($3)",
+            "issue_assignee"
+        ));
+        assert!(!alias_nullable_only(
+            "\"issue_assignee\".\"assignee_id\" = 'x'",
+            "issue_assignee"
+        ));
+        // One positive reference anywhere forces INNER.
+        assert!(!alias_nullable_only(
+            "issue_assignee.assignee_id IS NULL AND issue_assignee.assignee_id IN ($3)",
+            "issue_assignee"
+        ));
+    }
+}
+
+#[cfg(test)]
+mod pidashconv_1447_tests {
+    use super::{coerce_description, validate_name, Denial};
+    use serde_json::{Map, Value};
+
+    fn body(name: Value) -> Map<String, Value> {
+        let mut body = Map::new();
+        body.insert("name".to_owned(), name);
+        body
+    }
+
+    fn raw_body(result: Result<Option<String>, Denial>) -> String {
+        match result {
+            Err(Denial::Raw(_, body)) => body,
+            other => panic!("expected a raw 400, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn name_trims_coerces_and_rejects_blank() {
+        // DRF `CharField` strips with Python `str.strip()`, which also
+        // removes U+001C-U+001F; `max_length` applies to the stripped
+        // value and numbers coerce via `str()` (PIDASHCONV-1447).
+        assert_eq!(
+            validate_name(&body(Value::String("  x  ".to_owned())), false).unwrap(),
+            Some("x".to_owned())
+        );
+        assert_eq!(
+            validate_name(&body(Value::from(123)), false).unwrap(),
+            Some("123".to_owned())
+        );
+        let padded = format!("{}\u{1c}", "y".repeat(255));
+        assert_eq!(
+            validate_name(&body(Value::String(padded)), false).unwrap(),
+            Some("y".repeat(255))
+        );
+        for blank in ["", "   ", "\u{1f}"] {
+            assert_eq!(
+                raw_body(validate_name(&body(Value::String(blank.to_owned())), false)),
+                r#"{"name":["This field may not be blank."]}"#,
+                "blank input {blank:?} must 400"
+            );
+        }
+        assert_eq!(
+            raw_body(validate_name(&body(Value::from("z".repeat(256))), false)),
+            r#"{"name":["Ensure this field has no more than 255 characters."]}"#
+        );
+        for invalid in [Value::Bool(true), Value::Null] {
+            let body = raw_body(validate_name(&body(invalid), false));
+            assert!(
+                body.contains("Not a valid string.") || body.contains("may not be null"),
+                "unexpected body {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn description_trims_and_coerces_with_blank_allowed() {
+        // `TextField(blank=True)`: a blank remainder stores as `""`.
+        assert_eq!(
+            coerce_description(&Value::String("notes\n".to_owned())).unwrap(),
+            "notes"
+        );
+        assert_eq!(
+            coerce_description(&Value::String("   ".to_owned())).unwrap(),
+            ""
+        );
+        assert_eq!(coerce_description(&Value::from(7)).unwrap(), "7");
+        assert!(matches!(
+            coerce_description(&Value::Bool(false)),
+            Err(Denial::Raw(_, _))
+        ));
+        assert!(matches!(
+            coerce_description(&Value::Null),
+            Err(Denial::Raw(_, _))
+        ));
     }
 }

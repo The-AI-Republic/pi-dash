@@ -2,8 +2,8 @@
   "bugs": [],
   "data": {
     "fragments": {
-      "assembled_len": 53594,
-      "assembled_sha256": "c4a63023bb1ca4f249017b7e99f2403b7e51cbf9bf8b9910e00bba2e6f0e3331",
+      "assembled_len": 54780,
+      "assembled_sha256": "eea2ba89650f68ca0e1a7e919ef803dddb373b7c9c9086a8bcb3776c1c9a9b2a",
       "fragment_count": 14,
       "fragments_in_order": [
         "01_intro.md",
@@ -334,8 +334,8 @@
         {
           "allows_personal_override": false,
           "allows_workspace_override": false,
-          "body_len": 27264,
-          "body_sha256": "39cfc284adbf2029a7e9a400808791fe9614a580d60c2ab2f8d25d8b9f5588b3",
+          "body_len": 28450,
+          "body_sha256": "aa8e551457260983850ebc884c83d836297b6fea8ce0e8cad9c8f700cb599123",
           "customizable": "locked",
           "is_locked": true,
           "is_overridable": false,
@@ -568,9 +568,9 @@
     }
   },
   "fixture_id": "FIX-registry",
-  "how_produced": "executed against the real Python under pi_dash.settings.test (Django 4.2): pure units with no DB; DB-backed units against scratch database pidash_prompt_fx (migrated from this tree). Throwaway generators: /tmp/fxP_nodb.py, /tmp/fxP_nodb2.py, /tmp/fxP_db1.py, /tmp/fxP_db2.py (+ /tmp/fxP_setup.py world). PIDASHCONV-1058 re-sync: content-derived fields regenerated from origin/main@3267ceb9 via /tmp/fx1058_gen.py (registry.py + recipes.py loaded by path; stdlib-only, no Django). PDASHOSS01-234 re-sync: content-derived fields + work types regenerated from the work-type branch @28421e56e via fx234_gen.py (registry.py + recipes.py + work_types.py imported without Django).",
+  "how_produced": "executed against the real Python under pi_dash.settings.test (Django 4.2): pure units with no DB; DB-backed units against scratch database pidash_prompt_fx (migrated from this tree). Throwaway generators: /tmp/fxP_nodb.py, /tmp/fxP_nodb2.py, /tmp/fxP_db1.py, /tmp/fxP_db2.py (+ /tmp/fxP_setup.py world). PIDASHCONV-1058 re-sync: content-derived fields regenerated from origin/main@3267ceb9 via /tmp/fx1058_gen.py (registry.py + recipes.py loaded by path; stdlib-only, no Django). PIDASHCONV-1534 re-sync: pidash-cli body_len/body_sha256 + fragments assembled_len/assembled_sha256 regenerated from origin/main@0a6fb8eca via /tmp/fx1534_gen.py (registry.py + fragments/__init__.py loaded by path; stdlib-only, no Django). PDASHOSS01-234 re-sync: content-derived fields + work types regenerated from the work-type branch @28421e56e via fx234_gen.py (registry.py + recipes.py + work_types.py imported without Django). Merge of rust-dev into the work-type branch: pidash-cli body_len/body_sha256 recomputed from the merged section file.",
   "notes": [],
-  "ported_from": "28421e56e",
+  "ported_from": "0a6fb8eca0f459802045f22e02af5748a6bdc768",
   "trace": [
     "prompting/registry.py:26 (SECTIONS_DIR), 28-56 (tiers), 62-66 (MAX_SECTION_BODY_LENGTH), 102-147 (_parse_front_matter), 150-161 (_load_registry), 166-178 (REGISTRY/get_section/all_sections)",
     "prompting/fragments/__init__.py:37-55 (FRAGMENT_GLOB, fragment_paths, assemble)"

@@ -31,7 +31,7 @@
 //! `assign_rejected_busy`, `finalize_run_terminal`,
 //! `post_failure_comment` sections).
 
-use pidash_db::app_pages::strip::ml_strip_tags;
+use pidash_db::app_pages::strip::{django_strip_tags, ml_strip_tags};
 use pidash_db::runner_runs::agent_run;
 use pidash_types::runner_runs::{
     enrich_run_error, merge_usage, AgentRunStatus, RefusalCategory, RunnerInfo,
@@ -82,54 +82,9 @@ const LIVE_STATE_COLUMNS: &[&str] = &[
     "usage",
     "llm_model",
     "turn_count",
+    "agent_health",
+    "agent_last_activity_at",
     "updated_at",
-];
-
-/// `issue_comments` columns in Django `_meta` order (captured from
-/// `IssueComment._meta.concrete_fields`): the comment `INSERT` lists
-/// all 24.
-const COMMENT_COLUMNS: &[&str] = &[
-    "created_at",
-    "updated_at",
-    "created_by_id",
-    "updated_by_id",
-    "deleted_at",
-    "id",
-    "project_id",
-    "workspace_id",
-    "comment_stripped",
-    "comment_json",
-    "comment_html",
-    "description_id",
-    "attachments",
-    "labels",
-    "issue_id",
-    "actor_id",
-    "access",
-    "external_source",
-    "external_id",
-    "speaker_type",
-    "speaker_label",
-    "speaker_agent_run_id",
-    "edited_at",
-    "parent_id",
-];
-
-/// `descriptions` columns in Django `_meta` order (captured from
-/// `Description._meta.concrete_fields`).
-const DESCRIPTION_COLUMNS: &[&str] = &[
-    "created_at",
-    "updated_at",
-    "created_by_id",
-    "updated_by_id",
-    "deleted_at",
-    "id",
-    "workspace_id",
-    "project_id",
-    "description_json",
-    "description_html",
-    "description_binary",
-    "description_stripped",
 ];
 
 /// How a lifecycle plan fails. Each variant is a Python exception the
@@ -436,8 +391,9 @@ impl CommentPlan {
 /// Bindings for the comment `INSERT`: the fetched ids plus the plan.
 /// `created_at`/`updated_at` each bind their own `now()` (two
 /// `pre_save` calls); `created_by/updated_by` bind the ambient
-/// request user, `None` on lifecycle paths (daemon endpoints and
-/// workers carry no `crum` user).
+/// request user on request-inline lifecycle drains (the runner owner
+/// on daemon endpoints, the requester on web paths), `None` on worker
+/// paths (workers carry no `crum` user).
 #[derive(Debug, Clone, PartialEq)]
 pub struct CommentInsert {
     pub comment_id: Uuid,
@@ -448,54 +404,6 @@ pub struct CommentInsert {
     pub created_by_id: Option<Uuid>,
     pub updated_by_id: Option<Uuid>,
     pub plan: CommentPlan,
-}
-
-/// Comment `INSERT` (`IssueComment.objects.create`): all 24 columns in
-/// `_meta` order, values bound positionally — `$1`/`$2` now,
-/// `$3`/`$4` ambient user, `$5` null, `$6` comment id, `$7`/`$8`
-/// project/workspace, `$9` stripped, `$10` `{}`, `$11` html, `$12`
-/// null (linked after the description insert), `$13`/`$14` `[]`,
-/// `$15` issue, `$16` actor, `$17` `"INTERNAL"`, `$18`/`$19` null,
-/// `$20` speaker, `$21` label, `$22` speaker run, `$23`/`$24` null.
-/// No `RETURNING` (client-assigned UUID key).
-pub fn comment_insert_sql() -> String {
-    let columns = COMMENT_COLUMNS
-        .iter()
-        .map(|c| format!("\"{c}\""))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let params = (1..=COMMENT_COLUMNS.len())
-        .map(|n| format!("${n}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("INSERT INTO \"issue_comments\" ({columns}) VALUES ({params})")
-}
-
-/// Description `INSERT` (`IssueComment.save`): all 12 columns — `$1`/`$2`
-/// now, `$3`/`$4` ambient user (the passed defaults are discarded by
-/// `BaseModel.save` — a ported quirk), `$5` null, `$6` new id,
-/// `$7`/`$8` workspace/project, `$9` `{}`, `$10` html, `$11` null,
-/// `$12` Django-stripped text.
-pub fn description_insert_sql() -> String {
-    let columns = DESCRIPTION_COLUMNS
-        .iter()
-        .map(|c| format!("\"{c}\""))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let params = (1..=DESCRIPTION_COLUMNS.len())
-        .map(|n| format!("${n}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("INSERT INTO \"descriptions\" ({columns}) VALUES ({params})")
-}
-
-/// Description link-back (`IssueComment.save`): single-column update —
-/// `update_fields=["description_id"]` writes nothing else (auto_now is
-/// *not* force-included). Params: `$1` description id, `$2` comment id.
-/// Zero rows raise `DatabaseError` in Django; the executing layer maps
-/// that to its row-missing error.
-pub fn comment_description_link_sql() -> &'static str {
-    "UPDATE \"issue_comments\" SET \"description_id\" = $1 WHERE \"issue_comments\".\"id\" = $2"
 }
 
 /// `html.escape(str, quote=True)`: what `format_html` applies to each
@@ -513,99 +421,6 @@ fn escape_html(text: &str) -> String {
         }
     }
     out
-}
-
-/// Django's `django.utils.html.strip_tags` (what `Description.save`
-/// recomputes with): loop `_strip_once` while both `<` and `>` remain,
-/// stopping when an iteration stops removing `<`. Entities pass
-/// through verbatim. Mirrors the `api::space::sanitize::strip_tags`
-/// twin, which this crate cannot import (crate graph runs
-/// `types` → `db` → `services` → `api`); the depth-guard
-/// `SuspiciousOperation` arms are omitted there and here — generated
-/// comment HTML can never trigger them.
-fn django_strip_tags(value: &str) -> String {
-    let mut current = value.to_owned();
-    loop {
-        if !(current.contains('<') && current.contains('>')) {
-            break;
-        }
-        let next = django_strip_once(&current);
-        if next.matches('<').count() == current.matches('<').count() {
-            break;
-        }
-        current = next;
-    }
-    current
-}
-
-/// One Django `_strip_once` pass: collect text and verbatim entity
-/// references, skip tags (quote-aware), comments and declarations.
-fn django_strip_once(value: &str) -> String {
-    let bytes = value.as_bytes();
-    let mut out = String::with_capacity(value.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] != b'<' {
-            // `<` is ASCII, so byte detection never splits a
-            // multi-byte sequence; entities pass through verbatim.
-            let ch = value[index..].chars().next().expect("char boundary");
-            out.push(ch);
-            index += ch.len_utf8();
-            continue;
-        }
-        if value[index..].starts_with("<!--") {
-            if let Some(end) = value[index..].find("-->") {
-                index += end + 3;
-            } else {
-                // Unterminated comment: bogus-comments to EOF.
-                break;
-            }
-            continue;
-        }
-        if value[index..].starts_with("<!") || value[index..].starts_with("<?") {
-            if let Some(end) = find_tag_end(&value[index..]) {
-                index += end;
-            } else {
-                out.push('<');
-                index += 1;
-            }
-            continue;
-        }
-        // A `<` followed by ASCII alpha or `/` opens a tag; anything
-        // else is literal text.
-        let opener = value[index + 1..].chars().next().unwrap_or('\0');
-        if opener.is_ascii_alphabetic() || opener == '/' {
-            if let Some(end) = find_tag_end(&value[index..]) {
-                index += end;
-                continue;
-            }
-        }
-        out.push('<');
-        index += 1;
-    }
-    out
-}
-
-/// Byte length of `<…>` at `text[0] == '<'`, respecting
-/// single/double quotes; `None` when unterminated.
-fn find_tag_end(text: &str) -> Option<usize> {
-    let bytes = text.as_bytes();
-    let mut quote: Option<u8> = None;
-    let mut index = 1;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        if let Some(q) = quote {
-            if byte == q {
-                quote = None;
-            }
-        } else if byte == b'"' || byte == b'\'' {
-            quote = Some(byte);
-        } else if byte == b'>' {
-            return Some(index + 1);
-        }
-        index += 1;
-    }
-    None
 }
 
 /// Pause phase-1 writes (`apply_run_paused:191-195`): status becomes
@@ -1899,12 +1714,14 @@ mod tests {
              \"runner_live_state\".\"usage\", \
              \"runner_live_state\".\"llm_model\", \
              \"runner_live_state\".\"turn_count\", \
+             \"runner_live_state\".\"agent_health\", \
+             \"runner_live_state\".\"agent_last_activity_at\", \
              \"runner_live_state\".\"updated_at\" \
              FROM \"runner_live_state\" \
              WHERE (\"runner_live_state\".\"observed_run_id\" = $1 AND \
              \"runner_live_state\".\"runner_id\" = $2) LIMIT 1"
         );
-        assert_eq!(LIVE_STATE_COLUMNS.len(), 12);
+        assert_eq!(LIVE_STATE_COLUMNS.len(), 14);
     }
 
     #[test]
@@ -2064,22 +1881,6 @@ mod tests {
             runner_busy_update_sql(),
             "UPDATE \"runner\" SET \"status\" = $1 WHERE \"runner\".\"id\" = $2"
         );
-        let comment = comment_insert_sql();
-        assert_eq!(COMMENT_COLUMNS.len(), 24);
-        assert!(comment.starts_with("INSERT INTO \"issue_comments\" (\"created_at\", "));
-        assert!(comment.contains("\"speaker_agent_run_id\", \"edited_at\", \"parent_id\""));
-        assert!(comment.ends_with(
-            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, \
-             $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)"
-        ));
-        let description = description_insert_sql();
-        assert_eq!(DESCRIPTION_COLUMNS.len(), 12);
-        assert!(description.starts_with("INSERT INTO \"descriptions\" (\"created_at\", "));
-        assert!(description.ends_with("VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)"));
-        assert_eq!(
-            comment_description_link_sql(),
-            "UPDATE \"issue_comments\" SET \"description_id\" = $1 WHERE \"issue_comments\".\"id\" = $2"
-        );
     }
 
     #[test]
@@ -2098,6 +1899,8 @@ mod tests {
                 "usage",
                 "llm_model",
                 "turn_count",
+                "agent_health",
+                "agent_last_activity_at",
                 "updated_at",
             ]
         );
@@ -2108,51 +1911,5 @@ mod tests {
                 "read column {column} selected"
             );
         }
-        assert_eq!(
-            COMMENT_COLUMNS.to_vec(),
-            [
-                "created_at",
-                "updated_at",
-                "created_by_id",
-                "updated_by_id",
-                "deleted_at",
-                "id",
-                "project_id",
-                "workspace_id",
-                "comment_stripped",
-                "comment_json",
-                "comment_html",
-                "description_id",
-                "attachments",
-                "labels",
-                "issue_id",
-                "actor_id",
-                "access",
-                "external_source",
-                "external_id",
-                "speaker_type",
-                "speaker_label",
-                "speaker_agent_run_id",
-                "edited_at",
-                "parent_id",
-            ]
-        );
-        assert_eq!(
-            DESCRIPTION_COLUMNS.to_vec(),
-            [
-                "created_at",
-                "updated_at",
-                "created_by_id",
-                "updated_by_id",
-                "deleted_at",
-                "id",
-                "workspace_id",
-                "project_id",
-                "description_json",
-                "description_html",
-                "description_binary",
-                "description_stripped",
-            ]
-        );
     }
 }

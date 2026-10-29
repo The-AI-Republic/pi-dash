@@ -66,17 +66,14 @@
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
 use std::collections::{BTreeMap, HashMap};
-use std::io::Write;
+use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
-use axum::http::{header, HeaderMap, StatusCode};
-use axum::response::Response;
+use axum::http::{HeaderMap, StatusCode};
 use chrono_tz::Tz;
-use serde::Serialize;
 use serde_json::{Map, Value};
 use sqlx::Row;
 
-use pidash_db::app_pages::strip::sync_description_stripped;
 use pidash_db::tasks_ticker::models::issue_agent_ticker::{
     IssueAgentTicker, COLUMNS as TICKER_COLUMNS, TABLE as TICKER_TABLE,
 };
@@ -87,12 +84,16 @@ use pidash_services::app_issues::{
     IssueDetailBaseRow, IssueDetailRow, ListParams, ParseOptions, GITHUB_ISSUE_SYNC_PROBE_SQL,
     GIT_ISSUE_SYNC_PROBE_SQL,
 };
+use pidash_services::domain::activity::TaskEnqueueHook;
+use pidash_services::domain::issues as domain_issues;
+use pidash_services::domain::transition::IssueTransitionHook;
+use pidash_services::domain::{self, WriteActor, WriteCtx, WriteScope};
 use pidash_services::orchestration::blockers::{
     has_open_blockers_sql, relations_summary, summary_sql, BlockerRow,
 };
 use pidash_services::orchestration::clock::ProjectClockPolicy;
 use pidash_services::orchestration::creation::STATE_SELECT_SQL;
-use pidash_services::orchestration::entries::{FireOutcome, FireRequest, CLOCK_POLICY_SQL};
+use pidash_services::orchestration::entries::CLOCK_POLICY_SQL;
 use pidash_types::orchestration::StateRef;
 
 use super::queries_core::{archive_retrieve_sql, archive_scope_where, ARCHIVE_JOINS};
@@ -102,11 +103,14 @@ use super::{
     legacy_sql, multi_map, order_key, query_last, render_condition, resolve_project_id, Binder,
     Denial, FilteredSet, Gate, HandlerResult, ListContext, QueryMap, RELATION_JOINS,
 };
+use crate::domain_hooks::AppTaskEnqueueHook;
+use crate::issue_transition::AppTransitionHook;
 use crate::state::AppState;
 use crate::v1_cycles_modules::body as shared_body;
-use crate::v1_cycles_modules::json_cpython::{
+use crate::v1_cycles_modules::json::{
     parse_request_bytes_spans, JObject, JStr, JVal, JsonFail, JSON_PARSE_PREFIX,
 };
+use pidash_compat::response::{empty_response, json_response as status_response};
 
 /// Archived collection path in `app/urls/issue.py:247-249` form.
 pub const ARCHIVED_ISSUES_PATH: &str =
@@ -118,8 +122,8 @@ pub const ISSUE_ARCHIVE_PATH: &str =
 pub const BULK_ARCHIVE_PATH: &str =
     "/api/workspaces/{slug}/projects/{project_id}/bulk-archive-issues/";
 
-/// `issue_activity` Celery wire name (bare `@shared_task` default).
-pub const ISSUE_ACTIVITY_TASK: &str = "pi_dash.bgtasks.issue_activities_task.issue_activity";
+/// Re-export of the canonical [`pidash_services::domain::activity::ISSUE_ACTIVITY_TASK`].
+pub use pidash_services::domain::activity::ISSUE_ACTIVITY_TASK;
 
 /// `archive()` state-gate body (`archive.py:262`).
 const ARCHIVE_STATE_MESSAGE: &str = "Can only archive completed or cancelled state group issue";
@@ -133,17 +137,6 @@ const ENTITY_DENIED_BODY: &str =
     r#"{"detail":"You do not have permission to perform this action."}"#;
 /// `handle_exception`'s `ValidationError` message (bad UUID in `issue_ids`).
 const INVALID_DETAIL_MESSAGE: &str = "Please provide valid detail";
-/// `issue.save()` on archive: the `archived_at` write plus every
-/// recompute — `completed_at` from the state group, `updated_at`, the
-/// stripped description, and `updated_by_id` from crum
-/// (`BaseModel.save` sets it to the requesting user on every update).
-const ARCHIVE_UPDATE_SQL: &str = "UPDATE issues SET archived_at = $1, completed_at = $2, \
-    updated_at = $3, description_stripped = $4, updated_by_id = $5 WHERE id = $6";
-/// `issue.save()` on unarchive: the same recomputes plus the `state_id`
-/// write (the NULL-state default assignment rides the same statement).
-const UNARCHIVE_UPDATE_SQL: &str = "UPDATE issues SET archived_at = NULL, completed_at = $1, \
-    updated_at = $2, description_stripped = $3, state_id = $4, updated_by_id = $5 WHERE id = $6";
-
 /// Session auth + `_rewrite_project_kwarg` + `@allow_permission([ADMIN,
 /// MEMBER])`, in Django's `initial()` order (rewrite, then the permission
 /// checks, then `TimezoneMixin` activation). None of the archive endpoints
@@ -323,27 +316,9 @@ async fn workspace_id(pool: &sqlx::PgPool, slug: &str) -> Result<uuid::Uuid, Den
     row.map(|row| row.0).ok_or(Denial::ServerError)
 }
 
-/// A non-200 JSON response with the exact body.
-fn status_response(status: StatusCode, body: &str) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body.to_owned()))
-        .expect("status response")
-}
-
 /// JSON-escape one string value.
 fn json_detail(value: &str) -> String {
     serde_json::to_string(value).expect("detail string")
-}
-
-/// The 204 with no body (`DELETE` unarchive).
-fn empty_response(status: StatusCode) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(Vec::new()))
-        .expect("empty response")
 }
 
 // ---------------------------------------------------------------------------
@@ -393,8 +368,17 @@ pub async fn archived_list(
     let order_spec = order_sql(&params.order_by, "state.\"group\"", |name| {
         format!("min_{}", name.replace("__", "_"))
     });
-    let (key_expr, descending) = order_key(&order_spec.out_param, &params.order_by)?;
-    let direction = if descending { "DESC" } else { "ASC" };
+    // The archive list annotates the grouped `Subquery` count form
+    // (empty counts render `NULL`), so its count keys order `NULL`-style.
+    // Its `FROM` always carries the unfiltered `issue_cycle` bridge join,
+    // which the cycle-name traversal reuses like Django.
+    let key = order_key(
+        &order_spec.out_param,
+        &params.order_by,
+        Some("issue_cycle"),
+        true,
+    )?;
+    let direction = if key.descending { "DESC" } else { "ASC" };
     let per_page = params.per_page;
     let cursor = crate::paginator::Cursor::from_string(&params.cursor_raw)
         .map_err(|error| Denial::BadDetail(error.detail()))?;
@@ -419,10 +403,11 @@ pub async fn archived_list(
             &filtered,
             &group,
             sub_group_by.clone(),
-            &key_expr,
+            &key.expr,
             direction,
             per_page,
             cursor,
+            &key.joins,
         )
         .await;
     }
@@ -431,7 +416,7 @@ pub async fn archived_list(
     flat_paginated_response(
         &list_context,
         &filtered,
-        &key_expr,
+        &key.expr,
         direction,
         per_page,
         cursor,
@@ -439,6 +424,7 @@ pub async fn archived_list(
         fields,
         false,
         None,
+        &key.joins,
     )
     .await
 }
@@ -477,7 +463,9 @@ fn archive_filtered_set(
         .map_err(|_| Denial::ServerError)?;
     let mut legacy_sql_text = String::new();
     for (name, value) in legacy.predicates() {
-        let fragment = legacy_sql(&mut binder, name, value)?;
+        // The archive view shares the issue viewset's `TimezoneMixin`:
+        // `__date` terms truncate in the actor zone.
+        let fragment = legacy_sql(&mut binder, name, value, &gate.timezone)?;
         if legacy_sql_text.is_empty() {
             legacy_sql_text = fragment;
         } else {
@@ -747,6 +735,8 @@ struct OwnedLiveState {
     usage: Value,
     llm_model: Option<String>,
     turn_count: Option<i32>,
+    agent_health: Option<String>,
+    agent_last_activity_at: Option<String>,
     updated_at: String,
 }
 
@@ -906,6 +896,8 @@ impl OwnedRun {
                 usage: &live.usage,
                 llm_model: live.llm_model.as_deref(),
                 turn_count: live.turn_count,
+                agent_health: live.agent_health.as_deref(),
+                agent_last_activity_at: live.agent_last_activity_at.as_deref(),
                 updated_at: &live.updated_at,
             }),
         }
@@ -1125,8 +1117,11 @@ async fn fetch_agent_run(
     let usage: Option<Value> = row.try_get(24).map_err(|_| Denial::ServerError)?;
     let live_llm_model: Option<String> = row.try_get(25).map_err(|_| Denial::ServerError)?;
     let turn_count: Option<i32> = row.try_get(26).map_err(|_| Denial::ServerError)?;
+    let agent_health: Option<String> = row.try_get(27).map_err(|_| Denial::ServerError)?;
+    let agent_last_activity_at: Option<chrono::DateTime<chrono::Utc>> =
+        row.try_get(28).map_err(|_| Denial::ServerError)?;
     let live_updated_at: Option<chrono::DateTime<chrono::Utc>> =
-        row.try_get(27).map_err(|_| Denial::ServerError)?;
+        row.try_get(29).map_err(|_| Denial::ServerError)?;
     Ok(Some(OwnedRun {
         id: id.to_string(),
         status,
@@ -1156,6 +1151,8 @@ async fn fetch_agent_run(
             usage: usage.unwrap_or(Value::Null),
             llm_model: live_llm_model,
             turn_count,
+            agent_health,
+            agent_last_activity_at: agent_last_activity_at.map(serialize_iso_datetime),
             updated_at: serialize_iso_datetime(updated_at),
         }),
     }))
@@ -1287,70 +1284,63 @@ pub async fn archive_issue(
     let today = chrono::Utc::now().date_naive();
     let origin = activity_origin(&state)?;
     let current_instance = current_instance_json(&context.pool, &row).await?;
-    let mut kwargs = Map::new();
-    kwargs.insert(
-        "type".to_owned(),
-        Value::String("issue.activity.updated".to_owned()),
-    );
-    kwargs.insert(
-        "requested_data".to_owned(),
-        Value::String(format!(
-            "{{\"archived_at\": \"{today}\", \"automation\": false}}"
-        )),
-    );
-    kwargs.insert(
-        "actor_id".to_owned(),
-        Value::String(context.gate.user_id.to_string()),
-    );
-    kwargs.insert("issue_id".to_owned(), Value::String(issue_id.to_string()));
-    kwargs.insert(
-        "project_id".to_owned(),
-        Value::String(context.gate.project_id.to_string()),
-    );
-    kwargs.insert(
-        "current_instance".to_owned(),
-        Value::String(current_instance),
-    );
-    kwargs.insert(
-        "epoch".to_owned(),
-        Value::Number(chrono::Utc::now().timestamp().into()),
-    );
-    kwargs.insert("notification".to_owned(), Value::Bool(true));
-    kwargs.insert("origin".to_owned(), Value::String(origin));
-    enqueue_activity(&context.pool, kwargs).await;
+    let requested = format!("{{\"archived_at\": \"{today}\", \"automation\": false}}");
     // `save()`: the pre-save snapshot, the write with its recomputes,
-    // then the explicit post-save fire.
+    // then the explicit post-save fire — as one domain write + chain.
     let prev = crate::issue_transition::capture_prior_state_pool(&context.pool, Some(issue_id))
         .await
         .map_err(|_| Denial::ServerError)?;
     let now = chrono::Utc::now();
-    let completed_at = if group == "completed" {
-        Some(now)
-    } else {
-        None
-    };
-    let stripped = sync_description_stripped(Some(&row.description_html));
-    sqlx::query(ARCHIVE_UPDATE_SQL)
-        .bind(today)
-        .bind(completed_at)
-        .bind(now)
-        .bind(stripped)
-        .bind(context.gate.user_id)
-        .bind(issue_id)
-        .execute(&context.pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    fire_after_save(
-        &state,
-        &context.pool,
-        context.gate.user_id,
-        issue_id,
-        prev,
-        row.state_id,
-        Some(context.gate.user_id),
-        now,
-    )
-    .await?;
+    let orm = state.orm().ok_or(Denial::ServerError)?;
+    let ctx = write_ctx(&context.gate);
+    let transition: Arc<dyn IssueTransitionHook> =
+        Arc::new(AppTransitionHook::new(&state, &context.pool));
+    let enqueue: Arc<dyn TaskEnqueueHook> = Arc::new(AppTaskEnqueueHook::new(&context.pool));
+    let outcome = domain::run(&ctx, orm, |txn| {
+        let transition = transition.clone();
+        let enqueue = enqueue.clone();
+        let pool = context.pool.clone();
+        let ctx = ctx.clone();
+        Box::pin(async move {
+            txn.hooks_mut().register(transition);
+            txn.hooks_mut().register(enqueue);
+            domain_issues::archive(
+                &ctx,
+                txn,
+                &pool,
+                domain_issues::ArchiveIssue {
+                    issue_id,
+                    project_id: context.gate.project_id,
+                    state_id: row.state_id,
+                    description_html: row.description_html.clone(),
+                    archived_at: today,
+                    updated_at: now,
+                    prev_state: prev,
+                    fire: domain_issues::FireSpec {
+                        dispatch_immediate: true,
+                        created_by: Some(context.gate.user_id),
+                        moved_by_run: None,
+                        now,
+                    },
+                    pre_activity: domain_issues::PreSaveActivity {
+                        event: "issue.activity.updated".to_owned(),
+                        requested,
+                        actor: context.gate.user_id,
+                        project: context.gate.project_id,
+                        current_instance,
+                        origin,
+                        subscriber: None,
+                    },
+                },
+            )
+            .await
+        })
+    })
+    .await
+    .map_err(archive_denial)?;
+    if outcome.chain.stopped().is_some() {
+        return Err(Denial::ServerError);
+    }
     Ok(json_response(format!("{{\"archived_at\":\"{today}\"}}")))
 }
 
@@ -1373,80 +1363,64 @@ pub async fn unarchive_issue(
         fetch_unarchive_issue(&context.pool, &slug, &context.gate.project_id, &issue_id).await?;
     let origin = activity_origin(&state)?;
     let current_instance = current_instance_json(&context.pool, &row).await?;
-    let mut kwargs = Map::new();
-    kwargs.insert(
-        "type".to_owned(),
-        Value::String("issue.activity.updated".to_owned()),
-    );
-    kwargs.insert(
-        "requested_data".to_owned(),
-        Value::String("{\"archived_at\": null}".to_owned()),
-    );
-    kwargs.insert(
-        "actor_id".to_owned(),
-        Value::String(context.gate.user_id.to_string()),
-    );
-    kwargs.insert("issue_id".to_owned(), Value::String(issue_id.to_string()));
-    kwargs.insert(
-        "project_id".to_owned(),
-        Value::String(context.gate.project_id.to_string()),
-    );
-    kwargs.insert(
-        "current_instance".to_owned(),
-        Value::String(current_instance),
-    );
-    kwargs.insert(
-        "epoch".to_owned(),
-        Value::Number(chrono::Utc::now().timestamp().into()),
-    );
-    kwargs.insert("notification".to_owned(), Value::Bool(true));
-    kwargs.insert("origin".to_owned(), Value::String(origin));
-    enqueue_activity(&context.pool, kwargs).await;
     // `save()` state half: NULL takes the default-state assignment (and
     // skips the `completed_at` recompute); a set id with no row raises
     // `DoesNotExist` (404) — after the enqueue, like the `save()` raise.
+    // All three run in the domain write: the enqueue first, then the
+    // sparse save, then completion-if-changed and the fire.
     let prev = crate::issue_transition::capture_prior_state_pool(&context.pool, Some(issue_id))
         .await
         .map_err(|_| Denial::ServerError)?;
     let now = chrono::Utc::now();
-    let (state_id, completed_at) = match (&row.state_id, &row.group) {
-        (None, _) => {
-            let assigned =
-                default_state_for_project(&context.pool, &context.gate.project_id).await?;
-            (assigned, row.completed_at)
-        }
-        (Some(_), None) => return Err(Denial::NotFound),
-        (Some(id), Some(group)) => {
-            let completed_at = if group == "completed" {
-                Some(now)
-            } else {
-                None
-            };
-            (Some(*id), completed_at)
-        }
-    };
-    let stripped = sync_description_stripped(Some(&row.description_html));
-    sqlx::query(UNARCHIVE_UPDATE_SQL)
-        .bind(completed_at)
-        .bind(now)
-        .bind(stripped)
-        .bind(state_id)
-        .bind(context.gate.user_id)
-        .bind(issue_id)
-        .execute(&context.pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    fire_after_save(
-        &state,
-        &context.pool,
-        context.gate.user_id,
-        issue_id,
-        prev,
-        state_id,
-        Some(context.gate.user_id),
-        now,
-    )
-    .await?;
+    let orm = state.orm().ok_or(Denial::ServerError)?;
+    let ctx = write_ctx(&context.gate);
+    let transition: Arc<dyn IssueTransitionHook> =
+        Arc::new(AppTransitionHook::new(&state, &context.pool));
+    let enqueue: Arc<dyn TaskEnqueueHook> = Arc::new(AppTaskEnqueueHook::new(&context.pool));
+    let outcome = domain::run(&ctx, orm, |txn| {
+        let transition = transition.clone();
+        let enqueue = enqueue.clone();
+        let pool = context.pool.clone();
+        let ctx = ctx.clone();
+        Box::pin(async move {
+            txn.hooks_mut().register(transition);
+            txn.hooks_mut().register(enqueue);
+            domain_issues::unarchive(
+                &ctx,
+                txn,
+                &pool,
+                domain_issues::UnarchiveIssue {
+                    issue_id,
+                    project_id: context.gate.project_id,
+                    state_id: row.state_id,
+                    description_html: row.description_html.clone(),
+                    updated_at: now,
+                    prev_state: prev,
+                    fire: domain_issues::FireSpec {
+                        dispatch_immediate: true,
+                        created_by: Some(context.gate.user_id),
+                        moved_by_run: None,
+                        now,
+                    },
+                    pre_activity: domain_issues::PreSaveActivity {
+                        event: "issue.activity.updated".to_owned(),
+                        requested: "{\"archived_at\": null}".to_owned(),
+                        actor: context.gate.user_id,
+                        project: context.gate.project_id,
+                        current_instance,
+                        origin,
+                        subscriber: None,
+                    },
+                },
+            )
+            .await
+        })
+    })
+    .await
+    .map_err(archive_denial)?;
+    if outcome.chain.stopped().is_some() {
+        return Err(Denial::ServerError);
+    }
     Ok(empty_response(StatusCode::NO_CONTENT))
 }
 
@@ -1584,44 +1558,6 @@ fn write_row(row: sqlx::postgres::PgRow) -> Result<WriteRow, Denial> {
     })
 }
 
-/// `Issue.save()`'s NULL-state branch: the default non-triage state, else
-/// any non-triage state (`State.objects`, soft-deleted excluded,
-/// `sequence` order) — or `None` when the project has no states.
-async fn default_state_for_project(
-    pool: &sqlx::PgPool,
-    project_id: &uuid::Uuid,
-) -> Result<Option<uuid::Uuid>, Denial> {
-    for default_only in [true, false] {
-        let sql = default_state_sql(default_only);
-        let row: Option<(uuid::Uuid,)> = sqlx::query_as(&sql)
-            .bind(project_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-        if let Some((id,)) = row {
-            return Ok(Some(id));
-        }
-    }
-    Ok(None)
-}
-
-/// The default-state lookup: triage is excluded twice over — the
-/// `is_triage` flag *and* the `StateManager` `group != 'triage'` rule
-/// (real Triage states carry `is_triage = FALSE`, so the flag alone
-/// would admit them).
-fn default_state_sql(default_only: bool) -> String {
-    let extra = if default_only {
-        " AND s.\"default\""
-    } else {
-        ""
-    };
-    format!(
-        "SELECT s.id FROM states AS s WHERE s.project_id = $1 \
-         AND s.deleted_at IS NULL AND NOT s.is_triage AND s.\"group\" != 'triage'{extra} \
-         ORDER BY s.sequence ASC LIMIT 1"
-    )
-}
-
 /// `current_instance`: the 23-key bare-instance shape over the pre-save
 /// row, `json.dumps` spacing (`", "` / `": "`).
 async fn current_instance_json(pool: &sqlx::PgPool, row: &WriteRow) -> Result<String, Denial> {
@@ -1665,7 +1601,7 @@ async fn current_instance_json(pool: &sqlx::PgPool, row: &WriteRow) -> Result<St
         is_synced,
     };
     let view = issue_detail_base_to_representation(&base);
-    to_spaced_json(&view)
+    domain_issues::to_spaced_json(&view).ok_or(Denial::ServerError)
 }
 
 /// `base_host(request, is_app=True)`: `APP_BASE_URL` when set, else the
@@ -1679,61 +1615,30 @@ fn activity_origin(state: &AppState) -> Result<String, Denial> {
         .ok_or(Denial::ServerError)
 }
 
-/// Best-effort deferred publish of an `issue_activity.delay(...)` call:
-/// enqueue failures never change the response.
-async fn enqueue_activity(pool: &sqlx::PgPool, kwargs: Map<String, Value>) {
-    let message = pidash_jobs::TaskMessage::new(ISSUE_ACTIVITY_TASK, vec![], kwargs);
-    let job = pidash_jobs::queue::NewJob::new(
-        message.task.clone(),
-        Value::Array(message.args.clone()),
-        Value::Object(message.kwargs.clone()),
-    );
-    if let Err(error) = pidash_jobs::queue::enqueue(pool, &job).await {
-        tracing::warn!(%error, task = message.task.as_str(), "task enqueue failed; response stands");
-    }
+/// The domain-write context for an archive request: the request user as
+/// actor plus the gated tenant scope. The origin resolves up front (the
+/// archive enqueues run pre-save), not per effect.
+fn write_ctx(gate: &Gate) -> WriteCtx {
+    WriteCtx::new(WriteActor {
+        user_id: gate.user_id,
+        timezone: Some(gate.timezone.name().to_owned()),
+    })
+    .with_scope(WriteScope {
+        workspace_id: Some(gate.workspace_id),
+        project_id: Some(gate.project_id),
+    })
 }
 
-/// `json.dumps` separators (`", "` after items, `": "` after keys).
-struct SpacedFormatter;
-
-impl serde_json::ser::Formatter for SpacedFormatter {
-    fn begin_object_key<W>(&mut self, writer: &mut W, first: bool) -> std::io::Result<()>
-    where
-        W: ?Sized + Write,
-    {
-        if first {
-            Ok(())
-        } else {
-            writer.write_all(b", ")
-        }
+/// Map a domain-write failure onto the archive arms: a dangling-row miss
+/// 404s (the unarchive NULL-leg save raise); everything else 500s (the
+/// archive UPDATEs map every error to `ServerError` — there is no
+/// invalid-payload arm here).
+fn archive_denial(error: domain::DomainError) -> Denial {
+    if error.is_not_found() {
+        Denial::NotFound
+    } else {
+        Denial::ServerError
     }
-
-    fn begin_object_value<W>(&mut self, writer: &mut W) -> std::io::Result<()>
-    where
-        W: ?Sized + Write,
-    {
-        writer.write_all(b": ")
-    }
-
-    fn begin_array_value<W>(&mut self, writer: &mut W, first: bool) -> std::io::Result<()>
-    where
-        W: ?Sized + Write,
-    {
-        if first {
-            Ok(())
-        } else {
-            writer.write_all(b", ")
-        }
-    }
-}
-
-/// Serialize with [`SpacedFormatter`] (non-ASCII stays literal: the queue
-/// transport re-encodes anyway, so only the parsed value must match).
-fn to_spaced_json<T: Serialize>(value: &T) -> Result<String, Denial> {
-    let mut buf = Vec::new();
-    let mut ser = serde_json::ser::Serializer::with_formatter(&mut buf, SpacedFormatter);
-    value.serialize(&mut ser).map_err(|_| Denial::ServerError)?;
-    String::from_utf8(buf).map_err(|_| Denial::ServerError)
 }
 
 // ---------------------------------------------------------------------------
@@ -1785,7 +1690,7 @@ pub async fn bulk_archive(
             Err(shared_body::BodyError::UnsupportedMediaType(message)) => {
                 return Ok(status_response(
                     StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                    &unsupported_media_type_body(&message),
+                    unsupported_media_type_body(&message),
                 ));
             }
             Err(shared_body::BodyError::ParseDetail(message)) => {
@@ -1797,6 +1702,7 @@ pub async fn bulk_archive(
     let today = chrono::Utc::now().date_naive();
     let origin = activity_origin(&state)?;
     let rows = fetch_bulk_issues(&context.pool, &slug, &context.gate.project_id, &ids).await?;
+    let enqueue_hook: Arc<dyn TaskEnqueueHook> = Arc::new(AppTaskEnqueueHook::new(&context.pool));
     for row in &rows {
         // `select_related("state")` caches `None` for a NULL *or* dangling
         // id alike, so a missing group is `AttributeError` (500) either
@@ -1810,47 +1716,24 @@ pub async fn bulk_archive(
             return Ok(status_response(StatusCode::BAD_REQUEST, &body));
         }
         let current_instance = current_instance_json(&context.pool, row).await?;
-        let mut kwargs = Map::new();
-        kwargs.insert(
-            "type".to_owned(),
-            Value::String("issue.activity.updated".to_owned()),
-        );
-        kwargs.insert(
-            "requested_data".to_owned(),
-            Value::String(format!(
-                "{{\"archived_at\": \"{today}\", \"automation\": false}}"
-            )),
-        );
-        kwargs.insert(
-            "actor_id".to_owned(),
-            Value::String(context.gate.user_id.to_string()),
-        );
-        kwargs.insert("issue_id".to_owned(), Value::String(row.id.to_string()));
-        kwargs.insert(
-            "project_id".to_owned(),
-            Value::String(context.gate.project_id.to_string()),
-        );
-        kwargs.insert(
-            "current_instance".to_owned(),
-            Value::String(current_instance),
-        );
-        kwargs.insert(
-            "epoch".to_owned(),
-            Value::Number(chrono::Utc::now().timestamp().into()),
-        );
-        kwargs.insert("notification".to_owned(), Value::Bool(true));
-        kwargs.insert("origin".to_owned(), Value::String(origin.clone()));
-        enqueue_activity(&context.pool, kwargs).await;
+        domain_issues::bulk_archive_activity(
+            &enqueue_hook,
+            &domain_issues::BulkArchiveRow {
+                issue_id: row.id,
+                project_id: context.gate.project_id,
+                actor_id: context.gate.user_id,
+                current_instance,
+                origin: origin.clone(),
+            },
+            today,
+        )
+        .await;
     }
-    if !rows.is_empty() {
-        let hit: Vec<uuid::Uuid> = rows.iter().map(|row| row.id).collect();
-        sqlx::query("UPDATE issues SET archived_at = $1 WHERE id = ANY($2)")
-            .bind(today)
-            .bind(&hit)
-            .execute(&context.pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    }
+    // `bulk_update(["archived_at"])`: one UPDATE, no `save()`.
+    let hit: Vec<uuid::Uuid> = rows.iter().map(|row| row.id).collect();
+    domain_issues::bulk_archive_update(&context.pool, &hit, today)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(json_response(format!("{{\"archived_at\":\"{today}\"}}")))
 }
 
@@ -2016,51 +1899,14 @@ async fn fetch_bulk_issues(
 // Explicit signals (594 entries)
 // ---------------------------------------------------------------------------
 
-/// The post-save fire: a non-transition answers `NoTransition` without
-/// I/O; a failed handler is logged with the verbatim line (the counter
-/// already bumped inside) and the save stands; only a *lookup* storage
-/// failure propagates to the 500 — exactly the `try` placement in
-/// `fire_state_transition`. Drives the one live seam (PIDASHCONV-1216).
-#[allow(clippy::too_many_arguments)]
-async fn fire_after_save(
-    state: &AppState,
-    pool: &sqlx::PgPool,
-    actor_id: uuid::Uuid,
-    issue_id: uuid::Uuid,
-    prev_state_id: Option<uuid::Uuid>,
-    current_state_id: Option<uuid::Uuid>,
-    created_by: Option<uuid::Uuid>,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Result<(), Denial> {
-    let outcome = crate::issue_transition::fire_issue_transition(
-        state,
-        pool,
-        actor_id,
-        FireRequest {
-            issue_id,
-            prev_state_id,
-            current_state_id,
-            dispatch_immediate: true,
-            moved_by_run: None,
-            now,
-            jitter_secs: 0.0,
-            created_by,
-        },
-    )
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    if let FireOutcome::Failed { log_line, .. } = outcome {
-        tracing::error!("{log_line}");
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::v1_cycles_modules::json_cpython::parse_request_bytes;
+    use crate::v1_cycles_modules::json::parse_request_bytes;
     use pidash_services::app_issues::{ISSUE_DETAIL_ARCHIVE_FIELDS, ISSUE_DETAIL_BASE_FIELDS};
-    use pidash_services::orchestration::entries::fire_state_transition;
+    use pidash_services::orchestration::entries::{
+        fire_state_transition, FireOutcome, FireRequest,
+    };
 
     fn uid(n: u128) -> uuid::Uuid {
         uuid::Uuid::from_u128(n)
@@ -2071,7 +1917,7 @@ mod tests {
         let response = denial.into_response();
         let status = response.status();
         let body = response.into_body();
-        let bytes = axum::body::to_bytes(body, 4096).await.expect("body");
+        let bytes = axum::body::to_bytes(body, usize::MAX).await.expect("body");
         (status, String::from_utf8(bytes.to_vec()).expect("utf8"))
     }
 
@@ -2141,7 +1987,7 @@ mod tests {
             "automation": false,
             "nested": {"a": [1, 2], "b": None::<()>},
         });
-        let rendered = to_spaced_json(&value).expect("spaced");
+        let rendered = domain_issues::to_spaced_json(&value).expect("spaced");
         assert_eq!(
             rendered,
             "{\"archived_at\": \"2026-10-04\", \"automation\": false, \
@@ -2184,7 +2030,7 @@ mod tests {
             is_synced: false,
         };
         let view = issue_detail_base_to_representation(&base);
-        let rendered = to_spaced_json(&view).expect("spaced");
+        let rendered = domain_issues::to_spaced_json(&view).expect("spaced");
         let parsed: Map<String, Value> = serde_json::from_str(&rendered).expect("parses");
         // The 7 annotation keys omit; the rest keep Meta order.
         let mut expected: Vec<&str> = ISSUE_DETAIL_BASE_FIELDS.to_vec();
@@ -2365,33 +2211,30 @@ mod tests {
 
     #[tokio::test]
     async fn bulk_parse_error_body_is_lowercase_cpython() {
-        // A blank-but-nonempty body carries the CPython position.
+        // A blank-but-nonempty body 400s; the pins that remain are the
+        // 400 status and the lowercase envelope (message is serde's).
         let Err(JsonFail::Message(blank)) = parse_request_bytes(b" ") else {
             panic!("blank body must fail");
         };
-        assert_eq!(blank, "Expecting value: line 1 column 2 (char 1)");
+        assert!(!blank.is_empty(), "serde reason, got {blank:?}"); // Tier 3 since PIDASHCONV-1555: serde text
         let (status, body) =
             denial_body(Denial::BadDetail(format!("{JSON_PARSE_PREFIX}{blank}"))).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(
-            body,
-            "{\"detail\":\"JSON parse error - Expecting value: line 1 column 2 (char 1)\"}"
+        assert!(
+            body.starts_with("{\"detail\":\"JSON parse error - "),
+            "envelope shape, got {body:?}"
         );
-        // The shared parser's reason for `{oops`, verbatim.
+        // The shared parser's reason for `{oops` (serde text).
         let Err(JsonFail::Message(reason)) = parse_request_bytes(b"{oops") else {
             panic!("{{oops must fail");
         };
-        assert_eq!(
-            reason,
-            "Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"
-        );
+        assert!(!reason.is_empty(), "serde reason, got {reason:?}");
         let (status, body) =
             denial_body(Denial::BadDetail(format!("{JSON_PARSE_PREFIX}{reason}"))).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(
-            body,
-            "{\"detail\":\"JSON parse error - \
-             Expecting property name enclosed in double quotes: line 1 column 2 (char 1)\"}"
+        assert!(
+            body.starts_with("{\"detail\":\"JSON parse error - "),
+            "envelope shape, got {body:?}"
         );
     }
 
@@ -2514,26 +2357,6 @@ mod tests {
             form_request_data(&single, &files, &no_surr),
             Err(Denial::ServerError)
         ));
-    }
-
-    #[test]
-    fn save_updates_write_updated_by() {
-        for sql in [ARCHIVE_UPDATE_SQL, UNARCHIVE_UPDATE_SQL] {
-            assert!(sql.contains("updated_by_id = $5"), "{sql}");
-            assert!(sql.contains("WHERE id = $6"), "{sql}");
-        }
-        assert!(ARCHIVE_UPDATE_SQL.contains("archived_at = $1"));
-        assert!(UNARCHIVE_UPDATE_SQL.contains("archived_at = NULL"));
-    }
-
-    #[test]
-    fn default_state_lookup_excludes_triage_twice() {
-        for sql in [default_state_sql(true), default_state_sql(false)] {
-            assert!(sql.contains("NOT s.is_triage"), "{sql}");
-            assert!(sql.contains("s.\"group\" != 'triage'"), "{sql}");
-        }
-        assert!(default_state_sql(true).contains("AND s.\"default\""));
-        assert!(!default_state_sql(false).contains("default"));
     }
 
     #[test]

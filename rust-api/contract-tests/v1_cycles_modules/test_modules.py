@@ -427,3 +427,54 @@ class TestModuleDateFormats:
             )
             assert r.status_code == 400
             assert r.json() == DATE_FORMAT_ERROR
+
+
+class TestModuleMembersSoftDeleted:
+    """PIDASHCONV-1418: v1 `members` renders soft-deleted ModuleMember rows.
+
+    Django's M2M `instance.members.all()` joins the through table with no
+    soft-delete filter (serializers/module.py:203-206), while PATCH
+    soft-deletes the old rows then bulk-creates the new ones (:149). So
+    after any member-list change the payload keeps the dead ids too,
+    including duplicates. Sets/counts only: seed users share one
+    `now()` created_at, so `-created_at` order ties."""
+
+    def test_members_after_patch_include_soft_deleted(self, admin_client):
+        r = admin_client.post(
+            api.modules_url(SLUG, PROJ),
+            json={"name": _name("CT members"), "members": [db.ADMIN_ID]},
+        )
+        assert r.status_code == 201
+        mid = r.json()["id"]
+        r = admin_client.patch(
+            api.module_detail_url(SLUG, PROJ, mid),
+            json={"members": [db.MEMBER_ID]},
+        )
+        assert r.status_code == 200
+        r = admin_client.get(api.module_detail_url(SLUG, PROJ, mid))
+        assert r.status_code == 200
+        assert set(r.json()["members"]) == {db.ADMIN_ID, db.MEMBER_ID}
+        r = admin_client.get(api.modules_url(SLUG, PROJ))
+        assert r.status_code == 200
+        found = [m for m in r.json()["results"] if m["id"] == mid]
+        assert len(found) == 1
+        assert set(found[0]["members"]) == {db.ADMIN_ID, db.MEMBER_ID}
+
+    def test_members_patch_same_member_duplicates(self, admin_client):
+        r = admin_client.post(
+            api.modules_url(SLUG, PROJ),
+            json={"name": _name("CT members"), "members": [db.ADMIN_ID]},
+        )
+        assert r.status_code == 201
+        mid = r.json()["id"]
+        url = api.module_detail_url(SLUG, PROJ, mid)
+        r = admin_client.patch(url, json={"members": [db.ADMIN_ID]})
+        assert r.status_code == 200
+        r = admin_client.get(url)
+        assert r.json()["members"].count(db.ADMIN_ID) == 2
+        r = admin_client.patch(url, json={"members": [db.ADMIN_ID]})
+        assert r.status_code == 200
+        r = admin_client.get(url)
+        members = r.json()["members"]
+        assert len(members) == 3
+        assert members.count(db.ADMIN_ID) == 3

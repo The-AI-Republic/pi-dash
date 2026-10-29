@@ -19,12 +19,27 @@
 //! * [`tools_runs`] — `tools/runs.py:1-96` (PIDASHCONV-252).
 //! * [`tools_issues`] — `tools/issues.py:1-490` (PIDASHCONV-253).
 //! * [`tools_github`] — `tools/github.py:1-165` (PIDASHCONV-253).
+//!
+//! Public runtime services (OVL-07, stage 8): the config/probe/retry
+//! halves of `assistant/views/llm_config.py` and the provider send
+//! loops, moved out of the `api`/`jobs` crates so the cloud overlay
+//! calls them instead of copying them:
+//!
+//! * [`config`] — the `assistant_user_llm_config` row service
+//!   (`get_config` / `put_config` / `delete_config`).
+//! * [`probe`] — the provider connection probe (`probe_provider`,
+//!   `classify_probe`).
+//! * [`retry`] — the canonical provider retry policy
+//!   (`should_retry_status`, `sleep_for_retry`, `retry_after_seconds`).
 
 pub mod agent;
+pub mod config;
 pub mod crypto;
 pub mod llm;
 pub mod markdown;
 pub mod mcp;
+pub mod probe;
+pub mod retry;
 pub mod seams;
 pub mod ssrf;
 pub mod title;

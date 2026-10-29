@@ -127,6 +127,7 @@ use pidash_services::space::queries::project_meta::BOARD_COLUMNS;
 
 use super::{guards_error, owned, QueryMap};
 use crate::paginator::{self, Cursor, PageError, PageResponse};
+use pidash_compat::response::json_ok;
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -733,9 +734,9 @@ fn list_where_sql(filter_conjuncts: &[String], group_by: &str, sub_group_by: &st
 /// (`order_queryset.py:14-58` via
 /// [`order_key`](list_q::order_key)): `priority_order` / `state_order`
 /// `CASE`s, the `min_values` per-issue `MIN` subquery (Django's
-/// annotation is unguarded — plain joins, no `deleted_at` filter), or a
-/// plain column. Returns `(expression, descending)` for
-/// `ORDER BY {expr} {DIR} NULLS LAST`.
+/// annotation is unguarded — plain joins, no `deleted_at` filter), the
+/// view's annotation subqueries, or a plain column. Returns
+/// `(expression, descending)` for `ORDER BY {expr} {DIR} NULLS LAST`.
 fn order_key_expr(mapped: &str) -> Result<(String, bool), HandlerError> {
     let (key, desc) = match mapped.strip_prefix('-') {
         Some(rest) => (rest, true),
@@ -779,6 +780,22 @@ fn order_key_expr(mapped: &str) -> Result<(String, bool), HandlerError> {
             // replaced with the concrete subquery via `min_values_sql`.
             "MIN_VALUES".to_owned()
         }
+        // View annotations (`views/issue.py:98-125`): Django's `order_by`
+        // resolves annotation names like columns (`order_queryset.py:49-57`
+        // `else` branch), so they sort instead of raising. The bare
+        // subqueries are the same builders the `SELECT` projects; the
+        // `(SELECT ` prefix keeps `base_selects` from grouping by them
+        // (same rule as `min_values`).
+        "cycle_id" => bare_cycle_expr(),
+        "link_count" => bare_annotation_expr(&list_q::link_count_annotation_sql(), "link_count"),
+        "attachment_count" => bare_annotation_expr(
+            &list_q::attachment_count_annotation_sql(),
+            "attachment_count",
+        ),
+        "sub_issues_count" => bare_annotation_expr(
+            &list_q::sub_issues_count_annotation_sql(),
+            "sub_issues_count",
+        ),
         other => related_order_expr(other).ok_or(HandlerError::ServerError)?,
     };
     Ok((expr, desc))
@@ -1020,14 +1037,21 @@ fn group_inner_expr(group_by: &str) -> Option<String> {
     }
 }
 
+/// An annotation subquery without its `AS "<alias>"` tail (the builders
+/// carry the alias for `SELECT` use; order keys and partitions need the
+/// bare expression).
+fn bare_annotation_expr(full: &str, alias: &str) -> String {
+    let suffix = format!(" AS \"{alias}\"");
+    full.strip_suffix(suffix.as_str())
+        .unwrap_or(full)
+        .to_owned()
+}
+
 /// The cycle subquery without its `AS "cycle_id"` tail (the builder
 /// carries the alias for `SELECT` use; partitions and totals need the
 /// bare expression).
 fn bare_cycle_expr() -> String {
-    let full = list_q::cycle_id_annotation_sql();
-    full.strip_suffix(" AS \"cycle_id\"")
-        .unwrap_or(&full)
-        .to_owned()
+    bare_annotation_expr(&list_q::cycle_id_annotation_sql(), "cycle_id")
 }
 
 /// Extra `SELECT` for one group axis beyond the `on_results` projection:
@@ -1483,15 +1507,6 @@ fn multi_last(multi: &HashMap<String, Vec<String>>, key: &str) -> Option<String>
     multi
         .get(key)
         .and_then(|values| values.iter().last().cloned())
-}
-
-/// Render a 200 JSON response with exact bytes.
-fn json_ok(body: String) -> Response {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("handler json response")
 }
 
 /// Envelope metadata: everything [`PageResponse`] carries besides the
@@ -1955,11 +1970,11 @@ fn retrieve_reaction_items_sql() -> String {
 /// reaction `avatar_url` refs differ (see [`retrieve_reaction_items_sql`]).
 fn issue_retrieve_sql() -> String {
     format!(
-        "SELECT \"issues\".\"id\", \"issues\".\"name\", \"issues\".\"state_id\", \"issues\".\"sort_order\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"description_stripped\", \"issues\".\"description_binary\", {module_ids}, {label_ids}, {assignee_ids}, \"issues\".\"estimate_point_id\" AS \"estimate_point\", \"issues\".\"priority\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"project_id\", \"issues\".\"parent_id\", {cycle_id}, \"issues\".\"created_by_id\" AS \"created_by\", \"states\".\"group\" AS \"state__group\", {vote_items}, {reaction_items} FROM \"issues\" INNER JOIN \"workspaces\" ON (\"issues\".\"workspace_id\" = \"workspaces\".\"id\") INNER JOIN \"projects\" ON (\"issues\".\"project_id\" = \"projects\".\"id\") LEFT OUTER JOIN \"states\" ON (\"issues\".\"state_id\" = \"states\".\"id\") LEFT OUTER JOIN \"issues\" T_parent ON (\"issues\".\"parent_id\" = T_parent.\"id\") LEFT OUTER JOIN \"issue_labels\" \"label_through\" ON (\"issues\".\"id\" = \"label_through\".\"issue_id\") LEFT OUTER JOIN \"labels\" ON (\"label_through\".\"label_id\" = \"labels\".\"id\") LEFT OUTER JOIN \"issue_assignees\" \"assignee_through\" ON (\"issues\".\"id\" = \"assignee_through\".\"issue_id\") LEFT OUTER JOIN \"users\" \"assignees\" ON (\"assignee_through\".\"assignee_id\" = \"assignees\".\"id\") LEFT OUTER JOIN \"project_members\" ON (\"assignees\".\"id\" = \"project_members\".\"member_id\") LEFT OUTER JOIN \"module_issues\" \"module_through\" ON (\"issues\".\"id\" = \"module_through\".\"issue_id\") LEFT OUTER JOIN \"modules\" ON (\"module_through\".\"module_id\" = \"modules\".\"id\") LEFT OUTER JOIN \"issue_votes\" \"votes\" ON (\"issues\".\"id\" = \"votes\".\"issue_id\") LEFT OUTER JOIN \"users\" \"vote_actor\" ON (\"votes\".\"actor_id\" = \"vote_actor\".\"id\") LEFT OUTER JOIN \"issue_reactions\" ON (\"issues\".\"id\" = \"issue_reactions\".\"issue_id\") LEFT OUTER JOIN \"users\" \"reaction_actor\" ON (\"issue_reactions\".\"actor_id\" = \"reaction_actor\".\"id\") WHERE (\"issues\".\"deleted_at\" IS NULL AND \"states\".\"group\" != 'triage' AND \"issues\".\"archived_at\" IS NULL AND \"projects\".\"archived_at\" IS NULL AND \"issues\".\"is_draft\" = false AND \"issues\".\"id\" = $1 AND \"workspaces\".\"slug\" = $2 AND \"issues\".\"project_id\" = $3) GROUP BY \"issues\".\"id\", \"states\".\"group\" LIMIT 1",
+        "SELECT \"issues\".\"id\", \"issues\".\"name\", \"issues\".\"state_id\", \"issues\".\"sort_order\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"description_stripped\", \"issues\".\"description_binary\", {module_ids}, {label_ids}, {assignee_ids}, \"issues\".\"estimate_point_id\" AS \"estimate_point\", \"issues\".\"priority\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"project_id\", \"issues\".\"parent_id\", {cycle_id}, \"issues\".\"created_by_id\" AS \"created_by\", \"states\".\"group\" AS \"state__group\", {vote_items}, {reaction_items} FROM \"issues\" INNER JOIN \"workspaces\" ON (\"issues\".\"workspace_id\" = \"workspaces\".\"id\") INNER JOIN \"projects\" ON (\"issues\".\"project_id\" = \"projects\".\"id\") LEFT OUTER JOIN \"states\" ON (\"issues\".\"state_id\" = \"states\".\"id\") LEFT OUTER JOIN \"issues\" T_parent ON (\"issues\".\"parent_id\" = T_parent.\"id\") LEFT OUTER JOIN \"issue_labels\" \"label_through\" ON (\"issues\".\"id\" = \"label_through\".\"issue_id\") LEFT OUTER JOIN \"labels\" ON (\"label_through\".\"label_id\" = \"labels\".\"id\") LEFT OUTER JOIN \"issue_assignees\" \"assignee_through\" ON (\"issues\".\"id\" = \"assignee_through\".\"issue_id\") LEFT OUTER JOIN \"users\" \"assignees\" ON (\"assignee_through\".\"assignee_id\" = \"assignees\".\"id\") LEFT OUTER JOIN \"project_members\" ON (\"assignees\".\"id\" = \"project_members\".\"member_id\") LEFT OUTER JOIN \"module_issues\" \"module_through\" ON (\"issues\".\"id\" = \"module_through\".\"issue_id\") LEFT OUTER JOIN \"modules\" ON (\"module_through\".\"module_id\" = \"modules\".\"id\") LEFT OUTER JOIN \"issue_votes\" \"votes\" ON (\"issues\".\"id\" = \"votes\".\"issue_id\") LEFT OUTER JOIN \"users\" \"vote_actor\" ON (\"votes\".\"actor_id\" = \"vote_actor\".\"id\") LEFT OUTER JOIN \"issue_reactions\" ON (\"issues\".\"id\" = \"issue_reactions\".\"issue_id\") LEFT OUTER JOIN \"users\" \"reaction_actor\" ON (\"issue_reactions\".\"actor_id\" = \"reaction_actor\".\"id\") WHERE (\"issues\".\"deleted_at\" IS NULL AND NOT (\"states\".\"group\" = 'triage' AND \"states\".\"group\" IS NOT NULL) AND \"issues\".\"archived_at\" IS NULL AND \"projects\".\"archived_at\" IS NULL AND \"issues\".\"is_draft\" = false AND \"issues\".\"id\" = $1 AND \"workspaces\".\"slug\" = $2 AND \"issues\".\"project_id\" = $3) GROUP BY \"issues\".\"id\", \"states\".\"group\" LIMIT 1",
         module_ids = "COALESCE(ARRAY_AGG(DISTINCT \"modules\".\"id\") FILTER (WHERE NOT (\"modules\".\"id\" IS NULL) AND \"modules\".\"archived_at\" IS NULL AND \"module_through\".\"deleted_at\" IS NULL), '{}') AS \"module_ids\"",
         label_ids = "COALESCE(ARRAY_AGG(DISTINCT \"labels\".\"id\") FILTER (WHERE NOT (\"labels\".\"id\" IS NULL) AND \"label_through\".\"deleted_at\" IS NULL), '{}') AS \"label_ids\"",
         assignee_ids = "COALESCE(ARRAY_AGG(DISTINCT \"assignees\".\"id\") FILTER (WHERE NOT (\"assignees\".\"id\" IS NULL) AND \"project_members\".\"is_active\" = true AND \"assignee_through\".\"deleted_at\" IS NULL), '{}') AS \"assignee_ids\"",
-        cycle_id = "(SELECT U0.\"cycle_id\" FROM \"cycle_issues\" U0 WHERE (U0.\"deleted_at\" IS NULL AND U0.\"issue_id\" = (\"issues\".\"id\")) LIMIT 1) AS \"cycle_id\"",
+        cycle_id = "(SELECT U0.\"cycle_id\" FROM \"cycle_issues\" U0 WHERE (U0.\"deleted_at\" IS NULL AND U0.\"issue_id\" = (\"issues\".\"id\")) ORDER BY U0.\"created_at\" DESC LIMIT 1) AS \"cycle_id\"",
         vote_items = retrieve_vote_items_sql(),
         reaction_items = retrieve_reaction_items_sql(),
     )
@@ -2315,7 +2330,6 @@ mod tests {
             "name__bogus",
             "state__bogus",
             "project__workspace__slug",
-            "cycle_id",
         ] {
             assert!(
                 order_key_expr(bad).is_err(),
@@ -2343,6 +2357,36 @@ mod tests {
             "\"issues\".\"state_id\""
         );
         assert_eq!(order_key_expr("pk").unwrap().0, "\"issues\".\"id\"");
+    }
+
+    #[test]
+    fn order_key_expr_resolves_view_annotations() {
+        // `views/issue.py:98-125` annotations sort like columns instead of
+        // failing closed; the `(SELECT ` prefix is what keeps `base_selects`
+        // from grouping by them (same rule as `min_values`).
+        for (key, fragment) in [
+            ("cycle_id", "cycle_issues"),
+            ("link_count", "issue_links"),
+            ("attachment_count", "file_assets"),
+            ("sub_issues_count", "parent_id"),
+        ] {
+            for mapped in [key.to_owned(), format!("-{key}")] {
+                let (expr, desc) = order_key_expr(&mapped).unwrap();
+                assert_eq!(desc, mapped.starts_with('-'), "{mapped:?}");
+                assert!(
+                    expr.starts_with("(SELECT "),
+                    "{mapped:?} must stay a bare scalar subquery"
+                );
+                assert!(
+                    !expr.contains(&format!(" AS \"{key}\"")),
+                    "{mapped:?} must not carry the SELECT alias"
+                );
+                assert!(
+                    expr.contains(fragment),
+                    "{mapped:?} must order by its own annotation"
+                );
+            }
+        }
     }
 
     #[test]

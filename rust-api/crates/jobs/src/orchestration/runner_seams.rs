@@ -4,15 +4,15 @@
 //! (PIDASHCONV-862).
 //!
 //! The bin owns the `RunnerRunsSeams` provider but cannot build the
-//! jobs [`StoreDeps`] inputs: the `AdmissionCache` impls are
-//! `pub(crate)` in api and the `H`/`E`/`P` closures have no
-//! production factory. This module closes the gap with public
-//! executors over (`pool`, settings, `run_id`) that build their own
-//! inputs per call:
+//! jobs [`StoreDeps`] inputs: the api `AdmissionCache` impl is
+//! `pub(crate)` and the `H`/`E`/`P` closures have no production
+//! factory. This module closes the gap with public executors over
+//! (`pool`, settings, `run_id`) that build their own inputs per call:
 //!
 //! * [`complete_project_move_handoff_live`]: prefetches the source
-//!   run's creator presence, builds [`StoreDeps`] over a per-call
-//!   [`RunnerSeamCache`], and runs the jobs handoff driver.
+//!   run's creator presence, builds [`StoreDeps`] over the shared
+//!   [`RedisAdmissionCache`][crate::admission::RedisAdmissionCache],
+//!   and runs the jobs handoff driver.
 //! * [`maybe_apply_deferred_pause_live`]: same shape for the
 //!   deferred cap-hit pause (the pause path never reads presence,
 //!   so the map stays empty).
@@ -22,11 +22,9 @@
 //!   and executes the write — the executor the planner's docs call
 //!   for.
 //!
-//! [`RunnerSeamCache`] mirrors the api `RequestCache` exactly (a
-//! `Mutex<HashMap>`; the sync [`AdmissionCache`] trait cannot reach
-//! the async Redis client, and the drivers consult it only when
-//! building a cloud-executor run). Presence reads
-//! `assistant_user_llm_config` the way the assistant gate reads it.
+//! Admission counts against the shared Redis buckets (PIDASHCONV-1487),
+//! the same buckets the HTTP plane and the Django worker use. Presence
+//! reads `assistant_user_llm_config` the way the assistant gate reads it.
 //!
 //! Post-commit terminal effects the drivers return pending are
 //! enqueued into `rust_job_queue` here (the D-15 pipeline entry),
@@ -34,7 +32,7 @@
 //! bin provider maps each executor to `()` with no further work.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use chrono::Utc;
 use serde_json::Value;
@@ -42,75 +40,33 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use pidash_db::assistant::models::has_secret;
-use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings};
+use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings, RunnerSettings};
 use pidash_db::dispatch::status::AgentRunStatus;
 use pidash_db::tasks_ticker::jitter_seconds;
 use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
 use pidash_db::tx::Transaction;
 use pidash_services::assistant::seams::{agent_model_profile_for_user, has_usable_llm_config};
-use pidash_services::dispatch::{AdmissionCache, LlmProfile};
+use pidash_services::dispatch::LlmProfile;
+use pidash_services::domain::clock::apply_clock_write;
 #[cfg(test)]
 use pidash_services::extensions::NoExtraToolsets;
 use pidash_services::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
 use pidash_services::orchestration::clock::{self as clock, ClockIssue, ClockWrite, RunEndedRef};
+use pidash_services::runner_sessions::live_drains::{drain_pod_by_id, DrainError};
 use pidash_types::orchestration::{StateRef, TickerEventKind};
 
 use super::creation_jobs::StoreDeps;
-use super::creation_jobs::{complete_project_move_handoff as drive_handoff, CreationJobsError};
-use super::fire_tick_seam::{
-    create_ticker_sql, emit_logs, lock_ticker_by_issue_sql, map_policy, map_ticker,
-    maybe_apply_deferred_pause as drive_pause, save_clock_sql, DispatchJobsError,
+use super::creation_jobs::{
+    complete_project_move_handoff as drive_handoff, CreationJobsError, LiveCreationStore,
 };
+use super::fire_tick_seam::{
+    emit_logs, lock_ticker_by_issue_sql, map_policy, map_ticker,
+    maybe_apply_deferred_pause as drive_pause, DispatchJobsError,
+};
+use crate::admission::RedisAdmissionCache;
+use crate::dispatch::DispatchDecision;
 use crate::queue::enqueue;
 use crate::runner_runs::sweeps_chat::terminal_effects_job;
-
-// ---------------------------------------------------------------------------
-// Per-call admission cache
-// ---------------------------------------------------------------------------
-
-/// Per-call admission cache: [`RunnerSeamCache::default`] per
-/// executor call, the same call-scoped shape as the L6 drivers'
-/// caches and the api `RequestCache`.
-#[derive(Debug, Default)]
-pub struct RunnerSeamCache {
-    buckets: Mutex<HashMap<String, i64>>,
-}
-
-/// The [`AdmissionCache::Error`] for [`RunnerSeamCache`] (a poisoned
-/// mutex).
-#[derive(Debug)]
-pub struct CacheError(String);
-
-impl std::fmt::Display for CacheError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl std::error::Error for CacheError {}
-
-impl AdmissionCache for RunnerSeamCache {
-    type Error = CacheError;
-
-    fn bucket_count(&self, key: &str) -> Result<Option<i64>, Self::Error> {
-        self.buckets
-            .lock()
-            .map(|buckets| buckets.get(key).copied())
-            .map_err(|error| CacheError(error.to_string()))
-    }
-
-    fn add_or_incr(&self, key: &str, _timeout_secs: i64) -> Result<(), Self::Error> {
-        self.buckets
-            .lock()
-            .map(|mut buckets| {
-                buckets
-                    .entry(key.to_owned())
-                    .and_modify(|count| *count += 1)
-                    .or_insert(1);
-            })
-            .map_err(|error| CacheError(error.to_string()))
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Presence prefetch (the 861 live-inputs shape, scoped to one run)
@@ -222,13 +178,18 @@ async fn drain_terminal_effects(
 
 /// `complete_project_move_handoff(run_id)` with live inputs: the
 /// source run's creator presence, the installed assistant seam's
-/// llm-gate verdicts over it, a per-call [`RunnerSeamCache`], and
-/// `now`. Answers the replacement run id (`None` on every early-out:
-/// unknown run, non-terminal source, no marker, moved again, no pod).
+/// llm-gate verdicts over it, the shared [`RedisAdmissionCache`],
+/// and `now`. The shared Redis client and runner settings feed the
+/// replacement run's pod drain. Answers the replacement run id
+/// (`None` on every early-out: unknown run, non-terminal source, no
+/// marker, moved again, no pod).
+#[allow(clippy::too_many_arguments)]
 pub async fn complete_project_move_handoff_live(
     pool: &PgPool,
     cloud: &CloudAgentSettings,
     managed: &ManagedRunnerSettings,
+    redis: Option<&redis::Client>,
+    runner: &RunnerSettings,
     run_id: Uuid,
     toolsets: Arc<dyn CloudAgentToolsetsSeam>,
     assistant_seam: Arc<dyn AssistantModelSeam>,
@@ -240,13 +201,28 @@ pub async fn complete_project_move_handoff_live(
     let deps = StoreDeps {
         cloud: cloud.clone(),
         managed: managed.clone(),
-        cache: RunnerSeamCache::default(),
+        cache: RedisAdmissionCache::from_env(),
         has_usable_llm_config: gate_fn(verdicts),
         toolsets,
         llm_profile: profile_fn(presence),
         now_unix_secs: Utc::now().timestamp(),
     };
     let outcome = drive_handoff(pool, deps, run_id, Utc::now()).await?;
+    // The driver's `dispatch_agent_run` only *returns* the decision
+    // (`dispatch.py:61-70` drains the pod inline), so a `PodDrain`
+    // must be acted on here or the replacement stays QUEUED
+    // (PIDASHCONV-1494). The target-pod drain lands before the
+    // caller's source drains, as in `finalization.py`.
+    for (_, decision) in &outcome.dispatch_decisions {
+        if let DispatchDecision::PodDrain { pod_id } = decision {
+            drain_pod_by_id(pool, redis, runner, *pod_id)
+                .await
+                .map_err(|error| match error {
+                    DrainError::Db(db) => CreationJobsError::Db(db),
+                    other => CreationJobsError::Db(sqlx::Error::Protocol(other.to_string())),
+                })?;
+        }
+    }
     drain_terminal_effects(pool, &outcome.terminal_effects).await?;
     Ok(outcome.outcome.map(|run| run.id))
 }
@@ -267,7 +243,7 @@ pub async fn maybe_apply_deferred_pause_live(
     let deps = StoreDeps {
         cloud: cloud.clone(),
         managed: managed.clone(),
-        cache: RunnerSeamCache::default(),
+        cache: RedisAdmissionCache::from_env(),
         has_usable_llm_config: has_key_fn(Arc::clone(&presence)),
         toolsets,
         llm_profile: profile_fn(presence),
@@ -279,6 +255,209 @@ pub async fn maybe_apply_deferred_pause_live(
         .await
         .map_err(DispatchJobsError::Db)?;
     Ok(outcome.outcome.applied)
+}
+
+// ---------------------------------------------------------------------------
+// Post-run orchestration (run-ended reconcile + deferred pause +
+// pending-entry fire)
+// ---------------------------------------------------------------------------
+
+/// `_fire_pending_entry` lookup half (`run_lifecycle.py:141-155`): the
+/// run's work item id, if the run exists and names one. Executor-generic
+/// so the pool path and the hooks-transaction path share it. Moved
+/// from the api ports (OVL-06 PIDASHCONV-1544).
+pub async fn run_work_item_id<'e, E>(ex: E, run_id: Uuid) -> Result<Option<Uuid>, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let row: Option<Option<Uuid>> =
+        sqlx::query_scalar(r#"SELECT "work_item_id" FROM "agent_run" WHERE "id" = $1"#)
+            .bind(run_id)
+            .fetch_optional(ex)
+            .await?;
+    Ok(row.flatten())
+}
+
+/// `_fire_pending_entry` lookup half (`run_lifecycle.py:141-155`): the
+/// work item's pending ticker, if any. Executor-generic so the pool
+/// path and the hooks-transaction path share it. Moved from the api
+/// ports (OVL-06 PIDASHCONV-1544).
+pub async fn pending_entry_ticker_for<'e, E>(
+    ex: E,
+    work_item_id: Uuid,
+) -> Result<Option<Uuid>, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query_scalar(
+        r#"SELECT "id" FROM "issue_agent_ticker"
+           WHERE "issue_id" = $1 AND "enabled" = true AND "pending_entry" = true
+           LIMIT 1"#,
+    )
+    .bind(work_item_id)
+    .fetch_optional(ex)
+    .await
+}
+
+/// `_fire_pending_entry` (`run_lifecycle.py:141-155`): the run's work
+/// item pending ticker, if any, fires now. Moved from the api ports
+/// (OVL-06 PIDASHCONV-1544); the ports method and the in-tx variant's
+/// lookup half are thin callers. Re-exported through
+/// `pidash-sdk::ops`.
+pub async fn fire_pending_entry(pool: &PgPool, run_id: Uuid) -> Result<(), sqlx::Error> {
+    let Some(work_item_id) = run_work_item_id(pool, run_id).await? else {
+        return Ok(());
+    };
+    let Some(ticker_id) = pending_entry_ticker_for(pool, work_item_id).await? else {
+        return Ok(());
+    };
+    crate::tasks_ticker::scan::emit_fire_tick(pool, ticker_id).await
+}
+
+/// `_apply_post_run_orchestration` (`run_lifecycle.py:103-139`):
+/// disarm, deferred pause, pending-entry fire — each isolated in
+/// Python (try/except + log), so every failure is logged and the
+/// call still returns. Moved from the api ports
+/// (`runner_runs::LivePorts::post_run_orchestration`, OVL-06
+/// PIDASHCONV-1544) so the overlay shares the recipe instead of
+/// copying it; the ports method is now a thin caller. Re-exported
+/// through `pidash-sdk::ops`.
+pub async fn post_run_orchestration(
+    pool: &PgPool,
+    cloud: &CloudAgentSettings,
+    managed: &ManagedRunnerSettings,
+    toolsets: Arc<dyn CloudAgentToolsetsSeam>,
+    run_id: Uuid,
+) {
+    if let Err(error) = disarm_on_terminal_signal(pool, run_id).await {
+        tracing::error!(
+            ?error,
+            run_id = %run_id,
+            "orchestration.error: run-ended reconcile failed"
+        );
+    }
+    if let Err(error) =
+        maybe_apply_deferred_pause_live(pool, cloud, managed, run_id, toolsets).await
+    {
+        tracing::error!(
+            ?error,
+            run_id = %run_id,
+            "orchestration.error: deferred-pause failed"
+        );
+    }
+    if let Err(error) = fire_pending_entry(pool, run_id).await {
+        tracing::error!(
+            ?error,
+            run_id = %run_id,
+            "orchestration.error: pending-entry fire failed"
+        );
+    }
+}
+
+/// `_apply_post_run_orchestration` (`run_lifecycle.py:103-139`) on the
+/// caller's transaction. Disarm locks only the ticker, so its
+/// executor runs beside the caller's issue/run locks; the deferred
+/// pause re-locks the issue row and so runs on `tx`. The pending
+/// fire reads on `tx` after the pause's write and publishes through
+/// `on_commit`, so a rolled-back hooks transaction emits no tick.
+/// Moved from the api ports
+/// (`runner_runs::LivePorts::post_run_orchestration_in_tx`, OVL-06
+/// PIDASHCONV-1544); the ports method is now a thin caller.
+/// Re-exported through `pidash-sdk::ops`.
+pub async fn post_run_orchestration_in_tx<'t>(
+    tx: Transaction<'t>,
+    pool: &'t PgPool,
+    cloud: &CloudAgentSettings,
+    managed: &ManagedRunnerSettings,
+    cache: RedisAdmissionCache,
+    toolsets: Arc<dyn CloudAgentToolsetsSeam>,
+    run_id: Uuid,
+) -> Transaction<'t> {
+    if let Err(error) = disarm_on_terminal_signal(pool, run_id).await {
+        tracing::error!(
+            ?error,
+            run_id = %run_id,
+            "orchestration.error: run-ended reconcile failed"
+        );
+    }
+    let deps = StoreDeps {
+        cloud: cloud.clone(),
+        managed: managed.clone(),
+        cache,
+        // The pause path creates no runs: the presence closures are
+        // unread (`maybe_apply_deferred_pause_live`), so the keyless
+        // answers mirror it.
+        has_usable_llm_config: |_actor: Uuid| false,
+        toolsets,
+        llm_profile: |_actor: Option<Uuid>| LlmProfile {
+            available: false,
+            reason_code: String::new(),
+        },
+        now_unix_secs: Utc::now().timestamp(),
+    };
+    let mut store = LiveCreationStore::new(tx, pool, deps);
+    match pidash_services::orchestration::dispatch::maybe_apply_deferred_pause(
+        &mut store,
+        run_id,
+        Utc::now(),
+        0.0,
+    )
+    .await
+    {
+        Ok(outcome) => {
+            for line in &outcome.logs {
+                if line.level == "WARNING" {
+                    tracing::warn!("{}", line.message);
+                } else {
+                    tracing::info!("{}", line.message);
+                }
+            }
+        }
+        Err(error) => tracing::error!(
+            ?error,
+            run_id = %run_id,
+            "orchestration.error: deferred-pause failed"
+        ),
+    }
+    let (mut tx, _pool, _cache, _dispatches, _deferred, _terminal_effects) = store.into_parts();
+    let work_item_id: Option<Uuid> = match run_work_item_id(&mut **tx.inner(), run_id).await {
+        Ok(id) => id,
+        Err(error) => {
+            tracing::error!(
+                ?error,
+                run_id = %run_id,
+                "orchestration.error: pending-entry lookup failed"
+            );
+            None
+        }
+    };
+    let ticker_id: Option<Uuid> = match work_item_id {
+        Some(work_item_id) => pending_entry_ticker_for(&mut **tx.inner(), work_item_id)
+            .await
+            .unwrap_or(None),
+        None => None,
+    };
+    if let Some(ticker_id) = ticker_id {
+        // `_fire_pending_entry` queues `fire_tick.delay` with
+        // `transaction.on_commit`, so a rolled-back hooks transaction
+        // must not publish a tick for it.
+        let pool = pool.clone();
+        tx.on_commit(move || {
+            tokio::spawn(async move {
+                if let Err(error) = crate::tasks_ticker::scan::emit_fire_tick(&pool, ticker_id)
+                    .await
+                    .map_err(|error| error.to_string())
+                {
+                    tracing::error!(
+                        ?error,
+                        ticker_id = %ticker_id,
+                        "orchestration.error: pending-entry fire failed"
+                    );
+                }
+            });
+        });
+    }
+    tx
 }
 
 // ---------------------------------------------------------------------------
@@ -386,50 +565,13 @@ pub async fn disarm_on_terminal_signal(pool: &PgPool, run_id: Uuid) -> Result<bo
         jitter,
     );
     if let Some(outcome) = &outcome {
-        match outcome.write {
-            ClockWrite::None => {}
-            ClockWrite::Update => {
-                let ticker = ticker.as_ref().expect("update has a post-lock row");
-                // SAVE_CLOCK_PARAMS order: updated_at, granted,
-                // next_run_at, enabled, disarm_reason, pending_entry,
-                // pending_entry_free, pending_entry_actor_id,
-                // pending_entry_trigger, resume_parent_run_id, id.
-                sqlx::query(&save_clock_sql())
-                    .bind(now)
-                    .bind(ticker.granted)
-                    .bind(ticker.next_run_at)
-                    .bind(ticker.enabled)
-                    .bind(ticker.disarm_reason.as_str())
-                    .bind(ticker.pending_entry)
-                    .bind(ticker.pending_entry_free)
-                    .bind(ticker.pending_entry_actor_id)
-                    .bind(ticker.pending_entry_trigger.as_str())
-                    .bind(ticker.resume_parent_run_id)
-                    .bind(ticker.id)
-                    .execute(&mut **tx.inner())
-                    .await?;
-            }
-            ClockWrite::Insert => {
-                // Unreachable for `RUN_ENDED` (it never creates), kept
-                // so a future create-kind reuse cannot silently drop
-                // the row.
-                let ticker = ticker.as_ref().expect("insert has a post-lock row");
-                sqlx::query(&create_ticker_sql())
-                    .bind(ticker.created_at)
-                    .bind(ticker.created_by_id)
-                    .bind(ticker.id)
-                    .bind(ticker.issue_id)
-                    .bind(ticker.next_run_at)
-                    .bind(ticker.enabled)
-                    .bind(ticker.disarm_reason.as_str())
-                    .bind(ticker.pending_entry)
-                    .bind(ticker.pending_entry_free)
-                    .bind(ticker.pending_entry_actor_id)
-                    .bind(ticker.pending_entry_trigger.as_str())
-                    .bind(ticker.resume_parent_run_id)
-                    .execute(&mut **tx.inner())
-                    .await?;
-            }
+        // Insert is unreachable for `RUN_ENDED` (it never creates);
+        // the shared write keeps the leg so a future create-kind
+        // reuse cannot silently drop the row. A `None` write touches
+        // no row — there may be none (the no-ticker outcome).
+        if outcome.write != ClockWrite::None {
+            let ticker = ticker.as_ref().expect("clock write has a post-lock row");
+            apply_clock_write(&mut **tx.inner(), &outcome.write, ticker, now).await?;
         }
     }
     tx.commit().await?;
@@ -453,17 +595,6 @@ mod tests {
             .expect("SQL parses")
             .pop()
             .expect("one statement")
-    }
-
-    #[test]
-    fn cache_counts_like_request_cache() {
-        let cache = RunnerSeamCache::default();
-        assert_eq!(cache.bucket_count("k").unwrap(), None);
-        cache.add_or_incr("k", 60).unwrap();
-        assert_eq!(cache.bucket_count("k").unwrap(), Some(1));
-        cache.add_or_incr("k", 60).unwrap();
-        assert_eq!(cache.bucket_count("k").unwrap(), Some(2));
-        assert_eq!(cache.bucket_count("other").unwrap(), None);
     }
 
     #[test]
@@ -651,10 +782,13 @@ mod tests {
     async fn live_handoff_unknown_run_is_none() {
         let pool = pool().await;
         let (cloud, managed) = settings();
+        let runner = pidash_db::config::Settings::test_defaults().runner;
         let replacement = complete_project_move_handoff_live(
             &pool,
             &cloud,
             &managed,
+            None,
+            &runner,
             Uuid::new_v4(),
             Arc::new(NoExtraToolsets),
             Arc::new(DefaultSeam),
@@ -691,5 +825,107 @@ mod tests {
             .await
             .expect("unknown run is Ok");
         assert!(!stopped);
+    }
+
+    /// A terminal run whose issue has no ticker row answers `Ok(false)`
+    /// without touching a row (PIDASHCONV-1610): the `None` clock write
+    /// must not require a post-lock row. The shared-write migration
+    /// briefly unwrapped the row unconditionally, which panicked on
+    /// exactly this shape in the worker.
+    #[tokio::test]
+    #[ignore = "needs migrated scratch DB via DATABASE_URL"]
+    async fn live_disarm_no_ticker_row_is_false() {
+        let pool = pool().await;
+        let tag = Uuid::new_v4().to_string();
+        let user = Uuid::new_v4();
+        let workspace = Uuid::new_v4();
+        let project = Uuid::new_v4();
+        let pod = Uuid::new_v4();
+        let issue = Uuid::new_v4();
+        let run = Uuid::new_v4();
+        let now = Utc::now();
+        sqlx::query(
+            r#"INSERT INTO "users" ("password", "id", "username", "first_name", "last_name", "avatar", "date_joined", "created_at", "updated_at", "last_location", "created_location", "is_superuser", "is_managed", "is_password_expired", "is_active", "is_staff", "is_email_verified", "is_password_autoset", "token", "user_timezone", "last_login_ip", "last_logout_ip", "last_login_medium", "last_login_uagent", "is_bot", "display_name", "is_email_valid", "is_password_reset_required") VALUES ('!', $1, $2, '', '', '', $3, $3, $3, '', '', false, false, false, true, false, false, false, $4, 'UTC', '', '', '', '', false, $2, false, false)"#,
+        )
+        .bind(user)
+        .bind(format!("disarm-{tag}"))
+        .bind(now)
+        .bind(tag.clone())
+        .execute(&pool)
+        .await
+        .expect("seed user");
+        sqlx::query(
+            r#"INSERT INTO "workspaces" ("created_at", "updated_at", "id", "name", "slug", "owner_id", "timezone", "background_color") VALUES ($1, $1, $2, $3, $4, $5, 'UTC', '#fff')"#,
+        )
+        .bind(now)
+        .bind(workspace)
+        .bind(format!("disarm-{tag}"))
+        .bind(format!("disarm-{tag}"))
+        .bind(user)
+        .execute(&pool)
+        .await
+        .expect("seed workspace");
+        sqlx::query(
+            r#"INSERT INTO "projects" ("created_at", "updated_at", "id", "name", "description", "network", "identifier", "workspace_id", "cycle_view", "module_view", "issue_views_view", "page_view", "intake_view", "archive_in", "close_in", "logo_props", "is_time_tracking_enabled", "is_issue_type_enabled", "guest_view_all_features", "timezone", "members_can_edit_states", "repo_url", "base_branch", "agent_default_interval_seconds", "agent_default_max_ticks", "agent_ticking_enabled", "is_default", "agent_review_default_interval_seconds", "default_agent_executor", "agent_test_default_interval_seconds") VALUES ($1, $1, $2, $3, '', 0, 'DSP', $4, false, false, false, false, false, 0, 0, '{}', false, false, false, 'UTC', false, '', 'main', 60, 10, true, false, 60, '', 60)"#,
+        )
+        .bind(now)
+        .bind(project)
+        .bind(format!("disarm-{tag}"))
+        .bind(workspace)
+        .execute(&pool)
+        .await
+        .expect("seed project");
+        sqlx::query(
+            r#"INSERT INTO "pod" ("id", "name", "description", "is_default", "created_at", "updated_at", "workspace_id", "project_id") VALUES ($1, $2, '', false, $3, $3, $4, $5)"#,
+        )
+        .bind(pod)
+        .bind(format!("disarm-{tag}"))
+        .bind(now)
+        .bind(workspace)
+        .bind(project)
+        .execute(&pool)
+        .await
+        .expect("seed pod");
+        sqlx::query(
+            r#"INSERT INTO "issues" ("created_at", "updated_at", "id", "name", "description_json", "priority", "sequence_id", "project_id", "workspace_id", "description_html", "sort_order", "is_draft", "git_work_branch", "workpad", "complexity_score") VALUES ($1, $1, $2, $3, '{}', 'none', 1, $4, $5, '', 0, false, '', '', 0)"#,
+        )
+        .bind(now)
+        .bind(issue)
+        .bind(format!("disarm-{tag}"))
+        .bind(project)
+        .bind(workspace)
+        .execute(&pool)
+        .await
+        .expect("seed issue");
+        sqlx::query(
+            r#"INSERT INTO "agent_run" ("id", "status", "prompt", "run_config", "required_capabilities", "thread_id", "error", "created_at", "workspace_id", "work_item_id", "pod_id", "created_by_id", "llm_model", "refusal_category", "trigger", "executor_kind", "dispatch_attempts", "cancel_reason", "error_code", "tool_plan", "phase_kind", "agent_metadata", "usage", "work_type") VALUES ($1, 'completed', '', '{}', '{}', '', '', $2, $3, $4, $5, $6, '', '', 'tick', 'local_runner', 0, '', '', '{}', 'coding-task', '{}', '{}', '')"#,
+        )
+        .bind(run)
+        .bind(now)
+        .bind(workspace)
+        .bind(issue)
+        .bind(pod)
+        .bind(user)
+        .execute(&pool)
+        .await
+        .expect("seed run");
+        let stopped = disarm_on_terminal_signal(&pool, run)
+            .await
+            .expect("no-ticker disarm is Ok");
+        assert!(!stopped);
+        for (table, id) in [
+            ("agent_run", run),
+            ("issues", issue),
+            ("pod", pod),
+            ("projects", project),
+            ("workspaces", workspace),
+            ("users", user),
+        ] {
+            sqlx::query(&format!(r#"DELETE FROM "{table}" WHERE "id" = $1"#))
+                .bind(id)
+                .execute(&pool)
+                .await
+                .expect("cleanup row");
+        }
     }
 }
