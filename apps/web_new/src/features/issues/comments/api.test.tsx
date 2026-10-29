@@ -35,6 +35,7 @@ import {
   duplicateKeptCommentImages,
   foldPatch,
   paintComment,
+  pendingCommentPatch,
   removeCommentRow,
   requestCommentMentions,
   useCommentMentionSearch,
@@ -116,6 +117,30 @@ function stubClient(handler: (call: Recorded) => { status: number; body: unknown
     };
   });
   return { client, calls };
+}
+
+/**
+ * A transport whose answers the test releases by hand, so a mutation can
+ * be observed between `onMutate` and its PATCH resolving. Installs the
+ * client the hooks read through `getAppClient` too.
+ */
+function stubDeferredClient(handler: (call: Recorded) => Promise<{ status: number; body: unknown }>) {
+  const calls: Recorded[] = [];
+  createAppClient("https://api.test", async (url: string, init: TransportInit) => {
+    const call = { method: init.method, url, body: init.body ?? "" };
+    calls.push(call);
+    if (url.endsWith("/auth/get-csrf-token/")) {
+      return { status: 200, url, headers: { get: () => null }, text: async () => JSON.stringify({ csrf_token: "x" }) };
+    }
+    const answer = await handler(call);
+    return {
+      status: answer.status,
+      url,
+      headers: { get: () => null },
+      text: async () => (answer.body === "" ? "" : JSON.stringify(answer.body)),
+    };
+  });
+  return calls;
 }
 
 function harness() {
@@ -287,6 +312,49 @@ describe("useUpdateComment", () => {
       "<p>Draft</p>"
     );
     expect(snapshots[0]?.data).toEqual([comment()]);
+  });
+
+  it("withholds an edited body and its marker until the PATCH lands (ISS-198)", async () => {
+    let release: ((value: { status: number; body: unknown }) => void) | undefined;
+    const calls = stubDeferredClient(() => {
+      const answer = new Promise<{ status: number; body: unknown }>((resolve) => {
+        release = resolve;
+      });
+      return answer;
+    });
+    const { queryClient, wrapper } = harness();
+    queryClient.setQueryData(issueKeys.comments(SLUG, PROJECT, ISSUE), [comment()]);
+    const { result } = renderHook(() => useUpdateComment(SCOPE, COMMENT_UPDATE_FAILED_TITLE, COMMENT_UPDATED_TITLE), {
+      wrapper,
+    });
+    const pending = result.current.mutateAsync({ commentId: COMMENT, patch: { comment_html: "<p>Revised</p>" } });
+    // Give onMutate its turn: it cancels and snapshots before the write.
+    await waitFor(() => expect(calls.some((call) => call.method === "PATCH")).toBe(true));
+    const midFlight = queryClient.getQueryData<IssueComment[]>(issueKeys.comments(SLUG, PROJECT, ISSUE))?.[0];
+    // The stored row a fresh read would agree with is still the pre-edit
+    // body, so the card must not claim the edit landed either.
+    expect(midFlight?.comment_html).toBe("<p>Hello</p>");
+    expect(midFlight?.edited_at).toBeNull();
+
+    (release as ((value: { status: number; body: unknown }) => void) | undefined)?.({
+      status: 200,
+      body: comment({ comment_html: "<p>Revised</p>", edited_at: "2026-10-18T00:00:00Z" }),
+    });
+    await pending;
+    expect(JSON.parse(calls.find((call) => call.method === "PATCH")?.body ?? "{}")).toEqual({
+      comment_html: "<p>Revised</p>",
+    });
+    const confirmed = queryClient.getQueryData<IssueComment[]>(issueKeys.comments(SLUG, PROJECT, ISSUE))?.[0];
+    expect(confirmed?.comment_html).toBe("<p>Revised</p>");
+    expect(confirmed?.edited_at).toBe("2026-10-18T00:00:00Z");
+  });
+
+  it("keeps a fold or access flip immediate while a body change waits for the server", () => {
+    // Fold and access are presentation flags the card may show at once.
+    expect(pendingCommentPatch({ comment_html: "<p>Draft</p>", labels: ["fold"] })).toEqual({ labels: ["fold"] });
+    expect(pendingCommentPatch({ access: "EXTERNAL" })).toEqual({ access: "EXTERNAL" });
+    // A body-only patch paints nothing until the confirmed row arrives.
+    expect(pendingCommentPatch({ comment_html: "<p>Draft</p>" })).toEqual({});
   });
 
   it("paints labels and access without touching the body or the edited marker when both are absent", async () => {

@@ -394,6 +394,85 @@ describe("CommentThread", () => {
     expect(await screen.findByText("Revised", undefined, { timeout: 5000 })).toBeInTheDocument();
   });
 
+  it("sends the second draft after edit, cancel, edit and shows no marker until it lands (ISS-198)", async () => {
+    let release: ((value: { status: number; body: unknown }) => void) | undefined;
+    let revised = false;
+    const calls: Recorded[] = [];
+    createAppClient("https://api.test", async (url: string, init: TransportInit) => {
+      const call = { method: init.method, url, body: init.body ?? "" };
+      calls.push(call);
+      if (url.endsWith("/auth/get-csrf-token/")) {
+        return {
+          status: 200,
+          url,
+          headers: { get: () => null },
+          text: async () => JSON.stringify({ csrf_token: "x" }),
+        };
+      }
+      if (init.method === "PATCH") {
+        // Hold the write open so the test can read the card while it is out.
+        const answer = await new Promise<{ status: number; body: unknown }>((resolve) => {
+          release = resolve;
+        });
+        return {
+          status: answer.status,
+          url,
+          headers: { get: () => null },
+          text: async () => JSON.stringify(answer.body),
+        };
+      }
+      if (url.includes("activity_type=issue-property") || url.includes("/reactions/")) {
+        return { status: 200, url, headers: { get: () => null }, text: async () => "[]" };
+      }
+      const rows = revised
+        ? [comment({ comment_html: "<p>Second draft</p>", edited_at: "2026-10-18T10:00:00Z" })]
+        : [comment()];
+      return { status: 200, url, headers: { get: () => null }, text: async () => JSON.stringify(rows) };
+    });
+
+    const user = userEvent.setup();
+    renderThread();
+    await screen.findByText("Thread words", undefined, { timeout: 5000 });
+
+    // First edit, discarded: no write at all.
+    fireEvent.click(screen.getByRole("button", { name: "Comment actions" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Edit" }, { timeout: 5000 }));
+    await screen.findByLabelText("Edit comment", undefined, { timeout: 5000 });
+    fireEvent.click(screen.getByRole("button", { name: "Cancel editing" }));
+    expect(calls.some((call) => call.method === "PATCH")).toBe(false);
+
+    // Second edit, saved: only that draft is written.
+    fireEvent.click(screen.getByRole("button", { name: "Comment actions" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Edit" }, { timeout: 5000 }));
+    const editable = (await screen.findByLabelText("Edit comment", undefined, {
+      timeout: 5000,
+    })) as HTMLTextAreaElement;
+    editable.focus();
+    editable.setSelectionRange(0, editable.value.length);
+    await user.keyboard("Second draft");
+    await waitFor(() => expect(editable.value).toBe("Second draft"), { timeout: 5000 });
+    await user.click(screen.getByRole("button", { name: "Save comment" }));
+
+    await waitFor(() => expect(calls.some((call) => call.method === "PATCH")).toBe(true));
+    const patches = calls.filter((call) => call.method === "PATCH");
+    expect(patches).toHaveLength(1);
+    expect(patches[0]?.url).toContain(`/comments/${COMMENT}/`);
+    expect(JSON.parse(patches[0]?.body ?? "{}")).toEqual({ comment_html: "<p>Second draft</p>" });
+
+    // While the write is out, the card still shows the stored body and no
+    // edited marker, so it never claims a save the server has not stored.
+    expect(screen.queryByText(/Second draft/)).toBeNull();
+    expect(screen.queryByText(/\(edited\)/)).toBeNull();
+
+    revised = true;
+    (release as ((value: { status: number; body: unknown }) => void) | undefined)?.({
+      status: 200,
+      body: comment({ comment_html: "<p>Second draft</p>", edited_at: "2026-10-18T10:00:00Z" }),
+    });
+    expect(await screen.findByText("Second draft", undefined, { timeout: 5000 })).toBeInTheDocument();
+    expect(await screen.findByText(/edited/, undefined, { timeout: 5000 })).toBeInTheDocument();
+  });
+
   it("flips the access specifier from the menu", async () => {
     const calls = stubTransport((call) =>
       call.method === "PATCH"
