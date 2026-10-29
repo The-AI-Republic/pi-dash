@@ -9923,14 +9923,18 @@ export class WebNewDriver implements ParityDriver {
     await this.page.reload({ waitUntil: "domcontentloaded" });
     // Either surface settles the reload: the profile tab, a project
     // list (project, cycle, module, archived), one of the board layouts
-    // (rows or empty state), or a loader skeleton. The skeleton arm
-    // matters: loader scenarios reload under a stall and must return
-    // inside the skeleton window, the way the oracle's chrome settle
-    // does — waiting for rows would miss the window and triple the
-    // stall (the sub-issue query fires only after the list resolves).
+    // (rows or empty state), the shared empty card, or a loader
+    // skeleton. The skeleton arm matters: loader scenarios reload under
+    // a stall and must return inside the skeleton window, the way the
+    // oracle's chrome settle does — waiting for rows would miss the
+    // window and triple the stall (the sub-issue query fires only after
+    // the list resolves). The empty-card arm matters the same way: an
+    // empty project, cycle, or module surface renders only the shared
+    // EmptyContextCard (issues-empty-state), with no rows, headers, or
+    // skeleton to settle on (NEWFRONT-716: CYC-035).
     await this.page
       .locator(
-        '[data-testid="profile-list"], [data-testid="list-group-header"], [data-testid="list-row"], [data-testid="empty-state"], [data-testid="spreadsheet-scroller"], [data-testid="kanban-layout"], [data-testid="gantt-layout"], [data-testid="calendar-layout"], [data-testid="issues-calendar"], [data-testid="list-loading"], [data-testid="section-loading"]'
+        '[data-testid="profile-list"], [data-testid="list-group-header"], [data-testid="list-row"], [data-testid="empty-state"], [data-testid="spreadsheet-scroller"], [data-testid="kanban-layout"], [data-testid="gantt-layout"], [data-testid="calendar-layout"], [data-testid="issues-calendar"], [data-testid="list-loading"], [data-testid="section-loading"], [data-testid="issues-empty-state"]'
       )
       .first()
       .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
