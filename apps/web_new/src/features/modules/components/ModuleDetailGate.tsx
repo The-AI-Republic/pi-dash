@@ -14,6 +14,11 @@
 //
 // The gate decides; it does not build a second wall or a second empty
 // state.
+//
+// The gate is also the only thing allowed to mount the page: while its
+// read is in flight it holds a skeleton and renders no children, so a
+// screen suspending on the same key can never throw a 404 past the gate
+// into the route's error boundary (NEWFRONT-1026).
 
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
@@ -22,6 +27,7 @@ import * as React from "react";
 import { getAppClient } from "../../../core/api/client.js";
 import { ROLE_ADMIN } from "../../../core/session/permissions.js";
 import { useJoinProject, useWorkspaceMembership, ProjectAccessWall } from "../../auth/index.js";
+import { ListSkeleton } from "../../issues/index.js";
 import { moduleReadOutcome } from "../lib/moduleDetail.js";
 import { modulesListHref } from "../lib/moduleList.js";
 import { moduleDetailQueryOptions } from "./sidebar/moduleSidebarQueries.js";
@@ -49,8 +55,16 @@ export function ModuleDetailGate({
     error: detail.error,
     archivedAt: detail.data?.archived_at,
     isAdmin,
+    isPending: detail.isPending,
   });
 
+  if (outcome.kind === "pending") {
+    return (
+      <div data-testid="module-detail-gate-pending" aria-busy="true">
+        <ListSkeleton />
+      </div>
+    );
+  }
   if (outcome.kind === "wall") {
     const canJoin = outcome.wall === "join";
     const joining = canJoin && join.isPending;
