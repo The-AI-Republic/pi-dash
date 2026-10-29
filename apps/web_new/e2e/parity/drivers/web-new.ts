@@ -24455,7 +24455,18 @@ export class WebNewDriver implements ParityDriver {
       // The desktop trigger reveals on row hover; hovering first reads
       // the menu the way a viewer opens it.
       await row.hover({ timeout: WebNewDriver.WAIT_MS });
-      await row.locator('div[data-main-menu="true"]:visible button').click({ timeout: WebNewDriver.WAIT_MS });
+      const trigger = row.locator('div[data-main-menu="true"]:visible button');
+      try {
+        await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+      } catch {
+        // An open peek panel overlays the row's trigger (NEWFRONT-329
+        // deletes with the peek open): a keyboard user tabs to the
+        // covered trigger and presses Enter, which needs no click
+        // point. A genuinely missing trigger still fails below, on
+        // the fallback or the menu wait.
+        await trigger.focus({ timeout: WebNewDriver.WAIT_MS });
+        await trigger.press("Enter", { timeout: WebNewDriver.WAIT_MS });
+      }
     }
     await this.page.locator('[role="menuitem"]:visible').first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }

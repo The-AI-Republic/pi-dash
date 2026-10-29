@@ -621,7 +621,10 @@ test(
           title: "Archive success",
           message: expect.stringContaining(archiveLandingMention),
         });
-      expect(await driver.currentUrlPath()).toBe(`/${world.workspaceSlug}/projects/${world.projectId}/modules/`);
+      // The new landing keeps the bare path (no client-side hop runs);
+      // the old hop adds its trailing slash (slash-tolerant row).
+      const archiveLandingPath = (await driver.currentUrlPath()).replace(/\/$/, "");
+      expect(archiveLandingPath).toBe(`/${world.workspaceSlug}/projects/${world.projectId}/modules`);
       expect(await archivesModuleIsArchived(world.workspaceSlug, world.projectId, confirmed, world.owner.cookie)).toBe(
         true
       );
@@ -662,6 +665,10 @@ test(
       // because the module is still live (slash-tolerant: no hop runs,
       // so the address keeps its direct-entry shape).
       await expect.poll(() => driver.rulesLastToast(), { timeout: 30_000 }).toMatchObject({ title: "Error!" });
+      // Toasts carry role=dialog (cycles-driver precedent), so the
+      // error notice must drain before the dialog read proves the
+      // archive confirmation closed.
+      await expect.poll(() => driver.rulesLastToast(), { timeout: 30_000 }).toBe(null);
       expect(await driver.archivesArchiveDialog()).toBeNull();
       expect((await driver.currentUrlPath()).replace(/\/$/, "")).toBe(
         `/${world.workspaceSlug}/projects/${world.projectId}/modules`
