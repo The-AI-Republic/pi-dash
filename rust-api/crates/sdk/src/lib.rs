@@ -341,6 +341,32 @@ pub mod ops {
     pub use pidash_types::runner_runs::TERMINAL_RUN_STATUSES;
 }
 
+/// Public domain-write hooks: OSS's own side effects for any caller of
+/// `operations::*` and the domain writes (OVL-16, PIDASHCONV-1660).
+/// [`HookDeps`] is the one bundle (pool, settings, seams, drains, queue
+/// sink); it hands out the transition / enqueue / move hooks and the
+/// [`operations::Deps`][crate::operations::Deps] that installs the first
+/// two, so an overlay caller gets exactly the side effects the v1
+/// endpoint gets with no hook code of its own.
+pub mod hooks {
+    pub use pidash_jobs::hooks::EnqueueHook;
+    pub use pidash_jobs::hooks::HookDeps;
+    pub use pidash_jobs::hooks::LiveMoveAdmissionCache;
+    pub use pidash_jobs::hooks::LivePodDrain;
+    pub use pidash_jobs::hooks::MoveHook;
+    pub use pidash_jobs::hooks::OutboxTaskSink;
+    pub use pidash_jobs::hooks::QueuePublishDrain;
+    pub use pidash_jobs::hooks::QueueTerminalEffectsDrain;
+    pub use pidash_jobs::hooks::TaskSink;
+    pub use pidash_jobs::hooks::TerminalEffectsDrain;
+    pub use pidash_jobs::hooks::TransitionHook;
+    pub use pidash_jobs::issue_transition::PodDrain;
+    pub use pidash_jobs::issue_transition::PublishEffectsDrain;
+    pub use pidash_services::domain::activity::TaskEnqueueHook;
+    pub use pidash_services::domain::issues_move::MoveAdmissionCache;
+    pub use pidash_services::domain::transition::IssueTransitionHook;
+}
+
 /// The serializer step of the v1 write endpoints: validate the payload,
 /// apply defaults, save through `domain::*`, render the response
 /// (OVL-14, PIDASHCONV-1649). One submodule per endpoint group; the v1
