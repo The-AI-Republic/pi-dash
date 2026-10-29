@@ -5,6 +5,8 @@ edition = "2021"
 
 [dependencies]
 pidash-types = { path = "../types" }
+# OVL-04 (PIDASHCONV-1542): canonical parity plumbing. Leaf crate, no cycle.
+pidash-compat = { path = "../compat" }
 base64 = "0.22"
 fernet = "0.2"
 pbkdf2 = "0.13"
@@ -13,6 +15,17 @@ sha2 = "0.11"
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio", "uuid", "chrono", "json"] }
 thiserror = "2"
 sea-query = { version = "0.32", default-features = false, features = ["backend-postgres", "with-uuid", "with-chrono"] }
+# ORM-01 (PIDASHCONV-1519, design D1): SeaORM 1.1 entities over the
+# existing sqlx pool. The 1.1 line unifies on the locked sqlx 0.8.6 /
+# sea-query 0.32.7 (`cargo tree -d` must show no second copy); 2.x would
+# move the whole workspace to sqlx 0.9 and is out of scope for stage 8.
+sea-orm = { version = "~1.1.20", default-features = false, features = ["sqlx-postgres", "runtime-tokio", "macros", "with-uuid", "with-chrono", "with-json"] }
+# ORM-07 (PIDASHCONV-1525): `#[async_trait]` on the hand-written
+# `ActiveModelBehavior` impls (the trait is async-trait-based, so impls
+# must be too). Locked async-trait 0.1.x via sea-orm — no lock churn.
+# ORM-03 (PIDASHCONV-1521): `#[async_trait]` on the `ActiveModelBehavior`
+# hook impls too.
+async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # F-07 filter kernels: NaiveDate arithmetic for the legacy relative-date
@@ -21,7 +34,7 @@ serde_json = "1"
 chrono = { version = "0.4", default-features = false, features = ["std", "serde"] }
 chrono-tz = "0.10"
 uuid = { version = "1", features = ["serde"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time"] }
 # Shared async Redis handle (`redis.rs`, PIDASHCONV-265): tokio-native
 # multiplexed connections plus pubsub; `tokio-rustls-comp` (not bare
 # `tokio-comp`: without the rustls runtime glue the crate does not compile
@@ -36,3 +49,5 @@ redis = { version = "1", default-features = false, features = ["tokio-rustls-com
 futures-util = "0.3"
 mongodb = "3"
 tracing = "0.1"
+# NFKD for Django `slugify` parity (`state::slugify_name`, allow_unicode=False).
+unicode-normalization = "0.1"

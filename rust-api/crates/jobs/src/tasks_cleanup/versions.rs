@@ -94,8 +94,8 @@ pub const TASK_SCHEDULE_DESCRIPTION_VERSION: &str =
 /// `issue_description_version_task.py:44`.
 pub const TASK_DESCRIPTION_TASK: &str =
     "pi_dash.bgtasks.issue_description_version_task.issue_description_version_task";
-/// `page_version_task.py:22`.
-pub const TASK_TRACK_PAGE_VERSION: &str = "pi_dash.bgtasks.page_version_task.track_page_version";
+/// Re-export of the canonical [`pidash_services::domain::activity::TRACK_PAGE_VERSION_TASK`].
+pub use pidash_services::domain::activity::TRACK_PAGE_VERSION_TASK as TASK_TRACK_PAGE_VERSION;
 
 /// Every task name this module owns (registration + contract-suite parity).
 pub const ALL_VERSION_TASKS: [&str; 7] = [
@@ -1477,7 +1477,12 @@ pub async fn run_description_task(
                 .map_err(|e| e.to_string())?;
         }
         _ => {
-            let version = v::build_description_version(&snapshot, user, now, Uuid::new_v4());
+            let mut version = v::build_description_version(&snapshot, user, now, Uuid::new_v4());
+            // Django's `create()` passes the audit columns as
+            // constructor fields, then `BaseModel.save` NULLs both
+            // with no crum user in the worker (base.py:31-33).
+            version.created_by = None;
+            version.updated_by = None;
             insert_description_version_rows(&mut tx, &ctx, &[version])
                 .await
                 .map_err(|e| e.to_string())?;

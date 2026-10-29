@@ -61,14 +61,12 @@
 //! Deferred to follow-up issues (this issue's units are the four view
 //! functions; these need transports other domains own):
 //!
-//! - avatar S3 upload + `FileAsset` create (`adapter/base.py:145-217`):
-//!   download + content-type/size validation are ported; the SigV4 PUT
-//!   belongs to the asset domain (no S3 client exists in `rust-api/`).
-//!   Until it lands the port keeps Python's own upload-failure
-//!   behaviour (avatar URL fallback, no asset row).
 //! - invite-join cache invalidation (`workspace_project_join.py:38-44`):
 //!   `RedisHandle` exposes no key-delete API; the deletes are recorded
 //!   in the invite-join spec for the owning issue.
+//!
+//! The avatar S3 upload + `FileAsset` create (`adapter/base.py:139-218`)
+//! runs through the shared `auth_oauth` helper (PIDASHCONV-1323).
 //!
 //! Sibling provider issues (PIDASHCONV-335/336/341) merge their routers
 //! in `super::routes`; merges keep both sides.
@@ -83,6 +81,9 @@ use sqlx::PgPool;
 use crate::auth_session::render::disallowed_redirect;
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
+use pidash_compat::response::redirect_found;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
+use pidash_services::domain::workspaces::members;
 
 /// App initiate path (`authentication/urls.py:106`).
 pub const APP_INITIATE_PATH: &str = "/auth/gitlab/";
@@ -191,10 +192,6 @@ fn owned(
     router
 }
 
-/// `handle_exception`'s generic 500 branch (same body the sibling
-/// handler ports use; the contract pins the status, not the page).
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
-
 /// Handler failure with its exact status + body.
 #[derive(Debug)]
 enum Denial {
@@ -221,6 +218,10 @@ fn pool_of(state: &AppState) -> Result<&PgPool, Denial> {
         .ok_or(Denial::ServerError)
 }
 
+fn orm_of(state: &AppState) -> Result<&pidash_db::DatabaseConnection, Denial> {
+    state.orm().ok_or(Denial::ServerError)
+}
+
 /// `HttpResponseRedirect(url)`: 302 with a `Location` header and an
 /// empty body. Django percent-encodes the URL first (`iri_to_uri`,
 /// `django/http/response.py:620`). Past `MAX_URL_REDIRECT_LENGTH`
@@ -228,18 +229,14 @@ fn pool_of(state: &AppState) -> Result<&PgPool, Denial> {
 fn redirect_response(location: String) -> Response {
     let too_long =
         location.chars().count() > pidash_services::auth_session::MAX_URL_REDIRECT_LENGTH;
-    let encoded = crate::response_headers::iri_to_uri(&location);
+    let encoded = pidash_compat::http::iri_to_uri(&location);
     let Some(location) = crate::response_headers::header_value(&encoded) else {
         return Denial::ServerError.into_response();
     };
     if too_long {
         return disallowed_redirect();
     }
-    Response::builder()
-        .status(StatusCode::FOUND)
-        .header(header::LOCATION, location)
-        .body(axum::body::Body::empty())
-        .expect("redirect response")
+    redirect_found(location)
 }
 
 /// Django `QueryDict.get` (last wins) over the raw query pairs.
@@ -714,9 +711,12 @@ async fn app_callback(
     let allowed: Vec<&str> = allowed_owned.iter().map(String::as_str).collect();
     let callback = read_callback_session(&session);
     let code = query_last(&query, "code");
-    let query_state = query_last(&query, "state").unwrap_or_default();
+    // `request.GET.get("state")` is `None` when the param is absent, and
+    // `None != ""` always mismatches (`views/app/gitlab.py:63-66`): keep
+    // the `Option` so a missing param never equals the `""` default.
+    let query_state = query_last(&query, "state");
 
-    if query_state != callback.state {
+    if query_state.as_deref() != Some(callback.state.as_str()) {
         return Ok(redirect_response(plain_error_location(
             &base,
             callback.next_path.as_deref(),
@@ -819,9 +819,13 @@ async fn space_callback(
 ) -> Result<Response, Denial> {
     let callback = read_callback_session(&session);
     let code = query_last(&query, "code");
-    let query_state = query_last(&query, "state").unwrap_or_default();
+    // Same `None != ""` rule as the app twin (`views/space/gitlab.py:61-65`):
+    // a missing param must not match the `""` session default.
+    let query_state = query_last(&query, "state");
 
-    if query_state == callback.state && !code.as_deref().unwrap_or("").is_empty() {
+    if query_state.as_deref() == Some(callback.state.as_str())
+        && !code.as_deref().unwrap_or("").is_empty()
+    {
         let handle = session
             .as_ref()
             .map(|axum::Extension(handle)| handle.clone());
@@ -1144,192 +1148,10 @@ fn random_color() -> String {
     format!("#{}", &uuid::Uuid::new_v4().simple().to_string()[..6])
 }
 
-/// New-user row (`base.py:299-328` + `User.save()`, `user.py:167-187`):
-/// identity + names + password hash; `display_name` is backfilled
-/// from the local part BEFORE the insert (the `else` arm is dead —
-/// `len(split)` is never 0); `is_active` defaults `True`;
-/// `last_login_medium` keeps the `"email"` default until
-/// `save_user_data` overwrites it.
-#[allow(clippy::too_many_arguments)]
-async fn insert_user(
-    pool: &PgPool,
-    id: uuid::Uuid,
-    email: &str,
-    username: &str,
-    password_hash: &str,
-    first_name: &str,
-    last_name: &str,
-    now: chrono::DateTime<Utc>,
-) -> Result<(), Denial> {
-    let display_name = email.split('@').next().unwrap_or_default();
-    sqlx::query(
-        r#"INSERT INTO "users"
-           ("id", "password", "last_login", "username", "mobile_number", "email",
-            "display_name", "first_name", "last_name", "avatar", "avatar_asset_id",
-            "cover_image", "cover_image_asset_id", "date_joined", "created_at", "updated_at",
-            "last_location", "created_location", "is_superuser", "is_managed",
-            "is_password_expired", "is_active", "is_staff", "is_email_verified",
-            "is_password_autoset", "is_password_reset_required", "token", "last_active",
-            "last_login_time", "last_logout_time", "last_login_ip", "last_logout_ip",
-            "last_login_medium", "last_login_uagent", "token_updated_at", "is_bot",
-            "bot_type", "user_timezone", "is_email_valid", "masked_at")
-           VALUES ($1,$2,NULL,$3,NULL,$4,$5,$6,$7,'',NULL,
-                   NULL,NULL,$8,$8,$8,
-                   '','',FALSE,FALSE,
-                   FALSE,TRUE,FALSE,TRUE,
-                   TRUE,FALSE,'',$8,
-                   NULL,NULL,'','',
-                   'email','',NULL,FALSE,
-                   NULL,'UTC',FALSE,NULL)"#,
-    )
-    .bind(id)
-    .bind(password_hash)
-    .bind(username)
-    .bind(email)
-    .bind(display_name)
-    .bind(first_name)
-    .bind(last_name)
-    .bind(now)
-    .execute(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(())
-}
-
-/// `Profile.objects.create(user=user)` (`base.py:342`): every column
-/// with its Python-side default.
-async fn insert_profile(
-    pool: &PgPool,
-    id: uuid::Uuid,
-    user_id: uuid::Uuid,
-    now: chrono::DateTime<Utc>,
-) -> Result<(), Denial> {
-    sqlx::query(
-        r#"INSERT INTO "profiles"
-           ("id", "user_id", "theme", "is_app_rail_docked", "is_tour_completed",
-            "onboarding_step", "use_case", "role", "is_onboarded", "last_workspace_id",
-            "billing_address_country", "billing_address", "has_billing_address",
-            "company_name", "notification_view_mode", "is_smooth_cursor_enabled",
-            "is_mobile_onboarded", "mobile_onboarding_step", "mobile_timezone_auto_set",
-            "language", "start_of_the_week", "goals", "background_color",
-            "is_navigation_tour_completed", "has_marketing_email_consent",
-            "is_subscribed_to_changelog", "product_tour", "settings",
-            "created_at", "updated_at")
-           VALUES ($1,$2,'{}',TRUE,FALSE,
-                   $3,NULL,NULL,FALSE,NULL,
-                   'INDIA',NULL,FALSE,
-                   '','full',FALSE,
-                   FALSE,$4,FALSE,
-                   'en',0,'{}',$5,
-                   FALSE,FALSE,
-                   FALSE,$6,'{}',
-                   $7,$7)"#,
-    )
-    .bind(id)
-    .bind(user_id)
-    .bind(serde_json::json!({
-        "profile_complete": false,
-        "workspace_create": false,
-        "workspace_invite": false,
-        "workspace_join": false,
-    }))
-    .bind(serde_json::json!({
-        "profile_complete": false,
-        "workspace_create": false,
-        "workspace_join": false,
-    }))
-    .bind(random_color())
-    .bind(serde_json::json!({
-        "work_items": false,
-        "cycles": false,
-        "modules": false,
-        "intake": false,
-        "pages": false,
-    }))
-    .bind(now)
-    .execute(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(())
-}
-
-/// `create_user_notification` post_save receiver
-/// (`user.py:306-317`): fires on user create for non-bots.
-async fn insert_notification_preference(
-    pool: &PgPool,
-    id: uuid::Uuid,
-    user_id: uuid::Uuid,
-    now: chrono::DateTime<Utc>,
-) -> Result<(), Denial> {
-    sqlx::query(
-        r#"INSERT INTO "user_notification_preferences"
-           ("id", "created_at", "updated_at", "created_by_id", "updated_by_id", "deleted_at",
-            "user_id", "workspace_id", "project_id",
-            "property_change", "state_change", "comment", "mention", "issue_completed")
-           VALUES ($1,$2,$2,NULL,NULL,NULL,$3,NULL,NULL,TRUE,TRUE,TRUE,TRUE,TRUE)"#,
-    )
-    .bind(id)
-    .bind(now)
-    .bind(user_id)
-    .execute(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(())
-}
-
-/// Avatar content types (`base.py:170-176`).
-fn avatar_extension(content_type: &str) -> Option<&'static str> {
-    match content_type {
-        "image/jpeg" | "image/jpg" => Some("jpg"),
-        "image/png" => Some("png"),
-        "image/gif" => Some("gif"),
-        "image/webp" => Some("webp"),
-        _ => None,
-    }
-}
-
-/// `download_and_upload_avatar` (`base.py:145-217`): downloads (10s
-/// timeout), enforces the content-length / content-type / total-size
-/// gates, then uploads to storage. The SigV4 PUT + `FileAsset` create
-/// need the asset domain's S3 transport (follow-up issue); until it
-/// lands the port keeps Python's own upload-failure behaviour — the
-/// avatar URL fallback with no asset row.
-async fn download_avatar_bytes(avatar_url: &str, max_size: u64) -> Option<(Vec<u8>, String)> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .ok()?;
-    let response = client.get(avatar_url).send().await.ok()?;
-    if !response.status().is_success() {
-        return None;
-    }
-    if let Some(length) = response
-        .headers()
-        .get(reqwest::header::CONTENT_LENGTH)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse::<u64>().ok())
-    {
-        if length > max_size {
-            return None;
-        }
-    }
-    let content_type = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("image/jpeg")
-        .split(';')
-        .next()
-        .unwrap_or("image/jpeg")
-        .trim()
-        .to_owned();
-    avatar_extension(&content_type)?;
-    let bytes = response.bytes().await.ok()?.to_vec();
-    if bytes.len() as u64 > max_size {
-        return None;
-    }
-    Some((bytes, content_type))
-}
+// NOTE: the new-user INSERT, the signup profile row and the
+// `create_user_notification` post_save insert moved to
+// `domain::identity::create_user` (PIDASHCONV-1525). The signup arm
+// below calls it directly.
 
 /// `get_default_props` (`workspace.py:22-50`): the JSON default for
 /// member `view_props` / `default_props`.
@@ -1398,10 +1220,13 @@ async fn gitlab_sync_enabled(pool: &PgPool, secret_key: &str) -> Result<bool, De
     }))
 }
 
-/// `sync_user_data` (`base.py:256-287`, new user + sync
-/// enabled): names, `display_name` (stored or derived), avatar URL
-/// fallback (S3 upload is the follow-up gap — old-asset delete is
-/// skipped with it), then a full-row save with its side effects.
+/// `sync_user_data` (`base.py:256-287`, new user + sync enabled): names,
+/// `display_name` (stored or derived), then the avatar pair the call site
+/// resolved: on upload success `asset` carries the new FK and `avatar` is
+/// `""` when a signup asset existed (what `delete_old_avatar` wrote) or
+/// the provider URL otherwise (the delete was a no-op); on failure
+/// `avatar` is the provider URL and `asset` is `None` (`base.py:278-284`).
+#[allow(clippy::too_many_arguments)]
 async fn sync_user_data(
     pool: &PgPool,
     user: &DbUser,
@@ -1409,21 +1234,24 @@ async fn sync_user_data(
     last_name: &str,
     display_name: &str,
     avatar: &str,
+    asset: Option<uuid::Uuid>,
     now: chrono::DateTime<Utc>,
 ) -> Result<(), Denial> {
     let is_staff = user.is_staff || user.is_superuser;
-    sqlx::query(
-        r#"UPDATE "users" SET "first_name" = $1, "last_name" = $2, "display_name" = $3,
-                  "avatar" = $4, "is_staff" = $5, "updated_at" = $6 WHERE "id" = $7"#,
+    pidash_services::domain::identity::sync_user_data(
+        pool,
+        user.id,
+        &pidash_services::domain::identity::SyncUpdate {
+            first_name,
+            last_name,
+            display_name,
+            avatar: Some(avatar),
+            avatar_asset_id: Some(asset),
+            is_staff: Some(is_staff),
+            touch_updated_at: true,
+            now,
+        },
     )
-    .bind(first_name)
-    .bind(last_name)
-    .bind(display_name)
-    .bind(avatar)
-    .bind(is_staff)
-    .bind(now)
-    .bind(user.id)
-    .execute(pool)
     .await
     .map_err(|_| Denial::ServerError)?;
     Ok(())
@@ -1461,22 +1289,26 @@ async fn save_user_data(
         user.display_name.clone()
     };
     let is_staff = user.is_staff || user.is_superuser;
-    sqlx::query(
-        r#"UPDATE "users" SET "last_login_medium" = 'gitlab', "last_active" = $1,
-                  "last_login_time" = $1, "last_login_ip" = $2, "last_login_uagent" = $3,
-                  "token_updated_at" = $1, "token" = $4, "is_active" = TRUE,
-                  "avatar" = $5, "display_name" = $6, "is_staff" = $7, "updated_at" = $1
-           WHERE "id" = $8"#,
+    pidash_services::domain::identity::save_user_data(
+        pool,
+        user.id,
+        &pidash_services::domain::identity::LoginStamps {
+            medium: Some("gitlab"),
+            login_ip: ip,
+            login_uagent: user_agent,
+            avatar: Some(avatar),
+            avatar_asset_id: None,
+            display_name: Some(pidash_services::domain::identity::DisplayNameUpdate::Bound(
+                &display_name,
+            )),
+            is_staff: Some(pidash_services::domain::identity::StaffSync::Value(
+                is_staff,
+            )),
+            touch_updated_at: true,
+            rotated_token: &token,
+            now,
+        },
     )
-    .bind(now)
-    .bind(ip)
-    .bind(user_agent)
-    .bind(token)
-    .bind(avatar)
-    .bind(display_name)
-    .bind(is_staff)
-    .bind(user.id)
-    .execute(pool)
     .await
     .map_err(|_| Denial::ServerError)?;
     Ok(())
@@ -1762,38 +1594,18 @@ async fn bulk_insert_workspace_members(
     if rows.is_empty() {
         return Ok(());
     }
-    let mut builder: sqlx::QueryBuilder<sqlx::Postgres> = sqlx::QueryBuilder::new(
-        r#"INSERT INTO "workspace_members" ("id", "created_at", "updated_at",
-           "created_by_id", "updated_by_id", "deleted_at",
-           "workspace_id", "member_id", "role", "company_role",
-           "view_props", "default_props", "issue_props", "is_active",
-           "getting_started_checklist", "tips", "explored_features") "#,
-    );
     let view_props = default_props_json();
     let issue_props = issue_props_json();
-    builder.push_values(rows, |mut row, member| {
-        row.push_bind(uuid::Uuid::new_v4())
-            .push_bind(now)
-            .push_bind(now)
-            .push_bind(member.created_by_id)
-            .push_bind(Option::<uuid::Uuid>::None)
-            .push_bind(Option::<chrono::DateTime<Utc>>::None)
-            .push_bind(member.workspace_id)
-            .push_bind(member.member_id)
-            .push_bind(member.role)
-            .push_bind(Option::<String>::None)
-            .push_bind(view_props.clone())
-            .push_bind(view_props.clone())
-            .push_bind(issue_props.clone())
-            .push_bind(true)
-            .push_bind(serde_json::json!({}))
-            .push_bind(serde_json::json!({}))
-            .push_bind(serde_json::json!({}));
-    });
-    builder.push(" ON CONFLICT DO NOTHING");
-    builder
-        .build()
-        .execute(pool)
+    let bulk_rows: Vec<members::BulkMember> = rows
+        .iter()
+        .map(|member| members::BulkMember {
+            workspace_id: member.workspace_id,
+            user_id: member.member_id,
+            role: member.role,
+            created_by: member.created_by_id,
+        })
+        .collect();
+    members::bulk_add(pool, &bulk_rows, &view_props, &issue_props, now)
         .await
         .map_err(|_| Denial::ServerError)?;
     Ok(())
@@ -1812,34 +1624,25 @@ async fn bulk_insert_project_members(
     if rows.is_empty() {
         return Ok(());
     }
-    let mut builder: sqlx::QueryBuilder<sqlx::Postgres> = sqlx::QueryBuilder::new(
-        r#"INSERT INTO "project_members" ("id", "created_at", "updated_at",
-           "created_by_id", "updated_by_id", "deleted_at",
-           "workspace_id", "member_id", "comment", "role",
-           "view_props", "default_props", "preferences", "sort_order", "is_active") "#,
-    );
     let view_props = default_props_json();
-    builder.push_values(rows, |mut row, member| {
-        row.push_bind(uuid::Uuid::new_v4())
-            .push_bind(now)
-            .push_bind(now)
-            .push_bind(member.created_by_id)
-            .push_bind(Option::<uuid::Uuid>::None)
-            .push_bind(Option::<chrono::DateTime<Utc>>::None)
-            .push_bind(member.workspace_id)
-            .push_bind(member.member_id)
-            .push_bind(Option::<String>::None)
-            .push_bind(member.role)
-            .push_bind(view_props.clone())
-            .push_bind(view_props.clone())
-            .push_bind(default_preferences_json())
-            .push_bind(65535.0_f64)
-            .push_bind(true);
-    });
-    builder.push(" ON CONFLICT DO NOTHING");
-    builder
-        .build()
-        .execute(pool)
+    let prefs = default_preferences_json();
+    let bulk: Vec<pidash_services::domain::projects::members::BulkRow> = rows
+        .iter()
+        .map(
+            |member| pidash_services::domain::projects::members::BulkRow {
+                workspace_id: member.workspace_id,
+                project_id: None,
+                user_id: member.member_id,
+                role: pidash_services::domain::projects::members::RoleBind::Int(i64::from(
+                    member.role,
+                )),
+                created_by: member.created_by_id,
+                created_at: now,
+                updated_at: now,
+            },
+        )
+        .collect();
+    pidash_services::domain::projects::members::bulk_add(pool, &bulk, &view_props, &prefs, false)
         .await
         .map_err(|_| Denial::ServerError)?;
     Ok(())
@@ -1873,20 +1676,15 @@ async fn redirection_path(
     now: chrono::DateTime<Utc>,
 ) -> Result<String, Denial> {
     // `Profile.objects.get_or_create(user=user)`.
-    let profile: Option<(bool, Option<uuid::Uuid>)> = sqlx::query_as(
-        r#"SELECT "is_onboarded", "last_workspace_id" FROM "profiles" WHERE "user_id" = $1"#,
+    let path = pidash_services::domain::identity::get_or_create_profile(
+        pool,
+        user_id,
+        now,
+        &random_color(),
     )
-    .bind(user_id)
-    .fetch_optional(pool)
     .await
     .map_err(|_| Denial::ServerError)?;
-    let (is_onboarded, last_workspace_id) = match profile {
-        Some(found) => found,
-        None => {
-            insert_profile(pool, uuid::Uuid::new_v4(), user_id, now).await?;
-            (false, None)
-        }
-    };
+    let (is_onboarded, last_workspace_id) = (path.is_onboarded, path.last_workspace_id);
     if !is_onboarded {
         return Ok("onboarding".to_owned());
     }
@@ -2024,6 +1822,9 @@ async fn callback_success(
     let found = find_user_by_email(pool, &email).await?;
     // B4: `is_signup = bool(user)` — inverted as written.
     let is_signup = found.is_some();
+    // Avatar I/O client (`S3Storage(request)` signs the public host,
+    // `base.py:198` — `is_server=False`).
+    let client = reqwest::Client::new();
 
     let user_agent = headers
         .get(header::USER_AGENT)
@@ -2055,28 +1856,65 @@ async fn callback_success(
             );
             let first_name = name_or_empty(&user_data.user.first_name);
             let last_name = name_or_empty(&user_data.user.last_name);
-            insert_user(
-                pool,
-                id,
-                &email,
-                &username,
-                &password_hash,
-                &first_name,
-                &last_name,
-                now,
+            // `User(...)` + first `save()` with the `post_save`
+            // preferences row and the adapter profile row, all inside
+            // `domain::identity::create_user`.
+            pidash_services::domain::identity::create_user(
+                orm_of(state)?,
+                &pidash_services::domain::identity::NewUser {
+                    id: Some(id),
+                    email: &email,
+                    username,
+                    password_hash: password_hash.clone(),
+                    first_name: &first_name,
+                    last_name: &last_name,
+                    display_name: email.split('@').next().unwrap_or_default().to_owned(),
+                    avatar: "",
+                    is_email_verified: true,
+                    is_password_autoset: true,
+                    last_active: Some(now),
+                    login_ip: Some(""),
+                    login_uagent: Some(""),
+                    is_bot: false,
+                    now,
+                    profile: Some(pidash_services::domain::identity::NewProfile {
+                        company_name: "",
+                        background_color: random_color(),
+                    }),
+                },
             )
-            .await?;
-            // Avatar: attempt the download for side-effect parity,
-            // keep the URL fallback (S3 upload is the follow-up gap).
-            let avatar = match &user_data.user.avatar {
-                serde_json::Value::String(url) if !url.is_empty() => {
-                    let _ = download_avatar_bytes(url, max_avatar).await;
-                    url.clone()
-                }
+            .await
+            .map_err(|_| Denial::ServerError)?;
+            // Avatar (`base.py:330-339`): success sets the FK too, failure
+            // keeps the provider URL (persisted by `save_user_data`
+            // below). No old avatar exists to delete.
+            let avatar_url = match &user_data.user.avatar {
+                serde_json::Value::String(url) if !url.is_empty() => url.clone(),
                 _ => String::new(),
             };
-            insert_profile(pool, uuid::Uuid::new_v4(), id, now).await?;
-            insert_notification_preference(pool, uuid::Uuid::new_v4(), id, now).await?;
+            let mut signup_asset = None;
+            if !avatar_url.is_empty() {
+                if let Some(asset_id) = super::download_and_upload_avatar(
+                    &client,
+                    pool,
+                    &settings.storage,
+                    if is_secure { "https" } else { "http" },
+                    &host,
+                    PROVIDER,
+                    &avatar_url,
+                    id,
+                    max_avatar,
+                    now,
+                )
+                .await
+                {
+                    pidash_services::domain::identity::stamp_avatar_asset(pool, id, asset_id)
+                        .await
+                        .map_err(|_| Denial::ServerError)?;
+                    signup_asset = Some(asset_id);
+                }
+            }
+            let avatar = avatar_url;
             let mut created = DbUser {
                 id,
                 email: email.clone(),
@@ -2094,12 +1932,51 @@ async fn callback_success(
                 let first_name = name_or_empty(&user_data.user.first_name);
                 let last_name = name_or_empty(&user_data.user.last_name);
                 let display_name = get_display_name(&email);
-                let avatar = match &user_data.user.avatar {
-                    serde_json::Value::String(url) if !url.is_empty() => {
-                        let _ = download_avatar_bytes(url, max_avatar).await;
-                        url.clone()
-                    }
+                let avatar_url = match &user_data.user.avatar {
+                    serde_json::Value::String(url) if !url.is_empty() => url.clone(),
                     _ => String::new(),
+                };
+                // `delete_old_avatar` + `download_and_upload_avatar`
+                // (`base.py:278-284`): the signup asset is the old avatar.
+                // On success only the FK moves — Django never writes
+                // `avatar` here, so it keeps the `''` the delete wrote
+                // when a signup asset existed, and the signup provider
+                // URL otherwise (the delete is a no-op without one).
+                // The provider URL lands only when the upload fails.
+                super::delete_old_avatar(
+                    &client,
+                    pool,
+                    &settings.storage,
+                    if is_secure { "https" } else { "http" },
+                    &host,
+                    id,
+                    signup_asset,
+                    now,
+                )
+                .await;
+                let (avatar, asset) = match super::download_and_upload_avatar(
+                    &client,
+                    pool,
+                    &settings.storage,
+                    if is_secure { "https" } else { "http" },
+                    &host,
+                    PROVIDER,
+                    &avatar_url,
+                    id,
+                    max_avatar,
+                    now,
+                )
+                .await
+                {
+                    Some(asset_id) => (
+                        if signup_asset.is_some() {
+                            String::new()
+                        } else {
+                            avatar_url.clone()
+                        },
+                        Some(asset_id),
+                    ),
+                    None => (avatar_url, None),
                 };
                 sync_user_data(
                     pool,
@@ -2108,6 +1985,7 @@ async fn callback_success(
                     &last_name,
                     &display_name,
                     &avatar,
+                    asset,
                     now,
                 )
                 .await?;
@@ -2204,8 +2082,8 @@ async fn create_update_account(
     token_data: &pidash_services::auth_oauth::providers::TokenData,
     now: chrono::DateTime<Utc>,
 ) {
-    use pidash_db::auth_oauth::queries::account::{
-        create_account, find_account_id, update_account, NewAccount, TokenFields,
+    use pidash_services::domain::identity::account::{
+        create_account, find_account_id, rotate_account_tokens, NewAccount, TokenFields,
     };
     let tokens = TokenFields {
         access_token: text_or_none(&token_data.access_token),
@@ -2241,7 +2119,7 @@ async fn create_update_account(
                 .fetch_optional(pool)
                 .await;
             if let Ok(Some((created_at, metadata))) = loaded {
-                let _ = update_account(
+                let _ = rotate_account_tokens(
                     pool,
                     id,
                     created_at,
@@ -2547,11 +2425,9 @@ mod tests {
 
     #[test]
     fn helpers_match_python_shapes() {
-        assert_eq!(avatar_extension("image/jpeg"), Some("jpg"));
-        assert_eq!(avatar_extension("image/png"), Some("png"));
-        assert_eq!(avatar_extension("image/gif"), Some("gif"));
-        assert_eq!(avatar_extension("image/webp"), Some("webp"));
-        assert_eq!(avatar_extension("image/svg+xml"), None);
+        // The avatar extension allowlist now lives in the shared
+        // `pidash_storage::avatar_extension` (covered by the storage
+        // crate's own golden tests).
         assert_eq!(get_display_name("ada@example.com"), "ada");
         assert_eq!(get_display_name("no-at-sign").len(), 6);
         assert_eq!(name_or_empty(&serde_json::json!("Ada")), "Ada");

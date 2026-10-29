@@ -296,8 +296,9 @@ pub fn bulk_swallows_integrity_error(branch: BulkBranch) -> bool {
 /// so it also stamps `updated_by` (CRUM request user) and `updated_at`.
 pub const SAVE_PROJECT_COVER_GET_SQL: &str =
     "SELECT \"projects\".\"id\" FROM \"projects\" WHERE \"projects\".\"id\" = $1 AND \"projects\".\"deleted_at\" IS NULL";
-pub const SAVE_PROJECT_COVER_SQL: &str =
-    "UPDATE \"projects\" SET \"cover_image_asset_id\" = $2, \"updated_at\" = $3, \"updated_by_id\" = $4 WHERE \"projects\".\"id\" = $1";
+// NOTE: the cover write (`SAVE_PROJECT_COVER_SQL`) moved to
+// `domain::projects::save_project_cover` (PIDASHCONV-1630) —
+// `projects` is a covered table, so the statement lives in domain/.
 
 // ---------------------------------------------------------------------------
 // Check endpoint (`v2.py:691-697`)
@@ -382,6 +383,7 @@ pub fn download_filename(attributes_name: Option<&str>, fresh_uuid_hex: &str) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::projects::SAVE_PROJECT_COVER_SQL;
     use serde_json::Value;
 
     /// Committed evidence replayed here without a database:

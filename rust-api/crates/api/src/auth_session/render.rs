@@ -76,22 +76,9 @@ pub fn disallowed_redirect() -> Response {
         .into_response()
 }
 
-/// Django autoescape for the single substituted value (`&<>"'`;
-/// Django renders `'` as `&#x27;`).
-pub fn html_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#x27;"),
-            _ => out.push(c),
-        }
-    }
-    out
-}
+/// Canonical Django autoescape, moved to `pidash_compat::html`
+/// (PIDASHCONV-1623); this re-export keeps the old path working.
+pub use pidash_compat::html::html_escape;
 
 /// `apps/api/templates/csrf_failure.html`, verbatim except the
 /// `{{ root_url }}` marker (replaced by [`render_csrf_failure`]).

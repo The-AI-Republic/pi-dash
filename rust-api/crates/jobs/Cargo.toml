@@ -5,6 +5,8 @@ edition = "2021"
 
 [dependencies]
 pidash-types = { path = "../types" }
+# OVL-04 (PIDASHCONV-1542): canonical parity plumbing. Leaf crate, no cycle.
+pidash-compat = { path = "../compat" }
 pidash-db = { path = "../db" }
 # Version-task flows call the D-09 decision layer (api-crate precedent).
 pidash-services = { path = "../services" }
@@ -77,8 +79,10 @@ rand08 = { package = "rand", version = "0.8" }
 # (PIDASHCONV-865: same version + TLS features, no second entry).
 # Same locked futures-util 0.3.x the binary builds on (no new
 # downloads). uuid gains v7 above for the agent loop's `uuid7()`
-# run/conversation ids.
-futures-util = { version = "0.3", default-features = false }
+# run/conversation ids. The `std` feature is only for
+# `FutureExt::catch_unwind` (PIDASHCONV-1327); it pulls alloc +
+# futures-core/std + futures-task/std + slab/std, all already locked.
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 sqlparser = "0.63.0"

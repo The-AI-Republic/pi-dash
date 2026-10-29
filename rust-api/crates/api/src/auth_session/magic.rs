@@ -50,8 +50,9 @@
 //!   project-invite `IntegrityError` (missing `project_id`, kept) still
 //!   500s *after* the workspace-member writes commit.
 //! * QUIRK-csrf-rotate: `login()` rotates the CSRF secret, so success sets
-//!   a fresh masked `csrftoken` cookie (Django defaults: 1-year age,
-//!   `/`, `Lax`; secure/domain/httponly from settings).
+//!   a fresh 32-char `csrftoken` cookie (`rotate_token` stores the raw
+//!   secret; Django defaults: 1-year age, `/`, `Lax`;
+//!   secure/domain/httponly from settings).
 
 use axum::body::Body;
 use axum::extract::{ConnectInfo, State};
@@ -59,8 +60,6 @@ use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::Router;
-use hmac::{Hmac, Mac};
-use sha2::{Digest, Sha256};
 
 use pidash_services::auth_session::guards::{
     allow_request, parse_rate, throttle_cache_key, throttle_denied_json,
@@ -72,6 +71,8 @@ use pidash_services::auth_session::magic::{
     strip_magic_prefix, token_from_u32, verify_decision, verify_error, InitGate, InitiateOutcome,
     VerifyOutcome, TOKEN_REJECTION_LIMIT,
 };
+use pidash_services::domain::identity;
+use pidash_services::domain::workspaces::members;
 
 /// Unwrap a `Result`, answering the uncaught-exception 500 on any error
 /// (every fallible I/O on these paths propagates in Python).
@@ -104,6 +105,7 @@ use crate::middleware::SessionHandle;
 use crate::state::AppState;
 use pidash_auth::csrf as csrf_kernel;
 use pidash_auth::session as session_kernel;
+use pidash_compat::response::empty_response_no_content_type;
 
 /// `POST /auth/magic-generate/`.
 pub const APP_GENERATE_PATH: &str = "/auth/magic-generate/";
@@ -182,7 +184,7 @@ fn json_400(code: i32, message: &str, payload: &[(&str, ParamValue)]) -> Respons
 fn redirect_302(location: String) -> Response {
     let too_long =
         location.chars().count() > pidash_services::auth_session::MAX_URL_REDIRECT_LENGTH;
-    let encoded = crate::response_headers::iri_to_uri(&location);
+    let encoded = pidash_compat::http::iri_to_uri(&location);
     let Some(location) = crate::response_headers::header_value(&encoded) else {
         return server_error();
     };
@@ -201,10 +203,7 @@ fn redirect_302(location: String) -> Response {
 /// the bramched handling): empty body, like the F-08 session layer's
 /// `server_error`.
 fn server_error() -> Response {
-    Response::builder()
-        .status(StatusCode::INTERNAL_SERVER_ERROR)
-        .body(Body::empty())
-        .expect("static 500 response")
+    empty_response_no_content_type(StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 /// Throttle denial: the `auth_exception_handler` rewrite of DRF's
@@ -342,45 +341,10 @@ enum CsrfDenial {
     BadToken,
 }
 
-/// Where the request token came from (`CsrfViewMiddleware._check_token`:
-/// the `csrfmiddlewaretoken` POST field wins when non-empty, else the
-/// `X-CSRFToken` header).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TokenSource {
-    Post,
-    Header,
-}
-
-impl TokenSource {
-    /// `_bad_token_message` source rendering (`csrf.py:347-352`;
-    /// `CSRF_HEADER_NAME` is the default, parsed as `X-Csrftoken`).
-    fn describe(self) -> &'static str {
-        match self {
-            TokenSource::Post => "POST",
-            TokenSource::Header => "the 'X-Csrftoken' HTTP header",
-        }
-    }
-}
-
-/// Resolve the request token in Django's order: the last
-/// `csrfmiddlewaretoken` form value when non-empty, else the header
-/// when present (even empty — an empty header fails format, it does
-/// not fall through to "missing").
-fn csrf_token_source(
-    pairs: &[(String, String)],
-    header_token: Option<&str>,
-) -> Option<(String, TokenSource)> {
-    if let Some(value) = pairs
-        .iter()
-        .rev()
-        .find(|(k, _)| k == "csrfmiddlewaretoken")
-        .map(|(_, v)| v.as_str())
-        .filter(|v| !v.is_empty())
-    {
-        return Some((value.to_owned(), TokenSource::Post));
-    }
-    header_token.map(|token| (token.to_owned(), TokenSource::Header))
-}
+use pidash_compat::http::{
+    csrf_failure_json, csrf_failure_response, csrf_token_source, hex_encode, session_auth_hash,
+    TokenSource,
+};
 
 /// `_check_token` + `_does_token_match` over one token: the format
 /// gate first (`has incorrect length` / `has invalid characters`),
@@ -404,9 +368,8 @@ fn csrf_check_token(secret: &str, token: &str, source: TokenSource) -> Result<()
 /// Django's `_get_secret` (`csrf.py:230-256`) over the cookie value:
 /// the cookie must pass the format gate, and a 64-char cookie is
 /// unmasked first ("Django versions before 4.0 masked the secret before
-/// storing" — and this module's own `login_user` rotation still mints
-/// masked cookies, QUIRK-csrf-rotate, so without this step a client
-/// sending its rotated cookie back as the header would never verify).
+/// storing", so without this step a client sending such a cookie back
+/// as the header would never verify).
 fn csrf_cookie_secret(cookie: &str) -> Result<String, String> {
     if let Err(error) = csrf_kernel::check_token_format(cookie) {
         return Err(format!("CSRF cookie {}.", error.reason()));
@@ -435,43 +398,6 @@ fn csrf_gate(
         return Err(CsrfDenial::BadToken);
     };
     csrf_check_token(&secret, &token, source).map_err(|_| CsrfDenial::BadToken)
-}
-
-/// DRF `SessionAuthentication.enforce_csrf` denial
-/// (`authentication.py:148`): 403 with the middleware's reason after
-/// `CSRF Failed: `. Only reachable for authenticated callers —
-/// anonymous requests return `None` before the check. Lowercase
-/// `detail`: DRF 3.15.2's `exception_handler` (`views.py:96`) renders
-/// `{'detail': exc.detail}`, and the project's
-/// `auth_exception_handler` only rewrites `Throttled`/`NotAuthenticated`
-/// (live Django bytes: `{"detail":"CSRF Failed: CSRF cookie not set."}`).
-fn csrf_failure_json(reason: &str) -> Response {
-    (
-        StatusCode::FORBIDDEN,
-        [
-            (header::CONTENT_TYPE, "application/json"),
-            (header::VARY, "Cookie"),
-        ],
-        format!(
-            "{{\"detail\":\"CSRF Failed: {}\"}}",
-            reason.replace('\\', "\\\\").replace('"', "\\\"")
-        ),
-    )
-        .into_response()
-}
-
-/// The `csrf_failure` page: 200 + `text/html`, `root_url` =
-/// `base_host(request)` with no surface flags.
-fn csrf_failure_response(root_url: &str) -> Response {
-    (
-        StatusCode::OK,
-        [
-            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
-            (header::VARY, "Cookie"),
-        ],
-        render_csrf_failure(root_url),
-    )
-        .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -880,32 +806,6 @@ async fn user_exists(pool: &sqlx::PgPool, email: &str) -> Result<bool, sqlx::Err
     Ok(row.is_some())
 }
 
-/// `user.get_session_auth_hash()`: `salted_hmac(...get_session_auth_hash,
-/// password).hexdigest()` (`django/contrib/auth/base_user.py`). The salt
-/// is shared with the license plumbing ([`crate::license::SESSION_AUTH_HASH_SALT`]).
-fn session_auth_hash(password_field: &str, secret_key: &[u8]) -> String {
-    let key = Sha256::digest(
-        [
-            crate::license::SESSION_AUTH_HASH_SALT.as_bytes(),
-            secret_key,
-        ]
-        .concat(),
-    );
-    let mut mac = Hmac::<Sha256>::new_from_slice(&key).expect("HMAC-SHA256 accepts any key length");
-    mac.update(password_field.as_bytes());
-    hex_encode(&mac.finalize().into_bytes())
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0x0f) as usize] as char);
-    }
-    out
-}
-
 /// Draw `n` characters from Django's `get_random_string` alphabet
 /// (`ascii_letters + digits`, 62 symbols) off UUID4 bytes with rejection
 /// sampling (256 = 4 × 62 + 8: bytes ≥ 248 redraw, so the map is uniform).
@@ -959,106 +859,15 @@ fn autoset_password() -> (String, String) {
     (hash, raw)
 }
 
-/// New-user INSERT (`adapter/base.py:301-342` + `User.save()` side
-/// effects `user.py:167-187`): every NOT NULL column is supplied (Django
-/// emits no DB-level defaults); the password hash lands before the insert
-/// and `token` stays `""` (`token_updated_at` NULL → no rotation).
-#[allow(clippy::too_many_arguments)]
-async fn insert_user(
-    pool: &sqlx::PgPool,
-    now: chrono::DateTime<chrono::Utc>,
-    email: &str,
-    username: &str,
-    password_hash: &str,
-    display_name: &str,
-    login_ip: Option<&str>,
-    login_uagent: Option<&str>,
-) -> Result<uuid::Uuid, sqlx::Error> {
-    let id = uuid::Uuid::new_v4();
-    sqlx::query(
-        "INSERT INTO \"users\" (\"id\", \"password\", \"last_login\", \"username\", \"mobile_number\", \
-         \"email\", \"display_name\", \"first_name\", \"last_name\", \"avatar\", \"avatar_asset_id\", \
-         \"cover_image\", \"cover_image_asset_id\", \"date_joined\", \"created_at\", \"updated_at\", \
-         \"last_location\", \"created_location\", \"is_superuser\", \"is_managed\", \
-         \"is_password_expired\", \"is_active\", \"is_staff\", \"is_email_verified\", \
-         \"is_password_autoset\", \"is_password_reset_required\", \"token\", \"last_active\", \
-         \"last_login_time\", \"last_logout_time\", \"last_login_ip\", \"last_logout_ip\", \
-         \"last_login_medium\", \"last_login_uagent\", \"token_updated_at\", \"is_bot\", \"bot_type\", \
-         \"user_timezone\", \"is_email_valid\", \"masked_at\") \
-         VALUES ($1, $2, NULL, $3, NULL, $4, $5, '', '', '', NULL, NULL, NULL, $6, $6, $6, \
-         '', '', FALSE, FALSE, FALSE, TRUE, FALSE, TRUE, TRUE, FALSE, '', $6, NULL, NULL, $7, '', \
-         'email', $8, NULL, FALSE, NULL, 'UTC', FALSE, NULL)",
-    )
-    .bind(id)
-    .bind(password_hash)
-    .bind(username)
-    .bind(email)
-    .bind(display_name)
-    .bind(now)
-    .bind(login_ip)
-    .bind(login_uagent)
-    .execute(pool)
-    .await?;
-    Ok(id)
-}
+// NOTE: the new-user INSERT, the `create_user_notification` post_save
+// insert and the signup profile row moved to
+// `domain::identity::create_user` (PIDASHCONV-1525), which runs the
+// entity insert (the `after_save` hook fires) plus the service-level
+// profile row. The signup arm below calls it directly.
 
-/// `post_save` receiver `create_user_notification` (`user.py:327-340`):
-/// a preferences row on every non-bot create.
-async fn insert_notification_prefs(
-    pool: &sqlx::PgPool,
-    now: chrono::DateTime<chrono::Utc>,
-    user_id: &uuid::Uuid,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "INSERT INTO \"user_notification_preferences\" (\"id\", \"created_at\", \"updated_at\", \
-         \"created_by_id\", \"updated_by_id\", \"deleted_at\", \"user_id\", \"workspace_id\", \
-         \"project_id\", \"property_change\", \"state_change\", \"comment\", \"mention\", \
-         \"issue_completed\") \
-         VALUES ($1, $2, $2, NULL, NULL, NULL, $3, NULL, NULL, TRUE, TRUE, TRUE, TRUE, TRUE)",
-    )
-    .bind(uuid::Uuid::new_v4())
-    .bind(now)
-    .bind(user_id)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
-/// Profile row (`Profile.objects.create(user=user)`, `base.py:342`) with
-/// the model defaults (`user.py:198-288` + `color.py:9-14`).
-async fn insert_profile(
-    pool: &sqlx::PgPool,
-    now: chrono::DateTime<chrono::Utc>,
-    user_id: &uuid::Uuid,
-) -> Result<(), sqlx::Error> {
-    // `get_random_color` (`utils/color.py:9`): `#` + six hex digits.
-    let color = format!("#{}", hex_encode(&uuid::Uuid::new_v4().into_bytes()[..3]));
-    sqlx::query(
-        "INSERT INTO \"profiles\" (\"id\", \"created_at\", \"updated_at\", \
-         \"user_id\", \"theme\", \"is_app_rail_docked\", \
-         \"is_tour_completed\", \"onboarding_step\", \"use_case\", \"role\", \"is_onboarded\", \
-         \"last_workspace_id\", \"billing_address_country\", \"billing_address\", \
-         \"has_billing_address\", \"company_name\", \"notification_view_mode\", \
-         \"is_smooth_cursor_enabled\", \"is_mobile_onboarded\", \"mobile_onboarding_step\", \
-         \"mobile_timezone_auto_set\", \"language\", \"start_of_the_week\", \"goals\", \
-         \"background_color\", \"is_navigation_tour_completed\", \"has_marketing_email_consent\", \
-         \"is_subscribed_to_changelog\", \"product_tour\", \"settings\") \
-         VALUES ($1, $2, $2, $3, '{}', TRUE, FALSE, \
-         '{\"profile_complete\": false, \"workspace_create\": false, \
-           \"workspace_invite\": false, \"workspace_join\": false}', \
-         NULL, NULL, FALSE, NULL, 'INDIA', NULL, FALSE, '', 'full', FALSE, FALSE, \
-         '{\"profile_complete\": false, \"workspace_create\": false, \"workspace_join\": false}', \
-         FALSE, 'en', 0, '{}', $4, FALSE, FALSE, FALSE, \
-         '{\"work_items\": false, \"cycles\": false, \"modules\": false, \"intake\": false, \
-           \"pages\": false}', '{}')",
-    )
-    .bind(uuid::Uuid::new_v4())
-    .bind(now)
-    .bind(user_id)
-    .bind(color)
-    .execute(pool)
-    .await?;
-    Ok(())
+/// `get_random_color` (`utils/color.py:9`): `#` + six hex digits.
+fn profile_background_color() -> String {
+    format!("#{}", hex_encode(&uuid::Uuid::new_v4().into_bytes()[..3]))
 }
 
 /// `save_user_data` (`adapter/base.py:220-234`): the login stamp UPDATE
@@ -1089,21 +898,25 @@ async fn save_user_data(
         uuid::Uuid::new_v4().simple(),
         uuid::Uuid::new_v4().simple()
     );
-    let updated: Result<_, sqlx::Error> = sqlx::query(
-        "UPDATE \"users\" SET \"last_login_medium\" = 'magic-code', \"last_active\" = $1, \
-         \"last_login_time\" = $1, \"last_login_ip\" = $2, \"last_login_uagent\" = $3, \
-         \"token_updated_at\" = $1, \"token\" = $4, \"is_active\" = TRUE, \"updated_at\" = $1 \
-         WHERE \"users\".\"id\" = $5",
+    let updated = identity::save_user_data(
+        pool,
+        user.id,
+        &identity::LoginStamps {
+            medium: Some("magic-code"),
+            login_ip,
+            login_uagent,
+            avatar: None,
+            avatar_asset_id: None,
+            display_name: None,
+            is_staff: None,
+            touch_updated_at: true,
+            rotated_token: &rotated,
+            now,
+        },
     )
-    .bind(now)
-    .bind(login_ip)
-    .bind(login_uagent)
-    .bind(rotated)
-    .bind(user.id)
-    .execute(pool)
     .await;
     match updated {
-        Ok(_) => Ok(()),
+        Ok(()) => Ok(()),
         Err(_) => Err(server_error()),
     }
 }
@@ -1114,26 +927,17 @@ async fn save_user_data(
 
 /// `Profile.objects.get_or_create(user=user)`: the live row's
 /// `is_onboarded` + `last_workspace_id`, creating the default row first
-/// when missing.
+/// when missing. `Profile` extends `TimeAuditModel` (`user.py:200`), not
+/// the full `BaseModel`: no `deleted_at` soft-delete column, so the
+/// domain lookup carries no filter either.
 async fn get_or_create_profile(
     pool: &sqlx::PgPool,
     now: chrono::DateTime<chrono::Utc>,
     user_id: &uuid::Uuid,
 ) -> Result<(bool, Option<uuid::Uuid>), sqlx::Error> {
-    // `Profile` extends `TimeAuditModel` (`user.py:200`), not the full
-    // `BaseModel`: no `deleted_at` soft-delete column, so no filter here.
-    let row: Option<(bool, Option<uuid::Uuid>)> = sqlx::query_as(
-        "SELECT \"is_onboarded\", \"last_workspace_id\" FROM \"profiles\" \
-         WHERE \"user_id\" = $1 LIMIT 1",
-    )
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await?;
-    if let Some(found) = row {
-        return Ok(found);
-    }
-    insert_profile(pool, now, user_id).await?;
-    Ok((false, None))
+    let path =
+        identity::get_or_create_profile(pool, *user_id, now, &profile_background_color()).await?;
+    Ok((path.is_onboarded, path.last_workspace_id))
 }
 
 /// `get_redirection_path` (`utils/redirection_path.py:8-46`): the pure
@@ -1254,29 +1058,25 @@ async fn process_workspace_project_invitations(
         .collect();
 
     if !invites.is_empty() {
-        let moment = now.to_rfc3339();
-        let mut values: Vec<String> = Vec::with_capacity(invites.len());
-        for invite in &invites {
-            values.push(format!(
-                "('{}', '{moment}', '{moment}', '{}', '{}', {}, NULL, NULL, NULL, \
-                 '{props}', '{props}', '{issue}', TRUE, '{{}}', '{{}}', '{{}}')",
-                uuid::Uuid::new_v4(),
-                invite.workspace_id,
-                user.id,
-                invite.role,
-                props = workspace_default_props(),
-                issue = workspace_issue_props(),
-            ));
-        }
-        let sql = format!(
-            "INSERT INTO \"workspace_members\" (\"id\", \"created_at\", \"updated_at\", \
-             \"workspace_id\", \"member_id\", \"role\", \"created_by_id\", \"updated_by_id\", \
-             \"deleted_at\", \"view_props\", \"default_props\", \"issue_props\", \"is_active\", \
-             \"getting_started_checklist\", \"tips\", \"explored_features\") \
-             VALUES {} ON CONFLICT DO NOTHING",
-            values.join(", ")
-        );
-        sqlx::query(&sql).execute(pool).await.map_err(map_err)?;
+        // The interpolated defaults reparse from the same fixed text
+        // (jsonb storage normalizes key order either way, so the
+        // committed bytes match the old inline literals).
+        let view_props: serde_json::Value =
+            serde_json::from_str(workspace_default_props()).map_err(|_| server_error())?;
+        let issue_props: serde_json::Value =
+            serde_json::from_str(workspace_issue_props()).map_err(|_| server_error())?;
+        let rows: Vec<members::BulkMember> = invites
+            .iter()
+            .map(|invite| members::BulkMember {
+                workspace_id: invite.workspace_id,
+                user_id: user.id,
+                role: invite.role,
+                created_by: None,
+            })
+            .collect();
+        members::bulk_add(pool, &rows, &view_props, &issue_props, now)
+            .await
+            .map_err(map_err)?;
 
         for invite in &invites {
             // `invalidate_cache_directly(path, url_params=False, user=False,
@@ -1330,66 +1130,55 @@ async fn process_workspace_project_invitations(
         .collect();
 
     if !project_invites.is_empty() {
-        let moment = now.to_rfc3339();
-        let mut values: Vec<String> = Vec::with_capacity(project_invites.len());
-        for invite in &project_invites {
-            let created_by = invite
-                .created_by_id
-                .map(|id| format!("'{id}'"))
-                .unwrap_or_else(|| "NULL".to_owned());
-            values.push(format!(
-                "('{}', '{moment}', '{moment}', {created_by}, NULL, NULL, '{}', '{}', {}, \
-                 '{props}', '{props}', '{issue}', TRUE, '{{}}', '{{}}', '{{}}')",
-                uuid::Uuid::new_v4(),
-                invite.workspace_id,
-                user.id,
-                map_invite_role(invite.role),
-                props = workspace_default_props(),
-                issue = workspace_issue_props(),
-            ));
-        }
-        let sql = format!(
-            "INSERT INTO \"workspace_members\" (\"id\", \"created_at\", \"updated_at\", \
-             \"created_by_id\", \"updated_by_id\", \"deleted_at\", \"workspace_id\", \"member_id\", \
-             \"role\", \"view_props\", \"default_props\", \"issue_props\", \"is_active\", \
-             \"getting_started_checklist\", \"tips\", \"explored_features\") \
-             VALUES {} ON CONFLICT DO NOTHING",
-            values.join(", ")
-        );
-        sqlx::query(&sql).execute(pool).await.map_err(map_err)?;
+        let view_props: serde_json::Value =
+            serde_json::from_str(workspace_default_props()).map_err(|_| server_error())?;
+        let issue_props: serde_json::Value =
+            serde_json::from_str(workspace_issue_props()).map_err(|_| server_error())?;
+        let rows: Vec<members::BulkMember> = project_invites
+            .iter()
+            .map(|invite| members::BulkMember {
+                workspace_id: invite.workspace_id,
+                user_id: user.id,
+                role: map_invite_role(invite.role),
+                created_by: invite.created_by_id,
+            })
+            .collect();
+        members::bulk_add(pool, &rows, &view_props, &issue_props, now)
+            .await
+            .map_err(map_err)?;
 
         // Ported bug kept (`workspace_project_join.py:76-87`): the
         // `ProjectMember` write omits `project_id` although the column is
         // NOT NULL — Postgres raises `IntegrityError` despite
         // `ignore_conflicts=True`.
-        let mut values: Vec<String> = Vec::with_capacity(project_invites.len());
-        for invite in &project_invites {
-            let created_by = invite
-                .created_by_id
-                .map(|id| format!("'{id}'"))
-                .unwrap_or_else(|| "NULL".to_owned());
-            values.push(format!(
-                "('{}', '{moment}', '{moment}', {created_by}, NULL, NULL, '{}', '{}', NULL, {}, \
-                 '{props}', '{props}', '{prefs}', 65535.0, TRUE)",
-                uuid::Uuid::new_v4(),
-                invite.workspace_id,
-                user.id,
-                map_invite_role(invite.role),
-                props = project_default_props(),
-                prefs = project_default_preferences(),
-            ));
-        }
-        let sql = format!(
-            "INSERT INTO \"project_members\" (\"id\", \"created_at\", \"updated_at\", \
-             \"created_by_id\", \"updated_by_id\", \"deleted_at\", \"workspace_id\", \"member_id\", \
-             \"comment\", \"role\", \"view_props\", \"default_props\", \"preferences\", \
-             \"sort_order\", \"is_active\") \
-             VALUES {} ON CONFLICT DO NOTHING",
-            values.join(", ")
-        );
+        let props: serde_json::Value =
+            serde_json::from_str(project_default_props()).map_err(|_| server_error())?;
+        let prefs: serde_json::Value =
+            serde_json::from_str(project_default_preferences()).map_err(|_| server_error())?;
+        let bulk: Vec<pidash_services::domain::projects::members::BulkRow> = project_invites
+            .iter()
+            .map(|invite| {
+                pidash_services::domain::projects::members::BulkRow {
+                    workspace_id: invite.workspace_id,
+                    // PB-1008: the explicit `NULL` raises the same 23502
+                    // the omitted column raises (identical message,
+                    // identical effect).
+                    project_id: None,
+                    user_id: user.id,
+                    role: pidash_services::domain::projects::members::RoleBind::Int(i64::from(
+                        map_invite_role(invite.role),
+                    )),
+                    created_by: invite.created_by_id,
+                    created_at: now,
+                    updated_at: now,
+                }
+            })
+            .collect();
         // The missing `project_id` raises here when the arm fires — the
         // earlier writes above already committed (no transaction).
-        sqlx::query(&sql).execute(pool).await.map_err(map_err)?;
+        pidash_services::domain::projects::members::bulk_add(pool, &bulk, &props, &prefs, false)
+            .await
+            .map_err(map_err)?;
     }
 
     // Both querysets are (soft-)deleted after the joins (`:90-91`): the
@@ -1488,7 +1277,7 @@ struct LoginRequest<'a> {
 /// on the session, i.e. `flush()` + `cycle_key()`), the `user_logged_in`
 /// signal stamps `users.last_login`, and `device_info` lands in the
 /// session. The tower layer persists the mutated session and sets the
-/// `session-id` cookie; the fresh masked `csrftoken` cookie below mirrors
+/// `session-id` cookie; the fresh 32-char `csrftoken` cookie below mirrors
 /// the `rotate_token` half of `login()`.
 async fn login_user(request: LoginRequest<'_>) -> Result<String, Response> {
     let LoginRequest {
@@ -1557,23 +1346,20 @@ async fn login_user(request: LoginRequest<'_>) -> Result<String, Response> {
     }
     // `user_logged_in` → `update_last_login` (`auth/models.py`): the
     // signal save, inside `login()` before the session persists.
-    if sqlx::query("UPDATE \"users\" SET \"last_login\" = $1 WHERE \"users\".\"id\" = $2")
-        .bind(now)
-        .bind(user.id)
-        .execute(pool)
+    if identity::stamp_last_login(pool, user.id, now)
         .await
         .is_err()
     {
         return Err(server_error());
     }
-    // `rotate_token` half: a fresh secret, masked, with Django's cookie
-    // attributes (secure/domain from settings, httponly per the project
-    // override, `/` + `Lax` defaults).
+    // `rotate_token` half: a fresh secret with Django's cookie attributes
+    // (secure/domain from settings, httponly per the project override,
+    // `/` + `Lax` defaults). The cookie carries the raw 32-char secret
+    // (`_add_new_csrf_cookie`); only bodies and headers carry masked tokens.
     let secret = pidash_auth::csrf::new_secret();
-    let masked = pidash_auth::csrf::mask_secret(&secret).map_err(|_| server_error())?;
     let set_cookie = pidash_auth::session::render_set_cookie(&pidash_auth::session::SetCookie {
         name: CSRF_COOKIE_NAME.to_owned(),
-        value: masked,
+        value: secret,
         expires: Some(pidash_auth::session::http_date(
             now.timestamp() + CSRF_COOKIE_MAX_AGE,
         )),
@@ -1836,7 +1622,7 @@ async fn sign(
         )
         .is_err()
         {
-            return csrf_failure_response(&root);
+            return csrf_failure_response(render_csrf_failure(&root));
         }
     }
     let form = parse_sign_form(content_type.unwrap_or(""), &body);
@@ -1960,22 +1746,40 @@ async fn sign(
                 .next()
                 .unwrap_or(&form.email)
                 .to_owned();
-            let id = insert_user(
-                &pool,
-                now,
-                &form.email,
-                &username,
-                &password_hash,
-                &display_name,
-                login_ip.as_deref(),
-                headers
-                    .get(header::USER_AGENT)
-                    .and_then(|v| v.to_str().ok()),
+            // `User(...)` + first `save()` with the `post_save`
+            // preferences row and the adapter profile row, all inside
+            // `domain::identity::create_user`.
+            let Some(orm) = state.orm() else {
+                return server_error();
+            };
+            let id = identity::create_user(
+                orm,
+                &identity::NewUser {
+                    id: None,
+                    email: &form.email,
+                    username,
+                    password_hash: password_hash.clone(),
+                    first_name: "",
+                    last_name: "",
+                    display_name,
+                    avatar: "",
+                    is_email_verified: true,
+                    is_password_autoset: true,
+                    last_active: Some(now),
+                    login_ip: login_ip.as_deref(),
+                    login_uagent: headers
+                        .get(header::USER_AGENT)
+                        .and_then(|v| v.to_str().ok()),
+                    is_bot: false,
+                    now,
+                    profile: Some(identity::NewProfile {
+                        company_name: "",
+                        background_color: profile_background_color(),
+                    }),
+                },
             )
             .await;
             let id = or_500!(id);
-            or_500!(insert_notification_prefs(&pool, now, &id).await);
-            or_500!(insert_profile(&pool, now, &id).await);
             DbUser {
                 id,
                 email: form.email.clone(),

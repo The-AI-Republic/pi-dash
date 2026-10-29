@@ -80,7 +80,7 @@
 use std::collections::HashMap;
 
 use axum::extract::{Path, Query, State};
-use axum::http::{header, StatusCode};
+use axum::http::StatusCode;
 use axum::response::Response;
 use axum::Router;
 use serde_json::{Map, Value};
@@ -96,6 +96,7 @@ use crate::app_issues::{
 };
 use crate::state::AppState;
 use pidash_auth::permissions::allow::AllowFacts;
+pub(crate) use pidash_compat::response::{empty_response, json_response};
 
 /// `GET` + `POST` on the module-issues collection path, `POST` on the
 /// issue-modules path, `DELETE` on the detail path. Every other method
@@ -156,22 +157,6 @@ pub const GROUP_CLASH_MESSAGE: &str = "Group by and sub group by cannot have sam
 // ---------------------------------------------------------------------------
 
 pub(crate) type HandlerResult = Result<Response, Denial>;
-
-pub(crate) fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("view response")
-}
-
-pub(crate) fn empty_response(status: StatusCode) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(Vec::new()))
-        .expect("empty response")
-}
 
 #[cfg(test)]
 fn json_string(value: &str) -> String {
@@ -311,14 +296,17 @@ pub(crate) fn pool_of(state: &AppState) -> Result<sqlx::PgPool, Denial> {
         .ok_or(Denial::ServerError)
 }
 
-/// `origin=base_host(request, is_app=True)`: `WEB_URL or APP_BASE_URL`
+/// `base_host(request, is_app=True)` (`utils/host.py:17-66`):
+/// `APP_BASE_URL` wins when set, else `WEB_URL`; unset is
+/// `ImproperlyConfigured` → 500. Empty strings fall through like
+/// Python's `or` (PIDASHCONV-1597).
 /// (`handlers_modules::request_origin`, same settings seam).
 fn request_origin(state: &AppState) -> Result<String, Denial> {
-    state
-        .settings()
-        .urls
-        .app_base_url
+    let urls = &state.settings().urls;
+    urls.app_base_url
         .clone()
+        .filter(|s| !s.is_empty())
+        .or_else(|| urls.web_url.clone().filter(|s| !s.is_empty()))
         .ok_or(Denial::ServerError)
 }
 
@@ -606,40 +594,14 @@ fn group_member_selects(group_by: Option<&str>, sub_group_by: Option<&str>) -> S
     out
 }
 
-/// Bind a `sea_query::Value` vec to raw SQL (same mapping as the D-26
-/// `bind_all`, over this endpoint's placeholders).
+/// Bind a `sea_query::Value` vec to raw SQL, over this endpoint's
+/// placeholders. The mapping is the canonical `pidash_compat::db`
+/// binder (OVL-04); this wrapper only maps its error to the local 500.
 fn bind_values<'a>(
     sql: &'a str,
     values: Vec<sea_query::Value>,
 ) -> Result<sqlx::query::Query<'a, Postgres, sqlx::postgres::PgArguments>, Denial> {
-    use sea_query::Value as SeaValue;
-    let mut query = sqlx::query(sql);
-    for value in &values {
-        query = match value {
-            SeaValue::Bool(value) => query.bind(*value),
-            SeaValue::TinyInt(value) => query.bind(*value),
-            SeaValue::SmallInt(value) => query.bind(*value),
-            SeaValue::Int(value) => query.bind(*value),
-            SeaValue::BigInt(value) => query.bind(*value),
-            SeaValue::TinyUnsigned(value) => query.bind(value.map(i16::from)),
-            SeaValue::SmallUnsigned(value) => query.bind(value.map(i32::from)),
-            SeaValue::Unsigned(value) => query.bind(value.map(|v| v as i64)),
-            SeaValue::BigUnsigned(value) => query.bind(value.map(|v| v as i64)),
-            SeaValue::Float(value) => query.bind(*value),
-            SeaValue::Double(value) => query.bind(*value),
-            SeaValue::String(value) => query.bind(value.clone().map(|text| *text)),
-            SeaValue::Char(value) => query.bind(value.map(|char| char.to_string())),
-            SeaValue::Bytes(value) => query.bind(value.clone().map(|bytes| (*bytes).clone())),
-            SeaValue::Uuid(value) => query.bind(value.clone().map(|id| *id)),
-            SeaValue::ChronoDate(value) => query.bind(value.clone().map(|date| *date)),
-            SeaValue::ChronoDateTimeUtc(value) => query.bind(value.clone().map(|moment| *moment)),
-            SeaValue::ChronoTime(_)
-            | SeaValue::ChronoDateTime(_)
-            | SeaValue::ChronoDateTimeLocal(_)
-            | SeaValue::ChronoDateTimeWithTimeZone(_) => return Err(Denial::ServerError),
-        };
-    }
-    Ok(query)
+    pidash_compat::db::bind_all(sql, values).map_err(|_| Denial::ServerError)
 }
 
 /// Filtered `FROM … WHERE` for the module-issue list (`issue.py:97-107`):
@@ -689,7 +651,9 @@ fn module_filtered_set(
         .map_err(|_| Denial::ServerError)?;
     let mut legacy_sql_text = String::new();
     for (name, value) in legacy.predicates() {
-        let fragment = legacy_sql(&mut binder, name, value)?;
+        // UTC keeps this slice's current truncation; its own actor-zone
+        // fix follows the app_issues pattern separately.
+        let fragment = legacy_sql(&mut binder, name, value, &chrono_tz::UTC)?;
         if legacy_sql_text.is_empty() {
             legacy_sql_text = fragment;
         } else {
@@ -821,17 +785,37 @@ async fn module_issue_list(
         sub_group_by,
         &timezone,
     )?;
+    // `order_issue_queryset` (`:112-117`), default `created_at`
+    // (`request.GET.get("order_by", "created_at")` at `:112`): unlike the
+    // cycle/project lists, an absent `order_by` sorts oldest-first, so the
+    // shared `-created_at` default in `params.rs` must not apply here.
+    // The module list annotates the plain `Func(Count)` form (empty counts
+    // render `0`), so its count keys order `0`-style. A filter that
+    // referenced the cycle bridge lends its join to the cycle-name
+    // traversal (Django reuses it, scope included, instead of joining
+    // again); otherwise the traversal joins fresh.
+    let order_by = query_last(&query, "order_by").unwrap_or_else(|| "created_at".to_owned());
+    let order_spec =
+        pidash_services::app_issues::ordering::order_sql(&order_by, "state.\"group\"", |name| {
+            format!("min_{}", name.replace("__", "_"))
+        });
+    let cycle_bridge =
+        crate::app_issues::has_issue_cycle_join(&filtered.from_where).then_some("issue_cycle");
+    let key = order_key(&order_spec.out_param, &order_by, cycle_bridge, false)?;
+    let direction = if key.descending { "DESC" } else { "ASC" };
     // Total count over the pre-annotation set (the `deepcopy` at `:107`).
-    let total_sql = format!("SELECT COUNT(DISTINCT issue.id) {}", filtered.from_where);
+    // The flat branch keeps the distinct-issue count; the grouped branch
+    // counts `queryset.count()` over the order-joined rows (pinned live:
+    // fan-out links count).
+    let total_sql = if group_by.is_some() && !key.joins.is_empty() {
+        format!(
+            "SELECT COUNT(*) {}",
+            crate::app_issues::with_order_joins(&filtered.from_where, &key.joins)
+        )
+    } else {
+        format!("SELECT COUNT(DISTINCT issue.id) {}", filtered.from_where)
+    };
     let total_count = fetch_count(&pool, &total_sql, filtered.values.clone()).await?;
-    // `order_issue_queryset` (`:112-117`), default `created_at`.
-    let order_spec = pidash_services::app_issues::ordering::order_sql(
-        &params.order_by,
-        "state.\"group\"",
-        |name| format!("min_{}", name.replace("__", "_")),
-    );
-    let (key_expr, descending) = order_key(&order_spec.out_param, &params.order_by)?;
-    let direction = if descending { "DESC" } else { "ASC" };
     let per_page = params.per_page;
     let cursor = crate::paginator::Cursor::from_string(&params.cursor_raw).map_err(page_denial)?;
     if group_by.is_some() {
@@ -842,15 +826,19 @@ async fn module_issue_list(
             &filtered,
             group_by.unwrap_or_default(),
             sub_group_by.map(str::to_owned),
-            &key_expr,
+            &key.expr,
             direction,
             per_page,
             cursor,
             total_count,
+            &key.joins,
         )
         .await;
     }
-    module_flat_response(&pool, &filtered, &key_expr, direction, per_page, cursor).await
+    module_flat_response(
+        &pool, &filtered, &key.expr, direction, per_page, cursor, &key.joins,
+    )
+    .await
 }
 
 /// Plain `paginate` branch (`issue.py:199-207`): distinct rows, the
@@ -862,6 +850,7 @@ async fn module_flat_response(
     direction: &str,
     per_page: i64,
     cursor: crate::paginator::Cursor,
+    order_joins: &str,
 ) -> HandlerResult {
     use crate::paginator::{
         apply_offset_window, max_hits, next_cursor, offset_window, prev_cursor,
@@ -871,9 +860,12 @@ async fn module_flat_response(
     let window = offset_window(limit, cursor.offset, cursor.value, cursor.is_prev, None)
         .map_err(page_denial)?;
     let selects = module_row_selects(&[]);
+    // The cycle-name traversal joins ride on the row query only: fan-out
+    // rows differ in `__order_key`, so `DISTINCT` keeps one row per link
+    // like Django, while the totals below stay distinct-issue counts.
+    let row_where = crate::app_issues::with_order_joins(&filtered.from_where, order_joins);
     let inner = format!(
-        "SELECT DISTINCT {selects}, ({key_expr}) AS __order_key {} ORDER BY __order_key {direction} NULLS LAST, issue.created_at DESC LIMIT {} OFFSET {}",
-        filtered.from_where,
+        "SELECT DISTINCT {selects}, ({key_expr}) AS __order_key {row_where} ORDER BY __order_key {direction} NULLS LAST, issue.created_at DESC LIMIT {} OFFSET {}",
         window.stop - window.offset,
         window.offset
     );
@@ -1067,6 +1059,7 @@ async fn module_grouped_response(
     per_page: i64,
     cursor: crate::paginator::Cursor,
     total_count: i64,
+    order_joins: &str,
 ) -> HandlerResult {
     use crate::paginator::{
         grouped_max_hits, grouped_window, next_cursor, prev_cursor, process_grouped_results,
@@ -1093,13 +1086,15 @@ async fn module_grouped_response(
         Some(sub) => format!("{group_expr}, {sub}"),
         None => group_expr.clone(),
     };
+    // The cycle-name traversal joins ride on the row query: the window
+    // numbers fan-out rows like Django's, and the final order is global.
+    let row_where = crate::app_issues::with_order_joins(&filtered.from_where, order_joins);
     let inner = format!(
         "SELECT * FROM (SELECT DISTINCT {selects}{member_selects}, ({key_expr}) AS __order_key,
          ROW_NUMBER() OVER (PARTITION BY {partition} ORDER BY ({key_expr}) {direction} NULLS LAST, issue.created_at DESC) AS __rn
-         {from_where}) __w
+         {row_where}) __w
          WHERE __w.__rn > {offset} AND __w.__rn <= {stop}
          ORDER BY __w.__order_key {direction} NULLS LAST, __w.created_at DESC",
-        from_where = filtered.from_where,
         offset = window.offset,
         stop = window.stop,
     );
@@ -1178,15 +1173,22 @@ async fn module_grouped_response(
     // page 0; a 3-issue list with `per_page=1` answers count 1 on page 0
     // and count 1 on page 1). `total_count`/`total_results` stay the full
     // distinct-issue count.
+    // The cycle-name traversal is the exception: Django's grouped `count`
+    // is the raw window length (`CursorResult.__len__`), fan-out links
+    // included (pinned live), so the collapse is skipped while its joins
+    // are present.
     let mut seen_issues = std::collections::HashSet::new();
-    let page_issue_count = page
-        .iter()
-        .filter(|row| {
-            row.get("id")
-                .map(|id| seen_issues.insert(id.to_string()))
-                .unwrap_or(false)
-        })
-        .count();
+    let page_issue_count = if order_joins.is_empty() {
+        page.iter()
+            .filter(|row| {
+                row.get("id")
+                    .map(|id| seen_issues.insert(id.to_string()))
+                    .unwrap_or(false)
+            })
+            .count()
+    } else {
+        page.len()
+    };
     Ok(json_response(
         StatusCode::OK,
         envelope(
@@ -1832,6 +1834,35 @@ mod tests {
 
     fn empty_query() -> QueryMap {
         HashMap::new()
+    }
+
+    fn origin_state(app_base_url: Option<&str>, web_url: Option<&str>) -> AppState {
+        let mut settings = pidash_db::config::Settings::test_defaults();
+        settings.urls.app_base_url = app_base_url.map(str::to_owned);
+        settings.urls.web_url = web_url.map(str::to_owned);
+        AppState::with_settings("test", settings)
+    }
+
+    /// `base_host(request, is_app=True)` (`utils/host.py:17-66`):
+    /// `APP_BASE_URL` wins when truthy, else `WEB_URL`; unset is
+    /// `ImproperlyConfigured` → 500. Empty strings fall through like
+    /// Python's `or` (PIDASHCONV-1597, PIDASHCONV-1648).
+    #[test]
+    fn request_origin_falls_through_empty_strings() {
+        let app = "https://app.example.invalid";
+        let web = "https://web.example.invalid";
+        let state = origin_state(Some(app), Some(web));
+        assert_eq!(request_origin(&state).expect("app base wins"), app);
+        let state = origin_state(None, Some(web));
+        assert_eq!(request_origin(&state).expect("falls through"), web);
+        let state = origin_state(Some(""), Some(web));
+        assert_eq!(request_origin(&state).expect("empty falls through"), web);
+        let state = origin_state(Some(app), Some(""));
+        assert_eq!(request_origin(&state).expect("app wins"), app);
+        let state = origin_state(Some(""), Some(""));
+        assert!(matches!(request_origin(&state), Err(Denial::ServerError)));
+        let state = origin_state(None, None);
+        assert!(matches!(request_origin(&state), Err(Denial::ServerError)));
     }
 
     #[test]

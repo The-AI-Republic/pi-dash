@@ -53,6 +53,8 @@ pub const PAGE_SERIALIZER_FIELDS: &[&str] = &[
     "color",
     "labels",
     "parent",
+    "parent_id",
+    "sub_pages_count",
     "is_favorite",
     "is_locked",
     "archived_at",
@@ -442,7 +444,7 @@ mod tests {
     fn page_serializer_fields_match_f30_01_in_order() {
         let parsed = golden(F30_01);
         let expected = str_list(&parsed["field_list"]);
-        assert_eq!(PAGE_SERIALIZER_FIELDS.len(), 19);
+        assert_eq!(PAGE_SERIALIZER_FIELDS.len(), 21);
         assert_eq!(PAGE_SERIALIZER_FIELDS, expected.as_slice());
     }
 
@@ -454,7 +456,7 @@ mod tests {
         let mut expected = str_list(&parsed["field_list"]);
         expected.push("description_html");
         assert_eq!(page_detail_fields(), expected);
-        assert_eq!(page_detail_fields().len(), 20);
+        assert_eq!(page_detail_fields().len(), 22);
     }
 
     #[test]

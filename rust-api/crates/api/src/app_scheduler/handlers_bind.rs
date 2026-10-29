@@ -102,9 +102,12 @@ use crate::runner_runs::runs::{
     total_pages, PodMiniStrings,
 };
 use crate::state::AppState;
+use crate::uuid_path::{classify_uuid_segment, UuidSegment};
 
 use super::gate;
 use super::{json_response, pool_of, resolve_project_id, session_authenticated};
+use pidash_compat::datetime::{render_datetime_opt, render_uuid, render_uuid_opt};
+use pidash_compat::py::py_strip;
 
 // ---------------------------------------------------------------------------
 // Exact bodies
@@ -346,10 +349,13 @@ pub async fn binding_detail(
     extension: Option<Extension<SessionHandle>>,
     req: Request,
 ) -> Response {
-    let Ok(binding_id) = binding_raw.parse::<Uuid>() else {
-        // URL resolution precedes auth: a non-UUID id proxies to Django's
-        // resolver 404 (the `app_pages` precedent).
-        return crate::edge::proxy(State(state), req).await;
+    let binding_id = match classify_uuid_segment(&binding_raw) {
+        UuidSegment::Canonical(id) => id,
+        // URL resolution precedes auth: a non-canonical or non-UUID id
+        // proxies to Django's resolver 404 (the `app_pages` precedent).
+        UuidSegment::NonCanonical | UuidSegment::Garbage => {
+            return crate::edge::proxy(State(state), req).await;
+        }
     };
     let pool = match pool_of(&state) {
         Ok(pool) => pool,
@@ -387,8 +393,14 @@ pub async fn binding_patch(
     extension: Option<Extension<SessionHandle>>,
     req: Request,
 ) -> Response {
-    let Ok(binding_id) = binding_raw.parse::<Uuid>() else {
-        return crate::edge::proxy(State(state), req).await;
+    let binding_id = match classify_uuid_segment(&binding_raw) {
+        UuidSegment::Canonical(id) => id,
+        // Django's `<uuid:>` converter routes only the canonical
+        // spelling; non-canonical and garbage proxy to its resolver
+        // 404 (PIDASHCONV-1475).
+        UuidSegment::NonCanonical | UuidSegment::Garbage => {
+            return crate::edge::proxy(State(state), req).await;
+        }
     };
     let pool = match pool_of(&state) {
         Ok(pool) => pool,
@@ -509,8 +521,14 @@ pub async fn binding_uninstall(
     extension: Option<Extension<SessionHandle>>,
     req: Request,
 ) -> Response {
-    let Ok(binding_id) = binding_raw.parse::<Uuid>() else {
-        return crate::edge::proxy(State(state), req).await;
+    let binding_id = match classify_uuid_segment(&binding_raw) {
+        UuidSegment::Canonical(id) => id,
+        // Django's `<uuid:>` converter routes only the canonical
+        // spelling; non-canonical and garbage proxy to its resolver
+        // 404 (PIDASHCONV-1475).
+        UuidSegment::NonCanonical | UuidSegment::Garbage => {
+            return crate::edge::proxy(State(state), req).await;
+        }
     };
     let pool = match pool_of(&state) {
         Ok(pool) => pool,
@@ -566,10 +584,13 @@ pub async fn binding_runs(
     extension: Option<Extension<SessionHandle>>,
     req: Request,
 ) -> Response {
-    let Ok(binding_id) = binding_raw.parse::<Uuid>() else {
-        // URL resolution precedes auth: a non-UUID id proxies to Django's
-        // resolver 404 (the `app_pages` precedent).
-        return crate::edge::proxy(State(state), req).await;
+    let binding_id = match classify_uuid_segment(&binding_raw) {
+        UuidSegment::Canonical(id) => id,
+        // URL resolution precedes auth: a non-canonical or non-UUID id
+        // proxies to Django's resolver 404 (the `app_pages` precedent).
+        UuidSegment::NonCanonical | UuidSegment::Garbage => {
+            return crate::edge::proxy(State(state), req).await;
+        }
     };
     let pool = match pool_of(&state) {
         Ok(pool) => pool,
@@ -871,13 +892,6 @@ async fn read_request_data(state: &AppState, req: Request) -> Result<Value, Resp
 // ---------------------------------------------------------------------------
 // Python-compat value helpers (DRF 3.15.2 + Django 4.2 field semantics)
 // ---------------------------------------------------------------------------
-
-/// Python `str.strip()` with no args: Unicode whitespace plus
-/// `\x1c`–`\x1f` (same predicate as the shape layer's private `py_strip`;
-/// services is read-only, so it is mirrored here, not imported).
-fn py_strip(value: &str) -> &str {
-    value.trim_matches(|c: char| c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c))
-}
 
 /// Python `str(value)` over a JSON value, for the `% (value)s`
 /// interpolations in the UUID / choice messages. Strings pass through
@@ -2862,20 +2876,6 @@ async fn fetch_pod_display(pool: &PgPool, pod_id: &Uuid) -> Result<Option<String
 // ---------------------------------------------------------------------------
 // Render (`SchedulerBindingSerializer.to_representation`)
 // ---------------------------------------------------------------------------
-
-fn render_uuid(id: &Uuid) -> Value {
-    Value::String(id.to_string())
-}
-
-fn render_uuid_opt(id: &Option<Uuid>) -> Value {
-    id.map(|id| render_uuid(&id)).unwrap_or(Value::Null)
-}
-
-fn render_datetime_opt(instant: &Option<DateTime<Utc>>, timezone: &Tz) -> Value {
-    instant
-        .map(|instant| Value::String(crate::serializer::render_datetime_in(&instant, timezone)))
-        .unwrap_or(Value::Null)
-}
 
 /// The 4 detail-only values (`SchedulerBindingDetailSerializer`,
 /// `474123e5`): `resolved_prompt` (always a string),

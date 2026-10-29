@@ -1,7 +1,7 @@
 //! Runner Prometheus metrics (D-15, stage 5, PIDASHCONV-542).
 //!
 //! Ports `apps/api/pi_dash/runner/views/metrics.py:1-105`
-//! (`GET /api/v1/runner/metrics/`, [`metrics`]): five point-in-time
+//! (`GET /api/v1/runner/metrics/`, [`metrics`]): six point-in-time
 //! gauges plus the `pi_dash_runs_failed_by_reason{reason}` family
 //! (PDASHOSS01-183) rendered by hand in Prometheus text format. AllowAny with no
 //! auth classes — the handler never touches the session — and the
@@ -12,8 +12,9 @@ use axum::extract::State;
 use axum::http::{header, StatusCode};
 use axum::response::Response;
 
-use super::{json_response, pool_of, view_response, ALLOW_RUNNER_METRICS, SERVER_ERROR_BODY};
+use super::{pool_of, view_response, ALLOW_RUNNER_METRICS};
 use crate::state::AppState;
+use pidash_compat::response::server_error;
 
 /// Exact content type (`metrics.py:105`): scrapers require it.
 pub const METRICS_CONTENT_TYPE: &str = "text/plain; version=0.0.4";
@@ -28,9 +29,12 @@ pub const ACTIVE_RUN_STATUSES: [&str; 5] = [
     "awaiting_reauth",
 ];
 
-/// Runner status counts (`values_list("status").annotate(Count)`).
+/// Runner status counts with the per-status paused count
+/// (`values("status").annotate(c=Count("id"), paused=Count("id",
+/// filter=Q(paused_at__isnull=False, revoked_at__isnull=True)))`,
+/// `09738d222` adds the `paused` arm).
 pub fn runner_status_counts_sql() -> String {
-    r#"SELECT "runner"."status", COUNT("runner"."id") FROM "runner" GROUP BY "runner"."status""#
+    r#"SELECT "runner"."status", COUNT("runner"."id") AS "c", COUNT("runner"."id") FILTER (WHERE ("runner"."paused_at" IS NOT NULL AND "runner"."revoked_at" IS NULL)) AS "paused" FROM "runner" GROUP BY "runner"."status""#
         .to_owned()
 }
 
@@ -77,12 +81,15 @@ pub fn gauge(name: &str, help: &str, value: i64) -> String {
     format!("# HELP {name} {help}\n# TYPE {name} gauge\n{name} {value}\n")
 }
 
-/// The metrics body (`metrics.py:78-104`), in source order:
+/// The metrics body (`metrics.py:78-104`), in source order.
+/// `online` is already net of paused runners (`09738d222`); `paused`
+/// counts non-revoked paused runners in any connectivity state;
 /// `failed_by_reason` is the sorted `(reason, count)` list.
 pub fn metrics_body(
     online: i64,
     busy: i64,
     offline: i64,
+    paused: i64,
     active_runs: i64,
     pending_approvals: i64,
     failed_by_reason: &[(String, i64)],
@@ -92,7 +99,11 @@ pub fn metrics_body(
         .map(|(reason, count)| ("reason", reason.as_str(), *count))
         .collect();
     [
-        gauge("pi_dash_runner_online", "Runners currently online.", online),
+        gauge(
+            "pi_dash_runner_online",
+            "Runners online and accepting work (excludes paused).",
+            online,
+        ),
         gauge(
             "pi_dash_runner_busy",
             "Runners currently executing a run.",
@@ -102,6 +113,11 @@ pub fn metrics_body(
             "pi_dash_runner_offline",
             "Runners that have dropped their heartbeat (excludes revoked).",
             offline,
+        ),
+        gauge(
+            "pi_dash_runner_paused",
+            "Non-revoked runners paused by an operator, in any connectivity state.",
+            paused,
         ),
         gauge(
             "pi_dash_runs_active",
@@ -133,7 +149,7 @@ async fn metrics_inner(State(state): State<AppState>) -> Response {
         Ok(pool) => pool,
         Err(response) => return response,
     };
-    let status_rows: Vec<(String, i64)> = match sqlx::query_as(&runner_status_counts_sql())
+    let status_rows: Vec<(String, i64, i64)> = match sqlx::query_as(&runner_status_counts_sql())
         .fetch_all(pool)
         .await
     {
@@ -143,11 +159,18 @@ async fn metrics_inner(State(state): State<AppState>) -> Response {
     let mut online = 0;
     let mut busy = 0;
     let mut offline = 0;
-    for (status, count) in status_rows {
+    let mut paused = 0;
+    for (status, count, paused_count) in status_rows {
+        // The paused gauge sums every status group (`metrics.py:78`); the
+        // COUNT filter already excludes revoked runners.
+        paused += paused_count;
         // Revoked runners are retired, not a health signal: counted in
         // their own group and ignored here (`metrics.py:14-15`).
         match status.as_str() {
-            "online" => online = count,
+            // The online gauge nets out paused-ONLINE runners
+            // (`metrics.py:79-80`, `09738d222`); busy/offline keep
+            // their raw counts, as in Python.
+            "online" => online = count - paused_count,
             "busy" => busy = count,
             "offline" => offline = count,
             _ => {}
@@ -185,6 +208,7 @@ async fn metrics_inner(State(state): State<AppState>) -> Response {
         online,
         busy,
         offline,
+        paused,
         active_runs,
         pending_approvals,
         &failed_by_reason,
@@ -194,14 +218,6 @@ async fn metrics_inner(State(state): State<AppState>) -> Response {
         .header(header::CONTENT_TYPE, METRICS_CONTENT_TYPE)
         .body(axum::body::Body::from(body))
         .expect("metrics response")
-}
-
-/// 500 for transport failures (unreachable in `serve`).
-fn server_error() -> Response {
-    json_response(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        SERVER_ERROR_BODY.to_owned(),
-    )
 }
 
 #[cfg(test)]
@@ -219,9 +235,9 @@ mod tests {
     #[test]
     fn body_matches_fx08_byte_for_byte() {
         let fx = fx08();
-        // Fixture rows: 1 online, 1 busy, 2 offline, 8 active, 2 pending,
-        // no FAILED run with a stored reason (header-only family).
-        let body = metrics_body(1, 1, 2, 8, 2, &[]);
+        // Fixture rows: 1 online, 1 busy, 2 offline, 0 paused, 8 active,
+        // 2 pending, no FAILED run with a stored reason (header-only family).
+        let body = metrics_body(1, 1, 2, 0, 8, 2, &[]);
         assert_eq!(body, fx["metrics"]["body"].as_str().expect("body"));
         assert_eq!(
             METRICS_CONTENT_TYPE,
@@ -243,7 +259,7 @@ mod tests {
             ("agent_error.provider_network".to_owned(), 4),
             ("timeout".to_owned(), 1),
         ];
-        let body = metrics_body(0, 0, 0, 0, 0, &rows);
+        let body = metrics_body(0, 0, 0, 0, 0, 0, &rows);
         assert!(body.ends_with(
             "# HELP pi_dash_runs_failed_by_reason FAILED AgentRuns per canonical failure_reason.\n\
              # TYPE pi_dash_runs_failed_by_reason gauge\n\

@@ -95,7 +95,32 @@ def _make_online_runner(seeder, owner_id, workspace_id, pod_id):
                    '','',0,'',1,'','','',0,'{}','manual')""",
         (runner_id, f"handoff-{uuid.uuid4().hex[:8]}", owner_id, workspace_id, pod_id),
     )
+    seeder._put("runner", runner_id)
     return runner_id
+
+
+def _delete_child_runs(seeder, run_id):
+    """Remove server-created replacement runs of a seeded run.
+
+    The seed tracker only knows seeded rows, and ``agent_run`` FKs
+    (``parent_run_id``, ``runner_id``, ``pod_id``) silently block the tracked
+    deletes while a replacement survives — so drop each child's event,
+    approval and dedupe rows, then the children themselves.
+    """
+    replacements = seeder.db.fetchall(
+        "SELECT id FROM agent_run WHERE parent_run_id = %s", (run_id,)
+    )
+    for replacement in replacements:
+        seeder.db.execute(
+            "DELETE FROM run_message_dedupe WHERE run_id = %s", (replacement["id"],)
+        )
+        seeder.db.execute(
+            "DELETE FROM agent_run_event WHERE agent_run_id = %s", (replacement["id"],)
+        )
+        seeder.db.execute(
+            "DELETE FROM agent_run_approval WHERE agent_run_id = %s", (replacement["id"],)
+        )
+    seeder.db.execute("DELETE FROM agent_run WHERE parent_run_id = %s", (run_id,))
 
 
 def _complete(machine_client, run_id, done_payload):
@@ -157,6 +182,7 @@ def run_with_issue(seeder, daemon_world, machine_flow, issue_world):
         (issue_world["id"], run["id"]),
     )
     yield run
+    _delete_child_runs(seeder, run["id"])
     seeder.db.execute("DELETE FROM run_message_dedupe WHERE run_id = %s", (run["id"],))
     seeder.db.execute("DELETE FROM agent_run_event WHERE agent_run_id = %s", (run["id"],))
     seeder.db.execute("DELETE FROM agent_run_approval WHERE agent_run_id = %s", (run["id"],))
@@ -284,3 +310,114 @@ def test_complete_move_handoff_drains_target_pod(
     assert str(replacement["pod_id"]) == target_pod["id"], replacement
     assert replacement["status"] == "assigned", replacement
     assert str(replacement["runner_id"]) == target_runner, replacement
+
+
+@pytest.fixture()
+def handoff_failure_world(
+    seeder, daemon_world, machine_flow, issue_world, run_with_issue
+):
+    """A moved issue whose handoff replacement cannot build its prompt.
+
+    The issue moves to a target project (with the ``_project_move_handoff``
+    marker on the source run), and a workspace-level override replaces the
+    ``autonomy`` section — overridable, in the coding-task recipe — with an
+    unrenderable body, so ``build_first_turn`` raises on both template
+    engines (Django's sandboxed Jinja2 and Rust's strict minijinja) and the
+    replacement finalizes FAILED with ``prompt_build_failed`` (PIDASHCONV-1514).
+
+    Server-created rows (replacement run, comment, description) are removed
+    afterwards — the seed tracker only knows seeded rows.
+    """
+    _set_runner_online(seeder, machine_flow["runner_id"])
+    workspace_id = daemon_world["workspace"]["id"]
+    target_project = seeder.create_project(workspace_id)
+    target_state = seeder.create_state(
+        workspace_id, target_project["id"], name="In Progress", group="started"
+    )
+    target_pod = seeder.create_pod(
+        workspace_id, target_project["id"], name="handoff target", is_default=True
+    )
+    seeder.db.execute(
+        "UPDATE issues SET project_id = %s, state_id = %s WHERE id = %s",
+        (target_project["id"], target_state["id"], issue_world["id"]),
+    )
+    seeder.db.execute(
+        "UPDATE agent_run SET run_config = %s::jsonb WHERE id = %s",
+        (
+            json.dumps(
+                {
+                    "_project_move_handoff": {
+                        "target_project_id": target_project["id"],
+                        "target_pod_id": target_pod["id"],
+                    }
+                }
+            ),
+            run_with_issue["id"],
+        ),
+    )
+    override_id = str(uuid.uuid4())
+    seeder.db.execute(
+        """INSERT INTO prompt_section_override
+           (id, workspace_id, user_id, section_key, body, is_active,
+            version, needs_attention, updated_by_id, created_at, updated_at)
+           VALUES (%s,%s,NULL,'autonomy',%s,true,1,false,NULL,now(),now())""",
+        (override_id, workspace_id, "{% if %}"),
+    )
+    seeder._put("prompt_section_override", override_id)
+    world = {
+        "issue_id": issue_world["id"],
+        "run_id": run_with_issue["id"],
+        "owner_id": daemon_world["owner"]["id"],
+    }
+    yield world
+    _delete_child_runs(seeder, world["run_id"])
+    descriptions = seeder.db.fetchall(
+        "SELECT description_id FROM issue_comments WHERE issue_id = %s",
+        (world["issue_id"],),
+    )
+    seeder.db.execute(
+        "DELETE FROM issue_comments WHERE issue_id = %s", (world["issue_id"],)
+    )
+    for row in descriptions:
+        if row["description_id"] is not None:
+            seeder.db.execute(
+                "DELETE FROM descriptions WHERE id = %s", (row["description_id"],)
+            )
+
+
+def test_complete_move_handoff_failure_comment_stamped_with_requester(
+    machine_client, seeder, handoff_failure_world
+):
+    """A failed replacement posts its SYSTEM comment as the requester.
+
+    The handoff runs inline in the daemon ``complete`` request, so Django
+    stamps the crum user (the runner owner) on the replacement's failure
+    comment and its description row; Rust must match (PIDASHCONV-1514).
+    """
+    _complete(machine_client, handoff_failure_world["run_id"], {"summary": "done"})
+
+    replacement = seeder.db.fetchone(
+        "SELECT id, status, error_code FROM agent_run WHERE parent_run_id = %s",
+        (handoff_failure_world["run_id"],),
+    )
+    assert replacement is not None, "no replacement run created by the handoff"
+    assert replacement["status"] == "failed", replacement
+    assert replacement["error_code"] == "prompt_build_failed", replacement
+    comments = seeder.db.fetchall(
+        "SELECT id, created_by_id, updated_by_id, description_id, comment_html"
+        " FROM issue_comments"
+        " WHERE issue_id = %s AND speaker_agent_run_id = %s AND deleted_at IS NULL",
+        (handoff_failure_world["issue_id"], replacement["id"]),
+    )
+    assert len(comments) == 1
+    comment = comments[0]
+    assert "Run failed." in comment["comment_html"]
+    assert str(comment["created_by_id"]) == handoff_failure_world["owner_id"]
+    assert comment["updated_by_id"] is None
+    description = seeder.db.fetchone(
+        "SELECT created_by_id, updated_by_id FROM descriptions WHERE id = %s",
+        (comment["description_id"],),
+    )
+    assert description is not None
+    assert str(description["created_by_id"]) == handoff_failure_world["owner_id"]
+    assert description["updated_by_id"] is None

@@ -9,6 +9,7 @@ import uuid
 from pathlib import Path
 
 import pytest
+from psycopg.types.json import Json
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -294,6 +295,27 @@ def test_patch_archived_400(seed):
     http.delete(seed["keys"][KEY], f"{base(seed)}/{created['id']}/archive/", expect=204)
 
 
+def test_patch_timezone_pytz_2024_1_membership(seed, conn):
+    # PIDASHCONV-1389: the v1 project timezone ChoiceField must match
+    # pytz 2024.1 exactly (db/models/project.py:122). Asia/Choibalsan is
+    # accepted (200 + stored); America/Coyhaique is rejected (400).
+    tag = db.new_tag()
+    created = http.post(seed["keys"][KEY], base(seed) + "/",
+                        json={"name": f"CT Tz {tag}",
+                              "identifier": f"T{tag.upper()}"[:12]}, expect=201).json()
+    url = f"{base(seed)}/{created['id']}/"
+    r = http.patch(seed["keys"][KEY], url,
+                   json={"timezone": "Asia/Choibalsan"}, expect=200).json()
+    assert r["timezone"] == "Asia/Choibalsan"
+    saved = db.fetch_one(conn, "SELECT timezone FROM projects WHERE id = %s", (created["id"],))
+    assert saved == {"timezone": "Asia/Choibalsan"}
+    r = http.patch(seed["keys"][KEY], url,
+                   json={"timezone": "America/Coyhaique"}, expect=400)
+    assert r.json() == {"timezone": ['"America/Coyhaique" is not a valid choice.']}
+    saved = db.fetch_one(conn, "SELECT timezone FROM projects WHERE id = %s", (created["id"],))
+    assert saved == {"timezone": "Asia/Choibalsan"}
+
+
 def test_delete(seed, conn):
     tag = db.new_tag()
     created = http.post(seed["keys"][KEY], base(seed) + "/",
@@ -479,6 +501,40 @@ def test_expand_null_fk_renders_empty_object(seed, conn):
         assert row[expand] == {}
 
 
+def test_expand_non_fk_key_renders_null_and_appends_unrendered(seed):
+    # PIDASHCONV-1395: keys outside the expansion map render the `<key>_id`
+    # getattr fallback (serializers/base.py:114-116), which is None for
+    # plain columns — the key is nulled in place, never re-rendered. The
+    # gate is `expand in self.fields` (base.py:78), so declared-but-
+    # unrendered fields are appended: detail `sort_order` (the detail
+    # queryset never annotates it) lands null at the very end.
+    key = seed["keys"][KEY]
+    pid = seed["project"]["id"]
+    # Detail baseline: name renders, sort_order is absent.
+    plain = http.get(key, f"{base(seed)}/{pid}/").json()
+    assert plain["name"] == seed["project"]["name"]
+    assert "sort_order" not in plain
+    # Detail ?expand=name,sort_order: name nulled in place, sort_order
+    # appended null last — wire order is baseline + ["sort_order"].
+    r = http.get(key, f"{base(seed)}/{pid}/",
+                 params={"expand": "name,sort_order"})
+    body = r.json()
+    assert body["name"] is None
+    assert body["sort_order"] is None
+    assert list(body.keys()) == list(plain.keys()) + ["sort_order"]
+    assert b'"name":null' in r.content
+    assert r.content.endswith(b'"sort_order":null}')
+    # List ?expand=name: name nulled in place, order unchanged.
+    plain_list = http.get(key, base(seed) + "/").json()
+    plain_row = next(p for p in plain_list["results"] if p["id"] == pid)
+    assert plain_row["name"] == seed["project"]["name"]
+    r = http.get(key, base(seed) + "/", params={"expand": "name"})
+    row = next(p for p in r.json()["results"] if p["id"] == pid)
+    assert row["name"] is None
+    assert list(row.keys()) == list(plain_row.keys())
+    assert b'"name":null' in r.content
+
+
 # --- Unknown workspace slug vs project-ref rewrite order (PIDASHCONV-1147) ---
 # Django's `_rewrite_project_kwarg` (api/views/base.py:51-98) runs in
 # `BaseAPIView.initial` *before* `check_permissions`, so a non-UUID project
@@ -656,3 +712,28 @@ def test_cover_image_url_attachment_null_project_renders_none_text(seed, conn):
     )
     detail = http.get(key, f"{base(seed)}/{pid}/").json()
     assert detail["cover_image_url"] == expected
+
+
+def test_detail_renders_stored_network_and_description_json(seed, conn):
+    """Detail echoes stored network + JSON descriptions (PIDASHCONV-1388 twin).
+
+    HTTP-side twin of the tasks_webhooks project-chain tests: the worker
+    fan-out must decode these same columns (INT2 network, jsonb
+    descriptions). Seeded via SQL because create ignores the description
+    fields (ProjectCreateSerializer.Meta.fields) — the read path is what
+    this pins.
+    """
+    pid = db.create_project(conn, seed["ws_a"]["id"], db.new_tag(),
+                            created_by_id=seed["owner"]["id"])["id"]
+    db.add_project_member(conn, seed["ws_a"]["id"], pid, seed["owner"]["id"], db.ADMIN)
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE projects SET network = 2, description_text = %s,"
+            " description_html = %s WHERE id = %s",
+            (Json({"ops": "text"}), Json({"a": 1}), pid),
+        )
+    conn.commit()
+    body = http.get(seed["keys"][KEY], f"{base(seed)}/{pid}/").json()
+    assert body["network"] == 2
+    assert body["description_text"] == {"ops": "text"}
+    assert body["description_html"] == {"a": 1}

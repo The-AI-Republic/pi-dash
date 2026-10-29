@@ -4,11 +4,11 @@
 //!
 //! * `IssueMoveAPIEndpoint.post` (`:920-937`) — move a work item to
 //!   another project, with `utils/issue_move.py:122-393` as its closure:
-//!   the non-dict-body `{}` coercion, the 650
-//!   [`move_work_item_to_project`](pidash_services::app_issues::issue_move::move_work_item_to_project)
-//!   driver behind a pool-backed [`MoveStore`], the post-commit
-//!   cancel/drain, the explicit 594 state-transition fire, the two
-//!   enqueues, then the S1 API read shape.
+//!   the non-dict-body `{}` coercion,
+//!   `domain::issues::move_to_project` over the 650 kernel, the
+//!   post-commit cancel/drain, the 594 state-transition fire and the
+//!   two enqueues folded into the commit chain, then the S1 API read
+//!   shape.
 //! * `IssueSearchEndpoint.get` (`:2682-2720`) — legacy thin search at
 //!   `work-items/search/` plus its deprecated `issues/` twin: raw
 //!   `values()` rows (NOT the S6 `IssueSearchSerializer` — the fixture
@@ -25,17 +25,19 @@
 //! only); every other method proxies to Django through the edge
 //! fallback.
 //!
-//! Layering (all foundation use is read-only): the move reuses the 650
-//! driver (`pidash_services::app_issues::issue_move` — the ported util,
-//! shared with the D-26 app surface, whose pool driver in
-//! `app_issues::handlers_versions_move` this module's store mirrors)
-//! plus the 594 signal entries and the D-14 drain recipe; the search SQL
+//! Layering (all foundation use is read-only): the move reuses the
+//! move domain service (`domain::issues::move_to_project` over the 650
+//! kernel — the ported util, shared with the D-26 app surface — with
+//! the 594 fire and the D-14 pod drains behind its hooks); the search SQL
 //! text and param parsers live in
 //! `pidash_services::v1_work_items::queries_search` (Q3, PIDASHCONV-670)
 //! over `app_views_search::fts`; the advanced row assembly is
-//! `queries_search::{advanced_result, advanced_envelope}`; the success
-//! datetime rendering is `crate::serializer::render_datetime_in`;
-//! auth/preamble/rewrite/query helpers are reused from
+//! `queries_search::{advanced_result, advanced_envelope}`; the move's
+//! success datetime rendering is
+//! `crate::serializer::render_datetime_in` (the `IssueSerializer`
+//! `DateTimeField` path), while the advanced rows render UTC
+//! (`crate::serializer::render_datetime` — raw `.values()` datetimes,
+//! no `DateTimeField`); auth/preamble/rewrite/query helpers are reused from
 //! [`super::handlers_social`]. This module owns the HTTP shells: the
 //! move's `ProjectEntityPermission` POST gate, the search AuthOnly gate
 //! (both search views inherit `IsAuthenticated` from `BaseAPIView` and
@@ -109,9 +111,9 @@
 //! * The immediate-handoff insert (a move whose handoff runs are all
 //!   QUEUED/PAUSED) runs through the D-12 creation seam
 //!   (`create_project_move_handoff_run`), mirroring the D-26 twin's
-//!   adoption (PIDASHCONV-743): the span is a `DbTransaction` lent to
-//!   the seam in-span, and the creation outboxes drain post-commit
-//!   before the move's own post-commit work.
+//!   adoption (PIDASHCONV-743): the span is the SeaORM transaction the
+//!   seam writes through in-span, and the creation outboxes drain in
+//!   the commit chain before the move's own post-commit work.
 //!
 //! Fixture: `F18-11` (`rust-api/fixtures/v1_work_items/handlers/` —
 //! `search`, `search_advanced`, the deprecated `search` twin, and the
@@ -119,10 +121,10 @@
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
-use tokio::sync::Mutex;
+use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
@@ -130,80 +132,28 @@ use serde_json::{Map, Value};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-use pidash_auth::permissions::membership::ProjectRoleFacts;
 use pidash_auth::permissions::project;
 use pidash_auth::scope::TenantScope;
-use pidash_db::app_project::models::project::ProjectLookup;
-use pidash_db::config::RunnerSettings;
-use pidash_db::dispatch::AgentRunStatus;
-use pidash_db::orchestration::workpad::AgentUserCollisionError;
-use pidash_db::runner_sessions::machine_outbox::{self, MachineOutboxError};
-use pidash_db::runner_sessions::models::runner_session;
-use pidash_db::runner_sessions::outbox as runner_outbox;
-use pidash_db::runner_sessions::outbox::OutboxError;
-use pidash_db::runner_sessions::RunnerSession;
-use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
-use pidash_db::tx::Transaction as DbTransaction;
-use pidash_services::app_issues::issue_move::{
-    CREATE_ADVISORY_LOCK_SQL, CREATE_SAVE_DEFAULT_STATE_SQL, CREATE_SAVE_FALLBACK_STATE_SQL,
-    CREATE_SEQ_SCAN_SQL, DEFAULT_FOR_PROJECT_ID_SQL,
-};
-use pidash_services::app_issues::{
-    move_work_item_to_project, repoint_sql, send_project_move_cancel, MoveError, MovePostCommit,
-    MoveResult, MoveStore, MovedIssueFields, MovedIssueRow, PodRow, ProjectRow, SourceIssueRow,
-    StateRow, ASSIGNEE_IDS_SQL, ASSIGNEE_PRUNE_SQL, ASSIGNEE_REPOINT_SQL, CHILDREN_DETACH_SQL,
-    COMMENT_IDS_SQL, CYCLE_DELETE_SQL, DESCRIPTION_IDS_SQL, HANDOFF_PARENT_UPDATE_SQL,
-    HANDOFF_RUNS_LOCK_SQL, INERT_RUN_UPDATE_SQL, ISSUE_MOVE_UPDATE_SQL, LABEL_DELETE_SQL,
-    LABEL_IDS_SQL, MEMBER_EXISTS_SQL, MODULE_DELETE_SQL, MOVED_ISSUE_REFETCH_SQL,
-    PROJECT_IDENTIFIER_SQL, PROJECT_RESOLVE_BY_IDENTIFIER_SQL, PROJECT_RESOLVE_BY_PK_SQL,
-    RELATION_DELETE_SQL, SEQUENCE_CREATE_SQL, SEQUENCE_DETACH_SQL, SOURCE_ISSUE_LOCK_SQL,
-    SOURCE_ISSUE_SQL, WORKSPACE_SLUG_SQL,
-};
-use pidash_services::app_issues::{HandoffRunRow, RepointTarget};
-use pidash_services::dispatch::policy::UserFlags;
-use pidash_services::orchestration::blockers::{has_open_blockers_sql, summary_sql, BlockerRow};
-use pidash_services::orchestration::clock::{ClockWrite, ProjectClockPolicy};
-use pidash_services::orchestration::creation::{
-    create_project_move_handoff_run, AdmissionError, CreationError, CreationSeam, ExecutionError,
-    ExecutionFields, ExecutionRequest, FinalizeAgentRunSeam, HandoffCreateRequest, IssueView,
-    LockedIssue, NewAgentRun, PodView, ProjectView, RenderBundle, RenderedTurn, RunView,
-    RunnerView, StateView, STATE_SELECT_SQL,
-};
-use pidash_services::orchestration::entries::{
-    capture_prior_state, fire_state_transition, BindingView, EntriesSeam, FireOutcome, FireRequest,
-    NewSchedulerRun, PreflightSeam, SchedulerView, WorkspaceView, PRIOR_STATE_SELECT_SQL,
-};
-use pidash_services::prompting::composer::{OverrideIndex, OverrideRow};
-use pidash_services::runner_sessions::drain::{
-    drain_pod_log, next_for_runner_sql, plan_assignment, AssignmentFacts, DrainEffect,
-    ASSIGN_RUN_UPDATE_SQL, DRAIN_POD_BY_ID_LOOKUP_SQL, DRAIN_POD_IDLE_RUNNERS_SQL,
-};
-use pidash_services::runner_sessions::guards::alive_threshold;
-use pidash_services::runner_sessions::pubsub::{
-    send_to_runner, PubsubStore, CLOSE_ACTIVE_SESSIONS_SQL,
-};
+use pidash_services::domain::activity::TaskEnqueueHook;
+use pidash_services::domain::issues as domain_issues;
+use pidash_services::domain::transition::IssueTransitionHook;
+use pidash_services::domain::{WriteActor, WriteCtx, WriteScope};
+use pidash_services::operations;
 use pidash_services::v1_work_items::queries_search as q;
-use pidash_services::v1_work_items::shape_issue::{
-    BlockerSummary, IssueRow as ApiIssueRow, RepresentationInput, SummaryItem,
-};
-use pidash_types::dispatch::AgentExecutorKind;
-
-use crate::orchestration::{
-    drain_creation_outboxes, handoff_store, split_outboxes, CreationDrainError, CreationOutboxes,
-    SpanCreationDeps,
-};
-use crate::serializer::render_datetime_in;
-use crate::state::AppState;
-use crate::v1_cycles_modules::body as shared_body;
-use crate::v1_cycles_modules::json_cpython::{
-    parse_json_text, to_serde_publish, JsonFail, JSON_PARSE_PREFIX,
-};
 
 use super::handlers_social::{preamble, query_last, rewrite_project_id, QueryMap};
 use super::perms::{gate_for, V1WorkItemsRoute};
-
-/// `handle_exception`'s generic branch (`api/views/base.py:166-170`).
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
+use crate::domain_hooks::{AppMoveAdmissionCache, AppMovePostCommitHook, AppTaskEnqueueHook};
+use crate::issue_transition::AppTransitionHook;
+use crate::middleware::body_limit::read_request_bytes;
+use crate::orchestration::SpanCreationDeps;
+use crate::serializer::render_datetime;
+use crate::state::AppState;
+use crate::v1_cycles_modules::body as shared_body;
+use crate::v1_cycles_modules::json::{
+    parse_json_text, to_serde_publish, JsonFail, JSON_PARSE_PREFIX,
+};
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 
 // ---------------------------------------------------------------------------
 // Responses
@@ -298,6 +248,33 @@ impl IntoResponse for Denial {
     }
 }
 
+/// Map an operation failure onto the `Denial` arms the moved move handler
+/// used (OVL-14, PIDASHCONV-1649). The move operation never returns the
+/// issues-family 400/404/409 bodies, so those arms 500 instead of
+/// rendering a body this module cannot spell.
+impl From<operations::Error> for Denial {
+    fn from(error: operations::Error) -> Self {
+        match error {
+            operations::Error::NotFound => Denial::NotFound,
+            operations::Error::ProjectNotFound => Denial::ProjectNotFound,
+            operations::Error::Rejection { status, message } => {
+                Denial::MoveRejection { status, message }
+            }
+            operations::Error::ServerError => Denial::ServerError,
+            operations::Error::BadError(_)
+            | operations::Error::FieldErrors(_)
+            | operations::Error::NotFoundBody(_)
+            | operations::Error::Conflict(_) => Denial::ServerError,
+        }
+    }
+}
+
+/// Wrap an operation outcome in the v1 response.
+fn op_response(outcome: operations::Outcome) -> Result<Response, Denial> {
+    let status = StatusCode::from_u16(outcome.status).map_err(|_| Denial::ServerError)?;
+    Ok(json_response(status, outcome.body))
+}
+
 impl From<super::handlers_social::Denial> for Denial {
     fn from(denial: super::handlers_social::Denial) -> Self {
         use super::handlers_social::Denial as Social;
@@ -318,14 +295,7 @@ impl From<super::handlers_social::Denial> for Denial {
 /// post-pass escapes U+2028/U+2029 (`rest_framework/renderers.py`); the
 /// `app_project` `escape_u2028` precedent, applied to every JSON body here.
 fn json_response(status: StatusCode, body: String) -> Response {
-    let body = body
-        .replace('\u{2028}', "\\u2028")
-        .replace('\u{2029}', "\\u2029");
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("handler json response")
+    pidash_compat::response::json_response(status, pidash_compat::response::escape_u2028(&body))
 }
 
 /// Quote one JSON string value (DRF `detail`/`error` wrappers).
@@ -815,11 +785,13 @@ struct AdvancedDecoded {
 
 /// Decode one advanced `values()` row by POSITION (`:2860-2875` order —
 /// `name` repeats across issues/states/projects, so by-name decoding
-/// would collide). Datetimes render in the request timezone
-/// (`TimezoneMixin`); `_rank` is `ts_rank`'s `real`.
+/// would collide). Datetimes render UTC with a `Z` suffix: the view
+/// copies raw `.values()` datetimes into a plain dict (`:2912-2914`)
+/// with no DRF `DateTimeField`, so `TimezoneMixin` has no effect and
+/// DRF's `JSONEncoder` emits `isoformat()` with `+00:00` rewritten to
+/// `Z`; `_rank` is `ts_rank`'s `real`.
 fn decode_advanced_row(
     row: &sqlx::postgres::PgRow,
-    tz: &Tz,
 ) -> Result<(AdvancedDecoded, i32, Option<f32>), Denial> {
     let id: Uuid = row.try_get(0).map_err(|_| Denial::ServerError)?;
     let sequence_id: i32 = row.try_get(1).map_err(|_| Denial::ServerError)?;
@@ -840,9 +812,9 @@ fn decode_advanced_row(
             id: id.to_string(),
             name,
             headline,
-            created_at: render_datetime_in(&created_at, tz),
-            updated_at: render_datetime_in(&updated_at, tz),
-            completed_at: completed_at.as_ref().map(|dt| render_datetime_in(dt, tz)),
+            created_at: render_datetime(&created_at),
+            updated_at: render_datetime(&updated_at),
+            completed_at: completed_at.as_ref().map(render_datetime),
             state_name,
             state_group,
             project_id: project_id.to_string(),
@@ -877,7 +849,9 @@ async fn search_advanced_inner(
     let pre = preamble(state, headers, slug).await?;
     // AuthOnly gate (see `search_inner`): the authenticated caller
     // reaches the handler body for any slug.
-    let tz = activate_timezone(pre.actor.timezone.as_deref())?;
+    // Timezone activation still gates unknown zones (400); the decoded
+    // datetimes render UTC (see `decode_advanced_row`).
+    let _tz = activate_timezone(pre.actor.timezone.as_deref())?;
     if q::parse_advanced_query(query_last(query, "q").as_deref()).is_none() {
         return Ok(json_response(
             StatusCode::OK,
@@ -892,7 +866,7 @@ async fn search_advanced_inner(
     );
     let mut rendered = Vec::with_capacity(rows.len());
     for row in &rows {
-        let (decoded, sequence_id, rank) = decode_advanced_row(row, &tz)?;
+        let (decoded, sequence_id, rank) = decode_advanced_row(row)?;
         let url = pidash_services::v1_work_items::shape_issue::issue_url(
             web_base.as_deref(),
             Some(&decoded.workspace_slug),
@@ -944,11 +918,6 @@ pub fn owned_move(
     owned(router, &["POST"])
 }
 
-/// Django's `DATA_UPLOAD_MAX_MEMORY_SIZE` (5 MiB,
-/// `settings/common.py:594`): past it the size middleware answers 413
-/// before the view runs.
-const MAX_BODY: usize = 5_242_880;
-
 /// Move body shape for the shared negotiator: a single scalar,
 /// last-value-wins; uploads are dropped (the view reads `request.data`
 /// only, and no contract body is multipart).
@@ -959,9 +928,11 @@ const MOVE_BODY_SPEC: shared_body::BodySpec = shared_body::BodySpec {
 
 /// `POST .../projects/<project_id>/work-items/<pk>/move/`
 /// (`views/issue.py:920-937`): the entity gate, the body read, the
-/// pre-save snapshot, the 650 move driver over the pool store, the
-/// post-commit cancel/drain, the explicit 594 fire, the two enqueues,
-/// then the refreshed issue in the S1 API read shape.
+/// pre-save snapshot, `domain::issues::move_to_project` inside a
+/// write transaction (the 650 kernel over the SeaORM move store,
+/// with the post-commit cancel/drain, the 594 fire, the completion
+/// comment and the enqueues folded into the commit chain), then the
+/// refreshed issue in the S1 API read shape.
 pub async fn post_move(
     State(state): State<AppState>,
     Path((slug, project_id, pk)): Path<(String, String, String)>,
@@ -973,11 +944,12 @@ pub async fn post_move(
     }
     let pk = pk.parse::<Uuid>().expect("checked segment");
     let (parts, body) = req.into_parts();
-    // The size middleware reads before the view, so 413 precedes auth —
-    // exactly as `RequestBodySizeLimitMiddleware` 413s before DRF runs.
-    let bytes = match axum::body::to_bytes(body, MAX_BODY).await {
+    // The serve-wide `BodyLimitLayer` already 413'd over-limit bodies
+    // before the view ran; the read below cannot re-cap. A mid-stream
+    // transport failure fails closed with the truncated-body 502.
+    let bytes = match read_request_bytes(body).await {
         Ok(bytes) => bytes,
-        Err(_) => return Denial::RequestTooLarge.into_response(),
+        Err(response) => return response,
     };
     match move_inner(&state, &parts, &bytes, &headers, &slug, &project_id, &pk).await {
         Ok(response) => response,
@@ -1011,7 +983,7 @@ async fn move_inner(
     .await?;
     // `TimezoneMixin.initial` runs after the gate: survivors with an
     // unknown stored zone 400 here (an empty zone 500s).
-    let tz = activate_timezone(pre.actor.timezone.as_deref())?;
+    activate_timezone(pre.actor.timezone.as_deref())?;
     // `request.data` parses lazily in the view — after auth, gate, and
     // timezone — so a denying gate answers before a malformed body 400s.
     let target_ref = read_move_target(&parts.headers, bytes)?;
@@ -1020,126 +992,59 @@ async fn move_inner(
         state.settings().urls.web_url.as_deref(),
         state.settings().urls.app_base_url.as_deref(),
     );
-    let now = Utc::now();
-    // The pre-save snapshot, before the move's own write.
-    let mut signal = MoveSignalSeam { pool: &pre.pool };
-    let prev = capture_prior_state(&mut signal, Some(*pk))
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    let store = PoolMoveStore::new(&pre.pool, SpanCreationDeps::from_state(state));
-    let outcome = match move_work_item_to_project(
-        &store,
+    let orm = state.orm().ok_or(Denial::ServerError)?;
+    let ctx = WriteCtx::new(WriteActor {
+        user_id: pre.actor.id,
+        timezone: pre.actor.timezone.clone(),
+    })
+    .with_scope(WriteScope {
+        workspace_id: Some(workspace_id),
+        project_id: Some(project_id),
+    });
+    let transition: Arc<dyn IssueTransitionHook> =
+        Arc::new(AppTransitionHook::new(state, &pre.pool));
+    let enqueue: Arc<dyn TaskEnqueueHook> = Arc::new(AppTaskEnqueueHook::new(&pre.pool));
+    let deps = operations::Deps {
+        pool: pre.pool.clone(),
+        orm: orm.clone(),
+        transition,
+        enqueue,
+    };
+    let span_deps = SpanCreationDeps::from_state(state);
+    let drain: Arc<dyn domain_issues::MovePostCommitHook> = Arc::new(AppMovePostCommitHook::new(
+        &pre.pool,
+        state,
+        span_deps.cache.clone(),
+    ));
+    let creation = domain_issues::CreationDeps {
+        pool: pre.pool.clone(),
+        cloud: span_deps.cloud.clone(),
+        managed: span_deps.managed.clone(),
+        now_unix_secs: span_deps.now_unix_secs,
+        toolsets: span_deps.toolsets.clone(),
+        assistant_seam: span_deps.assistant_seam.clone(),
+        admission: Arc::new(AppMoveAdmissionCache::new(span_deps.cache)),
+    };
+    let write = operations::issues::MoveWrite {
         slug,
         project_id,
-        *pk,
-        &target_ref,
-        pre.actor.id,
-        &origin,
-        web_base.as_deref(),
-        &now,
-    )
-    .await
-    {
-        Ok(outcome) => outcome,
-        Err(error) => {
-            store.abort().await;
-            return Err(map_move_error(error));
-        }
+        pk: *pk,
+        target_ref: &target_ref,
+        origin: Some(origin),
+        web_base,
     };
-    match outcome {
-        MoveResult::AlreadyThere(source) => {
-            // Same project: no writes at all, no signals, no enqueues —
-            // just the issue in the API read shape.
-            // Same-project rows carry no url parts (no refetch ran), so
-            // the serializer's lazy pair resolves here — FK-guaranteed.
-            let slug = store
-                .representation_workspace_slug(source.workspace_id)
-                .await
-                .map_err(|_| Denial::ServerError)?
-                .ok_or(Denial::ServerError)?;
-            let identifier = store
-                .representation_project_identifier(source.project_id)
-                .await
-                .map_err(|_| Denial::ServerError)?
-                .ok_or(Denial::ServerError)?;
-            let body = render_moved_issue_api(
-                &store,
-                &source,
-                &slug,
-                &identifier,
-                web_base.as_deref(),
-                &tz,
-            )
-            .await?;
-            Ok(json_response(StatusCode::OK, body))
-        }
-        MoveResult::Moved(moved) => {
-            // The creation registered its `on_commit` entries first
-            // (the dispatch precedes the cancel send and pod drains),
-            // so its outboxes drain before the move's own post-commit
-            // work. A drain failure is a 500 with the move standing.
-            if let Some(outboxes) = store.take_creation_outboxes().await {
-                let redis = redis_client(state);
-                let pubsub = MovePubsub {
-                    pool: &pre.pool,
-                    redis: redis.as_ref(),
-                    runner: &state.settings().runner,
-                };
-                drain_creation_outboxes(&pre.pool, state, outboxes, |pod_id| {
-                    drain_pod_by_id(&pre.pool, &pubsub, pod_id)
-                })
-                .await
-                .map_err(|error| {
-                    match error {
-                        CreationDrainError::Dispatch(db) => {
-                            tracing::warn!("move creation dispatch failed: {db}")
-                        }
-                        CreationDrainError::PodDrain(denial) => {
-                            tracing::warn!("move creation pod drain failed: {denial:?}")
-                        }
-                    }
-                    Denial::ServerError
-                })?;
-            }
-            run_post_commit(state, &pre.pool, &moved.post_commit).await?;
-            fire_after_move(
-                &pre.pool,
-                *pk,
-                prev,
-                moved.issue.row.state_id,
-                moved.dispatch_immediate,
-                Some(pre.actor.id),
-                now,
-            )
-            .await?;
-            for enqueue in &moved.enqueues {
-                let job = pidash_jobs::queue::NewJob::new(
-                    enqueue.task,
-                    Value::Array(enqueue.args.clone()),
-                    Value::Object(enqueue.kwargs.clone()),
-                );
-                // `.delay` past the commit: best-effort, the response
-                // stands on enqueue failure, as in Django (where the
-                // broker is up so `.delay` never raises here) and as in
-                // the D-26 twin (PIDASHCONV-793: serve-only envs have no
-                // `rust_job_queue` table, so a mapped 500 would fail an
-                // already-committed move).
-                if let Err(error) = pidash_jobs::queue::enqueue(&pre.pool, &job).await {
-                    tracing::warn!(%error, task = enqueue.task, "task enqueue failed; response stands");
-                }
-            }
-            let body = render_moved_issue_api(
-                &store,
-                &moved.issue.row,
-                &moved.issue.workspace_slug,
-                &moved.issue.project_identifier,
-                web_base.as_deref(),
-                &tz,
-            )
-            .await?;
-            Ok(json_response(StatusCode::OK, body))
-        }
-    }
+    // Exactly the Django behavior: the gate checked the source project
+    // up front (target-only guards), no `updated_by` stamp, handoff on.
+    let outcome = operations::issues::move_to_project(
+        &deps,
+        &ctx,
+        &write,
+        domain_issues::MoveOptions::django(),
+        drain,
+        creation,
+    )
+    .await?;
+    op_response(outcome)
 }
 
 /// The move's `target_ref` (`views/issue.py:920-924`): `request.data`
@@ -1246,1590 +1151,6 @@ async fn require_gate(
     } else {
         Err(Denial::Forbidden)
     }
-}
-
-/// Map the 650 driver's failures onto the view's responses: the
-/// recoverable `{"error"}` + status, the source-miss 404, the
-/// resolve-miss 404 `detail`, anything else the 500.
-fn map_move_error(error: MoveError) -> Denial {
-    match error {
-        MoveError::Issue(issue) => Denial::MoveRejection {
-            status: issue.status_code,
-            message: issue.message,
-        },
-        MoveError::IssueNotFound => Denial::NotFound,
-        MoveError::ProjectNotFound => Denial::ProjectNotFound,
-        MoveError::Store(_) => Denial::ServerError,
-    }
-}
-
-/// Run the driver's post-commit actions in order (the cancel first,
-/// then one drain per source pod): the cancel send is best-effort with
-/// logged warnings; a drain failure propagates (rows already
-/// committed — the delete-cmds precedent, mirroring `on_commit`
-/// raising past the commit).
-async fn run_post_commit(
-    state: &AppState,
-    pool: &PgPool,
-    actions: &[MovePostCommit],
-) -> Result<(), Denial> {
-    if actions.is_empty() {
-        return Ok(());
-    }
-    let redis = redis_client(state);
-    let pubsub = MovePubsub {
-        pool,
-        redis: redis.as_ref(),
-        runner: &state.settings().runner,
-    };
-    for action in actions {
-        match action {
-            MovePostCommit::SendCancel { runner_id, run_id } => {
-                let outcome = send_project_move_cancel(&pubsub, *runner_id, *run_id).await;
-                for warning in outcome.warnings {
-                    tracing::warn!("{warning}");
-                }
-            }
-            MovePostCommit::DrainPod { pod_id } => {
-                drain_pod_by_id(pool, &pubsub, *pod_id).await?;
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Api-crate-owned Redis client (the delete-cmds precedent): `None`
-/// when `REDIS_URL` is unset, empty, or unparsable, mirroring
-/// `redis_instance()` returning `None`.
-fn redis_client(state: &AppState) -> Option<redis::Client> {
-    state
-        .settings()
-        .redis
-        .url
-        .as_deref()
-        .filter(|url| !url.is_empty())
-        .and_then(|url| pidash_db::redis::open_client(url).ok())
-}
-
-/// Fire the state-transition handler after the move's save: the state
-/// always changes here, `dispatch_immediate` is false exactly when
-/// handoff runs exist, `moved_by_run` stays `None`. A handler failure
-/// answers `Failed` with the verbatim log line — the move stands.
-async fn fire_after_move(
-    pool: &PgPool,
-    issue_id: Uuid,
-    prev_state_id: Option<Uuid>,
-    current_state_id: Option<Uuid>,
-    dispatch_immediate: bool,
-    created_by: Option<Uuid>,
-    now: DateTime<Utc>,
-) -> Result<(), Denial> {
-    let mut seam = MoveSignalSeam { pool };
-    let mut preflight = MovePreflight;
-    let outcome = fire_state_transition(
-        &mut seam,
-        &mut preflight,
-        &FireRequest {
-            issue_id,
-            prev_state_id,
-            current_state_id,
-            dispatch_immediate,
-            moved_by_run: None,
-            now,
-            jitter_secs: 0.0,
-            created_by,
-        },
-    )
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    if let FireOutcome::Failed { log_line, .. } = outcome {
-        tracing::error!("{log_line}");
-    }
-    Ok(())
-}
-
-/// The move's 200 body: `IssueSerializer(issue).data` (`views/issue.py:937`)
-/// over the refreshed (or same-project) issue — a bare instance, so no
-/// `fields`/`expand` context and no relations viewer (the `relations`
-/// block omits), while the blocker summary always queries
-/// (`serializers/issue.py:436-493`).
-async fn render_moved_issue_api(
-    store: &PoolMoveStore<'_>,
-    issue: &SourceIssueRow,
-    workspace_slug: &str,
-    project_identifier: &str,
-    web_base: Option<&str>,
-    tz: &Tz,
-) -> Result<String, Denial> {
-    // Serializer read order (`to_representation`): assignees, labels,
-    // then the blocker summary (blocked_by, blocking, has_open) — the
-    // same seam reads the driver used pre-move, now past the commit.
-    let assignee_ids: Vec<String> = store
-        .representation_assignee_ids(issue.id)
-        .await
-        .map_err(|_| Denial::ServerError)?
-        .iter()
-        .map(Uuid::to_string)
-        .collect();
-    let label_ids: Vec<String> = store
-        .representation_label_ids(issue.id)
-        .await
-        .map_err(|_| Denial::ServerError)?
-        .iter()
-        .map(Uuid::to_string)
-        .collect();
-    let blocked_by = store
-        .representation_blocked_by(issue.id)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    let blocking = store
-        .representation_blocking(issue.id)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    let has_open_blockers = store
-        .representation_has_open_blockers(issue.id)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    let blocked_by_items: Vec<SummaryItem> = blocked_by.iter().map(summary_item).collect();
-    let blocking_items: Vec<SummaryItem> = blocking.iter().map(summary_item).collect();
-    let blockers = BlockerSummary {
-        blocked_by: blocked_by_items,
-        blocking: blocking_items,
-        has_open_blockers,
-    };
-
-    let id = issue.id.to_string();
-    let created_at = render_datetime_in(&issue.created_at, tz);
-    let updated_at = render_datetime_in(&issue.updated_at, tz);
-    let deleted_at = issue
-        .deleted_at
-        .as_ref()
-        .map(|dt| render_datetime_in(dt, tz));
-    let completed_at = issue
-        .completed_at
-        .as_ref()
-        .map(|dt| render_datetime_in(dt, tz));
-    let archived_at = issue
-        .archived_at
-        .as_ref()
-        .map(|dt| dt.date_naive().to_string());
-    let start_date = issue.start_date.as_ref().map(ToString::to_string);
-    let target_date = issue.target_date.as_ref().map(ToString::to_string);
-    let project = issue.project_id.to_string();
-    let workspace = issue.workspace_id.to_string();
-    let parent = issue.parent_id.map(|id| id.to_string());
-    let state = issue.state_id.map(|id| id.to_string());
-    let estimate_point = issue.estimate_point_id.map(|id| id.to_string());
-    let assigned_pod = issue.assigned_pod_id.map(|id| id.to_string());
-    let created_by = issue.created_by_id.map(|id| id.to_string());
-    let updated_by = issue.updated_by_id.map(|id| id.to_string());
-    let url = pidash_services::v1_work_items::shape_issue::issue_url(
-        web_base,
-        Some(workspace_slug),
-        Some(project_identifier),
-        Some(issue.sequence_id),
-    );
-    let assignee_refs: Vec<&str> = assignee_ids.iter().map(String::as_str).collect();
-    let label_refs: Vec<&str> = label_ids.iter().map(String::as_str).collect();
-    let row = ApiIssueRow {
-        id: &id,
-        type_id: issue.type_id.as_deref(),
-        url,
-        created_at: &created_at,
-        updated_at: &updated_at,
-        deleted_at: deleted_at.as_deref(),
-        point: issue.point,
-        name: &issue.name,
-        description_html: &issue.description_html,
-        description_binary: issue.description_binary.as_deref(),
-        priority: &issue.priority,
-        complexity_score: issue.complexity_score,
-        start_date: start_date.as_deref(),
-        target_date: target_date.as_deref(),
-        sequence_id: issue.sequence_id,
-        sort_order: issue.sort_order,
-        completed_at: completed_at.as_deref(),
-        archived_at: archived_at.as_deref(),
-        is_draft: issue.is_draft,
-        external_source: issue.external_source.as_deref(),
-        external_id: issue.external_id.as_deref(),
-        git_work_branch: &issue.git_work_branch,
-        created_via: issue.created_via.as_deref(),
-        agent_executor: issue.agent_executor.as_deref(),
-        created_by: created_by.as_deref(),
-        updated_by: updated_by.as_deref(),
-        project: &project,
-        workspace: &workspace,
-        parent: parent.as_deref(),
-        state: state.as_deref(),
-        estimate_point: estimate_point.as_deref(),
-        assigned_pod: assigned_pod.as_deref(),
-    };
-    let input = RepresentationInput {
-        row: &row,
-        fields: None,
-        expand: &[],
-        is_list: false,
-        assignee_ids: assignee_refs.as_slice(),
-        assignee_rows: &[],
-        label_ids: label_refs.as_slice(),
-        expanded_labels: &[],
-        blockers: Some(&blockers),
-        relations: None,
-        expansions: &[],
-    };
-    // The binary/NaN arms reproduce Django 500s; the `Missing*` arms are
-    // unreachable (blockers supplied, no fields filter).
-    let view = pidash_services::v1_work_items::shape_issue::render_issue(&input)
-        .map_err(|_| Denial::ServerError)?;
-    serde_json::to_string(&view).map_err(|_| Denial::ServerError)
-}
-
-/// One `relations_summary` item (`orchestration/blockers.py:184-198`):
-/// `{identifier, state, state_group}` — the composed `PROJ-42`
-/// identifier, never the bare sequence.
-fn summary_item(row: &BlockerRow) -> SummaryItem<'_> {
-    SummaryItem {
-        identifier: format!("{}-{}", row.project_identifier, row.sequence_id),
-        state: row.state_name.as_deref(),
-        state_group: row.state_group.as_deref(),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Pool `MoveStore`
-// ---------------------------------------------------------------------------
-
-/// The 650 [`MoveStore`] over the pool: guard reads run on pool
-/// checkouts, the `:173-373` span runs on one held transaction
-/// (`BEGIN` at [`MoveStore::lock_source_issue`], `COMMIT` at
-/// [`MoveStore::moved_issue`], `ROLLBACK` via [`PoolMoveStore::abort`]
-/// on any driver error), and every statement is the 650 SQL text
-/// executed verbatim.
-///
-/// The span is a [`DbTransaction`], borrowed from the pool, so
-/// [`MoveStore::create_handoff_run`] can lend it to the D-12 creation
-/// seam in-span; the creation outboxes wait on the store for the
-/// handler's post-commit drain.
-///
-/// The mutex only bridges `&self` to the held transaction — the store
-/// is per-request, so it is never contended. It is a tokio mutex so
-/// the guard stays `Send` across awaits (a std guard would poison the
-/// handler future's `Send` bound).
-struct PoolMoveStore<'p> {
-    pool: &'p PgPool,
-    txn: Mutex<Option<DbTransaction<'p>>>,
-    creation_deps: SpanCreationDeps,
-    creation: Mutex<Option<CreationOutboxes>>,
-}
-
-impl<'p> PoolMoveStore<'p> {
-    fn new(pool: &'p PgPool, creation_deps: SpanCreationDeps) -> Self {
-        Self {
-            pool,
-            txn: Mutex::new(None),
-            creation_deps,
-            creation: Mutex::new(None),
-        }
-    }
-
-    /// Take the creation outboxes for the post-commit drain (`None`
-    /// when the move created no handoff run — every pre-seam path).
-    async fn take_creation_outboxes(&self) -> Option<CreationOutboxes> {
-        self.creation.lock().await.take()
-    }
-
-    /// Roll back the span when the driver failed (Django's
-    /// `transaction.atomic` exit on raise). A no-op when no span is
-    /// open (pre-span failures).
-    async fn abort(&self) {
-        let tx = self.txn.lock().await.take();
-        if let Some(tx) = tx {
-            if let Err(error) = tx.rollback().await {
-                tracing::warn!(%error, "move store: rollback failed");
-            }
-        }
-    }
-
-    /// Open the span: hold one transaction on the pool.
-    async fn begin_span(&self) -> Result<(), pidash_services::app_issues::issue_move::StoreError> {
-        use pidash_services::app_issues::issue_move::StoreError;
-        let tx = DbTransaction::begin(self.pool)
-            .await
-            .map_err(|error| StoreError(error.to_string()))?;
-        self.txn.lock().await.replace(tx);
-        Ok(())
-    }
-
-    /// Close the span: `COMMIT` and release the connection.
-    async fn commit_span(&self) -> Result<(), pidash_services::app_issues::issue_move::StoreError> {
-        use pidash_services::app_issues::issue_move::StoreError;
-        let tx = self
-            .txn
-            .lock()
-            .await
-            .take()
-            .ok_or_else(|| StoreError("move store: commit without a span".to_owned()))?;
-        tx.commit()
-            .await
-            .map_err(|error| StoreError(error.to_string()))?;
-        Ok(())
-    }
-}
-
-fn store_error(
-    error: impl std::fmt::Display,
-) -> pidash_services::app_issues::issue_move::StoreError {
-    pidash_services::app_issues::issue_move::StoreError(error.to_string())
-}
-
-/// Map one `SOURCE_ISSUE_SQL` / `SOURCE_ISSUE_LOCK_SQL` /
-/// `MOVED_ISSUE_REFETCH_SQL` row. The int4 columns (`point`,
-/// `complexity_score`, `sequence_id`) widen to the driver's i64s;
-/// `type_id` stringifies (the 650 row carries the hyphenated form);
-/// the `archived_at` date widens to midnight UTC (the 650 row types it
-/// a datetime; the move's SQL filters it NULL in every one of these
-/// reads, so the widening only ever sees `None`).
-fn map_source_row(
-    row: &sqlx::postgres::PgRow,
-) -> Result<SourceIssueRow, pidash_services::app_issues::issue_move::StoreError> {
-    use pidash_services::app_issues::issue_move::StoreError;
-    let fail = |error: sqlx::Error| StoreError(error.to_string());
-    let point: Option<i32> = row.try_get("point").map_err(fail)?;
-    let complexity_score: i32 = row.try_get("complexity_score").map_err(fail)?;
-    let sequence_id: i32 = row.try_get("sequence_id").map_err(fail)?;
-    let type_id: Option<Uuid> = row.try_get("type_id").map_err(fail)?;
-    let archived_at: Option<chrono::NaiveDate> = row.try_get("archived_at").map_err(fail)?;
-    let archived_at = archived_at
-        .and_then(|date| date.and_hms_opt(0, 0, 0))
-        .map(|naive| naive.and_utc());
-    Ok(SourceIssueRow {
-        id: row.try_get("id").map_err(fail)?,
-        project_id: row.try_get("project_id").map_err(fail)?,
-        workspace_id: row.try_get("workspace_id").map_err(fail)?,
-        state_id: row.try_get("state_id").map_err(fail)?,
-        parent_id: row.try_get("parent_id").map_err(fail)?,
-        estimate_point_id: row.try_get("estimate_point_id").map_err(fail)?,
-        assigned_pod_id: row.try_get("assigned_pod_id").map_err(fail)?,
-        type_id: type_id.map(|id| id.to_string()),
-        created_at: row.try_get("created_at").map_err(fail)?,
-        updated_at: row.try_get("updated_at").map_err(fail)?,
-        deleted_at: row.try_get("deleted_at").map_err(fail)?,
-        point: point.map(i64::from),
-        name: row.try_get("name").map_err(fail)?,
-        description_html: row.try_get("description_html").map_err(fail)?,
-        description_binary: row.try_get("description_binary").map_err(fail)?,
-        priority: row.try_get("priority").map_err(fail)?,
-        complexity_score: i64::from(complexity_score),
-        start_date: row.try_get("start_date").map_err(fail)?,
-        target_date: row.try_get("target_date").map_err(fail)?,
-        sequence_id: i64::from(sequence_id),
-        sort_order: row.try_get("sort_order").map_err(fail)?,
-        completed_at: row.try_get("completed_at").map_err(fail)?,
-        archived_at,
-        is_draft: row.try_get("is_draft").map_err(fail)?,
-        external_source: row.try_get("external_source").map_err(fail)?,
-        external_id: row.try_get("external_id").map_err(fail)?,
-        git_work_branch: row.try_get("git_work_branch").map_err(fail)?,
-        created_via: row.try_get("created_via").map_err(fail)?,
-        agent_executor: row.try_get("agent_executor").map_err(fail)?,
-        created_by_id: row.try_get("created_by_id").map_err(fail)?,
-        updated_by_id: row.try_get("updated_by_id").map_err(fail)?,
-    })
-}
-
-/// Map one `HANDOFF_RUNS_LOCK_SQL` row. An unknown stored `status`
-/// is a store failure (loud 500, never a silent coercion); `trigger`
-/// crosses verbatim — `agent_run.trigger` is a plain varchar and
-/// migration 0029 keeps `blocker_completed` rows readable as an
-/// unknown trigger (the 731 tolerance: unknown is neither human nor
-/// automatic).
-fn map_handoff_row(
-    row: &sqlx::postgres::PgRow,
-) -> Result<HandoffRunRow, pidash_services::app_issues::issue_move::StoreError> {
-    use pidash_services::app_issues::issue_move::StoreError;
-    let fail = |error: sqlx::Error| StoreError(error.to_string());
-    let status: String = row.try_get("status").map_err(fail)?;
-    let status = AgentRunStatus::from_value(&status)
-        .ok_or_else(|| StoreError(format!("move store: unknown agent_run.status {status:?}")))?;
-    let trigger: String = row.try_get("trigger").map_err(fail)?;
-    let run_config: Option<Value> = row.try_get("run_config").map_err(fail)?;
-    Ok(HandoffRunRow {
-        id: row.try_get("id").map_err(fail)?,
-        status,
-        runner_id: row.try_get("runner_id").map_err(fail)?,
-        pod_id: row.try_get("pod_id").map_err(fail)?,
-        created_by_id: row.try_get("created_by_id").map_err(fail)?,
-        run_config: run_config.unwrap_or(Value::Null),
-        trigger,
-    })
-}
-
-/// Map one `blockers::summary_sql` row.
-fn map_blocker_row(
-    row: &sqlx::postgres::PgRow,
-) -> Result<BlockerRow, pidash_services::app_issues::issue_move::StoreError> {
-    use pidash_services::app_issues::issue_move::StoreError;
-    let fail = |error: sqlx::Error| StoreError(error.to_string());
-    Ok(BlockerRow {
-        issue_id: row.try_get("id").map_err(fail)?,
-        sequence_id: row.try_get("sequence_id").map_err(fail)?,
-        project_identifier: row.try_get("identifier").map_err(fail)?,
-        state_name: row.try_get("name").map_err(fail)?,
-        state_group: row.try_get("group").map_err(fail)?,
-    })
-}
-
-/// Replace the `:issue_id` anchor placeholder the blocker builders emit
-/// with the caller's `$1` bind.
-fn issue_param(sql: String) -> String {
-    sql.replace(":issue_id", "$1")
-}
-
-#[allow(async_fn_in_trait)]
-impl MoveStore for PoolMoveStore<'_> {
-    async fn source_issue(
-        &self,
-        slug: &str,
-        project_id: Uuid,
-        pk: Uuid,
-    ) -> Result<Option<SourceIssueRow>, pidash_services::app_issues::issue_move::StoreError> {
-        let row: Option<sqlx::postgres::PgRow> = sqlx::query(SOURCE_ISSUE_SQL)
-            .bind(slug)
-            .bind(project_id)
-            .bind(pk)
-            .fetch_optional(self.pool)
-            .await
-            .map_err(store_error)?;
-        row.map(|row| map_source_row(&row)).transpose()
-    }
-
-    async fn resolve_project(
-        &self,
-        slug: &str,
-        lookup: &ProjectLookup,
-    ) -> Result<Option<ProjectRow>, pidash_services::app_issues::issue_move::StoreError> {
-        let row: Option<(Uuid, Uuid, String)> = match lookup {
-            ProjectLookup::Pk(id) => sqlx::query_as(PROJECT_RESOLVE_BY_PK_SQL)
-                .bind(id)
-                .bind(slug)
-                .fetch_optional(self.pool)
-                .await
-                .map_err(store_error)?,
-            ProjectLookup::Identifier(identifier) => {
-                sqlx::query_as(PROJECT_RESOLVE_BY_IDENTIFIER_SQL)
-                    .bind(identifier)
-                    .bind(slug)
-                    .fetch_optional(self.pool)
-                    .await
-                    .map_err(store_error)?
-            }
-        };
-        Ok(row.map(|(id, workspace_id, identifier)| ProjectRow {
-            id,
-            workspace_id,
-            identifier,
-        }))
-    }
-
-    async fn can_move_into_target(
-        &self,
-        slug: &str,
-        target_project_id: Uuid,
-        actor_id: Uuid,
-    ) -> Result<bool, pidash_services::app_issues::issue_move::StoreError> {
-        let hit: Option<(i32,)> = sqlx::query_as(MEMBER_EXISTS_SQL)
-            .bind(slug)
-            .bind(target_project_id)
-            .bind(actor_id)
-            .fetch_optional(self.pool)
-            .await
-            .map_err(store_error)?;
-        Ok(hit.is_some())
-    }
-
-    async fn representation_workspace_slug(
-        &self,
-        workspace_id: Uuid,
-    ) -> Result<Option<String>, pidash_services::app_issues::issue_move::StoreError> {
-        let row: Option<(String,)> = sqlx::query_as(WORKSPACE_SLUG_SQL)
-            .bind(workspace_id)
-            .fetch_optional(self.pool)
-            .await
-            .map_err(store_error)?;
-        Ok(row.map(|row| row.0))
-    }
-
-    async fn representation_project_identifier(
-        &self,
-        project_id: Uuid,
-    ) -> Result<Option<String>, pidash_services::app_issues::issue_move::StoreError> {
-        let row: Option<(String,)> = sqlx::query_as(PROJECT_IDENTIFIER_SQL)
-            .bind(project_id)
-            .fetch_optional(self.pool)
-            .await
-            .map_err(store_error)?;
-        Ok(row.map(|row| row.0))
-    }
-
-    async fn representation_assignee_ids(
-        &self,
-        issue_id: Uuid,
-    ) -> Result<Vec<Uuid>, pidash_services::app_issues::issue_move::StoreError> {
-        let rows: Vec<(Uuid,)> = sqlx::query_as(ASSIGNEE_IDS_SQL)
-            .bind(issue_id)
-            .fetch_all(self.pool)
-            .await
-            .map_err(store_error)?;
-        Ok(rows.into_iter().map(|row| row.0).collect())
-    }
-
-    async fn representation_label_ids(
-        &self,
-        issue_id: Uuid,
-    ) -> Result<Vec<Uuid>, pidash_services::app_issues::issue_move::StoreError> {
-        let rows: Vec<(Uuid,)> = sqlx::query_as(LABEL_IDS_SQL)
-            .bind(issue_id)
-            .fetch_all(self.pool)
-            .await
-            .map_err(store_error)?;
-        Ok(rows.into_iter().map(|row| row.0).collect())
-    }
-
-    async fn representation_blocked_by(
-        &self,
-        issue_id: Uuid,
-    ) -> Result<Vec<BlockerRow>, pidash_services::app_issues::issue_move::StoreError> {
-        let rows = sqlx::query(&issue_param(summary_sql(false)))
-            .bind(issue_id)
-            .fetch_all(self.pool)
-            .await
-            .map_err(store_error)?;
-        rows.iter().map(map_blocker_row).collect()
-    }
-
-    async fn representation_blocking(
-        &self,
-        issue_id: Uuid,
-    ) -> Result<Vec<BlockerRow>, pidash_services::app_issues::issue_move::StoreError> {
-        let rows = sqlx::query(&issue_param(summary_sql(true)))
-            .bind(issue_id)
-            .fetch_all(self.pool)
-            .await
-            .map_err(store_error)?;
-        rows.iter().map(map_blocker_row).collect()
-    }
-
-    async fn representation_has_open_blockers(
-        &self,
-        issue_id: Uuid,
-    ) -> Result<bool, pidash_services::app_issues::issue_move::StoreError> {
-        let hit: Option<(i32,)> = sqlx::query_as(&issue_param(has_open_blockers_sql()))
-            .bind(issue_id)
-            .fetch_optional(self.pool)
-            .await
-            .map_err(store_error)?;
-        Ok(hit.is_some())
-    }
-
-    async fn target_default_state(
-        &self,
-        target_project_id: Uuid,
-    ) -> Result<Option<StateRow>, pidash_services::app_issues::issue_move::StoreError> {
-        let row: Option<(Uuid,)> = sqlx::query_as(CREATE_SAVE_DEFAULT_STATE_SQL)
-            .bind(target_project_id)
-            .fetch_optional(self.pool)
-            .await
-            .map_err(store_error)?;
-        Ok(row.map(|row| StateRow { id: row.0 }))
-    }
-
-    async fn target_fallback_state(
-        &self,
-        target_project_id: Uuid,
-    ) -> Result<Option<StateRow>, pidash_services::app_issues::issue_move::StoreError> {
-        let row: Option<(Uuid,)> = sqlx::query_as(CREATE_SAVE_FALLBACK_STATE_SQL)
-            .bind(target_project_id)
-            .fetch_optional(self.pool)
-            .await
-            .map_err(store_error)?;
-        Ok(row.map(|row| StateRow { id: row.0 }))
-    }
-
-    async fn lock_source_issue(
-        &self,
-        slug: &str,
-        project_id: Uuid,
-        pk: Uuid,
-    ) -> Result<Option<SourceIssueRow>, pidash_services::app_issues::issue_move::StoreError> {
-        use pidash_services::app_issues::issue_move::StoreError;
-        self.begin_span().await?;
-        let mut guard = self.txn.lock().await;
-        let conn = guard
-            .as_mut()
-            .ok_or_else(|| StoreError("move store: span lost".to_owned()))?;
-        let row: Option<sqlx::postgres::PgRow> = sqlx::query(SOURCE_ISSUE_LOCK_SQL)
-            .bind(slug)
-            .bind(project_id)
-            .bind(pk)
-            .fetch_optional(&mut **conn.inner())
-            .await
-            .map_err(|error| StoreError(error.to_string()))?;
-        row.map(|row| map_source_row(&row)).transpose()
-    }
-
-    async fn advisory_lock_project(
-        &self,
-        lock_key: i64,
-    ) -> Result<(), pidash_services::app_issues::issue_move::StoreError> {
-        use pidash_services::app_issues::issue_move::StoreError;
-        let mut guard = self.txn.lock().await;
-        let conn = guard
-            .as_mut()
-            .ok_or_else(|| StoreError("move store: advisory lock outside a span".to_owned()))?;
-        sqlx::query(CREATE_ADVISORY_LOCK_SQL)
-            .bind(lock_key)
-            .execute(&mut **conn.inner())
-            .await
-            .map(|_| ())
-            .map_err(|error| StoreError(error.to_string()))
-    }
-
-    async fn lock_handoff_runs(
-        &self,
-        issue_id: Uuid,
-    ) -> Result<Vec<HandoffRunRow>, pidash_services::app_issues::issue_move::StoreError> {
-        use pidash_services::app_issues::issue_move::StoreError;
-        let mut guard = self.txn.lock().await;
-        let conn = guard
-            .as_mut()
-            .ok_or_else(|| StoreError("move store: handoff lock outside a span".to_owned()))?;
-        let rows = sqlx::query(HANDOFF_RUNS_LOCK_SQL)
-            .bind(issue_id)
-            .fetch_all(&mut **conn.inner())
-            .await
-            .map_err(|error| StoreError(error.to_string()))?;
-        rows.iter().map(map_handoff_row).collect()
-    }
-
-    async fn max_target_sequence(
-        &self,
-        target_project_id: Uuid,
-    ) -> Result<Option<i64>, pidash_services::app_issues::issue_move::StoreError> {
-        use pidash_services::app_issues::issue_move::StoreError;
-        let mut guard = self.txn.lock().await;
-        let conn = guard
-            .as_mut()
-            .ok_or_else(|| StoreError("move store: sequence scan outside a span".to_owned()))?;
-        let row: Option<(Option<i64>,)> = sqlx::query_as(CREATE_SEQ_SCAN_SQL)
-            .bind(target_project_id)
-            .fetch_optional(&mut **conn.inner())
-            .await
-            .map_err(|error| StoreError(error.to_string()))?;
-        Ok(row.and_then(|row| row.0))
-    }
-
-    async fn target_default_pod(
-        &self,
-        target_project_id: Uuid,
-    ) -> Result<Option<PodRow>, pidash_services::app_issues::issue_move::StoreError> {
-        use pidash_services::app_issues::issue_move::StoreError;
-        let mut guard = self.txn.lock().await;
-        let conn = guard
-            .as_mut()
-            .ok_or_else(|| StoreError("move store: pod lookup outside a span".to_owned()))?;
-        let row: Option<sqlx::postgres::PgRow> = sqlx::query(DEFAULT_FOR_PROJECT_ID_SQL)
-            .bind(target_project_id)
-            .fetch_optional(&mut **conn.inner())
-            .await
-            .map_err(|error| StoreError(error.to_string()))?;
-        row.map(|row| {
-            row.try_get("id")
-                .map(|id| PodRow { id })
-                .map_err(|error| StoreError(error.to_string()))
-        })
-        .transpose()
-    }
-
-    async fn save_moved_issue(
-        &self,
-        issue_id: Uuid,
-        fields: &MovedIssueFields,
-        now: &chrono::DateTime<chrono::Utc>,
-    ) -> Result<(), pidash_services::app_issues::issue_move::StoreError> {
-        use pidash_services::app_issues::issue_move::StoreError;
-        let sequence = i32::try_from(fields.sequence_id)
-            .map_err(|_| StoreError("move store: sequence_id overflows int4".to_owned()))?;
-        let mut guard = self.txn.lock().await;
-        let conn = guard
-            .as_mut()
-            .ok_or_else(|| StoreError("move store: save outside a span".to_owned()))?;
-        sqlx::query(ISSUE_MOVE_UPDATE_SQL)
-            .bind(fields.project_id)
-            .bind(fields.workspace_id)
-            .bind(sequence)
-            .bind(fields.state_id)
-            .bind(fields.assigned_pod_id)
-            .bind(None::<Uuid>)
-            .bind(None::<Uuid>)
-            .bind(None::<Uuid>)
-            .bind(now)
-            .bind(issue_id)
-            .execute(&mut **conn.inner())
-            .await
-            .map(|_| ())
-            .map_err(|error| StoreError(error.to_string()))
-    }
-
-    async fn cancel_inert_run(
-        &self,
-        run_id: Uuid,
-        now: &chrono::DateTime<chrono::Utc>,
-    ) -> Result<(), pidash_services::app_issues::issue_move::StoreError> {
-        use pidash_services::app_issues::issue_move::StoreError;
-        let mut guard = self.txn.lock().await;
-        let conn = guard
-            .as_mut()
-            .ok_or_else(|| StoreError("move store: inert cancel outside a span".to_owned()))?;
-        sqlx::query(INERT_RUN_UPDATE_SQL)
-            .bind(run_id)
-            .bind(now)
-            .execute(&mut **conn.inner())
-            .await
-            .map(|_| ())
-            .map_err(|error| StoreError(error.to_string()))
-    }
-
-    async fn mark_handoff_parent(
-        &self,
-        run_id: Uuid,
-        run_config: &Value,
-    ) -> Result<(), pidash_services::app_issues::issue_move::StoreError> {
-        use pidash_services::app_issues::issue_move::StoreError;
-        let mut guard = self.txn.lock().await;
-        let conn = guard
-            .as_mut()
-            .ok_or_else(|| StoreError("move store: handoff mark outside a span".to_owned()))?;
-        sqlx::query(HANDOFF_PARENT_UPDATE_SQL)
-            .bind(run_id)
-            .bind(run_config)
-            .execute(&mut **conn.inner())
-            .await
-            .map(|_| ())
-            .map_err(|error| StoreError(error.to_string()))
-    }
-
-    async fn detach_old_sequences(
-        &self,
-        issue_id: Uuid,
-        target_project_id: Uuid,
-    ) -> Result<u64, pidash_services::app_issues::issue_move::StoreError> {
-        use pidash_services::app_issues::issue_move::StoreError;
-        let mut guard = self.txn.lock().await;
-        let conn = guard
-            .as_mut()
-            .ok_or_else(|| StoreError("move store: sequence detach outside a span".to_owned()))?;
-        sqlx::query(SEQUENCE_DETACH_SQL)
-            .bind(issue_id)
-            .bind(target_project_id)
-            .execute(&mut **conn.inner())
-            .await
-            .map(|done| done.rows_affected())
-            .map_err(|error| StoreError(error.to_string()))
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn create_target_sequence(
-        &self,
-        sequence_id: Uuid,
-        issue_id: Uuid,
-        sequence: i64,
-        target_project_id: Uuid,
-        target_workspace_id: Uuid,
-        now: &chrono::DateTime<chrono::Utc>,
-        actor_id: Uuid,
-    ) -> Result<(), pidash_services::app_issues::issue_move::StoreError> {
-        use pidash_services::app_issues::issue_move::StoreError;
-        let mut guard = self.txn.lock().await;
-        let conn = guard
-            .as_mut()
-            .ok_or_else(|| StoreError("move store: sequence create outside a span".to_owned()))?;
-        sqlx::query(SEQUENCE_CREATE_SQL)
-            .bind(sequence_id)
-            .bind(now)
-            .bind(now)
-            .bind(actor_id)
-            .bind(issue_id)
-            .bind(sequence)
-            .bind(target_project_id)
-            .bind(target_workspace_id)
-            .execute(&mut **conn.inner())
-            .await
-            .map(|_| ())
-            .map_err(|error| StoreError(error.to_string()))
-    }
-
-    async fn prune_assignees(
-        &self,
-        issue_id: Uuid,
-        target_project_id: Uuid,
-        now: &chrono::DateTime<chrono::Utc>,
-    ) -> Result<u64, pidash_services::app_issues::issue_move::StoreError> {
-        use pidash_services::app_issues::issue_move::StoreError;
-        let mut guard = self.txn.lock().await;
-        let conn = guard
-            .as_mut()
-            .ok_or_else(|| StoreError("move store: assignee prune outside a span".to_owned()))?;
-        sqlx::query(ASSIGNEE_PRUNE_SQL)
-            .bind(now)
-            .bind(issue_id)
-            .bind(target_project_id)
-            .execute(&mut **conn.inner())
-            .await
-            .map(|done| done.rows_affected())
-            .map_err(|error| StoreError(error.to_string()))
-    }
-
-    async fn repoint_assignees(
-        &self,
-        issue_id: Uuid,
-        target_project_id: Uuid,
-        target_workspace_id: Uuid,
-    ) -> Result<u64, pidash_services::app_issues::issue_move::StoreError> {
-        use pidash_services::app_issues::issue_move::StoreError;
-        let mut guard = self.txn.lock().await;
-        let conn = guard
-            .as_mut()
-            .ok_or_else(|| StoreError("move store: assignee repoint outside a span".to_owned()))?;
-        sqlx::query(ASSIGNEE_REPOINT_SQL)
-            .bind(target_project_id)
-            .bind(target_workspace_id)
-            .bind(issue_id)
-            .execute(&mut **conn.inner())
-            .await
-            .map(|done| done.rows_affected())
-            .map_err(|error| StoreError(error.to_string()))
-    }
-
-    async fn soft_delete_issue_labels(
-        &self,
-        issue_id: Uuid,
-        now: &chrono::DateTime<chrono::Utc>,
-    ) -> Result<u64, pidash_services::app_issues::issue_move::StoreError> {
-        use pidash_services::app_issues::issue_move::StoreError;
-        let mut guard = self.txn.lock().await;
-        let conn = guard
-            .as_mut()
-            .ok_or_else(|| StoreError("move store: label wipe outside a span".to_owned()))?;
-        sqlx::query(LABEL_DELETE_SQL)
-            .bind(now)
-            .bind(issue_id)
-            .execute(&mut **conn.inner())
-            .await
-            .map(|done| done.rows_affected())
-            .map_err(|error| StoreError(error.to_string()))
-    }
-
-    async fn soft_delete_cycle_issues(
-        &self,
-        issue_id: Uuid,
-        now: &chrono::DateTime<chrono::Utc>,
-    ) -> Result<u64, pidash_services::app_issues::issue_move::StoreError> {
-        use pidash_services::app_issues::issue_move::StoreError;
-        let mut guard = self.txn.lock().await;
-        let conn = guard
-            .as_mut()
-            .ok_or_else(|| StoreError("move store: cycle wipe outside a span".to_owned()))?;
-        sqlx::query(CYCLE_DELETE_SQL)
-            .bind(now)
-            .bind(issue_id)
-            .execute(&mut **conn.inner())
-            .await
-            .map(|done| done.rows_affected())
-            .map_err(|error| StoreError(error.to_string()))
-    }
-
-    async fn soft_delete_module_issues(
-        &self,
-        issue_id: Uuid,
-        now: &chrono::DateTime<chrono::Utc>,
-    ) -> Result<u64, pidash_services::app_issues::issue_move::StoreError> {
-        use pidash_services::app_issues::issue_move::StoreError;
-        let mut guard = self.txn.lock().await;
-        let conn = guard
-            .as_mut()
-            .ok_or_else(|| StoreError("move store: module wipe outside a span".to_owned()))?;
-        sqlx::query(MODULE_DELETE_SQL)
-            .bind(now)
-            .bind(issue_id)
-            .execute(&mut **conn.inner())
-            .await
-            .map(|done| done.rows_affected())
-            .map_err(|error| StoreError(error.to_string()))
-    }
-
-    async fn soft_delete_issue_relations(
-        &self,
-        issue_id: Uuid,
-        now: &chrono::DateTime<chrono::Utc>,
-    ) -> Result<u64, pidash_services::app_issues::issue_move::StoreError> {
-        use pidash_services::app_issues::issue_move::StoreError;
-        let mut guard = self.txn.lock().await;
-        let conn = guard
-            .as_mut()
-            .ok_or_else(|| StoreError("move store: relation wipe outside a span".to_owned()))?;
-        sqlx::query(RELATION_DELETE_SQL)
-            .bind(now)
-            .bind(issue_id)
-            .execute(&mut **conn.inner())
-            .await
-            .map(|done| done.rows_affected())
-            .map_err(|error| StoreError(error.to_string()))
-    }
-
-    async fn detach_children(
-        &self,
-        issue_id: Uuid,
-        target_project_id: Uuid,
-    ) -> Result<u64, pidash_services::app_issues::issue_move::StoreError> {
-        use pidash_services::app_issues::issue_move::StoreError;
-        let mut guard = self.txn.lock().await;
-        let conn = guard
-            .as_mut()
-            .ok_or_else(|| StoreError("move store: children detach outside a span".to_owned()))?;
-        sqlx::query(CHILDREN_DETACH_SQL)
-            .bind(issue_id)
-            .bind(target_project_id)
-            .execute(&mut **conn.inner())
-            .await
-            .map(|done| done.rows_affected())
-            .map_err(|error| StoreError(error.to_string()))
-    }
-
-    async fn moved_comment_ids(
-        &self,
-        issue_id: Uuid,
-    ) -> Result<Vec<Uuid>, pidash_services::app_issues::issue_move::StoreError> {
-        use pidash_services::app_issues::issue_move::StoreError;
-        let mut guard = self.txn.lock().await;
-        let conn = guard
-            .as_mut()
-            .ok_or_else(|| StoreError("move store: comment ids outside a span".to_owned()))?;
-        let rows: Vec<(Uuid,)> = sqlx::query_as(COMMENT_IDS_SQL)
-            .bind(issue_id)
-            .fetch_all(&mut **conn.inner())
-            .await
-            .map_err(|error| StoreError(error.to_string()))?;
-        Ok(rows.into_iter().map(|row| row.0).collect())
-    }
-
-    async fn moved_description_ids(
-        &self,
-        issue_id: Uuid,
-    ) -> Result<Vec<Uuid>, pidash_services::app_issues::issue_move::StoreError> {
-        use pidash_services::app_issues::issue_move::StoreError;
-        let mut guard = self.txn.lock().await;
-        let conn = guard
-            .as_mut()
-            .ok_or_else(|| StoreError("move store: description ids outside a span".to_owned()))?;
-        let rows: Vec<(Uuid,)> = sqlx::query_as(DESCRIPTION_IDS_SQL)
-            .bind(issue_id)
-            .fetch_all(&mut **conn.inner())
-            .await
-            .map_err(|error| StoreError(error.to_string()))?;
-        Ok(rows.into_iter().map(|row| row.0).collect())
-    }
-
-    async fn repoint_related(
-        &self,
-        target: RepointTarget,
-        issue_id: Uuid,
-        comment_ids: &[Uuid],
-        description_ids: &[Uuid],
-        target_project_id: Uuid,
-        target_workspace_id: Uuid,
-    ) -> Result<u64, pidash_services::app_issues::issue_move::StoreError> {
-        use pidash_services::app_issues::issue_move::StoreError;
-        let mut guard = self.txn.lock().await;
-        let conn = guard
-            .as_mut()
-            .ok_or_else(|| StoreError("move store: repoint outside a span".to_owned()))?;
-        let sql = repoint_sql(target);
-        let mut query = sqlx::query(sql)
-            .bind(target_project_id)
-            .bind(target_workspace_id)
-            .bind(issue_id);
-        query = match target {
-            RepointTarget::IssueActivity
-            | RepointTarget::CommentReaction
-            | RepointTarget::FileAsset => query.bind(comment_ids.to_vec()),
-            RepointTarget::Description => query.bind(description_ids.to_vec()),
-            _ => query,
-        };
-        query
-            .execute(&mut **conn.inner())
-            .await
-            .map(|done| done.rows_affected())
-            .map_err(|error| StoreError(error.to_string()))
-    }
-
-    async fn create_handoff_run(
-        &self,
-        issue_id: Uuid,
-        parent_run: &HandoffRunRow,
-        pod_id: Uuid,
-        now: &chrono::DateTime<chrono::Utc>,
-    ) -> Result<(), pidash_services::app_issues::issue_move::StoreError> {
-        use pidash_services::app_issues::issue_move::StoreError;
-        // Lend the span to the D-12 creation seam: the create must see
-        // the move's uncommitted writes (the moved issue, the cancelled
-        // parent, the repoints), exactly like Python's in-atomic call
-        // (`issue_move.py:353-362`).
-        let tx =
-            self.txn.lock().await.take().ok_or_else(|| {
-                StoreError("move store: handoff create outside a span".to_owned())
-            })?;
-        let mut creation = handoff_store(tx, self.pool, &self.creation_deps);
-        // The locked row is the parent's pre-cancel snapshot, and the
-        // `RunView` projection needs the full row: re-read it in-span,
-        // under the held lock. The cancel touched only
-        // status/ended_at/queue_position, so this is the row Python's
-        // mutated in-memory instance describes.
-        let parent = creation
-            .run(parent_run.id)
-            .await
-            .map_err(|error| StoreError(error.to_string()))?
-            .ok_or_else(|| {
-                StoreError(format!(
-                    "move store: handoff parent {} gone under its lock",
-                    parent_run.id
-                ))
-            })?;
-        let outcome = create_project_move_handoff_run(
-            &mut creation,
-            &HandoffCreateRequest {
-                issue_id,
-                parent,
-                pod_id,
-                now: *now,
-            },
-        )
-        .await;
-        // The span goes back on the store before any error return, so
-        // `abort` still rolls it back.
-        let (tx, outboxes) = split_outboxes(creation);
-        self.txn.lock().await.replace(tx);
-        let _created = outcome.map_err(|error| StoreError(error.to_string()))?;
-        self.creation.lock().await.replace(outboxes);
-        Ok(())
-    }
-
-    async fn moved_issue(
-        &self,
-        pk: Uuid,
-    ) -> Result<Option<MovedIssueRow>, pidash_services::app_issues::issue_move::StoreError> {
-        self.commit_span().await?;
-        let row: Option<sqlx::postgres::PgRow> = sqlx::query(MOVED_ISSUE_REFETCH_SQL)
-            .bind(pk)
-            .fetch_optional(self.pool)
-            .await
-            .map_err(store_error)?;
-        row.map(|row| {
-            let workspace_slug: String = row.try_get("slug").map_err(|error| {
-                pidash_services::app_issues::issue_move::StoreError(error.to_string())
-            })?;
-            let project_identifier: String = row.try_get("identifier").map_err(|error| {
-                pidash_services::app_issues::issue_move::StoreError(error.to_string())
-            })?;
-            Ok(MovedIssueRow {
-                row: map_source_row(&row)?,
-                workspace_slug,
-                project_identifier,
-            })
-        })
-        .transpose()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Move signal seam (594)
-// ---------------------------------------------------------------------------
-
-/// The 594 [`EntriesSeam`] for the move's save: `state` + `prior_state_id`
-/// are live (they cover the capture and the driver's non-trigger early
-/// return — every gate seed, the backlog norm); the ticker/creation
-/// surface answers store errors, which the fire swallows by design
-/// (counter + the verbatim log line) while the move stands. The archive
-/// handler's precedent, with the live lookups this path needs.
-struct MoveSignalSeam<'a> {
-    pool: &'a PgPool,
-}
-
-/// A creation-runtime method the move's fire reached past a ticking
-/// transition without the D-11/D-12 runtime. The fire maps it to
-/// `Failed` (logged); the move stands.
-fn move_seam_gap<T>(method: &str) -> Result<T, CreationError> {
-    Err(CreationError::Db(format!(
-        "move signal seam: {method} needs the D-12 creation runtime"
-    )))
-}
-
-impl CreationSeam for MoveSignalSeam<'_> {
-    async fn issue(&mut self, _issue_id: Uuid) -> Result<IssueView, CreationError> {
-        move_seam_gap("issue")
-    }
-
-    async fn project(&mut self, _project_id: Uuid) -> Result<ProjectView, CreationError> {
-        move_seam_gap("project")
-    }
-
-    async fn state(&mut self, state_id: Option<Uuid>) -> Result<Option<StateView>, CreationError> {
-        let Some(state_id) = state_id else {
-            return Ok(None);
-        };
-        let row: Option<(Uuid, String, String)> = sqlx::query_as(STATE_SELECT_SQL)
-            .bind(state_id)
-            .fetch_optional(self.pool)
-            .await
-            .map_err(|error| CreationError::Db(error.to_string()))?;
-        row.map(|(id, name, group)| StateView { id, name, group })
-            .ok_or_else(|| CreationError::MissingRow("state".to_owned()))
-            .map(Some)
-    }
-
-    async fn latest_prior_run(
-        &mut self,
-        _issue_id: Uuid,
-    ) -> Result<Option<RunView>, CreationError> {
-        move_seam_gap("latest_prior_run")
-    }
-
-    async fn active_run_for(&mut self, _issue_id: Uuid) -> Result<Option<RunView>, CreationError> {
-        move_seam_gap("active_run_for")
-    }
-
-    async fn run(&mut self, _run_id: Uuid) -> Result<Option<RunView>, CreationError> {
-        move_seam_gap("run")
-    }
-
-    async fn runner(&mut self, _runner_id: Uuid) -> Result<Option<RunnerView>, CreationError> {
-        move_seam_gap("runner")
-    }
-
-    async fn assigned_pod(&mut self, _pod_id: Uuid) -> Result<Option<PodView>, CreationError> {
-        move_seam_gap("assigned_pod")
-    }
-
-    async fn default_pod_for_project(
-        &mut self,
-        _project_id: Uuid,
-    ) -> Result<Option<PodView>, CreationError> {
-        move_seam_gap("default_pod_for_project")
-    }
-
-    async fn resume_parent_run_id(
-        &mut self,
-        _issue_id: Uuid,
-    ) -> Result<Option<Uuid>, CreationError> {
-        move_seam_gap("resume_parent_run_id")
-    }
-
-    async fn work_item_id_for_run(&mut self, _run_id: Uuid) -> Result<Option<Uuid>, CreationError> {
-        move_seam_gap("work_item_id_for_run")
-    }
-
-    async fn lock_issue_for_handoff(
-        &mut self,
-        _issue_id: Uuid,
-    ) -> Result<Option<LockedIssue>, CreationError> {
-        move_seam_gap("lock_issue_for_handoff")
-    }
-
-    async fn lock_run_for_handoff(
-        &mut self,
-        _run_id: Uuid,
-    ) -> Result<Option<RunView>, CreationError> {
-        move_seam_gap("lock_run_for_handoff")
-    }
-
-    async fn user_flags(&mut self, _user_id: Uuid) -> Result<UserFlags, CreationError> {
-        move_seam_gap("user_flags")
-    }
-
-    async fn insert_run(&mut self, _row: &NewAgentRun) -> Result<RunView, CreationError> {
-        move_seam_gap("insert_run")
-    }
-
-    async fn save_prompt(
-        &mut self,
-        _run_id: Uuid,
-        _prompt: &str,
-        _manifest: &Value,
-    ) -> Result<(), CreationError> {
-        move_seam_gap("save_prompt")
-    }
-
-    async fn save_run_config(
-        &mut self,
-        _run_id: Uuid,
-        _config: &Value,
-    ) -> Result<(), CreationError> {
-        move_seam_gap("save_run_config")
-    }
-
-    async fn execution_fields(
-        &mut self,
-        _req: &ExecutionRequest,
-    ) -> Result<ExecutionFields, ExecutionError> {
-        Err(ExecutionError::Store(CreationError::Db(
-            "move signal seam: execution_fields needs the D-12 creation runtime".to_owned(),
-        )))
-    }
-
-    async fn lock_cloud_creation_capacity(
-        &mut self,
-        _workspace_id: Uuid,
-        _executor_kind: AgentExecutorKind,
-        _automatic: bool,
-    ) -> Result<Option<AdmissionError>, CreationError> {
-        move_seam_gap("lock_cloud_creation_capacity")
-    }
-
-    fn dispatch_after_commit(&mut self, _run_id: Uuid) {}
-
-    async fn render_bundle(
-        &mut self,
-        _issue_id: Uuid,
-        _run_id: Uuid,
-        _parent_run_id: Option<Uuid>,
-        _trigger: &str,
-        _created_by_id: Uuid,
-    ) -> Result<RenderBundle, CreationError> {
-        move_seam_gap("render_bundle")
-    }
-
-    fn extra_toolsets_schema_tool(&self) -> String {
-        String::new()
-    }
-}
-
-impl FinalizeAgentRunSeam for MoveSignalSeam<'_> {
-    async fn finalize_failed_run(
-        &mut self,
-        _run_id: Uuid,
-        _error_code: &str,
-        _error: &str,
-        _now: DateTime<Utc>,
-    ) -> Result<RunView, CreationError> {
-        move_seam_gap("finalize_failed_run")
-    }
-}
-
-impl EntriesSeam for MoveSignalSeam<'_> {
-    async fn prior_state_id(&mut self, issue_id: Uuid) -> Result<Option<Uuid>, CreationError> {
-        let row: Option<(Uuid, Option<Uuid>)> = sqlx::query_as(PRIOR_STATE_SELECT_SQL)
-            .bind(issue_id)
-            .fetch_optional(self.pool)
-            .await
-            .map_err(|error| CreationError::Db(error.to_string()))?;
-        Ok(row.and_then(|(_, state_id)| state_id))
-    }
-
-    async fn queued_follow_up(
-        &mut self,
-        _issue_id: Uuid,
-    ) -> Result<Option<RunView>, CreationError> {
-        move_seam_gap("queued_follow_up")
-    }
-
-    async fn lock_ticker(
-        &mut self,
-        _issue_id: Uuid,
-    ) -> Result<Option<IssueAgentTicker>, CreationError> {
-        move_seam_gap("lock_ticker")
-    }
-
-    async fn save_ticker(
-        &mut self,
-        _row: &IssueAgentTicker,
-        _write: ClockWrite,
-    ) -> Result<(), CreationError> {
-        move_seam_gap("save_ticker")
-    }
-
-    fn set_rollback(&mut self) {}
-
-    async fn clock_policy(
-        &mut self,
-        _project_id: Uuid,
-    ) -> Result<ProjectClockPolicy, CreationError> {
-        move_seam_gap("clock_policy")
-    }
-
-    async fn binding(&mut self, _binding_id: Uuid) -> Result<BindingView, CreationError> {
-        move_seam_gap("binding")
-    }
-
-    async fn scheduler_override_pod(
-        &mut self,
-        _pod_id: Uuid,
-        _project_id: Option<Uuid>,
-    ) -> Result<Option<PodView>, CreationError> {
-        move_seam_gap("scheduler_override_pod")
-    }
-
-    async fn workspace(&mut self, _workspace_id: Uuid) -> Result<WorkspaceView, CreationError> {
-        move_seam_gap("workspace")
-    }
-
-    async fn scheduler_row(&mut self, _scheduler_id: Uuid) -> Result<SchedulerView, CreationError> {
-        move_seam_gap("scheduler_row")
-    }
-
-    async fn scheduler_override_rows(
-        &mut self,
-        _workspace_id: Uuid,
-    ) -> Result<Vec<OverrideRow>, CreationError> {
-        move_seam_gap("scheduler_override_rows")
-    }
-
-    async fn project_role_facts(
-        &mut self,
-        _user_id: Uuid,
-        _workspace_slug: &str,
-        _project_id: Uuid,
-    ) -> Result<ProjectRoleFacts, CreationError> {
-        move_seam_gap("project_role_facts")
-    }
-
-    async fn has_usable_llm_config(&mut self, _user_id: Uuid) -> Result<bool, CreationError> {
-        move_seam_gap("has_usable_llm_config")
-    }
-
-    async fn agent_system_user(
-        &mut self,
-    ) -> Result<Result<Uuid, AgentUserCollisionError>, CreationError> {
-        move_seam_gap("agent_system_user")
-    }
-
-    async fn insert_scheduler_run(
-        &mut self,
-        _row: &NewSchedulerRun,
-    ) -> Result<RunView, CreationError> {
-        move_seam_gap("insert_scheduler_run")
-    }
-
-    fn compose_scheduler_turn(
-        &mut self,
-        _context: &Value,
-        _index: &OverrideIndex,
-        _workspace_id: Option<&str>,
-        _executor_kind: Option<&str>,
-        _tool_catalog_version: i64,
-    ) -> Result<RenderedTurn, String> {
-        Err("move signal seam: compose_scheduler_turn needs the D-12 creation runtime".to_owned())
-    }
-}
-
-/// Preflight for the move's fire: the L8 eligibility check is unmerged,
-/// so any dispatch decision fails closed (the entry aborts loudly, the
-/// move stands).
-struct MovePreflight;
-
-impl PreflightSeam for MovePreflight {
-    async fn preflight_eligibility_or_bounce(
-        &mut self,
-        _issue_id: Uuid,
-        _creator_id: Uuid,
-        _pod_id: Uuid,
-        _triggered_by: &str,
-    ) -> Result<bool, CreationError> {
-        move_seam_gap("preflight_eligibility_or_bounce")
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Post-commit: cancel send + pod drain
-// ---------------------------------------------------------------------------
-
-/// The 552 [`PubsubStore`] over the pool + Redis (the delete-cmds
-/// shape): same verbs, same outbox helpers, no runner-enroll
-/// dependency.
-struct MovePubsub<'p> {
-    pool: &'p PgPool,
-    redis: Option<&'p redis::Client>,
-    runner: &'p RunnerSettings,
-}
-
-impl PubsubStore for MovePubsub<'_> {
-    async fn enqueue_for_runner(
-        &self,
-        runner_id: Uuid,
-        message: &Map<String, Value>,
-    ) -> Result<Option<String>, OutboxError> {
-        runner_outbox::enqueue_for_runner(self.redis, self.pool, self.runner, runner_id, message)
-            .await
-    }
-
-    async fn enqueue_for_machine(
-        &self,
-        dev_machine_id: Uuid,
-        message: &Map<String, Value>,
-    ) -> Result<Option<String>, MachineOutboxError> {
-        machine_outbox::enqueue_for_machine(
-            self.redis,
-            self.pool,
-            self.runner,
-            dev_machine_id,
-            message,
-        )
-        .await
-    }
-
-    async fn active_runner_sessions(
-        &self,
-        runner_id: Uuid,
-    ) -> Result<Vec<RunnerSession>, OutboxError> {
-        let rows = sqlx::query(CLOSE_ACTIVE_SESSIONS_SQL)
-            .bind(runner_id)
-            .fetch_all(self.pool)
-            .await?;
-        rows.iter()
-            .map(runner_session::runner_session_from_row)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(OutboxError::from)
-    }
-
-    async fn revoke_runner_session(
-        &self,
-        session_id: Uuid,
-        reason: &str,
-    ) -> Result<(), OutboxError> {
-        sqlx::query(runner_session::REVOKE_SQL)
-            .bind(Utc::now())
-            .bind(reason)
-            .bind(session_id)
-            .execute(self.pool)
-            .await
-            .map(|_| ())
-            .map_err(OutboxError::from)
-    }
-
-    async fn clear_session_marker(&self, session_id: Uuid) -> Result<(), OutboxError> {
-        runner_outbox::clear_session_marker(self.redis, &session_id.to_string()).await
-    }
-
-    async fn publish_session_eviction(
-        &self,
-        runner_id: Uuid,
-        old_session_id: Uuid,
-        new_session_id: &str,
-    ) -> Result<(), OutboxError> {
-        runner_outbox::publish_session_eviction(
-            self.redis,
-            &runner_id.to_string(),
-            Some(&old_session_id.to_string()),
-            new_session_id,
-        )
-        .await
-    }
-}
-
-/// The `drain_pod_by_id` executor (`runner/services/matcher.py`,
-/// through the 552 recipe): miss → 0 with no transaction; else one
-/// transaction over the idle list, one `next_for_runner` claim per
-/// runner, the `ASSIGN_RUN_UPDATE_SQL` write per claim — then, past
-/// the commit, one `assign` send per claim. Effects dispatch in
-/// idle-list order; the log line fires only when claims happened.
-///
-/// A dispatch failure propagates (the drain contract: the offline
-/// error must not be swallowed) — rows already committed, mirroring
-/// `on_commit` raising past the commit.
-async fn drain_pod_by_id(
-    pool: &PgPool,
-    pubsub: &MovePubsub<'_>,
-    pod_id: Uuid,
-) -> Result<(), Denial> {
-    let pod: Option<(Uuid,)> = sqlx::query_as(DRAIN_POD_BY_ID_LOOKUP_SQL)
-        .bind(pod_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    if pod.is_none() {
-        return Ok(());
-    }
-    let mut tx = pool.begin().await.map_err(|_| Denial::ServerError)?;
-    let threshold = alive_threshold(Utc::now());
-    let runners = sqlx::query(DRAIN_POD_IDLE_RUNNERS_SQL)
-        .bind(threshold)
-        .bind(pod_id)
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    let mut effects = Vec::new();
-    for runner in &runners {
-        let runner_id: Uuid = runner.try_get("id").map_err(|_| Denial::ServerError)?;
-        let owner_id: Uuid = runner
-            .try_get("owner_id")
-            .map_err(|_| Denial::ServerError)?;
-        let provisioning: String = runner
-            .try_get("provisioning")
-            .map_err(|_| Denial::ServerError)?;
-        let visibility: i32 = runner
-            .try_get("visibility")
-            .map_err(|_| Denial::ServerError)?;
-        let Some(next_sql) = next_for_runner_sql(&provisioning, visibility) else {
-            continue;
-        };
-        let run = sqlx::query(&next_sql)
-            .bind(pod_id)
-            .bind(runner_id)
-            .bind(owner_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-        let Some(run) = run else {
-            continue;
-        };
-        let run_id: Uuid = run.try_get("id").map_err(|_| Denial::ServerError)?;
-        let work_item_id: Option<Uuid> = run
-            .try_get("work_item_id")
-            .map_err(|_| Denial::ServerError)?;
-        let prompt: String = run.try_get("prompt").map_err(|_| Denial::ServerError)?;
-        let run_config: Option<Value> =
-            run.try_get("run_config").map_err(|_| Denial::ServerError)?;
-        let run_config = run_config
-            .and_then(|config| config.as_object().cloned())
-            .ok_or(Denial::ServerError)?;
-        let plan = plan_assignment(&AssignmentFacts {
-            run_id,
-            runner_id,
-            owner_id,
-            work_item_id,
-            prompt,
-            run_config,
-        });
-        sqlx::query(ASSIGN_RUN_UPDATE_SQL)
-            .bind(owner_id)
-            .bind(runner_id)
-            .bind(Utc::now())
-            .bind(run_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-        effects.push(plan.after_commit);
-    }
-    tx.commit().await.map_err(|_| Denial::ServerError)?;
-    for effect in &effects {
-        let DrainEffect::SendAssign { runner_id, message } = effect;
-        send_to_runner(pubsub, *runner_id, message)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    }
-    if !effects.is_empty() {
-        tracing::info!("{}", drain_pod_log(&pod_id, effects.len()));
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -3136,33 +1457,6 @@ mod tests {
     }
 
     #[test]
-    fn map_move_error_maps_driver_failures() {
-        use pidash_services::app_issues::IssueMoveError;
-        let rejection = map_move_error(MoveError::Issue(IssueMoveError {
-            message: "project is required".to_owned(),
-            status_code: 400,
-        }));
-        assert_eq!(
-            rejection,
-            Denial::MoveRejection {
-                status: 400,
-                message: "project is required".to_owned(),
-            }
-        );
-        assert_eq!(map_move_error(MoveError::IssueNotFound), Denial::NotFound);
-        assert_eq!(
-            map_move_error(MoveError::ProjectNotFound),
-            Denial::ProjectNotFound
-        );
-        assert_eq!(
-            map_move_error(MoveError::Store(
-                pidash_services::app_issues::issue_move::StoreError("boom".to_owned())
-            )),
-            Denial::ServerError
-        );
-    }
-
-    #[test]
     fn read_move_target_coerces_non_dict_bodies() {
         use axum::http::header;
         // The negotiator treats a missing `content-length` as empty, so
@@ -3242,21 +1536,6 @@ mod tests {
             &scope,
             &facts(false)
         ));
-    }
-
-    #[test]
-    fn summary_item_composes_identifier() {
-        let row = BlockerRow {
-            issue_id: Uuid::nil(),
-            sequence_id: 42,
-            project_identifier: "PROJ".to_owned(),
-            state_name: Some("Todo".to_owned()),
-            state_group: Some("unstarted".to_owned()),
-        };
-        let item = summary_item(&row);
-        assert_eq!(item.identifier, "PROJ-42");
-        assert_eq!(item.state, Some("Todo"));
-        assert_eq!(item.state_group, Some("unstarted"));
     }
 
     #[test]

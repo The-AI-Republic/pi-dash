@@ -2387,3 +2387,119 @@ def test_rust_track_page_version_description_stripped(db_conn, html):
 
     row = wait_for(_version_row, what="page_version stripped by rust worker")
     assert row["description_stripped"] == _ml_strip(html)
+
+
+def test_rust_description_version_task_writes_null_audit(db_conn):
+    """Rust issue_description_version_task inserts NULL audit cols (PIDASHCONV-1295).
+
+    Replay of ``test_description_version_task_writes_null_audit``: the
+    task-path insert NULLs ``created_by_id`` and ``updated_by_id`` (the
+    crum rule, base.py:31-33) while ``owned_by_id`` keeps the acting user.
+    The sync backfill keeps the issue's audit copies (``bulk_create``
+    skips ``save()``), so only the task path is pinned here.
+    """
+    tag = uuid.uuid4().hex[:8]
+    chain = seed_helpers.issue_chain(db_conn, f"1295rdesc-{tag}")
+    owner = chain["owner"]
+    issue = chain["issue"]
+    updater = seed_helpers.user(db_conn, f"rust-1295desc-{tag}-updater")
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "UPDATE issues SET created_by_id = %s::uuid,"
+            " updated_by_id = %s::uuid,"
+            " description_html = '<p>live v1</p>'"
+            " WHERE id = %s::uuid",
+            (str(owner["id"]), str(updater["id"]), str(issue["id"])),
+        )
+    rust_queue.publish(
+        f"{M}.issue_description_version_task.issue_description_version_task",
+        args=[
+            _json.dumps({"description_html": "<p>stale</p>"}),
+            str(issue["id"]),
+            str(owner["id"]),
+        ],
+        kwargs={"is_creating": True},
+    )
+
+    def _version_row():
+        with db_conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT created_by_id, updated_by_id, owned_by_id"
+                " FROM issue_description_versions"
+                " WHERE issue_id = %s::uuid",
+                (str(issue["id"]),),
+            )
+            return cur.fetchone()
+
+    row = wait_for(_version_row, what="description version by rust worker")
+    assert row["created_by_id"] is None
+    assert row["updated_by_id"] is None
+    assert str(row["owned_by_id"]) == str(owner["id"])
+
+
+# The scheduler reclaims stale running rows at most once per minute, so a
+# row seeded just after a sweep waits nearly a full minute. The bound
+# leaves headroom for loaded CI without letting a never-reclaimed row
+# (the pre-fix behavior) pass.
+RECLAIM_BOUND_SECS = 150
+
+
+def _seed_stale_running(db_conn, celery_id: str, task: str) -> None:
+    """A dead worker's footprint: claimed 2h ago, never settled."""
+    stale = datetime.now(timezone.utc) - timedelta(hours=2)
+    with db_conn.cursor() as cur:
+        cur.execute(
+            f"INSERT INTO {rust_queue.QUEUE_TABLE} "
+            "(celery_id, task, args, kwargs, queue, status, "
+            "claimed_at, claimed_by) "
+            "VALUES (%s, %s, '[]', '{}', 'celery', 'running', %s, %s)",
+            (celery_id, task, stale, "contract-dead-worker"),
+        )
+
+
+def _queue_row(db_conn, celery_id: str):
+    with db_conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            f"SELECT status, attempts, last_error FROM {rust_queue.QUEUE_TABLE} "
+            "WHERE celery_id = %s",
+            (celery_id,),
+        )
+        return cur.fetchone()
+
+
+def test_1327_rust_reclaims_stale_running_rows(db_conn):
+    """PIDASHCONV-1327 replay: stale ``running`` rows are reclaimed.
+
+    A row whose worker died mid-job (panic, SIGKILL, crash, redeploy)
+    must not sit ``running`` forever: the scheduler reclaims it past the
+    lease, and the worker then processes it normally. The unknown-name
+    row parks ``failed`` with its cause; the no-op cleanup row runs and
+    acks. Before the fix both rows stay ``running`` with NULL
+    ``last_error`` and this test times out at its bound.
+    """
+    tag = uuid.uuid4().hex[:8]
+    unknown_id = f"1327-unknown-{tag}"
+    noop_id = f"1327-noop-{tag}"
+    _seed_stale_running(db_conn, unknown_id, f"test.unknown.1327-{tag}")
+    _seed_stale_running(db_conn, noop_id, f"{M}.cleanup_task.delete_api_logs")
+
+    def _unknown_parked():
+        row = _queue_row(db_conn, unknown_id)
+        return row if row and row["status"] == "failed" else None
+
+    parked = wait_for(
+        _unknown_parked,
+        timeout=RECLAIM_BOUND_SECS,
+        what="stale unknown-task row reclaimed and parked",
+    )
+    assert parked["attempts"] >= 1
+    assert parked["last_error"] and "unknown task" in parked["last_error"]
+
+    def _noop_acked():
+        return True if _queue_row(db_conn, noop_id) is None else None
+
+    wait_for(
+        _noop_acked,
+        timeout=RECLAIM_BOUND_SECS,
+        what="stale no-op row reclaimed and acked",
+    )

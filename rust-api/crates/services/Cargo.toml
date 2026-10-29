@@ -5,6 +5,8 @@ edition = "2021"
 
 [dependencies]
 pidash-types = { path = "../types" }
+# OVL-04 (PIDASHCONV-1542): canonical parity plumbing. Leaf crate, no cycle.
+pidash-compat = { path = "../compat" }
 pidash-db = { path = "../db" }
 pidash-auth = { path = "../auth" }
 # D-05 GitHub adapter datetimes: same locked chrono 0.4.45 as pidash-db
@@ -65,8 +67,14 @@ redis = { version = "1", default-features = false, features = ["tokio-rustls-com
 # pidash-api, minus `stream` which the ops client does not need).
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots"] }
 # D-37 wait loops: sleep/timeout only (the runtime comes from the binary;
-# macros/rt stay dev-only for the async unit tests below).
-tokio = { version = "1", features = ["time"] }
+# macros stay dev-only for the async unit tests below). OVL-06
+# (PIDASHCONV-1544): the GitHub sync transport builds its own
+# current-thread runtime in `run_sync`, so `rt` joins the main build
+# (same locked tokio 1.x — features are not in the lockfile).
+tokio = { version = "1", features = ["time", "rt"] }
+# OVL-06 GitHub App JWT mint (moved from the api twins; same locked
+# jsonwebtoken 9.x as pidash-api — no lock churn).
+jsonwebtoken = "9"
 # D-37 SigV4: reuse the shared hashing helper; the storage crate itself
 # stays read-only (its fixed-shape sign_* helpers cannot sign the
 # query-bearing list/policy requests, so ops signs those itself).
@@ -80,9 +88,45 @@ tracing = "0.1"
 # PIDASHCONV-1280 link-crawler titles: WHATWG decoding for Dammit-declared
 # charsets (shift_jis, windows-125x, utf-16, ...). Pure-Rust, no C build.
 encoding_rs = "0.8"
+# PIDASHCONV-1554 stored-HTML normaliser: fragment parsing (same locked
+# html5ever 0.39.x / markup5ever_rcdom 0.39.x pair as pidash-api, no lock
+# churn beyond the new edges).
+html5ever = "0.39"
+markup5ever_rcdom = "0.39.0"
+# ORM-02 (PIDASHCONV-1520, design D1/D5): the domain write services run on
+# the SeaORM transaction. Identical spec to pidash-db (locked sea-orm
+# 1.1.20 — no lock churn, `cargo tree -d` shows one copy).
+sea-orm = { version = "~1.1.20", default-features = false, features = ["sqlx-postgres", "runtime-tokio", "macros", "with-uuid", "with-chrono", "with-json"] }
+# ORM-02 review: the `TxnConn` handle implements SeaORM's `ConnectionTrait`
+# (locked async-trait 0.1.x via sea-orm — no lock churn).
+async-trait = "0.1"
+# PIDASHCONV-1631 v1-asset user-save template: the relocated sea-query
+# builder. Identical spec to pidash-db (locked sea-query 0.32.7 — no
+# lock churn).
+sea-query = { version = "0.32", default-features = false, features = ["backend-postgres", "with-uuid", "with-chrono"] }
+# OVL-14 (PIDASHCONV-1649): `space::sanitize` moved here from pidash-api.
+# Identical spec to pidash-api (locked ammonia 4.2.0 — no lock churn).
+ammonia = "4"
+# OVL-14 (PIDASHCONV-1649): the markdown→HTML port moved here from the v1
+# work-items handlers. Identical spec to pidash-api (locked
+# pulldown-cmark 0.13.4 — no lock churn).
+pulldown-cmark = "0.13.4"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt"] }
+# PIDASHCONV-1599 probe CA-bundle tests: the custom-CA TLS fake needs
+# a listener (`net`) plus the async read/write adapters (`io-util`).
+# Test builds only; the shipped lib keeps `time` + `rt` (features are
+# not in the lockfile, no lock churn).
+tokio = { version = "1", features = ["macros", "rt", "net", "io-util"] }
+# PIDASHCONV-1599 probe CA-bundle tests: the custom-CA TLS fake serves
+# the canned 200 over `tokio-rustls`, parsing the fixture PEMs with
+# `rustls-pki-types`. Same locked rustls 0.23.45 + tokio-rustls 0.26.5
+# pair (and the same `ring`, not `aws-lc-rs`) the api and jobs crates
+# already pin; rustls-pki-types resolves to the locked 1.x (no lock
+# churn). Test builds only; the shipped lib is unchanged.
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = "0.26.5"
+rustls-pki-types = "1"
 # D-18 attachment overflow tests (PIDASHCONV-782): the request path
 # publishes numbers through the api crate, which builds serde_json with
 # arbitrary_precision — the overflow-literal pins need the same
