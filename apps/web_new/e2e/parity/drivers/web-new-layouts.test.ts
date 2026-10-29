@@ -627,4 +627,17 @@ describe("web_new layout switch settle", () => {
 
     expect(stub.responses).toHaveLength(0);
   });
+
+  it("tolerates a changed switch that never PATCHes display prefs", async () => {
+    const stub = switchPage("list");
+    const armed = stub.page.waitForResponse.bind(stub.page);
+    stub.page.waitForResponse = (async (predicate: (response: never) => unknown, options: unknown) => {
+      await armed(predicate, options);
+      throw new Error("Timeout 30000ms exceeded.");
+    }) as Page["waitForResponse"];
+
+    await expect(new WebNewDriver(stub.page).layoutsSwitchTo("kanban")).resolves.toBeUndefined();
+
+    expect(stub.responses).toHaveLength(1);
+  });
 });

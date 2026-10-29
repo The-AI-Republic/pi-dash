@@ -9042,7 +9042,11 @@ export class WebNewDriver implements ParityDriver {
     // switch's success write lands after the surface mounts, and a prefs
     // write that starts in between (ISS-008's group toggle) is clobbered by
     // it — server and UI diverge and the toggle never flips.
-    if (patchSettled !== null) await patchSettled;
+    // Best-effort: the surface mount above is the commit signal. A switch
+    // that never PATCHes display prefs (another area's prefs shape, a slow
+    // network) must not hang and throw here — without the settle the ISS-008
+    // clobber window simply stays open, as before this gate fix.
+    if (patchSettled !== null) await patchSettled.catch(() => undefined);
   }
 
   private async layoutsWaitForProjectLayout(layout: LayoutsLayoutKey): Promise<void> {
