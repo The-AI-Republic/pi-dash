@@ -436,6 +436,7 @@ pidash_sdk::ops::has_open_blockers_sql
 pidash_sdk::ops::is_ticking_state
 pidash_sdk::ops::latest_prior_run_sql
 pidash_sdk::ops::lock_ticker_sql
+pidash_sdk::ops::map_run_view
 pidash_sdk::ops::merge_settings
 pidash_sdk::ops::model_activity_kwargs
 pidash_sdk::ops::move_to_project
