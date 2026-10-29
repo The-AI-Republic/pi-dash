@@ -47,7 +47,11 @@
     "/{ws}/projects/{projectId}/archives",
     "/{ws}/projects/{projectId}/archives/*",
     "/{ws}/analytics/*",
-    "/{ws}/drafts"
+    "/{ws}/drafts",
+    "/{ws}/projects/{projectId}/views",
+    "/{ws}/projects/{projectId}/views/*",
+    "/{ws}/workspace-views",
+    "/{ws}/workspace-views/*"
   ],
   "reservedTopLevel": [
     "404",

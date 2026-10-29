@@ -237,7 +237,8 @@ describe("bundled list", () => {
       "/acme/projects/00000000-0000-0000-0000-000000000000",
       "/acme/projects/00000000-0000-0000-0000-000000000000/cycles",
       "/acme/projects/00000000-0000-0000-0000-000000000000/modules",
-      "/acme/projects/00000000-0000-0000-0000-000000000000/views",
+      // (Project views moved with their own area gate, NEWFRONT-745, and are
+      // asserted in the views block below.)
       "/acme/projects/00000000-0000-0000-0000-000000000000/issues-archive",
     ]) {
       expect(isMigratedPath(path), path).toBe(false);
@@ -282,6 +283,31 @@ describe("bundled list", () => {
     }
     expect(resolveLinkKind("/acme/analytics/overview")).toBe("router");
     expect(resolveLinkKind("/acme/analytics-archive")).toBe("anchor");
+  });
+
+  it("serves project and workspace views from web_new", () => {
+    for (const path of [
+      "/acme/projects/00000000-0000-0000-0000-000000000000/views",
+      "/acme/projects/00000000-0000-0000-0000-000000000000/views/",
+      "/acme/projects/00000000-0000-0000-0000-000000000000/views/00000000-0000-0000-0000-000000000000",
+      "/acme/workspace-views",
+      "/acme/workspace-views/",
+      "/acme/workspace-views/all-issues",
+      "/acme/workspace-views/00000000-0000-0000-0000-000000000000",
+    ]) {
+      expect(isMigratedPath(path), path).toBe(true);
+    }
+    // Near-miss spellings stay on the old app.
+    for (const path of [
+      "/acme/projects/00000000-0000-0000-0000-000000000000/view",
+      "/acme/projects/00000000-0000-0000-0000-000000000000/views-archive",
+      "/acme/workspace-view",
+      "/acme/workspace-views-archive",
+    ]) {
+      expect(isMigratedPath(path), path).toBe(false);
+    }
+    expect(resolveLinkKind("/acme/workspace-views")).toBe("router");
+    expect(resolveLinkKind("/acme/workspace-view")).toBe("anchor");
   });
 
   it("keeps workspace matching out of reserved top-level names and the bare root", () => {
