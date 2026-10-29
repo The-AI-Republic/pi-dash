@@ -131,23 +131,14 @@ export function CommentEditForm({
     >
       <div
         onKeyDown={(event) => {
-          if (event.key === "Escape") {
-            if (!mentions.mentionOpen) return;
-            event.preventDefault();
-            mentions.dismiss();
-            return;
-          }
-          // Inside the editing surface the surface owns plain Enter, at
-          // key time and from the live document: it consumes the key
-          // itself and a pick or no-op is already decided by then
-          // (CMT-003/011, ISS-197). An Enter from elsewhere in the form
-          // still saves; save() still holds a pristine body.
-          if (event.key !== "Enter" || event.shiftKey || event.ctrlKey || event.metaKey) return;
-          if (event.defaultPrevented) return;
-          // IME composition commits with Enter: leave that Enter to the input.
-          if (event.nativeEvent.isComposing) return;
+          // The editing surface owns plain Enter, at key time and from the
+          // live document: it consumes the key itself and a pick or no-op
+          // is already decided by then (CMT-003/011, ISS-197). This
+          // wrapper only adds the popup's Escape. The check button and
+          // the form's submit stay the ways to save without the keyboard.
+          if (event.key !== "Escape" || !mentions.mentionOpen) return;
           event.preventDefault();
-          void save(handleRef.current?.getHtml());
+          mentions.dismiss();
         }}
       >
         <React.Suspense fallback={<div className="min-h-24 rounded-(--radius-control) bg-(--subtle)" />}>
