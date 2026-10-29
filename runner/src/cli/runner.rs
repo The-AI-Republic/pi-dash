@@ -31,7 +31,9 @@ pub struct RunnerArgs {
 pub enum RunnerCommand {
     /// Register a new runner under the active connection.
     Add(AddArgs),
-    /// List runners configured on this machine.
+    /// List runners configured on this machine (local config only; never
+    /// calls the cloud). For a project's cloud runners and their status,
+    /// use `pidash project runners <project>`.
     List,
     /// Deregister a runner and remove its config block.
     Remove(RemoveArgs),
