@@ -54,6 +54,7 @@ use pidash_db::tx::Transaction;
 use pidash_services::dispatch::{
     consume_admission_token, AdmissionCache, DeferredConsume, LlmProfile,
 };
+use pidash_services::domain::clock::apply_clock_write;
 use pidash_services::domain::comments as comment_domain;
 use pidash_services::domain::identity::{
     create_bot_user, find_agent_user, make_unusable_password, stamp_bot_unusable_password,
@@ -61,9 +62,7 @@ use pidash_services::domain::identity::{
     AGENT_USER_FIRST_NAME, AGENT_USER_LAST_NAME,
 };
 use pidash_services::domain::issues as domain_issues;
-use pidash_services::orchestration::clock::{
-    CREATE_TICKER_PARAMS, LOCK_TICKER_PARAMS, SAVE_CLOCK_PARAMS, SAVE_CLOCK_SQL,
-};
+use pidash_services::orchestration::clock::{ClockWrite, LOCK_TICKER_PARAMS};
 use pidash_services::orchestration::dispatch::{
     BounceOutcome, CandidateUser, ContinuationDispatchOutcome, DispatchError, DispatchSeam,
     HumanRunAiOutcome, LogLine, NewIssueComment, NewWaitActivity, PauseOutcome, PodRunnerMatcher,
@@ -199,17 +198,6 @@ pub(crate) fn lock_ticker_by_issue_sql() -> String {
     )
 }
 
-pub(crate) fn create_ticker_sql() -> String {
-    translate_clock_sql(
-        &pidash_services::orchestration::clock::create_ticker_sql(),
-        CREATE_TICKER_PARAMS,
-    )
-}
-
-pub(crate) fn save_clock_sql() -> String {
-    translate_clock_sql(SAVE_CLOCK_SQL, SAVE_CLOCK_PARAMS)
-}
-
 // ---------------------------------------------------------------------------
 // DispatchSeam over the L6 store
 // ---------------------------------------------------------------------------
@@ -301,51 +289,29 @@ where
         ticker: &IssueAgentTicker,
         now: DateTime<Utc>,
     ) -> Result<(), DispatchError> {
-        // SAVE_CLOCK_PARAMS order: updated_at, granted, next_run_at,
-        // enabled, disarm_reason, pending_entry, pending_entry_free,
-        // pending_entry_actor_id, pending_entry_trigger,
-        // resume_parent_run_id, id.
-        sqlx::query(&save_clock_sql())
-            .bind(now)
-            .bind(ticker.granted)
-            .bind(ticker.next_run_at)
-            .bind(ticker.enabled)
-            .bind(ticker.disarm_reason.as_str())
-            .bind(ticker.pending_entry)
-            .bind(ticker.pending_entry_free)
-            .bind(ticker.pending_entry_actor_id)
-            .bind(ticker.pending_entry_trigger.as_str())
-            .bind(ticker.resume_parent_run_id)
-            .bind(ticker.id)
-            .execute(&mut **self.dispatch_tx().inner())
-            .await
-            .map_err(db)?;
+        apply_clock_write(
+            &mut **self.dispatch_tx().inner(),
+            &ClockWrite::Update,
+            ticker,
+            now,
+        )
+        .await
+        .map_err(db)?;
         Ok(())
     }
 
     async fn insert_ticker(&mut self, ticker: &IssueAgentTicker) -> Result<(), DispatchError> {
-        // CREATE_TICKER_PARAMS order: now, created_by_id, id,
-        // issue_id, next_run_at, enabled, disarm_reason, pending_entry,
-        // pending_entry_free, pending_entry_actor_id,
-        // pending_entry_trigger, resume_parent_run_id (`used` /
-        // `granted` / `waited` / `user_disabled` are 0/0/0/FALSE
-        // literals — no create-path handler changes them).
-        sqlx::query(&create_ticker_sql())
-            .bind(ticker.created_at)
-            .bind(ticker.created_by_id)
-            .bind(ticker.id)
-            .bind(ticker.issue_id)
-            .bind(ticker.next_run_at)
-            .bind(ticker.enabled)
-            .bind(ticker.disarm_reason.as_str())
-            .bind(ticker.pending_entry)
-            .bind(ticker.pending_entry_free)
-            .bind(ticker.pending_entry_actor_id)
-            .bind(ticker.pending_entry_trigger.as_str())
-            .bind(ticker.resume_parent_run_id)
-            .execute(&mut **self.dispatch_tx().inner())
-            .await
-            .map_err(db)?;
+        // Insert ignores `now` (it stamps the row's own `created_at`,
+        // the pre-consolidation bind); pass the row stamp so the call
+        // reads honestly.
+        apply_clock_write(
+            &mut **self.dispatch_tx().inner(),
+            &ClockWrite::Insert,
+            ticker,
+            ticker.created_at,
+        )
+        .await
+        .map_err(db)?;
         Ok(())
     }
 
@@ -1157,41 +1123,13 @@ mod tests {
 
     #[test]
     fn clock_sql_translation() {
-        // `:name` → `$n` in PARAMS order, longest names first.
+        // `:name` → `$n` in PARAMS order, longest names first. The
+        // save/create goldens moved to `domain::clock` with the
+        // shared write; the seams keep only the lock query.
         assert_eq!(
             lock_ticker_by_issue_sql(),
             pidash_services::orchestration::clock::lock_ticker_sql().replace(":issue_id", "$1")
         );
-        let save = save_clock_sql();
-        assert!(!save.contains(':'));
-        for (index, name) in SAVE_CLOCK_PARAMS.iter().enumerate() {
-            let placeholder = format!("${}", index + 1);
-            assert!(
-                save.contains(&placeholder),
-                "missing {placeholder} for {name}"
-            );
-        }
-        // Spot-check the bind order against the const text.
-        let set = save
-            .split("SET ")
-            .nth(1)
-            .unwrap()
-            .split(" WHERE")
-            .next()
-            .unwrap();
-        let cols: Vec<&str> = set.split(", ").collect();
-        assert_eq!(cols.len(), SAVE_CLOCK_PARAMS.len() - 1);
-        assert!(cols[0].starts_with("updated_at = $1"));
-        assert!(save.ends_with("WHERE id = $11"));
-        let create = create_ticker_sql();
-        assert!(!create.contains(':'));
-        for (index, name) in CREATE_TICKER_PARAMS.iter().enumerate() {
-            let placeholder = format!("${}", index + 1);
-            assert!(
-                create.contains(&placeholder),
-                "missing {placeholder} for {name}"
-            );
-        }
     }
 
     #[test]

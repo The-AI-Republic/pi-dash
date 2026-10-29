@@ -41,13 +41,11 @@ use pidash_services::dispatch::admission::AdmissionCache;
 use pidash_services::dispatch::policy::UserFlags;
 use pidash_services::dispatch::LlmProfile;
 use pidash_services::domain::activity::TaskEnqueueHook;
+use pidash_services::domain::clock::apply_clock_write;
 use pidash_services::domain::identity::AgentUserCollisionError;
 use pidash_services::domain::transition::IssueTransitionHook;
 use pidash_services::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
-use pidash_services::orchestration::clock::{
-    ClockWrite, ProjectClockPolicy, CREATE_TICKER_PARAMS, LOCK_TICKER_PARAMS, SAVE_CLOCK_PARAMS,
-    SAVE_CLOCK_SQL,
-};
+use pidash_services::orchestration::clock::{ClockWrite, ProjectClockPolicy, LOCK_TICKER_PARAMS};
 use pidash_services::orchestration::creation::{
     AdmissionError, CreationError, CreationSeam, ExecutionError, ExecutionFields, ExecutionRequest,
     FinalizeAgentRunSeam, IssueView, LockedIssue, NewAgentRun, PodView, ProjectView, RenderBundle,
@@ -346,17 +344,6 @@ fn lock_ticker_by_issue_sql() -> String {
     )
 }
 
-fn create_ticker_sql() -> String {
-    translate_clock_sql(
-        &pidash_services::orchestration::clock::create_ticker_sql(),
-        CREATE_TICKER_PARAMS,
-    )
-}
-
-fn save_clock_sql() -> String {
-    translate_clock_sql(SAVE_CLOCK_SQL, SAVE_CLOCK_PARAMS)
-}
-
 /// Map one full ticker row (the jobs `map_ticker` shape over the same shared
 /// column list).
 fn map_ticker(row: &PgRow) -> Result<IssueAgentTicker, sqlx::Error> {
@@ -591,46 +578,11 @@ where
         row: &IssueAgentTicker,
         write: ClockWrite,
     ) -> Result<(), CreationError> {
-        match write {
-            ClockWrite::None => Ok(()),
-            ClockWrite::Insert => {
-                sqlx::query(&create_ticker_sql())
-                    .bind(row.created_at)
-                    .bind(row.created_by_id)
-                    .bind(row.id)
-                    .bind(row.issue_id)
-                    .bind(row.next_run_at)
-                    .bind(row.enabled)
-                    .bind(row.disarm_reason.as_str())
-                    .bind(row.pending_entry)
-                    .bind(row.pending_entry_free)
-                    .bind(row.pending_entry_actor_id)
-                    .bind(row.pending_entry_trigger.as_str())
-                    .bind(row.resume_parent_run_id)
-                    .execute(self.pool)
-                    .await
-                    .map_err(Self::db)?;
-                Ok(())
-            }
-            ClockWrite::Update => {
-                sqlx::query(&save_clock_sql())
-                    .bind(chrono::Utc::now())
-                    .bind(row.granted)
-                    .bind(row.next_run_at)
-                    .bind(row.enabled)
-                    .bind(row.disarm_reason.as_str())
-                    .bind(row.pending_entry)
-                    .bind(row.pending_entry_free)
-                    .bind(row.pending_entry_actor_id)
-                    .bind(row.pending_entry_trigger.as_str())
-                    .bind(row.resume_parent_run_id)
-                    .bind(row.id)
-                    .execute(self.pool)
-                    .await
-                    .map_err(Self::db)?;
-                Ok(())
-            }
-        }
+        // `updated_at` is now-at-write: Python's `save()` stamps
+        // `auto_now` at write time (the pre-consolidation bind).
+        apply_clock_write(self.pool, &write, row, chrono::Utc::now())
+            .await
+            .map_err(Self::db)
     }
 
     fn set_rollback(&mut self) {

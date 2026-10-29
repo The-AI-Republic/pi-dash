@@ -61,9 +61,7 @@ use crate::admission::RedisAdmissionCache;
 use crate::dispatch::{append_event, dispatch_agent_run, DispatchDecision};
 use crate::issue_transition::WorkerTaskEnqueueHook;
 use crate::orchestration::{
-    fire_tick_seam::{
-        create_ticker_sql, emit_logs, lock_ticker_by_issue_sql, map_ticker, save_clock_sql,
-    },
+    fire_tick_seam::{emit_logs, lock_ticker_by_issue_sql, map_ticker},
     live_inputs::JobsMatcher,
     preflight_eligibility_or_bounce, LiveCreationStore, StoreDeps,
 };
@@ -85,6 +83,7 @@ use pidash_services::dispatch::{
     admission::AdmissionCache, consume_admission_token, DeferredConsume, LlmProfile,
 };
 use pidash_services::domain::activity::TaskEnqueueHook;
+use pidash_services::domain::clock::apply_clock_write;
 use pidash_services::domain::comments as comment_domain;
 use pidash_services::domain::identity::AgentUserCollisionError;
 use pidash_services::domain::issues as domain_issues;
@@ -1742,46 +1741,11 @@ where
         row: &IssueAgentTicker,
         write: ClockWrite,
     ) -> Result<(), CreationError> {
-        match write {
-            ClockWrite::None => Ok(()),
-            ClockWrite::Insert => {
-                sqlx::query(&create_ticker_sql())
-                    .bind(row.created_at)
-                    .bind(row.created_by_id)
-                    .bind(row.id)
-                    .bind(row.issue_id)
-                    .bind(row.next_run_at)
-                    .bind(row.enabled)
-                    .bind(row.disarm_reason.as_str())
-                    .bind(row.pending_entry)
-                    .bind(row.pending_entry_free)
-                    .bind(row.pending_entry_actor_id)
-                    .bind(row.pending_entry_trigger.as_str())
-                    .bind(row.resume_parent_run_id)
-                    .execute(self.pool)
-                    .await
-                    .map_err(Self::db)?;
-                Ok(())
-            }
-            ClockWrite::Update => {
-                sqlx::query(&save_clock_sql())
-                    .bind(Utc::now())
-                    .bind(row.granted)
-                    .bind(row.next_run_at)
-                    .bind(row.enabled)
-                    .bind(row.disarm_reason.as_str())
-                    .bind(row.pending_entry)
-                    .bind(row.pending_entry_free)
-                    .bind(row.pending_entry_actor_id)
-                    .bind(row.pending_entry_trigger.as_str())
-                    .bind(row.resume_parent_run_id)
-                    .bind(row.id)
-                    .execute(self.pool)
-                    .await
-                    .map_err(Self::db)?;
-                Ok(())
-            }
-        }
+        // `updated_at` is now-at-write: Python's `save()` stamps
+        // `auto_now` at write time (the pre-consolidation bind).
+        apply_clock_write(self.pool, &write, row, Utc::now())
+            .await
+            .map_err(Self::db)
     }
 
     fn set_rollback(&mut self) {
