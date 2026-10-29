@@ -57,24 +57,6 @@ class UserAssetsV2Endpoint(BaseAPIView):
                 request=request,
             )
             return
-        # User Cover
-        if entity_type == FileAsset.EntityTypeContext.USER_COVER:
-            user = User.objects.get(id=asset.user_id)
-            user.cover_image = None
-            # Delete the previous cover image
-            if user.cover_image_asset_id:
-                self.asset_delete(user.cover_image_asset_id)
-            # Save the new cover image
-            user.cover_image_asset_id = asset_id
-            user.save()
-            invalidate_cache_directly(path="/api/users/me/", url_params=False, user=True, request=request)
-            invalidate_cache_directly(
-                path="/api/users/me/settings/",
-                url_params=False,
-                user=True,
-                request=request,
-            )
-            return
         return
 
     def entity_asset_delete(self, entity_type, asset, request):
@@ -82,19 +64,6 @@ class UserAssetsV2Endpoint(BaseAPIView):
         if entity_type == FileAsset.EntityTypeContext.USER_AVATAR:
             user = User.objects.get(id=asset.user_id)
             user.avatar_asset_id = None
-            user.save()
-            invalidate_cache_directly(path="/api/users/me/", url_params=False, user=True, request=request)
-            invalidate_cache_directly(
-                path="/api/users/me/settings/",
-                url_params=False,
-                user=True,
-                request=request,
-            )
-            return
-        # User Cover
-        if entity_type == FileAsset.EntityTypeContext.USER_COVER:
-            user = User.objects.get(id=asset.user_id)
-            user.cover_image_asset_id = None
             user.save()
             invalidate_cache_directly(path="/api/users/me/", url_params=False, user=True, request=request)
             invalidate_cache_directly(
@@ -117,7 +86,7 @@ class UserAssetsV2Endpoint(BaseAPIView):
         size_limit = min(size, settings.FILE_SIZE_LIMIT)
 
         #  Check if the entity type is allowed
-        if not entity_type or entity_type not in ["USER_AVATAR", "USER_COVER"]:
+        if entity_type != FileAsset.EntityTypeContext.USER_AVATAR:
             return Response(
                 {"error": "Invalid entity type.", "status": False},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -199,22 +168,15 @@ class UserAssetsV2Endpoint(BaseAPIView):
 
 
 class WorkspaceFileAssetEndpoint(BaseAPIView):
-    """This endpoint is used to upload cover images/logos etc for workspace, projects and users."""
+    """This endpoint is used to upload logos/avatars etc for workspace, projects and users."""
 
     def get_entity_id_field(self, entity_type, entity_id):
         # Workspace Logo
         if entity_type == FileAsset.EntityTypeContext.WORKSPACE_LOGO:
             return {"workspace_id": entity_id}
 
-        # Project Cover
-        if entity_type == FileAsset.EntityTypeContext.PROJECT_COVER:
-            return {"project_id": entity_id}
-
-        # User Avatar and Cover
-        if entity_type in [
-            FileAsset.EntityTypeContext.USER_AVATAR,
-            FileAsset.EntityTypeContext.USER_COVER,
-        ]:
+        # User Avatar
+        if entity_type == FileAsset.EntityTypeContext.USER_AVATAR:
             return {"user_id": entity_id}
 
         # Issue Attachment and Description
@@ -266,22 +228,7 @@ class WorkspaceFileAssetEndpoint(BaseAPIView):
             )
             invalidate_cache_directly(path="/api/instances/", url_params=False, user=False, request=request)
             return
-
-        # Project Cover
-        elif entity_type == FileAsset.EntityTypeContext.PROJECT_COVER:
-            project = Project.objects.filter(id=asset.project_id).first()
-            if project is None:
-                return
-            # Delete the previous cover image
-            if project.cover_image_asset_id:
-                self.asset_delete(project.cover_image_asset_id)
-            # Save the new cover image
-            project.cover_image = ""
-            project.cover_image_asset_id = asset_id
-            project.save()
-            return
-        else:
-            return
+        return
 
     def entity_asset_delete(self, entity_type, asset, request):
         # Workspace Logo
@@ -300,16 +247,7 @@ class WorkspaceFileAssetEndpoint(BaseAPIView):
             )
             invalidate_cache_directly(path="/api/instances/", url_params=False, user=False, request=request)
             return
-        # Project Cover
-        elif entity_type == FileAsset.EntityTypeContext.PROJECT_COVER:
-            project = Project.objects.filter(id=asset.project_id).first()
-            if project is None:
-                return
-            project.cover_image_asset_id = None
-            project.save()
-            return
-        else:
-            return
+        return
 
     def post(self, request, slug):
         name = request.data.get("name")
@@ -448,9 +386,7 @@ class StaticFileAssetEndpoint(BaseAPIView):
         # Check if the entity type is allowed
         if asset.entity_type not in [
             FileAsset.EntityTypeContext.USER_AVATAR,
-            FileAsset.EntityTypeContext.USER_COVER,
             FileAsset.EntityTypeContext.WORKSPACE_LOGO,
-            FileAsset.EntityTypeContext.PROJECT_COVER,
         ]:
             return Response(
                 {"error": "Invalid entity type.", "status": False},
@@ -478,19 +414,13 @@ class AssetRestoreEndpoint(BaseAPIView):
 
 
 class ProjectAssetEndpoint(BaseAPIView):
-    """This endpoint is used to upload cover images/logos etc for workspace, projects and users."""
+    """This endpoint is used to upload logos/attachments etc for workspace, projects and users."""
 
     def get_entity_id_field(self, entity_type, entity_id):
         if entity_type == FileAsset.EntityTypeContext.WORKSPACE_LOGO:
             return {"workspace_id": entity_id}
 
-        if entity_type == FileAsset.EntityTypeContext.PROJECT_COVER:
-            return {"project_id": entity_id}
-
-        if entity_type in [
-            FileAsset.EntityTypeContext.USER_AVATAR,
-            FileAsset.EntityTypeContext.USER_COVER,
-        ]:
+        if entity_type == FileAsset.EntityTypeContext.USER_AVATAR:
             return {"user_id": entity_id}
 
         if entity_type in [
@@ -628,11 +558,6 @@ class ProjectAssetEndpoint(BaseAPIView):
 
 
 class ProjectBulkAssetEndpoint(BaseAPIView):
-    def save_project_cover(self, asset, project_id):
-        project = Project.objects.get(id=project_id)
-        project.cover_image_asset_id = asset.id
-        project.save()
-
     @allow_permission([ROLE.ADMIN, ROLE.MEMBER, ROLE.GUEST])
     def post(self, request, slug, project_id, entity_id):
         asset_ids = request.data.get("asset_ids", [])
@@ -652,11 +577,6 @@ class ProjectBulkAssetEndpoint(BaseAPIView):
                 {"error": "The requested asset could not be found."},
                 status=status.HTTP_404_NOT_FOUND,
             )
-
-        # Check if the asset is uploaded
-        if asset.entity_type == FileAsset.EntityTypeContext.PROJECT_COVER:
-            assets.update(project_id=project_id)
-            [self.save_project_cover(asset, project_id) for asset in assets]
 
         if asset.entity_type == FileAsset.EntityTypeContext.ISSUE_DESCRIPTION:
             # For some cases, the bulk api is called after the issue is deleted creating
@@ -705,15 +625,8 @@ class DuplicateAssetEndpoint(BaseAPIView):
         if entity_type == FileAsset.EntityTypeContext.WORKSPACE_LOGO:
             return {"workspace_id": entity_id}
 
-        # Project Cover
-        if entity_type == FileAsset.EntityTypeContext.PROJECT_COVER:
-            return {"project_id": entity_id}
-
-        # User Avatar and Cover
-        if entity_type in [
-            FileAsset.EntityTypeContext.USER_AVATAR,
-            FileAsset.EntityTypeContext.USER_COVER,
-        ]:
+        # User Avatar
+        if entity_type == FileAsset.EntityTypeContext.USER_AVATAR:
             return {"user_id": entity_id}
 
         # Issue Attachment and Description

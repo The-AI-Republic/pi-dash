@@ -5,18 +5,12 @@
  */
 
 import { EModalPosition, EModalWidth, ModalCore } from "@pi-dash/ui";
-import { getAssetIdFromUrl, checkURLValidity } from "@pi-dash/utils";
-// pi dash ui
-// helpers
 // hooks
 import useKeypress from "@/hooks/use-keypress";
 // pi dash web components
 import { CreateProjectForm } from "@/pi-dash-web/components/projects/create/root";
 // pi dash web types
 import type { TProject } from "@/pi-dash-web/types/projects";
-// services
-import { FileService } from "@/services/file.service";
-const fileService = new FileService();
 
 type Props = {
   isOpen: boolean;
@@ -30,14 +24,6 @@ type Props = {
 export function CreateProjectModal(props: Props) {
   const { isOpen, onClose, setToFavorite = false, workspaceSlug, data, templateId } = props;
 
-  const handleCoverImageStatusUpdate = async (projectId: string, coverImage: string) => {
-    if (!checkURLValidity(coverImage)) {
-      await fileService.updateBulkProjectAssetsUploadStatus(workspaceSlug, projectId, projectId, {
-        asset_ids: [getAssetIdFromUrl(coverImage)],
-      });
-    }
-  };
-
   useKeypress("Escape", () => {
     if (isOpen) onClose();
   });
@@ -48,7 +34,6 @@ export function CreateProjectModal(props: Props) {
         setToFavorite={setToFavorite}
         workspaceSlug={workspaceSlug}
         onClose={onClose}
-        updateCoverImageStatus={handleCoverImageStatusUpdate}
         handleNextStep={() => onClose()}
         data={data}
         templateId={templateId}

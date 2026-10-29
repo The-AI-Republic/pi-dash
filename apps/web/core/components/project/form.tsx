@@ -16,15 +16,10 @@ import { EmojiPicker, EmojiIconPickerTypes, Logo } from "@pi-dash/propel/emoji-i
 import { LockIcon } from "@pi-dash/propel/icons";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import { Tooltip } from "@pi-dash/propel/tooltip";
-import { EFileAssetType } from "@pi-dash/types";
 import type { IProject, IWorkspace } from "@pi-dash/types";
 import { CustomSelect, Input, TextArea, ToggleSwitch } from "@pi-dash/ui";
 import { renderFormattedDate } from "@pi-dash/utils";
-import { CoverImage } from "@/components/common/cover-image";
-import { ImagePickerPopover } from "@/components/core/image-picker-popover";
 import { TimezoneSelect } from "@/components/global";
-// helpers
-import { handleCoverImageChange } from "@/helpers/cover-image.helper";
 // hooks
 import { useProject } from "@/hooks/store/use-project";
 import { usePlatformOS } from "@/hooks/use-platform-os";
@@ -110,7 +105,6 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
   });
   // derived values
   const currentNetwork = NETWORK_CHOICES.find((n) => n.key === project?.network);
-  const coverImage = watch("cover_image_url");
   const cloudExecutorOption = project.agent_executor_options?.find((option) => option.kind === "cloud_agent");
   // The budget and cadence controls stay visible but inert while ticking is
   // off, so the configured policy is still readable at a glance.
@@ -286,29 +280,6 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
       payload.agent_test_default_interval_seconds = cadenceSeconds;
     }
 
-    // Handle cover image changes
-    try {
-      const coverImagePayload = await handleCoverImageChange(project.cover_image_url, formData.cover_image_url, {
-        workspaceSlug: workspaceSlug.toString(),
-        entityIdentifier: project.id,
-        entityType: EFileAssetType.PROJECT_COVER,
-        isUserAsset: false,
-      });
-
-      if (coverImagePayload) {
-        Object.assign(payload, coverImagePayload);
-      }
-    } catch (error) {
-      console.error("Error handling cover image:", error);
-      setToast({
-        type: TOAST_TYPE.ERROR,
-        title: t("Error!"),
-        message: error instanceof Error ? error.message : "Failed to process cover image",
-      });
-      setIsLoading(false);
-      return;
-    }
-
     if (project.identifier !== formData.identifier)
       await projectService
         .checkProjectIdentifierAvailability(workspaceSlug, payload.identifier ?? "")
@@ -325,76 +296,52 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
 
   return (
     <form onSubmit={handleSubmit(onSubmit)}>
-      <div className="relative h-44 w-full">
-        <div className="absolute inset-0 bg-gradient-to-t from-black/50 to-transparent" />
-        <CoverImage src={coverImage} alt="Project cover image" className="h-44 w-full rounded-md" />
-        <div className="absolute bottom-4 z-5 flex w-full items-end justify-between gap-3 px-4">
-          <div className="flex flex-grow gap-3 truncate">
-            <Controller
-              control={control}
-              name="logo_props"
-              render={({ field: { value, onChange } }) => (
-                <EmojiPicker
-                  iconType="material"
-                  closeOnSelect={false}
-                  isOpen={isOpen}
-                  handleToggle={(val: boolean) => setIsOpen(val)}
-                  className="flex items-center justify-center"
-                  buttonClassName="flex h-[52px] w-[52px] flex-shrink-0 items-center justify-center rounded-lg bg-white/10"
-                  label={<Logo logo={value} size={28} />}
-                  // TODO: fix types
-                  onChange={(val: any) => {
-                    let logoValue = {};
+      <div className="flex w-full items-center gap-3">
+        <Controller
+          control={control}
+          name="logo_props"
+          render={({ field: { value, onChange } }) => (
+            <EmojiPicker
+              iconType="material"
+              closeOnSelect={false}
+              isOpen={isOpen}
+              handleToggle={(val: boolean) => setIsOpen(val)}
+              className="flex items-center justify-center"
+              buttonClassName="flex h-[52px] w-[52px] flex-shrink-0 items-center justify-center rounded-lg border border-subtle bg-layer-2"
+              label={<Logo logo={value} size={28} />}
+              // TODO: fix types
+              onChange={(val: any) => {
+                let logoValue = {};
 
-                    if (val?.type === "emoji")
-                      logoValue = {
-                        value: val.value,
-                      };
-                    else if (val?.type === "icon") logoValue = val.value;
+                if (val?.type === "emoji")
+                  logoValue = {
+                    value: val.value,
+                  };
+                else if (val?.type === "icon") logoValue = val.value;
 
-                    onChange({
-                      in_use: val?.type,
-                      [val?.type]: logoValue,
-                    });
-                    setIsOpen(false);
-                  }}
-                  defaultIconColor={value?.in_use && value.in_use === "icon" ? value?.icon?.color : undefined}
-                  defaultOpen={
-                    value.in_use && value.in_use === "emoji" ? EmojiIconPickerTypes.EMOJI : EmojiIconPickerTypes.ICON
-                  }
-                  disabled={!isAdmin}
-                />
-              )}
+                onChange({
+                  in_use: val?.type,
+                  [val?.type]: logoValue,
+                });
+                setIsOpen(false);
+              }}
+              defaultIconColor={value?.in_use && value.in_use === "icon" ? value?.icon?.color : undefined}
+              defaultOpen={
+                value.in_use && value.in_use === "emoji" ? EmojiIconPickerTypes.EMOJI : EmojiIconPickerTypes.ICON
+              }
+              disabled={!isAdmin}
             />
-            <div className="flex flex-col gap-1 truncate text-on-color">
-              <span className="truncate text-16 font-semibold">{watch("name")}</span>
-              <span className="flex items-center gap-2 text-13">
-                <span>{watch("identifier")} .</span>
-                <span className="flex items-center gap-1.5">
-                  {project.network === 0 && <LockIcon className="h-2.5 w-2.5 text-on-color" />}
-                  {currentNetwork && t(currentNetwork?.i18n_label)}
-                </span>
-              </span>
-            </div>
-          </div>
-          <div className="flex flex-shrink-0 justify-center">
-            <div>
-              <Controller
-                control={control}
-                name="cover_image_url"
-                render={({ field: { value, onChange } }) => (
-                  <ImagePickerPopover
-                    label={t("Change cover")}
-                    control={control}
-                    onChange={onChange}
-                    value={value ?? null}
-                    disabled={!isAdmin}
-                    projectId={project.id}
-                  />
-                )}
-              />
-            </div>
-          </div>
+          )}
+        />
+        <div className="flex flex-col gap-1 truncate">
+          <span className="truncate text-16 font-semibold">{watch("name")}</span>
+          <span className="flex items-center gap-2 text-13 text-secondary">
+            <span>{watch("identifier")} .</span>
+            <span className="flex items-center gap-1.5">
+              {project.network === 0 && <LockIcon className="h-2.5 w-2.5" />}
+              {currentNetwork && t(currentNetwork?.i18n_label)}
+            </span>
+          </span>
         </div>
       </div>
       <div className="mt-8 flex flex-col gap-8">

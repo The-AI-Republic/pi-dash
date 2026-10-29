@@ -123,7 +123,6 @@ export interface ProjectDetail {
   id: string;
   identifier: string;
   name: string;
-  cover_image: string;
   icon_prop: null;
   emoji: string;
   description: string;
