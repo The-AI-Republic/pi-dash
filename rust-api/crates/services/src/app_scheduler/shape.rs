@@ -74,6 +74,7 @@
 //!    date/time separator — reproduced, not sanitized.
 
 use chrono::{NaiveDate, NaiveDateTime};
+use pidash_compat::py::py_strip;
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -296,16 +297,6 @@ pub fn iso_item_type_error(index: usize, type_name: &str) -> String {
 /// `_validate_iso_datetime_list` unparsable item (`scheduler.py:66-69`).
 pub fn iso_item_parse_error(index: usize, detail: &str) -> String {
     format!("item {index} is not a valid ISO 8601 datetime: {detail}")
-}
-
-/// Python `str.strip()` with no arguments: strip Unicode whitespace.
-/// Exactly `char::is_whitespace` plus U+001C..U+001F (FS/GS/RS/US), which
-/// Python strips but Rust's `trim()` does not (verified by an exhaustive
-/// BMP probe of `str.strip` against the `White_Space` property: those 4
-/// are the only differences; no `White_Space` character exists above the
-/// BMP).
-fn py_strip(value: &str) -> &str {
-    value.trim_matches(|c: char| c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c))
 }
 
 /// `_validate_color` (`scheduler.py:37-43`): strip, lowercase, then

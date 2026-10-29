@@ -1,0 +1,164 @@
+name: rust-api-contract-tests-assistant-mcp-entry-soft-limit-rust
+
+# PIDASHCONV-1572: Rust-side replay of the MCP-entry soft-limit oracle.
+# The Django oracle half is `assistant/test_tasks_turn.py`
+# (`test_mcp_entry_hang_fails_at_soft_limit`), run by the worker-plane job
+# in rust-api-contract-tests.yml. This workflow mirrors the turn-replay
+# job shape with the Django worker (and beat) STOPPED and the Rust worker
+# (`pidash-api worker`) serving rust_job_queue instead: the replay
+# (tasks_assistant/test_mcp_entry_soft_limit_rust_replay.py) seeds a
+# rust_job_queue row with the exact Celery v2 payload, `assistant.run_turn`
+# executes LOCALLY against ten hanging MCP stubs (accept TCP, never
+# answer), and the turn must fail turn_timeout at the 60s soft limit —
+# toolset entry spans ~100s (sequential, ~10s per server), so the limit
+# deterministically fires mid-entry. A dedicated job (not the shared
+# turn-replay job) because that job must keep the 300 default for
+# `test_slow_stream_fails_at_soft_limit`.
+
+on:
+  push:
+    branches: [rust-dev]
+    paths:
+      - "rust-api/**"
+      - ".github/workflows/rust-api-contract-tests-assistant-mcp-entry-soft-limit-rust.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  assistant-mcp-entry-soft-limit-rust-replay:
+    name: assistant MCP-entry soft-limit oracle vs Rust worker
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:15.7-alpine
+        env:
+          POSTGRES_USER: pi_dash
+          POSTGRES_PASSWORD: pi_dash
+          POSTGRES_DB: pi_dash
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: valkey/valkey:7.2.11-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      rabbitmq:
+        image: rabbitmq:3.13.6-management-alpine
+        env:
+          RABBITMQ_DEFAULT_USER: pi_dash
+          RABBITMQ_DEFAULT_PASS: pi_dash
+          RABBITMQ_DEFAULT_VHOST: pi_dash
+        ports:
+          - 5672:5672
+          - 15672:15672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DJANGO_SETTINGS_MODULE: pi_dash.settings.local
+      POSTGRES_USER: pi_dash
+      POSTGRES_PASSWORD: pi_dash
+      POSTGRES_DB: pi_dash
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+      REDIS_URL: redis://localhost:6379/
+      CONTRACT_REDIS_URL: redis://localhost:6379/0
+      RABBITMQ_HOST: localhost
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USER: pi_dash
+      RABBITMQ_PASSWORD: pi_dash
+      RABBITMQ_VHOST: pi_dash
+      WEB_URL: http://localhost
+      APP_BASE_URL: http://localhost
+      BASE_URL: http://localhost:8000
+      DATABASE_URL: postgresql://pi_dash:pi_dash@localhost:5432/pi_dash
+      CELERY_BROKER_URL: amqp://pi_dash:pi_dash@localhost:5672/pi_dash
+      CONTRACT_TASK_TIMEOUT: "60"
+      # The Rust worker boots the assistant seam; the same committed
+      # test-only Fernet key the assistant suite uses (ephemeral CI
+      # database; never a real secret).
+      ASSISTANT_CRYPTO_BACKEND: fernet
+      ASSISTANT_ENCRYPTION_KEY: -k26Q_XWFtfq5jzJTSUY483-H3-wrdJ67w2kQgLDmlU=
+      # PIDASHCONV-1572: the MCP-entry replay enters ten hanging toolsets
+      # (~100s span, sequential) and the 60s soft limit must fire mid-entry.
+      # The default hard limit stays: its 390s sweep cutoff is clear of the
+      # ~60s replay turn.
+      ASSISTANT_TURN_SOFT_LIMIT: "60"
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12.x"
+          cache: pip
+          cache-dependency-path: |
+            apps/api/requirements.txt
+            apps/api/requirements/base.txt
+            apps/api/requirements/test.txt
+            rust-api/contract-tests/requirements.txt
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust-api
+
+      - name: Install API dependencies
+        working-directory: apps/api
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements/test.txt
+          pip install "django-debug-toolbar==4.3.0"
+
+      - name: Install contract-test dependencies
+        working-directory: rust-api/contract-tests
+        run: pip install -r requirements.txt
+
+      - name: Migrate contract database
+        working-directory: apps/api
+        run: python manage.py migrate --no-input
+
+      - name: Build Rust worker
+        working-directory: rust-api
+        run: cargo build --bin pidash-api
+
+      - name: Start Rust worker (Django worker stays stopped)
+        working-directory: rust-api
+        run: |
+          nohup ./target/debug/pidash-api worker \
+            > /tmp/contract-rust-worker.log 2>&1 &
+          for i in $(seq 1 30); do
+            grep -q "worker + scheduler loops started" /tmp/contract-rust-worker.log && break
+            sleep 2
+          done
+          grep -q "worker + scheduler loops started" /tmp/contract-rust-worker.log
+
+      - name: Run assistant MCP-entry soft-limit Rust replay
+        working-directory: rust-api/contract-tests
+        # Same plugin dodge as the Django oracle job: the API install puts
+        # pytest-django in this interpreter; the replay never touches Django.
+        run: env -u DJANGO_SETTINGS_MODULE pytest -p no:django tasks_assistant/test_mcp_entry_soft_limit_rust_replay.py -v
+
+      - name: Upload worker log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: contract-rust-worker-log
+          path: /tmp/contract-rust-worker.log

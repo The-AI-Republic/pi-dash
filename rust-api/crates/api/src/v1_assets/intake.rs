@@ -29,10 +29,11 @@
 //!   the same bytes;
 //! * `description_html` sanitization is
 //!   [`crate::space::sanitize::sanitize_html`] (`nh3.clean` port) and tag
-//!   stripping is `pidash_db`'s `strip_tags_ml` (`html_processor`
-//!   port). The lxml round-trip and the markdown-it converter below it
-//!   have no foundation home, so they live here, differentially tested
-//!   against live Python (see `markdown` / `lxml_emulate`).
+//!   stripping rides the `Issue.save()` hooks' MLStripper port. The lxml
+//!   round-trip is the shared
+//!   [`pidash_services::html_normalize::lxml_roundtrip`]; the markdown-it
+//!   converter below it has no foundation home, so it lives here,
+//!   differentially tested against live Python (see `markdown`).
 //!
 //! # Ported bugs (translate, don't redesign)
 //!
@@ -58,6 +59,7 @@
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
@@ -77,11 +79,19 @@ use pidash_db::v1_assets::intake_queries;
 use pidash_db::v1_projects::queries_projmem::{self, TenantScope as QueryScope};
 use pidash_jobs::v1_assets::tasks as intake_tasks;
 use pidash_services::app_issues::envelope;
+use pidash_services::domain::activity::TaskEnqueueHook;
+use pidash_services::domain::issues as domain_issues;
+use pidash_services::domain::issues::IssueFieldSet;
+use pidash_services::domain::transition::IssueTransitionHook;
+use pidash_services::domain::{self, WriteActor, WriteCtx, WriteScope};
+use pidash_services::html_normalize::lxml_roundtrip;
 use pidash_types::v1_assets::intake as intake_types;
 use pidash_types::{ProjectId, WorkspaceId};
 
 use super::permissions as v1_perm;
 use crate::assistant::events::py_dumps;
+use crate::domain_hooks::AppTaskEnqueueHook;
+use crate::issue_transition::AppTransitionHook;
 use crate::license::form_body::{self, BodyFail, BodyKind};
 use crate::paginator::{
     apply_offset_window, max_hits, next_cursor, offset_window, prev_cursor, Cursor,
@@ -90,7 +100,10 @@ use crate::space::sanitize::{sanitize_html, Sanitize};
 use crate::state::AppState;
 use crate::uuid_path::{classify_uuid_segment, UuidSegment};
 use crate::v1_cycles_modules::cycle as cycle_mod;
-use pidash_db::v1_assets::model::sticky::strip_tags_ml;
+use pidash_compat::datetime::{render_date_opt, render_datetime_opt, render_uuid_opt as opt_uuid};
+use pidash_compat::db::is_unique_violation;
+pub(crate) use pidash_compat::response::json_response;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -159,8 +172,6 @@ pub const PAGE_NOT_FOUND_BODY: &str = r#"{"error": "Page not found."}"#;
 /// `handle_exception`'s `IntegrityError` branch (`base.py:136-140`): the
 /// triage-creation race (unique `name`+`project`) 400s here.
 pub const PAYLOAD_INVALID_BODY: &str = r#"{"error":"The payload is not valid"}"#;
-/// `handle_exception`'s generic 500 branch.
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// Create pre-check (`views/intake.py:148-149`).
 pub const NAME_REQUIRED_BODY: &str = r#"{"error":"Name is required"}"#;
 /// Create priority allowlist (`views/intake.py:163-169`).
@@ -265,14 +276,6 @@ impl IntoResponse for Denial {
 
 pub(crate) type HandlerResult = Result<Response, Denial>;
 
-pub(crate) fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("view response")
-}
-
 fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("string serializes")
 }
@@ -283,10 +286,15 @@ fn json_string(value: &str) -> String {
 fn page_denial(error: crate::paginator::PageError) -> Denial {
     use crate::paginator::PageError;
     match error {
-        PageError::InvalidPerPage | PageError::PerPageTooLarge(_) | PageError::InvalidCursor => {
-            Denial::BadDetail(error.detail())
-        }
-        _ => Denial::ServerError,
+        PageError::InvalidPerPage
+        | PageError::PerPageTooLarge(_)
+        | PageError::InvalidCursor
+        | PageError::OffsetTooLarge
+        | PageError::NegativeOffset => Denial::BadDetail(error.detail()),
+        PageError::ZeroLimit
+        | PageError::NegativeSlice
+        | PageError::NonFiniteCursor
+        | PageError::MissingOrderKey => Denial::ServerError,
     }
 }
 
@@ -296,13 +304,6 @@ fn page_denial(error: crate::paginator::PageError) -> Denial {
 /// `handle_exception` branch).
 fn cycle_denial(_error: cycle_mod::Denial) -> Denial {
     Denial::ServerError
-}
-
-/// True for Postgres unique-violation errors (SQLSTATE 23505): the
-/// triage-creation race Django's `handle_exception` maps to the
-/// `IntegrityError` 400 (`base.py:136-140`).
-fn is_unique_violation(error: &sqlx::Error) -> bool {
-    matches!(error, sqlx::Error::Database(db) if db.code().as_deref() == Some("23505"))
 }
 
 // ---------------------------------------------------------------------------
@@ -315,15 +316,21 @@ fn is_unique_violation(error: &sqlx::Error) -> bool {
 /// `MultiPartParser` — `select_body_kind`) picks the parser by media type.
 /// The JSON branch serves the exact `application/json` in any case plus the
 /// `*/*`, `application/*` and `*/json` wildcards (`_MediaType.match`);
-/// form/multipart bodies become a last-wins field map (`QueryDict`);
-/// anything else is 415. Malformed JSON keeps the existing `ParseError` 400.
-fn parse_json_body(body: &[u8], headers: &HeaderMap, memory_limit: i64) -> Result<Value, Denial> {
+/// form/multipart bodies become a last-wins field map (`QueryDict`) carrying
+/// the file parts, so the update view can replay the immutable-`QueryDict`
+/// `.pop` 500 (`PIDASHCONV-1402`); anything else is 415. Malformed JSON keeps
+/// the existing `ParseError` 400.
+fn parse_json_body(
+    body: &[u8],
+    headers: &HeaderMap,
+    memory_limit: i64,
+) -> Result<form_body::ParsedBody, Denial> {
     // DRF's `_load_stream` leaves the stream `None` at content-length
     // zero and `_parse` returns the empty mapping without touching a
     // parser (`request.py`, DRF 3.15.2; same shape as the merged
     // precedents) — so emptiness is checked before the media type.
     if body.is_empty() {
-        return Ok(Value::Object(Map::new()));
+        return Ok(form_body::ParsedBody::json(Value::Object(Map::new())));
     }
     let content_type = headers
         .get(header::CONTENT_TYPE)
@@ -331,15 +338,16 @@ fn parse_json_body(body: &[u8], headers: &HeaderMap, memory_limit: i64) -> Resul
         .unwrap_or("");
     match form_body::select_body_kind(content_type) {
         Some(BodyKind::Json) => serde_json::from_slice(body)
+            .map(form_body::ParsedBody::json)
             .map_err(|error| Denial::BadDetail(format!("JSON parse error - {error}"))),
         // QueryDict semantics: last value wins (`parse_form_body`).
         Some(BodyKind::Form) => match form_body::parse_form_body(body) {
-            Ok(pairs) => Ok(form_body::ParsedBody::form(pairs).value().clone()),
+            Ok(pairs) => Ok(form_body::ParsedBody::form(pairs)),
             Err(_) => Err(Denial::ServerError),
         },
         Some(BodyKind::Multipart) => {
             match form_body::parse_multipart_body(content_type, body, memory_limit) {
-                Ok(pairs) => Ok(form_body::ParsedBody::form(pairs).value().clone()),
+                Ok(pairs) => Ok(form_body::ParsedBody::form(pairs)),
                 Err(BodyFail::Parse(message)) => Err(Denial::BadDetail(message)),
                 Err(BodyFail::Fatal) | Err(BodyFail::TooMany) => Err(Denial::ServerError),
             }
@@ -353,6 +361,46 @@ fn parse_json_body(body: &[u8], headers: &HeaderMap, memory_limit: i64) -> Resul
             Err(Denial::UnsupportedMediaType(raw.to_owned()))
         }
     }
+}
+
+/// True when the update view's `request.data.pop("issue", False)`
+/// (`views/intake.py:344`) raises `AttributeError` on an immutable
+/// `QueryDict` (`PIDASHCONV-1402`): DRF only copies the data (making it
+/// mutable) when files are present (`request.py`, `_load_data_and_files`),
+/// so a form/multipart body with no file parts pops immutable — and an
+/// empty body with a form content type is `QueryDict('')` (`_parse`),
+/// immutable too. Both are the generic 500. `intake_create` is unaffected
+/// because `QueryDict.get` never mutates.
+fn pops_immutable_querydict(
+    parsed: &form_body::ParsedBody,
+    body: &[u8],
+    headers: &HeaderMap,
+) -> bool {
+    if parsed.is_form() {
+        // File parts are the `_files` that trigger the mutable copy;
+        // without one the `QueryDict` stays immutable.
+        let has_files = parsed
+            .keys()
+            .iter()
+            .any(|key| matches!(parsed.field(key), form_body::BodyField::File(_)));
+        return !has_files;
+    }
+    if body.is_empty() {
+        // `_parse`'s empty branch checks the exact form media types
+        // (`is_form_media_type`), not the parser wildcards.
+        let content_type = headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("");
+        let base = content_type
+            .split(';')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        return base == "application/x-www-form-urlencoded" || base == "multipart/form-data";
+    }
+    false
 }
 
 /// Django `QueryDict.get`: the last value, or `None`. Axum's
@@ -450,10 +498,7 @@ async fn authenticate_api(pool: &sqlx::PgPool, presented: &str) -> Result<Uuid, 
             return Err(Denial::InvalidToken);
         }
     }
-    sqlx::query(r#"UPDATE api_tokens SET last_used = $1 WHERE id = $2"#)
-        .bind(now)
-        .bind(id)
-        .execute(pool)
+    pidash_services::domain::tokens::touch_api_token_last_used_by_id(pool, id, now)
         .await
         .map_err(|_| Denial::ServerError)?;
     // The token loggers stamp this id on the `process_logs` payload
@@ -527,18 +572,12 @@ async fn authenticate_machine(
         .await
         .map_err(|_| Denial::ServerError)?;
     if !member.unwrap_or(false) {
-        sqlx::query(r#"UPDATE machine_token SET revoked_at = $1 WHERE id = $2"#)
-            .bind(now)
-            .bind(id)
-            .execute(pool)
+        pidash_services::domain::tokens::revoke_machine_token_by_id(pool, id, now)
             .await
             .map_err(|_| Denial::ServerError)?;
         return Err(Denial::InvalidToken);
     }
-    sqlx::query(r#"UPDATE machine_token SET last_used_at = $1 WHERE id = $2"#)
-        .bind(now)
-        .bind(id)
-        .execute(pool)
+    pidash_services::domain::tokens::touch_machine_token_last_used_by_id(pool, id, now)
         .await
         .map_err(|_| Denial::ServerError)?;
     // The token loggers stamp this id on the `process_logs` payload
@@ -741,6 +780,7 @@ const IS_TYPE: usize = 26;
 const IS_DELETED_AT: usize = 27;
 const IS_GIT_WORK_BRANCH: usize = 28;
 const IS_ASSIGNED_POD: usize = 29;
+const IS_WORKPAD: usize = 30;
 const IS_CREATED_VIA: usize = 31;
 const IS_AGENT_EXECUTOR: usize = 32;
 const IS_COMPLEXITY_SCORE: usize = 33;
@@ -804,6 +844,7 @@ struct IssueRow {
     estimate_point_id: Option<Uuid>,
     type_id: Option<Uuid>,
     assigned_pod_id: Option<Uuid>,
+    workpad: String,
 }
 
 fn cell<T>(row: &sqlx::postgres::PgRow, index: usize) -> Result<T, Denial>
@@ -899,10 +940,96 @@ impl IssueRow {
             deleted_at: cell(row, base + IS_DELETED_AT)?,
             git_work_branch: cell(row, base + IS_GIT_WORK_BRANCH)?,
             assigned_pod_id: cell(row, base + IS_ASSIGNED_POD)?,
+            workpad: cell(row, base + IS_WORKPAD)?,
             created_via: cell(row, base + IS_CREATED_VIA)?,
             agent_executor: cell(row, base + IS_AGENT_EXECUTOR)?,
             complexity_score: cell(row, base + IS_COMPLEXITY_SCORE)?,
         })
+    }
+
+    /// The full-save field set: every column, for the domain write the
+    /// update/delete drivers run after overlaying their validated input.
+    /// `priority`/`complexity_score` fall back exactly like the old
+    /// UPDATE binds (`""`/`0`) on the unreachable stored-`None`.
+    fn field_set(&self) -> IssueFieldSet {
+        IssueFieldSet {
+            id: self.id,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+            created_by_id: self.created_by_id,
+            updated_by_id: self.updated_by_id,
+            deleted_at: self.deleted_at,
+            project_id: self.project_id,
+            workspace_id: self.workspace_id,
+            parent_id: self.parent_id,
+            state_id: self.state_id,
+            point: self.point,
+            estimate_point_id: self.estimate_point_id,
+            name: self.name.clone(),
+            description_json: self.description_json.clone(),
+            description_html: self.description_html.clone(),
+            description_stripped: self.description_stripped.clone(),
+            description_binary: self.description_binary.clone(),
+            priority: self.priority.clone().unwrap_or_default(),
+            complexity_score: self.complexity_score.unwrap_or(0),
+            start_date: self.start_date,
+            target_date: self.target_date,
+            sequence_id: self.sequence_id,
+            sort_order: self.sort_order,
+            completed_at: self.completed_at,
+            archived_at: self.archived_at,
+            is_draft: self.is_draft,
+            external_source: self.external_source.clone(),
+            external_id: self.external_id.clone(),
+            type_id: self.type_id,
+            git_work_branch: self.git_work_branch.clone(),
+            workpad: self.workpad.clone(),
+            created_via: self.created_via.clone(),
+            assigned_pod_id: self.assigned_pod_id,
+            agent_executor: self.agent_executor.clone(),
+        }
+    }
+
+    /// Adapt a saved domain row back to the render row (the create path
+    /// renders the returned row without re-reading).
+    fn from_model(model: &pidash_db::entity::issues::Model) -> Self {
+        let fields = IssueFieldSet::from(model);
+        Self {
+            id: fields.id,
+            created_at: fields.created_at,
+            updated_at: fields.updated_at,
+            deleted_at: fields.deleted_at,
+            point: fields.point,
+            name: fields.name,
+            description_json: fields.description_json,
+            description_html: fields.description_html,
+            description_stripped: fields.description_stripped,
+            description_binary: fields.description_binary,
+            priority: Some(fields.priority),
+            complexity_score: Some(fields.complexity_score),
+            start_date: fields.start_date,
+            target_date: fields.target_date,
+            sequence_id: fields.sequence_id,
+            sort_order: fields.sort_order,
+            completed_at: fields.completed_at,
+            archived_at: fields.archived_at,
+            is_draft: fields.is_draft,
+            external_source: fields.external_source,
+            external_id: fields.external_id,
+            git_work_branch: fields.git_work_branch,
+            created_via: fields.created_via,
+            agent_executor: fields.agent_executor,
+            created_by_id: fields.created_by_id,
+            updated_by_id: fields.updated_by_id,
+            project_id: fields.project_id,
+            workspace_id: fields.workspace_id,
+            parent_id: fields.parent_id,
+            state_id: fields.state_id,
+            estimate_point_id: fields.estimate_point_id,
+            type_id: fields.type_id,
+            assigned_pod_id: fields.assigned_pod_id,
+            workpad: fields.workpad,
+        }
     }
 
     /// Adapt to the merged full-`IssueSerializer` renderer input.
@@ -967,22 +1094,8 @@ fn issue_cols_qualified() -> String {
 // Renders (`IntakeIssueSerializer` + `IssueExpandSerializer` read shapes)
 // ---------------------------------------------------------------------------
 
-fn opt_uuid(value: &Option<Uuid>) -> Value {
-    value.map_or(Value::Null, |id| Value::String(id.to_string()))
-}
-
 fn opt_string(value: &Option<String>) -> Value {
     value.clone().map_or(Value::Null, Value::String)
-}
-
-fn render_datetime_opt(value: &Option<DateTime<Utc>>, timezone: &Tz) -> Value {
-    value.map_or(Value::Null, |dt| {
-        Value::String(crate::serializer::render_datetime_in(&dt, timezone))
-    })
-}
-
-fn render_date_opt(value: &Option<NaiveDate>) -> Value {
-    value.map_or(Value::Null, |date| Value::String(date.to_string()))
 }
 
 /// `description_binary` renders through DRF's `ModelField`
@@ -2472,6070 +2585,6 @@ fn check_description_html(html: &str, from_markdown: bool) -> Result<String, Des
 }
 
 // ---------------------------------------------------------------------------
-// lxml `html.fromstring` / `tostring` emulation (lxml 6.1.0, libxml2)
-// ---------------------------------------------------------------------------
-
-/// Emulate `html.tostring(html.fromstring(value), encoding="unicode")`
-/// for the description gate. `None` is the empty-document
-/// `ParserError` (`Document is empty`).
-///
-/// Assembly rules (`lxml/html/__init__.py:839-904` + libxml2 tree
-/// construction, all probed live):
-/// * no elements and HTML-whitespace-only text → `None`;
-/// * `^\s*<(html|!doctype)` (re.I, Python `\s`) → full-document mode:
-///   `<html{attrs}>` + optional head + frames + optional body, just as
-///   libxml2 built it (post-`</html>` content dropped);
-/// * otherwise the fragment rules: text-only → `<span>` (leading
-///   HTML-ws stripped); one element with insignificant surroundings →
-///   the element + its verbatim tail; else `<div>` iff any descendant
-///   is in `defs.block_tags`, else `<span>`;
-/// * head-only elements (`title`/`script`/`style`/`base`/`link`/`meta`)
-///   before any body content, explicit `<head>`, and leading
-///   frame-ish elements (`frame`/`frameset`/`noframes`) force document
-///   shape; an explicit `<body>` is transparent (its post-text becomes
-///   the result tail — dropped when the body holds one element).
-fn lxml_roundtrip(html: &str) -> Option<String> {
-    if let Some(prefix_len) = lxml_full_html_prefix(html) {
-        return lxml_document(html, prefix_len);
-    }
-    let nodes = lxml_parse_fragment(html);
-    lxml_assemble(nodes)
-}
-
-/// `_looks_like_full_html_unicode`: `^\s*<(?:html|!doctype)` (re.I).
-/// Returns the length of the leading-whitespace prefix on match.
-fn lxml_full_html_prefix(html: &str) -> Option<usize> {
-    let stripped = html.trim_start_matches(is_py_strip_char);
-    let after_ws = html.len() - stripped.len();
-    let lower = stripped.to_ascii_lowercase();
-    if lower.starts_with("<html") || lower.starts_with("<!doctype") {
-        // `<htmlX` must still be a tag open, not `<htmlfoo` text... it
-        // is: the regex only needs the literal prefix.
-        Some(after_ws)
-    } else {
-        None
-    }
-}
-
-/// libxml2 HTML whitespace: tab, LF, FF, CR, space (NOT vertical tab).
-fn is_html_ws(ch: char) -> bool {
-    matches!(ch, '\t' | '\n' | '\x0C' | '\r' | ' ')
-}
-
-/// Python-`.strip()` significance (fromstring's `.strip()` checks).
-fn lxml_significant(text: &str) -> bool {
-    !text.trim_matches(is_py_strip_char).is_empty()
-}
-
-/// `defs.block_tags`, exactly (general + list + table + the four
-/// partial-form tags — note `del`/`ins`/`option` ARE block here).
-fn lxml_is_block_tag(name: &str) -> bool {
-    matches!(
-        name,
-        "address"
-            | "blockquote"
-            | "center"
-            | "del"
-            | "div"
-            | "h1"
-            | "h2"
-            | "h3"
-            | "h4"
-            | "h5"
-            | "h6"
-            | "hr"
-            | "ins"
-            | "isindex"
-            | "noscript"
-            | "p"
-            | "pre"
-            | "dir"
-            | "dl"
-            | "dt"
-            | "dd"
-            | "li"
-            | "menu"
-            | "ol"
-            | "ul"
-            | "table"
-            | "caption"
-            | "colgroup"
-            | "col"
-            | "thead"
-            | "tfoot"
-            | "tbody"
-            | "tr"
-            | "td"
-            | "th"
-            | "fieldset"
-            | "form"
-            | "legend"
-            | "optgroup"
-            | "option"
-    )
-}
-
-/// `_contains_block_level_tag`: any descendant (or self) in block_tags.
-fn lxml_contains_block(nodes: &[LxmlNode]) -> bool {
-    nodes.iter().any(|node| match node {
-        LxmlNode::Text(_) | LxmlNode::HeadClose | LxmlNode::BodyClose | LxmlNode::Comment(_) => {
-            false
-        }
-        LxmlNode::Element(element) => {
-            lxml_is_block_tag(&element.name) || lxml_contains_block(&element.children)
-        }
-    })
-}
-
-/// Frame-ish elements (libxml2's html>frameset shapes).
-fn lxml_is_frame(name: &str) -> bool {
-    matches!(name, "frame" | "frameset" | "noframes")
-}
-
-/// Serialize a node list (elements + escaped text, verbatim order).
-fn lxml_serialize_nodes(nodes: &[LxmlNode]) -> String {
-    let mut out = String::new();
-    for node in nodes {
-        match node {
-            LxmlNode::Element(element) => out.push_str(&lxml_serialize_element(element)),
-            LxmlNode::Text(text) => out.push_str(&lxml_escape_text(text)),
-            LxmlNode::Comment(content) => out.push_str(&lxml_serialize_comment(content)),
-            // Markers never survive to serialization (filtered in
-            // fragments, consumed in documents); skip defensively.
-            LxmlNode::HeadClose | LxmlNode::BodyClose => {}
-        }
-    }
-    out
-}
-
-/// Serialize a comment: empty content renders `<!---->` (libxml2's
-/// abrupt-closing spelling), anything else verbatim in `<!--...-->`.
-fn lxml_serialize_comment(content: &str) -> String {
-    if content.is_empty() {
-        String::from("<!---->")
-    } else {
-        format!("<!--{content}-->")
-    }
-}
-
-/// Serialize an open tag's attributes (`name`/`name="value"`).
-fn lxml_serialize_attrs(attrs: &[(String, Option<String>)]) -> String {
-    let mut out = String::new();
-    for (name, value) in attrs {
-        match value {
-            None => {
-                out.push(' ');
-                out.push_str(name);
-            }
-            Some(value) => {
-                let minimized = lxml_is_boolean_attr(name)
-                    && (value.is_empty() || value.eq_ignore_ascii_case(name));
-                if minimized {
-                    out.push(' ');
-                    out.push_str(name);
-                } else {
-                    let mut val = value.clone();
-                    if lxml_is_url_attr(name) {
-                        val = lxml_encode_url(&val);
-                    }
-                    // Quote choice: single quotes iff the value holds
-                    // `"` but no `'` (else `"` escapes as `&quot;`).
-                    out.push(' ');
-                    out.push_str(name);
-                    if val.contains('"') && !val.contains('\'') {
-                        out.push_str("='");
-                        out.push_str(&lxml_escape_attr_inner(&val, false));
-                        out.push('\'');
-                    } else {
-                        out.push_str("=\"");
-                        out.push_str(&lxml_escape_attr(&val));
-                        out.push('"');
-                    }
-                }
-            }
-        }
-    }
-    out
-}
-
-/// Full-document assembly (the regex matched): `<html{attrs}>` plus head,
-/// frames and body. `prefix_len` is the leading-whitespace run, whose
-/// non-HTML-ws remainder becomes body text (probed: `\xa0<html>`).
-fn lxml_document(html: &str, prefix_len: usize) -> Option<String> {
-    let nodes = lxml_parse_fragment(html);
-    // Content = children of `<html>` elements (first one's attrs win);
-    // with no `<html>` element (doctype-only) the top level itself.
-    // Anything after `</html>` never survives libxml2 (probed).
-    let mut html_attrs: Option<Vec<(String, Option<String>)>> = None;
-    let mut content: Vec<LxmlNode> = Vec::new();
-    let mut saw_html = false;
-    // The `<html>` attributes survive only before any content (a
-    // prefix remainder or an earlier element/non-blank text drops
-    // them — probed); a `<html/>` never claims them (content flows
-    // past it — probed).
-    let mut saw_content = !html[..prefix_len].trim_start_matches(is_html_ws).is_empty();
-    for node in nodes {
-        match node {
-            LxmlNode::Element(element) if element.name == "html" && !element.slash && !saw_html => {
-                saw_html = true;
-                if !saw_content {
-                    html_attrs = Some(element.attrs.clone());
-                }
-                content.extend(element.children);
-            }
-            LxmlNode::Element(element) if element.name == "html" && !element.slash => {
-                // A second top-level `<html>` ends the document:
-                // it and everything after drop (probed).
-                break;
-            }
-            LxmlNode::Element(element) if element.name == "html" => {
-                // A first `<html/>` (nothing before it) claims the
-                // document: attrs kept, everything after dropped
-                // (`<html/>x` → `<html></html>`). A later one flows
-                // through (and seals the body like `<body/>` —
-                // probed).
-                if !saw_content && !saw_html {
-                    saw_html = true;
-                    html_attrs = Some(element.attrs);
-                } else if !saw_html {
-                    content.push(LxmlNode::Element(element));
-                }
-            }
-            other => {
-                if !saw_html {
-                    saw_content = saw_content
-                        || match &other {
-                            LxmlNode::Element(_) => true,
-                            LxmlNode::Text(text) => !lxml_is_html_blank(text),
-                            LxmlNode::Comment(_) | LxmlNode::HeadClose | LxmlNode::BodyClose => {
-                                false
-                            }
-                        };
-                    content.push(other);
-                }
-                // Post-`</html>` nodes are dropped.
-            }
-        }
-    }
-    // The leading prefix (all strip-ws by regex construction) is
-    // dropped as parsed text — only its non-HTML-ws remainder (e.g.
-    // `\xa0`) survives as body text. The parser flushed exactly at
-    // the `<`, so the first text node IS the prefix.
-    if prefix_len > 0 {
-        if let Some(LxmlNode::Text(_)) = content.first() {
-            content.remove(0);
-        }
-    }
-    let prefix_body_text = html[..prefix_len].trim_start_matches(is_html_ws).to_owned();
-    lxml_build_document(content, html_attrs, prefix_body_text, true)
-}
-
-/// Fragment assembly: explicit `<html>` is transparent here (its
-/// children splice inline — probed). Document-shaped input (a
-/// head/frame/head element first) routes to document assembly with
-/// bodies intact; other bodies merge per the fragment rules.
-fn lxml_assemble(nodes: Vec<LxmlNode>) -> Option<String> {
-    // Fragment-mode `<html>` is transparent (children splice inline)
-    // — except self-closing leftovers, which close like `<body/>`.
-    // A first-significant `<html>` (past blanks/comments/markers)
-    // splices and drops everything after it (`<!--c--><html>y</html>z`
-    // → `<span>y</span>` — probed); a later one splices inline.
-    let nodes_in = nodes;
-    let mut nodes: Vec<LxmlNode> = Vec::new();
-    let mut saw_significant = false;
-    for node in nodes_in {
-        match node {
-            LxmlNode::Element(element) if element.name == "html" && !element.slash => {
-                nodes.extend(element.children);
-                if !saw_significant {
-                    // First-significant `<html>`: drop everything
-                    // after the splice.
-                    break;
-                }
-            }
-            other => {
-                let significant = match &other {
-                    LxmlNode::Element(_) => true,
-                    LxmlNode::Text(text) => !lxml_is_html_blank(text),
-                    LxmlNode::Comment(_) | LxmlNode::HeadClose | LxmlNode::BodyClose => false,
-                };
-                saw_significant = saw_significant || significant;
-                nodes.push(other);
-            }
-        }
-    }
-    // Document-shape inference: a head-only/frame/head element first
-    // (past blank text and stray head closes) forces document shape.
-    // The blank measure is libxml2's, not Python's: `\x0b`/`\xa0`
-    // break inference (`\xa0<title>t</title>` → bare `<title>t</title>`).
-    // An explicit body first plus a head element anywhere later also
-    // forces it (the head late-splits after the body) — unless a
-    // `<html/>` intervenes (end-of-document: everything after drops).
-    let mut force_doc = false;
-    // Spurious stray-body markers (nothing significant before them)
-    // strip before inference (they must not gate head-only forcing
-    // — probed).
-    let mut drop_markers = Vec::new();
-    for (index, node) in nodes.iter().enumerate() {
-        if matches!(node, LxmlNode::BodyClose) {
-            let violations = nodes[..index]
-                .iter()
-                .filter(|node| match node {
-                    LxmlNode::Element(_) => true,
-                    LxmlNode::Text(text) => lxml_significant(text),
-                    _ => false,
-                })
-                .count();
-            if violations == 0 {
-                drop_markers.push(index);
-            }
-        }
-    }
-    for index in drop_markers.into_iter().rev() {
-        nodes.remove(index);
-    }
-    // A stray-`</body>` marker anywhere suppresses breaks (pre-marker
-    // content scans past it); body-first stays positional (a body or
-    // marker seen so far gates head-only/frame forcing — probed).
-    let has_marker = nodes.iter().any(|node| matches!(node, LxmlNode::BodyClose));
-    let mut body_first = false;
-    let mut saw_significant = false;
-    for node in &nodes {
-        match node {
-            LxmlNode::Text(text) if !lxml_is_html_blank(text) => {
-                saw_significant = true;
-                if !body_first && !has_marker {
-                    break;
-                }
-            }
-            // A `head` element forces anywhere; head-only/frame
-            // elements force only first-significant (past body-start
-            // or content they stay inline — probed).
-            LxmlNode::Element(element) if element.name == "head" => {
-                force_doc = true;
-                break;
-            }
-            LxmlNode::Element(element)
-                if (lxml_is_head_only(&element.name) || lxml_is_frame(&element.name))
-                    && !body_first
-                    && !saw_significant =>
-            {
-                force_doc = true;
-                break;
-            }
-            LxmlNode::BodyClose if !body_first => {
-                body_first = true;
-            }
-            LxmlNode::Element(element) if element.name == "body" && !body_first => {
-                // First significant node is a body: keep scanning for
-                // a head (a second body is just another element).
-                body_first = true;
-                saw_significant = true;
-            }
-            // A `<html/>` ends the scan (before a body it is just
-            // another element; after a body-first it ends the
-            // document: nothing later survives — probed).
-            LxmlNode::Element(element) if element.name == "html" && element.slash => break,
-            LxmlNode::Element(_) => {
-                saw_significant = true;
-                if !body_first && !has_marker {
-                    break;
-                }
-            }
-            _ => {}
-        }
-    }
-    if force_doc {
-        return lxml_build_document(nodes, None, String::new(), false);
-    }
-    // Plain fragments splice top-level `<head>` pairs transparently
-    // (probed: the head vanishes, children stay); slash-heads stay
-    // (they close like `<body/>`). Stray head closes are ignored.
-    let nodes: Vec<LxmlNode> = nodes
-        .into_iter()
-        .flat_map(|node| match node {
-            LxmlNode::Element(element) if element.name == "head" && !element.slash => {
-                element.children
-            }
-            LxmlNode::HeadClose => vec![],
-            other => vec![other],
-        })
-        .collect();
-    let first_body = nodes.iter().position(|node| {
-        matches!(node, LxmlNode::Element(element) if element.name == "body")
-            || matches!(node, LxmlNode::Element(element) if element.name == "html" && element.slash)
-            || matches!(node, LxmlNode::Element(element) if element.name == "head" && element.slash)
-    });
-    let Some(first_body) = first_body else {
-        // Empty: no elements and HTML-ws-only text (`\x0b` COUNTS —
-        // libxml2's measure, not Python's).
-        let has_element = nodes
-            .iter()
-            .any(|node| matches!(node, LxmlNode::Element(_)));
-        let has_content = nodes.iter().any(|node| match node {
-            LxmlNode::Element(_) => true,
-            // An empty text (only an unclosed open tag at EOF leaves
-            // one) counts: `<mid  A` alone is `<span></span>`.
-            LxmlNode::Text(text) => text.is_empty() || text.chars().any(|ch| !is_html_ws(ch)),
-            LxmlNode::Comment(_) | LxmlNode::HeadClose | LxmlNode::BodyClose => false,
-        });
-        if !has_element && !has_content {
-            return None;
-        }
-        return lxml_assemble_fragment(nodes, String::new());
-    };
-    // An explicit body is content by itself (`<body></body>` →
-    // `<span></span>`): no empty arm below this point.
-    //
-    // Implied body: any element or non-blank text before the first
-    // body opens the body early (explicit bodies then splice
-    // transparently with attrs dropped, post content merges — until a
-    // self-closing `<body/>` closes it again).
-    let implied = nodes[..first_body].iter().any(|node| match node {
-        LxmlNode::Element(_) => true,
-        LxmlNode::Text(text) => !lxml_is_html_blank(text),
-        LxmlNode::Comment(_) | LxmlNode::HeadClose | LxmlNode::BodyClose => false,
-    });
-    if implied {
-        lxml_assemble_implied_body(nodes)
-    } else {
-        lxml_assemble_merged_body(nodes, first_body)
-    }
-}
-
-/// Fragment with an implied body: pre-body content + all bodies'
-/// children merge into one fragment; a `<body/>` closes (later text is
-/// tail, later non-body elements are dropped and stop the tail).
-fn lxml_assemble_implied_body(nodes: Vec<LxmlNode>) -> Option<String> {
-    let mut fragment: Vec<LxmlNode> = Vec::new();
-    let mut tail = String::new();
-    let mut accumulating = true;
-    let mut closed = false;
-    let mut saw_body = false;
-    for node in nodes {
-        if closed {
-            match node {
-                LxmlNode::Element(element) if element.name == "body" => {
-                    fragment.extend(element.children);
-                }
-                LxmlNode::Element(element)
-                    if (element.name == "html" || element.name == "head") && element.slash =>
-                {
-                    // Already closed: contributes nothing.
-                }
-                LxmlNode::Text(text) => {
-                    if accumulating {
-                        tail.push_str(&text);
-                    }
-                }
-                LxmlNode::Element(_) | LxmlNode::Comment(_) => {
-                    accumulating = false;
-                }
-                LxmlNode::HeadClose | LxmlNode::BodyClose => {}
-            }
-            continue;
-        }
-        match node {
-            LxmlNode::Element(element) if element.name == "body" => {
-                if element.slash {
-                    closed = true;
-                } else {
-                    saw_body = true;
-                    fragment.extend(element.children);
-                }
-            }
-            LxmlNode::Element(element)
-                if (element.name == "html" || element.name == "head") && element.slash =>
-            {
-                closed = true;
-            }
-            LxmlNode::Text(text) if saw_body && lxml_is_html_blank(&text) => {
-                // Post-body blanks join the last element's content
-                // (`<div>a</div><body><b>x</body>  ` keeps the blanks
-                // in `b` — probed).
-                if let Some(LxmlNode::Element(element)) = fragment.last_mut() {
-                    element.children.push(LxmlNode::Text(text));
-                } else {
-                    fragment.push(LxmlNode::Text(text));
-                }
-            }
-            other => fragment.push(other),
-        }
-    }
-    // libxml2 skips leading blanks at parse: the implied body opens at
-    // the first non-blank. Emulated here (plain assembly strips
-    // idempotently, so this only matters for verbatim consumers).
-    if let Some(LxmlNode::Text(first)) = fragment.first() {
-        let stripped = first.trim_start_matches(is_html_ws).to_owned();
-        if stripped.is_empty() {
-            fragment.remove(0);
-        } else {
-            fragment[0] = LxmlNode::Text(stripped);
-        }
-    }
-    lxml_assemble_fragment(fragment, tail)
-}
-
-/// Fragment with explicit bodies only (the blank prelude is dropped):
-/// children concatenate, tails concatenate, the first body's attrs win;
-/// post-body non-body elements are dropped and stop the tail.
-fn lxml_assemble_merged_body(nodes: Vec<LxmlNode>, first_body: usize) -> Option<String> {
-    let mut children: Vec<LxmlNode> = Vec::new();
-    let mut attrs: Option<Vec<(String, Option<String>)>> = None;
-    let mut tail = String::new();
-    let mut accumulating = true;
-    for node in nodes.into_iter().skip(first_body) {
-        match node {
-            LxmlNode::Element(element) if element.name == "body" => {
-                if attrs.is_none() {
-                    attrs = Some(element.attrs);
-                }
-                children.extend(element.children);
-            }
-            LxmlNode::Element(element)
-                if (element.name == "html" || element.name == "head") && element.slash =>
-            {
-                // A `<html/>`/`<head/>` only closes (never opens, no attrs).
-            }
-            LxmlNode::Text(text) => {
-                if accumulating {
-                    tail.push_str(&text);
-                }
-            }
-            LxmlNode::Element(_) | LxmlNode::Comment(_) => {
-                accumulating = false;
-            }
-            LxmlNode::HeadClose | LxmlNode::BodyClose => {}
-        }
-    }
-    lxml_render_merged_body(children, attrs, tail)
-}
-
-/// Merged-body rendering shared by fragment assembly and the
-/// frames-die fallback: a lone element unwraps (leading
-/// Python-insignificant text dropped, trailing kept, attrs and tail
-/// dropped), else the body renames to span/div keeping attrs,
-/// children verbatim, tail after. Never empty.
-fn lxml_render_merged_body(
-    children: Vec<LxmlNode>,
-    attrs: Option<Vec<(String, Option<String>)>>,
-    tail: String,
-) -> Option<String> {
-    // A lone comment unwraps bare like a lone element (leading
-    // insignificant text dropped, trailing kept, tail dropped).
-    let elements = children
-        .iter()
-        .filter(|node| matches!(node, LxmlNode::Element(_) | LxmlNode::Comment(_)))
-        .count();
-    if elements == 1 {
-        let position = children
-            .iter()
-            .position(|node| matches!(node, LxmlNode::Element(_) | LxmlNode::Comment(_)))
-            .expect("element");
-        let leading_ok = children[..position].iter().all(|node| match node {
-            LxmlNode::Text(text) => !lxml_significant(text),
-            // A leading comment blocks the unwrap too (it renders in
-            // the wrap); markers stay transparent.
-            LxmlNode::Comment(_) => false,
-            _ => true,
-        });
-        let trailing: String = children[position + 1..]
-            .iter()
-            .filter_map(|node| match node {
-                LxmlNode::Text(text) => Some(text.clone()),
-                _ => None,
-            })
-            .collect();
-        // A trailing comment blocks the unwrap (leading comments do
-        // not — they drop with the body).
-        let trailing_comment = children[position + 1..]
-            .iter()
-            .any(|node| matches!(node, LxmlNode::Comment(_)));
-        if leading_ok && !lxml_significant(&trailing) && !trailing_comment {
-            let mut out = match &children[position] {
-                LxmlNode::Element(element) => lxml_serialize_element(element),
-                LxmlNode::Comment(content) => lxml_serialize_comment(content),
-                _ => unreachable!(),
-            };
-            out.push_str(&lxml_escape_text(&trailing));
-            return Some(out);
-        }
-    }
-    let tag = if lxml_contains_block(&children) {
-        "div"
-    } else {
-        "span"
-    };
-    let mut out = format!("<{tag}");
-    if let Some(attrs) = attrs {
-        out.push_str(&lxml_serialize_attrs(&attrs));
-    }
-    out.push('>');
-    out.push_str(&lxml_serialize_nodes(&children));
-    out.push_str(&format!("</{tag}>"));
-    out.push_str(&lxml_escape_text(&tail));
-    Some(out)
-}
-
-/// Plain-fragment assembly (document shape already ruled out, no
-/// explicit body/html left): text-only → span; single → element +
-/// verbatim tail; else span/div by block descendants. `tail` appends
-/// unless the fragment is a lone element (then it is dropped).
-fn lxml_assemble_fragment(nodes: Vec<LxmlNode>, mut tail: String) -> Option<String> {
-    // A `<head>` this far past inference is past body-start, so it
-    // splices transparently (probed: `<p>x</p><head><title>t</title>`
-    // `</head>` keeps the title inline, drops the head tags).
-    let nodes: Vec<LxmlNode> = nodes
-        .into_iter()
-        .flat_map(|node| match node {
-            LxmlNode::Element(element) if element.name == "head" => element.children,
-            other => vec![other],
-        })
-        .collect();
-    // A stray-body marker splits the stream: a single-element pre
-    // drops everything after; otherwise leading post-marker text
-    // survives as tail (up to the first element/comment).
-    let mut nodes = nodes;
-    if let Some(marker) = nodes
-        .iter()
-        .position(|node| matches!(node, LxmlNode::BodyClose))
-    {
-        let violations = nodes[..marker]
-            .iter()
-            .filter(|node| match node {
-                LxmlNode::Element(_) => true,
-                LxmlNode::Text(text) => lxml_significant(text),
-                LxmlNode::Comment(_) => false,
-                _ => false,
-            })
-            .count();
-        let single = violations == 1
-            && nodes[..marker]
-                .iter()
-                .any(|node| matches!(node, LxmlNode::Element(_)));
-        if violations == 0 {
-            // Nothing significant before the marker: it is spurious
-            // — drop it and assemble the rest normally (`</body>x`
-            // → `<span>x</span>` — probed).
-            nodes.remove(marker);
-            nodes.retain(|node| !matches!(node, LxmlNode::BodyClose));
-        } else if single {
-            nodes.truncate(marker);
-        } else {
-            // Leading post-marker text survives as tail; the first
-            // element/comment (or second marker) ends it.
-            for node in &nodes[marker + 1..] {
-                match node {
-                    LxmlNode::Text(text) => tail.push_str(text),
-                    _ => break,
-                }
-            }
-            nodes.truncate(marker);
-        }
-        nodes.retain(|node| !matches!(node, LxmlNode::BodyClose));
-    }
-    // Leading strip: a Python-blank text run strips only when the
-    // rest is a single element/comment (+ blanks) -- otherwise it
-    // stays for the wrap; significant text loses just its HTML-ws run.
-    // Comments strip iff followed by significant content (element,
-    // comment, or non-HTML-blank text).
-    loop {
-        match nodes.first() {
-            Some(LxmlNode::HeadClose) | Some(LxmlNode::BodyClose) => {
-                nodes.remove(0);
-            }
-            Some(LxmlNode::Comment(_)) => {
-                let rest_significant = nodes[1..].iter().any(|node| match node {
-                    LxmlNode::Element(_) | LxmlNode::Comment(_) => true,
-                    LxmlNode::Text(text) => !lxml_is_html_blank(text),
-                    _ => false,
-                });
-                if rest_significant {
-                    nodes.remove(0);
-                } else {
-                    break;
-                }
-            }
-            Some(LxmlNode::Text(first)) if lxml_is_html_blank(first) => {
-                nodes.remove(0);
-            }
-            Some(LxmlNode::Text(first)) if !lxml_significant(first) => {
-                // Python-blank but HTML-significant (`\x0b`): strips
-                // only when the rest is a single element/comment (+
-                // blanks); otherwise just the HTML-ws run trims.
-                let rest: Vec<&LxmlNode> = nodes[1..]
-                    .iter()
-                    .filter(|node| match node {
-                        LxmlNode::Text(text) => lxml_significant(text),
-                        LxmlNode::Element(_) | LxmlNode::Comment(_) => true,
-                        _ => false,
-                    })
-                    .collect();
-                let single = rest.len() == 1
-                    && matches!(rest[0], LxmlNode::Element(_) | LxmlNode::Comment(_));
-                if single {
-                    nodes.remove(0);
-                } else if let Some(LxmlNode::Text(first)) = nodes.first_mut() {
-                    *first = first.trim_start_matches(is_html_ws).to_owned();
-                    break;
-                } else {
-                    break;
-                }
-            }
-            Some(LxmlNode::Text(_)) => {
-                if let Some(LxmlNode::Text(first)) = nodes.first_mut() {
-                    *first = first.trim_start_matches(is_html_ws).to_owned();
-                }
-                break;
-            }
-            _ => break,
-        }
-    }
-    let elements = nodes
-        .iter()
-        .filter(|node| matches!(node, LxmlNode::Element(_)))
-        .count();
-    if elements == 0 {
-        // A lone comment (leading blanks stripped above) renders bare
-        // with its blank tail (`\x0b<!--c-->`).
-        if let Some(LxmlNode::Comment(_)) = nodes.first() {
-            let bare = nodes[1..]
-                .iter()
-                .all(|node| matches!(node, LxmlNode::Text(text) if lxml_is_html_blank(text)));
-            if bare {
-                let mut out = match &nodes[0] {
-                    LxmlNode::Comment(content) => lxml_serialize_comment(content),
-                    _ => unreachable!(),
-                };
-                for node in &nodes[1..] {
-                    if let LxmlNode::Text(text) = node {
-                        out.push_str(&lxml_escape_text(text));
-                    }
-                }
-                out.push_str(&lxml_escape_text(&tail));
-                return Some(out);
-            }
-        }
-        let mut out = format!("<span>{}</span>", lxml_serialize_nodes(&nodes));
-        out.push_str(&lxml_escape_text(&tail));
-        return Some(out);
-    }
-    // Single element with insignificant surroundings → it + verbatim
-    // tail (leading text is dropped with the body).
-    if elements == 1 {
-        let position = nodes
-            .iter()
-            .position(|node| matches!(node, LxmlNode::Element(_)))
-            .expect("element");
-        let leading_ok = nodes[..position].iter().all(|node| match node {
-            LxmlNode::Text(text) => !lxml_significant(text),
-            // Unreachable (leading comments strip above), but a
-            // comment here must block like in merged bodies.
-            LxmlNode::Comment(_) => false,
-            _ => true,
-        });
-        let trailing: String = nodes[position + 1..]
-            .iter()
-            .filter_map(|node| match node {
-                LxmlNode::Text(text) => Some(text.clone()),
-                _ => None,
-            })
-            .collect();
-        // A trailing comment blocks the unwrap (leading comments were
-        // already stripped above).
-        let trailing_comment = nodes[position + 1..]
-            .iter()
-            .any(|node| matches!(node, LxmlNode::Comment(_)));
-        if leading_ok && !lxml_significant(&trailing) && !trailing_comment {
-            let LxmlNode::Element(element) = &nodes[position] else {
-                unreachable!();
-            };
-            let mut out = lxml_serialize_element(element);
-            out.push_str(&lxml_escape_text(&trailing));
-            return Some(out);
-        }
-    }
-    // libxml2 strips the body's leading HTML-ws run at parse time,
-    // in every mode (`  a<b>x</b>` → `<span>a<b>x</b></span>`).
-    if let Some(LxmlNode::Text(first)) = nodes.first() {
-        let stripped = first.trim_start_matches(is_html_ws).to_owned();
-        if stripped.is_empty() {
-            nodes.remove(0);
-        } else {
-            nodes[0] = LxmlNode::Text(stripped);
-        }
-    }
-    let tag = if lxml_contains_block(&nodes) {
-        "div"
-    } else {
-        "span"
-    };
-    let mut out = format!("<{tag}>");
-    out.push_str(&lxml_serialize_nodes(&nodes));
-    out.push_str(&format!("</{tag}>"));
-    out.push_str(&lxml_escape_text(&tail));
-    Some(out)
-}
-
-/// Document assembly shared by full-html mode and head/frame
-/// inference. Partition phases: PRE (head/frames accumulate), IN
-/// (implied body open), POST (explicit body closed). Fragment-doc
-/// mode smashes bodies and drops frames against an explicit-or-content
-/// body without a head; full-html mode keeps every body section and
-/// sibling in document order.
-fn lxml_build_document(
-    nodes: Vec<LxmlNode>,
-    html_attrs: Option<Vec<(String, Option<String>)>>,
-    prefix_text: String,
-    doc_mode: bool,
-) -> Option<String> {
-    let mut asm = DocAsm {
-        head: Vec::new(),
-        head_tails: Vec::new(),
-        head_explicit: false,
-        head_attrs: None,
-        head_attrs_first: false,
-        head_open: false,
-        head_closed_clean: false,
-        frames: Vec::new(),
-        frame_tails: Vec::new(),
-        head_first: true,
-        last_accum_frame: None,
-        mid: Vec::new(),
-        body: Vec::new(),
-        body_attrs: None,
-        post: Vec::new(),
-        flow: Vec::new(),
-        current: Vec::new(),
-        pending: Vec::new(),
-        pre: Vec::new(),
-        phase: LxmlPhase::Pre,
-        doc_mode,
-        has_html: html_attrs.is_some(),
-    };
-    // A non-blank prefix remainder implies the body before any
-    // content (`\xa0<html><title>t</title></html>` puts the title in
-    // the body; the remainder merges ahead of the body's own text).
-    // Fragment callers always pass an empty prefix.
-    if !prefix_text.is_empty() {
-        asm.phase = LxmlPhase::In;
-        asm.push_body_node(LxmlNode::Text(prefix_text.clone()));
-    }
-    // Head loop: heads splice their children back into the stream
-    // (feedback at the head), which is then reprocessed first.
-    let mut nodes = nodes;
-    while !nodes.is_empty() {
-        let node = nodes.remove(0);
-        asm.step(node, &mut nodes);
-    }
-    asm.finish(html_attrs, prefix_text)
-}
-
-/// Partition phases (see `lxml_build_document`).
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-enum LxmlPhase {
-    Pre,
-    In,
-    Post,
-}
-
-/// Full-html flow items: body sections and their siblings in document
-/// order (`<body>x</body>t1<body>y</body>` keeps both bodies with `t1`
-/// between — full-html mode never smashes).
-enum LxmlFlow {
-    Body {
-        attrs: Option<Vec<(String, Option<String>)>>,
-        children: Vec<LxmlNode>,
-    },
-    Node(LxmlNode),
-}
-
-/// Where a late-split head element lands: mid (full-html pre-body),
-/// post (fragment-doc post-body) or flow (full-html post-body).
-enum LxmlLateTarget {
-    Mid,
-    Post,
-    Flow,
-}
-
-/// Document-assembly state (see `lxml_build_document`).
-struct DocAsm {
-    head: Vec<LxmlNode>,
-    /// Tails of head elements, in order (one slot per head node).
-    head_tails: Vec<Vec<LxmlNode>>,
-    head_explicit: bool,
-    /// First-pair attributes (kept iff the head was still empty).
-    head_attrs: Option<Vec<(String, Option<String>)>>,
-    /// The kept attributes came from the first pair (a later pair's
-    /// survive only onto a non-empty head — probed).
-    head_attrs_first: bool,
-    /// An open head accepts content; a clean close (explicit `</head>`
-    /// while open) routes later head content to `mid`; a content close
-    /// opens the body instead.
-    head_open: bool,
-    head_closed_clean: bool,
-    frames: Vec<LxmlNode>,
-    frame_tails: Vec<Vec<LxmlNode>>,
-    /// First-appearance order of the head vs frames groups.
-    head_first: bool,
-    /// What the last head/frame accumulation was (blanks attach to
-    /// its tail positionally); `None` before the first one.
-    last_accum_frame: Option<bool>,
-    /// Stray head content after a clean close (emitted after frames,
-    /// before the body — never reopens the head).
-    mid: Vec<LxmlNode>,
-    /// Fragment-doc body + post-body section.
-    body: Vec<LxmlNode>,
-    body_attrs: Option<Vec<(String, Option<String>)>>,
-    post: Vec<LxmlNode>,
-    /// Full-html ordered flow + implied-body accumulator.
-    flow: Vec<LxmlFlow>,
-    current: Vec<LxmlNode>,
-    /// Pending pre-body blanks and comments (last head/frame tail,
-    /// else dropped — or pre-body siblings in headless full-html).
-    pending: Vec<LxmlNode>,
-    /// Pre-head siblings: headless pending blanks when an explicit
-    /// `<html>` is present (emitted before the head/frames groups).
-    pre: Vec<LxmlNode>,
-    phase: LxmlPhase,
-    doc_mode: bool,
-    /// An explicit `<html>` element was present (headless pre-body
-    /// blanks survive only then; a bare doctype drops them).
-    has_html: bool,
-}
-
-impl DocAsm {
-    /// Process one node; returns true when feedback was spliced (the
-    /// caller reprocesses the same index).
-    fn step(&mut self, node: LxmlNode, nodes: &mut Vec<LxmlNode>) {
-        match self.phase {
-            LxmlPhase::Pre => self.step_pre(node, nodes),
-            LxmlPhase::In => self.step_in(node, nodes),
-            LxmlPhase::Post => self.step_post(node, nodes),
-        }
-    }
-
-    fn step_pre(&mut self, node: LxmlNode, nodes: &mut Vec<LxmlNode>) {
-        match node {
-            // Stray-body markers only matter to fragment assembly.
-            LxmlNode::BodyClose => {}
-            LxmlNode::HeadClose => {
-                if self.head_open {
-                    self.attach_pending();
-                    self.head_open = false;
-                    self.head_closed_clean = true;
-                }
-            }
-            LxmlNode::Text(text) => {
-                // An empty text (only an unclosed open tag at EOF
-                // leaves one) implies the body (`<html><mid  A` →
-                // `<html><body></body></html>` — probed).
-                if text.is_empty() {
-                    self.push_implied_text(text);
-                } else if lxml_is_html_blank(&text) {
-                    if self.head_closed_clean {
-                        self.mid.push(LxmlNode::Text(text));
-                    } else {
-                        self.pending.push(LxmlNode::Text(text));
-                    }
-                } else {
-                    self.push_implied_text(text);
-                }
-            }
-            LxmlNode::Comment(comment) => {
-                if self.head_closed_clean {
-                    self.mid.push(LxmlNode::Comment(comment));
-                } else {
-                    self.pending.push(LxmlNode::Comment(comment));
-                }
-            }
-            LxmlNode::Element(element) if element.name == "head" => {
-                if self.head_closed_clean {
-                    if self.doc_mode {
-                        // Full-html: a pair after a clean close splits
-                        // (pending blanks precede it in mid); the rest
-                        // feeds back and can still imply the body.
-                        self.attach_pending();
-                        self.split_head_element(element, nodes, LxmlLateTarget::Mid);
-                    } else {
-                        // A head pair after a clean close merges (an
-                        // explicit head always exists to merge into).
-                        self.merge_head2(element, nodes);
-                    }
-                } else if self.head_open {
-                    // A head pair while open is fully transparent.
-                    nodes.splice(0..0, element.children);
-                } else {
-                    // First head: pre-head blanks attach outside it
-                    // (headless with `<html>`: pre-head siblings),
-                    // then it opens fresh (its own blanks are content);
-                    // its close (consumed at parse) clean-closes via
-                    // the trailing marker — unless a child opens the
-                    // body or closes clean first.
-                    self.attach_pre();
-                    self.last_accum_frame = None;
-                    let first_pair = !self.head_explicit;
-                    self.head_explicit = true;
-                    self.head_open = true;
-                    // First-pair attributes survive only onto an empty
-                    // head (a late pair merges content, drops attrs).
-                    if self.head.is_empty() {
-                        self.head_attrs = Some(element.attrs);
-                        self.head_attrs_first = first_pair;
-                    }
-                    let mut feedback = element.children;
-                    feedback.push(LxmlNode::HeadClose);
-                    nodes.splice(0..0, feedback);
-                }
-            }
-            LxmlNode::Element(element) if lxml_is_head_only(&element.name) => {
-                // Blanks attach before the head opens (headless with
-                // `<html>`: pre-head siblings; a top-level prelude
-                // drops; an open head's prelude is content; after a
-                // clean close they precede the element).
-                self.attach_pre();
-                if self.head_closed_clean {
-                    self.mid.push(LxmlNode::Element(element));
-                    return;
-                }
-                if !self.head_open && (!self.head.is_empty() || self.head_explicit) {
-                    // A head group already exists (content, or an
-                    // explicit pair that closed): the element strays
-                    // bare to mid and never reopens the head. With
-                    // no head anywhere the head reopens (first
-                    // content — `head_first` already settled).
-                    self.mid.push(LxmlNode::Element(element));
-                    return;
-                }
-                self.head_open = true;
-                if self.head.is_empty() && self.frames.is_empty() {
-                    self.head_first = true;
-                }
-                self.head.push(LxmlNode::Element(element));
-                self.head_tails.push(Vec::new());
-                self.last_accum_frame = Some(false);
-            }
-            LxmlNode::Element(element) if lxml_is_frame(&element.name) => {
-                if (element.name == "frame" || element.name == "noframes")
-                    && (self.head_open || self.head_closed_clean)
-                {
-                    // `frame`/`noframes` are head-aware (unlike
-                    // `frameset`, which always groups): they stay in
-                    // an open head and stray to mid after a clean
-                    // close, exactly like head-only elements.
-                    self.attach_pre();
-                    if self.head_closed_clean {
-                        self.mid.push(LxmlNode::Element(element));
-                        return;
-                    }
-                    if self.head.is_empty() && self.frames.is_empty() {
-                        self.head_first = true;
-                    }
-                    self.head.push(LxmlNode::Element(element));
-                    self.head_tails.push(Vec::new());
-                    self.last_accum_frame = Some(false);
-                    return;
-                }
-                // Headless full-html blanks stay before the frames
-                // (`<html>  <frameset>`); doctype-only drops.
-                self.attach_pre();
-                // An explicit (even empty) head claims first position;
-                // otherwise the first group wins.
-                if self.head.is_empty() && self.frames.is_empty() && !self.head_explicit {
-                    self.head_first = false;
-                }
-                // Frames close an open head (not cleanly — later blanks
-                // attach to the frame tail, and a later `</head>` is
-                // ignored rather than clean-closing).
-                self.head_open = false;
-                self.frames.push(LxmlNode::Element(element));
-                self.frame_tails.push(Vec::new());
-                self.last_accum_frame = Some(true);
-            }
-            LxmlNode::Element(element) if element.name == "body" => {
-                self.explicit_open(element);
-            }
-            LxmlNode::Element(element) if element.name == "html" => {
-                if element.slash {
-                    // A `<html/>` closes nothing pre-body.
-                } else {
-                    // Nested leftovers splice (transparent).
-                    nodes.splice(0..0, element.children);
-                }
-            }
-            LxmlNode::Element(element) => {
-                // Head-closing elements evict (open the body); anything
-                // else stays in an open head, or evicts when none is.
-                if lxml_closes_head(&element.name) || !self.head_open {
-                    self.implied_open();
-                    self.push_body_node(LxmlNode::Element(element));
-                } else {
-                    self.attach_pending();
-                    self.head.push(LxmlNode::Element(element));
-                    self.head_tails.push(Vec::new());
-                    self.last_accum_frame = Some(false);
-                }
-            }
-        }
-    }
-
-    fn step_in(&mut self, node: LxmlNode, nodes: &mut Vec<LxmlNode>) {
-        match node {
-            LxmlNode::HeadClose => {}
-            // A stray `</body>` seals the body: what follows lands
-            // post-body (a `<body/>` closes the same way — probed).
-            LxmlNode::BodyClose => {
-                self.seal_current();
-                self.phase = LxmlPhase::Post;
-            }
-            LxmlNode::Text(text) => {
-                self.push_body_node(LxmlNode::Text(text));
-            }
-            LxmlNode::Comment(comment) => {
-                self.push_body_node(LxmlNode::Comment(comment));
-            }
-            LxmlNode::Element(element) if element.name == "head" => {
-                nodes.splice(0..0, element.children);
-            }
-            LxmlNode::Element(element) if element.name == "body" => {
-                if element.slash {
-                    // A `<body/>` closes even an implied body.
-                    self.seal_current();
-                    self.phase = LxmlPhase::Post;
-                } else {
-                    nodes.splice(0..0, element.children);
-                }
-            }
-            LxmlNode::Element(element) if element.name == "html" => {
-                if element.slash {
-                    // A `<html/>` closes an implied body, like `<body/>`.
-                    self.seal_current();
-                    self.phase = LxmlPhase::Post;
-                } else {
-                    nodes.splice(0..0, element.children);
-                }
-            }
-            LxmlNode::Element(element) => {
-                self.push_body_node(LxmlNode::Element(element));
-            }
-        }
-    }
-
-    fn step_post(&mut self, node: LxmlNode, nodes: &mut Vec<LxmlNode>) {
-        match node {
-            LxmlNode::HeadClose | LxmlNode::BodyClose => {}
-            LxmlNode::Text(text) => {
-                self.push_post_node(LxmlNode::Text(text));
-            }
-            LxmlNode::Comment(comment) => {
-                self.push_post_node(LxmlNode::Comment(comment));
-            }
-            LxmlNode::Element(element) if element.name == "body" => {
-                self.explicit_open(element);
-            }
-            LxmlNode::Element(element) if element.name == "head" => {
-                if self.doc_mode {
-                    // Full-html post-body pairs always split into flow
-                    // siblings (never into the head group).
-                    self.split_head_element(element, nodes, LxmlLateTarget::Flow);
-                } else if !self.head.is_empty() || self.head_explicit {
-                    // A head exists to merge into (an early head, or an
-                    // explicit empty one).
-                    self.merge_head2(element, nodes);
-                } else if let Some(position) = self.post.iter().rposition(
-                    |node| matches!(node, LxmlNode::Element(element) if element.name == "head"),
-                ) {
-                    // A late head already sits in post: merge-split
-                    // into it (leading blanks dropped, pair attrs
-                    // dropped), rest feeds back.
-                    let (moving, rest) = lxml_split_head2(element.children);
-                    let LxmlNode::Element(target) = &mut self.post[position] else {
-                        unreachable!();
-                    };
-                    target.children.extend(moving);
-                    self.last_accum_frame = Some(false);
-                    nodes.splice(0..0, rest);
-                } else {
-                    // No head anywhere: late-split into a new post
-                    // head element (pair attrs kept, leading blanks
-                    // verbatim), rest feeds back.
-                    self.split_head_element(element, nodes, LxmlLateTarget::Post);
-                }
-            }
-            LxmlNode::Element(element) if element.name == "html" => {
-                if element.slash {
-                    // Post-body `<html/>` closes nothing (already closed).
-                } else {
-                    nodes.splice(0..0, element.children);
-                }
-            }
-            LxmlNode::Element(element) => {
-                self.push_post_node(LxmlNode::Element(element));
-            }
-        }
-    }
-
-    /// Content closes the head and opens the body (implied). The
-    /// clean-close flag survives opening: run routing reads the
-    /// pre-open head state, and every other reader is PRE-only.
-    fn implied_open(&mut self) {
-        self.flush_pending();
-        self.head_open = false;
-        self.phase = LxmlPhase::In;
-    }
-
-    /// An explicit body: children to the body (fragment: smashed,
-    /// first attrs win; full-html: a new section), then POST.
-    fn explicit_open(&mut self, element: LxmlElement) {
-        self.flush_pending();
-        self.head_open = false;
-        if self.doc_mode {
-            self.flow.push(LxmlFlow::Body {
-                attrs: Some(element.attrs),
-                children: element.children,
-            });
-        } else {
-            if self.body_attrs.is_none() {
-                self.body_attrs = Some(element.attrs);
-            }
-            self.body.extend(element.children);
-        }
-        self.phase = LxmlPhase::Post;
-    }
-
-    /// A non-first `<head>` element with a head to merge into: the
-    /// pre-close part moves to head1 (attrs and leading blanks
-    /// dropped), the rest feeds back into the stream.
-    fn merge_head2(&mut self, element: LxmlElement, nodes: &mut Vec<LxmlNode>) {
-        let (moving, rest) = lxml_split_head2(element.children);
-        if !moving.is_empty() {
-            for node in moving {
-                self.head.push(node);
-                self.head_tails.push(Vec::new());
-            }
-            self.last_accum_frame = Some(false);
-        }
-        nodes.splice(0..0, rest);
-    }
-
-    /// A `<head>` element with no head group to merge into: late-split
-    /// into a new head *element* at the target (pair attrs kept,
-    /// leading blanks verbatim), the rest feeds back into the stream.
-    fn split_head_element(
-        &mut self,
-        element: LxmlElement,
-        nodes: &mut Vec<LxmlNode>,
-        target: LxmlLateTarget,
-    ) {
-        let (moving, rest) = lxml_split_late(element.children);
-        let head = LxmlNode::Element(LxmlElement {
-            name: String::from("head"),
-            attrs: element.attrs,
-            children: moving,
-            slash: false,
-            implicit: false,
-            ejected: false,
-            matched: false,
-        });
-        match target {
-            LxmlLateTarget::Mid => self.mid.push(head),
-            LxmlLateTarget::Post => self.post.push(head),
-            LxmlLateTarget::Flow => self.flow.push(LxmlFlow::Node(head)),
-        }
-        nodes.splice(0..0, rest);
-    }
-
-    /// An implied-open trigger's leading blank run splits off like
-    /// pending blanks (the trigger text itself is never blank). The
-    /// run routes BEFORE the open: an open-but-empty head takes it
-    /// as content (`<head>  mid</head>` keeps the blanks in head).
-    fn push_implied_text(&mut self, text: String) {
-        let run_len: usize = text
-            .chars()
-            .take_while(|ch| is_html_ws(*ch))
-            .map(|ch| ch.len_utf8())
-            .sum();
-        let rest = text[run_len..].to_owned();
-        // Pending nodes route first (stream order), then the run.
-        self.flush_pending();
-        if run_len > 0 {
-            let run = text[..run_len].to_owned();
-            self.route_prebody(vec![LxmlNode::Text(run)]);
-        }
-        self.head_open = false;
-        self.phase = LxmlPhase::In;
-        self.push_body_node(LxmlNode::Text(rest));
-    }
-
-    /// Route pre-body blanks/comments at body-open: mid after a clean
-    /// close, else the last frame/head tail, else head content of an
-    /// open-but-empty head, else pre-body flow siblings in headless
-    /// full-html, else body content.
-    fn route_prebody(&mut self, items: Vec<LxmlNode>) {
-        for item in items {
-            if self.head_closed_clean {
-                self.mid.push(item);
-            } else if self.head_open && !self.frames.is_empty() && self.head.is_empty() {
-                // An open-but-empty (late) head with frames drops
-                // evicted preludes (a late head's blanks vanish when
-                // body content evicts — probed); with head content
-                // they still attach to the head tail.
-                drop(item);
-            } else if self.last_accum_frame == Some(true) {
-                if let Some(last) = self.frame_tails.last_mut() {
-                    last.push(item);
-                }
-            } else if self.last_accum_frame == Some(false) {
-                if let Some(last) = self.head_tails.last_mut() {
-                    last.push(item);
-                }
-            } else if self.head_open && self.head.is_empty() {
-                self.head.push(item);
-                self.head_tails.push(Vec::new());
-                self.last_accum_frame = Some(false);
-            } else if self.doc_mode
-                && self.head.is_empty()
-                && self.frames.is_empty()
-                && !self.head_explicit
-                && self.has_html
-            {
-                self.flow.push(LxmlFlow::Node(item));
-            } else if self.doc_mode
-                && self.head.is_empty()
-                && self.frames.is_empty()
-                && !self.head_explicit
-            {
-                // Headless doctype-only: libxml2 drops the blanks (there is
-                // no root element for the push-ws to attach to).
-                drop(item);
-            } else if self.doc_mode {
-                self.current.push(item);
-            } else {
-                self.body.push(item);
-            }
-        }
-    }
-
-    /// Move pending pre-body blanks/comments at body-open (same routing
-    /// as a trigger run — pending never survives a clean close, which
-    /// takes pre-body nodes to mid directly).
-    fn flush_pending(&mut self) {
-        if self.pending.is_empty() {
-            return;
-        }
-        let pending = std::mem::take(&mut self.pending);
-        self.route_prebody(pending);
-    }
-
-    /// Route pending blanks/comments at a head/frames accumulation:
-    /// headless with an explicit `<html>`, they survive as pre-head
-    /// siblings; otherwise attach (tails/content/mid/drop) as usual.
-    fn attach_pre(&mut self) {
-        if !self.pending.is_empty()
-            && self.head.is_empty()
-            && self.frames.is_empty()
-            && !self.head_explicit
-            && !self.head_closed_clean
-            && self.has_html
-        {
-            let pending = std::mem::take(&mut self.pending);
-            self.pre.extend(pending);
-        } else {
-            self.attach_pending();
-        }
-    }
-
-    /// Attach pending blanks/comments to the last head/frame tail
-    /// positionally; a prelude inside an open-but-empty head is head
-    /// content; otherwise dropped. After a clean close the head takes
-    /// no more tails, so pending nodes precede whatever follows (mid).
-    /// Shared by the PRE accumulation arms and both finishes.
-    fn attach_pending(&mut self) {
-        if self.pending.is_empty() {
-            return;
-        }
-        if self.head_closed_clean {
-            let pending = std::mem::take(&mut self.pending);
-            self.mid.extend(pending);
-            return;
-        }
-        match self.last_accum_frame {
-            Some(true) => {
-                if let Some(last) = self.frame_tails.last_mut() {
-                    last.extend(std::mem::take(&mut self.pending));
-                }
-            }
-            Some(false) => {
-                if let Some(last) = self.head_tails.last_mut() {
-                    last.extend(std::mem::take(&mut self.pending));
-                }
-            }
-            None => {
-                if self.head_open {
-                    let pending = std::mem::take(&mut self.pending);
-                    for item in pending {
-                        self.head.push(item);
-                        self.head_tails.push(Vec::new());
-                    }
-                    self.last_accum_frame = Some(false);
-                    return;
-                }
-            }
-        }
-        self.pending.clear();
-    }
-
-    /// Seal the implied full-html body section, if any.
-    fn seal_current(&mut self) {
-        if self.doc_mode && !self.current.is_empty() {
-            self.flow.push(LxmlFlow::Body {
-                attrs: None,
-                children: std::mem::take(&mut self.current),
-            });
-        }
-    }
-
-    fn push_body_node(&mut self, node: LxmlNode) {
-        if self.doc_mode {
-            self.current.push(node);
-        } else {
-            self.body.push(node);
-        }
-    }
-
-    fn push_post_node(&mut self, node: LxmlNode) {
-        if self.doc_mode {
-            self.flow.push(LxmlFlow::Node(node));
-        } else {
-            self.post.push(node);
-        }
-    }
-}
-impl DocAsm {
-    fn finish(
-        mut self,
-        html_attrs: Option<Vec<(String, Option<String>)>>,
-        prefix_text: String,
-    ) -> Option<String> {
-        self.seal_current();
-        if self.doc_mode {
-            self.finish_full(html_attrs, prefix_text)
-        } else {
-            self.finish_fragment()
-        }
-    }
-
-    fn finish_fragment(mut self) -> Option<String> {
-        // Frames die against an explicit-or-content body without a
-        // head anywhere (head content, an explicit head, or an
-        // unmerged head sibling) — the document falls back to a
-        // fragment rendered from the merged body, verbatim.
-        let post_has_head = self
-            .post
-            .iter()
-            .any(|node| matches!(node, LxmlNode::Element(element) if element.name == "head"));
-        if !self.frames.is_empty()
-            && (!self.body.is_empty() || self.body_attrs.is_some())
-            && self.head.is_empty()
-            && !self.head_explicit
-            && !post_has_head
-        {
-            let mut tail = String::new();
-            for node in &self.post {
-                match node {
-                    LxmlNode::Text(text) => tail.push_str(text),
-                    LxmlNode::Element(_) | LxmlNode::Comment(_) => break,
-                    LxmlNode::HeadClose | LxmlNode::BodyClose => {}
-                }
-            }
-            return lxml_render_merged_body(self.body, self.body_attrs, tail);
-        }
-        // Trailing blanks attach to the last head/frame tail (the body
-        // never opened on this path — opens flush).
-        self.attach_pending();
-        let mut out = String::from("<html>");
-        out.push_str(&lxml_serialize_nodes(&self.pre));
-        self.emit_head_frames_mid(&mut out);
-        // An explicit (even empty) body is kept.
-        if !self.body.is_empty() || self.body_attrs.is_some() {
-            out.push_str("<body");
-            if let Some(attrs) = self.body_attrs {
-                out.push_str(&lxml_serialize_attrs(&attrs));
-            }
-            out.push('>');
-            out.push_str(&lxml_serialize_nodes(&self.body));
-            out.push_str("</body>");
-        }
-        out.push_str(&lxml_serialize_nodes(&self.post));
-        out.push_str("</html>");
-        Some(out)
-    }
-
-    fn finish_full(
-        mut self,
-        html_attrs: Option<Vec<(String, Option<String>)>>,
-        prefix_text: String,
-    ) -> Option<String> {
-        // The prefix remainder (if any) already seeded the implied
-        // body up front; nothing to place here.
-        let _ = prefix_text;
-        if self.head.is_empty()
-            && !self.head_explicit
-            && self.frames.is_empty()
-            && self.flow.is_empty()
-        {
-            // Bare `<html>` (explicit, inner blanks verbatim) or an
-            // empty doctype (`None` — `<!DOCTYPE html>` alone is empty).
-            return match html_attrs {
-                Some(attrs) => Some(format!(
-                    "<html{}>{}</html>",
-                    lxml_serialize_attrs(&attrs),
-                    lxml_serialize_nodes(&self.pending)
-                )),
-                None => None,
-            };
-        }
-        self.attach_pending();
-        let mut out = String::from("<html");
-        if let Some(attrs) = html_attrs {
-            out.push_str(&lxml_serialize_attrs(&attrs));
-        }
-        out.push('>');
-        out.push_str(&lxml_serialize_nodes(&self.pre));
-        self.emit_head_frames_mid(&mut out);
-        for item in &self.flow {
-            match item {
-                LxmlFlow::Body { attrs, children } => {
-                    out.push_str("<body");
-                    if let Some(attrs) = attrs {
-                        out.push_str(&lxml_serialize_attrs(attrs));
-                    }
-                    out.push('>');
-                    out.push_str(&lxml_serialize_nodes(children));
-                    out.push_str("</body>");
-                }
-                LxmlFlow::Node(LxmlNode::Element(element)) => {
-                    out.push_str(&lxml_serialize_element(element));
-                }
-                LxmlFlow::Node(LxmlNode::Text(text)) => {
-                    out.push_str(&lxml_escape_text(text));
-                }
-                LxmlFlow::Node(LxmlNode::Comment(content)) => {
-                    out.push_str(&lxml_serialize_comment(content));
-                }
-                LxmlFlow::Node(LxmlNode::HeadClose) | LxmlFlow::Node(LxmlNode::BodyClose) => {}
-            }
-        }
-        out.push_str("</html>");
-        Some(out)
-    }
-
-    /// Head and frames emit in first-appearance order (probed:
-    /// `<frameset>f</frameset><title>t</title>` keeps frameset first),
-    /// then stray post-close head content.
-    fn emit_head_frames_mid(&self, out: &mut String) {
-        let mut head_out = String::new();
-        if !self.head.is_empty() || self.head_explicit {
-            head_out.push_str("<head");
-            // A later pair's attributes survive only onto a non-empty
-            // head (a first pair's always survive — probed).
-            let keep_attrs = self.head_attrs_first || !self.head.is_empty();
-            if keep_attrs {
-                if let Some(attrs) = &self.head_attrs {
-                    head_out.push_str(&lxml_serialize_attrs(attrs));
-                }
-            }
-            head_out.push('>');
-            for (node, tail) in self.head.iter().zip(self.head_tails.iter()) {
-                match node {
-                    LxmlNode::Element(element) => {
-                        head_out.push_str(&lxml_serialize_element(element));
-                    }
-                    LxmlNode::Text(text) => head_out.push_str(&lxml_escape_text(text)),
-                    LxmlNode::Comment(content) => {
-                        head_out.push_str(&lxml_serialize_comment(content));
-                    }
-                    LxmlNode::HeadClose | LxmlNode::BodyClose => {}
-                }
-                head_out.push_str(&lxml_serialize_nodes(tail));
-            }
-            head_out.push_str("</head>");
-        }
-        let mut frames_out = String::new();
-        for (node, tail) in self.frames.iter().zip(self.frame_tails.iter()) {
-            match node {
-                LxmlNode::Element(element) => {
-                    frames_out.push_str(&lxml_serialize_element(element));
-                }
-                LxmlNode::Text(text) => frames_out.push_str(&lxml_escape_text(text)),
-                LxmlNode::Comment(content) => {
-                    frames_out.push_str(&lxml_serialize_comment(content));
-                }
-                LxmlNode::HeadClose | LxmlNode::BodyClose => {}
-            }
-            frames_out.push_str(&lxml_serialize_nodes(tail));
-        }
-        if self.head_first {
-            out.push_str(&head_out);
-            out.push_str(&frames_out);
-        } else {
-            out.push_str(&frames_out);
-            out.push_str(&head_out);
-        }
-        out.push_str(&lxml_serialize_nodes(&self.mid));
-    }
-}
-
-/// Split a non-first `<head>`'s children at the first non-blank
-/// character: the leading part (minus leading blanks, which are the
-/// head's dropped `.text`) moves into head1; the rest becomes
-/// siblings (or body content, fed back into the stream).
-fn lxml_split_head2(children: Vec<LxmlNode>) -> (Vec<LxmlNode>, Vec<LxmlNode>) {
-    let mut moving: Vec<LxmlNode> = Vec::new();
-    let mut rest: Vec<LxmlNode> = Vec::new();
-    // Leading blanks drop only before the first element.
-    let mut seen_element = false;
-    let mut closing = false;
-    for child in children {
-        if closing {
-            rest.push(child);
-            continue;
-        }
-        match child {
-            LxmlNode::Element(_) => {
-                seen_element = true;
-                moving.push(child);
-            }
-            // Comments move (and count as content for the blanks
-            // after them).
-            LxmlNode::Comment(_) => {
-                seen_element = true;
-                moving.push(child);
-            }
-            LxmlNode::Text(text) => {
-                let blank_len: usize = text
-                    .chars()
-                    .take_while(|ch| is_html_ws(*ch))
-                    .map(|ch| ch.len_utf8())
-                    .sum();
-                if blank_len == text.len() {
-                    if seen_element {
-                        moving.push(LxmlNode::Text(text));
-                    }
-                } else {
-                    if seen_element && blank_len > 0 {
-                        moving.push(LxmlNode::Text(text[..blank_len].to_owned()));
-                    }
-                    rest.push(LxmlNode::Text(text[blank_len..].to_owned()));
-                    closing = true;
-                }
-            }
-            // Markers are top-level only; drop defensively.
-            LxmlNode::HeadClose | LxmlNode::BodyClose => {}
-        }
-    }
-    (moving, rest)
-}
-
-/// Split a late `<head>` pair's children (no head exists yet to merge
-/// into): leading blank text (verbatim — even before the first
-/// element, unlike merge-split) plus leading stay-elements move into
-/// the new head; the first nonblank text (split at its blank prefix),
-/// head-closing element, body, frameset, html or head element closes
-/// it, and that node plus everything after becomes siblings (fed back
-/// into the stream).
-fn lxml_split_late(children: Vec<LxmlNode>) -> (Vec<LxmlNode>, Vec<LxmlNode>) {
-    let mut moving: Vec<LxmlNode> = Vec::new();
-    let mut rest: Vec<LxmlNode> = Vec::new();
-    let mut closing = false;
-    for child in children {
-        if closing {
-            rest.push(child);
-            continue;
-        }
-        match child {
-            LxmlNode::Element(element)
-                if element.name == "body"
-                    || element.name == "html"
-                    || element.name == "frameset"
-                    || element.name == "head"
-                    || lxml_closes_head(&element.name) =>
-            {
-                rest.push(LxmlNode::Element(element));
-                closing = true;
-            }
-            LxmlNode::Element(element) => {
-                moving.push(LxmlNode::Element(element));
-            }
-            // Comments move into the late head like stay-elements.
-            LxmlNode::Comment(comment) => {
-                moving.push(LxmlNode::Comment(comment));
-            }
-            LxmlNode::Text(text) => {
-                let blank_len: usize = text
-                    .chars()
-                    .take_while(|ch| is_html_ws(*ch))
-                    .map(|ch| ch.len_utf8())
-                    .sum();
-                if blank_len == text.len() {
-                    moving.push(LxmlNode::Text(text));
-                } else {
-                    if blank_len > 0 {
-                        moving.push(LxmlNode::Text(text[..blank_len].to_owned()));
-                    }
-                    rest.push(LxmlNode::Text(text[blank_len..].to_owned()));
-                    closing = true;
-                }
-            }
-            // Markers are top-level only; split defensively.
-            LxmlNode::HeadClose => {
-                rest.push(LxmlNode::HeadClose);
-                closing = true;
-            }
-            // Stray-body markers stay out of late heads like HeadClose.
-            LxmlNode::BodyClose => {
-                rest.push(LxmlNode::BodyClose);
-                closing = true;
-            }
-        }
-    }
-    (moving, rest)
-}
-
-#[derive(Debug)]
-enum LxmlNode {
-    Element(LxmlElement),
-    Text(String),
-    /// An HTML comment (`<!--c-->`), bogus comment (`<!foo>`), or
-    /// processing instruction (`<?foo>`): content verbatim (abrupt
-    /// `<!-->`/`<!--->` closings yield empty content). Leading comments
-    /// strip in fragments (comments alone are empty); elsewhere they are
-    /// block-keep nodes that stop tails and survive merges as content.
-    Comment(String),
-    /// A stray `</body>` (no body open): fragment assembly drops
-    /// what follows iff the pre-marker nodes are a single element.
-    BodyClose,
-    /// A top-level stray `</head>` (no open head to match): closes an
-    /// open head in document assembly, ignored everywhere else. Nested
-    /// strays are dropped at parse (`<div></head></div>` → `<div></div>`).
-    HeadClose,
-}
-
-#[derive(Debug)]
-struct LxmlElement {
-    name: String,
-    attrs: Vec<(String, Option<String>)>,
-    children: Vec<LxmlNode>,
-    /// Self-closing spelling (`<body/>`): only `<body>` reads it — a
-    /// top-level `<body/>` opens *and* closes (later text is tail even
-    /// when the body was implied), unlike `<body></body>`.
-    slash: bool,
-    /// Parser-implied `<body>` inside a top-level `<frameset>`: never
-    /// closes on `</body>` (only its frameset closes it).
-    implicit: bool,
-    /// Ejected-but-open frameset (`</frameset>` closed it while inners
-    /// survived): stays on the stack accepting content via its inners,
-    /// but never matches a close again.
-    ejected: bool,
-    /// Explicit `<body>` closed by a matched `</body>`: kept as an
-    /// element. Unmatched explicit bodies splice (children move to
-    /// the parent, the element vanishes — probed).
-    matched: bool,
-}
-
-/// libxml2 void elements (never take children or an end tag).
-/// `wbr`/`embed`/`source`/`track` are NOT void here despite HTML5
-/// (probed: `<div><wbr>x</div>` → `<div><wbr>x</wbr></div>`).
-fn lxml_is_void(name: &str) -> bool {
-    matches!(
-        name,
-        "area"
-            | "base"
-            | "basefont"
-            | "br"
-            | "col"
-            | "frame"
-            | "hr"
-            | "img"
-            | "input"
-            | "isindex"
-            | "link"
-            | "meta"
-            | "param"
-    )
-}
-
-/// Raw-text elements: content runs to the matching end tag with no
-/// nested tags. `title`/`textarea` are RCDATA (entities decode);
-/// everything else keeps content verbatim (probed). `plaintext` never
-/// closes (runs to EOF); `listing` and `noscript` are notably NOT
-/// raw-text (probed).
-fn lxml_is_rawtext(name: &str) -> bool {
-    matches!(
-        name,
-        "script"
-            | "style"
-            | "textarea"
-            | "title"
-            | "iframe"
-            | "noframes"
-            | "noembed"
-            | "xmp"
-            | "plaintext"
-    )
-}
-
-/// Elements whose text children serialize unescaped. Only `script` and
-/// `style` — every other raw-text element (`title`, `textarea`,
-/// `iframe`, ...) escapes (`<title>a<b</title>` →
-/// `<title>a&lt;b</title>`, probed).
-fn lxml_is_cdata_serialize(name: &str) -> bool {
-    matches!(name, "script" | "style")
-}
-
-/// HTML boolean attributes libxml2 minimizes when the value is empty
-/// or equals the name (`checked="checked"` → `checked`).
-fn lxml_is_boolean_attr(name: &str) -> bool {
-    matches!(
-        name,
-        "allowfullscreen"
-            | "async"
-            | "autofocus"
-            | "autoplay"
-            | "checked"
-            | "compact"
-            | "controls"
-            | "declare"
-            | "default"
-            | "defer"
-            | "disabled"
-            | "formnovalidate"
-            | "hidden"
-            | "inert"
-            | "ismap"
-            | "itemscope"
-            | "multiple"
-            | "muted"
-            | "nohref"
-            | "noresize"
-            | "noshade"
-            | "novalidate"
-            | "nowrap"
-            | "open"
-            | "readonly"
-            | "required"
-            | "reversed"
-            | "seamless"
-            | "selected"
-            | "sortable"
-            | "truespeed"
-            | "typemustmatch"
-    )
-}
-
-/// URL attributes libxml2 percent-encodes tabs/newlines in.
-fn lxml_is_url_attr(name: &str) -> bool {
-    matches!(
-        name,
-        "href" | "src" | "action" | "cite" | "data" | "formaction" | "poster"
-    )
-}
-
-/// Start tags that auto-close an open `<p>` (enumerated live over all
-/// HTML tags — libxml2's own list, not HTML5's: `li`/`dt`/`dd` close,
-/// `article`/`thead`/etc. don't; `html` is transparent and never
-/// closes). Only when `<p>` is the innermost open element (a deeper
-/// `<p>` stays nested — probed); no button scope (`<button><p>`
-/// closes — probed). Applies to self-closing and void spellings too
-/// (`<div/>`, `<hr/>` close).
-fn lxml_closes_p(name: &str) -> bool {
-    matches!(
-        name,
-        "address"
-            | "blockquote"
-            | "body"
-            | "caption"
-            | "center"
-            | "col"
-            | "colgroup"
-            | "dd"
-            | "dir"
-            | "div"
-            | "dl"
-            | "dt"
-            | "fieldset"
-            | "form"
-            | "frameset"
-            | "h1"
-            | "h2"
-            | "h3"
-            | "h4"
-            | "h5"
-            | "h6"
-            | "head"
-            | "hr"
-            | "li"
-            | "listing"
-            | "menu"
-            | "ol"
-            | "p"
-            | "pre"
-            | "table"
-            | "tbody"
-            | "td"
-            | "tfoot"
-            | "th"
-            | "tr"
-            | "title"
-            | "ul"
-            | "xmp"
-    )
-}
-
-/// Open-time auto-close: `new_tag`'s start tag pops an innermost
-/// `top` (applied in a loop — `<dl><li><li>` pops twice). `p` pops
-/// from the `lxml_closes_p` family; headings pop only for `p`,
-/// `table`, `li`, `form`; `pre` pops `ul` but NOT `ol`; `td`/`th`
-/// pop six inlines (`a`/`b`/`font`/`i`/`span`/`u` — but NOT `em`
-/// et al); `p` pops eight (`b`/`i`/`u`/`s`/`strike`/`tt`/`small`/
-/// `big` — but NOT `code` et al); `table`/`fieldset` pop `a` only;
-/// `a` self-closes (the only inline that does); `li`/`form`/`dt`/
-/// `dd` pop `pre`; `dl` pops `dt` (but NOT `dd`); `thead` pops
-/// nothing but `colgroup`; `tbody` pops the whole ladder; `tfoot`
-/// pops all but itself; `tr` pops cells plus `colgroup`; `dt`/`dd`
-/// cross-close; `option`/`colgroup` self-close (all probed).
-fn lxml_autocloses(new_tag: &str, top: &str) -> bool {
-    if top.is_empty() {
-        return false;
-    }
-    if top == "p" {
-        return lxml_closes_p(new_tag);
-    }
-    if matches!(top, "h1" | "h2" | "h3" | "h4" | "h5" | "h6") {
-        return matches!(new_tag, "p" | "table" | "li" | "form" | "fieldset");
-    }
-    if matches!(
-        top,
-        "a" | "b" | "font" | "i" | "span" | "u" | "s" | "strike" | "tt" | "small" | "big"
-    ) {
-        return match new_tag {
-            "td" | "th" => matches!(top, "a" | "b" | "font" | "i" | "span" | "u"),
-            "table" | "fieldset" => top == "a",
-            "a" => top == "a",
-            "p" => matches!(
-                top,
-                "b" | "i" | "u" | "s" | "strike" | "tt" | "small" | "big"
-            ),
-            _ => false,
-        };
-    }
-    match new_tag {
-        "li" => matches!(top, "dl" | "li" | "pre"),
-        "form" => matches!(top, "dl" | "ul" | "ol" | "form" | "pre"),
-        "pre" => top == "ul",
-        "ul" => top == "pre",
-        "fieldset" => matches!(top, "pre" | "legend"),
-        "dl" => matches!(top, "dt" | "pre"),
-        "table" => top == "pre",
-        "tr" => matches!(top, "td" | "th" | "tr" | "colgroup"),
-        "td" | "th" => matches!(top, "td" | "th"),
-        "thead" => top == "colgroup",
-        "tbody" => matches!(
-            top,
-            "td" | "th" | "tr" | "thead" | "tbody" | "tfoot" | "colgroup"
-        ),
-        "tfoot" => matches!(top, "td" | "th" | "tr" | "thead" | "tbody" | "colgroup"),
-        "colgroup" => top == "colgroup",
-        "option" => top == "option",
-        "dt" => matches!(top, "dd" | "pre"),
-        "dd" => matches!(top, "dt" | "pre"),
-        _ => false,
-    }
-}
-
-/// Per-inner close outcome: how `inner` (open above the match of
-/// `</closer>`) treats the close. Force pops into the match; Ignore
-/// keeps the match open (below forces still pop out); Eject keeps a
-/// contiguous run open while the match pops beneath. Structural
-/// closes (`body`/`html`) force everything; `head` never reaches
-/// here (top-only match); `frameset` has its own eject-all path.
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-enum LxmlOutcome {
-    Force,
-    Ignore,
-    Eject,
-}
-
-fn lxml_close_outcome(closer: &str, inner: &str) -> LxmlOutcome {
-    let structural = matches!(closer, "body" | "html" | "head" | "frameset");
-    match inner {
-        "table" => {
-            if structural {
-                LxmlOutcome::Force
-            } else {
-                LxmlOutcome::Ignore
-            }
-        }
-        "div" => {
-            if structural
-                || matches!(
-                    closer,
-                    "div" | "table" | "thead" | "tbody" | "tfoot" | "tr" | "td" | "th"
-                )
-            {
-                LxmlOutcome::Force
-            } else {
-                LxmlOutcome::Ignore
-            }
-        }
-        "thead" => {
-            if structural || matches!(closer, "table" | "tbody" | "tfoot") {
-                LxmlOutcome::Force
-            } else {
-                LxmlOutcome::Ignore
-            }
-        }
-        "tbody" => {
-            if matches!(closer, "thead" | "tfoot" | "tr" | "td" | "th") {
-                LxmlOutcome::Eject
-            } else if structural || closer == "table" {
-                LxmlOutcome::Force
-            } else {
-                LxmlOutcome::Ignore
-            }
-        }
-        "tfoot" => {
-            if closer == "thead" {
-                LxmlOutcome::Eject
-            } else if structural || matches!(closer, "table" | "tbody") {
-                LxmlOutcome::Force
-            } else {
-                LxmlOutcome::Ignore
-            }
-        }
-        "tr" => {
-            if matches!(closer, "td" | "th") {
-                LxmlOutcome::Eject
-            } else if structural || matches!(closer, "table" | "thead" | "tbody" | "tfoot") {
-                LxmlOutcome::Force
-            } else {
-                LxmlOutcome::Ignore
-            }
-        }
-        "td" => {
-            if closer == "th" {
-                LxmlOutcome::Eject
-            } else if structural || matches!(closer, "table" | "tr" | "thead" | "tbody" | "tfoot") {
-                LxmlOutcome::Force
-            } else {
-                LxmlOutcome::Ignore
-            }
-        }
-        "th" => {
-            if closer == "td" {
-                LxmlOutcome::Eject
-            } else if structural || matches!(closer, "table" | "tr" | "thead" | "tbody" | "tfoot") {
-                LxmlOutcome::Force
-            } else {
-                LxmlOutcome::Ignore
-            }
-        }
-        _ => LxmlOutcome::Force,
-    }
-}
-
-/// Significant children for frameset gates (imply + frameset-body
-/// close): elements except stays (`head`-only, `frame`, `head`) and
-/// `body`, plus non-blank text; blanks, comments and markers don't
-/// block (probed).
-fn lxml_significant_stays_exempt(nodes: &[LxmlNode]) -> bool {
-    nodes.iter().any(|node| match node {
-        LxmlNode::Element(element) => {
-            !lxml_is_head_only(&element.name)
-                && !lxml_is_frame(&element.name)
-                && element.name != "head"
-                && element.name != "body"
-        }
-        LxmlNode::Text(text) => !lxml_is_html_blank(text),
-        LxmlNode::Comment(_) | LxmlNode::HeadClose | LxmlNode::BodyClose => false,
-    })
-}
-
-/// First-significant-child gate for `</body>` below structural: the
-/// first non-blank, non-comment, non-marker child blocks iff it is
-/// significant — non-blank text always; elements except `body` and
-/// (`head` parent) all stays, (`html` parent) only `head`-only,
-/// `frame` and `head` (probed).
-fn lxml_first_significant_blocks(nodes: &[LxmlNode], broad_stays: bool) -> bool {
-    nodes
-        .iter()
-        .find_map(|node| match node {
-            LxmlNode::Element(element) => {
-                let exempt = element.name == "body"
-                    || lxml_is_frame(&element.name)
-                    || element.name == "head"
-                    || lxml_is_head_only(&element.name)
-                    || (broad_stays && !lxml_closes_head(&element.name));
-                Some(!exempt)
-            }
-            LxmlNode::Text(text) => {
-                if lxml_is_html_blank(text) {
-                    None
-                } else {
-                    Some(true)
-                }
-            }
-            LxmlNode::Comment(_) | LxmlNode::HeadClose | LxmlNode::BodyClose => None,
-        })
-        .unwrap_or(false)
-}
-
-/// Significant roots for eject gates (`</html>` + `</body>`): any
-/// element or non-blank text; blanks, comments and markers don't
-/// count (probed).
-fn lxml_significant_any(nodes: &[LxmlNode]) -> bool {
-    nodes.iter().any(|node| match node {
-        LxmlNode::Element(_) => true,
-        LxmlNode::Text(text) => !lxml_is_html_blank(text),
-        LxmlNode::Comment(_) | LxmlNode::HeadClose | LxmlNode::BodyClose => false,
-    })
-}
-
-/// Frameset-imply readiness: the stack top sits directly inside a
-/// top-level frameset, the imply gate is clean, and no body exists
-/// yet. Returns the frameset index.
-fn lxml_frameset_imply_ready(stack: &[LxmlElement], roots: &[LxmlNode]) -> Option<usize> {
-    let index = stack
-        .iter()
-        .rposition(|open| open.name == "frameset")
-        .filter(|&index| {
-            stack[..index]
-                .iter()
-                .all(|open| open.name == "html" || open.name == "head")
-        })?;
-    if index + 1 != stack.len() {
-        return None;
-    }
-    let blocked = if index == 0 {
-        lxml_significant_stays_exempt(roots)
-    } else {
-        let below_html = index == 1 && stack[0].name == "html";
-        let parent_blocked = lxml_significant_stays_exempt(&stack[index - 1].children);
-        let own_text_blocked = below_html
-            && stack[index]
-                .children
-                .iter()
-                .any(|node| matches!(node, LxmlNode::Text(text) if !lxml_is_html_blank(text)));
-        parent_blocked || own_text_blocked
-    };
-    if blocked {
-        return None;
-    }
-    if stack[index]
-        .children
-        .iter()
-        .any(|node| matches!(node, LxmlNode::Element(element) if element.name == "body"))
-    {
-        return None;
-    }
-    Some(index)
-}
-
-/// Push the shared implied frameset body.
-fn lxml_push_imply_body(stack: &mut Vec<LxmlElement>) {
-    stack.push(LxmlElement {
-        name: String::from("body"),
-        attrs: Vec::new(),
-        children: Vec::new(),
-        slash: false,
-        implicit: true,
-        ejected: false,
-        matched: false,
-    });
-}
-
-/// Tokenize + build the fragment tree: comments kept (bogus
-/// comments and PIs too; doctypes and stray end tags dropped);
-/// unclosed tags at EOF are dropped; `<`/end-of-input edge text stays
-/// literal; entities decode in text and attribute values; tag/attribute
-/// names lowercase.
-fn lxml_parse_fragment(html: &str) -> Vec<LxmlNode> {
-    let mut roots: Vec<LxmlNode> = Vec::new();
-    // Stack of open elements; each entry is the element plus the
-    // sibling list it appends to (roots or its parent's children).
-    let mut stack: Vec<LxmlElement> = Vec::new();
-    let bytes = html.as_bytes();
-    let mut pos = 0;
-    let mut text = String::new();
-    // Nested `<body>` opens with a bare slash swallow their own
-    // closes (the close must not match an outer body — probed).
-    let mut transparent_bodies: u32 = 0;
-    // Transparent nested `<html>` opens swallow their own closes (a
-    // swallowed `</html>` must not F5-drop the stack — probed).
-    let mut transparent_htmls: u32 = 0;
-    // Transparent nested `<head>` opens swallow their own closes
-    // (the close must not match an outer head — probed).
-    let mut transparent_heads: u32 = 0;
-    let flush_text =
-        |text: &mut String, stack: &mut Vec<LxmlElement>, roots: &mut Vec<LxmlNode>| {
-            if text.is_empty() {
-                return;
-            }
-            // A `<` in text directly inside a ready top-level
-            // frameset implies the shared body early: pre-`<`
-            // flushes to the frameset, `<`+rest flushes into the new
-            // body (probed).
-            if text.contains('<') && lxml_frameset_imply_ready(stack, roots).is_some() {
-                let cut = text.find('<').expect("lt");
-                let pre = text[..cut].to_owned();
-                let post = text[cut..].to_owned();
-                text.clear();
-                if !pre.is_empty() {
-                    let node = LxmlNode::Text(lxml_decode_entities(&pre, false));
-                    stack.last_mut().expect("frameset").children.push(node);
-                }
-                lxml_push_imply_body(stack);
-                if !post.is_empty() {
-                    let node = LxmlNode::Text(lxml_decode_entities(&post, false));
-                    stack.last_mut().expect("body").children.push(node);
-                }
-                return;
-            }
-            let decoded = lxml_decode_entities(text, false);
-            let node = LxmlNode::Text(decoded);
-            if let Some(parent) = stack.last_mut() {
-                parent.children.push(node);
-            } else {
-                roots.push(node);
-            }
-            text.clear();
-        };
-    while pos < bytes.len() {
-        // Raw-text content runs verbatim to its end tag. The name is
-        // cloned up front: the pop below fires only when the end tag
-        // is found, so this is deliberately not a pop-if-rawtext.
-        let rawtext_name = stack
-            .last()
-            .filter(|open| lxml_is_rawtext(&open.name))
-            .map(|open| open.name.clone());
-        if let Some(name) = rawtext_name {
-            // The end tag matches case-insensitively (`</SCRIPT>`
-            // closes `<script>`). `plaintext` never closes.
-            let rest = &html[pos..];
-            // The end tag may carry trailing junk (`</script foo>`,
-            // `</title/>` close); the name must match exactly
-            // (`</scriptfoo>` does not close `script`).
-            let found = if name == "plaintext" {
-                None
-            } else {
-                lxml_find_rawtext_end(rest, &name)
-            };
-            if let Some((end, close_len)) = found {
-                let raw = rest[..end].to_owned();
-                if !raw.is_empty() {
-                    // RCDATA (`title`/`textarea`) decodes entities;
-                    // other raw-text stays verbatim (probed).
-                    let content = if name == "title" || name == "textarea" {
-                        lxml_decode_entities(&raw, false)
-                    } else {
-                        raw
-                    };
-                    let node = LxmlNode::Text(content);
-                    stack.last_mut().expect("open").children.push(node);
-                }
-                pos += end + close_len;
-                let element = stack.pop().expect("open");
-                push_element(&mut stack, &mut roots, element);
-                continue;
-            }
-            // Unclosed raw-text runs to EOF.
-            let raw = rest.to_owned();
-            if !raw.is_empty() {
-                let content = if name == "title" || name == "textarea" {
-                    lxml_decode_entities(&raw, false)
-                } else {
-                    raw
-                };
-                let node = LxmlNode::Text(content);
-                stack.last_mut().expect("open").children.push(node);
-            }
-            break;
-        }
-        if bytes[pos] != b'<' {
-            // Decode entities lazily at flush; accumulate raw bytes.
-            let ch = html[pos..].chars().next().expect("char");
-            text.push(ch);
-            pos += ch.len_utf8();
-            continue;
-        }
-        let rest = &html[pos..];
-        if rest.starts_with("<!--") {
-            flush_text(&mut text, &mut stack, &mut roots);
-            // Abrupt closings (`<!-->` / `<!--->`) yield an empty comment
-            // and rescan after them; otherwise the first `-->` or `--!>`
-            // closes (unterminated eats to EOF).
-            let (content, consumed) = if rest.starts_with("<!-->") {
-                (String::new(), 5)
-            } else if rest.starts_with("<!--->") {
-                (String::new(), 6)
-            } else {
-                // Closers only count after the opener: an overlapping
-                // `--!>` (`<!--!>`) does not close — the comment eats
-                // to EOF (`a<!--!>b` → `<span>a<!--!>b--></span>`).
-                let tail = rest.strip_prefix("<!--").expect("opener checked");
-                let plain = tail.find("-->").map(|end| end + 4);
-                let bang = tail.find("--!>").map(|end| end + 4);
-                match (plain, bang) {
-                    (Some(end), Some(bang_end)) if bang_end < end => {
-                        (tail[..bang_end - 4].to_owned(), bang_end + 4)
-                    }
-                    (Some(end), _) => (tail[..end - 4].to_owned(), end + 3),
-                    (None, Some(bang_end)) => (tail[..bang_end - 4].to_owned(), bang_end + 4),
-                    (None, None) => {
-                        // Unterminated at EOF: strip one trailing `--`
-                        // (else `-`) before closing (`a<!--x-->` keeps
-                        // `x`; `a<!--x---->` keeps `x--`, whose dashes
-                        // merge with the `-->`).
-                        let mut content = tail.to_owned();
-                        if content.ends_with("--") {
-                            content.truncate(content.len() - 2);
-                        } else if content.ends_with('-') {
-                            content.truncate(content.len() - 1);
-                        }
-                        (content, rest.len())
-                    }
-                }
-            };
-            let node = LxmlNode::Comment(content);
-            if let Some(parent) = stack.last_mut() {
-                parent.children.push(node);
-            } else {
-                roots.push(node);
-            }
-            pos += consumed;
-            continue;
-        }
-        if rest.len() > 1 && (rest.as_bytes()[1] == b'!' || rest.as_bytes()[1] == b'?') {
-            flush_text(&mut text, &mut stack, &mut roots);
-            // Doctypes (`<!doctype`, ASCII case-insensitive) drop; bogus
-            // comments and processing instructions keep their content to
-            // the next '>' (unterminated eats to EOF).
-            let is_doctype = rest.as_bytes()[1] == b'!'
-                && rest.len() > 8
-                && rest
-                    .get(2..9)
-                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case("doctype"));
-            if is_doctype {
-                if let Some(end) = rest.find('>') {
-                    pos += end + 1;
-                } else {
-                    pos = bytes.len();
-                }
-                continue;
-            }
-            // Processing instructions keep their `?` in the content.
-            let start = if rest.as_bytes()[1] == b'?' { 1 } else { 2 };
-            let (content, consumed) = if let Some(end) = rest.find('>') {
-                (rest[start..end].to_owned(), end + 1)
-            } else {
-                (rest[start..].to_owned(), rest.len())
-            };
-            let node = LxmlNode::Comment(content);
-            if let Some(parent) = stack.last_mut() {
-                parent.children.push(node);
-            } else {
-                roots.push(node);
-            }
-            pos += consumed;
-            continue;
-        }
-        if rest.starts_with("</") {
-            if rest.len() == 2 {
-                // Bare `</` at EOF stays literal (`a</` keeps it).
-                text.push('<');
-                text.push('/');
-                pos += 2;
-                continue;
-            }
-            flush_text(&mut text, &mut stack, &mut roots);
-            // `</` + letter: end tag (name = first token). `</` +
-            // ASCII-whitespace/`!`/`?`: bogus comment to `>` (EOF: to
-            // end). Anything else (`</=x>`, `</3>`, `</>`): consumed
-            // and dropped.
-            let third = rest.as_bytes().get(2).copied();
-            if third.is_some_and(|b| b.is_ascii_whitespace() || b == b'!' || b == b'?') {
-                let bogus = rest.strip_prefix("</").expect("opener checked");
-                let (content, consumed) = if let Some(end) = bogus.find('>') {
-                    (bogus[..end].to_owned(), end + 3)
-                } else {
-                    (bogus.to_owned(), rest.len())
-                };
-                let node = LxmlNode::Comment(content);
-                if let Some(parent) = stack.last_mut() {
-                    parent.children.push(node);
-                } else {
-                    roots.push(node);
-                }
-                pos += consumed;
-                continue;
-            }
-            let Some(end) = rest.find('>') else {
-                // Unclosed end tag at EOF is dropped (`"a<b"` → `"a"`).
-                break;
-            };
-            if !third.is_some_and(|b| b.is_ascii_alphabetic()) {
-                pos += end + 1;
-                continue;
-            }
-            // The close name is the first token (`</b <i>` closes b).
-            let name_end = rest[2..end]
-                .find(|ch: char| ch.is_ascii_whitespace() || ch == '/' || ch == '>')
-                .map(|index| 2 + index)
-                .unwrap_or(end);
-            let name = rest[2..name_end].to_ascii_lowercase();
-            if name == "html" && transparent_htmls > 0 {
-                // Matches a transparent nested open: swallowed (it must
-                // not F5-drop, nor match an outer html — probed).
-                transparent_htmls -= 1;
-                pos += end + 1;
-                continue;
-            }
-            if name == "head" && transparent_heads > 0 {
-                // Matches a transparent nested open: swallowed (it must
-                // not match an outer head — probed).
-                transparent_heads -= 1;
-                pos += end + 1;
-                continue;
-            }
-            if name == "html" && !stack.iter().any(|open| open.name == "html") {
-                // Stray `</html>` (no html open) closes everything left
-                // open and ends input when content was produced
-                // (non-blank text or a non-slash element — comments
-                // and slash elements don't end it). A matched
-                // `</html>` closes normally below.
-                while let Some(inner) = stack.pop() {
-                    push_element(&mut stack, &mut roots, inner);
-                }
-                transparent_bodies = 0;
-                let produced = roots.iter().any(|node| match node {
-                    LxmlNode::Element(element) => {
-                        if element.slash {
-                            false
-                        } else if element.name == "head" {
-                            !element.children.is_empty()
-                        } else {
-                            true
-                        }
-                    }
-                    LxmlNode::Text(text) => !lxml_is_html_blank(text),
-                    LxmlNode::Comment(_) | LxmlNode::HeadClose | LxmlNode::BodyClose => false,
-                });
-                // Without produced content the close still ends input
-                // when roots hold elements and no tag start follows
-                // it (bare/comment roots always continue — probed).
-                let roots_have_element = roots
-                    .iter()
-                    .any(|node| matches!(node, LxmlNode::Element(_)));
-                let rest_after = &html[pos + end + 1..];
-                let has_tag = rest_after
-                    .as_bytes()
-                    .windows(2)
-                    .any(|pair| pair[0] == b'<' && pair[1].is_ascii_alphabetic());
-                if produced || (roots_have_element && !has_tag) {
-                    pos = html.len();
-                } else {
-                    pos += end + 1;
-                }
-                continue;
-            }
-            // Pop to the matching open (auto-closing inners); a
-            // nameless or unmatched end tag is dropped.
-            if !name.is_empty() {
-                if name == "body" && transparent_bodies > 0 {
-                    // Matches a bare-slash nested open: swallowed.
-                    transparent_bodies -= 1;
-                    pos += end + 1;
-                    continue;
-                }
-                if name == "body"
-                    && stack
-                        .iter()
-                        .rposition(|open| open.name == "body")
-                        .is_some_and(|depth| stack[depth].implicit)
-                {
-                    // Implied frameset bodies never close on `</body>`
-                    // (only their frameset closes them — probed).
-                    pos += end + 1;
-                    continue;
-                }
-                if name == "body" && !stack.iter().any(|open| open.name == "body") {
-                    // Stray `</body>` (no body open): with structural
-                    // (`html`/`head`/`frameset`) elements on the stack
-                    // nothing pops — the marker nests into the top
-                    // (probed: `<html>x</body>y</html>` splits inside
-                    // `html`), or into the top's last child when that
-                    // is a `head`-only element (then it never seals —
-                    // probed); else closes everything and marks the
-                    // split at roots.
-                    if stack
-                        .iter()
-                        .any(|open| matches!(open.name.as_str(), "html" | "head" | "frameset"))
-                    {
-                        let swallow = stack.last().is_some_and(|top| {
-                            top.children.last().is_some_and(|last| {
-                                matches!(last, LxmlNode::Element(element) if lxml_is_head_only(&element.name))
-                            })
-                        });
-                        if swallow {
-                            let top = stack.last_mut().expect("top");
-                            let last = top.children.last_mut().expect("last");
-                            let LxmlNode::Element(element) = last else {
-                                unreachable!()
-                            };
-                            element.children.push(LxmlNode::BodyClose);
-                        } else if let Some(parent) = stack.last_mut() {
-                            parent.children.push(LxmlNode::BodyClose);
-                        } else {
-                            roots.push(LxmlNode::BodyClose);
-                        }
-                    } else {
-                        while let Some(inner) = stack.pop() {
-                            push_element(&mut stack, &mut roots, inner);
-                        }
-                        roots.push(LxmlNode::BodyClose);
-                    }
-                    pos += end + 1;
-                    continue;
-                }
-                // Ejected framesets never match again (their close
-                // already ran — a second `</frameset>` is stray).
-                let depth = stack
-                    .iter()
-                    .rposition(|open| open.name == name && !open.ejected);
-                // `</head>` with open inners: a structural adjacent
-                // (`body`/`html`/`frameset`) swallows it; a dirty head
-                // (closes-head element children or non-blank text) or
-                // a closes-head adjacent ejects every inner (the match
-                // pops beneath, inners stay open); else everything
-                // force-pops into the match (probed).
-                let head_with_inners =
-                    name == "head" && depth.is_some_and(|depth| stack.len() > depth + 1);
-                if head_with_inners {
-                    let depth = depth.expect("head");
-                    let adjacent_structural =
-                        matches!(stack[depth + 1].name.as_str(), "body" | "html" | "frameset");
-                    let adjacent_closes = lxml_closes_head(&stack[depth + 1].name.clone());
-                    let adjacent_weird = stack[depth + 1].name.contains('<');
-                    let head_dirty = stack[depth].children.iter().any(|node| match node {
-                        LxmlNode::Element(element) => lxml_closes_head(&element.name),
-                        LxmlNode::Text(text) => !lxml_is_html_blank(text),
-                        _ => false,
-                    });
-                    if adjacent_structural {
-                        // Swallowed: dropped.
-                    } else if head_dirty || adjacent_closes || adjacent_weird {
-                        let element = stack.remove(depth);
-                        let node = LxmlNode::Element(element);
-                        if depth > 0 {
-                            stack[depth - 1].children.push(node);
-                        } else {
-                            roots.push(node);
-                        }
-                    } else {
-                        while stack.len() > depth + 1 {
-                            let inner = stack.pop().expect("inner");
-                            push_element(&mut stack, &mut roots, inner);
-                        }
-                        let element = stack.pop().expect("match");
-                        push_element(&mut stack, &mut roots, element);
-                    }
-                } else if name == "body" {
-                    // Matched `</body>` (explicit; implied frameset
-                    // bodies swallow above, strays split above). Below
-                    // structural the topmost structural child-gate
-                    // decides (first-significant blocks); below a
-                    // non-structural element it ejects (children move
-                    // to the new top, inners stay open) unless an
-                    // open clean head plus a stays element sit below
-                    // with no closes-head element open, or head-only
-                    // roots sit under a stays top (then normal). At
-                    // roots with inners and stays-significant roots
-                    // it ejects; with closed children it closes
-                    // normally; childless it closes and drops
-                    // everything after (probed).
-                    let depth = depth.expect("body");
-                    let below_name = if depth > 0 {
-                        stack[depth - 1].name.clone()
-                    } else {
-                        String::new()
-                    };
-                    let below_structural =
-                        matches!(below_name.as_str(), "html" | "head" | "frameset");
-                    let has_inners = stack.len() > depth + 1;
-                    let children_empty = stack[depth].children.is_empty();
-                    // Eject moves the body's children to the new top
-                    // (or roots) and leaves inners open.
-                    let eject_body =
-                        |stack: &mut Vec<LxmlElement>, roots: &mut Vec<LxmlNode>, depth: usize| {
-                            let element = stack.remove(depth);
-                            let children = element.children;
-                            if depth > 0 {
-                                for child in children {
-                                    stack[depth - 1].children.push(child);
-                                }
-                            } else {
-                                roots.extend(children);
-                            }
-                        };
-                    // Normal close pops inners into the body and links
-                    // the body element to its parent or roots.
-                    let close_body =
-                        |stack: &mut Vec<LxmlElement>, roots: &mut Vec<LxmlNode>, depth: usize| {
-                            while stack.len() > depth + 1 {
-                                let inner = stack.pop().expect("inner");
-                                push_element(stack, roots, inner);
-                            }
-                            let mut element = stack.pop().expect("match");
-                            element.matched = true;
-                            push_element(stack, roots, element);
-                        };
-                    if depth > 0 && below_structural {
-                        // Below structural (`html`/`head`/`frameset`)
-                        // the body ejects iff the topmost structural
-                        // element below it has significant children;
-                        // below a nested frameset (non-`html`/`head`
-                        // below it) it always ejects (probed).
-                        let nested_frameset = below_name == "frameset"
-                            && stack[..depth - 1]
-                                .iter()
-                                .any(|open| !matches!(open.name.as_str(), "html" | "head"));
-                        let topmost_blocked = stack[..depth]
-                            .iter()
-                            .find(|open| matches!(open.name.as_str(), "html" | "head" | "frameset"))
-                            .is_some_and(|topmost| {
-                                lxml_first_significant_blocks(
-                                    &topmost.children,
-                                    topmost.name == "head",
-                                )
-                            });
-                        if nested_frameset || topmost_blocked {
-                            eject_body(&mut stack, &mut roots, depth);
-                        } else {
-                            close_body(&mut stack, &mut roots, depth);
-                        }
-                    } else if depth > 0 {
-                        let below = &stack[..depth];
-                        let head_below = below.iter().any(|open| open.name == "head");
-                        let stays_below = below.iter().any(|open| {
-                            !lxml_closes_head(&open.name)
-                                && !matches!(
-                                    open.name.as_str(),
-                                    "html" | "head" | "frameset" | "body"
-                                )
-                        });
-                        // The head must be clean (no closes-head
-                        // elements or non-blank text children —
-                        // stays elements and comments are fine), and
-                        // no closes-head element may sit open below.
-                        let head_clean =
-                            below
-                                .iter()
-                                .find(|open| open.name == "head")
-                                .is_none_or(|head| {
-                                    head.children.iter().all(|node| match node {
-                                        LxmlNode::Element(element) => {
-                                            !lxml_closes_head(&element.name)
-                                        }
-                                        LxmlNode::Text(text) => lxml_is_html_blank(text),
-                                        LxmlNode::Comment(_)
-                                        | LxmlNode::HeadClose
-                                        | LxmlNode::BodyClose => true,
-                                    })
-                                });
-                        let closes_open_below = below.iter().any(|open| {
-                            lxml_closes_head(&open.name)
-                                && !matches!(open.name.as_str(), "html" | "head" | "frameset")
-                        });
-                        // Head-only roots (at least one `head`-only
-                        // element, everything else insignificant) keep
-                        // the body under a stays top (probed).
-                        let mut head_only_roots = false;
-                        let mut roots_clean = true;
-                        for node in roots.iter() {
-                            match node {
-                                LxmlNode::Element(element) if lxml_is_head_only(&element.name) => {
-                                    head_only_roots = true;
-                                }
-                                LxmlNode::Element(_) => {
-                                    roots_clean = false;
-                                    break;
-                                }
-                                LxmlNode::Text(text) => {
-                                    if !lxml_is_html_blank(text) {
-                                        roots_clean = false;
-                                        break;
-                                    }
-                                }
-                                LxmlNode::Comment(_)
-                                | LxmlNode::HeadClose
-                                | LxmlNode::BodyClose => {}
-                            }
-                        }
-                        let top_stays = !lxml_closes_head(&below_name)
-                            && !matches!(
-                                below_name.as_str(),
-                                "html" | "head" | "frameset" | "body"
-                            );
-                        if (head_only_roots && roots_clean && top_stays)
-                            || (head_below && stays_below && head_clean && !closes_open_below)
-                        {
-                            close_body(&mut stack, &mut roots, depth);
-                        } else {
-                            eject_body(&mut stack, &mut roots, depth);
-                        }
-                    } else if !has_inners {
-                        close_body(&mut stack, &mut roots, depth);
-                    } else if lxml_significant_stays_exempt(&roots) {
-                        eject_body(&mut stack, &mut roots, depth);
-                    } else if !children_empty {
-                        close_body(&mut stack, &mut roots, depth);
-                    } else {
-                        close_body(&mut stack, &mut roots, depth);
-                        pos = html.len();
-                    }
-                } else if let Some(depth) = depth {
-                    if name == "html"
-                        && stack.len() > depth + 1
-                        && pos + end + 1 < html.len()
-                        && lxml_significant_any(&roots)
-                    {
-                        // Matched `</html>` with significant content
-                        // before it and anything after it ejects (the
-                        // match pops beneath, inners stay open); else
-                        // it force-pops (probed).
-                        let element = stack.remove(depth);
-                        let node = LxmlNode::Element(element);
-                        if depth > 0 {
-                            stack[depth - 1].children.push(node);
-                        } else {
-                            roots.push(node);
-                        }
-                    } else if name == "frameset" && stack.len() > depth + 1 {
-                        // Frameset eject: the frameset closes but every
-                        // inner stays open (`<frameset><div>x</div>
-                        // </frameset>y` routes `y` into the frameset's
-                        // body; a second `</frameset>` is stray).
-                        stack[depth].ejected = true;
-                    } else {
-                        // Per-inner outcomes (bottom-up from the match):
-                        // forces below the lowest Ignore pop out into
-                        // the match; any Ignore keeps the match open;
-                        // else a contiguous Eject run pops the match
-                        // beneath it; else everything force-pops.
-                        let mut lowest_ignore: Option<usize> = None;
-                        let mut run_end = depth + 1;
-                        for (index, open) in stack.iter().enumerate().skip(depth + 1) {
-                            match lxml_close_outcome(&name, &open.name) {
-                                LxmlOutcome::Ignore => {
-                                    lowest_ignore = Some(index);
-                                    break;
-                                }
-                                LxmlOutcome::Eject if index == run_end => {
-                                    run_end += 1;
-                                }
-                                _ => {}
-                            }
-                        }
-                        if let Some(ignore_at) = lowest_ignore {
-                            // Open `p` elements below the lowest Ignore
-                            // pop out (removed from beneath in order,
-                            // linked to the match as siblings — only
-                            // `p` drains, probed); the first non-`p`
-                            // stops the drain; the match and everything
-                            // above stay open.
-                            let below = ignore_at - (depth + 1);
-                            for _ in 0..below {
-                                if stack[depth + 1].name != "p" {
-                                    break;
-                                }
-                                let entry = stack.remove(depth + 1);
-                                stack[depth].children.push(LxmlNode::Element(entry));
-                            }
-                        } else if run_end > depth + 1 {
-                            // Eject: the match pops beneath its run
-                            // (linked to its own parent); the run and
-                            // everything above stay open at that level.
-                            let element = stack.remove(depth);
-                            let node = LxmlNode::Element(element);
-                            if depth > 0 {
-                                stack[depth - 1].children.push(node);
-                            } else {
-                                roots.push(node);
-                            }
-                        } else {
-                            while stack.len() > depth + 1 {
-                                let inner = stack.pop().expect("inner");
-                                push_element(&mut stack, &mut roots, inner);
-                            }
-                            let element = stack.pop().expect("match");
-                            push_element(&mut stack, &mut roots, element);
-                        }
-                    }
-                } else if name == "head" && stack.iter().all(|open| open.name == "html") {
-                    // Top-level stray `</head>` (possibly inside `<html>`
-                    // wrappers): a marker for document assembly, which
-                    // closes an open head on it. Nested strays are
-                    // dropped.
-                    if let Some(parent) = stack.last_mut() {
-                        parent.children.push(LxmlNode::HeadClose);
-                    } else {
-                        roots.push(LxmlNode::HeadClose);
-                    }
-                }
-            }
-            pos += end + 1;
-            continue;
-        }
-        // Start tag (or literal '<': `<` starts a tag only before
-        // an ASCII letter -- `<3>`, `<_x>`, `<=x>`, `<>`, `< >` stay
-        // text; an unclosed tag at EOF is dropped).
-        let after = rest.get(1..).unwrap_or("");
-        if !after
-            .chars()
-            .next()
-            .is_some_and(|ch| ch.is_ascii_alphabetic())
-        {
-            text.push('<');
-            pos += 1;
-            continue;
-        }
-        // The name runs to ASCII-whitespace, `/` or `>` (`<`, `&`,
-        // `=`, quotes all valid inside: `<b<i>`, `<b&e;>`, `<b= v>`).
-        let mut name_end = after.len();
-        for (index, ch) in after.char_indices() {
-            if ch.is_ascii_whitespace() || ch == '/' || ch == '>' {
-                name_end = index;
-                break;
-            }
-        }
-        let tag_name = after[..name_end].to_ascii_lowercase();
-        let tag_rest = &after[name_end..];
-        // Find the tag's closing '>' honoring quotes -- but quotes
-        // group ONLY inside a post-`=` value.
-        let Some(close) = lxml_tag_close(tag_rest) else {
-            // Unclosed open tag at EOF: dropped, but leaves an empty
-            // text behind (counts as content for shape purposes:
-            // `<mid  A` alone is `<span></span>`, and in documents it
-            // implies an empty body — probed). A non-frame,
-            // non-structural tag directly inside a ready top-level
-            // frameset implies the shared body first (the empty text
-            // lands in it — probed).
-            flush_text(&mut text, &mut stack, &mut roots);
-            if !lxml_is_frame(&tag_name)
-                && !matches!(tag_name.as_str(), "body" | "html" | "head")
-                && lxml_frameset_imply_ready(&stack, &roots).is_some()
-            {
-                lxml_push_imply_body(&mut stack);
-            }
-            let node = LxmlNode::Text(String::new());
-            if let Some(parent) = stack.last_mut() {
-                parent.children.push(node);
-            } else {
-                roots.push(node);
-            }
-            break;
-        };
-        let attr_text = &tag_rest[..close];
-        flush_text(&mut text, &mut stack, &mut roots);
-        let attrs = lxml_parse_attrs(attr_text);
-        let self_closing = lxml_is_self_closing(attr_text);
-        // A top-level frameset (nothing but `<html>` wrappers or a
-        // `<head>` below it) has its own content model: non-frame
-        // elements imply a shared body, `<p>` never auto-closes,
-        // explicit bodies keep working. Nested framesets behave like
-        // plain elements (bodies inside them are transparent).
-        let top_frameset = stack
-            .iter()
-            .rposition(|open| open.name == "frameset")
-            .filter(|&index| {
-                stack[..index]
-                    .iter()
-                    .all(|open| open.name == "html" || open.name == "head")
-            });
-        let direct_in_frameset = top_frameset.is_some_and(|index| index + 1 == stack.len());
-        // Open-time auto-close (loop): a start tag pops every
-        // innermost element its close set names (`<dl><li><li>`
-        // siblings both (`li` pops `li`, then `dl`); `<tr><td><tr>`
-        // pops `td`, then `tr`; `<h1><p><div>` is all siblings
-        // (`p` pops `h1` at its own open, `div` then pops `p`)).
-        // Close sets (each probed): plain blocks pop `p`; `p` and
-        // `table` also pop `h1`-`h6` (but `div`/`ul`/headings never
-        // pop headings — `<h1><div>` nests); `pre` pops `ul` (but
-        // NOT `ol`) plus `p`; `li`/`form` pop their eject sets;
-        // table internals pop up the section ladder; `dt`/`dd`
-        // cross-close (but never self-close); `option` self-closes.
-        // Fires inside top-level framesets too (probed); `li` also
-        // pops through an ejected frameset chain (probed).
-        loop {
-            let top = stack.last().map(|open| open.name.as_str()).unwrap_or("");
-            let poisoned = tag_name == "li" && stack.iter().any(|open| open.ejected);
-            if !lxml_autocloses(&tag_name, top) && !poisoned {
-                break;
-            }
-            let closed = stack.pop().expect("auto-close");
-            push_element(&mut stack, &mut roots, closed);
-        }
-        // Inside `<html>` wrappers counts as top level for the
-        // structural tags (their children are extracted wholesale).
-        let nested = stack.iter().any(|open| open.name != "html");
-        // The shared frameset body implies only before any
-        // significant roots (non-head elements or non-blank text;
-        // head-only/frame/head elements, blanks and comments don't
-        // block — probed).
-        let roots_significant = lxml_significant_stays_exempt(&roots);
-        let structural = tag_name == "body" || tag_name == "html" || tag_name == "head";
-        // The shared frameset body implies only before significant
-        // content in its parent (roots when top-level, else the below
-        // element's children: a dirty head — closes-head element or
-        // non-blank text children — blocks, stays elements don't);
-        // directly under `<html>` the frameset's own non-blank text
-        // blocks too (elements don't — probed).
-        let imply_blocked = top_frameset.is_some_and(|index| {
-            if index == 0 {
-                roots_significant
-            } else {
-                let below_html = index == 1 && stack[0].name == "html";
-                let parent_blocked = lxml_significant_stays_exempt(&stack[index - 1].children);
-                let own_text_blocked = below_html
-                    && stack[index].children.iter().any(
-                        |node| matches!(node, LxmlNode::Text(text) if !lxml_is_html_blank(text)),
-                    );
-                parent_blocked || own_text_blocked
-            }
-        });
-        if self_closing && structural && nested {
-            // A nested `<body/>`, `<html/>` or `<head/>` closes the
-            // innermost open element and is itself dropped — except a
-            // `<body/>` directly inside `<head>` (opens an empty body)
-            // or directly inside a top-level frameset (stays).
-            let body_in_head =
-                tag_name == "body" && stack.last().is_some_and(|open| open.name == "head");
-            if (tag_name == "body" && direct_in_frameset) || body_in_head {
-                push_element(
-                    &mut stack,
-                    &mut roots,
-                    LxmlElement {
-                        name: tag_name,
-                        attrs,
-                        children: Vec::new(),
-                        slash: true,
-                        implicit: false,
-                        ejected: false,
-                        matched: false,
-                    },
-                );
-            } else if let Some(mut parent) = stack.pop() {
-                // A `<body/>` pop closes its body (kept as an
-                // element, like a matched `</body>` — probed).
-                if tag_name == "body" && parent.name == "body" {
-                    parent.matched = true;
-                }
-                push_element(&mut stack, &mut roots, parent);
-            }
-        } else if !self_closing && nested && (tag_name == "html" || tag_name == "head") {
-            // Nested `<html>`/`<head>` opens are transparent (children
-            // splice into the parent); their closes are swallowed
-            // (tracked — they must not F5-drop, match an outer
-            // element, or mark a split).
-            if tag_name == "html" {
-                transparent_htmls += 1;
-            } else {
-                transparent_heads += 1;
-            }
-        } else if !self_closing && tag_name == "body" && direct_in_frameset {
-            // An explicit body directly inside a top-level frameset
-            // (attrs kept; closes normally on `</body>`).
-            stack.push(LxmlElement {
-                name: tag_name,
-                attrs,
-                children: Vec::new(),
-                slash: false,
-                implicit: false,
-                ejected: false,
-                matched: false,
-            });
-        } else if !self_closing && nested && tag_name == "body" && lxml_has_bare_slash(attr_text) {
-            // A nested `<body>` with a bare (unquoted, undetected)
-            // slash never opens; its own close is swallowed
-            // (tracked — it must not match an outer body).
-            transparent_bodies += 1;
-        } else if direct_in_frameset
-            && !imply_blocked
-            && !lxml_is_frame(&tag_name)
-            && !top_frameset.is_some_and(|index| {
-                stack[index].children.iter().any(
-                    |node| matches!(node, LxmlNode::Element(element) if element.name == "body"),
-                )
-            })
-        {
-            // A non-frame element directly inside a top-level
-            // frameset with no body yet implies a shared body (which
-            // never closes on `</body>`); the element nests inside.
-            stack.push(LxmlElement {
-                name: String::from("body"),
-                attrs: Vec::new(),
-                children: Vec::new(),
-                slash: false,
-                implicit: true,
-                ejected: false,
-                matched: false,
-            });
-            if lxml_is_void(&tag_name) || self_closing {
-                let element = LxmlElement {
-                    name: tag_name,
-                    attrs,
-                    children: Vec::new(),
-                    slash: self_closing,
-                    implicit: false,
-                    ejected: false,
-                    matched: false,
-                };
-                push_element(&mut stack, &mut roots, element);
-            } else {
-                stack.push(LxmlElement {
-                    name: tag_name,
-                    attrs,
-                    children: Vec::new(),
-                    slash: false,
-                    implicit: false,
-                    ejected: false,
-                    matched: false,
-                });
-            }
-        } else if lxml_is_void(&tag_name) || self_closing {
-            let element = LxmlElement {
-                name: tag_name,
-                attrs,
-                children: Vec::new(),
-                slash: self_closing,
-                implicit: false,
-                ejected: false,
-                matched: false,
-            };
-            push_element(&mut stack, &mut roots, element);
-        } else {
-            stack.push(LxmlElement {
-                name: tag_name,
-                attrs,
-                children: Vec::new(),
-                slash: false,
-                implicit: false,
-                ejected: false,
-                matched: false,
-            });
-        }
-        pos += 1 + name_end + close + 1;
-    }
-    flush_text(&mut text, &mut stack, &mut roots);
-    // EOF auto-closes the stack, innermost first (`"<div>x"`).
-    while let Some(element) = stack.pop() {
-        push_element(&mut stack, &mut roots, element);
-    }
-    roots
-}
-
-/// Find the tag's closing `>` honoring quotes -- but quotes group
-/// ONLY inside a post-`=` value (`<b "a>b">` closes at the first
-/// `>` with attr `"a`; `<b a="x>y">` skips it, value `x>y`).
-/// `=` separates a value only after a name (a leading `=` is a
-/// literal name char: `<b =a=b>` names `=a` with value `b`); `/`
-/// outside a value terminates the name (`<b a/=b>` names `a`, `=b`).
-/// Bare-slash detection: a `/` outside quotes (quotes group only
-/// inside a post-`=` value, mirroring tag scanning — probed).
-fn lxml_has_bare_slash(attr_text: &str) -> bool {
-    #[derive(PartialEq, Eq)]
-    enum State {
-        Fresh,
-        Name,
-        AfterName,
-        Value,
-    }
-    let bytes = attr_text.as_bytes();
-    let mut state = State::Fresh;
-    let mut quote: Option<u8> = None;
-    let mut value_started = false;
-    let mut pos = 0;
-    while pos < bytes.len() {
-        let ch = bytes[pos];
-        if let Some(q) = quote {
-            if ch == q {
-                quote = None;
-                state = State::Fresh;
-            }
-            pos += 1;
-            continue;
-        }
-        if ch == b'/' {
-            return true;
-        }
-        if ch == b'"' || ch == b'\'' {
-            if state == State::Value && !value_started {
-                quote = Some(ch);
-                value_started = true;
-            } else if state == State::Fresh || state == State::AfterName {
-                state = State::Name;
-            }
-            pos += 1;
-            continue;
-        }
-        if ch == b'=' {
-            if state == State::Name || state == State::AfterName {
-                state = State::Value;
-                value_started = false;
-            } else if state == State::Fresh {
-                state = State::Name;
-            }
-            pos += 1;
-            continue;
-        }
-        if ch.is_ascii_whitespace() {
-            match state {
-                State::Name => state = State::AfterName,
-                State::Value if value_started => {
-                    state = State::Fresh;
-                    value_started = false;
-                }
-                _ => {}
-            }
-            pos += 1;
-            continue;
-        }
-        if state == State::Fresh || state == State::AfterName {
-            state = State::Name;
-        } else if state == State::Value {
-            value_started = true;
-        }
-        pos += 1;
-    }
-    false
-}
-
-fn lxml_tag_close(tag_rest: &str) -> Option<usize> {
-    #[derive(PartialEq, Eq)]
-    enum State {
-        Fresh,
-        Name,
-        AfterName,
-        Value,
-    }
-    let bytes = tag_rest.as_bytes();
-    let mut state = State::Fresh;
-    let mut quote: Option<u8> = None;
-    let mut value_started = false;
-    let mut pos = 0;
-    while pos < bytes.len() {
-        let ch = bytes[pos];
-        if let Some(q) = quote {
-            if ch == q {
-                quote = None;
-                state = State::Fresh;
-            }
-            pos += 1;
-            continue;
-        }
-        if ch == b'>' {
-            return Some(pos);
-        }
-        if ch == b'"' || ch == b'\'' {
-            if state == State::Value && !value_started {
-                quote = Some(ch);
-                value_started = true;
-            } else if state == State::Fresh || state == State::AfterName {
-                state = State::Name;
-            }
-            pos += 1;
-            continue;
-        }
-        if ch == b'=' {
-            if state == State::Name || state == State::AfterName {
-                state = State::Value;
-                value_started = false;
-            } else if state == State::Fresh {
-                state = State::Name;
-            }
-            pos += 1;
-            continue;
-        }
-        if ch == b'/' {
-            if state == State::Value {
-                value_started = true;
-            } else {
-                state = State::Fresh;
-            }
-            pos += 1;
-            continue;
-        }
-        if ch.is_ascii_whitespace() {
-            match state {
-                State::Name => state = State::AfterName,
-                State::Value if value_started => {
-                    state = State::Fresh;
-                    value_started = false;
-                }
-                _ => {}
-            }
-            pos += 1;
-            continue;
-        }
-        if state == State::Fresh || state == State::AfterName {
-            state = State::Name;
-        } else if state == State::Value {
-            value_started = true;
-        }
-        pos += 1;
-    }
-    None
-}
-
-/// Self-closing detection: `/` immediately before the `>` (last
-/// character — `<body / >` is NOT self-closing), outside quotes and
-/// outside unquoted attribute values (`<body class=c/>` opens — the
-/// slash belongs to the value — while `<body class="c"/>` closes).
-fn lxml_is_self_closing(attr_text: &str) -> bool {
-    if !attr_text.ends_with('/') {
-        return false;
-    }
-    let bytes = attr_text.as_bytes();
-    let last = bytes.len() - 1;
-    let mut pos = 0;
-    while pos < bytes.len() {
-        while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
-            pos += 1;
-        }
-        if pos >= bytes.len() {
-            break;
-        }
-        if pos == last {
-            return bytes[pos] == b'/';
-        }
-        let start = pos;
-        while pos < bytes.len()
-            && !bytes[pos].is_ascii_whitespace()
-            && bytes[pos] != b'='
-            && bytes[pos] != b'/'
-            && bytes[pos] != b'>'
-        {
-            pos += 1;
-        }
-        if start == pos {
-            // Stray `/` or `=`: self-closing only at the very end.
-            if pos == last {
-                return bytes[pos] == b'/';
-            }
-            pos += 1;
-            continue;
-        }
-        while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
-            pos += 1;
-        }
-        if pos < bytes.len() && bytes[pos] == b'=' {
-            pos += 1;
-            while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
-                pos += 1;
-            }
-            if pos < bytes.len() && (bytes[pos] == b'"' || bytes[pos] == b'\'') {
-                let quote = bytes[pos];
-                pos += 1;
-                while pos < bytes.len() && bytes[pos] != quote {
-                    pos += 1;
-                }
-                if pos < bytes.len() {
-                    pos += 1;
-                }
-            } else {
-                // Unquoted value: runs to whitespace (the trailing `/`
-                // inside it is a value character, not a close).
-                let value_start = pos;
-                while pos < bytes.len() && !bytes[pos].is_ascii_whitespace() && bytes[pos] != b'>' {
-                    pos += 1;
-                }
-                if value_start <= last && last < pos {
-                    return false;
-                }
-            }
-        }
-    }
-    false
-}
-
-/// Locate a raw-text end tag: `</name` (ASCII case-insensitive) +
-/// terminator (ASCII-whitespace, `/`, `>`) + run to `>`. Returns the
-/// start offset and the total consumed length.
-fn lxml_find_rawtext_end(rest: &str, name: &str) -> Option<(usize, usize)> {
-    let bytes = rest.as_bytes();
-    let mut pos = 0;
-    while pos + 1 < bytes.len() {
-        let mut start = None;
-        while pos + 1 < bytes.len() {
-            if bytes[pos] == b'<' && bytes[pos + 1] == b'/' {
-                start = Some(pos);
-                break;
-            }
-            pos += 1;
-        }
-        let start = start?;
-        let after = rest.get(start + 2..).unwrap_or("");
-        if !after
-            .chars()
-            .next()
-            .is_some_and(|ch| ch.is_ascii_alphabetic())
-        {
-            pos = start + 2;
-            continue;
-        }
-        let mut name_end = after.len();
-        for (index, ch) in after.char_indices() {
-            if ch.is_ascii_whitespace() || ch == '/' || ch == '>' {
-                name_end = index;
-                break;
-            }
-        }
-        if after[..name_end].eq_ignore_ascii_case(name) {
-            if let Some(rel) = rest[start + 2 + name_end..].find('>') {
-                return Some((start, 2 + name_end + rel + 1));
-            }
-            return None;
-        }
-        pos = start + 2;
-    }
-    None
-}
-
-fn push_element(stack: &mut [LxmlElement], roots: &mut Vec<LxmlNode>, element: LxmlElement) {
-    // An unmatched explicit `<body>` (never closed by `</body>`)
-    // splices under a non-structural parent: its children move to
-    // the parent, the element (and its attrs) vanish. At roots or
-    // under a structural parent it keeps (assembly unwraps or
-    // hoists it); implied, slash and matched bodies always keep.
-    let splice = element.name == "body"
-        && !element.implicit
-        && !element.matched
-        && !element.slash
-        && stack
-            .last()
-            .is_some_and(|parent| !matches!(parent.name.as_str(), "html" | "head" | "frameset"));
-    if splice {
-        let children = element.children;
-        if let Some(parent) = stack.last_mut() {
-            parent.children.extend(children);
-        } else {
-            roots.extend(children);
-        }
-        return;
-    }
-    let node = LxmlNode::Element(element);
-    if let Some(parent) = stack.last_mut() {
-        parent.children.push(node);
-    } else {
-        roots.push(node);
-    }
-}
-
-/// Parse `name="value"` / `name='value'` / `name=value` / bare-name
-/// attributes; names lowercase, values entity-decoded. A `/` from a
-/// self-closing tag parses as a (dropped) bare name; duplicates keep
-/// the FIRST (case-insensitively: `a=1 A=2` keeps `1`).
-fn lxml_parse_attrs(text: &str) -> Vec<(String, Option<String>)> {
-    let mut attrs = Vec::new();
-    let bytes = text.as_bytes();
-    let mut pos = 0;
-    while pos < bytes.len() {
-        while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
-            pos += 1;
-        }
-        if pos >= bytes.len() {
-            break;
-        }
-        let start = pos;
-        while pos < bytes.len()
-            && !bytes[pos].is_ascii_whitespace()
-            && (bytes[pos] != b'=' || pos == start)
-            && bytes[pos] != b'/'
-            && bytes[pos] != b'>'
-        {
-            pos += 1;
-        }
-        if start == pos {
-            // Stray `/` (self-closing slash): skip one char.
-            pos += 1;
-            continue;
-        }
-        // A leading `=` is a literal name char (`<b =a=b>` names
-        // `=a`); any later `=` separated the value above.
-        let name = text[start..pos].to_ascii_lowercase();
-        while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
-            pos += 1;
-        }
-        if pos < bytes.len() && bytes[pos] == b'=' {
-            pos += 1;
-            while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
-                pos += 1;
-            }
-            if pos < bytes.len() && (bytes[pos] == b'"' || bytes[pos] == b'\'') {
-                let quote = bytes[pos];
-                pos += 1;
-                let value_start = pos;
-                while pos < bytes.len() && bytes[pos] != quote {
-                    pos += 1;
-                }
-                let raw = text[value_start..pos].to_owned();
-                if pos < bytes.len() {
-                    pos += 1;
-                }
-                if !attrs.iter().any(|(seen, _)| *seen == name) {
-                    attrs.push((name, Some(lxml_decode_entities(&raw, true))));
-                }
-            } else {
-                let value_start = pos;
-                while pos < bytes.len() && !bytes[pos].is_ascii_whitespace() && bytes[pos] != b'>' {
-                    pos += 1;
-                }
-                let raw = text[value_start..pos].to_owned();
-                if !attrs.iter().any(|(seen, _)| *seen == name) {
-                    attrs.push((name, Some(lxml_decode_entities(&raw, true))));
-                }
-            }
-        } else {
-            if !attrs.iter().any(|(seen, _)| *seen == name) {
-                attrs.push((name, None));
-            }
-        }
-    }
-    attrs.retain(|(name, _)| name != "/");
-    attrs
-}
-
-/// Decode `&amp;`-style entities the way libxml2's HTML parser does
-/// (all probed live). After `&`, scan the maximal ASCII-alphanumeric
-/// run R (Unicode alnum terminates it — `&noté` resolves `not`). Then:
-/// - `&#...`: decimal run, or `#x`/`#X` + hex run (at least one digit;
-///   else literal `&`); the value maps per `lxml_charref_value`
-///   (overflow → U+FFFD, never literal); one optional `;` is consumed.
-/// - else if the char after R is `;` and R is a table name: emit it,
-///   consume R + `;` (the full run always wins — `&notin;` → `∉`).
-/// - else the longest legacy prefix of R resolves (unique — no legacy
-///   member prefixes another; `&notinx;` → `¬inx;`, `&fjligx;` stays
-///   literal); no `;` is consumed. In attribute values this path is
-///   blocked when the char after the hit is ASCII-alnum or `=`
-///   (`title="&AMPb"` stays literal, `title="&AMP"` resolves);
-///   numerics and `;`-terminated names are never blocked, and text is
-///   never blocked (`&AMP=x` → `&`).
-///
-/// Anything else stays literal (re-escaped by the serializer).
-fn lxml_decode_entities(text: &str, in_attr: bool) -> String {
-    let mut out = String::with_capacity(text.len());
-    let bytes = text.as_bytes();
-    let mut pos = 0;
-    while pos < bytes.len() {
-        if bytes[pos] != b'&' {
-            let ch = text[pos..].chars().next().expect("char");
-            out.push(ch);
-            pos += ch.len_utf8();
-            continue;
-        }
-        if pos + 1 < bytes.len() && bytes[pos + 1] == b'#' {
-            if let Some((ch, used)) = lxml_decode_charref(&text[pos + 2..]) {
-                out.push(ch);
-                pos += 2 + used;
-                continue;
-            }
-            out.push('&');
-            pos += 1;
-            continue;
-        }
-        let mut run_end = pos + 1;
-        while run_end < bytes.len() && bytes[run_end].is_ascii_alphanumeric() {
-            run_end += 1;
-        }
-        let run = &text[pos + 1..run_end];
-        let after = bytes.get(run_end).copied();
-        if after == Some(b';') {
-            if let Some(decoded) = lxml_named_entity(run) {
-                out.push_str(decoded);
-                pos = run_end + 1;
-                continue;
-            }
-        }
-        // Longest legacy prefix (scan all lengths; at most one hits).
-        let mut hit: Option<(usize, &'static str)> = None;
-        for len in 1..=run.len() {
-            if let Some(decoded) = lxml_legacy_entity(&run[..len]) {
-                hit = Some((len, decoded));
-            }
-        }
-        if let Some((len, decoded)) = hit {
-            // A proper-prefix hit is always followed by alnum (the run
-            // is maximal); a full-run hit only by `=` (`;` after a full
-            // legacy run takes the table path above instead).
-            let blocked = in_attr && (len < run.len() || after == Some(b'='));
-            if !blocked {
-                out.push_str(decoded);
-                pos += 1 + len;
-                continue;
-            }
-        }
-        out.push('&');
-        pos += 1;
-    }
-    out
-}
-
-/// The HTML5 named character reference table (2125 entries,
-/// generated from CPython's `html.entities.html5` `;`-suffixed
-/// keys): libxml2 2.14 resolves exactly this set with a
-/// semicolon (verified live: every entry resolves, and the
-/// reverse fuzz shows no other `&name;` does). Multi-char
-/// values (`fjlig` → `fj`) included verbatim.
-fn lxml_named_entity(name: &str) -> Option<&'static str> {
-    Some(match name {
-        "AElig" => "Æ",
-        "AMP" => "&",
-        "Aacute" => "Á",
-        "Abreve" => "Ă",
-        "Acirc" => "Â",
-        "Acy" => "А",
-        "Afr" => "𝔄",
-        "Agrave" => "À",
-        "Alpha" => "Α",
-        "Amacr" => "Ā",
-        "And" => "⩓",
-        "Aogon" => "Ą",
-        "Aopf" => "𝔸",
-        "ApplyFunction" => "\u{2061}",
-        "Aring" => "Å",
-        "Ascr" => "𝒜",
-        "Assign" => "≔",
-        "Atilde" => "Ã",
-        "Auml" => "Ä",
-        "Backslash" => "∖",
-        "Barv" => "⫧",
-        "Barwed" => "⌆",
-        "Bcy" => "Б",
-        "Because" => "∵",
-        "Bernoullis" => "ℬ",
-        "Beta" => "Β",
-        "Bfr" => "𝔅",
-        "Bopf" => "𝔹",
-        "Breve" => "˘",
-        "Bscr" => "ℬ",
-        "Bumpeq" => "≎",
-        "CHcy" => "Ч",
-        "COPY" => "©",
-        "Cacute" => "Ć",
-        "Cap" => "⋒",
-        "CapitalDifferentialD" => "ⅅ",
-        "Cayleys" => "ℭ",
-        "Ccaron" => "Č",
-        "Ccedil" => "Ç",
-        "Ccirc" => "Ĉ",
-        "Cconint" => "∰",
-        "Cdot" => "Ċ",
-        "Cedilla" => "¸",
-        "CenterDot" => "·",
-        "Cfr" => "ℭ",
-        "Chi" => "Χ",
-        "CircleDot" => "⊙",
-        "CircleMinus" => "⊖",
-        "CirclePlus" => "⊕",
-        "CircleTimes" => "⊗",
-        "ClockwiseContourIntegral" => "∲",
-        "CloseCurlyDoubleQuote" => "”",
-        "CloseCurlyQuote" => "’",
-        "Colon" => "∷",
-        "Colone" => "⩴",
-        "Congruent" => "≡",
-        "Conint" => "∯",
-        "ContourIntegral" => "∮",
-        "Copf" => "ℂ",
-        "Coproduct" => "∐",
-        "CounterClockwiseContourIntegral" => "∳",
-        "Cross" => "⨯",
-        "Cscr" => "𝒞",
-        "Cup" => "⋓",
-        "CupCap" => "≍",
-        "DD" => "ⅅ",
-        "DDotrahd" => "⤑",
-        "DJcy" => "Ђ",
-        "DScy" => "Ѕ",
-        "DZcy" => "Џ",
-        "Dagger" => "‡",
-        "Darr" => "↡",
-        "Dashv" => "⫤",
-        "Dcaron" => "Ď",
-        "Dcy" => "Д",
-        "Del" => "∇",
-        "Delta" => "Δ",
-        "Dfr" => "𝔇",
-        "DiacriticalAcute" => "´",
-        "DiacriticalDot" => "˙",
-        "DiacriticalDoubleAcute" => "˝",
-        "DiacriticalGrave" => "`",
-        "DiacriticalTilde" => "˜",
-        "Diamond" => "⋄",
-        "DifferentialD" => "ⅆ",
-        "Dopf" => "𝔻",
-        "Dot" => "¨",
-        "DotDot" => "⃜",
-        "DotEqual" => "≐",
-        "DoubleContourIntegral" => "∯",
-        "DoubleDot" => "¨",
-        "DoubleDownArrow" => "⇓",
-        "DoubleLeftArrow" => "⇐",
-        "DoubleLeftRightArrow" => "⇔",
-        "DoubleLeftTee" => "⫤",
-        "DoubleLongLeftArrow" => "⟸",
-        "DoubleLongLeftRightArrow" => "⟺",
-        "DoubleLongRightArrow" => "⟹",
-        "DoubleRightArrow" => "⇒",
-        "DoubleRightTee" => "⊨",
-        "DoubleUpArrow" => "⇑",
-        "DoubleUpDownArrow" => "⇕",
-        "DoubleVerticalBar" => "∥",
-        "DownArrow" => "↓",
-        "DownArrowBar" => "⤓",
-        "DownArrowUpArrow" => "⇵",
-        "DownBreve" => "̑",
-        "DownLeftRightVector" => "⥐",
-        "DownLeftTeeVector" => "⥞",
-        "DownLeftVector" => "↽",
-        "DownLeftVectorBar" => "⥖",
-        "DownRightTeeVector" => "⥟",
-        "DownRightVector" => "⇁",
-        "DownRightVectorBar" => "⥗",
-        "DownTee" => "⊤",
-        "DownTeeArrow" => "↧",
-        "Downarrow" => "⇓",
-        "Dscr" => "𝒟",
-        "Dstrok" => "Đ",
-        "ENG" => "Ŋ",
-        "ETH" => "Ð",
-        "Eacute" => "É",
-        "Ecaron" => "Ě",
-        "Ecirc" => "Ê",
-        "Ecy" => "Э",
-        "Edot" => "Ė",
-        "Efr" => "𝔈",
-        "Egrave" => "È",
-        "Element" => "∈",
-        "Emacr" => "Ē",
-        "EmptySmallSquare" => "◻",
-        "EmptyVerySmallSquare" => "▫",
-        "Eogon" => "Ę",
-        "Eopf" => "𝔼",
-        "Epsilon" => "Ε",
-        "Equal" => "⩵",
-        "EqualTilde" => "≂",
-        "Equilibrium" => "⇌",
-        "Escr" => "ℰ",
-        "Esim" => "⩳",
-        "Eta" => "Η",
-        "Euml" => "Ë",
-        "Exists" => "∃",
-        "ExponentialE" => "ⅇ",
-        "Fcy" => "Ф",
-        "Ffr" => "𝔉",
-        "FilledSmallSquare" => "◼",
-        "FilledVerySmallSquare" => "▪",
-        "Fopf" => "𝔽",
-        "ForAll" => "∀",
-        "Fouriertrf" => "ℱ",
-        "Fscr" => "ℱ",
-        "GJcy" => "Ѓ",
-        "GT" => ">",
-        "Gamma" => "Γ",
-        "Gammad" => "Ϝ",
-        "Gbreve" => "Ğ",
-        "Gcedil" => "Ģ",
-        "Gcirc" => "Ĝ",
-        "Gcy" => "Г",
-        "Gdot" => "Ġ",
-        "Gfr" => "𝔊",
-        "Gg" => "⋙",
-        "Gopf" => "𝔾",
-        "GreaterEqual" => "≥",
-        "GreaterEqualLess" => "⋛",
-        "GreaterFullEqual" => "≧",
-        "GreaterGreater" => "⪢",
-        "GreaterLess" => "≷",
-        "GreaterSlantEqual" => "⩾",
-        "GreaterTilde" => "≳",
-        "Gscr" => "𝒢",
-        "Gt" => "≫",
-        "HARDcy" => "Ъ",
-        "Hacek" => "ˇ",
-        "Hat" => "^",
-        "Hcirc" => "Ĥ",
-        "Hfr" => "ℌ",
-        "HilbertSpace" => "ℋ",
-        "Hopf" => "ℍ",
-        "HorizontalLine" => "─",
-        "Hscr" => "ℋ",
-        "Hstrok" => "Ħ",
-        "HumpDownHump" => "≎",
-        "HumpEqual" => "≏",
-        "IEcy" => "Е",
-        "IJlig" => "Ĳ",
-        "IOcy" => "Ё",
-        "Iacute" => "Í",
-        "Icirc" => "Î",
-        "Icy" => "И",
-        "Idot" => "İ",
-        "Ifr" => "ℑ",
-        "Igrave" => "Ì",
-        "Im" => "ℑ",
-        "Imacr" => "Ī",
-        "ImaginaryI" => "ⅈ",
-        "Implies" => "⇒",
-        "Int" => "∬",
-        "Integral" => "∫",
-        "Intersection" => "⋂",
-        "InvisibleComma" => "\u{2063}",
-        "InvisibleTimes" => "\u{2062}",
-        "Iogon" => "Į",
-        "Iopf" => "𝕀",
-        "Iota" => "Ι",
-        "Iscr" => "ℐ",
-        "Itilde" => "Ĩ",
-        "Iukcy" => "І",
-        "Iuml" => "Ï",
-        "Jcirc" => "Ĵ",
-        "Jcy" => "Й",
-        "Jfr" => "𝔍",
-        "Jopf" => "𝕁",
-        "Jscr" => "𝒥",
-        "Jsercy" => "Ј",
-        "Jukcy" => "Є",
-        "KHcy" => "Х",
-        "KJcy" => "Ќ",
-        "Kappa" => "Κ",
-        "Kcedil" => "Ķ",
-        "Kcy" => "К",
-        "Kfr" => "𝔎",
-        "Kopf" => "𝕂",
-        "Kscr" => "𝒦",
-        "LJcy" => "Љ",
-        "LT" => "<",
-        "Lacute" => "Ĺ",
-        "Lambda" => "Λ",
-        "Lang" => "⟪",
-        "Laplacetrf" => "ℒ",
-        "Larr" => "↞",
-        "Lcaron" => "Ľ",
-        "Lcedil" => "Ļ",
-        "Lcy" => "Л",
-        "LeftAngleBracket" => "⟨",
-        "LeftArrow" => "←",
-        "LeftArrowBar" => "⇤",
-        "LeftArrowRightArrow" => "⇆",
-        "LeftCeiling" => "⌈",
-        "LeftDoubleBracket" => "⟦",
-        "LeftDownTeeVector" => "⥡",
-        "LeftDownVector" => "⇃",
-        "LeftDownVectorBar" => "⥙",
-        "LeftFloor" => "⌊",
-        "LeftRightArrow" => "↔",
-        "LeftRightVector" => "⥎",
-        "LeftTee" => "⊣",
-        "LeftTeeArrow" => "↤",
-        "LeftTeeVector" => "⥚",
-        "LeftTriangle" => "⊲",
-        "LeftTriangleBar" => "⧏",
-        "LeftTriangleEqual" => "⊴",
-        "LeftUpDownVector" => "⥑",
-        "LeftUpTeeVector" => "⥠",
-        "LeftUpVector" => "↿",
-        "LeftUpVectorBar" => "⥘",
-        "LeftVector" => "↼",
-        "LeftVectorBar" => "⥒",
-        "Leftarrow" => "⇐",
-        "Leftrightarrow" => "⇔",
-        "LessEqualGreater" => "⋚",
-        "LessFullEqual" => "≦",
-        "LessGreater" => "≶",
-        "LessLess" => "⪡",
-        "LessSlantEqual" => "⩽",
-        "LessTilde" => "≲",
-        "Lfr" => "𝔏",
-        "Ll" => "⋘",
-        "Lleftarrow" => "⇚",
-        "Lmidot" => "Ŀ",
-        "LongLeftArrow" => "⟵",
-        "LongLeftRightArrow" => "⟷",
-        "LongRightArrow" => "⟶",
-        "Longleftarrow" => "⟸",
-        "Longleftrightarrow" => "⟺",
-        "Longrightarrow" => "⟹",
-        "Lopf" => "𝕃",
-        "LowerLeftArrow" => "↙",
-        "LowerRightArrow" => "↘",
-        "Lscr" => "ℒ",
-        "Lsh" => "↰",
-        "Lstrok" => "Ł",
-        "Lt" => "≪",
-        "Map" => "⤅",
-        "Mcy" => "М",
-        "MediumSpace" => " ",
-        "Mellintrf" => "ℳ",
-        "Mfr" => "𝔐",
-        "MinusPlus" => "∓",
-        "Mopf" => "𝕄",
-        "Mscr" => "ℳ",
-        "Mu" => "Μ",
-        "NJcy" => "Њ",
-        "Nacute" => "Ń",
-        "Ncaron" => "Ň",
-        "Ncedil" => "Ņ",
-        "Ncy" => "Н",
-        "NegativeMediumSpace" => "\u{200B}",
-        "NegativeThickSpace" => "\u{200B}",
-        "NegativeThinSpace" => "\u{200B}",
-        "NegativeVeryThinSpace" => "\u{200B}",
-        "NestedGreaterGreater" => "≫",
-        "NestedLessLess" => "≪",
-        "NewLine" => "\n",
-        "Nfr" => "𝔑",
-        "NoBreak" => "\u{2060}",
-        "NonBreakingSpace" => " ",
-        "Nopf" => "ℕ",
-        "Not" => "⫬",
-        "NotCongruent" => "≢",
-        "NotCupCap" => "≭",
-        "NotDoubleVerticalBar" => "∦",
-        "NotElement" => "∉",
-        "NotEqual" => "≠",
-        "NotEqualTilde" => "≂̸",
-        "NotExists" => "∄",
-        "NotGreater" => "≯",
-        "NotGreaterEqual" => "≱",
-        "NotGreaterFullEqual" => "≧̸",
-        "NotGreaterGreater" => "≫̸",
-        "NotGreaterLess" => "≹",
-        "NotGreaterSlantEqual" => "⩾̸",
-        "NotGreaterTilde" => "≵",
-        "NotHumpDownHump" => "≎̸",
-        "NotHumpEqual" => "≏̸",
-        "NotLeftTriangle" => "⋪",
-        "NotLeftTriangleBar" => "⧏̸",
-        "NotLeftTriangleEqual" => "⋬",
-        "NotLess" => "≮",
-        "NotLessEqual" => "≰",
-        "NotLessGreater" => "≸",
-        "NotLessLess" => "≪̸",
-        "NotLessSlantEqual" => "⩽̸",
-        "NotLessTilde" => "≴",
-        "NotNestedGreaterGreater" => "⪢̸",
-        "NotNestedLessLess" => "⪡̸",
-        "NotPrecedes" => "⊀",
-        "NotPrecedesEqual" => "⪯̸",
-        "NotPrecedesSlantEqual" => "⋠",
-        "NotReverseElement" => "∌",
-        "NotRightTriangle" => "⋫",
-        "NotRightTriangleBar" => "⧐̸",
-        "NotRightTriangleEqual" => "⋭",
-        "NotSquareSubset" => "⊏̸",
-        "NotSquareSubsetEqual" => "⋢",
-        "NotSquareSuperset" => "⊐̸",
-        "NotSquareSupersetEqual" => "⋣",
-        "NotSubset" => "⊂⃒",
-        "NotSubsetEqual" => "⊈",
-        "NotSucceeds" => "⊁",
-        "NotSucceedsEqual" => "⪰̸",
-        "NotSucceedsSlantEqual" => "⋡",
-        "NotSucceedsTilde" => "≿̸",
-        "NotSuperset" => "⊃⃒",
-        "NotSupersetEqual" => "⊉",
-        "NotTilde" => "≁",
-        "NotTildeEqual" => "≄",
-        "NotTildeFullEqual" => "≇",
-        "NotTildeTilde" => "≉",
-        "NotVerticalBar" => "∤",
-        "Nscr" => "𝒩",
-        "Ntilde" => "Ñ",
-        "Nu" => "Ν",
-        "OElig" => "Œ",
-        "Oacute" => "Ó",
-        "Ocirc" => "Ô",
-        "Ocy" => "О",
-        "Odblac" => "Ő",
-        "Ofr" => "𝔒",
-        "Ograve" => "Ò",
-        "Omacr" => "Ō",
-        "Omega" => "Ω",
-        "Omicron" => "Ο",
-        "Oopf" => "𝕆",
-        "OpenCurlyDoubleQuote" => "“",
-        "OpenCurlyQuote" => "‘",
-        "Or" => "⩔",
-        "Oscr" => "𝒪",
-        "Oslash" => "Ø",
-        "Otilde" => "Õ",
-        "Otimes" => "⨷",
-        "Ouml" => "Ö",
-        "OverBar" => "‾",
-        "OverBrace" => "⏞",
-        "OverBracket" => "⎴",
-        "OverParenthesis" => "⏜",
-        "PartialD" => "∂",
-        "Pcy" => "П",
-        "Pfr" => "𝔓",
-        "Phi" => "Φ",
-        "Pi" => "Π",
-        "PlusMinus" => "±",
-        "Poincareplane" => "ℌ",
-        "Popf" => "ℙ",
-        "Pr" => "⪻",
-        "Precedes" => "≺",
-        "PrecedesEqual" => "⪯",
-        "PrecedesSlantEqual" => "≼",
-        "PrecedesTilde" => "≾",
-        "Prime" => "″",
-        "Product" => "∏",
-        "Proportion" => "∷",
-        "Proportional" => "∝",
-        "Pscr" => "𝒫",
-        "Psi" => "Ψ",
-        "QUOT" => "\"",
-        "Qfr" => "𝔔",
-        "Qopf" => "ℚ",
-        "Qscr" => "𝒬",
-        "RBarr" => "⤐",
-        "REG" => "®",
-        "Racute" => "Ŕ",
-        "Rang" => "⟫",
-        "Rarr" => "↠",
-        "Rarrtl" => "⤖",
-        "Rcaron" => "Ř",
-        "Rcedil" => "Ŗ",
-        "Rcy" => "Р",
-        "Re" => "ℜ",
-        "ReverseElement" => "∋",
-        "ReverseEquilibrium" => "⇋",
-        "ReverseUpEquilibrium" => "⥯",
-        "Rfr" => "ℜ",
-        "Rho" => "Ρ",
-        "RightAngleBracket" => "⟩",
-        "RightArrow" => "→",
-        "RightArrowBar" => "⇥",
-        "RightArrowLeftArrow" => "⇄",
-        "RightCeiling" => "⌉",
-        "RightDoubleBracket" => "⟧",
-        "RightDownTeeVector" => "⥝",
-        "RightDownVector" => "⇂",
-        "RightDownVectorBar" => "⥕",
-        "RightFloor" => "⌋",
-        "RightTee" => "⊢",
-        "RightTeeArrow" => "↦",
-        "RightTeeVector" => "⥛",
-        "RightTriangle" => "⊳",
-        "RightTriangleBar" => "⧐",
-        "RightTriangleEqual" => "⊵",
-        "RightUpDownVector" => "⥏",
-        "RightUpTeeVector" => "⥜",
-        "RightUpVector" => "↾",
-        "RightUpVectorBar" => "⥔",
-        "RightVector" => "⇀",
-        "RightVectorBar" => "⥓",
-        "Rightarrow" => "⇒",
-        "Ropf" => "ℝ",
-        "RoundImplies" => "⥰",
-        "Rrightarrow" => "⇛",
-        "Rscr" => "ℛ",
-        "Rsh" => "↱",
-        "RuleDelayed" => "⧴",
-        "SHCHcy" => "Щ",
-        "SHcy" => "Ш",
-        "SOFTcy" => "Ь",
-        "Sacute" => "Ś",
-        "Sc" => "⪼",
-        "Scaron" => "Š",
-        "Scedil" => "Ş",
-        "Scirc" => "Ŝ",
-        "Scy" => "С",
-        "Sfr" => "𝔖",
-        "ShortDownArrow" => "↓",
-        "ShortLeftArrow" => "←",
-        "ShortRightArrow" => "→",
-        "ShortUpArrow" => "↑",
-        "Sigma" => "Σ",
-        "SmallCircle" => "∘",
-        "Sopf" => "𝕊",
-        "Sqrt" => "√",
-        "Square" => "□",
-        "SquareIntersection" => "⊓",
-        "SquareSubset" => "⊏",
-        "SquareSubsetEqual" => "⊑",
-        "SquareSuperset" => "⊐",
-        "SquareSupersetEqual" => "⊒",
-        "SquareUnion" => "⊔",
-        "Sscr" => "𝒮",
-        "Star" => "⋆",
-        "Sub" => "⋐",
-        "Subset" => "⋐",
-        "SubsetEqual" => "⊆",
-        "Succeeds" => "≻",
-        "SucceedsEqual" => "⪰",
-        "SucceedsSlantEqual" => "≽",
-        "SucceedsTilde" => "≿",
-        "SuchThat" => "∋",
-        "Sum" => "∑",
-        "Sup" => "⋑",
-        "Superset" => "⊃",
-        "SupersetEqual" => "⊇",
-        "Supset" => "⋑",
-        "THORN" => "Þ",
-        "TRADE" => "™",
-        "TSHcy" => "Ћ",
-        "TScy" => "Ц",
-        "Tab" => "\t",
-        "Tau" => "Τ",
-        "Tcaron" => "Ť",
-        "Tcedil" => "Ţ",
-        "Tcy" => "Т",
-        "Tfr" => "𝔗",
-        "Therefore" => "∴",
-        "Theta" => "Θ",
-        "ThickSpace" => "  ",
-        "ThinSpace" => " ",
-        "Tilde" => "∼",
-        "TildeEqual" => "≃",
-        "TildeFullEqual" => "≅",
-        "TildeTilde" => "≈",
-        "Topf" => "𝕋",
-        "TripleDot" => "⃛",
-        "Tscr" => "𝒯",
-        "Tstrok" => "Ŧ",
-        "Uacute" => "Ú",
-        "Uarr" => "↟",
-        "Uarrocir" => "⥉",
-        "Ubrcy" => "Ў",
-        "Ubreve" => "Ŭ",
-        "Ucirc" => "Û",
-        "Ucy" => "У",
-        "Udblac" => "Ű",
-        "Ufr" => "𝔘",
-        "Ugrave" => "Ù",
-        "Umacr" => "Ū",
-        "UnderBar" => "_",
-        "UnderBrace" => "⏟",
-        "UnderBracket" => "⎵",
-        "UnderParenthesis" => "⏝",
-        "Union" => "⋃",
-        "UnionPlus" => "⊎",
-        "Uogon" => "Ų",
-        "Uopf" => "𝕌",
-        "UpArrow" => "↑",
-        "UpArrowBar" => "⤒",
-        "UpArrowDownArrow" => "⇅",
-        "UpDownArrow" => "↕",
-        "UpEquilibrium" => "⥮",
-        "UpTee" => "⊥",
-        "UpTeeArrow" => "↥",
-        "Uparrow" => "⇑",
-        "Updownarrow" => "⇕",
-        "UpperLeftArrow" => "↖",
-        "UpperRightArrow" => "↗",
-        "Upsi" => "ϒ",
-        "Upsilon" => "Υ",
-        "Uring" => "Ů",
-        "Uscr" => "𝒰",
-        "Utilde" => "Ũ",
-        "Uuml" => "Ü",
-        "VDash" => "⊫",
-        "Vbar" => "⫫",
-        "Vcy" => "В",
-        "Vdash" => "⊩",
-        "Vdashl" => "⫦",
-        "Vee" => "⋁",
-        "Verbar" => "‖",
-        "Vert" => "‖",
-        "VerticalBar" => "∣",
-        "VerticalLine" => "|",
-        "VerticalSeparator" => "❘",
-        "VerticalTilde" => "≀",
-        "VeryThinSpace" => " ",
-        "Vfr" => "𝔙",
-        "Vopf" => "𝕍",
-        "Vscr" => "𝒱",
-        "Vvdash" => "⊪",
-        "Wcirc" => "Ŵ",
-        "Wedge" => "⋀",
-        "Wfr" => "𝔚",
-        "Wopf" => "𝕎",
-        "Wscr" => "𝒲",
-        "Xfr" => "𝔛",
-        "Xi" => "Ξ",
-        "Xopf" => "𝕏",
-        "Xscr" => "𝒳",
-        "YAcy" => "Я",
-        "YIcy" => "Ї",
-        "YUcy" => "Ю",
-        "Yacute" => "Ý",
-        "Ycirc" => "Ŷ",
-        "Ycy" => "Ы",
-        "Yfr" => "𝔜",
-        "Yopf" => "𝕐",
-        "Yscr" => "𝒴",
-        "Yuml" => "Ÿ",
-        "ZHcy" => "Ж",
-        "Zacute" => "Ź",
-        "Zcaron" => "Ž",
-        "Zcy" => "З",
-        "Zdot" => "Ż",
-        "ZeroWidthSpace" => "\u{200B}",
-        "Zeta" => "Ζ",
-        "Zfr" => "ℨ",
-        "Zopf" => "ℤ",
-        "Zscr" => "𝒵",
-        "aacute" => "á",
-        "abreve" => "ă",
-        "ac" => "∾",
-        "acE" => "∾̳",
-        "acd" => "∿",
-        "acirc" => "â",
-        "acute" => "´",
-        "acy" => "а",
-        "aelig" => "æ",
-        "af" => "\u{2061}",
-        "afr" => "𝔞",
-        "agrave" => "à",
-        "alefsym" => "ℵ",
-        "aleph" => "ℵ",
-        "alpha" => "α",
-        "amacr" => "ā",
-        "amalg" => "⨿",
-        "amp" => "&",
-        "and" => "∧",
-        "andand" => "⩕",
-        "andd" => "⩜",
-        "andslope" => "⩘",
-        "andv" => "⩚",
-        "ang" => "∠",
-        "ange" => "⦤",
-        "angle" => "∠",
-        "angmsd" => "∡",
-        "angmsdaa" => "⦨",
-        "angmsdab" => "⦩",
-        "angmsdac" => "⦪",
-        "angmsdad" => "⦫",
-        "angmsdae" => "⦬",
-        "angmsdaf" => "⦭",
-        "angmsdag" => "⦮",
-        "angmsdah" => "⦯",
-        "angrt" => "∟",
-        "angrtvb" => "⊾",
-        "angrtvbd" => "⦝",
-        "angsph" => "∢",
-        "angst" => "Å",
-        "angzarr" => "⍼",
-        "aogon" => "ą",
-        "aopf" => "𝕒",
-        "ap" => "≈",
-        "apE" => "⩰",
-        "apacir" => "⩯",
-        "ape" => "≊",
-        "apid" => "≋",
-        "apos" => "'",
-        "approx" => "≈",
-        "approxeq" => "≊",
-        "aring" => "å",
-        "ascr" => "𝒶",
-        "ast" => "*",
-        "asymp" => "≈",
-        "asympeq" => "≍",
-        "atilde" => "ã",
-        "auml" => "ä",
-        "awconint" => "∳",
-        "awint" => "⨑",
-        "bNot" => "⫭",
-        "backcong" => "≌",
-        "backepsilon" => "϶",
-        "backprime" => "‵",
-        "backsim" => "∽",
-        "backsimeq" => "⋍",
-        "barvee" => "⊽",
-        "barwed" => "⌅",
-        "barwedge" => "⌅",
-        "bbrk" => "⎵",
-        "bbrktbrk" => "⎶",
-        "bcong" => "≌",
-        "bcy" => "б",
-        "bdquo" => "„",
-        "becaus" => "∵",
-        "because" => "∵",
-        "bemptyv" => "⦰",
-        "bepsi" => "϶",
-        "bernou" => "ℬ",
-        "beta" => "β",
-        "beth" => "ℶ",
-        "between" => "≬",
-        "bfr" => "𝔟",
-        "bigcap" => "⋂",
-        "bigcirc" => "◯",
-        "bigcup" => "⋃",
-        "bigodot" => "⨀",
-        "bigoplus" => "⨁",
-        "bigotimes" => "⨂",
-        "bigsqcup" => "⨆",
-        "bigstar" => "★",
-        "bigtriangledown" => "▽",
-        "bigtriangleup" => "△",
-        "biguplus" => "⨄",
-        "bigvee" => "⋁",
-        "bigwedge" => "⋀",
-        "bkarow" => "⤍",
-        "blacklozenge" => "⧫",
-        "blacksquare" => "▪",
-        "blacktriangle" => "▴",
-        "blacktriangledown" => "▾",
-        "blacktriangleleft" => "◂",
-        "blacktriangleright" => "▸",
-        "blank" => "␣",
-        "blk12" => "▒",
-        "blk14" => "░",
-        "blk34" => "▓",
-        "block" => "█",
-        "bne" => "=⃥",
-        "bnequiv" => "≡⃥",
-        "bnot" => "⌐",
-        "bopf" => "𝕓",
-        "bot" => "⊥",
-        "bottom" => "⊥",
-        "bowtie" => "⋈",
-        "boxDL" => "╗",
-        "boxDR" => "╔",
-        "boxDl" => "╖",
-        "boxDr" => "╓",
-        "boxH" => "═",
-        "boxHD" => "╦",
-        "boxHU" => "╩",
-        "boxHd" => "╤",
-        "boxHu" => "╧",
-        "boxUL" => "╝",
-        "boxUR" => "╚",
-        "boxUl" => "╜",
-        "boxUr" => "╙",
-        "boxV" => "║",
-        "boxVH" => "╬",
-        "boxVL" => "╣",
-        "boxVR" => "╠",
-        "boxVh" => "╫",
-        "boxVl" => "╢",
-        "boxVr" => "╟",
-        "boxbox" => "⧉",
-        "boxdL" => "╕",
-        "boxdR" => "╒",
-        "boxdl" => "┐",
-        "boxdr" => "┌",
-        "boxh" => "─",
-        "boxhD" => "╥",
-        "boxhU" => "╨",
-        "boxhd" => "┬",
-        "boxhu" => "┴",
-        "boxminus" => "⊟",
-        "boxplus" => "⊞",
-        "boxtimes" => "⊠",
-        "boxuL" => "╛",
-        "boxuR" => "╘",
-        "boxul" => "┘",
-        "boxur" => "└",
-        "boxv" => "│",
-        "boxvH" => "╪",
-        "boxvL" => "╡",
-        "boxvR" => "╞",
-        "boxvh" => "┼",
-        "boxvl" => "┤",
-        "boxvr" => "├",
-        "bprime" => "‵",
-        "breve" => "˘",
-        "brvbar" => "¦",
-        "bscr" => "𝒷",
-        "bsemi" => "⁏",
-        "bsim" => "∽",
-        "bsime" => "⋍",
-        "bsol" => "\\",
-        "bsolb" => "⧅",
-        "bsolhsub" => "⟈",
-        "bull" => "•",
-        "bullet" => "•",
-        "bump" => "≎",
-        "bumpE" => "⪮",
-        "bumpe" => "≏",
-        "bumpeq" => "≏",
-        "cacute" => "ć",
-        "cap" => "∩",
-        "capand" => "⩄",
-        "capbrcup" => "⩉",
-        "capcap" => "⩋",
-        "capcup" => "⩇",
-        "capdot" => "⩀",
-        "caps" => "∩︀",
-        "caret" => "⁁",
-        "caron" => "ˇ",
-        "ccaps" => "⩍",
-        "ccaron" => "č",
-        "ccedil" => "ç",
-        "ccirc" => "ĉ",
-        "ccups" => "⩌",
-        "ccupssm" => "⩐",
-        "cdot" => "ċ",
-        "cedil" => "¸",
-        "cemptyv" => "⦲",
-        "cent" => "¢",
-        "centerdot" => "·",
-        "cfr" => "𝔠",
-        "chcy" => "ч",
-        "check" => "✓",
-        "checkmark" => "✓",
-        "chi" => "χ",
-        "cir" => "○",
-        "cirE" => "⧃",
-        "circ" => "ˆ",
-        "circeq" => "≗",
-        "circlearrowleft" => "↺",
-        "circlearrowright" => "↻",
-        "circledR" => "®",
-        "circledS" => "Ⓢ",
-        "circledast" => "⊛",
-        "circledcirc" => "⊚",
-        "circleddash" => "⊝",
-        "cire" => "≗",
-        "cirfnint" => "⨐",
-        "cirmid" => "⫯",
-        "cirscir" => "⧂",
-        "clubs" => "♣",
-        "clubsuit" => "♣",
-        "colon" => ":",
-        "colone" => "≔",
-        "coloneq" => "≔",
-        "comma" => ",",
-        "commat" => "@",
-        "comp" => "∁",
-        "compfn" => "∘",
-        "complement" => "∁",
-        "complexes" => "ℂ",
-        "cong" => "≅",
-        "congdot" => "⩭",
-        "conint" => "∮",
-        "copf" => "𝕔",
-        "coprod" => "∐",
-        "copy" => "©",
-        "copysr" => "℗",
-        "crarr" => "↵",
-        "cross" => "✗",
-        "cscr" => "𝒸",
-        "csub" => "⫏",
-        "csube" => "⫑",
-        "csup" => "⫐",
-        "csupe" => "⫒",
-        "ctdot" => "⋯",
-        "cudarrl" => "⤸",
-        "cudarrr" => "⤵",
-        "cuepr" => "⋞",
-        "cuesc" => "⋟",
-        "cularr" => "↶",
-        "cularrp" => "⤽",
-        "cup" => "∪",
-        "cupbrcap" => "⩈",
-        "cupcap" => "⩆",
-        "cupcup" => "⩊",
-        "cupdot" => "⊍",
-        "cupor" => "⩅",
-        "cups" => "∪︀",
-        "curarr" => "↷",
-        "curarrm" => "⤼",
-        "curlyeqprec" => "⋞",
-        "curlyeqsucc" => "⋟",
-        "curlyvee" => "⋎",
-        "curlywedge" => "⋏",
-        "curren" => "¤",
-        "curvearrowleft" => "↶",
-        "curvearrowright" => "↷",
-        "cuvee" => "⋎",
-        "cuwed" => "⋏",
-        "cwconint" => "∲",
-        "cwint" => "∱",
-        "cylcty" => "⌭",
-        "dArr" => "⇓",
-        "dHar" => "⥥",
-        "dagger" => "†",
-        "daleth" => "ℸ",
-        "darr" => "↓",
-        "dash" => "‐",
-        "dashv" => "⊣",
-        "dbkarow" => "⤏",
-        "dblac" => "˝",
-        "dcaron" => "ď",
-        "dcy" => "д",
-        "dd" => "ⅆ",
-        "ddagger" => "‡",
-        "ddarr" => "⇊",
-        "ddotseq" => "⩷",
-        "deg" => "°",
-        "delta" => "δ",
-        "demptyv" => "⦱",
-        "dfisht" => "⥿",
-        "dfr" => "𝔡",
-        "dharl" => "⇃",
-        "dharr" => "⇂",
-        "diam" => "⋄",
-        "diamond" => "⋄",
-        "diamondsuit" => "♦",
-        "diams" => "♦",
-        "die" => "¨",
-        "digamma" => "ϝ",
-        "disin" => "⋲",
-        "div" => "÷",
-        "divide" => "÷",
-        "divideontimes" => "⋇",
-        "divonx" => "⋇",
-        "djcy" => "ђ",
-        "dlcorn" => "⌞",
-        "dlcrop" => "⌍",
-        "dollar" => "$",
-        "dopf" => "𝕕",
-        "dot" => "˙",
-        "doteq" => "≐",
-        "doteqdot" => "≑",
-        "dotminus" => "∸",
-        "dotplus" => "∔",
-        "dotsquare" => "⊡",
-        "doublebarwedge" => "⌆",
-        "downarrow" => "↓",
-        "downdownarrows" => "⇊",
-        "downharpoonleft" => "⇃",
-        "downharpoonright" => "⇂",
-        "drbkarow" => "⤐",
-        "drcorn" => "⌟",
-        "drcrop" => "⌌",
-        "dscr" => "𝒹",
-        "dscy" => "ѕ",
-        "dsol" => "⧶",
-        "dstrok" => "đ",
-        "dtdot" => "⋱",
-        "dtri" => "▿",
-        "dtrif" => "▾",
-        "duarr" => "⇵",
-        "duhar" => "⥯",
-        "dwangle" => "⦦",
-        "dzcy" => "џ",
-        "dzigrarr" => "⟿",
-        "eDDot" => "⩷",
-        "eDot" => "≑",
-        "eacute" => "é",
-        "easter" => "⩮",
-        "ecaron" => "ě",
-        "ecir" => "≖",
-        "ecirc" => "ê",
-        "ecolon" => "≕",
-        "ecy" => "э",
-        "edot" => "ė",
-        "ee" => "ⅇ",
-        "efDot" => "≒",
-        "efr" => "𝔢",
-        "eg" => "⪚",
-        "egrave" => "è",
-        "egs" => "⪖",
-        "egsdot" => "⪘",
-        "el" => "⪙",
-        "elinters" => "⏧",
-        "ell" => "ℓ",
-        "els" => "⪕",
-        "elsdot" => "⪗",
-        "emacr" => "ē",
-        "empty" => "∅",
-        "emptyset" => "∅",
-        "emptyv" => "∅",
-        "emsp" => " ",
-        "emsp13" => " ",
-        "emsp14" => " ",
-        "eng" => "ŋ",
-        "ensp" => " ",
-        "eogon" => "ę",
-        "eopf" => "𝕖",
-        "epar" => "⋕",
-        "eparsl" => "⧣",
-        "eplus" => "⩱",
-        "epsi" => "ε",
-        "epsilon" => "ε",
-        "epsiv" => "ϵ",
-        "eqcirc" => "≖",
-        "eqcolon" => "≕",
-        "eqsim" => "≂",
-        "eqslantgtr" => "⪖",
-        "eqslantless" => "⪕",
-        "equals" => "=",
-        "equest" => "≟",
-        "equiv" => "≡",
-        "equivDD" => "⩸",
-        "eqvparsl" => "⧥",
-        "erDot" => "≓",
-        "erarr" => "⥱",
-        "escr" => "ℯ",
-        "esdot" => "≐",
-        "esim" => "≂",
-        "eta" => "η",
-        "eth" => "ð",
-        "euml" => "ë",
-        "euro" => "€",
-        "excl" => "!",
-        "exist" => "∃",
-        "expectation" => "ℰ",
-        "exponentiale" => "ⅇ",
-        "fallingdotseq" => "≒",
-        "fcy" => "ф",
-        "female" => "♀",
-        "ffilig" => "ﬃ",
-        "fflig" => "ﬀ",
-        "ffllig" => "ﬄ",
-        "ffr" => "𝔣",
-        "filig" => "ﬁ",
-        "fjlig" => "fj",
-        "flat" => "♭",
-        "fllig" => "ﬂ",
-        "fltns" => "▱",
-        "fnof" => "ƒ",
-        "fopf" => "𝕗",
-        "forall" => "∀",
-        "fork" => "⋔",
-        "forkv" => "⫙",
-        "fpartint" => "⨍",
-        "frac12" => "½",
-        "frac13" => "⅓",
-        "frac14" => "¼",
-        "frac15" => "⅕",
-        "frac16" => "⅙",
-        "frac18" => "⅛",
-        "frac23" => "⅔",
-        "frac25" => "⅖",
-        "frac34" => "¾",
-        "frac35" => "⅗",
-        "frac38" => "⅜",
-        "frac45" => "⅘",
-        "frac56" => "⅚",
-        "frac58" => "⅝",
-        "frac78" => "⅞",
-        "frasl" => "⁄",
-        "frown" => "⌢",
-        "fscr" => "𝒻",
-        "gE" => "≧",
-        "gEl" => "⪌",
-        "gacute" => "ǵ",
-        "gamma" => "γ",
-        "gammad" => "ϝ",
-        "gap" => "⪆",
-        "gbreve" => "ğ",
-        "gcirc" => "ĝ",
-        "gcy" => "г",
-        "gdot" => "ġ",
-        "ge" => "≥",
-        "gel" => "⋛",
-        "geq" => "≥",
-        "geqq" => "≧",
-        "geqslant" => "⩾",
-        "ges" => "⩾",
-        "gescc" => "⪩",
-        "gesdot" => "⪀",
-        "gesdoto" => "⪂",
-        "gesdotol" => "⪄",
-        "gesl" => "⋛︀",
-        "gesles" => "⪔",
-        "gfr" => "𝔤",
-        "gg" => "≫",
-        "ggg" => "⋙",
-        "gimel" => "ℷ",
-        "gjcy" => "ѓ",
-        "gl" => "≷",
-        "glE" => "⪒",
-        "gla" => "⪥",
-        "glj" => "⪤",
-        "gnE" => "≩",
-        "gnap" => "⪊",
-        "gnapprox" => "⪊",
-        "gne" => "⪈",
-        "gneq" => "⪈",
-        "gneqq" => "≩",
-        "gnsim" => "⋧",
-        "gopf" => "𝕘",
-        "grave" => "`",
-        "gscr" => "ℊ",
-        "gsim" => "≳",
-        "gsime" => "⪎",
-        "gsiml" => "⪐",
-        "gt" => ">",
-        "gtcc" => "⪧",
-        "gtcir" => "⩺",
-        "gtdot" => "⋗",
-        "gtlPar" => "⦕",
-        "gtquest" => "⩼",
-        "gtrapprox" => "⪆",
-        "gtrarr" => "⥸",
-        "gtrdot" => "⋗",
-        "gtreqless" => "⋛",
-        "gtreqqless" => "⪌",
-        "gtrless" => "≷",
-        "gtrsim" => "≳",
-        "gvertneqq" => "≩︀",
-        "gvnE" => "≩︀",
-        "hArr" => "⇔",
-        "hairsp" => " ",
-        "half" => "½",
-        "hamilt" => "ℋ",
-        "hardcy" => "ъ",
-        "harr" => "↔",
-        "harrcir" => "⥈",
-        "harrw" => "↭",
-        "hbar" => "ℏ",
-        "hcirc" => "ĥ",
-        "hearts" => "♥",
-        "heartsuit" => "♥",
-        "hellip" => "…",
-        "hercon" => "⊹",
-        "hfr" => "𝔥",
-        "hksearow" => "⤥",
-        "hkswarow" => "⤦",
-        "hoarr" => "⇿",
-        "homtht" => "∻",
-        "hookleftarrow" => "↩",
-        "hookrightarrow" => "↪",
-        "hopf" => "𝕙",
-        "horbar" => "―",
-        "hscr" => "𝒽",
-        "hslash" => "ℏ",
-        "hstrok" => "ħ",
-        "hybull" => "⁃",
-        "hyphen" => "‐",
-        "iacute" => "í",
-        "ic" => "\u{2063}",
-        "icirc" => "î",
-        "icy" => "и",
-        "iecy" => "е",
-        "iexcl" => "¡",
-        "iff" => "⇔",
-        "ifr" => "𝔦",
-        "igrave" => "ì",
-        "ii" => "ⅈ",
-        "iiiint" => "⨌",
-        "iiint" => "∭",
-        "iinfin" => "⧜",
-        "iiota" => "℩",
-        "ijlig" => "ĳ",
-        "imacr" => "ī",
-        "image" => "ℑ",
-        "imagline" => "ℐ",
-        "imagpart" => "ℑ",
-        "imath" => "ı",
-        "imof" => "⊷",
-        "imped" => "Ƶ",
-        "in" => "∈",
-        "incare" => "℅",
-        "infin" => "∞",
-        "infintie" => "⧝",
-        "inodot" => "ı",
-        "int" => "∫",
-        "intcal" => "⊺",
-        "integers" => "ℤ",
-        "intercal" => "⊺",
-        "intlarhk" => "⨗",
-        "intprod" => "⨼",
-        "iocy" => "ё",
-        "iogon" => "į",
-        "iopf" => "𝕚",
-        "iota" => "ι",
-        "iprod" => "⨼",
-        "iquest" => "¿",
-        "iscr" => "𝒾",
-        "isin" => "∈",
-        "isinE" => "⋹",
-        "isindot" => "⋵",
-        "isins" => "⋴",
-        "isinsv" => "⋳",
-        "isinv" => "∈",
-        "it" => "\u{2062}",
-        "itilde" => "ĩ",
-        "iukcy" => "і",
-        "iuml" => "ï",
-        "jcirc" => "ĵ",
-        "jcy" => "й",
-        "jfr" => "𝔧",
-        "jmath" => "ȷ",
-        "jopf" => "𝕛",
-        "jscr" => "𝒿",
-        "jsercy" => "ј",
-        "jukcy" => "є",
-        "kappa" => "κ",
-        "kappav" => "ϰ",
-        "kcedil" => "ķ",
-        "kcy" => "к",
-        "kfr" => "𝔨",
-        "kgreen" => "ĸ",
-        "khcy" => "х",
-        "kjcy" => "ќ",
-        "kopf" => "𝕜",
-        "kscr" => "𝓀",
-        "lAarr" => "⇚",
-        "lArr" => "⇐",
-        "lAtail" => "⤛",
-        "lBarr" => "⤎",
-        "lE" => "≦",
-        "lEg" => "⪋",
-        "lHar" => "⥢",
-        "lacute" => "ĺ",
-        "laemptyv" => "⦴",
-        "lagran" => "ℒ",
-        "lambda" => "λ",
-        "lang" => "⟨",
-        "langd" => "⦑",
-        "langle" => "⟨",
-        "lap" => "⪅",
-        "laquo" => "«",
-        "larr" => "←",
-        "larrb" => "⇤",
-        "larrbfs" => "⤟",
-        "larrfs" => "⤝",
-        "larrhk" => "↩",
-        "larrlp" => "↫",
-        "larrpl" => "⤹",
-        "larrsim" => "⥳",
-        "larrtl" => "↢",
-        "lat" => "⪫",
-        "latail" => "⤙",
-        "late" => "⪭",
-        "lates" => "⪭︀",
-        "lbarr" => "⤌",
-        "lbbrk" => "❲",
-        "lbrace" => "{",
-        "lbrack" => "[",
-        "lbrke" => "⦋",
-        "lbrksld" => "⦏",
-        "lbrkslu" => "⦍",
-        "lcaron" => "ľ",
-        "lcedil" => "ļ",
-        "lceil" => "⌈",
-        "lcub" => "{",
-        "lcy" => "л",
-        "ldca" => "⤶",
-        "ldquo" => "“",
-        "ldquor" => "„",
-        "ldrdhar" => "⥧",
-        "ldrushar" => "⥋",
-        "ldsh" => "↲",
-        "le" => "≤",
-        "leftarrow" => "←",
-        "leftarrowtail" => "↢",
-        "leftharpoondown" => "↽",
-        "leftharpoonup" => "↼",
-        "leftleftarrows" => "⇇",
-        "leftrightarrow" => "↔",
-        "leftrightarrows" => "⇆",
-        "leftrightharpoons" => "⇋",
-        "leftrightsquigarrow" => "↭",
-        "leftthreetimes" => "⋋",
-        "leg" => "⋚",
-        "leq" => "≤",
-        "leqq" => "≦",
-        "leqslant" => "⩽",
-        "les" => "⩽",
-        "lescc" => "⪨",
-        "lesdot" => "⩿",
-        "lesdoto" => "⪁",
-        "lesdotor" => "⪃",
-        "lesg" => "⋚︀",
-        "lesges" => "⪓",
-        "lessapprox" => "⪅",
-        "lessdot" => "⋖",
-        "lesseqgtr" => "⋚",
-        "lesseqqgtr" => "⪋",
-        "lessgtr" => "≶",
-        "lesssim" => "≲",
-        "lfisht" => "⥼",
-        "lfloor" => "⌊",
-        "lfr" => "𝔩",
-        "lg" => "≶",
-        "lgE" => "⪑",
-        "lhard" => "↽",
-        "lharu" => "↼",
-        "lharul" => "⥪",
-        "lhblk" => "▄",
-        "ljcy" => "љ",
-        "ll" => "≪",
-        "llarr" => "⇇",
-        "llcorner" => "⌞",
-        "llhard" => "⥫",
-        "lltri" => "◺",
-        "lmidot" => "ŀ",
-        "lmoust" => "⎰",
-        "lmoustache" => "⎰",
-        "lnE" => "≨",
-        "lnap" => "⪉",
-        "lnapprox" => "⪉",
-        "lne" => "⪇",
-        "lneq" => "⪇",
-        "lneqq" => "≨",
-        "lnsim" => "⋦",
-        "loang" => "⟬",
-        "loarr" => "⇽",
-        "lobrk" => "⟦",
-        "longleftarrow" => "⟵",
-        "longleftrightarrow" => "⟷",
-        "longmapsto" => "⟼",
-        "longrightarrow" => "⟶",
-        "looparrowleft" => "↫",
-        "looparrowright" => "↬",
-        "lopar" => "⦅",
-        "lopf" => "𝕝",
-        "loplus" => "⨭",
-        "lotimes" => "⨴",
-        "lowast" => "∗",
-        "lowbar" => "_",
-        "loz" => "◊",
-        "lozenge" => "◊",
-        "lozf" => "⧫",
-        "lpar" => "(",
-        "lparlt" => "⦓",
-        "lrarr" => "⇆",
-        "lrcorner" => "⌟",
-        "lrhar" => "⇋",
-        "lrhard" => "⥭",
-        "lrm" => "\u{200E}",
-        "lrtri" => "⊿",
-        "lsaquo" => "‹",
-        "lscr" => "𝓁",
-        "lsh" => "↰",
-        "lsim" => "≲",
-        "lsime" => "⪍",
-        "lsimg" => "⪏",
-        "lsqb" => "[",
-        "lsquo" => "‘",
-        "lsquor" => "‚",
-        "lstrok" => "ł",
-        "lt" => "<",
-        "ltcc" => "⪦",
-        "ltcir" => "⩹",
-        "ltdot" => "⋖",
-        "lthree" => "⋋",
-        "ltimes" => "⋉",
-        "ltlarr" => "⥶",
-        "ltquest" => "⩻",
-        "ltrPar" => "⦖",
-        "ltri" => "◃",
-        "ltrie" => "⊴",
-        "ltrif" => "◂",
-        "lurdshar" => "⥊",
-        "luruhar" => "⥦",
-        "lvertneqq" => "≨︀",
-        "lvnE" => "≨︀",
-        "mDDot" => "∺",
-        "macr" => "¯",
-        "male" => "♂",
-        "malt" => "✠",
-        "maltese" => "✠",
-        "map" => "↦",
-        "mapsto" => "↦",
-        "mapstodown" => "↧",
-        "mapstoleft" => "↤",
-        "mapstoup" => "↥",
-        "marker" => "▮",
-        "mcomma" => "⨩",
-        "mcy" => "м",
-        "mdash" => "—",
-        "measuredangle" => "∡",
-        "mfr" => "𝔪",
-        "mho" => "℧",
-        "micro" => "µ",
-        "mid" => "∣",
-        "midast" => "*",
-        "midcir" => "⫰",
-        "middot" => "·",
-        "minus" => "−",
-        "minusb" => "⊟",
-        "minusd" => "∸",
-        "minusdu" => "⨪",
-        "mlcp" => "⫛",
-        "mldr" => "…",
-        "mnplus" => "∓",
-        "models" => "⊧",
-        "mopf" => "𝕞",
-        "mp" => "∓",
-        "mscr" => "𝓂",
-        "mstpos" => "∾",
-        "mu" => "μ",
-        "multimap" => "⊸",
-        "mumap" => "⊸",
-        "nGg" => "⋙̸",
-        "nGt" => "≫⃒",
-        "nGtv" => "≫̸",
-        "nLeftarrow" => "⇍",
-        "nLeftrightarrow" => "⇎",
-        "nLl" => "⋘̸",
-        "nLt" => "≪⃒",
-        "nLtv" => "≪̸",
-        "nRightarrow" => "⇏",
-        "nVDash" => "⊯",
-        "nVdash" => "⊮",
-        "nabla" => "∇",
-        "nacute" => "ń",
-        "nang" => "∠⃒",
-        "nap" => "≉",
-        "napE" => "⩰̸",
-        "napid" => "≋̸",
-        "napos" => "ŉ",
-        "napprox" => "≉",
-        "natur" => "♮",
-        "natural" => "♮",
-        "naturals" => "ℕ",
-        "nbsp" => " ",
-        "nbump" => "≎̸",
-        "nbumpe" => "≏̸",
-        "ncap" => "⩃",
-        "ncaron" => "ň",
-        "ncedil" => "ņ",
-        "ncong" => "≇",
-        "ncongdot" => "⩭̸",
-        "ncup" => "⩂",
-        "ncy" => "н",
-        "ndash" => "–",
-        "ne" => "≠",
-        "neArr" => "⇗",
-        "nearhk" => "⤤",
-        "nearr" => "↗",
-        "nearrow" => "↗",
-        "nedot" => "≐̸",
-        "nequiv" => "≢",
-        "nesear" => "⤨",
-        "nesim" => "≂̸",
-        "nexist" => "∄",
-        "nexists" => "∄",
-        "nfr" => "𝔫",
-        "ngE" => "≧̸",
-        "nge" => "≱",
-        "ngeq" => "≱",
-        "ngeqq" => "≧̸",
-        "ngeqslant" => "⩾̸",
-        "nges" => "⩾̸",
-        "ngsim" => "≵",
-        "ngt" => "≯",
-        "ngtr" => "≯",
-        "nhArr" => "⇎",
-        "nharr" => "↮",
-        "nhpar" => "⫲",
-        "ni" => "∋",
-        "nis" => "⋼",
-        "nisd" => "⋺",
-        "niv" => "∋",
-        "njcy" => "њ",
-        "nlArr" => "⇍",
-        "nlE" => "≦̸",
-        "nlarr" => "↚",
-        "nldr" => "‥",
-        "nle" => "≰",
-        "nleftarrow" => "↚",
-        "nleftrightarrow" => "↮",
-        "nleq" => "≰",
-        "nleqq" => "≦̸",
-        "nleqslant" => "⩽̸",
-        "nles" => "⩽̸",
-        "nless" => "≮",
-        "nlsim" => "≴",
-        "nlt" => "≮",
-        "nltri" => "⋪",
-        "nltrie" => "⋬",
-        "nmid" => "∤",
-        "nopf" => "𝕟",
-        "not" => "¬",
-        "notin" => "∉",
-        "notinE" => "⋹̸",
-        "notindot" => "⋵̸",
-        "notinva" => "∉",
-        "notinvb" => "⋷",
-        "notinvc" => "⋶",
-        "notni" => "∌",
-        "notniva" => "∌",
-        "notnivb" => "⋾",
-        "notnivc" => "⋽",
-        "npar" => "∦",
-        "nparallel" => "∦",
-        "nparsl" => "⫽⃥",
-        "npart" => "∂̸",
-        "npolint" => "⨔",
-        "npr" => "⊀",
-        "nprcue" => "⋠",
-        "npre" => "⪯̸",
-        "nprec" => "⊀",
-        "npreceq" => "⪯̸",
-        "nrArr" => "⇏",
-        "nrarr" => "↛",
-        "nrarrc" => "⤳̸",
-        "nrarrw" => "↝̸",
-        "nrightarrow" => "↛",
-        "nrtri" => "⋫",
-        "nrtrie" => "⋭",
-        "nsc" => "⊁",
-        "nsccue" => "⋡",
-        "nsce" => "⪰̸",
-        "nscr" => "𝓃",
-        "nshortmid" => "∤",
-        "nshortparallel" => "∦",
-        "nsim" => "≁",
-        "nsime" => "≄",
-        "nsimeq" => "≄",
-        "nsmid" => "∤",
-        "nspar" => "∦",
-        "nsqsube" => "⋢",
-        "nsqsupe" => "⋣",
-        "nsub" => "⊄",
-        "nsubE" => "⫅̸",
-        "nsube" => "⊈",
-        "nsubset" => "⊂⃒",
-        "nsubseteq" => "⊈",
-        "nsubseteqq" => "⫅̸",
-        "nsucc" => "⊁",
-        "nsucceq" => "⪰̸",
-        "nsup" => "⊅",
-        "nsupE" => "⫆̸",
-        "nsupe" => "⊉",
-        "nsupset" => "⊃⃒",
-        "nsupseteq" => "⊉",
-        "nsupseteqq" => "⫆̸",
-        "ntgl" => "≹",
-        "ntilde" => "ñ",
-        "ntlg" => "≸",
-        "ntriangleleft" => "⋪",
-        "ntrianglelefteq" => "⋬",
-        "ntriangleright" => "⋫",
-        "ntrianglerighteq" => "⋭",
-        "nu" => "ν",
-        "num" => "#",
-        "numero" => "№",
-        "numsp" => " ",
-        "nvDash" => "⊭",
-        "nvHarr" => "⤄",
-        "nvap" => "≍⃒",
-        "nvdash" => "⊬",
-        "nvge" => "≥⃒",
-        "nvgt" => ">⃒",
-        "nvinfin" => "⧞",
-        "nvlArr" => "⤂",
-        "nvle" => "≤⃒",
-        "nvlt" => "<⃒",
-        "nvltrie" => "⊴⃒",
-        "nvrArr" => "⤃",
-        "nvrtrie" => "⊵⃒",
-        "nvsim" => "∼⃒",
-        "nwArr" => "⇖",
-        "nwarhk" => "⤣",
-        "nwarr" => "↖",
-        "nwarrow" => "↖",
-        "nwnear" => "⤧",
-        "oS" => "Ⓢ",
-        "oacute" => "ó",
-        "oast" => "⊛",
-        "ocir" => "⊚",
-        "ocirc" => "ô",
-        "ocy" => "о",
-        "odash" => "⊝",
-        "odblac" => "ő",
-        "odiv" => "⨸",
-        "odot" => "⊙",
-        "odsold" => "⦼",
-        "oelig" => "œ",
-        "ofcir" => "⦿",
-        "ofr" => "𝔬",
-        "ogon" => "˛",
-        "ograve" => "ò",
-        "ogt" => "⧁",
-        "ohbar" => "⦵",
-        "ohm" => "Ω",
-        "oint" => "∮",
-        "olarr" => "↺",
-        "olcir" => "⦾",
-        "olcross" => "⦻",
-        "oline" => "‾",
-        "olt" => "⧀",
-        "omacr" => "ō",
-        "omega" => "ω",
-        "omicron" => "ο",
-        "omid" => "⦶",
-        "ominus" => "⊖",
-        "oopf" => "𝕠",
-        "opar" => "⦷",
-        "operp" => "⦹",
-        "oplus" => "⊕",
-        "or" => "∨",
-        "orarr" => "↻",
-        "ord" => "⩝",
-        "order" => "ℴ",
-        "orderof" => "ℴ",
-        "ordf" => "ª",
-        "ordm" => "º",
-        "origof" => "⊶",
-        "oror" => "⩖",
-        "orslope" => "⩗",
-        "orv" => "⩛",
-        "oscr" => "ℴ",
-        "oslash" => "ø",
-        "osol" => "⊘",
-        "otilde" => "õ",
-        "otimes" => "⊗",
-        "otimesas" => "⨶",
-        "ouml" => "ö",
-        "ovbar" => "⌽",
-        "par" => "∥",
-        "para" => "¶",
-        "parallel" => "∥",
-        "parsim" => "⫳",
-        "parsl" => "⫽",
-        "part" => "∂",
-        "pcy" => "п",
-        "percnt" => "%",
-        "period" => ".",
-        "permil" => "‰",
-        "perp" => "⊥",
-        "pertenk" => "‱",
-        "pfr" => "𝔭",
-        "phi" => "φ",
-        "phiv" => "ϕ",
-        "phmmat" => "ℳ",
-        "phone" => "☎",
-        "pi" => "π",
-        "pitchfork" => "⋔",
-        "piv" => "ϖ",
-        "planck" => "ℏ",
-        "planckh" => "ℎ",
-        "plankv" => "ℏ",
-        "plus" => "+",
-        "plusacir" => "⨣",
-        "plusb" => "⊞",
-        "pluscir" => "⨢",
-        "plusdo" => "∔",
-        "plusdu" => "⨥",
-        "pluse" => "⩲",
-        "plusmn" => "±",
-        "plussim" => "⨦",
-        "plustwo" => "⨧",
-        "pm" => "±",
-        "pointint" => "⨕",
-        "popf" => "𝕡",
-        "pound" => "£",
-        "pr" => "≺",
-        "prE" => "⪳",
-        "prap" => "⪷",
-        "prcue" => "≼",
-        "pre" => "⪯",
-        "prec" => "≺",
-        "precapprox" => "⪷",
-        "preccurlyeq" => "≼",
-        "preceq" => "⪯",
-        "precnapprox" => "⪹",
-        "precneqq" => "⪵",
-        "precnsim" => "⋨",
-        "precsim" => "≾",
-        "prime" => "′",
-        "primes" => "ℙ",
-        "prnE" => "⪵",
-        "prnap" => "⪹",
-        "prnsim" => "⋨",
-        "prod" => "∏",
-        "profalar" => "⌮",
-        "profline" => "⌒",
-        "profsurf" => "⌓",
-        "prop" => "∝",
-        "propto" => "∝",
-        "prsim" => "≾",
-        "prurel" => "⊰",
-        "pscr" => "𝓅",
-        "psi" => "ψ",
-        "puncsp" => " ",
-        "qfr" => "𝔮",
-        "qint" => "⨌",
-        "qopf" => "𝕢",
-        "qprime" => "⁗",
-        "qscr" => "𝓆",
-        "quaternions" => "ℍ",
-        "quatint" => "⨖",
-        "quest" => "?",
-        "questeq" => "≟",
-        "quot" => "\"",
-        "rAarr" => "⇛",
-        "rArr" => "⇒",
-        "rAtail" => "⤜",
-        "rBarr" => "⤏",
-        "rHar" => "⥤",
-        "race" => "∽̱",
-        "racute" => "ŕ",
-        "radic" => "√",
-        "raemptyv" => "⦳",
-        "rang" => "⟩",
-        "rangd" => "⦒",
-        "range" => "⦥",
-        "rangle" => "⟩",
-        "raquo" => "»",
-        "rarr" => "→",
-        "rarrap" => "⥵",
-        "rarrb" => "⇥",
-        "rarrbfs" => "⤠",
-        "rarrc" => "⤳",
-        "rarrfs" => "⤞",
-        "rarrhk" => "↪",
-        "rarrlp" => "↬",
-        "rarrpl" => "⥅",
-        "rarrsim" => "⥴",
-        "rarrtl" => "↣",
-        "rarrw" => "↝",
-        "ratail" => "⤚",
-        "ratio" => "∶",
-        "rationals" => "ℚ",
-        "rbarr" => "⤍",
-        "rbbrk" => "❳",
-        "rbrace" => "}",
-        "rbrack" => "]",
-        "rbrke" => "⦌",
-        "rbrksld" => "⦎",
-        "rbrkslu" => "⦐",
-        "rcaron" => "ř",
-        "rcedil" => "ŗ",
-        "rceil" => "⌉",
-        "rcub" => "}",
-        "rcy" => "р",
-        "rdca" => "⤷",
-        "rdldhar" => "⥩",
-        "rdquo" => "”",
-        "rdquor" => "”",
-        "rdsh" => "↳",
-        "real" => "ℜ",
-        "realine" => "ℛ",
-        "realpart" => "ℜ",
-        "reals" => "ℝ",
-        "rect" => "▭",
-        "reg" => "®",
-        "rfisht" => "⥽",
-        "rfloor" => "⌋",
-        "rfr" => "𝔯",
-        "rhard" => "⇁",
-        "rharu" => "⇀",
-        "rharul" => "⥬",
-        "rho" => "ρ",
-        "rhov" => "ϱ",
-        "rightarrow" => "→",
-        "rightarrowtail" => "↣",
-        "rightharpoondown" => "⇁",
-        "rightharpoonup" => "⇀",
-        "rightleftarrows" => "⇄",
-        "rightleftharpoons" => "⇌",
-        "rightrightarrows" => "⇉",
-        "rightsquigarrow" => "↝",
-        "rightthreetimes" => "⋌",
-        "ring" => "˚",
-        "risingdotseq" => "≓",
-        "rlarr" => "⇄",
-        "rlhar" => "⇌",
-        "rlm" => "\u{200F}",
-        "rmoust" => "⎱",
-        "rmoustache" => "⎱",
-        "rnmid" => "⫮",
-        "roang" => "⟭",
-        "roarr" => "⇾",
-        "robrk" => "⟧",
-        "ropar" => "⦆",
-        "ropf" => "𝕣",
-        "roplus" => "⨮",
-        "rotimes" => "⨵",
-        "rpar" => ")",
-        "rpargt" => "⦔",
-        "rppolint" => "⨒",
-        "rrarr" => "⇉",
-        "rsaquo" => "›",
-        "rscr" => "𝓇",
-        "rsh" => "↱",
-        "rsqb" => "]",
-        "rsquo" => "’",
-        "rsquor" => "’",
-        "rthree" => "⋌",
-        "rtimes" => "⋊",
-        "rtri" => "▹",
-        "rtrie" => "⊵",
-        "rtrif" => "▸",
-        "rtriltri" => "⧎",
-        "ruluhar" => "⥨",
-        "rx" => "℞",
-        "sacute" => "ś",
-        "sbquo" => "‚",
-        "sc" => "≻",
-        "scE" => "⪴",
-        "scap" => "⪸",
-        "scaron" => "š",
-        "sccue" => "≽",
-        "sce" => "⪰",
-        "scedil" => "ş",
-        "scirc" => "ŝ",
-        "scnE" => "⪶",
-        "scnap" => "⪺",
-        "scnsim" => "⋩",
-        "scpolint" => "⨓",
-        "scsim" => "≿",
-        "scy" => "с",
-        "sdot" => "⋅",
-        "sdotb" => "⊡",
-        "sdote" => "⩦",
-        "seArr" => "⇘",
-        "searhk" => "⤥",
-        "searr" => "↘",
-        "searrow" => "↘",
-        "sect" => "§",
-        "semi" => ";",
-        "seswar" => "⤩",
-        "setminus" => "∖",
-        "setmn" => "∖",
-        "sext" => "✶",
-        "sfr" => "𝔰",
-        "sfrown" => "⌢",
-        "sharp" => "♯",
-        "shchcy" => "щ",
-        "shcy" => "ш",
-        "shortmid" => "∣",
-        "shortparallel" => "∥",
-        "shy" => "\u{AD}",
-        "sigma" => "σ",
-        "sigmaf" => "ς",
-        "sigmav" => "ς",
-        "sim" => "∼",
-        "simdot" => "⩪",
-        "sime" => "≃",
-        "simeq" => "≃",
-        "simg" => "⪞",
-        "simgE" => "⪠",
-        "siml" => "⪝",
-        "simlE" => "⪟",
-        "simne" => "≆",
-        "simplus" => "⨤",
-        "simrarr" => "⥲",
-        "slarr" => "←",
-        "smallsetminus" => "∖",
-        "smashp" => "⨳",
-        "smeparsl" => "⧤",
-        "smid" => "∣",
-        "smile" => "⌣",
-        "smt" => "⪪",
-        "smte" => "⪬",
-        "smtes" => "⪬︀",
-        "softcy" => "ь",
-        "sol" => "/",
-        "solb" => "⧄",
-        "solbar" => "⌿",
-        "sopf" => "𝕤",
-        "spades" => "♠",
-        "spadesuit" => "♠",
-        "spar" => "∥",
-        "sqcap" => "⊓",
-        "sqcaps" => "⊓︀",
-        "sqcup" => "⊔",
-        "sqcups" => "⊔︀",
-        "sqsub" => "⊏",
-        "sqsube" => "⊑",
-        "sqsubset" => "⊏",
-        "sqsubseteq" => "⊑",
-        "sqsup" => "⊐",
-        "sqsupe" => "⊒",
-        "sqsupset" => "⊐",
-        "sqsupseteq" => "⊒",
-        "squ" => "□",
-        "square" => "□",
-        "squarf" => "▪",
-        "squf" => "▪",
-        "srarr" => "→",
-        "sscr" => "𝓈",
-        "ssetmn" => "∖",
-        "ssmile" => "⌣",
-        "sstarf" => "⋆",
-        "star" => "☆",
-        "starf" => "★",
-        "straightepsilon" => "ϵ",
-        "straightphi" => "ϕ",
-        "strns" => "¯",
-        "sub" => "⊂",
-        "subE" => "⫅",
-        "subdot" => "⪽",
-        "sube" => "⊆",
-        "subedot" => "⫃",
-        "submult" => "⫁",
-        "subnE" => "⫋",
-        "subne" => "⊊",
-        "subplus" => "⪿",
-        "subrarr" => "⥹",
-        "subset" => "⊂",
-        "subseteq" => "⊆",
-        "subseteqq" => "⫅",
-        "subsetneq" => "⊊",
-        "subsetneqq" => "⫋",
-        "subsim" => "⫇",
-        "subsub" => "⫕",
-        "subsup" => "⫓",
-        "succ" => "≻",
-        "succapprox" => "⪸",
-        "succcurlyeq" => "≽",
-        "succeq" => "⪰",
-        "succnapprox" => "⪺",
-        "succneqq" => "⪶",
-        "succnsim" => "⋩",
-        "succsim" => "≿",
-        "sum" => "∑",
-        "sung" => "♪",
-        "sup" => "⊃",
-        "sup1" => "¹",
-        "sup2" => "²",
-        "sup3" => "³",
-        "supE" => "⫆",
-        "supdot" => "⪾",
-        "supdsub" => "⫘",
-        "supe" => "⊇",
-        "supedot" => "⫄",
-        "suphsol" => "⟉",
-        "suphsub" => "⫗",
-        "suplarr" => "⥻",
-        "supmult" => "⫂",
-        "supnE" => "⫌",
-        "supne" => "⊋",
-        "supplus" => "⫀",
-        "supset" => "⊃",
-        "supseteq" => "⊇",
-        "supseteqq" => "⫆",
-        "supsetneq" => "⊋",
-        "supsetneqq" => "⫌",
-        "supsim" => "⫈",
-        "supsub" => "⫔",
-        "supsup" => "⫖",
-        "swArr" => "⇙",
-        "swarhk" => "⤦",
-        "swarr" => "↙",
-        "swarrow" => "↙",
-        "swnwar" => "⤪",
-        "szlig" => "ß",
-        "target" => "⌖",
-        "tau" => "τ",
-        "tbrk" => "⎴",
-        "tcaron" => "ť",
-        "tcedil" => "ţ",
-        "tcy" => "т",
-        "tdot" => "⃛",
-        "telrec" => "⌕",
-        "tfr" => "𝔱",
-        "there4" => "∴",
-        "therefore" => "∴",
-        "theta" => "θ",
-        "thetasym" => "ϑ",
-        "thetav" => "ϑ",
-        "thickapprox" => "≈",
-        "thicksim" => "∼",
-        "thinsp" => " ",
-        "thkap" => "≈",
-        "thksim" => "∼",
-        "thorn" => "þ",
-        "tilde" => "˜",
-        "times" => "×",
-        "timesb" => "⊠",
-        "timesbar" => "⨱",
-        "timesd" => "⨰",
-        "tint" => "∭",
-        "toea" => "⤨",
-        "top" => "⊤",
-        "topbot" => "⌶",
-        "topcir" => "⫱",
-        "topf" => "𝕥",
-        "topfork" => "⫚",
-        "tosa" => "⤩",
-        "tprime" => "‴",
-        "trade" => "™",
-        "triangle" => "▵",
-        "triangledown" => "▿",
-        "triangleleft" => "◃",
-        "trianglelefteq" => "⊴",
-        "triangleq" => "≜",
-        "triangleright" => "▹",
-        "trianglerighteq" => "⊵",
-        "tridot" => "◬",
-        "trie" => "≜",
-        "triminus" => "⨺",
-        "triplus" => "⨹",
-        "trisb" => "⧍",
-        "tritime" => "⨻",
-        "trpezium" => "⏢",
-        "tscr" => "𝓉",
-        "tscy" => "ц",
-        "tshcy" => "ћ",
-        "tstrok" => "ŧ",
-        "twixt" => "≬",
-        "twoheadleftarrow" => "↞",
-        "twoheadrightarrow" => "↠",
-        "uArr" => "⇑",
-        "uHar" => "⥣",
-        "uacute" => "ú",
-        "uarr" => "↑",
-        "ubrcy" => "ў",
-        "ubreve" => "ŭ",
-        "ucirc" => "û",
-        "ucy" => "у",
-        "udarr" => "⇅",
-        "udblac" => "ű",
-        "udhar" => "⥮",
-        "ufisht" => "⥾",
-        "ufr" => "𝔲",
-        "ugrave" => "ù",
-        "uharl" => "↿",
-        "uharr" => "↾",
-        "uhblk" => "▀",
-        "ulcorn" => "⌜",
-        "ulcorner" => "⌜",
-        "ulcrop" => "⌏",
-        "ultri" => "◸",
-        "umacr" => "ū",
-        "uml" => "¨",
-        "uogon" => "ų",
-        "uopf" => "𝕦",
-        "uparrow" => "↑",
-        "updownarrow" => "↕",
-        "upharpoonleft" => "↿",
-        "upharpoonright" => "↾",
-        "uplus" => "⊎",
-        "upsi" => "υ",
-        "upsih" => "ϒ",
-        "upsilon" => "υ",
-        "upuparrows" => "⇈",
-        "urcorn" => "⌝",
-        "urcorner" => "⌝",
-        "urcrop" => "⌎",
-        "uring" => "ů",
-        "urtri" => "◹",
-        "uscr" => "𝓊",
-        "utdot" => "⋰",
-        "utilde" => "ũ",
-        "utri" => "▵",
-        "utrif" => "▴",
-        "uuarr" => "⇈",
-        "uuml" => "ü",
-        "uwangle" => "⦧",
-        "vArr" => "⇕",
-        "vBar" => "⫨",
-        "vBarv" => "⫩",
-        "vDash" => "⊨",
-        "vangrt" => "⦜",
-        "varepsilon" => "ϵ",
-        "varkappa" => "ϰ",
-        "varnothing" => "∅",
-        "varphi" => "ϕ",
-        "varpi" => "ϖ",
-        "varpropto" => "∝",
-        "varr" => "↕",
-        "varrho" => "ϱ",
-        "varsigma" => "ς",
-        "varsubsetneq" => "⊊︀",
-        "varsubsetneqq" => "⫋︀",
-        "varsupsetneq" => "⊋︀",
-        "varsupsetneqq" => "⫌︀",
-        "vartheta" => "ϑ",
-        "vartriangleleft" => "⊲",
-        "vartriangleright" => "⊳",
-        "vcy" => "в",
-        "vdash" => "⊢",
-        "vee" => "∨",
-        "veebar" => "⊻",
-        "veeeq" => "≚",
-        "vellip" => "⋮",
-        "verbar" => "|",
-        "vert" => "|",
-        "vfr" => "𝔳",
-        "vltri" => "⊲",
-        "vnsub" => "⊂⃒",
-        "vnsup" => "⊃⃒",
-        "vopf" => "𝕧",
-        "vprop" => "∝",
-        "vrtri" => "⊳",
-        "vscr" => "𝓋",
-        "vsubnE" => "⫋︀",
-        "vsubne" => "⊊︀",
-        "vsupnE" => "⫌︀",
-        "vsupne" => "⊋︀",
-        "vzigzag" => "⦚",
-        "wcirc" => "ŵ",
-        "wedbar" => "⩟",
-        "wedge" => "∧",
-        "wedgeq" => "≙",
-        "weierp" => "℘",
-        "wfr" => "𝔴",
-        "wopf" => "𝕨",
-        "wp" => "℘",
-        "wr" => "≀",
-        "wreath" => "≀",
-        "wscr" => "𝓌",
-        "xcap" => "⋂",
-        "xcirc" => "◯",
-        "xcup" => "⋃",
-        "xdtri" => "▽",
-        "xfr" => "𝔵",
-        "xhArr" => "⟺",
-        "xharr" => "⟷",
-        "xi" => "ξ",
-        "xlArr" => "⟸",
-        "xlarr" => "⟵",
-        "xmap" => "⟼",
-        "xnis" => "⋻",
-        "xodot" => "⨀",
-        "xopf" => "𝕩",
-        "xoplus" => "⨁",
-        "xotime" => "⨂",
-        "xrArr" => "⟹",
-        "xrarr" => "⟶",
-        "xscr" => "𝓍",
-        "xsqcup" => "⨆",
-        "xuplus" => "⨄",
-        "xutri" => "△",
-        "xvee" => "⋁",
-        "xwedge" => "⋀",
-        "yacute" => "ý",
-        "yacy" => "я",
-        "ycirc" => "ŷ",
-        "ycy" => "ы",
-        "yen" => "¥",
-        "yfr" => "𝔶",
-        "yicy" => "ї",
-        "yopf" => "𝕪",
-        "yscr" => "𝓎",
-        "yucy" => "ю",
-        "yuml" => "ÿ",
-        "zacute" => "ź",
-        "zcaron" => "ž",
-        "zcy" => "з",
-        "zdot" => "ż",
-        "zeetrf" => "ℨ",
-        "zeta" => "ζ",
-        "zfr" => "𝔷",
-        "zhcy" => "ж",
-        "zigrarr" => "⇝",
-        "zopf" => "𝕫",
-        "zscr" => "𝓏",
-        "zwj" => "\u{200D}",
-        "zwnj" => "\u{200C}",
-        _ => return None,
-    })
-}
-
-/// The no-semicolon legacy subset libxml2 honors (106 entries,
-/// generated from CPython's `html.entities.html5` bare keys —
-/// independently confirmed by probing every HTML5 name live:
-/// exactly these resolve bare). No member prefixes another, so
-/// the legacy prefix of a run is unique. Values come from the
-/// full table.
-fn lxml_legacy_entity(prefix: &str) -> Option<&'static str> {
-    if matches!(
-        prefix,
-        "AElig"
-            | "AMP"
-            | "Aacute"
-            | "Acirc"
-            | "Agrave"
-            | "Aring"
-            | "Atilde"
-            | "Auml"
-            | "COPY"
-            | "Ccedil"
-            | "ETH"
-            | "Eacute"
-            | "Ecirc"
-            | "Egrave"
-            | "Euml"
-            | "GT"
-            | "Iacute"
-            | "Icirc"
-            | "Igrave"
-            | "Iuml"
-            | "LT"
-            | "Ntilde"
-            | "Oacute"
-            | "Ocirc"
-            | "Ograve"
-            | "Oslash"
-            | "Otilde"
-            | "Ouml"
-            | "QUOT"
-            | "REG"
-            | "THORN"
-            | "Uacute"
-            | "Ucirc"
-            | "Ugrave"
-            | "Uuml"
-            | "Yacute"
-            | "aacute"
-            | "acirc"
-            | "acute"
-            | "aelig"
-            | "agrave"
-            | "amp"
-            | "aring"
-            | "atilde"
-            | "auml"
-            | "brvbar"
-            | "ccedil"
-            | "cedil"
-            | "cent"
-            | "copy"
-            | "curren"
-            | "deg"
-            | "divide"
-            | "eacute"
-            | "ecirc"
-            | "egrave"
-            | "eth"
-            | "euml"
-            | "frac12"
-            | "frac14"
-            | "frac34"
-            | "gt"
-            | "iacute"
-            | "icirc"
-            | "iexcl"
-            | "igrave"
-            | "iquest"
-            | "iuml"
-            | "laquo"
-            | "lt"
-            | "macr"
-            | "micro"
-            | "middot"
-            | "nbsp"
-            | "not"
-            | "ntilde"
-            | "oacute"
-            | "ocirc"
-            | "ograve"
-            | "ordf"
-            | "ordm"
-            | "oslash"
-            | "otilde"
-            | "ouml"
-            | "para"
-            | "plusmn"
-            | "pound"
-            | "quot"
-            | "raquo"
-            | "reg"
-            | "sect"
-            | "shy"
-            | "sup1"
-            | "sup2"
-            | "sup3"
-            | "szlig"
-            | "thorn"
-            | "times"
-            | "uacute"
-            | "ucirc"
-            | "ugrave"
-            | "uml"
-            | "uuml"
-            | "yacute"
-            | "yen"
-            | "yuml"
-    ) {
-        lxml_named_entity(prefix)
-    } else {
-        None
-    }
-}
-
-/// Decode the digits after `&#`: `#x`/`#X` + maximal hex run, else a
-/// maximal decimal run (at least one digit required, else `None` keeps
-/// the `&` literal). Returns the char plus bytes consumed, including
-/// one optional `;`. Overflow (a run too long for `u64`) maps to
-/// U+FFFD like any other out-of-range value — never literal.
-fn lxml_decode_charref(rest: &str) -> Option<(char, usize)> {
-    let bytes = rest.as_bytes();
-    let (digits, hex) = if bytes.first() == Some(&b'x') || bytes.first() == Some(&b'X') {
-        let mut end = 1;
-        while end < bytes.len() && bytes[end].is_ascii_hexdigit() {
-            end += 1;
-        }
-        (&rest[1..end], true)
-    } else {
-        let mut end = 0;
-        while end < bytes.len() && bytes[end].is_ascii_digit() {
-            end += 1;
-        }
-        (&rest[..end], false)
-    };
-    if digits.is_empty() {
-        return None;
-    }
-    let number: u64 = if hex {
-        u64::from_str_radix(digits, 16).unwrap_or(u64::MAX)
-    } else {
-        digits.parse::<u64>().unwrap_or(u64::MAX)
-    };
-    let ch = lxml_charref_value(number);
-    let mut used = digits.len() + usize::from(hex);
-    if bytes.get(used) == Some(&b';') {
-        used += 1;
-    }
-    Some((ch, used))
-}
-
-fn lxml_charref_value(number: u64) -> char {
-    // libxml2 (probed): NUL/surrogates/out-of-range → U+FFFD;
-    // 0x80-0x9F → windows-1252 (five unmapped stay raw); C0 controls,
-    // DEL, CR, FDD0 and FFFE pass through raw.
-    if number == 0 || (0xD800..=0xDFFF).contains(&number) || number > 0x10FFFF {
-        return '\u{FFFD}';
-    }
-    let number = number as u32;
-    if (0x80..=0x9F).contains(&number) {
-        return match number {
-            0x80 => '\u{20AC}',
-            0x82 => '\u{201A}',
-            0x83 => '\u{0192}',
-            0x84 => '\u{201E}',
-            0x85 => '\u{2026}',
-            0x86 => '\u{2020}',
-            0x87 => '\u{2021}',
-            0x88 => '\u{02C6}',
-            0x89 => '\u{2030}',
-            0x8A => '\u{0160}',
-            0x8B => '\u{2039}',
-            0x8C => '\u{0152}',
-            0x8E => '\u{017D}',
-            0x91 => '\u{2018}',
-            0x92 => '\u{2019}',
-            0x93 => '\u{201C}',
-            0x94 => '\u{201D}',
-            0x95 => '\u{2022}',
-            0x96 => '\u{2013}',
-            0x97 => '\u{2014}',
-            0x98 => '\u{02DC}',
-            0x99 => '\u{2122}',
-            0x9A => '\u{0161}',
-            0x9B => '\u{203A}',
-            0x9C => '\u{0153}',
-            0x9E => '\u{017E}',
-            0x9F => '\u{0178}',
-            _ => char::from_u32(number).unwrap_or('\u{FFFD}'),
-        };
-    }
-    char::from_u32(number).unwrap_or('\u{FFFD}')
-}
-
-/// libxml2 lowercases tag/attribute names, double-quotes attribute
-/// values (escaping `&`/`<`/`>`/`"`), minimizes booleans, drops `>`
-///-less voids' slashes and re-escapes text (`&`/`<`/`>`).
-fn lxml_serialize_element(element: &LxmlElement) -> String {
-    let mut out = String::new();
-    out.push('<');
-    out.push_str(&element.name);
-    for (name, value) in &element.attrs {
-        match value {
-            None => {
-                out.push(' ');
-                out.push_str(name);
-            }
-            Some(value) => {
-                let minimized = lxml_is_boolean_attr(name)
-                    && (value.is_empty() || value.eq_ignore_ascii_case(name));
-                if minimized {
-                    out.push(' ');
-                    out.push_str(name);
-                } else {
-                    let mut val = value.clone();
-                    if lxml_is_url_attr(name) {
-                        val = lxml_encode_url(&val);
-                    }
-                    // Quote choice: single quotes iff the value holds
-                    // `"` but no `'` (else `"` escapes as `&quot;`).
-                    out.push(' ');
-                    out.push_str(name);
-                    if val.contains('"') && !val.contains('\'') {
-                        out.push_str("='");
-                        out.push_str(&lxml_escape_attr_inner(&val, false));
-                        out.push('\'');
-                    } else {
-                        out.push_str("=\"");
-                        out.push_str(&lxml_escape_attr(&val));
-                        out.push('"');
-                    }
-                }
-            }
-        }
-    }
-    out.push('>');
-    if lxml_is_void(&element.name) {
-        return out;
-    }
-    for child in &element.children {
-        match child {
-            LxmlNode::Element(inner) => out.push_str(&lxml_serialize_element(inner)),
-            LxmlNode::Text(text) => {
-                if lxml_is_cdata_serialize(&element.name) {
-                    out.push_str(text);
-                } else {
-                    out.push_str(&lxml_escape_text(text));
-                }
-            }
-            LxmlNode::Comment(content) => out.push_str(&lxml_serialize_comment(content)),
-            // Markers never nest (top-level only); skip defensively.
-            LxmlNode::HeadClose | LxmlNode::BodyClose => {}
-        }
-    }
-    // libxml2 drops `</li>` for content-empty items only (probed:
-    // `<li></li>` → `<li>`, but `<li> </li>` keeps it; attrs do not
-    // count). Every other empty element keeps its end tag.
-    if element.name == "li" && element.children.is_empty() {
-        return out;
-    }
-    out.push_str("</");
-    out.push_str(&element.name);
-    out.push('>');
-    out
-}
-
-/// Tags libxml2 hoists into `<head>` when they precede any body
-/// content (`title`/`script`/`style`/`base`/`link`/`meta` — notably
-/// NOT `noscript`, `template`, `basefont` or `bgsound`).
-fn lxml_is_head_only(name: &str) -> bool {
-    matches!(
-        name,
-        "script" | "style" | "title" | "base" | "link" | "meta"
-    )
-}
-
-/// Elements that implicitly close an open `<head>` (their subtree moves
-/// to the body). Probed census: everything NOT here (table/form
-/// internals, `del`/`ins`, `frame`, `input`, `isindex`, `noscript`,
-/// `object`, `applet`, `area`, `param`, `noframes`, `basefont`,
-/// `noembed`, `plaintext`, `bgsound`, `wbr`, `embed`, `source`, `track`,
-/// `nobr`, `blink`, `marquee`, ... and every tag unknown to libxml2)
-/// stays inside the head. `body`/`frameset`/`head` are handled
-/// separately (open / frames / transparent) and never reach this test.
-fn lxml_closes_head(name: &str) -> bool {
-    matches!(
-        name,
-        "a" | "abbr"
-            | "acronym"
-            | "address"
-            | "b"
-            | "bdo"
-            | "big"
-            | "blockquote"
-            | "br"
-            | "center"
-            | "cite"
-            | "code"
-            | "dd"
-            | "dfn"
-            | "dir"
-            | "div"
-            | "dl"
-            | "dt"
-            | "em"
-            | "fieldset"
-            | "font"
-            | "form"
-            | "h1"
-            | "h2"
-            | "h3"
-            | "h4"
-            | "h5"
-            | "h6"
-            | "hr"
-            | "i"
-            | "iframe"
-            | "img"
-            | "kbd"
-            | "li"
-            | "listing"
-            | "map"
-            | "menu"
-            | "ol"
-            | "p"
-            | "pre"
-            | "q"
-            | "s"
-            | "samp"
-            | "small"
-            | "span"
-            | "strike"
-            | "strong"
-            | "sub"
-            | "sup"
-            | "table"
-            | "tt"
-            | "u"
-            | "ul"
-            | "var"
-            | "xmp"
-    )
-}
-
-/// HTML-blank text (libxml2's blank measure: tab, LF, FF, CR, space —
-/// NOT vertical tab, NOT nbsp). Blank runs never imply a body, never
-/// close a head, and are skipped by document-shape inference.
-fn lxml_is_html_blank(text: &str) -> bool {
-    !text.chars().any(|ch| !is_html_ws(ch))
-}
-
-/// libxml2 percent-encodes tab/newline/CR (and spaces?) in URL
-/// attributes (`java\tscript:x` → `java%09script:x`).
-fn lxml_encode_url(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for ch in value.chars() {
-        match ch {
-            '\t' => out.push_str("%09"),
-            '\n' => out.push_str("%0A"),
-            '\r' => out.push_str("%0D"),
-            _ => out.push(ch),
-        }
-    }
-    out
-}
-
-fn lxml_escape_text(text: &str) -> String {
-    // `&<>` only — probed: `\xa0` serializes literally (no `&nbsp;`).
-    let mut out = String::with_capacity(text.len());
-    for ch in text.chars() {
-        match ch {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            _ => out.push(ch),
-        }
-    }
-    out
-}
-
-fn lxml_escape_attr(value: &str) -> String {
-    lxml_escape_attr_inner(value, true)
-}
-
-/// Attribute-value escaping with optional `"` escaping (single-quoted
-/// values keep a literal `"`).
-fn lxml_escape_attr_inner(value: &str, escape_dquote: bool) -> String {
-    let mut out = String::with_capacity(value.len());
-    for ch in value.chars() {
-        match ch {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' if escape_dquote => out.push_str("&quot;"),
-            '\u{a0}' => out.push_str("&nbsp;"),
-            _ => out.push(ch),
-        }
-    }
-    out
-}
-
-// ---------------------------------------------------------------------------
 // Writes: `IssueSerializer` / `IntakeIssueUpdateSerializer` validation
 // ---------------------------------------------------------------------------
 
@@ -9269,7 +3318,7 @@ async fn validate_issue_input(
     }
     if matches!(patch.parent, Some(Some(_))) {
         return Err(Denial::FieldErrors(single_non_field(
-            "Parent is not valid please pass a valid parent_id",
+            "Parent is not valid issue_id please pass a valid issue_id",
         )));
     }
     if matches!(patch.estimate_point, Some(Some(_))) {
@@ -9688,18 +3737,6 @@ async fn fetch_companion_issue(pool: &sqlx::PgPool, issue_id: &Uuid) -> Result<I
     IssueRow::from_row(&row)
 }
 
-/// `issue.state` / `State` group reads: `_base_manager` (unfiltered) —
-/// the triage group resolves (the accept flow depends on it); a
-/// dangling id is the 404 branch.
-async fn fetch_state_group(pool: &sqlx::PgPool, state_id: &Uuid) -> Result<String, Denial> {
-    let group: Option<String> = sqlx::query_scalar(r#"SELECT "group" FROM states WHERE id = $1"#)
-        .bind(state_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    group.ok_or(Denial::ResourceMissing)
-}
-
 /// The accept default (`State.objects.filter(workspace, project,
 /// default=True).first()`, `StateManager` = live + non-triage,
 /// `Meta.ordering = ("sequence",)`).
@@ -9720,301 +3757,154 @@ async fn fetch_default_state(
     .map_err(|_| Denial::ServerError)
 }
 
-/// `Issue.save()`'s `state is None` resolution (`db/models/issue.py`),
-/// which filters `~Q(is_triage=True)` — NOT the manager's group
-/// exclusion — with NO workspace scope: the default first, else the
-/// first row, both in sequence order.
-async fn resolve_save_state(
-    pool: &sqlx::PgPool,
-    project_id: &Uuid,
-) -> Result<Option<Uuid>, Denial> {
-    let default: Option<Uuid> = sqlx::query_scalar(
-        r#"SELECT "id" FROM "states" WHERE "project_id" = $1
-           AND "deleted_at" IS NULL AND "is_triage" = FALSE AND "default" = TRUE
-           ORDER BY "sequence" LIMIT 1"#,
-    )
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    if default.is_some() {
-        return Ok(default);
-    }
-    sqlx::query_scalar(
-        r#"SELECT "id" FROM "states" WHERE "project_id" = $1
-           AND "deleted_at" IS NULL AND "is_triage" = FALSE
-           ORDER BY "sequence" LIMIT 1"#,
-    )
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)
-}
-
 // ---------------------------------------------------------------------------
 // Saves (`Issue.save` / `ModelSerializer.update` / soft delete)
 // ---------------------------------------------------------------------------
 
-/// Replace one link set (`IssueAssignee` / `IssueLabel`): soft-delete
-/// the live links, then `bulk_create(..., ignore_conflicts=True)` the
-/// new ids with the PRE-SAVE issue's audit columns. `IntegrityError`
-/// (unique + FK races alike) is swallowed; anything else is the 500.
-async fn replace_links(
-    pool: &sqlx::PgPool,
-    table: &str,
-    id_column: &str,
-    issue: &IssueRow,
-    ids: &[Uuid],
-    now: DateTime<Utc>,
-) -> Result<(), Denial> {
-    let delete_sql = format!(
-        "UPDATE \"{table}\" SET deleted_at = $1 WHERE issue_id = $2 AND deleted_at IS NULL"
-    );
-    sqlx::query(&delete_sql)
-        .bind(now)
-        .bind(issue.id)
-        .execute(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    for id in ids {
-        let insert_sql = format!(
-            "INSERT INTO \"{table}\" (id, created_at, updated_at, created_by_id, updated_by_id, \
-             deleted_at, issue_id, \"{id_column}\", project_id, workspace_id) \
-             VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, $8, $9) ON CONFLICT DO NOTHING"
-        );
-        let result = sqlx::query(&insert_sql)
-            .bind(Uuid::new_v4())
-            .bind(now)
-            .bind(now)
-            .bind(issue.created_by_id)
-            .bind(issue.updated_by_id)
-            .bind(issue.id)
-            .bind(id)
-            .bind(issue.project_id)
-            .bind(issue.workspace_id)
-            .execute(pool)
-            .await;
-        match result {
-            Ok(_) => {}
-            Err(error) if is_integrity_error(&error) => {}
-            Err(_) => return Err(Denial::ServerError),
-        }
+/// Map a domain-write failure onto this endpoint's arms: a dangling-row
+/// miss 404s (the old state-group read's `ResourceMissing`, preserved),
+/// anything else 500s — the old saves mapped every database failure,
+/// integrity included, to `ServerError`, exactly like Django's uncaught
+/// `IntegrityError`.
+fn domain_denial(error: domain::DomainError) -> Denial {
+    if error.is_not_found() {
+        Denial::ResourceMissing
+    } else {
+        Denial::ServerError
     }
-    Ok(())
 }
 
-/// Postgres integrity errors (unique + FK + not-null + check): the
-/// family Django surfaces as `IntegrityError`.
-fn is_integrity_error(error: &sqlx::Error) -> bool {
-    matches!(error, sqlx::Error::Database(db) if matches!(
-        db.code().as_deref(),
-        Some("23505" | "23503" | "23502" | "23514")
-    ))
+fn write_ctx(ctx: &Context, workspace_id: Uuid) -> WriteCtx {
+    WriteCtx::new(WriteActor {
+        user_id: ctx.user_id,
+        timezone: Some(ctx.timezone.name().to_owned()),
+    })
+    .with_scope(WriteScope {
+        workspace_id: Some(workspace_id),
+        project_id: Some(ctx.project_id),
+    })
+}
+
+/// The post-save fire arguments, one `post_save` receiver run: the v1
+/// intake views never set Django's `_orchestration_dispatch_immediate`
+/// attr and carry no moved-by run, so the defaults apply on every path.
+fn fire_spec(actor_id: &Uuid, now: DateTime<Utc>) -> domain_issues::FireSpec {
+    domain_issues::FireSpec {
+        dispatch_immediate: true,
+        created_by: Some(*actor_id),
+        moved_by_run: None,
+        now,
+    }
 }
 
 /// Apply an issue-half patch: link replacement, `updated_at` stamp,
-/// column writes, then `Issue.save()` (not adding): `state is None`
-/// resolution, `completed_at` recompute (overwriting any validated
-/// value whenever a state is set), `description_stripped` recompute
-/// (`""` → `None` on this path), audit stamp. Returns the post-save
-/// row.
+/// column writes, then `Issue.save()` (not adding). Rides
+/// `domain::issues::partial_update` with no activity trio — the view's
+/// own `issue.activity.updated` (v1 key omission plus the intake
+/// `intake=` extra) is enqueued driver-side ahead of this call, exactly
+/// where Django's view puts it (before `serializer.save()`).
 async fn save_issue_patch(
-    pool: &sqlx::PgPool,
+    state: &AppState,
+    ctx: &Context,
     issue: &IssueRow,
     patch: &IssuePatch,
-    user_id: &Uuid,
-) -> Result<IssueRow, Denial> {
-    let now_links = cycle_mod::micros_now();
-    if let Some(assignees) = &patch.assignees {
-        replace_links(
-            pool,
-            "issue_assignees",
-            "assignee_id",
-            issue,
-            assignees,
-            now_links,
-        )
-        .await?;
-    }
-    if let Some(labels) = &patch.labels {
-        replace_links(pool, "issue_labels", "label_id", issue, labels, now_links).await?;
-    }
+) -> Result<(), Denial> {
     // `update()` stamps `updated_at`, then `save()`'s `auto_now`
     // overwrites it — two clock reads, either of which can straddle.
     let _now_update = cycle_mod::micros_now();
     let now_save = cycle_mod::micros_now();
-
-    let mut state_id = patch.state.unwrap_or(issue.state_id);
-    if patch.state == Some(None) {
-        state_id = resolve_save_state(pool, &issue.project_id).await?;
-    }
-    let completed_at = match state_id {
-        Some(id) => {
-            let group = fetch_state_group(pool, &id).await?;
-            if group == "completed" {
-                Some(now_save)
-            } else {
-                None
-            }
-        }
-        None => patch.completed_at.unwrap_or(issue.completed_at),
-    };
-    let html = patch
+    let mut fields = issue.field_set();
+    fields.name = patch.name.clone().unwrap_or_else(|| issue.name.clone());
+    fields.description_html = patch
         .description_html
         .clone()
         .unwrap_or_else(|| issue.description_html.clone());
-    // `Issue.save()` non-adding branch: falsy html → NULL, else the
-    // strip result as-is (even `""` — `strip_tags("<p></p>")`).
-    let stripped: Option<String> = if html.is_empty() {
-        None
-    } else {
-        Some(strip_tags_ml(&html))
-    };
-
-    sqlx::query(
-        r#"UPDATE "issues" SET "name" = $1, "description_html" = $2, "priority" = $3,
-           "point" = $4, "complexity_score" = $5, "start_date" = $6, "target_date" = $7,
-           "sequence_id" = $8, "sort_order" = $9, "completed_at" = $10, "archived_at" = $11,
-           "is_draft" = $12, "external_source" = $13, "external_id" = $14,
-           "git_work_branch" = $15, "created_via" = $16, "agent_executor" = $17,
-           "created_by_id" = $18, "parent_id" = $19, "state_id" = $20,
-           "estimate_point_id" = $21, "type_id" = $22, "assigned_pod_id" = $23,
-           "deleted_at" = $24, "description_stripped" = $25,
-           "updated_at" = $26, "updated_by_id" = $27 WHERE "id" = $28"#,
-    )
-    .bind(patch.name.clone().unwrap_or_else(|| issue.name.clone()))
-    .bind(html.clone())
-    .bind(
-        patch
-            .priority
-            .clone()
-            .unwrap_or_else(|| issue.priority.clone().unwrap_or_default()),
-    )
-    .bind(patch.point.unwrap_or(issue.point))
-    .bind(patch.complexity_score.unwrap_or(issue.complexity_score))
-    .bind(patch.start_date.unwrap_or(issue.start_date))
-    .bind(patch.target_date.unwrap_or(issue.target_date))
-    .bind(patch.sequence_id.unwrap_or(issue.sequence_id))
-    .bind(patch.sort_order.unwrap_or(issue.sort_order))
-    .bind(completed_at)
-    .bind(patch.archived_at.unwrap_or(issue.archived_at))
-    .bind(patch.is_draft.unwrap_or(issue.is_draft))
-    .bind(
-        patch
-            .external_source
-            .clone()
-            .unwrap_or_else(|| issue.external_source.clone()),
-    )
-    .bind(
-        patch
-            .external_id
-            .clone()
-            .unwrap_or_else(|| issue.external_id.clone()),
-    )
-    .bind(
-        patch
-            .git_work_branch
-            .clone()
-            .unwrap_or_else(|| issue.git_work_branch.clone()),
-    )
-    .bind(
-        patch
-            .created_via
-            .clone()
-            .unwrap_or_else(|| issue.created_via.clone()),
-    )
-    .bind(
-        patch
-            .agent_executor
-            .clone()
-            .unwrap_or_else(|| issue.agent_executor.clone()),
-    )
-    .bind(patch.created_by.unwrap_or(issue.created_by_id))
-    .bind(patch.parent.unwrap_or(issue.parent_id))
-    .bind(state_id)
-    .bind(patch.estimate_point.unwrap_or(issue.estimate_point_id))
-    .bind(patch.issue_type.unwrap_or(issue.type_id))
-    .bind(patch.assigned_pod.unwrap_or(issue.assigned_pod_id))
-    .bind(patch.deleted_at.unwrap_or(issue.deleted_at))
-    .bind(stripped.clone())
-    .bind(now_save)
-    .bind(user_id)
-    .bind(issue.id)
-    .execute(pool)
+    fields.priority = patch
+        .priority
+        .clone()
+        .unwrap_or_else(|| issue.priority.clone().unwrap_or_default());
+    fields.point = patch.point.unwrap_or(issue.point);
+    fields.complexity_score = patch
+        .complexity_score
+        .unwrap_or(issue.complexity_score)
+        .unwrap_or(0);
+    fields.start_date = patch.start_date.unwrap_or(issue.start_date);
+    fields.target_date = patch.target_date.unwrap_or(issue.target_date);
+    fields.sequence_id = patch.sequence_id.unwrap_or(issue.sequence_id);
+    fields.sort_order = patch.sort_order.unwrap_or(issue.sort_order);
+    fields.completed_at = patch.completed_at.unwrap_or(issue.completed_at);
+    fields.archived_at = patch.archived_at.unwrap_or(issue.archived_at);
+    fields.is_draft = patch.is_draft.unwrap_or(issue.is_draft);
+    fields.external_source = patch
+        .external_source
+        .clone()
+        .unwrap_or_else(|| issue.external_source.clone());
+    fields.external_id = patch
+        .external_id
+        .clone()
+        .unwrap_or_else(|| issue.external_id.clone());
+    fields.git_work_branch = patch
+        .git_work_branch
+        .clone()
+        .unwrap_or_else(|| issue.git_work_branch.clone());
+    fields.created_via = patch
+        .created_via
+        .clone()
+        .unwrap_or_else(|| issue.created_via.clone());
+    fields.agent_executor = patch
+        .agent_executor
+        .clone()
+        .unwrap_or_else(|| issue.agent_executor.clone());
+    fields.created_by_id = patch.created_by.unwrap_or(issue.created_by_id);
+    fields.parent_id = patch.parent.unwrap_or(issue.parent_id);
+    fields.state_id = patch.state.unwrap_or(issue.state_id);
+    fields.estimate_point_id = patch.estimate_point.unwrap_or(issue.estimate_point_id);
+    fields.type_id = patch.issue_type.unwrap_or(issue.type_id);
+    fields.assigned_pod_id = patch.assigned_pod.unwrap_or(issue.assigned_pod_id);
+    fields.deleted_at = patch.deleted_at.unwrap_or(issue.deleted_at);
+    fields.updated_at = now_save;
+    let prev_state = issue.state_id;
+    let m2m_audit = (issue.created_by_id, issue.updated_by_id);
+    let orm = state.orm().ok_or(Denial::ServerError)?;
+    let domain_ctx = write_ctx(ctx, issue.workspace_id);
+    let transition: Arc<dyn IssueTransitionHook> =
+        Arc::new(AppTransitionHook::new(state, &ctx.pool));
+    let enqueue: Arc<dyn TaskEnqueueHook> = Arc::new(AppTaskEnqueueHook::new(&ctx.pool));
+    let outcome = domain::run(&domain_ctx, orm, |txn| {
+        let transition = transition.clone();
+        let enqueue = enqueue.clone();
+        let pool = ctx.pool.clone();
+        let domain_ctx = domain_ctx.clone();
+        let assignees = patch.assignees.clone();
+        let labels = patch.labels.clone();
+        let fire = fire_spec(&ctx.user_id, now_save);
+        Box::pin(async move {
+            txn.hooks_mut().register(transition);
+            txn.hooks_mut().register(enqueue);
+            domain_issues::partial_update(
+                &domain_ctx,
+                txn,
+                &pool,
+                domain_issues::PartialIssue {
+                    fields,
+                    assignees,
+                    labels,
+                    m2m_audit,
+                    sequence: None,
+                    prev_state,
+                    fire,
+                    activity: None,
+                },
+            )
+            .await
+        })
+    })
     .await
-    .map_err(|_| Denial::ServerError)?;
-
-    let mut saved = issue.clone();
-    if let Some(name) = &patch.name {
-        saved.name = name.clone();
+    .map_err(domain_denial)?;
+    if outcome.chain.stopped().is_some() {
+        return Err(Denial::ServerError);
     }
-    saved.description_html = html;
-    if let Some(priority) = &patch.priority {
-        saved.priority = Some(priority.clone());
-    }
-    if let Some(point) = patch.point {
-        saved.point = point;
-    }
-    if let Some(score) = patch.complexity_score {
-        saved.complexity_score = score;
-    }
-    if let Some(start) = patch.start_date {
-        saved.start_date = start;
-    }
-    if let Some(target) = patch.target_date {
-        saved.target_date = target;
-    }
-    if let Some(sequence) = patch.sequence_id {
-        saved.sequence_id = sequence;
-    }
-    if let Some(sort) = patch.sort_order {
-        saved.sort_order = sort;
-    }
-    saved.completed_at = completed_at;
-    if let Some(archived) = patch.archived_at {
-        saved.archived_at = archived;
-    }
-    if let Some(draft) = patch.is_draft {
-        saved.is_draft = draft;
-    }
-    if let Some(source) = &patch.external_source {
-        saved.external_source = source.clone();
-    }
-    if let Some(external) = &patch.external_id {
-        saved.external_id = external.clone();
-    }
-    if let Some(branch) = &patch.git_work_branch {
-        saved.git_work_branch = branch.clone();
-    }
-    if let Some(via) = &patch.created_via {
-        saved.created_via = via.clone();
-    }
-    if let Some(executor) = &patch.agent_executor {
-        saved.agent_executor = executor.clone();
-    }
-    if let Some(created_by) = patch.created_by {
-        saved.created_by_id = created_by;
-    }
-    if let Some(parent) = patch.parent {
-        saved.parent_id = parent;
-    }
-    saved.state_id = state_id;
-    if let Some(estimate) = patch.estimate_point {
-        saved.estimate_point_id = estimate;
-    }
-    if let Some(issue_type) = patch.issue_type {
-        saved.type_id = issue_type;
-    }
-    if let Some(pod) = patch.assigned_pod {
-        saved.assigned_pod_id = pod;
-    }
-    if let Some(deleted) = patch.deleted_at {
-        saved.deleted_at = deleted;
-    }
-    saved.description_stripped = stripped;
-    saved.updated_at = now_save;
-    saved.updated_by_id = Some(*user_id);
-    Ok(saved)
+    Ok(())
 }
 
 /// Apply an intake-half patch (`super().update` + `save()`): column
@@ -10075,79 +3965,59 @@ async fn save_intake_patch(
 /// request — with `completed_at` / `description_stripped` recomputed
 /// and the audit stamp moved. Returns the post-save (clobbered) row.
 async fn apply_triage_transition(
-    pool: &sqlx::PgPool,
+    state: &AppState,
+    ctx: &Context,
     pre_save: &IssueRow,
     default_id: &Uuid,
-    user_id: &Uuid,
-) -> Result<IssueRow, Denial> {
-    let now = cycle_mod::micros_now();
-    let group = fetch_state_group(pool, default_id).await?;
-    let completed_at = if group == "completed" {
-        Some(now)
-    } else {
-        None
-    };
-    // Same non-adding rule (`issue.save()` rewrites all fields):
-    // falsy html → NULL, else the strip result as-is.
-    let stripped: Option<String> = if pre_save.description_html.is_empty() {
-        None
-    } else {
-        Some(strip_tags_ml(&pre_save.description_html))
-    };
+) -> Result<(), Denial> {
     // The full-row rewrite IS the clobber: every pre-save column is
     // written back, so issue-half writes from this request vanish
-    // (`point` included — it is writable via the issue-half).
-    sqlx::query(
-        r#"UPDATE "issues" SET "name" = $1, "description_json" = $2, "description_html" = $3,
-           "description_stripped" = $4, "priority" = $5, "complexity_score" = $6,
-           "start_date" = $7, "target_date" = $8, "sequence_id" = $9, "sort_order" = $10,
-           "completed_at" = $11, "archived_at" = $12, "is_draft" = $13,
-           "external_source" = $14, "external_id" = $15, "git_work_branch" = $16,
-           "created_via" = $17, "agent_executor" = $18, "created_by_id" = $19,
-           "parent_id" = $20, "state_id" = $21, "estimate_point_id" = $22, "type_id" = $23,
-           "assigned_pod_id" = $24, "deleted_at" = $25, "point" = $26,
-           "updated_at" = $27, "updated_by_id" = $28 WHERE "id" = $29"#,
-    )
-    .bind(&pre_save.name)
-    .bind(&pre_save.description_json)
-    .bind(&pre_save.description_html)
-    .bind(&stripped)
-    .bind(&pre_save.priority)
-    .bind(pre_save.complexity_score)
-    .bind(pre_save.start_date)
-    .bind(pre_save.target_date)
-    .bind(pre_save.sequence_id)
-    .bind(pre_save.sort_order)
-    .bind(completed_at)
-    .bind(pre_save.archived_at)
-    .bind(pre_save.is_draft)
-    .bind(&pre_save.external_source)
-    .bind(&pre_save.external_id)
-    .bind(&pre_save.git_work_branch)
-    .bind(&pre_save.created_via)
-    .bind(&pre_save.agent_executor)
-    .bind(pre_save.created_by_id)
-    .bind(pre_save.parent_id)
-    .bind(default_id)
-    .bind(pre_save.estimate_point_id)
-    .bind(pre_save.type_id)
-    .bind(pre_save.assigned_pod_id)
-    .bind(pre_save.deleted_at)
-    .bind(pre_save.point)
-    .bind(now)
-    .bind(user_id)
-    .bind(pre_save.id)
-    .execute(pool)
+    // (`point` included — it is writable via the issue-half). It rides
+    // `domain::issues::update`: the save hooks recompute `completed_at`
+    // / stripped text, and the chain runs the `post_save` completion
+    // pair + fire Django's `issue.save()` fires.
+    let now = cycle_mod::micros_now();
+    let mut fields = pre_save.field_set();
+    fields.state_id = Some(*default_id);
+    fields.updated_at = now;
+    let prev_state = pre_save.state_id;
+    let m2m_audit = (pre_save.created_by_id, pre_save.updated_by_id);
+    let orm = state.orm().ok_or(Denial::ServerError)?;
+    let domain_ctx = write_ctx(ctx, pre_save.workspace_id);
+    let transition: Arc<dyn IssueTransitionHook> =
+        Arc::new(AppTransitionHook::new(state, &ctx.pool));
+    let enqueue: Arc<dyn TaskEnqueueHook> = Arc::new(AppTaskEnqueueHook::new(&ctx.pool));
+    let outcome = domain::run(&domain_ctx, orm, |txn| {
+        let transition = transition.clone();
+        let enqueue = enqueue.clone();
+        let pool = ctx.pool.clone();
+        let domain_ctx = domain_ctx.clone();
+        let fire = fire_spec(&ctx.user_id, now);
+        Box::pin(async move {
+            txn.hooks_mut().register(transition);
+            txn.hooks_mut().register(enqueue);
+            domain_issues::update(
+                &domain_ctx,
+                txn,
+                &pool,
+                domain_issues::UpdateIssue {
+                    fields,
+                    assignees: None,
+                    labels: None,
+                    m2m_audit,
+                    prev_state,
+                    fire,
+                },
+            )
+            .await
+        })
+    })
     .await
-    .map_err(|_| Denial::ServerError)?;
-
-    let mut saved = pre_save.clone();
-    saved.state_id = Some(*default_id);
-    saved.completed_at = completed_at;
-    saved.description_stripped = stripped;
-    saved.updated_at = now;
-    saved.updated_by_id = Some(*user_id);
-    Ok(saved)
+    .map_err(domain_denial)?;
+    if outcome.chain.stopped().is_some() {
+        return Err(Denial::ServerError);
+    }
+    Ok(())
 }
 
 /// Instance soft delete (`db/mixins.py:72-78`): `deleted_at` stamp,
@@ -10251,11 +4121,15 @@ fn json_has_nonfinite(value: &Value) -> bool {
 
 /// Triage get-or-create (`views/intake.py:173-184`): the lookup by
 /// `(project, slug)` first; the insert on a miss (a lost race hits the
-/// unique `name`+`project` row → the `IntegrityError` 400).
+/// unique `name`+`project` row → the `IntegrityError` 400). The insert
+/// carries the `State.save` resequence (`max + 15000` over the live
+/// non-triage project states, `65000` when there are none) and the
+/// crum `created_by` (the request user).
 async fn ensure_triage(
     pool: &sqlx::PgPool,
     slug: &str,
     project: &ProjectRow,
+    user_id: &Uuid,
 ) -> Result<Uuid, Denial> {
     // The pinned lookup selects `*`; read `id` by name off the row
     // (`query_scalar` cannot decode a multi-column row).
@@ -10271,201 +4145,144 @@ async fn ensure_triage(
     if let Some(id) = existing {
         return Ok(id);
     }
-    let id = Uuid::new_v4();
+    let max_sequence: Option<f64> = sqlx::query_scalar(&intake_queries::triage_max_sequence_sql())
+        .bind(project.id)
+        .fetch_one(pool)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let sequence = max_sequence
+        .map(|max| max + 15000.0)
+        .unwrap_or(intake_queries::TRIAGE_SEQUENCE_FALLBACK);
     let created_at = cycle_mod::micros_now();
     let updated_at = cycle_mod::micros_now();
-    let result = sqlx::query(&intake_queries::triage_insert_sql())
-        .bind(id)
-        .bind(created_at)
-        .bind(updated_at)
-        .bind(project.id)
-        .bind(project.workspace_id)
-        .execute(pool)
-        .await;
+    let result = pidash_services::domain::projects::states::add_triage(
+        pool,
+        project.id,
+        project.workspace_id,
+        sequence,
+        *user_id,
+        created_at,
+        updated_at,
+        pidash_services::domain::projects::states::TriageText::Full,
+    )
+    .await;
     match result {
-        Ok(_) => Ok(id),
+        Ok(id) => Ok(id),
         Err(error) if is_unique_violation(&error) => Err(Denial::PayloadInvalid),
         Err(_) => Err(Denial::ServerError),
     }
 }
 
-/// `convert_uuid_to_integer` (`utils/uuid.py`): the advisory-lock key —
-/// signed big-endian `int64` of the `sha256(str(uuid))` prefix.
-fn advisory_key(project_id: &Uuid) -> i64 {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(project_id.to_string().as_bytes());
-    let digest = hasher.finalize();
-    let mut bytes = [0u8; 8];
-    bytes.copy_from_slice(&digest[..8]);
-    i64::from_be_bytes(bytes)
-}
-
-/// `Pod.default_for_project_id` (`runner/models.py`): the live default
-/// pod, earliest first — or `None` (raw-SQL-seeded projects have none:
-/// the `post_save` signal only fires on ORM creates).
-async fn default_pod_for_project(
-    pool: &sqlx::PgPool,
-    project_id: &Uuid,
-) -> Result<Option<Uuid>, Denial> {
-    sqlx::query_scalar(
-        r#"SELECT "id" FROM "pod" WHERE "project_id" = $1 AND "is_default" = TRUE
-           AND "deleted_at" IS NULL ORDER BY "created_at" ASC LIMIT 1"#,
-    )
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)
-}
-
 /// `Issue.objects.create(...)` (`views/intake.py:186-194` +
-/// `Issue.save()` adding branch): the advisory lock (a no-op under
-/// autocommit — ported as the same statement), `sequence_id` from the
-/// `issue_sequences` counter (`max+1`, falsy → 1) with its new
-/// `IssueSequence` row, `sort_order = max(project, state) +
-/// 10000` when siblings exist, pod defaulting, tag stripping (as-is —
-/// no `or None` on this path), workspace from the project, crum audit.
+/// `Issue.save()` adding branch): the transaction-scoped advisory lock
+/// is taken first, then `sequence_id` from the `issue_sequences`
+/// counter (`max+1`, falsy → 1) with its new `IssueSequence` row and
+/// `sort_order = max(project, state) + 10000` when siblings exist — all
+/// on one transaction (`db/models/issue.py:311-336`), so concurrent
+/// creates serialize per project. The lock must live on the
+/// transaction: taken on the pool it would drop as soon as its own
+/// autocommit statement ends (PIDASHCONV-1406). Pod defaulting stays
+/// outside: Django resolves `assigned_pod` before `atomic()`
+/// (`issue.py:277-284`). Tag stripping as-is (no `or None` on this
+/// path), workspace from the project, crum audit.
 #[allow(clippy::too_many_arguments)]
 async fn insert_issue(
-    pool: &sqlx::PgPool,
+    state: &AppState,
+    ctx: &Context,
     name: &str,
     description_json: &Value,
     description_html: &str,
     priority: &str,
     project: &ProjectRow,
     triage_id: &Uuid,
-    user_id: &Uuid,
 ) -> Result<IssueRow, Denial> {
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(advisory_key(&project.id))
-        .execute(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    let last_sequence: Option<Option<i64>> = sqlx::query_scalar(
-        r#"SELECT MAX("sequence") FROM "issue_sequences" WHERE "project_id" = $1 AND "deleted_at" IS NULL"#,
-    )
-    .bind(project.id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    // `last_sequence + 1 if last_sequence else 1`: `0` and `None` both
-    // restart at 1 (falsy either way).
-    let sequence_id = i32::try_from(
-        last_sequence
-            .flatten()
-            .filter(|last| *last != 0)
-            .map(|last| last + 1)
-            .unwrap_or(1),
-    )
-    .map_err(|_| Denial::ServerError)?;
-    let max_sort: Option<f64> = sqlx::query_scalar(
-        r#"SELECT MAX("sort_order") FROM "issues"
-           WHERE "project_id" = $1 AND "state_id" = $2 AND "deleted_at" IS NULL"#,
-    )
-    .bind(project.id)
-    .bind(triage_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?
-    .flatten();
-    let sort_order = max_sort.map_or(65535.0, |max| max + 10000.0);
-    let pod_id = default_pod_for_project(pool, &project.id).await?;
-    // `Issue.save()` adding branch: falsy html → NULL, else the strip
-    // result as-is (even `""` — no `or None` on this path).
-    let stripped: Option<String> = if description_html.is_empty() {
-        None
-    } else {
-        Some(strip_tags_ml(description_html))
-    };
-
-    let id = Uuid::new_v4();
-    let created_at = cycle_mod::micros_now();
-    let updated_at = cycle_mod::micros_now();
-    sqlx::query(
-        r#"INSERT INTO "issues" ("id", "created_at", "updated_at", "created_by_id", "updated_by_id",
-           "deleted_at", "project_id", "workspace_id", "parent_id", "state_id", "point",
-           "estimate_point_id", "name", "description_json", "description_html",
-           "description_stripped", "description_binary", "priority", "complexity_score",
-           "start_date", "target_date", "sequence_id", "sort_order", "completed_at",
-           "archived_at", "is_draft", "external_source", "external_id", "type_id",
-           "git_work_branch", "workpad", "created_via", "assigned_pod_id", "agent_executor")
-           VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, NULL, $7, NULL, NULL, $8, $9, $10,
-           $11, NULL, $12, 0, NULL, NULL, $13, $14, NULL, NULL, FALSE, NULL, NULL, NULL,
-           '', '', NULL, $15, NULL)"#,
-    )
-    .bind(id)
-    .bind(created_at)
-    .bind(updated_at)
-    .bind(user_id)
-    .bind(project.id)
-    .bind(project.workspace_id)
-    .bind(triage_id)
-    .bind(name)
-    .bind(description_json)
-    .bind(description_html)
-    .bind(&stripped)
-    .bind(priority)
-    .bind(sequence_id)
-    .bind(sort_order)
-    .bind(pod_id)
-    .execute(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-
-    let sequence_created = cycle_mod::micros_now();
-    let sequence_updated = cycle_mod::micros_now();
-    sqlx::query(
-        r#"INSERT INTO "issue_sequences" ("id", "created_at", "updated_at", "created_by_id",
-           "updated_by_id", "deleted_at", "issue_id", "sequence", "project_id", "workspace_id",
-           "deleted") VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, $7, $8, FALSE)"#,
-    )
-    .bind(Uuid::new_v4())
-    .bind(sequence_created)
-    .bind(sequence_updated)
-    .bind(user_id)
-    .bind(id)
-    .bind(i64::from(sequence_id))
-    .bind(project.id)
-    .bind(project.workspace_id)
-    .execute(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-
-    Ok(IssueRow {
-        id,
-        created_at,
-        updated_at,
+    // `Issue.objects.create(...)` + `Issue.save()` ride
+    // `domain::issues::create`: the hooks resolve the pod default,
+    // `completed_at` (triage, so NULL), stripped text, sequence and sort
+    // order, and the post-commit chain runs the `post_save` fire Django's
+    // create fires (no m2m legs: the serializer runs with an EMPTY
+    // context on this endpoint). The created activity keeps its
+    // driver-side emit in the caller (v1 key omission plus the intake
+    // `intake=` extra).
+    let fields = IssueFieldSet {
+        id: Uuid::new_v4(),
+        created_at: cycle_mod::micros_now(),
+        updated_at: cycle_mod::micros_now(),
+        created_by_id: Some(ctx.user_id),
+        updated_by_id: None,
         deleted_at: None,
+        project_id: project.id,
+        workspace_id: project.workspace_id,
+        parent_id: None,
+        state_id: Some(*triage_id),
         point: None,
+        estimate_point_id: None,
         name: name.to_owned(),
         description_json: description_json.clone(),
         description_html: description_html.to_owned(),
-        description_stripped: stripped,
+        description_stripped: None,
         description_binary: None,
-        priority: Some(priority.to_owned()),
-        complexity_score: Some(0),
+        priority: priority.to_owned(),
+        complexity_score: 0,
         start_date: None,
         target_date: None,
-        sequence_id,
-        sort_order,
+        sequence_id: 0,
+        sort_order: 65535.0,
         completed_at: None,
         archived_at: None,
         is_draft: false,
         external_source: None,
         external_id: None,
-        git_work_branch: String::new(),
-        created_via: None,
-        agent_executor: None,
-        created_by_id: Some(*user_id),
-        updated_by_id: None,
-        project_id: project.id,
-        workspace_id: project.workspace_id,
-        parent_id: None,
-        state_id: Some(*triage_id),
-        estimate_point_id: None,
         type_id: None,
-        assigned_pod_id: pod_id,
+        git_work_branch: String::new(),
+        workpad: String::new(),
+        created_via: None,
+        assigned_pod_id: None,
+        agent_executor: None,
+    };
+    let fire = fire_spec(&ctx.user_id, cycle_mod::micros_now());
+    let orm = state.orm().ok_or(Denial::ServerError)?;
+    let domain_ctx = write_ctx(ctx, project.workspace_id);
+    let transition: Arc<dyn IssueTransitionHook> =
+        Arc::new(AppTransitionHook::new(state, &ctx.pool));
+    let enqueue: Arc<dyn TaskEnqueueHook> = Arc::new(AppTaskEnqueueHook::new(&ctx.pool));
+    let outcome = domain::run(&domain_ctx, orm, |txn| {
+        let transition = transition.clone();
+        let enqueue = enqueue.clone();
+        let pool = ctx.pool.clone();
+        let domain_ctx = domain_ctx.clone();
+        Box::pin(async move {
+            txn.hooks_mut().register(transition);
+            txn.hooks_mut().register(enqueue);
+            domain_issues::create(
+                &domain_ctx,
+                txn,
+                &pool,
+                domain_issues::CreateIssue {
+                    fields,
+                    assignees: Vec::new(),
+                    default_assignee: None,
+                    labels: Vec::new(),
+                    fire,
+                    origin: None,
+                    activity_requested: Value::Null,
+                    activity_notification: None,
+                    activity_require_origin: false,
+                    skip_activity: true,
+                    skip_fire: false,
+                    model_activity: None,
+                    created_override: None,
+                },
+            )
+            .await
+        })
     })
+    .await
+    .map_err(domain_denial)?;
+    if outcome.chain.stopped().is_some() {
+        return Err(Denial::ServerError);
+    }
+    Ok(IssueRow::from_model(&outcome.issue))
 }
 
 /// `IntakeIssue.objects.create(intake_id, project_id, issue,
@@ -10667,8 +4484,8 @@ async fn intake_create(
     body: Bytes,
 ) -> HandlerResult {
     let ctx = context(&state, &headers, &slug, &raw_project_id).await?;
-    let data = parse_json_body(&body, &headers, state.settings().file_size_limit)?;
-    let Value::Object(data) = data else {
+    let parsed = parse_json_body(&body, &headers, state.settings().file_size_limit)?;
+    let Value::Object(data) = parsed.value().clone() else {
         // `.get` on a non-dict (`None`, list, scalar) is the 500
         // `AttributeError`.
         return Err(Denial::ServerError);
@@ -10706,7 +4523,7 @@ async fn intake_create(
         _ => return Err(Denial::InvalidPriority),
     };
 
-    let triage_id = ensure_triage(&ctx.pool, &slug, &project).await?;
+    let triage_id = ensure_triage(&ctx.pool, &slug, &project, &ctx.user_id).await?;
     let description_json = issue_data
         .get("description")
         .filter(|value| !is_falsy_json(value))
@@ -10725,14 +4542,14 @@ async fn intake_create(
     let name = coerce_create_name(name_value)?;
     let description_html = coerce_create_html(issue_data.get("description_html"))?;
     let issue = insert_issue(
-        &ctx.pool,
+        &state,
+        &ctx,
         &name,
         &description_json,
         &description_html,
         &priority,
         &project,
         &triage_id,
-        &ctx.user_id,
     )
     .await?;
     // `intake_id=intake.id` (`:197`): the AND-guard fallthrough 500s
@@ -10888,8 +4705,12 @@ async fn intake_update(
 
     // `request.data` is lazy — the first touch is the `pop` at `:344`,
     // AFTER every guard above, so malformed bodies lose to them.
-    let data = parse_json_body(&body, &headers, state.settings().file_size_limit)?;
-    let Value::Object(mut data) = data else {
+    let parsed = parse_json_body(&body, &headers, state.settings().file_size_limit)?;
+    if pops_immutable_querydict(&parsed, &body, &headers) {
+        // `.pop` on the immutable `QueryDict` is the `AttributeError` 500.
+        return Err(Denial::ServerError);
+    }
+    let Value::Object(mut data) = parsed.value().clone() else {
         // `.pop` on a non-dict (list → `TypeError`, else
         // `AttributeError`) is the 500.
         return Err(Denial::ServerError);
@@ -10994,7 +4815,7 @@ async fn intake_update(
             Utc::now().timestamp(),
         );
         cycle_mod::enqueue_best_effort(&ctx.pool, &job).await;
-        save_issue_patch(&ctx.pool, pre_save_issue, patch, &ctx.user_id).await?;
+        save_issue_patch(&state, &ctx, pre_save_issue, patch).await?;
     }
 
     // `views/intake.py:416` serializes `IntakeIssueSerializer(intake_issue)`
@@ -11046,8 +4867,7 @@ async fn intake_update(
             .is_some()
             {
                 if let Some(default_id) = default_id {
-                    apply_triage_transition(&ctx.pool, &companion, &default_id, &ctx.user_id)
-                        .await?;
+                    apply_triage_transition(&state, &ctx, &companion, &default_id).await?;
                     transitioned = true;
                 }
             }
@@ -11186,7 +5006,58 @@ async fn intake_destroy(
         if v1_perm::delete_guard(is_creator, is_admin).is_err() {
             return Err(Denial::DeleteDenied);
         }
-        soft_delete_row(&ctx.pool, "issues", "issue", &issue.id, &ctx.user_id).await?;
+        // `issue.delete()` (`db/mixins.py:71-77`): stamp + full `save()`
+        // (the state legs run), the completion pair + fire Django's save
+        // fires, and the related-objects forward. No recent-visit delete
+        // and no `deleted` activity: Django's v1 destroy has neither.
+        // `delete()` stamps `deleted_at`, then `save()`'s `auto_now`
+        // moves `updated_at` — two clock reads.
+        let mut fields = issue.field_set();
+        fields.deleted_at = Some(cycle_mod::micros_now());
+        fields.updated_at = cycle_mod::micros_now();
+        let prev_state = issue.state_id;
+        let fire = fire_spec(&ctx.user_id, fields.updated_at);
+        let orm = state.orm().ok_or(Denial::ServerError)?;
+        let domain_ctx = write_ctx(&ctx, issue.workspace_id);
+        let transition: Arc<dyn IssueTransitionHook> =
+            Arc::new(AppTransitionHook::new(&state, &ctx.pool));
+        let enqueue: Arc<dyn TaskEnqueueHook> = Arc::new(AppTaskEnqueueHook::new(&ctx.pool));
+        let outcome = domain::run(&domain_ctx, orm, |txn| {
+            let transition = transition.clone();
+            let enqueue = enqueue.clone();
+            let pool = ctx.pool.clone();
+            let domain_ctx = domain_ctx.clone();
+            let slug = slug.clone();
+            Box::pin(async move {
+                txn.hooks_mut().register(transition);
+                txn.hooks_mut().register(enqueue);
+                domain_issues::soft_delete(
+                    &domain_ctx,
+                    txn,
+                    &pool,
+                    domain_issues::SoftDeleteIssue {
+                        fields,
+                        prev_state,
+                        fire,
+                        origin: None,
+                        slug,
+                        completion: true,
+                        visit_delete: false,
+                        activity_current: Value::Null,
+                        activity_notification: None,
+                        activity_require_origin: false,
+                        activity_subscriber: None,
+                        skip_activity: true,
+                    },
+                )
+                .await
+            })
+        })
+        .await
+        .map_err(domain_denial)?;
+        if outcome.chain.stopped().is_some() {
+            return Err(Denial::ServerError);
+        }
     }
     soft_delete_row(
         &ctx.pool,
@@ -21244,884 +15115,6 @@ mod tests {
         ("# Cold start\n\n- parent\n  - child\n\nChecklist:\n\n- [ ] fixtures\n- [x] prerequisites\n\n```rust\nfn main() {}\n```\n\n| page | updated_at |\n| --- | --- |\n| wiki-1 | 2026-09-21 |\n", "<h1>Cold start</h1><ul><li><p>parent</p><ul><li><p>child</p></li></ul></li></ul><p>Checklist:</p><ul data-type=\"taskList\"><li data-type=\"taskItem\" data-checked=\"false\"><label><input type=\"checkbox\"><span></span></label><div><p>fixtures</p></div></li><li data-type=\"taskItem\" data-checked=\"true\"><label><input type=\"checkbox\" checked=\"checked\"><span></span></label><div><p>prerequisites</p></div></li></ul><pre><code class=\"language-rust\">fn main() {}</code></pre><table><tbody><tr><th><p>page</p></th><th><p>updated_at</p></th></tr><tr><td><p>wiki-1</p></td><td><p>2026-09-21</p></td></tr></tbody></table>"),
     ];
 
-    const LXML_GOLDENS: &[(&str, Option<&str>)] = &[
-        ("", None),
-        ("5", Some("<span>5</span>")),
-        ("hello", Some("<span>hello</span>")),
-        ("<p></p>", Some("<p></p>")),
-        ("<p>x</p>", Some("<p>x</p>")),
-        ("<p>x</p><p>y</p>", Some("<div><p>x</p><p>y</p></div>")),
-        ("a < b", Some("<span>a &lt; b</span>")),
-        ("a & b", Some("<span>a &amp; b</span>")),
-        ("&amp;", Some("<span>&amp;</span>")),
-        ("<div>x", Some("<div>x</div>")),
-        ("<p>x", Some("<p>x</p>")),
-        ("x</p>", Some("<span>x</span>")),
-        ("<span>5</span>", Some("<span>5</span>")),
-        ("<br>", Some("<br>")),
-        ("<br/>", Some("<br>")),
-        ("a<br>b", Some("<span>a<br>b</span>")),
-        ("<hr>", Some("<hr>")),
-        ("<ul><li>a</li></ul>", Some("<ul><li>a</li></ul>")),
-        ("<input type=\"checkbox\">", Some("<input type=\"checkbox\">")),
-        ("<input type=\"checkbox\" checked=\"checked\">", Some("<input type=\"checkbox\" checked>")),
-        ("<li data-type=\"taskItem\" data-checked=\"true\">x</li>", Some("<li data-type=\"taskItem\" data-checked=\"true\">x</li>")),
-        ("<a href=\"http://x\">y</a>", Some("<a href=\"http://x\">y</a>")),
-        ("<A HREF='u'>v</A>", Some("<a href=\"u\">v</a>")),
-        ("<p class=\"c\" id=\"i\">x</p>", Some("<p class=\"c\" id=\"i\">x</p>")),
-        ("<script>x</script>", Some("<html><head><script>x</script></head></html>")),
-        ("<!-- c -->x", Some("<span>x</span>")),
-        ("<!DOCTYPE html><p>x</p>", Some("<html><body><p>x</p></body></html>")),
-        ("<table><tr><td>x</td></tr></table>", Some("<table><tr><td>x</td></tr></table>")),
-        ("<p>a<b>c</b>d</p>", Some("<p>a<b>c</b>d</p>")),
-        ("  spaced  ", Some("<span>spaced  </span>")),
-        ("\n\n", None),
-        ("<p>unclosed <b>bold", Some("<p>unclosed <b>bold</b></p>")),
-        ("text < with < multiple", Some("<span>text &lt; with &lt; multiple</span>")),
-        ("<p title=\"a'b\">x</p>", Some("<p title=\"a'b\">x</p>")),
-        ("<img src=\"s\">", Some("<img src=\"s\">")),
-        ("<h1>t</h1>", Some("<h1>t</h1>")),
-        ("<pre><code class=\"language-py\">x</code></pre>", Some("<pre><code class=\"language-py\">x</code></pre>")),
-        ("café 中文", Some("<span>café 中文</span>")),
-        ("<p>&lt;esc&gt;</p>", Some("<p>&lt;esc&gt;</p>")),
-        ("<custom-tag>x</custom-tag>", Some("<custom-tag>x</custom-tag>")),
-        ("<mention-component>x</mention-component>", Some("<mention-component>x</mention-component>")),
-        ("a<b", Some("<span>a</span>")),
-        ("a>", Some("<span>a&gt;</span>")),
-        ("<>", Some("<span>&lt;&gt;</span>")),
-        ("</p>", None),
-        ("<p/>", Some("<p></p>")),
-        ("<p />", Some("<p></p>")),
-        ("<td>x</td>", Some("<td>x</td>")),
-        ("<tr>x</tr>", Some("<tr>x</tr>")),
-        ("<tbody>x</tbody>", Some("<tbody>x</tbody>")),
-        ("<li>a", Some("<li>a</li>")),
-        ("<option>x</option>", Some("<option>x</option>")),
-        ("<button>x</button>", Some("<button>x</button>")),
-        ("<textarea>x</textarea>", Some("<textarea>x</textarea>")),
-        ("<title>x</title>", Some("<html><head><title>x</title></head></html>")),
-        ("<select><option>a</option></select>", Some("<select><option>a</option></select>")),
-        ("<p> </p>", Some("<p> </p>")),
-        ("x &unknown; y", Some("<span>x &amp;unknown; y</span>")),
-        ("&#65;", Some("<span>A</span>")),
-        ("&#x41;", Some("<span>A</span>")),
-        ("<a href=\"java\tscript:x\">y</a>", Some("<a href=\"java%09script:x\">y</a>")),
-        ("a<br>b", Some("<span>a<br>b</span>")),
-        ("<br>", Some("<br>")),
-        ("a<br>", Some("<span>a<br></span>")),
-        ("<br>b", Some("<span><br>b</span>")),
-        ("a<p>x</p>", Some("<div>a<p>x</p></div>")),
-        ("<p>x</p>b", Some("<div><p>x</p>b</div>")),
-        ("a<b>c</b>d", Some("<span>a<b>c</b>d</span>")),
-        ("<b>x</b><i>y</i>", Some("<span><b>x</b><i>y</i></span>")),
-        ("a<b>x</b>", Some("<span>a<b>x</b></span>")),
-        ("<b>x</b>a", Some("<span><b>x</b>a</span>")),
-        ("a ", Some("<span>a </span>")),
-        (" a", Some("<span>a</span>")),
-        ("<br><br>", Some("<span><br><br></span>")),
-        ("a<br><br>b", Some("<span>a<br><br>b</span>")),
-        ("<hr>", Some("<hr>")),
-        ("a<hr>b", Some("<div>a<hr>b</div>")),
-        ("<img src=s>", Some("<img src=\"s\">")),
-        ("a<img src=s>b", Some("<span>a<img src=\"s\">b</span>")),
-        ("<p>x</p> ", Some("<p>x</p> ")),
-        (" <p>x</p>", Some("<p>x</p>")),
-        ("<input>", Some("<input>")),
-        ("a<input>b", Some("<span>a<input>b</span>")),
-        ("<li>x</li>", Some("<li>x</li>")),
-        ("a<li>x</li>b", Some("<div>a<li>x</li>b</div>")),
-        ("<td>x</td>", Some("<td>x</td>")),
-        ("a<td>x</td>b", Some("<div>a<td>x</td>b</div>")),
-        ("<tr>x</tr>", Some("<tr>x</tr>")),
-        ("<tbody>x</tbody>", Some("<tbody>x</tbody>")),
-        ("<option>x</option>", Some("<option>x</option>")),
-        ("<button>x</button>", Some("<button>x</button>")),
-        ("<textarea>x</textarea>", Some("<textarea>x</textarea>")),
-        ("<select>x</select>", Some("<select>x</select>")),
-        ("<title>x</title>", Some("<html><head><title>x</title></head></html>")),
-        ("<script>x</script>", Some("<html><head><script>x</script></head></html>")),
-        ("<style>x</style>", Some("<html><head><style>x</style></head></html>")),
-        ("<head>x</head>", Some("<html><head></head><body>x</body></html>")),
-        ("\u{C}", None),
-        ("", Some("<span></span>")),
-        (" ", Some("<span> </span>")),
-        (" ", Some("<span> </span>")),
-        ("\u{B}\u{C}", Some("<span>\u{B}\u{C}</span>")),
-        ("\u{C}", None),
-        ("\t x", Some("<span>x</span>")),
-        ("\n x", Some("<span>x</span>")),
-        ("\r x", Some("<span>x</span>")),
-        ("\u{B} x", Some("<span>\u{B} x</span>")),
-        ("\u{C} x", Some("<span>x</span>")),
-        (" x", Some("<span> x</span>")),
-        ("x", Some("<span>x</span>")),
-        ("\u{1C}x", Some("<span>\u{1C}x</span>")),
-        (" x", Some("<span> x</span>")),
-        ("<base href=x>", Some("<html><head><base href=\"x\"></head></html>")),
-        ("<meta name=x>", Some("<html><head><meta name=\"x\"></head></html>")),
-        ("<link rel=x>", Some("<html><head><link rel=\"x\"></head></html>")),
-        ("<noscript>x</noscript>", Some("<noscript>x</noscript>")),
-        ("<template>x</template>", Some("<template>x</template>")),
-        ("<b>x</b>tail", Some("<span><b>x</b>tail</span>")),
-        ("<b>x</b>  ", Some("<b>x</b>  ")),
-        ("  <b>x</b>  ", Some("<b>x</b>  ")),
-        ("a<option>x</option>b", Some("<div>a<option>x</option>b</div>")),
-        ("a<button>x</button>b", Some("<span>a<button>x</button>b</span>")),
-        ("a<select>x</select>b", Some("<span>a<select>x</select>b</span>")),
-        ("a<textarea>x</textarea>b", Some("<span>a<textarea>x</textarea>b</span>")),
-        ("a<form>x</form>b", Some("<div>a<form>x</form>b</div>")),
-        ("a<del>x</del>b", Some("<div>a<del>x</del>b</div>")),
-        ("a<ins>x</ins>b", Some("<div>a<ins>x</ins>b</div>")),
-        ("a<isindex>b", Some("<div>a<isindex>b</div>")),
-        ("a<center>x</center>b", Some("<div>a<center>x</center>b</div>")),
-        ("a<address>x</address>b", Some("<div>a<address>x</address>b</div>")),
-        (" <title>x</title> ", Some("<html><head><title>x</title> </head></html>")),
-        ("<title>x</title> tail", Some("<html><head><title>x</title> </head><body>tail</body></html>")),
-        ("head <title>x</title>", Some("<span>head <title>x</title></span>")),
-        ("<basefont size=1>", Some("<basefont size=\"1\">")),
-        ("<bgsound src=x>", Some("<bgsound src=\"x\"></bgsound>")),
-        ("<noframes>x</noframes>", Some("<html><noframes>x</noframes></html>")),
-        ("<frame src=x>", Some("<html><frame src=\"x\"></html>")),
-        ("<frameset>x</frameset>", Some("<html><frameset>x</frameset></html>")),
-        ("<marquee>x</marquee>", Some("<marquee>x</marquee>")),
-        ("<b>x</b> ", Some("<b>x</b> ")),
-        ("<b>x</b>\u{1C}", Some("<b>x</b>\u{1C}")),
-        (" <b>x</b>", Some("<b>x</b>")),
-        ("<b>x</b>", Some("<b>x</b>")),
-        ("<!DOCTYPE html><p>x</p>", Some("<html><body><p>x</p></body></html>")),
-        ("<html><p>x</p></html>", Some("<html><body><p>x</p></body></html>")),
-        ("<HTML><P>x</P></HTML>", Some("<html><body><p>x</p></body></html>")),
-        ("  <!doctype html><p>x</p>", Some("<html><body><p>x</p></body></html>")),
-        ("<title>x</title>  tail", Some("<html><head><title>x</title>  </head><body>tail</body></html>")),
-        ("<title>x</title>\t tail", Some("<html><head><title>x</title>\t </head><body>tail</body></html>")),
-        ("<title>x</title>\n tail", Some("<html><head><title>x</title>\n </head><body>tail</body></html>")),
-        ("<title>x</title>tail", Some("<html><head><title>x</title></head><body>tail</body></html>")),
-        ("<title>x</title> ", Some("<html><head><title>x</title> </head></html>")),
-        ("<title>x</title>  ", Some("<html><head><title>x</title>  </head></html>")),
-        ("<html><head><title>t</title></head><body><p>x</p></body></html>", Some("<html><head><title>t</title></head><body><p>x</p></body></html>")),
-        ("<html><head></head><body><p>x</p></body></html>", Some("<html><head></head><body><p>x</p></body></html>")),
-        ("<!DOCTYPE html><html><body><p>x</p></body></html>", Some("<html><body><p>x</p></body></html>")),
-        (" <html><p>x</p></html>", Some("<html><body> <p>x</p></body></html>")),
-        ("<HTML><HEAD><TITLE>t</TITLE></HEAD></HTML>", Some("<html><head><title>t</title></head></html>")),
-        ("<html><body><p>x</p><p>y</p></body></html>", Some("<html><body><p>x</p><p>y</p></body></html>")),
-        ("<p>x</p><title>t</title>", Some("<div><p>x</p><title>t</title></div>")),
-        ("<title>a</title><title>b</title>", Some("<html><head><title>a</title><title>b</title></head></html>")),
-        ("<title>a</title><p>x</p>", Some("<html><head><title>a</title></head><body><p>x</p></body></html>")),
-        ("<p>x</p><script>s</script>", Some("<div><p>x</p><script>s</script></div>")),
-        ("<frameset>x</frameset> tail", Some("<span>tail</span>")),
-        ("head <frameset>x</frameset>", Some("<span>head <frameset>x</frameset></span>")),
-        ("<noframes>x</noframes> tail", Some("<span>tail</span>")),
-        ("<head><title>t</title></head>", Some("<html><head><title>t</title></head></html>")),
-        ("<body><p>x</p></body>", Some("<p>x</p>")),
-        ("<title>x</title> tail", Some("<html><head><title>x</title></head><body> tail</body></html>")),
-        ("<title>x</title>\u{B}tail", Some("<html><head><title>x</title></head><body>\u{B}tail</body></html>")),
-        ("<title>x</title>\u{C}tail", Some("<html><head><title>x</title>\u{C}</head><body>tail</body></html>")),
-        ("<frame src=x> tail", Some("<span>tail</span>")),
-        ("<frameset>a</frameset><frameset>b</frameset>", Some("<html><frameset>a</frameset><frameset>b</frameset></html>")),
-        ("<p>x</p><frameset>y</frameset>", Some("<div><p>x</p><frameset>y</frameset></div>")),
-        ("<head>a<title>t</title>b</head>", Some("<html><head></head><body>a<title>t</title>b</body></html>")),
-        ("<head></head><p>x</p>", Some("<html><head></head><body><p>x</p></body></html>")),
-        ("<body><p>x</p><p>y</p></body>", Some("<div><p>x</p><p>y</p></div>")),
-        ("<body>text</body>", Some("<span>text</span>")),
-        ("<body class=x><p>y</p></body>", Some("<p>y</p>")),
-        ("<body>x</body> tail", Some("<span>x</span> tail")),
-        ("<html><head><title>t</title></head></html>", Some("<html><head><title>t</title></head></html>")),
-        ("<html><body class=x><p>y</p></body></html>", Some("<html><body class=\"x\"><p>y</p></body></html>")),
-        ("<title>t</title><head><title>u</title></head>", Some("<html><head><title>t</title><title>u</title></head></html>")),
-        ("tail <frameset>a</frameset>", Some("<span>tail <frameset>a</frameset></span>")),
-        ("<frameset>a</frameset><p>x</p>", Some("<p>x</p>")),
-        ("<head> <title>t</title> </head>", Some("<html><head> <title>t</title> </head></html>")),
-        ("head <body>x</body>", Some("<span>head x</span>")),
-        ("<body><p>x</p></body><p>y</p>", Some("<p>x</p>")),
-        ("<html class=x><p>y</p></html>", Some("<html class=\"x\"><body><p>y</p></body></html>")),
-        ("<html>text<p>x</p></html>", Some("<html><body>text<p>x</p></body></html>")),
-        ("<title>t</title><head>a<title>u</title></head>", Some("<html><head><title>t</title></head><body>a<title>u</title></body></html>")),
-        ("<script>s</script> tail <p>x</p>", Some("<html><head><script>s</script> </head><body>tail <p>x</p></body></html>")),
-        ("<p>x</p> tail <p>y</p>", Some("<div><p>x</p> tail <p>y</p></div>")),
-        ("<b>x</b><b>y</b>tail", Some("<span><b>x</b><b>y</b>tail</span>")),
-        ("a  <b>x</b>  b", Some("<span>a  <b>x</b>  b</span>")),
-        ("<body><b>x</b></body>tail", Some("<b>x</b>")),
-        ("<title>t</title><frameset>f</frameset>", Some("<html><head><title>t</title></head><frameset>f</frameset></html>")),
-        ("<frameset>f</frameset><title>t</title>", Some("<html><frameset>f</frameset><head><title>t</title></head></html>")),
-        ("<body><b>x</b></body>  ", Some("<b>x</b>")),
-        ("<frameset>f</frameset>  ", Some("<html><frameset>f</frameset>  </html>")),
-        ("<title>t</title><frameset>f</frameset><p>x</p>", Some("<html><head><title>t</title></head><frameset>f</frameset><body><p>x</p></body></html>")),
-        ("<title>a</title> <title>b</title>", Some("<html><head><title>a</title> <title>b</title></head></html>")),
-        ("<p>x</p><head><title>t</title></head>", Some("<div><p>x</p><title>t</title></div>")),
-        ("<title>t</title><body><p>x</p></body>", Some("<html><head><title>t</title></head><body><p>x</p></body></html>")),
-        ("<title>t</title><body><p>x</p></body> tail", Some("<html><head><title>t</title></head><body><p>x</p></body> tail</html>")),
-        ("<title>t</title>pre<body>x</body>", Some("<html><head><title>t</title></head><body>prex</body></html>")),
-        ("<body><p>x</p></body><body><p>y</p></body>", Some("<div><p>x</p><p>y</p></div>")),
-        ("  a<b>x</b>", Some("<span>a<b>x</b></span>")),
-        ("  a", Some("<span>a</span>")),
-        ("\t\na<b>x</b>", Some("<span>a<b>x</b></span>")),
-        ("  <b>x</b>tail", Some("<span><b>x</b>tail</span>")),
-        (" a<b>x</b>", Some("<span> a<b>x</b></span>")),
-        ("<html><p>x</p></html> tail", Some("<html><body><p>x</p></body></html>")),
-        ("<html><p>x</p></html><p>y</p>", Some("<html><body><p>x</p></body></html>")),
-        ("text <html><p>x</p></html>", Some("<div>text <p>x</p></div>")),
-        ("<!DOCTYPE html>", None),
-        ("<!DOCTYPE html> tail", Some("<html><body>tail</body></html>")),
-        ("<html></html>", Some("<html></html>")),
-        ("<html>  </html>", Some("<html>  </html>")),
-        ("&#x0;", Some("<span>�</span>")),
-        ("&#xD800;", Some("<span>�</span>")),
-        ("&#xDFFF;", Some("<span>�</span>")),
-        ("&#x110000;", Some("<span>�</span>")),
-        ("&#xFFFE;", Some("<span>￾</span>")),
-        ("&#xFFFF;", Some("<span>￿</span>")),
-        ("&#x80;", Some("<span>€</span>")),
-        ("&#x9F;", Some("<span>Ÿ</span>")),
-        ("&#1;", Some("<span>\u{1}</span>")),
-        ("&#8;", Some("<span>\u{8}</span>")),
-        ("&#11;", Some("<span>\u{B}</span>")),
-        ("&#127;", Some("<span>\u{7F}</span>")),
-        ("&#255;", Some("<span>ÿ</span>")),
-        ("&#X41;", Some("<span>A</span>")),
-        ("&#x00041;", Some("<span>A</span>")),
-        ("&#00065;", Some("<span>A</span>")),
-        ("&#;", Some("<span>&amp;#;</span>")),
-        ("&#x;", Some("<span>&amp;#x;</span>")),
-        ("&#99999999;", Some("<span>�</span>")),
-        ("&#x81;", Some("<span></span>")),
-        ("&#x8D;", Some("<span></span>")),
-        ("&#x90;", Some("<span></span>")),
-        ("&#x9D;", Some("<span></span>")),
-        ("&#x82;", Some("<span>‚</span>")),
-        ("&#133;", Some("<span>…</span>")),
-        ("&#13;", None),
-        ("&#xD;", None),
-        ("&lt;script&gt;alert(1)&lt;/script&gt;", Some("<span>&lt;script&gt;alert(1)&lt;/script&gt;</span>")),
-        ("<p><strong>b</strong> <em>i</em> <s>s</s> <code>c</code></p>", Some("<p><strong>b</strong> <em>i</em> <s>s</s> <code>c</code></p>")),
-        ("<ul data-type=\"taskList\"><li data-type=\"taskItem\" data-checked=\"true\"><label><input type=\"checkbox\" checked=\"checked\"><span></span></label><div><p>done</p></div></li></ul>", Some("<ul data-type=\"taskList\"><li data-type=\"taskItem\" data-checked=\"true\"><label><input type=\"checkbox\" checked><span></span></label><div><p>done</p></div></li></ul>")),
-        ("<table><tbody><tr><th><p>A</p></th></tr></tbody></table>", Some("<table><tbody><tr><th><p>A</p></th></tr></tbody></table>")),
-        ("<blockquote><p>quoted</p></blockquote>", Some("<blockquote><p>quoted</p></blockquote>")),
-        ("<ol start=\"3\"><li><p>a</p></li></ol>", Some("<ol start=\"3\"><li><p>a</p></li></ol>")),
-        ("<pre><code class=\"language-python\">x</code></pre>", Some("<pre><code class=\"language-python\">x</code></pre>")),
-        ("<p>a<br>b</p>", Some("<p>a<br>b</p>")),
-        ("&#0;", Some("<span>�</span>")),
-        ("&#xD800;", Some("<span>�</span>")),
-        ("&AMP;", Some("<span>&amp;</span>")),
-        ("&notin;", Some("<span>∉</span>")),
-        ("<p data-x=\"1\" data-y='2'>t</p>", Some("<p data-x=\"1\" data-y=\"2\">t</p>")),
-        ("<a href=\"/rel/path?q=1&r=2\">t</a>", Some("<a href=\"/rel/path?q=1&amp;r=2\">t</a>")),
-        ("<title>t</title><body><p>x</p></body> tail", Some("<html><head><title>t</title></head><body><p>x</p></body> tail</html>")),
-        ("<title>t</title><body></body> tail", Some("<html><head><title>t</title></head><body></body> tail</html>")),
-        ("<title>t</title><body> </body> tail", Some("<html><head><title>t</title></head><body> </body> tail</html>")),
-        ("<frameset>f</frameset><body>x</body> tail", Some("<span>x</span> tail")),
-        ("<title>t</title><body>x</body>   ", Some("<html><head><title>t</title></head><body>x</body>   </html>")),
-        ("<head><title>t</title></head><body>x</body> tail", Some("<html><head><title>t</title></head><body>x</body> tail</html>")),
-        ("<body>x</body> tail", Some("<span>x</span> tail")),
-        ("<title>t</title>mid<body>x</body> tail", Some("<html><head><title>t</title></head><body>midx tail</body></html>")),
-        ("<title>t</title><body>x</body><body>y</body> tail", Some("<html><head><title>t</title></head><body>xy</body> tail</html>")),
-        ("<title>t</title><body>x</body><p>y</p>", Some("<html><head><title>t</title></head><body>x</body><p>y</p></html>")),
-        ("<title>t</title><body>x</body><p>y</p> tail", Some("<html><head><title>t</title></head><body>x</body><p>y</p> tail</html>")),
-        ("<title>x</title>tail", Some("<html><head><title>x</title></head><body>tail</body></html>")),
-        ("<title>t</title><body>x", Some("<html><head><title>t</title></head><body>x</body></html>")),
-        ("pre<title>t</title><body>x</body> tail", Some("<span>pre<title>t</title>x tail</span>")),
-        ("<title>t</title><b>m</b><body>x</body> tail", Some("<html><head><title>t</title></head><body><b>m</b>x tail</body></html>")),
-        ("<title>t</title>\u{C}<body>x</body> tail", Some("<html><head><title>t</title>\u{C}</head><body>x</body> tail</html>")),
-        ("<title>t</title>\u{B}<body>x</body> tail", Some("<html><head><title>t</title></head><body>\u{B}x tail</body></html>")),
-        ("<title>t</title> <body>x</body> tail", Some("<html><head><title>t</title></head><body> x tail</body></html>")),
-        ("<title>t</title><body>x</body>mid<body>y</body> tail", Some("<html><head><title>t</title></head><body>xy</body>mid tail</html>")),
-        ("<title>t</title><body>x</body><body>y</body><body>z</body> tail", Some("<html><head><title>t</title></head><body>xyz</body> tail</html>")),
-        ("<title>t</title>mid<body>x</body><p>y</p>", Some("<html><head><title>t</title></head><body>midx<p>y</p></body></html>")),
-        ("<title>t</title>mid<body class=c>x</body>", Some("<html><head><title>t</title></head><body>midx</body></html>")),
-        ("<title>t</title><body class=c>x</body> tail", Some("<html><head><title>t</title></head><body class=\"c\">x</body> tail</html>")),
-        ("<title>t</title><body class=a>x</body><body class=b>y</body> tail", Some("<html><head><title>t</title></head><body class=\"a\">xy</body> tail</html>")),
-        ("<title>t</title><body>x</body>t2<p>y</p> tail", Some("<html><head><title>t</title></head><body>x</body>t2<p>y</p> tail</html>")),
-        ("<title>t</title>mid1<body>x</body>mid2<body>y</body> tail", Some("<html><head><title>t</title></head><body>mid1xmid2y tail</body></html>")),
-        ("<title>t</title>mid<body>x</body>", Some("<html><head><title>t</title></head><body>midx</body></html>")),
-        ("<title>t</title><body>x</body><title>u</title>", Some("<html><head><title>t</title></head><body>x</body><title>u</title></html>")),
-        ("<title>t</title><body>x</body><head><title>u</title></head>", Some("<html><head><title>t</title><title>u</title></head><body>x</body></html>")),
-        ("mid<body>x</body> tail", Some("<span>midx tail</span>")),
-        ("<b>m</b><body>x</body> tail", Some("<span><b>m</b>x tail</span>")),
-        ("<b>m</b><body>x</body><p>y</p>", Some("<div><b>m</b>x<p>y</p></div>")),
-        ("mid<body>x</body><p>y</p>", Some("<div>midx<p>y</p></div>")),
-        ("<body>x</body><body>y</body> tail", Some("<span>xy</span> tail")),
-        ("<body>x</body>mid<body>y</body> tail", Some("<span>xy</span>mid tail")),
-        ("<body>x</body><body>y</body><body>z</body> tail", Some("<span>xyz</span> tail")),
-        ("\u{C}<body>x</body> tail", Some("<span>x</span> tail")),
-        (" <body>x</body> tail", Some("<span> x tail</span>")),
-        ("<body class=c>x</body> tail", Some("<span class=\"c\">x</span> tail")),
-        ("mid1<body>x</body>mid2<body>y</body> tail", Some("<span>mid1xmid2y tail</span>")),
-        ("<body>x</body>t2<p>y</p> tail", Some("<span>x</span>t2")),
-        ("<html><title>t</title><body>x</body> tail</html>", Some("<html><head><title>t</title></head><body>x</body> tail</html>")),
-        ("<html><title>t</title>mid<body>x</body> tail</html>", Some("<html><head><title>t</title></head><body>midx tail</body></html>")),
-        ("<html><body>x</body><body>y</body> tail</html>", Some("<html><body>x</body><body>y</body> tail</html>")),
-        ("<html><body>x</body><p>y</p></html>", Some("<html><body>x</body><p>y</p></html>")),
-        ("<!DOCTYPE html><title>t</title><body>x</body> tail", Some("<html><head><title>t</title></head><body>x</body> tail</html>")),
-        ("<html>mid<body>x</body> tail</html>", Some("<html><body>midx tail</body></html>")),
-        ("<html><body>x</body></html> tail", Some("<html><body>x</body></html>")),
-        ("<body class=c><p>x</p></body>", Some("<p>x</p>")),
-        ("<body><p>x</p>t</body>", Some("<div><p>x</p>t</div>")),
-        ("<body><b>x</b><i>y</i></body>", Some("<span><b>x</b><i>y</i></span>")),
-        ("<body class=c><p>x</p>t</body>", Some("<div class=\"c\"><p>x</p>t</div>")),
-        ("<body class=a>x</body><body class=b>y</body> tail", Some("<span class=\"a\">xy</span> tail")),
-        ("mid<body class=c>x</body> tail", Some("<span>midx tail</span>")),
-        ("<body>x</body>m1<body>y</body>m2<body>z</body> tail", Some("<span>xyz</span>m1m2 tail")),
-        ("<title>t</title><body>x</body>m1<body>y</body>m2<body>z</body> tail", Some("<html><head><title>t</title></head><body>xyz</body>m1m2 tail</html>")),
-        ("<body>x</body>", Some("<span>x</span>")),
-        ("<body></body> tail", Some("<span></span> tail")),
-        ("<body> </body> tail", Some("<span> </span> tail")),
-        ("<title>t</title><body></body>", Some("<html><head><title>t</title></head><body></body></html>")),
-        ("<title>t</title><body>x</body><p>p</p><body>y</body> tail", Some("<html><head><title>t</title></head><body>xy</body><p>p</p> tail</html>")),
-        ("<body><p>x</p></body> tail", Some("<p>x</p>")),
-        ("<body>x</body>t2<b>y</b>t3", Some("<span>x</span>t2")),
-        ("<body>x</body><b>y</b>t3", Some("<span>x</span>")),
-        ("<body>x</body><p>p</p><body>y</body> tail", Some("<span>xy</span>")),
-        ("<title>t</title><body><body>x</body></body> tail", Some("<html><head><title>t</title></head><body>x</body> tail</html>")),
-        ("<body><body>x</body></body> tail", Some("<span>x</span> tail")),
-        ("<div><body>x</body></div>", Some("<div>x</div>")),
-        ("<div>mid<body>x</body> tail</div>", Some("<div>midx tail</div>")),
-        ("<title>t</title><body>x</body><head>u</head>", Some("<html><head><title>t</title></head><body>x</body>u</html>")),
-        ("<title>t</title>mid<body>x</body><head><title>u</title></head>", Some("<html><head><title>t</title></head><body>midx<title>u</title></body></html>")),
-        ("<title>t</title><body>x</body><frameset>f</frameset>", Some("<html><head><title>t</title></head><body>x</body><frameset>f</frameset></html>")),
-        ("<title>t</title>mid<frameset>f</frameset>", Some("<html><head><title>t</title></head><body>mid<frameset>f</frameset></body></html>")),
-        ("<html><title>t</title><body>x</body><head><title>u</title></head></html>", Some("<html><head><title>t</title></head><body>x</body><head><title>u</title></head></html>")),
-        ("<html><body>x</body> tail<p>y</p></html>", Some("<html><body>x</body> tail<p>y</p></html>")),
-        ("<html>mid<body>x</body><body>y</body> tail</html>", Some("<html><body>midxy tail</body></html>")),
-        ("<html>  <body>x</body></html>", Some("<html>  <body>x</body></html>")),
-        ("<html><body class=c>x</body> tail</html>", Some("<html><body class=\"c\">x</body> tail</html>")),
-        (" <title>t</title>", Some("<title>t</title>")),
-        ("\u{B}<title>t</title>", Some("<title>t</title>")),
-        ("\u{C}<title>t</title>", Some("<html><head><title>t</title></head></html>")),
-        (" <b>x</b>", Some("<b>x</b>")),
-        ("\u{B}<b>x</b>", Some("<b>x</b>")),
-        ("\u{C}<b>x</b>", Some("<b>x</b>")),
-        ("<b>x</b> ", Some("<b>x</b> ")),
-        ("<b>x</b>\u{B}", Some("<b>x</b>\u{B}")),
-        (" <b>x</b> tail", Some("<span> <b>x</b> tail</span>")),
-        (" <b>x</b> tail", Some("<span><b>x</b> tail</span>")),
-        ("<body>mid<p>x</p></body>", Some("<div>mid<p>x</p></div>")),
-        ("<body><body class=c>x</body></body>", Some("<span>x</span>")),
-        ("<body>x<body>y</body>z</body>", Some("<span>xyz</span>")),
-        ("<head><div><body>x</body></div></head>", Some("<html><head></head><body><div>x</div></body></html>")),
-        ("<title>t</title>mid<head><body>x</body></head>", Some("<html><head><title>t</title></head><body>midx</body></html>")),
-        ("<head><title>t</title><body class=c>x</body></head>", Some("<html><head><title>t</title></head><body class=\"c\">x</body></html>")),
-        ("<title>t</title><body>x</body><head> <title>u</title> </head>", Some("<html><head><title>t</title><title>u</title> </head><body>x</body></html>")),
-        ("<head>a<title>u</title>b</head>", Some("<html><head></head><body>a<title>u</title>b</body></html>")),
-        ("<head> <title>u</title></head>", Some("<html><head> <title>u</title></head></html>")),
-        ("<title>t</title>  mid", Some("<html><head><title>t</title>  </head><body>mid</body></html>")),
-        ("\u{C} <body>  x</body>", Some("<span>  x</span>")),
-        ("<body>x</body><p>p</p>t2<body>y</body> tail", Some("<span>xy</span>")),
-        ("<noframes><body>x</body></noframes>", Some("<html><noframes>&lt;body&gt;x&lt;/body&gt;</noframes></html>")),
-        ("<html><frameset>f</frameset><body>x</body></html>", Some("<html><frameset>f</frameset><body>x</body></html>")),
-        ("<html><frameset>f</frameset><p>x</p></html>", Some("<html><frameset>f</frameset><body><p>x</p></body></html>")),
-        ("<!DOCTYPE html><frameset>f</frameset><p>x</p>", Some("<html><frameset>f</frameset><body><p>x</p></body></html>")),
-        ("<html><body>x</body><title>u</title></html>", Some("<html><body>x</body><title>u</title></html>")),
-        ("<html><body>x</body><frameset>f</frameset></html>", Some("<html><body>x</body><frameset>f</frameset></html>")),
-        ("<html><title>t</title>  <body>x</body></html>", Some("<html><head><title>t</title>  </head><body>x</body></html>")),
-        ("<head>x</head>  <p>y</p>", Some("<html><head></head><body>x  <p>y</p></body></html>")),
-        ("<title>t</title><body>x</body>t1<head>a</head>t2", Some("<html><head><title>t</title></head><body>x</body>t1at2</html>")),
-        ("<body>x</body>t1<p>p</p>t2<body>y</body>t3", Some("<span>xy</span>t1")),
-        ("<frameset>f</frameset><body>x</body>t1<p>p</p> tail", Some("<span>x</span>t1")),
-        ("<div><body class=c>x</body></div>", Some("<div>x</div>")),
-        ("<body><div><body class=c>x</body></div></body>", Some("<div>x</div>")),
-        ("<title>t</title><head><body>x</body></head>", Some("<html><head><title>t</title></head><body>x</body></html>")),
-        ("<b>x</b>a", Some("<span><b>x</b>a</span>")),
-        (" <b>x</b> ", Some("<b>x</b> ")),
-        ("<b>x</b>   tail   ", Some("<span><b>x</b>   tail   </span>")),
-        ("<frameset>a</frameset><frameset>b</frameset>", Some("<html><frameset>a</frameset><frameset>b</frameset></html>")),
-        ("<title>t</title><head> <title>u</title></head><body>x</body>", Some("<html><head><title>t</title> <title>u</title></head><body>x</body></html>")),
-        ("<title>t</title><head>a<title>u</title></head><body>x</body>", Some("<html><head><title>t</title></head><body>a<title>u</title>x</body></html>")),
-        ("<head><title>t</title>mid<p>x</p></head>", Some("<html><head><title>t</title></head><body>mid<p>x</p></body></html>")),
-        ("<head><title>t</title><div>x</div></head>", Some("<html><head><title>t</title></head><body><div>x</div></body></html>")),
-        ("<head><frameset>f</frameset></head>", Some("<html><head></head><frameset>f</frameset></html>")),
-        ("<head> <title>u</title></head>", Some("<html><head></head><body> <title>u</title></body></html>")),
-        ("<title>t</title><frameset>f</frameset><p>x</p>", Some("<html><head><title>t</title></head><frameset>f</frameset><body><p>x</p></body></html>")),
-        ("<html><p>x</p><frameset>f</frameset></html>", Some("<html><body><p>x</p><frameset>f</frameset></body></html>")),
-        ("<iframe><b>x</b></iframe>", Some("<iframe>&lt;b&gt;x&lt;/b&gt;</iframe>")),
-        ("<noscript><b>x</b></noscript>", Some("<noscript><b>x</b></noscript>")),
-        ("<div><noframes><b>x</b></noframes></div>", Some("<div><noframes>&lt;b&gt;x&lt;/b&gt;</noframes></div>")),
-        ("<noframes>x", Some("<html><noframes>x</noframes></html>")),
-        ("<title>t</title><body>x</body><head>  <title>u</title>  <title>v</title>  </head>", Some("<html><head><title>t</title><title>u</title>  <title>v</title>  </head><body>x</body></html>")),
-        ("<title>t</title><body>x</body><head>   </head>", Some("<html><head><title>t</title></head><body>x</body></html>")),
-        ("<title>t</title><body>x</body><head></head>", Some("<html><head><title>t</title></head><body>x</body></html>")),
-        ("<title>t</title><body>x</body><head> <title>u</title></head>", Some("<html><head><title>t</title></head><body>x</body> <title>u</title></html>")),
-        ("<body> <p>x</p></body> tail", Some("<p>x</p>")),
-        ("<body><p>x</p>t</body> tail", Some("<div><p>x</p>t</div> tail")),
-        ("<head><head><title>u</title></head></head>", Some("<html><head><title>u</title></head></html>")),
-        ("<title>t</title><frameset>f</frameset><body>x</body> tail", Some("<html><head><title>t</title></head><frameset>f</frameset><body>x</body> tail</html>")),
-        ("<html><title>t</title><frameset>f</frameset><body>x</body></html>", Some("<html><head><title>t</title></head><frameset>f</frameset><body>x</body></html>")),
-        ("<xmp><b>x</b></xmp>", Some("<xmp>&lt;b&gt;x&lt;/b&gt;</xmp>")),
-        ("<plaintext><b>x</b>", Some("<plaintext>&lt;b&gt;x&lt;/b&gt;</plaintext>")),
-        ("<noembed><b>x</b></noembed>", Some("<noembed>&lt;b&gt;x&lt;/b&gt;</noembed>")),
-        ("<listing><b>x</b></listing>", Some("<listing><b>x</b></listing>")),
-        ("<iframe>&amp;</iframe>", Some("<iframe>&amp;amp;</iframe>")),
-        ("<noframes>&amp;</noframes>", Some("<html><noframes>&amp;amp;</noframes></html>")),
-        ("<title>t</title><body>x</body><head><title>u</title>b</head>", Some("<html><head><title>t</title><title>u</title></head><body>x</body>b</html>")),
-        ("<title>t</title><body>x</body><head><title>u</title>b<title>v</title></head>", Some("<html><head><title>t</title><title>u</title></head><body>x</body>b<title>v</title></html>")),
-        ("<frameset>f</frameset><body>x</body><head><title>u</title></head>", Some("<html><frameset>f</frameset><body>x</body><head><title>u</title></head></html>")),
-        ("<frameset>f</frameset><head><title>u</title></head><body>x</body>", Some("<html><frameset>f</frameset><head><title>u</title></head><body>x</body></html>")),
-        ("<frameset>f</frameset><body>x</body>t1<head><title>u</title></head>", Some("<html><frameset>f</frameset><body>x</body>t1<head><title>u</title></head></html>")),
-        ("<head><title>t</title><div>x</div><title>u</title></head>", Some("<html><head><title>t</title></head><body><div>x</div><title>u</title></body></html>")),
-        ("<noframes><noframes>x</noframes></noframes>", Some("<html><noframes>&lt;noframes&gt;x</noframes></html>")),
-        ("<iframe>x", Some("<iframe>x</iframe>")),
-        ("<body><p>x</p><p>y</p></body> tail", Some("<div><p>x</p><p>y</p></div> tail")),
-        ("<title>t</title><body>x</body><frame src=f>", Some("<html><head><title>t</title></head><body>x</body><frame src=\"f\"></html>")),
-        ("<frame src=f><body>x</body> tail", Some("<span>x</span> tail")),
-        ("<head></head><body>x</body><head><title>u</title></head>", Some("<html><head><title>u</title></head><body>x</body></html>")),
-        ("<title>t</title><body>x</body><head>\u{C}<title>u</title></head>", Some("<html><head><title>t</title><title>u</title></head><body>x</body></html>")),
-        ("<head>\u{B}<title>u</title></head>", Some("<html><head></head><body>\u{B}<title>u</title></body></html>")),
-        ("<iframe><iframe>x</iframe></iframe>", Some("<iframe>&lt;iframe&gt;x</iframe>")),
-        ("<plaintext>x", Some("<plaintext>x</plaintext>")),
-        ("<title>t</title><body>x</body><head><title>u</title>\u{C}b<title>v</title></head>", Some("<html><head><title>t</title><title>u</title>\u{C}</head><body>x</body>b<title>v</title></html>")),
-        ("<script>a<b&c>d</script>", Some("<html><head><script>a<b&c>d</script></head></html>")),
-        ("<style>a>b&c</style>", Some("<html><head><style>a>b&c</style></head></html>")),
-        ("<title>a<b&c</title>", Some("<html><head><title>a&lt;b&amp;c</title></head></html>")),
-        ("<textarea>a<b&c</textarea>", Some("<textarea>a&lt;b&amp;c</textarea>")),
-        ("<iframe>a<b&c>d</iframe>", Some("<iframe>a&lt;b&amp;c&gt;d</iframe>")),
-        ("<xmp>a<b</xmp>", Some("<xmp>a&lt;b</xmp>")),
-        ("<script>a</b>x</script>", Some("<html><head><script>a</b>x</script></head></html>")),
-        ("<title>t</title><script>a<b</script><body>x</body>", Some("<html><head><title>t</title><script>a<b</script></head><body>x</body></html>")),
-        ("<body>mid<p>x</p></body> tail", Some("<div>mid<p>x</p></div> tail")),
-        ("<head><title>t</title>mid</head>", Some("<html><head><title>t</title></head><body>mid</body></html>")),
-        ("<head>mid<title>u</title></head>", Some("<html><head></head><body>mid<title>u</title></body></html>")),
-        ("<head><title>t</title>\u{C}mid</head>", Some("<html><head><title>t</title>\u{C}</head><body>mid</body></html>")),
-        ("<body><title>u</title></body>", Some("<title>u</title>")),
-        ("<div><body>x</body></div><body>y</body> tail", Some("<div><div>x</div>y tail</div>")),
-        ("<head><frame src=f></head>", Some("<html><head><frame src=\"f\"></head></html>")),
-        ("<head><noframes>x</noframes></head>", Some("<html><head><noframes>x</noframes></head></html>")),
-        ("<head><head>mid</head></head>", Some("<html><head></head><body>mid</body></html>")),
-        ("<frameset><div><body>x</body></div></frameset>", Some("<html><frameset><body><div>x</div></body></frameset></html>")),
-        ("<body><frameset><body>x</body></frameset></body>", Some("<frameset>x</frameset>")),
-        ("<title>t</title><body>x</body><head><title>u</title>b<title>v</title>tail2</head> tail", Some("<html><head><title>t</title><title>u</title></head><body>x</body>b<title>v</title>tail2 tail</html>")),
-        ("<html>mid<body>x</body><head><title>u</title></head></html>", Some("<html><body>midx<title>u</title></body></html>")),
-        ("<html><title>t</title>mid<body>x</body></html>", Some("<html><head><title>t</title></head><body>midx</body></html>")),
-        ("<html>  <title>t</title></html>", Some("<html>  <head><title>t</title></head></html>")),
-        ("<title>t</title>", Some("<title>t</title>")),
-        ("<body><p>x</p><div>y</div></body>", Some("<div><p>x</p><div>y</div></div>")),
-        ("<body class=c><b>x</b><i>y</i></body> tail", Some("<span class=\"c\"><b>x</b><i>y</i></span> tail")),
-        ("  mid<body>x</body> tail", Some("<span>midx tail</span>")),
-        ("<title>t</title>mid1<body>x</body>mid2<body>y</body>tail2<p>z</p>", Some("<html><head><title>t</title></head><body>mid1xmid2ytail2<p>z</p></body></html>")),
-        ("<head>x</head><body>y</body> tail", Some("<html><head></head><body>xy tail</body></html>")),
-        ("<TITLE>t</TITLE><BODY>x</BODY> tail", Some("<html><head><title>t</title></head><body>x</body> tail</html>")),
-        ("<Body Class=C>x</Body> tail", Some("<span class=\"C\">x</span> tail")),
-        ("<body><body><body>x</body></body></body>", Some("<span>x</span>")),
-        ("<p><body>x</body></p>", Some("<div><p></p>x</div>")),
-        ("<table><body>x</body></table>", Some("<table>x</table>")),
-        ("<select><body>x</body></select>", Some("<select>x</select>")),
-        ("<title>t</title><body>x</body><!--c--> tail", Some("<html><head><title>t</title></head><body>x</body><!--c--> tail</html>")),
-        ("<body>x</body><!--c--> tail", Some("<span>x</span>")),
-        ("<head><!--c--><title>u</title></head>", Some("<html><head><!--c--><title>u</title></head></html>")),
-        ("<title>t</title><!--c--><body>x</body>", Some("<html><head><title>t</title><!--c--></head><body>x</body></html>")),
-        ("a<!--c--><body>x</body> tail", Some("<span>a<!--c-->x tail</span>")),
-        ("a<!--->x-->b", Some("<span>a<!---->x--&gt;b</span>")),
-        ("a<!-->-->b", Some("<span>a<!---->--&gt;b</span>")),
-        ("a<!-- >b", Some("<span>a<!-- >b--></span>")),
-        ("a<?foo", Some("<span>a<!--?foo--></span>")),
-        ("a<!foo", Some("<span>a<!--foo--></span>")),
-        ("<?a?>b?>", Some("<span>b?&gt;</span>")),
-        ("a<!doctypx>b", Some("<span>a<!--doctypx-->b</span>")),
-        ("a<!DOCTYPEfoo>b", Some("<span>ab</span>")),
-        ("x<!--c--><div>y</div>", Some("<div>x<!--c--><div>y</div></div>")),
-        ("<head><title>t</title></head><head><!--c--><title>u</title></head>", Some("<html><head><title>t</title><!--c--><title>u</title></head></html>")),
-        ("<body>x</body><head><!--c--><title>u</title></head>", Some("<html><body>x</body><head><!--c--><title>u</title></head></html>")),
-        ("<head><title>t</title></head><head>  <!--c--><title>u</title></head>", Some("<html><head><title>t</title><!--c--><title>u</title></head></html>")),
-        ("<div>x</div><!--c--><!--d-->", Some("<div><div>x</div><!--c--><!--d--></div>")),
-        ("a<!--b", Some("<span>a<!--b--></span>")),
-        ("<!--a-->x<!--b-->", Some("<span>x<!--b--></span>")),
-        ("<title>t</title><!--c--><frameset>f</frameset>", Some("<html><head><title>t</title><!--c--></head><frameset>f</frameset></html>")),
-        ("<frameset>f</frameset><!--c-->tail", Some("<span>tail</span>")),
-        ("<html><!--c--><frameset>f</frameset></html>", Some("<html><!--c--><frameset>f</frameset></html>")),
-        ("<head><title>t</title></head><head><!--c-->  <title>u</title></head>", Some("<html><head><title>t</title><!--c-->  <title>u</title></head></html>")),
-        ("<body><p>x</p><!--c--></body>", Some("<div><p>x</p><!--c--></div>")),
-        ("<!--c-->", None),
-        ("  <!--c-->", None),
-        ("<!--c-->  ", None),
-        ("<body>a<!--c-->b</body>", Some("<span>a<!--c-->b</span>")),
-        ("<body><!--a--><p>x</p><!--b--></body>", Some("<div><!--a--><p>x</p><!--b--></div>")),
-        ("<p>x</p><!--c-->", Some("<div><p>x</p><!--c--></div>")),
-        ("<!--c--><p>x</p>", Some("<p>x</p>")),
-        ("a<!--b-->c", Some("<span>a<!--b-->c</span>")),
-        ("<!--a--><!--b-->", None),
-        ("  <!--c-->  a", Some("<span>a</span>")),
-        ("<!--c-->  a", Some("<span>a</span>")),
-        ("  <!--c-->a", Some("<span>a</span>")),
-        ("<body><!--c--><p>x</p></body>", Some("<div><!--c--><p>x</p></div>")),
-        ("<head><!--c-->x</head>", Some("<html><head><!--c--></head><body>x</body></html>")),
-        ("<head><!--c-->x<title>t</title></head>", Some("<html><head><!--c--></head><body>x<title>t</title></body></html>")),
-        ("<body><p>x</p></body><!--c-->", Some("<p>x</p>")),
-        ("<html>  <!--c--><body>x</body></html>", Some("<html>  <!--c--><body>x</body></html>")),
-        ("a<!", Some("<span>a<!----></span>")),
-        ("a<?", Some("<span>a<!--?--></span>")),
-        ("<!>", None),
-        ("<?a>", None),
-        ("<!---->", None),
-        ("<!-->", None),
-        ("text<!--c-->", Some("<span>text<!--c--></span>")),
-        ("<head></head>", Some("<html><head></head></html>")),
-        ("<head>  </head>", Some("<html><head>  </head></html>")),
-        ("<head><div><!--c--></div></head>", Some("<html><head></head><body><div><!--c--></div></body></html>")),
-        ("<head>  <!--c--></head>", Some("<html><head>  <!--c--></head></html>")),
-        ("<head><!--c--></head>", Some("<html><head><!--c--></head></html>")),
-        ("<p>x</p><head><!--c--></head>", Some("<div><p>x</p><!--c--></div>")),
-        ("<head><!--c--><title>t</title></head>", Some("<html><head><!--c--><title>t</title></head></html>")),
-        ("<body>x</body><!--c--><head><title>t</title></head>", Some("<html><body>x</body><!--c--><head><title>t</title></head></html>")),
-        ("</head><!--c--><p>x</p>", Some("<p>x</p>")),
-        ("<!--c--><body>x</body>", Some("<span>x</span>")),
-        ("  <!--c--><body>x</body>", Some("<span>x</span>")),
-        ("<body><!--c--></body>", Some("<!--c-->")),
-        ("<title>t</title><!--c-->", Some("<html><head><title>t</title><!--c--></head></html>")),
-        ("<body><!--a--><!--b--></body>", Some("<span><!--a--><!--b--></span>")),
-        ("<body>  <!--c-->  </body>", Some("<!--c-->  ")),
-        ("<body><!--c--></body> tail", Some("<!--c-->")),
-        ("<body> <!--c--></body>", Some("<!--c-->")),
-        ("<body><!--c--> </body>", Some("<!--c--> ")),
-        ("<body>x<!--c--></body>", Some("<span>x<!--c--></span>")),
-        ("<body><!--c-->x</body>", Some("<span><!--c-->x</span>")),
-        ("<html>  <!--c--></html>", Some("<html>  <!--c--></html>")),
-        ("a<!--", Some("<span>a<!----></span>")),
-        ("a<!--x--!>b", Some("<span>a<!--x-->b</span>")),
-        ("<html><!--c--></html>", Some("<html><!--c--></html>")),
-        ("<!DOCTYPE html><!--c-->", None),
-        ("a<!--x--!>y-->b", Some("<span>a<!--x-->y--&gt;b</span>")),
-        ("a<!--x-->y--!>b", Some("<span>a<!--x-->y--!&gt;b</span>")),
-        ("a<!--x--!!>b", Some("<span>a<!--x--!!>b--></span>")),
-        ("a<!--!>b", Some("<span>a<!--!>b--></span>")),
-        ("a<!--!>", Some("<span>a<!--!>--></span>")),
-        ("<!--!>", None),
-        ("a<!--x--->y-->b", Some("<span>a<!--x--->y--&gt;b</span>")),
-        ("<body>&amp;</body>", Some("<span>&amp;</span>")),
-        ("<frameset>f</frameset><body class=c>x</body>", Some("<span class=\"c\">x</span>")),
-        ("<frameset>f</frameset><body> </body> tail", Some("<span> </span> tail")),
-        ("<frameset>f</frameset><body>  x</body>", Some("<span>  x</span>")),
-        ("<head><frameset>f</frameset><p>x</p></head>", Some("<html><head></head><frameset>f</frameset><body><p>x</p></body></html>")),
-        (" <html>  <p>x</p></html>", Some("<html><body>   <p>x</p></body></html>")),
-        (" <html><title>t</title></html>", Some("<html><body> <title>t</title></body></html>")),
-        ("<html><body></body></html>", Some("<html><body></body></html>")),
-        ("<html><body></body><body></body></html>", Some("<html><body></body><body></body></html>")),
-        ("<body><p>x</p></body><body>y</body>", Some("<div><p>x</p>y</div>")),
-        ("<title>t</title><head><head><title>u</title></head></head><body>x</body>", Some("<html><head><title>t</title><title>u</title></head><body>x</body></html>")),
-        ("<head><title>t</title><body>x</body><title>u</title></head>", Some("<html><head><title>t</title></head><body>x</body><title>u</title></html>")),
-        ("<body><head><body>x</body></head></body>", Some("<span>x</span>")),
-        ("<div><head><title>u</title></head></div>", Some("<div><title>u</title></div>")),
-        ("<frameset><head><body>x</body></head></frameset>", Some("<html><frameset><body>x</body></frameset></html>")),
-        ("<title>t</title><body>x</body><head><head><title>u</title></head></head>", Some("<html><head><title>t</title><title>u</title></head><body>x</body></html>")),
-        ("<body>x</body><div><head><title>u</title></head></div>", Some("<span>x</span>")),
-        ("<plaintext>x</plaintext>", Some("<plaintext>x&lt;/plaintext&gt;</plaintext>")),
-        ("<body><plaintext>x</plaintext></body>", Some("<plaintext>x&lt;/plaintext&gt;&lt;/body&gt;</plaintext>")),
-        ("<noembed>x", Some("<noembed>x</noembed>")),
-        ("<xmp>x", Some("<xmp>x</xmp>")),
-        ("<body/>x", Some("<span></span>x")),
-        ("<div><body/>x</div>", Some("<div><div></div>x</div>")),
-        ("<p/>x", Some("<div><p></p>x</div>")),
-        ("<head>   </head><frameset>f</frameset><body>x</body>", Some("<html><head>   </head><frameset>f</frameset><body>x</body></html>")),
-        ("<head><title>t</title></head><head><title>u</title></head><body>x</body>", Some("<html><head><title>t</title><title>u</title></head><body>x</body></html>")),
-        ("<title>t</title><body>x</body><head>a</head><head><title>u</title></head>", Some("<html><head><title>t</title><title>u</title></head><body>x</body>a</html>")),
-        ("<frameset>f</frameset><title>u</title><body>x</body> tail", Some("<html><frameset>f</frameset><head><title>u</title></head><body>x</body> tail</html>")),
-        ("<div><body></body>x</div>", Some("<div>x</div>")),
-        ("<span><body/>x</span>", Some("<span><span></span>x</span>")),
-        ("<body><body/></body>", Some("<span></span>")),
-        ("<head><body/></head>", Some("<html><head></head><body></body></html>")),
-        ("<body/>", Some("<span></span>")),
-        ("<frameset><body/></frameset>", Some("<html><frameset><body></body></frameset></html>")),
-        ("<head><br></head>", Some("<html><head></head><body><br></body></html>")),
-        ("<head><img src=i></head>", Some("<html><head></head><body><img src=\"i\"></body></html>")),
-        ("<head><hr></head>", Some("<html><head></head><body><hr></body></html>")),
-        ("<head><input></head>", Some("<html><head><input></head></html>")),
-        ("<div><body> </body>x</div>", Some("<div> x</div>")),
-        ("<head><div></div></head>", Some("<html><head></head><body><div></div></body></html>")),
-        ("<body><div></div></body>", Some("<div></div>")),
-        ("<div><span><body/>x</span></div>", Some("<div><span></span>x</div>")),
-        ("<div><body class=c/>x</div>", Some("<div>x</div>")),
-        ("<div>a<body/>x</div>", Some("<div><div>a</div>x</div>")),
-        ("<head><select></head>", Some("<html><head><select></select></head></html>")),
-        ("<head><textarea>x</textarea></head>", Some("<html><head><textarea>x</textarea></head></html>")),
-        ("<head><button></head>", Some("<html><head><button></button></head></html>")),
-        ("<head><option></head>", Some("<html><head><option></option></head></html>")),
-        ("<head><isindex></head>", Some("<html><head><isindex></head></html>")),
-        ("<head><basefont></head>", Some("<html><head><basefont></head></html>")),
-        ("<head><bgsound></head>", Some("<html><head><bgsound></bgsound></head></html>")),
-        ("<head><wbr></head>", Some("<html><head><wbr></wbr></head></html>")),
-        ("<head><embed></head>", Some("<html><head><embed></embed></head></html>")),
-        ("<head><source></head>", Some("<html><head><source></source></head></html>")),
-        ("<head><track></head>", Some("<html><head><track></track></head></html>")),
-        ("<head><col></head>", Some("<html><head><col></head></html>")),
-        ("<head><area></head>", Some("<html><head><area></head></html>")),
-        ("<head><param></head>", Some("<html><head><param></head></html>")),
-        ("<head><iframe>x</iframe></head>", Some("<html><head></head><body><iframe>x</iframe></body></html>")),
-        ("<head><noembed>x</noembed></head>", Some("<html><head><noembed>x</noembed></head></html>")),
-        ("<head><xmp>x</xmp></head>", Some("<html><head></head><body><xmp>x</xmp></body></html>")),
-        ("<head><plaintext>x</head>", Some("<html><head><plaintext>x&lt;/head&gt;</plaintext></head></html>")),
-        ("<head><noscript>x</noscript></head>", Some("<html><head><noscript>x</noscript></head></html>")),
-        ("<head><template>x</template></head>", Some("<html><head><template>x</template></head></html>")),
-        ("<head><slot>x</slot></head>", Some("<html><head><slot>x</slot></head></html>")),
-        ("<head><object></head>", Some("<html><head><object></object></head></html>")),
-        ("<head><applet></head>", Some("<html><head><applet></applet></head></html>")),
-        ("<head><marquee></head>", Some("<html><head><marquee></marquee></head></html>")),
-        ("<head><keygen></head>", Some("<html><head><keygen></keygen></head></html>")),
-        ("<head><li></head>", Some("<html><head></head><body><li></body></html>")),
-        ("<head><td></head>", Some("<html><head><td></td></head></html>")),
-        ("<div><head/>x</div>", Some("<div><div></div>x</div>")),
-        ("<head/>", Some("<html><head></head></html>")),
-        ("<head/><title>u</title>", Some("<html><head></head><title>u</title></html>")),
-        ("<head><a>x</a></head>", Some("<html><head></head><body><a>x</a></body></html>")),
-        ("<head><h1>x</h1></head>", Some("<html><head></head><body><h1>x</h1></body></html>")),
-        ("<head><ul>x</ul></head>", Some("<html><head></head><body><ul>x</ul></body></html>")),
-        ("<head><table>x</table></head>", Some("<html><head></head><body><table>x</table></body></html>")),
-        ("<head><form>x</form></head>", Some("<html><head></head><body><form>x</form></body></html>")),
-        ("<head><custom-tag>x</custom-tag></head>", Some("<html><head><custom-tag>x</custom-tag></head></html>")),
-        ("<head><b>x</head>", Some("<html><head></head><body><b>x</b></body></html>")),
-        ("<head><i>x</head>", Some("<html><head></head><body><i>x</i></body></html>")),
-        ("<head><span>x</head>", Some("<html><head></head><body><span>x</span></body></html>")),
-        ("<head><h2>x</head>", Some("<html><head></head><body><h2>x</h2></body></html>")),
-        ("<head><ol>x</head>", Some("<html><head></head><body><ol>x</ol></body></html>")),
-        ("<head><em>x</head>", Some("<html><head></head><body><em>x</em></body></html>")),
-        ("<head><strong>x</head>", Some("<html><head></head><body><strong>x</strong></body></html>")),
-        ("<head><code>x</head>", Some("<html><head></head><body><code>x</code></body></html>")),
-        ("<head><pre>x</head>", Some("<html><head></head><body><pre>x</pre></body></html>")),
-        ("<head><blockquote>x</head>", Some("<html><head></head><body><blockquote>x</blockquote></body></html>")),
-        ("<head><dl>x</head>", Some("<html><head></head><body><dl>x</dl></body></html>")),
-        ("<head><font>x</head>", Some("<html><head></head><body><font>x</font></body></html>")),
-        ("<head><center>x</head>", Some("<html><head></head><body><center>x</center></body></html>")),
-        ("<head><label>x</head>", Some("<html><head><label>x</label></head></html>")),
-        ("<head><fieldset>x</head>", Some("<html><head></head><body><fieldset>x</fieldset></body></html>")),
-        ("<head><legend>x</head>", Some("<html><head><legend>x</legend></head></html>")),
-        ("<head><optgroup>x</head>", Some("<html><head><optgroup>x</optgroup></head></html>")),
-        ("<head><datalist>x</head>", Some("<html><head><datalist>x</datalist></head></html>")),
-        ("<head><output>x</head>", Some("<html><head><output>x</output></head></html>")),
-        ("<head><meter>x</head>", Some("<html><head><meter>x</meter></head></html>")),
-        ("<head><progress>x</head>", Some("<html><head><progress>x</progress></head></html>")),
-        ("<head><details>x</head>", Some("<html><head><details>x</details></head></html>")),
-        ("<head><dialog>x</head>", Some("<html><head><dialog>x</dialog></head></html>")),
-        ("<head><main>x</head>", Some("<html><head><main>x</main></head></html>")),
-        ("<head><section>x</head>", Some("<html><head><section>x</section></head></html>")),
-        ("<head><article>x</head>", Some("<html><head><article>x</article></head></html>")),
-        ("<head><nav>x</head>", Some("<html><head><nav>x</nav></head></html>")),
-        ("<head><aside>x</head>", Some("<html><head><aside>x</aside></head></html>")),
-        ("<head><header>x</head>", Some("<html><head><header>x</header></head></html>")),
-        ("<head><footer>x</head>", Some("<html><head><footer>x</footer></head></html>")),
-        ("<head><figure>x</head>", Some("<html><head><figure>x</figure></head></html>")),
-        ("<head><video>x</head>", Some("<html><head><video>x</video></head></html>")),
-        ("<head><audio>x</head>", Some("<html><head><audio>x</audio></head></html>")),
-        ("<head><canvas>x</head>", Some("<html><head><canvas>x</canvas></head></html>")),
-        ("<head><abbr>x</head>", Some("<html><head></head><body><abbr>x</abbr></body></html>")),
-        ("<head><cite>x</head>", Some("<html><head></head><body><cite>x</cite></body></html>")),
-        ("<head><dfn>x</head>", Some("<html><head></head><body><dfn>x</dfn></body></html>")),
-        ("<head><kbd>x</head>", Some("<html><head></head><body><kbd>x</kbd></body></html>")),
-        ("<head><samp>x</head>", Some("<html><head></head><body><samp>x</samp></body></html>")),
-        ("<head><var>x</head>", Some("<html><head></head><body><var>x</var></body></html>")),
-        ("<head><sub>x</head>", Some("<html><head></head><body><sub>x</sub></body></html>")),
-        ("<head><sup>x</head>", Some("<html><head></head><body><sup>x</sup></body></html>")),
-        ("<head><small>x</head>", Some("<html><head></head><body><small>x</small></body></html>")),
-        ("<head><big>x</head>", Some("<html><head></head><body><big>x</big></body></html>")),
-        ("<head><tt>x</head>", Some("<html><head></head><body><tt>x</tt></body></html>")),
-        ("<head><s>x</head>", Some("<html><head></head><body><s>x</s></body></html>")),
-        ("<head><strike>x</head>", Some("<html><head></head><body><strike>x</strike></body></html>")),
-        ("<head><u>x</head>", Some("<html><head></head><body><u>x</u></body></html>")),
-        ("<head><del>x</head>", Some("<html><head><del>x</del></head></html>")),
-        ("<head><ins>x</head>", Some("<html><head><ins>x</ins></head></html>")),
-        ("<head><q>x</head>", Some("<html><head></head><body><q>x</q></body></html>")),
-        ("<head><address>x</head>", Some("<html><head></head><body><address>x</address></body></html>")),
-        ("<head><dt>x</head>", Some("<html><head></head><body><dt>x</dt></body></html>")),
-        ("<head><dd>x</head>", Some("<html><head></head><body><dd>x</dd></body></html>")),
-        ("<head><caption>x</head>", Some("<html><head><caption>x</caption></head></html>")),
-        ("<head><th>x</head>", Some("<html><head><th>x</th></head></html>")),
-        ("<head><tr>x</head>", Some("<html><head><tr>x</tr></head></html>")),
-        ("<head><tbody>x</head>", Some("<html><head><tbody>x</tbody></head></html>")),
-        ("<head><thead>x</head>", Some("<html><head><thead>x</thead></head></html>")),
-        ("<head><colgroup>x</head>", Some("<html><head><colgroup>x</colgroup></head></html>")),
-        ("<head><h6>x</head>", Some("<html><head></head><body><h6>x</h6></body></html>")),
-        ("<head><h3>x</head>", Some("<html><head></head><body><h3>x</h3></body></html>")),
-        ("<head><p>x</head>", Some("<html><head></head><body><p>x</p></body></html>")),
-        ("<head><div>x</head>", Some("<html><head></head><body><div>x</div></body></html>")),
-        ("<head><li>x</head>", Some("<html><head></head><body><li>x</li></body></html>")),
-        ("<head><br>x</head>", Some("<html><head></head><body><br>x</body></html>")),
-        ("<head><img>x</head>", Some("<html><head></head><body><img>x</body></html>")),
-        ("<head><hr>x</head>", Some("<html><head></head><body><hr>x</body></html>")),
-        ("<div><body class=\"c\"/>x</div>", Some("<div><div></div>x</div>")),
-        ("<div><body / >x</div>", Some("<div>x</div>")),
-        ("<body>x<body/>y</body>", Some("<span>x</span>y")),
-        ("<div><p/>x</div>", Some("<div><p></p>x</div>")),
-        ("<div><html/>x</div>", Some("<div><div></div>x</div>")),
-        ("<head><div><body/>x</div></head>", Some("<html><head></head><body><div></div>x</body></html>")),
-        ("<div><body/>x<body/>y</div>", Some("<div><div></div>x</div>y")),
-        ("<head/><title>u</title><p>x</p>", Some("<html><head></head><title>u</title><body><p>x</p></body></html>")),
-        ("<head></head><title>u</title>", Some("<html><head></head><title>u</title></html>")),
-        ("<head>x</head><title>u</title>", Some("<html><head></head><body>x<title>u</title></body></html>")),
-        ("<head><div>x</div></head><title>u</title>", Some("<html><head></head><body><div>x</div><title>u</title></body></html>")),
-        ("<title>t</title><head></head><title>u</title>", Some("<html><head><title>t</title><title>u</title></head></html>")),
-        ("<head/><frameset>f</frameset><title>u</title>", Some("<html><head></head><frameset>f</frameset><title>u</title></html>")),
-        ("<head><isindex prompt=x></head>", Some("<html><head><isindex prompt=\"x\"></head></html>")),
-        ("<head><a href=u>x</a></head>", Some("<html><head></head><body><a href=\"u\">x</a></body></html>")),
-        ("<head><ul><li>x</li></ul></head>", Some("<html><head></head><body><ul><li>x</li></ul></body></html>")),
-        ("<head><acronym>x</head>", Some("<html><head></head><body><acronym>x</acronym></body></html>")),
-        ("<head><bdo>x</head>", Some("<html><head></head><body><bdo>x</bdo></body></html>")),
-        ("<head><dir>x</head>", Some("<html><head></head><body><dir>x</dir></body></html>")),
-        ("<head><menu>x</menu></head>", Some("<html><head></head><body><menu>x</menu></body></html>")),
-        ("<head><map>x</map></head>", Some("<html><head></head><body><map>x</map></body></html>")),
-        ("<head><tfoot>x</tfoot></head>", Some("<html><head><tfoot>x</tfoot></head></html>")),
-        ("<div><span/>x</div>", Some("<div><span></span>x</div>")),
-        ("<div><title/>x</div>", Some("<div><title></title>x</div>")),
-        ("<div><frameset/>x</div>", Some("<div><frameset></frameset>x</div>")),
-        ("<div><table/>x</div>", Some("<div><table></table>x</div>")),
-        ("mid<body></body> tail", Some("<span>mid tail</span>")),
-        ("<b>m</b><body></body> tail", Some("<span><b>m</b> tail</span>")),
-        ("<body class=\"c\"/>x", Some("<span class=\"c\"></span>x")),
-        ("<head><title>t</title></head><title>u</title>", Some("<html><head><title>t</title></head><title>u</title></html>")),
-        ("<title>t</title></head><title>u</title>", Some("<html><head><title>t</title></head><title>u</title></html>")),
-        ("<title>t</title><p>x</p><title>u</title>", Some("<html><head><title>t</title></head><body><p>x</p><title>u</title></body></html>")),
-        ("<head></head><head><title>u</title></head><p>x</p>", Some("<html><head><title>u</title></head><body><p>x</p></body></html>")),
-        ("<head></head>  <title>u</title>", Some("<html><head></head>  <title>u</title></html>")),
-        ("<html><head></head><title>u</title></html>", Some("<html><head></head><title>u</title></html>")),
-        ("<head></head><head></head><title>u</title>", Some("<html><head></head><title>u</title></html>")),
-        ("<body/>x<body>y</body>", Some("<span>y</span>x")),
-        ("<body>x</body><body/>y", Some("<span>x</span>y")),
-        ("<div></head></div>", Some("<div></div>")),
-        ("<head><frameset>f</frameset></head><title>u</title>", Some("<html><head></head><frameset>f</frameset><title>u</title></html>")),
-        ("<head><body>x</body></head><title>u</title>", Some("<html><head></head><body>x</body><title>u</title></html>")),
-        ("</head><title>u</title>", Some("<html><head><title>u</title></head></html>")),
-        ("<frameset>f</frameset></head><body>x</body>", Some("<span>x</span>")),
-        ("<head><title>t</title></head >", Some("<html><head><title>t</title></head></html>")),
-        ("<title>t</title><body><p>x</p></body> tail", Some("<html><head><title>t</title></head><body><p>x</p></body> tail</html>")),
-        ("<title>t</title>mid<body>x</body> tail", Some("<html><head><title>t</title></head><body>midx tail</body></html>")),
-        ("<body>x</body>mid<body>y</body> tail", Some("<span>xy</span>mid tail")),
-        ("<title>t</title><body>x</body>mid<body>y</body> tail", Some("<html><head><title>t</title></head><body>xy</body>mid tail</html>")),
-        ("<title>t</title><b>m</b><body>x</body> tail", Some("<html><head><title>t</title></head><body><b>m</b>x tail</body></html>")),
-        ("<title>t</title> <body>x</body> tail", Some("<html><head><title>t</title> </head><body>x</body> tail</html>")),
-        ("<title>t</title><body>x</body><p>y</p> tail", Some("<html><head><title>t</title></head><body>x</body><p>y</p> tail</html>")),
-        ("<html><title>t</title><body>x</body> tail</html>", Some("<html><head><title>t</title></head><body>x</body> tail</html>")),
-        ("<body>x</body><p>y</p>", Some("<span>x</span>")),
-        (" <title>t</title>", Some("<title>t</title>")),
-        (" <b>x</b>", Some("<b>x</b>")),
-        (" <body>x</body> tail", Some("<span> x tail</span>")),
-        ("\u{B}<title>t</title>", Some("<title>t</title>")),
-        ("mid<b>x</b>", Some("<span>mid<b>x</b></span>")),
-        (" <p>x</p>", Some("<p>x</p>")),
-        ("<head><body>x</body></head>", Some("<html><head></head><body>x</body></html>")),
-        ("<head><title>t</title><body>x</body></head>", Some("<html><head><title>t</title></head><body>x</body></html>")),
-        ("<frameset><body>x</body></frameset>", Some("<html><frameset><body>x</body></frameset></html>")),
-        ("<html>  <p>x</p></html>", Some("<html>  <body><p>x</p></body></html>")),
-        ("<html> <body>x</body></html>", Some("<html><body> x</body></html>")),
-        ("<frameset>f</frameset>  <body>x</body> tail", Some("<span>x</span> tail")),
-        ("<title>t</title><body>x</body>t1<head>a<title>u</title>b</head>t2", Some("<html><head><title>t</title></head><body>x</body>t1a<title>u</title>bt2</html>")),
-        ("<title>t</title><body>x</body><head><title>u</title><title>v</title></head>", Some("<html><head><title>t</title><title>u</title><title>v</title></head><body>x</body></html>")),
-        ("<body><p>x</p> </body>", Some("<p>x</p> ")),
-        ("<body> <p>x</p></body>", Some("<p>x</p>")),
-        ("<body>  x</body>", Some("<span>  x</span>")),
-        ("<body>x  </body>", Some("<span>x  </span>")),
-        ("<body>  </body>", Some("<span>  </span>")),
-        ("<body></body>", Some("<span></span>")),
-        ("<title>t</title>mid<body/> tail", Some("<html><head><title>t</title></head><body>mid</body> tail</html>")),
-        ("<title>t</title>mid<body/>tail2<p>y</p>", Some("<html><head><title>t</title></head><body>mid</body>tail2<p>y</p></html>")),
-        ("<title>t</title><body/>x<body>y</body>", Some("<html><head><title>t</title></head><body>y</body>x</html>")),
-        ("<html/>", Some("<html></html>")),
-        ("<head><html>x</html></head>", Some("<html><head></head><body>x</body></html>")),
-        ("<div><html>x</html></div>", Some("<div>x</div>")),
-        ("<frameset><html>x</html></frameset>", Some("<html><frameset>x</frameset></html>")),
-        ("<head><head/>x</head>", Some("<html><head></head><body>x</body></html>")),
-        ("<head><html/>x</head>", Some("<html><head></head><body>x</body></html>")),
-        ("<frameset><head/>x</frameset>", Some("<span>x</span>")),
-        ("<html><title>t</title></head><title>u</title></html>", Some("<html><head><title>t</title></head><title>u</title></html>")),
-        ("<html></head><title>u</title></html>", Some("<html><head><title>u</title></head></html>")),
-        ("<b>m</b><body/>t2<p>y</p> tail", Some("<b>m</b>")),
-        ("<head><listing>x</listing></head>", Some("<html><head></head><body><listing>x</listing></body></html>")),
-        ("<head><nobr>x</nobr></head>", Some("<html><head><nobr>x</nobr></head></html>")),
-        ("<head><blink>x</blink></head>", Some("<html><head><blink>x</blink></head></html>")),
-        ("<html>  <frameset>f</frameset></html>", Some("<html>  <frameset>f</frameset></html>")),
-        ("  <frameset>f</frameset><body>x</body>", Some("<span>x</span>")),
-        ("<frameset>f</frameset><body></body>", Some("<span></span>")),
-        ("<head></head><head>  a<title>u</title></head>", Some("<html><head></head><body>a<title>u</title></body></html>")),
-        ("<title>t</title><body>x</body><head><title>u</title>b<body>y</body></head>", Some("<html><head><title>t</title><title>u</title></head><body>xy</body>b</html>")),
-        ("<head><div></head><p>y</p></head>", Some("<html><head></head><body><div><p>y</p></div></body></html>")),
-        ("<head><div><head><title>u</title></head></div></head>", Some("<html><head></head><body><div><title>u</title></div></body></html>")),
-        ("x<html/>y", Some("<span>x</span>y")),
-        ("<head></head>  <body>x</body>", Some("<html><head></head>  <body>x</body></html>")),
-        (" <html></html>", Some("<html><body> </body></html>")),
-        ("<html/>x", Some("<html></html>")),
-        ("<title>t</title><html/>x", Some("<html><head><title>t</title></head><body>x</body></html>")),
-        ("<html class=c/>x", Some("<html class=\"c/\"><body>x</body></html>")),
-        ("x<html></html>y", Some("<span>xy</span>")),
-        (" <!DOCTYPE html>", Some("<html><body> </body></html>")),
-        ("  <html/>x", Some("<html></html>")),
-        ("  <html class=\"c\"/>x", Some("<html class=\"c\"></html>")),
-        ("<html><title>t</title><html/>x</html>", Some("<html><head><title>t</title></head><body>x</body></html>")),
-        ("<html>  mid</html>", Some("<html>  <body>mid</body></html>")),
-        ("<head></head>  mid", Some("<html><head></head>  <body>mid</body></html>")),
-        ("<head>  mid</head>", Some("<html><head>  </head><body>mid</body></html>")),
-        ("<head><title>t</title></head>  mid", Some("<html><head><title>t</title></head>  <body>mid</body></html>")),
-        ("<head>  <p>x</p></head>", Some("<html><head>  </head><body><p>x</p></body></html>")),
-        ("<frameset>f</frameset><title>u</title>  mid", Some("<html><frameset>f</frameset><head><title>u</title>  </head><body>mid</body></html>")),
-        ("<title>t</title><frameset>f</frameset>  mid", Some("<html><head><title>t</title></head><frameset>f</frameset>  <body>mid</body></html>")),
-        ("<title>t</title>  </head><p>x</p>", Some("<html><head><title>t</title>  </head><body><p>x</p></body></html>")),
-        ("<title>t</title><frameset>f</frameset>  </head><p>x</p>", Some("<html><head><title>t</title></head><frameset>f</frameset>  <body><p>x</p></body></html>")),
-        ("<head>  </head><p>x</p>", Some("<html><head>  </head><body><p>x</p></body></html>")),
-        ("<frameset>f</frameset><title>u</title>  ", Some("<html><frameset>f</frameset><head><title>u</title>  </head></html>")),
-        ("<!DOCTYPE html>  <frameset>f</frameset>", Some("<html><frameset>f</frameset></html>")),
-        ("<!DOCTYPE html>  <p>x</p>", Some("<html><body><p>x</p></body></html>")),
-        ("<!DOCTYPE html>  <body>x</body>", Some("<html><body>x</body></html>")),
-        ("<!DOCTYPE html><html>  mid</html>", Some("<html>  <body>mid</body></html>")),
-        ("<frameset><dl>x</dl></frameset>", Some("<html><frameset><body><dl>x</dl></body></frameset></html>")),
-        ("<body><frameset></frameset><br></body>", Some("<span><frameset></frameset><br></span>")),
-        ("<frameset><nobr>x</nobr></frameset>", Some("<html><frameset><body><nobr>x</nobr></body></frameset></html>")),
-        ("<html>x</body>y</html>", Some("<html><body>x</body>y</html>")),
-        ("<head>x</body>y", Some("<html><head></head><body>x</body>y</html>")),
-        ("<html>x</frameset>y</html>", Some("<html><body>xy</body></html>")),
-        ("<frameset>f</body>y", Some("<html><frameset>fy</frameset></html>")),
-        ("<dl>x</dl>", Some("<dl>x</dl>")),
-        ("<body>x</html>y", Some("<span>x</span>")),
-        ("<basefont>x", Some("<span><basefont>x</span>")),
-        ("<frame>x", Some("<span>x</span>")),
-        ("<frame>x</frame>", Some("<span>x</span>")),
-        ("<frame><noframes>f</noframes></frameset>", Some("<html><frame><noframes>f</noframes></html>")),
-        ("<frameset><p>x</p></frameset>", Some("<html><frameset><body><p>x</p></body></frameset></html>")),
-        ("<body><object>x</object></body>", Some("<object>x</object>")),
-        ("<body>x<map>y</map>z</body>", Some("<span>x<map>y</map>z</span>")),
-        ("<applet>x</applet>", Some("<applet>x</applet>")),
-        ("<acronym>x</acronym>", Some("<acronym>x</acronym>")),
-        ("<bdo>x</bdo>", Some("<bdo>x</bdo>")),
-        ("<menu>x</menu>", Some("<menu>x</menu>")),
-        ("<dir>x</dir>", Some("<dir>x</dir>")),
-        ("<nobr>x</nobr>", Some("<nobr>x</nobr>")),
-        ("<frameset>a</frameset>b<p>c</p>", Some("<div>b<p>c</p></div>")),
-        ("<frameset>a</frameset> <p>c</p>", Some("<p>c</p>")),
-        ("<body><head><p>t</p></head><p>b</p></body>", Some("<div><p>t</p><p>b</p></div>")),
-        ("<head><frameset>f</frameset>t</head>x", Some("<html><head></head><frameset>f</frameset><body>tx</body></html>")),
-        ("<head><div>d</div>t</head>x", Some("<html><head></head><body><div>d</div>tx</body></html>")),
-        ("<head><script>s</script>tail</head>x", Some("<html><head><script>s</script></head><body>tailx</body></html>")),
-        ("<head>x</head><title>t</title>", Some("<html><head></head><body>x<title>t</title></body></html>")),
-        ("<head>t1</title>t2</title>t3</head>x", Some("<html><head></head><body>t1t2t3x</body></html>")),
-        ("<!--a--><head>x</head>", Some("<html><head></head><body>x</body></html>")),
-        (" <head>x</head>", Some("<html><head></head><body>x</body></html>")),
-        ("<html><head><title>T</title></head>junk<body>B</body></html>", Some("<html><head><title>T</title></head><body>junkB</body></html>")),
-        ("<html><head><title>T</title></head><p>P</p><body>B</body></html>", Some("<html><head><title>T</title></head><body><p>P</p>B</body></html>")),
-        ("<html><head><title>T</title></head><base href=x><node>y</node><body>B</body></html>", Some("<html><head><title>T</title></head><base href=\"x\"><body><node>y</node>B</body></html>")),
-        ("<html><head><title>T</title></head><frameset><frame></frameset></html>", Some("<html><head><title>T</title></head><frameset><frame></frameset></html>")),
-        ("<html><head><title>T</title></head><object>O</object></html>", Some("<html><head><title>T</title></head><body><object>O</object></body></html>")),
-        ("<html><head><title>T</title></head><select><option>o</option></select></html>", Some("<html><head><title>T</title></head><body><select><option>o</option></select></body></html>")),
-        ("<html><head><title>T</title></head><table><tr><td>c</td></tr></table></html>", Some("<html><head><title>T</title></head><body><table><tr><td>c</td></tr></table></body></html>")),
-        ("<html><head><basefont size=1><isindex><link></head><title>T</title></html>", Some("<html><head><basefont size=\"1\"><isindex><link></head><title>T</title></html>")),
-        ("<table><form><tr><td>x", Some("<table><form><tr><td>x</td></tr></form></table>")),
-        ("<form><table><tr><td>x", Some("<form><table><tr><td>x</td></tr></table></form>")),
-        ("<form><p>x", Some("<form><p>x</p></form>")),
-        ("<button><div>x", Some("<button><div>x</div></button>")),
-        ("<select><div>x", Some("<select><div>x</div></select>")),
-        ("<li><form>x", Some("<li><form>x</form></li>")),
-        ("<option><div>x", Some("<option><div>x</div></option>")),
-        ("<a><table><tr><td>x", Some("<div><a></a><table><tr><td>x</td></tr></table></div>")),
-        ("<table><caption><div>x", Some("<table><caption><div>x</div></caption></table>")),
-        ("<td><tr>x", Some("<div><td></td><tr>x</tr></div>")),
-        ("<html><head><title>T</title></head>x<body>B</body></html>", Some("<html><head><title>T</title></head><body>xB</body></html>")),
-        ("<html><head><title>T</title></head><p>x", Some("<html><head><title>T</title></head><body><p>x</p></body></html>")),
-        ("<html><head><title>T</title></head><object>O</object>x", Some("<html><head><title>T</title></head><body><object>O</object>x</body></html>")),
-        ("<html><head><title>T</title></head>a<dl>d</dl>b", Some("<html><head><title>T</title></head><body>a<dl>d</dl>b</body></html>")),
-        ("<t>t</t>x<body>B</body>", Some("<span><t>t</t>xB</span>")),
-        ("<object><div>x</div></object>", Some("<object><div>x</div></object>")),
-        ("<button><div>x</div>t</button>", Some("<button><div>x</div>t</button>")),
-        ("<object>O</object>x", Some("<span><object>O</object>x</span>")),
-        ("<marquee><div>x</div></marquee>", Some("<marquee><div>x</div></marquee>")),
-        ("<li><span>a</span></li>", Some("<li><span>a</span></li>")),
-        ("<td><div>d</div></td>", Some("<td><div>d</div></td>")),
-        ("<option><b>x</b></option>", Some("<option><b>x</b></option>")),
-        ("<title>t</title>tail", Some("<html><head><title>t</title></head><body>tail</body></html>")),
-        ("<table><td>x</td></table>tail", Some("<div><table><td>x</td></table>tail</div>")),
-        ("<ul><li>a<li>b", Some("<ul><li>a</li><li>b</li></ul>")),
-        ("x <b>y</b>", Some("<span>x <b>y</b></span>")),
-        ("<p>a<p>b</p>c", Some("<div><p>a</p><p>b</p>c</div>")),
-    ];
-
     const DT_GOLDENS: &[(&str, Option<&str>)] = &[
         ("2030-01-01", Some("naive:2030-01-01T00:00:00")),
         (
@@ -22325,19 +15318,6 @@ mod tests {
                 Sanitize::Clean(cleaned) => assert_eq!(cleaned, html, "input: {input:?}"),
                 Sanitize::Invalid => panic!("golden output fails sanitize: {input:?}"),
             }
-        }
-    }
-
-    // -- lxml (`validate()` gate, live goldens) --
-
-    #[test]
-    fn lxml_roundtrip_matches_live_python() {
-        for (input, expected) in LXML_GOLDENS {
-            assert_eq!(
-                lxml_roundtrip(input).as_deref(),
-                *expected,
-                "input: {input:?}"
-            );
         }
     }
 
@@ -22729,21 +15709,6 @@ mod tests {
     }
 
     #[test]
-    fn advisory_key_matches_sha_prefix() {
-        // `convert_uuid_to_integer` (`utils/uuid.py:19-26`): the
-        // first 8 sha256 *bytes*, signed big-endian.
-        let id = Uuid::parse_str("123e4567-e89b-12d3-a456-426614174000").unwrap();
-        assert_eq!(advisory_key(&id), {
-            use sha2::Digest;
-            let digest = sha2::Sha256::digest(id.to_string().as_bytes());
-            i64::from_be_bytes([
-                digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6],
-                digest[7],
-            ])
-        });
-    }
-
-    #[test]
     fn error_bag_appends_in_field_order() {
         // Repeated `field()` calls on one key accumulate; distinct
         // keys keep insertion order (DRF error shape).
@@ -22825,31 +15790,6 @@ mod tests {
         }
         println!(
             "{}/{} markdown cases agree",
-            cases.len() - mismatches.min(cases.len()),
-            cases.len()
-        );
-        assert_eq!(mismatches, 0, "differential mismatches found");
-    }
-
-    #[test]
-    #[ignore]
-    fn fuzz_lxml_against_live_python() {
-        let cases = read_cases("/tmp/lxml_cases.txt");
-        assert!(!cases.is_empty(), "no fuzz cases generated");
-        let mut mismatches = 0;
-        for (input, expected) in &cases {
-            let actual = lxml_roundtrip(input).unwrap_or_else(|| "ERROR".to_owned());
-            if &actual != expected {
-                mismatches += 1;
-                if mismatches <= 5 {
-                    println!(
-                        "MISMATCH input={input:?}\n  expected={expected:?}\n  actual={actual:?}"
-                    );
-                }
-            }
-        }
-        println!(
-            "{}/{} lxml cases agree",
             cases.len() - mismatches.min(cases.len()),
             cases.len()
         );

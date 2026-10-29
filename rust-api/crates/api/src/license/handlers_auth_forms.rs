@@ -230,7 +230,7 @@ pub fn success_location(base: &str) -> String {
 /// folding; `trim` + `to_lowercase` is the same operation. Runs only after
 /// the presence check, so missing/empty values never reach it.
 pub fn normalize_email(raw: &str) -> String {
-    raw.trim().to_lowercase()
+    pidash_compat::http::normalize_email(raw)
 }
 
 /// Django `validate_email` verdict (`django/core/validators.py`,

@@ -423,6 +423,7 @@ mod tests {
             config_dir: dir.path().join("config"),
             data_dir: dir.path().join("data"),
             runtime_dir: dir.path().join("runtime"),
+            machine_context_dir: dir.path().join("config"),
         };
         paths.ensure().unwrap();
         (dir, paths)
@@ -461,6 +462,7 @@ mod tests {
                 log_level: "info".into(),
                 log_retention_days: 14,
                 agent_observability_v1: false,
+                agent_watchdog: Default::default(),
                 auto_update: true,
             },
             runners,

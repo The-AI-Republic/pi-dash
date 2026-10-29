@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import base64
 import datetime
 import json
+import select
 import socket
 import ssl
 import threading
@@ -721,6 +723,91 @@ def posthog_sink():
     sink.stop()
 
 
+class LiveDocStub:
+    """Stub live-document conversion server for page-write tests (PIDASHCONV-1503).
+
+    Page writes convert through ``POST {LIVE_URL}/convert-document/``
+    (``pi_dash.utils.live_document``); without a live server both backends
+    503 and nothing is written. The stub binds the fixed base in
+    ``LIVE_DOC_STUB_BASE`` — the backend under test points ``LIVE_BASE_URL``
+    at the same base — and answers every POST with one fixed usable
+    document (non-empty binary, empty body HTML, empty JSON).
+
+    Context-manager scoped (one conversion window per test), deliberately
+    NOT a session fixture: while the stub is down conversion fails and the
+    503 contract tests keep passing.
+    """
+
+    BINARY = b"contract-live-document"
+
+    def __init__(self, base_url: str | None = None) -> None:
+        outer = self
+        self.requests: list[dict] = []
+        self._lock = threading.Lock()
+        payload = json.dumps(
+            {
+                "description_binary": base64.b64encode(self.BINARY).decode("ascii"),
+                "description_html": "<p></p>",
+                "description_json": {},
+            }
+        ).encode()
+
+        class Handler(BaseHTTPRequestHandler):
+            def _answer(self) -> None:
+                length = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(length) if length else b""
+                try:
+                    parsed = json.loads(raw) if raw else None
+                except ValueError:
+                    parsed = None
+                with outer._lock:
+                    outer.requests.append(
+                        {
+                            "method": self.command,
+                            "path": urlsplit(self.path).path,
+                            "headers": dict(self.headers),
+                            "body": raw,
+                            "json": parsed,
+                        }
+                    )
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            do_GET = _answer
+            do_POST = _answer
+            do_PUT = _answer
+            do_PATCH = _answer
+            do_DELETE = _answer
+
+            def log_message(self, *args: object) -> None:  # keep test output clean
+                pass
+
+        parts = urlsplit(base_url or config.LIVE_DOC_STUB_BASE)
+        self._server = ThreadingHTTPServer((parts.hostname, parts.port), Handler)
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    @property
+    def url(self) -> str:
+        host, port = self._server.server_address
+        return f"http://{host}:{port}"
+
+    def snapshot(self) -> list[dict]:
+        with self._lock:
+            return list(self.requests)
+
+    def __enter__(self) -> "LiveDocStub":
+        self._thread.start()
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self._server.shutdown()
+        self._thread.join(timeout=5)
+        self._server.server_close()
+
+
 class HostileLengthSink:
     """Raw-socket sink answering a huge Content-Length, then closing (PIDASHCONV-1273).
 
@@ -1063,5 +1150,421 @@ class ProxyStub:
         finally:
             try:
                 conn.close()
+            except OSError:
+                pass
+
+
+# --- PIDASHCONV-1472: redirect stub + MITM proxy for the rename tests ---
+#
+# The renamed-repo contract tests need a stub that answers 301/307 with
+# Location headers. The Rust worker reaches a plain-HTTP stub through
+# PIDASH_GITHUB_API_BASE (RedirectStub); the Django worker cannot be
+# pointed at a stub (it hardcodes https://api.github.com), so it goes
+# through MitmProxy, which MITMs api.github.com with a test CA and
+# serves the same routes inside the tunnel. Route tables are shared:
+# values may contain "{base}", formatted with the server's own base so
+# each leg follows same-host Locations.
+def normalize_redirect_routes(routes: dict, base: str) -> dict:
+    """Build a ``{(METHOD, path): (status, payload, headers)}`` table.
+
+    Each route is ``(status, body)`` or ``(status, body, headers)``;
+    ``body`` may be bytes, str, or a JSON-serializable value (served as
+    ``application/json``); ``headers`` is a ``{name: value}`` dict whose
+    values (and str bodies) format ``{base}``. Matching strips the query
+    string.
+    """
+    normalized: dict[tuple[str, str], tuple[int, bytes, dict]] = {}
+    for (method, path), route in routes.items():
+        if len(route) == 3:
+            status, body, headers = route
+            headers = {k: v.format(base=base) for k, v in dict(headers).items()}
+        else:
+            status, body = route
+            headers = {}
+        if isinstance(body, (dict, list)):
+            payload = json.dumps(body).encode()
+            headers.setdefault("Content-Type", "application/json")
+        elif isinstance(body, str):
+            payload = body.format(base=base).encode()
+            headers.setdefault("Content-Type", "application/json")
+        else:
+            payload = bytes(body)
+            headers.setdefault("Content-Type", "application/json")
+        normalized[(method, path)] = (status, payload, headers)
+    return normalized
+
+
+class RedirectStub:
+    """HTTP stub dispatching (status, headers, body) by (method, path).
+
+    Like :class:`RoutingStub` plus per-route response headers (Location
+    for 301/307) and a fixed-port bind: the worker under test dials a
+    base baked into its boot env, so the stub binds that port at run time
+    (STALL_S3_PORT precedent). Unmapped paths answer 404. Every hit
+    records ``{method, path, headers, body}`` in :attr:`requests` (full
+    path, query string included).
+    """
+
+    def __init__(
+        self,
+        routes: dict,
+        *,
+        host: str = "127.0.0.1",
+        port: int = 0,
+    ) -> None:
+        outer = self
+        self.requests: list[dict] = []
+        self._lock = threading.Lock()
+
+        class Handler(BaseHTTPRequestHandler):
+            def _answer(self) -> None:
+                length = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(length) if length else b""
+                with outer._lock:
+                    outer.requests.append(
+                        {
+                            "method": self.command,
+                            "path": self.path,
+                            "headers": dict(self.headers),
+                            "body": raw,
+                        }
+                    )
+                route = outer._table.get((self.command, urlsplit(self.path).path))
+                if route is None:
+                    self.send_response(404)
+                    self.send_header("Content-Type", "text/plain")
+                    self.send_header("Content-Length", "9")
+                    self.end_headers()
+                    self.wfile.write(b"not found")
+                    return
+                status, payload, headers = route
+                self.send_response(status)
+                for name, value in headers.items():
+                    if name.lower() != "content-length":
+                        self.send_header(name, value)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            do_GET = _answer
+            do_POST = _answer
+            do_PUT = _answer
+            do_PATCH = _answer
+            do_DELETE = _answer
+
+            def log_message(self, *args: object) -> None:  # keep test output clean
+                pass
+
+        self._server = ThreadingHTTPServer((host, port), Handler)
+        bound_host, bound_port = self._server.server_address[:2]
+        self._table = normalize_redirect_routes(
+            routes, f"http://{bound_host}:{bound_port}"
+        )
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    @property
+    def url(self) -> str:
+        host, port = self._server.server_address[:2]
+        return f"http://{host}:{port}"
+
+    def snapshot(self) -> list[dict]:
+        with self._lock:
+            return list(self.requests)
+
+    def __enter__(self) -> "RedirectStub":
+        self._thread.start()
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self._server.shutdown()
+        self._thread.join(timeout=5)
+        self._server.server_close()
+
+
+def make_ca_bundle(directory, *, sans=("api.github.com",)):
+    """Test-CA bundle (test CA + system certifi roots) for MITM workers.
+
+    The worker under test validates the MITM leaf (test CA) and any
+    relayed real-host certs (system roots) against one REQUESTS_CA_BUNDLE
+    file, so the bundle concatenates both. Returns
+    ``(bundle_pem, cert_pem, key_pem)`` as Paths under ``directory``.
+    """
+    import certifi
+
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    ca_pem, cert_pem, key_pem = make_test_ca(directory, sans=list(sans))
+    bundle_pem = directory / "mitm-ca-bundle.pem"
+    bundle_pem.write_bytes(ca_pem.read_bytes() + Path(certifi.where()).read_bytes())
+    return bundle_pem, cert_pem, key_pem
+
+
+class MitmProxy:
+    """Forward proxy that MITMs one host and blind-relays everything else.
+
+    ``CONNECT <mitm_host>:443`` gets ``200 Connection established``,
+    then speaks TLS inside the tunnel with the caller-supplied test cert
+    and serves :func:`normalize_redirect_routes` ``routes`` (base
+    ``https://<mitm_host>``, so the client follows Locations back through
+    the proxy; unmapped inner paths answer 404). Any other CONNECT target
+    is blindly relayed byte-for-byte (sentry/telemetry-style traffic the
+    test does not stub keeps working). Plain absolute-URI requests
+    answer 400 (https clients always CONNECT — anything else is a loud
+    failure). Records ``{method, path, headers, body, tunneled,
+    relayed}`` in :attr:`requests`.
+
+    First use: PIDASHCONV-1472, where the Django worker (which hardcodes
+    https://api.github.com) reaches the redirect stub through this proxy
+    while the Rust worker uses a plain RedirectStub via
+    PIDASH_GITHUB_API_BASE.
+    """
+
+    def __init__(
+        self,
+        routes: dict,
+        *,
+        mitm_host: str = "api.github.com",
+        tls_cert=None,
+        tls_key=None,
+        host: str = "127.0.0.1",
+        port: int = 0,
+        relay_timeout: float = 120.0,
+    ) -> None:
+        self._table = normalize_redirect_routes(routes, f"https://{mitm_host}")
+        self._mitm_host = mitm_host
+        self._tls_cert = tls_cert
+        self._tls_key = tls_key
+        self._relay_timeout = relay_timeout
+        self.requests: list[dict] = []
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._sock.bind((host, port))
+        self._sock.listen(32)
+        self._sock.settimeout(0.5)
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+
+    @property
+    def url(self) -> str:
+        host, port = self._sock.getsockname()
+        return f"http://{host}:{port}"
+
+    def snapshot(self) -> list[dict]:
+        with self._lock:
+            return list(self.requests)
+
+    def saw_connect(self, host: str) -> bool:
+        """True once any CONNECT to ``host`` arrived (loop-membership gate)."""
+        with self._lock:
+            return any(
+                entry["method"] == "CONNECT"
+                and entry["path"].split(":")[0].lower() == host.lower()
+                for entry in self.requests
+            )
+
+    def __enter__(self) -> "MitmProxy":
+        self._thread.start()
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self._stop.set()
+        self._thread.join(timeout=10)
+        self._sock.close()
+
+    def _record(self, entry: dict) -> None:
+        with self._lock:
+            self.requests.append(entry)
+
+    @staticmethod
+    def _read_request(rfile):
+        line = rfile.readline(65536).decode("latin-1").strip()
+        if not line:
+            return None, {}
+        headers = {}
+        while True:
+            raw = rfile.readline(65536).decode("latin-1")
+            if raw in ("", "\r\n", "\n"):
+                break
+            name, _, value = raw.partition(":")
+            headers[name.strip()] = value.strip()
+        return line, headers
+
+    def _serve(self) -> None:
+        while not self._stop.is_set():
+            try:
+                conn, _ = self._sock.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            worker = threading.Thread(target=self._handle, args=(conn,), daemon=True)
+            worker.start()
+
+    def _handle(self, conn: socket.socket) -> None:
+        try:
+            conn.settimeout(10)
+            line, headers = self._read_request(conn.makefile("rb"))
+            if line is None:
+                return
+            parts = line.split(" ", 2)
+            method = parts[0] if parts else ""
+            target = parts[1] if len(parts) > 1 else ""
+            if method.upper() != "CONNECT":
+                self._record(
+                    {
+                        "method": method,
+                        "path": target,
+                        "headers": headers,
+                        "body": b"",
+                        "tunneled": False,
+                        "relayed": False,
+                    }
+                )
+                conn.sendall(
+                    b"HTTP/1.1 400 Bad Request\r\nContent-Length: 11\r\n"
+                    b"Connection: close\r\n\r\nbad request"
+                )
+                return
+            host = target.split(":")[0].lower()
+            if host == self._mitm_host.lower():
+                self._record(
+                    {
+                        "method": "CONNECT",
+                        "path": target,
+                        "headers": headers,
+                        "body": b"",
+                        "tunneled": False,
+                        "relayed": False,
+                    }
+                )
+                self._serve_tunnel(conn)
+            else:
+                self._record(
+                    {
+                        "method": "CONNECT",
+                        "path": target,
+                        "headers": headers,
+                        "body": b"",
+                        "tunneled": False,
+                        "relayed": True,
+                    }
+                )
+                self._relay(conn, target)
+        except (OSError, ssl.SSLError):
+            pass
+        finally:
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+    def _serve_tunnel(self, conn: socket.socket) -> None:
+        conn.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
+        if self._tls_cert is None:
+            return
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(str(self._tls_cert), str(self._tls_key))
+        try:
+            tls = context.wrap_socket(conn, server_side=True)
+        except (ssl.SSLError, OSError):
+            return
+        try:
+            tls.settimeout(10)
+            rfile = tls.makefile("rb")
+            iline, iheaders = self._read_request(rfile)
+            if iline is None:
+                return
+            iparts = iline.split(" ", 2)
+            imethod = iparts[0] if iparts else ""
+            ipath = iparts[1] if len(iparts) > 1 else ""
+            length = 0
+            for name, value in iheaders.items():
+                if name.lower() == "content-length":
+                    try:
+                        length = int(value)
+                    except ValueError:
+                        length = 0
+            body = rfile.read(length) if length else b""
+            self._record(
+                {
+                    "method": imethod,
+                    "path": ipath,
+                    "headers": iheaders,
+                    "body": body,
+                    "tunneled": True,
+                    "relayed": False,
+                }
+            )
+            route = self._table.get((imethod, urlsplit(ipath).path))
+            if route is None:
+                head = (
+                    "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\n"
+                    "Content-Length: 9\r\nConnection: close\r\n\r\nnot found"
+                ).encode()
+                tls.sendall(head)
+                return
+            status, payload, headers = route
+            reason = {
+                200: "OK",
+                201: "Created",
+                301: "Moved Permanently",
+                307: "Temporary Redirect",
+            }.get(status, "Status")
+            head = [f"HTTP/1.1 {status} {reason}"]
+            for name, value in headers.items():
+                if name.lower() != "content-length":
+                    head.append(f"{name}: {value}")
+            head.append(f"Content-Length: {len(payload)}")
+            head.append("Connection: close")
+            tls.sendall(("\r\n".join(head) + "\r\n\r\n").encode() + payload)
+        except (ssl.SSLError, OSError):
+            pass
+        finally:
+            try:
+                tls.close()
+            except OSError:
+                pass
+
+    def _relay(self, client: socket.socket, target: str) -> None:
+        host, _, port = target.partition(":")
+        try:
+            upstream = socket.create_connection((host, int(port or 443)), timeout=10)
+        except (OSError, ValueError):
+            try:
+                client.sendall(
+                    b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 11\r\n"
+                    b"Connection: close\r\n\r\nbad gateway"
+                )
+            except OSError:
+                pass
+            return
+        try:
+            client.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
+            for sock in (client, upstream):
+                sock.setblocking(False)
+            deadline = time.monotonic() + self._relay_timeout
+            while time.monotonic() < deadline:
+                try:
+                    ready, _, _ = select.select([client, upstream], [], [], 5)
+                except (OSError, ValueError):
+                    return
+                if not ready:
+                    continue
+                for sock in ready:
+                    other = upstream if sock is client else client
+                    try:
+                        chunk = sock.recv(65536)
+                    except OSError:
+                        return
+                    if not chunk:
+                        return
+                    try:
+                        other.sendall(chunk)
+                    except OSError:
+                        return
+        finally:
+            try:
+                upstream.close()
             except OSError:
                 pass

@@ -245,16 +245,6 @@ pub fn message_seq_sql() -> &'static str {
     "SELECT COALESCE(MAX(seq), 0) FROM assistant_message WHERE thread_id = $1"
 }
 
-/// Prompt message (`dispatch.py:103-109` via `events.create_message`):
-/// completed USER message carrying `job.prompt` verbatim, linked to the
-/// turn with an empty payload. `completed_at` stays NULL.
-pub fn message_insert_sql() -> &'static str {
-    "INSERT INTO assistant_message \
-     (id, thread_id, turn_id, seq, kind, display_content, payload, status, created_at) \
-     VALUES ($1, $2, $3, $4, 'user', $5, '{}', 'completed', $6) \
-     RETURNING id"
-}
-
 /// Link the message back onto the turn (`dispatch.py:110-111`,
 /// `turn.save(update_fields=["user_message"])`).
 pub fn turn_link_message_sql() -> &'static str {
@@ -414,15 +404,16 @@ async fn dispatch_inner(pool: &PgPool, target_id: &Uuid) -> Result<Inner, Error>
         .fetch_one(&mut *tx)
         .await?;
     let message_id = Uuid::new_v4();
-    sqlx::query(message_insert_sql())
-        .bind(message_id)
-        .bind(thread_id)
-        .bind(turn_id)
-        .bind(max_seq + 1)
-        .bind(claim.prompt.clone())
-        .bind(now)
-        .execute(&mut *tx)
-        .await?;
+    pidash_services::domain::assistant::create_prompt_message(
+        &mut *tx,
+        message_id,
+        thread_id,
+        turn_id,
+        max_seq + 1,
+        &claim.prompt,
+        now,
+    )
+    .await?;
     sqlx::query(turn_link_message_sql())
         .bind(message_id)
         .bind(turn_id)
@@ -731,19 +722,6 @@ mod tests {
                     "model_used",
                     "error_code",
                     "error_detail",
-                    "returning id",
-                ],
-            ),
-            (
-                message_insert_sql(),
-                vec![
-                    "insert into assistant_message",
-                    "turn_id",
-                    "seq",
-                    "'user'",
-                    "'completed'",
-                    "'{}'",
-                    "display_content",
                     "returning id",
                 ],
             ),

@@ -34,7 +34,7 @@
 //! * Ticket `SET EX` is skipped when Redis is `None`, but the endpoint
 //!   still 201s an unredeemable ticket (`:832-850`).
 //! * Rotate drops `user` from the dev-machine filter while bootstrap
-//!   keeps it (`:181-190`; the `rotate_revoke_sql` machine branch).
+//!   keeps it (`:181-190`; the domain `revoke_tokens_for_machine_in_workspace`).
 //! * An unknown `?pod=` name falls through to the project default pod
 //!   instead of 404ing (`:671-675`).
 //! * The managed-cap 409 returns from inside the attempt `atomic()`
@@ -53,18 +53,16 @@ use axum::http::{header, HeaderMap, HeaderValue, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
 use chrono::{DateTime, Utc};
-use hmac::{Hmac, Mac};
 use http_body_util::BodyExt as _;
 use serde_json::{Map, Value};
-use sha2::{Digest, Sha256};
 use sqlx::postgres::{PgRow, Postgres};
 use sqlx::{Row, Transaction};
 use uuid::Uuid;
 
-use pidash_db::auth_oauth::queries::cli_token::deactivate_api_token;
 use pidash_db::runner_enroll::columns::{
     dev_machine as dm_cols, enums, machine_token as mt_cols, pod as pod_cols, runner as r_cols,
 };
+use pidash_services::domain::tokens::cli_token::deactivate_api_token;
 use pidash_services::runner_enroll::queries::enroll_reads as enroll_sql;
 use pidash_services::runner_enroll::serializers::shapes as enroll_shapes;
 use pidash_services::runner_enroll::tokens as enroll_tokens;
@@ -73,6 +71,10 @@ use super::auth as enroll_auth;
 use super::throttle as enroll_throttle;
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
+pub use pidash_compat::datetime::render_isoformat;
+use pidash_compat::db::is_integrity_error;
+use pidash_compat::py::py_strip;
+pub use pidash_compat::response::{error_body, json_response, server_error, SERVER_ERROR_BODY};
 
 // ---------------------------------------------------------------------------
 // Wire consts (`enrollment.py`, `register.py`)
@@ -102,28 +104,11 @@ pub const TICKET_KEY_PREFIX: &str = "machine_token_ticket:";
 /// exactly `(ModelBackend,)` (`settings/common.py:125`).
 const MODEL_BACKEND: &str = "django.contrib.auth.backends.ModelBackend";
 
-/// Salt for `user.get_session_auth_hash()`
-/// (`django.contrib.auth` `HASH_SESSION_KEY` verification).
-const SESSION_AUTH_HASH_SALT: &str =
-    "django.contrib.auth.models.AbstractBaseUser.get_session_auth_hash";
+use pidash_compat::http::verify_session_hash;
 
 // ---------------------------------------------------------------------------
 // Shared responses (the `runner_runs` shape, restated: no cross-domain dep)
 // ---------------------------------------------------------------------------
-
-/// Unhandled-failure body (500). Runner views have no custom
-/// `handle_exception`, so Django renders its HTML error page here; only
-/// the status is contract-pinned.
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
-
-/// Render a JSON body with the DRF content type.
-pub fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("runner-enroll response builds")
-}
 
 /// The request pool, or the 500 when the server runs pool-less
 /// (unreachable in `serve`, which fail-fasts at boot).
@@ -135,14 +120,6 @@ pub fn pool_of(state: &AppState) -> Result<&sqlx::PgPool, Response> {
             SERVER_ERROR_BODY.to_owned(),
         )),
     }
-}
-
-/// The 500 shortcut for fallible handler paths.
-pub fn server_error() -> Response {
-    json_response(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        SERVER_ERROR_BODY.to_owned(),
-    )
 }
 
 /// DRF `Allow` for the GET-only health probe
@@ -175,11 +152,6 @@ fn view_response(mut response: Response, allow: &'static str) -> Response {
         .headers_mut()
         .insert(header::ALLOW, HeaderValue::from_static(allow));
     response
-}
-
-/// `{"error": name}` (view-inline 4xx bodies).
-pub fn error_body(name: &str) -> String {
-    serde_json::json!({ "error": name }).to_string()
 }
 
 /// `{"error": name, "error_description": desc}`.
@@ -221,16 +193,6 @@ pub fn not_authenticated() -> Response {
         serde_json::json!({ "detail": "Authentication credentials were not provided." })
             .to_string(),
     )
-}
-
-/// Integrity errors (`IntegrityError`, Postgres class 23): unique / FK /
-/// not-null violations. Django catches these around the D2/B2 savepoint
-/// inserts and the create attempt body; anything else escapes to 500.
-fn is_integrity_error(err: &sqlx::Error) -> bool {
-    match err {
-        sqlx::Error::Database(db) => db.code().is_some_and(|code| code.starts_with("23")),
-        _ => false,
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -324,14 +286,6 @@ pub fn py_truthy(value: &Value) -> bool {
     }
 }
 
-/// Python `str.strip()`: `str.isspace()` is Unicode `White_Space` plus
-/// U+001C-U+001F and U+0085; Rust `trim()` strips `White_Space` only.
-pub fn py_strip(s: &str) -> &str {
-    s.trim_matches(|c: char| {
-        c.is_whitespace() || c == '\u{85}' || ('\u{1c}'..='\u{1f}').contains(&c)
-    })
-}
-
 /// First `max` Unicode code points (`text[:max]`).
 pub fn truncate_chars(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
@@ -366,17 +320,6 @@ pub fn frame_text(body: &Value, key: &str, max: usize) -> Result<String, Respons
 /// `(request.data.get(key) or "").strip()` (no truncation).
 pub fn frame_stripped(body: &Value, key: &str) -> Result<String, Response> {
     Ok(py_strip(&frame_raw(body, key)?).to_owned())
-}
-
-/// Python `datetime.isoformat()` for an aware UTC timestamp: `+00:00`
-/// offset, six-digit microseconds only when nonzero (the `prompting`
-/// `render_isoformat` precedent, restated).
-pub fn render_isoformat(dt: DateTime<Utc>) -> String {
-    if dt.timestamp_subsec_micros() == 0 {
-        dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, false)
-    } else {
-        dt.to_rfc3339_opts(chrono::SecondsFormat::Micros, false)
-    }
 }
 
 /// `json.dumps(..., ensure_ascii=True)` over compact `serde_json` output
@@ -427,39 +370,6 @@ pub fn next_auto_runner_name(pod_runner_count: i64) -> String {
 // ---------------------------------------------------------------------------
 // Session resolve (`BaseSessionAuthentication` + `IsAuthenticated`)
 // ---------------------------------------------------------------------------
-
-/// `user.get_session_auth_hash()`: `salted_hmac(<salt>, password)` with
-/// SHA256, compared constant-time (the `license::resolve_actor`
-/// precedent, restated without the timezone arm: runner views render no
-/// datetimes, so a bad `user_timezone` must not 500 here).
-fn verify_session_hash(session_hash: &str, password_field: &str, secret_key: &[u8]) -> bool {
-    let key = Sha256::digest([SESSION_AUTH_HASH_SALT.as_bytes(), secret_key].concat());
-    let mut mac = Hmac::<Sha256>::new_from_slice(&key).expect("HMAC-SHA256 accepts any key length");
-    mac.update(password_field.as_bytes());
-    let expected = hex_encode(&mac.finalize().into_bytes());
-    constant_time_eq(expected.as_bytes(), session_hash.as_bytes())
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0x0f) as usize] as char);
-    }
-    out
-}
-
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for i in 0..a.len() {
-        diff |= a[i] ^ b[i];
-    }
-    diff == 0
-}
 
 /// `request.user` from the Django session, or `None` for anonymous.
 /// Mirrors `django.contrib.auth.get_user` + DRF `SessionAuthentication`
@@ -545,8 +455,8 @@ pub async fn check_anon_throttle(
     let xff = headers
         .get("x-forwarded-for")
         .and_then(|value| value.to_str().ok());
-    let remote = remote.map(|addr| addr.ip().to_string()).unwrap_or_default();
-    let ident = enroll_throttle::get_ident(xff, &remote);
+    let remote = remote.map(|addr| addr.ip().to_string());
+    let ident = enroll_throttle::get_ident(xff, remote.as_deref());
     let key = enroll_throttle::anon_cache_key(false, &ident).expect("anon key");
     let history: Vec<f64> = match redis.get_string(&key).await {
         Ok(Some(raw)) => decode_throttle_history(&raw),
@@ -1073,22 +983,22 @@ async fn insert_machine_token(
     host_label: &str,
     minted: &enroll_tokens::MintedToken,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(&enroll_sql::machine_token_insert_sql())
-        .bind(Uuid::new_v4())
-        .bind(user_id)
-        .bind(dev_machine_id)
-        .bind(workspace_id)
-        .bind(host_label)
-        .bind(&minted.hashed)
-        .bind(&minted.fingerprint)
-        .bind(enroll_sql::machine_token_label(host_label))
-        .bind(true)
-        .bind(Utc::now())
-        .bind(None::<DateTime<Utc>>)
-        .bind(None::<DateTime<Utc>>)
-        .execute(&mut **tx)
-        .await
-        .map(|_| ())
+    pidash_services::domain::tokens::insert_machine_token(
+        &mut **tx,
+        &pidash_services::domain::tokens::NewMachineToken {
+            id: Uuid::new_v4(),
+            user_id,
+            dev_machine_id,
+            workspace_id,
+            host_label: host_label.to_owned(),
+            token_hash: minted.hashed.clone(),
+            token_fingerprint: minted.fingerprint.clone(),
+            label: enroll_sql::machine_token_label(host_label),
+            is_service: true,
+            created_at: Utc::now(),
+        },
+    )
+    .await
 }
 
 /// `_maybe_mint_machine_token` (`:130-171`): locked-exists probe, mint,
@@ -1169,17 +1079,26 @@ pub async fn rotate_machine_token(
     secret_key: &str,
 ) -> Result<enroll_tokens::MintedToken, RotateOutcome> {
     let with_machine = dev_machine_id.is_some();
-    let sql = enroll_sql::rotate_revoke_sql(with_machine);
-    let mut revoke = sqlx::query(&sql).bind(Utc::now());
     if with_machine {
-        revoke = revoke.bind(dev_machine_id).bind(workspace_id);
-    } else {
-        revoke = revoke.bind(host_label).bind(user_id).bind(workspace_id);
-    }
-    revoke
-        .execute(&mut **tx)
+        pidash_services::domain::tokens::revoke_tokens_for_machine_in_workspace(
+            &mut **tx,
+            dev_machine_id.expect("checked is_some"),
+            workspace_id,
+            Utc::now(),
+        )
         .await
         .map_err(|_| RotateOutcome::Server)?;
+    } else {
+        pidash_services::domain::tokens::revoke_tokens_legacy_host(
+            &mut **tx,
+            host_label,
+            user_id,
+            workspace_id,
+            Utc::now(),
+        )
+        .await
+        .map_err(|_| RotateOutcome::Server)?;
+    }
     let minted = enroll_tokens::mint_machine_token(secret_key);
     match insert_machine_token(
         tx,
@@ -2812,17 +2731,6 @@ mod tests {
         assert!(!py_truthy(&serde_json::json!([])));
         assert!(!py_truthy(&serde_json::json!({})));
         assert!(py_truthy(&serde_json::json!([0])));
-    }
-
-    #[test]
-    fn isoformat_matches_django() {
-        let whole = DateTime::from_timestamp(1_700_000_000, 0).expect("ts");
-        assert_eq!(render_isoformat(whole), "2023-11-14T22:13:20+00:00");
-        let micros = DateTime::from_timestamp(1_700_000_000, 123_456_000).expect("ts");
-        assert_eq!(render_isoformat(micros), "2023-11-14T22:13:20.123456+00:00");
-        // Millis-exact micros keep six digits (the PIDASHCONV-716 trap).
-        let millis = DateTime::from_timestamp(1_700_000_000, 123_000_000).expect("ts");
-        assert_eq!(render_isoformat(millis), "2023-11-14T22:13:20.123000+00:00");
     }
 
     #[test]

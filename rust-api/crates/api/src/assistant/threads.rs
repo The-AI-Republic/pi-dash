@@ -156,7 +156,19 @@ async fn delete_thread_rows(conn: &mut sqlx::PgConnection, thread_id: &Uuid) -> 
         "UPDATE \"loop_targets\" SET \"last_run_id\" = NULL \
          WHERE \"last_run_id\" IN (SELECT \"id\" FROM \"assistant_turn\" WHERE \"thread_id\" = $1)",
         "DELETE FROM \"assistant_event\" WHERE \"thread_id\" = $1",
-        "DELETE FROM \"assistant_message\" WHERE \"thread_id\" = $1",
+    ] {
+        sqlx::query(statement)
+            .bind(thread_id)
+            .execute(&mut *conn)
+            .await
+            .map_err(|_| server_error())?;
+    }
+    // Message leg (leaf-first order preserved — messages after events,
+    // before turns).
+    pidash_services::domain::assistant::delete_thread_messages(&mut *conn, *thread_id)
+        .await
+        .map_err(|_| server_error())?;
+    for statement in [
         "DELETE FROM \"assistant_turn\" WHERE \"thread_id\" = $1",
         "DELETE FROM \"assistant_thread\" WHERE \"id\" = $1",
     ] {

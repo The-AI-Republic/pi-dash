@@ -273,9 +273,9 @@ struct VersionDetailBody {
 }
 
 /// `PageDetailSerializer` over the duplicate re-fetch (`base.py:638-639`):
-/// the 17 observed keys — `is_favorite`/`label_ids`/`labels` `SkipField`
-/// out because the re-fetch annotates only `project_ids`
-/// (QUIRK-duplicate-shape).
+/// the 18 observed keys — `is_favorite`/`label_ids`/`sub_pages_count`/
+/// `labels` `SkipField` out because the re-fetch annotates only
+/// `project_ids` (QUIRK-duplicate-shape); `parent_id` is a model attribute.
 #[derive(Debug, Serialize)]
 struct DuplicateBody {
     id: Uuid,
@@ -284,6 +284,7 @@ struct DuplicateBody {
     access: i16,
     color: String,
     parent: Option<Uuid>,
+    parent_id: Option<Uuid>,
     is_locked: bool,
     archived_at: Option<NaiveDate>,
     workspace: Uuid,
@@ -339,6 +340,7 @@ fn render_copy(row: &CopyRow, tz: &Tz) -> DuplicateBody {
         access: row.access,
         color: row.color.clone(),
         parent: row.parent_id,
+        parent_id: row.parent_id,
         is_locked: row.is_locked,
         archived_at: row.archived_at,
         workspace: row.workspace_id,
@@ -852,7 +854,7 @@ mod tests {
         let body = serde_json::to_string(&render_copy(&row, &Tz::UTC)).expect("serializes");
         assert_eq!(
             body,
-            r#"{"id":"11111111-1111-4111-8111-111111111105","name":"Probe page (Copy)","owned_by":"11111111-1111-4111-8111-111111111104","access":0,"color":"","parent":null,"is_locked":false,"archived_at":null,"workspace":"11111111-1111-4111-8111-111111111102","created_at":"2026-01-02T03:04:05.006007Z","updated_at":"2026-01-02T03:04:05.006007Z","created_by":"11111111-1111-4111-8111-111111111104","updated_by":"11111111-1111-4111-8111-111111111104","view_props":{"full_width":false},"logo_props":{},"project_ids":["11111111-1111-4111-8111-111111111106"],"description_html":"<p>Hi</p>"}"#
+            r#"{"id":"11111111-1111-4111-8111-111111111105","name":"Probe page (Copy)","owned_by":"11111111-1111-4111-8111-111111111104","access":0,"color":"","parent":null,"parent_id":null,"is_locked":false,"archived_at":null,"workspace":"11111111-1111-4111-8111-111111111102","created_at":"2026-01-02T03:04:05.006007Z","updated_at":"2026-01-02T03:04:05.006007Z","created_by":"11111111-1111-4111-8111-111111111104","updated_by":"11111111-1111-4111-8111-111111111104","view_props":{"full_width":false},"logo_props":{},"project_ids":["11111111-1111-4111-8111-111111111106"],"description_html":"<p>Hi</p>"}"#
         );
         // A populated `archived_at` renders `YYYY-MM-DD`.
         let archived = CopyRow {

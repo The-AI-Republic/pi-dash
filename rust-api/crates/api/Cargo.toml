@@ -5,6 +5,9 @@ edition = "2021"
 
 [dependencies]
 pidash-types = { path = "../types" }
+# OVL-04 (PIDASHCONV-1542): canonical Python/DRF parity plumbing
+# (sea-query binder, error classifiers, ...). A leaf crate, so no cycle.
+pidash-compat = { path = "../compat" }
 pidash-db = { path = "../db" }
 pidash-auth = { path = "../auth" }
 pidash-services = { path = "../services" }
@@ -47,7 +50,10 @@ serde = { version = "1", features = ["derive"] }
 # original text, so Python-int vs float discrimination and the exact decimal
 # display DRF uses both survive parsing (`Number::to_string` echoes input).
 serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# Startup builders (PIDASHCONV-1541): `net` binds the listener, `signal`
+# arms the SIGINT/SIGTERM shutdown, `sync` carries the worker watch
+# channel, `time` bounds the shutdown drain. Features only, no new crates.
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
 # DRF-compatible value rendering (F-07 serializer kernel): aware datetimes in
 # any IANA zone (TimezoneMixin activates the user's zone per request) and
 # Decimal-as-string (DRF COERCE_DECIMAL_TO_STRING).
@@ -55,6 +61,10 @@ chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
 rust_decimal = { version = "1", features = ["serde"] }
 sea-query = { version = "0.32", default-features = false, features = ["backend-postgres", "with-uuid", "with-chrono"] }
+# ORM-03/B (PIDASHCONV-1521): the v1 patch driver re-reads the full issue
+# row through the `issues` entity (the render decode is lossy). Identical
+# spec to pidash-db/pidash-services, so the lockfile gains no new downloads.
+sea-orm = { version = "~1.1.20", default-features = false, features = ["sqlx-postgres", "runtime-tokio", "macros", "with-uuid", "with-chrono", "with-json"] }
 thiserror = "2"
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio", "uuid", "chrono", "json"] }
 uuid = { version = "1", features = ["v4"] }
@@ -74,9 +84,14 @@ md-5 = "0.10.6"
 # `CiphertextBlob`/`Plaintext`. Same 0.22 line the db crate builds on, so
 # the lockfile gains no new downloads.
 base64 = "0.22"
-# D-20 exotic charsets (PIDASHCONV-693): `bz2_codec` decode. Pure-Rust
-# default backend (libbz2-rs-sys), no system dependency.
-bzip2 = "0.6"
+# D-20 body layer (PIDASHCONV-1552, tier 3): request-body charsets outside
+# the nine 627 decoders decode with encoding_rs. Same 0.8 line the
+# services crate builds on, so the lockfile gains no new downloads.
+encoding_rs = "0.8"
+# Multipart filename sanitizing (PIDASHCONV-1556): `str.isprintable`
+# as general categories C*/Z* except U+0020, on Unicode 16.0 data.
+# Already in the lockfile via jsonschema, so no new downloads.
+unicode-general-category = "1"
 # Magic-link sign-in/up views read urlencoded forms via the D-16 email
 # line below (`serde_urlencoded`; same 0.7 line, no new downloads).
 # Assistant config validation (D-06): IDN second pass of the Django
@@ -103,6 +118,13 @@ tower = { version = "0.5", features = ["util"] }
 # body through a `Stream` adapter (`futures-core`; both already in the
 # lockfile via axum/reqwest, so no new downloads).
 futures-core = "0.3"
+# Assistant turn MCP client (moved from the binary, PIDASHCONV-1541):
+# incremental SSE reads (`StreamExt`, PIDASHCONV-1112) and output-schema
+# validation (`validator_for`, the mcp SDK's _validate_tool_result). Same
+# locked lines the binary built on (no lock churn beyond the edges); no
+# jsonschema default features (remote $refs fail closed, ring only).
+futures-util = { version = "0.3", default-features = false }
+jsonschema = { version = "0.59", default-features = false }
 tracing = "0.1"
 # GitHub App JWT (`build_app_jwt`, RS256): same 9.x line the auth and jobs
 # crates build on, so the lockfile gains no new downloads.

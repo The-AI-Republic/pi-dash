@@ -695,9 +695,110 @@ pub fn managed_runner_configuration_check(
     errors
 }
 
+/// `REDIS_URL` env name (config registry; `redis.py` reads
+/// `settings.REDIS_URL` — the `redis_origin.rs` position).
+const REDIS_URL_VAR: &str = "REDIS_URL";
+
+/// Redis-backed [`AdmissionCache`]: the production implementation of
+/// the sync trait. Unified (OVL-06 PIDASHCONV-1544) from the api and
+/// jobs twins, which were byte-identical but had to live apart (jobs
+/// cannot depend on api — crate graph); both now re-export this.
+/// Each call opens a short sync connection (the trait is sync; only
+/// cloud admission paths touch it). Keys go through Django's
+/// [`crate::ops::boot::cache_key`] (`:1:{key}`), so Rust and Django
+/// count the same buckets. An unset or unusable `REDIS_URL` fails
+/// closed like Python's backend failure. Re-exported through
+/// `pidash-sdk::ops`.
+#[derive(Clone, Debug)]
+pub struct RedisAdmissionCache {
+    /// The shared client; `None` fails every bucket read closed.
+    pub client: Option<redis::Client>,
+}
+
+fn cache_unavailable<T>(what: &'static str) -> Result<T, redis::RedisError> {
+    Err(redis::RedisError::from((
+        redis::ErrorKind::Io,
+        what,
+        "redis unavailable".to_owned(),
+    )))
+}
+
+impl RedisAdmissionCache {
+    /// Build for an explicit client (request paths).
+    pub fn new(client: Option<redis::Client>) -> Self {
+        RedisAdmissionCache { client }
+    }
+
+    /// Build from `REDIS_URL`: `None` client when it is unset, empty,
+    /// or unparsable, which fails every bucket read closed.
+    pub fn from_env() -> Self {
+        let client = std::env::var(REDIS_URL_VAR)
+            .ok()
+            .filter(|url| !url.is_empty())
+            .and_then(|url| redis::Client::open(url.as_str()).ok());
+        RedisAdmissionCache { client }
+    }
+}
+
+impl AdmissionCache for RedisAdmissionCache {
+    type Error = redis::RedisError;
+
+    fn bucket_count(&self, key: &str) -> Result<Option<i64>, Self::Error> {
+        let Some(client) = &self.client else {
+            return cache_unavailable("bucket_count");
+        };
+        let mut connection = client.get_connection()?;
+        let value: Option<i64> = redis::cmd("GET")
+            .arg(crate::ops::boot::cache_key(key))
+            .query(&mut connection)?;
+        Ok(value)
+    }
+
+    fn add_or_incr(&self, key: &str, timeout_secs: i64) -> Result<(), Self::Error> {
+        let Some(client) = &self.client else {
+            return cache_unavailable("add_or_incr");
+        };
+        let mut connection = client.get_connection()?;
+        // `cache.add(key, 1, timeout) or cache.incr(key)`: set-if-absent
+        // with TTL, else increment.
+        let set: Option<String> = redis::cmd("SET")
+            .arg(crate::ops::boot::cache_key(key))
+            .arg(1)
+            .arg("EX")
+            .arg(timeout_secs)
+            .arg("NX")
+            .query(&mut connection)?;
+        if set.is_none() {
+            let _: i64 = redis::cmd("INCR")
+                .arg(crate::ops::boot::cache_key(key))
+                .query(&mut connection)?;
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_client_fails_closed() {
+        let cache = RedisAdmissionCache { client: None };
+        assert!(cache.bucket_count("k").is_err());
+        assert!(cache.add_or_incr("k", 60).is_err());
+    }
+
+    #[test]
+    fn refused_connection_fails_closed() {
+        // Discard port: nothing listens, so the sync connect refuses
+        // immediately with no server needed.
+        let client = redis::Client::open("redis://127.0.0.1:9/").expect("url parses");
+        let cache = RedisAdmissionCache {
+            client: Some(client),
+        };
+        assert!(cache.bucket_count("k").is_err());
+        assert!(cache.add_or_incr("k", 60).is_err());
+    }
     use serde_json::Value;
     use std::cell::{Cell, RefCell};
     use std::collections::HashMap;

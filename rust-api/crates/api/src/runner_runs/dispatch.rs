@@ -37,12 +37,14 @@ use serde_json::Value;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
+use pidash_db::redis::client_from_settings;
 use pidash_db::runner_runs::pod::Pod;
+use pidash_db::runner_runs::AgentRun;
 use pidash_db::tx::Transaction as DbTransaction;
 use pidash_jobs::dispatch::{
     dispatch_after_commit as collect_dispatch, dispatch_agent_run,
-    execution_fields as resolve_execution_fields, ActorScope, ExecutionFieldsError,
-    ExecutionInputs, ExecutionSeams, ProjectScope,
+    execution_fields as resolve_execution_fields, ActorScope, DispatchDecision,
+    ExecutionFieldsError, ExecutionInputs, ExecutionSeams, ProjectScope,
 };
 use pidash_jobs::orchestration::LiveCreationStore;
 use pidash_services::assistant::seams as assistant_seams;
@@ -64,13 +66,12 @@ use pidash_types::orchestration::{
 };
 
 use super::runs::{
-    binding_detail_for, fetch_guarded_run, is_workspace_member, issue_lookup_sql, parse_py_uuid,
-    pod_mini_for, py_truthy_json, render_detail, tool_calls_for, workspace_role,
-    ISSUE_NOT_FOUND_BODY,
+    binding_detail_for, decode_run, fetch_guarded_run, is_workspace_member, issue_lookup_sql,
+    parse_py_uuid, pod_mini_for, py_truthy_json, render_detail, run_detail_sql, tool_calls_for,
+    workspace_role, ISSUE_NOT_FOUND_BODY,
 };
 use super::{json_response, server_error};
 use crate::project_move_handoff::RedisAdmissionCache;
-use crate::runner_enroll::teardown::redis_client;
 use crate::state::AppState;
 use crate::v1_work_items::handlers_actions::{dispatch_deps, draw_jitter, fetch_project, IssueRow};
 
@@ -519,10 +520,14 @@ async fn rollback_then(tx: DbTransaction<'_>, response: Response) -> Response {
 /// one `dispatch_agent_run` per collected run — Django's `on_commit`
 /// registration order (the creation-rate consumes register inside
 /// `execution_fields`, before the `dispatch_after_commit` hook at
-/// `runs.py:309`). A drain failure is a 500 with the rows committed,
-/// exactly like an `on_commit` raise.
+/// `runs.py:309`). A [`DispatchDecision::PodDrain`] drains through
+/// `drain_pod_by_id` — Python drains the pod inline
+/// (`dispatch.py:61-70`), so the decision is acted on, never dropped.
+/// A drain failure is a 500 with the rows committed, exactly like an
+/// `on_commit` raise.
 async fn drain_direct_dispatch(
     pool: &PgPool,
+    state: &AppState,
     cloud: &pidash_db::config::CloudAgentSettings,
     cache: &RedisAdmissionCache,
     dispatches: Vec<Uuid>,
@@ -533,36 +538,74 @@ async fn drain_direct_dispatch(
         consume_admission_token(cache, consume);
     }
     for run_id in dispatches {
-        if dispatch_agent_run(pool, cloud, run_id, now).await.is_err() {
-            return Err(server_error());
+        match dispatch_agent_run(pool, cloud, run_id, now).await {
+            Ok(DispatchDecision::PodDrain { pod_id }) => {
+                if crate::runner_enroll::teardown::drain_pod_by_id(pool, state, pod_id)
+                    .await
+                    .is_err()
+                {
+                    return Err(server_error());
+                }
+            }
+            Ok(_) => {}
+            Err(_) => return Err(server_error()),
         }
     }
     Ok(())
 }
 
 /// Re-read the created run and render the 201: `run.refresh_from_db()`
-/// then `AgentRunSerializer(run).data` (`runs.py:341-345`) — the same
-/// detail shape as `GET`, with the post-dispatch row.
+/// then `AgentRunSerializer(run).data` — the direct path only
+/// (`runs.py:376-380`). The issue-bound tails must NOT use this: Django
+/// serializes the pre-dispatch in-memory instance there (no refresh), so
+/// they snapshot the row in-transaction and render via
+/// [`render_created_snapshot`].
 async fn render_created_run(pool: &PgPool, run_id: Uuid) -> Response {
     let guarded = match fetch_guarded_run(pool, run_id).await {
         Ok(Some(guarded)) => guarded,
         Ok(None) => return server_error(),
         Err(response) => return response,
     };
-    let pod = match pod_mini_for(pool, guarded.run.pod_id).await {
+    render_created_snapshot(pool, &guarded.run).await
+}
+
+/// Render the 201 from a pre-commit snapshot of the created run (the
+/// issue-bound tails): Django's `AgentRunSerializer(run).data` on the
+/// in-memory instance. The run's own columns come from the snapshot;
+/// pod, tool calls and binding re-read post-commit — Django lazy-loads
+/// those related rows at serialization time too, and the dispatch
+/// touches only the `agent_run` row.
+async fn render_created_snapshot(pool: &PgPool, run: &AgentRun) -> Response {
+    let pod = match pod_mini_for(pool, run.pod_id).await {
         Ok(pod) => pod,
         Err(response) => return response,
     };
-    let tool_calls = match tool_calls_for(pool, guarded.run.id).await {
+    let tool_calls = match tool_calls_for(pool, run.id).await {
         Ok(calls) => calls,
         Err(response) => return response,
     };
-    let binding = match binding_detail_for(pool, &guarded.run).await {
+    let binding = match binding_detail_for(pool, run).await {
         Ok(binding) => binding,
         Err(response) => return response,
     };
-    let payload = render_detail(&guarded.run, &pod, &tool_calls, binding.as_ref());
+    let payload = render_detail(run, &pod, &tool_calls, binding.as_ref());
     json_response(StatusCode::CREATED, payload.to_string())
+}
+
+/// Read the just-created run through the open creation transaction: the
+/// pre-dispatch row Django's in-memory instance holds. A missing row or
+/// a read error is a 500 — the caller rolls the transaction back, as
+/// Django's `atomic` block would on the same failure.
+async fn fetch_created_run(tx: &mut DbTransaction<'_>, run_id: Uuid) -> Result<AgentRun, Response> {
+    let row: Option<sqlx::postgres::PgRow> = sqlx::query(&run_detail_sql())
+        .bind(run_id)
+        .fetch_optional(&mut **tx.inner())
+        .await
+        .map_err(|_| server_error())?;
+    let Some(row) = row else {
+        return Err(server_error());
+    };
+    decode_run(&row, 0).map_err(|_| server_error())
 }
 
 /// The direct-create reads `execution_fields` needs beyond the §6.5
@@ -1277,7 +1320,7 @@ pub async fn post_direct(
         now_unix_secs: now.timestamp(),
     };
     let cache = RedisAdmissionCache {
-        client: redis_client(state),
+        client: client_from_settings(state.settings()),
     };
     let mut deferred: Vec<DeferredConsume> = Vec::new();
     let mut collect = |consume: DeferredConsume| deferred.push(consume);
@@ -1409,7 +1452,7 @@ pub async fn post_direct(
         return server_error();
     }
     if let Err(response) =
-        drain_direct_dispatch(pool, &cloud, &cache, dispatches, deferred, now).await
+        drain_direct_dispatch(pool, state, &cloud, &cache, dispatches, deferred, now).await
     {
         return response;
     }
@@ -1690,7 +1733,7 @@ async fn post_issue_dispatch(
             }
         }
     };
-    let (tx, pool, cache, dispatches, deferred, _terminal) = store.into_parts();
+    let (mut tx, pool, cache, dispatches, deferred, _terminal) = store.into_parts();
     let Some(run_id) = run_id else {
         // `transaction.set_rollback(True)` (`:379/453`): the re-time and
         // any bounce writes vanish with the failed dispatch.
@@ -1700,15 +1743,22 @@ async fn post_issue_dispatch(
         )
         .await;
     };
+    // Snapshot the created row before commit and drain: Django answers
+    // these tails with the pre-dispatch in-memory instance (no
+    // `refresh_from_db`, unlike the direct path).
+    let snapshot = match fetch_created_run(&mut tx, run_id).await {
+        Ok(run) => run,
+        Err(response) => return rollback_then(tx, response).await,
+    };
     if tx.commit().await.is_err() {
         return server_error();
     }
     if let Err(response) =
-        drain_direct_dispatch(pool, &cloud, &cache, dispatches, deferred, now).await
+        drain_direct_dispatch(pool, state, &cloud, &cache, dispatches, deferred, now).await
     {
         return response;
     }
-    render_created_run(pool, run_id).await
+    render_created_snapshot(pool, &snapshot).await
 }
 
 /// `_post_run_ai` (`runs.py:347-388`).

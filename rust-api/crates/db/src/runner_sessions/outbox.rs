@@ -92,10 +92,11 @@
 //!   divergence" (spin vs terminate-and-claim) is retired: both
 //!   sides terminate and claim, and the
 //!   `delete_consumer`-after-`0-0` branch is reachable on both.
-//!   Every *terminating* Python trace still replays exactly: empty
-//!   PEL returns `0` with no `DELCONSUMER` (the old consumer is
-//!   kept — `claim_pending_empty_pel`), transport errors return the
-//!   count so far, `None` returns `0`.
+//!   Every Python trace replays exactly: an empty terminal page
+//!   returns `0` *with* `DELCONSUMER` (the old consumer is deleted
+//!   — `claim_pending_empty_pel`), an empty non-terminal page keeps
+//!   scanning, transport errors return the count so far, `None`
+//!   returns `0`.
 //! * `claim_pending_for_new_session` runs even when `old_consumer`
 //!   is `None` (`outbox.py:297-305` — deliberate: `XAUTOCLAIM`
 //!   scans the whole group PEL; the fixture's `None`-consumer spin
@@ -518,12 +519,12 @@ fn parse_autoclaim(reply: &redis::Value) -> Option<(String, Vec<Vec<u8>>)> {
 /// Runs even when `old_consumer` is `None` (the whole-group scan is
 /// the point — `outbox.py:297-305`); the old consumer entry is
 /// deleted only after the cursor reaches `0-0`, and only when an
-/// old consumer was named. An empty claim page returns the count so
-/// far *without* deleting (Python's `if not result: return
-/// claimed`), so an empty PEL keeps the old consumer. Transport or
-/// shape failures log and return the count so far, never `Err`. A
-/// cursor that does not advance bails the same way (error log,
-/// count so far — Django `64842e19`).
+/// old consumer was named. An empty page still follows the cursor:
+/// `0-0` deletes the old consumer and returns (so an empty PEL
+/// hands off cleanly), a non-advancing cursor bails (error log,
+/// count so far — Django `64842e19`), anything else continues the
+/// scan (`outbox.py:342-356`). Transport or shape failures log and
+/// return the count so far, never `Err`.
 pub async fn claim_pending_for_new_session(
     client: Option<&redis::Client>,
     runner_id: &str,
@@ -573,9 +574,6 @@ pub async fn claim_pending_for_new_session(
                 return claimed;
             }
         };
-        if ids.is_empty() {
-            return claimed;
-        }
         claimed += ids.len();
         if next_cursor == "0-0" {
             if let Some(old) = old_consumer.filter(|name| !name.is_empty()) {
@@ -1862,14 +1860,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mock_claim_empty_pel_returns_without_delete() {
-        // Empty PEL: one XAUTOCLAIM, returns 0, and NO DELCONSUMER —
-        // the old consumer is kept (claim_pending_empty_pel).
+    async fn mock_claim_empty_pel_deletes_old_consumer() {
+        // Empty PEL: one XAUTOCLAIM returning cursor 0-0, returns 0,
+        // and the old consumer IS deleted (claim_pending_empty_pel;
+        // `outbox.py:343-346` runs on an empty terminal page).
         let rid = fresh_id();
         let sk = keys::stream_key(&rid);
         let gn = keys::group_name(&rid);
         let empty = resp_array(vec![resp_str("0-0"), resp_array(vec![])]);
-        let (client, log) = start_mock(vec![empty]);
+        let (client, log) = start_mock(vec![empty, resp_int(0)]);
         let claimed = claim_pending_for_new_session(
             Some(&client),
             &rid,
@@ -1881,17 +1880,83 @@ mod tests {
         assert_eq!(claimed, 0);
         assert_eq!(
             recorded(&log),
-            vec![argv([
-                "XAUTOCLAIM",
-                sk.as_str(),
-                gn.as_str(),
-                "consumer-new",
-                "0",
-                "0-0",
-                "COUNT",
-                "200",
-                "JUSTID"
-            ])]
+            vec![
+                argv([
+                    "XAUTOCLAIM",
+                    sk.as_str(),
+                    gn.as_str(),
+                    "consumer-new",
+                    "0",
+                    "0-0",
+                    "COUNT",
+                    "200",
+                    "JUSTID"
+                ]),
+                argv([
+                    "XGROUP",
+                    "DELCONSUMER",
+                    sk.as_str(),
+                    gn.as_str(),
+                    "consumer-old"
+                ]),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn mock_claim_empty_nonterminal_page_keeps_scanning() {
+        // An empty page with an advancing cursor keeps scanning and
+        // still deletes the old consumer at 0-0 (`outbox.py:342-357`;
+        // mirrors Django's
+        // test_claim_pending_keeps_scanning_empty_nonterminal_pages).
+        let rid = fresh_id();
+        let sk = keys::stream_key(&rid);
+        let gn = keys::group_name(&rid);
+        let page1 = resp_array(vec![resp_str("250-0"), resp_array(vec![])]);
+        let page2 = resp_array(vec![resp_str("0-0"), resp_array(vec![resp_str("300-0")])]);
+        let (client, log) = start_mock(vec![page1, page2, resp_int(0)]);
+        let claimed = claim_pending_for_new_session(
+            Some(&client),
+            &rid,
+            Some("consumer-old"),
+            "consumer-new",
+            0,
+        )
+        .await;
+        assert_eq!(claimed, 1);
+        assert_eq!(
+            recorded(&log),
+            vec![
+                argv([
+                    "XAUTOCLAIM",
+                    sk.as_str(),
+                    gn.as_str(),
+                    "consumer-new",
+                    "0",
+                    "0-0",
+                    "COUNT",
+                    "200",
+                    "JUSTID"
+                ]),
+                argv([
+                    "XAUTOCLAIM",
+                    sk.as_str(),
+                    gn.as_str(),
+                    "consumer-new",
+                    "0",
+                    "250-0",
+                    "COUNT",
+                    "200",
+                    "JUSTID"
+                ]),
+                argv([
+                    "XGROUP",
+                    "DELCONSUMER",
+                    sk.as_str(),
+                    gn.as_str(),
+                    "consumer-old"
+                ]),
+            ]
         );
     }
 
@@ -2687,7 +2752,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn live_claim_empty_pel_keeps_old_consumer() {
+    async fn live_claim_empty_pel_deletes_old_consumer() {
         let client = live_client();
         let rid = fresh_id();
         ensure_stream_group(Some(&client), &rid)
@@ -2719,8 +2784,8 @@ mod tests {
         let reply: redis::Value = xinfo.query_async(&mut conn).await.expect("xinfo");
         let names = consumer_names(&reply);
         assert!(
-            names.contains(&"consumer-old".to_string()),
-            "old consumer kept on empty PEL: {names:?}"
+            !names.contains(&"consumer-old".to_string()),
+            "old consumer deleted on empty PEL: {names:?}"
         );
         assert!(
             names.contains(&"consumer-new".to_string()),
@@ -2731,10 +2796,9 @@ mod tests {
 
     #[tokio::test]
     async fn live_claim_nonempty_terminates_and_hands_off() {
-        // KNOWN DIVERGENCE (see the module docs): Python spins here
-        // forever (the JUSTID cursor bug); the Rust loop paginates
-        // to `0-0`, returns the claimed count, and deletes the old
-        // consumer.
+        // Both sides paginate to `0-0` since Django `64842e19`
+        // retired the JUSTID cursor spin: the Rust loop returns the
+        // claimed count and deletes the old consumer.
         let client = live_client();
         let rid = fresh_id();
         ensure_stream_group(Some(&client), &rid)

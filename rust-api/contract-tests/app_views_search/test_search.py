@@ -11,6 +11,7 @@ The EXPLAIN test below pins the plan; the behavioral tests pin the results.
 """
 
 import os
+from datetime import datetime, timezone
 
 from .conftest import session_headers
 
@@ -274,6 +275,50 @@ def test_entity_search_issue_shape(api, seed, tenant_a, project_a, auth_a):
     }
 
 
+def test_entity_search_cycle_module_archived_project_included(
+    api, seed, tenant_a, project_a, auth_a
+):
+    """Entity-search cycle/module branches include archived projects
+    (PIDASHCONV-1450): Django filters member/is_active/slug only, with
+    no project__archived_at__isnull on these branches — unlike the
+    global search sections."""
+    ws_id = tenant_a["workspace"]["id"]
+    cycle_id = seed._insert(
+        "cycles",
+        name="archived probe cycle",
+        description="",
+        owned_by_id=tenant_a["user"]["id"],
+        view_props="{}",
+        logo_props="{}",
+        timezone="UTC",
+        version=1,
+        sort_order=65535,
+        progress_snapshot="{}",
+        project_id=project_a,
+        workspace_id=ws_id,
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+    module_id = seed.module(ws_id, project_a, name="archived probe module")
+    with seed.conn.cursor() as cur:
+        cur.execute(
+            "UPDATE projects SET archived_at = %s WHERE id = %s",
+            (datetime.now(timezone.utc), project_a),
+        )
+    url = f"/api/workspaces/{tenant_a['workspace']['slug']}/entity-search/"
+    for query_type, row_id in (("cycle", cycle_id), ("module", module_id)):
+        for params in (
+            {"query": "archived probe", "query_type": query_type},
+            {
+                "query": "archived probe", "query_type": query_type,
+                "project_id": str(project_a),
+            },
+        ):
+            r = api.get(url, headers=auth_a, params=params)
+            assert r.status_code == 200, r.text
+            assert row_id in [row["id"] for row in r.json()[query_type]], params
+
+
 def test_entity_search_without_project(api, seed, tenant_a, auth_a):
     r = api.get(
         f"/api/workspaces/{tenant_a['workspace']['slug']}/entity-search/",
@@ -328,3 +373,37 @@ def test_fts_uses_issues_fts_idx(db, seed, tenant_a, project_a):
         )
         plan = "\n".join(row[0] for row in cur.fetchall())
     assert "issues_fts_idx" in plan, plan
+
+
+def test_search_issues_module_exclusion_split_exclude(
+    api, seed, tenant_a, project_a, auth_a
+):
+    """?module=M keeps Django's split exclude (PIDASHCONV-1449): exclude()
+    over the multi-valued issue_module join compiles to NOT (any link row
+    to M AND any live link to any module), so an issue soft-removed from M
+    but still live in N is excluded, while a control with only a
+    soft-deleted link to M is still listed."""
+    ws_id = tenant_a["workspace"]["id"]
+    mod_m = seed.module(ws_id, project_a)
+    mod_n = seed.module(ws_id, project_a)
+    issue_id = seed.issue(ws_id, project_a, name="split exclude target")
+    control_id = seed.issue(ws_id, project_a, name="split exclude control")
+    seed.module_issue(ws_id, project_a, mod_m, issue_id)
+    seed.module_issue(ws_id, project_a, mod_n, issue_id)
+    seed.module_issue(ws_id, project_a, mod_m, control_id)
+    with seed.conn.cursor() as cur:
+        cur.execute(
+            "UPDATE module_issues SET deleted_at = now(), updated_at = now()"
+            " WHERE module_id = %s AND issue_id IN (%s, %s)",
+            (mod_m, issue_id, control_id),
+        )
+    r = api.get(
+        f"/api/workspaces/{tenant_a['workspace']['slug']}"
+        f"/projects/{project_a}/search-issues/",
+        headers=auth_a,
+        params={"module": str(mod_m)},
+    )
+    assert r.status_code == 200, r.text
+    ids = [row["id"] for row in r.json()]
+    assert issue_id not in ids
+    assert control_id in ids

@@ -76,6 +76,7 @@ use pidash_services::app_issues::{
     STATE_GROUP_VALUES,
 };
 
+use pidash_compat::response::json_ok as json_response;
 use render::v2_page;
 
 /// Register the app-issues routes: the five list-family GETs, the
@@ -286,25 +287,10 @@ pub const NOT_FOUND_BODY: &str = r#"{"error":"The required object does not exist
 /// found") renders with the resolve message — verified against live
 /// Django, not the bare default.
 pub const PROJECT_NOT_FOUND_BODY: &str = r#"{"detail":"Project not found"}"#;
-/// `handle_exception`'s generic 500 branch.
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// `handle_exception`'s `ValidationError` branch (bad UUID in `issues=`).
 pub const INVALID_DETAIL_BODY: &str = r#"{"error":"Please provide valid detail"}"#;
 
-/// One query value, repeated or not. `serde_html_form` (axum's `Query`
-/// backend) does not coerce a lone `?key=value` into a sequence, so the
-/// extractor uses this untagged shape and callers read first/last —
-/// mirroring Django's `QueryDict`, where repeats are legal and `.get`
-/// returns the last value.
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(untagged)]
-pub enum OneOrMany {
-    One(String),
-    Many(Vec<String>),
-}
-
-/// The multi-value query map every list handler extracts.
-pub type QueryMap = HashMap<String, OneOrMany>;
+pub use pidash_compat::http::{query_last, OneOrMany, QueryMap};
 
 /// All values for `key`, in order; `None` when absent.
 pub fn query_values(query: &QueryMap, key: &str) -> Option<Vec<String>> {
@@ -312,11 +298,6 @@ pub fn query_values(query: &QueryMap, key: &str) -> Option<Vec<String>> {
         OneOrMany::One(one) => vec![one.clone()],
         OneOrMany::Many(many) => many.clone(),
     })
-}
-
-/// Django `QueryDict.get`: the last value, or `None`.
-pub fn query_last(query: &QueryMap, key: &str) -> Option<String> {
-    query_values(query, key).and_then(|values| values.into_iter().last())
 }
 
 /// Plain multi-map for the services layer (pure, axum-free).
@@ -347,6 +328,8 @@ pub enum Denial {
     BadError(String),
     /// 400, `{"message": ..., "code": ...}` (filter validation).
     BadFilter(String, String),
+    /// 502, truncated request-body read (the shared bad-gateway shape).
+    TruncatedBody,
     /// 500, generic branch.
     ServerError,
 }
@@ -380,6 +363,10 @@ impl Denial {
                     json_string(message),
                     json_string(code)
                 ),
+            ),
+            Denial::TruncatedBody => (
+                StatusCode::BAD_GATEWAY,
+                crate::edge::BAD_GATEWAY_BODY.to_owned(),
             ),
             Denial::ServerError => (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -681,48 +668,14 @@ pub fn render_condition(cond: &Condition) -> (String, Vec<sea_query::Value>) {
     (fragment, values.0)
 }
 
-fn bind_sea_value<'q>(
-    query: sqlx::query::Query<'q, Postgres, PgArguments>,
-    value: &sea_query::Value,
-) -> Result<sqlx::query::Query<'q, Postgres, PgArguments>, Denial> {
-    use sea_query::Value as SeaValue;
-    match value {
-        SeaValue::Bool(value) => Ok(query.bind(*value)),
-        SeaValue::TinyInt(value) => Ok(query.bind(*value)),
-        SeaValue::SmallInt(value) => Ok(query.bind(*value)),
-        SeaValue::Int(value) => Ok(query.bind(*value)),
-        SeaValue::BigInt(value) => Ok(query.bind(*value)),
-        SeaValue::TinyUnsigned(value) => Ok(query.bind(value.map(i16::from))),
-        SeaValue::SmallUnsigned(value) => Ok(query.bind(value.map(i32::from))),
-        SeaValue::Unsigned(value) => Ok(query.bind(value.map(|v| v as i64))),
-        SeaValue::BigUnsigned(value) => Ok(query.bind(value.map(|v| v as i64))),
-        SeaValue::Float(value) => Ok(query.bind(*value)),
-        SeaValue::Double(value) => Ok(query.bind(*value)),
-        SeaValue::String(value) => Ok(query.bind(value.clone().map(|text| *text))),
-        SeaValue::Char(value) => Ok(query.bind(value.map(|char| char.to_string()))),
-        SeaValue::Bytes(value) => Ok(query.bind(value.clone().map(|bytes| (*bytes).clone()))),
-        SeaValue::Uuid(value) => Ok(query.bind(value.clone().map(|id| *id))),
-        // Rich date / datetime filters bind typed params (`DATE` /
-        // `timestamptz`), like the ORM. The remaining chrono variants are
-        // never emitted; they only keep the match exhaustive.
-        SeaValue::ChronoDate(value) => Ok(query.bind(value.clone().map(|date| *date))),
-        SeaValue::ChronoDateTimeUtc(value) => Ok(query.bind(value.clone().map(|moment| *moment))),
-        SeaValue::ChronoTime(_)
-        | SeaValue::ChronoDateTime(_)
-        | SeaValue::ChronoDateTimeLocal(_)
-        | SeaValue::ChronoDateTimeWithTimeZone(_) => Err(Denial::ServerError),
-    }
-}
-
+/// Bind a `sea_query::Value` vec to raw SQL: the canonical binder now
+/// lives in `pidash_compat::db` (OVL-04); this wrapper only maps its
+/// error to the local 500, exactly as the previous inline copy did.
 fn bind_all<'a>(
     sql: &'a str,
     values: Vec<sea_query::Value>,
 ) -> Result<sqlx::query::Query<'a, Postgres, PgArguments>, Denial> {
-    let mut query = sqlx::query(sql);
-    for value in &values {
-        query = bind_sea_value(query, value)?;
-    }
-    Ok(query)
+    pidash_compat::db::bind_all(sql, values).map_err(|_| Denial::ServerError)
 }
 
 /// Fetch every row of `inner_sql` as a JSON map each, via `row_to_json`.
@@ -932,6 +885,7 @@ pub async fn filters_timezone(
 // kernel conditions (`issue` for the base table, `state` for states,
 // the relation aliases for the m2m joins).
 
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 use pidash_db::issue_filters::FilterValue;
 
 /// A legacy predicate compiled to SQL text (placeholders bound inline).
@@ -939,10 +893,16 @@ use pidash_db::issue_filters::FilterValue;
 /// list applies the same `issue_filters(params, "GET")` stack over the
 /// same `issue` alias — referenced, never re-ported. Visibility only; no
 /// behavior change.
+/// `timezone` is the truncation zone for the `__date` terms: Django's
+/// `__date` lookup is `TruncDate`, whose `get_tzname()` returns the
+/// `TimezoneMixin`-activated actor zone. Callers whose slice still
+/// truncates in UTC pass `chrono_tz::UTC` until their own actor-zone
+/// fix lands (identical wherever the session zone is UTC).
 pub(crate) fn legacy_sql(
     binder: &mut Binder,
     name: &str,
     value: &FilterValue,
+    timezone: &Tz,
 ) -> Result<String, Denial> {
     // `__isnull` flags.
     if let Some(path) = name.strip_suffix("__isnull") {
@@ -1008,10 +968,11 @@ pub(crate) fn legacy_sql(
             }
             Ok(format!("{column} IN ({})", holders.join(",")))
         }
-        FilterValue::Text(text) => legacy_text_sql(binder, name, text),
+        FilterValue::Text(text) => legacy_text_sql(binder, name, text, timezone),
         FilterValue::Flag(_) => Err(Denial::ServerError),
         FilterValue::Day(day) => {
-            let (column, operator) = day_comparison(name).ok_or(Denial::ServerError)?;
+            let (column, operator) =
+                day_comparison(binder, name, timezone).ok_or(Denial::ServerError)?;
             let holder = binder.bind_string(day.to_string());
             Ok(format!("{column} {operator} {holder}::date"))
         }
@@ -1073,15 +1034,31 @@ fn strings_in_column(name: &str) -> Option<&'static str> {
     })
 }
 
+/// A `__date` term truncated in `timezone`: `(issue.<column> AT TIME
+/// ZONE $N)::date` with the zone bound as a parameter (it comes from a
+/// parsed `Tz`, so it is a valid IANA name either way). Django's
+/// `__date` lookup is `TruncDate`, whose `get_tzname()` returns the
+/// `TimezoneMixin`-activated actor zone.
+fn zoned_date_column(binder: &mut Binder, column: &str, timezone: &Tz) -> String {
+    let holder = binder.bind_string(timezone.name().to_owned());
+    format!("(issue.{column} AT TIME ZONE {holder})::date")
+}
+
 /// `(column, operator)` for `Day` predicates (`__gte` / `__lte`).
-fn day_comparison(name: &str) -> Option<(&'static str, &'static str)> {
+/// The `__date` terms truncate in `timezone`; `start_date` /
+/// `target_date` are plain date columns and need no truncation.
+fn day_comparison(
+    binder: &mut Binder,
+    name: &str,
+    timezone: &Tz,
+) -> Option<(String, &'static str)> {
     let (term, operator) = name.rsplit_once("__")?;
     let column = match term {
-        "created_at__date" => "issue.created_at::date",
-        "updated_at__date" => "issue.updated_at::date",
-        "completed_at__date" => "issue.completed_at::date",
-        "start_date" => "issue.start_date",
-        "target_date" => "issue.target_date",
+        "created_at__date" => zoned_date_column(binder, "created_at", timezone),
+        "updated_at__date" => zoned_date_column(binder, "updated_at", timezone),
+        "completed_at__date" => zoned_date_column(binder, "completed_at", timezone),
+        "start_date" => "issue.start_date".to_owned(),
+        "target_date" => "issue.target_date".to_owned(),
         _ => return None,
     };
     let operator = match operator {
@@ -1094,8 +1071,14 @@ fn day_comparison(name: &str) -> Option<(&'static str, &'static str)> {
 
 /// Text predicates: `name__icontains`, explicit date bounds
 /// (`__gte`/`__lte` on a `__date` term or plain date term), and the
-/// single-value `__contains` form.
-fn legacy_text_sql(binder: &mut Binder, name: &str, text: &str) -> Result<String, Denial> {
+/// single-value `__contains` form. The `__date` terms truncate in
+/// `timezone` (Django `TruncDate` under the activated actor zone).
+fn legacy_text_sql(
+    binder: &mut Binder,
+    name: &str,
+    text: &str,
+    timezone: &Tz,
+) -> Result<String, Denial> {
     if name == "name__icontains" {
         // Django `icontains`: LIKE with `\`, `%`, `_` escaped.
         let escaped = text
@@ -1116,11 +1099,11 @@ fn legacy_text_sql(binder: &mut Binder, name: &str, text: &str) -> Result<String
             _ => return Err(Denial::ServerError),
         };
         let column = match term {
-            "created_at__date" => "issue.created_at::date",
-            "updated_at__date" => "issue.updated_at::date",
-            "completed_at__date" => "issue.completed_at::date",
-            "start_date" => "issue.start_date",
-            "target_date" => "issue.target_date",
+            "created_at__date" => zoned_date_column(binder, "created_at", timezone),
+            "updated_at__date" => zoned_date_column(binder, "updated_at", timezone),
+            "completed_at__date" => zoned_date_column(binder, "completed_at", timezone),
+            "start_date" => "issue.start_date".to_owned(),
+            "target_date" => "issue.target_date".to_owned(),
             _ => return Err(Denial::ServerError),
         };
         // Explicit bounds must parse as dates: Django's `get_prep_value`
@@ -1465,7 +1448,9 @@ pub fn filtered_set(
     }
     // Legacy filters. Relative dates resolve against the UTC date, exactly
     // like `timezone.now().date()` in `issue_filters.py` (`now()` is always
-    // UTC; the request tz activation only affects `localtime()`).
+    // UTC; the request tz activation only affects `localtime()`). The
+    // `__date` truncations use the gate's actor zone instead (Django's
+    // `TruncDate` under the `TimezoneMixin`-activated user zone).
     let mut legacy_sql_text = String::new();
     if layers.legacy {
         let flat: HashMap<String, String> = query
@@ -1476,7 +1461,7 @@ pub fn filtered_set(
         let legacy = pidash_db::issue_filters::issue_filters_get(&flat, "", today)
             .map_err(|_| Denial::ServerError)?;
         for (name, value) in legacy.predicates() {
-            let fragment = legacy_sql(&mut binder, name, value)?;
+            let fragment = legacy_sql(&mut binder, name, value, &gate.timezone)?;
             if legacy_sql_text.is_empty() {
                 legacy_sql_text = fragment;
             } else {
@@ -1979,14 +1964,6 @@ pub async fn group_values(
 
 type HandlerResult = Result<Response, Denial>;
 
-fn json_response(body: String) -> Response {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("json response")
-}
-
 /// Shared preamble: gate + parsed params + filtered set + order key.
 /// `extra_where` carries path-specific predicates (`updated_at__gt`,
 /// `pk__in`); callers splice their binds through `extra_binds`.
@@ -2422,7 +2399,7 @@ fn shape_json_value(field: &str, value: &Value, timezone: &Tz, shift: bool) -> V
             },
             _ => value.clone(),
         },
-        "completed_at" | "deleted_at" => match value {
+        "created_at" | "updated_at" | "completed_at" | "deleted_at" => match value {
             Value::String(text) => match chrono::DateTime::parse_from_rfc3339(text) {
                 Ok(aware) => Value::String(crate::serializer::render_datetime(
                     &aware.with_timezone(&chrono::Utc),
@@ -2434,7 +2411,9 @@ fn shape_json_value(field: &str, value: &Value, timezone: &Tz, shift: bool) -> V
         "sort_order" => match value {
             Value::Number(number) => {
                 let float = number.as_f64().unwrap_or(f64::NAN);
-                Value::String(crate::paginator::py_float_str(float))
+                serde_json::Number::from_f64(float)
+                    .map(Value::Number)
+                    .unwrap_or_else(|| value.clone())
             }
             _ => value.clone(),
         },
@@ -3211,6 +3190,45 @@ mod tests {
     }
 
     #[test]
+    fn grouped_rows_render_like_ungrouped() {
+        // PIDASHCONV-1510: Django serves grouped rows through the same
+        // `issue_on_results` `.values()` dicts as the flat list, so
+        // `sort_order` is a JSON number and datetimes carry `Z` — not the
+        // `row_to_json` string/`+00:00` spellings.
+        let mut row = Map::new();
+        row.insert(
+            "sort_order".to_owned(),
+            Value::Number(serde_json::Number::from(10000)),
+        );
+        row.insert(
+            "created_at".to_owned(),
+            Value::String("2026-10-26T06:51:00.235877+00:00".to_owned()),
+        );
+        row.insert(
+            "updated_at".to_owned(),
+            Value::String("2026-10-26T06:51:00.235877+00:00".to_owned()),
+        );
+        let fields = vec![
+            "sort_order".to_owned(),
+            "created_at".to_owned(),
+            "updated_at".to_owned(),
+        ];
+        let shaped = shape_map(&row, &fields, &chrono_tz::UTC, false);
+        assert_eq!(
+            serde_json::to_string(&shaped["sort_order"]).unwrap(),
+            "10000.0"
+        );
+        assert_eq!(
+            shaped["created_at"],
+            Value::String("2026-10-26T06:51:00.235877Z".to_owned())
+        );
+        assert_eq!(
+            shaped["updated_at"],
+            Value::String("2026-10-26T06:51:00.235877Z".to_owned())
+        );
+    }
+
+    #[test]
     fn count_annotations_grouped_paths_render_null_when_empty() {
         // `IssueViewSet.apply_annotations` + `IssuePaginatedViewSet`: the
         // grouped `Count` subquery has no `Coalesce`, so zero related rows
@@ -3428,10 +3446,22 @@ mod tests {
     #[test]
     fn legacy_isnull_and_in_predicates() {
         let mut binder = Binder::new();
-        let sql = legacy_sql(&mut binder, "labels__isnull", &FilterValue::Flag(true)).expect("sql");
+        let sql = legacy_sql(
+            &mut binder,
+            "labels__isnull",
+            &FilterValue::Flag(true),
+            &chrono_tz::UTC,
+        )
+        .expect("sql");
         assert_eq!(sql, "label_issue.label_id IS NULL");
         let id = uuid::Uuid::nil();
-        let sql = legacy_sql(&mut binder, "state__in", &FilterValue::Uuids(vec![id])).expect("sql");
+        let sql = legacy_sql(
+            &mut binder,
+            "state__in",
+            &FilterValue::Uuids(vec![id]),
+            &chrono_tz::UTC,
+        )
+        .expect("sql");
         assert!(sql.starts_with("issue.state_id IN ($"));
     }
 
@@ -3439,12 +3469,20 @@ mod tests {
     fn legacy_updated_at_predicates_hit_the_updated_column() {
         let mut binder = Binder::new();
         let day = chrono::NaiveDate::from_ymd_opt(2026, 1, 12).expect("day");
-        let sql =
-            legacy_sql(&mut binder, "updated_at__date__gte", &FilterValue::Day(day)).expect("sql");
-        assert!(sql.starts_with("issue.updated_at::date >= "), "{sql}");
+        let sql = legacy_sql(
+            &mut binder,
+            "updated_at__date__gte",
+            &FilterValue::Day(day),
+            &chrono_tz::UTC,
+        )
+        .expect("sql");
+        assert!(sql.starts_with("(issue.updated_at AT TIME ZONE $"), "{sql}");
+        assert!(sql.contains(")::date >= "), "{sql}");
         let text = FilterValue::Text("2026-01-12".to_owned());
-        let sql = legacy_sql(&mut binder, "updated_at__date__lte", &text).expect("sql");
-        assert!(sql.starts_with("issue.updated_at::date"), "{sql}");
+        let sql =
+            legacy_sql(&mut binder, "updated_at__date__lte", &text, &chrono_tz::UTC).expect("sql");
+        assert!(sql.contains("issue.updated_at"), "{sql}");
+        assert!(!sql.contains("created_at"), "{sql}");
     }
 
     #[test]
@@ -3454,9 +3492,50 @@ mod tests {
             &mut binder,
             "logged_by__in",
             &FilterValue::Uuids(vec![uuid::Uuid::nil()]),
+            &chrono_tz::UTC,
         )
         .unwrap_err();
         assert!(matches!(denial, Denial::ServerError));
+    }
+
+    #[test]
+    fn legacy_date_terms_truncate_in_the_actor_zone() {
+        // Django's `__date` lookup is `TruncDate` in the activated actor
+        // zone; the zone rides as a bound parameter, never interpolated.
+        let mut binder = Binder::new();
+        let tokyo: Tz = "Asia/Tokyo".parse().expect("tz");
+        let sql = legacy_sql(
+            &mut binder,
+            "created_at__date__gte",
+            &FilterValue::Text("2026-01-02".to_owned()),
+            &tokyo,
+        )
+        .expect("sql");
+        assert_eq!(sql, "(issue.created_at AT TIME ZONE $1)::date >= $2::date");
+        assert_eq!(binder.values().len(), 2);
+        // Plain date columns truncate nothing and bind no zone.
+        let mut binder = Binder::new();
+        let sql = legacy_sql(
+            &mut binder,
+            "start_date__lte",
+            &FilterValue::Text("2026-01-02".to_owned()),
+            &tokyo,
+        )
+        .expect("sql");
+        assert_eq!(sql, "issue.start_date <= $1::date");
+        // The single-value `__contains` form LIKEs the zoned date text.
+        let mut binder = Binder::new();
+        let sql = legacy_sql(
+            &mut binder,
+            "created_at__date__contains",
+            &FilterValue::Text("2026-01-02".to_owned()),
+            &tokyo,
+        )
+        .expect("sql");
+        assert_eq!(
+            sql,
+            "(issue.created_at AT TIME ZONE $1)::date::text LIKE $3"
+        );
     }
 
     #[test]

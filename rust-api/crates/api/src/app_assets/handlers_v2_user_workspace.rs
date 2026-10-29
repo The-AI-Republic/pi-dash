@@ -103,11 +103,18 @@ use uuid::Uuid;
 use pidash_auth::permissions::allow::AllowFacts;
 use pidash_auth::scope::TenantScope;
 use pidash_services::app_assets::queries_v2_user_workspace as q;
+use pidash_services::ops::users as user_save;
 use pidash_types::WorkspaceId;
 
 use super::guards;
 use super::quote_filename;
 use crate::state::AppState;
+use crate::uuid_path::{classify_uuid_segment, UuidSegment};
+use pidash_compat::py::py_json_string;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
+use pidash_compat::response::{
+    json_response as raw, json_value as json_status, no_content, server_error,
+};
 
 /// Register the six owned v2 paths. Sibling handler issues merge their own
 /// routers (project/bulk/check/duplicate/downloads, v1); merges keep both
@@ -159,9 +166,6 @@ pub const UNAUTHENTICATED_BODY: &str =
 /// `handle_exception`'s `ObjectDoesNotExist` branch
 /// (`app/views/base.py:129-133`).
 pub const NOT_FOUND_BODY: &str = r#"{"error":"The required object does not exist."}"#;
-/// `handle_exception`'s generic 500 branch (also `ValueError`/`TypeError`
-/// from the unguarded `int(size)`, and any DB error).
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// Resolver 404 for non-UUID `<uuid:asset_id>` segments (global
 /// `handler404`, `pi_dash/urls.py:15`). `JsonResponse` bytes, i.e.
 /// `json.dumps` defaults with the space after the colon.
@@ -172,28 +176,6 @@ pub const PAYLOAD_NOT_VALID_BODY: &str = r#"{"error":"The payload is not valid"}
 /// `allow_permission` fallthrough (`app/permissions/base.py`).
 pub const PERMISSION_DENIED_BODY: &str = r#"{"error":"You don't have the required permissions."}"#;
 
-fn raw(status: StatusCode, body: &'static str) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("static response")
-}
-
-fn json_status(status: StatusCode, body: Value) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(
-            serde_json::to_string(&body).expect("serializable response"),
-        ))
-        .expect("json response")
-}
-
-fn server_error() -> Response {
-    raw(StatusCode::INTERNAL_SERVER_ERROR, SERVER_ERROR_BODY)
-}
-
 /// `.get()` miss envelope: Django `ObjectDoesNotExist` through the base
 /// `handle_exception` (`app/views/base.py:129-133`).
 fn does_not_exist() -> Response {
@@ -202,10 +184,6 @@ fn does_not_exist() -> Response {
 
 fn page_not_found() -> Response {
     raw(StatusCode::NOT_FOUND, PAGE_NOT_FOUND_BODY)
-}
-
-fn no_content() -> Response {
-    StatusCode::NO_CONTENT.into_response()
 }
 
 fn pool(state: &AppState) -> Option<&sqlx::PgPool> {
@@ -502,12 +480,19 @@ fn workspace_asset_url(
     }
 }
 
-/// Parse a `<uuid:asset_id>` path segment: Django's converter 404s on
-/// garbage, so unparseable ids answer the resolver body (before auth —
-/// resolution precedes `initial()`).
+/// Parse a `<uuid:asset_id>` path segment: Django's converter routes only
+/// the canonical lowercase hyphenated spelling, so anything else answers
+/// the resolver body (before auth — resolution precedes `initial()`).
+/// Non-canonical spellings answer locally like garbage: no handler in this
+/// module carries proxy plumbing, and the prod `handler404` bytes are
+/// already pinned (PIDASHCONV-1215), so a proxy round-trip would add
+/// nothing (PIDASHCONV-1399).
 #[allow(clippy::result_large_err)]
 fn parse_asset_id(raw: &str) -> Result<Uuid, Response> {
-    raw.parse::<Uuid>().map_err(|_| page_not_found())
+    match classify_uuid_segment(raw) {
+        UuidSegment::Canonical(id) => Ok(id),
+        UuidSegment::NonCanonical | UuidSegment::Garbage => Err(page_not_found()),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -561,7 +546,26 @@ async fn asset_delete(pool: &sqlx::PgPool, asset_id: &Uuid) -> Result<(), sqlx::
     Ok(())
 }
 
-/// `UserAssetsV2Endpoint.entity_asset_save` (`v2.py:41-78`).
+/// `user_entity_save` user-row read: the previous link FK plus the
+/// `User.save()` input fields (`db/models/user.py:169-187`).
+type UserLinkRow = (
+    Option<Uuid>,
+    String,
+    String,
+    bool,
+    bool,
+    String,
+    Option<DateTime<Utc>>,
+);
+
+/// `user_entity_delete` user-row read: the `User.save()` input fields.
+type UserUnlinkRow = (String, String, bool, bool, String, Option<DateTime<Utc>>);
+
+/// `UserAssetsV2Endpoint.entity_asset_save` (`v2.py:41-78`): the avatar /
+/// cover link plus the full `user.save()` column effects
+/// (`db/models/user.py:169-187`) — normalized email, filled display
+/// name, staff sync, token rotation when a token is in use, and the
+/// `auto_now` `updated_at` (PIDASHCONV-1397).
 #[allow(clippy::result_large_err)]
 async fn user_entity_save(
     pool: &sqlx::PgPool,
@@ -571,14 +575,18 @@ async fn user_entity_save(
 ) -> Result<(), Response> {
     match q::user_save_action(entity_type) {
         q::UserSaveAction::SetAvatar => {
-            // `User.objects.get(id=asset.user_id)` (miss raises → 404).
-            let prev: Option<(Option<Uuid>,)> =
-                sqlx::query_as(r#"SELECT "avatar_asset_id" FROM "users" WHERE "id" = $1"#)
-                    .bind(owner_id)
-                    .fetch_optional(pool)
-                    .await
-                    .map_err(|_| server_error())?;
-            let Some((prev,)) = prev else {
+            // `User.objects.get(id=asset.user_id)` (miss raises → 404);
+            // the row also feeds `user.save()` below.
+            let row: Option<UserLinkRow> = sqlx::query_as(
+                r#"SELECT "avatar_asset_id", "email", "display_name", "is_staff", "is_superuser", "token", "token_updated_at" FROM "users" WHERE "id" = $1"#,
+            )
+            .bind(owner_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| server_error())?;
+            let Some((prev, email, display_name, is_staff, is_superuser, token, token_updated_at)) =
+                row
+            else {
                 return Err(does_not_exist());
             };
             if let Some(prev_id) = prev {
@@ -587,25 +595,37 @@ async fn user_entity_save(
                     .map_err(|_| server_error())?;
             }
             // `user.avatar = ""` (empty string, not None — BUG ported).
-            sqlx::query(
-                r#"UPDATE "users" SET "avatar" = $1, "avatar_asset_id" = $2 WHERE "id" = $3"#,
+            let now = Utc::now();
+            let write = user_save::apply_user_save(
+                &user_save::UserSaveInput {
+                    email,
+                    display_name,
+                    is_staff,
+                    is_superuser,
+                    token,
+                    token_updated_at,
+                },
+                &user_save::new_user_token(),
+                now,
+            );
+            pidash_services::domain::identity::link_avatar_asset(
+                pool, *owner_id, *asset_id, &write, now,
             )
-            .bind("")
-            .bind(asset_id)
-            .bind(owner_id)
-            .execute(pool)
             .await
             .map_err(|_| server_error())?;
             Ok(())
         }
         q::UserSaveAction::SetCover => {
-            let prev: Option<(Option<Uuid>,)> =
-                sqlx::query_as(r#"SELECT "cover_image_asset_id" FROM "users" WHERE "id" = $1"#)
-                    .bind(owner_id)
-                    .fetch_optional(pool)
-                    .await
-                    .map_err(|_| server_error())?;
-            let Some((prev,)) = prev else {
+            let row: Option<UserLinkRow> = sqlx::query_as(
+                r#"SELECT "cover_image_asset_id", "email", "display_name", "is_staff", "is_superuser", "token", "token_updated_at" FROM "users" WHERE "id" = $1"#,
+            )
+            .bind(owner_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| server_error())?;
+            let Some((prev, email, display_name, is_staff, is_superuser, token, token_updated_at)) =
+                row
+            else {
                 return Err(does_not_exist());
             };
             if let Some(prev_id) = prev {
@@ -614,12 +634,22 @@ async fn user_entity_save(
                     .map_err(|_| server_error())?;
             }
             // `user.cover_image = None` (asymmetry with avatar — ported).
-            sqlx::query(
-                r#"UPDATE "users" SET "cover_image" = NULL, "cover_image_asset_id" = $1 WHERE "id" = $2"#,
+            let now = Utc::now();
+            let write = user_save::apply_user_save(
+                &user_save::UserSaveInput {
+                    email,
+                    display_name,
+                    is_staff,
+                    is_superuser,
+                    token,
+                    token_updated_at,
+                },
+                &user_save::new_user_token(),
+                now,
+            );
+            pidash_services::domain::identity::link_cover_asset(
+                pool, *owner_id, *asset_id, &write, now,
             )
-            .bind(asset_id)
-            .bind(owner_id)
-            .execute(pool)
             .await
             .map_err(|_| server_error())?;
             Ok(())
@@ -629,7 +659,9 @@ async fn user_entity_save(
 }
 
 /// `UserAssetsV2Endpoint.entity_asset_delete` (`v2.py:80-107`): clears the
-/// link FK only (the `avatar`/`cover_image` strings are untouched here).
+/// link FK only (the `avatar`/`cover_image` strings are untouched here),
+/// plus the full `user.save()` column effects
+/// (`db/models/user.py:169-187`) — see `user_entity_save` (PIDASHCONV-1397).
 #[allow(clippy::result_large_err)]
 async fn user_entity_delete(
     pool: &sqlx::PgPool,
@@ -638,31 +670,61 @@ async fn user_entity_delete(
 ) -> Result<(), Response> {
     match q::user_delete_action(entity_type) {
         q::UserDeleteAction::ClearAvatar => {
-            let row: Option<(Uuid,)> =
-                sqlx::query_as(r#"SELECT "id" FROM "users" WHERE "id" = $1"#)
-                    .bind(owner_id)
-                    .fetch_optional(pool)
-                    .await
-                    .map_err(|_| server_error())?;
-            row.ok_or_else(does_not_exist)?;
-            sqlx::query(r#"UPDATE "users" SET "avatar_asset_id" = NULL WHERE "id" = $1"#)
-                .bind(owner_id)
-                .execute(pool)
+            let row: Option<UserUnlinkRow> = sqlx::query_as(
+                r#"SELECT "email", "display_name", "is_staff", "is_superuser", "token", "token_updated_at" FROM "users" WHERE "id" = $1"#,
+            )
+            .bind(owner_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| server_error())?;
+            let Some((email, display_name, is_staff, is_superuser, token, token_updated_at)) = row
+            else {
+                return Err(does_not_exist());
+            };
+            let now = Utc::now();
+            let write = user_save::apply_user_save(
+                &user_save::UserSaveInput {
+                    email,
+                    display_name,
+                    is_staff,
+                    is_superuser,
+                    token,
+                    token_updated_at,
+                },
+                &user_save::new_user_token(),
+                now,
+            );
+            pidash_services::domain::identity::unlink_avatar_asset(pool, *owner_id, &write, now)
                 .await
                 .map_err(|_| server_error())?;
             Ok(())
         }
         q::UserDeleteAction::ClearCover => {
-            let row: Option<(Uuid,)> =
-                sqlx::query_as(r#"SELECT "id" FROM "users" WHERE "id" = $1"#)
-                    .bind(owner_id)
-                    .fetch_optional(pool)
-                    .await
-                    .map_err(|_| server_error())?;
-            row.ok_or_else(does_not_exist)?;
-            sqlx::query(r#"UPDATE "users" SET "cover_image_asset_id" = NULL WHERE "id" = $1"#)
-                .bind(owner_id)
-                .execute(pool)
+            let row: Option<UserUnlinkRow> = sqlx::query_as(
+                r#"SELECT "email", "display_name", "is_staff", "is_superuser", "token", "token_updated_at" FROM "users" WHERE "id" = $1"#,
+            )
+            .bind(owner_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| server_error())?;
+            let Some((email, display_name, is_staff, is_superuser, token, token_updated_at)) = row
+            else {
+                return Err(does_not_exist());
+            };
+            let now = Utc::now();
+            let write = user_save::apply_user_save(
+                &user_save::UserSaveInput {
+                    email,
+                    display_name,
+                    is_staff,
+                    is_superuser,
+                    token,
+                    token_updated_at,
+                },
+                &user_save::new_user_token(),
+                now,
+            );
+            pidash_services::domain::identity::unlink_cover_asset(pool, *owner_id, &write, now)
                 .await
                 .map_err(|_| server_error())?;
             Ok(())
@@ -672,12 +734,18 @@ async fn user_entity_delete(
 }
 
 /// `WorkspaceFileAssetEndpoint.entity_asset_save` (`v2.py:247-284`).
+///
+/// The Django writes are FULL `workspace.save()` / `project.save()` calls,
+/// so they also stamp `updated_at` (`auto_now`) and `updated_by` (the CRUM
+/// request user) — hence the `now` / `actor_id` parameters.
 #[allow(clippy::result_large_err)]
 async fn workspace_entity_save(
     pool: &sqlx::PgPool,
     asset_id: &Uuid,
     entity_type: &str,
     asset: &AssetRow,
+    now: DateTime<Utc>,
+    actor_id: &Uuid,
 ) -> Result<(), Response> {
     match q::workspace_save_action(entity_type) {
         q::WorkspaceSaveAction::SetLogo => {
@@ -699,13 +767,13 @@ async fn workspace_entity_save(
                     .await
                     .map_err(|_| server_error())?;
             }
-            sqlx::query(
-                r#"UPDATE "workspaces" SET "logo" = $1, "logo_asset_id" = $2 WHERE "id" = $3"#,
+            pidash_services::domain::workspaces::stamp_logo(
+                pool,
+                workspace_id,
+                *asset_id,
+                now,
+                actor_id,
             )
-            .bind("")
-            .bind(asset_id)
-            .bind(workspace_id)
-            .execute(pool)
             .await
             .map_err(|_| server_error())?;
             Ok(())
@@ -727,13 +795,9 @@ async fn workspace_entity_save(
                     .await
                     .map_err(|_| server_error())?;
             }
-            sqlx::query(
-                r#"UPDATE "projects" SET "cover_image" = $1, "cover_image_asset_id" = $2 WHERE "id" = $3"#,
+            pidash_services::domain::projects::stamp_cover_image(
+                pool, project_id, *asset_id, now, actor_id,
             )
-            .bind("")
-            .bind(asset_id)
-            .bind(project_id)
-            .execute(pool)
             .await
             .map_err(|_| server_error())?;
             Ok(())
@@ -743,11 +807,16 @@ async fn workspace_entity_save(
 }
 
 /// `WorkspaceFileAssetEndpoint.entity_asset_delete` (`v2.py:286-312`).
+///
+/// Full `workspace.save()` / `project.save()` like the link path, so the
+/// `updated_at` / `updated_by` stamps ride along (`now` / `actor_id`).
 #[allow(clippy::result_large_err)]
 async fn workspace_entity_delete(
     pool: &sqlx::PgPool,
     entity_type: &str,
     asset: &AssetRow,
+    now: DateTime<Utc>,
+    actor_id: &Uuid,
 ) -> Result<(), Response> {
     match q::workspace_delete_action(entity_type) {
         q::WorkspaceDeleteAction::ClearLogo => {
@@ -767,11 +836,14 @@ async fn workspace_entity_delete(
             .await
             .map_err(|_| server_error())?;
             row.ok_or_else(does_not_exist)?;
-            sqlx::query(r#"UPDATE "workspaces" SET "logo_asset_id" = NULL WHERE "id" = $1"#)
-                .bind(workspace_id)
-                .execute(pool)
-                .await
-                .map_err(|_| server_error())?;
+            pidash_services::domain::workspaces::clear_logo_asset(
+                pool,
+                workspace_id,
+                now,
+                actor_id,
+            )
+            .await
+            .map_err(|_| server_error())?;
             Ok(())
         }
         q::WorkspaceDeleteAction::ClearCover => {
@@ -786,11 +858,11 @@ async fn workspace_entity_delete(
             .await
             .map_err(|_| server_error())?;
             let Some(_) = row else { return Ok(()) };
-            sqlx::query(r#"UPDATE "projects" SET "cover_image_asset_id" = NULL WHERE "id" = $1"#)
-                .bind(project_id)
-                .execute(pool)
-                .await
-                .map_err(|_| server_error())?;
+            pidash_services::domain::projects::clear_cover_image_asset(
+                pool, project_id, now, actor_id,
+            )
+            .await
+            .map_err(|_| server_error())?;
             Ok(())
         }
         q::WorkspaceDeleteAction::Noop => Ok(()),
@@ -1236,7 +1308,7 @@ async fn workspace_patch(
         Ok(id) => id,
         Err(response) => return response,
     };
-    let _actor = match require_user(&state, extension).await {
+    let actor = match require_user(&state, extension).await {
         Ok(actor) => actor,
         Err(denial) => return denial.into_response(),
     };
@@ -1263,7 +1335,10 @@ async fn workspace_patch(
         publish_metadata(pool, &asset_id).await;
     }
     let entity_type = asset.entity_type.clone().unwrap_or_default();
-    if let Err(response) = workspace_entity_save(pool, &asset_id, &entity_type, &asset).await {
+    let now = Utc::now();
+    if let Err(response) =
+        workspace_entity_save(pool, &asset_id, &entity_type, &asset, now, &actor.id).await
+    {
         return response;
     }
     let data = match parse_data(content_type(&headers).as_deref(), &body) {
@@ -1300,7 +1375,7 @@ async fn workspace_delete(
         Ok(id) => id,
         Err(response) => return response,
     };
-    let _actor = match require_user(&state, extension).await {
+    let actor = match require_user(&state, extension).await {
         Ok(actor) => actor,
         Err(denial) => return denial.into_response(),
     };
@@ -1324,7 +1399,9 @@ async fn workspace_delete(
         Err(_) => return server_error(),
     };
     let entity_type = asset.entity_type.clone().unwrap_or_default();
-    if let Err(response) = workspace_entity_delete(pool, &entity_type, &asset).await {
+    let now = Utc::now();
+    if let Err(response) = workspace_entity_delete(pool, &entity_type, &asset, now, &actor.id).await
+    {
         return response;
     }
     if sqlx::query(&q::delete_update_sql())
@@ -1894,37 +1971,6 @@ fn presigned_post(
     Ok(serde_json::json!({"url": url, "fields": fields}))
 }
 
-/// CPython `json.dumps` string encoding (`ensure_ascii`): `"` and
-/// `\` escaped, C0 controls short/`\u00XX`, everything else non-ASCII
-/// as `\uXXXX` (surrogate pairs past the BMP).
-fn py_json_string(input: &str) -> String {
-    let mut out = String::with_capacity(input.len() + 2);
-    out.push('"');
-    for c in input.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{08}' => out.push_str("\\b"),
-            '\u{0c}' => out.push_str("\\f"),
-            c if (c as u32) < 0x20 => {
-                out.push_str(&format!("\\u{:04x}", c as u32));
-            }
-            c if (c as u32) < 0x7f => out.push(c),
-            c => {
-                let mut buf = [0u16; 2];
-                for unit in c.encode_utf16(&mut buf) {
-                    out.push_str(&format!("\\u{unit:04x}"));
-                }
-            }
-        }
-    }
-    out.push('"');
-    out
-}
-
 /// Standard base64 with padding (policy documents).
 fn base64_encode(input: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -2334,6 +2380,20 @@ mod tests {
     fn bad_uuid_answers_resolver_404() {
         assert!(parse_asset_id("not-a-uuid").is_err());
         assert!(parse_asset_id("3f9a2c1e-9b1a-4d2e-8f3a-1a2b3c4d5e6f").is_ok());
+    }
+
+    #[test]
+    fn noncanonical_uuid_answers_resolver_404() {
+        // Parseable but unroutable spellings (PIDASHCONV-1399): Django's
+        // `<uuid:>` converter rejects these before auth, like garbage.
+        for raw in [
+            "3F9A2C1E-9B1A-4D2E-8F3A-1A2B3C4D5E6F",
+            "3f9a2c1e9b1a4d2e8f3a1a2b3c4d5e6f",
+            "{3f9a2c1e-9b1a-4d2e-8f3a-1a2b3c4d5e6f}",
+            "urn:uuid:3f9a2c1e-9b1a-4d2e-8f3a-1a2b3c4d5e6f",
+        ] {
+            assert!(parse_asset_id(raw).is_err(), "{raw}");
+        }
     }
 
     #[test]

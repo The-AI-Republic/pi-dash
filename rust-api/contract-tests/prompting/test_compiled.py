@@ -36,6 +36,14 @@ def test_compiled_runner_wire_compat(api, tenant_a, auth_a):
     assert "pidash run yield" in template
 
 
+def test_compiled_context_md_block(api, tenant_a, auth_a):
+    """PIDASHCONV-1534: the pidash-cli section carries the two-tier
+    context.md block (Django main e89aba75b, PDASHOSS01-161)."""
+    r = api.get(_compiled_url(tenant_a, "coding-task"), headers=auth_a)
+    assert r.status_code == 200, r.text
+    assert "### Working context files (`context.md`)" in r.json()["template_body"]
+
+
 def test_compiled_unknown_kind_400(api, tenant_a, auth_a):
     r = api.get(_compiled_url(tenant_a, "bogus"), headers=auth_a)
     assert r.status_code == 400, r.text

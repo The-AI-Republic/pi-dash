@@ -50,6 +50,8 @@
 //!   `pidash-api worker` for WORKER_SUITES (see WORKER_SUITES.txt), and the
 //!   versions tests poll until the row lands (`_wait_for_versions`).
 
+use std::sync::Arc;
+
 use axum::extract::{Path, Query, State};
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Utc};
@@ -63,25 +65,43 @@ use pidash_db::issue_filters::{
 use pidash_db::tasks_ticker::IssueAgentTicker;
 use pidash_services::app_intake::permissions as guards;
 use pidash_services::app_intake::tasks as intake_tasks;
+use pidash_services::app_issues::serializers_create::managed_unavailable_detail;
 use pidash_services::app_issues::serializers_create::HAS_ACTIVE_RUN_SQL;
 use pidash_services::app_issues::serializers_detail::{
     agent_status_to_representation, agent_ticker_to_representation, serialize_iso_datetime,
     AgentLiveStateRow, AgentRunDetailRow, AgentTickerView, ACTIVE_AGENT_RUN_SQL,
     AGENT_RUN_COUNT_SQL, LATEST_AGENT_RUN_SQL,
 };
+use pidash_services::dispatch::admission::{managed_runner_availability, LlmProfile};
+use pidash_services::dispatch::policy::{
+    cloud_agent_is_configured, managed_runner_is_enabled, UserFlags,
+};
+use pidash_services::domain::activity::TaskEnqueueHook;
+use pidash_services::domain::issues as domain_issues;
+use pidash_services::domain::issues::IssueFieldSet;
+use pidash_services::domain::transition::IssueTransitionHook;
+use pidash_services::domain::{self, WriteActor, WriteCtx, WriteScope};
 use pidash_services::orchestration::clock::ProjectClockPolicy;
+use pidash_types::dispatch::{AgentExecutorKind, ManagedRunnerReason};
 use pidash_types::orchestration::StateRef;
 
+use crate::app_issues::handlers_core::{
+    assistant_has_api_key, enrolled_runner, online_runner, paused_runner,
+};
 use crate::app_issues::resolve_gate;
+use crate::domain_hooks::AppTaskEnqueueHook;
+use crate::issue_transition::AppTransitionHook;
 use crate::middleware::SessionHandle;
 
 use super::{
     actor, enqueue_message, enqueue_soft_delete, guard_denial, guards_error, guest_view_all,
     intake_id_for, is_issue_creator, json_truthy, load_membership, parse_body, parse_id, pool_of,
-    query_last, raw_json_response, resolve_tenant, Denial, QueryMap,
+    query_last, raw_json_response, resolve_project_id, Denial, QueryMap,
 };
 use crate::serializer::render_datetime_in;
 use crate::state::AppState;
+use pidash_compat::datetime::{render_uuid as uuid_string, render_uuid_opt as opt_uuid};
+use pidash_compat::validate::{char_internal, push_error, validate_char, validate_datetime};
 
 // ---------------------------------------------------------------------------
 // Rows
@@ -123,6 +143,7 @@ pub struct IssueRow {
     pub created_via: Option<String>,
     pub agent_executor: Option<String>,
     pub complexity_score: i32,
+    pub workpad: String,
 }
 
 impl IssueRow {
@@ -162,7 +183,49 @@ impl IssueRow {
             created_via: row.try_get("created_via")?,
             agent_executor: row.try_get("agent_executor")?,
             complexity_score: row.try_get("complexity_score")?,
+            workpad: row.try_get("workpad")?,
         })
+    }
+
+    /// The full-save field set: every column, for the domain write the
+    /// update/delete drivers run after overlaying their validated input.
+    pub fn field_set(&self) -> IssueFieldSet {
+        IssueFieldSet {
+            id: self.id,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+            created_by_id: self.created_by_id,
+            updated_by_id: self.updated_by_id,
+            deleted_at: self.deleted_at,
+            project_id: self.project_id,
+            workspace_id: self.workspace_id,
+            parent_id: self.parent_id,
+            state_id: self.state_id,
+            point: self.point,
+            estimate_point_id: self.estimate_point_id,
+            name: self.name.clone(),
+            description_json: self.description_json.clone(),
+            description_html: self.description_html.clone(),
+            description_stripped: self.description_stripped.clone(),
+            description_binary: self.description_binary.clone(),
+            priority: self.priority.clone(),
+            complexity_score: self.complexity_score,
+            start_date: self.start_date,
+            target_date: self.target_date,
+            sequence_id: self.sequence_id,
+            sort_order: self.sort_order,
+            completed_at: self.completed_at,
+            archived_at: self.archived_at,
+            is_draft: self.is_draft,
+            external_source: self.external_source.clone(),
+            external_id: self.external_id.clone(),
+            type_id: self.type_id,
+            git_work_branch: self.git_work_branch.clone(),
+            workpad: self.workpad.clone(),
+            created_via: self.created_via.clone(),
+            assigned_pod_id: self.assigned_pod_id,
+            agent_executor: self.agent_executor.clone(),
+        }
     }
 }
 
@@ -232,7 +295,8 @@ const ISSUE_COLS: &str = concat!(
     "i.description_stripped, i.completed_at, i.sort_order, i.point, i.archived_at, ",
     "i.is_draft, i.external_id, i.external_source, i.description_binary, ",
     "i.estimate_point_id, i.type_id, i.deleted_at, i.git_work_branch, ",
-    "i.assigned_pod_id, i.created_via, i.agent_executor, i.complexity_score"
+    "i.assigned_pod_id, i.created_via, i.agent_executor, i.complexity_score, ",
+    "i.workpad"
 );
 
 fn intake_issue_from(row: &sqlx::postgres::PgRow) -> Result<IntakeIssueRow, sqlx::Error> {
@@ -408,68 +472,6 @@ pub async fn fetch_issue_for_destroy(
 /// Field errors in DRF's `{"field": ["message"]}` shape.
 pub type FieldErrors = serde_json::Map<String, serde_json::Value>;
 
-fn push_error(errors: &mut FieldErrors, field: &str, message: String) {
-    errors
-        .entry(field.to_owned())
-        .or_insert_with(|| serde_json::Value::Array(Vec::new()))
-        .as_array_mut()
-        .expect("error list")
-        .push(serde_json::Value::String(message));
-}
-
-/// DRF `CharField.to_internal_value`: bools, lists and dicts fail;
-/// numbers stringify; strings trim. `None` is rejected upstream with
-/// the null message.
-fn char_internal(value: &serde_json::Value) -> Result<String, ()> {
-    match value {
-        serde_json::Value::String(text) => Ok(text.trim().to_string()),
-        serde_json::Value::Number(number) => Ok(number.to_string().trim().to_string()),
-        serde_json::Value::Bool(_) | serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
-            Err(())
-        }
-        serde_json::Value::Null => Err(()),
-    }
-}
-
-fn validate_char(
-    errors: &mut FieldErrors,
-    field: &str,
-    value: &serde_json::Value,
-    max_length: usize,
-    allow_blank: bool,
-    allow_null: bool,
-) -> Option<String> {
-    if value.is_null() {
-        if !allow_null {
-            push_error(errors, field, "This field may not be null.".to_owned());
-        }
-        return None;
-    }
-    match char_internal(value) {
-        Err(()) => {
-            push_error(errors, field, "Not a valid string.".to_owned());
-            None
-        }
-        Ok(text) => {
-            if text.is_empty() && !allow_blank {
-                push_error(errors, field, "This field may not be blank.".to_owned());
-                return None;
-            }
-            // `[:255]` counts code points; over-long is a 400, never a
-            // panic.
-            if text.chars().count() > max_length {
-                push_error(
-                    errors,
-                    field,
-                    format!("Ensure this field has no more than {max_length} characters."),
-                );
-                return None;
-            }
-            Some(text)
-        }
-    }
-}
-
 /// DRF `IntegerField.to_internal_value`: bools fail; ints pass; floats
 /// with integral value pass; numeric strings parse; everything else
 /// fails.
@@ -626,58 +628,6 @@ fn date_format_message() -> String {
     "Date has wrong format. Use one of these formats instead: YYYY-MM-DD.".to_owned()
 }
 
-/// DRF `DateTimeField.to_internal_value`: ISO-8601 with `Z`/offsets
-/// (plus a bare date, read as midnight UTC, like DRF's date fallback).
-fn validate_datetime(
-    errors: &mut FieldErrors,
-    field: &str,
-    value: &serde_json::Value,
-    allow_null: bool,
-) -> Option<DateTime<Utc>> {
-    if value.is_null() {
-        if !allow_null {
-            push_error(errors, field, "This field may not be null.".to_owned());
-        }
-        return None;
-    }
-    let raw = match value {
-        serde_json::Value::String(text) => text,
-        _ => {
-            push_error(errors, field, datetime_format_message());
-            return None;
-        }
-    };
-    let text = raw.trim().to_string();
-    if let Ok(date) = chrono::NaiveDate::parse_from_str(&text, "%Y-%m-%d") {
-        return Some(date.and_hms_opt(0, 0, 0).expect("midnight").and_utc());
-    }
-    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&text) {
-        return Some(dt.with_timezone(&Utc));
-    }
-    // DRF's `strptime(value, 'iso-8601')` fallthrough (`to_internal_value`
-    // runs it when `parse_datetime` returns `None` — PIDASHCONV-773):
-    // the literal matches case-insensitively and yields naive
-    // 1900-01-01, read as UTC like the date arm above. Checked on the RAW
-    // text — Django's `strptime` sees the value before any strip (this
-    // port's trim is a pre-existing quirk), so a padded literal still
-    // fails. Exact match (probed); ASCII-only (765 unicode-gap family).
-    if raw.eq_ignore_ascii_case("iso-8601") {
-        let naive = chrono::NaiveDate::from_ymd_opt(1900, 1, 1)
-            .and_then(|date| date.and_hms_opt(0, 0, 0))
-            .expect("1900-01-01 valid");
-        return Some(naive.and_utc());
-    }
-    // DRF also accepts the `+HHMM`/`+HH:MM` offsets and fractional
-    // forms RFC 3339 covers; anything else is the format error.
-    push_error(errors, field, datetime_format_message());
-    None
-}
-
-fn datetime_format_message() -> String {
-    "Datetime has wrong format. Use one of these formats instead: YYYY-MM-DDThh:mm[:ss[.uuuuuu]][+HH:MM|-HH:MM|Z]."
-        .to_owned()
-}
-
 /// DRF `ChoiceField.to_internal_value` over integer choices: the value
 /// renders with straight quotes (`"7" is not a valid choice.`).
 fn validate_int_choice(
@@ -813,6 +763,44 @@ fn validate_uuid_field(
     }
 }
 
+/// One `PrimaryKeyRelatedField` value over a UUID pk: `Ok(Some(id))`
+/// resolved, `Ok(None)` on a lookup outage (silent, like `validate_pk`
+/// before it), `Err(message)` for coercion and existence failures.
+/// Callers pass neither null nor `""` for scalar fields (both clear
+/// outside, since every scalar pk key here is `allow_null=True`); list
+/// items arrive raw and both fail null (`allow_null=False`).
+async fn resolve_pk_item(
+    pool: &PgPool,
+    value: &serde_json::Value,
+    queryset_sql: &str,
+) -> Result<Option<Uuid>, String> {
+    if value.is_null() || is_empty_string(value) {
+        return Err("This field may not be null.".to_owned());
+    }
+    let text = match value {
+        serde_json::Value::String(text) => text.trim().to_string(),
+        _ => return Err("Not a valid string.".to_owned()),
+    };
+    let id = match text.parse::<Uuid>() {
+        Ok(id) => id,
+        Err(_) => {
+            return Err(format!("\u{201c}{text}\u{201d} is not a valid UUID."));
+        }
+    };
+    let row: Option<(Uuid,)> = match sqlx::query_as(queryset_sql)
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+    {
+        Ok(row) => row,
+        Err(_) => return Ok(None),
+    };
+    if row.is_none() {
+        return Err(format!("Invalid pk \"{id}\" - object does not exist."));
+    }
+    Ok(Some(id))
+}
+
 /// DRF `PrimaryKeyRelatedField.to_internal_value` over a UUID pk:
 /// malformed ids fail like the UUID field; well-formed ids must name a
 /// live row in the field queryset.
@@ -824,35 +812,79 @@ pub async fn validate_pk(
     queryset_sql: &str,
     allow_null: bool,
 ) -> Option<Uuid> {
-    let id = validate_uuid_field(errors, field, value, allow_null)?;
     if value.is_null() {
+        if !allow_null {
+            push_error(errors, field, "This field may not be null.".to_owned());
+        }
         return None;
     }
-    let row: Option<(Uuid,)> = sqlx::query_as(queryset_sql)
-        .bind(id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| ())
-        .ok()?;
-    if row.is_none() {
-        push_error(
-            errors,
-            field,
-            format!("Invalid pk \"{id}\" - object does not exist."),
-        );
-        return None;
+    match resolve_pk_item(pool, value, queryset_sql).await {
+        Ok(resolved) => resolved,
+        Err(message) => {
+            push_error(errors, field, message);
+            None
+        }
     }
-    Some(id)
 }
 
 /// Row-existence probes for the FK fields. Queryset notes:
 /// * `state_id`: `State.all_state_objects` — the plain manager, so
 ///   soft-deleted rows still resolve here (the project check in
 ///   `validate()` rejects them next).
-/// * `parent_id` / `estimate_point_id` / `duplicate_to`: the default
-///   soft-delete-scoped managers.
+/// * `state`: the auto-generated twin binds the model's
+///   `_default_manager` — `State.objects`, live rows minus the triage
+///   group (`db/models/state.py:79-83`). A soft-deleted or triage id
+///   answers `does_not_exist` here, verified live.
+/// * `estimate_point`: the auto-generated field binds the model's
+///   `_default_manager` — `EstimatePoint.objects`, soft-delete-scoped
+///   (`db/mixins.py:60-67`). `estimate_point_id` is NOT a declared
+///   field (`serializers/issue.py:137-154` declares only
+///   `state_id`/`parent_id`/`assigned_pod_id`), so DRF drops the key
+///   and it is ignored below, like any unknown key (verified live).
+/// * `parent_id` / `duplicate_to`: the default soft-delete-scoped
+///   managers. (`parent` is the auto twin over `Issue.issue_objects`,
+///   shared with `duplicate_to`; see `duplicate_to_live_sql`.)
 fn state_any_sql() -> &'static str {
     r#"SELECT id FROM states WHERE id = $1"#
+}
+
+/// `State.objects` (`db/models/state.py:79-83`): live rows minus the
+/// triage group. The `$1` lookup id returns the row id.
+fn state_objects_sql() -> &'static str {
+    r#"SELECT id FROM states WHERE id = $1 AND deleted_at IS NULL AND "group" != 'triage'"#
+}
+
+/// `Issue.save`'s state fill (`db/models/issue.py:287-299`) when the
+/// validated state is `None`: the project's default non-triage state,
+/// else the first non-triage state in `Meta.ordering` (`sequence`).
+/// Both legs scope `State.objects` (`deleted_at IS NULL`, triage group
+/// excluded) plus `~Q(is_triage=True)`. Returns the row id and whether
+/// its group is `completed` (`save` stamps `completed_at = now()`
+/// then, else NULL); `(None, false)` when no row fills, in which case
+/// `save` leaves the input `completed_at` untouched.
+#[allow(clippy::result_large_err)]
+async fn default_state_fill(
+    pool: &PgPool,
+    project_id: Uuid,
+) -> Result<(Option<Uuid>, bool), Response> {
+    for default_only in [true, false] {
+        let default_guard = if default_only {
+            r#" AND "default" = TRUE"#
+        } else {
+            ""
+        };
+        let row: Option<(Uuid, String)> = sqlx::query_as(&format!(
+            r#"SELECT id, "group" FROM states WHERE project_id = $1 AND deleted_at IS NULL AND "group" != 'triage' AND is_triage IS NOT TRUE{default_guard} ORDER BY sequence LIMIT 1"#
+        ))
+        .bind(project_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| Denial::ServerError.into_response())?;
+        if let Some((id, group)) = row {
+            return Ok((Some(id), group == "completed"));
+        }
+    }
+    Ok((None, false))
 }
 
 fn issue_live_sql() -> &'static str {
@@ -917,10 +949,6 @@ pub struct ValidatedIssue {
     pub created_via: Option<Option<String>>,
     pub assignee_ids: Option<Vec<Uuid>>,
     pub label_ids: Option<Vec<Uuid>>,
-    /// `labels` / `assignees` (the auto M2M twins): validated like DRF,
-    /// then fail the save with a 500, exactly like `setattr` on the
-    /// instance does.
-    pub m2m_crash: bool,
 }
 
 const ISSUE_PRIORITIES: &[&str] = &["low", "medium", "high", "urgent", "none"];
@@ -929,7 +957,8 @@ const AGENT_EXECUTORS: &[&str] = &["local_runner", "managed_runner", "cloud_agen
 /// Field-level validation for the issue branch, in serializer field
 /// order. Unknown and read-only keys (`id`, `project`, `workspace`,
 /// `created_by`, `updated_by`, `created_at`, `updated_at`,
-/// `description_binary`, `workpad`) are ignored, like DRF.
+/// `description_binary`, `workpad`, `labels`, `assignees`,
+/// `estimate_point_id`) are ignored, like DRF.
 pub async fn validate_issue_fields(
     pool: &PgPool,
     input: &serde_json::Map<String, serde_json::Value>,
@@ -1073,8 +1102,12 @@ pub async fn validate_issue_fields(
     if let Some(value) = input.get("sequence_id") {
         out.sequence_id = validate_integer(errors, "sequence_id", value, false);
     }
+    // `""` clears like null on every scalar pk arm below: DRF coerces
+    // it to `None` before validation, and each key here is
+    // `allow_null=True` (declared fields say so; the auto twins inherit
+    // it from their null FKs).
     if let Some(value) = input.get("state_id") {
-        if value.is_null() {
+        if value.is_null() || is_empty_string(value) {
             out.state_id = Some(None);
         } else if let Some(id) =
             validate_pk(pool, errors, "state_id", value, state_any_sql(), false).await
@@ -1082,8 +1115,25 @@ pub async fn validate_issue_fields(
             out.state_id = Some(Some(id));
         }
     }
+    // `state`: the auto-generated twin (`Meta.exclude` keeps the model
+    // field, so DRF adds it beside the declared `state_id`). Same
+    // source, validated under its own key — and it wins when both
+    // keys are present, because DRF applies declared fields before
+    // auto fields (verified live: `state_id`=triage + `state`=backlog
+    // 400s on the backlog value, and `state`=null clears over a valid
+    // `state_id`). Runs after the `state_id` arm so the overwrite
+    // order matches; errors merge with `state_id` first, like DRF.
+    if let Some(value) = input.get("state") {
+        if value.is_null() || is_empty_string(value) {
+            out.state_id = Some(None);
+        } else if let Some(id) =
+            validate_pk(pool, errors, "state", value, state_objects_sql(), false).await
+        {
+            out.state_id = Some(Some(id));
+        }
+    }
     if let Some(value) = input.get("parent_id") {
-        if value.is_null() {
+        if value.is_null() || is_empty_string(value) {
             out.parent_id = Some(None);
         } else if let Some(id) =
             validate_pk(pool, errors, "parent_id", value, issue_live_sql(), false).await
@@ -1091,13 +1141,43 @@ pub async fn validate_issue_fields(
             out.parent_id = Some(Some(id));
         }
     }
-    if let Some(value) = input.get("estimate_point_id") {
-        if value.is_null() {
+    // `parent`: the auto-generated twin (`Meta.exclude` keeps the model
+    // field, so DRF adds it beside the declared `parent_id`). Same
+    // source, validated under its own key with the default-manager
+    // queryset (`Issue.issue_objects`, shared with `duplicate_to`),
+    // and it wins when both keys are present, because DRF applies
+    // declared fields before auto fields (verified live: `parent_id`=X
+    // + `parent`=Y lands Y, and a triage id 400s under `parent` while
+    // 200ing under `parent_id`). Runs after the `parent_id` arm so the
+    // overwrite order matches; errors merge with `parent_id` first,
+    // like DRF.
+    if let Some(value) = input.get("parent") {
+        if value.is_null() || is_empty_string(value) {
+            out.parent_id = Some(None);
+        } else if let Some(id) = validate_pk(
+            pool,
+            errors,
+            "parent",
+            value,
+            duplicate_to_live_sql(),
+            false,
+        )
+        .await
+        {
+            out.parent_id = Some(Some(id));
+        }
+    }
+    // `estimate_point`: the auto-generated FK field, validated under
+    // its own key. There is intentionally no `estimate_point_id` arm:
+    // that key is not a serializer field, so DRF drops it (a bogus
+    // `estimate_point_id` PATCH 200s on Django — verified live).
+    if let Some(value) = input.get("estimate_point") {
+        if value.is_null() || is_empty_string(value) {
             out.estimate_point_id = Some(None);
         } else if let Some(id) = validate_pk(
             pool,
             errors,
-            "estimate_point_id",
+            "estimate_point",
             value,
             estimate_point_live_sql(),
             false,
@@ -1108,7 +1188,7 @@ pub async fn validate_issue_fields(
         }
     }
     if let Some(value) = input.get("type") {
-        if value.is_null() {
+        if value.is_null() || is_empty_string(value) {
             out.type_id = Some(None);
         } else if let Some(id) =
             validate_pk(pool, errors, "type", value, issue_type_live_sql(), false).await
@@ -1117,7 +1197,7 @@ pub async fn validate_issue_fields(
         }
     }
     if let Some(value) = input.get("assigned_pod_id") {
-        if value.is_null() {
+        if value.is_null() || is_empty_string(value) {
             out.assigned_pod_id = Some(None);
         } else if let Some(id) = validate_uuid_field(errors, "assigned_pod_id", value, false) {
             // `Pod.all_objects`: tombstoned rows still resolve
@@ -1181,22 +1261,9 @@ pub async fn validate_issue_fields(
     if let Some(value) = input.get("label_ids") {
         out.label_ids = validate_pk_list(pool, errors, "label_ids", value, label_live_sql()).await;
     }
-    // The auto M2M twins validate like DRF, then crash the save.
-    if input.contains_key("labels") || input.contains_key("assignees") {
-        for key in ["labels", "assignees"] {
-            if let Some(value) = input.get(key) {
-                let sql = if key == "labels" {
-                    label_live_sql()
-                } else {
-                    user_live_sql()
-                };
-                let _ = validate_pk_list(pool, errors, key, value, sql).await;
-            }
-        }
-        if errors.is_empty() {
-            out.m2m_crash = true;
-        }
-    }
+    // `labels` / `assignees` (the auto M2M twins) are read-only on
+    // `IssueCreateSerializer`: M2M fields with a custom through map
+    // read-only, so DRF silently drops the keys. Ignore them here too.
     out
 }
 
@@ -1209,7 +1276,9 @@ fn label_live_sql() -> &'static str {
 }
 
 /// DRF `ListField(child=PrimaryKeyRelatedField)`: non-lists fail with
-/// the type message; null fails; each item resolves like `validate_pk`.
+/// the type message; null fails; each item resolves like `validate_pk`,
+/// with per-item errors keyed by index (`run_child_validation`
+/// collects every index, and any error drops the list).
 pub async fn validate_pk_list(
     pool: &PgPool,
     errors: &mut FieldErrors,
@@ -1247,11 +1316,29 @@ pub async fn validate_pk_list(
         }
     };
     let mut ids = Vec::with_capacity(items.len());
-    for item in items {
-        match validate_pk(pool, errors, field, item, queryset_sql, false).await {
-            Some(id) => ids.push(id),
-            None => return None,
+    let mut item_errors = serde_json::Map::new();
+    for (idx, item) in items.iter().enumerate() {
+        match resolve_pk_item(pool, item, queryset_sql).await {
+            Ok(Some(id)) => ids.push(id),
+            // Lookup outage: silent whole-field drop, like before —
+            // but validation errors already collected still fail.
+            Ok(None) => {
+                if !item_errors.is_empty() {
+                    errors.insert(
+                        field.to_owned(),
+                        serde_json::Value::Object(std::mem::take(&mut item_errors)),
+                    );
+                }
+                return None;
+            }
+            Err(message) => {
+                item_errors.insert(idx.to_string(), serde_json::json!([message]));
+            }
         }
+    }
+    if !item_errors.is_empty() {
+        errors.insert(field.to_owned(), serde_json::Value::Object(item_errors));
+        return None;
     }
     Some(ids)
 }
@@ -1321,18 +1408,31 @@ pub async fn has_active_run(pool: &PgPool, issue_id: &Uuid) -> Result<bool, Deni
 
 /// Object-level validation, in `validate()` order: sync lock, dates,
 /// pod, executor, HTML sanitize, assignee/label filtering, state /
-/// parent / estimate checks. Field errors and non-field errors share
-/// the DRF body; the caller answers 400 when either is non-empty.
+/// parent / estimate checks. First error wins — every `raise` in
+/// `validate()` stops validation (`serializers/issue.py:206-385`) —
+/// so each check returns as soon as it pushes. Field errors and
+/// non-field errors share the DRF body; the caller answers 400 when
+/// either is non-empty.
 #[allow(clippy::too_many_arguments)]
 pub async fn validate_issue_object(
     pool: &PgPool,
+    settings: &pidash_db::config::Settings,
     project_id: &Uuid,
+    workspace_id: &Uuid,
+    viewer_id: &Uuid,
     issue: &IssueRow,
     validated: &ValidatedIssue,
     input: &serde_json::Map<String, serde_json::Value>,
     errors: &mut FieldErrors,
     non_field: &mut Vec<String>,
 ) -> Result<IssueObjectValidation, Denial> {
+    // The caller answers 400 and ignores the outcome whenever an
+    // error was pushed, so early exits return it empty.
+    let empty = || IssueObjectValidation {
+        assignee_ids: None,
+        label_ids: None,
+        description_html: None,
+    };
     // Read-only lock for actively-synced issues: only changed values
     // block (`serializers/issue.py:210-229`).
     if is_synced_safe(pool, issue).await {
@@ -1362,8 +1462,12 @@ pub async fn validate_issue_object(
                 blocked.push("description_stripped");
             }
         }
-        for field in blocked {
+        // One `raise` with a dict: every blocked key lands together.
+        for field in &blocked {
             push_error(errors, field, SYNC_LOCKED_MESSAGE.to_owned());
+        }
+        if !blocked.is_empty() {
+            return Ok(empty());
         }
     }
 
@@ -1373,15 +1477,32 @@ pub async fn validate_issue_object(
     ) {
         if start > target {
             non_field.push("Start date cannot exceed target date".to_owned());
+            return Ok(empty());
         }
     }
 
     if let Some(pod) = validated.assigned_pod_id.as_ref() {
-        validate_pod(pool, project_id, issue, *pod, errors, non_field).await?;
+        if validate_pod(pool, project_id, issue, *pod, errors, non_field).await? {
+            return Ok(empty());
+        }
     }
 
     if let Some(executor) = validated.agent_executor.as_ref() {
-        validate_executor(pool, project_id, issue, executor.clone(), errors, non_field).await?;
+        if validate_executor(
+            pool,
+            settings,
+            project_id,
+            workspace_id,
+            viewer_id,
+            issue,
+            executor.clone(),
+            errors,
+            non_field,
+        )
+        .await?
+        {
+            return Ok(empty());
+        }
     }
 
     // HTML sanitize (`serializers/issue.py:326-332`): truthy values
@@ -1395,6 +1516,7 @@ pub async fn validate_issue_object(
                 }
                 crate::space::sanitize::Sanitize::Invalid => {
                     push_error(errors, "error", "html content is not valid".to_owned());
+                    return Ok(empty());
                 }
             }
         }
@@ -1438,12 +1560,15 @@ pub async fn validate_issue_object(
     // State / parent / estimate project checks
     // (`serializers/issue.py:357-379`).
     if let Some(Some(state_id)) = validated.state_id.as_ref() {
-        // `allow_triage_state` is always true on this path, so the
-        // triage manager (triage + live) and the default manager
-        // (non-triage + live) jointly cover every live project state.
+        // `allow_triage_state` is always true on this path, so
+        // `validate()` uses the triage manager only: the state must be
+        // a live TRIAGE row in this project
+        // (`serializers/issue.py:207-208,357-364`; verified live — a
+        // live backlog id 400s here on Django).
         let row: Option<(Uuid,)> = sqlx::query_as(
             r#"SELECT s.id FROM states s
-               WHERE s.project_id = $1 AND s.id = $2 AND s.deleted_at IS NULL"#,
+               WHERE s.project_id = $1 AND s.id = $2 AND s.deleted_at IS NULL
+                 AND s."group" = 'triage'"#,
         )
         .bind(project_id)
         .bind(state_id)
@@ -1452,6 +1577,7 @@ pub async fn validate_issue_object(
         .map_err(|_| Denial::ServerError)?;
         if row.is_none() {
             non_field.push("State is not valid please pass a valid state_id".to_owned());
+            return Ok(empty());
         }
         let _ = input;
     }
@@ -1466,6 +1592,7 @@ pub async fn validate_issue_object(
         .map_err(|_| Denial::ServerError)?;
         if row.is_none() {
             non_field.push("Parent is not valid issue_id please pass a valid issue_id".to_owned());
+            return Ok(empty());
         }
     }
     if let Some(Some(estimate_id)) = validated.estimate_point_id.as_ref() {
@@ -1481,6 +1608,7 @@ pub async fn validate_issue_object(
             non_field.push(
                 "Estimate point is not valid please pass a valid estimate_point_id".to_owned(),
             );
+            return Ok(empty());
         }
     }
 
@@ -1492,7 +1620,8 @@ pub async fn validate_issue_object(
 }
 
 /// Pod checks (`serializers/issue.py:240-259`): project match, tombstone,
-/// mid-flight reassignment.
+/// mid-flight reassignment. First error wins, like the sequential
+/// `raise`s; returns whether an error was pushed.
 async fn validate_pod(
     pool: &PgPool,
     project_id: &Uuid,
@@ -1500,8 +1629,8 @@ async fn validate_pod(
     pod: Option<Uuid>,
     errors: &mut FieldErrors,
     _non_field: &mut Vec<String>,
-) -> Result<(), Denial> {
-    let Some(pod_id) = pod else { return Ok(()) };
+) -> Result<bool, Denial> {
+    let Some(pod_id) = pod else { return Ok(false) };
     let row: Option<(Uuid, Option<chrono::DateTime<Utc>>)> =
         sqlx::query_as(r#"SELECT project_id, deleted_at FROM pod WHERE id = $1"#)
             .bind(pod_id)
@@ -1509,7 +1638,7 @@ async fn validate_pod(
             .await
             .map_err(|_| Denial::ServerError)?;
     let Some((pod_project, pod_deleted)) = row else {
-        return Ok(());
+        return Ok(false);
     };
     if pod_project != *project_id {
         push_error(
@@ -1517,9 +1646,11 @@ async fn validate_pod(
             "assigned_pod_id",
             "pod is in a different project".to_owned(),
         );
+        return Ok(true);
     }
     if pod_deleted.is_some() {
         push_error(errors, "assigned_pod_id", "pod has been deleted".to_owned());
+        return Ok(true);
     }
     if issue.assigned_pod_id.is_some()
         && issue.assigned_pod_id != Some(pod_id)
@@ -1530,184 +1661,150 @@ async fn validate_pod(
             "assigned_pod_id",
             "cannot reassign pod while the issue has an active run".to_owned(),
         );
+        return Ok(true);
     }
-    Ok(())
+    Ok(false)
 }
 
-/// Executor checks (`serializers/issue.py:264-312`).
+/// Executor checks (`serializers/issue.py:275-321`): the
+/// settings-backed cloud/managed gates with Django's messages
+/// (mirroring `app_issues` step 4), and the mid-flight rule for
+/// explicit null too (`:314-321` sits outside
+/// `if executor is not None`). First error wins, like the sequential
+/// `raise`s; returns whether an error was pushed.
+#[allow(clippy::too_many_arguments)]
 async fn validate_executor(
     pool: &PgPool,
+    settings: &pidash_db::config::Settings,
     project_id: &Uuid,
+    workspace_id: &Uuid,
+    viewer_id: &Uuid,
     issue: &IssueRow,
     executor: Option<String>,
     errors: &mut FieldErrors,
     _non_field: &mut Vec<String>,
-) -> Result<(), Denial> {
-    let Some(executor) = executor else {
-        return Ok(());
-    };
-    if executor == "cloud_agent" && !cloud_agent_configured(pool).await {
-        push_error(
-            errors,
-            "agent_executor",
-            "Pi Dash Cloud Agent is not available on this instance".to_owned(),
-        );
+) -> Result<bool, Denial> {
+    if let Some(executor) = executor.as_deref() {
+        // Field level (`AGENT_EXECUTORS`) already rejected unknown
+        // values with the `ChoiceField` message, so only the three
+        // kinds arrive (`:280-281` is unreachable past the field).
+        match AgentExecutorKind::from_value(executor) {
+            Some(AgentExecutorKind::CloudAgent)
+                if !cloud_agent_is_configured(&settings.cloud_agent) =>
+            {
+                push_error(
+                    errors,
+                    "agent_executor",
+                    "Pi Dash Cloud Agent is not available on this instance".to_owned(),
+                );
+                return Ok(true);
+            }
+            Some(AgentExecutorKind::ManagedRunner) => {
+                // `self.instance.project` (`:295`): always resolved on
+                // update — the tenant project is the issue's project.
+                let mut llm_profile = LlmProfile {
+                    available: false,
+                    reason_code: ManagedRunnerReason::LLM_CONFIG_MISSING.to_owned(),
+                };
+                let mut enrolled_exists = false;
+                let mut online_exists = false;
+                let mut paused_exists = false;
+                // `managed_runner_availability` gates in fixed order;
+                // each probe runs only when reached (mirrors
+                // `app_issues::handlers_core`).
+                let mut viewer: Option<UserFlags> = None;
+                if managed_runner_is_enabled(&settings.managed_runner) {
+                    let flags: Option<(bool, bool)> =
+                        sqlx::query_as(r#"SELECT is_active, is_bot FROM users WHERE id = $1"#)
+                            .bind(viewer_id)
+                            .fetch_optional(pool)
+                            .await
+                            .map_err(|_| Denial::ServerError)?;
+                    viewer = flags.map(|(is_active, is_bot)| UserFlags { is_active, is_bot });
+                    if viewer.is_some_and(|flags| flags.is_active && !flags.is_bot) {
+                        // `managed_llm_profile` seam: CE has no usable
+                        // desktop profile; a BYOK key reads as
+                        // BYOK-unsupported, else LLM-config-missing
+                        // (same transcription as `app_issues`).
+                        let keyed = assistant_has_api_key(pool, viewer_id)
+                            .await
+                            .map_err(|_| Denial::ServerError)?;
+                        llm_profile = LlmProfile {
+                            available: false,
+                            reason_code: if keyed {
+                                ManagedRunnerReason::BYOK_UNSUPPORTED.to_owned()
+                            } else {
+                                ManagedRunnerReason::LLM_CONFIG_MISSING.to_owned()
+                            },
+                        };
+                        if llm_profile.available {
+                            enrolled_exists =
+                                enrolled_runner(pool, viewer_id, project_id, workspace_id)
+                                    .await
+                                    .map_err(|_| Denial::ServerError)?;
+                            if enrolled_exists {
+                                online_exists =
+                                    online_runner(pool, viewer_id, project_id, workspace_id)
+                                        .await
+                                        .map_err(|_| Denial::ServerError)?;
+                                // `09738d222`: the paused
+                                // tiebreaker runs only when
+                                // nothing is online (mirrors
+                                // `app_issues::handlers_core`).
+                                if !online_exists {
+                                    paused_exists =
+                                        paused_runner(pool, viewer_id, project_id, workspace_id)
+                                            .await
+                                            .map_err(|_| Denial::ServerError)?;
+                                }
+                            }
+                        }
+                    }
+                }
+                let verdict = managed_runner_availability(
+                    &settings.managed_runner,
+                    viewer.as_ref(),
+                    || llm_profile.clone(),
+                    enrolled_exists,
+                    online_exists,
+                    paused_exists,
+                );
+                // `NO_RUNNER_FOR_PROJECT` accepts the pin (the desktop
+                // enrolls on open and resolves the race, `:304-307`).
+                if !verdict.available
+                    && verdict.reason_code != ManagedRunnerReason::NO_RUNNER_FOR_PROJECT
+                {
+                    push_error(
+                        errors,
+                        "agent_executor",
+                        managed_unavailable_detail(&verdict.reason_code).into_owned(),
+                    );
+                    return Ok(true);
+                }
+            }
+            _ => {}
+        }
     }
-    if executor == "managed_runner" && !managed_runner_available(pool, project_id).await {
-        // The desktop-enrollment race carve-out
-        // (`NO_RUNNER_FOR_PROJECT` accepts): without an enrolled
-        // runner the pin still lands.
-        push_error(
-            errors,
-            "agent_executor",
-            "Pi Dash desktop runner is not available for this project".to_owned(),
-        );
-    }
-    let current = issue.agent_executor.clone();
-    if Some(executor.as_str()) != current.as_deref() && has_active_run(pool, &issue.id).await? {
+    // The mid-flight rule runs for explicit null too (`None` clears
+    // the override); `None == None` is unchanged, like Django's
+    // `str(None) == str(None)`.
+    if executor.as_deref() != issue.agent_executor.as_deref()
+        && has_active_run(pool, &issue.id).await?
+    {
         push_error(
             errors,
             "agent_executor",
             "cannot change the execution target while the issue has an active run".to_owned(),
         );
+        return Ok(true);
     }
-    Ok(())
-}
-
-/// `cloud_agent_is_configured` (`core/agent_execution.py:34`): the
-/// operator kill switch. Reads the live Django settings rows; absent
-/// rows read as unconfigured.
-async fn cloud_agent_configured(pool: &PgPool) -> bool {
-    sqlx::query_scalar::<_, Option<String>>(
-        r#"SELECT value FROM django_settings WHERE key = 'CLOUD_AGENT_ENABLED'"#,
-    )
-    .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten()
-    .flatten()
-    .is_some_and(|value| matches!(value.as_str(), "true" | "1" | "yes"))
-}
-
-/// `managed_runner_availability` (`managed_runner/policy.py`): accept
-/// when the instance kill switch is on or a runner is enrolled for the
-/// project (the `NO_RUNNER_FOR_PROJECT` carve-out accepts either way in
-/// practice — enrollment self-heals on open).
-async fn managed_runner_available(pool: &PgPool, project_id: &Uuid) -> bool {
-    let kill: Option<(bool,)> =
-        sqlx::query_as(r#"SELECT enabled FROM managed_runner_config WHERE id = 1 LIMIT 1"#)
-            .fetch_optional(pool)
-            .await
-            .unwrap_or(None);
-    if kill.is_some_and(|row| row.0) {
-        return true;
-    }
-    let enrolled: Option<(Uuid,)> =
-        sqlx::query_as(r#"SELECT runner_id FROM runner_projects WHERE project_id = $1 LIMIT 1"#)
-            .bind(project_id)
-            .fetch_optional(pool)
-            .await
-            .unwrap_or(None);
-    // Unenrolled projects accept the pin (the client resolves the race);
-    // only an explicitly disabled instance rejects.
-    enrolled.is_some() || kill.is_none()
+    Ok(false)
 }
 
 // ---------------------------------------------------------------------------
 // Writes (`IssueCreateSerializer.update`, `IntakeIssueSerializer.update`,
 // `Issue.save`, `BaseModel.save`)
 // ---------------------------------------------------------------------------
-
-/// `Issue.save` computed columns (`db/models/issue.py:300-348`):
-/// `description_stripped` always recomputed; a null state resolves to
-/// the project default (lowest sequence) or the lowest-sequence live
-/// non-triage state **without touching `completed_at`** (the
-/// group-driven arm is the `else` of the null-state arm); a set state
-/// drives `completed_at` (now when the group is `completed`, else
-/// null). `BaseModel.save` stamps `updated_by` on every update and
-/// `auto_now` stamps `updated_at`.
-pub struct IssueSaveOutcome {
-    pub description_stripped: Option<String>,
-    pub state_id: Option<Uuid>,
-    pub completed_at: Option<DateTime<Utc>>,
-    pub updated_at: DateTime<Utc>,
-}
-
-pub async fn issue_save_columns(
-    pool: &PgPool,
-    project_id: &Uuid,
-    description_html: &str,
-    state_id: Option<Uuid>,
-    fallback_completed_at: Option<DateTime<Utc>>,
-    now: DateTime<Utc>,
-) -> Result<IssueSaveOutcome, Denial> {
-    let description_stripped = if description_html.is_empty() {
-        None
-    } else {
-        Some(crate::space::sanitize::strip_tags(description_html))
-    };
-    // The null-state arm assigns without touching `completed_at`.
-    let state_was_null = state_id.is_none();
-    let state_id = match state_id {
-        None => default_state_for(pool, project_id).await?,
-        Some(id) => Some(id),
-    };
-    let completed_at = if state_was_null {
-        fallback_completed_at
-    } else {
-        match state_id {
-            None => fallback_completed_at,
-            Some(id) => {
-                let group: Option<(Option<String>,)> =
-                    sqlx::query_as(r#"SELECT "group" FROM states WHERE id = $1"#)
-                        .bind(id)
-                        .fetch_optional(pool)
-                        .await
-                        .map_err(|_| Denial::ServerError)?;
-                match group {
-                    Some((Some(group),)) if group == "completed" => Some(now),
-                    _ => None,
-                }
-            }
-        }
-    };
-    Ok(IssueSaveOutcome {
-        description_stripped,
-        state_id,
-        completed_at,
-        updated_at: now,
-    })
-}
-
-/// Default-state resolution for a null state (`db/models/issue.py:300-314`,
-/// `State.Meta.ordering = ("sequence",)`): the lowest-sequence live
-/// default non-triage state, else the lowest-sequence live non-triage
-/// state, else none.
-pub async fn default_state_for(pool: &PgPool, project_id: &Uuid) -> Result<Option<Uuid>, Denial> {
-    let row: Option<(Uuid,)> = sqlx::query_as(
-        r#"SELECT s.id FROM states s
-           WHERE s.project_id = $1 AND s.default AND s."group" != 'triage'
-             AND s.deleted_at IS NULL
-           ORDER BY s.sequence LIMIT 1"#,
-    )
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    if row.is_some() {
-        return Ok(row.map(|row| row.0));
-    }
-    let row: Option<(Uuid,)> = sqlx::query_as(
-        r#"SELECT s.id FROM states s
-           WHERE s.project_id = $1 AND s."group" != 'triage' AND s.deleted_at IS NULL
-           ORDER BY s.sequence LIMIT 1"#,
-    )
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(row.map(|row| row.0))
-}
 
 /// `IntakeIssueSerializer.validate` (`serializers/intake.py:43-66`):
 /// accepting while the linked issue sits in TRIAGE needs a project
@@ -1753,192 +1850,137 @@ pub async fn validate_accept_transition(
 
 /// Apply the validated issue-branch writes (`update()`,
 /// `serializers/issue.py:435-462`): m2m replacement, then the scalar
-/// UPDATE with the `Issue.save` computed columns. Every save stamps
-/// `updated_by` (`BaseModel.save`).
+/// save with the `Issue.save` computed columns. Every save stamps
+/// `updated_by` (`BaseModel.save`). Rides
+/// `domain::issues::partial_update` with no activity trio — the view's
+/// own `issue.activity.updated` (the intake `intake=` extra kwarg) and
+/// version emits stay driver-side, sequenced after this returns.
 #[allow(clippy::too_many_arguments)]
 pub async fn apply_issue_update(
+    state: &AppState,
     pool: &PgPool,
     issue: &IssueRow,
     validated: &ValidatedIssue,
     object: &IssueObjectValidation,
     actor_id: &Uuid,
+    actor_timezone: &chrono_tz::Tz,
     now: DateTime<Utc>,
 ) -> Result<(), Denial> {
-    if validated.m2m_crash {
-        return Err(Denial::ServerError);
-    }
-    if let Some(ids) = object.assignee_ids.as_ref() {
-        sqlx::query(r#"DELETE FROM issue_assignees WHERE issue_id = $1"#)
-            .bind(issue.id)
-            .execute(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-        for assignee_id in ids {
-            sqlx::query(
-                r#"INSERT INTO issue_assignees
-                   (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
-                    project_id, workspace_id, issue_id, assignee_id)
-                   VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, $8, $9)
-                   ON CONFLICT DO NOTHING"#,
-            )
-            .bind(Uuid::new_v4())
-            .bind(now)
-            .bind(now)
-            .bind(issue.created_by_id)
-            .bind(issue.updated_by_id)
-            .bind(issue.project_id)
-            .bind(issue.workspace_id)
-            .bind(issue.id)
-            .bind(assignee_id)
-            .execute(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-        }
-    }
-    if let Some(ids) = object.label_ids.as_ref() {
-        sqlx::query(r#"DELETE FROM issue_labels WHERE issue_id = $1"#)
-            .bind(issue.id)
-            .execute(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-        for label_id in ids {
-            sqlx::query(
-                r#"INSERT INTO issue_labels
-                   (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
-                    project_id, workspace_id, issue_id, label_id)
-                   VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, $8, $9)
-                   ON CONFLICT DO NOTHING"#,
-            )
-            .bind(Uuid::new_v4())
-            .bind(now)
-            .bind(now)
-            .bind(issue.created_by_id)
-            .bind(issue.updated_by_id)
-            .bind(issue.project_id)
-            .bind(issue.workspace_id)
-            .bind(issue.id)
-            .bind(label_id)
-            .execute(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-        }
-    }
-
     let html = object
         .description_html
         .clone()
         .or(validated.description_html.clone())
         .unwrap_or_else(|| issue.description_html.clone());
-    let state_id = match validated.state_id.as_ref() {
-        Some(inner) => *inner,
-        None => issue.state_id,
-    };
-    let fallback_completed = validated.completed_at.unwrap_or(issue.completed_at);
-    let saved = issue_save_columns(
-        pool,
-        &issue.project_id,
-        &html,
-        state_id,
-        fallback_completed,
-        now,
-    )
-    .await?;
-
-    sqlx::query(
-        r#"UPDATE issues SET name = $2, description_html = $3, description_json = $4,
-             description_stripped = $5, priority = $6, complexity_score = $7,
-             start_date = $8, target_date = $9, point = $10, sort_order = $11,
-             completed_at = $12, archived_at = $13, is_draft = $14,
-             external_source = $15, external_id = $16, sequence_id = $17,
-             state_id = $18, parent_id = $19, estimate_point_id = $20, type_id = $21,
-             assigned_pod_id = $22, agent_executor = $23, git_work_branch = $24,
-             created_via = $25, updated_at = $26, updated_by_id = $27
-           WHERE id = $1"#,
-    )
-    .bind(issue.id)
-    .bind(validated.name.clone().unwrap_or_else(|| issue.name.clone()))
-    .bind(html)
-    .bind(
-        validated
-            .description_json
-            .clone()
-            .unwrap_or_else(|| issue.description_json.clone()),
-    )
-    .bind(saved.description_stripped)
-    .bind(
-        validated
-            .priority
-            .clone()
-            .unwrap_or_else(|| issue.priority.clone()),
-    )
-    .bind(
-        validated
-            .complexity_score
-            .map(|score| score as i32)
-            .unwrap_or(issue.complexity_score),
-    )
-    .bind(validated.start_date.unwrap_or(issue.start_date))
-    .bind(validated.target_date.unwrap_or(issue.target_date))
-    .bind(
-        validated
-            .point
-            .unwrap_or_else(|| issue.point.map(i64::from))
-            .map(|point| point as i32),
-    )
-    .bind(validated.sort_order.unwrap_or(issue.sort_order))
-    .bind(saved.completed_at)
-    .bind(validated.archived_at.unwrap_or(issue.archived_at))
-    .bind(validated.is_draft.unwrap_or(issue.is_draft))
-    .bind(
-        validated
-            .external_source
-            .clone()
-            .unwrap_or_else(|| issue.external_source.clone()),
-    )
-    .bind(
-        validated
-            .external_id
-            .clone()
-            .unwrap_or_else(|| issue.external_id.clone()),
-    )
-    .bind(
-        validated
-            .sequence_id
-            .map(|sequence| sequence as i32)
-            .unwrap_or(issue.sequence_id),
-    )
-    .bind(saved.state_id)
-    .bind(validated.parent_id.unwrap_or(issue.parent_id))
-    .bind(
-        validated
-            .estimate_point_id
-            .unwrap_or(issue.estimate_point_id),
-    )
-    .bind(validated.type_id.unwrap_or(issue.type_id))
-    .bind(validated.assigned_pod_id.unwrap_or(issue.assigned_pod_id))
-    .bind(
-        validated
-            .agent_executor
-            .clone()
-            .unwrap_or_else(|| issue.agent_executor.clone()),
-    )
-    .bind(
-        validated
-            .git_work_branch
-            .clone()
-            .unwrap_or_else(|| issue.git_work_branch.clone()),
-    )
-    .bind(
-        validated
-            .created_via
-            .clone()
-            .unwrap_or_else(|| issue.created_via.clone()),
-    )
-    .bind(saved.updated_at)
-    .bind(actor_id)
-    .execute(pool)
+    let mut fields = issue.field_set();
+    fields.name = validated.name.clone().unwrap_or_else(|| issue.name.clone());
+    fields.description_html = html;
+    fields.description_json = validated
+        .description_json
+        .clone()
+        .unwrap_or_else(|| issue.description_json.clone());
+    fields.priority = validated
+        .priority
+        .clone()
+        .unwrap_or_else(|| issue.priority.clone());
+    fields.complexity_score = validated
+        .complexity_score
+        .map(|score| score as i32)
+        .unwrap_or(issue.complexity_score);
+    fields.start_date = validated.start_date.unwrap_or(issue.start_date);
+    fields.target_date = validated.target_date.unwrap_or(issue.target_date);
+    fields.point = validated
+        .point
+        .unwrap_or_else(|| issue.point.map(i64::from))
+        .map(|point| point as i32);
+    fields.sort_order = validated.sort_order.unwrap_or(issue.sort_order);
+    fields.completed_at = validated.completed_at.unwrap_or(issue.completed_at);
+    fields.archived_at = validated.archived_at.unwrap_or(issue.archived_at);
+    fields.is_draft = validated.is_draft.unwrap_or(issue.is_draft);
+    fields.external_source = validated
+        .external_source
+        .clone()
+        .unwrap_or_else(|| issue.external_source.clone());
+    fields.external_id = validated
+        .external_id
+        .clone()
+        .unwrap_or_else(|| issue.external_id.clone());
+    fields.sequence_id = validated
+        .sequence_id
+        .map(|sequence| sequence as i32)
+        .unwrap_or(issue.sequence_id);
+    fields.state_id = validated.state_id.unwrap_or(issue.state_id);
+    fields.parent_id = validated.parent_id.unwrap_or(issue.parent_id);
+    fields.estimate_point_id = validated
+        .estimate_point_id
+        .unwrap_or(issue.estimate_point_id);
+    fields.type_id = validated.type_id.unwrap_or(issue.type_id);
+    fields.assigned_pod_id = validated.assigned_pod_id.unwrap_or(issue.assigned_pod_id);
+    fields.agent_executor = validated
+        .agent_executor
+        .clone()
+        .unwrap_or_else(|| issue.agent_executor.clone());
+    fields.git_work_branch = validated
+        .git_work_branch
+        .clone()
+        .unwrap_or_else(|| issue.git_work_branch.clone());
+    fields.created_via = validated
+        .created_via
+        .clone()
+        .unwrap_or_else(|| issue.created_via.clone());
+    fields.updated_at = now;
+    let prev_state = issue.state_id;
+    let m2m_audit = (issue.created_by_id, issue.updated_by_id);
+    let orm = state.orm().ok_or(Denial::ServerError)?;
+    let ctx = write_ctx(
+        actor_id,
+        actor_timezone,
+        issue.workspace_id,
+        issue.project_id,
+    );
+    let transition: Arc<dyn IssueTransitionHook> = Arc::new(AppTransitionHook::new(state, pool));
+    let enqueue: Arc<dyn TaskEnqueueHook> = Arc::new(AppTaskEnqueueHook::new(pool));
+    let outcome = domain::run(&ctx, orm, |txn| {
+        let transition = transition.clone();
+        let enqueue = enqueue.clone();
+        let ctx = ctx.clone();
+        // The driver pool is a borrow; the chain needs an owned handle
+        // (`PgPool` is an `Arc` clone, unobservable).
+        let pool = (*pool).clone();
+        let assignees = object.assignee_ids.clone();
+        let labels = object.label_ids.clone();
+        let fire = fire_spec(actor_id, now);
+        Box::pin(async move {
+            txn.hooks_mut().register(transition);
+            txn.hooks_mut().register(enqueue);
+            domain_issues::partial_update(
+                &ctx,
+                txn,
+                &pool,
+                domain_issues::PartialIssue {
+                    fields,
+                    assignees,
+                    labels,
+                    m2m_audit,
+                    sequence: None,
+                    prev_state,
+                    fire,
+                    activity: None,
+                },
+            )
+            .await
+        })
+    })
     .await
-    .map_err(|_| Denial::ServerError)?;
+    .map_err(|error| {
+        if error.is_integrity_violation() {
+            Denial::BadError("The payload is not valid".to_owned())
+        } else {
+            Denial::ServerError
+        }
+    })?;
+    if outcome.chain.stopped().is_some() {
+        return Err(Denial::ServerError);
+    }
     Ok(())
 }
 
@@ -1970,7 +2012,9 @@ pub async fn validate_intake_fields(
         out.status = validate_int_choice(errors, "status", value, INTAKE_STATUSES, false);
     }
     if let Some(value) = input.get("duplicate_to") {
-        if value.is_null() {
+        // `""` coerces to `None` before validation (`RelatedField`), and
+        // the auto field is `allow_null=True` (null FK), so it clears.
+        if value.is_null() || is_empty_string(value) {
             out.duplicate_to = Some(None);
         } else if let Some(id) = validate_pk(
             pool,
@@ -2007,12 +2051,22 @@ pub async fn validate_intake_fields(
 /// `updated_by` stamping, then the accepted-status TRIAGE-to-default
 /// issue transition (a full `Issue.save`, so `updated_at` /
 /// `description_stripped` / `completed_at` recompute there too).
+///
+/// `pre_save_issue` is the issue row fetched before either branch saved:
+/// Django's transition saves the cached pre-save `intake_issue.issue`
+/// whole, clobbering the issue-half writes from the same request (the
+/// stale-save bug, PORTED BUGS PB-2036 — the same clobber the v1 port
+/// models in `apply_triage_transition`).
+#[allow(clippy::too_many_arguments)]
 pub async fn apply_intake_update(
+    state: &AppState,
     pool: &PgPool,
     bridge: &IntakeIssueRow,
     validated: &ValidatedIntake,
+    pre_save_issue: &IssueRow,
     default_state_id: Option<Uuid>,
     actor_id: &Uuid,
+    actor_timezone: &chrono_tz::Tz,
     now: DateTime<Utc>,
 ) -> Result<(), Denial> {
     sqlx::query(
@@ -2042,31 +2096,65 @@ pub async fn apply_intake_update(
 
     // The accepted-status transition (`intake.py:73-82`): only when the
     // validated status is accepted (the caller checked TRIAGE + default
-    // presence in `validate()`).
+    // presence in `validate()`). The full-row rewrite IS the clobber:
+    // every pre-save column is written back, so issue-half writes from
+    // this request vanish — exactly Django's stale `issue.save()`. It
+    // rides `domain::issues::update`: the save hooks recompute
+    // `completed_at` / stripped text, and the chain runs the `post_save`
+    // completion pair + fire Django's save fires.
     if let Some(state_id) = default_state_id {
         let transition_now = Utc::now();
-        let group: Option<(Option<String>,)> =
-            sqlx::query_as(r#"SELECT "group" FROM states WHERE id = $1"#)
-                .bind(state_id)
-                .fetch_optional(pool)
+        let mut fields = pre_save_issue.field_set();
+        fields.state_id = Some(state_id);
+        fields.updated_at = transition_now;
+        let prev_state = pre_save_issue.state_id;
+        let m2m_audit = (pre_save_issue.created_by_id, pre_save_issue.updated_by_id);
+        let orm = state.orm().ok_or(Denial::ServerError)?;
+        let ctx = write_ctx(
+            actor_id,
+            actor_timezone,
+            pre_save_issue.workspace_id,
+            pre_save_issue.project_id,
+        );
+        let transition: Arc<dyn IssueTransitionHook> =
+            Arc::new(AppTransitionHook::new(state, pool));
+        let enqueue: Arc<dyn TaskEnqueueHook> = Arc::new(AppTaskEnqueueHook::new(pool));
+        let outcome = domain::run(&ctx, orm, |txn| {
+            let transition = transition.clone();
+            let enqueue = enqueue.clone();
+            let ctx = ctx.clone();
+            let pool = (*pool).clone();
+            let fire = fire_spec(actor_id, transition_now);
+            Box::pin(async move {
+                txn.hooks_mut().register(transition);
+                txn.hooks_mut().register(enqueue);
+                domain_issues::update(
+                    &ctx,
+                    txn,
+                    &pool,
+                    domain_issues::UpdateIssue {
+                        fields,
+                        assignees: None,
+                        labels: None,
+                        m2m_audit,
+                        prev_state,
+                        fire,
+                    },
+                )
                 .await
-                .map_err(|_| Denial::ServerError)?;
-        let completed_at = match group {
-            Some((Some(group),)) if group == "completed" => Some(transition_now),
-            _ => None,
-        };
-        sqlx::query(
-            r#"UPDATE issues SET state_id = $1, completed_at = $2,
-                 updated_at = $3, updated_by_id = $4 WHERE id = $5"#,
-        )
-        .bind(state_id)
-        .bind(completed_at)
-        .bind(transition_now)
-        .bind(actor_id)
-        .bind(bridge.issue_id)
-        .execute(pool)
+            })
+        })
         .await
-        .map_err(|_| Denial::ServerError)?;
+        .map_err(|error| {
+            if error.is_integrity_violation() {
+                Denial::BadError("The payload is not valid".to_owned())
+            } else {
+                Denial::ServerError
+            }
+        })?;
+        if outcome.chain.stopped().is_some() {
+            return Err(Denial::ServerError);
+        }
     }
     Ok(())
 }
@@ -2075,12 +2163,6 @@ pub async fn apply_intake_update(
 // Rendering (`IntakeIssueDetailSerializer`, `IssueDetailSerializer`,
 // `IssueIntakeSerializer`, `IntakeIssueSerializer`)
 // ---------------------------------------------------------------------------
-
-fn opt_uuid(value: &Option<Uuid>) -> serde_json::Value {
-    value.map_or(serde_json::Value::Null, |id| {
-        serde_json::Value::String(id.to_string())
-    })
-}
 
 fn opt_string(value: &Option<String>) -> serde_json::Value {
     value
@@ -2240,7 +2322,13 @@ pub async fn blocker_summary(
                  AND (st."group" IS NULL OR st."group" != 'triage')
                  AND i.archived_at IS NULL AND NOT i.is_draft
                  AND p.deleted_at IS NULL AND p.archived_at IS NULL
-               ORDER BY p.identifier, i.sequence_id LIMIT 100"#,
+               -- `_summary_list` (`blockers.py:172-181`): the `_resolved`
+               -- annotation sorts open rows first and the cap applies
+               -- after, so open items are never the ones cut. A NULL
+               -- group takes the ELSE branch (open), like Django.
+               ORDER BY CASE WHEN s."group" IN ('cancelled', 'completed')
+                        THEN 1 ELSE 0 END,
+                 p.identifier, i.sequence_id LIMIT 100"#,
         )
         .bind(&id_list)
         .fetch_all(pool)
@@ -2807,15 +2895,16 @@ pub fn render_intake_dump(
     serde_json::Value::Object(map)
 }
 
-/// `base_host(request, is_app=True)` (`utils/host.py:17`): `WEB_URL`
-/// else `APP_BASE_URL`; unset is `ImproperlyConfigured` → 500.
+/// `base_host(request, is_app=True)` (`utils/host.py:17-66`):
+/// `APP_BASE_URL` wins when set, else `WEB_URL`; unset is
+/// `ImproperlyConfigured` → 500. Empty strings fall through like
+/// Python's `or` (PIDASHCONV-1597).
 fn request_origin(state: &AppState) -> Result<String, Denial> {
-    state
-        .settings()
-        .urls
-        .web_url
+    let urls = &state.settings().urls;
+    urls.app_base_url
         .clone()
-        .or_else(|| state.settings().urls.app_base_url.clone())
+        .filter(|s| !s.is_empty())
+        .or_else(|| urls.web_url.clone().filter(|s| !s.is_empty()))
         .ok_or(Denial::ServerError)
 }
 
@@ -2863,16 +2952,34 @@ pub async fn partial_update(
         Ok(pool) => pool,
         Err(denial) => return denial.into_response(),
     };
+    // The id rewrite only — no row lookup, so a denied caller never
+    // learns whether the project exists (PIDASHCONV-1433).
+    let project_id = match resolve_project_id(pool, &slug, &project_id_raw).await {
+        Ok(project_id) => project_id,
+        Err(denial) => return denial.into_response(),
+    };
+    // Decorator (`:328`): ADMIN + `Issue`-creator. Runs before the body
+    // parse and every lookup, exactly like `@allow_permission`.
+    let membership = match load_membership(pool, &slug, &project_id, &actor.id).await {
+        Ok(membership) => membership,
+        Err(denial) => return denial.into_response(),
+    };
+    let creator = match is_issue_creator(pool, &pk, &actor.id).await {
+        Ok(creator) => creator,
+        Err(denial) => return denial.into_response(),
+    };
+    let gate = guards::intake_issue_update_gate(&membership.as_guard(), creator);
+    if gate.is_err() {
+        return guard_denial(gate);
+    }
+    // DRF parses the body lazily at the first `request.data` touch
+    // (`:330-331`), after the decorator.
     let data = match parse_body(&body) {
         Ok(data) => data,
         Err(response) => return response,
     };
     let serde_json::Value::Object(mut top) = data else {
         return Denial::ServerError.into_response();
-    };
-    let tenant = match resolve_tenant(pool, &slug, &project_id_raw).await {
-        Ok(tenant) => tenant,
-        Err(denial) => return denial.into_response(),
     };
 
     // `skip_activity` pop + description-update probe (`:330-331`).
@@ -2886,28 +2993,15 @@ pub async fn partial_update(
 
     // Lookups (`:333-339`): the intake instance compiles to its pk, so
     // a missing intake reads as `IS NULL` → 404 (BUG-partial-…).
-    let intake_id = match intake_id_for(pool, &slug, &tenant.project_id).await {
+    let intake_id = match intake_id_for(pool, &slug, &project_id).await {
         Ok(intake_id) => intake_id,
         Err(denial) => return denial.into_response(),
     };
-    let bridge = match lookup_intake_issue(pool, &pk, &slug, &tenant.project_id, intake_id).await {
+    let bridge = match lookup_intake_issue(pool, &pk, &slug, &project_id, intake_id).await {
         Ok(Some(bridge)) => bridge,
         Ok(None) => return Denial::NotFound.into_response(),
         Err(denial) => return denial.into_response(),
     };
-    let membership = match load_membership(pool, &slug, &tenant.project_id, &actor.id).await {
-        Ok(membership) => membership,
-        Err(denial) => return denial.into_response(),
-    };
-    // Decorator (`:328`): ADMIN + `Issue`-creator.
-    let creator = match is_issue_creator(pool, &pk, &actor.id).await {
-        Ok(creator) => creator,
-        Err(denial) => return denial.into_response(),
-    };
-    let gate = guards::intake_issue_update_gate(&membership.as_guard(), creator);
-    if gate.is_err() {
-        return guard_denial(gate);
-    }
     // Membership gate (`:355-359`).
     let gate = guards::update_membership_gate(&membership.as_guard());
     if gate.is_err() {
@@ -2933,12 +3027,11 @@ pub async fn partial_update(
         let serde_json::Value::Object(issue_input) = &issue_value else {
             return Denial::ServerError.into_response();
         };
-        let stored =
-            match fetch_issue_annotated(pool, &bridge.issue_id, &tenant.project_id, &slug).await {
-                Ok(Some(stored)) => stored,
-                Ok(None) => return Denial::NotFound.into_response(),
-                Err(denial) => return denial.into_response(),
-            };
+        let stored = match fetch_issue_annotated(pool, &bridge.issue_id, &project_id, &slug).await {
+            Ok(Some(stored)) => stored,
+            Ok(None) => return Denial::NotFound.into_response(),
+            Err(denial) => return denial.into_response(),
+        };
         let (stored_issue, stored_labels, stored_assignees) = stored;
         // GUEST narrowing (`:398-403`): the 3-key subset with stored
         // fallbacks; every other key is silently dropped.
@@ -2977,10 +3070,17 @@ pub async fn partial_update(
         )));
         let mut field_errors = FieldErrors::new();
         let validated = validate_issue_fields(pool, &narrowed, &mut field_errors).await;
+        if !field_errors.is_empty() {
+            // Field errors skip `validate()` entirely (DRF order).
+            return Denial::BadJson(serde_json::Value::Object(field_errors)).into_response();
+        }
         let mut non_field: Vec<String> = Vec::new();
         let object = match validate_issue_object(
             pool,
-            &tenant.project_id,
+            state.settings(),
+            &project_id,
+            &bridge.workspace_id,
+            &actor.id,
             &stored_issue,
             &validated,
             &narrowed,
@@ -3012,9 +3112,13 @@ pub async fn partial_update(
     let mut intake_validated: Option<ValidatedIntake> = None;
     let mut intake_current_dump: Option<String> = None;
     let mut accept_state: Option<Uuid> = None;
+    // The pre-save issue snapshot for the accept transition's stale
+    // full-row rewrite (`intake.py:70-82` saves the cached pre-save
+    // `intake_issue.issue` whole). Fetched before either branch saves.
+    let mut accept_presave: Option<IssueRow> = None;
     if guards::intake_fields_writable(&membership.as_guard()) {
         let bridge_issue =
-            match fetch_issue_annotated(pool, &bridge.issue_id, &tenant.project_id, &slug).await {
+            match fetch_issue_annotated(pool, &bridge.issue_id, &project_id, &slug).await {
                 Ok(Some((issue, _, _))) => issue,
                 Ok(None) => return Denial::NotFound.into_response(),
                 Err(denial) => return denial.into_response(),
@@ -3049,8 +3153,8 @@ pub async fn partial_update(
         };
         match validate_accept_transition(
             pool,
-            &tenant.workspace_id,
-            &tenant.project_id,
+            &bridge.workspace_id,
+            &project_id,
             validated.status,
             state_group,
         )
@@ -3060,6 +3164,7 @@ pub async fn partial_update(
             Err(response) => return response,
         }
         intake_validated = Some(validated);
+        accept_presave = Some(bridge_issue);
     }
 
     // Both serializers valid: save the issue branch first (`:430-456`).
@@ -3074,14 +3179,22 @@ pub async fn partial_update(
         issue_requested_dump.as_ref(),
         issue_current_dump.as_ref(),
     ) {
-        let stored =
-            match fetch_issue_annotated(pool, &bridge.issue_id, &tenant.project_id, &slug).await {
-                Ok(Some((issue, _, _))) => issue,
-                Ok(None) => return Denial::NotFound.into_response(),
-                Err(denial) => return denial.into_response(),
-            };
-        if let Err(denial) =
-            apply_issue_update(pool, &stored, validated, object, &actor.id, now).await
+        let stored = match fetch_issue_annotated(pool, &bridge.issue_id, &project_id, &slug).await {
+            Ok(Some((issue, _, _))) => issue,
+            Ok(None) => return Denial::NotFound.into_response(),
+            Err(denial) => return denial.into_response(),
+        };
+        if let Err(denial) = apply_issue_update(
+            &state,
+            pool,
+            &stored,
+            validated,
+            object,
+            &actor.id,
+            &actor.timezone,
+            now,
+        )
+        .await
         {
             return denial.into_response();
         }
@@ -3094,7 +3207,7 @@ pub async fn partial_update(
                 requested.clone(),
                 actor.id.to_string(),
                 pk.to_string(),
-                tenant.project_id.to_string(),
+                project_id.to_string(),
                 current.clone(),
                 epoch,
                 origin.clone(),
@@ -3119,11 +3232,23 @@ pub async fn partial_update(
     }
 
     // Then the intake branch (`:457-471`).
-    if let (Some(validated), Some(current)) =
-        (intake_validated.as_ref(), intake_current_dump.as_ref())
-    {
-        if let Err(denial) =
-            apply_intake_update(pool, &bridge, validated, accept_state, &actor.id, now).await
+    if let (Some(validated), Some(current), Some(presave)) = (
+        intake_validated.as_ref(),
+        intake_current_dump.as_ref(),
+        accept_presave.as_ref(),
+    ) {
+        if let Err(denial) = apply_intake_update(
+            &state,
+            pool,
+            &bridge,
+            validated,
+            presave,
+            accept_state,
+            &actor.id,
+            &actor.timezone,
+            now,
+        )
+        .await
         {
             return denial.into_response();
         }
@@ -3132,7 +3257,7 @@ pub async fn partial_update(
             super::python_dumps(&serde_json::Value::Object(top.clone())),
             actor.id.to_string(),
             pk.to_string(),
-            tenant.project_id.to_string(),
+            project_id.to_string(),
             current.clone(),
             epoch,
             origin,
@@ -3149,7 +3274,7 @@ pub async fn partial_update(
     let Some(intake_uuid) = intake_id else {
         return Denial::ServerError.into_response();
     };
-    let detail = match fetch_detail(pool, &intake_uuid, &pk, &tenant.project_id).await {
+    let detail = match fetch_detail(pool, &intake_uuid, &pk, &project_id).await {
         Ok(Some(detail)) => detail,
         Ok(None) => return Denial::NotFound.into_response(),
         Err(denial) => return denial.into_response(),
@@ -3185,28 +3310,19 @@ pub async fn retrieve(
         Ok(pool) => pool,
         Err(denial) => return denial.into_response(),
     };
-    let tenant = match resolve_tenant(pool, &slug, &project_id_raw).await {
-        Ok(tenant) => tenant,
-        Err(denial) => return denial.into_response(),
-    };
-    // `Intake.objects.filter(...).first()` then `.get(intake_id=intake_id.id)`
-    // — a missing intake dereferences `None.id` → 500.
-    let intake_id = match intake_id_for(pool, &slug, &tenant.project_id).await {
-        Ok(Some(intake_id)) => intake_id,
-        Ok(None) => return Denial::ServerError.into_response(),
-        Err(denial) => return denial.into_response(),
-    };
-    // `Project.objects.get(pk=project_id)` — a miss is 404.
-    let view_all = match guest_view_all(pool, &tenant.project_id).await {
-        Ok(view_all) => view_all,
+    // The id rewrite only — no row lookup, so a denied caller never
+    // learns whether the project exists (PIDASHCONV-1433).
+    let project_id = match resolve_project_id(pool, &slug, &project_id_raw).await {
+        Ok(project_id) => project_id,
         Err(denial) => return denial.into_response(),
     };
     // Decorator (`:502`): ADMIN + MEMBER + GUEST + `Issue`-creator.
+    // Runs before every lookup, exactly like `@allow_permission`.
     let creator = match is_issue_creator(pool, &pk, &actor.id).await {
         Ok(creator) => creator,
         Err(denial) => return denial.into_response(),
     };
-    let membership = match load_membership(pool, &slug, &tenant.project_id, &actor.id).await {
+    let membership = match load_membership(pool, &slug, &project_id, &actor.id).await {
         Ok(membership) => membership,
         Err(denial) => return denial.into_response(),
     };
@@ -3214,7 +3330,22 @@ pub async fn retrieve(
     if gate.is_err() {
         return guard_denial(gate);
     }
-    let detail = match fetch_detail(pool, &intake_id, &pk, &tenant.project_id).await {
+    // `Intake.objects.filter(...).first()` never raises; the 404/500
+    // order below is Django's statement order: `Project.objects.get`
+    // first, then `.get(intake_id=intake_id.id)` dereferencing `None.id`
+    // → 500 (PIDASHCONV-1433 review: project row and intake both
+    // missing must answer 404, not 500).
+    // `Project.objects.get(pk=project_id)` — a miss is 404.
+    let view_all = match guest_view_all(pool, &project_id).await {
+        Ok(view_all) => view_all,
+        Err(denial) => return denial.into_response(),
+    };
+    let intake_id = match intake_id_for(pool, &slug, &project_id).await {
+        Ok(Some(intake_id)) => intake_id,
+        Ok(None) => return Denial::ServerError.into_response(),
+        Err(denial) => return denial.into_response(),
+    };
+    let detail = match fetch_detail(pool, &intake_id, &pk, &project_id).await {
         Ok(Some(detail)) => detail,
         Ok(None) => return Denial::NotFound.into_response(),
         Err(denial) => return denial.into_response(),
@@ -3256,25 +3387,19 @@ pub async fn destroy(
         Ok(pool) => pool,
         Err(denial) => return denial.into_response(),
     };
-    let tenant = match resolve_tenant(pool, &slug, &project_id_raw).await {
-        Ok(tenant) => tenant,
+    // The id rewrite only — no row lookup, so a denied caller never
+    // learns whether the project exists (PIDASHCONV-1433).
+    let project_id = match resolve_project_id(pool, &slug, &project_id_raw).await {
+        Ok(project_id) => project_id,
         Err(denial) => return denial.into_response(),
     };
-    let intake_id = match intake_id_for(pool, &slug, &tenant.project_id).await {
-        Ok(intake_id) => intake_id,
-        Err(denial) => return denial.into_response(),
-    };
-    let bridge = match lookup_intake_issue(pool, &pk, &slug, &tenant.project_id, intake_id).await {
-        Ok(Some(bridge)) => bridge,
-        Ok(None) => return Denial::NotFound.into_response(),
-        Err(denial) => return denial.into_response(),
-    };
-    // Decorator (`:549`): ADMIN + `Issue`-creator.
+    // Decorator (`:549`): ADMIN + `Issue`-creator. Runs before every
+    // lookup, exactly like `@allow_permission`.
     let creator = match is_issue_creator(pool, &pk, &actor.id).await {
         Ok(creator) => creator,
         Err(denial) => return denial.into_response(),
     };
-    let membership = match load_membership(pool, &slug, &tenant.project_id, &actor.id).await {
+    let membership = match load_membership(pool, &slug, &project_id, &actor.id).await {
         Ok(membership) => membership,
         Err(denial) => return denial.into_response(),
     };
@@ -3282,6 +3407,15 @@ pub async fn destroy(
     if gate.is_err() {
         return guard_denial(gate);
     }
+    let intake_id = match intake_id_for(pool, &slug, &project_id).await {
+        Ok(intake_id) => intake_id,
+        Err(denial) => return denial.into_response(),
+    };
+    let bridge = match lookup_intake_issue(pool, &pk, &slug, &project_id, intake_id).await {
+        Ok(Some(bridge)) => bridge,
+        Ok(None) => return Denial::NotFound.into_response(),
+        Err(denial) => return denial.into_response(),
+    };
 
     // The status cascade (`:560-565`): statuses -2/-1/0/2 also delete
     // the `Issue`. Soft deletes stamp `deleted_at`/`updated_at`/
@@ -3289,17 +3423,18 @@ pub async fn destroy(
     // enqueue the related-objects sweep.
     let now = Utc::now();
     if guards::destroy_cascades_to_issue(bridge.status) {
-        let issue = match fetch_issue_for_destroy(pool, &slug, &tenant.project_id, &pk).await {
+        let issue = match fetch_issue_for_destroy(pool, &slug, &project_id, &pk).await {
             Ok(Some(issue)) => issue,
             // BUG-destroy-dangling-issue: `.first()` may be `None` and
             // `.delete()` is unconditional → 500.
             Ok(None) => return Denial::ServerError.into_response(),
             Err(denial) => return denial.into_response(),
         };
-        if let Err(denial) = soft_delete_issue(pool, &issue.id, &actor.id, now).await {
+        if let Err(denial) =
+            soft_delete_issue(&state, pool, &issue, &slug, &actor.id, &actor.timezone, now).await
+        {
             return denial.into_response();
         }
-        enqueue_soft_delete(pool, "db", "issue", &pk).await;
     }
     if let Err(denial) = soft_delete_bridge(pool, &bridge.id, &actor.id, now).await {
         return denial.into_response();
@@ -3311,22 +3446,80 @@ pub async fn destroy(
         .expect("empty 204")
 }
 
-/// `SoftDeleteModel.delete` (`db/mixins.py:71-77`): stamp + save.
+/// `SoftDeleteModel.delete` (`db/mixins.py:71-77`): stamp + save. Rides
+/// `domain::issues::soft_delete`: the full `save()` (state legs run),
+/// the completion pair + fire Django's save fires, and the
+/// related-objects forward (replacing the driver's old enqueue — same
+/// task, args and kwargs). No recent-visit delete and no `deleted`
+/// activity: Django's intake destroy has neither.
+#[allow(clippy::too_many_arguments)]
 async fn soft_delete_issue(
+    state: &AppState,
     pool: &PgPool,
-    issue_id: &Uuid,
+    issue: &IssueRow,
+    slug: &str,
     actor_id: &Uuid,
+    actor_timezone: &chrono_tz::Tz,
     now: DateTime<Utc>,
 ) -> Result<(), Denial> {
-    sqlx::query(
-        r#"UPDATE issues SET deleted_at = $2, updated_at = $2, updated_by_id = $3 WHERE id = $1"#,
-    )
-    .bind(issue_id)
-    .bind(now)
-    .bind(actor_id)
-    .execute(pool)
+    let mut fields = issue.field_set();
+    fields.deleted_at = Some(now);
+    fields.updated_at = now;
+    let prev_state = issue.state_id;
+    let orm = state.orm().ok_or(Denial::ServerError)?;
+    let ctx = write_ctx(
+        actor_id,
+        actor_timezone,
+        issue.workspace_id,
+        issue.project_id,
+    );
+    let transition: Arc<dyn IssueTransitionHook> = Arc::new(AppTransitionHook::new(state, pool));
+    let enqueue: Arc<dyn TaskEnqueueHook> = Arc::new(AppTaskEnqueueHook::new(pool));
+    let slug = slug.to_owned();
+    let outcome = domain::run(&ctx, orm, |txn| {
+        let transition = transition.clone();
+        let enqueue = enqueue.clone();
+        let ctx = ctx.clone();
+        // The driver pool is a borrow; the chain needs an owned handle
+        // (`PgPool` is an `Arc` clone, unobservable).
+        let pool = (*pool).clone();
+        let fire = fire_spec(actor_id, now);
+        Box::pin(async move {
+            txn.hooks_mut().register(transition);
+            txn.hooks_mut().register(enqueue);
+            domain_issues::soft_delete(
+                &ctx,
+                txn,
+                &pool,
+                domain_issues::SoftDeleteIssue {
+                    fields,
+                    prev_state,
+                    fire,
+                    origin: None,
+                    slug,
+                    completion: true,
+                    visit_delete: false,
+                    activity_current: serde_json::Value::Null,
+                    activity_notification: None,
+                    activity_require_origin: false,
+                    activity_subscriber: None,
+                    skip_activity: true,
+                },
+            )
+            .await
+        })
+    })
     .await
-    .map_err(|_| Denial::ServerError)?;
+    .map_err(|error| {
+        if error.is_integrity_violation() {
+            Denial::BadError("The payload is not valid".to_owned())
+        } else {
+            Denial::ServerError
+        }
+    })?;
+    if outcome.chain.stopped().is_some() {
+        return Err(Denial::ServerError);
+    }
     Ok(())
 }
 
@@ -3570,7 +3763,10 @@ pub async fn collection_list(
         let Some(issue) = nested.get(&issue_id) else {
             return Denial::ServerError.into_response();
         };
-        rendered.push(render_list_row(row, issue, gate.timezone));
+        match render_list_row(row, issue, gate.timezone) {
+            Ok(value) => rendered.push(value),
+            Err(_) => return Denial::ServerError.into_response(),
+        }
     }
     let results_json = serde_json::Value::Array(rendered).to_string();
     // `limit <= 0` never reaches here (`list_page` rejects it the way
@@ -4186,13 +4382,16 @@ async fn fetch_list_issues(
 
 /// `IntakeIssueSerializer` row (`intake.py:27-41` + `to_representation`
 /// `:86-90`): explicit `Meta.fields` order; the annotated `label_ids`
-/// ride the nested issue object.
+/// ride the nested issue object. Decode errors propagate: every column
+/// is projected by the list query, so a failure is a programmer error
+/// (a wrong column name rendered `duplicate_to` as null until
+/// PIDASHCONV-1434) and must 500, never render a default.
 fn render_list_row(
     row: &sqlx::postgres::PgRow,
     issue: &ListIssue,
     timezone: chrono_tz::Tz,
-) -> serde_json::Value {
-    let label_ids: Vec<Uuid> = row.try_get::<Vec<Uuid>, _>("label_ids").unwrap_or_default();
+) -> Result<serde_json::Value, sqlx::Error> {
+    let label_ids: Vec<Uuid> = row.try_get("label_ids")?;
     let mut nested = serde_json::Map::with_capacity(8);
     nested.insert("id".to_owned(), uuid_string(&issue.id));
     nested.insert(
@@ -4221,44 +4420,20 @@ fn render_list_row(
     );
     nested.insert("created_by".to_owned(), opt_uuid(&issue.created_by_id));
     let mut body = serde_json::Map::with_capacity(7);
-    body.insert(
-        "id".to_owned(),
-        serde_json::Value::String(
-            row.try_get::<Uuid, _>("id")
-                .map(|id| id.to_string())
-                .unwrap_or_default(),
-        ),
-    );
-    body.insert(
-        "status".to_owned(),
-        serde_json::Value::from(row.try_get::<i32, _>("status").unwrap_or(-2)),
-    );
-    body.insert(
-        "duplicate_to".to_owned(),
-        row.try_get::<Option<Uuid>, _>("duplicate_to")
-            .map(|id| opt_uuid(&id))
-            .unwrap_or(serde_json::Value::Null),
-    );
-    body.insert(
-        "snoozed_till".to_owned(),
-        row.try_get::<Option<DateTime<Utc>>, _>("snoozed_till")
-            .map(|moment| opt_dt(&moment, timezone))
-            .unwrap_or(serde_json::Value::Null),
-    );
-    body.insert(
-        "source".to_owned(),
-        row.try_get::<Option<String>, _>("source")
-            .map(|source| opt_string(&source))
-            .unwrap_or(serde_json::Value::Null),
-    );
+    let id: Uuid = row.try_get("id")?;
+    body.insert("id".to_owned(), serde_json::Value::String(id.to_string()));
+    let status: i32 = row.try_get("status")?;
+    body.insert("status".to_owned(), serde_json::Value::from(status));
+    let duplicate_to: Option<Uuid> = row.try_get("duplicate_to_id")?;
+    body.insert("duplicate_to".to_owned(), opt_uuid(&duplicate_to));
+    let snoozed_till: Option<DateTime<Utc>> = row.try_get("snoozed_till")?;
+    body.insert("snoozed_till".to_owned(), opt_dt(&snoozed_till, timezone));
+    let source: Option<String> = row.try_get("source")?;
+    body.insert("source".to_owned(), opt_string(&source));
     body.insert("issue".to_owned(), serde_json::Value::Object(nested));
-    body.insert(
-        "created_by".to_owned(),
-        row.try_get::<Option<Uuid>, _>("created_by_id")
-            .map(|id| opt_uuid(&id))
-            .unwrap_or(serde_json::Value::Null),
-    );
-    serde_json::Value::Object(body)
+    let created_by: Option<Uuid> = row.try_get("created_by_id")?;
+    body.insert("created_by".to_owned(), opt_uuid(&created_by));
+    Ok(serde_json::Value::Object(body))
 }
 
 // ---------------------------------------------------------------------------
@@ -4365,68 +4540,118 @@ pub async fn collection_create(
         Err(response) => return response,
     };
     let now = Utc::now();
-    // Serialize sequence assignment the way `Issue.save` does
-    // (`db/models/issue.py:313-343`): transaction-level advisory lock on
-    // the project, `MAX+1` sequence, tag-stripped text, `MAX+10000` sort
-    // order. Lock failure degrades to the plain path.
-    let _ = sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(advisory_key(&gate.project_id))
-        .execute(pool)
-        .await;
-    let sequence_id: i32 = match sqlx::query_scalar::<_, Option<i64>>(
-        "SELECT MAX(\"sequence\") FROM \"issue_sequences\" WHERE (\"issue_sequences\".\"project_id\" = $1)",
-    )
-    .bind(gate.project_id)
-    .fetch_one(pool)
-    .await
-    {
-        Ok(max) => max.map(|max| max + 1).unwrap_or(1) as i32,
-        Err(_) => return Denial::ServerError.into_response(),
-    };
-    let sort_order: f64 = match sqlx::query_scalar::<_, Option<f64>>(
-        "SELECT MAX(\"sort_order\") FROM \"issues\" WHERE (\"issues\".\"deleted_at\" IS NULL AND \"issues\".\"project_id\" = $1 AND \"issues\".\"state_id\" = $2)",
-    )
-    .bind(gate.project_id)
-    .bind(triage_id)
-    .fetch_one(pool)
-    .await
-    {
-        Ok(max) => max.map(|max| max + 10000.0).unwrap_or(65535.0),
-        Err(_) => return Denial::ServerError.into_response(),
+    // `IssueCreateSerializer.create` + `Issue.save` ride
+    // `domain::issues::create`: the hooks resolve the pod default,
+    // stripped text, sequence and sort order, and the post-commit chain
+    // runs the `post_save` fire plus the m2m legs in handler order. The
+    // created activity keeps its driver-side emit below (the intake
+    // `intake=` extra kwarg). `state_id`/`completed_at` replay `save`
+    // directly (validated above): triage, so NULL, unless explicit null
+    // filled another state.
+    let Some(description_html) = validated.description_html.clone() else {
+        // Unreachable post-validation (absent defaults, null/invalid
+        // 400s in the serializer): the old NULL bind would trip the
+        // not-null check into the same invalid-payload 400.
+        return Denial::BadError("The payload is not valid".to_owned()).into_response();
     };
     let issue_id = Uuid::new_v4();
-    // `IssueCreateSerializer.create` (`serializers/issue.py:387-462`) +
-    // `Issue.save` + `BaseModel.save` (crum `created_by`): the full row.
-    if let Err(response) = insert_issue(
-        pool,
-        &gate,
-        &validated,
-        issue_id,
-        triage_id,
-        sequence_id,
-        sort_order,
-        now,
-        default_assignee_id,
-    )
-    .await
-    {
-        return response;
-    }
-    if let Err(error) = sqlx::query(
-        "INSERT INTO \"issue_sequences\" (\"id\", \"created_at\", \"updated_at\", \"created_by_id\", \"updated_by_id\", \"deleted_at\", \"project_id\", \"workspace_id\", \"issue_id\", \"sequence\", \"deleted\") VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, $7, $8, FALSE)",
-    )
-    .bind(Uuid::new_v4())
-    .bind(now)
-    .bind(now)
-    .bind(gate.user_id)
-    .bind(gate.project_id)
-    .bind(gate.workspace_id)
-    .bind(issue_id)
-    .bind(i64::from(sequence_id))
-    .execute(pool)
-    .await
-    {
-        return db_error(error);
+    let fields = IssueFieldSet {
+        id: issue_id,
+        created_at: now,
+        updated_at: now,
+        created_by_id: Some(gate.user_id),
+        updated_by_id: None,
+        deleted_at: validated.deleted_at,
+        project_id: gate.project_id,
+        workspace_id: gate.workspace_id,
+        parent_id: validated.parent_id,
+        state_id: validated.state_id,
+        point: validated.point,
+        estimate_point_id: validated.estimate_point_id,
+        name: validated.name.clone(),
+        description_json: validated.description_json.clone(),
+        description_html,
+        description_stripped: None,
+        description_binary: None,
+        priority: validated.priority.clone(),
+        complexity_score: validated.complexity_score,
+        start_date: validated.start_date,
+        target_date: validated.target_date,
+        sequence_id: 0,
+        sort_order: validated.sort_order.unwrap_or(65535.0),
+        // `Issue.save` stamps now() for a completed-group state, NULL
+        // otherwise; only a fill miss (NULL state) keeps the input.
+        completed_at: match validated.state_id {
+            None => validated.completed_at,
+            Some(_) if validated.state_completed => Some(now),
+            Some(_) => None,
+        },
+        archived_at: validated.archived_at,
+        is_draft: validated.is_draft,
+        external_source: validated.external_source.clone(),
+        external_id: validated.external_id.clone(),
+        type_id: validated.type_id,
+        git_work_branch: validated.git_work_branch.clone(),
+        workpad: String::new(),
+        created_via: validated.created_via.clone(),
+        assigned_pod_id: validated.assigned_pod_id,
+        agent_executor: validated.agent_executor.clone(),
+    };
+    // The m2m plan resolves pre-save (pure reads of validated input).
+    let assignees = validated.assignee_ids.clone().unwrap_or_default();
+    let labels = validated.label_ids.clone().unwrap_or_default();
+    let fire = fire_spec(&gate.user_id, now);
+    let Some(orm) = state.orm() else {
+        return Denial::ServerError.into_response();
+    };
+    let ctx = write_ctx(
+        &gate.user_id,
+        &gate.timezone,
+        gate.workspace_id,
+        gate.project_id,
+    );
+    let transition: Arc<dyn IssueTransitionHook> = Arc::new(AppTransitionHook::new(&state, pool));
+    let enqueue: Arc<dyn TaskEnqueueHook> = Arc::new(AppTaskEnqueueHook::new(pool));
+    let outcome = domain::run(&ctx, orm, |txn| {
+        let transition = transition.clone();
+        let enqueue = enqueue.clone();
+        let ctx = ctx.clone();
+        // The driver pool is a borrow; the chain needs an owned handle
+        // (`PgPool` is an `Arc` clone, unobservable).
+        let pool = (*pool).clone();
+        Box::pin(async move {
+            txn.hooks_mut().register(transition);
+            txn.hooks_mut().register(enqueue);
+            domain_issues::create(
+                &ctx,
+                txn,
+                &pool,
+                domain_issues::CreateIssue {
+                    fields,
+                    assignees,
+                    default_assignee: default_assignee_id,
+                    labels,
+                    fire,
+                    origin: None,
+                    activity_requested: serde_json::Value::Null,
+                    activity_notification: None,
+                    activity_require_origin: false,
+                    skip_activity: true,
+                    skip_fire: false,
+                    model_activity: None,
+                    created_override: None,
+                },
+            )
+            .await
+        })
+    })
+    .await;
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(error) => return domain_response(error),
+    };
+    if outcome.chain.stopped().is_some() {
+        return Denial::ServerError.into_response();
     }
     // `IntakeIssue.objects.create(...)` (`:265-272`): the intake id is
     // the FIRST intake row for the project (name ordering); the
@@ -4546,7 +4771,7 @@ async fn ensure_triage_state(
         return Ok(id);
     }
     let max_sequence: Option<f64> = match sqlx::query_scalar(
-        "SELECT MAX(\"sequence\") FROM \"states\" WHERE (\"states\".\"project_id\" = $1 AND \"states\".\"group\" != 'triage')",
+        "SELECT MAX(\"sequence\") FROM \"states\" WHERE (\"states\".\"project_id\" = $1 AND \"states\".\"group\" != 'triage' AND \"states\".\"deleted_at\" IS NULL)",
     )
     .bind(gate.project_id)
     .fetch_one(pool)
@@ -4556,36 +4781,25 @@ async fn ensure_triage_state(
         Err(_) => return Err(Denial::ServerError.into_response()),
     };
     let sequence = max_sequence.map(|max| max + 15000.0).unwrap_or(65000.0);
-    let new_id = Uuid::new_v4();
     let now = Utc::now();
     // Full `State.objects.create` row: explicit kwargs plus the
     // `save()`-filled columns (`description=""`, `slug="triage"`,
     // `is_triage=False`) and the crum `created_by`.
-    if let Err(error) = sqlx::query(
-        "INSERT INTO \"states\" (\"id\", \"created_at\", \"updated_at\", \"created_by_id\", \"name\", \"description\", \"slug\", \"color\", \"project_id\", \"workspace_id\", \"sequence\", \"group\", \"default\", \"is_triage\") VALUES ($1, $2, $3, $4, 'Triage', '', 'triage', '#4E5355', $5, $6, $7, 'triage', false, false)",
+    match pidash_services::domain::projects::states::add_triage(
+        pool,
+        gate.project_id,
+        gate.workspace_id,
+        sequence,
+        gate.user_id,
+        now,
+        now,
+        pidash_services::domain::projects::states::TriageText::Quoted,
     )
-    .bind(new_id)
-    .bind(now)
-    .bind(now)
-    .bind(gate.user_id)
-    .bind(gate.project_id)
-    .bind(gate.workspace_id)
-    .bind(sequence)
-    .execute(pool)
     .await
     {
-        return Err(db_error(error));
+        Ok(new_id) => Ok(new_id),
+        Err(error) => Err(db_error(error)),
     }
-    Ok(new_id)
-}
-
-/// `convert_uuid_to_integer(project.id)` (`utils/uuid.py:19-26`): sha256
-/// of the string form, first 8 bytes big-endian signed. The lock
-/// serializes sequence assignment (`db/models/issue.py:318`).
-fn advisory_key(project_id: &Uuid) -> i64 {
-    use sha2::Digest;
-    let digest = sha2::Sha256::digest(project_id.to_string().as_bytes());
-    i64::from_be_bytes(digest[..8].try_into().expect("eight bytes"))
 }
 
 /// `base_host(request, is_app=True)` (`utils/host.py:61-65`):
@@ -4593,13 +4807,18 @@ fn advisory_key(project_id: &Uuid) -> i64 {
 /// Both unset is `ImproperlyConfigured` (500).
 fn app_origin(state: &AppState) -> Option<String> {
     let settings = state.settings();
-    if let Some(base) = &settings.urls.app_base_url {
-        return Some(base.clone());
+    if let Some(base) = settings
+        .urls
+        .app_base_url
+        .as_deref()
+        .filter(|s| !s.is_empty())
+    {
+        return Some(base.to_owned());
     }
-    if let Some(web) = &settings.urls.web_url {
-        return Some(web.clone());
+    if let Some(web) = settings.urls.web_url.as_deref().filter(|s| !s.is_empty()) {
+        return Some(web.to_owned());
     }
-    settings.urls.app_base_url.clone()
+    settings.urls.app_base_url.clone().filter(|s| !s.is_empty())
 }
 
 /// Map a database failure onto the `handle_exception` matrix: integrity
@@ -4613,13 +4832,49 @@ fn db_error(error: sqlx::Error) -> Response {
     Denial::ServerError.into_response()
 }
 
+/// Map a domain-write failure onto the same matrix: integrity → 400,
+/// anything else → 500. No `NotFound` arm: every fetch miss answers 404
+/// driver-side ahead of the write, and the hook's dangling-state miss is
+/// the race Django 500s (`State.DoesNotExist` uncaught in `save()`).
+fn domain_response(error: domain::DomainError) -> Response {
+    if error.is_integrity_violation() {
+        Denial::BadError("The payload is not valid".to_owned()).into_response()
+    } else {
+        Denial::ServerError.into_response()
+    }
+}
+
+fn write_ctx(
+    user_id: &Uuid,
+    timezone: &chrono_tz::Tz,
+    workspace_id: Uuid,
+    project_id: Uuid,
+) -> WriteCtx {
+    WriteCtx::new(WriteActor {
+        user_id: *user_id,
+        timezone: Some(timezone.name().to_owned()),
+    })
+    .with_scope(WriteScope {
+        workspace_id: Some(workspace_id),
+        project_id: Some(project_id),
+    })
+}
+
+/// The post-save fire arguments, one `post_save` receiver run: the intake
+/// views never set Django's `_orchestration_dispatch_immediate` attr, so
+/// the default applies on every path.
+fn fire_spec(actor_id: &Uuid, now: DateTime<Utc>) -> domain_issues::FireSpec {
+    domain_issues::FireSpec {
+        dispatch_immediate: true,
+        created_by: Some(*actor_id),
+        moved_by_run: None,
+        now,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // bodies and scalars
 // ---------------------------------------------------------------------------
-
-fn uuid_string(id: &Uuid) -> serde_json::Value {
-    serde_json::Value::String(id.to_string())
-}
 
 // ---------------------------------------------------------------------------
 // create: IssueCreateSerializer validation
@@ -4631,6 +4886,14 @@ fn uuid_string(id: &Uuid) -> serde_json::Value {
 /// are implemented; every arm cites its source.
 #[derive(Debug, Clone)]
 struct ValidatedCreate {
+    // The created row's state: the server-set triage row when the
+    // `state` key is absent, else the auto twin's resolution (`None`
+    // only when explicit null finds no default-fill row, in which
+    // case `Issue.save` inserts NULL).
+    state_id: Option<Uuid>,
+    // Whether the resolved state sits in the completed group
+    // (`Issue.save` stamps `completed_at = now()` then, else NULL).
+    state_completed: bool,
     parent_id: Option<Uuid>,
     assigned_pod_id: Option<Uuid>,
     label_ids: Option<Vec<Uuid>>,
@@ -4648,6 +4911,10 @@ struct ValidatedCreate {
     #[allow(dead_code)]
     sequence_id: Option<i32>,
     sort_order: Option<f64>,
+    // Validated then usually discarded: `Issue.save` overwrites
+    // `completed_at` whenever a state resolves (now() for the completed
+    // group, else NULL). Only when explicit null finds no fill row does
+    // the input survive onto the NULL-state row.
     completed_at: Option<DateTime<Utc>>,
     archived_at: Option<chrono::NaiveDate>,
     is_draft: bool,
@@ -4683,34 +4950,36 @@ async fn validate_issue_create(
     };
     // Declared-field order first: state_id, parent_id, assigned_pod_id,
     // label_ids, assignee_ids.
-    let parent_id = match opt_pk_field(issue_data, "parent_id", pool, "issues").await {
+    let mut parent_id = match opt_pk_field(issue_data, "parent_id", pool, "issues", true).await {
         Ok(id) => id,
         Err(message) => {
             field_errors.insert("parent_id".to_owned(), serde_json::json!([message]));
             None
         }
     };
-    let assigned_pod_id = match opt_pk_field(issue_data, "assigned_pod_id", pool, "pod").await {
-        Ok(id) => id,
-        Err(message) => {
-            field_errors.insert("assigned_pod_id".to_owned(), serde_json::json!([message]));
-            None
-        }
-    };
-    let label_ids = match opt_uuid_list_field(issue_data, "label_ids", pool, "labels").await {
+    let assigned_pod_id =
+        match opt_pk_field(issue_data, "assigned_pod_id", pool, "pod", false).await {
+            Ok(id) => id,
+            Err(message) => {
+                field_errors.insert("assigned_pod_id".to_owned(), serde_json::json!([message]));
+                None
+            }
+        };
+    let label_ids = match opt_uuid_list_field(issue_data, "label_ids", pool, "labels", true).await {
         Ok(ids) => ids,
         Err(body) => {
             field_errors.insert("label_ids".to_owned(), body);
             None
         }
     };
-    let assignee_ids = match opt_uuid_list_field(issue_data, "assignee_ids", pool, "users").await {
-        Ok(ids) => ids,
-        Err(body) => {
-            field_errors.insert("assignee_ids".to_owned(), body);
-            None
-        }
-    };
+    let assignee_ids =
+        match opt_uuid_list_field(issue_data, "assignee_ids", pool, "users", false).await {
+            Ok(ids) => ids,
+            Err(body) => {
+                field_errors.insert("assignee_ids".to_owned(), body);
+                None
+            }
+        };
     // Auto fields in `Meta` order: point, name, description_json,
     // description_html, priority (already gated), complexity_score,
     // dates, sequence_id, sort_order, completed_at, archived_at,
@@ -5016,15 +5285,65 @@ async fn validate_issue_create(
             None
         }
     };
+    // `parent`: the auto-generated twin (`Meta.exclude` keeps the model
+    // field, so DRF adds it beside the declared `parent_id`). Same
+    // source, validated under its own key with the default-manager
+    // queryset (`Issue.issue_objects`, shared with `duplicate_to`),
+    // and it wins when both keys are present, because DRF applies
+    // declared fields before auto fields (verified live on POST:
+    // `parent_id`=X + `parent`=Y lands Y, `parent`=null clears over a
+    // valid `parent_id`, and a triage id 400s under `parent` while
+    // 200ing under `parent_id`). Sits after `agent_executor` to match
+    // DRF field order (..., agent_executor, parent, state,
+    // estimate_point, type), so multi-error bodies merge like DRF.
+    if let Some(value) = issue_data.get("parent") {
+        if value.is_null() {
+            parent_id = None;
+        } else {
+            match resolve_pk_sql(pool, value, duplicate_to_live_sql()).await {
+                // `""` coerces to `None` ([`parse_pk_key`]), clearing like
+                // null — the auto twin still wins over `parent_id`.
+                Ok(resolved) => parent_id = resolved,
+                Err(message) => {
+                    field_errors.insert("parent".to_owned(), serde_json::json!([message]));
+                }
+            }
+        }
+    }
+    // `state`: the auto-generated twin (`Meta.exclude` keeps the model
+    // field, so DRF adds it beside the declared `state_id`). Same
+    // source, validated under its own key with the default-manager
+    // queryset (`State.objects`, shared with nothing else), and it wins
+    // over the server-set `state_id` because DRF applies declared fields
+    // before auto fields (verified live on POST: bogus, soft-deleted and
+    // triage ids 400 under `state`, and `state`=null lands the save()
+    // default instead of triage). Sits after `parent` to match DRF field
+    // order (..., agent_executor, parent, state, estimate_point, type),
+    // so multi-error bodies merge like DRF.
+    // `""` counts as the null key: DRF coerces it to `None` before
+    // validation, so it replays the save-default fill, like null.
+    let state_key_null = issue_data
+        .get("state")
+        .is_some_and(|value| value.is_null() || is_empty_string(value));
+    let state_override = match issue_data.get("state") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(value) => match resolve_pk_sql(pool, value, state_objects_sql()).await {
+            Ok(resolved) => resolved,
+            Err(message) => {
+                field_errors.insert("state".to_owned(), serde_json::json!([message]));
+                None
+            }
+        },
+    };
     let estimate_point_id =
-        match opt_pk_field(issue_data, "estimate_point", pool, "estimate_points").await {
+        match opt_pk_field(issue_data, "estimate_point", pool, "estimate_points", true).await {
             Ok(id) => id,
             Err(message) => {
                 field_errors.insert("estimate_point".to_owned(), serde_json::json!([message]));
                 None
             }
         };
-    let type_id = match opt_pk_field(issue_data, "type", pool, "issue_types").await {
+    let type_id = match opt_pk_field(issue_data, "type", pool, "issue_types", true).await {
         Ok(id) => id,
         Err(message) => {
             field_errors.insert("type".to_owned(), serde_json::json!([message]));
@@ -5087,12 +5406,39 @@ async fn validate_issue_create(
         }
         _ => None,
     };
-    // `state` is the server-set triage row: the project check always
-    // passes on this path (`allow_triage_state` context).
-    let _ = triage_id;
+    // `state` is the server-set triage row unless the auto twin fired:
+    // explicit null replays `Issue.save`'s default-state fill, and a
+    // valid id runs the `validate()` project check first (`:355-362`,
+    // `allow_triage_state` context, so the triage manager).
+    let (mut state_id, mut state_completed) = if state_key_null {
+        default_state_fill(pool, gate.project_id).await?
+    } else {
+        (triage_id, false)
+    };
+    if let Some(state) = state_override {
+        let in_triage: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM \"states\" WHERE (\"states\".\"project_id\" = $1 AND \"states\".\"id\" = $2 AND \"states\".\"deleted_at\" IS NULL AND \"states\".\"group\" = 'triage'))",
+        )
+        .bind(gate.project_id)
+        .bind(state)
+        .fetch_one(pool)
+        .await
+        .map_err(|_| Denial::ServerError.into_response())?;
+        if !in_triage {
+            return Err(Denial::BadJson(serde_json::json!({
+                "non_field_errors": ["State is not valid please pass a valid state_id"]
+            }))
+            .into_response());
+        }
+        // Unreachable short of a concurrent group flip between the two
+        // reads (the field queryset excludes the triage group the gate
+        // requires): the gate-passed id lands, like `validate()`.
+        state_id = Some(state);
+        state_completed = false;
+    }
     if let Some(parent) = parent_id {
         let in_project: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM \"issues\" WHERE (\"issues\".\"project_id\" = $1 AND \"issues\".\"id\" = $2))",
+            "SELECT EXISTS (SELECT 1 FROM \"issues\" WHERE (\"issues\".\"project_id\" = $1 AND \"issues\".\"id\" = $2 AND \"issues\".\"deleted_at\" IS NULL))",
         )
         .bind(gate.project_id)
         .bind(parent)
@@ -5108,7 +5454,7 @@ async fn validate_issue_create(
     }
     if let Some(estimate) = estimate_point_id {
         let in_project: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM \"estimate_points\" WHERE (\"estimate_points\".\"project_id\" = $1 AND \"estimate_points\".\"id\" = $2))",
+            "SELECT EXISTS (SELECT 1 FROM \"estimate_points\" WHERE (\"estimate_points\".\"project_id\" = $1 AND \"estimate_points\".\"id\" = $2 AND \"estimate_points\".\"deleted_at\" IS NULL))",
         )
         .bind(gate.project_id)
         .bind(estimate)
@@ -5123,6 +5469,8 @@ async fn validate_issue_create(
         }
     }
     Ok(ValidatedCreate {
+        state_id,
+        state_completed,
         parent_id,
         assigned_pod_id,
         label_ids,
@@ -5155,18 +5503,19 @@ async fn validate_issue_create(
 // field coercions (DRF to_internal_value, in serializer field order)
 // ---------------------------------------------------------------------------
 
-/// `PrimaryKeyRelatedField.to_internal_value` (`relations.py:252-263`)
-/// with a UUID `pk_field`: bools fail `incorrect_type` up front; strings
-/// parse as UUIDs (curly-quote `not a valid UUID` message); ints go
-/// straight to the lookup (`does_not_exist` — no UUID row ever matches);
-/// floats/dicts/lists fail with the UUID message over their Python
-/// `str()` (`5.5`, `{}`, `[]`).
+/// The `PrimaryKeyRelatedField.to_internal_value` coercion shared by
+/// [`resolve_pk`] and [`resolve_pk_sql`]: `(lookup id, display id)`.
+/// Ints coerce through `UUID(int=n)` (`UUIDField.get_prep_value`):
+/// out-of-range negatives fail `incorrect_type`, the rest look up a
+/// (practically never matching) UUID while the message keeps the
+/// original digits. `None` is the empty value: `""` becomes `None`
+/// via DRF's `RelatedField.run_validation` coercion
+/// (`relations.py:151-155`), and JSON null list items arrive raw —
+/// both answer the field's `allow_null` rule instead of the UUID
+/// parse. The empty-string match is exact-`""` (no trim), like DRF's
+/// `data == ''`.
 #[allow(clippy::result_large_err)]
-async fn resolve_pk(pool: &PgPool, table: &str, raw: &serde_json::Value) -> Result<Uuid, String> {
-    // Ints coerce through `UUID(int=n)` (`UUIDField.get_prep_value`):
-    // out-of-range negatives fail `incorrect_type`, the rest look up a
-    // (practically never matching) UUID while the message keeps the
-    // original digits.
+fn parse_pk_key(raw: &serde_json::Value) -> Result<Option<(Uuid, String)>, String> {
     enum Key {
         Uuid(Uuid),
         Int(Uuid, String),
@@ -5175,10 +5524,15 @@ async fn resolve_pk(pool: &PgPool, table: &str, raw: &serde_json::Value) -> Resu
         serde_json::Value::Bool(_) => {
             return Err("Incorrect type. Expected pk value, received bool.".to_owned());
         }
-        serde_json::Value::String(text) => match text.parse::<Uuid>() {
-            Ok(id) => Key::Uuid(id),
-            Err(_) => return Err(uuid_invalid(text)),
-        },
+        serde_json::Value::String(text) => {
+            if text.is_empty() {
+                return Ok(None);
+            }
+            match text.parse::<Uuid>() {
+                Ok(id) => Key::Uuid(id),
+                Err(_) => return Err(uuid_invalid(text)),
+            }
+        }
         serde_json::Value::Number(number) => {
             if let Some(int) = number.as_i64() {
                 if int < 0 {
@@ -5197,18 +5551,51 @@ async fn resolve_pk(pool: &PgPool, table: &str, raw: &serde_json::Value) -> Resu
             return Err(uuid_invalid(&python_str_repr(raw)));
         }
         serde_json::Value::Null => {
-            return Err("Incorrect type. Expected pk value, received NoneType.".to_owned());
+            // Raw null reaches here only from list items (every scalar
+            // caller lands missing/null before coercion): like `""` it
+            // answers the field's `allow_null` rule instead of the UUID
+            // parse, so list children fail null, like DRF.
+            return Ok(None);
         }
     };
-    // Same-table parameterization keeps one helper. The querysets here
-    // (`Issue.objects`, `Pod.all_objects`, plain `Label`/`EstimatePoint`/
-    // `IssueType` managers) are unfiltered, so no soft-delete guard.
-    let (id, display) = match &key {
+    Ok(Some(match &key {
         Key::Uuid(id) => (*id, id.to_string()),
         Key::Int(id, text) => (*id, text.clone()),
+    }))
+}
+
+/// `PrimaryKeyRelatedField.to_internal_value` (`relations.py:252-263`)
+/// with a UUID `pk_field`: bools fail `incorrect_type` up front; strings
+/// parse as UUIDs (curly-quote `not a valid UUID` message); ints go
+/// straight to the lookup (`does_not_exist` — no UUID row ever matches);
+/// floats/dicts/lists fail with the UUID message over their Python
+/// `str()` (`5.5`, `{}`, `[]`).
+#[allow(clippy::result_large_err)]
+async fn resolve_pk(
+    pool: &PgPool,
+    table: &str,
+    raw: &serde_json::Value,
+    live_only: bool,
+) -> Result<Option<Uuid>, String> {
+    let Some((id, display)) = parse_pk_key(raw)? else {
+        // Empty value ([`parse_pk_key`]); the caller applies the
+        // field's `allow_null` rule (scalar fields land `None`, list
+        // children fail null).
+        return Ok(None);
+    };
+    // Same-table parameterization keeps one helper. `live_only` mirrors
+    // the field queryset: the default soft-delete-scoped managers
+    // (`Issue.objects`, `Label.objects`, `EstimatePoint.objects`,
+    // `IssueType.objects`) hide `deleted_at` rows, while
+    // `Pod.all_objects` and the `users` table (no `deleted_at` column)
+    // stay unfiltered.
+    let guard = if live_only {
+        " AND (\"deleted_at\" IS NULL)"
+    } else {
+        ""
     };
     let exists: bool = sqlx::query_scalar(&format!(
-        "SELECT EXISTS (SELECT 1 FROM \"{table}\" WHERE (\"id\" = $1))"
+        "SELECT EXISTS (SELECT 1 FROM \"{table}\" WHERE (\"id\" = $1){guard})"
     ))
     .bind(id)
     .fetch_one(pool)
@@ -5217,12 +5604,46 @@ async fn resolve_pk(pool: &PgPool, table: &str, raw: &serde_json::Value) -> Resu
     if !exists {
         return Err(format!("Invalid pk \"{display}\" - object does not exist."));
     }
-    Ok(id)
+    Ok(Some(id))
+}
+
+/// [`resolve_pk`] against a caller-supplied queryset: the same coercion
+/// and `does_not_exist` message, for fields whose manager is not a plain
+/// table-plus-`deleted_at` scope (the auto `parent` twin over
+/// `Issue.issue_objects`, the auto `state` twin over `State.objects`).
+/// The SQL takes the lookup id as `$1` and returns the row id.
+#[allow(clippy::result_large_err)]
+async fn resolve_pk_sql(
+    pool: &PgPool,
+    raw: &serde_json::Value,
+    queryset_sql: &str,
+) -> Result<Option<Uuid>, String> {
+    let Some((id, display)) = parse_pk_key(raw)? else {
+        // Empty value ([`parse_pk_key`]); the caller applies the
+        // field's `allow_null` rule.
+        return Ok(None);
+    };
+    let row: Option<(Uuid,)> = sqlx::query_as(queryset_sql)
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| "Incorrect type. Expected pk value, received str.".to_owned())?;
+    if row.is_none() {
+        return Err(format!("Invalid pk \"{display}\" - object does not exist."));
+    }
+    Ok(Some(id))
 }
 
 /// DRF `UUIDField` failure message: curly quotes around the input.
 fn uuid_invalid(input: &str) -> String {
     format!("\u{201c}{input}\u{201d} is not a valid UUID.")
+}
+
+/// Exact-`""` JSON string (DRF's `data == ''`, no trim): the input
+/// `RelatedField.run_validation` forces to `None` before validation
+/// (`relations.py:151-155`).
+fn is_empty_string(value: &serde_json::Value) -> bool {
+    value.as_str().is_some_and(str::is_empty)
 }
 
 /// Python `str()` for JSON values (DRF error-message interpolation):
@@ -5264,19 +5685,21 @@ fn python_str_repr(value: &serde_json::Value) -> String {
 }
 
 /// Optional `PrimaryKeyRelatedField`: missing/null → `None`; otherwise
-/// [`resolve_pk`].
+/// [`resolve_pk`]. `""` rides the same `None` (`allow_null=True` on every
+/// scalar pk key here) through the [`parse_pk_key`] coercion.
 #[allow(clippy::result_large_err)]
 async fn opt_pk_field(
     issue_data: &serde_json::Map<String, serde_json::Value>,
     key: &str,
     pool: &PgPool,
     table: &str,
+    live_only: bool,
 ) -> Result<Option<Uuid>, String> {
     let raw = match issue_data.get(key) {
         None | Some(serde_json::Value::Null) => return Ok(None),
         Some(raw) => raw,
     };
-    resolve_pk(pool, table, raw).await.map(Some)
+    resolve_pk(pool, table, raw, live_only).await
 }
 
 /// Optional `ListField(child=PrimaryKeyRelatedField)`: missing → `None`
@@ -5288,6 +5711,7 @@ async fn opt_uuid_list_field(
     key: &str,
     pool: &PgPool,
     table: &str,
+    live_only: bool,
 ) -> Result<Option<Vec<Uuid>>, serde_json::Value> {
     let raw = match issue_data.get(key) {
         None => return Ok(None),
@@ -5306,8 +5730,16 @@ async fn opt_uuid_list_field(
     let mut out = Vec::with_capacity(items.len());
     let mut errors = serde_json::Map::new();
     for (idx, item) in items.iter().enumerate() {
-        match resolve_pk(pool, table, item).await {
-            Ok(id) => out.push(id),
+        match resolve_pk(pool, table, item, live_only).await {
+            Ok(Some(id)) => out.push(id),
+            // List children carry `allow_null=False`, so the empty
+            // value (`""`, null) fails null here, like DRF.
+            Ok(None) => {
+                errors.insert(
+                    idx.to_string(),
+                    serde_json::json!(["This field may not be null."]),
+                );
+            }
             Err(message) => {
                 errors.insert(idx.to_string(), serde_json::json!([message]));
             }
@@ -5586,9 +6018,9 @@ async fn filter_project_assignees(
         .map(|id| format!("'{id}'"))
         .collect::<Vec<_>>()
         .join(",");
-    // `ProjectMember.objects` is the plain manager: no soft-delete guard.
+    // `ProjectMember.objects` is the soft-delete-scoped default manager.
     let rows: Vec<Uuid> = sqlx::query_scalar(&format!(
-        "SELECT \"member_id\" FROM \"project_members\" WHERE (\"project_id\" = $1 AND \"role\" >= 15 AND \"is_active\" AND \"member_id\" IN ({list}))"
+        "SELECT \"member_id\" FROM \"project_members\" WHERE (\"project_id\" = $1 AND \"role\" >= 15 AND \"is_active\" AND \"deleted_at\" IS NULL AND \"member_id\" IN ({list}))"
     ))
     .bind(project_id)
     .fetch_all(pool)
@@ -5609,9 +6041,9 @@ async fn filter_project_labels(
         .map(|id| format!("'{id}'"))
         .collect::<Vec<_>>()
         .join(",");
-    // `Label.objects` is the plain manager: no soft-delete guard.
+    // `Label.objects` is the soft-delete-scoped default manager.
     let rows: Vec<Uuid> = sqlx::query_scalar(&format!(
-        "SELECT \"id\" FROM \"labels\" WHERE (\"project_id\" = $1 AND \"id\" IN ({list}))"
+        "SELECT \"id\" FROM \"labels\" WHERE (\"project_id\" = $1 AND \"deleted_at\" IS NULL AND \"id\" IN ({list}))"
     ))
     .bind(project_id)
     .fetch_all(pool)
@@ -5623,170 +6055,6 @@ async fn filter_project_labels(
 // ---------------------------------------------------------------------------
 // create: Issue + m2m writes
 // ---------------------------------------------------------------------------
-
-/// `IssueCreateSerializer.create` (`serializers/issue.py:387-462`) with
-/// `Issue.save` (`db/models/issue.py:267-351`) and `BaseModel.save`
-/// (crum `created_by`, `db/models/base.py:24-46`): the full `issues` row
-/// plus assignee/label links. `sequence_id` input is always overridden;
-/// `sort_order` input survives only when no max exists (the caller
-/// resolved both); `description_stripped` is recomputed; assignees fall
-/// back to the project default; `IntegrityError` on the links is
-/// swallowed (`ON CONFLICT DO NOTHING` is the same final state).
-#[allow(clippy::too_many_arguments)]
-#[allow(clippy::result_large_err)]
-async fn insert_issue(
-    pool: &PgPool,
-    gate: &crate::app_issues::Gate,
-    validated: &ValidatedCreate,
-    issue_id: Uuid,
-    triage_id: Uuid,
-    sequence_id: i32,
-    sort_order: f64,
-    now: DateTime<Utc>,
-    default_assignee_id: Option<Uuid>,
-) -> Result<(), Response> {
-    let sort_order = match validated.sort_order {
-        Some(input) => {
-            // `save` overrides only when a max exists; the caller already
-            // computed `MAX+10000` from the same table, so an input
-            // survives exactly when the max query found no row.
-            let has_max: bool = sqlx::query_scalar(
-                "SELECT EXISTS (SELECT 1 FROM \"issues\" WHERE (\"issues\".\"deleted_at\" IS NULL AND \"issues\".\"project_id\" = $1 AND \"issues\".\"state_id\" = $2))",
-            )
-            .bind(gate.project_id)
-            .bind(triage_id)
-            .fetch_one(pool)
-            .await
-            .map_err(|_| Denial::ServerError.into_response())?;
-            if has_max {
-                sort_order
-            } else {
-                input
-            }
-        }
-        None => sort_order,
-    };
-    // `assigned_pod`: explicit input wins, else the project default pod
-    // (`Issue.save`, `:277-286`).
-    let assigned_pod_id = match validated.assigned_pod_id {
-        Some(pod) => Some(pod),
-        None => default_project_pod(pool, gate.project_id).await?,
-    };
-    // `save`: `None` only when the html itself is `""`/`None`;
-    // otherwise the stripped text, even when it strips to `""`.
-    let description_stripped = match validated.description_html.as_deref() {
-        None | Some("") => None,
-        Some(html) => Some(crate::space::sanitize::strip_tags(html)),
-    };
-    if let Err(error) = sqlx::query(
-        "INSERT INTO \"issues\" (\"id\", \"created_at\", \"updated_at\", \"created_by_id\", \"updated_by_id\", \"deleted_at\", \"project_id\", \"workspace_id\", \"parent_id\", \"state_id\", \"point\", \"estimate_point_id\", \"name\", \"description_json\", \"description_html\", \"description_stripped\", \"description_binary\", \"priority\", \"complexity_score\", \"start_date\", \"target_date\", \"sequence_id\", \"sort_order\", \"completed_at\", \"archived_at\", \"is_draft\", \"external_source\", \"external_id\", \"type_id\", \"git_work_branch\", \"workpad\", \"created_via\", \"assigned_pod_id\", \"agent_executor\") VALUES ($1, $2, $3, $4, NULL, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NULL, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, '', $29, $30, $31)",
-    )
-    .bind(issue_id)
-    .bind(now)
-    .bind(now)
-    .bind(gate.user_id)
-    .bind(validated.deleted_at)
-    .bind(gate.project_id)
-    .bind(gate.workspace_id)
-    .bind(validated.parent_id)
-    .bind(triage_id)
-    .bind(validated.point)
-    .bind(validated.estimate_point_id)
-    .bind(validated.name.clone())
-    .bind(validated.description_json.clone())
-    .bind(validated.description_html.clone())
-    .bind(description_stripped)
-    .bind(validated.priority.clone())
-    .bind(validated.complexity_score)
-    .bind(validated.start_date)
-    .bind(validated.target_date)
-    .bind(sequence_id)
-    .bind(sort_order)
-    .bind(validated.completed_at)
-    .bind(validated.archived_at)
-    .bind(validated.is_draft)
-    .bind(validated.external_source.clone())
-    .bind(validated.external_id.clone())
-    .bind(validated.type_id)
-    .bind(validated.git_work_branch.clone())
-    .bind(validated.created_via.clone())
-    .bind(assigned_pod_id)
-    .bind(validated.agent_executor.clone())
-    .execute(pool)
-    .await
-    {
-        return Err(db_error(error));
-    }
-    // Assignees (`create`, `:402-441`): validated ids, else the project
-    // default when it is an active member (`role__gte=15`).
-    let assignees = match &validated.assignee_ids {
-        Some(ids) => ids.clone(),
-        None => match default_assignee_id {
-            Some(default) => {
-                let valid: bool = sqlx::query_scalar(
-                    "SELECT EXISTS (SELECT 1 FROM \"project_members\" WHERE (\"member_id\" = $1 AND \"project_id\" = $2 AND \"role\" >= 15 AND \"is_active\"))",
-                )
-                .bind(default)
-                .bind(gate.project_id)
-                .fetch_one(pool)
-                .await
-                .map_err(|_| Denial::ServerError.into_response())?;
-                if valid {
-                    vec![default]
-                } else {
-                    Vec::new()
-                }
-            }
-            None => Vec::new(),
-        },
-    };
-    for assignee_id in &assignees {
-        let _ = sqlx::query(
-            "INSERT INTO \"issue_assignees\" (\"id\", \"created_at\", \"updated_at\", \"created_by_id\", \"updated_by_id\", \"deleted_at\", \"project_id\", \"workspace_id\", \"issue_id\", \"assignee_id\") VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, $7, $8) ON CONFLICT DO NOTHING",
-        )
-        .bind(Uuid::new_v4())
-        .bind(now)
-        .bind(now)
-        .bind(gate.user_id)
-        .bind(gate.project_id)
-        .bind(gate.workspace_id)
-        .bind(issue_id)
-        .bind(*assignee_id)
-        .execute(pool)
-        .await;
-    }
-    if let Some(label_ids) = &validated.label_ids {
-        for label_id in label_ids {
-            let _ = sqlx::query(
-                "INSERT INTO \"issue_labels\" (\"id\", \"created_at\", \"updated_at\", \"created_by_id\", \"updated_by_id\", \"deleted_at\", \"project_id\", \"workspace_id\", \"issue_id\", \"label_id\") VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, $7, $8) ON CONFLICT DO NOTHING",
-            )
-            .bind(Uuid::new_v4())
-            .bind(now)
-            .bind(now)
-            .bind(gate.user_id)
-            .bind(gate.project_id)
-            .bind(gate.workspace_id)
-            .bind(issue_id)
-            .bind(*label_id)
-            .execute(pool)
-            .await;
-        }
-    }
-    Ok(())
-}
-
-/// The project's default pod (`Pod.default_for_project_id`), if any.
-#[allow(clippy::result_large_err)]
-async fn default_project_pod(pool: &PgPool, project_id: Uuid) -> Result<Option<Uuid>, Response> {
-    sqlx::query_scalar(
-        "SELECT \"id\" FROM \"pod\" WHERE (\"pod\".\"deleted_at\" IS NULL AND \"pod\".\"project_id\" = $1 AND \"pod\".\"is_default\" = TRUE) ORDER BY \"pod\".\"created_at\" ASC LIMIT 1",
-    )
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map(|row| row.flatten())
-    .map_err(|_| Denial::ServerError.into_response())
-}
 
 // ---------------------------------------------------------------------------
 // create: re-fetch + IntakeIssueDetailSerializer render
@@ -6098,6 +6366,52 @@ fn render_created_issue(rows: &CreatedRows, timezone: chrono_tz::Tz) -> serde_js
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn origin_state(app_base_url: Option<&str>, web_url: Option<&str>) -> AppState {
+        let mut settings = pidash_db::config::Settings::test_defaults();
+        settings.urls.app_base_url = app_base_url.map(str::to_owned);
+        settings.urls.web_url = web_url.map(str::to_owned);
+        AppState::with_settings("test", settings)
+    }
+
+    /// `base_host(request, is_app=True)` treats `""` as missing
+    /// (PIDASHCONV-1597): an empty `APP_BASE_URL` falls through to
+    /// `WEB_URL`, and empty everywhere is the 500. `APP_BASE_URL` wins
+    /// when both are set (PIDASHCONV-1641).
+    #[test]
+    fn request_origin_falls_through_empty_strings() {
+        let app = "https://app.example.invalid";
+        let web = "https://web.example.invalid";
+        let state = origin_state(Some(""), Some(web));
+        assert_eq!(request_origin(&state).expect("falls through"), web);
+        let state = origin_state(Some(app), Some(""));
+        assert_eq!(request_origin(&state).expect("app wins"), app);
+        let state = origin_state(Some(""), Some(""));
+        assert!(matches!(request_origin(&state), Err(Denial::ServerError)));
+        let state = origin_state(None, None);
+        assert!(matches!(request_origin(&state), Err(Denial::ServerError)));
+        let state = origin_state(Some(app), Some(web));
+        assert_eq!(request_origin(&state).expect("app base wins"), app);
+    }
+
+    /// `base_host(request, is_app=True)` treats `""` as missing
+    /// (PIDASHCONV-1597): an empty `APP_BASE_URL` falls through to
+    /// `WEB_URL`, and empty everywhere is `None` (the caller 500s).
+    #[test]
+    fn app_origin_falls_through_empty_strings() {
+        let web = "https://web.example.invalid";
+        let state = origin_state(Some(""), Some(web));
+        assert_eq!(app_origin(&state).as_deref(), Some(web));
+        let state = origin_state(Some(""), Some(""));
+        assert_eq!(app_origin(&state), None);
+        let state = origin_state(None, None);
+        assert_eq!(app_origin(&state), None);
+        let state = origin_state(Some("https://app.example.invalid"), Some(web));
+        assert_eq!(
+            app_origin(&state).as_deref(),
+            Some("https://app.example.invalid")
+        );
+    }
 
     #[test]
     fn updated_at_predicates_hit_the_issue_updated_column() {

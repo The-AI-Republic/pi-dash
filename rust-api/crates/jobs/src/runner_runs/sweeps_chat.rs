@@ -78,6 +78,7 @@ use pidash_db::runner_runs::{
     AgentChatSession,
 };
 use pidash_db::tasks_ticker::models::scheduler_binding;
+use pidash_services::domain::comments as comment_domain;
 use pidash_services::integrations::serializers::isoformat;
 use pidash_services::runner_runs::chat::{self, ChatEffect, NewEventInputs};
 use pidash_services::runner_runs::finalization::{self, TerminalEffectsInputs};
@@ -113,6 +114,22 @@ pub const RECONCILE_TERMINAL_EFFECTS_TASK: &str = "runner.reconcile_agent_run_te
 /// Re-export the L4 wire name for the single apply
 /// (`runner.apply_agent_run_terminal_effects`, `tasks.py:333`).
 pub use finalization::TERMINAL_EFFECTS_TASK;
+
+/// Enqueue one `apply_agent_run_terminal_effects` task for a run
+/// (`apply_agent_run_terminal_effects.delay(str(run_id))`):
+/// `args=[str(run_id)]`, `kwargs={}`. Moved from the api ports
+/// (`runner_runs::LivePorts::emit_terminal_effects`, OVL-06
+/// PIDASHCONV-1544) so the overlay shares the emit instead of
+/// copying it; the ports method is now a thin caller. Re-exported
+/// through `pidash-sdk::ops`.
+pub async fn emit_terminal_effects(pool: &PgPool, run_id: Uuid) -> Result<(), sqlx::Error> {
+    let job = NewJob::new(
+        TERMINAL_EFFECTS_TASK,
+        Value::Array(vec![Value::String(run_id.to_string())]),
+        Value::Object(Default::default()),
+    );
+    enqueue(pool, &job).await.map(|_| ())
+}
 
 // ---------------------------------------------------------------------------
 // Settings
@@ -1428,58 +1445,44 @@ async fn post_failure_comment(
         return Ok(());
     }
     let actor_id = seams.agent_system_user().await.map_err(SweepError::Seam)?;
-    let comment_id = Uuid::new_v4();
-    let description_id = Uuid::new_v4();
-    // `comment_insert_sql` positional binds (`lifecycle.rs:452-460`):
-    // two `now()` reads, ambient user nulls (workers carry no `crum`
-    // user), then the fetched ids plus the plan.
-    sqlx::query(&lifecycle::comment_insert_sql())
-        .bind(Utc::now())
-        .bind(Utc::now())
-        .bind(None::<Uuid>)
-        .bind(None::<Uuid>)
-        .bind(None::<DateTime<Utc>>)
-        .bind(comment_id)
-        .bind(ids.project_id)
-        .bind(ids.workspace_id)
-        .bind(comment.comment_stripped.clone())
-        .bind(json!({}))
-        .bind(comment.comment_html.clone())
-        .bind(None::<Uuid>)
-        .bind(Vec::<String>::new())
-        .bind(Vec::<String>::new())
-        .bind(ids.issue_id)
-        .bind(actor_id)
-        .bind("INTERNAL")
-        .bind(None::<String>)
-        .bind(None::<String>)
-        .bind(comment.speaker.value())
-        .bind(comment.speaker_label.clone())
-        .bind(comment.speaker_agent_run_id)
-        .bind(None::<DateTime<Utc>>)
-        .bind(None::<Uuid>)
-        .execute(&mut **tx)
-        .await?;
-    sqlx::query(&lifecycle::description_insert_sql())
-        .bind(Utc::now())
-        .bind(Utc::now())
-        .bind(None::<Uuid>)
-        .bind(None::<Uuid>)
-        .bind(None::<DateTime<Utc>>)
-        .bind(description_id)
-        .bind(ids.workspace_id)
-        .bind(ids.project_id)
-        .bind(json!({}))
-        .bind(comment.comment_html.clone())
-        .bind(None::<Vec<u8>>)
-        .bind(comment.description_stripped.clone())
-        .execute(&mut **tx)
-        .await?;
-    sqlx::query(lifecycle::comment_description_link_sql())
-        .bind(description_id)
-        .bind(comment_id)
-        .execute(&mut **tx)
-        .await?;
+    // Domain executor twins, in Django order. Ambient user nulls:
+    // workers carry no `crum` user. Four `now()` reads keep their
+    // positions (comment pair, description pair); the description
+    // stripped value binds verbatim (empty stays `""`, never NULL).
+    let empty_json = json!({});
+    let empty_list: Vec<String> = Vec::new();
+    let rows = comment_domain::CommentRows {
+        id: Uuid::new_v4(),
+        description_id: Uuid::new_v4(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        desc_created_at: Utc::now(),
+        desc_updated_at: Utc::now(),
+        workspace_id: ids.workspace_id,
+        project_id: ids.project_id,
+        issue_id: ids.issue_id,
+        actor_id: Some(actor_id),
+        created_by: None,
+        updated_by: None,
+        deleted_at: None,
+        html: &comment.comment_html,
+        json: &empty_json,
+        stripped: &comment.comment_stripped,
+        desc_stripped: Some(&comment.description_stripped),
+        access: "INTERNAL",
+        speaker_type: comment.speaker.value(),
+        speaker_label: &comment.speaker_label,
+        speaker_agent_run_id: comment.speaker_agent_run_id,
+        external_id: None,
+        external_source: None,
+        parent_id: None,
+        attachments: &empty_list,
+        labels: &empty_list,
+        edited_at: None,
+    };
+    comment_domain::insert_comment_row(&mut **tx, &rows).await?;
+    comment_domain::insert_description_row(&mut **tx, &rows).await?;
+    comment_domain::link_comment_description(&mut **tx, rows.id, rows.description_id).await?;
     Ok(())
 }
 

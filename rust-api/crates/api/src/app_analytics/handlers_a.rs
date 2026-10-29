@@ -69,8 +69,9 @@
 
 use std::collections::HashMap;
 
+use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
 use chrono::NaiveDate;
@@ -86,6 +87,8 @@ use super::gates::{
 };
 use pidash_auth::permissions::allow::AllowFacts;
 use pidash_auth::permissions::{ROLE_ADMIN, ROLE_MEMBER};
+use pidash_compat::response::json_response;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 use pidash_services::app_analytics::queries;
 use pidash_types::WorkspaceId;
 
@@ -172,8 +175,6 @@ pub const OBJECT_NOT_FOUND_BODY: &str = NOT_FOUND_BODY;
 /// DRF `get_object()` miss on the viewset detail routes:
 /// `Http404("No AnalyticView matches the given query.")`.
 pub const VIEW_NOT_FOUND_BODY: &str = r#"{"detail":"No AnalyticView matches the given query."}"#;
-/// `handle_exception`'s generic 500 branch.
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// `handle_exception`'s `ValidationError` branch (bad UUIDs, bad dates).
 pub const INVALID_DETAIL_BODY: &str = r#"{"error":"Please provide valid detail"}"#;
 /// DRF `JSONParser` failure prefix (`rest_framework/parsers.py` raises
@@ -252,15 +253,6 @@ impl IntoResponse for Denial {
         )
             .into_response()
     }
-}
-
-fn json_response(status: StatusCode, body: String) -> Response {
-    (
-        status,
-        [(axum::http::header::CONTENT_TYPE, "application/json")],
-        body,
-    )
-        .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -370,29 +362,8 @@ async fn gated_actor(
 // Query params + issue_filters(GET) SQL
 // ---------------------------------------------------------------------------
 
-/// One query value, repeated or not. `serde_html_form` (axum's `Query`
-/// backend) does not coerce a lone `?key=value` into a sequence, so the
-/// extractor uses this untagged shape and callers read the last value —
-/// mirroring Django's `QueryDict`, where repeats are legal and `.get`
-/// returns the last value.
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(untagged)]
-pub enum OneOrMany {
-    One(String),
-    Many(Vec<String>),
-}
-
-/// The multi-value query map every analytics handler extracts.
-pub type QueryMap = HashMap<String, OneOrMany>;
-
-/// Django `QueryDict.get`: the last value, or `None`.
-pub fn query_last(query: &QueryMap, key: &str) -> Option<String> {
-    match query.get(key) {
-        Some(OneOrMany::One(one)) => Some(one.clone()),
-        Some(OneOrMany::Many(many)) => many.last().cloned(),
-        None => None,
-    }
-}
+use pidash_compat::filter::{isnull_column, strings_in_column, uuid_in_column};
+pub use pidash_compat::http::{query_last, OneOrMany, QueryMap};
 
 /// Flat last-wins map for the F-04 `pidash_db::issue_filters` kernels
 /// (their `params.get(key)` is Django's `.get`).
@@ -484,87 +455,51 @@ fn alias_nullable_only(where_sql: &str, alias: &str) -> bool {
     true
 }
 
-/// Join legs for the relation aliases a filter fragment references.
+/// One join leg for a relation alias a filter fragment references.
 /// `INNER` when a value predicate touches the alias, else `LEFT OUTER`
 /// (Django's `filter()` vs `__isnull` join). Through-table FK attnames are
 /// `issue_id` on every leg (Django `<model>_id` for the `issue` FK).
+fn relation_leg(fragment: &str, alias: &str, table: &str) -> String {
+    let join = if alias_nullable_only(fragment, alias) {
+        "LEFT OUTER JOIN"
+    } else {
+        "INNER JOIN"
+    };
+    format!(" {join} \"{table}\" \"{alias}\" ON (\"issues\".\"id\" = \"{alias}\".\"issue_id\")")
+}
+
+/// Join legs for the relation aliases a filter fragment references.
 pub fn relation_joins(fragment: &str) -> String {
     let mut out = String::new();
     for (alias, table) in RELATION_JOINS {
         if !fragment.contains(&format!("\"{alias}\".")) {
             continue;
         }
-        let join = if alias_nullable_only(fragment, alias) {
-            "LEFT OUTER JOIN"
-        } else {
-            "INNER JOIN"
-        };
-        out.push_str(&format!(
-            " {join} \"{table}\" \"{alias}\" ON (\"issues\".\"id\" = \"{alias}\".\"issue_id\")"
-        ));
+        out.push_str(&relation_leg(fragment, alias, table));
     }
     out
 }
 
-/// Columns for `__isnull` predicates (and bare `Null` values), in this
-/// scope's quoted refs.
-fn isnull_column(path: &str) -> Option<&'static str> {
-    Some(match path {
-        "parent" => "\"issues\".\"parent_id\"",
-        "labels" => "\"label_issue\".\"label_id\"",
-        "assignees" => "\"issue_assignee\".\"assignee_id\"",
-        "created_by" => "\"issues\".\"created_by_id\"",
-        "issue_cycle__cycle_id" => "\"issue_cycle\".\"cycle_id\"",
-        "issue_module__module_id" => "\"issue_module\".\"module_id\"",
-        "label_issue__deleted_at" => "\"label_issue\".\"deleted_at\"",
-        "issue_assignee__deleted_at" => "\"issue_assignee\".\"deleted_at\"",
-        "issue_cycle__deleted_at" => "\"issue_cycle\".\"deleted_at\"",
-        "issue_module__deleted_at" => "\"issue_module\".\"deleted_at\"",
-        "issue_subscribers__deleted_at" => "\"issue_subscribers\".\"deleted_at\"",
-        "target_date" => "\"issues\".\"target_date\"",
-        "start_date" => "\"issues\".\"start_date\"",
-        _ => return None,
-    })
-}
-
-/// Columns for UUID `__in` predicates. `logged_by` has no model field:
-/// Django raises `FieldError` (generic 500).
-fn uuid_in_column(name: &str) -> Option<&'static str> {
-    Some(match name {
-        "state__in" => "\"issues\".\"state_id\"",
-        "parent__in" => "\"issues\".\"parent_id\"",
-        "labels__in" => "\"label_issue\".\"label_id\"",
-        "assignees__in" => "\"issue_assignee\".\"assignee_id\"",
-        "issue_mention__mention__id__in" => "\"issue_mention\".\"mention_id\"",
-        "created_by__in" => "\"issues\".\"created_by_id\"",
-        "project__in" => "\"issues\".\"project_id\"",
-        "issue_cycle__cycle_id__in" => "\"issue_cycle\".\"cycle_id\"",
-        "issue_module__module_id__in" => "\"issue_module\".\"module_id\"",
-        "issue_subscribers__subscriber_id__in" => "\"issue_subscribers\".\"subscriber_id\"",
-        _ => return None,
-    })
-}
-
-/// Columns for string `__in` predicates.
-fn strings_in_column(name: &str) -> Option<&'static str> {
-    Some(match name {
-        "state__group__in" => "\"states\".\"group\"",
-        "estimate_point__in" => "\"issues\".\"estimate_point_id\"",
-        "priority__in" => "\"issues\".\"priority\"",
-        "issue_intake__status__in" => "\"issue_intake\".\"status\"",
-        _ => return None,
-    })
+/// `__date`-truncated column for a timestamptz filter term: Django's `__date`
+/// lookup is `TruncDate`, which converts with the `TimezoneMixin`-activated
+/// user zone. Plain date columns need no conversion (same rule as
+/// [`queries::month_dimension_expr`]); `column` is the quoted ref.
+fn trunc_date_column(column: &str, timezone: &chrono_tz::Tz) -> String {
+    format!(
+        "({column} AT TIME ZONE {})::date",
+        queries::sql_zone_literal(timezone.name())
+    )
 }
 
 /// `(column, operator)` for `Day` predicates (`__gte` / `__lte`).
-fn day_comparison(name: &str) -> Option<(&'static str, &'static str)> {
+fn day_comparison(name: &str, timezone: &chrono_tz::Tz) -> Option<(String, &'static str)> {
     let (term, operator) = name.rsplit_once("__")?;
     let column = match term {
-        "created_at__date" => "\"issues\".\"created_at\"::date",
-        "updated_at__date" => "\"issues\".\"updated_at\"::date",
-        "completed_at__date" => "\"issues\".\"completed_at\"::date",
-        "start_date" => "\"issues\".\"start_date\"",
-        "target_date" => "\"issues\".\"target_date\"",
+        "created_at__date" => trunc_date_column("\"issues\".\"created_at\"", timezone),
+        "updated_at__date" => trunc_date_column("\"issues\".\"updated_at\"", timezone),
+        "completed_at__date" => trunc_date_column("\"issues\".\"completed_at\"", timezone),
+        "start_date" => "\"issues\".\"start_date\"".to_owned(),
+        "target_date" => "\"issues\".\"target_date\"".to_owned(),
         _ => return None,
     };
     let operator = match operator {
@@ -578,12 +513,14 @@ fn day_comparison(name: &str) -> Option<(&'static str, &'static str)> {
 /// Compile one `issue_filters(query_params, "GET")` predicate to SQL text
 /// (placeholders allocated from `binds`). Predicate names are Django ORM
 /// paths; unknown names are a `FieldError` in Python, a 500 here (same
-/// split as the pilot compiler).
+/// split as the pilot compiler). `timezone` is the actor zone for the
+/// `__date` terms (Django's `TruncDate` converts with it).
 #[allow(clippy::result_large_err)]
 pub fn filter_sql(
     binds: &mut Binds,
     name: &str,
     value: &pidash_db::issue_filters::FilterValue,
+    timezone: &chrono_tz::Tz,
 ) -> Result<String, Denial> {
     use pidash_db::issue_filters::FilterValue;
     if let Some(path) = name.strip_suffix("__isnull") {
@@ -639,10 +576,10 @@ pub fn filter_sql(
             }
             Ok(format!("{column} IN ({})", holders.join(",")))
         }
-        FilterValue::Text(text) => filter_text_sql(binds, name, text),
+        FilterValue::Text(text) => filter_text_sql(binds, name, text, timezone),
         FilterValue::Flag(_) => Err(Denial::ServerError),
         FilterValue::Day(day) => {
-            let (column, operator) = day_comparison(name).ok_or(Denial::ServerError)?;
+            let (column, operator) = day_comparison(name, timezone).ok_or(Denial::ServerError)?;
             let holder = binds.placeholder(BindVal::Text(day.to_string()));
             Ok(format!("{column} {operator} {holder}::date"))
         }
@@ -658,7 +595,12 @@ pub fn filter_sql(
 /// single-value `__contains` form. Bare `start_date`/`target_date` are
 /// Django exact lookups.
 #[allow(clippy::result_large_err)]
-fn filter_text_sql(binds: &mut Binds, name: &str, text: &str) -> Result<String, Denial> {
+fn filter_text_sql(
+    binds: &mut Binds,
+    name: &str,
+    text: &str,
+    timezone: &chrono_tz::Tz,
+) -> Result<String, Denial> {
     if name == "name__icontains" {
         // Django `icontains`: LIKE with `\`, `%`, `_` escaped.
         let escaped = text
@@ -691,11 +633,11 @@ fn filter_text_sql(binds: &mut Binds, name: &str, text: &str) -> Result<String, 
         _ => return Err(Denial::ServerError),
     };
     let column = match term {
-        "created_at__date" => "\"issues\".\"created_at\"::date",
-        "updated_at__date" => "\"issues\".\"updated_at\"::date",
-        "completed_at__date" => "\"issues\".\"completed_at\"::date",
-        "start_date" => "\"issues\".\"start_date\"",
-        "target_date" => "\"issues\".\"target_date\"",
+        "created_at__date" => trunc_date_column("\"issues\".\"created_at\"", timezone),
+        "updated_at__date" => trunc_date_column("\"issues\".\"updated_at\"", timezone),
+        "completed_at__date" => trunc_date_column("\"issues\".\"completed_at\"", timezone),
+        "start_date" => "\"issues\".\"start_date\"".to_owned(),
+        "target_date" => "\"issues\".\"target_date\"".to_owned(),
         _ => return Err(Denial::ServerError),
     };
     // Explicit bounds must parse as dates: Django's `get_prep_value`
@@ -751,9 +693,14 @@ fn parse_datetime_param(text: &str) -> Option<chrono::DateTime<chrono::Utc>> {
 /// Compile the request's `issue_filters(params, "GET")` predicates plus the
 /// scope into one `{filters}` fragment and its binds. `manager` selects the
 /// `IssueManager` scope (every analytics read) vs the plain soft-delete
-/// scope (the label-details bug branch, `base.py:83`).
+/// scope (the label-details bug branch, `base.py:83`). `timezone` is the
+/// actor zone for the `__date` terms (see [`filter_sql`]).
 #[allow(clippy::result_large_err)]
-pub fn scope_and_filters(query: &QueryMap, manager: bool) -> Result<(String, Binds), Denial> {
+pub fn scope_and_filters(
+    query: &QueryMap,
+    manager: bool,
+    timezone: &chrono_tz::Tz,
+) -> Result<(String, Binds), Denial> {
     let flat = flat_params(query);
     let today = chrono::Utc::now().date_naive();
     let compiled = pidash_db::issue_filters::issue_filters_get(&flat, "", today)
@@ -766,7 +713,10 @@ pub fn scope_and_filters(query: &QueryMap, manager: bool) -> Result<(String, Bin
         "(\"issues\".\"deleted_at\" IS NULL)".to_owned()
     });
     for (name, value) in compiled.predicates() {
-        parts.push(format!("({})", filter_sql(&mut binds, name, value)?));
+        parts.push(format!(
+            "({})",
+            filter_sql(&mut binds, name, value, timezone)?
+        ));
     }
     Ok((parts.join(" AND "), binds))
 }
@@ -775,9 +725,20 @@ pub fn scope_and_filters(query: &QueryMap, manager: bool) -> Result<(String, Bin
 /// fragment references, plus the manager scope's states leg (Django's
 /// exclude join — always `LEFT OUTER`; NULL-state rows still drop out of
 /// the `!=` test, same as Django). Legs the statement already joined are
-/// skipped (the state/cycle/module detail builders join their own tables).
+/// skipped: the state/cycle/module detail builders join their own tables,
+/// and a statement the filter-join rewrite repointed already carries the
+/// alias leg in place (joining it again is a duplicate alias).
 pub fn scope_joins(statement: &str, fragment: &str, manager: bool) -> String {
-    let mut joins = relation_joins(fragment);
+    let mut joins = String::new();
+    for (alias, table) in RELATION_JOINS {
+        if !fragment.contains(&format!("\"{alias}\".")) {
+            continue;
+        }
+        if statement.contains(&format!("\"{table}\" \"{alias}\"")) {
+            continue;
+        }
+        joins.push_str(&relation_leg(fragment, alias, table));
+    }
     let wants_states = manager || fragment.contains("\"states\".");
     if wants_states && !statement.contains("JOIN \"states\"") {
         joins.push_str(
@@ -804,6 +765,64 @@ pub fn scoped_sql(statement: &str, joins: &str) -> String {
     }
 }
 
+/// Through-table legs the Q-01 plot/detail builders join a second time,
+/// unaliased: handler-local filter alias plus SQL table. Django reuses the
+/// single join the `issue_filters` predicates already created (`base.py:63`
+/// filters first, `analytics_plot.py:60` annotates after); the builders'
+/// extra leg fans the dimension out over filtered-out and soft-deleted
+/// links instead (PIDASHCONV-1451).
+const REUSE_RELATIONS: &[(&str, &str)] = &[
+    ("label_issue", "issue_labels"),
+    ("issue_assignee", "issue_assignees"),
+    ("issue_cycle", "cycle_issues"),
+    ("issue_module", "module_issues"),
+];
+
+/// Repoint a Q-01 plot/details statement at the filter's relation joins.
+///
+/// When the filter fragment already references a relation alias, the
+/// builder's unaliased leg of that table is swapped in place for the
+/// filter's alias leg (same INNER/LEFT rule as [`relation_joins`]) and
+/// every remaining `"table".` column ref (dimension/segment expressions,
+/// detail target-table `ON` clauses, `deleted_at` guards) is rewritten to
+/// the alias, so the dimension and the details read the same single join
+/// Django uses. The swap stays in place — later legs (the detail
+/// target-table joins) reference the alias, so it must be joined before
+/// them — and [`scope_joins`] skips legs the statement already carries.
+/// Tables the filter never touches keep the builder's fresh join.
+pub fn reuse_filter_joins(statement: &str, fragment: &str) -> String {
+    let mut out = statement.to_owned();
+    for (alias, table) in REUSE_RELATIONS {
+        if !fragment.contains(&format!("\"{alias}\".")) {
+            continue;
+        }
+        // The builders spell this leg identically (`dimension_sql` and the
+        // four details builders): `LEFT OUTER JOIN "<table>" ON
+        // ("issues"."id" = "<table>"."issue_id")`.
+        let leg = format!(
+            " LEFT OUTER JOIN \"{table}\" ON (\"issues\".\"id\" = \"{table}\".\"issue_id\")"
+        );
+        out = out.replace(&leg, &relation_leg(fragment, alias, table));
+        out = out.replace(&format!("\"{table}\"."), &format!("\"{alias}\"."));
+    }
+    out
+}
+
+/// Django duplicate-kwarg crash (`base.py:83,136,150`, PIDASHCONV-1451):
+/// when the relation GET key is present, `**filters` already carries
+/// `<alias>__deleted_at__isnull` (`filter_labels` / `filter_cycle` /
+/// `filter_module` set it unconditionally), and the details branch passes
+/// the same kwarg explicitly again, so `QuerySet.filter()` raises
+/// `TypeError` and `handle_exception` answers the generic 500. The assignee
+/// branch adds no explicit guard, so it never crashes. Mirrors Django's
+/// `"labels" in request.GET` key-presence check (empty values crash too).
+pub fn duplicate_guard_crash(query: &QueryMap, x_axis: &str, segment: Option<&str>) -> bool {
+    let on_axis = |axis: &str| x_axis == axis || segment == Some(axis);
+    (on_axis("labels__id") && query.contains_key("labels"))
+        || (on_axis("issue_cycle__cycle_id") && query.contains_key("cycle"))
+        || (on_axis("issue_module__module_id") && query.contains_key("module"))
+}
+
 // ---------------------------------------------------------------------------
 // GET analytics/ — AnalyticsEndpoint.get (base.py:38-176)
 // ---------------------------------------------------------------------------
@@ -819,16 +838,22 @@ async fn analytics_get(
         Ok(actor) => actor,
         Err(denied) => return denied,
     };
-    let _ = actor;
-    match analytics_body(&state, &slug, &query).await {
+    match analytics_body(&state, &slug, &query, &actor.timezone).await {
         Ok(body) => json_response(StatusCode::OK, body),
         Err(denial) => denial.into_response(),
     }
 }
 
 /// Build the analytics response body: validate, filter, count, plot, extras.
+/// `timezone` is the actor zone: Django's `TimezoneMixin` activates it, so
+/// the `__date` filters and the date-axis buckets convert with it.
 #[allow(clippy::result_large_err)]
-async fn analytics_body(state: &AppState, slug: &str, query: &QueryMap) -> Result<String, Denial> {
+async fn analytics_body(
+    state: &AppState,
+    slug: &str,
+    query: &QueryMap,
+    timezone: &chrono_tz::Tz,
+) -> Result<String, Denial> {
     let pool = pool_of(state)?;
     let x_axis = query_last(query, "x_axis");
     let y_axis = query_last(query, "y_axis");
@@ -843,14 +868,16 @@ async fn analytics_body(state: &AppState, slug: &str, query: &QueryMap) -> Resul
 
     // Manager scope + GET predicates, once; the label branch recompiles
     // without the manager scope (B1).
-    let (fragment, binds) = scope_and_filters(query, true)?;
-    let (label_fragment, label_binds) = scope_and_filters(query, false)?;
+    let (fragment, binds) = scope_and_filters(query, true, timezone)?;
+    let (label_fragment, label_binds) = scope_and_filters(query, false, timezone)?;
 
     let total = fetch_count(pool, slug, &fragment, &binds).await?;
 
     let distribution = if y_axis == "issue_count" {
-        let sql = queries::base_plot_count_sql(&x_axis, segment.as_deref(), &fragment)
-            .ok_or(Denial::ServerError)?;
+        let sql =
+            queries::base_plot_count_sql(&x_axis, segment.as_deref(), &fragment, timezone.name())
+                .ok_or(Denial::ServerError)?;
+        let sql = reuse_filter_joins(&sql, &fragment);
         let joins = scope_joins(&sql, &fragment, true);
         let rows = fetch_count_plot(
             pool,
@@ -862,8 +889,14 @@ async fn analytics_body(state: &AppState, slug: &str, query: &QueryMap) -> Resul
         .await?;
         super::render::distribution_from_count_rows(rows, &x_axis, segment.is_some())
     } else {
-        let sql = queries::base_plot_estimate_sql(&x_axis, segment.as_deref(), &fragment)
-            .ok_or(Denial::ServerError)?;
+        let sql = queries::base_plot_estimate_sql(
+            &x_axis,
+            segment.as_deref(),
+            &fragment,
+            timezone.name(),
+        )
+        .ok_or(Denial::ServerError)?;
+        let sql = reuse_filter_joins(&sql, &fragment);
         let joins = scope_joins(&sql, &fragment, true);
         let rows = fetch_estimate_plot(
             pool,
@@ -875,6 +908,13 @@ async fn analytics_body(state: &AppState, slug: &str, query: &QueryMap) -> Resul
         .await?;
         super::render::distribution_from_estimate_rows(rows, &x_axis, segment.is_some())
     };
+
+    // Django duplicate-kwarg crash (see [`duplicate_guard_crash`]): the
+    // details branches below run after the plot (`base.py:71-159`), so the
+    // crash lands here, once the distribution is computed.
+    if duplicate_guard_crash(query, &x_axis, segment.as_deref()) {
+        return Err(Denial::ServerError);
+    }
 
     // Extras: each arm runs only for its axis (`base.py:71-159`); anything
     // else stays `{}`.
@@ -1073,6 +1113,7 @@ async fn fetch_label_details(
     binds: &Binds,
 ) -> Result<Vec<Map<String, Value>>, Denial> {
     let sql = queries::base_label_details_sql(fragment);
+    let sql = reuse_filter_joins(&sql, fragment);
     let scoped = scoped_sql(&sql, &scope_joins(&sql, fragment, false));
     let rows: Vec<(Uuid, Option<String>, Option<String>)> =
         bind_all_as(sqlx::query_as(&scoped), slug, binds.values())
@@ -1118,6 +1159,7 @@ async fn fetch_assignee_details(
     binds: &Binds,
 ) -> Result<Vec<Map<String, Value>>, Denial> {
     let sql = queries::base_assignee_details_sql(fragment);
+    let sql = reuse_filter_joins(&sql, fragment);
     let scoped = scoped_sql(&sql, &scope_joins(&sql, fragment, true));
     let rows: Vec<AssigneeDetailRow> = bind_all_as(sqlx::query_as(&scoped), slug, binds.values())
         .fetch_all(pool)
@@ -1159,6 +1201,7 @@ async fn fetch_cycle_details(
     binds: &Binds,
 ) -> Result<Vec<Map<String, Value>>, Denial> {
     let sql = queries::base_cycle_details_sql(fragment);
+    let sql = reuse_filter_joins(&sql, fragment);
     let scoped = scoped_sql(&sql, &scope_joins(&sql, fragment, true));
     let rows: Vec<(Uuid, Option<String>)> =
         bind_all_as(sqlx::query_as(&scoped), slug, binds.values())
@@ -1192,6 +1235,7 @@ async fn fetch_module_details(
     binds: &Binds,
 ) -> Result<Vec<Map<String, Value>>, Denial> {
     let sql = queries::base_module_details_sql(fragment);
+    let sql = reuse_filter_joins(&sql, fragment);
     let scoped = scoped_sql(&sql, &scope_joins(&sql, fragment, true));
     let rows: Vec<(Uuid, Option<String>)> =
         bind_all_as(sqlx::query_as(&scoped), slug, binds.values())
@@ -1571,36 +1615,56 @@ pub struct ViewInput {
     pub query_dict: Option<Value>,
 }
 
-/// Validate one `name` value: DRF `CharField(max_length=255)` — type, then
-/// blank, then length in code points (Python `[:255]`-style slicing counts
-/// code points, never UTF-8 bytes).
+/// Python `str.strip()` membership: Rust `White_Space` plus U+001C-U+001F
+/// (same set as `is_py_space` in `db::app_pages::strip`, PIDASHCONV-801 /
+/// 890 — verified by exhaustively diffing `str.strip` against
+/// `char::is_whitespace` over all code points; those four are the only
+/// differences).
+fn is_py_strip_ws(ch: char) -> bool {
+    ch.is_whitespace() || matches!(ch, '\u{1c}'..='\u{1f}')
+}
+
+/// Validate one `name` value: DRF `CharField(max_length=255)`
+/// (`run_validation` + `to_internal_value`) — `null` fails,
+/// bools/composites fail, numbers coerce via `str()`, the value strips
+/// (`trim_whitespace`), blank (empty or whitespace-only) fails, then
+/// length in code points on the stripped value (Python `[:255]`-style
+/// slicing counts code points, never UTF-8 bytes).
 fn validate_name(value: &Value) -> Result<String, Value> {
-    let text = match value {
-        Value::String(text) => text,
-        Value::Null => {
-            return Err(field_error("This field may not be null."));
-        }
+    if value.is_null() {
+        return Err(field_error("This field may not be null."));
+    }
+    let raw = match value {
+        Value::String(text) => text.clone(),
+        Value::Number(number) => number.to_string(),
         _ => return Err(field_error("Not a valid string.")),
     };
-    if text.is_empty() {
+    let stripped = raw.trim_matches(is_py_strip_ws);
+    if stripped.is_empty() {
         return Err(field_error("This field may not be blank."));
     }
-    if text.chars().count() > 255 {
+    if stripped.chars().count() > 255 {
         return Err(field_error(
             "Ensure this field has no more than 255 characters.",
         ));
     }
-    Ok(text.clone())
+    Ok(stripped.to_owned())
 }
 
-/// Validate one `description` value (`TextField(blank=True)`): type only —
-/// `""` is allowed, missing defaults to `""`.
+/// Validate one `description` value (`TextField(blank=True)` →
+/// `CharField(allow_blank=True)`): same coercion and strip as
+/// [`validate_name`]; blank strips to `""`, which is allowed, and there
+/// is no `max_length`. Missing defaults to `""`.
 fn validate_description(value: &Value) -> Result<String, Value> {
-    match value {
-        Value::String(text) => Ok(text.clone()),
-        Value::Null => Err(field_error("This field may not be null.")),
-        _ => Err(field_error("Not a valid string.")),
+    if value.is_null() {
+        return Err(field_error("This field may not be null."));
     }
+    let raw = match value {
+        Value::String(text) => text.clone(),
+        Value::Number(number) => number.to_string(),
+        _ => return Err(field_error("Not a valid string.")),
+    };
+    Ok(raw.trim_matches(is_py_strip_ws).to_owned())
 }
 
 fn field_error(message: &str) -> Value {
@@ -1706,9 +1770,35 @@ fn empty_query_dict() -> Value {
 // Viewset handlers
 // ---------------------------------------------------------------------------
 
-fn parse_pk(raw: &str) -> Result<Uuid, Denial> {
-    // `get_object()` filters `pk=<raw>`: garbage is a `ValidationError`.
-    Uuid::parse_str(raw).map_err(|_| Denial::BadValidation)
+/// Rebuild the inbound request and proxy it to Django (non-canonical
+/// `<uuid:pk>` spellings: routing precedes auth, so Django's resolver 404
+/// answers before any 401 — the `v1_cycles_modules` precedent).
+async fn proxy_through(
+    state: AppState,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let mut req = axum::http::Request::builder()
+        .method(method)
+        .uri(uri)
+        .body(axum::body::Body::from(body))
+        .expect("rebuild proxy request");
+    *req.headers_mut() = headers;
+    crate::edge::proxy(State(state), req).await
+}
+
+/// Parse the `<uuid:pk>` segment (`app/urls/analytic.py:36`): only a
+/// canonically-spelled segment parses — every other spelling (and any
+/// non-UUID) is a resolver miss the caller proxies to Django for its own
+/// 404, before auth. `Uuid::parse_str` alone would also accept
+/// uppercase, simple, braced and `urn:uuid:` spellings Django never routes.
+fn parse_pk(raw: &str) -> Result<Uuid, ()> {
+    if !crate::uuid_path::is_canonical_uuid(raw) {
+        return Err(());
+    }
+    Uuid::parse_str(raw).map_err(|_| ())
 }
 
 /// Map a body-parse failure to DRF's `ParseError` shape. Blank input is
@@ -1876,8 +1966,14 @@ async fn create_view(
 async fn view_retrieve(
     State(state): State<AppState>,
     extension: Option<axum::Extension<SessionHandle>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
     Path((slug, pk)): Path<(String, String)>,
 ) -> Response {
+    let Ok(id) = parse_pk(&pk) else {
+        return proxy_through(state, method, uri, headers, Bytes::new()).await;
+    };
     let actor = match gated_actor(&state, extension, "GET", ANALYTIC_VIEW_DETAIL_PATH, &slug).await
     {
         Ok(actor) => actor,
@@ -1885,10 +1981,6 @@ async fn view_retrieve(
     };
     let pool = match pool_of(&state) {
         Ok(pool) => pool,
-        Err(denial) => return denial.into_response(),
-    };
-    let id = match parse_pk(&pk) {
-        Ok(id) => id,
         Err(denial) => return denial.into_response(),
     };
     match fetch_view_detail(pool, &slug, &id).await {
@@ -1907,9 +1999,15 @@ async fn view_retrieve(
 async fn view_partial_update(
     State(state): State<AppState>,
     extension: Option<axum::Extension<SessionHandle>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
     Path((slug, pk)): Path<(String, String)>,
     body: axum::body::Bytes,
 ) -> Response {
+    let Ok(id) = parse_pk(&pk) else {
+        return proxy_through(state, method, uri, headers, body).await;
+    };
     let actor =
         match gated_actor(&state, extension, "PATCH", ANALYTIC_VIEW_DETAIL_PATH, &slug).await {
             Ok(actor) => actor,
@@ -1917,10 +2015,6 @@ async fn view_partial_update(
         };
     let pool = match pool_of(&state) {
         Ok(pool) => pool,
-        Err(denial) => return denial.into_response(),
-    };
-    let id = match parse_pk(&pk) {
-        Ok(id) => id,
         Err(denial) => return denial.into_response(),
     };
     let fields = match parse_body(&body) {
@@ -2024,8 +2118,14 @@ pub(crate) async fn enqueue_soft_delete(pool: &sqlx::PgPool, model: &str, pk: &u
 async fn view_destroy(
     State(state): State<AppState>,
     extension: Option<axum::Extension<SessionHandle>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
     Path((slug, pk)): Path<(String, String)>,
 ) -> Response {
+    let Ok(id) = parse_pk(&pk) else {
+        return proxy_through(state, method, uri, headers, Bytes::new()).await;
+    };
     let actor = match gated_actor(
         &state,
         extension,
@@ -2040,10 +2140,6 @@ async fn view_destroy(
     };
     let pool = match pool_of(&state) {
         Ok(pool) => pool,
-        Err(denial) => return denial.into_response(),
-    };
-    let id = match parse_pk(&pk) {
-        Ok(id) => id,
         Err(denial) => return denial.into_response(),
     };
     match destroy_view(pool, &actor, &slug, &id).await {
@@ -2332,10 +2428,12 @@ mod tests {
 
     #[test]
     fn scope_and_filters_empty_params_is_manager_scope() {
-        let (fragment, binds) = scope_and_filters(&query_map(&[]), true).expect("scope");
+        let (fragment, binds) =
+            scope_and_filters(&query_map(&[]), true, &chrono_tz::UTC).expect("scope");
         assert!(fragment.contains(queries::ISSUE_OBJECTS_SCOPE));
         assert!(binds.values().is_empty());
-        let (fragment, _) = scope_and_filters(&query_map(&[]), false).expect("plain");
+        let (fragment, _) =
+            scope_and_filters(&query_map(&[]), false, &chrono_tz::UTC).expect("plain");
         assert!(fragment.contains("\"issues\".\"deleted_at\" IS NULL"));
         assert!(!fragment.contains("triage"));
     }
@@ -2348,6 +2446,7 @@ mod tests {
             &mut binds,
             "priority__in",
             &FilterValue::Strings(vec!["high".to_owned()]),
+            &chrono_tz::UTC,
         )
         .expect("priority");
         // `$1` is the workspace slug; the first filter bind is `$2`.
@@ -2356,9 +2455,21 @@ mod tests {
             &mut binds,
             "state__in",
             &FilterValue::Uuids(vec![Uuid::nil()]),
+            &chrono_tz::UTC,
         )
         .expect("state");
         assert_eq!(sql, "\"issues\".\"state_id\" IN ($3)");
+        // `__date` terms truncate in the actor zone.
+        let sql = filter_sql(
+            &mut binds,
+            "created_at__date__gte",
+            &FilterValue::Text("2026-10-01".to_owned()),
+            &chrono_tz::America::New_York,
+        )
+        .expect("date bound");
+        assert!(sql.contains(
+            "(\"issues\".\"created_at\" AT TIME ZONE 'America/New_York')::date >= $4::date"
+        ));
     }
 
     #[test]
@@ -2402,9 +2513,21 @@ mod tests {
     }
 
     #[test]
-    fn bad_pk_is_a_validation_400() {
-        let denial = parse_pk("nope").expect_err("bad uuid");
-        assert!(matches!(denial, Denial::BadValidation));
+    fn parse_pk_rejects_every_non_canonical_spelling() {
+        // Django's `<uuid:pk>` converter routes only this spelling; the
+        // caller proxies every rejection for the resolver 404, before auth.
+        let canonical = "12345678-1234-1234-1234-1234567890ab";
+        assert!(parse_pk(canonical).is_ok());
+        for raw in [
+            "12345678-1234-1234-1234-1234567890AB",
+            "123456781234123412341234567890ab",
+            "{12345678-1234-1234-1234-1234567890ab}",
+            "urn:uuid:12345678-1234-1234-1234-1234567890ab",
+            "not-a-uuid",
+            "",
+        ] {
+            assert!(parse_pk(raw).is_err(), "{raw}");
+        }
     }
 
     #[test]
@@ -2447,7 +2570,8 @@ mod tests {
     fn filtered_count_sql_composes_end_to_end() {
         // `?priority=high`: kernel → predicate → binds → joins → splice.
         let (fragment, binds) =
-            scope_and_filters(&query_map(&[("priority", "high")]), true).expect("scope");
+            scope_and_filters(&query_map(&[("priority", "high")]), true, &chrono_tz::UTC)
+                .expect("scope");
         assert!(fragment.contains("\"issues\".\"priority\" IN ($2)"));
         assert_eq!(binds.values().len(), 1);
         let sql = queries::base_count_sql(&fragment);
@@ -2467,13 +2591,172 @@ mod tests {
         // `?labels=<uuid>`: the value predicate joins INNER (Django's
         // `filter()` join), and the bind is the parsed UUID at `$2`.
         let id = Uuid::nil();
-        let (fragment, binds) =
-            scope_and_filters(&query_map(&[("labels", &id.to_string())]), true).expect("scope");
+        let (fragment, binds) = scope_and_filters(
+            &query_map(&[("labels", &id.to_string())]),
+            true,
+            &chrono_tz::UTC,
+        )
+        .expect("scope");
         assert!(fragment.contains("\"label_issue\".\"label_id\" IN ($2)"));
         let sql = queries::base_count_sql(&fragment);
         let joins = scope_joins(&sql, &fragment, true);
         assert!(joins.contains("INNER JOIN \"issue_labels\" \"label_issue\""));
         assert_eq!(binds.values().len(), 1);
+    }
+
+    #[test]
+    fn dimension_reuses_filter_join() {
+        // `?labels=<uuid>` + `x_axis=labels__id` (PIDASHCONV-1451): the
+        // builder's second `issue_labels` leg is swapped in place for the
+        // filter's `label_issue` alias leg and the dimension reads the
+        // alias — one join, Django's. The scope skips the leg the
+        // statement already carries (only the states leg is spliced in).
+        let id = Uuid::nil();
+        let (fragment, _) = scope_and_filters(
+            &query_map(&[("labels", &id.to_string())]),
+            true,
+            &chrono_tz::UTC,
+        )
+        .expect("scope");
+        let sql = queries::base_plot_count_sql("labels__id", None, &fragment, "UTC").expect("plot");
+        assert!(sql.contains("LEFT OUTER JOIN \"issue_labels\""));
+        let reused = reuse_filter_joins(&sql, &fragment);
+        assert!(!reused.contains("LEFT OUTER JOIN \"issue_labels\""));
+        assert!(reused.contains("INNER JOIN \"issue_labels\" \"label_issue\""));
+        assert!(reused.contains("\"label_issue\".\"label_id\""));
+        assert!(!reused.contains("\"issue_labels\"."));
+        let joins = scope_joins(&reused, &fragment, true);
+        assert!(!joins.contains("issue_labels"));
+        assert!(joins.contains("LEFT OUTER JOIN \"states\""));
+    }
+
+    #[test]
+    fn reuse_skips_tables_the_filter_never_touches() {
+        // `?priority=high` + `x_axis=labels__id`: no `label_issue` ref in
+        // the fragment, so the builder's fresh join is kept verbatim.
+        let (fragment, _) =
+            scope_and_filters(&query_map(&[("priority", "high")]), true, &chrono_tz::UTC)
+                .expect("scope");
+        let sql = queries::base_plot_count_sql("labels__id", None, &fragment, "UTC").expect("plot");
+        assert_eq!(reuse_filter_joins(&sql, &fragment), sql);
+    }
+
+    #[test]
+    fn reuse_repoints_segments_and_details() {
+        // Segment on a filtered relation + every details builder: the
+        // segment expression, the detail target-table `ON` and the
+        // `deleted_at` guards all move onto the filter's alias.
+        let id = Uuid::nil().to_string();
+        let (fragment, _) = scope_and_filters(
+            &query_map(&[
+                ("labels", &id),
+                ("assignees", &id),
+                ("cycle", &id),
+                ("module", &id),
+            ]),
+            true,
+            &chrono_tz::UTC,
+        )
+        .expect("scope");
+        let sql = queries::base_plot_count_sql("priority", Some("assignees__id"), &fragment, "UTC")
+            .expect("plot");
+        let reused = reuse_filter_joins(&sql, &fragment);
+        assert!(reused.contains("\"issue_assignee\".\"assignee_id\" AS \"segment\""));
+        assert!(!reused.contains("\"issue_assignees\"."));
+        for (builder, table, alias, target) in [
+            (
+                queries::base_label_details_sql(&fragment),
+                "issue_labels",
+                "label_issue",
+                "labels",
+            ),
+            (
+                queries::base_assignee_details_sql(&fragment),
+                "issue_assignees",
+                "issue_assignee",
+                "users",
+            ),
+            (
+                queries::base_cycle_details_sql(&fragment),
+                "cycle_issues",
+                "issue_cycle",
+                "cycles",
+            ),
+            (
+                queries::base_module_details_sql(&fragment),
+                "module_issues",
+                "issue_module",
+                "modules",
+            ),
+        ] {
+            assert!(builder.contains(&format!("LEFT OUTER JOIN \"{table}\"")));
+            let reused = reuse_filter_joins(&builder, &fragment);
+            assert!(
+                !reused.contains(&format!("LEFT OUTER JOIN \"{table}\"")),
+                "{table} second leg survives"
+            );
+            assert!(
+                reused.contains(&format!("\"{table}\" \"{alias}\"")),
+                "{alias} leg missing in place"
+            );
+            // The alias leg precedes the detail target-table leg that
+            // references it (a later leg cannot see a join that follows).
+            let leg_at = reused
+                .find(&format!("\"{table}\" \"{alias}\""))
+                .expect("leg");
+            let target_at = reused.find(&format!("JOIN \"{target}\"")).expect("target");
+            assert!(leg_at < target_at, "{alias} leg sorts after its use");
+            assert!(
+                !reused.contains(&format!("\"{table}\".")),
+                "{table} ref survives"
+            );
+            // The scope skips the alias leg the statement already carries.
+            let joins = scope_joins(&reused, &fragment, true);
+            assert!(
+                !joins.contains(&format!("\"{table}\" \"{alias}\"")),
+                "{alias} leg duplicated by scope"
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_guard_crash_matrix() {
+        // `base.py:83,136,150` (PIDASHCONV-1451): relation key present +
+        // matching details axis crashes; anything else does not. The
+        // assignee branch adds no explicit guard, so it never crashes.
+        let id = Uuid::nil().to_string();
+        for (key, axis) in [
+            ("labels", "labels__id"),
+            ("cycle", "issue_cycle__cycle_id"),
+            ("module", "issue_module__module_id"),
+        ] {
+            let query = query_map(&[(key, id.as_str())]);
+            assert!(duplicate_guard_crash(&query, axis, None), "{key} x_axis");
+            assert!(
+                duplicate_guard_crash(&query, "priority", Some(axis)),
+                "{key} segment"
+            );
+            assert!(
+                !duplicate_guard_crash(&query, "priority", None),
+                "{key} off-axis"
+            );
+            assert!(
+                !duplicate_guard_crash(&query_map(&[]), axis, None),
+                "{key} absent"
+            );
+        }
+        // Empty values still crash: Django checks key presence.
+        let mut query: QueryMap = HashMap::new();
+        query.insert("labels".to_owned(), OneOrMany::One(String::new()));
+        assert!(duplicate_guard_crash(&query, "labels__id", None));
+        // Assignees never crash, on or off axis.
+        let query = query_map(&[("assignees", id.as_str())]);
+        assert!(!duplicate_guard_crash(&query, "assignees__id", None));
+        assert!(!duplicate_guard_crash(
+            &query,
+            "priority",
+            Some("assignees__id")
+        ));
     }
 
     #[test]
