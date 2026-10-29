@@ -14,10 +14,17 @@ next message, and one they removed is gone immediately.
 misbehaving must never take the assistant down with it; the turn proceeds with
 whatever toolsets did build. Callers surface the skipped servers to the user
 (see ``build_toolsets``' second return value).
+
+**Trust policy: results are data.** A tool server is third-party code, so what
+it returns is delimited as untrusted content before the model sees it, exactly
+as issue and comment text is. That covers both channels a result can arrive
+on: the value of a successful call (:func:`wrap_untrusted_result`) and the
+message of a failed one (:func:`wrap_untrusted_retry`).
 """
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 
@@ -29,6 +36,7 @@ from pydantic_ai.toolsets import WrapperToolset
 from pi_dash.assistant import crypto, ssrf
 from pi_dash.assistant.errors import AssistantError
 from pi_dash.assistant.models import AssistantMCPServer
+from pi_dash.assistant.runtime.instructions import wrap_untrusted
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +68,69 @@ _CONTROL_FLOW_EXCEPTIONS: tuple[type[BaseException], ...] = tuple(
     )
     if isinstance(t, type) and issubclass(t, BaseException)
 )
+
+
+def wrap_untrusted_result(result):
+    """Delimit a tool server's result so the model reads it as data.
+
+    A connected tool server is third-party code the user pointed us at, and its
+    results are the one channel that reaches the model on *every* call. Left
+    verbatim they arrived with less delimiting than a Pi Dash issue body, whose
+    text ``tools._results`` has always wrapped — so they get the same
+    ``<untrusted>`` frame, and rule 4 of ``instructions.BASE_INSTRUCTIONS``
+    names tool-server output explicitly.
+
+    Shape by shape, matching what ``MCPToolset.call_tool`` can hand back:
+
+    * ``str`` — the common case; wrapped in place.
+    * ``dict`` — JSON-encoded into a *single* frame rather than wrapped
+      field-by-field. A hostile server chooses its keys as freely as its
+      values, so per-field wrapping would leave the keys bare.
+    * ``list``/``tuple`` — a multi-part result; wrapped element-wise, so the
+      text parts are framed while the rest keeps its type.
+    * anything else — ``BinaryContent``, numbers, booleans, ``None`` — passes
+      through. There is nothing to delimit in an image, and re-encoding one
+      would only corrupt it.
+    """
+    if isinstance(result, str):
+        return wrap_untrusted(result)
+    if isinstance(result, dict):
+        # ``default=str`` because structured content is whatever the server
+        # serialized; a value json cannot encode must not raise out of a tool
+        # call that otherwise succeeded.
+        return wrap_untrusted(json.dumps(result, default=str))
+    if isinstance(result, (list, tuple)):
+        return [wrap_untrusted_result(part) for part in result]
+    return result
+
+
+def wrap_untrusted_retry(exc: BaseException) -> None:
+    """Frame the server-controlled text a retry exception carries, in place.
+
+    The error channel is a results channel. When a tool reports failure, the
+    message the model is asked to react to is the server's own text: fastmcp
+    raises ``ToolError(result.content[0].text)`` and pydantic-ai turns that
+    into ``ModelRetry(message=str(e))``, which the tool manager hands to the
+    model verbatim as a ``RetryPromptPart`` — followed by its own trusted
+    "Fix the errors and try again." So a hostile server only has to fail every
+    call to get un-delimited text in front of the model, and rule 4's promise
+    that tool-server output arrives framed is what makes that text read as
+    ours rather than theirs.
+
+    Mutated rather than re-raised as a new exception: the retry machinery keys
+    off the exception's identity and its other attributes (``tool_retry``
+    carries the part the tool manager reuses), so replacing the object risks
+    changing control flow. Only the text changes.
+    """
+    message = getattr(exc, "message", None)
+    if isinstance(message, str):
+        exc.message = wrap_untrusted(message)  # type: ignore[attr-defined]
+    # ``ToolRetryError`` carries the prompt part itself; its ``content`` is the
+    # server's text for a tool retry, or pydantic-ai's own validation-error
+    # list — a list is ours, so leave it alone.
+    part = getattr(exc, "tool_retry", None)
+    if part is not None and isinstance(getattr(part, "content", None), str):
+        part.content = wrap_untrusted(part.content)
 
 
 @dataclass(frozen=True)
@@ -160,16 +231,29 @@ class ResilientToolset(WrapperToolset):
         ``ModelRetry`` would burn the run's retries on a server that is not
         coming back.
 
-        pydantic-ai's own control-flow exceptions pass through untouched: they
-        are decisions, not outages, and the tool manager is what acts on them.
+        pydantic-ai's own control-flow exceptions pass through: they are
+        decisions, not outages, and the tool manager is what acts on them. The
+        server-authored text they carry is framed on the way past, because a
+        retry prompt reaches the model just as a result does — see
+        :func:`wrap_untrusted_retry`.
+
+        A result that *did* come from the server is delimited as untrusted on
+        the way out — see :func:`wrap_untrusted_result`. The failure message
+        below is ours, not the server's, so it stays unwrapped: framing our own
+        text as untrusted would tell the model to ignore the one sentence
+        explaining why its tool call produced nothing.
         """
         try:
-            return await super().call_tool(name, tool_args, ctx, tool)
-        except _CONTROL_FLOW_EXCEPTIONS:
+            result = await super().call_tool(name, tool_args, ctx, tool)
+        except _CONTROL_FLOW_EXCEPTIONS as exc:
+            # Still a decision, not an outage — but the text it carries came
+            # from the server, so it gets framed like any other result.
+            wrap_untrusted_retry(exc)
             raise
         except Exception as exc:  # noqa: BLE001 — a dying server is not a turn failure
             self._record(exc, f"failed calling {name}")
             return f"Tool server {self.server_name!r} was unavailable for this call ({type(exc).__name__})."
+        return wrap_untrusted_result(result)
 
 
 def build_toolset(
