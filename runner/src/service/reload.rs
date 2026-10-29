@@ -528,6 +528,9 @@ mod tests {
             last_heartbeat: None,
             last_session_open: None,
             consecutive_bootstrap_failures: fails,
+            disconnect_reason: None,
+            next_retry_at: None,
+            cloud_deleted_confirmations: 0,
             observability: None,
         }
     }
