@@ -77,7 +77,7 @@ describe("SpaceAccountSlot", () => {
     renderSlot(() => new Promise<never>(() => undefined));
     expect(screen.getByTestId("space-navbar-signin")).toHaveAttribute(
       "href",
-      "/spaces/?next_path=/issues/anchor-1/%3Fboard%3Dkanban%26peekId%3Dissue-1"
+      "/spaces/?next_path=/issues/anchor-1/?board=kanban&peekId=issue-1"
     );
     expect(screen.queryByTestId("space-account-trigger")).not.toBeInTheDocument();
   });
@@ -85,7 +85,7 @@ describe("SpaceAccountSlot", () => {
   it("offers sign-in carrying the full position to anonymous visitors", async () => {
     renderSlot(() => reply(401, { detail: "anonymous" }));
     const link = await screen.findByTestId("space-navbar-signin");
-    expect(link).toHaveAttribute("href", "/spaces/?next_path=/issues/anchor-1/%3Fboard%3Dkanban%26peekId%3Dissue-1");
+    expect(link).toHaveAttribute("href", "/spaces/?next_path=/issues/anchor-1/?board=kanban&peekId=issue-1");
     expect(link).toHaveTextContent("Sign in");
   });
 

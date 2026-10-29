@@ -16,6 +16,7 @@ interface FakePage {
   url: ReturnType<typeof vi.fn>;
   route: ReturnType<typeof vi.fn>;
   unrouteAll: ReturnType<typeof vi.fn>;
+  getByTestId: ReturnType<typeof vi.fn>;
 }
 
 function fakePage(url = "http://new.test/spaces/issues/anchor-1/"): {
@@ -28,6 +29,9 @@ function fakePage(url = "http://new.test/spaces/issues/anchor-1/"): {
     url: vi.fn(() => url),
     route: vi.fn(async () => undefined),
     unrouteAll: vi.fn(async () => undefined),
+    // The landing opener waits for a settled card or guidance view; the
+    // stub reports settled immediately.
+    getByTestId: vi.fn(() => ({ isVisible: async () => true })),
   };
   return { page, driver: new WebNewDriver(page as unknown as Page) };
 }
