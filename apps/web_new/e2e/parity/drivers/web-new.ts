@@ -5304,7 +5304,13 @@ export class WebNewDriver implements ParityDriver {
   private async openActivityFilterMenu(): Promise<void> {
     await this.page.keyboard.press("Escape").catch(() => undefined);
     const panel = this.page.getByRole("group", { name: "Activity categories" });
-    if ((await panel.count()) > 0 && (await panel.first().isVisible())) return;
+    // The dismiss may animate out; a toggle that resolves against the
+    // closing panel detaches mid-click and retries until it times out.
+    // Wait until it is gone, then open it fresh and stable.
+    await panel
+      .first()
+      .waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => undefined);
     await this.activityFilterButton().click({ timeout: WebNewDriver.WAIT_MS });
     await panel.first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }

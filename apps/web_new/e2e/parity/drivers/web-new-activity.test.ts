@@ -191,6 +191,7 @@ describe("activity feed driver methods", () => {
 
   it("toggles one category by its label and closes the popover", async () => {
     const toggled: string[] = [];
+    const waits: (string | undefined)[] = [];
     const filter = locator();
     const { page, recorded } = pageOf({
       role: (role) => {
@@ -198,6 +199,7 @@ describe("activity feed driver methods", () => {
         if (role === "group") {
           return locator({
             locator: () => locator(),
+            waitFor: async (options?: unknown) => void waits.push((options as { state?: string } | undefined)?.state),
             getByRole: (innerRole, innerOptions) => {
               expect(innerRole).toBe("checkbox");
               expect((innerOptions as { exact?: boolean }).exact).toBe(true);
@@ -213,6 +215,9 @@ describe("activity feed driver methods", () => {
     await new WebNewDriver(page).activityToggleFilter("Comments");
     expect(toggled).toEqual(["Comments"]);
     expect(recorded.keys).toContain("Escape");
+    // The closing panel must be gone before the fresh open, or the
+    // toggle resolves against a detaching node (NEWFRONT-818).
+    expect(waits).toEqual(["detached", undefined]);
   });
 
   it("reads the narrowed marker off the filter trigger", async () => {
