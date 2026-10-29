@@ -86,6 +86,14 @@ test(
         await driver.draftOpenStatePicker(name);
         await driver.pickerPick("Doing");
         await expect.poll(() => driver.draftStateText(name), { timeout: 30_000 }).toBe("Doing");
+        // The row shows "Doing" optimistically; arm the failure only once
+        // the server holds it, or the armed failure can land on this
+        // still-queued save instead of the one under test.
+        await expect
+          .poll(async () => (await serverDraftRecord(workspaceSlug, draft.id, owner.cookie)).stateId, {
+            timeout: 30_000,
+          })
+          .toBe(doingId);
         try {
           await driver.draftFailNextPatch(500, 1500);
           await driver.draftOpenStatePicker(name);
