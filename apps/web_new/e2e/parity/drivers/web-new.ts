@@ -2665,21 +2665,16 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async modalProjectName(): Promise<string> {
-    return this.modalProjectChipLabel();
-  }
-
-  /**
-   * The chip's label text: the trigger also carries the project mark,
-   * whose initial would prefix the name ("PParity Project", ISS-130), so
-   * prefer the non-hidden label span and fall back to the raw text.
-   */
-  private async modalProjectChipLabel(): Promise<string> {
+    // Read the chip's name span, not the whole chip: the trigger also
+    // carries the project mark, whose initial would prefix the name
+    // ("PParity Project", ISS-130).
     const chip = this.modalProjectChip();
     await chip.waitFor({ timeout: 30_000 });
-    const labels = chip.locator(':scope > span:not([aria-hidden="true"])');
-    const text =
-      (await labels.count()) > 0 ? await labels.first().textContent() : await chip.textContent();
-    return (text ?? "").replace(/\s+/g, " ").trim();
+    const label = chip.locator("span.truncate");
+    if ((await label.count()) > 0) {
+      return ((await label.first().textContent()) ?? "").replace(/\s+/g, " ").trim();
+    }
+    return ((await chip.textContent()) ?? "").replace(/\s+/g, " ").trim();
   }
 
   async selectModalProject(name: string): Promise<void> {
@@ -2687,7 +2682,7 @@ export class WebNewDriver implements ParityDriver {
     const option = this.page.getByRole("option", { name, exact: true }).first();
     await option.waitFor({ timeout: 30_000 });
     await option.click();
-    await expect.poll(() => this.modalProjectChipLabel(), { timeout: 30_000 }).toBe(name);
+    await expect.poll(() => this.modalProjectName(), { timeout: 30_000 }).toBe(name);
   }
 
   /** The create/edit dialog: scoped by its title field, since toasts and

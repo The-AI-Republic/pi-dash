@@ -49,6 +49,7 @@ export function isReferenceQueryKey(queryKey: readonly unknown[]): boolean {
  * back from it, even in the persist-everything build.
  */
 export interface OwnerScopedMeta {
+  [key: string]: unknown;
   ownerScoped: true;
 }
 

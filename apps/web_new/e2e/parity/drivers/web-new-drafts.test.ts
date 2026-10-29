@@ -427,8 +427,8 @@ describe("block quick actions", () => {
 
 describe("the modal project chip", () => {
   // The chip pairs a decorative project-mark initial (aria-hidden) with the
-  // project name; the name is the non-hidden span, never the tile glyph.
-  const LABEL_SPAN = "span:not([aria-hidden=";
+  // project name in the truncating label span, never the tile glyph.
+  const LABEL_SPAN = "span.truncate";
   const isLabel = (path: string): boolean => path.includes(LABEL_SPAN);
   const isChip = (path: string): boolean => path.endsWith(CHIP);
 

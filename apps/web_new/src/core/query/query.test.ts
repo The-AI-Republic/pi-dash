@@ -308,7 +308,17 @@ describe("cache persistence", () => {
     persistor.stop();
 
     const raw = (await storage.get("tanstack-query-cache")) ?? "";
-    const stored = JSON.parse(raw) as { state: { queries: Array<{ queryKey: unknown[] }> } };
+    const stored = JSON.parse(raw) as {
+      state: {
+        queries: Array<{
+          queryKey: unknown[];
+          queryHash?: string;
+          dehydratedAt?: number;
+          meta?: unknown;
+          state?: unknown;
+        }>;
+      };
+    };
     expect(stored.state.queries.map((entry) => entry.queryKey)).toEqual([["ws", "acme", "reference", "states"]]);
 
     // A payload written by an older build can still carry the entry.
