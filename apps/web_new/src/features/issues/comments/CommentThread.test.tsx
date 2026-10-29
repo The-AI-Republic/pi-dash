@@ -179,16 +179,18 @@ describe("comment deep links", () => {
     expect(commentIdFromHash("")).toBeNull();
   });
 
-  it("builds a link from the page address without its current hash", () => {
+  it("builds a relative link from the page address without its current hash", () => {
+    // The old app copies a relative link with a slash before the hash
+    // (parity/specs/comments.md §5.2, CMT-007); relative links stay valid
+    // across origins, so the absolute form was a parity bug (NEWFRONT-818).
     expect(
       commentLinkFor(
         { href: "https://p.test/acme/issues/i#comment-old", hash: "#comment-old", pathname: "/acme/issues/i" },
         "new"
       )
-    ).toBe("https://p.test/acme/issues/i#comment-new");
-    expect(commentLinkFor({ href: "https://p.test/a", hash: "", pathname: "/a" }, "x")).toBe(
-      "https://p.test/a#comment-x"
-    );
+    ).toBe("/acme/issues/i/#comment-new");
+    expect(commentLinkFor({ href: "https://p.test/a", hash: "", pathname: "/a" }, "x")).toBe("/a/#comment-x");
+    expect(commentLinkFor({ href: "https://p.test/a/", hash: "", pathname: "/a/" }, "x")).toBe("/a/#comment-x");
   });
 });
 
@@ -279,7 +281,9 @@ describe("CommentThread", () => {
     }
   }, 20000);
 
-  it("copies the absolute deep link for a comment", async () => {
+  it("copies the relative deep link for a comment", async () => {
+    // Relative with a slash before the hash, like the old app
+    // (parity/specs/comments.md §5.2, CMT-007; NEWFRONT-818).
     const writeText = stubClipboard(async () => undefined);
     stubTransport(() => ({ status: 200, body: [comment()] }));
     renderThread();
@@ -291,7 +295,7 @@ describe("CommentThread", () => {
       fireEvent.click(within(menu).getByRole("menuitem", { name: "Copy link" }));
     });
     await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
-    expect(writeText).toHaveBeenCalledWith(`${window.location.origin}/acme/projects/p/issues/i#comment-${COMMENT}`);
+    expect(writeText).toHaveBeenCalledWith(`/acme/projects/p/issues/i/#comment-${COMMENT}`);
     expect(notifySuccess).toHaveBeenCalledWith(COMMENT_LINK_COPIED_TITLE);
   }, 20000);
 

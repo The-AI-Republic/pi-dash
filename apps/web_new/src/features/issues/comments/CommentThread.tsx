@@ -56,10 +56,13 @@ export interface CommentLocation {
   pathname: string;
 }
 
-/** Absolute deep link for a comment on the current page. */
+/** Relative deep link for a comment on the current page (CMT-007). */
 export function commentLinkFor(location: CommentLocation, commentId: string): string {
-  const base = location.href.slice(0, location.href.length - location.hash.length);
-  return commentDeepLink(base, commentId);
+  // The copied link is app-relative with a slash before the hash, exactly
+  // what the old app writes (parity/specs/comments.md §5.2); relative
+  // links stay valid across origins (dev port, cloud, desktop).
+  const path = location.pathname.endsWith("/") ? location.pathname : `${location.pathname}/`;
+  return commentDeepLink(path, commentId);
 }
 
 export interface CommentThreadProps {
