@@ -45,17 +45,17 @@ export interface MentionQuery {
 }
 
 /**
- * Read the mention query the caret currently sits in: the nearest @ on
- * the same text run, with no whitespace between it and the caret. An
- * empty query right after a typed @ opens the list.
+ * Read the mention query the caret currently sits in: the nearest @ that
+ * starts the run or follows whitespace, with everything after it as the
+ * query. Spaces narrow the query instead of closing it: "@ada grace"
+ * keeps offering matches for the full phrase (CMT-019). An empty query
+ * right after a typed @ opens the list.
  */
 export function mentionQueryAt(textBeforeCaret: string): MentionQuery | null {
   const at = textBeforeCaret.lastIndexOf("@");
   if (at === -1) return null;
-  const tail = textBeforeCaret.slice(at + 1);
-  if (/\s/.test(tail)) return null;
   if (at > 0 && !/\s/.test(textBeforeCaret.slice(at - 1, at))) return null;
-  return { text: tail };
+  return { text: textBeforeCaret.slice(at + 1) };
 }
 
 /** Stored HTML mentions count as content even without words (ISS-127). */

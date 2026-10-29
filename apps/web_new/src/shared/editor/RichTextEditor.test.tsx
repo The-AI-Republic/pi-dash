@@ -287,7 +287,12 @@ describe("RichTextEditor", { timeout: EDITOR_TEST_TIMEOUT }, () => {
     editable.focus();
     await user.keyboard("Hello @ad");
     await vi.waitFor(() => expect(queries[queries.length - 1]).toBe("ad"));
+    // A space narrows the query instead of closing it: the old suggestion
+    // allows spaces, and CMT-019 narrows on "Parity M" (NEWFRONT-818).
     await user.keyboard(" ");
+    await vi.waitFor(() => expect(queries[queries.length - 1]).toBe("ad "));
+    // Leaving the @ run behind drops the query entirely.
+    await user.keyboard("{Enter}");
     await vi.waitFor(() => expect(queries[queries.length - 1]).toBeNull());
   });
 

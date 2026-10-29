@@ -52,8 +52,10 @@ describe("mentionQueryAt", () => {
     expect(mentionQueryAt("mail@example")).toBeNull();
   });
 
-  it("ignores a query broken by whitespace", () => {
-    expect(mentionQueryAt("@ada grace")).toBeNull();
+  it("keeps a multi-word query open past the space", () => {
+    // The old suggestion allows spaces, and CMT-019 narrows on "Parity M":
+    // a space narrows the query instead of closing it (NEWFRONT-818).
+    expect(mentionQueryAt("@ada grace")).toEqual({ text: "ada grace" });
   });
 
   it("returns null without any @", () => {
