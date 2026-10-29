@@ -1119,6 +1119,9 @@ mod tests {
             ("\u{2000}", "'\\u2000'"),
             ("\u{f0000}", "'\\U000f0000'"),
             ("\u{e0000}", "'\\U000e0000'"),
+            // Narrow no-break space: Zs but not White_Space, so the old
+            // gate passed it raw; CPython escapes it (review probe).
+            ("\u{202f}", "'\\u202f'"),
             // No-change pins: controls escaped before and after.
             ("\0", "'\\x00'"),
             ("\u{7f}", "'\\x7f'"),
