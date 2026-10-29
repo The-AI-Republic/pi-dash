@@ -47664,61 +47664,193 @@ export class WebNewDriver implements ParityDriver {
   }
 
   // --- Space peek shell (NEWFRONT-450, SPC-040–046). ---
+  private spacePeekDialog(): Locator {
+    return this.page.getByTestId("space-peek");
+  }
+
+  /** The overlay's detail column (engagement, description, properties). */
+  private spacePeekDetailsSection(): Locator {
+    return this.spacePeekDialog().getByTestId("space-peek-detail");
+  }
+
+  /** The read-only description region, when the issue has one. */
+  private spacePeekDescriptionRegion(): Locator {
+    return this.spacePeekDetailsSection().locator(".rich-text-content").first();
+  }
+
   async spacePeekOpen(): Promise<boolean> {
-    return todo("spacePeekOpen");
+    return (await this.spacePeekDialog().count()) > 0;
   }
+
   async spacePeekMode(): Promise<"side" | "modal" | "full"> {
-    return todo("spacePeekMode");
+    const layout = await this.spacePeekDialog()
+      .first()
+      .getAttribute("data-peek-layout")
+      .catch(() => null);
+    if (layout === "side" || layout === "modal" || layout === "full") return layout;
+    throw new Error("[parity] peek overlay open but presentation marker absent.");
   }
-  async spacePeekSwitchMode(_mode: "side" | "modal" | "full"): Promise<void> {
-    return todo("spacePeekSwitchMode");
+
+  async spacePeekSwitchMode(mode: "side" | "modal" | "full"): Promise<void> {
+    const label = mode === "side" ? "Side panel" : mode === "modal" ? "Modal" : "Full screen";
+    await this.spacePeekDialog().getByTestId("space-peek-mode-trigger").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("menuitem", { name: label }).click({ timeout: WebNewDriver.WAIT_MS });
+    await expect
+      .poll(
+        async () => {
+          try {
+            return await this.spacePeekMode();
+          } catch {
+            return null;
+          }
+        },
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .toBe(mode);
   }
-  async spacePeekClose(_via?: "header" | "backdrop" | "escape"): Promise<void> {
-    return todo("spacePeekClose");
+
+  async spacePeekClose(via: "header" | "backdrop" | "escape" = "escape"): Promise<void> {
+    if (via === "header") {
+      await this.spacePeekDialog()
+        .getByRole("button", { name: "Close preview" })
+        .click({ timeout: WebNewDriver.WAIT_MS });
+    } else if (via === "backdrop") {
+      const backdrop = this.page.getByTestId("peek-backdrop");
+      if ((await backdrop.count()) === 0) throw new Error("[parity] peek overlay has no backdrop to click.");
+      await backdrop.click({ position: { x: 10, y: 10 }, timeout: WebNewDriver.WAIT_MS });
+    } else {
+      await this.page.keyboard.press("Escape");
+    }
+    await expect.poll(() => this.spacePeekOpen(), { timeout: WebNewDriver.WAIT_MS }).toBe(false);
   }
+
   async spacePeekKey(): Promise<string | null> {
-    return todo("spacePeekKey");
+    const key = this.spacePeekDialog().getByTestId("space-peek-key").first();
+    if ((await key.count()) === 0) return null;
+    const text = (((await key.innerText().catch(() => "")) ?? "").trim() ?? "").trim();
+    return text === "" ? null : text;
   }
+
   async spacePeekTitle(): Promise<string | null> {
-    return todo("spacePeekTitle");
+    // The skeleton header renders no heading: a missing h4 reads as null,
+    // never as an empty string.
+    const heading = this.spacePeekDialog().locator("h4").first();
+    if ((await heading.count()) === 0) return null;
+    const text = (((await heading.innerText().catch(() => "")) ?? "").trim() ?? "").trim();
+    return text === "" ? null : text;
   }
+
   async spacePeekDescriptionVisible(): Promise<boolean> {
-    return todo("spacePeekDescriptionVisible");
+    return this.isShown(this.spacePeekDescriptionRegion());
   }
+
   async spacePeekDescriptionText(): Promise<string | null> {
-    return todo("spacePeekDescriptionText");
+    if (!(await this.spacePeekDescriptionVisible())) return null;
+    const text = await this.spacePeekDescriptionRegion()
+      .innerText()
+      .catch(() => "");
+    const trimmed = (text ?? "").trim();
+    return trimmed === "" ? null : trimmed;
   }
+
   async spacePeekDescriptionHtml(): Promise<string | null> {
-    return todo("spacePeekDescriptionHtml");
+    if (!(await this.spacePeekDescriptionVisible())) return null;
+    try {
+      const html = await this.spacePeekDescriptionRegion().innerHTML({ timeout: 5_000 });
+      return html.trim() === "" ? null : html;
+    } catch {
+      return null;
+    }
   }
+
   async spacePeekDescriptionEditable(): Promise<boolean> {
-    return todo("spacePeekDescriptionEditable");
+    const region = this.spacePeekDescriptionRegion();
+    if ((await region.count()) === 0) return false;
+    return (await region.getAttribute("contenteditable").catch(() => null)) === "true";
   }
+
   async spacePeekProperties(): Promise<{
     state: string;
     priority: string;
     dueDate: string | null;
     dueDateEmphasised: boolean;
   } | null> {
-    return todo("spacePeekProperties");
+    if (!(await this.spacePeekOpen())) return null;
+    const panel = this.spacePeekDialog().getByTestId("space-peek-properties").first();
+    if ((await panel.count()) === 0) return null;
+    const state = await panel
+      .locator('div[data-property="state"] dd')
+      .first()
+      .innerText()
+      .catch(() => "");
+    const priority = await panel
+      .locator('div[data-property="priority"] dd')
+      .first()
+      .innerText()
+      .catch(() => "");
+    const dueEmpty = await panel.getByTestId("space-peek-due-empty").count();
+    if (dueEmpty > 0) {
+      return {
+        state: (state ?? "").trim(),
+        priority: (priority ?? "").trim(),
+        dueDate: null,
+        dueDateEmphasised: false,
+      };
+    }
+    const due = panel.getByTestId("space-peek-due").first();
+    const dueText = (((await due.innerText().catch(() => "")) ?? "").trim() ?? "").trim();
+    const overdue = (await due.getAttribute("data-overdue").catch(() => null)) === "true";
+    return {
+      state: (state ?? "").trim(),
+      priority: (priority ?? "").trim(),
+      dueDate: dueText === "" ? null : dueText,
+      dueDateEmphasised: overdue,
+    };
   }
+
   async spacePeekActivityVisible(): Promise<boolean> {
-    return todo("spacePeekActivityVisible");
+    return this.isShown(this.spacePeekDialog().getByTestId("space-comments"));
   }
+
   async spacePeekCopyLinkVisible(): Promise<boolean> {
-    return todo("spacePeekCopyLinkVisible");
+    return this.isShown(this.spacePeekDialog().getByTestId("space-peek-copy"));
   }
+
   async spacePeekCopyLink(): Promise<void> {
-    return todo("spacePeekCopyLink");
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await this.spacePeekDialog().getByTestId("space-peek-copy").click({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async spacePeekReadClipboard(): Promise<string> {
-    return todo("spacePeekReadClipboard");
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    return this.page.evaluate(() => navigator.clipboard.readText());
   }
+
   async spacePeekLastNotice(): Promise<{ title: string; message: string } | null> {
-    return todo("spacePeekLastNotice");
+    // No-wait read: the caller polls, and a waiting read would stretch
+    // every poll iteration past the notice's auto-dismiss.
+    const toast = this.page.getByTestId("toast-notification").first();
+    if (!(await this.isShown(toast))) return null;
+    const title = (
+      (await toast
+        .locator("h2")
+        .first()
+        .textContent()
+        .catch(() => "")) ?? ""
+    ).trim();
+    const message = (
+      (await toast
+        .locator("p")
+        .first()
+        .textContent()
+        .catch(() => "")) ?? ""
+    ).trim();
+    if (title === "" && message === "") return null;
+    return { title, message };
   }
+
   async spacePeekSkeletonsVisible(): Promise<boolean> {
-    return todo("spacePeekSkeletonsVisible");
+    return this.isShown(this.spacePeekDialog().getByTestId("space-peek-skeleton"));
   }
   async deskShellNativeHttpPresent(): Promise<boolean> {
     // The shell advertises its API origin; without it the desktop

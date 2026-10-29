@@ -4,9 +4,10 @@
 // Clipboard-write gate for the public overlay's copy action (SPC-045).
 // The action exists only where the browser can actually write: the
 // clipboard API must be present and, when the permissions API answers
-// for `clipboard-write`, it must not say denied. A browser that does not
-// answer the query at all keeps the action (absence of a refusal is not
-// a refusal) rather than hiding it from every visitor.
+// for `clipboard-write`, it must say granted — a mere non-denial would
+// offer the action where the write still fails (headless answers prompt
+// by default). A browser that does not answer the query at all keeps
+// the action rather than hiding it from every visitor.
 
 import * as React from "react";
 
@@ -21,15 +22,15 @@ export function clipboardWriteAvailable(navigatorLike: Pick<ClipboardCapable, "c
   return typeof navigatorLike?.clipboard?.writeText === "function";
 }
 
-/** Whether the permission probe says the write is refused. */
-export function clipboardPermissionRefused(permission: { state: string }): boolean {
-  return permission.state === "denied";
+/** Whether the permission probe grants the write outright. */
+export function clipboardPermissionGranted(permission: { state: string }): boolean {
+  return permission.state === "granted";
 }
 
 /**
  * Whether the overlay may offer the copy action. Resolves false on a
- * browser without clipboard writing, and false once the permission
- * probe answers denied; a probe failure is not a refusal.
+ * browser without clipboard writing, and false unless the permission
+ * probe answers granted; a probe failure is not a refusal.
  */
 export async function readClipboardWriteAllowed(navigatorLike: ClipboardCapable | undefined): Promise<boolean> {
   if (!clipboardWriteAvailable(navigatorLike)) return false;
@@ -37,7 +38,7 @@ export async function readClipboardWriteAllowed(navigatorLike: ClipboardCapable 
   if (typeof query !== "function") return true;
   try {
     const status = await query.call(navigatorLike?.permissions, { name: "clipboard-write" });
-    return !clipboardPermissionRefused(status);
+    return clipboardPermissionGranted(status);
   } catch {
     return true;
   }
