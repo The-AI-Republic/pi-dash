@@ -20,10 +20,12 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use sea_orm::{ActiveModelTrait, ActiveValue, ConnectionTrait, DbBackend, Statement};
 use serde_json::{Map, Value};
+use sqlx::Row;
 use uuid::Uuid;
 
 use pidash_db::entity::descriptions;
 use pidash_db::entity::issue_comments;
+use pidash_db::ops::repair::NewDescription;
 
 use super::activity::{TaskEnqueueHook, ISSUE_ACTIVITY_TASK, MODEL_ACTIVITY_TASK};
 use super::ctx::WriteCtx;
@@ -1273,6 +1275,88 @@ where
 
 const V1_COMMENT_SOFT_DELETE_SQL: &str = "UPDATE \"issue_comments\" SET \"deleted_at\" = $1, \"updated_at\" = $2, \"updated_by_id\" = $3 WHERE \"id\" = $4";
 
+/// Columns of the copy `INSERT`, in bind order.
+const DESCRIPTION_INSERT_COLUMNS: &str = "(id, created_at, updated_at, \
+    description_json, description_html, description_stripped, project_id, \
+    created_by_id, updated_by_id, workspace_id)";
+
+/// The copy link step: `bulk_update` writes `description_id` only, no
+/// `updated_at` bump (verified against live Django). Moved verbatim
+/// from `pidash_db::ops::repair` (PIDASHCONV-1630).
+pub(crate) const LINK_COMMENT_SQL: &str =
+    "UPDATE issue_comments SET description_id = $1 WHERE id = $2";
+
+/// Multi-row `INSERT INTO descriptions ... RETURNING id` for `bulk_create`
+/// (`copy_issue_comment_to_description.py:44`): one statement per batch,
+/// Postgres `$N` placeholders, zip-aligned `RETURNING id` like Django's.
+/// Moved verbatim from `pidash_db::ops::repair` (PIDASHCONV-1630).
+pub(crate) fn descriptions_insert_sql(row_count: usize) -> String {
+    let mut sql = format!("INSERT INTO descriptions {DESCRIPTION_INSERT_COLUMNS} VALUES ");
+    for row in 0..row_count {
+        if row > 0 {
+            sql.push_str(", ");
+        }
+        let base = row * 10;
+        sql.push('(');
+        for col in 0..10 {
+            if col > 0 {
+                sql.push_str(", ");
+            }
+            sql.push_str(&format!("${}", base + col + 1));
+        }
+        sql.push(')');
+    }
+    sql.push_str(" RETURNING id");
+    sql
+}
+
+/// One copy batch write (`copy_issue_comment_to_description.py:28-51`):
+/// `bulk_create` then the `description_id` backfill in a single
+/// transaction. Returns the inserted ids, zip-aligned with `descriptions`.
+/// Moved verbatim from `pidash_db::ops::repair` (PIDASHCONV-1630); the
+/// only change is the error type (`sqlx::Error`, the domain twin
+/// convention — `RepairError` was a transparent wrapper, so the ops
+/// binary renders identical text).
+pub async fn apply_copy_batch(
+    pool: &sqlx::PgPool,
+    descriptions: &[NewDescription],
+    links: &[(Uuid, Uuid)],
+) -> Result<Vec<Uuid>, sqlx::Error> {
+    if descriptions.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut tx = pool.begin().await?;
+    let insert_sql = descriptions_insert_sql(descriptions.len());
+    let mut query = sqlx::query(&insert_sql);
+    for desc in descriptions {
+        query = query
+            .bind(desc.id)
+            .bind(desc.created_at)
+            .bind(desc.updated_at)
+            .bind(sqlx::types::Json(&desc.description_json))
+            .bind(&desc.description_html)
+            .bind(&desc.description_stripped)
+            .bind(desc.project_id)
+            .bind(desc.created_by_id)
+            .bind(desc.updated_by_id)
+            .bind(desc.workspace_id);
+    }
+    let inserted = query.fetch_all(&mut *tx).await?;
+    let mut ids = Vec::with_capacity(inserted.len());
+    for row in &inserted {
+        ids.push(row.try_get::<Uuid, _>("id")?);
+    }
+    for (comment_id, description_id) in links {
+        sqlx::query(LINK_COMMENT_SQL)
+            .bind(description_id)
+            .bind(comment_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(ids)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2397,5 +2481,29 @@ mod tests {
         assert_eq!(desc.1.as_deref(), Some("v2"));
         assert_eq!(desc.2, serde_json::json!({"foreign": true}));
         assert_eq!(desc.3, None);
+    }
+
+    #[test]
+    fn repair_insert_builder_numbers_placeholders() {
+        // Moved with the builder from `pidash_db::ops::repair`
+        // (PIDASHCONV-1630); assertions verbatim.
+        let one = descriptions_insert_sql(1);
+        assert!(one.starts_with("INSERT INTO descriptions ("), "{one}");
+        assert!(
+            one.contains("$1, $2, $3, $4, $5, $6, $7, $8, $9, $10"),
+            "{one}"
+        );
+        assert!(one.ends_with(" RETURNING id"), "{one}");
+        let two = descriptions_insert_sql(2);
+        assert!(two.contains("($11, $12, $13"), "{two}");
+        assert!(two.contains("$20) RETURNING id"), "{two}");
+    }
+
+    #[test]
+    fn repair_link_comment_pins_single_column() {
+        // Moved with the const from `pidash_db::ops::repair`
+        // (PIDASHCONV-1630); assertions verbatim.
+        assert!(LINK_COMMENT_SQL.contains("SET description_id = $1"));
+        assert!(!LINK_COMMENT_SQL.contains("updated_at"));
     }
 }

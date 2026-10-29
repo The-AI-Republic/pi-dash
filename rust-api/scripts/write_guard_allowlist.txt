@@ -4,11 +4,6 @@
 # Fingerprints hash the statement, not line numbers: unrelated edits do not churn this list.
 # The list only shrinks: remove the entry in the same PR that removes the site.
 # Seeded at 5e249b4d (399 sites). Do not add new sites; move them into domain/ instead.
-crates/db/src/ops/repair.rs | INSERT descriptions | f1a2da93f870 | sql
-crates/db/src/ops/repair.rs | UPDATE issue_comments | 210caaf40f84 | sql
-crates/db/src/ops/repair.rs | UPDATE issue_sequences | 3717ad044d93 | sql
-crates/db/src/ops/repair.rs | UPDATE issues | 39b92117fcc5 | sql
-crates/db/src/orchestration/workpad.rs | UPDATE issues | 32e88e8a80aa | sql
 crates/jobs/src/tasks_cleanup/dummy_data.rs | INSERT issue_assignees | c2cedf21ec47 | sql
 crates/jobs/src/tasks_cleanup/dummy_data.rs | INSERT issue_sequences | b5f228b9985d | sql
 crates/jobs/src/tasks_cleanup/dummy_data.rs | INSERT issues | 7f4e35179110 | sql
@@ -26,19 +21,3 @@ crates/jobs/src/tasks_cleanup/workspace_seed.rs | INSERT workspace_members | 38f
 crates/jobs/src/tasks_cleanup/workspace_seed.rs | UPDATE projects | 140bbcf424e7 | sql
 crates/jobs/src/tasks_webhooks/activity_dispatch.rs | UPDATE issues | 408189099ae3 | sql
 crates/jobs/src/tasks_webhooks/activity_dispatch.rs | UPDATE issues | 588a92ecf217 | sql
-crates/services/src/app_assets/queries_v2_project.rs | UPDATE projects | 4373f6498ae7 | sql
-crates/services/src/app_issues/move.rs | INSERT issue_sequences | f141b015b498 | sql
-crates/services/src/app_issues/move.rs | UPDATE descriptions | 2c5f069e1e40 | sql
-crates/services/src/app_issues/move.rs | UPDATE issue_assignees | 60dcabe814f9 | sql
-crates/services/src/app_issues/move.rs | UPDATE issue_assignees | fa7375080034 | sql
-crates/services/src/app_issues/move.rs | UPDATE issue_comments | 117467b7c338 | sql
-crates/services/src/app_issues/move.rs | UPDATE issue_relations | 580f6906923a | sql
-crates/services/src/app_issues/move.rs | UPDATE issue_sequences | b6f60b367cda | sql
-crates/services/src/app_issues/move.rs | UPDATE issues | 28f60603dcc8 | sql
-crates/services/src/app_issues/move.rs | UPDATE issues | 910c1ca5dae7 | sql
-crates/services/src/app_issues/move.rs | UPDATE issues | 911e38bddad5 | sql
-crates/services/src/app_issues/serializers_create.rs | INSERT issue_assignees | b6326dbfa85d | sql
-crates/services/src/app_issues/serializers_create.rs | UPDATE issue_assignees | 3153bdc23937 | sql
-crates/services/src/integrations/repositories.rs | UPDATE projects | 0b9c0f07e274 | sql
-crates/services/src/space/queries/intake_assets.rs | INSERT issues | f8ff517d41b9 | sql
-crates/services/src/v1_projects/ser_workflow.rs | UPDATE states | 00108ca007ee | sql

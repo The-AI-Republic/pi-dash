@@ -67,7 +67,7 @@ use crate::app_issues::issue_move::{
 };
 pub use crate::app_issues::issue_move::{MoveGuards, MoveOptions};
 use crate::app_issues::serializers_create::{
-    m2m_batches, m2m_insert_sql, ASSIGNEE_CLEAR_SQL, DEFAULT_ASSIGNEE_EXISTS_SQL, LABEL_CLEAR_SQL,
+    m2m_batches, m2m_insert_sql, DEFAULT_ASSIGNEE_EXISTS_SQL, LABEL_CLEAR_SQL,
 };
 use crate::orchestration::entries::{FireOutcome, FireRequest};
 
@@ -430,6 +430,16 @@ where
         ))),
     }
 }
+
+/// `IssueAssignee.objects.filter(issue).delete()` (`:475`): a SOFT
+/// delete — `SoftDeletionQuerySet.delete` defaults to `soft=True`
+/// (`db/mixins.py:48-52`), i.e. `UPDATE … SET deleted_at`, scoped by
+/// the default manager (`deleted_at IS NULL`). `updated_at` is NOT
+/// touched (queryset `update()` skips `auto_now`). Moved verbatim from
+/// `app_issues::serializers_create` (PIDASHCONV-1630). Params: `$1`
+/// deletion timestamp, `$2` issue id (uuid).
+pub(crate) const ASSIGNEE_CLEAR_SQL: &str =
+    "UPDATE issue_assignees SET deleted_at = $1 WHERE issue_id = $2 AND deleted_at IS NULL";
 
 /// One update m2m leg (`serializers/issue.py:477-511`): present keys
 /// soft-delete the live links, then re-insert the effective ids with
@@ -1740,6 +1750,42 @@ const WORKPAD_BARE_UPDATE_SQL: &str =
     "UPDATE issues SET workpad = $3, updated_at = $4 WHERE id = $1 AND project_id = $2 \
      AND deleted_at IS NULL";
 
+/// `set_workpad` write (`orchestration/workpad.py:79-84`):
+/// `update_fields=["workpad", "updated_at"]`, rendered in `_meta`
+/// order per the fixture. Moved verbatim from
+/// `pidash_db::orchestration::workpad` (PIDASHCONV-1630). `$1` is the
+/// stamp, `$2` the body, `$3` the issue id.
+pub(crate) const WORKPAD_SAVE_UPDATE_SQL: &str =
+    "UPDATE issues SET updated_at = $1, workpad = $2 WHERE id = $3";
+
+/// Overwrite the workpad body; `None`/empty clears it
+/// (`body or ""`). `now` stands in for the `auto_now` stamp. A
+/// missing row is a silent no-op (Python's `save()` would attempt an
+/// `INSERT` fallback there — unreachable from live callers and
+/// deliberately not recreated). Contrast [`set_workpad`], which runs
+/// the PATCH-flow save (hook recomputes plus the completion leg),
+/// and [`update_workpad`], the agent-tool `QuerySet.update` shape —
+/// this is the orchestration `save(update_fields)` shape. Runs on any
+/// executor. Moved verbatim from
+/// `pidash_db::orchestration::workpad::set_workpad` (PIDASHCONV-1630).
+pub async fn update_workpad_save<'e, E>(
+    ex: E,
+    issue_id: Uuid,
+    body: Option<&str>,
+    now: DateTime<Utc>,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(WORKPAD_SAVE_UPDATE_SQL)
+        .bind(now)
+        .bind(body.unwrap_or(""))
+        .bind(issue_id)
+        .execute(ex)
+        .await?;
+    Ok(())
+}
+
 /// The agent-tool transition save (`tools.py:334-335`): a
 /// `save(update_fields=["state", "updated_at", "updated_by"])`
 /// equivalent — the three columns land with no hook-recompute writes
@@ -1771,6 +1817,20 @@ where
 
 const ISSUE_STATE_BARE_UPDATE_SQL: &str =
     "UPDATE issues SET state_id = $2, updated_at = $3, updated_by_id = $4 WHERE id = $1";
+
+/// N3 Issue INSERT (`views/intake.py:145-152`). `$1` = id, `$2` =
+/// created_at, `$3` = updated_at, `$4` = name, `$5` = description_json, `$6`
+/// = description_html, `$7` = priority, `$8` = project id, `$9` = triage
+/// state id. Python-side fallbacks (`:146-149`):
+/// description_json `{}` / description_html `"<p></p>"` / priority `"low"`
+/// (NOT the validated `"none"` — QUIRK-priority-default); a present-but-null
+/// key passes `None` through. No `workspace_id` kwarg
+/// (QUIRK-no-workspace-insert). Moved verbatim from
+/// `space::queries::intake_assets` (PIDASHCONV-1630): `issues` is a
+/// covered table, so the builder lives in domain/.
+pub fn issue_insert_sql() -> String {
+    "INSERT INTO \"issues\" (\"id\", \"created_at\", \"updated_at\", \"name\", \"description_json\", \"description_html\", \"priority\", \"project_id\", \"state_id\") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)".to_string()
+}
 
 /// The sync-mirror full-row INSERT both providers share
 /// (`Issue.objects.create`, `git_sync_task.py:92-97`; the
@@ -2152,6 +2212,49 @@ where
         .bind(upd.updated_by_id)
         .bind(upd.issue_id);
     statement.execute(ex).await.map(|done| done.rows_affected())
+}
+
+/// The `fix_duplicate_sequences` issue renumber
+/// (`fix_duplicate_sequences.py:90`): `bulk_update` writes
+/// `sequence_id` only, no `updated_at` bump (verified). Moved verbatim
+/// from `pidash_db::ops::repair` (PIDASHCONV-1630).
+pub(crate) const UPDATE_ISSUE_SEQUENCE_ID_SQL: &str =
+    "UPDATE issues SET sequence_id = $1 WHERE id = $2";
+
+/// The `fix_duplicate_sequences` sequence-row twin (`:91`): same rule,
+/// `sequence` only. Moved verbatim from `pidash_db::ops::repair`
+/// (PIDASHCONV-1630).
+pub(crate) const UPDATE_SEQUENCE_SQL: &str =
+    "UPDATE issue_sequences SET sequence = $1 WHERE id = $2";
+
+/// The two `fix_duplicate_sequences` `bulk_update`s (`:90-91`): the
+/// issue renumbers, then the mapped sequence rows take the same new
+/// values. Each pair is `(row_id, new_value)`. Takes `&mut
+/// PgConnection` (the `create_update_account` precedent:
+/// multi-statement steps inside the caller's transaction are not
+/// executor-generic); the repair driver passes its advisory-locked
+/// transaction and commits. Moved verbatim from `FixTx::commit_plan`
+/// (PIDASHCONV-1630) minus the commit.
+pub async fn apply_fix_plan(
+    conn: &mut sqlx::PgConnection,
+    issue_updates: &[(Uuid, i64)],
+    sequence_updates: &[(Uuid, i64)],
+) -> Result<(), sqlx::Error> {
+    for (issue_id, new_sequence) in issue_updates {
+        sqlx::query(UPDATE_ISSUE_SEQUENCE_ID_SQL)
+            .bind(new_sequence)
+            .bind(issue_id)
+            .execute(&mut *conn)
+            .await?;
+    }
+    for (row_id, new_sequence) in sequence_updates {
+        sqlx::query(UPDATE_SEQUENCE_SQL)
+            .bind(new_sequence)
+            .bind(row_id)
+            .execute(&mut *conn)
+            .await?;
+    }
+    Ok(())
 }
 
 /// The ticker state-move write (`scheduling.py:700,1113,1468`):
@@ -4581,5 +4684,120 @@ mod tests {
             .execute(&pool)
             .await
             .expect("cleanup user");
+    }
+
+    #[test]
+    fn repair_fix_updates_pin_single_column() {
+        // Moved with the consts from `pidash_db::ops::repair`
+        // (PIDASHCONV-1630); assertions verbatim.
+        assert!(!UPDATE_ISSUE_SEQUENCE_ID_SQL.contains("updated_at"));
+        assert!(!UPDATE_SEQUENCE_SQL.contains("updated_at"));
+    }
+
+    static WORKPAD_FIXTURE: &str =
+        include_str!("../../../../fixtures/orchestration/fx02_reads/workpad.golden.json");
+
+    #[test]
+    fn workpad_save_sql_sets_both_update_fields() {
+        // Moved with the const from `pidash_db::orchestration::workpad`
+        // (PIDASHCONV-1630); assertions verbatim.
+        let parsed: Value = serde_json::from_str(WORKPAD_FIXTURE).expect("fixture parses");
+        let rendered = parsed["set_update_sql"][0]
+            .as_str()
+            .expect("set_update_sql");
+        assert!(rendered.starts_with("UPDATE \"issues\" SET \"updated_at\" = "));
+        assert!(rendered.contains(", \"workpad\" = "));
+        assert_eq!(
+            WORKPAD_SAVE_UPDATE_SQL,
+            "UPDATE issues SET updated_at = $1, workpad = $2 WHERE id = $3"
+        );
+    }
+
+    const WORKPAD_ISSUES_DDL: &str = "CREATE TEMPORARY TABLE issues (
+        id UUID PRIMARY KEY, workpad TEXT, updated_at TIMESTAMPTZ NOT NULL)";
+
+    fn live_workpad_uuid(tag: &str) -> Uuid {
+        Uuid::parse_str(&format!("11111111-2222-3333-4444-{tag}")).expect("fixed uuid")
+    }
+
+    /// `workpad.golden.json` replay: fresh issue reads `""`, set /
+    /// overwrite / clear round-trip, `None` and `NULL` read as `""`.
+    /// Moved with the write from `pidash_db::orchestration::workpad`
+    /// (PIDASHCONV-1630); the read leg still lives there.
+    #[tokio::test]
+    async fn live_workpad_roundtrip_replays_fixture() {
+        use pidash_db::orchestration::fetch_workpad;
+        use sqlx::Row;
+
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let mut tx = pool.begin().await.expect("begin scratch tx");
+        sqlx::query(WORKPAD_ISSUES_DDL)
+            .execute(&mut *tx)
+            .await
+            .expect("temp issues");
+        let issue = live_workpad_uuid("000000003020");
+        let epoch: chrono::DateTime<chrono::Utc> =
+            "2026-10-03T11:00:00+00:00".parse().expect("epoch");
+        sqlx::query("INSERT INTO issues (id, workpad, updated_at) VALUES ($1, '', $2)")
+            .bind(issue)
+            .bind(epoch)
+            .execute(&mut *tx)
+            .await
+            .expect("seed issue");
+        assert_eq!(fetch_workpad(&mut *tx, issue).await.expect("get fresh"), "");
+        let now: chrono::DateTime<chrono::Utc> = "2026-10-03T12:00:00+00:00".parse().expect("T0");
+        update_workpad_save(
+            &mut *tx,
+            issue,
+            Some("## Agent Workpad\n\n- implementing\n"),
+            now,
+        )
+        .await
+        .expect("set");
+        assert_eq!(
+            fetch_workpad(&mut *tx, issue).await.expect("get set"),
+            "## Agent Workpad\n\n- implementing\n"
+        );
+        let stamp: chrono::DateTime<chrono::Utc> =
+            sqlx::query("SELECT updated_at FROM issues WHERE id = $1")
+                .bind(issue)
+                .fetch_one(&mut *tx)
+                .await
+                .expect("read back")
+                .try_get("updated_at")
+                .expect("updated_at");
+        assert_eq!(stamp, now);
+        update_workpad_save(&mut *tx, issue, Some("second"), now)
+            .await
+            .expect("overwrite");
+        assert_eq!(
+            fetch_workpad(&mut *tx, issue).await.expect("get overwrite"),
+            "second"
+        );
+        update_workpad_save(&mut *tx, issue, Some(""), now)
+            .await
+            .expect("clear");
+        assert_eq!(
+            fetch_workpad(&mut *tx, issue).await.expect("get cleared"),
+            ""
+        );
+        update_workpad_save(&mut *tx, issue, None, now)
+            .await
+            .expect("set none");
+        assert_eq!(fetch_workpad(&mut *tx, issue).await.expect("get none"), "");
+        // A `NULL` workpad (unreachable on the real `NOT NULL`
+        // column) still reads as `""`, like `issue.workpad or ""`.
+        sqlx::query("UPDATE issues SET workpad = NULL WHERE id = $1")
+            .bind(issue)
+            .execute(&mut *tx)
+            .await
+            .expect("null out");
+        assert_eq!(fetch_workpad(&mut *tx, issue).await.expect("get null"), "");
+        assert!(matches!(
+            fetch_workpad(&mut *tx, live_workpad_uuid("000000009999")).await,
+            Err(sqlx::Error::RowNotFound)
+        ));
     }
 }

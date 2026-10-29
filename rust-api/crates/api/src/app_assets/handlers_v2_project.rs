@@ -99,6 +99,7 @@ use pidash_compat::response::{
     json_response as raw, json_value as json_status, no_content, server_error,
 };
 use pidash_services::app_assets::queries_v2_project as q;
+use pidash_services::domain::projects as domain_projects;
 use pidash_types::WorkspaceId;
 
 /// All ten `EntityTypeContext` values (`db/models/asset.py:33-43`): the
@@ -1368,14 +1369,15 @@ async fn post_bulk_asset(
                 if exists.is_none() {
                     return does_not_exist();
                 }
-                if sqlx::query(q::SAVE_PROJECT_COVER_SQL)
-                    .bind(project_id)
-                    .bind(row.id)
-                    .bind(Utc::now())
-                    .bind(actor.id)
-                    .execute(&pool)
-                    .await
-                    .is_err()
+                if domain_projects::save_project_cover(
+                    &pool,
+                    project_id,
+                    row.id,
+                    Utc::now(),
+                    actor.id,
+                )
+                .await
+                .is_err()
                 {
                     return server_error();
                 }
