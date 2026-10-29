@@ -14,6 +14,7 @@ import {
   createIssueComment,
   deleteIssueComment,
   duplicateCommentImage,
+  getIssueComment,
   gitSyncedCommentErrorFrom,
   isApiError,
   listIssueComments,
@@ -244,14 +245,24 @@ export function useCreateComment(scope: CommentScope) {
         comment_html: html,
         access,
       });
-      if (assetIds.length > 0) {
-        try {
-          await attachCommentImages(client, scope.workspaceSlug, scope.projectId, comment.id, assetIds);
-        } catch (error) {
-          notifyError(COMMENT_ATTACH_FAILED_TITLE, commentFailureDetail(error));
-        }
+      if (assetIds.length === 0) return comment;
+      try {
+        await attachCommentImages(client, scope.workspaceSlug, scope.projectId, comment.id, assetIds);
+      } catch (error) {
+        notifyError(COMMENT_ATTACH_FAILED_TITLE, commentFailureDetail(error));
+        return comment;
       }
-      return comment;
+      // The bulk link rewrites the stored body but answers 204: the
+      // create response still carries the pre-attach HTML, and the
+      // feed's delta refresh only adds newer rows, so caching it would
+      // show the new comment without its pictures until a reload. A
+      // refused re-read keeps the create response rather than failing
+      // the post (CMT-009).
+      try {
+        return await getIssueComment(client, scope.workspaceSlug, scope.projectId, scope.issueId, comment.id);
+      } catch {
+        return comment;
+      }
     },
     onSuccess: (comment) => {
       notifySuccess(COMMENT_CREATED_TITLE);

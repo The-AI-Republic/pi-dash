@@ -86,6 +86,24 @@ export async function listIssueComments(
   return client.parse(IssueCommentList, body, `GET issue comments ${issueId}`);
 }
 
+/**
+ * Read one comment back (CMT-009). The image bulk link answers 204
+ * after rewriting the stored body, so a create that attached pictures
+ * re-reads the row; the create response still carries the pre-attach
+ * HTML and the feed's delta refresh never repairs it.
+ */
+export async function getIssueComment(
+  client: ApiClient,
+  slug: string,
+  projectId: string,
+  issueId: string,
+  commentId: string
+): Promise<IssueComment> {
+  const path = `/api/workspaces/${slug}/projects/${projectId}/issues/${issueId}/comments/${commentId}/`;
+  const body = await client.getJson<unknown>(path);
+  return client.parse(IssueComment, body, `GET ${path}`);
+}
+
 export interface IssueCommentCreate {
   comment_html: string;
   comment_json?: unknown;

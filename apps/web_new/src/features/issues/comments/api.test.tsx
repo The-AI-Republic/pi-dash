@@ -482,6 +482,50 @@ describe("useCreateComment", () => {
     });
   });
 
+  it("re-reads the row after the bulk link so the feed shows the pictures (CMT-009)", async () => {
+    const created = comment({
+      id: "823e4567-e89b-12d3-a456-426614174008",
+      created_at: "2026-10-17T00:00:00Z",
+      comment_html: "<p>Hi</p>",
+    });
+    const attached = comment({
+      ...created,
+      comment_html: '<p>Hi</p><image-component src="asset-1"></image-component>',
+    });
+    const { queryClient, wrapper } = harness();
+    queryClient.setQueryData(issueKeys.comments(SLUG, PROJECT, ISSUE), [comment()]);
+    const { calls } = stubClient((call) => {
+      if (call.url.includes("/history/")) return { status: 200, body: [comment(), attached] };
+      if (call.method === "GET") return { status: 200, body: attached };
+      if (call.url.includes("/bulk/")) return { status: 204, body: "" };
+      return { status: 201, body: created };
+    });
+    const { result } = renderHook(() => useCreateComment(SCOPE), { wrapper });
+    const row = await result.current.mutateAsync({ html: "<p>Hi</p>", access: "EXTERNAL", assetIds: ["asset-1"] });
+    expect(row.comment_html).toContain("image-component");
+    const reread = calls.find((call) => call.method === "GET" && call.url.includes(`/comments/${created.id}/`));
+    expect(reread?.url).toContain(`/issues/${ISSUE}/comments/${created.id}/`);
+    await waitFor(() => {
+      const rows = queryClient.getQueryData<IssueComment[]>(issueKeys.comments(SLUG, PROJECT, ISSUE)) ?? [];
+      expect(rows.map((entry) => entry.id)).toEqual([COMMENT, created.id]);
+      expect(rows[1]?.comment_html).toContain("image-component");
+    });
+  });
+
+  it("keeps the create response when the post-attach re-read is refused", async () => {
+    const created = comment({ id: "823e4567-e89b-12d3-a456-426614174008", comment_html: "<p>Hi</p>" });
+    const { wrapper } = harness();
+    stubClient((call) => {
+      if (call.url.includes("/bulk/")) return { status: 204, body: "" };
+      if (call.method === "GET") return { status: 500, body: { error: "boom" } };
+      return { status: 201, body: created };
+    });
+    const { result } = renderHook(() => useCreateComment(SCOPE), { wrapper });
+    const row = await result.current.mutateAsync({ html: "<p>Hi</p>", access: "INTERNAL", assetIds: ["asset-1"] });
+    expect(row).toEqual(created);
+    expect(notifySuccess).toHaveBeenCalledWith(COMMENT_CREATED_TITLE);
+  });
+
   it("skips the bulk write without images and keeps a row already in cache", async () => {
     const { queryClient, wrapper } = harness();
     queryClient.setQueryData(issueKeys.comments(SLUG, PROJECT, ISSUE), [comment()]);

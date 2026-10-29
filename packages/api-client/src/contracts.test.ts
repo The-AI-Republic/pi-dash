@@ -352,6 +352,7 @@ import { EpicUserProperties, getEpicUserProperties, updateEpicUserProperties } f
 import {
   createIssueComment,
   deleteIssueComment,
+  getIssueComment,
   gitSyncedCommentErrorFrom,
   listIssueComments,
   updateIssueComment,
@@ -5169,6 +5170,17 @@ describe("issue comment contracts", () => {
     expect(url).toContain(`/issues/${UUID}/history/`);
     expect(url).toContain("activity_type=issue-comment");
     expect(url).toContain("created_at__gt=2026-01-01T00%3A00%3A00Z");
+  });
+
+  it("reads one comment back after the image bulk link", async () => {
+    const transport = recordingTransport(() => fakeResponse({ body: JSON.stringify(comment) }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await getIssueComment(client, "acme", UUID2, UUID, UUID);
+    expect(parsed.id).toBe(UUID);
+    expect(parsed.comment_stripped).toBe("Hello");
+    expect(transport.calls[0]?.url).toBe(
+      `https://api.test/api/workspaces/acme/projects/${UUID2}/issues/${UUID}/comments/${UUID}/`
+    );
   });
 
   it("creates a comment and parses the created row", async () => {

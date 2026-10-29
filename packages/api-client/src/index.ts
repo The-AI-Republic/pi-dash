@@ -394,6 +394,7 @@ export {
   IssueCommentList,
   createIssueComment,
   deleteIssueComment,
+  getIssueComment,
   gitSyncedCommentErrorFrom,
   listIssueComments,
   updateIssueComment,
