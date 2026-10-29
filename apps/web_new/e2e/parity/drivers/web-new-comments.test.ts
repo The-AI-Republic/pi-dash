@@ -244,6 +244,64 @@ describe("web_new comment driver", () => {
     expect(visited).not.toContain("reload");
   });
 
+  it("retries the browse settle once through a reload on a stall", async () => {
+    const visited: string[] = [];
+    const page = pageOf();
+    page.page.goto = (async (url: string) => {
+      visited.push(url);
+      return null;
+    }) as Page["goto"];
+    let settles = 0;
+    page.page.getByRole = ((role: string, options?: { name?: string }) => {
+      if (role === "heading" && options?.name === "Activity") {
+        return locator({
+          waitFor: async () => {
+            settles += 1;
+            visited.push(`settle${settles}`);
+            if (settles === 1) throw new Error("stall");
+          },
+        });
+      }
+      return locator();
+    }) as Page["getByRole"];
+    page.page.getByText = (() => locator({ count: async () => 0 })) as unknown as Page["getByText"];
+    page.page.reload = (async () => {
+      visited.push("reload");
+      return null;
+    }) as Page["reload"];
+    await new WebNewDriver(page.page).openIssueDetail("acme", "WEB-1");
+    expect(visited).toEqual(["/acme/browse/WEB-1", "settle1", "reload", "settle2"]);
+  });
+
+  it("returns without retrying when the browse missing state rendered", async () => {
+    const visited: string[] = [];
+    const page = pageOf();
+    page.page.goto = (async (url: string) => {
+      visited.push(url);
+      return null;
+    }) as Page["goto"];
+    page.page.getByRole = ((role: string, options?: { name?: string }) => {
+      if (role === "heading" && options?.name === "Activity") {
+        return locator({
+          waitFor: async () => {
+            throw new Error("stall");
+          },
+        });
+      }
+      return locator();
+    }) as Page["getByRole"];
+    page.page.getByText = ((text: string | RegExp) => {
+      expect(String(text)).toContain("No work item matches this address");
+      return locator({ count: async () => 1 });
+    }) as unknown as Page["getByText"];
+    page.page.reload = (async () => {
+      visited.push("reload");
+      return null;
+    }) as Page["reload"];
+    await new WebNewDriver(page.page).openIssueDetail("acme", "WEB-1");
+    expect(visited).toEqual(["/acme/browse/WEB-1"]);
+  });
+
   it("reads the card texts in feed order", async () => {
     const page = pageOf({
       locator: (selector) =>

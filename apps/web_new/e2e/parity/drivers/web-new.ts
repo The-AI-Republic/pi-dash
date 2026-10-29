@@ -3328,6 +3328,19 @@ export class WebNewDriver implements ParityDriver {
   async openIssueDetail(workspaceSlug: string, issueSeqOrProjectId: string, issueId?: string): Promise<void> {
     if (issueId === undefined) {
       await this.page.goto(`/${workspaceSlug}/browse/${issueSeqOrProjectId}`);
+      // Same stall class as the short link: the browse route's chunks can
+      // abort under vite pressure and the detail never settles. Settle on
+      // the Activity heading like the id form; a rendered missing state
+      // returns without retrying (callers assert it via seesDetailMissing).
+      const activity = this.page.getByRole("heading", { name: "Activity", exact: true });
+      try {
+        await activity.waitFor({ timeout: WebNewDriver.WAIT_MS });
+      } catch {
+        if ((await this.page.getByText(/No work item matches this address/).count()) > 0) return;
+        await this.page.reload();
+        await activity.waitFor({ timeout: WebNewDriver.WAIT_MS });
+      }
+      return;
     } else {
       // The id route is the legacy short link; it redirects to the
       // canonical browse address once the server resolves the key.
