@@ -14,13 +14,13 @@ from rest_framework.test import APIClient
 
 from pi_dash.db.models import Issue, Project, State, User
 from pi_dash.db.models.scheduler import Scheduler, SchedulerBinding
-from pi_dash.prompting import recipes, registry
+from pi_dash.prompting import recipes, registry, work_types
 from pi_dash.prompting.models import PromptSectionOverride
 
 
 def _section_of_tier(kind, tier):
     """First section key in ``kind``'s recipe with the given customizable tier."""
-    for key in recipes.recipe_for(kind):
+    for key in work_types.expand(recipes.recipe_for(kind), work_types.DEFAULT_WORK_TYPE):
         if registry.get_section(key).customizable == tier:
             return key
     return None

@@ -649,6 +649,17 @@ workspace overrides.
 
 ### 9.5 Work-kind axis (non-coding In Progress prompts)
 
+> **Superseded (PDASHOSS01-234).** This axis shipped as **work type**
+> (`prompting/work_types.py`), with one deliberate departure from the
+> sketch below: instead of a `(phase × work kind) → kind` matrix, the
+> stage keeps selecting the kind/recipe unchanged (so `phase_kind`,
+> ticking, and the outcome guard are untouched) and the work type fills
+> named **slots** in the stage recipes (`Slot("context" | "execute" |
+"review" | "test")`) with namespaced sections (`software.execute`).
+> Core sections are work-type-neutral by unit test. The
+> default-with-override storage (`project.default_work_type`, nullable
+> `issue.work_type`, `effective_work_type()`) lands as designed here.
+
 **Designed, deferred.** Today every In Progress issue renders
 `coding-task`, and non-coding work (investigations, ops, comment-only
 responses) is handled by runtime classification _inside_ the prompt

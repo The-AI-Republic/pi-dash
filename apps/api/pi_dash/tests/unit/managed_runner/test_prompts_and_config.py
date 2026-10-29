@@ -40,7 +40,7 @@ def test_managed_recipes_share_local_sections_unlike_cloud():
     restriction."""
     coding = recipes.MANAGED_RECIPES[recipes.KIND_CODING_TASK]
     assert "pidash-cli" in coding
-    assert not any(key.startswith("cloud-") for key in coding)
+    assert not any(isinstance(key, str) and key.startswith("cloud-") for key in coding)
 
 
 def test_recipe_for_routes_by_executor_kind():
