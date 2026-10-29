@@ -196,7 +196,9 @@ test(
 
     const created = `Vd27 Item ${harness.tag}`;
     await driver.viewsDetailAddClick();
-    expect(await driver.createModalOpen()).toBe(true);
+    // The create form mounts a beat after the click on the oracle; wait
+    // for it rather than sampling once.
+    await expect.poll(() => driver.createModalOpen(), POLL).toBe(true);
     await driver.fillCreateTitle(created);
     await driver.submitCreateModal();
     await expect.poll(() => driver.visibleIssueNames(), POLL).toEqual(expect.arrayContaining([created]));
