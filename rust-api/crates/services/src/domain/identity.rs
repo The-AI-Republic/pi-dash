@@ -27,6 +27,16 @@
 //!   an entity insert cannot join that transaction (D5). Bots get
 //!   neither hook effect anyway (Django skips bots in the receiver and
 //!   creates no profile for them), so nothing is lost.
+//! * The provisioned insert ([`insert_provisioned_user`]) is
+//!   executor-generic for the same D5 reason: the overlay's platform
+//!   upsert and OIDC sync create users on a caller-owned sqlx
+//!   transaction. Neither path writes a profile row here, and the
+//!   prefs row is the separate explicit
+//!   [`insert_user_notification_preference`] call (both paths create
+//!   non-bots, so the receiver gate is statically satisfied; the sync
+//!   path stamps it with a fresh `now`). The platform dirty update
+//!   ([`update_user_fields`]) rides the same executor shape (D6 gap
+//!   PIDASHCONV-1616).
 //!
 //! Per-caller deltas (design D6) ride on the input structs, each citing
 //! the Python file:line that has the same difference. Three Rust-side
@@ -344,6 +354,242 @@ where
         .execute(ex)
         .await
         .map(|_| ())
+}
+
+// ---------------------------------------------------------------------------
+// provisioned users (executor-generic; D6 gap PIDASHCONV-1616)
+// ---------------------------------------------------------------------------
+
+/// The provisioned `users` insert: all 40 physical columns in `_meta`
+/// order, the same list [`BOT_USER_INSERT_SQL`] carries — one
+/// full-row shape for the table. The platform path spells the columns
+/// id-first; the stored rows are identical either way. `$1..$40`
+/// follow the column order.
+const PROVISIONED_USER_INSERT_SQL: &str = "INSERT INTO users (password, last_login, id, username,
+    mobile_number, email, display_name, first_name, last_name, avatar, avatar_asset_id,
+    cover_image, cover_image_asset_id, date_joined, created_at, updated_at, last_location,
+    created_location, is_superuser, is_managed, is_password_expired, is_active, is_staff,
+    is_email_verified, is_password_autoset, is_password_reset_required, token, last_active,
+    last_login_time, last_logout_time, last_login_ip, last_logout_ip, last_login_medium,
+    last_login_uagent, token_updated_at, is_bot, bot_type, user_timezone, is_email_valid,
+    masked_at)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
+    $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35,
+    $36, $37, $38, $39, $40)";
+
+/// The `User` `post_save` effect as explicit SQL
+/// (`db/models/user.py:307-320`): one `user_notification_preferences`
+/// row — all five flags true, NULL audit and scope columns — in
+/// `_meta` column order. `$1..$14` follow the column order.
+const USER_NOTIFICATION_PREFERENCE_INSERT_SQL: &str = "INSERT INTO user_notification_preferences
+    (created_at, updated_at, created_by_id, updated_by_id, deleted_at, id, user_id,
+    workspace_id, project_id, property_change, state_change, comment, mention, issue_completed)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)";
+
+/// Resolved inputs for [`insert_provisioned_user`]: the two tx-bound
+/// provisioning paths' first-save values. The platform upsert
+/// (`service.py:255-265`: managed + verified, unusable password,
+/// empty names/avatar, medium `"email"`) and the OIDC sync create
+/// (`sync.py:91-103`: claims email/names/picture, autoset password,
+/// medium `"airepublic"`) differ only in these fields; every other
+/// column is fixed-identical. `id` is `None` where the function
+/// generates one (both paths do). `user_timezone` is caller-resolved
+/// though both paths pass `"UTC"` today. Neither path writes a
+/// profile row here (platform never does; sync runs its own
+/// `get_or_create`), and the prefs row is the separate explicit
+/// [`insert_user_notification_preference`] call.
+pub struct ProvisionedUser<'a> {
+    pub id: Option<Uuid>,
+    pub email: &'a str,
+    pub username: &'a str,
+    pub password_hash: &'a str,
+    pub display_name: &'a str,
+    pub first_name: &'a str,
+    pub last_name: &'a str,
+    pub avatar: &'a str,
+    pub is_managed: bool,
+    pub is_email_verified: bool,
+    pub is_password_autoset: bool,
+    pub last_login_medium: &'a str,
+    pub user_timezone: &'a str,
+    pub now: DateTime<Utc>,
+}
+
+/// `User(...)` + first `save()` for the tx-bound provisioning paths:
+/// the platform upsert (`service.py:255-265`) and the OIDC sync
+/// `get_or_create` create side (`sync.py:91-103`). Executor-generic —
+/// both callers hold a sqlx transaction an entity insert cannot join
+/// (D5) — and profile-free. The `post_save` prefs effect is the
+/// caller's separate [`insert_user_notification_preference`] call.
+/// Returns the row id (generated when `ProvisionedUser::id` is
+/// `None`).
+pub async fn insert_provisioned_user<'e, E>(
+    ex: E,
+    user: &ProvisionedUser<'_>,
+) -> Result<Uuid, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let id = user.id.unwrap_or_else(Uuid::new_v4);
+    sqlx::query(PROVISIONED_USER_INSERT_SQL)
+        .bind(user.password_hash)
+        .bind(Option::<DateTime<Utc>>::None)
+        .bind(id)
+        .bind(user.username)
+        .bind(Option::<String>::None)
+        .bind(user.email)
+        .bind(user.display_name)
+        .bind(user.first_name)
+        .bind(user.last_name)
+        .bind(user.avatar)
+        .bind(Option::<Uuid>::None)
+        .bind(Option::<String>::None)
+        .bind(Option::<Uuid>::None)
+        .bind(user.now)
+        .bind(user.now)
+        .bind(user.now)
+        .bind("")
+        .bind("")
+        .bind(false)
+        .bind(user.is_managed)
+        .bind(false)
+        .bind(true)
+        .bind(false)
+        .bind(user.is_email_verified)
+        .bind(user.is_password_autoset)
+        .bind(false)
+        .bind("")
+        .bind(user.now)
+        .bind(Option::<DateTime<Utc>>::None)
+        .bind(Option::<DateTime<Utc>>::None)
+        .bind("")
+        .bind("")
+        .bind(user.last_login_medium)
+        .bind("")
+        .bind(Option::<DateTime<Utc>>::None)
+        .bind(false)
+        .bind(Option::<String>::None)
+        .bind(user.user_timezone)
+        .bind(false)
+        .bind(Option::<DateTime<Utc>>::None)
+        .execute(ex)
+        .await?;
+    Ok(id)
+}
+
+/// The `User` `post_save` effect as an explicit call
+/// (`db/models/user.py:307-320`, reached from `service.py:265` and
+/// `sync.py:91`): one preferences row — all five flags true, NULL
+/// audit and scope columns. Executor-generic: the tx-bound callers
+/// cannot reach the entity `after_save` hook (D5). `row_id` is
+/// caller-generated (`uuid4`, both callers); `now` stamps both
+/// columns (the platform path reuses the user row's `now`, the sync
+/// path a fresh stamp).
+pub async fn insert_user_notification_preference<'e, E>(
+    ex: E,
+    row_id: Uuid,
+    user_id: Uuid,
+    now: DateTime<Utc>,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(USER_NOTIFICATION_PREFERENCE_INSERT_SQL)
+        .bind(now)
+        .bind(now)
+        .bind(Option::<Uuid>::None)
+        .bind(Option::<Uuid>::None)
+        .bind(Option::<DateTime<Utc>>::None)
+        .bind(row_id)
+        .bind(user_id)
+        .bind(Option::<Uuid>::None)
+        .bind(Option::<Uuid>::None)
+        .bind(true)
+        .bind(true)
+        .bind(true)
+        .bind(true)
+        .bind(true)
+        .execute(ex)
+        .await
+        .map(|_| ())
+}
+
+/// Dirty `users` subset for [`update_user_fields`]: `Some` writes the
+/// column (`service.py:267-276`: email always synced, display name
+/// filled when empty, username filled when empty).
+pub struct UserFieldUpdates<'a> {
+    pub username: Option<&'a str>,
+    pub email: Option<&'a str>,
+    pub display_name: Option<&'a str>,
+}
+
+impl UserFieldUpdates<'_> {
+    /// No dirty columns: `user.save()` never runs (`service.py:277`).
+    pub fn is_empty(&self) -> bool {
+        self.username.is_none() && self.email.is_none() && self.display_name.is_none()
+    }
+}
+
+/// Render the dirty-fields `UPDATE` for one input combination (fixed
+/// `_meta` order: username, email, display_name, updated_at — Django
+/// 4.2 re-sorts `update_fields`, `base.py:952-957`). `None` when no
+/// column is dirty: the save never runs. Pure, so the unit tests pin
+/// the exact text per combination.
+fn user_fields_sql(updates: &UserFieldUpdates<'_>) -> Option<String> {
+    if updates.is_empty() {
+        return None;
+    }
+    let mut set = Vec::new();
+    let mut next = 0;
+    let mut arg = || {
+        next += 1;
+        format!("${next}")
+    };
+    if updates.username.is_some() {
+        set.push(format!("\"username\" = {}", arg()));
+    }
+    if updates.email.is_some() {
+        set.push(format!("\"email\" = {}", arg()));
+    }
+    if updates.display_name.is_some() {
+        set.push(format!("\"display_name\" = {}", arg()));
+    }
+    let updated_at = arg();
+    set.push(format!("\"updated_at\" = {updated_at}"));
+    let id = arg();
+    Some(format!(
+        "UPDATE \"users\" SET {} WHERE \"id\" = {id}",
+        set.join(", ")
+    ))
+}
+
+/// `user.save(update_fields=...)` (`service.py:267-280`): only dirty
+/// columns plus `updated_at`, in `_meta` order. A no-op when nothing
+/// is dirty (the `if user_updates:` guard). Runs on the caller's
+/// executor.
+pub async fn update_user_fields<'e, E>(
+    ex: E,
+    user_id: Uuid,
+    updates: &UserFieldUpdates<'_>,
+    now: DateTime<Utc>,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let Some(sql) = user_fields_sql(updates) else {
+        return Ok(());
+    };
+    let mut query = sqlx::query(&sql);
+    if let Some(username) = updates.username {
+        query = query.bind(username);
+    }
+    if let Some(email) = updates.email {
+        query = query.bind(email);
+    }
+    if let Some(display_name) = updates.display_name {
+        query = query.bind(display_name);
+    }
+    query.bind(now).bind(user_id).execute(ex).await.map(|_| ())
 }
 
 // ---------------------------------------------------------------------------
@@ -2832,5 +3078,391 @@ mod tests {
                 .await
                 .expect("read back a again");
         assert_eq!(moved, (t2, Some(ws2)));
+    }
+
+    // -- provisioned-user pins (D6 gap PIDASHCONV-1616) -------------------------
+
+    /// `_meta` column order for the provisioned-insert assertion
+    /// (the bot test above carries its own copy for its statement).
+    const USER_META_COLUMNS: [&str; 40] = [
+        "password",
+        "last_login",
+        "id",
+        "username",
+        "mobile_number",
+        "email",
+        "display_name",
+        "first_name",
+        "last_name",
+        "avatar",
+        "avatar_asset_id",
+        "cover_image",
+        "cover_image_asset_id",
+        "date_joined",
+        "created_at",
+        "updated_at",
+        "last_location",
+        "created_location",
+        "is_superuser",
+        "is_managed",
+        "is_password_expired",
+        "is_active",
+        "is_staff",
+        "is_email_verified",
+        "is_password_autoset",
+        "is_password_reset_required",
+        "token",
+        "last_active",
+        "last_login_time",
+        "last_logout_time",
+        "last_login_ip",
+        "last_logout_ip",
+        "last_login_medium",
+        "last_login_uagent",
+        "token_updated_at",
+        "is_bot",
+        "bot_type",
+        "user_timezone",
+        "is_email_valid",
+        "masked_at",
+    ];
+
+    #[test]
+    fn provisioned_insert_lists_all_40_columns_in_meta_order() {
+        let head = PROVISIONED_USER_INSERT_SQL;
+        let mut cursor = 0;
+        for column in USER_META_COLUMNS {
+            let found = head[cursor..]
+                .find(column)
+                .unwrap_or_else(|| panic!("{column} listed"));
+            cursor += found + column.len();
+        }
+        for bind in 1..=40 {
+            assert!(head.contains(&format!("${bind}")), "bind ${bind} present");
+        }
+    }
+
+    #[test]
+    fn prefs_insert_lists_all_14_columns_in_meta_order() {
+        let columns = [
+            "created_at",
+            "updated_at",
+            "created_by_id",
+            "updated_by_id",
+            "deleted_at",
+            "id",
+            "user_id",
+            "workspace_id",
+            "project_id",
+            "property_change",
+            "state_change",
+            "comment",
+            "mention",
+            "issue_completed",
+        ];
+        let head = USER_NOTIFICATION_PREFERENCE_INSERT_SQL;
+        let mut cursor = 0;
+        for column in columns {
+            let found = head[cursor..]
+                .find(column)
+                .unwrap_or_else(|| panic!("{column} listed"));
+            cursor += found + column.len();
+        }
+        for bind in 1..=14 {
+            assert!(head.contains(&format!("${bind}")), "bind ${bind} present");
+        }
+    }
+
+    fn field_updates_fixture() -> UserFieldUpdates<'static> {
+        UserFieldUpdates {
+            username: None,
+            email: None,
+            display_name: None,
+        }
+    }
+
+    #[test]
+    fn user_fields_sql_empty_is_no_save() {
+        let updates = field_updates_fixture();
+        assert!(updates.is_empty());
+        assert_eq!(user_fields_sql(&updates), None);
+    }
+
+    #[test]
+    fn user_fields_sql_all_dirty_shape() {
+        let updates = UserFieldUpdates {
+            username: Some("u"),
+            email: Some("e"),
+            display_name: Some("d"),
+        };
+        assert!(!updates.is_empty());
+        assert_eq!(
+            user_fields_sql(&updates).as_deref(),
+            Some(
+                "UPDATE \"users\" SET \"username\" = $1, \"email\" = $2, \
+                 \"display_name\" = $3, \"updated_at\" = $4 WHERE \"id\" = $5"
+            )
+        );
+    }
+
+    #[test]
+    fn user_fields_sql_email_only_shape() {
+        let updates = UserFieldUpdates {
+            email: Some("e"),
+            ..field_updates_fixture()
+        };
+        assert_eq!(
+            user_fields_sql(&updates).as_deref(),
+            Some("UPDATE \"users\" SET \"email\" = $1, \"updated_at\" = $2 WHERE \"id\" = $3")
+        );
+    }
+
+    #[test]
+    fn user_fields_sql_username_display_shape() {
+        let updates = UserFieldUpdates {
+            username: Some("u"),
+            display_name: Some("d"),
+            ..field_updates_fixture()
+        };
+        assert_eq!(
+            user_fields_sql(&updates).as_deref(),
+            Some(
+                "UPDATE \"users\" SET \"username\" = $1, \"display_name\" = $2, \
+                 \"updated_at\" = $3 WHERE \"id\" = $4"
+            )
+        );
+    }
+
+    /// Whole-row read-back as JSON: one assertion pins all 40 stored
+    /// values, so a swapped bind cannot hide.
+    async fn user_json(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        id: Uuid,
+    ) -> serde_json::Value {
+        sqlx::query_scalar("SELECT to_jsonb(users) FROM users WHERE id = $1")
+            .bind(id)
+            .fetch_one(&mut **tx)
+            .await
+            .expect("user row reads back")
+    }
+
+    /// D6 gap PIDASHCONV-1616: both provisioning shapes store their
+    /// callers' exact rows — platform (`service.py:255-265`) and OIDC
+    /// sync (`sync.py:91-103`) — the prefs call stores the receiver
+    /// row (`user.py:307-320`), and the dirty update writes only
+    /// dirty columns plus `updated_at` (a no-op when empty).
+    #[tokio::test]
+    async fn live_provisioned_shapes_store_caller_rows() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let mut tx = pool.begin().await.expect("begin scratch tx");
+        for ddl in [USERS_DDL, PREFS_DDL] {
+            sqlx::query(ddl)
+                .execute(&mut *tx)
+                .await
+                .expect("temp identity tables");
+        }
+        let now: DateTime<Utc> = "2026-10-28T12:00:00+00:00".parse().expect("T0");
+        let later: DateTime<Utc> = "2026-10-28T12:05:00+00:00".parse().expect("T1");
+        let stamp = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
+        let stamp_later = later.to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
+
+        // The platform upsert's values (`service.py:255-265`).
+        let platform_id = live_uuid("000000006101");
+        let platform = ProvisionedUser {
+            id: Some(platform_id),
+            email: "plat1616@example.test",
+            username: "plat1616user",
+            password_hash: "!unusable1616hash0000000000000000000000",
+            display_name: "plat1616",
+            first_name: "",
+            last_name: "",
+            avatar: "",
+            is_managed: true,
+            is_email_verified: true,
+            is_password_autoset: false,
+            last_login_medium: "email",
+            user_timezone: "UTC",
+            now,
+        };
+        let got = insert_provisioned_user(&mut *tx, &platform)
+            .await
+            .expect("platform insert");
+        assert_eq!(got, platform_id);
+        assert_eq!(
+            user_json(&mut tx, platform_id).await,
+            serde_json::json!({
+                "password": "!unusable1616hash0000000000000000000000",
+                "last_login": null,
+                "id": platform_id.to_string(),
+                "username": "plat1616user",
+                "mobile_number": null,
+                "email": "plat1616@example.test",
+                "display_name": "plat1616",
+                "first_name": "",
+                "last_name": "",
+                "avatar": "",
+                "avatar_asset_id": null,
+                "cover_image": null,
+                "cover_image_asset_id": null,
+                "date_joined": stamp,
+                "created_at": stamp,
+                "updated_at": stamp,
+                "last_location": "",
+                "created_location": "",
+                "is_superuser": false,
+                "is_managed": true,
+                "is_password_expired": false,
+                "is_active": true,
+                "is_staff": false,
+                "is_email_verified": true,
+                "is_password_autoset": false,
+                "is_password_reset_required": false,
+                "token": "",
+                "last_active": stamp,
+                "last_login_time": null,
+                "last_logout_time": null,
+                "last_login_ip": "",
+                "last_logout_ip": "",
+                "last_login_medium": "email",
+                "last_login_uagent": "",
+                "token_updated_at": null,
+                "is_bot": false,
+                "bot_type": null,
+                "user_timezone": "UTC",
+                "is_email_valid": false,
+                "masked_at": null,
+            })
+        );
+
+        // The OIDC sync create's values (`sync.py:91-103`); verified
+        // false here so the pin proves the flag is caller-resolved.
+        let sync_id = live_uuid("000000006102");
+        let sync = ProvisionedUser {
+            id: Some(sync_id),
+            email: "sync1616@example.test",
+            username: "Sync1616@Example.TEST",
+            password_hash: "",
+            display_name: "Sync User",
+            first_name: "Sync",
+            last_name: "User",
+            avatar: "https://picture.test/sync1616",
+            is_managed: false,
+            is_email_verified: false,
+            is_password_autoset: true,
+            last_login_medium: "airepublic",
+            user_timezone: "UTC",
+            now,
+        };
+        let got = insert_provisioned_user(&mut *tx, &sync)
+            .await
+            .expect("sync insert");
+        assert_eq!(got, sync_id);
+        assert_eq!(
+            user_json(&mut tx, sync_id).await,
+            serde_json::json!({
+                "password": "",
+                "last_login": null,
+                "id": sync_id.to_string(),
+                "username": "Sync1616@Example.TEST",
+                "mobile_number": null,
+                "email": "sync1616@example.test",
+                "display_name": "Sync User",
+                "first_name": "Sync",
+                "last_name": "User",
+                "avatar": "https://picture.test/sync1616",
+                "avatar_asset_id": null,
+                "cover_image": null,
+                "cover_image_asset_id": null,
+                "date_joined": stamp,
+                "created_at": stamp,
+                "updated_at": stamp,
+                "last_location": "",
+                "created_location": "",
+                "is_superuser": false,
+                "is_managed": false,
+                "is_password_expired": false,
+                "is_active": true,
+                "is_staff": false,
+                "is_email_verified": false,
+                "is_password_autoset": true,
+                "is_password_reset_required": false,
+                "token": "",
+                "last_active": stamp,
+                "last_login_time": null,
+                "last_logout_time": null,
+                "last_login_ip": "",
+                "last_logout_ip": "",
+                "last_login_medium": "airepublic",
+                "last_login_uagent": "",
+                "token_updated_at": null,
+                "is_bot": false,
+                "bot_type": null,
+                "user_timezone": "UTC",
+                "is_email_valid": false,
+                "masked_at": null,
+            })
+        );
+
+        // The prefs call stores the receiver row (`user.py:307-320`).
+        let prefs_id = live_uuid("000000006103");
+        insert_user_notification_preference(&mut *tx, prefs_id, platform_id, now)
+            .await
+            .expect("prefs insert");
+        let prefs: serde_json::Value = sqlx::query_scalar(
+            "SELECT to_jsonb(user_notification_preferences) \
+             FROM user_notification_preferences WHERE id = $1",
+        )
+        .bind(prefs_id)
+        .fetch_one(&mut *tx)
+        .await
+        .expect("prefs row reads back");
+        assert_eq!(
+            prefs,
+            serde_json::json!({
+                "created_at": stamp,
+                "updated_at": stamp,
+                "created_by_id": null,
+                "updated_by_id": null,
+                "deleted_at": null,
+                "id": prefs_id.to_string(),
+                "user_id": platform_id.to_string(),
+                "workspace_id": null,
+                "project_id": null,
+                "property_change": true,
+                "state_change": true,
+                "comment": true,
+                "mention": true,
+                "issue_completed": true,
+            })
+        );
+
+        // The dirty update writes only dirty columns plus updated_at.
+        update_user_fields(
+            &mut *tx,
+            sync_id,
+            &UserFieldUpdates {
+                username: None,
+                email: Some("sync1616-new@example.test"),
+                display_name: Some("Sync Renamed"),
+            },
+            later,
+        )
+        .await
+        .expect("dirty update");
+        let row = user_json(&mut tx, sync_id).await;
+        assert_eq!(row["email"], serde_json::json!("sync1616-new@example.test"));
+        assert_eq!(row["display_name"], serde_json::json!("Sync Renamed"));
+        assert_eq!(row["updated_at"], serde_json::json!(stamp_later));
+        assert_eq!(row["username"], serde_json::json!("Sync1616@Example.TEST"));
+        assert_eq!(row["created_at"], serde_json::json!(stamp));
+
+        // Empty updates save nothing — not even updated_at.
+        update_user_fields(&mut *tx, sync_id, &field_updates_fixture(), later)
+            .await
+            .expect("empty update no-ops");
+        let row = user_json(&mut tx, sync_id).await;
+        assert_eq!(row["updated_at"], serde_json::json!(stamp_later));
     }
 }
