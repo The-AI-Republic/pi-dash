@@ -241,20 +241,20 @@ pub const CLOCK_POLICY_SQL: &str = "SELECT agent_ticking_enabled, agent_default_
 /// order as L6's `RUN_INSERT_SQL`, with the scheduler VALUES shape —
 /// `work_item` NULL, `scheduler_binding` bound, `parent_run` NULL, the
 /// `'scheduler'` trigger and `'{}'` run config as literals (fixed by the
-/// call path, like `'queued'`), no `phase_kind` stamp (the model default
-/// `""`). `$1..$10` carry the caller-supplied fields in
+/// call path, like `'queued'`), no `phase_kind` or `work_type` stamp (the
+/// model default `""`). `$1..$10` carry the caller-supplied fields in
 /// [`NewSchedulerRun`] order.
 pub const SCHEDULER_RUN_INSERT_SQL: &str =
     "INSERT INTO agent_run (id, workspace_id, owner_id, created_by_id, \
     pod_id, runner_id, pinned_runner_id, work_item_id, scheduler_binding_id, parent_run_id, \
     status, executor_kind, dispatch_attempts, cancel_requested_at, cancel_reason, error_code, \
     tool_plan, terminal_hooks_applied_at, terminal_capacity_released_at, prompt, trigger, \
-    prompt_manifest, phase_kind, run_config, required_capabilities, thread_id, agent_metadata, \
-    lease_expires_at, done_payload, error, refusal_category, llm_model, usage, created_at, \
-    assigned_at, queue_position, started_at, ended_at) \
+    prompt_manifest, phase_kind, work_type, run_config, required_capabilities, thread_id, \
+    agent_metadata, lease_expires_at, done_payload, error, refusal_category, llm_model, usage, \
+    created_at, assigned_at, queue_position, started_at, ended_at) \
     VALUES ($1, $2, NULL, $3, $4, NULL, $5, NULL, $6, NULL, 'queued', $7, 0, NULL, '', $8, $9, \
-    NULL, NULL, '', 'scheduler', NULL, '', '{}', '[]', '', '{}', NULL, NULL, '', '', '', '{}', $10, \
-    NULL, NULL, NULL, NULL)";
+    NULL, NULL, '', 'scheduler', NULL, '', '', '{}', '[]', '', '{}', NULL, NULL, '', '', '', '{}', \
+    $10, NULL, NULL, NULL, NULL)";
 
 /// The scheduler INSERT as executed: [`SCHEDULER_RUN_INSERT_SQL`] plus
 /// `RETURNING` the [`RUN_VIEW_COLUMNS`] projection, like `objects.create`.
@@ -1440,6 +1440,7 @@ mod tests {
             priority: Some("none".to_owned()),
             sequence_id: 10,
             target_date: None,
+            work_type: None,
         }
     }
 
@@ -1459,6 +1460,7 @@ mod tests {
             interval_impl: 10_800,
             interval_review: 10_800,
             interval_test: 10_800,
+            default_work_type: "software".to_owned(),
         }
     }
 

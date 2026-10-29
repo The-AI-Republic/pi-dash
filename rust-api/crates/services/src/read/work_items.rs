@@ -21,7 +21,7 @@ use crate::v1_work_items::{filter_fields, FieldSpec};
 /// The `issues.*` columns every read path selects (F18-05 column order).
 /// `description_json` / `description_stripped` / `workpad` are unrendered
 /// and unread here, so they stay out of the select list.
-pub const ISSUE_SELECT_COLS: &str = r#""issues"."id", "issues"."created_at", "issues"."updated_at", "issues"."deleted_at", "issues"."point", "issues"."name", "issues"."description_html", "issues"."description_binary", "issues"."priority", "issues"."complexity_score", "issues"."start_date", "issues"."target_date", "issues"."sequence_id", "issues"."sort_order", "issues"."completed_at", "issues"."archived_at", "issues"."is_draft", "issues"."external_source", "issues"."external_id", "issues"."git_work_branch", "issues"."created_via", "issues"."agent_executor", "issues"."created_by_id", "issues"."updated_by_id", "issues"."project_id", "issues"."workspace_id", "issues"."parent_id", "issues"."state_id", "issues"."estimate_point_id", "issues"."type_id", "issues"."assigned_pod_id""#;
+pub const ISSUE_SELECT_COLS: &str = r#""issues"."id", "issues"."created_at", "issues"."updated_at", "issues"."deleted_at", "issues"."point", "issues"."name", "issues"."description_html", "issues"."description_binary", "issues"."priority", "issues"."complexity_score", "issues"."start_date", "issues"."target_date", "issues"."sequence_id", "issues"."sort_order", "issues"."completed_at", "issues"."archived_at", "issues"."is_draft", "issues"."external_source", "issues"."external_id", "issues"."git_work_branch", "issues"."created_via", "issues"."agent_executor", "issues"."work_type", "issues"."created_by_id", "issues"."updated_by_id", "issues"."project_id", "issues"."workspace_id", "issues"."parent_id", "issues"."state_id", "issues"."estimate_point_id", "issues"."type_id", "issues"."assigned_pod_id""#;
 
 /// The joined extras every read path selects: the URL parts and the state
 /// group (the completed-arm check on writes).
@@ -56,6 +56,7 @@ pub struct DecodedIssue {
     pub git_work_branch: String,
     pub created_via: Option<String>,
     pub agent_executor: Option<String>,
+    pub work_type: Option<String>,
     pub created_by: Option<String>,
     pub updated_by: Option<String>,
     pub project: String,
@@ -341,6 +342,7 @@ pub fn decode_issue(row: &sqlx::postgres::PgRow, tz: &Tz) -> Result<DecodedIssue
         git_work_branch: row_string(row, "git_work_branch")?,
         created_via: row_string_opt(row, "created_via")?,
         agent_executor: row_string_opt(row, "agent_executor")?,
+        work_type: row_string_opt(row, "work_type")?,
         created_by: row_uuid_opt(row, "created_by_id")?.map(|id| id.to_string()),
         updated_by: row_uuid_opt(row, "updated_by_id")?.map(|id| id.to_string()),
         project: row_uuid(row, "project_id")?.to_string(),
@@ -994,6 +996,7 @@ pub async fn render_decoded(
         git_work_branch: &decoded.git_work_branch,
         created_via: decoded.created_via.as_deref(),
         agent_executor: decoded.agent_executor.as_deref(),
+        work_type: decoded.work_type.as_deref(),
         created_by: decoded.created_by.as_deref(),
         updated_by: decoded.updated_by.as_deref(),
         project: &decoded.project,

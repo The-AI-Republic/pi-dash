@@ -1955,7 +1955,7 @@ mod tests {
                 .map(|column| format!("\"runner\".\"{column}\"")),
         );
         assert_eq!(entries, expected);
-        assert_eq!(agent_run::COLUMNS.len(), 41);
+        assert_eq!(agent_run::COLUMNS.len(), 42);
         assert_eq!(runner_cols::COLUMNS.len(), 32);
     }
 

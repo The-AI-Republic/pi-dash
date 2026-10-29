@@ -629,24 +629,25 @@ pub fn decode_run(row: &sqlx::postgres::PgRow, base: usize) -> Result<AgentRun, 
         trigger,
         prompt_manifest: row.try_get(base + 21)?,
         phase_kind: row.try_get(base + 22)?,
-        run_config: row.try_get(base + 23)?,
-        required_capabilities: row.try_get(base + 24)?,
-        thread_id: row.try_get(base + 25)?,
-        agent_metadata: row.try_get(base + 26)?,
-        lease_expires_at: row.try_get(base + 27)?,
-        done_payload: row.try_get(base + 28)?,
-        error: row.try_get(base + 29)?,
-        refusal_category: row.try_get(base + 30)?,
-        llm_model: row.try_get(base + 31)?,
-        usage: row.try_get(base + 32)?,
-        input_tokens: row.try_get(base + 33)?,
-        output_tokens: row.try_get(base + 34)?,
-        total_tokens: row.try_get(base + 35)?,
-        created_at: row.try_get(base + 36)?,
-        assigned_at: row.try_get(base + 37)?,
-        queue_position: row.try_get(base + 38)?,
-        started_at: row.try_get(base + 39)?,
-        ended_at: row.try_get(base + 40)?,
+        work_type: row.try_get(base + 23)?,
+        run_config: row.try_get(base + 24)?,
+        required_capabilities: row.try_get(base + 25)?,
+        thread_id: row.try_get(base + 26)?,
+        agent_metadata: row.try_get(base + 27)?,
+        lease_expires_at: row.try_get(base + 28)?,
+        done_payload: row.try_get(base + 29)?,
+        error: row.try_get(base + 30)?,
+        refusal_category: row.try_get(base + 31)?,
+        llm_model: row.try_get(base + 32)?,
+        usage: row.try_get(base + 33)?,
+        input_tokens: row.try_get(base + 34)?,
+        output_tokens: row.try_get(base + 35)?,
+        total_tokens: row.try_get(base + 36)?,
+        created_at: row.try_get(base + 37)?,
+        assigned_at: row.try_get(base + 38)?,
+        queue_position: row.try_get(base + 39)?,
+        started_at: row.try_get(base + 40)?,
+        ended_at: row.try_get(base + 41)?,
     })
 }
 
@@ -2282,7 +2283,7 @@ mod tests {
     fn run_select_list_covers_all_columns_once() {
         let list = run_select_list();
         assert_eq!(list.split(", ").count(), agent_run::COLUMNS.len());
-        assert_eq!(agent_run::COLUMNS.len(), 41);
+        assert_eq!(agent_run::COLUMNS.len(), 42);
         assert!(list.starts_with(r#""agent_run"."id""#));
         assert!(list.ends_with(r#""agent_run"."ended_at""#));
     }
@@ -2382,7 +2383,7 @@ mod tests {
         error_code TEXT, tool_plan JSONB,
         terminal_hooks_applied_at TIMESTAMPTZ,
         terminal_capacity_released_at TIMESTAMPTZ, prompt TEXT,
-        trigger TEXT, prompt_manifest JSONB, phase_kind TEXT,
+        trigger TEXT, prompt_manifest JSONB, phase_kind TEXT, work_type TEXT,
         run_config JSONB, required_capabilities JSONB, thread_id TEXT,
         agent_metadata JSONB, lease_expires_at TIMESTAMPTZ,
         done_payload JSONB, error TEXT, refusal_category TEXT,
@@ -2419,11 +2420,11 @@ mod tests {
             sqlx::query(
                 "INSERT INTO agent_run (id, workspace_id, created_by_id, pod_id,
                  status, executor_kind, dispatch_attempts, cancel_reason,
-                 error_code, tool_plan, prompt, trigger, phase_kind,
+                 error_code, tool_plan, prompt, trigger, phase_kind, work_type,
                  run_config, required_capabilities, thread_id, agent_metadata,
                  error, refusal_category, llm_model, usage, created_at)
                  VALUES ($1, $2, $3, $4, 'running', 'local_runner', 0, '', '',
-                 '{}', '', $5, 'work', '{}', '{}', 't', '{}', '', '', '', '{}',
+                 '{}', '', $5, 'work', '', '{}', '{}', 't', '{}', '', '', '', '{}',
                  now())",
             )
             .bind(id)

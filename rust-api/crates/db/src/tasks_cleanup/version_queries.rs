@@ -86,7 +86,7 @@ use uuid::Uuid;
 /// (`columns.json`: the trailing `assignees`/`labels` entries are
 /// `ManyToManyField`s with no physical column and are excluded, exactly as
 /// Django's own `SELECT` does).
-pub const ISSUE_COLUMNS: [&str; 34] = [
+pub const ISSUE_COLUMNS: [&str; 35] = [
     "created_at",
     "updated_at",
     "created_by_id",
@@ -121,6 +121,7 @@ pub const ISSUE_COLUMNS: [&str; 34] = [
     "created_via",
     "assigned_pod_id",
     "agent_executor",
+    "work_type",
 ];
 
 /// The nine `.only()` columns of the description backfill, in the order

@@ -2588,10 +2588,10 @@ mod tests {
                     "agent_ticking_enabled", "is_default",
                     "agent_review_default_interval_seconds",
                     "default_agent_executor",
-                    "agent_test_default_interval_seconds")
+                    "agent_test_default_interval_seconds", "default_work_type")
                    VALUES ($1,$1,$2,$3,'',0,$4,$5,true,true,true,true,true,
                            365,365,'{}',true,false,false,'UTC',true,'','',
-                           10800,10,true,false,10800,'local_runner',10800)"#,
+                           10800,10,true,false,10800,'local_runner',10800,'software')"#,
             )
             .bind(now)
             .bind(project_id)

@@ -521,6 +521,7 @@ mod tests {
             created_via: Set(None),
             assigned_pod_id: Set(None),
             agent_executor: Set(None),
+            work_type: Set(None),
         }
     }
 

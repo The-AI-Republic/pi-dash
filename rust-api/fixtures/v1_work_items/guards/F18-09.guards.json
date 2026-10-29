@@ -174,6 +174,7 @@
             "git_work_branch": "",
             "created_via": null,
             "agent_executor": null,
+            "work_type": null,
             "created_by": "79c81d76-5a93-4d3d-894d-5935576834b6",
             "updated_by": null,
             "project": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",

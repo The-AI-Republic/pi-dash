@@ -788,6 +788,7 @@ struct ParsedWrite {
     git_work_branch: Option<String>,
     created_via: Option<Option<String>>,
     agent_executor: Option<Option<String>>,
+    work_type: Option<Option<String>>,
     created_by: Option<Option<Uuid>>,
     parent: Option<Option<Uuid>>,
     state: Option<Option<Uuid>>,
@@ -1112,6 +1113,10 @@ async fn parse_issue_write(
         }
     };
 
+    // --- work_type (Char 32, allow_null+allow_blank; registry check in
+    // `validate`) ---
+    let work_type_shape = parse_optional_char(get("work_type"), Some(32));
+
     // --- created_by (PKRF User, allow_null) ---
     let created_by_shape = parse_optional_pk(get("created_by"), from_form);
 
@@ -1396,6 +1401,7 @@ async fn parse_issue_write(
     scalar_field!(branch_shape, "git_work_branch", parsed.git_work_branch);
     scalar_field!(via_shape, "created_via", parsed.created_via);
     scalar_field!(executor_shape, "agent_executor", parsed.agent_executor);
+    scalar_field!(work_type_shape, "work_type", parsed.work_type);
     // created_by
     match created_by_shape {
         FieldParse::Absent => {}
@@ -2743,18 +2749,28 @@ async fn run_write_validate(
                 Some(roundtripped) => html = roundtripped,
                 None => return Err(fail(ValidateError::InvalidHtml)),
             }
-            // Sanitizer substitute (`:232-238`): only truthy HTML
-            // validates, and the clean output always substitutes.
+        }
+        parsed.description_html = Some(html);
+    }
+
+    // Work type (PDASHOSS01-234): `""` normalizes to the inherit state; a
+    // truthy key must be registered. Runs between the lxml round-trip and
+    // the sanitizer, like Django.
+    parsed.work_type = shape::normalize_work_type(parsed.work_type.take()).map_err(fail)?;
+
+    // Sanitizer substitute (`:232-238`): only truthy HTML validates, and the
+    // clean output always substitutes.
+    if !from_markdown {
+        if let Some(html) = parsed.description_html.as_mut() {
             if !html.is_empty() {
-                match crate::space::sanitize::sanitize_html(&html) {
-                    crate::space::sanitize::Sanitize::Clean(clean) => html = clean,
+                match crate::space::sanitize::sanitize_html(html) {
+                    crate::space::sanitize::Sanitize::Clean(clean) => *html = clean,
                     crate::space::sanitize::Sanitize::Invalid => {
                         return Err(fail(ValidateError::HtmlContentInvalid));
                     }
                 }
             }
         }
-        parsed.description_html = Some(html);
     }
 
     // Assignee / label allow-lists (`:246-259`): falsy inputs (absent or
@@ -3233,6 +3249,7 @@ pub async fn create(
         created_via: parsed.created_via.clone().flatten(),
         assigned_pod_id: parsed.assigned_pod.flatten(),
         agent_executor: parsed.agent_executor.clone().flatten(),
+        work_type: parsed.work_type.clone().flatten(),
     };
     // The raw-data overrides resolve pre-save (pure), but their failures
     // surface post-commit in the chain leg, in port order — a bad override
@@ -3543,6 +3560,9 @@ pub async fn update(
     }
     if let Some(value) = parsed.agent_executor.clone() {
         fields.agent_executor = value;
+    }
+    if let Some(value) = parsed.work_type.clone() {
+        fields.work_type = value;
     }
     if let Some(value) = parsed.created_by {
         fields.created_by_id = value;
@@ -3939,6 +3959,7 @@ async fn render_moved_issue_api(
         git_work_branch: &issue.git_work_branch,
         created_via: issue.created_via.as_deref(),
         agent_executor: issue.agent_executor.as_deref(),
+        work_type: issue.work_type.as_deref(),
         created_by: created_by.as_deref(),
         updated_by: updated_by.as_deref(),
         project: &project,

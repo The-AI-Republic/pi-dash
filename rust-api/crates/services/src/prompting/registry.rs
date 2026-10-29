@@ -15,6 +15,13 @@
 //! * `registry.py:150-161` (`_load_registry`), `166` (`REGISTRY`),
 //!   `169-178` (`get_section`, `all_sections`).
 //!
+//! * Work-type sections (PDASHOSS01-234): `prompting/work_types/<key>/<slot>.md`
+//!   are mirrored under `src/prompting/work_types/` and loaded as ordinary
+//!   registry sections with namespaced keys (`software.execute`), so
+//!   overrides, tiers, validation and the manifest treat them like core
+//!   sections. The `work_type.md` metadata file in each folder is *not* a
+//!   section; [`super::work_types`] parses it.
+//!
 //! Fail-loud like Python's import-time `REGISTRY = _load_registry()`: a
 //! malformed mirror panics on first registry access with the same message
 //! Python would raise at import.
@@ -111,6 +118,18 @@ pub fn parse_front_matter<'a>(
     file_name: &str,
     text: &'a str,
 ) -> Result<PromptSection<'a>, PromptRegistryError> {
+    parse_front_matter_with_key(file_name, text, None)
+}
+
+/// [`parse_front_matter`] with Python's `expected_key` argument:
+/// `Some(key)` replaces the filename-stem check — work-type sections carry
+/// namespaced keys (`software.execute`) that cannot equal the stem of
+/// `work_types/software/execute.md`.
+pub fn parse_front_matter_with_key<'a>(
+    file_name: &str,
+    text: &'a str,
+    expected_key: Option<&str>,
+) -> Result<PromptSection<'a>, PromptRegistryError> {
     if !text.starts_with("---") {
         return Err(PromptRegistryError::new(format!(
             "section '{file_name}' is missing the leading '---' front-matter block"
@@ -165,7 +184,14 @@ pub fn parse_front_matter<'a>(
     }
     let key = meta["key"];
     let stem = file_name.strip_suffix(".md").unwrap_or(file_name);
-    if stem != key {
+    if let Some(expected_key) = expected_key {
+        if key != expected_key {
+            return Err(PromptRegistryError::new(format!(
+                "section file '{file_name}' must carry key='{expected_key}' \
+                 (its folder + filename), got key='{key}'"
+            )));
+        }
+    } else if stem != key {
         return Err(PromptRegistryError::new(format!(
             "section file '{file_name}' does not match its front-matter key='{key}' \
              (filename stem must equal the key)"
@@ -262,7 +288,6 @@ const SECTION_FILES: &[(&str, &str)] = &[
         "relationships.md",
         include_str!("sections/relationships.md"),
     ),
-    ("repo-context.md", include_str!("sections/repo-context.md")),
     ("review-cycle.md", include_str!("sections/review-cycle.md")),
     ("review-intro.md", include_str!("sections/review-intro.md")),
     (
@@ -305,6 +330,62 @@ const SECTION_FILES: &[(&str, &str)] = &[
     ),
 ];
 
+/// Filename reserved for work-type metadata inside a work-type folder
+/// (`registry.py` `WORK_TYPE_META_FILENAME`).
+pub const WORK_TYPE_META_FILENAME: &str = "work_type.md";
+
+/// Embedded work-type folders: `(work_type_key, file_name, file_bytes)` for
+/// every `work_types/<key>/*.md`, sorted by folder then filename (the load
+/// order of `_load_registry`). Includes each folder's `work_type.md`
+/// metadata file, which the registry skips and [`super::work_types`] parses.
+pub(crate) const WORK_TYPE_FILES: &[(&str, &str, &str)] = &[
+    (
+        "general",
+        "execute.md",
+        include_str!("work_types/general/execute.md"),
+    ),
+    (
+        "general",
+        "review.md",
+        include_str!("work_types/general/review.md"),
+    ),
+    (
+        "general",
+        "test.md",
+        include_str!("work_types/general/test.md"),
+    ),
+    (
+        "general",
+        "work_type.md",
+        include_str!("work_types/general/work_type.md"),
+    ),
+    (
+        "software",
+        "context.md",
+        include_str!("work_types/software/context.md"),
+    ),
+    (
+        "software",
+        "execute.md",
+        include_str!("work_types/software/execute.md"),
+    ),
+    (
+        "software",
+        "review.md",
+        include_str!("work_types/software/review.md"),
+    ),
+    (
+        "software",
+        "test.md",
+        include_str!("work_types/software/test.md"),
+    ),
+    (
+        "software",
+        "work_type.md",
+        include_str!("work_types/software/work_type.md"),
+    ),
+];
+
 /// The loaded registry, parsed once (`registry.py:166`). `BTreeMap` keeps
 /// key-sorted order for [`all_sections`].
 static REGISTRY: LazyLock<BTreeMap<&'static str, PromptSection<'static>>> = LazyLock::new(|| {
@@ -323,6 +404,28 @@ static REGISTRY: LazyLock<BTreeMap<&'static str, PromptSection<'static>>> = Lazy
     }
     if registry.is_empty() {
         panic!("prompt registry is malformed: no sections found");
+    }
+    // Work-type sections: work_types/<key>/<slot>.md → section key
+    // "<key>.<slot>". Slot-name and metadata validation is work_types.rs's
+    // job; here they are just sections with enforced namespaced keys (the
+    // key itself still borrows the embedded front-matter).
+    for (work_type, file_name, text) in WORK_TYPE_FILES {
+        if *file_name == WORK_TYPE_META_FILENAME {
+            continue;
+        }
+        let stem = file_name.strip_suffix(".md").unwrap_or(file_name);
+        let expected_key = format!("{work_type}.{stem}");
+        let section = parse_front_matter_with_key(file_name, text, Some(&expected_key))
+            .unwrap_or_else(|err| {
+                panic!("prompt registry is malformed: {}", err.message());
+            });
+        if registry.contains_key(section.key) {
+            panic!(
+                "prompt registry is malformed: duplicate section key: '{}'",
+                section.key
+            );
+        }
+        registry.insert(section.key, section);
     }
     registry
 });

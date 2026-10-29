@@ -211,6 +211,7 @@ pub const CREATE_META_FIELDS: &[&str] = &[
     "repo_url",
     "base_branch",
     "default_agent_executor",
+    "default_work_type",
 ];
 
 /// `ProjectCreateSerializer.Meta.read_only_fields` (`:129-137`).
@@ -350,6 +351,8 @@ pub enum ProjectSerError {
     CloudAgentUnavailable,
     /// `managed_runner` while disabled: serializer 400.
     ManagedRunnerDisabled,
+    /// `default_work_type` is not a registered work type: serializer 400.
+    UnknownWorkType,
     /// Name holds a forbidden character.
     NameForbidden,
     /// Identifier holds a forbidden character.
@@ -398,6 +401,7 @@ impl ProjectSerError {
         match self {
             ProjectSerError::CloudAgentUnavailable => CLOUD_AGENT_UNAVAILABLE_BODY,
             ProjectSerError::ManagedRunnerDisabled => MANAGED_RUNNER_DISABLED_BODY,
+            ProjectSerError::UnknownWorkType => UNKNOWN_DEFAULT_WORK_TYPE_BODY.as_str(),
             ProjectSerError::NameForbidden => NAME_FORBIDDEN_BODY,
             ProjectSerError::IdentifierForbidden => IDENTIFIER_FORBIDDEN_BODY,
             ProjectSerError::ProjectLeadNotMember => PROJECT_LEAD_NOT_MEMBER_BODY,
@@ -472,6 +476,8 @@ pub fn check_description_html(
 pub struct SharedChecks<'a> {
     /// Raw `default_agent_executor` input.
     pub executor: Option<&'a str>,
+    /// Raw `default_work_type` input (`_validate_default_work_type`).
+    pub work_type: Option<&'a str>,
     /// `cloud_agent_is_configured()`.
     pub cloud_configured: bool,
     /// `managed_runner_is_enabled()`.
@@ -485,6 +491,28 @@ pub struct SharedChecks<'a> {
     /// `WorkspaceMember` row for `default_assignee`, when supplied.
     pub default_assignee_is_member: Option<bool>,
 }
+
+/// Ports `_validate_default_work_type(data)` (PDASHOSS01-234): a truthy
+/// value must name a registered work type; blank passes (`Project.save`
+/// resolves it on create).
+pub fn check_default_work_type(work_type: Option<&str>) -> Result<(), ProjectSerError> {
+    match work_type {
+        Some(wt) if !wt.is_empty() && !crate::prompting::work_types::is_known(wt) => {
+            Err(ProjectSerError::UnknownWorkType)
+        }
+        _ => Ok(()),
+    }
+}
+
+/// `{"default_work_type": ["unknown work type; expected one of [...]"]}`:
+/// the dict `ValidationError` raised in `validate()`, list-wrapped by DRF.
+static UNKNOWN_DEFAULT_WORK_TYPE_BODY: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| {
+        serde_json::json!({
+            "default_work_type": [crate::prompting::work_types::unknown_work_type_message()]
+        })
+        .to_string()
+    });
 
 /// Name/identifier forbidden-character checks, in source order
 /// (`serializers/project.py:144-148,218-222,288-292`).
@@ -517,6 +545,7 @@ pub fn validate_shared(input: &SharedChecks<'_>) -> Result<(), ProjectSerError> 
         input.cloud_configured,
         input.managed_enabled,
     ))?;
+    check_default_work_type(input.work_type)?;
     check_name_identifier(input)?;
     check_membership(input)?;
     Ok(())
@@ -596,6 +625,7 @@ pub fn validate_read(
         shared.cloud_configured,
         shared.managed_enabled,
     ))?;
+    check_default_work_type(shared.work_type)?;
     check_name_identifier(shared)?;
     if instance_is_default == Some(true) && is_default == Some(false) {
         return Err(ProjectSerError::UnsetDefault);
@@ -636,6 +666,7 @@ mod tests {
     fn quiet_shared() -> SharedChecks<'static> {
         SharedChecks {
             executor: None,
+            work_type: None,
             cloud_configured: false,
             managed_enabled: false,
             name: None,
@@ -1053,10 +1084,38 @@ mod tests {
     }
 
     #[test]
+    fn default_work_type_check_follows_registry() {
+        assert_eq!(check_default_work_type(None), Ok(()));
+        assert_eq!(check_default_work_type(Some("")), Ok(()));
+        assert_eq!(check_default_work_type(Some("general")), Ok(()));
+        assert_eq!(check_default_work_type(Some("software")), Ok(()));
+        let err = check_default_work_type(Some("bogus")).unwrap_err();
+        assert_eq!(err.status(), 400);
+        assert_eq!(
+            err.body(),
+            r#"{"default_work_type":["unknown work type; expected one of ['general', 'software']"]}"#
+        );
+        // Executor check runs first, then the work type, then the name.
+        let mut shared = quiet_shared();
+        shared.work_type = Some("bogus");
+        shared.name = Some("a&b");
+        assert_eq!(
+            validate_shared(&shared),
+            Err(ProjectSerError::UnknownWorkType)
+        );
+        shared.executor = Some("managed_runner");
+        assert_eq!(
+            validate_shared(&shared),
+            Err(ProjectSerError::ManagedRunnerDisabled)
+        );
+    }
+
+    #[test]
     fn shape_consts_match_python_source() {
-        assert_eq!(CREATE_META_FIELDS.len(), 26);
+        assert_eq!(CREATE_META_FIELDS.len(), 27);
         assert_eq!(CREATE_META_FIELDS[0], "name");
         assert_eq!(CREATE_META_FIELDS[25], "default_agent_executor");
+        assert_eq!(CREATE_META_FIELDS[26], "default_work_type");
         assert!(CREATE_META_FIELDS.contains(&"identifier"));
         assert_eq!(
             CREATE_META_READ_ONLY_FIELDS,

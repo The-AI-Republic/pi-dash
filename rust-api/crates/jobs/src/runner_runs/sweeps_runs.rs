@@ -1543,7 +1543,7 @@ mod tests {
              \"agent_run\".\"terminal_hooks_applied_at\", \
              \"agent_run\".\"terminal_capacity_released_at\", \"agent_run\".\"prompt\", \
              \"agent_run\".\"trigger\", \"agent_run\".\"prompt_manifest\", \"agent_run\".\"phase_kind\", \
-             \"agent_run\".\"run_config\", \"agent_run\".\"required_capabilities\", \
+             \"agent_run\".\"work_type\", \"agent_run\".\"run_config\", \"agent_run\".\"required_capabilities\", \
              \"agent_run\".\"thread_id\", \"agent_run\".\"agent_metadata\", \
              \"agent_run\".\"lease_expires_at\", \"agent_run\".\"done_payload\", \"agent_run\".\"error\", \
              \"agent_run\".\"refusal_category\", \"agent_run\".\"llm_model\", \"agent_run\".\"usage\", \

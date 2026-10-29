@@ -63,7 +63,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use serde::Serialize;
 
-use super::{recipes, registry, renderer};
+use super::{recipes, registry, renderer, work_types};
 
 /// Manifest/source label for a registry-default section body
 /// (`composer.py:32`).
@@ -403,6 +403,22 @@ fn attributed_detail(
     detail.to_owned()
 }
 
+/// The recipe for `kind` on `executor_kind` with its slots filled for
+/// `work_type` (`work_types.expand(recipes.recipe_for(...), work_type or
+/// DEFAULT_WORK_TYPE)`).
+fn expanded_recipe(
+    kind: &str,
+    executor_kind: Option<&str>,
+    work_type: Option<&str>,
+) -> Result<Vec<&'static str>, PromptComposeError> {
+    let recipe = recipes::recipe_for(kind, executor_kind)
+        .map_err(|e| PromptComposeError::new(e.message()))?;
+    let work_type = work_type
+        .filter(|key| !key.is_empty())
+        .unwrap_or(work_types::DEFAULT_WORK_TYPE);
+    work_types::expand(recipe, work_type).map_err(|e| PromptComposeError::new(e.message()))
+}
+
 /// Resolve, assemble, and render the recipe for `kind`
 /// (`composer.py:286-321`). Raises [`PromptComposeError`] (attributed to
 /// the failing section) when rendering fails.
@@ -413,10 +429,14 @@ fn attributed_detail(
 /// draft_overrides:`). A draft keeps its resolved version and is labeled
 /// [`SOURCE_DRAFT`].
 ///
-/// Unknown kinds / sections surface message-preserving
+/// `work_type` fills the recipe's slots ([`work_types::expand`]); `None`
+/// means the default work type.
+///
+/// Unknown kinds / sections / work types surface message-preserving
 /// [`PromptComposeError`]s (Python propagates `RecipeNotFound` /
-/// `PromptRegistryError` as-is; there are no typed catchers yet, so the
-/// message is the contract).
+/// `PromptRegistryError` / `WorkTypeError` as-is; there are no typed
+/// catchers yet, so the message is the contract).
+#[allow(clippy::too_many_arguments)]
 pub fn compose(
     kind: &str,
     workspace_id: Option<&str>,
@@ -425,9 +445,9 @@ pub fn compose(
     context: &serde_json::Value,
     draft_overrides: Option<&HashMap<String, String>>,
     executor_kind: Option<&str>,
+    work_type: Option<&str>,
 ) -> Result<ComposedPrompt, PromptComposeError> {
-    let recipe = recipes::recipe_for(kind, executor_kind)
-        .map_err(|e| PromptComposeError::new(e.message()))?;
+    let recipe = expanded_recipe(kind, executor_kind, work_type)?;
     let mut resolved = Vec::with_capacity(recipe.len());
     for key in recipe {
         resolved.push(
@@ -508,9 +528,9 @@ pub fn compile_template(
     workspace_id: Option<&str>,
     user_id: Option<&str>,
     index: &OverrideIndex,
+    work_type: Option<&str>,
 ) -> Result<ComposedPrompt, PromptComposeError> {
-    let recipe =
-        recipes::recipe_for(kind, None).map_err(|e| PromptComposeError::new(e.message()))?;
+    let recipe = expanded_recipe(kind, None, work_type)?;
     let mut resolved = Vec::with_capacity(recipe.len());
     for key in recipe {
         resolved.push(
@@ -855,6 +875,7 @@ mod tests {
             &populated_issue_context(),
             None,
             None,
+            None,
         )
         .expect("defaults compose");
         assert_eq!(
@@ -901,6 +922,7 @@ mod tests {
             &populated_issue_context(),
             Some(&drafts),
             None,
+            None,
         )
         .expect("draft composes");
         assert!(composed.text.contains("Hello sample-ws!"));
@@ -919,6 +941,7 @@ mod tests {
             &index,
             &populated_issue_context(),
             Some(&HashMap::new()),
+            None,
             None,
         )
         .expect("empty drafts compose");
@@ -940,6 +963,7 @@ mod tests {
             &index,
             &populated_issue_context(),
             Some(&drafts),
+            None,
             None,
         )
         .expect_err("bad draft fails");
@@ -982,6 +1006,7 @@ mod tests {
             Some(WORKSPACE_ID),
             Some(USER_ID),
             &index,
+            None,
         )
         .expect("compiles");
         assert!(compiled.text.contains("{{"));
@@ -1017,6 +1042,7 @@ mod tests {
             &populated_issue_context(),
             None,
             None,
+            None,
         )
         .expect_err("unknown kind fails");
         assert_eq!(err.message(), "no recipe for kind 'nope'");
@@ -1037,9 +1063,18 @@ mod tests {
             .into_iter()
             .next()
             .expect("populated sample first");
-        compose(kind, None, None, &OverrideIndex::new(), &ctx, None, None)
-            .unwrap_or_else(|err| panic!("{kind} composes: {}", err.message()))
-            .text
+        compose(
+            kind,
+            None,
+            None,
+            &OverrideIndex::new(),
+            &ctx,
+            None,
+            None,
+            None,
+        )
+        .unwrap_or_else(|err| panic!("{kind} composes: {}", err.message()))
+        .text
     }
 
     // Ticking semantics: outcomes are informational; only --stop-ticking
@@ -1108,7 +1143,7 @@ mod tests {
     #[test]
     fn review_kind_splits_external_wait_from_human_wait() {
         let body = composed_text(recipes::KIND_REVIEW);
-        assert!(body.contains("**waiting on CI or the PR**"));
+        assert!(body.contains("**waiting on an external process**"));
         assert!(body.contains("**keep the clock ticking**"));
         assert!(body.contains("`waiting_on_human --stop-ticking`"));
         assert!(body.contains("`done --stop-ticking`"));
@@ -1119,9 +1154,9 @@ mod tests {
     fn test_kind_pass_stops_clock_explicitly_or_moves_on() {
         let body = composed_text(recipes::KIND_TEST);
         assert!(body.contains("`done --stop-ticking`"));
-        assert!(body.contains("explicitly lets agents merge and close"));
+        assert!(body.contains("explicitly lets agents accept and close"));
         assert!(!body.contains("--state \"Done\""));
-        assert!(body.contains("**nothing changed, waiting on CI or a dependency**"));
+        assert!(body.contains("**nothing changed, waiting on an external process**"));
         assert!(body.contains("**nothing changed, waiting on a human**"));
         assert!(body.contains("`waiting_on_external`"));
     }

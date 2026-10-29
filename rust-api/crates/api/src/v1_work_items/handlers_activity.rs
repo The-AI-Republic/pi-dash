@@ -838,6 +838,7 @@ const SPAN_MODELS: &[SpanModel] = &[
             "created_at",
             "cycle_view",
             "default_agent_executor",
+            "default_work_type",
             "deleted_at",
             "description",
             "description_html",
@@ -929,6 +930,7 @@ const SPAN_MODELS: &[SpanModel] = &[
             "start_date",
             "target_date",
             "updated_at",
+            "work_type",
             "workpad",
         ],
         fks: &[
@@ -2243,6 +2245,7 @@ async fn expand_issue(
         .map_err(|_| Denial::ServerError)?;
     let created_via = row_string_opt(&row, "created_via")?;
     let agent_executor = row_string_opt(&row, "agent_executor")?;
+    let work_type = row_string_opt(&row, "work_type")?;
     let created_by = row_uuid_opt(&row, "created_by_id")?.map(|id| id.to_string());
     let updated_by = row_uuid_opt(&row, "updated_by_id")?.map(|id| id.to_string());
     let project = row_uuid_opt(&row, "project_id")?.map(|id| id.to_string());
@@ -2302,6 +2305,7 @@ async fn expand_issue(
         git_work_branch: git_work_branch.as_deref().unwrap_or(""),
         created_via: created_via.as_deref(),
         agent_executor: agent_executor.as_deref(),
+        work_type: work_type.as_deref(),
         created_by: created_by.as_deref(),
         updated_by: updated_by.as_deref(),
         project: project.as_deref().unwrap_or(""),

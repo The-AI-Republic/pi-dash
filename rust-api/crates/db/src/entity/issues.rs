@@ -46,6 +46,7 @@ pub struct Model {
     pub created_via: Option<String>,
     pub agent_executor: Option<String>,
     pub complexity_score: i32,
+    pub work_type: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

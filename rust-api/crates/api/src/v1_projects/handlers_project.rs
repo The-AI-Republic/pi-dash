@@ -128,6 +128,9 @@ pub enum Denial {
     FieldErrors(String),
     /// 404, view-inline `{"error": ...}` with a custom message.
     NotFoundError(String),
+    /// 403, view-inline `{"error": ...}` (the agent-run
+    /// `default_work_type` lock).
+    ForbiddenError(String),
     /// 409, `{"name": ...}` / `{"identifier": ...}` (pre-rendered bytes).
     Conflict(String),
     /// 500, generic branch.
@@ -166,6 +169,10 @@ impl Denial {
             }
             Denial::NotFoundError(message) => (
                 StatusCode::NOT_FOUND,
+                format!("{{\"error\":{}}}", json_string(message)),
+            ),
+            Denial::ForbiddenError(message) => (
+                StatusCode::FORBIDDEN,
                 format!("{{\"error\":{}}}", json_string(message)),
             ),
             Denial::ServerError => (
@@ -657,6 +664,7 @@ const READ_FIELD_ORDER: &[&str] = &[
     "agent_test_default_interval_seconds",
     "agent_ticking_enabled",
     "default_agent_executor",
+    "default_work_type",
     "created_by",
     "updated_by",
     "workspace",
@@ -975,6 +983,11 @@ pub async fn render_project(
     );
     put(
         &mut map,
+        "default_work_type",
+        Value::String(row_string(row, "default_work_type")?),
+    );
+    put(
+        &mut map,
         "created_by",
         render_uuid_opt(&row_uuid_opt(row, "created_by_id")?),
     );
@@ -1258,6 +1271,7 @@ const PROJECT_LIST_FIELDS: &[&str] = &[
     "repo_url",
     "base_branch",
     "default_agent_executor",
+    "default_work_type",
     "default_state",
     "estimate",
 ];
@@ -1622,6 +1636,7 @@ pub const CREATE_FIELD_ORDER: &[&str] = &[
     "repo_url",
     "base_branch",
     "default_agent_executor",
+    "default_work_type",
 ];
 
 /// `ProjectUpdateSerializer` extra writable fields
@@ -1696,6 +1711,9 @@ async fn coerce_field(
             value,
             &["local_runner", "cloud_agent", "managed_runner"],
         )?),
+        // `CharField(max_length=32, blank=True)`; the registry check is
+        // `validate()`'s `_validate_default_work_type` (PDASHOSS01-234).
+        "default_work_type" => FieldValue::Str(coerce_char(value, true, Some(32))?),
         _ => return Ok(None),
     }))
 }
@@ -2634,6 +2652,7 @@ pub async fn create_project_inner(
     let name = field_str(&data, "name");
     let identifier_raw = field_str(&data, "identifier");
     let executor = field_str(&data, "default_agent_executor");
+    let work_type = field_str(&data, "default_work_type");
     let lead = field_fk(&data, "project_lead").unwrap_or(None);
     let assignee = field_fk(&data, "default_assignee").unwrap_or(None);
     let lead_member = match lead {
@@ -2646,6 +2665,7 @@ pub async fn create_project_inner(
     };
     let shared = ser::SharedChecks {
         executor: executor.as_deref(),
+        work_type: work_type.as_deref(),
         cloud_configured: state.settings().cloud_agent.enabled,
         managed_enabled: state.settings().managed_runner.enabled,
         name: name.as_deref(),
@@ -2687,6 +2707,14 @@ pub async fn create_project_inner(
             "local_runner".to_owned()
         }
     };
+    // `Project.save()` on create: a blank `default_work_type` resolves from
+    // the repo binding (`db/models/project.py`, PDASHOSS01-234).
+    let repo_url = field_str(&data, "repo_url").unwrap_or_default();
+    let default_work_type = match work_type.as_deref() {
+        Some(wt) if !wt.is_empty() => wt.to_owned(),
+        _ => pidash_services::prompting::work_types::default_for_new_project(Some(&repo_url))
+            .to_owned(),
+    };
     // `save()` auto-default (`db/models/project.py:261-270`): the first
     // project of a workspace becomes default.
     let has_default: bool = sqlx::query_scalar(
@@ -2707,7 +2735,6 @@ pub async fn create_project_inner(
     let v1_cover = field_opt_str(&data, "cover_image").unwrap_or(None);
     let v1_ext_source = field_opt_str(&data, "external_source").unwrap_or(None);
     let v1_ext_id = field_opt_str(&data, "external_id").unwrap_or(None);
-    let v1_repo = field_str(&data, "repo_url").unwrap_or_default();
     let v1_branch = field_str(&data, "base_branch").unwrap_or_else(|| "main".to_owned());
     let project_id = pidash_services::domain::projects::create(
         &pre.pool,
@@ -2745,7 +2772,7 @@ pub async fn create_project_inner(
             timezone: &timezone,
             external_source: v1_ext_source.as_deref(),
             external_id: v1_ext_id.as_deref(),
-            repo_url: &v1_repo,
+            repo_url: &repo_url,
             base_branch: &v1_branch,
             agent_interval: 10800,
             agent_max_ticks: 10,
@@ -2754,6 +2781,7 @@ pub async fn create_project_inner(
             agent_ticking: true,
             default_executor: &default_executor,
             members_can_edit_states: field_bool(&data, "members_can_edit_states").unwrap_or(true),
+            default_work_type: &default_work_type,
             created_by: pre.actor.id,
             created_at: now,
             updated_at: now,
@@ -2963,6 +2991,58 @@ pub async fn retrieve_project_inner(
     Ok(json_ok(text))
 }
 
+/// `RUN_ID_HEADER` (`api/views/issue.py`): the agent run-id header.
+pub const RUN_ID_HEADER: &str = "X-Pi-Dash-Run-Id";
+/// 403 message of the agent-run `default_work_type` lock
+/// (`views/project.py` patch, PDASHOSS01-234).
+pub const DEFAULT_WORK_TYPE_LOCKED_MESSAGE: &str =
+    "default_work_type is locked for agent runs; only a human can change it";
+
+/// Python truthiness of a JSON value (`x or ""`).
+fn json_truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(b) => *b,
+        Value::Number(n) => n.as_f64().is_some_and(|f| f != 0.0),
+        Value::String(s) => !s.is_empty(),
+        Value::Array(a) => !a.is_empty(),
+        Value::Object(o) => !o.is_empty(),
+    }
+}
+
+/// Ports the patch view's lock: a non-blank `X-Pi-Dash-Run-Id` header plus
+/// a `default_work_type` key whose `request.data.get(...) or ""` differs
+/// from the stored value. A form body's `QueryDict.get` reads the last raw
+/// value; any truthy non-string never equals the stored string.
+fn default_work_type_locked(
+    headers: &HeaderMap,
+    input: &serde_json::Map<String, Value>,
+    from_form: bool,
+    stored: &str,
+) -> bool {
+    let run_id = headers
+        .get(RUN_ID_HEADER)
+        .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned())
+        .unwrap_or_default();
+    if run_id.trim().is_empty() {
+        return false;
+    }
+    let Some(raw) = input.get("default_work_type") else {
+        return false;
+    };
+    let value = match raw {
+        Value::Array(items) if from_form => items.last().cloned().unwrap_or(Value::Null),
+        other => other.clone(),
+    };
+    if !json_truthy(&value) {
+        return !stored.is_empty();
+    }
+    match value {
+        Value::String(s) => s != stored,
+        _ => true,
+    }
+}
+
 /// `PATCH workspaces/<slug>/projects/<pk>/` (`views/project.py:403-467`).
 pub async fn patch_project_inner(
     state: &AppState,
@@ -3044,11 +3124,23 @@ pub async fn patch_project_inner(
             "Archived project cannot be updated".to_owned(),
         ));
     }
+    // Agent-run lock on the project's default work type
+    // (`views/project.py` patch, PDASHOSS01-234): after the archived guard,
+    // before the serializer.
+    let stored_work_type: String = plain
+        .try_get("default_work_type")
+        .map_err(|_| Denial::ServerError)?;
+    if default_work_type_locked(headers, &input, from_form, &stored_work_type) {
+        return Err(Denial::ForbiddenError(
+            DEFAULT_WORK_TYPE_LOCKED_MESSAGE.to_owned(),
+        ));
+    }
     let data = coerce_write(&pre.pool, &merged, true, true).await?;
     // Inherited `validate()` first (`ProjectCreateSerializer.validate`).
     let name = field_str(&data, "name");
     let identifier_raw = field_str(&data, "identifier");
     let executor = field_str(&data, "default_agent_executor");
+    let work_type = field_str(&data, "default_work_type");
     let lead = field_fk(&data, "project_lead").unwrap_or(None);
     let assignee = field_fk(&data, "default_assignee").unwrap_or(None);
     let lead_member = match lead {
@@ -3061,6 +3153,7 @@ pub async fn patch_project_inner(
     };
     let shared = ser::SharedChecks {
         executor: executor.as_deref(),
+        work_type: work_type.as_deref(),
         cloud_configured: state.settings().cloud_agent.enabled,
         managed_enabled: state.settings().managed_runner.enabled,
         name: name.as_deref(),
@@ -3313,6 +3406,9 @@ pub async fn apply_project_update(
     }
     if let Some(v) = field_str(data, "default_agent_executor") {
         push_str(&mut sets, &mut binds, "default_agent_executor", v);
+    }
+    if let Some(v) = field_str(data, "default_work_type") {
+        push_str(&mut sets, &mut binds, "default_work_type", v);
     }
     // New `is_default` value (or the stored one when untouched).
     let new_default: bool = field_bool(data, "is_default").unwrap_or(was_default);

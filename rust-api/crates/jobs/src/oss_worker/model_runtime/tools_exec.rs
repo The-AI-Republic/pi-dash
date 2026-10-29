@@ -1320,6 +1320,7 @@ async fn op_create_project_issue(
         created_via: Some("cloud_agent".to_owned()),
         assigned_pod_id: None,
         agent_executor: None,
+        work_type: None,
     };
     // Inert: the fire is skipped (the caller drives it post-commit).
     let fire = domain_issues::FireSpec {

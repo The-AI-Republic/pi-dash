@@ -66,7 +66,7 @@ const ISSUE_EXPAND_ATTRS: &[&str] = &[
     "issue_link",
 ];
 
-/// `IssueSerializer.Meta.fields` (`issue.py:1063-1092`): 29 names. The flat
+/// `IssueSerializer.Meta.fields` (`issue.py:1063-1093`): 30 names. The flat
 /// branch's serializer declares all of them even though seven annotation-backed
 /// ones `SkipField` out of the body; `expand in self.fields` still sees them, so
 /// a declared-field clobber can add a key the base body omitted.
@@ -87,6 +87,7 @@ pub const FLAT_EXPAND_FIELDS: &[&str] = &[
     "cycle_id",
     "assigned_pod_id",
     "agent_executor",
+    "work_type",
     "module_ids",
     "label_ids",
     "assignee_ids",
@@ -121,6 +122,7 @@ pub const DETAIL_EXPAND_FIELDS: &[&str] = &[
     "cycle_id",
     "assigned_pod_id",
     "agent_executor",
+    "work_type",
     "module_ids",
     "label_ids",
     "assignee_ids",

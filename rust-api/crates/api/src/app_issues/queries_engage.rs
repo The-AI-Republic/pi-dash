@@ -187,7 +187,7 @@ pub const TICKER_COLUMNS: &str = "issue_agent_ticker.created_at, issue_agent_tic
     issue_agent_ticker.pending_entry_free, issue_agent_ticker.pending_entry_actor_id, \
     issue_agent_ticker.pending_entry_trigger, issue_agent_ticker.resume_parent_run_id";
 
-/// All 34 concrete `issues` columns under the `parent` self-join alias
+/// All 35 concrete `issues` columns under the `parent` self-join alias
 /// (identifier-full `select_related("parent")`; Django renders `T4`).
 pub const PARENT_ISSUE_COLUMNS: &str = "parent.created_at, parent.updated_at, \
     parent.created_by_id, parent.updated_by_id, parent.deleted_at, parent.id, \
@@ -197,7 +197,8 @@ pub const PARENT_ISSUE_COLUMNS: &str = "parent.created_at, parent.updated_at, \
     parent.complexity_score, parent.start_date, parent.target_date, parent.sequence_id, \
     parent.sort_order, parent.completed_at, parent.archived_at, parent.is_draft, \
     parent.external_source, parent.external_id, parent.type_id, parent.git_work_branch, \
-    parent.workpad, parent.created_via, parent.assigned_pod_id, parent.agent_executor";
+    parent.workpad, parent.created_via, parent.assigned_pod_id, parent.agent_executor, \
+    parent.work_type";
 
 /// Identifier-lite `.only()` select list in Django's RENDER order: `.only()`
 /// honors model field order, not the call order. `external_source` rides

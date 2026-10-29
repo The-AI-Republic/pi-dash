@@ -353,6 +353,7 @@ fn map_source_row(row: &QueryResult) -> Result<SourceIssueRow, StoreError> {
         git_work_branch: row.try_get("", "git_work_branch").map_err(store_error)?,
         created_via: row.try_get("", "created_via").map_err(store_error)?,
         agent_executor: row.try_get("", "agent_executor").map_err(store_error)?,
+        work_type: row.try_get("", "work_type").map_err(store_error)?,
         created_by_id: row.try_get("", "created_by_id").map_err(store_error)?,
         updated_by_id: row.try_get("", "updated_by_id").map_err(store_error)?,
     })

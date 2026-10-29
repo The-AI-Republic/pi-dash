@@ -151,10 +151,10 @@ def seed_project(cur, ws_id: uuid.UUID, identifier: str) -> uuid.UUID:
             repo_url, base_branch, agent_default_interval_seconds,
             agent_default_max_ticks, agent_ticking_enabled, is_default,
             agent_review_default_interval_seconds, default_agent_executor,
-            agent_test_default_interval_seconds, created_at, updated_at)
+            agent_test_default_interval_seconds, created_at, updated_at, default_work_type)
             VALUES (%s, %s, '', 2, %s, %s, false, false, false, true,
             false, 0, 0, '{}', false, false, false, 'UTC', true, '', 'main',
-            10800, 10, true, false, 10800, 'local_runner', 10800, %s, %s)""",
+            10800, 10, true, false, 10800, 'local_runner', 10800, %s, %s, 'software')""",
         (pr_id, f"P-{identifier}", identifier, ws_id, OLD1, OLD1),
     )
     return pr_id

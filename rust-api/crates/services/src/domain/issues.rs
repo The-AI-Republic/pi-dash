@@ -196,6 +196,9 @@ pub struct IssueFieldSet {
     pub created_via: Option<String>,
     pub assigned_pod_id: Option<Uuid>,
     pub agent_executor: Option<String>,
+    /// `Issue.work_type` (PDASHOSS01-234): the per-issue work-type
+    /// override; NULL inherits the project default.
+    pub work_type: Option<String>,
 }
 
 impl IssueFieldSet {
@@ -239,6 +242,7 @@ impl IssueFieldSet {
             created_via: Set(self.created_via),
             assigned_pod_id: Set(self.assigned_pod_id),
             agent_executor: Set(self.agent_executor),
+            work_type: Set(self.work_type),
         }
     }
 
@@ -282,6 +286,7 @@ impl IssueFieldSet {
             created_via: Set(self.created_via),
             assigned_pod_id: Set(self.assigned_pod_id),
             agent_executor: Set(self.agent_executor),
+            work_type: Set(self.work_type),
         }
     }
 }
@@ -323,6 +328,7 @@ impl From<&issues::Model> for IssueFieldSet {
             created_via: model.created_via.clone(),
             assigned_pod_id: model.assigned_pod_id,
             agent_executor: model.agent_executor.clone(),
+            work_type: model.work_type.clone(),
         }
     }
 }
@@ -3798,6 +3804,7 @@ mod tests {
             created_via: None,
             assigned_pod_id: None,
             agent_executor: None,
+            work_type: None,
         };
         let issue_id = fields.id;
         let created = super::super::run(&ctx, &db, |txn| {
@@ -4314,6 +4321,7 @@ mod tests {
                                     created_via: None,
                                     assigned_pod_id: None,
                                     agent_executor: None,
+                                    work_type: None,
                                 },
                                 assignees: Some(vec![new_link]),
                                 labels: None,

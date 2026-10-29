@@ -1267,10 +1267,10 @@ mod tests {
                  logo_props, timezone, repo_url, base_branch, agent_default_interval_seconds, \
                  agent_default_max_ticks, agent_review_default_interval_seconds, \
                  agent_test_default_interval_seconds, agent_ticking_enabled, \
-                 default_agent_executor, workspace_id) \
+                 default_agent_executor, default_work_type, workspace_id) \
                  VALUES ($1, $2, $2, $3, $4, '', 2, false, false, false, true, false, false, \
                  false, false, false, true, 0, 0, '{}', 'UTC', '', 'main', 10800, 10, 10800, \
-                 10800, true, 'local_runner', $5)",
+                 10800, true, 'local_runner', 'software', $5)",
             )
             .bind(project)
             .bind(now)
@@ -1315,10 +1315,10 @@ mod tests {
             sqlx::query(
                 "INSERT INTO agent_run (id, workspace_id, created_by_id, pod_id, status, \
                  executor_kind, dispatch_attempts, cancel_reason, error_code, tool_plan, \
-                 prompt, trigger, phase_kind, run_config, required_capabilities, thread_id, \
-                 agent_metadata, lease_expires_at, error, refusal_category, llm_model, usage, \
-                 created_at) \
-                 VALUES ($1, $2, $3, $4, $5, $6, 0, '', '', '{}', '', 'direct', '', '{}', \
+                 prompt, trigger, phase_kind, work_type, run_config, required_capabilities, \
+                 thread_id, agent_metadata, lease_expires_at, error, refusal_category, \
+                 llm_model, usage, created_at) \
+                 VALUES ($1, $2, $3, $4, $5, $6, 0, '', '', '{}', '', 'direct', '', '', '{}', \
                  '[]', '', '{}', $7, '', '', '', '{}', $8)",
             )
             .bind(id)

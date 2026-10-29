@@ -784,6 +784,7 @@ const IS_WORKPAD: usize = 30;
 const IS_CREATED_VIA: usize = 31;
 const IS_AGENT_EXECUTOR: usize = 32;
 const IS_COMPLEXITY_SCORE: usize = 33;
+const IS_WORK_TYPE: usize = 34;
 
 /// One `intake_issues` row.
 #[derive(Debug, Clone)]
@@ -835,6 +836,7 @@ struct IssueRow {
     git_work_branch: String,
     created_via: Option<String>,
     agent_executor: Option<String>,
+    work_type: Option<String>,
     created_by_id: Option<Uuid>,
     updated_by_id: Option<Uuid>,
     project_id: Uuid,
@@ -944,6 +946,7 @@ impl IssueRow {
             created_via: cell(row, base + IS_CREATED_VIA)?,
             agent_executor: cell(row, base + IS_AGENT_EXECUTOR)?,
             complexity_score: cell(row, base + IS_COMPLEXITY_SCORE)?,
+            work_type: cell(row, base + IS_WORK_TYPE)?,
         })
     }
 
@@ -987,6 +990,7 @@ impl IssueRow {
             created_via: self.created_via.clone(),
             assigned_pod_id: self.assigned_pod_id,
             agent_executor: self.agent_executor.clone(),
+            work_type: self.work_type.clone(),
         }
     }
 
@@ -1019,6 +1023,7 @@ impl IssueRow {
             git_work_branch: fields.git_work_branch,
             created_via: fields.created_via,
             agent_executor: fields.agent_executor,
+            work_type: fields.work_type,
             created_by_id: fields.created_by_id,
             updated_by_id: fields.updated_by_id,
             project_id: fields.project_id,
@@ -1057,6 +1062,7 @@ impl IssueRow {
             git_work_branch: self.git_work_branch.clone(),
             created_via: self.created_via.clone(),
             agent_executor: self.agent_executor.clone(),
+            work_type: self.work_type.clone(),
             created_by: self.created_by_id,
             updated_by: self.updated_by_id,
             project_id: self.project_id,
@@ -1077,7 +1083,7 @@ const ISSUE_COLS: &str = "created_at, updated_at, id, name, description_json, pr
      updated_by_id, workspace_id, description_html, description_stripped, completed_at, \
      sort_order, point, archived_at, is_draft, external_id, external_source, description_binary, \
      estimate_point_id, type_id, deleted_at, git_work_branch, assigned_pod_id, workpad, \
-     created_via, agent_executor, complexity_score";
+     created_via, agent_executor, complexity_score, work_type";
 
 /// [`ISSUE_COLS`] with every column qualified by the `issues` table — for
 /// reads that join another table (e.g. `workspaces`), where the bare column
@@ -1300,6 +1306,7 @@ async fn render_issue_expand(
         "agent_executor".to_owned(),
         opt_string(&issue.agent_executor),
     );
+    map.insert("work_type".to_owned(), opt_string(&issue.work_type));
     map.insert("created_by".to_owned(), opt_uuid(&issue.created_by_id));
     map.insert("updated_by".to_owned(), opt_uuid(&issue.updated_by_id));
     map.insert(
@@ -2572,13 +2579,27 @@ enum DescriptionFail {
     SanitizeInvalid,
 }
 
+/// Both legs back to back (the validator runs them with the work-type
+/// check in between, so only the unit tests use the composition).
+#[cfg(test)]
 fn check_description_html(html: &str, from_markdown: bool) -> Result<String, DescriptionFail> {
-    let round_tripped = if from_markdown {
-        html.to_owned()
+    let round_tripped = roundtrip_description_html(html, from_markdown)?;
+    sanitize_description_html(&round_tripped)
+}
+
+/// The lxml round-trip leg of [`check_description_html`] (skipped for
+/// markdown-converted input).
+fn roundtrip_description_html(html: &str, from_markdown: bool) -> Result<String, DescriptionFail> {
+    if from_markdown {
+        Ok(html.to_owned())
     } else {
-        lxml_roundtrip(html).ok_or(DescriptionFail::InvalidHtml)?
-    };
-    match sanitize_html(&round_tripped) {
+        lxml_roundtrip(html).ok_or(DescriptionFail::InvalidHtml)
+    }
+}
+
+/// The sanitizer leg of [`check_description_html`].
+fn sanitize_description_html(round_tripped: &str) -> Result<String, DescriptionFail> {
+    match sanitize_html(round_tripped) {
         Sanitize::Clean(cleaned) => Ok(cleaned),
         Sanitize::Invalid => Err(DescriptionFail::SanitizeInvalid),
     }
@@ -2859,6 +2880,7 @@ struct IssuePatch {
     git_work_branch: Option<String>,
     created_via: Option<Option<String>>,
     agent_executor: Option<Option<String>>,
+    work_type: Option<Option<String>>,
     created_by: Option<Option<Uuid>>,
     parent: Option<Option<Uuid>>,
     state: Option<Option<Uuid>>,
@@ -3161,6 +3183,21 @@ async fn validate_issue_input(
             }
         }
     }
+    if let Some(value) = data.get("work_type") {
+        if value.is_null() {
+            patch.work_type = Some(None);
+        } else {
+            match check_char(value, true, Some(32), true) {
+                Ok(text) => match check_no_null_chars(&text) {
+                    Ok(()) => patch.work_type = Some(Some(text)),
+                    Err(FieldFail::Msg(message)) => errors.field("work_type", message),
+                    Err(FieldFail::Server) => return Err(Denial::ServerError),
+                },
+                Err(FieldFail::Msg(message)) => errors.field("work_type", message),
+                Err(FieldFail::Server) => return Err(Denial::ServerError),
+            }
+        }
+    }
     if let Some(value) = data.get("created_by") {
         if value.is_null() {
             patch.created_by = Some(None);
@@ -3282,7 +3319,28 @@ async fn validate_issue_input(
         }
     }
     if let Some(html) = patch.description_html.clone() {
-        match check_description_html(&html, from_markdown) {
+        match roundtrip_description_html(&html, from_markdown) {
+            Ok(round_tripped) => patch.description_html = Some(round_tripped),
+            Err(_) => {
+                return Err(Denial::FieldErrors(single_non_field("Invalid HTML passed")));
+            }
+        }
+    }
+    match pidash_services::v1_work_items::shape_issue::normalize_work_type(patch.work_type.take()) {
+        Ok(work_type) => patch.work_type = work_type,
+        Err(_) => {
+            let mut map = Map::with_capacity(1);
+            map.insert(
+                "work_type".to_owned(),
+                Value::Array(vec![Value::String(
+                    pidash_services::prompting::work_types::unknown_work_type_message(),
+                )]),
+            );
+            return Err(Denial::FieldErrors(Value::Object(map)));
+        }
+    }
+    if let Some(html) = patch.description_html.clone() {
+        match sanitize_description_html(&html) {
             Ok(cleaned) => patch.description_html = Some(cleaned),
             Err(DescriptionFail::InvalidHtml) => {
                 return Err(Denial::FieldErrors(single_non_field("Invalid HTML passed")));
@@ -3855,6 +3913,10 @@ async fn save_issue_patch(
         .agent_executor
         .clone()
         .unwrap_or_else(|| issue.agent_executor.clone());
+    fields.work_type = patch
+        .work_type
+        .clone()
+        .unwrap_or_else(|| issue.work_type.clone());
     fields.created_by_id = patch.created_by.unwrap_or(issue.created_by_id);
     fields.parent_id = patch.parent.unwrap_or(issue.parent_id);
     fields.state_id = patch.state.unwrap_or(issue.state_id);
@@ -4239,6 +4301,7 @@ async fn insert_issue(
         created_via: None,
         assigned_pod_id: None,
         agent_executor: None,
+        work_type: None,
     };
     let fire = fire_spec(&ctx.user_id, cycle_mod::micros_now());
     let orm = state.orm().ok_or(Denial::ServerError)?;

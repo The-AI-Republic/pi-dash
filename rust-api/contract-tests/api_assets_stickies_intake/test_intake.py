@@ -33,7 +33,7 @@ ISSUE_KEYS = {
     "priority", "complexity_score", "start_date", "target_date",
     "sequence_id", "sort_order", "completed_at", "archived_at", "is_draft",
     "external_source", "external_id", "git_work_branch", "created_via",
-    "agent_executor", "created_by", "updated_by", "project", "workspace",
+    "agent_executor", "work_type", "created_by", "updated_by", "project", "workspace",
     "parent", "estimate_point", "type", "assigned_pod",
 }
 

@@ -87,7 +87,7 @@ use super::Binder;
 // Shared column lists (Django concrete-field order, live-compiled)
 // ---------------------------------------------------------------------------
 
-/// All 34 concrete `issues` columns in Django's select order, qualified with
+/// All 35 concrete `issues` columns in Django's select order, qualified with
 /// the pilot-2 `issue` alias so these fragments compose with
 /// `complex_filter` / `legacy_sql` / `order_key` output.
 pub const ISSUE_COLUMNS: &str = "issue.created_at, issue.updated_at, issue.created_by_id, \
@@ -98,7 +98,7 @@ pub const ISSUE_COLUMNS: &str = "issue.created_at, issue.updated_at, issue.creat
     issue.target_date, issue.sequence_id, issue.sort_order, issue.completed_at, \
     issue.archived_at, issue.is_draft, issue.external_source, issue.external_id, \
     issue.type_id, issue.git_work_branch, issue.workpad, issue.created_via, \
-    issue.assigned_pod_id, issue.agent_executor";
+    issue.assigned_pod_id, issue.agent_executor, issue.work_type";
 
 /// All 18 concrete `states` columns (`select_related("state")` order).
 /// `group`/`default` stay quoted: reserved words.
@@ -159,7 +159,8 @@ pub const PREFETCH_ISSUE_COLUMNS: &str = "issues.created_at, issues.updated_at, 
     issues.complexity_score, issues.start_date, issues.target_date, issues.sequence_id, \
     issues.sort_order, issues.completed_at, issues.archived_at, issues.is_draft, \
     issues.external_source, issues.external_id, issues.type_id, issues.git_work_branch, \
-    issues.workpad, issues.created_via, issues.assigned_pod_id, issues.agent_executor";
+    issues.workpad, issues.created_via, issues.assigned_pod_id, issues.agent_executor, \
+    issues.work_type";
 
 // ---------------------------------------------------------------------------
 // Scalar annotations shared by retrieve / sub-issues / archive-list

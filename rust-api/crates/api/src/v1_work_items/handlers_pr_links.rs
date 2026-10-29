@@ -216,6 +216,8 @@ impl From<crate::v1_projects::handlers_project::Denial> for Denial {
             D::BadError(message) => Denial::BadError(message),
             D::FieldErrors(_) => Denial::ServerError,
             D::NotFoundError(message) => Denial::NotFoundError(message),
+            // Unreachable from the reused calls (patch-only lock).
+            D::ForbiddenError(_) => Denial::ServerError,
             D::Conflict(body) => Denial::Conflict(body),
             D::ServerError => Denial::ServerError,
         }

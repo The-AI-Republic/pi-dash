@@ -2055,6 +2055,7 @@ async fn render_full(
         cycle_id: Some(get_str(row, "cycle_id")),
         assigned_pod_id: get_str(row, "i_assigned_pod_id"),
         agent_executor: get_str(row, "i_agent_executor"),
+        work_type: get_str(row, "i_work_type"),
         module_ids: Some(str_refs(&module_ids)),
         label_ids: Some(str_refs(&label_ids)),
         assignee_ids: Some(str_refs(&assignee_ids)),
@@ -2629,7 +2630,7 @@ const POST_ROW_COLUMNS: &str = "issue.id, issue.name, issue.state_id, issue.sort
     issue.completed_at, issue.estimate_point_id AS estimate_point, issue.priority, \
     issue.complexity_score, issue.start_date, issue.target_date, issue.sequence_id, \
     issue.project_id, issue.parent_id, issue.assigned_pod_id, issue.agent_executor, \
-    issue.created_at, issue.updated_at, issue.created_by_id AS created_by, \
+    issue.work_type, issue.created_at, issue.updated_at, issue.created_by_id AS created_by, \
     issue.updated_by_id AS updated_by, issue.is_draft, issue.archived_at, \
     issue.external_source, state.\"group\" AS state_group";
 
@@ -2688,6 +2689,7 @@ async fn render_post_row(
         cycle_id: None,
         assigned_pod_id: get_str(row, "assigned_pod_id"),
         agent_executor: get_str(row, "agent_executor"),
+        work_type: get_str(row, "work_type"),
         module_ids: None,
         label_ids: None,
         assignee_ids: None,
@@ -2814,7 +2816,7 @@ mod tests {
                 .collect()
         }
         let mut expected = stems(queries_core::ISSUE_COLUMNS, "issue", "i_");
-        assert_eq!(expected.len(), 34);
+        assert_eq!(expected.len(), 35);
         expected.extend(
             [
                 "cycle_id",
@@ -2844,23 +2846,25 @@ mod tests {
             "t_",
         ));
         let actual = full_row_aliases();
-        assert_eq!(actual.len(), 175);
+        assert_eq!(actual.len(), 177);
         assert_eq!(actual, expected);
         // Spot the group boundaries: a shifted block fails loudly.
         assert_eq!(actual[0], "i_created_at");
         assert_eq!(actual[33], "i_agent_executor");
-        assert_eq!(actual[34], "cycle_id");
-        assert_eq!(actual[42], "is_intake");
-        assert_eq!(actual[43], "p_created_at");
-        assert_eq!(actual[88], "p_default_agent_executor");
-        assert_eq!(actual[89], "w_created_at");
-        assert_eq!(actual[102], "w_background_color");
-        assert_eq!(actual[103], "par_created_at");
-        assert_eq!(actual[136], "par_agent_executor");
-        assert_eq!(actual[137], "s_created_at");
-        assert_eq!(actual[154], "s_external_id");
-        assert_eq!(actual[155], "t_created_at");
-        assert_eq!(actual[174], "t_resume_parent_run_id");
+        assert_eq!(actual[34], "i_work_type");
+        assert_eq!(actual[35], "cycle_id");
+        assert_eq!(actual[43], "is_intake");
+        assert_eq!(actual[44], "p_created_at");
+        assert_eq!(actual[89], "p_default_agent_executor");
+        assert_eq!(actual[90], "w_created_at");
+        assert_eq!(actual[103], "w_background_color");
+        assert_eq!(actual[104], "par_created_at");
+        assert_eq!(actual[137], "par_agent_executor");
+        assert_eq!(actual[138], "par_work_type");
+        assert_eq!(actual[139], "s_created_at");
+        assert_eq!(actual[156], "s_external_id");
+        assert_eq!(actual[157], "t_created_at");
+        assert_eq!(actual[176], "t_resume_parent_run_id");
         // Unique: no `row_to_json` key collision survives.
         let mut unique = actual.clone();
         unique.sort();

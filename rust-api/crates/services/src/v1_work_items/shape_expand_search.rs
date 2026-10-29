@@ -220,6 +220,7 @@ pub const EXPAND_ALL_FIELDS_IN_ORDER: &[&str] = &[
     "git_work_branch",
     "created_via",
     "agent_executor",
+    "work_type",
     "created_by",
     "updated_by",
     "project",
@@ -389,6 +390,7 @@ pub fn render_expand(
             "git_work_branch" => Value::String(row.git_work_branch.to_string()),
             "created_via" => opt_str(row.created_via),
             "agent_executor" => opt_str(row.agent_executor),
+            "work_type" => opt_str(row.work_type),
             "created_by" => opt_str(row.created_by),
             "updated_by" => opt_str(row.updated_by),
             "project" => Value::String(row.project.to_string()),
@@ -1091,6 +1093,7 @@ mod tests {
             git_work_branch: "",
             created_via: None,
             agent_executor: None,
+            work_type: None,
             created_by: Some("79c81d76-5a93-4d3d-894d-5935576834b6"),
             updated_by: Some("79c81d76-5a93-4d3d-894d-5935576834b6"),
             project: "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
@@ -1163,7 +1166,7 @@ mod tests {
         for key in ["cycle", "module", "workpad", "url", "type_id"] {
             assert!(!rendered_map.contains_key(key), "no {key} key");
         }
-        assert_eq!(rendered_map.len(), 36);
+        assert_eq!(rendered_map.len(), 37);
     }
 
     #[test]
@@ -1285,7 +1288,7 @@ mod tests {
         let mut input = expand_input(&row);
         input.expand = &["cycle", "module"];
         let rendered_map = render_expand(&input).expect("renders");
-        assert_eq!(rendered_map.len(), 38);
+        assert_eq!(rendered_map.len(), 39);
         assert_eq!(rendered_map["cycle"], Value::Null);
         assert_eq!(rendered_map["module"], Value::Null);
 

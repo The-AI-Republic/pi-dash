@@ -1732,6 +1732,15 @@ const FIELD_TABLE: &[FieldSpec] = &[
         allow_null: true,
     },
     FieldSpec {
+        name: "work_type",
+        shape: FieldShape::Char {
+            max_length: Some(32),
+            allow_blank: true,
+            branch_regex: false,
+        },
+        allow_null: true,
+    },
+    FieldSpec {
         name: "parent",
         shape: FieldShape::UuidPk(PkQueryset::Issues),
         allow_null: true,
@@ -2564,6 +2573,12 @@ async fn run_validate(
         Some(Validated::Text(executor)) => Some(Some(executor.as_str())),
         _ => None,
     };
+    let work_type: Option<Option<&str>> = match validated.get("work_type") {
+        None => None,
+        Some(Validated::Null) => Some(None),
+        Some(Validated::Text(work_type)) => Some(Some(work_type.as_str())),
+        _ => None,
+    };
     let description_stripped: Option<Option<&str>> = match validated.get("description_stripped") {
         None => None,
         Some(Validated::Null) => Some(None),
@@ -2594,6 +2609,7 @@ async fn run_validate(
         }),
         assigned_pod,
         agent_executor,
+        work_type,
         description_html: text("description_html"),
         description_binary: None,
         assignee_ids: assignee_ids.as_deref(),
@@ -3095,7 +3111,7 @@ const ISSUE_OBJECTS_SCOPE: &str =
     "AND NOT (state.\"group\" = 'triage' AND state.\"group\" IS NOT NULL) \
      AND issue.archived_at IS NULL AND project.archived_at IS NULL AND issue.is_draft = FALSE";
 
-/// One looked-up issue: the 34 storable columns, the scalar annotations
+/// One looked-up issue: the 35 storable columns, the scalar annotations
 /// (each `None`/empty when its leg is absent), and the joined state pair
 /// for the ticker leg.
 struct CoreIssueRow {
@@ -3112,7 +3128,7 @@ struct CoreIssueRow {
     state_name: Option<String>,
 }
 
-/// Map the 34 storable columns off a `SELECT {ISSUE_COLUMNS}` row.
+/// Map the 35 storable columns off a `SELECT {ISSUE_COLUMNS}` row.
 fn save_row_from_pg(row: &sqlx::postgres::PgRow) -> Result<IssueSaveRow, sqlx::Error> {
     Ok(IssueSaveRow {
         id: row.try_get("id")?,
@@ -3149,6 +3165,7 @@ fn save_row_from_pg(row: &sqlx::postgres::PgRow) -> Result<IssueSaveRow, sqlx::E
         created_via: row.try_get("created_via")?,
         assigned_pod_id: row.try_get("assigned_pod_id")?,
         agent_executor: row.try_get("agent_executor")?,
+        work_type: row.try_get("work_type")?,
     })
 }
 
@@ -3693,6 +3710,7 @@ async fn render_detail_map(
         cycle_id: Some(cycle_id.as_deref()),
         assigned_pod_id: assigned_pod_id.as_deref(),
         agent_executor: save.agent_executor.as_deref(),
+        work_type: save.work_type.as_deref(),
         module_ids: Some(module_refs),
         label_ids: Some(label_refs),
         assignee_ids: Some(assignee_refs),
@@ -3984,6 +4002,11 @@ fn assemble_new_issue(
             _ => None,
         },
         agent_executor: v_text(validated, "agent_executor").map(str::to_owned),
+        // `validate()` normalized `""` to `None` (inherit the project
+        // default) and rejected unknown keys.
+        work_type: v_text(validated, "work_type")
+            .filter(|work_type| !work_type.is_empty())
+            .map(str::to_owned),
     };
     Ok((
         row,
@@ -4027,6 +4050,11 @@ fn apply_validated_to_existing(
     }
     if validated.contains_key("agent_executor") {
         row.agent_executor = v_text(validated, "agent_executor").map(str::to_owned);
+    }
+    if validated.contains_key("work_type") {
+        row.work_type = v_text(validated, "work_type")
+            .filter(|work_type| !work_type.is_empty())
+            .map(str::to_owned);
     }
     if let Some(priority) = v_text(validated, "priority") {
         row.priority = priority.to_owned();
@@ -4380,6 +4408,7 @@ async fn render_put_body(
         git_work_branch: row.git_work_branch.as_str(),
         created_via: row.created_via.as_deref(),
         agent_executor: row.agent_executor.as_deref(),
+        work_type: row.work_type.as_deref(),
         point: row.point,
         deleted_at: deleted_at.as_deref(),
         created_at: created_at.as_str(),

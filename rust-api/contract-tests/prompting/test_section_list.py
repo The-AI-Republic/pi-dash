@@ -10,13 +10,15 @@ SECTION_KEYS = {
     "editable_at_personal",
 }
 
-# coding-task recipe order, pinned from prompting/recipes.py.
+# coding-task recipe order, pinned from prompting/recipes.py, with the
+# work-type slots filled for the default work type (`software`,
+# PDASHOSS01-234).
 CODING_TASK_ORDER = (
-    "intro", "repo-context", "relationships", "session-framing",
+    "intro", "software.context", "relationships", "session-framing",
     "pidash-cli", "task-lifecycle", "default-posture", "autonomy",
     "state-routing", "analyze-and-scope", "workpad-setup",
-    "implementation", "blocking", "guardrails", "workpad-template",
-    "ending-run",
+    "software.execute", "implementation", "blocking", "guardrails",
+    "workpad-template", "ending-run",
 )
 
 
@@ -34,6 +36,8 @@ def test_list_shape(api, tenant_a, auth_a):
     body = r.json()
     assert body["kind"] == "coding-task"
     assert body["scope"] == "user"
+    assert body["work_type"] == "software"
+    assert list(body) == ["kind", "scope", "work_type", "sections"]
     sections = body["sections"]
     assert [s["key"] for s in sections] == list(CODING_TASK_ORDER)
     for s in sections:

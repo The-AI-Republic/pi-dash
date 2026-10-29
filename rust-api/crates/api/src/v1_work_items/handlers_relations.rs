@@ -253,6 +253,8 @@ impl From<crate::v1_projects::handlers_project::Denial> for Denial {
                 Denial::NotFound(format!("{{\"error\":{}}}", json_string(&message)))
             }
             // Unreachable from the reused calls (no 409 arm there).
+            // Unreachable from the reused calls (patch-only lock).
+            D::ForbiddenError(_) => Denial::ServerError,
             D::Conflict(_) => Denial::ServerError,
             D::ServerError => Denial::ServerError,
         }

@@ -2015,6 +2015,15 @@ const ISSUE_FIELDS: &[FieldSpec] = &[
         allow_null: true,
     },
     FieldSpec {
+        name: "work_type",
+        shape: FieldShape::Char {
+            max: Some(32),
+            allow_blank: true,
+        },
+        required: false,
+        allow_null: true,
+    },
+    FieldSpec {
         name: "parent",
         shape: FieldShape::Pk(PkQueryset::IssuesVisible),
         required: false,
@@ -6022,6 +6031,12 @@ async fn run_issue_create_validate(
         Some(FieldValue::Text(executor)) => Some(Some(executor.as_str())),
         _ => None,
     };
+    let work_type: Option<Option<&str>> = match find_value(values, "work_type") {
+        None => None,
+        Some(FieldValue::Null) => Some(None),
+        Some(FieldValue::Text(work_type)) => Some(Some(work_type.as_str())),
+        _ => None,
+    };
     let description_stripped: Option<Option<&str>> =
         match find_value(values, "description_stripped") {
             None => None,
@@ -6051,6 +6066,7 @@ async fn run_issue_create_validate(
         }),
         assigned_pod,
         agent_executor,
+        work_type,
         description_html: text("description_html"),
         description_binary: None,
         assignee_ids: assignee_ids.as_deref(),
@@ -6311,6 +6327,8 @@ fn assemble_new_issue(
         created_via: opt_text(values, "created_via"),
         assigned_pod_id: pod,
         agent_executor: opt_text(values, "agent_executor"),
+        // `validate()` normalized `""` to `None` and rejected unknown keys.
+        work_type: filtered.work_type.clone().flatten(),
     };
     Ok((
         row,
@@ -6555,6 +6573,7 @@ async fn render_draft_to_issue_body(
         git_work_branch: row.git_work_branch.as_str(),
         created_via: row.created_via.as_deref(),
         agent_executor: row.agent_executor.as_deref(),
+        work_type: row.work_type.as_deref(),
         point: row.point,
         deleted_at: deleted_at.as_deref(),
         created_at: created_at.as_str(),
@@ -7175,6 +7194,7 @@ mod tests {
         // `name` is required on the create shape.
         let filtered = ValidatedAttrs {
             description_html: None,
+            work_type: None,
             assignee_ids: None,
             label_ids: None,
         };
@@ -7205,6 +7225,7 @@ mod tests {
         // The sanitized html wins over the input.
         let filtered = ValidatedAttrs {
             description_html: Some("<p>clean</p>".to_owned()),
+            work_type: None,
             assignee_ids: None,
             label_ids: None,
         };

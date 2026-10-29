@@ -1946,6 +1946,35 @@ async fn patch_issue_inner(
         pidash_jobs::tasks_webhooks::activity_dispatch::django_dumps(&current_rendered);
 
     let parsed_body = parse_write_body(headers, raw_body)?;
+
+    // The work-type lock (PDASHOSS01-234): runs right after the run
+    // resolution, before `current_instance` and normalization (both
+    // side-effect free, so checking after the body parse is the same
+    // order). Only an *explicit* run-id header locks — the headerless
+    // inference above still stamps `moved_by_run` but never locks a human.
+    let header_run_id_present = header_ref.map(str::trim).is_some_and(|h| !h.is_empty());
+    if moved_by_run.is_some() && header_run_id_present {
+        if let Some(raw) = parsed_body.value.get("work_type") {
+            // `request.data.get("work_type") or None` vs
+            // `issue.work_type or None`: falsy spells `None`, and only a
+            // string can equal the stored varchar.
+            let unchanged = if raw_truthy(raw) {
+                matches!(raw, Value::String(text)
+                    if current.work_type.as_deref().is_some_and(|stored| stored == text))
+            } else {
+                current.work_type.as_deref().is_none_or(str::is_empty)
+            };
+            let ticking = matches!(
+                current.state_group.as_deref(),
+                Some("started" | "review" | "test")
+            );
+            if !unchanged && ticking {
+                return Err(Denial::ForbiddenBody(
+                    shape::WORK_TYPE_LOCKED_BODY.to_owned(),
+                ));
+            }
+        }
+    }
     let orm = state.orm().ok_or(Denial::ServerError)?;
     let ctx = domain_write_ctx(&pre, &project_id);
     let transition: Arc<dyn IssueTransitionHook> =
@@ -2185,6 +2214,27 @@ pub async fn delete_issue_detail(
 // ---------------------------------------------------------------------------
 // Orchestration signals (explicit): `capture_prior_state` + `fire_state_transition`
 // ---------------------------------------------------------------------------
+
+/// Python truthiness of a raw JSON body value (the work-type lock's
+/// `request.data.get("work_type") or None`).
+fn raw_truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(flag) => *flag,
+        Value::Number(number) => {
+            if let Some(int) = number.as_i64() {
+                return int != 0;
+            }
+            if let Some(uint) = number.as_u64() {
+                return uint != 0;
+            }
+            number.as_f64().is_some_and(|float| float != 0.0)
+        }
+        Value::String(text) => !text.is_empty(),
+        Value::Array(items) => !items.is_empty(),
+        Value::Object(map) => !map.is_empty(),
+    }
+}
 
 #[cfg(test)]
 mod signal_tests {

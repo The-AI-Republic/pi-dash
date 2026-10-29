@@ -104,6 +104,10 @@ pub struct NewProject<'a> {
     pub agent_ticking: bool,
     pub default_executor: &'a str,
     pub members_can_edit_states: bool,
+    /// `Project.default_work_type` (PDASHOSS01-234), already resolved
+    /// by the caller (`Project.save()` fills a blank one from the repo
+    /// binding via `work_types::default_for_new_project`).
+    pub default_work_type: &'a str,
     pub created_by: Uuid,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -128,10 +132,11 @@ const PROJECT_INSERT_SQL: &str = "INSERT INTO \"projects\" \
     \"external_source\", \"external_id\", \"repo_url\", \"base_branch\", \
     \"agent_default_interval_seconds\", \"agent_default_max_ticks\", \
     \"agent_review_default_interval_seconds\", \"agent_test_default_interval_seconds\", \
-    \"agent_ticking_enabled\", \"default_agent_executor\", \"members_can_edit_states\") \
+    \"agent_ticking_enabled\", \"default_agent_executor\", \"members_can_edit_states\", \
+    \"default_work_type\") \
     VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, \
     $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, \
-    $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44)";
+    $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45)";
 
 const PROJECT_INSERT_V1_SQL: &str = "INSERT INTO \"projects\" (\"id\", \"created_at\", \"updated_at\", \
     \"created_by_id\", \"updated_by_id\", \"name\", \"description\", \"description_text\", \
@@ -143,9 +148,9 @@ const PROJECT_INSERT_V1_SQL: &str = "INSERT INTO \"projects\" (\"id\", \"created
     \"external_source\", \"external_id\", \"repo_url\", \"base_branch\", \
     \"agent_default_interval_seconds\", \"agent_default_max_ticks\", \
     \"agent_review_default_interval_seconds\", \"agent_test_default_interval_seconds\", \
-    \"agent_ticking_enabled\", \"default_agent_executor\") \
+    \"agent_ticking_enabled\", \"default_agent_executor\", \"default_work_type\") \
     VALUES ($1,$2,$3,$4,NULL,$5,$6,NULL,NULL,2,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,\
-    $20,$21,$22,$23,NULL,NULL,$24,$25,$26,NULL,$27,$28,$29,$30,$31,10800,10,10800,10800,TRUE,$32)";
+    $20,$21,$22,$23,NULL,NULL,$24,$25,$26,NULL,$27,$28,$29,$30,$31,10800,10,10800,10800,TRUE,$32,$33)";
 
 /// `Project.objects.create(...)`: the default-clear plus the row, in
 /// one transaction, returning the new id. Errors propagate as
@@ -210,6 +215,7 @@ pub async fn create(pool: &sqlx::PgPool, project: &NewProject<'_>) -> Result<Uui
         .bind(project.agent_ticking)
         .bind(project.default_executor)
         .bind(project.members_can_edit_states)
+        .bind(project.default_work_type)
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
@@ -321,6 +327,7 @@ where
         .bind(project.repo_url)
         .bind(project.base_branch)
         .bind(project.default_executor)
+        .bind(project.default_work_type)
         .execute(ex)
         .await?;
     Ok(())
@@ -615,6 +622,8 @@ pub struct ProjectUpdate<'a> {
     pub agent_ticking: bool,
     pub default_executor: &'a str,
     pub members_can_edit_states: bool,
+    /// `Project.default_work_type` (PDASHOSS01-234).
+    pub default_work_type: &'a str,
     pub workspace_id: Uuid,
     pub deleted_at: Option<DateTime<Utc>>,
     pub updated_at: DateTime<Utc>,
@@ -638,7 +647,8 @@ const PROJECT_UPDATE_SQL: &str = "UPDATE projects SET
              agent_ticking_enabled = $37, default_agent_executor = $38,
              members_can_edit_states = $39,
              workspace_id = $40, deleted_at = $41,
-             updated_at = $42, updated_by_id = $43, created_by_id = $44
+             updated_at = $42, updated_by_id = $43, created_by_id = $44,
+             default_work_type = $46
            WHERE id = $45";
 
 /// The app project PATCH/PUT write (`ProjectSerializer.update()` +
@@ -698,6 +708,7 @@ where
         .bind(upd.updated_by)
         .bind(upd.created_by)
         .bind(project_id)
+        .bind(upd.default_work_type)
         .execute(ex)
         .await
         .map(|_| ())
@@ -905,11 +916,11 @@ pub(crate) const SEED_PROJECT_INSERT_SQL: &str = "INSERT INTO projects \
     members_can_edit_states, repo_url, base_branch, agent_default_interval_seconds, \
     agent_default_max_ticks, agent_ticking_enabled, is_default, \
     agent_review_default_interval_seconds, default_agent_executor, \
-    agent_test_default_interval_seconds) \
+    agent_test_default_interval_seconds, default_work_type) \
     VALUES ($1, $1, $2, $3, $4, NULL, NULL, $5, $6, $7, NULL, NULL, NULL, $8, NULL, \
     true, true, $9, true, true, NULL, NULL, false, 0, 0, NULL, $10, NULL, false, false, \
     NULL, false, $11, NULL, NULL, NULL, true, '', 'main', 10800, 10, true, $12, 10800, \
-    $13, 10800) \
+    $13, 10800, $14) \
     RETURNING id";
 
 pub(crate) const SEED_PROJECT_DEMOTE_SQL: &str = "UPDATE projects SET is_default = false \
@@ -937,6 +948,11 @@ pub async fn create_seed_project(
         .bind(project.timezone)
         .bind(project.is_default)
         .bind(project.default_agent_executor)
+        // `Project.save()` resolves the blank default from the (empty)
+        // repo binding (PDASHOSS01-234).
+        .bind(crate::prompting::work_types::default_for_new_project(Some(
+            "",
+        )))
         .fetch_one(&mut *tx)
         .await?;
     if project.is_default {
@@ -977,10 +993,10 @@ pub(crate) const DEMO_PROJECT_INSERT_SQL: &str = "INSERT INTO projects \
     guest_view_all_features, timezone, members_can_edit_states, repo_url, base_branch, \
     agent_default_interval_seconds, agent_default_max_ticks, \
     agent_review_default_interval_seconds, agent_test_default_interval_seconds, \
-    agent_ticking_enabled, default_agent_executor) \
+    agent_ticking_enabled, default_agent_executor, default_work_type) \
     VALUES ($1::uuid, $2::uuid, $3, $4, NULL, TRUE, $5, $5, '', 2, FALSE, FALSE, FALSE, \
     TRUE, 0, 0, '{}', FALSE, FALSE, $6, FALSE, $7, TRUE, '', 'main', 10800, 10, 10800, \
-    10800, TRUE, $8)";
+    10800, TRUE, $8, $9)";
 
 /// The dummy-data project insert. Generates the row id client-side
 /// (as Django does) and returns it for the pod/member legs.
@@ -1001,6 +1017,11 @@ where
         .bind(project.is_default)
         .bind(project.timezone)
         .bind(project.default_agent_executor)
+        // `Project.save()` resolves the blank default from the (empty)
+        // repo binding (PDASHOSS01-234).
+        .bind(crate::prompting::work_types::default_for_new_project(Some(
+            "",
+        )))
         .execute(ex)
         .await?;
     Ok(id)
@@ -3363,6 +3384,7 @@ mod tests {
             agent_test: 10800,
             agent_ticking: true,
             default_executor: "local_runner",
+            default_work_type: "software",
             members_can_edit_states: true,
             created_by: actor,
             created_at: now,
@@ -3492,6 +3514,7 @@ mod tests {
             agent_test: 4,
             agent_ticking: false,
             default_executor: "x",
+            default_work_type: "software",
             members_can_edit_states: false,
             workspace_id: ws,
             deleted_at: None,

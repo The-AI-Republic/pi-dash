@@ -7,7 +7,7 @@
 //! - `GET archived-issues/` (`IssueArchiveViewSet.list`, `:106-219`):
 //!   the pilot-2 list machinery over the archive scope (non-epic,
 //!   archived, this project/slug) with the archive annotations.
-//! - `GET issues/<pk>/archive/` (`retrieve`, `:221-255`): the 28-key
+//! - `GET issues/<pk>/archive/` (`retrieve`, `:221-255`): the 29-key
 //!   [`ISSUE_DETAIL_ARCHIVE_FIELDS`] detail (only `is_subscribed`
 //!   annotated).
 //! - `POST issues/<pk>/archive/` (`archive`, `:257-279`): the
@@ -52,7 +52,7 @@
 //!   keys (only `is_subscribed` annotated — the 639 finding, pinned by
 //!   `ARCHIVE_DETAIL_KEYS` in `test_archive.py`).
 //! * FX-ISS-19 says `current_instance` is the 29-key shape; the enqueue
-//!   serializes a bare instance, so DRF omits the 7 annotation keys (22
+//!   serializes a bare instance, so DRF omits the 7 annotation keys (23
 //!   keys — the pilot-2 `SERIALIZER_FIELDS` rule, verified live).
 //! * FX-ISS-19 omits the `save()` recomputes (`completed_at`,
 //!   `updated_at`, `description_stripped`, NULL-state default).
@@ -60,7 +60,7 @@
 //! # Known gaps (precedent: pilot-2 records the same)
 //!
 //! * `?expand=` on archive retrieve only *adds* nested keys; the nested
-//!   expansion fleet is out of scope, so the base 28-key shape renders
+//!   expansion fleet is out of scope, so the base 29-key shape renders
 //!   (the contract suite never sends `expand` here).
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
@@ -525,7 +525,7 @@ fn archive_filtered_set(
 // Archive retrieve (`archive.py:221-255`)
 // ---------------------------------------------------------------------------
 
-/// `GET .../issues/<pk>/archive/`: the 28-key detail. Django serializes
+/// `GET .../issues/<pk>/archive/`: the 29-key detail. Django serializes
 /// through the same `IssueDetailSerializer(issue, expand=self.expand)`, so
 /// `?expand=` runs the shared `DynamicBaseSerializer` kernel — mapper names
 /// nest, declared names clobber, `issue_attachments` appends, and a mapped
@@ -663,7 +663,7 @@ fn json_drf(row: &Map<String, Value>, key: &str) -> Result<String, Denial> {
     json_drf_opt(row, key)?.ok_or(Denial::ServerError)
 }
 
-/// Everything the 28-key render borrows: the base scalars plus the
+/// Everything the 29-key render borrows: the base scalars plus the
 /// ticker/policy/state/run/blocker inputs, all owned.
 struct DetailOwned {
     id: String,
@@ -681,6 +681,7 @@ struct DetailOwned {
     parent_id: Option<String>,
     assigned_pod_id: Option<String>,
     agent_executor: Option<String>,
+    work_type: Option<String>,
     created_at: String,
     updated_at: String,
     created_by: Option<String>,
@@ -785,6 +786,7 @@ impl DetailOwned {
             parent_id: json_str_opt(row, "parent_id"),
             assigned_pod_id: json_str_opt(row, "assigned_pod_id"),
             agent_executor: json_str_opt(row, "agent_executor"),
+            work_type: json_str_opt(row, "work_type"),
             created_at: json_drf(row, "created_at")?,
             updated_at: json_drf(row, "updated_at")?,
             created_by: json_str_opt(row, "created_by_id"),
@@ -807,7 +809,7 @@ impl DetailOwned {
 
     /// Borrow the render input: the seven annotation fields stay `None`
     /// (unannotated → omitted) and `is_intake` stays `None`, which is the
-    /// 28-key archive shape.
+    /// 29-key archive shape.
     fn view(&self) -> IssueDetailRow<'_> {
         let base = IssueDetailBaseRow {
             id: &self.id,
@@ -826,6 +828,7 @@ impl DetailOwned {
             cycle_id: None,
             assigned_pod_id: self.assigned_pod_id.as_deref(),
             agent_executor: self.agent_executor.as_deref(),
+            work_type: self.work_type.as_deref(),
             module_ids: None,
             label_ids: None,
             assignee_ids: None,
@@ -1240,6 +1243,7 @@ struct WriteRow {
     parent_id: Option<String>,
     assigned_pod_id: Option<String>,
     agent_executor: Option<String>,
+    work_type: Option<String>,
     created_at: chrono::DateTime<chrono::Utc>,
     updated_at: chrono::DateTime<chrono::Utc>,
     created_by: Option<String>,
@@ -1435,7 +1439,7 @@ async fn fetch_archive_issue(
          issue.sort_order, issue.completed_at, issue.estimate_point_id, issue.priority, \
          issue.complexity_score, issue.start_date, issue.target_date, issue.sequence_id, \
          issue.project_id, issue.parent_id, issue.assigned_pod_id, issue.agent_executor, \
-         issue.created_at, issue.updated_at, issue.created_by_id, issue.updated_by_id, \
+         issue.work_type, issue.created_at, issue.updated_at, issue.created_by_id, issue.updated_by_id, \
          issue.is_draft, issue.archived_at, issue.external_source, issue.description_html \
          FROM issues AS issue \
          JOIN workspaces ON workspaces.id = issue.workspace_id \
@@ -1470,7 +1474,7 @@ async fn fetch_unarchive_issue(
          issue.sort_order, issue.completed_at, issue.estimate_point_id, issue.priority, \
          issue.complexity_score, issue.start_date, issue.target_date, issue.sequence_id, \
          issue.project_id, issue.parent_id, issue.assigned_pod_id, issue.agent_executor, \
-         issue.created_at, issue.updated_at, issue.created_by_id, issue.updated_by_id, \
+         issue.work_type, issue.created_at, issue.updated_at, issue.created_by_id, issue.updated_by_id, \
          issue.is_draft, issue.archived_at, issue.external_source, issue.description_html \
          FROM issues AS issue \
          JOIN workspaces ON workspaces.id = issue.workspace_id \
@@ -1538,6 +1542,7 @@ fn write_row(row: sqlx::postgres::PgRow) -> Result<WriteRow, Denial> {
         agent_executor: row
             .try_get("agent_executor")
             .map_err(|_| Denial::ServerError)?,
+        work_type: row.try_get("work_type").map_err(|_| Denial::ServerError)?,
         created_at: row.try_get("created_at").map_err(|_| Denial::ServerError)?,
         updated_at: row.try_get("updated_at").map_err(|_| Denial::ServerError)?,
         created_by: created_by.map(|id| id.to_string()),
@@ -1553,7 +1558,7 @@ fn write_row(row: sqlx::postgres::PgRow) -> Result<WriteRow, Denial> {
     })
 }
 
-/// `current_instance`: the 22-key bare-instance shape over the pre-save
+/// `current_instance`: the 23-key bare-instance shape over the pre-save
 /// row, `json.dumps` spacing (`", "` / `": "`).
 async fn current_instance_json(pool: &sqlx::PgPool, row: &WriteRow) -> Result<String, Denial> {
     let is_synced = fetch_is_synced(pool, row.id, row.external_source.as_deref()).await?;
@@ -1580,6 +1585,7 @@ async fn current_instance_json(pool: &sqlx::PgPool, row: &WriteRow) -> Result<St
         cycle_id: None,
         assigned_pod_id: row.assigned_pod_id.as_deref(),
         agent_executor: row.agent_executor.as_deref(),
+        work_type: row.work_type.as_deref(),
         module_ids: None,
         label_ids: None,
         assignee_ids: None,
@@ -1871,7 +1877,7 @@ async fn fetch_bulk_issues(
          issue.sort_order, issue.completed_at, issue.estimate_point_id, issue.priority, \
          issue.complexity_score, issue.start_date, issue.target_date, issue.sequence_id, \
          issue.project_id, issue.parent_id, issue.assigned_pod_id, issue.agent_executor, \
-         issue.created_at, issue.updated_at, issue.created_by_id, issue.updated_by_id, \
+         issue.work_type, issue.created_at, issue.updated_at, issue.created_by_id, issue.updated_by_id, \
          issue.is_draft, issue.archived_at, issue.external_source, issue.description_html \
          FROM issues AS issue \
          JOIN workspaces ON workspaces.id = issue.workspace_id \
@@ -1990,7 +1996,7 @@ mod tests {
     }
 
     #[test]
-    fn current_instance_is_22_keys_in_meta_order() {
+    fn current_instance_is_23_keys_in_meta_order() {
         let base = IssueDetailBaseRow {
             id: "id",
             name: "name",
@@ -2008,6 +2014,7 @@ mod tests {
             cycle_id: None,
             assigned_pod_id: None,
             agent_executor: None,
+            work_type: None,
             module_ids: None,
             label_ids: None,
             assignee_ids: None,
@@ -2038,14 +2045,14 @@ mod tests {
         ] {
             expected.retain(|kept| *kept != key);
         }
-        assert_eq!(parsed.len(), 22);
+        assert_eq!(parsed.len(), 23);
         let keys: Vec<&str> = parsed.keys().map(String::as_str).collect();
         assert_eq!(keys, expected);
         assert!(rendered.contains("\"sort_order\": 10000.0"));
     }
 
     #[test]
-    fn archive_detail_is_28_keys() {
+    fn archive_detail_is_29_keys() {
         use pidash_services::orchestration::blockers::{RelationDirections, RelationsSummary};
         let blockers = RelationsSummary {
             relations_summary: RelationDirections {
@@ -2071,6 +2078,7 @@ mod tests {
             cycle_id: None,
             assigned_pod_id: None,
             agent_executor: None,
+            work_type: None,
             module_ids: None,
             label_ids: None,
             assignee_ids: None,

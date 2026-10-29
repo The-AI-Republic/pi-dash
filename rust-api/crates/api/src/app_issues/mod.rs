@@ -2607,6 +2607,7 @@ const SERIALIZER_FIELDS: &[&str] = &[
     "parent_id",
     "assigned_pod_id",
     "agent_executor",
+    "work_type",
     "created_at",
     "updated_at",
     "created_by",
@@ -2654,7 +2655,7 @@ async fn serializer_list(
         issue.completed_at, issue.estimate_point_id AS estimate_point, issue.priority,
         issue.complexity_score, issue.start_date, issue.target_date, issue.sequence_id,
         issue.project_id, issue.parent_id, issue.assigned_pod_id, issue.agent_executor,
-        issue.created_at, issue.updated_at, issue.created_by_id AS created_by,
+        issue.work_type, issue.created_at, issue.updated_at, issue.created_by_id AS created_by,
         issue.updated_by_id AS updated_by, issue.is_draft, issue.archived_at,
         (CASE WHEN issue.external_source IS NULL OR issue.external_source = '' THEN FALSE
          ELSE (EXISTS (SELECT 1 FROM git_issue_syncs g

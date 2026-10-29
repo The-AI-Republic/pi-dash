@@ -399,6 +399,7 @@ impl CreationSeam for SeaHandoffStore<'_> {
                 sea_orm::Value::from(row.phase_kind.clone()),
                 sea_orm::Value::from(row.run_config.clone()),
                 sea_orm::Value::from(row.now),
+                sea_orm::Value::from(row.work_type.clone()),
             ],
         )
         .await?
@@ -737,6 +738,7 @@ fn twin_map_issue(row: &QueryResult) -> Result<IssueView, CreationError> {
         priority: row.try_get("", "priority").map_err(twin_db)?,
         sequence_id: row.try_get("", "sequence_id").map_err(twin_db)?,
         target_date: row.try_get("", "target_date").map_err(twin_db)?,
+        work_type: row.try_get("", "work_type").map_err(twin_db)?,
     })
 }
 
@@ -768,6 +770,7 @@ fn twin_map_project(row: &QueryResult) -> Result<ProjectView, CreationError> {
         interval_impl: i64::from(interval_impl),
         interval_review: i64::from(interval_review),
         interval_test: i64::from(interval_test),
+        default_work_type: row.try_get("", "default_work_type").map_err(twin_db)?,
     })
 }
 

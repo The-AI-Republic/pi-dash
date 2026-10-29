@@ -726,6 +726,24 @@
      "rel": null
     },
     {
+     "name": "work_type",
+     "column": "work_type",
+     "type": "CharField",
+     "db_type": "varchar(32)",
+     "null": false,
+     "blank": true,
+     "default": "",
+     "db_default": "NOT_PROVIDED",
+     "db_index": false,
+     "unique": false,
+     "max_length": 32,
+     "choices": null,
+     "editable": true,
+     "auto_now": false,
+     "auto_now_add": false,
+     "rel": null
+    },
+    {
      "name": "run_config",
      "column": "run_config",
      "type": "JSONField",
