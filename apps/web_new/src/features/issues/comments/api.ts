@@ -151,6 +151,26 @@ function authorPatch(comment: IssueComment): CommentPatch {
   return { comment_html: comment.comment_html, edited_at: comment.edited_at };
 }
 
+/**
+ * The patch a card paints while its write is still out. Fold and access
+ * are presentation flags whose flip reads as instant feedback, and a
+ * refusal rolls them back.
+ *
+ * A body change is not painted here (ISS-198). Painting it would show
+ * the new words and the edited marker before the PATCH resolves, so
+ * every reader of the stored comment — a reload, another tab, a fresh
+ * API read — still sees the pre-edit body while the card claims the
+ * edit landed. The body and the marker therefore wait for the confirmed
+ * row in `onSuccess`; the editor stays open under its own saving state
+ * until then, so nothing flickers.
+ */
+export function pendingCommentPatch(patch: IssueCommentPatch): CommentPatch {
+  return {
+    ...(patch.labels === undefined ? {} : { labels: patch.labels }),
+    ...(patch.access === undefined ? {} : { access: patch.access }),
+  };
+}
+
 /** Write one comment change (body, access or labels) with its notice. */
 export function useUpdateComment(scope: CommentScope, failureTitle: string, successTitle: string) {
   const client = getAppClient();
@@ -158,15 +178,7 @@ export function useUpdateComment(scope: CommentScope, failureTitle: string, succ
   return useMutation({
     mutationFn: ({ commentId, patch }: { commentId: string; patch: IssueCommentPatch }) =>
       updateIssueComment(client, scope.workspaceSlug, scope.projectId, scope.issueId, commentId, patch),
-    onMutate: async ({ commentId, patch }) => {
-      const optimistic: CommentPatch = {
-        ...(patch.labels === undefined ? {} : { labels: patch.labels }),
-        ...(patch.access === undefined ? {} : { access: patch.access }),
-        ...(patch.comment_html === undefined ? {} : { comment_html: patch.comment_html }),
-        ...(patch.comment_html === undefined ? {} : { edited_at: new Date().toISOString() }),
-      };
-      return paintComment(queryClient, scope, commentId, optimistic);
-    },
+    onMutate: async ({ commentId, patch }) => paintComment(queryClient, scope, commentId, pendingCommentPatch(patch)),
     onSuccess: (comment) => {
       notifySuccess(successTitle);
       const key = issueKeys.comments(scope.workspaceSlug, scope.projectId, scope.issueId);
