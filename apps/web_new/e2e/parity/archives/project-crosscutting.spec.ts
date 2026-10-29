@@ -72,6 +72,8 @@ import { specTags, specTitle } from "../helpers/tags";
 
 const PROJECT_DIALOG = ["ARCH-026"];
 const AUTO_ARCHIVE = ["ARCH-027"];
+/** A loaded box can trail the default poll by seconds; shared settle bound. */
+const SETTLE_POLL = { timeout: 120_000 };
 const AUTO_ARCHIVE_GATE = ["ARCH-027", "ARCH-028"];
 const PERMISSIONS_MEMBER = ["ARCH-028"];
 const PERMISSIONS_GUEST = ["ARCH-028"];
@@ -249,8 +251,12 @@ test(
         expect(await driver.automationsMonthModal()).not.toBeNull();
         await driver.automationsMonthFill("7");
         await driver.automationsMonthSubmit();
-        await expect.poll(() => driver.automationsMonthModal()).toBeNull();
-        await expect.poll(async () => (await driver.automationsArchiveRow()).pickerLabel).toBe("7 months");
+        // The modal closes on the write, and the row's label follows the
+        // refetched project; on a loaded box either can trail the submit by
+        // more than the poll's default second (observed on the desktop leg),
+        // so both settle against the shared list timeout.
+        await expect.poll(() => driver.automationsMonthModal(), SETTLE_POLL).toBeNull();
+        await expect.poll(async () => (await driver.automationsArchiveRow()).pickerLabel, SETTLE_POLL).toBe("7 months");
         expect((await serverProjectAutomations(seed.workspaceSlug, projectId, session)).archive_in).toBe(7);
       });
 

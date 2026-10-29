@@ -12,6 +12,7 @@ import { expect, test, type CDPSession, type Locator, type Page, type Route, typ
 import { sessionBrowserCookies, signInSessionRetry } from "../helpers/api";
 import { bridgeParityAssetBucket } from "../helpers/asset-bucket.js";
 import { calendarDayLabel, isoDayOffset, localTodayISO } from "../helpers/calendar-dates.js";
+import { isCloudNewEdition } from "../helpers/parity-env.js";
 import { descriptionAfterHeading } from "./modal-copy.js";
 import type {
   AdminAbsenceFacts,
@@ -1669,6 +1670,17 @@ export class WebNewDriver implements ParityDriver {
    * that path ends signed in either way.
    */
   private async entryAdmitsPassword(): Promise<boolean> {
+    // A declared cloud build never offers the credential card — its entry
+    // hands off to the provider (the cloud spec precedent, NEWFRONT-984 and
+    // NEWFRONT-745) — so the run says so with PARITY_NEW_EDITION=cloud and
+    // this answers without visiting the entry. Visiting `/` signed out is
+    // what a cloud build against a stack without its rotation endpoint
+    // cannot survive: the 401 on the session probe rotates, the rotation
+    // 404s, and the entry paints its failure surface instead of a card.
+    // That is a property of the leg, not of this area's screens, so the
+    // leg declares its edition rather than teaching the probe to read a
+    // crash as "formless".
+    if (isCloudNewEdition()) return false;
     try {
       return await this.probeEntryAdmitsPassword();
     } catch {

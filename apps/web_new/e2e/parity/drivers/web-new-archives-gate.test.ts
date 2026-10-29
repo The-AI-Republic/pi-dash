@@ -625,6 +625,33 @@ describe("rulesEnsureSignedIn on a build with no password form", () => {
     expect(cookies.added).toHaveLength(1);
   });
 
+  it("enters a declared cloud build by session without visiting its entry", async () => {
+    // A cloud build against a stack without its rotation endpoint paints a
+    // failure surface at "/" (the session probe's 401 rotates, the rotation
+    // 404s), so the run declares the edition and the driver skips the
+    // signed-out visit: no "/" goto, and a minted session is planted.
+    vi.stubEnv("PARITY_NEW_EDITION", "cloud");
+    const { page, cookies, gotos } = entryPage({});
+
+    await new WebNewDriver(page).rulesEnsureSignedIn("owner@example.com", "secret", "acme");
+
+    expect(gotos).not.toContain("/");
+    expect(cookies.added).toHaveLength(1);
+    expect(gotos).toContain("/acme/");
+  });
+
+  it("still probes the entry on an OSS build", async () => {
+    vi.stubEnv("PARITY_NEW_EDITION", "");
+    const { page, gotos } = entryPage({ passwordField: true });
+    const driver = new WebNewDriver(page);
+    vi.spyOn(driver, "isSignedOut").mockResolvedValue(true);
+    vi.spyOn(driver, "signInWithPassword").mockImplementation(async () => undefined);
+
+    await driver.rulesEnsureSignedIn("owner@example.com", "secret", "acme");
+
+    expect(gotos).toContain("/");
+  });
+
   it("keeps the credential form on a web build", async () => {
     const { page, cookies } = entryPage({ passwordField: true });
     const driver = new WebNewDriver(page);

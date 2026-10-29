@@ -142,6 +142,16 @@ export function resolveParityEnv(env: Env): ParityEnv {
   };
 }
 
+/**
+ * Whether the `new` target is the web_new **cloud edition** build
+ * (`PARITY_NEW_EDITION=cloud`, NEWFRONT-745): a cloud build declares its own
+ * entry and provider sign-in, so scenarios that drive the credential card
+ * enter it with an API-minted session instead. Unset means the OSS build.
+ */
+export function isCloudNewEdition(env: Env = process.env): boolean {
+  return (pick(env, "PARITY_NEW_EDITION") ?? "").toLowerCase() === "cloud";
+}
+
 /** The oracle base URL: explicit PARITY_ORACLE_URL, else derived from the namespace. */
 export function parityOracleUrl(env: Env): string {
   return pick(env, "PARITY_ORACLE_URL") ?? `http://localhost:${resolveParityEnv(env).ports.oracle}`;
