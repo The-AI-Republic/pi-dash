@@ -227,6 +227,30 @@ def test_enqueue_rejects_unknown_agent(
 
 
 @pytest.mark.unit
+def test_enqueue_rejects_agent_the_machine_daemon_does_not_support(
+    db, session_client, workspace, dev_machine, machine_token, live_session
+):
+    """A daemon that advertised its supported kinds (PDASHOSS01-142) gets a
+    friendly cloud-side rejection instead of bouncing the command off its
+    parser and writing back a raw ``unknown agent kind`` error."""
+    dev_machine.supported_agents = ["codex", "claude-code"]
+    dev_machine.save(update_fields=["supported_agents"])
+    resp = _enqueue(session_client, dev_machine, workspace, agent="muse-code")
+    assert resp.status_code == 400, resp.data
+    assert resp.data["error"] == "unsupported_agent"
+
+
+@pytest.mark.unit
+def test_enqueue_allows_any_agent_when_machine_advertises_nothing(
+    db, session_client, workspace, dev_machine, machine_token, live_session, _fake_redis
+):
+    """Empty advertised set means "unknown" (older daemon) — gate nothing."""
+    assert dev_machine.supported_agents == []
+    resp = _enqueue(session_client, dev_machine, workspace, agent="muse-code")
+    assert resp.status_code == 202, resp.data
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("agent", sorted(_VALID_AGENTS))
 def test_enqueue_accepts_every_supported_agent(
     db, session_client, workspace, dev_machine, machine_token, live_session, _fake_redis, agent
@@ -438,10 +462,15 @@ def test_dev_machine_list_control_online_flag(
     db, session_client, workspace, dev_machine, machine_token, live_session
 ):
     url = reverse("dev-machine-list")
+    dev_machine.supported_agents = ["codex", "claude-code"]
+    dev_machine.save(update_fields=["supported_agents"])
     resp = session_client.get(url, {"workspace": str(workspace.id)})
     assert resp.status_code == 200
     rows = {row["id"]: row for row in resp.data}
     assert rows[str(dev_machine.id)]["control_online"] is True
+    # The advertised set rides along so the Add-runner modal can gate its
+    # agent options per machine (PDASHOSS01-142).
+    assert rows[str(dev_machine.id)]["supported_agents"] == ["codex", "claude-code"]
 
     # Revoking the session flips the flag off.
     MachineSession.objects.filter(dev_machine=dev_machine).update(
