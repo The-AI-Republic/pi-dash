@@ -1818,6 +1818,20 @@ where
 const ISSUE_STATE_BARE_UPDATE_SQL: &str =
     "UPDATE issues SET state_id = $2, updated_at = $3, updated_by_id = $4 WHERE id = $1";
 
+/// N3 Issue INSERT (`views/intake.py:145-152`). `$1` = id, `$2` =
+/// created_at, `$3` = updated_at, `$4` = name, `$5` = description_json, `$6`
+/// = description_html, `$7` = priority, `$8` = project id, `$9` = triage
+/// state id. Python-side fallbacks (`:146-149`):
+/// description_json `{}` / description_html `"<p></p>"` / priority `"low"`
+/// (NOT the validated `"none"` — QUIRK-priority-default); a present-but-null
+/// key passes `None` through. No `workspace_id` kwarg
+/// (QUIRK-no-workspace-insert). Moved verbatim from
+/// `space::queries::intake_assets` (PIDASHCONV-1630): `issues` is a
+/// covered table, so the builder lives in domain/.
+pub fn issue_insert_sql() -> String {
+    "INSERT INTO \"issues\" (\"id\", \"created_at\", \"updated_at\", \"name\", \"description_json\", \"description_html\", \"priority\", \"project_id\", \"state_id\") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)".to_string()
+}
+
 /// The sync-mirror full-row INSERT both providers share
 /// (`Issue.objects.create`, `git_sync_task.py:92-97`; the
 /// `update_or_create` create arm, `github_sync_task.py:135-140`, via the
@@ -1836,20 +1850,6 @@ const ISSUE_STATE_BARE_UPDATE_SQL: &str =
 /// create fires no signal legs (`state is None` on the git arm, so the
 /// orchestration receiver sees no change; the completion receiver skips
 /// creates), so there is nothing to chain.
-/// N3 Issue INSERT (`views/intake.py:145-152`). `$1` = id, `$2` =
-/// created_at, `$3` = updated_at, `$4` = name, `$5` = description_json, `$6`
-/// = description_html, `$7` = priority, `$8` = project id, `$9` = triage
-/// state id. Python-side fallbacks (`:146-149`):
-/// description_json `{}` / description_html `"<p></p>"` / priority `"low"`
-/// (NOT the validated `"none"` — QUIRK-priority-default); a present-but-null
-/// key passes `None` through. No `workspace_id` kwarg
-/// (QUIRK-no-workspace-insert). Moved verbatim from
-/// `space::queries::intake_assets` (PIDASHCONV-1630): `issues` is a
-/// covered table, so the builder lives in domain/.
-pub fn issue_insert_sql() -> String {
-    "INSERT INTO \"issues\" (\"id\", \"created_at\", \"updated_at\", \"name\", \"description_json\", \"description_html\", \"priority\", \"project_id\", \"state_id\") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)".to_string()
-}
-
 pub struct MirrorIssueInsert {
     pub issue_id: Uuid,
     pub now: DateTime<Utc>,

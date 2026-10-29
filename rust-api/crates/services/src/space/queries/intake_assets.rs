@@ -216,10 +216,10 @@ pub fn triage_lookup_sql() -> String {
     "SELECT \"states\".* FROM \"states\" WHERE (\"states\".\"deleted_at\" IS NULL AND \"states\".\"group\" = 'triage' AND \"states\".\"project_id\" = $1 AND \"states\".\"workspace_id\" = $2) ORDER BY \"states\".\"sequence\" ASC LIMIT 1".to_string()
 }
 
-/// Alias of [`crate::domain::issues::issue_insert_sql`]: the
-/// builder moved to domain/ (PIDASHCONV-1630) — `issues` is a covered
-/// table. Kept so existing paths keep resolving.
-pub use crate::domain::issues::issue_insert_sql;
+// NOTE: the N3 issue-INSERT builder moved to
+// `domain::issues::issue_insert_sql` (PIDASHCONV-1630) — `issues` is
+// a covered table, so the builder lives in domain/. No alias:
+// nothing outside this crate's tests used the old path.
 
 /// N3 IntakeIssue INSERT (`views/intake.py:165-170`). `$1` = id, `$2` =
 /// created_at, `$3` = updated_at, `$4` = intake id (**URL kwarg**,
@@ -384,6 +384,7 @@ pub fn bulk_reassign_sql(count: usize) -> String {
 mod tests {
     use super::super::project_meta::{board_by_anchor_first_sql, settings_get_sql};
     use super::*;
+    use crate::domain::issues::issue_insert_sql;
 
     const FIXTURE_INTAKE_SQL: &str =
         include_str!("../../../../../fixtures/space/queries/intake.sql");

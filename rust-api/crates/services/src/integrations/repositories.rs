@@ -451,10 +451,10 @@ pub async fn bind_repository<S: GitStore>(
     Ok((binding, clone_url))
 }
 
-/// Alias of [`crate::domain::projects::project_repo_update_sql`]:
-/// the builder moved to domain/ (PIDASHCONV-1630) — `projects` is a
-/// covered table. Kept so existing paths keep resolving.
-pub use crate::domain::projects::project_repo_update_sql;
+// NOTE: the repo-fields builder moved to
+// `domain::projects::project_repo_update_sql` (PIDASHCONV-1630) —
+// `projects` is a covered table, so the builder lives in domain/.
+// No alias: nothing outside this crate's tests used the old path.
 
 /// `get_binding` (`services.py:353-358`).
 pub async fn get_binding<S: GitStore>(
@@ -538,6 +538,7 @@ mod tests {
     use super::super::accounts::fakes::*;
     use super::super::accounts::{GitIntegrationError, GitStore, ServiceError, StoreError};
     use super::*;
+    use crate::domain::projects::project_repo_update_sql;
     use chrono::TimeZone;
     use pidash_db::integrations::git_models::{
         git_provider_account::{self, GitProviderAccount},
