@@ -55,6 +55,26 @@ function inboxIssueIdFromPath(path: string): string {
   return decodeURIComponent(match[1]);
 }
 
+/**
+ * The created request's id, polling until the post-create navigation
+ * lands. The dialog closes on the mutation response while the address
+ * follows through the router, so a single read races the transition
+ * (gate NEWFRONT-695). Both legs poll; the oracle resolves at once.
+ */
+async function createdIssueId(driver: ParityDriver): Promise<string> {
+  let path = await driver.currentPath();
+  await expect
+    .poll(
+      async () => {
+        path = await driver.currentPath();
+        return /[?&]inboxIssueId=([^&]+)/.test(path);
+      },
+      { timeout: 30_000 }
+    )
+    .toBe(true);
+  return inboxIssueIdFromPath(path);
+}
+
 /** Open the dialog on a fresh project as the seeded owner. */
 async function openFreshDialog(
   driver: ParityDriver,
@@ -97,7 +117,7 @@ test(
         await driver.intakeCreateSubmit();
       });
 
-      const issueId = inboxIssueIdFromPath(await driver.currentPath());
+      const issueId = await createdIssueId(driver);
 
       await test.step("screen opens the new item", async () => {
         expect(await driver.intakeCreateDialogOpen()).toBe(false);
@@ -275,7 +295,7 @@ test(
       await driver.intakeCreateFillTitle(title);
       await driver.intakeCreateSubmit();
       expect(await driver.intakeCreateDialogOpen()).toBe(false);
-      const issueId = inboxIssueIdFromPath(await driver.currentPath());
+      const issueId = await createdIssueId(driver);
       const detail = await serverIntakeCreateDetail(seed.workspaceSlug, projectId, issueId, session);
       expect(detail.name).toBe(title);
     } finally {
@@ -333,12 +353,23 @@ test(
       // handler wins over the form's busy guard, so Escape mid-upload
       // closes with no wait notice. Intended: same wait notice as
       // Discard, dialog kept. See NEWFRONT-304 and the INT-016 row.
+      // The new build guards Escape exactly like close (gate
+      // NEWFRONT-695), so its leg asserts the wait, not the close.
+      const onNew = driver.target === "web_new";
       await driver.intakeCreateFillTitle(`${tag} request`);
       await driver.intakeCreateStallNextUpload();
       await driver.intakeCreateInsertImage({ name: "dot.png", mime: "image/png", bytes: tinyPng() });
       await driver.intakeCreatePressEscape();
+      if (onNew) {
+        await expect.poll(() => driver.isToastVisible("still processing"), { timeout: 15_000 }).toBe(true);
+        expect(await driver.intakeCreateDialogOpen()).toBe(true);
+        await driver.intakeCreateReleaseUpload();
+        await expect.poll(() => driver.intakeCreateEditorImageCount(), { timeout: 60_000 }).toBe(1);
+        await driver.intakeCreatePressEscape();
+      } else {
+        await driver.intakeCreateReleaseUpload();
+      }
       await expect.poll(() => driver.intakeCreateDialogOpen(), { timeout: 15_000 }).toBe(false);
-      await driver.intakeCreateReleaseUpload();
       const rows = await serverInboxIssues(seed.workspaceSlug, projectId, session);
       expect(rows).toEqual([]);
     } finally {
@@ -385,7 +416,7 @@ test(
 
       const issueId = await test.step("save and resolve the created item", async () => {
         await driver.intakeCreateSubmit();
-        return inboxIssueIdFromPath(await driver.currentPath());
+        return createdIssueId(driver);
       });
 
       await test.step("the upload is attached to the created work item", async () => {
@@ -395,7 +426,15 @@ test(
         expect(assets[0]?.uploaded).toBe(true);
         const detail = await serverIntakeCreateDetail(seed.workspaceSlug, projectId, issueId, session);
         expect(detail.name).toBe(title);
-        expect(detail.descriptionHtml).toContain("image-component");
+        // The old editor serializes an image-component node; the new
+        // stack serializes a plain img (every new reader accepts both,
+        // and the spec only requires the HTML to reference the asset),
+        // so the new leg pins the img instead (gate NEWFRONT-695).
+        if (driver.target === "web_new") {
+          expect(detail.descriptionHtml).toContain("<img");
+        } else {
+          expect(detail.descriptionHtml).toContain("image-component");
+        }
         expect(detail.descriptionHtml).toContain(assets[0]?.id ?? "");
       });
     } finally {
@@ -443,7 +482,7 @@ test(
         await driver.intakeCreateSubmit();
       });
 
-      const issueId = inboxIssueIdFromPath(await driver.currentPath());
+      const issueId = await createdIssueId(driver);
 
       await test.step("a triage state exists again and owns the request", async () => {
         const probe = await serverIntakeCreateTriageProbe(seed.workspaceSlug, projectId, session);

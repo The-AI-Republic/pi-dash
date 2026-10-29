@@ -41,7 +41,9 @@
     "/{ws}/projects/{projectId}/pages",
     "/{ws}/projects/{projectId}/pages/*",
     "/{ws}/projects/{projectId}/issues",
-    "/{ws}/projects/{projectId}/issues/*"
+    "/{ws}/projects/{projectId}/issues/*",
+    "/{ws}/projects/{projectId}/intake",
+    "/{ws}/projects/{projectId}/inbox"
   ],
   "reservedTopLevel": [
     "404",

@@ -35,6 +35,13 @@ export interface IntakeTriageActionsProps {
   projectIdentifier: string;
   /** The acted request's work-item id, excluded from the picker. */
   issueId: string;
+  /**
+   * The viewer's project role, or null outside the project. The accept
+   * form filters its offered projects by create permission, so the
+   * locked row must carry the role or the form degrades to its
+   * no-project notice (gate NEWFRONT-695, INT-020).
+   */
+  memberRole: number | null;
 }
 
 export function IntakeTriageActions({
@@ -44,6 +51,7 @@ export function IntakeTriageActions({
   projectName,
   projectIdentifier,
   issueId,
+  memberRole,
 }: IntakeTriageActionsProps): React.ReactElement {
   return (
     <>
@@ -70,6 +78,7 @@ export function IntakeTriageActions({
         projectName={projectName}
         projectIdentifier={projectIdentifier}
         issueId={issueId}
+        memberRole={memberRole}
       />
     </>
   );
@@ -89,6 +98,7 @@ export function IntakeTriageDialogs({
   projectName,
   projectIdentifier,
   issueId,
+  memberRole,
 }: IntakeTriageDialogsProps): React.ReactElement {
   return (
     <>
@@ -98,7 +108,7 @@ export function IntakeTriageDialogs({
           if (!open) controls.setOpenDialog(null);
         }}
         workspaceSlug={workspaceSlug}
-        projects={[{ id: projectId, name: projectName, identifier: projectIdentifier }]}
+        projects={[{ id: projectId, name: projectName, identifier: projectIdentifier, memberRole }]}
         initialProjectId={projectId}
         lockedProjectId={projectId}
         edit={controls.acceptTarget}

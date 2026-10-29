@@ -73,6 +73,8 @@ export interface IntakeDetailProps {
    * the address to the neighbour. True when the tab emptied.
    */
   onAdvance: (removedId: string) => boolean;
+  /** A duplicate write landed; the screen pins the staying selection. */
+  onStay: (issueId: string) => void;
 }
 
 export function IntakeDetail({
@@ -90,6 +92,7 @@ export function IntakeDetail({
   onToggleList,
   onMissing,
   onAdvance,
+  onStay,
 }: IntakeDetailProps): React.ReactElement | null {
   const detail = useIntakeDetail(workspaceSlug, projectId, issueId);
   const me = useMe();
@@ -155,6 +158,7 @@ export function IntakeDetail({
       listOpen={listOpen}
       onToggleList={onToggleList}
       onAdvance={onAdvance}
+      onStay={onStay}
     />
   );
 }
@@ -175,6 +179,7 @@ interface IntakeDetailLoadedProps {
   listOpen: boolean;
   onToggleList: (() => void) | undefined;
   onAdvance: (removedId: string) => boolean;
+  onStay: (issueId: string) => void;
 }
 
 function IntakeDetailLoaded({
@@ -193,6 +198,7 @@ function IntakeDetailLoaded({
   listOpen,
   onToggleList,
   onAdvance,
+  onStay,
 }: IntakeDetailLoadedProps): React.ReactElement {
   const titleUpdate = useUpdateIntakeIssue({
     workspaceSlug,
@@ -232,6 +238,7 @@ function IntakeDetailLoaded({
     isAuthorized: isProjectAuthorized(role),
     isCreator,
     onAdvance,
+    onStay,
   });
   const duplicate = detail.duplicate_issue_detail;
   const duplicateKey = duplicate === null ? null : `${projectIdentifier}-${duplicate.sequence_id}`;
@@ -292,6 +299,7 @@ function IntakeDetailLoaded({
               projectName={projectName}
               projectIdentifier={projectIdentifier}
               issueId={issueId}
+              memberRole={role}
             />
           ) : undefined}
         </>
@@ -316,6 +324,7 @@ function IntakeDetailLoaded({
                 projectName={projectName}
                 projectIdentifier={projectIdentifier}
                 issueId={issueId}
+                memberRole={role}
               />
             ) : undefined
           }

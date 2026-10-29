@@ -425,6 +425,7 @@ function renderDetail(queryClient: QueryClient, props: Partial<React.ComponentPr
   const onNext = vi.fn();
   const onMissing = vi.fn();
   const onAdvance = vi.fn(() => false);
+  const onStay = vi.fn();
   render(
     <QueryClientProvider client={queryClient}>
       <IntakeDetail
@@ -439,6 +440,7 @@ function renderDetail(queryClient: QueryClient, props: Partial<React.ComponentPr
         onNext={onNext}
         onMissing={onMissing}
         onAdvance={onAdvance}
+        onStay={onStay}
         {...props}
       />
     </QueryClientProvider>

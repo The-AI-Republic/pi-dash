@@ -113,6 +113,23 @@ export function IntakeListPane({
     }
   }
 
+  // A short first page never overflows, so no scroll gesture can reach
+  // the paging threshold and the tail rows stay unreachable: fill the
+  // pane while another page exists and nothing is in flight (gate
+  // NEWFRONT-695, INT-007). The guards mirror the scroll handler, plus
+  // the failed read (whose retry owns the next attempt) — without them
+  // an erroring page would refetch on every render.
+  const paneRef = React.useRef<HTMLDivElement | null>(null);
+  React.useLayoutEffect(() => {
+    const pane = paneRef.current;
+    if (pane === null || !hasNextPage || loadingMore || failed) return;
+    // Fill only a laid-out pane whose content fits: a zero-height pane
+    // is hidden or unmeasured, and firing there would prefetch behind
+    // the scroll-driven paging the overflowing case owns (INT-007).
+    if (pane.clientHeight <= 0 || pane.scrollHeight > pane.clientHeight) return;
+    onLoadMore();
+  });
+
   return (
     <aside className="flex min-h-0 w-80 shrink-0 flex-col border-r border-(--border)">
       <div className="shrink-0 border-b border-(--border) px-(--space-2) py-(--space-2)">
@@ -149,6 +166,7 @@ export function IntakeListPane({
         aria-label={`${tab === "open" ? "Open" : "Closed"} intake requests`}
         data-testid="intake-list-pane"
         tabIndex={-1}
+        ref={paneRef}
         onScroll={handleScroll}
         className="min-h-0 flex-1 overflow-y-auto"
       >
