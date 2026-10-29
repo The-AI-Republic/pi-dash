@@ -70,7 +70,8 @@ export interface GanttBulkFlags {
  * ride the workspace's project list, which the gated route already holds;
  * the estimate link does not — that list answers a fixed column set
  * without it — so the estimate entry follows the project's own row
- * (EST-018). A project the list does not carry shows every field.
+ * (EST-018). A project the list does not carry still shows its
+ * cycle and module fields; only the estimate entry follows the row.
  */
 export function useProjectBulkFlags(workspaceSlug: string, projectId: string): GanttBulkFlags {
   const client = getAppClient();
