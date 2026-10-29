@@ -21,6 +21,7 @@ interface StubLocator {
   locator?: (selector: string, options?: unknown) => StubLocator;
   getByRole?: (role: string, options?: unknown) => StubLocator;
   getByText?: (text: RegExp | string, options?: unknown) => StubLocator;
+  filter?: (options?: unknown) => StubLocator;
   evaluate?: (fn: (element: never, arg?: never) => unknown, arg?: unknown) => Promise<unknown>;
   evaluateAll?: (fn: (nodes: never[]) => unknown) => Promise<unknown>;
   boundingBox?: () => Promise<{ x: number; y: number; width: number; height: number } | null>;
@@ -52,6 +53,7 @@ function locator(overrides: Partial<StubLocator> = {}): Locator {
     locator: () => node,
     getByRole: () => node,
     getByText: () => node,
+    filter: () => node,
   };
   for (const [name, value] of Object.entries(defaults)) {
     if (node[name] === undefined) node[name] = value;
@@ -189,6 +191,7 @@ describe("activity feed driver methods", () => {
 
   it("toggles one category by its label and closes the popover", async () => {
     const toggled: string[] = [];
+    const waits: (string | undefined)[] = [];
     const filter = locator();
     const { page, recorded } = pageOf({
       role: (role) => {
@@ -196,6 +199,7 @@ describe("activity feed driver methods", () => {
         if (role === "group") {
           return locator({
             locator: () => locator(),
+            waitFor: async (options?: unknown) => void waits.push((options as { state?: string } | undefined)?.state),
             getByRole: (innerRole, innerOptions) => {
               expect(innerRole).toBe("checkbox");
               expect((innerOptions as { exact?: boolean }).exact).toBe(true);
@@ -211,6 +215,9 @@ describe("activity feed driver methods", () => {
     await new WebNewDriver(page).activityToggleFilter("Comments");
     expect(toggled).toEqual(["Comments"]);
     expect(recorded.keys).toContain("Escape");
+    // The closing panel must be gone before the fresh open, or the
+    // toggle resolves against a detaching node (NEWFRONT-818).
+    expect(waits).toEqual(["detached", undefined]);
   });
 
   it("reads the narrowed marker off the filter trigger", async () => {
@@ -374,7 +381,7 @@ describe("activity feed driver methods", () => {
       },
     });
     const { page } = pageOf({
-      role: (role, options) => {
+      role: (role, _options) => {
         if (role === "group") {
           return locator({
             locator: () => editor,
@@ -390,10 +397,14 @@ describe("activity feed driver methods", () => {
           });
         }
         if (role === "article") {
-          expect((options as { hasText?: unknown }).hasText).toBe("hello");
           return locator({
-            waitFor: async () => {
-              cardWaited += 1;
+            filter: (filterOptions?: { hasText?: unknown }) => {
+              expect(filterOptions?.hasText).toBe("hello");
+              return locator({
+                waitFor: async () => {
+                  cardWaited += 1;
+                },
+              });
             },
           });
         }

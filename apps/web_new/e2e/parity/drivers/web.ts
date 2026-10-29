@@ -4150,6 +4150,16 @@ export class WebDriver implements ParityDriver {
     await editor.pressSequentially(text, { timeout: 30_000 });
   }
 
+  async composerEditAppend(text: string): Promise<void> {
+    // Click inside the opening paragraph, then line end: the caret
+    // lands at the end of that block whatever the editor holds after
+    // it, keeping embedded nodes.
+    const editor = this.commentEditEditor();
+    await editor.locator("p").first().click({ timeout: 30_000 });
+    await editor.press("End", { timeout: 30_000 });
+    await editor.pressSequentially(text, { timeout: 30_000 });
+  }
+
   /** The card holding the open inline edit form (exactly one is ever open). */
   private commentEditCard(): Locator {
     // Found from the open editor upward: a `{ has: <page-scoped locator> }`

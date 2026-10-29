@@ -951,3 +951,47 @@ Status cells. Slices never bring up the parity stack; the area gate
 NEWFRONT-818 runs every comments scenario against `apps/web_new`, turns
 passing rows into `new green`, and files fix issues for failures. A row whose
 behaviour is not in the current split is a defect in the split, not a stub.
+
+## 15. Gate-time clarifications (NEWFRONT-818)
+
+Recorded when the area gate proved all 25 rows green on `apps/web_new`
+(final proof 32/32, plus sameness legs on the cloud stack and a
+desktop-target build).
+
+- **Pinned bugs show the intended behaviour in the new build.** The three
+  `bug:` oracle scenarios stay as written against the old app; the new
+  build is expected to differ, and the gate diverged the new-build
+  driver expectation rather than the oracle. NEWFRONT-145: a failed
+  attachment upload surfaces an error notice without losing the draft.
+  NEWFRONT-147: an edit that keeps the image arms save; the new build
+  duplicates the asset into the revision, and when the duplicate call
+  itself fails with a 5xx it keeps the edit saveable by sharing the
+  source asset id rather than losing the user's edit (the backend
+  duplicate-assets 500 is tracked separately in NEWFRONT-1028).
+  NEWFRONT-128: the merged history read no longer 500s; the new build
+  merges the two split reads client-side.
+- **Deep-link form (CMT-007).** The copied link is relative,
+  `/{ws}/browse/…#comment-{id}`, matching the oracle. Absolute links
+  with the public host are not used.
+- **Mention queries (CMT-019).** The trigger query accepts multi-word
+  text (`allowSpaces`), so typing a full name keeps narrowing instead
+  of closing the suggestion list.
+- **Git-sync fixture (CMT-005).** The seeded git-synced comment is
+  single-use per database state: the scenario unbinds the repository
+  to prove deletion works after unbind, so a full-suite proof needs a
+  fresh database reset to keep the row green.
+- **In-suite load flakes (no product change).** Two scenarios failed
+  only inside full-suite runs under dev-server pressure and passed
+  standalone unmodified and on later full re-proofs: the intake spec
+  once rendered a blank body, and the sameness spec once found no
+  Activity section. Both are attributed to chunk delivery under load,
+  not to comment behaviour.
+- **Routes.** The area's screens ride already-migrated prefixes —
+  `/{ws}/browse/{workItem}` and `/{ws}/projects/{projectId}/intake` —
+  so the gate added no entries and the proxy regeneration was a no-op
+  (NEWFRONT-528's workspace-scoped form is in place).
+- **Edition legs.** The full suite ran on OSS; CMT-025 additionally
+  passed on a cloud-edition stack (`PARITY_ORACLE_EDITION=cloud`) and
+  on a desktop-target build of `apps/web_new`, one sameness scenario
+  each. No desktop shell binary or private-overlay UI beyond the
+  oracle stack was exercised.

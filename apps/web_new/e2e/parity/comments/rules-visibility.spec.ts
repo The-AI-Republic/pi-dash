@@ -47,7 +47,11 @@ test(
     });
 
     await test.step("new comments start internal with a switch offered", async () => {
-      expect(await driver.rulesCommentAccessBadge(comment.id)).toBe("internal");
+      // The new app learns the project is externally shared a beat after
+      // the card paints; the oracle knows it at first paint. Either way
+      // the badge must settle internal, which also means the project
+      // read behind the switch has landed before the menu is opened.
+      await expect.poll(() => driver.rulesCommentAccessBadge(comment.id), { timeout: 30_000 }).toBe("internal");
       const options = await driver.rulesCommentMenuOptions(comment.id);
       expect(options).toContain("access_switch");
     });

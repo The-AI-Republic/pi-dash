@@ -80,8 +80,10 @@ test(
       await expect.poll(() => driver.rulesCommentBodyText(comment.id), { timeout: 30_000 }).not.toBe(null);
       const body = await driver.rulesCommentBodyText(comment.id);
       expect(body ?? "").toContain(MARKER);
-      const cardText = await driver.rulesCommentCardText(comment.id);
-      expect(cardText).toContain("🎉");
+      // The new app reads reactions through their own query, which lands
+      // just after the optimistic body; the oracle embeds them in the
+      // row. Either way the chip must reappear, so poll for it.
+      await expect.poll(() => driver.rulesCommentCardText(comment.id), { timeout: 30_000 }).toContain("🎉");
       await expect
         .poll(
           async () =>
