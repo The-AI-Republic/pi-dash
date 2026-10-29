@@ -323,6 +323,61 @@ describe("cyclesDismissDatePicker", () => {
   });
 });
 
+describe("cyclesCreatePastDayDisabled", () => {
+  /** Local `yyyy-MM-dd` for a day offset from now. */
+  function localIso(offset: number): string {
+    const at = new Date();
+    at.setDate(at.getDate() + offset);
+    return `${at.getFullYear()}-${String(at.getMonth() + 1).padStart(2, "0")}-${String(at.getDate()).padStart(2, "0")}`;
+  }
+
+  /** The recorded path of one day cell in the dialog's range calendar. */
+  function cellPath(iso: string): string {
+    return `page.getByTestId("cycle-date-range-calendar").locator(${JSON.stringify(`button[data-day="${iso}"]`)})`;
+  }
+
+  it("probes the viewer's local today, not the project zone", async () => {
+    const script = new Recorder();
+    const yesterday = localIso(-1);
+    const today = localIso(0);
+    script.disableds.set(cellPath(yesterday), true);
+    script.disableds.set(cellPath(today), false);
+    expect(await script.driver().cyclesCreatePastDayDisabled()).toBe(true);
+    // Both boundary days were read as cells, each after turning the grid.
+    expect(script.callsFor(cellPath(yesterday), "isDisabled")).toHaveLength(1);
+    expect(script.callsFor(cellPath(today), "isDisabled")).toHaveLength(1);
+    const monthSelects = script.calls.filter(
+      (call) => call.path.includes('getByLabel("Month"') && call.method === "selectOption"
+    );
+    expect(monthSelects).toHaveLength(2);
+    expect(script.presses).toEqual(["Escape"]);
+  });
+
+  it("keeps the same rule in a zone ahead of the project's", async () => {
+    const tz = process.env["TZ"];
+    process.env["TZ"] = "Pacific/Auckland";
+    try {
+      const script = new Recorder();
+      const yesterday = localIso(-1);
+      const today = localIso(0);
+      script.disableds.set(cellPath(yesterday), true);
+      script.disableds.set(cellPath(today), false);
+      expect(await script.driver().cyclesCreatePastDayDisabled()).toBe(true);
+      expect(script.callsFor(cellPath(yesterday), "isDisabled")).toHaveLength(1);
+      expect(script.callsFor(cellPath(today), "isDisabled")).toHaveLength(1);
+    } finally {
+      if (tz === undefined) delete process.env["TZ"];
+      else process.env["TZ"] = tz;
+    }
+  });
+
+  it("reports false when today itself is disabled", async () => {
+    const script = new Recorder();
+    script.disableds.set(cellPath(localIso(0)), true);
+    expect(await script.driver().cyclesCreatePastDayDisabled()).toBe(false);
+  });
+});
+
 describe("cyclesSidebarDescription", () => {
   it("reads the description body", async () => {
     const script = new Recorder();

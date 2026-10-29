@@ -17,7 +17,7 @@ import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/toaster.js";
-import { DateRangePicker, type RangeValue } from "../../issues/index.js";
+import { DateRangePicker, todayIsoDay, type RangeValue } from "../../issues/index.js";
 import { invalidateAfterCycleWrite } from "../api/invalidate.js";
 import {
   CYCLE_OVERLAP_TITLE,
@@ -27,7 +27,7 @@ import {
   cycleOverlapMessage,
   needsCycleDateCheck,
 } from "../dialog/cycleRange.js";
-import { cycleSpanModel, instantToProjectDate, projectToday } from "../lib/cycleDates.js";
+import { cycleSpanModel, instantToProjectDate } from "../lib/cycleDates.js";
 
 export interface CycleSidebarDatesProps {
   workspaceSlug: string;
@@ -146,7 +146,7 @@ export function CycleSidebarDates({
         value={draft}
         onChange={handleChange}
         mode="merged"
-        min={projectToday(projectTimeZone)}
+        min={todayIsoDay()}
         label="Cycle dates"
         testId="cycle-sidebar-dates-picker"
         clearable

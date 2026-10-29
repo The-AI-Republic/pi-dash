@@ -371,8 +371,15 @@ The dialog asks for (CYC-014, CYC-015):
   with the input intact. A single date alone is accepted only on
   **edit** (§7), where PATCH allows it and stored one-sided cycles must
   stay editable. The overlap check never runs unless both dates are
-  present. The past is not selectable for the start date (today is
-  allowed); the end date cannot precede the start date. The dialog
+  present. The past is not selectable for the end date either (today is
+  allowed): the range calendar's floor is the **viewer's own calendar
+  day**, not the project's. The oracle passes the client's `new Date()`
+  to a calendar that lays out days in the browser zone, so a project
+  whose zone has already rolled past midnight (a UTC project on a US
+  evening) never hides the viewer's today. A picker floor taken in the
+  project zone would disable the viewer's today in that window; the
+  project zone is the basis for reading and displaying stored dates, not
+  for the picker floor. The end date cannot precede the start date. The dialog
   heading is **"Create cycle"** (edit uses
   **"Update cycle"**), and the footer's confirm control is the button
   **"Create cycle"** on create / **"Update cycle"** on edit, next to a
@@ -848,7 +855,11 @@ Sections, top to bottom:
   replaces or queues visibly, and an overlap rejection is always shown
   (§26, NEWFRONT-264).
 - **Dates and timezone** (CYC-044, see §17): the date span with the
-  project offset chip whenever the project offset is non-zero.
+  project offset chip whenever the project offset is non-zero. The
+  sidebar picker's floor is the viewer's local today, the same rule as
+  the dialog (§6), even though the span it shows is the project-zone
+  reading: the offset chip explains the stored dates, the picker only
+  stops days that are already past on the viewer's own calendar.
 - **Description** (CYC-037): the cycle's description, read-only, with
   paragraph breaks preserved. An empty description renders nothing — no
   placeholder text — matching the old sidebar. Editing the description
@@ -1064,6 +1075,15 @@ sidebar all agree on what "today" and "covers today" mean. The helper
 takes the project timezone as an argument; it is part of slice A
 (NEWFRONT-707) and is the only place the area converts calendar days to
 instants.
+
+The one exception is the picker floor (§6, §14): the cycle date pickers
+disable days before the viewer's local today, a reading the shared helper
+does not serve, because a stored cycle day is a project-zone calendar day
+while a day the viewer is about to pick is a day on their own wall
+calendar. The picker floor uses the same local-day primitive the other
+date editors in the app use, so every date picker agrees on what "before
+today" means for the person clicking. Spans, display, the hero's
+covers-today rule and the date-check request keep the project zone.
 
 Oracle: `hero-crosscutting.spec.ts` (cycle dates carry the project
 offset and user-timezone equivalents; no offset chip when the project

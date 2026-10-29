@@ -403,7 +403,9 @@ describe("CreateCycleDialog form", () => {
   it("disables the past in the start picker while today stays enabled", async () => {
     renderCreate();
     const calendar = await openCalendar();
-    const today = projectToday("UTC");
+    // The picker's floor is the viewer's own today (ISS-215), so the
+    // boundary days come from the browser's clock, not the project zone.
+    const today = localDayOf(new Date().toISOString());
     const past = calendar.querySelector(`button[data-day="${shiftDay(today, -1)}"]`);
     const present = calendar.querySelector(`button[data-day="${today}"]`);
     expect(past).not.toBeNull();
@@ -817,4 +819,60 @@ describe("UpdateCycleDialog", () => {
     );
     expect(screen.getByRole("button", { name: "Update cycle" })).toBeEnabled();
   });
+});
+
+/** Freeze the clock only; real timers keep user-event interaction working. */
+function freezeClock(at: string): void {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date(at));
+}
+
+/** Run one body with the browser's zone set to `zone`. */
+function inViewerZone(zone: string, body: () => Promise<void>): () => Promise<void> {
+  return async () => {
+    const previous = process.env["TZ"];
+    process.env["TZ"] = zone;
+    try {
+      await body();
+    } finally {
+      if (previous === undefined) delete process.env["TZ"];
+      else process.env["TZ"] = previous;
+    }
+  };
+}
+
+describe("CreateCycleDialog minimum day (ISS-215)", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it(
+    "keeps the viewer's today pickable while the project zone has rolled into tomorrow",
+    inViewerZone("America/Los_Angeles", async () => {
+      // 04:00 UTC is the evening of Oct 28 in California: the project's
+      // UTC day is already Oct 29 while the viewer still edits Oct 28.
+      freezeClock("2026-10-29T04:00:00Z");
+      harness.detailsTimezone = "UTC";
+      renderCreate();
+      const calendar = await openCalendar();
+      expect(calendar.querySelector('button[data-day="2026-10-27"]')).toBeDisabled();
+      expect(calendar.querySelector('button[data-day="2026-10-28"]')).toBeEnabled();
+      expect(calendar.querySelector('button[data-day="2026-10-29"]')).toBeEnabled();
+    })
+  );
+
+  it(
+    "uses the viewer's day even when the project zone lags it",
+    inViewerZone("Pacific/Auckland", async () => {
+      // 04:00 UTC is the late afternoon of Oct 29 in Auckland, so the
+      // viewer's today is a day ahead of a Los Angeles project.
+      freezeClock("2026-10-29T04:00:00Z");
+      harness.detailsTimezone = "America/Los_Angeles";
+      renderCreate();
+      const calendar = await openCalendar();
+      expect(calendar.querySelector('button[data-day="2026-10-28"]')).toBeDisabled();
+      expect(calendar.querySelector('button[data-day="2026-10-29"]')).toBeEnabled();
+      expect(calendar.querySelector('button[data-day="2026-10-30"]')).toBeEnabled();
+    })
+  );
 });

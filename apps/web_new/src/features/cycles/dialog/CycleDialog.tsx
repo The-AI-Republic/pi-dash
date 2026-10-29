@@ -19,12 +19,12 @@ import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { useProjectRoles } from "../../auth/index.js";
-import { DateRangePicker, type RangeValue } from "../../issues/index.js";
+import { DateRangePicker, todayIsoDay, type RangeValue } from "../../issues/index.js";
 import { isProjectAuthorized, projectDetailsQueryOptions } from "../../projects/index.js";
 import { ProjectPicker, toProjectOption } from "../../../shared/pickers/index.js";
 import { notifyError, notifySuccess, storePreference } from "../../../shared/shell/index.js";
 import { invalidateAfterCycleWrite } from "../api/invalidate.js";
-import { instantToProjectDate, projectToday } from "../lib/cycleDates.js";
+import { instantToProjectDate } from "../lib/cycleDates.js";
 import {
   CYCLE_OVERLAP_TITLE,
   cycleFailureMessage,
@@ -335,7 +335,7 @@ function SaveCycleFormBody(props: SaveCycleFormBodyProps): React.ReactElement {
               setRange(next);
               if (rangeError !== null) setRangeError(validateCycleRange(next, props.mode));
             }}
-            min={projectToday(timeZone)}
+            min={todayIsoDay()}
             clearable
             disabled={submitting}
             testId="cycle-date-range"
