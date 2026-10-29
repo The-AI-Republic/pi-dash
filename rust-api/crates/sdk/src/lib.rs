@@ -714,4 +714,14 @@ mod tests {
         // takes no external deps, so no `HeaderMap` is built here).
         let _ = std::mem::size_of_val(&crate::compat::http::form_field);
     }
+
+    /// OVL-10 residue (PIDASHCONV-1646): the float repr resolves through
+    /// the SDK facade via the existing `pidash_compat::py` module
+    /// re-export. Behaviour is pinned by pidash-compat's own
+    /// `py_json_float_cases` + halfway tests; this only locks the path.
+    #[test]
+    fn compat_py_float_is_exported() {
+        assert_eq!(crate::compat::py::py_json_float(0.5), "0.5");
+        assert_eq!(crate::compat::py::py_json_float(f64::INFINITY), "Infinity");
+    }
 }
