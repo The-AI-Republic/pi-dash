@@ -10,7 +10,11 @@
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
-import { CHUNK_LOAD_ATTEMPTS, loadWithRetry } from "../../../../../../features/exports/chunkRetry.js";
+import {
+  CHUNK_LOAD_ATTEMPTS,
+  CHUNK_LOAD_RETRY_DELAY_MS,
+  loadWithRetry,
+} from "../../../../../../features/exports/chunkRetry.js";
 import { ExportsSettingsPage } from "../../../../../../features/workspace-settings/components/ExportsSettingsPage.js";
 import { registerWorkspaceSettingsPage } from "../../../../../../features/workspace-settings/lib/registry.js";
 import { SettingsSectionOutlet } from "../../../../../../features/workspace-settings/components/SettingsSectionOutlet.js";
@@ -30,7 +34,11 @@ function WorkspaceSettingsSectionPage(): React.ReactElement {
   // the initial bundle (NEWFRONT-768). A transient load failure retries
   // instead of pinning the pending slot (NEWFRONT-772, EXP-023).
   React.useEffect(() => {
-    void loadWithRetry(() => import("../../../../../../features/exports/register.js"), CHUNK_LOAD_ATTEMPTS);
+    void loadWithRetry(
+      () => import("../../../../../../features/exports/register.js"),
+      CHUNK_LOAD_ATTEMPTS,
+      CHUNK_LOAD_RETRY_DELAY_MS
+    );
   }, []);
   return <SettingsSectionOutlet workspaceSlug={ws} section="exports" />;
 }
