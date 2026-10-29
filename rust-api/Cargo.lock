@@ -3077,6 +3077,7 @@ dependencies = [
  "chrono-tz",
  "hmac 0.12.1",
  "http",
+ "icu_properties",
  "sea-query",
  "serde",
  "serde_json",
