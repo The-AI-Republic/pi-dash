@@ -101,8 +101,16 @@ use serde::Serialize;
 use serde_json::Value;
 use sqlx::Row;
 
+use crate::middleware::body_limit::read_request_bytes;
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
+use pidash_compat::datetime::render_rfc3339_in;
+use pidash_compat::py::{py_num_str, python_dumps};
+use pidash_compat::response::json_response;
+use pidash_compat::validate::push_error;
+use pidash_db::app_pages::strip::ml_strip_tags;
+use pidash_services::domain::comments as comment_domain;
+use pidash_services::read::{self, ActorDetailView, CommentReactionView, CommentRow, CommentView};
 use pidash_services::space::{guards, queries};
 
 // ---------------------------------------------------------------------------
@@ -216,6 +224,8 @@ enum HandlerError {
     BadJson(Value),
     /// 400 `{"detail": ...}` (malformed JSON bodies).
     BadDetail(String),
+    /// 502, truncated request-body read (the shared bad-gateway shape).
+    TruncatedBody,
     /// 500 `{"error":"Something went wrong please try again later"}` —
     /// the fallback envelope.
     ServerError,
@@ -252,6 +262,10 @@ impl HandlerError {
                 StatusCode::BAD_REQUEST,
                 format!("{{\"detail\":{}}}", json_string(message)),
             ),
+            HandlerError::TruncatedBody => (
+                StatusCode::BAD_GATEWAY,
+                crate::edge::BAD_GATEWAY_BODY.to_owned(),
+            ),
             HandlerError::ServerError => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 r#"{"error":"Something went wrong please try again later"}"#.to_owned(),
@@ -277,15 +291,6 @@ impl IntoResponse for HandlerError {
 
 fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
-}
-
-/// Render `body` (already exact JSON bytes) with an explicit status.
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("handler json response")
 }
 
 fn pool_of(state: &AppState) -> Result<&sqlx::PgPool, HandlerError> {
@@ -430,20 +435,9 @@ fn req_bool(obj: &serde_json::Map<String, Value>, key: &str) -> Result<bool, Han
     }
 }
 
-fn req_json(obj: &serde_json::Map<String, Value>, key: &str) -> Result<Value, HandlerError> {
-    obj.get(key).cloned().ok_or(HandlerError::ServerError)
-}
-
-/// Render a `row_to_json` timestamptz value exactly like DRF `DateTimeField`
-/// with the default `iso-8601` format: ISO-8601 in the request's zone with
-/// `+00:00` rewritten to `Z` (serializer kernel rule).
-fn render_dt(raw: &str, tz: &chrono_tz::Tz) -> Result<String, HandlerError> {
-    let dt = chrono::DateTime::parse_from_rfc3339(raw).map_err(|_| HandlerError::ServerError)?;
-    Ok(crate::serializer::render_datetime_in(&dt, tz))
-}
-
 fn render_dt_opt(raw: Option<String>, tz: &chrono_tz::Tz) -> Result<Option<String>, HandlerError> {
-    raw.map(|text| render_dt(&text, tz)).transpose()
+    raw.map(|text| render_rfc3339_in(&text, tz).map_err(|_| HandlerError::ServerError))
+        .transpose()
 }
 
 // ---------------------------------------------------------------------------
@@ -552,96 +546,17 @@ async fn project_workspace_id(
 // `json.dumps` with CPython defaults (Celery `requested_data` payloads)
 // ---------------------------------------------------------------------------
 
-/// `json.dumps(value)`: `separators=(', ', ': ')`, `ensure_ascii=True`,
-/// insertion-ordered keys. Same implementation as the intake handlers'
-/// `python_dumps` (convergent copy; the two dedupe if both merge).
-fn python_dumps(value: &serde_json::Value) -> String {
-    let mut out = String::new();
-    python_dump_into(&mut out, value);
-    out
-}
-
-fn python_dump_into(out: &mut String, value: &serde_json::Value) {
-    match value {
-        serde_json::Value::Null => out.push_str("null"),
-        serde_json::Value::Bool(true) => out.push_str("true"),
-        serde_json::Value::Bool(false) => out.push_str("false"),
-        serde_json::Value::Number(number) => out.push_str(&number.to_string()),
-        serde_json::Value::String(text) => python_dump_str(out, text),
-        serde_json::Value::Array(items) => {
-            out.push('[');
-            for (index, item) in items.iter().enumerate() {
-                if index > 0 {
-                    out.push_str(", ");
-                }
-                python_dump_into(out, item);
-            }
-            out.push(']');
-        }
-        serde_json::Value::Object(map) => {
-            out.push('{');
-            for (index, (key, item)) in map.iter().enumerate() {
-                if index > 0 {
-                    out.push_str(", ");
-                }
-                python_dump_str(out, key);
-                out.push_str(": ");
-                python_dump_into(out, item);
-            }
-            out.push('}');
-        }
+/// The `Description` mirror row's stripped text on `create()`: `Description.save`
+/// RECOMPUTES it with Django's own `strip_tags` (`db/models/description.py:22-29`),
+/// which keeps entities verbatim — unlike the comment column's entity-decoding
+/// MLStripper (`utils/html_processor.py`). Empty HTML stores NULL. (PATCH syncs
+/// the decoded form via queryset `update()`, which runs no `save()`.)
+fn description_stripped_for_create(comment_html: &str) -> Option<String> {
+    if comment_html.is_empty() {
+        None
+    } else {
+        Some(super::sanitize::strip_tags(comment_html))
     }
-}
-
-/// CPython `py_encode_basestring_ascii`.
-fn python_dump_str(out: &mut String, text: &str) {
-    out.push('"');
-    for ch in text.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{08}' => out.push_str("\\b"),
-            '\u{0C}' => out.push_str("\\f"),
-            ch if (ch as u32) < 0x20 || (ch as u32) == 0x7F => {
-                out.push_str(&format!("\\u{:04x}", ch as u32));
-            }
-            ch if (ch as u32) > 0x7E => {
-                let code = ch as u32;
-                if code > 0xFFFF {
-                    let v = code - 0x10000;
-                    out.push_str(&format!(
-                        "\\u{:04x}\\u{:04x}",
-                        0xD800 + (v >> 10),
-                        0xDC00 + (v & 0x3FF)
-                    ));
-                } else {
-                    out.push_str(&format!("\\u{code:04x}"));
-                }
-            }
-            ch => out.push(ch),
-        }
-    }
-    out.push('"');
-}
-
-/// `django.utils.html.strip_tags`: remove every `<...>` span. The comment
-/// `save()` computes `comment_stripped` this way (`db/models/issue.py:601`;
-/// `""` stays `""`).
-fn strip_tags(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    let mut in_tag = false;
-    for ch in value.chars() {
-        match ch {
-            '<' => in_tag = true,
-            '>' if in_tag => in_tag = false,
-            _ if !in_tag => out.push(ch),
-            _ => {}
-        }
-    }
-    out
 }
 
 // ---------------------------------------------------------------------------
@@ -709,10 +624,14 @@ async fn ensure_public_member(
         .await
         .map_err(|_| HandlerError::ServerError)?;
     if existing.is_none() {
+        // `created_by` is the request user (`member_id` at every call
+        // site); `updated_by` stays NULL on create (`BaseModel.save`,
+        // `db/models/base.py:23-43`).
         sqlx::query(pidash_jobs::space::PUBLIC_MEMBER_INSERT_SQL)
             .bind(uuid::Uuid::new_v4())
             .bind(project_id)
             .bind(workspace_id)
+            .bind(member_id)
             .bind(member_id)
             .execute(pool)
             .await
@@ -722,177 +641,72 @@ async fn ensure_public_member(
 }
 
 // ---------------------------------------------------------------------------
-// Shared nests: users, assets, lite leaves
+// Comment rendering (the public read service owns the row types, the
+// views and the renderers; the wrappers map every failure to the 500
+// the moved code raised).
 // ---------------------------------------------------------------------------
 
-/// `SELECT` for the user row behind `actor_detail` nests. Unlike every
-/// other forward FK here, this carries no soft-deletion guard: `User`
-/// (`db/models/user.py:56`, `AbstractBaseUser` + `PermissionsMixin`) has no
-/// `deleted_at` column, so Django emits no filter for it.
-fn user_detail_sql() -> String {
-    "SELECT \"users\".\"id\", \"users\".\"first_name\", \"users\".\"last_name\", \"users\".\"avatar\", \"users\".\"avatar_asset_id\", \"users\".\"is_bot\", \"users\".\"display_name\" FROM \"users\" WHERE (\"users\".\"id\" = $1)".to_string()
-}
-
-/// `SELECT` for the `display_name` behind reaction/vote rows
-/// (`source="actor.display_name"`). Same unguarded `users` read as
-/// [`user_detail_sql`]: no `deleted_at` column exists to filter on.
-fn display_name_sql() -> String {
-    "SELECT display_name FROM users WHERE id = $1".to_string()
-}
-
-/// `SELECT` for the logo/cover asset row behind `*_url` properties (the
-/// project_meta shape).
-fn logo_asset_sql() -> String {
-    "SELECT \"a\".\"id\", \"a\".\"entity_type\", \"a\".\"workspace_id\", \"a\".\"project_id\", \"a\".\"issue_id\", \"w\".\"slug\" AS \"workspace_slug\" FROM \"file_assets\" AS \"a\" LEFT OUTER JOIN \"workspaces\" AS \"w\" ON (\"a\".\"workspace_id\" = \"w\".\"id\") WHERE (\"a\".\"deleted_at\" IS NULL AND \"a\".\"id\" = $1)".to_string()
-}
-
-/// Port of `FileAsset.asset_url` (`db/models/asset.py:80-99`): static-asset
-/// branches render `/api/assets/v2/static/<id>/`; attachment/description
-/// branches interpolate ids; anything else renders `None`.
-fn asset_url(
-    asset_id: &str,
-    entity_type: Option<&str>,
-    workspace_slug: Option<&str>,
-    project_id: Option<&str>,
-    issue_id: Option<&str>,
-) -> Option<String> {
-    match entity_type {
-        Some("WORKSPACE_LOGO" | "USER_AVATAR" | "USER_COVER" | "PROJECT_COVER") => {
-            Some(format!("/api/assets/v2/static/{asset_id}/"))
-        }
-        Some("ISSUE_ATTACHMENT") => {
-            let (slug, project, issue) = match (workspace_slug, project_id, issue_id) {
-                (Some(s), Some(p), Some(i)) => (s, p, i),
-                _ => return None,
-            };
-            Some(format!(
-                "/api/assets/v2/workspaces/{slug}/projects/{project}/issues/{issue}/attachments/{asset_id}/"
-            ))
-        }
-        Some(
-            "ISSUE_DESCRIPTION"
-            | "COMMENT_DESCRIPTION"
-            | "PAGE_DESCRIPTION"
-            | "DRAFT_ISSUE_DESCRIPTION",
-        ) => {
-            let (slug, project) = match (workspace_slug, project_id) {
-                (Some(s), Some(p)) => (s, p),
-                _ => return None,
-            };
-            Some(format!(
-                "/api/assets/v2/workspaces/{slug}/projects/{project}/{asset_id}/"
-            ))
-        }
-        _ => None,
-    }
-}
-
-/// Resolve a logo/cover/avatar URL the way the model properties do: the
-/// asset's `asset_url` when the FK is set (even when that computes to
-/// `None`), else the raw string column, else `None`. Empty strings are
-/// falsy in Python (`if self.avatar`), so they render `None` too.
-async fn logo_or_cover_url(
-    pool: &sqlx::PgPool,
-    raw: Option<String>,
-    asset_id: Option<String>,
-) -> Result<Option<String>, HandlerError> {
-    let Some(asset_id) = asset_id else {
-        return Ok(raw.filter(|text| !text.is_empty()));
-    };
-    let row = fetch_optional_object(pool, &logo_asset_sql(), &[uuid_param(&asset_id)?])
-        .await?
-        .ok_or(HandlerError::ServerError)?;
-    let o = obj(&row)?;
-    let entity_type = opt_str(o, "entity_type")?;
-    let workspace_slug = opt_str(o, "workspace_slug")?;
-    let project_id = opt_str(o, "project_id")?;
-    let issue_id = opt_str(o, "issue_id")?;
-    let id = req_str(o, "id")?;
-    Ok(asset_url(
-        &id,
-        entity_type.as_deref(),
-        workspace_slug.as_deref(),
-        project_id.as_deref(),
-        issue_id.as_deref(),
-    ))
-}
-
-/// App `UserLiteSerializer` (`app/serializers/user.py:141-154`), in
-/// `Meta.fields` order.
-#[derive(Debug, Serialize)]
-struct ActorDetailView {
-    id: String,
-    first_name: String,
-    last_name: String,
-    avatar: Option<String>,
-    avatar_url: Option<String>,
-    is_bot: bool,
-    display_name: String,
-}
-
-/// Render one user row as `actor_detail`. A dangling FK is a 500 like
-/// Python's `DoesNotExist` → fallback envelope.
+/// Render one user row as `actor_detail` via the public read service.
 async fn render_actor_detail(
     pool: &sqlx::PgPool,
     user_id: &str,
 ) -> Result<ActorDetailView, HandlerError> {
-    let row = fetch_optional_object(pool, &user_detail_sql(), &[uuid_param(user_id)?])
-        .await?
-        .ok_or(HandlerError::ServerError)?;
-    let o = obj(&row)?;
-    let avatar = opt_str(o, "avatar")?;
-    let avatar_url =
-        logo_or_cover_url(pool, avatar.clone(), opt_str(o, "avatar_asset_id")?).await?;
-    Ok(ActorDetailView {
-        id: req_str(o, "id")?,
-        first_name: opt_str(o, "first_name")?.unwrap_or_default(),
-        last_name: opt_str(o, "last_name")?.unwrap_or_default(),
-        // `avatar` is the raw column: DRF renders `""` verbatim. Only the
-        // `avatar_url` property folds falsy values to `None`
-        // (`db/models/user.py:143-151`, via `logo_or_cover_url` above).
-        avatar,
-        avatar_url,
-        is_bot: req_bool(o, "is_bot")?,
-        display_name: opt_str(o, "display_name")?.unwrap_or_default(),
-    })
+    read::render_actor_detail(pool, user_id)
+        .await
+        .map_err(|_| HandlerError::ServerError)
 }
 
+/// Render one comment row with its nests via the public read service.
+async fn render_comment(
+    pool: &sqlx::PgPool,
+    row: &CommentRow,
+    tz: &chrono_tz::Tz,
+    include_member: bool,
+) -> Result<CommentView, HandlerError> {
+    read::render_comment(pool, row, tz, include_member)
+        .await
+        .map_err(|_| HandlerError::ServerError)
+}
+
+/// Render one reaction row via the public read service.
+async fn render_comment_reaction_row(
+    pool: &sqlx::PgPool,
+    row: &Value,
+    tz: &chrono_tz::Tz,
+) -> Result<CommentReactionView, HandlerError> {
+    read::render_comment_reaction_row(pool, row, tz)
+        .await
+        .map_err(|_| HandlerError::ServerError)
+}
+
+/// The synced-comment lock via the public read service.
+async fn comment_is_synced(
+    pool: &sqlx::PgPool,
+    external_source: Option<&str>,
+    comment_id: &str,
+) -> Result<bool, HandlerError> {
+    read::comment_is_synced(pool, external_source, comment_id)
+        .await
+        .map_err(|_| HandlerError::ServerError)
+}
 // ---------------------------------------------------------------------------
 // Query strings (Django QueryDict.get: last value wins)
 // ---------------------------------------------------------------------------
 
-/// One query value, repeated or not (the app_issues shape).
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(untagged)]
-enum OneOrMany {
-    One(String),
-    Many(Vec<String>),
-}
-
-type QueryMap = std::collections::HashMap<String, OneOrMany>;
-
-/// Django `QueryDict.get`: the last value, or `None`.
-fn query_last(query: &QueryMap, key: &str) -> Option<String> {
-    query.get(key).and_then(|value| match value {
-        OneOrMany::One(one) => Some(one.clone()),
-        OneOrMany::Many(many) => many.last().cloned(),
-    })
-}
+use pidash_compat::http::{query_last, QueryMap};
 
 // ---------------------------------------------------------------------------
 // Request bodies (DRF JSON parsing)
 // ---------------------------------------------------------------------------
 
-/// Django's `DATA_UPLOAD_MAX_MEMORY_SIZE` default.
-const MAX_BODY: usize = 2_621_440;
-
-/// Read the request body the way DRF does for JSON posts: empty → `{}`;
-/// malformed → `ParseError` 400; non-object JSON → the attribute errors
-/// the view code hits (500 envelope).
+/// Read the request body the way DRF does for JSON posts: unbounded past
+/// the serve-wide `BodyLimitLayer`; empty → `{}`; malformed → `ParseError`
+/// 400; non-object JSON → the attribute errors the view code hits
+/// (500 envelope).
 async fn read_body(req: Request) -> Result<Value, HandlerError> {
-    let bytes = axum::body::to_bytes(req.into_body(), MAX_BODY)
+    let bytes = read_request_bytes(req.into_body())
         .await
-        .map_err(|_| HandlerError::ServerError)?;
+        .map_err(|_| HandlerError::TruncatedBody)?;
     parse_body(&bytes)
 }
 
@@ -916,452 +730,10 @@ async fn proxy(state: &AppState, req: Request) -> Response {
 }
 
 // ---------------------------------------------------------------------------
-// Comment shapes (app IssueCommentSerializer, issue.py:948-989)
-// ---------------------------------------------------------------------------
-
-/// App `IssueFlatSerializer` for `issue_detail`
-/// (`app/serializers/issue.py:105-123`), in `Meta.fields` order.
-#[derive(Debug, Serialize)]
-struct IssueFlatView {
-    id: String,
-    name: String,
-    description_json: Value,
-    description_html: Option<String>,
-    priority: String,
-    complexity_score: Value,
-    start_date: Option<String>,
-    target_date: Option<String>,
-    sequence_id: i64,
-    sort_order: Value,
-    is_draft: bool,
-}
-
-/// App `ProjectLiteSerializer` for `project_detail`
-/// (`app/serializers/project.py:120-133`), in `Meta.fields` order.
-#[derive(Debug, Serialize)]
-struct ProjectLiteView {
-    id: String,
-    identifier: String,
-    name: String,
-    cover_image: Option<String>,
-    cover_image_url: Option<String>,
-    logo_props: Value,
-    description: Option<String>,
-    is_default: bool,
-}
-
-/// App `WorkspaceLiteSerializer` for `workspace_detail`
-/// (`app/serializers/workspace.py:79-83`), in `Meta.fields` order.
-#[derive(Debug, Serialize)]
-struct WorkspaceLiteView {
-    name: String,
-    slug: String,
-    id: String,
-    logo_url: Option<String>,
-}
-
-/// App `CommentReactionSerializer` (`app/serializers/issue.py:917-937`),
-/// in `Meta.fields` order. `display_name` reads `actor.display_name`.
-#[derive(Debug, Serialize)]
-struct CommentReactionView {
-    id: String,
-    actor: String,
-    comment: String,
-    reaction: String,
-    display_name: String,
-    deleted_at: Option<String>,
-    workspace: Option<String>,
-    project: Option<String>,
-    created_at: String,
-    updated_at: String,
-    created_by: Option<String>,
-    updated_by: Option<String>,
-}
-
-/// App `IssueCommentSerializer` (`app/serializers/issue.py:948-972`):
-/// `Meta.fields = "__all__"`, which DRF orders as pk, declared fields in
-/// creation order, concrete model fields, then forward relations
-/// (`get_default_field_names`). `is_member` is only present on
-/// queryset-annotated rows (list/retrieve), never on create/update
-/// responses.
-#[derive(Debug, Serialize)]
-struct CommentView {
-    id: String,
-    actor_detail: Option<ActorDetailView>,
-    issue_detail: IssueFlatView,
-    project_detail: ProjectLiteView,
-    workspace_detail: WorkspaceLiteView,
-    comment_reactions: Vec<CommentReactionView>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    is_member: Option<bool>,
-    is_synced: bool,
-    created_at: String,
-    updated_at: String,
-    deleted_at: Option<String>,
-    comment_stripped: Option<String>,
-    comment_json: Value,
-    comment_html: Option<String>,
-    attachments: Value,
-    labels: Value,
-    access: Option<String>,
-    external_source: Option<String>,
-    external_id: Option<String>,
-    speaker_type: Option<String>,
-    speaker_label: Option<String>,
-    speaker_agent_run_id: Option<String>,
-    edited_at: Option<String>,
-    created_by: Option<String>,
-    updated_by: Option<String>,
-    project: Option<String>,
-    workspace: Option<String>,
-    description: Option<String>,
-    issue: Option<String>,
-    actor: Option<String>,
-    parent: Option<String>,
-}
-
-/// The `issue_comments` columns one render needs, read from the
-/// `row_to_json` object. `created_by`/`updated_by` arrive as
-/// `created_by_id` from `SELECT *` (the column names); the `or_else`
-/// fallback covers aliased selects.
-struct CommentRow {
-    id: String,
-    created_at: String,
-    updated_at: String,
-    created_by: Option<String>,
-    updated_by: Option<String>,
-    deleted_at: Option<String>,
-    project_id: Option<String>,
-    workspace_id: Option<String>,
-    comment_stripped: Option<String>,
-    comment_json: Value,
-    comment_html: Option<String>,
-    description_id: Option<String>,
-    attachments: Value,
-    labels: Value,
-    issue_id: Option<String>,
-    actor_id: Option<String>,
-    access: Option<String>,
-    external_source: Option<String>,
-    external_id: Option<String>,
-    speaker_type: Option<String>,
-    speaker_label: Option<String>,
-    speaker_agent_run_id: Option<String>,
-    edited_at: Option<String>,
-    parent_id: Option<String>,
-    is_member: Option<bool>,
-}
-
-impl CommentRow {
-    fn from_value(value: &Value) -> Result<Self, HandlerError> {
-        let o = obj(value)?;
-        let is_member = match o.get("is_member") {
-            None => None,
-            Some(Value::Bool(b)) => Some(*b),
-            Some(Value::Null) => None,
-            _ => return Err(HandlerError::ServerError),
-        };
-        Ok(Self {
-            id: req_str(o, "id")?,
-            created_at: req_str(o, "created_at")?,
-            updated_at: req_str(o, "updated_at")?,
-            created_by: opt_str(o, "created_by_id")?
-                .or_else(|| opt_str(o, "created_by").unwrap_or(None)),
-            updated_by: opt_str(o, "updated_by_id")?
-                .or_else(|| opt_str(o, "updated_by").unwrap_or(None)),
-            deleted_at: opt_str(o, "deleted_at")?,
-            project_id: opt_str(o, "project_id")?,
-            workspace_id: opt_str(o, "workspace_id")?,
-            comment_stripped: opt_str(o, "comment_stripped")?,
-            comment_json: o.get("comment_json").cloned().unwrap_or(Value::Null),
-            comment_html: opt_str(o, "comment_html")?,
-            description_id: opt_str(o, "description_id")?,
-            attachments: o.get("attachments").cloned().unwrap_or(Value::Null),
-            labels: o.get("labels").cloned().unwrap_or(Value::Null),
-            issue_id: opt_str(o, "issue_id")?,
-            actor_id: opt_str(o, "actor_id")?,
-            access: opt_str(o, "access")?,
-            external_source: opt_str(o, "external_source")?,
-            external_id: opt_str(o, "external_id")?,
-            speaker_type: opt_str(o, "speaker_type")?,
-            speaker_label: opt_str(o, "speaker_label")?,
-            speaker_agent_run_id: opt_str(o, "speaker_agent_run_id")?,
-            edited_at: opt_str(o, "edited_at")?,
-            parent_id: opt_str(o, "parent_id")?,
-            is_member,
-        })
-    }
-}
-
-/// Render one comment row with its nests. `include_member` is true for
-/// list/retrieve (annotated queryset) and false for create/update (plain
-/// instance: the key is skipped, like DRF's `SkipField`).
-async fn render_comment(
-    pool: &sqlx::PgPool,
-    row: &CommentRow,
-    tz: &chrono_tz::Tz,
-    include_member: bool,
-) -> Result<CommentView, HandlerError> {
-    let issue_detail = render_issue_flat(pool, row.issue_id.as_deref()).await?;
-    let project_detail = render_project_lite(pool, row.project_id.as_deref()).await?;
-    let workspace_detail = render_workspace_lite(pool, row.workspace_id.as_deref()).await?;
-    let comment_reactions = render_comment_reactions(pool, &row.id, tz).await?;
-    let actor_detail = match row.actor_id.as_deref() {
-        None => None,
-        Some(actor) => Some(render_actor_detail(pool, actor).await?),
-    };
-    let is_synced = comment_is_synced(pool, row.external_source.as_deref(), &row.id).await?;
-    Ok(CommentView {
-        id: row.id.clone(),
-        actor_detail,
-        issue_detail,
-        project_detail,
-        workspace_detail,
-        comment_reactions,
-        is_member: if include_member { row.is_member } else { None },
-        is_synced,
-        created_at: render_dt(&row.created_at, tz)?,
-        updated_at: render_dt(&row.updated_at, tz)?,
-        created_by: row.created_by.clone(),
-        updated_by: row.updated_by.clone(),
-        deleted_at: render_dt_opt(row.deleted_at.clone(), tz)?,
-        project: row.project_id.clone(),
-        workspace: row.workspace_id.clone(),
-        comment_stripped: row.comment_stripped.clone(),
-        comment_json: row.comment_json.clone(),
-        comment_html: row.comment_html.clone(),
-        description: row.description_id.clone(),
-        attachments: row.attachments.clone(),
-        labels: row.labels.clone(),
-        issue: row.issue_id.clone(),
-        actor: row.actor_id.clone(),
-        access: row.access.clone(),
-        external_source: row.external_source.clone(),
-        external_id: row.external_id.clone(),
-        speaker_type: row.speaker_type.clone(),
-        speaker_label: row.speaker_label.clone(),
-        speaker_agent_run_id: row.speaker_agent_run_id.clone(),
-        edited_at: render_dt_opt(row.edited_at.clone(), tz)?,
-        parent: row.parent_id.clone(),
-    })
-}
-
-/// `issue_detail`: the flat leaf over the comment's issue FK. The read
-/// mirrors `_base_manager` (no `deleted_at` filter), so a soft-deleted
-/// issue still renders; only a genuinely missing row is a 500 like
-/// Python's `DoesNotExist` → fallback envelope (PIDASHCONV-1260).
-async fn render_issue_flat(
-    pool: &sqlx::PgPool,
-    issue_id: Option<&str>,
-) -> Result<IssueFlatView, HandlerError> {
-    let Some(issue_id) = issue_id else {
-        return Err(HandlerError::ServerError);
-    };
-    let row = fetch_optional_object(
-        pool,
-        "SELECT \"issues\".\"id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"is_draft\" FROM \"issues\" WHERE (\"issues\".\"id\" = $1)",
-        &[uuid_param(issue_id)?],
-    )
-    .await?
-    .ok_or(HandlerError::ServerError)?;
-    let o = obj(&row)?;
-    let sequence_id = match o.get("sequence_id") {
-        Some(Value::Number(n)) => n.as_i64().ok_or(HandlerError::ServerError)?,
-        _ => return Err(HandlerError::ServerError),
-    };
-    // DRF `FloatField` renders `65535.0`, never Postgres `float8out`'s
-    // `65535` (the project_meta kernel rule).
-    let sort_order = match o.get("sort_order") {
-        Some(Value::Number(n)) => {
-            let float = n.as_f64().ok_or(HandlerError::ServerError)?;
-            serde_json::Number::from_f64(float)
-                .map(Value::Number)
-                .ok_or(HandlerError::ServerError)?
-        }
-        _ => return Err(HandlerError::ServerError),
-    };
-    Ok(IssueFlatView {
-        id: req_str(o, "id")?,
-        name: req_str(o, "name")?,
-        description_json: req_json(o, "description_json")?,
-        description_html: opt_str(o, "description_html")?,
-        priority: req_str(o, "priority")?,
-        complexity_score: req_json(o, "complexity_score")?,
-        start_date: opt_str(o, "start_date")?,
-        target_date: opt_str(o, "target_date")?,
-        sequence_id,
-        sort_order,
-        is_draft: req_bool(o, "is_draft")?,
-    })
-}
-
-/// `project_detail`: the app lite leaf over the comment's project FK.
-/// Unfiltered `_base_manager` read: a soft-deleted project still renders
-/// (PIDASHCONV-1260).
-async fn render_project_lite(
-    pool: &sqlx::PgPool,
-    project_id: Option<&str>,
-) -> Result<ProjectLiteView, HandlerError> {
-    let Some(project_id) = project_id else {
-        return Err(HandlerError::ServerError);
-    };
-    let row = fetch_optional_object(
-        pool,
-        "SELECT \"projects\".\"id\", \"projects\".\"identifier\", \"projects\".\"name\", \"projects\".\"cover_image\", \"projects\".\"cover_image_asset_id\", \"projects\".\"logo_props\", \"projects\".\"description\", \"projects\".\"is_default\" FROM \"projects\" WHERE (\"projects\".\"id\" = $1)",
-        &[uuid_param(project_id)?],
-    )
-    .await?
-    .ok_or(HandlerError::ServerError)?;
-    let o = obj(&row)?;
-    let cover_image_url = logo_or_cover_url(
-        pool,
-        opt_str(o, "cover_image")?,
-        opt_str(o, "cover_image_asset_id")?,
-    )
-    .await?;
-    Ok(ProjectLiteView {
-        id: req_str(o, "id")?,
-        identifier: req_str(o, "identifier")?,
-        name: req_str(o, "name")?,
-        cover_image: opt_str(o, "cover_image")?,
-        cover_image_url,
-        logo_props: req_json(o, "logo_props")?,
-        description: opt_str(o, "description")?,
-        is_default: req_bool(o, "is_default")?,
-    })
-}
-
-/// `workspace_detail`: the app lite leaf over the comment's workspace FK.
-/// Unfiltered `_base_manager` read: a soft-deleted workspace still renders
-/// (PIDASHCONV-1260).
-async fn render_workspace_lite(
-    pool: &sqlx::PgPool,
-    workspace_id: Option<&str>,
-) -> Result<WorkspaceLiteView, HandlerError> {
-    let Some(workspace_id) = workspace_id else {
-        return Err(HandlerError::ServerError);
-    };
-    let row = fetch_optional_object(
-        pool,
-        "SELECT \"workspaces\".\"id\", \"workspaces\".\"name\", \"workspaces\".\"slug\", \"workspaces\".\"logo\", \"workspaces\".\"logo_asset_id\" FROM \"workspaces\" WHERE (\"workspaces\".\"id\" = $1)",
-        &[uuid_param(workspace_id)?],
-    )
-    .await?
-    .ok_or(HandlerError::ServerError)?;
-    let o = obj(&row)?;
-    let logo_url =
-        logo_or_cover_url(pool, opt_str(o, "logo")?, opt_str(o, "logo_asset_id")?).await?;
-    Ok(WorkspaceLiteView {
-        name: req_str(o, "name")?,
-        slug: req_str(o, "slug")?,
-        id: req_str(o, "id")?,
-        logo_url,
-    })
-}
-
-/// `comment_reactions`: the live reaction rows for one comment, newest
-/// first (model `ordering = ("-created_at",)`).
-async fn render_comment_reactions(
-    pool: &sqlx::PgPool,
-    comment_id: &str,
-    tz: &chrono_tz::Tz,
-) -> Result<Vec<CommentReactionView>, HandlerError> {
-    let rows = fetch_all_objects(
-        pool,
-        "SELECT \"comment_reactions\".* FROM \"comment_reactions\" WHERE (\"comment_reactions\".\"deleted_at\" IS NULL AND \"comment_reactions\".\"comment_id\" = $1) ORDER BY \"comment_reactions\".\"created_at\" DESC",
-        &[uuid_param(comment_id)?],
-    )
-    .await?;
-    let mut out = Vec::with_capacity(rows.len());
-    for row in &rows {
-        out.push(render_comment_reaction_row(pool, row, tz).await?);
-    }
-    Ok(out)
-}
-
-async fn render_comment_reaction_row(
-    pool: &sqlx::PgPool,
-    row: &Value,
-    tz: &chrono_tz::Tz,
-) -> Result<CommentReactionView, HandlerError> {
-    let o = obj(row)?;
-    let actor_id = req_str(o, "actor_id")?;
-    let display_name = fetch_display_name(pool, &actor_id).await?;
-    Ok(CommentReactionView {
-        id: req_str(o, "id")?,
-        actor: actor_id,
-        comment: req_str(o, "comment_id")?,
-        reaction: req_str(o, "reaction")?,
-        display_name,
-        deleted_at: render_dt_opt(opt_str(o, "deleted_at")?, tz)?,
-        workspace: opt_str(o, "workspace_id")?,
-        project: opt_str(o, "project_id")?,
-        created_at: render_dt(&req_str(o, "created_at")?, tz)?,
-        updated_at: render_dt(&req_str(o, "updated_at")?, tz)?,
-        created_by: opt_str(o, "created_by_id")?
-            .or_else(|| opt_str(o, "created_by").unwrap_or(None)),
-        updated_by: opt_str(o, "updated_by_id")?
-            .or_else(|| opt_str(o, "updated_by").unwrap_or(None)),
-    })
-}
-
-/// `display_name` for reaction rows (`source="actor.display_name"`).
-async fn fetch_display_name(pool: &sqlx::PgPool, user_id: &str) -> Result<String, HandlerError> {
-    let id = uuid::Uuid::parse_str(user_id).map_err(|_| HandlerError::ServerError)?;
-    let row: Option<(Option<String>,)> = sqlx::query_as(&display_name_sql())
-        .bind(id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| HandlerError::ServerError)?;
-    row.map(|row| row.0.unwrap_or_default())
-        .ok_or(HandlerError::ServerError)
-}
-
-/// The synced-comment lock (`app/serializers/issue.py:79-91`): native rows
-/// (`external_source` empty) short-circuit before any DB probe.
-async fn comment_is_synced(
-    pool: &sqlx::PgPool,
-    external_source: Option<&str>,
-    comment_id: &str,
-) -> Result<bool, HandlerError> {
-    if external_source.unwrap_or("").is_empty() {
-        return Ok(false);
-    }
-    let id = uuid::Uuid::parse_str(comment_id).map_err(|_| HandlerError::ServerError)?;
-    let git: Option<(uuid::Uuid,)> = sqlx::query_as(
-        "SELECT id FROM git_comment_syncs WHERE deleted_at IS NULL AND comment_id = $1 LIMIT 1",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| HandlerError::ServerError)?;
-    if git.is_some() {
-        return Ok(true);
-    }
-    let github: Option<(uuid::Uuid,)> = sqlx::query_as(
-        "SELECT id FROM github_comment_syncs WHERE deleted_at IS NULL AND comment_id = $1 LIMIT 1",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| HandlerError::ServerError)?;
-    Ok(github.is_some())
-}
-
-// ---------------------------------------------------------------------------
 // Validation (serializer `is_valid`, error bodies are `serializer.errors`)
 // ---------------------------------------------------------------------------
 
 type FieldErrors = serde_json::Map<String, Value>;
-
-fn push_error(errors: &mut FieldErrors, field: &str, message: String) {
-    errors
-        .entry(field.to_owned())
-        .or_insert_with(|| Value::Array(Vec::new()))
-        .as_array_mut()
-        .expect("error entry is an array")
-        .push(Value::String(message));
-}
 
 fn field_errors(errors: FieldErrors) -> Result<(), HandlerError> {
     if errors.is_empty() {
@@ -1386,8 +758,11 @@ fn check_text(
             None
         }
         Some(Value::String(text)) => {
+            // DRF `CharField(trim_whitespace=True)`: strip first, then
+            // count characters — same tail as app_issues `check_text_tail`.
+            let stripped = text.trim();
             if let Some(max) = max_length {
-                if text.len() > max {
+                if stripped.chars().count() > max {
                     push_error(
                         errors,
                         field,
@@ -1395,7 +770,7 @@ fn check_text(
                     );
                 }
             }
-            Some(text.clone())
+            Some(stripped.to_owned())
         }
         _ => {
             push_error(errors, field, "Not a valid string.".to_owned());
@@ -1405,7 +780,9 @@ fn check_text(
 }
 
 /// Required text input (the reaction name): missing, null, blank and
-/// wrong-typed inputs each fail their own way.
+/// wrong-typed inputs each fail their own way. DRF `CharField` over the
+/// reaction `TextField` (`db/models/issue.py:733,760`): strip first, then
+/// the blank check, and coerce basic numerics via `str(data)`.
 fn check_required_text(
     errors: &mut FieldErrors,
     body: &serde_json::Map<String, Value>,
@@ -1421,12 +798,20 @@ fn check_required_text(
             None
         }
         Some(Value::String(text)) => {
-            if text.is_empty() {
+            // DRF `CharField(trim_whitespace=True)`: strip first, then
+            // the blank check — same tail as `check_text` above.
+            let stripped = text.trim();
+            if stripped.is_empty() {
                 push_error(errors, field, "This field may not be blank.".to_owned());
                 None
             } else {
-                Some(text.clone())
+                Some(stripped.to_owned())
             }
+        }
+        Some(Value::Number(number)) => {
+            // DRF `CharField.to_internal_value` coerces ints/floats via
+            // `str(data)`; bools and composites still fail below.
+            Some(py_num_str(number))
         }
         _ => {
             push_error(errors, field, "Not a valid string.".to_owned());
@@ -1485,7 +870,10 @@ fn check_nullable_text(
         None => None,
         Some(Value::Null) => Some(None),
         Some(Value::String(text)) => {
-            if text.len() > max_length {
+            // DRF `CharField(trim_whitespace=True)`: strip first, then
+            // count characters — same tail as app_issues `check_text_tail`.
+            let stripped = text.trim();
+            if stripped.chars().count() > max_length {
                 push_error(
                     errors,
                     field,
@@ -1493,7 +881,7 @@ fn check_nullable_text(
                 );
                 None
             } else {
-                Some(Some(text.clone()))
+                Some(Some(stripped.to_owned()))
             }
         }
         _ => {
@@ -1605,8 +993,11 @@ fn check_string_list(
             for item in items {
                 match item {
                     Value::String(text) => {
+                        // List items are DRF child `CharField`s: strip, then
+                        // count characters (app_issues `check_text_tail`).
+                        let stripped = text.trim();
                         if let Some(max) = item_max_length {
-                            if text.len() > max {
+                            if stripped.chars().count() > max {
                                 push_error(
                                     errors,
                                     field,
@@ -1615,7 +1006,7 @@ fn check_string_list(
                                 return None;
                             }
                         }
-                        out.push(text.clone());
+                        out.push(stripped.to_owned());
                     }
                     _ => {
                         push_error(errors, field, "Not a valid string.".to_owned());
@@ -1848,7 +1239,13 @@ async fn comment_list_inner(
     let tz = request_tz(actor.as_ref());
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
-        let rendered = render_comment(pool, &CommentRow::from_value(row)?, &tz, true).await?;
+        let rendered = render_comment(
+            pool,
+            &CommentRow::from_value(row).map_err(|_| HandlerError::ServerError)?,
+            &tz,
+            true,
+        )
+        .await?;
         out.push(serde_json::to_value(&rendered).map_err(|_| HandlerError::ServerError)?);
     }
     serde_json::to_string(&out).map_err(|_| HandlerError::ServerError)
@@ -1967,7 +1364,13 @@ async fn comment_retrieve_inner(
     .await?;
     let row = rows.first().ok_or(HandlerError::NotFoundDetail)?;
     let tz = request_tz(actor.as_ref());
-    let rendered = render_comment(pool, &CommentRow::from_value(row)?, &tz, true).await?;
+    let rendered = render_comment(
+        pool,
+        &CommentRow::from_value(row).map_err(|_| HandlerError::ServerError)?,
+        &tz,
+        true,
+    )
+    .await?;
     serde_json::to_string(&rendered).map_err(|_| HandlerError::ServerError)
 }
 
@@ -2028,8 +1431,9 @@ async fn comment_create_inner(
     let now = chrono::Utc::now();
     let comment_id = uuid::Uuid::new_v4();
     // `IssueComment.save`: `comment_stripped` is recomputed from
-    // `comment_html` (`db/models/issue.py:601`); absent html defaults to
-    // `"<p></p>"` (model default).
+    // `comment_html` with MLStripper (`db/models/issue.py:601` over
+    // `utils/html_processor.py`); absent html defaults to `"<p></p>"`
+    // (model default).
     let html = input
         .comment_html
         .clone()
@@ -2037,7 +1441,7 @@ async fn comment_create_inner(
     let stripped = if html.is_empty() {
         String::new()
     } else {
-        strip_tags(&html)
+        ml_strip_tags(&html)
     };
     let comment_json = input
         .comment_json
@@ -2051,53 +1455,64 @@ async fn comment_create_inner(
     // `IssueComment.save` runs the comment insert, the `Description` mirror
     // insert and the link update inside one `transaction.atomic()` block
     // (`db/models/issue.py:598-627`): a mid-save failure leaves no rows.
+    let issue = uuid::Uuid::parse_str(issue_id).map_err(|_| HandlerError::ServerError)?;
+    let edited_at: Option<chrono::DateTime<chrono::Utc>> = input
+        .edited_at
+        .clone()
+        .flatten()
+        .map(|text| parse_input_datetime(&text).ok_or(HandlerError::ServerError))
+        .transpose()?;
+    // Domain twins, in Django order; one `now()` feeds all four stamps.
+    // `access` is always `EXTERNAL`. The old link carried `AND
+    // deleted_at IS NULL`: provably a no-op (the row was inserted
+    // uncommitted in this transaction, so no concurrent delete can land
+    // first), dropped with the shared twin.
+    let external_source = input.external_source.clone().flatten();
+    let external_id = input.external_id.clone().flatten();
+    let desc_stripped = description_stripped_for_create(&html);
+    let rows = comment_domain::CommentRows {
+        id: comment_id,
+        description_id: uuid::Uuid::new_v4(),
+        created_at: now,
+        updated_at: now,
+        desc_created_at: now,
+        desc_updated_at: now,
+        workspace_id,
+        project_id,
+        issue_id: issue,
+        actor_id: Some(actor.id),
+        created_by: Some(actor.id),
+        updated_by: None,
+        deleted_at: None,
+        html: &html,
+        json: &comment_json,
+        stripped: &stripped,
+        desc_stripped: desc_stripped.as_deref(),
+        access: "EXTERNAL",
+        speaker_type: input.speaker_type.as_deref().unwrap_or("human"),
+        speaker_label: input.speaker_label.as_deref().unwrap_or(""),
+        speaker_agent_run_id: input.speaker_agent_run_id.flatten(),
+        external_id: external_id.as_deref(),
+        external_source: external_source.as_deref(),
+        parent_id: input.parent_id.flatten(),
+        attachments: &attachments,
+        labels: &labels,
+        edited_at,
+    };
     let mut tx = pool.begin().await.map_err(|_| HandlerError::ServerError)?;
-    insert_comment(
-        &mut tx,
-        &comment_id,
-        &now,
-        &actor.id,
-        &workspace_id,
-        &project_id,
-        issue_id,
-        &stripped,
-        &comment_json,
-        &html,
-        &attachments,
-        &labels,
-        &input,
-    )
-    .await?;
-    // The `Description` mirror row (`IssueComment.save`, `:604-623`):
-    // workspace/project follow the comment, `created_by` is the actor,
-    // `updated_by` stays NULL on create.
-    let description_id = uuid::Uuid::new_v4();
-    sqlx::query("INSERT INTO descriptions (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, project_id, description_stripped, description_json, description_html, description_binary) VALUES ($1, $2, $2, $3, NULL, NULL, $4, $5, $6, $7, $8, NULL)")
-        .bind(description_id)
-        .bind(now)
-        .bind(actor.id)
-        .bind(workspace_id)
-        .bind(project_id)
-        .bind(&stripped)
-        .bind(&comment_json)
-        .bind(&html)
-        .execute(&mut *tx)
+    comment_domain::insert_comment_row(&mut *tx, &rows)
         .await
-        .map_err(|_| HandlerError::ServerError)?;
-    // The description link is a second `save(update_fields=["description_id"])`
-    // (`IssueComment.save`, `:620-627`): `update_fields` restricts the UPDATE
-    // to exactly that column, so `updated_by`/`updated_at` stay NULL and
-    // `created_at` in the row (same shape as
-    // `app_issues/handlers_engage.rs:5104-5116`).
-    sqlx::query(
-        "UPDATE issue_comments SET description_id = $1 WHERE id = $2 AND deleted_at IS NULL",
-    )
-    .bind(description_id)
-    .bind(comment_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(|_| HandlerError::ServerError)?;
-    tx.commit().await.map_err(|_| HandlerError::ServerError)?;
+        .map_err(integrity_error)?;
+    comment_domain::insert_description_row(&mut *tx, &rows)
+        .await
+        .map_err(integrity_error)?;
+    comment_domain::link_comment_description(&mut *tx, rows.id, rows.description_id)
+        .await
+        .map_err(integrity_error)?;
+    // The `issue_id` FK is `DEFERRABLE INITIALLY DEFERRED`, so a comment
+    // on a missing issue only fails here at commit — map it the same way
+    // as the inserts (`handle_exception`, `views/base.py:74-78`).
+    tx.commit().await.map_err(integrity_error)?;
     let row = fetch_comment_by_id(pool, &comment_id)
         .await?
         .ok_or(HandlerError::ServerError)?;
@@ -2105,7 +1520,7 @@ async fn comment_create_inner(
     // before the `update_fields` save, and the view returns `serializer.data`
     // from that instance — so the 201 carries the actor while the row keeps
     // NULL (`handlers_engage.rs:5120-5124` renders the same split).
-    let mut created = CommentRow::from_value(&row)?;
+    let mut created = CommentRow::from_value(&row).map_err(|_| HandlerError::ServerError)?;
     created.updated_by = Some(actor.id.to_string());
     let tz = request_tz(Some(&actor));
     let rendered = render_comment(pool, &created, &tz, false).await?;
@@ -2139,57 +1554,6 @@ fn string_list(value: &Value) -> Result<Vec<String>, HandlerError> {
             .collect(),
         _ => Err(HandlerError::ServerError),
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn insert_comment(
-    ex: &mut sqlx::PgConnection,
-    comment_id: &uuid::Uuid,
-    now: &chrono::DateTime<chrono::Utc>,
-    actor_id: &uuid::Uuid,
-    workspace_id: &uuid::Uuid,
-    project_id: &uuid::Uuid,
-    issue_id: &str,
-    stripped: &str,
-    comment_json: &Value,
-    html: &str,
-    attachments: &[String],
-    labels: &[String],
-    input: &CommentInput,
-) -> Result<(), HandlerError> {
-    let issue = uuid::Uuid::parse_str(issue_id).map_err(|_| HandlerError::ServerError)?;
-    let edited_at: Option<chrono::DateTime<chrono::Utc>> = input
-        .edited_at
-        .clone()
-        .flatten()
-        .map(|text| parse_input_datetime(&text).ok_or(HandlerError::ServerError))
-        .transpose()?;
-    let result = sqlx::query("INSERT INTO issue_comments (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, project_id, comment_stripped, comment_json, comment_html, description_id, attachments, labels, issue_id, actor_id, access, external_source, external_id, speaker_type, speaker_label, speaker_agent_run_id, edited_at, parent_id) VALUES ($1, $2, $2, $3, NULL, NULL, $4, $5, $6, $7, $8, NULL, $9, $10, $11, $3, 'EXTERNAL', $12, $13, $14, $15, $16, $17, $18)")
-        .bind(comment_id)
-        .bind(now)
-        .bind(actor_id)
-        .bind(workspace_id)
-        .bind(project_id)
-        .bind(stripped)
-        .bind(comment_json)
-        .bind(html)
-        .bind(attachments)
-        .bind(labels)
-        .bind(issue)
-        .bind(input.external_source.clone().flatten().as_deref())
-        .bind(input.external_id.clone().flatten().as_deref())
-        .bind(input.speaker_type.as_deref().unwrap_or("human"))
-        .bind(input.speaker_label.as_deref().unwrap_or(""))
-        .bind(input.speaker_agent_run_id.flatten())
-        .bind(edited_at)
-        .bind(input.parent_id.flatten())
-        .execute(&mut *ex)
-        .await
-        .map_err(integrity_error)?;
-    if result.rows_affected() != 1 {
-        return Err(HandlerError::ServerError);
-    }
-    Ok(())
 }
 
 async fn fetch_comment_by_id(
@@ -2251,7 +1615,7 @@ async fn comment_partial_update_inner(
     )
     .await?
     .ok_or(HandlerError::NotFound)?;
-    let old = CommentRow::from_value(&old_row)?;
+    let old = CommentRow::from_value(&old_row).map_err(|_| HandlerError::ServerError)?;
     let input = validate_comment(pool, body.as_object().ok_or(HandlerError::ServerError)?).await?;
     // The synced lock (`IssueCommentSerializer.validate`, `:977-989`):
     // changed locked fields fail per field.
@@ -2304,7 +1668,7 @@ async fn comment_partial_update_inner(
     // explicit `comment_stripped` without new html is overwritten back.
     let html = input.comment_html.clone().or(old.comment_html.clone());
     let stripped = match &html {
-        Some(text) if !text.is_empty() => strip_tags(text),
+        Some(text) if !text.is_empty() => ml_strip_tags(text),
         _ => String::new(),
     };
     let now = chrono::Utc::now();
@@ -2323,7 +1687,13 @@ async fn comment_partial_update_inner(
         .await?
         .ok_or(HandlerError::ServerError)?;
     let tz = request_tz(Some(&actor));
-    let rendered = render_comment(pool, &CommentRow::from_value(&row)?, &tz, false).await?;
+    let rendered = render_comment(
+        pool,
+        &CommentRow::from_value(&row).map_err(|_| HandlerError::ServerError)?,
+        &tz,
+        false,
+    )
+    .await?;
     let value = serde_json::to_value(&rendered).map_err(|_| HandlerError::ServerError)?;
     // `requested_data` is the raw input dump; `current_instance` is the
     // after image: `save()` at `:307` mutates the in-memory instance, so
@@ -2397,36 +1767,38 @@ async fn apply_comment_update(
         Some(items) => items,
         None => string_list(&old.labels)?,
     };
-    let html_changed = input.comment_html.is_some();
-    let stripped_value = if html_changed {
-        stripped.to_owned()
-    } else {
-        old.comment_stripped.clone().unwrap_or_default()
-    };
+    // `save()` recomputes `comment_stripped` from the current
+    // `comment_html` on every save (`issue.py:606`), so the strip of the
+    // resulting html always wins — even when the PATCH omits html and the
+    // stored value is stale (pre-1258/1581 rows, other writers).
+    let stripped_value = stripped.to_owned();
     let old_html = old.comment_html.clone().unwrap_or_default();
     let new_html = html.clone().unwrap_or(old_html.clone());
     let html_value = html.clone().or(old.comment_html.clone());
-    sqlx::query("UPDATE issue_comments SET updated_at = $1, updated_by_id = $2, comment_stripped = $3, comment_json = $4, comment_html = $5, attachments = $6, labels = $7, access = $8, external_source = $9, external_id = $10, speaker_type = $11, speaker_label = $12, speaker_agent_run_id = $13, edited_at = $14, parent_id = $15, description_id = $16 WHERE id = $17 AND deleted_at IS NULL")
-        .bind(now)
-        .bind(actor_id)
-        .bind(&stripped_value)
-        .bind(&comment_json)
-        .bind(html_value)
-        .bind(attachments.as_slice())
-        .bind(labels.as_slice())
-        .bind(access)
-        .bind(external_source)
-        .bind(external_id)
-        .bind(speaker_type)
-        .bind(speaker_label)
-        .bind(speaker_agent_run_id)
-        .bind(edited_at)
-        .bind(parent_id)
-        .bind(description_id)
-        .bind(comment_id)
-        .execute(pool)
-        .await
-        .map_err(integrity_error)?;
+    comment_domain::save_space_comment_update(
+        pool,
+        &comment_domain::SpaceCommentUpdate {
+            id: *comment_id,
+            updated_at: *now,
+            updated_by: *actor_id,
+            stripped: &stripped_value,
+            json: &comment_json,
+            html: html_value.as_deref(),
+            attachments: attachments.as_slice(),
+            labels: labels.as_slice(),
+            access: access.as_deref(),
+            external_source: external_source.as_deref(),
+            external_id: external_id.as_deref(),
+            speaker_type: speaker_type.as_deref(),
+            speaker_label: speaker_label.as_deref(),
+            speaker_agent_run_id,
+            edited_at,
+            parent_id,
+            description_id,
+        },
+    )
+    .await
+    .map_err(integrity_error)?;
     // Mirror tracked-field changes into the description row (`save()`'s
     // change mapping, `:625-641`); untouched when the link is gone.
     let stripped_changed = stripped_value != old.comment_stripped.clone().unwrap_or_default();
@@ -2434,9 +1806,12 @@ async fn apply_comment_update(
     let json_changed = comment_json != old.comment_json;
     if old.description_id.is_none() {
         // A missing link creates + links a Description even on update
-        // (`IssueComment.save`, `:618-621`): audit/user defaults are the
-        // pre-save row, the tracked text is the new row, and the link is a
-        // second save stamping `updated_by`/`updated_at` again.
+        // (`IssueComment.save`, `:618-621`): the tracked text is the new
+        // row, and the link is a second save stamping `updated_by`/
+        // `updated_at` again. The create passes the comment's audit
+        // columns as defaults, but `BaseModel.save` overrides them
+        // (`base.py:21-41`): `created_by` is the requesting user and
+        // `updated_by` is NULL.
         let workspace_id = old
             .workspace_id
             .as_deref()
@@ -2451,40 +1826,58 @@ async fn apply_comment_update(
             .transpose()
             .map_err(|_| HandlerError::ServerError)?
             .ok_or(HandlerError::ServerError)?;
-        let description_id = uuid::Uuid::new_v4();
-        sqlx::query("INSERT INTO descriptions (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, project_id, description_stripped, description_json, description_html, description_binary) VALUES ($1, $2, $2, $3, $4, NULL, $5, $6, $7, $8, $9, NULL)")
-            .bind(description_id)
-            .bind(now)
-            .bind(parse_old_uuid(&old.created_by)?)
-            .bind(parse_old_uuid(&old.updated_by)?)
-            .bind(workspace_id)
-            .bind(project_id)
-            .bind(&stripped_value)
-            .bind(&comment_json)
-            .bind(&new_html)
-            .execute(pool)
+        // A relinked Description is a fresh `create()`, so its stripped
+        // text is the `Description.save` recompute, not the ML value.
+        let desc_stripped = description_stripped_for_create(&new_html);
+        let desc = comment_domain::DescriptionValues {
+            id: uuid::Uuid::new_v4(),
+            created_at: *now,
+            updated_at: *now,
+            created_by: Some(*actor_id),
+            updated_by: None,
+            workspace_id,
+            project_id,
+            json: &comment_json,
+            html: &new_html,
+            stripped: desc_stripped.as_deref(),
+        };
+        comment_domain::insert_description_values(pool, &desc)
             .await
             .map_err(|_| HandlerError::ServerError)?;
+        let description_id = desc.id;
         let relinked_at = chrono::Utc::now();
-        sqlx::query("UPDATE issue_comments SET description_id = $1, updated_by_id = $2, updated_at = $3 WHERE id = $4 AND deleted_at IS NULL")
-            .bind(description_id)
-            .bind(actor_id)
-            .bind(relinked_at)
-            .bind(comment_id)
-            .execute(pool)
-            .await
-            .map_err(|_| HandlerError::ServerError)?;
+        comment_domain::relink_space_comment_description(
+            pool,
+            *comment_id,
+            description_id,
+            *actor_id,
+            relinked_at,
+        )
+        .await
+        .map_err(|_| HandlerError::ServerError)?;
     } else if stripped_changed || html_changed || json_changed {
+        // Queryset `update` bypasses `Description.save` (values land
+        // verbatim), but only the changed subset syncs
+        // (`issue.py:637-646`, PIDASHCONV-1581 item 2) — an unchanged
+        // field keeps the description row's own value.
         let description_id = uuid::Uuid::parse_str(old.description_id.as_deref().unwrap_or(""))
             .map_err(|_| HandlerError::ServerError)?;
-        sqlx::query("UPDATE descriptions SET description_html = $1, description_stripped = $2, description_json = $3, updated_by_id = $4, updated_at = $5 WHERE id = $6")
-            .bind(&new_html)
-            .bind(&stripped_value)
-            .bind(&comment_json)
-            .bind(actor_id)
-            .bind(now)
-            .bind(description_id)
-            .execute(pool)
+        if html_changed {
+            comment_domain::sync_description_html(pool, description_id, &new_html)
+                .await
+                .map_err(|_| HandlerError::ServerError)?;
+        }
+        if stripped_changed {
+            comment_domain::sync_description_stripped(pool, description_id, &stripped_value)
+                .await
+                .map_err(|_| HandlerError::ServerError)?;
+        }
+        if json_changed {
+            comment_domain::sync_description_json(pool, description_id, &comment_json)
+                .await
+                .map_err(|_| HandlerError::ServerError)?;
+        }
+        comment_domain::touch_synced_description(pool, description_id, Some(*actor_id), *now)
             .await
             .map_err(|_| HandlerError::ServerError)?;
     }
@@ -2534,7 +1927,7 @@ async fn comment_destroy_inner(
     )
     .await?
     .ok_or(HandlerError::NotFound)?;
-    let old = CommentRow::from_value(&old_row)?;
+    let old = CommentRow::from_value(&old_row).map_err(|_| HandlerError::ServerError)?;
     let tz = request_tz(Some(&actor));
     let old_view = render_comment(pool, &old, &tz, false).await?;
     let old_value = serde_json::to_value(&old_view).map_err(|_| HandlerError::ServerError)?;
@@ -2552,16 +1945,9 @@ async fn comment_destroy_inner(
     enqueue_message(pool, publish.message()).await;
     // `comment.delete()` (`db/mixins.py:72-77`): `deleted_at` plus a full
     // `save()` (`updated_at`, CRUM `updated_by`).
-    sqlx::query(
-        "UPDATE issue_comments SET deleted_at = $1, updated_at = $2, updated_by_id = $3 WHERE id = $4 AND deleted_at IS NULL",
-    )
-    .bind(now)
-    .bind(now)
-    .bind(actor.id)
-    .bind(comment_id)
-    .execute(pool)
-    .await
-    .map_err(|_| HandlerError::ServerError)?;
+    comment_domain::soft_delete_space_comment(pool, comment_id, actor.id, now)
+        .await
+        .map_err(|_| HandlerError::ServerError)?;
     enqueue_soft_delete(pool, "issuecomment", &comment_id).await;
     Ok(())
 }
@@ -2600,8 +1986,10 @@ async fn render_issue_reaction(
     Ok(IssueReactionView {
         id: req_str(o, "id")?,
         actor_detail: render_actor_detail(pool, &actor_id).await?,
-        created_at: render_dt(&req_str(o, "created_at")?, tz)?,
-        updated_at: render_dt(&req_str(o, "updated_at")?, tz)?,
+        created_at: render_rfc3339_in(&req_str(o, "created_at")?, tz)
+            .map_err(|_| HandlerError::ServerError)?,
+        updated_at: render_rfc3339_in(&req_str(o, "updated_at")?, tz)
+            .map_err(|_| HandlerError::ServerError)?,
         created_by: opt_str(o, "created_by_id")?
             .or_else(|| opt_str(o, "created_by").unwrap_or(None)),
         updated_by: opt_str(o, "updated_by_id")?
@@ -3458,6 +2846,8 @@ async fn vote_destroy_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pidash_compat::http::OneOrMany;
+    use pidash_services::read::{IssueFlatView, ProjectLiteView, WorkspaceLiteView};
     use tower::ServiceExt;
 
     #[test]
@@ -3828,23 +3218,23 @@ mod tests {
     }
 
     #[test]
-    fn python_dumps_matches_cpython_separators() {
-        let value = serde_json::json!({"a": 1, "b": "<p>hi</p>", "c": "héllo"});
+    fn description_mirror_keeps_entities_verbatim() {
+        // `Description.save` recomputes with Django's own `strip_tags`
+        // (`db/models/description.py:22-29`): entities verbatim, a bare `<`
+        // kept as text, empty HTML stores NULL.
+        assert_eq!(description_stripped_for_create(""), None);
         assert_eq!(
-            python_dumps(&value),
-            r#"{"a": 1, "b": "<p>hi</p>", "c": "h\u00e9llo"}"#
+            description_stripped_for_create("<p>hi</p>"),
+            Some("hi".to_owned())
         );
         assert_eq!(
-            python_dumps(&serde_json::json!([1, true, None::<()>])),
-            "[1, true, null]"
+            description_stripped_for_create("<p>Tom &amp; Jerry</p>"),
+            Some("Tom &amp; Jerry".to_owned())
         );
-    }
-
-    #[test]
-    fn strip_tags_matches_django() {
-        assert_eq!(strip_tags("<p>hi</p>"), "hi");
-        assert_eq!(strip_tags(""), "");
-        assert_eq!(strip_tags("<p></p>"), "");
+        assert_eq!(
+            description_stripped_for_create("<p>I <3 this</p>"),
+            Some("I <3 this".to_owned())
+        );
     }
 
     #[test]
@@ -3902,9 +3292,8 @@ mod tests {
         // `User` has no `deleted_at` column (`db/models/user.py:56`), so
         // every `users` read must filter on the id alone; PIDASHCONV-237
         // regressed all seven social paths with a guard the schema rejects.
-        assert!(!user_detail_sql().contains("deleted_at"));
-        assert!(user_detail_sql().contains("\"users\".\"id\" = $1"));
-        assert!(!display_name_sql().contains("deleted_at"));
+        // (`user_detail_sql` / `display_name_sql` moved to the read
+        // service with their own pins; see `read::comment` tests.)
         assert_eq!(
             nullable_fk_sql("users"),
             "SELECT id FROM users WHERE id = $1"

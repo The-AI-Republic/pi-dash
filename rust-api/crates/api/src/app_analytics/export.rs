@@ -71,6 +71,7 @@ use crate::middleware::SessionHandle;
 use crate::state::AppState;
 
 use super::gates::{FORBIDDEN_BODY, NOT_FOUND_BODY};
+use pidash_compat::response::json_response;
 
 /// DRF `IsAuthenticated` denial, same body as every other D-35 route.
 pub const UNAUTHENTICATED_BODY: &str = super::gates::ANON_BODY;
@@ -150,14 +151,6 @@ impl IntoResponse for Denial {
 
 fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
-}
-
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("export response")
 }
 
 fn pool_of(state: &AppState) -> Result<&sqlx::PgPool, Denial> {

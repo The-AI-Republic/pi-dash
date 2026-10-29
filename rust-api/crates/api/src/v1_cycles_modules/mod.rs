@@ -16,15 +16,10 @@
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
 pub mod body;
-#[cfg(test)]
-pub mod body_battery;
-pub mod body_decoders;
-pub mod body_tables;
 pub mod cycle;
 pub mod gates;
-pub mod json_cpython;
+pub mod json;
 pub mod module;
-pub mod sanitize_data;
 
 use axum::Router;
 

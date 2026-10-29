@@ -200,14 +200,6 @@ pub fn per_row_draw_max(population: usize) -> Result<usize, String> {
     Ok(population - 1)
 }
 
-/// First `sequence_id`: `Max("sequence") + 1`, or 1 when none (`:283-285`).
-pub fn next_sequence(max_sequence: Option<i64>) -> i64 {
-    match max_sequence {
-        None => 1,
-        Some(largest) => largest + 1,
-    }
-}
-
 /// First `sort_order`: max sort in a random state `+ 10000`, or 65535 when
 /// no issue exists yet (`:288-291`).
 pub fn initial_sort_order(max_sort: Option<f64>) -> f64 {
@@ -394,9 +386,10 @@ mod tests {
     }
 
     #[test]
-    fn sequence_and_sort_progression() {
-        assert_eq!(next_sequence(None), 1);
-        assert_eq!(next_sequence(Some(41)), 42);
+    fn sort_progression() {
+        // The sequence kernel folded into
+        // `app_project::ser_project::next_work_item_sequence` (pinned by
+        // `next_sequence_kernel_matches_fixture` there).
         assert_eq!(initial_sort_order(None), 65535.0);
         assert_eq!(initial_sort_order(Some(65535.0)), 75535.0);
         assert_eq!(advance_sort_order(75535.0, 250), 75785.0);

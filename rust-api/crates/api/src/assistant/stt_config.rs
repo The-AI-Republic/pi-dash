@@ -308,7 +308,7 @@ async fn get_config(
         Ok(row) => row,
         Err(failure) => return failure.into_response(),
     };
-    crate::license::json_response(&serialize_row(row.as_ref()))
+    crate::license::json_response(serialize_row(row.as_ref()))
 }
 
 /// `PUT users/me/ai-assistant/stt-config/` (`stt_config.py:49-77`).
@@ -388,7 +388,7 @@ async fn put_config(
         api_key_encrypted,
         last_verified_at: stored_verified,
     };
-    crate::license::json_response(&serialize_row(Some(&saved)))
+    crate::license::json_response(serialize_row(Some(&saved)))
 }
 
 /// `DELETE users/me/ai-assistant/stt-config/` (`stt_config.py:79-81`).

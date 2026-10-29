@@ -61,6 +61,7 @@ use pidash_auth::session::{
 use pidash_auth::signing::{Signer, SESSION_SIGNING_SALT};
 
 use crate::license::{verify_session_hash, MODEL_BACKEND};
+use pidash_compat::response::empty_response_no_content_type;
 
 /// What went wrong talking to the session table. A load/save failure maps
 /// to Django's 500 (`SessionInterrupted` on save races), never to a
@@ -860,10 +861,7 @@ where
 /// The shape stays minimal on purpose — the F-07 error renderer owns API
 /// error bodies, and Django's own 500 page is deployment-specific.
 fn server_error() -> Response<Body> {
-    Response::builder()
-        .status(StatusCode::INTERNAL_SERVER_ERROR)
-        .body(Body::empty())
-        .expect("static 500 response")
+    empty_response_no_content_type(StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 async fn apply_response_rules<Store: SessionStore>(
@@ -983,7 +981,7 @@ mod tests {
     }
 
     fn auth_hash() -> String {
-        crate::license::make_session_auth_hash("", SECRET)
+        pidash_compat::http::session_auth_hash("", SECRET)
     }
 
     /// Seed one live row carrying the full Django auth trio, through any store.

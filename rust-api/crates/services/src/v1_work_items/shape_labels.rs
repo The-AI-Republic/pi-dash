@@ -103,6 +103,7 @@ use serde_json::{Map, Value};
 
 use super::shape_issue::{field_errors_body, BASE_EXPANSION_NAMES};
 use super::{filter_fields, FieldSpec, FilterError};
+use pidash_compat::py::py_strip;
 
 /// `IssueLiteSerializer.Meta.fields` (`serializers/issue.py:507`).
 pub const ISSUE_LITE_FIELDS: &[&str] = &["id", "sequence_id", "project_id"];
@@ -370,19 +371,6 @@ fn py_parse_float(text: &str) -> Option<f64> {
     } else {
         trimmed.parse::<f64>().ok()
     }
-}
-
-/// Python `str.strip()` membership (live-probed, PIDASHCONV-801): Rust
-/// `is_whitespace` plus U+001C-U+001F (which Python strips but the Unicode
-/// `White_Space` property omits). Same kernel as the sibling `py_strip` in
-/// `shape_social` and `py_stripped` in the relations handler.
-fn py_is_space(c: char) -> bool {
-    c.is_whitespace() || matches!(c, '\x1c'..='\x1f')
-}
-
-/// Python `str.strip()` (no-arg): strip [`py_is_space`] from both ends.
-fn py_strip(text: &str) -> &str {
-    text.trim_matches(py_is_space)
 }
 
 /// Outcome of [`validate_char`] for one text input.
