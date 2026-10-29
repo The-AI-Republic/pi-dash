@@ -2007,7 +2007,7 @@ fn micros_now() -> chrono::DateTime<chrono::Utc> {
 /// on every sibling in the project (soft-deleted and triage rows keep theirs,
 /// via the default-manager scope in the domain twin).
 async fn run_default_flip(pool: &sqlx::PgPool, project_id: Uuid) -> Result<(), HandlerError> {
-    domain_projects::states::clear_defaults(pool, project_id)
+    domain_projects::states::clear_project_defaults(pool, project_id)
         .await
         .map_err(|_| HandlerError::ServerError)?;
     Ok(())

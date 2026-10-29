@@ -134,7 +134,7 @@ pub fn state_default_flip_requested(default: Option<bool>) -> bool {
 }
 
 // NOTE: the default-flip write moved to
-// `domain::projects::states::clear_defaults` (PIDASHCONV-1630) —
+// `domain::projects::states::clear_project_defaults` (PIDASHCONV-1630) —
 // `states` is a covered table, so the statement lives in domain/.
 
 /// Mirrors `data.get("group", None) == StateGroup.TRIAGE.value`
@@ -148,7 +148,7 @@ pub fn state_group_rejected(group: Option<&str>) -> bool {
 /// Returns `(default_flip_armed, validation_error_body)`. The flip flag
 /// is computed first because the Python runs the UPDATE before the
 /// triage check (BUG-4a): callers must execute the flip
-/// ([`clear_defaults`](crate::domain::projects::states::clear_defaults))
+/// ([`clear_project_defaults`](crate::domain::projects::states::clear_project_defaults))
 /// even when the returned body is `Some`.
 pub fn state_validate(
     default: Option<bool>,

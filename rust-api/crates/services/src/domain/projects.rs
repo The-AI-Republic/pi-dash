@@ -2110,7 +2110,9 @@ pub mod states {
     /// Clear `default` on every sibling state in the project
     /// (soft-deleted and triage rows keep theirs, via the
     /// default-manager scope in [`STATE_DEFAULT_FLIP_SQL`]).
-    pub async fn clear_defaults<'e, E>(ex: E, project_id: Uuid) -> Result<(), sqlx::Error>
+    /// Unscoped by workspace slug, unlike the `mark_as_default`
+    /// clear leg ([`clear_defaults`]) — the v1 flip has no slug.
+    pub async fn clear_project_defaults<'e, E>(ex: E, project_id: Uuid) -> Result<(), sqlx::Error>
     where
         E: sqlx::Executor<'e, Database = sqlx::Postgres>,
     {
