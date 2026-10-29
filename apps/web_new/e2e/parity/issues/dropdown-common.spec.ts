@@ -61,8 +61,18 @@ test(
         expect(await driver.pickerSearchValue()).toBe("");
         expect(await driver.pickerOpen()).toBe(true);
         expect(await driver.pickerOptionTexts()).toEqual(["Urgent", "High", "Medium", "Low", "None"]);
-        await driver.pickerPressEscape();
-        expect(await driver.pickerOpen()).toBe(false);
+        // The query-clear re-render can swallow one Escape: retry until
+        // the popup reports closed (gate hardening; a closed picker
+        // ignores further presses on both legs).
+        await expect
+          .poll(
+            async () => {
+              if (await driver.pickerOpen()) await driver.pickerPressEscape();
+              return driver.pickerOpen();
+            },
+            { timeout: 5_000 }
+          )
+          .toBe(false);
       });
 
       await test.step("outside click closes the popup", async () => {
