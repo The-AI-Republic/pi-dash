@@ -260,7 +260,9 @@ pub mod ops {
     pub use pidash_services::domain::issues::move_to_project;
     pub use pidash_services::domain::issues::CreationDeps;
     pub use pidash_services::domain::issues::MoveDomainOutcome;
+    pub use pidash_services::domain::issues::MoveGuards;
     pub use pidash_services::domain::issues::MoveInput;
+    pub use pidash_services::domain::issues::MoveOptions;
     pub use pidash_services::domain::issues::MovePostCommitHook;
     pub use pidash_services::domain::issues::MoveRejection;
     pub use pidash_services::integrations::adapters_github::ClientAuth;
