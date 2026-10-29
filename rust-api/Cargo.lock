@@ -3146,6 +3146,7 @@ dependencies = [
  "reqwest",
  "rrule",
  "rustls",
+ "sea-orm",
  "sea-query",
  "serde",
  "serde_json",

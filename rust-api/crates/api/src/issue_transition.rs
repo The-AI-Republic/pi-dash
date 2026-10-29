@@ -14,17 +14,19 @@
 //!   [`pidash_jobs::issue_transition`].
 //!
 //! This module keeps the save handlers' entry points at their existing
-//! paths: two re-exports plus [`fire_issue_transition`], which builds the
-//! two [`StoreDeps`][pidash_jobs::orchestration::StoreDeps] from the
-//! [`AppState`] and delegates to the jobs core with the api drains.
-//! [`AppTransitionHook`] is the same binding as a
+//! paths: the pre-save snapshot re-export plus [`fire_issue_transition`],
+//! a thin caller of the public [`hooks::TransitionHook`][pidash_jobs::hooks::TransitionHook]
+//! over this binary's state and pool with the api drains.
+//! [`AppTransitionHook`] is the same binding as an
 //! [`IssueTransitionHook`][pidash_services::domain::transition::IssueTransitionHook]
 //! for binaries that register it on a [`WriteTxn`][pidash_services::domain::WriteTxn]
 //! hook registry.
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
+use pidash_jobs::hooks::{HookDeps, OutboxTaskSink, QueueTerminalEffectsDrain, TransitionHook};
 use pidash_jobs::issue_transition::{PodDrain, PublishEffectsDrain};
 use pidash_services::domain::transition::IssueTransitionHook;
 use pidash_services::orchestration::entries::{FireOutcome, FireRequest};
@@ -33,10 +35,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::state::AppState;
-use crate::v1_work_items::handlers_actions::dispatch_deps_for_ids;
 
-/// The post-save completion comment-back, re-exported from the jobs layer.
-pub(crate) use pidash_jobs::issue_transition::enqueue_completion_comment;
 /// The pre-save `state_id` snapshot, re-exported from the domain layer.
 pub(crate) use pidash_services::domain::transition::capture_prior_state_pool;
 
@@ -86,10 +85,10 @@ impl PodDrain for TransitionDrains {
 
 /// Run the post-save transition fire for one issue against live SQL.
 ///
-/// Same signature and behaviour as before the ORM-02 move: builds the two
-/// dependency bundles from the [`AppState`] and delegates to the jobs
-/// core with the api drains. Public so overlay binaries (which link this
-/// crate) and [`AppTransitionHook`] registrants can call it.
+/// Same signature and behaviour as before the OVL-16 move: the public
+/// transition hook over this binary's state and pool, with the api
+/// drains. Public so overlay binaries (which link this crate) and
+/// [`AppTransitionHook`] registrants can call it.
 // The `()` error is the transition-driver convention, kept verbatim. Each
 // erasure logs its cause first (PIDASHCONV-1563), as does the jobs core.
 #[allow(clippy::result_unit_err)]
@@ -99,51 +98,10 @@ pub async fn fire_issue_transition(
     actor_id: Uuid,
     request: FireRequest,
 ) -> Result<FireOutcome, ()> {
-    if request.prev_state_id == request.current_state_id {
-        return Ok(FireOutcome::NoTransition);
-    }
-    let now_unix_secs = request.now.timestamp();
-    let (store_deps, _matcher) =
-        dispatch_deps_for_ids(state, pool, actor_id, request.issue_id, now_unix_secs)
-            .await
-            .map_err(|denial| {
-                // The deps builders warn-log their own storage cause; this
-                // carries the fire it 500s (PIDASHCONV-1563).
-                tracing::error!(
-                    denial = ?denial,
-                    site = "fire-dispatch-deps",
-                    issue_id = %request.issue_id,
-                    "issue transition fire failure"
-                );
-            })?;
-    let (preflight_deps, matcher) =
-        dispatch_deps_for_ids(state, pool, actor_id, request.issue_id, now_unix_secs)
-            .await
-            .map_err(|denial| {
-                tracing::error!(
-                    denial = ?denial,
-                    site = "fire-preflight-deps",
-                    issue_id = %request.issue_id,
-                    "issue transition fire failure"
-                );
-            })?;
-    let cloud = state.settings().cloud_agent.clone();
-    let drains = TransitionDrains {
-        pool: pool.clone(),
-        state: state.clone(),
-        actor_id,
-    };
-    pidash_jobs::issue_transition::fire_transition(
-        pool,
-        store_deps,
-        preflight_deps,
-        matcher,
-        &cloud,
-        request,
-        &drains,
-        &drains,
-    )
-    .await
+    AppTransitionHook::new(state, pool)
+        .hook_for(actor_id)
+        .fire(actor_id, request)
+        .await
 }
 
 /// The api binary's [`IssueTransitionHook`]: the public transition entry
@@ -162,6 +120,38 @@ impl AppTransitionHook {
             pool: pool.clone(),
         }
     }
+
+    /// The public hook over this binary's pieces: settings, seams and
+    /// admission cache from the [`AppState`], the api drains, and the
+    /// outbox sink. The store-deps prefetch the hook runs reads the same
+    /// universe, presence and verdicts the old `dispatch_deps_for_ids`
+    /// pair read, once per fire instead of twice.
+    fn hook_for(&self, actor_id: Uuid) -> TransitionHook {
+        use pidash_db::redis::client_from_settings;
+        let settings = self.state.settings();
+        let drains = Arc::new(TransitionDrains {
+            pool: self.pool.clone(),
+            state: self.state.clone(),
+            actor_id,
+        });
+        let deps = HookDeps {
+            pool: self.pool.clone(),
+            cloud: settings.cloud_agent.clone(),
+            managed: settings.managed_runner.clone(),
+            cache: pidash_services::dispatch::admission::RedisAdmissionCache::new(
+                client_from_settings(settings),
+            ),
+            redis: client_from_settings(settings),
+            runner: settings.runner.clone(),
+            toolsets: self.state.toolsets().clone(),
+            assistant_seam: self.state.assistant_seam().clone(),
+            publish: drains.clone(),
+            pods: drains,
+            terminal: Arc::new(QueueTerminalEffectsDrain::new(&self.pool)),
+            queue: Arc::new(OutboxTaskSink),
+        };
+        TransitionHook::new(&deps)
+    }
 }
 
 impl IssueTransitionHook for AppTransitionHook {
@@ -171,15 +161,12 @@ impl IssueTransitionHook for AppTransitionHook {
         prev_state_id: Option<Uuid>,
         current_state_id: Option<Uuid>,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-        let pool = self.pool.clone();
+        // The comment leg never touches the drains, so the actor bound
+        // into them here is unread on this path.
+        let hook = self.hook_for(Uuid::nil());
         Box::pin(async move {
-            enqueue_completion_comment(
-                &pool,
-                &issue_id,
-                prev_state_id.as_ref(),
-                current_state_id.as_ref(),
-            )
-            .await;
+            hook.enqueue_completion_comment(issue_id, prev_state_id, current_state_id)
+                .await;
         })
     }
 
@@ -188,9 +175,8 @@ impl IssueTransitionHook for AppTransitionHook {
         actor_id: Uuid,
         request: FireRequest,
     ) -> Pin<Box<dyn Future<Output = Result<FireOutcome, ()>> + Send + '_>> {
-        let state = self.state.clone();
-        let pool = self.pool.clone();
-        Box::pin(async move { fire_issue_transition(&state, &pool, actor_id, request).await })
+        let hook = self.hook_for(actor_id);
+        Box::pin(async move { hook.fire(actor_id, request).await })
     }
 }
 
