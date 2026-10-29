@@ -10,6 +10,15 @@
 /** Freshness window: issues created within the last half minute. */
 export const FRESH_WINDOW_MS = 30_000;
 
+/**
+ * Bypass cap (bug NEWFRONT-1014): at most this many fresh rows mount in
+ * the unvirtualized strip; the rest virtualize like stale rows. Ten roomy
+ * rows are ~440 px, so even a screenful of fresh rows leaves the flat
+ * virtualizer a usable share of its section instead of squeezing it to
+ * zero height and killing pagination.
+ */
+export const FRESH_BYPASS_LIMIT = 10;
+
 /** Whether an issue counts as fresh at `now`. */
 export function isFresh(createdAt: string, now: number = Date.now()): boolean {
   return now - Date.parse(createdAt) < FRESH_WINDOW_MS;
@@ -39,15 +48,20 @@ export interface FreshPartition<T> {
   rest: T[];
 }
 
-/** Split fresh rows from the rest, preserving order in both halves. */
+/**
+ * Split fresh rows from the rest, preserving order in both halves. Only
+ * the first `limit` fresh rows bypass; the overflow joins `rest` so the
+ * strip stays bounded no matter how many rows are fresh.
+ */
 export function partitionFresh<T extends { created_at: string }>(
   issues: readonly T[],
-  now: number = Date.now()
+  now: number = Date.now(),
+  limit: number = FRESH_BYPASS_LIMIT
 ): FreshPartition<T> {
   const fresh: T[] = [];
   const rest: T[] = [];
   for (const issue of issues) {
-    if (isFresh(issue.created_at, now)) fresh.push(issue);
+    if (isFresh(issue.created_at, now) && fresh.length < limit) fresh.push(issue);
     else rest.push(issue);
   }
   return { fresh, rest };

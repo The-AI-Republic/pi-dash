@@ -3,6 +3,7 @@
 // See the LICENSE file for details.
 import { describe, expect, it } from "vitest";
 import {
+  FRESH_BYPASS_LIMIT,
   FRESH_WINDOW_MS,
   createTempId,
   isFresh,
@@ -53,6 +54,35 @@ describe("freshness", () => {
       rest: [issues[0], issues[2]],
     });
     expect(partitionFresh([], NOW)).toEqual({ fresh: [], rest: [] });
+  });
+
+  it("caps the bypass so overflow fresh rows join the virtualized rest (NEWFRONT-1014)", () => {
+    const issues = [
+      ...Array.from({ length: FRESH_BYPASS_LIMIT + 2 }, (_, index) => ({
+        id: `fresh-${index}`,
+        created_at: FRESH_AT,
+      })),
+      { id: "stale-1", created_at: STALE_AT },
+    ];
+    const { fresh, rest } = partitionFresh(issues, NOW);
+    expect(fresh.map((row) => row.id)).toEqual(
+      Array.from({ length: FRESH_BYPASS_LIMIT }, (_, index) => `fresh-${index}`)
+    );
+    expect(rest.map((row) => row.id)).toEqual([
+      `fresh-${FRESH_BYPASS_LIMIT}`,
+      `fresh-${FRESH_BYPASS_LIMIT + 1}`,
+      "stale-1",
+    ]);
+  });
+
+  it("honors an explicit bypass limit, including zero", () => {
+    const issues = [
+      { id: "fresh-1", created_at: FRESH_AT },
+      { id: "stale-1", created_at: STALE_AT },
+      { id: "fresh-2", created_at: FRESH_AT },
+    ];
+    expect(partitionFresh(issues, NOW, 1)).toEqual({ fresh: [issues[0]], rest: [issues[1], issues[2]] });
+    expect(partitionFresh(issues, NOW, 0)).toEqual({ fresh: [], rest: issues });
   });
 
   it("mints unique temp ids under the temp prefix", () => {

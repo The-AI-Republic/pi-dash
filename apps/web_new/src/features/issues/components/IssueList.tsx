@@ -4,9 +4,10 @@
 // Read-only issue list (first vertical slice). Virtualized rows over the
 // prefetched list query; the layout search param only changes density.
 // Fresh rows mount in an unvirtualized strip above the list so they render
-// immediately (parity/specs/issues.md §1, ISS-006); temp rows carry a
-// pulsing overlay until the server confirms. Selection, filters and detail
-// arrive with NEWFRONT-71.
+// immediately (parity/specs/issues.md §1, ISS-006); the strip is capped
+// and overflow fresh rows virtualize (bug NEWFRONT-1014); temp rows carry
+// a pulsing overlay until the server confirms. Selection, filters and
+// detail arrive with NEWFRONT-71.
 
 import { Badge, cn, VirtualList } from "@pidash/kit";
 import type { IssueListItem } from "@pidash/api-client";

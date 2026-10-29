@@ -294,6 +294,7 @@ import type { IssuesEntity, PrefsRecord } from "../prefs/entities.js";
 import { WORKFLOW_FLAG } from "../edition/flags.js";
 import { registerEditionIssuesProviders, resetEditionIssuesProviders } from "../edition/providers.js";
 import { groupedSections } from "./grouping.js";
+import { FRESH_BYPASS_LIMIT } from "../freshness/fresh.js";
 import { edition } from "../../../core/edition/index.js";
 import { BULK_OPERATIONS_FLAG } from "../bulk/edition.js";
 import { ListLayout, type ListLayoutProps } from "./ListLayout.js";
@@ -1385,5 +1386,66 @@ describe("ListLayout fresh bypass (ISS-006)", () => {
       window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown" }));
     });
     expect(screen.queryByTestId("row-probe")).not.toBeInTheDocument();
+  });
+
+  it("caps the strip with a hundred fresh rows so the region still pages (ISS-010, NEWFRONT-1014)", async () => {
+    const fresh = Array.from({ length: 100 }, (_, index) =>
+      freshRow({
+        id: `123e4567-e89b-12d3-a456-42661417${String(6100 + index)}`,
+        sequence_id: 1000 + index,
+        name: `Fresh ${index + 1}`,
+      })
+    );
+    const rows = [...staleRows(3), ...fresh];
+    mocks.pages.mockReturnValue(pageState({ sections: flatSections(rows), total: rows.length, hasMore: true }));
+    renderLayout();
+
+    // The strip holds the first rows only: the rest virtualize below, so a
+    // screenful of fresh rows cannot squeeze the region to zero height.
+    const overflowName = `Fresh ${FRESH_BYPASS_LIMIT + 1}`;
+    const strip = await screen.findByTestId("issues-fresh-strip");
+    expect(within(strip).getAllByTestId("row-probe")).toHaveLength(FRESH_BYPASS_LIMIT);
+    expect(within(strip).getByRole("button", { name: "Fresh 1" })).toBeInTheDocument();
+    expect(within(strip).queryByRole("button", { name: overflowName })).not.toBeInTheDocument();
+
+    const region = screen.getByRole("region", { name: "Issues" });
+    expect(within(region).getByRole("button", { name: "Row 1" })).toBeInTheDocument();
+    expect(within(region).getByRole("button", { name: overflowName })).toBeInTheDocument();
+    // Bypassed or virtualized, never both.
+    expect(screen.getAllByRole("button", { name: overflowName })).toHaveLength(1);
+    expect(screen.getByTestId("list-sentinel")).toBeInTheDocument();
+  });
+
+  it("loads the next page when the sentinel intersects past a capped strip (ISS-010, NEWFRONT-1014)", async () => {
+    const seen: Array<{ callback: IntersectionObserverCallback; target: Element | null }> = [];
+    class CapturingObserver {
+      constructor(callback: IntersectionObserverCallback) {
+        seen.push({ callback, target: null });
+      }
+      observe(target: Element): void {
+        seen[seen.length - 1]!.target = target;
+      }
+      disconnect(): void {}
+    }
+    vi.stubGlobal("IntersectionObserver", CapturingObserver);
+    const loadMore = vi.fn();
+    const fresh = Array.from({ length: 100 }, (_, index) =>
+      freshRow({
+        id: `123e4567-e89b-12d3-a456-42661417${String(6200 + index)}`,
+        sequence_id: 2000 + index,
+        name: `Paged ${index + 1}`,
+      })
+    );
+    const rows = [...staleRows(3), ...fresh];
+    mocks.pages.mockReturnValue(
+      pageState({ sections: flatSections(rows), total: rows.length, hasMore: true, loadMore })
+    );
+    renderLayout();
+
+    const sentinel = await screen.findByTestId("list-sentinel");
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.target).toBe(sentinel);
+    seen[0]!.callback([{ isIntersecting: true } as IntersectionObserverEntry], null as unknown as IntersectionObserver);
+    expect(loadMore).toHaveBeenCalledTimes(1);
   });
 });
