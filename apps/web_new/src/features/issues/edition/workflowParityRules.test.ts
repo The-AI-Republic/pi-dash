@@ -62,13 +62,19 @@ describe("readParityWorkflowRules", () => {
 
   it("reads storage failures as no rules", () => {
     seed(RULES);
-    const getItem = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
-      throw new Error("denied");
-    });
+    // Stub the object the provider actually reads: jsdom keeps
+    // getItem off Storage.prototype, so spying on the prototype
+    // silently leaves the real storage in place (same class of host
+    // issue as prefs.test.ts documents for localStorage).
+    const sessionStorage = vi.spyOn(window, "sessionStorage", "get").mockReturnValue({
+      getItem: () => {
+        throw new Error("denied");
+      },
+    } as unknown as Storage);
     try {
       expect(readParityWorkflowRules()).toBeNull();
     } finally {
-      getItem.mockRestore();
+      sessionStorage.mockRestore();
     }
   });
 });
