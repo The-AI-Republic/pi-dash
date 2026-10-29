@@ -2895,14 +2895,16 @@ pub fn render_intake_dump(
     serde_json::Value::Object(map)
 }
 
-/// `base_host(request, is_app=True)` (`utils/host.py:17`): `WEB_URL`
-/// else `APP_BASE_URL`; unset is `ImproperlyConfigured` → 500.
+/// `base_host(request, is_app=True)` (`utils/host.py:17-66`):
+/// `APP_BASE_URL` wins when set, else `WEB_URL`; unset is
+/// `ImproperlyConfigured` → 500. Empty strings fall through like
+/// Python's `or` (PIDASHCONV-1597).
 fn request_origin(state: &AppState) -> Result<String, Denial> {
     let urls = &state.settings().urls;
-    urls.web_url
+    urls.app_base_url
         .clone()
         .filter(|s| !s.is_empty())
-        .or_else(|| urls.app_base_url.clone().filter(|s| !s.is_empty()))
+        .or_else(|| urls.web_url.clone().filter(|s| !s.is_empty()))
         .ok_or(Denial::ServerError)
 }
 
@@ -6370,21 +6372,24 @@ mod tests {
         AppState::with_settings("test", settings)
     }
 
-    /// `request_origin` treats `""` as missing (PIDASHCONV-1597): an
-    /// empty `WEB_URL` falls through to `APP_BASE_URL`, and empty
-    /// everywhere is the 500.
+    /// `base_host(request, is_app=True)` treats `""` as missing
+    /// (PIDASHCONV-1597): an empty `APP_BASE_URL` falls through to
+    /// `WEB_URL`, and empty everywhere is the 500. `APP_BASE_URL` wins
+    /// when both are set (PIDASHCONV-1641).
     #[test]
     fn request_origin_falls_through_empty_strings() {
         let app = "https://app.example.invalid";
+        let web = "https://web.example.invalid";
+        let state = origin_state(Some(""), Some(web));
+        assert_eq!(request_origin(&state).expect("falls through"), web);
         let state = origin_state(Some(app), Some(""));
-        assert_eq!(request_origin(&state).expect("falls through"), app);
+        assert_eq!(request_origin(&state).expect("app wins"), app);
         let state = origin_state(Some(""), Some(""));
         assert!(matches!(request_origin(&state), Err(Denial::ServerError)));
         let state = origin_state(None, None);
         assert!(matches!(request_origin(&state), Err(Denial::ServerError)));
-        let web = "https://web.example.invalid";
         let state = origin_state(Some(app), Some(web));
-        assert_eq!(request_origin(&state).expect("web first"), web);
+        assert_eq!(request_origin(&state).expect("app base wins"), app);
     }
 
     /// `base_host(request, is_app=True)` treats `""` as missing
