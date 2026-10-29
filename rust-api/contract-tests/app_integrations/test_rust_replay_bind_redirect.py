@@ -23,6 +23,9 @@ Run with the Rust server up against its own DATABASE_URL (dedicated CI
 job). A Rust server without the override env hits real GitHub and
 records 401s, so the loop-membership gate skips instead of failing when
 the stub saw no fresh hit.
+
+PIDASHCONV-1642 adds the rebind replay
+(``test_rust_rebind_changed_repo_url_rewrites_project``).
 """
 
 from __future__ import annotations
@@ -89,3 +92,25 @@ def test_rust_bind_renamed_github_repo_follows_301(
     assert row["full_name"] == f"{oracle.NEW_OWNER}/{oracle.NEW_NAME}", row
     assert row["base_branch"] == "main", row
     assert row["repo_url"] == oracle.REPO_PAYLOAD["clone_url"], row
+
+
+def test_rust_rebind_changed_repo_url_rewrites_project(
+    admin, bind_world, seeder, db, redirect_stub
+):
+    """Rust replay of the changed-repo_url rebind (PIDASHCONV-1642)."""
+    world = bind_world
+    account_id, old_binding_id = oracle.seed_stale_bind(seeder, db, world)
+    url = proj_url(world, "repository", "bind")
+    before = len(redirect_stub.snapshot())
+    response = admin.post(
+        url, json={"repo_url": f"https://github.com/{oracle.OLD_OWNER}/{oracle.OLD_NAME}"}
+    )
+    fresh = redirect_stub.snapshot()[before:]
+    if not fresh:
+        raise pytest.skip(
+            "Rust server is not pointed at the bind-redirect stub — boot it with"
+            f" PIDASH_GITHUB_API_BASE=http://127.0.0.1:{oracle.STUB_PORT}"
+        )
+    assert response.status_code == 201, response.text[:500]
+    oracle.assert_bind_renamed_ok(response.json(), account_id)
+    oracle.assert_rebound_project_row(db, world["project"]["id"], old_binding_id)
