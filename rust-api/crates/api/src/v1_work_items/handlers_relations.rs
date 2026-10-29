@@ -119,6 +119,7 @@ use pidash_services::domain::relations as relation_domain;
 use pidash_services::domain::transition::IssueTransitionHook;
 use pidash_services::domain::{WriteActor, WriteCtx, WriteScope};
 use pidash_services::operations;
+use pidash_services::read;
 use pidash_services::v1_work_items::queries_sub::{
     actual_relation, is_reverse_relation, union_ids,
 };
@@ -1355,27 +1356,15 @@ async fn workpad_get_inner(
     )
     .await?;
     let tz = activate_timezone(pre.actor.timezone.as_deref())?;
-    let row = sqlx::query(
-        r#"SELECT "issues"."workpad", "issues"."updated_at"
-           FROM "issues"
-           LEFT OUTER JOIN "states" ON ("issues"."state_id" = "states"."id")
-           INNER JOIN "projects" ON ("issues"."project_id" = "projects"."id")
-           INNER JOIN "workspaces" ON ("issues"."workspace_id" = "workspaces"."id")
-           WHERE ("issues"."deleted_at" IS NULL
-             AND NOT ("states"."group" = 'triage' AND "states"."group" IS NOT NULL)
-             AND NOT ("issues"."archived_at" IS NOT NULL)
-             AND NOT ("projects"."archived_at" IS NOT NULL)
-             AND NOT ("issues"."is_draft")
-             AND "workspaces"."slug" = $1
-             AND "issues"."project_id" = $2
-             AND "issues"."id" = $3)"#,
-    )
-    .bind(slug)
-    .bind(project_id)
-    .bind(issue_id)
-    .fetch_optional(&pre.pool)
-    .await
-    .map_err(|error| db_error(error, "workpad-get"))?;
+    let row = read::fetch_workpad(&pre.pool, slug, &project_id, issue_id)
+        .await
+        .map_err(|error| match error {
+            read::Error::NotFound | read::Error::Failed(_) => Denial::ServerError,
+            read::Error::Db(err) => {
+                let (site, source) = err.split();
+                db_error(source, site)
+            }
+        })?;
     let Some(row) = row else {
         return Err(Denial::NotFound(RESOURCE_NOT_FOUND_BODY.to_owned()));
     };
