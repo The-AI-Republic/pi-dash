@@ -711,25 +711,35 @@ describe("modulesDetailSidebarLead", () => {
   const ROW = `${SIDEBAR} role(group,Lead)`;
 
   it("returns the initial plus the resolved name when set", async () => {
-    const { driver } = harness({ [`${ROW} role(img,)`]: { count: 1, attrs: { "aria-label": "Ada Lovelace" } } });
+    const { driver } = harness({
+      [`${ROW} css(span[role="img"])`]: { count: 1, attrs: { "aria-label": "Ada Lovelace" } },
+    });
     expect(await driver.modulesDetailSidebarLead()).toBe("A Ada Lovelace");
   });
 
   it("returns the prompt when unset", async () => {
     const { driver } = harness({
-      [`${ROW} role(img,)`]: { count: 0 },
+      [`${ROW} css(span[role="img"])`]: { count: 0 },
       [`${ROW} role(button,)`]: { count: 1, text: "Lead" },
     });
     expect(await driver.modulesDetailSidebarLead()).toBe("Lead");
   });
 
+  it("falls back to the trigger name text when the avatar label is absent", async () => {
+    const { driver } = harness({
+      [`${ROW} css(span[role="img"])`]: { count: 1, attrs: {} },
+      [`${ROW} css(button span.truncate)`]: { count: 1, text: "Ada Lovelace" },
+    });
+    expect(await driver.modulesDetailSidebarLead()).toBe("A Ada Lovelace");
+  });
+
   it("returns null when the sidebar, name, or trigger is absent", async () => {
     const noSidebar = harness({ [SIDEBAR]: { count: 0 } });
     expect(await noSidebar.driver.modulesDetailSidebarLead()).toBe(null);
-    const noName = harness({ [`${ROW} role(img,)`]: { count: 1, attrs: {} } });
+    const noName = harness({ [`${ROW} css(span[role="img"])`]: { count: 1, attrs: {} } });
     expect(await noName.driver.modulesDetailSidebarLead()).toBe(null);
     const noTrigger = harness({
-      [`${ROW} role(img,)`]: { count: 0 },
+      [`${ROW} css(span[role="img"])`]: { count: 0 },
       [`${ROW} role(button,)`]: { count: 0 },
     });
     expect(await noTrigger.driver.modulesDetailSidebarLead()).toBe(null);
@@ -739,7 +749,9 @@ describe("modulesDetailSidebarLead", () => {
 describe("modulesDetailSidebarSetLead", () => {
   it("activates the row and option, then verifies the lead", async () => {
     const row = `${SIDEBAR} role(group,Lead)`;
-    const { fake, driver } = harness({ [`${row} role(img,)`]: { count: 1, attrs: { "aria-label": "Te Am" } } });
+    const { fake, driver } = harness({
+      [`${row} css(span[role="img"])`]: { count: 1, attrs: { "aria-label": "Te Am" } },
+    });
     await driver.modulesDetailSidebarSetLead("Te Am");
     expect(fake.clicks).toContain(`${row} role(button,)`);
     expect(fake.clicks).toContain("page role(option,Te Am)");
@@ -747,7 +759,7 @@ describe("modulesDetailSidebarSetLead", () => {
 });
 
 describe("modulesDetailSidebarMembers", () => {
-  const AVATARS = `${SIDEBAR} role(group,Members) role(img,)`;
+  const AVATARS = `${SIDEBAR} role(group,Members) css(span[role="img"])`;
 
   it("returns avatar names in order", async () => {
     const { driver } = harness({ [AVATARS]: { count: 1, attrs: { "aria-label": "Ada Lovelace" } } });
@@ -765,7 +777,9 @@ describe("modulesDetailSidebarMembers", () => {
 describe("modulesDetailSidebarAddMember", () => {
   it("activates the row and option, then verifies membership", async () => {
     const row = `${SIDEBAR} role(group,Members)`;
-    const { fake, driver } = harness({ [`${row} role(img,)`]: { count: 1, attrs: { "aria-label": "Te Am" } } });
+    const { fake, driver } = harness({
+      [`${row} css(span[role="img"])`]: { count: 1, attrs: { "aria-label": "Te Am" } },
+    });
     await driver.modulesDetailSidebarAddMember("Te Am");
     expect(fake.clicks).toContain(`${row} role(button,)`);
     expect(fake.clicks).toContain("page role(option,Te Am)");

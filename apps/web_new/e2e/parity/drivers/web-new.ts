@@ -32803,7 +32803,9 @@ export class WebNewDriver implements ParityDriver {
   async modulesDetailSidebarLead(): Promise<string | null> {
     if ((await this.moduleSidebar().count()) === 0) return null;
     const row = this.moduleSidebarRow("Lead");
-    const avatar = row.getByRole("img").first();
+    // CSS, not the img role: the avatar is a plain labelled span and the
+    // role query misses it in some trees (MOD-033).
+    const avatar = row.locator('span[role="img"]').first();
     if ((await avatar.count()) === 0) {
       // Unset: the trigger shows the prompt.
       const trigger = row.getByRole("button").first();
@@ -32812,10 +32814,14 @@ export class WebNewDriver implements ParityDriver {
     }
     // Set: the initial plus the resolved display name (the new picker
     // resolves names where the old row kept the placeholder; the spec
-    // forks on that).
-    const name = ((await avatar.getAttribute("aria-label").catch(() => "")) ?? "").trim();
-    if (name === "") return null;
-    return `${name.charAt(0)} ${name}`;
+    // forks on that). The label carries the name; the trigger's name
+    // text is the fallback when the label is absent.
+    const labelled = ((await avatar.getAttribute("aria-label").catch(() => "")) ?? "").trim();
+    const fallback = row.locator("button span.truncate").first();
+    const text =
+      labelled === "" ? ((await fallback.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim() : labelled;
+    if (text === "") return null;
+    return `${text.charAt(0)} ${text}`;
   }
 
   async modulesDetailSidebarSetLead(name: string): Promise<void> {
@@ -32830,9 +32836,10 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async modulesDetailSidebarMembers(): Promise<string[]> {
-    // Avatar aria-labels carry the resolved display names. The stack
-    // windows at three avatars plus a +N badge; the specs stay within.
-    const avatars = this.moduleSidebarRow("Members").getByRole("img");
+    // Avatar aria-labels carry the resolved display names (CSS, not the
+    // img role — see the lead reader). The stack windows at three
+    // avatars plus a +N badge; the specs stay within.
+    const avatars = this.moduleSidebarRow("Members").locator('span[role="img"]');
     const total = await avatars.count();
     const names: string[] = [];
     for (let index = 0; index < total; index++) {
