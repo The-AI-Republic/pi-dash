@@ -46992,13 +46992,15 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async pageExportFailSave(): Promise<void> {
-    // The dialog funnels every format through the blob-URL save
-    // primitive; replacing it with a thrower deterministically drives
-    // the failure branch (error notice, dialog stays open). A reload
-    // clears it.
+    // Failure injection for the dialog's save path: savePageExport hands
+    // the rendered bytes to the browser sink, whose createObjectUrl is the
+    // global URL.createObjectURL (pages-export/lib/downloadSink.ts).
+    // Replacing the global with a thrower deterministically drives the
+    // dialog's failure branch (error notice, dialog stays open); a page
+    // reload restores the primitive.
     await this.page.evaluate(() => {
       (URL as unknown as { createObjectURL: unknown }).createObjectURL = () => {
-        throw new Error("[parity] pageExportFailSave sabotage");
+        throw new Error("[parity] page-export save sabotage");
       };
     });
   }
@@ -47023,25 +47025,58 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async pageExportGateMarkersPresent(): Promise<boolean> {
-    // Upgrade/paywall/desktop-shell markers on the current surface: tight
-    // patterns only — the scenario fails on any hit, so generic words
-    // stay out.
-    const root = this.page.locator("main");
-    for (const role of ["button", "link", "menuitem"] as const) {
-      const found = root.getByRole(role, { name: /upgrade|premium|enterprise|contact sales|go to cloud/i });
-      const total = await found.count();
-      for (let index = 0; index < total; index += 1) {
-        if (
-          await found
-            .nth(index)
-            .isVisible()
-            .catch(() => false)
-        )
-          return true;
+    // Edition-gate sweep over the export surfaces, scoped to the roots
+    // web_new actually mounts. AppShell renders screen content inside
+    // main[aria-label="Content"] with the top bar and sidebar outside it;
+    // workspace settings replace the whole shell with
+    // div[data-testid="workspace-settings-shell"]; the kit dialog portals
+    // to the body. A visible paywall marker on any export surface fails
+    // the row, so every mounted root is scanned — and a scan that finds
+    // no content root, or no candidate controls inside the roots, throws
+    // instead of reporting a vacuous pass.
+    const roots: Locator[] = [];
+    const settingsShell = this.page.getByTestId("workspace-settings-shell");
+    if ((await settingsShell.count()) > 0) {
+      roots.push(settingsShell);
+    } else {
+      const content = this.page.locator("main");
+      if ((await content.count()) > 0) roots.push(content);
+    }
+    const dialogs = this.page.getByRole("dialog");
+    const dialogTotal = await dialogs.count();
+    for (let index = 0; index < dialogTotal; index += 1) {
+      const dialog = dialogs.nth(index);
+      if (await dialog.isVisible().catch(() => false)) roots.push(dialog);
+    }
+    if (roots.length === 0) {
+      throw new Error("[parity] gate-marker scan mounted no content root; refusing a vacuous pass.");
+    }
+    let candidates = 0;
+    for (const root of roots) {
+      for (const role of ["button", "link", "menuitem", "heading"] as const) {
+        candidates += await root.getByRole(role).count();
       }
     }
-    for (const heading of ["Available on", "Not available in your plan", "Desktop app", "Offline mode"]) {
-      if (await this.isShown(root.getByRole("heading", { name: heading }).first())) return true;
+    if (candidates === 0) {
+      throw new Error("[parity] gate-marker scan found no candidate controls; refusing a vacuous pass.");
+    }
+    for (const root of roots) {
+      for (const role of ["button", "link", "menuitem"] as const) {
+        const found = root.getByRole(role, { name: /upgrade|premium|enterprise|contact sales|go to cloud/i });
+        const total = await found.count();
+        for (let index = 0; index < total; index += 1) {
+          if (
+            await found
+              .nth(index)
+              .isVisible()
+              .catch(() => false)
+          )
+            return true;
+        }
+      }
+      for (const heading of ["Available on", "Not available in your plan", "Desktop app", "Offline mode"]) {
+        if (await this.isShown(root.getByRole("heading", { name: heading }).first())) return true;
+      }
     }
     return false;
   }

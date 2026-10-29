@@ -53,6 +53,8 @@ const SUBMIT_IDLE = `page.getByRole("button",{"name":"Export","exact":true})`;
 const TOASTS = `page.locator("[data-testid=\\"toast-notification\\"]")`;
 const DIALOG = `page.getByRole("dialog")`;
 const MAIN = `page.locator("main")`;
+const SETTINGS_SHELL = `page.getByTestId("workspace-settings-shell")`;
+const GATE_HEADING_NAMES = ["Available on", "Not available in your plan", "Desktop app", "Offline mode"];
 
 interface FakeOption {
   name: string;
@@ -79,6 +81,14 @@ class Recorder {
   submitDisabled = false;
   toasts: FakeToast[] = [];
   dialogPresent = false;
+  dialogVisible = true;
+  /** AppShell content main; absent on settings surfaces. */
+  mainPresent = true;
+  /** Settings shell root; replaces AppShell on settings surfaces. */
+  settingsShellPresent = false;
+  /** Bare-role candidate controls per mounted root (marker sweeps use gateHits). */
+  candidateButtons = 2;
+  candidateHeadings = 1;
   /** Offered labels per dialog row; a missing row unmounts its select. */
   dialogRows: Partial<Record<"format" | "scope" | "pageFormat", string[]>> = {};
   download: { fileName: string; path: string | null } | null = null;
@@ -180,8 +190,21 @@ class Recorder {
     if (/^page\.getByRole\("dialog"\)\.filter\(.*\)\.last\(\)$/.test(path)) {
       return this.dialogPresent ? 1 : 0;
     }
+    if (path === MAIN) return this.mainPresent ? 1 : 0;
+    if (path === SETTINGS_SHELL) return this.settingsShellPresent ? 1 : 0;
     if (path.includes('getByRole("heading"')) {
-      if (path.startsWith(MAIN)) return this.gateHeadings.length > 0 ? 1 : 0;
+      // Bare-role queries are the gate scan's candidate sweep; named ones
+      // are either gate-marker probes or dialog form reads by label.
+      if (!path.includes('{"name"')) {
+        if (path.startsWith(MAIN)) return this.mainPresent ? this.candidateHeadings : 0;
+        if (path.startsWith(SETTINGS_SHELL)) return this.settingsShellPresent ? this.candidateHeadings : 0;
+        if (path.includes('getByRole("dialog")')) return this.dialogPresent ? this.candidateHeadings : 0;
+        return 0;
+      }
+      if (GATE_HEADING_NAMES.some((name) => path.includes(`{"name":"${name}"}`))) {
+        return this.gateHeadings.length > 0 ? 1 : 0;
+      }
+      if (path.startsWith(MAIN) || path.startsWith(SETTINGS_SHELL)) return this.gateHeadings.length > 0 ? 1 : 0;
       return this.dialogPresent ? 1 : 0;
     }
     if (path.includes('locator("#page-export-format")') && !path.includes("option")) {
@@ -193,15 +216,27 @@ class Recorder {
     if (path.includes('locator("#page-export-size")') && !path.includes("option")) {
       return this.dialogRows.pageFormat === undefined ? 0 : 1;
     }
-    if (path.startsWith(MAIN) && path.includes('getByRole("button"')) return this.gateHits.length;
-    if (path.startsWith(MAIN) && path.includes('getByRole("link"')) return 0;
-    if (path.startsWith(MAIN) && path.includes('getByRole("menuitem"')) return 0;
     if (path.includes('getByTestId("workspace-settings-not-authorized")')) {
       return this.accessSurface === "not-authorized" ? 1 : 0;
     }
     if (path.includes('getByTestId("workspace-exports-settings")')) {
       return this.accessSurface === "form" ? 1 : 0;
     }
+    if (path.includes('getByRole("button"')) {
+      // Bare-role queries are the gate scan's candidate sweep; named ones
+      // are gate-marker probes (a regex name stringifies to {"name":{}}).
+      if (!path.includes('{"name"')) {
+        if (path.startsWith(MAIN)) return this.mainPresent ? this.candidateButtons : 0;
+        if (path.startsWith(SETTINGS_SHELL)) return this.settingsShellPresent ? this.candidateButtons : 0;
+        if (path.includes('getByRole("dialog")')) return this.dialogPresent ? this.candidateButtons : 0;
+        return 0;
+      }
+      if (path.startsWith(MAIN) || path.startsWith(SETTINGS_SHELL) || path.includes('getByRole("dialog")')) {
+        return this.gateHits.length;
+      }
+      return 0;
+    }
+    if (path.includes('getByRole("link"') || path.includes('getByRole("menuitem"')) return 0;
     return 0;
   }
 
@@ -241,6 +276,15 @@ class Recorder {
     const toastMatch = new RegExp(`^${TOASTS.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\.nth\\((\\d+)\\)$`).exec(path);
     if (toastMatch?.[1] !== undefined) return this.toasts[Number(toastMatch[1])]?.visible ?? false;
     if (path.startsWith(MAIN) && path.includes('getByRole("button"')) {
+      const hit = /\.nth\((\d+)\)$/.exec(path);
+      if (hit?.[1] === undefined) return this.gateHits.length > 0;
+      return this.gateHits[Number(hit[1])]?.visible ?? false;
+    }
+    if (/^page\.getByRole\("dialog"\)\.nth\(\d+\)$/.test(path)) return this.dialogVisible;
+    if (
+      (path.startsWith(SETTINGS_SHELL) || path.includes('getByRole("dialog")')) &&
+      path.includes('getByRole("button"')
+    ) {
       const hit = /\.nth\((\d+)\)$/.exec(path);
       if (hit?.[1] === undefined) return this.gateHits.length > 0;
       return this.gateHits[Number(hit[1])]?.visible ?? false;
@@ -860,5 +904,52 @@ describe("pageExportGateMarkersPresent", () => {
     const rec = new Recorder();
     rec.gateHeadings = ["Desktop app"];
     await expect(rec.driver().pageExportGateMarkersPresent()).resolves.toBe(true);
+  });
+
+  it("throws when no content root mounts instead of passing vacuously", async () => {
+    const rec = new Recorder();
+    rec.mainPresent = false;
+    await expect(rec.driver().pageExportGateMarkersPresent()).rejects.toThrow(
+      "[parity] gate-marker scan mounted no content root; refusing a vacuous pass."
+    );
+  });
+
+  it("throws when the roots carry no candidate controls", async () => {
+    const rec = new Recorder();
+    rec.candidateButtons = 0;
+    rec.candidateHeadings = 0;
+    await expect(rec.driver().pageExportGateMarkersPresent()).rejects.toThrow(
+      "[parity] gate-marker scan found no candidate controls; refusing a vacuous pass."
+    );
+  });
+
+  it("scans the settings shell when it replaces the content main", async () => {
+    const rec = new Recorder();
+    rec.mainPresent = false;
+    rec.settingsShellPresent = true;
+    rec.gateHits = [{ role: "button", visible: true }];
+    await expect(rec.driver().pageExportGateMarkersPresent()).resolves.toBe(true);
+    const sweeps = rec.calls.filter((call) => call.path.startsWith(SETTINGS_SHELL) && call.method === "count");
+    expect(sweeps.length).toBeGreaterThan(0);
+  });
+
+  it("scans the open dialog alongside the content main", async () => {
+    const rec = new Recorder();
+    rec.mainPresent = false;
+    rec.dialogPresent = true;
+    rec.gateHits = [{ role: "button", visible: true }];
+    await expect(rec.driver().pageExportGateMarkersPresent()).resolves.toBe(true);
+    const sweeps = rec.calls.filter((call) => call.path.includes('getByRole("dialog")') && call.method === "count");
+    expect(sweeps.length).toBeGreaterThan(0);
+  });
+
+  it("ignores a hidden dialog when choosing roots", async () => {
+    const rec = new Recorder();
+    rec.mainPresent = false;
+    rec.dialogPresent = true;
+    rec.dialogVisible = false;
+    await expect(rec.driver().pageExportGateMarkersPresent()).rejects.toThrow(
+      "[parity] gate-marker scan mounted no content root; refusing a vacuous pass."
+    );
   });
 });
