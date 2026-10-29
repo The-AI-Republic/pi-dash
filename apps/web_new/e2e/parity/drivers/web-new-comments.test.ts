@@ -184,6 +184,66 @@ describe("web_new comment driver", () => {
     expect(visited).toEqual(["reload", "url", "comments"]);
   });
 
+  it("retries the short-link redirect once through a reload on a stall", async () => {
+    const visited: string[] = [];
+    const page = pageOf();
+    page.page.goto = (async (url: string) => {
+      visited.push(url);
+      return null;
+    }) as Page["goto"];
+    page.page.waitForLoadState = (async () => {
+      visited.push("load");
+    }) as Page["waitForLoadState"];
+    let urls = 0;
+    page.page.waitForURL = (async () => {
+      urls += 1;
+      visited.push(`url${urls}`);
+      if (urls === 1) throw new Error("stall");
+      return null;
+    }) as Page["waitForURL"];
+    page.page.getByText = ((text: string) => {
+      expect(text).toBe("Back to the project issues");
+      return locator({ count: async () => 0 });
+    }) as unknown as Page["getByText"];
+    page.page.reload = (async () => {
+      visited.push("reload");
+      return null;
+    }) as Page["reload"];
+    page.page.getByRole = ((role: string, options?: { name?: string }) => {
+      if (role === "heading" && options?.name === "Activity") {
+        return locator({ waitFor: async () => void visited.push("comments") });
+      }
+      return locator();
+    }) as Page["getByRole"];
+    await new WebNewDriver(page.page).openIssueDetail("acme", "p-1", "i-1");
+    expect(visited).toEqual(["/acme/projects/p-1/issues/i-1", "load", "url1", "reload", "url2", "comments"]);
+  });
+
+  it("throws without retrying when the missing state rendered", async () => {
+    const visited: string[] = [];
+    const page = pageOf();
+    page.page.goto = (async (url: string) => {
+      visited.push(url);
+      return null;
+    }) as Page["goto"];
+    page.page.waitForLoadState = (async () => {
+      visited.push("load");
+    }) as Page["waitForLoadState"];
+    page.page.waitForURL = (async () => {
+      visited.push("url");
+      throw new Error("stall");
+    }) as Page["waitForURL"];
+    page.page.getByText = (() => locator({ count: async () => 1 })) as unknown as Page["getByText"];
+    page.page.reload = (async () => {
+      visited.push("reload");
+      return null;
+    }) as Page["reload"];
+    await expect(new WebNewDriver(page.page).openIssueDetail("acme", "p-1", "i-1")).rejects.toThrow(
+      "never reached the browse view"
+    );
+    expect(visited).not.toContain("reload");
+  });
+
   it("reads the card texts in feed order", async () => {
     const page = pageOf({
       locator: (selector) =>

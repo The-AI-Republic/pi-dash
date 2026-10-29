@@ -3336,9 +3336,22 @@ export class WebNewDriver implements ParityDriver {
         await this.page.goto(`/${workspaceSlug}/projects/${issueSeqOrProjectId}/issues/${issueId}`);
         await this.page.waitForLoadState("domcontentloaded");
       }
-      await this.page.waitForURL(/\/browse\//, { timeout: WebNewDriver.WAIT_MS }).catch(() => {
-        throw new Error(`[parity] detail for ${issueId} never reached the browse view (current: ${this.page.url()}).`);
-      });
+      // The short-link loader resolves through a dynamic import; under
+      // vite dev-transform pressure the import occasionally aborts and
+      // the loader never settles (no resolve request fires at all).
+      // Retry once through a reload — but a rendered missing state means
+      // the issue is genuinely unknown, so that throws without retrying.
+      const unreachable = (): Error =>
+        new Error(`[parity] detail for ${issueId} never reached the browse view (current: ${this.page.url()}).`);
+      try {
+        await this.page.waitForURL(/\/browse\//, { timeout: WebNewDriver.WAIT_MS });
+      } catch {
+        if ((await this.page.getByText("Back to the project issues").count()) > 0) throw unreachable();
+        await this.page.reload();
+        await this.page.waitForURL(/\/browse\//, { timeout: WebNewDriver.WAIT_MS }).catch(() => {
+          throw unreachable();
+        });
+      }
     }
     await this.page.getByRole("heading", { name: "Activity", exact: true }).waitFor({
       timeout: WebNewDriver.WAIT_MS,
