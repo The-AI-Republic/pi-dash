@@ -77,6 +77,13 @@ pub struct Settings {
     pub gitlab_allowed_hosts: Vec<String>,
     pub cors_allowed_origins: Vec<String>,
     pub cors_allow_all_origins: bool,
+    /// `CSRF_TRUSTED_ORIGINS` (`settings/common.py:617`): the CORS
+    /// allowed origins, cloned. The cloud overlay overwrites this with
+    /// the env list plus the desktop origins
+    /// (`pi_dash_cloud/settings/cloud.py:338`, unconditional), while
+    /// `cors_allowed_origins` keeps the CORS-only semantics (empty
+    /// under the allow-all wildcard).
+    pub csrf_trusted_origins: Vec<String>,
     pub database: DatabaseSettings,
     pub redis: RedisSettings,
     pub assistant: AssistantSettings,
@@ -323,29 +330,28 @@ impl<'a> Ctx<'a> {
         }
     }
 
-    fn opt_int(&self, key: &str) -> Result<Option<i64>, ConfigError> {
-        match self.raw(key, None)? {
-            ConfigValue::Null => Ok(None),
-            v => v
-                .to_int()
-                .map(Some)
-                .ok_or_else(|| ConfigError::TypeMismatch {
-                    key: key.to_owned(),
-                    expected: "int or null",
-                    actual: self.lookup(key).unwrap_or_default(),
-                }),
-        }
+    /// Lenient float: mirrors `redis.py:22-27` `_float_setting`
+    /// (PIDASHCONV-1316) — empty or unparseable values fall back to the
+    /// default instead of failing boot. Redis tuning only; the other
+    /// numeric keys stay strict (`req_int`).
+    fn float_or_default(&self, key: &str, default: f64) -> Result<f64, ConfigError> {
+        let inline = ConfigValue::from(default);
+        Ok(self.raw(key, Some(&inline))?.to_float().unwrap_or(default))
     }
 
-    fn req_float(&self, key: &str, inline: ConfigValue) -> Result<f64, ConfigError> {
-        match self.raw(key, Some(&inline))?.to_float() {
-            Some(f) => Ok(f),
-            None => Err(ConfigError::TypeMismatch {
-                key: key.to_owned(),
-                expected: "float",
-                actual: self.lookup(key).unwrap_or_default(),
-            }),
-        }
+    /// Lenient int: mirrors `redis.py:30-35` `_int_setting`
+    /// (PIDASHCONV-1316) — empty or unparseable values fall back to the
+    /// default instead of failing boot. Redis tuning only.
+    fn int_or_default(&self, key: &str, default: i64) -> Result<i64, ConfigError> {
+        let inline = ConfigValue::from(default);
+        Ok(self.raw(key, Some(&inline))?.to_int().unwrap_or(default))
+    }
+
+    /// Lenient optional positive int: mirrors `redis.py:38-46`
+    /// `_optional_int_setting` (PIDASHCONV-1316) — unset, `""`,
+    /// unparseable and `<= 0` all mean "no cap" (`None`).
+    fn opt_positive_int(&self, key: &str) -> Result<Option<i64>, ConfigError> {
+        Ok(self.raw(key, None)?.to_int().filter(|v| *v > 0))
     }
 
     /// `value == "1"` (case-sensitive, no lowering): session persistence,
@@ -979,6 +985,8 @@ impl Settings {
             gitlab_allowed_hosts: ctx.csv_stripped("GITLAB_ALLOWED_HOSTS", "")?,
             cors_allowed_origins: cors_allowed_origins.clone(),
             cors_allow_all_origins: cors_allowed_origins.is_empty(),
+            // common.py:617: CSRF_TRUSTED_ORIGINS = cors_allowed_origins.
+            csrf_trusted_origins: cors_allowed_origins.clone(),
             database: DatabaseSettings {
                 url: database_url,
                 name: ctx.opt_string("POSTGRES_DB")?,
@@ -991,13 +999,15 @@ impl Settings {
             redis: RedisSettings {
                 url: redis_url,
                 ssl: redis_ssl,
+                // Lenient like redis.py:22-46 (PIDASHCONV-1316): Django
+                // keeps these as raw strings and falls back at use, so
+                // empty/garbage values must not fail boot.
                 socket_connect_timeout_secs: ctx
-                    .req_float("REDIS_SOCKET_CONNECT_TIMEOUT", ConfigValue::from(2.0))?,
-                socket_timeout_secs: ctx
-                    .req_float("REDIS_SOCKET_TIMEOUT", ConfigValue::from(5.0))?,
+                    .float_or_default("REDIS_SOCKET_CONNECT_TIMEOUT", 2.0)?,
+                socket_timeout_secs: ctx.float_or_default("REDIS_SOCKET_TIMEOUT", 5.0)?,
                 health_check_interval_secs: ctx
-                    .req_int("REDIS_HEALTH_CHECK_INTERVAL", ConfigValue::from(30))?,
-                max_connections: ctx.opt_int("REDIS_MAX_CONNECTIONS")?,
+                    .int_or_default("REDIS_HEALTH_CHECK_INTERVAL", 30)?,
+                max_connections: ctx.opt_positive_int("REDIS_MAX_CONNECTIONS")?,
             },
             assistant: AssistantSettings {
                 crypto_backend: ctx.req_string("ASSISTANT_CRYPTO_BACKEND", "aws-kms")?,
@@ -1459,6 +1469,11 @@ mod tests {
             s.cors_allowed_origins,
             vec!["https://a.example", "https://b.example"]
         );
+        // common.py:617: the CSRF list is the CORS list, cloned.
+        assert_eq!(
+            s.csrf_trusted_origins,
+            vec!["https://a.example", "https://b.example"]
+        );
         assert_eq!(s.database.url.as_deref(), Some("postgresql://db/pidash"));
         assert!(s.redis.ssl);
         assert!(s.loop_tuning.enabled);
@@ -1470,6 +1485,18 @@ mod tests {
             s.urls.admin_base_url.as_deref(),
             Some("https://admin.example")
         );
+    }
+
+    #[test]
+    fn csrf_trusted_origins_default_to_the_empty_cors_list() {
+        // common.py:150-155,617: an unset CORS env leaves the allow-all
+        // wildcard on and the CSRF list empty (the cloud overlay, not
+        // OSS resolution, adds the desktop origins there).
+        let s = Settings::from_map_with(&HashMap::new(), Profile::Common, &NoOverlay)
+            .expect("resolves");
+        assert!(s.cors_allow_all_origins);
+        assert!(s.cors_allowed_origins.is_empty());
+        assert!(s.csrf_trusted_origins.is_empty());
     }
 
     #[test]
@@ -1551,6 +1578,70 @@ mod tests {
             matches!(err, ConfigError::TypeMismatch { .. }),
             "unexpected: {err:?}"
         );
+    }
+
+    #[test]
+    fn redis_timeouts_fall_back_to_defaults_on_garbage() {
+        // redis.py:22-35 `_float_setting`/`_int_setting`: unparseable (or
+        // empty) values fall back to the default instead of failing boot
+        // (PIDASHCONV-1316). Valid values keep Python's float()/int() rules.
+        for (key, raw, expected) in [
+            ("REDIS_SOCKET_CONNECT_TIMEOUT", "", 2.0),
+            ("REDIS_SOCKET_CONNECT_TIMEOUT", "abc", 2.0),
+            ("REDIS_SOCKET_CONNECT_TIMEOUT", "3.5", 3.5),
+            ("REDIS_SOCKET_CONNECT_TIMEOUT", " 1e3 ", 1000.0),
+            ("REDIS_SOCKET_TIMEOUT", "", 5.0),
+            ("REDIS_SOCKET_TIMEOUT", "abc", 5.0),
+            ("REDIS_SOCKET_TIMEOUT", "1.5", 1.5),
+        ] {
+            let s = Settings::from_map_with(&vars(&[(key, raw)]), Profile::Common, &NoOverlay)
+                .expect("redis tuning garbage must not fail boot");
+            let actual = if key.contains("CONNECT") {
+                s.redis.socket_connect_timeout_secs
+            } else {
+                s.redis.socket_timeout_secs
+            };
+            assert_eq!(actual, expected, "key={key} raw={raw:?}");
+        }
+        for (raw, expected) in [("", 30), ("abc", 30), ("45", 45), ("1_0", 10)] {
+            let s = Settings::from_map_with(
+                &vars(&[("REDIS_HEALTH_CHECK_INTERVAL", raw)]),
+                Profile::Common,
+                &NoOverlay,
+            )
+            .expect("redis tuning garbage must not fail boot");
+            assert_eq!(s.redis.health_check_interval_secs, expected, "raw={raw:?}");
+        }
+        // Unset keys resolve to the same defaults.
+        let s = Settings::from_map_with(&HashMap::new(), Profile::Common, &NoOverlay)
+            .expect("resolves");
+        assert_eq!(s.redis.socket_connect_timeout_secs, 2.0);
+        assert_eq!(s.redis.socket_timeout_secs, 5.0);
+        assert_eq!(s.redis.health_check_interval_secs, 30);
+    }
+
+    #[test]
+    fn redis_max_connections_maps_bad_and_nonpositive_to_none() {
+        // redis.py:38-46 `_optional_int_setting`: unset, "", unparseable
+        // and <= 0 all mean "no cap" (PIDASHCONV-1316).
+        for (raw, expected) in [
+            ("", None),
+            ("abc", None),
+            ("0", None),
+            ("-1", None),
+            ("25", Some(25)),
+        ] {
+            let s = Settings::from_map_with(
+                &vars(&[("REDIS_MAX_CONNECTIONS", raw)]),
+                Profile::Common,
+                &NoOverlay,
+            )
+            .expect("redis tuning garbage must not fail boot");
+            assert_eq!(s.redis.max_connections, expected, "raw={raw:?}");
+        }
+        let s = Settings::from_map_with(&HashMap::new(), Profile::Common, &NoOverlay)
+            .expect("resolves");
+        assert_eq!(s.redis.max_connections, None);
     }
 
     #[test]

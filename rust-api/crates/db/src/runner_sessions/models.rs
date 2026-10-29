@@ -114,24 +114,11 @@ pub mod runner_session {
     /// lifetime, which is why Redis I/O stays outside the
     /// `atomic()` block (`:156-167`).
     pub const OPEN_PRIOR_SQL: &str = "SELECT \"runner_session\".\"id\", \"runner_session\".\"runner_id\", \"runner_session\".\"protocol_version\", \"runner_session\".\"created_at\", \"runner_session\".\"last_seen_at\", \"runner_session\".\"revoked_at\", \"runner_session\".\"revoked_reason\" FROM \"runner_session\" WHERE (\"runner_session\".\"revoked_at\" IS NULL AND \"runner_session\".\"runner_id\" = $1) ORDER BY \"runner_session\".\"created_at\" DESC LIMIT 1 FOR UPDATE";
-    /// Session-open insert (`views/sessions.py:184-189`):
-    /// `create(id=new_sid, runner=runner,
-    /// protocol_version=RUNNER_PROTOCOL_VERSION,
-    /// last_seen_at=now)`. Params in column order: `$1` id (fresh
-    /// `uuid4`, caller-supplied), `$2` runner id, `$3` protocol
-    /// version, `$4` `created_at` (`auto_now_add`, Python-side
-    /// `now`), `$5` `last_seen_at`, `$6` `revoked_at` (`NULL`: no
-    /// default, nullable), `$7` `revoked_reason` (`""` default). No
-    /// `RETURNING`: the PK is supplied, so Django fetches nothing
-    /// back.
-    pub const OPEN_INSERT_SQL: &str = "INSERT INTO \"runner_session\" (\"id\", \"runner_id\", \"protocol_version\", \"created_at\", \"last_seen_at\", \"revoked_at\", \"revoked_reason\") VALUES ($1, $2, $3, $4, $5, $6, $7)";
-    /// Session revoke (`views/sessions.py:180-182` open-eviction with
-    /// reason `"evicted_by_new_session"`, `:307-309` delete with
-    /// `"clean_shutdown"`): `save(update_fields=["revoked_at",
-    /// "revoked_reason"])`. `$1` revoked_at, `$2` revoked_reason,
-    /// `$3` session id. `close_runner_session` (`pubsub.py:101-104`,
-    /// reason `"force_close"`, PIDASHCONV-553) emits this same shape.
-    pub const REVOKE_SQL: &str = "UPDATE \"runner_session\" SET \"revoked_at\" = $1, \"revoked_reason\" = $2 WHERE \"runner_session\".\"id\" = $3";
+    // NOTE: the session-open insert, revoke and touch statements lived
+    // here; they moved to `pidash_services::domain::tokens`
+    // (`open_runner_session`, `revoke_runner_session`,
+    // `touch_runner_session`; PIDASHCONV-1520), whose tests carry the
+    // pins. The lookups below stay: reads are out of scope.
     /// Session-delete lookup (`views/sessions.py:303`):
     /// `get(id=sid, runner=runner, revoked_at__isnull=True)`; miss
     /// (or an already-revoked row) still clears the marker and
@@ -145,11 +132,6 @@ pub mod runner_session {
     /// (`:345-352`). `$1` session id, `$2` runner id. Ordering
     /// cleared, `LIMIT 21`, like every `.get()`.
     pub const POLL_GET_SQL: &str = "SELECT \"runner_session\".\"id\", \"runner_session\".\"runner_id\", \"runner_session\".\"protocol_version\", \"runner_session\".\"created_at\", \"runner_session\".\"last_seen_at\", \"runner_session\".\"revoked_at\", \"runner_session\".\"revoked_reason\" FROM \"runner_session\" WHERE (\"runner_session\".\"id\" = $1 AND \"runner_session\".\"runner_id\" = $2) LIMIT 21";
-    /// Poll-bookkeeping touch (`views/sessions.py:359-360`):
-    /// `save(update_fields=["last_seen_at"])`. `$1` last_seen_at,
-    /// `$2` session id.
-    pub const TOUCH_SQL: &str =
-        "UPDATE \"runner_session\" SET \"last_seen_at\" = $1 WHERE \"runner_session\".\"id\" = $2";
     /// Active-session id lookup
     /// (`services/outbox.py:207-213`): `filter(runner_id=runner_id,
     /// revoked_at__isnull=True).values_list("id",
@@ -346,30 +328,8 @@ pub mod runner_session {
             assert!(sql.ends_with("LIMIT 1 FOR UPDATE"));
         }
 
-        #[test]
-        fn open_insert_sql_matches_captured_django() {
-            let sql = OPEN_INSERT_SQL;
-            assert_terms_in_order(
-                sql,
-                &[
-                    "INSERT INTO \"runner_session\" (\"id\", \"runner_id\", \"protocol_version\", \"created_at\", \"last_seen_at\", \"revoked_at\", \"revoked_reason\")",
-                    "VALUES ($1, $2, $3, $4, $5, $6, $7)",
-                ],
-            );
-            assert!(
-                !sql.contains("RETURNING"),
-                "no RETURNING: the PK is caller-supplied"
-            );
-        }
-
-        #[test]
-        fn revoke_sql_matches_captured_django() {
-            // SET order is update_fields order; the WHERE is the bare pk.
-            assert_eq!(
-                REVOKE_SQL,
-                "UPDATE \"runner_session\" SET \"revoked_at\" = $1, \"revoked_reason\" = $2 WHERE \"runner_session\".\"id\" = $3"
-            );
-        }
+        // (The open-insert and revoke SQL pins moved with the
+        // statements to `pidash_services::domain::tokens`.)
 
         #[test]
         fn delete_get_sql_matches_captured_django() {
@@ -403,13 +363,8 @@ pub mod runner_session {
             assert!(sql.ends_with("LIMIT 21"));
         }
 
-        #[test]
-        fn touch_sql_matches_captured_django() {
-            assert_eq!(
-                TOUCH_SQL,
-                "UPDATE \"runner_session\" SET \"last_seen_at\" = $1 WHERE \"runner_session\".\"id\" = $2"
-            );
-        }
+        // (The touch SQL pin moved with the statement to
+        // `pidash_services::domain::tokens`.)
     }
 }
 

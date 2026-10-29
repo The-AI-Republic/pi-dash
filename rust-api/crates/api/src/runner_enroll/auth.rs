@@ -78,6 +78,7 @@
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::Response;
 use pidash_auth::jwt::KeyRing;
+pub use pidash_compat::response::server_error;
 use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -209,21 +210,6 @@ pub fn not_authenticated_response(
     builder
         .body(axum::body::Body::from(body))
         .expect("auth denial builds")
-}
-
-/// Unhandled-failure escape (`UnicodeDecodeError` on the header,
-/// `ValidationError` on a non-UUID id, any `sqlx::Error` outside the
-/// best-effort bump): 500. Django renders its HTML error page here; only
-/// the status is contract-pinned, and the body keeps the sibling-handler
-/// JSON text (same position as `crate::runner_runs::SERVER_ERROR_BODY`).
-pub fn server_error() -> Response {
-    Response::builder()
-        .status(StatusCode::INTERNAL_SERVER_ERROR)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(
-            r#"{"error":"Something went wrong please try again later"}"#,
-        ))
-        .expect("server error builds")
 }
 
 // ---------------------------------------------------------------------------
@@ -587,23 +573,19 @@ async fn workspace_member_role(
 /// rows (revoked is denied earlier), so the `is not None` early return never
 /// fires here.
 async fn revoke_machine_token(pool: &PgPool, token_id: Uuid) -> Result<(), sqlx::Error> {
-    sqlx::query(r#"UPDATE "machine_token" SET "revoked_at" = $1 WHERE "machine_token"."id" = $2"#)
-        .bind(chrono::Utc::now())
-        .bind(token_id)
-        .execute(pool)
+    pidash_services::domain::tokens::revoke_machine_token_by_id(pool, token_id, chrono::Utc::now())
         .await
-        .map(|_| ())
 }
 
 /// `MachineToken.objects.filter(pk=...).update(last_used_at=...)`: no
 /// `updated_at` touch (`QuerySet.update` writes only the named column).
 async fn bump_machine_token_last_used(pool: &PgPool, token_id: Uuid) -> Result<(), sqlx::Error> {
-    sqlx::query(r#"UPDATE "machine_token" SET "last_used_at" = $1 WHERE "machine_token"."id" = $2"#)
-        .bind(chrono::Utc::now())
-        .bind(token_id)
-        .execute(pool)
-        .await
-        .map(|_| ())
+    pidash_services::domain::tokens::touch_machine_token_last_used_by_id(
+        pool,
+        token_id,
+        chrono::Utc::now(),
+    )
+    .await
 }
 
 /// Membership-or-revoke shared by the three `mt_` paths
@@ -1014,10 +996,7 @@ async fn authenticate_api_key_token(
     {
         return Ok(ApiKeyOutcome::Invalid);
     }
-    sqlx::query(r#"UPDATE "api_tokens" SET "last_used" = $1 WHERE "api_tokens"."id" = $2"#)
-        .bind(chrono::Utc::now())
-        .bind(id)
-        .execute(pool)
+    pidash_services::domain::tokens::touch_api_token_last_used_by_id(pool, id, chrono::Utc::now())
         .await
         .map_err(|_| server_error())?;
     // The token loggers stamp this id on the `process_logs` payload

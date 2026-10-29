@@ -17,6 +17,10 @@
 //!   revoke frames + session closes; runner rows untouched (port as-is).
 //! * `POST /api/runners/<rid>/revoke/` — row-locked read, view/manage
 //!   gates, idempotent 200 (no re-emit when already revoked).
+//! * `POST /api/runners/<rid>/pause/` (`09738d222`) — stamp the pause,
+//!   release pins, return the runner plus `in_flight_runs`.
+//! * `POST /api/runners/<rid>/resume/` (`09738d222`) — clear the pause,
+//!   drain queued work to the runner, return the runner.
 //!
 //! Fixture ids D13-F3 (`tokens/tokens.golden.json`: rotation mints),
 //! D13-F5 (`queries/*.sql`: refresh/revoke/cascade SQL), D13-F6
@@ -40,7 +44,7 @@
 //! * This module is the first pool-backed consumer of the
 //!   [`RevokeStore`](pidash_services::runner_enroll::revoke::RevokeStore)
 //!   and [`PubsubStore`](pidash_services::runner_sessions::pubsub::PubsubStore)
-//!   seams: one `TxStores` implementation runs the drivers on a sqlx
+//!   seams: the jobs revoke service runs the drivers on a sqlx
 //!   transaction, commits, then fires the collected post-commit effects
 //!   in Python's registration order (per-run publish pairs → handoffs →
 //!   drains → cleanup).
@@ -105,6 +109,7 @@ use uuid::Uuid;
 use pidash_auth::permissions::membership;
 use pidash_auth::permissions::runner as runner_perm;
 use pidash_auth::scope::TenantScope;
+use pidash_db::redis::client_from_settings;
 use pidash_db::runner_enroll::columns::{
     dev_machine as dm_cols, pod as pod_cols, runner as r_cols,
 };
@@ -112,15 +117,14 @@ use pidash_services::runner_enroll::queries::{catalog_reads, enroll_reads, manag
 use pidash_services::runner_enroll::revoke as revoke_kernel;
 use pidash_services::runner_enroll::serializers::shapes;
 use pidash_services::runner_enroll::tokens as enroll_tokens;
-use pidash_services::runner_runs::finalization as finalize_kernel;
-use pidash_services::runner_sessions::{drain as drain_kernel, pubsub as pubsub_kernel};
+use pidash_services::runner_sessions::pubsub as pubsub_kernel;
 use pidash_types::{UserId, WorkspaceId};
 
 use super::auth as enroll_auth;
 use crate::middleware::SessionHandle;
 use crate::runner_runs::{json_response, pool_of, server_error};
 use crate::state::AppState;
-use crate::v1_cycles_modules::json_cpython::{self, JObject, JVal, JsonFail};
+use crate::v1_cycles_modules::json::{self, JObject, JVal, JsonFail};
 
 // ---------------------------------------------------------------------------
 // Error bodies (D13-F7 `handlers/endpoints.golden.json`, key order verbatim)
@@ -321,7 +325,8 @@ fn machine_lazy_sql() -> String {
 const LIVE_STATE_SQL: &str =
     "SELECT \"runner_id\", \"observed_run_id\", \"last_event_at\", \"last_event_kind\", \
      \"last_event_summary\", \"agent_pid\", \"agent_subprocess_alive\", \
-     \"approvals_pending\", \"usage\", \"llm_model\", \"turn_count\", \"updated_at\" \
+     \"approvals_pending\", \"usage\", \"llm_model\", \"turn_count\", \
+     \"agent_health\", \"agent_last_activity_at\", \"updated_at\" \
      FROM \"runner_live_state\" WHERE \"runner_live_state\".\"runner_id\" = $1 LIMIT 1";
 
 // ---------------------------------------------------------------------------
@@ -435,7 +440,7 @@ async fn read_request_data(state: &AppState, req: Request) -> Result<JVal, Respo
         .await
         .map(|collected| collected.to_bytes())
         .map_err(|_| server_error())?;
-    match json_cpython::parse_request_data(&bytes) {
+    match json::parse_request_data(&bytes) {
         Ok(value) => Ok(value),
         Err(JsonFail::Message(detail)) => Err(json_response(
             StatusCode::BAD_REQUEST,
@@ -450,7 +455,7 @@ async fn read_request_data(state: &AppState, req: Request) -> Result<JVal, Respo
 fn parse_error_body(detail: &str) -> String {
     format!(
         "{{\"detail\":{}}}",
-        serde_json::to_string(&format!("{}{detail}", json_cpython::JSON_PARSE_PREFIX))
+        serde_json::to_string(&format!("{}{detail}", json::JSON_PARSE_PREFIX))
             .expect("json string")
     )
 }
@@ -499,19 +504,6 @@ fn body_workspace(data: &JVal) -> Result<Option<String>, Response> {
             Err(server_error())
         }
     }
-}
-
-/// Api-crate-owned Redis client (the `machine.rs` `redis_client`
-/// position): `None` when `REDIS_URL` is unset, empty, or unparsable,
-/// mirroring `redis_instance()` returning `None`.
-pub(crate) fn redis_client(state: &AppState) -> Option<redis::Client> {
-    state
-        .settings()
-        .redis
-        .url
-        .as_deref()
-        .filter(|url| !url.is_empty())
-        .and_then(|url| redis::Client::open(url).ok())
 }
 
 // ---------------------------------------------------------------------------
@@ -645,9 +637,10 @@ pub async fn runner_refresh(
         && presented_hash == runner.previous_refresh_token_hash
     {
         let now = now_micros();
-        let mut stores = TxStores::new(&mut tx, runner_id);
-        let outcome = match revoke_kernel::revoke_runner(
-            &mut stores,
+        let bundle = match revoke_runner_on_tx(
+            &mut tx,
+            &pool,
+            &state,
             runner_id,
             runner.revoked_at,
             REVOKE_REASON_REFRESH_REPLAYED,
@@ -655,14 +648,16 @@ pub async fn runner_refresh(
         )
         .await
         {
-            Ok(outcome) => outcome,
+            Ok(bundle) => bundle,
             Err(_) => return server_error(),
         };
-        let bundle = stores.into_bundle(outcome);
         if tx.commit().await.is_err() {
             return server_error();
         }
-        if fire_bundle(&pool, &state, bundle).await.is_err() {
+        if fire_bundle(&pool, &state, bundle, Some(runner.owner_id))
+            .await
+            .is_err()
+        {
             return server_error();
         }
         return unauthorized(REFRESH_TOKEN_REPLAYED_BODY);
@@ -682,9 +677,10 @@ pub async fn runner_refresh(
     };
     if member.is_none() {
         let now = now_micros();
-        let mut stores = TxStores::new(&mut tx, runner_id);
-        let outcome = match revoke_kernel::revoke_runner(
-            &mut stores,
+        let bundle = match revoke_runner_on_tx(
+            &mut tx,
+            &pool,
+            &state,
             runner_id,
             runner.revoked_at,
             REVOKE_REASON_MEMBERSHIP,
@@ -692,14 +688,16 @@ pub async fn runner_refresh(
         )
         .await
         {
-            Ok(outcome) => outcome,
+            Ok(bundle) => bundle,
             Err(_) => return server_error(),
         };
-        let bundle = stores.into_bundle(outcome);
         if tx.commit().await.is_err() {
             return server_error();
         }
-        if fire_bundle(&pool, &state, bundle).await.is_err() {
+        if fire_bundle(&pool, &state, bundle, Some(runner.owner_id))
+            .await
+            .is_err()
+        {
             return server_error();
         }
         return unauthorized(MEMBERSHIP_REVOKED_BODY);
@@ -824,9 +822,10 @@ pub async fn runner_self_revoke(
         Err(_) => return server_error(),
     };
     let bundle = {
-        let mut stores = TxStores::new(&mut tx, runner_pk);
-        let outcome = match revoke_kernel::revoke_runner(
-            &mut stores,
+        match revoke_runner_on_tx(
+            &mut tx,
+            &pool,
+            &state,
             runner_pk,
             revoked_at,
             REVOKE_REASON_SELF,
@@ -834,15 +833,17 @@ pub async fn runner_self_revoke(
         )
         .await
         {
-            Ok(outcome) => outcome,
+            Ok(bundle) => bundle,
             Err(_) => return server_error(),
-        };
-        stores.into_bundle(outcome)
+        }
     };
     if tx.commit().await.is_err() {
         return server_error();
     }
-    if fire_bundle(&pool, &state, bundle).await.is_err() {
+    if fire_bundle(&pool, &state, bundle, Some(auth.runner.owner_id))
+        .await
+        .is_err()
+    {
         return server_error();
     }
 
@@ -1052,10 +1053,7 @@ pub async fn dev_machine_revoke(
         stamped = Some((now, auto_now));
     }
     // Token revoke-all (`:198`).
-    if sqlx::query(&manage_reads::machine_tokens_revoke_sql())
-        .bind(now)
-        .bind(machine_id)
-        .execute(&mut *tx)
+    if pidash_services::domain::tokens::revoke_tokens_for_dev_machine(&mut *tx, machine_id, now)
         .await
         .is_err()
     {
@@ -1104,20 +1102,22 @@ pub async fn dev_machine_revoke(
     // samples its own `now()` (`models.py:598`).
     let mut bundles = Vec::with_capacity(runner_ids.len());
     for (index, runner_id) in runner_ids.iter().enumerate() {
-        let mut stores = TxStores::new(&mut tx, *runner_id);
-        let outcome = match revoke_kernel::revoke_runner(
-            &mut stores,
-            *runner_id,
-            runner_revoked[index],
-            REVOKE_REASON_DEV_MACHINE,
-            now_micros(),
-        )
-        .await
-        {
-            Ok(outcome) => outcome,
-            Err(_) => return server_error(),
-        };
-        bundles.push(stores.into_bundle(outcome));
+        bundles.push(
+            match revoke_runner_on_tx(
+                &mut tx,
+                &pool,
+                &state,
+                *runner_id,
+                runner_revoked[index],
+                REVOKE_REASON_DEV_MACHINE,
+                now_micros(),
+            )
+            .await
+            {
+                Ok(bundle) => bundle,
+                Err(_) => return server_error(),
+            },
+        );
         let pubsub = TxPubsub::new(&mut tx, &state);
         if pubsub_kernel::close_runner_session(
             &pubsub,
@@ -1134,7 +1134,10 @@ pub async fn dev_machine_revoke(
         return server_error();
     }
     for bundle in bundles {
-        if fire_bundle(&pool, &state, bundle).await.is_err() {
+        if fire_bundle(&pool, &state, bundle, Some(user_id))
+            .await
+            .is_err()
+        {
             return server_error();
         }
     }
@@ -1209,10 +1212,7 @@ pub async fn dev_machine_rotate(
 
     // Token revoke-all (`:238`).
     let now = now_micros();
-    if sqlx::query(&manage_reads::machine_tokens_revoke_sql())
-        .bind(now)
-        .bind(machine_id)
-        .execute(&mut *tx)
+    if pidash_services::domain::tokens::revoke_tokens_for_dev_machine(&mut *tx, machine_id, now)
         .await
         .is_err()
     {
@@ -1342,20 +1342,22 @@ pub async fn runner_revoke(
     let already_revoked = runner.revoked_at.is_some();
     let mut bundle = None;
     if !already_revoked {
-        let mut stores = TxStores::new(&mut tx, runner_id);
-        let outcome = match revoke_kernel::revoke_runner(
-            &mut stores,
-            runner_id,
-            runner.revoked_at,
-            REVOKE_REASON_MANUAL,
-            now_micros(),
-        )
-        .await
-        {
-            Ok(outcome) => outcome,
-            Err(_) => return server_error(),
-        };
-        bundle = Some(stores.into_bundle(outcome));
+        bundle = Some(
+            match revoke_runner_on_tx(
+                &mut tx,
+                &pool,
+                &state,
+                runner_id,
+                runner.revoked_at,
+                REVOKE_REASON_MANUAL,
+                now_micros(),
+            )
+            .await
+            {
+                Ok(bundle) => bundle,
+                Err(_) => return server_error(),
+            },
+        );
     }
     if tx.commit().await.is_err() {
         return server_error();
@@ -1363,7 +1365,10 @@ pub async fn runner_revoke(
     // The frame + close run OUTSIDE the tx, only on a fresh revoke
     // (`:488-490`); the re-read + serialize run in both arms (`:491-492`).
     if let Some(bundle) = bundle {
-        if fire_bundle(&pool, &state, bundle).await.is_err() {
+        if fire_bundle(&pool, &state, bundle, Some(user_id))
+            .await
+            .is_err()
+        {
             return server_error();
         }
         let pubsub = PoolPubsubStore::new(&pool, &state);
@@ -1383,7 +1388,7 @@ pub async fn runner_revoke(
             return server_error();
         }
     }
-    match render_revoked_runner(&pool, runner_id).await {
+    match render_toggled_runner(&pool, runner_id).await {
         Ok(body) => json_response(StatusCode::OK, body),
         Err(response) => response,
     }
@@ -1546,6 +1551,8 @@ struct FullRunner {
     updated_at: DateTime<Utc>,
     revoked_at: Option<DateTime<Utc>>,
     revoked_reason: String,
+    paused_at: Option<DateTime<Utc>>,
+    paused_by_id: Option<Uuid>,
 }
 
 /// Decode a full runner row positionally (`r_cols::COLUMNS` order —
@@ -1574,6 +1581,8 @@ fn decode_full_runner(row: &sqlx::postgres::PgRow) -> Result<FullRunner, Respons
         updated_at: row.try_get(26).map_err(|_| server_error())?,
         revoked_at: row.try_get(27).map_err(|_| server_error())?,
         revoked_reason: row.try_get(28).map_err(|_| server_error())?,
+        paused_at: row.try_get(29).map_err(|_| server_error())?,
+        paused_by_id: row.try_get(30).map_err(|_| server_error())?,
     })
 }
 
@@ -1592,7 +1601,7 @@ struct DevMachineMiniOwned {
     label: String,
 }
 
-/// Owned live-state snapshot (`RunnerLiveState`, `models.py:1454-1500`).
+/// Owned live-state snapshot (`RunnerLiveState`, `models.py:1504-1558`).
 struct LiveStateOwned {
     observed_run_id: Option<String>,
     last_event_at: Option<String>,
@@ -1604,6 +1613,8 @@ struct LiveStateOwned {
     usage: Value,
     llm_model: Option<String>,
     turn_count: Option<i64>,
+    agent_health: Option<String>,
+    agent_last_activity_at: Option<String>,
     updated_at: String,
 }
 
@@ -1623,7 +1634,9 @@ async fn fetch_live_state(
     };
     let observed: Option<Uuid> = row.try_get(1).map_err(|_| server_error())?;
     let last_event_at: Option<DateTime<Utc>> = row.try_get(2).map_err(|_| server_error())?;
-    let updated_at: DateTime<Utc> = row.try_get(11).map_err(|_| server_error())?;
+    let agent_last_activity_at: Option<DateTime<Utc>> =
+        row.try_get(12).map_err(|_| server_error())?;
+    let updated_at: DateTime<Utc> = row.try_get(13).map_err(|_| server_error())?;
     let agent_pid: Option<i32> = row.try_get(5).map_err(|_| server_error())?;
     let approvals_pending: Option<i32> = row.try_get(7).map_err(|_| server_error())?;
     let turn_count: Option<i32> = row.try_get(10).map_err(|_| server_error())?;
@@ -1640,6 +1653,10 @@ async fn fetch_live_state(
         usage: row.try_get(8).map_err(|_| server_error())?,
         llm_model: row.try_get(9).map_err(|_| server_error())?,
         turn_count: turn_count.map(i64::from),
+        agent_health: row.try_get(11).map_err(|_| server_error())?,
+        agent_last_activity_at: agent_last_activity_at
+            .as_ref()
+            .map(crate::serializer::render_datetime),
         updated_at: crate::serializer::render_datetime(&updated_at),
     }))
 }
@@ -1669,6 +1686,8 @@ struct RunnerRender {
     enrolled_at: Option<String>,
     revoked_at: Option<String>,
     revoked_reason: String,
+    paused_at: Option<String>,
+    paused_by: Option<String>,
     created_at: String,
     updated_at: String,
 }
@@ -1702,6 +1721,8 @@ impl RunnerRender {
             usage: &live.usage,
             llm_model: live.llm_model.as_deref(),
             turn_count: live.turn_count,
+            agent_health: live.agent_health.as_deref(),
+            agent_last_activity_at: live.agent_last_activity_at.as_deref(),
             updated_at: &live.updated_at,
         });
         let row = shapes::RunnerRow {
@@ -1727,6 +1748,8 @@ impl RunnerRender {
             enrolled_at: self.enrolled_at.as_deref(),
             revoked_at: self.revoked_at.as_deref(),
             revoked_reason: &self.revoked_reason,
+            paused_at: self.paused_at.as_deref(),
+            paused_by: self.paused_by.as_deref(),
             created_at: &self.created_at,
             updated_at: &self.updated_at,
         };
@@ -1734,11 +1757,14 @@ impl RunnerRender {
     }
 }
 
-/// Serialize the re-read runner for the revoke 200 (`:491-492`): the
-/// refresh row plus the serializer's lazy loads (pod, dev-machine mini,
-/// project identifier, live state). A vanished row is the source's
+/// Serialize the re-read runner for the revoke/pause/resume 200s
+/// (revoke `:491-492`; pause/resume `_serialize_toggled_runner`,
+/// `runners.py:596-601`): the refresh row plus the serializer's lazy
+/// loads (pod, dev-machine mini, project identifier, live state).
+/// Same body as the `select_related` re-read — the joins only change
+/// the query shape, never the bytes. A vanished row is the source's
 /// `DoesNotExist` → 500.
-async fn render_revoked_runner(pool: &PgPool, runner_id: Uuid) -> Result<String, Response> {
+async fn render_toggled_runner(pool: &PgPool, runner_id: Uuid) -> Result<String, Response> {
     let row: Option<sqlx::postgres::PgRow> = sqlx::query(&runner_refresh_sql())
         .bind(runner_id)
         .fetch_optional(pool)
@@ -1834,6 +1860,11 @@ async fn render_revoked_runner(pool: &PgPool, runner_id: Uuid) -> Result<String,
             .as_ref()
             .map(crate::serializer::render_datetime),
         revoked_reason: runner.revoked_reason.clone(),
+        paused_at: runner
+            .paused_at
+            .as_ref()
+            .map(crate::serializer::render_datetime),
+        paused_by: runner.paused_by_id.map(|id| id.to_string()),
         created_at: crate::serializer::render_datetime(&runner.created_at),
         updated_at: crate::serializer::render_datetime(&runner.updated_at),
     }
@@ -1841,257 +1872,361 @@ async fn render_revoked_runner(pool: &PgPool, runner_id: Uuid) -> Result<String,
 }
 
 // ---------------------------------------------------------------------------
-// Executors: the first pool-backed `RevokeStore` (F6: called, never inlined)
+// `POST /api/runners/<rid>/pause|resume/` (`runners.py:495-601`, `09738d222`)
+// ---------------------------------------------------------------------------
+
+use pidash_db::runner_enroll::columns::enums as runner_enums;
+use pidash_db::runner_runs::agent_run as run_cols;
+use pidash_services::runner_sessions::offline_recovery as pins_kernel;
+
+/// `{"error": ..., "code": "runner_revoked"}` 409
+/// (`_lock_manageable_runner`, `runners.py:507-522`): the operator
+/// toggle refuses revoked runners — resume cannot un-revoke.
+pub const RUNNER_REVOKED_CONFLICT_BODY: &str =
+    r#"{"error":"runner is revoked","code":"runner_revoked"}"#;
+
+/// `runner.save(update_fields=["paused_at", "paused_by", "updated_at"])`
+/// on pause (`runners.py:544`). Binds: `$1` now, `$2` pausing user id,
+/// `$3` now, `$4` runner id.
+pub const PAUSE_RUNNER_UPDATE_SQL: &str = "UPDATE \"runner\" SET \"paused_at\" = $1, \"paused_by_id\" = $2, \"updated_at\" = $3 WHERE \"runner\".\"id\" = $4";
+
+/// The same `save(update_fields=...)` on resume (`runners.py:587`),
+/// clearing the stamps. Binds: `$1` now, `$2` runner id.
+pub const RESUME_RUNNER_UPDATE_SQL: &str = "UPDATE \"runner\" SET \"paused_at\" = NULL, \"paused_by_id\" = NULL, \"updated_at\" = $1 WHERE \"runner\".\"id\" = $2";
+
+/// In-flight runs for the pause body
+/// (`AgentRun.objects.filter(runner=runner,
+/// status__in=BUSY_STATUSES).values_list("id", "status")`,
+/// `runners.py:552-554`). Binds: `$1` runner id. Statuses in
+/// `BUSY_STATUSES` order (pinned by the test below); newest first.
+pub const IN_FLIGHT_RUNS_SQL: &str = "SELECT \"agent_run\".\"id\", \"agent_run\".\"status\" FROM \"agent_run\" WHERE (\"agent_run\".\"runner_id\" = $1 AND \"agent_run\".\"status\" IN ('assigned', 'waiting_for_worktree', 'running', 'cancel_requested', 'awaiting_approval', 'awaiting_reauth')) ORDER BY \"agent_run\".\"created_at\" DESC";
+
+/// `_lock_manageable_runner` (`runners.py:495-522`): lock the row, 404
+/// when missing or invisible, 403 when unmanageable. The caller checks
+/// revocation and writes. (The revoke handler keeps its own copy of
+/// this preamble; this one serves the pause/resume pair.)
+async fn lock_manageable_runner(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    runner_id: Uuid,
+    user_id: Uuid,
+) -> Result<FullRunner, Response> {
+    let row: Option<sqlx::postgres::PgRow> = sqlx::query(&runner_locked_read_sql())
+        .bind(runner_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|_| server_error())?;
+    let Some(row) = row else {
+        return Err(not_found());
+    };
+    let runner = decode_full_runner(&row)?;
+    // View gate → 404 (`:499-500`).
+    let can_view = runner_perm::can_view_runner(&runner_perm::RunnerFacts {
+        workspace: WorkspaceId::from(runner.workspace_id.to_string()),
+        authenticated: true,
+        visibility: i32::from(runner.visibility),
+        owned_by_requester: runner.owner_id == user_id,
+    });
+    if !can_view {
+        return Err(not_found());
+    }
+    // Manage gate → 403 (`:501-502`): the private fast path skips the
+    // role read exactly like Python (private non-owners never query).
+    if runner.visibility == runner_perm::VISIBILITY_PRIVATE as i16 {
+        if runner.owner_id != user_id {
+            return Err(forbidden());
+        }
+    } else {
+        let role = workspace_role_in(&mut **tx, runner.workspace_id, user_id).await?;
+        let workspace = WorkspaceId::from(runner.workspace_id.to_string());
+        let scope = TenantScope::new(workspace.clone());
+        let manageable = runner_perm::can_manage_runner(
+            &scope,
+            &runner_perm::ManageFacts {
+                workspace,
+                requester: Some(UserId::from(user_id.to_string())),
+                visibility: i32::from(runner.visibility),
+                owned_by_requester: runner.owner_id == user_id,
+                is_workspace_admin: membership::is_workspace_admin(role),
+            },
+        );
+        if !manageable {
+            return Err(forbidden());
+        }
+    }
+    Ok(runner)
+}
+
+/// `POST /api/runners/<runner_id>/pause/` (`runners.py:525-561`):
+/// stamp the pause (idempotent — an already-paused row keeps its
+/// stamps with no release and no drain), commit, release the
+/// runner's pins, and return the runner plus `in_flight_runs`.
+/// Revoked (either marker) → 409. A non-canonical segment falls
+/// through to Django (which renders its own 404) before auth runs.
+pub async fn runner_pause(
+    State(state): State<AppState>,
+    extension: Option<Extension<SessionHandle>>,
+    Path(raw_id): Path<String>,
+    req: Request,
+) -> Response {
+    let Some(runner_id) = strict_uuid(&raw_id) else {
+        return crate::edge::proxy(State(state.clone()), req).await;
+    };
+    let (pool, user_id) = match web_actor(&state, extension).await {
+        Ok(preamble) => preamble,
+        Err(response) => return response,
+    };
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(_) => return server_error(),
+    };
+    let runner = match lock_manageable_runner(&mut tx, runner_id, user_id).await {
+        Ok(runner) => runner,
+        Err(response) => return response,
+    };
+    if runner.revoked_at.is_some() || runner.status == runner_enums::RUNNER_STATUS_REVOKED {
+        let _ = tx.rollback().await;
+        return conflict(RUNNER_REVOKED_CONFLICT_BODY);
+    }
+    let transition = runner.paused_at.is_none();
+    if transition {
+        let now = now_micros();
+        if sqlx::query(PAUSE_RUNNER_UPDATE_SQL)
+            .bind(now)
+            .bind(user_id)
+            .bind(now)
+            .bind(runner_id)
+            .execute(&mut *tx)
+            .await
+            .is_err()
+        {
+            return server_error();
+        }
+    }
+    if tx.commit().await.is_err() {
+        return server_error();
+    }
+    if transition {
+        // The `on_commit` release (`:548-549`): pins drop and affected
+        // pods drain before the body renders.
+        if release_pins_for_paused_runner(&pool, &state, runner_id)
+            .await
+            .is_err()
+        {
+            return server_error();
+        }
+    }
+    let in_flight = match fetch_in_flight_runs(&pool, runner_id).await {
+        Ok(json) => json,
+        Err(response) => return response,
+    };
+    let runner_json = match render_toggled_runner(&pool, runner_id).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+    json_response(StatusCode::OK, pause_body(&runner_json, &in_flight))
+}
+
+/// `POST /api/runners/<runner_id>/resume/` (`runners.py:564-601`):
+/// clear the stamps (a no-op when unpaused, with no drain), commit,
+/// drain queued work to the runner, and return the runner. Revoked
+/// (either marker) → 409. A non-canonical segment falls through to
+/// Django (which renders its own 404) before auth runs.
+pub async fn runner_resume(
+    State(state): State<AppState>,
+    extension: Option<Extension<SessionHandle>>,
+    Path(raw_id): Path<String>,
+    req: Request,
+) -> Response {
+    let Some(runner_id) = strict_uuid(&raw_id) else {
+        return crate::edge::proxy(State(state.clone()), req).await;
+    };
+    let (pool, user_id) = match web_actor(&state, extension).await {
+        Ok(preamble) => preamble,
+        Err(response) => return response,
+    };
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(_) => return server_error(),
+    };
+    let runner = match lock_manageable_runner(&mut tx, runner_id, user_id).await {
+        Ok(runner) => runner,
+        Err(response) => return response,
+    };
+    if runner.revoked_at.is_some() || runner.status == runner_enums::RUNNER_STATUS_REVOKED {
+        let _ = tx.rollback().await;
+        return conflict(RUNNER_REVOKED_CONFLICT_BODY);
+    }
+    let transition = runner.paused_at.is_some();
+    if transition
+        && sqlx::query(RESUME_RUNNER_UPDATE_SQL)
+            .bind(now_micros())
+            .bind(runner_id)
+            .execute(&mut *tx)
+            .await
+            .is_err()
+    {
+        return server_error();
+    }
+    if tx.commit().await.is_err() {
+        return server_error();
+    }
+    if transition {
+        // The `on_commit` drain (`:591-592`).
+        if drain_runner_by_id(&pool, &state, runner_id).await.is_err() {
+            return server_error();
+        }
+    }
+    let runner_json = match render_toggled_runner(&pool, runner_id).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+    json_response(StatusCode::OK, runner_json)
+}
+
+/// In-flight `{"id", "status"}` rows for the pause body
+/// (`runners.py:552-554`), newest first, as a JSON array string.
+async fn fetch_in_flight_runs(pool: &PgPool, runner_id: Uuid) -> Result<String, Response> {
+    let rows: Vec<(Uuid, String)> = sqlx::query_as(IN_FLIGHT_RUNS_SQL)
+        .bind(runner_id)
+        .fetch_all(pool)
+        .await
+        .map_err(|_| server_error())?;
+    let items: Vec<Value> = rows
+        .into_iter()
+        .map(|(id, status)| serde_json::json!({"id": id.to_string(), "status": status}))
+        .collect();
+    serde_json::to_string(&items).map_err(|_| server_error())
+}
+
+/// `{**runner, "in_flight_runs": [...]}` (`runners.py:556-561`): the
+/// runner keys keep their order, the new key trails.
+fn pause_body(runner_json: &str, in_flight_json: &str) -> String {
+    let mut body = runner_json.to_owned();
+    assert_eq!(body.pop(), Some('}'));
+    body.push_str(",\"in_flight_runs\":");
+    body.push_str(in_flight_json);
+    body.push('}');
+    body
+}
+
+/// `release_pins_for_paused_runner` (`tasks.py:184-219`): send every
+/// QUEUED `local_runner` run pinned to a just-paused runner back to
+/// its pod queue, then drain each affected pod — each drain isolated,
+/// so one failed drain never skips the rest. Called from the pause
+/// commit hook (not a celery task).
+async fn release_pins_for_paused_runner(
+    pool: &PgPool,
+    state: &AppState,
+    runner_id: Uuid,
+) -> Result<(), ()> {
+    use sqlx::Row;
+    let pinned: Vec<Uuid> = sqlx::query_scalar(&pins_kernel::paused_runner_pin_ids_select())
+        .bind(AgentExecutorKind::LocalRunner.value())
+        .bind(AgentRunStatus::Queued.value())
+        .bind(runner_id)
+        .fetch_all(pool)
+        .await
+        .map_err(|_| ())?;
+    let lock_sql = pins_kernel::paused_runner_pin_lock_select();
+    let at = |column: &str| run_cols::COLUMNS.iter().position(|name| *name == column);
+    let mut released = 0usize;
+    let mut pod_ids: Vec<Uuid> = Vec::new();
+    for run_id in pinned {
+        // One atomic block per run (`_release_pins`, `tasks.py:148-180`):
+        // re-lock the still-paused pin, clear the parent thread, clear
+        // the pin. A lock miss rolls back the empty tx.
+        let mut tx = pool.begin().await.map_err(|_| ())?;
+        let row: Option<sqlx::postgres::PgRow> = sqlx::query(&lock_sql)
+            .bind(run_id)
+            .bind(AgentRunStatus::Queued.value())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|_| ())?;
+        let Some(row) = row else {
+            tx.rollback().await.map_err(|_| ())?;
+            continue;
+        };
+        let pod_id: Option<Uuid> = row.try_get(at("pod_id").ok_or(())?).map_err(|_| ())?;
+        let parent_run_id: Option<Uuid> = row
+            .try_get(at("parent_run_id").ok_or(())?)
+            .map_err(|_| ())?;
+        // The T3 parent projection follows the run projection; the
+        // join is a LEFT OUTER JOIN, so every parent cell is null
+        // without one.
+        let thread_at = run_cols::COLUMNS.len() + at("thread_id").ok_or(())?;
+        let parent_thread: Option<String> = row.try_get(thread_at).map_err(|_| ())?;
+        // Parent write first, pin write second (source order).
+        if let Some(parent_id) =
+            parent_run_id.filter(|_| parent_thread.as_deref().is_some_and(|t| !t.is_empty()))
+        {
+            sqlx::query(&pins_kernel::clear_parent_thread_sql())
+                .bind(String::new())
+                .bind(parent_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|_| ())?;
+        }
+        sqlx::query(&pins_kernel::clear_pin_sql())
+            .bind(run_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| ())?;
+        tx.commit().await.map_err(|_| ())?;
+        released += 1;
+        if let Some(pod_id) = pod_id {
+            if !pod_ids.contains(&pod_id) {
+                pod_ids.push(pod_id);
+            }
+        }
+    }
+    for pod_id in pod_ids {
+        if drain_pod_by_id(pool, state, pod_id).await.is_err() {
+            tracing::error!("release pins: drain failed for pod {pod_id}");
+        }
+    }
+    if released > 0 {
+        tracing::info!(
+            "release_pins_for_paused_runner runner={runner_id} unpinned {released} run(s)"
+        );
+    }
+    Ok(())
+}
+
+/// `drain_for_runner_by_id` (`matcher.py:253-264`): runner lookup
+/// (miss ⇒ `Ok(false)`, no tx), else the re-lock/next/assign/send
+/// recipe. A dispatch failure propagates — the row stays `ASSIGNED`
+/// while the caller observes the failure. Thin caller of the public
+/// executor (OVL-06); the local copy is deleted.
+async fn drain_runner_by_id(pool: &PgPool, state: &AppState, runner_id: Uuid) -> Result<bool, ()> {
+    let redis = client_from_settings(state.settings());
+    pidash_services::runner_sessions::live_drains::drain_for_runner_by_id(
+        pool,
+        redis.as_ref(),
+        &state.settings().runner,
+        runner_id,
+    )
+    .await
+    .map_err(|_| ())
+}
+
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Executors (F6/F8: called, never inlined)
 // ---------------------------------------------------------------------------
 
 use pidash_db::runner_sessions::models::runner_session as db_runner_session;
 use pidash_db::runner_sessions::outbox as session_outbox;
 use pidash_db::runner_sessions::outbox::OutboxError as SessionOutboxError;
 use pidash_db::runner_sessions::RunnerSession as DbRunnerSession;
+use pidash_jobs::runner_enroll::{
+    fire_revoke_bundle, revoke, RevokeBundle, RevokeCtx, RevokeScope,
+};
 use pidash_services::runner_enroll::delete as delete_kernel;
-use pidash_services::runner_enroll::revoke::{RevokeError, RevokeOutcome, RevokeStore};
 use pidash_services::runner_runs::LifecycleEffect;
 use pidash_services::runner_sessions::pubsub::PubsubStore;
 use pidash_types::dispatch::AgentExecutorKind;
-use pidash_types::runner_runs::{AgentRunStatus, TERMINAL_RUN_STATUSES};
+use pidash_types::runner_runs::AgentRunStatus;
 
-/// One revoke's post-commit effects, in Python's registration order:
-/// the per-run publish pairs (registered during S3, in run order) fire
-/// first, then the handoffs, drains, and stream cleanup (`models.py`
-/// `finalize_agent_run:125` + `Runner.revoke:673-685`).
-struct EffectBundle {
-    runner_id: Uuid,
-    publish: Vec<LifecycleEffect>,
-    handoffs: Vec<Uuid>,
-    drains: Vec<Uuid>,
-    cleanup: Option<Uuid>,
-}
-
-/// Pool-backed [`RevokeStore`]: S1-S4 SQL runs on the caller's
-/// transaction; the finalize's publish pairs and the revoke collectors
-/// accumulate for post-commit firing.
-struct TxStores<'t, 'p> {
-    tx: &'t mut sqlx::Transaction<'p, sqlx::Postgres>,
-    runner_id: Uuid,
-    publish: Vec<LifecycleEffect>,
-    handoffs: Vec<Uuid>,
-    drains: Vec<Uuid>,
-    cleanup: Option<Uuid>,
-}
-
-impl<'t, 'p> TxStores<'t, 'p> {
-    fn new(tx: &'t mut sqlx::Transaction<'p, sqlx::Postgres>, runner_id: Uuid) -> Self {
-        Self {
-            tx,
-            runner_id,
-            publish: Vec::new(),
-            handoffs: Vec::new(),
-            drains: Vec::new(),
-            cleanup: None,
-        }
-    }
-
-    /// Consume the stores into the post-commit bundle, logging the
-    /// driver's warnings (the executor owns them per `revoke.rs`).
-    fn into_bundle(self, outcome: RevokeOutcome) -> EffectBundle {
-        for warning in &outcome.warnings {
-            tracing::warn!("{warning}");
-        }
-        EffectBundle {
-            runner_id: self.runner_id,
-            publish: self.publish,
-            handoffs: self.handoffs,
-            drains: self.drains,
-            cleanup: self.cleanup,
-        }
-    }
-}
-
-/// The revoke-finalize SET order (planned `status`, `ended_at`, the
-/// two markers, then our extras in dict order): pinned so a kernel
-/// drift fails loudly instead of mis-binding.
-const REVOKE_FINALIZE_COLUMNS: [&str; 7] = [
-    "status",
-    "ended_at",
-    "terminal_hooks_applied_at",
-    "terminal_capacity_released_at",
-    "error",
-    "error_code",
-    "cancel_reason",
-];
-
-impl RevokeStore for TxStores<'_, '_> {
-    async fn mark_runner_revoked(
-        &mut self,
-        runner_id: Uuid,
-        now: DateTime<Utc>,
-        reason: &str,
-    ) -> Result<(), RevokeError> {
-        sqlx::query(revoke_kernel::MARK_RUNNER_REVOKED_SQL)
-            .bind(now)
-            .bind(reason)
-            .bind(runner_id)
-            .execute(&mut **self.tx)
-            .await
-            .map_err(|error| RevokeError::Store(error.to_string()))?;
-        Ok(())
-    }
-
-    async fn revoke_active_sessions(
-        &mut self,
-        runner_id: Uuid,
-        now: DateTime<Utc>,
-        stored_reason: &str,
-    ) -> Result<(), RevokeError> {
-        sqlx::query(revoke_kernel::REVOKE_ACTIVE_SESSIONS_SQL)
-            .bind(now)
-            .bind(stored_reason)
-            .bind(runner_id)
-            .execute(&mut **self.tx)
-            .await
-            .map_err(|error| RevokeError::Store(error.to_string()))?;
-        Ok(())
-    }
-
-    async fn lock_active_runs(
-        &mut self,
-        runner_id: Uuid,
-    ) -> Result<Vec<(Uuid, Option<Uuid>)>, RevokeError> {
-        sqlx::query_as::<_, (Uuid, Option<Uuid>)>(&revoke_kernel::active_runs_lock_sql())
-            .bind(runner_id)
-            .fetch_all(&mut **self.tx)
-            .await
-            .map_err(|error| RevokeError::Store(error.to_string()))
-    }
-
-    async fn finalize_cancelled_run(
-        &mut self,
-        run_id: Uuid,
-        runner_id: Uuid,
-        stored_reason: &str,
-    ) -> Result<(), RevokeError> {
-        use pidash_services::runner_runs::SetValue;
-        // `finalize_agent_run(run, "cancelled", error="runner revoked",
-        // error_code="runner_revoked", cancel_reason=<stored>)`: no
-        // `done_payload` merge (these updates carry none).
-        let values = finalize_kernel::plan_finalize_values(
-            AgentRunStatus::Cancelled,
-            &[
-                ("error", SetValue::Text("runner revoked".to_owned())),
-                ("error_code", SetValue::Text("runner_revoked".to_owned())),
-                ("cancel_reason", SetValue::Text(stored_reason.to_owned())),
-            ],
-        )
-        .map_err(|error| RevokeError::Store(error.to_string()))?;
-        let columns: Vec<&str> = values.clauses.iter().map(|clause| clause.column).collect();
-        if columns.as_slice() != REVOKE_FINALIZE_COLUMNS {
-            return Err(RevokeError::Store(format!(
-                "revoke finalize columns drifted: {columns:?}"
-            )));
-        }
-        // First-writer-wins lock (`with_runner=true`): a lost race is a
-        // silent `Ok` (Python ignores `False`).
-        let lock_sql = finalize_kernel::lock_run_for_finalize_sql(true, false);
-        let mut locked = sqlx::query(&lock_sql).bind(run_id);
-        for status in TERMINAL_RUN_STATUSES {
-            locked = locked.bind(status.value());
-        }
-        locked = locked.bind(runner_id);
-        let row: Option<sqlx::postgres::PgRow> = locked
-            .fetch_optional(&mut **self.tx)
-            .await
-            .map_err(|error| RevokeError::Store(error.to_string()))?;
-        let Some(row) = row else {
-            return Ok(());
-        };
-        // Clause-order binds (`finalize_update_sql`).
-        sqlx::query(&finalize_kernel::finalize_update_sql(&values))
-            .bind(AgentRunStatus::Cancelled.value())
-            .bind(chrono::Utc::now())
-            .bind(None::<DateTime<Utc>>)
-            .bind(None::<DateTime<Utc>>)
-            .bind("runner revoked")
-            .bind("runner_revoked")
-            .bind(stored_reason)
-            .bind(run_id)
-            .execute(&mut **self.tx)
-            .await
-            .map_err(|error| RevokeError::Store(error.to_string()))?;
-        // The cloud-only terminal event (the `runs.rs` position).
-        let executor_kind: String = row
-            .try_get("executor_kind")
-            .map_err(|error| RevokeError::Store(error.to_string()))?;
-        if AgentExecutorKind::from_value(&executor_kind) == Some(AgentExecutorKind::CloudAgent) {
-            let exists = sqlx::query_scalar::<_, i32>(finalize_kernel::terminal_event_exists_sql())
-                .bind(run_id)
-                .bind("terminal")
-                .fetch_optional(&mut **self.tx)
-                .await
-                .map_err(|error| RevokeError::Store(error.to_string()))?;
-            if exists.is_none() {
-                let max_seq =
-                    sqlx::query_scalar::<_, i32>(finalize_kernel::terminal_event_max_seq_sql())
-                        .bind(run_id)
-                        .fetch_optional(&mut **self.tx)
-                        .await
-                        .map_err(|error| RevokeError::Store(error.to_string()))?;
-                let plan = finalize_kernel::plan_terminal_event(
-                    max_seq,
-                    AgentRunStatus::Cancelled,
-                    &finalize_kernel::finalize_error_code(&values),
-                );
-                sqlx::query(&finalize_kernel::terminal_event_insert_sql())
-                    .bind(run_id)
-                    .bind(plan.seq)
-                    .bind("terminal")
-                    .bind(plan.payload)
-                    .bind(chrono::Utc::now())
-                    .execute(&mut **self.tx)
-                    .await
-                    .map_err(|error| RevokeError::Store(error.to_string()))?;
-            }
-        }
-        // D-15's terminal-effects `on_commit` (registered in-tx, fires
-        // first post-commit).
-        self.publish
-            .extend(finalize_kernel::plan_publish_effects(run_id));
-        Ok(())
-    }
-
-    async fn pinned_queued_pod_ids(
-        &mut self,
-        runner_id: Uuid,
-    ) -> Result<Vec<Option<Uuid>>, RevokeError> {
-        sqlx::query_scalar(revoke_kernel::PINNED_QUEUED_PODS_SQL)
-            .bind(runner_id)
-            .fetch_all(&mut **self.tx)
-            .await
-            .map_err(|error| RevokeError::Store(error.to_string()))
-    }
-
-    async fn unpin_queued_runs(&mut self, runner_id: Uuid) -> Result<(), RevokeError> {
-        sqlx::query(revoke_kernel::UNPIN_QUEUED_RUNS_SQL)
-            .bind(runner_id)
-            .execute(&mut **self.tx)
-            .await
-            .map_err(|error| RevokeError::Store(error.to_string()))?;
-        Ok(())
-    }
-
-    fn complete_handoff_after_commit(&mut self, run_id: Uuid) {
-        self.handoffs.push(run_id);
-    }
-
-    fn drain_pod_after_commit(&mut self, pod_id: Uuid) {
-        self.drains.push(pod_id);
-    }
-
-    fn schedule_stream_cleanup_after_commit(&mut self, runner_id: Uuid) {
-        self.cleanup = Some(runner_id);
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Executors: the first pool-backed `PubsubStore`s (F8: called, never inlined)
 // ---------------------------------------------------------------------------
 
@@ -2115,7 +2250,7 @@ impl PubsubStore for PoolPubsubStore<'_, '_> {
         runner_id: Uuid,
         message: &Map<String, Value>,
     ) -> Result<Option<String>, SessionOutboxError> {
-        let redis = redis_client(self.state);
+        let redis = client_from_settings(self.state.settings());
         session_outbox::enqueue_for_runner(
             redis.as_ref(),
             self.pool,
@@ -2132,7 +2267,7 @@ impl PubsubStore for PoolPubsubStore<'_, '_> {
         message: &Map<String, Value>,
     ) -> Result<Option<String>, pidash_db::runner_sessions::machine_outbox::MachineOutboxError>
     {
-        let redis = redis_client(self.state);
+        let redis = client_from_settings(self.state.settings());
         pidash_db::runner_sessions::machine_outbox::enqueue_for_machine(
             redis.as_ref(),
             self.pool,
@@ -2163,18 +2298,19 @@ impl PubsubStore for PoolPubsubStore<'_, '_> {
         session_id: Uuid,
         reason: &str,
     ) -> Result<(), SessionOutboxError> {
-        sqlx::query(db_runner_session::REVOKE_SQL)
-            .bind(now_micros())
-            .bind(reason)
-            .bind(session_id)
-            .execute(self.pool)
-            .await
-            .map_err(SessionOutboxError::Db)?;
+        pidash_services::domain::tokens::revoke_runner_session(
+            self.pool,
+            session_id,
+            now_micros(),
+            reason,
+        )
+        .await
+        .map_err(SessionOutboxError::Db)?;
         Ok(())
     }
 
     async fn clear_session_marker(&self, session_id: Uuid) -> Result<(), SessionOutboxError> {
-        let redis = redis_client(self.state);
+        let redis = client_from_settings(self.state.settings());
         session_outbox::clear_session_marker(redis.as_ref(), &session_id.to_string()).await
     }
 
@@ -2184,7 +2320,7 @@ impl PubsubStore for PoolPubsubStore<'_, '_> {
         old_session_id: Uuid,
         new_session_id: &str,
     ) -> Result<(), SessionOutboxError> {
-        let redis = redis_client(self.state);
+        let redis = client_from_settings(self.state.settings());
         let runner_id = runner_id.to_string();
         let old = old_session_id.to_string();
         session_outbox::publish_session_eviction(
@@ -2225,7 +2361,7 @@ impl PubsubStore for TxPubsub<'_, '_, '_> {
     ) -> Result<Option<String>, SessionOutboxError> {
         let mut guard = self.tx.lock().await;
         let tx: &mut sqlx::Transaction<'_, sqlx::Postgres> = &mut guard;
-        let redis = redis_client(self.state);
+        let redis = client_from_settings(self.state.settings());
         session_outbox::enqueue_for_runner(
             redis.as_ref(),
             &mut **tx,
@@ -2244,7 +2380,7 @@ impl PubsubStore for TxPubsub<'_, '_, '_> {
     {
         let mut guard = self.tx.lock().await;
         let tx: &mut sqlx::Transaction<'_, sqlx::Postgres> = &mut guard;
-        let redis = redis_client(self.state);
+        let redis = client_from_settings(self.state.settings());
         pidash_db::runner_sessions::machine_outbox::enqueue_for_machine(
             redis.as_ref(),
             &mut **tx,
@@ -2279,18 +2415,19 @@ impl PubsubStore for TxPubsub<'_, '_, '_> {
     ) -> Result<(), SessionOutboxError> {
         let mut guard = self.tx.lock().await;
         let tx: &mut sqlx::Transaction<'_, sqlx::Postgres> = &mut guard;
-        sqlx::query(db_runner_session::REVOKE_SQL)
-            .bind(now_micros())
-            .bind(reason)
-            .bind(session_id)
-            .execute(&mut **tx)
-            .await
-            .map_err(SessionOutboxError::Db)?;
+        pidash_services::domain::tokens::revoke_runner_session(
+            &mut **tx,
+            session_id,
+            now_micros(),
+            reason,
+        )
+        .await
+        .map_err(SessionOutboxError::Db)?;
         Ok(())
     }
 
     async fn clear_session_marker(&self, session_id: Uuid) -> Result<(), SessionOutboxError> {
-        let redis = redis_client(self.state);
+        let redis = client_from_settings(self.state.settings());
         session_outbox::clear_session_marker(redis.as_ref(), &session_id.to_string()).await
     }
 
@@ -2300,7 +2437,7 @@ impl PubsubStore for TxPubsub<'_, '_, '_> {
         old_session_id: Uuid,
         new_session_id: &str,
     ) -> Result<(), SessionOutboxError> {
-        let redis = redis_client(self.state);
+        let redis = client_from_settings(self.state.settings());
         let runner_id = runner_id.to_string();
         let old = old_session_id.to_string();
         session_outbox::publish_session_eviction(
@@ -2313,75 +2450,128 @@ impl PubsubStore for TxPubsub<'_, '_, '_> {
     }
 }
 
-/// One post-commit step, in fire order.
-enum FireOp {
-    Publish(LifecycleEffect),
-    Handoff(Uuid),
-    Drain(Uuid),
-    Cleanup(Uuid),
+/// Run one bare `Runner.revoke()` on the caller's tx and collect its
+/// post-commit bundle, logging the driver's warnings (the executor
+/// owns them per `revoke.rs`). The caller commits its tx, then fires
+/// the bundle with [`fire_bundle`].
+async fn revoke_runner_on_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    pool: &PgPool,
+    state: &AppState,
+    runner_id: Uuid,
+    revoked_at: Option<DateTime<Utc>>,
+    reason: &str,
+    now: DateTime<Utc>,
+) -> Result<RevokeBundle, ()> {
+    let collected = revoke(
+        &revoke_ctx(pool, state),
+        tx,
+        RevokeScope::Runner {
+            runner_id,
+            revoked_at,
+            reason,
+            now,
+        },
+    )
+    .await
+    .map_err(|_| ())?;
+    for warning in &collected.warnings {
+        tracing::warn!("{warning}");
+    }
+    Ok(collected.bundle)
 }
 
-/// Flatten one revoke's bundle into fire order: the publish pairs
-/// first (registered during S3, in run order), then handoffs, drains,
-/// and the stream cleanup (`models.py` `finalize_agent_run:125` +
-/// `Runner.revoke:673-685`). Pure, so the order is unit-pinned.
-fn fire_plan(bundle: EffectBundle) -> Vec<FireOp> {
-    let mut plan =
-        Vec::with_capacity(bundle.publish.len() + bundle.handoffs.len() + bundle.drains.len() + 1);
-    plan.extend(bundle.publish.into_iter().map(FireOp::Publish));
-    plan.extend(bundle.handoffs.into_iter().map(FireOp::Handoff));
-    plan.extend(bundle.drains.into_iter().map(FireOp::Drain));
-    plan.extend(bundle.cleanup.into_iter().map(FireOp::Cleanup));
-    plan
+/// The revoke runtime facts: the pool, the api-owned Redis client,
+/// and runner settings. Bare revokes register no frames (the machine
+/// flow sends its own outside the driver), so the effect placement
+/// never applies.
+fn revoke_ctx(pool: &PgPool, state: &AppState) -> RevokeCtx {
+    RevokeCtx {
+        pool: pool.clone(),
+        redis: client_from_settings(state.settings()),
+        runner: state.settings().runner.clone(),
+        atomic_effects: false,
+    }
 }
 
 /// Fire one revoke's post-commit bundle (`models.py:597-685`): publish
 /// effects isolated each, handoffs isolated each (swallowed after the
 /// failure log), drains and cleanup propagating (the source registers
 /// them bare, and a raise stops Django's `on_commit` chain).
-async fn fire_bundle(pool: &PgPool, state: &AppState, bundle: EffectBundle) -> Result<(), ()> {
-    let runner_id = bundle.runner_id;
+/// `terminal_created_by` is the ambient crum request user for the
+/// inline terminal effects (runner owner on daemon paths, web
+/// requester on web paths).
+async fn fire_bundle(
+    pool: &PgPool,
+    state: &AppState,
+    bundle: RevokeBundle,
+    terminal_created_by: Option<Uuid>,
+) -> Result<(), ()> {
     let ports = crate::runner_runs::LivePorts::new(pool.clone(), state);
-    for op in fire_plan(bundle) {
-        match op {
-            FireOp::Publish(effect) => {
-                crate::project_move_handoff::drain_one_publish(pool, &ports, effect).await
+    fire_revoke_bundle(
+        &revoke_ctx(pool, state),
+        bundle,
+        |run_id| {
+            pidash_jobs::orchestration::drain_publish_effects(
+                vec![LifecycleEffect::PublishTerminalEffects { run_id }],
+                |one| {
+                    crate::runner_runs::run_endpoints::drain_lifecycle_effects(
+                        pool,
+                        &ports,
+                        vec![one],
+                        terminal_created_by,
+                    )
+                },
+            )
+        },
+        |run_id| {
+            pidash_jobs::orchestration::drain_publish_effects(
+                vec![LifecycleEffect::ApplyTerminalEffectsInline { run_id }],
+                |one| {
+                    crate::runner_runs::run_endpoints::drain_lifecycle_effects(
+                        pool,
+                        &ports,
+                        vec![one],
+                        terminal_created_by,
+                    )
+                },
+            )
+        },
+        |runner_id, run_id| async move {
+            if crate::project_move_handoff::complete_project_move_handoff(
+                pool,
+                state,
+                run_id,
+                terminal_created_by,
+            )
+            .await
+            .is_err()
+            {
+                tracing::warn!(
+                    "{}",
+                    revoke_kernel::handoff_failure_log(&runner_id, &run_id)
+                );
             }
-            FireOp::Handoff(run_id) => {
-                if crate::project_move_handoff::complete_project_move_handoff(pool, state, run_id)
-                    .await
-                    .is_err()
-                {
-                    tracing::warn!(
-                        "{}",
-                        revoke_kernel::handoff_failure_log(&runner_id, &run_id)
-                    );
-                }
-            }
-            FireOp::Drain(pod_id) => drain_pod_by_id(pool, state, pod_id).await?,
-            FireOp::Cleanup(runner_id) => {
-                let redis = redis_client(state);
-                session_outbox::schedule_stream_cleanup_for_runner(
-                    redis.as_ref(),
-                    &state.settings().runner,
-                    &runner_id.to_string(),
-                )
-                .await
-                .map_err(|_| ())?;
-            }
-        }
-    }
-    Ok(())
+        },
+    )
+    .await
+    .map_err(|_| ())
 }
 
 /// The self-revoke row delete (`enrollment.py:533`):
 /// `Runner.objects.filter(pk).delete()` runs Django's collector over the
 /// one row — same sequence as `delete_collected_runner_rows` (restated
-/// order, shared builders), on the pool (no tx on this path).
+/// order, shared builders). Like `QuerySet.delete()`, the whole cascade
+/// runs inside one transaction: `Collector.delete` wraps every
+/// cascade/SET_NULL/delete statement in `transaction.atomic(using,
+/// savepoint=False)` (`django/db/models/deletion.py`), so a failure on any
+/// statement rolls the lot back. Running the statements autocommit on the
+/// pool left partial deletes committed when a later one failed.
 async fn delete_collected_runner(pool: &PgPool, runner_id: Uuid) -> Result<(), ()> {
+    let mut tx = pool.begin().await.map_err(|_| ())?;
     let root: Option<sqlx::postgres::PgRow> = sqlx::query(delete_kernel::COLLECT_RUNNER_BY_ID_SQL)
         .bind(runner_id)
-        .fetch_optional(pool)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(|_| ())?;
     if root.is_none() {
@@ -2389,7 +2579,7 @@ async fn delete_collected_runner(pool: &PgPool, runner_id: Uuid) -> Result<(), (
     }
     let chat_ids: Vec<Uuid> = sqlx::query_scalar(&delete_kernel::collect_chat_ids_sql(1))
         .bind(runner_id)
-        .fetch_all(pool)
+        .fetch_all(&mut *tx)
         .await
         .map_err(|_| ())?;
     let mut message_ids: Vec<Uuid> = Vec::new();
@@ -2399,7 +2589,7 @@ async fn delete_collected_runner(pool: &PgPool, runner_id: Uuid) -> Result<(), (
         for chat_id in &chat_ids {
             fetched = fetched.bind(*chat_id);
         }
-        message_ids = fetched.fetch_all(pool).await.map_err(|_| ())?;
+        message_ids = fetched.fetch_all(&mut *tx).await.map_err(|_| ())?;
         let events_sql = delete_kernel::delete_chat_events_sql(chat_ids.len());
         let approvals_sql = delete_kernel::delete_chat_approvals_sql(chat_ids.len());
         let dedupes_sql = delete_kernel::delete_chat_dedupes_sql(chat_ids.len());
@@ -2411,33 +2601,31 @@ async fn delete_collected_runner(pool: &PgPool, runner_id: Uuid) -> Result<(), (
             approvals = approvals.bind(*chat_id);
             dedupes = dedupes.bind(*chat_id);
         }
-        events.execute(pool).await.map_err(|_| ())?;
-        approvals.execute(pool).await.map_err(|_| ())?;
-        dedupes.execute(pool).await.map_err(|_| ())?;
+        events.execute(&mut *tx).await.map_err(|_| ())?;
+        approvals.execute(&mut *tx).await.map_err(|_| ())?;
+        dedupes.execute(&mut *tx).await.map_err(|_| ())?;
     }
-    sqlx::query(&delete_kernel::delete_runner_sessions_sql(1))
-        .bind(runner_id)
-        .execute(pool)
+    pidash_services::domain::tokens::delete_runner_sessions_for_runners(&mut *tx, &[runner_id])
         .await
         .map_err(|_| ())?;
     sqlx::query(&delete_kernel::delete_force_refresh_sql(1))
         .bind(runner_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(|_| ())?;
     sqlx::query(&delete_kernel::delete_live_state_sql(1))
         .bind(runner_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(|_| ())?;
     sqlx::query(&delete_kernel::null_run_runners_sql(1))
         .bind(runner_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(|_| ())?;
     sqlx::query(&delete_kernel::null_run_pins_sql(1))
         .bind(runner_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(|_| ())?;
     if !message_ids.is_empty() {
@@ -2446,7 +2634,7 @@ async fn delete_collected_runner(pool: &PgPool, runner_id: Uuid) -> Result<(), (
         for message_id in &message_ids {
             nulls = nulls.bind(*message_id);
         }
-        nulls.execute(pool).await.map_err(|_| ())?;
+        nulls.execute(&mut *tx).await.map_err(|_| ())?;
     }
     if !message_ids.is_empty() {
         let deletes_sql = delete_kernel::delete_chat_messages_sql(message_ids.len());
@@ -2454,7 +2642,7 @@ async fn delete_collected_runner(pool: &PgPool, runner_id: Uuid) -> Result<(), (
         for message_id in &message_ids {
             deletes = deletes.bind(*message_id);
         }
-        deletes.execute(pool).await.map_err(|_| ())?;
+        deletes.execute(&mut *tx).await.map_err(|_| ())?;
     }
     if !chat_ids.is_empty() {
         let deletes_sql = delete_kernel::delete_chat_sessions_sql(chat_ids.len());
@@ -2462,13 +2650,16 @@ async fn delete_collected_runner(pool: &PgPool, runner_id: Uuid) -> Result<(), (
         for chat_id in &chat_ids {
             deletes = deletes.bind(*chat_id);
         }
-        deletes.execute(pool).await.map_err(|_| ())?;
+        deletes.execute(&mut *tx).await.map_err(|_| ())?;
     }
     sqlx::query(&delete_kernel::delete_runner_rows_sql(1))
         .bind(runner_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(|_| ())?;
+    if tx.commit().await.is_err() {
+        return Err(());
+    }
     Ok(())
 }
 
@@ -2476,107 +2667,26 @@ async fn delete_collected_runner(pool: &PgPool, runner_id: Uuid) -> Result<(), (
 // Executors: the `drain_pod_by_id` loop (the `drain.rs` recipe, verbatim)
 // ---------------------------------------------------------------------------
 
-use pidash_services::runner_sessions::drain::{AssignmentFacts, AssignmentPlan};
-use pidash_services::runner_sessions::guards::alive_threshold;
-
-/// `drain_pod_by_id` (`matcher.py:242-251`): pod lookup (miss ⇒ `Ok`,
-/// no tx), else the drain loop. A dispatch failure propagates — the row
-/// stays `ASSIGNED` while the caller observes the failure.
+/// `drain_pod_by_id` (`matcher.py:242-251`): pod lookup (miss ⇒
+/// `Ok`, no tx), else the drain loop. Thin caller of the public
+/// executor (OVL-06); the local copy is deleted. The executor's
+/// sends-then-log order also fixes PIDASHCONV-1561 (this twin logged
+/// first).
 pub(crate) async fn drain_pod_by_id(
     pool: &PgPool,
     state: &AppState,
     pod_id: Uuid,
 ) -> Result<(), ()> {
-    let pod: Option<sqlx::postgres::PgRow> = sqlx::query(drain_kernel::DRAIN_POD_BY_ID_LOOKUP_SQL)
-        .bind(pod_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| ())?;
-    if pod.is_none() {
-        return Ok(());
-    }
-    drain_pod(pool, state, pod_id).await
-}
-
-/// `drain_pod` (`matcher.py:194-239`): lock the idle list, then per
-/// runner in list order take the next queued run, write the assignment,
-/// and plan the frame; commit once; then dispatch each frame in
-/// assignment order through the merged `send_to_runner` driver.
-async fn drain_pod(pool: &PgPool, state: &AppState, pod_id: Uuid) -> Result<(), ()> {
-    let mut tx = pool.begin().await.map_err(|_| ())?;
-    let threshold = alive_threshold(now_micros());
-    let runners = sqlx::query(drain_kernel::DRAIN_POD_IDLE_RUNNERS_SQL)
-        .bind(threshold)
-        .bind(pod_id)
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(|_| ())?;
-    let mut plans: Vec<AssignmentPlan> = Vec::new();
-    for runner in &runners {
-        let runner_id: Uuid = runner.try_get(0).map_err(|_| ())?;
-        let owner_id: Uuid = runner.try_get(1).map_err(|_| ())?;
-        let provisioning: String = runner.try_get(7).map_err(|_| ())?;
-        let visibility: i16 = runner.try_get(8).map_err(|_| ())?;
-        // Non-private runners issue no query (the `qs.none()` arm).
-        let Some(next_sql) =
-            drain_kernel::next_for_runner_sql(&provisioning, i32::from(visibility))
-        else {
-            continue;
-        };
-        let run: Option<sqlx::postgres::PgRow> = sqlx::query(&next_sql)
-            .bind(pod_id)
-            .bind(runner_id)
-            .bind(owner_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|_| ())?;
-        let Some(run) = run else {
-            continue;
-        };
-        let run_id: Uuid = run.try_get(0).map_err(|_| ())?;
-        let work_item_id: Option<Uuid> = run.try_get(7).map_err(|_| ())?;
-        let prompt: String = run.try_get(19).map_err(|_| ())?;
-        let run_config: Value = run.try_get(23).map_err(|_| ())?;
-        let Value::Object(run_config) = run_config else {
-            return Err(());
-        };
-        // `$3` is a fresh `timezone.now()` per assignment (`:233`).
-        sqlx::query(drain_kernel::ASSIGN_RUN_UPDATE_SQL)
-            .bind(owner_id)
-            .bind(runner_id)
-            .bind(now_micros())
-            .bind(run_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|_| ())?;
-        plans.push(drain_kernel::plan_assignment(&AssignmentFacts {
-            run_id,
-            runner_id,
-            owner_id,
-            work_item_id,
-            prompt,
-            run_config,
-        }));
-    }
-    tx.commit().await.map_err(|_| ())?;
-    if !plans.is_empty() {
-        tracing::info!("{}", drain_kernel::drain_pod_log(&pod_id, plans.len()));
-    }
-    let pubsub = PoolPubsubStore::new(pool, state);
-    for plan in &plans {
-        let outcome = match plan.after_commit {
-            drain_kernel::DrainEffect::SendAssign {
-                runner_id,
-                ref message,
-            } => pubsub_kernel::send_to_runner(&pubsub, runner_id, message)
-                .await
-                .map_err(|_| ())?,
-        };
-        for warning in &outcome.warnings {
-            tracing::warn!("{warning}");
-        }
-    }
-    Ok(())
+    let redis = client_from_settings(state.settings());
+    pidash_services::runner_sessions::live_drains::drain_pod_by_id(
+        pool,
+        redis.as_ref(),
+        &state.settings().runner,
+        pod_id,
+    )
+    .await
+    .map(|_| ())
+    .map_err(|_| ())
 }
 
 // ---------------------------------------------------------------------------
@@ -2642,6 +2752,14 @@ pub fn web_routes() -> Router<AppState> {
             "/api/runners/{runner_id}/revoke/",
             owned(post(runner_revoke), POST_ONLY),
         )
+        .route(
+            "/api/runners/{runner_id}/pause/",
+            owned(post(runner_pause), POST_ONLY),
+        )
+        .route(
+            "/api/runners/{runner_id}/resume/",
+            owned(post(runner_resume), POST_ONLY),
+        )
 }
 
 #[cfg(test)]
@@ -2680,14 +2798,11 @@ mod tests {
     use pidash_services::runner_enroll::queries::{enroll_reads, manage_reads};
     use pidash_services::runner_enroll::revoke::check_revoke_reason;
     use pidash_services::runner_enroll::tokens::{mint_refresh_token, REFRESH_TOKEN_PREFIX};
-    use pidash_services::runner_runs::LifecycleEffect;
 
     const FIXTURE_ENDPOINTS: &str =
         include_str!("../../../../fixtures/runner_enroll/handlers/endpoints.golden.json");
     const FIXTURE_TOKENS: &str =
         include_str!("../../../../fixtures/runner_enroll/tokens/tokens.golden.json");
-    const FIXTURE_FLOWS: &str =
-        include_str!("../../../../fixtures/runner_enroll/services/flows.golden.json");
     const FIXTURE_WIRE: &str =
         include_str!("../../../../fixtures/runner_enroll/external/wire_pins.json");
     const FIXTURE_ENROLL_REFRESH_SQL: &str =
@@ -2903,6 +3018,62 @@ mod tests {
         assert_eq!(hex(&mac.finalize().into_bytes()), minted.hashed);
     }
 
+    // ---- Operator pause/resume SQL + bodies (`09738d222`) -------------------
+
+    #[test]
+    fn pause_resume_sql_match_django_saves() {
+        // SET order follows `update_fields`, not the model.
+        assert_eq!(
+            PAUSE_RUNNER_UPDATE_SQL,
+            "UPDATE \"runner\" SET \"paused_at\" = $1, \"paused_by_id\" = $2, \"updated_at\" = $3 WHERE \"runner\".\"id\" = $4"
+        );
+        assert_eq!(
+            RESUME_RUNNER_UPDATE_SQL,
+            "UPDATE \"runner\" SET \"paused_at\" = NULL, \"paused_by_id\" = NULL, \"updated_at\" = $1 WHERE \"runner\".\"id\" = $2"
+        );
+    }
+
+    #[test]
+    fn in_flight_sql_lists_busy_statuses_in_order() {
+        use pidash_services::runner_sessions::guards::BUSY_STATUSES;
+        let want: Vec<String> = BUSY_STATUSES
+            .iter()
+            .map(|status| format!("'{}'", status.value()))
+            .collect();
+        assert!(
+            IN_FLIGHT_RUNS_SQL.contains(&format!("IN ({})", want.join(", "))),
+            "{IN_FLIGHT_RUNS_SQL}"
+        );
+        assert!(
+            IN_FLIGHT_RUNS_SQL.contains("\"agent_run\".\"runner_id\" = $1"),
+            "{IN_FLIGHT_RUNS_SQL}"
+        );
+        assert!(
+            IN_FLIGHT_RUNS_SQL.ends_with("ORDER BY \"agent_run\".\"created_at\" DESC"),
+            "{IN_FLIGHT_RUNS_SQL}"
+        );
+    }
+
+    #[test]
+    fn pause_body_appends_in_flight_runs_last() {
+        assert_eq!(
+            pause_body(r#"{"a":1}"#, r#"[{"id":"x","status":"running"}]"#),
+            r#"{"a":1,"in_flight_runs":[{"id":"x","status":"running"}]}"#
+        );
+        assert_eq!(
+            pause_body(r#"{"a":1}"#, "[]"),
+            r#"{"a":1,"in_flight_runs":[]}"#
+        );
+    }
+
+    #[test]
+    fn revoked_conflict_body_shape() {
+        assert_eq!(
+            RUNNER_REVOKED_CONFLICT_BODY,
+            r#"{"error":"runner is revoked","code":"runner_revoked"}"#
+        );
+    }
+
     // ---- D13-F5: refresh/revoke SQL ----------------------------------
 
     #[test]
@@ -3004,42 +3175,12 @@ mod tests {
         assert!(locked.contains("FOR UPDATE"), "{locked}");
         let revoke = normalize_sql(&manage_reads::machine_revoke_sql());
         assert!(revoke.contains(r#"SET "revoked_at" = "#), "{revoke}");
-        let tokens = normalize_sql(&manage_reads::machine_tokens_revoke_sql());
-        assert!(tokens.contains(r#"UPDATE "machine_token""#), "{tokens}");
-        assert!(tokens.contains(r#""revoked_at" IS NULL"#), "{tokens}");
+        // (The token-revoke core moved to
+        // `pidash_services::domain::tokens::revoke_tokens_for_dev_machine`,
+        // whose test carries the pin.)
     }
 
     // ---- D13-F6: revoke cascade --------------------------------------
-
-    #[test]
-    fn f6_fire_plan_order() {
-        let flows: serde_json::Value = serde_json::from_str(FIXTURE_FLOWS).unwrap();
-        let order = flows["revoke_cascade_steps"]["post_commit_hooks"]
-            .as_str()
-            .unwrap();
-        assert!(order.starts_with("handoffs"), "{order}");
-        let bundle = EffectBundle {
-            runner_id: Uuid::nil(),
-            publish: vec![
-                LifecycleEffect::PublishTerminalEffects {
-                    run_id: Uuid::nil(),
-                },
-                LifecycleEffect::ApplyTerminalEffectsInline {
-                    run_id: Uuid::nil(),
-                },
-            ],
-            handoffs: vec![Uuid::nil()],
-            drains: vec![Uuid::nil()],
-            cleanup: Some(Uuid::nil()),
-        };
-        let plan = fire_plan(bundle);
-        assert_eq!(plan.len(), 5);
-        assert!(matches!(plan[0], FireOp::Publish(_)));
-        assert!(matches!(plan[1], FireOp::Publish(_)));
-        assert!(matches!(plan[2], FireOp::Handoff(_)));
-        assert!(matches!(plan[3], FireOp::Drain(_)));
-        assert!(matches!(plan[4], FireOp::Cleanup(_)));
-    }
 
     #[test]
     fn f6_reason_handling() {

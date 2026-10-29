@@ -20,11 +20,14 @@
 //! - `_start_assistant_row` / `_emit_delta` / `_finalize_row` (`:118-155`) →
 //!   [`TurnSeam::start_row`] / [`emit_delta`] / [`finalize_row`], driven by
 //!   [`StreamSink`] below.
-//! - `_complete_turn` / `_fail_turn` / `_cancel_turn` (`:157-213`) →
+//! - `_was_cut_off` / `_mark_cut_off` (`:369-372,502-530`) →
+//!   [`TurnSeam::was_cut_off`] / [`TurnSeam::mark_cut_off`], called between
+//!   usage extraction and completion exactly like Python.
+//! - `_complete_turn` / `_fail_turn` / `_cancel_turn` (`:158-213`) →
 //!   [`TurnSeam::complete_turn`] / [`fail_turn`] / [`cancel_turn`]; the exact
 //!   `UPDATE`/`INSERT`/`DELETE` shapes are the `*_sql` builders here, pinned
 //!   against the fixture's `updates` entries.
-//! - `_finalize_open_rows` (`:173-178`) → [`finalize_open_rows_update`].
+//! - `_finalize_open_rows` (`:173-178`) → `domain::assistant::finalize_open_messages`.
 //! - `_Streamer` (`:220-292`) → [`StreamSink`]: a `TextPart` start closes the
 //!   open row and opens a new one, deltas accumulate and flush every
 //!   [`DELTA_FLUSH_MS`] or at [`PENDING_FLUSH_CHARS`] pending chars, the end
@@ -38,26 +41,29 @@
 //! - `_model_label` (`:422-425`) → [`TurnSeam::model_label`].
 //! - `_extract_usage` (`:428-439`) → [`TurnUsage`] + [`usage_value`]
 //!   (extraction failure → `{}`, never null).
-//! - `_classify_error` (`:442-480` on `origin/main`, past #1126) →
-//!   [`classify_error`] for the text fallback (`:454-480`), same branch
-//!   order: credit (status-code 402 read from the exception, never
-//!   substring-matched) first, then auth, unreachable, model, internal.
-//!   The typed-first branch (`:443-451`) is the [`AgentError::Typed`] arm:
+//! - `_classify_error` (`:447-486` on `origin/main`, past #1430) → the
+//!   [`TurnSeam::turn_error_for_user`] hook with the
+//!   [`classify_provider_error`] fallback: status-first wording (credit,
+//!   auth, rate-limit, model, unreachable), text markers only for
+//!   status-less failures.
+//!   The typed-first branch (`:453-457`) is the [`AgentError::Typed`] arm:
 //!   a typed failure crosses the seam already classified and is used
-//!   verbatim, never text-guessed. (Only this bullet tracks `origin/main`;
-//!   the rest of this map tracks the frozen `tasks.py` until PIDASHCONV-1055
-//!   merges `main`.)
+//!   verbatim, never text-guessed. The `_hit_output_limit` branch
+//!   (`:489-499`) is the [`AgentError::OutputTruncated`] arm, mapping to
+//!   `response_truncated` past the provider classifier. (Only this bullet
+//!   tracks `origin/main`; the rest of this map tracks the frozen
+//!   `tasks.py` until PIDASHCONV-1055 merges `main`.)
 //! - `run_assistant_turn` (`:476-491`, `name="assistant.run_turn"`,
-//!   `acks_late=False`, `max_retries=0`, soft 300 / hard 330) →
+//!   `acks_late=False`, `max_retries=0`, soft/hard limits from settings) →
 //!   [`RUN_TURN_TASK`] + [`register_turn_handler`]. Celery retries are
 //!   disabled for the turn task, so the handler returns [`Verdict::Ack`] or
 //!   [`Verdict::Fail`] — never `Retry`. The `SoftTimeLimitExceeded` arm
-//!   (`:486-489`) is the stream-phase deadline in [`drive_turn`]: past
-//!   [`TURN_SOFT_LIMIT_SECS`] the stream drops (aborting the agent), the
-//!   open row fails, and the turn fails with `turn_timeout`. There is no
-//!   hard-kill equivalent — a timed-out turn ends in its fail write, and
-//!   anything still `RUNNING` past 390s is recovered by the sweep like any
-//!   other crashed turn.
+//!   (`:486-489`) is the stream-phase deadline in [`drive_turn`]: past the
+//!   configured soft limit (300 at defaults) the stream drops (aborting the
+//!   agent), the open row fails, and the turn fails with `turn_timeout`.
+//!   There is no hard-kill equivalent — a timed-out turn ends in its fail
+//!   write, and anything still `RUNNING` past the sweep cutoff is recovered
+//!   by the sweep like any other crashed turn.
 //! - `_close_turn_connection` (`:494-508`) has no equivalent: it releases the
 //!   worker's thread-local Django connection, and `sqlx` pooling (plus the
 //!   seam owning its own pool handle) needs no turn-end release.
@@ -81,13 +87,15 @@ use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::assistant::provider_errors::{classify_provider_error, BYOK};
 use crate::queue::JobRow;
 use crate::worker::{HandlerError, Registry, Verdict};
 
 /// Celery task name (`tasks.py:477`, `@shared_task(name=...)`).
 pub const RUN_TURN_TASK: &str = "assistant.run_turn";
 
-/// Soft time limit, seconds (`tasks.py:45`, `ASSISTANT_TURN_SOFT_LIMIT`).
+/// Soft time limit default, seconds (`tasks.py:45`,
+/// `ASSISTANT_TURN_SOFT_LIMIT` when unset).
 pub const TURN_SOFT_LIMIT_SECS: u64 = 300;
 /// Hard time limit, seconds (`tasks.py:46`, `ASSISTANT_TURN_HARD_LIMIT`).
 pub const TURN_HARD_LIMIT_SECS: u64 = 330;
@@ -192,112 +200,62 @@ pub fn truncate_detail(detail: &str) -> &str {
 }
 
 // --------------------------------------------------------------------------- //
-// Error classification (`tasks.py:442-480` on `origin/main`, past #1126)
+// Error classification (`tasks.py:447-486` on `origin/main`, past #1430)
 // --------------------------------------------------------------------------- //
 
-/// Provider error codes (`tasks.py:469`, `provider_out_of_credit` /
-/// `provider_auth_failed` / `provider_unreachable` / `model_invalid` /
-/// `internal`).
-pub const CODE_OUT_OF_CREDIT: &str = "provider_out_of_credit";
-/// Provider error codes (`tasks.py:469`, `provider_out_of_credit` /
-/// `provider_auth_failed` / `provider_unreachable` / `model_invalid` /
-/// `internal`).
-pub const CODE_AUTH_FAILED: &str = "provider_auth_failed";
-/// Provider error codes (`tasks.py:469`, `provider_out_of_credit` /
-/// `provider_unreachable` / `model_invalid` / `internal`).
-pub const CODE_UNREACHABLE: &str = "provider_unreachable";
-/// Provider error codes (`tasks.py:469`, `provider_out_of_credit` /
-/// `provider_auth_failed` / `provider_unreachable` / `model_invalid` /
-/// `internal`).
-pub const CODE_MODEL_INVALID: &str = "model_invalid";
-/// Provider error codes (`tasks.py:469`, `provider_out_of_credit` /
-/// `provider_auth_failed` / `provider_unreachable` / `model_invalid` /
-/// `internal`).
+/// Unrecognised-failure code: `_classify_error` returns `internal` when the
+/// seam leaves a failure unclassified (`tasks.py:464-465`).
 pub const CODE_INTERNAL: &str = "internal";
 
 /// Iteration-limit code (`tasks.py:354`, `UsageLimitExceeded` branch).
 pub const CODE_ITERATION_LIMIT: &str = "iteration_limit";
 /// Soft-time-limit code (`tasks.py:489`, `SoftTimeLimitExceeded` branch).
 pub const CODE_TURN_TIMEOUT: &str = "turn_timeout";
+/// Output-limit code (`tasks.py:463`, `_hit_output_limit` branch).
+pub const CODE_RESPONSE_TRUNCATED: &str = "response_truncated";
 
-/// User-facing details, verbatim (`tasks.py:469-480`).
-pub const DETAIL_OUT_OF_CREDIT: &str = "The provider rejected the request for lack of credit.";
-/// User-facing details, verbatim (`tasks.py:469-480`).
-pub const DETAIL_AUTH_FAILED: &str = "Your API key was rejected by the provider.";
-/// User-facing details, verbatim (`tasks.py:469-480`).
-pub const DETAIL_UNREACHABLE: &str = "Could not reach the configured provider endpoint.";
-/// User-facing details, verbatim (`tasks.py:469-480`).
-pub const DETAIL_MODEL_INVALID: &str =
-    "The configured model name was not accepted by the provider.";
-/// User-facing details, verbatim (`tasks.py:469-480`).
+/// Unrecognised-failure detail, verbatim (`tasks.py:465`).
 pub const DETAIL_INTERNAL: &str = "The assistant hit an unexpected error.";
 /// Soft-time-limit detail, verbatim (`tasks.py:489`).
 pub const DETAIL_TURN_TIMEOUT: &str = "The assistant took too long to respond.";
+/// Output-limit detail, verbatim (`tasks.py:463`).
+pub const DETAIL_RESPONSE_TRUNCATED: &str =
+    "The reply was cut off because it reached the model's output limit.";
 
-/// Classify an untyped provider failure: the text fallback of
-/// `_classify_error` (`tasks.py:454-480`).
+/// Word an untyped provider failure for the turn's user: the
+/// [`TurnSeam::turn_error_for_user`] hook with the default-classifier
+/// fallback (`tasks.py:447-486`).
 ///
-/// `message` is `str(exc)`; `status_code` is the exception's `status_code`
-/// attribute when present. Branch order is load-bearing: credit is checked
-/// before auth, and the 402 status is read from the exception — never
-/// substring-matched, because "402" appears in request ids and token counts
-/// (`tasks.py:460-464`).
-///
-/// Typed failures never reach this function: `_classify_error` returns an
-/// `AssistantError`'s own code/detail before text matching (`tasks.py:443-451`),
-/// and the Rust equivalent is the [`AgentError::Typed`] arm, used verbatim.
-pub fn classify_error(message: &str, status_code: Option<u16>) -> (&'static str, &'static str) {
-    let text = message.to_lowercase();
-    if status_code == Some(402)
-        || [
-            "payment required",
-            "insufficient_credits",
-            "insufficient credits",
-            "no_credit_account",
-            "quota exceeded",
-        ]
-        .iter()
-        .any(|s| text.contains(s))
+/// A seam failure (an overlay hook raising) never fails the failure path:
+/// like `_turn_error` it logs and falls back to
+/// [`classify_provider_error`] with the BYOK connection. `None` from both
+/// is the generic `internal` bucket. Typed failures never reach here:
+/// `_classify_error` returns an `AssistantError`'s own code/detail first
+/// (`tasks.py:453-457`), and the Rust equivalent is the
+/// [`AgentError::Typed`] arm, used verbatim.
+async fn turn_error_for_user<S: TurnSeam>(
+    seam: &S,
+    ctx: &TurnContext,
+    message: &str,
+    status_code: Option<u16>,
+    body_detail: &str,
+    model_name: &str,
+) -> (String, String) {
+    match seam
+        .turn_error_for_user(ctx, message, status_code, body_detail, model_name)
+        .await
     {
-        return (CODE_OUT_OF_CREDIT, DETAIL_OUT_OF_CREDIT);
+        Ok(Some((code, detail))) => (code, detail),
+        Ok(None) => (CODE_INTERNAL.to_owned(), DETAIL_INTERNAL.to_owned()),
+        Err(error) => {
+            tracing::error!(
+                error = %error.0,
+                "turn_error_for_user failed; using the default classifier"
+            );
+            classify_provider_error(status_code, message, body_detail, BYOK, model_name)
+                .unwrap_or((CODE_INTERNAL.to_owned(), DETAIL_INTERNAL.to_owned()))
+        }
     }
-    if [
-        "401",
-        "unauthorized",
-        "api key",
-        "authentication",
-        "invalid_api_key",
-    ]
-    .iter()
-    .any(|s| text.contains(s))
-    {
-        return (CODE_AUTH_FAILED, DETAIL_AUTH_FAILED);
-    }
-    if [
-        "connection",
-        "timeout",
-        "timed out",
-        "unreachable",
-        "could not connect",
-        "name resolution",
-    ]
-    .iter()
-    .any(|s| text.contains(s))
-    {
-        return (CODE_UNREACHABLE, DETAIL_UNREACHABLE);
-    }
-    if [
-        "model_not_found",
-        "does not exist",
-        "unknown model",
-        "no such model",
-    ]
-    .iter()
-    .any(|s| text.contains(s))
-    {
-        return (CODE_MODEL_INVALID, DETAIL_MODEL_INVALID);
-    }
-    (CODE_INTERNAL, DETAIL_INTERNAL)
 }
 
 // --------------------------------------------------------------------------- //
@@ -640,20 +598,6 @@ pub fn lock_turn_select() -> String {
     format!("SELECT * FROM {TABLE_TURN} WHERE id = $1 FOR UPDATE")
 }
 
-/// Terminal complete write (`tasks.py:157-166`): status + model_messages +
-/// usage + model_used (or "") + completed_at. The `AND status = 'running'`
-/// guard has no Python equivalent (`tasks.py` overwrites unconditionally):
-/// Python's hard kill at 330s keeps a live turn and the 390s sweep mutually
-/// exclusive, while Rust relies on the guard so a swept turn can never flip
-/// back to completed. Callers skip the event/row writes when 0 rows match.
-pub fn complete_turn_update() -> String {
-    format!(
-        "UPDATE {TABLE_TURN} SET status = '{TURN_COMPLETED}', model_messages = $2, \
-         usage = $3, model_used = $4, completed_at = NOW() WHERE id = $1 \
-         AND status = '{TURN_RUNNING}'"
-    )
-}
-
 /// Clear the thread's in-flight pointer when it still names this turn
 /// (`tasks.py:166,190,211`).
 pub fn clear_active_turn_update() -> String {
@@ -663,37 +607,13 @@ pub fn clear_active_turn_update() -> String {
     )
 }
 
-/// Terminal fail write (`tasks.py:181-188`): status plus truncated
-/// code/detail plus `completed_at`. Truncation happens in
-/// [`truncate_code`]/[`truncate_detail`] before binding, never in SQL,
-/// because the Python slices count code points. Guarded on `running` like
-/// [`complete_turn_update`]: only the first terminal writer owns the row.
-pub fn fail_turn_update() -> String {
-    format!(
-        "UPDATE {TABLE_TURN} SET status = '{TURN_FAILED}', error_code = $2, \
-         error_detail = $3, completed_at = NOW() WHERE id = $1 \
-         AND status = '{TURN_RUNNING}'"
-    )
-}
-
 /// Terminal cancel write (`tasks.py:204-209`): status + completed_at only —
 /// no error columns, unlike the fail path. Guarded on `running` like
-/// [`complete_turn_update`]: only the first terminal writer owns the row.
+/// the complete/fail writes: only the first terminal writer owns the row.
 pub fn cancel_turn_update() -> String {
     format!(
         "UPDATE {TABLE_TURN} SET status = '{TURN_CANCELLED}', completed_at = NOW() WHERE id = $1 \
          AND status = '{TURN_RUNNING}'"
-    )
-}
-
-/// Close still-streaming rows (`tasks.py:173-178`): every message of the
-/// turn stuck in `streaming` moves to the terminal status with `completed_at`
-/// now. Covers the soft-time-limit signal and sweep paths, where the
-/// in-loop finalizer cannot run.
-pub fn finalize_open_rows_update() -> String {
-    format!(
-        "UPDATE {TABLE_MESSAGE} SET status = $2, completed_at = NOW() \
-         WHERE turn_id = $1 AND status = '{MSG_STREAMING}'"
     )
 }
 
@@ -703,56 +623,21 @@ pub fn thread_lock_select() -> String {
     format!("SELECT id FROM {TABLE_THREAD} WHERE id = $1 FOR UPDATE")
 }
 
-/// Error message row (`events.create_message`, `tasks.py:191-193`): an
-/// `error`-kind, `failed`-status message carrying `detail or code`. Seq is
-/// `COALESCE(MAX(seq), 0) + 1` on the thread (`events.py:78-80`), so the
-/// first row takes seq 1 — the same form the tools ports use.
-///
-/// `created_at` is `auto_now_add` (`models.py:138`), `NOT NULL` with no
-/// database default, so the insert must supply it: `$5` binds it as an
-/// explicit `now` (`events.create_message` stamps it Python-side), the same
-/// convention `loop_dispatch::message_insert_sql` and the `db` events port
-/// use. `completed_at` stays NULL, like the ORM row.
-pub fn error_message_insert() -> String {
-    format!(
-        "INSERT INTO {TABLE_MESSAGE} \
-         (id, thread_id, turn_id, seq, kind, display_content, payload, status, created_at) \
-         VALUES ($1, $2, $3, \
-         (SELECT COALESCE(MAX(seq), 0) + 1 FROM {TABLE_MESSAGE} WHERE thread_id = $2), \
-         '{KIND_ERROR}', $4, '{{}}', '{MSG_FAILED}', $5)"
-    )
-}
-
-/// `turn_failed` event row (`tasks.py:194-200`): kind, the error message id,
-/// and the turn/error payload. The event id is a `BigAutoField`, so the
-/// insert omits it. Like the message row, `created_at` is `auto_now_add`
-/// (`models.py:166`, `events.append_event`) with no database default, so `$5`
-/// binds it.
-pub fn turn_failed_event_insert() -> String {
-    format!(
-        "INSERT INTO {TABLE_EVENT} (thread_id, turn_id, seq, kind, message_id, payload, created_at) \
-         VALUES ($1, $2, \
-         (SELECT COALESCE(MAX(seq), 0) + 1 FROM {TABLE_EVENT} WHERE thread_id = $1), \
-         '{EVENT_TURN_FAILED}', $3, $4, $5)"
-    )
-}
-
-/// Delta pruning (`events.prune_turn_deltas`, `tasks.py:170,201,213`): a
-/// finished turn's `assistant_delta` events are deleted; completed content
-/// lives in rows.
-pub fn prune_turn_deltas_delete() -> String {
-    format!("DELETE FROM {TABLE_EVENT} WHERE turn_id = $1 AND kind = '{EVENT_ASSISTANT_DELTA}'")
-}
+// (complete/fail/finalize/error/event/prune builders moved to
+// `pidash_services::domain::assistant`; cancel/clear/locks stay.)
 
 // --------------------------------------------------------------------------- //
 // Seam boundary + turn driver (`tasks.py:299-367`)
 // --------------------------------------------------------------------------- //
 
-/// Infra failure inside the seam (DB/Redis/transport). The handler maps it
-/// to [`Verdict::Fail`]: Celery retries are disabled for the turn task
-/// (`max_retries=0`, `tasks.py:479`), so a crashed turn parks and the sweep
-/// recovers it — write tools are never re-executed by redelivery
-/// (`tasks.py:8-10`).
+/// Infra failure inside the seam (DB/Redis/transport). Outside the stream
+/// loop the handler maps it to [`Verdict::Fail`]: Celery retries are disabled
+/// for the turn task (`max_retries=0`, `tasks.py:479`), so a crashed turn
+/// parks and the sweep recovers it — write tools are never re-executed by
+/// redelivery (`tasks.py:8-10`). Inside the stream loop the driver fails the
+/// turn first (report, fail the open row, classify, fail the turn), like the
+/// `except Exception` arm (`tasks.py:356-361`); only a failure of that
+/// failure path still parks for the sweep.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SeamError(pub String);
 
@@ -771,7 +656,8 @@ pub struct ModelError {
 }
 
 /// Agent-run failure, mirroring the three `except` arms of `_run_turn`
-/// (`tasks.py:346-361`).
+/// (`tasks.py:346-361`) plus the output-limit check inside
+/// `_classify_error` (`tasks.py:489-499`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentError {
     /// `UsageLimitExceeded` → `iteration_limit` (`tasks.py:351-355`).
@@ -779,7 +665,7 @@ pub enum AgentError {
     /// A typed `AssistantError` raised inside the run — by a model adapter
     /// or an ee provider — already carrying its stable code and user-facing
     /// detail. Used verbatim, never text-guessed: the typed-first branch of
-    /// `_classify_error` (`tasks.py:443-451`, #1126).
+    /// `_classify_error` (`tasks.py:453-457`, #1126, kept by #1430).
     ///
     /// Python walks `exc.__cause__` because the agent runtime may re-raise a
     /// provider failure wrapped in its own type. Rust has no exception chain:
@@ -788,10 +674,25 @@ pub enum AgentError {
     /// any cause is an `AssistantError` (see [`ModelError`] for the same
     /// already-classified crossing at model-resolution time).
     Typed { code: String, detail: String },
-    /// Any other provider failure → [`classify_error`] (`tasks.py:356-361`).
+    /// The model ran out of output tokens (`IncompleteToolCall`, or the
+    /// length-exhaustion `UnexpectedModelBehavior`) → `response_truncated`
+    /// with the constant cut-off detail: the `_hit_output_limit` branch
+    /// (`tasks.py:489-499`), which Django checks after the provider
+    /// classifier and before `internal`. The variant bypasses
+    /// [`classify_provider_error`] outright — neither pydantic-ai message matches
+    /// any provider marker, so the bypass classifies identically.
+    OutputTruncated,
+    /// Any other provider failure → [`TurnSeam::turn_error_for_user`]
+    /// (`tasks.py:356-361`). `message` is `str(exc)`; `status_code` the
+    /// exception's HTTP status when it carries one; `body_detail` the
+    /// provider's own one-line explanation from the structured response
+    /// body (`""` when it gave none); `model_name` the model the failing
+    /// call used (`""` when unknown).
     Provider {
         message: String,
         status_code: Option<u16>,
+        body_detail: String,
+        model_name: String,
     },
 }
 
@@ -909,14 +810,29 @@ pub trait TurnSeam: Send + Sync {
         &self,
         stream: &Self::Stream,
     ) -> impl std::future::Future<Output = Result<Option<TurnUsage>, SeamError>> + Send;
-    /// `_complete_turn` (`tasks.py:157-170`), including the delta prune
-    /// (`:170`).
+    /// `_was_cut_off` (`tasks.py:369,502-507`): true when the final
+    /// reply ended because the output limit was reached.
+    fn was_cut_off(
+        &self,
+        stream: &Self::Stream,
+    ) -> impl std::future::Future<Output = Result<bool, SeamError>> + Send;
+    /// `_mark_cut_off` (`tasks.py:370-371,510-530`): flag the turn's last
+    /// reply as cut off — `payload.truncated` on the row, then the
+    /// envelope re-sent as a second `message_completed`.
+    fn mark_cut_off(
+        &self,
+        ctx: &TurnContext,
+    ) -> impl std::future::Future<Output = Result<(), SeamError>> + Send;
+    /// `_complete_turn` (`tasks.py:158-172`), including the delta prune
+    /// (`:172`). `truncated` adds the `"truncated": true` key to the
+    /// `turn_completed` payload — only when true (`:168-169`).
     fn complete_turn(
         &self,
         ctx: &TurnContext,
         model_messages: Value,
         usage: Value,
         model_used: String,
+        truncated: bool,
     ) -> impl std::future::Future<Output = Result<(), SeamError>> + Send;
     /// `_fail_turn` (`tasks.py:181-201`): truncates code/detail first,
     /// including the error row, the event and the delta prune (`:191-201`).
@@ -932,6 +848,24 @@ pub trait TurnSeam: Send + Sync {
         &self,
         ctx: &TurnContext,
     ) -> impl std::future::Future<Output = Result<(), SeamError>> + Send;
+    /// `turn_error_for_user` (`ee/assistant/model_provider.py:72-87`): the
+    /// error to show the turn's user for a failure that is not already a
+    /// typed `AssistantError`. The returned pair supplies the stable code
+    /// and the user-facing detail; `None` leaves the failure as a generic
+    /// internal error. CE: every connection is BYOK, so the wording
+    /// assumes a key the user supplied, and `model_name` falls back to
+    /// the user's configured model when the failure carries none. An
+    /// overlay seam picks the connection kind here; an `Err` (a hook
+    /// that itself fails) falls back to the default classifier, never
+    /// stranding the turn.
+    fn turn_error_for_user(
+        &self,
+        ctx: &TurnContext,
+        message: &str,
+        status_code: Option<u16>,
+        body_detail: &str,
+        model_name: &str,
+    ) -> impl std::future::Future<Output = Result<Option<(String, String)>, SeamError>> + Send;
 }
 
 /// How one turn ended. Variants mirror the `_run_turn` exits
@@ -960,21 +894,31 @@ pub enum DriveResult {
 /// server is exactly when the user must hear about it.
 ///
 /// The stream phase runs under the soft-limit deadline
-/// ([`TURN_SOFT_LIMIT_SECS`] from drive start, like Celery counting from
-/// task start): past it the stream drops (aborting the agent), the open row
+/// (`soft_limit_secs` from drive start, like Celery counting from task
+/// start): past it the stream drops (aborting the agent), the open row
 /// fails, and the turn fails with `turn_timeout` — the
 /// `SoftTimeLimitExceeded` arm (`tasks.py:486-489`).
-pub async fn drive_turn<S: TurnSeam>(seam: &S, turn_id: Uuid) -> Result<DriveResult, SeamError> {
+///
+/// `soft_limit_secs` is the configured `ASSISTANT_TURN_SOFT_LIMIT`
+/// (`settings.assistant.turn_soft_limit`), not the
+/// [`TURN_SOFT_LIMIT_SECS`] default: Django reads the same setting at
+/// `tasks.py:45`, so a hard-coded 300 here would kill healthy long turns
+/// for any operator who raised the limit (PIDASHCONV-1458).
+pub async fn drive_turn<S: TurnSeam>(
+    seam: &S,
+    turn_id: Uuid,
+    soft_limit_secs: i64,
+) -> Result<DriveResult, SeamError> {
     drive_turn_with_deadline(
         seam,
         turn_id,
-        tokio::time::Instant::now() + Duration::from_secs(TURN_SOFT_LIMIT_SECS),
+        tokio::time::Instant::now() + Duration::from_secs(soft_limit_secs.max(0) as u64),
     )
     .await
 }
 
 /// [`drive_turn`] with an explicit stream-phase deadline (the production
-/// deadline is `now + TURN_SOFT_LIMIT_SECS`; tests pass a near one).
+/// deadline is `now + soft_limit_secs`; tests pass a near one).
 pub async fn drive_turn_with_deadline<S: TurnSeam>(
     seam: &S,
     turn_id: Uuid,
@@ -1048,16 +992,58 @@ pub async fn drive_turn_with_deadline<S: TurnSeam>(
         // stream end (`tasks.py:231-233`: the `async for` body). A cancel
         // that lands after the last event — or before a stream that yields
         // nothing — is ignored and the turn completes.
-        if !matches!(item, StreamItem::End) && seam.is_cancelled(ctx.turn_id).await? {
-            report_runtime_failures(seam, &ctx, &toolsets).await?;
-            if let Some(action) = sink.fail_open(MSG_CANCELLED) {
-                perform(seam, &ctx, &mut open_row, &action).await?;
+        if !matches!(item, StreamItem::End) {
+            let cancelled = match seam.is_cancelled(ctx.turn_id).await {
+                Ok(cancelled) => cancelled,
+                // A seam failure inside the stream loop is a turn failure,
+                // not a crash (`tasks.py:356-361`): the handler raised out
+                // of `assistant.run`, so the run fails — report, fail the
+                // open row, classify, fail the turn.
+                Err(err) => {
+                    let fail_action = sink.fail_open(MSG_FAILED);
+                    return seam_failed(seam, &ctx, &toolsets, fail_action, &mut open_row, &err)
+                        .await;
+                }
+            };
+            if cancelled {
+                report_runtime_failures(seam, &ctx, &toolsets).await?;
+                if let Some(action) = sink.fail_open(MSG_CANCELLED) {
+                    perform(seam, &ctx, &mut open_row, &action).await?;
+                }
+                seam.cancel_turn(&ctx).await?;
+                return Ok(DriveResult::Cancelled);
             }
-            seam.cancel_turn(&ctx).await?;
-            return Ok(DriveResult::Cancelled);
         }
-        for action in sink.handle(&item, seam.now_ms()) {
-            perform(seam, &ctx, &mut open_row, &action).await?;
+        let actions = sink.handle(&item, seam.now_ms());
+        for (index, action) in actions.iter().enumerate() {
+            if let Err(err) = perform(seam, &ctx, &mut open_row, action).await {
+                // Same failure path as a provider error (`tasks.py:356-361`).
+                // A failed close is still open — Django clears `self.message`
+                // only after success (`tasks.py:281-286`), so `fail_open_row`
+                // retries the close as failed — hence the text of the failed
+                // close is reused for the failed one. Likewise a failed flush
+                // keeps its row text: `finalize_if_open` moves the text into
+                // the close pair up front while Django keeps `self.text`
+                // until the close succeeds, so an unperformed sibling close
+                // carries the text `fail_open_row` would close with.
+                let fail_action = match action {
+                    SinkAction::FinalizeRow { text, .. } => Some(SinkAction::FinalizeRow {
+                        text: text.clone(),
+                        status: MSG_FAILED,
+                    }),
+                    _ => actions[index + 1..]
+                        .iter()
+                        .find_map(|sibling| match sibling {
+                            SinkAction::FinalizeRow { text, .. } => Some(SinkAction::FinalizeRow {
+                                text: text.clone(),
+                                status: MSG_FAILED,
+                            }),
+                            _ => None,
+                        })
+                        .or_else(|| sink.fail_open(MSG_FAILED)),
+                };
+                return seam_failed(seam, &ctx, &toolsets, fail_action, &mut open_row, &err).await;
+            }
         }
         if matches!(item, StreamItem::End) {
             break;
@@ -1071,7 +1057,11 @@ pub async fn drive_turn_with_deadline<S: TurnSeam>(
 
     let model_messages = seam.dump_messages(&stream).await?;
     let usage = usage_value(seam.extract_usage(&stream).await?.as_ref());
-    seam.complete_turn(&ctx, model_messages, usage, model_label)
+    let truncated = seam.was_cut_off(&stream).await?;
+    if truncated {
+        seam.mark_cut_off(&ctx).await?;
+    }
+    seam.complete_turn(&ctx, model_messages, usage, model_label, truncated)
         .await?;
     Ok(DriveResult::Completed)
 }
@@ -1088,26 +1078,65 @@ async fn stream_failed<S: TurnSeam>(
     open_row: &mut Option<Uuid>,
     err: AgentError,
 ) -> Result<DriveResult, SeamError> {
+    let (code, detail) = match err {
+        AgentError::UsageLimit(detail) => (CODE_ITERATION_LIMIT.to_owned(), detail),
+        // Typed-first (`tasks.py:453-457`): the seam already resolved the
+        // cause chain, so the code/detail cross verbatim — re-wording
+        // here would erase both into the generic bucket.
+        AgentError::Typed { code, detail } => (code, detail),
+        // Output-limit (`tasks.py:489-499`): the constant code/detail —
+        // `_hit_output_limit` sits after the provider classifier, and
+        // neither pydantic-ai message matches a provider marker, so the
+        // variant bypasses `classify_provider_error` outright.
+        AgentError::OutputTruncated => (
+            CODE_RESPONSE_TRUNCATED.to_owned(),
+            DETAIL_RESPONSE_TRUNCATED.to_owned(),
+        ),
+        AgentError::Provider {
+            message,
+            status_code,
+            body_detail,
+            model_name,
+        } => turn_error_for_user(seam, ctx, &message, status_code, &body_detail, &model_name).await,
+    };
+    fail_open_row_and_turn(seam, ctx, toolsets, fail_action, open_row, &code, &detail).await?;
+    Ok(DriveResult::Failed { code, detail })
+}
+
+/// Seam-failure exit: a DB/Redis/transport error from inside the stream loop
+/// (`_start_assistant_row` / `_emit_delta` / `_finalize_row` raising out of
+/// `streamer.handle`, `tasks.py:118-155 + 336-361`) takes the same path as a
+/// provider error — report, fail the open row, classify the seam text, fail
+/// the turn — instead of leaving the turn RUNNING for the sweep.
+async fn seam_failed<S: TurnSeam>(
+    seam: &S,
+    ctx: &TurnContext,
+    toolsets: &[ToolsetHandle],
+    fail_action: Option<SinkAction>,
+    open_row: &mut Option<Uuid>,
+    err: &SeamError,
+) -> Result<DriveResult, SeamError> {
+    let (code, detail) = turn_error_for_user(seam, ctx, &err.0, None, "", "").await;
+    fail_open_row_and_turn(seam, ctx, toolsets, fail_action, open_row, &code, &detail).await?;
+    Ok(DriveResult::Failed { code, detail })
+}
+
+/// Shared failure tail: report runtime tool failures, fail the open row
+/// (pre-computed by the caller), fail the turn with the given code/detail.
+async fn fail_open_row_and_turn<S: TurnSeam>(
+    seam: &S,
+    ctx: &TurnContext,
+    toolsets: &[ToolsetHandle],
+    fail_action: Option<SinkAction>,
+    open_row: &mut Option<Uuid>,
+    code: &str,
+    detail: &str,
+) -> Result<(), SeamError> {
     report_runtime_failures(seam, ctx, toolsets).await?;
     if let Some(action) = fail_action {
         perform(seam, ctx, open_row, &action).await?;
     }
-    let (code, detail) = match err {
-        AgentError::UsageLimit(detail) => (CODE_ITERATION_LIMIT.to_owned(), detail),
-        // Typed-first (`tasks.py:443-451`): the seam already resolved the
-        // cause chain, so the code/detail cross verbatim — text matching
-        // here would erase both into the generic bucket.
-        AgentError::Typed { code, detail } => (code, detail),
-        AgentError::Provider {
-            message,
-            status_code,
-        } => {
-            let (code, detail) = classify_error(&message, status_code);
-            (code.to_owned(), detail.to_owned())
-        }
-    };
-    seam.fail_turn(ctx, &code, &detail).await?;
-    Ok(DriveResult::Failed { code, detail })
+    seam.fail_turn(ctx, code, detail).await
 }
 
 /// Soft-limit exit (`tasks.py:486-489`, `SoftTimeLimitExceeded`): fail the
@@ -1183,8 +1212,12 @@ async fn perform<S: TurnSeam>(
             Ok(())
         }
         SinkAction::FinalizeRow { text, status } => {
-            if let Some(id) = open_row.take() {
+            // The id is released only after success: a failed close leaves
+            // the row open (Django clears `self.message` only after success,
+            // `tasks.py:281-286`), so the failure path can retry it as failed.
+            if let Some(id) = *open_row {
                 seam.finalize_row(ctx, id, text, status).await?;
+                *open_row = None;
             }
             Ok(())
         }
@@ -1225,10 +1258,15 @@ pub fn parse_run_turn_arg(job: &JobRow) -> Result<Uuid, String> {
 /// live worker: the domain gate flips ownership after the proxy pass, so
 /// until then `assistant.run_turn` still routes to `PythonOwned` (see
 /// [`crate::worker::route_for`]).
+///
+/// `soft_limit_secs` is the configured `ASSISTANT_TURN_SOFT_LIMIT`
+/// (`settings.assistant.turn_soft_limit`); the handler drives
+/// [`drive_turn`] under `now + soft` like Celery's `soft_time_limit`.
 pub fn register_turn_handler<S: TurnSeam + 'static>(
     registry: &mut Registry,
     _pool: PgPool,
     seam: Arc<S>,
+    soft_limit_secs: i64,
 ) {
     registry.register(
         RUN_TURN_TASK,
@@ -1240,7 +1278,7 @@ pub fn register_turn_handler<S: TurnSeam + 'static>(
                         Ok(id) => id,
                         Err(error) => return Ok(Verdict::Fail { error }),
                     };
-                    match drive_turn(seam.as_ref(), turn_id).await {
+                    match drive_turn(seam.as_ref(), turn_id, soft_limit_secs).await {
                         Ok(_) => Ok(Verdict::Ack),
                         Err(error) => Ok(Verdict::Fail {
                             error: error.to_string(),
@@ -1321,48 +1359,129 @@ mod tests {
     }
 
     #[test]
-    fn classify_error_matches_fixture_vectors() {
+    fn classify_provider_error_matches_fixture_vectors() {
+        use crate::assistant::provider_errors::{classify_provider_error, BYOK, GATEWAY};
         let fx = tasks_fixture();
         let vectors = fx["tasks"]["classify_error"]["vectors"]
             .as_object()
             .expect("vectors map");
         // Every fixture vector pins its (code, detail) pair.
         for (name, pair) in vectors {
-            let (code, detail) = match name.as_str() {
-                "payment_required" => classify_error("Payment Required: top up please", None),
-                "status_402" => classify_error("anything at all", Some(402)),
-                "auth_401" => classify_error("401 Unauthorized", None),
-                "connection" => classify_error("could not connect: timed out", None),
-                "model_not_found" => classify_error("model_not_found: no such model", None),
-                "other" => classify_error("weird boom", None),
+            let (status, text, body_detail, connection, model) = match name.as_str() {
+                "rate_429" => (
+                    Some(429),
+                    "status_code: 429, model_name: m, body: {'message': 'Rate limit exceeded'}",
+                    "",
+                    BYOK,
+                    "",
+                ),
+                // Django parametrizes `test_429_asks_the_user_to_retry`
+                // over both connections: a 429 reads as rate-limited on
+                // the gateway too.
+                "gateway_429" => (
+                    Some(429),
+                    "status_code: 429, model_name: m, body: {'message': 'Rate limit exceeded'}",
+                    "",
+                    GATEWAY,
+                    "",
+                ),
+                "credit_402_body" => (
+                    Some(402),
+                    "status_code: 402, model_name: m, body: {'message': 'Insufficient credits.'}",
+                    "Insufficient credits. Top up at https://example.test/billing.",
+                    BYOK,
+                    "",
+                ),
+                "credit_402_bare" => (Some(402), "anything at all", "", BYOK, ""),
+                "credit_429_quota" => (
+                    Some(429),
+                    "You exceeded your current quota. code: insufficient_quota",
+                    "",
+                    BYOK,
+                    "",
+                ),
+                "auth_401" => (Some(401), "status_code: 401, model_name: m", "", BYOK, ""),
+                "auth_400_text" => (
+                    Some(400),
+                    "API key not valid. Please pass a valid API key.",
+                    "",
+                    BYOK,
+                    "",
+                ),
+                "model_400_named" => (Some(400), "unsupported model: foo", "", BYOK, "oracle-stub"),
+                "model_noname" => (None, "model_not_found: no such model", "", BYOK, ""),
+                "unreachable_500" => (Some(500), "connection reset by upstream", "", BYOK, ""),
+                "unreachable_text" => (None, "Connection timed out", "", BYOK, ""),
+                "gateway_401" => (
+                    Some(401),
+                    "status_code: 401, model_name: m",
+                    "",
+                    GATEWAY,
+                    "",
+                ),
+                "gateway_402_body" => (
+                    Some(402),
+                    "status_code: 402, model_name: m",
+                    "Insufficient credits. Top up at https://example.test/billing.",
+                    GATEWAY,
+                    "",
+                ),
+                "gateway_model" => (Some(400), "Unsupported model", "", GATEWAY, "acme/gone-1"),
                 other => panic!("unknown fixture vector {other}"),
             };
-            assert_eq!(code, pair[0].as_str().unwrap(), "code for {name}");
-            assert_eq!(detail, pair[1].as_str().unwrap(), "detail for {name}");
+            let got = classify_provider_error(status, text, body_detail, connection, model)
+                .unwrap_or_else(|| panic!("vector {name} classified"));
+            assert_eq!(got.0, pair[0].as_str().unwrap(), "code for {name}");
+            assert_eq!(got.1, pair[1].as_str().unwrap(), "detail for {name}");
         }
-        // The 402 status wins even when the message is unrelated: the code
-        // is read from the exception, never substring-matched
-        // (`tasks.py:460-464`). A bare "402" in text alone must NOT route
-        // to credit.
+        // The status is read from the failure, never substring-matched: a
+        // request id containing "401"/"402"/"429" classifies nothing on its
+        // own (`test_a_status_like_number_in_the_text_is_not_a_status`).
+        for request_id in ["req_401abc", "req_402abc", "req_429abc"] {
+            let text = format!("upstream failed, request id {request_id}");
+            assert_eq!(
+                classify_provider_error(Some(500), &text, "", BYOK, ""),
+                None,
+                "{request_id} is not a status"
+            );
+            assert_eq!(
+                classify_provider_error(None, &text, "", BYOK, ""),
+                None,
+                "{request_id} is not a status"
+            );
+        }
+        let classify =
+            |status, text: &str| classify_provider_error(status, text, "", BYOK, "").map(|p| p.0);
+        // A 5xx never counts as auth, and "quota exceeded" alone on a 429
+        // is a per-minute request quota, not an empty balance.
         assert_eq!(
-            classify_error("request id 402 token count 402", None).0,
-            CODE_INTERNAL
+            classify(Some(500), "authentication service returned an error"),
+            None
         );
         assert_eq!(
-            classify_error("request id 402 token count 402", Some(402)).0,
-            CODE_OUT_OF_CREDIT
+            classify(Some(429), "Rate limit quota exceeded, retry in 30s").as_deref(),
+            Some("provider_rate_limited")
+        );
+        // A 400 that is not about the model is left unclassified.
+        assert_eq!(
+            classify(
+                Some(400),
+                "This model's maximum context length is 128000 tokens."
+            ),
+            None
         );
         // Credit beats auth when both markers are present (branch order).
         assert_eq!(
-            classify_error("401 payment required", None).0,
-            CODE_OUT_OF_CREDIT
+            classify(None, "unauthorized: payment required").as_deref(),
+            Some("provider_out_of_credit")
         );
-        // Untyped failures still classify by text
-        // (`test_untyped_errors_are_still_classified_by_text`).
+        // Status-less failures still classify by text
+        // (`test_statusless_failures_are_still_classified_by_text`).
         assert_eq!(
-            classify_error("Connection timed out", None).0,
-            CODE_UNREACHABLE
+            classify(None, "Incorrect API key provided").as_deref(),
+            Some("provider_auth_failed")
         );
+        assert_eq!(classify(None, "something else entirely"), None);
     }
 
     #[test]
@@ -1480,10 +1599,8 @@ mod tests {
 
         assert!(lock_turn_select().contains("FOR UPDATE"));
 
-        let complete = complete_turn_update();
-        for col in ["model_messages", "usage", "model_used", "completed_at"] {
-            assert!(complete.contains(col), "complete sets {col}");
-        }
+        // (complete/fail/finalize/error/event/prune pins moved to
+        // `pidash_services::domain::assistant` with their SQL.)
         let clear = clear_active_turn_update();
         assert!(clear.contains("active_turn_id = NULL"));
         assert!(
@@ -1491,10 +1608,6 @@ mod tests {
             "clears only when matching"
         );
 
-        let fail = fail_turn_update();
-        for col in ["error_code", "error_detail", "completed_at"] {
-            assert!(fail.contains(col), "fail sets {col}");
-        }
         // Cancel writes status only — no error columns (`tasks.py:204-209`).
         let cancel = cancel_turn_update();
         assert!(cancel.contains("status = 'cancelled'"));
@@ -1503,32 +1616,7 @@ mod tests {
             "cancel keeps error columns: {cancel}"
         );
 
-        let fin = finalize_open_rows_update();
-        assert!(fin.contains("status = $2"));
-        assert!(fin.contains("status = 'streaming'"));
-
-        let err = error_message_insert();
-        assert!(err.contains("'error'") && err.contains("'failed'"));
-        assert!(
-            err.contains("COALESCE(MAX(seq), 0) + 1"),
-            "seq alloc: {err}"
-        );
-        // `created_at` is `auto_now_add` with no database default: the insert
-        // must carry the column or every row violates NOT NULL.
-        assert!(
-            err.contains("created_at"),
-            "message stamps created_at: {err}"
-        );
-
-        let ev = turn_failed_event_insert();
-        assert!(ev.contains("'turn_failed'"));
-        assert!(ev.contains("COALESCE(MAX(seq), 0) + 1"), "seq alloc: {ev}");
-        assert!(ev.contains("created_at"), "event stamps created_at: {ev}");
-
         assert!(thread_lock_select().contains("FOR UPDATE"));
-
-        let prune = prune_turn_deltas_delete();
-        assert!(prune.contains("assistant_event") && prune.contains("'assistant_delta'"));
     }
 
     /// Terminal writes are guarded on `running` (PIDASHCONV-1253): a swept
@@ -1537,16 +1625,13 @@ mod tests {
     /// no-op on every Python-reachable path.
     #[test]
     fn terminal_updates_guard_running() {
-        for sql in [
-            complete_turn_update(),
-            fail_turn_update(),
-            cancel_turn_update(),
-        ] {
-            assert!(
-                sql.contains("AND status = 'running'"),
-                "guarded terminal write: {sql}"
-            );
-        }
+        // (complete/fail guards pinned in full text by
+        // `pidash_services::domain::assistant`.)
+        let sql = cancel_turn_update();
+        assert!(
+            sql.contains("AND status = 'running'"),
+            "guarded terminal write: {sql}"
+        );
     }
 
     /// The soft-limit (code, detail) pair is Django's verbatim
@@ -1630,7 +1715,21 @@ mod tests {
         cancel_after: Option<usize>,
         pulls: Mutex<usize>,
         usage: Option<TurnUsage>,
+        /// Scripted `was_cut_off` answer (default false).
+        cut_off: bool,
         fail_emit: bool,
+        /// 1-based row-op index to fail once (`start_row`/`emit_delta`/
+        /// `finalize_row` in perform order); the failure-path writes that
+        /// follow succeed, like a transient fault that already cleared.
+        fail_row_op_at: Option<usize>,
+        row_ops: Mutex<usize>,
+        /// `is_cancelled` raises instead of answering.
+        fail_cancel_check: bool,
+        /// `fail_turn` raises (a failure path that cannot write).
+        fail_turn_write: bool,
+        /// `turn_error_for_user` raises (an overlay hook bug): the drive
+        /// must fall back to the default classifier, not strand the turn.
+        fail_turn_error: bool,
         calls: Mutex<Vec<String>>,
     }
 
@@ -1656,9 +1755,29 @@ mod tests {
                     requests: Some(1),
                     tool_calls: Some(0),
                 }),
+                cut_off: false,
                 fail_emit: false,
+                fail_row_op_at: None,
+                row_ops: Mutex::new(0),
+                fail_cancel_check: false,
+                fail_turn_write: false,
+                fail_turn_error: false,
                 calls: Mutex::new(Vec::new()),
             }
+        }
+
+        /// Next 1-based row-op index, for `fail_row_op_at` scripts.
+        fn next_row_op(&self) -> usize {
+            let mut ops = self.row_ops.lock().unwrap();
+            *ops += 1;
+            *ops
+        }
+
+        fn row_fault(&self, n: usize) -> Result<(), SeamError> {
+            if self.fail_row_op_at == Some(n) {
+                return Err(SeamError("boom: row write failed".to_owned()));
+            }
+            Ok(())
         }
 
         fn log(&self, entry: String) {
@@ -1694,6 +1813,9 @@ mod tests {
             Ok(self.claim)
         }
         async fn is_cancelled(&self, _t: Uuid) -> Result<bool, SeamError> {
+            if self.fail_cancel_check {
+                return Err(SeamError("boom: cancel read failed".to_owned()));
+            }
             match self.cancel_after {
                 Some(n) => Ok(*self.pulls.lock().unwrap() >= n),
                 None => Ok(false),
@@ -1772,6 +1894,7 @@ mod tests {
         async fn start_row(&self, _c: &TurnContext) -> Result<Uuid, SeamError> {
             let id = Uuid::new_v4();
             self.log(format!("start_row:{id}"));
+            self.row_fault(self.next_row_op())?;
             Ok(id)
         }
         async fn emit_delta(
@@ -1781,6 +1904,7 @@ mod tests {
             chunk: &str,
         ) -> Result<(), SeamError> {
             self.log(format!("emit_delta:{chunk}"));
+            self.row_fault(self.next_row_op())?;
             Ok(())
         }
         async fn finalize_row(
@@ -1791,6 +1915,7 @@ mod tests {
             status: &'static str,
         ) -> Result<(), SeamError> {
             self.log(format!("finalize_row:{status}:{text}"));
+            self.row_fault(self.next_row_op())?;
             Ok(())
         }
         async fn dump_messages(&self, _s: &FakeStream) -> Result<Value, SeamError> {
@@ -1799,15 +1924,24 @@ mod tests {
         async fn extract_usage(&self, _s: &FakeStream) -> Result<Option<TurnUsage>, SeamError> {
             Ok(self.usage.clone())
         }
+        async fn was_cut_off(&self, _s: &FakeStream) -> Result<bool, SeamError> {
+            self.log("was_cut_off".to_owned());
+            Ok(self.cut_off)
+        }
+        async fn mark_cut_off(&self, _c: &TurnContext) -> Result<(), SeamError> {
+            self.log("mark_cut_off".to_owned());
+            Ok(())
+        }
         async fn complete_turn(
             &self,
             _c: &TurnContext,
             _m: Value,
             usage: Value,
             model_used: String,
+            truncated: bool,
         ) -> Result<(), SeamError> {
             self.log(format!(
-                "complete_turn:{model_used}:{}",
+                "complete_turn:{model_used}:{}:{truncated}",
                 serde_json::to_string(&usage).unwrap()
             ));
             Ok(())
@@ -1819,11 +1953,35 @@ mod tests {
             detail: &str,
         ) -> Result<(), SeamError> {
             self.log(format!("fail_turn:{code}:{detail}"));
+            if self.fail_turn_write {
+                return Err(SeamError("boom: fail write failed".to_owned()));
+            }
             Ok(())
         }
         async fn cancel_turn(&self, _c: &TurnContext) -> Result<(), SeamError> {
             self.log("cancel_turn".to_owned());
             Ok(())
+        }
+
+        async fn turn_error_for_user(
+            &self,
+            _c: &TurnContext,
+            message: &str,
+            status_code: Option<u16>,
+            body_detail: &str,
+            model_name: &str,
+        ) -> Result<Option<(String, String)>, SeamError> {
+            use crate::assistant::provider_errors::{classify_provider_error, BYOK};
+            if self.fail_turn_error {
+                return Err(SeamError("overlay bug".to_owned()));
+            }
+            Ok(classify_provider_error(
+                status_code,
+                message,
+                body_detail,
+                BYOK,
+                model_name,
+            ))
         }
     }
 
@@ -1907,19 +2065,52 @@ mod tests {
         );
     }
 
+    /// PIDASHCONV-1458: [`drive_turn`] honors the configured soft limit,
+    /// not the 300 default — with a 1s limit a stream stalled past it
+    /// fails with `turn_timeout` (against a hard-coded 300 the same
+    /// stream would ride out the 5s stall and complete).
+    #[tokio::test]
+    async fn drive_turn_honors_configured_soft_limit() {
+        let mut seam = FakeSeam::ok(vec![]);
+        seam.stall_at_pull = Some(1);
+        let out = drive_turn(&seam, Uuid::new_v4(), 1).await.unwrap();
+        assert_eq!(
+            out,
+            DriveResult::Failed {
+                code: CODE_TURN_TIMEOUT.to_owned(),
+                detail: DETAIL_TURN_TIMEOUT.to_owned(),
+            }
+        );
+        let calls = seam.take_calls();
+        assert!(
+            calls
+                .iter()
+                .any(|c| c == "fail_turn:turn_timeout:The assistant took too long to respond."),
+            "the turn failed with turn_timeout: {calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|c| c.starts_with("complete_turn")),
+            "never completes: {calls:?}"
+        );
+    }
+
     #[tokio::test]
     async fn drive_noop_paths() {
         // Missing/ineligible context: silent return, nothing else runs.
         let mut seam = FakeSeam::ok(vec![]);
         seam.ctx = None;
-        let out = drive_turn(&seam, Uuid::new_v4()).await.unwrap();
+        let out = drive_turn(&seam, Uuid::new_v4(), TURN_SOFT_LIMIT_SECS as i64)
+            .await
+            .unwrap();
         assert_eq!(out, DriveResult::Noop);
         assert_eq!(seam.take_calls().as_slice(), ["load_context"]);
 
         // Lost claim: same silence after mark_running.
         let mut seam = FakeSeam::ok(vec![]);
         seam.claim = false;
-        let out = drive_turn(&seam, Uuid::new_v4()).await.unwrap();
+        let out = drive_turn(&seam, Uuid::new_v4(), TURN_SOFT_LIMIT_SECS as i64)
+            .await
+            .unwrap();
         assert_eq!(out, DriveResult::Noop);
         assert_eq!(
             seam.take_calls().as_slice(),
@@ -1934,7 +2125,9 @@ mod tests {
             code: "llm_config_missing".to_owned(),
             detail: "Configure your AI provider in Settings.".to_owned(),
         });
-        let out = drive_turn(&seam, Uuid::new_v4()).await.unwrap();
+        let out = drive_turn(&seam, Uuid::new_v4(), TURN_SOFT_LIMIT_SECS as i64)
+            .await
+            .unwrap();
         assert_eq!(
             out,
             DriveResult::ModelFailed {
@@ -1957,7 +2150,9 @@ mod tests {
             },
             StreamItem::End,
         ]);
-        let out = drive_turn(&seam, Uuid::new_v4()).await.unwrap();
+        let out = drive_turn(&seam, Uuid::new_v4(), TURN_SOFT_LIMIT_SECS as i64)
+            .await
+            .unwrap();
         assert_eq!(out, DriveResult::Completed);
         assert_eq!(seam.saw("start_row").len(), 1);
         let deltas = seam.saw("emit_delta");
@@ -1990,7 +2185,9 @@ mod tests {
     async fn drive_degraded_toolsets_still_completes() {
         let mut seam = FakeSeam::ok(vec![StreamItem::End]);
         seam.toolsets = Err(SeamError("boom".to_owned()));
-        let out = drive_turn(&seam, Uuid::new_v4()).await.unwrap();
+        let out = drive_turn(&seam, Uuid::new_v4(), TURN_SOFT_LIMIT_SECS as i64)
+            .await
+            .unwrap();
         assert_eq!(out, DriveResult::Completed);
         assert_eq!(seam.saw("emit_skipped:all tool servers").len(), 1);
     }
@@ -2002,7 +2199,9 @@ mod tests {
         let mut seam = FakeSeam::ok(vec![StreamItem::End]);
         seam.toolsets = Err(SeamError("boom".to_owned()));
         seam.fail_emit = true;
-        let out = drive_turn(&seam, Uuid::new_v4()).await.unwrap();
+        let out = drive_turn(&seam, Uuid::new_v4(), TURN_SOFT_LIMIT_SECS as i64)
+            .await
+            .unwrap();
         assert_eq!(out, DriveResult::Completed);
         assert_eq!(seam.saw("emit_skipped:all tool servers").len(), 1);
         assert_eq!(seam.saw("complete_turn").len(), 1);
@@ -2014,7 +2213,9 @@ mod tests {
         // a pre-set key with an eventless stream still completes.
         let mut seam = FakeSeam::ok(vec![StreamItem::End]);
         seam.cancel_after = Some(0);
-        let out = drive_turn(&seam, Uuid::new_v4()).await.unwrap();
+        let out = drive_turn(&seam, Uuid::new_v4(), TURN_SOFT_LIMIT_SECS as i64)
+            .await
+            .unwrap();
         assert_eq!(out, DriveResult::Completed);
         assert!(seam.saw("cancel_turn").is_empty());
     }
@@ -2034,7 +2235,9 @@ mod tests {
         // the delivered-but-unprocessed event, `tasks.py:231-233`): the open
         // row fails as cancelled, then the turn cancels.
         seam.cancel_after = Some(2);
-        let out = drive_turn(&seam, Uuid::new_v4()).await.unwrap();
+        let out = drive_turn(&seam, Uuid::new_v4(), TURN_SOFT_LIMIT_SECS as i64)
+            .await
+            .unwrap();
         assert_eq!(out, DriveResult::Cancelled);
         assert!(seam.saw("finalize_row:cancelled:").len() == 1);
         assert_eq!(seam.saw("cancel_turn").len(), 1);
@@ -2046,7 +2249,9 @@ mod tests {
         // UsageLimit on open → iteration_limit, no row work.
         let mut seam = FakeSeam::ok(vec![]);
         seam.open_err = Some(AgentError::UsageLimit("25 requests".to_owned()));
-        let out = drive_turn(&seam, Uuid::new_v4()).await.unwrap();
+        let out = drive_turn(&seam, Uuid::new_v4(), TURN_SOFT_LIMIT_SECS as i64)
+            .await
+            .unwrap();
         assert_eq!(
             out,
             DriveResult::Failed {
@@ -2066,17 +2271,111 @@ mod tests {
             .push_back(Err(AgentError::Provider {
                 message: "could not connect".to_owned(),
                 status_code: None,
+                body_detail: String::new(),
+                model_name: String::new(),
             }));
-        let out = drive_turn(&seam, Uuid::new_v4()).await.unwrap();
+        let out = drive_turn(&seam, Uuid::new_v4(), TURN_SOFT_LIMIT_SECS as i64)
+            .await
+            .unwrap();
         assert_eq!(
             out,
             DriveResult::Failed {
-                code: CODE_UNREACHABLE.to_owned(),
-                detail: DETAIL_UNREACHABLE.to_owned(),
+                code: "provider_unreachable".to_owned(),
+                detail: "Could not reach the configured provider endpoint.".to_owned(),
             }
         );
         assert!(seam.saw("finalize_row:failed:hi").len() == 1);
         assert!(seam.saw("fail_turn:provider_unreachable").len() == 1);
+    }
+
+    #[tokio::test]
+    async fn drive_output_truncated_fails_response_truncated() {
+        // `_hit_output_limit` (`tasks.py:489-499`): an output-limit
+        // failure carries the constant code/detail, never
+        // text-classified — the pydantic-ai messages match no
+        // provider marker, so the bypass equals Django's order.
+        let mut seam = FakeSeam::ok(vec![]);
+        seam.open_err = Some(AgentError::OutputTruncated);
+        let out = drive_turn(&seam, Uuid::new_v4(), TURN_SOFT_LIMIT_SECS as i64)
+            .await
+            .unwrap();
+        assert_eq!(
+            out,
+            DriveResult::Failed {
+                code: CODE_RESPONSE_TRUNCATED.to_owned(),
+                detail: DETAIL_RESPONSE_TRUNCATED.to_owned(),
+            }
+        );
+        assert_eq!(seam.saw("fail_turn:response_truncated:").len(), 1);
+        assert!(seam.saw("complete_turn").is_empty());
+    }
+
+    #[tokio::test]
+    async fn drive_cut_off_marks_and_completes_truncated() {
+        // `_was_cut_off` / `_mark_cut_off` (`tasks.py:369-372`): a
+        // cut-off success marks the row before completing, and the
+        // completion carries the flag.
+        let mut seam = FakeSeam::ok(vec![StreamItem::End]);
+        seam.cut_off = true;
+        let out = drive_turn(&seam, Uuid::new_v4(), TURN_SOFT_LIMIT_SECS as i64)
+            .await
+            .unwrap();
+        assert_eq!(out, DriveResult::Completed);
+        assert_eq!(seam.saw("was_cut_off").len(), 1);
+        assert_eq!(seam.saw("mark_cut_off").len(), 1);
+        let done = seam.saw("complete_turn");
+        assert_eq!(done.len(), 1);
+        assert!(done[0].ends_with(":true"), "truncated flag: {done:?}");
+        let calls = seam.take_calls();
+        let marked = calls.iter().position(|c| c == "mark_cut_off").unwrap();
+        let completed = calls
+            .iter()
+            .position(|c| c.starts_with("complete_turn"))
+            .unwrap();
+        assert!(marked < completed, "mark precedes complete: {calls:?}");
+    }
+
+    #[tokio::test]
+    async fn drive_clean_finish_skips_mark_and_flag() {
+        // The normal-finish control: no mark call, and the completion
+        // carries no flag.
+        let seam = FakeSeam::ok(vec![StreamItem::End]);
+        let out = drive_turn(&seam, Uuid::new_v4(), TURN_SOFT_LIMIT_SECS as i64)
+            .await
+            .unwrap();
+        assert_eq!(out, DriveResult::Completed);
+        assert_eq!(seam.saw("was_cut_off").len(), 1);
+        assert!(seam.saw("mark_cut_off").is_empty());
+        let done = seam.saw("complete_turn");
+        assert_eq!(done.len(), 1);
+        assert!(done[0].ends_with(":false"), "no flag: {done:?}");
+    }
+
+    #[tokio::test]
+    async fn drive_failing_turn_error_hook_falls_back_to_default_classifier() {
+        // Port of `test_a_failing_hook_does_not_strand_the_turn`: the seam
+        // hook raises, so the drive falls back to the default classifier
+        // and the turn still fails with the classified code.
+        let mut seam = FakeSeam::ok(vec![]);
+        seam.fail_turn_error = true;
+        seam.open_err = Some(AgentError::Provider {
+            message: "slow down".to_owned(),
+            status_code: Some(429),
+            body_detail: String::new(),
+            model_name: String::new(),
+        });
+        let out = drive_turn(&seam, Uuid::new_v4(), TURN_SOFT_LIMIT_SECS as i64)
+            .await
+            .unwrap();
+        assert_eq!(
+            out,
+            DriveResult::Failed {
+                code: "provider_rate_limited".to_owned(),
+                detail: "Too many requests to the model provider. Wait a moment and try again."
+                    .to_owned(),
+            }
+        );
+        assert!(seam.saw("fail_turn:provider_rate_limited").len() == 1);
     }
 
     #[tokio::test]
@@ -2102,7 +2401,9 @@ mod tests {
                     code: code.clone(),
                     detail: detail.clone(),
                 }));
-            let out = drive_turn(&seam, Uuid::new_v4()).await.unwrap();
+            let out = drive_turn(&seam, Uuid::new_v4(), TURN_SOFT_LIMIT_SECS as i64)
+                .await
+                .unwrap();
             assert_eq!(
                 out,
                 DriveResult::Failed {
@@ -2117,27 +2418,34 @@ mod tests {
             assert!(seam.saw(&format!("fail_turn:{code}:")).len() == 1);
         }
         // The typed arm is load-bearing, not dead: neither detail
-        // text-guesses to its own code, so without `Typed` both vectors
+        // classifies to its own code, so without `Typed` both vectors
         // would land in the generic bucket. ("Stream ended early." matches
         // no marker at all — Django's own comment on the unreachable case.)
+        use crate::assistant::provider_errors::{classify_provider_error, BYOK};
         assert_eq!(
-            classify_error("Stream ended early.", None),
-            (CODE_INTERNAL, DETAIL_INTERNAL)
+            classify_provider_error(None, "Stream ended early.", "", BYOK, ""),
+            None
         );
         assert_eq!(
-            classify_error("Plan usage is unavailable. Check Settings → Usage.", None).0,
-            CODE_INTERNAL
+            classify_provider_error(
+                None,
+                "Plan usage is unavailable. Check Settings → Usage.",
+                "",
+                BYOK,
+                ""
+            ),
+            None
         );
 
         // Port of `test_a_typed_error_wrapped_by_the_runtime_is_still_recognised`:
         // Django walks `__cause__` past the wrapper; the Rust seam
         // implementor performs that walk at the boundary and emits `Typed`.
-        // The wrapper's own text would text-guess to `internal`, proving the
+        // The wrapper's own text would classify to nothing, proving the
         // typed arm did the work. `open_stream` takes the same path with no
         // row work (nothing streamed yet).
         assert_eq!(
-            classify_error("model request failed", None).0,
-            CODE_INTERNAL
+            classify_provider_error(None, "model request failed", "", BYOK, ""),
+            None
         );
         let quota = &fx["tasks"]["classify_error"]["typed_vectors"]["vectors"]["quota_direct"];
         let mut seam = FakeSeam::ok(vec![]);
@@ -2145,7 +2453,9 @@ mod tests {
             code: quota[0].as_str().unwrap().to_owned(),
             detail: quota[1].as_str().unwrap().to_owned(),
         });
-        let out = drive_turn(&seam, Uuid::new_v4()).await.unwrap();
+        let out = drive_turn(&seam, Uuid::new_v4(), TURN_SOFT_LIMIT_SECS as i64)
+            .await
+            .unwrap();
         assert_eq!(
             out,
             DriveResult::Failed {
@@ -2163,14 +2473,143 @@ mod tests {
         seam.open_err = Some(AgentError::Provider {
             message: "x".to_owned(),
             status_code: None,
+            body_detail: String::new(),
+            model_name: String::new(),
         });
         seam.runtime_failed = vec![SkippedServer {
             name: "dead".to_owned(),
             reason: "boom".to_owned(),
         }];
-        let out = drive_turn(&seam, Uuid::new_v4()).await.unwrap();
+        let out = drive_turn(&seam, Uuid::new_v4(), TURN_SOFT_LIMIT_SECS as i64)
+            .await
+            .unwrap();
         assert!(matches!(out, DriveResult::Failed { .. }));
         assert_eq!(seam.saw("emit_skipped:dead").len(), 1);
+    }
+
+    /// A seam DB error from a mid-stream row write is a turn failure, not a
+    /// crash (`tasks.py:356-361`): the open row fails, the seam text
+    /// classifies, the turn fails — the sweep never sees it (PIDASHCONV-1254).
+    #[tokio::test]
+    async fn drive_row_write_failure_fails_turn_at_once() {
+        let mut seam = FakeSeam::ok(vec![
+            StreamItem::TextDelta {
+                chunk: "hi".to_owned(),
+            },
+            StreamItem::TextDelta {
+                chunk: "yo".to_owned(),
+            },
+            StreamItem::End,
+        ]);
+        seam.fail_row_op_at = Some(2); // the delta flush after the row opened
+        let out = drive_turn(&seam, Uuid::new_v4(), TURN_SOFT_LIMIT_SECS as i64)
+            .await
+            .unwrap();
+        assert_eq!(
+            out,
+            DriveResult::Failed {
+                code: CODE_INTERNAL.to_owned(),
+                detail: DETAIL_INTERNAL.to_owned(),
+            }
+        );
+        assert!(seam.saw("finalize_row:failed:hiyo").len() == 1);
+        assert!(seam.saw("fail_turn:internal:").len() == 1);
+        assert!(seam.saw("complete_turn").is_empty());
+        assert!(seam.saw("cancel_turn").is_empty());
+    }
+
+    /// The first row never opened, so there is nothing to close — Django's
+    /// `fail_open_row` is a no-op with `self.message is None`
+    /// (`tasks.py:289-292`).
+    #[tokio::test]
+    async fn drive_start_row_failure_fails_without_row_close() {
+        let mut seam = FakeSeam::ok(vec![StreamItem::TextDelta {
+            chunk: "hi".to_owned(),
+        }]);
+        seam.fail_row_op_at = Some(1);
+        let out = drive_turn(&seam, Uuid::new_v4(), TURN_SOFT_LIMIT_SECS as i64)
+            .await
+            .unwrap();
+        assert!(matches!(out, DriveResult::Failed { .. }));
+        assert!(seam.saw("finalize_row:").is_empty());
+        assert_eq!(seam.saw("fail_turn:").len(), 1);
+    }
+
+    /// A failed flush keeps its row text: the close pair's unperformed
+    /// sibling close carries the accumulated text (`tasks.py:289-292` closes
+    /// with `self.text`, which a failed `_flush` leaves intact).
+    #[tokio::test]
+    async fn drive_close_pair_flush_failure_keeps_row_text() {
+        let mut seam = FakeSeam::ok(vec![
+            StreamItem::TextDelta {
+                chunk: "hi".to_owned(),
+            },
+            StreamItem::End,
+        ]);
+        seam.fail_row_op_at = Some(2); // the close pair's flush
+        let out = drive_turn(&seam, Uuid::new_v4(), TURN_SOFT_LIMIT_SECS as i64)
+            .await
+            .unwrap();
+        assert!(matches!(out, DriveResult::Failed { .. }));
+        assert!(seam.saw("finalize_row:failed:hi").len() == 1);
+        assert!(
+            seam.saw("finalize_row:completed:").is_empty(),
+            "the sibling close never ran"
+        );
+        assert_eq!(seam.saw("fail_turn:").len(), 1);
+    }
+
+    /// A failed close is still open (`tasks.py:281-286` clears `self.message`
+    /// only after success), so the failure path retries it as failed.
+    #[tokio::test]
+    async fn drive_finalize_failure_retries_close_as_failed() {
+        let mut seam = FakeSeam::ok(vec![
+            StreamItem::TextDelta {
+                chunk: "hi".to_owned(),
+            },
+            StreamItem::End,
+        ]);
+        seam.fail_row_op_at = Some(3); // the completed close at stream end
+        let out = drive_turn(&seam, Uuid::new_v4(), TURN_SOFT_LIMIT_SECS as i64)
+            .await
+            .unwrap();
+        assert!(matches!(out, DriveResult::Failed { .. }));
+        assert!(seam.saw("finalize_row:completed:hi").len() == 1);
+        assert!(seam.saw("finalize_row:failed:hi").len() == 1);
+        assert_eq!(seam.saw("fail_turn:").len(), 1);
+    }
+
+    /// The live seam swallows cancel-read errors as false; a seam that
+    /// surfaces one takes the same failure path as any other stream-loop
+    /// seam error (nothing streamed yet, so no row closes).
+    #[tokio::test]
+    async fn drive_cancel_check_failure_fails_turn() {
+        let mut seam = FakeSeam::ok(vec![StreamItem::TextDelta {
+            chunk: "hi".to_owned(),
+        }]);
+        seam.fail_cancel_check = true;
+        let out = drive_turn(&seam, Uuid::new_v4(), TURN_SOFT_LIMIT_SECS as i64)
+            .await
+            .unwrap();
+        assert!(matches!(out, DriveResult::Failed { .. }));
+        assert!(seam.saw("start_row").is_empty());
+        assert_eq!(seam.saw("fail_turn:").len(), 1);
+    }
+
+    /// A failure path that cannot write is a crash, like Django's
+    /// `fail_open_row`/`_fail_turn` raising out of the `except` arm: the
+    /// driver returns the seam error and the sweep recovers the turn.
+    #[tokio::test]
+    async fn drive_seam_outage_still_parks_for_sweep() {
+        let mut seam = FakeSeam::ok(vec![StreamItem::TextDelta {
+            chunk: "hi".to_owned(),
+        }]);
+        seam.fail_row_op_at = Some(1);
+        seam.fail_turn_write = true;
+        let err = drive_turn(&seam, Uuid::new_v4(), TURN_SOFT_LIMIT_SECS as i64)
+            .await
+            .unwrap_err();
+        assert_eq!(err, SeamError("boom: fail write failed".to_owned()));
     }
 
     #[test]

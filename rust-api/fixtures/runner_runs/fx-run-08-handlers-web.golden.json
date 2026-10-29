@@ -667,7 +667,7 @@
  "metrics": {
   "status": 200,
   "content_type": "text/plain; version=0.0.4",
-  "body": "# HELP pi_dash_runner_online Runners currently online.\n# TYPE pi_dash_runner_online gauge\npi_dash_runner_online 1\n# HELP pi_dash_runner_busy Runners currently executing a run.\n# TYPE pi_dash_runner_busy gauge\npi_dash_runner_busy 1\n# HELP pi_dash_runner_offline Runners that have dropped their heartbeat (excludes revoked).\n# TYPE pi_dash_runner_offline gauge\npi_dash_runner_offline 2\n# HELP pi_dash_runs_active AgentRuns in an in-flight status.\n# TYPE pi_dash_runs_active gauge\npi_dash_runs_active 8\n# HELP pi_dash_approvals_pending ApprovalRequests waiting for a decision.\n# TYPE pi_dash_approvals_pending gauge\npi_dash_approvals_pending 2\n",
+  "body": "# HELP pi_dash_runner_online Runners online and accepting work (excludes paused).\n# TYPE pi_dash_runner_online gauge\npi_dash_runner_online 1\n# HELP pi_dash_runner_busy Runners currently executing a run.\n# TYPE pi_dash_runner_busy gauge\npi_dash_runner_busy 1\n# HELP pi_dash_runner_offline Runners that have dropped their heartbeat (excludes revoked).\n# TYPE pi_dash_runner_offline gauge\npi_dash_runner_offline 2\n# HELP pi_dash_runner_paused Non-revoked runners paused by an operator, in any connectivity state.\n# TYPE pi_dash_runner_paused gauge\npi_dash_runner_paused 0\n# HELP pi_dash_runs_active AgentRuns in an in-flight status.\n# TYPE pi_dash_runs_active gauge\npi_dash_runs_active 8\n# HELP pi_dash_approvals_pending ApprovalRequests waiting for a decision.\n# TYPE pi_dash_approvals_pending gauge\npi_dash_approvals_pending 2\n",
   "auth_classes": [],
   "perm_classes": [
    "AllowAny"

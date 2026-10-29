@@ -10,9 +10,14 @@
 //!
 //! * `release_pins_on_offline_runners`: QUEUED `local_runner` runs
 //!   pinned to a runner silent past `RUNNER_OFFLINE_PIN_RELEASE_SECS`
-//!   (default 300) and created before the cutoff go back to the pod
-//!   queue (pin cleared, parent `thread_id` cleared), 500 per pass,
-//!   then each affected pod drains.
+//!   (default 300) — or operator-paused (`09738d222`, which keeps
+//!   heartbeating but takes no work) — and created before the cutoff
+//!   go back to the pod queue (pin cleared, parent `thread_id`
+//!   cleared), 500 per pass, then each affected pod drains.
+//! * `release_pins_for_paused_runner` (`09738d222`, called from the
+//!   pause endpoint's commit hook): every QUEUED `local_runner` run
+//!   pinned to the just-paused runner goes back to the pod queue
+//!   immediately, then each affected pod drains.
 //! * `fail_runs_on_offline_runners`: BUSY `local_runner` runs on a
 //!   runner silent past `RUNNER_OFFLINE_RUN_FAIL_SECS` (default 3600)
 //!   are terminated through `_finish_unclaimed_runs` with error code
@@ -77,22 +82,24 @@ fn aliased_columns(alias: &str, columns: &[&str]) -> String {
 
 /// Stuck-pin candidate ids: QUEUED `local_runner` runs with a pin,
 /// created before the cutoff, whose pinned runner is silent past the
-/// cutoff or never heartbeated. Binds: `$1` cutoff (`created_at`),
+/// cutoff, never heartbeated, or operator-paused (`_pinned_runner_gone_q`,
+/// `09738d222`). Binds: `$1` cutoff (`created_at`),
 /// `$2` `local_runner`, `$3` `queued`, `$4` cutoff (heartbeat).
 pub fn stuck_queued_run_ids_select() -> String {
     "SELECT \"agent_run\".\"id\" FROM \"agent_run\" INNER JOIN \"runner\" ON \
      (\"agent_run\".\"pinned_runner_id\" = \"runner\".\"id\") WHERE \
      (\"agent_run\".\"created_at\" < $1 AND \"agent_run\".\"executor_kind\" = $2 AND \
      \"agent_run\".\"pinned_runner_id\" IS NOT NULL AND \"agent_run\".\"status\" = $3 AND \
-     (\"runner\".\"last_heartbeat_at\" < $4 OR \"runner\".\"last_heartbeat_at\" IS NULL)) \
+     (\"runner\".\"last_heartbeat_at\" < $4 OR \"runner\".\"last_heartbeat_at\" IS NULL OR \
+     \"runner\".\"paused_at\" IS NOT NULL)) \
      ORDER BY \"agent_run\".\"created_at\" DESC LIMIT 500"
         .to_owned()
 }
 
 /// Per-run re-check lock: the candidate back under `FOR UPDATE OF
-/// "agent_run"` with the silence predicate re-applied (the runner may
-/// have come back), plus the parent row via `select_related`.
-/// Binds: `$1` run id, `$2` `queued`, `$3` cutoff.
+/// "agent_run"` with the gone predicate re-applied (the runner may
+/// have come back or been resumed), plus the parent row via
+/// `select_related`. Binds: `$1` run id, `$2` `queued`, `$3` cutoff.
 pub fn release_pin_lock_select() -> String {
     format!(
         "SELECT {}, {} FROM \"agent_run\" INNER JOIN \"runner\" ON \
@@ -100,7 +107,38 @@ pub fn release_pin_lock_select() -> String {
          LEFT OUTER JOIN \"agent_run\" T3 ON (\"agent_run\".\"parent_run_id\" = T3.\"id\") \
          WHERE (\"agent_run\".\"id\" = $1 AND \"agent_run\".\"pinned_runner_id\" IS NOT NULL AND \
          \"agent_run\".\"status\" = $2 AND (\"runner\".\"last_heartbeat_at\" < $3 OR \
-         \"runner\".\"last_heartbeat_at\" IS NULL)) \
+         \"runner\".\"last_heartbeat_at\" IS NULL OR \"runner\".\"paused_at\" IS NOT NULL)) \
+         ORDER BY \"agent_run\".\"created_at\" DESC LIMIT 1 FOR UPDATE OF \"agent_run\"",
+        qualified_columns("agent_run", agent_run::COLUMNS),
+        aliased_columns("T3", agent_run::COLUMNS),
+    )
+}
+
+/// Paused-runner candidate ids (`release_pins_for_paused_runner`,
+/// `09738d222`): every QUEUED `local_runner` run pinned to the
+/// just-paused runner, whatever its age. No runner join (the pin
+/// column carries the id) and no `LIMIT`: the pause owns the set.
+/// Binds: `$1` `local_runner`, `$2` `queued`, `$3` runner id.
+pub fn paused_runner_pin_ids_select() -> String {
+    "SELECT \"agent_run\".\"id\" FROM \"agent_run\" WHERE \
+     (\"agent_run\".\"executor_kind\" = $1 AND \"agent_run\".\"pinned_runner_id\" IS NOT NULL AND \
+     \"agent_run\".\"status\" = $2 AND \"agent_run\".\"pinned_runner_id\" = $3) \
+     ORDER BY \"agent_run\".\"created_at\" DESC"
+        .to_owned()
+}
+
+/// Paused-runner re-check lock: the candidate back under `FOR UPDATE
+/// OF "agent_run"` with the still-paused predicate re-applied (the
+/// runner may have been resumed since the candidate list was read),
+/// plus the parent row via `select_related`. Binds: `$1` run id,
+/// `$2` `queued`.
+pub fn paused_runner_pin_lock_select() -> String {
+    format!(
+        "SELECT {}, {} FROM \"agent_run\" INNER JOIN \"runner\" ON \
+         (\"agent_run\".\"pinned_runner_id\" = \"runner\".\"id\") \
+         LEFT OUTER JOIN \"agent_run\" T3 ON (\"agent_run\".\"parent_run_id\" = T3.\"id\") \
+         WHERE (\"agent_run\".\"id\" = $1 AND \"agent_run\".\"pinned_runner_id\" IS NOT NULL AND \
+         \"agent_run\".\"status\" = $2 AND \"runner\".\"paused_at\" IS NOT NULL) \
          ORDER BY \"agent_run\".\"created_at\" DESC LIMIT 1 FOR UPDATE OF \"agent_run\"",
         qualified_columns("agent_run", agent_run::COLUMNS),
         aliased_columns("T3", agent_run::COLUMNS),
@@ -246,8 +284,21 @@ mod tests {
              (\"agent_run\".\"pinned_runner_id\" = \"runner\".\"id\") WHERE \
              (\"agent_run\".\"created_at\" < $1 AND \"agent_run\".\"executor_kind\" = $2 AND \
              \"agent_run\".\"pinned_runner_id\" IS NOT NULL AND \"agent_run\".\"status\" = $3 AND \
-             (\"runner\".\"last_heartbeat_at\" < $4 OR \"runner\".\"last_heartbeat_at\" IS NULL)) \
+             (\"runner\".\"last_heartbeat_at\" < $4 OR \"runner\".\"last_heartbeat_at\" IS NULL OR \
+             \"runner\".\"paused_at\" IS NOT NULL)) \
              ORDER BY \"agent_run\".\"created_at\" DESC LIMIT 500",
+        );
+    }
+
+    #[test]
+    fn paused_release_list_sql_matches_django() {
+        // No runner join, no age gate, no LIMIT: the pause owns the set.
+        assert_eq!(
+            paused_runner_pin_ids_select(),
+            "SELECT \"agent_run\".\"id\" FROM \"agent_run\" WHERE \
+             (\"agent_run\".\"executor_kind\" = $1 AND \"agent_run\".\"pinned_runner_id\" IS NOT NULL AND \
+             \"agent_run\".\"status\" = $2 AND \"agent_run\".\"pinned_runner_id\" = $3) \
+             ORDER BY \"agent_run\".\"created_at\" DESC",
         );
     }
 
@@ -268,12 +319,31 @@ mod tests {
         assert!(sql.contains(
             "WHERE (\"agent_run\".\"id\" = $1 AND \"agent_run\".\"pinned_runner_id\" IS NOT NULL AND \
              \"agent_run\".\"status\" = $2 AND (\"runner\".\"last_heartbeat_at\" < $3 OR \
-             \"runner\".\"last_heartbeat_at\" IS NULL)) \
+             \"runner\".\"last_heartbeat_at\" IS NULL OR \"runner\".\"paused_at\" IS NOT NULL)) \
              ORDER BY \"agent_run\".\"created_at\" DESC LIMIT 1 FOR UPDATE OF \"agent_run\""
         ));
         // The parent alias is bare T3 (Django's join counter), not T1 —
         // and never double-quoted (that would be another alias).
         assert!(sql.contains("T3.\"thread_id\""));
+        assert!(!sql.contains("\"T3\""));
+    }
+
+    #[test]
+    fn paused_release_lock_sql_shape_matches_django() {
+        let sql = paused_runner_pin_lock_select();
+        let head = format!(
+            "SELECT {}, {} FROM \"agent_run\"",
+            qualified_columns("agent_run", agent_run::COLUMNS),
+            aliased_columns("T3", agent_run::COLUMNS),
+        );
+        assert!(sql.starts_with(&head), "projection drifted");
+        // Same lock shape as the sweep, but the re-check is the
+        // still-paused arm alone (no cutoff bind).
+        assert!(sql.contains(
+            "WHERE (\"agent_run\".\"id\" = $1 AND \"agent_run\".\"pinned_runner_id\" IS NOT NULL AND \
+             \"agent_run\".\"status\" = $2 AND \"runner\".\"paused_at\" IS NOT NULL) \
+             ORDER BY \"agent_run\".\"created_at\" DESC LIMIT 1 FOR UPDATE OF \"agent_run\""
+        ));
         assert!(!sql.contains("\"T3\""));
     }
 

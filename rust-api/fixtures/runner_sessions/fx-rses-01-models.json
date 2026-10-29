@@ -454,6 +454,22 @@
           "max_length": 32,
           "blank": true,
           "default": "''"
+        },
+        {
+          "name": "paused_at",
+          "column": "paused_at",
+          "type": "DateTimeField",
+          "null": true,
+          "blank": true
+        },
+        {
+          "name": "paused_by",
+          "column": "paused_by_id",
+          "type": "ForeignKey",
+          "null": true,
+          "blank": true,
+          "to": "AUTH_USER_MODEL",
+          "on_delete": "SET_NULL"
         }
       ],
       "constraints": [

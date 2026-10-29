@@ -126,26 +126,25 @@ pub fn delete_revoke_reason(purge_local: bool) -> &'static str {
 // SQL (`runner_delete.py:124-143`, probe-verified on Django 4.2.30)
 // ---------------------------------------------------------------------------
 
-/// D1 — revoke the machine's tokens (`:127`).
-///
-/// `$1` = now, `$2` = machine.
-pub const REVOKE_MACHINE_TOKENS_SQL: &str = "UPDATE \"machine_token\" SET \"revoked_at\" = $1 WHERE (\"machine_token\".\"dev_machine_id\" = $2 AND \"machine_token\".\"revoked_at\" IS NULL)";
+// NOTE: the D1 machine-token revoke const lived here; the statement
+// moved to `crate::domain::tokens::revoke_tokens_for_dev_machine`
+// (PIDASHCONV-1520), whose test carries the pin.
 
 /// D2 — locked full rows for the machine (`:128`).
 ///
 /// `$1` = machine. Django materializes full instances; the driver reads
 /// only id + `revoked_at` ([`LockedRunner`]).
-pub const LOCK_MACHINE_RUNNERS_SQL: &str = "SELECT \"runner\".\"id\", \"runner\".\"owner_id\", \"runner\".\"workspace_id\", \"runner\".\"dev_machine_id\", \"runner\".\"pod_id\", \"runner\".\"name\", \"runner\".\"host_label\", \"runner\".\"provisioning\", \"runner\".\"visibility\", \"runner\".\"refresh_token_hash\", \"runner\".\"refresh_token_fingerprint\", \"runner\".\"refresh_token_generation\", \"runner\".\"previous_refresh_token_hash\", \"runner\".\"access_token_signing_key_version\", \"runner\".\"enrollment_token_hash\", \"runner\".\"enrollment_token_fingerprint\", \"runner\".\"enrolled_at\", \"runner\".\"capabilities\", \"runner\".\"status\", \"runner\".\"os\", \"runner\".\"arch\", \"runner\".\"runner_version\", \"runner\".\"dev_metadata\", \"runner\".\"protocol_version\", \"runner\".\"last_heartbeat_at\", \"runner\".\"created_at\", \"runner\".\"updated_at\", \"runner\".\"revoked_at\", \"runner\".\"revoked_reason\" FROM \"runner\" WHERE \"runner\".\"dev_machine_id\" = $1 ORDER BY \"runner\".\"last_heartbeat_at\" DESC, \"runner\".\"created_at\" DESC FOR UPDATE";
+pub const LOCK_MACHINE_RUNNERS_SQL: &str = "SELECT \"runner\".\"id\", \"runner\".\"owner_id\", \"runner\".\"workspace_id\", \"runner\".\"dev_machine_id\", \"runner\".\"pod_id\", \"runner\".\"name\", \"runner\".\"host_label\", \"runner\".\"provisioning\", \"runner\".\"visibility\", \"runner\".\"refresh_token_hash\", \"runner\".\"refresh_token_fingerprint\", \"runner\".\"refresh_token_generation\", \"runner\".\"previous_refresh_token_hash\", \"runner\".\"access_token_signing_key_version\", \"runner\".\"enrollment_token_hash\", \"runner\".\"enrollment_token_fingerprint\", \"runner\".\"enrolled_at\", \"runner\".\"capabilities\", \"runner\".\"status\", \"runner\".\"os\", \"runner\".\"arch\", \"runner\".\"runner_version\", \"runner\".\"dev_metadata\", \"runner\".\"protocol_version\", \"runner\".\"last_heartbeat_at\", \"runner\".\"created_at\", \"runner\".\"updated_at\", \"runner\".\"revoked_at\", \"runner\".\"revoked_reason\", \"runner\".\"paused_at\", \"runner\".\"paused_by_id\" FROM \"runner\" WHERE \"runner\".\"dev_machine_id\" = $1 ORDER BY \"runner\".\"last_heartbeat_at\" DESC, \"runner\".\"created_at\" DESC FOR UPDATE";
 
 /// Runner-collector root fetch, single-id form (`:94`; no `ORDER BY`).
 ///
 /// `$1` = runner.
-pub const COLLECT_RUNNER_BY_ID_SQL: &str = "SELECT \"runner\".\"id\", \"runner\".\"owner_id\", \"runner\".\"workspace_id\", \"runner\".\"dev_machine_id\", \"runner\".\"pod_id\", \"runner\".\"name\", \"runner\".\"host_label\", \"runner\".\"provisioning\", \"runner\".\"visibility\", \"runner\".\"refresh_token_hash\", \"runner\".\"refresh_token_fingerprint\", \"runner\".\"refresh_token_generation\", \"runner\".\"previous_refresh_token_hash\", \"runner\".\"access_token_signing_key_version\", \"runner\".\"enrollment_token_hash\", \"runner\".\"enrollment_token_fingerprint\", \"runner\".\"enrolled_at\", \"runner\".\"capabilities\", \"runner\".\"status\", \"runner\".\"os\", \"runner\".\"arch\", \"runner\".\"runner_version\", \"runner\".\"dev_metadata\", \"runner\".\"protocol_version\", \"runner\".\"last_heartbeat_at\", \"runner\".\"created_at\", \"runner\".\"updated_at\", \"runner\".\"revoked_at\", \"runner\".\"revoked_reason\" FROM \"runner\" WHERE \"runner\".\"id\" = $1";
+pub const COLLECT_RUNNER_BY_ID_SQL: &str = "SELECT \"runner\".\"id\", \"runner\".\"owner_id\", \"runner\".\"workspace_id\", \"runner\".\"dev_machine_id\", \"runner\".\"pod_id\", \"runner\".\"name\", \"runner\".\"host_label\", \"runner\".\"provisioning\", \"runner\".\"visibility\", \"runner\".\"refresh_token_hash\", \"runner\".\"refresh_token_fingerprint\", \"runner\".\"refresh_token_generation\", \"runner\".\"previous_refresh_token_hash\", \"runner\".\"access_token_signing_key_version\", \"runner\".\"enrollment_token_hash\", \"runner\".\"enrollment_token_fingerprint\", \"runner\".\"enrolled_at\", \"runner\".\"capabilities\", \"runner\".\"status\", \"runner\".\"os\", \"runner\".\"arch\", \"runner\".\"runner_version\", \"runner\".\"dev_metadata\", \"runner\".\"protocol_version\", \"runner\".\"last_heartbeat_at\", \"runner\".\"created_at\", \"runner\".\"updated_at\", \"runner\".\"revoked_at\", \"runner\".\"revoked_reason\", \"runner\".\"paused_at\", \"runner\".\"paused_by_id\" FROM \"runner\" WHERE \"runner\".\"id\" = $1";
 
 /// Runner-collector root fetch, by-machine form (`:142`; no `ORDER BY`).
 ///
 /// `$1` = machine.
-pub const COLLECT_RUNNERS_BY_MACHINE_SQL: &str = "SELECT \"runner\".\"id\", \"runner\".\"owner_id\", \"runner\".\"workspace_id\", \"runner\".\"dev_machine_id\", \"runner\".\"pod_id\", \"runner\".\"name\", \"runner\".\"host_label\", \"runner\".\"provisioning\", \"runner\".\"visibility\", \"runner\".\"refresh_token_hash\", \"runner\".\"refresh_token_fingerprint\", \"runner\".\"refresh_token_generation\", \"runner\".\"previous_refresh_token_hash\", \"runner\".\"access_token_signing_key_version\", \"runner\".\"enrollment_token_hash\", \"runner\".\"enrollment_token_fingerprint\", \"runner\".\"enrolled_at\", \"runner\".\"capabilities\", \"runner\".\"status\", \"runner\".\"os\", \"runner\".\"arch\", \"runner\".\"runner_version\", \"runner\".\"dev_metadata\", \"runner\".\"protocol_version\", \"runner\".\"last_heartbeat_at\", \"runner\".\"created_at\", \"runner\".\"updated_at\", \"runner\".\"revoked_at\", \"runner\".\"revoked_reason\" FROM \"runner\" WHERE \"runner\".\"dev_machine_id\" = $1";
+pub const COLLECT_RUNNERS_BY_MACHINE_SQL: &str = "SELECT \"runner\".\"id\", \"runner\".\"owner_id\", \"runner\".\"workspace_id\", \"runner\".\"dev_machine_id\", \"runner\".\"pod_id\", \"runner\".\"name\", \"runner\".\"host_label\", \"runner\".\"provisioning\", \"runner\".\"visibility\", \"runner\".\"refresh_token_hash\", \"runner\".\"refresh_token_fingerprint\", \"runner\".\"refresh_token_generation\", \"runner\".\"previous_refresh_token_hash\", \"runner\".\"access_token_signing_key_version\", \"runner\".\"enrollment_token_hash\", \"runner\".\"enrollment_token_fingerprint\", \"runner\".\"enrolled_at\", \"runner\".\"capabilities\", \"runner\".\"status\", \"runner\".\"os\", \"runner\".\"arch\", \"runner\".\"runner_version\", \"runner\".\"dev_metadata\", \"runner\".\"protocol_version\", \"runner\".\"last_heartbeat_at\", \"runner\".\"created_at\", \"runner\".\"updated_at\", \"runner\".\"revoked_at\", \"runner\".\"revoked_reason\", \"runner\".\"paused_at\", \"runner\".\"paused_by_id\" FROM \"runner\" WHERE \"runner\".\"dev_machine_id\" = $1";
 
 /// Machine-collector root fetch (`:143`; no `ORDER BY`).
 ///
@@ -202,16 +201,12 @@ pub fn delete_chat_dedupes_sql(chat_count: usize) -> String {
     )
 }
 
+// NOTE: the session fast-delete builder lived here; the statement moved
+// to `crate::domain::tokens::delete_runner_sessions_for_runners`
+// (PIDASHCONV-1520), whose tests carry the pins.
+
 /// Runner-level fast deletes (runner ids). Each takes `$1..$N` = runner
 /// ids in fetch order.
-pub fn delete_runner_sessions_sql(runner_count: usize) -> String {
-    format!(
-        "DELETE FROM \"runner_session\" WHERE \"runner_session\".\"runner_id\" IN ({})",
-        in_placeholders(runner_count),
-    )
-}
-
-/// See [`delete_runner_sessions_sql`].
 pub fn delete_force_refresh_sql(runner_count: usize) -> String {
     format!(
         "DELETE FROM \"runner_force_refresh\" WHERE \"runner_force_refresh\".\"runner_id\" IN ({})",
@@ -219,7 +214,8 @@ pub fn delete_force_refresh_sql(runner_count: usize) -> String {
     )
 }
 
-/// See [`delete_runner_sessions_sql`].
+/// Runner-level fast deletes (runner ids). Each takes `$1..$N` = runner
+/// ids in fetch order.
 pub fn delete_live_state_sql(runner_count: usize) -> String {
     format!(
         "DELETE FROM \"runner_live_state\" WHERE \"runner_live_state\".\"runner_id\" IN ({})",
@@ -283,9 +279,9 @@ pub const DELETE_MACHINE_SESSIONS_SQL: &str =
 pub const NULL_RUNNER_MACHINES_SQL: &str =
     "UPDATE \"runner\" SET \"dev_machine_id\" = NULL WHERE \"runner\".\"dev_machine_id\" IN ($1)";
 
-/// Machine `SET_NULL` updates: `$1` = machine (token rows survive).
-pub const NULL_TOKEN_MACHINES_SQL: &str =
-    "UPDATE \"machine_token\" SET \"dev_machine_id\" = NULL WHERE \"machine_token\".\"dev_machine_id\" IN ($1)";
+// NOTE: the machine-token `SET_NULL` const lived here; the statement
+// moved to `crate::domain::tokens::clear_token_dev_machines`
+// (PIDASHCONV-1520), whose test carries the pin (token rows survive).
 
 /// Machine-row delete: `$1` = machine.
 pub const DELETE_MACHINE_ROW_SQL: &str =
@@ -339,7 +335,8 @@ pub trait RunnerDeleteStore: RevokeStore {
     /// propagates.
     async fn close_runner_session(&mut self, runner_id: Uuid) -> Result<(), RevokeError>;
 
-    /// D1: revoke the machine's tokens ([`REVOKE_MACHINE_TOKENS_SQL`]).
+    /// D1: revoke the machine's tokens
+    /// (`crate::domain::tokens::revoke_tokens_for_dev_machine`).
     async fn revoke_machine_tokens(
         &mut self,
         machine_id: Uuid,
@@ -381,7 +378,8 @@ pub trait RunnerDeleteStore: RevokeStore {
     /// Chat-subtree fast deletes ([`delete_chat_dedupes_sql`]).
     async fn delete_chat_dedupes(&mut self, chat_ids: &[Uuid]) -> Result<(), RevokeError>;
 
-    /// Runner fast deletes ([`delete_runner_sessions_sql`]).
+    /// Runner fast deletes
+    /// (`crate::domain::tokens::delete_runner_sessions_for_runners`).
     async fn delete_runner_sessions(&mut self, runner_ids: &[Uuid]) -> Result<(), RevokeError>;
 
     /// Runner fast deletes ([`delete_force_refresh_sql`]).
@@ -418,7 +416,8 @@ pub trait RunnerDeleteStore: RevokeStore {
     /// Machine `SET_NULL` ([`NULL_RUNNER_MACHINES_SQL`]).
     async fn null_runner_machines(&mut self, machine_id: Uuid) -> Result<(), RevokeError>;
 
-    /// Machine `SET_NULL` ([`NULL_TOKEN_MACHINES_SQL`]).
+    /// Machine `SET_NULL` on token rows
+    /// (`crate::domain::tokens::clear_token_dev_machines`).
     async fn null_token_machines(&mut self, machine_id: Uuid) -> Result<(), RevokeError>;
 
     /// Machine-row delete ([`DELETE_MACHINE_ROW_SQL`]).
@@ -670,13 +669,8 @@ mod tests {
         format!("SELECT {list} FROM \"{table}\"")
     }
 
-    #[test]
-    fn d1_revokes_machine_tokens() {
-        assert_eq!(
-            REVOKE_MACHINE_TOKENS_SQL,
-            "UPDATE \"machine_token\" SET \"revoked_at\" = $1 WHERE (\"machine_token\".\"dev_machine_id\" = $2 AND \"machine_token\".\"revoked_at\" IS NULL)"
-        );
-    }
+    // (The D1 SQL pin moved with the statement to
+    // `crate::domain::tokens`.)
 
     #[test]
     fn d2_locks_full_rows_in_model_order() {
@@ -685,7 +679,7 @@ mod tests {
             select_prefix(r_cols::TABLE, r_cols::COLUMNS),
         );
         assert_eq!(LOCK_MACHINE_RUNNERS_SQL, expected);
-        assert_eq!(r_cols::COLUMNS.len(), 29);
+        assert_eq!(r_cols::COLUMNS.len(), 31);
     }
 
     #[test]
@@ -751,10 +745,8 @@ mod tests {
             delete_chat_dedupes_sql(1),
             "DELETE FROM \"chat_message_dedupe\" WHERE \"chat_message_dedupe\".\"session_id\" IN ($1)"
         );
-        assert_eq!(
-            delete_runner_sessions_sql(1),
-            "DELETE FROM \"runner_session\" WHERE \"runner_session\".\"runner_id\" IN ($1)"
-        );
+        // (The session fast-delete pin moved with the statement to
+        // `crate::domain::tokens`.)
         assert_eq!(
             delete_force_refresh_sql(1),
             "DELETE FROM \"runner_force_refresh\" WHERE \"runner_force_refresh\".\"runner_id\" IN ($1)"
@@ -803,10 +795,8 @@ mod tests {
             NULL_RUNNER_MACHINES_SQL,
             "UPDATE \"runner\" SET \"dev_machine_id\" = NULL WHERE \"runner\".\"dev_machine_id\" IN ($1)"
         );
-        assert_eq!(
-            NULL_TOKEN_MACHINES_SQL,
-            "UPDATE \"machine_token\" SET \"dev_machine_id\" = NULL WHERE \"machine_token\".\"dev_machine_id\" IN ($1)"
-        );
+        // (The token `SET_NULL` pin moved with the statement to
+        // `crate::domain::tokens`.)
         assert_eq!(
             DELETE_MACHINE_ROW_SQL,
             "DELETE FROM \"dev_machine\" WHERE \"dev_machine\".\"id\" IN ($1)"

@@ -75,6 +75,7 @@ use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 use serde_json::{Map, Value};
 
+use crate::middleware::body_limit::read_request_bytes;
 use crate::state::AppState;
 
 use super::queries_core;
@@ -82,6 +83,7 @@ use super::queries_engage;
 use super::{
     fetch_count, fetch_json_rows, order_key, query_last, shape_row, Binder, Denial, QueryMap,
 };
+use pidash_compat::response::json_response;
 use pidash_db::tasks_ticker::IssueAgentTicker;
 use pidash_services::app_issues::serializers_assoc::{
     project_user_property_to_representation, ProjectUserPropertyRow,
@@ -398,14 +400,6 @@ async fn resolve_entity_gate(
 // Small responses
 // ---------------------------------------------------------------------------
 
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("static response")
-}
-
 fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
 }
@@ -433,15 +427,13 @@ fn dates_exceeded_body() -> Response {
 // ---------------------------------------------------------------------------
 
 /// Read the JSON body of a proxied-or-owned request (the cycles `detail_body`
-/// shape): same 2 MiB default limit as axum's `Json`; an empty body reads as
-/// `{}`, like DRF; a non-JSON media type is DRF's 415; a malformed document
-/// answers the extractor rejection.
+/// shape): unbounded past the serve-wide `BodyLimitLayer`; an empty body
+/// reads as `{}`, like DRF; a non-JSON media type is DRF's 415; a malformed
+/// document answers the extractor rejection.
 async fn read_body(state: &AppState, req: axum::extract::Request) -> Result<Value, Response> {
     use axum::extract::FromRequest;
     let (parts, body) = req.into_parts();
-    let bytes = axum::body::to_bytes(body, 2 * 1024 * 1024)
-        .await
-        .map_err(|_| Denial::ServerError.into_response())?;
+    let bytes = read_request_bytes(body).await?;
     if bytes.is_empty() {
         return Ok(Value::Object(Map::new()));
     }
@@ -538,22 +530,22 @@ fn get_id_list(row: &Map<String, Value>, key: &str) -> Vec<String> {
 // Deferred publishes (best-effort `rust_job_queue` rows; the response stands)
 // ---------------------------------------------------------------------------
 
-/// Celery wire name for `issue_activity`
-/// (`bgtasks/issue_activities_task.py:1504`).
-const ISSUE_ACTIVITY_TASK: &str = "pi_dash.bgtasks.issue_activities_task.issue_activity";
+// Canonical task name lives in `pidash_services::domain::activity`.
+use pidash_services::domain::activity::ISSUE_ACTIVITY_TASK;
 /// Celery wire name for `recent_visited_task` (bare `@shared_task` default).
 const RECENT_VISITED_TASK: &str = "pi_dash.bgtasks.recent_visited_task.recent_visited_task";
 
-/// `base_host(request, is_app=True)` (`utils/host.py:17`): `WEB_URL` else
-/// `APP_BASE_URL`; unset skips the enqueue (the cycles precedent — Django
-/// would 500, but every merged handler treats the queue as best-effort).
+/// `base_host(request, is_app=True)` (`utils/host.py:17-66`):
+/// `APP_BASE_URL` wins when set, else `WEB_URL`; unset skips the enqueue
+/// (the cycles precedent — Django would 500, but every merged handler
+/// treats the queue as best-effort). Empty strings fall through like
+/// Python's `or` (PIDASHCONV-1587).
 fn request_origin(state: &AppState) -> Option<String> {
-    state
-        .settings()
-        .urls
-        .web_url
+    let urls = &state.settings().urls;
+    urls.app_base_url
         .clone()
-        .or_else(|| state.settings().urls.app_base_url.clone())
+        .filter(|s| !s.is_empty())
+        .or_else(|| urls.web_url.clone().filter(|s| !s.is_empty()))
 }
 
 /// Best-effort deferred publish (the space intake precedent): without the
@@ -802,28 +794,27 @@ async fn fetch_or_create_property(
         return Err(Denial::NotFound);
     };
     let now = Utc::now();
-    let id = uuid::Uuid::new_v4();
-    sqlx::query(
-        "INSERT INTO project_user_properties (id, created_at, updated_at, created_by_id, \
-        updated_by_id, deleted_at, project_id, workspace_id, user_id, filters, display_filters, \
-        display_properties, rich_filters, preferences, sort_order) \
-        VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, $7, $8, $9, $10, $11, $12, $13) \
-        ON CONFLICT (user_id, project_id) WHERE deleted_at IS NULL DO NOTHING",
+    let filters = default_filters();
+    let display_filters = default_display_filters();
+    let display_properties = default_display_properties();
+    let rich = Value::Object(Map::new());
+    let preferences = default_preferences();
+    pidash_services::domain::projects::members::get_or_create_property(
+        pool,
+        &pidash_services::domain::projects::members::NewMemberProperty {
+            workspace_id,
+            project_id: gate.project_id,
+            user_id: gate.user_id,
+            filters: &filters,
+            display_filters: &display_filters,
+            display_properties: &display_properties,
+            rich_filters: &rich,
+            preferences: &preferences,
+            sort_order: 65535.0,
+            created_by: Some(gate.user_id),
+            now,
+        },
     )
-    .bind(id)
-    .bind(now)
-    .bind(now)
-    .bind(gate.user_id)
-    .bind(gate.project_id)
-    .bind(workspace_id)
-    .bind(gate.user_id)
-    .bind(default_filters())
-    .bind(default_display_filters())
-    .bind(default_display_properties())
-    .bind(Value::Object(Map::new()))
-    .bind(default_preferences())
-    .bind(65535.0f64)
-    .execute(pool)
     .await
     .map_err(|_| Denial::ServerError)?;
     fetch_property(pool, gate).await?.ok_or(Denial::ServerError)
@@ -1252,65 +1243,20 @@ fn upsert_write<'a>(
 /// signals, `updated_at` untouched. Unset halves keep their stored value
 /// (Django rewrites the same value — a no-op either way).
 async fn apply_bulk_dates(pool: &sqlx::PgPool, writes: &[BulkWrite<'_>]) -> Result<(), Denial> {
-    if writes.is_empty() {
-        return Ok(());
-    }
-    // Placeholder plan: the CASE values in arm order (start arms, then
-    // target arms), then the id list. A side with no arms is omitted
-    // entirely (an armless `CASE` is a syntax error; Django rewrites the
-    // stored value there — a no-op either way).
-    let mut ids: Vec<String> = Vec::new();
-    let mut values: Vec<(String, chrono::NaiveDate)> = Vec::new();
-    let mut target_values: Vec<(String, chrono::NaiveDate)> = Vec::new();
+    // Parsed up front: the twin takes typed ids, and an unparseable id
+    // 500s before any SQL runs, exactly as the inline binds did.
+    let mut parsed_writes = Vec::with_capacity(writes.len());
     for write in writes {
-        ids.push(write.id.to_owned());
-        if let Some(date) = write.start_date {
-            values.push((write.id.to_owned(), date));
-        }
-        if let Some(date) = write.target_date {
-            target_values.push((write.id.to_owned(), date));
-        }
+        let id: uuid::Uuid = write.id.parse().map_err(|_| Denial::ServerError)?;
+        parsed_writes.push(pidash_services::domain::issues::BulkIssueDates {
+            id,
+            start_date: write.start_date,
+            target_date: write.target_date,
+        });
     }
-    let mut sql = String::from("UPDATE issues SET ");
-    let mut placeholder: usize = 1;
-    let mut first_set = true;
-    for (column, arms) in [("start_date", &values), ("target_date", &target_values)] {
-        if arms.is_empty() {
-            continue;
-        }
-        if !first_set {
-            sql.push_str(", ");
-        }
-        first_set = false;
-        sql.push_str(&format!("{column} = CASE id "));
-        for _ in arms {
-            sql.push_str(&format!("WHEN ${} THEN ${} ", placeholder, placeholder + 1));
-            placeholder += 2;
-        }
-        sql.push_str(&format!("ELSE {column} END"));
-    }
-    sql.push_str(" WHERE id IN (");
-    let mut first = true;
-    for _ in &ids {
-        if !first {
-            sql.push(',');
-        }
-        first = false;
-        sql.push_str(&format!("${placeholder}"));
-        placeholder += 1;
-    }
-    sql.push(')');
-    let mut query = sqlx::query(&sql);
-    for (id, date) in values.iter().chain(target_values.iter()) {
-        let parsed: uuid::Uuid = id.parse().map_err(|_| Denial::ServerError)?;
-        query = query.bind(parsed).bind(*date);
-    }
-    for id in &ids {
-        let parsed: uuid::Uuid = id.parse().map_err(|_| Denial::ServerError)?;
-        query = query.bind(parsed);
-    }
-    query.execute(pool).await.map_err(|_| Denial::ServerError)?;
-    Ok(())
+    pidash_services::domain::issues::bulk_update_issue_dates(pool, &parsed_writes)
+        .await
+        .map_err(|_| Denial::ServerError)
 }
 
 /// Python truthiness for the `if start_date:` / `if target_date:` guards.
@@ -1858,6 +1804,7 @@ struct AgentRunOwned {
     started_at: Option<String>,
     ended_at: Option<String>,
     live_last_event_at: Option<String>,
+    live_agent_last_activity_at: Option<String>,
     live_updated_at: Option<String>,
 }
 
@@ -1894,6 +1841,7 @@ async fn fetch_agent_run(
         started_at: render_iso_moment(&row, "started_at"),
         ended_at: render_iso_moment(&row, "ended_at"),
         live_last_event_at: render_iso_moment(&row, "last_event_at"),
+        live_agent_last_activity_at: render_iso_moment(&row, "agent_last_activity_at"),
         live_updated_at,
         created_at,
         row,
@@ -1915,6 +1863,8 @@ fn agent_run_detail_row(run: &AgentRunOwned) -> AgentRunDetailRow<'_> {
             usage,
             llm_model: get_str(row, "live_llm_model"),
             turn_count: get_i32(row, "turn_count"),
+            agent_health: get_str(row, "agent_health"),
+            agent_last_activity_at: run.live_agent_last_activity_at.as_deref(),
             updated_at,
         }
     });
@@ -2181,11 +2131,16 @@ async fn sub_issues_get(
     };
     let (pool, gate) = resolve_entity_gate(&state, &slug, &project_raw, extension, false).await?;
     let order_param = query_last(&query, "order_by").unwrap_or_else(|| "-created_at".to_owned());
-    let order = sub_issues_order(&order_param).map_err(IntoResponse::into_response)?;
+    let (order, order_joins) =
+        sub_issues_order(&order_param).map_err(IntoResponse::into_response)?;
     let mut binder = Binder::new();
     let selects = queries_core::sub_issues_selects();
     let from_where = queries_core::sub_issues_from_where(&mut binder, &slug, parent_id);
-    let inner = format!("SELECT {selects} {from_where} {order}");
+    // The cycle-name traversal joins ride on the row query, so a
+    // multi-linked child fans out into one row per link like Django (the
+    // distribution below counts the fanned rows too).
+    let row_where = super::with_order_joins(&from_where, &order_joins);
+    let inner = format!("SELECT {selects} {row_where} {order}");
     let rows = fetch_json_rows(&pool, &inner, binder.values())
         .await
         .map_err(IntoResponse::into_response)?;
@@ -2237,9 +2192,12 @@ async fn sub_issues_get(
 /// skips the port explicitly and falls back to the model ordering
 /// (`-created_at` — the same statement); an unknown field is Django's
 /// `FieldError` → generic 500.
-fn sub_issues_order(order_by_param: &str) -> Result<String, Denial> {
+fn sub_issues_order(order_by_param: &str) -> Result<(String, String), Denial> {
     if order_by_param.is_empty() {
-        return Ok(queries_core::SUB_ISSUES_DEFAULT_ORDER.to_owned());
+        return Ok((
+            queries_core::SUB_ISSUES_DEFAULT_ORDER.to_owned(),
+            String::new(),
+        ));
     }
     let spec = order_sql(order_by_param, "state.\"group\"", |name| {
         format!("min_{}", name.replace("__", "_"))
@@ -2257,24 +2215,31 @@ fn sub_issues_order(order_by_param: &str) -> Result<String, Denial> {
         let sql = spec
             .order_by_sql
             .replace("created_at DESC", "issue.created_at DESC");
-        return Ok(format!("ORDER BY {sql}"));
+        return Ok((format!("ORDER BY {sql}"), String::new()));
     }
+    // The sub-issue list annotates `Coalesce(..., 0)` counts, so its count
+    // keys order `0`-style.
     if out == "min_values" || out == "-min_values" {
-        let (expr, descending) = order_key(out, order_by_param)?;
-        return Ok(format!(
-            "ORDER BY {expr} {}, issue.created_at DESC",
-            if descending { "DESC" } else { "ASC" }
+        let key = order_key(out, order_by_param, None, false)?;
+        return Ok((
+            format!(
+                "ORDER BY {expr} {}, issue.created_at DESC",
+                if key.descending { "DESC" } else { "ASC" },
+                expr = key.expr,
+            ),
+            key.joins,
         ));
     }
-    let (expr, descending) = order_key(out, order_by_param)?;
+    let key = order_key(out, order_by_param, None, false)?;
     let mut sql = format!(
         "ORDER BY {expr} {}",
-        if descending { "DESC" } else { "ASC" }
+        if key.descending { "DESC" } else { "ASC" },
+        expr = key.expr,
     );
     if !order_by_param.contains("created_at") {
         sql.push_str(", issue.created_at DESC");
     }
-    Ok(sql)
+    Ok((sql, key.joins))
 }
 
 /// Insertion-ordered string→list buckets (what `defaultdict(list)` renders).
@@ -2654,23 +2619,9 @@ async fn link_sub_issues(
     parent_id: &uuid::Uuid,
     found: &[uuid::Uuid],
 ) -> Result<(), Denial> {
-    let mut binder = Binder::new();
-    let parent = binder.bind_uuid(*parent_id);
-    let mut holders = Vec::with_capacity(found.len());
-    for id in found {
-        holders.push(binder.bind_uuid(*id));
-    }
-    let sql = format!(
-        "UPDATE issues SET parent_id = {parent} WHERE id IN ({})",
-        holders.join(",")
-    );
-    let mut query = sqlx::query(&sql);
-    query = query.bind(parent_id);
-    for id in found {
-        query = query.bind(id);
-    }
-    query.execute(pool).await.map_err(|_| Denial::ServerError)?;
-    Ok(())
+    pidash_services::domain::issues::link_sub_issue_parents(pool, *parent_id, found)
+        .await
+        .map_err(|_| Denial::ServerError)
 }
 
 const POST_ROW_COLUMNS: &str = "issue.id, issue.name, issue.state_id, issue.sort_order, \
@@ -2758,6 +2709,34 @@ async fn render_post_row(
 mod tests {
     use super::*;
     use crate::app_issues::OneOrMany;
+
+    fn origin_state(app_base_url: Option<&str>, web_url: Option<&str>) -> AppState {
+        let mut settings = pidash_db::config::Settings::test_defaults();
+        settings.urls.app_base_url = app_base_url.map(str::to_owned);
+        settings.urls.web_url = web_url.map(str::to_owned);
+        AppState::with_settings("test", settings)
+    }
+
+    /// `base_host(request, is_app=True)` treats `""` as missing
+    /// (PIDASHCONV-1587): an empty `APP_BASE_URL` falls back to
+    /// `WEB_URL`, and empty everywhere is `None` (the enqueue is
+    /// skipped). `APP_BASE_URL` wins when both are set
+    /// (PIDASHCONV-1641).
+    #[test]
+    fn request_origin_falls_through_empty_strings() {
+        let app = "https://app.example.invalid";
+        let web = "https://web.example.invalid";
+        let state = origin_state(Some(""), Some(web));
+        assert_eq!(request_origin(&state).as_deref(), Some(web));
+        let state = origin_state(Some(app), Some(""));
+        assert_eq!(request_origin(&state).as_deref(), Some(app));
+        let state = origin_state(Some(""), Some(""));
+        assert_eq!(request_origin(&state), None);
+        let state = origin_state(None, None);
+        assert_eq!(request_origin(&state), None);
+        let state = origin_state(Some(app), Some(web));
+        assert_eq!(request_origin(&state).as_deref(), Some(app));
+    }
 
     #[test]
     fn strict_int_matrix() {
@@ -2913,19 +2892,30 @@ mod tests {
     fn sub_issues_order_branches() {
         assert_eq!(
             sub_issues_order("").unwrap(),
-            queries_core::SUB_ISSUES_DEFAULT_ORDER
+            (
+                queries_core::SUB_ISSUES_DEFAULT_ORDER.to_owned(),
+                String::new()
+            )
         );
         assert_eq!(
             sub_issues_order("-created_at").unwrap(),
-            "ORDER BY issue.\"created_at\" DESC"
+            (
+                "ORDER BY issue.\"created_at\" DESC".to_owned(),
+                String::new()
+            )
         );
         let priority = sub_issues_order("priority").unwrap();
-        assert!(priority.contains("WHEN issue.priority = 'urgent'"));
-        assert!(priority.contains("issue.created_at DESC"));
-        assert!(!priority.contains(" created_at DESC"));
+        assert!(priority.0.contains("WHEN issue.priority = 'urgent'"));
+        assert!(priority.0.contains("issue.created_at DESC"));
+        assert!(!priority.0.contains(" created_at DESC"));
+        assert!(priority.1.is_empty());
         let min = sub_issues_order("-labels__name").unwrap();
-        assert!(min.contains("MIN(l.name)"));
-        assert!(min.contains("issue.created_at DESC"));
+        assert!(min.0.contains("MIN(l.name)"));
+        assert!(min.0.contains("issue.created_at DESC"));
+        assert!(min.1.is_empty());
+        let crossed = sub_issues_order("issue_cycle__cycle__name").unwrap();
+        assert!(crossed.0.contains("__order_c.name ASC"));
+        assert!(crossed.1.contains("LEFT JOIN cycle_issues AS __order_ci"));
         assert!(sub_issues_order("nope").is_err());
     }
 

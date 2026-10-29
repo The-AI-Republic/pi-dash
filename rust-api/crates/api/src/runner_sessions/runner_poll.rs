@@ -114,15 +114,15 @@
 
 use std::time::{Duration, Instant};
 
-use axum::body::Bytes;
-use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{Path, Request, State};
+use axum::http::StatusCode;
 use axum::response::Response;
 use chrono::{DateTime, Utc};
 use http_body_util::BodyExt as _;
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
+use pidash_db::redis::client_from_settings;
 use pidash_db::runner_enroll::columns::enums::{RUNNER_STATUS_BUSY, RUNNER_STATUS_ONLINE};
 use pidash_db::runner_sessions::models::runner_session::{self, runner_session_from_row};
 use pidash_db::runner_sessions::outbox as session_outbox;
@@ -131,8 +131,7 @@ use pidash_db::runner_sessions::RunnerSession as DbRunnerSession;
 use pidash_services::runner_enroll::tokens::build_key_ring;
 use pidash_services::runner_runs::finalization as finalize_kernel;
 use pidash_services::runner_runs::{LifecycleEffect, SetValue};
-use pidash_services::runner_sessions::drain as drain_kernel;
-use pidash_services::runner_sessions::guards::{alive_threshold, heartbeat_grace};
+use pidash_services::runner_sessions::guards::heartbeat_grace;
 use pidash_services::runner_sessions::pubsub as pubsub_kernel;
 use pidash_services::runner_sessions::pubsub::PubsubStore;
 use pidash_services::runner_sessions::session_service as session_kernel;
@@ -147,18 +146,15 @@ use pidash_types::runner_sessions::{
 use crate::runner_enroll::auth::{authenticate_access_token, ALLOW_POST};
 use crate::runner_enroll::now_micros;
 use crate::runner_runs::run_endpoints::drain_lifecycle_effects;
-use crate::runner_runs::{json_response, pool_of, server_error, LivePorts};
+use crate::runner_runs::{is_uuid_path_segment, json_response, pool_of, server_error, LivePorts};
 use crate::state::AppState;
+use pidash_compat::db::is_unique_violation;
+use pidash_compat::py::py_truthy;
 
 /// Long-poll wait slice (`_POLL_SLICE_MS`, `sessions.py:42`).
 const POLL_SLICE_MS: u64 = 1000;
 /// `XREADGROUP COUNT` on every poll read (`:483-488, :525-531`).
 const POLL_READ_COUNT: i64 = 100;
-/// Django's `custom_404_view` bytes (`app/views/error_404.py`):
-/// `JsonResponse({"error": "Page not found."})`. The `<uuid:>`
-/// converter 404s non-UUID segments before any view runs; axum matches
-/// the segment, so the handlers answer those bytes on a bad id.
-const PAGE_NOT_FOUND_BODY: &str = r#"{"error": "Page not found."}"#;
 /// Lock/statement caps (`_bound_txn_waits`, `:50-71`). Neither
 /// `RUNNER_TXN_*` setting exists in the settings modules, so the
 /// `getattr` defaults always apply; the bytes replay the FX-RSES-02
@@ -189,14 +185,16 @@ fn render(response: HttpResponse) -> Response {
     json_response(status, response.body)
 }
 
-/// Resolver-404 for a non-UUID path id (see [`PAGE_NOT_FOUND_BODY`]).
-fn page_not_found() -> Response {
-    json_response(StatusCode::NOT_FOUND, PAGE_NOT_FOUND_BODY.to_owned())
-}
-
-/// Parse a `<uuid:>` path segment, or the resolver-404.
-fn parse_uuid(raw: &str) -> Result<Uuid, Response> {
-    raw.parse().map_err(|_| page_not_found())
+/// Parse a `<uuid:>` path segment. The converter regex is
+/// lowercase-hex-only; anything else matches no Django route, so
+/// callers proxy the request to Django, reproducing its 404
+/// byte-for-byte in every settings flavor (the `runner_open.rs`
+/// `parse_uuid` precedent).
+fn parse_uuid(raw: &str) -> Result<Uuid, ()> {
+    if !is_uuid_path_segment(raw) {
+        return Err(());
+    }
+    raw.parse().map_err(|_| ())
 }
 
 /// `timezone.now().isoformat()`: `+00:00` suffix, microseconds iff
@@ -204,42 +202,6 @@ fn parse_uuid(raw: &str) -> Result<Uuid, Response> {
 /// microsecond-truncated stamps (Django renders at most 6 digits).
 fn django_isoformat(now: DateTime<Utc>) -> String {
     now.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, false)
-}
-
-/// Api-crate-owned Redis client (the `LivePorts` precedent):
-/// `None` when `REDIS_URL` is unset, empty, or unparsable, mirroring
-/// `redis_instance()` / `async_redis_instance()` returning `None`.
-fn redis_client(state: &AppState) -> Option<redis::Client> {
-    state
-        .settings()
-        .redis
-        .url
-        .as_deref()
-        .filter(|url| !url.is_empty())
-        .and_then(|url| redis::Client::open(url).ok())
-}
-
-/// Python truthiness for JSON values (`None`/`False`/`0`/`""`/`[]`/`{}`
-/// are falsy; everything else is truthy) — the `or []` half of
-/// `body.get("ack") or []` (`:354`) and the `in_flight_run` gate
-/// (`:444`).
-fn py_truthy(value: &Value) -> bool {
-    match value {
-        Value::Null => false,
-        Value::Bool(flag) => *flag,
-        Value::Number(number) => {
-            if let Some(int) = number.as_i64() {
-                int != 0
-            } else if let Some(uint) = number.as_u64() {
-                uint != 0
-            } else {
-                number.as_f64().is_some_and(|float| float != 0.0)
-            }
-        }
-        Value::String(text) => !text.is_empty(),
-        Value::Array(items) => !items.is_empty(),
-        Value::Object(map) => !map.is_empty(),
-    }
 }
 
 /// One ack-list item to its `XACK` id: strings verbatim, numbers via
@@ -686,13 +648,7 @@ async fn reap_stale_busy_runs(
 // Live-state upsert (`_poll_bookkeeping`, `:413-426`)
 // ---------------------------------------------------------------------------
 
-/// Whether an insert failure is a lost `get_or_create` race
-/// (Django retries on `IntegrityError` only): SQLSTATE `23505`.
-fn is_unique_violation(error: &sqlx::Error) -> bool {
-    matches!(error, sqlx::Error::Database(db) if db.code().is_some_and(|code| code.as_ref() == "23505"))
-}
-
-/// Whether the entry carries any observability key (the `:353-357`
+/// Whether the entry carries any observability key (the `:400-404`
 /// `has_snapshot` gate): `observed_run_id`, a snapshot field,
 /// `tokens`, or `model`. Controls whether the `get_or_create` runs at
 /// all — the planner re-derives the same gate, but the gate must run
@@ -841,7 +797,7 @@ fn parse_live_datetime(text: &str) -> Option<DateTime<Utc>> {
     None
 }
 
-/// Bind one live-state `SET` value (`:383-394` — `Null` renders
+/// Bind one live-state `SET` value (`:430-438` — `Null` renders
 /// inline, so only `Text`/`Json` arrive here): Django field
 /// adaptation per column. Text columns take `str()` (strings bind
 /// verbatim; numbers/bools render; nested values render compact —
@@ -853,6 +809,8 @@ fn parse_live_datetime(text: &str) -> Option<DateTime<Utc>> {
 /// Typed columns must bind native values: Postgres has no `text`
 /// assignment cast for `uuid`/`timestamptz`, so binding the raw
 /// string fails the `UPDATE` where Django's `save()` stores it.
+/// `agent_health` rides the default text arm (`CharField`; the
+/// planner already skipped unknown labels).
 fn bind_live_state_value<'q>(
     query: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
     column: &str,
@@ -865,7 +823,7 @@ fn bind_live_state_value<'q>(
             }
             _ => None,
         },
-        "last_event_at" => match value {
+        "last_event_at" | "agent_last_activity_at" => match value {
             SetValue::Text(text) | SetValue::Json(Value::String(text)) => {
                 parse_live_datetime(text).map(|dt| query.bind(dt))
             }
@@ -925,7 +883,7 @@ fn bind_live_state_value<'q>(
 }
 
 /// `upsert_runner_live_state(runner, status_entry)`
-/// (`session_service.py:336-397`), fully swallowed: the source wraps
+/// (`session_service.py:383-448`), fully swallowed: the source wraps
 /// the whole call in `try/except Exception` (log only), so every
 /// failure here logs and returns. The `get_or_create` selects, then
 /// inserts on a miss (a lost insert race re-selects, as Django's
@@ -1033,7 +991,7 @@ impl PubsubStore for PollPubsubStore<'_, '_> {
         runner_id: Uuid,
         message: &Map<String, Value>,
     ) -> Result<Option<String>, SessionOutboxError> {
-        let redis = redis_client(self.state);
+        let redis = client_from_settings(self.state.settings());
         session_outbox::enqueue_for_runner(
             redis.as_ref(),
             self.pool,
@@ -1050,7 +1008,7 @@ impl PubsubStore for PollPubsubStore<'_, '_> {
         message: &Map<String, Value>,
     ) -> Result<Option<String>, pidash_db::runner_sessions::machine_outbox::MachineOutboxError>
     {
-        let redis = redis_client(self.state);
+        let redis = client_from_settings(self.state.settings());
         pidash_db::runner_sessions::machine_outbox::enqueue_for_machine(
             redis.as_ref(),
             self.pool,
@@ -1081,18 +1039,19 @@ impl PubsubStore for PollPubsubStore<'_, '_> {
         session_id: Uuid,
         reason: &str,
     ) -> Result<(), SessionOutboxError> {
-        sqlx::query(runner_session::REVOKE_SQL)
-            .bind(now_micros())
-            .bind(reason)
-            .bind(session_id)
-            .execute(self.pool)
-            .await
-            .map_err(SessionOutboxError::Db)?;
+        pidash_services::domain::tokens::revoke_runner_session(
+            self.pool,
+            session_id,
+            now_micros(),
+            reason,
+        )
+        .await
+        .map_err(SessionOutboxError::Db)?;
         Ok(())
     }
 
     async fn clear_session_marker(&self, session_id: Uuid) -> Result<(), SessionOutboxError> {
-        let redis = redis_client(self.state);
+        let redis = client_from_settings(self.state.settings());
         session_outbox::clear_session_marker(redis.as_ref(), &session_id.to_string()).await
     }
 
@@ -1102,7 +1061,7 @@ impl PubsubStore for PollPubsubStore<'_, '_> {
         old_session_id: Uuid,
         new_session_id: &str,
     ) -> Result<(), SessionOutboxError> {
-        let redis = redis_client(self.state);
+        let redis = client_from_settings(self.state.settings());
         let runner_id = runner_id.to_string();
         let old = old_session_id.to_string();
         session_outbox::publish_session_eviction(
@@ -1115,220 +1074,70 @@ impl PubsubStore for PollPubsubStore<'_, '_> {
     }
 }
 
-/// Dispatch one [`drain_kernel::DrainEffect`] after commit, logging
-/// the swallowed-failure lines. Only the offline error propagates —
-/// the row stays `ASSIGNED` while the caller observes the failure,
-/// exactly as Python (TRACE bug 2).
-async fn dispatch_assign(
-    pool: &sqlx::postgres::PgPool,
-    state: &AppState,
-    effect: &drain_kernel::DrainEffect,
-) -> Result<(), ()> {
-    let pubsub = PollPubsubStore::new(pool, state);
-    let drain_kernel::DrainEffect::SendAssign { runner_id, message } = effect;
-    let outcome = pubsub_kernel::send_to_runner(&pubsub, *runner_id, message)
-        .await
-        .map_err(|_| ())?;
-    for warning in &outcome.warnings {
-        tracing::warn!("{warning}");
-    }
-    Ok(())
-}
-
-/// `drain_for_runner_by_id` (`matcher.py:298-304`): the by-id lookup
-/// (miss ⇒ `Ok(false)`), else the locked drain. Runner-row indices
-/// follow the 30-column projection (`id` 0, `owner_id` 1, `pod_id` 4,
-/// `provisioning` 7, `visibility` 8); run-row indices the 41-column
-/// image (`id` 0, `work_item_id` 7, `prompt` 19, `run_config` 23).
-async fn drain_for_runner_by_id(
-    pool: &sqlx::postgres::PgPool,
-    state: &AppState,
-    runner_id: Uuid,
-) -> Result<bool, ()> {
-    use sqlx::Row;
-    let found: Option<sqlx::postgres::PgRow> =
-        sqlx::query(drain_kernel::DRAIN_FOR_RUNNER_BY_ID_LOOKUP_SQL)
-            .bind(runner_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| ())?;
-    if found.is_none() {
-        return Ok(false);
-    }
-    let mut tx = pool.begin().await.map_err(|_| ())?;
-    let threshold = alive_threshold(now_micros());
-    let locked: Option<sqlx::postgres::PgRow> =
-        sqlx::query(drain_kernel::DRAIN_FOR_RUNNER_LOCK_SQL)
-            .bind(threshold)
-            .bind(runner_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|_| ())?;
-    let Some(locked) = locked else {
-        return Ok(false);
-    };
-    let locked_runner_id: Uuid = locked.try_get(0).map_err(|_| ())?;
-    let owner_id: Uuid = locked.try_get(1).map_err(|_| ())?;
-    let pod_id: Uuid = locked.try_get(4).map_err(|_| ())?;
-    let provisioning: String = locked.try_get(7).map_err(|_| ())?;
-    let visibility: i16 = locked.try_get(8).map_err(|_| ())?;
-    // Non-private runners issue no query (the `qs.none()` arm).
-    let Some(next_sql) = drain_kernel::next_for_runner_sql(&provisioning, i32::from(visibility))
-    else {
-        return Ok(false);
-    };
-    let run: Option<sqlx::postgres::PgRow> = sqlx::query(&next_sql)
-        .bind(pod_id)
-        .bind(locked_runner_id)
-        .bind(owner_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|_| ())?;
-    let Some(run) = run else {
-        return Ok(false);
-    };
-    let run_id: Uuid = run.try_get(0).map_err(|_| ())?;
-    let work_item_id: Option<Uuid> = run.try_get(7).map_err(|_| ())?;
-    let prompt: String = run.try_get(19).map_err(|_| ())?;
-    let run_config: Value = run.try_get(23).map_err(|_| ())?;
-    let Value::Object(run_config) = run_config else {
-        return Err(());
-    };
-    sqlx::query(drain_kernel::ASSIGN_RUN_UPDATE_SQL)
-        .bind(owner_id)
-        .bind(locked_runner_id)
-        .bind(now_micros())
-        .bind(run_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|_| ())?;
-    let plan = drain_kernel::plan_assignment(&drain_kernel::AssignmentFacts {
-        run_id,
-        runner_id: locked_runner_id,
-        owner_id,
-        work_item_id,
-        prompt,
-        run_config,
-    });
-    tx.commit().await.map_err(|_| ())?;
-    // The `on_commit` send fires before the `:294` log line (the
-    // registration runs immediately with no active transaction).
-    dispatch_assign(pool, state, &plan.after_commit).await?;
-    tracing::info!(
-        "{}",
-        drain_kernel::drain_for_runner_log(&locked_runner_id, &run_id)
-    );
-    Ok(true)
-}
-
-/// `drain_pod_by_id` (`matcher.py:242-251`): pod lookup (miss ⇒ `Ok`,
-/// no tx), else the drain loop. A dispatch failure propagates — the
-/// row stays `ASSIGNED` while the caller observes the failure.
-pub(crate) async fn drain_pod_by_id(
-    pool: &sqlx::postgres::PgPool,
-    state: &AppState,
-    pod_id: Uuid,
-) -> Result<(), ()> {
-    let pod: Option<sqlx::postgres::PgRow> = sqlx::query(drain_kernel::DRAIN_POD_BY_ID_LOOKUP_SQL)
-        .bind(pod_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| ())?;
-    if pod.is_none() {
-        return Ok(());
-    }
-    drain_pod(pool, state, pod_id).await
-}
-
-/// `drain_pod` (`matcher.py:194-239`): lock the idle list, then per
-/// runner in list order take the next queued run, write the
-/// assignment, and plan the frame; commit once; then dispatch each
-/// frame in assignment order. The `:237` log line runs after the
-/// sends (the `on_commit` registrations fire immediately).
-async fn drain_pod(
-    pool: &sqlx::postgres::PgPool,
-    state: &AppState,
-    pod_id: Uuid,
-) -> Result<(), ()> {
-    use sqlx::Row;
-    let mut tx = pool.begin().await.map_err(|_| ())?;
-    let threshold = alive_threshold(now_micros());
-    let runners = sqlx::query(drain_kernel::DRAIN_POD_IDLE_RUNNERS_SQL)
-        .bind(threshold)
-        .bind(pod_id)
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(|_| ())?;
-    let mut plans: Vec<drain_kernel::AssignmentPlan> = Vec::new();
-    for runner in &runners {
-        let runner_id: Uuid = runner.try_get(0).map_err(|_| ())?;
-        let owner_id: Uuid = runner.try_get(1).map_err(|_| ())?;
-        let provisioning: String = runner.try_get(7).map_err(|_| ())?;
-        let visibility: i16 = runner.try_get(8).map_err(|_| ())?;
-        // Non-private runners issue no query (the `qs.none()` arm).
-        let Some(next_sql) =
-            drain_kernel::next_for_runner_sql(&provisioning, i32::from(visibility))
-        else {
-            continue;
-        };
-        let run: Option<sqlx::postgres::PgRow> = sqlx::query(&next_sql)
-            .bind(pod_id)
-            .bind(runner_id)
-            .bind(owner_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|_| ())?;
-        let Some(run) = run else {
-            continue;
-        };
-        let run_id: Uuid = run.try_get(0).map_err(|_| ())?;
-        let work_item_id: Option<Uuid> = run.try_get(7).map_err(|_| ())?;
-        let prompt: String = run.try_get(19).map_err(|_| ())?;
-        let run_config: Value = run.try_get(23).map_err(|_| ())?;
-        let Value::Object(run_config) = run_config else {
-            return Err(());
-        };
-        // `$3` is a fresh `timezone.now()` per assignment (`:233`).
-        sqlx::query(drain_kernel::ASSIGN_RUN_UPDATE_SQL)
-            .bind(owner_id)
-            .bind(runner_id)
-            .bind(now_micros())
-            .bind(run_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|_| ())?;
-        plans.push(drain_kernel::plan_assignment(
-            &drain_kernel::AssignmentFacts {
-                run_id,
-                runner_id,
-                owner_id,
-                work_item_id,
-                prompt,
-                run_config,
-            },
-        ));
-    }
-    tx.commit().await.map_err(|_| ())?;
-    for plan in &plans {
-        dispatch_assign(pool, state, &plan.after_commit).await?;
-    }
-    if !plans.is_empty() {
-        tracing::info!("{}", drain_kernel::drain_pod_log(&pod_id, plans.len()));
-    }
-    Ok(())
+/// Log a drain-path cause before it erases into `()` (PIDASHCONV-1563):
+/// the transition fire maps `()` to a 500 with no other trace, so the
+/// storage error must land here while it is still in hand. The dispatch
+/// itself moved to the public `live_drains` executor (OVL-06), so the
+/// per-step sites collapse into the thin caller's single erasure and
+/// the [`DrainError`][pidash_services::runner_sessions::live_drains::DrainError]
+/// `Display` carries the cause.
+fn drain_error<E: std::fmt::Display>(error: E, site: &str, pod_id: &Uuid) {
+    tracing::error!(%error, site, %pod_id, "runner drain failure");
 }
 
 // ---------------------------------------------------------------------------
 // Post-commit firing (the `on_commit` registrations, in order)
 // ---------------------------------------------------------------------------
 
+/// `drain_for_runner_by_id` (`matcher.py:298-304`): the by-id lookup
+/// (miss ⇒ `Ok(false)`), else the locked drain. Thin caller of the
+/// public executor (OVL-06); the local copy is deleted.
+async fn drain_for_runner_by_id(
+    pool: &sqlx::postgres::PgPool,
+    state: &AppState,
+    runner_id: Uuid,
+) -> Result<bool, ()> {
+    let redis = client_from_settings(state.settings());
+    pidash_services::runner_sessions::live_drains::drain_for_runner_by_id(
+        pool,
+        redis.as_ref(),
+        &state.settings().runner,
+        runner_id,
+    )
+    .await
+    .map_err(|_| ())
+}
+
+/// `drain_pod_by_id` (`matcher.py:242-251`): pod lookup (miss ⇒ `Ok`,
+/// no tx), else the drain loop. A dispatch failure propagates — the
+/// row stays `ASSIGNED` while the caller observes the failure. Thin
+/// caller of the public executor (OVL-06); the local copy is deleted.
+pub(crate) async fn drain_pod_by_id(
+    pool: &sqlx::postgres::PgPool,
+    state: &AppState,
+    pod_id: Uuid,
+) -> Result<(), ()> {
+    let redis = client_from_settings(state.settings());
+    pidash_services::runner_sessions::live_drains::drain_pod_by_id(
+        pool,
+        redis.as_ref(),
+        &state.settings().runner,
+        pod_id,
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| drain_error(error, "drain-pod", &pod_id))
+}
 /// Drain one finalized run's publish pair, each effect isolated with
 /// its failure log (`agent_run_finalization.py` `_publish_effects`:
 /// the emit and the inline apply sit in separate `try` blocks).
+/// `terminal_created_by` is the ambient crum request user for the
+/// inline terminal effects.
 async fn drain_publish_pair(
     pool: &sqlx::postgres::PgPool,
     ports: &LivePorts,
     pair: [LifecycleEffect; 2],
+    terminal_created_by: Option<Uuid>,
 ) {
     for effect in pair {
         let label = match &effect {
@@ -1340,7 +1149,7 @@ async fn drain_publish_pair(
             }
             unexpected => format!("failed to drain unexpected terminal effect: {unexpected:?}"),
         };
-        if drain_lifecycle_effects(pool, ports, vec![effect])
+        if drain_lifecycle_effects(pool, ports, vec![effect], terminal_created_by)
             .await
             .is_err()
         {
@@ -1353,10 +1162,13 @@ async fn drain_publish_pair(
 /// through the D-12 provider, drains through [`drain_kernel`] — all
 /// unguarded, so any failure propagates to the poll (TRACE bug 2).
 /// The cancel retry is the isolated twin (`:223-241`, one log line).
+/// `terminal_created_by` is the ambient crum request user for the
+/// inline terminal effects.
 async fn fire_session_effect(
     pool: &sqlx::postgres::PgPool,
     state: &AppState,
     effect: session_kernel::SessionEffect,
+    terminal_created_by: Option<Uuid>,
 ) -> Result<(), ()> {
     use session_kernel::SessionEffect;
     match effect {
@@ -1386,9 +1198,14 @@ async fn fire_session_effect(
             .map(|_| ()),
         SessionEffect::DrainPod { pod_id } => drain_pod_by_id(pool, state, pod_id).await,
         SessionEffect::CompleteProjectMoveHandoff { run_id } => {
-            crate::project_move_handoff::complete_project_move_handoff(pool, state, run_id)
-                .await
-                .map(|_| ())
+            crate::project_move_handoff::complete_project_move_handoff(
+                pool,
+                state,
+                run_id,
+                terminal_created_by,
+            )
+            .await
+            .map(|_| ())
         }
     }
 }
@@ -1567,19 +1384,25 @@ async fn read_with_eviction_awareness(
 pub async fn runner_session_poll(
     State(state): State<AppState>,
     Path((raw_runner_id, raw_sid)): Path<(String, String)>,
-    headers: HeaderMap,
-    body: Bytes,
+    req: Request,
 ) -> Response {
-    let pool = match pool_of(&state) {
-        Ok(pool) => pool.clone(),
-        Err(response) => return response,
-    };
+    // Resolver first (Django 404s non-converter segments before any
+    // view code — and before touching the database).
     let runner_id = match parse_uuid(&raw_runner_id) {
         Ok(id) => id,
-        Err(response) => return response,
+        Err(()) => return crate::edge::proxy(State(state), req).await,
     };
     let sid = match parse_uuid(&raw_sid) {
         Ok(id) => id,
+        Err(()) => return crate::edge::proxy(State(state), req).await,
+    };
+    let headers = req.headers().clone();
+    let body = match req.into_body().collect().await {
+        Ok(collected) => collected.to_bytes(),
+        Err(_) => return server_error(),
+    };
+    let pool = match pool_of(&state) {
+        Ok(pool) => pool.clone(),
         Err(response) => return response,
     };
     // Stock settings carry no `RUNNER_ACCESS_TOKEN_KEYS`, so the ring
@@ -1648,10 +1471,7 @@ pub async fn runner_session_poll(
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
-    if sqlx::query(runner_session::TOUCH_SQL)
-        .bind(now_micros())
-        .bind(sid)
-        .execute(&pool)
+    if pidash_services::domain::tokens::touch_runner_session(&pool, sid, now_micros())
         .await
         .is_err()
     {
@@ -1727,20 +1547,28 @@ pub async fn runner_session_poll(
     // The heartbeat commit fires the reap registrations in order:
     // the cancel retry, then one publish pair per finalized run in
     // reap order, then the drain effects. Only the drain effects
-    // propagate (TRACE bug 2).
+    // propagate (TRACE bug 2). Daemon request: the crum user is the
+    // runner owner.
+    let terminal_created_by = Some(auth.runner.owner_id);
     if let Some(retry) = reap.retry_cancel {
-        if fire_session_effect(&pool, &state, retry).await.is_err() {
+        if fire_session_effect(&pool, &state, retry, terminal_created_by)
+            .await
+            .is_err()
+        {
             return server_error();
         }
     }
     if !reap.publish_pairs.is_empty() {
         let ports = LivePorts::new(pool.clone(), &state);
         for pair in reap.publish_pairs {
-            drain_publish_pair(&pool, &ports, pair).await;
+            drain_publish_pair(&pool, &ports, pair, terminal_created_by).await;
         }
     }
     for effect in reap.drain_effects {
-        if fire_session_effect(&pool, &state, effect).await.is_err() {
+        if fire_session_effect(&pool, &state, effect, terminal_created_by)
+            .await
+            .is_err()
+        {
             return server_error();
         }
     }
@@ -1751,7 +1579,7 @@ pub async fn runner_session_poll(
     }
 
     // XACK explicit ids (`:428-430`).
-    let redis = redis_client(&state);
+    let redis = client_from_settings(state.settings());
     if !ack_ids.is_empty()
         && session_outbox::ack_for_session(redis.as_ref(), &rid, &ack_ids)
             .await
@@ -2216,7 +2044,7 @@ mod tests {
         );
     }
 
-    /// The live-state snapshot gate (`:353-357`): only observability
+    /// The live-state snapshot gate (`:400-404`): only observability
     /// keys run the `get_or_create` at all.
     #[test]
     fn live_state_gate_needs_snapshot_keys() {
@@ -2234,6 +2062,8 @@ mod tests {
             "approvals_pending",
             "llm_model",
             "turn_count",
+            "agent_health",
+            "agent_last_activity_at",
             "tokens",
             "model",
         ] {

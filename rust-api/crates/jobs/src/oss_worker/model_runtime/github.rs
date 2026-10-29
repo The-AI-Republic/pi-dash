@@ -20,14 +20,13 @@
 #![forbid(unsafe_code)]
 
 use std::collections::HashMap;
-use std::sync::OnceLock;
 
 use base64::Engine as _;
 
 use pidash_db::app_integrations::queries_github::{
     app_headers, build_app_jwt_claims, installation_token_cache_key, installation_token_ttl_secs,
-    normalize_private_key, parse_github_datetime, DEFAULT_TIMEOUT_SECONDS, GITHUB_ACCEPT_HEADER,
-    GITHUB_API_BASE, GITHUB_API_VERSION_HEADER,
+    next_url, normalize_private_key, parse_github_datetime, DEFAULT_TIMEOUT_SECONDS,
+    GITHUB_ACCEPT_HEADER, GITHUB_API_BASE, GITHUB_API_VERSION_HEADER,
 };
 use pidash_db::redis::RedisHandle;
 use serde_json::Value;
@@ -132,6 +131,13 @@ impl GithubFailure {
     /// `json.JSONDecodeError` (a `ValueError`): non-JSON bodies.
     pub fn json_decode(message: impl Into<String>) -> Self {
         Self::new("JSONDecodeError", message)
+    }
+
+    /// `requests.exceptions.InvalidHeader`: header values carrying
+    /// control bytes (a token with `\r`/`\n`), which `requests`
+    /// rejects at send time — the `_headers` failure mode.
+    pub fn invalid_header(message: impl Into<String>) -> Self {
+        Self::new("InvalidHeader", message)
     }
 
     /// `requests` transport failures, by kind: timeouts split into
@@ -367,6 +373,67 @@ pub async fn installation_token(
 // REST client (`github_client.py:38-220`, the twin subset)
 // ---------------------------------------------------------------------------
 
+/// Header-construction failure from [`github_headers`]: the fixed
+/// per-header message (e.g. `"github bearer token"`). Callers map it onto
+/// their own transport failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GithubHeadersError {
+    /// Fixed message naming the header that failed to parse.
+    pub message: String,
+}
+
+impl GithubHeadersError {
+    fn new(message: &str) -> Self {
+        Self {
+            message: message.to_owned(),
+        }
+    }
+}
+
+impl std::fmt::Display for GithubHeadersError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for GithubHeadersError {}
+
+/// `GithubClient._headers` (`github_client.py:54-60`) as a `HeaderMap`:
+/// Bearer token + Accept + X-GitHub-Api-Version + User-Agent.
+///
+/// The canonical copy (PIDASHCONV-1625): fallible, because the token
+/// is attacker-influenced and header construction must never panic.
+/// The messages keep the overlay's texts so OVL-10's switch is
+/// message-preserving.
+pub fn github_headers(token: &str) -> Result<reqwest::header::HeaderMap, GithubHeadersError> {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        reqwest::header::AUTHORIZATION,
+        format!("Bearer {token}")
+            .parse()
+            .map_err(|_| GithubHeadersError::new("github bearer token"))?,
+    );
+    headers.insert(
+        reqwest::header::ACCEPT,
+        GITHUB_ACCEPT_HEADER
+            .parse()
+            .map_err(|_| GithubHeadersError::new("github accept header"))?,
+    );
+    headers.insert(
+        "X-GitHub-Api-Version",
+        GITHUB_API_VERSION_HEADER
+            .parse()
+            .map_err(|_| GithubHeadersError::new("github version header"))?,
+    );
+    headers.insert(
+        reqwest::header::USER_AGENT,
+        CLIENT_USER_AGENT
+            .parse()
+            .map_err(|_| GithubHeadersError::new("github user agent"))?,
+    );
+    Ok(headers)
+}
+
 /// `GithubClient` (`github_client.py:38-52`): bearer-token REST over
 /// `api_base` with a per-request timeout. Only the endpoints the twin
 /// tools call are ported; each returns decoded JSON.
@@ -446,26 +513,11 @@ impl GithubRestClient {
         Self::new(&token, timeout_secs, &ctx.api_base)
     }
 
-    /// `GithubClient._headers` (`:54-60`).
-    fn headers(&self) -> reqwest::header::HeaderMap {
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(
-            reqwest::header::AUTHORIZATION,
-            format!("Bearer {}", self.token).parse().expect("bearer"),
-        );
-        headers.insert(
-            reqwest::header::ACCEPT,
-            GITHUB_ACCEPT_HEADER.parse().expect("accept"),
-        );
-        headers.insert(
-            "X-GitHub-Api-Version",
-            GITHUB_API_VERSION_HEADER.parse().expect("version"),
-        );
-        headers.insert(
-            reqwest::header::USER_AGENT,
-            CLIENT_USER_AGENT.parse().expect("agent"),
-        );
-        headers
+    /// `GithubClient._headers` (`:54-60`), via the [`github_headers`]
+    /// canonical: a bad token is `InvalidHeader`, never a panic
+    /// (PIDASHCONV-1625).
+    fn headers(&self) -> Result<reqwest::header::HeaderMap, GithubFailure> {
+        github_headers(&self.token).map_err(|error| GithubFailure::invalid_header(error.message))
     }
 
     /// `GithubClient._request` (`:62-74`): timeout + default headers,
@@ -477,7 +529,7 @@ impl GithubRestClient {
         url: &str,
         accept: Option<&str>,
     ) -> Result<reqwest::Response, GithubFailure> {
-        let mut headers = self.headers();
+        let mut headers = self.headers()?;
         if let Some(accept) = accept {
             headers.insert(
                 reqwest::header::ACCEPT,
@@ -521,24 +573,11 @@ impl GithubRestClient {
         serde_json::from_str(&text).map_err(|error| GithubFailure::json_decode(error.to_string()))
     }
 
-    /// `GithubClient._next_url` (`:76-85`): the `next` URL from a
-    /// paginated response's `Link` header — `re.match` per comma part,
-    /// so a leading `<url>; rel="next"` prefix matches with trailing
-    /// attributes allowed.
+    /// `GithubClient._next_url` (`:76-85`), via the
+    /// [`next_url`][pidash_db::app_integrations::queries_github::next_url]
+    /// canonical (PIDASHCONV-1625).
     fn next_url(link: &str) -> Option<String> {
-        static NEXT: OnceLock<regex::Regex> = OnceLock::new();
-        let next = NEXT.get_or_init(|| {
-            regex::Regex::new(r#"^\s*<([^>]+)>;\s*rel="next""#).expect("next-url regex")
-        });
-        if link.is_empty() {
-            return None;
-        }
-        for part in link.split(',') {
-            if let Some(capture) = next.captures(part) {
-                return Some(capture[1].to_owned());
-            }
-        }
-        None
+        next_url(link)
     }
 
     /// `GithubClient._paginate` (`:87-97`): follow `next` links,
@@ -587,8 +626,10 @@ impl GithubRestClient {
     /// `get_file` (`:167-189`): contents API, `type == "file"` guard,
     /// forgiving base64 (non-alphabet chars discarded, as
     /// `validate=False` does), the 64 KiB cap, UTF-8-or-binary shape.
-    /// `path` interpolates raw and `ref` is `quote_plus`-encoded,
-    /// exactly as Python builds the URL.
+    /// `path` interpolates raw except ASCII controls (encoded as
+    /// requests sends them, so the `url` crate cannot strip them and
+    /// resolve the resulting dot segments out of the bound repo) and
+    /// `ref` is `quote_plus`-encoded, exactly as Python builds the URL.
     pub async fn get_file(
         &self,
         owner: &str,
@@ -596,6 +637,7 @@ impl GithubRestClient {
         path: &str,
         git_ref: &str,
     ) -> Result<Value, GithubFailure> {
+        let path = encode_path_controls(path);
         let mut url = format!("{}/repos/{owner}/{name}/contents/{path}", self.api_base);
         if !git_ref.is_empty() {
             url = format!("{url}?ref={}", quote_plus(git_ref));
@@ -768,6 +810,28 @@ impl GithubRestClient {
     }
 }
 
+/// Percent-encode ASCII control bytes in a contents `path`
+/// (`github_client.py:170`, PIDASHCONV-1486): requests/urllib3 sends
+/// them `%XX` (uppercase) and never resolves dot segments, while the
+/// `url` crate strips tab/LF/CR and then resolves the resulting
+/// `..` segments out of the bound repository. Only bytes below
+/// `0x20` and `0x7f` change; `/`, `.` and everything else
+/// interpolate raw, exactly as before.
+fn encode_path_controls(path: &str) -> String {
+    if !path.bytes().any(|byte| byte < 0x20 || byte == 0x7f) {
+        return path.to_owned();
+    }
+    let mut out = Vec::with_capacity(path.len());
+    for byte in path.bytes() {
+        if byte < 0x20 || byte == 0x7f {
+            out.extend_from_slice(format!("%{byte:02X}").as_bytes());
+        } else {
+            out.push(byte);
+        }
+    }
+    String::from_utf8(out).expect("control-encoded path stays UTF-8")
+}
+
 /// `urllib.parse.quote_plus`, for the contents `ref` param: letters,
 /// digits and `_.-~` pass, space becomes `+`, anything else is
 /// percent-encoded uppercase over UTF-8 bytes.
@@ -929,6 +993,56 @@ mod tests {
         let urls = state.urls.lock().unwrap();
         assert!(urls[0].ends_with("?ref=feature%2Fx+y"), "{urls:?}");
         assert!(!urls[1].contains('?'), "{urls:?}");
+    }
+
+    #[tokio::test]
+    async fn get_file_control_dot_path_stays_bound() {
+        // PIDASHCONV-1486: each `.\n.` / `.\t.` segment passes the
+        // `..` guard, but the `url` crate strips tab/LF/CR and then
+        // resolves the resulting `..` segments out of the bound
+        // repo. requests/urllib3 instead percent-encodes the controls
+        // and never creates dot segments, so the request stays under
+        // `/repos/{owner}/{name}/contents/` (GitHub answers 404).
+        let (base, state) = mock_server(vec![
+            json_reply(r#"{"type": "file", "path": "p", "sha": "s", "content": ""}"#),
+            json_reply(r#"{"type": "file", "path": "p", "sha": "s", "content": ""}"#),
+            json_reply(r#"{"type": "file", "path": "p", "sha": "s", "content": ""}"#),
+        ])
+        .await;
+        let client = client_for(&base);
+        client
+            .get_file(
+                "o",
+                "r",
+                ".\n./.\n./.\n./.\n./repos/o2/r2/contents/secret",
+                "",
+            )
+            .await
+            .expect("file");
+        client
+            .get_file("o", "r", ".\t./.\t./.\t./.\t./orgs/x", "")
+            .await
+            .expect("file");
+        client
+            .get_file("o", "r", "a\x01b\x7fc\r", "")
+            .await
+            .expect("file");
+        let urls = state.urls.lock().unwrap();
+        for url in urls.iter() {
+            assert!(
+                url.starts_with("/repos/o/r/contents/"),
+                "escaped the bound repo: {urls:?}"
+            );
+        }
+        assert_eq!(
+            urls[0], "/repos/o/r/contents/.%0A./.%0A./.%0A./.%0A./repos/o2/r2/contents/secret",
+            "{urls:?}"
+        );
+        assert!(urls[1].contains("%09"), "{urls:?}");
+        assert!(
+            urls[2].contains("%01") && urls[2].contains("%7F") && urls[2].contains("%0D"),
+            "{urls:?}"
+        );
     }
 
     #[tokio::test]
@@ -1216,6 +1330,43 @@ mod tests {
             GithubRestClient::next_url(r#"<https://a/b>; rel="last""#),
             None
         );
+    }
+
+    #[test]
+    fn github_headers_values_and_bad_token() {
+        // The four `_headers` values (github_client.py:54-60).
+        let headers = github_headers("tok").expect("headers");
+        let value = |name: reqwest::header::HeaderName| {
+            headers
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .expect("value")
+                .to_owned()
+        };
+        assert_eq!(
+            value(reqwest::header::AUTHORIZATION),
+            format!("Bearer {}", "tok")
+        );
+        assert_eq!(
+            value(reqwest::header::ACCEPT),
+            "application/vnd.github+json"
+        );
+        assert_eq!(
+            headers
+                .get("x-github-api-version")
+                .and_then(|v| v.to_str().ok()),
+            Some("2022-11-28")
+        );
+        assert_eq!(value(reqwest::header::USER_AGENT), CLIENT_USER_AGENT);
+        // A token with control bytes is InvalidHeader, never a panic.
+        let error = github_headers("bad\ntoken").expect_err("bad token");
+        assert_eq!(error.message, "github bearer token");
+        assert_eq!(error.to_string(), "github bearer token");
+        let client =
+            GithubRestClient::new("bad\ntoken", 30, "https://api.github.com").expect("client");
+        let failure = client.headers().expect_err("bad token headers");
+        assert_eq!(failure.python_type, "InvalidHeader");
+        assert_eq!(failure.message, "github bearer token");
     }
 
     #[test]

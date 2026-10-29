@@ -33,16 +33,13 @@ use std::path::Path;
 use std::time::Duration;
 use uuid::Uuid;
 
-use crate::agent::{AgentProcessHandle, BridgeEvent, RunPayload, StderrSnapshot};
+use crate::agent::{
+    AgentProcessHandle, BridgeEvent, ENGINE_STARTUP_TIMEOUT, RunPayload, StderrSnapshot,
+};
 use crate::cloud::protocol::{ApprovalDecision, FailureReason};
 use crate::grok::process::GrokProcess;
 use crate::grok::schema;
 use crate::openclaw::schema::AcpMessage;
-
-/// How long to wait for grok to answer a handshake request (`initialize` /
-/// `session/new`) before giving up on run setup. Generous: grok has to boot
-/// its ACP server and may authenticate against the xAI API first.
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct Bridge {
     proc: GrokProcess,
@@ -139,7 +136,7 @@ impl Bridge {
         let id = self.proc.alloc_id();
         let line = schema::initialize_request(id);
         self.proc.send_raw(&line).await?;
-        self.await_response(HANDSHAKE_TIMEOUT)
+        self.await_response(ENGINE_STARTUP_TIMEOUT)
             .await
             .context("grok initialize failed")?;
         self.initialized = true;
@@ -155,7 +152,7 @@ impl Bridge {
         let line = schema::session_new_request(id, &cwd_str, self.model.as_deref());
         self.proc.send_raw(&line).await?;
         let result = self
-            .await_response(HANDSHAKE_TIMEOUT)
+            .await_response(ENGINE_STARTUP_TIMEOUT)
             .await
             .context("grok session/new failed")?;
         // Prefer the id grok minted; fall back to any seeded resume id so we

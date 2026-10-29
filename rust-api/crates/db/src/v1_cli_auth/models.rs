@@ -101,6 +101,8 @@ pub mod runner {
         "updated_at",
         "revoked_at",
         "revoked_reason",
+        "paused_at",
+        "paused_by_id",
     ];
 
     /// `id` (`:394`): UUID pk, `default=uuid.uuid4`, `editable=False`.
@@ -226,6 +228,16 @@ pub mod runner {
     pub const REVOKED_REASON_MAX_LENGTH: usize = 32;
     pub const DEFAULT_REVOKED_REASON: &str = "";
 
+    /// `paused_at` (`09738d222`, migration `0031_runner_paused`):
+    /// nullable + blank `DateTimeField`; `NULL` means not paused.
+    pub const PAUSED_AT_NULLABLE: bool = true;
+
+    /// `paused_by` FK (`09738d222`): nullable + blank, `SET NULL` to
+    /// the auth user model (`related_name="+"`, so no reverse
+    /// accessor). The operator who paused the runner.
+    pub const PAUSED_BY_ON_DELETE: OnDelete = OnDelete::SetNull;
+    pub const PAUSED_BY_REFERENCES: &str = "users(id)";
+
     /// Per-pod name uniqueness (`:484-489`): unique btree on
     /// (`pod_id`, `name`).
     pub const UNIQUE_CONSTRAINT_NAME: &str = "runner_unique_name_per_pod";
@@ -285,6 +297,8 @@ pub mod runner {
         pub updated_at: chrono::DateTime<chrono::Utc>,
         pub revoked_at: Option<chrono::DateTime<chrono::Utc>>,
         pub revoked_reason: String,
+        pub paused_at: Option<chrono::DateTime<chrono::Utc>>,
+        pub paused_by_id: Option<uuid::Uuid>,
     }
 }
 
@@ -316,8 +330,8 @@ mod tests {
             serde_json::json!(["-last_heartbeat_at", "-created_at"])
         );
         assert_eq!(runner::ORDERING, &["-last_heartbeat_at", "-created_at"]);
-        assert_eq!(f2["column_count"].as_u64(), Some(29));
-        assert_eq!(runner::COLUMNS.len(), 29);
+        assert_eq!(f2["column_count"].as_u64(), Some(31));
+        assert_eq!(runner::COLUMNS.len(), 31);
     }
 
     #[test]
@@ -333,13 +347,18 @@ mod tests {
     #[test]
     fn f2_types_and_nullability_match_fixture() {
         let f2 = fixture_f2();
-        // Nullability per column: only the four nullable fields are true.
+        // Nullability per column: only the six nullable fields are true.
         for name in runner::COLUMNS {
             let doc = column_doc(&f2, name);
             let nullable = doc["nullable"].as_bool().expect("nullable is bool");
             let expected = matches!(
                 *name,
-                "dev_machine_id" | "enrolled_at" | "last_heartbeat_at" | "revoked_at"
+                "dev_machine_id"
+                    | "enrolled_at"
+                    | "last_heartbeat_at"
+                    | "revoked_at"
+                    | "paused_at"
+                    | "paused_by_id"
             );
             assert_eq!(nullable, expected, "nullability of {name}");
         }
@@ -382,6 +401,15 @@ mod tests {
             Some("PROTECT")
         );
         assert_eq!(runner::POD_ON_DELETE, OnDelete::Protect);
+        assert_eq!(
+            column_doc(&f2, "paused_by_id")["references"].as_str(),
+            Some(runner::PAUSED_BY_REFERENCES)
+        );
+        assert_eq!(
+            column_doc(&f2, "paused_by_id")["on_delete"].as_str(),
+            Some("SET NULL")
+        );
+        assert_eq!(runner::PAUSED_BY_ON_DELETE, OnDelete::SetNull);
         // No deleted_at column anywhere on this path.
         assert!(
             !runner::COLUMNS.contains(&"deleted_at"),
@@ -467,9 +495,9 @@ mod tests {
         assert_eq!(runner::UNIQUE_CONSTRAINT_FIELDS, &["pod_id", "name"]);
         // Meta.indexes entries are the last four fixture index rows.
         let indexes = f2["indexes"].as_array().expect("indexes array");
-        assert_eq!(indexes.len(), 13);
+        assert_eq!(indexes.len(), 14);
         for (i, (name, cols)) in runner::META_INDEXES.iter().enumerate() {
-            let row = &indexes[9 + i];
+            let row = &indexes[indexes.len() - 4 + i];
             assert_eq!(row["name"].as_str(), Some(*name), "meta index {i} name");
             let row_cols: Vec<&str> = row["columns"]
                 .as_array()

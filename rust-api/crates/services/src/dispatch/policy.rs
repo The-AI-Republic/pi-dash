@@ -373,6 +373,11 @@ pub const LLM_CONFIG_MISSING_REASON: &str = "llm_config_missing";
 /// `agent_execution.py:121`: no online non-bundled runner on the project's pod.
 pub const NO_LOCAL_RUNNER_REASON: &str = "no_local_runner";
 
+/// `agent_execution.py:118` (`09738d222`): online non-bundled runners
+/// exist, but every one is operator-paused — the fix is to resume, not
+/// to add one.
+pub const LOCAL_RUNNER_PAUSED_REASON: &str = "local_runner_paused";
+
 /// One `agent_executor_options` row (`agent_execution.py:112-128`), fields in dict
 /// order (`kind`, `available`, `reason_code`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -395,13 +400,18 @@ pub struct ManagedAvailability {
 ///
 /// Rows are always `[cloud_agent, local_runner, managed_runner]`. The cloud row also
 /// reflects the viewer's LLM config when `user` is given; without a user only the
-/// instance switch is reported. `local_runner_exists` is the [`LOCAL_RUNNER_EXISTS_SQL`]
-/// verdict; `managed` is L4's `managed_runner_availability` verdict, passed through
-/// verbatim.
+/// instance switch is reported. `local_runner_available` is the
+/// [`LOCAL_RUNNER_AVAILABLE_EXISTS_SQL`] verdict (online, non-bundled,
+/// unpaused); `local_runner_exists` is the [`LOCAL_RUNNER_EXISTS_SQL`]
+/// verdict (online, non-bundled, paused or not) — consulted only when
+/// the runner is unavailable, exactly as Python's `elif` runs the
+/// second `exists()` only then. `managed` is L4's
+/// `managed_runner_availability` verdict, passed through verbatim.
 pub fn agent_executor_options<F>(
     cloud: &CloudAgentSettings,
     user: Option<UserFlags>,
     has_usable_llm_config: F,
+    local_runner_available: bool,
     local_runner_exists: bool,
     managed: ManagedAvailability,
 ) -> [ExecutorOption; 3]
@@ -421,6 +431,13 @@ where
         cloud_available = false;
         cloud_reason = LLM_CONFIG_MISSING_REASON.to_string();
     }
+    let local_reason = if local_runner_available {
+        String::new()
+    } else if local_runner_exists {
+        LOCAL_RUNNER_PAUSED_REASON.to_string()
+    } else {
+        NO_LOCAL_RUNNER_REASON.to_string()
+    };
     [
         ExecutorOption {
             kind: AgentExecutorKind::CloudAgent,
@@ -429,12 +446,8 @@ where
         },
         ExecutorOption {
             kind: AgentExecutorKind::LocalRunner,
-            available: local_runner_exists,
-            reason_code: if local_runner_exists {
-                String::new()
-            } else {
-                NO_LOCAL_RUNNER_REASON.to_string()
-            },
+            available: local_runner_available,
+            reason_code: local_reason,
         },
         ExecutorOption {
             kind: AgentExecutorKind::ManagedRunner,
@@ -454,6 +467,12 @@ where
 /// column, and Django never filters joined tables (`pod`) by their managers.
 /// Params: `$1` project id (uuid), `$2` workspace id (uuid).
 pub const LOCAL_RUNNER_EXISTS_SQL: &str = "SELECT 1 FROM runner INNER JOIN pod ON pod.id = runner.pod_id WHERE pod.project_id = $1 AND runner.workspace_id = $2 AND runner.status = 'online' AND runner.provisioning <> 'desktop_bundled' LIMIT 1";
+
+/// The available leg of `agent_executor_options` (`agent_execution.py:112`,
+/// `09738d222`): [`LOCAL_RUNNER_EXISTS_SQL`] plus the unpaused arm — an
+/// ONLINE runner on the project's pod that is not operator-paused.
+/// Params: `$1` project id (uuid), `$2` workspace id (uuid).
+pub const LOCAL_RUNNER_AVAILABLE_EXISTS_SQL: &str = "SELECT 1 FROM runner INNER JOIN pod ON pod.id = runner.pod_id WHERE pod.project_id = $1 AND runner.workspace_id = $2 AND runner.status = 'online' AND runner.provisioning <> 'desktop_bundled' AND runner.paused_at IS NULL LIMIT 1";
 
 // ---------------------------------------------------------------------------
 // GitHub availability (`policy.py:75-94`)
@@ -1087,6 +1106,7 @@ mod tests {
             None,
             || panic!("no user, no seam"),
             true,
+            true,
             managed(true, ""),
         );
         assert_eq!(
@@ -1117,6 +1137,7 @@ mod tests {
             Some(active_user()),
             || panic!("cloud off, no seam"),
             false,
+            false,
             managed(false, "managed_runner_disabled"),
         );
         assert!(!rows[0].available);
@@ -1133,6 +1154,7 @@ mod tests {
             &cloud_on,
             Some(active_user()),
             || false,
+            false,
             false,
             managed(false, "x"),
         );
@@ -1151,6 +1173,7 @@ mod tests {
             Some(active_user()),
             || true,
             false,
+            false,
             managed(false, "x"),
         );
         assert!(rows[0].available);
@@ -1161,6 +1184,7 @@ mod tests {
             &cloud_on,
             None,
             || panic!("no user"),
+            false,
             false,
             managed(true, ""),
         );
@@ -1175,16 +1199,31 @@ mod tests {
             None,
             || panic!("no user"),
             true,
+            true,
             managed(true, ""),
         );
         assert!(rows[1].available);
         assert_eq!(rows[1].reason_code, "");
+
+        // Local leg, paused: online runners exist but all are paused —
+        // unavailable with the resume-the-runner reason (`09738d222`).
+        let rows = agent_executor_options(
+            &cloud_on,
+            None,
+            || panic!("no user"),
+            false,
+            true,
+            managed(true, ""),
+        );
+        assert!(!rows[1].available);
+        assert_eq!(rows[1].reason_code, LOCAL_RUNNER_PAUSED_REASON);
 
         // Managed leg passes L4's verdict through verbatim.
         let rows = agent_executor_options(
             &cloud_on,
             None,
             || panic!("no user"),
+            true,
             true,
             managed(false, "desktop_not_connected"),
         );
@@ -1209,6 +1248,19 @@ mod tests {
                 .expect("golden")
                 .contains("DESKTOP_BUNDLED")
         );
+    }
+
+    #[test]
+    fn local_runner_available_sql_adds_pause_arm() {
+        // The available leg is the exists leg plus the unpaused arm
+        // (`09738d222`); params keep their positions.
+        assert_eq!(
+            LOCAL_RUNNER_AVAILABLE_EXISTS_SQL,
+            "SELECT 1 FROM runner INNER JOIN pod ON pod.id = runner.pod_id WHERE pod.project_id = $1 AND runner.workspace_id = $2 AND runner.status = 'online' AND runner.provisioning <> 'desktop_bundled' AND runner.paused_at IS NULL LIMIT 1"
+        );
+        assert!(LOCAL_RUNNER_AVAILABLE_EXISTS_SQL.starts_with(
+            &LOCAL_RUNNER_EXISTS_SQL[..LOCAL_RUNNER_EXISTS_SQL.len() - " LIMIT 1".len()]
+        ));
     }
 
     // -- build_tool_plan goldens ---------------------------------------------

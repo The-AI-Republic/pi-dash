@@ -83,6 +83,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use pidash_db::Pools;
+use pidash_services::domain::issues as domain_issues;
 
 use crate::queue::{enqueue, NewJob};
 use crate::tasks_webhooks::activity_dispatch::{django_dumps, ISSUE_ACTIVITY_TASK};
@@ -123,14 +124,6 @@ pub const CLOSE_PROJECTS_SQL: &str = "SELECT id, close_in, created_by_id, defaul
 /// `ORDER BY sequence ASC LIMIT 1`. May return no row (QUIRK-5).
 pub const FIND_CANCELLED_STATE_SQL: &str = "SELECT id FROM states WHERE \"group\" = 'cancelled' \
      AND deleted_at IS NULL ORDER BY sequence ASC LIMIT 1";
-
-/// Archive bulk write (`:69`): `bulk_update(issues_to_update, [\"archived_at\"])`
-/// touches ONLY `archived_at` — no signals, no `auto_now` bump.
-pub const ARCHIVE_ISSUES_SQL: &str = "UPDATE issues SET archived_at = $1 WHERE id = ANY($2)";
-
-/// Close bulk write (`:132`): `bulk_update(issues_to_update, [\"state\"])`
-/// touches ONLY the state FK column.
-pub const CLOSE_ISSUES_SQL: &str = "UPDATE issues SET state_id = $1 WHERE id = ANY($2)";
 
 /// The candidate-issue SELECT both phases share (`:39-55,100-116`),
 /// parameterized by the phase's state-group list. Renders what the ORM
@@ -339,24 +332,32 @@ async fn candidate_issue_ids(
         .map_err(|error| AutomationError::Log(format!("{phase}: candidate lookup: {error}")))
 }
 
-/// Bulk write in `batch_size=100` chunks (`:69,132`).
-async fn bulk_update_in_chunks<T>(
+/// Which single-column `bulk_update` a chunked write runs: the archive
+/// stamp (`["archived_at"]`, `:69`) or the close state (`["state"]`,
+/// `:132`, nullable — QUIRK-5).
+enum BulkIssueWrite {
+    Archive(NaiveDate),
+    Close(Option<Uuid>),
+}
+
+/// Bulk write in `batch_size=100` chunks (`:69,132`), routed through the
+/// `domain::issues` bare bulk fns.
+async fn bulk_update_in_chunks(
     pool: &PgPool,
     phase: &str,
-    sql: &str,
-    value: T,
+    write: &BulkIssueWrite,
     ids: &[Uuid],
-) -> Result<(), AutomationError>
-where
-    T: for<'e> sqlx::Encode<'e, sqlx::Postgres> + sqlx::Type<sqlx::Postgres> + Clone + Send,
-{
+) -> Result<(), AutomationError> {
     for chunk in ids.chunks(BULK_BATCH_SIZE) {
-        sqlx::query(sql)
-            .bind(value.clone())
-            .bind(chunk.to_vec())
-            .execute(pool)
-            .await
-            .map_err(|error| AutomationError::Log(format!("{phase}: bulk update: {error}")))?;
+        let outcome = match write {
+            BulkIssueWrite::Archive(archived_at) => {
+                domain_issues::bulk_set_archived_at(pool, chunk, *archived_at).await
+            }
+            BulkIssueWrite::Close(state_id) => {
+                domain_issues::bulk_set_state(pool, chunk, *state_id).await
+            }
+        };
+        outcome.map_err(|error| AutomationError::Log(format!("{phase}: bulk update: {error}")))?;
     }
     Ok(())
 }
@@ -392,7 +393,7 @@ async fn run_archive(pool: &PgPool) -> Result<(), AutomationError> {
         // `archive_at = timezone.now().date()` (`:62`): read once per
         // project, a DATE not a datetime.
         let archive_at = Utc::now().date_naive();
-        bulk_update_in_chunks(pool, "archive", ARCHIVE_ISSUES_SQL, archive_at, &ids).await?;
+        bulk_update_in_chunks(pool, "archive", &BulkIssueWrite::Archive(archive_at), &ids).await?;
         let requested_data = archive_requested_data(archive_at);
         let current_instance = archive_current_instance();
         for issue_id in &ids {
@@ -461,7 +462,7 @@ async fn run_close(pool: &PgPool) -> Result<(), AutomationError> {
             continue;
         }
         let close_state = resolve_close_state(pool, project).await?;
-        bulk_update_in_chunks(pool, "close", CLOSE_ISSUES_SQL, close_state, &ids).await?;
+        bulk_update_in_chunks(pool, "close", &BulkIssueWrite::Close(close_state), &ids).await?;
         // `str(issue.state_id)` AFTER the assignment (`:136`): every
         // issue in this project reports the same resolved state.
         let requested_data = close_requested_data(close_state);
@@ -758,15 +759,9 @@ mod tests {
         assert!(CLOSE_PROJECTS_SQL.contains("close_in > 0"));
         assert!(CLOSE_PROJECTS_SQL.contains("default_state_id"));
         assert!(CLOSE_PROJECTS_SQL.contains("deleted_at IS NULL"));
-        // Bulk writes touch exactly one column each.
-        assert_eq!(
-            ARCHIVE_ISSUES_SQL,
-            "UPDATE issues SET archived_at = $1 WHERE id = ANY($2)"
-        );
-        assert_eq!(
-            CLOSE_ISSUES_SQL,
-            "UPDATE issues SET state_id = $1 WHERE id = ANY($2)"
-        );
+        // Bulk writes touch exactly one column each (the statement pins
+        // moved to `domain::issues::ticker_and_automation_bare_sql_shapes`
+        // with the SQL; the batch size stays here with the chunking).
         assert_eq!(BULK_BATCH_SIZE, 100);
         // Cancelled fallback: soft-filtered, sequence-ordered, first row.
         assert!(FIND_CANCELLED_STATE_SQL.contains("\"group\" = 'cancelled'"));

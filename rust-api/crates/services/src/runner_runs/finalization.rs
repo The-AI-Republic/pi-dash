@@ -29,6 +29,7 @@
 //! Fixture: FX-RUN-05 (`merge_done_payload`, `finalize_agent_run`,
 //! `apply_terminal_effects` sections).
 
+use chrono::{DateTime, Utc};
 use pidash_db::runner_runs::{agent_run, event, pod};
 use pidash_db::tasks_ticker::models::scheduler_binding;
 use pidash_types::dispatch::AgentExecutorKind;
@@ -51,9 +52,9 @@ pub const TERMINAL_EFFECTS_TASK: &str = "runner.apply_agent_run_terminal_effects
 pub const YIELD_KEYS: [&str; 4] = ["status", "note", "yielded_at", "stop_ticking"];
 
 /// `runner` columns in Django `_meta` order (captured from
-/// `Runner._meta.concrete_fields`): the capacity re-read joins the
-/// full row. Canonical home is the D-13 port; this list pins the
-/// `SELECT` text until it lands.
+/// `Runner._meta.concrete_fields`, plus the `09738d222` pause pair):
+/// the capacity re-read joins the full row. Canonical home is the
+/// D-13 port; this list pins the `SELECT` text until it lands.
 const RUNNER_COLUMNS: &[&str] = &[
     "id",
     "owner_id",
@@ -84,6 +85,8 @@ const RUNNER_COLUMNS: &[&str] = &[
     "updated_at",
     "revoked_at",
     "revoked_reason",
+    "paused_at",
+    "paused_by_id",
 ];
 
 /// How finalization planning fails: `new_status` is not terminal
@@ -341,6 +344,34 @@ pub fn terminal_event_payload(new_status: AgentRunStatus, error_code: &str) -> V
     serde_json::json!({"status": new_status.value(), "error_code": error_code})
 }
 
+/// Terminal-event `INSERT` performer ([`terminal_event_insert_sql`]):
+/// append the planned cloud-only event for one finalized run.
+///
+/// `plan` is the [`plan_terminal_event`] row (`seq`, `{"status",
+/// "error_code"}` payload); `kind` binds `terminal`, `created_at`
+/// binds the caller's own `now` (each driver stamps its own clock,
+/// never hoisted across legs). The existence guard and max-seq read
+/// stay driver-side.
+pub async fn insert_terminal_event<'e, E>(
+    ex: E,
+    run_id: Uuid,
+    plan: TerminalEventPlan,
+    now: DateTime<Utc>,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(&terminal_event_insert_sql())
+        .bind(run_id)
+        .bind(plan.seq)
+        .bind("terminal")
+        .bind(plan.payload)
+        .bind(now)
+        .execute(ex)
+        .await
+        .map(|_| ())
+}
+
 /// `_publish_effects` (`agent_run_finalization.py:89-103`): the Celery
 /// emit first, then the inline terminal-effects run — each isolated,
 /// in order. The executing layer logs `failed to publish terminal
@@ -405,7 +436,7 @@ pub fn update_hooks_marker_sql() -> &'static str {
 }
 
 /// Capacity re-read (`apply_terminal_effects:183`):
-/// `select_related("runner", "pod").get(pk)` — 40 + 10 + 29 columns,
+/// `select_related("runner", "pod").get(pk)` — 40 + 10 + 31 columns,
 /// `.get()` so no `LIMIT`. A missing row raises `DoesNotExist` (no
 /// guard in the source); the executing layer propagates it. Param:
 /// `$1` run id.
@@ -1464,7 +1495,7 @@ mod tests {
             vec![
                 ("\"agent_run\"".to_owned(), 40),
                 ("\"pod\"".to_owned(), 10),
-                ("\"runner\"".to_owned(), 29),
+                ("\"runner\"".to_owned(), 31),
             ]
         );
         assert!(
@@ -1520,6 +1551,8 @@ mod tests {
                 "updated_at",
                 "revoked_at",
                 "revoked_reason",
+                "paused_at",
+                "paused_by_id",
             ]
         );
         assert_eq!(scheduler_binding::COLUMNS.len(), 22);

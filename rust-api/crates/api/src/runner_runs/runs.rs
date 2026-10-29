@@ -74,11 +74,12 @@ use pidash_types::WorkspaceId;
 use super::{
     is_uuid_path_segment, json_response, pool_of, proxy_with_body, view_response,
     ALLOW_RELEASE_PIN, ALLOW_RETICK, ALLOW_RUNS, ALLOW_RUN_CANCEL, ALLOW_RUN_DETAIL,
-    SERVER_ERROR_BODY,
 };
 use crate::license::{query_last, resolve_actor, QueryMap, UNAUTHENTICATED_BODY};
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
+pub(crate) use pidash_compat::py::py_strip;
+use pidash_compat::response::server_error;
 
 // ---------------------------------------------------------------------------
 // Exact bodies (only arms this port answers; proxied arms are Django's)
@@ -142,13 +143,6 @@ pub fn py_truthy_json(value: Option<&Value>) -> bool {
         Some(Value::Array(items)) => !items.is_empty(),
         Some(Value::Object(map)) => !map.is_empty(),
     }
-}
-
-/// Python `str.strip()` (no args): Rust's `White_Space` plus U+001C–U+001F,
-/// which CPython's `Py_UNICODE_ISSPACE` strips but the Unicode property
-/// does not (verified against CPython 3.12). Same formula as the L4 twin.
-pub fn py_strip(text: &str) -> &str {
-    text.trim_matches(|c: char| c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c))
 }
 
 /// First `max` Unicode code points of `text` (`text[:max]`, `runs.py:560`).
@@ -735,14 +729,6 @@ impl RunEventRecord {
 /// 401 for anonymous callers on guarded endpoints (DRF `NotAuthenticated`).
 fn unauthorized() -> Response {
     json_response(StatusCode::UNAUTHORIZED, UNAUTHENTICATED_BODY.to_owned())
-}
-
-/// 500 for transport / model-violation failures on owned branches.
-fn server_error() -> Response {
-    json_response(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        SERVER_ERROR_BODY.to_owned(),
-    )
 }
 
 impl From<RowError> for Response {

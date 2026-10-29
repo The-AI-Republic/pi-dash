@@ -57,14 +57,11 @@
 //!   exactly Django-with-local-memory-cache behaviour.
 
 use axum::{
-    body::Body,
     extract::State,
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Router,
 };
-use hmac::Hmac;
-use sha2::{Digest, Sha256};
 
 use pidash_auth::csrf as csrf_kernel;
 use pidash_auth::session as session_kernel;
@@ -74,13 +71,18 @@ use pidash_services::auth_session::guards as guards_kernel;
 use pidash_services::auth_session::queries as queries_kernel;
 use pidash_services::auth_session::shapes as shapes_kernel;
 use pidash_services::auth_session::tasks as tasks_kernel;
+use pidash_services::domain::identity;
+use pidash_services::domain::workspaces::members;
 
 use crate::assistant::governor::throttle_check;
 use crate::assistant::throttles::ThrottleSpec;
-use crate::auth_session::render::render_csrf_failure;
+use crate::auth_session::render::{disallowed_redirect, render_csrf_failure};
+use crate::auth_session::throttle_ident;
 use crate::edge;
 use crate::license::handlers_auth_forms::client_ip;
+use crate::middleware::body_limit::read_request_bytes;
 use crate::state::AppState;
+use pidash_compat::response::{redirect_found_cookies, server_error};
 
 /// `AuthenticationThrottle`: 30/minute, scope `authentication`
 /// (`authentication/rate_limit.py:17-19`).
@@ -94,10 +96,10 @@ const AUTHENTICATION_THROTTLE: ThrottleSpec = ThrottleSpec {
 /// resolves this backend string (`settings/common.py:125`).
 const MODEL_BACKEND: &str = "django.contrib.auth.backends.ModelBackend";
 
-/// Salt for `user.get_session_auth_hash()` (same value as the D-01
-/// license wiring).
-const SESSION_AUTH_HASH_SALT: &str =
-    "django.contrib.auth.models.AbstractBaseUser.get_session_auth_hash";
+use pidash_compat::http::{
+    csrf_failure_json, csrf_failure_response, csrf_token_source, form_field, session_auth_hash,
+    TokenSource,
+};
 
 /// Django 4.2 `PBKDF2PasswordHasher`: 600000 iterations, 22-char
 /// alphanumeric salt (128 bits of entropy over 62 chars).
@@ -232,19 +234,23 @@ fn provenance(headers: &HeaderMap, peer_ip: Option<String>, cookie_name: &str) -
     }
 }
 
-/// `request.POST` as last-wins pairs, only for form content types
-/// (any other content type leaves `POST` empty in Django).
+/// `request.POST` as ordered pairs: multipart fields when the body is
+/// framed multipart, else the urlencoded parse for form posts
+/// (PIDASHCONV-1349; same shape as `magic.rs::form_pairs` from
+/// PIDASHCONV-1079). Any other content type leaves `POST` empty in
+/// Django, so the pairs are empty there.
 fn form_pairs(content_type: Option<&str>, body: &[u8]) -> Vec<(String, String)> {
-    let is_form = content_type.is_some_and(|ct| {
-        ct.split(';').next().is_some_and(|mime| {
-            mime.trim()
-                .eq_ignore_ascii_case("application/x-www-form-urlencoded")
-        })
-    });
+    let content_type = content_type.unwrap_or("");
+    if let Some(pairs) = crate::auth_session::multipart::parse_fields(content_type, body) {
+        return pairs;
+    }
+    let mime = content_type.split(';').next().map(str::trim).unwrap_or("");
+    let is_form = mime.eq_ignore_ascii_case("application/x-www-form-urlencoded")
+        || mime.eq_ignore_ascii_case("multipart/form-data");
     if !is_form {
         return Vec::new();
     }
-    serde_urlencoded::from_bytes::<Vec<(String, String)>>(body).unwrap_or_default()
+    serde_urlencoded::from_bytes(body).unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------
@@ -257,46 +263,6 @@ fn form_pairs(content_type: Option<&str>, body: &[u8]) -> Vec<(String, String)> 
 enum CsrfDenial {
     NoCookie,
     BadToken,
-}
-
-/// Where the request token came from (`CsrfViewMiddleware._check_token`:
-/// the `csrfmiddlewaretoken` POST field wins when non-empty, else the
-/// `X-CSRFToken` header).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TokenSource {
-    Post,
-    Header,
-}
-
-impl TokenSource {
-    /// `_bad_token_message` source rendering (`csrf.py:347-352`;
-    /// `CSRF_HEADER_NAME` is the default, parsed as `X-Csrftoken`).
-    fn describe(self) -> &'static str {
-        match self {
-            TokenSource::Post => "POST",
-            TokenSource::Header => "the 'X-Csrftoken' HTTP header",
-        }
-    }
-}
-
-/// Resolve the request token in Django's order: the last
-/// `csrfmiddlewaretoken` form value when non-empty, else the header
-/// when present (even empty — an empty header fails format, it does
-/// not fall through to "missing").
-fn csrf_token_source(
-    pairs: &[(String, String)],
-    header_token: Option<&str>,
-) -> Option<(String, TokenSource)> {
-    if let Some(value) = pairs
-        .iter()
-        .rev()
-        .find(|(k, _)| k == "csrfmiddlewaretoken")
-        .map(|(_, v)| v.as_str())
-        .filter(|v| !v.is_empty())
-    {
-        return Some((value.to_owned(), TokenSource::Post));
-    }
-    header_token.map(|token| (token.to_owned(), TokenSource::Header))
 }
 
 /// `_check_token` + `_does_token_match` over one token: the format
@@ -320,50 +286,23 @@ fn csrf_check_token(secret: &str, token: &str, source: TokenSource) -> Result<()
 
 /// Mirror `CsrfViewMiddleware.process_view` for these endpoints: the
 /// `csrftoken` cookie must be present and the request token must
-/// check out. A malformed cookie secret can never match (Django
-/// would mint a fresh secret and then fail the compare the same
-/// way); the failure page never renders the reason either way.
+/// check out. A 64-char cookie unmasks first (`_get_secret`); a
+/// malformed cookie secret can never match (Django would mint a fresh
+/// secret and then fail the compare the same way); the failure page
+/// never renders the reason either way.
 fn csrf_gate(prov: &Provenance, pairs: &[(String, String)]) -> Result<(), CsrfDenial> {
-    let Some(secret) = prov.csrf_cookie.as_deref() else {
+    let Some(cookie) = prov.csrf_cookie.as_deref() else {
         return Err(CsrfDenial::NoCookie);
+    };
+    let secret = if cookie.len() == csrf_kernel::CSRF_TOKEN_LENGTH {
+        csrf_kernel::unmask_token(cookie).map_err(|_| CsrfDenial::BadToken)?
+    } else {
+        cookie.to_owned()
     };
     let Some((token, source)) = csrf_token_source(pairs, prov.header_token.as_deref()) else {
         return Err(CsrfDenial::BadToken);
     };
-    csrf_check_token(secret, &token, source).map_err(|_| CsrfDenial::BadToken)
-}
-
-/// DRF `SessionAuthentication.enforce_csrf` denial
-/// (`authentication.py:148`): 403 with the middleware's reason after
-/// `CSRF Failed: `. Only reachable for authenticated callers —
-/// anonymous requests return `None` before the check.
-fn csrf_failure_json(reason: &str) -> Response {
-    (
-        StatusCode::FORBIDDEN,
-        [
-            (header::CONTENT_TYPE, "application/json"),
-            (header::VARY, "Cookie"),
-        ],
-        format!(
-            "{{\"detail\":\"CSRF Failed: {}\"}}",
-            reason.replace('\\', "\\\\").replace('"', "\\\"")
-        ),
-    )
-        .into_response()
-}
-
-/// The `csrf_failure` page: 200 + `text/html`, `root_url` =
-/// `base_host(request)` with no surface flags.
-fn csrf_failure_response(root_url: &str) -> Response {
-    (
-        StatusCode::OK,
-        [
-            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
-            (header::VARY, "Cookie"),
-        ],
-        render_csrf_failure(root_url),
-    )
-        .into_response()
+    csrf_check_token(&secret, &token, source).map_err(|_| CsrfDenial::BadToken)
 }
 
 // ---------------------------------------------------------------------------
@@ -371,20 +310,20 @@ fn csrf_failure_response(root_url: &str) -> Response {
 // ---------------------------------------------------------------------------
 
 /// `HttpResponseRedirect`: 302 + `Location`, `Vary: Cookie`, and any
-/// `Set-Cookie` values the branch issued.
+/// `Set-Cookie` values the branch issued. Django percent-encodes the URL
+/// first (`iri_to_uri`, `django/http/response.py:620`). Past
+/// `MAX_URL_REDIRECT_LENGTH` characters the final `Location` answers
+/// 400 (`DisallowedRedirect`).
 fn redirect_response(location: String, set_cookies: Vec<String>) -> Response {
-    let Some(location) = crate::response_headers::header_value(&location) else {
+    let too_long = location.chars().count() > shapes_kernel::MAX_URL_REDIRECT_LENGTH;
+    let encoded = pidash_compat::http::iri_to_uri(&location);
+    let Some(location) = crate::response_headers::header_value(&encoded) else {
         return server_error();
     };
-    let mut builder = Response::builder()
-        .status(StatusCode::FOUND)
-        .header(header::LOCATION, location)
-        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-        .header(header::VARY, "Cookie");
-    for cookie in set_cookies {
-        builder = builder.header(header::SET_COOKIE, cookie);
+    if too_long {
+        return disallowed_redirect();
     }
-    builder.body(Body::empty()).expect("static redirect")
+    redirect_found_cookies(location, set_cookies)
 }
 
 /// DRF 200 JSON (`Json` renders compact `application/json`).
@@ -424,7 +363,9 @@ fn throttle_429() -> Response {
 
 /// DRF `UnsupportedMediaType` (`exceptions.py:217`): the request's
 /// content type echoed verbatim. `Vary: Cookie`, same as above.
-fn unsupported_media_type_response(content_type: &str) -> Response {
+/// Shared with the magic-generate handler (PIDASHCONV-1351), whose
+/// DRF views parse `request.data` under the same default parsers.
+pub(crate) fn unsupported_media_type_response(content_type: &str) -> Response {
     (
         StatusCode::UNSUPPORTED_MEDIA_TYPE,
         [
@@ -435,15 +376,6 @@ fn unsupported_media_type_response(content_type: &str) -> Response {
             "{{\"detail\":\"Unsupported media type \\\"{}\\\" in request.\"}}",
             content_type.replace('\\', "\\\\").replace('"', "\\\"")
         ),
-    )
-        .into_response()
-}
-
-fn server_error() -> Response {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        [(header::CONTENT_TYPE, "application/json")],
-        r#"{"error":"Something went wrong please try again later"}"#,
     )
         .into_response()
 }
@@ -584,7 +516,8 @@ async fn user_by_pk(pool: &sqlx::PgPool, id: uuid::Uuid) -> Result<Option<UserRo
 // ---------------------------------------------------------------------------
 
 /// `user.check_password(candidate)` (`hashers.py`): `False` on
-/// mismatch *and* on unparsable hashes.
+/// mismatch *and* on unparsable hashes. The setter side effect
+/// (re-hash outdated hashes) lives in `provider_outcome`, not here.
 fn check_password(candidate: &str, encoded: &str) -> bool {
     pidash_auth::password::verify_password(candidate, encoded).unwrap_or(false)
 }
@@ -605,26 +538,6 @@ fn encode_password(password: &str) -> String {
     pidash_auth::password::hash_password(password, &salt, PBKDF2_ITERATIONS)
 }
 
-/// `user.get_session_auth_hash()`: `salted_hmac(...get_session_auth_hash,
-/// password).hexdigest()` (same construction as the D-01 wiring).
-fn session_auth_hash(password_field: &str, secret_key: &[u8]) -> String {
-    let key = Sha256::digest([SESSION_AUTH_HASH_SALT.as_bytes(), secret_key].concat());
-    let mut mac = Hmac::<Sha256>::new_from_slice(&key).expect("HMAC-SHA256 accepts any key length");
-    use hmac::Mac as _;
-    mac.update(password_field.as_bytes());
-    hex_encode(&mac.finalize().into_bytes())
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0x0f) as usize] as char);
-    }
-    out
-}
-
 /// `zxcvbn(password)["score"]` (same estimator, 0-4 scale; an
 /// unscorable input is 0, like the empty-password score).
 fn password_score(password: &str) -> u8 {
@@ -643,72 +556,13 @@ fn display_name_for(email: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// User writes (`adapter/base.py:220-360`)
+// User writes (`adapter/base.py:220-360`, via `domain::identity`)
 // ---------------------------------------------------------------------------
-
-/// `User(...)` + first `save()` for a sign-up
-/// (`base.py:296-328`): identity + names + the `set_password` hash;
-/// every other column takes its model default (`save()` then fills
-/// `display_name` from the email local part and leaves `token` empty
-/// — `token_updated_at` is still null).
-async fn create_user(
-    pool: &sqlx::PgPool,
-    email: &str,
-    password: &str,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Result<uuid::Uuid, sqlx::Error> {
-    let id = uuid::Uuid::new_v4();
-    let username = uuid::Uuid::new_v4().simple().to_string();
-    sqlx::query(
-        r#"INSERT INTO "users"
-           ("id", "password", "username", "email", "first_name", "last_name",
-            "avatar", "date_joined", "created_at", "updated_at", "last_location",
-            "created_location", "is_superuser", "is_managed", "is_password_expired",
-            "is_active", "is_staff", "is_email_verified", "is_password_autoset",
-            "is_password_reset_required", "token", "last_active", "last_login_time",
-            "last_logout_time", "last_login_ip", "last_logout_ip", "last_login_medium",
-            "last_login_uagent", "token_updated_at", "is_bot", "bot_type",
-            "user_timezone", "is_email_valid", "masked_at", "display_name",
-            "mobile_number", "cover_image")
-           VALUES ($1,$2,$3,$4,'','', '', $5, $5, $5, '', '',
-            false,false,false, true,false,false,false,false, '', NULL, NULL,
-            NULL, '', '', 'email', '', NULL, false, NULL,
-            'UTC', false, NULL, $6,
-            NULL, NULL)"#,
-    )
-    .bind(id)
-    .bind(encode_password(password))
-    .bind(&username)
-    .bind(email)
-    .bind(now)
-    .bind(display_name_for(email))
-    .execute(pool)
-    .await?;
-    Ok(id)
-}
-
-/// `post_save` receiver `create_user_notification` (`user.py:307-321`):
-/// a preferences row on every non-bot create (all five flags true).
-/// Same insert as the magic sign-up path (`magic.rs`).
-async fn insert_notification_prefs(
-    pool: &sqlx::PgPool,
-    now: chrono::DateTime<chrono::Utc>,
-    user_id: &uuid::Uuid,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "INSERT INTO \"user_notification_preferences\" (\"id\", \"created_at\", \"updated_at\", \
-         \"created_by_id\", \"updated_by_id\", \"deleted_at\", \"user_id\", \"workspace_id\", \
-         \"project_id\", \"property_change\", \"state_change\", \"comment\", \"mention\", \
-         \"issue_completed\") \
-         VALUES ($1, $2, $2, NULL, NULL, NULL, $3, NULL, NULL, TRUE, TRUE, TRUE, TRUE, TRUE)",
-    )
-    .bind(uuid::Uuid::new_v4())
-    .bind(now)
-    .bind(user_id)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
+// NOTE: user create, the `create_user_notification` post_save insert and
+// the signup profile row moved to `domain::identity::create_user`
+// (PIDASHCONV-1525), which runs the entity insert (the `after_save` hook
+// fires) plus the service-level profile row. The signup arm below calls
+// it directly.
 
 /// `save_user_data` (`base.py:220-234`): the login stamps plus the
 /// `is_active` flip in one `UPDATE`. The activation mail is published by
@@ -722,61 +576,49 @@ async fn save_user_data(
     ip: Option<String>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), sqlx::Error> {
-    let token = format!(
+    let token = fresh_user_token();
+    identity::save_user_data(
+        pool,
+        user_id,
+        &identity::LoginStamps {
+            medium: Some("email"),
+            login_ip: ip.as_deref(),
+            login_uagent: user_agent.as_deref(),
+            avatar: None,
+            avatar_asset_id: None,
+            display_name: None,
+            is_staff: None,
+            // The email stamps never bump `updated_at` (preserved verbatim;
+            // see `domain::identity`).
+            touch_updated_at: false,
+            rotated_token: &token,
+            now,
+        },
+    )
+    .await
+}
+
+/// Fresh `User.save()` token: `uuid4().hex + uuid4().hex`
+/// (`db/models/user.py:174`).
+pub(crate) fn fresh_user_token() -> String {
+    format!(
         "{}{}",
         uuid::Uuid::new_v4().simple(),
         uuid::Uuid::new_v4().simple()
-    );
-    sqlx::query(
-        r#"UPDATE "users" SET "last_login_medium" = 'email', "last_active" = $2,
-           "last_login_time" = $2, "last_login_ip" = $3, "last_login_uagent" = $4,
-           "token_updated_at" = $2, "token" = $5, "is_active" = true
-           WHERE "id" = $1"#,
     )
-    .bind(user_id)
-    .bind(now)
-    .bind(ip)
-    .bind(user_agent)
-    .bind(token)
-    .execute(pool)
-    .await?;
-    Ok(())
 }
 
-/// The `user_logged_in` signal (`update_last_login`): `last_login =
-/// now` on every login.
-async fn stamp_last_login(
-    pool: &sqlx::PgPool,
-    user_id: uuid::Uuid,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(r#"UPDATE "users" SET "last_login" = $2 WHERE "id" = $1"#)
-        .bind(user_id)
-        .bind(now)
-        .execute(pool)
-        .await?;
-    Ok(())
-}
+// NOTE: the change/set/reset-password write (the password plus the
+// `User.save()` column effects) moved to
+// `domain::identity::write_password_with_save_effects` (PIDASHCONV-1628),
+// and the `user_logged_in` `last_login` stamp to
+// `domain::identity::stamp_last_login`; the change/set/reset callers live
+// in `password.rs`.
 
-/// `Profile.objects.get_or_create(user=user)` for
-/// `get_redirection_path` (`redirection_path.py:11`): the insert
-/// carries every model default. Also serves the adapter
-/// `Profile.objects.create(user=user)` (`base.py:342`) at signup,
-/// where the SELECT always misses on the fresh user id.
-async fn get_or_create_profile(
-    pool: &sqlx::PgPool,
-    user_id: uuid::Uuid,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Result<(bool, Option<uuid::Uuid>), sqlx::Error> {
-    let row: Option<(bool, Option<uuid::Uuid>)> = sqlx::query_as(
-        r#"SELECT "is_onboarded", "last_workspace_id" FROM "profiles" WHERE "user_id" = $1"#,
-    )
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await?;
-    if let Some(found) = row {
-        return Ok(found);
-    }
+/// `get_random_color` (`utils/color.py:9-14`): `"#"` + six hexdigits.
+/// The uuid draw is lowercase-only (see `domain::identity`); no test can
+/// pin a random color.
+fn profile_background_color() -> String {
     let color_suffix: String = uuid::Uuid::new_v4()
         .simple()
         .to_string()
@@ -784,34 +626,7 @@ async fn get_or_create_profile(
         .filter(|c| c.is_ascii_hexdigit())
         .take(6)
         .collect();
-    sqlx::query(
-        r#"INSERT INTO "profiles"
-           ("id", "user_id", "created_at", "updated_at", "theme", "is_app_rail_docked",
-            "is_tour_completed", "onboarding_step", "use_case", "role", "is_onboarded",
-            "last_workspace_id", "billing_address_country", "billing_address",
-            "has_billing_address", "company_name", "notification_view_mode",
-            "is_smooth_cursor_enabled", "is_mobile_onboarded", "mobile_onboarding_step",
-            "mobile_timezone_auto_set", "language", "start_of_the_week", "goals",
-            "background_color", "is_navigation_tour_completed",
-            "has_marketing_email_consent", "is_subscribed_to_changelog",
-            "product_tour", "settings")
-           VALUES ($1,$2,$3,$3, '{}', true,
-            false, '{"profile_complete": false, "workspace_create": false, "workspace_invite": false, "workspace_join": false}'::jsonb, NULL, NULL, false,
-            NULL, 'INDIA', NULL,
-            false, '', 'full',
-            false, false, '{"profile_complete": false, "workspace_create": false, "workspace_join": false}'::jsonb,
-            false, 'en', 0, '{}',
-            $4, false,
-            false, false,
-            '{"work_items": false, "cycles": false, "modules": false, "intake": false, "pages": false}'::jsonb, '{}') "#,
-    )
-    .bind(uuid::Uuid::new_v4())
-    .bind(user_id)
-    .bind(now)
-    .bind(format!("#{color_suffix}"))
-    .execute(pool)
-    .await?;
-    Ok((false, None))
+    format!("#{color_suffix}")
 }
 
 /// `get_redirection_path` (`redirection_path.py:8-46`): onboarding
@@ -822,8 +637,14 @@ async fn redirection_path(
     user_id: uuid::Uuid,
     user_email: &str,
 ) -> Result<String, sqlx::Error> {
-    let (is_onboarded, last_workspace_id) =
-        get_or_create_profile(pool, user_id, chrono::Utc::now()).await?;
+    let path = identity::get_or_create_profile(
+        pool,
+        user_id,
+        chrono::Utc::now(),
+        &profile_background_color(),
+    )
+    .await?;
+    let (is_onboarded, last_workspace_id) = (path.is_onboarded, path.last_workspace_id);
     if !is_onboarded {
         return Ok("onboarding".to_owned());
     }
@@ -1000,37 +821,16 @@ async fn insert_project_arm_workspace_members(
     }
     let default_props = default_props_json();
     let issue_props = issue_props_json();
-    let empty = serde_json::json!({});
-    let mut builder = sqlx::QueryBuilder::new(
-        "INSERT INTO \"workspace_members\" (\"created_at\", \"updated_at\", \"created_by_id\", \
-         \"updated_by_id\", \"deleted_at\", \"id\", \"workspace_id\", \"member_id\", \"role\", \
-         \"company_role\", \"view_props\", \"default_props\", \"issue_props\", \"is_active\", \
-         \"getting_started_checklist\", \"tips\", \"explored_features\") ",
-    );
-    builder.push_values(rows, |mut bind, row| {
-        let (workspace_id, role, created_by) = row;
-        bind.push_bind(now)
-            .push_bind(now)
-            .push_bind(*created_by)
-            .push_bind(None::<uuid::Uuid>)
-            .push_bind(None::<chrono::DateTime<chrono::Utc>>)
-            .push_bind(uuid::Uuid::new_v4())
-            .push_bind(*workspace_id)
-            .push_bind(user_id)
-            .push_bind(invite_member_role(*role))
-            .push_bind(None::<String>)
-            .push_bind(sqlx::types::Json(default_props.clone()))
-            .push_bind(sqlx::types::Json(default_props.clone()))
-            .push_bind(sqlx::types::Json(issue_props.clone()))
-            .push_bind(true)
-            .push_bind(empty.clone())
-            .push_bind(empty.clone())
-            .push_bind(empty.clone());
-    });
-    builder.push(" ON CONFLICT DO NOTHING");
-    builder
-        .build()
-        .execute(pool)
+    let bulk_rows: Vec<members::BulkMember> = rows
+        .iter()
+        .map(|(workspace_id, role, created_by)| members::BulkMember {
+            workspace_id: *workspace_id,
+            user_id,
+            role: invite_member_role(*role),
+            created_by: *created_by,
+        })
+        .collect();
+    members::bulk_add(pool, &bulk_rows, &default_props, &issue_props, now)
         .await
         .map_err(|_| server_error())?;
     Ok(())
@@ -1058,36 +858,34 @@ async fn insert_project_arm_project_members(
     }
     let default_props = default_props_json();
     let preferences = default_preferences_json();
-    let mut builder = sqlx::QueryBuilder::new(
-        "INSERT INTO \"project_members\" (\"created_at\", \"updated_at\", \"created_by_id\", \
-         \"updated_by_id\", \"deleted_at\", \"id\", \"workspace_id\", \"member_id\", \"comment\", \
-         \"role\", \"view_props\", \"default_props\", \"preferences\", \"sort_order\", \
-         \"is_active\") ",
-    );
-    builder.push_values(rows, |mut bind, row| {
-        let (workspace_id, role, created_by) = row;
-        bind.push_bind(now)
-            .push_bind(now)
-            .push_bind(*created_by)
-            .push_bind(None::<uuid::Uuid>)
-            .push_bind(None::<chrono::DateTime<chrono::Utc>>)
-            .push_bind(uuid::Uuid::new_v4())
-            .push_bind(*workspace_id)
-            .push_bind(user_id)
-            .push_bind(None::<String>)
-            .push_bind(invite_member_role(*role))
-            .push_bind(sqlx::types::Json(default_props.clone()))
-            .push_bind(sqlx::types::Json(default_props.clone()))
-            .push_bind(sqlx::types::Json(preferences.clone()))
-            .push_bind(65535.0f64)
-            .push_bind(true);
-    });
-    builder.push(" ON CONFLICT DO NOTHING");
-    builder
-        .build()
-        .execute(pool)
-        .await
-        .map_err(|_| server_error())?;
+    let bulk: Vec<pidash_services::domain::projects::members::BulkRow> = rows
+        .iter()
+        .map(|(workspace_id, role, created_by)| {
+            pidash_services::domain::projects::members::BulkRow {
+                workspace_id: *workspace_id,
+                // PB-1008: the project arm omits `project_id`; the
+                // explicit `NULL` raises the same 23502 as the omitted
+                // column (identical message, identical effect).
+                project_id: None,
+                user_id,
+                role: pidash_services::domain::projects::members::RoleBind::Int(i64::from(
+                    invite_member_role(*role),
+                )),
+                created_by: *created_by,
+                created_at: now,
+                updated_at: now,
+            }
+        })
+        .collect();
+    pidash_services::domain::projects::members::bulk_add(
+        pool,
+        &bulk,
+        &default_props,
+        &preferences,
+        false,
+    )
+    .await
+    .map_err(|_| server_error())?;
     Ok(())
 }
 
@@ -1117,23 +915,22 @@ async fn post_user_auth_workflow(
         .await
         .map_err(|_| server_error())?;
     for (workspace_id, role, _slug) in &workspace_invites {
-        sqlx::query(
-            r#"INSERT INTO "workspace_members"
-               ("created_at", "updated_at", "created_by_id", "updated_by_id", "deleted_at",
-                "id", "workspace_id", "member_id", "role", "company_role",
-                "view_props", "default_props", "issue_props", "is_active",
-                "getting_started_checklist", "tips", "explored_features")
-               VALUES ($1,$1,NULL,NULL,NULL, $2,$3,$4,$5,NULL, $6,$6,$7,true, '{}','{}','{}')
-               ON CONFLICT DO NOTHING"#,
+        members::add(
+            pool,
+            &members::NewMember {
+                workspace_id: *workspace_id,
+                user_id: Some(user_id),
+                role: *role,
+                company_role: None,
+                created_by: None,
+                view_props: &default_props,
+                default_props: &default_props,
+                issue_props: &issue_props,
+                now,
+                ignore_conflicts: true,
+                db_now: false,
+            },
         )
-        .bind(now)
-        .bind(uuid::Uuid::new_v4())
-        .bind(workspace_id)
-        .bind(user_id)
-        .bind(role)
-        .bind(sqlx::types::Json(default_props.clone()))
-        .bind(sqlx::types::Json(issue_props.clone()))
-        .execute(pool)
         .await
         .map_err(|_| server_error())?;
     }
@@ -1458,7 +1255,7 @@ async fn provider_outcome(
     form: kernel::EmailForm,
     normalized: &str,
     raw_password: &str,
-    existing: Option<&UserRow>,
+    existing: Option<&mut UserRow>,
 ) -> Result<kernel::ProviderOutcome, Response> {
     let enable_email_password = config_value(pool, "ENABLE_EMAIL_PASSWORD", None)
         .await
@@ -1473,6 +1270,20 @@ async fn provider_outcome(
                 return Ok(kernel::ProviderOutcome::BadPassword {
                     email: normalized.to_owned(),
                 });
+            }
+            // Django's `check_password` setter (`base_user.py:111-123`): a
+            // correct password on an outdated hash re-encodes with the
+            // default hasher at once (`save(update_fields=["password"])`
+            // writes only that column — no `updated_at` bump). This is the
+            // same row the session tail reads, so the session hash covers
+            // the new field exactly as `login()` does after the setter.
+            if let Some(new_hash) =
+                pidash_auth::password::rehash_if_outdated(raw_password, &user.password)
+            {
+                identity::rehash_password(pool, user.id, &new_hash)
+                    .await
+                    .map_err(|_| server_error())?;
+                user.password = new_hash;
             }
             Ok(kernel::ProviderOutcome::Ok)
         }
@@ -1555,18 +1366,20 @@ async fn evaluate_attempt(
         kernel::FormField::Missing => "",
     };
     let normalized = kernel::normalize_email(raw_email);
-    let existing = user_by_email(pool, &normalized)
+    let mut existing = user_by_email(pool, &normalized)
         .await
         .map_err(|_| server_error())?;
     let user_exists = existing.is_some();
-    let user_row = existing.clone();
     let provider = if (req.form == kernel::EmailForm::SignIn) != user_exists {
         // The view's own existence pre-check fails: the provider is
         // never constructed (`Q-provider-order`).
         kernel::ProviderOutcome::Ok
     } else {
-        provider_outcome(pool, req.form, &normalized, raw_password, existing.as_ref()).await?
+        provider_outcome(pool, req.form, &normalized, raw_password, existing.as_mut()).await?
     };
+    // Cloned after the provider ran: a sign-in re-hash above already
+    // rewrote `password` in place for the session tail.
+    let user_row = existing.clone();
     let attempt = kernel::EmailAttempt {
         form: req.form,
         instance_ok: true,
@@ -1628,7 +1441,7 @@ async fn run_authenticated(
     // `user_login` AFTER `provider.authenticate()` returns
     // (`app/email.py:109-111`) — so the stamp lands after the invitation
     // workflow, never on its 500 path.
-    stamp_last_login(pool, user_id, now)
+    identity::stamp_last_login(pool, user_id, now)
         .await
         .map_err(|_| server_error())?;
     let device_info = serde_json::json!({
@@ -1666,7 +1479,7 @@ async fn run_authenticated(
 /// either the error redirect or the authenticated tail.
 async fn serve_email_form(state: &AppState, req: &EmailRequest, current_site: &str) -> Response {
     if csrf_gate(&req.prov, &req.pairs).is_err() {
-        return csrf_failure_response(&req.hosts.root_base);
+        return csrf_failure_response(render_csrf_failure(&req.hosts.root_base));
     }
     let Some(pool) = state.pools().map(|pools| pools.primary()) else {
         return server_error();
@@ -1710,37 +1523,54 @@ async fn serve_email_form(state: &AppState, req: &EmailRequest, current_site: &s
         }
         kernel::EmailForm::SignUp => {
             let now = chrono::Utc::now();
-            let (user_id, password_field) =
-                match create_user(pool, &normalized, &raw_password, now).await {
-                    Ok(id) => {
-                        let row = match user_by_email(pool, &normalized).await {
-                            Ok(row) => row,
-                            Err(_) => return server_error(),
-                        };
-                        match row {
-                            Some(row) => (id, row.password),
-                            None => return server_error(),
-                        }
+            let Some(orm) = state.orm() else {
+                return server_error();
+            };
+            // `User(...)` + first `save()` (`base.py:296-328`) with the
+            // `post_save` preferences row (`user.py:307`) and the adapter
+            // `Profile.objects.create(user=user)` (`base.py:342`), all inside
+            // `domain::identity::create_user`. The profile lands for every
+            // new user on both surfaces (PIDASHCONV-879).
+            let created = identity::create_user(
+                orm,
+                &identity::NewUser {
+                    id: None,
+                    email: &normalized,
+                    username: uuid::Uuid::new_v4().simple().to_string(),
+                    password_hash: encode_password(&raw_password),
+                    first_name: "",
+                    last_name: "",
+                    display_name: display_name_for(&normalized),
+                    avatar: "",
+                    is_email_verified: false,
+                    is_password_autoset: false,
+                    // Django's field default (`user.py:105`): the insert
+                    // stores `last_active = now` (PIDASHCONV-1560).
+                    last_active: Some(now),
+                    login_ip: Some(""),
+                    login_uagent: Some(""),
+                    is_bot: false,
+                    now,
+                    profile: Some(identity::NewProfile {
+                        company_name: "",
+                        background_color: profile_background_color(),
+                    }),
+                },
+            )
+            .await;
+            let (user_id, password_field) = match created {
+                Ok(id) => {
+                    let row = match user_by_email(pool, &normalized).await {
+                        Ok(row) => row,
+                        Err(_) => return server_error(),
+                    };
+                    match row {
+                        Some(row) => (id, row.password),
+                        None => return server_error(),
                     }
-                    Err(_) => return server_error(),
-                };
-            // `post_save` fires on the first `save()` (`user.py:307`),
-            // before the authenticated tail below.
-            if insert_notification_prefs(pool, now, &user_id)
-                .await
-                .is_err()
-            {
-                return server_error();
-            }
-            // `Profile.objects.create(user=user)` (`adapter/base.py:342`):
-            // the adapter creates the profile for every new user on both
-            // surfaces. The app branch used to get it only incidentally via
-            // `redirection_path`'s get-or-create, and the space branch never
-            // did (PIDASHCONV-879). `user_id` is fresh, so the SELECT inside
-            // always misses and this is exactly Django's create.
-            if get_or_create_profile(pool, user_id, now).await.is_err() {
-                return server_error();
-            }
+                }
+                Err(_) => return server_error(),
+            };
             run_authenticated(
                 pool,
                 state,
@@ -1763,9 +1593,10 @@ async fn serve_email_form(state: &AppState, req: &EmailRequest, current_site: &s
 
 async fn signin_app(State(state): State<AppState>, req: axum::extract::Request) -> Response {
     let (parts, body) = req.into_parts();
-    let body = axum::body::to_bytes(body, 1024 * 1024)
-        .await
-        .unwrap_or_default();
+    let body = match read_request_bytes(body).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
     let peer = parts
         .extensions
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
@@ -1784,9 +1615,10 @@ async fn signin_app(State(state): State<AppState>, req: axum::extract::Request) 
 
 async fn signup_app(State(state): State<AppState>, req: axum::extract::Request) -> Response {
     let (parts, body) = req.into_parts();
-    let body = axum::body::to_bytes(body, 1024 * 1024)
-        .await
-        .unwrap_or_default();
+    let body = match read_request_bytes(body).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
     let peer = parts
         .extensions
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
@@ -1805,9 +1637,10 @@ async fn signup_app(State(state): State<AppState>, req: axum::extract::Request) 
 
 async fn signin_space(State(state): State<AppState>, req: axum::extract::Request) -> Response {
     let (parts, body) = req.into_parts();
-    let body = axum::body::to_bytes(body, 1024 * 1024)
-        .await
-        .unwrap_or_default();
+    let body = match read_request_bytes(body).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
     let peer = parts
         .extensions
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
@@ -1826,9 +1659,10 @@ async fn signin_space(State(state): State<AppState>, req: axum::extract::Request
 
 async fn signup_space(State(state): State<AppState>, req: axum::extract::Request) -> Response {
     let (parts, body) = req.into_parts();
-    let body = axum::body::to_bytes(body, 1024 * 1024)
-        .await
-        .unwrap_or_default();
+    let body = match read_request_bytes(body).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
     let peer = parts
         .extensions
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
@@ -1853,10 +1687,14 @@ async fn signup_space(State(state): State<AppState>, req: axum::extract::Request
 /// the `email` member when the media type yields one, `None` for the
 /// empty-body `{}` and every other falsy shape, or the content type
 /// back when nothing parses it (DRF 415).
-fn check_request_email(content_type: &str, body: &[u8]) -> Result<Option<String>, String> {
+fn check_request_email(headers: &HeaderMap, body: &[u8]) -> Result<Option<String>, String> {
     if body.is_empty() {
         return Ok(None);
     }
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
     let mime = content_type
         .split(';')
         .next()
@@ -1872,6 +1710,19 @@ fn check_request_email(content_type: &str, body: &[u8]) -> Result<Option<String>
         ));
     }
     if mime == "application/x-www-form-urlencoded" {
+        // Single-field read through the shared canonical
+        // (PIDASHCONV-1626): `multipart::parse_fields` returns `None`
+        // for this media type, so `form_pairs` here is exactly the
+        // canonical's gate + parse + last-wins. Missing or empty stays
+        // missing (`request.data.get("email", False)` is falsy either
+        // way).
+        return Ok(form_field(body, headers, "email").filter(|value| !value.is_empty()));
+    }
+    if mime == "multipart/form-data" {
+        // Multipart reads through `form_pairs` (the DRF default
+        // parsers include `MultiPartParser`; PIDASHCONV-1349):
+        // missing or empty stays missing (`request.data.get("email",
+        // False)` is falsy either way).
         return Ok(
             match kernel::form_field(&form_pairs(Some(content_type), body), "email") {
                 kernel::FormField::Missing => None,
@@ -1879,12 +1730,6 @@ fn check_request_email(content_type: &str, body: &[u8]) -> Result<Option<String>
                 kernel::FormField::Present(value) => Some(value.to_owned()),
             },
         );
-    }
-    if mime == "multipart/form-data" {
-        // Django's multipart parser would read the fields; there is
-        // no multipart reader here, so the member stays missing
-        // (recorded approximation, like malformed JSON).
-        return Ok(None);
     }
     Err(content_type.to_owned())
 }
@@ -2027,9 +1872,10 @@ async fn check_email_throttle(state: &AppState, ident: &str) -> bool {
 
 async fn serve_email_check(state: &AppState, req: axum::extract::Request) -> Response {
     let (parts, body) = req.into_parts();
-    let body = axum::body::to_bytes(body, 1024 * 1024)
-        .await
-        .unwrap_or_default();
+    let body = match read_request_bytes(body).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
     let Some(pool) = state.pools().map(|pools| pools.primary()) else {
         return server_error();
     };
@@ -2037,11 +1883,6 @@ async fn serve_email_check(state: &AppState, req: axum::extract::Request) -> Res
         .extensions
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
         .map(|info| info.0.ip().to_string());
-    let forwarded = parts
-        .headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok());
-    let ip = client_ip(forwarded, peer.as_deref()).unwrap_or_default();
     // Throttle before the handler (`APIView.initial`: auth, then
     // permissions, then throttles); authenticated callers bypass the
     // anon scope. Histories live in the shared redis db under the DRF
@@ -2093,11 +1934,9 @@ async fn serve_email_check(state: &AppState, req: axum::extract::Request) -> Res
         }
     }
     if !authenticated {
-        let ident = if ip.is_empty() {
-            "127.0.0.1".to_owned()
-        } else {
-            ip.clone()
-        };
+        // DRF `get_ident`, not the first-entry `client_ip` stamp:
+        // the whole X-Forwarded-For chain is the bucket.
+        let ident = throttle_ident(&parts.headers, peer);
         if !check_email_throttle(state, &ident).await {
             return throttle_429();
         }
@@ -2106,12 +1945,7 @@ async fn serve_email_check(state: &AppState, req: axum::extract::Request) -> Res
         let decision = kernel::EmailCheckDecision::NotConfigured;
         return json_400(&decision.error_pairs());
     }
-    let content_type = parts
-        .headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    let email_raw = match check_request_email(content_type, &body) {
+    let email_raw = match check_request_email(&parts.headers, &body) {
         Ok(email_raw) => email_raw,
         Err(media_type) => return unsupported_media_type_response(&media_type),
     };
@@ -2209,9 +2043,10 @@ fn session_delete_cookie(ctx: &CookieCtx, cookie_name: &str) -> String {
 /// missing cookie or a live anonymous session answers bare.
 async fn serve_signout(state: &AppState, req: axum::extract::Request, space: bool) -> Response {
     let (parts, body) = req.into_parts();
-    let body = axum::body::to_bytes(body, 1024 * 1024)
-        .await
-        .unwrap_or_default();
+    let body = match read_request_bytes(body).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
     let hosts = host_ctx(state);
     let cookie_name = state.settings().session.cookie_name.clone();
     let peer = parts
@@ -2220,7 +2055,7 @@ async fn serve_signout(state: &AppState, req: axum::extract::Request, space: boo
         .map(|info| info.0.ip().to_string());
     let prov = provenance(&parts.headers, peer, &cookie_name);
     if csrf_gate(&prov, &form_pairs(prov.content_type.as_deref(), &body)).is_err() {
-        return csrf_failure_response(&hosts.root_base);
+        return csrf_failure_response(render_csrf_failure(&hosts.root_base));
     }
     let hosts_ref = allowed_hosts_ref(&hosts.allowed_hosts);
     let next_path = form_pairs(prov.content_type.as_deref(), &body)
@@ -2262,14 +2097,7 @@ async fn serve_signout(state: &AppState, req: axum::extract::Request, space: boo
         return bare();
     };
     let now = chrono::Utc::now();
-    let stamped = sqlx::query(
-        r#"UPDATE "users" SET "last_logout_ip" = $2, "last_logout_time" = $3, "updated_at" = $3 WHERE "id" = $1"#,
-    )
-    .bind(user_id)
-    .bind(prov.ip.clone())
-    .bind(now)
-    .execute(pool)
-    .await;
+    let stamped = identity::stamp_logout(pool, user_id, prov.ip.as_deref(), now).await;
     if stamped.is_err() {
         return bare();
     }
@@ -2295,6 +2123,17 @@ async fn signout_space(State(state): State<AppState>, req: axum::extract::Reques
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overlong_redirect_location_answers_400() {
+        let long = format!("http://app.test/?{}", "a".repeat(17_000));
+        assert_eq!(
+            redirect_response(long, Vec::new()).status(),
+            StatusCode::BAD_REQUEST
+        );
+        let ok = redirect_response("http://app.test/?next_path=/x".to_owned(), Vec::new());
+        assert_eq!(ok.status(), StatusCode::FOUND);
+    }
 
     fn prov_with(secret: Option<&str>, token: Option<&str>) -> Provenance {
         Provenance {
@@ -2342,6 +2181,35 @@ mod tests {
                 &form
             ),
             Ok(())
+        );
+    }
+
+    #[test]
+    fn csrf_gate_unmasks_a_64_char_cookie() {
+        // `_get_secret`: a masked cookie unmasks before the compare, so the
+        // cookie value itself and any other masking of the secret pass.
+        let secret = "abcdefghijklmnopqrstuvwxyz012345";
+        let cookie = csrf_kernel::mask_secret(secret).expect("masks");
+        let other = csrf_kernel::mask_secret(secret).expect("masks");
+        let pairs: Vec<(String, String)> = vec![];
+        assert_eq!(
+            csrf_gate(&prov_with(Some(&cookie), Some(&cookie)), &pairs),
+            Ok(())
+        );
+        assert_eq!(
+            csrf_gate(&prov_with(Some(&cookie), Some(&other)), &pairs),
+            Ok(())
+        );
+        // A token for a different secret still fails.
+        let wrong = csrf_kernel::mask_secret(&csrf_kernel::new_secret()).expect("masks");
+        assert_eq!(
+            csrf_gate(&prov_with(Some(&cookie), Some(&wrong)), &pairs),
+            Err(CsrfDenial::BadToken)
+        );
+        // A 64-char cookie with invalid characters fails closed.
+        assert_eq!(
+            csrf_gate(&prov_with(Some(&"!".repeat(64)), Some(&other)), &pairs),
+            Err(CsrfDenial::BadToken)
         );
     }
 
@@ -2400,34 +2268,50 @@ mod tests {
         );
     }
 
+    fn headers_with_content_type(value: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_TYPE, value.parse().expect("content type"));
+        headers
+    }
+
     #[test]
     fn check_request_email_follows_the_media_type() {
+        let json = headers_with_content_type("application/json");
+        let urlencoded = headers_with_content_type("application/x-www-form-urlencoded");
+        let multipart = headers_with_content_type("multipart/form-data; boundary=abc");
+        let text = headers_with_content_type("text/plain");
         // JSON object member.
         assert_eq!(
-            check_request_email("application/json", br#"{"email":"h@x.com"}"#),
+            check_request_email(&json, br#"{"email":"h@x.com"}"#),
             Ok(Some("h@x.com".to_owned()))
         );
         // Empty body is `{}` whatever the media type.
-        assert_eq!(check_request_email("application/json", b""), Ok(None));
-        assert_eq!(check_request_email("text/plain", b""), Ok(None));
+        assert_eq!(check_request_email(&json, b""), Ok(None));
+        assert_eq!(check_request_email(&text, b""), Ok(None));
         // Urlencoded reads the last field; empty stays missing.
         assert_eq!(
-            check_request_email(
-                "application/x-www-form-urlencoded",
-                b"email=a%40x.com&email=b%40x.com"
-            ),
+            check_request_email(&urlencoded, b"email=a%40x.com&email=b%40x.com"),
             Ok(Some("b@x.com".to_owned()))
         );
+        assert_eq!(check_request_email(&urlencoded, b"email="), Ok(None));
+        // Multipart reads the last field; missing or empty stays missing.
+        let framed = b"--abc\r\nContent-Disposition: form-data; name=\"email\"\r\n\r\nh@x.com\r\n--abc--\r\n";
         assert_eq!(
-            check_request_email("application/x-www-form-urlencoded", b"email="),
-            Ok(None)
+            check_request_email(&multipart, framed),
+            Ok(Some("h@x.com".to_owned()))
         );
+        let framed_empty =
+            b"--abc\r\nContent-Disposition: form-data; name=\"email\"\r\n\r\n\r\n--abc--\r\n";
+        assert_eq!(check_request_email(&multipart, framed_empty), Ok(None));
         // Anything else is the content type back (DRF 415).
         assert_eq!(
-            check_request_email("text/plain", b"h@x.com"),
+            check_request_email(&text, b"h@x.com"),
             Err("text/plain".to_owned())
         );
-        assert_eq!(check_request_email("", b"h@x.com"), Err(String::new()));
+        assert_eq!(
+            check_request_email(&HeaderMap::new(), b"h@x.com"),
+            Err(String::new())
+        );
     }
 
     #[test]
@@ -2462,6 +2346,13 @@ mod tests {
         );
         assert!(form_pairs(Some("application/json"), b"email=a%40x.com").is_empty());
         assert!(form_pairs(None, b"email=a%40x.com").is_empty());
+        // Framed multipart reads fields in order (last wins downstream).
+        let framed = b"--abc\r\nContent-Disposition: form-data; name=\"email\"\r\n\r\na@x.com\r\n--abc\r\nContent-Disposition: form-data; name=\"email\"\r\n\r\nb@x.com\r\n--abc--\r\n";
+        let pairs = form_pairs(Some("multipart/form-data; boundary=abc"), framed);
+        assert_eq!(
+            kernel::form_field(&pairs, "email"),
+            kernel::FormField::Present("b@x.com")
+        );
     }
 
     #[test]

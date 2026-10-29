@@ -139,8 +139,9 @@ pub const BUSY_STATUSES: [AgentRunStatus; 6] = [
 
 /// `runner` columns in Django `_meta` order — the `SELECT` projection
 /// of [`SELECT_RUNNER_FOR_RUN_SQL`], pinned against FX-RSES-01 by the
-/// tests below.
-pub const RUNNER_COLUMNS: [&str; 29] = [
+/// tests below. The `09738d222` operator-pause pair trails the list
+/// (migration `0031_runner_paused`).
+pub const RUNNER_COLUMNS: [&str; 31] = [
     "id",
     "owner_id",
     "workspace_id",
@@ -170,6 +171,8 @@ pub const RUNNER_COLUMNS: [&str; 29] = [
     "updated_at",
     "revoked_at",
     "revoked_reason",
+    "paused_at",
+    "paused_by_id",
 ];
 
 // ---------------------------------------------------------------------------
@@ -180,7 +183,8 @@ pub const RUNNER_COLUMNS: [&str; 29] = [
 ///
 /// `$1` is the [`alive_threshold`], `$2` the run owner's id
 /// (`owner=run.owner`), `$3` the run's workspace id. `status` is the
-/// `'online'` literal; the `NOT EXISTS` arm is the
+/// `'online'` literal; the `paused_at IS NULL` arm is the `09738d222`
+/// `assignable()` pause rule; the `NOT EXISTS` arm is the
 /// `.exclude(agent_runs__status__in=BUSY_STATUSES)` reverse join
 /// (`agent_run.runner_id`, alias `U1`, values in [`BUSY_STATUSES`]
 /// order). The explicit `-last_heartbeat_at` order replaces
@@ -190,7 +194,7 @@ pub const RUNNER_COLUMNS: [&str; 29] = [
 ///
 /// There is deliberately no `provisioning` term — see the
 /// ported-bugs note.
-pub const SELECT_RUNNER_FOR_RUN_SQL: &str = "SELECT \"runner\".\"id\", \"runner\".\"owner_id\", \"runner\".\"workspace_id\", \"runner\".\"dev_machine_id\", \"runner\".\"pod_id\", \"runner\".\"name\", \"runner\".\"host_label\", \"runner\".\"provisioning\", \"runner\".\"visibility\", \"runner\".\"refresh_token_hash\", \"runner\".\"refresh_token_fingerprint\", \"runner\".\"refresh_token_generation\", \"runner\".\"previous_refresh_token_hash\", \"runner\".\"access_token_signing_key_version\", \"runner\".\"enrollment_token_hash\", \"runner\".\"enrollment_token_fingerprint\", \"runner\".\"enrolled_at\", \"runner\".\"capabilities\", \"runner\".\"status\", \"runner\".\"os\", \"runner\".\"arch\", \"runner\".\"runner_version\", \"runner\".\"dev_metadata\", \"runner\".\"protocol_version\", \"runner\".\"last_heartbeat_at\", \"runner\".\"created_at\", \"runner\".\"updated_at\", \"runner\".\"revoked_at\", \"runner\".\"revoked_reason\" FROM \"runner\" WHERE (\"runner\".\"last_heartbeat_at\" >= $1 AND \"runner\".\"owner_id\" = $2 AND \"runner\".\"status\" = 'online' AND \"runner\".\"workspace_id\" = $3 AND NOT (EXISTS(SELECT 1 AS \"a\" FROM \"agent_run\" U1 WHERE (U1.\"status\" IN ('assigned', 'waiting_for_worktree', 'running', 'cancel_requested', 'awaiting_approval', 'awaiting_reauth') AND U1.\"runner_id\" = (\"runner\".\"id\")) LIMIT 1))) ORDER BY \"runner\".\"last_heartbeat_at\" DESC LIMIT 1 FOR UPDATE SKIP LOCKED";
+pub const SELECT_RUNNER_FOR_RUN_SQL: &str = "SELECT \"runner\".\"id\", \"runner\".\"owner_id\", \"runner\".\"workspace_id\", \"runner\".\"dev_machine_id\", \"runner\".\"pod_id\", \"runner\".\"name\", \"runner\".\"host_label\", \"runner\".\"provisioning\", \"runner\".\"visibility\", \"runner\".\"refresh_token_hash\", \"runner\".\"refresh_token_fingerprint\", \"runner\".\"refresh_token_generation\", \"runner\".\"previous_refresh_token_hash\", \"runner\".\"access_token_signing_key_version\", \"runner\".\"enrollment_token_hash\", \"runner\".\"enrollment_token_fingerprint\", \"runner\".\"enrolled_at\", \"runner\".\"capabilities\", \"runner\".\"status\", \"runner\".\"os\", \"runner\".\"arch\", \"runner\".\"runner_version\", \"runner\".\"dev_metadata\", \"runner\".\"protocol_version\", \"runner\".\"last_heartbeat_at\", \"runner\".\"created_at\", \"runner\".\"updated_at\", \"runner\".\"revoked_at\", \"runner\".\"revoked_reason\", \"runner\".\"paused_at\", \"runner\".\"paused_by_id\" FROM \"runner\" WHERE (\"runner\".\"last_heartbeat_at\" >= $1 AND \"runner\".\"paused_at\" IS NULL AND \"runner\".\"owner_id\" = $2 AND \"runner\".\"status\" = 'online' AND \"runner\".\"workspace_id\" = $3 AND NOT (EXISTS(SELECT 1 AS \"a\" FROM \"agent_run\" U1 WHERE (U1.\"status\" IN ('assigned', 'waiting_for_worktree', 'running', 'cancel_requested', 'awaiting_approval', 'awaiting_reauth') AND U1.\"runner_id\" = (\"runner\".\"id\")) LIMIT 1))) ORDER BY \"runner\".\"last_heartbeat_at\" DESC LIMIT 1 FOR UPDATE SKIP LOCKED";
 
 // ---------------------------------------------------------------------------
 // Cap pair (`matcher.py:363-372`, `:451-460`)
@@ -293,15 +297,16 @@ pub fn pod_has_runner_general_sql(owner_count: usize) -> Option<String> {
 // Assignment predicate (`matcher.py:463-465`)
 // ---------------------------------------------------------------------------
 
-/// `eligible_for_assignment` (`:463-465`): `Q(pk=runner.pk,
-/// status=RunnerStatus.ONLINE)` as a `WHERE` fragment.
+/// `eligible_for_assignment` (`:463-465`, `09738d222` adds the
+/// pause arm): `Q(pk=runner.pk, status=RunnerStatus.ONLINE,
+/// paused_at__isnull=True)` as a `WHERE` fragment.
 /// `runner_param` is the already-rendered runner id (`$N` at
 /// runtime, the quoted literal when replaying fixtures). Heartbeat
 /// freshness and busy state are deliberately absent — a convenience
 /// predicate for assertions/tests, ported as written.
 pub fn eligible_for_assignment_predicate(runner_param: &str) -> String {
     format!(
-        "(\"runner\".\"id\" = {p} AND \"runner\".\"status\" = 'online')",
+        "(\"runner\".\"id\" = {p} AND \"runner\".\"status\" = 'online' AND \"runner\".\"paused_at\" IS NULL)",
         p = runner_param
     )
 }
@@ -391,7 +396,7 @@ mod tests {
             .map(|f| f["column"].as_str().expect("column"))
             .collect();
         assert_eq!(RUNNER_COLUMNS.to_vec(), expected);
-        assert_eq!(RUNNER_COLUMNS.len(), 29);
+        assert_eq!(RUNNER_COLUMNS.len(), 31);
     }
 
     #[test]
@@ -427,7 +432,9 @@ mod tests {
             .replace("'ce755a5b0c644e838f276218e639df62'::uuid", "$2")
             .replace("'af244c9a30a74b4a99b23a5c5ac09847'::uuid", "$3");
         assert_eq!(normalized, SELECT_RUNNER_FOR_RUN_SQL);
-        // Captured WHERE term order: threshold, owner, status, workspace.
+        // Captured WHERE term order: threshold, pause, owner, status,
+        // workspace (`09738d222`: `assignable()` sorts its kwargs, so the
+        // pause arm lands between the threshold and the status).
         let where_clause = SELECT_RUNNER_FOR_RUN_SQL
             .split_once(" WHERE (")
             .expect("WHERE")
@@ -435,6 +442,7 @@ mod tests {
         let status_term = format!("\"runner\".\"status\" = '{RUNNER_STATUS_ONLINE}'");
         let terms = [
             "\"runner\".\"last_heartbeat_at\" >= $1",
+            "\"runner\".\"paused_at\" IS NULL",
             "\"runner\".\"owner_id\" = $2",
             status_term.as_str(),
             "\"runner\".\"workspace_id\" = $3",
@@ -674,12 +682,12 @@ mod tests {
         let ours = eligible_for_assignment_predicate("'297ebdfd-8d3b-44ae-b295-964880f92013'");
         assert_eq!(
             ours,
-            "(\"runner\".\"id\" = '297ebdfd-8d3b-44ae-b295-964880f92013' AND \"runner\".\"status\" = 'online')"
+            "(\"runner\".\"id\" = '297ebdfd-8d3b-44ae-b295-964880f92013' AND \"runner\".\"status\" = 'online' AND \"runner\".\"paused_at\" IS NULL)"
         );
         assert!(ours.contains(RUNNER_STATUS_ONLINE));
         assert_eq!(
             eligible_for_assignment_predicate("$1"),
-            "(\"runner\".\"id\" = $1 AND \"runner\".\"status\" = 'online')"
+            "(\"runner\".\"id\" = $1 AND \"runner\".\"status\" = 'online' AND \"runner\".\"paused_at\" IS NULL)"
         );
     }
 }

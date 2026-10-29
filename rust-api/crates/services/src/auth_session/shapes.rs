@@ -46,6 +46,7 @@
 //!   `email=False` ([`python_bool`]); space reset targets carry a
 //!   double slash (handler-owned composition, FX-02 Q4).
 
+use pidash_compat::http::split_authority;
 use serde_json::Value;
 
 /// `AUTHENTICATION_ERROR_CODES` (`adapter/error.py:5-74`), source order.
@@ -312,18 +313,6 @@ fn split_scheme(s: &str) -> (String, &str) {
     }
 }
 
-/// Authority split for the post-scheme remainder: a leading `//`
-/// opens an authority running to the next `/?#` (empty authority, as
-/// in `///x`, yields netloc `""` and path `/x`, matching `urlparse`).
-fn split_authority(rest: &str) -> (&str, &str) {
-    if let Some(after) = rest.strip_prefix("//") {
-        let end = after.find(['/', '?', '#']).unwrap_or(after.len());
-        (&after[..end], &after[end..])
-    } else {
-        ("", rest)
-    }
-}
-
 /// Path without query/fragment (`urlparse(...).path`).
 fn path_only(s: &str) -> &str {
     let end = s.find(['?', '#']).unwrap_or(s.len());
@@ -342,14 +331,21 @@ pub fn url_has_allowed_host_and_scheme(url: &str, allowed_hosts: &[&str]) -> boo
     check_allowed(url, allowed_hosts) && check_allowed(&normalised, allowed_hosts)
 }
 
+/// `MAX_URL_REDIRECT_LENGTH` (`django/utils/http.py:51`):
+/// `HttpResponseRedirectBase` raises `DisallowedRedirect` (400) when
+/// the final `Location` is longer than this many characters
+/// (`django/http/response.py:621-625`).
+pub const MAX_URL_REDIRECT_LENGTH: usize = 16384;
+
 fn check_allowed(url: &str, allowed_hosts: &[&str]) -> bool {
-    // `///` prefix and over-long URLs are unsafe; `len` counts code
-    // points as Python `len()` does.
-    if url.starts_with("///") || url.chars().count() > 2048 {
+    // A `///` prefix is unsafe (`django/utils/http.py:368-372`). There
+    // is no length cap here in 4.2: the 2048 limit is a Django 6 rule,
+    // and over-long redirects 400 later, in `HttpResponseRedirectBase`.
+    if url.starts_with("///") {
         return false;
     }
     let (scheme, rest) = split_scheme(url);
-    let (netloc, _) = split_authority(rest);
+    let (netloc, _) = split_authority(rest).unwrap_or(("", rest));
     if netloc.is_empty() && !scheme.is_empty() {
         return false;
     }
@@ -380,7 +376,7 @@ pub fn validate_next_path(next_path: &str) -> String {
     }
     let scrubbed = next_path.replace('\\', "");
     let (scheme, rest) = split_scheme(&scrubbed);
-    let (netloc, path) = split_authority(rest);
+    let (netloc, path) = split_authority(rest).unwrap_or(("", rest));
     let candidate = if !scheme.is_empty() || !netloc.is_empty() {
         path_only(path).to_owned()
     } else {
@@ -425,7 +421,7 @@ fn contains_suspicious_patterns(path: &str) -> bool {
 /// Netloc of an absolute base URL (`urlparse(base).netloc`).
 pub fn netloc_of(base_url: &str) -> &str {
     let (_, rest) = split_scheme(base_url);
-    let (netloc, _) = split_authority(rest);
+    let (netloc, _) = split_authority(rest).unwrap_or(("", rest));
     netloc
 }
 
@@ -939,6 +935,39 @@ mod tests {
             get_safe_redirect_url(app, "", &[], &allowed),
             get("success_no_next")
         );
+    }
+
+    #[test]
+    fn allowed_host_check_has_no_length_cap() {
+        // Django 4.2 (`django/utils/http.py:368-372`) rejects only the
+        // `///` prefix here; the 2048 limit is a Django 6 rule.
+        let allowed = ["app.test"];
+        let long = format!("http://app.test/?{}", "a".repeat(3000));
+        assert!(long.chars().count() > 2048);
+        assert!(url_has_allowed_host_and_scheme(&long, &allowed));
+        assert!(!url_has_allowed_host_and_scheme("///app.test/x", &allowed));
+        assert_eq!(MAX_URL_REDIRECT_LENGTH, 16384);
+    }
+
+    #[test]
+    fn long_redirect_keeps_next_path() {
+        let allowed = ["app.test"];
+        let url = get_safe_redirect_url(
+            "http://app.test",
+            "/ws/projects/",
+            &[
+                ("error_code", ParamValue::Int(5075)),
+                (
+                    "error_message",
+                    ParamValue::Str("INVALID_EMAIL_SIGN_IN".to_owned()),
+                ),
+                ("email", ParamValue::Str(format!("{}@", "a".repeat(2000)))),
+            ],
+            &allowed,
+        );
+        assert!(url.contains("next_path=/ws/projects/"), "{url}");
+        assert!(url.chars().count() > 2048, "{}", url.len());
+        assert!(url.chars().count() <= MAX_URL_REDIRECT_LENGTH);
     }
 
     #[test]
