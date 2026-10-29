@@ -408,6 +408,12 @@ function todo(target: string): never {
 }
 
 /**
+ * Module lifecycle labels as the sidebar status pill renders them (the
+ * driver's copy of MODULE_STATUS_LABELS; drivers never import app UI).
+ */
+const MODULE_DETAIL_STATUS_LABELS = ["Backlog", "Planned", "In Progress", "Paused", "Completed", "Cancelled"] as const;
+
+/**
  * Whether the current address has resolved to a settled surface: the
  * settings shell, a denial, one of the instance screens, or the
  * workspace-not-found screen. Exported so it can be exercised directly in
@@ -32372,7 +32378,9 @@ export class WebNewDriver implements ParityDriver {
   // --- Module detail/analytics/links (NEWFRONT-310, MOD-029-035). Appended stubs.
 
   async modulesDetailSidebarName(): Promise<string | null> {
-    return todo("modulesDetailSidebarName");
+    // The detail and peek mounts render the same sidebar tree; the
+    // cross-cutting reader already covers its name input.
+    return this.modulesXSidebarName(this.moduleSidebar());
   }
 
   async modulesDetailBadgeText(): Promise<string | null> {
@@ -32689,80 +32697,235 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async modulesDetailSidebarStatus(): Promise<string | null> {
-    return todo("modulesDetailSidebarStatus");
+    for (const status of MODULE_DETAIL_STATUS_LABELS) {
+      const pill = this.moduleSidebar().getByRole("button", { name: status, exact: true });
+      if (
+        (await pill.count()) > 0 &&
+        (await pill
+          .first()
+          .isVisible()
+          .catch(() => false))
+      )
+        return status;
+    }
+    return null;
   }
 
-  async modulesDetailSidebarSetStatus(_status: string): Promise<void> {
-    return todo("modulesDetailSidebarSetStatus");
+  async modulesDetailSidebarSetStatus(status: string): Promise<void> {
+    // No early return when already set: re-picking the same value is a
+    // no-op write, and always activating keeps the method pinnable with
+    // a static fake (the read already proves the end state).
+    const current = await this.modulesDetailSidebarStatus();
+    if (current === null) throw new Error("[parity] module status pill never rendered.");
+    await this.moduleSidebar()
+      .getByRole("button", { name: current, exact: true })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("option", { name: status }).first().click({ timeout: WebNewDriver.WAIT_MS });
+    await expect.poll(() => this.modulesDetailSidebarStatus(), { timeout: WebNewDriver.WAIT_MS }).toBe(status);
   }
 
   async modulesDetailSidebarDescription(): Promise<string | null> {
-    return todo("modulesDetailSidebarDescription");
+    const area = this.moduleSidebar().getByTestId("modules-sidebar-description").first();
+    if ((await area.count()) === 0) return null;
+    return area.inputValue({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async modulesDetailSidebarDateText(): Promise<string> {
-    return todo("modulesDetailSidebarDateText");
+    const trigger = this.moduleSidebar().getByTestId("modules-sidebar-dates-trigger").first();
+    await trigger.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return (await trigger.innerText()).trim().replace(/\s+/g, " ");
   }
 
   async modulesDetailSidebarDateDisabled(): Promise<boolean> {
-    return todo("modulesDetailSidebarDateDisabled");
+    const trigger = this.moduleSidebar().getByTestId("modules-sidebar-dates-trigger").first();
+    await trigger.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return trigger.isDisabled();
   }
 
   async modulesDetailSidebarOpenDatePicker(): Promise<void> {
-    return todo("modulesDetailSidebarOpenDatePicker");
+    // The trigger toggles, so an already-open calendar is left alone:
+    // clicking again would shut it.
+    if (
+      !(await this.moduleSidebarDatesCalendar()
+        .first()
+        .isVisible()
+        .catch(() => false))
+    ) {
+      await this.moduleSidebar()
+        .getByTestId("modules-sidebar-dates-trigger")
+        .first()
+        .click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    await this.moduleSidebarDatesCalendar().first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
-  async modulesDetailPickDateDay(_label: string): Promise<void> {
-    return todo("modulesDetailPickDateDay");
+  async modulesDetailPickDateDay(label: string): Promise<void> {
+    // The spec addresses days by the old calendar's ordinal labels
+    // ("October 15th, 2026"); the new calendar renders plain labels
+    // ("October 15, 2026"), so strip ordinals before matching, then walk
+    // forward until the day's month shows (the grid renders one month
+    // plus its outside days).
+    const plain = label.replace(/(\d+)(st|nd|rd|th)/, "$1");
+    const calendar = this.moduleSidebarDatesCalendar().first();
+    await calendar.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    for (let step = 0; step < 24; step++) {
+      const day = calendar.getByRole("button", { name: plain, exact: true }).first();
+      if ((await day.count()) > 0 && (await day.isVisible().catch(() => false))) {
+        await day.click({ timeout: WebNewDriver.WAIT_MS });
+        return;
+      }
+      await calendar.getByRole("button", { name: "Next month" }).click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    throw new Error(`[parity] sidebar calendar never showed ${label}.`);
   }
 
   async modulesDetailDismissDatePicker(): Promise<void> {
-    return todo("modulesDetailDismissDatePicker");
+    await this.page.keyboard.press("Escape");
+    await this.moduleSidebarDatesCalendar()
+      .first()
+      .waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => undefined);
   }
 
   async modulesDetailSidebarLead(): Promise<string | null> {
-    return todo("modulesDetailSidebarLead");
+    if ((await this.moduleSidebar().count()) === 0) return null;
+    const row = this.moduleSidebarRow("Lead");
+    const avatar = row.getByRole("img").first();
+    if ((await avatar.count()) === 0) {
+      // Unset: the trigger shows the prompt.
+      const trigger = row.getByRole("button").first();
+      if ((await trigger.count()) === 0) return null;
+      return ((await trigger.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim() || null;
+    }
+    // Set: the initial plus the resolved display name (the new picker
+    // resolves names where the old row kept the placeholder; the spec
+    // forks on that).
+    const name = ((await avatar.getAttribute("aria-label").catch(() => "")) ?? "").trim();
+    if (name === "") return null;
+    return `${name.charAt(0)} ${name}`;
   }
 
-  async modulesDetailSidebarSetLead(_name: string): Promise<void> {
-    return todo("modulesDetailSidebarSetLead");
+  async modulesDetailSidebarSetLead(name: string): Promise<void> {
+    const row = this.moduleSidebarRow("Lead");
+    await row.getByRole("button").first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("option", { name }).first().click({ timeout: WebNewDriver.WAIT_MS });
+    // Equality, not change: the row must land on this lead, and a static
+    // fake can pin that (the oracle polls for mere change).
+    await expect
+      .poll(() => this.modulesDetailSidebarLead(), { timeout: WebNewDriver.WAIT_MS })
+      .toBe(`${name.charAt(0)} ${name}`);
   }
 
   async modulesDetailSidebarMembers(): Promise<string[]> {
-    return todo("modulesDetailSidebarMembers");
+    // Avatar aria-labels carry the resolved display names. The stack
+    // windows at three avatars plus a +N badge; the specs stay within.
+    const avatars = this.moduleSidebarRow("Members").getByRole("img");
+    const total = await avatars.count();
+    const names: string[] = [];
+    for (let index = 0; index < total; index++) {
+      const label = (
+        (await avatars
+          .nth(index)
+          .getAttribute("aria-label")
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (label !== "") names.push(label);
+    }
+    return names;
   }
 
-  async modulesDetailSidebarAddMember(_name: string): Promise<void> {
-    return todo("modulesDetailSidebarAddMember");
+  async modulesDetailSidebarAddMember(name: string): Promise<void> {
+    const row = this.moduleSidebarRow("Members");
+    await row.getByRole("button").first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("option", { name }).first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.keyboard.press("Escape");
+    await expect.poll(() => this.modulesDetailSidebarMembers(), { timeout: WebNewDriver.WAIT_MS }).toContain(name);
   }
 
   async modulesDetailSidebarStatusDisabled(): Promise<boolean> {
-    return todo("modulesDetailSidebarStatusDisabled");
+    for (const status of MODULE_DETAIL_STATUS_LABELS) {
+      const pill = this.moduleSidebar().getByRole("button", { name: status, exact: true }).first();
+      if ((await pill.count()) === 0) continue;
+      return pill.isDisabled().catch(() => true);
+    }
+    return true;
   }
 
   async modulesDetailSidebarLeadDisabled(): Promise<boolean> {
-    return todo("modulesDetailSidebarLeadDisabled");
+    return this.moduleSidebarRow("Lead")
+      .getByRole("button")
+      .first()
+      .isDisabled({ timeout: WebNewDriver.WAIT_MS })
+      .catch(() => true);
   }
 
   async modulesDetailSidebarMembersDisabled(): Promise<boolean> {
-    return todo("modulesDetailSidebarMembersDisabled");
+    return this.moduleSidebarRow("Members")
+      .getByRole("button")
+      .first()
+      .isDisabled({ timeout: WebNewDriver.WAIT_MS })
+      .catch(() => true);
   }
 
   async modulesDetailSidebarWorkItemsText(): Promise<string> {
-    return todo("modulesDetailSidebarWorkItemsText");
+    const value = this.moduleSidebarRow("Work items").locator("span.text-body").first();
+    if ((await value.count()) === 0) return "";
+    return ((await value.innerText()) ?? "").replace(/\s+/g, " ").trim();
   }
 
   async modulesDetailSidebarPointsText(): Promise<string | null> {
-    return todo("modulesDetailSidebarPointsText");
+    const row = this.moduleSidebarRow("Points");
+    if ((await row.count()) === 0) return null;
+    const value = row.locator("span.text-body").first();
+    if ((await value.count()) === 0) return null;
+    return ((await value.innerText()) ?? "").replace(/\s+/g, " ").trim();
   }
 
   async modulesDetailSlowFetchShowsLoader(): Promise<boolean> {
-    return todo("modulesDetailSlowFetchShowsLoader");
+    // Same shape as the oracle: delay every modules GET so the skeleton
+    // window is watchable, watch before reloading, and let the route die
+    // with the test's page.
+    const pattern = "**/api/workspaces/**/modules**";
+    await this.page.route(pattern, async (route) => {
+      if (route.request().method() === "GET") {
+        await new Promise((resolve) => setTimeout(resolve, 4000));
+      }
+      try {
+        await route.continue();
+      } catch {
+        // A delayed handler can outlive the test: teardown disposes the
+        // route while it sleeps. Rethrow when the page is still open.
+        if (!this.page.isClosed()) throw new Error("[parity] loader delay route failed on an open page.");
+      }
+    });
+    const seenPromise = this.page
+      .getByTestId("modules-analytics-sidebar-skeleton")
+      .first()
+      .waitFor({ timeout: 90_000 })
+      .then(
+        () => true,
+        () => false
+      );
+    await this.page.reload({ waitUntil: "domcontentloaded" });
+    const seen = await seenPromise;
+    await this.moduleSidebar().first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return seen;
   }
 
   /** The module analytics sidebar (slice C's tree, both mounts). */
   private moduleSidebar(): Locator {
     return this.page.getByTestId("modules-analytics-sidebar");
+  }
+
+  /** One labeled property group inside the analytics sidebar. */
+  private moduleSidebarRow(label: string): Locator {
+    return this.moduleSidebar().getByRole("group", { name: label });
+  }
+
+  /** The sidebar date picker's portalled range calendar. */
+  private moduleSidebarDatesCalendar(): Locator {
+    return this.page.getByTestId("modules-sidebar-dates-calendar");
   }
 
   /** Breakdown rows of the selected tab, in rendered order. */

@@ -6,7 +6,8 @@
 // the trail, the switcher, the unknown-module state, layout switching,
 // the filter toggle, the display group entries, the small-screen bar,
 // the analytics entry and dialog, and the sidebar toggle with its
-// persisted collapse flag.
+// persisted collapse flag. The area gate (NEWFRONT-808) adds the MOD-033
+// sidebar field reads and writes, the counts, and the slow-fetch loader.
 // A fake Page answers from a path-keyed table so each case pins the hook a
 // method reads or the control it activates; no browser runs here.
 import type { Locator, Page } from "@playwright/test";
@@ -62,6 +63,7 @@ class FakePage {
   readonly continued: string[] = [];
   path = "/acme/projects/p1/modules/m1";
   titleValue = "Website - Delivery";
+  closed = false;
 
   constructor(private readonly table: Table = {}) {}
 
@@ -146,6 +148,7 @@ class FakePage {
         self.pageCalls.push(`waitForURL:${String(pattern)}`);
       },
       waitForTimeout: async () => undefined,
+      isClosed: () => self.closed,
       keyboard: { press: async () => undefined },
       route: async (matcher: unknown, handler: (route: unknown) => Promise<void>) => {
         self.routes.push({ matcher, handler: handler as never });
@@ -567,5 +570,352 @@ describe("modulesDetailMobileOpenAnalytics", () => {
     await driver.modulesDetailMobileOpenAnalytics();
     expect(fake.clicks).toEqual(["page testid(issues-mobile-header) testid(module-analytics-entry)"]);
     expect(fake.keys).toContain("testid:issues-analytics-body");
+  });
+});
+
+// Sidebar field reads and writes (NEWFRONT-808 gate, MOD-033): status,
+// identity, dates, lead, members, counts, points gating, and the slow
+// fetch loader. Keys compose the sidebar scope with the row or control
+// each method addresses.
+const SIDEBAR = "page testid(modules-analytics-sidebar)";
+
+function pillKey(label: string): string {
+  return `${SIDEBAR} role(button,${label})`;
+}
+
+describe("modulesDetailSidebarName", () => {
+  it("reads the sidebar name input", async () => {
+    const { driver } = harness({ [`${SIDEBAR} testid(modules-sidebar-name)`]: { value: " Delivery " } });
+    expect(await driver.modulesDetailSidebarName()).toBe("Delivery");
+  });
+
+  it("reads null when the name is blank or absent", async () => {
+    const blank = harness({ [`${SIDEBAR} testid(modules-sidebar-name)`]: { value: "  " } });
+    expect(await blank.driver.modulesDetailSidebarName()).toBe(null);
+    const absent = harness({ [`${SIDEBAR} testid(modules-sidebar-name)`]: { count: 0 } });
+    expect(await absent.driver.modulesDetailSidebarName()).toBe(null);
+  });
+});
+
+describe("modulesDetailSidebarStatus", () => {
+  const OTHERS = ["Backlog", "Planned", "Paused", "Completed", "Cancelled"];
+
+  it("returns the visible pill label", async () => {
+    const table: Table = { [pillKey("In Progress")]: { count: 1, visible: true } };
+    for (const label of OTHERS) table[pillKey(label)] = { count: 0 };
+    const { driver } = harness(table);
+    expect(await driver.modulesDetailSidebarStatus()).toBe("In Progress");
+  });
+
+  it("returns null when no pill renders", async () => {
+    const table: Table = { [pillKey("In Progress")]: { count: 0 } };
+    for (const label of OTHERS) table[pillKey(label)] = { count: 0 };
+    const { driver } = harness(table);
+    expect(await driver.modulesDetailSidebarStatus()).toBe(null);
+  });
+});
+
+describe("modulesDetailSidebarSetStatus", () => {
+  it("throws when the pill never rendered", async () => {
+    const table: Table = {};
+    for (const label of ["Backlog", "Planned", "In Progress", "Paused", "Completed", "Cancelled"]) {
+      table[pillKey(label)] = { count: 0 };
+    }
+    const { driver } = harness(table);
+    await expect(driver.modulesDetailSidebarSetStatus("In Progress")).rejects.toThrow(/never rendered/);
+  });
+
+  it("activates the trigger and option, then verifies the pill", async () => {
+    const table: Table = { [pillKey("In Progress")]: { count: 1, visible: true } };
+    for (const label of ["Backlog", "Planned", "Paused", "Completed", "Cancelled"]) {
+      table[pillKey(label)] = { count: 0 };
+    }
+    const { fake, driver } = harness(table);
+    await driver.modulesDetailSidebarSetStatus("In Progress");
+    expect(fake.clicks).toContain(pillKey("In Progress"));
+    expect(fake.clicks).toContain("page role(option,In Progress)");
+  });
+});
+
+describe("modulesDetailSidebarDescription", () => {
+  it("reads the description field", async () => {
+    const { driver } = harness({ [`${SIDEBAR} testid(modules-sidebar-description)`]: { value: "Why" } });
+    expect(await driver.modulesDetailSidebarDescription()).toBe("Why");
+  });
+
+  it("reads null when the field is absent", async () => {
+    const { driver } = harness({ [`${SIDEBAR} testid(modules-sidebar-description)`]: { count: 0 } });
+    expect(await driver.modulesDetailSidebarDescription()).toBe(null);
+  });
+});
+
+describe("modulesDetailSidebarDateText", () => {
+  it("reads the trigger label whitespace-collapsed", async () => {
+    const { driver } = harness({
+      [`${SIDEBAR} testid(modules-sidebar-dates-trigger)`]: { text: "Sep 01,  2026   Oct 18, 2026" },
+    });
+    expect(await driver.modulesDetailSidebarDateText()).toBe("Sep 01, 2026 Oct 18, 2026");
+  });
+});
+
+describe("modulesDetailSidebarDateDisabled", () => {
+  it("reads the trigger disabled flag", async () => {
+    const key = `${SIDEBAR} testid(modules-sidebar-dates-trigger)`;
+    expect(await harness({ [key]: { disabled: true } }).driver.modulesDetailSidebarDateDisabled()).toBe(true);
+    expect(await harness({ [key]: { disabled: false } }).driver.modulesDetailSidebarDateDisabled()).toBe(false);
+  });
+});
+
+describe("modulesDetailSidebarOpenDatePicker", () => {
+  const CALENDAR = "page testid(modules-sidebar-dates-calendar)";
+  const TRIGGER = `${SIDEBAR} testid(modules-sidebar-dates-trigger)`;
+
+  it("clicks the trigger when the calendar is hidden", async () => {
+    const { fake, driver } = harness({ [CALENDAR]: { visible: false } });
+    await driver.modulesDetailSidebarOpenDatePicker();
+    expect(fake.clicks).toEqual([TRIGGER]);
+  });
+
+  it("leaves an open calendar alone", async () => {
+    const { fake, driver } = harness({ [CALENDAR]: { visible: true } });
+    await driver.modulesDetailSidebarOpenDatePicker();
+    expect(fake.clicks).toEqual([]);
+  });
+});
+
+describe("modulesDetailPickDateDay", () => {
+  const CALENDAR = "page testid(modules-sidebar-dates-calendar)";
+
+  it("strips ordinals and clicks the visible day", async () => {
+    const { fake, driver } = harness({ [`${CALENDAR} role(button,October 15, 2026)`]: { count: 1, visible: true } });
+    await driver.modulesDetailPickDateDay("October 15th, 2026");
+    expect(fake.clicks).toEqual([`${CALENDAR} role(button,October 15, 2026)`]);
+  });
+
+  it("walks forward a bounded number of months, then throws", async () => {
+    const { fake, driver } = harness({ [`${CALENDAR} role(button,October 15, 2026)`]: { count: 0 } });
+    await expect(driver.modulesDetailPickDateDay("October 15th, 2026")).rejects.toThrow(/never showed/);
+    expect(fake.clicks).toHaveLength(24);
+    expect(fake.clicks[0]).toBe(`${CALENDAR} role(button,Next month)`);
+  });
+});
+
+describe("modulesDetailDismissDatePicker", () => {
+  it("resolves once the calendar detaches", async () => {
+    const { driver } = harness();
+    await expect(driver.modulesDetailDismissDatePicker()).resolves.toBe(undefined);
+  });
+});
+
+describe("modulesDetailSidebarLead", () => {
+  const ROW = `${SIDEBAR} role(group,Lead)`;
+
+  it("returns the initial plus the resolved name when set", async () => {
+    const { driver } = harness({ [`${ROW} role(img,)`]: { count: 1, attrs: { "aria-label": "Ada Lovelace" } } });
+    expect(await driver.modulesDetailSidebarLead()).toBe("A Ada Lovelace");
+  });
+
+  it("returns the prompt when unset", async () => {
+    const { driver } = harness({
+      [`${ROW} role(img,)`]: { count: 0 },
+      [`${ROW} role(button,)`]: { count: 1, text: "Lead" },
+    });
+    expect(await driver.modulesDetailSidebarLead()).toBe("Lead");
+  });
+
+  it("returns null when the sidebar, name, or trigger is absent", async () => {
+    const noSidebar = harness({ [SIDEBAR]: { count: 0 } });
+    expect(await noSidebar.driver.modulesDetailSidebarLead()).toBe(null);
+    const noName = harness({ [`${ROW} role(img,)`]: { count: 1, attrs: {} } });
+    expect(await noName.driver.modulesDetailSidebarLead()).toBe(null);
+    const noTrigger = harness({
+      [`${ROW} role(img,)`]: { count: 0 },
+      [`${ROW} role(button,)`]: { count: 0 },
+    });
+    expect(await noTrigger.driver.modulesDetailSidebarLead()).toBe(null);
+  });
+});
+
+describe("modulesDetailSidebarSetLead", () => {
+  it("activates the row and option, then verifies the lead", async () => {
+    const row = `${SIDEBAR} role(group,Lead)`;
+    const { fake, driver } = harness({ [`${row} role(img,)`]: { count: 1, attrs: { "aria-label": "Te Am" } } });
+    await driver.modulesDetailSidebarSetLead("Te Am");
+    expect(fake.clicks).toContain(`${row} role(button,)`);
+    expect(fake.clicks).toContain("page role(option,Te Am)");
+  });
+});
+
+describe("modulesDetailSidebarMembers", () => {
+  const AVATARS = `${SIDEBAR} role(group,Members) role(img,)`;
+
+  it("returns avatar names in order", async () => {
+    const { driver } = harness({ [AVATARS]: { count: 1, attrs: { "aria-label": "Ada Lovelace" } } });
+    expect(await driver.modulesDetailSidebarMembers()).toEqual(["Ada Lovelace"]);
+  });
+
+  it("returns empty when no avatar or name renders", async () => {
+    const none = harness({ [AVATARS]: { count: 0 } });
+    expect(await none.driver.modulesDetailSidebarMembers()).toEqual([]);
+    const blank = harness({ [AVATARS]: { count: 1, attrs: {} } });
+    expect(await blank.driver.modulesDetailSidebarMembers()).toEqual([]);
+  });
+});
+
+describe("modulesDetailSidebarAddMember", () => {
+  it("activates the row and option, then verifies membership", async () => {
+    const row = `${SIDEBAR} role(group,Members)`;
+    const { fake, driver } = harness({ [`${row} role(img,)`]: { count: 1, attrs: { "aria-label": "Te Am" } } });
+    await driver.modulesDetailSidebarAddMember("Te Am");
+    expect(fake.clicks).toContain(`${row} role(button,)`);
+    expect(fake.clicks).toContain("page role(option,Te Am)");
+  });
+});
+
+describe("modulesDetailSidebarStatusDisabled", () => {
+  it("reads the pill disabled flag", async () => {
+    const table: Table = { [pillKey("Backlog")]: { count: 1, disabled: true } };
+    for (const label of ["Planned", "In Progress", "Paused", "Completed", "Cancelled"]) {
+      table[pillKey(label)] = { count: 0 };
+    }
+    expect(await harness(table).driver.modulesDetailSidebarStatusDisabled()).toBe(true);
+    const enabled: Table = { [pillKey("Backlog")]: { count: 1, disabled: false } };
+    for (const label of ["Planned", "In Progress", "Paused", "Completed", "Cancelled"]) {
+      enabled[pillKey(label)] = { count: 0 };
+    }
+    expect(await harness(enabled).driver.modulesDetailSidebarStatusDisabled()).toBe(false);
+  });
+
+  it("refuses edits when no pill renders", async () => {
+    const table: Table = {};
+    for (const label of ["Backlog", "Planned", "In Progress", "Paused", "Completed", "Cancelled"]) {
+      table[pillKey(label)] = { count: 0 };
+    }
+    expect(await harness(table).driver.modulesDetailSidebarStatusDisabled()).toBe(true);
+  });
+});
+
+describe("modulesDetailSidebarLeadDisabled", () => {
+  const key = `${SIDEBAR} role(group,Lead) role(button,)`;
+
+  it("reads the lead trigger disabled flag", async () => {
+    expect(await harness({ [key]: { disabled: true } }).driver.modulesDetailSidebarLeadDisabled()).toBe(true);
+    expect(await harness({ [key]: { disabled: false } }).driver.modulesDetailSidebarLeadDisabled()).toBe(false);
+  });
+});
+
+describe("modulesDetailSidebarMembersDisabled", () => {
+  const key = `${SIDEBAR} role(group,Members) role(button,)`;
+
+  it("reads the members trigger disabled flag", async () => {
+    expect(await harness({ [key]: { disabled: true } }).driver.modulesDetailSidebarMembersDisabled()).toBe(true);
+    expect(await harness({ [key]: { disabled: false } }).driver.modulesDetailSidebarMembersDisabled()).toBe(false);
+  });
+});
+
+describe("modulesDetailSidebarWorkItemsText", () => {
+  const key = `${SIDEBAR} role(group,Work items) css(span.text-body)`;
+
+  it("reads the count text whitespace-collapsed", async () => {
+    const { driver } = harness({ [key]: { count: 1, text: " 1/2 " } });
+    expect(await driver.modulesDetailSidebarWorkItemsText()).toBe("1/2");
+  });
+
+  it("reads empty when the value is absent", async () => {
+    const { driver } = harness({ [key]: { count: 0 } });
+    expect(await driver.modulesDetailSidebarWorkItemsText()).toBe("");
+  });
+});
+
+describe("modulesDetailSidebarPointsText", () => {
+  const ROW = `${SIDEBAR} role(group,Points)`;
+
+  it("reads the points count text", async () => {
+    const { driver } = harness({ [`${ROW} css(span.text-body)`]: { count: 1, text: "0/2" } });
+    expect(await driver.modulesDetailSidebarPointsText()).toBe("0/2");
+  });
+
+  it("reads null when the row or value is absent", async () => {
+    const noRow = harness({ [ROW]: { count: 0 } });
+    expect(await noRow.driver.modulesDetailSidebarPointsText()).toBe(null);
+    const noValue = harness({ [ROW]: { count: 1 }, [`${ROW} css(span.text-body)`]: { count: 0 } });
+    expect(await noValue.driver.modulesDetailSidebarPointsText()).toBe(null);
+  });
+});
+
+describe("modulesDetailSlowFetchShowsLoader", () => {
+  function runHandler(
+    fake: FakePage,
+    route: {
+      request: () => { method: () => string };
+      fulfill: (answer: unknown) => Promise<void>;
+      continue: () => Promise<void>;
+    }
+  ): Promise<void> {
+    const registered = fake.routes[0];
+    if (registered === undefined) throw new Error("no route registered");
+    return registered.handler(route);
+  }
+
+  it("delays module reads, reloads, and reports the watched skeleton", async () => {
+    const { fake, driver } = harness();
+    await expect(driver.modulesDetailSlowFetchShowsLoader()).resolves.toBe(true);
+    expect(fake.routes).toHaveLength(1);
+    expect(fake.routes[0]?.matcher).toBe("**/api/workspaces/**/modules**");
+    expect(fake.pageCalls).toContain("reload");
+  });
+
+  it("delays GET reads and continues", async () => {
+    const { fake, driver } = harness();
+    await driver.modulesDetailSlowFetchShowsLoader();
+    let continued = false;
+    await runHandler(fake, {
+      request: () => ({ method: () => "GET" }),
+      fulfill: async () => undefined,
+      continue: async () => {
+        continued = true;
+      },
+    });
+    expect(continued).toBe(true);
+  });
+
+  it("continues writes without delay", async () => {
+    const { fake, driver } = harness();
+    await driver.modulesDetailSlowFetchShowsLoader();
+    let continued = false;
+    await runHandler(fake, {
+      request: () => ({ method: () => "POST" }),
+      fulfill: async () => undefined,
+      continue: async () => {
+        continued = true;
+      },
+    });
+    expect(continued).toBe(true);
+  });
+
+  it("rethrows a failed continue on an open page, swallows it once closed", async () => {
+    const open = harness();
+    await open.driver.modulesDetailSlowFetchShowsLoader();
+    await expect(
+      runHandler(open.fake, {
+        request: () => ({ method: () => "GET" }),
+        fulfill: async () => undefined,
+        continue: async () => {
+          throw new Error("gone");
+        },
+      })
+    ).rejects.toThrow(/loader delay route failed/);
+    const closed = harness();
+    closed.fake.closed = true;
+    await closed.driver.modulesDetailSlowFetchShowsLoader();
+    await expect(
+      runHandler(closed.fake, {
+        request: () => ({ method: () => "GET" }),
+        fulfill: async () => undefined,
+        continue: async () => {
+          throw new Error("gone");
+        },
+      })
+    ).resolves.toBe(undefined);
   });
 });
