@@ -365,7 +365,7 @@ test(
         // machine that runs them.
         expect(text).toContain("Connect your AI agents with Pi Dash");
         expect(text).toMatch(/hand tasks to those agents/);
-        expect(text).toMatch(/machine where the coding agent will run the work/);
+        expect(text).toMatch(/whichever machine hosts your coding agent/);
       }
       expect(text).toContain("macOS / Linux");
       await driver.advanceCliInstall();

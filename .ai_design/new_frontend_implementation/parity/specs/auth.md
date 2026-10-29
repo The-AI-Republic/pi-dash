@@ -663,9 +663,10 @@ The step's heading and explanation carry main PR 357 (`a41baf3a4`,
 PDASHOSS01-127, NEWFRONT-1029). The heading says "Connect your AI agents
 with Pi Dash" and the explanation covers two facts: the CLI is what
 connects the user's AI agents to Pi Dash, so tasks can be handed to
-those agents, and it must be installed on the machine where the coding
-agent runs the work. The rebuild writes its own sentence for the
-explanation (goal 1: our copy, not the old app's), so the parity
+those agents, and it has to live on whichever machine hosts the coding
+agent, since that is where the work happens. The rebuild writes its own
+sentence for the explanation (goal 1: our copy, not the old app's,
+including the install-location sentence), so the parity
 scenario pins intent — the step the user lands on and both required
 facts on the rebuild — while the heading sentence itself is the
 product copy main#357 settled. The oracle built from this checkout
