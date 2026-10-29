@@ -2045,7 +2045,9 @@ async fn collection_create(
         _ => "low".to_string(),
     };
     // Triage auto-create (`:128-143`): reuse the state, else insert with
-    // the `State.save` resequence (`max+15000`, `65000` on empty).
+    // the `State.save` resequence (`max+15000`, `65000` on empty). The max
+    // runs over `State.objects` — live, non-triage project states
+    // (`db/models/state.py:79-83,131-139`; PIDASHCONV-1638).
     // The queries-layer lookup selects `states.*`; decoding that row as a
     // scalar fails whenever a triage row exists, so read the `id` column
     // off the row instead (foundation read-only).
@@ -2068,7 +2070,7 @@ async fn collection_create(
         Some(id) => id,
         None => {
             let max_sequence: Option<f64> = match sqlx::query_scalar(
-                "SELECT MAX(sequence) FROM \"states\" WHERE \"states\".\"project_id\" = $1",
+                "SELECT MAX(sequence) FROM \"states\" WHERE \"states\".\"project_id\" = $1 AND \"states\".\"deleted_at\" IS NULL AND NOT (\"states\".\"group\" = 'triage')",
             )
             .bind(board.project_id)
             .fetch_one(pool)
