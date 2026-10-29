@@ -298,21 +298,22 @@ async fn post_message(
     .fetch_one(&mut *tx)
     .await
     .map_err(|_| server_error())?;
-    let message = sqlx::query_as::<_, MessageRow>(
-        "INSERT INTO \"assistant_message\" \
-         (\"id\", \"thread_id\", \"turn_id\", \"seq\", \"kind\", \"display_content\", \
-         \"payload\", \"status\", \"created_at\", \"completed_at\") \
-         VALUES (gen_random_uuid(), $1, $2, $3, 'user', $4, '{}', 'completed', now(), NULL) \
-         RETURNING \"id\", \"kind\", \"display_content\", \"status\", \"seq\", \
-         \"turn_id\", \"payload\"::text AS \"payload_text\", \"created_at\", \"completed_at\"",
+    let created = pidash_services::domain::assistant::create_user_message(
+        &mut *tx, thread_id, turn_id, next_seq, &content,
     )
-    .bind(thread_id)
-    .bind(turn_id)
-    .bind(next_seq)
-    .bind(&content)
-    .fetch_one(&mut *tx)
     .await
     .map_err(|_| server_error())?;
+    let message = MessageRow {
+        id: created.id,
+        kind: created.kind,
+        display_content: created.display_content,
+        status: created.status,
+        seq: created.seq,
+        turn_id: created.turn_id,
+        payload_text: created.payload_text,
+        created_at: created.created_at,
+        completed_at: created.completed_at,
+    };
     // `turn.user_message = user_msg; turn.save(...)` (`messages.py:96-97`).
     sqlx::query("UPDATE \"assistant_turn\" SET \"user_message_id\" = $1 WHERE \"id\" = $2")
         .bind(message.id)

@@ -391,47 +391,7 @@ pub(crate) async fn is_session_authenticated(
     )
 }
 
-/// `user.get_session_auth_hash()`: `salted_hmac(...get_session_auth_hash,
-/// password).hexdigest()`, compared constant-time. Same construction as
-/// the license-domain verifier (whose copy is private to its module;
-/// per-domain duplication of this exact function is the established
-/// pattern — see the `auth_oauth`/`auth_session` copies).
-fn verify_session_hash(session_hash: &str, password_field: &str, secret_key: &[u8]) -> bool {
-    use hmac::{Hmac, Mac};
-    use sha2::{Digest, Sha256};
-    let key = Sha256::digest(
-        [
-            crate::license::SESSION_AUTH_HASH_SALT.as_bytes(),
-            secret_key,
-        ]
-        .concat(),
-    );
-    let mut mac = Hmac::<Sha256>::new_from_slice(&key).expect("HMAC accepts any key length");
-    mac.update(password_field.as_bytes());
-    let expected = hex_encode(&mac.finalize().into_bytes());
-    constant_time_eq(expected.as_bytes(), session_hash.as_bytes())
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push(HEX[(byte >> 4) as usize] as char);
-        out.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    out
-}
-
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for i in 0..a.len() {
-        diff |= a[i] ^ b[i];
-    }
-    diff == 0
-}
+use pidash_compat::http::verify_session_hash;
 
 /// Stamp the DRF view shell on a response: `Allow` on every response, plus
 /// `Vary: Accept` on the doc routes (two renderer classes).
@@ -788,7 +748,7 @@ mod tests {
         let password = "pbkdf2_sha256$720000$salt$hash";
         let key = Sha256::digest(
             [
-                crate::license::SESSION_AUTH_HASH_SALT.as_bytes(),
+                pidash_compat::http::SESSION_AUTH_HASH_SALT.as_bytes(),
                 secret.as_slice(),
             ]
             .concat(),

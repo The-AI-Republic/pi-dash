@@ -9,6 +9,7 @@ for every error branch, and session establishment on success (``session-id``
 cookie, ``sessions`` row, ``GET /api/users/me/`` 200).
 """
 
+import re
 from urllib.parse import quote_plus
 
 import httpx
@@ -157,3 +158,27 @@ class TestMagicSignIn:
             f"&email={quote_plus(user['email'])}"
         )
         assert resp.headers["location"] == expected
+
+    def test_success_rotates_32_char_csrf_cookie(self, seed, rdb):
+        """`login()` rotation stores the 32-char secret (PIDASHCONV-1311).
+
+        Django's `rotate_token` → `_add_new_csrf_cookie` stores the raw
+        32-char secret in the `csrftoken` cookie
+        (`django/middleware/csrf.py`); only page-embedded tokens and the
+        get-csrf-token body carry the 64-char masked form.
+        """
+        user = seed.user(email=fresh_email())
+        client = csrf_client()
+        token = _seed_token(client, rdb, user["email"])
+
+        resp = post_form(client, SIGN_IN, {"email": user["email"], "code": token})
+
+        assert resp.status_code == 302, resp.text
+        rotated = None
+        for value in resp.headers.get_list("set-cookie"):
+            match = re.match(r"\s*csrftoken=([^;]*)", value)
+            if match:
+                rotated = match.group(1)
+        assert rotated is not None, resp.headers.get_list("set-cookie")
+        assert re.fullmatch(r"[A-Za-z0-9]{32}", rotated), rotated
+        assert client.cookies["csrftoken"] == rotated

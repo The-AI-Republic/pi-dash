@@ -2,7 +2,8 @@
 
 Covers workspace member list, project member list/create (both the
 `members/` and `project-members/` aliases), member detail get/patch/delete,
-one denied case and one tenant-isolation case.
+one denied case and one tenant-isolation case. Non-canonical UUID detail
+spellings 404 on both aliases (PIDASHCONV-1393).
 """
 
 import sys
@@ -168,3 +169,55 @@ def test_null_email_member_shapes(seed, conn):
         assert set(got.keys()) == USER_KEYS
         assert got["id"] == user["id"]
         assert got["email"] is None
+
+
+def _spellings(canonical):
+    # Every spelling `uuid.UUID()` (and Rust's `Uuid::parse_str`) accepts
+    # but Django's `<uuid:...>` converter (`[0-9a-f]{8}-...`, matched
+    # case-sensitively) does not route (PIDASHCONV-1393).
+    return {
+        "uppercase": canonical.upper(),
+        "simple": canonical.replace("-", ""),
+        "braced": "{" + canonical + "}",
+    }
+
+
+def _assert_resolver_404(resp):
+    # Routing precedes auth and the view entirely: the answer is the
+    # resolver's 404, never the view's body or a 401. The harness serves
+    # Django with `pi_dash.settings.test` (`DEBUG = True`), so the
+    # resolver miss is Django's technical HTML page on both backends
+    # (PIDASHCONV-1193 note); the production JSON handler404 only
+    # appears with `DEBUG = False` and is unreachable here.
+    assert resp.status_code == 404, resp.text[:400]
+    assert resp.headers.get("content-type", "").startswith("text/html"), \
+        resp.headers.get("content-type")
+
+
+def test_detail_non_canonical_spelling_404s(seed, conn):
+    # `members/<uuid:pk>/` and `project-members/<uuid:pk>/`
+    # (`member.py:21,31`): uppercase, plain-hex and braced spellings of a
+    # real membership id resolver-404 on GET, PATCH and DELETE — for
+    # anonymous callers too — and change nothing.
+    tag = db.new_tag()
+    user = db.create_user(conn, tag, first_name="CtSpell")
+    db.add_workspace_member(conn, seed["ws_a"]["id"], user["id"], db.MEMBER)
+    created = http.post(seed["keys"][KEY], proj_base(seed) + "/members/",
+                        json={"member": user["id"], "role": db.MEMBER},
+                        expect=201).json()
+    mid = created["id"]
+    for suffix in ("/members/", "/project-members/"):
+        for segment in _spellings(mid).values():
+            url = f"{proj_base(seed)}{suffix}{segment}/"
+            _assert_resolver_404(http.get(None, url, expect=404))
+            _assert_resolver_404(http.get(seed["keys"][KEY], url, expect=404))
+            _assert_resolver_404(http.patch(
+                seed["keys"][KEY], url, json={"role": db.GUEST}, expect=404))
+            _assert_resolver_404(http.delete(seed["keys"][KEY], url, expect=404))
+    row = db.fetch_one(
+        conn, "SELECT role, is_active FROM project_members WHERE id = %s", (mid,))
+    assert row["role"] == db.MEMBER
+    assert row["is_active"] is True
+    # Canonical control: the gate must not reject the spelling Django routes.
+    got = http.get(seed["keys"][KEY], f"{proj_base(seed)}/members/{mid}/").json()
+    assert got["id"] == user["id"]

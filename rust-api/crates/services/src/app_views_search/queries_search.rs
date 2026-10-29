@@ -343,6 +343,18 @@ fn member_scope_arms(user: &str, slug: &str) -> Vec<String> {
     ]
 }
 
+/// Membership + tenancy scope for the entity-search `cycle`/`module`
+/// branches (`base.py:405-411,453-459,597-602,644-648`): member, `is_active`
+/// and slug only. Unlike the global sections, Django applies no
+/// `project__archived_at__isnull` here (PIDASHCONV-1450).
+fn entity_member_scope_arms(user: &str, slug: &str) -> Vec<String> {
+    vec![
+        "project_members.is_active".to_owned(),
+        format!("project_members.member_id = {user}"),
+        format!("workspaces.slug = {slug}"),
+    ]
+}
+
 // ---------------------------------------------------------------------------
 // Global search sections (GlobalSearchEndpoint :54-253)
 // ---------------------------------------------------------------------------
@@ -870,8 +882,9 @@ pub const ENTITY_ISSUE_KEYS: &[&str] = &[
 ];
 
 /// `cycle` branch (`base.py:396-442,588-633`): `name` icontains, membership
-/// scope, project pin on the project branch, the `status` annotation,
-/// `-created_at`, `DISTINCT`, `values` + `[:count]`. `now` is the
+/// scope (no archived-project arm — Django filters archived only on the
+/// global sections), project pin on the project branch, the `status`
+/// annotation, `-created_at`, `DISTINCT`, `values` + `[:count]`. `now` is the
 /// `timezone.now()` value, bound four times (see [`cycle_status_case`]).
 pub fn entity_cycle(scope: &EntityScope<'_>, query: Option<&str>, now: &str) -> BuiltQuery {
     let mut builder = Builder::new();
@@ -885,7 +898,7 @@ pub fn entity_cycle(scope: &EntityScope<'_>, query: Option<&str>, now: &str) -> 
             wheres.push(arm);
         }
     }
-    wheres.extend(member_scope_arms(&user, &slug));
+    wheres.extend(entity_member_scope_arms(&user, &slug));
     if let Some(pid) = scope.project_id {
         let project = builder.uuid(pid);
         wheres.push(format!("cycles.project_id = {project}"));
@@ -925,7 +938,7 @@ pub fn entity_module(scope: &EntityScope<'_>, query: Option<&str>) -> BuiltQuery
             wheres.push(arm);
         }
     }
-    wheres.extend(member_scope_arms(&user, &slug));
+    wheres.extend(entity_member_scope_arms(&user, &slug));
     if let Some(pid) = scope.project_id {
         let project = builder.uuid(pid);
         wheres.push(format!("modules.project_id = {project}"));
@@ -1152,13 +1165,20 @@ pub fn build_issue_search(input: &IssueSearchInput<'_>) -> Result<BuiltQuery, Is
         );
     }
 
-    // `exclude_issues_in_module` (:90-95): same collapse with the module
-    // pinned. `if module:` — empty was normalised to `None` by the caller.
+    // `exclude_issues_in_module` (:90-95): Django splits the multi-valued
+    // `exclude()` into two subqueries — any link row to M (live or
+    // soft-deleted) AND any live link to *any* module — so unlike the
+    // cycle arm above, pinning M does NOT collapse to one `NOT EXISTS`.
+    // Emitted verbatim in Django's shape (verified against the 4.2.30
+    // compiler). `if module:` — empty was normalised to `None` by the
+    // caller.
     if let Some(mid) = opt(input.module) {
         let module = builder.uuid(mid);
         wheres.push(format!(
-            "NOT EXISTS (SELECT 1 FROM module_issues \
-             WHERE issue_id = issues.id AND module_id = {module} AND deleted_at IS NULL)"
+            "NOT (EXISTS (SELECT 1 FROM module_issues \
+             WHERE issue_id = issues.id AND module_id = {module}) AND EXISTS (SELECT 1 FROM issues U0 \
+             LEFT JOIN module_issues U1 ON U0.id = U1.issue_id \
+             WHERE U1.deleted_at IS NULL AND U0.id = issues.id))"
         ));
     }
 
@@ -1526,6 +1546,24 @@ mod tests {
         assert!(!built.sql.contains("CASE"));
     }
 
+    // PIDASHCONV-1450: the entity-search cycle/module branches carry no
+    // archived-project arm — Django filters member/is_active/slug only.
+    #[test]
+    fn entity_cycle_module_include_archived_projects() {
+        let now = "2026-09-29T20:00:00Z";
+        for built in [
+            entity_cycle(&entity_scope(Some(PID)), Some("acme"), now),
+            entity_cycle(&entity_scope(None), Some("acme"), now),
+            entity_module(&entity_scope(Some(PID)), Some("acme")),
+            entity_module(&entity_scope(None), Some("acme")),
+        ] {
+            assert!(!built.sql.contains("archived_at"));
+            assert!(built.sql.contains("project_members.is_active"));
+            assert!(built.sql.contains("project_members.member_id = $"));
+            assert!(built.sql.contains("workspaces.slug = $"));
+        }
+    }
+
     #[test]
     fn entity_page_access_rules() {
         let project = entity_page(&entity_scope(Some(PID)), None);
@@ -1676,7 +1714,16 @@ mod tests {
             "NOT EXISTS (SELECT 1 FROM cycle_issues \
              WHERE issue_id = issues.id AND deleted_at IS NULL)"
         ));
-        assert!(sql.contains("module_issues"));
+        // Split exclude, not the cycle-style collapse: any link row to M
+        // AND any live link to any module (Django 4.2.30 compiler output).
+        assert!(sql.contains(
+            "NOT (EXISTS (SELECT 1 FROM module_issues \
+             WHERE issue_id = issues.id AND module_id = $"
+        ));
+        assert!(sql.contains(
+            "LEFT JOIN module_issues U1 ON U0.id = U1.issue_id \
+             WHERE U1.deleted_at IS NULL AND U0.id = issues.id)"
+        ));
         assert!(sql.contains("issues.target_date IS NULL"));
         assert!(sql.contains("issues.created_by_id = $"));
         assert!(sql.ends_with("LIMIT 100"));

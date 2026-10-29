@@ -14,6 +14,8 @@ use serde_json::{Map, Value};
 use crate::task_message::TaskMessage;
 use crate::worker::{Handler, Registry, Verdict};
 
+use super::bs_normalize::{normalize_bs, NormalizedMention};
+
 /// Value stored under every mail lock (`acquire_lock` passes the literal
 /// `"true"`; `email_notification_task.py:38`).
 pub const LOCK_VALUE: &str = "true";
@@ -354,236 +356,45 @@ fn escape_bs_text(name: &str) -> String {
         .replace('>', "&gt;")
 }
 
-/// One parsed `<mention-component …>` open tag: its byte length and the
-/// `entity_identifier` attribute (`None` when absent — the Python
-/// `KeyError` case).
-struct OpenTag {
-    open_len: usize,
-    entity_identifier: Option<String>,
-}
-
-/// Match `<mention-component` (case-insensitive — `html.parser`
-/// lowercases tag names before `find_all`, `:133`) followed by a tag
-/// delimiter. Returns `None` for anything else, including unterminated
-/// `<…` (copied literally, as the parser would text-ify it).
-fn match_open_tag(s: &str) -> Option<OpenTag> {
-    if !s.starts_with('<') {
-        return None;
-    }
-    let rest = &s[1..];
-    let name_len = "mention-component".len();
-    // Byte-compare: `rest[..name_len]` panics when byte `name_len`
-    // lands inside a multi-byte char (PIDASHCONV-1284). `.get(..)`
-    // also subsumes the short-`rest` check.
-    let is_name = rest
-        .as_bytes()
-        .get(..name_len)
-        .is_some_and(|b| b.eq_ignore_ascii_case(b"mention-component"));
-    if !is_name {
-        return None;
-    }
-    match rest.get(name_len..).and_then(|tail| tail.chars().next()) {
-        Some(c) if c.is_whitespace() || c == '/' || c == '>' => {}
-        _ => return None,
-    }
-    // Scan to the closing `>` respecting quoted attribute values.
-    let bytes = s.as_bytes();
-    let mut j = 1 + name_len;
-    let mut quote: Option<u8> = None;
-    while j < bytes.len() {
-        let c = bytes[j];
-        if let Some(q) = quote {
-            if c == q {
-                quote = None;
-            }
-        } else if c == b'"' || c == b'\'' {
-            quote = Some(c);
-        } else if c == b'>' {
-            break;
-        }
-        j += 1;
-    }
-    if j >= bytes.len() {
-        return None;
-    }
-    let tag_text = &s[..=j];
-    Some(OpenTag {
-        open_len: j + 1,
-        entity_identifier: find_attr(tag_text, "entity_identifier"),
-    })
-}
-
-/// Match a `</mention-component …>` close tag (case-insensitive,
-/// optional whitespace): its byte length, else `None`.
-fn match_close_tag(s: &str) -> Option<usize> {
-    if !s.starts_with("</") {
-        return None;
-    }
-    let rest = &s[2..];
-    let name_len = "mention-component".len();
-    // Byte-compare: `rest[..name_len]` panics when byte `name_len`
-    // lands inside a multi-byte char (PIDASHCONV-1284). `.get(..)`
-    // also subsumes the short-`rest` check.
-    let is_name = rest
-        .as_bytes()
-        .get(..name_len)
-        .is_some_and(|b| b.eq_ignore_ascii_case(b"mention-component"));
-    if !is_name {
-        return None;
-    }
-    let mut j = 2 + name_len;
-    let bytes = s.as_bytes();
-    while j < bytes.len() && bytes[j].is_ascii_whitespace() {
-        j += 1;
-    }
-    if j < bytes.len() && bytes[j] == b'>' {
-        Some(j + 1)
-    } else {
-        None
-    }
-}
-
-/// Read one attribute value out of an open-tag slice. Attribute names
-/// compare lowercased (`html.parser` lowercases them, `:135`); values
-/// accept `"…"`, `'…'` or bare spellings, taken raw with no entity
-/// decoding (ids are UUIDs). A valueless attribute yields `Some("")`
-/// (Python sees `""`, and the `User.objects.get(pk="")` then raises
-/// `DoesNotExist` — preserved).
-fn find_attr(tag: &str, want: &str) -> Option<String> {
-    let bytes = tag.as_bytes();
-    let mut k = 1 + "mention-component".len();
-    while k < bytes.len() {
-        while k < bytes.len() && (bytes[k].is_ascii_whitespace() || bytes[k] == b'/') {
-            k += 1;
-        }
-        if k >= bytes.len() || bytes[k] == b'>' {
-            break;
-        }
-        let start = k;
-        while k < bytes.len()
-            && !bytes[k].is_ascii_whitespace()
-            && bytes[k] != b'='
-            && bytes[k] != b'>'
-            && bytes[k] != b'/'
-        {
-            k += 1;
-        }
-        let name = tag[start..k].to_ascii_lowercase();
-        while k < bytes.len() && bytes[k].is_ascii_whitespace() {
-            k += 1;
-        }
-        let mut value = String::new();
-        if k < bytes.len() && bytes[k] == b'=' {
-            k += 1;
-            while k < bytes.len() && bytes[k].is_ascii_whitespace() {
-                k += 1;
-            }
-            if k < bytes.len() && (bytes[k] == b'"' || bytes[k] == b'\'') {
-                let q = bytes[k];
-                k += 1;
-                let vs = k;
-                while k < bytes.len() && bytes[k] != q {
-                    k += 1;
-                }
-                value = tag[vs..k.min(tag.len())].to_owned();
-                k += 1;
-            } else {
-                let vs = k;
-                while k < bytes.len() && !bytes[k].is_ascii_whitespace() && bytes[k] != b'>' {
-                    k += 1;
-                }
-                value = tag[vs..k].to_owned();
-            }
-        }
-        if name == want {
-            return Some(value);
-        }
-    }
-    None
-}
-
-/// End offset (relative to `s`, which starts at the open tag) of the
-/// span a replacement covers: through the matching close tag
-/// (nesting-aware), or `Some(open_len)` for self-closing `<…/>`, or
-/// `None` when never closed — in which case only the open tag is
-/// replaced (documented divergence: BeautifulSoup would swallow the
-/// trailing siblings into the element; the editor always emits balanced
-/// tags, so no producer hits this).
-fn match_close(s: &str, open_len: usize) -> Option<usize> {
-    let open = &s[..open_len];
-    let inner = open[..open.len() - 1].trim_end();
-    if inner.ends_with('/') {
-        return Some(open_len);
-    }
-    let mut depth = 1;
-    let mut k = open_len;
-    while k < s.len() {
-        if s[k..].starts_with("<!--") {
-            k = s[k..].find("-->").map(|j| k + j + 3).unwrap_or(s.len());
-            continue;
-        }
-        if let Some(tag) = match_open_tag(&s[k..]) {
-            depth += 1;
-            k += tag.open_len;
-            continue;
-        }
-        if let Some(len) = match_close_tag(&s[k..]) {
-            depth -= 1;
-            k += len;
-            if depth == 0 {
-                return Some(k);
-            }
-            continue;
-        }
-        k += s[k..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
-    }
-    None
-}
-
 /// Rewrite every `<mention-component>` to `@display_name`
 /// (`email_notification_task.py:130-140`).
 ///
+/// Normalization first: Python runs the whole string through
+/// `str(BeautifulSoup(html, "html.parser"))` — entities decoded and
+/// minimally re-escaped, voids as `<x/>`, attributes sorted and
+/// double-quoted — and `find_all` collects elements in document order.
+/// [`normalize_bs`](super::bs_normalize::normalize_bs) does both in one
+/// pass, so mention-lookalikes inside raw text, comments, PIs, CDATA
+/// sections or attribute values are never elements. Then, per element
+/// in order (the Python loop, `:133-138`): a missing
+/// `entity_identifier` is `KeyError`
+/// ([`MentionError::MissingEntityIdentifier`]), each lookup is one
+/// `User.objects.get(pk=user_id)` + `.display_name` (`:136-137`) —
+/// including repeats and nested inners (no caching: the N-query shape)
+/// — and the `@name` text re-serializes with `&`, `<`, `>` escaped.
+///
 /// `lookup` is one `User.objects.get(pk=user_id)` + `.display_name`
-/// (`:136-137`) per mention occurrence — including repeats (no caching:
-/// Python runs the SELECT per element, N queries preserved in shape).
-/// Tags inside `<!-- … -->` comments are never elements (BeautifulSoup
-/// parity) and pass through untouched.
+/// (`:136-137`) per mention occurrence.
 pub fn process_mention(
     html: &str,
     lookup: &dyn Fn(&str) -> Result<String, MentionLookupError>,
 ) -> Result<String, MentionError> {
-    let mut out = String::with_capacity(html.len());
-    let mut i = 0;
-    while i < html.len() {
-        // Tags inside HTML comments are not elements.
-        if html[i..].starts_with("<!--") {
-            let end = html[i..]
-                .find("-->")
-                .map(|j| i + j + 3)
-                .unwrap_or(html.len());
-            out.push_str(&html[i..end]);
-            i = end;
-            continue;
-        }
-        if let Some(tag) = match_open_tag(&html[i..]) {
-            // Python collects `find_all` first: a missing attribute raises
-            // `KeyError` before any SELECT or replacement (`:133-135`).
-            let entity_id = tag
-                .entity_identifier
-                .ok_or(MentionError::MissingEntityIdentifier)?;
-            let name =
-                lookup(&entity_id).map_err(|_| MentionError::UserNotFound(entity_id.clone()))?;
-            let end = match_close(&html[i..], tag.open_len).map(|e| i + e);
-            out.push('@');
-            out.push_str(&escape_bs_text(&name));
-            i = end.unwrap_or(i + tag.open_len);
-            continue;
-        }
-        let ch = html[i..].chars().next().unwrap_or('\0');
-        out.push(ch);
-        i += ch.len_utf8().max(1);
+    let normalized = normalize_bs(html);
+    let mut names = Vec::with_capacity(normalized.mentions.len());
+    for mention in &normalized.mentions {
+        let entity_id = mention
+            .entity_id
+            .as_deref()
+            .ok_or(MentionError::MissingEntityIdentifier)?;
+        let name =
+            lookup(entity_id).map_err(|_| MentionError::UserNotFound(entity_id.to_owned()))?;
+        names.push(name);
     }
-    Ok(out)
+    Ok(splice_mentions(
+        &normalized.html,
+        &normalized.mentions,
+        &names,
+    ))
 }
 
 /// Map `process_mention` over a content list (`:142-150`): `None` maps
@@ -1306,57 +1117,19 @@ pub enum SendError {
     UnknownActor(String),
 }
 
-/// A located `<mention-component>`: byte span plus the resolved
-/// `entity_identifier` (missing attribute is already a
-/// [`MentionError::MissingEntityIdentifier`] here).
-struct MentionSpan {
-    start: usize,
-    end: usize,
-    entity_id: String,
-}
-
-/// Phase 1 of mention rewriting: locate every element span in order
-/// (same traversal as [`process_mention`).
-fn extract_mentions(html: &str) -> Result<Vec<MentionSpan>, MentionError> {
-    let mut spans = Vec::new();
-    let mut i = 0;
-    while i < html.len() {
-        if html[i..].starts_with("<!--") {
-            i = html[i..]
-                .find("-->")
-                .map(|j| i + j + 3)
-                .unwrap_or(html.len());
-            continue;
-        }
-        if let Some(tag) = match_open_tag(&html[i..]) {
-            let entity_id = tag
-                .entity_identifier
-                .ok_or(MentionError::MissingEntityIdentifier)?;
-            let end = match_close(&html[i..], tag.open_len).map(|e| i + e);
-            spans.push(MentionSpan {
-                start: i,
-                end: end.unwrap_or(i + tag.open_len),
-                entity_id,
-            });
-            i = spans.last().expect("just pushed").end;
-            continue;
-        }
-        i += html[i..]
-            .chars()
-            .next()
-            .map(|c| c.len_utf8().max(1))
-            .unwrap_or(1);
-    }
-    Ok(spans)
-}
-
-/// Phase 3 of mention rewriting: splice resolved `@name`s into the
-/// spans (names escaped exactly like [`process_mention`]).
-fn splice_mentions(html: &str, spans: &[MentionSpan], names: &[String]) -> String {
+/// Splice resolved `@name`s into normalized mention spans (names
+/// escaped exactly like [`process_mention`]). A span nested inside an
+/// already-spliced span is skipped (its lookup already ran — Python
+/// replaces the outer element, which detaches the inner, whose own
+/// replace is a no-op on the output).
+fn splice_mentions(html: &str, spans: &[NormalizedMention], names: &[String]) -> String {
     debug_assert_eq!(spans.len(), names.len());
     let mut out = String::with_capacity(html.len());
     let mut cursor = 0;
     for (span, name) in spans.iter().zip(names.iter()) {
+        if span.start < cursor {
+            continue;
+        }
         out.push_str(&html[cursor..span.start]);
         out.push('@');
         out.push_str(&escape_bs_text(name));
@@ -1408,22 +1181,31 @@ async fn rewrite_mention_slots(
 }
 
 /// `process_html_content` over one HTML string with an async lookup:
-/// extract spans, resolve each display name with a fresh call (no
-/// dedup — the N-query shape), splice.
+/// normalize (BeautifulSoup round-trip) and collect spans, resolve each
+/// display name with a fresh call (no dedup — the N-query shape,
+/// repeats and nested inners included), splice.
 async fn rewrite_html(html: &str, mentions: &impl MentionSource) -> Result<String, SendError> {
-    let spans = extract_mentions(html)?;
-    let mut names = Vec::with_capacity(spans.len());
-    for span in &spans {
+    let normalized = normalize_bs(html);
+    let mut names = Vec::with_capacity(normalized.mentions.len());
+    for span in &normalized.mentions {
+        let entity_id = span
+            .entity_id
+            .as_deref()
+            .ok_or(MentionError::MissingEntityIdentifier)?;
         let name = mentions
-            .display_name(&span.entity_id)
+            .display_name(entity_id)
             .await
             .map_err(|error| match error {
-                MentionLookupError::NotFound(_) => SendError::UserNotFound(span.entity_id.clone()),
+                MentionLookupError::NotFound(_) => SendError::UserNotFound(entity_id.to_owned()),
                 MentionLookupError::Db(detail) => SendError::MentionDb(detail),
             })?;
         names.push(name);
     }
-    Ok(splice_mentions(html, &spans, &names))
+    Ok(splice_mentions(
+        &normalized.html,
+        &normalized.mentions,
+        &names,
+    ))
 }
 
 /// The per-actor plan: template rows plus comment entries (`:189-239`).
@@ -2447,56 +2229,11 @@ mod part2_tests {
     }
 
     #[test]
-    fn match_open_tag_non_ascii_around_name_boundary() {
-        // PIDASHCONV-1284: `rest[..17]` panicked when byte 17 after `<`
-        // fell inside a multi-byte char. Every width at every offset.
-        for ch in ['é', '’', '😀'] {
-            for offset in 0..=17 {
-                let rest = format!("{}{ch}{}", "a".repeat(offset), "b".repeat(20));
-                assert!(
-                    match_open_tag(&format!("<{rest}")).is_none(),
-                    "offset {offset} char {ch:?}"
-                );
-            }
-            // Byte 17 inside the char even when the 17-byte name matches:
-            // `<mention-componenté…>` is not a tag (é is no delimiter).
-            let rest = format!("mention-component{ch} tail");
-            assert!(
-                match_open_tag(&format!("<{rest}")).is_none(),
-                "name prefix + {ch:?}"
-            );
-        }
-        // Positive control: the real tag still matches.
-        assert!(match_open_tag("<mention-component entity_identifier=\"u1\">").is_some());
-    }
-
-    #[test]
-    fn match_close_tag_non_ascii_around_name_boundary() {
-        // PIDASHCONV-1284: same slicing panic via `</` (`match_close_tag`).
-        for ch in ['é', '’', '😀'] {
-            for offset in 0..=17 {
-                let rest = format!("{}{ch}{}", "a".repeat(offset), "b".repeat(20));
-                assert!(
-                    match_close_tag(&format!("</{rest}")).is_none(),
-                    "offset {offset} char {ch:?}"
-                );
-            }
-            let rest = format!("mention-component{ch}>");
-            assert!(
-                match_close_tag(&format!("</{rest}")).is_none(),
-                "name prefix + {ch:?}"
-            );
-        }
-        assert_eq!(
-            match_close_tag("</mention-component>"),
-            Some("</mention-component>".len())
-        );
-    }
-
-    #[test]
     fn mention_rewrites_non_ascii_html_without_panic() {
-        // PIDASHCONV-1284: the issue's example — é straddles byte 17
-        // after the `<p>` tag start — plus a real mention to rewrite.
+        // PIDASHCONV-1284: non-ASCII text around a real mention must not
+        // panic the parser (the byte-17 slicing the bs4 engine replaced;
+        // the old helper-level sweeps live on as the engine-level sweep
+        // in bs_normalize's `non_ascii_around_name_boundary` test).
         let map = names(&[("u1", "Ada L")]);
         let html = "<p>Merci beaucoupé pour la revue</p><mention-component entity_identifier=\"u1\">Ada</mention-component>";
         assert_eq!(
@@ -2506,15 +2243,132 @@ mod part2_tests {
     }
 
     #[test]
+    fn mention_normalizes_html_like_beautifulsoup() {
+        // PIDASHCONV-1287: entities decoded, voids self-closed, attrs
+        // sorted — even around the splice.
+        let map = names(&[("u1", "Bob")]);
+        let html = "<p>a&nbsp;&nbsp;b<br>c <img src=\"x.png\"> it&#39;s &quot;q&quot; \
+            <mention-component label=\"x\" entity_identifier=\"u1\"></mention-component></p>";
+        assert_eq!(
+            process_mention(html, &lookup_of(&map)).expect("rewrite"),
+            "<p>a\u{a0}\u{a0}b<br/>c <img src=\"x.png\"/> it\'s \"q\" @Bob</p>"
+        );
+    }
+
+    #[test]
     fn mention_close_scan_skips_non_ascii_bogus_close() {
-        // `match_close` probes `match_close_tag` at every walk stop; a
-        // `</` whose 17th byte lands inside é must not panic.
+        // PIDASHCONV-1284: a `</` whose 17th byte lands inside é must not
+        // panic the end-tag scan; the bogus close drops like bs4's.
         let map = names(&[("u1", "Ada")]);
         let bogus = format!("</p{}é>", "A".repeat(15));
         let html =
             format!("<mention-component entity_identifier=\"u1\">x{bogus}tail</mention-component>");
         assert_eq!(
             process_mention(&html, &lookup_of(&map)).expect("rewrite"),
+            "@Ada"
+        );
+    }
+
+    #[test]
+    fn mention_inside_raw_text_is_not_an_element() {
+        let map = names(&[("u1", "Ada")]);
+        let html = "<script><mention-component entity_identifier=\"u1\"/></script>";
+        assert_eq!(
+            process_mention(html, &lookup_of(&map)).expect("script kept"),
+            html
+        );
+        let calls = AtomicUsize::new(0);
+        let lookup = |id: &str| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            map.get(id)
+                .cloned()
+                .ok_or_else(|| MentionLookupError::NotFound(id.to_owned()))
+        };
+        process_mention(html, &lookup).expect("no lookup");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn mention_inside_attribute_values_is_not_an_element() {
+        let map = names(&[("u1", "Ada")]);
+        let html = "<p title=\"<mention-component entity_identifier=&#34;u1&#34;>\">x</p>";
+        assert_eq!(
+            process_mention(html, &lookup_of(&map)).expect("attr kept"),
+            "<p title='&lt;mention-component entity_identifier=\"u1\"&gt;'>x</p>"
+        );
+    }
+
+    #[test]
+    fn mention_nested_inner_lookup_runs_but_outer_wins_bytes() {
+        // Python replaces the outer element (detaching the inner) but
+        // still runs the inner lookup: N queries, outer bytes.
+        let map = names(&[("o", "Outer"), ("i", "Inner")]);
+        let calls = AtomicUsize::new(0);
+        let lookup = |id: &str| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            map.get(id)
+                .cloned()
+                .ok_or_else(|| MentionLookupError::NotFound(id.to_owned()))
+        };
+        assert_eq!(
+            process_mention(
+                "<mention-component entity_identifier=\"o\">a<mention-component entity_identifier=\"i\">b</mention-component>c</mention-component>",
+                &lookup
+            )
+            .expect("rewrite"),
+            "@Outer"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn mention_missing_attribute_errors_in_loop_order() {
+        // Python reads `mention["entity_identifier"]` per iteration, so
+        // an earlier valid mention's lookup runs before the KeyError.
+        let map = names(&[("u1", "Ada")]);
+        let calls = AtomicUsize::new(0);
+        let lookup = |id: &str| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            map.get(id)
+                .cloned()
+                .ok_or_else(|| MentionLookupError::NotFound(id.to_owned()))
+        };
+        assert_eq!(
+            process_mention(
+                "<mention-component entity_identifier=\"u1\">a</mention-component><mention-component>oops</mention-component>",
+                &lookup
+            ),
+            Err(MentionError::MissingEntityIdentifier)
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn mention_unclosed_tag_at_eof_is_dropped() {
+        // Python never sees the element (the tag needs `>`), so there
+        // is no KeyError and no output for it.
+        let map = names(&[("u1", "Ada")]);
+        assert_eq!(
+            process_mention(
+                "<p>a<mention-component entity_identifier=\"u1\"",
+                &lookup_of(&map)
+            )
+            .expect("drop"),
+            "<p>a</p>"
+        );
+    }
+
+    #[test]
+    fn mention_unclosed_element_swallows_tail_like_bs() {
+        // `<mc>tail` parses as an element containing `tail`, replaced
+        // whole (the old open-tag-only divergence is gone).
+        let map = names(&[("u1", "Ada")]);
+        assert_eq!(
+            process_mention(
+                "<mention-component entity_identifier=\"u1\">tail",
+                &lookup_of(&map)
+            )
+            .expect("rewrite"),
             "@Ada"
         );
     }

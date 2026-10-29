@@ -111,7 +111,9 @@ export function PodDropdownBase(props: TPodDropdownBaseProps) {
       ? t("Select OpenHub in AI Assistant settings to run on your desktop.")
       : managedAgent?.reasonCode === "managed_runner_disabled"
         ? t("Pi Dash Agent is not enabled on this server.")
-        : t("Open this project in Pi Dash Desktop to connect its agent.");
+        : managedAgent?.reasonCode === "managed_runner_paused"
+          ? t("Pi Dash Agent is paused for this project. Resume it to run here.")
+          : t("Open this project in Pi Dash Desktop to connect its agent.");
   const cloudUnavailableReason =
     cloudAgent?.reasonCode === "llm_config_missing"
       ? t("Configure your AI provider in Pi Dash AI settings to use the Cloud Agent.")

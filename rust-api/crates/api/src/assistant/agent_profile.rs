@@ -162,11 +162,12 @@ async fn get_profile(
     };
     json_body(
         StatusCode::OK,
-        &serde_json::json!({
+        serde_json::json!({
             "managed_runner_enabled": enabled,
             "lane": profile.lane,
             "base_url": profile.base_url,
             "model": profile.model,
+            "top_up_url": profile.top_up_url,
             "available": available,
             "reason_code": reason_code,
             "graceful_stop_seconds": state.settings().managed_runner.graceful_stop_secs,
@@ -218,7 +219,7 @@ async fn post_token(
             );
             json_body(
                 StatusCode::OK,
-                &serde_json::json!({"token": token, "expires_at": expires_at}),
+                serde_json::json!({"token": token, "expires_at": expires_at}),
             )
         }
         Err(CredentialError::Unavailable(unavailable)) => {
@@ -234,7 +235,7 @@ async fn post_token(
             };
             error_response(
                 StatusCode::CONFLICT,
-                &serde_json::json!({
+                serde_json::json!({
                     "error": reason,
                     "detail": detail,
                 }),
@@ -251,7 +252,7 @@ async fn post_token(
                 "managed_runner.token_refresh_failed"
             );
             let status = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-            error_response(status, &serde_json::json!({ "error": code }))
+            error_response(status, serde_json::json!({ "error": code }))
         }
     }
 }
@@ -486,6 +487,7 @@ mod live_tests {
                     base_url: "https://gateway.example.com".to_owned(),
                     model: "hub-default".to_owned(),
                     reason_code: String::new(),
+                    top_up_url: "https://gateway.example.com/account/credits".to_owned(),
                 }
             })
         }
@@ -609,7 +611,7 @@ mod live_tests {
         use sha2::{Digest, Sha256};
         let key = Sha256::digest(
             [
-                crate::license::SESSION_AUTH_HASH_SALT.as_bytes(),
+                pidash_compat::http::SESSION_AUTH_HASH_SALT.as_bytes(),
                 secret_key.as_bytes(),
             ]
             .concat(),
@@ -667,6 +669,10 @@ mod live_tests {
         assert_eq!(body["lane"], "openhub");
         assert_eq!(body["base_url"], "https://gateway.example.com");
         assert_eq!(body["model"], "hub-default");
+        assert_eq!(
+            body["top_up_url"],
+            "https://gateway.example.com/account/credits"
+        );
         assert_eq!(body["available"], true);
         assert_eq!(body["reason_code"], "");
     }
@@ -688,6 +694,7 @@ mod live_tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["lane"], "");
+        assert_eq!(body["top_up_url"], "");
         assert_eq!(body["available"], false);
         assert_eq!(body["reason_code"], "llm_config_missing");
     }

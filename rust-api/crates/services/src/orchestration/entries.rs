@@ -85,13 +85,13 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 use uuid::Uuid;
 
+use crate::domain::identity::AgentUserCollisionError;
 use pidash_auth::permissions::membership::check_project_role;
 pub use pidash_auth::permissions::membership::ProjectRoleFacts;
 use pidash_db::app_project::models::state::StateGroup;
 use pidash_db::dispatch::status::{AgentRunStatus, AgentRunTrigger};
 use pidash_db::orchestration::querysets::{ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER};
 use pidash_db::orchestration::runs::ACTIVE_STATUSES;
-use pidash_db::orchestration::workpad::AgentUserCollisionError;
 use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
 use pidash_types::dispatch::AgentExecutorKind;
 use pidash_types::orchestration::{
@@ -113,6 +113,7 @@ use super::creation::{
     FinalizeAgentRunSeam, PodView, ProjectView, RenderedTurn, RunView, StateView,
     ERROR_CODE_PROMPT_BUILD_FAILED, RUN_VIEW_COLUMNS,
 };
+use pidash_compat::py::py_uuid_or_none;
 
 // ---------------------------------------------------------------------------
 // Reasons, error strings, signal attributes (all verbatim)
@@ -458,9 +459,9 @@ pub trait EntriesSeam: CreationSeam + FinalizeAgentRunSeam {
     /// and role gates pass, as in Python.
     async fn has_usable_llm_config(&mut self, user_id: Uuid) -> Result<bool, CreationError>;
     /// `get_agent_system_user`: the dedicated bot user, created on first
-    /// call ([`AGENT_USER_SELECT_SQL`](pidash_db::orchestration::workpad::AGENT_USER_SELECT_SQL),
-    /// `AGENT_USER_INSERT_SQL`, `AGENT_USER_PASSWORD_SQL`). The outer
-    /// error is a store failure; the inner is the verbatim collision.
+    /// call (`domain::identity`: find by username, bot insert, unusable
+    /// password stamp). The outer error is a store failure; the inner is
+    /// the verbatim collision.
     async fn agent_system_user(
         &mut self,
     ) -> Result<Result<Uuid, AgentUserCollisionError>, CreationError>;
@@ -544,14 +545,9 @@ pub fn fire_error_log_line(
     format!(
         "orchestration.error: handle_issue_state_transition failed \
          for issue={issue_pk} from_state={} to_state={} (total_errors={total_errors})",
-        opt_uuid(prev_state_id),
-        opt_uuid(current_state_id),
+        py_uuid_or_none(&prev_state_id),
+        py_uuid_or_none(&current_state_id),
     )
-}
-
-/// Python `str()` of an optional id for log lines.
-fn opt_uuid(id: Option<Uuid>) -> String {
-    id.map_or_else(|| "None".to_owned(), |id| id.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -1364,9 +1360,9 @@ mod tests {
     use serde_json::{json, Value};
     use uuid::Uuid;
 
+    use crate::domain::identity::AgentUserCollisionError;
     use pidash_auth::permissions::membership::ProjectRoleFacts;
     use pidash_db::dispatch::status::{AgentRunStatus, AgentRunTrigger};
-    use pidash_db::orchestration::workpad::AgentUserCollisionError;
     use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
     use pidash_types::dispatch::AgentExecutorKind;
     use pidash_types::orchestration::StateRef;
@@ -2887,6 +2883,7 @@ mod tests {
                 pod_id: uid(0x50),
                 status: "online".to_owned(),
                 last_heartbeat_at: Some(frozen_now()),
+                paused_at: None,
             },
         );
         let outcome = handle_issue_comment(&mut seam, &comment_req(Some(uid(0x40)), now))

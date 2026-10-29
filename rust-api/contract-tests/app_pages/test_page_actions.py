@@ -268,6 +268,27 @@ def test_access_null_non_owner_is_400_owner_body(member_client, world, db):
     assert db.fetchval("SELECT access FROM pages WHERE id=%s", (world["page"]["id"],)) == 0
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [{"access": -1}, {"access": "-1"}],
+    ids=["int", "str"],
+)
+def test_access_negative_owner_is_400_invalid_payload(user_client, world, db, payload):
+    # PIDASHCONV-1413. The owner's negative value passes the owner guard
+    # (`owned_by == user`), then `page.access = access` runs
+    # `PositiveSmallIntegerField.get_prep_value` (`int(-1)` → `-1`,
+    # `int("-1")` → `-1`) and the UPDATE violates the
+    # `CHECK ("access" >= 0)` constraint. `IntegrityError` reaches
+    # `BaseViewSet.handle_exception`, which answers 400 invalid-payload —
+    # the same mapping as the null case (PIDASHCONV-1173). No row changes.
+    response = user_client.post(
+        f"{page_url(world, world['page']['id'])}access/", json=payload
+    )
+    assert response.status_code == 400
+    assert response.json() == {"error": "The payload is not valid"}
+    assert db.fetchval("SELECT access FROM pages WHERE id=%s", (world["page"]["id"],)) == 0
+
+
 def test_access_requires_auth(anon_client, world):
     assert anon_client.post(f"{page_url(world, world['page']['id'])}access/").status_code in (401, 403)
 

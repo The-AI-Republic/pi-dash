@@ -15,6 +15,8 @@ flip from 401/403 to 200. Removing only the ``BaseViewSet`` line is a no-op —
 the global default still denies — so the tripwire demo must cover both.
 """
 
+import uuid
+
 import pytest
 
 pytestmark = pytest.mark.contract
@@ -139,6 +141,27 @@ def test_comment_create_on_soft_deleted_issue_returns_201(user_client, world, db
     assert member is not None
 
 
+def test_comment_create_on_missing_issue_is_invalid_payload(user_client, world, db):
+    # PIDASHCONV-1635: the create takes issue_id from the URL with no
+    # existence check (views/issue.py:257-294); the issue_id FK is
+    # DEFERRABLE INITIALLY DEFERRED, so the violation surfaces at commit
+    # and handle_exception maps it to 400 (base.py:74-78). Rust must map
+    # its tx.commit() failure the same way — never a 500 — and roll the
+    # comment, description and link writes back together.
+    missing = str(uuid.uuid4())
+    assert missing != world["issue"]["id"]
+    url = f"{BASE}/anchor/{world['anchor']}/issues/{missing}/comments/"
+    before_comments = db.fetchone("SELECT count(*) AS n FROM issue_comments")["n"]
+    before_descriptions = db.fetchone("SELECT count(*) AS n FROM descriptions")["n"]
+    response = user_client.post(url, json={"comment_html": "<p>x</p>"})
+    assert response.status_code == 400
+    assert response.content == b'{"error":"The payload is not valid"}'
+    after_comments = db.fetchone("SELECT count(*) AS n FROM issue_comments")["n"]
+    after_descriptions = db.fetchone("SELECT count(*) AS n FROM descriptions")["n"]
+    assert after_comments == before_comments
+    assert after_descriptions == before_descriptions
+
+
 def test_comment_retrieve_patch_delete_owned(user_client, world):
     comment_id = world["comment"]["id"]
     got = user_client.get(_comments_url(world, comment_id))
@@ -215,6 +238,25 @@ def test_issue_reaction_create_and_delete(user_client, world, db):
     )
     assert row["deleted_at"] is not None
     assert str(row["updated_by_id"]) == world["owner"]["id"]
+
+
+def test_issue_reaction_public_member_stamps_creator(other_client, other_user, world, db):
+    # PIDASHCONV-1259: a non-member's write auto-creates a
+    # ProjectPublicMember row via get_or_create(member=request.user), and
+    # BaseModel.save stamps created_by to the request user while updated_by
+    # stays NULL on create (db/models/base.py:23-43). The Rust port
+    # inserted the row without created_by_id.
+    url = f"{BASE}/anchor/{world['anchor']}/issues/{world['issue']['id']}/reactions/"
+    created = other_client.post(url, json={"reaction": "rocket"})
+    assert created.status_code == 201
+    row = db.fetchone(
+        "SELECT created_by_id, updated_by_id FROM project_public_members"
+        " WHERE project_id = %s AND member_id = %s AND deleted_at IS NULL",
+        (world["project"]["id"], other_user["id"]),
+    )
+    assert row is not None
+    assert str(row["created_by_id"]) == other_user["id"]
+    assert row["updated_by_id"] is None
 
 
 def test_issue_reaction_list_requires_auth(anon_client, world):

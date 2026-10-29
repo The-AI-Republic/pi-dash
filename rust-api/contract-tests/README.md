@@ -411,6 +411,19 @@ pointing at the same broker the worker consumes, and the server must run
 with `CLOUD_AGENT_ENABLED=true` (dispatch execution branches and the
 queue scanner are kill-switched otherwise).
 
+Page-write suites (`v1_work_items`) additionally need the backend booted with
+`LIVE_BASE_URL` pointing at the stub live-document server the tests bind
+(`LIVE_DOC_STUB_BASE`, default `http://127.0.0.1:18096`):
+
+```sh
+LIVE_BASE_URL=http://127.0.0.1:18096  # on the backend under test (Django or Rust)
+```
+
+The stub (`_harness/sinks.py: LiveDocStub`) answers
+`POST /live/convert-document/` with a fixed usable document and is up only
+inside the create tests that hold it; with the stub down conversion fails,
+so the 503 contract tests keep passing unchanged.
+
 ## Backend under test (assistant domain)
 
 The assistant suite needs a live backend plus the Postgres it reads/writes.

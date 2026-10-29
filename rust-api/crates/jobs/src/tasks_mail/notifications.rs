@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 use super::email_notification::py_str;
 use super::mention_ids_in_html;
+use pidash_compat::datetime::django_str_datetime;
 
 /// One `issue_mentions` row to insert: `update_mentions_for_issue` builds
 /// `IssueMention(mention_id=…, issue=…, project=…,
@@ -257,12 +258,17 @@ pub fn extract_mentions(issue_instance: &str) -> Vec<String> {
 // Ported bugs (kept verbatim, listed in the PR):
 // - PORT BUG 3 (`:573-576`, `:622-625`): the description-mention email logs
 //   set `receiver_id=subscriber` — the stale loop variable from the
-//   subscriber loop, not `mention_id`. When that loop never ran the name is
-//   unbound (`NameError`) and the whole task dies via the outer `except`.
+//   subscriber loop, not `mention_id`. When that loop never ran the name
+//   still holds the bool task parameter (`:196`), so Django builds
+//   `EmailNotificationLog(receiver_id=True/False)`; only the final email
+//   bulk_create dies (UUID-as-bool FK `IntegrityError`, swallowed by the
+//   outer `except`), while the Notification and mention writes stay
+//   committed (PB-1577; PIDASHCONV-1285 re-recorded the F-NOTIF row).
 // - STALE ACTIVITY (`:559-567`): the single description-mention
-//   `Notification` reads `old/new_identifier` from `issue_activity`, the
-//   stale variable of the earlier subscriber/activity loop. Unbound when
-//   that loop never iterated — same `NameError` death.
+//   `Notification` reads `old/new_identifier` from `issue_activity`, bound
+//   by the comment-mention loop (`:249`) over every activity whatever the
+//   subscriber count — always `issue_activities_created[-1]`, unbound only
+//   when that list is empty (PB-1575).
 // - UUID TRAP (`:263-265`): `comment_mentions` is re-filtered with
 //   `UUID(mention)` on every activity; a non-UUID mention raises
 //   `ValueError` and kills the whole task (in-memory bulks discarded,
@@ -782,18 +788,6 @@ pub struct LastActivity {
     pub created_at: DateTime<Utc>,
 }
 
-/// `str(last_activity.created_at)`: Django renders an aware datetime as
-/// `YYYY-MM-DD HH:MM:SS[.ffffff]+HH:MM` (`USE_TZ=True`, so UTC) — the
-/// fractional part appears only when microseconds are nonzero, exactly like
-/// `datetime.isoformat(sep=" ")`.
-pub fn django_str_datetime(moment: &DateTime<Utc>) -> String {
-    if moment.timestamp_subsec_nanos() == 0 {
-        moment.format("%Y-%m-%d %H:%M:%S%:z").to_string()
-    } else {
-        moment.format("%Y-%m-%d %H:%M:%S%.6f%:z").to_string()
-    }
-}
-
 /// Per-subscriber `sender` branch (`:311-317`): the creator reads
 /// `in_app:issue_activities:created`; an assignee (while the creator is not
 /// one) reads `:assigned`; everyone else reads `:subscribed`.
@@ -824,17 +818,12 @@ pub fn should_send_email(
     }
 }
 
-/// Stale-variable reads both bug branches share. `last_subscriber` is the
-/// `subscriber` loop variable after the subscriber loop (`:311`); when that
-/// loop never ran the name is unbound and both reads die (PORT BUG 3).
-pub fn stale_receiver(last_subscriber: Option<Uuid>) -> Result<Uuid, TaskSwallow> {
-    last_subscriber.ok_or_else(|| {
-        TaskSwallow::message("notifications: unbound subscriber (PORT BUG 3, :573/:622)")
-    })
-}
-
 /// The stale `issue_activity` read of the single-notification
-/// description-mention branch (`:559-567`).
+/// description-mention branch (`:559-567`). Every Python loop over
+/// `issue_activities_created` (`:249`, `:321`, `:468`, `:611`) runs to
+/// completion with no `break`, so the name is always the last activity;
+/// the caller passes `activities.last()`. Only an empty list leaves the
+/// name unbound (PB-1575), and that still kills the task.
 pub fn stale_loop_activity(
     last_loop_activity: Option<&Map<String, Value>>,
 ) -> Result<&Map<String, Value>, TaskSwallow> {
@@ -1267,16 +1256,19 @@ pub async fn run_notifications(
 
     let mut bulk_notifications: Vec<NewNotification> = Vec::new();
     let mut bulk_email_logs: Vec<NewEmailLog> = Vec::new();
-    // Stale loop bindings both bug branches read (`:559`, `:573`, `:622`).
+    // Stale `subscriber` after the subscriber loop (`:311`). `None` means
+    // the loop never ran, so the name still holds the bool task parameter
+    // (`:196`); a description-mention email row built then poisons the
+    // whole email batch (PB-1577, PORT BUG 3). The stale `issue_activity`
+    // needs no tracking: it is always `activities.last()`.
     let mut last_subscriber: Option<Uuid> = None;
-    let mut last_loop_activity: Option<&Map<String, Value>> = None;
+    let mut email_batch_poisoned = false;
 
     for subscriber in &issue_subscribers {
         last_subscriber = Some(*subscriber);
         let sender = sender_for(subscriber, shape.created_by_id, &assignees);
         let preference = fetch_preference(db, *subscriber).await?;
         for activity in &activities {
-            last_loop_activity = Some(*activity);
             let detail = activity.get("issue_detail").ok_or_else(|| {
                 TaskSwallow::message("notifications: 'NoneType' object has no attribute 'get'")
             })?;
@@ -1474,9 +1466,9 @@ pub async fn run_notifications(
             Some(last) if actor_matches_last => {
                 // Single "You have been mentioned" row (`:530-571`). The
                 // `old/new_identifier` cells read the STALE `issue_activity`
-                // loop variable (`:559-567`); the email row reads the STALE
-                // `subscriber` (PORT BUG 3, `:573-576`).
-                let stale = stale_loop_activity(last_loop_activity)?;
+                // (`:559-567`), always the last activity; the email row reads
+                // the STALE `subscriber` (PORT BUG 3, `:573-576`).
+                let stale = stale_loop_activity(activities.last().copied())?;
                 let mut data = Map::new();
                 data.insert("issue".to_owned(), Value::Object(issue_json(&shape, true)));
                 let mut activity_block = Map::new();
@@ -1531,50 +1523,75 @@ pub async fn run_notifications(
                     data: Value::Object(data),
                 });
                 if preference.mention {
-                    let mut email_data = Map::new();
-                    email_data.insert("issue".to_owned(), Value::Object(issue_json(&shape, false)));
-                    let mut email_activity = Map::new();
-                    email_activity.insert("id".to_owned(), Value::String(last.id.to_string()));
-                    email_activity.insert("verb".to_owned(), Value::String(last.verb.clone()));
-                    email_activity.insert("field".to_owned(), Value::String("mention".to_owned()));
-                    email_activity.insert(
-                        "actor".to_owned(),
-                        Value::String(
-                            last.actor_id
-                                .map(|actor| actor.to_string())
-                                .unwrap_or_else(|| "None".to_owned()),
-                        ),
-                    );
-                    email_activity.insert(
-                        "new_value".to_owned(),
-                        Value::String(last.new_value.clone().unwrap_or_else(|| "None".to_owned())),
-                    );
-                    email_activity.insert(
-                        "old_value".to_owned(),
-                        Value::String(last.old_value.clone().unwrap_or_else(|| "None".to_owned())),
-                    );
-                    for key in ["old_identifier", "new_identifier"] {
-                        match str_or_none_if_falsy(stale, key) {
-                            Some(rendered) => {
-                                email_activity.insert(key.to_owned(), Value::String(rendered));
+                    match last_subscriber {
+                        Some(receiver_id) => {
+                            let mut email_data = Map::new();
+                            email_data.insert(
+                                "issue".to_owned(),
+                                Value::Object(issue_json(&shape, false)),
+                            );
+                            let mut email_activity = Map::new();
+                            email_activity
+                                .insert("id".to_owned(), Value::String(last.id.to_string()));
+                            email_activity
+                                .insert("verb".to_owned(), Value::String(last.verb.clone()));
+                            email_activity
+                                .insert("field".to_owned(), Value::String("mention".to_owned()));
+                            email_activity.insert(
+                                "actor".to_owned(),
+                                Value::String(
+                                    last.actor_id
+                                        .map(|actor| actor.to_string())
+                                        .unwrap_or_else(|| "None".to_owned()),
+                                ),
+                            );
+                            email_activity.insert(
+                                "new_value".to_owned(),
+                                Value::String(
+                                    last.new_value.clone().unwrap_or_else(|| "None".to_owned()),
+                                ),
+                            );
+                            email_activity.insert(
+                                "old_value".to_owned(),
+                                Value::String(
+                                    last.old_value.clone().unwrap_or_else(|| "None".to_owned()),
+                                ),
+                            );
+                            for key in ["old_identifier", "new_identifier"] {
+                                match str_or_none_if_falsy(stale, key) {
+                                    Some(rendered) => {
+                                        email_activity
+                                            .insert(key.to_owned(), Value::String(rendered));
+                                    }
+                                    None => {
+                                        email_activity.insert(key.to_owned(), Value::Null);
+                                    }
+                                };
                             }
-                            None => {
-                                email_activity.insert(key.to_owned(), Value::Null);
-                            }
-                        };
+                            email_activity.insert(
+                                "activity_time".to_owned(),
+                                Value::String(django_str_datetime(&last.created_at)),
+                            );
+                            email_data
+                                .insert("issue_activity".to_owned(), Value::Object(email_activity));
+                            bulk_email_logs.push(NewEmailLog {
+                                id: Uuid::new_v4(),
+                                triggered_by_id: input.actor_id,
+                                receiver_id,
+                                entity_identifier: input.issue_id,
+                                data: Value::Object(email_data),
+                            });
+                        }
+                        // No subscribers: `subscriber` still holds the bool
+                        // task parameter (`:196`), so Django builds
+                        // `EmailNotificationLog(receiver_id=True/False)` and
+                        // the final email bulk_create dies to the user-FK
+                        // error, swallowed by the outer `except`
+                        // (`:670-674`). The Notification and mention writes
+                        // stay committed; the whole email batch is lost, so
+                        // push nothing and skip the insert below.
+                        None => email_batch_poisoned = true,
                     }
-                    email_activity.insert(
-                        "activity_time".to_owned(),
-                        Value::String(django_str_datetime(&last.created_at)),
-                    );
-                    email_data.insert("issue_activity".to_owned(), Value::Object(email_activity));
-                    bulk_email_logs.push(NewEmailLog {
-                        id: Uuid::new_v4(),
-                        triggered_by_id: input.actor_id,
-                        receiver_id: stale_receiver(last_subscriber)?,
-                        entity_identifier: input.issue_id,
-                        data: Value::Object(email_data),
-                    });
                 }
             }
             _ => {
@@ -1591,25 +1608,39 @@ pub async fn run_notifications(
                         activity,
                     );
                     if preference.mention {
-                        let mut email_data = Map::new();
-                        email_data
-                            .insert("issue".to_owned(), Value::Object(issue_json(&shape, false)));
-                        email_data.insert(
-                            "issue_activity".to_owned(),
-                            Value::Object(activity_json(
-                                activity,
-                                None,
-                                Some("mention"),
-                                Some(activity.get("created_at").cloned().unwrap_or(Value::Null)),
-                            )),
-                        );
-                        bulk_email_logs.push(NewEmailLog {
-                            id: Uuid::new_v4(),
-                            triggered_by_id: input.actor_id,
-                            receiver_id: stale_receiver(last_subscriber)?,
-                            entity_identifier: input.issue_id,
-                            data: Value::Object(email_data),
-                        });
+                        match last_subscriber {
+                            Some(receiver_id) => {
+                                let mut email_data = Map::new();
+                                email_data.insert(
+                                    "issue".to_owned(),
+                                    Value::Object(issue_json(&shape, false)),
+                                );
+                                email_data.insert(
+                                    "issue_activity".to_owned(),
+                                    Value::Object(activity_json(
+                                        activity,
+                                        None,
+                                        Some("mention"),
+                                        Some(
+                                            activity
+                                                .get("created_at")
+                                                .cloned()
+                                                .unwrap_or(Value::Null),
+                                        ),
+                                    )),
+                                );
+                                bulk_email_logs.push(NewEmailLog {
+                                    id: Uuid::new_v4(),
+                                    triggered_by_id: input.actor_id,
+                                    receiver_id,
+                                    entity_identifier: input.issue_id,
+                                    data: Value::Object(email_data),
+                                });
+                            }
+                            // Same bool-receiver batch loss as the
+                            // single-row branch (`:622-625` → `:670-674`).
+                            None => email_batch_poisoned = true,
+                        }
                     }
                     bulk_notifications.push(mention_bulk_row(notification));
                 }
@@ -1629,7 +1660,14 @@ pub async fn run_notifications(
     )
     .await?;
     insert_notifications(db, &bulk_notifications, now).await?;
-    insert_email_logs(db, &bulk_email_logs, now).await?;
+    // A bool-receiver description-mention row poisons the whole email
+    // batch: Django's single-statement bulk_create dies to the FK error
+    // and the outer `except` swallows it (`:670-674`), so even valid
+    // comment-mention rows in the batch are lost. Skip the insert to
+    // reproduce that write set.
+    if !email_batch_poisoned {
+        insert_email_logs(db, &bulk_email_logs, now).await?;
+    }
     Ok(())
 }
 
@@ -2105,13 +2143,15 @@ mod tests {
     }
 
     #[test]
-    fn stale_reads_die_when_loops_never_ran() {
-        // PORT BUG 3 (`:573-576`, `:622-625`) and the stale `issue_activity`
-        // (`:559-567`): unbound names raise, killing the task.
-        assert!(stale_receiver(None).is_err());
+    fn stale_activity_dies_only_on_empty_activities() {
+        // The stale `issue_activity` (`:559-567`) is always the last
+        // activity; only an empty list leaves the name unbound (PB-1575).
+        // The stale `subscriber` is never unbound — it falls back to the
+        // bool task parameter and poisons the email batch instead
+        // (PB-1577, covered by the contract suite, not here).
         assert!(stale_loop_activity(None).is_err());
-        let id = Uuid::new_v4();
-        assert_eq!(stale_receiver(Some(id)), Ok(id));
+        let map = Map::new();
+        assert!(stale_loop_activity(Some(&map)).is_ok());
     }
 
     #[test]
@@ -2290,25 +2330,6 @@ mod tests {
         assert!(py_truthy(&json!(true)));
         assert!(py_truthy(&json!("x")));
         assert!(py_truthy(&json!([1])));
-    }
-
-    #[test]
-    fn django_str_datetime_renders_like_python() {
-        // `str()` of an aware UTC datetime: `+00:00`, never `UTC`.
-        let moment =
-            chrono::DateTime::parse_from_rfc3339("2026-09-01T12:00:00Z").expect("test time");
-        assert_eq!(
-            django_str_datetime(&moment.with_timezone(&chrono::Utc)),
-            "2026-09-01 12:00:00+00:00"
-        );
-        // `str()` keeps microseconds when nonzero (`:605`); `created_at`
-        // values from Postgres virtually always carry them.
-        let moment =
-            chrono::DateTime::parse_from_rfc3339("2026-09-01T12:00:00.123456Z").expect("test time");
-        assert_eq!(
-            django_str_datetime(&moment.with_timezone(&chrono::Utc)),
-            "2026-09-01 12:00:00.123456+00:00"
-        );
     }
 
     #[test]
