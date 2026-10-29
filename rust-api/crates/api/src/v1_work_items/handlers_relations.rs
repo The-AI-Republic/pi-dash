@@ -1286,6 +1286,11 @@ async fn relate_inner(
                 // (`orchestration/relations.py:193-218`); pair-exact
                 // creation is the MCP tool's semantic.
                 pair_exact: false,
+                // The v1 agent endpoint refuses self-relations and
+                // dedupes duplicate ids
+                // (`orchestration/relations.py:166-177`); the raw
+                // per-iteration loop is the MCP tool's semantic.
+                raw_targets: false,
             },
         )
         .await?
@@ -1300,6 +1305,11 @@ async fn relate_inner(
                 // (`orchestration/relations.py:251-252`); newest-only
                 // is the MCP tool's semantic.
                 newest_only: false,
+                // The v1 agent endpoint refuses self-relations and
+                // dedupes duplicate ids
+                // (`orchestration/relations.py:166-177`); the raw
+                // per-iteration loop is the MCP tool's semantic.
+                raw_targets: false,
             },
         )
         .await?
