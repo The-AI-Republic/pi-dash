@@ -1223,9 +1223,15 @@ test.describe("module detail on desktop", () => {
         });
 
         await test.step("entries filter the list on detail", async () => {
+          // Fixed (NEWFRONT-337): entries live under their own tabs on
+          // web_new; the oracle keeps the rotated mapping (states under
+          // Labels, assignees under States, labels under Assignees).
+          const statesTab = driver.target === "web_new" ? "States" : "Labels";
+          const assigneesTab = driver.target === "web_new" ? "Assignees" : "States";
+          const labelsTab = driver.target === "web_new" ? "Labels" : "Assignees";
           // Entries wire their handlers once the filter instance loads;
           // settle on the clickable marker instead of racing that window.
-          await driver.modulesDetailProgressStatsTab("Labels");
+          await driver.modulesDetailProgressStatsTab(statesTab);
           await expect
             .poll(() => driver.modulesDetailProgressEntryClickable("Backlog"), { timeout: 30_000 })
             .toBe(true);
@@ -1256,12 +1262,6 @@ test.describe("module detail on desktop", () => {
             }
             await expect.poll(listNames, { timeout: 30_000 }).toEqual(expected);
           };
-          // Fixed (NEWFRONT-337): entries live under their own tabs on
-          // web_new; the oracle keeps the rotated mapping (states under
-          // Labels, assignees under States, labels under Assignees).
-          const statesTab = driver.target === "web_new" ? "States" : "Labels";
-          const assigneesTab = driver.target === "web_new" ? "Assignees" : "States";
-          const labelsTab = driver.target === "web_new" ? "Labels" : "Assignees";
           // State groups (live under the Labels tab while NEWFRONT-337 stands).
           await driver.modulesDetailProgressStatsTab(statesTab);
           await clickUntilList("Backlog", [backlogName]);
@@ -1401,7 +1401,12 @@ test.describe("module detail on desktop", () => {
           await driver.modulesDetailLinksAddClick();
           await driver.modulesDetailLinkFillUrl("https://refused.example");
           await driver.modulesDetailLinkSubmit();
-          expect(await toastText(driver)).toContain("Error!");
+          // web_new titles the failure notice with the action; the
+          // oracle uses its generic "Error!" title. Either way the
+          // notice shows and the refused write stores nothing.
+          expect(await toastText(driver)).toContain(
+            driver.target === "web_new" ? "Couldn't create the module link" : "Error!"
+          );
           expect(await serverModulesDetailLinks(seed.workspaceSlug, projectId, secondId, session)).toEqual([]);
         });
       } finally {

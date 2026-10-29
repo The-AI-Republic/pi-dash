@@ -33006,15 +33006,19 @@ export class WebNewDriver implements ParityDriver {
     return (await chart.count()) > 0 && (await chart.isVisible().catch(() => false));
   }
 
+  /** First visible measure trigger; the sidebar mounts twice (detail + closed peek). */
+  private moduleProgressMeasureTrigger(): Locator {
+    return this.moduleSidebar().getByTestId("module-progress-measure").filter({ visible: true });
+  }
+
   async modulesDetailProgressMeasureValue(): Promise<string | null> {
-    const trigger = this.moduleSidebar().getByTestId("module-progress-measure");
+    const trigger = this.moduleProgressMeasureTrigger();
     if ((await trigger.count()) === 0) return null;
-    if (!(await trigger.isVisible().catch(() => false))) return null;
-    return ((await trigger.innerText()) ?? "").replace(/\s+/g, " ").trim();
+    return ((await trigger.first().innerText()) ?? "").replace(/\s+/g, " ").trim();
   }
 
   async modulesDetailProgressMeasureOptions(): Promise<string[]> {
-    const trigger = this.moduleSidebar().getByTestId("module-progress-measure");
+    const trigger = this.moduleProgressMeasureTrigger();
     if ((await trigger.count()) === 0) return [];
     await trigger.first().scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
     await trigger.first().click({ timeout: WebNewDriver.WAIT_MS });
@@ -33036,7 +33040,7 @@ export class WebNewDriver implements ParityDriver {
     };
     this.page.on("response", onResponse);
     try {
-      const trigger = this.moduleSidebar().getByTestId("module-progress-measure");
+      const trigger = this.moduleProgressMeasureTrigger();
       await trigger.first().scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
       await trigger.first().click({ timeout: WebNewDriver.WAIT_MS });
       // If a stale toggle state swallowed the open, the option never
