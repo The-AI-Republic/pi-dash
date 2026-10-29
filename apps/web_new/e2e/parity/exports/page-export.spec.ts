@@ -51,13 +51,16 @@ import {
   markOnboardedForProjects,
   parityProjectIdentifier,
   serverCreatePage,
-  sessionBrowserCookies,
   setLastWorkspaceForProjects,
-  signInSession,
   signUpAuthedSession,
   uniqueSuffixForProjects,
   type AuthedSession,
 } from "../helpers/api";
+import {
+  browserSessionCookies as editionBrowserCookies,
+  isCloudEdition,
+  seededSession,
+} from "../workspace-settings/edition-session";
 import { isParityApiRequestPath } from "../helpers/api-traffic";
 import { specTags, specTitle } from "../helpers/tags";
 
@@ -86,7 +89,28 @@ function detailPath(seed: ParitySeedFacts, projectId: string, pageId: string): s
 }
 
 async function seedSession(seed: ParitySeedFacts): Promise<string> {
-  return signInSession(seed.email, seed.password);
+  // Cloud stacks seed a passwordless identity that enters through the
+  // provider's dev-login endpoint; OSS seeds sign in through the
+  // credential form. Same session-cookie contract either way.
+  return seededSession(seed, seed.email);
+}
+
+/**
+ * Open a seeded-project page as the seed user after world-owner steps ran
+ * in this context. The world owner enters through the sign-up form (a
+ * session-id cookie) while the cloud seed enters through dev-login (a
+ * pidash_access cookie); without a clear both identities ride along and
+ * the server answers as the wrong one. On OSS both sessions are
+ * session-id, so the clear changes nothing there.
+ */
+async function openSeedPageAfterWorld(
+  driver: ParityDriver,
+  path: string,
+  session: string,
+  seed: ParitySeedFacts
+): Promise<void> {
+  await driver.page.context().clearCookies();
+  await driver.openAuthenticated(path, editionBrowserCookies(session, seed));
 }
 
 /** Filename slug the dialog derives from a page title (verified live). */
@@ -150,7 +174,7 @@ async function openExportDialog(
   const session = await seedSession(seed);
   const title = `${label} ${tag}`;
   const pageId = await serverCreatePage(seed.workspaceSlug, seed.projectId, session, title);
-  await driver.openAuthenticated(detailPath(seed, seed.projectId, pageId), sessionBrowserCookies(session));
+  await driver.openAuthenticated(detailPath(seed, seed.projectId, pageId), editionBrowserCookies(session, seed));
   await driver.pagesLiveWaitSynced();
   await driver.pagesHeaderOpenOptions();
   await driver.pagesHeaderChooseMenuItem("Export");
@@ -181,7 +205,7 @@ async function landPageContent(
   let marker = "";
   for (let attempt = 0; attempt < 5; attempt += 1) {
     marker = `land-${tag}-a${attempt}`;
-    await driver.openAuthenticated(detailPath(seed, projectId, pageId), sessionBrowserCookies(session));
+    await driver.openAuthenticated(detailPath(seed, projectId, pageId), editionBrowserCookies(session, seed));
     await driver.pagesLiveWaitSynced();
     await driver.pagesLiveTypeInBody(`${marker} `);
     await expect.poll(() => driver.pagesLiveBodyText(), { timeout: 60_000 }).toContain(marker);
@@ -321,7 +345,7 @@ test(
     let marker = "";
     for (let attempt = 0; attempt < 5; attempt += 1) {
       marker = `mdimg-${tag}-a${attempt}`;
-      await driver.openAuthenticated(path, sessionBrowserCookies(session));
+      await driver.openAuthenticated(path, editionBrowserCookies(session, seed));
       await driver.pagesLiveWaitSynced();
       await driver.pagesLiveTypeInBody(`${marker} `);
       await expect.poll(() => driver.pagesLiveBodyText(), { timeout: 60_000 }).toContain(marker);
@@ -485,7 +509,7 @@ test(
     const tag = stamp();
     const session = await seedSession(seed);
     const pageId = await serverCreatePage(seed.workspaceSlug, seed.projectId, session, `Feed021 ${tag}`);
-    await driver.openAuthenticated(detailPath(seed, seed.projectId, pageId), sessionBrowserCookies(session));
+    await driver.openAuthenticated(detailPath(seed, seed.projectId, pageId), editionBrowserCookies(session, seed));
     await driver.pagesLiveWaitSynced();
     await driver.pagesLiveTypeInBody(`feed-${tag} `);
 
@@ -537,7 +561,7 @@ test(
     const tag = stamp();
     const session = await seedSession(seed);
     const pageId = await serverCreatePage(seed.workspaceSlug, seed.projectId, session, `Feed021b ${tag}`);
-    await driver.openAuthenticated(detailPath(seed, seed.projectId, pageId), sessionBrowserCookies(session));
+    await driver.openAuthenticated(detailPath(seed, seed.projectId, pageId), editionBrowserCookies(session, seed));
     await driver.pagesLiveWaitSynced();
     await driver.pagesLiveTypeInBody(`feedb-${tag} `);
 
@@ -781,7 +805,7 @@ test(
       const tag = stamp();
       const session = await seedSession(seed);
       const pageId = await serverCreatePage(seed.workspaceSlug, seed.projectId, session, `Kbd023 ${tag}`);
-      await driver.openAuthenticated(detailPath(seed, seed.projectId, pageId), sessionBrowserCookies(session));
+      await openSeedPageAfterWorld(driver, detailPath(seed, seed.projectId, pageId), session, seed);
       await driver.pagesLiveWaitSynced();
       await driver.pagesHeaderOpenOptions();
       await driver.pagesHeaderChooseMenuItem("Export");
@@ -861,7 +885,7 @@ test(
       const tag = stamp();
       const session = await seedSession(seed);
       const pageId = await serverCreatePage(seed.workspaceSlug, seed.projectId, session, `Kbd023b ${tag}`);
-      await driver.openAuthenticated(detailPath(seed, seed.projectId, pageId), sessionBrowserCookies(session));
+      await openSeedPageAfterWorld(driver, detailPath(seed, seed.projectId, pageId), session, seed);
       await driver.pagesLiveWaitSynced();
       await driver.pagesHeaderOpenOptions();
       await driver.pagesHeaderChooseMenuItem("Export");
@@ -939,7 +963,7 @@ test(
     });
 
     await test.step("the page-export dialog renders ungated with no markers", async () => {
-      await driver.openAuthenticated(detailPath(seed, seed.projectId, pageId), sessionBrowserCookies(session));
+      await openSeedPageAfterWorld(driver, detailPath(seed, seed.projectId, pageId), session, seed);
       await driver.pagesLiveWaitSynced();
       await driver.pagesHeaderOpenOptions();
       await driver.pagesHeaderChooseMenuItem("Export");
@@ -953,7 +977,16 @@ test(
       const paths = traffic.stop();
       expect(paths).toContain(`/api/workspaces/${world.workspaceSlug}/export-issues`);
       expect(paths.filter((path) => /export-issues/.test(path)).length).toBeGreaterThan(0);
-      expect(paths.filter((path) => /desktop|license|billing|premium|upgrade|\bee\b/i.test(path))).toEqual([]);
+      // Cloud chrome phones home around every page, on both apps: the old
+      // app refreshes the auth scope, the new app reads the plan snapshot
+      // for the sidebar badge (CLOUD-038). Both are ambient shell reads,
+      // not export entry — observed as the only denylisted paths on each
+      // target's cloud run — so the cloud leg sets exactly those two aside
+      // before the sweep. Every other billing/license/upgrade-shaped call
+      // still fails, on both editions.
+      const ambient = isCloudEdition() ? ["/api/auth/scope-upgrade/", "/api/billing/me/plan/"] : [];
+      const swept = paths.filter((path) => !ambient.includes(path));
+      expect(swept.filter((path) => /desktop|license|billing|premium|upgrade|\bee\b/i.test(path))).toEqual([]);
     });
   }
 );
