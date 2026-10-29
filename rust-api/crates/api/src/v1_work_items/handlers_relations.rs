@@ -1282,6 +1282,10 @@ async fn relate_inner(
             &write,
             operations::relations::RelateOptions {
                 emit_activity: true,
+                // The v1 agent endpoint dedupes across orientations
+                // (`orchestration/relations.py:193-218`); pair-exact
+                // creation is the MCP tool's semantic.
+                pair_exact: false,
             },
         )
         .await?

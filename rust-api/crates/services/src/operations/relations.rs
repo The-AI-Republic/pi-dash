@@ -818,9 +818,48 @@ fn agent_activity_kwargs(
     kwargs
 }
 
+/// One relate `INSERT` attempt (`relations.py:196-207`): `Ok(true)`
+/// when this call created the row, `Ok(false)` when a concurrent
+/// writer holds the pair (Python's `IntegrityError` catch re-reads;
+/// both callers map a lost race the same way they map a lost
+/// `ON CONFLICT` race).
+async fn insert_relation_row(
+    pool: &PgPool,
+    actor_id: &Uuid,
+    source: &SourceIssue,
+    issue_id: Uuid,
+    related_id: Uuid,
+    stored: &str,
+) -> Result<bool, Error> {
+    // `objects.create()` in `transaction.atomic()` (a single
+    // statement is atomic anyway): the explicit
+    // `created_by`/`updated_by` pass through `BaseModel.save`,
+    // whose adding branch keeps `created_by` but NULLS
+    // `updated_by` (REL-5).
+    let row = relation_domain::RelationRow {
+        id: Uuid::new_v4(),
+        created_at: now_utc(),
+        updated_at: now_utc(),
+        created_by: Some(*actor_id),
+        updated_by: None,
+        project_id: source.project_id,
+        workspace_id: source.workspace_id,
+        issue_id,
+        related_issue_id: related_id,
+        relation_type: stored,
+    };
+    match relation_domain::relate_row_or_nothing(pool, &row).await {
+        Ok(created) => Ok(created),
+        Err(error) if is_unique_violation(&error) => Ok(false),
+        Err(error) => Err(db_error(error, "relate-insert")),
+    }
+}
+
 /// `relate` (`relations.py:180-232`): record "source \<type\> each
 /// target", idempotent. Returns the response map minus `relations` (the
-/// caller appends the grouped read).
+/// caller appends the grouped read). With `pair_exact`, creation matches
+/// the exact oriented pair (the MCP `get_or_create`) instead of deduping
+/// across orientations.
 async fn relate_op(
     deps: &Deps,
     source: &SourceIssue,
@@ -828,6 +867,7 @@ async fn relate_op(
     targets: Vec<ResolvedIssue>,
     actor_id: &Uuid,
     emit_activity: bool,
+    pair_exact: bool,
 ) -> Result<Map<String, Value>, Error> {
     let pool = &deps.pool;
     let targets = check_targets(source, targets)?;
@@ -837,34 +877,34 @@ async fn relate_op(
     for target in &targets {
         let (issue_id, related_id, stored) = stored_edge(source.id, relation_type, target.id);
         let existing = fetch_pair_rows(pool, &source.id, &target.id).await?;
+        if pair_exact {
+            // MCP `get_or_create(issue, related_issue)`
+            // (`pi_dash_cloud/mcp/tools.py:664-675`): the lookup names
+            // the exact oriented pair and no type, so a live row on
+            // this orientation — any stored type — means "skipped"
+            // (reported under `unchanged`), and cross-orientation rows
+            // are invisible. The stored edge is the same triple the
+            // default path writes (MCP's swap set and canonical type
+            // match [`stored_edge`).
+            let oriented_live = existing
+                .iter()
+                .any(|row| row.issue_id == issue_id && row.related_issue_id == related_id);
+            let created_now = !oriented_live
+                && insert_relation_row(pool, actor_id, source, issue_id, related_id, &stored)
+                    .await?;
+            if created_now {
+                created.push(target);
+            } else {
+                unchanged.push(target.identifier());
+            }
+            continue;
+        }
         if existing.is_empty() {
-            // `objects.create()` in `transaction.atomic()` (a single
-            // statement is atomic anyway): the explicit
-            // `created_by`/`updated_by` pass through `BaseModel.save`,
-            // whose adding branch keeps `created_by` but NULLS
-            // `updated_by` (REL-5). A concurrent writer's unique
-            // violation re-reads below (Python's `IntegrityError`
-            // catch does the same).
-            let row = relation_domain::RelationRow {
-                id: Uuid::new_v4(),
-                created_at: now_utc(),
-                updated_at: now_utc(),
-                created_by: Some(*actor_id),
-                updated_by: None,
-                project_id: source.project_id,
-                workspace_id: source.workspace_id,
-                issue_id,
-                related_issue_id: related_id,
-                relation_type: &stored,
-            };
-            match relation_domain::relate_row_or_nothing(pool, &row).await {
-                Ok(true) => {
-                    created.push(target);
-                    continue;
-                }
-                Ok(false) => {}
-                Err(error) if is_unique_violation(&error) => {}
-                Err(error) => return Err(db_error(error, "relate-insert")),
+            // A concurrent writer's unique violation re-reads below
+            // (Python's `IntegrityError` catch does the same).
+            if insert_relation_row(pool, actor_id, source, issue_id, related_id, &stored).await? {
+                created.push(target);
+                continue;
             }
         }
         let existing = if existing.is_empty() {
@@ -1065,8 +1105,9 @@ async fn unrelate_op(
 ///
 /// The caller already ran auth, the gate and body negotiation, and
 /// pre-fetched `write.source` before parsing the body, so a bogus issue
-/// 404s before a malformed body 400s (`:3165-3167`). `newest_only` is
-/// the unrelate leg's option only; the relate leg ignores it.
+/// 404s before a malformed body 400s (`:3165-3167`). `pair_exact` is
+/// the relate leg's option only and `newest_only` the unrelate leg's;
+/// each leg ignores the other's.
 async fn relate_shared(
     deps: &Deps,
     ctx: &WriteCtx,
@@ -1074,6 +1115,7 @@ async fn relate_shared(
     emit_activity: bool,
     is_relate: bool,
     newest_only: bool,
+    pair_exact: bool,
 ) -> Result<Outcome, Error> {
     let pool = &deps.pool;
     let slug = write.slug;
@@ -1113,6 +1155,7 @@ async fn relate_shared(
             targets,
             &actor_id,
             emit_activity,
+            pair_exact,
         )
         .await?
     } else {
@@ -1156,6 +1199,14 @@ pub struct RelateOptions {
     /// callers that enqueue their own shaped activity (the MCP tools)
     /// pass `false`.
     pub emit_activity: bool,
+    /// Match and create the exact oriented `(source, target,
+    /// stored-type)` row without the cross-orientation dedupe (design
+    /// D6: the v1 agent endpoint classifies the pair in either direction
+    /// from the source viewpoint — `orchestration/relations.py:193-218`
+    /// — while the MCP tool `get_or_create`s the exact oriented pair —
+    /// `pi_dash_cloud/mcp/tools.py:664-675`). The v1 handler passes
+    /// `false`; MCP passes `true`.
+    pub pair_exact: bool,
 }
 
 /// Per-caller options for [`unrelate`].
@@ -1186,7 +1237,16 @@ pub async fn relate(
     write: &RelationWrite<'_>,
     options: RelateOptions,
 ) -> Result<Outcome, Error> {
-    relate_shared(deps, ctx, write, options.emit_activity, true, false).await
+    relate_shared(
+        deps,
+        ctx,
+        write,
+        options.emit_activity,
+        true,
+        false,
+        options.pair_exact,
+    )
+    .await
 }
 
 /// `POST .../relations/unrelate/` (`views/issue.py:3250-3253`): remove
@@ -1205,6 +1265,7 @@ pub async fn unrelate(
         options.emit_activity,
         false,
         options.newest_only,
+        false,
     )
     .await
 }
@@ -1653,6 +1714,29 @@ mod tests {
         fn target_identifier(&self) -> String {
             format!("{}-{}", self.project_identifier, self.target_seq)
         }
+
+        fn target_source(&self) -> SourceIssue {
+            SourceIssue {
+                id: self.target_id,
+                project_id: self.project_id,
+                workspace_id: self.workspace_id,
+                project_identifier: self.project_identifier.clone(),
+                sequence_id: self.target_seq,
+            }
+        }
+
+        fn source_targets(&self) -> Vec<ResolvedIssue> {
+            vec![ResolvedIssue {
+                id: self.source_id,
+                workspace_id: self.workspace_id,
+                project_identifier: self.project_identifier.clone(),
+                sequence_id: self.source_seq,
+            }]
+        }
+
+        fn source_identifier(&self) -> String {
+            format!("{}-{}", self.project_identifier, self.source_seq)
+        }
     }
 
     async fn seed_scope(pool: &sqlx::PgPool, tag: &str) -> LiveScope {
@@ -1780,7 +1864,7 @@ mod tests {
         id
     }
 
-    fn unrelate_deps(pool: &sqlx::PgPool) -> (Deps, Arc<RecordingEnqueue>) {
+    fn op_deps(pool: &sqlx::PgPool) -> (Deps, Arc<RecordingEnqueue>) {
         let enqueue = Arc::new(RecordingEnqueue {
             calls: Mutex::new(Vec::new()),
         });
@@ -1834,7 +1918,7 @@ mod tests {
         )
         .await;
         let newer = insert_relation(&pool, &scope, scope.target_id, scope.source_id, now).await;
-        let (deps, enqueue) = unrelate_deps(&pool);
+        let (deps, enqueue) = op_deps(&pool);
         let out = unrelate_op(
             &deps,
             &scope.source(),
@@ -1887,7 +1971,7 @@ mod tests {
         )
         .await;
         let second = insert_relation(&pool, &scope, scope.target_id, scope.source_id, now).await;
-        let (deps, enqueue) = unrelate_deps(&pool);
+        let (deps, enqueue) = op_deps(&pool);
         let out = unrelate_op(
             &deps,
             &scope.source(),
@@ -1915,5 +1999,130 @@ mod tests {
             vec![second.to_string(), first.to_string()]
         );
         assert_eq!(calls.len(), 2);
+    }
+
+    async fn live_pair_rows(
+        pool: &sqlx::PgPool,
+        a_id: Uuid,
+        b_id: Uuid,
+    ) -> Vec<(Uuid, Uuid, String)> {
+        sqlx::query_as(
+            "SELECT issue_id, related_issue_id, relation_type FROM issue_relations \
+             WHERE deleted_at IS NULL \
+               AND ((issue_id = $1 AND related_issue_id = $2) \
+                 OR (issue_id = $2 AND related_issue_id = $1)) \
+             ORDER BY created_at ASC",
+        )
+        .bind(a_id)
+        .bind(b_id)
+        .fetch_all(pool)
+        .await
+        .expect("read pair rows")
+    }
+
+    #[tokio::test]
+    async fn live_pair_exact_double_relate_stores_both_orientations() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let scope = seed_scope(&pool, "exact").await;
+        let (deps, _enqueue) = op_deps(&pool);
+        // The MCP suite's double relate: M9A-1→M9A-3 then M9A-3→M9A-1.
+        let first = relate_op(
+            &deps,
+            &scope.source(),
+            "duplicate",
+            scope.targets(),
+            &scope.actor,
+            false,
+            true,
+        )
+        .await
+        .expect("relate exact");
+        assert_eq!(
+            first.get("created"),
+            Some(&Value::Array(vec![Value::String(
+                scope.target_identifier()
+            )]))
+        );
+        let second = relate_op(
+            &deps,
+            &scope.target_source(),
+            "duplicate",
+            scope.source_targets(),
+            &scope.actor,
+            false,
+            true,
+        )
+        .await
+        .expect("relate exact reversed");
+        // The reversed orientation creates instead of deduping.
+        assert_eq!(
+            second.get("created"),
+            Some(&Value::Array(vec![Value::String(
+                scope.source_identifier()
+            )]))
+        );
+        assert_eq!(second.get("unchanged"), Some(&Value::Array(vec![])));
+        let rows = live_pair_rows(&pool, scope.source_id, scope.target_id).await;
+        assert_eq!(
+            rows,
+            vec![
+                (scope.source_id, scope.target_id, "duplicate".to_owned()),
+                (scope.target_id, scope.source_id, "duplicate".to_owned()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn live_default_double_relate_dedupes_across_orientations() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let scope = seed_scope(&pool, "dedupe").await;
+        let (deps, _enqueue) = op_deps(&pool);
+        let first = relate_op(
+            &deps,
+            &scope.source(),
+            "duplicate",
+            scope.targets(),
+            &scope.actor,
+            false,
+            false,
+        )
+        .await
+        .expect("relate default");
+        assert_eq!(
+            first.get("created"),
+            Some(&Value::Array(vec![Value::String(
+                scope.target_identifier()
+            )]))
+        );
+        let second = relate_op(
+            &deps,
+            &scope.target_source(),
+            "duplicate",
+            scope.source_targets(),
+            &scope.actor,
+            false,
+            false,
+        )
+        .await
+        .expect("relate default reversed");
+        // The v1 default reads the existing row from the other end and
+        // reports unchanged; nothing is created.
+        assert_eq!(second.get("created"), Some(&Value::Array(vec![])));
+        assert_eq!(
+            second.get("unchanged"),
+            Some(&Value::Array(vec![Value::String(
+                scope.source_identifier()
+            )]))
+        );
+        assert_eq!(second.get("conflicts"), Some(&Value::Array(vec![])));
+        let rows = live_pair_rows(&pool, scope.source_id, scope.target_id).await;
+        assert_eq!(
+            rows,
+            vec![(scope.source_id, scope.target_id, "duplicate".to_owned())]
+        );
     }
 }
