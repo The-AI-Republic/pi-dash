@@ -266,6 +266,24 @@ describe("bundled list", () => {
     expect(resolveLinkKind("/acme/projects/00000000-0000-0000-0000-000000000000/cycles")).toBe("anchor");
   });
 
+  it("serves workspace analytics and the tab subtree from web_new", () => {
+    for (const path of [
+      "/acme/analytics",
+      "/acme/analytics/",
+      "/acme/analytics/overview",
+      "/acme/analytics/work-items",
+      "/acme/analytics/work-items/",
+    ]) {
+      expect(isMigratedPath(path), path).toBe(true);
+    }
+    // Near-miss spellings stay on the old app.
+    for (const path of ["/acme/analytics-archive", "/acme/analyticsx"]) {
+      expect(isMigratedPath(path), path).toBe(false);
+    }
+    expect(resolveLinkKind("/acme/analytics/overview")).toBe("router");
+    expect(resolveLinkKind("/acme/analytics-archive")).toBe("anchor");
+  });
+
   it("keeps workspace matching out of reserved top-level names and the bare root", () => {
     for (const name of [
       "api",
