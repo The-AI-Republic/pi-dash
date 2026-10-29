@@ -832,6 +832,68 @@ where
 }
 
 // ---------------------------------------------------------------------------
+// OIDC sync login stamps (cloud re-login triple, last-login-time single)
+// ---------------------------------------------------------------------------
+
+/// The OIDC sync re-login save (`pi_dash_cloud/airepublic/sync.py:122-124`):
+/// `update_fields = ["avatar", "last_login_medium", "is_email_verified"]`,
+/// which Django re-sorts into `_meta` order — `avatar`,
+/// `is_email_verified`, `last_login_medium` — and `updated_at` is NOT
+/// stamped (`auto_now` only fires when `update_fields` is `None` or lists
+/// it). The dirty check and the never-downgrade verified gate live with
+/// the driver; when dirty, all three current values are written. A fixed
+/// shape, unlike [`sync_user_data`] (always names) and [`save_user_data`]
+/// (the full login-stamps statement).
+const USER_RELOGIN_UPDATE_SQL: &str = "UPDATE \"users\" SET \"avatar\" = $1, \"is_email_verified\" = $2, \"last_login_medium\" = $3 WHERE \"id\" = $4";
+
+/// See [`USER_RELOGIN_UPDATE_SQL`]: the fixed 3-column re-login write.
+/// Runs on the caller's executor (the sync driver holds the upsert
+/// transaction).
+pub async fn update_user_relogin<'e, E>(
+    ex: E,
+    user_id: Uuid,
+    avatar: &str,
+    is_email_verified: bool,
+    last_login_medium: &str,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(USER_RELOGIN_UPDATE_SQL)
+        .bind(avatar)
+        .bind(is_email_verified)
+        .bind(last_login_medium)
+        .bind(user_id)
+        .execute(ex)
+        .await
+        .map(|_| ())
+}
+
+/// The OIDC sync every-login bump (`pi_dash_cloud/airepublic/sync.py:126-127`):
+/// `update_fields = ["last_login_time"]`, a single column.
+const USER_LAST_LOGIN_TIME_UPDATE_SQL: &str =
+    "UPDATE \"users\" SET \"last_login_time\" = $1 WHERE \"id\" = $2";
+
+/// See [`USER_LAST_LOGIN_TIME_UPDATE_SQL`]: the single-column timestamp
+/// bump. Runs on the caller's executor (the sync driver holds the upsert
+/// transaction).
+pub async fn update_user_last_login_time<'e, E>(
+    ex: E,
+    user_id: Uuid,
+    at: DateTime<Utc>,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(USER_LAST_LOGIN_TIME_UPDATE_SQL)
+        .bind(at)
+        .bind(user_id)
+        .execute(ex)
+        .await
+        .map(|_| ())
+}
+
+// ---------------------------------------------------------------------------
 // get_or_create_profile (login redirection path)
 // ---------------------------------------------------------------------------
 
@@ -1704,6 +1766,109 @@ mod tests {
              \"display_name\" = $3, \"avatar\" = $4, \"updated_at\" = $5 \
              WHERE \"id\" = $6"
         );
+    }
+
+    // -- OIDC sync login stamps (PIDASHCONV-1621) -------------------------------
+
+    #[test]
+    fn relogin_update_sql_is_byte_identical() {
+        // The overlay re-login builder, verbatim
+        // (`cloud-db/src/auth/queries.rs`, `update_user_relogin`): the SET
+        // list is identical — columns, order, quoting and `$n` positions.
+        // Only the `WHERE` differs: the sea-query builder qualifies it
+        // (`WHERE "users"."id" = $4`) while OSS spells it unqualified.
+        assert_eq!(
+            USER_RELOGIN_UPDATE_SQL,
+            "UPDATE \"users\" SET \"avatar\" = $1, \"is_email_verified\" = $2, \
+             \"last_login_medium\" = $3 WHERE \"id\" = $4"
+        );
+    }
+
+    #[test]
+    fn last_login_time_update_sql_is_byte_identical() {
+        // The overlay timestamp builder, verbatim
+        // (`cloud-db/src/auth/queries.rs`, `update_user_last_login_time`):
+        // same single SET column. The builder renders the bind as
+        // `CAST($1 AS timestamptz)` (sea-query renders every datetime bind
+        // that way) while OSS binds the `DateTime<Utc>` as a plain `$1`
+        // like every other stamps fn — the same stored value either way —
+        // and the `WHERE` is unqualified here (`WHERE "id" = $2`).
+        assert_eq!(
+            USER_LAST_LOGIN_TIME_UPDATE_SQL,
+            "UPDATE \"users\" SET \"last_login_time\" = $1 WHERE \"id\" = $2"
+        );
+    }
+
+    /// PIDASHCONV-1621: the two OIDC sync stamps write only their own
+    /// columns — the re-login triple flips avatar/verified/medium while
+    /// `updated_at` keeps its seed stamp (Django's `update_fields` save
+    /// does not touch `auto_now`, `sync.py:122-124`), and the timestamp
+    /// bump moves only `last_login_time` (`sync.py:126-127`). Names,
+    /// display name, token and ip are untouched by both.
+    #[tokio::test]
+    async fn live_relogin_and_login_time_write_only_their_columns() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let mut tx = pool.begin().await.expect("begin scratch tx");
+        sqlx::query(USERS_DDL)
+            .execute(&mut *tx)
+            .await
+            .expect("temp users");
+        let seeded: DateTime<Utc> = "2026-10-27T12:00:00+00:00".parse().expect("T0");
+        let login: DateTime<Utc> = "2026-10-28T12:00:00+00:00".parse().expect("T1");
+        let user_id = live_uuid("000000006211");
+        sqlx::query(
+            "INSERT INTO users (password, id, username, email, display_name, first_name,
+             last_name, avatar, date_joined, created_at, updated_at, last_location,
+             created_location, is_superuser, is_managed, is_password_expired, is_active,
+             is_staff, is_email_verified, is_password_autoset, is_password_reset_required,
+             token, last_login_ip, last_logout_ip, last_login_medium, last_login_uagent,
+             is_bot, user_timezone, is_email_valid)
+             VALUES ('usable-hash', $1, 'stamp1621', 'stamp1621@example.test', 'stamp',
+             'St', 'Amp', 'http://pic/old', $2, $2, $2, '', '', false, false, false, true,
+             false, false, false, false, '', '', '', 'email', '', false, 'UTC', false)",
+        )
+        .bind(user_id)
+        .bind(seeded)
+        .execute(&mut *tx)
+        .await
+        .expect("seed user");
+        update_user_relogin(&mut *tx, user_id, "http://pic/new", true, "airepublic")
+            .await
+            .expect("relogin triple runs");
+        update_user_last_login_time(&mut *tx, user_id, login)
+            .await
+            .expect("login-time single runs");
+        let row: sqlx::postgres::PgRow = sqlx::query(
+            "SELECT avatar, is_email_verified, last_login_medium, last_login_time,
+             updated_at, first_name, last_name, display_name, token, last_login_ip
+             FROM users WHERE id = $1",
+        )
+        .bind(user_id)
+        .fetch_one(&mut *tx)
+        .await
+        .expect("read back");
+        let avatar: String = row.try_get("avatar").expect("avatar");
+        let verified: bool = row.try_get("is_email_verified").expect("verified");
+        let medium: String = row.try_get("last_login_medium").expect("medium");
+        let at: Option<DateTime<Utc>> = row.try_get("last_login_time").expect("login time");
+        let touched: DateTime<Utc> = row.try_get("updated_at").expect("updated_at");
+        let first: String = row.try_get("first_name").expect("first_name");
+        let last: String = row.try_get("last_name").expect("last_name");
+        let display: String = row.try_get("display_name").expect("display_name");
+        let token: String = row.try_get("token").expect("token");
+        let ip: String = row.try_get("last_login_ip").expect("last_login_ip");
+        assert_eq!(avatar, "http://pic/new", "relogin avatar follows claims");
+        assert!(verified, "relogin promotes verified");
+        assert_eq!(medium, "airepublic", "relogin flips medium");
+        assert_eq!(at, Some(login), "every-login timestamp bump");
+        assert_eq!(touched, seeded, "relogin stamps no updated_at");
+        assert_eq!(first, "St", "names stay user-controlled");
+        assert_eq!(last, "Amp", "names stay user-controlled");
+        assert_eq!(display, "stamp", "display name untouched");
+        assert_eq!(token, "", "token untouched");
+        assert_eq!(ip, "", "login ip untouched");
     }
 
     // -- moved agent-user pins (from db::orchestration::workpad) ---------------
