@@ -67,6 +67,8 @@ afterEach(() => {
   notify.notifyError.mockReset();
   notify.notifySuccess.mockReset();
   router.navigate.mockReset();
+  router.navigate.mockResolvedValue(undefined);
+  globalThis.window.history.replaceState(null, "", "/acme/projects/p1/issues");
 });
 
 function renderDialog(overrides: Partial<React.ComponentProps<typeof ModuleArchiveDialog>> = {}) {
@@ -130,12 +132,39 @@ describe("ModuleArchiveDialog", () => {
     expect(notify.notifySuccess).toHaveBeenCalledWith(MODULE_ARCHIVE_SUCCESS_TITLE, MODULE_ARCHIVE_SUCCESS_BODY);
     expect(invalidate).toHaveBeenCalledWith({ queryKey: moduleKeys.list("acme", MODULES_PROJECT_ID) });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: moduleKeys.archivedList("acme", MODULES_PROJECT_ID) });
+    // The typed route target keeps the list's trailing slash; a plain
+    // string target loses it in the router.
     expect(router.navigate).toHaveBeenCalledWith({
-      to: `/acme/projects/${MODULES_PROJECT_ID}/modules/`,
+      to: "/$ws/projects/$projectId/modules/",
+      params: { ws: "acme", projectId: MODULES_PROJECT_ID },
       search: {},
       replace: true,
     });
     expect(notify.notifyError).not.toHaveBeenCalled();
+  });
+
+  it("rewrites a slashless modules address after landing, which only the slash distinguishes", async () => {
+    // The router sees `/modules` and `/modules/` as one location, so the
+    // landing navigation is a no-op and the address keeps its entered
+    // form; the dialog rewrites it to the canonical list address.
+    router.navigate.mockImplementation(async ({ params }: { params: { ws: string; projectId: string } }) => {
+      globalThis.window.history.replaceState(null, "", `/${params.ws}/projects/${params.projectId}/modules`);
+    });
+    renderDialog();
+    fireEvent.click(screen.getByRole("button", { name: "Archive" }));
+    await waitFor(() =>
+      expect(globalThis.window.location.pathname).toBe(`/acme/projects/${MODULES_PROJECT_ID}/modules/`)
+    );
+  });
+
+  it("leaves an already-canonical address alone", async () => {
+    router.navigate.mockImplementation(async ({ params }: { params: { ws: string; projectId: string } }) => {
+      globalThis.window.history.replaceState(null, "", `/${params.ws}/projects/${params.projectId}/modules/`);
+    });
+    renderDialog();
+    fireEvent.click(screen.getByRole("button", { name: "Archive" }));
+    await waitFor(() => expect(router.navigate).toHaveBeenCalled());
+    expect(globalThis.window.location.pathname).toBe(`/acme/projects/${MODULES_PROJECT_ID}/modules/`);
   });
 
   it("hands the landed archive to a host that supplies its own landing", async () => {

@@ -168,42 +168,69 @@ test(
     await createLiveAnchor(seed, projectId, tag, session);
     try {
       await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
+      const oracle = driver.target !== "web_new";
 
-      await test.step("a filled project shows the skeleton, never rows", async () => {
+      await test.step("a filled project settles from its own fetch", async () => {
         await driver.archivesCyclesOpenTabRaw(seed.workspaceSlug, projectId);
-        await expect.poll(() => driver.archivesCyclesSkeletonVisible(), { timeout: 30_000 }).toBe(true);
-        // The fetch succeeds but nothing renders from it.
-        await expect.poll(() => driver.archivesCyclesVisibleNames(), { timeout: 10_000 }).toEqual([]);
-        expect(await driver.archivesCyclesEmptyHeading()).toBe(null);
-        expect(await driver.archivesCyclesNoMatchHint()).toBe(null);
+        if (oracle) {
+          // Old app: the fetch succeeds but the archived selector stays
+          // gated on a live visit, so the skeleton never gives way.
+          await expect.poll(() => driver.archivesCyclesSkeletonVisible(), { timeout: 30_000 }).toBe(true);
+          await expect.poll(() => driver.archivesCyclesVisibleNames(), { timeout: 10_000 }).toEqual([]);
+          expect(await driver.archivesCyclesEmptyHeading()).toBe(null);
+          expect(await driver.archivesCyclesNoMatchHint()).toBe(null);
+        } else {
+          // web_new: a direct load renders the archived rows (the fix).
+          await expect.poll(() => driver.archivesCyclesSkeletonVisible(), { timeout: 30_000 }).toBe(false);
+          await expect.poll(() => driver.archivesCyclesVisibleNames(), { timeout: 60_000 }).toEqual([name]);
+        }
         const archived = await serverArchivedCycles(seed.workspaceSlug, projectId, session);
         expect(archived.map((row) => row.id)).toContain(cycleId);
       });
 
-      await test.step("a zero-archived project shows the skeleton, never the empty state", async () => {
+      await test.step("a zero-archived project explains itself", async () => {
         await driver.archivesCyclesOpenTabRaw(seed.workspaceSlug, emptyProjectId);
-        await expect.poll(() => driver.archivesCyclesSkeletonVisible(), { timeout: 30_000 }).toBe(true);
-        expect(await driver.archivesCyclesEmptyHeading()).toBe(null);
+        if (oracle) {
+          await expect.poll(() => driver.archivesCyclesSkeletonVisible(), { timeout: 30_000 }).toBe(true);
+          expect(await driver.archivesCyclesEmptyHeading()).toBe(null);
+        } else {
+          await expect.poll(() => driver.archivesCyclesSkeletonVisible(), { timeout: 30_000 }).toBe(false);
+          // The zero card mounts with the settled list, a beat after the
+          // skeleton clears; poll instead of reading it once.
+          await expect
+            .poll(() => driver.archivesCyclesEmptyHeading(), { timeout: 30_000 })
+            .toBe("No archived cycles yet");
+        }
         const archived = await serverArchivedCycles(seed.workspaceSlug, emptyProjectId, session);
         expect(archived).toEqual([]);
       });
 
-      await test.step("a shared peek link keeps the param but opens no peek", async () => {
+      await test.step("a shared peek link keeps the param and opens the peek", async () => {
         await driver.archivesCyclesOpenPeekLink(seed.workspaceSlug, projectId, cycleId);
-        await expect.poll(() => driver.archivesCyclesSkeletonVisible(), { timeout: 30_000 }).toBe(true);
+        if (oracle) {
+          await expect.poll(() => driver.archivesCyclesSkeletonVisible(), { timeout: 30_000 }).toBe(true);
+          expect(await driver.archivesCyclesPeekName()).toBe(null);
+        } else {
+          await expect.poll(() => driver.archivesCyclesPeekName(), { timeout: 60_000 }).toBe(name);
+        }
         expect(await driver.archivesCyclesPeekParam()).toBe(cycleId);
-        expect(await driver.archivesCyclesPeekName()).toBe(null);
       });
 
-      await test.step("reloading drops the open peek back to the skeleton", async () => {
+      await test.step("reloading re-reads the list and reopens the peek", async () => {
         await openTabViaLiveSettled(driver, seed.workspaceSlug, projectId, [name]);
         await driver.archivesCyclesOpenPeek(name);
         expect(await driver.archivesCyclesPeekName()).toBe(name);
         await driver.archivesCyclesReload();
-        await expect.poll(() => driver.archivesCyclesSkeletonVisible(), { timeout: 30_000 }).toBe(true);
-        expect(await driver.archivesCyclesPeekParam()).toBe(cycleId);
-        expect(await driver.archivesCyclesPeekName()).toBe(null);
-        expect(await driver.archivesCyclesVisibleNames()).toEqual([]);
+        if (oracle) {
+          await expect.poll(() => driver.archivesCyclesSkeletonVisible(), { timeout: 30_000 }).toBe(true);
+          expect(await driver.archivesCyclesPeekParam()).toBe(cycleId);
+          expect(await driver.archivesCyclesPeekName()).toBe(null);
+          expect(await driver.archivesCyclesVisibleNames()).toEqual([]);
+        } else {
+          await expect.poll(() => driver.archivesCyclesVisibleNames(), { timeout: 60_000 }).toEqual([name]);
+          expect(await driver.archivesCyclesPeekParam()).toBe(cycleId);
+          expect(await driver.archivesCyclesPeekName()).toBe(name);
+        }
       });
     } finally {
       await serverCleanupProject(seed.workspaceSlug, projectId, session);
@@ -738,18 +765,26 @@ test(
         .poll(async () => (await driver.archivesCyclesVisibleNames()).includes(name), { timeout: 60_000 })
         .toBe(true);
 
-      // Delete under the open dialog so the confirm's POST 404s. The store
-      // swallows the failure (NEWFRONT-244), so the UI takes the success
-      // branch exactly as if the archive had worked. Intended: an error
-      // confirmation with no navigation.
+      // Delete under the open dialog so the confirm's POST 404s. The old
+      // app's store swallows the failure (NEWFRONT-244) and takes the
+      // success branch; web_new reports the failure and stays put.
+      const oracle = driver.target !== "web_new";
       await driver.archivesCyclesOpenRowMenu(name);
       await driver.archivesCyclesMenuPick("Archive");
       expect(await driver.archivesCyclesArchiveDialogText()).not.toBe(null);
       await serverDeleteCycle(seed.workspaceSlug, projectId, cycleId, session);
       await driver.archivesCyclesArchiveDialogConfirm();
 
-      expect(await toastText(driver)).toMatch(/archive success/i);
-      expect(await currentPathClean(driver)).toBe(`/${seed.workspaceSlug}/projects/${projectId}/cycles`);
+      const toast = await toastText(driver);
+      if (oracle) {
+        expect(toast).toMatch(/archive success/i);
+        expect(await currentPathClean(driver)).toBe(`/${seed.workspaceSlug}/projects/${projectId}/cycles`);
+      } else {
+        // Intended: a failure confirmation, no success claim, no leave.
+        expect(toast).not.toMatch(/success/i);
+        expect(toast).toMatch(/archiv/i);
+        expect(await currentPathClean(driver)).toBe(`/${seed.workspaceSlug}/projects/${projectId}/cycles`);
+      }
       const live = await serverProjectCycles(seed.workspaceSlug, projectId, session);
       expect(live.map((row) => row.id)).not.toContain(cycleId);
       const archived = await serverArchivedCycles(seed.workspaceSlug, projectId, session);
@@ -929,15 +964,20 @@ test(
       await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
       await openTabViaLiveSettled(driver, seed.workspaceSlug, projectId, [name]);
 
-      // Delete under the stale row so the restore's DELETE 404s. The store
-      // swallows the failure (NEWFRONT-244), so the UI toasts success while
-      // the row (whose archived flag never cleared) stays rendered.
-      // Intended: an error confirmation instead of the success toast.
+      // Delete under the stale row so the restore's DELETE 404s. The old
+      // app's store swallows the failure (NEWFRONT-244) and toasts success
+      // while the stale row stays; web_new reports the failure instead.
+      const oracle = driver.target !== "web_new";
       await driver.archivesCyclesOpenRowMenu(name);
       await serverDeleteCycle(seed.workspaceSlug, projectId, cycleId, session);
       await driver.archivesCyclesMenuPick("Restore");
 
-      expect(await toastText(driver)).toMatch(/cycle restored/i);
+      const toast = await toastText(driver);
+      if (oracle) expect(toast).toMatch(/cycle restored/i);
+      else {
+        expect(toast).not.toMatch(/cycle restored|success/i);
+        expect(toast).toMatch(/restor/i);
+      }
       await expect
         .poll(() => currentPathClean(driver), { timeout: 30_000 })
         .toBe(`/${seed.workspaceSlug}/projects/${projectId}/archives/cycles`);
@@ -971,10 +1011,19 @@ test(
       await driver.rulesEnsureSignedIn(guest.email, guest.password, seed.workspaceSlug);
       await driver.archivesCyclesOpenTabRaw(seed.workspaceSlug, projectId);
 
-      // Fresh loads hold the skeleton for every role (NEWFRONT-231); the
-      // guest additionally cannot read the list at all, so no row — and
-      // no restore entry — ever renders for them.
-      await expect.poll(() => driver.archivesCyclesSkeletonVisible(), { timeout: 30_000 }).toBe(true);
+      // Fresh loads hold the skeleton (NEWFRONT-231); the guest
+      // additionally cannot read the list at all, so no row — and no
+      // restore entry — ever renders for them. Old app: the refused read
+      // leaves the skeleton stuck (NEWFRONT-240). web_new settles it into
+      // the read-failure state while the server still refuses
+      // (PDASHOSS01-323), so the guest is never left on a stuck shell.
+      const oracle = driver.target !== "web_new";
+      if (oracle) {
+        await expect.poll(() => driver.archivesCyclesSkeletonVisible(), { timeout: 30_000 }).toBe(true);
+      } else {
+        await expect.poll(() => driver.archivesCyclesSkeletonVisible(), { timeout: 120_000 }).toBe(false);
+        await expect.poll(() => driver.archivesPageTextPresent("Cycles didn't load"), { timeout: 30_000 }).toBe(true);
+      }
       expect(await driver.archivesCyclesVisibleNames()).toEqual([]);
 
       const guestSession = await signInSession(guest.email, guest.password);

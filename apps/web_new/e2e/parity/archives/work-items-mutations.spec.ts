@@ -133,7 +133,11 @@ test(
         await driver.archivesFailNextMutation("DELETE", `/issues/${issue.id}/archive/`);
         try {
           await driver.layoutsRowMenuChoose(name, "Restore");
-          await expect.poll(() => driver.sawToast("could not be restored"), { timeout: 60_000 }).toBe(true);
+          // Both apps report the failure; only the wording differs (the
+          // shared error toast is not pinned to one string).
+          await expect
+            .poll(async () => (await driver.lastToast()) ?? "", { timeout: 60_000 })
+            .toMatch(/could not be restored|couldn't restore|restore failed/i);
         } finally {
           await driver.archivesClearMutationFailure();
         }
@@ -220,10 +224,13 @@ test(
       await driver.archivesOpenList(seed.workspaceSlug, projectId);
       await expect.poll(() => driver.archivesMutationVisibleIssueNames(), { timeout: 300_000 }).toContain(name);
 
-      // Actual: even the project owner gets no Delete entry; the menu
-      // itself proves it opened on the right row.
+      // Old app: even the project owner gets no Delete entry (bug
+      // NEWFRONT-165). web_new builds the intended four-entry menu, so
+      // this leg proves Delete renders for an editor.
+      const oracle = driver.target !== "web_new";
       const entries = await driver.layoutsRowMenuItems(name);
-      expect(entries).not.toContain("Delete");
+      if (oracle) expect(entries).not.toContain("Delete");
+      else expect(entries).toContain("Delete");
       expect(entries).toContain("Restore");
       expect(entries).toContain("Copy link");
     } finally {
@@ -259,11 +266,28 @@ test(
         await driver.archivesFailNextMutation("DELETE", `/issues/${issue.id}/`);
         try {
           await driver.layoutsDeleteModalConfirm();
-          await expect.poll(() => driver.sawToast("delete failed"), { timeout: 60_000 }).toBe(true);
+          // Both apps report the failure; the wording is not pinned (the
+          // shared error toast carries whatever detail the server sent).
+          const toast = await expect
+            .poll(async () => (await driver.lastToast()) ?? "", { timeout: 60_000 })
+            .not.toBe("")
+            .then(() => driver.lastToast());
+          expect(toast).not.toMatch(/success/i);
+          expect(toast).toMatch(/error|delete|failed/i);
         } finally {
           await driver.archivesClearMutationFailure();
         }
         expect((await issueStatus(seed.workspaceSlug, projectId, issue.id, session)).status).toBe(200);
+      });
+
+      // web_new keeps the confirmation open after a failed delete so the
+      // reader can retry it; the old app closes it. Dismiss it explicitly
+      // before the next step drives the detail menu.
+      await test.step("the failure left no blocking confirmation behind", async () => {
+        if (await driver.layoutsDeleteModalVisible()) {
+          await driver.dismissTopmost();
+        }
+        await expect.poll(() => driver.layoutsDeleteModalVisible(), { timeout: 60_000 }).toBe(false);
       });
 
       await test.step("confirming deletes the row from the UI and the server", async () => {
@@ -307,18 +331,31 @@ test(
       await driver.archivesOpenList(seed.workspaceSlug, projectId);
       await expect.poll(() => driver.archivesMutationVisibleIssueNames(), { timeout: 300_000 }).toContain(name);
 
-      await test.step("open-in-new-tab lands on the broken undefined-identifier address", async () => {
+      // Old app: both actions build `/browse/undefined-N/` (NEWFRONT-235).
+      // web_new builds the archived DETAIL address instead.
+      const oracle = driver.target !== "web_new";
+      await test.step("open-in-new-tab lands on the archived detail address", async () => {
         const url = await driver.layoutsRowMenuOpenNewTabUrl(name);
-        expect(url).toContain(`/browse/undefined-${seqNum}/`);
-        expect(url).not.toContain(`/archives/issues/${issue.id}`);
+        if (oracle) {
+          expect(url).toContain(`/browse/undefined-${seqNum}/`);
+          expect(url).not.toContain(`/archives/issues/${issue.id}`);
+        } else {
+          expect(url).toContain(`/archives/issues/${issue.id}`);
+          expect(url).not.toContain("/browse/undefined-");
+        }
       });
 
-      await test.step("copy-link copies the same broken address with a success confirmation", async () => {
+      await test.step("copy-link copies the same address with a success confirmation", async () => {
         await driver.layoutsRowMenuChoose(name, "Copy link");
         await expect.poll(() => driver.sawToast("Link copied"), { timeout: 60_000 }).toBe(true);
         const clipboard = await driver.readClipboard();
-        expect(clipboard).toContain(`/browse/undefined-${seqNum}/`);
-        expect(clipboard).not.toContain(`/archives/issues/${issue.id}`);
+        if (oracle) {
+          expect(clipboard).toContain(`/browse/undefined-${seqNum}/`);
+          expect(clipboard).not.toContain(`/archives/issues/${issue.id}`);
+        } else {
+          expect(clipboard).toContain(`/archives/issues/${issue.id}`);
+          expect(clipboard).not.toContain("/browse/undefined-");
+        }
       });
     } finally {
       await serverUnarchiveIssue(seed.workspaceSlug, projectId, issue.id, session).catch(() => {});
@@ -393,15 +430,18 @@ test(
       // mistaken for a slow boot.
       const out = await driver.archivesDetailPendingStateOnHeldFetch(seed.workspaceSlug, projectId, issue.id);
 
-      // Actual: the content area stays blank — no banner, no activity
+      // Old app: the content area stays blank — no banner, no activity
       // section — and the breadcrumb carries no identifier-plus-sequence
-      // reference until the record lands. Intended: a loader shows while
-      // fetching (bug NEWFRONT-245).
+      // reference until the record lands. Intended (and web_new's
+      // behavior): the shared detail loader shows while the record is
+      // outstanding (bug NEWFRONT-245).
+      const oracle = driver.target !== "web_new";
       expect(out.heldRequests).toBeGreaterThan(0);
       expect(out.bannerDuringHold).toBeNull();
       expect(out.breadcrumbDuringHold).not.toContain(ref.seq);
       expect(out.activityDuringHold).toBe(false);
       expect(out.settled).toBe(true);
+      if (!oracle) expect(out.loaderDuringHold).toBe(true);
 
       // The released fetch settles on the full detail, and the hold never
       // mutated anything: the item is still archived on the server.
@@ -427,15 +467,22 @@ test(
     await openPath(driver, `/${seed.workspaceSlug}/projects/${seed.projectId}/archives/issues/${missingId}`, session);
     await driver.archivesOpenDetailRaw(seed.workspaceSlug, seed.projectId, missingId);
 
-    // Settle on the chrome, then prove the blank: no not-found state, no
-    // banner, no error text anywhere, and no redirect away. The failing
-    // record fetch resolves in milliseconds, so a short grace past the
-    // chrome paint makes the negatives deterministic.
+    // Old app: settle on the chrome, then prove the blank — no not-found
+    // state, no banner, no error text anywhere, and no redirect away. The
+    // failing record fetch resolves in milliseconds, so a short grace past
+    // the chrome paint makes the negatives deterministic. web_new renders
+    // the shared not-found state instead (NEWFRONT-236).
     await expect.poll(() => driver.hasVisibleText("Archives"), { timeout: 300_000 }).toBe(true);
-    await driver.page.waitForTimeout(5000);
-    expect(await driver.archivesDetailNotFoundVisible()).toBe(false);
-    expect(await driver.archivesMutationDetailBannerText()).toBeNull();
-    expect(await driver.hasVisibleText("does not exist")).toBe(false);
+    const oracle = driver.target !== "web_new";
+    if (oracle) {
+      await driver.page.waitForTimeout(5000);
+      expect(await driver.archivesDetailNotFoundVisible()).toBe(false);
+      expect(await driver.archivesMutationDetailBannerText()).toBeNull();
+      expect(await driver.hasVisibleText("does not exist")).toBe(false);
+    } else {
+      await expect.poll(() => driver.archivesDetailNotFoundVisible(), { timeout: 120_000 }).toBe(true);
+      expect(await driver.archivesMutationDetailBannerText()).toBeNull();
+    }
     expect(await driver.currentUrlPath()).toContain(missingId);
   }
 );
@@ -472,7 +519,9 @@ test(
         await driver.archivesFailNextMutation("DELETE", `/issues/${restoreIssue.id}/archive/`);
         try {
           await driver.archivesDetailMenuChoose("Restore");
-          await expect.poll(() => driver.sawToast("could not be restored"), { timeout: 60_000 }).toBe(true);
+          await expect
+            .poll(async () => (await driver.lastToast()) ?? "", { timeout: 60_000 })
+            .toMatch(/could not be restored|couldn't restore|restore failed/i);
         } finally {
           await driver.archivesClearMutationFailure();
         }
@@ -493,11 +542,28 @@ test(
         await driver.archivesFailNextMutation("DELETE", `/issues/${deleteIssue.id}/`);
         try {
           await driver.layoutsDeleteModalConfirm();
-          await expect.poll(() => driver.sawToast("delete failed"), { timeout: 60_000 }).toBe(true);
+          // Both apps report the failure; the wording is not pinned (the
+          // shared error toast carries whatever detail the server sent).
+          const toast = await expect
+            .poll(async () => (await driver.lastToast()) ?? "", { timeout: 60_000 })
+            .not.toBe("")
+            .then(() => driver.lastToast());
+          expect(toast).not.toMatch(/success/i);
+          expect(toast).toMatch(/error|delete|failed/i);
         } finally {
           await driver.archivesClearMutationFailure();
         }
         expect((await issueStatus(seed.workspaceSlug, projectId, deleteIssue.id, session)).status).toBe(200);
+      });
+
+      // web_new keeps the confirmation open after a failed delete so the
+      // reader can retry it; the old app closes it. Dismiss it explicitly
+      // before the next step drives the detail menu.
+      await test.step("the failure left no blocking confirmation behind", async () => {
+        if (await driver.layoutsDeleteModalVisible()) {
+          await driver.dismissTopmost();
+        }
+        await expect.poll(() => driver.layoutsDeleteModalVisible(), { timeout: 60_000 }).toBe(false);
       });
 
       await test.step("delete from detail navigates back to the archived list", async () => {
@@ -573,7 +639,9 @@ test(
         await driver.archivesFailNextMutation("POST", `/issues/${doneIssue.id}/archive/`);
         try {
           await driver.confirmArchive();
-          await expect.poll(() => driver.sawToast("could not be archived"), { timeout: 60_000 }).toBe(true);
+          await expect
+            .poll(async () => (await driver.lastToast()) ?? "", { timeout: 60_000 })
+            .toMatch(/could not be archived|couldn't archive|error while archiving/i);
         } finally {
           await driver.archivesClearMutationFailure();
         }

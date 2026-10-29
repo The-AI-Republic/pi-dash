@@ -27,6 +27,8 @@ import {
   moduleArchiveDialogBody,
   moduleArchiveDialogTitle,
   moduleArchiveLanding,
+  modulesListLandingHref,
+  modulesListLandingNeedsSlash,
 } from "../../lib/moduleArchive.js";
 import { MODULE_FAILURE_TITLE, moduleFailureBody } from "../../lib/moduleForm.js";
 
@@ -64,7 +66,14 @@ export function ModuleArchiveDialog({
       onClose();
       if (onArchived === undefined) {
         const landing = moduleArchiveLanding(workspaceSlug, projectId);
-        void navigate({ to: landing.to, search: landing.search, replace: landing.replace });
+        await navigate({ to: landing.to, params: landing.params, search: landing.search, replace: landing.replace });
+        // Landing from the live list only changes the trailing slash, which
+        // the router sees as the same location: rewrite the address so it
+        // reads the canonical list form the spec pins (§7.4).
+        const view = globalThis.window;
+        if (view !== undefined && modulesListLandingNeedsSlash(view.location.pathname, workspaceSlug, projectId)) {
+          view.history.replaceState(null, "", modulesListLandingHref(workspaceSlug, projectId));
+        }
       } else {
         onArchived(target);
       }

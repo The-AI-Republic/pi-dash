@@ -10,6 +10,7 @@ import { describe, expect, it } from "vitest";
 
 import { seedFactsFromEnv } from "./api.js";
 import {
+  isCloudNewEdition,
   parityApiUrl,
   parityOracleAdminUrl,
   parityOracleUrl,
@@ -311,5 +312,15 @@ describe("seedFactsFromEnv (api.ts namespace default)", () => {
     withParityEnv({ PARITY_NS: "257" }, () => {
       expect(() => seedFactsFromEnv()).toThrow(/\.seed-257\.json/);
     });
+  });
+});
+
+describe("isCloudNewEdition", () => {
+  it("is true only for a declared cloud build", () => {
+    expect(isCloudNewEdition({ PARITY_NEW_EDITION: "cloud" })).toBe(true);
+    expect(isCloudNewEdition({ PARITY_NEW_EDITION: " Cloud " })).toBe(true);
+    expect(isCloudNewEdition({ PARITY_NEW_EDITION: "oss" })).toBe(false);
+    expect(isCloudNewEdition({ PARITY_NEW_EDITION: "" })).toBe(false);
+    expect(isCloudNewEdition({})).toBe(false);
   });
 });

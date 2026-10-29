@@ -6,7 +6,7 @@
 // methods use goto, waitForLoadState, waitForFunction, url, getByTestId,
 // getByRole, locator, count, isVisible, innerText, inputValue, fill, click,
 // setInputFiles, waitFor, waitForResponse, route/unrouteAll, evaluate and
-// context().grantPermissions.
+// context().grantPermissions and context().clearCookies.
 import type { Page, Route } from "@playwright/test";
 import { describe, expect, it, vi } from "vitest";
 import { WebNewDriver } from "./web-new";
@@ -85,6 +85,7 @@ function stubPage(overrides: Record<string, unknown> = {}): Page {
     context: () => ({
       grantPermissions: vi.fn(async () => undefined),
       addCookies: vi.fn(async () => undefined),
+      clearCookies: vi.fn(async () => undefined),
     }),
     title: async () => "Acme · Members",
     emulateMedia: vi.fn(async () => undefined),

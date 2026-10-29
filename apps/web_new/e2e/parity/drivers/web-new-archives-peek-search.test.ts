@@ -40,6 +40,7 @@ function loc(
   node["fill"] = overrides.fill ?? (async () => undefined);
   const self = node as unknown as Locator;
   node["first"] = () => self;
+  node["last"] = () => self;
   node["nth"] = () => self;
   node["locator"] = (selector: string, options?: unknown) => overrides.locator?.(selector, options) ?? self;
   node["getByRole"] = (role: string, options?: unknown) => overrides.getByRole?.(role, options) ?? self;
@@ -75,7 +76,9 @@ function stubPage(config: StubConfig): { page: Page; presses: string[] } {
           ? (config.panel ?? loc())
           : loc(),
     getByTestId: () => config.panel ?? loc(),
-    getByRole: () => config.panel ?? loc(),
+    // No row menu is open unless a case says so: the peek opener closes an
+    // open menu before it presses the row.
+    getByRole: () => loc({ count: async () => 0 }),
     getByText: () => loc(),
     waitForTimeout: async (ms: number) => {
       now += ms;
@@ -149,9 +152,10 @@ describe("archivesPeekOpenFirst across tabs", () => {
     expect(url).toContain("peekCycle=c1");
   });
 
-  it("opens a module peek from its row when no quick-look control exists", async () => {
+  it("opens a module peek from the row's labelled preview control", async () => {
     let url = "http://new.test/acme/projects/p1/archives/modules";
-    let rowClicks = 0;
+    const names: string[] = [];
+    let previewClicks = 0;
     const { page } = stubPage({
       url: () => url,
       content: (access, value) => {
@@ -159,16 +163,23 @@ describe("archivesPeekOpenFirst across tabs", () => {
           return loc();
         }
         return loc({
-          getByRole: () => loc({ count: async () => 0 }),
-          locator: (inner) =>
-            inner === "a, span"
-              ? loc({
-                  click: async () => {
-                    rowClicks += 1;
-                    url = "http://new.test/acme/projects/p1/archives/modules?peekModule=m1";
-                  },
-                })
-              : loc(),
+          getByRole: (role, options) => {
+            if (role !== "button") return loc({ count: async () => 0 });
+            names.push(String((options as { name?: unknown }).name));
+            return loc({
+              click: async () => {
+                previewClicks += 1;
+                url = "http://new.test/acme/projects/p1/archives/modules?peekModule=m1";
+              },
+            });
+          },
+          // The name link navigates to the detail, so it must stay unpressed.
+          locator: () =>
+            loc({
+              click: async () => {
+                throw new Error("the module peek must not use the name link");
+              },
+            }),
         });
       },
     });
@@ -176,7 +187,8 @@ describe("archivesPeekOpenFirst across tabs", () => {
 
     await driver.archivesPeekOpenFirst("Archived module");
 
-    expect(rowClicks).toBe(1);
+    expect(previewClicks).toBe(1);
+    expect(names).toEqual(["/^Open preview of Archived module$/"]);
     expect(url).toContain("peekModule=m1");
   });
 

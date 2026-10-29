@@ -25,6 +25,8 @@ import {
   moduleArchiveDialogBody,
   moduleArchiveDialogTitle,
   moduleArchiveLanding,
+  modulesListLandingHref,
+  modulesListLandingNeedsSlash,
   resolveArchivedModulesBody,
   toArchivedModuleRow,
   type ArchivedModulesBodyInput,
@@ -55,11 +57,32 @@ describe("archive copy", () => {
   });
 
   it("lands a landed archive back on the modules list", () => {
+    // The typed target, so the router keeps the list's trailing slash
+    // instead of rebuilding the address without it.
     expect(moduleArchiveLanding("acme", MODULES_PROJECT_ID)).toEqual({
-      to: `/acme/projects/${MODULES_PROJECT_ID}/modules/`,
+      to: "/$ws/projects/$projectId/modules/",
+      params: { ws: "acme", projectId: MODULES_PROJECT_ID },
       search: {},
       replace: true,
     });
+  });
+});
+
+describe("modules list landing address", () => {
+  it("pins the canonical trailing-slash form", () => {
+    expect(modulesListLandingHref("acme", MODULES_PROJECT_ID)).toBe(`/acme/projects/${MODULES_PROJECT_ID}/modules/`);
+  });
+
+  it("recognises the slashless form the router treats as the same location", () => {
+    expect(
+      modulesListLandingNeedsSlash(`/acme/projects/${MODULES_PROJECT_ID}/modules`, "acme", MODULES_PROJECT_ID)
+    ).toBe(true);
+    expect(
+      modulesListLandingNeedsSlash(`/acme/projects/${MODULES_PROJECT_ID}/modules/`, "acme", MODULES_PROJECT_ID)
+    ).toBe(false);
+    expect(
+      modulesListLandingNeedsSlash(`/acme/projects/${MODULES_PROJECT_ID}/issues`, "acme", MODULES_PROJECT_ID)
+    ).toBe(false);
   });
 });
 

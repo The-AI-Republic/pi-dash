@@ -281,6 +281,54 @@ describe("cache persistence", () => {
     expect(isReferenceQueryKey(["ws", "acme", "reference", "states"])).toBe(true);
     expect(isReferenceQueryKey(["ws", "acme", "list"])).toBe(false);
   });
+
+  it("restores a preview that paints at once and still refetches", async () => {
+    const storage = createMemoryStore();
+    const writer = createQueryClient();
+    const listKey = ["ws", "acme", "list"];
+    writer.setQueryData(listKey, [{ id: "before-archive" }]);
+    // Written a moment before launch: inside the list staleTime, so a
+    // restore that kept this timestamp would treat the rows as an answer.
+    const persistor = createCachePersistor(writer, storage, { saveDelayMs: 1 });
+    await persistor.save();
+    persistor.stop();
+
+    const reader = createQueryClient();
+    const loader = createCachePersistor(reader, storage, { saveDelayMs: 1 });
+    await loader.restore();
+    loader.stop();
+
+    // The saved rows are on screen before anything is fetched.
+    expect(reader.getQueryData(listKey)).toEqual([{ id: "before-archive" }]);
+    const restored = reader.getQueryCache().find({ queryKey: listKey });
+    expect(restored?.state.dataUpdatedAt).toBe(0);
+    expect(restored?.isStaleByTime(LIST_STALE_TIME_MS)).toBe(true);
+  });
+
+  it("refetches a restored read on its first subscriber and paints the live rows", async () => {
+    const storage = createMemoryStore();
+    const writer = createQueryClient();
+    const listKey = ["ws", "acme", "list"];
+    writer.setQueryData(listKey, [{ id: "before-archive" }]);
+    const persistor = createCachePersistor(writer, storage, { saveDelayMs: 1 });
+    await persistor.save();
+    persistor.stop();
+
+    const reader = createQueryClient();
+    const loader = createCachePersistor(reader, storage, { saveDelayMs: 1 });
+    await loader.restore();
+    loader.stop();
+
+    const reads: string[] = [];
+    const unsubscribe = reader.getQueryCache().subscribe((event) => {
+      if (event.type === "updated" && event.action.type === "success") reads.push("success");
+    });
+    const result = await reader.fetchQuery({ queryKey: listKey, queryFn: () => Promise.resolve([{ id: "after" }]) });
+    unsubscribe();
+    expect(reads).toEqual(["success"]);
+    expect(result).toEqual([{ id: "after" }]);
+    expect(reader.getQueryData(listKey)).toEqual([{ id: "after" }]);
+  });
 });
 
 describe("realtime hub stub", () => {

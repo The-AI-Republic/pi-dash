@@ -51,20 +51,44 @@ export const MODULE_ARCHIVE_CONFIRM = "Archive";
  * Where an archive lands the viewer (§7.4): the project's modules list.
  * The peek key is dropped, because the module it named just left the live
  * list.
+ *
+ * The target is the typed route plus its params, not a ready-made path:
+ * the router rebuilds a string target and drops the list's trailing slash,
+ * while the typed form keeps the address the modules list is served at.
  */
 export function moduleArchiveLanding(
   workspaceSlug: string,
   projectId: string
 ): {
-  to: string;
+  to: "/$ws/projects/$projectId/modules/";
+  params: { ws: string; projectId: string };
   search: Record<string, never>;
   replace: true;
 } {
   return {
-    to: `/${workspaceSlug}/projects/${projectId}/modules/`,
+    to: "/$ws/projects/$projectId/modules/",
+    params: { ws: workspaceSlug, projectId },
     search: {},
     replace: true,
   };
+}
+
+/**
+ * The modules-list address with its trailing slash (§7.4). Kept beside the
+ * route target so the landing and its canonical check cannot drift apart.
+ */
+export function modulesListLandingHref(workspaceSlug: string, projectId: string): string {
+  return `/${workspaceSlug}/projects/${projectId}/modules/`;
+}
+
+/**
+ * Whether the router already sits on the landing address in its slashless
+ * form. The router treats `/modules` and `/modules/` as one location, so a
+ * navigation between them is a no-op and the address keeps the form it was
+ * entered with; the caller has to rewrite it itself.
+ */
+export function modulesListLandingNeedsSlash(pathname: string, workspaceSlug: string, projectId: string): boolean {
+  return pathname === modulesListLandingHref(workspaceSlug, projectId).replace(/\/$/, "");
 }
 
 // ------------------------------------------------------------ archived state

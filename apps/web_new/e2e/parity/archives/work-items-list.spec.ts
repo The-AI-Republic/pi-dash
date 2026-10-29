@@ -7,7 +7,7 @@
 // row menus, the shared filter expression with removable chips, the
 // Display control (grouping, ordering, columns), and the side peek panel
 // with locked fields and address sync.
-// Rows: ARCH-001..ARCH-007.
+// Rows: ARCH-001..ARCH-007 and ARCH-033 (archived empty states).
 import { test, expect } from "../fixtures";
 import {
   parityProjectIdentifier,
@@ -24,8 +24,13 @@ import {
   serverPatchIssue,
   serverPatchProject,
   serverProjectStates,
+  serverSessionUserId,
   serverUnarchiveIssue,
+  ROLE,
+  addProjectMembers,
+  ensureWorkspaceMember,
   signInSession,
+  uniqueEmail,
 } from "../helpers/api";
 import { specTags, specTitle } from "../helpers/tags";
 
@@ -335,13 +340,16 @@ test(
         await driver.archivesCloseMenus();
       });
 
-      await test.step("each row offers restore, open, and copy-link — but no Delete (bug NEWFRONT-234)", async () => {
+      await test.step("each row offers restore, open, copy-link and Delete", async () => {
+        // Old app: the read-only gate hides the wired Delete entry
+        // (NEWFRONT-234). web_new renders the intended four-entry menu.
+        const oracle = driver.target !== "web_new";
         await driver.archivesOpenRowMenu(second.name);
         try {
-          // Live menu carries three entries: the read-only gate hides the
-          // wired Delete entry (NEWFRONT-234). Intended: Delete renders
-          // fourth and opens the delete confirmation.
-          expect(await driver.archivesRowMenuEntries()).toEqual(["Restore", "Open in new tab", "Copy link"]);
+          const entries = await driver.archivesRowMenuEntries();
+          expect(entries).toEqual(
+            oracle ? ["Restore", "Open in new tab", "Copy link"] : ["Restore", "Open in new tab", "Copy link", "Delete"]
+          );
         } finally {
           await driver.archivesCloseMenus();
         }
@@ -595,6 +603,93 @@ test(
       });
     } finally {
       await cleanupArchivedFixture(seed, projectId, [issue.id], [done.owned], session);
+    }
+  }
+);
+
+test(
+  specTitle(["ARCH-033"], "archived empty states explain the archive and open the automation rule"),
+  { tag: specTags(["ARCH-033"]) },
+  async ({ driver, seed }) => {
+    const tag = `NF704 empty ${Date.now()}`;
+    const session = await signInSession(seed.email, seed.password);
+    const projectId = await serverCreateProjectWithFlags(
+      seed.workspaceSlug,
+      `${tag} project`,
+      parityProjectIdentifier("N704"),
+      {},
+      session
+    );
+    const memberEmail = uniqueEmail("parity-arc33");
+    const memberSession = await ensureWorkspaceMember(
+      seed.workspaceSlug,
+      session,
+      memberEmail,
+      "Parity-Arc33-Member-1",
+      ROLE.MEMBER
+    );
+    const memberId = await serverSessionUserId(memberSession);
+    await addProjectMembers(seed.workspaceSlug, projectId, session, [{ member_id: memberId, role: ROLE.MEMBER }]);
+    const done = await doneStateFor(seed, projectId, session, tag);
+    try {
+      await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
+
+      await test.step("nothing archived: the explanation and the automation rule", async () => {
+        expect(await serverArchivedIssues(seed.workspaceSlug, projectId, session)).toEqual([]);
+        await driver.archivesOpenIssuesList(seed.workspaceSlug, projectId);
+        await expect.poll(() => driver.layoutsEmptyTitle(), LIST_POLL).toEqual("No archived work items yet");
+        expect(await driver.layoutsEmptyActions()).toEqual([{ label: "Set automation", disabled: false }]);
+        expect(await driver.archivesVisibleIssueNames()).toEqual([]);
+      });
+
+      await test.step("the control opens the project's automation settings, not a create action", async () => {
+        await driver.layoutsEmptyChoose("Set automation");
+        await expect
+          .poll(() => driver.layoutsCurrentUrl(), LIST_POLL)
+          .toContain(`/${seed.workspaceSlug}/settings/projects/${projectId}/automations`);
+      });
+
+      // The old affordance is enabled for members too and drops them on the
+      // not-authorized page; the new app renders it disabled (spec §2.4).
+      // The new leg pins the intended rule, the oracle keeps its behavior.
+      await test.step("a plain project member sees the control disabled on the new app", async () => {
+        await driver.resetSession();
+        await driver.rulesEnsureSignedIn(memberEmail, "Parity-Arc33-Member-1", seed.workspaceSlug);
+        await driver.archivesOpenIssuesList(seed.workspaceSlug, projectId);
+        await expect.poll(() => driver.layoutsEmptyTitle(), LIST_POLL).toEqual("No archived work items yet");
+        const [entry] = await driver.layoutsEmptyActions();
+        expect(entry?.label).toBe("Set automation");
+        if (driver.target === "web_new") expect(entry?.disabled).toBe(true);
+      });
+
+      await test.step("archived rows hidden by a filter offer clear filters instead", async () => {
+        const hidden = await archiveNamedIssue(seed, projectId, `${tag} hidden`, done.id, session, {
+          priority: "low",
+        });
+        await driver.resetSession();
+        await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
+        await driver.archivesOpenIssuesList(seed.workspaceSlug, projectId);
+        await expect.poll(() => driver.archivesVisibleIssueNames(), LIST_POLL).toEqual([hidden.name]);
+        const loadWait = driver.archivesWaitForListQuery();
+        await driver.archivesSeedStoredExpression(seed.workspaceSlug, projectId, {
+          and: [{ priority__in: "urgent" }],
+        });
+        await loadWait;
+        await expect.poll(() => driver.layoutsEmptyTitle(), LIST_POLL).toEqual("No matching results.");
+        expect(await driver.layoutsEmptyActions()).toEqual([{ label: "Clear filters", disabled: false }]);
+        expect(await driver.archivesVisibleIssueNames()).toEqual([]);
+        await driver.layoutsEmptyChoose("Clear filters");
+        await expect.poll(() => driver.archivesVisibleIssueNames(), LIST_POLL).toEqual([hidden.name]);
+      });
+    } finally {
+      const archived = await serverArchivedIssues(seed.workspaceSlug, projectId, session).catch(() => []);
+      await cleanupArchivedFixture(
+        seed,
+        projectId,
+        archived.map((row) => row.id),
+        [done.owned],
+        session
+      );
     }
   }
 );
