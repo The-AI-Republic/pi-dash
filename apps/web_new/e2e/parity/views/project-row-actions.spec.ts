@@ -14,6 +14,7 @@ import {
   serverUserFavorites,
   setProjectViewFlags,
 } from "../helpers/api";
+import { isCloudNewEdition } from "../helpers/parity-env";
 import { specTags, specTitle } from "../helpers/tags";
 import { viewsHarness, viewsOpenListAs, viewsSeat } from "./support";
 
@@ -85,9 +86,16 @@ test(
     await test.step("owners see edit and delete, others see subsets, publish is absent", async () => {
       await viewsOpenListAs(driver, harness);
       await expect.poll(() => driver.viewsListNames(), POLL).toEqual([name]);
+      // Publish's absence is the OSS half of VIEW-020; a cloud build serves
+      // the entry for the owner and every admin, and its own leg below
+      // covers the publish flow.
+      const cloud = driver.target === "web_new" && isCloudNewEdition();
+      const ownerItems = cloud
+        ? ["Edit", "Open in new tab", "Copy link", "Publish", "Delete"]
+        : ["Edit", "Open in new tab", "Copy link", "Delete"];
       await driver.viewsRowMenuOpen(name);
-      expect(await driver.viewsRowMenuItems()).toEqual(["Edit", "Open in new tab", "Copy link", "Delete"]);
-      expect(await driver.viewsRowMenuPublishPresent()).toBe(false);
+      expect(await driver.viewsRowMenuItems()).toEqual(ownerItems);
+      if (!cloud) expect(await driver.viewsRowMenuPublishPresent()).toBe(false);
 
       await viewsOpenListAs(driver, harness, member);
       await expect.poll(() => driver.viewsListNames(), POLL).toEqual([name]);
@@ -97,7 +105,9 @@ test(
       await viewsOpenListAs(driver, harness, admin);
       await expect.poll(() => driver.viewsListNames(), POLL).toEqual([name]);
       await driver.viewsRowMenuOpen(name);
-      expect(await driver.viewsRowMenuItems()).toEqual(["Open in new tab", "Copy link", "Delete"]);
+      expect(await driver.viewsRowMenuItems()).toEqual(
+        cloud ? ["Open in new tab", "Copy link", "Publish", "Delete"] : ["Open in new tab", "Copy link", "Delete"]
+      );
     });
 
     await test.step("copy link writes the deep link and toasts", async () => {
@@ -186,7 +196,7 @@ test(
       await expect.poll(() => driver.viewsListNames(), POLL).toEqual(expect.arrayContaining([doomed, spared]));
       await driver.viewsRowMenuOpen(doomed);
       await driver.viewsRowMenuPick("Delete");
-      expect(await driver.viewsDeleteTitle()).toBe("Are you sure you want to delete this view?");
+      await expect.poll(() => driver.viewsDeleteTitle(), POLL).toBe("Are you sure you want to delete this view?");
       const body = await driver.viewsDeleteBody();
       expect(body).toContain("permanently deleted");
       expect(body).toContain("without any way to restore them");
@@ -218,6 +228,54 @@ test(
       expect(await driver.viewsDeleteTitle()).toBe("Are you sure you want to delete this view?");
       await driver.viewsDeleteCancel();
       await expect.poll(() => driver.viewsListNames(), POLL).toEqual([spared]);
+    });
+  }
+);
+
+test(
+  specTitle(["VIEW-020"], "cloud: publishing shows Live and a link, unpublishing clears both"),
+  { tag: specTags(["VIEW-020"]) },
+  async ({ driver }, testInfo) => {
+    // Cloud leg (parity/specs/views.md §6/§14, gate note): target-only. The
+    // old cloud app's publish modules are empty stubs, so there is no oracle
+    // half; this proves web_new against the cloud build, which the run
+    // declares with PARITY_NEW_EDITION=cloud.
+    test.skip(testInfo.project.name !== "new", "the publish flow pins the web_new cloud build only");
+    test.skip(!isCloudNewEdition(), "cloud leg needs web_new built with the cloud edition");
+    const harness = await viewsHarness("parity-vm20c");
+    const { owner, workspaceSlug, projectId } = harness;
+    const name = `Vm20c Live ${harness.tag}`;
+    const created = await createProjectViewFull(workspaceSlug, projectId, owner.cookie, { name });
+
+    await test.step("the owner's menu offers publish, and publishing stores an anchor", async () => {
+      await viewsOpenListAs(driver, harness);
+      await expect.poll(() => driver.viewsListNames(), POLL).toEqual([name]);
+      await driver.viewsRowMenuOpen(name);
+      expect(await driver.viewsRowMenuPublishPresent()).toBe(true);
+      await driver.page.keyboard.press("Escape");
+      const link = await driver.viewsRowPublish(name);
+      expect(link).toContain(`/views/published/`);
+      const detail = await serverProjectViewDetail(workspaceSlug, projectId, created, owner.cookie);
+      expect(detail.anchor).not.toBeNull();
+      expect(link).toContain(encodeURIComponent(detail.anchor ?? ""));
+    });
+
+    await test.step("the row shows Live while published", async () => {
+      await viewsOpenListAs(driver, harness);
+      await expect.poll(() => driver.viewsListNames(), POLL).toEqual([name]);
+      expect(await driver.viewsRowLiveVisible(name)).toBe(true);
+    });
+
+    await test.step("unpublishing clears the anchor and the Live marker", async () => {
+      await driver.viewsRowUnpublish(name);
+      await expect
+        .poll(async () => (await serverProjectViewDetail(workspaceSlug, projectId, created, owner.cookie)).anchor, POLL)
+        .toBeNull();
+      await viewsOpenListAs(driver, harness);
+      await expect.poll(() => driver.viewsListNames(), POLL).toEqual([name]);
+      expect(await driver.viewsRowLiveVisible(name)).toBe(false);
+      await driver.viewsRowMenuOpen(name);
+      expect(await driver.viewsRowMenuPublishPresent()).toBe(true);
     });
   }
 );

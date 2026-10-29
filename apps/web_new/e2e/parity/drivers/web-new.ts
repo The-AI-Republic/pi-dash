@@ -6549,11 +6549,6 @@ export class WebNewDriver implements ParityDriver {
     await this.identifierBadge().click({ timeout: WebNewDriver.WAIT_MS });
   }
 
-  async viewsOpenDetail(workspaceSlug: string, projectId: string, viewId: string): Promise<void> {
-    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/views/${viewId}`);
-    await this.page.waitForLoadState("domcontentloaded");
-  }
-
   async ganttShowsIssue(issueName: string): Promise<boolean> {
     // The sidebar lists every issue in the view, dated or not, and the
     // oracle settles on the name text — so a present row link means shown.
@@ -21487,53 +21482,11 @@ export class WebNewDriver implements ParityDriver {
     const texts = await names.allInnerTexts();
     return texts.map((text) => text.replace(/\s+/g, " ").trim()).filter((text) => text.length > 0);
   }
-  async viewsListBreadcrumb(): Promise<string[]> {
-    return todo("viewsListBreadcrumb");
-  }
-  async viewsListTabTitle(): Promise<string> {
-    return todo("viewsListTabTitle");
-  }
-  async viewsHeaderAddVisible(): Promise<boolean> {
-    return todo("viewsHeaderAddVisible");
-  }
   async viewsOpenCreateFromHeader(): Promise<void> {
     // The list header's primary action (NEWFRONT-719, VIEW-003); the
     // dialog it opens is views-owned (NEWFRONT-721).
     await this.page.getByRole("button", { name: "Add view", exact: true }).click();
     await this.page.getByRole("heading", { name: "Create View" }).waitFor({ timeout: WebNewDriver.WAIT_MS });
-  }
-  async viewsListSkeletonVisible(): Promise<boolean> {
-    return todo("viewsListSkeletonVisible");
-  }
-  async viewsDelayListLoad(_ms: number): Promise<void> {
-    return todo("viewsDelayListLoad");
-  }
-  async viewsEmptyTitle(): Promise<string> {
-    return todo("viewsEmptyTitle");
-  }
-  async viewsEmptyCreateVisible(): Promise<boolean> {
-    return todo("viewsEmptyCreateVisible");
-  }
-  async viewsEmptyCreateEnabled(): Promise<boolean> {
-    return todo("viewsEmptyCreateEnabled");
-  }
-  async viewsEmptyCreateOpen(): Promise<void> {
-    return todo("viewsEmptyCreateOpen");
-  }
-  async viewsNoMatchTitle(): Promise<string> {
-    return todo("viewsNoMatchTitle");
-  }
-  async viewsRowHref(_name: string): Promise<string | null> {
-    return todo("viewsRowHref");
-  }
-  async viewsRowAccess(_name: string): Promise<string> {
-    return todo("viewsRowAccess");
-  }
-  async viewsRowOwnerAvatar(_name: string): Promise<boolean> {
-    return todo("viewsRowOwnerAvatar");
-  }
-  async viewsRowLiveVisible(_name: string): Promise<boolean> {
-    return todo("viewsRowLiveVisible");
   }
   private viewsRowStar(name: string): Locator {
     return this.viewsRowByName(name).getByTestId("project-views-row-star");
@@ -21554,108 +21507,6 @@ export class WebNewDriver implements ParityDriver {
     // and applies the toggle to the cached record, so no duplicate
     // response can clobber the star (NEWFRONT-220 has no counterpart).
     await this.viewsRowStar(name).click({ timeout: 30_000 });
-  }
-  async viewsRowText(_name: string): Promise<string> {
-    return todo("viewsRowText");
-  }
-  async viewsSearchTriggerVisible(): Promise<boolean> {
-    return todo("viewsSearchTriggerVisible");
-  }
-  async viewsSearchOpen(): Promise<void> {
-    return todo("viewsSearchOpen");
-  }
-  async viewsSearchExpanded(): Promise<boolean> {
-    return todo("viewsSearchExpanded");
-  }
-  async viewsSearchType(_text: string): Promise<void> {
-    return todo("viewsSearchType");
-  }
-  async viewsSearchValue(): Promise<string> {
-    return todo("viewsSearchValue");
-  }
-  async viewsSearchFocused(): Promise<boolean> {
-    return todo("viewsSearchFocused");
-  }
-  async viewsSearchEscape(): Promise<void> {
-    return todo("viewsSearchEscape");
-  }
-  async viewsSearchClear(): Promise<void> {
-    return todo("viewsSearchClear");
-  }
-  async viewsSearchClickOutside(): Promise<void> {
-    return todo("viewsSearchClickOutside");
-  }
-  async viewsSortTriggerText(): Promise<string> {
-    return todo("viewsSortTriggerText");
-  }
-  async viewsSortOpen(): Promise<void> {
-    return todo("viewsSortOpen");
-  }
-  async viewsSortMenuTexts(): Promise<string[]> {
-    return todo("viewsSortMenuTexts");
-  }
-  async viewsSortMenuSelected(_text: string): Promise<boolean> {
-    return todo("viewsSortMenuSelected");
-  }
-  async viewsSortPick(_text: string): Promise<void> {
-    return todo("viewsSortPick");
-  }
-  async viewsFiltersOpen(): Promise<void> {
-    return todo("viewsFiltersOpen");
-  }
-  async viewsFiltersPanelText(): Promise<string> {
-    return todo("viewsFiltersPanelText");
-  }
-  async viewsFiltersToggleFavorites(): Promise<void> {
-    return todo("viewsFiltersToggleFavorites");
-  }
-  async viewsFiltersDateOptions(): Promise<string[]> {
-    return todo("viewsFiltersDateOptions");
-  }
-  async viewsFiltersPickDate(_text: string): Promise<void> {
-    return todo("viewsFiltersPickDate");
-  }
-  async viewsFiltersCreatorOptions(): Promise<string[]> {
-    return todo("viewsFiltersCreatorOptions");
-  }
-  async viewsFiltersPickCreator(_name: string): Promise<void> {
-    return todo("viewsFiltersPickCreator");
-  }
-  async viewsFiltersAccessPresent(): Promise<boolean> {
-    return todo("viewsFiltersAccessPresent");
-  }
-  async viewsFiltersSearchType(_text: string): Promise<void> {
-    return todo("viewsFiltersSearchType");
-  }
-  async viewsFiltersClose(): Promise<void> {
-    return todo("viewsFiltersClose");
-  }
-  async viewsChipsVisible(): Promise<boolean> {
-    return todo("viewsChipsVisible");
-  }
-  async viewsChipTexts(): Promise<string[]> {
-    return todo("viewsChipTexts");
-  }
-  async viewsChipRemoveValue(_dimension: string, _value: string): Promise<void> {
-    return todo("viewsChipRemoveValue");
-  }
-  async viewsChipRemoveDimension(_dimension: string): Promise<void> {
-    return todo("viewsChipRemoveDimension");
-  }
-  async viewsChipsClearAll(): Promise<void> {
-    return todo("viewsChipsClearAll");
-  }
-  async viewsGateTitle(): Promise<string> {
-    return todo("viewsGateTitle");
-  }
-  async viewsGateManageVisible(): Promise<boolean> {
-    return todo("viewsGateManageVisible");
-  }
-  async viewsGateManageEnabled(): Promise<boolean> {
-    return todo("viewsGateManageEnabled");
-  }
-  async viewsGateManageOpen(): Promise<void> {
-    return todo("viewsGateManageOpen");
   }
   private viewsDialog(): Locator {
     return this.page
@@ -21701,6 +21552,28 @@ export class WebNewDriver implements ParityDriver {
     // its selector inside this marker.
     return this.isShown(this.viewsDialog().getByTestId("view-access-field"));
   }
+
+  async viewsDialogPickAccess(label: string): Promise<void> {
+    // The cloud selector is a radiogroup of option buttons, each keyed by
+    // its own test id (VIEW-019). An OSS dialog mounts no field at all,
+    // so this fails loudly instead of clicking something else.
+    const field = this.viewsDialog().getByTestId("view-access-field");
+    await field.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await field
+      .getByRole("radio", { name: new RegExp(`^${label}`) })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await expect
+      .poll(
+        async () =>
+          (await field
+            .getByRole("radio", { name: new RegExp(`^${label}`) })
+            .first()
+            .getAttribute("aria-checked")) === "true",
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .toBe(true);
+  }
   async viewsDialogIconOpen(): Promise<void> {
     await this.viewsDialog().getByTestId("view-icon-picker").click();
     await this.page.getByRole("tablist", { name: "Icon type" }).waitFor({ timeout: WebNewDriver.WAIT_MS });
@@ -21721,12 +21594,19 @@ export class WebNewDriver implements ParityDriver {
     await grid.getByRole("button").first().click();
     await tabs.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
   }
-  async viewsDialogIconPreview(): Promise<string> {
-    return todo("viewsDialogIconPreview");
-  }
   async viewsDialogDisplayOpen(): Promise<void> {
     await this.viewsDialog().getByTestId("display-options-trigger").click();
     await this.page.getByRole("region", { name: "Display Properties" }).waitFor({ timeout: WebNewDriver.WAIT_MS });
+  }
+  async viewsDialogDisplayClose(): Promise<void> {
+    // The panel portals outside the dialog and, on a taller dialog (the
+    // cloud access selector adds a section), it can sit over the footer's
+    // submit button. Callers that have read it dismiss it before clicking
+    // anything in the footer.
+    const panel = this.page.getByTestId("display-options-panel");
+    if (!(await this.isShown(panel))) return;
+    await this.viewsDialog().getByTestId("display-options-trigger").click({ timeout: WebNewDriver.WAIT_MS });
+    await panel.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
   }
   async viewsDialogDisplayTexts(): Promise<string[]> {
     // No open-wait here: the caller opens the Display panel first. The
@@ -21859,6 +21739,44 @@ export class WebNewDriver implements ParityDriver {
     return items.some((item) => /publish/i.test(item));
   }
 
+  private viewsPublishDialog(): Locator {
+    return this.page
+      .getByRole("dialog")
+      .filter({ has: this.page.getByRole("heading", { name: /^(Publish view|Published view)$/ }) });
+  }
+
+  async viewsRowPublish(name: string): Promise<string> {
+    // Cloud only (VIEW-020): OSS rows never offer the entry, so the menu
+    // read below is what fails first there.
+    await this.viewsRowMenuOpen(name);
+    if (!(await this.viewsRowMenuPublishPresent())) {
+      throw new Error("[parity] the row menu offers no publish entry (cloud builds only).");
+    }
+    await this.viewsRowMenuPick("Publish");
+    const dialog = this.viewsPublishDialog();
+    await this.page.getByRole("heading", { name: "Publish view" }).waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.getByRole("button", { name: "Publish", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    // The dialog flips to its published state and shows the derived link.
+    const link = dialog.getByTestId("publish-view-link");
+    await link.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const text = ((await link.innerText().catch(() => "")) ?? "").trim();
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
+    return text;
+  }
+
+  async viewsRowUnpublish(name: string): Promise<void> {
+    // The Live marker opens the same dialog as the menu entry.
+    const marker = this.viewsRowByName(name).getByTestId("project-views-row-live");
+    await marker.click({ timeout: WebNewDriver.WAIT_MS });
+    const dialog = this.viewsPublishDialog();
+    await this.page.getByRole("heading", { name: "Published view" }).waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.getByRole("button", { name: "Unpublish", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("heading", { name: "Publish view" }).waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
+  }
+
   async viewsRowOpenNewTabHref(name: string): Promise<string> {
     await this.viewsRowMenuOpen(name);
     const menu = this.page.getByRole("menu");
@@ -21895,10 +21813,11 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async viewsDeleteConfirm(): Promise<void> {
+    // Click and return: a successful delete closes the dialog and a failed
+    // one keeps it open, and the scenario asserts whichever it expects. No
+    // wait here, because a short-lived success or error notice would be
+    // gone by the time the next poll read it.
     await this.viewsDeleteDialog().getByRole("button", { name: "Delete", exact: true }).click({ timeout: 60_000 });
-    await this.page
-      .getByRole("heading", { name: "Are you sure you want to delete this view?" })
-      .waitFor({ state: "hidden", timeout: 60_000 });
   }
 
   async viewsDeleteConfirmAttempt(): Promise<void> {
@@ -21911,201 +21830,6 @@ export class WebNewDriver implements ParityDriver {
       .getByRole("heading", { name: "Are you sure you want to delete this view?" })
       .waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS })
       .catch(() => undefined);
-  }
-  async viewsDetailBreadcrumb(): Promise<string[]> {
-    return todo("viewsDetailBreadcrumb");
-  }
-  async viewsDetailErrorTitle(): Promise<string> {
-    return todo("viewsDetailErrorTitle");
-  }
-  async viewsDetailErrorBack(): Promise<void> {
-    return todo("viewsDetailErrorBack");
-  }
-  async viewsDetailSwitcherOpen(_name: string): Promise<void> {
-    return todo("viewsDetailSwitcherOpen");
-  }
-  async viewsDetailSwitcherOptions(): Promise<string[]> {
-    return todo("viewsDetailSwitcherOptions");
-  }
-  async viewsDetailSwitcherSearchVisible(): Promise<boolean> {
-    return todo("viewsDetailSwitcherSearchVisible");
-  }
-  async viewsDetailSwitcherSearch(_text: string): Promise<void> {
-    return todo("viewsDetailSwitcherSearch");
-  }
-  async viewsDetailSwitcherPick(_name: string): Promise<void> {
-    return todo("viewsDetailSwitcherPick");
-  }
-  async viewsDetailLockVisible(): Promise<boolean> {
-    return todo("viewsDetailLockVisible");
-  }
-  async viewsDetailDisplayOptions(): Promise<string[]> {
-    return todo("viewsDetailDisplayOptions");
-  }
-  async viewsDetailFilterAdd(_property: string, _value: string): Promise<void> {
-    return todo("viewsDetailFilterAdd");
-  }
-  async viewsDetailUpdateView(): Promise<void> {
-    return todo("viewsDetailUpdateView");
-  }
-  async viewsDetailSaveAsVisible(): Promise<boolean> {
-    return todo("viewsDetailSaveAsVisible");
-  }
-  async viewsDetailSaveAsClick(): Promise<void> {
-    return todo("viewsDetailSaveAsClick");
-  }
-  async viewsDetailAddClick(): Promise<void> {
-    return todo("viewsDetailAddClick");
-  }
-  async viewsDetailShowsIssue(_name: string): Promise<boolean> {
-    return todo("viewsDetailShowsIssue");
-  }
-  async wsViewsListNames(): Promise<string[]> {
-    return todo("wsViewsListNames");
-  }
-  async wsViewsDefaultNames(): Promise<string[]> {
-    return todo("wsViewsDefaultNames");
-  }
-  async wsViewsListTabTitle(): Promise<string> {
-    return todo("wsViewsListTabTitle");
-  }
-  async wsViewsSearchFill(_text: string): Promise<void> {
-    return todo("wsViewsSearchFill");
-  }
-  async wsViewsRowDescription(_name: string): Promise<string> {
-    return todo("wsViewsRowDescription");
-  }
-  async wsViewsRowMenuOpen(_name: string): Promise<void> {
-    return todo("wsViewsRowMenuOpen");
-  }
-  async wsViewsRowMenuEntries(): Promise<string[]> {
-    return todo("wsViewsRowMenuEntries");
-  }
-  async wsViewsRowMenuPick(_entry: string): Promise<void> {
-    return todo("wsViewsRowMenuPick");
-  }
-  async wsViewsSkeletonVisible(): Promise<boolean> {
-    return todo("wsViewsSkeletonVisible");
-  }
-  async wsViewsSkeletonFlashed(_windowMs: number): Promise<boolean> {
-    return todo("wsViewsSkeletonFlashed");
-  }
-  async wsViewsDelayNextList(_ms: number): Promise<void> {
-    return todo("wsViewsDelayNextList");
-  }
-  async wsViewsFailNextWrite(_status: number): Promise<void> {
-    return todo("wsViewsFailNextWrite");
-  }
-  async wsViewsStripVisible(): Promise<boolean> {
-    return todo("wsViewsStripVisible");
-  }
-  async wsViewsListStarVisible(): Promise<boolean> {
-    return todo("wsViewsListStarVisible");
-  }
-  async wsViewsDefaultRowHasMenu(_name: string): Promise<boolean> {
-    return todo("wsViewsDefaultRowHasMenu");
-  }
-  async wsViewsRowOpen(_name: string): Promise<void> {
-    return todo("wsViewsRowOpen");
-  }
-  async wsViewsDialogDisplayOptions(): Promise<string[]> {
-    return todo("wsViewsDialogDisplayOptions");
-  }
-  async wsViewsDetailTabTitle(): Promise<string> {
-    return todo("wsViewsDetailTabTitle");
-  }
-  async wsViewsDetailCrumbs(): Promise<string[]> {
-    return todo("wsViewsDetailCrumbs");
-  }
-  async wsViewsDetailSwitcherOpen(_name: string): Promise<void> {
-    return todo("wsViewsDetailSwitcherOpen");
-  }
-  async wsViewsDetailSwitcherOptions(): Promise<string[]> {
-    return todo("wsViewsDetailSwitcherOptions");
-  }
-  async wsViewsDetailSwitcherSearchVisible(): Promise<boolean> {
-    return todo("wsViewsDetailSwitcherSearchVisible");
-  }
-  async wsViewsDetailSwitcherSearch(_text: string): Promise<void> {
-    return todo("wsViewsDetailSwitcherSearch");
-  }
-  async wsViewsDetailSwitcherPick(_name: string): Promise<void> {
-    return todo("wsViewsDetailSwitcherPick");
-  }
-  async wsViewsDetailLayoutVisible(): Promise<boolean> {
-    return todo("wsViewsDetailLayoutVisible");
-  }
-  async wsViewsDetailDisplayVisible(): Promise<boolean> {
-    return todo("wsViewsDetailDisplayVisible");
-  }
-  async wsViewsDetailFiltersToggleVisible(): Promise<boolean> {
-    return todo("wsViewsDetailFiltersToggleVisible");
-  }
-  async wsViewsDetailAddVisible(): Promise<boolean> {
-    return todo("wsViewsDetailAddVisible");
-  }
-  async wsViewsDetailAddClick(): Promise<void> {
-    return todo("wsViewsDetailAddClick");
-  }
-  async wsViewsDetailMenuOpen(): Promise<void> {
-    return todo("wsViewsDetailMenuOpen");
-  }
-  async wsViewsDetailMenuEntries(): Promise<string[]> {
-    return todo("wsViewsDetailMenuEntries");
-  }
-  async wsViewsDetailCopyLink(): Promise<string> {
-    return todo("wsViewsDetailCopyLink");
-  }
-  async wsViewsDetailOpenNewTabHref(): Promise<string> {
-    return todo("wsViewsDetailOpenNewTabHref");
-  }
-  async wsViewsDetailErrorTitle(): Promise<string> {
-    return todo("wsViewsDetailErrorTitle");
-  }
-  async wsViewsDetailErrorBack(): Promise<void> {
-    return todo("wsViewsDetailErrorBack");
-  }
-  async viewsSettingsNotAuthorized(): Promise<boolean> {
-    return todo("viewsSettingsNotAuthorized");
-  }
-  async viewsSettingsViewsToggleValue(): Promise<boolean> {
-    return todo("viewsSettingsViewsToggleValue");
-  }
-  async viewsSettingsViewsToggleFlip(): Promise<void> {
-    return todo("viewsSettingsViewsToggleFlip");
-  }
-  async viewsDialogTabOrder(): Promise<string[]> {
-    return todo("viewsDialogTabOrder");
-  }
-  async viewsListDragRow(_from: string, _to: string): Promise<void> {
-    return todo("viewsListDragRow");
-  }
-  async viewsPageExportImportVisible(): Promise<boolean> {
-    return todo("viewsPageExportImportVisible");
-  }
-  async viewsDetailLayoutActive(): Promise<number> {
-    return todo("viewsDetailLayoutActive");
-  }
-  async viewsDetailLayoutPick(_index: number): Promise<void> {
-    return todo("viewsDetailLayoutPick");
-  }
-  async viewsDetailLayoutVisible(): Promise<boolean> {
-    return todo("viewsDetailLayoutVisible");
-  }
-  async viewsDetailDisplayVisible(): Promise<boolean> {
-    return todo("viewsDetailDisplayVisible");
-  }
-  async viewsDetailFiltersToggleVisible(): Promise<boolean> {
-    return todo("viewsDetailFiltersToggleVisible");
-  }
-  async viewsDetailAddVisible(): Promise<boolean> {
-    return todo("viewsDetailAddVisible");
-  }
-  async viewsDetailEmptyTitle(): Promise<string> {
-    return todo("viewsDetailEmptyTitle");
-  }
-  async viewsDetailTabTitle(): Promise<string> {
-    return todo("viewsDetailTabTitle");
   }
   async notificationsCurrentUrl(): Promise<string> {
     // The full address as the address bar shows it: scenario callers parse
@@ -49862,5 +49586,1034 @@ export class WebNewDriver implements ParityDriver {
     await this.page.mouse.down();
     await this.page.locator(`[data-gantt-lane][data-lane-id="${toId}"]`).hover();
     await this.page.mouse.up();
+  }
+
+  // ---------------------------------------------------------------------
+  // --- Views area (NEWFRONT-745 area gate). The list, controls, gate,
+  // --- dialog, detail, workspace list/CRUD/detail, settings and palette
+  // --- methods the views scenarios call. Appended below the throwing
+  // --- stubs the shared driver contract pins; later class members win, so
+  // --- the stubs above stay untouched.
+  // ---------------------------------------------------------------------
+
+  private static readonly VIEWS_LAYOUT_KEYS = ["list", "kanban", "calendar", "spreadsheet", "gantt_chart"] as const;
+
+  private static readonly VIEWS_LAYOUT_LABELS = ["List", "Board", "Calendar", "Spreadsheet", "Timeline"] as const;
+
+  /** Normalised visible text of a locator, "" when it is absent. */
+  private async viewsText(locator: Locator): Promise<string> {
+    if ((await locator.count()) === 0) return "";
+    return (
+      (await locator
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  /** Trimmed inner texts of a locator list, empties dropped. */
+  private async viewsTexts(locator: Locator): Promise<string[]> {
+    const texts = await locator.allInnerTexts().catch(() => [] as string[]);
+    return texts.map((text) => text.replace(/\s+/g, " ").trim()).filter((text) => text.length > 0);
+  }
+
+  private viewsScreen(): Locator {
+    return this.page.getByTestId("project-views-screen");
+  }
+
+  private viewsZeroState(): Locator {
+    return this.page.getByTestId("project-views-zero");
+  }
+
+  private viewsGate(): Locator {
+    return this.page.getByTestId("project-views-gate");
+  }
+
+  private viewsNoMatch(): Locator {
+    return this.page.getByTestId("project-views-no-match");
+  }
+
+  private viewsSearchRoot(): Locator {
+    return this.page.getByTestId("project-views-search");
+  }
+
+  private viewsSearchInput(): Locator {
+    return this.viewsSearchRoot().getByRole("textbox", { name: "Search views by name" });
+  }
+
+  private viewsFilterPanel(): Locator {
+    return this.page.getByTestId("project-views-filter-panel");
+  }
+
+  private viewsFilterSection(title: string): Locator {
+    return this.viewsFilterPanel().locator(`section[data-section-title="${title}"]`);
+  }
+
+  private viewsChipGroup(dimension: string): Locator {
+    // Callers may name the dimension by its stored key ("created") or by
+    // the label the strip shows ("Created at"); match either.
+    const wanted = dimension.trim().toLowerCase();
+    return this.page.locator("[data-chip-dimension]").filter({
+      has: this.page.locator("span", { hasText: new RegExp(`^\\s*${escapeRegExp(wanted)}\\s*$`, "i") }),
+    });
+  }
+
+  /** The Display panel's option labels (section titles, pills, rows). */
+  private async viewsDisplayPanelLabels(scope: Locator): Promise<string[]> {
+    const panel = scope.getByTestId("display-options-panel");
+    await panel.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const titles = await panel
+      .locator("[data-section-title]")
+      .evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-section-title") ?? ""));
+    const texts: string[] = [];
+    for (const title of titles) if (title !== "") texts.push(title);
+    const buttons = await panel.locator("button").evaluateAll((nodes) =>
+      nodes.map((node) => ({
+        label: (node.getAttribute("aria-label") ?? node.textContent ?? "").replace(/\s+/g, " ").trim(),
+        expand: (node.getAttribute("aria-label") ?? "").startsWith("Collapse "),
+      }))
+    );
+    for (const button of buttons) {
+      if (button.expand || button.label === "") continue;
+      if (!texts.includes(button.label)) texts.push(button.label);
+    }
+    return texts;
+  }
+
+  async viewsOpenDetail(workspaceSlug: string, projectId: string, viewId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/views/${viewId}`, { waitUntil: "domcontentloaded" });
+    await this.page
+      .locator('[data-testid="saved-view-header"], [data-testid="saved-view-missing"]')
+      .first()
+      .waitFor({ state: "visible", timeout: 120_000 });
+  }
+
+  async viewsListBreadcrumb(): Promise<string[]> {
+    const trail = this.page.getByTestId("project-views-header").getByRole("navigation", { name: "Breadcrumb" });
+    return this.viewsTexts(trail.locator("ol > li"));
+  }
+
+  async viewsListTabTitle(): Promise<string> {
+    return this.page.title();
+  }
+
+  async viewsHeaderAddVisible(): Promise<boolean> {
+    return this.isShown(this.page.getByRole("button", { name: "Add view", exact: true }));
+  }
+
+  async viewsListSkeletonVisible(): Promise<boolean> {
+    return this.isShown(this.page.getByTestId("project-views-skeleton"));
+  }
+
+  async viewsDelayListLoad(ms: number): Promise<void> {
+    // Hold the next project saved-views list read (a GET ending in /views/);
+    // reads of one view's detail carry an id and stay untouched.
+    await this.page.route(
+      // Both apps call the same API path; the workspace segment is part of
+      // every API URL, so match on the trailing project views collection.
+      (url) => url.pathname.endsWith("/views/") && url.pathname.includes("/projects/"),
+      async (route) => {
+        if (route.request().method() === "GET") await new Promise((resolve) => setTimeout(resolve, ms));
+        await route.continue();
+      },
+      { times: 1 }
+    );
+  }
+
+  /** The card heading inside a detailed empty state (title span). */
+  private async viewsCardTitle(card: Locator): Promise<string> {
+    if (!(await this.isShown(card))) return "";
+    return this.viewsText(card.locator("h3 > span").first());
+  }
+
+  async viewsEmptyTitle(): Promise<string> {
+    return this.viewsCardTitle(this.viewsZeroState());
+  }
+
+  async viewsEmptyCreateVisible(): Promise<boolean> {
+    return this.isShown(this.viewsZeroState().getByRole("button", { name: "Create view", exact: true }));
+  }
+
+  async viewsEmptyCreateEnabled(): Promise<boolean> {
+    const action = this.viewsZeroState().getByRole("button", { name: "Create view", exact: true }).first();
+    if ((await action.count()) === 0) return false;
+    return action.isEnabled();
+  }
+
+  async viewsEmptyCreateOpen(): Promise<void> {
+    await this.viewsZeroState().getByRole("button", { name: "Create view", exact: true }).click({
+      timeout: WebNewDriver.WAIT_MS,
+    });
+    await this.page.getByRole("heading", { name: "Create View" }).waitFor({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async viewsNoMatchTitle(): Promise<string> {
+    if (!(await this.isShown(this.viewsNoMatch()))) return "";
+    const texts = await this.viewsTexts(this.viewsNoMatch().locator("span"));
+    return texts[0] ?? "";
+  }
+
+  async viewsRowHref(name: string): Promise<string | null> {
+    const row = this.viewsRowByName(name);
+    if ((await row.count()) === 0) return null;
+    return row.first().locator("a").first().getAttribute("href");
+  }
+
+  async viewsRowAccess(name: string): Promise<string> {
+    return this.viewsText(this.viewsRowByName(name).getByTestId("project-views-row-access"));
+  }
+
+  async viewsRowOwnerAvatar(name: string): Promise<boolean> {
+    return this.isShown(this.viewsRowByName(name).getByTestId("project-views-row-owner"));
+  }
+
+  async viewsRowLiveVisible(name: string): Promise<boolean> {
+    return this.isShown(this.viewsRowByName(name).getByTestId("project-views-row-live"));
+  }
+
+  async viewsRowText(name: string): Promise<string> {
+    return this.viewsText(this.viewsRowByName(name));
+  }
+
+  async viewsSearchTriggerVisible(): Promise<boolean> {
+    return this.isShown(this.viewsSearchRoot().getByRole("button", { name: "Search views", exact: true }));
+  }
+
+  async viewsSearchOpen(): Promise<void> {
+    if (await this.viewsSearchExpanded()) {
+      await this.viewsSearchInput().click({ timeout: WebNewDriver.WAIT_MS });
+      return;
+    }
+    await this.viewsSearchRoot().getByRole("button", { name: "Search views", exact: true }).click({
+      timeout: WebNewDriver.WAIT_MS,
+    });
+    await this.viewsSearchInput().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async viewsSearchExpanded(): Promise<boolean> {
+    return (await this.viewsSearchRoot().locator('[data-search-expanded="true"]').count()) > 0;
+  }
+
+  async viewsSearchType(text: string): Promise<void> {
+    await this.viewsSearchInput().fill(text);
+  }
+
+  async viewsSearchValue(): Promise<string> {
+    if ((await this.viewsSearchInput().count()) === 0) return "";
+    return this.viewsSearchInput().inputValue();
+  }
+
+  async viewsSearchFocused(): Promise<boolean> {
+    const input = this.viewsSearchInput();
+    if ((await input.count()) === 0) return false;
+    return input.evaluate((node) => document.activeElement === node);
+  }
+
+  async viewsSearchEscape(): Promise<void> {
+    await this.viewsSearchInput().press("Escape");
+  }
+
+  async viewsSearchClear(): Promise<void> {
+    await this.viewsSearchRoot().getByRole("button", { name: "Clear search", exact: true }).click({
+      timeout: WebNewDriver.WAIT_MS,
+    });
+  }
+
+  async viewsSearchClickOutside(): Promise<void> {
+    // The breadcrumb trail above the controls is inert (plain text
+    // crumbs), so a press there only reaches the document listener.
+    await this.page
+      .getByTestId("project-views-header")
+      .getByRole("navigation", { name: "Breadcrumb" })
+      .first()
+      .click({ position: { x: 2, y: 2 }, timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async viewsSortTriggerText(): Promise<string> {
+    return this.viewsText(this.page.getByTestId("project-views-sort-trigger"));
+  }
+
+  async viewsSortOpen(): Promise<void> {
+    if ((await this.page.getByRole("menu").count()) === 0) {
+      await this.page.getByTestId("project-views-sort-trigger").click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async viewsSortMenuTexts(): Promise<string[]> {
+    return this.viewsTexts(this.page.getByRole("menuitem"));
+  }
+
+  async viewsSortMenuSelected(text: string): Promise<boolean> {
+    const item = this.page.getByRole("menuitem", { name: text, exact: true }).first();
+    if ((await item.count()) === 0) return false;
+    // The active key and the active direction each render a check glyph.
+    return (await item.locator("svg").count()) > 0;
+  }
+
+  async viewsSortPick(text: string): Promise<void> {
+    await this.page.getByRole("menuitem", { name: text, exact: true }).first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .getByRole("menu")
+      .first()
+      .waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => undefined);
+  }
+
+  async viewsFiltersOpen(): Promise<void> {
+    if (!(await this.isShown(this.viewsFilterPanel()))) {
+      await this.page.getByTestId("project-views-filter-trigger").click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    await this.viewsFilterPanel().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async viewsFiltersPanelText(): Promise<string> {
+    return this.viewsText(this.viewsFilterPanel());
+  }
+
+  async viewsFiltersToggleFavorites(): Promise<void> {
+    await this.viewsFilterPanel().getByRole("checkbox", { name: "Favorites", exact: true }).first().click({
+      timeout: WebNewDriver.WAIT_MS,
+    });
+    // Favorites is a single-value pick, so the panel closes on every toggle;
+    // settling here keeps the next section pick from racing the teardown.
+    await this.viewsFilterPanel()
+      .waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => undefined);
+  }
+
+  async viewsFiltersDateOptions(): Promise<string[]> {
+    await this.viewsFiltersOpen();
+    return this.viewsFilterSection("Created date")
+      .getByRole("checkbox")
+      .evaluateAll((nodes) => nodes.map((node) => (node.getAttribute("aria-label") ?? "").trim()))
+      .then((labels) => labels.filter((label) => label.length > 0));
+  }
+
+  async viewsFiltersPickDate(text: string): Promise<void> {
+    // A single-value pick (favorites, a completed custom window) closes the
+    // panel, so reopen before reaching for another section.
+    await this.viewsFiltersOpen();
+    await this.viewsFilterSection("Created date")
+      .getByRole("checkbox", { name: text, exact: true })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async viewsFiltersCreatorOptions(): Promise<string[]> {
+    await this.viewsFiltersOpen();
+    return this.viewsFilterSection("Created by")
+      .getByRole("checkbox")
+      .evaluateAll((nodes) => nodes.map((node) => (node.getAttribute("aria-label") ?? "").trim()))
+      .then((labels) => labels.filter((label) => label.length > 0));
+  }
+
+  async viewsFiltersPickCreator(name: string): Promise<void> {
+    await this.viewsFiltersOpen();
+    await this.viewsFilterSection("Created by")
+      .getByRole("checkbox", { name, exact: true })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async viewsFiltersAccessPresent(): Promise<boolean> {
+    return (await this.viewsFilterPanel().locator('section[data-section-title="Access"]').count()) > 0;
+  }
+
+  async viewsFiltersSearchType(text: string): Promise<void> {
+    await this.viewsFilterPanel().getByRole("textbox", { name: "Search filters" }).fill(text);
+  }
+
+  async viewsFiltersClose(): Promise<void> {
+    if (!(await this.isShown(this.viewsFilterPanel()))) return;
+    await this.page.mouse.click(2, 2);
+    await this.viewsFilterPanel()
+      .waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => undefined);
+  }
+
+  async viewsChipsVisible(): Promise<boolean> {
+    return this.isShown(this.page.getByTestId("project-views-applied-filters"));
+  }
+
+  async viewsChipTexts(): Promise<string[]> {
+    return this.viewsTexts(this.page.locator("[data-chip-dimension]"));
+  }
+
+  async viewsChipRemoveValue(dimension: string, value: string): Promise<void> {
+    await this.viewsChipGroup(dimension)
+      .getByRole("button", { name: `Remove ${value}`, exact: true })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async viewsChipRemoveDimension(dimension: string): Promise<void> {
+    const group = this.viewsChipGroup(dimension).first();
+    await group.locator('button[aria-label^="Clear "]').first().click({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async viewsChipsClearAll(): Promise<void> {
+    const strip = this.page.getByTestId("project-views-applied-filters");
+    if (!(await this.isShown(strip))) return;
+    await strip.getByRole("button", { name: "Clear all", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await strip.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
+  }
+
+  async viewsGateTitle(): Promise<string> {
+    return this.viewsCardTitle(this.viewsGate());
+  }
+
+  async viewsGateManageVisible(): Promise<boolean> {
+    return this.isShown(this.viewsGate().getByRole("button", { name: "Manage features", exact: true }));
+  }
+
+  async viewsGateManageEnabled(): Promise<boolean> {
+    const action = this.viewsGate().getByRole("button", { name: "Manage features", exact: true }).first();
+    if ((await action.count()) === 0) return false;
+    return action.isEnabled();
+  }
+
+  async viewsGateManageOpen(): Promise<void> {
+    await this.viewsGate().getByRole("button", { name: "Manage features", exact: true }).click({
+      timeout: WebNewDriver.WAIT_MS,
+    });
+    await this.page.waitForLoadState("domcontentloaded");
+  }
+
+  async viewsDialogIconPreview(): Promise<string> {
+    return this.viewsText(this.viewsDialog().getByTestId("view-icon-picker"));
+  }
+
+  async viewsDetailBreadcrumb(): Promise<string[]> {
+    const header = this.page.getByTestId("saved-view-header");
+    if ((await header.count()) === 0) return [];
+    return this.viewsTexts(header.getByRole("navigation", { name: "Breadcrumb" }).locator("ol > li"));
+  }
+
+  async viewsDetailErrorTitle(): Promise<string> {
+    const missing = this.page.getByTestId("saved-view-missing");
+    if (!(await this.isShown(missing))) return "";
+    return this.viewsText(missing.locator("h3").first());
+  }
+
+  async viewsDetailErrorBack(): Promise<void> {
+    await this.page.getByTestId("saved-view-missing").getByRole("button", { name: "Back to views" }).click({
+      timeout: WebNewDriver.WAIT_MS,
+    });
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.viewsScreen().waitFor({ state: "visible", timeout: 120_000 });
+  }
+
+  private viewsDetailSwitcherList(): Locator {
+    return this.page.getByRole("listbox", { name: "Saved views" });
+  }
+
+  async viewsDetailSwitcherOpen(name: string): Promise<void> {
+    if (await this.isShown(this.viewsDetailSwitcherList())) return;
+    await this.page
+      .getByTestId("saved-view-header")
+      .getByRole("button", { name, exact: true })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.viewsDetailSwitcherList().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async viewsDetailSwitcherOptions(): Promise<string[]> {
+    return this.viewsTexts(this.viewsDetailSwitcherList().getByRole("option"));
+  }
+
+  async viewsDetailSwitcherSearchVisible(): Promise<boolean> {
+    return this.isShown(this.page.getByRole("combobox", { name: "Search views" }));
+  }
+
+  async viewsDetailSwitcherSearch(text: string): Promise<void> {
+    await this.page.getByRole("combobox", { name: "Search views" }).fill(text);
+  }
+
+  async viewsDetailSwitcherPick(name: string): Promise<void> {
+    await this.viewsDetailSwitcherList().getByRole("option", { name, exact: true }).first().click({
+      timeout: WebNewDriver.WAIT_MS,
+    });
+    await this.viewsDetailSwitcherList()
+      .waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => undefined);
+    await this.page.waitForLoadState("domcontentloaded");
+  }
+
+  async viewsDetailLockVisible(): Promise<boolean> {
+    return this.isShown(this.page.getByTestId("saved-view-lock"));
+  }
+
+  private async viewsActiveLayoutIndex(scope: Locator): Promise<number> {
+    for (let index = 0; index < WebNewDriver.VIEWS_LAYOUT_KEYS.length; index += 1) {
+      const key = WebNewDriver.VIEWS_LAYOUT_KEYS[index]!;
+      const segment = scope.locator(`[data-layout="${key}"][data-active="true"]`);
+      if ((await segment.count()) > 0 && (await segment.first().isVisible())) return index;
+    }
+    const dropdown = scope.getByRole("button", { name: /^Change issue layout, current / }).first();
+    if ((await dropdown.count()) > 0) {
+      const label = (await dropdown.getAttribute("aria-label")) ?? "";
+      const index = WebNewDriver.VIEWS_LAYOUT_LABELS.findIndex((entry) => label.endsWith(entry));
+      if (index >= 0) return index;
+    }
+    return -1;
+  }
+
+  async viewsDetailLayoutActive(): Promise<number> {
+    return this.viewsActiveLayoutIndex(this.page);
+  }
+
+  async viewsDetailLayoutPick(index: number): Promise<void> {
+    const key = WebNewDriver.VIEWS_LAYOUT_KEYS[index];
+    const label = WebNewDriver.VIEWS_LAYOUT_LABELS[index];
+    if (key === undefined || label === undefined) throw new Error(`[parity] no layout at index ${index}.`);
+    const segment = this.page.locator(`[data-layout="${key}"]`).filter({ visible: true }).first();
+    if ((await segment.count()) > 0) {
+      await segment.click({ timeout: WebNewDriver.WAIT_MS });
+    } else {
+      await this.page
+        .getByRole("button", { name: /^Change issue layout, current / })
+        .first()
+        .click({ timeout: WebNewDriver.WAIT_MS });
+      await this.page.getByRole("menuitem", { name: label, exact: true }).first().click({
+        timeout: WebNewDriver.WAIT_MS,
+      });
+    }
+    await expect.poll(() => this.viewsDetailLayoutActive(), { timeout: WebNewDriver.WAIT_MS }).toBe(index);
+  }
+
+  async viewsDetailLayoutVisible(): Promise<boolean> {
+    return (
+      (await this.isShown(this.page.getByTestId("layout-switcher-segmented"))) ||
+      (await this.isShown(this.page.getByTestId("layout-switcher-dropdown")))
+    );
+  }
+
+  async viewsDetailDisplayVisible(): Promise<boolean> {
+    return this.isShown(this.page.getByTestId("display-options-trigger"));
+  }
+
+  async viewsDetailFiltersToggleVisible(): Promise<boolean> {
+    // The issues-owned filter row shows its toggle once a condition exists
+    // and an "Add filter" button before that; both are the one filter
+    // affordance VIEW-026 asserts, and the locked view renders neither.
+    return (
+      (await this.isShown(this.page.getByTestId("rich-filter-toggle").first())) ||
+      (await this.isShown(this.page.getByTestId("rich-filter-add").first()))
+    );
+  }
+
+  async viewsDetailAddVisible(): Promise<boolean> {
+    return this.isShown(this.page.getByRole("button", { name: "Add work item", exact: true }));
+  }
+
+  async viewsDetailEmptyTitle(): Promise<string> {
+    const title = this.page.getByText("View work items will appear here", { exact: true });
+    if (!(await this.isShown(title))) return "";
+    return "View work items will appear here";
+  }
+
+  async viewsDetailTabTitle(): Promise<string> {
+    return this.page.title();
+  }
+
+  async viewsDetailDisplayOptions(): Promise<string[]> {
+    const trigger = this.page.getByTestId("display-options-trigger").first();
+    if ((await trigger.count()) === 0) return [];
+    if (!(await this.isShown(this.page.getByTestId("display-options-panel")))) {
+      await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    const labels = await this.viewsDisplayPanelLabels(this.page);
+    await this.page.keyboard.press("Escape");
+    await this.page
+      .getByTestId("display-options-panel")
+      .waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => undefined);
+    return labels;
+  }
+
+  async viewsDetailDisplayPick(section: string, option: string): Promise<void> {
+    const trigger = this.page.getByTestId("display-options-trigger").first();
+    await trigger.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    if (!(await this.isShown(this.page.getByTestId("display-options-panel")))) {
+      await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    const panel = this.page.getByTestId("display-options-panel");
+    await panel.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    // The section is located by its own title attribute rather than by text
+    // so a heading that gains an applied count ("Group by (1)") still reads;
+    // a layout that withholds the section fails here, which is the point.
+    const row = panel
+      .locator(`[data-section-title="${section}"]`)
+      .getByRole("button", { name: option, exact: true })
+      .first();
+    await row.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await row.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.keyboard.press("Escape");
+    await panel.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
+  }
+
+  async viewsDetailFilterAdd(property: string, value: string): Promise<void> {
+    // The issues header repeats some controls for the small-screen bar, so
+    // every lookup here is scoped to the first (desktop) instance.
+    const toggle = this.page.getByTestId("rich-filter-toggle").first();
+    if ((await toggle.count()) > 0 && (await toggle.getAttribute("aria-pressed")) !== "true") {
+      await toggle.click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    const add = this.page.getByTestId("rich-filter-add").first();
+    if ((await add.count()) > 0 && (await this.isShown(add))) {
+      await add.click({ timeout: WebNewDriver.WAIT_MS });
+    } else {
+      await this.page.getByRole("button", { name: "Add filter", exact: true }).first().click({
+        timeout: WebNewDriver.WAIT_MS,
+      });
+    }
+    const properties = this.page.getByRole("listbox", { name: "Filter properties" });
+    await properties.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await properties.getByRole("option", { name: property, exact: true }).first().click({
+      timeout: WebNewDriver.WAIT_MS,
+    });
+    await properties.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
+    // A static value set lists itself right after the property is picked.
+    const direct = this.page.getByRole("checkbox", { name: value, exact: true });
+    if ((await direct.count()) === 0) {
+      await this.page.getByRole("button", { name: "--", exact: true }).last().click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    const pick = this.page.getByRole("checkbox", { name: value, exact: true }).first();
+    await pick.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await pick.click({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async viewsDetailUpdateView(): Promise<void> {
+    const button = this.page.getByRole("button", { name: "Update view", exact: true }).first();
+    await button.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await button.click({ timeout: WebNewDriver.WAIT_MS });
+    await button.waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
+  }
+
+  async viewsDetailSaveAsVisible(): Promise<boolean> {
+    return this.isShown(this.page.getByTestId("rich-save-view"));
+  }
+
+  async viewsDetailSaveAsClick(): Promise<void> {
+    await this.page.getByTestId("rich-save-view").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("heading", { name: "Create View" }).waitFor({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async viewsDetailAddClick(): Promise<void> {
+    await this.page.getByRole("button", { name: "Add work item", exact: true }).click({
+      timeout: WebNewDriver.WAIT_MS,
+    });
+    await this.page
+      .getByRole("heading", { name: "New work item" })
+      .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async viewsDetailShowsIssue(name: string): Promise<boolean> {
+    const row = this.page.getByText(name, { exact: true });
+    if ((await row.count()) === 0) return false;
+    return row.first().isVisible();
+  }
+
+  // --- Workspace views list, CRUD and detail (VIEW-029-040) ---------------
+
+  private wsViewsCustomRow(name: string): Locator {
+    return this.page
+      .getByTestId("workspace-views-custom-row")
+      .filter({ has: this.page.locator("a", { hasText: name }) });
+  }
+
+  private wsViewsDefaultRow(name: string): Locator {
+    return this.page.getByTestId("workspace-views-default-row").filter({ hasText: name });
+  }
+
+  async wsViewsListNames(): Promise<string[]> {
+    const rows = this.page.getByTestId("workspace-views-custom-row");
+    const names: string[] = [];
+    const total = await rows.count();
+    for (let index = 0; index < total; index += 1) {
+      const row = rows.nth(index);
+      const name = await this.viewsText(row.locator("a > span > span").first());
+      if (name !== "") names.push(name);
+    }
+    return names;
+  }
+
+  async wsViewsDefaultNames(): Promise<string[]> {
+    // One label per default row; a `.last()` on the shared locator would
+    // collapse the whole set to a single element.
+    const labels = await this.page
+      .getByTestId("workspace-views-default-row")
+      .locator("a > span")
+      .evaluateAll((nodes) => nodes.map((node) => (node.textContent ?? "").replace(/\s+/g, " ").trim()));
+    return labels.filter((label) => label.length > 0);
+  }
+
+  async wsViewsListTabTitle(): Promise<string> {
+    return this.page.title();
+  }
+
+  async wsViewsSearchFill(text: string): Promise<void> {
+    await this.page.getByTestId("workspace-views-search").getByRole("textbox", { name: "Search views" }).fill(text);
+  }
+
+  async wsViewsRowDescription(name: string): Promise<string> {
+    const row = this.wsViewsCustomRow(name);
+    if ((await row.count()) === 0) return "";
+    const spans = row.first().locator("a > span");
+    if ((await spans.count()) < 2) return "";
+    return this.viewsText(spans.nth(1));
+  }
+
+  async wsViewsRowMenuOpen(name: string): Promise<void> {
+    await this.wsViewsCustomRow(name)
+      .first()
+      .getByTestId("workspace-views-row-menu-trigger")
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async wsViewsRowMenuEntries(): Promise<string[]> {
+    return this.viewsTexts(this.page.getByRole("menuitem"));
+  }
+
+  async wsViewsRowMenuPick(entry: string): Promise<void> {
+    await this.page
+      .getByRole("menuitem", { name: entry, exact: true })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .getByRole("menu")
+      .first()
+      .waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => undefined);
+  }
+
+  async wsViewsSkeletonVisible(): Promise<boolean> {
+    return this.isShown(this.page.getByTestId("project-views-skeleton"));
+  }
+
+  async wsViewsSkeletonFlashed(windowMs: number): Promise<boolean> {
+    // The observer is armed by wsViewsDelayNextList before the navigation;
+    // this reads whether it ever saw the skeleton, waiting up to `windowMs`.
+    const seen = await this.page
+      .waitForFunction(() => (window as unknown as Record<string, unknown>)["__parityViewsSkeletonSeen"] === true, {
+        timeout: windowMs,
+        polling: 100,
+      })
+      .then(() => true)
+      .catch(() => false);
+    if (seen) return true;
+    return this.page.evaluate(
+      () => (window as unknown as Record<string, unknown>)["__parityViewsSkeletonSeen"] === true
+    );
+  }
+
+  async wsViewsDelayNextList(ms: number): Promise<void> {
+    // Arm the skeleton observer for the next document, then hold the next
+    // workspace customs read for `ms`.
+    await this.page.addInitScript(() => {
+      const win = window as unknown as Record<string, unknown>;
+      win["__parityViewsSkeletonSeen"] = false;
+      const boot = (): void => {
+        const scan = (): void => {
+          if (document.querySelector("[data-testid='project-views-skeleton']") !== null) {
+            win["__parityViewsSkeletonSeen"] = true;
+          }
+        };
+        scan();
+        new MutationObserver(scan).observe(document.documentElement, { childList: true, subtree: true });
+      };
+      if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot, { once: true });
+      else boot();
+    });
+    await this.page.route(
+      (url) => url.pathname.includes("/workspaces/") && url.pathname.endsWith("/views/"),
+      async (route) => {
+        if (route.request().method() === "GET") await new Promise((resolve) => setTimeout(resolve, ms));
+        await route.continue();
+      },
+      { times: 1 }
+    );
+  }
+
+  async wsViewsFailNextWrite(status: number): Promise<void> {
+    // One-shot failure for the next workspace-views write; reads pass so
+    // the list behind the dialog still settles.
+    const matches = (url: URL) => url.pathname.includes("/workspaces/") && url.pathname.includes("/views");
+    const handler = async (route: Route) => {
+      const method = route.request().method();
+      if (method === "GET" || method === "OPTIONS" || method === "HEAD") {
+        await route.continue();
+        return;
+      }
+      await route.fulfill({ status, contentType: "application/json", body: "{}" });
+      await this.page.unroute(matches, handler).catch(() => undefined);
+    };
+    await this.page.route(matches, handler);
+  }
+
+  async wsViewsStripVisible(): Promise<boolean> {
+    return this.isShown(this.page.getByTestId("workspace-views-tab-strip"));
+  }
+
+  async wsViewsListStarVisible(): Promise<boolean> {
+    const star = this.page.getByTestId("project-views-row-star");
+    if ((await star.count()) === 0) return false;
+    return star.first().isVisible();
+  }
+
+  async wsViewsDefaultRowHasMenu(name: string): Promise<boolean> {
+    const row = this.wsViewsDefaultRow(name);
+    if ((await row.count()) === 0) return false;
+    return (await row.first().locator("button").count()) > 0;
+  }
+
+  async wsViewsRowOpen(name: string): Promise<void> {
+    await this.wsViewsCustomRow(name).first().locator("a").first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.page
+      .locator('[data-testid="workspace-view-header"], [data-testid="saved-view-missing"]')
+      .first()
+      .waitFor({ state: "visible", timeout: 120_000 });
+  }
+
+  async wsViewsDialogDisplayOptions(): Promise<string[]> {
+    const dialog = this.viewsDialog();
+    if (!(await this.isShown(this.page.getByTestId("display-options-panel")))) {
+      await dialog.getByTestId("display-options-trigger").first().click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    const labels = await this.viewsDisplayPanelLabels(this.page);
+    await this.page.keyboard.press("Escape");
+    await this.page
+      .getByTestId("display-options-panel")
+      .waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => undefined);
+    return labels;
+  }
+
+  async wsViewsDetailTabTitle(): Promise<string> {
+    return this.page.title();
+  }
+
+  private wsViewsDetailHeader(): Locator {
+    return this.page.getByTestId("workspace-view-header");
+  }
+
+  async wsViewsDetailCrumbs(): Promise<string[]> {
+    const header = this.wsViewsDetailHeader();
+    if ((await header.count()) === 0) return [];
+    return this.viewsTexts(header.getByRole("navigation", { name: "Breadcrumb" }).locator("ol > li"));
+  }
+
+  private wsViewsSwitcherList(): Locator {
+    return this.page.getByRole("listbox", { name: "Workspace views" });
+  }
+
+  async wsViewsDetailSwitcherOpen(name: string): Promise<void> {
+    if (await this.isShown(this.wsViewsSwitcherList())) return;
+    await this.wsViewsDetailHeader()
+      .getByRole("button", { name, exact: true })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.wsViewsSwitcherList().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async wsViewsDetailSwitcherOptions(): Promise<string[]> {
+    return this.viewsTexts(this.wsViewsSwitcherList().getByRole("option"));
+  }
+
+  async wsViewsDetailSwitcherSearchVisible(): Promise<boolean> {
+    return this.isShown(this.page.getByRole("combobox", { name: "Search views" }));
+  }
+
+  async wsViewsDetailSwitcherSearch(text: string): Promise<void> {
+    await this.page.getByRole("combobox", { name: "Search views" }).fill(text);
+  }
+
+  async wsViewsDetailSwitcherPick(name: string): Promise<void> {
+    await this.wsViewsSwitcherList().getByRole("option", { name, exact: true }).first().click({
+      timeout: WebNewDriver.WAIT_MS,
+    });
+    await this.wsViewsSwitcherList()
+      .waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => undefined);
+    await this.page.waitForLoadState("domcontentloaded");
+  }
+
+  async wsViewsDetailLayoutVisible(): Promise<boolean> {
+    const header = this.wsViewsDetailHeader();
+    if ((await header.count()) === 0) return false;
+    return (
+      (await this.isShown(header.getByTestId("layout-switcher-segmented"))) ||
+      (await this.isShown(header.getByTestId("layout-switcher-dropdown")))
+    );
+  }
+
+  async wsViewsDetailDisplayVisible(): Promise<boolean> {
+    const header = this.wsViewsDetailHeader();
+    if ((await header.count()) === 0) return false;
+    return this.isShown(header.getByTestId("display-options-trigger"));
+  }
+
+  async wsViewsDetailFiltersToggleVisible(): Promise<boolean> {
+    // The issues-owned filter row offers its toggle once a condition exists
+    // and an "Add filter" button before that; a locked view mounts neither.
+    const header = this.wsViewsDetailHeader();
+    if ((await header.count()) === 0) return false;
+    if (await this.isShown(header.getByTestId("rich-filter-toggle"))) return true;
+    const add = this.page.getByTestId("rich-filter-add").first();
+    return (await add.count()) > 0 && (await this.isShown(add));
+  }
+
+  async wsViewsDetailAddVisible(): Promise<boolean> {
+    const header = this.wsViewsDetailHeader();
+    if ((await header.count()) === 0) return false;
+    return this.isShown(header.getByTestId("workspace-view-add"));
+  }
+
+  async wsViewsDetailAddClick(): Promise<void> {
+    await this.wsViewsDetailHeader().getByTestId("workspace-view-add").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("heading", { name: "Create View" }).waitFor({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  private wsViewsDetailMenu(): Locator {
+    return this.page.getByRole("menu").filter({ visible: true }).last();
+  }
+
+  async wsViewsDetailMenuOpen(): Promise<void> {
+    if ((await this.page.getByRole("menuitem").count()) > 0) return;
+    await this.wsViewsDetailHeader().getByTestId("workspace-view-menu-trigger").click({
+      timeout: WebNewDriver.WAIT_MS,
+    });
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async wsViewsDetailMenuEntries(): Promise<string[]> {
+    return this.viewsTexts(this.wsViewsDetailMenu().getByRole("menuitem"));
+  }
+
+  async wsViewsDetailCopyLink(): Promise<string> {
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await this.wsViewsDetailMenuOpen();
+    await this.wsViewsDetailMenu().getByRole("menuitem", { name: "Copy link", exact: true }).click({
+      timeout: WebNewDriver.WAIT_MS,
+    });
+    await expect
+      .poll(() => this.page.evaluate(() => navigator.clipboard.readText()), { timeout: WebNewDriver.WAIT_MS })
+      .not.toBe("");
+    return this.page.evaluate(() => navigator.clipboard.readText());
+  }
+
+  async wsViewsDetailOpenNewTabHref(): Promise<string> {
+    await this.wsViewsDetailMenuOpen();
+    const [popup] = await Promise.all([
+      this.page.waitForEvent("popup", { timeout: 60_000 }),
+      this.wsViewsDetailMenu()
+        .getByRole("menuitem", { name: "Open in new tab", exact: true })
+        .click({ timeout: WebNewDriver.WAIT_MS }),
+    ]);
+    const href = popup.url();
+    await popup.close().catch(() => undefined);
+    return href;
+  }
+
+  async wsViewsDetailErrorTitle(): Promise<string> {
+    const missing = this.page.getByTestId("saved-view-missing");
+    if (!(await this.isShown(missing))) return "";
+    return this.viewsText(missing.locator("h3").first());
+  }
+
+  async wsViewsDetailErrorBack(): Promise<void> {
+    await this.page
+      .getByTestId("saved-view-missing")
+      .getByRole("button", { name: "Go to All work items", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.wsViewsDetailHeader().waitFor({ state: "visible", timeout: 120_000 });
+  }
+
+  async viewsSettingsNotAuthorized(): Promise<boolean> {
+    // The shell resolves the role and the project before the gate decides,
+    // so wait for either outcome instead of reading a blank first paint.
+    const denied = this.page.getByTestId("project-settings-denied");
+    const allowed = this.page.getByTestId("project-feature-settings");
+    await denied
+      .or(allowed)
+      .first()
+      .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => undefined);
+    return this.isShown(denied);
+  }
+
+  private viewsSettingsSwitch(): Locator {
+    return this.page.getByTestId("project-feature-settings").getByRole("switch", { name: "Enable views" });
+  }
+
+  async viewsSettingsViewsToggleValue(): Promise<boolean> {
+    const toggle = this.viewsSettingsSwitch().first();
+    // Wait for the settings panel before reading: an absent switch means the
+    // page has not rendered yet, not that the feature is off.
+    await toggle.waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS });
+    return (await toggle.getAttribute("aria-checked")) === "true";
+  }
+
+  async viewsSettingsViewsToggleFlip(): Promise<void> {
+    await this.viewsSettingsSwitch().first().click({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async viewsDialogTabOrder(): Promise<string[]> {
+    // Walk the dialog's focus path with Tab and read each landing spot's
+    // accessible name. The walk starts from the dialog's first field and
+    // stops when focus cycles back to it, so it never wanders out of the
+    // dialog and leaves a later Escape pointed at the page behind it.
+    const dialog = this.viewsDialog();
+    await dialog.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const order: string[] = [];
+    await this.viewsDialogTitleField().focus();
+    for (let step = 0; step < 24; step += 1) {
+      const name = await this.page.evaluate(() => {
+        const active = document.activeElement as HTMLElement | null;
+        if (active === null || active === document.body) return "";
+        const label = active.getAttribute("aria-label");
+        if (label !== null && label.trim() !== "") return label.trim();
+        const placeholder = active.getAttribute("placeholder");
+        if (placeholder !== null && placeholder.trim() !== "") return placeholder.trim();
+        const text = (active.textContent ?? "").replace(/\s+/g, " ").trim();
+        if (text !== "") return text;
+        return active.tagName.toLowerCase();
+      });
+      if (step > 0 && name === order[0]) break;
+      if (name !== "") order.push(name);
+      await this.page.keyboard.press("Tab");
+    }
+    // Leave focus back on the dialog's first field so the caller's next key
+    // press (Escape) still lands inside the dialog.
+    await this.viewsDialogTitleField().focus();
+    return order;
+  }
+
+  private viewsDialogTitleField(): Locator {
+    return this.viewsDialog().getByPlaceholder("Title", { exact: true });
+  }
+
+  async viewsListDragRow(from: string, to: string): Promise<void> {
+    // Native HTML5 drag between two rows; a list with no drag handlers
+    // simply never reorders.
+    const source = this.viewsRowByName(from);
+    const target = this.viewsRowByName(to);
+    if ((await source.count()) === 0 || (await target.count()) === 0) return;
+    await source
+      .first()
+      .dragTo(target.first(), { timeout: WebNewDriver.WAIT_MS })
+      .catch(() => undefined);
+  }
+
+  async viewsPageExportImportVisible(): Promise<boolean> {
+    const control = this.page.getByRole("button", { name: /export|import|print/i });
+    const links = this.page.getByRole("link", { name: /export|import|print/i });
+    return (await this.isShown(control)) || (await this.isShown(links));
   }
 }

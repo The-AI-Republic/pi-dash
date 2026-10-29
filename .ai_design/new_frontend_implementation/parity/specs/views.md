@@ -650,16 +650,28 @@ switcher at all.
 **Display options (VIEW-026).** The Display control offers exactly the
 sections the active layout supports (Display properties, Group by, Order by,
 Show empty groups, Show sub-work items, Sub-group by only where the layout
-supports it, Calendar options for Calendar). Entries for cycle and module
-follow the project's `cycle_view` and `module_view` flags: absent when the
-feature is off, present when on. Changes update the view's live display
-state and mark it dirty; Update view persists them through
-`display_filters`/`display_properties` and the echo replaces local state.
-Locked views hide the Display control.
+supports it, Calendar options for Calendar). Sub-group by is a Board section
+and follows the issues area's rule (ISS-077) rather than this row's: it
+appears only once a Group by dimension is chosen, so a Board with no
+grouping lists Group by but not Sub-group by. The old app lists Sub-group by
+on any Board regardless of grouping; the target is the ISS-077 rule, which
+`web_new` already implements. The VIEW-026 scenario asserts each app's own
+answer and then proves the section appears once a grouping is picked. It
+asserts the rule rather than the board's opening state: a switch into Board
+may already seed a Group by (the issues area stores State when none was
+chosen), so "no Sub-group by immediately after the switch" is only true
+while the board carries no grouping.
+Entries for cycle and module follow the project's `cycle_view` and
+`module_view` flags: absent when the feature is off, present when on. Changes
+update the view's live display state and mark it dirty; Update view persists
+them through `display_filters`/`display_properties` and the echo replaces
+local state. Locked views hide the Display control.
 
-**Filter toggle and saved query (VIEW-026).** The filter toggle shows or
-hides the issues area's rich filter row for this view. The row edits the
-view's saved expression and display settings, not the viewer's personal
+**Filter toggle and saved query (VIEW-026).** The filter affordance is the
+issues area's (ISS-096): with no condition and nothing unsaved it is an
+"Add filter" button that opens the property picker, and with a condition or
+unsaved change it toggles the rich filter row. Either way it edits this
+view's saved expression and display settings, never the viewer's personal
 filters. Its Save as/Update view triggers are the issues-owned controls from
 `parity/specs/issues.md` §9/§21 (ISS-104/105) and must **delegate to this
 area's dialog without changing the payload**: the row computes the same
@@ -1096,6 +1108,53 @@ reason), files **one** fix sub-issue under the epic naming the blocker, and
 does not hold the rest of the area. The row keeps `oracle green`; it does
 not become `new green` until its cloud leg passes. OSS legs alone are not
 enough for VIEW-019, VIEW-020 and VIEW-040.
+
+**Gate note (NEWFRONT-745, 2026-10-27).** NEWFRONT-948 landed the three
+slots, so `web_new` has a cloud edition to run these rows against. Two
+limits were measured, not assumed:
+
+- **No oracle half.** The old cloud app renders none of the controls: its
+  `ce` modules are empty stubs (`apps/web/ce/components/views/access-controller.tsx`,
+  `publish/use-view-publish.tsx`, and `GlobalViewLayoutSelection` in
+  `ce/components/views/helper.tsx`), and the private overlay carries no
+  views override for either app. A cloud leg is therefore target-only,
+  like VIEW-033, and never proves the old behaviour.
+- **No server write path.** `IssueView`
+  (`apps/api/pi_dash/db/models/view.py`) has an `access` column that
+  `IssueViewSerializer.Meta.read_only_fields` marks read-only and **no
+  `anchor` field at all**; no migration adds one, and both `partial_update`
+  handlers answer 200 while ignoring the key. Measured against the gate
+  stack: `PATCH {access: 0}` echoes `access: 1`, and a `PATCH {anchor}`
+  comes back with no `anchor` key, on both the project and workspace
+  routes.
+
+VIEW-019 and VIEW-020 were therefore `blocked: cloud view write path stores
+neither access nor anchor` until NEWFRONT-972 landed; the slot code already
+failed loudly rather than faking the state. VIEW-040 needs no server change
+— its persist is the custom's `display_filters` PATCH, an OSS endpoint —
+so its cloud leg is run work, not a product gap.
+
+**Gate note (NEWFRONT-745, 2026-10-27, later the same day).** NEWFRONT-972
+merged into `web-new-dev` as `95edef538` (`IssueViewSerializer` takes
+`access` and `anchor`; migration `0170_issueview_anchor`; both scopes
+echo). The gate's two cloud legs are written and pass on a cloud-edition
+`web_new` tower against that API:
+
+- VIEW-019 — `project-create-dialog.spec.ts`, "cloud: the access selector
+  creates an owner-only view and the badge follows it": picking owner-only
+  stores `access: 0` and shows the Private row badge and the detail lock;
+  leaving the default stores `access: 1` and shows Public.
+- VIEW-020 — `project-row-actions.spec.ts`, "cloud: publishing shows Live
+  and a link, unpublishing clears both": the owner's menu offers Publish,
+  publishing stores an `anchor` and shows a link built from it, the row
+  carries the Live marker, and unpublishing clears the anchor and the
+  marker.
+
+Both legs are target-only: they skip unless the new build declares the
+cloud edition (`PARITY_NEW_EDITION=cloud`), and they skip on the oracle
+project for the reason above. Their rows turn `new green` when the final
+full-area proof run is green; the OSS halves of the same files stay
+unchanged and green on all three targets.
 
 ## 15. Bug markers (observed → intended → adjudication)
 

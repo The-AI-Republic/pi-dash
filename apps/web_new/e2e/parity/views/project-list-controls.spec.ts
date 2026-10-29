@@ -325,10 +325,21 @@ test(
       await expect.poll(() => driver.viewsListNames(), POLL).toEqual([]);
     });
 
-    // Intended: dropping the date dimension keeps favorites (starred-only
-    // list, favorites chip kept). The app wipes the sibling filter instead.
-    await test.step("bug: dropping the date dimension also clears favorites", async () => {
+    // Intended (VIEW-007, NEWFRONT-216): dropping the date dimension keeps
+    // the sibling favorites chip and its starred-only list. The old app
+    // replaces the whole filter object and pins that bug; web_new ships the
+    // intended behavior, so the leg asserts it instead (spec §15/§18).
+    await test.step("dropping the date dimension: sibling wipe on the old app, kept on the new app", async () => {
       await driver.viewsChipRemoveDimension("created at");
+      if (driver.target === "web_new") {
+        const chipsAfter = (await driver.viewsChipTexts()).join(" | ").toLowerCase();
+        expect(chipsAfter).toContain("favorites");
+        expect(chipsAfter).not.toContain("created at");
+        await expect.poll(() => driver.viewsListNames(), POLL).toEqual([starred]);
+        const server = await serverSavedViews(workspaceSlug, projectId, owner.cookie);
+        expect(server).toHaveLength(2);
+        return;
+      }
       expect(await driver.viewsChipsVisible()).toBe(false);
       await expect.poll(() => driver.viewsListNames(), POLL).toEqual(expect.arrayContaining([starred, plain]));
       const server = await serverSavedViews(workspaceSlug, projectId, owner.cookie);

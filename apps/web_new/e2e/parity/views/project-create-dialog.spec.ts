@@ -7,8 +7,9 @@
 // VIEW-013, VIEW-014, VIEW-019 (OSS part). Green on apps/web first.
 import { test, expect } from "../fixtures";
 import { VIEW_ACCESS, serverProjectViewDetail, serverSavedViews } from "../helpers/api";
+import { isCloudNewEdition } from "../helpers/parity-env";
 import { specTags, specTitle } from "../helpers/tags";
-import { viewsHarness, viewsOpenListAs } from "./support";
+import { viewsHarness, viewsOpenDetailAs, viewsOpenListAs } from "./support";
 
 const POLL = { timeout: 60_000 };
 
@@ -44,7 +45,11 @@ test(
       await viewsOpenListAs(driver, harness);
       await driver.viewsOpenCreateFromHeader();
       await expect.poll(() => driver.viewsDialogOpen(), POLL).toBe(true);
-      expect(await driver.viewsDialogAccessPresent()).toBe(false);
+      // The selector's absence is the OSS half of VIEW-019; a cloud build
+      // fills the slot, and its own leg below covers the presence.
+      if (!(driver.target === "web_new" && isCloudNewEdition())) {
+        expect(await driver.viewsDialogAccessPresent()).toBe(false);
+      }
       expect(await driver.viewsDialogFiltersExpanded()).toBe(true);
       await driver.viewsDialogIconOpen();
       expect(await driver.viewsDialogIconTabs()).toEqual(["Emoji", "Icon"]);
@@ -53,6 +58,10 @@ test(
       const display = (await driver.viewsDialogDisplayTexts()).join(" | ");
       expect(display).toContain("Display Properties");
       expect(display).toContain("Group by");
+      // Dismissed before the footer is used: on a cloud build the extra
+      // access section makes the dialog tall enough for the open panel to
+      // cover the submit button.
+      await driver.viewsDialogDisplayClose();
     });
 
     await test.step("title is required and capped at 255 characters", async () => {
@@ -89,8 +98,9 @@ test(
     const name = `Vd14 Board ${harness.tag}`;
 
     // Intended: the dialog stays open with the user's input intact so the
-    // user can retry. The app resets the form to blank defaults instead.
-    await test.step("bug: NEWFRONT-221 a failing submit toasts and resets the form", async () => {
+    // user can retry. The old app resets the form to blank defaults instead;
+    // web_new ships the intended retention (views spec §15).
+    await test.step("bug: NEWFRONT-221 a failing submit keeps the form for retry", async () => {
       await viewsOpenListAs(driver, harness);
       await driver.viewsOpenCreateFromHeader();
       await expect.poll(() => driver.viewsDialogOpen(), POLL).toBe(true);
@@ -100,8 +110,13 @@ test(
       await driver.viewsDialogSubmitAttempt();
       await expect.poll(() => driver.lastToast(), POLL).toContain("Failed to create view");
       expect(await driver.viewsDialogOpen()).toBe(true);
-      await expect.poll(() => driver.viewsDialogTitleValue(), POLL).toBe("");
-      expect(await driver.viewsDialogDescriptionValue()).toBe("");
+      if (driver.target === "web_new") {
+        expect(await driver.viewsDialogTitleValue()).toBe(name);
+        expect(await driver.viewsDialogDescriptionValue()).toBe("wiped on failure");
+      } else {
+        await expect.poll(() => driver.viewsDialogTitleValue(), POLL).toBe("");
+        expect(await driver.viewsDialogDescriptionValue()).toBe("");
+      }
       const server = await serverSavedViews(workspaceSlug, projectId, owner.cookie);
       expect(server).toHaveLength(0);
     });
@@ -125,6 +140,70 @@ test(
       expect((detail.display_filters as { group_by?: string })?.group_by).toBe("state");
       expect((detail.logo_props as { in_use?: string })?.in_use).toBe("icon");
       expect((detail.logo_props as { icon?: { name?: string } })?.icon?.name).toBe("Activity");
+    });
+  }
+);
+
+test(
+  specTitle(["VIEW-019"], "cloud: the access selector creates an owner-only view and the badge follows it"),
+  { tag: specTags(["VIEW-019"]) },
+  async ({ driver }, testInfo) => {
+    // Cloud leg (parity/specs/views.md §5/§14, gate note): target-only.
+    // The old cloud app renders the OSS access stub, so there is no oracle
+    // half; this proves web_new against the cloud build, which the run
+    // declares with PARITY_NEW_EDITION=cloud.
+    test.skip(testInfo.project.name !== "new", "the access selector pins the web_new cloud build only");
+    test.skip(!isCloudNewEdition(), "cloud leg needs web_new built with the cloud edition");
+    const harness = await viewsHarness("parity-vd19c");
+    const { workspaceSlug, projectId, owner } = harness;
+    const name = `Vd19c Owner ${harness.tag}`;
+
+    let viewId = "";
+    await test.step("the dialog offers shared (default) and owner-only", async () => {
+      await viewsOpenListAs(driver, harness);
+      await driver.viewsOpenCreateFromHeader();
+      await expect.poll(() => driver.viewsDialogOpen(), POLL).toBe(true);
+      expect(await driver.viewsDialogAccessPresent()).toBe(true);
+    });
+
+    await test.step("picking owner-only stores access 0 on the created view", async () => {
+      await driver.viewsDialogFillTitle(name);
+      await driver.viewsDialogPickAccess("Owner-only");
+      await driver.viewsDialogSubmit();
+      await expect.poll(() => driver.page.url(), POLL).toContain("/views/");
+      viewId = driver.page.url().split("/views/")[1]?.split("/")[0] ?? "";
+      expect(viewId).toMatch(/^[0-9a-f-]{36}$/);
+      await expect
+        .poll(async () => (await serverProjectViewDetail(workspaceSlug, projectId, viewId, owner.cookie)).access, POLL)
+        .toBe(VIEW_ACCESS.PRIVATE);
+    });
+
+    await test.step("the row badge and the detail lock follow the stored access", async () => {
+      await viewsOpenListAs(driver, harness);
+      await expect.poll(() => driver.viewsListNames(), POLL).toEqual([name]);
+      expect(await driver.viewsRowAccess(name)).toBe("Private");
+      await viewsOpenDetailAs(driver, harness, viewId);
+      await expect.poll(() => driver.viewsDetailLockVisible(), POLL).toBe(true);
+    });
+
+    await test.step("shared is the untouched default, so a plain create stays public", async () => {
+      const shared = `Vd19c Shared ${harness.tag}`;
+      await viewsOpenListAs(driver, harness);
+      await driver.viewsOpenCreateFromHeader();
+      await expect.poll(() => driver.viewsDialogOpen(), POLL).toBe(true);
+      await driver.viewsDialogFillTitle(shared);
+      await driver.viewsDialogSubmit();
+      await expect.poll(() => driver.page.url(), POLL).toContain("/views/");
+      const sharedId = driver.page.url().split("/views/")[1]?.split("/")[0] ?? "";
+      await expect
+        .poll(
+          async () => (await serverProjectViewDetail(workspaceSlug, projectId, sharedId, owner.cookie)).access,
+          POLL
+        )
+        .toBe(VIEW_ACCESS.PUBLIC);
+      await viewsOpenListAs(driver, harness);
+      await expect.poll(() => driver.viewsListNames(), POLL).toEqual(expect.arrayContaining([shared, name]));
+      expect(await driver.viewsRowAccess(shared)).toBe("Public");
     });
   }
 );

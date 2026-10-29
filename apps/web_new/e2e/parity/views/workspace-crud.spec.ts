@@ -163,10 +163,11 @@ test(
   specTitle(["VIEW-035"], "bug: failed edit stays silent with the dialog open"),
   { tag: specTags(["VIEW-035"]) },
   async ({ driver }) => {
-    // bug: NEWFRONT-232 — the store swallows PATCH failures (optimistic
+    // bug: NEWFRONT-232 — the old store swallows PATCH failures (optimistic
     // rollback, no rethrow), so the modal's error toast never fires: the
     // failed save leaves the dialog open on the previous values with no
-    // notice at all. The intended behavior is the VIEW-035 error notice.
+    // notice at all. The intended behavior is the VIEW-035 error notice,
+    // which web_new ships (spec §15/§16).
     const harness = await viewsHarness("parity-w35f");
     const { owner, workspaceSlug } = harness;
     const custom = `W35f Alpha ${harness.tag}`;
@@ -184,6 +185,11 @@ test(
     // server-side, not through the row.)
     await expect.poll(() => driver.viewsDialogHeading(), POLL).toBe("Update View");
     expect((await serverWorkspaceViewDetail(workspaceSlug, customId, owner.cookie)).name).toBe(custom);
+    if (driver.target === "web_new") {
+      await expect.poll(() => driver.lastToast(), POLL).toContain("could not be updated");
+      expect(await driver.viewsDialogTitleValue()).toBe(`${custom} Renamed`);
+      return;
+    }
     expect(await driver.lastToast()).toBeNull();
   }
 );
@@ -192,7 +198,8 @@ test(
   specTitle(["VIEW-036"], "delete confirms, then removes silently; cancel keeps the view"),
   { tag: specTags(["VIEW-036"]) },
   async ({ driver }) => {
-    // Gap vs "a success notice": deletion closes silently with no toast.
+    // Gap vs "a success notice": the old app closes silently with no toast.
+    // web_new ships the success notice, so its leg proves it (spec §10/§16).
     const harness = await viewsHarness("parity-w36");
     const { owner, workspaceSlug } = harness;
     const custom = `W36 Alpha ${harness.tag}`;
@@ -213,7 +220,11 @@ test(
     await driver.wsViewsRowMenuPick("Delete View");
     await driver.viewsDeleteConfirm();
     await expect.poll(() => driver.wsViewsListNames(), POLL).toEqual([]);
-    expect(await driver.lastToast()).toBeNull();
+    if (driver.target === "web_new") {
+      await expect.poll(() => driver.lastToast(), POLL).toContain("View deleted successfully");
+    } else {
+      expect(await driver.lastToast()).toBeNull();
+    }
     expect(await serverWorkspaceViews(workspaceSlug, owner.cookie)).toEqual([]);
   }
 );

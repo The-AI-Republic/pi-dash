@@ -11,6 +11,22 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { SidebarProjectsGroup, type SidebarProjectsGroupProps } from "./SidebarProjectsGroup.js";
 
+// The aggregate "Work Items" row becomes a router Link once the views
+// prefixes join the migrated-route list. This suite asserts the rendered
+// navigation intent, not TanStack's own routing: stand the Link in as a
+// plain anchor, the same way SidebarProjectRow.test.tsx does.
+vi.mock("@tanstack/react-router", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@tanstack/react-router")>()),
+  Link: (props: { to?: string; children?: React.ReactNode } & Record<string, unknown>) => {
+    const { to, children, ...rest } = props;
+    return (
+      <a href={to} {...rest}>
+        {children}
+      </a>
+    );
+  },
+}));
+
 const WS_ID = "123e4567-e89b-12d3-a456-426614174000";
 const PROJECT_A = "223e4567-e89b-12d3-a456-426614174001";
 const PROJECT_B = "323e4567-e89b-12d3-a456-426614174002";

@@ -64,13 +64,14 @@ test(
 );
 
 test(
-  specTitle(["VIEW-025", "VIEW-026"], "locked views hide layout and display but keep a working filter toggle"),
+  specTitle(["VIEW-025", "VIEW-026"], "locked views hide layout, display and the filter toggle"),
   { tag: specTags(["VIEW-025", "VIEW-026"]) },
   async ({ driver }) => {
-    // Gap vs the rows' "no switcher / neither control" wording: the
-    // filter toggle stays visible on locked views while layout and
-    // Display hide; saving stays shut server-side (locked PATCHes fail
-    // with 400) and no Update/Save button offers without a dirty query.
+    // A locked view hides the layout switcher and Display on both apps.
+    // The filter toggle is the target divergence: intended is hidden
+    // (VIEW-025/026 wording, spec §16) and web_new ships that; the old app
+    // keeps it and pins the gap. Add work item and the quick menu stay.
+    // Saving is shut server-side too (locked PATCHes fail with 400).
     const harness = await viewsHarness("parity-vd25l");
     const { owner, workspaceSlug, projectId } = harness;
     const name = `Vd25l Alpha ${harness.tag}`;
@@ -82,7 +83,7 @@ test(
     await expect.poll(() => driver.viewsDetailEmptyTitle(), POLL).toBe("View work items will appear here");
     expect(await driver.viewsDetailLayoutVisible()).toBe(false);
     expect(await driver.viewsDetailDisplayVisible()).toBe(false);
-    expect(await driver.viewsDetailFiltersToggleVisible()).toBe(true);
+    expect(await driver.viewsDetailFiltersToggleVisible()).toBe(driver.target !== "web_new");
     expect(await driver.viewsDetailAddVisible()).toBe(true);
     expect((await serverProjectViewDetail(workspaceSlug, projectId, viewId, owner.cookie)).is_locked).toBe(true);
     await expect(patchProjectView(workspaceSlug, projectId, viewId, owner.cookie, { name })).rejects.toThrow(
@@ -116,7 +117,23 @@ test(
 
     await driver.viewsDetailLayoutPick(1);
     await expect.poll(() => driver.viewsDetailLayoutActive(), POLL).toBe(1);
-    expect(await driver.viewsDetailDisplayOptions()).toContain("Sub-group by");
+    // Board offers sub-grouping as a section (VIEW-026). Whether it waits
+    // for a Group by choice is the issues area's rule (ISS-077), and the
+    // two apps differ there: web_new withholds it until a grouping exists,
+    // the old app lists it unconditionally.
+    //
+    // Assert the rule, not the board's opening state: a switch into Board
+    // may seed a Group by (the issues area stores State when none was
+    // chosen), so "Sub-group by is absent right after the switch" is only
+    // true while the board has no grouping. Either way, the section must
+    // follow the grouping — shown once one is chosen, never before it.
+    const boardOptions = await driver.viewsDetailDisplayOptions();
+    if (driver.target === "web_new") {
+      await driver.viewsDetailDisplayPick("Group by", "States");
+      expect(await driver.viewsDetailDisplayOptions()).toContain("Sub-group by");
+    } else {
+      expect(boardOptions).toContain("Sub-group by");
+    }
 
     await patchProject(workspaceSlug, projectId, owner.cookie, { cycle_view: true, module_view: true });
     await driver.reloadPage();
@@ -150,7 +167,9 @@ test(
         return JSON.stringify(detail.rich_filters);
       }, POLL)
       .toContain("urgent");
-    expect(await driver.lastToast()).toContain("updated successfully");
+    // The toast lands when the PATCH resolves, which can trail the stored
+    // query the poll above already sees; wait for it rather than sample.
+    await expect.poll(async () => driver.lastToast(), POLL).toContain("updated successfully");
   }
 );
 
@@ -177,7 +196,9 @@ test(
 
     const created = `Vd27 Item ${harness.tag}`;
     await driver.viewsDetailAddClick();
-    expect(await driver.createModalOpen()).toBe(true);
+    // The create form mounts a beat after the click on the oracle; wait
+    // for it rather than sampling once.
+    await expect.poll(() => driver.createModalOpen(), POLL).toBe(true);
     await driver.fillCreateTitle(created);
     await driver.submitCreateModal();
     await expect.poll(() => driver.visibleIssueNames(), POLL).toEqual(expect.arrayContaining([created]));
@@ -230,12 +251,17 @@ test(
     await viewsOpenDetailAs(driver, harness, viewId);
     await expect.poll(() => driver.viewsDetailTabTitle(), POLL).toContain(name);
     await expect.poll(() => driver.viewsDetailEmptyTitle(), POLL).toBe("View work items will appear here");
+    // The filter row (and Save as with it) mounts once the project detail
+    // that carries the views feature flag resolves, so the "no unsaved
+    // query, no Save as" half waits for the row's own affordance instead of
+    // reading the header in a single shot and catching it still pending.
+    await expect.poll(() => driver.viewsDetailFiltersToggleVisible(), POLL).toBe(true);
     expect(await driver.viewsDetailSaveAsVisible()).toBe(false);
 
     await driver.viewsDetailFilterAdd("Priority", "Urgent");
-    expect(await driver.viewsDetailSaveAsVisible()).toBe(true);
+    await expect.poll(() => driver.viewsDetailSaveAsVisible(), POLL).toBe(true);
     await driver.viewsDetailSaveAsClick();
-    expect(await driver.viewsDialogTitleValue()).toBe(`${name} 2`);
+    await expect.poll(() => driver.viewsDialogTitleValue(), POLL).toBe(`${name} 2`);
     await driver.viewsDialogSubmit();
     await expect.poll(() => driver.viewsDetailTabTitle(), POLL).toContain(`${name} 2`);
 

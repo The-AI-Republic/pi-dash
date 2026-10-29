@@ -31,8 +31,18 @@ test(
     await test.step("bug: NEWFRONT-247 the shortcut lands on a 404, not the features settings", async () => {
       // bug: NEWFRONT-247 — the button points at the bare /features index,
       // which has no page (only per-feature sub-pages exist); intended is
-      // the project features settings page.
+      // the project features settings page. web_new ships the intended
+      // target (the views feature page with its switch), so its leg checks
+      // that page rather than the old bare URL (views spec §15).
       await driver.viewsGateManageOpen();
+      if (driver.target === "web_new") {
+        await expect
+          .poll(() => driver.currentUrlPath(), POLL)
+          .toMatch(/\/settings\/projects\/[^/]+\/features\/[^/]+\/?$/);
+        await expect.poll(() => driver.viewsSettingsViewsToggleValue(), POLL).toBe(false);
+        expect(await driver.viewsGateTitle()).toBe("");
+        return;
+      }
       await expect.poll(() => driver.currentUrlPath(), POLL).toMatch(/\/settings\/projects\/[^/]+\/features\/?$/);
       await expect.poll(() => driver.viewsGateTitle(), POLL).toBe("");
     });

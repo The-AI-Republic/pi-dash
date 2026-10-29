@@ -11907,6 +11907,8 @@ export interface ParityProjectViewDetail {
   owned_by: string | null;
   is_favorite: boolean;
   is_locked: boolean;
+  /** Publish token (VIEW-020); null or absent while the view is not live. */
+  anchor: string | null;
   logo_props: unknown;
   rich_filters: unknown;
   display_filters: unknown;
@@ -11925,6 +11927,7 @@ function projectViewDetailOf(row: Record<string, unknown>): ParityProjectViewDet
     owned_by: typeof owned === "string" ? owned : null,
     is_favorite: row["is_favorite"] === true,
     is_locked: row["is_locked"] === true,
+    anchor: typeof row["anchor"] === "string" && row["anchor"] !== "" ? row["anchor"] : null,
     logo_props: row["logo_props"] ?? null,
     rich_filters: row["rich_filters"] ?? null,
     display_filters: row["display_filters"] ?? null,
