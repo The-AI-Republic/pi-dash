@@ -46,7 +46,8 @@
     "/{ws}/projects/{projectId}/inbox",
     "/{ws}/projects/{projectId}/archives",
     "/{ws}/projects/{projectId}/archives/*",
-    "/{ws}/analytics/*"
+    "/{ws}/analytics/*",
+    "/{ws}/drafts"
   ],
   "reservedTopLevel": [
     "404",
