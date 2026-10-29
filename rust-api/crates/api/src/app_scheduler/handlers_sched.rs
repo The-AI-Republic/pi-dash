@@ -33,11 +33,16 @@
 //! * DELETE samples `now()` twice (`:now` for the bindings update and the
 //!   scheduler `deleted_at`, `:now2` for the scheduler `updated_at` —
 //!   `views.py:150-157`, F36-04 R5).
-//! * Duplicate slug answers 400 `{"slug": ["This slug is already in use
-//!   in this workspace."]}` (R7 `validate_slug`, OSS `main` `3db73752`,
-//!   PDASHOSS01-221): the EXISTS check runs whenever the slug's
-//!   `CharField` half passed, so the conflict merges ahead of any other
-//!   field errors (slug is declared first — F36-10). The `IntegrityError`
+//! * `slug` is read-only and derived from the name
+//!   ([`shape::derive_scheduler_slug`], PDASHOSS01-319): set on create,
+//!   re-derived when a PATCH carries `name` unless the row's slug is a
+//!   built-in one (`ensure_builtin_schedulers` matches rows by slug).
+//! * A name whose derived slug another active scheduler in the workspace
+//!   already uses answers 400 `{"name": ["A scheduler with the same name
+//!   already exists in this workspace."]}` (R7 via `validate_name`): the
+//!   EXISTS check runs whenever the name's `CharField` half passed, so the
+//!   conflict merges ahead of any other field errors (name is the first
+//!   writable field — F36-10). The `IntegrityError`
 //!   → `{"error": "The payload is not valid"}` branch survives only as a
 //!   check-then-write race backstop (`BaseAPIView.handle_exception`,
 //!   `app/views/base.py:211-240`, still flattens Django-side races the
@@ -69,6 +74,7 @@ use serde_json::{Map, Value};
 use sqlx::PgPool;
 
 use pidash_services::app_scheduler::{queries, shape};
+use pidash_services::scheduler::builtins::BUILTINS;
 
 use super::gate::{self, Gate};
 use crate::middleware::SessionHandle;
@@ -87,7 +93,7 @@ use pidash_compat::response::json_response;
 /// [`tests::not_found_body_matches_f36_10`].
 pub const SCHEDULER_NOT_FOUND_BODY: &str = r#"{"detail":"No Scheduler matches the given query."}"#;
 /// `handle_exception`'s `IntegrityError` branch (400,
-/// `app/views/base.py:220-224`): since R7 (`validate_slug`) this is only
+/// `app/views/base.py:220-224`): since R7 (`validate_name`) this is only
 /// the check-then-write race backstop on POST and PATCH, never the
 /// first-line duplicate answer (and never a 409).
 pub const INVALID_PAYLOAD_BODY: &str = r#"{"error":"The payload is not valid"}"#;
@@ -262,15 +268,9 @@ impl AnnotatedSchedulerRow {
 // ---------------------------------------------------------------------------
 
 /// Writable scheduler columns in `Meta.fields` declaration order: error
-/// objects preserve this order (DRF iterates `self.fields`).
-const WRITABLE_FIELDS: &[&str] = &[
-    "slug",
-    "name",
-    "description",
-    "prompt",
-    "color",
-    "is_enabled",
-];
+/// objects preserve this order (DRF iterates `self.fields`). `slug` is
+/// read-only (derived from `name`), so a body `slug` is ignored.
+const WRITABLE_FIELDS: &[&str] = &["name", "description", "prompt", "color", "is_enabled"];
 
 const REQUIRED_MESSAGE: &str = "This field is required.";
 const NULL_MESSAGE: &str = "This field may not be null.";
@@ -283,9 +283,10 @@ fn max_length_message(max_length: usize) -> String {
     format!("Ensure this field has no more than {max_length} characters.")
 }
 
-/// A validated scheduler write: all six writable columns resolved
+/// A validated scheduler write: all six written columns resolved
 /// (provided values, or model defaults on create / current values on
-/// PATCH). PATCH writes every column (`save()` semantics, R4).
+/// PATCH; `slug` derived from `name` per [`derived_slug_for`]). PATCH
+/// writes every column (`save()` semantics, R4).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SchedulerWrite {
     pub slug: String,
@@ -408,16 +409,23 @@ fn non_dict_body(body: &Value) -> Value {
 }
 
 /// Validate one present field value into its write slot, collecting the
-/// field's errors (`validate_color` runs only when the `CharField` half
-/// passes, like DRF's `validate_<field>` hook).
+/// field's errors (`validate_color` and `validate_name`'s empty-slug
+/// check run only when the `CharField` half passes, like DRF's
+/// `validate_<field>` hook).
 fn validate_field(
     field: &str,
     value: &Value,
     write: &mut SchedulerWrite,
 ) -> Result<(), Vec<String>> {
     match field {
-        "slug" => char_field(value, false, Some(64)).map(|slug| write.slug = slug),
-        "name" => char_field(value, false, Some(255)).map(|name| write.name = name),
+        "name" => {
+            let name = char_field(value, false, Some(255))?;
+            if shape::derive_scheduler_slug(&name).is_empty() {
+                return Err(vec![shape::NAME_NEEDS_ALNUM_ERROR.to_owned()]);
+            }
+            write.name = name;
+            Ok(())
+        }
         "description" => {
             char_field(value, true, None).map(|description| write.description = description)
         }
@@ -434,10 +442,11 @@ fn validate_field(
 }
 
 /// Validate a create body (`SchedulerSerializer(data)`,
-/// `views.py:79-80`): unknown and read-only keys ignored, every missing
-/// required key (`slug`, `name`, `prompt`) fails, missing optionals take
-/// their model defaults (`description` `""`, `color` `"#3b82f6"`,
-/// `is_enabled` true). All field errors accumulate in declaration order.
+/// `views.py:79-80`): unknown and read-only keys (`slug` included) are
+/// ignored, every missing required key (`name`, `prompt`) fails, missing
+/// optionals take their model defaults (`description` `""`, `color`
+/// `"#3b82f6"`, `is_enabled` true), and `slug` is derived from `name`.
+/// All field errors accumulate in declaration order.
 pub fn validate_create_body(body: &Value) -> Result<SchedulerWrite, Value> {
     let object = match body.as_object() {
         Some(map) => map,
@@ -463,7 +472,7 @@ pub fn validate_create_body(body: &Value) -> Result<SchedulerWrite, Value> {
                 }
             }
             None => {
-                if matches!(field, "slug" | "name" | "prompt") {
+                if matches!(field, "name" | "prompt") {
                     errors.insert(
                         field.to_owned(),
                         Value::Array(vec![Value::String(REQUIRED_MESSAGE.to_owned())]),
@@ -473,9 +482,24 @@ pub fn validate_create_body(body: &Value) -> Result<SchedulerWrite, Value> {
         }
     }
     if errors.is_empty() {
+        write.slug = shape::derive_scheduler_slug(&write.name);
         Ok(write)
     } else {
         Err(Value::Object(errors))
+    }
+}
+
+/// `SchedulerSerializer.validate`'s slug rule on PATCH: a body carrying
+/// `name` re-derives the slug, except on a built-in row (slug in the
+/// [`BUILTINS`] catalog), which keeps its slug because
+/// `ensure_builtin_schedulers` matches rows by slug. The `source` column
+/// can't tell built-ins apart: API-created rows get the model default.
+fn derived_slug_for(existing: &SchedulerRow, name_changed: bool, name: &str) -> String {
+    let builtin = BUILTINS.iter().any(|builtin| builtin.slug == existing.slug);
+    if name_changed && !builtin {
+        shape::derive_scheduler_slug(name)
+    } else {
+        existing.slug.clone()
     }
 }
 
@@ -509,6 +533,7 @@ pub fn validate_patch_body(body: &Value, existing: &SchedulerRow) -> Result<Sche
         }
     }
     if errors.is_empty() {
+        write.slug = derived_slug_for(existing, object.contains_key("name"), &write.name);
         Ok(write)
     } else {
         Err(Value::Object(errors))
@@ -516,17 +541,20 @@ pub fn validate_patch_body(body: &Value, existing: &SchedulerRow) -> Result<Sche
 }
 
 // ---------------------------------------------------------------------------
-// Slug uniqueness (R7 `validate_slug`, `scheduler.py:113-134`)
+// Duplicate names (R7 via `validate_name`, PDASHOSS01-319)
 // ---------------------------------------------------------------------------
 
-/// `validate_slug`'s input: the body's slug iff present and
-/// `CharField`-valid. DRF calls the `validate_<field>` hook only when
-/// the field's own validation passed, so missing, blank, over-long, or
-/// wrong-typed slugs — and non-dict bodies — never reach the EXISTS
-/// check (the DB constraint stays the backstop there, as in Django).
-fn candidate_slug(body: &Value) -> Option<String> {
-    let slug = body.as_object()?.get("slug")?;
-    char_field(slug, false, Some(64)).ok()
+/// The slug `validate_name` checks: the body's name iff present,
+/// `CharField`-valid, and deriving a non-empty slug. DRF calls the
+/// `validate_<field>` hook only when the field's own validation passed,
+/// and the empty-slug rejection fires before the EXISTS check, so missing,
+/// blank, over-long, wrong-typed or letterless names — and non-dict
+/// bodies — never reach it (the DB constraint stays the backstop there,
+/// as in Django).
+fn candidate_name_slug(body: &Value) -> Option<String> {
+    let name = body.as_object()?.get("name")?;
+    let slug = shape::derive_scheduler_slug(&char_field(name, false, Some(255)).ok()?);
+    (!slug.is_empty()).then_some(slug)
 }
 
 /// R7 slug-unique check, with or without the PATCH self-row exclusion.
@@ -556,45 +584,38 @@ async fn slug_in_use(
     Ok(row.is_some())
 }
 
-/// The `{"slug": [...]}` conflict body, merged ahead of any other field
-/// errors (slug is the first declared field, so DRF lists it first).
-fn slug_conflict_body(prior: Map<String, Value>) -> Value {
+/// The `{"name": [...]}` duplicate body, merged ahead of any other field
+/// errors (name is the first writable field, so DRF lists it first).
+fn name_conflict_body(prior: Map<String, Value>) -> Value {
     let mut body = Map::with_capacity(prior.len() + 1);
     body.insert(
-        "slug".to_owned(),
-        Value::Array(vec![Value::String(shape::SLUG_UNIQUE_ERROR.to_owned())]),
+        "name".to_owned(),
+        Value::Array(vec![Value::String(shape::DUPLICATE_NAME_ERROR.to_owned())]),
     );
     body.extend(prior);
     Value::Object(body)
 }
 
-/// Run R7 after pure validation. On `Ok` a conflict denies with the
-/// lone slug body; on `Err` a conflict prepends `slug` to the field
-/// errors. The check runs only when the slug's `CharField` half passed
-/// (that's when DRF calls `validate_slug`), so missing/invalid slugs
-/// and non-dict bodies pass through untouched.
-async fn enforce_slug_unique(
+/// Run R7 on the name's derived slug after pure validation. On `Ok` a
+/// conflict denies with the lone name body; on `Err` a conflict prepends
+/// `name` to the field errors. The check runs only when the body carries
+/// a name that reaches `validate_name`'s EXISTS query (see
+/// [`candidate_name_slug`]); a PATCH without `name` skips it.
+async fn enforce_name_unique(
     pool: &PgPool,
     workspace_id: &uuid::Uuid,
     body: &Value,
     exclude_scheduler: Option<&uuid::Uuid>,
     validated: Result<SchedulerWrite, Value>,
 ) -> Result<SchedulerWrite, Denial> {
+    let conflict = match candidate_name_slug(body) {
+        Some(slug) => slug_in_use(pool, workspace_id, &slug, exclude_scheduler).await?,
+        None => false,
+    };
     match validated {
-        Ok(write) => {
-            if slug_in_use(pool, workspace_id, &write.slug, exclude_scheduler).await? {
-                return Err(Denial::BadJson(slug_conflict_body(Map::new())));
-            }
-            Ok(write)
-        }
-        Err(Value::Object(prior)) => {
-            if let Some(slug) = candidate_slug(body) {
-                if slug_in_use(pool, workspace_id, &slug, exclude_scheduler).await? {
-                    return Err(Denial::BadJson(slug_conflict_body(prior)));
-                }
-            }
-            Err(Denial::BadJson(Value::Object(prior)))
-        }
+        Ok(_) if conflict => Err(Denial::BadJson(name_conflict_body(Map::new()))),
+        Ok(write) => Ok(write),
+        Err(Value::Object(prior)) if conflict => Err(Denial::BadJson(name_conflict_body(prior))),
         Err(other) => Err(Denial::BadJson(other)),
     }
 }
@@ -733,7 +754,7 @@ pub async fn scheduler_create(
         Err(denial) => return denial.into_response(),
     };
     let validated = validate_create_body(&body);
-    let write = match enforce_slug_unique(pool, &gate.workspace_id, &body, None, validated).await {
+    let write = match enforce_name_unique(pool, &gate.workspace_id, &body, None, validated).await {
         Ok(write) => write,
         Err(denial) => return denial.into_response(),
     };
@@ -909,7 +930,7 @@ pub async fn scheduler_patch(
     };
     let record = row.record();
     let validated = validate_patch_body(&body, &record);
-    let write = match enforce_slug_unique(
+    let write = match enforce_name_unique(
         pool,
         &gate.workspace_id,
         &body,
@@ -1346,12 +1367,12 @@ mod tests {
 
     #[test]
     fn create_valid_minimal_takes_model_defaults() {
-        let write = validate_create_body(&json!({"slug": "s", "name": "N", "prompt": "x"}))
+        let write = validate_create_body(&json!({"name": "N", "prompt": "x"}))
             .expect("minimal create validates");
         assert_eq!(
             write,
             SchedulerWrite {
-                slug: "s".to_owned(),
+                slug: "n".to_owned(),
                 name: "N".to_owned(),
                 description: String::new(),
                 prompt: "x".to_owned(),
@@ -1364,8 +1385,7 @@ mod tests {
     #[test]
     fn create_valid_full_canonicalizes() {
         let write = validate_create_body(&json!({
-            "slug": "  nightly ",
-            "name": "Nightly",
+            "name": "  Nightly ",
             "description": "d",
             "prompt": "Scan.",
             "color": "  #ABCDEF  ",
@@ -1373,6 +1393,7 @@ mod tests {
         }))
         .expect("full create validates");
         assert_eq!(write.slug, "nightly");
+        assert_eq!(write.name, "Nightly");
         assert_eq!(write.color, "#abcdef");
         assert!(!write.is_enabled);
     }
@@ -1381,7 +1402,7 @@ mod tests {
     fn create_missing_required_accumulates_in_field_order() {
         let errors = errors_for(json!({}));
         let keys: Vec<&String> = errors.keys().collect();
-        assert_eq!(keys, vec!["slug", "name", "prompt"]);
+        assert_eq!(keys, vec!["name", "prompt"]);
         for key in keys {
             assert_eq!(
                 errors[key],
@@ -1393,18 +1414,11 @@ mod tests {
 
     #[test]
     fn create_null_rejected_on_every_writable_field() {
-        for field in [
-            "slug",
-            "name",
-            "description",
-            "prompt",
-            "color",
-            "is_enabled",
-        ] {
+        for field in ["name", "description", "prompt", "color", "is_enabled"] {
             let mut body = Map::new();
             body.insert(field.to_owned(), Value::Null);
             // Fill the other required fields so only this field errors.
-            for required in ["slug", "name", "prompt"] {
+            for required in ["name", "prompt"] {
                 if required != field {
                     body.insert(required.to_owned(), Value::String("v".to_owned()));
                 }
@@ -1420,9 +1434,9 @@ mod tests {
 
     #[test]
     fn create_blank_rules_match_allow_blank() {
-        // slug/name/prompt/color reject blank; description coerces to "".
-        for field in ["slug", "name", "prompt", "color"] {
-            let errors = errors_for(json!({"slug": "s", "name": "n", "prompt": "p", field: ""}));
+        // name/prompt/color reject blank; description coerces to "".
+        for field in ["name", "prompt", "color"] {
+            let errors = errors_for(json!({"name": "n", "prompt": "p", field: ""}));
             assert_eq!(
                 errors[field],
                 json!(["This field may not be blank."]),
@@ -1430,7 +1444,7 @@ mod tests {
             );
         }
         let write = validate_create_body(&json!({
-            "slug": "s", "name": "n", "prompt": "p", "description": "   ",
+            "name": "n", "prompt": "p", "description": "   ",
         }))
         .expect("whitespace description coerces");
         assert_eq!(write.description, "");
@@ -1438,18 +1452,14 @@ mod tests {
 
     #[test]
     fn create_max_length_counts_chars_not_bytes() {
-        let emoji_slug: String = "e".repeat(63) + "\u{1F600}";
-        assert_eq!(emoji_slug.chars().count(), 64);
-        validate_create_body(&json!({"slug": emoji_slug, "name": "n", "prompt": "p"}))
-            .expect("64 chars (67 bytes) fit max_length 64");
-        let long_slug = "s".repeat(65);
-        let errors = errors_for(json!({"slug": long_slug, "name": "n", "prompt": "p"}));
-        assert_eq!(
-            errors["slug"],
-            json!(["Ensure this field has no more than 64 characters."])
-        );
+        let emoji_name: String = "e".repeat(254) + "\u{1F600}";
+        assert_eq!(emoji_name.chars().count(), 255);
+        let write = validate_create_body(&json!({"name": emoji_name, "prompt": "p"}))
+            .expect("255 chars (258 bytes) fit max_length 255");
+        // The derived slug is capped at the 64-char column.
+        assert_eq!(write.slug, "e".repeat(64));
         let long_name = "n".repeat(256);
-        let errors = errors_for(json!({"slug": "s", "name": long_name, "prompt": "p"}));
+        let errors = errors_for(json!({"name": long_name, "prompt": "p"}));
         assert_eq!(
             errors["name"],
             json!(["Ensure this field has no more than 255 characters."])
@@ -1460,7 +1470,7 @@ mod tests {
     #[test]
     fn create_bad_color_body_is_contract_exact() {
         let errors = errors_for(json!({
-            "slug": "bad", "name": "Bad", "prompt": "x", "color": "red",
+            "name": "Bad", "prompt": "x", "color": "red",
         }));
         assert_eq!(
             Value::Object(errors),
@@ -1490,7 +1500,7 @@ mod tests {
         ];
         for (input, expected) in cases {
             let result = validate_create_body(&json!({
-                "slug": "s", "name": "n", "prompt": "p", "color": input,
+                "name": "n", "prompt": "p", "color": input,
             }));
             match expected {
                 Ok(color) => {
@@ -1498,7 +1508,7 @@ mod tests {
                 }
                 Err(message) => {
                     let errors = errors_for(json!({
-                        "slug": "s", "name": "n", "prompt": "p", "color": input,
+                        "name": "n", "prompt": "p", "color": input,
                     }));
                     assert_eq!(errors["color"], json!([message]), "color {input:?}");
                     assert!(result.is_err());
@@ -1524,7 +1534,7 @@ mod tests {
         ];
         for value in truthy {
             let write = validate_create_body(&json!({
-                "slug": "s", "name": "n", "prompt": "p", "is_enabled": value,
+                "name": "n", "prompt": "p", "is_enabled": value,
             }))
             .expect("truthy coerces");
             assert!(write.is_enabled, "is_enabled {value}");
@@ -1542,7 +1552,7 @@ mod tests {
         ];
         for value in falsy {
             let write = validate_create_body(&json!({
-                "slug": "s", "name": "n", "prompt": "p", "is_enabled": value,
+                "name": "n", "prompt": "p", "is_enabled": value,
             }))
             .expect("falsy coerces");
             assert!(!write.is_enabled, "is_enabled {value}");
@@ -1556,7 +1566,7 @@ mod tests {
             json!({}),
         ] {
             let errors = errors_for(json!({
-                "slug": "s", "name": "n", "prompt": "p", "is_enabled": value,
+                "name": "n", "prompt": "p", "is_enabled": value,
             }));
             assert_eq!(
                 errors["is_enabled"],
@@ -1568,18 +1578,18 @@ mod tests {
 
     #[test]
     fn create_scalar_coercion_matches_charfield() {
-        let write = validate_create_body(&json!({"slug": 5, "name": "n", "prompt": "p"}))
-            .expect("int coerces");
-        assert_eq!(write.slug, "5");
-        let write = validate_create_body(&json!({"slug": "s", "name": 5.5, "prompt": "p"}))
-            .expect("float coerces");
-        assert_eq!(write.name, "5.5");
+        let write = validate_create_body(&json!({"name": 5, "prompt": "p"})).expect("int coerces");
+        assert_eq!((write.name.as_str(), write.slug.as_str()), ("5", "5"));
+        let write =
+            validate_create_body(&json!({"name": 5.5, "prompt": "p"})).expect("float coerces");
+        assert_eq!((write.name.as_str(), write.slug.as_str()), ("5.5", "5-5"));
         for (field, value) in [
-            ("slug", json!(true)),
-            ("slug", json!([1])),
+            ("name", json!(true)),
+            ("name", json!([1])),
             ("name", json!({"a": 1})),
+            ("prompt", json!(true)),
         ] {
-            let errors = errors_for(json!({"slug": "s", "name": "n", "prompt": "p", field: value}));
+            let errors = errors_for(json!({"name": "n", "prompt": "p", field: value}));
             assert_eq!(
                 errors[field],
                 json!(["Not a valid string."]),
@@ -1590,16 +1600,14 @@ mod tests {
 
     #[test]
     fn create_nul_rejected_after_max_length() {
-        let errors = errors_for(json!({
-            "slug": "a\0b", "name": "n", "prompt": "p",
-        }));
-        assert_eq!(errors["slug"], json!(["Null characters are not allowed."]));
-        let long_nul = "s".repeat(70) + "\0";
-        let errors = errors_for(json!({"slug": long_nul, "name": "n", "prompt": "p"}));
+        let errors = errors_for(json!({"name": "a\0b", "prompt": "p"}));
+        assert_eq!(errors["name"], json!(["Null characters are not allowed."]));
+        let long_nul = "s".repeat(260) + "\0";
+        let errors = errors_for(json!({"name": long_nul, "prompt": "p"}));
         assert_eq!(
-            errors["slug"],
+            errors["name"],
             json!([
-                "Ensure this field has no more than 64 characters.",
+                "Ensure this field has no more than 255 characters.",
                 "Null characters are not allowed."
             ])
         );
@@ -1608,7 +1616,7 @@ mod tests {
     #[test]
     fn create_read_only_and_unknown_keys_ignored() {
         let write = validate_create_body(&json!({
-            "slug": "s",
+            "slug": "client-slug",
             "name": "n",
             "prompt": "p",
             "id": "00000000-0000-0000-0000-000000000000",
@@ -1620,7 +1628,10 @@ mod tests {
             "unknown_key": [1, 2, 3],
         }))
         .expect("read-only + unknown keys ignored");
-        assert_eq!(write.slug, "s");
+        assert_eq!(
+            write.slug, "n",
+            "a body slug is ignored; the name derives it"
+        );
         assert_eq!(write.color, "#3b82f6");
         assert!(write.is_enabled);
     }
@@ -1658,7 +1669,7 @@ mod tests {
             "name": 5,
         }));
         let keys: Vec<&String> = errors.keys().collect();
-        assert_eq!(keys, vec!["slug", "prompt", "color", "is_enabled"]);
+        assert_eq!(keys, vec!["prompt", "color", "is_enabled"]);
     }
 
     /// Single-field error serialization equals the mandated
@@ -1666,7 +1677,7 @@ mod tests {
     #[test]
     fn single_field_errors_match_shape_builder() {
         let errors = errors_for(json!({
-            "slug": "bad", "name": "Bad", "prompt": "x", "color": "red",
+            "name": "Bad", "prompt": "x", "color": "red",
         }));
         let rendered = serde_json::to_string(&Value::Object(errors)).expect("errors JSON");
         assert_eq!(
@@ -1678,53 +1689,76 @@ mod tests {
         );
     }
 
-    // -- R7 slug uniqueness ---------------------------------------------------
+    // -- Slug derivation + duplicate names (PDASHOSS01-319) ---------------
 
-    /// The lone conflict body is wire-exact (captured from `origin/main`)
-    /// and equals the mandated [`shape::field_error_body`] output.
     #[test]
-    fn slug_conflict_body_is_wire_exact() {
+    fn create_derives_slug_from_name() {
+        for (name, slug) in [
+            ("Nightly Bug Scan", "nightly-bug-scan"),
+            ("  PR  review!!", "pr-review"),
+            ("BUG_SCAN", "bug-scan"),
+        ] {
+            let write = validate_create_body(&json!({"name": name, "prompt": "p"}))
+                .expect("create validates");
+            assert_eq!(write.slug, slug, "name {name:?}");
+        }
+    }
+
+    #[test]
+    fn name_without_letter_or_digit_is_a_name_error() {
+        for name in ["!!!", "日本語", "--", "🚀"] {
+            let errors = errors_for(json!({"name": name, "prompt": "p"}));
+            assert_eq!(
+                Value::Object(errors),
+                json!({"name": ["Name must contain at least one letter or digit."]}),
+                "name {name:?}"
+            );
+        }
+        // Blank still answers DRF's blank error first.
+        let errors = errors_for(json!({"name": "   ", "prompt": "p"}));
+        assert_eq!(errors["name"], json!(["This field may not be blank."]));
+    }
+
+    /// The lone conflict body is wire-exact and equals the mandated
+    /// [`shape::field_error_body`] output.
+    #[test]
+    fn name_conflict_body_is_wire_exact() {
         let rendered =
-            serde_json::to_string(&slug_conflict_body(Map::new())).expect("conflict JSON");
+            serde_json::to_string(&name_conflict_body(Map::new())).expect("conflict JSON");
         assert_eq!(
             rendered,
-            r#"{"slug":["This slug is already in use in this workspace."]}"#
+            r#"{"name":["A scheduler with the same name already exists in this workspace."]}"#
         );
         assert_eq!(
             rendered,
-            shape::field_error_body("slug", shape::SLUG_UNIQUE_ERROR)
+            shape::field_error_body("name", shape::DUPLICATE_NAME_ERROR)
         );
     }
 
-    /// A conflict merges ahead of other field errors: slug is declared
-    /// first, so DRF lists it first (`{"slug": [...], "name": [...]}`).
+    /// A conflict merges ahead of other field errors: name is the first
+    /// writable field, so DRF lists it first.
     #[test]
-    fn slug_conflict_merges_ahead_of_other_errors() {
-        let prior = errors_for(json!({"slug": "dup", "prompt": "x"}));
-        assert_eq!(
-            prior.keys().collect::<Vec<_>>(),
-            vec!["name"],
-            "only name fails; slug reached R7"
-        );
-        let merged = slug_conflict_body(prior);
-        let keys: Vec<&String> = merged.as_object().expect("object").keys().collect();
-        assert_eq!(keys, vec!["slug", "name"]);
+    fn name_conflict_merges_ahead_of_other_errors() {
+        let prior = errors_for(json!({"name": "Dup", "color": "red"}));
+        assert_eq!(prior.keys().collect::<Vec<_>>(), vec!["prompt", "color"]);
+        let merged = name_conflict_body(prior);
         assert_eq!(
             serde_json::to_string(&merged).expect("merged JSON"),
-            r#"{"slug":["This slug is already in use in this workspace."],"name":["This field is required."]}"#
+            r#"{"name":["A scheduler with the same name already exists in this workspace."],"prompt":["This field is required."],"color":["color must be a 7-character hex string like '#3b82f6'"]}"#
         );
     }
 
-    /// Every F36-10 `duplicate_slug` body (create + PATCH) equals the
+    /// Every F36-10 `duplicate_name` body (create + PATCH) equals the
     /// conflict body, byte for byte.
     #[test]
-    fn duplicate_slug_bodies_match_f36_10() {
+    fn duplicate_name_bodies_match_f36_10() {
         let fixture = fixture_json(FIXTURE_SCHEDULER_IO);
         let actions = fixture["actions"].as_array().expect("actions array");
-        let expected = slug_conflict_body(Map::new());
+        let expected = name_conflict_body(Map::new());
         let mut checked = 0;
         for action in actions {
-            if let Some(duplicate) = action.get("duplicate_slug") {
+            assert!(action.get("duplicate_slug").is_none());
+            if let Some(duplicate) = action.get("duplicate_name") {
                 assert_eq!(duplicate["body"], expected);
                 assert_eq!(duplicate["status"], 400);
                 checked += 1;
@@ -1733,21 +1767,56 @@ mod tests {
         assert_eq!(checked, 2, "create + PATCH duplicate bodies");
     }
 
-    /// `validate_slug`'s input set: present and `CharField`-valid slugs
-    /// only (stripped, coerced); everything else skips the check.
+    /// `validate_name`'s EXISTS input: present, `CharField`-valid names
+    /// with a non-empty derived slug only; everything else skips it.
     #[test]
-    fn candidate_slug_matches_validate_slug_inputs() {
+    fn candidate_name_slug_matches_validate_name_inputs() {
         assert_eq!(
-            candidate_slug(&json!({"slug": "  dup  "})),
-            Some("dup".to_owned())
+            candidate_name_slug(&json!({"name": "  Bug Scan  "})),
+            Some("bug-scan".to_owned())
         );
-        assert_eq!(candidate_slug(&json!({"slug": 5})), Some("5".to_owned()));
-        assert_eq!(candidate_slug(&json!({"name": "x"})), None);
-        assert_eq!(candidate_slug(&json!({"slug": "   "})), None);
-        assert_eq!(candidate_slug(&json!({"slug": Value::Null})), None);
-        assert_eq!(candidate_slug(&json!({"slug": ["x"]})), None);
-        assert_eq!(candidate_slug(&json!("dup")), None);
-        assert_eq!(candidate_slug(&json!(null)), None);
+        assert_eq!(
+            candidate_name_slug(&json!({"name": 5})),
+            Some("5".to_owned())
+        );
+        assert_eq!(candidate_name_slug(&json!({"slug": "x"})), None);
+        assert_eq!(candidate_name_slug(&json!({"name": "   "})), None);
+        assert_eq!(candidate_name_slug(&json!({"name": "!!!"})), None);
+        assert_eq!(candidate_name_slug(&json!({"name": Value::Null})), None);
+        assert_eq!(candidate_name_slug(&json!({"name": ["x"]})), None);
+        assert_eq!(candidate_name_slug(&json!({"name": "n".repeat(256)})), None);
+        assert_eq!(candidate_name_slug(&json!("dup")), None);
+        assert_eq!(candidate_name_slug(&json!(null)), None);
+    }
+
+    #[test]
+    fn patch_rename_rederives_slug_of_user_row() {
+        let write = validate_patch_body(&json!({"name": "Weekly Review"}), &sample_row())
+            .expect("rename validates");
+        assert_eq!(write.slug, "weekly-review");
+    }
+
+    #[test]
+    fn patch_without_name_keeps_slug() {
+        let write =
+            validate_patch_body(&json!({"slug": "ignored", "prompt": "new"}), &sample_row())
+                .expect("patch validates");
+        assert_eq!(write.slug, "nightly");
+    }
+
+    #[test]
+    fn patch_rename_keeps_builtin_slug() {
+        for builtin in BUILTINS {
+            let row = SchedulerRow {
+                slug: builtin.slug.to_owned(),
+                name: builtin.name.to_owned(),
+                ..sample_row()
+            };
+            let write = validate_patch_body(&json!({"name": "Weekly Sec Sweep"}), &row)
+                .expect("rename validates");
+            assert_eq!(write.name, "Weekly Sec Sweep");
+            assert_eq!(write.slug, builtin.slug, "built-in keeps its slug");
+        }
     }
 
     // -- PATCH validation -----------------------------------------------------
@@ -1762,7 +1831,7 @@ mod tests {
         assert_eq!(
             write,
             SchedulerWrite {
-                slug: "nightly".to_owned(),
+                slug: "renamed".to_owned(),
                 name: "Renamed".to_owned(),
                 description: "d".to_owned(),
                 prompt: "Scan.".to_owned(),
