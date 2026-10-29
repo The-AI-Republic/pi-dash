@@ -12,7 +12,13 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { getAppClient } from "../../../core/api/client.js";
 import { notifyError } from "../../../shared/shell/index.js";
 import { issueKeys } from "../api/keys.js";
-import { writeEntityPrefs, type IssuesEntity, type PrefsRecord } from "../prefs/entities.js";
+import {
+  applyPrefsPatch,
+  mergePrefsResponse,
+  writeEntityPrefs,
+  type IssuesEntity,
+  type PrefsRecord,
+} from "../prefs/entities.js";
 import { entityPrefsKeyPart, prefsQueryOptions } from "../prefs/prefsQuery.js";
 
 /** One entity's collapsed group keys (list and board share them). */
@@ -67,11 +73,18 @@ export function useToggleCollapsedGroup(workspaceSlug: string, entity: IssuesEnt
       const record = await queryClient.fetchQuery(prefsQueryOptions(getAppClient(), workspaceSlug, entity));
       const next = toggleCollapsed(readCollapsedGroups(record.filters), axis, key);
       const filters = withCollapsedFilters(record.filters, next);
-      queryClient.setQueryData<PrefsRecord>(prefsKey, { ...record, filters });
+      // Key-scoped updater writes (NEWFRONT-1013): the optimistic, success
+      // and rollback writes each touch only the filters key, so an
+      // interleaved display or rich-filter write survives them.
+      queryClient.setQueryData<PrefsRecord>(prefsKey, (current) => applyPrefsPatch(current, record, { filters }));
       try {
-        return await writeEntityPrefs(getAppClient(), workspaceSlug, entity, { filters });
+        const response = await writeEntityPrefs(getAppClient(), workspaceSlug, entity, { filters });
+        queryClient.setQueryData<PrefsRecord>(prefsKey, (current) =>
+          mergePrefsResponse(current, response, ["filters"])
+        );
+        return response;
       } catch (error) {
-        queryClient.setQueryData(prefsKey, record);
+        queryClient.setQueryData<PrefsRecord>(prefsKey, (current) => mergePrefsResponse(current, record, ["filters"]));
         notifyError(COLLAPSE_FAILED_TITLE, COLLAPSE_FAILED_BODY);
         throw error;
       }
