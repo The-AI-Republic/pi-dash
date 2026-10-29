@@ -184,3 +184,73 @@ def test_issue_list_order_by_view_annotations_sort(anon_client, world, seeder, d
         body = response.json()
         assert [row["name"] for row in body["results"]] == names, order_by
         assert body["count"] == 7, order_by
+
+
+def test_issue_list_order_by_desc_nullable_keys_nulls_last(anon_client, world, seeder, db):
+    """PIDASHCONV-1643: nullable DESC keys sort NULLs last on both backends.
+
+    The issue alleged Rust renders ``NULLS LAST`` while Django's plain
+    ``order_by`` in ``order_queryset.py:49-57`` leaves the Postgres default
+    (``DESC`` -> ``NULLS FIRST``). Live Django disproves it: the paginator
+    re-orders with explicit ``nulls_last=True`` in both directions
+    (``OffsetPaginator.get_result``, ``paginator.py:136-139``, and the
+    grouped variants at ``:253-265`` / ``:461-470``), superseding the
+    ``order_issue_queryset`` ordering — so both backends sort NULLs last
+    on ``-start_date``, ``-target_date`` and ``-cycle_id``, ungrouped and
+    grouped. This test pins that agreed row order.
+    """
+    ws_id = world["workspace"]["id"]
+    proj_id = world["project"]["id"]
+    state_id = world["state"]["id"]
+    cycle = seeder.create_cycle(ws_id, proj_id, world["owner"]["id"], name="Nulls cycle")
+
+    def stamp(issue_id, start, target, minutes_ago):
+        db.execute(
+            "UPDATE issues SET start_date = %s, target_date = %s,"
+            " created_at = now() - make_interval(mins => %s) WHERE id = %s",
+            (start, target, minutes_ago, issue_id),
+        )
+
+    def add_issue(name, start, target, minutes_ago, link_cycle=False):
+        issue = seeder.create_issue(ws_id, proj_id, state_id, name=name)
+        stamp(issue["id"], start, target, minutes_ago)
+        if link_cycle:
+            db.execute(
+                """INSERT INTO cycle_issues
+                   (id, workspace_id, project_id, cycle_id, issue_id, created_at, updated_at)
+                   VALUES (gen_random_uuid(),%s,%s,%s,%s,now(),now())""",
+                (ws_id, proj_id, cycle["id"], issue["id"]),
+            )
+        return issue["id"]
+
+    # Dated rows sort among themselves; the two NULL rows expose the
+    # placement (NULLS LAST both directions, `-created_at` within).
+    stamp(world["issue"]["id"], "2026-03-15", "2026-04-15", 100)
+    add_issue("nulls-A", None, None, 300)
+    add_issue("nulls-B", None, None, 20)
+    add_issue("nulls-old", "2026-01-10", "2026-02-10", 200)
+    add_issue("nulls-new", "2026-06-01", "2026-07-01", 10, link_cycle=True)
+
+    nulls_by_created = ["nulls-B", "Contract issue", "nulls-old", "nulls-A"]
+    expected = {
+        "-start_date": ["nulls-new", "Contract issue", "nulls-old", "nulls-B", "nulls-A"],
+        "start_date": ["nulls-old", "Contract issue", "nulls-new", "nulls-B", "nulls-A"],
+        "-target_date": ["nulls-new", "Contract issue", "nulls-old", "nulls-B", "nulls-A"],
+        "-cycle_id": ["nulls-new", *nulls_by_created],
+        "cycle_id": ["nulls-new", *nulls_by_created],
+    }
+
+    for order_by, names in expected.items():
+        response = anon_client.get(_issues_url(world), params={"order_by": order_by})
+        assert response.status_code == 200, (order_by, response.text)
+        body = response.json()
+        assert [row["name"] for row in body["results"]] == names, order_by
+        assert body["count"] == 5, order_by
+
+    # Grouped path: the window/outer orderings carry the same placement.
+    response = anon_client.get(
+        _issues_url(world), params={"order_by": "-start_date", "group_by": "priority"}
+    )
+    assert response.status_code == 200, response.text
+    grouped = response.json()["results"]["none"]["results"]
+    assert [row["name"] for row in grouped] == expected["-start_date"]
