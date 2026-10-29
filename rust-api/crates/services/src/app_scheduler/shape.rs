@@ -11,9 +11,9 @@
 //!   query itself lives in the queries layer; this module resolves
 //!   annotated vs counted), and color validation via `_validate_color`
 //!   (`:37-43`).
-//! - `SchedulerBindingSerializer` (`:114-268`): the 25-field list, the
-//!   read-only set (11 Meta entries plus the 3 declared read-only derived
-//!   fields = 14 effective), the derived reads (`scheduler_slug/name/color`,
+//! - `SchedulerBindingSerializer` (`:114-268`): the 26-field list, the
+//!   read-only set (12 Meta entries plus the 3 declared read-only derived
+//!   fields = 15 effective), the derived reads (`scheduler_slug/name/color`,
 //!   `last_run_status`, `last_run_ended_at`, `pod_name`), and every
 //!   validator: `validate_rrule` (`:181-198`), `validate_rdates/exdates`
 //!   via `_validate_iso_datetime_list` (`:46-71`), `validate_tzid`
@@ -21,7 +21,7 @@
 //!   `validate` (`:225-268`: scheduler/project lock, rrule+dtstart
 //!   re-check, pod-must-belong-to-project).
 //! - `SchedulerBindingDetailSerializer` (`:292-331`, `474123e5`): the
-//!   29-field list (25 + `resolved_prompt`, `run_count`,
+//!   30-field list (26 + `resolved_prompt`, `run_count`,
 //!   `scheduler_source`, `scheduler_is_enabled`), the 18-key effective
 //!   read-only set, and `get_resolved_prompt` composed through the
 //!   prompting layer's `build_scheduler_task_body` +
@@ -130,6 +130,7 @@ pub const BINDING_SERIALIZER_FIELDS: &[&str] = &[
     "last_run_status",
     "last_run_ended_at",
     "last_error",
+    "series_exhausted",
     "actor",
     "created_at",
     "updated_at",
@@ -145,6 +146,7 @@ pub const BINDING_META_READ_ONLY_FIELDS: &[&str] = &[
     "last_run_status",
     "last_run_ended_at",
     "last_error",
+    "series_exhausted",
     "actor",
     "created_at",
     "updated_at",
@@ -153,12 +155,12 @@ pub const BINDING_META_READ_ONLY_FIELDS: &[&str] = &[
 /// Derived fields declared `read_only=True` on the field itself
 /// (`scheduler.py:115-117`): `scheduler_slug`, `scheduler_name`,
 /// `scheduler_color`. Together with [`BINDING_META_READ_ONLY_FIELDS`]
-/// these form the effective 14-key read-only set (verified by
+/// these form the effective 15-key read-only set (verified by
 /// introspection; see F36-02 `read_only_note`).
 pub const BINDING_DECLARED_READ_ONLY_FIELDS: &[&str] =
     &["scheduler_slug", "scheduler_name", "scheduler_color"];
 
-/// The effective binding read-only set (14 keys): the Meta list first,
+/// The effective binding read-only set (15 keys): the Meta list first,
 /// then the 3 declared derived fields. Handlers use this for membership
 /// (keys sent by the client are silently ignored).
 pub fn binding_read_only_fields() -> Vec<&'static str> {
@@ -168,7 +170,7 @@ pub fn binding_read_only_fields() -> Vec<&'static str> {
 }
 
 /// `SchedulerBindingDetailSerializer.Meta.fields` (drift port of
-/// `474123e5`, `app/serializers/scheduler.py:292-331`): the 25 list
+/// `474123e5`, `app/serializers/scheduler.py:292-331`): the 26 list
 /// fields plus the 4 detail-only reads, appended in Meta order
 /// (`SchedulerBindingSerializer.Meta.fields + [...]`). Served by the
 /// binding GET detail and the PATCH response — never by list/install.
@@ -195,6 +197,7 @@ pub const BINDING_DETAIL_FIELDS: &[&str] = &[
     "last_run_status",
     "last_run_ended_at",
     "last_error",
+    "series_exhausted",
     "actor",
     "created_at",
     "updated_at",
@@ -212,7 +215,7 @@ pub const BINDING_DETAIL_EXTRA_READ_ONLY_FIELDS: &[&str] = &[
     "scheduler_is_enabled",
 ];
 
-/// The effective detail read-only set (18 keys): the base 14 plus the
+/// The effective detail read-only set (19 keys): the base 15 plus the
 /// 4 detail extras. Pinned here as the shape oracle; handlers ignore
 /// these keys structurally (only known writable fields are read, so
 /// read-only and unknown keys sent by the client are silently ignored).
@@ -1528,22 +1531,22 @@ mod tests {
     fn binding_fields_match_f36_02_in_order() {
         let parsed = golden(F36_02);
         let expected = str_list(&parsed["fields"]);
-        assert_eq!(BINDING_SERIALIZER_FIELDS.len(), 25);
+        assert_eq!(BINDING_SERIALIZER_FIELDS.len(), 26);
         assert_eq!(BINDING_SERIALIZER_FIELDS, expected.as_slice());
     }
 
     #[test]
-    fn binding_effective_read_only_is_14() {
+    fn binding_effective_read_only_is_15() {
         let parsed = golden(F36_02);
-        // The golden's `read_only_fields` is the *effective* 14-key set
+        // The golden's `read_only_fields` is the *effective* 15-key set
         // (fields order); the port keeps the two sources separate (the 11
         // Meta entries plus the 3 declared derived fields) and unions them.
         let golden_effective = str_list(&parsed["read_only_fields"]);
-        assert_eq!(golden_effective.len(), 14);
-        assert_eq!(BINDING_META_READ_ONLY_FIELDS.len(), 11);
+        assert_eq!(golden_effective.len(), 15);
+        assert_eq!(BINDING_META_READ_ONLY_FIELDS.len(), 12);
         assert_eq!(BINDING_DECLARED_READ_ONLY_FIELDS.len(), 3);
         let mut effective = binding_read_only_fields();
-        assert_eq!(effective.len(), 14);
+        assert_eq!(effective.len(), 15);
         effective.sort_unstable();
         let mut golden_sorted = golden_effective;
         golden_sorted.sort_unstable();
@@ -1552,7 +1555,7 @@ mod tests {
         for key in &effective {
             assert!(BINDING_SERIALIZER_FIELDS.contains(key));
         }
-        // The render example carries exactly the 25 keys.
+        // The render example carries exactly the 26 keys.
         let mut rendered: Vec<&str> = parsed["render_example"]
             .as_object()
             .expect("golden carries render_example")
@@ -1569,24 +1572,24 @@ mod tests {
     fn detail_fields_match_golden_in_order() {
         let parsed = golden(F36_02);
         let expected = str_list(&parsed["detail_fields"]);
-        assert_eq!(expected.len(), 29);
-        assert_eq!(BINDING_DETAIL_FIELDS.len(), 29);
+        assert_eq!(expected.len(), 30);
+        assert_eq!(BINDING_DETAIL_FIELDS.len(), 30);
         assert_eq!(BINDING_DETAIL_FIELDS, expected.as_slice());
-        // The 25 list fields first, in list order, then the 4 extras.
-        assert_eq!(&BINDING_DETAIL_FIELDS[..25], BINDING_SERIALIZER_FIELDS);
+        // The 26 list fields first, in list order, then the 4 extras.
+        assert_eq!(&BINDING_DETAIL_FIELDS[..26], BINDING_SERIALIZER_FIELDS);
         assert_eq!(
-            &BINDING_DETAIL_FIELDS[25..],
+            &BINDING_DETAIL_FIELDS[26..],
             BINDING_DETAIL_EXTRA_READ_ONLY_FIELDS
         );
     }
 
     #[test]
-    fn detail_effective_read_only_is_18() {
+    fn detail_effective_read_only_is_19() {
         let parsed = golden(F36_02);
         let golden_effective = str_list(&parsed["detail_read_only_fields"]);
-        assert_eq!(golden_effective.len(), 18);
+        assert_eq!(golden_effective.len(), 19);
         let mut effective = binding_detail_read_only_fields();
-        assert_eq!(effective.len(), 18);
+        assert_eq!(effective.len(), 19);
         effective.sort_unstable();
         let mut golden_sorted = golden_effective;
         golden_sorted.sort_unstable();

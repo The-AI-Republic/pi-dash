@@ -593,11 +593,22 @@ pub fn install_next_run_at_decision(
     computed.filter(|next| Some(*next) != stored)
 }
 
-/// Patch write decision (`:272`): write the computed value back via BR6
-/// whenever it is non-null — WITHOUT comparing to stored (ported quirk
-/// 6: the install/patch asymmetry is intentional).
-pub fn patch_next_run_at_decision(computed: Option<DateTime<Utc>>) -> Option<DateTime<Utc>> {
-    computed
+/// Patch write decision (`:272-283`, `_next_fire_for_binding_checked`):
+/// `Some(value)` means write `value` (possibly NULL) via BR6, `None`
+/// means no write. A clean parse writes whenever the computed value
+/// differs from the refreshed stored one — INCLUDING a NULL: an edit that
+/// made the series finite and already over must clear the stale cursor,
+/// or the scanner would fire a rule past its end. A parse error (the
+/// serializer validated the bundle, so unreachable in practice) leaves
+/// `next_run_at` untouched.
+pub fn patch_next_run_at_decision(
+    computed: Result<Option<DateTime<Utc>>, String>,
+    stored: Option<DateTime<Utc>>,
+) -> Option<Option<DateTime<Utc>>> {
+    match computed {
+        Ok(next) if next != stored => Some(next),
+        _ => None,
+    }
 }
 
 /// Install recompute (`:216-220`): expand `bundle` through the injected
@@ -622,18 +633,24 @@ pub fn install_next_run_at(
     install_next_run_at_decision(computed, stored)
 }
 
-/// Patch recompute (`:269-274`): expand `bundle` through the injected
-/// closure, then apply [`patch_next_run_at_decision`]. The handler
-/// calls this only after [`patch_triggers_recompute`] passed AND the
-/// row was refreshed from the DB (`:270`), and writes the result via
-/// BR6 (also updating its in-memory row, which the 200 re-renders).
+/// Patch recompute (`:269-283`): expand `bundle` through the injected
+/// checked closure (`_next_fire_for_binding_checked`: parse error vs
+/// exhausted series), then apply [`patch_next_run_at_decision`] against
+/// the refreshed `stored` cursor. The handler calls this only after
+/// [`patch_triggers_recompute`] passed AND the row was refreshed from the
+/// DB (`:270`), and writes the result via BR6 (also updating its
+/// in-memory row, which the 200 re-renders).
 pub fn patch_next_run_at(
     bundle: &RruleBundle<'_>,
+    stored: Option<DateTime<Utc>>,
     now: DateTime<Utc>,
-    next_fire_for_binding: impl Fn(&RruleBundle<'_>, DateTime<Utc>) -> Option<DateTime<Utc>>,
-) -> Option<DateTime<Utc>> {
-    let computed = next_fire_for_binding(bundle, now);
-    patch_next_run_at_decision(computed)
+    next_fire_for_binding_checked: impl Fn(
+        &RruleBundle<'_>,
+        DateTime<Utc>,
+    ) -> Result<Option<DateTime<Utc>>, String>,
+) -> Option<Option<DateTime<Utc>>> {
+    let computed = next_fire_for_binding_checked(bundle, now);
+    patch_next_run_at_decision(computed, stored)
 }
 
 #[cfg(test)]
@@ -1203,9 +1220,28 @@ mod tests {
         assert_eq!(install_next_run_at_decision(Some(t1), Some(t1)), None);
         assert_eq!(install_next_run_at_decision(None, None), None);
         assert_eq!(install_next_run_at_decision(None, Some(t1)), None);
-        // Patch (:272): non-null, no comparison — even when identical.
-        assert_eq!(patch_next_run_at_decision(Some(t1)), Some(t1));
-        assert_eq!(patch_next_run_at_decision(None), None);
+        // Patch (:272-283): a clean parse writes whatever differs from
+        // stored — including NULL (a finished series clears the stale
+        // cursor); identical values and parse errors write nothing.
+        assert_eq!(
+            patch_next_run_at_decision(Ok(Some(t2)), Some(t1)),
+            Some(Some(t2))
+        );
+        assert_eq!(
+            patch_next_run_at_decision(Ok(Some(t1)), None),
+            Some(Some(t1))
+        );
+        assert_eq!(patch_next_run_at_decision(Ok(Some(t1)), Some(t1)), None);
+        assert_eq!(patch_next_run_at_decision(Ok(None), Some(t1)), Some(None));
+        assert_eq!(patch_next_run_at_decision(Ok(None), None), None);
+        assert_eq!(
+            patch_next_run_at_decision(Err("bad".to_owned()), Some(t1)),
+            None
+        );
+        assert_eq!(
+            patch_next_run_at_decision(Err("bad".to_owned()), None),
+            None
+        );
     }
 
     #[test]
@@ -1232,10 +1268,17 @@ mod tests {
         // Install applies the differs-from-stored rule.
         let out = install_next_run_at(&bundle, Some(fire), now, |_, _| Some(fire));
         assert_eq!(out, None);
-        // Patch applies the non-null rule (no comparison).
-        let out = patch_next_run_at(&bundle, now, |_, _| Some(fire));
-        assert_eq!(out, Some(fire));
-        let out = patch_next_run_at(&bundle, now, |_, _| None);
+        // Patch applies the differs-from-stored rule over the checked
+        // closure (NULL included).
+        let out = patch_next_run_at(&bundle, None, now, |got, got_now| {
+            assert_eq!(*got, bundle);
+            assert_eq!(got_now, now);
+            Ok(Some(fire))
+        });
+        assert_eq!(out, Some(Some(fire)));
+        let out = patch_next_run_at(&bundle, Some(fire), now, |_, _| Ok(None));
+        assert_eq!(out, Some(None));
+        let out = patch_next_run_at(&bundle, Some(fire), now, |_, _| Err("bad".to_owned()));
         assert_eq!(out, None);
     }
 
