@@ -1864,12 +1864,14 @@ async fn bind_transaction(
     )
     .await?;
     if current_repo_url != canonical_url {
-        sqlx::query("UPDATE projects SET repo_url = $1 WHERE id = $2")
-            .bind(canonical_url)
-            .bind(project_id)
-            .execute(&mut **tx)
-            .await
-            .map_err(txn_error)?;
+        pidash_services::domain::projects::stamp_text_field(
+            &mut **tx,
+            pidash_services::domain::projects::ProjectTextField::RepoUrl,
+            canonical_url,
+            *project_id,
+        )
+        .await
+        .map_err(txn_error)?;
     }
     Ok(sync_id)
 }

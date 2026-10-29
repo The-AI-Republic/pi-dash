@@ -2458,23 +2458,19 @@ async fn save_preference(
             columns.push((key, PreferenceValue::Flag(flag)));
         }
     }
-    let mut sql = String::from(
-        "UPDATE \"user_notification_preferences\" SET \"updated_at\" = $2, \"updated_by_id\" = $3",
-    );
-    for (index, (column, _)) in columns.iter().enumerate() {
-        sql.push_str(&format!(", \"{column}\" = ${}", index + 4));
-    }
-    sql.push_str(" WHERE \"id\" = $1");
-    let mut query = sqlx::query(&sql).bind(id).bind(now).bind(user_id);
-    for (_, value) in columns {
-        query = match value {
-            PreferenceValue::Stamp(stamp) => query.bind(stamp),
-            PreferenceValue::Id(owner) => query.bind(owner),
-            PreferenceValue::Flag(flag) => query.bind(flag),
-        };
-    }
-    query
-        .execute(pool)
+    use pidash_services::domain::identity::PreferenceColumn;
+    let mapped: Vec<(&str, PreferenceColumn)> = columns
+        .into_iter()
+        .map(|(column, value)| {
+            let mapped = match value {
+                PreferenceValue::Stamp(stamp) => PreferenceColumn::Stamp(stamp),
+                PreferenceValue::Id(owner) => PreferenceColumn::Id(owner),
+                PreferenceValue::Flag(flag) => PreferenceColumn::Flag(flag),
+            };
+            (column, mapped)
+        })
+        .collect();
+    pidash_services::domain::identity::save_preference_columns(pool, *id, *now, *user_id, &mapped)
         .await
         .map(|_| ())
         .map_err(|_| Denial::ServerError.into_response())

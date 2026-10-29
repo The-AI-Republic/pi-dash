@@ -608,19 +608,9 @@ async fn user_entity_save(
                 &user_save::new_user_token(),
                 now,
             );
-            sqlx::query(
-                r#"UPDATE "users" SET "avatar" = $1, "avatar_asset_id" = $2, "email" = $3, "display_name" = $4, "is_staff" = $5, "token" = $6, "token_updated_at" = $7, "updated_at" = $8 WHERE "id" = $9"#,
+            pidash_services::domain::identity::link_avatar_asset(
+                pool, *owner_id, *asset_id, &write, now,
             )
-            .bind("")
-            .bind(asset_id)
-            .bind(&write.email)
-            .bind(&write.display_name)
-            .bind(write.is_staff)
-            .bind(&write.token)
-            .bind(write.token_updated_at)
-            .bind(now)
-            .bind(owner_id)
-            .execute(pool)
             .await
             .map_err(|_| server_error())?;
             Ok(())
@@ -657,18 +647,9 @@ async fn user_entity_save(
                 &user_save::new_user_token(),
                 now,
             );
-            sqlx::query(
-                r#"UPDATE "users" SET "cover_image" = NULL, "cover_image_asset_id" = $1, "email" = $2, "display_name" = $3, "is_staff" = $4, "token" = $5, "token_updated_at" = $6, "updated_at" = $7 WHERE "id" = $8"#,
+            pidash_services::domain::identity::link_cover_asset(
+                pool, *owner_id, *asset_id, &write, now,
             )
-            .bind(asset_id)
-            .bind(&write.email)
-            .bind(&write.display_name)
-            .bind(write.is_staff)
-            .bind(&write.token)
-            .bind(write.token_updated_at)
-            .bind(now)
-            .bind(owner_id)
-            .execute(pool)
             .await
             .map_err(|_| server_error())?;
             Ok(())
@@ -713,19 +694,9 @@ async fn user_entity_delete(
                 &user_save::new_user_token(),
                 now,
             );
-            sqlx::query(
-                r#"UPDATE "users" SET "avatar_asset_id" = NULL, "email" = $1, "display_name" = $2, "is_staff" = $3, "token" = $4, "token_updated_at" = $5, "updated_at" = $6 WHERE "id" = $7"#,
-            )
-            .bind(&write.email)
-            .bind(&write.display_name)
-            .bind(write.is_staff)
-            .bind(&write.token)
-            .bind(write.token_updated_at)
-            .bind(now)
-            .bind(owner_id)
-            .execute(pool)
-            .await
-            .map_err(|_| server_error())?;
+            pidash_services::domain::identity::unlink_avatar_asset(pool, *owner_id, &write, now)
+                .await
+                .map_err(|_| server_error())?;
             Ok(())
         }
         q::UserDeleteAction::ClearCover => {
@@ -753,19 +724,9 @@ async fn user_entity_delete(
                 &user_save::new_user_token(),
                 now,
             );
-            sqlx::query(
-                r#"UPDATE "users" SET "cover_image_asset_id" = NULL, "email" = $1, "display_name" = $2, "is_staff" = $3, "token" = $4, "token_updated_at" = $5, "updated_at" = $6 WHERE "id" = $7"#,
-            )
-            .bind(&write.email)
-            .bind(&write.display_name)
-            .bind(write.is_staff)
-            .bind(&write.token)
-            .bind(write.token_updated_at)
-            .bind(now)
-            .bind(owner_id)
-            .execute(pool)
-            .await
-            .map_err(|_| server_error())?;
+            pidash_services::domain::identity::unlink_cover_asset(pool, *owner_id, &write, now)
+                .await
+                .map_err(|_| server_error())?;
             Ok(())
         }
         q::UserDeleteAction::Noop => Ok(()),
@@ -806,15 +767,13 @@ async fn workspace_entity_save(
                     .await
                     .map_err(|_| server_error())?;
             }
-            sqlx::query(
-                r#"UPDATE "workspaces" SET "logo" = $1, "logo_asset_id" = $2, "updated_at" = $3, "updated_by_id" = $4 WHERE "id" = $5"#,
+            pidash_services::domain::workspaces::stamp_logo(
+                pool,
+                workspace_id,
+                *asset_id,
+                now,
+                actor_id,
             )
-            .bind("")
-            .bind(asset_id)
-            .bind(now)
-            .bind(actor_id)
-            .bind(workspace_id)
-            .execute(pool)
             .await
             .map_err(|_| server_error())?;
             Ok(())
@@ -836,15 +795,9 @@ async fn workspace_entity_save(
                     .await
                     .map_err(|_| server_error())?;
             }
-            sqlx::query(
-                r#"UPDATE "projects" SET "cover_image" = $1, "cover_image_asset_id" = $2, "updated_at" = $3, "updated_by_id" = $4 WHERE "id" = $5"#,
+            pidash_services::domain::projects::stamp_cover_image(
+                pool, project_id, *asset_id, now, actor_id,
             )
-            .bind("")
-            .bind(asset_id)
-            .bind(now)
-            .bind(actor_id)
-            .bind(project_id)
-            .execute(pool)
             .await
             .map_err(|_| server_error())?;
             Ok(())
@@ -883,15 +836,14 @@ async fn workspace_entity_delete(
             .await
             .map_err(|_| server_error())?;
             row.ok_or_else(does_not_exist)?;
-            sqlx::query(
-                r#"UPDATE "workspaces" SET "logo_asset_id" = NULL, "updated_at" = $1, "updated_by_id" = $2 WHERE "id" = $3"#,
+            pidash_services::domain::workspaces::clear_logo_asset(
+                pool,
+                workspace_id,
+                now,
+                actor_id,
             )
-            .bind(now)
-            .bind(actor_id)
-            .bind(workspace_id)
-                .execute(pool)
-                .await
-                .map_err(|_| server_error())?;
+            .await
+            .map_err(|_| server_error())?;
             Ok(())
         }
         q::WorkspaceDeleteAction::ClearCover => {
@@ -906,15 +858,11 @@ async fn workspace_entity_delete(
             .await
             .map_err(|_| server_error())?;
             let Some(_) = row else { return Ok(()) };
-            sqlx::query(
-                r#"UPDATE "projects" SET "cover_image_asset_id" = NULL, "updated_at" = $1, "updated_by_id" = $2 WHERE "id" = $3"#,
+            pidash_services::domain::projects::clear_cover_image_asset(
+                pool, project_id, now, actor_id,
             )
-            .bind(now)
-            .bind(actor_id)
-            .bind(project_id)
-                .execute(pool)
-                .await
-                .map_err(|_| server_error())?;
+            .await
+            .map_err(|_| server_error())?;
             Ok(())
         }
         q::WorkspaceDeleteAction::Noop => Ok(()),

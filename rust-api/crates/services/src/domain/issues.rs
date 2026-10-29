@@ -2184,6 +2184,40 @@ where
 const TICKER_STATE_UPDATE_SQL: &str =
     "UPDATE issues SET state_id = $1, updated_at = $2 WHERE id = $3";
 
+/// The estimate-point delete reassignment
+/// (`EstimatePointEndpoint.destroy`, `estimate/base.py:185-247`): on
+/// the `new_estimate_id` branch, the whole live queryset for the old
+/// point moves to the new one — inside the per-issue activity loop
+/// (the first emit precedes the update; after the first iteration
+/// nothing matches but the emits continue). No `updated_at` touch:
+/// a plain queryset `.update()`. The activity fan-out stays
+/// caller-enqueued, as today.
+pub async fn reassign_estimate_point<'e, E>(
+    ex: E,
+    new_point_id: Uuid,
+    project_id: Uuid,
+    slug: &str,
+    old_point_id: Uuid,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(REASSIGN_ESTIMATE_POINT_SQL)
+        .bind(new_point_id)
+        .bind(project_id)
+        .bind(slug)
+        .bind(old_point_id)
+        .execute(ex)
+        .await
+        .map(|_| ())
+}
+
+const REASSIGN_ESTIMATE_POINT_SQL: &str = "UPDATE issues SET estimate_point_id = $1 WHERE id IN (
+                     SELECT i.id FROM issues i JOIN workspaces w ON w.id = i.workspace_id
+                     WHERE i.deleted_at IS NULL AND i.project_id = $2 AND w.slug = $3
+                       AND i.estimate_point_id = $4
+                   )";
+
 /// The automation bulk writes (`bulk_update(..., batch_size=100)`):
 /// `["archived_at"]` (`issue_automation_task.py:69`) and `["state"]`
 /// (`:132`) — a single column each, no `updated_at` touch (`bulk_update`
@@ -2901,6 +2935,10 @@ mod tests {
         assert_eq!(
             BULK_CLOSE_SQL,
             "UPDATE issues SET state_id = $1 WHERE id = ANY($2)"
+        );
+        assert_eq!(
+            REASSIGN_ESTIMATE_POINT_SQL,
+            "UPDATE issues SET estimate_point_id = $1 WHERE id IN (\n                     SELECT i.id FROM issues i JOIN workspaces w ON w.id = i.workspace_id\n                     WHERE i.deleted_at IS NULL AND i.project_id = $2 AND w.slug = $3\n                       AND i.estimate_point_id = $4\n                   )"
         );
     }
 
