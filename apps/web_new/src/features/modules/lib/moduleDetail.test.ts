@@ -78,24 +78,28 @@ describe("moduleReadOutcome (MOD-038)", () => {
   }
 
   it("shows the content for a resolved live module", () => {
-    expect(moduleReadOutcome({ error: null, archivedAt: null, isAdmin: false })).toEqual({ kind: "content" });
+    expect(moduleReadOutcome({ error: null, archivedAt: null, isAdmin: false, isPending: false })).toEqual({
+      kind: "content",
+    });
   });
 
   it("calls an archived record served on the live address a miss", () => {
-    expect(moduleReadOutcome({ error: null, archivedAt: "2026-03-01T00:00:00Z", isAdmin: false })).toEqual({
+    expect(
+      moduleReadOutcome({ error: null, archivedAt: "2026-03-01T00:00:00Z", isAdmin: false, isPending: false })
+    ).toEqual({
       kind: "missing",
     });
   });
 
   it("calls a 404 a miss", () => {
-    expect(moduleReadOutcome({ error: statusError(404), archivedAt: null, isAdmin: true })).toEqual({
+    expect(moduleReadOutcome({ error: statusError(404), archivedAt: null, isAdmin: true, isPending: false })).toEqual({
       kind: "missing",
     });
   });
 
   it("sends a 409 to the join wall whatever the reader's standing", () => {
     for (const isAdmin of [false, true]) {
-      expect(moduleReadOutcome({ error: statusError(409), archivedAt: null, isAdmin })).toEqual({
+      expect(moduleReadOutcome({ error: statusError(409), archivedAt: null, isAdmin, isPending: false })).toEqual({
         kind: "wall",
         wall: "join",
       });
@@ -103,25 +107,45 @@ describe("moduleReadOutcome (MOD-038)", () => {
   });
 
   it("offers a workspace admin the join wall on a private project (403)", () => {
-    expect(moduleReadOutcome({ error: statusError(403), archivedAt: null, isAdmin: true })).toEqual({
+    expect(moduleReadOutcome({ error: statusError(403), archivedAt: null, isAdmin: true, isPending: false })).toEqual({
       kind: "wall",
       wall: "join",
     });
   });
 
   it("shows a refused non-admin the no-access wall, never the missing state", () => {
-    expect(moduleReadOutcome({ error: statusError(403), archivedAt: null, isAdmin: false })).toEqual({
+    expect(moduleReadOutcome({ error: statusError(403), archivedAt: null, isAdmin: false, isPending: false })).toEqual({
       kind: "wall",
       wall: "no-access",
     });
   });
 
-  it("keeps pending reads and transient failures on the content path", () => {
-    expect(moduleReadOutcome({ error: null, archivedAt: undefined, isAdmin: false })).toEqual({ kind: "content" });
-    expect(moduleReadOutcome({ error: new Error("network"), archivedAt: null, isAdmin: false })).toEqual({
+  it("holds the page while the read is pending, whatever the cache still shows (NEWFRONT-1026)", () => {
+    // A remount of an errored query refetches: the state is pending with
+    // error null, so the gate must hold instead of rendering the page.
+    expect(moduleReadOutcome({ error: null, archivedAt: undefined, isAdmin: false, isPending: true })).toEqual({
+      kind: "pending",
+    });
+    // A refetch of a previously failed key carries the old error while it
+    // is in flight; the outcome still holds rather than re-deciding early.
+    expect(moduleReadOutcome({ error: statusError(404), archivedAt: null, isAdmin: false, isPending: true })).toEqual({
+      kind: "pending",
+    });
+  });
+
+  it("lets a settled archived record win over a stale pending flag", () => {
+    expect(
+      moduleReadOutcome({ error: null, archivedAt: "2026-03-01T00:00:00Z", isAdmin: false, isPending: true })
+    ).toEqual({ kind: "missing" });
+  });
+
+  it("keeps transient failures on the content path", () => {
+    expect(
+      moduleReadOutcome({ error: new Error("network"), archivedAt: null, isAdmin: false, isPending: false })
+    ).toEqual({
       kind: "content",
     });
-    expect(moduleReadOutcome({ error: statusError(500), archivedAt: null, isAdmin: false })).toEqual({
+    expect(moduleReadOutcome({ error: statusError(500), archivedAt: null, isAdmin: false, isPending: false })).toEqual({
       kind: "content",
     });
   });
