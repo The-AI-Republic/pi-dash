@@ -47266,132 +47266,313 @@ export class WebNewDriver implements ParityDriver {
   }
 
   // --- Spaces auth (NEWFRONT-452, SPC-058..064). ---
-  async spaceAuthOpenLanding(_params?: { email?: string; errorCode?: string; nextPath?: string }): Promise<void> {
-    return todo("spaceAuthOpenLanding");
+  private spaceAuthCardScope(): Locator {
+    return this.page.getByTestId("space-auth-card");
+  }
+
+  private spaceAuthEmailForm(): Locator {
+    return this.page.getByTestId("space-auth-email-form");
+  }
+
+  private spaceAuthSubmitOf(form: Locator): Locator {
+    return form.locator('button[type="submit"]');
+  }
+
+  private async spaceAuthNativeSubmit(form: Locator): Promise<void> {
+    const page = this.page;
+    await Promise.all([
+      page.waitForLoadState("domcontentloaded", { timeout: WebNewDriver.WAIT_MS }).catch(() => {}),
+      this.spaceAuthSubmitOf(form).click(),
+    ]);
+  }
+
+  private async spaceAuthFormAlert(form: Locator): Promise<string | null> {
+    const alert = form.getByRole("alert").first();
+    if ((await alert.count()) === 0) return null;
+    if (!(await alert.isVisible().catch(() => false))) return null;
+    const text = ((await alert.innerText().catch(() => "")) ?? "").trim();
+    return text === "" ? null : text;
+  }
+
+  async spaceAuthOpenLanding(params?: { email?: string; errorCode?: string; nextPath?: string }): Promise<void> {
+    const query = new URLSearchParams();
+    if (params?.email !== undefined) query.set("email", params.email);
+    if (params?.errorCode !== undefined) query.set("error_code", params.errorCode);
+    if (params?.nextPath !== undefined) query.set("next_path", params.nextPath);
+    const suffix = query.size > 0 ? `?${query.toString()}` : "";
+    await this.page.goto(`/spaces/${suffix}`, { waitUntil: "domcontentloaded" });
+    // Boot retry (mirrors the base driver's awaitAppBoot, NEWFRONT-124):
+    // on noisy hosts the dev server's module fetches abort and the app
+    // never boots, and a transient probe failure lands on the instance
+    // failure screen instead; both recover with a hard reload, so poll
+    // for either settled state and reload when neither (or the failure)
+    // shows. A healthy load pays only the first poll.
+    const landing = this.page.getByTestId("space-landing");
+    const card = this.page.getByTestId("space-auth-card");
+    const guidance = this.page.getByTestId("space-landing-guidance");
+    const failure = this.page.getByTestId("space-instance-failure");
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const deadline = Date.now() + 15_000;
+      for (;;) {
+        // The loader carries the landing marker with neither the card
+        // nor the guidance mounted; returning on it lets polls converge
+        // on the empty page, so only a settled state counts (SPC-062).
+        if (await card.isVisible().catch(() => false)) return;
+        if (await guidance.isVisible().catch(() => false)) return;
+        const failed = await failure.isVisible().catch(() => false);
+        if (failed || Date.now() >= deadline) break;
+        await this.page.waitForTimeout(250);
+      }
+      await this.page.reload({ waitUntil: "domcontentloaded" });
+    }
+    await landing.waitFor({ timeout: 5_000 });
   }
 
   async spaceAuthStep(): Promise<"email" | "password" | "code" | "signed-in" | "unknown"> {
-    return todo("spaceAuthStep");
+    const page = this.page;
+    const guidance = page.getByTestId("space-landing-guidance").first();
+    if ((await guidance.count()) > 0 && (await guidance.isVisible().catch(() => false))) return "signed-in";
+    const card = this.spaceAuthCardScope().first();
+    if ((await card.count()) === 0) return "unknown";
+    if (!(await card.isVisible().catch(() => false))) return "unknown";
+    const step = await card.getAttribute("data-step").catch(() => null);
+    return step === "email" || step === "password" || step === "code" ? step : "unknown";
   }
 
   async spaceAuthMode(): Promise<"sign-in" | "sign-up" | null> {
-    return todo("spaceAuthMode");
+    const card = this.spaceAuthCardScope().first();
+    if ((await card.count()) === 0) return null;
+    const mode = await card.getAttribute("data-mode").catch(() => null);
+    return mode === "sign-in" || mode === "sign-up" ? mode : null;
   }
 
-  async spaceAuthFillEmail(_email: string): Promise<void> {
-    return todo("spaceAuthFillEmail");
+  async spaceAuthFillEmail(email: string): Promise<void> {
+    await this.spaceAuthEmailForm().locator('input[name="email"]').fill(email);
   }
 
-  async spaceAuthSubmitEmail(_email: string): Promise<void> {
-    return todo("spaceAuthSubmitEmail");
+  async spaceAuthSubmitEmail(email: string): Promise<void> {
+    const page = this.page;
+    await this.spaceAuthFillEmail(email);
+    const form = this.spaceAuthEmailForm();
+    const submit = this.spaceAuthSubmitOf(form);
+    // Implausible addresses disable the submit; blurring surfaces the
+    // inline validation instead of round-tripping to the server.
+    if (!(await submit.isEnabled().catch(() => false))) {
+      await form.locator('input[name="email"]').press("Tab");
+      return;
+    }
+    await Promise.all([
+      page.waitForResponse(/\/auth\/spaces\/email-check\//, { timeout: WebNewDriver.WAIT_MS }),
+      submit.click(),
+    ]);
   }
 
   async spaceAuthBlurEmail(): Promise<void> {
-    return todo("spaceAuthBlurEmail");
+    await this.spaceAuthEmailForm().locator('input[name="email"]').press("Tab");
   }
 
   async spaceAuthEmailError(): Promise<string | null> {
-    return todo("spaceAuthEmailError");
+    return this.spaceAuthFormAlert(this.spaceAuthEmailForm());
   }
 
   async spaceAuthEmailSubmitEnabled(): Promise<boolean> {
-    return todo("spaceAuthEmailSubmitEnabled");
+    return this.spaceAuthSubmitOf(this.spaceAuthEmailForm())
+      .isEnabled()
+      .catch(() => false);
   }
 
   async spaceAuthBanner(): Promise<string | null> {
-    return todo("spaceAuthBanner");
+    const banner = this.page.getByTestId("space-auth-banner").first();
+    if ((await banner.count()) === 0) return null;
+    if (!(await banner.isVisible().catch(() => false))) return null;
+    const text = ((await banner.innerText().catch(() => "")) ?? "").trim();
+    return text === "" ? null : text;
   }
 
   async spaceAuthDismissBanner(): Promise<void> {
-    return todo("spaceAuthDismissBanner");
+    const banner = this.page.getByTestId("space-auth-banner").first();
+    if ((await banner.count()) === 0) return;
+    await banner.getByRole("button", { name: "Dismiss" }).click();
   }
 
   async spaceAuthClearEmail(): Promise<void> {
-    return todo("spaceAuthClearEmail");
+    await this.spaceAuthCardScope().getByRole("button", { name: "Clear email" }).first().click();
+    await this.spaceAuthEmailForm().locator('input[name="email"]').waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
-  async spaceAuthFillPassword(_password: string, _confirmPassword?: string): Promise<void> {
-    return todo("spaceAuthFillPassword");
+  private spaceAuthPasswordForm(): Locator {
+    return this.page.getByTestId("space-auth-password-form");
   }
 
-  async spaceAuthSubmitPassword(_password: string, _confirmPassword?: string): Promise<void> {
-    return todo("spaceAuthSubmitPassword");
+  async spaceAuthFillPassword(password: string, confirmPassword?: string): Promise<void> {
+    const form = this.spaceAuthPasswordForm();
+    await form.locator('input[name="password"]').fill(password);
+    if (confirmPassword !== undefined) {
+      await form.locator('input[name="confirm_password"]').fill(confirmPassword);
+    }
+  }
+
+  async spaceAuthSubmitPassword(password: string, confirmPassword?: string): Promise<void> {
+    const form = this.spaceAuthPasswordForm();
+    await form.locator('input[name="password"]').fill(password);
+    if (confirmPassword !== undefined) {
+      await form.locator('input[name="confirm_password"]').fill(confirmPassword);
+    }
+    await this.spaceAuthNativeSubmit(form);
   }
 
   async spaceAuthPasswordSubmitEnabled(): Promise<boolean> {
-    return todo("spaceAuthPasswordSubmitEnabled");
+    return this.spaceAuthSubmitOf(this.spaceAuthPasswordForm())
+      .isEnabled()
+      .catch(() => false);
   }
 
-  async spaceAuthTogglePasswordVisibility(_field: "password" | "confirm"): Promise<void> {
-    return todo("spaceAuthTogglePasswordVisibility");
+  async spaceAuthTogglePasswordVisibility(field: "password" | "confirm"): Promise<void> {
+    const name = field === "password" ? /^(Show|Hide) password$/ : /^(Show|Hide) confirmation$/;
+    await this.spaceAuthPasswordForm().getByRole("button", { name }).click();
   }
 
   async spaceAuthPasswordFieldTypes(): Promise<{ password: string | null; confirm: string | null }> {
-    return todo("spaceAuthPasswordFieldTypes");
+    const form = this.spaceAuthPasswordForm();
+    const password = form.locator('input[name="password"]').first();
+    const confirm = form.locator('input[name="confirm_password"]').first();
+    return {
+      password: (await password.count()) === 0 ? null : await password.getAttribute("type"),
+      confirm: (await confirm.count()) === 0 ? null : await confirm.getAttribute("type"),
+    };
   }
 
   async spaceAuthStrengthMeterVisible(): Promise<boolean> {
-    return todo("spaceAuthStrengthMeterVisible");
+    const meter = this.page.getByTestId("space-auth-strength").first();
+    if ((await meter.count()) === 0) return false;
+    return meter.isVisible().catch(() => false);
   }
 
   async spaceAuthStrengthMessage(): Promise<string | null> {
-    return todo("spaceAuthStrengthMessage");
+    const meter = this.page.getByTestId("space-auth-strength").first();
+    if ((await meter.count()) === 0) return null;
+    if (!(await meter.isVisible().catch(() => false))) return null;
+    const text = (
+      (await meter
+        .locator("p")
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+    return text === "" ? null : text;
   }
 
   async spaceAuthPasswordMismatchError(): Promise<string | null> {
-    return todo("spaceAuthPasswordMismatchError");
+    return this.spaceAuthFormAlert(this.spaceAuthPasswordForm());
   }
 
   async spaceAuthPasswordPrimaryLabel(): Promise<string | null> {
-    return todo("spaceAuthPasswordPrimaryLabel");
+    const submit = this.spaceAuthSubmitOf(this.spaceAuthPasswordForm()).first();
+    if ((await submit.count()) === 0) return null;
+    const label = ((await submit.innerText().catch(() => "")) ?? "").trim();
+    return label === "" ? null : label;
+  }
+
+  private spaceAuthCodeForm(): Locator {
+    return this.page.getByTestId("space-auth-code-form");
   }
 
   async spaceAuthSeesSwitchToCode(): Promise<boolean> {
-    return todo("spaceAuthSeesSwitchToCode");
+    const button = this.spaceAuthPasswordForm().getByRole("button", { name: "Use a login code instead" }).first();
+    if ((await button.count()) === 0) return false;
+    return button.isVisible().catch(() => false);
   }
 
   async spaceAuthSwitchToCode(): Promise<void> {
-    return todo("spaceAuthSwitchToCode");
+    await this.spaceAuthPasswordForm().getByRole("button", { name: "Use a login code instead" }).click();
+    await this.spaceAuthCodeForm().locator('input[name="code"]').waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async spaceAuthSeesConfirmPassword(): Promise<boolean> {
-    return todo("spaceAuthSeesConfirmPassword");
+    return (await this.spaceAuthPasswordForm().locator('input[name="confirm_password"]').count()) > 0;
   }
 
-  async spaceAuthSubmitCode(_code: string): Promise<void> {
-    return todo("spaceAuthSubmitCode");
+  async spaceAuthSubmitCode(code: string): Promise<void> {
+    const form = this.spaceAuthCodeForm();
+    await form.locator('input[name="code"]').fill(code);
+    // The code form binds its CSRF token at render from a fetch racing
+    // the test: submitting before it resolves posts token-less and the
+    // server answers the verification-failed page instead of running the
+    // form, so wait for the token first.
+    const csrfField = form.locator('input[name="csrfmiddlewaretoken"]');
+    await expect.poll(() => csrfField.inputValue(), { timeout: WebNewDriver.WAIT_MS }).not.toBe("");
+    await this.spaceAuthNativeSubmit(form);
   }
 
   async spaceAuthCodeResendState(): Promise<{ disabled: boolean; label: string | null }> {
-    return todo("spaceAuthCodeResendState");
+    const resend = this.page.getByTestId("space-auth-resend").first();
+    if ((await resend.count()) === 0) return { disabled: true, label: null };
+    const label = ((await resend.innerText().catch(() => "")) ?? "").trim();
+    return { disabled: !(await resend.isEnabled().catch(() => false)), label: label === "" ? null : label };
   }
 
   async spaceAuthClickResendCode(): Promise<void> {
-    return todo("spaceAuthClickResendCode");
+    await this.page.getByTestId("space-auth-resend").click();
   }
 
   async spaceAuthProviderButtons(): Promise<string[]> {
-    return todo("spaceAuthProviderButtons");
+    const names: Record<string, string> = { google: "Google", github: "GitHub", gitlab: "GitLab", gitea: "Gitea" };
+    const anchors = this.spaceAuthCardScope().locator("a[data-provider]");
+    const ids = await anchors.evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-provider") ?? ""));
+    return ids.map((id) => names[id] ?? id);
   }
 
   async spaceAuthProvidersCompact(): Promise<boolean> {
-    return todo("spaceAuthProvidersCompact");
+    // Compact buttons are monogram anchors carrying the invitation as
+    // their accessible name; full buttons render the invitation as text.
+    return (await this.spaceAuthCardScope().locator("a[data-provider][aria-label]").count()) > 0;
   }
 
   async spaceAuthProvidersDividerVisible(): Promise<boolean> {
-    return todo("spaceAuthProvidersDividerVisible");
+    const divider = this.page.getByTestId("space-auth-providers-divider").first();
+    if ((await divider.count()) === 0) return false;
+    return divider.isVisible().catch(() => false);
   }
 
-  async spaceAuthClickProvider(_name: string): Promise<void> {
-    return todo("spaceAuthClickProvider");
+  async spaceAuthClickProvider(name: string): Promise<void> {
+    await this.spaceAuthCardScope().locator(`a[data-provider="${name.toLowerCase()}"]`).click();
   }
 
   async spaceAuthHeader(): Promise<{ heading: string | null; subline: string | null }> {
-    return todo("spaceAuthHeader");
+    const header = this.page.getByTestId("space-auth-header").first();
+    if ((await header.count()) === 0) return { heading: null, subline: null };
+    const heading = (
+      (await header
+        .locator("h1")
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+    const subline = (
+      (await header
+        .locator("p")
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+    return { heading: heading === "" ? null : heading, subline: subline === "" ? null : subline };
   }
 
   async spaceAuthConsent(): Promise<{ text: string | null; termsHref: string | null; privacyHref: string | null }> {
-    return todo("spaceAuthConsent");
+    const consent = this.page.getByTestId("space-auth-consent").first();
+    if ((await consent.count()) === 0) return { text: null, termsHref: null, privacyHref: null };
+    const text = ((await consent.innerText().catch(() => "")) ?? "").trim();
+    const termsHref = await consent
+      .getByRole("link", { name: "Terms of Service" })
+      .first()
+      .getAttribute("href")
+      .catch(() => null);
+    const privacyHref = await consent
+      .getByRole("link", { name: "Privacy Policy" })
+      .first()
+      .getAttribute("href")
+      .catch(() => null);
+    return { text: text === "" ? null : text, termsHref, privacyHref };
   }
 
   // --- Space filters + peek shell (NEWFRONT-450, SPC-034–046).
@@ -48169,56 +48350,195 @@ export class WebNewDriver implements ParityDriver {
     return this.isShown(this.page.getByTestId("space-peek-reaction-add"));
   }
 
+  /** Thread rows in the open overlay. */
+  private spaceNewCommentRows(): Locator {
+    return this.spacePeekDialog().getByTestId("space-comment-row");
+  }
+
+  /** The composer's editing surface. */
+  private spaceNewComposerEditor(): Locator {
+    return this.page.getByTestId("space-comment-composer").locator('[contenteditable="true"]');
+  }
+
   async spaceCommentSection(): Promise<SpaceCommentSection> {
-    return todo("spaceCommentSection");
+    const section = this.spacePeekDialog().getByTestId("space-comments");
+    const sectionVisible = (await section.count()) > 0;
+    return {
+      sectionVisible,
+      threadCount: sectionVisible ? await this.spaceNewCommentRows().count() : 0,
+      composerVisible: sectionVisible && (await this.isShown(this.page.getByTestId("space-comment-composer"))),
+      signInInviteVisible: sectionVisible && (await this.isShown(section.getByTestId("space-comments-signin"))),
+    };
   }
 
   async spaceCommentRows(): Promise<SpaceCommentRow[]> {
-    return todo("spaceCommentRows");
+    let rows = await this.spaceNewReadCommentRows();
+    if (rows.length === 0) {
+      await this.page.waitForTimeout(1_000);
+      return this.spaceNewReadCommentRows();
+    }
+    const deadline = Date.now() + 30_000;
+    while (Date.now() < deadline) {
+      if (rows.length === 0 || rows.every((row) => row.folded || row.contentText.length > 0)) return rows;
+      await this.page.waitForTimeout(400);
+      rows = await this.spaceNewReadCommentRows();
+    }
+    return rows;
   }
 
-  async spaceCommentToggleFold(_index: number): Promise<void> {
-    return todo("spaceCommentToggleFold");
+  private async spaceNewReadCommentRows(): Promise<SpaceCommentRow[]> {
+    return this.spacePeekDialog()
+      .first()
+      .evaluate((root): SpaceCommentRow[] => {
+        const rows = Array.from(root.querySelectorAll('[data-testid="space-comment-row"]'));
+        return rows.map((row) => {
+          const author = row.querySelector('[data-testid="space-comment-author"]')?.textContent?.trim() ?? "";
+          const ageText = row.querySelector('[data-testid="space-comment-age"]')?.textContent?.trim() ?? "";
+          const foldToggle = row.querySelector('[data-testid="space-comment-fold"]');
+          const folded = foldToggle !== null;
+          const expanded = foldToggle?.getAttribute("aria-expanded") === "true";
+          const body = row.querySelector('[data-testid="space-comment-body"]');
+          const contentText = folded && !expanded ? "" : ((body as HTMLElement | null)?.innerText?.trim() ?? "");
+          const speakerRaw = row.querySelector('[data-testid="space-comment-speaker"]')?.textContent?.trim() ?? "";
+          const speakerLabel = speakerRaw.endsWith(":")
+            ? speakerRaw.slice(0, -1)
+            : speakerRaw === ""
+              ? null
+              : speakerRaw;
+          const avatarWrap = row.querySelector(":scope > div");
+          return {
+            author,
+            botMark: / Bot$/.test(author),
+            ageText,
+            contentText,
+            folded,
+            speakerLabel,
+            avatarKind: (avatarWrap?.querySelector("img") != null ? "image" : "initial") as "image" | "initial",
+            hasImage: body?.querySelector("img") != null,
+          };
+        });
+      });
   }
 
-  async spaceCommentType(_text: string): Promise<void> {
-    return todo("spaceCommentType");
+  async spaceCommentToggleFold(index: number): Promise<void> {
+    await this.spaceNewCommentRows().nth(index).getByTestId("space-comment-fold").click({ timeout: 15_000 });
   }
 
-  async spaceCommentPasteHtml(_html: string): Promise<void> {
-    return todo("spaceCommentPasteHtml");
+  async spaceCommentType(text: string): Promise<void> {
+    const composer = this.spaceNewComposerEditor();
+    await composer.click({ timeout: 30_000 });
+    await composer.fill(text, { timeout: 30_000 });
+  }
+
+  async spaceCommentPasteHtml(html: string): Promise<void> {
+    const page = this.page;
+    await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await page.evaluate(
+      ([fragment]: [string]) => {
+        const blobHtml = new Blob([fragment], { type: "text/html" });
+        const blobText = new Blob([fragment.replace(/<[^>]*>/g, "")], { type: "text/plain" });
+        return navigator.clipboard.write([new ClipboardItem({ "text/html": blobHtml, "text/plain": blobText })]);
+      },
+      [html]
+    );
+    const composer = this.spaceNewComposerEditor();
+    await composer.click({ timeout: 30_000 });
+    await composer.press(`${process.platform === "darwin" ? "Meta" : "Control"}+v`, { timeout: 30_000 });
   }
 
   async spaceCommentDraftText(): Promise<string> {
-    return todo("spaceCommentDraftText");
+    return (
+      (await this.spaceNewComposerEditor()
+        .innerText({ timeout: 30_000 })
+        .catch(() => "")) ?? ""
+    ).trim();
   }
 
   async spaceCommentSubmit(): Promise<void> {
-    return todo("spaceCommentSubmit");
+    // The editing surface owns plain Enter, so the submit button is the
+    // deterministic posting path; the write must land before returning
+    // since the scenarios read the thread right after. A refused post has
+    // no response (an aborted request never answers), only its notice —
+    // and the notice auto-dismisses — so settle on whichever lands first
+    // instead of idling past the notice's lifetime.
+    const before = await this.page.getByTestId("toast-notification").count();
+    const posted = this.page
+      .waitForResponse((response) => response.url().includes("/comments") && response.request().method() === "POST", {
+        timeout: WebNewDriver.WAIT_MS,
+      })
+      .catch(() => null);
+    const noticed = this.page
+      .waitForFunction(
+        (prior) => document.querySelectorAll('[data-testid="toast-notification"]').length > prior,
+        before,
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .catch(() => null);
+    await this.page.getByTestId("space-comment-composer-submit").click({ timeout: 30_000 });
+    await Promise.race([posted, noticed]);
   }
 
-  async spaceCommentAttachImage(_filePath: string): Promise<void> {
-    return todo("spaceCommentAttachImage");
+  async spaceCommentAttachImage(filePath: string): Promise<void> {
+    await this.page.getByTestId("space-comment-composer-image").setInputFiles(filePath, { timeout: 30_000 });
+    // The upload swaps from uploader chrome to a block with a resolved
+    // asset src; a preview-phase img (blob/data URL) does not count.
+    await this.page.waitForFunction(
+      () => {
+        const composer = document.querySelector('[data-testid="space-comment-composer"]');
+        if (!(composer instanceof HTMLElement)) return false;
+        return Array.from(composer.querySelectorAll("img")).some((img) => {
+          const src = img.getAttribute("src") ?? "";
+          return src.startsWith("/") || src.startsWith("http");
+        });
+      },
+      null,
+      { timeout: 120_000 }
+    );
   }
 
-  async spaceCommentMention(_memberQuery: string, _memberDisplayName: string): Promise<SpaceMentionResult> {
-    return todo("spaceCommentMention");
+  async spaceCommentMention(memberQuery: string, memberDisplayName: string): Promise<SpaceMentionResult> {
+    const composer = this.spaceNewComposerEditor();
+    await composer.click({ timeout: 30_000 });
+    await this.page.keyboard.type(`@${memberQuery}`, { delay: 60 });
+    await this.page.waitForTimeout(2_000);
+    const offered = await this.spaceCommentMentionOpen();
+    let inserted = false;
+    if (offered) {
+      const option = this.page.getByTestId("space-comment-mentions").getByText(memberDisplayName, { exact: true });
+      await option.click({ timeout: 15_000 });
+      inserted = (await this.spaceCommentDraftText()).includes(`@${memberDisplayName}`);
+    }
+    return { offered, inserted };
   }
 
   async spaceCommentMentionOpen(): Promise<boolean> {
-    return todo("spaceCommentMentionOpen");
+    return (await this.page.getByTestId("space-comment-mentions").count()) > 0;
   }
 
-  async spaceCommentMenuVisible(_index: number): Promise<boolean> {
-    return todo("spaceCommentMenuVisible");
+  async spaceCommentMenuVisible(index: number): Promise<boolean> {
+    return this.isShown(this.spaceNewCommentRows().nth(index).getByTestId("space-comment-menu"));
   }
 
-  async spaceCommentMenuOpen(_index: number): Promise<void> {
-    return todo("spaceCommentMenuOpen");
+  async spaceCommentMenuOpen(index: number): Promise<void> {
+    // A click on an already-open trigger toggles the menu shut, so close
+    // any open menu first: every open then starts from the same state.
+    const firstItem = this.page.getByRole("menuitem").first();
+    if (await firstItem.isVisible().catch(() => false)) {
+      await this.page.keyboard.press("Escape");
+      await firstItem.waitFor({ state: "hidden", timeout: 5_000 }).catch(() => {});
+    }
+    const trigger = this.spaceNewCommentRows().nth(index).getByTestId("space-comment-menu");
+    await trigger.click({ timeout: 15_000 });
+    await firstItem.waitFor({ timeout: 15_000 });
   }
 
-  async spaceCommentMenuItems(_index: number): Promise<string[]> {
-    return todo("spaceCommentMenuItems");
+  async spaceCommentMenuItems(index: number): Promise<string[]> {
+    await this.spaceCommentMenuOpen(index);
+    const items = this.page.getByRole("menuitem");
+    const count = await items.count();
+    const names: string[] = [];
+    for (let at = 0; at < count; at += 1) names.push(((await items.nth(at).innerText()) ?? "").trim());
+    return names;
   }
 
   async spaceCommentInviteReturn(): Promise<{
@@ -48226,39 +48546,135 @@ export class WebNewDriver implements ParityDriver {
     view: string | null;
     issueId: string | null;
   } | null> {
-    return todo("spaceCommentInviteReturn");
+    const invite = this.spacePeekDialog().getByTestId("space-comments-signin").first();
+    if ((await invite.count()) === 0) return null;
+    const href = await invite.getAttribute("href");
+    if (href === null) return null;
+    // The sign-in link keeps query punctuation literal, so peekId rides as
+    // its own outer param while the board view stays inside next_path.
+    const outer = new URL(href, this.page.url());
+    const issueId = outer.searchParams.get("peekId");
+    const nextPath = outer.searchParams.get("next_path");
+    if (nextPath === null) return { anchor: null, view: null, issueId };
+    const target = new URL(nextPath, outer.origin);
+    return {
+      anchor: /^\/issues\/([^/]+)\/?$/.exec(target.pathname)?.[1] ?? null,
+      view: target.searchParams.get("board"),
+      issueId,
+    };
   }
 
-  async spaceCommentEdit(_index: number, _newText: string): Promise<void> {
-    return todo("spaceCommentEdit");
+  async spaceCommentEdit(index: number, newText: string): Promise<void> {
+    const row = this.spaceNewCommentRows().nth(index);
+    await this.spaceCommentMenuOpen(index);
+    await this.page.getByRole("menuitem", { name: "Edit" }).click({ timeout: 15_000 });
+    const editor = row.locator('[contenteditable="true"]');
+    await editor.waitFor({ timeout: 15_000 });
+    await editor.fill(newText, { timeout: 30_000 });
+    await row.getByRole("button", { name: "Save comment" }).click({ timeout: 15_000 });
+    await this.page.getByTestId("space-comment-edit").waitFor({ state: "hidden", timeout: 30_000 });
   }
 
-  async spaceCommentDelete(_index: number): Promise<void> {
-    return todo("spaceCommentDelete");
+  async spaceCommentDelete(index: number): Promise<void> {
+    await this.spaceCommentMenuOpen(index);
+    // The scenarios read the server thread right after; the UI removes
+    // the row optimistically, so the delete write must land before
+    // returning or the server read races it (SPC-055).
+    const deleted = this.page
+      .waitForResponse((response) => response.url().includes("/comments") && response.request().method() === "DELETE", {
+        timeout: WebNewDriver.WAIT_MS,
+      })
+      .catch(() => null);
+    await this.page.getByRole("menuitem", { name: "Delete" }).click({ timeout: 15_000 });
+    await this.page
+      .getByRole("menuitem")
+      .first()
+      .waitFor({ state: "detached", timeout: 15_000 })
+      .catch(() => {});
+    await deleted;
   }
 
   async spaceCommentNotices(): Promise<SpaceCommentNotice[]> {
-    return todo("spaceCommentNotices");
+    const toasts = this.page.getByTestId("toast-notification");
+    const count = await toasts.count();
+    const notices: SpaceCommentNotice[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const toast = toasts.nth(index);
+      const message = ((await toast.innerText({ timeout: 30_000 }).catch(() => "")) ?? "").trim();
+      if (message.length === 0) continue;
+      const kindAttr = await toast.getAttribute("data-kind").catch(() => null);
+      const kind: SpaceCommentNotice["kind"] = kindAttr === "success" || kindAttr === "error" ? kindAttr : "unknown";
+      notices.push({ message, kind });
+    }
+    return notices;
   }
 
-  async spaceCommentReactions(_index: number): Promise<SpaceReactionGroup[]> {
-    return todo("spaceCommentReactions");
+  async spaceCommentReactions(index: number): Promise<SpaceReactionGroup[]> {
+    const row = this.spaceNewCommentRows().nth(index);
+    const pills = row.getByTestId("space-comment-reaction");
+    const count = await pills.count();
+    const groups: SpaceReactionGroup[] = [];
+    for (let i = 0; i < count; i++) {
+      const pill = pills.nth(i);
+      const emoji = (
+        (
+          (await pill
+            .locator('span[aria-hidden="true"]')
+            .first()
+            .innerText()
+            .catch(() => "")) ?? ""
+        ).trim() ?? ""
+      ).trim();
+      const countText =
+        (await pill
+          .locator(".tabular-nums")
+          .first()
+          .innerText()
+          .catch(() => "0")) ?? "0";
+      const mine = (await pill.getAttribute("aria-pressed").catch(() => null)) === "true";
+      groups.push({
+        emoji,
+        count: Number.parseInt(countText.trim() || "0", 10),
+        mine,
+        users: await this.spaceNewHoverNames(pill),
+      });
+    }
+    return groups;
   }
 
-  async spaceCommentReactPick(_index: number): Promise<SpacePickedEmoji> {
-    return todo("spaceCommentReactPick");
+  async spaceCommentReactPick(index: number): Promise<SpacePickedEmoji> {
+    const open = async () => {
+      await this.spaceNewCommentRows().nth(index).getByTestId("space-comment-reaction-add").click({ timeout: 15_000 });
+      await this.page.getByTestId("space-comment-reaction-add-option").first().waitFor({ timeout: 10_000 });
+    };
+    try {
+      await open();
+    } catch {
+      await open();
+    }
+    const entry = this.page.getByTestId("space-comment-reaction-add-option").first();
+    await entry.waitFor({ timeout: 60_000 });
+    const emoji = (((await entry.textContent()) ?? "").trim() ?? "").trim();
+    if (emoji === "") throw new Error("[parity] first picker entry carried no character.");
+    await entry.click({ force: true, timeout: 15_000 });
+    return { emoji, code: WebNewDriver.spaceNewEmojiCode(emoji) };
   }
 
-  async spaceCommentReactClick(_index: number, _emoji: string): Promise<void> {
-    return todo("spaceCommentReactClick");
+  async spaceCommentReactClick(index: number, emoji: string): Promise<void> {
+    await this.spaceNewCommentRows()
+      .nth(index)
+      .getByTestId("space-comment-reaction")
+      .filter({ hasText: emoji })
+      .first()
+      .click({ timeout: 15_000 });
   }
 
-  async spaceCommentReactAddVisible(_index: number): Promise<boolean> {
-    return todo("spaceCommentReactAddVisible");
+  async spaceCommentReactAddVisible(index: number): Promise<boolean> {
+    return this.isShown(this.spaceNewCommentRows().nth(index).getByTestId("space-comment-reaction-add"));
   }
 
-  async spaceCommentPeekMode(_mode: "side" | "modal" | "full"): Promise<void> {
-    return todo("spaceCommentPeekMode");
+  async spaceCommentPeekMode(mode: "side" | "modal" | "full"): Promise<void> {
+    await this.spacePeekSwitchMode(mode);
   }
 
   async spaceCommentOpenEmbed(anchor: string, issueName: string): Promise<void> {
@@ -48273,12 +48689,27 @@ export class WebNewDriver implements ParityDriver {
     const frame = this.page.frameLocator("iframe");
     const card = frame.getByText(issueName, { exact: true }).first();
     await card.waitFor({ timeout: 120_000 });
+    const listed = this.page
+      .waitForResponse((response) => response.url().includes("/comments") && response.request().method() === "GET", {
+        timeout: 60_000,
+      })
+      .catch(() => null);
     await card.click({ timeout: WebNewDriver.WAIT_MS });
     await frame.getByTestId("space-peek").first().waitFor({ state: "visible", timeout: 60_000 });
+    await listed;
   }
 
   async spaceCommentEmbedSection(): Promise<SpaceCommentSection> {
-    return todo("spaceCommentEmbedSection");
+    const frame = this.page.frameLocator("iframe");
+    const section = frame.getByTestId("space-comments");
+    const sectionVisible = (await section.count()) > 0;
+    const visible = async (locator: Locator): Promise<boolean> => locator.isVisible().catch(() => false);
+    return {
+      sectionVisible,
+      threadCount: sectionVisible ? await frame.getByTestId("space-comment-row").count() : 0,
+      composerVisible: sectionVisible && (await visible(frame.getByTestId("space-comment-composer"))),
+      signInInviteVisible: sectionVisible && (await visible(section.getByTestId("space-comments-signin"))),
+    };
   }
 
   async spaceReactEmbedAddVisible(): Promise<boolean> {
@@ -48289,12 +48720,51 @@ export class WebNewDriver implements ParityDriver {
       .catch(() => false);
   }
 
-  async spaceCommentEmbedMenuVisible(_index: number): Promise<boolean> {
-    return todo("spaceCommentEmbedMenuVisible");
+  async spaceCommentEmbedMenuVisible(index: number): Promise<boolean> {
+    const frame = this.page.frameLocator("iframe");
+    return frame
+      .getByTestId("space-comment-row")
+      .nth(index)
+      .getByTestId("space-comment-menu")
+      .isVisible()
+      .catch(() => false);
   }
 
-  async spaceCommentEmbedReactions(_index: number): Promise<{ groups: SpaceReactionGroup[]; addVisible: boolean }> {
-    return todo("spaceCommentEmbedReactions");
+  async spaceCommentEmbedReactions(index: number): Promise<{ groups: SpaceReactionGroup[]; addVisible: boolean }> {
+    // Framed pills are inert counts: no hover attribution is read (the
+    // tooltip would render inside the frame document anyway).
+    const frame = this.page.frameLocator("iframe");
+    const row = frame.getByTestId("space-comment-row").nth(index);
+    const pills = row.getByTestId("space-comment-reaction");
+    const count = await pills.count();
+    const groups: SpaceReactionGroup[] = [];
+    for (let i = 0; i < count; i++) {
+      const pill = pills.nth(i);
+      const emoji = (
+        (
+          (await pill
+            .locator('span[aria-hidden="true"]')
+            .first()
+            .innerText()
+            .catch(() => "")) ?? ""
+        ).trim() ?? ""
+      ).trim();
+      const countText =
+        (await pill
+          .locator(".tabular-nums")
+          .first()
+          .innerText()
+          .catch(() => "0")) ?? "0";
+      const mine = (await pill.getAttribute("aria-pressed").catch(() => null)) === "true";
+      groups.push({ emoji, count: Number.parseInt(countText.trim() || "0", 10), mine, users: [] });
+    }
+    return {
+      groups,
+      addVisible: await row
+        .getByTestId("space-comment-reaction-add")
+        .isVisible()
+        .catch(() => false),
+    };
   }
 
   // --- Cloud marketing + public surface (NEWFRONT-645, CLOUD-001–005;

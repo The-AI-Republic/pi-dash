@@ -174,7 +174,14 @@ test(
       });
 
       await test.step("the invitation keeps the board but drops the issue and the view", async () => {
-        expect(await driver.spaceCommentInviteReturn()).toEqual({ anchor, view: null, issueId: null });
+        // Intended on web_new (bug NEWFRONT-465 fixed): the invitation
+        // carries the whole board position, view and issue included.
+        if (driver.target === "web_new") {
+          const issueId = await serverSpaceIssueIdByName(anchor, issueName);
+          expect(await driver.spaceCommentInviteReturn()).toEqual({ anchor, view: "kanban", issueId });
+        } else {
+          expect(await driver.spaceCommentInviteReturn()).toEqual({ anchor, view: null, issueId: null });
+        }
       });
     } finally {
       await restoreFlags(seed, before, admin);
@@ -853,6 +860,16 @@ test(
         const index = rows.findIndex((row) => row.contentText.includes(marker));
         expect(index).toBeGreaterThanOrEqual(0);
         await driver.spaceCommentEdit(index, attempted);
+        // Intended on web_new (bug NEWFRONT-467 fixed): a failed save
+        // reconciles the row back to the stored marker instead of leaving
+        // the attempted text on screen.
+        if (driver.target === "web_new") {
+          await expect.poll(bodies, { timeout: 30_000 }).toContain(marker);
+          await driver.page.waitForTimeout(10_000);
+          expect(await bodies()).toContain(marker);
+          expect(await bodies()).not.toContain(attempted);
+          return;
+        }
         await expect.poll(bodies, { timeout: 30_000 }).toContain(attempted);
         // Pinned: the phantom edit stays on screen (the display editor
         // keeps the attempted text even though the store re-listed).
@@ -913,9 +930,17 @@ test(
         expect(index).toBeGreaterThanOrEqual(0);
         // Pinned: the pill carries the count while the reactor names stay
         // empty (the view reads a nested actor the payload never sends).
-        expect(await driver.spaceCommentReactions(index)).toEqual([
-          { emoji: partyEmoji, count: 1, mine: false, users: [] },
-        ]);
+        // Intended on web_new (bug NEWFRONT-466 fixed): the pill names its
+        // reactor from the flat display name the payload sends.
+        if (driver.target === "web_new") {
+          expect(await driver.spaceCommentReactions(index)).toEqual([
+            { emoji: partyEmoji, count: 1, mine: false, users: [guestName] },
+          ]);
+        } else {
+          expect(await driver.spaceCommentReactions(index)).toEqual([
+            { emoji: partyEmoji, count: 1, mine: false, users: [] },
+          ]);
+        }
         expect(await driver.spaceCommentReactAddVisible(index)).toBe(true);
       });
     } finally {
@@ -1067,7 +1092,13 @@ test(
         const landing = await driver.spaceCommentAuthLanding();
         expect(landing.returnAnchor).toBe(anchor);
         expect(landing.returnIssueId).toBe(issueId);
-        expect(landing.returnView).toBeNull();
+        // Intended on web_new (bug NEWFRONT-465 fixed): the board view
+        // rides along to sign-in instead of being dropped.
+        if (driver.target === "web_new") {
+          expect(landing.returnView).toBe("kanban");
+        } else {
+          expect(landing.returnView).toBeNull();
+        }
       });
 
       await test.step("no reaction was stored", async () => {

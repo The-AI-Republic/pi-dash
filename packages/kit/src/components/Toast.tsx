@@ -53,11 +53,14 @@ export interface ShowToastOptions {
   actions?: readonly ToastAction[];
   /** Auto-dismiss delay in ms; 0 keeps the toast until dismissed. */
   timeout?: number;
+  /** Severity marker, exposed as data-kind for tests and styling hooks. */
+  kind?: "success" | "error" | "info" | undefined;
 }
 
 export function showToast(manager: ToastHostManager, options: ShowToastOptions): string {
   return manager.add<ToastActionData>({
     title: options.title,
+    ...(options.kind === undefined ? {} : { type: options.kind }),
     ...(options.description === undefined ? {} : { description: options.description }),
     ...(options.timeout === undefined ? {} : { timeout: options.timeout }),
     ...(options.actions === undefined ? {} : { data: { actions: options.actions } }),
@@ -106,6 +109,7 @@ function ToastCard({ toast, manager }: { toast: ToastItem; manager: ToastHostMan
     <BaseToast.Root
       toast={toast}
       data-testid="toast-notification"
+      {...(toast.type === undefined ? {} : { "data-kind": toast.type })}
       onKeyDown={(event) => {
         if (event.key === "Escape") manager.close(toast.id);
       }}

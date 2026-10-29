@@ -169,7 +169,9 @@ test(
       expect(await driver.spaceAuthEmailSubmitEnabled()).toBe(false);
       expect(await driver.spaceAuthEmailError()).toBeNull();
       await driver.spaceAuthBlurEmail();
-      await expect.poll(() => driver.spaceAuthEmailError()).toBe("Email is invalid");
+      // web_new carries its own validation copy (independence rule).
+      const malformedCopy = driver.target === "web_new" ? "That email address doesn't look right." : "Email is invalid";
+      await expect.poll(() => driver.spaceAuthEmailError()).toBe(malformedCopy);
       expect(await driver.spaceAuthEmailSubmitEnabled()).toBe(false);
     });
 
@@ -290,7 +292,11 @@ test(
           await driver.spaceAuthOpenLanding();
           await driver.spaceAuthSubmitEmail(seed.email);
           await expect.poll(() => driver.spaceAuthStep()).toBe("email");
-          await expect.poll(() => driver.spaceAuthBanner()).toMatch(/invalid email/i);
+          // Intended on web_new (bug NEWFRONT-462 fixed): the banner
+          // explains that no sign-in method is enabled instead of
+          // blaming the address.
+          const noMethodBanner = driver.target === "web_new" ? /isn't available on this instance/i : /invalid email/i;
+          await expect.poll(() => driver.spaceAuthBanner()).toMatch(noMethodBanner);
           await driver.spaceAuthDismissBanner();
           await expect.poll(() => driver.spaceAuthBanner()).toBeNull();
           expect(await driver.spaceAuthStep()).toBe("email");
@@ -300,7 +306,13 @@ test(
           await driver.spaceAuthOpenLanding();
           await driver.spaceAuthSubmitEmail(fresh);
           await expect.poll(() => driver.spaceAuthStep()).toBe("email");
-          expect(await driver.spaceAuthBanner()).toBeNull();
+          // Intended on web_new (bug NEWFRONT-462 fixed): new addresses
+          // get the same explanation as known ones instead of silence.
+          if (driver.target === "web_new") {
+            await expect.poll(() => driver.spaceAuthBanner()).toMatch(/isn't available on this instance/i);
+          } else {
+            expect(await driver.spaceAuthBanner()).toBeNull();
+          }
         });
       }
     );
@@ -326,22 +338,33 @@ test(
       await convergeStep(driver, fresh, "code");
 
       await test.step("resending starts a short cooldown", async () => {
-        expect(await driver.spaceAuthCodeResendState()).toEqual({ disabled: false, label: "Resend" });
+        // web_new carries its own resend copy (independence rule) and
+        // shows a sending state while the first generate is still out,
+        // so the idle control is polled for instead of read once.
+        if (driver.target === "web_new") {
+          await expect
+            .poll(() => driver.spaceAuthCodeResendState(), SERVER_POLL)
+            .toEqual({ disabled: false, label: "Send another code" });
+        } else {
+          expect(await driver.spaceAuthCodeResendState()).toEqual({ disabled: false, label: "Resend" });
+        }
         await driver.spaceAuthClickResendCode();
+        const cooldownLabel = driver.target === "web_new" ? /send another code in \d+s/i : /resend in \d+s/i;
         await expect
           .poll(() => driver.spaceAuthCodeResendState(), SERVER_POLL)
           .toEqual({
             disabled: true,
-            label: expect.stringMatching(/resend in \d+s/i),
+            label: expect.stringMatching(cooldownLabel),
           });
       });
 
       await test.step("the cooldown lapses back to resend", async () => {
+        const idleLabel = driver.target === "web_new" ? "Send another code" : "Resend";
         await expect
           .poll(() => driver.spaceAuthCodeResendState(), SERVER_POLL)
           .toEqual({
             disabled: false,
-            label: "Resend",
+            label: idleLabel,
           });
       });
 
@@ -379,7 +402,9 @@ test(
       await test.step("the coded link lands back on the code step with guidance", async () => {
         await driver.spaceAuthOpenLanding({ errorCode: "5092" });
         await expect.poll(() => driver.spaceAuthStep()).toBe("code");
-        await expect.poll(() => driver.spaceAuthBanner()).toMatch(/invalid magic code/i);
+        // web_new carries its own banner copy (independence rule).
+        const invalidCodeBanner = driver.target === "web_new" ? /code isn't valid/i : /invalid magic code/i;
+        await expect.poll(() => driver.spaceAuthBanner()).toMatch(invalidCodeBanner);
       });
 
       await test.step("a missing code redirects with the expired-code error", async () => {
@@ -399,7 +424,8 @@ test(
       await test.step("the expired link lands back on the code step with guidance", async () => {
         await driver.spaceAuthOpenLanding({ errorCode: "5097" });
         await expect.poll(() => driver.spaceAuthStep()).toBe("code");
-        await expect.poll(() => driver.spaceAuthBanner()).toMatch(/expired magic code/i);
+        const expiredCodeBanner = driver.target === "web_new" ? /code has expired/i : /expired magic code/i;
+        await expect.poll(() => driver.spaceAuthBanner()).toMatch(expiredCodeBanner);
       });
     });
   }
@@ -425,7 +451,8 @@ test(
 
       await test.step("the resend past the cap explains itself on the code step", async () => {
         await driver.spaceAuthClickResendCode();
-        await expect.poll(() => driver.spaceAuthBanner(), SERVER_POLL).toMatch(/expired magic code/i);
+        const capBanner = driver.target === "web_new" ? /code has expired/i : /expired magic code/i;
+        await expect.poll(() => driver.spaceAuthBanner(), SERVER_POLL).toMatch(capBanner);
         expect(await driver.spaceAuthStep()).toBe("code");
       });
 
@@ -458,7 +485,13 @@ test(
 
       await test.step("submitting the live code succeeds without an error code", async () => {
         await driver.spaceAuthSubmitCode(code ?? "");
-        await expect.poll(() => driver.currentPath(), SERVER_POLL).toContain("/spaces");
+        // web_new reports the old app's mount-free addresses, so the
+        // spaces base reads as the bare root: pin the real pathname.
+        if (driver.target === "web_new") {
+          await expect.poll(() => new URL(driver.page.url()).pathname, SERVER_POLL).toMatch(/^\/spaces\/?$/);
+        } else {
+          await expect.poll(() => driver.currentPath(), SERVER_POLL).toContain("/spaces");
+        }
         expect(new URL(driver.page.url()).searchParams.has("error_code")).toBe(false);
       });
 
@@ -520,13 +553,17 @@ test(
     await expect.poll(() => driver.spaceAuthStep()).toBe("password");
 
     await test.step("weak passwords surface the strength meter and stay disabled", async () => {
+      // web_new carries its own meter copy (independence rule).
+      const shortCopy = driver.target === "web_new" ? "Use 8 or more characters." : "Password is too short";
+      const weakCopy =
+        driver.target === "web_new" ? "Mix upper-case, lower-case, numbers and symbols." : "Password is weak";
       await driver.spaceAuthFillPassword("abc");
       expect(await driver.spaceAuthStrengthMeterVisible()).toBe(true);
-      expect(await driver.spaceAuthStrengthMessage()).toBe("Password is too short");
+      expect(await driver.spaceAuthStrengthMessage()).toBe(shortCopy);
       expect(await driver.spaceAuthPasswordSubmitEnabled()).toBe(false);
       await driver.spaceAuthFillPassword("abcdefgh");
       expect(await driver.spaceAuthStrengthMeterVisible()).toBe(true);
-      expect(await driver.spaceAuthStrengthMessage()).toBe("Password is weak");
+      expect(await driver.spaceAuthStrengthMessage()).toBe(weakCopy);
       expect(await driver.spaceAuthPasswordSubmitEnabled()).toBe(false);
     });
 
@@ -573,7 +610,9 @@ test(
       await driver.spaceAuthSubmitEmail(seed.email);
       await expect.poll(() => driver.spaceAuthStep()).toBe("password");
       expect(await driver.spaceAuthSeesSwitchToCode()).toBe(false);
-      expect(await driver.spaceAuthPasswordPrimaryLabel()).toBe("Go to workspace");
+      // web_new labels its password submit "Sign in" in both mail states.
+      const mailLessLabel = driver.target === "web_new" ? "Sign in" : "Go to workspace";
+      expect(await driver.spaceAuthPasswordPrimaryLabel()).toBe(mailLessLabel);
     });
 
     await withInstanceConfig(seed.email, seed.password, { EMAIL_HOST: "parity-mail.example" }, async (admin) => {
@@ -584,7 +623,8 @@ test(
       await test.step("configured sign-in offers the switch and a continue-labeled submit", async () => {
         await convergeStep(driver, seed.email, "password");
         expect(await driver.spaceAuthSeesSwitchToCode()).toBe(true);
-        expect(await driver.spaceAuthPasswordPrimaryLabel()).toBe("Continue");
+        const configuredLabel = driver.target === "web_new" ? "Sign in" : "Continue";
+        expect(await driver.spaceAuthPasswordPrimaryLabel()).toBe(configuredLabel);
       });
 
       await test.step("the switch moves to the code step and delivers a code", async () => {
@@ -623,7 +663,13 @@ test(
       await driver.spaceAuthSubmitEmail(seed.email);
       await expect.poll(() => driver.spaceAuthStep()).toBe("password");
       await driver.spaceAuthSubmitPassword(seed.password);
-      await expect.poll(() => driver.currentPath(), SERVER_POLL).toContain("/spaces");
+      // web_new reports the old app's mount-free addresses, so the
+      // spaces base reads as the bare root: pin the real pathname.
+      if (driver.target === "web_new") {
+        await expect.poll(() => new URL(driver.page.url()).pathname, SERVER_POLL).toMatch(/^\/spaces\/?$/);
+      } else {
+        await expect.poll(() => driver.currentPath(), SERVER_POLL).toContain("/spaces");
+      }
       expect(new URL(driver.page.url()).searchParams.has("error_code")).toBe(false);
     });
 
@@ -661,7 +707,13 @@ test(
       await driver.spaceAuthSubmitEmail(fresh);
       await expect.poll(() => driver.spaceAuthStep()).toBe("password");
       await driver.spaceAuthSubmitPassword(password, password);
-      await expect.poll(() => driver.currentPath(), SERVER_POLL).toContain("/spaces");
+      // web_new reports the old app's mount-free addresses, so the
+      // spaces base reads as the bare root: pin the real pathname.
+      if (driver.target === "web_new") {
+        await expect.poll(() => new URL(driver.page.url()).pathname, SERVER_POLL).toMatch(/^\/spaces\/?$/);
+      } else {
+        await expect.poll(() => driver.currentPath(), SERVER_POLL).toContain("/spaces");
+      }
       expect(new URL(driver.page.url()).searchParams.has("error_code")).toBe(false);
     });
 
@@ -769,22 +821,33 @@ test(
   { tag: specTags(["SPC-063"]) },
   async ({ driver, seed }) => {
     await healBaseline(seed.email, seed.password);
+    // web_new carries its own banner copy (independence rule); the
+    // already-registered wording happens to match on both.
+    const webNewBanner = (code: string, fallback: RegExp | null): RegExp | null => {
+      if (driver.target !== "web_new") return fallback;
+      if (code === "5065") return /sign-in failed/i;
+      if (code === "5035") return /sign-up failed/i;
+      if (code === "5090" || code === "5092") return /code isn't valid/i;
+      if (code === "5095" || code === "5097" || code === "5100" || code === "5102") return /code has expired/i;
+      if (code === "5060") return /no account uses this address/i;
+      return fallback;
+    };
     const cases: {
       code: string;
       step: "email" | "password" | "code";
       mode: "sign-in" | "sign-up" | null;
       banner: RegExp | null;
     }[] = [
-      { code: "5065", step: "password", mode: "sign-in", banner: /authentication failed/i },
-      { code: "5035", step: "password", mode: "sign-up", banner: /authentication failed/i },
-      { code: "5090", step: "code", mode: "sign-in", banner: /invalid magic code/i },
-      { code: "5092", step: "code", mode: "sign-up", banner: /invalid magic code/i },
-      { code: "5095", step: "code", mode: "sign-in", banner: /expired magic code/i },
-      { code: "5097", step: "code", mode: "sign-up", banner: /expired magic code/i },
-      { code: "5100", step: "code", mode: "sign-in", banner: /expired magic code/i },
-      { code: "5102", step: "code", mode: "sign-up", banner: /expired magic code/i },
-      { code: "5060", step: "email", mode: "sign-up", banner: /no account found/i },
-      { code: "5030", step: "email", mode: "sign-up", banner: /already registered/i },
+      { code: "5065", step: "password", mode: "sign-in", banner: webNewBanner("5065", /authentication failed/i) },
+      { code: "5035", step: "password", mode: "sign-up", banner: webNewBanner("5035", /authentication failed/i) },
+      { code: "5090", step: "code", mode: "sign-in", banner: webNewBanner("5090", /invalid magic code/i) },
+      { code: "5092", step: "code", mode: "sign-up", banner: webNewBanner("5092", /invalid magic code/i) },
+      { code: "5095", step: "code", mode: "sign-in", banner: webNewBanner("5095", /expired magic code/i) },
+      { code: "5097", step: "code", mode: "sign-up", banner: webNewBanner("5097", /expired magic code/i) },
+      { code: "5100", step: "code", mode: "sign-in", banner: webNewBanner("5100", /expired magic code/i) },
+      { code: "5102", step: "code", mode: "sign-up", banner: webNewBanner("5102", /expired magic code/i) },
+      { code: "5060", step: "email", mode: "sign-up", banner: webNewBanner("5060", /no account found/i) },
+      { code: "5030", step: "email", mode: "sign-up", banner: webNewBanner("5030", /already registered/i) },
       { code: "5900", step: "email", mode: "sign-up", banner: null },
       { code: "9999", step: "email", mode: "sign-up", banner: null },
     ];
@@ -820,14 +883,27 @@ test(
     await healBaseline(seed.email, seed.password);
     await expect.poll(async () => (await spaceEmailCheck(seed.email)).status, SERVER_POLL).toBe("CREDENTIAL");
 
+    // web_new carries its own header copy (independence rule).
+    const signUpHeader =
+      driver.target === "web_new"
+        ? { heading: "Join the conversation", subline: "Create an account to vote and comment on public boards." }
+        : {
+            heading: "View, comment, and do more",
+            subline: "Sign up or log in to work with Pi Dash work items and Pages.",
+          };
+    const signInHeader =
+      driver.target === "web_new"
+        ? { heading: "Welcome back", subline: "Sign in to vote and comment on public boards." }
+        : {
+            heading: "Sign in to upvote or comment",
+            subline: "Contribute in nudging the features you want to get built.",
+          };
+
     await test.step("the email step opens in sign-up mode with its consent line", async () => {
       await driver.spaceAuthOpenLanding();
       await expect.poll(() => driver.spaceAuthStep()).toBe("email");
       expect(await driver.spaceAuthMode()).toBe("sign-up");
-      expect(await driver.spaceAuthHeader()).toEqual({
-        heading: "View, comment, and do more",
-        subline: "Sign up or log in to work with Pi Dash work items and Pages.",
-      });
+      expect(await driver.spaceAuthHeader()).toEqual(signUpHeader);
       const consent = await driver.spaceAuthConsent();
       expect(consent.text).toMatch(/^by creating an account/i);
       expect(consent.termsHref).toBe("https://airepublic.com/terms");
@@ -838,10 +914,7 @@ test(
       await driver.spaceAuthSubmitEmail(seed.email);
       await expect.poll(() => driver.spaceAuthStep()).toBe("password");
       expect(await driver.spaceAuthMode()).toBe("sign-in");
-      expect(await driver.spaceAuthHeader()).toEqual({
-        heading: "Sign in to upvote or comment",
-        subline: "Contribute in nudging the features you want to get built.",
-      });
+      expect(await driver.spaceAuthHeader()).toEqual(signInHeader);
       const consent = await driver.spaceAuthConsent();
       expect(consent.text).toMatch(/^by signing in/i);
       expect(consent.termsHref).toBe("https://airepublic.com/terms");

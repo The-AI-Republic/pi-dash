@@ -92,7 +92,7 @@ export function SpaceCommentRow({
         ) : showBody ? (
           <div className="flex min-w-0 flex-col gap-(--space-1)">
             {speaker === null ? null : (
-              <span className="text-meta font-medium text-(--text)">
+              <span data-testid="space-comment-speaker" className="text-meta font-medium text-(--text)">
                 {speaker}
                 {":"}
               </span>
