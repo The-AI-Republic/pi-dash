@@ -361,13 +361,8 @@ impl RevokeStore for PoolRevokeStore<'_, '_, '_> {
         stored_reason: &str,
     ) -> Result<(), RevokeError> {
         self.current_runner = Some(runner_id);
-        sqlx::query(revoke::MARK_RUNNER_REVOKED_SQL)
-            .bind(now)
-            .bind(stored_reason)
-            .bind(runner_id)
-            .execute(&mut **self.tx)
+        revoke::stamp_runner_revoked(&mut **self.tx, runner_id, now, stored_reason)
             .await
-            .map(|_| ())
             .map_err(store_err)
     }
 
@@ -412,9 +407,10 @@ impl RevokeStore for PoolRevokeStore<'_, '_, '_> {
     /// No `done_payload` merge: these updates carry none.
     ///
     /// Reconciles the three surfaces: the plan inputs and column pin are
-    /// teardown/v1's, the positional binds are v1/teardown's, the clock
-    /// is micros-truncated (v1's — wire-identical to the raw binds
-    /// elsewhere since sqlx truncates to micros; see the module docs).
+    /// teardown/v1's; the update and event legs run through the shared
+    /// revoke performers with a micros-truncated clock (v1's —
+    /// wire-identical to the raw binds elsewhere since sqlx truncates
+    /// to micros; see the module docs).
     async fn finalize_cancelled_run(
         &mut self,
         run_id: Uuid,
@@ -456,19 +452,15 @@ impl RevokeStore for PoolRevokeStore<'_, '_, '_> {
             return Ok(());
         };
         let executor_kind: String = row.try_get("executor_kind").map_err(store_err)?;
-        sqlx::query(&finalize_kernel::finalize_update_sql(&values))
-            .bind(AgentRunStatus::Cancelled.value())
-            .bind(now_micros())
-            .bind(None::<i16>)
-            .bind(None::<DateTime<Utc>>)
-            .bind(None::<DateTime<Utc>>)
-            .bind(revoke::FINALIZE_ERROR)
-            .bind(revoke::FINALIZE_ERROR_CODE)
-            .bind(stored_reason)
-            .bind(run_id)
-            .execute(&mut **self.tx)
-            .await
-            .map_err(store_err)?;
+        revoke::execute_revoke_finalize_update(
+            &mut **self.tx,
+            &values,
+            run_id,
+            stored_reason,
+            now_micros(),
+        )
+        .await
+        .map_err(store_err)?;
         if executor_kind == AgentExecutorKind::CloudAgent.value() {
             let exists = sqlx::query_scalar::<_, i32>(finalize_kernel::terminal_event_exists_sql())
                 .bind(run_id)
@@ -488,13 +480,7 @@ impl RevokeStore for PoolRevokeStore<'_, '_, '_> {
                     AgentRunStatus::Cancelled,
                     &finalize_kernel::finalize_error_code(&values),
                 );
-                sqlx::query(&finalize_kernel::terminal_event_insert_sql())
-                    .bind(run_id)
-                    .bind(plan.seq)
-                    .bind("terminal")
-                    .bind(plan.payload)
-                    .bind(now_micros())
-                    .execute(&mut **self.tx)
+                finalize_kernel::insert_terminal_event(&mut **self.tx, run_id, plan, now_micros())
                     .await
                     .map_err(store_err)?;
             }
@@ -521,11 +507,8 @@ impl RevokeStore for PoolRevokeStore<'_, '_, '_> {
     }
 
     async fn unpin_queued_runs(&mut self, runner_id: Uuid) -> Result<(), RevokeError> {
-        sqlx::query(revoke::UNPIN_QUEUED_RUNS_SQL)
-            .bind(runner_id)
-            .execute(&mut **self.tx)
+        revoke::unpin_queued_runs_for_runner(&mut **self.tx, runner_id)
             .await
-            .map(|_| ())
             .map_err(store_err)
     }
 

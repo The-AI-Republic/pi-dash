@@ -29,6 +29,7 @@
 //! Fixture: FX-RUN-05 (`merge_done_payload`, `finalize_agent_run`,
 //! `apply_terminal_effects` sections).
 
+use chrono::{DateTime, Utc};
 use pidash_db::runner_runs::{agent_run, event, pod};
 use pidash_db::tasks_ticker::models::scheduler_binding;
 use pidash_types::dispatch::AgentExecutorKind;
@@ -346,6 +347,34 @@ pub fn plan_terminal_event(
 /// Terminal-event payload: `{"status": <value>, "error_code": <code>}`.
 pub fn terminal_event_payload(new_status: AgentRunStatus, error_code: &str) -> Value {
     serde_json::json!({"status": new_status.value(), "error_code": error_code})
+}
+
+/// Terminal-event `INSERT` performer ([`terminal_event_insert_sql`]):
+/// append the planned cloud-only event for one finalized run.
+///
+/// `plan` is the [`plan_terminal_event`] row (`seq`, `{"status",
+/// "error_code"}` payload); `kind` binds `terminal`, `created_at`
+/// binds the caller's own `now` (each driver stamps its own clock,
+/// never hoisted across legs). The existence guard and max-seq read
+/// stay driver-side.
+pub async fn insert_terminal_event<'e, E>(
+    ex: E,
+    run_id: Uuid,
+    plan: TerminalEventPlan,
+    now: DateTime<Utc>,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(&terminal_event_insert_sql())
+        .bind(run_id)
+        .bind(plan.seq)
+        .bind("terminal")
+        .bind(plan.payload)
+        .bind(now)
+        .execute(ex)
+        .await
+        .map(|_| ())
 }
 
 /// `_publish_effects` (`agent_run_finalization.py:89-103`): the Celery
