@@ -2105,10 +2105,17 @@ async fn collection_create(
     // order, and the post-commit chain runs the `post_save` fire Django's
     // create fires (no m2m legs on this endpoint). The bare created emit
     // stays driver-side below.
-    let description_json = issue_data
-        .get("description_json")
-        .cloned()
-        .unwrap_or_else(super::sanitize::default_description_json);
+    // `issue_data.get("description_json", {})` (`:147`): an explicit
+    // null arrives as None and the NOT NULL jsonb column rejects it —
+    // the invalid-payload 400, same as the description_html null arm
+    // below. Any other JSON value stores as-is.
+    let description_json = match issue_data.get("description_json") {
+        Some(serde_json::Value::Null) => {
+            return guards_error(guards::handle_exception(ExceptionKind::IntegrityError));
+        }
+        Some(value) => value.clone(),
+        None => super::sanitize::default_description_json(),
+    };
     // `issue_data.get("description_html", DEFAULT_DESCRIPTION)` (`:148`):
     // an explicit null stores NULL (no serializer validation on create).
     let description_html: Option<String> = match issue_data.get("description_html") {
