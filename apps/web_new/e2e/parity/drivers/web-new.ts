@@ -4112,8 +4112,15 @@ export class WebNewDriver implements ParityDriver {
     return out;
   }
   async openWidgetSection(widget: string): Promise<void> {
-    if (await this.widgetExpanded(widget)) return;
-    await (await this.widgetHeaderFor(widget)).click({ timeout: WebNewDriver.WAIT_MS });
+    // A header click can land on a remounting node and never toggle
+    // (peek nested ISS-165: aria stays false after the click while the
+    // header count reads fine). Verify and re-click, bounded, and never
+    // click an open section shut.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (await this.widgetExpanded(widget)) return;
+      await (await this.widgetHeaderFor(widget)).click({ timeout: WebNewDriver.WAIT_MS });
+      await this.page.waitForTimeout(250);
+    }
   }
   async widgetExpanded(widget: string): Promise<boolean> {
     // The header's aria flag and the mounted panel agree; the panel is

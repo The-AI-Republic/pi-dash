@@ -121,7 +121,7 @@ describe("widget rows", () => {
             getAttribute: async (name: string) => (name === "aria-expanded" ? expanded : null),
             click: async () => {
               clicks.push("Attachments");
-              expanded = "false";
+              expanded = "true";
             },
           });
         }
@@ -138,6 +138,50 @@ describe("widget rows", () => {
     expect(clicks).toEqual(["Attachments"]);
     await driver.toggleWidgetSection("Attachments");
     expect(clicks).toEqual(["Attachments", "Attachments"]);
+  });
+
+  it("re-clicks when the first header click never opens the section", async () => {
+    let clicks = 0;
+    let expanded: string | null = "false";
+    const page = pageOf({
+      locator: (selector: string) => {
+        if (selector === '[data-testid="sub-issues-collapsible"]') {
+          return locator({
+            getAttribute: async (name: string) => (name === "aria-expanded" ? expanded : null),
+            click: async () => {
+              clicks += 1;
+              // The first click lands on a remounting node and is lost;
+              // the second takes.
+              if (clicks >= 2) expanded = "true";
+            },
+          });
+        }
+        return locator();
+      },
+    });
+    const driver = new WebNewDriver(page);
+    await driver.openWidgetSection("Sub-work items");
+    expect(clicks).toBe(2);
+    await expect(driver.widgetExpanded("Sub-work items")).resolves.toBe(true);
+  });
+
+  it("stops after three lost clicks instead of toggling forever", async () => {
+    let clicks = 0;
+    const page = pageOf({
+      locator: (selector: string) => {
+        if (selector === '[data-testid="sub-issues-collapsible"]') {
+          return locator({
+            getAttribute: async (name: string) => (name === "aria-expanded" ? "false" : null),
+            click: async () => {
+              clicks += 1;
+            },
+          });
+        }
+        return locator();
+      },
+    });
+    await new WebNewDriver(page).openWidgetSection("Sub-work items");
+    expect(clicks).toBe(3);
   });
 
   it("reports a section with no header as collapsed", async () => {
