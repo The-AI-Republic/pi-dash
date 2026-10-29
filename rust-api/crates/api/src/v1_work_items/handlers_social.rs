@@ -855,9 +855,7 @@ async fn link_url_exists(pool: &PgPool, url: &str, issue_id: &Uuid) -> Result<bo
     .map_err(|error| db_error(error, "link-dup"))
 }
 
-/// Comment list rows (`:1805-1828`): the link predicates plus the
-/// `is_member=Exists(...)` annotation (explicit `ProjectMember.objects`
-/// filter — WITH the manager's `deleted_at IS NULL`, unlike the guard).
+/// Comment list rows (`:1805-1828`) via the public read service.
 async fn fetch_comment_rows(
     pool: &PgPool,
     slug: &str,
@@ -865,30 +863,15 @@ async fn fetch_comment_rows(
     issue_id: &Uuid,
     user_id: &Uuid,
 ) -> Result<Vec<sqlx::postgres::PgRow>, Denial> {
-    sqlx::query(
-        r#"SELECT DISTINCT c.*, EXISTS (
-             SELECT 1 FROM "project_members" pm
-             WHERE pm."deleted_at" IS NULL AND pm."is_active"
-               AND pm."member_id" = $4 AND pm."project_id" = $2
-               AND pm."workspace_id" = (SELECT "id" FROM "workspaces" WHERE "slug" = $1)
-           ) AS "is_member"
-           FROM "issue_comments" c
-           WHERE c."deleted_at" IS NULL
-             AND c."workspace_id" = (SELECT "id" FROM "workspaces" WHERE "slug" = $1)
-             AND c."project_id" = $2 AND c."issue_id" = $3
-             AND EXISTS (SELECT 1 FROM "project_members" pm
-                         WHERE pm."project_id" = c."project_id" AND pm."member_id" = $4 AND pm."is_active")
-             AND EXISTS (SELECT 1 FROM "projects" p
-                         WHERE p."id" = c."project_id" AND p."archived_at" IS NULL)
-           ORDER BY c."created_at" DESC"#,
-    )
-    .bind(slug)
-    .bind(project_id)
-    .bind(issue_id)
-    .bind(user_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| db_error(error, "comment-list"))
+    read::fetch_comment_list_rows(pool, slug, project_id, issue_id, user_id)
+        .await
+        .map_err(|error| match error {
+            read::Error::NotFound | read::Error::Failed(_) => Denial::ServerError,
+            read::Error::Db(err) => {
+                let (site, source) = err.split();
+                db_error(source, site)
+            }
+        })
 }
 
 /// Comment detail row (`:2008`): the list chain (annotation included) plus

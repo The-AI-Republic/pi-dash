@@ -147,6 +147,60 @@ pub async fn resolve_workpad_state(
     }
 }
 
+/// `GET .../workpad/` (`views/issue.py:3275-3279`): the scoped
+/// workpad read — live, non-triage, unarchived, non-draft issue in the
+/// slug's project. Moved from `v1_work_items::handlers_relations`
+/// (PIDASHCONV-1661).
+pub async fn fetch_workpad(
+    pool: &PgPool,
+    slug: &str,
+    project_id: &Uuid,
+    issue_id: &Uuid,
+) -> Result<Option<sqlx::postgres::PgRow>, Error> {
+    let row = sqlx::query(
+        r#"SELECT "issues"."workpad", "issues"."updated_at"
+           FROM "issues"
+           LEFT OUTER JOIN "states" ON ("issues"."state_id" = "states"."id")
+           INNER JOIN "projects" ON ("issues"."project_id" = "projects"."id")
+           INNER JOIN "workspaces" ON ("issues"."workspace_id" = "workspaces"."id")
+           WHERE ("issues"."deleted_at" IS NULL
+             AND NOT ("states"."group" = 'triage' AND "states"."group" IS NOT NULL)
+             AND NOT ("issues"."archived_at" IS NOT NULL)
+             AND NOT ("projects"."archived_at" IS NOT NULL)
+             AND NOT ("issues"."is_draft")
+             AND "workspaces"."slug" = $1
+             AND "issues"."project_id" = $2
+             AND "issues"."id" = $3)"#,
+    )
+    .bind(slug)
+    .bind(project_id)
+    .bind(issue_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| DbError::new("workpad-get", error))?;
+    Ok(row)
+}
+
+/// Payload re-read of one issue's workpad by pk, with no scope
+/// predicates: the MCP `get_workpad` tool resolves and gates the issue
+/// first, and Python serializes the in-memory object without
+/// re-querying, so the re-read must not re-filter — a miss means only
+/// a concurrent delete. (Moved from the MCP read tools by
+/// PIDASHCONV-1661; Rule 5: queries on OSS tables live here.)
+pub async fn fetch_workpad_by_id(
+    pool: &PgPool,
+    issue_id: &Uuid,
+) -> Result<Option<sqlx::postgres::PgRow>, Error> {
+    let row = sqlx::query(
+        r#"SELECT "issues"."workpad", "issues"."updated_at" FROM "issues" WHERE "issues"."id" = $1"#,
+    )
+    .bind(issue_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| DbError::new("workpad-by-id", error))?;
+    Ok(row)
+}
+
 /// The workpad-PATCH `description_stripped` recompute
 /// (`db/models/issue.py:346-350`): `None` for empty HTML, else
 /// `html_processor.strip_tags` — the entity-decoding MLStripper
@@ -336,5 +390,44 @@ mod live {
             workpad_stripped("<p>a &amp; b</p>").as_deref(),
             Some("a & b")
         );
+    }
+
+    #[tokio::test]
+    async fn workpad_reads_hit_and_miss() {
+        use sqlx::Row as _;
+        let Some(db) = pool().await else { return };
+        let world = seed_world(&db).await;
+        let row = fetch_workpad(
+            &db,
+            &world.workspace_slug,
+            &world.project_id,
+            &world.issue_id,
+        )
+        .await
+        .expect("scoped hit")
+        .expect("row");
+        let body: String = row.try_get("workpad").expect("workpad");
+        assert_eq!(body, "");
+        let _updated: chrono::DateTime<chrono::Utc> =
+            row.try_get("updated_at").expect("updated_at");
+        let missing = fetch_workpad(
+            &db,
+            &world.workspace_slug,
+            &world.project_id,
+            &Uuid::new_v4(),
+        )
+        .await
+        .expect("scoped miss");
+        assert!(missing.is_none());
+        let row = fetch_workpad_by_id(&db, &world.issue_id)
+            .await
+            .expect("by-id hit")
+            .expect("row");
+        let body: String = row.try_get("workpad").expect("workpad");
+        assert_eq!(body, "");
+        let missing = fetch_workpad_by_id(&db, &Uuid::new_v4())
+            .await
+            .expect("by-id miss");
+        assert!(missing.is_none());
     }
 }
