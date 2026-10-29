@@ -129,6 +129,9 @@ test(
     await wsViewsOpenListAs(driver, harness);
     await expect.poll(() => driver.wsViewsDefaultNames(), POLL).toEqual(DEFAULTS);
     expect(await driver.wsViewsListNames()).toEqual([]);
-    expect(await driver.wsViewsSkeletonVisible()).toBe(false);
+    // The customs read settles after the defaults paint, so the empty result
+    // (and the skeleton leaving with it) is a poll, not a one-shot read
+    // (VIEW-039: skeleton while pending, defaults alone once settled).
+    await expect.poll(() => driver.wsViewsSkeletonVisible(), POLL).toBe(false);
   }
 );
