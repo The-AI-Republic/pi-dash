@@ -566,9 +566,10 @@ fn py_json_number(number: &serde_json::Number) -> String {
 /// `Infinity`/`-Infinity`/`NaN` words `allow_nan` keeps (a `1e400`
 /// literal parses, the way `json.loads` accepts it).
 ///
-/// Mirrors `jobs::pyformat::py_float_repr`, which this crate cannot
-/// reach (foundation crates are read-only and `pidash-api` does not
-/// depend on `pidash-jobs`).
+/// Mirrors `jobs::pyformat::py_float_repr` (same exponent fixup),
+/// with the `NaN`/`Infinity` arms added: the jobs copy renders
+/// non-finite as `"null"` for kombu `repr` headers, while `json.dumps`
+/// keeps the bare words.
 fn py_json_float(float: f64) -> String {
     if float.is_nan() {
         return "NaN".to_owned();
