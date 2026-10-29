@@ -294,41 +294,10 @@ pub fn entity_user_select_sql() -> String {
     sel.to_string(PostgresQueryBuilder)
 }
 
-/// `entity_asset_delete` user write (`asset.py:63-64,69-70`, server
-/// twins `:261-262,:267-268`): `user.save()` with no `update_fields`
-/// is a **full-row** save — every non-pk column in `_meta` order, pk
-/// in `WHERE`. The builder emits exactly that: `SET` over
-/// [`USER_COLUMNS`] minus `id` (`$1`–`$39`), `WHERE "users"."id" =
-/// $40`. Handlers bind the fetched row with
-/// [`EntityClearTarget::AvatarAssetId`] / `CoverImageAssetId` nulled;
-/// [`EntityClearTarget::NoOp`] binds the row unchanged (and the
-/// handler skips the statement entirely — the view returns without
-/// touching the profile).
-///
-/// `User.save()` also lowercases/strips the email and rotates the
-/// token when `token_updated_at` is set (`db/models/user.py:162-170`);
-/// that value-shaping is handler-owned, like every other Python-side
-/// assignment on this path.
-pub fn entity_user_save_sql() -> String {
-    use sea_query::PostgresQueryBuilder;
-    let mut stmt = Query::update();
-    stmt.table(Alias::new(USER_TABLE.to_owned()));
-    let mut bind = 1u32;
-    for col in USER_COLUMNS {
-        if *col == "id" {
-            continue;
-        }
-        stmt.value(
-            Alias::new((*col).to_owned()),
-            Expr::cust(format!("${bind}")),
-        );
-        bind += 1;
-    }
-    stmt.and_where(
-        Expr::col((Alias::new(USER_TABLE), Alias::new("id"))).eq(Expr::cust(format!("${bind}"))),
-    );
-    stmt.to_string(PostgresQueryBuilder)
-}
+// NOTE: the `entity_user_save_sql` builder lived here; it moved to
+// `pidash_services::domain::identity` (PIDASHCONV-1631), whose tests
+// carry the pin. `USER_COLUMNS` stays: the select builder and the
+// relocated save builder share it.
 
 /// Generic get + patch lookup (`asset.py:430`, `:608` — one shared
 /// builder): `FileAsset.objects.get(id=asset_id,
@@ -501,18 +470,6 @@ mod tests {
         ] {
             assert_eq!(entity_clear_target(other), EntityClearTarget::NoOp);
         }
-    }
-
-    #[test]
-    fn entity_user_save_is_full_row_with_pk_last() {
-        let sql = entity_user_save_sql();
-        assert!(sql.starts_with("UPDATE \"users\" SET "), "{sql}");
-        // Every non-pk column bound in USER_COLUMNS order ($1-$39),
-        // pk last ($40) — Django save() shape.
-        assert!(sql.contains("\"password\" = $1"), "{sql}");
-        assert!(sql.contains("\"masked_at\" = $39"), "{sql}");
-        assert!(sql.contains("WHERE \"users\".\"id\" = ($40)"), "{sql}");
-        assert!(!sql.contains("\"id\" = $"), "{sql}");
     }
 
     #[test]

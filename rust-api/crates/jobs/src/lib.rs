@@ -19,6 +19,8 @@
 //! Port agents (D-07…D-10) register handlers in [`worker::Registry`];
 //! this crate owns the mechanism, never task bodies.
 
+/// Redis-backed cloud-agent admission cache (PIDASHCONV-1487).
+pub mod admission;
 /// Page-view publish envelopes (D-30, PIDASHCONV-293).
 pub mod app_pages;
 /// Assistant turn pipeline + stale-turn sweep (D-06, PIDASHCONV-254).
@@ -37,6 +39,12 @@ pub mod dispatch;
 #[path = "dispatch/execute.rs"]
 pub mod dispatch_execute;
 pub mod integrations;
+/// Issue post-save orchestration (PIDASHCONV-1520): the completion
+/// comment, the transition fire core, and the pool-direct ticker seams.
+/// Moved here from `pidash-api::issue_transition` so a `WriteTxn`
+/// after-commit step can call them; the api module keeps delegating
+/// wrappers over its own drains.
+pub mod issue_transition;
 /// Iterative compact-JSON encoder (PIDASHCONV-626): stack-safe
 /// `serde_json::to_vec` for the ~9900-deep payloads ports may enqueue.
 pub mod json_compact;
@@ -66,6 +74,9 @@ pub mod orchestration;
 pub mod oss_worker;
 pub mod pyformat;
 pub mod queue;
+/// Runner revoke/delete executor (OVL-06, PIDASHCONV-1544): the revoke
+/// bundle as one public service call over the services drivers.
+pub mod runner_enroll;
 /// Runner task executors (D-15 L6, PIDASHCONV-539/540): the executing
 /// half of `runner/tasks.py` over the L4/L5 planners — approval expiry
 /// + runner/session sweeps (L6a) and dedupe + chat sweeps +

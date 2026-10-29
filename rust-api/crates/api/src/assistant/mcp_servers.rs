@@ -44,6 +44,9 @@ use crate::state::AppState;
 
 use super::common::{parse_body, request_content_type, BodyField, BodyMap, ParsedBody};
 use super::{error_response, json_body, pool_of, request_actor, Denial};
+use pidash_compat::validate::{
+    push_error, BLANK_MSG, INVALID_BOOL_MSG, INVALID_STR_MSG, NULL_MSG, REQUIRED_MSG,
+};
 
 /// `users/me/ai-assistant/mcp-servers/` (under the `api/` include).
 pub const SERVERS_PATH: &str = "/api/users/me/ai-assistant/mcp-servers/";
@@ -82,11 +85,6 @@ pub fn routes() -> Router<AppState> {
 
 /// DRF default messages used below (stable English strings, verified
 /// live against the installed DRF).
-const REQUIRED_MSG: &str = "This field is required.";
-const NULL_MSG: &str = "This field may not be null.";
-const BLANK_MSG: &str = "This field may not be blank.";
-const INVALID_STR_MSG: &str = "Not a valid string.";
-const INVALID_BOOL_MSG: &str = "Must be a valid boolean.";
 const INVALID_URL_MSG: &str = "Enter a valid URL.";
 const NULL_CHARS_MSG: &str = "Null characters are not allowed.";
 const NAME_REQUIRED_MSG: &str = "A name is required.";
@@ -224,7 +222,7 @@ fn validate_char_field(
         push_error(
             errors,
             field,
-            &format!("Ensure this field has no more than {max_length} characters."),
+            format!("Ensure this field has no more than {max_length} characters."),
         );
         clean = false;
     }
@@ -341,15 +339,6 @@ fn validate_bool_field(
             None
         }
     }
-}
-
-fn push_error(errors: &mut Map<String, Value>, field: &str, message: &str) {
-    errors
-        .entry(field.to_string())
-        .or_insert_with(|| Value::Array(Vec::new()))
-        .as_array_mut()
-        .expect("error list")
-        .push(Value::String(message.to_string()));
 }
 
 // ---------------------------------------------------------------------------
@@ -719,7 +708,7 @@ fn serialize_server(row: &ServerRow, effective_prefix: Option<&str>, timezone: &
 fn blocked_response() -> Response {
     error_response(
         StatusCode::BAD_REQUEST,
-        &serde_json::json!({
+        serde_json::json!({
             "error": "url_blocked",
             "detail": "That server host is not allowed.",
         }),
@@ -731,7 +720,7 @@ fn blocked_response() -> Response {
 fn duplicate_name_response() -> Response {
     error_response(
         StatusCode::BAD_REQUEST,
-        &serde_json::json!({
+        serde_json::json!({
             "error": "duplicate_name",
             "detail": "You already have a tool server with that name.",
         }),
@@ -857,7 +846,7 @@ fn dtype_error(kind: &str) -> Map<String, Value> {
 
 /// Render a field-error dict 400 (`raise_exception=True`).
 fn validation_error_response(errors: &Map<String, Value>) -> Response {
-    error_response(StatusCode::BAD_REQUEST, &Value::Object(errors.clone()))
+    error_response(StatusCode::BAD_REQUEST, Value::Object(errors.clone()))
 }
 
 /// Set/clear the encrypted auth header (`_apply_auth_header`,
@@ -867,7 +856,8 @@ fn validation_error_response(errors: &Map<String, Value>) -> Response {
 /// crypto `AssistantError` renders as its code/detail/status; an
 /// operational failure propagates to the generic 500.
 #[allow(clippy::result_large_err)]
-fn apply_auth_header(
+async fn apply_auth_header(
+    state: &AppState,
     encrypted: &mut Option<Vec<u8>>,
     auth_header: Option<&str>,
 ) -> Result<(), Response> {
@@ -878,13 +868,15 @@ fn apply_auth_header(
         *encrypted = None;
         return Ok(());
     }
-    match super::encrypt_secret(header) {
+    let config = super::common::crypto_config(state);
+    match super::common::encrypt_api_key(&config, header).await {
         Ok(token) => {
             *encrypted = Some(token);
             Ok(())
         }
-        Err(super::SecretError::Assistant(error)) => Err(super::assistant_error_response(&error)),
-        Err(super::SecretError::Transport(_)) => Err(Denial::ServerError.into_response()),
+        Err(err) => Err(super::common::crypto_failure(err, |error| {
+            super::assistant_error_response(error)
+        })),
     }
 }
 
@@ -949,7 +941,7 @@ async fn list_servers(
             )
         })
         .collect();
-    json_body(StatusCode::OK, &Value::Array(body))
+    json_body(StatusCode::OK, Value::Array(body))
 }
 
 /// `POST`: validate, SSRF-guard, duplicate-name check, server-cap
@@ -1004,7 +996,7 @@ async fn create_server(
         Ok(count) if count >= limit as i64 => {
             return error_response(
                 StatusCode::BAD_REQUEST,
-                &serde_json::json!({
+                serde_json::json!({
                     "error": "too_many_servers",
                     "detail": format!(
                         "You can have at most {limit} tool servers. Remove one before adding another."
@@ -1016,7 +1008,9 @@ async fn create_server(
         Err(denial) => return denial.into_response(),
     }
     let mut encrypted: Option<Vec<u8>> = None;
-    if let Err(response) = apply_auth_header(&mut encrypted, attrs.auth_header.as_deref()) {
+    if let Err(response) =
+        apply_auth_header(&state, &mut encrypted, attrs.auth_header.as_deref()).await
+    {
         return response;
     }
     let id = uuid::Uuid::new_v4();
@@ -1050,7 +1044,7 @@ async fn create_server(
     };
     json_body(
         StatusCode::CREATED,
-        &serialize_server(
+        serialize_server(
             &ServerRow {
                 id,
                 name,
@@ -1126,8 +1120,12 @@ async fn patch_server(
     if let Some(is_enabled) = attrs.is_enabled {
         row.is_enabled = is_enabled;
     }
-    if let Err(response) =
-        apply_auth_header(&mut row.auth_header_encrypted, attrs.auth_header.as_deref())
+    if let Err(response) = apply_auth_header(
+        &state,
+        &mut row.auth_header_encrypted,
+        attrs.auth_header.as_deref(),
+    )
+    .await
     {
         return response;
     }
@@ -1155,7 +1153,7 @@ async fn patch_server(
     }
     json_body(
         StatusCode::OK,
-        &serialize_server(&row, None, &actor.timezone),
+        serialize_server(&row, None, &actor.timezone),
     )
 }
 

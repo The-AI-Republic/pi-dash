@@ -941,7 +941,7 @@ async fn run_shadow(plan: ShadowPlan, django: DjangoCapture, parts: ShadowReques
     let django_status = django_response.status;
 
     let app = gate.shadow_app.clone();
-    let dispatch = tokio::spawn(async move {
+    let mut dispatch = tokio::spawn(async move {
         let rust_http = app
             .oneshot(parts.into_request())
             .await
@@ -972,7 +972,11 @@ async fn run_shadow(plan: ShadowPlan, django: DjangoCapture, parts: ShadowReques
         DispatchOutcome::Compared(compare(&django_response, &rust_response), rust_status)
     });
 
-    match tokio::time::timeout(SHADOW_TIMEOUT, dispatch).await {
+    // Borrow the handle so a timeout still owns it below: dropping a
+    // `JoinHandle` detaches the task instead of stopping it, which would
+    // leak the handler past the inflight cap while holding its pool
+    // connection (PIDASHCONV-1306).
+    match tokio::time::timeout(SHADOW_TIMEOUT, &mut dispatch).await {
         Ok(Ok(DispatchOutcome::Compared(Verdict::Match, _))) => {
             gate.count(&template, Outcome::Matched);
         }
@@ -1005,6 +1009,11 @@ async fn run_shadow(plan: ShadowPlan, django: DjangoCapture, parts: ShadowReques
             gate.count(&template, Outcome::Errored);
         }
         Err(_) => {
+            // Stop the dispatch and wait until it is actually gone before
+            // counting: this task still holds the permit, so live
+            // dispatches never exceed max_inflight.
+            dispatch.abort();
+            let _ = dispatch.await;
             gate.count(&template, Outcome::Errored);
         }
     }

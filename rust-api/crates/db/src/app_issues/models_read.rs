@@ -792,6 +792,8 @@ pub mod foreign {
         "usage",
         "llm_model",
         "turn_count",
+        "agent_health",
+        "agent_last_activity_at",
         "updated_at",
     ];
 
@@ -1344,7 +1346,7 @@ mod tests {
             .map(|c| c.split(" (").next().unwrap().to_string())
             .collect();
         assert_eq!(owned(foreign::RUNNER_LIVE_STATE_COLUMNS_READ), live_read);
-        assert_eq!(foreign::RUNNER_LIVE_STATE_COLUMNS_READ.len(), 12);
+        assert_eq!(foreign::RUNNER_LIVE_STATE_COLUMNS_READ.len(), 14);
         let live_raw = foreign_columns_read(&v, "runner_live_state");
         assert!(live_raw[0].contains("(PK, OneToOne)"));
         assert!(live_raw[8].contains("PROPERTIES"));

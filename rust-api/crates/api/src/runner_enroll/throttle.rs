@@ -115,10 +115,12 @@ pub fn parse_rate(rate: &str) -> Option<(u32, u64)> {
 /// `X-Forwarded-For` with all whitespace stripped when the header is
 /// present, else the remote address. An empty header value counts as absent
 /// (Python's `if xff`); a whitespace-only value strips to the empty ident.
-pub fn get_ident(x_forwarded_for: Option<&str>, remote_addr: &str) -> String {
+/// A missing peer renders `"None"` (Python's `cache_format % {'ident':
+/// None}`), never `""`.
+pub fn get_ident(x_forwarded_for: Option<&str>, remote_addr: Option<&str>) -> String {
     match x_forwarded_for {
         Some(xff) if !xff.is_empty() => xff.split_whitespace().collect(),
-        _ => remote_addr.to_owned(),
+        _ => remote_addr.unwrap_or("None").to_owned(),
     }
 }
 
@@ -273,18 +275,22 @@ mod tests {
     /// X-Forwarded-For with all whitespace stripped wins, else remote addr.
     #[test]
     fn ident_prefers_stripped_xff() {
-        assert_eq!(get_ident(None, "127.0.0.1"), "127.0.0.1");
-        assert_eq!(get_ident(Some(""), "127.0.0.1"), "127.0.0.1");
-        assert_eq!(get_ident(Some("1.2.3.4"), "127.0.0.1"), "1.2.3.4");
+        assert_eq!(get_ident(None, Some("127.0.0.1")), "127.0.0.1");
+        assert_eq!(get_ident(Some(""), Some("127.0.0.1")), "127.0.0.1");
+        assert_eq!(get_ident(Some("1.2.3.4"), Some("127.0.0.1")), "1.2.3.4");
         assert_eq!(
-            get_ident(Some("  1.2.3.4 , 5.6.7.8  "), "127.0.0.1"),
+            get_ident(Some("  1.2.3.4 , 5.6.7.8  "), Some("127.0.0.1")),
             "1.2.3.4,5.6.7.8"
         );
         assert_eq!(
-            get_ident(Some("1.2.3.4,\t 5.6.7.8"), "127.0.0.1"),
+            get_ident(Some("1.2.3.4,\t 5.6.7.8"), Some("127.0.0.1")),
             "1.2.3.4,5.6.7.8"
         );
-        assert_eq!(get_ident(Some("   "), "127.0.0.1"), "");
+        assert_eq!(get_ident(Some("   "), Some("127.0.0.1")), "");
+        // PIDASHCONV-1419: a missing peer renders "None" (Python's
+        // `cache_format % {'ident': None}`), never "".
+        assert_eq!(get_ident(None, None), "None");
+        assert_eq!(get_ident(Some(""), None), "None");
     }
 
     /// Cache key format matches DRF (`throttle_anon_<ip>` — the suffix of

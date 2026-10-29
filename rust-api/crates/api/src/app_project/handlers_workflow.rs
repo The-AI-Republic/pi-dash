@@ -87,15 +87,17 @@ use pidash_db::app_project::models::project::{classify_lookup, ProjectLookup};
 use pidash_db::app_project::models::state as state_model;
 use pidash_services::app_project::ser_workflow as ser;
 use pidash_services::app_project::tasks as t;
+use pidash_services::read::{self, state_row_from, StateRow, StateRowTuple};
 use pidash_types::{ProjectId, WorkspaceId};
 use rand::Rng;
 
 use crate::license::{resolve_actor, Actor};
 use crate::middleware::SessionHandle;
-use crate::serializer::render_datetime_in;
 use crate::state::AppState;
 
 use super::gates;
+use pidash_compat::datetime::render_datetime_in;
+use pidash_compat::response::{empty_response, json_response};
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -316,48 +318,19 @@ fn db_denial(error: sqlx::Error) -> Denial {
     Denial::ServerError
 }
 
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("view response")
-}
-
 fn json_ok(body: String) -> Response {
     json_response(StatusCode::OK, body)
 }
 
 fn no_content() -> Response {
-    Response::builder()
-        .status(StatusCode::NO_CONTENT)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(Vec::new()))
-        .expect("empty 204")
+    empty_response(StatusCode::NO_CONTENT)
 }
 
 // ---------------------------------------------------------------------------
 // Query map (Django QueryDict: repeats legal, .get returns the last)
 // ---------------------------------------------------------------------------
 
-/// One query value, repeated or not (the pilot `OneOrMany` shape).
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(untagged)]
-enum OneOrMany {
-    One(String),
-    Many(Vec<String>),
-}
-
-/// The multi-value query map the list handler extracts.
-type QueryMap = HashMap<String, OneOrMany>;
-
-/// Django `QueryDict.get`: the last value, or `None` when absent.
-fn query_last(query: &QueryMap, key: &str) -> Option<String> {
-    query.get(key).map(|value| match value {
-        OneOrMany::One(one) => one.clone(),
-        OneOrMany::Many(many) => many.last().cloned().unwrap_or_default(),
-    })
-}
+use pidash_compat::http::{query_last, QueryMap};
 
 // ---------------------------------------------------------------------------
 // Request context: auth + rewrite + tenant + membership
@@ -991,64 +964,10 @@ fn key_min_error() -> String {
 // States
 // ---------------------------------------------------------------------------
 
-/// One state row for the read shape (the 9 `STATE_READ_KEYS` columns).
-#[derive(Debug, Clone)]
-struct StateRow {
-    id: uuid::Uuid,
-    project_id: uuid::Uuid,
-    workspace_id: uuid::Uuid,
-    name: String,
-    color: String,
-    group: String,
-    default: bool,
-    description: String,
-    sequence: f64,
-}
-
-/// Render one state through the L3 read shape.
+/// Render one state through the L3 read shape (the public read
+/// service owns the row type and the renderer).
 fn render_state(row: &StateRow) -> Value {
-    let id = row.id.to_string();
-    let project_id = row.project_id.to_string();
-    let workspace_id = row.workspace_id.to_string();
-    let row_view = ser::StateRow {
-        id: &id,
-        project_id: &project_id,
-        workspace_id: &workspace_id,
-        name: &row.name,
-        color: &row.color,
-        group: &row.group,
-        default: row.default,
-        description: &row.description,
-        sequence: row.sequence,
-    };
-    let view = ser::state_to_representation(&row_view);
-    serde_json::to_value(&view).expect("state view serializes")
-}
-
-type StateRowTuple = (
-    uuid::Uuid,
-    uuid::Uuid,
-    uuid::Uuid,
-    String,
-    String,
-    String,
-    bool,
-    String,
-    f64,
-);
-
-fn state_row_from(tuple: StateRowTuple) -> StateRow {
-    StateRow {
-        id: tuple.0,
-        project_id: tuple.1,
-        workspace_id: tuple.2,
-        name: tuple.3,
-        color: tuple.4,
-        group: tuple.5,
-        default: tuple.6,
-        description: tuple.7,
-        sequence: tuple.8,
-    }
+    read::render_state(row)
 }
 
 /// `StateViewSet.list` (`state/base.py:84-109`): the scoped queryset
@@ -1377,43 +1296,45 @@ async fn state_create(
         .or(input.sequence)
         .unwrap_or(state_model::DEFAULT_SEQUENCE);
     let name = input.name.expect("validated name");
-    let id = uuid::Uuid::new_v4();
+    let description = input.description.expect("validated description");
+    let color = input.color.expect("validated color");
+    let group = input.group.expect("validated group");
+    let default = input.default.expect("validated default");
     let now = utc_now_micros();
-    let insert = sqlx::query(
-        r#"INSERT INTO states
-           (id, project_id, workspace_id, name, description, color, slug, sequence,
-            "group", is_triage, "default", external_source, external_id,
-            created_at, updated_at, created_by_id, updated_by_id, deleted_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, FALSE, $10, NULL, NULL,
-                   $11, $11, $12, NULL, NULL)"#,
+    let insert = pidash_services::domain::projects::states::create(
+        &pool,
+        &pidash_services::domain::projects::states::NewState {
+            project_id,
+            workspace_id,
+            name: &name,
+            description: &description,
+            color: &color,
+            slug: &state_model::slugify_name(&name),
+            sequence,
+            group: &group,
+            is_triage: false,
+            default,
+            external_source: None,
+            external_id: None,
+            created_by: actor.id,
+            updated_by: None,
+            now,
+            v1: false,
+        },
     )
-    .bind(id)
-    .bind(project_id)
-    .bind(workspace_id)
-    .bind(&name)
-    .bind(input.description.expect("validated description"))
-    .bind(input.color.expect("validated color"))
-    .bind(state_model::slugify_name(&name))
-    .bind(sequence)
-    .bind(input.group.expect("validated group"))
-    .bind(input.default.expect("validated default"))
-    .bind(now)
-    .bind(actor.id)
-    .execute(&pool)
     .await;
-    if let Err(error) = insert {
+    let id = match insert {
+        Ok(id) => id,
         // `except IntegrityError: if "already exists"` — the `DETAIL`
         // line fires exactly for `23505`.
-        if let sqlx::Error::Database(db_error) = &error {
-            if db_error.code().as_deref() == Some("23505") {
-                return Ok(json_response(
-                    StatusCode::BAD_REQUEST,
-                    STATE_DUP_NAME_BODY.to_owned(),
-                ));
-            }
+        Err(sqlx::Error::Database(db_error)) if db_error.code().as_deref() == Some("23505") => {
+            return Ok(json_response(
+                StatusCode::BAD_REQUEST,
+                STATE_DUP_NAME_BODY.to_owned(),
+            ));
         }
-        return Err(Denial::ServerError);
-    }
+        Err(_) => return Err(Denial::ServerError),
+    };
     // `serializer.data` renders the saved instance; re-read unscoped by
     // pk (the post-write re-read precedent).
     let row: Option<StateRowTuple> = sqlx::query_as(
@@ -1492,23 +1413,20 @@ async fn state_partial_update(
     let description = input.description.unwrap_or(current.description);
     let sequence = input.sequence.unwrap_or(current.sequence);
     let now = utc_now_micros();
-    let update = sqlx::query(
-        r#"UPDATE states SET name = $1, color = $2, "group" = $3, "default" = $4,
-                  description = $5, sequence = $6, slug = $7,
-                  updated_at = $8, updated_by_id = $9 WHERE id = $10"#,
-    )
-    .bind(&name)
-    .bind(&color)
-    .bind(&group)
-    .bind(default)
-    .bind(&description)
-    .bind(sequence)
-    .bind(state_model::slugify_name(&name))
-    .bind(now)
-    .bind(actor.id)
-    .bind(pk)
-    .execute(&pool)
-    .await;
+    use pidash_services::domain::projects::states as project_states;
+    let slug = state_model::slugify_name(&name);
+    let patch = project_states::StatePatch {
+        name: name.as_str(),
+        color: color.as_str(),
+        group: group.as_str(),
+        default,
+        description: description.as_str(),
+        sequence,
+        slug: slug.as_str(),
+        updated_at: now,
+        updated_by: actor.id,
+    };
+    let update = project_states::update(&pool, pk, &patch).await;
     if let Err(error) = update {
         if let sqlx::Error::Database(db_error) = &error {
             if db_error.code().as_deref() == Some("23505") {
@@ -1575,27 +1493,13 @@ async fn state_mark_default(
     let pk = parse_uuid_or_invalid(&pk_raw)?;
     // Plain `.update()`s: no `updated_at`/`updated_by` touch (queryset
     // updates bypass `save()`).
-    sqlx::query(
-        r#"UPDATE states s SET "default" = FALSE FROM workspaces w
-           WHERE s.workspace_id = w.id AND w.slug = $1 AND s.project_id = $2
-             AND s."default" AND s.deleted_at IS NULL AND NOT (s."group" = 'triage')"#,
-    )
-    .bind(&slug)
-    .bind(project_id)
-    .execute(&pool)
-    .await
-    .map_err(db_denial)?;
-    sqlx::query(
-        r#"UPDATE states s SET "default" = TRUE FROM workspaces w
-           WHERE s.workspace_id = w.id AND w.slug = $1 AND s.project_id = $2 AND s.id = $3
-             AND s.deleted_at IS NULL AND NOT (s."group" = 'triage')"#,
-    )
-    .bind(&slug)
-    .bind(project_id)
-    .bind(pk)
-    .execute(&pool)
-    .await
-    .map_err(db_denial)?;
+    use pidash_services::domain::projects::states as project_states;
+    project_states::clear_defaults(&pool, &slug, project_id)
+        .await
+        .map_err(db_denial)?;
+    project_states::mark_default(&pool, &slug, project_id, pk)
+        .await
+        .map_err(db_denial)?;
     Ok(no_content())
 }
 
@@ -1660,16 +1564,9 @@ async fn state_destroy(
     // stamps `updated_at`/`updated_by`) + the `soft_delete_related_objects`
     // publish.
     let now = utc_now_micros();
-    sqlx::query(
-        r#"UPDATE states SET deleted_at = $1, updated_at = $1, updated_by_id = $2
-           WHERE id = $3"#,
-    )
-    .bind(now)
-    .bind(actor.id)
-    .bind(pk)
-    .execute(&pool)
-    .await
-    .map_err(db_denial)?;
+    pidash_services::domain::projects::states::soft_delete_app(&pool, pk, now, actor.id)
+        .await
+        .map_err(db_denial)?;
     enqueue_soft_delete(&pool, "state", &pk).await;
     Ok(no_content())
 }
@@ -3010,18 +2907,9 @@ async fn point_destroy(
                 Some(Ok(id)) => *id,
                 _ => return Err(Denial::BadValidation),
             };
-            sqlx::query(
-                r#"UPDATE issues SET estimate_point_id = $1 WHERE id IN (
-                     SELECT i.id FROM issues i JOIN workspaces w ON w.id = i.workspace_id
-                     WHERE i.deleted_at IS NULL AND i.project_id = $2 AND w.slug = $3
-                       AND i.estimate_point_id = $4
-                   )"#,
+            pidash_services::domain::issues::reassign_estimate_point(
+                &pool, new_uuid, project_id, &slug, point_id,
             )
-            .bind(new_uuid)
-            .bind(project_id)
-            .bind(&slug)
-            .bind(point_id)
-            .execute(&pool)
             .await
             .map_err(db_denial)?;
         }

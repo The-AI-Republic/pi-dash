@@ -74,7 +74,7 @@ def _job_state(conn, celery_id: str):
         return cur.fetchone()
 
 
-def test_rust_delete_old_s3_link_stall_fails_bounded(db_conn, broker_url):
+def test_rust_delete_old_s3_link_stall_fails_bounded(db_conn):
     """A wedged S3 fails the Rust expiry job within a bounded time.
 
     The worker dials a black hole (accept, never reply). The delete must

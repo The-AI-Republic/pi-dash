@@ -54,16 +54,16 @@
 //!   emits capital-`Detail` until PIDASHCONV-718 lands).
 //! * Body: [`crate::runner_enroll::read_request_data`] (CPython-exact
 //!   JSON, lowercase 400s, non-JSON content proxied to Django), then
-//!   [`json_cpython::to_serde_publish`](crate::v1_cycles_modules::json_cpython::to_serde_publish)
+//!   [`json::to_serde_publish`](crate::v1_cycles_modules::json::to_serde_publish)
 //!   for the kernel maps.
 //! * Plans: [`session_service`](pidash_services::runner_sessions::session_service)
 //!   (hello, reaper, slug, resume, redeliver),
 //!   [`chat`](pidash_services::runner_runs::chat) (release rows),
 //!   [`finalization`](pidash_services::runner_runs::finalization)
 //!   (reap finalizes),
-//!   [`drain`](pidash_services::runner_sessions::drain) +
-//!   [`pubsub`](pidash_services::runner_sessions::pubsub) (drains,
-//!   sends). Kernel SQL runs verbatim where already parameterized;
+//!   [`live_drains`](pidash_services::runner_sessions::live_drains)
+//!   (drains) + [`pubsub`](pidash_services::runner_sessions::pubsub)
+//!   (sends). Kernel SQL runs verbatim where already parameterized;
 //!   the Django-literal chat builders execute as parameterized
 //!   equivalents (same predicates, locks, order — the L8 `chat.rs`
 //!   precedent).
@@ -130,6 +130,7 @@ use serde_json::{Map, Value};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use pidash_db::redis::client_from_settings;
 use pidash_db::runner_runs::{
     chat_event, chat_message, chat_session, AgentChatMessage, AgentChatSession,
 };
@@ -140,8 +141,6 @@ use pidash_services::runner_runs::chat as chat_kernel;
 use pidash_services::runner_runs::chat::ChatEffect;
 use pidash_services::runner_runs::finalization;
 use pidash_services::runner_runs::LifecycleEffect;
-use pidash_services::runner_sessions::drain as drain_kernel;
-use pidash_services::runner_sessions::guards as session_guards;
 use pidash_services::runner_sessions::pubsub as pubsub_kernel;
 use pidash_services::runner_sessions::pubsub::PubsubStore;
 use pidash_services::runner_sessions::session_service as session_kernel;
@@ -166,7 +165,8 @@ use crate::runner_runs::{
     RunnerPorts,
 };
 use crate::state::AppState;
-use crate::v1_cycles_modules::json_cpython;
+use crate::v1_cycles_modules::json;
+use pidash_compat::py::py_str;
 
 /// Revoke reason stamped on the prior session at open (`:181`).
 const REASON_EVICTED_BY_NEW_SESSION: &str = "evicted_by_new_session";
@@ -250,19 +250,6 @@ fn django_isoformat(now: DateTime<Utc>) -> String {
     truncated.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, false)
 }
 
-/// Api-crate-owned Redis client (the `LivePorts` precedent):
-/// `None` when `REDIS_URL` is unset, empty, or unparsable, mirroring
-/// `redis_instance()` returning `None`.
-fn redis_client(state: &AppState) -> Option<redis::Client> {
-    state
-        .settings()
-        .redis
-        .url
-        .as_deref()
-        .filter(|url| !url.is_empty())
-        .and_then(|url| redis::Client::open(url).ok())
-}
-
 /// Quote an L2 column list for a `SELECT` projection (`"a", "b"`),
 /// so the executing reads cannot drift from the pinned lists.
 fn quoted_columns(table: &str, columns: &[&str]) -> String {
@@ -278,119 +265,6 @@ fn quoted_columns(table: &str, columns: &[&str]) -> String {
 // crate is read-only for this issue, so the formula is restated here
 // for the view-level `str(project_slug)` / `str(in_flight)` reads)
 // ---------------------------------------------------------------------------
-
-/// Python `str(value)` for JSON frame values: `None`/`True`/`False`
-/// spellings, integers verbatim, floats in CPython repr form,
-/// strings as-is, containers in single-quote repr form.
-fn py_str(value: &Value) -> String {
-    match value {
-        Value::Null => "None".to_owned(),
-        Value::Bool(true) => "True".to_owned(),
-        Value::Bool(false) => "False".to_owned(),
-        Value::Number(n) => py_num_str(n),
-        Value::String(s) => s.clone(),
-        Value::Array(items) => {
-            let inner: Vec<String> = items.iter().map(py_repr).collect();
-            format!("[{}]", inner.join(", "))
-        }
-        Value::Object(map) => {
-            let inner: Vec<String> = map
-                .iter()
-                .map(|(k, v)| format!("{}: {}", py_repr_str(k), py_repr(v)))
-                .collect();
-            format!("{{{}}}", inner.join(", "))
-        }
-    }
-}
-
-/// CPython `repr` of a number: integers verbatim, floats via
-/// [`py_float_str`].
-fn py_num_str(n: &serde_json::Number) -> String {
-    if let Some(i) = n.as_i64() {
-        return i.to_string();
-    }
-    if let Some(u) = n.as_u64() {
-        return u.to_string();
-    }
-    n.as_f64()
-        .map(py_float_str)
-        .unwrap_or_else(|| n.to_string())
-}
-
-/// CPython `repr(float)`: Rust's `Debug` shortest round-trip with
-/// the exponent normalized to Python's `e±XX` form.
-fn py_float_str(f: f64) -> String {
-    if f.is_nan() {
-        return "nan".to_owned();
-    }
-    if f.is_infinite() {
-        return if f > 0.0 {
-            "inf".to_owned()
-        } else {
-            "-inf".to_owned()
-        };
-    }
-    let rust = format!("{f:?}");
-    let Some(pos) = rust.find('e') else {
-        return rust;
-    };
-    let (mantissa, exp) = rust.split_at(pos);
-    let exp = &exp[1..];
-    let (sign, digits) = match exp.strip_prefix('-') {
-        Some(digits) => ("-", digits),
-        None => ("+", exp.strip_prefix('+').unwrap_or(exp)),
-    };
-    format!("{mantissa}e{sign}{digits:0>2}")
-}
-
-/// Python `repr(value)` for a value nested in a container: identical
-/// to [`py_str`] except strings, which gain quotes.
-fn py_repr(value: &Value) -> String {
-    match value {
-        Value::String(s) => py_repr_str(s),
-        other => py_str(other),
-    }
-}
-
-/// Python `repr(str)`: single quotes unless the string contains
-/// `'` but not `"`, backslash escapes for quotes, backslashes,
-/// whitespace, and non-printables (`\xNN` / `\uNNNN` /
-/// `\U00NNNNNN`).
-fn py_repr_str(s: &str) -> String {
-    let use_double = s.contains('\'') && !s.contains('"');
-    let quote = if use_double { '"' } else { '\'' };
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push(quote);
-    for c in s.chars() {
-        if c == quote {
-            out.push('\\');
-            out.push(c);
-        } else {
-            match c {
-                '\\' => out.push_str("\\\\"),
-                '\n' => out.push_str("\\n"),
-                '\r' => out.push_str("\\r"),
-                '\t' => out.push_str("\\t"),
-                c if py_printable(c) => out.push(c),
-                c if (c as u32) < 0x100 => {
-                    out.push_str(&format!("\\x{:02x}", c as u32));
-                }
-                c if (c as u32) < 0x1_0000 => {
-                    out.push_str(&format!("\\u{:04x}", c as u32));
-                }
-                c => {
-                    out.push_str(&format!("\\U{:08x}", c as u32));
-                }
-            }
-        }
-    }
-    out.push(quote);
-    out
-}
-
-fn py_printable(c: char) -> bool {
-    !(c.is_control() || c == '\u{7f}' || c == '\u{2028}' || c == '\u{2029}')
-}
 
 // ---------------------------------------------------------------------------
 // Protocol header (`_check_protocol_header`, `:97-119`)
@@ -642,7 +516,7 @@ fn txn_fail_response(fail: TxnFail, runner_id: Uuid) -> Response {
 // Cross-domain ports: real D-14 drains, LivePorts for the rest
 // ---------------------------------------------------------------------------
 
-/// Pool-backed [`PubsubStore`] for the drain sends (the
+/// Pool-backed [`PubsubStore`] for the post-commit sends (the
 /// `teardown.rs` `PoolPubsubStore` precedent): each statement
 /// autocommits, like the source paths that run outside any `atomic`.
 struct SessionPubsub<'p, 's> {
@@ -656,7 +530,7 @@ impl PubsubStore for SessionPubsub<'_, '_> {
         runner_id: Uuid,
         message: &Map<String, Value>,
     ) -> Result<Option<String>, OutboxError> {
-        let redis = redis_client(self.state);
+        let redis = client_from_settings(self.state.settings());
         session_outbox::enqueue_for_runner(
             redis.as_ref(),
             self.pool,
@@ -673,7 +547,7 @@ impl PubsubStore for SessionPubsub<'_, '_> {
         message: &Map<String, Value>,
     ) -> Result<Option<String>, pidash_db::runner_sessions::machine_outbox::MachineOutboxError>
     {
-        let redis = redis_client(self.state);
+        let redis = client_from_settings(self.state.settings());
         pidash_db::runner_sessions::machine_outbox::enqueue_for_machine(
             redis.as_ref(),
             self.pool,
@@ -704,18 +578,19 @@ impl PubsubStore for SessionPubsub<'_, '_> {
         session_id: Uuid,
         reason: &str,
     ) -> Result<(), OutboxError> {
-        sqlx::query(runner_session::REVOKE_SQL)
-            .bind(Utc::now())
-            .bind(reason)
-            .bind(session_id)
-            .execute(self.pool)
-            .await
-            .map_err(OutboxError::Db)?;
+        pidash_services::domain::tokens::revoke_runner_session(
+            self.pool,
+            session_id,
+            Utc::now(),
+            reason,
+        )
+        .await
+        .map_err(OutboxError::Db)?;
         Ok(())
     }
 
     async fn clear_session_marker(&self, session_id: Uuid) -> Result<(), OutboxError> {
-        let redis = redis_client(self.state);
+        let redis = client_from_settings(self.state.settings());
         session_outbox::clear_session_marker(redis.as_ref(), &session_id.to_string()).await
     }
 
@@ -725,7 +600,7 @@ impl PubsubStore for SessionPubsub<'_, '_> {
         old_session_id: Uuid,
         new_session_id: &str,
     ) -> Result<(), OutboxError> {
-        let redis = redis_client(self.state);
+        let redis = client_from_settings(self.state.settings());
         session_outbox::publish_session_eviction(
             redis.as_ref(),
             &runner_id.to_string(),
@@ -812,8 +687,14 @@ impl RunnerPorts for SessionPorts<'_> {
             .await
     }
 
-    async fn complete_project_move_handoff(&self, run_id: Uuid) -> Result<(), PortError> {
-        self.live.complete_project_move_handoff(run_id).await
+    fn complete_project_move_handoff(
+        &self,
+        run_id: Uuid,
+        terminal_created_by: Option<Uuid>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), PortError>> + Send + '_>>
+    {
+        self.live
+            .complete_project_move_handoff(run_id, terminal_created_by)
     }
 
     async fn agent_system_user_id(&self) -> Result<Uuid, PortError> {
@@ -838,215 +719,46 @@ impl RunnerPorts for SessionPorts<'_> {
 }
 
 // ---------------------------------------------------------------------------
-// Drain executors (`matcher.py:194-306` via the `drain` kernel)
+// Drain executors (`matcher.py:194-306` via the public `live_drains` executors)
 // ---------------------------------------------------------------------------
 
-/// `drain_for_runner_by_id` (`:298-303`): runner lookup (miss ⇒ `Ok`,
-/// no tx), else the single-assignment drain.
+/// `drain_for_runner_by_id` (`matcher.py:298-304`): the by-id lookup
+/// (miss ⇒ `Ok`), else the locked drain. Thin caller of the public
+/// executor (PIDASHCONV-1561); the local copy is deleted.
 async fn drain_for_runner_by_id(
     pool: &PgPool,
     state: &AppState,
     runner_id: Uuid,
 ) -> Result<(), String> {
-    let row = sqlx::query(drain_kernel::DRAIN_FOR_RUNNER_BY_ID_LOOKUP_SQL)
-        .bind(runner_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|error| error.to_string())?;
-    if row.is_none() {
-        return Ok(());
-    }
-    drain_for_runner(pool, state, runner_id).await
-}
-
-/// `drain_for_runner` (`:252-296`): re-select the runner under
-/// `SKIP LOCKED`, take the next queued run, write the assignment,
-/// commit, then dispatch the frame (the nested `on_commit` fires
-/// immediately post-commit) and log.
-async fn drain_for_runner(pool: &PgPool, state: &AppState, runner_id: Uuid) -> Result<(), String> {
-    use sqlx::Row;
-    let mut tx = pool.begin().await.map_err(|error| error.to_string())?;
-    let threshold = session_guards::alive_threshold(Utc::now());
-    let locked = sqlx::query(drain_kernel::DRAIN_FOR_RUNNER_LOCK_SQL)
-        .bind(threshold)
-        .bind(runner_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|error| error.to_string())?;
-    let Some(locked) = locked else {
-        tx.commit().await.map_err(|error| error.to_string())?;
-        return Ok(());
-    };
-    let owner_id: Uuid = locked
-        .try_get("owner_id")
-        .map_err(|error| error.to_string())?;
-    let pod_id: Uuid = locked
-        .try_get("pod_id")
-        .map_err(|error| error.to_string())?;
-    let provisioning: String = locked
-        .try_get("provisioning")
-        .map_err(|error| error.to_string())?;
-    let visibility: i16 = locked
-        .try_get("visibility")
-        .map_err(|error| error.to_string())?;
-    // Non-private runners issue no query (the `qs.none()` arm).
-    let Some(next_sql) = drain_kernel::next_for_runner_sql(&provisioning, i32::from(visibility))
-    else {
-        tx.commit().await.map_err(|error| error.to_string())?;
-        return Ok(());
-    };
-    let run = sqlx::query(&next_sql)
-        .bind(pod_id)
-        .bind(runner_id)
-        .bind(owner_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|error| error.to_string())?;
-    let Some(run) = run else {
-        tx.commit().await.map_err(|error| error.to_string())?;
-        return Ok(());
-    };
-    let run_id: Uuid = run.try_get("id").map_err(|error| error.to_string())?;
-    let work_item_id: Option<Uuid> = run
-        .try_get("work_item_id")
-        .map_err(|error| error.to_string())?;
-    let prompt: String = run.try_get("prompt").map_err(|error| error.to_string())?;
-    let run_config: Value = run
-        .try_get("run_config")
-        .map_err(|error| error.to_string())?;
-    let Value::Object(run_config) = run_config else {
-        return Err("drain_for_runner: run_config is not an object".to_owned());
-    };
-    // `$3` is a fresh `timezone.now()` per assignment (`:285-289`).
-    sqlx::query(drain_kernel::ASSIGN_RUN_UPDATE_SQL)
-        .bind(owner_id)
-        .bind(runner_id)
-        .bind(Utc::now())
-        .bind(run_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|error| error.to_string())?;
-    let plan = drain_kernel::plan_assignment(&drain_kernel::AssignmentFacts {
-        run_id,
+    let redis = client_from_settings(state.settings());
+    pidash_services::runner_sessions::live_drains::drain_for_runner_by_id(
+        pool,
+        redis.as_ref(),
+        &state.settings().runner,
         runner_id,
-        owner_id,
-        work_item_id,
-        prompt,
-        run_config,
-    });
-    tx.commit().await.map_err(|error| error.to_string())?;
-    let drain_kernel::DrainEffect::SendAssign { runner_id, message } = &plan.after_commit;
-    let store = SessionPubsub { pool, state };
-    let outcome = pubsub_kernel::send_to_runner(&store, *runner_id, message)
-        .await
-        .map_err(|error| error.to_string())?;
-    for warning in &outcome.warnings {
-        tracing::warn!("{warning}");
-    }
-    tracing::info!("{}", drain_kernel::drain_for_runner_log(runner_id, &run_id));
-    Ok(())
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| error.to_string())
 }
 
-/// `drain_pod_by_id` (`:242-250`): pod lookup (miss ⇒ `Ok`, no tx),
-/// else the drain loop.
+/// `drain_pod_by_id` (`matcher.py:242-251`): pod lookup (miss ⇒
+/// `Ok`, no tx), else the drain loop. Thin caller of the public
+/// executor (PIDASHCONV-1561); the local copy is deleted. The
+/// executor's sends-then-log order fixes this twin, which logged the
+/// info line before sending where Python sends first: a dispatch
+/// failure now propagates with no info line, exactly as Python.
 async fn drain_pod_by_id(pool: &PgPool, state: &AppState, pod_id: Uuid) -> Result<(), String> {
-    let pod = sqlx::query(drain_kernel::DRAIN_POD_BY_ID_LOOKUP_SQL)
-        .bind(pod_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|error| error.to_string())?;
-    if pod.is_none() {
-        return Ok(());
-    }
-    drain_pod(pool, state, pod_id).await
-}
-
-/// `drain_pod` (`:194-239`): lock the idle list, then per runner in
-/// list order take the next queued run, write the assignment, and
-/// plan the frame; commit once; then dispatch each frame in
-/// assignment order (the `teardown.rs` recipe).
-async fn drain_pod(pool: &PgPool, state: &AppState, pod_id: Uuid) -> Result<(), String> {
-    use sqlx::Row;
-    let mut tx = pool.begin().await.map_err(|error| error.to_string())?;
-    let threshold = session_guards::alive_threshold(Utc::now());
-    let runners = sqlx::query(drain_kernel::DRAIN_POD_IDLE_RUNNERS_SQL)
-        .bind(threshold)
-        .bind(pod_id)
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(|error| error.to_string())?;
-    let mut plans: Vec<drain_kernel::AssignmentPlan> = Vec::new();
-    for runner in &runners {
-        let runner_id: Uuid = runner.try_get("id").map_err(|error| error.to_string())?;
-        let owner_id: Uuid = runner
-            .try_get("owner_id")
-            .map_err(|error| error.to_string())?;
-        let provisioning: String = runner
-            .try_get("provisioning")
-            .map_err(|error| error.to_string())?;
-        let visibility: i16 = runner
-            .try_get("visibility")
-            .map_err(|error| error.to_string())?;
-        let Some(next_sql) =
-            drain_kernel::next_for_runner_sql(&provisioning, i32::from(visibility))
-        else {
-            continue;
-        };
-        let run = sqlx::query(&next_sql)
-            .bind(pod_id)
-            .bind(runner_id)
-            .bind(owner_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|error| error.to_string())?;
-        let Some(run) = run else {
-            continue;
-        };
-        let run_id: Uuid = run.try_get("id").map_err(|error| error.to_string())?;
-        let work_item_id: Option<Uuid> = run
-            .try_get("work_item_id")
-            .map_err(|error| error.to_string())?;
-        let prompt: String = run.try_get("prompt").map_err(|error| error.to_string())?;
-        let run_config: Value = run
-            .try_get("run_config")
-            .map_err(|error| error.to_string())?;
-        let Value::Object(run_config) = run_config else {
-            return Err("drain_pod: run_config is not an object".to_owned());
-        };
-        sqlx::query(drain_kernel::ASSIGN_RUN_UPDATE_SQL)
-            .bind(owner_id)
-            .bind(runner_id)
-            .bind(Utc::now())
-            .bind(run_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| error.to_string())?;
-        plans.push(drain_kernel::plan_assignment(
-            &drain_kernel::AssignmentFacts {
-                run_id,
-                runner_id,
-                owner_id,
-                work_item_id,
-                prompt,
-                run_config,
-            },
-        ));
-    }
-    tx.commit().await.map_err(|error| error.to_string())?;
-    if !plans.is_empty() {
-        tracing::info!("{}", drain_kernel::drain_pod_log(&pod_id, plans.len()));
-    }
-    let store = SessionPubsub { pool, state };
-    for plan in &plans {
-        let drain_kernel::DrainEffect::SendAssign { runner_id, message } = &plan.after_commit;
-        let outcome = pubsub_kernel::send_to_runner(&store, *runner_id, message)
-            .await
-            .map_err(|error| error.to_string())?;
-        for warning in &outcome.warnings {
-            tracing::warn!("{warning}");
-        }
-    }
-    Ok(())
+    let redis = client_from_settings(state.settings());
+    pidash_services::runner_sessions::live_drains::drain_pod_by_id(
+        pool,
+        redis.as_ref(),
+        &state.settings().runner,
+        pod_id,
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| error.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -1612,30 +1324,26 @@ async fn open_transaction(
     if let Some(row) = prior {
         let prior = runner_session_from_row(&row).map_err(TxnFail::from)?;
         old_session_id = Some(prior.id.to_string());
-        sqlx::query(runner_session::REVOKE_SQL)
-            .bind(Utc::now())
-            .bind(REASON_EVICTED_BY_NEW_SESSION)
-            .bind(prior.id)
-            .execute(&mut *tx)
-            .await
-            .map_err(TxnFail::from)?;
-    }
-    // `create(… last_seen_at=now())`: the kwarg `now()` evaluates
-    // first, then `auto_now_add` stamps `created_at` — two calls, in
-    // that order.
-    let last_seen_at = Utc::now();
-    let created_at = Utc::now();
-    sqlx::query(runner_session::OPEN_INSERT_SQL)
-        .bind(new_sid)
-        .bind(runner.id)
-        .bind(runner_session::DEFAULT_PROTOCOL_VERSION)
-        .bind(created_at)
-        .bind(last_seen_at)
-        .bind(None::<DateTime<Utc>>)
-        .bind(runner_session::DEFAULT_REVOKED_REASON)
-        .execute(&mut *tx)
+        pidash_services::domain::tokens::revoke_runner_session(
+            &mut *tx,
+            prior.id,
+            Utc::now(),
+            REASON_EVICTED_BY_NEW_SESSION,
+        )
         .await
         .map_err(TxnFail::from)?;
+    }
+    // `create(… last_seen_at=now())`: the kwarg `now()` evaluates
+    // first, then `auto_now_add` stamps `created_at` — the domain
+    // driver keeps that order.
+    pidash_services::domain::tokens::open_runner_session(
+        &mut *tx,
+        new_sid,
+        runner.id,
+        runner_session::DEFAULT_PROTOCOL_VERSION,
+    )
+    .await
+    .map_err(TxnFail::from)?;
     execute_hello(&mut tx, runner, body).await?;
     let mut effects = OpenEffects::default();
     execute_reap_open(&mut tx, runner.id, body, &mut effects).await?;
@@ -1653,9 +1361,10 @@ async fn fire_open_effects(
     pool: &PgPool,
     state: &AppState,
     effects: OpenEffects,
+    terminal_created_by: Option<Uuid>,
 ) -> Result<(), Response> {
     let ports = SessionPorts::new(pool, state);
-    drain_lifecycle_effects(pool, &ports, effects.lifecycle).await?;
+    drain_lifecycle_effects(pool, &ports, effects.lifecycle, terminal_created_by).await?;
     for effect in effects.session_drains {
         match effect {
             session_kernel::SessionEffect::RetryCancelDelivery { runner_id, message } => {
@@ -1676,7 +1385,7 @@ async fn fire_open_effects(
             }
             session_kernel::SessionEffect::CompleteProjectMoveHandoff { run_id } => {
                 ports
-                    .complete_project_move_handoff(run_id)
+                    .complete_project_move_handoff(run_id, terminal_created_by)
                     .await
                     .map_err(|_| server_error())?;
             }
@@ -1937,7 +1646,7 @@ async fn runner_session_open_inner(
     };
     // `body = request.data or {}`: a truthy non-dict reaches
     // `body.get` and 500s (`AttributeError`).
-    let body = match json_cpython::to_serde_publish(&parsed) {
+    let body = match json::to_serde_publish(&parsed) {
         Value::Object(map) => map,
         other if py_truthy(&other) => return server_error(),
         _ => Map::new(),
@@ -1954,7 +1663,7 @@ async fn runner_session_open_inner(
         }
     }
 
-    let redis = redis_client(&state);
+    let redis = client_from_settings(state.settings());
     let rid_key = rid_str.clone();
     if let Err(response) = side_effect(
         runner_id,
@@ -1971,7 +1680,9 @@ async fn runner_session_open_inner(
         Ok(outcome) => outcome,
         Err(fail) => return txn_fail_response(fail, runner_id),
     };
-    if let Err(response) = fire_open_effects(&pool, &state, effects).await {
+    // Daemon request: the crum user is the runner owner.
+    let terminal_created_by = Some(runner.owner_id);
+    if let Err(response) = fire_open_effects(&pool, &state, effects, terminal_created_by).await {
         return response;
     }
 
@@ -2124,7 +1835,7 @@ async fn runner_session_delete_inner(
         _ => return render(runner_id_mismatch_drf()),
     }
 
-    let redis = redis_client(&state);
+    let redis = client_from_settings(state.settings());
     // Canonical (lowercase) rendering: the marker key must match what
     // the open/poll paths write however the URL spelled the id.
     let sid_str = sid.to_string();
@@ -2146,13 +1857,14 @@ async fn runner_session_delete_inner(
         }
         return StatusCode::NO_CONTENT.into_response();
     }
-    if sqlx::query(runner_session::REVOKE_SQL)
-        .bind(Utc::now())
-        .bind(REASON_CLEAN_SHUTDOWN)
-        .bind(sid)
-        .execute(&pool)
-        .await
-        .is_err()
+    if pidash_services::domain::tokens::revoke_runner_session(
+        &pool,
+        sid,
+        Utc::now(),
+        REASON_CLEAN_SHUTDOWN,
+    )
+    .await
+    .is_err()
     {
         return server_error();
     }
@@ -2297,28 +2009,6 @@ mod tests {
             project_slug_mismatch(&serde_json::json!(7), Some("7".to_owned())),
             None
         );
-    }
-
-    /// `py_str` vectors: scalar spellings, float exponents, and
-    /// single-quote container reprs.
-    #[test]
-    fn py_str_vectors() {
-        assert_eq!(py_str(&Value::Null), "None");
-        assert_eq!(py_str(&Value::Bool(true)), "True");
-        assert_eq!(py_str(&Value::Bool(false)), "False");
-        assert_eq!(py_str(&serde_json::json!(5)), "5");
-        assert_eq!(py_str(&serde_json::json!(-42)), "-42");
-        assert_eq!(py_str(&serde_json::json!("CT00003")), "CT00003");
-        assert_eq!(py_str(&serde_json::json!(1.5)), "1.5");
-        assert_eq!(py_str(&serde_json::json!(1e16)), "1e+16");
-        assert_eq!(
-            py_str(&serde_json::json!([1, "a", true, null])),
-            "[1, 'a', True, None]"
-        );
-        assert_eq!(py_str(&serde_json::json!({"k": 1})), "{'k': 1}");
-        assert_eq!(py_repr_str("it\"s"), "'it\"s'");
-        assert_eq!(py_repr_str("it's"), "\"it's\"");
-        assert_eq!(py_repr_str("a'b\"c"), "'a\\'b\"c'");
     }
 
     /// The 401 re-render: the pre-718 capital-`Detail` denial and the
