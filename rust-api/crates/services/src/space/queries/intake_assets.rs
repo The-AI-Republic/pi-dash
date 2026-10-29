@@ -156,9 +156,10 @@ pub fn intake_list_where_sql() -> String {
 /// counted (`views/intake.py:77-81`). The `issue_objects` scope
 /// (`db/models/issue.py:95-104`; single-table conjuncts in
 /// `db::space::columns::issue_objects_scope`, joins owned here) travels into
-/// the subquery.
+/// the subquery. The `states` join is `LEFT OUTER` with the null-safe
+/// triage negation (PB-0343): stateless children ARE counted.
 fn sub_issues_count_sql() -> String {
-    "(SELECT COUNT(U0.\"id\") FROM \"issues\" U0 INNER JOIN \"states\" U1 ON (U0.\"state_id\" = U1.\"id\") INNER JOIN \"projects\" U2 ON (U0.\"project_id\" = U2.\"id\") WHERE (U0.\"deleted_at\" IS NULL AND U0.\"archived_at\" IS NULL AND U0.\"is_draft\" = false AND U1.\"group\" != 'triage' AND U2.\"archived_at\" IS NULL AND U0.\"parent_id\" = (\"issues\".\"id\"))) AS \"sub_issues_count\"".to_string()
+    "(SELECT COUNT(U0.\"id\") FROM \"issues\" U0 LEFT OUTER JOIN \"states\" U1 ON (U0.\"state_id\" = U1.\"id\") INNER JOIN \"projects\" U2 ON (U0.\"project_id\" = U2.\"id\") WHERE (U0.\"deleted_at\" IS NULL AND U0.\"archived_at\" IS NULL AND U0.\"is_draft\" = false AND NOT (U1.\"group\" = 'triage' AND U1.\"group\" IS NOT NULL) AND U2.\"archived_at\" IS NULL AND U0.\"parent_id\" = (\"issues\".\"id\"))) AS \"sub_issues_count\"".to_string()
 }
 
 /// N2 link count: `IssueLink.objects.filter(issue=OuterRef("id"))` counted
