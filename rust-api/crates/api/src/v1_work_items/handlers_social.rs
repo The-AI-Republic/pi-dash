@@ -3867,6 +3867,7 @@ async fn comment_post_inner(
         &resolve_created_at,
         operations::comments::CommentCreateOptions {
             emit_activity: true,
+            emit_model_activity: true,
         },
     )
     .await?;
@@ -4026,6 +4027,7 @@ async fn comment_patch_inner(
         &write,
         operations::comments::CommentUpdateOptions {
             emit_activity: true,
+            emit_model_activity: true,
         },
     )
     .await?;

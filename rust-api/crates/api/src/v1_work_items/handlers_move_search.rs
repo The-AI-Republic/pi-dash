@@ -1030,7 +1030,7 @@ async fn move_inner(
         project_id,
         pk: *pk,
         target_ref: &target_ref,
-        origin,
+        origin: Some(origin),
         web_base,
     };
     let outcome = operations::issues::move_to_project(&deps, &ctx, &write, drain, creation).await?;

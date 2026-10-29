@@ -3012,8 +3012,15 @@ pub struct IssueWrite<'a> {
 pub struct CreateOptions {
     /// Emit the `issue_activity` created leg. The v1 view passes `true`;
     /// callers that enqueue their own shaped activity (the MCP tools)
-    /// pass `false`. The webhook (`model_activity`) leg always runs.
+    /// pass `false`.
     pub emit_activity: bool,
+    /// Emit the webhook (`model_activity`) leg. The v1 view passes
+    /// `true`; origin-less callers that enqueue their own shaped legs
+    /// (the MCP tools) pass `false`, which skips the leg entirely — no
+    /// origin is required and no [`ChainStop::Origin`] is recorded.
+    ///
+    /// [`ChainStop::Origin`]: domain_issues::ChainStop::Origin
+    pub emit_model_activity: bool,
 }
 
 /// Per-caller options for [`update`] (design D6).
@@ -3088,6 +3095,32 @@ async fn render_write_response(
                 db_error(source, site)
             }
         })
+}
+
+/// The create's `model_activity` spec, unless the caller suppresses the
+/// leg (design D6): origin-less callers (the MCP tools) pass
+/// `emit_model_activity: false` and enqueue their own shaped legs, so no
+/// spec is built, no origin is required, and the chain records no
+/// [`ChainStop::Origin`](domain_issues::ChainStop::Origin).
+fn create_model_activity(
+    model: Uuid,
+    requested: Value,
+    actor: Uuid,
+    slug: String,
+    origin: Option<String>,
+    emit_model_activity: bool,
+) -> Option<domain_issues::ModelActivitySpec> {
+    if !emit_model_activity {
+        return None;
+    }
+    Some(domain_issues::ModelActivitySpec {
+        model,
+        requested,
+        current: Value::Null,
+        actor,
+        slug,
+        origin,
+    })
 }
 
 /// `POST .../issues/` (`IssueListCreateAPIEndpoint.post`,
@@ -3228,14 +3261,20 @@ pub async fn create(
     let default_assignee_id = project.default_assignee_id;
     let transition: Arc<dyn IssueTransitionHook> = deps.transition.clone();
     let enqueue: Arc<dyn TaskEnqueueHook> = deps.enqueue.clone();
-    let origin = write.origin.clone();
     let emit_activity = options.emit_activity;
+    let model_activity = create_model_activity(
+        new_id,
+        data,
+        actor_id,
+        slug.to_owned(),
+        write.origin.clone(),
+        options.emit_model_activity,
+    );
     let outcome = domain::run(ctx, &deps.orm, |txn| {
         let transition = transition.clone();
         let enqueue = enqueue.clone();
         let pool = deps.pool.clone();
         let ctx = ctx.clone();
-        let slug = slug.to_owned();
         Box::pin(async move {
             txn.hooks_mut().register(transition);
             txn.hooks_mut().register(enqueue);
@@ -3260,14 +3299,7 @@ pub async fn create(
                     activity_require_origin: false,
                     skip_activity: !emit_activity,
                     skip_fire: false,
-                    model_activity: Some(domain_issues::ModelActivitySpec {
-                        model: new_id,
-                        requested: data,
-                        current: Value::Null,
-                        actor: actor_id,
-                        slug,
-                        origin,
-                    }),
+                    model_activity,
                     created_override: Some(domain_issues::CreatedOverride {
                         created_at: override_created_at,
                         created_by: override_created_by,
@@ -3623,8 +3655,12 @@ pub struct MoveWrite<'a> {
     /// body's `project` member (missing reads JSON null, which the driver
     /// blanks to the required-400).
     pub target_ref: &'a Value,
-    /// The settings-derived app origin (`base_host`, `is_app=True`).
-    pub origin: String,
+    /// The settings-derived app origin (`base_host`, `is_app=True`), if
+    /// configured. Origin-less callers (the MCP tools, no HTTP request)
+    /// pass `None`; the domain move enqueues the `model_activity` leg
+    /// with a JSON-null origin, exactly Django's `.delay(origin=None)`
+    /// wire bytes.
+    pub origin: Option<String>,
     /// The settings-derived web base for rendered URLs, if configured.
     pub web_base: Option<String>,
 }
@@ -3681,7 +3717,7 @@ pub async fn move_to_project(
                     project_id,
                     pk: pk_owned,
                     target_ref: &target_ref,
-                    origin: Some(origin.clone()),
+                    origin: origin.clone(),
                     web_base_url: web_base_owned.as_deref(),
                     now,
                     prev_state: prev,
@@ -4029,5 +4065,79 @@ mod move_tests {
         assert_eq!(item.identifier, "PROJ-42");
         assert_eq!(item.state, Some("Todo"));
         assert_eq!(item.state_group, Some("unstarted"));
+    }
+}
+
+#[cfg(test)]
+mod suppression_tests {
+    use super::*;
+
+    #[test]
+    fn suppressed_create_builds_no_model_activity_spec() {
+        // The MCP options (`emit_model_activity: false`) with no origin:
+        // the create pushes no webhook leg, so the chain records no
+        // `Origin` stop and the operation answers 201 instead of 500.
+        // Suppression wins even when an origin is configured.
+        let requested = serde_json::json!({"name": "n"});
+        for origin in [None, Some("https://app.example.test".to_owned())] {
+            assert!(create_model_activity(
+                Uuid::nil(),
+                requested.clone(),
+                Uuid::nil(),
+                "ws".to_owned(),
+                origin,
+                false,
+            )
+            .is_none());
+        }
+    }
+
+    #[test]
+    fn emitting_create_forwards_origin_into_spec() {
+        // The v1 options (`emit_model_activity: true`) build the spec
+        // with the origin forwarded — including a `None` origin, which
+        // the chain then stops on (`ChainStop::Origin`), exactly the
+        // view's `base_host` raise past the save.
+        let requested = serde_json::json!({"name": "n"});
+        let model = Uuid::new_v4();
+        let actor = Uuid::new_v4();
+        let spec = create_model_activity(
+            model,
+            requested.clone(),
+            actor,
+            "ws".to_owned(),
+            Some("https://app.example.test".to_owned()),
+            true,
+        )
+        .expect("spec");
+        assert_eq!(spec.model, model);
+        assert_eq!(spec.requested, requested);
+        assert_eq!(spec.current, Value::Null);
+        assert_eq!(spec.actor, actor);
+        assert_eq!(spec.slug, "ws");
+        assert_eq!(spec.origin.as_deref(), Some("https://app.example.test"));
+        let spec = create_model_activity(model, requested, actor, "ws".to_owned(), None, true)
+            .expect("spec");
+        assert_eq!(spec.origin, None);
+    }
+
+    #[test]
+    fn move_write_accepts_none_origin() {
+        // The origin-less (`None`) move the MCP layer passes: the type
+        // admits it, and the operation forwards it into
+        // `MoveInput.origin` — the domain move then enqueues the
+        // null-origin webhook, pinned at the leg by
+        // `move_model_activity_leg_none_origin_enqueues_null`.
+        let target = Value::Null;
+        let write = MoveWrite {
+            slug: "ws",
+            project_id: Uuid::nil(),
+            pk: Uuid::nil(),
+            target_ref: &target,
+            origin: None,
+            web_base: None,
+        };
+        let forwarded: Option<String> = write.origin.clone();
+        assert_eq!(forwarded, None);
     }
 }
