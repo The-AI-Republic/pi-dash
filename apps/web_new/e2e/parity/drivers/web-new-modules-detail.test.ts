@@ -82,7 +82,6 @@ class FakePage {
       nth: () => self.locator(id),
       filter: (options: { has?: Locator; hasText?: string | RegExp }) =>
         self.locator(`${id} has(${String((options.has as never)?.["__id"] ?? "")},${String(options.hasText ?? "")})`),
-      or: (other: Locator) => self.locator(`${id} or(${(other as never)?.["__id"] ?? ""})`),
       getByTestId: (testId: string) => self.locator(`${id} testid(${testId})`),
       getByRole: (role: string, options?: { name?: string }) =>
         self.locator(`${id} role(${role},${options?.name ?? ""})`),
@@ -880,8 +879,9 @@ describe("modulesDetailSlowFetchShowsLoader", () => {
     expect(fake.pageCalls).toContain("reload");
     // Either skeleton proves the loading state: the route pending
     // skeleton while the prefetch stalls, or the analytics sidebar's.
-    expect(fake.keys).toContain("testid:issues-skeleton-list");
-    expect(fake.keys).toContain("testid:modules-analytics-sidebar-skeleton");
+    expect(fake.keys).toContain(
+      'css:[data-testid="issues-skeleton-list"], [data-testid="modules-analytics-sidebar-skeleton"]'
+    );
   });
 
   it("delays GET reads and continues", async () => {

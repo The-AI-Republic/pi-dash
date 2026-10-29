@@ -32922,20 +32922,25 @@ export class WebNewDriver implements ParityDriver {
     // user sees is the route's pending skeleton (the shared list
     // skeleton); the analytics sidebar skeleton covers that panel's own
     // refetch window when it is open. Either one proves the loading
-    // state, the way the oracle's any-pulse watch does.
-    const seenPromise = this.page
-      .getByTestId("issues-skeleton-list")
-      .or(this.page.getByTestId("modules-analytics-sidebar-skeleton"))
-      .first()
-      .waitFor({ timeout: 90_000 })
-      .then(
-        () => true,
-        () => false
-      );
-    await this.page.reload({ waitUntil: "domcontentloaded" });
-    const seen = await seenPromise;
-    await this.moduleSidebar().first().waitFor({ timeout: WebNewDriver.WAIT_MS });
-    return seen;
+    // state, the way the oracle's any-pulse watch does. Reload first,
+    // then poll: a watch armed before the navigation misses the pending
+    // window (the issues gate's ganttLoadingObservedOnReload shape).
+    await this.page.reload();
+    const deadline = Date.now() + 90_000;
+    for (;;) {
+      const loader = this.page
+        .locator('[data-testid="issues-skeleton-list"], [data-testid="modules-analytics-sidebar-skeleton"]')
+        .first();
+      if ((await loader.count()) > 0 && (await loader.isVisible().catch(() => false))) {
+        await this.moduleSidebar().first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+        return true;
+      }
+      if (Date.now() > deadline) {
+        await this.moduleSidebar().first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+        return false;
+      }
+      await this.page.waitForTimeout(250);
+    }
   }
 
   /** The module analytics sidebar (slice C's tree, both mounts). */
