@@ -9,7 +9,7 @@
 import type { SpaceBoardIssue, SpaceBoardIssuePage, SpaceBoardIssueQuery, SpaceBoardState } from "@pidash/api-client";
 
 import type { SpaceBoardFilters, SpaceLayout } from "../lib/address.js";
-import { SPACE_LAYOUTS } from "../lib/address.js";
+import { SPACE_LAYOUTS, facetValuesOf } from "../lib/address.js";
 
 /** Rows requested per group, first and later pages alike. */
 export const SPACE_BOARD_PAGE_SIZE = 50;
@@ -38,8 +38,7 @@ export function resolveSpaceLayout(requested: SpaceLayout | undefined, offered: 
 
 /** A stable identity for one filter combination, used for caches and resets. */
 export function spaceFilterSignature(filters: SpaceBoardFilters): string {
-  const part = (values: readonly string[] | undefined): string => (values === undefined ? "" : values.join(","));
-  return [part(filters.state), part(filters.priority), part(filters.labels)].join("|");
+  return [filters.state ?? "", filters.priority ?? "", filters.labels ?? ""].join("|");
 }
 
 /**
@@ -53,15 +52,17 @@ export function spaceBoardQuery(
   cursor: string = SPACE_FIRST_GROUP_CURSOR,
   state?: string
 ): SpaceBoardIssueQuery {
-  const stateValues = state === undefined ? filters.state : [state];
+  const stateValues = state === undefined ? facetValuesOf(filters.state) : [state];
+  const priorityValues = facetValuesOf(filters.priority);
+  const labelValues = facetValuesOf(filters.labels);
   return {
     groupBy: "state_id",
     perPage: SPACE_BOARD_PAGE_SIZE,
     cursor,
     orderBy: SPACE_BOARD_ORDER,
-    ...(stateValues === undefined ? {} : { state: [...stateValues] }),
-    ...(filters.priority === undefined ? {} : { priority: [...filters.priority] }),
-    ...(filters.labels === undefined ? {} : { labels: [...filters.labels] }),
+    ...(stateValues.length === 0 ? {} : { state: stateValues }),
+    ...(priorityValues.length === 0 ? {} : { priority: priorityValues }),
+    ...(labelValues.length === 0 ? {} : { labels: labelValues }),
   };
 }
 

@@ -30,11 +30,22 @@ export const SPACE_PRIORITIES = ["urgent", "high", "medium", "low", "none"] as c
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-/** The filter facets a board address can carry (slice F owns their UI). */
+/**
+ * The filter facets a board address can carry (slice F owns their UI).
+ * Facets stay comma-joined strings (never arrays): the router's default
+ * search serializer JSON-encodes arrays, which would spell multi-value
+ * facets as `?state=["a","b"]` instead of the specified `?state=a,b`
+ * (SPC-035). Readers split with {@link facetValuesOf}.
+ */
 export interface SpaceBoardFilters {
-  state?: readonly string[] | undefined;
-  priority?: readonly string[] | undefined;
-  labels?: readonly string[] | undefined;
+  state?: string | undefined;
+  priority?: string | undefined;
+  labels?: string | undefined;
+}
+
+/** Split one comma-joined facet (or array shape) into its values. */
+export function facetValuesOf(value: unknown): string[] {
+  return listParam(value) ?? [];
 }
 
 export interface SpaceBoardSearch extends SpaceBoardFilters {
@@ -100,9 +111,12 @@ function validPriorities(value: unknown): string[] | undefined {
 export function parseSpaceBoardSearch(search: Record<string, unknown>): SpaceBoardSearch {
   const board = validLayout(stringParam(search["board"]));
   const peekId = stringParam(search["peekId"]);
-  const state = validIds(search["state"]);
-  const priority = validPriorities(search["priority"]);
-  const labels = validIds(search["labels"]);
+  // Validated facets rejoin into comma-joined strings so the router
+  // serializes them back byte-identical (SPC-035); arrays would leave as
+  // JSON under the default search serializer.
+  const state = validIds(search["state"])?.join(",");
+  const priority = validPriorities(search["priority"])?.join(",");
+  const labels = validIds(search["labels"])?.join(",");
   return {
     ...(board === undefined ? {} : { board }),
     ...(peekId === undefined ? {} : { peekId }),
@@ -157,10 +171,17 @@ export function spaceReturnPath(anchor: string, search: SpaceBoardSearch): strin
 
 /**
  * Landing address for an anonymous sign-in link. The value stays
- * subtree-relative (no `/spaces` prefix) and keeps its path slashes literal,
- * so both the server and the oracle read the position unchanged.
+ * subtree-relative (no `/spaces` prefix) and keeps the path slashes and the
+ * query punctuation (`?`, `&`, `=`) literal, exactly like the old app's
+ * `/?next_path=<path>?<query>` links: the landing parses `board` out of
+ * `next_path` the old way, and a `peekId` rides as its own outer param and
+ * is dropped on return — also the old way (SPC-013 pins the literal form).
  */
 export function spaceSignInHref(anchor: string, search: SpaceBoardSearch): string {
-  const encoded = encodeURIComponent(spaceReturnPath(anchor, search)).replaceAll("%2F", "/");
+  const encoded = encodeURIComponent(spaceReturnPath(anchor, search))
+    .replaceAll("%2F", "/")
+    .replaceAll("%3F", "?")
+    .replaceAll("%26", "&")
+    .replaceAll("%3D", "=");
   return `${SPACE_BASE}/?next_path=${encoded}`;
 }

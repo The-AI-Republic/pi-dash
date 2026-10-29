@@ -27,7 +27,7 @@ function markKind(): string | null {
 }
 
 describe("resolveSpaceMarkKind", () => {
-  const cases: Array<[string, SpaceBoardProject | null, SpaceMarkKind]> = [
+  const cases: Array<[string, SpaceBoardProject | null, SpaceMarkKind | "throw"]> = [
     ["icon branch", detailsWith({ in_use: "icon", icon: { name: "rocket_launch", color: "#1075e1" } }), "icon"],
     ["unknown icon name keeps the icon branch", detailsWith({ in_use: "icon", icon: { name: "rocket" } }), "icon"],
     ["emoji branch", detailsWith({ in_use: "emoji", emoji: { value: "128512" } }), "emoji"],
@@ -37,15 +37,23 @@ describe("resolveSpaceMarkKind", () => {
     ["non-map logo_props falls back", detailsWith("not-a-map" as unknown as Record<string, unknown>), "fallback"],
     ["null logo_props falls back", detailsWith(null as unknown as Record<string, unknown>), "fallback"],
     ["array logo_props falls back", detailsWith([] as unknown as Record<string, unknown>), "fallback"],
-    ["out-of-range emoji falls back", detailsWith({ in_use: "emoji", emoji: { value: "99999999" } }), "fallback"],
     [
-      "undecodable emoji falls back",
+      "out-of-range emoji throws to the boundary",
+      detailsWith({ in_use: "emoji", emoji: { value: "99999999" } }),
+      "throw",
+    ],
+    [
+      "undecodable emoji throws to the boundary",
       detailsWith({ in_use: "emoji", emoji: { value: "not-a-code-point" } }),
-      "fallback",
+      "throw",
     ],
   ];
   it.each(cases)("%s", (_label, details, kind) => {
-    expect(resolveSpaceMarkKind(details)).toBe(kind);
+    if (kind === "throw") {
+      expect(() => resolveSpaceMarkKind(details)).toThrow(RangeError);
+    } else {
+      expect(resolveSpaceMarkKind(details)).toBe(kind);
+    }
   });
 });
 
@@ -94,13 +102,17 @@ describe("SpaceProjectMark", () => {
     expect(screen.getByTestId("space-navbar-mark")).toHaveTextContent("");
   });
 
-  it("renders the generic mark for malformed logo_props instead of crashing", () => {
-    const { unmount } = render(
-      <SpaceProjectMark details={detailsWith("not-a-map" as unknown as Record<string, unknown>)} />
-    );
+  it("renders the generic mark when logo_props is not a map", () => {
+    render(<SpaceProjectMark details={detailsWith("not-a-map" as unknown as Record<string, unknown>)} />);
     expect(markKind()).toBe("fallback");
-    unmount();
-    render(<SpaceProjectMark details={detailsWith({ in_use: "emoji", emoji: { value: "99999999" } })} />);
-    expect(markKind()).toBe("fallback");
+  });
+
+  it("throws a corrupt emoji code point to the space error boundary (SPC-019)", () => {
+    expect(() =>
+      render(<SpaceProjectMark details={detailsWith({ in_use: "emoji", emoji: { value: "99999999" } })} />)
+    ).toThrow(RangeError);
+    expect(() =>
+      render(<SpaceProjectMark details={detailsWith({ in_use: "emoji", emoji: { value: "not-a-code-point" } })} />)
+    ).toThrow(RangeError);
   });
 });

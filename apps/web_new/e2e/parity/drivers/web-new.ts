@@ -7,7 +7,16 @@
 // fill these in method by method; the oracle driver stays untouched.
 import { readFileSync, statSync } from "node:fs";
 
-import { expect, test, type CDPSession, type Locator, type Page, type Route, type WebSocket } from "@playwright/test";
+import {
+  expect,
+  test,
+  type CDPSession,
+  type Locator,
+  type Page,
+  type Request,
+  type Route,
+  type WebSocket,
+} from "@playwright/test";
 
 import { sessionBrowserCookies, signInSessionRetry } from "../helpers/api";
 import { bridgeParityAssetBucket } from "../helpers/asset-bucket.js";
@@ -1187,7 +1196,11 @@ export class WebNewDriver implements ParityDriver {
   // apps/web_new; the oracle driver already implements these.
   async openAuthenticated(path: string, cookies: ParityBrowserCookie[]): Promise<void> {
     await this.page.context().addCookies(cookies);
-    await this.page.goto(path, { waitUntil: "domcontentloaded" });
+    // The old app serves public boards at the root; the new app mounts the
+    // same addresses under /spaces. No other area passes /issues/* paths,
+    // so this prefix is space-only by construction.
+    const target = path.startsWith("/issues/") ? `/spaces${path}` : path;
+    await this.page.goto(target, { waitUntil: "domcontentloaded" });
     await this.page.waitForLoadState("domcontentloaded");
   }
   async currentPath(): Promise<string> {
@@ -43273,86 +43286,559 @@ export class WebNewDriver implements ParityDriver {
     await this.page.waitForLoadState("domcontentloaded");
   }
   // --- Space layouts & cards oracle (NEWFRONT-449, SPC-020..033). ---
+  private static readonly SPACE_BOARD_ISSUES_PATTERN = /\/api\/public\/anchor\/[^/]+\/issues\/?(\?|$)/;
+
+  /** Switcher options in display order. */
+  private spaceBoardSwitcherOptions(): Locator {
+    return this.page.getByTestId("space-layout-option");
+  }
+
+  /** Run work while counting public-issues list fetches. */
+  private async spaceBoardCountIssuesRequests(work: () => Promise<void>): Promise<number> {
+    let hits = 0;
+    const onRequest = (req: Request): void => {
+      if (WebNewDriver.SPACE_BOARD_ISSUES_PATTERN.test(req.url())) hits += 1;
+    };
+    this.page.on("request", onRequest);
+    try {
+      await work();
+    } finally {
+      this.page.off("request", onRequest);
+    }
+    return hits;
+  }
+
+  /** Resolve once either layout's content (or the empty notice) renders. */
+  private async spaceBoardWaitForLayout(): Promise<void> {
+    const shellRendered = (): boolean => {
+      if (document.querySelector('[data-testid="space-list-layout"]') !== null) return true;
+      if (document.querySelector('[data-testid="space-board-layout"]') !== null) return true;
+      return document.querySelector('[data-testid="space-board-empty"]') !== null;
+    };
+    const settled = await this.page.waitForFunction(shellRendered, null, { timeout: 60_000 }).then(
+      () => true,
+      () => false
+    );
+    if (!settled) {
+      await this.page.reload({ timeout: WebNewDriver.WAIT_MS }).catch(() => {});
+      await this.page.waitForLoadState("domcontentloaded", { timeout: WebNewDriver.WAIT_MS }).catch(() => {});
+      await this.page.waitForFunction(shellRendered, null, { timeout: 60_000 });
+    }
+    await this.page
+      .waitForFunction(
+        (): boolean => {
+          if (document.querySelector("a[id^='issue-']") !== null) return true;
+          return document.querySelector('[data-testid="space-board-empty"]') !== null;
+        },
+        null,
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .catch(() => {
+        throw new Error("[parity] board content never rendered its rows.");
+      });
+  }
+
   async spaceBoardLayoutOptions(): Promise<string[]> {
-    return todo("spaceBoardLayoutOptions");
+    const options = this.spaceBoardSwitcherOptions();
+    await options.first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const count = await options.count();
+    const out: string[] = [];
+    for (let i = 0; i < count; i++) {
+      const key = (await options.nth(i).getAttribute("data-layout")) ?? "";
+      if (key === "") throw new Error("[parity] switcher option carries no layout key.");
+      out.push(key);
+    }
+    return out;
   }
+
   async spaceBoardActiveLayout(): Promise<string> {
-    return todo("spaceBoardActiveLayout");
+    await this.spaceBoardWaitForLayout();
+    await this.page.waitForFunction(() => new URL(window.location.href).searchParams.get("board") !== null, null, {
+      timeout: WebNewDriver.WAIT_MS,
+    });
+    return new URL(this.page.url()).searchParams.get("board") ?? "";
   }
-  async spaceBoardSwitchLayout(_layout: string): Promise<void> {
-    return todo("spaceBoardSwitchLayout");
+
+  async spaceBoardSwitchLayout(layout: string): Promise<void> {
+    const options = this.spaceBoardSwitcherOptions();
+    await options.first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const direct = this.page.locator(`[data-testid="space-layout-option"][data-layout="${layout}"]`);
+    if ((await direct.count()) === 0) throw new Error(`[parity] switcher offers no ${JSON.stringify(layout)} layout.`);
+    await direct.first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.waitForFunction(
+      (want: string) => new URL(window.location.href).searchParams.get("board") === want,
+      layout,
+      { timeout: WebNewDriver.WAIT_MS }
+    );
+    await this.spaceBoardWaitForLayout();
   }
-  async spaceBoardSwitchLayoutRefetches(_layout: string): Promise<number> {
-    return todo("spaceBoardSwitchLayoutRefetches");
+
+  async spaceBoardSwitchLayoutRefetches(layout: string): Promise<number> {
+    await this.spaceBoardWaitForLayout();
+    await this.page.waitForTimeout(1000);
+    return this.spaceBoardCountIssuesRequests(async () => {
+      await this.spaceBoardSwitchLayout(layout);
+      await this.page.waitForTimeout(1500);
+    });
   }
   async spaceBoardListGroups(): Promise<SpaceBoardGroupFacts[]> {
-    return todo("spaceBoardListGroups");
+    await this.spaceBoardWaitForLayout();
+    return this.page.evaluate((): SpaceBoardGroupFacts[] => {
+      const groups = [...document.querySelectorAll('[data-testid="space-list-group"]')];
+      return groups.map((group) => {
+        const name = group.querySelector('[data-testid="space-group-name"]')?.textContent?.trim() ?? "";
+        const raw = Number(group.querySelector('[data-testid="space-group-count"]')?.textContent?.trim() ?? "0");
+        const rows = group.querySelectorAll('[data-testid="space-board-issue"]').length;
+        return { name, count: Number.isNaN(raw) ? 0 : raw, rows };
+      });
+    });
   }
+
   async spaceBoardKanbanColumns(): Promise<SpaceBoardGroupFacts[]> {
-    return todo("spaceBoardKanbanColumns");
+    await this.spaceBoardWaitForLayout();
+    return this.page.evaluate((): SpaceBoardGroupFacts[] => {
+      const columns = [...document.querySelectorAll('[data-testid="space-board-column"]')];
+      return columns.map((column) => {
+        const name = column.querySelector('[data-testid="space-group-name"]')?.textContent?.trim() ?? "";
+        const raw = Number(column.querySelector('[data-testid="space-group-count"]')?.textContent?.trim() ?? "0");
+        const cards = column.querySelectorAll('[data-testid="space-board-card"]').length;
+        return { name, count: Number.isNaN(raw) ? 0 : raw, rows: cards };
+      });
+    });
   }
+
   async spaceBoardKanbanColumnsFlow(): Promise<"row" | "column" | "single"> {
-    return todo("spaceBoardKanbanColumnsFlow");
+    return this.page.evaluate((): "row" | "column" | "single" => {
+      const columns = [...document.querySelectorAll('[data-testid="space-board-column"]')];
+      const first = columns[0];
+      const second = columns[1];
+      if (first === undefined || second === undefined) return "single";
+      const a = first.getBoundingClientRect();
+      const b = second.getBoundingClientRect();
+      const overlapY = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+      if (b.left > a.left && overlapY > 0) return "row";
+      return "column";
+    });
   }
+
   async spaceBoardEmptyVisible(): Promise<boolean> {
-    return todo("spaceBoardEmptyVisible");
+    await this.spaceBoardWaitForLayout();
+    return this.page
+      .getByTestId("space-board-empty")
+      .isVisible()
+      .catch(() => false);
   }
-  async spaceBoardListGroupLoadMoreVisible(_groupName: string): Promise<boolean> {
-    return todo("spaceBoardListGroupLoadMoreVisible");
+  /** Index of one list group by its exact header name. */
+  private async spaceNewListGroupIndex(groupName: string): Promise<number> {
+    const index = await this.page.evaluate((want: string): number => {
+      const groups = [...document.querySelectorAll('[data-testid="space-list-group"]')];
+      return groups.findIndex(
+        (g) => (g.querySelector('[data-testid="space-group-name"]')?.textContent?.trim() ?? "") === want
+      );
+    }, groupName);
+    if (index < 0) throw new Error(`[parity] list shows no ${JSON.stringify(groupName)} group.`);
+    return index;
   }
-  async spaceBoardListGroupLoadMore(_groupName: string): Promise<void> {
-    return todo("spaceBoardListGroupLoadMore");
+
+  /** Rows rendered in one list group. */
+  private async spaceNewListGroupRowCount(index: number): Promise<number> {
+    return this.page.evaluate((i: number): number => {
+      const groups = [...document.querySelectorAll('[data-testid="space-list-group"]')];
+      const group = groups[i] ?? null;
+      return group === null ? 0 : group.querySelectorAll('[data-testid="space-board-issue"]').length;
+    }, index);
   }
-  async spaceBoardListGroupShowsLoader(_groupName: string): Promise<boolean> {
-    return todo("spaceBoardListGroupShowsLoader");
+
+  /** Root element of one list group, located through its header. */
+  private spaceNewListGroupRoot(groupName: string): Locator {
+    const header = this.page.getByTestId("space-list-group-header").filter({ hasText: groupName });
+    return header.locator('xpath=ancestor::*[@data-testid="space-list-group"][1]');
   }
-  async spaceBoardKanbanColumnScrollLoad(_columnName: string): Promise<void> {
-    return todo("spaceBoardKanbanColumnScrollLoad");
+
+  async spaceBoardListGroupLoadMoreVisible(groupName: string): Promise<boolean> {
+    const control = this.spaceNewListGroupRoot(groupName).getByTestId("space-list-load-more");
+    return control.isVisible().catch(() => false);
   }
-  async spaceBoardKanbanColumnShowsLoader(_columnName: string): Promise<boolean> {
-    return todo("spaceBoardKanbanColumnShowsLoader");
+
+  async spaceBoardListGroupLoadMore(groupName: string): Promise<void> {
+    const index = await this.spaceNewListGroupIndex(groupName);
+    const before = await this.spaceNewListGroupRowCount(index);
+    const control = this.spaceNewListGroupRoot(groupName).getByTestId("space-list-load-more");
+    await control.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await control.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.waitForFunction(
+      ([i, prev]: [number, number]): boolean => {
+        const groups = [...document.querySelectorAll('[data-testid="space-list-group"]')];
+        const group = groups[i] ?? null;
+        const now = group === null ? 0 : group.querySelectorAll('[data-testid="space-board-issue"]').length;
+        return now > prev;
+      },
+      [index, before] as [number, number],
+      { timeout: WebNewDriver.WAIT_MS }
+    );
   }
-  async spaceBoardKanbanScrollBurstFetches(_columnName: string, _scrolls: number): Promise<number> {
-    return todo("spaceBoardKanbanScrollBurstFetches");
+
+  async spaceBoardListGroupShowsLoader(groupName: string): Promise<boolean> {
+    const index = await this.spaceNewListGroupIndex(groupName);
+    let seen = false;
+    await this.page.route(
+      WebNewDriver.SPACE_BOARD_ISSUES_PATTERN,
+      async (route) => {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        await route.continue();
+      },
+      { times: 1 }
+    );
+    try {
+      const before = await this.spaceNewListGroupRowCount(index);
+      const control = this.spaceNewListGroupRoot(groupName).getByTestId("space-list-load-more");
+      await control.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+      await control.click({ timeout: WebNewDriver.WAIT_MS });
+      const deadline = Date.now() + 8000;
+      for (;;) {
+        const pulse = await this.page.evaluate((i: number): boolean => {
+          const groups = [...document.querySelectorAll('[data-testid="space-list-group"]')];
+          const group = groups[i] ?? null;
+          return group !== null && group.querySelector('[data-testid="space-list-placeholder"]') !== null;
+        }, index);
+        if (pulse) {
+          seen = true;
+          break;
+        }
+        if (Date.now() >= deadline) break;
+        await this.page.waitForTimeout(150);
+      }
+      await this.page
+        .waitForFunction(
+          ([i, prev]: [number, number]): boolean => {
+            const groups = [...document.querySelectorAll('[data-testid="space-list-group"]')];
+            const group = groups[i] ?? null;
+            const now = group === null ? 0 : group.querySelectorAll('[data-testid="space-board-issue"]').length;
+            return now > prev;
+          },
+          [index, before] as [number, number],
+          { timeout: WebNewDriver.WAIT_MS }
+        )
+        .catch(() => {});
+    } finally {
+      await this.page.unroute(WebNewDriver.SPACE_BOARD_ISSUES_PATTERN).catch(() => {});
+    }
+    return seen;
   }
-  async spaceBoardCardFacts(_issueName: string): Promise<SpaceBoardCardFacts> {
-    return todo("spaceBoardCardFacts");
+
+  /** Index of one board column by its exact header name. */
+  private async spaceNewKanbanColumnIndex(columnName: string): Promise<number> {
+    const index = await this.page.evaluate((want: string): number => {
+      const columns = [...document.querySelectorAll('[data-testid="space-board-column"]')];
+      return columns.findIndex(
+        (c) => (c.querySelector('[data-testid="space-group-name"]')?.textContent?.trim() ?? "") === want
+      );
+    }, columnName);
+    if (index < 0) throw new Error(`[parity] board shows no ${JSON.stringify(columnName)} column.`);
+    return index;
   }
-  async spaceBoardCardMarkers(_issueName: string): Promise<SpaceBoardCardMarkers> {
-    return todo("spaceBoardCardMarkers");
+
+  /** Cards rendered in one board column. */
+  private async spaceNewKanbanColumnCardCount(index: number): Promise<number> {
+    return this.page.evaluate((i: number): number => {
+      const columns = [...document.querySelectorAll('[data-testid="space-board-column"]')];
+      const column = columns[i] ?? null;
+      return column === null ? 0 : column.querySelectorAll('[data-testid="space-board-card"]').length;
+    }, index);
   }
-  async spaceBoardKanbanCardFooter(_issueName: string): Promise<SpaceBoardCardFooter> {
-    return todo("spaceBoardKanbanCardFooter");
+
+  /** Scroll one column's scrollable body to its end. */
+  private async spaceNewKanbanColumnScrollToEnd(index: number): Promise<void> {
+    await this.page.evaluate((i: number): void => {
+      const columns = [...document.querySelectorAll('[data-testid="space-board-column"]')];
+      const column = columns[i] ?? null;
+      const body = column?.querySelector('[data-testid="space-board-column-scroll"]') ?? column;
+      body?.scrollTo({ top: body.scrollHeight });
+    }, index);
   }
-  async spaceBoardListCardFooterVisible(_issueName: string): Promise<boolean> {
-    return todo("spaceBoardListCardFooterVisible");
+
+  async spaceBoardKanbanColumnScrollLoad(columnName: string): Promise<void> {
+    const index = await this.spaceNewKanbanColumnIndex(columnName);
+    const before = await this.spaceNewKanbanColumnCardCount(index);
+    await this.spaceNewKanbanColumnScrollToEnd(index);
+    await this.page.waitForFunction(
+      ([i, prev]: [number, number]): boolean => {
+        const columns = [...document.querySelectorAll('[data-testid="space-board-column"]')];
+        const column = columns[i] ?? null;
+        const now = column === null ? 0 : column.querySelectorAll('[data-testid="space-board-card"]').length;
+        return now > prev;
+      },
+      [index, before] as [number, number],
+      { timeout: WebNewDriver.WAIT_MS }
+    );
   }
-  async spaceBoardOpenCard(_issueName: string): Promise<void> {
-    return todo("spaceBoardOpenCard");
+
+  async spaceBoardKanbanColumnShowsLoader(columnName: string): Promise<boolean> {
+    const index = await this.spaceNewKanbanColumnIndex(columnName);
+    let seen = false;
+    await this.page.route(
+      WebNewDriver.SPACE_BOARD_ISSUES_PATTERN,
+      async (route) => {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        await route.continue();
+      },
+      { times: 1 }
+    );
+    try {
+      const before = await this.spaceNewKanbanColumnCardCount(index);
+      await this.spaceNewKanbanColumnScrollToEnd(index);
+      const deadline = Date.now() + 8000;
+      for (;;) {
+        const pulse = await this.page.evaluate((i: number): boolean => {
+          const columns = [...document.querySelectorAll('[data-testid="space-board-column"]')];
+          const column = columns[i] ?? null;
+          return column !== null && column.querySelector('[data-testid="space-board-card-placeholder"]') !== null;
+        }, index);
+        if (pulse) {
+          seen = true;
+          break;
+        }
+        if (Date.now() >= deadline) break;
+        await this.page.waitForTimeout(150);
+      }
+      await this.page
+        .waitForFunction(
+          ([i, prev]: [number, number]): boolean => {
+            const columns = [...document.querySelectorAll('[data-testid="space-board-column"]')];
+            const column = columns[i] ?? null;
+            const now = column === null ? 0 : column.querySelectorAll('[data-testid="space-board-card"]').length;
+            return now > prev;
+          },
+          [index, before] as [number, number],
+          { timeout: WebNewDriver.WAIT_MS }
+        )
+        .catch(() => {});
+    } finally {
+      await this.page.unroute(WebNewDriver.SPACE_BOARD_ISSUES_PATTERN).catch(() => {});
+    }
+    return seen;
   }
+
+  async spaceBoardKanbanScrollBurstFetches(columnName: string, scrolls: number): Promise<number> {
+    const index = await this.spaceNewKanbanColumnIndex(columnName);
+    await this.page.route(
+      WebNewDriver.SPACE_BOARD_ISSUES_PATTERN,
+      async (route) => {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        await route.continue();
+      },
+      { times: 1 }
+    );
+    try {
+      const fetches = await this.spaceBoardCountIssuesRequests(async () => {
+        for (let i = 0; i < scrolls; i++) {
+          await this.page.evaluate((idx: number): void => {
+            const columns = [...document.querySelectorAll('[data-testid="space-board-column"]')];
+            const column = columns[idx] ?? null;
+            const body = column?.querySelector('[data-testid="space-board-column-scroll"]') ?? column;
+            body?.scrollTo({ top: 0 });
+            body?.scrollTo({ top: body.scrollHeight });
+          }, index);
+          await this.page.waitForTimeout(60);
+        }
+        await this.page.waitForTimeout(1200);
+      });
+      await this.page.waitForTimeout(2500);
+      return fetches;
+    } finally {
+      await this.page.unroute(WebNewDriver.SPACE_BOARD_ISSUES_PATTERN).catch(() => {});
+    }
+  }
+  /** Card/row link for an issue (the link carries the issue name as its title). */
+  private async spaceBoardCardLink(issueName: string): Promise<Locator> {
+    await this.spaceBoardWaitForLayout();
+    const candidates = this.page.getByTitle(issueName, { exact: true });
+    const count = await candidates.count();
+    for (let i = 0; i < count; i++) {
+      const anchor = candidates.nth(i).locator("xpath=ancestor-or-self::a[1]");
+      if ((await anchor.count()) > 0) {
+        await anchor.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+        return anchor;
+      }
+    }
+    throw new Error(`[parity] board shows no card titled ${JSON.stringify(issueName)}.`);
+  }
+
+  async spaceBoardCardFacts(issueName: string): Promise<SpaceBoardCardFacts> {
+    const link = await this.spaceBoardCardLink(issueName);
+    return link.evaluate((el): SpaceBoardCardFacts => {
+      const title = el.getAttribute("title") ?? "";
+      const card = el.closest('[data-testid="space-board-card"]');
+      if (card !== null) {
+        const key = el.querySelector(":scope > div:nth-child(1)")?.textContent?.trim() ?? "";
+        return { key, title, hoverTitle: title };
+      }
+      const row = el.closest('[data-testid="space-board-issue"]');
+      const key = row?.querySelector('[data-testid="space-issue-key"]')?.textContent?.trim() ?? "";
+      return { key, title, hoverTitle: title };
+    });
+  }
+
+  async spaceBoardCardMarkers(issueName: string): Promise<SpaceBoardCardMarkers> {
+    const link = await this.spaceBoardCardLink(issueName);
+    return link.evaluate((el): SpaceBoardCardMarkers => {
+      const root = el.closest('[data-testid="space-board-card"], [data-testid="space-board-issue"]');
+      const markers = root?.querySelector('[data-testid="space-card-markers"]') ?? null;
+      const rawState = markers?.querySelector('[data-testid="space-card-state"]')?.textContent?.trim() ?? null;
+      const priorityEl = markers?.querySelector('[data-testid="space-card-priority"]') ?? null;
+      const priority = priorityEl?.getAttribute("data-priority") ?? null;
+      const labels =
+        markers === null
+          ? []
+          : [...markers.querySelectorAll('[data-testid="space-card-label"]')]
+              .map((d) => d.textContent?.trim() ?? "")
+              .filter((t) => t.length > 0);
+      const dates =
+        markers === null
+          ? []
+          : [...markers.querySelectorAll('[data-testid="space-card-date"]')]
+              .map((d) => d.textContent?.trim() ?? "")
+              .filter((t) => t.length > 0);
+      return {
+        state: rawState === "" ? null : rawState,
+        priority: priority === "" ? null : priority,
+        labels: [...new Set(labels)],
+        dates,
+        text: (root?.textContent ?? "").replace(/\s+/g, " "),
+      };
+    });
+  }
+
+  async spaceBoardKanbanCardFooter(issueName: string): Promise<SpaceBoardCardFooter> {
+    const link = await this.spaceBoardCardLink(issueName);
+    const card = link.locator('xpath=ancestor::*[@data-testid="space-board-card"][1]');
+    const footer = card.getByTestId("space-board-card-footer").first();
+    if (!(await this.isShown(footer))) return { visible: false, votes: false, reactions: false };
+    const votes = await this.isShown(footer.getByTestId("space-card-votes").first());
+    const reactions = await this.isShown(footer.getByTestId("space-card-reactions").first());
+    return { visible: true, votes, reactions };
+  }
+  async spaceBoardListCardFooterVisible(issueName: string): Promise<boolean> {
+    const link = await this.spaceBoardCardLink(issueName);
+    return link.evaluate((el): boolean => {
+      const row = el.closest('[data-testid="space-board-issue"]');
+      if (row === null) return false;
+      if (row.querySelector('[data-testid="space-board-card-footer"]') !== null) return true;
+      return row.querySelector("button") !== null;
+    });
+  }
+
+  /** The peek overlay panel (the dialog's visible face). */
+  private spaceBoardPeekPanel(): Locator {
+    return this.page.getByRole("dialog").filter({ has: this.page.getByTestId("space-peek-detail") });
+  }
+
+  async spaceBoardOpenCard(issueName: string): Promise<void> {
+    const link = await this.spaceBoardCardLink(issueName);
+    await link.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.waitForFunction(() => new URL(window.location.href).searchParams.get("peekId") !== null, null, {
+      timeout: WebNewDriver.WAIT_MS,
+    });
+    await this.spaceBoardPeekPanel().first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+  }
+
   async spaceBoardPeekVisible(): Promise<boolean> {
-    return todo("spaceBoardPeekVisible");
+    const panel = this.spaceBoardPeekPanel().first();
+    await panel.waitFor({ state: "visible", timeout: 10_000 }).catch(() => {});
+    return panel.isVisible().catch(() => false);
   }
+
   async spaceBoardClosePeek(): Promise<void> {
-    return todo("spaceBoardClosePeek");
+    await this.page.keyboard.press("Escape");
+    await this.page.waitForFunction(() => new URL(window.location.href).searchParams.get("peekId") === null, null, {
+      timeout: WebNewDriver.WAIT_MS,
+    });
+    await this.spaceBoardPeekPanel().first().waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
   }
+
   async spaceBoardHighlightedRow(): Promise<string | null> {
-    return todo("spaceBoardHighlightedRow");
+    await this.spaceBoardWaitForLayout();
+    return this.page.evaluate((): string | null => {
+      const lit = [...document.querySelectorAll('[data-testid="space-board-issue"] a[aria-current="true"]')];
+      if (lit.length > 1) throw new Error("[parity] more than one list row is highlighted.");
+      const first = lit[0];
+      if (first === undefined) return null;
+      return first.getAttribute("title") ?? first.textContent?.trim() ?? null;
+    });
   }
+
   async spaceBoardCardDragFacts(): Promise<SpaceBoardDragFacts> {
-    return todo("spaceBoardCardDragFacts");
+    await this.spaceBoardWaitForLayout();
+    return this.page.evaluate((): SpaceBoardDragFacts => {
+      const cards = [
+        ...document.querySelectorAll('[data-testid="space-board-issue"], [data-testid="space-board-card"]'),
+      ];
+      let draggable = 0;
+      let handles = 0;
+      let editControls = 0;
+      for (const card of cards) {
+        if (card.getAttribute("draggable") === "true") draggable += 1;
+        draggable += card.querySelectorAll("[draggable='true']").length;
+        handles += card.querySelectorAll("[data-drag-handle], [class*='cursor-grab'], [class*='cursor-move']").length;
+        editControls += card.querySelectorAll("input, textarea, select, [contenteditable='true']").length;
+      }
+      return { draggable, handles, editControls };
+    });
   }
-  async spaceBoardDragCardOrder(_issueName: string): Promise<{ before: string[]; after: string[] }> {
-    return todo("spaceBoardDragCardOrder");
+
+  async spaceBoardDragCardOrder(issueName: string): Promise<{ before: string[]; after: string[] }> {
+    const before = await this.spaceBoardVisibleOrder();
+    const link = await this.spaceBoardCardLink(issueName);
+    await link.scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
+    const box = await link.boundingBox();
+    if (box === null) throw new Error("[parity] card has no bounding box to drag.");
+    const x = box.x + box.width / 2;
+    const y = box.y + box.height / 2;
+    await this.page.mouse.move(x, y);
+    await this.page.mouse.down();
+    for (let i = 1; i <= 10; i++) {
+      await this.page.mouse.move(x, y + i * 12, { steps: 2 });
+      await this.page.waitForTimeout(30);
+    }
+    await this.page.mouse.up();
+    await this.page.waitForTimeout(500);
+    const after = await this.spaceBoardVisibleOrder();
+    return { before, after };
   }
+
   async spaceBoardVisibleOrder(): Promise<string[]> {
-    return todo("spaceBoardVisibleOrder");
+    await this.spaceBoardWaitForLayout();
+    return this.page.evaluate((): string[] =>
+      [...document.querySelectorAll("a[id^='issue-']")].map(
+        (a) => a.getAttribute("title") ?? a.textContent?.trim() ?? ""
+      )
+    );
   }
+
   async spaceBoardRefocusStability(): Promise<SpaceBoardStability> {
-    return todo("spaceBoardRefocusStability");
+    const before = await this.spaceBoardVisibleOrder();
+    const refetches = await this.spaceBoardCountIssuesRequests(async () => {
+      await this.page.evaluate((): void => {
+        window.dispatchEvent(new Event("blur"));
+        document.dispatchEvent(new Event("visibilitychange"));
+        window.dispatchEvent(new Event("focus"));
+        document.dispatchEvent(new Event("visibilitychange"));
+      });
+      await this.page.waitForTimeout(2500);
+    });
+    const after = await this.spaceBoardVisibleOrder();
+    return { before, after, refetches };
   }
+
   async spaceBoardReconnectStability(): Promise<{ before: string[]; after: string[] }> {
-    return todo("spaceBoardReconnectStability");
+    const before = await this.spaceBoardVisibleOrder();
+    await this.page.waitForTimeout(6000);
+    await this.page.context().setOffline(true);
+    await this.page.waitForTimeout(1000);
+    await this.page.context().setOffline(false);
+    await this.page.waitForTimeout(4000);
+    const after = await this.spaceBoardVisibleOrder();
+    return { before, after };
   }
 
   // --- Instance-admin entry/session oracle (NEWFRONT-441, ADM-001..012).
@@ -46020,58 +46506,293 @@ export class WebNewDriver implements ParityDriver {
   }
   // --- Space navbar & chrome (NEWFRONT-448, SPC-010..019 + SPC-065). ---
   async spaceChromeNavbarIdentity(): Promise<SpaceChromeNavbarIdentity> {
-    return todo("spaceChromeNavbarIdentity");
+    const nameEl = this.spaceNavbarName();
+    await nameEl.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    // The slot shows a placeholder until publish settings land; converge on
+    // the settled name (or on rendered board content, which proves the
+    // placeholder is final rather than still loading).
+    const rows = this.page.getByTestId("space-board-issue");
+    const deadline = Date.now() + 15_000;
+    for (;;) {
+      const current = (((await nameEl.textContent().catch(() => "")) ?? "") as string).replace(/\s+/g, " ").trim();
+      if (current !== "" && current !== "...") break;
+      if ((await rows.count()) > 0) break;
+      if (Date.now() >= deadline) break;
+      await this.page.waitForTimeout(300);
+    }
+    const raw = ((await nameEl.textContent().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+    const mark = await this.page.getByTestId("space-navbar-mark").first().getAttribute("data-mark");
+    const logo: SpaceChromeNavbarIdentity["logo"] =
+      mark === "icon" || mark === "emoji" || mark === "fallback" ? mark : "empty";
+    return { name: raw === "" ? null : raw, logo };
   }
-  async spaceChromeNavbarWithoutProjectDetails(_anchor: string): Promise<SpaceChromeNavbarIdentity> {
-    return todo("spaceChromeNavbarWithoutProjectDetails");
+
+  /**
+   * Fulfill the publish-settings fetch with a mutated payload (fetched live
+   * first, so only the named branch changes), open the board, and read the
+   * navbar. The route is always removed before returning.
+   */
+  private async spaceNavbarWithMutatedSettings(
+    anchor: string,
+    mutate: (payload: Record<string, unknown>) => void
+  ): Promise<SpaceChromeNavbarIdentity> {
+    const pattern = "**/api/public/anchor/*/settings/";
+    await this.page.route(pattern, async (route) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      const upstream = await route.fetch();
+      const payload = (await upstream.json()) as Record<string, unknown>;
+      mutate(payload);
+      await route.fulfill({ response: upstream, body: JSON.stringify(payload) });
+    });
+    try {
+      await this.spaceOpenBoard(anchor);
+      return await this.spaceChromeNavbarIdentity();
+    } finally {
+      await this.page.unroute(pattern);
+    }
   }
-  async spaceChromeNavbarWithLogo(_anchor: string, _kind: "icon" | "emoji"): Promise<SpaceChromeNavbarIdentity> {
-    return todo("spaceChromeNavbarWithLogo");
+
+  async spaceChromeNavbarWithoutProjectDetails(anchor: string): Promise<SpaceChromeNavbarIdentity> {
+    return this.spaceNavbarWithMutatedSettings(anchor, (payload) => {
+      delete payload["project_details"];
+    });
+  }
+  async spaceChromeNavbarWithLogo(anchor: string, kind: "icon" | "emoji"): Promise<SpaceChromeNavbarIdentity> {
+    return this.spaceNavbarWithMutatedSettings(anchor, (payload) => {
+      const details = payload["project_details"] as Record<string, unknown>;
+      details["logo_props"] =
+        kind === "icon"
+          ? { in_use: "icon", icon: { name: "rocket", color: "#1075e1" } }
+          : { in_use: "emoji", emoji: { value: "128512" } };
+    });
   }
   async spaceChromeTheme(): Promise<"light" | "dark"> {
-    return todo("spaceChromeTheme");
+    // Read only once the board (and its theme guard) is mounted: the app
+    // root pins its own resolution during boot, and converging on that
+    // pre-mount value would mistake boot for settled. Afterwards the pin
+    // may still correct a competing writer a beat later, so converge on
+    // two consecutive reads rather than the first sight (a missing
+    // attribute reads light).
+    await this.page
+      .getByTestId("space-board")
+      .first()
+      .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => null);
+    const deadline = Date.now() + 5_000;
+    let settled: string | null = null;
+    for (;;) {
+      const theme = await this.page.evaluate(() => document.documentElement.getAttribute("data-theme"));
+      if (theme !== null && theme === settled) return theme === "dark" ? "dark" : "light";
+      settled = theme;
+      if (Date.now() >= deadline) return settled === "dark" ? "dark" : "light";
+      await this.page.waitForTimeout(150);
+    }
   }
   async spaceChromeToggleTheme(): Promise<void> {
-    return todo("spaceChromeToggleTheme");
+    const before = await this.spaceChromeTheme();
+    await this.page.getByTestId("space-theme-switch").click({ timeout: WebNewDriver.WAIT_MS });
+    // The switch applies on the next frame; poll briefly, then report
+    // whatever settled.
+    const deadline = Date.now() + 5_000;
+    for (;;) {
+      const now = await this.spaceChromeTheme();
+      if (now !== before) return;
+      if (Date.now() >= deadline) return;
+      await this.page.waitForTimeout(200);
+    }
   }
   async spaceChromeBodyBackground(): Promise<string> {
-    return todo("spaceChromeBodyBackground");
+    // The new board leaves body transparent in both themes; read a chrome
+    // surface that actually carries the theme instead (the layout switcher
+    // sits in every board navbar). Wait for it first: an early read would
+    // fall through to the transparent body and poison the comparison.
+    const switcher = this.page.getByTestId("space-layout-switcher").first();
+    await switcher.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS }).catch(() => null);
+    return this.page.evaluate(() => {
+      const surface = document.querySelector('[data-testid="space-layout-switcher"]');
+      const target = surface ?? document.body;
+      return getComputedStyle(target).backgroundColor;
+    });
   }
   async spaceChromeClearStoredTheme(): Promise<void> {
-    return todo("spaceChromeClearStoredTheme");
+    await this.page.evaluate(() => localStorage.removeItem("space-theme"));
   }
-  async spaceChromeEmulateColorScheme(_scheme: "light" | "dark"): Promise<void> {
-    return todo("spaceChromeEmulateColorScheme");
+  async spaceChromeEmulateColorScheme(scheme: "light" | "dark"): Promise<void> {
+    await this.page.emulateMedia({ colorScheme: scheme });
   }
   async spaceChromeBadgeFacts(): Promise<SpaceChromeBadgeFacts | null> {
-    return todo("spaceChromeBadgeFacts");
+    const badge = this.page.getByTestId("space-product-badge").first();
+    await badge.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS }).catch(() => null);
+    if (!(await this.isShown(badge))) return null;
+    const box = await badge.boundingBox();
+    if (box === null) return null;
+    const viewport = this.page.viewportSize();
+    return {
+      href: (await badge.getAttribute("href")) ?? "",
+      target: await badge.getAttribute("target"),
+      rel: await badge.getAttribute("rel"),
+      text: (((await badge.innerText().catch(() => "")) ?? "") as string).replace(/\s+/g, " ").trim(),
+      box: { x: box.x, y: box.y, width: box.width, height: box.height },
+      viewport: { width: viewport?.width ?? 0, height: viewport?.height ?? 0 },
+    };
   }
   async spaceChromeBadgeNewTabUrl(): Promise<string> {
-    return todo("spaceChromeBadgeNewTabUrl");
+    const badge = this.page.getByTestId("space-product-badge").first();
+    await badge.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const [popup] = await Promise.all([
+      this.page.waitForEvent("popup", { timeout: WebNewDriver.WAIT_MS }),
+      badge.click({ timeout: WebNewDriver.WAIT_MS }),
+    ]);
+    const url = popup.url();
+    await popup.close();
+    return url;
   }
   async spaceChromeAnonymousSignInHref(): Promise<string | null> {
-    return todo("spaceChromeAnonymousSignInHref");
+    const link = this.page.getByTestId("space-navbar-signin").first();
+    await link.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    return link.getAttribute("href");
   }
+
+  /** Open the account menu (idempotent: the trigger toggles, so a second call must not close it). */
+  private async spaceOpenAccountMenu(): Promise<void> {
+    const trigger = this.page.getByTestId("space-account-trigger").first();
+    await trigger.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const signOut = this.page.getByRole("button", { name: "Sign out" }).first();
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (await this.isShown(signOut)) return;
+      await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+      await signOut.waitFor({ state: "visible", timeout: 5_000 }).catch(() => null);
+    }
+    if (!(await this.isShown(signOut))) throw new Error("[parity] the space account menu never opened.");
+  }
+
   async spaceChromeAccountMenuIdentity(): Promise<SpaceChromeAccountIdentity> {
-    return todo("spaceChromeAccountMenuIdentity");
+    const trigger = this.page.getByTestId("space-account-trigger").first();
+    await trigger.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    // The trigger pairs the avatar (initials) with the display-name label;
+    // the label is the trailing span.
+    const displayName = (
+      ((await trigger
+        .locator(":scope > span")
+        .last()
+        .innerText()
+        .catch(() => "")) ?? "") as string
+    )
+      .replace(/\s+/g, " ")
+      .trim();
+    await this.spaceOpenAccountMenu();
+    const offersSignOut = await this.isShown(this.page.getByRole("button", { name: "Sign out" }).first());
+    return { displayName: displayName === "" ? null : displayName, offersSignOut };
   }
   async spaceChromeSignOutForm(): Promise<SpaceChromeSignOutForm> {
-    return todo("spaceChromeSignOutForm");
+    await this.spaceOpenAccountMenu();
+    const form = this.page.getByTestId("space-signout-form").first();
+    await form.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const redirect = await form.locator('input[name="next_path"]').first().inputValue();
+    return { action: (await form.getAttribute("action")) ?? "", nextPath: redirect === "" ? null : redirect };
   }
   async spaceChromeSignOut(): Promise<SpaceChromeSignOutResult> {
-    return todo("spaceChromeSignOut");
+    await this.spaceOpenAccountMenu();
+    const [response] = await Promise.all([
+      this.page.waitForResponse(
+        (res) => res.request().method() === "POST" && res.url().includes("/auth/spaces/sign-out/"),
+        { timeout: WebNewDriver.WAIT_MS }
+      ),
+      this.page.getByRole("button", { name: "Sign out" }).first().click({ timeout: WebNewDriver.WAIT_MS }),
+    ]);
+    // The native form post commits a document navigation; read the outcome
+    // once the landing settles.
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.page.getByTestId("space-auth-card").first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    return {
+      locationHeader: response.headers()["location"] ?? null,
+      landedPath: await this.currentPath(),
+    };
   }
-  async spaceChromeOpenBoardFramed(_anchor: string, _query?: string): Promise<void> {
-    return todo("spaceChromeOpenBoardFramed");
+  /** Board path suffix for the caller's query form ("", "?...", "&..." or bare). */
+  private spaceBoardQuerySuffix(query: string): string {
+    if (query === "") return "/";
+    if (query.startsWith("?")) return `/${query}`;
+    if (query.startsWith("&")) return `/?${query.slice(1)}`;
+    return `/${query}`;
+  }
+
+  async spaceChromeOpenBoardFramed(anchor: string, query = ""): Promise<void> {
+    const frameSrc = `/spaces/issues/${anchor}${this.spaceBoardQuerySuffix(query)}`;
+    await this.page.setContent(
+      `<!doctype html><html><body style="margin:0"><iframe src="${frameSrc}" ` +
+        `style="width:1200px;height:900px;border:0" title="embedded board"></iframe></body></html>`
+    );
+    const board = this.page
+      .frameLocator("iframe")
+      .getByText(/^[A-Z]{2,}-\d+$/)
+      .first();
+    await board.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS * 2 });
   }
   async spaceChromeFramedFacts(): Promise<SpaceChromeFramedFacts> {
-    return todo("spaceChromeFramedFacts");
+    const frame = this.page.frameLocator("iframe");
+    const boardReadable =
+      (await frame
+        .getByText(/^[A-Z]{2,}-\d+$/)
+        .first()
+        .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS })
+        .then(
+          () => true,
+          () => false
+        )) ||
+      (await frame
+        .getByTestId("space-board-card")
+        .first()
+        .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS })
+        .then(
+          () => true,
+          () => false
+        ));
+    const signInVisible = await this.isShown(frame.getByTestId("space-navbar-signin").first());
+    // A stale framed session still renders the full board: the API answers
+    // from the framed request's own cookies, never the embedder's.
+    const inner = this.page.frames().find((candidate) => candidate.url().includes("/spaces/issues/"));
+    const sessionActiveInFrame =
+      inner === undefined
+        ? false
+        : await inner
+            .evaluate(async () => {
+              const res = await fetch("/api/users/me/", { credentials: "same-origin" });
+              return res.ok;
+            })
+            .catch(() => false);
+    const avatarVisible = await this.isShown(frame.getByTestId("space-account-trigger").first());
+    let emojiControls = 0;
+    for (const testId of ["space-card-reaction-add", "space-peek-reaction-add", "space-comment-reaction-add"]) {
+      emojiControls += await frame
+        .getByTestId(testId)
+        .filter({ visible: true })
+        .count()
+        .catch(() => 0);
+    }
+    return { boardReadable, signInVisible, sessionActiveInFrame, avatarVisible, emojiControls };
   }
-  async spaceChromeOpenIssuePeek(_anchor: string, _issueId: string, _query?: string): Promise<void> {
-    return todo("spaceChromeOpenIssuePeek");
+  async spaceChromeOpenIssuePeek(anchor: string, issueId: string, query = ""): Promise<void> {
+    const suffix = this.spaceBoardQuerySuffix(query);
+    await this.spaceOpenBoard(anchor, `${suffix}${query === "" ? "?" : "&"}peekId=${issueId}`);
+    await this.page
+      .getByTestId("space-peek-detail")
+      .first()
+      .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
   async spaceChromeEmojiControlCount(): Promise<number> {
-    return todo("spaceChromeEmojiControlCount");
+    let total = 0;
+    for (const testId of ["space-card-reaction-add", "space-peek-reaction-add", "space-comment-reaction-add"]) {
+      total += await this.page
+        .getByTestId(testId)
+        .filter({ visible: true })
+        .count()
+        .catch(() => 0);
+    }
+    return total;
   }
   /** Project-name slot in the public navbar. */
   private spaceNavbarName(): Locator {
@@ -46088,7 +46809,7 @@ export class WebNewDriver implements ParityDriver {
     await this.page
       .getByText(/^[A-Z]{2,}-\d+$/)
       .first()
-      .waitFor({ state: "visible", timeout: WebDriver.WAIT_MS * 2 });
+      .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS * 2 });
   }
 
   /** Boot the board while a stage's request is held, retrying until JS runs. */
@@ -46096,11 +46817,15 @@ export class WebNewDriver implements ParityDriver {
     for (let attempt = 0; attempt < 3; attempt++) {
       const firedPromise = this.page
         .waitForRequest((req) => req.method() === "GET" && req.url().includes(heldPath), {
-          timeout: WebDriver.WAIT_MS,
+          timeout: WebNewDriver.WAIT_MS,
         })
         .then(() => true)
         .catch(() => false);
-      await this.spaceOpenBoard(anchor);
+      // Boot at the canonical slashed URL with the board param settled:
+      // the slashless form and an unsettled board each trigger a
+      // client-side navigation that aborts the held fetch (SPC-016).
+      await this.page.goto(`/spaces/issues/${anchor}/?board=list`, { waitUntil: "domcontentloaded" });
+      await this.page.waitForLoadState("domcontentloaded");
       if (await firedPromise) return true;
     }
     return false;
@@ -46143,33 +46868,45 @@ export class WebNewDriver implements ParityDriver {
       const booted = await this.spaceBootWithHeldFetch(heldPath, anchor);
       if (booted) {
         await this.page.waitForTimeout(1_000);
-        sawSpinner = await this.spaceSpinner()
-          .isVisible()
-          .catch(() => false);
-        const keys = this.page.getByText(/^[A-Z]{2,}-\d+$/);
-        let shown = 0;
-        for (let i = 0; i < (await keys.count()); i++) {
-          if (
-            await keys
-              .nth(i)
-              .isVisible()
-              .catch(() => false)
-          )
-            shown++;
-        }
-        const name = (
-          ((await this.spaceNavbarName()
-            .textContent()
-            .catch(() => "")) ?? "") as string
-        )
-          .replace(/\s+/g, " ")
-          .trim();
-        contentAbsentWhileSpinning = shown === 0;
-        placeholderWhileHeld = name === "..." && shown === 0;
+        // Zero-autowait reads: the held request carries a ~30s client-side
+        // timeout, so any locator autowait (e.g. textContent on the absent
+        // navbar) would push the hold past it and kill the request. A
+        // single synchronous DOM snapshot keeps the hold near one second.
+        const snap = await this.page
+          .evaluate(() => {
+            const visible = (el: Element): boolean => {
+              const box = el.getBoundingClientRect();
+              if (box.width === 0 || box.height === 0) return false;
+              const style = window.getComputedStyle(el);
+              return style.visibility !== "hidden" && style.display !== "none";
+            };
+            let spinner = false;
+            for (const el of document.querySelectorAll("span.animate-spin")) {
+              if (visible(el)) {
+                spinner = true;
+                break;
+              }
+            }
+            const keyPattern = /^[A-Z]{2,}-\d+$/;
+            let shown = 0;
+            for (const el of document.querySelectorAll("body *")) {
+              if (el.children.length > 0) continue;
+              const text = (el.textContent ?? "").trim();
+              if (text !== "" && keyPattern.test(text) && visible(el)) shown++;
+            }
+            const nameEl = document.querySelector('[data-testid="space-navbar-name"]');
+            const name = ((nameEl?.textContent ?? "") as string).replace(/\s+/g, " ").trim();
+            return { spinner, shown, name };
+          })
+          .catch(() => ({ spinner: false, shown: 0, name: "" }));
+        sawSpinner = snap.spinner;
+        contentAbsentWhileSpinning = snap.shown === 0;
+        placeholderWhileHeld = snap.name === "..." && snap.shown === 0;
       }
     } finally {
+      // Release first and keep the route installed: unroute() here can win
+      // the race against the resumed continue() and abort the held request.
       release();
-      await this.page.unroute(pattern).catch(() => undefined);
     }
     let settledWithContent = false;
     try {
@@ -46178,23 +46915,122 @@ export class WebNewDriver implements ParityDriver {
     } catch {
       settledWithContent = false;
     }
+    await this.page.unroute(pattern).catch(() => undefined);
     return { sawSpinner, placeholderWhileHeld, contentAbsentWhileSpinning, settledWithContent };
   }
-  async spaceChromeProgressDuringSlowTransition(
-    _workspaceSlug: string,
-    _projectId: string
-  ): Promise<SpaceChromeProgressProbe> {
-    return todo("spaceChromeProgressDuringSlowTransition");
+  /**
+   * Read the visible toast notice (title + body). The caller waits for the
+   * toast to appear; this resolves null when none is showing.
+   */
+  private async spaceToastFacts(): Promise<SpaceChromeToastFacts> {
+    const toast = this.page.getByTestId("toast-notification").first();
+    const shown = await toast.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS }).then(
+      () => true,
+      () => false
+    );
+    if (!shown) return { title: null, message: null, clipboard: null };
+    const title = (
+      (await toast
+        .locator("h2")
+        .first()
+        .textContent()
+        .catch(() => "")) ?? ""
+    ).trim();
+    const message = (
+      (await toast
+        .locator("p")
+        .first()
+        .textContent()
+        .catch(() => "")) ?? ""
+    ).trim();
+    return { title: title === "" ? null : title, message: message === "" ? null : message, clipboard: null };
   }
-  async spaceChromeCopyIssueLinkToast(_anchor: string, _issueId: string): Promise<SpaceChromeToastFacts> {
-    return todo("spaceChromeCopyIssueLinkToast");
+
+  async spaceChromeProgressDuringSlowTransition(
+    workspaceSlug: string,
+    projectId: string
+  ): Promise<SpaceChromeProgressProbe> {
+    // Hold the legacy anchor resolution so the transition stays slow
+    // enough to observe; the board underneath proves a partial screen.
+    let resolveGate: (() => void) | null = null;
+    const gate = new Promise<void>((resolve) => {
+      resolveGate = resolve;
+    });
+    const pattern = "**/api/public/workspaces/*/projects/*/anchor/";
+    let sawBar = false;
+    await this.page.route(pattern, async (route) => {
+      try {
+        await gate;
+        await route.continue();
+      } catch {
+        // Stale held request from a boot-retry reload; the live load refires.
+      }
+    });
+    const bar = this.page.getByTestId("space-route-progress").first();
+    try {
+      await this.spaceOpenLegacyLink(workspaceSlug, projectId);
+      sawBar = await bar.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS }).then(
+        () => true,
+        () => false
+      );
+    } finally {
+      (resolveGate as unknown as () => void)();
+      await this.page.unroute(pattern).catch(() => undefined);
+    }
+    let completed = false;
+    try {
+      await this.spaceWaitForBoardContent();
+      // The bar unmounts once the transition settles; poll for removal.
+      const deadline = Date.now() + 10_000;
+      for (;;) {
+        if ((await bar.count()) === 0) {
+          completed = true;
+          break;
+        }
+        if (Date.now() >= deadline) break;
+        await this.page.waitForTimeout(300);
+      }
+    } catch {
+      completed = false;
+    }
+    return { sawBar, completed };
+  }
+  async spaceChromeCopyIssueLinkToast(anchor: string, issueId: string): Promise<SpaceChromeToastFacts> {
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await this.spaceChromeOpenIssuePeek(anchor, issueId);
+    const copy = this.page.getByTestId("space-peek-copy").first();
+    await copy.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await copy.click({ timeout: WebNewDriver.WAIT_MS });
+    const facts = await this.spaceToastFacts();
+    const clipboard = await this.page.evaluate(() => navigator.clipboard.readText().catch(() => ""));
+    return { ...facts, clipboard };
   }
   async spaceChromeCommentFailureToast(
-    _anchor: string,
-    _issueId: string,
-    _bodyText: string
+    anchor: string,
+    issueId: string,
+    bodyText: string
   ): Promise<SpaceChromeToastFacts> {
-    return todo("spaceChromeCommentFailureToast");
+    // Fail every comment creation while the composer posts; the send fails
+    // and the error notice names the comment.
+    const pattern = "**/api/public/anchor/*/issues/*/comments/";
+    await this.page.route(pattern, async (route) => {
+      if (route.request().method() === "POST") {
+        await route.abort("failed");
+        return;
+      }
+      await route.continue();
+    });
+    try {
+      await this.spaceChromeOpenIssuePeek(anchor, issueId);
+      const editor = this.page.getByTestId("space-comment-composer").locator(".rich-text-content").first();
+      await editor.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+      await editor.click({ timeout: WebNewDriver.WAIT_MS });
+      await this.page.keyboard.type(bodyText);
+      await this.page.getByTestId("space-comment-composer-submit").first().click({ timeout: WebNewDriver.WAIT_MS });
+      return await this.spaceToastFacts();
+    } finally {
+      await this.page.unroute(pattern);
+    }
   }
   async spaceChromeInstanceFailureFacts(anchor: string): Promise<SpaceChromeFailureFacts> {
     const pattern = "**/api/instances/";
@@ -46202,7 +47038,7 @@ export class WebNewDriver implements ParityDriver {
     try {
       await this.spaceOpenBoard(anchor);
       const heading = this.page.getByRole("heading", { name: /Unable to fetch instance details/ }).first();
-      await heading.waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+      await heading.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
       const retry = this.page.getByRole("button", { name: /Retry/ }).first();
       const images = this.page.locator("img");
       let illustration = false;
@@ -46227,7 +47063,7 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async spaceChromeRetryInstanceLoad(): Promise<void> {
-    await this.page.getByRole("button", { name: /Retry/ }).first().click({ timeout: WebDriver.WAIT_MS });
+    await this.page.getByRole("button", { name: /Retry/ }).first().click({ timeout: WebNewDriver.WAIT_MS });
     await this.spaceWaitForBoardContent();
   }
 
@@ -46247,7 +47083,7 @@ export class WebNewDriver implements ParityDriver {
     try {
       await this.spaceOpenBoard(anchor);
       const heading = this.page.getByRole("heading").first();
-      await heading.waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+      await heading.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
       const refresh = this.page.getByRole("button", { name: /Refresh/ }).first();
       const support = this.page.locator('a[href^="mailto:"]').first();
       const forum = this.page.locator('a[target="_blank"]').first();
@@ -46266,17 +47102,67 @@ export class WebNewDriver implements ParityDriver {
     await this.page
       .getByRole("button", { name: /Refresh/ })
       .first()
-      .click({ timeout: WebDriver.WAIT_MS });
+      .click({ timeout: WebNewDriver.WAIT_MS });
     await this.spaceWaitForBoardContent();
   }
-  async spaceLocaleBoardFacts(_anchor: string, _issueId: string): Promise<SpaceLocaleBoardFacts> {
-    return todo("spaceLocaleBoardFacts");
+  async spaceLocaleBoardFacts(anchor: string, issueId: string): Promise<SpaceLocaleBoardFacts> {
+    await this.spaceChromeOpenIssuePeek(anchor, issueId);
+    const props = this.page.getByTestId("space-peek-properties").first();
+    await props.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const peekProperties = (((await props.innerText().catch(() => "")) ?? "") as string).replace(/\s+/g, " ").trim();
+    const navbar = this.spaceNavbarName().locator("xpath=ancestor::header[1]");
+    const chromeText = (((await navbar.innerText().catch(() => "")) ?? "") as string).replace(/\s+/g, " ").trim();
+    return {
+      peekProperties,
+      issueKeys: await this.spaceIssueKeys(),
+      chromeText,
+      htmlLang: await this.page.evaluate(() => document.documentElement.getAttribute("lang")),
+      storedLocale: await this.page.evaluate(() => localStorage.getItem("userLanguage")),
+    };
   }
+
+  /** Visible issue keys across list rows and kanban cards. */
+  private async spaceIssueKeys(): Promise<string[]> {
+    const nodes = this.page.getByText(/^[A-Z]{2,}-\d+$/);
+    const total = await nodes.count();
+    const keys: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const text = (
+        ((await nodes
+          .nth(i)
+          .textContent()
+          .catch(() => "")) ?? "") as string as string
+      ).trim();
+      if (
+        text !== "" &&
+        !(await nodes
+          .nth(i)
+          .isHidden()
+          .catch(() => true))
+      )
+        keys.push(text);
+    }
+    return keys;
+  }
+
   async spaceLocaleLandingFacts(): Promise<SpaceLocaleLandingFacts> {
-    return todo("spaceLocaleLandingFacts");
+    await this.spaceOpenLanding();
+    const header = this.page.getByTestId("space-auth-header").first();
+    await header.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const read = async (node: Locator): Promise<string> =>
+      (((await node.textContent().catch(() => "")) ?? "") as string).replace(/\s+/g, " ").trim();
+    const title = await read(header.getByRole("heading").first());
+    const subtitle = await read(header.locator("p").first());
+    const consent = await read(this.page.getByTestId("space-auth-consent").first());
+    return { title, subtitle, consent };
   }
-  async spaceLocaleSetStoredLocale(_locale: string | null): Promise<void> {
-    return todo("spaceLocaleSetStoredLocale");
+
+  async spaceLocaleSetStoredLocale(locale: string | null): Promise<void> {
+    if (locale === null) {
+      await this.page.evaluate(() => localStorage.removeItem("userLanguage"));
+    } else {
+      await this.page.evaluate((value) => localStorage.setItem("userLanguage", value), locale);
+    }
   }
 
   // --- Space board access & routing (NEWFRONT-447, SPC-001..009). ---
@@ -46284,8 +47170,10 @@ export class WebNewDriver implements ParityDriver {
     await this.page.goto(this.spaceMountedPath(path), { waitUntil: "domcontentloaded", timeout: 120_000 });
   }
 
-  async spaceAccessOpenLandingAuthed(_cookies: ParityBrowserCookie[], _query?: string): Promise<void> {
-    return todo("spaceAccessOpenLandingAuthed");
+  async spaceAccessOpenLandingAuthed(cookies: ParityBrowserCookie[], query = ""): Promise<void> {
+    await this.page.context().addCookies(cookies);
+    await this.page.goto(`/spaces/${query}`, { waitUntil: "domcontentloaded" });
+    await this.page.waitForLoadState("domcontentloaded");
   }
 
   async spaceAccessBoardShowsProject(name: string): Promise<boolean> {
@@ -46350,7 +47238,11 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async spaceAccessLandingView(): Promise<"auth" | "signed-in" | "other"> {
-    return todo("spaceAccessLandingView");
+    const card = this.page.getByTestId("space-auth-card").first();
+    if (await card.isVisible().catch(() => false)) return "auth";
+    const guidance = this.page.getByTestId("space-landing-guidance").first();
+    if (await guidance.isVisible().catch(() => false)) return "signed-in";
+    return "other";
   }
 
   private async spaceAccessMetaContent(selector: string): Promise<string | null> {
@@ -46505,65 +47397,270 @@ export class WebNewDriver implements ParityDriver {
   // --- Space filters + peek shell (NEWFRONT-450, SPC-034–046).
   // --- Throwing stubs per the shared driver contract.
   // --- Space filters (NEWFRONT-450, SPC-034–039). ---
+  private spaceFiltersPanelScope(): Locator {
+    return this.page.getByTestId("space-filters-panel");
+  }
+
+  private spaceFiltersSearchInput(): Locator {
+    return this.page.getByTestId("space-filter-search");
+  }
+
   async spaceFiltersOpenPanel(): Promise<void> {
-    return todo("spaceFiltersOpenPanel");
+    if (await this.spaceFiltersPanelOpen()) return;
+    await this.page.getByTestId("space-filters-button").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.spaceFiltersSearchInput().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
+
   async spaceFiltersPanelOpen(): Promise<boolean> {
-    return todo("spaceFiltersPanelOpen");
+    return this.isShown(this.spaceFiltersSearchInput());
   }
+
   async spaceFiltersFacetNames(): Promise<string[]> {
-    return todo("spaceFiltersFacetNames");
+    const sections = this.spaceFiltersPanelScope().getByTestId("space-filter-section");
+    const count = await sections.count();
+    const names: string[] = [];
+    for (let i = 0; i < count; i++) {
+      const raw =
+        (await sections
+          .nth(i)
+          .innerText()
+          .catch(() => "")) ?? "";
+      names.push(raw.trim().replace(/ \(\d+\)$/, ""));
+    }
+    return names;
   }
-  async spaceFiltersSearchPanel(_query: string): Promise<void> {
-    return todo("spaceFiltersSearchPanel");
+
+  async spaceFiltersSearchPanel(query: string): Promise<void> {
+    await this.spaceFiltersSearchInput().fill(query, { timeout: WebNewDriver.WAIT_MS });
   }
+
+  /** Expand the state preview so every option reads, then list one facet's options. */
+  private async spaceFiltersOptionRows(
+    facet: "priority" | "state"
+  ): Promise<Array<{ name: string; checked: boolean }>> {
+    const section = this.spaceFiltersPanelScope().locator(`[data-testid="space-filter-facet"][data-facet="${facet}"]`);
+    const showMore = section.getByTestId("space-filter-show-more");
+    if (
+      (await showMore.count()) > 0 &&
+      (await showMore
+        .first()
+        .isVisible()
+        .catch(() => false))
+    ) {
+      const expanded = (await showMore.first().getAttribute("data-expanded")) === "true";
+      if (!expanded) await showMore.first().click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    const options = section.getByTestId("space-filter-option");
+    const count = await options.count();
+    const rows: Array<{ name: string; checked: boolean }> = [];
+    for (let i = 0; i < count; i++) {
+      const row = options.nth(i);
+      const rawOption = (await row.innerText().catch(() => "")) ?? "";
+      const name = rawOption.trim();
+      const checked = (await row.getAttribute("data-checked").catch(() => "false")) === "true";
+      if (name === "") continue;
+      rows.push({ name, checked });
+    }
+    return rows;
+  }
+
   async spaceFiltersPriorityOptions(): Promise<Array<{ name: string; checked: boolean }>> {
-    return todo("spaceFiltersPriorityOptions");
+    return this.spaceFiltersOptionRows("priority");
   }
+
   async spaceFiltersStateOptions(): Promise<Array<{ name: string; checked: boolean }>> {
-    return todo("spaceFiltersStateOptions");
+    return this.spaceFiltersOptionRows("state");
   }
-  async spaceFiltersPickPriority(_name: string): Promise<void> {
-    return todo("spaceFiltersPickPriority");
+
+  /** Click a panel option by its visible label, expanding the state preview first. */
+  private async spaceFiltersClickOption(facet: "priority" | "state", name: string): Promise<void> {
+    await this.spaceFiltersOpenPanel();
+    const section = this.spaceFiltersPanelScope().locator(`[data-testid="space-filter-facet"][data-facet="${facet}"]`);
+    const showMore = section.getByTestId("space-filter-show-more");
+    if (
+      (await showMore.count()) > 0 &&
+      (await showMore
+        .first()
+        .isVisible()
+        .catch(() => false))
+    ) {
+      const expanded = (await showMore.first().getAttribute("data-expanded")) === "true";
+      if (!expanded) await showMore.first().click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    const option = (): Locator => section.getByTestId("space-filter-option").filter({ hasText: name });
+    try {
+      await option().first().click({ timeout: WebNewDriver.WAIT_MS });
+    } catch {
+      await this.spaceFiltersOpenPanel();
+      await option().first().click({ timeout: WebNewDriver.WAIT_MS });
+    }
   }
-  async spaceFiltersPickState(_name: string): Promise<void> {
-    return todo("spaceFiltersPickState");
+
+  async spaceFiltersPickPriority(name: string): Promise<void> {
+    await this.spaceFiltersClickOption("priority", name);
+    await this.page.waitForURL((url) => url.searchParams.has("priority"), { timeout: WebNewDriver.WAIT_MS });
   }
+
+  async spaceFiltersPickState(name: string): Promise<void> {
+    await this.spaceFiltersClickOption("state", name);
+    await this.page.waitForURL((url) => url.searchParams.has("state"), { timeout: WebNewDriver.WAIT_MS });
+  }
+
   async spaceFiltersNoMatchesVisible(): Promise<boolean> {
-    return todo("spaceFiltersNoMatchesVisible");
+    return this.isShown(this.spaceFiltersPanelScope().getByTestId("space-filter-no-matches").first());
   }
+
   async spaceFiltersSearchBoxCount(): Promise<number> {
-    return todo("spaceFiltersSearchBoxCount");
+    const boxes = this.page.getByRole("textbox");
+    const count = await boxes.count();
+    let visible = 0;
+    for (let i = 0; i < count; i++) {
+      if (
+        await boxes
+          .nth(i)
+          .isVisible()
+          .catch(() => false)
+      )
+        visible++;
+    }
+    return visible;
   }
-  async spaceFiltersSwitchLayout(_layout: "list" | "kanban"): Promise<void> {
-    return todo("spaceFiltersSwitchLayout");
+
+  async spaceFiltersSwitchLayout(layout: "list" | "kanban"): Promise<void> {
+    await this.spaceBoardSwitchLayout(layout);
   }
+
   async spaceFiltersAppliedFacets(): Promise<Array<{ facet: string; values: string[] }>> {
-    return todo("spaceFiltersAppliedFacets");
+    if (!(await this.spaceFiltersAppliedStripVisible())) return [];
+    const shells = this.page.getByTestId("space-applied-facet");
+    const count = await shells.count();
+    const facets: Array<{ facet: string; values: string[] }> = [];
+    for (let i = 0; i < count; i++) {
+      const shell = shells.nth(i);
+      const facet = (await shell.getAttribute("data-facet").catch(() => "")) ?? "";
+      const pills = shell.getByTestId("space-applied-pill");
+      const pillCount = await pills.count();
+      const values: string[] = [];
+      for (let p = 0; p < pillCount; p++) {
+        const value =
+          (await pills
+            .nth(p)
+            .getAttribute("data-value")
+            .catch(() => "")) ?? "";
+        if (value !== "") values.push(value);
+      }
+      facets.push({ facet, values });
+    }
+    return facets;
   }
+
   async spaceFiltersAppliedStripVisible(): Promise<boolean> {
-    return todo("spaceFiltersAppliedStripVisible");
+    return this.isShown(this.page.getByTestId("space-applied-filters"));
   }
-  async spaceFiltersRemoveValue(_facet: string, _value: string): Promise<void> {
-    return todo("spaceFiltersRemoveValue");
+
+  async spaceFiltersRemoveValue(facet: string, value: string): Promise<void> {
+    const shell = this.page.locator(`[data-testid="space-applied-facet"][data-facet="${facet}"]`);
+    const pill = shell.getByTestId("space-applied-pill").filter({ hasText: new RegExp(escapeRegExp(value), "i") });
+    await pill.first().getByTestId("space-applied-remove").click({ timeout: WebNewDriver.WAIT_MS });
+    // Settle on the survivors: a bare absence poll would also pass on
+    // the navigation transient where the strip briefly unmounts. When the
+    // facet itself is gone, only a dropped address key proves the removal
+    // of its last value settled (a transient keeps the key).
+    await expect
+      .poll(
+        async () => {
+          const entry = (await this.spaceFiltersAppliedFacets()).find(
+            (candidate) => candidate.facet === facet.toLowerCase()
+          );
+          if (entry !== undefined) return !entry.values.some((text) => text.toLowerCase() === value.toLowerCase());
+          return !new URL(this.page.url()).searchParams.has(facet.toLowerCase());
+        },
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .toBe(true);
   }
-  async spaceFiltersClearFacet(_facet: string): Promise<void> {
-    return todo("spaceFiltersClearFacet");
+
+  async spaceFiltersClearFacet(facet: string): Promise<void> {
+    const shell = this.page.locator(`[data-testid="space-applied-facet"][data-facet="${facet}"]`);
+    await shell.getByTestId("space-applied-clear").click({ timeout: WebNewDriver.WAIT_MS });
+    // The strip and the address key must both drop: either alone could be
+    // the navigation transient rather than the settled clear.
+    await expect
+      .poll(
+        async () =>
+          !(await this.spaceFiltersAppliedFacets()).some((entry) => entry.facet === facet.toLowerCase()) &&
+          !new URL(this.page.url()).searchParams.has(facet.toLowerCase()),
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .toBe(true);
   }
+
   async spaceFiltersClearAll(): Promise<void> {
-    return todo("spaceFiltersClearAll");
+    await this.page.getByTestId("space-applied-clear-all").click({ timeout: WebNewDriver.WAIT_MS });
+    await expect.poll(() => this.spaceFiltersAppliedStripVisible(), { timeout: WebNewDriver.WAIT_MS }).toBe(false);
   }
+
+  private spaceNewFiltersLastErrorReload = 0;
+
   async spaceFiltersVisibleIssueNames(): Promise<string[]> {
-    return todo("spaceFiltersVisibleIssueNames");
+    // A fetch that fails under a loaded box lands the board on its error
+    // screen with no retry control (SPC-004 pins reload-as-recovery), so a
+    // poll that kept reading would spin forever. Reload once when the
+    // error screen is showing instead; genuine breakage still fails loudly
+    // because the fresh load errors again.
+    const errorShown = await this.page
+      .getByTestId("space-board-error")
+      .isVisible()
+      .catch(() => false);
+    if (errorShown && (await this.page.locator('a[id^="issue-"]').count()) === 0) {
+      const now = Date.now();
+      if (now - this.spaceNewFiltersLastErrorReload > 60_000) {
+        this.spaceNewFiltersLastErrorReload = now;
+        await this.page.reload({ timeout: WebNewDriver.WAIT_MS }).catch(() => {});
+        await this.page.waitForLoadState("domcontentloaded", { timeout: WebNewDriver.WAIT_MS }).catch(() => {});
+      }
+    }
+    const rows = this.page.locator('a[id^="issue-"]');
+    const count = await rows.count();
+    const names: string[] = [];
+    for (let i = 0; i < count; i++) {
+      const rawRow =
+        (await rows
+          .nth(i)
+          .innerText()
+          .catch(() => "")) ?? "";
+      const text = rawRow.trim();
+      if (text !== "") names.push(text);
+    }
+    return names;
   }
+
+  private spaceNewFiltersFetchUrls: string[] = [];
+  private spaceNewFiltersFetchListener: ((request: { url(): string }) => void) | null = null;
+
   async spaceFiltersBeginFetchWatch(): Promise<void> {
-    return todo("spaceFiltersBeginFetchWatch");
+    if (this.spaceNewFiltersFetchListener !== null) {
+      this.page.off("request", this.spaceNewFiltersFetchListener);
+      this.spaceNewFiltersFetchListener = null;
+    }
+    this.spaceNewFiltersFetchUrls = [];
+    const listener = (request: { url(): string }): void => {
+      const url = request.url();
+      if (/\/api\/public\/anchor\/[^/]+\/issues\/(\?|$)/.test(url)) this.spaceNewFiltersFetchUrls.push(url);
+    };
+    this.spaceNewFiltersFetchListener = listener;
+    this.page.on("request", listener);
   }
+
   async spaceFiltersFetchQueries(): Promise<string[]> {
-    return todo("spaceFiltersFetchQueries");
+    return this.spaceNewFiltersFetchUrls.map((url) => url.split("?", 2)[1] ?? "");
   }
+
   async spaceFiltersEndFetchWatch(): Promise<void> {
-    return todo("spaceFiltersEndFetchWatch");
+    if (this.spaceNewFiltersFetchListener !== null) {
+      this.page.off("request", this.spaceNewFiltersFetchListener);
+      this.spaceNewFiltersFetchListener = null;
+    }
   }
 
   // --- Space peek shell (NEWFRONT-450, SPC-040–046). ---

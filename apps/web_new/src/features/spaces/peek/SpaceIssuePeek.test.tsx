@@ -151,11 +151,11 @@ function setup(options: SetupOptions = {}) {
 
 describe("public comments wiring", () => {
   it("passes the publisher flag and current position into the thread (SPC-049)", async () => {
-    setup({ commentsEnabled: true, search: { board: "kanban", peekId: ISSUE_ID, state: [TODO_ID] } });
+    setup({ commentsEnabled: true, search: { board: "kanban", peekId: ISSUE_ID, state: TODO_ID } });
     expect(await screen.findByTestId("space-comments")).toBeInTheDocument();
     expect(await screen.findByTestId("space-comments-signin")).toHaveAttribute(
       "href",
-      `/spaces/?next_path=/issues/anchor-1/%3Fboard%3Dkanban%26peekId%3D${ISSUE_ID}%26state%3D${TODO_ID}`
+      `/spaces/?next_path=/issues/anchor-1/?board=kanban&peekId=${ISSUE_ID}&state=${TODO_ID}`
     );
   });
 

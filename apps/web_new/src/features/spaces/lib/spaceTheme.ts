@@ -66,6 +66,20 @@ export function useSpaceTheme(): { theme: SpaceTheme; toggle: () => void } {
   React.useLayoutEffect(() => {
     applyTheme(theme);
   }, [theme]);
+  // The app root and the workspace theme provider resolve a different
+  // (profile-bound) key in passive effects, which run after this layout
+  // effect and would overwrite the visitor's stored choice on every fresh
+  // mount. Hold the pin while the switch is mounted: an external write of
+  // any other value is corrected back to the resolved theme.
+  React.useEffect(() => {
+    if (typeof MutationObserver === "undefined") return;
+    const root = document.documentElement;
+    const observer = new MutationObserver(() => {
+      if (root.getAttribute("data-theme") !== theme) applyTheme(theme);
+    });
+    observer.observe(root, { attributes: true, attributeFilter: ["data-theme"] });
+    return () => observer.disconnect();
+  }, [theme]);
   const toggle = React.useCallback(() => {
     const next: SpaceTheme = theme === "light" ? "dark" : "light";
     writeStoredSpaceTheme(next);

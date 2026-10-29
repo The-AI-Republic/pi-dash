@@ -306,32 +306,52 @@ test(
       expect((meta.payload as { name?: unknown }).name).toBe(seed.projectName);
     });
 
-    await test.step("board page renders the generic fallback instead of the board metadata", async () => {
-      // Current behavior only (bug NEWFRONT-453): the metadata loader
-      // throws on its relative API base, so every board serves the generic
-      // tags. Intended: the board name/summary unfurl with no cover image.
-      await driver.spaceOpenBoard(anchor);
-      await expect.poll(() => driver.spaceAccessBoardShowsProject(seed.projectName), { timeout: 60_000 }).toBe(true);
-      const head = await driver.spaceAccessHeadFacts();
-      expect(head.title).toBe("Pi Dash");
-      expect(head.description).toBe(
-        "Made with Pi Dash, an AI-powered work management platform with publishing capabilities."
-      );
-      expect(head.ogTitle).toBe("Pi Dash");
-      expect(head.ogDescription).toBe(
-        "Made with Pi Dash, an AI-powered work management platform with publishing capabilities."
-      );
-      expect(head.twitterTitle).toBe("Pi Dash");
-      expect(head.ogImage).toBeNull();
-      expect(head.twitterImage).toBeNull();
-    });
+    if (driver.target === "web_new") {
+      await test.step("board page renders the per-board metadata with no cover image", async () => {
+        // Intended (bug NEWFRONT-453 fixed): the board name unfurls with no
+        // cover image (target per main#523). The seeded board carries no
+        // summary, so the description falls back to the generic line.
+        await driver.spaceOpenBoard(anchor);
+        await expect.poll(() => driver.spaceAccessBoardShowsProject(seed.projectName), { timeout: 60_000 }).toBe(true);
+        const head = await driver.spaceAccessHeadFacts();
+        expect(head.title).toBe(seed.projectName);
+        expect(head.description).toBe("Projects, issues and agents in one place.");
+        expect(head.ogTitle).toBe(seed.projectName);
+        expect(head.ogDescription).toBe("Projects, issues and agents in one place.");
+        expect(head.twitterTitle).toBe(seed.projectName);
+        expect(head.ogImage).toBeNull();
+        expect(head.twitterImage).toBeNull();
+      });
+    } else {
+      await test.step("board page renders the generic fallback instead of the board metadata", async () => {
+        // Current behavior only (bug NEWFRONT-453): the metadata loader
+        // throws on its relative API base, so every board serves the generic
+        // tags. Intended: the board name/summary unfurl with no cover image.
+        await driver.spaceOpenBoard(anchor);
+        await expect.poll(() => driver.spaceAccessBoardShowsProject(seed.projectName), { timeout: 60_000 }).toBe(true);
+        const head = await driver.spaceAccessHeadFacts();
+        expect(head.title).toBe("Pi Dash");
+        expect(head.description).toBe(
+          "Made with Pi Dash, an AI-powered work management platform with publishing capabilities."
+        );
+        expect(head.ogTitle).toBe("Pi Dash");
+        expect(head.ogDescription).toBe(
+          "Made with Pi Dash, an AI-powered work management platform with publishing capabilities."
+        );
+        expect(head.twitterTitle).toBe("Pi Dash");
+        expect(head.ogImage).toBeNull();
+        expect(head.twitterImage).toBeNull();
+      });
+    }
 
     await test.step("malformed anchors also fall back", async () => {
       expect((await serverSpaceBoardMeta("!!!")).status).toBe(404);
       await driver.spaceOpenBoard("!!!");
       await expect.poll(() => driver.spaceAccessAnchorNotFoundVisible(), { timeout: 60_000 }).toBe(true);
       const head = await driver.spaceAccessHeadFacts();
-      expect(head.title).toBe("Pi Dash");
+      // Intended on web_new: the dedicated not-found title (no board tags),
+      // never the generic product title and never a cover image.
+      expect(head.title).toBe(driver.target === "web_new" ? "Pi Dash — Board not found" : "Pi Dash");
       expect(head.ogImage).toBeNull();
       expect(head.twitterImage).toBeNull();
     });

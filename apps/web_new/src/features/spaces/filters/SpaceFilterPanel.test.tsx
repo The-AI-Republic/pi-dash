@@ -116,7 +116,7 @@ describe("SpaceFilterPanel (SPC-034)", () => {
   });
 
   it("marks applied options checked and counts them on the section header", async () => {
-    const { user } = renderPanel({ filters: { priority: ["high"], state: [TODO] } });
+    const { user } = renderPanel({ filters: { priority: "high", state: TODO } });
     await openPanel(user);
     const high = optionIn("priority", "high");
     expect(high).toHaveAttribute("aria-pressed", "true");

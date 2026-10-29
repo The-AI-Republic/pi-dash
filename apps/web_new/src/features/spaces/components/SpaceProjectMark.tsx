@@ -7,14 +7,14 @@
 // renders its decoded glyph; a project with no configured mark renders
 // an empty slot — the old board invents no mark here and neither does
 // the new one; and missing project details altogether render a generic
-// mark so the bar stays intact. A mark that cannot be decoded —
-// logo_props that is not a map, or an emoji value outside the code
-// point range — takes the same generic branch: a broken mark must
-// never take the board to the crash screen. The slot always carries
-// data-mark naming its branch for the area gate's driver, which reads
-// the branch rather than guessing from pixels — including while the
-// icon chunk is still loading and for icon names the glyph set does
-// not know, where the shared wrapper shows the identifier initial.
+// mark so the bar stays intact. A logo_props value that is not a map
+// takes the same generic branch, but a corrupt emoji code point is a
+// payload fault and throws to the space error boundary (SPC-019). The
+// slot always carries data-mark naming its branch for the area gate's
+// driver, which reads the branch rather than guessing from pixels —
+// including while the icon chunk is still loading and for icon names
+// the glyph set does not know, where the shared wrapper shows the
+// identifier initial.
 import { Layers } from "lucide-react";
 import type { SpaceBoardProject } from "@pidash/api-client";
 import * as React from "react";
@@ -39,13 +39,13 @@ function asLogoMap(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-/** The decoded emoji glyph, or null when the value does not decode. */
+/**
+ * The decoded emoji glyph, or null when no emoji is configured. A corrupt
+ * code point throws to the space error boundary (SPC-019) rather than
+ * rendering a fallback.
+ */
 function safeEmojiGlyph(logoProps: Record<string, unknown>): string | null {
-  try {
-    return projectMarkGlyph(logoProps);
-  } catch {
-    return null;
-  }
+  return projectMarkGlyph(logoProps);
 }
 
 /** Settle the mark branch and the payload its render needs. */

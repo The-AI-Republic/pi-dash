@@ -8,6 +8,8 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import * as React from "react";
 import { describe, expect, it } from "vitest";
 
+import type { SpaceBoardFilters } from "../lib/address.js";
+
 import { useSpaceGroups } from "./useSpaceGroups.js";
 import { boardIssue, DONE_ID, firstPage, STATES, TODO_ID } from "./testFixtures.js";
 
@@ -158,7 +160,7 @@ describe("useSpaceGroups (SPC-026)", () => {
     const { client, urls, wrapper } = harness((url) =>
       url.includes("state=") ? reply(nextPage(TODO_ID, ["Second"], 3)) : reply(FIRST)
     );
-    const { result } = renderHook(() => useSpaceGroups(client, "anchor-1", { priority: ["high"] }, STATES, FIRST), {
+    const { result } = renderHook(() => useSpaceGroups(client, "anchor-1", { priority: "high" }, STATES, FIRST), {
       wrapper,
     });
     act(() => result.current.loadMore(TODO_ID));
@@ -180,10 +182,10 @@ describe("useSpaceGroups (SPC-026)", () => {
     });
     const { result, rerender } = renderHook(
       ({ filters }) => useSpaceGroups(client, "anchor-1", filters, STATES, FIRST),
-      { wrapper, initialProps: { filters: {} as { priority?: string[] } } }
+      { wrapper, initialProps: { filters: {} as SpaceBoardFilters } }
     );
     act(() => result.current.loadMore(TODO_ID));
-    rerender({ filters: { priority: ["low"] } });
+    rerender({ filters: { priority: "low" } });
     release?.();
     await waitFor(() => expect(urls).toHaveLength(1));
     // The in-flight page was requested with the filters that were live when

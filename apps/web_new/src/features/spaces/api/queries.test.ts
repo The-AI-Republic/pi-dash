@@ -227,7 +227,7 @@ describe("space query options", () => {
       };
     });
     const state = "11111111-1111-4111-8111-111111111111";
-    await spaceIssuesQueryOptions(client, "anchor-1", { state: [state] }).queryFn!({} as never);
+    await spaceIssuesQueryOptions(client, "anchor-1", { state: state }).queryFn!({} as never);
     await spaceIssuesQueryOptions(client, "anchor-1", {}).queryFn!({} as never);
     expect(urls).toHaveLength(2);
     const filtered = new URL(urls[0] ?? "", "https://api.test");
@@ -263,7 +263,7 @@ describe("space query options", () => {
       };
     });
     const state = "11111111-1111-4111-8111-111111111111";
-    const options = spaceGroupQueryOptions(client, "anchor-1", { priority: ["high"] }, state, "50:1:0");
+    const options = spaceGroupQueryOptions(client, "anchor-1", { priority: "high" }, state, "50:1:0");
     expect(options.queryKey).toEqual(["spaces", "anchor", "anchor-1", "issues", "|high|", "group", state, "50:1:0"]);
     await options.queryFn!({} as never);
     const url = new URL(urls[0] ?? "", "https://api.test");

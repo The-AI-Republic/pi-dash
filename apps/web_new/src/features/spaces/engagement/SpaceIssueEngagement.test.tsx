@@ -260,9 +260,7 @@ describe("defaultSpaceSignInRedirect", () => {
     Object.defineProperty(window, "location", { configurable: true, writable: true, value: { assign } });
     try {
       defaultSpaceSignInRedirect(ANCHOR, { board: "kanban", peekId: ISSUE_ID });
-      expect(assign).toHaveBeenCalledWith(
-        `/spaces/?next_path=/issues/anchor-1/%3Fboard%3Dkanban%26peekId%3D${ISSUE_ID}`
-      );
+      expect(assign).toHaveBeenCalledWith(`/spaces/?next_path=/issues/anchor-1/?board=kanban&peekId=${ISSUE_ID}`);
     } finally {
       Object.defineProperty(window, "location", { configurable: true, writable: true, value: location });
     }
@@ -297,7 +295,7 @@ describe("defaultSpaceSignInRedirect", () => {
         </QueryClientProvider>
       );
       await userEvent.click(screen.getByTestId("space-peek-vote-up"));
-      expect(assign).toHaveBeenCalledWith("/spaces/?next_path=/issues/anchor-1/%3Fboard%3Dkanban");
+      expect(assign).toHaveBeenCalledWith("/spaces/?next_path=/issues/anchor-1/?board=kanban");
     } finally {
       Object.defineProperty(window, "location", { configurable: true, writable: true, value: location });
     }

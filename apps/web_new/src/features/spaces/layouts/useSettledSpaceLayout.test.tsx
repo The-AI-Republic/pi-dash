@@ -36,7 +36,7 @@ describe("useSettledSpaceLayout (SPC-020–022)", () => {
   });
 
   it("settles a missing layout on the first offered one and replaces the address", () => {
-    const { result } = settle({ peekId: "p1", state: [ID] }, { list: true, kanban: true });
+    const { result } = settle({ peekId: "p1", state: ID }, { list: true, kanban: true });
     expect(result.current.active).toBe("list");
     expect(navigation.navigate).toHaveBeenCalledWith({
       href: `/spaces/issues/anchor-1/?board=list&peekId=p1&state=${ID}`,
@@ -57,7 +57,7 @@ describe("useSettledSpaceLayout (SPC-020–022)", () => {
   });
 
   it("pushes exactly one address when the visitor picks another offered layout", () => {
-    const { result } = settle({ board: "list", peekId: "p1", priority: ["high"] }, { list: true, kanban: true });
+    const { result } = settle({ board: "list", peekId: "p1", priority: "high" }, { list: true, kanban: true });
     act(() => result.current.select("kanban"));
     expect(navigation.navigate).toHaveBeenCalledTimes(1);
     expect(navigation.navigate).toHaveBeenCalledWith({

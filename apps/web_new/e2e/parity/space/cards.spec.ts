@@ -364,7 +364,14 @@ test(
     const created = await createIssue(seed.workspaceSlug, seed.projectId, cookie, freshName);
     try {
       const { after } = await driver.spaceBoardReconnectStability();
-      expect(after).toEqual([freshName, ...before]);
+      // Intended on web_new (bug NEWFRONT-455 fixed): reconnecting keeps
+      // the loaded list like refocusing; the fresh issue stays hidden
+      // until the visitor navigates or refilters.
+      if (driver.target === "web_new") {
+        expect(after).toEqual(before);
+      } else {
+        expect(after).toEqual([freshName, ...before]);
+      }
     } finally {
       await deleteIssuesQuietly(seed, cookie, seed.projectId, [created.id]);
     }

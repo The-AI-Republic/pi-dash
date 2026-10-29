@@ -233,6 +233,24 @@ test(
     expect(await driver.spaceChromeTheme()).toBe("light");
     const lightBg = await driver.spaceChromeBodyBackground();
 
+    if (driver.target === "web_new") {
+      // Intended (bug NEWFRONT-456 fixed): every toggle flips, including
+      // the first click from the system default.
+      await driver.spaceChromeToggleTheme();
+      expect(await driver.spaceChromeTheme()).toBe("dark");
+      const darkBg = await driver.spaceChromeBodyBackground();
+      expect(darkBg).not.toBe(lightBg);
+
+      await driver.spaceChromeToggleTheme();
+      expect(await driver.spaceChromeTheme()).toBe("light");
+      expect(await driver.spaceChromeBodyBackground()).toBe(lightBg);
+
+      await driver.spaceChromeToggleTheme();
+      expect(await driver.spaceChromeTheme()).toBe("dark");
+      expect(await driver.spaceChromeBodyBackground()).toBe(darkBg);
+      return;
+    }
+
     await driver.spaceChromeToggleTheme();
     expect(await driver.spaceChromeTheme()).toBe("light");
     expect(await driver.spaceChromeBodyBackground()).toBe(lightBg);
@@ -420,7 +438,13 @@ test(
       expect(framed.boardReadable).toBe(true);
       expect(framed.signInVisible).toBe(false);
       expect(framed.avatarVisible).toBe(false);
-      expect(framed.emojiControls).toBeGreaterThan(0);
+      // Intended on web_new (bug NEWFRONT-469 fixed): the frame gate hides
+      // the card-footer add control too, so no emoji path stays live.
+      if (driver.target === "web_new") {
+        expect(framed.emojiControls).toBe(0);
+      } else {
+        expect(framed.emojiControls).toBeGreaterThan(0);
+      }
 
       expect((await publicIssues(anchor)).length).toBe(issues.length);
     });

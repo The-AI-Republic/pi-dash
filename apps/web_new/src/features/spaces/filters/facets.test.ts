@@ -50,53 +50,53 @@ describe("panelFacetsForLayout (SPC-038)", () => {
 describe("facetValues / hasAppliedFilters", () => {
   it("reads applied values and reports an empty filter object as clear", () => {
     expect(facetValues({}, "priority")).toEqual([]);
-    expect(facetValues({ priority: ["high"] }, "priority")).toEqual(["high"]);
+    expect(facetValues({ priority: "high" }, "priority")).toEqual(["high"]);
     expect(hasAppliedFilters({})).toBe(false);
-    expect(hasAppliedFilters({ state: [], priority: [], labels: [] })).toBe(false);
+    expect(hasAppliedFilters({ state: "", priority: "", labels: "" })).toBe(false);
   });
 
   it("reports each facet on its own", () => {
-    expect(hasAppliedFilters({ priority: ["high"] })).toBe(true);
-    expect(hasAppliedFilters({ state: [STATE_A] })).toBe(true);
-    expect(hasAppliedFilters({ labels: [LABEL] })).toBe(true);
+    expect(hasAppliedFilters({ priority: "high" })).toBe(true);
+    expect(hasAppliedFilters({ state: STATE_A })).toBe(true);
+    expect(hasAppliedFilters({ labels: LABEL })).toBe(true);
   });
 });
 
 describe("toggleFilterValue (SPC-034)", () => {
   it("adds a value to a clear facet", () => {
-    expect(toggleFilterValue({}, "priority", "high")).toEqual({ priority: ["high"] });
+    expect(toggleFilterValue({}, "priority", "high")).toEqual({ priority: "high" });
   });
 
   it("appends to surviving values without touching other facets", () => {
-    expect(toggleFilterValue({ priority: ["high"], state: [STATE_A] }, "priority", "urgent")).toEqual({
-      priority: ["high", "urgent"],
-      state: [STATE_A],
+    expect(toggleFilterValue({ priority: "high", state: STATE_A }, "priority", "urgent")).toEqual({
+      priority: "high,urgent",
+      state: STATE_A,
     });
   });
 
   it("drops an applied value and removes the facet key when nothing survives", () => {
-    expect(toggleFilterValue({ priority: ["high", "urgent"] }, "priority", "high")).toEqual({
-      priority: ["urgent"],
+    expect(toggleFilterValue({ priority: "high,urgent" }, "priority", "high")).toEqual({
+      priority: "urgent",
     });
-    expect(toggleFilterValue({ priority: ["high"], labels: [LABEL] }, "priority", "high")).toEqual({
-      labels: [LABEL],
+    expect(toggleFilterValue({ priority: "high", labels: LABEL }, "priority", "high")).toEqual({
+      labels: LABEL,
     });
   });
 });
 
 describe("removeFilterValue (SPC-035)", () => {
   it("drops one value and keeps the survivors under the same facet", () => {
-    expect(removeFilterValue({ state: [STATE_A, STATE_B] }, "state", STATE_A)).toEqual({ state: [STATE_B] });
+    expect(removeFilterValue({ state: [STATE_A, STATE_B].join(",") }, "state", STATE_A)).toEqual({ state: STATE_B });
   });
 
   it("removes the facet key when the last value goes", () => {
-    expect(removeFilterValue({ labels: [LABEL], priority: ["low"] }, "labels", LABEL)).toEqual({
-      priority: ["low"],
+    expect(removeFilterValue({ labels: LABEL, priority: "low" }, "labels", LABEL)).toEqual({
+      priority: "low",
     });
   });
 
   it("leaves the filters alone when the value is not applied", () => {
-    const filters = { priority: ["high"] };
+    const filters = { priority: "high" };
     expect(removeFilterValue(filters, "priority", "urgent")).toBe(filters);
     expect(removeFilterValue(filters, "state", STATE_A)).toBe(filters);
   });
@@ -104,26 +104,29 @@ describe("removeFilterValue (SPC-035)", () => {
 
 describe("clearFilterFacet (SPC-035)", () => {
   it("drops one facet and keeps the others", () => {
-    expect(clearFilterFacet({ priority: ["high"], state: [STATE_A] }, "priority")).toEqual({ state: [STATE_A] });
+    expect(clearFilterFacet({ priority: "high", state: STATE_A }, "priority")).toEqual({ state: STATE_A });
   });
 
   it("is a no-op shape when the facet is already clear", () => {
-    expect(clearFilterFacet({ priority: ["high"] }, "state")).toEqual({ priority: ["high"] });
+    expect(clearFilterFacet({ priority: "high" }, "state")).toEqual({ priority: "high" });
   });
 });
 
 describe("clearedFilterSearch / filteredBoardSearch (SPC-036)", () => {
   it("clear-all keeps the view and the open issue and drops every facet", () => {
     expect(
-      clearedFilterSearch({ board: "kanban", peekId: "p1", priority: ["high"], state: [STATE_A], labels: [LABEL] })
+      clearedFilterSearch({ board: "kanban", peekId: "p1", priority: "high", state: STATE_A, labels: LABEL })
     ).toEqual({ board: "kanban", peekId: "p1" });
-    expect(clearedFilterSearch({ priority: ["high"] })).toEqual({});
+    expect(clearedFilterSearch({ priority: "high" })).toEqual({});
   });
 
   it("rebuilds the search from a view plus a filter object", () => {
-    expect(
-      filteredBoardSearch({ board: "list", peekId: "p1" }, { priority: ["high", "urgent"], labels: [LABEL] })
-    ).toEqual({ board: "list", peekId: "p1", priority: ["high", "urgent"], labels: [LABEL] });
+    expect(filteredBoardSearch({ board: "list", peekId: "p1" }, { priority: "high,urgent", labels: LABEL })).toEqual({
+      board: "list",
+      peekId: "p1",
+      priority: "high,urgent",
+      labels: LABEL,
+    });
     expect(filteredBoardSearch({}, {})).toEqual({});
   });
 });
