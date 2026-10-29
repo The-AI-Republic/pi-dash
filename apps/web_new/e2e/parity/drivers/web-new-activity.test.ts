@@ -381,7 +381,7 @@ describe("activity feed driver methods", () => {
       },
     });
     const { page } = pageOf({
-      role: (role, options) => {
+      role: (role, _options) => {
         if (role === "group") {
           return locator({
             locator: () => editor,
