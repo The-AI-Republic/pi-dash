@@ -1292,6 +1292,10 @@ async fn relate_inner(
             &write,
             operations::relations::UnrelateOptions {
                 emit_activity: true,
+                // The v1 agent endpoint deletes every matching row
+                // (`orchestration/relations.py:251-252`); newest-only
+                // is the MCP tool's semantic.
+                newest_only: false,
             },
         )
         .await?
