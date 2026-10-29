@@ -587,7 +587,7 @@ describe("web_new comment driver", () => {
 });
 
 describe("web_new comments gate driver (NEWFRONT-818)", () => {
-  it("opens mention, rule, activity and composer details through the shared open", async () => {
+  it("opens mention, activity and composer details through the shared open", async () => {
     const page = pageOf();
     const driver = new WebNewDriver(page.page);
     const calls: string[] = [];
@@ -595,10 +595,66 @@ describe("web_new comments gate driver (NEWFRONT-818)", () => {
       calls.push(`${workspace}/${ref}/${id ?? "-"}`);
     }) as WebNewDriver["openIssueDetail"];
     await driver.mentionsOpenIssueDetail("acme", "p-1", "i-1");
-    await driver.rulesOpenIssueDetail("acme", "p-1", "i-1");
     await driver.activityOpenIssueDetail("acme", "p-1", "i-1");
     await driver.composerOpenIssue("acme", "WEB-1");
-    expect(calls).toEqual(["acme/p-1/i-1", "acme/p-1/i-1", "acme/p-1/i-1", "acme/WEB-1/-"]);
+    expect(calls).toEqual(["acme/p-1/i-1", "acme/p-1/i-1", "acme/WEB-1/-"]);
+  });
+
+  it("navigates rules details fresh even when already on browse", async () => {
+    const visited: string[] = [];
+    const page = pageOf();
+    page.page.url = () => "https://p.test/acme/browse/WEB-9";
+    page.page.goto = (async (url: string) => {
+      visited.push(url);
+      return null;
+    }) as Page["goto"];
+    page.page.waitForLoadState = (async () => {
+      visited.push("load");
+    }) as Page["waitForLoadState"];
+    page.page.waitForURL = (async (pattern: RegExp) => {
+      expect(pattern.test("/acme/browse/WEB-1")).toBe(true);
+      visited.push("url");
+      return null;
+    }) as Page["waitForURL"];
+    page.page.getByRole = ((role: string, options?: { name?: string }) => {
+      if (role === "group" && options?.name === "Add comment") {
+        return locator({ first: () => locator({ waitFor: async () => void visited.push("feed") }) });
+      }
+      return locator();
+    }) as Page["getByRole"];
+    await new WebNewDriver(page.page).rulesOpenIssueDetail("acme", "p-1", "i-1");
+    expect(visited).toEqual(["/acme/projects/p-1/issues/i-1", "load", "url", "feed"]);
+  });
+
+  it("retries the rules redirect once through a reload on a stall", async () => {
+    const visited: string[] = [];
+    const page = pageOf();
+    page.page.goto = (async (url: string) => {
+      visited.push(url);
+      return null;
+    }) as Page["goto"];
+    page.page.waitForLoadState = (async () => {
+      visited.push("load");
+    }) as Page["waitForLoadState"];
+    let urls = 0;
+    page.page.waitForURL = (async () => {
+      urls += 1;
+      visited.push(`url${urls}`);
+      if (urls === 1) throw new Error("stall");
+      return null;
+    }) as Page["waitForURL"];
+    page.page.reload = (async () => {
+      visited.push("reload");
+      return null;
+    }) as Page["reload"];
+    page.page.getByRole = ((role: string, options?: { name?: string }) => {
+      if (role === "group" && options?.name === "Add comment") {
+        return locator({ first: () => locator({ waitFor: async () => void visited.push("feed") }) });
+      }
+      return locator();
+    }) as Page["getByRole"];
+    await new WebNewDriver(page.page).rulesOpenIssueDetail("acme", "p-1", "i-1");
+    expect(visited).toEqual(["/acme/projects/p-1/issues/i-1", "load", "url1", "reload", "url2", "feed"]);
   });
 
   it("signs activity scenarios in through the shared rules sign-in", async () => {

@@ -1679,7 +1679,19 @@ export class WebNewDriver implements ParityDriver {
   // --- NEWFRONT-113 (rules) stubs: mirror of the oracle driver additions. ---
 
   async rulesOpenIssueDetail(workspaceSlug: string, projectId: string, issueId: string): Promise<void> {
-    await this.openIssueDetail(workspaceSlug, projectId, issueId);
+    // Always a fresh short-link navigation: the shared opener only
+    // reloads when already on browse, which would keep a previous
+    // probe issue on screen. The id route redirects to the canonical
+    // browse address once the server resolves the key.
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/issues/${issueId}`);
+    await this.page.waitForLoadState("domcontentloaded");
+    try {
+      await this.page.waitForURL(/\/browse\//, { timeout: WebNewDriver.WAIT_MS });
+    } catch {
+      await this.page.reload();
+      await this.page.waitForURL(/\/browse\//, { timeout: WebNewDriver.WAIT_MS });
+    }
+    await this.rulesWaitForFeed();
   }
 
   async rulesOpenIntakeIssue(workspaceSlug: string, projectId: string, inboxIssueId: string): Promise<void> {
