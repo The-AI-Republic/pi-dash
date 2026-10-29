@@ -1002,39 +1002,133 @@ export class WebNewDriver implements ParityDriver {
     return names;
   }
 
-  // --- Mention flows (NEWFRONT-115). Throwing stubs per the shared driver
-  // --- contract; the mentions area fills these in when it lands.
+  // --- Mention flows (NEWFRONT-115, implemented NEWFRONT-818). ---
 
-  async mentionsOpenIssueDetail(_workspaceSlug: string, _projectId: string, _issueId: string): Promise<void> {
-    return todo("mentionsOpenIssueDetail");
+  async mentionsOpenIssueDetail(workspaceSlug: string, projectId: string, issueId: string): Promise<void> {
+    // The short link redirects to the canonical browse address; the
+    // shared open settles on the Activity heading like every area.
+    await this.openIssueDetail(workspaceSlug, projectId, issueId);
   }
 
-  async mentionsSuggestionsFor(_query: string): Promise<string[]> {
-    return todo("mentionsSuggestionsFor");
+  /** The @ popup both comment forms share (CMT-019). */
+  private mentionSuggestionsList(): Locator {
+    return this.page.getByRole("list", { name: "Mention suggestions" });
+  }
+
+  async mentionsSuggestionsFor(query: string): Promise<string[]> {
+    const composer = this.composerEditor();
+    // A suggestion popup left open by a previous query covers the composer
+    // and would intercept the click; dismiss it first.
+    await this.page.keyboard.press("Escape").catch(() => undefined);
+    await composer.scrollIntoViewIfNeeded();
+    await composer.click();
+    // Start from an empty composer so repeated calls re-query instead of
+    // appending to the previous trigger text.
+    await this.page.keyboard.press("ControlOrMeta+a");
+    await this.page.keyboard.press("Backspace");
+    await composer.pressSequentially(`@${query}`, { delay: 90 });
+    const items = this.mentionSuggestionsList().getByRole("button");
+    await items.first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    // Each row is an avatar (no text) plus the member name span.
+    const names = await items.allInnerTexts();
+    return names.map((name) => name.trim()).filter((name) => name.length > 0);
   }
 
   async mentionsSuggestionsHaveAvatars(): Promise<boolean> {
-    return todo("mentionsSuggestionsHaveAvatars");
+    const items = this.mentionSuggestionsList().getByRole("button");
+    const count = await items.count();
+    if (count === 0) return false;
+    for (const item of await items.all()) {
+      if ((await item.getByRole("img").count()) === 0) return false;
+    }
+    return true;
   }
 
   async mentionsSuggestionSections(): Promise<string[]> {
-    return todo("mentionsSuggestionSections");
+    const list = this.mentionSuggestionsList();
+    await list.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    // Section labels are the list rows without a pick button; every
+    // people row carries one.
+    const rows = list.locator(":scope > li");
+    const count = await rows.count();
+    const sections: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const row = rows.nth(index);
+      if ((await row.getByRole("button").count()) > 0) continue;
+      const text = ((await row.innerText().catch(() => "")) ?? "").trim();
+      if (text.length > 0) sections.push(text);
+    }
+    return sections;
   }
 
-  async mentionsPostComment(_displayName: string, _bodyText: string): Promise<void> {
-    return todo("mentionsPostComment");
+  async mentionsPostComment(displayName: string, bodyText: string): Promise<void> {
+    const composer = this.composerEditor();
+    await this.page.keyboard.press("Escape").catch(() => undefined);
+    await composer.scrollIntoViewIfNeeded();
+    await composer.click();
+    await composer.pressSequentially(`@${displayName}`, { delay: 90 });
+    await this.mentionSuggestionsList().getByRole("button").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    // Enter picks the popup's first row; the mention node lands at the caret.
+    await this.page.keyboard.press("Enter");
+    await composer.pressSequentially(` ${bodyText}`, { delay: 40 });
+    await this.composerBox()
+      .getByRole("button", { name: "Comment", exact: true })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    // The posted body text appearing in the feed proves the save landed;
+    // bodyText is unique per scenario run, so this cannot match a stale row.
+    await this.page.getByText(bodyText).first().waitFor({ timeout: 60_000 });
   }
 
   async mentionsVisibleReferences(): Promise<{ text: string; href: string | null }[]> {
-    return todo("mentionsVisibleReferences");
+    const links = this.page.locator('a[href*="/profile/"]');
+    const count = await links.count();
+    const refs: { text: string; href: string | null }[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const link = links.nth(index);
+      const text = (await link.allTextContents()).join("").trim();
+      // Mention chips render "@Display Name"; other profile links (author
+      // rows, assignees) do not carry the "@" marker.
+      if (!text.startsWith("@")) continue;
+      refs.push({ text, href: await link.getAttribute("href") });
+    }
+    return refs;
   }
 
-  async mentionsEditRemovingMention(_oldBodyText: string, _plainText: string): Promise<void> {
-    return todo("mentionsEditRemovingMention");
+  async mentionsEditRemovingMention(oldBodyText: string, plainText: string): Promise<void> {
+    await this.openCommentMenu(oldBodyText);
+    await this.page.getByRole("menuitem", { name: "Edit" }).click({ timeout: WebNewDriver.WAIT_MS });
+    const editor = this.page.locator('[id^="comment-"] [contenteditable="true"]').first();
+    await editor.click({ timeout: WebNewDriver.WAIT_MS });
+    await editor.press("ControlOrMeta+a", { timeout: WebNewDriver.WAIT_MS });
+    await editor.pressSequentially(plainText, { timeout: WebNewDriver.WAIT_MS });
+    await editor
+      .locator("xpath=ancestor::form[1]")
+      .getByRole("button", { name: "Save comment" })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    // The plain replacement showing in the feed proves the save landed.
+    await this.commentCard(plainText).waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
-  async mentionsEnsureSignedIn(_email: string, _password: string): Promise<void> {
-    return todo("mentionsEnsureSignedIn");
+  async mentionsEnsureSignedIn(email: string, password: string): Promise<void> {
+    // The scratch stack rejects valid credentials intermittently under
+    // parallel parity runs, so the shared flow retries a bounded number
+    // of times. Sign-in itself waits for the landing (the URL leaves the
+    // entry); a previous attempt that landed late ends the loop early.
+    let lastError = "no attempt finished";
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      if (attempt > 1 && new URL(this.page.url()).pathname !== "/") return;
+      try {
+        await this.openEntry();
+        await this.signInWithPassword(email, password);
+        return;
+      } catch (error) {
+        lastError = String(error).split("\n")[0] ?? String(error);
+      }
+    }
+    if (new URL(this.page.url()).pathname !== "/") return;
+    throw new Error(`[parity] sign-in as ${email} did not land after 3 tries: ${lastError}`);
   }
 
   // Workspace onboarding + creation (NEWFRONT-111, AUTH-034..043). Throwing
@@ -1574,8 +1668,8 @@ export class WebNewDriver implements ParityDriver {
 
   // --- NEWFRONT-113 (rules) stubs: mirror of the oracle driver additions. ---
 
-  async rulesOpenIssueDetail(_workspaceSlug: string, _projectId: string, _issueId: string): Promise<void> {
-    return todo("rulesOpenIssueDetail");
+  async rulesOpenIssueDetail(workspaceSlug: string, projectId: string, issueId: string): Promise<void> {
+    await this.openIssueDetail(workspaceSlug, projectId, issueId);
   }
 
   async rulesOpenIntakeIssue(workspaceSlug: string, projectId: string, inboxIssueId: string): Promise<void> {
@@ -1588,8 +1682,20 @@ export class WebNewDriver implements ParityDriver {
     await this.page.getByRole("group", { name: "Add comment" }).first().waitFor({ timeout: 300_000 });
   }
 
-  async rulesCommentBodyText(_commentId: string): Promise<string | null> {
-    return todo("rulesCommentBodyText");
+  async rulesCommentBodyText(commentId: string): Promise<string | null> {
+    const card = this.rulesCard(commentId);
+    await card.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    // The read-only body region is unmounted while the card is folded
+    // shut, so its absence is the collapsed signal.
+    const body = card.getByRole("region", { name: /^Comment by / }).first();
+    if ((await body.count()) > 0) {
+      return ((await body.innerText({ timeout: WebNewDriver.WAIT_MS })) ?? "").trim();
+    }
+    const empty = card.getByText("This comment has no text.").first();
+    if ((await empty.count()) > 0) {
+      return ((await empty.innerText({ timeout: WebNewDriver.WAIT_MS })) ?? "").trim();
+    }
+    return null;
   }
 
   /** One comment card, addressed by the id its deep link points at. */
@@ -1623,8 +1729,29 @@ export class WebNewDriver implements ParityDriver {
     return keys;
   }
 
-  async rulesChooseCommentMenuOption(_commentId: string, _option: RulesCommentMenuOption): Promise<void> {
-    return todo("rulesChooseCommentMenuOption");
+  async rulesChooseCommentMenuOption(commentId: string, option: RulesCommentMenuOption): Promise<void> {
+    // Copying writes to the clipboard, which headless Chromium denies
+    // without an explicit grant; arrange it before the pick.
+    if (option === "copy_link") await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    const card = this.rulesCard(commentId);
+    await card.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const trigger = card.locator('button[aria-haspopup="menu"]').first();
+    await trigger.scrollIntoViewIfNeeded();
+    await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    const title =
+      option === "edit"
+        ? "Edit"
+        : option === "copy_link"
+          ? "Copy link"
+          : option === "access_switch"
+            ? /Switch to (public|private) comment/
+            : option === "fold"
+              ? "Fold comment"
+              : option === "unfold"
+                ? "Unfold comment"
+                : "Delete";
+    // The menu renders in a portal, so the pick is page-scoped.
+    await this.page.getByRole("menuitem", { name: title }).click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async rulesReadClipboard(): Promise<string> {
@@ -1634,16 +1761,39 @@ export class WebNewDriver implements ParityDriver {
     return this.page.evaluate(() => navigator.clipboard.readText());
   }
 
-  async rulesOpenDeepLink(_url: string): Promise<void> {
-    return todo("rulesOpenDeepLink");
+  /** The composer group marks a loaded activity section. */
+  private async rulesWaitForFeed(): Promise<void> {
+    await this.page.getByRole("group", { name: "Add comment" }).first().waitFor({ timeout: 120_000 });
   }
 
-  async rulesCommentHighlighted(_commentId: string): Promise<boolean> {
-    return todo("rulesCommentHighlighted");
+  async rulesOpenDeepLink(url: string): Promise<void> {
+    await this.page.goto(url);
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.rulesWaitForFeed();
   }
 
-  async rulesCommentAccessBadge(_commentId: string): Promise<"internal" | "public" | "hidden"> {
-    return todo("rulesCommentAccessBadge");
+  async rulesCommentHighlighted(commentId: string): Promise<boolean> {
+    // The highlight rides on the wrapper around the card for a few
+    // seconds after the deep link lands. Immediate read: callers poll.
+    return this.rulesCard(commentId)
+      .evaluate((element) => {
+        const wrapper = (element as HTMLElement).parentElement;
+        return wrapper !== null && wrapper.className.includes("ring-1");
+      })
+      .catch(() => false);
+  }
+
+  async rulesCommentAccessBadge(commentId: string): Promise<"internal" | "public" | "hidden"> {
+    const card = this.rulesCard(commentId);
+    await card.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    // The corner marker renders only while the project is externally
+    // shared; its accessible name reads the stored direction directly.
+    const marker = card.locator('span[aria-label="Private comment"], span[aria-label="Public comment"]').first();
+    if ((await marker.count()) === 0) return "hidden";
+    const label = await marker.getAttribute("aria-label");
+    if (label === "Public comment") return "public";
+    if (label === "Private comment") return "internal";
+    throw new Error(`[parity] no visibility mark readable on ${commentId}.`);
   }
 
   async rulesLastToast(): Promise<{ title: string; message: string } | null> {
@@ -1670,7 +1820,9 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async rulesReload(): Promise<void> {
-    return todo("rulesReload");
+    await this.page.reload();
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.rulesWaitForFeed();
   }
 
   /**
@@ -1772,24 +1924,37 @@ export class WebNewDriver implements ParityDriver {
     await this.page.waitForLoadState("domcontentloaded");
   }
 
-  async rulesOpenIssueDetailRaw(_workspaceSlug: string, _projectId: string, _issueId: string): Promise<void> {
-    return todo("rulesOpenIssueDetailRaw");
+  async rulesOpenIssueDetailRaw(workspaceSlug: string, projectId: string, issueId: string): Promise<void> {
+    // Same navigation as the full open, minus the feed wait: a refused
+    // viewer never renders the activity section, so waiting would hang.
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/issues/${issueId}`);
+    await this.page.waitForLoadState("domcontentloaded");
   }
 
   async rulesIssueMissingVisible(): Promise<boolean> {
-    return todo("rulesIssueMissingVisible");
+    // A refused viewer lands on the missing-item state instead of the
+    // detail screen; the text is the user-visible signal.
+    const missing = this.page.getByText("No work item matches this address").first();
+    await missing.waitFor({ timeout: 60_000 });
+    return missing.isVisible();
   }
 
   async rulesCommentComposerVisible(): Promise<boolean> {
-    return todo("rulesCommentComposerVisible");
+    // Immediate read, no waiting: several specs assert the composer's
+    // absence, where a wait would only burn the timeout.
+    return (await this.page.getByRole("group", { name: "Add comment" }).count()) > 0;
   }
 
-  async rulesCommentCardVisible(_commentId: string): Promise<boolean> {
-    return todo("rulesCommentCardVisible");
+  async rulesCommentCardVisible(commentId: string): Promise<boolean> {
+    // Immediate read, no waiting: callers poll for presence and assert
+    // absence directly.
+    return (await this.rulesCard(commentId).count()) > 0;
   }
 
-  async rulesCommentCardText(_commentId: string): Promise<string> {
-    return todo("rulesCommentCardText");
+  async rulesCommentCardText(commentId: string): Promise<string> {
+    const card = this.rulesCard(commentId);
+    await card.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return (await card.innerText()).trim();
   }
 
   async rulesIntakeTriageVisible(): Promise<boolean> {
@@ -3783,92 +3948,242 @@ export class WebNewDriver implements ParityDriver {
     await this.page.waitForLoadState("networkidle").catch(() => {});
   }
 
-  // --- Comment composer and CRUD (NEWFRONT-112). Stubs mirror the
-  // interface additions so scenarios compile against either target.
+  // --- Comment composer and CRUD (NEWFRONT-112, implemented NEWFRONT-818). ---
 
-  async composerOpenIssue(_workspaceSlug: string, _issueRef: string): Promise<void> {
-    return todo("composerOpenIssue");
+  async composerOpenIssue(workspaceSlug: string, issueRef: string): Promise<void> {
+    // The browse address settles on the Activity heading; a rendered
+    // missing state returns without retrying (callers assert it).
+    await this.openIssueDetail(workspaceSlug, issueRef);
   }
 
-  async composerType(_text: string): Promise<void> {
-    return todo("composerType");
+  async composerType(text: string): Promise<void> {
+    // Type until stable: a retype after a dropped draft lands on settled
+    // state, so bounded retries converge while one attempt could flake.
+    const editor = this.composerEditor();
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      await editor.click({ timeout: WebNewDriver.WAIT_MS });
+      if (attempt > 1) {
+        await editor.press("ControlOrMeta+a", { timeout: WebNewDriver.WAIT_MS });
+      }
+      await editor.pressSequentially(text, { timeout: WebNewDriver.WAIT_MS });
+      const deadline = Date.now() + 5_000;
+      for (;;) {
+        if ((await this.composerDraftText()).includes(text)) return;
+        if (Date.now() > deadline) break;
+        await this.page.waitForTimeout(250);
+      }
+    }
+    throw new Error(`[parity] composer draft never held ${JSON.stringify(text)} after 3 attempts`);
   }
 
-  async composerPasteHtml(_html: string): Promise<void> {
-    return todo("composerPasteHtml");
+  async composerPasteHtml(html: string): Promise<void> {
+    const page = this.page;
+    await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await page.evaluate(
+      ([fragment]: [string]) => {
+        const blobHtml = new Blob([fragment], { type: "text/html" });
+        const blobText = new Blob([fragment.replace(/<[^>]*>/g, "")], { type: "text/plain" });
+        return navigator.clipboard.write([new ClipboardItem({ "text/html": blobHtml, "text/plain": blobText })]);
+      },
+      [html]
+    );
+    const editor = this.composerEditor();
+    await editor.click({ timeout: WebNewDriver.WAIT_MS });
+    await editor.press("ControlOrMeta+v", { timeout: WebNewDriver.WAIT_MS });
   }
 
   async composerDraftText(): Promise<string> {
-    return todo("composerDraftText");
+    const raw = await this.composerEditor().innerText({ timeout: WebNewDriver.WAIT_MS });
+    return raw.trim();
   }
 
   async composerSubmitDisabled(): Promise<boolean> {
-    return todo("composerSubmitDisabled");
+    return this.composerBox().getByRole("button", { name: "Comment", exact: true }).first().isDisabled();
   }
 
   async composerSubmit(): Promise<void> {
-    return todo("composerSubmit");
+    // Fail fast when the composer never arms (e.g. a stuck upload leaves
+    // submit disabled): a blind click would hang until the test timeout.
+    const button = this.composerBox().getByRole("button", { name: "Comment", exact: true }).first();
+    await button.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    for (;;) {
+      if (await button.isEnabled().catch(() => false)) break;
+      if (Date.now() > deadline) throw new Error("[parity] composer submit never armed.");
+      await this.page.waitForTimeout(250);
+    }
+    await button.click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async composerPressEnter(): Promise<void> {
-    return todo("composerPressEnter");
+    const editor = this.composerEditor();
+    await editor.focus({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.keyboard.press("Enter");
   }
 
   async composerPressShiftEnter(): Promise<void> {
-    return todo("composerPressShiftEnter");
+    const editor = this.composerEditor();
+    await editor.focus({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.keyboard.press("Shift+Enter");
   }
 
-  async composerAttachFile(_path: string): Promise<void> {
-    return todo("composerAttachFile");
+  async composerAttachFile(path: string): Promise<void> {
+    // The file input sits behind the image label; setting files on it
+    // directly runs the same change pipeline as the picker.
+    await this.composerBox()
+      .locator('input[type="file"]')
+      .first()
+      .setInputFiles(path, { timeout: WebNewDriver.WAIT_MS });
   }
 
   async composerVisibleCommentTexts(): Promise<string[]> {
-    return todo("composerVisibleCommentTexts");
+    const cards = this.page.locator('[id^="comment-"]');
+    const count = await cards.count();
+    const bodies: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      // The read-only body region is unmounted while the card is folded
+      // shut, so its absence skips the card; the reaction section is a
+      // region too, so only the body region counts.
+      const body = cards
+        .nth(index)
+        .getByRole("region", { name: /^Comment by / })
+        .first();
+      if ((await body.count()) === 0) continue;
+      bodies.push(((await body.innerText({ timeout: WebNewDriver.WAIT_MS })) ?? "").trim());
+    }
+    return bodies;
   }
 
-  async composerOpenCommentMenu(_text: string): Promise<void> {
-    return todo("composerOpenCommentMenu");
+  async composerOpenCommentMenu(text: string): Promise<void> {
+    await this.openCommentMenu(text);
   }
 
-  async composerMenuClick(_item: string): Promise<void> {
-    return todo("composerMenuClick");
+  async composerMenuClick(item: string): Promise<void> {
+    await this.page.getByRole("menuitem", { name: item }).click({ timeout: WebNewDriver.WAIT_MS });
   }
 
-  async composerEditType(_text: string): Promise<void> {
-    return todo("composerEditType");
+  /** The editable surface of the open inline edit form. */
+  private commentEditEditor(): Locator {
+    return this.page.locator('[id^="comment-"] [contenteditable="true"]').first();
+  }
+
+  async composerEditType(text: string): Promise<void> {
+    const editor = this.commentEditEditor();
+    await editor.click({ timeout: WebNewDriver.WAIT_MS });
+    await editor.press("ControlOrMeta+a", { timeout: WebNewDriver.WAIT_MS });
+    await editor.pressSequentially(text, { timeout: WebNewDriver.WAIT_MS });
   }
 
   async composerEditSaveDisabled(): Promise<boolean> {
-    return todo("composerEditSaveDisabled");
+    return this.commentEditEditor()
+      .locator("xpath=ancestor::form[1]")
+      .getByRole("button", { name: "Save comment" })
+      .first()
+      .isDisabled();
   }
 
   async composerEditSave(): Promise<void> {
-    return todo("composerEditSave");
+    // The edit form renders the image control, the save check, then the
+    // discard cross; the check is addressed by its label.
+    await this.commentEditEditor()
+      .locator("xpath=ancestor::form[1]")
+      .getByRole("button", { name: "Save comment" })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async composerEditDiscard(): Promise<void> {
-    return todo("composerEditDiscard");
+    await this.commentEditEditor()
+      .locator("xpath=ancestor::form[1]")
+      .getByRole("button", { name: "Cancel editing" })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async composerEditPressEnter(): Promise<void> {
-    return todo("composerEditPressEnter");
+    const editor = this.commentEditEditor();
+    await editor.focus({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.keyboard.press("Enter");
   }
 
-  async composerCommentMeta(_text: string): Promise<{
+  async composerCommentMeta(text: string): Promise<{
     author: string;
     time: string;
     edited: boolean;
     tooltip: string | null;
   }> {
-    return todo("composerCommentMeta");
+    const card = this.commentCard(text);
+    // Center the card first: sticky chrome overlaps viewport edges, so a
+    // minimal scroll can park the time control under it where hover
+    // events never land.
+    await card.evaluate((element) => element.scrollIntoView({ block: "center" }));
+    const author = (
+      (await card
+        .locator("header div span")
+        .first()
+        .innerText({ timeout: WebNewDriver.WAIT_MS })
+        .catch(() => "")) ?? ""
+    ).trim();
+    const timeControl = card.getByRole("button", { name: /^Commented / }).first();
+    const time = ((await timeControl.innerText({ timeout: WebNewDriver.WAIT_MS }).catch(() => "")) ?? "").trim();
+    const tip = this.page.getByRole("tooltip");
+    // The exact-time tooltip is hover-triggered; focus alone never opens it.
+    let tooltip: string | null = null;
+    try {
+      await timeControl.hover({ timeout: 10_000 });
+      await tip.first().waitFor({ timeout: 10_000 });
+      tooltip =
+        (
+          (await tip
+            .first()
+            .innerText({ timeout: WebNewDriver.WAIT_MS })
+            .catch(() => "")) ?? ""
+        ).trim() || null;
+    } catch {
+      tooltip = null;
+    }
+    // Park the mouse away so the tooltip closes; a lingering portal would
+    // be misread as the next card's tooltip.
+    await this.page.mouse.move(8, 8);
+    await tip
+      .first()
+      .waitFor({ state: "detached", timeout: 5_000 })
+      .catch(() => undefined);
+    return { author, time, edited: time.includes("(edited)"), tooltip };
   }
 
-  async composerCommentImageCount(_text: string): Promise<number> {
-    return todo("composerCommentImageCount");
+  async composerCommentImageCount(text: string): Promise<number> {
+    // Attached images render as embedded image nodes (an <img> each) in
+    // the read-only card body; the header avatar lives outside the body
+    // region, so the body <img> count is exact.
+    const card = this.commentCard(text);
+    await card.scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
+    return card
+      .getByRole("region", { name: /^Comment by / })
+      .locator("img")
+      .count();
   }
 
   async composerVisibleNotices(): Promise<{ message: string; kind: "success" | "error" | "unknown" }[]> {
-    return todo("composerVisibleNotices");
+    const cards = this.page.locator('[data-testid="toast-notification"]');
+    const count = await cards.count();
+    const notices: { message: string; kind: "success" | "error" | "unknown" }[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const message = (
+        (await cards
+          .nth(index)
+          .innerText({ timeout: WebNewDriver.WAIT_MS })
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (message.length === 0) continue;
+      // The notice DOM carries no kind marker, so the product's own voice
+      // classifies: confirmations name success, refusals name the failure.
+      let kind: "success" | "error" | "unknown" = "unknown";
+      if (/couldn't|failed|failure|error|refused|denied/i.test(message)) kind = "error";
+      else if (/successfully|copied/i.test(message)) kind = "success";
+      notices.push({ message, kind });
+    }
+    return notices;
   }
   async pickAssignee(displayName: string): Promise<void> {
     await this.propertyOpenPicker("Assignees");
@@ -4778,12 +5093,14 @@ export class WebNewDriver implements ParityDriver {
   // Activity feed stubs (NEWFRONT-114). Mirror of the interface additions;
   // each throws until the activity area lands in apps/web_new.
 
-  async activitySignIn(_email: string, _password: string, _workspaceSlug: string): Promise<void> {
-    return todo("activitySignIn");
+  async activitySignIn(email: string, password: string, workspaceSlug: string): Promise<void> {
+    // Same landing contract as the rules scenarios (any role, on one
+    // workspace), so the shared retrying sign-in does the work.
+    await this.rulesEnsureSignedIn(email, password, workspaceSlug);
   }
 
-  async activityOpenIssueDetail(_workspaceSlug: string, _projectId: string, _issueId: string): Promise<void> {
-    return todo("activityOpenIssueDetail");
+  async activityOpenIssueDetail(workspaceSlug: string, projectId: string, issueId: string): Promise<void> {
+    await this.openIssueDetail(workspaceSlug, projectId, issueId);
   }
 
   async activityEntryTexts(): Promise<string[]> {
@@ -4831,8 +5148,12 @@ export class WebNewDriver implements ParityDriver {
       .click({ timeout: WebNewDriver.WAIT_MS });
   }
 
-  async activityRenameTitle(_title: string): Promise<void> {
-    return todo("activityRenameTitle");
+  async activityRenameTitle(title: string): Promise<void> {
+    const box = this.page.getByLabel("Title").first();
+    await box.click({ timeout: WebNewDriver.WAIT_MS });
+    await box.fill(title, { timeout: WebNewDriver.WAIT_MS });
+    // The title autosaves on blur, so move focus back to the feed section.
+    await this.page.getByRole("heading", { name: "Activity", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async activityLoadingVisible(): Promise<boolean> {
@@ -48860,20 +49181,93 @@ export class WebNewDriver implements ParityDriver {
     return (await this.page.getByTestId("cycles-filters-count").count()) > 0;
   }
 
-  async activityBeginTrafficSpy(_options: { reload?: boolean } = {}): Promise<void> {
-    return todo("activityBeginTrafficSpy");
+  // --- Cross-edition comment/activity sameness (NEWFRONT-819, CMT-025,
+  // --- implemented NEWFRONT-818). Per-page request counters behind the
+  // --- detail-screen spy; the attribution matches the oracle exactly so
+  // --- both legs count the same traffic the same way.
+  private commentActivitySpyInstalled = false;
+  private readonly commentActivitySpyHandler = async (route: Route): Promise<void> => {
+    this.commentActivityCount(route.request());
+    await route.continue();
+  };
+  private commentActivityTraffic: CommentActivityTraffic = {
+    historyReads: 0,
+    commentReads: 0,
+    commentCreates: 0,
+    mentionSearches: 0,
+    commentReactionCreates: 0,
+    commentReactionDeletes: 0,
+    issueReactionCreates: 0,
+    issueReactionDeletes: 0,
+    unexpectedWrites: 0,
+  };
+
+  async activityBeginTrafficSpy(options: { reload?: boolean } = {}): Promise<void> {
+    this.commentActivityTraffic = {
+      historyReads: 0,
+      commentReads: 0,
+      commentCreates: 0,
+      mentionSearches: 0,
+      commentReactionCreates: 0,
+      commentReactionDeletes: 0,
+      issueReactionCreates: 0,
+      issueReactionDeletes: 0,
+      unexpectedWrites: 0,
+    };
+    // Drop any spy from an earlier step so one request is never counted
+    // twice; a stale route would otherwise also outlive the scenario.
+    if (this.commentActivitySpyInstalled) await this.page.unroute("**/api/**", this.commentActivitySpyHandler);
+    this.commentActivitySpyInstalled = true;
+    await this.page.route("**/api/**", this.commentActivitySpyHandler);
+    if (options.reload === false) return;
+    // A reload guarantees every request the detail load makes goes through
+    // the spy, whatever the client cache already held from an earlier step.
+    await this.page.reload({ waitUntil: "domcontentloaded" });
+    await this.page.getByRole("heading", { name: "Activity", exact: true }).waitFor({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  /** Attribute one request to the capability that issued it. */
+  private commentActivityCount(request: { url(): string; method(): string }): void {
+    const url = request.url();
+    const method = request.method();
+    const counts = this.commentActivityTraffic;
+    if (method === "GET" && /\/history\/(\?|$)/.test(url)) counts.historyReads += 1;
+    else if (method === "GET" && /\/issues\/[^/]+\/comments\/(\?|$)/.test(url)) counts.commentReads += 1;
+    else if (method === "POST" && /\/issues\/[^/]+\/comments\/(\?|$)/.test(url)) counts.commentCreates += 1;
+    else if (method === "GET" && /\/entity-search\/(\?|$)/.test(url)) counts.mentionSearches += 1;
+    else if (/\/comments\/[^/]+\/reactions\/(\?|$)/.test(url)) {
+      if (method === "POST") counts.commentReactionCreates += 1;
+      else if (method !== "GET") counts.unexpectedWrites += 1;
+    } else if (/\/comments\/[^/]+\/reactions\/[^/]+\/(\?|$)/.test(url)) {
+      if (method === "DELETE") counts.commentReactionDeletes += 1;
+      else if (method !== "GET") counts.unexpectedWrites += 1;
+    } else if (/\/issues\/[^/]+\/reactions\/(\?|$)/.test(url)) {
+      if (method === "POST") counts.issueReactionCreates += 1;
+      else if (method !== "GET") counts.unexpectedWrites += 1;
+    } else if (/\/issues\/[^/]+\/reactions\/[^/]+\/(\?|$)/.test(url)) {
+      if (method === "DELETE") counts.issueReactionDeletes += 1;
+      else if (method !== "GET") counts.unexpectedWrites += 1;
+    } else if (method !== "GET" && method !== "HEAD" && method !== "OPTIONS") {
+      counts.unexpectedWrites += 1;
+    }
   }
 
   async activityTrafficCounts(): Promise<CommentActivityTraffic> {
-    return todo("activityTrafficCounts");
+    return { ...this.commentActivityTraffic };
   }
 
-  async activityCommentReactionControlVisible(_cardText: string): Promise<boolean> {
-    return todo("activityCommentReactionControlVisible");
+  async activityCommentReactionControlVisible(cardText: string): Promise<boolean> {
+    const card = this.commentCard(cardText);
+    if ((await card.count()) === 0) return false;
+    return (await card.locator('button[aria-haspopup="dialog"]').count()) > 0;
   }
 
   async issueReactionControlVisible(): Promise<boolean> {
-    return todo("issueReactionControlVisible");
+    try {
+      return (await this.issueReactionRow().locator('button[aria-haspopup="dialog"]').count()) > 0;
+    } catch {
+      return false;
+    }
   }
 
   // --- Project settings AI Workers (PSET-064, NEWFRONT-387/606). The
