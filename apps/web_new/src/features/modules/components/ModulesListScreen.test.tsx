@@ -201,6 +201,14 @@ beforeEach(() => {
       if (harness.modulesDelayMs > 0) await sleep(harness.modulesDelayMs);
       return jsonResponse(url, harness.modulesStatus, harness.modules);
     }
+    if (
+      (init.method ?? "GET") === "DELETE" &&
+      url.includes(`/api/workspaces/acme/projects/${MODULES_PROJECT_ID}/modules/`)
+    ) {
+      const deletedId = url.split("/modules/")[1]?.split("/")[0];
+      harness.modules = harness.modules.filter((module) => module.id !== deletedId);
+      return jsonResponse(url, 204, null);
+    }
     if (url.endsWith(`/projects/${MODULES_PROJECT_ID}/archived-modules/`)) {
       return jsonResponse(url, 200, []);
     }
@@ -698,5 +706,32 @@ describe("ModulesListScreen", () => {
     expect(fireEvent.click(screen.getByTestId("modules-row-peek"))).toBe(false);
     expect(screen.queryByTestId("peek-stub")).not.toBeInTheDocument();
     expect(screen.getByTestId("modules-row")).toBeInTheDocument();
+  });
+
+  it("closes the peek when the row menu deletes the peeked module", async () => {
+    const otherId = "323e4567-e89b-12d3-a456-426614174012";
+    harness.modules = [makeModuleRow(), makeModuleRow({ id: otherId, name: "Second" })];
+    const onPeekChange = vi.fn();
+    renderScreen(undefined, { peekModuleId: MODULES_MODULE_ID, onPeekChange });
+    const rows = await screen.findAllByTestId("modules-row");
+    fireEvent.click(within(rows[0]!).getAllByTestId("module-row-menu-trigger")[0]!);
+    fireEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
+    expect(await screen.findByRole("heading", { name: "Delete module" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(onPeekChange).toHaveBeenCalledWith(null));
+  });
+
+  it("keeps an unrelated peek when the row menu deletes another module", async () => {
+    const otherId = "323e4567-e89b-12d3-a456-426614174012";
+    harness.modules = [makeModuleRow(), makeModuleRow({ id: otherId, name: "Second" })];
+    const onPeekChange = vi.fn();
+    renderScreen(undefined, { peekModuleId: otherId, onPeekChange });
+    const rows = await screen.findAllByTestId("modules-row");
+    fireEvent.click(within(rows[0]!).getAllByTestId("module-row-menu-trigger")[0]!);
+    fireEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
+    expect(await screen.findByRole("heading", { name: "Delete module" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(screen.queryByRole("heading", { name: "Delete module" })).not.toBeInTheDocument());
+    expect(onPeekChange).not.toHaveBeenCalled();
   });
 });
