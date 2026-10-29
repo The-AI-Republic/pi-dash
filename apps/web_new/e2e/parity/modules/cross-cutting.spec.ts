@@ -229,7 +229,12 @@ test(
     });
 
     await test.step("no project context hides the command", async () => {
-      await driver.openAuthenticated(`/${world.workspaceSlug}/settings`, browserSessionCookies(world.owner));
+      // Both pages carry no project context; workspace settings would
+      // do too, but the new settings shell mounts no palette at all (a
+      // shell gap noted on the gate's workpad, not a modules row), so the
+      // workspace home carries the leg on web_new.
+      const path = driver.target === "web_new" ? `/${world.workspaceSlug}` : `/${world.workspaceSlug}/settings`;
+      await driver.openAuthenticated(path, browserSessionCookies(world.owner));
       await driver.pressPaletteOpenChord();
       expect(await driver.isCommandPaletteOpen()).toBe(true);
       expect(await driver.paletteHasCommand("New module")).toBe(false);

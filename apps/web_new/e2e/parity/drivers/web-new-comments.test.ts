@@ -174,6 +174,23 @@ describe("web_new comment driver", () => {
     expect(visited).toEqual(["/acme/browse/WEB-1", "comments"]);
   });
 
+  it("opens a work item for the composer through the merged issues entry (MOD-037)", async () => {
+    const visited: string[] = [];
+    const page = pageOf();
+    page.page.goto = (async (url: string) => {
+      visited.push(url);
+      return null;
+    }) as Page["goto"];
+    page.page.getByRole = ((role: string, options?: { name?: string }) => {
+      if (role === "heading" && options?.name === "Activity") {
+        return locator({ waitFor: async () => void visited.push("comments") });
+      }
+      return locator();
+    }) as Page["getByRole"];
+    await new WebNewDriver(page.page).composerOpenIssue("acme", "WEB-1");
+    expect(visited).toEqual(["/acme/browse/WEB-1", "comments"]);
+  });
+
   it("opens a detail by ids through the short link and its browse redirect", async () => {
     const visited: string[] = [];
     const page = pageOf();

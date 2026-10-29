@@ -25035,9 +25035,12 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async modulesXOpenEditDialogFromRow(name: string): Promise<void> {
+    // The new rows and cards expose no context menu; hover the item and
+    // activate its quick-menu trigger the way a viewer opens it.
     const item = this.modulesXItemForName(name);
     await item.waitFor({ timeout: WebNewDriver.WAIT_MS });
-    await item.click({ button: "right", timeout: WebNewDriver.WAIT_MS });
+    await item.hover({ timeout: WebNewDriver.WAIT_MS });
+    await item.locator('div[data-main-menu="true"]:visible button').click({ timeout: WebNewDriver.WAIT_MS });
     const edit = this.page.getByRole("menuitem", { name: "Edit", exact: true });
     await edit.first().waitFor({ timeout: WebNewDriver.WAIT_MS });
     await edit.first().click({ timeout: WebNewDriver.WAIT_MS });
@@ -25101,20 +25104,22 @@ export class WebNewDriver implements ParityDriver {
     await this.page.waitForLoadState("domcontentloaded");
     await this.awaitAppBoot(path);
     await this.modulesListWaitSettled();
-    // The panel body lands once its own detail read settles; a panel that
-    // is still loading is not a failure of the open, the read just waits.
+    // The open ends with the panel settled: its sidebar name, or the
+    // gone-away verdict for an unknown id. Tolerant waits here flake the
+    // immediate name reads callers make (MOD-038/039).
     await this.page
       .locator('[data-testid="modules-sidebar-name"], [data-testid="modules-gone-away"]')
       .last()
-      .waitFor({ timeout: WebNewDriver.WAIT_MS })
-      .catch(() => undefined);
+      .waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async modulesXPeekName(): Promise<string | null> {
-    // The peek renders the sidebar over the list; the detail page has no
-    // peek, so a peek name only counts while the list screen owns the page.
-    if (!(await this.isShown(this.page.getByTestId("modules-list-screen")))) return null;
-    return this.modulesXSidebarName(this.page.getByTestId("modules-list-screen").last());
+    // The peek panel mounts outside the list screen, so scope to the
+    // panel itself; the detail page has no peek panel, which keeps the
+    // no-peek guard (a peek name never reads the detail sidebar).
+    const panel = this.page.getByTestId("modules-peek").last();
+    if (!(await this.isShown(panel))) return null;
+    return this.modulesXSidebarName(panel);
   }
 
   // --- Keyboard and list search (MOD-040) ---
