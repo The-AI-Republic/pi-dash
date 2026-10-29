@@ -5,6 +5,38 @@ MCP-capable AI clients (e.g. Claude) as tools. It is a thin wrapper over the sam
 public REST surface (`/api/v1/`) that the `pidash` CLI uses, so tool responses
 mirror the REST serializers documented below.
 
+## Filtering issue lists
+
+`pidash_list_issues` accepts optional filters so clients can request a focused
+subset instead of retrieving an entire project and filtering locally:
+
+| Parameter     | Value                                                                 |
+| ------------- | --------------------------------------------------------------------- |
+| `state`       | List of state names or UUIDs. Names use case-insensitive exact match. |
+| `state_group` | List of `backlog`, `unstarted`, `started`, `review`, `test`, `completed`, or `cancelled`. |
+| `parent_id`   | Parent issue UUID or identifier, or `none` for top-level issues.      |
+| `labels`      | List of label names.                                                  |
+| `priority`    | List of `urgent`, `high`, `medium`, `low`, or `none`.                 |
+| `fields`      | List of field names to include in each result row.                    |
+
+Multiple filters are combined with AND semantics and are applied before the
+tool's `limit`. Within a filter list, any matching value is included. Unknown
+state or label names return an error that lists the valid names in the selected
+project scope.
+
+For example, this input lists only top-level backlog issues and keeps each row
+small:
+
+```json
+{
+  "workspace_slug": "eng",
+  "project_id": "ENG",
+  "state_group": ["backlog"],
+  "parent_id": "none",
+  "fields": ["id", "sequence_id", "name", "state", "priority"]
+}
+```
+
 ## Issue web URL (`url`)
 
 Every issue-returning tool includes an absolute, human-clickable `url` pointing
