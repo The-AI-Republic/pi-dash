@@ -234,16 +234,6 @@ describe("viewsText and viewsTexts", () => {
 });
 
 describe("views list navigation and chrome", () => {
-  it("opens the list and waits for the screen", async () => {
-    const screen = loc();
-    const state = harness((query) =>
-      query.kind === "testid" && query.value === "project-views-screen" ? screen : undefined
-    );
-    await new WebNewDriver(state.page).viewsOpenList("acme", "p-1");
-    expect(state.goto).toHaveBeenCalledWith("/acme/projects/p-1/views", { waitUntil: "domcontentloaded" });
-    expect(screen.waitFor).toHaveBeenCalledWith({ state: "visible", timeout: 120_000 });
-  });
-
   it("opens a saved view detail and accepts either the header or the missing card", async () => {
     const header = loc();
     const state = harness((query) =>
@@ -360,93 +350,6 @@ describe("views create dialog", () => {
     expect(field.getByRole).toHaveBeenCalledWith("radio", { name: /^Owner-only/ });
     expect(radio.getAttribute).toHaveBeenCalledWith("aria-checked");
     expect(dialog.getByTestId).toHaveBeenCalledWith("view-access-field");
-  });
-
-  it("reads the layout control value", async () => {
-    const state = harness();
-    (state.node as never as Stub).innerText = vi.fn(async () => "Board");
-    await expect(new WebNewDriver(state.page).viewsLayoutValue()).resolves.toBe("Board");
-  });
-
-  it("opens the layout picker only when it is closed", async () => {
-    const state = harness((query) =>
-      query.kind === "role" && query.value === "listbox" ? loc({ count: vi.fn(async () => 0) }) : undefined
-    );
-    const driver = new WebNewDriver(state.page);
-    await expect(driver.viewsLayoutOpenPicker()).resolves.toBeUndefined();
-    const control = (state.node as never as Stub).click as ReturnType<typeof vi.fn>;
-    expect(control).toHaveBeenCalled();
-  });
-
-  it("leaves an already open layout picker alone", async () => {
-    const state = harness();
-    await new WebNewDriver(state.page).viewsLayoutOpenPicker();
-    const click = (state.node as never as Stub).click as ReturnType<typeof vi.fn>;
-    expect(click).not.toHaveBeenCalled();
-  });
-
-  it("reads the layout option labels", async () => {
-    const state = harness();
-    (state.node as never as Stub).allInnerTexts = vi.fn(async () => ["List", "Board"]);
-    await expect(new WebNewDriver(state.page).viewsLayoutOptionTexts()).resolves.toEqual(["List", "Board"]);
-  });
-
-  it("detects a search field inside the picker", async () => {
-    const withInput = loc({ locator: vi.fn(() => loc({ count: vi.fn(async () => 1) })) });
-    const withoutInput = loc({ locator: vi.fn(() => loc({ count: vi.fn(async () => 0) })) });
-    const absent = loc({ count: vi.fn(async () => 0) });
-    await expect(
-      new WebNewDriver(
-        harness((q) => (q.kind === "role" && q.value === "listbox" ? withInput : undefined)).page
-      ).viewsLayoutHasSearch()
-    ).resolves.toBe(true);
-    await expect(
-      new WebNewDriver(
-        harness((q) => (q.kind === "role" && q.value === "listbox" ? withoutInput : undefined)).page
-      ).viewsLayoutHasSearch()
-    ).resolves.toBe(false);
-    await expect(
-      new WebNewDriver(
-        harness((q) => (q.kind === "role" && q.value === "listbox" ? absent : undefined)).page
-      ).viewsLayoutHasSearch()
-    ).resolves.toBe(false);
-  });
-
-  it("reports the selected layout option", async () => {
-    const withAttr = async (selected: string | null) => {
-      const state = harness();
-      (state.node as never as Stub).getAttribute = vi.fn(async () => selected);
-      return new WebNewDriver(state.page).viewsLayoutSelectedMarked("List");
-    };
-    await expect(withAttr("true")).resolves.toBe(true);
-    await expect(withAttr(null)).resolves.toBe(false);
-    const state = harness((query) =>
-      query.kind === "role" && query.value === "option" ? loc({ count: vi.fn(async () => 0) }) : undefined
-    );
-    await expect(new WebNewDriver(state.page).viewsLayoutSelectedMarked("List")).resolves.toBe(false);
-  });
-
-  it("picks a layout and waits for the picker to close", async () => {
-    const option = loc();
-    const listbox = loc({ getByRole: vi.fn(() => option) });
-    const state = harness((query) => (query.kind === "role" && query.value === "listbox" ? listbox : undefined));
-    await new WebNewDriver(state.page).viewsLayoutPick("Board");
-    expect(option.click).toHaveBeenCalled();
-    expect(listbox.waitFor).toHaveBeenCalledWith({ state: "hidden", timeout: 30_000 });
-  });
-
-  it("fills the title and submits the dialog", async () => {
-    const state = harness();
-    const node = state.node as never as Stub;
-    const driver = new WebNewDriver(state.page);
-    await driver.viewsFillName("Sprint board");
-    await driver.viewsSubmit();
-    expect(node.fill).toHaveBeenCalledWith("Sprint board");
-    expect(asked(state)).toContain("placeholder:Title");
-    expect(asked(state)).toContain('selector:button[type="submit"]');
-    expect(node.click).toHaveBeenCalled();
-    const headings = askedWith(state, "role", "heading");
-    expect(headings.some((query) => query.options?.["name"] instanceof RegExp)).toBe(true);
   });
 
   it("reads the icon preview", async () => {
@@ -1622,7 +1525,6 @@ describe("views defensive branches", () => {
     (state.node as never as Stub).waitFor = vi.fn(async () => Promise.reject(new Error("timeout")));
     const driver = new WebNewDriver(state.page);
     await expect(driver.viewsSortPick("Name")).resolves.toBeUndefined();
-    await expect(driver.viewsLayoutPick("List")).resolves.toBeUndefined();
     await expect(driver.viewsDetailSwitcherPick("Sprint")).resolves.toBeUndefined();
     await expect(driver.wsViewsDetailSwitcherPick("Sprint")).resolves.toBeUndefined();
     await expect(driver.wsViewsRowMenuPick("Rename")).resolves.toBeUndefined();

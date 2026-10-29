@@ -6070,7 +6070,6 @@ export class WebNewDriver implements ParityDriver {
   async intakeTriageStateDisabled(): Promise<boolean> {
     return this.intakeDetailPropertyDisabled("State");
   }
-<<<<<<< ours
 
   /** The view-create form the layout picker lives in. */
   private viewsForm(): Locator {
@@ -6163,10 +6162,6 @@ export class WebNewDriver implements ParityDriver {
     await this.page.getByTestId("sub-issues-collapsible").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
     await this.page.getByTestId("sub-issue-filters-trigger").first().click({ timeout: WebNewDriver.WAIT_MS });
     await this.page.getByTestId("sub-issue-filters-panel").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
-=======
-  async subIssueFiltersOpen(_workspaceSlug: string, _projectId: string, _parentIssueId: string): Promise<void> {
-    return todo("subIssueFiltersOpen");
->>>>>>> theirs
   }
 
   async subIssueFiltersPanelText(): Promise<string> {
@@ -6190,12 +6185,6 @@ export class WebNewDriver implements ParityDriver {
     // The clipboard grant is arranged by the caller's read, not here.
     await this.identifierBadge().click({ timeout: WebNewDriver.WAIT_MS });
   }
-<<<<<<< ours
-
-  async viewsOpenDetail(workspaceSlug: string, projectId: string, viewId: string): Promise<void> {
-    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/views/${viewId}`);
-    await this.page.waitForLoadState("domcontentloaded");
-  }
 
   async ganttShowsIssue(issueName: string): Promise<boolean> {
     // The sidebar lists every issue in the view, dated or not, and the
@@ -6211,10 +6200,6 @@ export class WebNewDriver implements ParityDriver {
       if (Date.now() >= deadline) return false;
       await this.page.waitForTimeout(500);
     }
-=======
-  async ganttShowsIssue(_issueName: string): Promise<boolean> {
-    return todo("ganttShowsIssue");
->>>>>>> theirs
   }
 
   // --- Project settings labels (NEWFRONT-393, PSET-036–042; new-app surface
@@ -49072,7 +49057,6 @@ export class WebNewDriver implements ParityDriver {
     return rows.filter((row) => row !== "");
   }
 
-<<<<<<< ours
   // --- Issues cloud presence (NEWFRONT-984, ISS-112–116/121/206/231–237
   // --- cloud legs). The cloud specs run on web_new only; the old-app
   // --- driver throws on these.
@@ -49166,7 +49150,8 @@ export class WebNewDriver implements ParityDriver {
     await this.page.mouse.down();
     await this.page.locator(`[data-gantt-lane][data-lane-id="${toId}"]`).hover();
     await this.page.mouse.up();
-=======
+  }
+
   // ---------------------------------------------------------------------
   // --- Views area (NEWFRONT-745 area gate). The list, controls, gate,
   // --- dialog, detail, workspace list/CRUD/detail, settings and palette
@@ -49259,65 +49244,6 @@ export class WebNewDriver implements ParityDriver {
       if (!texts.includes(button.label)) texts.push(button.label);
     }
     return texts;
-  }
-
-  async viewsOpenList(workspaceSlug: string, projectId: string): Promise<void> {
-    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/views`, { waitUntil: "domcontentloaded" });
-    await this.viewsScreen().waitFor({ state: "visible", timeout: 120_000 });
-  }
-
-  async viewsOpenCreate(): Promise<void> {
-    await this.viewsOpenCreateFromHeader();
-  }
-
-  async viewsLayoutValue(): Promise<string> {
-    return this.viewsText(this.viewsDialog().getByTestId("layout-control"));
-  }
-
-  private viewsLayoutListbox(): Locator {
-    return this.page.getByRole("listbox", { name: "Layouts" });
-  }
-
-  async viewsLayoutOpenPicker(): Promise<void> {
-    if (await this.isShown(this.viewsLayoutListbox())) return;
-    await this.viewsDialog().getByTestId("layout-control").click({ timeout: WebNewDriver.WAIT_MS });
-    await this.viewsLayoutListbox().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
-  }
-
-  async viewsLayoutOptionTexts(): Promise<string[]> {
-    return this.viewsTexts(this.viewsLayoutListbox().getByRole("option"));
-  }
-
-  async viewsLayoutHasSearch(): Promise<boolean> {
-    const box = this.viewsLayoutListbox();
-    if ((await box.count()) === 0) return false;
-    return (await box.locator("xpath=..").locator("input").count()) > 0;
-  }
-
-  async viewsLayoutSelectedMarked(text: string): Promise<boolean> {
-    const option = this.viewsLayoutListbox().getByRole("option", { name: text, exact: true }).first();
-    if ((await option.count()) === 0) return false;
-    return (await option.getAttribute("aria-selected")) === "true";
-  }
-
-  async viewsLayoutPick(text: string): Promise<void> {
-    await this.viewsLayoutListbox().getByRole("option", { name: text, exact: true }).first().click({
-      timeout: WebNewDriver.WAIT_MS,
-    });
-    await this.viewsLayoutListbox()
-      .waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS })
-      .catch(() => undefined);
-  }
-
-  async viewsFillName(name: string): Promise<void> {
-    await this.viewsDialog().getByPlaceholder("Title", { exact: true }).fill(name);
-  }
-
-  async viewsSubmit(): Promise<void> {
-    await this.viewsDialog().locator('button[type="submit"]').click({ timeout: WebNewDriver.WAIT_MS });
-    await this.page
-      .getByRole("heading", { name: /^(Create View|Update View)$/ })
-      .waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
   }
 
   async viewsOpenDetail(workspaceSlug: string, projectId: string, viewId: string): Promise<void> {
@@ -50253,6 +50179,5 @@ export class WebNewDriver implements ParityDriver {
     const control = this.page.getByRole("button", { name: /export|import|print/i });
     const links = this.page.getByRole("link", { name: /export|import|print/i });
     return (await this.isShown(control)) || (await this.isShown(links));
->>>>>>> theirs
   }
 }
