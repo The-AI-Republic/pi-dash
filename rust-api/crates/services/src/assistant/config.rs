@@ -40,6 +40,24 @@ pub struct LlmConfigRow {
     pub last_verified_at: Option<DateTime<Utc>>,
 }
 
+/// One `assistant_user_llm_config` row, all 9 columns
+/// (`models.py:238-262`): the narrow [`LlmConfigRow`] plus the pk, the
+/// owner and the stamps. The overlay's connection twin
+/// (`rust-cloud/.../assistant/connections.rs`, OVL-15) feeds this to
+/// [`domain::save_llm_config_full`], which needs the id and the stamps.
+#[derive(Debug, Clone)]
+pub struct LlmConfigFullRow {
+    pub id: i64,
+    pub user_id: Uuid,
+    pub provider_kind: String,
+    pub base_url: String,
+    pub model_name: String,
+    pub api_key_encrypted: Option<Vec<u8>>,
+    pub last_verified_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 /// Validated PUT fields; `None` is "omitted" (partial-update keeps the
 /// stored value, create falls back to the model default).
 #[derive(Debug, Default)]
@@ -82,35 +100,80 @@ pub struct ConfigDeps<'a> {
     pub ssrf_resolver: &'a (dyn HostResolver + Send + Sync),
 }
 
-/// Decoded config-row tuple: provider, base URL, model, encrypted key,
-/// verification timestamp.
-type LlmRowTuple = (
+/// Decoded full config-row tuple: id, owner, provider, base URL,
+/// model, encrypted key, verification timestamp, stamps.
+type LlmFullRowTuple = (
+    i64,
+    Uuid,
     String,
     String,
     String,
     Option<Vec<u8>>,
     Option<DateTime<Utc>>,
+    DateTime<Utc>,
+    DateTime<Utc>,
 );
 
 /// `UserLLMConfig.objects.filter(user=...)` (`models.py:238-262`):
-/// the caller's config row, if any.
-pub async fn get_config(pool: &PgPool, user_id: Uuid) -> Result<Option<LlmConfigRow>, sqlx::Error> {
-    let row: Option<LlmRowTuple> = sqlx::query_as(
-        r#"SELECT provider_kind, base_url, model_name, api_key_encrypted, last_verified_at
+/// the caller's config row, all 9 columns, if any. Generic over pool
+/// and connection: the overlay's select/adopt/get-or-create arms call
+/// this on a `&mut PgConnection` inside a transaction (OVL-15,
+/// PIDASHCONV-1651). `user_id` is unique (the `OneToOneField`), so at
+/// most one row matches; the `LIMIT 1` is the moved `get_config`
+/// predicate verbatim.
+pub async fn fetch_llm_config_full<'e, E>(
+    ex: E,
+    user_id: Uuid,
+) -> Result<Option<LlmConfigFullRow>, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let row: Option<LlmFullRowTuple> = sqlx::query_as(
+        r#"SELECT id, user_id, provider_kind, base_url, model_name, api_key_encrypted, last_verified_at, created_at, updated_at
            FROM assistant_user_llm_config WHERE user_id = $1 LIMIT 1"#,
     )
     .bind(user_id)
-    .fetch_optional(pool)
+    .fetch_optional(ex)
     .await?;
     Ok(row.map(
-        |(provider_kind, base_url, model_name, api_key_encrypted, last_verified_at)| LlmConfigRow {
+        |(
+            id,
+            user_id,
             provider_kind,
             base_url,
             model_name,
             api_key_encrypted,
             last_verified_at,
+            created_at,
+            updated_at,
+        )| LlmConfigFullRow {
+            id,
+            user_id,
+            provider_kind,
+            base_url,
+            model_name,
+            api_key_encrypted,
+            last_verified_at,
+            created_at,
+            updated_at,
         },
     ))
+}
+
+/// `UserLLMConfig.objects.filter(user=...)` (`models.py:238-262`):
+/// the caller's config row, if any. Thin caller of
+/// [`fetch_llm_config_full`], projected to the narrow row the HTTP
+/// shell renders.
+pub async fn get_config(pool: &PgPool, user_id: Uuid) -> Result<Option<LlmConfigRow>, sqlx::Error> {
+    Ok(fetch_llm_config_full(pool, user_id)
+        .await?
+        .map(|full| LlmConfigRow {
+            provider_kind: full.provider_kind,
+            base_url: full.base_url,
+            model_name: full.model_name,
+            api_key_encrypted: full.api_key_encrypted,
+            last_verified_at: full.last_verified_at,
+        }))
 }
 
 /// `PUT users/me/ai-assistant/config/` (`llm_config.py:46-74`): merge

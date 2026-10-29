@@ -562,10 +562,12 @@ pub mod assistant {
     pub use pidash_jobs::oss_worker::model_runtime::provider::Lane;
     pub use pidash_jobs::oss_worker::model_runtime::provider::ProviderError;
     pub use pidash_services::assistant::config::delete_config;
+    pub use pidash_services::assistant::config::fetch_llm_config_full;
     pub use pidash_services::assistant::config::get_config;
     pub use pidash_services::assistant::config::put_config;
     pub use pidash_services::assistant::config::ConfigDeps;
     pub use pidash_services::assistant::config::ConfigError;
+    pub use pidash_services::assistant::config::LlmConfigFullRow;
     pub use pidash_services::assistant::config::LlmConfigRow;
     pub use pidash_services::assistant::config::ValidatedPut;
     pub use pidash_services::assistant::crypto;
@@ -580,6 +582,9 @@ pub mod assistant {
     pub use pidash_services::assistant::llm::ModelRef;
     pub use pidash_services::assistant::mcp;
     pub use pidash_services::assistant::mcp::build_toolset_spec;
+    pub use pidash_services::assistant::mcp::fetch_enabled_mcp_servers;
+    pub use pidash_services::assistant::mcp::to_server_row;
+    pub use pidash_services::assistant::mcp::EnabledMcpServerRow;
     pub use pidash_services::assistant::mcp::ResilientState;
     pub use pidash_services::assistant::mcp::ToolsetSpec;
     pub use pidash_services::assistant::probe::classify_probe;
