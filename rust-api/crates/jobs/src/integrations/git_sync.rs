@@ -929,30 +929,13 @@ fn percent_encode(value: &str) -> String {
     out
 }
 
-/// `_next_url` (`github_client.py:75-81`): parse the `next` URL from a
-/// `Link` header — `re.match(r'\s*<([^>]+)>;\s*rel="next"', part)` per
-/// comma-separated part.
+/// `_next_url` (`github_client.py:75-81`) via the
+/// [`next_url`][pidash_db::app_integrations::queries_github::next_url]
+/// canonical (PIDASHCONV-1625): `re.match` per comma part, so a
+/// `>`-less part, an empty URL, or `>`-before-`;` spacing is skipped
+/// rather than matched or poisoning the header.
 pub fn next_link(header: &str) -> Option<String> {
-    if header.is_empty() {
-        return None;
-    }
-    for part in header.split(',') {
-        let trimmed = part.trim_start();
-        if !trimmed.starts_with('<') {
-            continue;
-        }
-        let end = trimmed.find('>')?;
-        let url = &trimmed[1..end];
-        let rest = trimmed[end + 1..].trim_start();
-        if !rest.starts_with(';') {
-            continue;
-        }
-        let rel = rest[1..].trim_start();
-        if rel.starts_with("rel=\"next\"") {
-            return Some(url.to_owned());
-        }
-    }
-    None
+    pidash_db::app_integrations::queries_github::next_url(header)
 }
 
 impl ReqwestGithubClient {
@@ -3287,11 +3270,23 @@ mod tests {
             Some("https://api.test/p2".to_owned())
         );
         assert_eq!(next_link("<https://api.test/p0>; rel=\"prev\""), None);
+        // The regex needs `>;` adjacent: space between never matched in
+        // Python (PIDASHCONV-1625 corrected this case's old `Some`).
+        assert_eq!(next_link("  <https://api.test/p2> ;  rel=\"next\""), None);
+        assert_eq!(next_link("not-a-link"), None);
+        // Divergent parts are skipped, never poison the header.
         assert_eq!(
-            next_link("  <https://api.test/p2> ;  rel=\"next\""),
+            next_link("<https://api.test/bad; rel=\"next\", <https://api.test/p2>; rel=\"next\""),
             Some("https://api.test/p2".to_owned())
         );
-        assert_eq!(next_link("not-a-link"), None);
+        assert_eq!(
+            next_link("<>; rel=\"next\", <https://api.test/p2>; rel=\"next\""),
+            Some("https://api.test/p2".to_owned())
+        );
+        assert_eq!(
+            next_link("<https://api.test/e> ; rel=\"next\", <https://api.test/p2>; rel=\"next\""),
+            Some("https://api.test/p2".to_owned())
+        );
     }
 
     // Rename redirects follow `requests` (`github_client.py:62-73`, no

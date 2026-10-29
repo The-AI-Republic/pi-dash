@@ -30,6 +30,7 @@ pidash_sdk::assistant::EventParts
 pidash_sdk::assistant::Failure
 pidash_sdk::assistant::GithubAppContext
 pidash_sdk::assistant::GithubFailure
+pidash_sdk::assistant::GithubHeadersError
 pidash_sdk::assistant::GithubRestClient
 pidash_sdk::assistant::Governor
 pidash_sdk::assistant::HISTORY_STATUS
@@ -137,6 +138,7 @@ pidash_sdk::assistant::encrypt_api_key
 pidash_sdk::assistant::fail_turn
 pidash_sdk::assistant::finalize_open_messages
 pidash_sdk::assistant::get_config
+pidash_sdk::assistant::github_headers
 pidash_sdk::assistant::governor
 pidash_sdk::assistant::has_secret
 pidash_sdk::assistant::history_limit
@@ -285,6 +287,7 @@ pidash_sdk::db::machine_token
 pidash_sdk::db::map_instance_admin_row
 pidash_sdk::db::map_instance_row
 pidash_sdk::db::ml_strip_tags
+pidash_sdk::db::next_url
 pidash_sdk::db::project_member
 pidash_sdk::db::runner
 pidash_sdk::db::runner_session
@@ -435,6 +438,7 @@ pidash_sdk::ops::merge_settings
 pidash_sdk::ops::move_to_project
 pidash_sdk::ops::next_event_seq
 pidash_sdk::ops::next_message_seq
+pidash_sdk::ops::paginate_with
 pidash_sdk::ops::pending_entry_ticker_for
 pidash_sdk::ops::post_run_orchestration
 pidash_sdk::ops::post_run_orchestration_in_tx
