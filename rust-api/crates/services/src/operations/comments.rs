@@ -454,19 +454,22 @@ pub async fn create(
     // The webhook carries the RAW body, the requester, and the app origin.
     // `origin` arrives pre-resolved from settings (`ok()` past the
     // save; the row + `issue_activity` persist on a misconfigured host,
-    // so the caller passes `None` there instead of failing).
-    let origin = write.origin.clone().ok_or(Error::ServerError)?;
-    let webhook = work_tasks::comment_model_activity_kwargs(
-        &comment_id.to_string(),
-        requested_data_value(body, from_form),
-        None,
-        &actor_id.to_string(),
-        slug,
-        &origin,
-    );
-    deps.enqueue
-        .enqueue_task(work_tasks::MODEL_ACTIVITY_TASK, vec![], webhook)
-        .await;
+    // so the caller passes `None` there instead of failing). Suppressed
+    // callers (the MCP tools) skip the leg — they enqueue their own
+    // shaped legs.
+    if let Some(origin) = webhook_origin(options.emit_model_activity, write.origin.clone())? {
+        let webhook = work_tasks::comment_model_activity_kwargs(
+            &comment_id.to_string(),
+            requested_data_value(body, from_form),
+            None,
+            &actor_id.to_string(),
+            slug,
+            &origin,
+        );
+        deps.enqueue
+            .enqueue_task(work_tasks::MODEL_ACTIVITY_TASK, vec![], webhook)
+            .await;
+    }
     let web_base = write.web_base.clone();
     let url = read::comment_url(
         pool,
@@ -738,19 +741,22 @@ pub async fn update(
     }
     // `origin` arrives pre-resolved from settings (`ok()` past the
     // save; the row + `issue_activity` persist on a misconfigured host,
-    // so the caller passes `None` there instead of failing).
-    let origin = write.origin.clone().ok_or(Error::ServerError)?;
-    let webhook = work_tasks::comment_model_activity_kwargs(
-        &pk.to_string(),
-        requested_data_value(body, from_form),
-        Some(&current),
-        &actor_id.to_string(),
-        slug,
-        &origin,
-    );
-    deps.enqueue
-        .enqueue_task(work_tasks::MODEL_ACTIVITY_TASK, vec![], webhook)
-        .await;
+    // so the caller passes `None` there instead of failing). Suppressed
+    // callers (the MCP tools) skip the leg — they enqueue their own
+    // shaped legs.
+    if let Some(origin) = webhook_origin(options.emit_model_activity, write.origin.clone())? {
+        let webhook = work_tasks::comment_model_activity_kwargs(
+            &pk.to_string(),
+            requested_data_value(body, from_form),
+            Some(&current),
+            &actor_id.to_string(),
+            slug,
+            &origin,
+        );
+        deps.enqueue
+            .enqueue_task(work_tasks::MODEL_ACTIVITY_TASK, vec![], webhook)
+            .await;
+    }
     // The response refetches by id (`:2086`) and renders un-annotated.
     let Some(after) = read::fetch_comment_direct(pool, slug, &project_id, issue_id, pk)
         .await
@@ -859,8 +865,13 @@ pub struct CommentWrite<'a> {
 pub struct CommentCreateOptions {
     /// Emit the `issue_activity` created leg. The v1 view passes `true`;
     /// callers that enqueue their own shaped activity (the MCP tools)
-    /// pass `false`. The webhook (`model_activity`) leg always runs.
+    /// pass `false`.
     pub emit_activity: bool,
+    /// Emit the webhook (`model_activity`) leg. The v1 view passes
+    /// `true`; origin-less callers that enqueue their own shaped legs
+    /// (the MCP tools) pass `false`, which skips the leg entirely — no
+    /// origin is required.
+    pub emit_model_activity: bool,
 }
 
 /// The pre-resolved comment-update scope: `before` is the live row the
@@ -896,6 +907,24 @@ pub struct CommentUpdateOptions {
     /// Emit the `issue_activity` update leg (see
     /// [`CommentCreateOptions`]).
     pub emit_activity: bool,
+    /// Emit the webhook (`model_activity`) leg (see
+    /// [`CommentCreateOptions`]).
+    pub emit_model_activity: bool,
+}
+
+/// Resolve the `model_activity` webhook origin for the caller's options:
+/// suppressed callers (`emit_model_activity: false`, the MCP tools) skip
+/// the leg entirely — no origin is required — while emitting callers
+/// 500 past the save when the origin is unconfigured, exactly the
+/// view's `base_host` raise.
+fn webhook_origin(
+    emit_model_activity: bool,
+    origin: Option<String>,
+) -> Result<Option<String>, Error> {
+    if !emit_model_activity {
+        return Ok(None);
+    }
+    Ok(Some(origin.ok_or(Error::ServerError)?))
 }
 
 #[cfg(test)]
@@ -1221,5 +1250,24 @@ mod tests {
         assert_eq!(python_scalar_str(&float).as_deref(), Some("1e+100"));
         let sci: Value = serde_json::from_str("1.5e3").expect("parses");
         assert_eq!(python_scalar_str(&sci).as_deref(), Some("1500.0"));
+    }
+
+    #[test]
+    fn webhook_origin_suppression_arms() {
+        // Suppressed callers (the MCP tools) skip the webhook leg with no
+        // origin required; emitting callers (v1) require one — the `None`
+        // 500 lands past the save, with the row + the gated
+        // `issue_activity` already persisted, exactly the view's
+        // `base_host` raise.
+        assert_eq!(webhook_origin(false, None).expect("ok"), None);
+        assert_eq!(
+            webhook_origin(false, Some("https://app.example.test".to_owned())).expect("ok"),
+            None
+        );
+        assert_eq!(
+            webhook_origin(true, Some("https://app.example.test".to_owned())).expect("ok"),
+            Some("https://app.example.test".to_owned())
+        );
+        assert_eq!(webhook_origin(true, None), Err(Error::ServerError));
     }
 }

@@ -1801,6 +1801,7 @@ async fn create_issue_inner(
         &write,
         operations::issues::CreateOptions {
             emit_activity: true,
+            emit_model_activity: true,
         },
     )
     .await?;
