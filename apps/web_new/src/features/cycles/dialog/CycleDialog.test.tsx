@@ -275,9 +275,24 @@ async function openCalendar(): Promise<HTMLElement> {
 }
 
 async function pickIsoDay(calendar: HTMLElement, iso: string): Promise<void> {
+  const user = userEvent.setup();
+  // The grid shows one visible month plus filler days, so a target past
+  // the grid edge needs month turns first, exactly as a user would.
+  for (let turn = 0; turn < 24; turn++) {
+    const cell = calendar.querySelector(`button[data-day="${iso}"]`);
+    if (cell !== null) {
+      await user.click(cell);
+      return;
+    }
+    const month = within(calendar).getByRole("combobox", { name: "Month" }) as HTMLSelectElement;
+    const year = within(calendar).getByRole("combobox", { name: "Year" }) as HTMLSelectElement;
+    const visible = `${year.value}-${String(Number(month.value) + 1).padStart(2, "0")}`;
+    const ahead = iso.slice(0, 7) > visible;
+    await user.click(within(calendar).getByRole("button", { name: ahead ? "Next month" : "Previous month" }));
+  }
   const cell = calendar.querySelector(`button[data-day="${iso}"]`);
   expect(cell).not.toBeNull();
-  await userEvent.setup().click(cell as Element);
+  await user.click(cell as Element);
 }
 
 describe("CreateCycleDialog form", () => {
