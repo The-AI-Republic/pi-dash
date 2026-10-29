@@ -56,7 +56,7 @@ SELECT "issues"."id", "issues"."name", "issues"."state_id", "issues"."sort_order
   "issues"."start_date", "issues"."target_date", "issues"."sequence_id",
   "issues"."project_id", "issues"."parent_id",
   (SELECT U0."cycle_id" FROM "cycle_issues" U0 WHERE (U0."deleted_at" IS NULL
-    AND U0."issue_id" = ("issues"."id")) LIMIT 1) AS "cycle_id",
+    AND U0."issue_id" = ("issues"."id")) ORDER BY U0."created_at" DESC LIMIT 1) AS "cycle_id",
   "issues"."created_by_id" AS "created_by", "states"."group" AS "state__group",
   ARRAY_AGG(DISTINCT (CASE WHEN ("votes"."id" IS NOT NULL
     AND "votes"."deleted_at" IS NULL) THEN JSONB_BUILD_OBJECT('vote', "votes"."vote",

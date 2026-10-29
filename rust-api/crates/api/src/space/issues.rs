@@ -1972,7 +1972,7 @@ fn issue_retrieve_sql() -> String {
         module_ids = "COALESCE(ARRAY_AGG(DISTINCT \"modules\".\"id\") FILTER (WHERE NOT (\"modules\".\"id\" IS NULL) AND \"modules\".\"archived_at\" IS NULL AND \"module_through\".\"deleted_at\" IS NULL), '{}') AS \"module_ids\"",
         label_ids = "COALESCE(ARRAY_AGG(DISTINCT \"labels\".\"id\") FILTER (WHERE NOT (\"labels\".\"id\" IS NULL) AND \"label_through\".\"deleted_at\" IS NULL), '{}') AS \"label_ids\"",
         assignee_ids = "COALESCE(ARRAY_AGG(DISTINCT \"assignees\".\"id\") FILTER (WHERE NOT (\"assignees\".\"id\" IS NULL) AND \"project_members\".\"is_active\" = true AND \"assignee_through\".\"deleted_at\" IS NULL), '{}') AS \"assignee_ids\"",
-        cycle_id = "(SELECT U0.\"cycle_id\" FROM \"cycle_issues\" U0 WHERE (U0.\"deleted_at\" IS NULL AND U0.\"issue_id\" = (\"issues\".\"id\")) LIMIT 1) AS \"cycle_id\"",
+        cycle_id = "(SELECT U0.\"cycle_id\" FROM \"cycle_issues\" U0 WHERE (U0.\"deleted_at\" IS NULL AND U0.\"issue_id\" = (\"issues\".\"id\")) ORDER BY U0.\"created_at\" DESC LIMIT 1) AS \"cycle_id\"",
         vote_items = retrieve_vote_items_sql(),
         reaction_items = retrieve_reaction_items_sql(),
     )

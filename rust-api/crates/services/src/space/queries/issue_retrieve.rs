@@ -155,9 +155,12 @@ fn module_ids_sql() -> String {
 
 /// `cycle_id` subquery annotation (`issue.py:608-612`):
 /// `CycleIssue.objects.filter(issue=OuterRef("id"),
-/// deleted_at__isnull=True).values("cycle_id")[:1]`.
+/// deleted_at__isnull=True).values("cycle_id")[:1]`. The filter does NOT
+/// clear ordering, so `CycleIssue.Meta.ordering = ("-created_at",)`
+/// (`db/models/cycle.py:124`) renders `ORDER BY ... DESC` before the
+/// `LIMIT 1` — the pick among several live cycle links is deterministic.
 fn cycle_id_sql() -> String {
-    "(SELECT U0.\"cycle_id\" FROM \"cycle_issues\" U0 WHERE (U0.\"deleted_at\" IS NULL AND U0.\"issue_id\" = (\"issues\".\"id\")) LIMIT 1) AS \"cycle_id\"".to_string()
+    "(SELECT U0.\"cycle_id\" FROM \"cycle_issues\" U0 WHERE (U0.\"deleted_at\" IS NULL AND U0.\"issue_id\" = (\"issues\".\"id\")) ORDER BY U0.\"created_at\" DESC LIMIT 1) AS \"cycle_id\"".to_string()
 }
 
 /// `vote_items` annotation (`issue.py:652-698`): one
@@ -445,7 +448,7 @@ mod tests {
         assert_builder_contains(
             &issue_retrieve_sql(),
             &["issue_id", "slug", "project_id"],
-            &fixture_fragment("(SELECT U0.\"cycle_id\" FROM \"cycle_issues\" U0 WHERE (U0.\"deleted_at\" IS NULL AND U0.\"issue_id\" = (\"issues\".\"id\")) LIMIT 1) AS \"cycle_id\""),
+            &fixture_fragment("(SELECT U0.\"cycle_id\" FROM \"cycle_issues\" U0 WHERE (U0.\"deleted_at\" IS NULL AND U0.\"issue_id\" = (\"issues\".\"id\")) ORDER BY U0.\"created_at\" DESC LIMIT 1) AS \"cycle_id\""),
         );
     }
 
