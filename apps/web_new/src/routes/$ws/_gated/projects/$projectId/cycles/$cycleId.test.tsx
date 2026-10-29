@@ -602,6 +602,20 @@ describe("cycle detail route", () => {
     expect(sheet).toHaveAttribute("data-hide-estimate", "true");
   });
 
+  it("shows the cycle sheet's estimate column when the project row links a system", async () => {
+    mocks.layout.current = "spreadsheet";
+    mocks.projectRow.current = { data: { timezone: "America/New_York", estimate: "eid-1" } };
+    renderRoute();
+    expect(await screen.findByTestId("spreadsheet-layout")).toHaveAttribute("data-hide-estimate", "false");
+  });
+
+  it("hides the cycle sheet's estimate column once the project row clears the link", async () => {
+    mocks.layout.current = "spreadsheet";
+    mocks.projectRow.current = { data: { timezone: "America/New_York", estimate: null } };
+    renderRoute();
+    expect(await screen.findByTestId("spreadsheet-layout")).toHaveAttribute("data-hide-estimate", "true");
+  });
+
   it("renders the timeline over the flat rows", async () => {
     mocks.layout.current = "gantt_chart";
     renderRoute();

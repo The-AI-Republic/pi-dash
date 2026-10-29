@@ -14,9 +14,10 @@ import * as React from "react";
 import type { State } from "@pidash/api-client";
 
 import { getAppClient } from "../../../core/api/client.js";
-import { useProjectRoles } from "../../auth/index.js";
+import { useProjectRoles, useProjectRow } from "../../auth/index.js";
 import { useNarrowViewport } from "../../../shared/shell/index.js";
 import { projectsQueryOptions } from "../../projects/index.js";
+import { hasEstimateLink } from "../../../shared/lib/estimateLink.js";
 import type { GanttRow } from "./rows.js";
 
 /** Query key suffix for one project's state list under the workspace. */
@@ -65,20 +66,23 @@ export interface GanttBulkFlags {
 }
 
 /**
- * The bulk toolbar's field flags from the workspace's project list
- * (ISS-116). The gated route already holds the list, so the timeline
- * gates the cycle, module and estimate entries without another request.
- * A project the list does not carry shows every field.
+ * The bulk toolbar's field flags (ISS-116). The cycle and module switches
+ * ride the workspace's project list, which the gated route already holds;
+ * the estimate link does not — that list answers a fixed column set
+ * without it — so the estimate entry follows the project's own row
+ * (EST-018). A project the list does not carry shows every field.
  */
 export function useProjectBulkFlags(workspaceSlug: string, projectId: string): GanttBulkFlags {
   const client = getAppClient();
   const { data: projects } = useQuery(projectsQueryOptions(client, workspaceSlug));
+  const projectRow = useProjectRow(workspaceSlug, projectId);
   const project = projects?.find((row) => row.id === projectId);
-  if (project === undefined) return { hideCycle: false, hideModule: false, hideEstimate: false };
+  const hideEstimate = !hasEstimateLink(projectRow.data);
+  if (project === undefined) return { hideCycle: false, hideModule: false, hideEstimate };
   return {
     hideCycle: !project.cycle_view,
     hideModule: !project.module_view,
-    hideEstimate: project.estimate == null,
+    hideEstimate,
   };
 }
 

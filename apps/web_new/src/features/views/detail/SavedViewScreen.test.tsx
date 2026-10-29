@@ -46,12 +46,20 @@ vi.mock("../../issues/layouts/ViewLayoutBody.js", () => ({
   ViewLayoutBody: (props: {
     layout: string;
     richExpression: unknown;
+    hideEstimate?: boolean;
     peek?: { peekKey: string | null; peekProjectId: string | null; onPeekChange: (request: unknown) => void };
   }) => {
     bodyHarness.layout = props.layout;
     bodyHarness.expression = props.richExpression;
     bodyHarness.peek = props.peek ?? null;
-    return <div data-testid="view-body" data-layout={props.layout} data-peek={props.peek?.peekKey ?? ""} />;
+    return (
+      <div
+        data-testid="view-body"
+        data-layout={props.layout}
+        data-hide-estimate={String(props.hideEstimate ?? false)}
+        data-peek={props.peek?.peekKey ?? ""}
+      />
+    );
   },
 }));
 vi.mock("../../issues/layouts/IssuesLayoutRoot.js", () => ({
@@ -243,6 +251,10 @@ function projectRow(overrides: Record<string, unknown> = {}): Project & Record<s
     project_lead: null,
     network: 0,
     estimate: null,
+    // The retrieve contract requires the readiness fields; without them
+    // the row fails to parse and every consumer reads "unlinked".
+    agent_executor_options: [],
+    default_agent_executor: "local_runner",
     created_at: "2026-01-02T03:04:05Z",
     updated_at: "2026-02-03T04:05:06Z",
     created_by: null,
@@ -385,6 +397,37 @@ describe("SavedViewScreen", () => {
     expect(screen.getByTestId("view-body")).toHaveAttribute("data-layout", "kanban");
     expect(bodyHarness.expression).toEqual({ and: [{ priority__in: "urgent" }] });
     expect(screen.getByTestId("root-total")).toHaveTextContent("1");
+    // The fixture project never linked an estimate system, so the view's
+    // sheet would not offer the column (EST-018).
+    expect(screen.getByTestId("view-body")).toHaveAttribute("data-hide-estimate", "true");
+  });
+
+  it("hides the view's estimate column after the project row clears the link (EST-018)", async () => {
+    const { estimate: _listProjectionOmitsIt, ...listRow } = projectRow();
+    harness.project = listRow;
+    harness.view = makeView({
+      id: VIEW_ID,
+      project: PROJECT_ID,
+      name: "Triage",
+      display_filters: { layout: "spreadsheet" },
+    });
+    renderScreen();
+    await waitFor(() => expect(screen.getByTestId("layout-root")).toBeInTheDocument());
+    expect(await screen.findByTestId("view-body")).toHaveAttribute("data-hide-estimate", "true");
+  });
+
+  it("shows the view's estimate column when the project row links a system (EST-018)", async () => {
+    harness.project = projectRow({ estimate: "623e4567-e89b-12d3-a456-426614174005" });
+    harness.view = makeView({
+      id: VIEW_ID,
+      project: PROJECT_ID,
+      name: "Triage",
+      display_filters: { layout: "spreadsheet" },
+    });
+    renderScreen();
+    await waitFor(() => expect(screen.getByTestId("layout-root")).toBeInTheDocument());
+    // The column stays off until the project row answers, so wait for it.
+    await waitFor(() => expect(screen.getByTestId("view-body")).toHaveAttribute("data-hide-estimate", "false"));
   });
 
   it("binds the peek address the view's URL carries to its layout (ISS-167)", async () => {

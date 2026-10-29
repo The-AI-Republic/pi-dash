@@ -14,7 +14,9 @@ import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
 import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
+import { useProjectRow } from "../../auth/index.js";
 import { projectsQueryOptions } from "../../projects/index.js";
+import { hasEstimateLink } from "../../../shared/lib/estimateLink.js";
 import { canEditInProject } from "../../../shared/shell/contextual/index.js";
 import { CalendarEntry } from "../calendar/CalendarEntry.js";
 import { resolvedKanbanLayout } from "../kanban/lazy.js";
@@ -112,6 +114,10 @@ export function EntityListScreen({
   const client = getAppClient();
   const { data: projects } = useSuspenseQuery(projectsQueryOptions(client, workspaceSlug));
   const project = projects.find((row) => row.id === projectId) ?? null;
+  // The estimate link is not in the workspace list projection, so the
+  // cycle and module pages read the project's own row for it (EST-018).
+  const projectRow = useProjectRow(workspaceSlug, projectId);
+  const hideEstimate = !hasEstimateLink(projectRow.data);
   // Titles live with the layout's own chunk instead of the route: the
   // route graph is eager and the picker reference barst pulls cycle,
   // module, pod and estimate contracts into the initial bundle (NEWFRONT-619).
@@ -281,7 +287,7 @@ export function EntityListScreen({
                   canEdit={canEdit}
                   hideCycle={!project.cycle_view}
                   hideModule={hideModuleGrouping}
-                  hideEstimate={project.estimate === null}
+                  hideEstimate={hideEstimate}
                   richExpression={richFilters}
                   weekStart={weekStart}
                   peekKey={peekKey}

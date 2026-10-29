@@ -27,6 +27,7 @@ import { canTransferFromBanner } from "../../../../../../features/cycles/lib/cyc
 import { isProjectAuthorized } from "../../../../../../features/projects/tabs.js";
 import { projectsQueryOptions } from "../../../../../../features/projects/api/queries.js";
 import { isCompletedCycle } from "../../../../../../shared/pickers/cycles.js";
+import { hasEstimateLink } from "../../../../../../shared/lib/estimateLink.js";
 import { canEditInProject } from "../../../../../../shared/shell/contextual/index.js";
 import { DisplayControl } from "../../../../../../features/issues/display/DisplayControl.js";
 import { LAYOUT_ORDER, resolveActiveLayout, type LayoutKind } from "../../../../../../features/issues/layouts/kinds.js";
@@ -113,8 +114,8 @@ export function CycleDetailContent({
   const projectRow = useProjectRow(workspaceSlug, projectId);
   const projectTimeZone = projectRow.data?.timezone ?? "UTC";
   // The estimate link comes from the retrieve row: the projects list
-  // answers a fixed .values() projection without it (EST-019).
-  const estimatesEnabled = projectRow.data?.estimate != null;
+  // answers a fixed .values() projection without it (EST-019, EST-018).
+  const estimatesEnabled = hasEstimateLink(projectRow.data);
   const [sidebarCollapsed, setSidebarCollapsed] = useCycleSidebarCollapsed();
   // The stored rich filters scope this read, as on the project list:
   // the totals, the badge, the analytics rows and the empty-card decision
@@ -298,7 +299,7 @@ export function CycleDetailContent({
                   canEdit={canEdit}
                   hideCycle={!project.cycle_view}
                   hideModule={!project.module_view}
-                  hideEstimate={project.estimate === null}
+                  hideEstimate={!estimatesEnabled}
                   richExpression={preferences.rich_filters}
                   weekStart={weekStart}
                   peekKey={peekKey}

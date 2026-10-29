@@ -378,6 +378,8 @@ function renderScreen(
     role?: number | null;
     prefs?: PrefsRecord;
     unfilteredSheetRows?: IssueListItem[];
+    /** The project's own row, the only read that carries the estimate link. */
+    projectRow?: { estimate: string | null };
     displayFilters?: Record<string, unknown>;
     projects?: Project[];
     transport?: ScreenTransport;
@@ -401,6 +403,13 @@ function renderScreen(
     projectsQueryOptions(apiClient, PARAMS.ws).queryKey,
     options.projects ?? [{ ...projectSeed(), ...options.project }]
   );
+  // The estimate link rides this row alone (EST-018); the list seed above
+  // never carries it. A render that does not name it reads as unlinked.
+  queryClient.setQueryData(authKeys.project(PARAMS.ws, PARAMS.projectId), {
+    ...projectSeed(),
+    ...options.project,
+    estimate: options.projectRow?.estimate ?? null,
+  });
   if (options.role !== null) {
     queryClient.setQueryData(sessionKeys.workspaces, [
       {
@@ -924,10 +933,35 @@ describe("project issues screen", () => {
   });
 
   it("hides the spreadsheet estimate column when the project has no estimate system", async () => {
-    renderScreen({}, 1, [issueRow()], { project: { estimate: null }, prefs: spreadsheetPrefsSeed() });
+    renderScreen({}, 1, [issueRow()], { projectRow: { estimate: null }, prefs: spreadsheetPrefsSeed() });
 
     await screen.findByRole("table", undefined, LAZY_WAIT);
     expect(screen.getAllByRole("columnheader").map((header) => header.textContent)).not.toContain("Estimate");
+  });
+
+  it("drops the spreadsheet estimate column after the link is cleared, even though the list row has none", async () => {
+    // The workspace list answers a fixed column set without `estimate`;
+    // reading the flag there kept the column on forever (EST-018).
+    const sharedRow = projectSeed();
+    delete (sharedRow as { estimate?: unknown }).estimate;
+    renderScreen({}, 1, [issueRow()], {
+      projects: [sharedRow],
+      projectRow: { estimate: null },
+      prefs: spreadsheetPrefsSeed(),
+    });
+
+    await screen.findByRole("table", undefined, LAZY_WAIT);
+    expect(screen.getAllByRole("columnheader").map((header) => header.textContent)).not.toContain("Estimate");
+  });
+
+  it("shows the spreadsheet estimate column when the project links a system", async () => {
+    renderScreen({}, 1, [issueRow()], {
+      projectRow: { estimate: "623e4567-e89b-12d3-a456-426614174005" },
+      prefs: spreadsheetPrefsSeed(),
+    });
+
+    await screen.findByRole("table", undefined, LAZY_WAIT);
+    expect(screen.getAllByRole("columnheader").map((header) => header.textContent)).toContain("Estimate");
   });
 
   it("renders the stored rich filter's sheet rows rather than the unfiltered sheet", async () => {

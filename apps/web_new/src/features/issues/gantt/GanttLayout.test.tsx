@@ -189,6 +189,10 @@ function renderLayout(
     archived?: boolean;
     /** Feature flags on the seeded project row (ISS-116 toolbar fields). */
     projectFlags?: { cycleView?: boolean; moduleView?: boolean; estimate?: string | null };
+    /** Clear the seeded project row so the timeline reads it as unresolved. */
+    missingProjectRow?: boolean;
+    /** A stray `estimate` on the workspace list row, which the server omits. */
+    staleListEstimate?: string | null;
     /** Seed an empty project list (ISS-116 missing-row default). */
     missingProject?: boolean;
     /** Controlled peek the route would pass (ISS-167). */
@@ -247,10 +251,23 @@ function renderLayout(
             archived_at: options.archived === true ? "2026-10-01" : null,
             cycle_view: projectFlags.cycleView,
             module_view: projectFlags.moduleView,
-            estimate: projectFlags.estimate,
+            // The server never sends `estimate` here; a seed that does is
+            // exactly the stale row the gating rule must ignore (EST-018).
+            ...(options.staleListEstimate === undefined ? {} : { estimate: options.staleListEstimate }),
           },
         ]
   );
+  // The estimate link rides the project's own row (EST-018): the
+  // workspace list above is a fixed projection without it.
+  if (options.missingProjectRow !== true) {
+    queryClient.setQueryData(authKeys.project(SLUG, PROJECT), {
+      id: PROJECT,
+      archived_at: options.archived === true ? "2026-10-01" : null,
+      cycle_view: projectFlags.cycleView,
+      module_view: projectFlags.moduleView,
+      estimate: projectFlags.estimate,
+    });
+  }
   render(
     <QueryClientProvider client={queryClient}>
       <React.Suspense fallback={<p>suspended</p>}>
@@ -828,13 +845,43 @@ describe("GanttLayout bulk selection (ISS-116)", () => {
     enableBulk();
     renderLayout({
       projectRole: 15,
-      projectFlags: { cycleView: false, moduleView: true, estimate: null },
+      projectFlags: { cycleView: false, moduleView: true, estimate: "estimate-1" },
     });
     fireEvent.click(screen.getByLabelText("Select WEB-1"));
     const toolbar = screen.getByTestId("bulk-toolbar");
     expect(toolbar).toHaveAttribute("data-hide-cycle", "true");
     expect(toolbar).not.toHaveAttribute("data-hide-module");
-    expect(toolbar).toHaveAttribute("data-hide-estimate", "true");
+    expect(toolbar).not.toHaveAttribute("data-hide-estimate");
+  });
+
+  it("hides the toolbar's estimate field once the project row clears the link", () => {
+    enableBulk();
+    renderLayout({
+      projectRole: 15,
+      projectFlags: { cycleView: true, moduleView: true, estimate: null },
+    });
+    fireEvent.click(screen.getByLabelText("Select WEB-1"));
+    expect(screen.getByTestId("bulk-toolbar")).toHaveAttribute("data-hide-estimate", "true");
+  });
+
+  it("ignores a link on the workspace list row; the project row decides", () => {
+    // The list projector never answers `estimate`; a stray one must not
+    // keep the toolbar field on (EST-018).
+    enableBulk();
+    renderLayout({
+      projectRole: 15,
+      projectFlags: { cycleView: true, moduleView: true, estimate: null },
+      staleListEstimate: "estimate-1",
+    });
+    fireEvent.click(screen.getByLabelText("Select WEB-1"));
+    expect(screen.getByTestId("bulk-toolbar")).toHaveAttribute("data-hide-estimate", "true");
+  });
+
+  it("hides the toolbar's estimate field while the project row is missing", () => {
+    enableBulk();
+    renderLayout({ projectRole: 15, missingProjectRow: true });
+    fireEvent.click(screen.getByLabelText("Select WEB-1"));
+    expect(screen.getByTestId("bulk-toolbar")).toHaveAttribute("data-hide-estimate", "true");
   });
 
   it("shows every toolbar field when the project row is missing", () => {

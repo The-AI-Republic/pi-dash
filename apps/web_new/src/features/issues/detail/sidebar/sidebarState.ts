@@ -9,6 +9,8 @@
 
 import type { Issue, ProjectDetail } from "@pidash/api-client";
 
+import { hasEstimateLink } from "../../../../shared/lib/estimateLink.js";
+
 /** Project fields the sidebar's conditional rows read. */
 export type SidebarFeatureProject = Pick<ProjectDetail, "module_view" | "cycle_view" | "estimate">;
 
@@ -25,9 +27,13 @@ export function showsCycleRow(project: Pick<SidebarFeatureProject, "cycle_view">
   return project.cycle_view;
 }
 
-/** True when the project has an estimate system, so the Estimate row renders. */
+/**
+ * True when the project links an estimate system, so the Estimate row
+ * renders. The rule is shared with every other estimate surface so the
+ * sidebar and the spreadsheet can never disagree (EST-018).
+ */
 export function showsEstimateRow(project: Pick<SidebarFeatureProject, "estimate">): boolean {
-  return project.estimate !== null && project.estimate !== undefined;
+  return hasEstimateLink(project);
 }
 
 /** Local calendar day of a moment as YYYY-MM-DD (not the UTC day). */
