@@ -16,7 +16,14 @@ import { useNavigate } from "@tanstack/react-router";
 import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
-import { loadRichFilterBuilder, prefsQueryOptions, writeEntityPrefs, type IssuesEntity } from "../../issues/index.js";
+import {
+  loadRichFilterBuilder,
+  mergePrefsResponse,
+  prefsQueryOptions,
+  writeEntityPrefs,
+  type IssuesEntity,
+  type PrefsRecord,
+} from "../../issues/index.js";
 import { notifyError } from "../../../shared/shell/toaster.js";
 import { toggleBreakdownFilter, type BreakdownDimension } from "../lib/cycleBreakdownFilter.js";
 import { cycleDetailPath } from "../lib/cycleScreen.js";
@@ -63,7 +70,12 @@ export function useApplyBreakdownFilter(target: HeroBreakdownTarget): {
         });
         // The detail reads the cached copy with an infinite stale time;
         // the write's answer refreshes it so the filter shows at once.
-        queryClient.setQueryData(options.queryKey, next);
+        // Only the owned rich_filters key merges over the cache: the
+        // response's other keys predate any display or collapse write
+        // that converged while this PATCH flew (NEWFRONT-1015).
+        queryClient.setQueryData<PrefsRecord>(options.queryKey, (current) =>
+          mergePrefsResponse(current, next, ["rich_filters"])
+        );
         const detail = cycleDetailPath(target.workspaceSlug, target.projectId, target.cycleId);
         await navigate({
           to: peekIssueId === undefined ? detail : `${detail}?peekIssueId=${encodeURIComponent(peekIssueId)}`,
