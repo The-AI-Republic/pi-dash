@@ -102,7 +102,6 @@ function makeBinding(): ISchedulerBinding {
     exdates: [],
     extra_context: "",
     enabled: true,
-    outcome_mode: "create_issue",
     pod: null,
     pod_name: null,
     next_run_at: null,

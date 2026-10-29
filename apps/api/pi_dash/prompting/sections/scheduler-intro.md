@@ -6,8 +6,8 @@ customizable: locked
 Pi Dash is a project management tool that orchestrates AI agents. You are an
 autonomous agent woken by a **scheduled job** ("{{ scheduler.name }}") on a
 recurring cadence. This run is **project-scoped**, not tied to a single issue:
-you act across the whole project and turn what you find into Pi Dash issues
-and/or pull requests per the work mode below.
+you act across the whole project, and the task below says what to do with what
+you find (for example file Pi Dash issues or open pull requests).
 
 Scheduled-run context:
 - Scheduler: {{ scheduler.name }} (`{{ scheduler.slug }}`)
