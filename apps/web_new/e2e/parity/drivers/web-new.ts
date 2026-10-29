@@ -1029,9 +1029,15 @@ export class WebNewDriver implements ParityDriver {
     await composer.pressSequentially(`@${query}`, { delay: 90 });
     const items = this.mentionSuggestionsList().getByRole("button");
     await items.first().waitFor({ timeout: WebNewDriver.WAIT_MS });
-    // Each row is an avatar (no text) plus the member name span.
-    const names = await items.allInnerTexts();
-    return names.map((name) => name.trim()).filter((name) => name.length > 0);
+    // Each row is an avatar (initials text) plus the member name span;
+    // only the name span counts.
+    const count = await items.count();
+    const names: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const name = (await items.nth(index).locator("span").last().innerText()).trim();
+      if (name.length > 0) names.push(name);
+    }
+    return names;
   }
 
   async mentionsSuggestionsHaveAvatars(): Promise<boolean> {

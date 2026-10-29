@@ -31,6 +31,7 @@ interface StubLocator {
   evaluate?: (fn: (element: never, arg?: never) => unknown, arg?: unknown) => Promise<unknown>;
   boundingBox?: () => Promise<{ x: number; y: number; width: number; height: number } | null>;
   first?: () => StubLocator;
+  last?: () => StubLocator;
   nth?: (index: number) => StubLocator;
   all?: () => Promise<StubLocator[]>;
   locator?: (selector: string) => StubLocator;
@@ -64,6 +65,7 @@ function locator(overrides: Partial<StubLocator> = {}): Locator {
   };
   const defaults: StubLocator = {
     first: () => node,
+    last: () => node,
     nth: () => node,
     all: async () => [node],
     locator: () => node,
@@ -647,7 +649,17 @@ describe("web_new comments gate driver (NEWFRONT-818)", () => {
     const editor = locator({
       pressSequentially: async (value: string) => void typed.push(value),
     });
-    const items = locator({ allInnerTexts: async () => ["  Parity Mention  ", "", "Parity Oracle"] });
+    const names = ["  Parity Mention  ", "", "Parity Oracle"];
+    const items = locator({
+      count: async () => names.length,
+      nth: (index: number) =>
+        locator({
+          locator: (selector: string) => {
+            expect(selector).toBe("span");
+            return locator({ last: () => locator({ innerText: async () => names[index] as string }) });
+          },
+        }),
+    });
     const page = pageOf();
     page.page.getByRole = ((role: string, options?: { name?: string }) => {
       if (role === "group") {
@@ -677,7 +689,16 @@ describe("web_new comments gate driver (NEWFRONT-818)", () => {
     const editor = locator({ pressSequentially: async () => undefined });
     const page = pageOf({
       composer: locator({ locator: () => editor }),
-      list: locator({ getByRole: () => locator({ allInnerTexts: async () => ["Parity Mention"] }) }),
+      list: locator({
+        getByRole: () =>
+          locator({
+            count: async () => 1,
+            nth: () =>
+              locator({
+                locator: () => locator({ last: () => locator({ innerText: async () => "Parity Mention" }) }),
+              }),
+          }),
+      }),
     });
     let presses = 0;
     page.page.keyboard.press = (async () => {
