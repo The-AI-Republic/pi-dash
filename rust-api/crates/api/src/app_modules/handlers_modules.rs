@@ -379,13 +379,16 @@ pub(crate) async fn actor_timezone(
     name.parse().map_err(|_| Denial::ServerError)
 }
 
-/// `origin=base_host(request, is_app=True)`: `WEB_URL or APP_BASE_URL`.
+/// `base_host(request, is_app=True)` (`utils/host.py:17-66`):
+/// `APP_BASE_URL` wins when set, else `WEB_URL`; unset is
+/// `ImproperlyConfigured` → 500. Empty strings fall through like
+/// Python's `or` (PIDASHCONV-1597).
 fn request_origin(state: &AppState) -> Result<String, Denial> {
-    state
-        .settings()
-        .urls
-        .app_base_url
+    let urls = &state.settings().urls;
+    urls.app_base_url
         .clone()
+        .filter(|s| !s.is_empty())
+        .or_else(|| urls.web_url.clone().filter(|s| !s.is_empty()))
         .ok_or(Denial::ServerError)
 }
 // ---------------------------------------------------------------------------
@@ -2687,6 +2690,35 @@ async fn module_destroy(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn origin_state(app_base_url: Option<&str>, web_url: Option<&str>) -> AppState {
+        let mut settings = pidash_db::config::Settings::test_defaults();
+        settings.urls.app_base_url = app_base_url.map(str::to_owned);
+        settings.urls.web_url = web_url.map(str::to_owned);
+        AppState::with_settings("test", settings)
+    }
+
+    /// `base_host(request, is_app=True)` (`utils/host.py:17-66`):
+    /// `APP_BASE_URL` wins when truthy, else `WEB_URL`; unset is
+    /// `ImproperlyConfigured` → 500. Empty strings fall through like
+    /// Python's `or` (PIDASHCONV-1597, PIDASHCONV-1648).
+    #[test]
+    fn request_origin_falls_through_empty_strings() {
+        let app = "https://app.example.invalid";
+        let web = "https://web.example.invalid";
+        let state = origin_state(Some(app), Some(web));
+        assert_eq!(request_origin(&state).expect("app base wins"), app);
+        let state = origin_state(None, Some(web));
+        assert_eq!(request_origin(&state).expect("falls through"), web);
+        let state = origin_state(Some(""), Some(web));
+        assert_eq!(request_origin(&state).expect("empty falls through"), web);
+        let state = origin_state(Some(app), Some(""));
+        assert_eq!(request_origin(&state).expect("app wins"), app);
+        let state = origin_state(Some(""), Some(""));
+        assert!(matches!(request_origin(&state), Err(Denial::ServerError)));
+        let state = origin_state(None, None);
+        assert!(matches!(request_origin(&state), Err(Denial::ServerError)));
+    }
 
     #[test]
     fn soft_delete_message_matches_the_mixin_call() {
