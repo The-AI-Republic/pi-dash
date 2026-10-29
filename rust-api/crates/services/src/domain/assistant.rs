@@ -40,6 +40,30 @@ const CONFIG_DELETE_SQL: &str = "DELETE FROM assistant_user_llm_config WHERE use
 const CONFIG_STAMP_VERIFIED_SQL: &str =
     "UPDATE assistant_user_llm_config SET last_verified_at = $1 WHERE user_id = $2";
 
+/// The `get_or_create(user=user)` miss-arm insert
+/// (`connections.py:319`): every column but the auto `id`, `_meta`
+/// order, `RETURNING id` (Django fetches the new pk that way). Unlike
+/// the handler insert above, `last_verified_at` is bound rather than
+/// forced `NULL` and the new id comes back for the driver's subsequent
+/// `WHERE id` update and returned struct; the `23505` race arm stays
+/// driver-side.
+const CONFIG_INSERT_RETURNING_SQL: &str = "INSERT INTO assistant_user_llm_config
+           (user_id, provider_kind, base_url, model_name, api_key_encrypted,
+            last_verified_at, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id";
+
+/// Full `cfg.save()` (`connections.py:325`): every non-pk column in
+/// `_meta` order, `WHERE id`. Unlike the handler update above,
+/// `last_verified_at` is written (copied from the selected connection
+/// row — deliberate Python behavior, Tier-1: stored rows differ) and
+/// `user_id` plus the `auto_now_add` `created_at` are written back with
+/// their stored values.
+const CONFIG_FULL_SAVE_SQL: &str = "UPDATE assistant_user_llm_config
+           SET user_id = $1, provider_kind = $2, base_url = $3, model_name = $4,
+               api_key_encrypted = $5, last_verified_at = $6, created_at = $7,
+               updated_at = $8
+           WHERE id = $9";
+
 /// Resolved inputs for [`save_llm_config`]: the handler validates,
 /// encrypts and resolves defaults first; `existed` comes from its
 /// pre-read (get-or-create split across fetch + save).
@@ -109,6 +133,86 @@ where
     sqlx::query(CONFIG_STAMP_VERIFIED_SQL)
         .bind(now)
         .bind(user_id)
+        .execute(ex)
+        .await
+        .map(|_| ())
+}
+
+/// Resolved inputs for [`insert_llm_config`]: the full non-pk row.
+/// The caller owns the clock (`created_at`/`updated_at`) and the
+/// defaults (the overlay passes its field defaults); `last_verified_at`
+/// is bound as given, not forced `NULL`.
+pub struct LlmConfigInsert<'a> {
+    pub user_id: Uuid,
+    pub provider_kind: &'a str,
+    pub base_url: &'a str,
+    pub model_name: &'a str,
+    pub api_key_encrypted: &'a Option<Vec<u8>>,
+    pub last_verified_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Insert one LLM config row; returns the new id (`RETURNING id`) for
+/// the driver's subsequent `WHERE id` update and returned struct
+/// (`connections.py:319` miss arm; the `23505` race arm stays with the
+/// driver).
+pub async fn insert_llm_config<'e, E>(
+    ex: E,
+    params: &LlmConfigInsert<'_>,
+) -> Result<i64, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query_scalar(CONFIG_INSERT_RETURNING_SQL)
+        .bind(params.user_id)
+        .bind(params.provider_kind)
+        .bind(params.base_url)
+        .bind(params.model_name)
+        .bind(params.api_key_encrypted)
+        .bind(params.last_verified_at)
+        .bind(params.created_at)
+        .bind(params.updated_at)
+        .fetch_one(ex)
+        .await
+}
+
+/// Resolved inputs for [`save_llm_config_full`]: the full non-pk row
+/// plus the pk. The caller copies the projected values in (notably
+/// `last_verified_at` from the selected connection row) and stamps
+/// `updated_at` with the save instant first; `user_id` and `created_at`
+/// carry their stored values.
+pub struct LlmConfigFullSave<'a> {
+    pub id: i64,
+    pub user_id: Uuid,
+    pub provider_kind: &'a str,
+    pub base_url: &'a str,
+    pub model_name: &'a str,
+    pub api_key_encrypted: &'a Option<Vec<u8>>,
+    pub last_verified_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Full `cfg.save()` (`connections.py:325`): overwrite every non-pk
+/// column of the `id` row, `last_verified_at` included.
+pub async fn save_llm_config_full<'e, E>(
+    ex: E,
+    params: &LlmConfigFullSave<'_>,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(CONFIG_FULL_SAVE_SQL)
+        .bind(params.user_id)
+        .bind(params.provider_kind)
+        .bind(params.base_url)
+        .bind(params.model_name)
+        .bind(params.api_key_encrypted)
+        .bind(params.last_verified_at)
+        .bind(params.created_at)
+        .bind(params.updated_at)
+        .bind(params.id)
         .execute(ex)
         .await
         .map(|_| ())
@@ -655,6 +759,14 @@ mod tests {
             "UPDATE assistant_user_llm_config SET last_verified_at = $1 WHERE user_id = $2"
         );
         assert_eq!(
+            CONFIG_INSERT_RETURNING_SQL,
+            "INSERT INTO assistant_user_llm_config\n           (user_id, provider_kind, base_url, model_name, api_key_encrypted,\n            last_verified_at, created_at, updated_at)\n           VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id"
+        );
+        assert_eq!(
+            CONFIG_FULL_SAVE_SQL,
+            "UPDATE assistant_user_llm_config\n           SET user_id = $1, provider_kind = $2, base_url = $3, model_name = $4,\n               api_key_encrypted = $5, last_verified_at = $6, created_at = $7,\n               updated_at = $8\n           WHERE id = $9"
+        );
+        assert_eq!(
             collapse_continuations(CREATE_USER_MESSAGE_SQL),
             "INSERT INTO \"assistant_message\" (\"id\", \"thread_id\", \"turn_id\", \"seq\", \"kind\", \"display_content\", \"payload\", \"status\", \"created_at\", \"completed_at\") VALUES (gen_random_uuid(), $1, $2, $3, 'user', $4, '{}', 'completed', now(), NULL) RETURNING \"id\", \"kind\", \"display_content\", \"status\", \"seq\", \"turn_id\", \"payload\"::text AS \"payload_text\", \"created_at\", \"completed_at\""
         );
@@ -776,6 +888,79 @@ mod tests {
         assert_eq!(row.0, "https://live.example.com/v2");
         assert!(row.1.is_some(), "verified stamp set");
         delete_llm_config(&mut *tx, user_id).await.expect("delete");
+        // The overlay projection shapes (`connections.py:319-325`):
+        // insert with field defaults returns the new id, and the full
+        // save copies every projected value — `last_verified_at`
+        // included — onto the `id` row.
+        let proj_user = Uuid::new_v4();
+        let no_key: Option<Vec<u8>> = None;
+        let proj_created = Utc::now();
+        let proj_id = insert_llm_config(
+            &mut *tx,
+            &LlmConfigInsert {
+                user_id: proj_user,
+                provider_kind: "openai_compatible",
+                base_url: "",
+                model_name: "",
+                api_key_encrypted: &no_key,
+                last_verified_at: None,
+                created_at: proj_created,
+                updated_at: proj_created,
+            },
+        )
+        .await
+        .expect("insert config returning id");
+        assert!(proj_id > 0, "new id returned");
+        let verified = DateTime::from_timestamp(1_779_000_000, 0).expect("fixed stamp");
+        save_llm_config_full(
+            &mut *tx,
+            &LlmConfigFullSave {
+                id: proj_id,
+                user_id: proj_user,
+                provider_kind: "anthropic",
+                base_url: "https://proj.example.com",
+                model_name: "proj-model",
+                api_key_encrypted: &key,
+                last_verified_at: Some(verified),
+                created_at: proj_created,
+                updated_at: Utc::now(),
+            },
+        )
+        .await
+        .expect("full save");
+        #[derive(FromRow)]
+        struct ProjectedConfig {
+            user_id: Uuid,
+            provider_kind: String,
+            base_url: String,
+            model_name: String,
+            api_key_encrypted: Option<Vec<u8>>,
+            last_verified_at: Option<DateTime<Utc>>,
+            created_at: DateTime<Utc>,
+            updated_at: DateTime<Utc>,
+        }
+        let proj: ProjectedConfig = sqlx::query_as(
+            "SELECT user_id, provider_kind, base_url, model_name, api_key_encrypted, \
+             last_verified_at, created_at, updated_at \
+             FROM assistant_user_llm_config WHERE id = $1",
+        )
+        .bind(proj_id)
+        .fetch_one(&mut *tx)
+        .await
+        .expect("read projected row");
+        assert_eq!(proj.user_id, proj_user);
+        assert_eq!(proj.provider_kind, "anthropic");
+        assert_eq!(proj.base_url, "https://proj.example.com");
+        assert_eq!(proj.model_name, "proj-model");
+        assert_eq!(proj.api_key_encrypted, key);
+        assert_eq!(proj.last_verified_at, Some(verified));
+        assert!(
+            proj.updated_at >= proj.created_at,
+            "save instant stamps updated_at"
+        );
+        delete_llm_config(&mut *tx, proj_user)
+            .await
+            .expect("delete projection");
         let thread_id = Uuid::new_v4();
         let turn_id = Uuid::new_v4();
         let created = create_user_message(&mut *tx, thread_id, turn_id, 1, "live hello")
