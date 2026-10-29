@@ -458,3 +458,46 @@ def test_sort_keys_unknown_stays_server_error(
     r = api.get(url, headers=auth_a, params={"order_by": "no_such_key"})
     assert r.status_code == 500, r.text
     assert r.json() == SERVER_ERROR
+
+
+def test_default_order_is_created_at_ascending(
+    api, seed, tenant_a, project_a, auth_a, module_a
+):
+    # PIDASHCONV-1422: with no order_by the module list defaults to
+    # `created_at` ascending (module/issue.py:112), unlike the cycle and
+    # project lists which default to `-created_at`. The Rust port used the
+    # shared `-created_at` default and returned newest-first.
+    ws_id = tenant_a["workspace"]["id"]
+    old_id = seed.issue(ws_id, project_a, name="Mod order OLD")
+    new_id = seed.issue(ws_id, project_a, name="Mod order NEW")
+    seed.module_issue(ws_id, project_a, module_a, old_id)
+    seed.module_issue(ws_id, project_a, module_a, new_id)
+    with seed.conn.cursor() as cur:
+        cur.execute(
+            "UPDATE issues SET created_at = %s, updated_at = %s WHERE id = %s",
+            (
+                datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc),
+                datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc),
+                old_id,
+            ),
+        )
+        cur.execute(
+            "UPDATE issues SET created_at = %s, updated_at = %s WHERE id = %s",
+            (
+                datetime.datetime(2025, 6, 1, tzinfo=datetime.timezone.utc),
+                datetime.datetime(2025, 6, 1, tzinfo=datetime.timezone.utc),
+                new_id,
+            ),
+        )
+    url = _module_issues_url(tenant_a, project_a, module_a)
+    r = api.get(url, headers=auth_a)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["total_count"] == 2, body
+    assert [row["id"] for row in body["results"]] == [old_id, new_id], body
+    r = api.get(url, headers=auth_a, params={"group_by": "priority"})
+    assert r.status_code == 200, r.text
+    buckets = r.json()["results"]
+    assert [row["id"] for row in buckets["none"]["results"]] == [
+        old_id, new_id,
+    ], sorted(buckets)

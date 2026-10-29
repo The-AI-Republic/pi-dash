@@ -65,9 +65,12 @@ use axum::Router;
 use serde_json::Value;
 
 use pidash_services::auth_session::{password as pw, tasks as t, MAX_URL_REDIRECT_LENGTH};
+use pidash_services::domain::identity;
 
 use crate::auth_session::render::disallowed_redirect;
+use crate::auth_session::throttle_ident;
 use crate::state::AppState;
+use pidash_compat::response::{empty_response_no_content_type, json_response};
 
 /// Register the seven password/CSRF routes. Nothing else: sibling paths
 /// stay unmatched and proxy to Django.
@@ -134,14 +137,6 @@ fn owned_post(
 // Responses (exact bytes)
 // ---------------------------------------------------------------------------
 
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("password response")
-}
-
 fn json_400(pairs: &[(String, Value)]) -> Response {
     json_response(
         StatusCode::BAD_REQUEST,
@@ -155,7 +150,7 @@ fn json_400(pairs: &[(String, Value)]) -> Response {
 /// 400 (`DisallowedRedirect`).
 fn redirect_302(location: String) -> Response {
     let too_long = location.chars().count() > MAX_URL_REDIRECT_LENGTH;
-    let encoded = crate::response_headers::iri_to_uri(&location);
+    let encoded = pidash_compat::http::iri_to_uri(&location);
     let Some(location) = crate::response_headers::header_value(&encoded) else {
         return server_error();
     };
@@ -211,10 +206,7 @@ fn throttled(wait: Option<f64>) -> Response {
 /// Empty 500. Django's production 500 page is deployment-specific HTML;
 /// only the status is contractual here (the 500 vectors assert status).
 fn server_error() -> Response {
-    Response::builder()
-        .status(StatusCode::INTERNAL_SERVER_ERROR)
-        .body(axum::body::Body::empty())
-        .expect("static 500 response")
+    empty_response_no_content_type(StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 /// Custom `csrf_failure` page (`common.py:38-44`): `render()` with the
@@ -601,18 +593,6 @@ fn now_float() -> f64 {
         .unwrap_or(0.0)
 }
 
-/// DRF `get_ident` (`throttling.py:23-40`, `NUM_PROXIES` unset): the
-/// `X-Forwarded-For` header with all whitespace stripped, else the peer
-/// address.
-fn throttle_ident(headers: &HeaderMap, peer: Option<std::net::SocketAddr>) -> String {
-    if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-        if !xff.is_empty() {
-            return xff.split_whitespace().collect();
-        }
-    }
-    peer.map(|p| p.ip().to_string()).unwrap_or_default()
-}
-
 /// `get_client_ip` (`utils/ip_address.py`): first `X-Forwarded-For`
 /// token (no stripping), else the peer address.
 fn client_ip(headers: &HeaderMap, peer: Option<std::net::SocketAddr>) -> Option<String> {
@@ -816,7 +796,7 @@ async fn get_csrf_token(
         pidash_services::auth_session::DEFAULT_ANON_SCOPE,
         pidash_services::auth_session::DEFAULT_ANON_RATE,
         actor.is_some(),
-        &throttle_ident(&headers, peer_addr),
+        &throttle_ident(&headers, peer_addr.map(|p| p.ip().to_string())),
     )
     .await
     {
@@ -865,30 +845,7 @@ async fn get_csrf_token(
     response
 }
 
-/// Session-auth hash for `login()`: `salted_hmac(
-/// "...AbstractBaseUser.get_session_auth_hash", password_field,
-/// SECRET_KEY).hexdigest()` — the same construction `resolve_actor`
-/// verifies.
-fn session_auth_hash(password_field: &str, secret_key: &[u8]) -> String {
-    use hmac::{Hmac, Mac};
-    use sha2::{Digest, Sha256};
-    let key = {
-        let mut hasher = Sha256::new();
-        hasher.update(b"django.contrib.auth.models.AbstractBaseUser.get_session_auth_hash");
-        hasher.update(secret_key);
-        hasher.finalize()
-    };
-    let mut mac = Hmac::<Sha256>::new_from_slice(&key).expect("HMAC-SHA256 accepts any key length");
-    mac.update(password_field.as_bytes());
-    let digest = mac.finalize().into_bytes();
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(digest.len() * 2);
-    for b in digest {
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0x0f) as usize] as char);
-    }
-    out
-}
+use pidash_compat::http::session_auth_hash;
 
 /// `user_login(user, request, is_app=True)` (`utils/login.py:14-28`) over
 /// the request session: Django `login()` re-keys the session, writes
@@ -1001,6 +958,31 @@ async fn password_row(
     .transpose()
 }
 
+/// Change/set/reset-password write: the encoded password plus the
+/// `User.save()` column effects
+/// (`domain::identity::write_password_with_save_effects`), with a
+/// caller-generated rotation token. `stamp_last_login` selects the
+/// change/set-password twin over reset-password.
+async fn write_password(
+    pool: &sqlx::PgPool,
+    user_id: uuid::Uuid,
+    encoded: &str,
+    stamp_last_login: bool,
+) -> Result<(), sqlx::Error> {
+    let token = crate::auth_session::email::fresh_user_token();
+    identity::write_password_with_save_effects(
+        pool,
+        user_id,
+        &identity::PasswordSave {
+            encoded,
+            fresh_token: &token,
+            rotated_at: chrono::Utc::now(),
+            stamp_last_login,
+        },
+    )
+    .await
+}
+
 /// `POST /auth/change-password/` (`ChangePasswordEndpoint`,
 /// `common.py:47-96`).
 async fn change_password(
@@ -1037,7 +1019,7 @@ async fn change_password(
         pidash_services::auth_session::DEFAULT_ANON_SCOPE,
         pidash_services::auth_session::DEFAULT_ANON_RATE,
         true,
-        &throttle_ident(&headers, peer_addr),
+        &throttle_ident(&headers, peer_addr.map(|p| p.ip().to_string())),
     )
     .await
     {
@@ -1076,6 +1058,27 @@ async fn change_password(
         }
         _ => false,
     };
+    // Django's `check_password` setter (`common.py:74`,
+    // `base_user.py:111-123`): a correct old password on an outdated hash
+    // re-encodes with the default hasher at once — after the
+    // missing-field gates (`:52-71`) but before the zxcvbn gate
+    // (`:82-89`), so a weak-new 400 still persists the upgrade.
+    // `save(update_fields=["password"])` writes only that column (no
+    // `updated_at` bump). Autoset accounts never reach `check_password`
+    // (`:74` short-circuits), and on the success path the new-password
+    // save below overwrites this either way.
+    if !is_autoset && old_present && new_present && old_matches {
+        if let Field::Text(candidate) = &old {
+            if let Some(new_hash) = pidash_auth::password::rehash_if_outdated(candidate, &stored) {
+                if identity::rehash_password(&pool, actor.id, &new_hash)
+                    .await
+                    .is_err()
+                {
+                    return server_error();
+                }
+            }
+        }
+    }
     let new_weak = new_text
         .as_deref()
         .map(pidash_services::auth_session::password::password_is_weak)
@@ -1100,7 +1103,7 @@ async fn change_password(
     );
     // `set_password` + `is_password_autoset = False` + `save()`; the
     // `user_logged_in` signal bumps `last_login` (`update_last_login`).
-    if crate::auth_session::email::write_password_with_save_effects(&pool, actor.id, &encoded, true)
+    if write_password(&pool, actor.id, &encoded, true)
         .await
         .is_err()
     {
@@ -1173,7 +1176,7 @@ async fn set_password(
         pidash_services::auth_session::DEFAULT_ANON_SCOPE,
         pidash_services::auth_session::DEFAULT_ANON_RATE,
         true,
-        &throttle_ident(&headers, peer_addr),
+        &throttle_ident(&headers, peer_addr.map(|p| p.ip().to_string())),
     )
     .await
     {
@@ -1222,7 +1225,7 @@ async fn set_password(
     );
     // `set_password` + `is_password_autoset = False` + `save()`; the
     // `user_logged_in` signal bumps `last_login` (`update_last_login`).
-    if crate::auth_session::email::write_password_with_save_effects(&pool, actor.id, &encoded, true)
+    if write_password(&pool, actor.id, &encoded, true)
         .await
         .is_err()
     {
@@ -1418,7 +1421,7 @@ async fn forgot_password(
         pidash_services::auth_session::AUTHENTICATION_THROTTLE_SCOPE,
         pidash_services::auth_session::AUTHENTICATION_THROTTLE_RATE,
         false,
-        &throttle_ident(&headers, peer),
+        &throttle_ident(&headers, peer.map(|p| p.ip().to_string())),
     )
     .await
     {
@@ -1686,7 +1689,7 @@ async fn reset_password(
         &salt,
         pidash_auth::password::PBKDF2_DEFAULT_ITERATIONS,
     );
-    if crate::auth_session::email::write_password_with_save_effects(&pool, user_id, &encoded, false)
+    if write_password(&pool, user_id, &encoded, false)
         .await
         .is_err()
     {
@@ -1897,6 +1900,14 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use tower::ServiceExt;
+
+    #[test]
+    fn peerless_throttle_ident_is_drf_none() {
+        // PIDASHCONV-1419: with no XFF and no peer, DRF's `cache_format
+        // % {'ident': None}` renders "None", never "".
+        let headers = axum::http::HeaderMap::new();
+        assert_eq!(throttle_ident(&headers, None), "None");
+    }
 
     #[test]
     fn overlong_redirect_location_answers_400() {

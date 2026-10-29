@@ -109,6 +109,12 @@ use pidash_types::WorkspaceId;
 use super::guards;
 use super::quote_filename;
 use crate::state::AppState;
+use crate::uuid_path::{classify_uuid_segment, UuidSegment};
+use pidash_compat::py::py_json_string;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
+use pidash_compat::response::{
+    json_response as raw, json_value as json_status, no_content, server_error,
+};
 
 /// Register the six owned v2 paths. Sibling handler issues merge their own
 /// routers (project/bulk/check/duplicate/downloads, v1); merges keep both
@@ -160,9 +166,6 @@ pub const UNAUTHENTICATED_BODY: &str =
 /// `handle_exception`'s `ObjectDoesNotExist` branch
 /// (`app/views/base.py:129-133`).
 pub const NOT_FOUND_BODY: &str = r#"{"error":"The required object does not exist."}"#;
-/// `handle_exception`'s generic 500 branch (also `ValueError`/`TypeError`
-/// from the unguarded `int(size)`, and any DB error).
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// Resolver 404 for non-UUID `<uuid:asset_id>` segments (global
 /// `handler404`, `pi_dash/urls.py:15`). `JsonResponse` bytes, i.e.
 /// `json.dumps` defaults with the space after the colon.
@@ -173,28 +176,6 @@ pub const PAYLOAD_NOT_VALID_BODY: &str = r#"{"error":"The payload is not valid"}
 /// `allow_permission` fallthrough (`app/permissions/base.py`).
 pub const PERMISSION_DENIED_BODY: &str = r#"{"error":"You don't have the required permissions."}"#;
 
-fn raw(status: StatusCode, body: &'static str) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("static response")
-}
-
-fn json_status(status: StatusCode, body: Value) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(
-            serde_json::to_string(&body).expect("serializable response"),
-        ))
-        .expect("json response")
-}
-
-fn server_error() -> Response {
-    raw(StatusCode::INTERNAL_SERVER_ERROR, SERVER_ERROR_BODY)
-}
-
 /// `.get()` miss envelope: Django `ObjectDoesNotExist` through the base
 /// `handle_exception` (`app/views/base.py:129-133`).
 fn does_not_exist() -> Response {
@@ -203,10 +184,6 @@ fn does_not_exist() -> Response {
 
 fn page_not_found() -> Response {
     raw(StatusCode::NOT_FOUND, PAGE_NOT_FOUND_BODY)
-}
-
-fn no_content() -> Response {
-    StatusCode::NO_CONTENT.into_response()
 }
 
 fn pool(state: &AppState) -> Option<&sqlx::PgPool> {
@@ -503,12 +480,19 @@ fn workspace_asset_url(
     }
 }
 
-/// Parse a `<uuid:asset_id>` path segment: Django's converter 404s on
-/// garbage, so unparseable ids answer the resolver body (before auth —
-/// resolution precedes `initial()`).
+/// Parse a `<uuid:asset_id>` path segment: Django's converter routes only
+/// the canonical lowercase hyphenated spelling, so anything else answers
+/// the resolver body (before auth — resolution precedes `initial()`).
+/// Non-canonical spellings answer locally like garbage: no handler in this
+/// module carries proxy plumbing, and the prod `handler404` bytes are
+/// already pinned (PIDASHCONV-1215), so a proxy round-trip would add
+/// nothing (PIDASHCONV-1399).
 #[allow(clippy::result_large_err)]
 fn parse_asset_id(raw: &str) -> Result<Uuid, Response> {
-    raw.parse::<Uuid>().map_err(|_| page_not_found())
+    match classify_uuid_segment(raw) {
+        UuidSegment::Canonical(id) => Ok(id),
+        UuidSegment::NonCanonical | UuidSegment::Garbage => Err(page_not_found()),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -624,19 +608,9 @@ async fn user_entity_save(
                 &user_save::new_user_token(),
                 now,
             );
-            sqlx::query(
-                r#"UPDATE "users" SET "avatar" = $1, "avatar_asset_id" = $2, "email" = $3, "display_name" = $4, "is_staff" = $5, "token" = $6, "token_updated_at" = $7, "updated_at" = $8 WHERE "id" = $9"#,
+            pidash_services::domain::identity::link_avatar_asset(
+                pool, *owner_id, *asset_id, &write, now,
             )
-            .bind("")
-            .bind(asset_id)
-            .bind(&write.email)
-            .bind(&write.display_name)
-            .bind(write.is_staff)
-            .bind(&write.token)
-            .bind(write.token_updated_at)
-            .bind(now)
-            .bind(owner_id)
-            .execute(pool)
             .await
             .map_err(|_| server_error())?;
             Ok(())
@@ -673,18 +647,9 @@ async fn user_entity_save(
                 &user_save::new_user_token(),
                 now,
             );
-            sqlx::query(
-                r#"UPDATE "users" SET "cover_image" = NULL, "cover_image_asset_id" = $1, "email" = $2, "display_name" = $3, "is_staff" = $4, "token" = $5, "token_updated_at" = $6, "updated_at" = $7 WHERE "id" = $8"#,
+            pidash_services::domain::identity::link_cover_asset(
+                pool, *owner_id, *asset_id, &write, now,
             )
-            .bind(asset_id)
-            .bind(&write.email)
-            .bind(&write.display_name)
-            .bind(write.is_staff)
-            .bind(&write.token)
-            .bind(write.token_updated_at)
-            .bind(now)
-            .bind(owner_id)
-            .execute(pool)
             .await
             .map_err(|_| server_error())?;
             Ok(())
@@ -729,19 +694,9 @@ async fn user_entity_delete(
                 &user_save::new_user_token(),
                 now,
             );
-            sqlx::query(
-                r#"UPDATE "users" SET "avatar_asset_id" = NULL, "email" = $1, "display_name" = $2, "is_staff" = $3, "token" = $4, "token_updated_at" = $5, "updated_at" = $6 WHERE "id" = $7"#,
-            )
-            .bind(&write.email)
-            .bind(&write.display_name)
-            .bind(write.is_staff)
-            .bind(&write.token)
-            .bind(write.token_updated_at)
-            .bind(now)
-            .bind(owner_id)
-            .execute(pool)
-            .await
-            .map_err(|_| server_error())?;
+            pidash_services::domain::identity::unlink_avatar_asset(pool, *owner_id, &write, now)
+                .await
+                .map_err(|_| server_error())?;
             Ok(())
         }
         q::UserDeleteAction::ClearCover => {
@@ -769,19 +724,9 @@ async fn user_entity_delete(
                 &user_save::new_user_token(),
                 now,
             );
-            sqlx::query(
-                r#"UPDATE "users" SET "cover_image_asset_id" = NULL, "email" = $1, "display_name" = $2, "is_staff" = $3, "token" = $4, "token_updated_at" = $5, "updated_at" = $6 WHERE "id" = $7"#,
-            )
-            .bind(&write.email)
-            .bind(&write.display_name)
-            .bind(write.is_staff)
-            .bind(&write.token)
-            .bind(write.token_updated_at)
-            .bind(now)
-            .bind(owner_id)
-            .execute(pool)
-            .await
-            .map_err(|_| server_error())?;
+            pidash_services::domain::identity::unlink_cover_asset(pool, *owner_id, &write, now)
+                .await
+                .map_err(|_| server_error())?;
             Ok(())
         }
         q::UserDeleteAction::Noop => Ok(()),
@@ -822,15 +767,13 @@ async fn workspace_entity_save(
                     .await
                     .map_err(|_| server_error())?;
             }
-            sqlx::query(
-                r#"UPDATE "workspaces" SET "logo" = $1, "logo_asset_id" = $2, "updated_at" = $3, "updated_by_id" = $4 WHERE "id" = $5"#,
+            pidash_services::domain::workspaces::stamp_logo(
+                pool,
+                workspace_id,
+                *asset_id,
+                now,
+                actor_id,
             )
-            .bind("")
-            .bind(asset_id)
-            .bind(now)
-            .bind(actor_id)
-            .bind(workspace_id)
-            .execute(pool)
             .await
             .map_err(|_| server_error())?;
             Ok(())
@@ -852,15 +795,9 @@ async fn workspace_entity_save(
                     .await
                     .map_err(|_| server_error())?;
             }
-            sqlx::query(
-                r#"UPDATE "projects" SET "cover_image" = $1, "cover_image_asset_id" = $2, "updated_at" = $3, "updated_by_id" = $4 WHERE "id" = $5"#,
+            pidash_services::domain::projects::stamp_cover_image(
+                pool, project_id, *asset_id, now, actor_id,
             )
-            .bind("")
-            .bind(asset_id)
-            .bind(now)
-            .bind(actor_id)
-            .bind(project_id)
-            .execute(pool)
             .await
             .map_err(|_| server_error())?;
             Ok(())
@@ -899,15 +836,14 @@ async fn workspace_entity_delete(
             .await
             .map_err(|_| server_error())?;
             row.ok_or_else(does_not_exist)?;
-            sqlx::query(
-                r#"UPDATE "workspaces" SET "logo_asset_id" = NULL, "updated_at" = $1, "updated_by_id" = $2 WHERE "id" = $3"#,
+            pidash_services::domain::workspaces::clear_logo_asset(
+                pool,
+                workspace_id,
+                now,
+                actor_id,
             )
-            .bind(now)
-            .bind(actor_id)
-            .bind(workspace_id)
-                .execute(pool)
-                .await
-                .map_err(|_| server_error())?;
+            .await
+            .map_err(|_| server_error())?;
             Ok(())
         }
         q::WorkspaceDeleteAction::ClearCover => {
@@ -922,15 +858,11 @@ async fn workspace_entity_delete(
             .await
             .map_err(|_| server_error())?;
             let Some(_) = row else { return Ok(()) };
-            sqlx::query(
-                r#"UPDATE "projects" SET "cover_image_asset_id" = NULL, "updated_at" = $1, "updated_by_id" = $2 WHERE "id" = $3"#,
+            pidash_services::domain::projects::clear_cover_image_asset(
+                pool, project_id, now, actor_id,
             )
-            .bind(now)
-            .bind(actor_id)
-            .bind(project_id)
-                .execute(pool)
-                .await
-                .map_err(|_| server_error())?;
+            .await
+            .map_err(|_| server_error())?;
             Ok(())
         }
         q::WorkspaceDeleteAction::Noop => Ok(()),
@@ -2039,37 +1971,6 @@ fn presigned_post(
     Ok(serde_json::json!({"url": url, "fields": fields}))
 }
 
-/// CPython `json.dumps` string encoding (`ensure_ascii`): `"` and
-/// `\` escaped, C0 controls short/`\u00XX`, everything else non-ASCII
-/// as `\uXXXX` (surrogate pairs past the BMP).
-fn py_json_string(input: &str) -> String {
-    let mut out = String::with_capacity(input.len() + 2);
-    out.push('"');
-    for c in input.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{08}' => out.push_str("\\b"),
-            '\u{0c}' => out.push_str("\\f"),
-            c if (c as u32) < 0x20 => {
-                out.push_str(&format!("\\u{:04x}", c as u32));
-            }
-            c if (c as u32) < 0x7f => out.push(c),
-            c => {
-                let mut buf = [0u16; 2];
-                for unit in c.encode_utf16(&mut buf) {
-                    out.push_str(&format!("\\u{unit:04x}"));
-                }
-            }
-        }
-    }
-    out.push('"');
-    out
-}
-
 /// Standard base64 with padding (policy documents).
 fn base64_encode(input: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -2479,6 +2380,20 @@ mod tests {
     fn bad_uuid_answers_resolver_404() {
         assert!(parse_asset_id("not-a-uuid").is_err());
         assert!(parse_asset_id("3f9a2c1e-9b1a-4d2e-8f3a-1a2b3c4d5e6f").is_ok());
+    }
+
+    #[test]
+    fn noncanonical_uuid_answers_resolver_404() {
+        // Parseable but unroutable spellings (PIDASHCONV-1399): Django's
+        // `<uuid:>` converter rejects these before auth, like garbage.
+        for raw in [
+            "3F9A2C1E-9B1A-4D2E-8F3A-1A2B3C4D5E6F",
+            "3f9a2c1e9b1a4d2e8f3a1a2b3c4d5e6f",
+            "{3f9a2c1e-9b1a-4d2e-8f3a-1a2b3c4d5e6f}",
+            "urn:uuid:3f9a2c1e-9b1a-4d2e-8f3a-1a2b3c4d5e6f",
+        ] {
+            assert!(parse_asset_id(raw).is_err(), "{raw}");
+        }
     }
 
     #[test]

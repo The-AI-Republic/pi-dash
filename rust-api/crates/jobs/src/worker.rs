@@ -92,6 +92,16 @@ impl Registry {
     pub fn owns(&self, task: &str) -> bool {
         self.handlers.contains_key(task)
     }
+
+    /// Names with a registered handler, sorted. The worker builder
+    /// snapshots this around each extra registration so registering
+    /// over an already-owned name is a build error, never a silent
+    /// replace (PIDASHCONV-1541).
+    pub fn task_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.handlers.keys().cloned().collect();
+        names.sort();
+        names
+    }
 }
 
 /// What settling does with one finished job. Pure: [`settle`] executes it.
@@ -486,6 +496,15 @@ mod tests {
         registry.register("t", handler_for(Ok(Verdict::Ack)));
         assert!(registry.owns("t"));
         assert!(!registry.owns("other"));
+    }
+
+    #[test]
+    fn task_names_lists_registered_names_sorted() {
+        let mut registry = Registry::new();
+        assert!(registry.task_names().is_empty());
+        registry.register("b.task", handler_for(Ok(Verdict::Ack)));
+        registry.register("a.task", handler_for(Ok(Verdict::Ack)));
+        assert_eq!(registry.task_names(), vec!["a.task", "b.task"]);
     }
 
     #[test]

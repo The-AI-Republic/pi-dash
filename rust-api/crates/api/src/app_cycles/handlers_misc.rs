@@ -84,8 +84,9 @@ use super::gates::{decide_gate, tenant_context, Gate, GateOutcome};
 use crate::middleware::body_limit::read_request_bytes;
 use crate::state::AppState;
 use crate::v1_cycles_modules::body as shared_body;
-use crate::v1_cycles_modules::json_cpython::{self, JsonFail};
+use crate::v1_cycles_modules::json::{self, JsonFail};
 use pidash_auth::permissions::allow::AllowFacts;
+pub use pidash_compat::response::{json_ok as raw_json_response, SERVER_ERROR_BODY};
 use pidash_types::WorkspaceId;
 
 // ---------------------------------------------------------------------------
@@ -102,8 +103,6 @@ pub const NOT_FOUND_BODY: &str = r#"{"error":"The required object does not exist
 /// propagated by DRF's exception handler as `NotFound(*exc.args)`
 /// (unresolvable project identifier).
 pub const NOT_FOUND_DETAIL_BODY: &str = r#"{"detail":"Project not found"}"#;
-/// `handle_exception`'s generic 500 branch.
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// `handle_exception`'s `ValidationError` branch
 /// (`app/views/base.py:125-128`).
 pub const INVALID_DETAIL_BODY: &str = r#"{"error":"Please provide valid detail"}"#;
@@ -218,15 +217,6 @@ impl IntoResponse for Denial {
 
 pub fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
-}
-
-/// Render pre-serialized JSON bytes as a 200 response body.
-pub fn raw_json_response(body: String) -> Response {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("json response")
 }
 
 /// Render pre-serialized JSON bytes with an explicit status.
@@ -547,16 +537,15 @@ pub fn parse_object_body(headers: &HeaderMap, body: &[u8]) -> Result<Map<String,
         shared_body::NegotiatedBody::Empty => Ok(Map::new()),
         shared_body::NegotiatedBody::JsonText { text, surr } => {
             let value =
-                json_cpython::parse_request_data_spans(text.as_bytes(), &surr).map_err(|fail| {
-                    match fail {
-                        JsonFail::Message(detail) => Denial::BadDetail(format!(
-                            "{}{detail}",
-                            json_cpython::JSON_PARSE_PREFIX
-                        )),
+                json::parse_request_data_spans(text.as_bytes(), &surr).map_err(
+                    |fail| match fail {
+                        JsonFail::Message(detail) => {
+                            Denial::BadDetail(format!("{}{detail}", json::JSON_PARSE_PREFIX))
+                        }
                         JsonFail::Recursion => Denial::ServerError,
-                    }
-                })?;
-            match json_cpython::to_serde_publish(&value) {
+                    },
+                )?;
+            match json::to_serde_publish(&value) {
                 Value::Object(map) => Ok(map),
                 _ => Err(Denial::ServerError),
             }
@@ -901,9 +890,8 @@ pub async fn overlap_exists(
 // `transfer_cycle_issues`, `utils/cycle_transfer_issues.py:36-479`)
 // ---------------------------------------------------------------------------
 
-/// Celery wire name for `issue_activity` (bare `@shared_task` default;
-/// also pinned by the D-32 intake `services::app_intake::tasks`).
-pub const ISSUE_ACTIVITY_TASK: &str = "pi_dash.bgtasks.issue_activities_task.issue_activity";
+/// Re-export of the canonical [`pidash_services::domain::activity::ISSUE_ACTIVITY_TASK`].
+pub use pidash_services::domain::activity::ISSUE_ACTIVITY_TASK;
 /// `type` kwarg of the transfer emit (`cycle_transfer_issues.py:463`).
 pub const TRANSFER_ACTIVITY_TYPE: &str = "cycle.activity.created";
 

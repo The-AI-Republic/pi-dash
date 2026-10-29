@@ -148,11 +148,10 @@ disposition any more: PIDASHCONV-1108 removed the AMQP hand-off, so the
 worker never forwards to a Python plane — an unknown name parks as
 failed (`unknown task <name>`).
 
-Note: 23 OWNED tasks are Rust-superset executions — called in Django
+Note: 21 OWNED tasks are Rust-superset executions — called in Django
 but unregistered there (dropped; PDASHOSS01-292), while the Rust
-worker runs them: `copy_s3_objects_of_description_and_assets`,
-`issue_description_version_task`, `process_logs`, `track_page_version`,
-`get_asset_object_metadata`, `workspace_seed` (domain gates + V-01),
+worker runs them: `issue_description_version_task`, `process_logs`,
+`track_page_version`, `workspace_seed` (domain gates + V-01),
 `user_activation_email`, `user_deactivation_email`,
 `project_add_user_email`, `workspace_invitation`, `project_invitation`
 (PIDASHCONV-1104), plus `track_event`, `page_transaction`,
@@ -166,6 +165,15 @@ PIDASHCONV-1105; standalone-Rust rule — runs in Rust, Django drops it).
 Deliberate (accepted by their domain gates);
 recorded here and in the V-01 PR, for the V-05 ported-bug register to
 catalog.
+(PIDASHCONV-1409, 2026-10-26: `copy_s3_objects_of_description_and_assets`
+and `get_asset_object_metadata` were removed from this list. The stock
+Django worker registers both — Celery's Django fixup runs the Django
+system checks at worker boot, which load the URLconf, which imports the
+views that import these modules — and executes both (the
+`test_copy_task_copies_s3_objects_and_rewrites_page` and
+`test_metadata_task_stores_head_dict` oracle tests pass against a stock
+worker with no `-I` includes). PDASHOSS01-292's "dropped" claim is stale
+for these two names. Dispositions unchanged: both stay OWNED.)
 
 ### W-assistant (0 rows; fixed)
 

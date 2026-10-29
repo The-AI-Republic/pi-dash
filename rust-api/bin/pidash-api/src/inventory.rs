@@ -11,7 +11,7 @@
 //! [`ROUTES`] row against the real router (all flags on, dead
 //! upstream) — owned methods must serve, proxied methods must 502,
 //! unlisted methods must 405 — and the mirror test rebuilds the worker
-//! registry exactly like `worker()` and compares it against [`TASKS`].
+//! registry exactly like the worker builder and compares it against [`TASKS`].
 //! Any router or registry drift fails `cargo test` here first.
 
 #[cfg(test)]
@@ -800,11 +800,11 @@ pub const ROUTES: &[RouteRow] = &[
     RouteRow { group: "api_v1", path: "/api/v1/auth/device/token/",
         owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "api_v1", path: "/api/v1/auth/machine-token/",
-        owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+        owned: &["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"], proxied: &["OPTIONS"] },
     RouteRow { group: "api_v1", path: "/api/v1/auth/revoke/",
-        owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+        owned: &["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"], proxied: &["OPTIONS"] },
     RouteRow { group: "api_v1", path: "/api/v1/auth/workspaces/",
-        owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+        owned: &["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"], proxied: &["OPTIONS"] },
     RouteRow { group: "api_v1", path: "/api/v1/runners/{runner_id}/",
         owned: &["DELETE"], proxied: &["GET", "POST", "PUT", "PATCH", "HEAD", "OPTIONS"] },
     RouteRow { group: "api_v1", path: "/api/v1/users/me/",
@@ -1150,7 +1150,7 @@ pub const TASKS: &[TaskRow] = &[
     // Provenance: every Pi Dash task name Django defines (worker-boot
     // registered or statically defined); the Celery canvas builtins and
     // dead code are excluded (PIDASHCONV-1108). Ownership mirrors
-    // `worker()`'s registrations, re-verified by
+    // the worker builder's registrations, re-verified by
     // `mirror_registry_matches_tasks_table` on each `cargo test` run.
     TaskRow {
         name: "assistant.run_turn",
@@ -1690,7 +1690,7 @@ mod tests {
         (allow, len)
     }
 
-    /// The worker registry, rebuilt exactly like `worker()` (mirror it
+    /// The worker registry, rebuilt exactly like the worker builder (mirror it
     /// on any registration change): `PgPool` groups register for real
     /// over a lazy pool (no I/O); `Pools` groups register stubs over
     /// the same name constants the real register fns consume (`Pools`
@@ -1760,7 +1760,7 @@ mod tests {
             pidash_jobs::tasks_webhooks::webhook_fanout::MODEL_ACTIVITY_TASK_NAME,
             stub(),
         );
-        // Real registrations (the same calls `worker()` makes).
+        // Real registrations (the same calls the worker builder makes).
         tasks_cleanup::register_versions(&mut registry, pool.clone());
         tasks_cleanup::assets::register_assets(
             &mut registry,
@@ -1781,7 +1781,7 @@ mod tests {
             std::sync::Arc::new(DefaultSeam),
         );
         tasks_cleanup::dummy_data::register(&mut registry, pool.clone());
-        // The same call `worker()` makes (PIDASHCONV-858): construction
+        // The same call the worker builder makes (PIDASHCONV-858): construction
         // does no I/O (lazy client, resolved settings), so the lazy
         // pool suffices and no S3 endpoint is needed here.
         tasks_cleanup::register_expiry(
@@ -1795,18 +1795,20 @@ mod tests {
             &mut registry,
             pool.clone(),
             pidash_jobs::integrations::git_sync::LiveProviders::from_env(),
+            None,
         );
         pidash_jobs::integrations::github_sync::register_github_sync_tasks(
             &mut registry,
             pool.clone(),
             pidash_jobs::integrations::github_sync::LiveTransports::from_env(),
+            None,
         );
         pidash_jobs::license::tasks::register(&mut registry, pool.clone());
         pidash_jobs::assistant::register_sweep_handler(
             &mut registry,
             pool.clone(),
             None,
-            // The same configured limit `worker()` passes (test defaults:
+            // The same configured limit the worker builder passes (test defaults:
             // 330, like Django's unset default).
             pidash_db::config::Settings::test_defaults()
                 .assistant
@@ -1815,12 +1817,12 @@ mod tests {
         pidash_jobs::loop_scan::register_scanner(&mut registry, pool.clone());
         pidash_jobs::loop_fire::register_fire(&mut registry, pool.clone());
         pidash_jobs::tasks_ticker::scan::register_scanners(&mut registry, pool.clone());
-        // Real registrations (the same calls `worker()` makes): the
+        // Real registrations (the same calls the worker builder makes): the
         // live tick seam over test-default settings, and the live
         // scheduler dispatch. Construction does no I/O, so the lazy
         // pool suffices.
         let dispatch_settings = pidash_db::config::Settings::test_defaults();
-        // The same CE assistant seam `worker()` installs (PIDASHCONV-1054).
+        // The same CE assistant seam the worker builder installs (PIDASHCONV-1054).
         let dispatch_assistant_seam =
             std::sync::Arc::new(pidash_api::assistant::model_seam::CeAssistantSeam::new(
                 std::sync::Arc::new(dispatch_settings.clone()),
@@ -1853,13 +1855,13 @@ mod tests {
         );
         pidash_jobs::tasks_mail::register_notifications_task(&mut registry, pool.clone());
         // D-07 membership mail (PIDASHCONV-1104): the same calls
-        // `worker()` makes — the T6 four plus project_invitation.
+        // `the worker builder makes — the T6 four plus project_invitation.
         pidash_jobs::tasks_mail::register_membership_mail_tasks(&mut registry, pool.clone());
         pidash_jobs::tasks_mail::register_project_invitation_task(&mut registry, pool.clone());
-        // The same call `worker()` makes (PIDASHCONV-1103): pool-only
+        // The same call the worker builder makes (PIDASHCONV-1103): pool-only
         // handlers over the lazy pool, no I/O.
         pidash_jobs::tasks_mail::register_auth_mail_tasks(&mut registry, pool.clone());
-        // Runner tasks (PIDASHCONV-859): the real `worker()` calls —
+        // Runner tasks (PIDASHCONV-859): the real worker-builder calls —
         // the providers construct with no I/O (lazy pool, no Redis
         // client, test-default settings).
         let runner_settings = pidash_db::config::Settings::test_defaults();
@@ -1889,7 +1891,7 @@ mod tests {
             runner_seams,
         );
         // D-11 execution tasks (PIDASHCONV-832 + PIDASHCONV-866):
-        // the same calls `worker()` makes — real register over the
+        // the same calls the worker builder makes — real register over the
         // lazy pool, no forward override (handlers never run here).
         let execute_settings =
             pidash_db::config::Settings::from_env().expect("settings parse in test env");
@@ -1905,6 +1907,11 @@ mod tests {
                     pidash_db::redis::RedisHandle::from_settings(&execute_settings),
                     execute_settings.secret_key.clone(),
                 ),
+                // No Redis client in the mirror (handlers never run
+                // here), like the runner-seams and turn-seam mirrors
+                // above; the worker builder builds this from REDIS_URL.
+                redis: None,
+                runner: execute_settings.runner.clone(),
             },
             keys: crate::model_runtime::keys::KeyResolver::from_env(
                 execute_settings.assistant.key_cache_ttl_secs,
@@ -1923,7 +1930,7 @@ mod tests {
             )),
             std::sync::Arc::new(pidash_services::extensions::NoExtraToolsets),
         );
-        // The same call `worker()` makes (PIDASHCONV-865): every seam
+        // The same call the worker builder makes (PIDASHCONV-865): every seam
         // constructor is lazy (no I/O), so the mirror builds them over
         // the lazy pool and a never-dialed Redis URL.
         pidash_jobs::tasks_mail::register_email_notification_tasks(
@@ -1949,24 +1956,27 @@ mod tests {
                 std::sync::Arc::new(pidash_jobs::tasks_mail::live::SmtpMailer::new()),
             ),
         );
-        // Export tasks (PIDASHCONV-1106): the same calls `worker()` makes
+        // Export tasks (PIDASHCONV-1106): the same calls the worker builder makes
         // (pool-only handlers, no I/O at registration).
         pidash_jobs::tasks_export::register_issue_export_task(&mut registry, pool.clone());
         pidash_jobs::tasks_export::register_analytic_task(&mut registry, pool.clone());
-        // Assistant turn (PIDASHCONV-863): the same call `worker()` makes
+        // Assistant turn (PIDASHCONV-863): the same call the worker builder makes
         // (live seam over the lazy pool, no Redis client, test-default
         // settings; construction does no I/O).
         pidash_jobs::assistant::register_turn_handler(
             &mut registry,
             pool.clone(),
             std::sync::Arc::new(
-                crate::turn::live::LiveTurnSeam::new(
+                pidash_api::turn::live::LiveTurnSeam::new(
                     pool.clone(),
                     std::sync::Arc::new(execute_settings.clone()),
                     None,
                 )
                 .expect("live turn seam builds"),
             ),
+            // The same configured soft limit the worker builder passes (test env:
+            // 300, like Django's unset default).
+            execute_settings.assistant.turn_soft_limit,
         );
 
         // The const union, independent of the table.

@@ -236,6 +236,19 @@ pub async fn scan_due_tickers(pool: &PgPool, now: &DateTime<Utc>) -> Result<usiz
     run_scan(pool, &due_tickers_sql(now), FIRE_TICK_TASK).await
 }
 
+/// Enqueue one `fire_tick` task for a ticker
+/// (`fire_tick.delay(str(ticker_id))`): `args=[str(ticker_id)]`,
+/// `kwargs={}`. Moved from the api ports
+/// (`runner_runs::LivePorts::emit_fire_tick`, OVL-06 PIDASHCONV-1544)
+/// so the overlay shares the emit instead of copying it; the ports
+/// method is now a thin caller. Re-exported through
+/// `pidash-sdk::ops`.
+pub async fn emit_fire_tick(pool: &PgPool, ticker_id: Uuid) -> Result<(), sqlx::Error> {
+    enqueue(pool, &fire_job(FIRE_TICK_TASK, &ticker_id))
+        .await
+        .map(|_| ())
+}
+
 /// Fan out `fire_scheduler_binding` tasks for every due binding
 /// (`scheduler.py:110-136`). Returns `0` without touching the database when
 /// the [`scheduler_enabled`] kill switch is off.

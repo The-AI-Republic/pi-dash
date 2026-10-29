@@ -11,7 +11,7 @@
 //! never re-derived: the provider constructor/mapping half (PIDASHCONV-325,
 //! `pidash_services::auth_oauth::{providers, error, exchange}`), the
 //! account upsert (PIDASHCONV-327,
-//! `pidash_db::auth_oauth::queries::account`), the redirect/host kernels
+//! `pidash_services::domain::identity::account`), the redirect/host kernels
 //! (D-16, `pidash_services::auth_session::shapes`), the view auth shape
 //! (PIDASHCONV-331, `super::guards`, AUTHOAUTH-F9), and Django
 //! `validate_email` (D-16, `crate::license::handlers_auth_forms`).
@@ -77,14 +77,16 @@ use axum::{
 use serde_json::Value;
 use uuid::Uuid;
 
-use pidash_db::auth_oauth::queries::account as account_queries;
 use pidash_db::redis::RedisHandle;
 use pidash_services::auth_oauth::{error as oauth_error, exchange, providers};
 use pidash_services::auth_session::shapes::{self, HostSettings, ParamValue};
+use pidash_services::domain::identity::account as account_queries;
+use pidash_services::domain::workspaces::members;
 
 use crate::auth_session::render::disallowed_redirect;
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
+use pidash_compat::response::redirect_found_html;
 
 /// `GITHUB_NOT_CONFIGURED` code (fixture F5 `OAUTH_ERROR_ROWS` order).
 fn github_not_configured() -> oauth_error::AuthenticationException {
@@ -158,19 +160,14 @@ pub fn routes() -> Router<AppState> {
 /// characters the final `Location` answers 400 (`DisallowedRedirect`).
 fn redirect_response(location: String) -> Response {
     let too_long = location.chars().count() > shapes::MAX_URL_REDIRECT_LENGTH;
-    let encoded = crate::response_headers::iri_to_uri(&location);
+    let encoded = pidash_compat::http::iri_to_uri(&location);
     let Some(location) = crate::response_headers::header_value(&encoded) else {
         return server_error();
     };
     if too_long {
         return disallowed_redirect();
     }
-    Response::builder()
-        .status(StatusCode::FOUND)
-        .header(header::LOCATION, location)
-        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-        .body(axum::body::Body::empty())
-        .expect("redirect response")
+    redirect_found_html(location)
 }
 
 /// Uncaught-exception answer: Django's 500 page. The contract suite pins
@@ -787,36 +784,6 @@ fn encode_password(password: &str) -> String {
     pidash_auth::password::hash_password(password, &password_salt(), 600_000)
 }
 
-/// `onboarding_step` default (`db/models/user.py:get_default_onboarding`).
-fn default_onboarding_step() -> Value {
-    serde_json::json!({
-        "profile_complete": false,
-        "workspace_create": false,
-        "workspace_invite": false,
-        "workspace_join": false,
-    })
-}
-
-/// `mobile_onboarding_step` default (`user.py:get_mobile_default_onboarding`).
-fn default_mobile_onboarding_step() -> Value {
-    serde_json::json!({
-        "profile_complete": false,
-        "workspace_create": false,
-        "workspace_join": false,
-    })
-}
-
-/// `product_tour` default (`user.py:get_default_product_tour`).
-fn default_product_tour() -> Value {
-    serde_json::json!({
-        "work_items": false,
-        "cycles": false,
-        "modules": false,
-        "intake": false,
-        "pages": false,
-    })
-}
-
 /// Member `view_props`/`default_props` (`workspace.py:get_default_props`,
 /// identical in `project.py:get_default_props` minus `display_properties`).
 fn workspace_default_props() -> Value {
@@ -880,6 +847,10 @@ fn coerce_provider_id(user_data: &mut Value) {
     }
 }
 
+// NOTE: the new-user INSERT, the `create_user_notification` post_save
+// insert and the signup profile row moved to
+// `domain::identity::create_user` (PIDASHCONV-1525).
+
 /// `complete_login_or_signup` (`adapter/base.py`) for the github callback:
 /// sanitize → find-or-create (signup gate, profile, avatar URL) → optional
 /// IDP sync → login-stamp save → invite callback → account upsert.
@@ -902,6 +873,7 @@ fn coerce_provider_id(user_data: &mut Value) {
 #[allow(clippy::too_many_arguments)]
 async fn complete_login_or_signup(
     pool: &sqlx::PgPool,
+    orm: &pidash_db::DatabaseConnection,
     secret_key: &str,
     headers: &HeaderMap,
     remote_addr: Option<&str>,
@@ -915,6 +887,7 @@ async fn complete_login_or_signup(
     host: &str,
     max_bytes: u64,
 ) -> Result<ResolvedUser, CallbackFailure> {
+    use pidash_services::domain::identity;
     let now = chrono::Utc::now();
     let user_data = &auth.user_data;
     let user_obj = &user_data.user;
@@ -1000,83 +973,68 @@ async fn complete_login_or_signup(
         // `display_name` from the email local part on the create save
         // (`base.py:328`); the row is inserted already backfilled.
         let display_name = backfill_display_name(email);
-        sqlx::query(
-            r#"INSERT INTO "users" ("id", "password", "last_login", "username", "mobile_number", "email",
-                "display_name", "first_name", "last_name", "avatar", "avatar_asset_id",
-                "cover_image", "cover_image_asset_id", "date_joined", "created_at", "updated_at",
-                "last_location", "created_location", "is_superuser", "is_managed", "is_password_expired",
-                "is_active", "is_staff", "is_email_verified", "is_password_autoset", "is_password_reset_required",
-                "token", "last_active", "last_login_time", "last_logout_time", "last_login_ip", "last_logout_ip",
-                "last_login_medium", "last_login_uagent", "token_updated_at", "is_bot", "bot_type",
-                "user_timezone", "is_email_valid", "masked_at")
-               VALUES ($1, $2, NULL, $3, NULL, $4, $9, $5, $6, $7, NULL, NULL, NULL, $8, $8, $8,
-                '', '', FALSE, FALSE, FALSE, TRUE, FALSE, TRUE, TRUE, FALSE,
-                '', $8, NULL, NULL, '', '', 'email', '', NULL, FALSE, NULL, 'UTC', FALSE, NULL)"#,
+        // `User(...)` + first `save()` with the `post_save` preferences
+        // row (`user.py:307`, before the avatar write below — same as the
+        // email signup) and the adapter profile row, all inside
+        // `domain::identity::create_user`.
+        identity::create_user(
+            orm,
+            &identity::NewUser {
+                id: Some(id),
+                email,
+                username,
+                password_hash: password.clone(),
+                first_name: &first_name,
+                last_name: &last_name,
+                display_name: display_name.clone(),
+                // Django inserts `''` (the field default, `user.py:68`)
+                // and persists the provider URL after the insert
+                // (`base.py:330-340`; PIDASHCONV-1560).
+                avatar: "",
+                is_email_verified: true,
+                is_password_autoset: true,
+                last_active: Some(now),
+                login_ip: Some(""),
+                login_uagent: Some(""),
+                is_bot: false,
+                now,
+                profile: Some(identity::NewProfile {
+                    company_name: "",
+                    background_color: format!(
+                        "#{}",
+                        Uuid::new_v4()
+                            .simple()
+                            .to_string()
+                            .chars()
+                            .take(6)
+                            .collect::<String>()
+                    ),
+                }),
+            },
         )
-        .bind(id)
-        .bind(&password)
-        .bind(&username)
-        .bind(email)
-        .bind(&first_name)
-        .bind(&last_name)
-        .bind(&avatar)
-        .bind(now)
-        .bind(&display_name)
-        .execute(pool)
         .await
         .map_err(|_| CallbackFailure::Server)?;
 
         // `avatar_asset = download_and_upload_avatar(...)` (`base.py:330-339`):
-        // success sets the FK too, failure keeps the provider URL the
-        // INSERT already stored. No old avatar exists to delete.
+        // the provider URL lands first (the INSERT stored `''`), then
+        // success sets the FK too; failure keeps the stamped URL. No old
+        // avatar exists to delete (same shape as the google signup).
         let mut created_asset = None;
         if !avatar.is_empty() {
+            identity::stamp_avatar_url(pool, id, &avatar)
+                .await
+                .map_err(|_| CallbackFailure::Server)?;
             if let Some(asset_id) = super::download_and_upload_avatar(
                 client, pool, storage, scheme, host, "github", &avatar, id, max_bytes, now,
             )
             .await
             {
-                sqlx::query("UPDATE \"users\" SET \"avatar_asset_id\" = $1 WHERE \"id\" = $2")
-                    .bind(asset_id)
-                    .bind(id)
-                    .execute(pool)
+                identity::stamp_avatar_asset(pool, id, asset_id)
                     .await
                     .map_err(|_| CallbackFailure::Server)?;
                 created_asset = Some(asset_id);
             }
         }
-
-        // `Profile.objects.create(user=user)` (`user.py:200-275` defaults).
-        let background = format!(
-            "#{}",
-            Uuid::new_v4()
-                .simple()
-                .to_string()
-                .chars()
-                .take(6)
-                .collect::<String>()
-        );
-        sqlx::query(
-            r#"INSERT INTO "profiles" ("id", "created_at", "updated_at", "user_id", "theme",
-                "is_app_rail_docked", "is_tour_completed", "onboarding_step", "use_case", "role",
-                "is_onboarded", "last_workspace_id", "billing_address_country", "billing_address",
-                "has_billing_address", "company_name", "notification_view_mode", "is_smooth_cursor_enabled",
-                "is_mobile_onboarded", "mobile_onboarding_step", "mobile_timezone_auto_set", "language",
-                "start_of_the_week", "goals", "background_color", "is_navigation_tour_completed",
-                "has_marketing_email_consent", "is_subscribed_to_changelog", "product_tour", "settings")
-               VALUES ($1, $2, $2, $3, '{}', TRUE, FALSE, $4, NULL, NULL, FALSE, NULL, 'INDIA', NULL,
-                FALSE, '', 'full', FALSE, FALSE, $5, FALSE, 'en', 0, '{}', $6, FALSE, FALSE, FALSE, $7, '{}')"#,
-        )
-        .bind(Uuid::new_v4())
-        .bind(now)
-        .bind(id)
-        .bind(default_onboarding_step())
-        .bind(default_mobile_onboarding_step())
-        .bind(&background)
-        .bind(default_product_tour())
-        .execute(pool)
-        .await
-        .map_err(|_| CallbackFailure::Server)?;
         // Created active (`is_active` defaults True, `user.py`), so the
         // activation branch below never fires for new users — as in Python.
         (
@@ -1138,32 +1096,38 @@ async fn complete_login_or_signup(
         .await
         {
             Some(asset_id) => {
-                sqlx::query(
-                    r#"UPDATE "users" SET "first_name" = $1, "last_name" = $2, "display_name" = $3,
-                       "avatar_asset_id" = $4, "updated_at" = $5 WHERE "id" = $6"#,
+                identity::sync_user_data(
+                    pool,
+                    user_id,
+                    &identity::SyncUpdate {
+                        first_name: &first_name,
+                        last_name: &last_name,
+                        display_name: &display_name,
+                        avatar: None,
+                        avatar_asset_id: Some(Some(asset_id)),
+                        is_staff: None,
+                        touch_updated_at: true,
+                        now,
+                    },
                 )
-                .bind(&first_name)
-                .bind(&last_name)
-                .bind(&display_name)
-                .bind(asset_id)
-                .bind(now)
-                .bind(user_id)
-                .execute(pool)
                 .await
                 .map_err(|_| CallbackFailure::Server)?;
             }
             None => {
-                sqlx::query(
-                    r#"UPDATE "users" SET "first_name" = $1, "last_name" = $2, "display_name" = $3,
-                       "avatar" = $4, "updated_at" = $5 WHERE "id" = $6"#,
+                identity::sync_user_data(
+                    pool,
+                    user_id,
+                    &identity::SyncUpdate {
+                        first_name: &first_name,
+                        last_name: &last_name,
+                        display_name: &display_name,
+                        avatar: Some(&avatar),
+                        avatar_asset_id: None,
+                        is_staff: None,
+                        touch_updated_at: true,
+                        now,
+                    },
                 )
-                .bind(&first_name)
-                .bind(&last_name)
-                .bind(&display_name)
-                .bind(&avatar)
-                .bind(now)
-                .bind(user_id)
-                .execute(pool)
                 .await
                 .map_err(|_| CallbackFailure::Server)?;
             }
@@ -1193,20 +1157,22 @@ async fn complete_login_or_signup(
         display_name
     };
     let is_staff = is_staff || is_superuser;
-    sqlx::query(
-        r#"UPDATE "users" SET "last_login_medium" = 'github', "last_active" = $1, "last_login_time" = $1,
-           "last_login_ip" = $2, "last_login_uagent" = $3, "token_updated_at" = $1, "token" = $5,
-           "display_name" = $6, "is_staff" = $7,
-           "is_active" = TRUE, "updated_at" = $1 WHERE "id" = $4"#,
+    identity::save_user_data(
+        pool,
+        user_id,
+        &identity::LoginStamps {
+            medium: Some("github"),
+            login_ip: ip.as_deref(),
+            login_uagent: uagent.as_deref(),
+            avatar: None,
+            avatar_asset_id: None,
+            display_name: Some(identity::DisplayNameUpdate::Bound(&display_name)),
+            is_staff: Some(identity::StaffSync::Value(is_staff)),
+            touch_updated_at: true,
+            rotated_token: &token,
+            now,
+        },
     )
-    .bind(now)
-    .bind(ip.as_deref())
-    .bind(uagent.as_deref())
-    .bind(user_id)
-    .bind(token)
-    .bind(display_name)
-    .bind(is_staff)
-    .execute(pool)
     .await
     .map_err(|_| CallbackFailure::Server)?;
 
@@ -1376,20 +1342,24 @@ async fn process_invitations(
     .fetch_all(pool)
     .await?;
     for (workspace_id, role, _slug) in &workspace_invites {
-        sqlx::query(
-            r#"INSERT INTO "workspace_members" ("id", "created_at", "updated_at", "workspace_id",
-               "member_id", "role", "view_props", "default_props", "issue_props",
-               "is_active", "explored_features", "getting_started_checklist", "tips")
-               VALUES ($1, $2, $2, $3, $4, $5, $6, $6, $7, TRUE, '{}', '{}', '{}') ON CONFLICT DO NOTHING"#,
+        let view_props = workspace_default_props();
+        let issue_props = serde_json::json!({"subscribed": true, "assigned": true, "created": true, "all_issues": true});
+        members::add(
+            pool,
+            &members::NewMember {
+                workspace_id: *workspace_id,
+                user_id: Some(user_id),
+                role: *role,
+                company_role: None,
+                created_by: None,
+                view_props: &view_props,
+                default_props: &view_props,
+                issue_props: &issue_props,
+                now,
+                ignore_conflicts: true,
+                db_now: false,
+            },
         )
-        .bind(Uuid::new_v4())
-        .bind(now)
-        .bind(workspace_id)
-        .bind(user_id)
-        .bind(role)
-        .bind(workspace_default_props())
-        .bind(serde_json::json!({"subscribed": true, "assigned": true, "created": true, "all_issues": true}))
-        .execute(pool)
         .await?;
     }
     // Per-invite cache invalidation + `track_event`, newest first (the
@@ -1429,41 +1399,46 @@ async fn process_invitations(
     .await?;
     for (workspace_id, role, created_by) in &project_invites {
         let clamped = if *role == 5 || *role == 15 { *role } else { 15 };
-        sqlx::query(
-            r#"INSERT INTO "workspace_members" ("id", "created_at", "updated_at", "workspace_id",
-               "member_id", "role", "created_by_id", "view_props", "default_props", "issue_props",
-               "is_active", "explored_features", "getting_started_checklist", "tips")
-               VALUES ($1, $2, $2, $3, $4, $5, $6, $7, $7, $8, TRUE, '{}', '{}', '{}') ON CONFLICT DO NOTHING"#,
+        let view_props = workspace_default_props();
+        let issue_props = serde_json::json!({"subscribed": true, "assigned": true, "created": true, "all_issues": true});
+        members::add(
+            pool,
+            &members::NewMember {
+                workspace_id: *workspace_id,
+                user_id: Some(user_id),
+                role: clamped,
+                company_role: None,
+                created_by: *created_by,
+                view_props: &view_props,
+                default_props: &view_props,
+                issue_props: &issue_props,
+                now,
+                ignore_conflicts: true,
+                db_now: false,
+            },
         )
-        .bind(Uuid::new_v4())
-        .bind(now)
-        .bind(workspace_id)
-        .bind(user_id)
-        .bind(clamped)
-        .bind(created_by)
-        .bind(workspace_default_props())
-        .bind(serde_json::json!({"subscribed": true, "assigned": true, "created": true, "all_issues": true}))
-        .execute(pool)
         .await?;
     }
     for (workspace_id, role, created_by) in &project_invites {
         let clamped = if *role == 5 || *role == 15 { *role } else { 15 };
-        sqlx::query(
-            r#"INSERT INTO "project_members" ("id", "created_at", "updated_at", "workspace_id",
-               "member_id", "role", "created_by_id", "view_props", "default_props", "preferences",
-               "sort_order", "is_active")
-               VALUES ($1, $2, $2, $3, $4, $5, $6, $7, $7, $8, 65535, TRUE) ON CONFLICT DO NOTHING"#,
+        let prefs = serde_json::json!({"pages": {"block_display": true},
+                    "navigation": {"default_tab": "work_items", "hide_in_more_menu": []}});
+        pidash_services::domain::projects::members::add(
+            pool,
+            &pidash_services::domain::projects::members::NewProjectMember {
+                workspace_id: *workspace_id,
+                project_id: None,
+                user_id: Some(user_id),
+                role: clamped,
+                created_by: *created_by,
+                view_props: &project_default_props(),
+                default_props: &project_default_props(),
+                preferences: &prefs,
+                now,
+                ignore_conflicts: true,
+                db_now: false,
+            },
         )
-        .bind(Uuid::new_v4())
-        .bind(now)
-        .bind(workspace_id)
-        .bind(user_id)
-        .bind(clamped)
-        .bind(created_by)
-        .bind(project_default_props())
-        .bind(serde_json::json!({"pages": {"block_display": true},
-                    "navigation": {"default_tab": "work_items", "hide_in_more_menu": []}}))
-        .execute(pool)
         .await?;
     }
 
@@ -1621,6 +1596,9 @@ async fn app_callback(
     let Some(pool) = pool_of(&state) else {
         return server_error();
     };
+    let Some(orm) = state.orm().cloned() else {
+        return server_error();
+    };
     // `current_site` for the activation mail (`base_host(request)`,
     // `base.py:230`) and the cache handle for the per-invite member-list
     // invalidation (a missing handle 500s, like Python with its cache
@@ -1672,6 +1650,7 @@ async fn app_callback(
         let avatar_host = request_host(&headers);
         let user = complete_login_or_signup(
             &pool,
+            &orm,
             &secret,
             &headers,
             remote_addr,
@@ -2237,6 +2216,11 @@ mod tests {
                 .await
                 .unwrap_or_default();
         for user_id in &user_ids {
+            sqlx::query(r#"DELETE FROM "user_notification_preferences" WHERE "user_id" = $1"#)
+                .bind(user_id)
+                .execute(pool)
+                .await
+                .ok();
             sqlx::query(r#"DELETE FROM "accounts" WHERE "user_id" = $1"#)
                 .bind(user_id)
                 .execute(pool)
@@ -2307,8 +2291,10 @@ mod tests {
 
         let auth = kernel_auth(&email);
         let headers = kernel_headers();
+        let orm = pidash_db::sea_orm_connection(&pool);
         let outcome = complete_login_or_signup(
             &pool,
+            &orm,
             "kernel-test-secret",
             &headers,
             Some("127.0.0.1"),
@@ -2413,8 +2399,10 @@ mod tests {
         let auth = kernel_auth(&email);
         let headers = kernel_headers();
         // No invites: no cache handle is needed and none is touched.
+        let orm = pidash_db::sea_orm_connection(&pool);
         let outcome = complete_login_or_signup(
             &pool,
+            &orm,
             "kernel-test-secret",
             &headers,
             Some("127.0.0.1"),
@@ -2454,6 +2442,87 @@ mod tests {
         let (_, is_active) = user_row.expect("user row created");
         assert!(is_active, "new user is active");
         assert_eq!(queue_rows, 0, "no emits without invites or prior inactive");
+    }
+
+    /// New-user signup creates the notification-preferences row
+    /// (`create_user_notification` post_save, `user.py:307-320`): one
+    /// row, all five flags true, NULL audit/scope columns, live.
+    /// PIDASHCONV-1528: the github signup skipped it.
+    #[tokio::test]
+    async fn github_kernel_signup_creates_notification_prefs() {
+        let _kernel = KERNEL_LOCK.lock().await;
+        let Some(pool) = kernel_pool().await else {
+            return;
+        };
+        let tag = Uuid::new_v4().simple().to_string()[..8].to_owned();
+        let email = format!("gh1528-{tag}@example.test");
+        let auth = kernel_auth(&email);
+        let headers = kernel_headers();
+        // No invites: no cache handle is needed and none is touched.
+        let orm = pidash_db::sea_orm_connection(&pool);
+        let outcome = complete_login_or_signup(
+            &pool,
+            &orm,
+            "kernel-test-secret",
+            &headers,
+            Some("127.0.0.1"),
+            &auth,
+            &email,
+            "http://kernel.test",
+            None,
+            &reqwest::Client::new(),
+            &kernel_storage(),
+            "http",
+            "kernel.test",
+            5_242_880,
+        )
+        .await;
+
+        // Observe everything before cleanup so a failure still sweeps.
+        let user_id: Option<Uuid> =
+            sqlx::query_scalar(r#"SELECT "id" FROM "users" WHERE "email" = $1"#)
+                .bind(&email)
+                .fetch_optional(&pool)
+                .await
+                .expect("read user");
+        let flags: Vec<(bool, bool, bool, bool, bool)> = if let Some(id) = user_id {
+            sqlx::query_as(
+                r#"SELECT "property_change", "state_change", "comment", "mention", "issue_completed"
+                   FROM "user_notification_preferences" WHERE "user_id" = $1"#,
+            )
+            .bind(id)
+            .fetch_all(&pool)
+            .await
+            .expect("read prefs")
+        } else {
+            Vec::new()
+        };
+        let live_unscoped: i64 = if let Some(id) = user_id {
+            sqlx::query_scalar(
+                r#"SELECT COUNT(*) FROM "user_notification_preferences"
+                   WHERE "user_id" = $1 AND "deleted_at" IS NULL AND "workspace_id" IS NULL
+                     AND "project_id" IS NULL AND "created_by_id" IS NULL
+                     AND "updated_by_id" IS NULL"#,
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .expect("read prefs scope")
+        } else {
+            0
+        };
+        cleanup_kernel_world(&pool, &email, &format!("gh1528-{tag}")).await;
+
+        assert!(outcome.is_ok(), "kernel must succeed");
+        user_id.expect("user row created");
+        assert_eq!(flags.len(), 1, "exactly one prefs row");
+        let (property_change, state_change, comment, mention, issue_completed) = flags[0];
+        assert!(property_change, "property_change defaults true");
+        assert!(state_change, "state_change defaults true");
+        assert!(comment, "comment defaults true");
+        assert!(mention, "mention defaults true");
+        assert!(issue_completed, "issue_completed defaults true");
+        assert_eq!(live_unscoped, 1, "prefs row is live with NULL audit/scope");
     }
 
     /// Seed an active user + two workspaces, each with a project and an
@@ -2635,8 +2704,10 @@ mod tests {
         let auth = kernel_auth(&email);
         let headers = kernel_headers();
         // No workspace invites: no cache handle is needed and none is touched.
+        let orm = pidash_db::sea_orm_connection(&pool);
         let outcome = complete_login_or_signup(
             &pool,
+            &orm,
             "kernel-test-secret",
             &headers,
             Some("127.0.0.1"),
@@ -2765,8 +2836,10 @@ mod tests {
         let mut auth = kernel_auth(&email);
         auth.user_data.user.provider_id = Value::String(provider_id.clone());
         let headers = kernel_headers();
+        let orm = pidash_db::sea_orm_connection(&pool);
         let outcome = complete_login_or_signup(
             &pool,
+            &orm,
             "kernel-test-secret",
             &headers,
             Some("127.0.0.1"),
@@ -2940,8 +3013,10 @@ mod tests {
         let avatar_url = format!("{avatar_base}/avatar.png");
         let auth = kernel_auth_with_avatar(&email, &avatar_url);
         let headers = kernel_headers();
+        let orm = pidash_db::sea_orm_connection(&pool);
         let outcome = complete_login_or_signup(
             &pool,
+            &orm,
             "kernel-test-secret",
             &headers,
             Some("127.0.0.1"),
@@ -3039,8 +3114,10 @@ mod tests {
         let avatar_url = format!("{avatar_base}/avatar.png");
         let auth = kernel_auth_with_avatar(&email, &avatar_url);
         let headers = kernel_headers();
+        let orm = pidash_db::sea_orm_connection(&pool);
         let outcome = complete_login_or_signup(
             &pool,
+            &orm,
             "kernel-test-secret",
             &headers,
             Some("127.0.0.1"),

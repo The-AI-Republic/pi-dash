@@ -196,25 +196,12 @@ use serde_json::{Map, Value};
 use sqlx::PgPool;
 
 use crate::state::AppState;
+pub use pidash_compat::response::{json_response, server_error, SERVER_ERROR_BODY};
+use pidash_db::redis::client_from_settings;
 
 // ---------------------------------------------------------------------------
 // Shared responses
 // ---------------------------------------------------------------------------
-
-/// Unhandled-failure body (500). Runner views have no custom
-/// `handle_exception`, so Django renders its HTML error page here; only
-/// the status is contract-pinned, and this JSON text keeps the Rust
-/// surface consistent with the sibling handler ports.
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
-
-/// Render a JSON body with the DRF content type.
-pub fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("runner-runs response builds")
-}
 
 /// The request pool, or the 500 when the server runs pool-less
 /// (unreachable in `serve`, which fail-fasts at boot).
@@ -226,14 +213,6 @@ pub fn pool_of(state: &AppState) -> Result<&PgPool, Response> {
             SERVER_ERROR_BODY.to_owned(),
         )),
     }
-}
-
-/// The 500 shortcut for fallible handler paths.
-pub fn server_error() -> Response {
-    json_response(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        SERVER_ERROR_BODY.to_owned(),
-    )
 }
 
 /// DRF `Allow` values (`APIView.default_response_headers`: each view's
@@ -814,13 +793,8 @@ async fn authenticate_machine_token(
     if !member {
         // `token.revoke()` then deny (`authentication.py:130-132`).
         let now = chrono::Utc::now();
-        let _ = sqlx::query(
-            r#"UPDATE "machine_token" SET "revoked_at" = $1 WHERE "machine_token"."id" = $2"#,
-        )
-        .bind(now)
-        .bind(token.id)
-        .execute(pool)
-        .await;
+        let _ =
+            pidash_services::domain::tokens::revoke_machine_token_by_id(pool, token.id, now).await;
         return Err(auth_failed("membership_revoked"));
     }
     let Some(runner_raw) = request_runner_id(headers) else {
@@ -857,13 +831,9 @@ async fn authenticate_machine_token(
     // `last_used_at` bump (`authentication.py:153`): `QuerySet.update`
     // touches no `updated_at`.
     let now = chrono::Utc::now();
-    let _ = sqlx::query(
-        r#"UPDATE "machine_token" SET "last_used_at" = $1 WHERE "machine_token"."id" = $2"#,
-    )
-    .bind(now)
-    .bind(token.id)
-    .execute(pool)
-    .await;
+    let _ =
+        pidash_services::domain::tokens::touch_machine_token_last_used_by_id(pool, token.id, now)
+            .await;
     Ok(Some(DaemonRunner::from(&row)))
 }
 
@@ -1045,11 +1015,16 @@ pub trait RunnerPorts: Send + Sync {
         run_id: uuid::Uuid,
     ) -> impl std::future::Future<Output = Result<pidash_db::tx::Transaction<'t>, PortError>> + Send;
     /// `complete_project_move_handoff(run_id)` (D-12, after the hooks
-    /// transaction commits, isolated).
+    /// transaction commits, isolated). `terminal_created_by` is the
+    /// ambient crum request user for the inline terminal effects.
+    /// Boxed: the handoff drains terminal effects inline, which can
+    /// recurse into this port, so the unboxed future type is cyclic
+    /// (E0391).
     fn complete_project_move_handoff(
         &self,
         run_id: uuid::Uuid,
-    ) -> impl std::future::Future<Output = Result<(), PortError>> + Send;
+        terminal_created_by: Option<uuid::Uuid>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), PortError>> + Send + '_>>;
     /// `get_agent_system_user()` (`orchestration/workpad.py:44-71`):
     /// the bot user id authoring pause/failure comments.
     fn agent_system_user_id(
@@ -1214,35 +1189,6 @@ impl LivePorts {
     pub fn pool(&self) -> &PgPool {
         &self.pool
     }
-
-    /// `_fire_pending_entry` (`run_lifecycle.py:141-154`): the run's work
-    /// item pending ticker, if any, fires now instead of waiting for the
-    /// scanner's next pass. A run with no work item, or an issue with no
-    /// enabled `pending_entry` ticker, is a no-op.
-    async fn fire_pending_entry(&self, run_id: uuid::Uuid) -> Result<(), PortError> {
-        let work_item_id: Option<Option<uuid::Uuid>> =
-            sqlx::query_scalar(r#"SELECT "work_item_id" FROM "agent_run" WHERE "id" = $1"#)
-                .bind(run_id)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|error| PortError::Transport(error.to_string()))?;
-        let Some(Some(work_item_id)) = work_item_id else {
-            return Ok(());
-        };
-        let ticker_id: Option<uuid::Uuid> = sqlx::query_scalar(
-            r#"SELECT "id" FROM "issue_agent_ticker"
-               WHERE "issue_id" = $1 AND "enabled" = true AND "pending_entry" = true
-               LIMIT 1"#,
-        )
-        .bind(work_item_id)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|error| PortError::Transport(error.to_string()))?;
-        let Some(ticker_id) = ticker_id else {
-            return Ok(());
-        };
-        self.emit_fire_tick(ticker_id).await
-    }
 }
 
 /// `OFFLINE_STREAM_MAXLEN` / `OFFLINE_STREAM_TTL_SECS`
@@ -1326,44 +1272,20 @@ impl RunnerPorts for LivePorts {
     }
 
     async fn post_run_orchestration(&self, run_id: uuid::Uuid) -> Result<(), PortError> {
-        // `_apply_post_run_orchestration` (`run_lifecycle.py:103-139`):
-        // disarm, deferred pause, pending-entry fire — each isolated in
-        // Python (try/except + log), so every failure is logged and the
-        // call still returns `Ok`.
+        // Thin caller of the public jobs driver (OVL-06): disarm,
+        // deferred pause, pending-entry fire, each isolated (logged,
+        // still `Ok`). Note: the pending-fire `?error` payload renders
+        // the jobs `sqlx::Error` where this method rendered
+        // `PortError::Transport` — the static message is unchanged.
         let settings = self.state.settings();
-        let cloud = settings.cloud_agent.clone();
-        let managed = settings.managed_runner.clone();
-        if let Err(error) =
-            pidash_jobs::orchestration::disarm_on_terminal_signal(&self.pool, run_id).await
-        {
-            tracing::error!(
-                ?error,
-                run_id = %run_id,
-                "orchestration.error: run-ended reconcile failed"
-            );
-        }
-        if let Err(error) = pidash_jobs::orchestration::maybe_apply_deferred_pause_live(
+        pidash_jobs::orchestration::post_run_orchestration(
             &self.pool,
-            &cloud,
-            &managed,
-            run_id,
+            &settings.cloud_agent,
+            &settings.managed_runner,
             self.state.toolsets().clone(),
+            run_id,
         )
-        .await
-        {
-            tracing::error!(
-                ?error,
-                run_id = %run_id,
-                "orchestration.error: deferred-pause failed"
-            );
-        }
-        if let Err(error) = self.fire_pending_entry(run_id).await {
-            tracing::error!(
-                ?error,
-                run_id = %run_id,
-                "orchestration.error: pending-entry fire failed"
-            );
-        }
+        .await;
         Ok(())
     }
 
@@ -1373,230 +1295,59 @@ impl RunnerPorts for LivePorts {
         pool: &'t PgPool,
         run_id: uuid::Uuid,
     ) -> Result<pidash_db::tx::Transaction<'t>, PortError> {
-        // `_apply_post_run_orchestration` (`run_lifecycle.py:103-139`) on
-        // the caller's transaction. Disarm locks only the ticker, so its
-        // executor runs beside the caller's issue/run locks; the deferred
-        // pause re-locks the issue row and so runs on `tx`.
-        if let Err(error) =
-            pidash_jobs::orchestration::disarm_on_terminal_signal(&self.pool, run_id).await
-        {
-            tracing::error!(
-                ?error,
-                run_id = %run_id,
-                "orchestration.error: run-ended reconcile failed"
-            );
-        }
+        // Thin caller of the public jobs driver (OVL-06).
         let settings = self.state.settings();
-        let deps = pidash_jobs::orchestration::StoreDeps {
-            cloud: settings.cloud_agent.clone(),
-            managed: settings.managed_runner.clone(),
-            cache: crate::project_move_handoff::RedisAdmissionCache {
-                client: crate::runner_enroll::teardown::redis_client(&self.state),
+        let tx = pidash_jobs::orchestration::post_run_orchestration_in_tx(
+            tx,
+            pool,
+            &settings.cloud_agent,
+            &settings.managed_runner,
+            crate::project_move_handoff::RedisAdmissionCache {
+                client: client_from_settings(self.state.settings()),
             },
-            // The pause path creates no runs: the presence closures are
-            // unread (`maybe_apply_deferred_pause_live`), so the keyless
-            // answers mirror it.
-            has_usable_llm_config: |_actor: uuid::Uuid| false,
-            toolsets: self.state.toolsets().clone(),
-            llm_profile: |_actor: Option<uuid::Uuid>| pidash_services::dispatch::LlmProfile {
-                available: false,
-                reason_code: String::new(),
-            },
-            now_unix_secs: chrono::Utc::now().timestamp(),
-        };
-        let mut store = pidash_jobs::orchestration::LiveCreationStore::new(tx, pool, deps);
-        match pidash_services::orchestration::dispatch::maybe_apply_deferred_pause(
-            &mut store,
+            self.state.toolsets().clone(),
             run_id,
-            chrono::Utc::now(),
-            0.0,
         )
-        .await
-        {
-            Ok(outcome) => {
-                for line in &outcome.logs {
-                    if line.level == "WARNING" {
-                        tracing::warn!("{}", line.message);
-                    } else {
-                        tracing::info!("{}", line.message);
-                    }
-                }
-            }
-            Err(error) => tracing::error!(
-                ?error,
-                run_id = %run_id,
-                "orchestration.error: deferred-pause failed"
-            ),
-        }
-        let (mut tx, _pool, _cache, _dispatches, _deferred, _terminal_effects) = store.into_parts();
-        // `_fire_pending_entry` (`run_lifecycle.py:141-155`): the run's
-        // work item pending ticker, if any, fires now. Read on the
-        // caller's transaction, after the pause's write.
-        let work_item_id: Option<uuid::Uuid> = match sqlx::query_scalar::<_, Option<uuid::Uuid>>(
-            r#"SELECT "work_item_id" FROM "agent_run" WHERE "id" = $1"#,
-        )
-        .bind(run_id)
-        .fetch_optional(&mut **tx.inner())
-        .await
-        {
-            Ok(row) => row.flatten(),
-            Err(error) => {
-                tracing::error!(
-                    ?error,
-                    run_id = %run_id,
-                    "orchestration.error: pending-entry lookup failed"
-                );
-                None
-            }
-        };
-        let ticker_id: Option<uuid::Uuid> = match work_item_id {
-            Some(work_item_id) => sqlx::query_scalar::<_, uuid::Uuid>(
-                r#"SELECT "id" FROM "issue_agent_ticker"
-                   WHERE "issue_id" = $1 AND "enabled" = true AND "pending_entry" = true
-                   LIMIT 1"#,
-            )
-            .bind(work_item_id)
-            .fetch_optional(&mut **tx.inner())
-            .await
-            .unwrap_or(None),
-            None => None,
-        };
-        if let Some(ticker_id) = ticker_id {
-            // `_fire_pending_entry` queues `fire_tick.delay` with
-            // `transaction.on_commit`, so a rolled-back hooks transaction
-            // must not publish a tick for it.
-            let pool = self.pool.clone();
-            tx.on_commit(move || {
-                tokio::spawn(async move {
-                    if let Err(error) = emit_celery(
-                        &pool,
-                        FIRE_TICK_TASK,
-                        vec![Value::String(ticker_id.to_string())],
-                    )
-                    .await
-                    {
-                        tracing::error!(
-                            ?error,
-                            ticker_id = %ticker_id,
-                            "orchestration.error: pending-entry fire failed"
-                        );
-                    }
-                });
-            });
-        }
+        .await;
         Ok(tx)
     }
 
-    async fn complete_project_move_handoff(&self, run_id: uuid::Uuid) -> Result<(), PortError> {
+    fn complete_project_move_handoff(
+        &self,
+        run_id: uuid::Uuid,
+        terminal_created_by: Option<uuid::Uuid>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), PortError>> + Send + '_>>
+    {
         // `complete_project_move_handoff(run_id)` (`service.py:644-732`):
-        // the D-12 live executor (own transaction, committed, then the
-        // handoff tx's own post-commit effects). Isolated in Python (the
-        // terminal transition already committed), so a failure is logged
-        // by the caller.
-        let settings = self.state.settings();
-        let cloud = settings.cloud_agent.clone();
-        let managed = settings.managed_runner.clone();
-        let replacement = pidash_jobs::orchestration::complete_project_move_handoff_live(
-            &self.pool,
-            &cloud,
-            &managed,
-            self.redis.as_ref(),
-            &settings.runner,
-            run_id,
-            self.state.toolsets().clone(),
-            self.state.assistant_seam().clone(),
-        )
-        .await
-        .map_err(|error| PortError::Transport(error.to_string()))?;
-        let Some(replacement_id) = replacement else {
-            return Ok(());
-        };
-        // `dispatch_after_commit` -> `dispatch_agent_run` -> for a
-        // runner-plane run `drain_pod_by_id(run.pod_id)`
-        // (`cloud_agent/dispatch.py:61-70`). The jobs executor runs the
-        // dispatch but returns only the run id, so re-read the decision's
-        // inputs: a replacement still QUEUED on a non-cloud executor is
-        // the `PodDrain` arm and must be matched now, not on a later poll.
-        let pending: Option<(String, String, Option<uuid::Uuid>)> = sqlx::query_as(
-            r#"SELECT "status", "executor_kind", "pod_id"
-               FROM "agent_run" WHERE "id" = $1"#,
-        )
-        .bind(replacement_id)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|error| PortError::Transport(error.to_string()))?;
-        let Some((status, executor_kind, pod_id)) = pending else {
-            return Ok(());
-        };
-        if status == "queued"
-            && executor_kind != pidash_types::dispatch::AgentExecutorKind::CloudAgent.value()
-        {
-            if let Some(pod_id) = pod_id {
-                crate::runner_enroll::teardown::drain_pod_by_id(&self.pool, &self.state, pod_id)
-                    .await
-                    .map_err(|()| {
-                        PortError::Transport("project move handoff pod drain failed".to_owned())
-                    })?;
-            }
-        }
-        Ok(())
+        // the api-crate twin (own transaction, committed, then the
+        // handoff tx's own post-commit effects: the terminal pairs —
+        // queued copy plus the inline apply under the crum user — then
+        // the pod drains). The jobs live executor only enqueues the
+        // terminal effects, so a replacement-run failure comment kept
+        // `created_by_id` NULL until the worker posted it
+        // (PIDASHCONV-1514). Isolated in Python (the terminal
+        // transition already committed), so a failure is logged by the
+        // caller.
+        Box::pin(async move {
+            crate::project_move_handoff::complete_project_move_handoff(
+                &self.pool,
+                &self.state,
+                run_id,
+                terminal_created_by,
+            )
+            .await
+            .map(|_| ())
+            .map_err(|()| PortError::Transport("project move handoff failed".to_owned()))
+        })
     }
 
     async fn agent_system_user_id(&self) -> Result<uuid::Uuid, PortError> {
-        // `get_agent_system_user` (`orchestration/workpad.py:44-71`):
-        // get-or-create on the unique username, refusing a
-        // non-bot collision. Real: pause/failure comments need the row.
-        let row: Option<(uuid::Uuid, bool)> =
-            sqlx::query_as(r#"SELECT "id", "is_bot" FROM "users" WHERE "username" = $1"#)
-                .bind(AGENT_USERNAME)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|error| PortError::Transport(error.to_string()))?;
-        if let Some((id, is_bot)) = row {
-            if !is_bot {
-                return Err(PortError::Transport(format!(
-                    "User {AGENT_USERNAME:?} exists but is not a bot"
-                )));
-            }
-            return Ok(id);
-        }
-        let id = uuid::Uuid::new_v4();
-        let inserted: Result<Option<(uuid::Uuid,)>, sqlx::Error> = sqlx::query_as(
-            r#"INSERT INTO "users"
-               ("id", "username", "email", "first_name", "last_name", "is_bot", "password")
-               VALUES ($1, $2, $3, $4, $5, TRUE, $6)
-               ON CONFLICT ("username") DO NOTHING
-               RETURNING "id""#,
-        )
-        .bind(id)
-        .bind(AGENT_USERNAME)
-        .bind(AGENT_USER_EMAIL)
-        .bind(AGENT_USER_FIRST_NAME)
-        .bind(AGENT_USER_LAST_NAME)
-        .bind(unusable_password())
-        .fetch_optional(&self.pool)
-        .await;
-        match inserted {
-            Ok(Some((id,))) => Ok(id),
-            _ => {
-                // Lost the get-or-create race: re-read the winner.
-                let row: Option<(uuid::Uuid, bool)> =
-                    sqlx::query_as(r#"SELECT "id", "is_bot" FROM "users" WHERE "username" = $1"#)
-                        .bind(AGENT_USERNAME)
-                        .fetch_optional(&self.pool)
-                        .await
-                        .map_err(|error| PortError::Transport(error.to_string()))?;
-                match row {
-                    Some((id, true)) => Ok(id),
-                    Some(_) => Err(PortError::Transport(format!(
-                        "User {AGENT_USERNAME:?} exists but is not a bot"
-                    ))),
-                    None => Err(PortError::Transport(
-                        "agent user missing after race".to_owned(),
-                    )),
-                }
-            }
-        }
+        // Thin caller of the public identity driver (OVL-06): the
+        // own-transaction wrapper over `get_agent_system_user`
+        // (PIDASHCONV-1525 moved the flow to `domain::identity`).
+        pidash_services::domain::identity::agent_system_user_id(&self.pool)
+            .await
+            .map_err(|error| PortError::Transport(error.to_string()))
     }
 
     async fn dispatch_waiting(&self, workspace_id: uuid::Uuid) -> Result<(), PortError> {
@@ -1617,62 +1368,21 @@ impl RunnerPorts for LivePorts {
     }
 
     async fn emit_terminal_effects(&self, run_id: uuid::Uuid) -> Result<(), PortError> {
-        emit_celery(
-            &self.pool,
-            TERMINAL_EFFECTS_TASK,
-            vec![Value::String(run_id.to_string())],
-        )
-        .await
-        .map_err(PortError::Transport)
+        // Thin caller of the public jobs driver (OVL-06).
+        pidash_jobs::runner_runs::emit_terminal_effects(&self.pool, run_id)
+            .await
+            .map_err(|error| PortError::Transport(error.to_string()))
     }
 
     async fn emit_fire_tick(&self, ticker_id: uuid::Uuid) -> Result<(), PortError> {
-        emit_celery(
-            &self.pool,
-            FIRE_TICK_TASK,
-            vec![Value::String(ticker_id.to_string())],
-        )
-        .await
-        .map_err(PortError::Transport)
+        pidash_jobs::tasks_ticker::scan::emit_fire_tick(&self.pool, ticker_id)
+            .await
+            .map_err(|error| PortError::Transport(error.to_string()))
     }
 
     fn redis_client(&self) -> Option<&redis::Client> {
         self.redis.as_ref()
     }
-}
-
-/// Agent bot identity (`orchestration/workpad.py:29-32`).
-const AGENT_USERNAME: &str = "pi_dash_agent";
-const AGENT_USER_EMAIL: &str = "agent@example.com";
-const AGENT_USER_FIRST_NAME: &str = "Pi Dash";
-const AGENT_USER_LAST_NAME: &str = "Agent";
-
-/// `runner.apply_agent_run_terminal_effects` (`runner/tasks.py:333`).
-const TERMINAL_EFFECTS_TASK: &str = "runner.apply_agent_run_terminal_effects";
-/// `pi_dash.bgtasks.agent_ticker.fire_tick` (D-10 task name).
-const FIRE_TICK_TASK: &str = "pi_dash.bgtasks.agent_ticker.fire_tick";
-
-/// `User.set_unusable_password()`: an unmatchable hash (never a valid
-/// encoded hash, so no password validates against it).
-fn unusable_password() -> String {
-    format!("!{}", uuid::Uuid::new_v4().as_simple())
-}
-
-/// Enqueue one task message onto the Postgres-backed queue (`rust_job_queue`),
-/// the `auth_session::email` `publish_message` shape without the broker.
-/// Enqueue errors propagate to the caller, which logs them — every emit site
-/// is isolated in Python.
-async fn emit_celery(pool: &sqlx::PgPool, task: &str, args: Vec<Value>) -> Result<(), String> {
-    let message = pidash_jobs::TaskMessage::new(task, args, Map::new());
-    let job = pidash_jobs::queue::NewJob::new(
-        message.task.clone(),
-        Value::Array(message.args.clone()),
-        Value::Object(message.kwargs.clone()),
-    );
-    pidash_jobs::queue::enqueue(pool, &job)
-        .await
-        .map(|_| ())
-        .map_err(|error| error.to_string())
 }
 
 /// Live enqueue: `_ensure_group` (`outbox.py:139-148`, BUSYGROUP
@@ -1823,16 +1533,15 @@ mod ports_tests {
     }
 
     #[test]
-    fn agent_identity_matches_workpad() {
-        assert_eq!(AGENT_USERNAME, "pi_dash_agent");
-        assert_eq!(AGENT_USER_EMAIL, "agent@example.com");
-        assert_eq!(AGENT_USER_FIRST_NAME, "Pi Dash");
-        assert_eq!(AGENT_USER_LAST_NAME, "Agent");
+    fn celery_task_names_match_python() {
+        // Both pins moved with their consts: TERMINAL_EFFECTS_TASK to
+        // `pidash_services::runner_runs::finalization` (re-exported by
+        // jobs) and FIRE_TICK_TASK to `pidash_jobs::tasks_ticker::scan`
+        // (same assertions there).
         assert_eq!(
-            TERMINAL_EFFECTS_TASK,
+            pidash_jobs::runner_runs::TERMINAL_EFFECTS_TASK,
             "runner.apply_agent_run_terminal_effects"
         );
-        assert_eq!(FIRE_TICK_TASK, "pi_dash.bgtasks.agent_ticker.fire_tick");
     }
 }
 

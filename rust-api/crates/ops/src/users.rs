@@ -13,6 +13,8 @@
 
 use crate::OpsIo;
 use clap::Args;
+use pidash_services::domain::identity;
+use pidash_services::domain::projects::members as project_members;
 
 // ---------------------------------------------------------------------------
 // Arguments (flags named verbatim; argparse `nargs="?"` becomes
@@ -329,7 +331,7 @@ pub async fn run_activate_user(
         &kernel::new_user_token(),
         chrono::Utc::now(),
     );
-    if let Err(error) = queries::save_user_activation(pool, user.id, &write).await {
+    if let Err(error) = identity::save_user_activation(pool, user.id, &write).await {
         emit_db_skeleton(io, &error);
         return Ok(1);
     }
@@ -430,7 +432,7 @@ pub async fn run_reset_password(
         &kernel::new_user_token(),
         chrono::Utc::now(),
     );
-    if let Err(error) = queries::save_user_password(pool, user.id, &encoded, &write).await {
+    if let Err(error) = identity::save_user_password(pool, user.id, &encoded, &write).await {
         emit_db_skeleton(io, &error);
         return Ok(1);
     }
@@ -638,7 +640,7 @@ pub async fn run_create_project_member(
     match queries::project_member_exists(pool, project.id, user.id).await {
         Ok(true) => {
             if let Err(error) =
-                queries::project_member_update(pool, project.id, user.id, role).await
+                project_members::ops_update_role(pool, project.id, user.id, role).await
             {
                 emit_db_skeleton(io, &error);
                 return Ok(1);
@@ -672,16 +674,22 @@ pub async fn run_create_project_member(
             let filters = queries::property_filters_json();
             let display_filters = queries::property_display_filters_json();
             let display_properties = queries::property_display_properties_json();
-            if let Err(error) = queries::property_create(
+            let rich = serde_json::json!({});
+            if let Err(error) = project_members::add_property(
                 pool,
-                project.workspace_id,
-                project.id,
-                user.id,
-                65535.0,
-                &filters,
-                &display_filters,
-                &display_properties,
-                &preferences,
+                &project_members::NewMemberProperty {
+                    workspace_id: project.workspace_id,
+                    project_id: project.id,
+                    user_id: user.id,
+                    filters: &filters,
+                    display_filters: &display_filters,
+                    display_properties: &display_properties,
+                    rich_filters: &rich,
+                    preferences: &preferences,
+                    sort_order: 65535.0,
+                    created_by: None,
+                    now: chrono::Utc::now(),
+                },
             )
             .await
             {
@@ -730,30 +738,37 @@ async fn create_project_member_with_hook(
         }
     };
     let hook_sort = min_sort.map(|min| min - 10000.0).unwrap_or(65535.0);
-    if let Err(error) = queries::property_create(
+    let rich = serde_json::json!({});
+    if let Err(error) = project_members::add_property(
         pool,
-        project.workspace_id,
-        project.id,
-        user.id,
-        hook_sort,
-        &queries::property_filters_json(),
-        &queries::property_display_filters_json(),
-        &queries::property_display_properties_json(),
-        preferences,
+        &project_members::NewMemberProperty {
+            workspace_id: project.workspace_id,
+            project_id: project.id,
+            user_id: user.id,
+            filters: &queries::property_filters_json(),
+            display_filters: &queries::property_display_filters_json(),
+            display_properties: &queries::property_display_properties_json(),
+            rich_filters: &rich,
+            preferences,
+            sort_order: hook_sort,
+            created_by: None,
+            now: chrono::Utc::now(),
+        },
     )
     .await
     {
         emit_db_skeleton(io, &error);
         return Err(1);
     }
-    if let Err(error) = queries::project_member_create(
+    if let Err(error) = project_members::ops_add(
         pool,
-        project.id,
         project.workspace_id,
+        project.id,
         user.id,
         role,
         props,
         preferences,
+        chrono::Utc::now(),
     )
     .await
     {
@@ -834,30 +849,70 @@ async fn run_create_dummy_data_inner(
     };
     let members_raw = ask_line(io, kernel::PROMPT_MEMBER_EMAILS)?;
     let members = kernel::split_member_emails(&members_raw);
-    let workspace_id = queries::workspace_create(
+    // `Workspace.objects.create(slug=..., name=..., owner=user)`
+    // (`:37`): `timezone UTC`, random `background_color`, `logo` /
+    // `organization_size` `NULL`, `NULL` audit (no crum user). The
+    // `post_save` seeding rides inside `domain::workspaces::create`.
+    use pidash_services::domain::workspaces::{self, members};
+    let now = chrono::Utc::now();
+    let background_color = kernel::random_color();
+    let stamps = workspaces::create(
         pool,
-        &workspace_name,
-        &workspace_slug,
-        owner.id,
-        &kernel::random_color(),
+        &workspaces::NewWorkspace {
+            id: uuid::Uuid::new_v4(),
+            name: &workspace_name,
+            slug: &workspace_slug,
+            owner_id: owner.id,
+            created_by: None,
+            logo: None,
+            logo_asset_id: None,
+            organization_size: None,
+            timezone: "UTC",
+            background_color: &background_color,
+            deleted_at: None,
+            created_at: now,
+            updated_at: now,
+            seed_created_by: None,
+        },
     )
     .await
     .map_err(|e| caught_db_error_text(&e))?;
-    // `post_save` on `Workspace` (`scheduler/signals.py:28-39`) fires
-    // during the create above, before the member rows below: seed the
-    // builtin schedulers. The receiver swallows every failure, so this
-    // never fails the command. `None` created_by: a management command
-    // has no crum request user, so Django stamps `NULL`.
-    pidash_services::scheduler::builtins::seed_builtin_schedulers(pool, workspace_id, None).await;
+    let workspace_id = stamps
+        .map(|stamps| stamps.id)
+        .ok_or_else(|| "Workspace creation returned no row".to_owned())?;
     let props = queries::workspace_member_props_json();
     let issue_props = queries::workspace_issue_props_json();
-    queries::workspace_member_create(pool, workspace_id, owner.id, 20, &props, &issue_props)
-        .await
-        .map_err(|e| caught_db_error_text(&e))?;
+    members::add(
+        pool,
+        &members::NewMember {
+            workspace_id,
+            user_id: Some(owner.id),
+            role: 20,
+            company_role: None,
+            created_by: None,
+            view_props: &props,
+            default_props: &props,
+            issue_props: &issue_props,
+            now,
+            ignore_conflicts: false,
+            db_now: false,
+        },
+    )
+    .await
+    .map_err(|e| caught_db_error_text(&e))?;
     let member_ids = queries::user_ids_by_emails(pool, &members)
         .await
         .map_err(|e| caught_db_error_text(&e))?;
-    queries::workspace_members_bulk_create(pool, workspace_id, &member_ids, &props, &issue_props)
+    let bulk_rows: Vec<members::BulkMember> = member_ids
+        .iter()
+        .map(|user_id| members::BulkMember {
+            workspace_id,
+            user_id: *user_id,
+            role: 20,
+            created_by: None,
+        })
+        .collect();
+    members::bulk_add(pool, &bulk_rows, &props, &issue_props, now)
         .await
         .map_err(|e| caught_db_error_text(&e))?;
     let project_count_raw = ask_line(io, kernel::PROMPT_PROJECT_COUNT)?;

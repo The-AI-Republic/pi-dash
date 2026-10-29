@@ -147,6 +147,14 @@ impl Pools {
     }
 }
 
+/// Build the shared SeaORM connection over the existing primary pool
+/// (ORM-01, design D5). The connector wraps the pool — it opens no
+/// connections of its own, so there is still exactly one pool. Pure
+/// constructor: no I/O, safe on a lazy pool in unit tests.
+pub fn sea_orm_connection(primary: &PgPool) -> sea_orm::DatabaseConnection {
+    sea_orm::SqlxPostgresConnector::from_sqlx_postgres_pool(primary.clone())
+}
+
 /// Django's per-connection idle guards
 /// (`apps/api/pi_dash/settings/common.py:188-212`), in milliseconds: a
 /// transaction left idle 60s is terminated, releasing its row locks, and a

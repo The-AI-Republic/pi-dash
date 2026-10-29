@@ -97,6 +97,8 @@ use pidash_auth::permissions::{ROLE_ADMIN, ROLE_MEMBER};
 use pidash_services::app_workspace::{
     models_workspace, queries_core, ser_invite, ser_workspace, tasks,
 };
+use pidash_services::domain::identity;
+use pidash_services::domain::workspaces::{self, members};
 use pidash_types::license::serializers_workspace::RESTRICTED_WORKSPACE_SLUGS;
 use pidash_types::WorkspaceId;
 
@@ -105,6 +107,8 @@ use crate::app_issues::{query_last, Denial, QueryMap};
 use crate::serializer::render_datetime_in;
 use crate::state::AppState;
 use crate::v1_projects::tz_zones::PYTZ_COMMON_TIMEZONES;
+use pidash_compat::db::{is_integrity_error, is_unique_violation};
+pub(crate) use pidash_compat::response::{empty_response, json_response};
 
 /// `workspace-slug-check/` (`urls/workspace.py:45-49`, W01).
 pub const SLUG_CHECK_PATH: &str = "/api/workspace-slug-check/";
@@ -478,22 +482,6 @@ fn gate_for_export() -> &'static gates::Gate {
 // ---------------------------------------------------------------------------
 
 pub(crate) type HandlerResult = Result<Response, Denial>;
-
-pub(crate) fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("view response")
-}
-
-pub(crate) fn empty_response(status: StatusCode) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(Vec::new()))
-        .expect("empty response")
-}
 
 /// `request.user` from the Django session: missing session, missing key,
 /// or a non-UUID id is anonymous → 401.
@@ -3398,29 +3386,6 @@ pub(crate) fn format_csv_datetime(instant: &chrono::DateTime<chrono::Utc>, _zone
 // Integrity mapping (`handle_exception`, create's own `except`)
 // ---------------------------------------------------------------------------
 
-/// Whether a sqlx failure is a Postgres integrity error (the
-/// `IntegrityError` umbrella: unique 23505, FK 23503, check 23514,
-/// not-null 23502).
-fn is_integrity_error(error: &sqlx::Error) -> bool {
-    matches!(
-        error
-            .as_database_error()
-            .and_then(|db| db.code())
-            .as_deref(),
-        Some("23505" | "23503" | "23514" | "23502")
-    )
-}
-
-fn is_unique_violation(error: &sqlx::Error) -> bool {
-    matches!(
-        error
-            .as_database_error()
-            .and_then(|db| db.code())
-            .as_deref(),
-        Some("23505")
-    )
-}
-
 /// Stock `get_object` miss: `get_object_or_404` raises `Http404("No <Model>
 /// matches the given query.")`, rewrapped by DRF as `NotFound` — 404
 /// `{"detail":"No <Model> matches the given query."}` (DRF `NotFound`).
@@ -3574,28 +3539,28 @@ pub async fn create_workspace(
     let organization_size = validated.organization_size.flatten();
     let workspace_id = uuid::Uuid::new_v4();
     let now = chrono::Utc::now();
-    let insert: Result<InsertedStamps, sqlx::Error> =
-        sqlx::query_as(
-            r#"INSERT INTO workspaces
-               (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, name, logo, logo_asset_id, owner_id, slug, organization_size, timezone, background_color)
-               VALUES ($1, $2, $2, $3, NULL, $4, $5, $6, $7, $3, $8, $9, $10, $11)
-               RETURNING created_at, updated_at"#,
-        )
-        .bind(workspace_id)
-        .bind(now)
-        .bind(user_id)
-        .bind(validated.deleted_at.flatten())
-        .bind(&name)
-        .bind(logo.as_deref())
-        .bind(validated.logo_asset_id.flatten())
-        .bind(&slug)
-        .bind(organization_size.as_deref())
-        .bind(&timezone)
-        .bind(&background_color)
-        .fetch_optional(&pool)
-        .await;
+    let insert = workspaces::create(
+        &pool,
+        &workspaces::NewWorkspace {
+            id: workspace_id,
+            name: &name,
+            slug: &slug,
+            owner_id: user_id,
+            created_by: Some(user_id),
+            logo: logo.as_deref(),
+            logo_asset_id: validated.logo_asset_id.flatten(),
+            organization_size: organization_size.as_deref(),
+            timezone: &timezone,
+            background_color: &background_color,
+            deleted_at: validated.deleted_at.flatten(),
+            created_at: now,
+            updated_at: now,
+            seed_created_by: Some(user_id),
+        },
+    )
+    .await;
     let (created_at, updated_at) = match insert {
-        Ok(Some(timestamps)) => timestamps,
+        Ok(Some(stamps)) => (stamps.created_at, stamps.updated_at),
         Ok(None) => return Err(Denial::ServerError),
         Err(error) if is_unique_violation(&error) => {
             return Ok(json_response(
@@ -3605,16 +3570,6 @@ pub async fn create_workspace(
         }
         Err(_) => return Err(Denial::ServerError),
     };
-    // `post_save` on `Workspace` (`scheduler/signals.py:28-39`) fires
-    // during the save above, before the member row below: seed the
-    // builtin schedulers. The receiver swallows every failure, so this
-    // never fails the request.
-    pidash_services::scheduler::builtins::seed_builtin_schedulers(
-        &pool,
-        workspace_id,
-        Some(user_id),
-    )
-    .await;
     // `WorkspaceMember.objects.create(...)` (`:126-132`): the `company_role`
     // echo (`:127`) renders through Python `str()` (null stays null).
     let company_role = match input.get("company_role") {
@@ -3623,33 +3578,30 @@ pub async fn create_workspace(
         InputValue::Value(Value::Null) => None,
         InputValue::Value(value) => Some(py_str(value)),
     };
-    let member_insert: Result<_, sqlx::Error> = sqlx::query(
-        r#"INSERT INTO workspace_members
-           (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, member_id, role, company_role, view_props, default_props, issue_props, getting_started_checklist, tips, explored_features, is_active)
-           VALUES ($1, $2, $2, $3, NULL, NULL, $4, $3, 20, $5, $6, $7, $8, $9, $10, $11, TRUE)"#,
-    )
-    .bind(uuid::Uuid::new_v4())
-    .bind(now)
-    .bind(user_id)
-    .bind(workspace_id)
-    .bind(company_role)
-    .bind(member_default_json(
-        models_workspace::workspace_member::DEFAULT_VIEW_PROPS_JSON,
-    )?)
     // `default_props` shares `get_default_props` with `view_props`
     // (`workspace.py:207-208`), so the one ported default serves both.
-    .bind(member_default_json(
-        models_workspace::workspace_member::DEFAULT_VIEW_PROPS_JSON,
-    )?)
-    .bind(member_default_json(
-        models_workspace::workspace_member::DEFAULT_ISSUE_PROPS_JSON,
-    )?)
-    .bind(member_default_json(models_workspace::workspace_member::EMPTY_DICT_JSON)?)
-    .bind(member_default_json(models_workspace::workspace_member::EMPTY_DICT_JSON)?)
-    .bind(member_default_json(models_workspace::workspace_member::EMPTY_DICT_JSON)?)
-    .execute(&pool)
-    .await;
-    if let Err(error) = member_insert {
+    let view_props =
+        member_default_json(models_workspace::workspace_member::DEFAULT_VIEW_PROPS_JSON)?;
+    let issue_props =
+        member_default_json(models_workspace::workspace_member::DEFAULT_ISSUE_PROPS_JSON)?;
+    if let Err(error) = members::add(
+        &pool,
+        &members::NewMember {
+            workspace_id,
+            user_id: Some(user_id),
+            role: 20,
+            company_role: company_role.as_deref(),
+            created_by: Some(user_id),
+            view_props: &view_props,
+            default_props: &view_props,
+            issue_props: &issue_props,
+            now,
+            ignore_conflicts: false,
+            db_now: false,
+        },
+    )
+    .await
+    {
         // Any unique violation (even the member row's) answers the 409:
         // Postgres renders every one with "already exists".
         if is_unique_violation(&error) {
@@ -3918,7 +3870,8 @@ async fn update_workspace_inner(
 }
 
 /// The stock `update()` write: validated columns plus the
-/// `updated_at`/`updated_by` re-stamp.
+/// `updated_at`/`updated_by` re-stamp
+/// (`domain::workspaces::patch` renders the statement).
 async fn apply_workspace_update(
     pool: &sqlx::PgPool,
     data: &WorkspaceRowData,
@@ -3926,39 +3879,18 @@ async fn apply_workspace_update(
     user_id: &uuid::Uuid,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), sqlx::Error> {
-    let mut assignments: Vec<String> = sets
-        .iter()
-        .enumerate()
-        .map(|(index, column)| format!("{column} = ${}", index + 1))
-        .collect();
-    assignments.push(format!("updated_at = ${}", sets.len() + 1));
-    assignments.push(format!("updated_by_id = ${}", sets.len() + 2));
-    let sql = format!(
-        "UPDATE workspaces SET {} WHERE id = ${}",
-        assignments.join(", "),
-        sets.len() + 3
-    );
-    let mut query = sqlx::query(&sql);
-    for column in sets {
-        query = match column.as_str() {
-            "deleted_at" => query.bind(data.deleted_at),
-            "name" => query.bind(&data.name),
-            "logo" => query.bind(data.logo.as_deref()),
-            "slug" => query.bind(&data.slug),
-            "organization_size" => query.bind(data.organization_size.as_deref()),
-            "timezone" => query.bind(&data.timezone),
-            "background_color" => query.bind(&data.background_color),
-            "logo_asset_id" => query.bind(data.logo_asset_id),
-            _ => query.bind(Option::<String>::None),
-        };
-    }
-    query
-        .bind(now)
-        .bind(user_id)
-        .bind(data.id)
-        .execute(pool)
-        .await?;
-    Ok(())
+    let cols: Vec<&str> = sets.iter().map(String::as_str).collect();
+    let patch = workspaces::WorkspacePatch {
+        deleted_at: data.deleted_at,
+        name: &data.name,
+        logo: data.logo.as_deref(),
+        slug: &data.slug,
+        organization_size: data.organization_size.as_deref(),
+        timezone: &data.timezone,
+        background_color: &data.background_color,
+        logo_asset_id: data.logo_asset_id,
+    };
+    workspaces::patch(pool, data.id, &cols, &patch, user_id, now).await
 }
 
 /// DELETE `workspaces/<slug>/` (`:183-201`): profile-pointer cleanup,
@@ -3988,9 +3920,7 @@ pub async fn destroy_workspace(
         Err(response) => return Ok(response),
     };
     // `remove_last_workspace_ids_from_user_settings` (`:187`).
-    sqlx::query("UPDATE profiles SET last_workspace_id = NULL WHERE last_workspace_id = $1")
-        .bind(data.id)
-        .execute(&pool)
+    identity::clear_last_workspace(&pool, data.id)
         .await
         .map_err(|_| Denial::ServerError)?;
     // `str(timezone.now().isoformat())`: micros-truncated UTC, `+00:00`.
@@ -4008,16 +3938,9 @@ pub async fn destroy_workspace(
     // `super().destroy()` (`mixins.py:72-78` + `workspace.py:107-118`):
     // soft delete, slug tombstone, `updated_by` re-stamp, fan-out.
     let tombstone = models_workspace::workspace::soft_deleted_slug(&data.slug, now);
-    sqlx::query(
-        "UPDATE workspaces SET deleted_at = $1, updated_at = $1, updated_by_id = $2, slug = $3 WHERE id = $4",
-    )
-    .bind(now)
-    .bind(user_id)
-    .bind(&tombstone)
-    .bind(data.id)
-    .execute(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    workspaces::soft_delete(&pool, data.id, now, user_id, &tombstone)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     enqueue_soft_delete_related(&pool, "db", "workspace", &data.id).await;
     Ok(empty_response(StatusCode::NO_CONTENT))
 }

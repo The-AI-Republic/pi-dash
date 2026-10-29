@@ -77,6 +77,7 @@ use http_body_util::BodyExt as _;
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
+use pidash_db::redis::client_from_settings;
 use pidash_db::runner_sessions::machine_outbox;
 use pidash_db::runner_sessions::models::machine_session;
 use pidash_db::runner_sessions::models::machine_session::machine_session_from_row;
@@ -92,6 +93,7 @@ use crate::runner_enroll::auth::{
 };
 use crate::runner_runs::{is_uuid_path_segment, json_response, pool_of, server_error};
 use crate::state::AppState;
+use pidash_compat::py::py_truthy;
 
 /// Long-poll wait slice (`_POLL_SLICE_MS`, `machine_sessions.py:49`).
 const POLL_SLICE_MS: u64 = 1000;
@@ -139,47 +141,12 @@ fn django_isoformat(now: DateTime<Utc>) -> String {
     truncated.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, false)
 }
 
-/// Api-crate-owned Redis client (the `LivePorts` precedent):
-/// `None` when `REDIS_URL` is unset, empty, or unparsable, mirroring
-/// `redis_instance()` / `async_redis_instance()` returning `None`.
-fn redis_client(state: &AppState) -> Option<redis::Client> {
-    state
-        .settings()
-        .redis
-        .url
-        .as_deref()
-        .filter(|url| !url.is_empty())
-        .and_then(|url| pidash_db::redis::open_client(url).ok())
-}
-
 /// `_auth_dev_machine` (`machine_sessions.py:54-67`) as data: the URL
 /// machine id iff the presented token is bound to it, else `None`.
 fn authed_machine_id(auth: Option<&MachineAuth>, url_id: Uuid) -> Option<Uuid> {
     match auth {
         Some(auth) if auth.token.dev_machine_id == Some(url_id) => Some(url_id),
         _ => None,
-    }
-}
-
-/// Python truthiness for JSON values (`None`/`False`/`0`/`""`/`[]`/`{}`
-/// are falsy; everything else is truthy) — the `or []` half of
-/// `body.get("ack") or []` (`:197`).
-fn py_truthy(value: &Value) -> bool {
-    match value {
-        Value::Null => false,
-        Value::Bool(flag) => *flag,
-        Value::Number(number) => {
-            if let Some(int) = number.as_i64() {
-                int != 0
-            } else if let Some(uint) = number.as_u64() {
-                uint != 0
-            } else {
-                number.as_f64().is_some_and(|float| float != 0.0)
-            }
-        }
-        Value::String(text) => !text.is_empty(),
-        Value::Array(items) => !items.is_empty(),
-        Value::Object(map) => !map.is_empty(),
     }
 }
 
@@ -383,7 +350,7 @@ pub async fn machine_session_open(
         return render(dev_machine_mismatch_drf());
     }
 
-    let redis = redis_client(&state);
+    let redis = client_from_settings(state.settings());
     let mid = dev_machine_id.to_string();
     if machine_outbox::ensure_stream_group(redis.as_ref(), &mid)
         .await
@@ -525,7 +492,7 @@ pub async fn machine_session_delete(
         return render(dev_machine_mismatch_drf());
     }
 
-    let redis = redis_client(&state);
+    let redis = client_from_settings(state.settings());
     // Canonical (lowercase) rendering: the marker key must match what
     // the open/poll paths write however the URL spelled the id.
     let sid_str = sid.to_string();
@@ -806,7 +773,7 @@ pub async fn machine_session_poll(
     {
         return server_error();
     }
-    let redis = redis_client(&state);
+    let redis = client_from_settings(state.settings());
     if !ack_ids.is_empty()
         && machine_outbox::ack_for_session(redis.as_ref(), &mid, &ack_ids)
             .await

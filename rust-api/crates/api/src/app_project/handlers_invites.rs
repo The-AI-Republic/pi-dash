@@ -32,8 +32,9 @@
 //!   (401), the `project_id` rewrite for authenticated callers only (404
 //!   `{"Detail":"Project not found"}` on a miss — the rewrite runs even on
 //!   the `AllowAny` join routes, where authentication still runs), then the
-//!   L7 gate (403), then body parsing (415 / axum rejection; empty body is
-//!   `{}` per the cycles live probe), then the handler.
+//!   L7 gate (403), then body parsing (JSON / form / multipart via the
+//!   shared DRF negotiation, 415 / axum rejection; empty body is `{}` per
+//!   the cycles live probe), then the handler.
 //! * Reads render through the L2/L1 kernels
 //!   (`ser_member::invite_to_representation`, `ser_project::DeployBoardRead`)
 //!   with datetimes in the caller's zone (`crate::serializer`, `Z` rewrite)
@@ -115,6 +116,8 @@ use crate::state::AppState;
 use pidash_auth::permissions::allow::AllowFacts;
 use pidash_auth::permissions::project::ProjectFacts;
 use pidash_auth::permissions::{ROLE_ADMIN, ROLE_MEMBER};
+use pidash_compat::db::is_integrity_error;
+use pidash_compat::response::{empty_response, json_response};
 use pidash_services::app_project::ser_member::{
     invite_to_representation, project_lite_to_representation, resolve_project_cover_image_url,
     resolve_workspace_logo_url, workspace_lite_to_representation, ProjectLiteRow,
@@ -125,6 +128,7 @@ use pidash_services::app_project::tasks::{
     invite_token, INTEGRITY_ERROR_BODY, OBJECT_NOT_FOUND_BODY, SERVER_ERROR_BODY,
     VALIDATION_ERROR_BODY,
 };
+use pidash_services::domain::workspaces::members;
 use pidash_types::{ProjectId, WorkspaceId};
 
 // ---------------------------------------------------------------------------
@@ -264,7 +268,7 @@ const SECRET_JOIN_BODY: &str = r#"{"error":"Only workspace admins can join priva
 
 /// Handler failure with its exact status + body.
 #[derive(Debug)]
-enum Denial {
+pub(crate) enum Denial {
     /// 401, DRF `NotAuthenticated`.
     Unauthorized,
     /// 403, `@allow_permission` body.
@@ -322,22 +326,6 @@ impl IntoResponse for Denial {
     }
 }
 
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("invite response")
-}
-
-fn empty_response(status: StatusCode) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::empty())
-        .expect("empty invite response")
-}
-
 fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
 }
@@ -355,17 +343,6 @@ fn gate_denial(outcome: GateOutcome, class_gate: bool) -> Denial {
             }
         }
         GateOutcome::Unauthenticated => Denial::Unauthorized,
-    }
-}
-
-/// Whether a sqlx failure is an integrity-constraint (`23xxx`) failure.
-fn is_integrity_error(err: &sqlx::Error) -> bool {
-    match err {
-        sqlx::Error::Database(db) => db
-            .code()
-            .as_deref()
-            .is_some_and(|code| code.starts_with("23")),
-        _ => false,
     }
 }
 
@@ -595,44 +572,144 @@ async fn check_board_gate(
     }
 }
 
+/// HTML-input shape for the five invite handlers that read
+/// `request.data` directly (`invite.py`, `base.py` favorites +
+/// board-create): DRF applies no serializer `get_value` rules there —
+/// `QueryDict.get` returns the last value verbatim — so no field is a
+/// list and no blank is skipped (PIDASHCONV-1508).
+const INVITE_BODY_SPEC: crate::v1_cycles_modules::body::BodySpec =
+    crate::v1_cycles_modules::body::BodySpec {
+        list_fields: &[],
+        skip_blank_fields: &[],
+    };
+
+/// HTML-input shape for the board PATCH (serializer-validated): a blank
+/// boolean behaves as absent (DRF `Field.get_value` — not required, no
+/// `allow_blank`, no `allow_null`), and so does a blank `updated_by`
+/// (the PATCH always re-stamps it to the caller, so absent and `None`
+/// converge — verified live, PIDASHCONV-1508).
+const BOARD_PATCH_BODY_SPEC: crate::v1_cycles_modules::body::BodySpec =
+    crate::v1_cycles_modules::body::BodySpec {
+        list_fields: &[],
+        skip_blank_fields: &[
+            "is_comments_enabled",
+            "is_reactions_enabled",
+            "is_votes_enabled",
+            "is_activity_enabled",
+            "is_disabled",
+            "updated_by",
+        ],
+    };
+
+/// Parse a form/multipart body through the shared DRF negotiation
+/// (PIDASHCONV-1508): the text map with the domain's HTML-input
+/// semantics. Uploaded files are dropped — no invite field is a file
+/// field (same convention as PIDASHCONV-1391).
+#[allow(clippy::result_large_err)]
+fn parse_html_body(
+    headers: &axum::http::HeaderMap,
+    body: &[u8],
+    spec: &crate::v1_cycles_modules::body::BodySpec,
+) -> Result<Value, Response> {
+    use crate::v1_cycles_modules::body::{negotiate_body, BodyError, NegotiatedBody};
+    match negotiate_body(headers, body, spec) {
+        Ok(NegotiatedBody::Form { map, .. }) => Ok(Value::Object(map)),
+        // Content-Length says empty (a header/body mismatch — the divert
+        // only runs on non-empty bytes): `{}` like the empty arm below.
+        Ok(NegotiatedBody::Empty) => Ok(Value::Object(Map::new())),
+        // Unreachable by selection (the divert only runs on the HTML
+        // mimes): decode defensively, 500 when the text is not JSON.
+        Ok(NegotiatedBody::JsonText { text, .. }) => {
+            serde_json::from_str(&text).map_err(|_| Denial::ServerError.into_response())
+        }
+        Err(BodyError::UnsupportedMediaType(detail)) => Err(Denial::Raw(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            format!("{{\"detail\":{}}}", json_string(&detail)),
+        )
+        .into_response()),
+        Err(BodyError::ParseDetail(detail)) => Err(Denial::Raw(
+            StatusCode::BAD_REQUEST,
+            format!("{{\"detail\":{}}}", json_string(&detail)),
+        )
+        .into_response()),
+        Err(BodyError::ServerError) => Err(Denial::ServerError.into_response()),
+    }
+}
+
 /// Bodies parse after the gate (the handler builds on `request.data`):
 /// an empty body is `{}` (DRF never raises `ParseError` on it — the
-/// cycles live probe); a non-empty body without a JSON content type
-/// answers the `UnsupportedMediaType` 415 naming the content type
-/// (`text/plain` when missing); otherwise axum's `Json` rejection bytes
-/// apply (malformed JSON stays DRF-unmatched — its messages carry parser
-/// positions serde cannot reproduce — documented, never hit by the suite).
+/// cycles live probe); form and multipart bodies parse through the
+/// shared DRF negotiation (PIDASHCONV-1508); a non-empty body whose
+/// content type the JSON parser does not satisfy answers the
+/// `UnsupportedMediaType` 415 naming the content type verbatim (empty
+/// when the header is missing — uvicorn/prod; runserver's `text/plain`
+/// there is a wsgiref artifact the port does not reproduce); otherwise
+/// axum's `Json` rejection bytes apply (malformed JSON stays
+/// DRF-unmatched — its messages carry parser positions serde cannot
+/// reproduce — documented, never hit by the suite). The flag reports
+/// HTML (form/multipart) input so the board PATCH can apply the
+/// serializer's HTML-only rules.
 #[allow(clippy::result_large_err)]
-async fn parse_body(state: &AppState, req: axum::extract::Request) -> Result<Value, Response> {
+async fn parse_body(
+    state: &AppState,
+    req: axum::extract::Request,
+    spec: &crate::v1_cycles_modules::body::BodySpec,
+) -> Result<(Value, bool), Response> {
     use axum::extract::FromRequest;
-    let (parts, body) = req.into_parts();
+    let (mut parts, body) = req.into_parts();
     let bytes = read_request_bytes(body).await?;
     if bytes.is_empty() {
-        return Ok(Value::Object(Map::new()));
+        return Ok((Value::Object(Map::new()), false));
     }
-    let content_type = parts
-        .headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("");
+    // Latin-1, like `negotiate_body`'s read: obs-text bytes name verbatim
+    // in the 415 (PIDASHCONV-1537); `to_str().ok()` blanked them to "".
+    let content_type = crate::v1_cycles_modules::body::header_str(&parts.headers, "content-type");
     let mime = content_type.split(';').next().unwrap_or("").trim();
-    if !mime.eq_ignore_ascii_case("application/json") {
-        let named = if content_type.is_empty() {
-            "text/plain"
-        } else {
-            content_type
-        };
+    if mime.eq_ignore_ascii_case("application/x-www-form-urlencoded")
+        || mime.eq_ignore_ascii_case("multipart/form-data")
+    {
+        return parse_html_body(&parts.headers, &bytes, spec).map(|body| (body, true));
+    }
+    if !matches_json_parser(&content_type) {
         // DRF `UnsupportedMediaType` (`detail`, lowercase; the media
         // type quotes are part of the message — live probe 2026-10-03).
-        let message = format!("Unsupported media type \"{named}\" in request.");
+        let message = format!("Unsupported media type \"{content_type}\" in request.");
         let body = format!("{{\"detail\":{}}}", json_string(&message));
         return Err(Denial::Raw(StatusCode::UNSUPPORTED_MEDIA_TYPE, body).into_response());
     }
+    // A wildcard content type selects the JSON parser (DRF `select_parser`
+    // first-match): normalize the header so axum's `Json` extractor takes
+    // the same path — and renders the same rejection bytes — as a plain
+    // `application/json` request.
+    if !mime.eq_ignore_ascii_case("application/json") {
+        parts.headers.insert(
+            header::CONTENT_TYPE,
+            header::HeaderValue::from_static("application/json"),
+        );
+    }
     let req = axum::extract::Request::from_parts(parts, axum::body::Body::from(bytes));
     match axum::Json::<Value>::from_request(req, state).await {
-        Ok(axum::Json(body)) => Ok(body),
+        Ok(axum::Json(body)) => Ok((body, false)),
         Err(rejection) => Err(rejection.into_response()),
     }
+}
+
+/// DRF `media_type_matches('application/json', content_type)`
+/// (`rest_framework/utils/mediatypes.py:_MediaType.match` with the parser
+/// side holding no params and no wildcards): the JSON parser is first in
+/// `DEFAULT_PARSER_CLASSES` (no override in `settings/common.py`), so any
+/// content type it satisfies parses as JSON — `application/json` in any
+/// case with any params, plus the `*/*`, `application/*` (and `*/json`)
+/// request-side wildcards. The `v1_cycles_modules::body` `select_parser`
+/// precedent (PIDASHCONV-627); form/multipart divert to `parse_html_body`
+/// above (PIDASHCONV-1508), never reach this check.
+fn matches_json_parser(content_type: &str) -> bool {
+    let base = content_type.split(';').next().unwrap_or("").trim();
+    let Some((main, sub)) = base.split_once('/') else {
+        return false;
+    };
+    (main == "*" || main.eq_ignore_ascii_case("application"))
+        && (sub == "*" || sub.eq_ignore_ascii_case("json"))
 }
 
 // ---------------------------------------------------------------------------
@@ -1534,7 +1611,7 @@ async fn enqueue_message(pool: &sqlx::PgPool, message: pidash_jobs::TaskMessage)
 /// minimum workspace sort order minus 10000 (65535 when none), and only
 /// then does the member row insert. `created_by` is the crum user (`None`
 /// for anonymous joins); `updated_by` stays `NULL`.
-async fn create_project_member(
+pub(crate) async fn create_project_member(
     pool: &sqlx::PgPool,
     project_id: &uuid::Uuid,
     member_id: Option<uuid::Uuid>,
@@ -1561,45 +1638,54 @@ async fn create_project_member(
         .await
         .map_err(|_| Denial::ServerError)?;
         let sort_order = min_sort.map(|min| min - 10000.0).unwrap_or(65535.0);
-        sqlx::query(
-            "INSERT INTO project_user_properties (id, workspace_id, project_id, user_id,
-                filters, display_filters, display_properties, rich_filters, preferences,
-                sort_order, created_by_id, updated_by_id, created_at, updated_at, deleted_at)
-             VALUES ($1, $2, $3, $4,
-                $5::jsonb, $6::jsonb, $7::jsonb, '{}', $8::jsonb,
-                $9, $10, NULL, now(), now(), NULL)",
+        let filters: Value =
+            serde_json::from_str(&default_issue_filters_json()).map_err(|_| Denial::ServerError)?;
+        let display_filters: Value = serde_json::from_str(&default_issue_display_filters_json())
+            .map_err(|_| Denial::ServerError)?;
+        let display_properties: Value =
+            serde_json::from_str(&default_issue_display_properties_json())
+                .map_err(|_| Denial::ServerError)?;
+        let prefs: Value =
+            serde_json::from_str(&default_preferences_json()).map_err(|_| Denial::ServerError)?;
+        pidash_services::domain::projects::members::add_property_db_now(
+            pool,
+            &pidash_services::domain::projects::members::NewMemberProperty {
+                workspace_id,
+                project_id: *project_id,
+                user_id: member_id,
+                filters: &filters,
+                display_filters: &display_filters,
+                display_properties: &display_properties,
+                rich_filters: &serde_json::json!({}),
+                preferences: &prefs,
+                sort_order,
+                created_by,
+                now: chrono::Utc::now(),
+            },
         )
-        .bind(uuid::Uuid::new_v4())
-        .bind(workspace_id)
-        .bind(project_id)
-        .bind(member_id)
-        .bind(default_issue_filters_json())
-        .bind(default_issue_display_filters_json())
-        .bind(default_issue_display_properties_json())
-        .bind(default_preferences_json())
-        .bind(sort_order)
-        .bind(created_by)
-        .execute(pool)
         .await
         .map_err(integrity_denial)?;
     }
-    sqlx::query(
-        "INSERT INTO project_members (id, workspace_id, project_id, member_id, role,
-            comment, view_props, default_props, preferences, sort_order,
-            is_active, created_by_id, updated_by_id, created_at, updated_at, deleted_at)
-         VALUES ($1, $2, $3, $4, $5,
-            NULL, $6::jsonb, $6::jsonb, $7::jsonb, 65535,
-            true, $8, NULL, now(), now(), NULL)",
+    let props: Value =
+        serde_json::from_str(&default_member_props_json()).map_err(|_| Denial::ServerError)?;
+    let prefs: Value =
+        serde_json::from_str(&default_preferences_json()).map_err(|_| Denial::ServerError)?;
+    pidash_services::domain::projects::members::add(
+        pool,
+        &pidash_services::domain::projects::members::NewProjectMember {
+            workspace_id,
+            project_id: Some(*project_id),
+            user_id: member_id,
+            role,
+            created_by,
+            view_props: &props,
+            default_props: &props,
+            preferences: &prefs,
+            now: chrono::Utc::now(),
+            ignore_conflicts: false,
+            db_now: true,
+        },
     )
-    .bind(uuid::Uuid::new_v4())
-    .bind(workspace_id)
-    .bind(project_id)
-    .bind(member_id)
-    .bind(role)
-    .bind(default_member_props_json())
-    .bind(default_preferences_json())
-    .bind(created_by)
-    .execute(pool)
     .await
     .map_err(integrity_denial)?;
     Ok(())
@@ -2145,8 +2231,8 @@ async fn invite_create(
         "workspaces/<slug>/projects/<project_id>/invitations/",
     )
     .await?;
-    let body = match parse_body(&state, req).await {
-        Ok(body) => body,
+    let body = match parse_body(&state, req, &INVITE_BODY_SPEC).await {
+        Ok((body, _)) => body,
         Err(response) => return Ok(response),
     };
     // `request.data.get("emails", [])` — a non-dict body has no `.get`
@@ -2425,47 +2511,27 @@ async fn bulk_insert_members(
     if project_ids.is_empty() {
         return Ok(());
     }
-    let props = default_member_props_json();
-    let prefs = default_preferences_json();
-    let mut sql = String::from(
-        "INSERT INTO project_members (id, workspace_id, project_id, member_id, role,
-            comment, view_props, default_props, preferences, sort_order,
-            is_active, created_by_id, updated_by_id, created_at, updated_at, deleted_at)
-         VALUES ",
-    );
-    for (index, _) in project_ids.iter().enumerate() {
-        if index > 0 {
-            sql.push_str(", ");
-        }
-        let base = index * 8;
-        sql.push_str(&format!(
-            "(${}, ${}, ${}, ${}, ${}, NULL, ${}::jsonb, ${}::jsonb, ${}::jsonb, \
-             65535, true, ${}, NULL, now(), now(), NULL)",
-            base + 1,
-            base + 2,
-            base + 3,
-            base + 4,
-            base + 5,
-            base + 6,
-            base + 6,
-            base + 7,
-            base + 8,
-        ));
-    }
-    sql.push_str(" ON CONFLICT DO NOTHING");
-    let mut query = sqlx::query(&sql);
-    for project_id in project_ids {
-        query = query
-            .bind(uuid::Uuid::new_v4())
-            .bind(*workspace_id)
-            .bind(*project_id)
-            .bind(*user_id)
-            .bind(role)
-            .bind(props.clone())
-            .bind(prefs.clone())
-            .bind(*user_id);
-    }
-    query.execute(pool).await.map_err(integrity_denial)?;
+    let props: Value =
+        serde_json::from_str(&default_member_props_json()).map_err(|_| Denial::ServerError)?;
+    let prefs: Value =
+        serde_json::from_str(&default_preferences_json()).map_err(|_| Denial::ServerError)?;
+    let rows: Vec<pidash_services::domain::projects::members::BulkRow> = project_ids
+        .iter()
+        .map(
+            |project_id| pidash_services::domain::projects::members::BulkRow {
+                workspace_id: *workspace_id,
+                project_id: Some(*project_id),
+                user_id: *user_id,
+                role: pidash_services::domain::projects::members::RoleBind::Int(i64::from(role)),
+                created_by: Some(*user_id),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            },
+        )
+        .collect();
+    pidash_services::domain::projects::members::bulk_add(pool, &rows, &props, &prefs, true)
+        .await
+        .map_err(integrity_denial)?;
     Ok(())
 }
 
@@ -2481,50 +2547,37 @@ async fn bulk_insert_user_properties(
     if project_ids.is_empty() {
         return Ok(());
     }
-    let filters = default_issue_filters_json();
-    let display_filters = default_issue_display_filters_json();
-    let display_properties = default_issue_display_properties_json();
-    let prefs = default_preferences_json();
-    let mut sql = String::from(
-        "INSERT INTO project_user_properties (id, workspace_id, project_id, user_id,
-            filters, display_filters, display_properties, rich_filters, preferences,
-            sort_order, created_by_id, updated_by_id, created_at, updated_at, deleted_at)
-         VALUES ",
-    );
-    for (index, _) in project_ids.iter().enumerate() {
-        if index > 0 {
-            sql.push_str(", ");
-        }
-        let base = index * 9;
-        sql.push_str(&format!(
-            "(${}, ${}, ${}, ${}, ${}::jsonb, ${}::jsonb, ${}::jsonb, '{{}}', ${}::jsonb, \
-             65535, ${}, NULL, now(), now(), NULL)",
-            base + 1,
-            base + 2,
-            base + 3,
-            base + 4,
-            base + 5,
-            base + 6,
-            base + 7,
-            base + 8,
-            base + 9,
-        ));
-    }
-    sql.push_str(" ON CONFLICT DO NOTHING");
-    let mut query = sqlx::query(&sql);
-    for project_id in project_ids {
-        query = query
-            .bind(uuid::Uuid::new_v4())
-            .bind(*workspace_id)
-            .bind(*project_id)
-            .bind(*user_id)
-            .bind(filters.clone())
-            .bind(display_filters.clone())
-            .bind(display_properties.clone())
-            .bind(prefs.clone())
-            .bind(*user_id);
-    }
-    query.execute(pool).await.map_err(integrity_denial)?;
+    let filters: Value =
+        serde_json::from_str(&default_issue_filters_json()).map_err(|_| Denial::ServerError)?;
+    let display_filters: Value = serde_json::from_str(&default_issue_display_filters_json())
+        .map_err(|_| Denial::ServerError)?;
+    let display_properties: Value = serde_json::from_str(&default_issue_display_properties_json())
+        .map_err(|_| Denial::ServerError)?;
+    let prefs: Value =
+        serde_json::from_str(&default_preferences_json()).map_err(|_| Denial::ServerError)?;
+    let rich = serde_json::json!({});
+    let rows: Vec<pidash_services::domain::projects::members::BulkProperty<'_>> = project_ids
+        .iter()
+        .map(
+            |project_id| pidash_services::domain::projects::members::BulkProperty {
+                workspace_id: *workspace_id,
+                project_id: *project_id,
+                user_id: *user_id,
+                filters: &filters,
+                display_filters: &display_filters,
+                display_properties: &display_properties,
+                rich_filters: &rich,
+                preferences: &prefs,
+                sort_order: 65535.0,
+                created_by: Some(*user_id),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            },
+        )
+        .collect();
+    pidash_services::domain::projects::members::bulk_add_properties(pool, &rows, true)
+        .await
+        .map_err(integrity_denial)?;
     Ok(())
 }
 
@@ -2589,8 +2642,8 @@ async fn user_invite_create(
         "users/me/workspaces/<slug>/projects/invitations/",
     )
     .await?;
-    let body = match parse_body(&state, req).await {
-        Ok(body) => body,
+    let body = match parse_body(&state, req, &INVITE_BODY_SPEC).await {
+        Ok((body, _)) => body,
         Err(response) => return Ok(response),
     };
     // `request.data.get("project_ids", [])` — a non-dict body has no
@@ -2676,16 +2729,12 @@ async fn user_invite_create(
     }
     if !project_ids.is_empty() {
         // Reactivate live rows (`QuerySet.update` stamps no `updated_at`).
-        sqlx::query(
-            r#"UPDATE project_members pm SET is_active = true
-               FROM workspaces w
-               WHERE pm.workspace_id = w.id AND w.slug = $1 AND pm.project_id = ANY($2)
-                 AND pm.member_id = $3 AND pm.deleted_at IS NULL"#,
+        pidash_services::domain::projects::members::reactivate_slug(
+            &pool,
+            &slug,
+            &project_ids,
+            resolved.id,
         )
-        .bind(&slug)
-        .bind(&project_ids)
-        .bind(resolved.id)
-        .execute(&pool)
         .await
         .map_err(|_| Denial::ServerError)?;
         // `bulk_create(..., ignore_conflicts=True)` — ONE statement
@@ -2780,8 +2829,8 @@ async fn join_post(
     // 415 / malformed-body / non-dict failure.
     let pk = pk.parse::<uuid::Uuid>().map_err(|_| Denial::ServerError)?;
     let invite = fetch_join_invite(&pool, &slug, &project_id, &pk).await?;
-    let body = match parse_body(&state, req).await {
-        Ok(body) => body,
+    let body = match parse_body(&state, req, &INVITE_BODY_SPEC).await {
+        Ok((body, _)) => body,
         Err(response) => return Ok(response),
     };
     // `request.data.get(...)` — a non-dict body has no `.get`.
@@ -2859,37 +2908,36 @@ async fn join_post(
             } else {
                 invite.role
             };
-            sqlx::query(
-                "INSERT INTO workspace_members (id, workspace_id, member_id, role,
-                    company_role, view_props, default_props, issue_props, is_active,
-                    getting_started_checklist, tips, explored_features,
-                    created_by_id, updated_by_id, created_at, updated_at, deleted_at)
-                 VALUES ($1, $2, $3, $4,
-                    NULL, $5::jsonb, $5::jsonb, $6::jsonb, true,
-                    '{}', '{}', '{}',
-                    $7, NULL, now(), now(), NULL)",
+            // The model defaults serialize from fixed `json!` values;
+            // reparse for the domain input (jsonb storage normalizes
+            // key order either way, so the committed bytes match).
+            let view_props: Value = serde_json::from_str(&default_workspace_props_json())
+                .map_err(|_| Denial::ServerError)?;
+            let issue_props: Value = serde_json::from_str(&default_issue_props_json())
+                .map_err(|_| Denial::ServerError)?;
+            members::add(
+                &pool,
+                &members::NewMember {
+                    workspace_id: invite.workspace_id,
+                    user_id,
+                    role,
+                    company_role: None,
+                    created_by,
+                    view_props: &view_props,
+                    default_props: &view_props,
+                    issue_props: &issue_props,
+                    now: chrono::Utc::now(),
+                    ignore_conflicts: false,
+                    db_now: true,
+                },
             )
-            .bind(uuid::Uuid::new_v4())
-            .bind(invite.workspace_id)
-            .bind(user_id)
-            .bind(role)
-            .bind(default_workspace_props_json())
-            .bind(default_issue_props_json())
-            .bind(created_by)
-            .execute(&pool)
             .await
             .map_err(integrity_denial)?;
         }
         Some((id,)) => {
-            sqlx::query(
-                "UPDATE workspace_members SET is_active = true, updated_at = now(), updated_by_id = $1
-                 WHERE id = $2",
-            )
-            .bind(created_by)
-            .bind(id)
-            .execute(&pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
+            members::activate_by_id(&pool, id, created_by)
+                .await
+                .map_err(|_| Denial::ServerError)?;
         }
     }
     // The existing project membership is looked up by workspace only —
@@ -2911,15 +2959,9 @@ async fn join_post(
         Some((id,)) => {
             // `project_member.role = project_member.role`: the role
             // re-saves unchanged (ported quirk).
-            sqlx::query(
-                "UPDATE project_members SET is_active = true, updated_at = now(), updated_by_id = $1
-                 WHERE id = $2",
-            )
-            .bind(created_by)
-            .bind(id)
-            .execute(&pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
+            pidash_services::domain::projects::members::reactivate_by_id(&pool, id, created_by)
+                .await
+                .map_err(|_| Denial::ServerError)?;
         }
     }
     Ok(json_response(StatusCode::OK, JOIN_ACCEPTED_BODY.to_owned()))
@@ -2976,8 +3018,8 @@ async fn fav_create(
         "workspaces/<slug>/user-favorite-projects/",
     )
     .await?;
-    let body = match parse_body(&state, req).await {
-        Ok(body) => body,
+    let body = match parse_body(&state, req, &INVITE_BODY_SPEC).await {
+        Ok((body, _)) => body,
         Err(response) => return Ok(response),
     };
     // `request.data.get("project")` — a non-dict body has no `.get`.
@@ -3157,8 +3199,8 @@ async fn board_create(
     let pool = pool_of(&state)?.clone();
     let project_id = resolve_project_id(&pool, &slug, &project_raw).await?;
     check_board_gate(&pool, &slug, &project_id, &resolved.id, "POST").await?;
-    let body = match parse_body(&state, req).await {
-        Ok(body) => body,
+    let body = match parse_body(&state, req, &INVITE_BODY_SPEC).await {
+        Ok((body, _)) => body,
         Err(response) => return Ok(response),
     };
     // `request.data.get(...)` — a non-dict body has no `.get`.
@@ -3699,9 +3741,12 @@ fn python_type_name(value: &Value) -> &'static str {
 
 /// `PrimaryKeyRelatedField.to_internal_value` for the `created_by` /
 /// `updated_by` / `intake` PATCH keys: `None` stays (all three allow
-/// null); bools fail `incorrect_type` outright (DRF raises `TypeError`
-/// before the lookup); strings and ints prep as UUIDs — a prep failure
-/// is Django's curly-quote `invalid` message *as a field error* (DRF
+/// null), and so does the exact empty string (DRF
+/// `RelatedField.run_validation` forces `''` to `None` on every input,
+/// JSON included — PIDASHCONV-1518); bools fail `incorrect_type`
+/// outright (DRF raises `TypeError` before the lookup); strings and
+/// ints prep as UUIDs — a prep failure is Django's curly-quote
+/// `invalid` message *as a field error* (DRF
 /// converts the escaped `ValidationError` via `get_error_detail`, live
 /// probe 2026-10-03), and a prep success must exist in the queryset or
 /// fail `does_not_exist` (the `users` table has no soft-delete column;
@@ -3719,6 +3764,9 @@ async fn validate_patch_pk(
     value: &Value,
 ) -> Result<PkValidation, Denial> {
     if value.is_null() {
+        return Ok(PkValidation::Null);
+    }
+    if matches!(value, Value::String(text) if text.is_empty()) {
         return Ok(PkValidation::Null);
     }
     if value.is_boolean() {
@@ -3787,8 +3835,8 @@ async fn board_partial_update(
     check_board_gate(&pool, &slug, &project_id, &resolved.id, "PATCH").await?;
     let pk = pk.parse::<uuid::Uuid>().map_err(|_| Denial::ServerError)?;
     let (current, _, _) = fetch_board_global(&pool, &pk).await?;
-    let body = match parse_body(&state, req).await {
-        Ok(body) => body,
+    let (body, from_form) = match parse_body(&state, req, &BOARD_PATCH_BODY_SPEC).await {
+        Ok(parsed) => parsed,
         Err(response) => return Ok(response),
     };
     // `Serializer.to_internal_value` on a non-dict: `non_field_errors`
@@ -3805,6 +3853,34 @@ async fn board_partial_update(
             return Err(Denial::Raw(StatusCode::BAD_REQUEST, errors.body()));
         }
     };
+    // HTML-only input rules (DRF `Field.get_value`, `fields.py:407-429` +
+    // `JSONField.get_value`, verified live — PIDASHCONV-1508): a blank
+    // `allow_null` scalar arrives as `None` (the blank-skips in
+    // `BOARD_PATCH_BODY_SPEC` already dropped the bools and
+    // `updated_by`), and an HTML `view_props` string JSON-decodes (the
+    // `JSONString` mark) — or fails the field below. The JSON arm skips
+    // all of this: `""` runs `to_internal_value` there, except on the
+    // PK keys, where the `RelatedField` rule maps it to null first
+    // (PIDASHCONV-1518).
+    let mut data = data.clone();
+    let mut view_props_json_failed = false;
+    let mut view_props_decoded_null = false;
+    if from_form {
+        for key in ["entity_identifier", "deleted_at", "created_by", "intake"] {
+            if matches!(data.get(key), Some(Value::String(text)) if text.is_empty()) {
+                data.insert(key.to_owned(), Value::Null);
+            }
+        }
+        if let Some(Value::String(text)) = data.remove("view_props") {
+            match serde_json::from_str(&text) {
+                Ok(Value::Null) => view_props_decoded_null = true,
+                Ok(parsed) => {
+                    data.insert("view_props".to_owned(), parsed);
+                }
+                Err(_) => view_props_json_failed = true,
+            }
+        }
+    }
     let mut errors = BoardPatchErrors::new();
     let mut sets: Vec<(&'static str, PatchValue)> = Vec::new();
     // The just-assigned views render in-memory (user key order), like Django.
@@ -3857,7 +3933,16 @@ async fn board_partial_update(
             }
         }
     }
-    if let Some(value) = data.get("view_props") {
+    if view_props_json_failed {
+        errors.push("view_props", "Value must be valid JSON.".to_owned());
+    } else if view_props_decoded_null {
+        // HTML `view_props=null` decodes to None after
+        // `validate_empty_values` ran (the `JSONString` is non-empty, so
+        // the null check never fires): it validates, then dies at save
+        // with the not-null `IntegrityError` 400. The NULL set below
+        // reproduces that write; sibling field errors still win first.
+        sets.push(("view_props", PatchValue::Null));
+    } else if let Some(value) = data.get("view_props") {
         if value.is_null() {
             errors.push("view_props", "This field may not be null.".to_owned());
         } else {
@@ -3885,8 +3970,23 @@ async fn board_partial_update(
     ] {
         if let Some(value) = data.get(field) {
             match validate_patch_pk(&pool, table, live_only, value).await? {
-                PkValidation::Null => sets.push((column, PatchValue::Null)),
-                PkValidation::Id(id) => sets.push((column, PatchValue::Uuid(id))),
+                // `updated_by` validates (a bad value still 400s) but
+                // never writes: `BaseModel.save()` re-stamps
+                // `updated_by` to the current user on every update
+                // (`db/models/base.py`, via crum), overwriting the
+                // validated value — so the audit stamp below always
+                // wins, and emitting both would double-SET the column
+                // (Postgres 42601, PIDASHCONV-1518).
+                PkValidation::Null => {
+                    if field != "updated_by" {
+                        sets.push((column, PatchValue::Null));
+                    }
+                }
+                PkValidation::Id(id) => {
+                    if field != "updated_by" {
+                        sets.push((column, PatchValue::Uuid(id)));
+                    }
+                }
                 PkValidation::FieldError(message) => errors.push(field, message),
             }
         }
@@ -4072,6 +4172,39 @@ mod tests {
             INTEGRITY_ERROR_BODY,
             handle_exception(&ViewError::IntegrityError).1
         );
+    }
+
+    /// `matches_json_parser` truth table, mirroring DRF
+    /// `media_type_matches('application/json', content_type)`
+    /// (`rest_framework/utils/mediatypes.py`), verified against the
+    /// installed DRF (PIDASHCONV-1517).
+    #[test]
+    fn json_parser_match_table() {
+        let cases: &[(&str, bool)] = &[
+            ("application/json", true),
+            ("Application/JSON", true),
+            ("application/json; charset=utf-8", true),
+            ("*/*", true),
+            ("application/*", true),
+            ("*/json", true),
+            ("text/plain", false),
+            ("", false),
+            ("foo", false),
+            ("application/json-patch", false),
+            ("text/*", false),
+            ("multipart/*", false),
+            ("*", false),
+            ("application/xml", false),
+            ("application / json", false),
+            ("* /*", false),
+        ];
+        for (content_type, want) in cases {
+            assert_eq!(
+                matches_json_parser(content_type),
+                *want,
+                "content type {content_type:?}"
+            );
+        }
     }
 
     #[test]
@@ -4642,6 +4775,51 @@ mod tests {
             ]
         );
         assert_eq!(message.kwargs.get("using"), Some(&Value::Null));
+    }
+
+    #[test]
+    fn html_body_negotiates() {
+        // PIDASHCONV-1508: form/multipart parse through the shared DRF
+        // negotiation (last value wins; blanks kept or skipped per spec).
+        let headers_for = |content_type: &str, len: usize| {
+            let mut headers = axum::http::HeaderMap::new();
+            headers.insert("content-type", content_type.parse().unwrap());
+            headers.insert("content-length", len.to_string().parse().unwrap());
+            headers
+        };
+        // Raw-`.get` handlers: blanks stay in the map, last value wins.
+        let body = b"email=x%40example.com&accepted=0&accepted=1";
+        let headers = headers_for("application/x-www-form-urlencoded", body.len());
+        let value = parse_html_body(&headers, body, &INVITE_BODY_SPEC).expect("form");
+        assert_eq!(value["email"], Value::String("x@example.com".to_owned()));
+        assert_eq!(value["accepted"], Value::String("1".to_owned()));
+        let body = b"emails=";
+        let headers = headers_for(
+            "application/x-www-form-urlencoded; charset=utf-8",
+            body.len(),
+        );
+        let value = parse_html_body(&headers, body, &INVITE_BODY_SPEC).expect("blank form");
+        assert_eq!(value["emails"], Value::String(String::new()));
+        // Board PATCH: blank bools and `updated_by` behave as absent;
+        // other blanks stay for the handler's blank-to-null rules.
+        let body = b"is_votes_enabled=&updated_by=&entity_name=&intake=";
+        let headers = headers_for("application/x-www-form-urlencoded", body.len());
+        let value = parse_html_body(&headers, body, &BOARD_PATCH_BODY_SPEC).expect("patch form");
+        let map = value.as_object().expect("object");
+        assert!(!map.contains_key("is_votes_enabled"));
+        assert!(!map.contains_key("updated_by"));
+        assert_eq!(map["entity_name"], Value::String(String::new()));
+        assert_eq!(map["intake"], Value::String(String::new()));
+        // Text-only multipart decodes like the equivalent form body.
+        let body = b"--BOUND\r\nContent-Disposition: form-data; name=\"accepted\"\r\n\r\n0\r\n--BOUND--\r\n";
+        let headers = headers_for("multipart/form-data; boundary=BOUND", body.len());
+        let value = parse_html_body(&headers, body, &INVITE_BODY_SPEC).expect("multipart");
+        assert_eq!(value["accepted"], Value::String("0".to_owned()));
+        // Multipart without a boundary is DRF's `ParseError` 400.
+        let body = b"not multipart";
+        let headers = headers_for("multipart/form-data", body.len());
+        let response = parse_html_body(&headers, body, &INVITE_BODY_SPEC).expect_err("400");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }
 

@@ -63,7 +63,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::Response;
 use axum::Router;
-use chrono::{SecondsFormat, Utc};
+use chrono::Utc;
 
 use pidash_db::app_integrations::queries_git;
 use pidash_db::config::encryption::Keyring;
@@ -71,6 +71,9 @@ use pidash_db::integrations::git_models::git_provider_account::GitProviderAccoun
 
 use super::gates::{decide_gate, tenant_context, Gate, GateOutcome};
 use crate::state::AppState;
+use crate::uuid_path::{classify_uuid_segment, UuidSegment};
+use pidash_compat::response::json_response;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 
 /// Exact bytes of the providers payload (`registry.py:45-53`).
 pub const PROVIDERS_BODY: &str = r#"{"providers":[{"key":"github","display_name":"GitHub","code_review_term":"pull request"},{"key":"gitlab","display_name":"GitLab","code_review_term":"merge request"}]}"#;
@@ -84,8 +87,6 @@ pub const WORKSPACE_NOT_FOUND_BODY: &str = r#"{"detail":"Not found."}"#;
 /// `get_object_or_404(GitProviderAccount, ...)` body (`git.py:100,105,120`).
 pub const ACCOUNT_NOT_FOUND_BODY: &str =
     r#"{"detail":"No GitProviderAccount matches the given query."}"#;
-/// Generic 500 (`views/base.py:99-103`).
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 
 /// GitHub API base (`utils/github_client.py:22`): the credential host is
 /// never consulted for github — verification and listing always hit
@@ -200,14 +201,6 @@ fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
 }
 
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("static json response")
-}
-
 fn denial_response(denial: Denial) -> Response {
     let (status, body) = denial.status_and_body();
     json_response(status, body)
@@ -303,10 +296,12 @@ fn pool_of(state: &AppState) -> Result<sqlx::PgPool, Denial> {
 
 /// `verified_at.isoformat() if verified_at else None`
 /// (`services.py:273`): Python renders a UTC-aware datetime as
-/// `...+00:00` with microseconds only when nonzero — exactly
-/// `AutoSi` without `Z`.
+/// `...+00:00` with exactly six fraction digits when microseconds
+/// are nonzero, none when zero — via
+/// [`crate::assistant::common::py_iso`] (chrono `AutoSi` is not
+/// equivalent: it trims trailing zeros. PIDASHCONV-1464).
 fn isoformat_or_none(dt: Option<chrono::DateTime<Utc>>) -> serde_json::Value {
-    dt.map(|dt| serde_json::Value::String(dt.to_rfc3339_opts(SecondsFormat::AutoSi, false)))
+    dt.map(|dt| serde_json::Value::String(crate::assistant::common::py_iso(&dt)))
         .unwrap_or(serde_json::Value::Null)
 }
 
@@ -1188,8 +1183,9 @@ async fn create_account(
 
 /// Shared detail lookup for get/delete/repos:
 /// `get_object_or_404(GitProviderAccount, id, workspace__slug)`
-/// (`git.py:100,105,120`). A non-UUID `account_id` proxies to Django —
-/// its `<uuid:>` converter 404s there exactly as before the cutover.
+/// (`git.py:100,105,120`). Only the canonical spelling is served: any
+/// other spelling proxies to Django, whose `<uuid:>` converter 404s
+/// there exactly as before the cutover (PIDASHCONV-1463).
 // `Response` is axum's handle type, so boxing it buys no runtime win;
 // the crate-wide `Result<_, Response>` helper shape stays as-is.
 #[allow(clippy::result_large_err)]
@@ -1199,9 +1195,11 @@ async fn detail_or_proxy(
     account_id: &str,
     req: axum::extract::Request,
 ) -> Result<GitProviderAccount, Response> {
-    let account_uuid = match account_id.parse::<uuid::Uuid>() {
-        Ok(id) => id,
-        Err(_) => return Err(crate::edge::proxy(State(state.clone()), req).await),
+    let account_uuid = match classify_uuid_segment(account_id) {
+        UuidSegment::Canonical(id) => id,
+        UuidSegment::NonCanonical | UuidSegment::Garbage => {
+            return Err(crate::edge::proxy(State(state.clone()), req).await)
+        }
     };
     let pool = pool_of(state).map_err(denial_response)?;
     match queries_git::fetch_provider_account_detail(&pool, account_uuid, slug).await {
@@ -1372,6 +1370,35 @@ async fn list_repos(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn isoformat_or_none_matches_python_isoformat() {
+        // `None` renders `null`; whole seconds render no fraction;
+        // trailing-zero micros keep six digits; nanosecond values
+        // truncate to microseconds (PIDASHCONV-1464).
+        assert_eq!(isoformat_or_none(None), serde_json::Value::Null);
+        let whole = chrono::DateTime::parse_from_rfc3339("2026-10-22T10:00:05+00:00")
+            .expect("parses")
+            .with_timezone(&Utc);
+        assert_eq!(
+            isoformat_or_none(Some(whole)),
+            serde_json::json!("2026-10-22T10:00:05+00:00")
+        );
+        let trailing = chrono::DateTime::parse_from_rfc3339("2026-10-22T10:00:05.12+00:00")
+            .expect("parses")
+            .with_timezone(&Utc);
+        assert_eq!(
+            isoformat_or_none(Some(trailing)),
+            serde_json::json!("2026-10-22T10:00:05.120000+00:00")
+        );
+        let nanos = chrono::DateTime::parse_from_rfc3339("2026-10-22T10:00:05.123456789+00:00")
+            .expect("parses")
+            .with_timezone(&Utc);
+        assert_eq!(
+            isoformat_or_none(Some(nanos)),
+            serde_json::json!("2026-10-22T10:00:05.123456+00:00")
+        );
+    }
 
     #[test]
     fn providers_body_is_byte_exact() {

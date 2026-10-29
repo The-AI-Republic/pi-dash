@@ -36,9 +36,9 @@
 //! * Relation reference pools reuse [`MEMBER_PROJECT_ISSUES_SQL`] as an
 //!   `IN` subquery (binds `$1`/`$2`), never a forked predicate list.
 //!   `OWN_PROJECT_ISSUES_PREDICATE` slots in as `$3` on the own-project
-//!   pool. (Its doc points at the assistant's `SCOPED_ISSUES_SQL`, which
-//!   wrongly excludes stateless issues — a foundation port bug flagged
-//!   in the PR, not followed here.)
+//!   pool. (Its doc points at the assistant's `SCOPED_ISSUES_SQL`,
+//!   whose stateless exclusion PIDASHCONV-1250 fixed null-safe; not
+//!   followed here.)
 //! * Reference spelling follows the D-12 [`classify_ref`] contract; the
 //!   v1 relations handler parses a more lenient UUID grammar
 //!   (misplaced hyphens). Realistic refs agree on both; the D-12 golden
@@ -53,33 +53,67 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
+use sqlx::postgres::PgRow;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use crate::admission::RedisAdmissionCache;
-use crate::dispatch::{append_event, dispatch_agent_run};
-use crate::orchestration::{LiveCreationStore, StoreDeps};
+use crate::dispatch::{append_event, dispatch_agent_run, DispatchDecision};
+use crate::issue_transition::WorkerTaskEnqueueHook;
+use crate::orchestration::{
+    fire_tick_seam::{emit_logs, lock_ticker_by_issue_sql, map_ticker},
+    live_inputs::JobsMatcher,
+    preflight_eligibility_or_bounce, LiveCreationStore, StoreDeps,
+};
 use crate::queue::{enqueue, enqueue_in, NewJob};
+use crate::runner_runs::sweeps_chat::terminal_effects_job;
 use crate::tasks_cleanup::deletion::SOFT_DELETE_TASK;
 use pidash_db::app_pages::strip::ml_strip_tags;
-use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings};
+use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings, RunnerSettings};
+use pidash_db::entity::comment_hooks::description_stripped_for;
 use pidash_db::orchestration::querysets::MEMBER_PROJECT_ISSUES_SQL;
+use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
 use pidash_db::tx::Transaction;
 use pidash_services::assistant::markdown::to_safe_html;
 use pidash_services::assistant::seams::agent_model_profile_for_user;
 use pidash_services::assistant::tools_issues::{escape_icontains, PROJECT_WRITE_GATE_SQL};
+use pidash_services::dispatch::policy::UserFlags;
 use pidash_services::dispatch::tools as plan;
-use pidash_services::dispatch::{consume_admission_token, LlmProfile};
+use pidash_services::dispatch::{
+    admission::AdmissionCache, consume_admission_token, DeferredConsume, LlmProfile,
+};
+use pidash_services::domain::activity::TaskEnqueueHook;
+use pidash_services::domain::clock::apply_clock_write;
+use pidash_services::domain::comments as comment_domain;
+use pidash_services::domain::identity::AgentUserCollisionError;
+use pidash_services::domain::issues as domain_issues;
+use pidash_services::domain::issues::IssueFieldSet;
+use pidash_services::domain::relations as relation_domain;
+use pidash_services::domain::transition::IssueTransitionHook;
+use pidash_services::domain::{self, WriteActor, WriteCtx, WriteScope};
 use pidash_services::extensions::CloudAgentToolsetsSeam;
-use pidash_services::orchestration::creation::STATE_SELECT_SQL;
+use pidash_services::orchestration::clock::{ClockWrite, ProjectClockPolicy};
+use pidash_services::orchestration::creation::{
+    AdmissionError, CreationError, CreationSeam, ExecutionError, ExecutionFields, ExecutionRequest,
+    FinalizeAgentRunSeam, IssueView, LockedIssue, NewAgentRun, PodView, ProjectView, RenderBundle,
+    RenderedTurn, RunView, RunnerView, StateView, STATE_SELECT_SQL,
+};
 use pidash_services::orchestration::entries::{
-    handle_issue_state_transition, PreflightSeam, TransitionRequest,
+    fire_state_transition, handle_issue_state_transition, BindingView, EntriesSeam, FireOutcome,
+    FireRequest, NewSchedulerRun, PreflightSeam, ProjectRoleFacts, SchedulerView,
+    TransitionRequest, WorkspaceView, CLOCK_POLICY_SQL, PRIOR_STATE_SELECT_SQL,
 };
 use pidash_services::orchestration::relations as rel;
+use pidash_services::prompting::composer::{OverrideIndex, OverrideRow};
+use pidash_services::runner_runs::{finalization, LifecycleEffect};
+use pidash_services::runner_sessions::live_drains::drain_pod_by_id;
+use pidash_types::dispatch::AgentExecutorKind;
 
 use super::agent::{ToolExecutor, ToolOutcome};
 use super::github::{GithubAppContext, GithubFailure, GithubRestClient};
 use super::validation::ValidatedArgs;
+use pidash_compat::datetime::render_isoformat;
+use pidash_compat::db::is_unique_violation;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -260,6 +294,9 @@ fn parse_django_uuid(text: &str) -> Option<Uuid> {
 pub struct ToolCtx {
     /// Worker primary pool (reads, ledger, audit transactions).
     pub pool: PgPool,
+    /// The shared SeaORM connection (stage 8): domain writes run their
+    /// transactions on this handle.
+    pub orm: pidash_db::DatabaseConnection,
     /// `CLOUD_AGENT_*` (`audit_guards`, bounds, event cap).
     pub cloud: CloudAgentSettings,
     /// Managed-runner settings (transition store inputs).
@@ -270,6 +307,16 @@ pub struct ToolCtx {
     pub github: GithubAppContext,
     /// Injected cloud-agent toolsets seam (transition store inputs).
     pub toolsets: Arc<dyn CloudAgentToolsetsSeam>,
+    /// Shared Redis client (`None` when `REDIS_URL` is unset or
+    /// unparsable): the create fire's pod drain (PIDASHCONV-1494).
+    pub redis: Option<redis::Client>,
+    /// Runner settings (the create fire's pod drain inputs).
+    pub runner: RunnerSettings,
+    /// The worker's transition hook, registered on every domain write
+    /// txn (PIDASHCONV-1596): domain fns resolve it eagerly even when
+    /// the chain stays empty, and an unregistered lookup panics the
+    /// task. The same instance the sync drivers hold.
+    pub transition_hook: Arc<dyn IssueTransitionHook>,
 }
 
 /// The `_scope` outcome (`tools.py:46-73`): the run's tenant position
@@ -491,9 +538,26 @@ pub async fn write_commit(
     tool_name: &'static str,
     result: Value,
 ) -> Result<Value, ToolExecError> {
+    let run_id = audit.scope.run_id;
+    let value = write_commit_tx(ctx, audit, result).await?;
+    emit_completed(ctx, run_id, tool_name, plan::ToolRisk::Write).await?;
+    Ok(value)
+}
+
+/// Ledger success-mark plus commit: the write-path
+/// `transaction.atomic()` body (`tools.py:97-129`), without the
+/// `tool_completed` append (`tools.py:156`). The create caller commits
+/// through this so its post-save fire runs on commit-success — Django's
+/// signal fires inside the save, before the append — while the tool
+/// result still covers the append exactly as [`write_commit`] does.
+async fn write_commit_tx(
+    ctx: &ToolCtx,
+    audit: WriteAudit<'_>,
+    result: Value,
+) -> Result<Value, ToolExecError> {
     let WriteAudit {
         mut tx,
-        scope,
+        scope: _,
         ledger_id,
     } = audit;
     let bounded = plan::bounded(result.clone(), ctx.cloud.max_tool_result_bytes)?;
@@ -511,7 +575,6 @@ pub async fn write_commit(
         .execute(&mut **tx.inner())
         .await?;
     tx.commit().await?;
-    emit_completed(ctx, scope.run_id, tool_name, plan::ToolRisk::Write).await?;
     Ok(result)
 }
 
@@ -763,17 +826,6 @@ async fn bound_issue(
     .map_err(ToolExecError::Db)
 }
 
-/// Python `datetime.isoformat()` for an aware UTC timestamp: `+00:00`
-/// offset, six-digit microseconds only when nonzero (the
-/// `render_isoformat` precedent).
-fn render_isoformat(dt: DateTime<Utc>) -> String {
-    if dt.timestamp_subsec_micros() == 0 {
-        dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, false)
-    } else {
-        dt.to_rfc3339_opts(chrono::SecondsFormat::Micros, false)
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Read ops
 // ---------------------------------------------------------------------------
@@ -984,36 +1036,49 @@ async fn op_add_current_issue_comment(
     } else {
         ml_strip_tags(&html)
     };
-    let comment_id = Uuid::new_v4();
-    let description_id = Uuid::new_v4();
+    // Domain executor twins, in Django order. One `now()` read feeds
+    // all four stamps; the description stripped value is the
+    // `Description.save` recompute (Django's own `strip_tags`,
+    // entities verbatim, `None`-when-empty — `description.py:23-29`),
+    // not the comment's ML text (PIDASHCONV-1581 item 1).
     let now = Utc::now();
-    sqlx::query(plan::COMMENT_INSERT_SQL)
-        .bind(comment_id)
-        .bind(now)
-        .bind(scope.creator_id)
-        .bind(scope.workspace_id)
-        .bind(issue.project_id)
-        .bind(stripped.as_str())
-        .bind(html.as_str())
-        .bind(issue.id)
-        .bind(scope.run_id)
-        .execute(&mut **tx.inner())
+    let empty_json = Value::Object(Default::default());
+    let empty_list: Vec<String> = Vec::new();
+    let desc_stripped = description_stripped_for(Some(html.as_str()));
+    let rows = comment_domain::CommentRows {
+        id: Uuid::new_v4(),
+        description_id: Uuid::new_v4(),
+        created_at: now,
+        updated_at: now,
+        desc_created_at: now,
+        desc_updated_at: now,
+        workspace_id: scope.workspace_id,
+        project_id: issue.project_id,
+        issue_id: issue.id,
+        actor_id: Some(scope.creator_id),
+        created_by: Some(scope.creator_id),
+        updated_by: None,
+        deleted_at: None,
+        html: html.as_str(),
+        json: &empty_json,
+        stripped: stripped.as_str(),
+        desc_stripped: desc_stripped.as_deref(),
+        access: "INTERNAL",
+        speaker_type: "agent",
+        speaker_label: "Pi Dash Cloud Agent",
+        speaker_agent_run_id: Some(scope.run_id),
+        external_id: None,
+        external_source: None,
+        parent_id: None,
+        attachments: &empty_list,
+        labels: &empty_list,
+        edited_at: None,
+    };
+    comment_domain::insert_comment_row(&mut **tx.inner(), &rows).await?;
+    comment_domain::insert_description_row(&mut **tx.inner(), &rows).await?;
+    comment_domain::link_comment_description(&mut **tx.inner(), rows.id, rows.description_id)
         .await?;
-    sqlx::query(plan::COMMENT_DESCRIPTION_INSERT_SQL)
-        .bind(description_id)
-        .bind(now)
-        .bind(scope.creator_id)
-        .bind(scope.workspace_id)
-        .bind(issue.project_id)
-        .bind(html.as_str())
-        .bind(stripped.as_str())
-        .execute(&mut **tx.inner())
-        .await?;
-    sqlx::query(plan::COMMENT_DESCRIPTION_LINK_SQL)
-        .bind(comment_id)
-        .bind(description_id)
-        .execute(&mut **tx.inner())
-        .await?;
+    let comment_id = rows.id;
     let created = plan::comment_created(&comment_id.to_string());
     serde_json::to_value(created)
         .map_err(|error| ToolExecError::Failure(plan::ToolCallFailure::Failed(error.to_string())))
@@ -1051,9 +1116,31 @@ async fn bound_issue_tx(
     .map_err(ToolExecError::Db)
 }
 
+/// Map a domain-write failure onto the tool errors: the model only
+/// ever sees the message, the ledger the Python type. Fault-path only
+/// (the row write itself): races the old inline SQL would surface as
+/// `OperationalError`/`IntegrityError` arrive stringified instead.
+fn domain_error(error: domain::DomainError) -> ToolExecError {
+    ToolExecError::Db(sqlx::Error::Protocol(error.to_string()))
+}
+
+fn write_ctx(scope: &ToolScope, project_id: Uuid) -> WriteCtx {
+    WriteCtx::new(WriteActor {
+        user_id: scope.creator_id,
+        timezone: None,
+    })
+    .with_scope(WriteScope {
+        workspace_id: Some(scope.workspace_id),
+        project_id: Some(project_id),
+    })
+}
+
 /// `pidash_update_current_issue_workpad` (`tools.py:296-307`). A run
 /// with no bound issue updates zero rows (`pk=None`) and still reports
-/// `updated`, with `issue_id` rendering Python's `str(None)`.
+/// `updated`, with `issue_id` rendering Python's `str(None)`. The write
+/// rides `domain::issues::update_workpad` — the `QuerySet.update`
+/// equivalent, bare columns with no save signals — inside the audit
+/// transaction, exactly where the inline `UPDATE` ran.
 async fn op_update_current_issue_workpad(
     tx: &mut Transaction<'_>,
     scope: &ToolScope,
@@ -1067,13 +1154,14 @@ async fn op_update_current_issue_workpad(
                 attribute: "project_id",
             });
         };
-        sqlx::query(plan::WORKPAD_UPDATE_SQL)
-            .bind(work_item_id)
-            .bind(issue.project_id)
-            .bind(body)
-            .bind(Utc::now())
-            .execute(&mut **tx.inner())
-            .await?;
+        let _ = domain_issues::update_workpad(
+            &mut **tx.inner(),
+            work_item_id,
+            issue.project_id,
+            body,
+            Utc::now(),
+        )
+        .await?;
         let updated = plan::workpad_updated(&work_item_id.to_string());
         serde_json::to_value(updated).map_err(|error| {
             ToolExecError::Failure(plan::ToolCallFailure::Failed(error.to_string()))
@@ -1115,12 +1203,15 @@ async fn state_view_tx(
 /// a tool-supplied completed state, insert the issue plus its
 /// sequence row, and return the brief. The title/description are
 /// pre-validated by the dispatch; `stripped_title` is what stores.
+/// Returns the brief plus the post-commit fire inputs — the caller
+/// drives [`fire_create_transition`] once the audit commits.
 async fn op_create_project_issue(
+    ctx: &ToolCtx,
     tx: &mut Transaction<'_>,
     scope: &ToolScope,
     description: &str,
     stripped_title: &str,
-) -> Result<Value, ToolExecError> {
+) -> Result<(Value, CreateDispatch), ToolExecError> {
     // `run.scheduler_binding.project_id` (the raw attname): the tool
     // uses the binding's project even when the run also has a bound
     // issue in another project.
@@ -1139,11 +1230,20 @@ async fn op_create_project_issue(
             attribute: "project_id",
         });
     };
-    let locked: Option<Uuid> = sqlx::query_scalar(plan::CREATE_PROJECT_LOCK_SQL)
-        .bind(project_id)
-        .fetch_optional(&mut **tx.inner())
-        .await?;
-    if locked.is_none() {
+    // Existence first, lock later: Django takes `select_for_update`
+    // here (`tools.py:351`) and saves in the same transaction, but the
+    // port commits the save in a separate domain transaction whose
+    // deferred FK checks run at COMMIT — holding this row's FOR UPDATE
+    // across that commit stalls the domain COMMIT on the audit txn (a
+    // one-way lock wait; the 60s idle guard then kills the audit
+    // connection, PIDASHCONV-1596). The lock lands after the domain
+    // commit below, still inside the audit transaction.
+    let exists: Option<Uuid> =
+        sqlx::query_scalar("SELECT id FROM projects WHERE id = $1 AND deleted_at IS NULL")
+            .bind(project_id)
+            .fetch_optional(&mut **tx.inner())
+            .await?;
+    if exists.is_none() {
         return Err(ToolExecError::Missing { model: "Project" });
     }
     let tool_state: Option<Uuid> = sqlx::query_scalar(plan::CREATE_DEFAULT_STATE_SQL)
@@ -1166,107 +1266,117 @@ async fn op_create_project_issue(
         .fetch_optional(&mut **tx.inner())
         .await?
         .flatten();
-    let state_id = match tool_state {
-        Some(state) => Some(state),
-        None => {
-            let repaired: Option<Uuid> = sqlx::query_scalar(plan::CREATE_SAVE_DEFAULT_STATE_SQL)
-                .bind(project_id)
-                .fetch_optional(&mut **tx.inner())
-                .await?
-                .flatten();
-            match repaired {
-                Some(state) => Some(state),
-                None => sqlx::query_scalar(plan::CREATE_SAVE_FALLBACK_STATE_SQL)
-                    .bind(project_id)
-                    .fetch_optional(&mut **tx.inner())
-                    .await?
-                    .flatten(),
-            }
-        }
-    };
-    sqlx::query(plan::CREATE_ADVISORY_LOCK_SQL)
-        .bind(plan::advisory_lock_key(&project_id))
-        .execute(&mut **tx.inner())
-        .await?;
-    let last_sequence: Option<i64> = sqlx::query_scalar(plan::CREATE_SEQ_SCAN_SQL)
-        .bind(project_id)
-        .fetch_optional(&mut **tx.inner())
-        .await?
-        .flatten();
-    let sequence_id = plan::saved_sequence_id(last_sequence);
-    let largest_sort_order: Option<f64> = match state_id {
-        Some(state) => sqlx::query_scalar(plan::CREATE_SORT_ORDER_MAX_SQL)
-            .bind(project_id)
-            .bind(state)
-            .fetch_optional(&mut **tx.inner())
-            .await?
-            .flatten(),
-        None => sqlx::query_scalar(
-            "SELECT MAX(sort_order) FROM issues \
-                 WHERE project_id = $1 AND state_id IS NULL AND deleted_at IS NULL",
-        )
-        .bind(project_id)
-        .fetch_optional(&mut **tx.inner())
-        .await?
-        .flatten(),
-    };
-    let sort_order = plan::saved_sort_order(largest_sort_order);
-    let pod_id: Option<Uuid> = sqlx::query_scalar(plan::CREATE_DEFAULT_POD_SQL)
-        .bind(project_id)
-        .fetch_optional(&mut **tx.inner())
-        .await?
-        .flatten();
-    // `completed_at` stamps only when the TOOL supplied the state and
-    // its group is `completed` — a save-repaired state never stamps.
-    let now = Utc::now();
-    let completed_at: Option<DateTime<Utc>> = match tool_state {
-        Some(state) => {
-            let group = state_view_tx(tx, state).await?.map(|view| view.group);
-            if group.as_deref() == Some("completed") {
-                Some(now)
-            } else {
-                None
-            }
-        }
-        None => None,
-    };
+    // The save rides `domain::issues::create`: the hooks repair a
+    // missing tool state (same default-then-fallback queries), take the
+    // advisory lock, scan the effective sequence and sort order, resolve
+    // the default pod, stamp `completed_at` for a tool-supplied completed
+    // state only (a repaired state never stamps — the assembled `None`
+    // rides through), and strip the html. The fire and the created
+    // activity are both skipped: the caller drives the bespoke
+    // post-commit fire and Django sends no activity on this path, so the
+    // chain stays empty. Both hooks are still registered: `create`
+    // resolves them eagerly and an unregistered lookup panics the task
+    // (PIDASHCONV-1596). The issue commits in the domain transaction,
+    // ahead of the audit commit below (the old
+    // inline inserts shared the audit transaction — a post-write audit
+    // failure now leaves the issue standing; fault-path only).
     // `to_safe_html` never yields `""` (the `<p></p>` fallback), so the
-    // `NULL` arm is defensive, kept for the port's exact shape.
+    // hook's `NULL` arm is defensive, kept for the port's exact shape.
     let html = to_safe_html(Some(description));
-    let stripped: Option<String> = if html.is_empty() {
-        None
-    } else {
-        Some(ml_strip_tags(&html))
-    };
+    let now = Utc::now();
     let issue_id = Uuid::new_v4();
-    let sequence_row_id = Uuid::new_v4();
-    sqlx::query(plan::CREATE_ISSUE_INSERT_SQL)
-        .bind(issue_id)
-        .bind(now)
-        .bind(now)
-        .bind(scope.creator_id)
+    let fields = IssueFieldSet {
+        id: issue_id,
+        created_at: now,
+        updated_at: now,
+        created_by_id: Some(scope.creator_id),
+        updated_by_id: None,
+        deleted_at: None,
+        project_id,
+        workspace_id: scope.workspace_id,
+        parent_id: None,
+        state_id: tool_state,
+        point: None,
+        estimate_point_id: None,
+        name: stripped_title.to_owned(),
+        description_json: serde_json::Value::Object(serde_json::Map::new()),
+        description_html: html,
+        description_stripped: None,
+        description_binary: None,
+        priority: "none".to_owned(),
+        complexity_score: 0,
+        start_date: None,
+        target_date: None,
+        sequence_id: 0,
+        sort_order: 65535.0,
+        completed_at: None,
+        archived_at: None,
+        is_draft: false,
+        external_source: None,
+        external_id: None,
+        type_id: None,
+        git_work_branch: String::new(),
+        workpad: String::new(),
+        created_via: Some("cloud_agent".to_owned()),
+        assigned_pod_id: None,
+        agent_executor: None,
+    };
+    // Inert: the fire is skipped (the caller drives it post-commit).
+    let fire = domain_issues::FireSpec {
+        dispatch_immediate: true,
+        created_by: Some(scope.creator_id),
+        moved_by_run: None,
+        now,
+    };
+    let domain_ctx = write_ctx(scope, project_id);
+    let transition = ctx.transition_hook.clone();
+    let enqueue: Arc<dyn TaskEnqueueHook> = Arc::new(WorkerTaskEnqueueHook::new(&ctx.pool));
+    let outcome = domain::run(&domain_ctx, &ctx.orm, |txn| {
+        let domain_ctx = domain_ctx.clone();
+        let pool = ctx.pool.clone();
+        let transition = transition.clone();
+        let enqueue = enqueue.clone();
+        Box::pin(async move {
+            txn.hooks_mut().register(transition);
+            txn.hooks_mut().register(enqueue);
+            domain_issues::create(
+                &domain_ctx,
+                txn,
+                &pool,
+                domain_issues::CreateIssue {
+                    fields,
+                    assignees: Vec::new(),
+                    default_assignee: None,
+                    labels: Vec::new(),
+                    fire,
+                    origin: None,
+                    activity_requested: serde_json::Value::Null,
+                    activity_notification: None,
+                    activity_require_origin: false,
+                    skip_activity: true,
+                    skip_fire: true,
+                    model_activity: None,
+                    created_override: None,
+                },
+            )
+            .await
+        })
+    })
+    .await
+    .map_err(domain_error)?;
+    // The deferred `select_for_update` (`tools.py:351`; see above):
+    // still held when the audit commits. A project deleted mid-flight
+    // errors here with the issue standing (fault-path only, like the
+    // audit-aftermath note above).
+    let locked: Option<Uuid> = sqlx::query_scalar(plan::CREATE_PROJECT_LOCK_SQL)
         .bind(project_id)
-        .bind(scope.workspace_id)
-        .bind(state_id)
-        .bind(stripped_title)
-        .bind(html.as_str())
-        .bind(stripped.as_deref())
-        .bind(sequence_id)
-        .bind(sort_order)
-        .bind(completed_at)
-        .bind(pod_id)
-        .execute(&mut **tx.inner())
+        .fetch_optional(&mut **tx.inner())
         .await?;
-    sqlx::query(plan::CREATE_ISSUE_SEQUENCE_INSERT_SQL)
-        .bind(sequence_row_id)
-        .bind(now)
-        .bind(scope.creator_id)
-        .bind(project_id)
-        .bind(scope.workspace_id)
-        .bind(issue_id)
-        .bind(sequence_id)
-        .execute(&mut **tx.inner())
-        .await?;
+    if locked.is_none() {
+        return Err(ToolExecError::Missing { model: "Project" });
+    }
+    let state_id = outcome.issue.state_id;
+    let sequence_id = i64::from(outcome.issue.sequence_id);
     // `{"created": True, **_issue_data(issue)}` (brief, `created`
     // first): the project identifier plus the resolved state.
     let project_identifier: Option<String> =
@@ -1293,8 +1403,584 @@ async fn op_create_project_issue(
         None,
     );
     let created = plan::issue_created(&plan::issue_brief(&detail));
-    serde_json::to_value(created)
-        .map_err(|error| ToolExecError::Failure(plan::ToolCallFailure::Failed(error.to_string())))
+    let value = serde_json::to_value(created).map_err(|error| {
+        ToolExecError::Failure(plan::ToolCallFailure::Failed(error.to_string()))
+    })?;
+    Ok((value, CreateDispatch { issue_id, state_id }))
+}
+
+/// What a create hands its caller for the post-commit orchestration
+/// fire (`signals.py:74-107`): the new issue plus its resolved state.
+/// `state_id` is `None` when the project has no state at all — the
+/// fire's early return (Django's `prev == current` no-op).
+struct CreateDispatch {
+    issue_id: Uuid,
+    state_id: Option<Uuid>,
+}
+
+/// Preflight for the tool's create: the live
+/// `preflight_eligibility_or_bounce` driver over the jobs
+/// [`JobsMatcher`]. A create is not an agent move (`moved_by_run` is
+/// `None`), so `dispatch_now` is reachable and the eligibility gate
+/// must run for real — the transition sibling's [`BinPreflight`] would
+/// fail closed here. Mirrors the api crate's `LivePreflight`; the deps
+/// travel by `Option` because the driver takes them by value while the
+/// seam only lends `&mut self`, and the driver consults preflight at
+/// most once per fire.
+struct LiveToolPreflight<C, H, P> {
+    pool: PgPool,
+    deps: Option<StoreDeps<C, H, P>>,
+    matcher: JobsMatcher,
+    now: DateTime<Utc>,
+    jitter_secs: f64,
+}
+
+impl<C, H, P> PreflightSeam for LiveToolPreflight<C, H, P>
+where
+    C: AdmissionCache,
+    H: Fn(Uuid) -> bool + Clone + Send + Sync,
+    P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
+{
+    async fn preflight_eligibility_or_bounce(
+        &mut self,
+        issue_id: Uuid,
+        creator_id: Uuid,
+        pod_id: Uuid,
+        triggered_by: &str,
+    ) -> Result<bool, pidash_services::orchestration::creation::CreationError> {
+        let Some(deps) = self.deps.take() else {
+            return Err(pidash_services::orchestration::creation::CreationError::Db(
+                "tool create reached preflight twice: the driver consults at most once".to_owned(),
+            ));
+        };
+        let out = preflight_eligibility_or_bounce(
+            &self.pool,
+            deps,
+            &self.matcher,
+            self.now,
+            self.jitter_secs,
+            issue_id,
+            Some(creator_id),
+            pod_id,
+            triggered_by,
+        )
+        .await
+        .map_err(|error| {
+            pidash_services::orchestration::creation::CreationError::Db(error.to_string())
+        })?;
+        emit_logs(&out.outcome.logs);
+        Ok(out.outcome.proceed)
+    }
+}
+
+/// The [`StoreDeps`] behind the create fire: the transition shape
+/// ([`drive_transition`]) — creator presence prefetched from the pool,
+/// the actor-is-creator closures — over the fire's own clock. Built
+/// twice per fire (store + preflight), like the v1 path's
+/// `dispatch_deps_for_ids` pair.
+fn create_fire_deps(
+    ctx: &ToolCtx,
+    creator: Uuid,
+    has_key: bool,
+    now_unix_secs: i64,
+) -> StoreDeps<
+    RedisAdmissionCache,
+    impl Fn(Uuid) -> bool + Clone + Send + Sync,
+    impl Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
+> {
+    StoreDeps {
+        cloud: ctx.cloud.clone(),
+        managed: ctx.managed.clone(),
+        cache: RedisAdmissionCache::from_env(),
+        has_usable_llm_config: move |user: Uuid| user == creator && has_key,
+        toolsets: ctx.toolsets.clone(),
+        llm_profile: move |user: Option<Uuid>| {
+            let key = user == Some(creator) && has_key;
+            let profile = agent_model_profile_for_user(key);
+            LlmProfile {
+                available: profile.available,
+                reason_code: profile.reason_code,
+            }
+        },
+        now_unix_secs,
+    }
+}
+
+/// The create fire's transition seam: the api `LiveTransitionSeam`
+/// shape (PIDASHCONV-1216), which the jobs crate cannot reuse across
+/// the crate direction.
+///
+/// The ticker/clock seam methods run pool-direct (autocommit);
+/// everything else delegates to the tx-backed [`LiveCreationStore`].
+/// The split is load-bearing: the reconcile clock lock must not be
+/// held across `preflight_eligibility_or_bounce`, whose bounce opens
+/// its own transaction and locks the same ticker row. Autocommit per
+/// ticker statement mirrors Django's own separate reconcile atomic
+/// (which commits before preflight).
+struct LiveToolTransitionSeam<'a, C, H, P> {
+    pool: &'a PgPool,
+    store: LiveCreationStore<'a, C, H, P>,
+}
+
+/// One [`CLOCK_POLICY_SQL`] row: ticking flag, pool, impl/review/test
+/// cadence columns (the scheduler-dispatch alias shape).
+type ClockPolicyRow = (
+    Option<bool>,
+    Option<i32>,
+    Option<i32>,
+    Option<i32>,
+    Option<i32>,
+);
+
+impl<'a, C, H, P> LiveToolTransitionSeam<'a, C, H, P> {
+    fn db(error: sqlx::Error) -> CreationError {
+        CreationError::Db(error.to_string())
+    }
+
+    /// Recover the transaction (to commit) plus the outboxes (to drain
+    /// after commit).
+    fn into_parts(
+        self,
+    ) -> (
+        Transaction<'a>,
+        &'a PgPool,
+        C,
+        Vec<Uuid>,
+        Vec<DeferredConsume>,
+        Vec<Uuid>,
+    ) {
+        self.store.into_parts()
+    }
+}
+
+impl<C, H, P> CreationSeam for LiveToolTransitionSeam<'_, C, H, P>
+where
+    C: AdmissionCache,
+    H: Fn(Uuid) -> bool + Clone + Send + Sync,
+    P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
+{
+    async fn issue(&mut self, issue_id: Uuid) -> Result<IssueView, CreationError> {
+        self.store.issue(issue_id).await
+    }
+
+    async fn project(&mut self, project_id: Uuid) -> Result<ProjectView, CreationError> {
+        self.store.project(project_id).await
+    }
+
+    async fn state(&mut self, state_id: Option<Uuid>) -> Result<Option<StateView>, CreationError> {
+        self.store.state(state_id).await
+    }
+
+    async fn latest_prior_run(&mut self, issue_id: Uuid) -> Result<Option<RunView>, CreationError> {
+        self.store.latest_prior_run(issue_id).await
+    }
+
+    async fn active_run_for(&mut self, issue_id: Uuid) -> Result<Option<RunView>, CreationError> {
+        self.store.active_run_for(issue_id).await
+    }
+
+    async fn run(&mut self, run_id: Uuid) -> Result<Option<RunView>, CreationError> {
+        self.store.run(run_id).await
+    }
+
+    async fn runner(&mut self, runner_id: Uuid) -> Result<Option<RunnerView>, CreationError> {
+        self.store.runner(runner_id).await
+    }
+
+    async fn assigned_pod(&mut self, pod_id: Uuid) -> Result<Option<PodView>, CreationError> {
+        self.store.assigned_pod(pod_id).await
+    }
+
+    async fn default_pod_for_project(
+        &mut self,
+        project_id: Uuid,
+    ) -> Result<Option<PodView>, CreationError> {
+        self.store.default_pod_for_project(project_id).await
+    }
+
+    async fn resume_parent_run_id(
+        &mut self,
+        issue_id: Uuid,
+    ) -> Result<Option<Uuid>, CreationError> {
+        self.store.resume_parent_run_id(issue_id).await
+    }
+
+    async fn work_item_id_for_run(&mut self, run_id: Uuid) -> Result<Option<Uuid>, CreationError> {
+        self.store.work_item_id_for_run(run_id).await
+    }
+
+    async fn lock_issue_for_handoff(
+        &mut self,
+        issue_id: Uuid,
+    ) -> Result<Option<LockedIssue>, CreationError> {
+        self.store.lock_issue_for_handoff(issue_id).await
+    }
+
+    async fn lock_run_for_handoff(
+        &mut self,
+        run_id: Uuid,
+    ) -> Result<Option<RunView>, CreationError> {
+        self.store.lock_run_for_handoff(run_id).await
+    }
+
+    async fn user_flags(&mut self, user_id: Uuid) -> Result<UserFlags, CreationError> {
+        self.store.user_flags(user_id).await
+    }
+
+    async fn insert_run(&mut self, row: &NewAgentRun) -> Result<RunView, CreationError> {
+        self.store.insert_run(row).await
+    }
+
+    async fn save_prompt(
+        &mut self,
+        run_id: Uuid,
+        prompt: &str,
+        manifest: &Value,
+    ) -> Result<(), CreationError> {
+        self.store.save_prompt(run_id, prompt, manifest).await
+    }
+
+    async fn save_run_config(&mut self, run_id: Uuid, config: &Value) -> Result<(), CreationError> {
+        self.store.save_run_config(run_id, config).await
+    }
+
+    async fn execution_fields(
+        &mut self,
+        req: &ExecutionRequest,
+    ) -> Result<ExecutionFields, ExecutionError> {
+        self.store.execution_fields(req).await
+    }
+
+    async fn lock_cloud_creation_capacity(
+        &mut self,
+        workspace_id: Uuid,
+        executor_kind: AgentExecutorKind,
+        automatic: bool,
+    ) -> Result<Option<AdmissionError>, CreationError> {
+        self.store
+            .lock_cloud_creation_capacity(workspace_id, executor_kind, automatic)
+            .await
+    }
+
+    fn dispatch_after_commit(&mut self, run_id: Uuid) {
+        self.store.dispatch_after_commit(run_id)
+    }
+
+    async fn render_bundle(
+        &mut self,
+        issue_id: Uuid,
+        run_id: Uuid,
+        parent_run_id: Option<Uuid>,
+        trigger: &str,
+        created_by_id: Uuid,
+    ) -> Result<RenderBundle, CreationError> {
+        self.store
+            .render_bundle(issue_id, run_id, parent_run_id, trigger, created_by_id)
+            .await
+    }
+
+    fn extra_toolsets_schema_tool(&self) -> String {
+        self.store.extra_toolsets_schema_tool()
+    }
+}
+
+impl<C, H, P> FinalizeAgentRunSeam for LiveToolTransitionSeam<'_, C, H, P>
+where
+    C: AdmissionCache,
+    H: Fn(Uuid) -> bool + Clone + Send + Sync,
+    P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
+{
+    async fn finalize_failed_run(
+        &mut self,
+        run_id: Uuid,
+        error_code: &str,
+        error: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<RunView, CreationError> {
+        self.store
+            .finalize_failed_run(run_id, error_code, error, now)
+            .await
+    }
+}
+
+impl<C, H, P> EntriesSeam for LiveToolTransitionSeam<'_, C, H, P>
+where
+    C: AdmissionCache,
+    H: Fn(Uuid) -> bool + Clone + Send + Sync,
+    P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
+{
+    async fn prior_state_id(&mut self, issue_id: Uuid) -> Result<Option<Uuid>, CreationError> {
+        let row: Option<(Uuid, Option<Uuid>)> = sqlx::query_as(PRIOR_STATE_SELECT_SQL)
+            .bind(issue_id)
+            .fetch_optional(self.pool)
+            .await
+            .map_err(Self::db)?;
+        Ok(row.and_then(|(_, state_id)| state_id))
+    }
+
+    async fn queued_follow_up(&mut self, issue_id: Uuid) -> Result<Option<RunView>, CreationError> {
+        self.store.queued_follow_up(issue_id).await
+    }
+
+    async fn lock_ticker(
+        &mut self,
+        issue_id: Uuid,
+    ) -> Result<Option<IssueAgentTicker>, CreationError> {
+        let row: Option<PgRow> = sqlx::query(&lock_ticker_by_issue_sql())
+            .bind(issue_id)
+            .fetch_optional(self.pool)
+            .await
+            .map_err(Self::db)?;
+        row.map(|row| map_ticker(&row))
+            .transpose()
+            .map_err(Self::db)
+    }
+
+    async fn save_ticker(
+        &mut self,
+        row: &IssueAgentTicker,
+        write: ClockWrite,
+    ) -> Result<(), CreationError> {
+        // `updated_at` is now-at-write: Python's `save()` stamps
+        // `auto_now` at write time (the pre-consolidation bind).
+        apply_clock_write(self.pool, &write, row, Utc::now())
+            .await
+            .map_err(Self::db)
+    }
+
+    fn set_rollback(&mut self) {
+        self.store.set_rollback()
+    }
+
+    async fn clock_policy(
+        &mut self,
+        project_id: Uuid,
+    ) -> Result<ProjectClockPolicy, CreationError> {
+        let row: Option<ClockPolicyRow> = sqlx::query_as(CLOCK_POLICY_SQL)
+            .bind(project_id)
+            .fetch_optional(self.pool)
+            .await
+            .map_err(Self::db)?;
+        let Some((ticking_enabled, max_ticks, interval, interval_review, interval_test)) = row
+        else {
+            return Err(CreationError::MissingRow(format!(
+                "no clock policy {project_id}"
+            )));
+        };
+        Ok(ProjectClockPolicy {
+            agent_ticking_enabled: ticking_enabled,
+            agent_default_max_ticks: max_ticks,
+            agent_default_interval_seconds: interval.map(i64::from),
+            agent_review_default_interval_seconds: interval_review.map(i64::from),
+            agent_test_default_interval_seconds: interval_test.map(i64::from),
+        })
+    }
+
+    async fn binding(&mut self, binding_id: Uuid) -> Result<BindingView, CreationError> {
+        self.store.binding(binding_id).await
+    }
+
+    async fn scheduler_override_pod(
+        &mut self,
+        pod_id: Uuid,
+        project_id: Option<Uuid>,
+    ) -> Result<Option<PodView>, CreationError> {
+        self.store.scheduler_override_pod(pod_id, project_id).await
+    }
+
+    async fn workspace(&mut self, workspace_id: Uuid) -> Result<WorkspaceView, CreationError> {
+        self.store.workspace(workspace_id).await
+    }
+
+    async fn scheduler_row(&mut self, scheduler_id: Uuid) -> Result<SchedulerView, CreationError> {
+        self.store.scheduler_row(scheduler_id).await
+    }
+
+    async fn scheduler_override_rows(
+        &mut self,
+        workspace_id: Uuid,
+    ) -> Result<Vec<OverrideRow>, CreationError> {
+        self.store.scheduler_override_rows(workspace_id).await
+    }
+
+    async fn project_role_facts(
+        &mut self,
+        user_id: Uuid,
+        workspace_slug: &str,
+        project_id: Uuid,
+    ) -> Result<ProjectRoleFacts, CreationError> {
+        self.store
+            .project_role_facts(user_id, workspace_slug, project_id)
+            .await
+    }
+
+    async fn has_usable_llm_config(&mut self, user_id: Uuid) -> Result<bool, CreationError> {
+        self.store.has_usable_llm_config(user_id).await
+    }
+
+    async fn agent_system_user(
+        &mut self,
+    ) -> Result<Result<Uuid, AgentUserCollisionError>, CreationError> {
+        self.store.agent_system_user().await
+    }
+
+    async fn insert_scheduler_run(
+        &mut self,
+        row: &NewSchedulerRun,
+    ) -> Result<RunView, CreationError> {
+        self.store.insert_scheduler_run(row).await
+    }
+
+    fn compose_scheduler_turn(
+        &mut self,
+        context: &Value,
+        index: &OverrideIndex,
+        workspace_id: Option<&str>,
+        executor_kind: Option<&str>,
+        tool_catalog_version: i64,
+    ) -> Result<RenderedTurn, String> {
+        self.store.compose_scheduler_turn(
+            context,
+            index,
+            workspace_id,
+            executor_kind,
+            tool_catalog_version,
+        )
+    }
+}
+
+/// The post-save fire for a tool-created issue
+/// (`fire_state_transition`, `signals.py:74-107`): a new row has no
+/// prior state, so creating directly in a ticking state arms the clock
+/// and creates the entry run — the v1 create fire (`fire_after_save`,
+/// PIDASHCONV-1216) over the tool's write.
+///
+/// Best-effort: the issue already committed, so nothing here fails the
+/// tool. A failed handler rolls the fire transaction back and logs the
+/// verbatim line (the counter already bumped inside); a lookup storage
+/// failure only warns. `created_by` is the run creator — the signal
+/// fires inside `impersonate(run.created_by)` (`tools.py:357`), so the
+/// crum user stamps the ticker row. The pool-direct clock writes are
+/// never rolled back (the api split seam's contract): a bounce or a
+/// late failure keeps the reconcile row, like Django.
+async fn fire_create_transition(
+    ctx: &ToolCtx,
+    creator_id: Uuid,
+    issue_id: Uuid,
+    state_id: Option<Uuid>,
+) {
+    let Some(current_state_id) = state_id else {
+        return;
+    };
+    let now = Utc::now();
+    let has_key = match crate::oss_worker::execute_seams::LiveExecuteSeams::llm_row(
+        &ctx.pool, creator_id,
+    )
+    .await
+    {
+        Ok(row) => row.as_ref().is_some_and(|row| row.has_api_key()),
+        Err(error) => {
+            tracing::warn!(%error, "tool create fire: llm presence lookup failed; fire skipped");
+            return;
+        }
+    };
+    let now_unix_secs = now.timestamp();
+    let store_deps = create_fire_deps(ctx, creator_id, has_key, now_unix_secs);
+    let preflight_deps = create_fire_deps(ctx, creator_id, has_key, now_unix_secs);
+    let tx = match Transaction::begin(&ctx.pool).await {
+        Ok(tx) => tx,
+        Err(error) => {
+            tracing::warn!(%error, "tool create fire: begin failed; fire skipped");
+            return;
+        }
+    };
+    let mut seam = LiveToolTransitionSeam {
+        pool: &ctx.pool,
+        store: LiveCreationStore::new(tx, &ctx.pool, store_deps),
+    };
+    let mut preflight = LiveToolPreflight {
+        pool: ctx.pool.clone(),
+        deps: Some(preflight_deps),
+        matcher: JobsMatcher::new(ctx.pool.clone()),
+        now,
+        jitter_secs: 0.0,
+    };
+    let request = FireRequest {
+        issue_id,
+        prev_state_id: None,
+        current_state_id: Some(current_state_id),
+        dispatch_immediate: true,
+        moved_by_run: None,
+        now,
+        // Caller-drawn jitter (L5 quirk-5): none, like the v1 create
+        // fire over the same entered-bucket event.
+        jitter_secs: 0.0,
+        created_by: Some(creator_id),
+    };
+    let outcome = fire_state_transition(&mut seam, &mut preflight, &request).await;
+    let (tx, pool, cache, dispatches, deferred, terminal_effects) = seam.into_parts();
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            let _ = tx.rollback().await;
+            tracing::warn!(%error, "tool create fire: state lookup failed; issue stands unfired");
+            return;
+        }
+    };
+    if !matches!(outcome, FireOutcome::Called(_)) {
+        // NoTransition (unreachable: a `Some` state always differs from
+        // the `None` prior) / Failed: nothing this drive wrote is kept.
+        let _ = tx.rollback().await;
+        if let FireOutcome::Failed { log_line, .. } = outcome {
+            tracing::error!("{log_line}");
+        }
+        return;
+    }
+    if let Err(error) = tx.commit().await {
+        tracing::warn!(%error, "tool create fire: commit failed; issue stands unfired");
+        return;
+    }
+    for run_id in dispatches {
+        // The driver only *returns* the decision (`dispatch.py:61-70`
+        // drains the pod inline), so a `PodDrain` must be acted on here
+        // or the run stays QUEUED (PIDASHCONV-1494). Best-effort, like
+        // the rest of the fire: the entry run stands either way.
+        match dispatch_agent_run(pool, &ctx.cloud, run_id, now).await {
+            Ok(DispatchDecision::PodDrain { pod_id }) => {
+                if let Err(error) =
+                    drain_pod_by_id(pool, ctx.redis.as_ref(), &ctx.runner, pod_id).await
+                {
+                    tracing::warn!(%error, "tool create fire: pod drain failed");
+                }
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(%error, "tool create fire: entry-run dispatch failed");
+            }
+        }
+    }
+    for consume in &deferred {
+        consume_admission_token(&cache, consume);
+    }
+    for effect_id in terminal_effects {
+        for effect in finalization::plan_publish_effects(effect_id) {
+            match effect {
+                LifecycleEffect::PublishTerminalEffects { run_id } => {
+                    let job = terminal_effects_job(&run_id);
+                    if let Err(error) = enqueue(pool, &job).await {
+                        tracing::error!(%error, "failed to publish terminal effects for run {run_id}");
+                    }
+                }
+                LifecycleEffect::ApplyTerminalEffectsInline { run_id } => {
+                    tracing::warn!(
+                        "skipping inline terminal effects for run {run_id}: no live RunnerRunsSeams \
+                         (PIDASHCONV-859); the queued effects task covers the hooks idempotently"
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1437,13 +2123,19 @@ async fn op_transition_current_issue<'a>(
         return (tx, value);
     }
     let now = Utc::now();
-    if let Err(error) = sqlx::query(plan::TRANSITION_ISSUE_SAVE_SQL)
-        .bind(issue_id)
-        .bind(target_id)
-        .bind(now)
-        .bind(scope.creator_id)
-        .execute(&mut **tx.inner())
-        .await
+    // The `save(update_fields=["state", "updated_at", "updated_by"])`
+    // equivalent: three bare columns, no hook-recompute writes, no chain
+    // — completion, fire and the orchestration drive stay driver-side, as
+    // today. Inside the audit transaction, under the row lock above (a
+    // separate domain transaction would deadlock against it).
+    if let Err(error) = domain_issues::update_issue_state(
+        &mut **tx.inner(),
+        issue_id,
+        target_id,
+        now,
+        scope.creator_id,
+    )
+    .await
     {
         return (tx, Err(error.into()));
     }
@@ -1761,14 +2453,6 @@ async fn pair_rows_tx(
         .collect()
 }
 
-/// Whether `error` is a unique violation (the relate race's 23505).
-fn is_unique_violation(error: &sqlx::Error) -> bool {
-    error
-        .as_database_error()
-        .and_then(|db| db.code())
-        .is_some_and(|code| code.as_ref() == "23505")
-}
-
 /// `pidash_relate_issues` (`tools.py:416-424` over
 /// `relations.py:180-232`): per-target verdict loop with a savepointed
 /// insert on `Create` (23505 re-reads and re-verdicts, quirk 5
@@ -1877,34 +2561,23 @@ async fn relate_insert_tx(
     tx: &mut Transaction<'_>,
     row: &rel::RelateInsert,
 ) -> Result<(), ToolExecError> {
-    let sql = render_named_params(
-        &rel::relate_insert_sql(),
-        &[
-            ("related_issue_id", 7),
-            ("workspace_id", 5),
-            ("stored_type", 8),
-            ("project_id", 4),
-            ("actor_id", 3),
-            ("issue_id", 6),
-            ("now", 2),
-            ("id", 1),
-        ],
-    );
     let now = Utc::now();
     sqlx::query("SAVEPOINT relate_target")
         .execute(&mut **tx.inner())
         .await?;
-    let inserted = sqlx::query(&sql)
-        .bind(row.id)
-        .bind(now)
-        .bind(row.created_by_id)
-        .bind(row.project_id)
-        .bind(row.workspace_id)
-        .bind(row.issue_id)
-        .bind(row.related_issue_id)
-        .bind(row.relation_type.as_str())
-        .execute(&mut **tx.inner())
-        .await;
+    let value = relation_domain::RelationRow {
+        id: row.id,
+        created_at: now,
+        updated_at: now,
+        created_by: Some(row.created_by_id),
+        updated_by: row.updated_by_id,
+        project_id: row.project_id,
+        workspace_id: row.workspace_id,
+        issue_id: row.issue_id,
+        related_issue_id: row.related_issue_id,
+        relation_type: row.relation_type.as_str(),
+    };
+    let inserted = relation_domain::relate_row(&mut **tx.inner(), &value).await;
     match inserted {
         Ok(_) => {
             sqlx::query("RELEASE SAVEPOINT relate_target")
@@ -1964,16 +2637,14 @@ async fn op_unrelate_issues(
         }
         for row in matching {
             let now = Utc::now();
-            let sql = render_named_params(
-                &rel::unrelate_delete_sql(),
-                &[("actor_id", 2), ("row_id", 3), ("now", 1)],
-            );
-            sqlx::query(&sql)
-                .bind(now)
-                .bind(scope.creator_id)
-                .bind(row.id)
-                .execute(&mut **tx.inner())
-                .await?;
+            relation_domain::soft_delete_relation_row(
+                &mut **tx.inner(),
+                row.id,
+                scope.creator_id,
+                now,
+                now,
+            )
+            .await?;
             enqueue_sweep(tx, "issuerelation", &row.id.to_string()).await?;
         }
         removed.push(target.identifier());
@@ -2698,19 +3369,53 @@ async fn dispatch_fn(
                         scope,
                         ledger_id,
                     } = audit;
-                    match op_create_project_issue(&mut tx, &scope, description, &stripped).await {
-                        Ok(result) => {
-                            write_commit(
+                    match op_create_project_issue(ctx, &mut tx, &scope, description, &stripped)
+                        .await
+                    {
+                        Ok((result, fire)) => {
+                            let creator_id = scope.creator_id;
+                            let run_id = scope.run_id;
+                            // The orchestration post-save fire
+                            // (`signals.py:74-107`): Django's
+                            // `Issue.objects.create` runs it inside the
+                            // save; here signals are explicit calls after
+                            // the commit lands (the v1 create shape,
+                            // PIDASHCONV-1216). The fire runs on
+                            // commit-success even when the
+                            // `tool_completed` append below fails
+                            // (Django appends at `tools.py:156`, after
+                            // the save's signal). Best-effort: the issue
+                            // already committed.
+                            match write_commit_tx(
                                 ctx,
                                 WriteAudit {
                                     tx,
                                     scope,
                                     ledger_id,
                                 },
-                                TOOL_CREATE_PROJECT_ISSUE,
                                 result,
                             )
                             .await
+                            {
+                                Ok(value) => {
+                                    fire_create_transition(
+                                        ctx,
+                                        creator_id,
+                                        fire.issue_id,
+                                        fire.state_id,
+                                    )
+                                    .await;
+                                    emit_completed(
+                                        ctx,
+                                        run_id,
+                                        TOOL_CREATE_PROJECT_ISSUE,
+                                        plan::ToolRisk::Write,
+                                    )
+                                    .await?;
+                                    Ok(value)
+                                }
+                                Err(error) => Err(error),
+                            }
                         }
                         Err(error) => {
                             let _ = tx.rollback().await;
@@ -3123,5 +3828,181 @@ mod tests {
         assert_eq!(render_isoformat(micro), "2026-03-04T05:06:07.123456+00:00");
         let milli = whole + chrono::Duration::milliseconds(120);
         assert_eq!(render_isoformat(milli), "2026-03-04T05:06:07.120000+00:00");
+    }
+}
+
+#[cfg(test)]
+mod live_tests {
+    use super::*;
+
+    async fn live_pool() -> Option<sqlx::PgPool> {
+        match std::env::var("DATABASE_URL") {
+            Ok(url) => Some(
+                sqlx::postgres::PgPoolOptions::new()
+                    .max_connections(5)
+                    .connect(&url)
+                    .await
+                    .expect("connect to scratch DATABASE_URL"),
+            ),
+            Err(_) => {
+                eprintln!("skipping live-db test: DATABASE_URL is not set");
+                None
+            }
+        }
+    }
+
+    struct Seed {
+        scope: ToolScope,
+    }
+
+    /// Seed user → workspace → project → issue. Column lists mirror
+    /// the contract-suite factories (`_harness/seed.py`); every
+    /// unique column carries a random tag so reruns never collide.
+    async fn seed_world(pool: &sqlx::PgPool) -> Seed {
+        let tag: String = Uuid::new_v4().simple().to_string()[..10].to_owned();
+        let user_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (id, password, email, username, display_name, first_name, last_name, avatar, date_joined, created_at, updated_at, last_location, created_location, is_superuser, is_managed, is_password_expired, is_active, is_staff, is_email_verified, is_password_autoset, is_password_reset_required, token, last_active, last_login_ip, last_logout_ip, last_login_medium, last_login_uagent, is_bot, user_timezone, is_email_valid) VALUES ($1, 'pbkdf2_sha256$600000$salt$hash', $2, $3, '', '', '', '', now(), now(), now(), '', '', false, false, false, true, false, false, false, false, '', now(), '', '', 'email', '', false, 'UTC', true)",
+        )
+        .bind(user_id)
+        .bind(format!("rs1581-{tag}@example.com"))
+        .bind(format!("rs1581_{tag}"))
+        .execute(pool)
+        .await
+        .expect("seed user");
+        let workspace_id = Uuid::new_v4();
+        let slug = format!("rs1581-{tag}");
+        sqlx::query(
+            "INSERT INTO workspaces (id, name, owner_id, slug, timezone, background_color, created_at, updated_at) VALUES ($1, $2, $3, $4, 'UTC', '#ffffff', now(), now())",
+        )
+        .bind(workspace_id)
+        .bind(format!("RS1581 {tag}"))
+        .bind(user_id)
+        .bind(&slug)
+        .execute(pool)
+        .await
+        .expect("seed workspace");
+        let project_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO projects (id, name, description, network, workspace_id, identifier, module_view, cycle_view, issue_views_view, page_view, intake_view, is_time_tracking_enabled, is_issue_type_enabled, is_default, guest_view_all_features, members_can_edit_states, archive_in, close_in, logo_props, timezone, repo_url, base_branch, agent_default_interval_seconds, agent_default_max_ticks, agent_review_default_interval_seconds, agent_test_default_interval_seconds, agent_ticking_enabled, default_agent_executor, created_at, updated_at) VALUES ($1, $2, '', 2, $3, $4, false, false, false, true, false, false, false, false, false, true, 0, 0, '{}', 'UTC', '', 'main', 10800, 10, 10800, 10800, true, 'local_runner', now(), now())",
+        )
+        .bind(project_id)
+        .bind(format!("RS1581 {tag}"))
+        .bind(workspace_id)
+        .bind(format!("RS{}", tag.to_uppercase()))
+        .execute(pool)
+        .await
+        .expect("seed project");
+        let state_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO states (id, workspace_id, project_id, name, description, color, slug, sequence, \"group\", is_triage, \"default\", created_at, updated_at) VALUES ($1, $2, $3, 'Backlog', '', '#ff0000', '', 65535, 'backlog', false, false, now(), now())",
+        )
+        .bind(state_id)
+        .bind(workspace_id)
+        .bind(project_id)
+        .execute(pool)
+        .await
+        .expect("seed state");
+        let issue_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO issues (id, workspace_id, project_id, state_id, name, description_json, description_html, priority, complexity_score, sequence_id, sort_order, is_draft, git_work_branch, workpad, created_at, updated_at) VALUES ($1, $2, $3, $4, 'Tool issue', '{}', '<p></p>', 'none', 0, 1, 65535, false, '', '', now(), now())",
+        )
+        .bind(issue_id)
+        .bind(workspace_id)
+        .bind(project_id)
+        .bind(state_id)
+        .execute(pool)
+        .await
+        .expect("seed issue");
+        Seed {
+            scope: ToolScope {
+                run_id: Uuid::new_v4(),
+                workspace_id,
+                workspace_slug: slug,
+                creator_id: user_id,
+                work_item_id: Some(issue_id),
+                scheduler_binding_id: None,
+                project_id,
+            },
+        }
+    }
+
+    async fn cleanup(pool: &sqlx::PgPool, scope: &ToolScope, comment_id: Uuid) {
+        let description_id: Option<Uuid> =
+            sqlx::query_scalar("SELECT description_id FROM issue_comments WHERE id = $1")
+                .bind(comment_id)
+                .fetch_optional(pool)
+                .await
+                .expect("read back description link")
+                .flatten();
+        sqlx::query("DELETE FROM issue_comments WHERE id = $1")
+            .bind(comment_id)
+            .execute(pool)
+            .await
+            .expect("teardown comment");
+        if let Some(description_id) = description_id {
+            sqlx::query("DELETE FROM descriptions WHERE id = $1")
+                .bind(description_id)
+                .execute(pool)
+                .await
+                .expect("teardown description");
+        }
+        for (sql, id) in [
+            (
+                "DELETE FROM issues WHERE id = $1",
+                scope.work_item_id.expect("bound issue"),
+            ),
+            ("DELETE FROM states WHERE project_id = $1", scope.project_id),
+            ("DELETE FROM projects WHERE id = $1", scope.project_id),
+            ("DELETE FROM workspaces WHERE id = $1", scope.workspace_id),
+            ("DELETE FROM users WHERE id = $1", scope.creator_id),
+        ] {
+            sqlx::query(sql)
+                .bind(id)
+                .execute(pool)
+                .await
+                .expect("teardown delete");
+        }
+    }
+
+    /// `pidash_add_current_issue_comment` strips each column with its
+    /// own stripper (PIDASHCONV-1581 item 1): the comment column
+    /// decodes entities (MLStripper, `issue.py:606`), the description
+    /// mirror keeps them verbatim (`Description.save`,
+    /// `description.py:23-29`).
+    #[tokio::test]
+    async fn add_comment_splits_strippers_per_column() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let seed = seed_world(&pool).await;
+        let mut tx = Transaction::begin(&pool).await.expect("begin");
+        let out = op_add_current_issue_comment(&mut tx, &seed.scope, "a & b")
+            .await
+            .expect("add comment");
+        tx.commit().await.expect("commit");
+        let comment_id: Uuid = out["comment_id"]
+            .as_str()
+            .expect("comment_id renders")
+            .parse()
+            .expect("comment_id parses");
+        let row: (String, String, Option<Uuid>) = sqlx::query_as(
+            "SELECT comment_html, comment_stripped, description_id FROM issue_comments WHERE id = $1",
+        )
+        .bind(comment_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read back the comment");
+        assert_eq!(row.0, "<p>a &amp; b</p>");
+        assert_eq!(row.1, "a & b");
+        let description_id = row.2.expect("comment links a description");
+        let desc: (Option<String>,) =
+            sqlx::query_as("SELECT description_stripped FROM descriptions WHERE id = $1")
+                .bind(description_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read back the description");
+        assert_eq!(desc.0.as_deref(), Some("a &amp; b"));
+        cleanup(&pool, &seed.scope, comment_id).await;
     }
 }

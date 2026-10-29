@@ -102,8 +102,6 @@ pub use gate::{
     UNAUTHENTICATED_BODY,
 };
 
-use std::collections::HashMap;
-
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -120,11 +118,15 @@ use pidash_auth::permissions::allow::AllowFacts;
 use pidash_auth::permissions::{ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER};
 use pidash_types::WorkspaceId;
 
+use crate::edge;
 use crate::middleware::body_limit::read_request_bytes;
 use crate::middleware::SessionHandle;
 use crate::paginator::{self, Cursor, PageError, PageResponse};
 use crate::serializer::render_datetime_in;
 use crate::state::AppState;
+use crate::uuid_path::{classify_uuid_segment, UuidSegment};
+use pidash_compat::response::json_ok;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 
 // ---------------------------------------------------------------------------
 // Wire constants (all verified live against Django, 2026-09-30)
@@ -140,8 +142,6 @@ pub const NOTIFICATION_NOT_FOUND_BODY: &str =
 /// (`app/views/base.py`): answers `partial_update` misses, whose lookup
 /// is a bare `.get()` (`base.py:152`).
 pub const OBJECT_NOT_FOUND_BODY: &str = r#"{"error":"The required object does not exist."}"#;
-/// `handle_exception`'s generic 500 branch.
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// `handle_exception`'s `KeyError` branch: answers unknown
 /// `snoozed` / `archived` values (`base.py:80-92` dict lookup).
 pub const KEY_ERROR_BODY: &str = r#"{"error":"The required key does not exist."}"#;
@@ -156,24 +156,7 @@ pub const MAX_PER_PAGE: i64 = 1000;
 // Query map (Django QueryDict: repeats legal, .get returns the last)
 // ---------------------------------------------------------------------------
 
-/// One query value, repeated or not.
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(untagged)]
-pub enum OneOrMany {
-    One(String),
-    Many(Vec<String>),
-}
-
-/// The multi-value query map every list handler extracts.
-pub type QueryMap = HashMap<String, OneOrMany>;
-
-/// Django `QueryDict.get`: the last value, or `None` when absent.
-pub fn query_last(query: &QueryMap, key: &str) -> Option<String> {
-    query.get(key).map(|value| match value {
-        OneOrMany::One(one) => one.clone(),
-        OneOrMany::Many(many) => many.last().cloned().unwrap_or_default(),
-    })
-}
+pub use pidash_compat::http::{query_last, OneOrMany, QueryMap};
 
 /// Django truthiness of `request.GET.get(key, False)`: absent is falsy;
 /// a present value is truthy unless it is the empty string
@@ -253,15 +236,6 @@ impl IntoResponse for Denial {
 
 pub fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
-}
-
-/// Render a 200 JSON response with exact bytes.
-fn json_ok(body: String) -> Response {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("handler json response")
 }
 
 /// Map a [`PageError`] the way the views do: the documented 400-class
@@ -369,30 +343,6 @@ fn enforce(outcome: GateOutcome) -> Result<(), Response> {
 // Routes
 // ---------------------------------------------------------------------------
 
-/// An owned path: the owned methods serve from Rust, everything else
-/// falls through to Django (its 405-after-auth and metadata responses
-/// live there). List `"HEAD"` alongside the other unowned methods: axum
-/// would auto-serve it from `get`, but Django defines no `head` and 405s
-/// after auth.
-pub fn owned(
-    handler: axum::routing::MethodRouter<AppState>,
-    unowned: &[&str],
-) -> axum::routing::MethodRouter<AppState> {
-    let mut router = handler;
-    for method in unowned {
-        router = match *method {
-            "POST" => router.post(crate::edge::proxy),
-            "PUT" => router.put(crate::edge::proxy),
-            "PATCH" => router.patch(crate::edge::proxy),
-            "DELETE" => router.delete(crate::edge::proxy),
-            "HEAD" => router.head(crate::edge::proxy),
-            "OPTIONS" => router.options(crate::edge::proxy),
-            _ => router.get(crate::edge::proxy),
-        };
-    }
-    router
-}
-
 /// Register the D-34 routes (all 7, `app/urls/notification.py:16-52`):
 /// the viewset-core triplet (routes 1-3, `:17-31`, PIDASHCONV-301),
 /// the state-transition and unread routes (routes 4-5, `:32-41`,
@@ -403,53 +353,47 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route(
             "/api/workspaces/{slug}/users/notifications/",
-            owned(
-                axum::routing::get(list),
-                &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
-            ),
+            edge::owned(axum::routing::get(list), &["GET", "TRACE"]),
         )
         .route(
             "/api/workspaces/{slug}/users/notifications/{pk}/",
-            owned(
+            edge::owned(
                 axum::routing::get(retrieve)
                     .patch(partial_update)
                     .delete(destroy),
-                &["POST", "PUT", "HEAD", "OPTIONS"],
+                &["GET", "PATCH", "DELETE", "TRACE"],
             ),
         )
         .route(
             "/api/workspaces/{slug}/users/notifications/{pk}/read/",
-            owned(
+            edge::owned(
                 axum::routing::post(mark_read).delete(mark_unread),
-                &["GET", "PUT", "PATCH", "OPTIONS"],
+                &["POST", "DELETE", "HEAD", "TRACE"],
             ),
         )
         .route(
             "/api/workspaces/{slug}/users/notifications/{pk}/archive/",
-            owned(
+            edge::owned(
                 axum::routing::post(archive).delete(unarchive),
-                &["GET", "PUT", "PATCH", "OPTIONS"],
+                &["POST", "DELETE", "HEAD", "TRACE"],
             ),
         )
         .route(
             "/api/workspaces/{slug}/users/notifications/unread/",
-            owned(
-                axum::routing::get(unread_get),
-                &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
-            ),
+            edge::owned(axum::routing::get(unread_get), &["GET", "TRACE"]),
         )
         .route(
             "/api/workspaces/{slug}/users/notifications/mark-all-read/",
-            owned(
+            edge::owned(
                 axum::routing::post(mark_all_read_create),
-                &["GET", "PUT", "PATCH", "DELETE", "OPTIONS"],
+                &["POST", "HEAD", "TRACE"],
             ),
         )
         .route(
             "/api/users/me/notification-preferences/",
-            owned(
+            edge::owned(
                 axum::routing::get(preference_get).patch(preference_patch),
-                &["POST", "PUT", "DELETE", "HEAD", "OPTIONS"],
+                &["GET", "PATCH", "TRACE"],
             ),
         )
 }
@@ -1312,14 +1256,19 @@ async fn fetch_one(
     }
 }
 
-/// Parse a UUID path segment. Django's `<uuid:pk>` converter leaves
-/// the route unmatched for garbage, so the request must fall through
-/// to Django (its `unread/` + `mark-all-read/` literals and its own
-/// 404 live there) — hence the proxy, not a Rust 404. The parse runs
+/// Classify a `<uuid:pk>` path segment the way Django's converter
+/// routes it: only the canonical lowercase hyphenated spelling serves
+/// locally. Parseable-but-non-canonical spellings (uppercase, simple,
+/// braced, `urn:uuid:`) and garbage both fall through to Django (its
+/// `unread/` + `mark-all-read/` literals and its own resolver 404 live
+/// there) — hence the proxy, not a Rust 404. The classification runs
 /// *before* auth: Django answers its routing 404 without
 /// authenticating.
 fn parse_pk(raw: &str) -> Option<Uuid> {
-    raw.parse::<Uuid>().ok()
+    match classify_uuid_segment(raw) {
+        UuidSegment::Canonical(id) => Some(id),
+        UuidSegment::NonCanonical | UuidSegment::Garbage => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2509,23 +2458,19 @@ async fn save_preference(
             columns.push((key, PreferenceValue::Flag(flag)));
         }
     }
-    let mut sql = String::from(
-        "UPDATE \"user_notification_preferences\" SET \"updated_at\" = $2, \"updated_by_id\" = $3",
-    );
-    for (index, (column, _)) in columns.iter().enumerate() {
-        sql.push_str(&format!(", \"{column}\" = ${}", index + 4));
-    }
-    sql.push_str(" WHERE \"id\" = $1");
-    let mut query = sqlx::query(&sql).bind(id).bind(now).bind(user_id);
-    for (_, value) in columns {
-        query = match value {
-            PreferenceValue::Stamp(stamp) => query.bind(stamp),
-            PreferenceValue::Id(owner) => query.bind(owner),
-            PreferenceValue::Flag(flag) => query.bind(flag),
-        };
-    }
-    query
-        .execute(pool)
+    use pidash_services::domain::identity::PreferenceColumn;
+    let mapped: Vec<(&str, PreferenceColumn)> = columns
+        .into_iter()
+        .map(|(column, value)| {
+            let mapped = match value {
+                PreferenceValue::Stamp(stamp) => PreferenceColumn::Stamp(stamp),
+                PreferenceValue::Id(owner) => PreferenceColumn::Id(owner),
+                PreferenceValue::Flag(flag) => PreferenceColumn::Flag(flag),
+            };
+            (column, mapped)
+        })
+        .collect();
+    pidash_services::domain::identity::save_preference_columns(pool, *id, *now, *user_id, &mapped)
         .await
         .map(|_| ())
         .map_err(|_| Denial::ServerError.into_response())

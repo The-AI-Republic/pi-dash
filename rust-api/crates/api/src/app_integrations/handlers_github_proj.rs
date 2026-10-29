@@ -836,14 +836,14 @@ async fn get_status(
         Err(denial) => return denial.into_response(),
     };
     if let Some(status) = legacy {
-        return json_response(&legacy_body(&status));
+        return json_response(legacy_body(&status));
     }
     let fallback = match fetch_fallback_status(&pool, &project_id, &slug).await {
         Ok(status) => status,
         Err(denial) => return denial.into_response(),
     };
     match fallback {
-        Some(status) => json_response(&fallback_body(&status)),
+        Some(status) => json_response(fallback_body(&status)),
         None => raw_body(StatusCode::OK, UNBOUND_BODY),
     }
 }
@@ -954,7 +954,7 @@ async fn patch_status(
     if sync_id.is_none() && mirrored == 0 {
         return raw_body(StatusCode::NOT_FOUND, NO_BINDING_BODY);
     }
-    json_response(&serde_json::json!({"is_sync_enabled": enabled}))
+    json_response(serde_json::json!({"is_sync_enabled": enabled}))
 }
 
 // ---------------------------------------------------------------------------
@@ -999,9 +999,12 @@ async fn enqueue_soft_delete(pool: &sqlx::PgPool, model: &'static str, id: &Uuid
 /// delete its comment syncs, then its issue syncs (queryset deletes —
 /// `deleted_at` only), then soft delete the binding itself (instance
 /// delete — `deleted_at`, `updated_at`, `updated_by`, plus the cascade
-/// task). Returns the soft-deleted binding ids for task enqueue.
+/// task). Returns the soft-deleted binding ids for task enqueue. Takes
+/// the open connection so the legacy-sync branch runs it inside its
+/// transaction while the no-sync branch passes an autocommit pooled
+/// connection, exactly like Django (PIDASHCONV-1466).
 async fn unbind_git_bindings(
-    pool: &sqlx::PgPool,
+    conn: &mut sqlx::PgConnection,
     actor_id: &Uuid,
     project_id: &Uuid,
     slug: &str,
@@ -1016,7 +1019,7 @@ async fn unbind_git_bindings(
     )
     .bind(project_id)
     .bind(slug)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await
     .map_err(|_| Denial::ServerError)?;
     for (id,) in &ids {
@@ -1027,7 +1030,7 @@ async fn unbind_git_bindings(
                )"#,
         )
         .bind(id)
-        .execute(pool)
+        .execute(&mut *conn)
         .await
         .map_err(|_| Denial::ServerError)?;
         sqlx::query(
@@ -1035,7 +1038,7 @@ async fn unbind_git_bindings(
                WHERE binding_id = $1 AND deleted_at IS NULL"#,
         )
         .bind(id)
-        .execute(pool)
+        .execute(&mut *conn)
         .await
         .map_err(|_| Denial::ServerError)?;
         sqlx::query(
@@ -1045,7 +1048,7 @@ async fn unbind_git_bindings(
         )
         .bind(actor_id)
         .bind(id)
-        .execute(pool)
+        .execute(&mut *conn)
         .await
         .map_err(|_| Denial::ServerError)?;
     }
@@ -1106,12 +1109,15 @@ async fn delete_status(
     };
     let mut tasks: Vec<(&'static str, Uuid)> = Vec::new();
     if let Some((id,)) = sync_id {
-        // `transaction.atomic()` (`github.py:1190`): the three writes
-        // below commit or roll back together.
+        // `transaction.atomic()` (`github.py:1190`): the sync writes
+        // and the binding unbind below commit or roll back together,
+        // so a mid-unbind failure never half-unbinds the project
+        // (PIDASHCONV-1466).
         let mut tx = match pool.begin().await {
             Ok(tx) => tx,
             Err(_) => return Denial::ServerError.into_response(),
         };
+        let mut binding_ids: Vec<Uuid> = Vec::new();
         let failed = sqlx::query(
             r#"UPDATE github_comment_syncs SET deleted_at = now()
                WHERE deleted_at IS NULL AND issue_sync_id IN (
@@ -1141,19 +1147,37 @@ async fn delete_status(
             .execute(&mut *tx)
             .await
             .is_err()
+            || match unbind_git_bindings(&mut tx, &actor.id, &project_id, &slug).await {
+                Ok(ids) => {
+                    binding_ids = ids;
+                    false
+                }
+                Err(_) => true,
+            }
             || tx.commit().await.is_err();
         if failed {
             return Denial::ServerError.into_response();
         }
         tasks.push(("githubrepositorysync", id));
-    }
-    match unbind_git_bindings(&pool, &actor.id, &project_id, &slug).await {
-        Ok(ids) => {
-            for id in &ids {
-                tasks.push(("gitrepositorybinding", *id));
-            }
+        for binding_id in &binding_ids {
+            tasks.push(("gitrepositorybinding", *binding_id));
         }
-        Err(denial) => return denial.into_response(),
+    } else {
+        // No legacy sync (`github.py:1183-1189`): Django runs this
+        // loop with no surrounding transaction, so the unbind stays
+        // on an autocommit pooled connection here too.
+        let mut connection = match pool.acquire().await {
+            Ok(connection) => connection,
+            Err(_) => return Denial::ServerError.into_response(),
+        };
+        match unbind_git_bindings(&mut connection, &actor.id, &project_id, &slug).await {
+            Ok(ids) => {
+                for id in &ids {
+                    tasks.push(("gitrepositorybinding", *id));
+                }
+            }
+            Err(denial) => return denial.into_response(),
+        }
     }
     for (model, id) in &tasks {
         enqueue_soft_delete(&pool, model, id).await;
@@ -1840,12 +1864,14 @@ async fn bind_transaction(
     )
     .await?;
     if current_repo_url != canonical_url {
-        sqlx::query("UPDATE projects SET repo_url = $1 WHERE id = $2")
-            .bind(canonical_url)
-            .bind(project_id)
-            .execute(&mut **tx)
-            .await
-            .map_err(txn_error)?;
+        pidash_services::domain::projects::stamp_text_field(
+            &mut **tx,
+            pidash_services::domain::projects::ProjectTextField::RepoUrl,
+            canonical_url,
+            *project_id,
+        )
+        .await
+        .map_err(txn_error)?;
     }
     Ok(sync_id)
 }

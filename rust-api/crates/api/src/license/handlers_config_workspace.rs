@@ -109,7 +109,8 @@ use super::{
     QueryMap,
 };
 use crate::state::AppState;
-use crate::v1_cycles_modules::json_cpython::{self, JsonFail};
+use crate::v1_cycles_modules::json::{self, JsonFail};
+use pidash_compat::db::is_unique_violation;
 
 /// Register the five configuration/workspace paths. Sibling license paths
 /// stay unmatched and proxy to Django; unowned methods on these paths
@@ -460,9 +461,10 @@ fn py_repr_str(s: &str) -> String {
 /// The base match lowercases like Django's `parse_header_parameters`, so
 /// `Application/JSON`, charset params, and the `*/*`, `application/*`,
 /// and `*/json` wildcards all serve. JSON bodies parse through the shared
-/// CPython layer (`json_cpython`, PIDASHCONV-1128), so malformed JSON,
-/// strict constants, int-limit and codec errors carry CPython's exact
-/// text; past the depth cap is Django's JSON 500.
+/// JSON layer (`json`, PIDASHCONV-1128), so malformed JSON is a 400 with
+/// serde's text (tier 3 since PIDASHCONV-1555; the strict-constant,
+/// int-limit and depth-cap texts are gone); codec errors keep CPython's
+/// text; depth failures are 400s, never Django's JSON 500.
 fn decode_json_body(
     headers: &HeaderMap,
     body: &[u8],
@@ -476,11 +478,11 @@ fn decode_json_body(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     match select_body_kind(content_type) {
-        Some(BodyKind::Json) => match json_cpython::parse_request_bytes(body) {
-            Ok(jval) => Ok(ParsedBody::json(json_cpython::to_serde_publish(&jval))),
+        Some(BodyKind::Json) => match json::parse_request_bytes(body) {
+            Ok(jval) => Ok(ParsedBody::json(json::to_serde_publish(&jval))),
             Err(JsonFail::Message(detail)) => Err(Denial::BadDetail(format!(
                 "{}{detail}",
-                json_cpython::JSON_PARSE_PREFIX
+                json::JSON_PARSE_PREFIX
             ))),
             Err(JsonFail::Recursion) => Err(Denial::ServerError),
         },
@@ -624,7 +626,7 @@ async fn email_credential_check(
         };
         return match stub {
             Some(Ok(())) => {
-                json_response(&serde_json::json!({"message": "Email successfully sent."}))
+                json_response(serde_json::json!({"message": "Email successfully sent."}))
             }
             Some(Err(err)) => Denial::BadError(err.message().to_owned()).into_response(),
             None => Denial::ServerError.into_response(),
@@ -650,7 +652,7 @@ async fn email_credential_check(
     })
     .await
     {
-        Ok(()) => json_response(&serde_json::json!({"message": "Email successfully sent."})),
+        Ok(()) => json_response(serde_json::json!({"message": "Email successfully sent."})),
         Err(err) => Denial::BadError(err.message().to_owned()).into_response(),
     }
 }
@@ -1018,28 +1020,13 @@ mod smtp {
         }
     }
 
-    /// `smtplib.quoteaddr`: parse the display name off, wrap the bare
-    /// addr-spec in `<>`; unparseable input passes through in `<>` unless
-    /// it already starts with `<`.
-    fn quote_address(raw: &str) -> String {
-        let trimmed = raw.trim();
-        if let Some(start) = trimmed.rfind('<') {
-            if let Some(end) = trimmed[start..].find('>') {
-                let inner = trimmed[start + 1..start + end].trim();
-                if !inner.is_empty() {
-                    return format!("<{inner}>");
-                }
-            }
-        }
-        if trimmed.starts_with('<') {
-            return trimmed.to_owned();
-        }
-        format!("<{trimmed}>")
-    }
-
     /// `EmailMessage.message()` header validation: any header value
     /// containing a newline raises `BadHeaderError`. Subject and body are
     /// constants; `from_email` and the recipients come from config/input.
+    /// This runs after the envelope sanitize on the SMTP path (`_send`
+    /// order, `smtp.py:144-150`): a newline the envelope rejects is the
+    /// envelope `ValueError` (generic 400), and only a newline the
+    /// envelope accepts (smuggled inside a stripped comment) reaches here.
     fn check_headers(from: &str, recipients: &[String]) -> Result<(), MailError> {
         if [SUBJECT, from].iter().any(|h| h.contains(['\r', '\n'])) {
             return Err(MailError::BadHeader);
@@ -1050,17 +1037,21 @@ mod smtp {
         Ok(())
     }
 
-    /// `console.EmailBackend.send_messages`: header validation runs (via
-    /// `message.message()`), then the rendered message plus the 79-dash
-    /// separator goes to stdout, flushed per message. A failed write
-    /// propagates (`fail_silently=False`) into the generic fallthrough.
+    /// `console.EmailBackend.send_messages`: the message renders (via
+    /// `message.message()`, which is also where header validation runs),
+    /// then the rendered message plus the 79-dash separator goes to
+    /// stdout, flushed per message. A failed write propagates
+    /// (`fail_silently=False`) into the generic fallthrough, and so does
+    /// a render failure past the newline check (an unparsable address is
+    /// the `ValueError` the view answers generically).
     pub fn send_console(from_email: Option<&str>, recipients: &[String]) -> Result<(), MailError> {
         let from = resolve_from(from_email);
         check_headers(from, recipients)?;
         // The render is shared with the DATA path (same accepted
         // approximation: exact bytes unobservable past the server), with
         // the email policy's `\n` endings the console backend writes.
-        let text = String::from_utf8_lossy(&message_bytes(from, recipients)).replace("\r\n", "\n");
+        let rendered = message_bytes(from, recipients).map_err(|_| MailError::Failed)?;
+        let text = String::from_utf8_lossy(&rendered).replace("\r\n", "\n");
         use std::io::Write as _;
         let mut out = std::io::stdout().lock();
         writeln!(out, "{text}")
@@ -1069,12 +1060,17 @@ mod smtp {
             .map_err(|_| MailError::Failed)
     }
 
-    /// `locmem.EmailBackend.send_messages`: header validation runs, then
-    /// success — the outbox append is in-process with no HTTP-observable
-    /// effect, so there is nothing further to mirror.
+    /// `locmem.EmailBackend.send_messages`: the message renders (via
+    /// `message.message()`), then success — the outbox append is
+    /// in-process with no HTTP-observable effect, so there is nothing
+    /// further to mirror. A render failure past the newline check is the
+    /// `ValueError` the view answers generically.
     pub fn send_locmem(from_email: Option<&str>, recipients: &[String]) -> Result<(), MailError> {
         let from = resolve_from(from_email);
-        check_headers(from, recipients)
+        check_headers(from, recipients)?;
+        message_bytes(from, recipients)
+            .map(|_| ())
+            .map_err(|_| MailError::Failed)
     }
 
     fn base64_encode(bytes: &[u8]) -> String {
@@ -1331,14 +1327,21 @@ mod smtp {
         Err(last)
     }
 
-    fn message_bytes(from: &str, recipients: &[String]) -> Vec<u8> {
+    fn message_bytes(from: &str, recipients: &[String]) -> Result<Vec<u8>, String> {
         // `message.as_bytes(linesep="\r\n")`: headers plus the plain body.
         // Exact bytes are unobservable past the server; the headers carry
-        // the validated values.
+        // the validated values. `From`/`To`/`Subject` render through the
+        // shared tasks_mail encoder (PIDASHCONV-1286), never a second port:
+        // RFC 2047 words plus IDNA plus the generator refold. Every caller
+        // ran `check_headers` first, so a failure here is an unparsable
+        // address (the `ValueError` the view answers generically).
         let to = recipients.join(", ");
+        let from = pidash_jobs::tasks_mail::mail_send::address_header("From", from)?;
+        let to = pidash_jobs::tasks_mail::mail_send::address_header("To", &to)?;
+        let subject = pidash_jobs::tasks_mail::mail_send::subject_header(SUBJECT)?;
         let now = chrono::Utc::now();
         let date = now.format("%a, %d %b %Y %H:%M:%S +0000").to_string();
-        let mut out = format!("From: {from}\r\nTo: {to}\r\nSubject: {SUBJECT}\r\nDate: {date}\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=\"utf-8\"\r\nContent-Transfer-Encoding: 7bit\r\n\r\n{BODY}\r\n");
+        let mut out = format!("{from}\r\n{to}\r\n{subject}\r\nDate: {date}\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=\"utf-8\"\r\nContent-Transfer-Encoding: 7bit\r\n\r\n{BODY}\r\n");
         // Dot-stuffing (`smtplib.data` quotes leading periods).
         let mut stuffed = String::with_capacity(out.len());
         for line in out.split_inclusive('\n') {
@@ -1348,7 +1351,7 @@ mod smtp {
             stuffed.push_str(line);
         }
         out = stuffed;
-        out.into_bytes()
+        Ok(out.into_bytes())
     }
 
     pub async fn send_test_email(cfg: EmailConfig<'_>) -> Result<(), MailError> {
@@ -1414,12 +1417,22 @@ mod smtp {
             )
             .await?;
         }
-        // `_send`: addresses are sanitized and the message rendered here —
-        // after the transport is up — so a bad header answers
-        // `BadHeaderError` even though the server was already reached.
+        // `_send` (`smtp.py:141-159`), after the transport is up: the
+        // envelope sanitizes first through the shared tasks_mail encoder
+        // (PIDASHCONV-1286, never a second port) — an unparsable address
+        // is the `ValueError` the view answers generically — then the
+        // headers validate (`BadHeaderError`), then the message renders.
         let from = resolve_from(cfg.from_email);
+        let envelope_from = pidash_jobs::tasks_mail::mail_send::envelope_address(from)
+            .map_err(|_| MailError::Failed)?;
+        let mut envelope_rcpts = Vec::with_capacity(cfg.recipients.len());
+        for recipient in cfg.recipients {
+            envelope_rcpts.push(
+                pidash_jobs::tasks_mail::mail_send::envelope_address(recipient)
+                    .map_err(|_| MailError::Failed)?,
+            );
+        }
         check_headers(from, cfg.recipients)?;
-        let envelope_from = quote_address(from);
         // `sendmail`: `MAIL` refusal (any code, 421 included) is
         // `SMTPSenderRefused`.
         io.write_str(&format!("MAIL FROM:{envelope_from}")).await?;
@@ -1430,9 +1443,8 @@ mod smtp {
         // `RCPT`: 250/251 accepted; anything else recorded; 421 aborts the
         // loop immediately; all-refused is `SMTPRecipientsRefused`.
         let mut refused = 0usize;
-        for recipient in cfg.recipients {
-            io.write_str(&format!("RCPT TO:{}", quote_address(recipient)))
-                .await?;
+        for envelope_rcpt in &envelope_rcpts {
+            io.write_str(&format!("RCPT TO:{envelope_rcpt}")).await?;
             let (code, _) = io.read_reply().await?;
             if code == 250 || code == 251 {
                 continue;
@@ -1452,7 +1464,7 @@ mod smtp {
         if code != 354 {
             return Err(MailError::Failed);
         }
-        let content = message_bytes(from, cfg.recipients);
+        let content = message_bytes(from, cfg.recipients).map_err(|_| MailError::Failed)?;
         io.write_bytes(&content).await?;
         io.write_bytes(b"\r\n.\r\n").await?;
         let (code, _) = io.read_reply().await?;
@@ -1555,17 +1567,176 @@ mod smtp {
             );
         }
 
+        /// PIDASHCONV-1445: the private `quote_address` is gone — the
+        /// envelope goes through the shared tasks_mail encoder
+        /// (`sanitize_address` + `quoteaddr`, `smtp.py:144-149`). Same
+        /// display-stripping expectations as before, plus the IDNA and
+        /// failure shapes the old pass-through never had.
         #[test]
-        fn quote_address_strips_display_names() {
+        fn envelope_sanitizes_like_django_send() {
+            let envelope = pidash_jobs::tasks_mail::mail_send::envelope_address;
             assert_eq!(
-                quote_address("Team Pi Dash <team@airepublic.com>"),
+                envelope("Team Pi Dash <team@airepublic.com>").expect("valid"),
                 "<team@airepublic.com>"
             );
-            assert_eq!(quote_address("plain@example.com"), "<plain@example.com>");
             assert_eq!(
-                quote_address("<bracketed@example.com>"),
+                envelope("plain@example.com").expect("valid"),
+                "<plain@example.com>"
+            );
+            assert_eq!(
+                envelope("<bracketed@example.com>").expect("valid"),
                 "<bracketed@example.com>"
             );
+            assert_eq!(
+                envelope("Équipe Pi Dash <team@x.com>").expect("valid"),
+                "<team@x.com>"
+            );
+            assert_eq!(
+                envelope("invite@münchen.de").expect("valid"),
+                "<invite@xn--mnchen-3ya.de>"
+            );
+            assert!(envelope("['a@x.test', 'b@x.test']").is_err());
+        }
+
+        /// PIDASHCONV-1445: the DATA headers go through the shared
+        /// tasks_mail encoder (`forbid_multi_line_headers`,
+        /// `message.py:55-76`): a non-ASCII From display name is RFC
+        /// 2047-encoded, an IDN To domain is punycoded, and the fixed
+        /// ASCII Subject renders verbatim. Pre-fix all three went out
+        /// as raw UTF-8.
+        #[test]
+        fn message_bytes_encodes_headers_like_django() {
+            let to = ["invite@münchen.de".to_owned()];
+            let bytes =
+                message_bytes("Équipe Pi Dash <team@x.com>", &to).expect("encodable headers");
+            let text = String::from_utf8(bytes).expect("DATA must stay valid UTF-8");
+            assert!(
+                text.contains("From: =?utf-8?q?=C3=89quipe_Pi_Dash?= <team@x.com>"),
+                "From display name not RFC 2047-encoded:\n{text}"
+            );
+            assert!(
+                text.contains("To: invite@xn--mnchen-3ya.de"),
+                "To domain not punycoded:\n{text}"
+            );
+            assert!(
+                text.contains("Subject: Email Notification from Pi Dash"),
+                "Subject changed:\n{text}"
+            );
+        }
+
+        /// PIDASHCONV-1445: the envelope goes through the shared
+        /// tasks_mail encoder (`smtp.py:_send` sanitize + `quoteaddr`,
+        /// `smtp.py:144-149`): IDN domains are punycoded and the From
+        /// display name never reaches the wire. Pre-fix the envelope
+        /// carried raw UTF-8 domains.
+        #[tokio::test]
+        async fn send_test_email_encodes_envelope_like_django() {
+            let to = ["invite@münchen.de".to_owned()];
+            let (addr, server) = run_fake_smtp(FakeSmtp {
+                extensions: vec![],
+                expect_user: String::new(),
+                expect_password: String::new(),
+                reject_plain: false,
+                rcpt_code: 250,
+            })
+            .await;
+            let result = send_test_email(EmailConfig {
+                host: "127.0.0.1",
+                port: i64::from(addr.port()),
+                username: None,
+                password: None,
+                use_tls: false,
+                use_ssl: false,
+                from_email: Some("Équipe Pi Dash <team@münchen.de>"),
+                recipients: &to,
+            })
+            .await;
+            assert_eq!(result, Ok(()));
+            let transcript = server.await.unwrap();
+            assert!(
+                transcript
+                    .iter()
+                    .any(|l| l == "C: MAIL FROM:<team@xn--mnchen-3ya.de>"),
+                "MAIL FROM not sanitized: {transcript:?}"
+            );
+            assert!(
+                transcript
+                    .iter()
+                    .any(|l| l == "C: RCPT TO:<invite@xn--mnchen-3ya.de>"),
+                "RCPT TO not punycoded: {transcript:?}"
+            );
+        }
+
+        /// PIDASHCONV-1445: `_send` sanitizes the envelope before the
+        /// message renders (`smtp.py:144-150`), so a newline recipient
+        /// is the envelope `ValueError` (generic 400), not
+        /// `BadHeaderError`. Pre-fix the header check ran first and
+        /// answered `BadHeader`.
+        #[tokio::test]
+        async fn send_test_email_envelope_before_headers_like_django_send() {
+            let to = ["a@b.com\nBcc: x@example.com".to_owned()];
+            let (addr, server) = run_fake_smtp(FakeSmtp {
+                extensions: vec![],
+                expect_user: String::new(),
+                expect_password: String::new(),
+                reject_plain: false,
+                rcpt_code: 250,
+            })
+            .await;
+            let result = send_test_email(EmailConfig {
+                host: "127.0.0.1",
+                port: i64::from(addr.port()),
+                username: None,
+                password: None,
+                use_tls: false,
+                use_ssl: false,
+                from_email: Some("noreply@example.com"),
+                recipients: &to,
+            })
+            .await;
+            assert_eq!(result, Err(MailError::Failed));
+            drop(server);
+        }
+
+        /// PIDASHCONV-1445: a newline smuggled inside a comment passes
+        /// the envelope sanitize (comments strip, `message.py:82-104`)
+        /// and still fails the header render (`BadHeaderError`,
+        /// `message.py:58-62`). Guards the envelope-first reorder.
+        #[tokio::test]
+        async fn send_test_email_comment_smuggled_newline_is_bad_header() {
+            let to = ["a@b.com (note\nline)".to_owned()];
+            let (addr, server) = run_fake_smtp(FakeSmtp {
+                extensions: vec![],
+                expect_user: String::new(),
+                expect_password: String::new(),
+                reject_plain: false,
+                rcpt_code: 250,
+            })
+            .await;
+            let result = send_test_email(EmailConfig {
+                host: "127.0.0.1",
+                port: i64::from(addr.port()),
+                username: None,
+                password: None,
+                use_tls: false,
+                use_ssl: false,
+                from_email: Some("noreply@example.com"),
+                recipients: &to,
+            })
+            .await;
+            assert_eq!(result, Err(MailError::BadHeader));
+            drop(server);
+        }
+
+        /// PIDASHCONV-1445: the stub backends render the message too
+        /// (`message.message()`), so a non-ASCII unparsable From is the
+        /// render `ValueError` (generic 400) there as well — probed on
+        /// Django 4.2.30, where `message()` raises instead of returning.
+        #[test]
+        fn stub_backends_reject_unparsable_non_ascii_from() {
+            let to = ["probe@example.com".to_owned()];
+            assert_eq!(send_console(Some("José"), &to), Err(MailError::Failed));
+            assert_eq!(send_locmem(Some("José"), &to), Err(MailError::Failed));
         }
 
         /// Multiline replies arrive in one TCP segment: the reader keeps
@@ -2003,7 +2174,7 @@ async fn workspace_slug_check(
     };
     let restricted = pidash_types::license::serializers_workspace::RESTRICTED_WORKSPACE_SLUGS
         .contains(&slug.as_str());
-    json_response(&serde_json::json!({"status": !(exists || restricted)}))
+    json_response(serde_json::json!({"status": !(exists || restricted)}))
 }
 
 async fn slug_exists(pool: &sqlx::PgPool, slug: &str) -> Result<bool, Denial> {
@@ -2117,7 +2288,7 @@ async fn list_workspaces(
         extra_stats: None,
         results,
     };
-    json_response(&envelope.to_json_value())
+    json_response(envelope.to_json_value())
 }
 
 async fn workspace_total_count(pool: &sqlx::PgPool, search: Option<&str>) -> Result<i64, Denial> {
@@ -2373,29 +2544,25 @@ async fn create_workspace(
     let workspace_id = uuid::Uuid::new_v4();
     let created_at = chrono::Utc::now();
     let updated_at = chrono::Utc::now();
-    let insert: Result<Option<(uuid::Uuid,)>, sqlx::Error> = sqlx::query_as(
-        r#"INSERT INTO workspaces
-           (created_at, updated_at, created_by_id, updated_by_id, deleted_at,
-            id, name, logo, logo_asset_id, owner_id, slug,
-            organization_size, timezone, background_color)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-           RETURNING id"#,
+    let insert = pidash_services::domain::workspaces::create(
+        &pool,
+        &pidash_services::domain::workspaces::NewWorkspace {
+            id: workspace_id,
+            name: &validated.name,
+            slug: &validated.slug,
+            owner_id: actor.id,
+            created_by: Some(actor.id),
+            logo: validated.logo.as_deref(),
+            logo_asset_id: validated.logo_asset,
+            organization_size: validated.organization_size.as_deref(),
+            timezone: &validated.timezone,
+            background_color: &validated.background_color,
+            deleted_at: validated.deleted_at,
+            created_at,
+            updated_at,
+            seed_created_by: Some(actor.id),
+        },
     )
-    .bind(created_at)
-    .bind(updated_at)
-    .bind(actor.id)
-    .bind(None::<uuid::Uuid>)
-    .bind(validated.deleted_at)
-    .bind(workspace_id)
-    .bind(&validated.name)
-    .bind(&validated.logo)
-    .bind(validated.logo_asset)
-    .bind(actor.id)
-    .bind(&validated.slug)
-    .bind(&validated.organization_size)
-    .bind(&validated.timezone)
-    .bind(&validated.background_color)
-    .fetch_optional(&pool)
     .await;
     match insert {
         Ok(_) => {}
@@ -2414,47 +2581,28 @@ async fn create_workspace(
             return Denial::ServerError.into_response();
         }
     }
-    // `post_save` on `Workspace` (`scheduler/signals.py:28-39`) fires
-    // during the save above, before the member row below: seed the
-    // builtin schedulers. The receiver swallows every failure, so this
-    // never fails the request.
-    pidash_services::scheduler::builtins::seed_builtin_schedulers(
-        &pool,
-        workspace_id,
-        Some(actor.id),
-    )
-    .await;
     // `WorkspaceMember.objects.create(workspace_id, member=user, role=20,
     // company_role=...)`: model `JSONField` defaults apply Python-side.
     let company_role = company_role_value(data.field("company_role"));
     let member_now = chrono::Utc::now();
-    let member_result = sqlx::query(
-        r#"INSERT INTO workspace_members
-           (created_at, updated_at, id, role, member_id, workspace_id,
-            view_props, default_props, issue_props, is_active,
-            explored_features, getting_started_checklist, tips,
-            company_role, created_by_id, updated_by_id, deleted_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-                   $14, $15, $16, $17)"#,
+    let member_view_props = default_view_props();
+    let member_issue_props = default_issue_props();
+    let member_result = pidash_services::domain::workspaces::members::add(
+        &pool,
+        &pidash_services::domain::workspaces::members::NewMember {
+            workspace_id,
+            user_id: Some(actor.id),
+            role: 20,
+            company_role: company_role.as_deref(),
+            created_by: Some(actor.id),
+            view_props: &member_view_props,
+            default_props: &member_view_props,
+            issue_props: &member_issue_props,
+            now: member_now,
+            ignore_conflicts: false,
+            db_now: false,
+        },
     )
-    .bind(member_now)
-    .bind(member_now)
-    .bind(uuid::Uuid::new_v4())
-    .bind(20i16)
-    .bind(actor.id)
-    .bind(workspace_id)
-    .bind(sqlx::types::Json(default_view_props()))
-    .bind(sqlx::types::Json(default_view_props()))
-    .bind(sqlx::types::Json(default_issue_props()))
-    .bind(true)
-    .bind(sqlx::types::Json(serde_json::json!({})))
-    .bind(sqlx::types::Json(serde_json::json!({})))
-    .bind(sqlx::types::Json(serde_json::json!({})))
-    .bind(company_role)
-    .bind(actor.id)
-    .bind(None::<uuid::Uuid>)
-    .bind(None::<chrono::DateTime<chrono::Utc>>)
-    .execute(&pool)
     .await;
     if let Err(err) = member_result {
         // Same `except IntegrityError` as the workspace row: a unique
@@ -2546,18 +2694,6 @@ fn json_len(found: BodyField<'_>) -> Option<usize> {
         Some(Value::Object(map)) => Some(map.len()),
         _ => None,
     }
-}
-
-/// True when `err` takes Django's `"already exists" in str(e)` branch:
-/// every Postgres unique violation renders a `Key (...) already exists.`
-/// DETAIL line (which is what psycopg's `str` matches on), and `sqlx`
-/// exposes no `DETAIL` accessor — hence the kind check instead of a
-/// string match (the `app_integrations` `is_duplicate_url` precedent).
-fn is_unique_violation(err: &sqlx::Error) -> bool {
-    let sqlx::Error::Database(db_error) = err else {
-        return false;
-    };
-    db_error.is_unique_violation()
 }
 
 /// `request.data.get("company_role", "")` into `CharField`: missing

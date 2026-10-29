@@ -78,8 +78,6 @@
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
-use std::collections::HashMap;
-
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State as AxumState};
 use axum::http::{header, HeaderMap, Method, StatusCode, Uri};
@@ -96,6 +94,7 @@ use pidash_auth::scope::TenantScope;
 use pidash_auth::token as token_kernel;
 use pidash_db::v1_projects::models::state as state_model;
 use pidash_db::v1_projects::queries_stateest as state_q;
+use pidash_services::domain::projects as domain_projects;
 use pidash_services::v1_projects::ser_workflow as ser;
 use pidash_types::{ProjectId, WorkspaceId};
 
@@ -104,6 +103,9 @@ use crate::license::AssetUrl;
 use crate::paginator::{self, Cursor, PageResponse};
 use crate::state::AppState;
 use crate::uuid_path::{classify_uuid_segment, UuidSegment};
+use pidash_compat::db::is_unique_violation;
+use pidash_compat::response::json_ok;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 
 /// One `machine_token` auth lookup row: user, workspace, dev-machine, revocation.
 type MachineTokenLookup = Option<(
@@ -278,8 +280,6 @@ pub const INVALID_TOKEN_BODY: &str = r#"{"detail":"Given API token is not valid"
 pub const NOT_FOUND_BODY: &str = r#"{"error":"The requested resource does not exist."}"#;
 /// `handle_exception`'s `IntegrityError` branch (`views/base.py:134-137`).
 pub const INVALID_PAYLOAD_BODY: &str = r#"{"error":"The payload is not valid"}"#;
-/// `handle_exception`'s generic branch (`views/base.py:156-160`).
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 
 /// Handler failure with its exact status + body, mirroring the `handle_exception`
 /// matrix plus the DRF denials these views inherit.
@@ -298,6 +298,9 @@ enum HandlerError {
     ProjectNotFound,
     /// 400, `{"detail": ...}` (`ParseError`: bad per_page/cursor/JSON).
     BadDetail(String),
+    /// 415, DRF `select_parser` (`{"detail": ...}`): the state writes read
+    /// `request.data` (PIDASHCONV-1391).
+    UnsupportedMediaType(String),
     /// 400, serializer `errors` dict (already rendered).
     FieldErrors(String),
     /// 400, view-inline `{"error": ...}` bodies.
@@ -325,6 +328,10 @@ impl HandlerError {
             ),
             HandlerError::BadDetail(message) => (
                 StatusCode::BAD_REQUEST,
+                format!("{{\"detail\":{}}}", json_string(message)),
+            ),
+            HandlerError::UnsupportedMediaType(message) => (
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
                 format!("{{\"detail\":{}}}", json_string(message)),
             ),
             HandlerError::FieldErrors(body) | HandlerError::Conflict(body) => {
@@ -365,15 +372,6 @@ impl IntoResponse for HandlerError {
 
 fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
-}
-
-/// Render a 200 JSON response with exact bytes (DRF `JSONRenderer`, compact).
-fn json_ok(body: String) -> Response {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("handler json response")
 }
 
 // ---------------------------------------------------------------------------
@@ -457,9 +455,7 @@ async fn authenticate_api_token(pool: &sqlx::PgPool, raw: &str) -> Result<Identi
         .map_err(|_| HandlerError::InvalidToken)?;
     // `api_token.save(update_fields=["last_used"])`: operational failures 500
     // through the generic branch, like Python.
-    sqlx::query(r#"UPDATE api_tokens SET last_used = now() WHERE token = $1"#)
-        .bind(raw)
-        .execute(pool)
+    pidash_services::domain::tokens::touch_api_token_last_used_by_token(pool, raw)
         .await
         .map_err(|_| HandlerError::ServerError)?;
     load_identity(pool, user_id).await
@@ -517,16 +513,12 @@ async fn authenticate_machine_token(
     .await
     .map_err(|_| HandlerError::ServerError)?;
     if member.is_none() {
-        sqlx::query(r#"UPDATE machine_token SET revoked_at = now() WHERE token_hash = $1"#)
-            .bind(&presented_hash)
-            .execute(pool)
+        pidash_services::domain::tokens::revoke_machine_token_by_hash(pool, &presented_hash)
             .await
             .map_err(|_| HandlerError::ServerError)?;
         return Err(HandlerError::InvalidToken);
     }
-    sqlx::query(r#"UPDATE machine_token SET last_used_at = now() WHERE token_hash = $1"#)
-        .bind(&presented_hash)
-        .execute(pool)
+    pidash_services::domain::tokens::touch_machine_token_last_used_by_hash(pool, &presented_hash)
         .await
         .map_err(|_| HandlerError::ServerError)?;
     load_identity(pool, user_id).await
@@ -746,24 +738,7 @@ async fn resolve_state_gate(
 // Query params, `fields` / `expand`, rendering
 // ---------------------------------------------------------------------------
 
-/// One query value, repeated or not (mirrors `app_issues::OneOrMany`: axum's
-/// `Query` backend does not coerce repeats, so callers read last-wins like
-/// Django's `QueryDict.get`).
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(untagged)]
-enum OneOrMany {
-    One(String),
-    Many(Vec<String>),
-}
-
-type QueryMap = HashMap<String, OneOrMany>;
-
-fn query_last(query: &QueryMap, key: &str) -> Option<String> {
-    query.get(key).map(|value| match value {
-        OneOrMany::One(one) => one.clone(),
-        OneOrMany::Many(many) => many.last().cloned().unwrap_or_default(),
-    })
-}
+use pidash_compat::http::{query_last, QueryMap};
 
 /// `BaseAPIView.fields` / `.expand` (`views/base.py:203-211`): comma-split,
 /// empties dropped, `None` when empty.
@@ -781,37 +756,6 @@ fn csv_param(raw: Option<String>) -> Option<Vec<String>> {
     }
 }
 
-/// All `StateSerializer` wire fields, in live-DRF order (probed 2026-09-30 against
-/// Django 4.2.30: declared `id`, the time/soft-delete columns, the plain model
-/// fields in definition order, then the four FKs — `created_by`, `updated_by`,
-/// `project`, `workspace` — last).
-///
-/// NOTE: this differs from
-/// [`pidash_services::v1_projects::ser_workflow::StateView`], which documents
-/// "declared `id`, then model definition order" (foundation, PIDASHCONV-351,
-/// read-only here). The order below is what Django actually emits; rendering
-/// lives in this module, so the port follows the wire, not the doc.
-const STATE_FIELDS: &[&str] = &[
-    "id",
-    "created_at",
-    "updated_at",
-    "deleted_at",
-    "name",
-    "description",
-    "color",
-    "slug",
-    "sequence",
-    "group",
-    "is_triage",
-    "default",
-    "external_source",
-    "external_id",
-    "created_by",
-    "updated_by",
-    "project",
-    "workspace",
-];
-
 /// Expansion map applicable to states (`serializers/base.py:53-94`):
 /// `project` → `ProjectLiteSerializer`, `workspace` → `WorkspaceLiteSerializer`,
 /// `created_by` / `updated_by` → `UserLiteSerializer`.
@@ -822,75 +766,6 @@ fn expand_lite_kind(name: &str) -> Option<&'static str> {
         "created_by" | "updated_by" => Some("user"),
         _ => None,
     }
-}
-
-/// One rendered state object as an ordered map, before `fields`/`expand`.
-#[allow(clippy::too_many_arguments)]
-fn state_base_map(
-    id: &str,
-    created_at: &str,
-    updated_at: &str,
-    created_by: Option<String>,
-    updated_by: Option<String>,
-    deleted_at: Option<String>,
-    project: &str,
-    workspace: &str,
-    name: &str,
-    description: &str,
-    color: &str,
-    slug: &str,
-    sequence: f64,
-    group: &str,
-    is_triage: bool,
-    default: bool,
-    external_source: Option<&str>,
-    external_id: Option<&str>,
-) -> serde_json::Map<String, Value> {
-    let mut map = serde_json::Map::with_capacity(STATE_FIELDS.len());
-    let opt = |v: Option<String>| v.map(Value::String).unwrap_or(Value::Null);
-    map.insert("id".to_owned(), Value::String(id.to_owned()));
-    map.insert(
-        "created_at".to_owned(),
-        Value::String(created_at.to_owned()),
-    );
-    map.insert(
-        "updated_at".to_owned(),
-        Value::String(updated_at.to_owned()),
-    );
-    map.insert("deleted_at".to_owned(), opt(deleted_at));
-    map.insert("name".to_owned(), Value::String(name.to_owned()));
-    map.insert(
-        "description".to_owned(),
-        Value::String(description.to_owned()),
-    );
-    map.insert("color".to_owned(), Value::String(color.to_owned()));
-    map.insert("slug".to_owned(), Value::String(slug.to_owned()));
-    map.insert(
-        "sequence".to_owned(),
-        serde_json::Number::from_f64(sequence)
-            .map(Value::Number)
-            .unwrap_or(Value::Null),
-    );
-    map.insert("group".to_owned(), Value::String(group.to_owned()));
-    map.insert("is_triage".to_owned(), Value::Bool(is_triage));
-    map.insert("default".to_owned(), Value::Bool(default));
-    map.insert(
-        "external_source".to_owned(),
-        external_source
-            .map(|v| Value::String(v.to_owned()))
-            .unwrap_or(Value::Null),
-    );
-    map.insert(
-        "external_id".to_owned(),
-        external_id
-            .map(|v| Value::String(v.to_owned()))
-            .unwrap_or(Value::Null),
-    );
-    map.insert("created_by".to_owned(), opt(created_by));
-    map.insert("updated_by".to_owned(), opt(updated_by));
-    map.insert("project".to_owned(), Value::String(project.to_owned()));
-    map.insert("workspace".to_owned(), Value::String(workspace.to_owned()));
-    map
 }
 
 /// Render one state row (`StateSerializer.to_representation`, `state.py:11-41`):
@@ -912,7 +787,7 @@ async fn render_state(
         .deleted_at
         .as_ref()
         .map(|dt| crate::serializer::render_datetime_in(dt, tz));
-    let mut map = state_base_map(
+    let mut map = ser::state_base_map(
         &row.id.to_string(),
         &created_at,
         &updated_at,
@@ -1176,14 +1051,46 @@ fn drf_type_name(value: &Value) -> &'static str {
     }
 }
 
-/// Parse the request body the way DRF's parsers do for these views: an empty
-/// body is empty data; otherwise JSON (malformed → 400 `{"detail": ...}`);
-/// a non-object JSON value answers 400 `non_field_errors`.
-fn read_object_body(body: Bytes) -> Result<serde_json::Map<String, Value>, HandlerError> {
-    if body.is_empty() {
-        return Ok(serde_json::Map::new());
+/// State write-path body spec: no list fields; blank `sequence`/`group`/
+/// `is_triage`/`default` form values behave as absent (all verified live).
+/// `description`/`external_*` keep `''` (`allow_blank`, stored verbatim).
+const STATE_BODY_SPEC: crate::v1_cycles_modules::body::BodySpec =
+    crate::v1_cycles_modules::body::BodySpec {
+        list_fields: &[],
+        skip_blank_fields: &["sequence", "group", "is_triage", "default"],
+    };
+
+/// Content-negotiated state write body (PIDASHCONV-1391): empty bodies are
+/// `{}`, form/multipart arrives as the HTML-input map (last value wins,
+/// blank optionals skipped per [`STATE_BODY_SPEC`]), JSON keeps the existing
+/// serde + `JSON parse error` mapping over the decoded text, and a media type
+/// no DRF parser accepts (or a missing `Content-Type` with a body) is the 415.
+///
+/// Multipart *file* parts are dropped: no state field is a file field, so a
+/// text-only multipart request is the whole named surface (same convention as
+/// PIDASHCONV-1149).
+fn parse_write_body(
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<serde_json::Map<String, Value>, HandlerError> {
+    use crate::v1_cycles_modules::body::{negotiate_body, BodyError, NegotiatedBody};
+    match negotiate_body(headers, body, &STATE_BODY_SPEC) {
+        Err(BodyError::UnsupportedMediaType(detail)) => {
+            Err(HandlerError::UnsupportedMediaType(detail))
+        }
+        Err(BodyError::ParseDetail(detail)) => Err(HandlerError::BadDetail(detail)),
+        Err(BodyError::ServerError) => Err(HandlerError::ServerError),
+        Ok(NegotiatedBody::Empty) => Ok(serde_json::Map::new()),
+        Ok(NegotiatedBody::JsonText { text, .. }) => read_json_object(text.as_bytes()),
+        Ok(NegotiatedBody::Form { map, .. }) => Ok(map),
     }
-    let value: Value = serde_json::from_slice(&body)
+}
+
+/// Parse decoded JSON source text the way DRF's parsers do for these views:
+/// malformed → 400 `{"detail": ...}`; a non-object JSON value answers 400
+/// `non_field_errors`.
+fn read_json_object(body: &[u8]) -> Result<serde_json::Map<String, Value>, HandlerError> {
+    let value: Value = serde_json::from_slice(body)
         .map_err(|e| HandlerError::BadDetail(format!("JSON parse error - {e}")))?;
     match value {
         Value::Object(map) => Ok(map),
@@ -1650,7 +1557,12 @@ fn validate_state_input(
         })
     } else {
         // Error order is serializer field order (DRF `errors` dict).
-        let order = |name: &str| STATE_FIELDS.iter().position(|f| *f == name).unwrap_or(99);
+        let order = |name: &str| {
+            ser::STATE_FIELDS
+                .iter()
+                .position(|f| *f == name)
+                .unwrap_or(99)
+        };
         errors.sort_by_key(|(name, _)| order(name));
         Err(errors)
     }
@@ -1855,7 +1767,7 @@ async fn create_state_inner(
         "POST",
     )
     .await?;
-    let raw = read_object_body(body)?;
+    let raw = parse_write_body(headers, &body)?;
     // Field validation first: DRF never calls `validate()` after field errors,
     // so the default-flip stays dormant on this path.
     let input = validate_state_input(&raw, false)
@@ -1912,7 +1824,6 @@ async fn create_state_inner(
             None => state_model::DEFAULT_SEQUENCE,
         },
     };
-    let id = Uuid::new_v4();
     let slug_value = state_model::slugify_name(&name);
     let description = input.description.clone().unwrap_or_default();
     let is_triage = input.is_triage.unwrap_or(state_model::DEFAULT_IS_TRIAGE);
@@ -1920,32 +1831,30 @@ async fn create_state_inner(
     // Each external field saves independently (missing or explicit null → null).
     let external_source = input.external_source.clone().flatten();
     let external_id = input.external_id.clone().flatten();
-    let insert = sqlx::query(
-        r#"INSERT INTO states
-           (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
-            project_id, workspace_id, name, description, color, slug, sequence,
-            "group", is_triage, "default", external_source, external_id)
-           VALUES ($1,$2,$3,$4,$5,NULL,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)"#,
+    let insert = pidash_services::domain::projects::states::create(
+        &pool,
+        &pidash_services::domain::projects::states::NewState {
+            project_id: gate.project_id,
+            workspace_id,
+            name: &name,
+            description: &description,
+            color: &color,
+            slug: &slug_value,
+            sequence,
+            group: &group,
+            is_triage,
+            default,
+            external_source: external_source.as_deref(),
+            external_id: external_id.as_deref(),
+            created_by: gate.actor.id,
+            updated_by: None,
+            now,
+            v1: true,
+        },
     )
-    .bind(id)
-    .bind(now)
-    .bind(now)
-    .bind(gate.actor.id)
-    .bind(Option::<Uuid>::None)
-    .bind(gate.project_id)
-    .bind(workspace_id)
-    .bind(&name)
-    .bind(&description)
-    .bind(&color)
-    .bind(&slug_value)
-    .bind(sequence)
-    .bind(&group)
-    .bind(is_triage)
-    .bind(default)
-    .bind(&external_source)
-    .bind(&external_id);
-    match insert.execute(&pool).await {
-        Ok(_) => {}
+    .await;
+    let id = match insert {
+        Ok(id) => id,
         Err(e) if is_unique_violation(&e) => {
             // Name clash: echo the surviving row's id; a lookup miss 500s
             // (Python `AttributeError` on `None.id` → generic branch). The lookup
@@ -1964,7 +1873,7 @@ async fn create_state_inner(
             )));
         }
         Err(_) => return Err(HandlerError::ServerError),
-    }
+    };
     let created = state_model::State {
         id,
         created_at: now,
@@ -2001,11 +1910,9 @@ fn micros_now() -> chrono::DateTime<chrono::Utc> {
 
 /// The default-flip side effect (`serializers/state.py:21-22`): clear `default`
 /// on every sibling in the project (soft-deleted and triage rows keep theirs,
-/// via the default-manager scope in [`ser::STATE_DEFAULT_FLIP_SQL`]).
+/// via the default-manager scope in the domain twin).
 async fn run_default_flip(pool: &sqlx::PgPool, project_id: Uuid) -> Result<(), HandlerError> {
-    sqlx::query(ser::STATE_DEFAULT_FLIP_SQL)
-        .bind(project_id)
-        .execute(pool)
+    domain_projects::states::clear_project_defaults(pool, project_id)
         .await
         .map_err(|_| HandlerError::ServerError)?;
     Ok(())
@@ -2104,14 +2011,6 @@ async fn fetch_state_by_name(
 fn state_conflict_body(error: &str, id: &str) -> String {
     serde_json::to_string(&serde_json::json!({"error": error, "id": id}))
         .expect("conflict body serializes")
-}
-
-/// True for unique/partial-unique violations (SQLSTATE 23505): the only
-/// `IntegrityError` the name-constraint INSERT can raise deterministically.
-fn is_unique_violation(e: &sqlx::Error) -> bool {
-    e.as_database_error()
-        .and_then(|db| db.code())
-        .is_some_and(|code| code == "23505")
 }
 
 /// Rebuild a request from its parts and proxy it to Django (the resolver
@@ -2265,7 +2164,7 @@ async fn patch_state_inner(
         .await
         .map_err(|_| HandlerError::ServerError)?
         .ok_or(HandlerError::NotFound)?;
-    let raw = read_object_body(body)?;
+    let raw = parse_write_body(headers, &body)?;
     let input = validate_state_input(&raw, true)
         .map_err(|errors| HandlerError::FieldErrors(field_errors_body(&errors)))?;
     // Partial `validate()`: the triage check sees the supplied group (or
@@ -2337,27 +2236,26 @@ async fn patch_state_inner(
     row.slug = state_model::slugify_name(&row.name);
     row.updated_at = micros_now();
     row.updated_by_id = Some(gate.actor.id);
-    let update = sqlx::query(
-        r#"UPDATE states SET updated_at = $1, updated_by_id = $2, name = $3,
-                  description = $4, color = $5, slug = $6, sequence = $7,
-                  "group" = $8, is_triage = $9, "default" = $10,
-                  external_source = $11, external_id = $12
-           WHERE id = $13"#,
+    match pidash_services::domain::projects::states::save(
+        &pool,
+        &pidash_services::domain::projects::states::SaveState {
+            id: row.id,
+            updated_at: row.updated_at,
+            updated_by: row.updated_by_id,
+            name: &row.name,
+            description: &row.description,
+            color: &row.color,
+            slug: &row.slug,
+            sequence: row.sequence,
+            group: &row.group,
+            is_triage: row.is_triage,
+            default: row.default,
+            external_source: row.external_source.as_deref(),
+            external_id: row.external_id.as_deref(),
+        },
     )
-    .bind(row.updated_at)
-    .bind(row.updated_by_id)
-    .bind(&row.name)
-    .bind(&row.description)
-    .bind(&row.color)
-    .bind(&row.slug)
-    .bind(row.sequence)
-    .bind(&row.group)
-    .bind(row.is_triage)
-    .bind(row.default)
-    .bind(&row.external_source)
-    .bind(&row.external_id)
-    .bind(row.id);
-    match update.execute(&pool).await {
+    .await
+    {
         Ok(_) => {}
         // Uncaught `IntegrityError` → `handle_exception` 400 branch.
         Err(e) if is_unique_violation(&e) => return Err(HandlerError::InvalidPayload),
@@ -2487,11 +2385,7 @@ async fn delete_state_inner(
         ));
     }
     let now = micros_now();
-    sqlx::query(r#"UPDATE states SET deleted_at = $1, updated_by_id = $2 WHERE id = $3"#)
-        .bind(now)
-        .bind(gate.actor.id)
-        .bind(state_id)
-        .execute(&pool)
+    pidash_services::domain::projects::states::soft_delete(&pool, state_id, gate.actor.id, now)
         .await
         .map_err(|_| HandlerError::ServerError)?;
     // Instance `delete()` → `.delay(...)` (`db/mixins.py:77-78`): stamp,
@@ -2662,7 +2556,7 @@ mod tests {
         // Probed live order: id, created_at, updated_at, deleted_at, then the
         // plain model fields, then the four FKs last.
         assert_eq!(
-            STATE_FIELDS,
+            ser::STATE_FIELDS,
             &[
                 "id",
                 "created_at",
@@ -2827,6 +2721,38 @@ mod tests {
             Err(HandlerError::BadError(message))
             if message == "The required key does not exist."
         ));
+    }
+
+    #[test]
+    fn write_body_negotiates() {
+        let headers_for = |content_type: &str, len: usize| {
+            let mut headers = HeaderMap::new();
+            headers.insert("content-type", content_type.parse().unwrap());
+            headers.insert("content-length", len.to_string().parse().unwrap());
+            headers
+        };
+        // Form input: text values arrive as scalars, blank optionals behave
+        // as absent, blank text stays in the map.
+        let body = b"name=S1&color=%23fff&sequence=&description=";
+        let headers = headers_for("application/x-www-form-urlencoded", body.len());
+        let map = parse_write_body(&headers, body).expect("form");
+        assert_eq!(map.get("name"), Some(&Value::String("S1".to_owned())));
+        assert!(!map.contains_key("sequence"));
+        assert_eq!(map.get("description"), Some(&Value::String(String::new())));
+        // Unknown media types 415 with the DRF detail.
+        let text_body = b"{\"description\": \"x\"}";
+        let headers = headers_for("text/plain", text_body.len());
+        let err = parse_write_body(&headers, text_body).expect_err("415");
+        let (status, body) = err.status_and_body();
+        assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(
+            body,
+            r#"{"detail":"Unsupported media type \"text/plain\" in request."}"#
+        );
+        assert!(matches!(err, HandlerError::UnsupportedMediaType(_)));
+        // Empty bodies are `{}`.
+        let map = parse_write_body(&HeaderMap::new(), b"").expect("empty");
+        assert!(map.is_empty());
     }
 }
 

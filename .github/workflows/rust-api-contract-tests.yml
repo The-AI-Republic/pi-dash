@@ -273,13 +273,15 @@ jobs:
             > /tmp/contract-beat.log 2>&1 &
 
       # PIDASHCONV-1062: the turn-errors static tests assert on Django source
-      # that exists on origin/main only (rust-dev's apps/api is frozen
-      # pre-#1126). Fetch the pinned commit and check it out as a worktree;
-      # retire after PIDASHCONV-1055 merges main into rust-dev.
+      # that exists on origin/main only. Fetch the pinned commit and check
+      # it out as a worktree; retire after the next main-sync merges main
+      # into rust-dev. PIDASHCONV-1566: re-pinned past 52df56b9e (#1430),
+      # which replaced the classifier the statics assert on (matches
+      # MAIN_PIN in assistant/test_turn_errors.py).
       - name: Provision origin/main worktree for drift static tests
         run: |
-          git fetch origin 3267ceb9cda65c90e6cb66e4a3ef8aaa26ca3a4e --depth 1
-          git worktree add --detach /tmp/pi-dash-main 3267ceb9cda65c90e6cb66e4a3ef8aaa26ca3a4e
+          git fetch origin 0a6fb8eca0f459802045f22e02af5748a6bdc768 --depth 1
+          git worktree add --detach /tmp/pi-dash-main 0a6fb8eca0f459802045f22e02af5748a6bdc768
           echo "PIDASH_DJANGO_MAIN_DIR=/tmp/pi-dash-main/apps/api" >> "$GITHUB_ENV"
 
       - name: Run worker-plane oracle
@@ -300,7 +302,12 @@ jobs:
         # (tasks_cleanup/test_mongo_write_error.py) needs a worker booted
         # with MONGO_DB_URL/MONGO_DB_DATABASE; this job's worker has no
         # Mongo, so it has its own mongo job (PIDASHCONV-1290).
-        run: env -u DJANGO_SETTINGS_MODULE pytest -p no:django --ignore-glob='*/test_rust_replay*.py' --ignore-glob='*/test_s3_stall.py' --ignore-glob='*/test_mongo_write_error.py' tasks_mail tasks_webhooks tasks_cleanup tasks_ticker assistant/test_tasks_turn.py assistant/test_turn_errors.py assistant/test_update_issue_completion.py assistant/test_create_issue_transition.py
+        # PIDASHCONV-1566 (stage-8 drift hold): assistant/test_turn_errors_drift.py
+        # asserts behavior that exists only on origin/main (52df56b9e); this
+        # job serves Django from the frozen checkout, so the file stays out
+        # of the selection until the next main-sync merges main into
+        # rust-dev, then is added next to assistant/test_turn_errors.py.
+        run: env -u DJANGO_SETTINGS_MODULE pytest -p no:django --ignore-glob='*/test_rust_replay*.py' --ignore-glob='*/test_s3_stall.py' --ignore-glob='*/test_mongo_write_error.py' tasks_mail tasks_webhooks tasks_cleanup tasks_ticker assistant/test_tasks_turn.py assistant/test_turn_errors.py assistant/test_update_issue_completion.py assistant/test_create_issue_transition.py assistant/test_dispatch_coding_run.py
 
       - name: Upload service logs on failure
         if: failure()

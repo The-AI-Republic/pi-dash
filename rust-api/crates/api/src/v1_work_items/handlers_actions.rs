@@ -89,17 +89,19 @@ use uuid::Uuid;
 
 use pidash_auth::permissions::project;
 use pidash_auth::scope::TenantScope;
+use pidash_db::redis::client_from_settings;
 use pidash_types::orchestration::{normalize_outcome, RUN_OUTCOMES};
 use pidash_types::runner_runs::AgentRunStatus;
 
 use crate::project_move_handoff::RedisAdmissionCache;
-use crate::runner_enroll::teardown::redis_client;
 use crate::state::AppState;
 
 use super::perms::{
     gate_for, refuse_agent_action, refuse_agent_retick, resolve_moved_by_run, run_belongs_to,
     RunFacts, V1WorkItemsRoute,
 };
+use pidash_compat::response::json_response;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 
 // ---------------------------------------------------------------------------
 // Responses
@@ -112,8 +114,6 @@ pub const UNAUTHENTICATED_BODY: &str =
 /// `APIKeyAuthentication` failure (`api/middleware/api_authentication.py`):
 /// every token rejection maps to this single 403 body.
 pub const INVALID_TOKEN_BODY: &str = r#"{"detail":"Given API token is not valid"}"#;
-/// `handle_exception`'s generic branch (`api/views/base.py:166-170`).
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// The three issue-scoped endpoints' lookup miss
 /// (`views/issue.py:963,1042,1231`).
 pub const WORK_ITEM_NOT_FOUND_BODY: &str = r#"{"error":"Work item not found"}"#;
@@ -213,15 +213,6 @@ impl IntoResponse for Denial {
 
 fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
-}
-
-/// Render a JSON response with exact bytes and status.
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(axum::http::header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("handler json response")
 }
 
 /// Map a database/driver failure to the generic 500 while logging the site
@@ -358,10 +349,8 @@ pub async fn actor(pool: &PgPool, headers: &HeaderMap, secret_key: &[u8]) -> Res
     // (`api_authentication.py:41-44`); machine tokens stamp `last_used_at`.
     // Best-effort: a failed stamp must not fail the request.
     if !raw.starts_with(pidash_auth::token::MACHINE_TOKEN_PREFIX) {
-        let _ = sqlx::query(r#"UPDATE "api_tokens" SET "last_used" = now() WHERE "token" = $1"#)
-            .bind(raw)
-            .execute(pool)
-            .await;
+        let _ =
+            pidash_services::domain::tokens::touch_api_token_last_used_by_token(pool, raw).await;
     }
     // The token loggers stamp this id on the `process_logs` payload
     // (Django reads `request.user` post-view; PIDASHCONV-937).
@@ -448,19 +437,16 @@ async fn resolve_machine_token(
     if !member {
         // `revoke()` stamps `revoked_at` only (`runner/models.py:865-869`);
         // `last_used_at` is stamped on success only.
-        let _ = sqlx::query(
-            r#"UPDATE "machine_token" SET "revoked_at" = now() WHERE "token_hash" = $1"#,
-        )
-        .bind(&presented_hash)
-        .execute(pool)
-        .await;
+        let _ =
+            pidash_services::domain::tokens::revoke_machine_token_by_hash(pool, &presented_hash)
+                .await;
         return Err(Denial::InvalidToken);
     }
-    let _ =
-        sqlx::query(r#"UPDATE "machine_token" SET "last_used_at" = now() WHERE "token_hash" = $1"#)
-            .bind(&presented_hash)
-            .execute(pool)
-            .await;
+    let _ = pidash_services::domain::tokens::touch_machine_token_last_used_by_hash(
+        pool,
+        &presented_hash,
+    )
+    .await;
     Ok(user_id)
 }
 
@@ -1117,7 +1103,7 @@ pub async fn dispatch_deps(
     let presence = fetch_presence(pool, actor_id, issue, project).await?;
     let verdicts = Arc::new(gate_verdicts(state, &presence).await);
     let cache = RedisAdmissionCache {
-        client: redis_client(state),
+        client: client_from_settings(state.settings()),
     };
     Ok((
         pidash_jobs::orchestration::StoreDeps {
@@ -1158,7 +1144,7 @@ pub async fn dispatch_deps_for_ids(
     let presence = Arc::new(fetch_llm_presence(pool, &universe).await?);
     let verdicts = Arc::new(gate_verdicts(state, &presence).await);
     let cache = RedisAdmissionCache {
-        client: redis_client(state),
+        client: client_from_settings(state.settings()),
     };
     Ok((
         pidash_jobs::orchestration::StoreDeps {
@@ -1426,9 +1412,8 @@ pub fn truncate_note(note: &str) -> Option<String> {
 
 /// Read the whole body.
 async fn read_body(body: axum::body::Body) -> Result<Vec<u8>, Denial> {
-    axum::body::to_bytes(body, usize::MAX)
+    pidash_compat::http::read_body(body)
         .await
-        .map(|bytes| bytes.to_vec())
         .map_err(|error| db_error(error, "read-body"))
 }
 
@@ -1634,6 +1619,7 @@ async fn wait_inner(
         epoch_secs,
         issue.id,
         run_id,
+        Some(pre.actor.id),
         Some(pre.actor.id),
     )
     .await

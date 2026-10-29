@@ -81,8 +81,6 @@
 //! `pidash_services::app_project`, the gates in [`super::gates`], the task
 //! shapes in `pidash_services::app_project::tasks`.
 
-use std::collections::HashMap;
-
 use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -97,6 +95,8 @@ use crate::state::AppState;
 
 use pidash_auth::permissions::allow::AllowFacts;
 use pidash_auth::permissions::{ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER};
+use pidash_compat::datetime::{django_str_datetime, render_datetime_in};
+use pidash_compat::response::no_content;
 use pidash_services::v1_work_items::python_number_str;
 use pidash_types::WorkspaceId;
 
@@ -756,57 +756,25 @@ fn json_string(value: &str) -> String {
 /// DRF `JSONRenderer.render`: after dumping, `\\u2028`/`\\u2029` are
 /// always escaped (lowercase hex) so the output is a strict JavaScript
 /// subset — `serde_json` emits them raw, so every rendered HTTP body
-/// passes through here.
+/// passes through here. The canonical escape is
+/// `pidash_compat::response::escape_u2028` (OVL-04).
 fn escape_u2028(body: String) -> String {
-    body.replace('\u{2028}', "\\u2028")
-        .replace('\u{2029}', "\\u2029")
-}
-
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("project response")
+    pidash_compat::response::escape_u2028(&body)
 }
 
 fn json_ok(body: String) -> Response {
-    json_response(StatusCode::OK, escape_u2028(body))
+    pidash_compat::response::json_response(StatusCode::OK, escape_u2028(body))
 }
 
 fn json_created(body: String) -> Response {
-    json_response(StatusCode::CREATED, escape_u2028(body))
-}
-
-fn no_content() -> Response {
-    Response::builder()
-        .status(StatusCode::NO_CONTENT)
-        .body(axum::body::Body::empty())
-        .expect("empty 204")
+    pidash_compat::response::json_response(StatusCode::CREATED, escape_u2028(body))
 }
 
 // ---------------------------------------------------------------------------
 // Query map (Django QueryDict: repeats legal, .get returns the last)
 // ---------------------------------------------------------------------------
 
-/// One query value, repeated or not.
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(untagged)]
-pub enum OneOrMany {
-    One(String),
-    Many(Vec<String>),
-}
-
-/// The multi-value query map every list handler extracts.
-pub type QueryMap = HashMap<String, OneOrMany>;
-
-/// Django `QueryDict.get`: the last value, or `None` when absent.
-pub fn query_last(query: &QueryMap, key: &str) -> Option<String> {
-    query.get(key).map(|value| match value {
-        OneOrMany::One(one) => one.clone(),
-        OneOrMany::Many(many) => many.last().cloned().unwrap_or_default(),
-    })
-}
+pub use pidash_compat::http::{query_last, OneOrMany, QueryMap};
 
 /// Django truthiness of `request.GET.get(key, False)`: absent is falsy;
 /// a present value is truthy unless it is the empty string.
@@ -1037,23 +1005,11 @@ fn utc_now_micros() -> DateTime<Utc> {
 /// with `+00:00` rewritten to `Z`, microseconds only when nonzero —
 /// `crate::serializer::render_datetime_in` ports exactly this.
 fn render_dt(value: &DateTime<Utc>, timezone: Tz) -> String {
-    crate::serializer::render_datetime_in(value, &timezone)
+    render_datetime_in(value, &timezone)
 }
 
 fn render_dt_opt(value: Option<DateTime<Utc>>, timezone: Tz) -> Option<String> {
     value.map(|value| render_dt(&value, timezone))
-}
-
-/// `str(archived_at)` (`base.py:441`): space separator, `+00:00` suffix,
-/// microseconds only when nonzero.
-fn render_python_datetime(value: &DateTime<Utc>) -> String {
-    let mut out = value.format("%Y-%m-%d %H:%M:%S").to_string();
-    let nanos = value.timestamp_subsec_nanos();
-    if nanos != 0 {
-        out.push_str(&format!(".{:06}", nanos / 1000));
-    }
-    out.push_str("+00:00");
-    out
 }
 
 /// `str(value)` for a truthy JSON body value, as `validate()` calls it on
@@ -4395,7 +4351,6 @@ async fn insert_project(
             }
         }
     };
-    let id = uuid::Uuid::new_v4();
     let name = validated.name.as_deref().expect("required on create");
     // `int4` columns: out-of-range `IntegerField` values 500 at the
     // column (`archive_in`/`close_in` are already fenced by 0..12).
@@ -4416,89 +4371,80 @@ async fn insert_project(
     // `save()` runs inside `transaction.atomic()`, clearing the previous
     // default *before* the insert — the partial unique index forbids two
     // live defaults even momentarily.
-    let mut tx = pool.begin().await.map_err(|_| Denial::ServerError)?;
-    if is_default {
-        sqlx::query(
-            r#"UPDATE projects SET is_default = FALSE
-               WHERE workspace_id = $1 AND is_default AND deleted_at IS NULL AND id <> $2"#,
-        )
-        .bind(workspace_id)
-        .bind(id)
-        .execute(&mut *tx)
-        .await
-        .map_err(db_denial)?;
-    }
-    let result = sqlx::query(
-        r#"INSERT INTO projects (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
-              name, description, description_text, description_html, network, workspace_id, identifier,
-              default_assignee_id, project_lead_id, emoji, icon_prop,
-              module_view, cycle_view, issue_views_view, page_view, intake_view,
-              is_time_tracking_enabled, is_issue_type_enabled, guest_view_all_features,
-              cover_image, cover_image_asset_id, estimate_id, archive_in, close_in, logo_props,
-              default_state_id, archived_at, is_default, timezone, external_source, external_id,
-              repo_url, base_branch,
-              agent_default_interval_seconds, agent_default_max_ticks,
-              agent_review_default_interval_seconds, agent_test_default_interval_seconds,
-              agent_ticking_enabled, default_agent_executor, members_can_edit_states)
-           VALUES ($1, $2, $2, $3, NULL, NULL,
-              $4, $5, $6, $7, $8, $9, $10,
-              $11, $12, $13, $14,
-              $15, $16, $17, $18, $19,
-              $20, $21, $22,
-              $23, $24, $25, $26, $27, $28,
-              $29, $30, $31, $32, $33, $34,
-              $35, $36,
-              $37, $38, $39, $40,
-              $41, $42, $43)"#,
+    let logo_props = validated
+        .logo_props
+        .clone()
+        .unwrap_or(Value::Object(Map::new()));
+    let id = pidash_services::domain::projects::create(
+        pool,
+        &pidash_services::domain::projects::NewProject {
+            name,
+            description: validated.description.as_deref().unwrap_or(""),
+            description_text: validated
+                .description_text
+                .as_ref()
+                .and_then(|value| value.as_ref()),
+            description_html: validated
+                .description_html
+                .as_ref()
+                .and_then(|value| value.as_ref()),
+            network: validated.network.unwrap_or(2),
+            workspace_id: *workspace_id,
+            identifier: &identifier,
+            default_assignee: validated.default_assignee.unwrap_or(None),
+            project_lead: validated.project_lead.unwrap_or(None),
+            emoji: validated.emoji.as_ref().and_then(|value| value.as_deref()),
+            icon_prop: validated
+                .icon_prop
+                .as_ref()
+                .and_then(|value| value.as_ref()),
+            module_view: validated.module_view.unwrap_or(false),
+            cycle_view: validated.cycle_view.unwrap_or(false),
+            issue_views_view: validated.issue_views_view.unwrap_or(false),
+            page_view: validated.page_view.unwrap_or(true),
+            intake_view: validated.intake_view.unwrap_or(false),
+            is_time_tracking_enabled: validated.is_time_tracking_enabled.unwrap_or(false),
+            is_issue_type_enabled: validated.is_issue_type_enabled.unwrap_or(false),
+            guest_view_all_features: validated.guest_view_all_features.unwrap_or(false),
+            cover_image: validated
+                .cover_image
+                .as_ref()
+                .and_then(|value| value.as_deref()),
+            cover_image_asset: validated.cover_image_asset.unwrap_or(None),
+            estimate: validated.estimate.unwrap_or(None),
+            archive_in,
+            close_in,
+            logo_props: &logo_props,
+            default_state: validated.default_state.unwrap_or(None),
+            archived_at: validated.archived_at.unwrap_or(None),
+            is_default,
+            clear_others: is_default,
+            timezone: &timezone,
+            external_source: validated
+                .external_source
+                .as_ref()
+                .and_then(|value| value.as_deref()),
+            external_id: validated
+                .external_id
+                .as_ref()
+                .and_then(|value| value.as_deref()),
+            repo_url: validated.repo_url.as_deref().unwrap_or(""),
+            base_branch: validated.base_branch.as_deref().unwrap_or("main"),
+            agent_interval,
+            agent_max_ticks,
+            agent_review,
+            agent_test,
+            agent_ticking: validated.agent_ticking_enabled.unwrap_or(true),
+            default_executor: &default_executor,
+            members_can_edit_states: validated.members_can_edit_states.unwrap_or(true),
+            created_by: *actor_id,
+            created_at: now,
+            updated_at: now,
+            v1: false,
+        },
     )
-    .bind(id)
-    .bind(now)
-    .bind(actor_id)
-    .bind(name)
-    .bind(validated.description.as_deref().unwrap_or(""))
-    .bind(validated.description_text.clone().unwrap_or(None))
-    .bind(validated.description_html.clone().unwrap_or(None))
-    .bind(validated.network.unwrap_or(2))
-    .bind(workspace_id)
-    .bind(identifier)
-    .bind(validated.default_assignee.unwrap_or(None))
-    .bind(validated.project_lead.unwrap_or(None))
-    .bind(validated.emoji.clone().unwrap_or(None))
-    .bind(validated.icon_prop.clone().unwrap_or(None))
-    .bind(validated.module_view.unwrap_or(false))
-    .bind(validated.cycle_view.unwrap_or(false))
-    .bind(validated.issue_views_view.unwrap_or(false))
-    .bind(validated.page_view.unwrap_or(true))
-    .bind(validated.intake_view.unwrap_or(false))
-    .bind(validated.is_time_tracking_enabled.unwrap_or(false))
-    .bind(validated.is_issue_type_enabled.unwrap_or(false))
-    .bind(validated.guest_view_all_features.unwrap_or(false))
-    .bind(validated.cover_image.clone().unwrap_or(None))
-    .bind(validated.cover_image_asset.unwrap_or(None))
-    .bind(validated.estimate.unwrap_or(None))
-    .bind(archive_in)
-    .bind(close_in)
-    .bind(validated.logo_props.clone().unwrap_or(Value::Object(Map::new())))
-    .bind(validated.default_state.unwrap_or(None))
-    .bind(validated.archived_at.unwrap_or(None))
-    .bind(is_default)
-    .bind(timezone)
-    .bind(validated.external_source.clone().unwrap_or(None))
-    .bind(validated.external_id.clone().unwrap_or(None))
-    .bind(validated.repo_url.as_deref().unwrap_or(""))
-    .bind(validated.base_branch.as_deref().unwrap_or("main"))
-    .bind(agent_interval)
-    .bind(agent_max_ticks)
-    .bind(agent_review)
-    .bind(agent_test)
-    .bind(validated.agent_ticking_enabled.unwrap_or(true))
-    .bind(default_executor)
-    .bind(validated.members_can_edit_states.unwrap_or(true))
-    .execute(&mut *tx)
     .await
     .map_err(db_denial)?;
-    debug_assert_eq!(result.rows_affected(), 1);
-    tx.commit().await.map_err(|_| Denial::ServerError)?;
     Ok(id)
 }
 
@@ -4556,45 +4502,44 @@ async fn insert_member(
     .await
     .map_err(db_denial)?;
     let sort_order = pidash_db::app_project::models::project_member::sort_order_on_create(min.0);
-    sqlx::query(
-        r#"INSERT INTO project_user_properties
-             (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
-              project_id, workspace_id, user_id, filters, display_filters, display_properties,
-              rich_filters, preferences, sort_order)
-           VALUES ($1, $2, $2, $3, NULL, NULL, $4, $5, $6, $7, $8, $9, $10, $11, $12)"#,
+    use pidash_services::domain::projects::members as project_members;
+    project_members::add_property(
+        pool,
+        &project_members::NewMemberProperty {
+            workspace_id: *workspace_id,
+            project_id: *project_id,
+            user_id: *member_id,
+            filters: &props::default_filters(),
+            display_filters: &props::default_display_filters(),
+            display_properties: &props::default_display_properties(),
+            rich_filters:
+                &pidash_db::app_project::models::project_user_property::default_rich_filters(),
+            preferences: &pidash_db::app_project::models::project_member::default_preferences(),
+            sort_order,
+            created_by: Some(*actor_id),
+            now,
+        },
     )
-    .bind(uuid::Uuid::new_v4())
-    .bind(now)
-    .bind(actor_id)
-    .bind(project_id)
-    .bind(workspace_id)
-    .bind(member_id)
-    .bind(props::default_filters())
-    .bind(props::default_display_filters())
-    .bind(props::default_display_properties())
-    .bind(pidash_db::app_project::models::project_user_property::default_rich_filters())
-    .bind(pidash_db::app_project::models::project_member::default_preferences())
-    .bind(sort_order)
-    .execute(pool)
     .await
     .map_err(db_denial)?;
-    sqlx::query(
-        r#"INSERT INTO project_members
-             (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
-              project_id, workspace_id, member_id, comment, role,
-              view_props, default_props, preferences, sort_order, is_active)
-           VALUES ($1, $2, $2, $3, NULL, NULL, $4, $5, $6, NULL, $7, $8, $8, $9, 65535, TRUE)"#,
+    let view = pidash_db::app_project::models::project_member::default_props();
+    let prefs = pidash_db::app_project::models::project_member::default_preferences();
+    project_members::add(
+        pool,
+        &project_members::NewProjectMember {
+            workspace_id: *workspace_id,
+            project_id: Some(*project_id),
+            user_id: Some(*member_id),
+            role: ROLE_ADMIN as i16,
+            created_by: Some(*actor_id),
+            view_props: &view,
+            default_props: &view,
+            preferences: &prefs,
+            now,
+            ignore_conflicts: false,
+            db_now: false,
+        },
     )
-    .bind(uuid::Uuid::new_v4())
-    .bind(now)
-    .bind(actor_id)
-    .bind(project_id)
-    .bind(workspace_id)
-    .bind(member_id)
-    .bind(ROLE_ADMIN)
-    .bind(pidash_db::app_project::models::project_member::default_props())
-    .bind(pidash_db::app_project::models::project_member::default_preferences())
-    .execute(pool)
     .await
     .map_err(db_denial)?;
     Ok(())
@@ -4613,25 +4558,23 @@ async fn insert_default_states(
     now: DateTime<Utc>,
 ) -> Result<(), Denial> {
     use pidash_db::app_project::models::state::DEFAULT_STATES;
+    use pidash_services::domain::projects::states as project_states;
     for &(name, color, sequence, group, default) in DEFAULT_STATES.iter() {
-        sqlx::query(
-            r#"INSERT INTO states
-                 (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
-                  project_id, workspace_id, name, description, color, slug, sequence,
-                  "group", is_triage, "default", external_source, external_id)
-               VALUES ($1, $2, $2, $3, NULL, NULL, $4, $5, $6, '', $7, '', $8, $9, FALSE, $10, NULL, NULL)"#,
+        project_states::add_default(
+            pool,
+            &project_states::NewDefaultState {
+                project_id: *project_id,
+                workspace_id: *workspace_id,
+                name,
+                color,
+                sequence,
+                group,
+                default,
+                created_by: *actor_id,
+                now,
+                v1: false,
+            },
         )
-        .bind(uuid::Uuid::new_v4())
-        .bind(now)
-        .bind(actor_id)
-        .bind(project_id)
-        .bind(workspace_id)
-        .bind(name)
-        .bind(color)
-        .bind(sequence)
-        .bind(group)
-        .bind(default)
-        .execute(pool)
         .await
         .map_err(db_denial)?;
     }
@@ -4653,6 +4596,7 @@ async fn apply_update(
     now: DateTime<Utc>,
 ) -> Result<(), Denial> {
     use pidash_db::app_project::models::project as m;
+    use pidash_services::domain::projects as domain_projects;
     let new_default = validated.is_default.unwrap_or(instance.is_default);
     // `save()` is atomic (`project.py:292-301`): guard, clear, write.
     let mut tx = pool.begin().await.map_err(|_| Denial::ServerError)?;
@@ -4670,15 +4614,9 @@ async fn apply_update(
             .map_err(|_| Denial::ValidationFailed)?;
     }
     if new_default {
-        sqlx::query(
-            r#"UPDATE projects SET is_default = FALSE
-               WHERE workspace_id = $1 AND is_default AND deleted_at IS NULL AND id <> $2"#,
-        )
-        .bind(instance.workspace_id)
-        .bind(instance.id)
-        .execute(&mut *tx)
-        .await
-        .map_err(db_denial)?;
+        domain_projects::clear_other_defaults(&mut *tx, instance.workspace_id, instance.id)
+            .await
+            .map_err(db_denial)?;
     }
     let identifier = match validated.identifier.as_deref() {
         Some(raw) => m::normalize_identifier(raw),
@@ -4706,158 +4644,106 @@ async fn apply_update(
             .agent_test_default_interval_seconds
             .unwrap_or(instance.agent_test_default_interval_seconds as i64),
     )?;
-    sqlx::query(
-        r#"UPDATE projects SET
-             name = $1, description = $2, description_text = $3, description_html = $4,
-             network = $5, identifier = $6,
-             default_assignee_id = $7, project_lead_id = $8, emoji = $9, icon_prop = $10,
-             module_view = $11, cycle_view = $12, issue_views_view = $13, page_view = $14,
-             intake_view = $15, is_time_tracking_enabled = $16, is_issue_type_enabled = $17,
-             guest_view_all_features = $18,
-             cover_image = $19, cover_image_asset_id = $20, estimate_id = $21,
-             archive_in = $22, close_in = $23, logo_props = $24,
-             default_state_id = $25, archived_at = $26, is_default = $27, timezone = $28,
-             external_source = $29, external_id = $30, repo_url = $31, base_branch = $32,
-             agent_default_interval_seconds = $33, agent_default_max_ticks = $34,
-             agent_review_default_interval_seconds = $35, agent_test_default_interval_seconds = $36,
-             agent_ticking_enabled = $37, default_agent_executor = $38,
-             members_can_edit_states = $39,
-             workspace_id = $40, deleted_at = $41,
-             updated_at = $42, updated_by_id = $43, created_by_id = $44
-           WHERE id = $45"#,
-    )
-    .bind(validated.name.as_deref().unwrap_or(&instance.name))
-    .bind(
-        validated
+    let upd = domain_projects::ProjectUpdate {
+        name: validated.name.as_deref().unwrap_or(&instance.name),
+        description: validated
             .description
             .as_deref()
             .unwrap_or(&instance.description),
-    )
-    .bind(
-        validated
+        description_text: validated
             .description_text
-            .clone()
-            .unwrap_or(instance.description_text.clone()),
-    )
-    .bind(
-        validated
+            .as_ref()
+            .map_or(instance.description_text.as_ref(), |v| v.as_ref()),
+        description_html: validated
             .description_html
-            .clone()
-            .unwrap_or(instance.description_html.clone()),
-    )
-    .bind(validated.network.unwrap_or(instance.network as i32))
-    .bind(identifier)
-    .bind(
-        validated
+            .as_ref()
+            .map_or(instance.description_html.as_ref(), |v| v.as_ref()),
+        network: validated.network.unwrap_or(instance.network as i32),
+        identifier: &identifier,
+        default_assignee: validated
             .default_assignee
             .unwrap_or(instance.default_assignee_id),
-    )
-    .bind(validated.project_lead.unwrap_or(instance.project_lead_id))
-    .bind(validated.emoji.clone().unwrap_or(instance.emoji.clone()))
-    .bind(
-        validated
+        project_lead: validated.project_lead.unwrap_or(instance.project_lead_id),
+        emoji: validated
+            .emoji
+            .as_ref()
+            .map_or(instance.emoji.as_deref(), |v| v.as_deref()),
+        icon_prop: validated
             .icon_prop
-            .clone()
-            .unwrap_or(instance.icon_prop.clone()),
-    )
-    .bind(validated.module_view.unwrap_or(instance.module_view))
-    .bind(validated.cycle_view.unwrap_or(instance.cycle_view))
-    .bind(
-        validated
+            .as_ref()
+            .map_or(instance.icon_prop.as_ref(), |v| v.as_ref()),
+        module_view: validated.module_view.unwrap_or(instance.module_view),
+        cycle_view: validated.cycle_view.unwrap_or(instance.cycle_view),
+        issue_views_view: validated
             .issue_views_view
             .unwrap_or(instance.issue_views_view),
-    )
-    .bind(validated.page_view.unwrap_or(instance.page_view))
-    .bind(validated.intake_view.unwrap_or(instance.intake_view))
-    .bind(
-        validated
+        page_view: validated.page_view.unwrap_or(instance.page_view),
+        intake_view: validated.intake_view.unwrap_or(instance.intake_view),
+        is_time_tracking_enabled: validated
             .is_time_tracking_enabled
             .unwrap_or(instance.is_time_tracking_enabled),
-    )
-    .bind(
-        validated
+        is_issue_type_enabled: validated
             .is_issue_type_enabled
             .unwrap_or(instance.is_issue_type_enabled),
-    )
-    .bind(
-        validated
+        guest_view_all_features: validated
             .guest_view_all_features
             .unwrap_or(instance.guest_view_all_features),
-    )
-    .bind(
-        validated
+        cover_image: validated
             .cover_image
-            .clone()
-            .unwrap_or(instance.cover_image.clone()),
-    )
-    .bind(
-        validated
+            .as_ref()
+            .map_or(instance.cover_image.as_deref(), |v| v.as_deref()),
+        cover_image_asset: validated
             .cover_image_asset
             .unwrap_or(instance.cover_image_asset_id),
-    )
-    .bind(validated.estimate.unwrap_or(instance.estimate_id))
-    .bind(archive_in)
-    .bind(close_in)
-    .bind(
-        validated
+        estimate: validated.estimate.unwrap_or(instance.estimate_id),
+        archive_in,
+        close_in,
+        logo_props: validated
             .logo_props
-            .clone()
-            .unwrap_or_else(|| instance.logo_props.clone()),
-    )
-    .bind(validated.default_state.unwrap_or(instance.default_state_id))
-    .bind(validated.archived_at.unwrap_or(instance.archived_at))
-    .bind(new_default)
-    .bind(validated.timezone.as_deref().unwrap_or(&instance.timezone))
-    .bind(
-        validated
+            .as_ref()
+            .unwrap_or(&instance.logo_props),
+        default_state: validated.default_state.unwrap_or(instance.default_state_id),
+        archived_at: validated.archived_at.unwrap_or(instance.archived_at),
+        is_default: new_default,
+        timezone: validated.timezone.as_deref().unwrap_or(&instance.timezone),
+        external_source: validated
             .external_source
-            .clone()
-            .unwrap_or(instance.external_source.clone()),
-    )
-    .bind(
-        validated
+            .as_ref()
+            .map_or(instance.external_source.as_deref(), |v| v.as_deref()),
+        external_id: validated
             .external_id
-            .clone()
-            .unwrap_or(instance.external_id.clone()),
-    )
-    .bind(validated.repo_url.as_deref().unwrap_or(&instance.repo_url))
-    .bind(
-        validated
+            .as_ref()
+            .map_or(instance.external_id.as_deref(), |v| v.as_deref()),
+        repo_url: validated.repo_url.as_deref().unwrap_or(&instance.repo_url),
+        base_branch: validated
             .base_branch
             .as_deref()
             .unwrap_or(&instance.base_branch),
-    )
-    .bind(agent_interval)
-    .bind(agent_max_ticks)
-    .bind(agent_review)
-    .bind(agent_test)
-    .bind(
-        validated
+        agent_interval,
+        agent_max_ticks,
+        agent_review,
+        agent_test,
+        agent_ticking: validated
             .agent_ticking_enabled
             .unwrap_or(instance.agent_ticking_enabled),
-    )
-    .bind(
-        validated
+        default_executor: validated
             .default_agent_executor
             .as_deref()
             .unwrap_or(&instance.default_agent_executor),
-    )
-    .bind(
-        validated
+        members_can_edit_states: validated
             .members_can_edit_states
             .unwrap_or(instance.members_can_edit_states),
-    )
-    .bind(validated.workspace.unwrap_or(instance.workspace_id))
-    .bind(validated.deleted_at.unwrap_or(None))
-    .bind(now)
-    .bind(actor_id)
-    // `created_by` is writable on both serializers (`update()` persists
-    // it; `save()` overwrites only `updated_by` — `models/base.py`).
-    .bind(validated.created_by.unwrap_or(instance.created_by_id))
-    .bind(instance.id)
-    .execute(&mut *tx)
-    .await
-    .map_err(db_denial)?;
+        workspace_id: validated.workspace.unwrap_or(instance.workspace_id),
+        deleted_at: validated.deleted_at.unwrap_or(None),
+        updated_at: now,
+        updated_by: actor_id,
+        // `created_by` is writable on both serializers (`update()` persists
+        // it; `save()` overwrites only `updated_by` — `models/base.py`).
+        created_by: validated.created_by.unwrap_or(instance.created_by_id),
+    };
+    domain_projects::apply_update(&mut *tx, instance.id, &upd)
+        .await
+        .map_err(db_denial)?;
     tx.commit().await.map_err(|_| Denial::ServerError)?;
     Ok(())
 }
@@ -5815,15 +5701,9 @@ async fn project_destroy(
     }
     let now = utc_now_micros();
     // `project.delete()`: stamps + its `soft_delete_related_objects` emit.
-    sqlx::query(
-        r#"UPDATE projects SET deleted_at = $1, updated_at = $1, updated_by_id = $2 WHERE id = $3"#,
-    )
-    .bind(now)
-    .bind(actor.id)
-    .bind(project_id)
-    .execute(&pool)
-    .await
-    .map_err(db_denial)?;
+    pidash_services::domain::projects::soft_delete(&pool, project_id, now, actor.id)
+        .await
+        .map_err(db_denial)?;
     enqueue_message(&pool, soft_delete_message(&project_id)).await;
     let origin = request_origin(&state)?;
     enqueue_message(
@@ -5890,15 +5770,9 @@ async fn archive_post(
     .map_err(db_denial)?;
     row.ok_or(Denial::ObjectNotFound)?;
     let now = utc_now_micros();
-    sqlx::query(
-        r#"UPDATE projects SET archived_at = $1, updated_at = $1, updated_by_id = $2 WHERE id = $3"#,
-    )
-    .bind(now)
-    .bind(actor.id)
-    .bind(project_id)
-    .execute(&pool)
-    .await
-    .map_err(db_denial)?;
+    pidash_services::domain::projects::archive(&pool, project_id, now, actor.id)
+        .await
+        .map_err(db_denial)?;
     sqlx::query(
         r#"UPDATE user_favorites SET deleted_at = $1
            WHERE project_id = $2 AND deleted_at IS NULL
@@ -5912,7 +5786,7 @@ async fn archive_post(
     .map_err(db_denial)?;
     Ok(json_ok(format!(
         "{{\"archived_at\":{}}}",
-        json_string(&render_python_datetime(&now))
+        json_string(&django_str_datetime(&now))
     )))
 }
 
@@ -5946,15 +5820,9 @@ async fn unarchive_delete(
     .map_err(db_denial)?;
     row.ok_or(Denial::ObjectNotFound)?;
     let now = utc_now_micros();
-    sqlx::query(
-        r#"UPDATE projects SET archived_at = NULL, updated_at = $1, updated_by_id = $2 WHERE id = $3"#,
-    )
-    .bind(now)
-    .bind(actor.id)
-    .bind(project_id)
-    .execute(&pool)
-    .await
-    .map_err(db_denial)?;
+    pidash_services::domain::projects::unarchive(&pool, project_id, now, actor.id)
+        .await
+        .map_err(db_denial)?;
     Ok(no_content())
 }
 
@@ -6135,18 +6003,16 @@ async fn user_views_post(
         }
     }
     let now = utc_now_micros();
-    sqlx::query(
-        r#"UPDATE project_members SET view_props = $1, default_props = $2, preferences = $3,
-             sort_order = $4, updated_at = $5, updated_by_id = $6 WHERE id = $7"#,
+    pidash_services::domain::projects::members::reset_props(
+        &pool,
+        member_id,
+        &view_props,
+        &default_props,
+        &preferences,
+        sort_order,
+        now,
+        actor.id,
     )
-    .bind(view_props)
-    .bind(default_props)
-    .bind(preferences)
-    .bind(sort_order)
-    .bind(now)
-    .bind(actor.id)
-    .bind(member_id)
-    .execute(&pool)
     .await
     .map_err(db_denial)?;
     Ok(no_content())
@@ -6924,13 +6790,13 @@ mod tests {
             .unwrap()
             .with_timezone(&Utc);
         assert_eq!(
-            render_python_datetime(&zoned),
+            django_str_datetime(&zoned),
             "2026-10-02 22:22:38.379224+00:00"
         );
         let zoned = chrono::DateTime::parse_from_rfc3339("2026-10-02T22:22:38Z")
             .unwrap()
             .with_timezone(&Utc);
-        assert_eq!(render_python_datetime(&zoned), "2026-10-02 22:22:38+00:00");
+        assert_eq!(django_str_datetime(&zoned), "2026-10-02 22:22:38+00:00");
         assert_eq!(python_float(&json!(1.5)), Some(1.5));
         assert_eq!(python_float(&json!(true)), Some(1.0));
         assert_eq!(python_float(&json!(" 2.5 ")), Some(2.5));
@@ -7108,6 +6974,7 @@ mod live_tests {
                     base_url: "https://gateway.example.com".to_owned(),
                     model: "hub-default".to_owned(),
                     reason_code: String::new(),
+                    top_up_url: String::new(),
                 }
             })
         }

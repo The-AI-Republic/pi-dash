@@ -433,14 +433,6 @@ pub mod user_favorite {
     /// See [`CREATED_BY_ON_DELETE`].
     pub const UPDATED_BY_ON_DELETE: OnDelete = OnDelete::SetNull;
 
-    /// Sibling sequence for a create (`favorite.py:52-63`): one step above
-    /// the largest sibling sequence (siblings share the project workspace
-    /// when a project is set, else the workspace). `None` keeps the field
-    /// default: Python only assigns when the aggregate is not `None`.
-    pub fn next_sequence(largest: Option<f64>) -> Option<f64> {
-        largest.map(|m| m + SEQUENCE_STEP)
-    }
-
     /// One user-favorite row. `name` (`CharField(blank=True, null=True)`,
     /// `favorite.py:22`) and `entity_identifier` (`UUIDField(null=True,
     /// blank=True)`, `:21`) are nullable; `is_folder` and `sequence`
@@ -900,9 +892,8 @@ mod tests {
 
     #[test]
     fn user_favorite_save_semantics() {
-        assert_eq!(user_favorite::next_sequence(None), None);
-        let stepped: f64 = user_favorite::next_sequence(Some(65535.0)).unwrap();
-        assert_eq!(stepped, 75535.0);
+        // The `next_sequence` kernel folded away with zero callers
+        // (ORM-03 C6); the default/step pins stay with the consts.
         assert_eq!(user_favorite::SEQUENCE_STEP, 10000.0);
         let folder: bool = user_favorite::DEFAULT_IS_FOLDER;
         assert!(!folder);

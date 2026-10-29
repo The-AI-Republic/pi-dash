@@ -80,7 +80,7 @@
 use std::collections::HashMap;
 
 use axum::extract::{Path, Query, State};
-use axum::http::{header, StatusCode};
+use axum::http::StatusCode;
 use axum::response::Response;
 use axum::Router;
 use serde_json::{Map, Value};
@@ -96,6 +96,7 @@ use crate::app_issues::{
 };
 use crate::state::AppState;
 use pidash_auth::permissions::allow::AllowFacts;
+pub(crate) use pidash_compat::response::{empty_response, json_response};
 
 /// `GET` + `POST` on the module-issues collection path, `POST` on the
 /// issue-modules path, `DELETE` on the detail path. Every other method
@@ -156,22 +157,6 @@ pub const GROUP_CLASH_MESSAGE: &str = "Group by and sub group by cannot have sam
 // ---------------------------------------------------------------------------
 
 pub(crate) type HandlerResult = Result<Response, Denial>;
-
-pub(crate) fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("view response")
-}
-
-pub(crate) fn empty_response(status: StatusCode) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(Vec::new()))
-        .expect("empty response")
-}
 
 #[cfg(test)]
 fn json_string(value: &str) -> String {
@@ -311,14 +296,17 @@ pub(crate) fn pool_of(state: &AppState) -> Result<sqlx::PgPool, Denial> {
         .ok_or(Denial::ServerError)
 }
 
-/// `origin=base_host(request, is_app=True)`: `WEB_URL or APP_BASE_URL`
+/// `base_host(request, is_app=True)` (`utils/host.py:17-66`):
+/// `APP_BASE_URL` wins when set, else `WEB_URL`; unset is
+/// `ImproperlyConfigured` → 500. Empty strings fall through like
+/// Python's `or` (PIDASHCONV-1597).
 /// (`handlers_modules::request_origin`, same settings seam).
 fn request_origin(state: &AppState) -> Result<String, Denial> {
-    state
-        .settings()
-        .urls
-        .app_base_url
+    let urls = &state.settings().urls;
+    urls.app_base_url
         .clone()
+        .filter(|s| !s.is_empty())
+        .or_else(|| urls.web_url.clone().filter(|s| !s.is_empty()))
         .ok_or(Denial::ServerError)
 }
 
@@ -606,40 +594,14 @@ fn group_member_selects(group_by: Option<&str>, sub_group_by: Option<&str>) -> S
     out
 }
 
-/// Bind a `sea_query::Value` vec to raw SQL (same mapping as the D-26
-/// `bind_all`, over this endpoint's placeholders).
+/// Bind a `sea_query::Value` vec to raw SQL, over this endpoint's
+/// placeholders. The mapping is the canonical `pidash_compat::db`
+/// binder (OVL-04); this wrapper only maps its error to the local 500.
 fn bind_values<'a>(
     sql: &'a str,
     values: Vec<sea_query::Value>,
 ) -> Result<sqlx::query::Query<'a, Postgres, sqlx::postgres::PgArguments>, Denial> {
-    use sea_query::Value as SeaValue;
-    let mut query = sqlx::query(sql);
-    for value in &values {
-        query = match value {
-            SeaValue::Bool(value) => query.bind(*value),
-            SeaValue::TinyInt(value) => query.bind(*value),
-            SeaValue::SmallInt(value) => query.bind(*value),
-            SeaValue::Int(value) => query.bind(*value),
-            SeaValue::BigInt(value) => query.bind(*value),
-            SeaValue::TinyUnsigned(value) => query.bind(value.map(i16::from)),
-            SeaValue::SmallUnsigned(value) => query.bind(value.map(i32::from)),
-            SeaValue::Unsigned(value) => query.bind(value.map(|v| v as i64)),
-            SeaValue::BigUnsigned(value) => query.bind(value.map(|v| v as i64)),
-            SeaValue::Float(value) => query.bind(*value),
-            SeaValue::Double(value) => query.bind(*value),
-            SeaValue::String(value) => query.bind(value.clone().map(|text| *text)),
-            SeaValue::Char(value) => query.bind(value.map(|char| char.to_string())),
-            SeaValue::Bytes(value) => query.bind(value.clone().map(|bytes| (*bytes).clone())),
-            SeaValue::Uuid(value) => query.bind(value.clone().map(|id| *id)),
-            SeaValue::ChronoDate(value) => query.bind(value.clone().map(|date| *date)),
-            SeaValue::ChronoDateTimeUtc(value) => query.bind(value.clone().map(|moment| *moment)),
-            SeaValue::ChronoTime(_)
-            | SeaValue::ChronoDateTime(_)
-            | SeaValue::ChronoDateTimeLocal(_)
-            | SeaValue::ChronoDateTimeWithTimeZone(_) => return Err(Denial::ServerError),
-        };
-    }
-    Ok(query)
+    pidash_compat::db::bind_all(sql, values).map_err(|_| Denial::ServerError)
 }
 
 /// Filtered `FROM … WHERE` for the module-issue list (`issue.py:97-107`):
@@ -823,20 +785,23 @@ async fn module_issue_list(
         sub_group_by,
         &timezone,
     )?;
-    // `order_issue_queryset` (`:112-117`), default `created_at`. The
-    // module list annotates the plain `Func(Count)` form (empty counts
+    // `order_issue_queryset` (`:112-117`), default `created_at`
+    // (`request.GET.get("order_by", "created_at")` at `:112`): unlike the
+    // cycle/project lists, an absent `order_by` sorts oldest-first, so the
+    // shared `-created_at` default in `params.rs` must not apply here.
+    // The module list annotates the plain `Func(Count)` form (empty counts
     // render `0`), so its count keys order `0`-style. A filter that
     // referenced the cycle bridge lends its join to the cycle-name
     // traversal (Django reuses it, scope included, instead of joining
     // again); otherwise the traversal joins fresh.
-    let order_spec = pidash_services::app_issues::ordering::order_sql(
-        &params.order_by,
-        "state.\"group\"",
-        |name| format!("min_{}", name.replace("__", "_")),
-    );
+    let order_by = query_last(&query, "order_by").unwrap_or_else(|| "created_at".to_owned());
+    let order_spec =
+        pidash_services::app_issues::ordering::order_sql(&order_by, "state.\"group\"", |name| {
+            format!("min_{}", name.replace("__", "_"))
+        });
     let cycle_bridge =
         crate::app_issues::has_issue_cycle_join(&filtered.from_where).then_some("issue_cycle");
-    let key = order_key(&order_spec.out_param, &params.order_by, cycle_bridge, false)?;
+    let key = order_key(&order_spec.out_param, &order_by, cycle_bridge, false)?;
     let direction = if key.descending { "DESC" } else { "ASC" };
     // Total count over the pre-annotation set (the `deepcopy` at `:107`).
     // The flat branch keeps the distinct-issue count; the grouped branch
@@ -1869,6 +1834,35 @@ mod tests {
 
     fn empty_query() -> QueryMap {
         HashMap::new()
+    }
+
+    fn origin_state(app_base_url: Option<&str>, web_url: Option<&str>) -> AppState {
+        let mut settings = pidash_db::config::Settings::test_defaults();
+        settings.urls.app_base_url = app_base_url.map(str::to_owned);
+        settings.urls.web_url = web_url.map(str::to_owned);
+        AppState::with_settings("test", settings)
+    }
+
+    /// `base_host(request, is_app=True)` (`utils/host.py:17-66`):
+    /// `APP_BASE_URL` wins when truthy, else `WEB_URL`; unset is
+    /// `ImproperlyConfigured` → 500. Empty strings fall through like
+    /// Python's `or` (PIDASHCONV-1597, PIDASHCONV-1648).
+    #[test]
+    fn request_origin_falls_through_empty_strings() {
+        let app = "https://app.example.invalid";
+        let web = "https://web.example.invalid";
+        let state = origin_state(Some(app), Some(web));
+        assert_eq!(request_origin(&state).expect("app base wins"), app);
+        let state = origin_state(None, Some(web));
+        assert_eq!(request_origin(&state).expect("falls through"), web);
+        let state = origin_state(Some(""), Some(web));
+        assert_eq!(request_origin(&state).expect("empty falls through"), web);
+        let state = origin_state(Some(app), Some(""));
+        assert_eq!(request_origin(&state).expect("app wins"), app);
+        let state = origin_state(Some(""), Some(""));
+        assert!(matches!(request_origin(&state), Err(Denial::ServerError)));
+        let state = origin_state(None, None);
+        assert!(matches!(request_origin(&state), Err(Denial::ServerError)));
     }
 
     #[test]

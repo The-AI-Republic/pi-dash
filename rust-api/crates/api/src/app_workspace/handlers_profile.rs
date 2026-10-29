@@ -115,6 +115,7 @@ use crate::app_issues::{
 };
 use crate::app_workspace::gates;
 use crate::state::AppState;
+use pidash_compat::response::json_response;
 use pidash_db::issue_filters::FilterValue;
 use pidash_services::app_issues::params::{ListParams, ParseOptions};
 use pidash_services::app_issues::shape::{envelope, on_results_fields};
@@ -206,14 +207,6 @@ pub const ME_ACTIVITIES_PATH: &str = "/api/users/me/activities/";
 // ---------------------------------------------------------------------------
 
 type HandlerResult = Result<Response, Denial>;
-
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("view response")
-}
 
 fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")

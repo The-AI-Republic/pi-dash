@@ -54,11 +54,11 @@ pub const ANTHROPIC_VERSION: &str = "2023-06-01";
 pub const ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com";
 
 /// Stainless retry contract (`openai/_constants.py:10-14`, identical
-/// in `anthropic/_constants.py`).
-pub const MAX_RETRIES: u32 = 2;
-const INITIAL_RETRY_DELAY_SECS: f64 = 0.5;
-const MAX_RETRY_DELAY_SECS: f64 = 8.0;
-const RETRY_AFTER_MAX_SECS: f64 = 60.0;
+/// in `anthropic/_constants.py`): the canonical
+/// [`pidash_services::assistant::retry`] policy (OVL-07 moved the
+/// former private copy there; the turn streaming loop shares it).
+pub use pidash_services::assistant::retry::MAX_RETRIES;
+use pidash_services::assistant::retry::{should_retry_status, sleep_for_retry};
 
 /// A provider lane: the [`ModelRef`][pidash_services::assistant::llm::ModelRef]
 /// branch plus the creator's decrypted key.
@@ -608,6 +608,19 @@ pub fn tool_result_text(content: &Value) -> String {
     }
 }
 
+/// Render one tool-return value for an OpenAI tool message
+/// (`model_response_str`, `messages.py:1243-1250`): empty data — an
+/// empty list or null — renders as `""` (`_unwrap_data`,
+/// `messages.py:1179-1187`, returns None for it), anything else
+/// through `tool_result_text`.
+pub fn openai_tool_result_text(content: &Value) -> String {
+    match content {
+        Value::Array(items) if items.is_empty() => String::new(),
+        Value::Null => String::new(),
+        other => tool_result_text(other),
+    }
+}
+
 /// Render retry feedback (`RetryPromptPart.model_response`,
 /// `messages.py:1445-1467`): str content reads verbatim with a tool
 /// name, `Validation feedback:\n`-prefixed without one; error lists
@@ -712,7 +725,7 @@ pub fn openai_request_body(
                                 ("tool_call_id".to_owned(), Value::String(call_id.to_owned())),
                                 (
                                     "content".to_owned(),
-                                    Value::String(tool_result_text(content)),
+                                    Value::String(openai_tool_result_text(content)),
                                 ),
                             ])));
                         }
@@ -1061,8 +1074,9 @@ fn anthropic_wire_tool(tool: &WireTool) -> Value {
 pub enum ProviderError {
     /// `APIStatusError` → `ModelHTTPError(status_code, model_name,
     /// body)`: an HTTP error status after retries. `body_text` is
-    /// the raw text; `body_json` the parsed body when the payload is
-    /// JSON (the SDK's `e.body` reads parsed-JSON-or-text).
+    /// the stripped text; `body_json` the parsed body when the
+    /// payload is JSON (the SDK's `e.body` reads
+    /// parsed-JSON-or-text).
     Http {
         status: u16,
         body_text: String,
@@ -1094,9 +1108,21 @@ impl ProviderError {
             } => {
                 // `f'status_code: {s}, model_name: {m}, body: {body}'`
                 // with the body Python-`repr`'d (a parsed dict) or raw
-                // (text).
+                // (text). On the OpenAI lane the SDK unwraps the
+                // envelope first (`data = body.get("error", body) if
+                // is_mapping(body) else body`, `_make_status_error`
+                // in `openai/_client.py`); the Anthropic SDK has no
+                // such unwrap, so that lane keeps the full body.
                 let body = match body_json {
-                    Some(json) => py_repr(json),
+                    Some(json) => {
+                        let shown = match (lane, json) {
+                            (Lane::OpenAICompatible { .. }, Value::Object(map)) => {
+                                map.get("error").unwrap_or(json)
+                            }
+                            _ => json,
+                        };
+                        py_repr(shown)
+                    }
                     None => body_text.clone(),
                 };
                 format!(
@@ -1612,6 +1638,16 @@ pub async fn complete(
     }
 }
 
+/// The error-status body split (`_make_status_error_from_response`,
+/// `openai/_base_client.py:407-427`, identical in the Anthropic
+/// SDK): strip the text first, then parse-or-keep, so both the
+/// JSON and the text slots carry the stripped form.
+fn parse_error_body(bytes: &[u8]) -> (String, Option<Value>) {
+    let text = String::from_utf8_lossy(bytes).trim().to_owned();
+    let json = serde_json::from_str::<Value>(&text).ok();
+    (text, json)
+}
+
 /// POST with the stainless retry loop (`openai/_base_client.py:990-1060`,
 /// async mirror at 1610-1660; identical in the Anthropic SDK):
 /// timeouts and connection errors retry while attempts remain, else
@@ -1663,7 +1699,28 @@ async fn post_with_retries(
             Ok(response) => {
                 let status = response.status().as_u16();
                 let headers = response.headers().clone();
-                let bytes = response.bytes().await.unwrap_or_default().to_vec();
+                // The non-streaming SDK `send` reads the body inside the
+                // request try block, so a body-read failure (read timeout
+                // or mid-body reset) retries exactly like a send failure.
+                let bytes = match response.bytes().await {
+                    Ok(body) => body.to_vec(),
+                    Err(error) if error.is_timeout() => {
+                        if retries_taken < MAX_RETRIES {
+                            sleep_for_retry(retries_taken, None).await;
+                            retries_taken += 1;
+                            continue;
+                        }
+                        return Err(ProviderError::Timeout);
+                    }
+                    Err(_) => {
+                        if retries_taken < MAX_RETRIES {
+                            sleep_for_retry(retries_taken, None).await;
+                            retries_taken += 1;
+                            continue;
+                        }
+                        return Err(ProviderError::Connection);
+                    }
+                };
                 if status < 400 {
                     return Ok(bytes);
                 }
@@ -1672,8 +1729,7 @@ async fn post_with_retries(
                     retries_taken += 1;
                     continue;
                 }
-                let body_text = String::from_utf8_lossy(&bytes).into_owned();
-                let body_json = serde_json::from_slice::<Value>(&bytes).ok();
+                let (body_text, body_json) = parse_error_body(&bytes);
                 return Err(ProviderError::Http {
                     status,
                     body_text,
@@ -1682,72 +1738,6 @@ async fn post_with_retries(
             }
         }
     }
-}
-
-/// `_should_retry` (`openai/_base_client.py:773-807`): the
-/// `x-should-retry` override wins, else 408/409/429/5xx retry.
-fn should_retry_status(status: u16, headers: &reqwest::header::HeaderMap) -> bool {
-    if let Some(flag) = headers
-        .get("x-should-retry")
-        .and_then(|value| value.to_str().ok())
-    {
-        if flag == "true" {
-            return true;
-        }
-        if flag == "false" {
-            return false;
-        }
-    }
-    status == 408 || status == 409 || status == 429 || status >= 500
-}
-
-/// `_sleep_for_retry` / `_calculate_retry_timeout`: the parsed
-/// `retry-after` wins when within `(0, 60]`, else exponential
-/// backoff with jitter.
-async fn sleep_for_retry(retries_taken: u32, headers: Option<&reqwest::header::HeaderMap>) {
-    let mut seconds = retry_after_seconds(headers)
-        .filter(|secs| secs.is_finite() && *secs > 0.0 && *secs <= RETRY_AFTER_MAX_SECS);
-    if seconds.is_none() {
-        let capped = retries_taken.min(1000) as f64;
-        let backoff = (INITIAL_RETRY_DELAY_SECS * 2_f64.powf(capped)).min(MAX_RETRY_DELAY_SECS);
-        seconds = Some((backoff * (1.0 - 0.25 * unit_random())).max(0.0));
-    }
-    if let Some(secs) = seconds {
-        tokio::time::sleep(std::time::Duration::from_secs_f64(secs)).await;
-    }
-}
-
-/// `_parse_retry_after_header`: `retry-after-ms` first, then
-/// `retry-after` as seconds (floats honoured), then as an HTTP-date.
-fn retry_after_seconds(headers: Option<&reqwest::header::HeaderMap>) -> Option<f64> {
-    let headers = headers?;
-    if let Some(ms) = headers
-        .get("retry-after-ms")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|text| text.parse::<f64>().ok())
-    {
-        return Some(ms / 1000.0);
-    }
-    let text = headers
-        .get("retry-after")
-        .and_then(|value| value.to_str().ok())?;
-    if let Ok(secs) = text.parse::<f64>() {
-        return Some(secs);
-    }
-    // HTTP-date (`email.utils.parsedate_tz` / `mktime_tz`): IMF-fixdate
-    // parses as RFC 2822.
-    let when = chrono::DateTime::parse_from_rfc2822(text).ok()?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs_f64())
-        .unwrap_or(0.0);
-    Some(when.timestamp() as f64 - now)
-}
-
-/// A uniform `[0, 1)` draw for retry jitter, from UUID randomness
-/// (no RNG crate is locked; `uuid::v4` bits serve).
-fn unit_random() -> f64 {
-    (uuid::Uuid::new_v4().as_u128() as f64) / (u128::MAX as f64)
 }
 
 #[cfg(test)]
@@ -2243,19 +2233,52 @@ mod tests {
             base_url: "https://t/v1".to_owned(),
             api_key: "k".to_owned(),
         };
+        let wrapped: Value = serde_json::from_str(
+            r#"{"error":{"message":"bad key","type":"invalid_request_error","code":null}}"#,
+        )
+        .unwrap();
         let error = ProviderError::Http {
             status: 400,
             body_text: String::new(),
-            body_json: Some(
-                serde_json::from_str::<Value>(
-                    r#"{"error":{"message":"bad key","type":"invalid_request_error","code":null}}"#,
-                )
-                .unwrap(),
-            ),
+            body_json: Some(wrapped.clone()),
+        };
+        // The OpenAI lane unwraps `body["error"]` (`_make_status_error`).
+        assert_eq!(
+            error.message(&lane),
+            "status_code: 400, model_name: gpt-4o-mini, body: {'message': 'bad key', 'type': 'invalid_request_error', 'code': None}"
+        );
+        // The Anthropic lane keeps the full body (no SDK unwrap).
+        let anthropic = Lane::Anthropic {
+            model: "claude-test".to_owned(),
+            api_key: "k".to_owned(),
+        };
+        let error = ProviderError::Http {
+            status: 400,
+            body_text: String::new(),
+            body_json: Some(wrapped),
+        };
+        assert_eq!(
+            error.message(&anthropic),
+            "status_code: 400, model_name: claude-test, body: {'error': {'message': 'bad key', 'type': 'invalid_request_error', 'code': None}}"
+        );
+        // Objects without an `error` key and non-object bodies repr whole.
+        let error = ProviderError::Http {
+            status: 400,
+            body_text: String::new(),
+            body_json: Some(serde_json::from_str(r#"{"message":"nope"}"#).unwrap()),
         };
         assert_eq!(
             error.message(&lane),
-            "status_code: 400, model_name: gpt-4o-mini, body: {'error': {'message': 'bad key', 'type': 'invalid_request_error', 'code': None}}"
+            "status_code: 400, model_name: gpt-4o-mini, body: {'message': 'nope'}"
+        );
+        let error = ProviderError::Http {
+            status: 400,
+            body_text: String::new(),
+            body_json: Some(serde_json::from_str(r#"["oops"]"#).unwrap()),
+        };
+        assert_eq!(
+            error.message(&lane),
+            "status_code: 400, model_name: gpt-4o-mini, body: ['oops']"
         );
         assert_eq!(ProviderError::Timeout.message(&lane), "Request timed out.");
         assert_eq!(
@@ -2265,18 +2288,17 @@ mod tests {
     }
 
     #[test]
-    fn retry_after_parsing() {
-        use reqwest::header::{HeaderMap, HeaderValue};
-        assert_eq!(retry_after_seconds(None), None);
-        let mut headers = HeaderMap::new();
-        assert_eq!(retry_after_seconds(Some(&headers)), None);
-        headers.insert("retry-after-ms", HeaderValue::from_static("1500"));
-        assert_eq!(retry_after_seconds(Some(&headers)), Some(1.5));
-        headers.remove("retry-after-ms");
-        headers.insert("retry-after", HeaderValue::from_static("3"));
-        assert_eq!(retry_after_seconds(Some(&headers)), Some(3.0));
-        headers.insert("retry-after", HeaderValue::from_static("2.5"));
-        assert_eq!(retry_after_seconds(Some(&headers)), Some(2.5));
+    fn error_body_strips_before_parsing() {
+        // `err_text = response.text.strip()`, then parse-or-keep.
+        let (text, json) = parse_error_body(b"upstream exploded\n\n");
+        assert_eq!(text, "upstream exploded");
+        assert_eq!(json, None);
+        let (text, json) = parse_error_body(b"  {\"a\": 1}  \n");
+        assert_eq!(text, "{\"a\": 1}");
+        assert_eq!(json, Some(serde_json::from_str(r#"{"a": 1}"#).unwrap()));
+        let (text, json) = parse_error_body(b"");
+        assert_eq!(text, "");
+        assert_eq!(json, None);
     }
 
     fn thinking_lane() -> Lane {
@@ -2426,5 +2448,33 @@ mod tests {
         assert!(mixed.get("reasoning_content").is_none());
         let empty: Vec<ResponsePart> = Vec::new();
         assert!(openai_assistant_message(&empty).is_none());
+    }
+
+    #[test]
+    fn openai_empty_tool_result_is_empty_string() {
+        // `_unwrap_data` (`messages.py:1179-1187`) returns None for
+        // empty data, so `model_response_str` (`messages.py:1243-1250`)
+        // renders an empty list or null as `''` — not `"[]"`/`"null"`.
+        // Non-empty lists still render as compact JSON.
+        for (content, expected) in [
+            (Value::Array(Vec::new()), ""),
+            (Value::Null, ""),
+            (serde_json::json!([{"id": "1"}]), r#"[{"id":"1"}]"#),
+        ] {
+            let history = vec![HistoryMessage::Request {
+                parts: vec![RequestPart::ToolReturn {
+                    name: "pidash_search_project_issues".to_owned(),
+                    content,
+                    call_id: "call_1".to_owned(),
+                }],
+            }];
+            let body = openai_request_body("gpt-4o-mini", "", &history, &[], 0);
+            assert_eq!(
+                body["messages"],
+                serde_json::json!([
+                    {"role": "tool", "tool_call_id": "call_1", "content": expected},
+                ])
+            );
+        }
     }
 }

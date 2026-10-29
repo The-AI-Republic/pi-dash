@@ -76,6 +76,7 @@ use pidash_services::app_issues::{
     STATE_GROUP_VALUES,
 };
 
+use pidash_compat::response::json_ok as json_response;
 use render::v2_page;
 
 /// Register the app-issues routes: the five list-family GETs, the
@@ -286,25 +287,10 @@ pub const NOT_FOUND_BODY: &str = r#"{"error":"The required object does not exist
 /// found") renders with the resolve message — verified against live
 /// Django, not the bare default.
 pub const PROJECT_NOT_FOUND_BODY: &str = r#"{"detail":"Project not found"}"#;
-/// `handle_exception`'s generic 500 branch.
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// `handle_exception`'s `ValidationError` branch (bad UUID in `issues=`).
 pub const INVALID_DETAIL_BODY: &str = r#"{"error":"Please provide valid detail"}"#;
 
-/// One query value, repeated or not. `serde_html_form` (axum's `Query`
-/// backend) does not coerce a lone `?key=value` into a sequence, so the
-/// extractor uses this untagged shape and callers read first/last —
-/// mirroring Django's `QueryDict`, where repeats are legal and `.get`
-/// returns the last value.
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(untagged)]
-pub enum OneOrMany {
-    One(String),
-    Many(Vec<String>),
-}
-
-/// The multi-value query map every list handler extracts.
-pub type QueryMap = HashMap<String, OneOrMany>;
+pub use pidash_compat::http::{query_last, OneOrMany, QueryMap};
 
 /// All values for `key`, in order; `None` when absent.
 pub fn query_values(query: &QueryMap, key: &str) -> Option<Vec<String>> {
@@ -312,11 +298,6 @@ pub fn query_values(query: &QueryMap, key: &str) -> Option<Vec<String>> {
         OneOrMany::One(one) => vec![one.clone()],
         OneOrMany::Many(many) => many.clone(),
     })
-}
-
-/// Django `QueryDict.get`: the last value, or `None`.
-pub fn query_last(query: &QueryMap, key: &str) -> Option<String> {
-    query_values(query, key).and_then(|values| values.into_iter().last())
 }
 
 /// Plain multi-map for the services layer (pure, axum-free).
@@ -687,48 +668,14 @@ pub fn render_condition(cond: &Condition) -> (String, Vec<sea_query::Value>) {
     (fragment, values.0)
 }
 
-fn bind_sea_value<'q>(
-    query: sqlx::query::Query<'q, Postgres, PgArguments>,
-    value: &sea_query::Value,
-) -> Result<sqlx::query::Query<'q, Postgres, PgArguments>, Denial> {
-    use sea_query::Value as SeaValue;
-    match value {
-        SeaValue::Bool(value) => Ok(query.bind(*value)),
-        SeaValue::TinyInt(value) => Ok(query.bind(*value)),
-        SeaValue::SmallInt(value) => Ok(query.bind(*value)),
-        SeaValue::Int(value) => Ok(query.bind(*value)),
-        SeaValue::BigInt(value) => Ok(query.bind(*value)),
-        SeaValue::TinyUnsigned(value) => Ok(query.bind(value.map(i16::from))),
-        SeaValue::SmallUnsigned(value) => Ok(query.bind(value.map(i32::from))),
-        SeaValue::Unsigned(value) => Ok(query.bind(value.map(|v| v as i64))),
-        SeaValue::BigUnsigned(value) => Ok(query.bind(value.map(|v| v as i64))),
-        SeaValue::Float(value) => Ok(query.bind(*value)),
-        SeaValue::Double(value) => Ok(query.bind(*value)),
-        SeaValue::String(value) => Ok(query.bind(value.clone().map(|text| *text))),
-        SeaValue::Char(value) => Ok(query.bind(value.map(|char| char.to_string()))),
-        SeaValue::Bytes(value) => Ok(query.bind(value.clone().map(|bytes| (*bytes).clone()))),
-        SeaValue::Uuid(value) => Ok(query.bind(value.clone().map(|id| *id))),
-        // Rich date / datetime filters bind typed params (`DATE` /
-        // `timestamptz`), like the ORM. The remaining chrono variants are
-        // never emitted; they only keep the match exhaustive.
-        SeaValue::ChronoDate(value) => Ok(query.bind(value.clone().map(|date| *date))),
-        SeaValue::ChronoDateTimeUtc(value) => Ok(query.bind(value.clone().map(|moment| *moment))),
-        SeaValue::ChronoTime(_)
-        | SeaValue::ChronoDateTime(_)
-        | SeaValue::ChronoDateTimeLocal(_)
-        | SeaValue::ChronoDateTimeWithTimeZone(_) => Err(Denial::ServerError),
-    }
-}
-
+/// Bind a `sea_query::Value` vec to raw SQL: the canonical binder now
+/// lives in `pidash_compat::db` (OVL-04); this wrapper only maps its
+/// error to the local 500, exactly as the previous inline copy did.
 fn bind_all<'a>(
     sql: &'a str,
     values: Vec<sea_query::Value>,
 ) -> Result<sqlx::query::Query<'a, Postgres, PgArguments>, Denial> {
-    let mut query = sqlx::query(sql);
-    for value in &values {
-        query = bind_sea_value(query, value)?;
-    }
-    Ok(query)
+    pidash_compat::db::bind_all(sql, values).map_err(|_| Denial::ServerError)
 }
 
 /// Fetch every row of `inner_sql` as a JSON map each, via `row_to_json`.
@@ -938,6 +885,7 @@ pub async fn filters_timezone(
 // kernel conditions (`issue` for the base table, `state` for states,
 // the relation aliases for the m2m joins).
 
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 use pidash_db::issue_filters::FilterValue;
 
 /// A legacy predicate compiled to SQL text (placeholders bound inline).
@@ -2014,14 +1962,6 @@ pub async fn group_values(
 
 type HandlerResult = Result<Response, Denial>;
 
-fn json_response(body: String) -> Response {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("json response")
-}
-
 /// Shared preamble: gate + parsed params + filtered set + order key.
 /// `extra_where` carries path-specific predicates (`updated_at__gt`,
 /// `pk__in`); callers splice their binds through `extra_binds`.
@@ -2457,7 +2397,7 @@ fn shape_json_value(field: &str, value: &Value, timezone: &Tz, shift: bool) -> V
             },
             _ => value.clone(),
         },
-        "completed_at" | "deleted_at" => match value {
+        "created_at" | "updated_at" | "completed_at" | "deleted_at" => match value {
             Value::String(text) => match chrono::DateTime::parse_from_rfc3339(text) {
                 Ok(aware) => Value::String(crate::serializer::render_datetime(
                     &aware.with_timezone(&chrono::Utc),
@@ -2469,7 +2409,9 @@ fn shape_json_value(field: &str, value: &Value, timezone: &Tz, shift: bool) -> V
         "sort_order" => match value {
             Value::Number(number) => {
                 let float = number.as_f64().unwrap_or(f64::NAN);
-                Value::String(crate::paginator::py_float_str(float))
+                serde_json::Number::from_f64(float)
+                    .map(Value::Number)
+                    .unwrap_or_else(|| value.clone())
             }
             _ => value.clone(),
         },
@@ -3242,6 +3184,45 @@ mod tests {
             )
             .await,
             StatusCode::BAD_GATEWAY
+        );
+    }
+
+    #[test]
+    fn grouped_rows_render_like_ungrouped() {
+        // PIDASHCONV-1510: Django serves grouped rows through the same
+        // `issue_on_results` `.values()` dicts as the flat list, so
+        // `sort_order` is a JSON number and datetimes carry `Z` — not the
+        // `row_to_json` string/`+00:00` spellings.
+        let mut row = Map::new();
+        row.insert(
+            "sort_order".to_owned(),
+            Value::Number(serde_json::Number::from(10000)),
+        );
+        row.insert(
+            "created_at".to_owned(),
+            Value::String("2026-10-26T06:51:00.235877+00:00".to_owned()),
+        );
+        row.insert(
+            "updated_at".to_owned(),
+            Value::String("2026-10-26T06:51:00.235877+00:00".to_owned()),
+        );
+        let fields = vec![
+            "sort_order".to_owned(),
+            "created_at".to_owned(),
+            "updated_at".to_owned(),
+        ];
+        let shaped = shape_map(&row, &fields, &chrono_tz::UTC, false);
+        assert_eq!(
+            serde_json::to_string(&shaped["sort_order"]).unwrap(),
+            "10000.0"
+        );
+        assert_eq!(
+            shaped["created_at"],
+            Value::String("2026-10-26T06:51:00.235877Z".to_owned())
+        );
+        assert_eq!(
+            shaped["updated_at"],
+            Value::String("2026-10-26T06:51:00.235877Z".to_owned())
         );
     }
 

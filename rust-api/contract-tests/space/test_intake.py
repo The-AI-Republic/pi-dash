@@ -94,6 +94,26 @@ def test_create_rejects_bad_priority(user_client, world):
     assert response.json() == {"error": "Invalid priority"}
 
 
+def test_create_null_description_json_is_400(user_client, world, db):
+    # PIDASHCONV-1637: an explicit null reaches Issue.objects.create as
+    # None (views/intake.py:147); description_json is NOT NULL
+    # (db/models/issue.py:138), so the insert raises IntegrityError and
+    # BaseViewSet.handle_exception answers 400 (views/base.py:74-78)
+    # with no issue/intake rows written. The triage State row IS
+    # written first (:133-142 runs before the failing insert), so only
+    # the issue and intake_issues tables are counted here.
+    before_issues = db.fetchone("SELECT count(*) AS c FROM issues")["c"]
+    before_intakes = db.fetchone("SELECT count(*) AS c FROM intake_issues")["c"]
+    response = user_client.post(
+        _list_url(world), json={"issue": {"name": "x", "description_json": None}}
+    )
+    assert response.status_code == 400
+    assert response.json() == {"error": "The payload is not valid"}
+    after_issues = db.fetchone("SELECT count(*) AS c FROM issues")["c"]
+    after_intakes = db.fetchone("SELECT count(*) AS c FROM intake_issues")["c"]
+    assert (after_issues, after_intakes) == (before_issues, before_intakes)
+
+
 def test_create_requires_auth(anon_client, world):
     response = anon_client.post(_list_url(world), json={"issue": {"name": "anon idea"}})
     assert response.status_code in (401, 403)
@@ -354,3 +374,33 @@ def test_concurrent_creates_get_distinct_sequence_ids(user_client, world, seeder
         (world["project"]["id"], world["issue"]["id"]),
     )
     assert dupes == []
+
+
+def test_create_triage_autocreate_ignores_deleted_and_triage_sequences(
+    user_client, world, seeder, db
+):
+    # PIDASHCONV-1638: the auto-created Triage row's sequence comes from
+    # State.save, which reads MAX(sequence) over State.objects — live,
+    # non-triage project states (db/models/state.py:79-83,131-139) — plus
+    # 15000. Soft-deleted rows (any group) and triage-group rows must not
+    # inflate it: live max 50000 here, so Triage lands on 65000 even with
+    # a deleted backlog state at 100000 and a deleted triage state (the
+    # highest row) at 200000.
+    db.execute("UPDATE states SET sequence=50000 WHERE id=%s", (world["state"]["id"],))
+    dead = seeder.create_state(
+        world["workspace"]["id"], world["project"]["id"], name="Deleted", group="backlog"
+    )
+    db.execute("UPDATE states SET sequence=100000, deleted_at=now() WHERE id=%s", (dead["id"],))
+    dead_triage = seeder.create_state(
+        world["workspace"]["id"], world["project"]["id"], name="Old triage", group="triage"
+    )
+    db.execute(
+        "UPDATE states SET sequence=200000, deleted_at=now() WHERE id=%s", (dead_triage["id"],)
+    )
+    response = user_client.post(_list_url(world), json={"issue": {"name": "triage scope idea"}})
+    assert response.status_code == 200
+    row = db.fetchone(
+        'SELECT sequence FROM states WHERE project_id=%s AND "group"=%s AND deleted_at IS NULL',
+        (world["project"]["id"], "triage"),
+    )
+    assert float(row["sequence"]) == 65000.0

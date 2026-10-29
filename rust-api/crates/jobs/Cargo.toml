@@ -5,6 +5,8 @@ edition = "2021"
 
 [dependencies]
 pidash-types = { path = "../types" }
+# OVL-04 (PIDASHCONV-1542): canonical parity plumbing. Leaf crate, no cycle.
+pidash-compat = { path = "../compat" }
 pidash-db = { path = "../db" }
 # Version-task flows call the D-09 decision layer (api-crate precedent).
 pidash-services = { path = "../services" }

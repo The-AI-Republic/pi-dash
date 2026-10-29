@@ -72,6 +72,7 @@
 //! crate so the ops entry point can call it too. The api workspace-create
 //! handlers call this same copy.
 
+use pidash_compat::db::is_unique_violation;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -288,18 +289,6 @@ type SchedulerSeedRow = (
     bool,
     String,
 );
-
-/// Whether a sqlx failure is a Postgres unique violation (23505) — the
-/// `IntegrityError` arm the losing racer takes (`builtins/__init__.py:177`).
-fn is_unique_violation(error: &sqlx::Error) -> bool {
-    matches!(
-        error
-            .as_database_error()
-            .and_then(|db| db.code())
-            .as_deref(),
-        Some("23505")
-    )
-}
 
 /// `post_save` receiver `_seed_builtins_on_workspace_create`
 /// (`scheduler/signals.py:28-39`): `ensure_builtin_schedulers` runs on
