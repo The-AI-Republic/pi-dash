@@ -51,7 +51,7 @@
 //!   overwrites `sequence` with `max(project sequences)+15000` whenever the
 //!   project already has states, so the auto-created Triage keeps `65000`
 //!   only on an empty project. `slug` is likewise filled (`"triage"`).
-//!   [`triage_insert_sql`] emits the explicit create kwargs; the reseed is
+//!   The triage INSERT moved to `domain::projects::states`; the reseed is
 //!   handler work.
 //! * QUIRK-unconditional-comment-id (`asset.py:110-119`): post stuffs
 //!   `entity_identifier` into `comment_id` for EVERY entity type, even
@@ -156,9 +156,10 @@ pub fn intake_list_where_sql() -> String {
 /// counted (`views/intake.py:77-81`). The `issue_objects` scope
 /// (`db/models/issue.py:95-104`; single-table conjuncts in
 /// `db::space::columns::issue_objects_scope`, joins owned here) travels into
-/// the subquery.
+/// the subquery. The `states` join is `LEFT OUTER` with the null-safe
+/// triage negation (PB-0343): stateless children ARE counted.
 fn sub_issues_count_sql() -> String {
-    "(SELECT COUNT(U0.\"id\") FROM \"issues\" U0 INNER JOIN \"states\" U1 ON (U0.\"state_id\" = U1.\"id\") INNER JOIN \"projects\" U2 ON (U0.\"project_id\" = U2.\"id\") WHERE (U0.\"deleted_at\" IS NULL AND U0.\"archived_at\" IS NULL AND U0.\"is_draft\" = false AND U1.\"group\" != 'triage' AND U2.\"archived_at\" IS NULL AND U0.\"parent_id\" = (\"issues\".\"id\"))) AS \"sub_issues_count\"".to_string()
+    "(SELECT COUNT(U0.\"id\") FROM \"issues\" U0 LEFT OUTER JOIN \"states\" U1 ON (U0.\"state_id\" = U1.\"id\") INNER JOIN \"projects\" U2 ON (U0.\"project_id\" = U2.\"id\") WHERE (U0.\"deleted_at\" IS NULL AND U0.\"archived_at\" IS NULL AND U0.\"is_draft\" = false AND NOT (U1.\"group\" = 'triage' AND U1.\"group\" IS NOT NULL) AND U2.\"archived_at\" IS NULL AND U0.\"parent_id\" = (\"issues\".\"id\"))) AS \"sub_issues_count\"".to_string()
 }
 
 /// N2 link count: `IssueLink.objects.filter(issue=OuterRef("id"))` counted
@@ -215,47 +216,10 @@ pub fn triage_lookup_sql() -> String {
     "SELECT \"states\".* FROM \"states\" WHERE (\"states\".\"deleted_at\" IS NULL AND \"states\".\"group\" = 'triage' AND \"states\".\"project_id\" = $1 AND \"states\".\"workspace_id\" = $2) ORDER BY \"states\".\"sequence\" ASC LIMIT 1".to_string()
 }
 
-/// N3 triage auto-create exact defaults (`views/intake.py:134-142`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TriageDefaults {
-    pub name: String,
-    pub group: String,
-    pub color: String,
-    pub sequence: f64,
-    pub default: bool,
-}
-
-/// The literal defaults from `intake.py:134-142`: `name="Triage"`,
-/// `group=StateGroup.TRIAGE`, `color="#4E5355"`, `sequence=65000`,
-/// `default=False` (project/workspace come from the board row).
-pub fn triage_defaults() -> TriageDefaults {
-    TriageDefaults {
-        name: "Triage".to_string(),
-        group: "triage".to_string(),
-        color: "#4E5355".to_string(),
-        sequence: 65000.0,
-        default: false,
-    }
-}
-
-/// N3 triage INSERT column set (`views/intake.py:134-142`). `$1` = id, `$2`
-/// = created_at, `$3` = updated_at, `$4` = project id, `$5` = workspace id;
-/// name/group/color/sequence/default are the [`triage_defaults`] literals.
-pub fn triage_insert_sql() -> String {
-    "INSERT INTO \"states\" (\"id\", \"created_at\", \"updated_at\", \"name\", \"group\", \"project_id\", \"workspace_id\", \"color\", \"sequence\", \"default\") VALUES ($1, $2, $3, 'Triage', 'triage', $4, $5, '#4E5355', 65000, false)".to_string()
-}
-
-/// N3 Issue INSERT (`views/intake.py:145-152`). `$1` = id, `$2` =
-/// created_at, `$3` = updated_at, `$4` = name, `$5` = description_json, `$6`
-/// = description_html, `$7` = priority, `$8` = project id, `$9` = triage
-/// state id. Python-side fallbacks (`:146-149`):
-/// description_json `{}` / description_html `"<p></p>"` / priority `"low"`
-/// (NOT the validated `"none"` — QUIRK-priority-default); a present-but-null
-/// key passes `None` through. No `workspace_id` kwarg
-/// (QUIRK-no-workspace-insert).
-pub fn issue_insert_sql() -> String {
-    "INSERT INTO \"issues\" (\"id\", \"created_at\", \"updated_at\", \"name\", \"description_json\", \"description_html\", \"priority\", \"project_id\", \"state_id\") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)".to_string()
-}
+// NOTE: the N3 issue-INSERT builder moved to
+// `domain::issues::issue_insert_sql` (PIDASHCONV-1630) — `issues` is
+// a covered table, so the builder lives in domain/. No alias:
+// nothing outside this crate's tests used the old path.
 
 /// N3 IntakeIssue INSERT (`views/intake.py:165-170`). `$1` = id, `$2` =
 /// created_at, `$3` = updated_at, `$4` = intake id (**URL kwarg**,
@@ -420,6 +384,7 @@ pub fn bulk_reassign_sql(count: usize) -> String {
 mod tests {
     use super::super::project_meta::{board_by_anchor_first_sql, settings_get_sql};
     use super::*;
+    use crate::domain::issues::issue_insert_sql;
 
     const FIXTURE_INTAKE_SQL: &str =
         include_str!("../../../../../fixtures/space/queries/intake.sql");
@@ -570,15 +535,6 @@ mod tests {
         let sql = triage_lookup_sql();
         assert!(sql.contains("\"group\" = 'triage'"));
         assert!(sql.ends_with("ORDER BY \"states\".\"sequence\" ASC LIMIT 1"));
-        let defaults = triage_defaults();
-        assert_eq!(defaults.name, "Triage");
-        assert_eq!(defaults.group, "triage");
-        assert_eq!(defaults.color, "#4E5355");
-        assert_eq!(defaults.sequence, 65000.0);
-        assert!(!defaults.default);
-        let insert = triage_insert_sql();
-        assert!(insert.contains("'Triage', 'triage'"));
-        assert!(insert.contains("'#4E5355', 65000, false"));
     }
 
     #[test]

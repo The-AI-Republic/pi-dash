@@ -42,6 +42,10 @@ pub fn header_value(value: &str) -> Option<HeaderValue> {
     mime_header_str(value).and_then(|word| HeaderValue::from_str(&word).ok())
 }
 
+/// Canonical `iri_to_uri`, moved to `pidash_compat::http`
+/// (PIDASHCONV-1623); this re-export keeps the old path working.
+pub use pidash_compat::http::iri_to_uri;
+
 /// `str.splitlines` boundaries other than `\r`/`\n` (rejected before the
 /// MIME path): `Header.encode` splits on these even with a huge
 /// `maxlinelen`.
@@ -230,6 +234,9 @@ mod tests {
         assert_eq!(mime_encode(""), "");
         assert!(header_value("").expect("empty").as_bytes().is_empty());
     }
+
+    // `iri_to_uri_matches_django_vectors` moved to `pidash_compat::http`
+    // with `iri_to_uri` (PIDASHCONV-1623).
 
     #[test]
     fn split_boundaries_fold_to_500() {

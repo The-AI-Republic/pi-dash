@@ -339,22 +339,30 @@
         "cmd": "xautoclaim",
         "args": [],
         "kwargs": {
-          "name": "'runner_stream:2b5e80b9-a171-4c81-b154-bdabe36dfa35'",
-          "groupname": "'runner-group:2b5e80b9-a171-4c81-b154-bdabe36dfa35'",
-          "consumername": "'consumer-13ebbddf-cbc2-4c1c-9fdc-2d845ff89c08'",
+          "name": "'runner_stream:e757c265-22ac-467e-bc90-a713b910c7ce'",
+          "groupname": "'runner-group:e757c265-22ac-467e-bc90-a713b910c7ce'",
+          "consumername": "'consumer-2e94f926-d4df-4acb-9e5c-22550073b1bc'",
           "min_idle_time": "0",
           "start_id": "'0-0'",
-          "count": "200",
-          "justid": "True"
+          "count": "200"
         },
-        "result": "[]"
+        "result": "[b'0-0', [], []]"
+      },
+      {
+        "cmd": "xgroup_delconsumer",
+        "args": [
+          "'runner_stream:e757c265-22ac-467e-bc90-a713b910c7ce'",
+          "'runner-group:e757c265-22ac-467e-bc90-a713b910c7ce'",
+          "'consumer-d0dfc63a-bcd7-485b-a5ad-b777dc6a564b'"
+        ],
+        "kwargs": {},
+        "result": "0"
       }
     ],
     "consumers_after": [
-      "consumer-0e16d83a-cd4d-4d2b-8d2a-3b8bb26b625f",
-      "consumer-13ebbddf-cbc2-4c1c-9fdc-2d845ff89c08"
+      "consumer-2e94f926-d4df-4acb-9e5c-22550073b1bc"
     ],
-    "old_consumer_kept": true
+    "old_consumer_kept": false
   },
   "delete_consumer_falsy": {
     "none": 0,

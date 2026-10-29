@@ -54,6 +54,27 @@ def session_auth_hash(password: str, secret: str) -> str:
     ).hexdigest()
 
 
+def verify_password(password: str, encoded: str) -> bool:
+    """``User.check_password`` for a Django ``pbkdf2_sha256`` hash.
+
+    The reset-password suite reads the stored hash back as raw text and
+    checks it with this helper, never by importing Django.
+    """
+    try:
+        algorithm, iterations, salt, digest = encoded.split("$")
+        rounds = int(iterations)
+    except (TypeError, ValueError):
+        return False
+    if algorithm != "pbkdf2_sha256":
+        return False
+    calculated = hashlib.pbkdf2_hmac(
+        "sha256", password.encode(), salt.encode(), rounds
+    )
+    return hmac.compare_digest(
+        base64.b64encode(calculated).decode(), digest
+    )
+
+
 def encode_session(session_dict: dict, secret: str) -> str:
     """``SessionStore.encode``: signed (+compressed) session payload."""
     salt = "django.contrib.sessions.SessionStore"

@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use pidash_db::config::Settings;
 use pidash_db::redis::RedisHandle;
+use pidash_db::DatabaseConnection;
 use pidash_db::Pools;
 use pidash_services::extensions::{CloudAgentToolsetsSeam, NoExtraToolsets};
 use pidash_services::user_settings::{base_settings_schema, SettingsSchema};
@@ -44,6 +45,7 @@ pub struct AppState {
     settings: Arc<Settings>,
     edge: EdgeHandle,
     pools: Option<Arc<Pools>>,
+    orm: Option<DatabaseConnection>,
     redis: Option<RedisHandle>,
     shadow_gate: Option<Arc<ShadowGate>>,
     shadow_config: Option<ShadowConfig>,
@@ -94,6 +96,7 @@ impl AppState {
             settings,
             edge,
             pools: None,
+            orm: None,
             redis: None,
             shadow_gate: None,
             shadow_config: None,
@@ -140,6 +143,7 @@ impl AppState {
             settings: self.settings.clone(),
             edge,
             pools: self.pools.clone(),
+            orm: self.orm.clone(),
             redis: self.redis.clone(),
             shadow_gate: None,
             shadow_config: None,
@@ -204,6 +208,16 @@ impl AppState {
         self
     }
 
+    /// Attach the shared SeaORM connection (ORM-01, design D5), built
+    /// with [`pidash_db::sea_orm_connection`] over the primary pool.
+    /// `None` until the binary connects, like [`AppState::with_pools`]:
+    /// the handle wraps the pool (no second pool), and `Clone` is cheap
+    /// (Arc), so the shadow clone shares it.
+    pub fn with_orm(mut self, orm: DatabaseConnection) -> Self {
+        self.orm = Some(orm);
+        self
+    }
+
     /// Attach the shared Redis handle (PIDASHCONV-265). `None` until the
     /// binary builds one from `Settings`, so unit tests that never touch
     /// the cache keep working unchanged; handlers treat `None` as
@@ -224,6 +238,13 @@ impl AppState {
 
     pub fn pools(&self) -> Option<&Pools> {
         self.pools.as_deref()
+    }
+
+    /// The shared SeaORM connection, if the binary attached one with
+    /// [`AppState::with_orm`]. Domain services (stage 8) run their writes
+    /// on this handle's transactions; reads stay on the sqlx pools.
+    pub fn orm(&self) -> Option<&DatabaseConnection> {
+        self.orm.as_ref()
     }
 
     pub fn redis(&self) -> Option<&RedisHandle> {

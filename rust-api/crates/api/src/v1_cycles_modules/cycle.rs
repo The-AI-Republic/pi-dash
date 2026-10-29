@@ -59,21 +59,21 @@
 //!   cross-project moves keep the bridge's old `project_id`
 //!   (`views/cycle.py:946-987`).
 //!
-//! Request bodies parse through [`super::json_cpython`] (PIDASHCONV-626),
-//! the shared CPython-envelope JSON layer:
+//! Request bodies parse through [`super::json`] (PIDASHCONV-626; serde
+//! since PIDASHCONV-1555), the shared JSON layer behind DRF's envelope:
 //!
-//! * `NaN`/`Infinity`/`-Infinity` in value position are strict-constant
-//!   400s under DRF's `STRICT_JSON` (the default); lone `\uD800-\uDFFF`
-//!   surrogates are accepted and flow through the `JStr` units.
-//! * Nesting parses to the measured 9939-deep cap (past it Django's JSON
-//!   500); `str()` echoes render to 9937-deep (past it the same).
+//! * `NaN`/`Infinity`/`-Infinity` in value position are 400s (serde's
+//!   text, not the strict-constant text); lone `\uD800-\uDFFF`
+//!   surrogates are 400s too (tier 3; accepted before PIDASHCONV-1555).
+//! * Nesting past serde's recursion limit (~128) is a 400 (tier 3; was
+//!   the measured 9939-deep cap with Django's JSON 500 past it).
 //!
 //! Fixture: `FX-CYCMOD-08`
 //! (`rust-api/fixtures/v1_cycles_modules/handlers/cycle.golden.json`).
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
@@ -84,15 +84,19 @@ use chrono_tz::Tz;
 use serde_json::Value;
 use sqlx::{PgPool, Row};
 
+use super::module::{check_max_length, CoerceFail};
 use pidash_auth::permissions::project;
+use pidash_compat::response::{json_created, json_ok, no_content};
 
 #[cfg(test)]
-use super::json_cpython::JNum;
-use super::json_cpython::{
+use super::json::JNum;
+use super::json::{
     to_serde_publish, to_serde_publish_map, JObject, JStr, JVal, JsonFail, PLAIN_CRASH_BODY,
     PLAIN_CRASH_CONTENT_TYPE,
 };
 use crate::state::AppState;
+use pidash_compat::datetime::{render_date_opt, render_datetime_opt, render_uuid, render_uuid_opt};
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 
 // ---------------------------------------------------------------------------
 // Responses
@@ -116,8 +120,6 @@ pub const NOT_FOUND_BODY: &str = r#"{"error":"The requested resource does not ex
 /// survives instead of the `"Not found."` default
 /// (`db/models/project.py:213-218`).
 pub const PROJECT_NOT_FOUND_BODY: &str = r#"{"detail":"Project not found"}"#;
-/// `handle_exception`'s generic branch (`api/views/base.py:166-170`).
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// `handle_exception`'s Django-`ValidationError` branch
 /// (`api/views/base.py:148-152`): invalid UUIDs inside `pk__in` lookups on
 /// the cycle-issues POST path.
@@ -221,32 +223,6 @@ impl IntoResponse for Denial {
 
 fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
-}
-
-/// Render a 200 JSON response with exact bytes.
-fn json_ok(body: String) -> Response {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(axum::http::header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("handler json response")
-}
-
-/// Render a 201 JSON response with exact bytes.
-fn json_created(body: String) -> Response {
-    Response::builder()
-        .status(StatusCode::CREATED)
-        .header(axum::http::header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("handler json response")
-}
-
-/// Render an empty 204 response.
-fn no_content() -> Response {
-    Response::builder()
-        .status(StatusCode::NO_CONTENT)
-        .body(axum::body::Body::empty())
-        .expect("handler empty response")
 }
 
 fn pool_of(state: &AppState) -> Result<PgPool, Denial> {
@@ -374,42 +350,7 @@ pub fn owned_unarchive(
 // Query params
 // ---------------------------------------------------------------------------
 
-/// One query value, repeated or not (same shape as the D-19 `v1_projects`
-/// family: axum's `Query` backend does not coerce a lone `?key=value` into
-/// a sequence, so callers read first/last like Django's `QueryDict`).
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(untagged)]
-pub enum OneOrMany {
-    One(String),
-    Many(Vec<String>),
-}
-
-/// The multi-value query map every handler extracts.
-pub type QueryMap = HashMap<String, OneOrMany>;
-
-/// Django `QueryDict.get`: the last value, or `None`.
-pub fn query_last(query: &QueryMap, key: &str) -> Option<String> {
-    query.get(key).map(|value| match value {
-        OneOrMany::One(one) => one.clone(),
-        OneOrMany::Many(many) => many.last().cloned().unwrap_or_default(),
-    })
-}
-
-/// `self.fields` / `self.expand` (`api/views/base.py:212-220`): comma
-/// split, empties dropped, `None` when empty.
-pub fn fields_param(query: &QueryMap, key: &str) -> Option<Vec<String>> {
-    let raw = query_last(query, key).unwrap_or_default();
-    let fields: Vec<String> = raw
-        .split(',')
-        .filter(|f| !f.is_empty())
-        .map(str::to_owned)
-        .collect();
-    if fields.is_empty() {
-        None
-    } else {
-        Some(fields)
-    }
-}
+pub use pidash_compat::http::{fields_param, query_last, OneOrMany, QueryMap};
 
 // ---------------------------------------------------------------------------
 // Authentication
@@ -490,10 +431,8 @@ pub async fn actor(pool: &PgPool, headers: &HeaderMap, secret_key: &[u8]) -> Res
     // (`api_authentication.py:41-44`); machine tokens stamp `last_used_at`.
     // Best-effort: a failed stamp must not fail the request.
     if !raw.starts_with(pidash_auth::token::MACHINE_TOKEN_PREFIX) {
-        let _ = sqlx::query(r#"UPDATE "api_tokens" SET "last_used" = now() WHERE "token" = $1"#)
-            .bind(raw)
-            .execute(pool)
-            .await;
+        let _ =
+            pidash_services::domain::tokens::touch_api_token_last_used_by_token(pool, raw).await;
     }
     // The token loggers stamp this id on the `process_logs` payload
     // (Django reads `request.user` post-view; PIDASHCONV-937).
@@ -579,19 +518,16 @@ async fn resolve_machine_token(
     if !member {
         // `revoke()` stamps `revoked_at` only (`runner/models.py:865-869`);
         // `last_used_at` is stamped on success only.
-        let _ = sqlx::query(
-            r#"UPDATE "machine_token" SET "revoked_at" = now() WHERE "token_hash" = $1"#,
-        )
-        .bind(&presented_hash)
-        .execute(pool)
-        .await;
+        let _ =
+            pidash_services::domain::tokens::revoke_machine_token_by_hash(pool, &presented_hash)
+                .await;
         return Err(Denial::InvalidToken);
     }
-    let _ =
-        sqlx::query(r#"UPDATE "machine_token" SET "last_used_at" = now() WHERE "token_hash" = $1"#)
-            .bind(&presented_hash)
-            .execute(pool)
-            .await;
+    let _ = pidash_services::domain::tokens::touch_machine_token_last_used_by_hash(
+        pool,
+        &presented_hash,
+    )
+    .await;
     Ok(user_id)
 }
 
@@ -787,11 +723,12 @@ pub async fn preamble(
 /// `base_host(request, is_app=True)` (`utils/host.py:17-67`): the app
 /// origin for task kwargs, never the inbound host.
 pub fn app_origin(state: &AppState) -> String {
-    if let Some(url) = state.settings().urls.app_base_url.clone() {
-        return url;
+    let urls = &state.settings().urls;
+    if let Some(url) = urls.app_base_url.as_deref().filter(|s| !s.is_empty()) {
+        return url.to_owned();
     }
-    if let Some(url) = state.settings().urls.web_url.clone() {
-        return url;
+    if let Some(url) = urls.web_url.as_deref().filter(|s| !s.is_empty()) {
+        return url.to_owned();
     }
     "http://localhost".to_owned()
 }
@@ -958,33 +895,10 @@ fn render_f64(value: f64) -> Value {
     serde_json::Number::from_f64(value).map_or(Value::Null, Value::Number)
 }
 
-fn render_uuid(value: &uuid::Uuid) -> Value {
-    Value::String(value.to_string())
-}
-
-fn render_uuid_opt(value: &Option<uuid::Uuid>) -> Value {
-    value.as_ref().map_or(Value::Null, render_uuid)
-}
-
 fn render_string_opt(value: &Option<String>) -> Value {
     value
         .as_ref()
         .map_or(Value::Null, |v| Value::String(v.clone()))
-}
-
-fn render_date_opt(value: &Option<chrono::NaiveDate>) -> Value {
-    value
-        .map(|d| Value::String(d.format("%Y-%m-%d").to_string()))
-        .unwrap_or(Value::Null)
-}
-
-/// DRF `DateTimeField` rendering in the request time zone (`Z` for UTC,
-/// six-digit micros only when nonzero): the shared
-/// `crate::serializer::render_datetime_in` kernel.
-fn render_datetime_opt(value: &Option<chrono::DateTime<chrono::Utc>>, timezone: &Tz) -> Value {
-    value.map_or(Value::Null, |dt| {
-        Value::String(crate::serializer::render_datetime_in(&dt, timezone))
-    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1892,7 +1806,7 @@ pub async fn render_issue(
         map.retain(|key, _| fields.iter().any(|f| f == key));
     }
     if let Some(expand) = expand {
-        apply_issue_expand(pool, detail, &mut map, expand, timezone).await?;
+        apply_issue_expand(pool, detail, &mut map, expand, timezone, fields).await?;
     }
     // Unlike the module shape, the issue appends are conditional on the keys
     // surviving filtering (`serializers/issue.py:242-248`).
@@ -1947,19 +1861,40 @@ pub async fn render_issue(
     Ok(Value::Object(map))
 }
 
+/// Declared `IssueSerializer` write-only fields: present in `self.fields` so
+/// `?expand=` reaches the fallthrough (`base.py:78,116`), which sets them to
+/// `None`, yet never in the rendered body because DRF drops write-only fields.
+/// (`assignees`/`labels` are write-only too, but the dedicated append path owns
+/// them, so they are not listed here.)
+const ISSUE_EXPAND_NULL_FIELDS: &[&str] = &["description_markdown"];
+
 /// `?expand=` for scalar issue keys: map hits render the Lite shapes (null
 /// FK → `{}`); every other key falls through to
 /// `getattr(instance, f"{expand}_id", None)` — `type` resolves to the
-/// unchanged id, everything else nulls the key.
+/// unchanged id, everything else nulls the key. A declared write-only field
+/// that the body never carried is set to null when it is in `self.fields`
+/// (survives `?fields=`), and an expanded `url` is removed because Django
+/// nulls it then pops the `None` (`serializers/issue.py:437-441`).
 pub async fn apply_issue_expand(
     pool: &PgPool,
     detail: &IssueDetail,
     map: &mut serde_json::Map<String, Value>,
     expand: &[String],
     timezone: &Tz,
+    fields: Option<&[String]>,
 ) -> Result<(), Denial> {
     for name in expand {
         if !map.contains_key(name.as_str()) {
+            // `expand in self.fields` (`base.py:78`) is true for a declared
+            // write-only field, so Django's fallthrough sets it to None even
+            // though the body never rendered it.
+            let survives_fields = match fields {
+                Some(fields) => fields.iter().any(|field| field == name),
+                None => true,
+            };
+            if survives_fields && ISSUE_EXPAND_NULL_FIELDS.contains(&name.as_str()) {
+                map.insert(name.clone(), Value::Null);
+            }
             continue;
         }
         match name.as_str() {
@@ -2019,6 +1954,12 @@ pub async fn apply_issue_expand(
                     "assigned_pod".to_owned(),
                     render_uuid_opt(&detail.assigned_pod_id),
                 );
+            }
+            "url" => {
+                // Django nulls `url` via the fallthrough, then
+                // `IssueSerializer.to_representation` pops the None so the key
+                // is absent, not null (`serializers/issue.py:437-441`).
+                map.remove("url");
             }
             _ => {
                 map.insert(name.clone(), Value::Null);
@@ -2612,22 +2553,23 @@ pub async fn expand_labels(
 // ---------------------------------------------------------------------------
 
 /// Parse the request body into `request.data` through the shared
-/// CPython-envelope layer ([`super::json_cpython`]): an empty body is `{}`
-/// (DRF's empty-stream default); malformed JSON is the DRF `ParseError`
-/// with CPython's error text; past the depth cap is Django's JSON 500.
+/// JSON layer ([`super::json`]): an empty body is `{}` (DRF's
+/// empty-stream default); malformed JSON is the DRF `ParseError` with
+/// serde's error text (tier 3 since PIDASHCONV-1555); past serde's depth
+/// limit is a 400, never Django's JSON 500.
 pub fn parse_body_value(raw: &[u8]) -> Result<JVal, Denial> {
     parse_body_value_spans(raw, &[])
 }
 
 /// [`parse_body_value`] over charset-decoded text carrying lone-surrogate
-/// spans (exotic charsets, PIDASHCONV-693): placeholders become `Sur`
-/// units inside the parsed strings.
+/// spans (exotic charsets, PIDASHCONV-693): any non-empty span list is a
+/// 400 (tier 3 since PIDASHCONV-1555; spans were threaded into the
+/// parsed strings before). Spans are always empty since PIDASHCONV-1552.
 pub fn parse_body_value_spans(raw: &[u8], surr: &[(usize, u16)]) -> Result<JVal, Denial> {
-    super::json_cpython::parse_request_data_spans(raw, surr).map_err(|fail| match fail {
-        JsonFail::Message(detail) => Denial::BadDetail(format!(
-            "{}{detail}",
-            super::json_cpython::JSON_PARSE_PREFIX
-        )),
+    super::json::parse_request_data_spans(raw, surr).map_err(|fail| match fail {
+        JsonFail::Message(detail) => {
+            Denial::BadDetail(format!("{}{detail}", super::json::JSON_PARSE_PREFIX))
+        }
         JsonFail::Recursion => Denial::ServerError,
     })
 }
@@ -2638,11 +2580,10 @@ pub fn parse_body_value_spans(raw: &[u8], surr: &[(usize, u16)]) -> Result<JVal,
 /// the EOF `ParseError`, never `{}` — the module path (`parse_json_map`)
 /// already works this way; verified live against Django.
 pub fn parse_body_value_text_spans(raw: &[u8], surr: &[(usize, u16)]) -> Result<JVal, Denial> {
-    super::json_cpython::parse_request_bytes_spans(raw, surr).map_err(|fail| match fail {
-        JsonFail::Message(detail) => Denial::BadDetail(format!(
-            "{}{detail}",
-            super::json_cpython::JSON_PARSE_PREFIX
-        )),
+    super::json::parse_request_bytes_spans(raw, surr).map_err(|fail| match fail {
+        JsonFail::Message(detail) => {
+            Denial::BadDetail(format!("{}{detail}", super::json::JSON_PARSE_PREFIX))
+        }
         JsonFail::Recursion => Denial::ServerError,
     })
 }
@@ -2812,21 +2753,14 @@ fn parse_object_or_500_ct(
     }
 }
 
-/// A single field-coercion failure: the pre-rendered message plus whether it
-/// is a per-field list (the usual shape) or an index-keyed object (list
-/// children, e.g. `members`).
-#[derive(Debug, Clone)]
-pub struct CoerceFail {
-    pub body: String,
-}
-
 /// Python `str(value)` for error echoes, over parsed values: the shared
-/// layer's [`super::json_cpython::py_str`] (strings verbatim with raw
-/// surrogates, true `repr()` quoting nested, depth-capped); a render past
-/// the depth cap is Django's JSON 500. (Callers divert top-level dirty
-/// echoes to [`Denial::RendererCrash`] before formatting.)
+/// layer's [`super::json::py_str`] (strings verbatim, true `repr()`
+/// quoting nested; values never nest past serde's recursion limit, so
+/// the render cannot fail). The [`Denial::RendererCrash`] arm is dead
+/// (tier 3 since PIDASHCONV-1555: lone surrogates are a 400 at parse,
+/// so no dirty echo reaches the renderer).
 pub fn py_repr(value: &JVal) -> Result<JStr, Denial> {
-    super::json_cpython::py_str(value).map_err(|_| Denial::ServerError)
+    super::json::py_str(value).map_err(|_| Denial::ServerError)
 }
 
 /// DRF `CharField` over one JSON value (verified live): `null` fails unless
@@ -2879,18 +2813,6 @@ pub fn coerce_char(
             ))
         }
     }
-}
-
-fn check_max_length(text: &str, max_length: Option<usize>) -> Result<(), CoerceFail> {
-    if let Some(max) = max_length {
-        // DRF counts Unicode scalar values (`len(str)`).
-        if text.chars().count() > max {
-            return Err(CoerceFail {
-                body: format!(r#"["Ensure this field has no more than {max} characters."]"#),
-            });
-        }
-    }
-    Ok(())
 }
 
 /// DRF `CharField` validators in append order (`fields.py` `CharField` plus
@@ -3565,636 +3487,14 @@ pub const PYTZ_COMMON_TIMEZONES: &[&str] = &[
     "UTC",
 ];
 
-/// One parsed datetime input: the wall time plus an optional fixed offset
-/// in microseconds east of UTC (`None` = naive → the request user's zone).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ParsedDatetime {
-    pub naive: chrono::NaiveDateTime,
-    pub offset_micros: Option<i64>,
-}
-
-/// `django.utils.dateparse.parse_datetime` on the oracle (Django 4.2,
-/// Python 3.12, `dateparse.py:104-129`, probed): `fromisoformat` first,
-/// the `datetime_re` fallback second, then DRF's
-/// `strptime(value, 'iso-8601')` fallthrough (`to_internal_value` runs
-/// it when `parse_datetime` returns `None`). Both `None` and
-/// `ValueError` mean "invalid" to DRF (suppressed at `fields.py:1179`),
-/// so one `Option`.
-pub fn parse_iso_datetime(text: &str) -> Option<ParsedDatetime> {
-    parse_fromisoformat(text)
-        .or_else(|| parse_django_datetime_re(text))
-        .or_else(|| {
-            // `strptime` compiles the literal format with `re.IGNORECASE`,
-            // so the input `iso-8601` in any letter case yields naive
-            // 1900-01-01. Exact match: padding fails on both sides (probed).
-            // Python's fold also accepts İ/ı/ſ letter variants; the port is
-            // ASCII-only (same family as the 765 unicode gap).
-            text.eq_ignore_ascii_case("iso-8601").then(|| {
-                let naive = chrono::NaiveDate::from_ymd_opt(1900, 1, 1)
-                    .and_then(|date| date.and_hms_opt(0, 0, 0))
-                    .expect("1900-01-01 valid");
-                ParsedDatetime {
-                    naive,
-                    offset_micros: None,
-                }
-            })
-        })
-}
-
-/// Python 3.12 `datetime.fromisoformat` (probed): extended/basic calendar
-/// and ISO week dates, any single char separator (digits included:
-/// `2026-10-01110:30:00` parses), `HH[MM[SS]]` times with `.`/`,`
-/// fractions of any length (truncated to micros), `Z` or numeric offsets
-/// (hours, hours+minutes, hours+minutes+seconds, each with an optional
-/// fraction on the last unit). Years 1-9999, offsets strictly inside ±24h.
-pub fn parse_fromisoformat(text: &str) -> Option<ParsedDatetime> {
-    if text.is_empty() {
-        return None;
-    }
-    let bytes = text.as_bytes();
-    // Date prefix: `YYYY-MM-DD` | `YYYYMMDD` | `YYYY-Www[-D]` | `YYYYWww[D]`.
-    // Only a `W` at 4/5 opens a week date; anywhere else it is an
-    // ordinary char (`2026-10-01W10:30:00` parses with `W` as separator).
-    if matches!(text.find('W'), Some(4) | Some(5)) {
-        return parse_fromiso_week_datetime(text);
-    }
-    let (date, rest) = parse_fromiso_date(bytes)?;
-    parse_fromiso_rest(date, rest, false).map(|(parsed, _)| parsed)
-}
-
-/// Everything after a `fromisoformat` date: bare (midnight naive) or one
-/// separator char plus time plus the tz tail, plus the basic time's digit
-/// count (`None` for extended times and bare dates). With `shape_only`
-/// the components are grammar-checked but range checks (hour ≤ 23,
-/// offset inside ±24h, ...) are skipped, so a well-formed but
-/// out-of-range rest still parses; the basic week fallback uses that to
-/// tell range failures (hard, unless the digit count is odd) from grammar
-/// failures (fall back).
-fn parse_fromiso_rest(
-    date: chrono::NaiveDate,
-    rest: &str,
-    shape_only: bool,
-) -> Option<(ParsedDatetime, Option<usize>)> {
-    if rest.is_empty() {
-        return Some((
-            ParsedDatetime {
-                naive: date.and_hms_opt(0, 0, 0)?,
-                offset_micros: None,
-            },
-            None,
-        ));
-    }
-    // Exactly one separator char, always (`20261001110:30:00` and
-    // `2026-10-01110:30:00` both parse, probed).
-    let sep_len = rest.chars().next()?.len_utf8();
-    let (naive_time, rest, frac_len, basic_digits) =
-        parse_fromiso_time(&rest[sep_len..], shape_only)?;
-    let naive = date.and_time(naive_time);
-    let offset_micros = parse_fromiso_tz_tail(rest, frac_len, shape_only)?;
-    Some((
-        ParsedDatetime {
-            naive,
-            offset_micros,
-        },
-        basic_digits,
-    ))
-}
-
-/// The tz remainder after a `fromisoformat` time (probed): empty (naive),
-/// `Z`, or a numeric offset — or skipped chars followed by `Z` or a
-/// numeric offset. The allowance depends on the fraction that was just
-/// consumed (`frac_len` digits, dotted or dotless, on any unit): none →
-/// one skip (`T10:30:00X+05:30` parses; even a bare `.` skips:
-/// `T10:30:00.+00:00` parses); 1-5 digits → no skip (`T10:30:00.5X+05:30`
-/// fails); 6+ digits → unlimited skips (`T10:30:00.000000ABCDEFG+05:30`
-/// parses — there is no second fraction, the middle is skipped). A
-/// marker-first remainder never skips, so `Z+00:00` fails, and a `Z`
-/// reached by skipping poisons the parse (`T10:30:00.000000XYZ+05:30`
-/// fails: after `XY` comes `Z+05:30`); a skip with no tz after it fails
-/// (`T1033404` fails); there is no skip inside the offset itself
-/// (`+05X+06:00` fails). Up to `allowance` trailing NULs are tolerated
-/// (`T10:30:00\0` parses naive, `T10:30:00\0\0` and `T10:30:00.5\0` fail,
-/// `T10:30:00.000000\0\0` parses naive).
-fn parse_fromiso_tz_tail(rest: &str, frac_len: usize, shape_only: bool) -> Option<Option<i64>> {
-    let allowance = tz_skip_allowance(frac_len);
-    let mut tail = rest;
-    let mut stripped: u32 = 0;
-    while allowance.is_none_or(|max| stripped < max) {
-        match tail.strip_suffix('\0') {
-            Some(shorter) => {
-                tail = shorter;
-                stripped += 1;
-            }
-            None => break,
-        }
-    }
-    match tail {
-        "" => Some(None),
-        "Z" => Some(Some(0)),
-        _ => {
-            let mut rest = tail;
-            let mut skips: u32 = 0;
-            loop {
-                if rest == "Z" {
-                    return Some(Some(0));
-                }
-                let first = rest.as_bytes().first()?;
-                if *first == b'+' || *first == b'-' {
-                    return Some(Some(parse_fromiso_offset(rest, shape_only)?));
-                }
-                if *first == b'Z' || allowance.is_some_and(|max| skips >= max) {
-                    return None;
-                }
-                let skip = rest.chars().next()?.len_utf8();
-                rest = &rest[skip..];
-                skips += 1;
-                if rest.is_empty() {
-                    return None;
-                }
-            }
-        }
-    }
-}
-
-/// Skip allowance from the consumed fraction's digit count (probed):
-/// `None` means unlimited.
-fn tz_skip_allowance(frac_len: usize) -> Option<u32> {
-    if frac_len == 0 {
-        Some(1)
-    } else if frac_len < 6 {
-        Some(0)
-    } else {
-        None
-    }
-}
-
-/// The `fromisoformat` calendar date prefix plus the unparsed remainder
-/// (week dates, which contain `W`, are handled before this is reached).
-fn parse_fromiso_date(bytes: &[u8]) -> Option<(chrono::NaiveDate, &str)> {
-    let text = std::str::from_utf8(bytes).ok()?;
-    if bytes.len() >= 10 && bytes[4] == b'-' && bytes[7] == b'-' {
-        let year = digits_to_i32(&bytes[0..4])?;
-        if !(1..=9999).contains(&year) {
-            return None;
-        }
-        let month = digits_to_u32(&bytes[5..7])?;
-        let day = digits_to_u32(&bytes[8..10])?;
-        let date = chrono::NaiveDate::from_ymd_opt(year, month, day)?;
-        return Some((date, &text[10..]));
-    }
-    if bytes.len() >= 8 && bytes[0..8].iter().all(|b| b.is_ascii_digit()) {
-        let year = digits_to_i32(&bytes[0..4])?;
-        if !(1..=9999).contains(&year) {
-            return None;
-        }
-        let month = digits_to_u32(&bytes[4..6])?;
-        let day = digits_to_u32(&bytes[6..8])?;
-        let date = chrono::NaiveDate::from_ymd_opt(year, month, day)?;
-        return Some((date, &text[8..]));
-    }
-    None
-}
-
-/// A `fromisoformat` ISO week datetime. The weekday takes the date's
-/// own shape only — `-D` after `YYYY-Www`, a trailing `D` after `YYYYWww`
-/// — and it backtracks: the with-weekday parse is tried first, then the
-/// bare-week (Monday) parse (`2026W404110:30:00` is Thursday, `2026W40610:30`
-/// is Monday, `2026-W40-11:30:00` is Monday, all probed). The basic `D`
-/// wins outright only with an even basic digit count (or an extended
-/// time). On an odd count Monday wins when it parses (`2026W404103340Z`
-/// is Monday), a Monday grammar failure keeps a valid with-day parse
-/// (`2026W404Z103+05.5` is Thursday), and a Monday range failure fails
-/// hard. A with-day grammar failure falls back to Monday-or-None, and a
-/// with-day range failure does the same on odd counts but fails hard on
-/// even counts (`2026W401030:00` fails even though Monday 03:00 would
-/// parse). The extended `-D` additionally needs
-/// end-or-nondigit after D (`2026-W40-4110:30:00` fails the with-day
-/// attempt and falls back to Monday, probed). With no dash the bare week
-/// takes any separator, digits included (`2026-W40610:30:00` is Monday,
-/// probed).
-fn parse_fromiso_week_datetime(text: &str) -> Option<ParsedDatetime> {
-    let bytes = text.as_bytes();
-    let wpos = text.find('W')?;
-    if wpos != 4 && wpos != 5 {
-        return None;
-    }
-    let extended = wpos == 5;
-    if extended && bytes[4] != b'-' {
-        return None;
-    }
-    let year = digits_to_i32(&bytes[0..4])?;
-    if !(1..=9999).contains(&year) {
-        return None;
-    }
-    let rest = &text[wpos + 1..];
-    if rest.len() < 2 || !rest.as_bytes()[0..2].iter().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    let week: u32 = rest[0..2].parse().ok()?;
-    let tail = &rest[2..];
-    let monday = chrono::NaiveDate::from_isoywd_opt(year, week, chrono::Weekday::Mon)?;
-    if extended {
-        match tail.strip_prefix('-') {
-            Some(day) => {
-                // Try `-D` (D must be followed by end or a non-digit),
-                // fall back to Monday with the dash as separator.
-                let day_end = day.len() <= 1 || !day.as_bytes()[1].is_ascii_digit();
-                if day_end {
-                    if let Some((parsed, _)) = weekday_try_backtrack(year, week, day, false) {
-                        return Some(parsed);
-                    }
-                }
-                parse_fromiso_rest(monday, tail, false).map(|(parsed, _)| parsed)
-            }
-            None => parse_fromiso_rest(monday, tail, false).map(|(parsed, _)| parsed),
-        }
-    } else {
-        // Try `D`: it wins outright only with an even basic digit count
-        // (or an extended time). On an odd count Monday wins when it
-        // parses, a Monday grammar failure keeps a valid with-day parse,
-        // and a Monday range failure fails hard. A with-day grammar
-        // failure falls back to Monday-or-None, and a with-day range
-        // failure does the same on odd counts but fails hard on even
-        // counts — so check the shape when the full parse fails, and the
-        // parity in both cases.
-        let with_full = weekday_try_backtrack(year, week, tail, false);
-        let with_odd = match &with_full {
-            Some((_, basic_digits)) => basic_digits.is_some_and(|count| count % 2 == 1),
-            None => match weekday_try_backtrack(year, week, tail, true) {
-                None => {
-                    return parse_fromiso_rest(monday, tail, false).map(|(parsed, _)| parsed);
-                }
-                Some((_, basic_digits)) => basic_digits.is_some_and(|count| count % 2 == 1),
-            },
-        };
-        if !with_odd {
-            return with_full.map(|(parsed, _)| parsed);
-        }
-        let without_full = parse_fromiso_rest(monday, tail, false);
-        if without_full.is_some() {
-            return without_full.map(|(parsed, _)| parsed);
-        }
-        if parse_fromiso_rest(monday, tail, true).is_none() {
-            return with_full.map(|(parsed, _)| parsed);
-        }
-        None
-    }
-}
-
-/// The with-weekday attempt: a leading digit 1-7 names the day, and the
-/// whole rest (separator, time, tz) must parse after it.
-fn weekday_try_backtrack(
-    year: i32,
-    week: u32,
-    text: &str,
-    shape_only: bool,
-) -> Option<(ParsedDatetime, Option<usize>)> {
-    let digit = *text.as_bytes().first()?;
-    if !(b'1'..=b'7').contains(&digit) {
-        return None;
-    }
-    let weekday = chrono::Weekday::try_from(digit - b'0' - 1).ok()?;
-    let date = chrono::NaiveDate::from_isoywd_opt(year, week, weekday)?;
-    parse_fromiso_rest(date, &text[1..], shape_only)
-}
-
-/// The `fromisoformat` time plus the tz remainder plus the consumed
-/// fraction's digit count (which drives the tz skip allowance):
-/// `HH[[:]MM[[:]SS]][.,frac]` (a fraction after any unit means sub-second
-/// micros, probed: `T10:30.5` is 10:30:00.5), plus a basic-only dotless
-/// fraction: 2+ digits glued after SS (`T103340040` is .040s; a single
-/// glued digit ends the time instead, probed: `T1033404` fails). Mixed
-/// basic/extended forms never parse (`T10:3000`, `T1030:00` fail), and a
-/// colon is never backtracked (`T10:30:0+00:00` fails). With
-/// `shape_only` the units are grammar-checked (two digits each) but the
-/// clock ranges are not enforced (midnight stands in for the time). The
-/// digit count covers basic unit digits plus the dotless run (including a
-/// lone run-1 digit that stays in the tz tail) plus one lone tail digit
-/// after a short basic time; dotted fractions never count, and extended
-/// times report `None`.
-fn parse_fromiso_time(
-    text: &str,
-    shape_only: bool,
-) -> Option<(chrono::NaiveTime, &str, usize, Option<usize>)> {
-    let bytes = text.as_bytes();
-    if bytes.len() < 2 || !bytes[0..2].iter().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    let hour: u32 = text[0..2].parse().ok()?;
-    let mut rest = &text[2..];
-    let mut minute: u32 = 0;
-    let mut second: u32 = 0;
-    let mut digits: Option<usize> = Some(2);
-    // Optional `:MM` / `MM`.
-    if let Some(tail) = rest.strip_prefix(':') {
-        digits = None;
-        if tail.len() < 2 || !tail.as_bytes()[0..2].iter().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
-        minute = tail[0..2].parse().ok()?;
-        rest = &tail[2..];
-        // Optional `:SS`.
-        if let Some(tail) = rest.strip_prefix(':') {
-            if tail.len() < 2 || !tail.as_bytes()[0..2].iter().all(|b| b.is_ascii_digit()) {
-                return None;
-            }
-            second = tail[0..2].parse().ok()?;
-            rest = &tail[2..];
-        }
-    } else if rest.len() >= 2 && rest.as_bytes()[0..2].iter().all(|b| b.is_ascii_digit()) {
-        digits = Some(4);
-        minute = rest[0..2].parse().ok()?;
-        rest = &rest[2..];
-        if rest.len() >= 2 && rest.as_bytes()[0..2].iter().all(|b| b.is_ascii_digit()) {
-            digits = Some(6);
-            second = rest[0..2].parse().ok()?;
-            rest = &rest[2..];
-            // Basic dotless fraction: a run of 2+ digits.
-            let run: usize = rest.bytes().take_while(|b| b.is_ascii_digit()).count();
-            if run >= 2 {
-                let mut micros: i64 = 0;
-                for (index, byte) in rest.bytes().take(6).enumerate() {
-                    if !byte.is_ascii_digit() {
-                        break;
-                    }
-                    micros += (byte - b'0') as i64 * 10_i64.pow(5 - index as u32);
-                }
-                let time = time_or_shape_midnight(hour, minute, second, micros, shape_only)?;
-                return Some((time, &rest[run..], run, Some(6 + run)));
-            }
-        }
-    }
-    // A lone digit left in the tz tail still counts (a run-1 after SS or
-    // after a short basic time).
-    if digits.is_some() && rest.as_bytes().first().is_some_and(|b| b.is_ascii_digit()) {
-        digits = digits.map(|count| count + 1);
-    }
-    let (micros, frac_len, rest) = parse_frac_micros_opt(rest)?;
-    let time = time_or_shape_midnight(hour, minute, second, micros, shape_only)?;
-    Some((time, rest, frac_len, digits))
-}
-
-/// Build the clock time, or midnight when only the shape is wanted.
-fn time_or_shape_midnight(
-    hour: u32,
-    minute: u32,
-    second: u32,
-    micros: i64,
-    shape_only: bool,
-) -> Option<chrono::NaiveTime> {
-    if shape_only {
-        return chrono::NaiveTime::from_hms_opt(0, 0, 0);
-    }
-    chrono::NaiveTime::from_hms_micro_opt(hour, minute, second, micros as u32)
-}
-
-/// The optional dotted fraction after a time component: `.`/`,` plus ≥1
-/// digit (any length, truncated to micros), returning micros, digit count
-/// and remainder. No dot — or a dot with no digits — means `(0, 0, rest)`
-/// unconsumed: a bare dot ends the time and the tz tail skips it
-/// (`T10:30:00.+00:00` parses, probed).
-fn parse_frac_micros_opt(text: &str) -> Option<(i64, usize, &str)> {
-    let tail = match text.strip_prefix('.').or_else(|| text.strip_prefix(',')) {
-        Some(tail) => tail,
-        None => return Some((0, 0, text)),
-    };
-    let digits: usize = tail.bytes().take_while(|b| b.is_ascii_digit()).count();
-    if digits == 0 {
-        return Some((0, 0, text));
-    }
-    let mut micros: i64 = 0;
-    for (index, byte) in tail.bytes().take(6).enumerate() {
-        if !byte.is_ascii_digit() {
-            break;
-        }
-        micros += (byte - b'0') as i64 * 10_i64.pow(5 - index as u32);
-    }
-    Some((micros, digits, &tail[digits..]))
-}
-
-/// The `fromisoformat` numeric offset in micros east of UTC:
-/// `±HH[MM[SS]]` basic or `±HH:MM[:SS]` extended (the mode locks on the
-/// first separator: `+0530:15` and `+05:3015` fail, probed), with an
-/// optional `.`/`,` fraction after any unit (always sub-second micros,
-/// probed: `+05.5` is 5h + 0.5s) — except a zero `HH:MM:SS` drops the
-/// fraction entirely (`+00:00:00.5` is UTC, probed). Components are never
-/// range-checked (`+05:99` normalises to +6:39); only the total must sit
-/// strictly inside ±24h (skipped with `shape_only`).
-fn parse_fromiso_offset(text: &str, shape_only: bool) -> Option<i64> {
-    let bytes = text.as_bytes();
-    let sign: i64 = match bytes.first()? {
-        b'+' => 1,
-        b'-' => -1,
-        _ => return None,
-    };
-    let rest = &text[1..];
-    if rest.len() < 2 || !rest.as_bytes()[0..2].iter().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    let hours: i64 = rest[0..2].parse().ok()?;
-    let mut rest = &rest[2..];
-    if rest.starts_with('.') || rest.starts_with(',') {
-        let (frac, _, tail) = parse_frac_micros_opt(rest)?;
-        return finish_fromiso_offset(sign, hours, 0, 0, frac, tail, shape_only);
-    }
-    let mut minutes: i64 = 0;
-    let mut seconds: i64 = 0;
-    if rest.starts_with(':') {
-        // Extended: `HH:MM[:SS]`.
-        rest = &rest[1..];
-        if rest.len() < 2 || !rest.as_bytes()[0..2].iter().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
-        minutes = rest[0..2].parse().ok()?;
-        rest = &rest[2..];
-        if rest.starts_with('.') || rest.starts_with(',') {
-            let (frac, _, tail) = parse_frac_micros_opt(rest)?;
-            return finish_fromiso_offset(sign, hours, minutes, 0, frac, tail, shape_only);
-        }
-        if let Some(tail) = rest.strip_prefix(':') {
-            if tail.len() < 2 || !tail.as_bytes()[0..2].iter().all(|b| b.is_ascii_digit()) {
-                return None;
-            }
-            seconds = tail[0..2].parse().ok()?;
-            rest = &tail[2..];
-        }
-    } else {
-        // Basic: `HH[MM[SS]]`.
-        if rest.len() >= 2 && rest.as_bytes()[0..2].iter().all(|b| b.is_ascii_digit()) {
-            minutes = rest[0..2].parse().ok()?;
-            rest = &rest[2..];
-            if rest.starts_with('.') || rest.starts_with(',') {
-                let (frac, _, tail) = parse_frac_micros_opt(rest)?;
-                return finish_fromiso_offset(sign, hours, minutes, 0, frac, tail, shape_only);
-            }
-            if rest.len() >= 2 && rest.as_bytes()[0..2].iter().all(|b| b.is_ascii_digit()) {
-                seconds = rest[0..2].parse().ok()?;
-                rest = &rest[2..];
-            }
-        }
-    }
-    let (frac, _, tail) = parse_frac_micros_opt(rest)?;
-    finish_fromiso_offset(sign, hours, minutes, seconds, frac, tail, shape_only)
-}
-
-/// Total a `fromisoformat` offset: the sign applies to the whole-unit part
-/// and the fraction alike; a zero whole part drops the fraction; the total
-/// must sit strictly inside ±24h; nothing may remain.
-fn finish_fromiso_offset(
-    sign: i64,
-    hours: i64,
-    minutes: i64,
-    seconds: i64,
-    frac_micros: i64,
-    rest: &str,
-    shape_only: bool,
-) -> Option<i64> {
-    if !rest.is_empty() {
-        return None;
-    }
-    if hours == 0 && minutes == 0 && seconds == 0 {
-        return Some(0);
-    }
-    let micros = sign * (hours * 3_600_000_000 + minutes * 60_000_000 + seconds * 1_000_000)
-        + sign * frac_micros;
-    if !shape_only && micros.abs() >= 24 * 3_600_000_000 {
-        return None;
-    }
-    Some(micros)
-}
-
-/// Django's `datetime_re` fallback (`dateparse.py`, exact):
-/// padded-or-not `YYYY-M-D`, `T`/space, `H:M[:S[.,frac]]]`, optional
-/// whitespace, optional `Z|±HH[[:]MM]`. The frac is `\d{1,6}\d{0,6}`
-/// (micros come from the first 6, left-justified). Offsets are whole minutes
-/// strictly inside ±24h (`timezone()` raises past that).
-pub fn parse_django_datetime_re(text: &str) -> Option<ParsedDatetime> {
-    let bytes = text.as_bytes();
-    if bytes.len() < 5 {
-        return None;
-    }
-    if !bytes[0..4].iter().all(|b| b.is_ascii_digit()) || bytes[4] != b'-' {
-        return None;
-    }
-    let year = digits_to_i32(&bytes[0..4])?;
-    // Django builds `datetime(...)` from the groups, which raises for year
-    // 0 (and DRF turns the raise into invalid, probed).
-    if !(1..=9999).contains(&year) {
-        return None;
-    }
-    let mut rest = &text[5..];
-    let (month, tail) = take_1_or_2_digits(rest)?;
-    rest = tail.strip_prefix('-')?;
-    let (day, tail) = take_1_or_2_digits(rest)?;
-    rest = tail;
-    let sep = rest.as_bytes().first()?;
-    if *sep != b'T' && *sep != b' ' {
-        return None;
-    }
-    rest = &rest[1..];
-    let (hour, tail) = take_1_or_2_digits(rest)?;
-    rest = tail.strip_prefix(':')?;
-    let (minute, tail) = take_1_or_2_digits(rest)?;
-    rest = tail;
-    let mut second: u32 = 0;
-    let mut micros: i64 = 0;
-    if let Some(tail) = rest.strip_prefix(':') {
-        let (value, tail) = take_1_or_2_digits(tail)?;
-        second = value;
-        rest = tail;
-        if let Some(tail) = rest.strip_prefix('.').or_else(|| rest.strip_prefix(',')) {
-            let digits: usize = tail.bytes().take_while(|b| b.is_ascii_digit()).count();
-            if digits == 0 || digits > 12 {
-                return None;
-            }
-            let (frac, _, tail) = parse_frac_micros_opt(rest)?;
-            micros = frac;
-            rest = tail;
-        }
-    }
-    // `\s*` then the optional tzinfo, then end.
-    let trimmed = rest.trim_start_matches(|c: char| c.is_whitespace());
-    let offset_micros = match trimmed {
-        "" => None,
-        "Z" => Some(0),
-        _ => Some(parse_django_offset(trimmed)?),
-    };
-    let date = chrono::NaiveDate::from_ymd_opt(year, month, day)?;
-    let time = chrono::NaiveTime::from_hms_micro_opt(hour, minute, second, micros as u32)?;
-    let naive = date.and_time(time);
-    Some(ParsedDatetime {
-        naive,
-        offset_micros,
-    })
-}
-
-/// Django's tzinfo arm: `±HH[[:]MM]` whole minutes, strictly inside ±24h.
-fn parse_django_offset(text: &str) -> Option<i64> {
-    let bytes = text.as_bytes();
-    let sign: i64 = match bytes.first()? {
-        b'+' => 1,
-        b'-' => -1,
-        _ => return None,
-    };
-    let rest = &text[1..];
-    if rest.len() < 2 || !rest.as_bytes()[0..2].iter().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    let hours: i64 = rest[0..2].parse().ok()?;
-    let rest = &rest[2..];
-    let (colon, rest) = match rest.strip_prefix(':') {
-        Some(tail) => (true, tail),
-        None => (false, rest),
-    };
-    let minutes: i64 = if rest.is_empty() {
-        if colon {
-            return None;
-        }
-        0
-    } else {
-        if rest.len() != 2 || !rest.bytes().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
-        rest.parse().ok()?
-    };
-    let micros = (hours * 3_600 + minutes * 60) * 1_000_000;
-    if micros.abs() >= 24 * 3_600_000_000 {
-        return None;
-    }
-    Some(sign * micros)
-}
-
-/// 1-2 ASCII digits plus the remainder (`\d{1,2}`).
-fn take_1_or_2_digits(text: &str) -> Option<(u32, &str)> {
-    let bytes = text.as_bytes();
-    let first = *bytes.first()?;
-    if !first.is_ascii_digit() {
-        return None;
-    }
-    let mut value: u32 = (first - b'0') as u32;
-    let mut rest = &text[1..];
-    if let Some(second) = rest.as_bytes().first() {
-        if second.is_ascii_digit() {
-            value = value * 10 + (second - b'0') as u32;
-            rest = &rest[1..];
-        }
-    }
-    Some((value, rest))
-}
-
-fn digits_to_i32(digits: &[u8]) -> Option<i32> {
-    if digits.is_empty() || !digits.iter().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    std::str::from_utf8(digits).ok()?.parse().ok()
-}
-
-fn digits_to_u32(digits: &[u8]) -> Option<u32> {
-    if digits.is_empty() || !digits.iter().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    std::str::from_utf8(digits).ok()?.parse().ok()
-}
+/// Django `parse_datetime` + DRF `strptime` fallthrough — moved to its
+/// canonical home `pidash_compat::datetime` by OVL-14 (PIDASHCONV-1649);
+/// re-exported here so every existing path keeps working (the compat
+/// name is `parse_django_datetime`; this module keeps the old name).
+pub use pidash_compat::datetime::{
+    parse_django_datetime as parse_iso_datetime, parse_django_datetime_re, parse_fromisoformat,
+    ParsedDatetime,
+};
 
 /// DRF `DateTimeField.enforce_timezone` failure: an aware input whose
 /// user-zone shift leaves years 1-9999, or (unreachable in practice) a
@@ -6889,7 +6189,7 @@ pub fn chart_number_value(number: ChartNumber) -> Value {
 /// missing). `completed` carries one entry per completion in distribution
 /// order (date-ascending, physical ties); `None` dates are uncompleted
 /// rows, skipped like Python's `is not None` guard. Future dates (past
-/// `today`, the actor-zone day — see the caller) render `null`.
+/// `today`, the UTC day — see the caller) render `null`.
 pub fn burndown_chart(
     total: ChartNumber,
     completed: &[(Option<chrono::NaiveDate>, ChartNumber)],
@@ -7190,9 +6490,10 @@ pub async fn transfer_cycle_issues_inner(
     let start_date = row_datetime_opt(&recount, "start_date", "transfer-recount")?;
     let end_date = row_datetime_opt(&recount, "end_date", "transfer-recount")?;
     // `burndown_plot` compares each chart day against
-    // `timezone.now().date()` with the ACTOR zone active
-    // (`TimezoneMixin`, `analytics_plot.py:247-257`) — not the UTC day.
-    let today = micros_now().with_timezone(&timezone).date_naive();
+    // `timezone.now().date()`, which is always the UTC day under
+    // `USE_TZ=True` — `TimezoneMixin` activation has no effect on it
+    // (`analytics_plot.py:246,260`).
+    let today = micros_now().date_naive();
     // Estimate gate (`:153-159`): the EXISTS the snapshot branch reads.
     let estimate_type: bool = sqlx::query_scalar::<_, i32>(queries::TRANSFER_ESTIMATE_TYPE_SQL)
         .bind(slug)
@@ -7793,7 +7094,30 @@ pub fn routes() -> axum::Router<AppState> {
 mod tests {
     use super::*;
     use axum::http::StatusCode;
+    use std::collections::HashMap;
     use tower::ServiceExt;
+
+    fn origin_state(app_base_url: Option<&str>, web_url: Option<&str>) -> AppState {
+        let mut settings = pidash_db::config::Settings::test_defaults();
+        settings.urls.app_base_url = app_base_url.map(str::to_owned);
+        settings.urls.web_url = web_url.map(str::to_owned);
+        AppState::with_settings("test", settings)
+    }
+
+    /// `base_host(request, is_app=True)` treats `""` as missing
+    /// (PIDASHCONV-1597): an empty `APP_BASE_URL` falls through to
+    /// `WEB_URL`. (The localhost fallback for unset-everywhere is a
+    /// separate, deliberate-looking deviation — out of scope.)
+    #[test]
+    fn app_origin_falls_through_empty_strings() {
+        let web = "https://web.example.invalid";
+        let state = origin_state(Some(""), Some(web));
+        assert_eq!(app_origin(&state), web);
+        let state = origin_state(Some("https://app.example.invalid"), Some(web));
+        assert_eq!(app_origin(&state), "https://app.example.invalid");
+        let state = origin_state(Some(""), Some(""));
+        assert_eq!(app_origin(&state), "http://localhost");
+    }
 
     #[test]
     fn activate_timezone_empty_zone_500s() {
@@ -8125,9 +7449,10 @@ mod tests {
             }
         }
         match parse_object_or_500(b"{bad").expect_err("malformed") {
-            Denial::BadDetail(message) => assert_eq!(
-                message,
-                "JSON parse error - Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"
+            // Tier 3 since PIDASHCONV-1555: serde's text, not CPython's.
+            Denial::BadDetail(message) => assert!(
+                message.starts_with("JSON parse error - ") && message.len() > 19,
+                "envelope + serde text, got {message:?}"
             ),
             denial => panic!("expected BadDetail, got {denial:?}"),
         }
@@ -8139,9 +7464,10 @@ mod tests {
     #[test]
     fn negotiated_json_text_empty_is_eof() {
         match parse_body_value_text_spans(b"", &[]).expect_err("decoded-empty 400s") {
-            Denial::BadDetail(message) => assert_eq!(
-                message,
-                "JSON parse error - Expecting value: line 1 column 1 (char 0)"
+            // Tier 3 since PIDASHCONV-1555: serde's EOF text, not CPython's.
+            Denial::BadDetail(message) => assert!(
+                message.starts_with("JSON parse error - ") && message.len() > 19,
+                "envelope + serde text, got {message:?}"
             ),
             denial => panic!("expected BadDetail, got {denial:?}"),
         }
@@ -8286,266 +7612,6 @@ mod tests {
         }
     }
 
-    /// F-N7: malformed bodies answer CPython's `json` error texts, not
-    /// serde's (fuzzed: 3674 structured/random/UTF-8 cases, 0 mismatches,
-    /// 0 reverse-divergences; serde_json 1.0.151 texts — this battery pins
-    /// them, so a serde upgrade that rewords errors fails loudly).
-    #[test]
-    fn json_parse_cpython_parity() {
-        for (raw, want) in [
-            (b"{bad" as &[u8], "JSON parse error - Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"),
-            (b"{]" as &[u8], "JSON parse error - Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"),
-            (b"{{}}" as &[u8], "JSON parse error - Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"),
-            (b"{'a':1}" as &[u8], "JSON parse error - Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"),
-            (b"{\"a\" 1}" as &[u8], "JSON parse error - Expecting ':' delimiter: line 1 column 6 (char 5)"),
-            (b"{\"a\":}" as &[u8], "JSON parse error - Expecting value: line 1 column 6 (char 5)"),
-            (b"{\"a\":1} trailing" as &[u8], "JSON parse error - Extra data: line 1 column 9 (char 8)"),
-            (b"truex" as &[u8], "JSON parse error - Extra data: line 1 column 5 (char 4)"),
-            (b"\"a\"b" as &[u8], "JSON parse error - Extra data: line 1 column 4 (char 3)"),
-            (b"\"\"x" as &[u8], "JSON parse error - Extra data: line 1 column 3 (char 2)"),
-            (b"1 2" as &[u8], "JSON parse error - Extra data: line 1 column 3 (char 2)"),
-            (b"{\"a\":1}{\"b\":2}" as &[u8], "JSON parse error - Extra data: line 1 column 8 (char 7)"),
-            (b"[1][2]" as &[u8], "JSON parse error - Extra data: line 1 column 4 (char 3)"),
-            (b"01 2" as &[u8], "JSON parse error - Extra data: line 1 column 2 (char 1)"),
-            (b"[01]" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 3 (char 2)"),
-            (b"{\"a\":01}" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 7 (char 6)"),
-            (b"01" as &[u8], "JSON parse error - Extra data: line 1 column 2 (char 1)"),
-            (b"0x1" as &[u8], "JSON parse error - Extra data: line 1 column 2 (char 1)"),
-            (b"{\"a\":0x1}" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 7 (char 6)"),
-            (b"-x" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
-            (b"[1e]" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 3 (char 2)"),
-            (b"12e" as &[u8], "JSON parse error - Extra data: line 1 column 3 (char 2)"),
-            (b"12e+" as &[u8], "JSON parse error - Extra data: line 1 column 3 (char 2)"),
-            (b"1e" as &[u8], "JSON parse error - Extra data: line 1 column 2 (char 1)"),
-            (b"{\"a\": 1e}" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 8 (char 7)"),
-            (b"[12e+]" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 4 (char 3)"),
-            (b"[-12e" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 5 (char 4)"),
-            (b"[0.5." as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 5 (char 4)"),
-            (b"[0.5.5]" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 5 (char 4)"),
-            (b"[-.5]" as &[u8], "JSON parse error - Expecting value: line 1 column 2 (char 1)"),
-            (b"{\"a\":-.5}" as &[u8], "JSON parse error - Expecting value: line 1 column 6 (char 5)"),
-            (b"[.5]" as &[u8], "JSON parse error - Expecting value: line 1 column 2 (char 1)"),
-            (b"{\"a\":.5}" as &[u8], "JSON parse error - Expecting value: line 1 column 6 (char 5)"),
-            (b"." as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
-            (b"{\"a\":.}" as &[u8], "JSON parse error - Expecting value: line 1 column 6 (char 5)"),
-            (b"+" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
-            (b"{\"a\": +}" as &[u8], "JSON parse error - Expecting value: line 1 column 7 (char 6)"),
-            (b"[--1]" as &[u8], "JSON parse error - Expecting value: line 1 column 2 (char 1)"),
-            (b"nul" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
-            (b"tru" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
-            (b"nulx" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
-            (b"nullx" as &[u8], "JSON parse error - Extra data: line 1 column 5 (char 4)"),
-            (b"[nulx]" as &[u8], "JSON parse error - Expecting value: line 1 column 2 (char 1)"),
-            (b"{\"a\":nulx}" as &[u8], "JSON parse error - Expecting value: line 1 column 6 (char 5)"),
-            (b"[truex]" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 6 (char 5)"),
-            (b"falsey" as &[u8], "JSON parse error - Extra data: line 1 column 6 (char 5)"),
-            (b"[falsey]" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 7 (char 6)"),
-            (b"nulL" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
-            (b"True" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
-            (b"None" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
-            (b"nulll" as &[u8], "JSON parse error - Extra data: line 1 column 5 (char 4)"),
-            (b"true2" as &[u8], "JSON parse error - Extra data: line 1 column 5 (char 4)"),
-            (b"[true2]" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 6 (char 5)"),
-            (b"{" as &[u8], "JSON parse error - Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"),
-            (b"{\"a\"" as &[u8], "JSON parse error - Expecting ':' delimiter: line 1 column 5 (char 4)"),
-            (b"{\"a\":" as &[u8], "JSON parse error - Expecting value: line 1 column 6 (char 5)"),
-            (b"[1" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 3 (char 2)"),
-            (b"{\"a\": \"abc" as &[u8], "JSON parse error - Unterminated string starting at: line 1 column 7 (char 6)"),
-            (b"{\"a\": tru" as &[u8], "JSON parse error - Expecting value: line 1 column 7 (char 6)"),
-            (b"-" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
-            (b"{\"a\": 12" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 9 (char 8)"),
-            (b"{\"a\": -" as &[u8], "JSON parse error - Expecting value: line 1 column 7 (char 6)"),
-            (b"[ 2" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 4 (char 3)"),
-            (b"[-2" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 4 (char 3)"),
-            (b"[1,2" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 5 (char 4)"),
-            (b"{\"a\":1," as &[u8], "JSON parse error - Expecting property name enclosed in double quotes: line 1 column 8 (char 7)"),
-            (b"{\"a\" :" as &[u8], "JSON parse error - Expecting value: line 1 column 7 (char 6)"),
-            (b"[1," as &[u8], "JSON parse error - Expecting value: line 1 column 4 (char 3)"),
-            (b"{\"a\":1 " as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 8 (char 7)"),
-            (b"[1 " as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 4 (char 3)"),
-            (b"{\"a\":\"b\"" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 9 (char 8)"),
-            (b"{\"a\":true" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 10 (char 9)"),
-            (b"{\"a\":1.5" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 9 (char 8)"),
-            (b"{\"a\":[1]" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 9 (char 8)"),
-            (b"{\"a\":1,\"b\":2" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 13 (char 12)"),
-            (b"[tru" as &[u8], "JSON parse error - Expecting value: line 1 column 2 (char 1)"),
-            (b"{\"a\":1 :" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 8 (char 7)"),
-            (b"{\"a\":\"b\" " as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 10 (char 9)"),
-            (b"[[[" as &[u8], "JSON parse error - Expecting value: line 1 column 4 (char 3)"),
-            (b"{\"a\":{\"b\":}" as &[u8], "JSON parse error - Expecting value: line 1 column 11 (char 10)"),
-            (b"{\"a\": 1e5x}" as &[u8], "JSON parse error - Expecting ',' delimiter: line 1 column 10 (char 9)"),
-            (b"\"abc" as &[u8], "JSON parse error - Unterminated string starting at: line 1 column 1 (char 0)"),
-            (b"\"" as &[u8], "JSON parse error - Unterminated string starting at: line 1 column 1 (char 0)"),
-            (b"\"\\" as &[u8], "JSON parse error - Unterminated string starting at: line 1 column 1 (char 0)"),
-            (b"\"\\u" as &[u8], "JSON parse error - Invalid \\uXXXX escape: line 1 column 3 (char 2)"),
-            (b"\"\\u12" as &[u8], "JSON parse error - Invalid \\uXXXX escape: line 1 column 3 (char 2)"),
-            (b"\"\\ud800" as &[u8], "JSON parse error - Invalid \\uXXXX escape: line 1 column 3 (char 2)"),
-            (b"\"\\u0041" as &[u8], "JSON parse error - Invalid \\uXXXX escape: line 1 column 3 (char 2)"),
-            (b"\"\\ud800\\u12\"" as &[u8], "JSON parse error - Invalid \\uXXXX escape: line 1 column 9 (char 8)"),
-            (b"{\"a\": \"\\q\"}" as &[u8], "JSON parse error - Invalid \\escape: line 1 column 8 (char 7)"),
-            (b"{\"a\": \"\\u12\"}" as &[u8], "JSON parse error - Invalid \\uXXXX escape: line 1 column 9 (char 8)"),
-            (b"\"a" as &[u8], "JSON parse error - Unterminated string starting at: line 1 column 1 (char 0)"),
-            (b"\"ab" as &[u8], "JSON parse error - Unterminated string starting at: line 1 column 1 (char 0)"),
-            (b"\"\\u12345" as &[u8], "JSON parse error - Unterminated string starting at: line 1 column 1 (char 0)"),
-            (b"{\"a\": \"x\x01y\"}" as &[u8], "JSON parse error - Invalid control character at: line 1 column 9 (char 8)"),
-            (b"\"a\nb\"" as &[u8], "JSON parse error - Invalid control character at: line 1 column 3 (char 2)"),
-            (b"\"a\tb\"" as &[u8], "JSON parse error - Invalid control character at: line 1 column 3 (char 2)"),
-            (b"[{\"a\":1},]" as &[u8], "JSON parse error - Expecting value: line 1 column 10 (char 9)"),
-            (b"{\"a\":1,}" as &[u8], "JSON parse error - Expecting property name enclosed in double quotes: line 1 column 8 (char 7)"),
-            (b"{\"a\":[1,}" as &[u8], "JSON parse error - Expecting value: line 1 column 9 (char 8)"),
-            (b"[[1,]]" as &[u8], "JSON parse error - Expecting value: line 1 column 5 (char 4)"),
-            (b"{\"a\":{\"b\":1,}}" as &[u8], "JSON parse error - Expecting property name enclosed in double quotes: line 1 column 13 (char 12)"),
-            (b"[1,]" as &[u8], "JSON parse error - Expecting value: line 1 column 4 (char 3)"),
-            (b"{\"a\":,}" as &[u8], "JSON parse error - Expecting value: line 1 column 6 (char 5)"),
-            (b"{,}" as &[u8], "JSON parse error - Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"),
-            (b"{\n\"a\"\n1\n}" as &[u8], "JSON parse error - Expecting ':' delimiter: line 3 column 1 (char 6)"),
-            (b"[\n1\n2\n]" as &[u8], "JSON parse error - Expecting ',' delimiter: line 3 column 1 (char 4)"),
-            (b"{\"\xc3\xa9\":}" as &[u8], "JSON parse error - Expecting value: line 1 column 6 (char 5)"),
-            (b"\"\xc3\xa9" as &[u8], "JSON parse error - Unterminated string starting at: line 1 column 1 (char 0)"),
-            (b"\xef\xbb\xbf{\"a\":1}" as &[u8], "JSON parse error - Unexpected UTF-8 BOM (decode using utf-8-sig): line 1 column 1 (char 0)"),
-            (b"\xef\xbb\xbf" as &[u8], "JSON parse error - Unexpected UTF-8 BOM (decode using utf-8-sig): line 1 column 1 (char 0)"),
-            (b"[\xef\xbb\xbf]" as &[u8], "JSON parse error - Expecting value: line 1 column 2 (char 1)"),
-            (b"{\xef\xbb\xbf\"a\":1}" as &[u8], "JSON parse error - Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"),
-            (b"1\xef\xbb\xbf" as &[u8], "JSON parse error - Extra data: line 1 column 2 (char 1)"),
-            (b"\xff\xfe" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xff in position 0: invalid start byte"),
-            (b"\xc3" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
-            (b"\xc3(" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xc3 in position 0: invalid continuation byte"),
-            (b"\xe2(\xa1" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xe2 in position 0: invalid continuation byte"),
-            (b"\x80" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0x80 in position 0: invalid start byte"),
-            (b"\xed\xa0\x80" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xed in position 0: invalid continuation byte"),
-            (b"\xf0\x9f\x98" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
-            (b"\xe2\x82(" as &[u8], "JSON parse error - 'utf-8' codec can't decode bytes in position 0-1: invalid continuation byte"),
-            (b"\xe2\x82" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
-            (b"\xc0\x80" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xc0 in position 0: invalid start byte"),
-            (b"\xed\xbf\xbf" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xed in position 0: invalid continuation byte"),
-            (b"\xf4\x90\x80\x80" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xf4 in position 0: invalid continuation byte"),
-            (b"\xdf" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
-            (b"\xef\xbf" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
-            (b"{\"a\": \"\xed\xa0\x80\"}" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xed in position 7: invalid continuation byte"),
-            (b"\xe0\x80\x80" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xe0 in position 0: invalid continuation byte"),
-            (b"a\x80b" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0x80 in position 1: invalid start byte"),
-            (b"\xc2\xc2" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xc2 in position 0: invalid continuation byte"),
-            // The codecs tail-drop: a trailing incomplete sequence parses
-            // as the truncated text (even when the tail could never be
-            // valid, like `\xed\xa0`); impossible bytes still fail.
-            (b"\xed\xa0" as &[u8], "JSON parse error - Expecting value: line 1 column 1 (char 0)"),
-            (b"[\xc3" as &[u8], "JSON parse error - Expecting value: line 1 column 2 (char 1)"),
-            (b"\"\xc3" as &[u8], "JSON parse error - Unterminated string starting at: line 1 column 1 (char 0)"),
-            (b"\xc0" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xc0 in position 0: invalid start byte"),
-            (b"\xf5" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xf5 in position 0: invalid start byte"),
-            (b"\xe0\x80" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xe0 in position 0: invalid continuation byte"),
-            (b"\xf0\x80\x80" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xf0 in position 0: invalid continuation byte"),
-            (b"\xf4\xbf\xbf" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xf4 in position 0: invalid continuation byte"),
-            (b"\xc3\xc3" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xc3 in position 0: invalid continuation byte"),
-            (b"\xed\xa0X" as &[u8], "JSON parse error - 'utf-8' codec can't decode byte 0xed in position 0: invalid continuation byte"),
-        ] {
-            let raw: &[u8] = raw;
-            match parse_body_value(raw).expect_err("battery is errors-only") {
-                Denial::BadDetail(message) => assert_eq!(message, want, "{raw:?}"),
-                denial => panic!("{raw:?}: expected BadDetail, got {denial:?}"),
-            }
-        }
-        // Strict constants reject under DRF's STRICT_JSON with the fixed
-        // text (no position), exactly when first in scan order.
-        for (raw, token) in [
-            (b"NaN".as_slice(), "NaN"),
-            (b"[Infinity]", "Infinity"),
-            (b"{\"a\": -Infinity}", "-Infinity"),
-            (b"{\"a\": NaNx}", "NaN"),
-        ] {
-            match parse_body_value(raw).expect_err("strict rejects") {
-                Denial::BadDetail(message) => assert_eq!(
-                    message,
-                    format!("JSON parse error - Out of range float values are not JSON compliant: '{token}'"),
-                    "{raw:?}"
-                ),
-                denial => panic!("{raw:?}: expected strict 400, got {denial:?}"),
-            }
-        }
-        // The digit limit rejects long int tokens with the fixed text.
-        let over = format!("{{\"a\": {}}}", "1".repeat(4301));
-        match parse_body_value(over.as_bytes()).expect_err("int limit") {
-            Denial::BadDetail(message) => assert_eq!(
-                message,
-                "JSON parse error - Exceeds the limit (4300 digits) for integer string conversion: \
-                 value has 4301 digits; use sys.set_int_max_str_digits() to increase the limit"
-            ),
-            denial => panic!("expected int-limit 400, got {denial:?}"),
-        }
-        // A truncated deep input recovers its plain EOF error; balanced
-        // deep input parses to the measured cap, then takes the generic
-        // 500 exactly where Django's RecursionError does.
-        let deep_open = "[".repeat(129);
-        match parse_body_value(deep_open.as_bytes()).expect_err("truncated deep") {
-            Denial::BadDetail(message) => assert_eq!(
-                message,
-                "JSON parse error - Expecting value: line 1 column 130 (char 129)"
-            ),
-            denial => panic!("expected EOF recovery, got {denial:?}"),
-        }
-        let deep_shut = format!("{{\"a\": {}1{}}}", "[".repeat(9938), "]".repeat(9938));
-        assert!(
-            parse_body_value(deep_shut.as_bytes()).is_ok(),
-            "9939-deep parses"
-        );
-        let too_deep = format!("{{\"a\": {}1{}}}", "[".repeat(9939), "]".repeat(9939));
-        assert!(
-            matches!(
-                parse_body_value(too_deep.as_bytes()).expect_err("past the cap"),
-                Denial::ServerError
-            ),
-            "9940-deep is Django's JSON 500"
-        );
-        // A mismatched closer past the old 128 cap keeps byte-exact text.
-        let mismatch = format!("{{\"a\": {}}}", "[".repeat(200).as_str());
-        match parse_body_value(mismatch.as_bytes()).expect_err("deep mismatch") {
-            Denial::BadDetail(message) => assert_eq!(
-                message,
-                "JSON parse error - Expecting value: line 1 column 207 (char 206)"
-            ),
-            denial => panic!("expected deep mismatch text, got {denial:?}"),
-        }
-        // The tail-drop can leave a VALID document: `{"a":1}\xc3`
-        // parses as `{"a":1}` (verified live through the oracle).
-        match &parse_body_value(b"{\"a\":1}\xc3").expect("tail-drop valid") {
-            JVal::Object(object) => assert!(object.get("a").is_some()),
-            value => panic!("expected object, got {value:?}"),
-        }
-        // An empty body is `{}`, never a parse error (DRF's
-        // content-length short-circuit, verified live).
-        match &parse_body_value(b"").expect("empty body") {
-            JVal::Object(object) => assert!(object.is_empty()),
-            value => panic!("expected empty object, got {value:?}"),
-        }
-        // Error margins at the cap (every flip verified live through
-        // Django): the value family surfaces to depth 9938, the
-        // string/object/delimiter/strict family to 9935.
-        let at_margin = |depth: usize, inner: &str| {
-            let mut raw = vec![b'['; depth];
-            raw.extend_from_slice(inner.as_bytes());
-            parse_body_value(&raw)
-        };
-        assert!(matches!(at_margin(9938, ","), Err(Denial::BadDetail(_))));
-        assert!(matches!(at_margin(9939, ","), Err(Denial::ServerError)));
-        assert!(matches!(at_margin(9935, "NaN"), Err(Denial::BadDetail(_))));
-        assert!(matches!(at_margin(9936, "NaN"), Err(Denial::ServerError)));
-        assert!(matches!(at_margin(9935, "1}"), Err(Denial::BadDetail(_))));
-        assert!(matches!(at_margin(9936, "1}"), Err(Denial::ServerError)));
-        // Terminated lone surrogates parse (CPython accepts them): the
-        // field holds the exact surrogate units.
-        match &parse_body_value(br#"{"a": "\ud800"}"#).expect("lone surrogate") {
-            JVal::Object(object) => match object.get("a") {
-                Some(JVal::Str(text)) => {
-                    assert!(text.has_surrogate());
-                    assert_eq!(text.first_surrogate(), Some(0xD800));
-                    assert_eq!(text.len_chars(), 1);
-                }
-                other => panic!("expected dirty string, got {other:?}"),
-            },
-            value => panic!("expected object, got {value:?}"),
-        }
-    }
-
     #[test]
     fn python_repr_echoes() {
         fn rendered(raw: &[u8]) -> String {
@@ -8572,18 +7638,19 @@ mod tests {
         assert_eq!(rendered(br#"["a'b\"c"]"#), "['a\\'b\"c']");
         assert_eq!(rendered(b"[\"\\u0001\"]"), "['\\x01']");
         assert_eq!(rendered(r#"["é"]"#.as_bytes()), "['é']");
-        // Nested surrogates repr-escape (clean output); top-level ones
-        // stay raw for the renderer-crash rule.
-        let nested = parse_body_value(b"[\"\\ud800\"]").expect("nested surrogate");
-        assert_eq!(
-            py_repr(&nested)
-                .expect("shallow")
-                .to_clean_string()
-                .expect("nested escapes clean"),
-            "['\\ud800']"
-        );
-        let top = parse_body_value(b"\"\\ud800\"").expect("top surrogate");
-        assert!(py_repr(&top).expect("shallow").to_clean_string().is_none());
+        // Tier 3 since PIDASHCONV-1555: lone surrogates are a 400 at
+        // parse now (were accepted, with repr-escape / renderer-crash
+        // arms downstream).
+        for raw in [b"[\"\\ud800\"]".as_slice(), b"\"\\ud800\""] {
+            assert!(
+                matches!(
+                    parse_body_value(raw),
+                    Err(Denial::BadDetail(message))
+                        if message.starts_with("JSON parse error - ")
+                ),
+                "{raw:?}: surrogate JSON 400s"
+            );
+        }
     }
 
     #[test]
@@ -8668,23 +7735,19 @@ mod tests {
                 .body,
             r#"["Null characters are not allowed."]"#
         );
-        // Lone surrogates fail the surrogate validator with the code point.
-        let dirty = parse_body_value(b"\"\\ud800\"").expect("dirty value");
-        assert_eq!(
-            coerce_char(Some(&dirty), false, false, Some(255))
-                .expect_err("surrogate")
-                .body,
-            r#"["Surrogate characters are not allowed: U+D800."]"#
-        );
-        // Validators collect: a long dirty name answers both messages.
-        let both = format!("\"{}\\ud800\"", "n".repeat(300));
-        let both = parse_body_value(both.as_bytes()).expect("long dirty");
-        assert_eq!(
-            coerce_char(Some(&both), false, false, Some(255))
-                .expect_err("collect")
-                .body,
-            r#"["Ensure this field has no more than 255 characters.","Surrogate characters are not allowed: U+D800."]"#
-        );
+        // Tier 3 since PIDASHCONV-1555: lone surrogates are a 400 at
+        // parse now (were validator 400s after an accepting parse).
+        let long_dirty = format!("\"{}\\ud800\"", "n".repeat(300));
+        for raw in [b"\"\\ud800\"".as_slice(), long_dirty.as_bytes()] {
+            assert!(
+                matches!(
+                    parse_body_value(raw),
+                    Err(Denial::BadDetail(message))
+                        if message.starts_with("JSON parse error - ")
+                ),
+                "{raw:?}: surrogate JSON 400s"
+            );
+        }
     }
 
     #[test]
@@ -8720,22 +7783,19 @@ mod tests {
                 .expect("ok"),
             Some("planned".to_owned())
         );
-        // A top-level dirty string echoes raw into the choice message,
-        // which crashes the renderer (the oracle's plain 500); only nested
-        // members repr-escape into a clean 400.
-        let dirty = parse_body_value(b"\"\\ud800\"").expect("dirty value");
-        assert!(matches!(
-            coerce_choice(Some(&dirty), &choices),
-            Err(Denial::RendererCrash)
-        ));
-        let nested = parse_body_value(b"[\"\\ud800\"]").expect("nested dirty");
-        assert_eq!(
-            coerce_choice(Some(&nested), &choices)
-                .expect("shallow")
-                .expect_err("nested")
-                .body,
-            r#"["\"['\\ud800']\" is not a valid choice."]"#
-        );
+        // Tier 3 since PIDASHCONV-1555: lone surrogates are a 400 at
+        // parse now (were renderer-crash 500s top-level and repr-escaped
+        // 400s nested).
+        for raw in [b"\"\\ud800\"".as_slice(), b"[\"\\ud800\"]"] {
+            assert!(
+                matches!(
+                    parse_body_value(raw),
+                    Err(Denial::BadDetail(message))
+                        if message.starts_with("JSON parse error - ")
+                ),
+                "{raw:?}: surrogate JSON 400s"
+            );
+        }
     }
 
     #[test]
@@ -9675,16 +8735,37 @@ mod tests {
 
     #[test]
     fn json_value_eq_deep_survives_small_stack() {
-        // The add-path dedupe runs on RAW values, which may nest to the
-        // 9939 cap: the comparison must not recurse (a recursive walk
-        // aborts the 2MB worker).
+        // The add-path dedupe comparison must not recurse (a recursive
+        // walk aborts the 2MB worker). Values are built programmatically:
+        // serde 400s 9938-deep parses since PIDASHCONV-1555 (tier 3).
         let deep = format!("{}1{}", "[".repeat(9938), "]".repeat(9938));
-        let left = parse_body_value(deep.as_bytes()).expect("left");
-        let right = parse_body_value(deep.as_bytes()).expect("right");
+        assert!(
+            matches!(
+                parse_body_value(deep.as_bytes()),
+                Err(Denial::BadDetail(message))
+                    if message.starts_with("JSON parse error - ")
+            ),
+            "9938-deep JSON 400s"
+        );
+        fn nest(depth: usize) -> JVal {
+            let mut value = JVal::Num(JNum::int("1".to_owned()));
+            for _ in 0..depth {
+                value = JVal::Array(vec![value]);
+            }
+            value
+        }
+        let left = nest(5000);
+        let right = nest(5000);
         let shallow = parse_body_value(b"[1]").expect("shallow");
-        let (equal, unequal) = std::thread::Builder::new()
+        // Values move back out so the deep drops land on the main test
+        // stack, not the 2MB probe stack.
+        let (equal, unequal, _left, _right, _shallow) = std::thread::Builder::new()
             .stack_size(2 * 1024 * 1024)
-            .spawn(move || (json_value_eq(&left, &right), json_value_eq(&left, &shallow)))
+            .spawn(move || {
+                let equal = json_value_eq(&left, &right);
+                let unequal = json_value_eq(&left, &shallow);
+                (equal, unequal, left, right, shallow)
+            })
             .expect("spawn")
             .join()
             .expect("no stack overflow");
@@ -9774,20 +8855,25 @@ mod tests {
 
     #[test]
     fn burndown_today_actor_zone_split() {
-        // F-C: the transfer caller derives `today` in the ACTOR zone, not
-        // UTC (`timezone.now().date()` under `TimezoneMixin`,
-        // `analytics_plot.py:247-257`). At 2026-10-02T00:30:00Z the UTC
-        // day is 10-02 while America/New_York still sits on 10-01, and
-        // the 10-02 chart entry flips between a number and `null`.
+        // The transfer caller derives `today` as the UTC day
+        // (`timezone.now().date()`, `analytics_plot.py:246,260`), not the
+        // actor-zone day: `timezone.now()` is always UTC under
+        // `USE_TZ=True`, whatever zone `TimezoneMixin` activated. At
+        // 2026-10-02T00:30:00Z the UTC day is 10-02 while
+        // America/New_York still sits on 10-01, and the 10-02 chart
+        // entry must stay a number (pending), not flip to `null`.
         use chrono_tz::Tz;
         let ny: Tz = "America/New_York".parse().expect("tz");
         let now = chrono::DateTime::parse_from_rfc3339("2026-10-02T00:30:00Z")
             .expect("dt")
             .to_utc();
-        let utc_today = now.date_naive();
-        let actor_today = now.with_timezone(&ny).date_naive();
-        assert_eq!(utc_today.to_string(), "2026-10-02");
-        assert_eq!(actor_today.to_string(), "2026-10-01");
+        let today = now.date_naive();
+        assert_eq!(today.to_string(), "2026-10-02");
+        // The split-window scenario still holds: the actor sits a day behind.
+        assert_eq!(
+            now.with_timezone(&ny).date_naive().to_string(),
+            "2026-10-01"
+        );
         let start = Some(
             chrono::DateTime::parse_from_rfc3339("2026-10-01T00:00:00Z")
                 .expect("dt")
@@ -9798,14 +8884,9 @@ mod tests {
                 .expect("dt")
                 .to_utc(),
         );
-        let actor_chart = burndown_chart(ChartNumber::Int(3), &[], start, end, actor_today);
+        let chart = burndown_chart(ChartNumber::Int(3), &[], start, end, today);
         assert_eq!(
-            serde_json::to_string(&actor_chart).expect("json"),
-            r#"{"2026-10-01":3,"2026-10-02":null}"#
-        );
-        let utc_chart = burndown_chart(ChartNumber::Int(3), &[], start, end, utc_today);
-        assert_eq!(
-            serde_json::to_string(&utc_chart).expect("json"),
+            serde_json::to_string(&chart).expect("json"),
             r#"{"2026-10-01":3,"2026-10-02":3}"#
         );
     }

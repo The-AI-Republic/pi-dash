@@ -16,10 +16,6 @@ on:
     paths:
       - "rust-api/**"
       - ".github/workflows/rust-api-contract-tests-tasks-assistant-rust.yml"
-  pull_request:
-    paths:
-      - "rust-api/**"
-      - ".github/workflows/rust-api-contract-tests-tasks-assistant-rust.yml"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -148,7 +144,9 @@ jobs:
         working-directory: rust-api/contract-tests
         # Same plugin dodge as the Django oracle job: the API install puts
         # pytest-django in this interpreter; the replay never touches Django.
-        run: env -u DJANGO_SETTINGS_MODULE pytest -p no:django tasks_assistant/test_rust_replay.py -v
+        # PIDASHCONV-1567: the output-limit truncation replay runs here too
+        # (default rust_queue transport for the Rust worker above).
+        run: env -u DJANGO_SETTINGS_MODULE pytest -p no:django tasks_assistant/test_rust_replay.py assistant/test_turn_truncated_rust_replay.py -v
 
       - name: Upload worker log on failure
         if: failure()

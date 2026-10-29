@@ -62,8 +62,6 @@ pub mod handlers;
 pub mod perms;
 pub mod writes;
 
-use std::collections::HashMap;
-
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{header, HeaderMap, Method, StatusCode, Uri};
@@ -73,6 +71,7 @@ use serde_json::Value;
 use sqlx::PgPool;
 
 use crate::state::AppState;
+pub use pidash_compat::response::{json_ok, SERVER_ERROR_BODY};
 
 /// Domain router: the four scheduler paths in
 /// [`handlers::routes`]. Owned GETs serve from Rust (cutover granularity);
@@ -105,8 +104,6 @@ pub const BINDING_NOT_FOUND_BODY: &str =
 pub const MISSING_KEY_BODY: &str = r#"{"error":"The required key does not exist."}"#;
 /// `handle_exception`'s `ObjectDoesNotExist` branch.
 pub const OBJECT_NOT_FOUND_BODY: &str = r#"{"error":"The requested resource does not exist."}"#;
-/// `handle_exception`'s generic 500 branch.
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 
 /// Handler failure with its exact status + body.
 #[derive(Debug)]
@@ -209,16 +206,6 @@ fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
 }
 
-/// 200 with a pre-rendered JSON body (DRF content type; key order is the
-/// construction order via `preserve_order`).
-pub fn json_ok(body: String) -> Response {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("json response")
-}
-
 /// 200 JSON from a value (key order is the construction order).
 pub fn ok_json(value: Value) -> Response {
     let body = serde_json::to_string(&value).expect("json body");
@@ -236,42 +223,7 @@ pub fn db_error<E: std::fmt::Display>(error: E, site: &str) -> Denial {
 // Query params
 // ---------------------------------------------------------------------------
 
-/// One query value, repeated or not (the `v1_projects` shape: axum's `Query`
-/// backend does not coerce a lone `?key=value` into a sequence, so callers
-/// read last like Django's `QueryDict`).
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(untagged)]
-pub enum OneOrMany {
-    One(String),
-    Many(Vec<String>),
-}
-
-/// The multi-value query map every handler extracts.
-pub type QueryMap = HashMap<String, OneOrMany>;
-
-/// Django `QueryDict.get`: the last value, or `None`.
-pub fn query_last(query: &QueryMap, key: &str) -> Option<String> {
-    query.get(key).map(|value| match value {
-        OneOrMany::One(one) => one.clone(),
-        OneOrMany::Many(many) => many.last().cloned().unwrap_or_default(),
-    })
-}
-
-/// `self.fields` / `self.expand` (`api/views/base.py:212-220`): comma
-/// split, empties dropped, `None` when empty.
-pub fn fields_param(query: &QueryMap, key: &str) -> Option<Vec<String>> {
-    let raw = query_last(query, key).unwrap_or_default();
-    let fields: Vec<String> = raw
-        .split(',')
-        .filter(|f| !f.is_empty())
-        .map(str::to_owned)
-        .collect();
-    if fields.is_empty() {
-        None
-    } else {
-        Some(fields)
-    }
-}
+pub use pidash_compat::http::{fields_param, query_last, OneOrMany, QueryMap};
 
 // ---------------------------------------------------------------------------
 // Authentication (`APIKeyAuthentication`)
@@ -311,10 +263,8 @@ pub async fn actor(pool: &PgPool, headers: &HeaderMap, secret_key: &[u8]) -> Res
     // `api_tokens.last_used` is stamped on every validated call
     // (`api_authentication.py:41-44`); machine tokens stamp `last_used_at`.
     if !raw.starts_with(pidash_auth::token::MACHINE_TOKEN_PREFIX) {
-        let _ = sqlx::query(r#"UPDATE "api_tokens" SET "last_used" = now() WHERE "token" = $1"#)
-            .bind(raw)
-            .execute(pool)
-            .await;
+        let _ =
+            pidash_services::domain::tokens::touch_api_token_last_used_by_token(pool, raw).await;
     }
     // The token loggers stamp this id on the `process_logs` payload
     // (Django reads `request.user` post-view; PIDASHCONV-937).
@@ -411,19 +361,16 @@ async fn resolve_machine_token(
     .map_err(|error| db_error(error, "machine-token-member"))?
     .unwrap_or(false);
     if !member {
-        let _ = sqlx::query(
-            r#"UPDATE "machine_token" SET "revoked_at" = now() WHERE "token_hash" = $1"#,
-        )
-        .bind(&presented_hash)
-        .execute(pool)
-        .await;
+        let _ =
+            pidash_services::domain::tokens::revoke_machine_token_by_hash(pool, &presented_hash)
+                .await;
         return Err(Denial::InvalidToken);
     }
-    let _ =
-        sqlx::query(r#"UPDATE "machine_token" SET "last_used_at" = now() WHERE "token_hash" = $1"#)
-            .bind(&presented_hash)
-            .execute(pool)
-            .await;
+    let _ = pidash_services::domain::tokens::touch_machine_token_last_used_by_hash(
+        pool,
+        &presented_hash,
+    )
+    .await;
     Ok(user_id)
 }
 

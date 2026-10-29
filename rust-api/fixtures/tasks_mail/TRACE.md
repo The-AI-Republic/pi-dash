@@ -72,6 +72,8 @@ dead code (see `dead/`): no fixture, no test, Python stays in place.
   (`receiver_id=subscriber` stale loop var, `:573-576` and `:622-625`), writes
   `:454-459,:661-670`, `print(e)` handler `:672-674`). Preference columns
   `db/models/notification.py:77-118`; `Notification` columns `:14-62`.
+  Exception: `no_subscriber_description_mention` — executed (recorded from
+  Django main `b6114ae64` via the worker-plane oracle, PIDASHCONV-1285).
 
 ## Auth — F-AUTH
 

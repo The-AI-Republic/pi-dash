@@ -19,6 +19,12 @@
 //! the key (`openapi.py:93` `if parameters:`, `openapi.py:85` `if summary:`),
 //! so the builder omits it too.
 //!
+//! `components.schemas` is *not* optional: the essentials carry 104
+//! `#/components/schemas/<Name>` `$ref`s (43 distinct names), so the
+//! registry captured from Django's document
+//! (`FX-OPENAPI-07.components_schemas.json`) is emitted verbatim and every
+//! reference resolves inside the served document (PIDASHCONV-1208).
+//!
 //! Renderers: [`render_json`] (4-space pretty, like DRF's `JSONRenderer`
 //! with `OpenApiJsonRenderer.get_indent or 4`) and [`render_yaml`] (minimal
 //! block-style emitter; every string double-quoted with JSON escaping so
@@ -78,6 +84,14 @@ pub fn build_document() -> Value {
         meta::API_KEY_AUTH_NAME.to_string(),
         meta::api_key_security_definition(),
     );
+    // `schemas` before `securitySchemes`, matching Django's `components`
+    // key order (`drf-spectacular` builds the registry first).
+    let mut components = Map::new();
+    components.insert("schemas".to_string(), component_schemas());
+    components.insert(
+        "securitySchemes".to_string(),
+        Value::Object(security_schemes),
+    );
     let mut doc = serde_json::json!({
         "openapi": meta::OPENAPI_VERSION,
         "info": {
@@ -97,7 +111,7 @@ pub fn build_document() -> Value {
         "servers": servers,
         "tags": tags,
         "paths": Value::Object(paths),
-        "components": {"securitySchemes": Value::Object(security_schemes)},
+        "components": Value::Object(components),
     });
     hooks::postprocess_project_id_dual_form(&mut doc);
     doc
@@ -193,6 +207,33 @@ fn push_indent(indent: usize, out: &mut String) {
     for _ in 0..indent {
         out.push(' ');
     }
+}
+
+/// The `components.schemas` registry of the served document: the verbatim
+/// `components.schemas` object captured from Django's live document
+/// (`rust-api/fixtures/v1_openapi/FX-OPENAPI-07.components_schemas.json`,
+/// `GET /api/schema/?format=json` with `ENABLE_DRF_SPECTACULAR=1` against
+/// `apps/api` at `origin/main d656243d3`).
+///
+/// drf-spectacular's `SchemaGenerator.get_schema` (`generators.py:282-293`)
+/// writes `components=self.registry.build(...)`, so every component an
+/// operation references is in the served document. The Rust port emits the
+/// same registry: without it every `#/components/schemas/<Name>` `$ref` the
+/// essentials carry dangles (43 targets / 104 refs, PIDASHCONV-1208) and the
+/// document is not a valid OpenAPI 3.0.3 spec. Embedded at build time and
+/// parsed per call like [`OPERATIONS_JSON`], so the served binary reads no
+/// files at runtime.
+const COMPONENT_SCHEMAS_JSON: &str =
+    include_str!("../../../../fixtures/v1_openapi/FX-OPENAPI-07.components_schemas.json");
+
+/// Parse the embedded components fixture and return its `schemas` object.
+fn component_schemas() -> Value {
+    let fixture: Value =
+        serde_json::from_str(COMPONENT_SCHEMAS_JSON).expect("components fixture parses");
+    fixture
+        .get("schemas")
+        .cloned()
+        .expect("components fixture carries `schemas`")
 }
 
 /// Per-operation essentials: `{path: {method: {operationId, tags, summary,
@@ -16758,6 +16799,75 @@ mod tests {
             *scheme,
             fixture()["security_schemes"]["ApiKeyAuthentication"]
         );
+    }
+
+    #[test]
+    fn every_ref_resolves_inside_document() {
+        let doc = build_document();
+        let mut refs = Vec::new();
+        collect_refs(&doc, &mut refs);
+        assert!(!refs.is_empty(), "served document carries no $ref");
+        let mut dangling: Vec<&str> = refs
+            .iter()
+            .filter(|reference| resolve_pointer(&doc, reference).is_none())
+            .map(String::as_str)
+            .collect();
+        dangling.sort_unstable();
+        dangling.dedup();
+        assert!(dangling.is_empty(), "dangling $ref targets: {dangling:?}");
+    }
+
+    #[test]
+    fn component_schemas_cover_every_referenced_name() {
+        let doc = build_document();
+        let schemas = doc["components"]["schemas"]
+            .as_object()
+            .expect("components.schemas is an object");
+        assert!(!schemas.is_empty());
+        let mut refs = Vec::new();
+        collect_refs(&doc, &mut refs);
+        for reference in refs {
+            let Some(name) = reference.strip_prefix("#/components/schemas/") else {
+                continue;
+            };
+            assert!(schemas.contains_key(name), "missing schema {name}");
+        }
+    }
+
+    fn collect_refs(value: &Value, out: &mut Vec<String>) {
+        match value {
+            Value::Object(map) => {
+                for (key, child) in map {
+                    if key == "$ref" {
+                        if let Some(reference) = child.as_str() {
+                            out.push(reference.to_string());
+                        }
+                    } else {
+                        collect_refs(child, out);
+                    }
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    collect_refs(item, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn resolve_pointer<'a>(doc: &'a Value, reference: &str) -> Option<&'a Value> {
+        let path = reference.strip_prefix("#/")?;
+        let mut node = doc;
+        for raw in path.split('/') {
+            let token = raw.replace("~1", "/").replace("~0", "~");
+            node = match node {
+                Value::Object(map) => map.get(&token)?,
+                Value::Array(items) => items.get(token.parse::<usize>().ok()?)?,
+                _ => return None,
+            };
+        }
+        Some(node)
     }
 
     #[test]

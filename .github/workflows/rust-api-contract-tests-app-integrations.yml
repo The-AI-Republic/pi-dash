@@ -9,11 +9,6 @@
 name: rust-api contract tests — app integrations
 
 on:
-  pull_request:
-    paths:
-      - "rust-api/**"
-      - "apps/api/**"
-      - ".github/workflows/rust-api-contract-tests-app-integrations.yml"
   push:
     branches: [rust-dev]
     paths:

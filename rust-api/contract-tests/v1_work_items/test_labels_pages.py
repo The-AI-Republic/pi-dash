@@ -3,11 +3,16 @@
 Page writes (create / update) require the live document service: without it
 they fail with 503 and nothing is written. That 503 shape is asserted here
 as the contract; reads and archive actions run against SQL-seeded pages.
+The create tests below run a stub live server (``LiveDocStub``) so the
+insert path itself is exercised; the stub is up only inside those tests.
 """
 
 import uuid
 
+import httpx
 import pytest
+
+from _harness.sinks import LiveDocStub
 
 from .conftest import ENVELOPE_KEYS
 
@@ -191,6 +196,65 @@ def test_page_unarchive_keeps_soft_deleted_live_parent(api, world, seeder, db):
     assert restored.json()["parent"] == parent["id"]
 
 
+def test_page_unarchive_detach_writes_parent_only(api, world, seeder, settings, db):
+    # Django's detach is ``page.parent = None; page.save(update_fields=["parent"])``
+    # (api/views/page.py:566-571). ``update_fields`` restricts the UPDATE to that
+    # one column, so neither ``updated_at`` (auto_now) nor ``updated_by``
+    # (``BaseModel.save``) is persisted: only ``parent_id`` changes. The v1 port
+    # used to stamp ``updated_at = now()`` and ``updated_by_id = requester`` on
+    # the same UPDATE (PIDASHCONV-1386; the app_pages copy was fixed in 1169).
+    parent = seeder.create_page(
+        world["workspace"]["id"], world["owner"]["id"], name="Parent", archived=True
+    )
+    seeder.link_page_to_project(parent["id"], world["project"]["id"], world["workspace"]["id"])
+    child = seeder.create_page(
+        world["workspace"]["id"],
+        world["owner"]["id"],
+        name="Child",
+        parent_id=parent["id"],
+        archived=True,
+    )
+    seeder.link_page_to_project(child["id"], world["project"]["id"], world["workspace"]["id"])
+    # Pin an audit identity distinct from the requester so a stray stamp is
+    # unmistakable: ``previous`` owns the child's last touch.
+    previous = seeder.create_user()
+    db.execute(
+        "UPDATE pages SET updated_at='2021-02-03 04:05:06+00', updated_by_id=%s WHERE id=%s",
+        (previous["id"], child["id"]),
+    )
+    before = db.fetchone(
+        "SELECT parent_id, updated_at, updated_by_id FROM pages WHERE id=%s", (child["id"],)
+    )
+    # Archived children are detail-visible: capture the rendered updated_at so
+    # the response comparison below needs no format guess.
+    detail_before = api.get(page_url(world, child["id"]))
+    assert detail_before.status_code == 200, detail_before.text
+
+    # The requester is a *different* eligible user (an ADMIN non-owner), so a
+    # stray stamp would set updated_by_id to this admin, not to ``previous``.
+    admin = seeder.create_user()
+    seeder.create_workspace_member(world["workspace"]["id"], admin["id"], role=20)
+    seeder.create_project_member(
+        world["workspace"]["id"], world["project"]["id"], admin["id"], role=20
+    )
+    token = seeder.create_api_token(admin["id"], world["workspace"]["id"])
+    with httpx.Client(
+        base_url=settings.base_url, timeout=30, headers={"X-Api-Key": token["token"]}
+    ) as admin_api:
+        restored = admin_api.delete(page_url(world, child["id"], "archive"))
+    assert restored.status_code == 200, restored.text
+    assert restored.json()["archived_at"] is None
+    assert restored.json()["parent"] is None
+    assert restored.json()["updated_at"] == detail_before.json()["updated_at"]
+
+    after = db.fetchone(
+        "SELECT parent_id, updated_at, updated_by_id FROM pages WHERE id=%s", (child["id"],)
+    )
+    assert after["parent_id"] is None  # detached: only parent_id changed
+    assert after["updated_at"] == before["updated_at"]
+    assert str(after["updated_by_id"]) == str(before["updated_by_id"]) == previous["id"]
+
+
 def _soft_delete_project(db, project_id, *, archived=False):
     """Soft-delete a seeded project, keeping its membership rows live.
 
@@ -247,3 +311,56 @@ def test_page_create_deleted_project_invalid_body_is_400(api, world, db):
     _soft_delete_project(db, world["project"]["id"])
     response = api.post(page_url(world), json={})
     assert response.status_code == 400, response.text
+
+
+def _conversion_hits(stub):
+    """POSTs the backend made to the stub live server during the create."""
+    return [hit for hit in stub.snapshot() if hit["method"] == "POST"]
+
+
+def test_page_create_without_parent(api, world, db):
+    """Create with no parent stores a null parent (PIDASHCONV-1503)."""
+    with LiveDocStub() as stub:
+        response = api.post(page_url(world), json={"name": "Top page"})
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert set(body) == PAGE_DETAIL_KEYS, f"keys changed: {sorted(set(body) ^ PAGE_DETAIL_KEYS)}"
+    assert body["name"] == "Top page"
+    assert body["parent"] is None
+    assert body["owned_by"] == world["owner"]["id"]
+    assert api.get(page_url(world, body["id"])).json()["parent"] is None
+    assert (
+        db.fetchval("SELECT parent_id FROM pages WHERE id=%s", (body["id"],))
+        is None
+    )
+    hits = _conversion_hits(stub)
+    assert hits, "page create must convert through the live server"
+    assert hits[0]["path"] == "/live/convert-document/"
+    assert hits[0]["json"]["variant"] == "document"
+
+
+def test_page_create_with_parent(api, world, seeder, db):
+    """Create with a parent stores it (PIDASHCONV-1503: it was never written)."""
+    parent = seeder.create_page(
+        world["workspace"]["id"], world["owner"]["id"], name="Parent"
+    )
+    seeder.link_page_to_project(
+        parent["id"], world["project"]["id"], world["workspace"]["id"]
+    )
+    with LiveDocStub() as stub:
+        response = api.post(
+            page_url(world), json={"name": "Child", "parent": parent["id"]}
+        )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert set(body) == PAGE_DETAIL_KEYS, f"keys changed: {sorted(set(body) ^ PAGE_DETAIL_KEYS)}"
+    assert body["parent"] == parent["id"]
+    assert api.get(page_url(world, body["id"])).json()["parent"] == parent["id"]
+    assert (
+        str(db.fetchval("SELECT parent_id FROM pages WHERE id=%s", (body["id"],)))
+        == parent["id"]
+    )
+    hits = _conversion_hits(stub)
+    assert hits, "page create must convert through the live server"
+    assert hits[0]["path"] == "/live/convert-document/"
+    assert hits[0]["json"]["variant"] == "document"

@@ -65,6 +65,7 @@ pub mod transcribe;
 use axum::Router;
 
 use crate::state::AppState;
+pub use pidash_compat::response::{json_value as error_response, json_value as json_body};
 
 /// Owned D-06 assistant routes (cutover granularity: registered paths
 /// serve from Rust, everything else keeps proxying). Sibling handler
@@ -165,23 +166,6 @@ pub async fn request_actor(
     }
 }
 
-/// Render an exact JSON body with its status. Insertion order is
-/// preserved by the crate's `serde_json/preserve_order`, so DRF field
-/// order survives rendering.
-pub fn json_body(status: StatusCode, body: &serde_json::Value) -> Response {
-    let rendered = serde_json::to_string(body).expect("assistant body serializes");
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(rendered))
-        .expect("assistant response")
-}
-
-/// Alias for error envelopes (same rendering, distinct call sites).
-pub fn error_response(status: StatusCode, body: &serde_json::Value) -> Response {
-    json_body(status, body)
-}
-
 /// Render a caught `AssistantError` as its code/detail/status
 /// (`except AssistantError as exc → (exc.code, exc.detail,
 /// exc.http_status)`).
@@ -191,88 +175,6 @@ pub fn assistant_error_response(
     let status = StatusCode::from_u16(error.http_status()).unwrap_or(StatusCode::OK);
     json_body(
         status,
-        &serde_json::json!({"error": error.code(), "detail": error.detail()}),
+        serde_json::json!({"error": error.code(), "detail": error.detail()}),
     )
-}
-
-/// Crypto failure split: data problems (`NotConfigured`, i.e. Python
-/// raising `AssistantNotConfigured`) versus operational problems
-/// (`Transport`, i.e. Python letting the error propagate to the generic
-/// 500).
-#[derive(Debug)]
-pub enum SecretError {
-    /// Renders as the wrapped `AssistantError`.
-    Assistant(pidash_types::assistant::errors::AssistantError),
-    /// Answers the generic 500 (never an `AssistantError` in Python).
-    Transport(String),
-}
-
-/// `crypto.encrypt` under the process env config
-/// (`crypto.py:224-225`). The KMS wire refuses: the contract backends
-/// are fernet (or unconfigured), and the workspace carries no AWS
-/// transport for port issues — a configured-KMS call fails closed to
-/// the 500 instead of hanging on a network dial.
-pub fn encrypt_secret(plaintext: &str) -> Result<Vec<u8>, SecretError> {
-    use pidash_services::assistant::crypto;
-    crypto::encrypt(&crypto::CryptoConfig::from_env(), plaintext, &RefusingKms).map_err(|err| {
-        match err {
-            crypto::CryptoError::NotConfigured(error) => SecretError::Assistant(error),
-            crypto::CryptoError::Transport(message) => SecretError::Transport(message.to_string()),
-        }
-    })
-}
-
-/// `crypto.decrypt` under the process env config
-/// (`crypto.py:228-229`); same refusing wire as [`encrypt_secret`].
-pub fn decrypt_secret(token: &[u8]) -> Result<String, SecretError> {
-    use pidash_services::assistant::crypto;
-    crypto::decrypt(&crypto::CryptoConfig::from_env(), token, &RefusingKms).map_err(|err| match err
-    {
-        crypto::CryptoError::NotConfigured(error) => SecretError::Assistant(error),
-        crypto::CryptoError::Transport(message) => SecretError::Transport(message.to_string()),
-    })
-}
-
-/// KMS wire that refuses (`KmsTransport`, `crypto.py:86-96`): only
-/// constructed, never called, unless an operator configures the KMS
-/// backend — in which case the call fails closed to the generic 500
-/// rather than dialing AWS from a handler.
-struct RefusingKms;
-
-impl pidash_services::assistant::crypto::KmsTransport for RefusingKms {
-    fn encrypt(
-        &self,
-        _key_id: &str,
-        _plaintext: &[u8],
-    ) -> Result<Vec<u8>, pidash_services::assistant::crypto::KmsTransportError> {
-        Err(
-            pidash_services::assistant::crypto::KmsTransportError::transport(
-                "no KMS transport in the Rust handlers",
-            ),
-        )
-    }
-
-    fn decrypt(
-        &self,
-        _key_id: &str,
-        _ciphertext: &[u8],
-    ) -> Result<Vec<u8>, pidash_services::assistant::crypto::KmsTransportError> {
-        Err(
-            pidash_services::assistant::crypto::KmsTransportError::transport(
-                "no KMS transport in the Rust handlers",
-            ),
-        )
-    }
-
-    fn re_encrypt(
-        &self,
-        _ciphertext: &[u8],
-        _destination_key_id: &str,
-    ) -> Result<Vec<u8>, pidash_services::assistant::crypto::KmsTransportError> {
-        Err(
-            pidash_services::assistant::crypto::KmsTransportError::transport(
-                "no KMS transport in the Rust handlers",
-            ),
-        )
-    }
 }

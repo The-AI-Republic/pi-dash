@@ -923,7 +923,11 @@ impl ReqwestS3 {
             &target.bucket,
         );
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(60))
+            // botocore's phased timeouts (both default 60s), not a total
+            // deadline: a slow-but-progressing transfer must not fail
+            // (PIDASHCONV-1270).
+            .connect_timeout(Duration::from_secs(60))
+            .read_timeout(Duration::from_secs(60))
             // botocore S3 answers a 301 (wrong-region bucket) by
             // re-signing for the new host and retrying; reqwest would
             // follow the redirect with a stale signature instead, so
@@ -943,18 +947,17 @@ impl ReqwestS3 {
         }
     }
 
-    /// Send one signed request. `operation` is the botocore operation name
-    /// used in the `ClientError` text; `send_md5` mirrors botocore's
-    /// auto-sent `Content-MD5` (PutObject/PutBucketPolicy only).
-    async fn send(
+    /// Sign and dispatch one request, returning the live response with
+    /// its URL (for transport error text). Shared by `send` (which reads
+    /// the full body) and the header-only probe path below.
+    async fn dispatch(
         &self,
-        operation: &'static str,
         method: reqwest::Method,
         path: &str,
         query: &str,
         body: Vec<u8>,
         send_md5: bool,
-    ) -> Result<Vec<u8>, S3CallError> {
+    ) -> Result<(reqwest::Response, String), S3CallError> {
         let (Some(access_key), Some(secret_key)) =
             (self.access_key.as_deref(), self.secret_key.as_deref())
         else {
@@ -1005,6 +1008,23 @@ impl ReqwestS3 {
                 S3CallError::Transport(format!("Could not connect to the endpoint URL: \"{url}\""))
             }
         })?;
+        Ok((response, url))
+    }
+
+    /// Send one signed request and read the full response body.
+    /// `operation` is the botocore operation name used in the
+    /// `ClientError` text; `send_md5` mirrors botocore's auto-sent
+    /// `Content-MD5` (PutObject/PutBucketPolicy only).
+    async fn send(
+        &self,
+        operation: &'static str,
+        method: reqwest::Method,
+        path: &str,
+        query: &str,
+        body: Vec<u8>,
+        send_md5: bool,
+    ) -> Result<Vec<u8>, S3CallError> {
+        let (response, url) = self.dispatch(method, path, query, body, send_md5).await?;
         let status = response.status();
         if status.is_success() {
             return response
@@ -1016,6 +1036,32 @@ impl ReqwestS3 {
                         "Could not connect to the endpoint URL: \"{url}\" ({error})"
                     ))
                 });
+        }
+        let body = response.bytes().await.unwrap_or_default();
+        Err(S3CallError::Service(
+            self.service_error(operation, status, &body),
+        ))
+    }
+
+    /// Send one signed request and decide success by the status alone,
+    /// dropping the response without reading the body: Django's
+    /// `get_object` probe returns once the headers arrive (the
+    /// `StreamingBody` is never consumed), so a very large first object
+    /// must not be buffered or awaited (PIDASHCONV-1270). Failures still
+    /// read the (small) error document for `Code`/`Message`.
+    async fn send_status_only(
+        &self,
+        operation: &'static str,
+        method: reqwest::Method,
+        path: &str,
+        query: &str,
+    ) -> Result<(), S3CallError> {
+        let (response, _) = self
+            .dispatch(method, path, query, Vec::new(), false)
+            .await?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
         }
         let body = response.bytes().await.unwrap_or_default();
         Err(S3CallError::Service(
@@ -1117,16 +1163,8 @@ impl S3Ops for ReqwestS3 {
 
     async fn get_object(&self, key: &str) -> Result<(), S3CallError> {
         let path = self.object_path(key);
-        self.send(
-            "GetObject",
-            reqwest::Method::GET,
-            &path,
-            "",
-            Vec::new(),
-            false,
-        )
-        .await
-        .map(|_| ())
+        self.send_status_only("GetObject", reqwest::Method::GET, &path, "")
+            .await
     }
 
     async fn put_object(&self, key: &str, body: &[u8]) -> Result<(), S3CallError> {
