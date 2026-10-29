@@ -818,9 +818,48 @@ fn agent_activity_kwargs(
     kwargs
 }
 
+/// One relate `INSERT` attempt (`relations.py:196-207`): `Ok(true)`
+/// when this call created the row, `Ok(false)` when a concurrent
+/// writer holds the pair (Python's `IntegrityError` catch re-reads;
+/// both callers map a lost race the same way they map a lost
+/// `ON CONFLICT` race).
+async fn insert_relation_row(
+    pool: &PgPool,
+    actor_id: &Uuid,
+    source: &SourceIssue,
+    issue_id: Uuid,
+    related_id: Uuid,
+    stored: &str,
+) -> Result<bool, Error> {
+    // `objects.create()` in `transaction.atomic()` (a single
+    // statement is atomic anyway): the explicit
+    // `created_by`/`updated_by` pass through `BaseModel.save`,
+    // whose adding branch keeps `created_by` but NULLS
+    // `updated_by` (REL-5).
+    let row = relation_domain::RelationRow {
+        id: Uuid::new_v4(),
+        created_at: now_utc(),
+        updated_at: now_utc(),
+        created_by: Some(*actor_id),
+        updated_by: None,
+        project_id: source.project_id,
+        workspace_id: source.workspace_id,
+        issue_id,
+        related_issue_id: related_id,
+        relation_type: stored,
+    };
+    match relation_domain::relate_row_or_nothing(pool, &row).await {
+        Ok(created) => Ok(created),
+        Err(error) if is_unique_violation(&error) => Ok(false),
+        Err(error) => Err(db_error(error, "relate-insert")),
+    }
+}
+
 /// `relate` (`relations.py:180-232`): record "source \<type\> each
 /// target", idempotent. Returns the response map minus `relations` (the
-/// caller appends the grouped read).
+/// caller appends the grouped read). With `pair_exact`, creation matches
+/// the exact oriented pair (the MCP `get_or_create`) instead of deduping
+/// across orientations.
 async fn relate_op(
     deps: &Deps,
     source: &SourceIssue,
@@ -828,6 +867,7 @@ async fn relate_op(
     targets: Vec<ResolvedIssue>,
     actor_id: &Uuid,
     emit_activity: bool,
+    pair_exact: bool,
 ) -> Result<Map<String, Value>, Error> {
     let pool = &deps.pool;
     let targets = check_targets(source, targets)?;
@@ -837,34 +877,34 @@ async fn relate_op(
     for target in &targets {
         let (issue_id, related_id, stored) = stored_edge(source.id, relation_type, target.id);
         let existing = fetch_pair_rows(pool, &source.id, &target.id).await?;
+        if pair_exact {
+            // MCP `get_or_create(issue, related_issue)`
+            // (`pi_dash_cloud/mcp/tools.py:664-675`): the lookup names
+            // the exact oriented pair and no type, so a live row on
+            // this orientation — any stored type — means "skipped"
+            // (reported under `unchanged`), and cross-orientation rows
+            // are invisible. The stored edge is the same triple the
+            // default path writes (MCP's swap set and canonical type
+            // match [`stored_edge`).
+            let oriented_live = existing
+                .iter()
+                .any(|row| row.issue_id == issue_id && row.related_issue_id == related_id);
+            let created_now = !oriented_live
+                && insert_relation_row(pool, actor_id, source, issue_id, related_id, &stored)
+                    .await?;
+            if created_now {
+                created.push(target);
+            } else {
+                unchanged.push(target.identifier());
+            }
+            continue;
+        }
         if existing.is_empty() {
-            // `objects.create()` in `transaction.atomic()` (a single
-            // statement is atomic anyway): the explicit
-            // `created_by`/`updated_by` pass through `BaseModel.save`,
-            // whose adding branch keeps `created_by` but NULLS
-            // `updated_by` (REL-5). A concurrent writer's unique
-            // violation re-reads below (Python's `IntegrityError`
-            // catch does the same).
-            let row = relation_domain::RelationRow {
-                id: Uuid::new_v4(),
-                created_at: now_utc(),
-                updated_at: now_utc(),
-                created_by: Some(*actor_id),
-                updated_by: None,
-                project_id: source.project_id,
-                workspace_id: source.workspace_id,
-                issue_id,
-                related_issue_id: related_id,
-                relation_type: &stored,
-            };
-            match relation_domain::relate_row_or_nothing(pool, &row).await {
-                Ok(true) => {
-                    created.push(target);
-                    continue;
-                }
-                Ok(false) => {}
-                Err(error) if is_unique_violation(&error) => {}
-                Err(error) => return Err(db_error(error, "relate-insert")),
+            // A concurrent writer's unique violation re-reads below
+            // (Python's `IntegrityError` catch does the same).
+            if insert_relation_row(pool, actor_id, source, issue_id, related_id, &stored).await? {
+                created.push(target);
+                continue;
             }
         }
         let existing = if existing.is_empty() {
@@ -947,7 +987,10 @@ async fn relate_op(
 
 /// `unrelate` (`relations.py:235-266`): remove "source \<type\> each
 /// target", idempotent — only exactly that type is removed. Returns the
-/// response map minus `relations`.
+/// response map minus `relations`. With `newest_only`, only the first
+/// match is removed: [`fetch_pair_rows`] returns newest-first (the
+/// model's `-created_at` ordering), so that is the row the MCP
+/// queryset's `.first()` deletes.
 async fn unrelate_op(
     deps: &Deps,
     source: &SourceIssue,
@@ -955,6 +998,7 @@ async fn unrelate_op(
     targets: Vec<ResolvedIssue>,
     actor_id: &Uuid,
     emit_activity: bool,
+    newest_only: bool,
 ) -> Result<Map<String, Value>, Error> {
     let pool = &deps.pool;
     let targets = check_targets(source, targets)?;
@@ -962,7 +1006,7 @@ async fn unrelate_op(
     let mut not_related: Vec<String> = Vec::new();
     for target in &targets {
         let rows = fetch_pair_rows(pool, &source.id, &target.id).await?;
-        let matching: Vec<&PairRow> = rows
+        let mut matching: Vec<&PairRow> = rows
             .iter()
             .filter(|row| type_from(row, &source.id) == relation_type)
             .collect();
@@ -972,6 +1016,11 @@ async fn unrelate_op(
         }
         // `row.delete()`: `deleted_at = now`, full `save()` (`updated_at`
         // re-stamped, `updated_by` = actor per REL-5), then the sweep.
+        // The filter keeps `fetch_pair_rows` order (newest first), so
+        // truncating to one keeps the MCP `.first()` row.
+        if newest_only {
+            matching.truncate(1);
+        }
         for row in matching {
             relation_domain::soft_delete_relation_row(
                 pool,
@@ -1056,13 +1105,17 @@ async fn unrelate_op(
 ///
 /// The caller already ran auth, the gate and body negotiation, and
 /// pre-fetched `write.source` before parsing the body, so a bogus issue
-/// 404s before a malformed body 400s (`:3165-3167`).
+/// 404s before a malformed body 400s (`:3165-3167`). `pair_exact` is
+/// the relate leg's option only and `newest_only` the unrelate leg's;
+/// each leg ignores the other's.
 async fn relate_shared(
     deps: &Deps,
     ctx: &WriteCtx,
     write: &RelationWrite<'_>,
     emit_activity: bool,
     is_relate: bool,
+    newest_only: bool,
+    pair_exact: bool,
 ) -> Result<Outcome, Error> {
     let pool = &deps.pool;
     let slug = write.slug;
@@ -1102,6 +1155,7 @@ async fn relate_shared(
             targets,
             &actor_id,
             emit_activity,
+            pair_exact,
         )
         .await?
     } else {
@@ -1112,6 +1166,7 @@ async fn relate_shared(
             targets,
             &actor_id,
             emit_activity,
+            newest_only,
         )
         .await?
     };
@@ -1144,6 +1199,14 @@ pub struct RelateOptions {
     /// callers that enqueue their own shaped activity (the MCP tools)
     /// pass `false`.
     pub emit_activity: bool,
+    /// Match and create the exact oriented `(source, target,
+    /// stored-type)` row without the cross-orientation dedupe (design
+    /// D6: the v1 agent endpoint classifies the pair in either direction
+    /// from the source viewpoint — `orchestration/relations.py:193-218`
+    /// — while the MCP tool `get_or_create`s the exact oriented pair —
+    /// `pi_dash_cloud/mcp/tools.py:664-675`). The v1 handler passes
+    /// `false`; MCP passes `true`.
+    pub pair_exact: bool,
 }
 
 /// Per-caller options for [`unrelate`].
@@ -1153,6 +1216,16 @@ pub struct UnrelateOptions {
     /// [`RelateOptions`]). The related-objects sweep enqueues always
     /// run: they are work, not activity.
     pub emit_activity: bool,
+    /// Delete only the newest matching row per target instead of every
+    /// matching row (design D6: the v1 agent endpoint deletes all —
+    /// `orchestration/relations.py:251-252` via
+    /// `views/issue.py:3250-3253` — while the MCP tool deletes the
+    /// queryset `.first()` only — `pi_dash_cloud/mcp/tools.py:729-732`
+    /// — under the same `Meta.ordering` (`-created_at`) that
+    /// [`fetch_pair_rows`] uses, so the first match is the newest row
+    /// on both sides). The v1 handler passes `false`; MCP passes
+    /// `true`.
+    pub newest_only: bool,
 }
 
 /// `POST .../relations/relate/` (`views/issue.py:3232-3235`): record
@@ -1164,7 +1237,16 @@ pub async fn relate(
     write: &RelationWrite<'_>,
     options: RelateOptions,
 ) -> Result<Outcome, Error> {
-    relate_shared(deps, ctx, write, options.emit_activity, true).await
+    relate_shared(
+        deps,
+        ctx,
+        write,
+        options.emit_activity,
+        true,
+        false,
+        options.pair_exact,
+    )
+    .await
 }
 
 /// `POST .../relations/unrelate/` (`views/issue.py:3250-3253`): remove
@@ -1176,7 +1258,16 @@ pub async fn unrelate(
     write: &RelationWrite<'_>,
     options: UnrelateOptions,
 ) -> Result<Outcome, Error> {
-    relate_shared(deps, ctx, write, options.emit_activity, false).await
+    relate_shared(
+        deps,
+        ctx,
+        write,
+        options.emit_activity,
+        false,
+        options.newest_only,
+        false,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -1519,6 +1610,519 @@ mod tests {
                 "epoch",
                 "notification",
             ]
+        );
+    }
+
+    // --- Live-DB unrelate selection tests (PIDASHCONV-1653) ---
+
+    use crate::domain::activity::TaskEnqueueHook;
+    use crate::domain::transition::IssueTransitionHook;
+    use crate::orchestration::entries::{FireOutcome, FireRequest};
+    use std::sync::{Arc, Mutex};
+
+    type EnqueueCall = (String, Vec<Value>, Map<String, Value>);
+
+    struct RecordingEnqueue {
+        calls: Mutex<Vec<EnqueueCall>>,
+    }
+
+    impl TaskEnqueueHook for RecordingEnqueue {
+        fn enqueue_task(
+            &self,
+            task: &str,
+            args: Vec<Value>,
+            kwargs: Map<String, Value>,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+            self.calls
+                .lock()
+                .expect("calls lock")
+                .push((task.to_owned(), args, kwargs));
+            Box::pin(async move {})
+        }
+    }
+
+    struct NoopTransition;
+
+    impl IssueTransitionHook for NoopTransition {
+        fn enqueue_completion_comment(
+            &self,
+            _issue_id: Uuid,
+            _prev_state_id: Option<Uuid>,
+            _current_state_id: Option<Uuid>,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+            Box::pin(async move {})
+        }
+
+        fn fire(
+            &self,
+            _actor_id: Uuid,
+            _request: FireRequest,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<FireOutcome, ()>> + Send + '_>>
+        {
+            Box::pin(async move { Ok(FireOutcome::NoTransition) })
+        }
+    }
+
+    async fn live_pool() -> Option<sqlx::PgPool> {
+        let url = match std::env::var("DATABASE_URL") {
+            Ok(url) => url,
+            Err(_) => {
+                eprintln!("skipping live-db test: DATABASE_URL is not set");
+                return None;
+            }
+        };
+        Some(
+            sqlx::postgres::PgPoolOptions::new()
+                .max_connections(2)
+                .connect(&url)
+                .await
+                .expect("connect to scratch DATABASE_URL"),
+        )
+    }
+
+    struct LiveScope {
+        actor: Uuid,
+        workspace_id: Uuid,
+        project_id: Uuid,
+        project_identifier: String,
+        source_id: Uuid,
+        source_seq: i32,
+        target_id: Uuid,
+        target_seq: i32,
+    }
+
+    impl LiveScope {
+        fn source(&self) -> SourceIssue {
+            SourceIssue {
+                id: self.source_id,
+                project_id: self.project_id,
+                workspace_id: self.workspace_id,
+                project_identifier: self.project_identifier.clone(),
+                sequence_id: self.source_seq,
+            }
+        }
+
+        fn targets(&self) -> Vec<ResolvedIssue> {
+            vec![ResolvedIssue {
+                id: self.target_id,
+                workspace_id: self.workspace_id,
+                project_identifier: self.project_identifier.clone(),
+                sequence_id: self.target_seq,
+            }]
+        }
+
+        fn target_identifier(&self) -> String {
+            format!("{}-{}", self.project_identifier, self.target_seq)
+        }
+
+        fn target_source(&self) -> SourceIssue {
+            SourceIssue {
+                id: self.target_id,
+                project_id: self.project_id,
+                workspace_id: self.workspace_id,
+                project_identifier: self.project_identifier.clone(),
+                sequence_id: self.target_seq,
+            }
+        }
+
+        fn source_targets(&self) -> Vec<ResolvedIssue> {
+            vec![ResolvedIssue {
+                id: self.source_id,
+                workspace_id: self.workspace_id,
+                project_identifier: self.project_identifier.clone(),
+                sequence_id: self.source_seq,
+            }]
+        }
+
+        fn source_identifier(&self) -> String {
+            format!("{}-{}", self.project_identifier, self.source_seq)
+        }
+    }
+
+    async fn seed_scope(pool: &sqlx::PgPool, tag: &str) -> LiveScope {
+        let actor = Uuid::new_v4();
+        let workspace_id = Uuid::new_v4();
+        let project_id = Uuid::new_v4();
+        let state_id = Uuid::new_v4();
+        let source_id = Uuid::new_v4();
+        let target_id = Uuid::new_v4();
+        let username = format!("ur-{tag}-{}", actor.simple());
+        sqlx::query(
+            "INSERT INTO users (id, password, username, email, first_name, last_name, avatar, \
+             date_joined, created_at, updated_at, last_location, created_location, is_superuser, \
+             is_managed, is_password_expired, is_active, is_staff, is_email_verified, \
+             is_password_autoset, token, user_timezone, last_login_ip, last_logout_ip, \
+             last_login_medium, last_login_uagent, is_bot, display_name, is_email_valid, \
+             is_password_reset_required) VALUES ($1, '!', $2, $3, 'CT', 'User', '', now(), now(), \
+             now(), '', '', false, false, false, true, false, true, false, $4, 'UTC', '', '', '', \
+             '', false, $2, true, false)",
+        )
+        .bind(actor)
+        .bind(username.clone())
+        .bind(format!("{username}@example.test"))
+        .bind("t".repeat(64))
+        .execute(pool)
+        .await
+        .expect("seed user");
+        sqlx::query(
+            "INSERT INTO workspaces (id, created_at, updated_at, name, slug, timezone, \
+             background_color, owner_id) VALUES ($1, now(), now(), 'ur ws', $2, 'UTC', '#ffffff', \
+             $3)",
+        )
+        .bind(workspace_id)
+        .bind(format!("ur-{tag}-{}", workspace_id.simple()))
+        .bind(actor)
+        .execute(pool)
+        .await
+        .expect("seed workspace");
+        let project_identifier = format!("U{:07X}", (project_id.as_u128() & 0x0fff_ffff) as u32);
+        sqlx::query(
+            "INSERT INTO projects (id, name, description, network, identifier, workspace_id, \
+             created_by_id, cycle_view, module_view, issue_views_view, page_view, intake_view, \
+             archive_in, close_in, logo_props, is_time_tracking_enabled, is_issue_type_enabled, \
+             guest_view_all_features, timezone, members_can_edit_states, repo_url, base_branch, \
+             agent_default_interval_seconds, agent_default_max_ticks, agent_ticking_enabled, \
+             is_default, agent_review_default_interval_seconds, default_agent_executor, \
+             agent_test_default_interval_seconds, created_at, updated_at) VALUES ($1, \
+             $2, '', 0, $3, $4, $5, true, true, true, true, false, 0, 0, '{}', true, \
+             true, false, 'UTC', false, '', '', 0, 0, false, false, 0, '', 0, now(), now())",
+        )
+        .bind(project_id)
+        .bind(format!("ur-project-{project_identifier}"))
+        .bind(project_identifier.clone())
+        .bind(workspace_id)
+        .bind(actor)
+        .execute(pool)
+        .await
+        .expect("seed project");
+        sqlx::query(
+            "INSERT INTO states (id, created_at, updated_at, name, description, color, slug, \
+             project_id, workspace_id, sequence, \"group\", \"default\", is_triage) VALUES \
+             ($1, now(), now(), 'Backlog', '', '#ff0000', $2, $3, $4, 100.0, 'backlog', true, false)",
+        )
+        .bind(state_id)
+        .bind(format!("ur-backlog-{state_id}"))
+        .bind(project_id)
+        .bind(workspace_id)
+        .execute(pool)
+        .await
+        .expect("seed state");
+        for (id, name, sequence_id) in [(source_id, "ur source", 11), (target_id, "ur target", 12)]
+        {
+            sqlx::query(
+                "INSERT INTO issues (id, created_at, updated_at, project_id, workspace_id, \
+                 state_id, name, description_json, description_html, sequence_id, sort_order, \
+                 priority, complexity_score, is_draft, git_work_branch, workpad) VALUES ($1, \
+                 now(), now(), $2, $3, $4, $5, '{}', '<p>ur</p>', $6, 10000.0, 'none', 0, false, \
+                 '', '')",
+            )
+            .bind(id)
+            .bind(project_id)
+            .bind(workspace_id)
+            .bind(state_id)
+            .bind(name)
+            .bind(sequence_id)
+            .execute(pool)
+            .await
+            .expect("seed issue");
+        }
+        LiveScope {
+            actor,
+            workspace_id,
+            project_id,
+            project_identifier,
+            source_id,
+            source_seq: 11,
+            target_id,
+            target_seq: 12,
+        }
+    }
+
+    async fn insert_relation(
+        pool: &sqlx::PgPool,
+        scope: &LiveScope,
+        issue_id: Uuid,
+        related_id: Uuid,
+        created_at: chrono::DateTime<Utc>,
+    ) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO issue_relations (id, created_at, updated_at, created_by_id, \
+             updated_by_id, deleted_at, project_id, workspace_id, issue_id, related_issue_id, \
+             relation_type) VALUES ($1, $2, $2, $3, NULL, NULL, $4, $5, $6, $7, 'duplicate')",
+        )
+        .bind(id)
+        .bind(created_at)
+        .bind(scope.actor)
+        .bind(scope.project_id)
+        .bind(scope.workspace_id)
+        .bind(issue_id)
+        .bind(related_id)
+        .execute(pool)
+        .await
+        .expect("insert relation");
+        id
+    }
+
+    fn op_deps(pool: &sqlx::PgPool) -> (Deps, Arc<RecordingEnqueue>) {
+        let enqueue = Arc::new(RecordingEnqueue {
+            calls: Mutex::new(Vec::new()),
+        });
+        let deps = Deps {
+            pool: pool.clone(),
+            orm: sea_orm::SqlxPostgresConnector::from_sqlx_postgres_pool(pool.clone()),
+            transition: Arc::new(NoopTransition),
+            enqueue: enqueue.clone(),
+        };
+        (deps, enqueue)
+    }
+
+    async fn deleted_at_of(pool: &sqlx::PgPool, id: Uuid) -> Option<chrono::DateTime<Utc>> {
+        let row: (Option<chrono::DateTime<Utc>>,) =
+            sqlx::query_as("SELECT deleted_at FROM issue_relations WHERE id = $1")
+                .bind(id)
+                .fetch_one(pool)
+                .await
+                .expect("read relation");
+        row.0
+    }
+
+    fn sweep_pks(calls: &[EnqueueCall]) -> Vec<String> {
+        calls
+            .iter()
+            .filter(|(task, _, _)| task == SOFT_DELETE_TASK)
+            .map(|(_, args, _)| {
+                assert_eq!(args.len(), 3);
+                assert_eq!(args[0], Value::String("db".to_owned()));
+                assert_eq!(args[1], Value::String("issuerelation".to_owned()));
+                args[2].as_str().expect("pk str").to_owned()
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn live_newest_only_deletes_newest_of_symmetric_pair() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let scope = seed_scope(&pool, "newest").await;
+        let now = Utc::now();
+        // The MCP suite's symmetric-duplicate pair: the older orientation
+        // first, the newer orientation second.
+        let older = insert_relation(
+            &pool,
+            &scope,
+            scope.source_id,
+            scope.target_id,
+            now - chrono::Duration::hours(1),
+        )
+        .await;
+        let newer = insert_relation(&pool, &scope, scope.target_id, scope.source_id, now).await;
+        let (deps, enqueue) = op_deps(&pool);
+        let out = unrelate_op(
+            &deps,
+            &scope.source(),
+            "duplicate",
+            scope.targets(),
+            &scope.actor,
+            false,
+            true,
+        )
+        .await
+        .expect("unrelate newest-only");
+        assert_eq!(
+            out.get("removed"),
+            Some(&Value::Array(vec![Value::String(
+                scope.target_identifier()
+            )]))
+        );
+        assert_eq!(out.get("not_related"), Some(&Value::Array(vec![])));
+        // Exactly the newest row is gone; the older orientation survives.
+        assert!(deleted_at_of(&pool, newer).await.is_some());
+        assert!(deleted_at_of(&pool, older).await.is_none());
+        let live: (Uuid, Uuid) = sqlx::query_as(
+            "SELECT issue_id, related_issue_id FROM issue_relations \
+             WHERE id = $1 AND deleted_at IS NULL",
+        )
+        .bind(older)
+        .fetch_one(&pool)
+        .await
+        .expect("older row live");
+        assert_eq!((live.0, live.1), (scope.source_id, scope.target_id));
+        // One sweep, for the deleted row; no activity (`emit_activity` off).
+        let calls = enqueue.calls.lock().expect("calls lock");
+        assert_eq!(sweep_pks(&calls), vec![newer.to_string()]);
+        assert_eq!(calls.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn live_default_deletes_all_matching_rows() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let scope = seed_scope(&pool, "all").await;
+        let now = Utc::now();
+        let first = insert_relation(
+            &pool,
+            &scope,
+            scope.source_id,
+            scope.target_id,
+            now - chrono::Duration::hours(1),
+        )
+        .await;
+        let second = insert_relation(&pool, &scope, scope.target_id, scope.source_id, now).await;
+        let (deps, enqueue) = op_deps(&pool);
+        let out = unrelate_op(
+            &deps,
+            &scope.source(),
+            "duplicate",
+            scope.targets(),
+            &scope.actor,
+            false,
+            false,
+        )
+        .await
+        .expect("unrelate default");
+        assert_eq!(
+            out.get("removed"),
+            Some(&Value::Array(vec![Value::String(
+                scope.target_identifier()
+            )]))
+        );
+        assert_eq!(out.get("not_related"), Some(&Value::Array(vec![])));
+        assert!(deleted_at_of(&pool, first).await.is_some());
+        assert!(deleted_at_of(&pool, second).await.is_some());
+        // One sweep per deleted row (newest first); no activity.
+        let calls = enqueue.calls.lock().expect("calls lock");
+        assert_eq!(
+            sweep_pks(&calls),
+            vec![second.to_string(), first.to_string()]
+        );
+        assert_eq!(calls.len(), 2);
+    }
+
+    async fn live_pair_rows(
+        pool: &sqlx::PgPool,
+        a_id: Uuid,
+        b_id: Uuid,
+    ) -> Vec<(Uuid, Uuid, String)> {
+        sqlx::query_as(
+            "SELECT issue_id, related_issue_id, relation_type FROM issue_relations \
+             WHERE deleted_at IS NULL \
+               AND ((issue_id = $1 AND related_issue_id = $2) \
+                 OR (issue_id = $2 AND related_issue_id = $1)) \
+             ORDER BY created_at ASC",
+        )
+        .bind(a_id)
+        .bind(b_id)
+        .fetch_all(pool)
+        .await
+        .expect("read pair rows")
+    }
+
+    #[tokio::test]
+    async fn live_pair_exact_double_relate_stores_both_orientations() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let scope = seed_scope(&pool, "exact").await;
+        let (deps, _enqueue) = op_deps(&pool);
+        // The MCP suite's double relate: M9A-1→M9A-3 then M9A-3→M9A-1.
+        let first = relate_op(
+            &deps,
+            &scope.source(),
+            "duplicate",
+            scope.targets(),
+            &scope.actor,
+            false,
+            true,
+        )
+        .await
+        .expect("relate exact");
+        assert_eq!(
+            first.get("created"),
+            Some(&Value::Array(vec![Value::String(
+                scope.target_identifier()
+            )]))
+        );
+        let second = relate_op(
+            &deps,
+            &scope.target_source(),
+            "duplicate",
+            scope.source_targets(),
+            &scope.actor,
+            false,
+            true,
+        )
+        .await
+        .expect("relate exact reversed");
+        // The reversed orientation creates instead of deduping.
+        assert_eq!(
+            second.get("created"),
+            Some(&Value::Array(vec![Value::String(
+                scope.source_identifier()
+            )]))
+        );
+        assert_eq!(second.get("unchanged"), Some(&Value::Array(vec![])));
+        let rows = live_pair_rows(&pool, scope.source_id, scope.target_id).await;
+        assert_eq!(
+            rows,
+            vec![
+                (scope.source_id, scope.target_id, "duplicate".to_owned()),
+                (scope.target_id, scope.source_id, "duplicate".to_owned()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn live_default_double_relate_dedupes_across_orientations() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let scope = seed_scope(&pool, "dedupe").await;
+        let (deps, _enqueue) = op_deps(&pool);
+        let first = relate_op(
+            &deps,
+            &scope.source(),
+            "duplicate",
+            scope.targets(),
+            &scope.actor,
+            false,
+            false,
+        )
+        .await
+        .expect("relate default");
+        assert_eq!(
+            first.get("created"),
+            Some(&Value::Array(vec![Value::String(
+                scope.target_identifier()
+            )]))
+        );
+        let second = relate_op(
+            &deps,
+            &scope.target_source(),
+            "duplicate",
+            scope.source_targets(),
+            &scope.actor,
+            false,
+            false,
+        )
+        .await
+        .expect("relate default reversed");
+        // The v1 default reads the existing row from the other end and
+        // reports unchanged; nothing is created.
+        assert_eq!(second.get("created"), Some(&Value::Array(vec![])));
+        assert_eq!(
+            second.get("unchanged"),
+            Some(&Value::Array(vec![Value::String(
+                scope.source_identifier()
+            )]))
+        );
+        assert_eq!(second.get("conflicts"), Some(&Value::Array(vec![])));
+        let rows = live_pair_rows(&pool, scope.source_id, scope.target_id).await;
+        assert_eq!(
+            rows,
+            vec![(scope.source_id, scope.target_id, "duplicate".to_owned())]
         );
     }
 }
