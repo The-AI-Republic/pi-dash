@@ -21,7 +21,7 @@ import {
 import { sessionBrowserCookies, signInSessionRetry } from "../helpers/api";
 import { bridgeParityAssetBucket } from "../helpers/asset-bucket.js";
 import { calendarDayLabel, isoDayOffset, localTodayISO } from "../helpers/calendar-dates.js";
-import { isCloudNewEdition } from "../helpers/parity-env.js";
+import { isCloudNewEdition, parityApiUrl } from "../helpers/parity-env.js";
 import { descriptionAfterHeading } from "./modal-copy.js";
 import type {
   AdminAbsenceFacts,
@@ -43277,8 +43277,10 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async spaceOpenLanding(): Promise<void> {
-    await this.page.goto("/spaces/", { waitUntil: "domcontentloaded" });
-    await this.page.waitForLoadState("domcontentloaded");
+    // The hardened auth opener serves the same destination with settled
+    // waits and boot retry; a bare goto leaves readers racing the boot
+    // loader under load (SPC-065).
+    await this.spaceAuthOpenLanding();
   }
 
   async spaceOpenLegacyLink(workspaceSlug: string, projectId: string): Promise<void> {
@@ -46530,22 +46532,26 @@ export class WebNewDriver implements ParityDriver {
   /**
    * Fulfill the publish-settings fetch with a mutated payload (fetched live
    * first, so only the named branch changes), open the board, and read the
-   * navbar. The route is always removed before returning.
+   * navbar. The route is always removed before returning. The payload is
+   * prefetched in Node: fetching upstream inside the handler hangs the
+   * settings read behind the browser's own loaded network stack (SPC-010).
    */
   private async spaceNavbarWithMutatedSettings(
     anchor: string,
     mutate: (payload: Record<string, unknown>) => void
   ): Promise<SpaceChromeNavbarIdentity> {
+    const upstream = await fetch(`${parityApiUrl(process.env)}/api/public/anchor/${anchor}/settings/`);
+    if (!upstream.ok) throw new Error(`[parity] settings prefetch failed: ${upstream.status}`);
+    const payload = (await upstream.json()) as Record<string, unknown>;
+    mutate(payload);
+    const body = JSON.stringify(payload);
     const pattern = "**/api/public/anchor/*/settings/";
     await this.page.route(pattern, async (route) => {
       if (route.request().method() !== "GET") {
         await route.continue();
         return;
       }
-      const upstream = await route.fetch();
-      const payload = (await upstream.json()) as Record<string, unknown>;
-      mutate(payload);
-      await route.fulfill({ response: upstream, body: JSON.stringify(payload) });
+      await route.fulfill({ status: 200, contentType: "application/json", body });
     });
     try {
       await this.spaceOpenBoard(anchor);
