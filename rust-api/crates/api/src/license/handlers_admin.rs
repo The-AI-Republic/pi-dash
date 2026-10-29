@@ -72,9 +72,7 @@ use axum::routing::{delete, get, post};
 use axum::Router;
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
-use hmac::Hmac;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use std::net::SocketAddr;
 use uuid::Uuid;
@@ -82,6 +80,8 @@ use uuid::Uuid;
 use pidash_auth::csrf as csrf_kernel;
 use pidash_auth::session as session_kernel;
 use pidash_auth::signing::{Signer, SESSION_SIGNING_SALT};
+use pidash_services::domain::identity;
+use pidash_services::read::{self, UserShape};
 use pidash_types::license::serializers_core::{
     instance_admin_me_to_representation, instance_admin_to_representation, AdminMeRow,
     InstanceAdminRow, LiteUserRow,
@@ -93,14 +93,19 @@ use super::form_body::{
 };
 use super::handlers_auth_forms as forms;
 use super::{file_asset_url, AssetUrl};
+use crate::auth_session::multipart::parse_fields;
 use crate::auth_session::render::render_csrf_failure;
 use crate::edge;
+use crate::middleware::body_limit::read_request_bytes;
 use crate::middleware::SessionHandle;
 use crate::paginator::py_float_str;
 use crate::serializer::render_datetime_in;
 use crate::state::AppState;
 use crate::uuid_path::is_canonical_uuid;
-use crate::v1_cycles_modules::json_cpython::{self, JsonFail};
+use crate::v1_cycles_modules::json::{self, JsonFail};
+use pidash_compat::response::{
+    json_response as json_response_text, json_value as json_response, redirect_found_cookies,
+};
 
 /// Register the seven owned endpoints. Cutover granularity is the
 /// route + method (pilot `owned()` pattern): sibling methods on these
@@ -434,52 +439,12 @@ fn avatar_url(
     )
 }
 
-/// Full `users` projection shared by `me`, `session`, and `user_detail`.
-/// Every user column rides a LEFT JOIN somewhere, so all read `Option`
-/// and the caller decides what a missing row means. `sqlx::FromRow` maps
-/// by column name (wide selects exceed the 16-tuple `FromRow` impls), so
-/// the SELECT aliases below must match these field names exactly.
-#[derive(Debug, Clone, sqlx::FromRow)]
-struct UserShape {
-    id: Option<Uuid>,
-    first_name: Option<String>,
-    last_name: Option<String>,
-    avatar: Option<String>,
-    avatar_asset_id: Option<Uuid>,
-    avatar_asset_row: Option<Uuid>,
-    avatar_asset_entity: Option<String>,
-    avatar_asset_workspace: Option<Uuid>,
-    avatar_asset_project: Option<Uuid>,
-    avatar_asset_issue: Option<Uuid>,
-    avatar_asset_workspace_slug: Option<String>,
-    cover_image: Option<String>,
-    date_joined: Option<DateTime<Utc>>,
-    display_name: Option<String>,
-    email: Option<String>,
-    is_active: Option<bool>,
-    is_bot: Option<bool>,
-    is_email_verified: Option<bool>,
-    user_timezone: Option<String>,
-    username: Option<String>,
-    is_password_autoset: Option<bool>,
-    last_login_medium: Option<String>,
-}
-
-const USER_SHAPE_SELECT: &str = "u.id AS id, u.first_name AS first_name, u.last_name AS last_name, u.avatar AS avatar, u.avatar_asset_id AS avatar_asset_id, fa.id AS avatar_asset_row, fa.entity_type AS avatar_asset_entity, fa.workspace_id AS avatar_asset_workspace, fa.project_id AS avatar_asset_project, fa.issue_id AS avatar_asset_issue, w.slug AS avatar_asset_workspace_slug, u.cover_image AS cover_image, u.date_joined AS date_joined, u.display_name AS display_name, u.email AS email, u.is_active AS is_active, u.is_bot AS is_bot, u.is_email_verified AS is_email_verified, u.user_timezone AS user_timezone, u.username AS username, u.is_password_autoset AS is_password_autoset, u.last_login_medium AS last_login_medium";
-
+/// Fetch one user with its avatar-asset joins via the public read
+/// service.
 async fn fetch_user(pool: &PgPool, user_id: &Uuid) -> Result<Option<UserShape>, Denial> {
-    // Both joins are deliberately unscoped: the forward-FK descriptor reads
-    // through `_base_manager`, so soft-deleted assets/workspaces resolve.
-    let row: Option<UserShape> = sqlx::query_as(&format!(
-        "SELECT {USER_SHAPE_SELECT} FROM users u LEFT JOIN file_assets fa ON fa.id = u.avatar_asset_id LEFT JOIN workspaces w ON w.id = fa.workspace_id WHERE u.id = $1"
-    ))
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    // A present row always carries its PK; its absence means the caller
-    // joined a null FK (`user_detail: null`, `user: null`).
-    Ok(row.filter(|shape| shape.id.is_some()))
+    read::fetch_user(pool, user_id)
+        .await
+        .map_err(|_| Denial::ServerError)
 }
 
 /// Render a `UserShape` through `InstanceAdminMeSerializer`
@@ -637,10 +602,11 @@ fn render_admin(
 /// `form_body::select_body_kind`); unmatched types are 415. On the JSON
 /// branch the body must be an object (`None.get("email")` /
 /// `[1].get("email")` raise `AttributeError` out of the view → generic
-/// 500); otherwise it parses through the shared CPython layer
-/// (`json_cpython`, PIDASHCONV-1128), so malformed JSON, strict constants,
-/// int-limit and codec errors carry CPython's exact text as `ParseError`
-/// 400 `{"detail"}`; past the depth cap is Django's JSON 500.
+/// 500); otherwise it parses through the shared JSON layer
+/// (`json`, PIDASHCONV-1128), so malformed JSON is a `ParseError` 400
+/// with serde's text (tier 3 since PIDASHCONV-1555; the strict-constant,
+/// int-limit and depth-cap texts are gone); codec errors keep CPython's
+/// text; depth failures are 400s, never Django's JSON 500.
 fn parse_json_body(
     headers: &HeaderMap,
     body: &[u8],
@@ -654,9 +620,9 @@ fn parse_json_body(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     match select_body_kind(content_type) {
-        Some(BodyKind::Json) => match json_cpython::parse_request_bytes(body) {
+        Some(BodyKind::Json) => match json::parse_request_bytes(body) {
             Ok(jval) => {
-                let data = json_cpython::to_serde_publish(&jval);
+                let data = json::to_serde_publish(&jval);
                 if data.is_object() {
                     Ok(ParsedBody::json(data))
                 } else {
@@ -667,7 +633,7 @@ fn parse_json_body(
             }
             Err(JsonFail::Message(detail)) => Err(Denial::BadDetail(format!(
                 "{}{detail}",
-                json_cpython::JSON_PARSE_PREFIX
+                json::JSON_PARSE_PREFIX
             ))),
             Err(JsonFail::Recursion) => Err(Denial::ServerError),
         },
@@ -884,18 +850,6 @@ fn lookup_email(found: BodyField<'_>) -> Result<String, Denial> {
         | Some(Value::Array(_))
         | Some(Value::Object(_)) => Err(Denial::BadError("Email is required".to_owned())),
     }
-}
-
-fn json_response(status: StatusCode, body: Value) -> Response {
-    json_response_text(status, body.to_string())
-}
-
-fn json_response_text(status: StatusCode, text: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(text))
-        .expect("json response")
 }
 
 /// Sentinel marking the 201 `role` slot for the echo splice below. NUL
@@ -1306,7 +1260,9 @@ async fn sign_out(
     // never reaches `admin.py:385`.
     let pairs = form_pairs(content_type_of(&headers), &body);
     if csrf_gate(&headers, &pairs).is_err() {
-        return Ok(csrf_failure_response(&state));
+        return Ok(csrf_failure_response(render_csrf_failure(
+            &failure_root_url(&state),
+        )));
     }
     let urls = &state.settings().urls;
     let target = sign_out_redirect(
@@ -1325,15 +1281,10 @@ async fn sign_out(
             .await?
             .ok_or(Denial::ServerError)?;
         let now = Utc::now();
-        sqlx::query(
-            "UPDATE users SET last_logout_ip = $1, last_logout_time = $2, updated_at = $2 WHERE id = $3",
-        )
-        .bind(client_ip(&headers))
-        .bind(now)
-        .bind(actor)
-        .execute(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
+        let ip = client_ip(&headers);
+        identity::stamp_logout(pool, actor, Some(ip.as_str()), now)
+            .await
+            .map_err(|_| Denial::ServerError)?;
         // `logout()`: `Session.flush()` drops the presented row (this
         // route always reads the admin cookie); the middleware then
         // answers the cookie deletion because the session reads empty.
@@ -1383,11 +1334,9 @@ const PBKDF2_ITERATIONS: u32 = 600_000;
 /// `BasePasswordHasher.salt()` length: 128 bits over the 62-char alphabet.
 const PASSWORD_SALT_LEN: usize = 22;
 
-/// Salt for `user.get_session_auth_hash()` (same construction as
-/// `super::SESSION_AUTH_HASH_SALT`; `auth_session/email.rs` carries its
-/// own copy too).
-const SESSION_AUTH_HASH_SALT: &str =
-    "django.contrib.auth.models.AbstractBaseUser.get_session_auth_hash";
+use pidash_compat::http::{
+    csrf_failure_response, csrf_token_source, hex_encode, session_auth_hash, TokenSource,
+};
 
 /// Why the CSRF gate rejected (Django `REASON_*`; the failure page never
 /// renders the reason, so these are log labels only).
@@ -1397,42 +1346,29 @@ enum CsrfDenial {
     BadToken,
 }
 
-/// Where the request token came from (`CsrfViewMiddleware._check_token`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TokenSource {
-    Post,
-    Header,
-}
-
-impl TokenSource {
-    /// `_bad_token_message` source rendering (`csrf.py:347-352`).
-    fn describe(self) -> &'static str {
-        match self {
-            TokenSource::Post => "POST",
-            TokenSource::Header => "the 'X-Csrftoken' HTTP header",
-        }
-    }
-}
-
 fn content_type_of(headers: &HeaderMap) -> Option<&str> {
     headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
 }
 
-/// `request.POST` as last-wins pairs, only for form content types (any
-/// other content type leaves `POST` empty in Django).
+/// `request.POST` as ordered pairs: multipart fields when the body is
+/// framed multipart, else the urlencoded parse for form posts
+/// (PIDASHCONV-1367; same shape as `auth_session::email::form_pairs`
+/// from PIDASHCONV-1349). Any other content type leaves `POST` empty in
+/// Django, so the pairs are empty there.
 fn form_pairs(content_type: Option<&str>, body: &[u8]) -> Vec<(String, String)> {
-    let is_form = content_type.is_some_and(|ct| {
-        ct.split(';').next().is_some_and(|mime| {
-            mime.trim()
-                .eq_ignore_ascii_case("application/x-www-form-urlencoded")
-        })
-    });
+    let content_type = content_type.unwrap_or("");
+    if let Some(pairs) = parse_fields(content_type, body) {
+        return pairs;
+    }
+    let mime = content_type.split(';').next().map(str::trim).unwrap_or("");
+    let is_form = mime.eq_ignore_ascii_case("application/x-www-form-urlencoded")
+        || mime.eq_ignore_ascii_case("multipart/form-data");
     if !is_form {
         return Vec::new();
     }
-    serde_urlencoded::from_bytes::<Vec<(String, String)>>(body).unwrap_or_default()
+    serde_urlencoded::from_bytes(body).unwrap_or_default()
 }
 
 /// `QueryDict.get`: the last value for `key`, or `None`.
@@ -1442,26 +1378,6 @@ fn form_last(pairs: &[(String, String)], key: &str) -> Option<String> {
         .rev()
         .find(|(k, _)| k == key)
         .map(|(_, v)| v.clone())
-}
-
-/// Resolve the request token in Django's order: the last
-/// `csrfmiddlewaretoken` form value when non-empty, else the header when
-/// present (even empty — an empty header fails format, it does not fall
-/// through to "missing").
-fn csrf_token_source(
-    pairs: &[(String, String)],
-    header_token: Option<&str>,
-) -> Option<(String, TokenSource)> {
-    if let Some(value) = pairs
-        .iter()
-        .rev()
-        .find(|(k, _)| k == "csrfmiddlewaretoken")
-        .map(|(_, v)| v.as_str())
-        .filter(|v| !v.is_empty())
-    {
-        return Some((value.to_owned(), TokenSource::Post));
-    }
-    header_token.map(|token| (token.to_owned(), TokenSource::Header))
 }
 
 /// `_check_token` + `_does_token_match` over one token: the format gate
@@ -1482,16 +1398,22 @@ fn csrf_check_token(secret: &str, token: &str, source: TokenSource) -> Result<()
 }
 
 /// Mirror `CsrfViewMiddleware.process_view`: the `csrftoken` cookie must be
-/// present and the request token must check out. A malformed cookie secret
-/// can never match (Django would mint a fresh secret and then fail the
-/// compare the same way).
+/// present and the request token must check out. A 64-char cookie unmasks
+/// first (`_get_secret`); a malformed cookie secret can never match
+/// (Django would mint a fresh secret and then fail the compare the same
+/// way).
 fn csrf_gate(headers: &HeaderMap, pairs: &[(String, String)]) -> Result<(), CsrfDenial> {
     let cookie_header = headers
         .get(header::COOKIE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let secret = session_kernel::cookie_value(cookie_header, CSRF_COOKIE_NAME)
+    let cookie = session_kernel::cookie_value(cookie_header, CSRF_COOKIE_NAME)
         .ok_or(CsrfDenial::NoCookie)?;
+    let secret = if cookie.len() == csrf_kernel::CSRF_TOKEN_LENGTH {
+        csrf_kernel::unmask_token(&cookie).map_err(|_| CsrfDenial::BadToken)?
+    } else {
+        cookie
+    };
     let header_token = headers.get("x-csrftoken").and_then(|v| v.to_str().ok());
     let (token, source) = csrf_token_source(pairs, header_token).ok_or(CsrfDenial::BadToken)?;
     csrf_check_token(&secret, &token, source).map_err(|_| CsrfDenial::BadToken)
@@ -1509,34 +1431,11 @@ fn failure_root_url(state: &AppState) -> String {
         .to_owned()
 }
 
-/// The `csrf_failure` page: 200 + `text/html`.
-fn csrf_failure_response(state: &AppState) -> Response {
-    (
-        StatusCode::OK,
-        [
-            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
-            (header::VARY, "Cookie"),
-        ],
-        render_csrf_failure(&failure_root_url(state)),
-    )
-        .into_response()
-}
-
 /// `HttpResponseRedirect`: 302 + `Location`, `Vary: Cookie`, and any
 /// `Set-Cookie` values the branch issued.
 fn redirect_response(location: &str, set_cookies: Vec<String>) -> Result<Response, Denial> {
     let location = crate::response_headers::header_value(location).ok_or(Denial::ServerError)?;
-    let mut builder = Response::builder()
-        .status(StatusCode::FOUND)
-        .header(header::LOCATION, location)
-        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-        .header(header::VARY, "Cookie");
-    for cookie in set_cookies {
-        builder = builder.header(header::SET_COOKIE, cookie);
-    }
-    Ok(builder
-        .body(axum::body::Body::empty())
-        .expect("static redirect"))
+    Ok(redirect_found_cookies(location, set_cookies))
 }
 
 /// Admin base URL for the redirect targets (`host.py:16-39` through the
@@ -1555,26 +1454,6 @@ fn admin_base(state: &AppState) -> Result<String, Denial> {
         admin_url,
         Some(urls.admin_base_path.as_str()),
     ))
-}
-
-/// `user.get_session_auth_hash()`: `salted_hmac(...get_session_auth_hash,
-/// password).hexdigest()`.
-fn session_auth_hash(password_field: &str, secret_key: &[u8]) -> String {
-    use hmac::Mac as _;
-    let key = Sha256::digest([SESSION_AUTH_HASH_SALT.as_bytes(), secret_key].concat());
-    let mut mac = Hmac::<Sha256>::new_from_slice(&key).expect("HMAC-SHA256 accepts any key length");
-    mac.update(password_field.as_bytes());
-    hex_encode(&mac.finalize().into_bytes())
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0x0f) as usize] as char);
-    }
-    out
 }
 
 /// `get_random_string(22)` over the Django alphabet
@@ -1679,12 +1558,17 @@ fn csrf_rotate_cookie(secret: &str, ctx: &CookieCtx) -> String {
     })
 }
 
-/// The auth keys `login()` writes into the session payload.
+/// The auth keys `login()` writes into the session payload, plus the
+/// `set_expiry(ADMIN_SESSION_COOKIE_AGE)` marker (`login.py:19`) every
+/// later save reads back (`SessionBase.get_expiry_date`): without it a
+/// re-save falls back to `SESSION_COOKIE_AGE` and the 1-hour admin
+/// session silently becomes a 7-day one.
 fn auth_payload_entries(
     user_id: Uuid,
     password_field: &str,
     device_info: &serde_json::Value,
     secret_key: &[u8],
+    age_secs: i64,
 ) -> Vec<(String, serde_json::Value)> {
     vec![
         (
@@ -1698,6 +1582,10 @@ fn auth_payload_entries(
         (
             "_auth_user_hash".to_owned(),
             serde_json::Value::String(session_auth_hash(password_field, secret_key)),
+        ),
+        (
+            "_session_expiry".to_owned(),
+            serde_json::Value::from(age_secs),
         ),
         ("device_info".to_owned(), device_info.clone()),
     ]
@@ -1723,7 +1611,7 @@ async fn issue_admin_session(
     now_unix: i64,
 ) -> Result<Vec<String>, sqlx::Error> {
     let signer = Signer::new(secret_key, SESSION_SIGNING_SALT);
-    let entries = auth_payload_entries(user_id, password_field, &device_info, secret_key);
+    let entries = auth_payload_entries(user_id, password_field, &device_info, secret_key, age_secs);
     let user_id_str = user_id.to_string();
     let expire_unix = now_unix + age_secs;
     if let Some(old) = presented_key.filter(|key| session_kernel::is_plausible_session_key(key)) {
@@ -1861,109 +1749,10 @@ async fn is_instance_admin(
     Ok(row.is_some())
 }
 
-/// `User.objects.create(...)` (`admin.py:210-217`) + `User.save()` side
-/// effects (`user.py:169-187`): every NOT NULL column is supplied (Django
-/// emits no DB-level defaults). `is_active` is already TRUE (model
-/// default); `token` stays `""` (`token_updated_at` NULL → no rotation).
-#[allow(clippy::too_many_arguments)]
-async fn insert_signup_user(
-    pool: &PgPool,
-    now: DateTime<Utc>,
-    email: &str,
-    first_name: &str,
-    last_name: &str,
-    password_hash: &str,
-) -> Result<Uuid, Denial> {
-    let id = Uuid::new_v4();
-    let username = Uuid::new_v4().simple().to_string();
-    sqlx::query(
-        "INSERT INTO \"users\" (\"id\", \"password\", \"last_login\", \"username\", \"mobile_number\", \
-         \"email\", \"display_name\", \"first_name\", \"last_name\", \"avatar\", \"avatar_asset_id\", \
-         \"cover_image\", \"cover_image_asset_id\", \"date_joined\", \"created_at\", \"updated_at\", \
-         \"last_location\", \"created_location\", \"is_superuser\", \"is_managed\", \
-         \"is_password_expired\", \"is_active\", \"is_staff\", \"is_email_verified\", \
-         \"is_password_autoset\", \"is_password_reset_required\", \"token\", \"last_active\", \
-         \"last_login_time\", \"last_logout_time\", \"last_login_ip\", \"last_logout_ip\", \
-         \"last_login_medium\", \"last_login_uagent\", \"token_updated_at\", \"is_bot\", \"bot_type\", \
-         \"user_timezone\", \"is_email_valid\", \"masked_at\") \
-         VALUES ($1, $2, NULL, $3, NULL, $4, $5, $6, $7, '', NULL, NULL, NULL, $8, $8, $8, \
-         '', '', FALSE, FALSE, FALSE, TRUE, FALSE, FALSE, FALSE, FALSE, '', $8, NULL, NULL, '', '', \
-         'email', '', NULL, FALSE, NULL, 'UTC', FALSE, NULL)",
-    )
-    .bind(id)
-    .bind(password_hash)
-    .bind(&username)
-    .bind(email)
-    .bind(display_name_for(email))
-    .bind(first_name)
-    .bind(last_name)
-    .bind(now)
-    .execute(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(id)
-}
-
-/// `post_save` receiver `create_user_notification` (`user.py:306-320`): a
-/// preferences row on every non-bot create (anonymous save → NULL audit).
-async fn insert_notification_prefs(
-    pool: &PgPool,
-    now: DateTime<Utc>,
-    user_id: &Uuid,
-) -> Result<(), Denial> {
-    sqlx::query(
-        "INSERT INTO \"user_notification_preferences\" (\"id\", \"created_at\", \"updated_at\", \
-         \"created_by_id\", \"updated_by_id\", \"deleted_at\", \"user_id\", \"workspace_id\", \
-         \"project_id\", \"property_change\", \"state_change\", \"comment\", \"mention\", \
-         \"issue_completed\") \
-         VALUES ($1, $2, $2, NULL, NULL, NULL, $3, NULL, NULL, TRUE, TRUE, TRUE, TRUE, TRUE)",
-    )
-    .bind(Uuid::new_v4())
-    .bind(now)
-    .bind(user_id)
-    .execute(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(())
-}
-
-/// `Profile.objects.create(user, company_name)` (`admin.py:218`) with the
-/// model defaults (`user.py:200-278` + `color.py:9-14`).
-async fn insert_signup_profile(
-    pool: &PgPool,
-    now: DateTime<Utc>,
-    user_id: &Uuid,
-    company_name: &str,
-) -> Result<(), Denial> {
-    sqlx::query(
-        "INSERT INTO \"profiles\" (\"id\", \"created_at\", \"updated_at\", \
-         \"user_id\", \"theme\", \"is_app_rail_docked\", \
-         \"is_tour_completed\", \"onboarding_step\", \"use_case\", \"role\", \"is_onboarded\", \
-         \"last_workspace_id\", \"billing_address_country\", \"billing_address\", \
-         \"has_billing_address\", \"company_name\", \"notification_view_mode\", \
-         \"is_smooth_cursor_enabled\", \"is_mobile_onboarded\", \"mobile_onboarding_step\", \
-         \"mobile_timezone_auto_set\", \"language\", \"start_of_the_week\", \"goals\", \
-         \"background_color\", \"is_navigation_tour_completed\", \"has_marketing_email_consent\", \
-         \"is_subscribed_to_changelog\", \"product_tour\", \"settings\") \
-         VALUES ($1, $2, $2, $3, '{}', TRUE, FALSE, \
-         '{\"profile_complete\": false, \"workspace_create\": false, \
-           \"workspace_invite\": false, \"workspace_join\": false}', \
-         NULL, NULL, FALSE, NULL, 'INDIA', NULL, FALSE, $4, 'full', FALSE, FALSE, \
-         '{\"profile_complete\": false, \"workspace_create\": false, \"workspace_join\": false}', \
-         FALSE, 'en', 0, '{}', $5, FALSE, FALSE, FALSE, \
-         '{\"work_items\": false, \"cycles\": false, \"modules\": false, \"intake\": false, \
-           \"pages\": false}', '{}')",
-    )
-    .bind(Uuid::new_v4())
-    .bind(now)
-    .bind(user_id)
-    .bind(company_name)
-    .bind(background_color())
-    .execute(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(())
-}
+// NOTE: the signup user INSERT, the `create_user_notification` post_save
+// insert and the `Profile.objects.create(user, company_name)` row moved to
+// `domain::identity::create_user` (PIDASHCONV-1525). The signup arm above
+// calls it directly.
 
 /// The stamp `save()` (`admin.py:220-226,347-353`): login stamps plus the
 /// `User.save` token rotation (`token_updated_at` set → fresh 64-hex
@@ -1977,18 +1766,24 @@ async fn apply_login_stamps(
     user_agent: Option<&str>,
 ) -> Result<(), Denial> {
     let rotated = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
-    sqlx::query(
-        "UPDATE \"users\" SET \"is_active\" = TRUE, \"last_active\" = $1, \
-         \"last_login_time\" = $1, \"last_login_ip\" = $2, \"last_login_uagent\" = $3, \
-         \"token_updated_at\" = $1, \"token\" = $4, \"updated_at\" = $1 \
-         WHERE \"id\" = $5",
+    identity::save_user_data(
+        pool,
+        *user_id,
+        &identity::LoginStamps {
+            // The license stamps never assign the medium (it keeps the
+            // `"email"` insert default).
+            medium: None,
+            login_ip: ip,
+            login_uagent: user_agent,
+            avatar: None,
+            avatar_asset_id: None,
+            display_name: None,
+            is_staff: None,
+            touch_updated_at: true,
+            rotated_token: &rotated,
+            now,
+        },
     )
-    .bind(now)
-    .bind(ip)
-    .bind(user_agent)
-    .bind(rotated)
-    .bind(user_id)
-    .execute(pool)
     .await
     .map_err(|_| Denial::ServerError)?;
     Ok(())
@@ -2017,10 +1812,7 @@ fn client_ip_ua(headers: &HeaderMap, peer: Option<&str>) -> (Option<String>, Opt
 /// `user_login` replay) so both success paths and that failure path
 /// match.
 async fn stamp_last_login(pool: &PgPool, user_id: &Uuid, now: DateTime<Utc>) -> Result<(), Denial> {
-    sqlx::query("UPDATE \"users\" SET \"last_login\" = $1 WHERE \"id\" = $2")
-        .bind(now)
-        .bind(user_id)
-        .execute(pool)
+    identity::stamp_last_login(pool, *user_id, now)
         .await
         .map_err(|_| Denial::ServerError)?;
     Ok(())
@@ -2125,16 +1917,19 @@ async fn finish_login(
 async fn sign_up(State(state): State<AppState>, req: Request) -> Result<Response, Denial> {
     let (parts, body) = req.into_parts();
     let headers = &parts.headers;
-    let body = axum::body::to_bytes(body, 1024 * 1024)
-        .await
-        .unwrap_or_default();
+    let body = match read_request_bytes(body).await {
+        Ok(body) => body,
+        Err(response) => return Ok(response),
+    };
     let peer = parts
         .extensions
         .get::<ConnectInfo<SocketAddr>>()
         .map(|info| info.0.ip().to_string());
     let pairs = form_pairs(content_type_of(headers), &body);
     if csrf_gate(headers, &pairs).is_err() {
-        return Ok(csrf_failure_response(&state));
+        return Ok(csrf_failure_response(render_csrf_failure(
+            &failure_root_url(&state),
+        )));
     }
     let pool = pools(&state)?;
     let base = admin_base(&state)?;
@@ -2183,17 +1978,37 @@ async fn sign_up(State(state): State<AppState>, req: Request) -> Result<Response
     let first_name = form.first_name.clone().ok_or(Denial::ServerError)?;
     let password_hash = encode_password(&password);
     let now = Utc::now();
-    let user_id = insert_signup_user(
-        pool,
-        now,
-        &email,
-        &first_name,
-        &form.last_name,
-        &password_hash,
+    // `User(...)` + first `save()` (`admin.py:210-218`) with the
+    // `post_save` preferences row (`user.py:307`) and the
+    // `Profile.objects.create(user, company_name)` row (`admin.py:218`),
+    // all inside `domain::identity::create_user`.
+    let orm = state.orm().ok_or(Denial::ServerError)?;
+    let user_id = identity::create_user(
+        orm,
+        &identity::NewUser {
+            id: None,
+            email: &email,
+            username: Uuid::new_v4().simple().to_string(),
+            password_hash: password_hash.clone(),
+            first_name: &first_name,
+            last_name: &form.last_name,
+            display_name: display_name_for(&email),
+            avatar: "",
+            is_email_verified: false,
+            is_password_autoset: false,
+            last_active: Some(now),
+            login_ip: Some(""),
+            login_uagent: Some(""),
+            is_bot: false,
+            now,
+            profile: Some(identity::NewProfile {
+                company_name: &form.company_name,
+                background_color: background_color(),
+            }),
+        },
     )
-    .await?;
-    insert_notification_prefs(pool, now, &user_id).await?;
-    insert_signup_profile(pool, now, &user_id, &form.company_name).await?;
+    .await
+    .map_err(|_| Denial::ServerError)?;
     // `user.save()` (`admin.py:220-227`) lands BEFORE the admin insert
     // (`admin.py:229`): a NULL User-Agent 500s with NO admin row (a retry
     // then 5180s, not 5150s), and a bad-telemetry 500 leaves a stamped
@@ -2226,16 +2041,19 @@ async fn sign_up(State(state): State<AppState>, req: Request) -> Result<Response
 async fn sign_in(State(state): State<AppState>, req: Request) -> Result<Response, Denial> {
     let (parts, body) = req.into_parts();
     let headers = &parts.headers;
-    let body = axum::body::to_bytes(body, 1024 * 1024)
-        .await
-        .unwrap_or_default();
+    let body = match read_request_bytes(body).await {
+        Ok(body) => body,
+        Err(response) => return Ok(response),
+    };
     let peer = parts
         .extensions
         .get::<ConnectInfo<SocketAddr>>()
         .map(|info| info.0.ip().to_string());
     let pairs = form_pairs(content_type_of(headers), &body);
     if csrf_gate(headers, &pairs).is_err() {
-        return Ok(csrf_failure_response(&state));
+        return Ok(csrf_failure_response(render_csrf_failure(
+            &failure_root_url(&state),
+        )));
     }
     let pool = pools(&state)?;
     let base = admin_base(&state)?;
@@ -2277,10 +2095,7 @@ async fn sign_in(State(state): State<AppState>, req: Request) -> Result<Response
                 if let Some(new_hash) =
                     pidash_auth::password::rehash_if_outdated(candidate, password_field)
                 {
-                    sqlx::query(r#"UPDATE "users" SET "password" = $1 WHERE "id" = $2"#)
-                        .bind(&new_hash)
-                        .bind(*id)
-                        .execute(pool)
+                    identity::rehash_password(pool, *id, &new_hash)
                         .await
                         .map_err(|_| Denial::ServerError)?;
                     *password_field = new_hash;
@@ -2453,6 +2268,28 @@ mod tests {
     }
 
     #[test]
+    fn csrf_gate_unmasks_a_64_char_cookie() {
+        // `_get_secret`: a masked cookie unmasks before the compare, so the
+        // cookie value itself and any other masking of the secret pass.
+        let secret = csrf_kernel::new_secret();
+        let cookie = csrf_kernel::mask_secret(&secret).expect("mask");
+        let other = csrf_kernel::mask_secret(&secret).expect("mask");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            format!("csrftoken={cookie}").parse().expect("cookie"),
+        );
+        let pairs = vec![("csrfmiddlewaretoken".to_owned(), cookie.clone())];
+        assert_eq!(csrf_gate(&headers, &pairs), Ok(()));
+        let pairs = vec![("csrfmiddlewaretoken".to_owned(), other)];
+        assert_eq!(csrf_gate(&headers, &pairs), Ok(()));
+        // A token for a different secret still fails.
+        let wrong = csrf_kernel::mask_secret(&csrf_kernel::new_secret()).expect("mask");
+        let pairs = vec![("csrfmiddlewaretoken".to_owned(), wrong)];
+        assert_eq!(csrf_gate(&headers, &pairs), Err(CsrfDenial::BadToken));
+    }
+
+    #[test]
     fn csrf_check_token_renders_django_reasons() {
         let secret = csrf_kernel::new_secret();
         let masked = csrf_kernel::mask_secret(&secret).expect("mask");
@@ -2477,6 +2314,10 @@ mod tests {
             b"a=1",
         );
         assert_eq!(form_last(&pairs, "a").as_deref(), Some("1"));
+        // Framed multipart reads fields in order (last wins downstream).
+        let framed = b"--abc\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\n1\r\n--abc\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\n2\r\n--abc--\r\n";
+        let pairs = form_pairs(Some("multipart/form-data; boundary=abc"), framed);
+        assert_eq!(form_last(&pairs, "a").as_deref(), Some("2"));
     }
 
     #[test]
@@ -2767,10 +2608,14 @@ mod tests {
         // Empty body is `{}` without parsing (DRF `_parse`: stream None).
         let empty = parse_json_body(&json_headers(), b"", 5_242_880).expect("empty is {}");
         assert_eq!(empty.value(), &serde_json::json!({}));
-        // Blank bodies are DRF `ParseError` with the CPython message.
+        // Blank bodies are DRF `ParseError` (tier 3: serde text).
         let err = parse_json_body(&json_headers(), b"   ", 5_242_880).expect_err("blank body 400s");
-        let (_, body) = err.status_and_body();
-        assert!(body.contains("column 4 (char 3)"), "{body}");
+        let (status, body) = err.status_and_body();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            body.starts_with("{\"detail\":\"JSON parse error - "),
+            "{body}"
+        );
         // Non-JSON content-type with a body is 415.
         let mut plain = HeaderMap::new();
         plain.insert(header::CONTENT_TYPE, "text/plain".parse().unwrap());
@@ -2814,9 +2659,9 @@ mod tests {
             parse_json_body(&json_headers(), b"{bad}", 5_242_880).expect_err("malformed 400s");
         let (status, body) = err.status_and_body();
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(
-            body,
-            r#"{"detail":"JSON parse error - Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"}"#
+        assert!(
+            body.starts_with("{\"detail\":\"JSON parse error - "),
+            "envelope + serde text, got {body:?}"
         );
         // Non-UTF-8 is a codec `ParseError` 400 (DRF catches `ValueError`,
         // which includes `UnicodeDecodeError`), not a 500.

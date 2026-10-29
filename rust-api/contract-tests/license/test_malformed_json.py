@@ -2,13 +2,12 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
-"""License malformed-JSON messages match CPython byte-for-byte (PIDASHCONV-1128).
+"""License malformed-JSON is a 400 envelope (PIDASHCONV-1128, tier 3).
 
 Malformed bodies 400 on both backends with DRF's ``ParseError`` detail
-(``JSON parse error - <CPython message>``). Rust previously rendered
-serde errors (or a generic message on admins); it now parses through the
-shared ``json_cpython`` layer. Each case pins the exact detail per
-endpoint on both backends.
+(``JSON parse error - <message>``). The message text is CPython's on
+Django and serde's on Rust (PIDASHCONV-1555, rule 13 tier 3); cases
+assert status and envelope shape only, not message bytes.
 """
 
 import pytest
@@ -21,27 +20,12 @@ CASES = [
     ("POST", "/api/instances/workspaces/"),
 ]
 
-# (body-bytes, expected detail): CPython json error texts, verified live
-# against Django 2026-10-17.
+# Malformed bodies (tier 3: message texts differ by backend).
 MALFORMED = [
-    (
-        b"{bad}",
-        "JSON parse error - Expecting property name enclosed in double quotes: "
-        "line 1 column 2 (char 1)",
-    ),
-    (
-        b'{"a":}',
-        "JSON parse error - Expecting value: line 1 column 6 (char 5)",
-    ),
-    (
-        b"   ",
-        "JSON parse error - Expecting value: line 1 column 4 (char 3)",
-    ),
-    (
-        b'{"a":1,}',
-        "JSON parse error - Expecting property name enclosed in double quotes: "
-        "line 1 column 8 (char 7)",
-    ),
+    b"{bad}",
+    b'{"a":}',
+    b"   ",
+    b'{"a":1,}',
 ]
 
 
@@ -53,8 +37,9 @@ def _send(admin_api, method, path, body):
 
 
 @pytest.mark.parametrize("method,path", CASES)
-@pytest.mark.parametrize("body,detail", MALFORMED)
-def test_malformed_json_message_is_cpython(admin_api, method, path, body, detail):
+@pytest.mark.parametrize("body", MALFORMED)
+def test_malformed_json_is_400_envelope(admin_api, method, path, body):
     res = _send(admin_api, method, path, body)
     assert res.status_code == 400
-    assert res.json() == {"detail": detail}
+    detail = res.json()["detail"]
+    assert detail.startswith("JSON parse error - "), detail

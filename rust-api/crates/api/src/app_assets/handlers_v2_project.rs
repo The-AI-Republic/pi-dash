@@ -89,10 +89,17 @@ use uuid::Uuid;
 use crate::app_assets::guards;
 use crate::app_assets::quote_filename;
 use crate::state::AppState;
+use crate::uuid_path::{classify_uuid_segment, UuidSegment};
 use pidash_auth::permissions::allow::AllowFacts;
 use pidash_auth::permissions::{ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER};
 use pidash_auth::scope::TenantScope;
+use pidash_compat::db::is_integrity_error;
+use pidash_compat::py::py_json_string;
+use pidash_compat::response::{
+    json_response as raw, json_value as json_status, no_content, server_error,
+};
 use pidash_services::app_assets::queries_v2_project as q;
+use pidash_services::domain::projects as domain_projects;
 use pidash_types::WorkspaceId;
 
 /// All ten `EntityTypeContext` values (`db/models/asset.py:33-43`): the
@@ -129,8 +136,6 @@ const DOES_NOT_EXIST_BODY: &str = r#"{"error":"The required object does not exis
 /// `BaseAPIView.handle_exception`: `ValidationError` branch (`:226-230`),
 /// also raised by `UUIDField.to_python` on bad UUID writes.
 const VALID_DETAIL_BODY: &str = r#"{"error":"Please provide valid detail"}"#;
-/// `BaseAPIView.handle_exception`: generic branch (`:238-243`).
-const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// DRF `NotAuthenticated` denial: anonymous on a guarded route.
 const UNAUTHENTICATED_BODY: &str = r#"{"detail":"Authentication credentials were not provided."}"#;
 /// `Project.resolve` miss (`db/models/project.py:190-217` via `Http404`).
@@ -203,28 +208,6 @@ pub fn routes() -> Router<AppState> {
 // Small responders
 // ---------------------------------------------------------------------------
 
-fn raw(status: StatusCode, body: &'static str) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("static response")
-}
-
-fn json_status(status: StatusCode, body: Value) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(
-            serde_json::to_string(&body).expect("serializable response"),
-        ))
-        .expect("json response")
-}
-
-fn server_error() -> Response {
-    raw(StatusCode::INTERNAL_SERVER_ERROR, SERVER_ERROR_BODY)
-}
-
 /// `.get()` miss envelope: Django `ObjectDoesNotExist` through
 /// `BaseAPIView.handle_exception` (`app/views/base.py:232-236`).
 fn does_not_exist() -> Response {
@@ -237,10 +220,6 @@ fn page_not_found() -> Response {
 
 fn valid_detail() -> Response {
     raw(StatusCode::BAD_REQUEST, VALID_DETAIL_BODY)
-}
-
-fn no_content() -> Response {
-    StatusCode::NO_CONTENT.into_response()
 }
 
 fn redirect(location: String) -> Response {
@@ -1010,9 +989,12 @@ async fn patch_project_asset(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let pk = match pk_raw.parse::<Uuid>() {
-        Ok(pk) => pk,
-        Err(_) => return page_not_found(),
+    // Django routes `<uuid:pk>` canonically only; anything else is a
+    // resolver 404 before auth, answered locally like garbage (no proxy
+    // plumbing in this module — PIDASHCONV-1399).
+    let pk = match classify_uuid_segment(&pk_raw) {
+        UuidSegment::Canonical(pk) => pk,
+        UuidSegment::NonCanonical | UuidSegment::Garbage => return page_not_found(),
     };
     let actor = match require_actor(&state, extension).await {
         Ok(actor) => actor,
@@ -1102,9 +1084,10 @@ async fn delete_project_asset(
     Path((slug, project_raw, pk_raw)): Path<(String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
 ) -> Response {
-    let pk = match pk_raw.parse::<Uuid>() {
-        Ok(pk) => pk,
-        Err(_) => return page_not_found(),
+    // Same canonical-spelling gate as patch (PIDASHCONV-1399).
+    let pk = match classify_uuid_segment(&pk_raw) {
+        UuidSegment::Canonical(pk) => pk,
+        UuidSegment::NonCanonical | UuidSegment::Garbage => return page_not_found(),
     };
     let actor = match require_actor(&state, extension).await {
         Ok(actor) => actor,
@@ -1160,9 +1143,10 @@ async fn get_project_asset(
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     headers: HeaderMap,
 ) -> Response {
-    let pk = match pk_raw.parse::<Uuid>() {
-        Ok(pk) => pk,
-        Err(_) => return page_not_found(),
+    // Same canonical-spelling gate as patch (PIDASHCONV-1399).
+    let pk = match classify_uuid_segment(&pk_raw) {
+        UuidSegment::Canonical(pk) => pk,
+        UuidSegment::NonCanonical | UuidSegment::Garbage => return page_not_found(),
     };
     let actor = match require_actor(&state, extension).await {
         Ok(actor) => actor,
@@ -1247,9 +1231,11 @@ async fn post_bulk_asset(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let entity_id = match entity_raw.parse::<Uuid>() {
-        Ok(id) => id,
-        Err(_) => return page_not_found(),
+    // Django routes `<uuid:entity_id>` canonically only; anything else is
+    // a resolver 404 before auth, answered locally (PIDASHCONV-1399).
+    let entity_id = match classify_uuid_segment(&entity_raw) {
+        UuidSegment::Canonical(id) => id,
+        UuidSegment::NonCanonical | UuidSegment::Garbage => return page_not_found(),
     };
     let actor = match require_actor(&state, extension).await {
         Ok(actor) => actor,
@@ -1383,14 +1369,15 @@ async fn post_bulk_asset(
                 if exists.is_none() {
                     return does_not_exist();
                 }
-                if sqlx::query(q::SAVE_PROJECT_COVER_SQL)
-                    .bind(project_id)
-                    .bind(row.id)
-                    .bind(Utc::now())
-                    .bind(actor.id)
-                    .execute(&pool)
-                    .await
-                    .is_err()
+                if domain_projects::save_project_cover(
+                    &pool,
+                    project_id,
+                    row.id,
+                    Utc::now(),
+                    actor.id,
+                )
+                .await
+                .is_err()
                 {
                     return server_error();
                 }
@@ -1508,9 +1495,11 @@ async fn get_check_asset(
     Path((slug, asset_raw)): Path<(String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
 ) -> Response {
-    let asset_id = match asset_raw.parse::<Uuid>() {
-        Ok(id) => id,
-        Err(_) => return page_not_found(),
+    // Django routes `<uuid:asset_id>` canonically only; anything else is
+    // a resolver 404 before auth, answered locally (PIDASHCONV-1399).
+    let asset_id = match classify_uuid_segment(&asset_raw) {
+        UuidSegment::Canonical(id) => id,
+        UuidSegment::NonCanonical | UuidSegment::Garbage => return page_not_found(),
     };
     let actor = match require_actor(&state, extension).await {
         Ok(actor) => actor,
@@ -1549,9 +1538,10 @@ async fn post_duplicate_asset(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let asset_id = match asset_raw.parse::<Uuid>() {
-        Ok(id) => id,
-        Err(_) => return page_not_found(),
+    // Same canonical-spelling gate as check (PIDASHCONV-1399).
+    let asset_id = match classify_uuid_segment(&asset_raw) {
+        UuidSegment::Canonical(id) => id,
+        UuidSegment::NonCanonical | UuidSegment::Garbage => return page_not_found(),
     };
     let actor = match require_actor(&state, extension).await {
         Ok(actor) => actor,
@@ -1778,9 +1768,10 @@ async fn get_workspace_download(
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     headers: HeaderMap,
 ) -> Response {
-    let asset_id = match asset_raw.parse::<Uuid>() {
-        Ok(id) => id,
-        Err(_) => return page_not_found(),
+    // Same canonical-spelling gate as check (PIDASHCONV-1399).
+    let asset_id = match classify_uuid_segment(&asset_raw) {
+        UuidSegment::Canonical(id) => id,
+        UuidSegment::NonCanonical | UuidSegment::Garbage => return page_not_found(),
     };
     download_asset(
         &state,
@@ -1801,9 +1792,10 @@ async fn get_project_download(
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     headers: HeaderMap,
 ) -> Response {
-    let asset_id = match asset_raw.parse::<Uuid>() {
-        Ok(id) => id,
-        Err(_) => return page_not_found(),
+    // Same canonical-spelling gate as check (PIDASHCONV-1399).
+    let asset_id = match classify_uuid_segment(&asset_raw) {
+        UuidSegment::Canonical(id) => id,
+        UuidSegment::NonCanonical | UuidSegment::Garbage => return page_not_found(),
     };
     let actor = match require_actor(&state, extension).await {
         Ok(actor) => actor,
@@ -2282,37 +2274,6 @@ fn presigned_post(
     Ok(serde_json::json!({"url": url, "fields": fields}))
 }
 
-/// CPython `json.dumps` string encoding (`ensure_ascii`): `"` and
-/// `\` escaped, C0 controls short/`\u00XX`, everything else non-ASCII
-/// as `\uXXXX` (surrogate pairs past the BMP).
-fn py_json_string(input: &str) -> String {
-    let mut out = String::with_capacity(input.len() + 2);
-    out.push('"');
-    for c in input.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{08}' => out.push_str("\\b"),
-            '\u{0c}' => out.push_str("\\f"),
-            c if (c as u32) < 0x20 => {
-                out.push_str(&format!("\\u{:04x}", c as u32));
-            }
-            c if (c as u32) < 0x7f => out.push(c),
-            c => {
-                let mut buf = [0u16; 2];
-                for unit in c.encode_utf16(&mut buf) {
-                    out.push_str(&format!("\\u{unit:04x}"));
-                }
-            }
-        }
-    }
-    out.push('"');
-    out
-}
-
 /// Standard base64 with padding (policy documents).
 fn base64_encode(input: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -2438,24 +2399,6 @@ async fn s3_copy_object(
         Ok(())
     } else {
         Err(CopyError::Refused)
-    }
-}
-
-/// Django `IntegrityError` (unique/fk/not-null/check) as sqlx sees it:
-/// these branches `pass`, anything else 500s.
-fn is_integrity_error(error: &sqlx::Error) -> bool {
-    match error {
-        sqlx::Error::Database(db) => {
-            let kind = db.kind();
-            matches!(
-                kind,
-                sqlx::error::ErrorKind::UniqueViolation
-                    | sqlx::error::ErrorKind::ForeignKeyViolation
-                    | sqlx::error::ErrorKind::NotNullViolation
-                    | sqlx::error::ErrorKind::CheckViolation
-            )
-        }
-        _ => false,
     }
 }
 

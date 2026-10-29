@@ -12,12 +12,14 @@
 //! Both names are registered in `worker()` (the standalone rule): an
 //! unregistered name parks as failed, never forwarded to Python.
 
+pub mod provider_errors;
 pub mod run_turn;
 pub mod sweep;
 
+pub use provider_errors::{classify_provider_error, provider_detail, BYOK, GATEWAY};
 pub use run_turn::{
-    cancel_key, classify_error, context_eligible, register_turn_handler, DriveResult, SeamError,
-    SkippedServer, StreamItem, StreamSink, TurnContext, TurnSeam, TurnUsage, RUN_TURN_TASK,
+    cancel_key, context_eligible, register_turn_handler, DriveResult, SeamError, SkippedServer,
+    StreamItem, StreamSink, TurnContext, TurnSeam, TurnUsage, RUN_TURN_TASK,
 };
 pub use sweep::{drive_sweep, register_sweep_handler, SWEEP_TASK};
 
@@ -28,17 +30,22 @@ pub use sweep::{drive_sweep, register_sweep_handler, SWEEP_TASK};
 pub const TASK_NAMES: [&str; 2] = [RUN_TURN_TASK, SWEEP_TASK];
 
 /// Build the handler table for both assistant tasks. The pool feeds the
-/// sweep's live store; the seam drives the turn pipeline (see
-/// [`run_turn::TurnSeam`] for the port boundary). `hard_limit_secs` is the
-/// configured `ASSISTANT_TURN_HARD_LIMIT` for the sweep's stale cutoff.
+/// sweep's live store and the Redis client its post-commit `turn_failed`
+/// publish (`None` skips the publish); the seam drives the turn pipeline
+/// (see [`run_turn::TurnSeam`] for the port boundary). `hard_limit_secs` is
+/// the configured `ASSISTANT_TURN_HARD_LIMIT` for the sweep's stale cutoff;
+/// `soft_limit_secs` is the configured `ASSISTANT_TURN_SOFT_LIMIT` for the
+/// turn runner's stream deadline.
 pub fn register_assistant_tasks<S: TurnSeam + 'static>(
     registry: &mut crate::worker::Registry,
     pool: sqlx::PgPool,
+    redis: Option<redis::Client>,
     seam: std::sync::Arc<S>,
     hard_limit_secs: i64,
+    soft_limit_secs: i64,
 ) {
-    register_turn_handler(registry, pool.clone(), seam);
-    register_sweep_handler(registry, pool, hard_limit_secs);
+    register_turn_handler(registry, pool.clone(), seam, soft_limit_secs);
+    register_sweep_handler(registry, pool, redis, hard_limit_secs);
 }
 
 #[cfg(test)]
@@ -138,12 +145,19 @@ mod tests {
         async fn extract_usage(&self, _: &()) -> Result<Option<TurnUsage>, SeamError> {
             Ok(None)
         }
+        async fn was_cut_off(&self, _: &()) -> Result<bool, SeamError> {
+            Ok(false)
+        }
+        async fn mark_cut_off(&self, _: &TurnContext) -> Result<(), SeamError> {
+            Ok(())
+        }
         async fn complete_turn(
             &self,
             _: &TurnContext,
             _: Value,
             _: Value,
             _: String,
+            _: bool,
         ) -> Result<(), SeamError> {
             Ok(())
         }
@@ -152,6 +166,23 @@ mod tests {
         }
         async fn cancel_turn(&self, _: &TurnContext) -> Result<(), SeamError> {
             Ok(())
+        }
+        async fn turn_error_for_user(
+            &self,
+            _: &TurnContext,
+            message: &str,
+            status_code: Option<u16>,
+            body_detail: &str,
+            model_name: &str,
+        ) -> Result<Option<(String, String)>, SeamError> {
+            use super::provider_errors::{classify_provider_error, BYOK};
+            Ok(classify_provider_error(
+                status_code,
+                message,
+                body_detail,
+                BYOK,
+                model_name,
+            ))
         }
     }
 
@@ -168,8 +199,10 @@ mod tests {
         register_assistant_tasks(
             &mut registry,
             pool,
+            None,
             Arc::new(NoopSeam),
             run_turn::TURN_HARD_LIMIT_SECS as i64,
+            run_turn::TURN_SOFT_LIMIT_SECS as i64,
         );
         for name in TASK_NAMES {
             assert!(registry.owns(name), "{name} must run locally");

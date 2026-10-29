@@ -8,6 +8,13 @@ on:
       - ".github/workflows/rust-api.yml"
       - "Cargo.toml"
       - "Cargo.lock"
+  pull_request:
+    branches: [rust-dev]
+    paths:
+      - "rust-api/**"
+      - ".github/workflows/rust-api.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

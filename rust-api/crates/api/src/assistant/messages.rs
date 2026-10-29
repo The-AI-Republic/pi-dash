@@ -26,7 +26,7 @@
 
 use axum::body::Bytes;
 use axum::extract::{Extension, Path, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
@@ -36,9 +36,9 @@ use pidash_db::config::AssistantSettings;
 use uuid::Uuid;
 
 use super::common::{
-    json_response, or_empty_str, owned_thread, parse_after, parse_json_body, parse_limit, pool_ref,
-    py_iso, query_last, request_actor, require_member, role_for, server_error, thread_not_found,
-    title_from, unauthenticated, HandlerResult,
+    body_get, json_response, or_empty_body, owned_thread, parse_after, parse_body, parse_limit,
+    pool_ref, py_iso, query_last, request_actor, request_content_type, require_member, role_for,
+    server_error, thread_not_found, title_from, unauthenticated, HandlerResult, ParsedBody,
 };
 use super::redis::{check_message_throttle, signal_cancel, ThrottleVerdict};
 use crate::middleware::SessionHandle;
@@ -184,6 +184,7 @@ async fn post_message(
     State(state): State<AppState>,
     Path((slug, thread_id)): Path<(String, String)>,
     extension: Option<Extension<SessionHandle>>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> HandlerResult<Response> {
     let pool = pool_ref(&state)?;
@@ -203,8 +204,14 @@ async fn post_message(
     let Some(_thread) = owned_thread(pool, &thread_id, &actor.id, &slug).await? else {
         return Err(thread_not_found());
     };
-    let data = parse_json_body(&body)?;
-    let content = or_empty_str(data.get("content"))?.trim().to_owned();
+    let data = match parse_body(&body, request_content_type(&headers)) {
+        Ok(ParsedBody::Object(map)) => map,
+        // A non-object body has no `.get`: `AttributeError` → generic
+        // 500. (JSON `null` takes the same path: `None.get` raises too.)
+        Ok(_) => return Err(server_error()),
+        Err(failure) => return Err(failure.into_response()),
+    };
+    let content = or_empty_body(body_get(&data, "content"))?.trim().to_owned();
     if content.is_empty() {
         return Err(json_response(
             StatusCode::BAD_REQUEST,
@@ -291,21 +298,22 @@ async fn post_message(
     .fetch_one(&mut *tx)
     .await
     .map_err(|_| server_error())?;
-    let message = sqlx::query_as::<_, MessageRow>(
-        "INSERT INTO \"assistant_message\" \
-         (\"id\", \"thread_id\", \"turn_id\", \"seq\", \"kind\", \"display_content\", \
-         \"payload\", \"status\", \"created_at\", \"completed_at\") \
-         VALUES (gen_random_uuid(), $1, $2, $3, 'user', $4, '{}', 'completed', now(), NULL) \
-         RETURNING \"id\", \"kind\", \"display_content\", \"status\", \"seq\", \
-         \"turn_id\", \"payload\"::text AS \"payload_text\", \"created_at\", \"completed_at\"",
+    let created = pidash_services::domain::assistant::create_user_message(
+        &mut *tx, thread_id, turn_id, next_seq, &content,
     )
-    .bind(thread_id)
-    .bind(turn_id)
-    .bind(next_seq)
-    .bind(&content)
-    .fetch_one(&mut *tx)
     .await
     .map_err(|_| server_error())?;
+    let message = MessageRow {
+        id: created.id,
+        kind: created.kind,
+        display_content: created.display_content,
+        status: created.status,
+        seq: created.seq,
+        turn_id: created.turn_id,
+        payload_text: created.payload_text,
+        created_at: created.created_at,
+        completed_at: created.completed_at,
+    };
     // `turn.user_message = user_msg; turn.save(...)` (`messages.py:96-97`).
     sqlx::query("UPDATE \"assistant_turn\" SET \"user_message_id\" = $1 WHERE \"id\" = $2")
         .bind(message.id)

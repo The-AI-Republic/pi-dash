@@ -46,6 +46,7 @@
 //!   `email=False` ([`python_bool`]); space reset targets carry a
 //!   double slash (handler-owned composition, FX-02 Q4).
 
+use pidash_compat::http::split_authority;
 use serde_json::Value;
 
 /// `AUTHENTICATION_ERROR_CODES` (`adapter/error.py:5-74`), source order.
@@ -312,18 +313,6 @@ fn split_scheme(s: &str) -> (String, &str) {
     }
 }
 
-/// Authority split for the post-scheme remainder: a leading `//`
-/// opens an authority running to the next `/?#` (empty authority, as
-/// in `///x`, yields netloc `""` and path `/x`, matching `urlparse`).
-fn split_authority(rest: &str) -> (&str, &str) {
-    if let Some(after) = rest.strip_prefix("//") {
-        let end = after.find(['/', '?', '#']).unwrap_or(after.len());
-        (&after[..end], &after[end..])
-    } else {
-        ("", rest)
-    }
-}
-
 /// Path without query/fragment (`urlparse(...).path`).
 fn path_only(s: &str) -> &str {
     let end = s.find(['?', '#']).unwrap_or(s.len());
@@ -356,7 +345,7 @@ fn check_allowed(url: &str, allowed_hosts: &[&str]) -> bool {
         return false;
     }
     let (scheme, rest) = split_scheme(url);
-    let (netloc, _) = split_authority(rest);
+    let (netloc, _) = split_authority(rest).unwrap_or(("", rest));
     if netloc.is_empty() && !scheme.is_empty() {
         return false;
     }
@@ -387,7 +376,7 @@ pub fn validate_next_path(next_path: &str) -> String {
     }
     let scrubbed = next_path.replace('\\', "");
     let (scheme, rest) = split_scheme(&scrubbed);
-    let (netloc, path) = split_authority(rest);
+    let (netloc, path) = split_authority(rest).unwrap_or(("", rest));
     let candidate = if !scheme.is_empty() || !netloc.is_empty() {
         path_only(path).to_owned()
     } else {
@@ -432,7 +421,7 @@ fn contains_suspicious_patterns(path: &str) -> bool {
 /// Netloc of an absolute base URL (`urlparse(base).netloc`).
 pub fn netloc_of(base_url: &str) -> &str {
     let (_, rest) = split_scheme(base_url);
-    let (netloc, _) = split_authority(rest);
+    let (netloc, _) = split_authority(rest).unwrap_or(("", rest));
     netloc
 }
 

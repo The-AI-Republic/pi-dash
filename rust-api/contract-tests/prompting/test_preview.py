@@ -201,3 +201,22 @@ def test_preview_draft_section_not_in_recipe_400(api, tenant_a, issue_a,
                        "section_key": "scheduler-task",
                        "body": "not part of this kind"})
     assert r.status_code == 400, r.text
+
+
+def test_preview_draft_crlf_cr_normalised_to_lf(api, tenant_a, issue_a,
+                                                write_a):
+    """CRLF and bare CR in a draft body render as LF (PIDASHCONV-1233).
+
+    Jinja2's lexer rewrites CR/CRLF in the template source to ``\\n``
+    (the environment's ``newline_sequence``); the seeded world carries no
+    CR anywhere else, so the whole prompt must be CR-free.
+    """
+    draft = "CRLF1233-A\r\nCRLF1233-B\rCRLF1233-C\nCRLF1233-D"
+    r = api.post(_preview_url(tenant_a, "coding-task"), headers=write_a,
+                 json={"issue_id": str(issue_a),
+                       "section_key": "implementation",
+                       "body": draft})
+    assert r.status_code == 200, r.text
+    prompt = r.json()["prompt"]
+    assert "CRLF1233-A\nCRLF1233-B\nCRLF1233-C\nCRLF1233-D" in prompt
+    assert "\r" not in prompt

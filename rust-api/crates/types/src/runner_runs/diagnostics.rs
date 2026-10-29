@@ -38,6 +38,7 @@
 
 use std::sync::OnceLock;
 
+use pidash_compat::py::py_strip;
 use serde::{Deserialize, Serialize};
 
 /// Marker separating guidance from the raw error (`diagnostics.py:17`).
@@ -58,11 +59,6 @@ fn grok_re() -> &'static regex::Regex {
 fn muse_re() -> &'static regex::Regex {
     static RE: OnceLock<regex::Regex> = OnceLock::new();
     RE.get_or_init(|| regex::Regex::new(r"\bmuse\b").expect("muse pattern compiles"))
-}
-
-/// Python `str.strip()`: Rust's `is_whitespace` set plus U+001C..=U+001F.
-fn py_strip(text: &str) -> &str {
-    text.trim_matches(|c: char| c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c))
 }
 
 /// Python `str.splitlines()` boundaries (`\r\n` counts as one).

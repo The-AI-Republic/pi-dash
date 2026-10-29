@@ -381,6 +381,54 @@ def test_webhook_send_hostile_content_length_logs_failure_and_retries(
     assert str(alive[0]["response_status"]) == "200"
 
 
+def test_webhook_send_query_on_bare_host_posts_to_root_with_query(
+    db_conn, broker_url, webhook_sink
+):
+    """Query-string URL with no path: sink gets POST /?token=... (PIDASHCONV-1275).
+
+    Django accepts webhook URLs like ``http://host:port?token=abc``
+    (URLField plus validate_schema/validate_domain) and delivers
+    them: requests/urllib3 ends the authority at the first of '/',
+    '?' or '#', so the POST goes to the bare host with
+    '/?token=abc' as the request target. The Rust port split the
+    authority at the first '/' only and folded '?token=abc' into
+    the host, so every delivery failed with a transport error.
+    """
+    owner = seed_helpers.user(db_conn, "contract-query-host-owner")
+    workspace = seed_helpers.workspace(db_conn, "contractqueryhost", owner["id"])
+    token = uuid.uuid4().hex
+    hook = seed_helpers.webhook(
+        db_conn,
+        workspace["id"],
+        f"{config.WEBHOOK_SINK_BASE}?token={token}",
+        issue=True,
+    )
+    webhook_sink.clear()
+    before = snapshot(db_conn, ["webhook_logs"])
+
+    celery_wire.publish(
+        f"{M}.webhook_task.webhook_send_task",
+        kwargs={
+            "webhook_id": str(hook["id"]),
+            "slug": workspace["slug"],
+            "event": "issue",
+            "event_data": {"id": "contract-query-host"},
+            "action": "POST",
+            "current_site": "example.com",
+            "activity": None,
+        },
+    )
+    (delivery,) = webhook_sink.wait_for_count(1, what="query-host webhook POST")
+    assert delivery["path"] == f"/?token={token}"
+
+    (row,) = wait_for(
+        lambda: _log_diff_rows(db_conn, before) or None,
+        what="query-host webhook_logs row",
+    )
+    assert str(row["response_status"]) == "200"
+    assert row["retry_count"] == 0
+
+
 def test_webhook_redelivery_posts_twice_with_identical_bodies(
     db_conn, broker_url, webhook_sink
 ):
@@ -446,6 +494,60 @@ def test_activity_chain_fans_out_to_sink(db_conn, broker_url, webhook_sink):
         what="chained webhook_logs row",
     )
     assert chained[0]["event_type"] == "issue"
+
+
+def test_project_chain_fans_out_with_network_and_description_html(db_conn, broker_url, webhook_sink):
+    """Project created chain carries stored network + description JSON (PIDASHCONV-1388).
+
+    Oracle half: ``model_activity`` on the created path fans out to
+    ``webhook_activity`` with ``event="project"``, which serializes the
+    row via ``get_model_data`` (``ProjectSerializer``). The send POST's
+    wire body is empty (the spaced-headers bug pinned in
+    ``test_webhook_send_success``), so the payload is asserted on the
+    logged ``request_body`` (``str(payload)``): ``data.network`` is the
+    stored smallint and ``data.description_text`` /
+    ``data.description_html`` are the stored JSON documents.
+    """
+    owner = seed_helpers.user(db_conn, "projchain-owner")
+    workspace = seed_helpers.workspace(db_conn, "projchain", owner["id"])
+    project = seed_helpers.project(
+        db_conn,
+        workspace["id"],
+        network=2,
+        description_text={"ops": "text"},
+        description_html={"a": 1},
+    )
+    url = f"{config.WEBHOOK_SINK_BASE}/hook/{uuid.uuid4().hex}"
+    seed_helpers.webhook(db_conn, workspace["id"], url, project=True)
+    webhook_sink.clear()
+    before = snapshot(db_conn, ["webhook_logs"])
+
+    celery_wire.publish(
+        f"{M}.webhook_task.model_activity",
+        args=[
+            "project",
+            str(project["id"]),
+            {},
+            None,
+            str(owner["id"]),
+            workspace["slug"],
+            "example.com",
+        ],
+    )
+    deliveries = webhook_sink.wait_for_count(1, what="project chained webhook POST")
+    assert deliveries[0]["body"] == ""
+    (row,) = wait_for(
+        lambda: _log_diff_rows(db_conn, before) or None,
+        what="project chained webhook_logs row",
+    )
+    assert row["event_type"] == "project"
+    # The chain passes verb="created" as the action, which the send task's
+    # POST/PATCH/PUT/DELETE map leaves untouched (unlike a direct send with
+    # action="POST", which logs "create").
+    assert row["request_method"] == "created"
+    assert "'network': 2" in row["request_body"]
+    assert "'description_text': {'ops': 'text'}" in row["request_body"]
+    assert "'description_html': {'a': 1}" in row["request_body"]
 
 
 def _soft_delete_row(conn, table, row_id):
@@ -739,6 +841,207 @@ def test_recent_visited_writes_row(db_conn, broker_url):
     assert touched["updated_at"] == created["updated_at"]
 
 
+#: PIDASHCONV-1277: same-emoji reaction seeds with explicit stamps, so the
+#: newest-first expectation is deterministic on both backends. Django's
+#: ``.first()`` applies ``Meta.ordering = ("-created_at",)`` (IssueReaction
+#: and CommentReaction, ``db/models/issue.py:747,774``); a ``LIMIT 1``
+#: without ``ORDER BY`` returns whichever row the plan hits first (the
+#: seeds below arrange for the older one; see ``_seed_reaction_pair``).
+_REACTION_OLD_TS = "2026-01-01T00:00:00+00:00"
+_REACTION_NEW_TS = "2026-06-01T00:00:00+00:00"
+_REACTION_EMOJI = "\U0001f44d"  # thumbs up, the issue's example
+_REACTION_EPOCH = 1780000000
+
+
+def _ordered_uuid_pair():
+    """Two ascending uuids (PIDASHCONV-1277): random per run, ordered always."""
+    first, second = str(uuid.uuid4()), str(uuid.uuid4())
+    return (first, second) if first < second else (second, first)
+
+
+def _seed_reaction_pair(db_conn, tag):
+    """One project, two issues (ascending ids), and a reactor user (PIDASHCONV-1277).
+
+    Ascending ids make the pre-fix failure deterministic: the unordered
+    ``LIMIT 1`` returns the older row under every plan (seqscan heap
+    order, pkey id order, partial-unique ``(issue_id,...)`` /
+    ``(comment_id,...)`` key order). The fixed ``ORDER BY created_at
+    DESC`` — and Django's ``-created_at`` ordering — are unaffected by ids.
+    """
+    from _harness.db import insert_row
+
+    chain = seed_helpers.issue_chain(db_conn, tag)
+    issue_x_id, issue_y_id = _ordered_uuid_pair()
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "UPDATE issues SET id = %s WHERE id = %s",
+            (issue_x_id, str(chain["issue"]["id"])),
+        )
+    db_conn.commit()
+    chain["issue"]["id"] = issue_x_id
+    issue2 = insert_row(
+        db_conn,
+        "issues",
+        {
+            "id": issue_y_id,
+            "workspace_id": str(chain["workspace"]["id"]),
+            "project_id": str(chain["project"]["id"]),
+            "state_id": str(chain["state"]["id"]),
+            "name": "contract issue two",
+            "description_json": {},
+            "description_html": "<p></p>",
+            "priority": "none",
+            "complexity_score": 0,
+            "sequence_id": 2,
+            "is_draft": False,
+            "sort_order": 65534,
+            "git_work_branch": "",
+            "workpad": "",
+        },
+    )
+    chain["issue2"] = issue2
+    chain["reactor"] = seed_helpers.user(db_conn, f"{tag}-reactor")
+    return chain
+
+
+def _seed_reaction_comment(db_conn, chain, issue, comment_id):
+    """Comment seed with varchar[]-safe array literals (PIDASHCONV-1277).
+
+    ``seed.issue_comment`` passes ``attachments``/``labels`` as ``[]``,
+    which psycopg sends as json against varchar[] columns; ``'{}'``
+    matches the app_issues raw-SQL seeds.
+    """
+    from _harness.db import insert_row
+
+    return insert_row(
+        db_conn,
+        "issue_comments",
+        {
+            "id": comment_id,
+            "workspace_id": str(chain["workspace"]["id"]),
+            "project_id": str(chain["project"]["id"]),
+            "issue_id": str(issue["id"]),
+            "actor_id": str(chain["reactor"]["id"]),
+            "access": "EXTERNAL",
+            "attachments": "{}",
+            "comment_html": "<p>hi</p>",
+            "comment_json": {},
+            "comment_stripped": "hi",
+            "labels": "{}",
+            "speaker_label": "",
+            "speaker_type": "human",
+        },
+    )
+
+
+def test_issue_activity_comment_reaction_picks_newest(db_conn, broker_url):
+    """comment_reaction created: the activity names the NEWEST match (PIDASHCONV-1277).
+
+    The same actor reacts with the same emoji on comment A (issue X,
+    older) then comment B (issue Y, newer). The builder resolves "the"
+    reaction by (reaction, project, actor) and records the activity on
+    the matched reaction's comment issue, so the row must carry issue Y
+    and the newer reaction id.
+    """
+    from _harness.db import insert_row
+
+    chain = _seed_reaction_pair(db_conn, "r1277comment")
+    ws, project, reactor = chain["workspace"], chain["project"], chain["reactor"]
+    comment_a_id, comment_b_id = _ordered_uuid_pair()
+    comment_a = _seed_reaction_comment(db_conn, chain, chain["issue"], comment_a_id)
+    comment_b = _seed_reaction_comment(db_conn, chain, chain["issue2"], comment_b_id)
+    base = {
+        "workspace_id": str(ws["id"]),
+        "project_id": str(project["id"]),
+        "actor_id": str(reactor["id"]),
+        "reaction": _REACTION_EMOJI,
+    }
+    old_id, new_id = _ordered_uuid_pair()
+    insert_row(db_conn, "comment_reactions", {
+        "id": old_id,
+        **base, "comment_id": str(comment_a["id"]), "created_at": _REACTION_OLD_TS,
+    })
+    newer = insert_row(db_conn, "comment_reactions", {
+        "id": new_id,
+        **base, "comment_id": str(comment_b["id"]), "created_at": _REACTION_NEW_TS,
+    })
+    before = snapshot(db_conn, ["issue_activities"])
+    celery_wire.publish(
+        f"{M}.issue_activities_task.issue_activity",
+        kwargs={
+            "type": "comment_reaction.activity.created",
+            "requested_data": json.dumps({"reaction": _REACTION_EMOJI}),
+            "current_instance": None,
+            "issue_id": None,
+            "actor_id": str(reactor["id"]),
+            "project_id": str(project["id"]),
+            "epoch": _REACTION_EPOCH,
+        },
+    )
+    (row,) = wait_for(
+        lambda: _added_rows(db_conn, "issue_activities", before) or None,
+        what="comment-reaction issue_activities row",
+    )
+    assert row["issue_id"] == str(chain["issue2"]["id"])
+    assert row["new_identifier"] == str(newer["id"])
+    assert row["verb"] == "created"
+    assert row["field"] == "reaction"
+    assert row["new_value"] == _REACTION_EMOJI
+    assert row["comment"] == "added the reaction"
+
+
+def test_issue_activity_issue_reaction_picks_newest(db_conn, broker_url):
+    """issue_reaction created: new_identifier is the NEWEST match (PIDASHCONV-1277).
+
+    Same shape as the comment case, through
+    ``create_issue_reaction_activity``: same actor, same emoji, two
+    issues, older seeded first. The activity row must name the newer
+    reaction id.
+    """
+    from _harness.db import insert_row
+
+    chain = _seed_reaction_pair(db_conn, "r1277issue")
+    ws, project, reactor = chain["workspace"], chain["project"], chain["reactor"]
+    base = {
+        "workspace_id": str(ws["id"]),
+        "project_id": str(project["id"]),
+        "actor_id": str(reactor["id"]),
+        "reaction": _REACTION_EMOJI,
+    }
+    old_id, new_id = _ordered_uuid_pair()
+    insert_row(db_conn, "issue_reactions", {
+        "id": old_id,
+        **base, "issue_id": str(chain["issue"]["id"]), "created_at": _REACTION_OLD_TS,
+    })
+    newer = insert_row(db_conn, "issue_reactions", {
+        "id": new_id,
+        **base, "issue_id": str(chain["issue2"]["id"]), "created_at": _REACTION_NEW_TS,
+    })
+    before = snapshot(db_conn, ["issue_activities"])
+    celery_wire.publish(
+        f"{M}.issue_activities_task.issue_activity",
+        kwargs={
+            "type": "issue_reaction.activity.created",
+            "requested_data": json.dumps({"reaction": _REACTION_EMOJI}),
+            "current_instance": None,
+            "issue_id": str(chain["issue2"]["id"]),
+            "actor_id": str(reactor["id"]),
+            "project_id": str(project["id"]),
+            "epoch": _REACTION_EPOCH,
+        },
+    )
+    (row,) = wait_for(
+        lambda: _added_rows(db_conn, "issue_activities", before) or None,
+        what="issue-reaction issue_activities row",
+    )
+    assert row["issue_id"] == str(chain["issue2"]["id"])
+    assert row["new_identifier"] == str(newer["id"])
+    assert row["verb"] == "created"
+    assert row["field"] == "reaction"
+    assert row["new_value"] == _REACTION_EMOJI
+    assert row["comment"] == "added the reaction"
+
+
 def _seed_page(db_conn, workspace_id, owner_id):
     from _harness.db import insert_row
 
@@ -846,6 +1149,59 @@ def test_page_transaction_url_src_inserts_nothing(db_conn, broker_url):
         f'<image-component id="{uuid.uuid4()}" src="https://cdn.example/logo.png">'
         f"</image-component>"
     )
+    before = snapshot(db_conn, ["page_logs"])
+    celery_wire.publish(
+        f"{M}.page_transaction_task.page_transaction",
+        args=[html, "", str(page["id"])],
+    )
+    marker_id = str(uuid.uuid4())
+    marker_html = (
+        f'<mention-component id="{marker_id}" entity_identifier="{uuid.uuid4()}" '
+        f'entity_name="M-1" entity_type="issue"></mention-component>'
+    )
+    celery_wire.publish(
+        f"{M}.page_transaction_task.page_transaction",
+        args=[marker_html, "", str(marker_page["id"])],
+    )
+    wait_for(
+        lambda: _live_page_logs(db_conn, marker_page["id"]) or None,
+        what="marker page_logs row",
+    )
+    assert _added_rows(db_conn, "page_logs", before) != []
+    poisoned = [
+        row
+        for row in snapshot(db_conn, ["page_logs"])["page_logs"].values()
+        if row["page_id"] == str(page["id"])
+    ]
+    assert poisoned == []
+
+
+def test_page_transaction_second_chunk_poison_inserts_nothing(db_conn, broker_url):
+    """A poison id past the first 50 rolls back the whole bulk_create (PIDASHCONV-1282).
+
+    ``bulk_create(..., batch_size=50)`` wraps every batch in one
+    ``transaction.atomic(savepoint=False)`` (Django 4.2
+    ``QuerySet.bulk_create``), so a non-UUID mention id on the 51st
+    component rolls back the first batch too: zero new page_logs rows,
+    and the job still acks.
+
+    Completion signal: same marker-job pattern as
+    ``test_page_transaction_url_src_inserts_nothing`` (solo pool, FIFO).
+    """
+    owner = seed_helpers.user(db_conn, "contract-txchunk-owner")
+    workspace = seed_helpers.workspace(db_conn, "contracttxchunk", owner["id"])
+    page = _seed_page(db_conn, workspace["id"], owner["id"])
+    marker_page = _seed_page(db_conn, workspace["id"], owner["id"])
+    parts = [
+        f'<mention-component id="{uuid.uuid4()}" entity_identifier="{uuid.uuid4()}" '
+        f'entity_name="ISS-{n}" entity_type="issue"></mention-component>'
+        for n in range(50)
+    ]
+    parts.append(
+        f'<mention-component id="not-a-uuid" entity_identifier="{uuid.uuid4()}" '
+        f'entity_name="ISS-50" entity_type="issue"></mention-component>'
+    )
+    html = "".join(parts)
     before = snapshot(db_conn, ["page_logs"])
     celery_wire.publish(
         f"{M}.page_transaction_task.page_transaction",
@@ -1313,5 +1669,113 @@ def test_issue_activity_closed_to_writes_state_row_and_notifies(db_conn, broker_
     assert note["sender"] == "in_app:issue_activities:subscribed"
     assert note["title"] == "Pi Dash updated the state to "
     assert note["triggered_by_id"] == str(owner["id"])
+    # state_change preference + field=state sends one email log row.
+    assert len(_added_rows(db_conn, "email_notification_logs", before)) == 1
+
+
+def _seed_triage_state_world(db_conn, slug):
+    """Issue + triage state + Todo state + one notified subscriber (PIDASHCONV-1278).
+
+    Mirrors ``_seed_closed_to_world``: the subscriber is an active
+    project member with a preferences row so ``notifications`` writes
+    exactly one ``notifications`` row for them.
+    """
+    chain = seed_helpers.issue_chain(db_conn, slug)
+    owner, workspace, project, issue = (
+        chain["owner"],
+        chain["workspace"],
+        chain["project"],
+        chain["issue"],
+    )
+    triage_state = seed_helpers.state(
+        db_conn,
+        project["id"],
+        workspace["id"],
+        name="Triage",
+        group="triage",
+        is_triage=True,
+    )
+    todo_state = seed_helpers.state(
+        db_conn, project["id"], workspace["id"], name="Todo", group="unstarted"
+    )
+    sub = seed_helpers.user(db_conn, f"{slug}-subscriber")
+    seed_helpers.project_member(db_conn, project["id"], workspace["id"], sub["id"])
+    seed_helpers.issue_subscriber(
+        db_conn, project["id"], workspace["id"], issue["id"], sub["id"]
+    )
+    seed_helpers.notification_preference(db_conn, sub["id"])
+    return {
+        "owner": owner,
+        "workspace": workspace,
+        "project": project,
+        "issue": issue,
+        "triage_state": triage_state,
+        "todo_state": todo_state,
+        "subscriber": sub,
+    }
+
+
+def test_issue_activity_triage_state_resolves_to_null(db_conn, broker_url):
+    """triage → Todo: the triage side of the state row is NULL (PIDASHCONV-1278).
+
+    ``State.objects`` excludes ``group="triage"``
+    (``db/models/state.py`` ``StateManager``), so ``track_state``
+    (``issue_activities_task.py:208-209``) resolves a triage state id
+    to ``None`` and stores ``old_value``/``old_identifier`` NULL
+    (:211-225). The intake PATCH path
+    (``app/views/intake/base.py:430-447``) enqueues exactly this shape
+    when an intake issue leaves Triage.
+    """
+    world = _seed_triage_state_world(db_conn, "triagestate")
+    issue, owner, project = world["issue"], world["owner"], world["project"]
+    triage_state, todo_state = world["triage_state"], world["todo_state"]
+    sub = world["subscriber"]
+    epoch = 1728500000
+    before = snapshot(db_conn, ["issue_activities", "notifications", "email_notification_logs"])
+
+    celery_wire.publish(
+        f"{M}.issue_activities_task.issue_activity",
+        kwargs={
+            "type": "issue.activity.updated",
+            "requested_data": json.dumps({"state_id": str(todo_state["id"])}),
+            "current_instance": json.dumps({"state_id": str(triage_state["id"])}),
+            "issue_id": str(issue["id"]),
+            "actor_id": str(owner["id"]),
+            "project_id": str(project["id"]),
+            "epoch": epoch,
+            "subscriber": False,
+            "notification": True,
+        },
+    )
+    (row,) = wait_for(
+        lambda: _added_rows(db_conn, "issue_activities", before) or None,
+        what="triage-state issue_activities row",
+    )
+    assert row["field"] == "state"
+    assert row["verb"] == "updated"
+    assert row["comment"] == "updated the state to"
+    assert row["old_value"] is None
+    assert row["old_identifier"] is None
+    assert row["new_value"] == todo_state["name"]
+    assert row["new_identifier"] == str(todo_state["id"])
+    assert row["issue_id"] == str(issue["id"])
+    assert row["project_id"] == str(project["id"])
+    assert row["actor_id"] == str(owner["id"])
+    assert row["epoch"] == epoch
+
+    (note,) = wait_for(
+        lambda: _added_rows(db_conn, "notifications", before) or None,
+        what="triage-state notifications row",
+    )
+    assert note["receiver_id"] == str(sub["id"])
+    assert note["entity_identifier"] == str(issue["id"])
+    assert note["sender"] == "in_app:issue_activities:subscribed"
+    assert note["title"] == "updated the state to"
+    assert note["triggered_by_id"] == str(owner["id"])
+    activity_block = note["data"]["issue_activity"]
+    assert activity_block["old_value"] == "None"
+    assert activity_block["old_identifier"] is None
+    assert activity_block["new_value"] == todo_state["name"]
+    assert activity_block["new_identifier"] == str(todo_state["id"])
     # state_change preference + field=state sends one email log row.
     assert len(_added_rows(db_conn, "email_notification_logs", before)) == 1

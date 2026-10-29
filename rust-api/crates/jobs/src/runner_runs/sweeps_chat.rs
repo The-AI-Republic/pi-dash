@@ -7,8 +7,9 @@
 //!   rows older than the TTL.
 //! * `runner.sweep_agent_chat_state` (`:227-244`): `sweep_active_turns()`
 //!   + `sweep_empty_sessions()` from L5.
-//! * `runner.reconcile_stalled_runs` (`:246-330`): the 3-conjunct stall
-//!   watchdog, reaping via L4 `finalize_run_terminal`.
+//! * `runner.reconcile_stalled_runs` (`:412-503`): the 3-conjunct stall
+//!   watchdog (scoped to non-watchdog runners via `agent_health IS NULL`),
+//!   reaping via L4 `finalize_run_terminal`.
 //! * `runner.apply_agent_run_terminal_effects` (`:333-337`) +
 //!   `runner.reconcile_agent_run_terminal_effects` (`:340-353`, one unit):
 //!   the single apply plus the batch-of-100 `.delay` fan-out.
@@ -19,7 +20,7 @@
 //! fail-turn plan, event inserts), L4 `lifecycle`/`finalization`
 //! (terminal-update values, finalize lock/update, the terminal-effects
 //! plan, comment + scheduler-hook SQL). This module adds the candidate
-//! selects Django builds at the task call sites (the stall 3-conjunct
+//! selects Django builds at the task call sites (the stall candidate
 //! query, the reconcile batch query, the two dedupe deletes), the row
 //! mapping, the transaction/savepoint structure, and the post-commit
 //! effect firing. Settings resolve from the environment under the same
@@ -77,6 +78,7 @@ use pidash_db::runner_runs::{
     AgentChatSession,
 };
 use pidash_db::tasks_ticker::models::scheduler_binding;
+use pidash_services::domain::comments as comment_domain;
 use pidash_services::integrations::serializers::isoformat;
 use pidash_services::runner_runs::chat::{self, ChatEffect, NewEventInputs};
 use pidash_services::runner_runs::finalization::{self, TerminalEffectsInputs};
@@ -105,7 +107,7 @@ pub const SWEEP_RUN_MESSAGE_DEDUPE_TASK: &str = "runner.sweep_run_message_dedupe
 pub const SWEEP_CHAT_MESSAGE_DEDUPE_TASK: &str = "runner.sweep_chat_message_dedupe";
 /// `runner.sweep_agent_chat_state` (`tasks.py:227`).
 pub const SWEEP_AGENT_CHAT_STATE_TASK: &str = "runner.sweep_agent_chat_state";
-/// `runner.reconcile_stalled_runs` (`tasks.py:246`).
+/// `runner.reconcile_stalled_runs` (`tasks.py:411`).
 pub const RECONCILE_STALLED_RUNS_TASK: &str = "runner.reconcile_stalled_runs";
 /// `runner.reconcile_agent_run_terminal_effects` (`tasks.py:340`).
 pub const RECONCILE_TERMINAL_EFFECTS_TASK: &str = "runner.reconcile_agent_run_terminal_effects";
@@ -114,13 +116,29 @@ pub const RECONCILE_TERMINAL_EFFECTS_TASK: &str = "runner.reconcile_agent_run_te
 /// (`runner.apply_agent_run_terminal_effects`, `tasks.py:333`).
 pub use finalization::TERMINAL_EFFECTS_TASK;
 
+/// Enqueue one `apply_agent_run_terminal_effects` task for a run
+/// (`apply_agent_run_terminal_effects.delay(str(run_id))`):
+/// `args=[str(run_id)]`, `kwargs={}`. Moved from the api ports
+/// (`runner_runs::LivePorts::emit_terminal_effects`, OVL-06
+/// PIDASHCONV-1544) so the overlay shares the emit instead of
+/// copying it; the ports method is now a thin caller. Re-exported
+/// through `pidash-sdk::ops`.
+pub async fn emit_terminal_effects(pool: &PgPool, run_id: Uuid) -> Result<(), sqlx::Error> {
+    let job = NewJob::new(
+        TERMINAL_EFFECTS_TASK,
+        Value::Array(vec![Value::String(run_id.to_string())]),
+        Value::Object(Default::default()),
+    );
+    enqueue(pool, &job).await.map(|_| ())
+}
+
 // ---------------------------------------------------------------------------
 // Settings
 // ---------------------------------------------------------------------------
 
-/// `RUNNER_AGENT_STALL_THRESHOLD_SECS` default (`tasks.py:268`).
+/// `RUNNER_AGENT_STALL_THRESHOLD_SECS` default (`tasks.py:438`).
 pub const STALL_THRESHOLD_SECS_DEFAULT: i64 = 360;
-/// `RUNNER_AGENT_OBSERVABILITY_STALE_SECS` default (`tasks.py:269`).
+/// `RUNNER_AGENT_OBSERVABILITY_STALE_SECS` default (`tasks.py:439`).
 pub const OBSERVABILITY_STALE_SECS_DEFAULT: i64 = 90;
 
 /// Resolve a seconds setting: the env var under Django's setting name,
@@ -147,7 +165,7 @@ pub fn parse_dedupe_ttl(raw: Option<&str>) -> i64 {
     run_message_dedupe_ttl_secs(raw.and_then(|value| value.parse::<i64>().ok()))
 }
 
-/// `RUNNER_AGENT_STALL_THRESHOLD_SECS` (`tasks.py:268`).
+/// `RUNNER_AGENT_STALL_THRESHOLD_SECS` (`tasks.py:438`).
 pub fn stall_threshold_secs() -> i64 {
     setting_secs(
         "RUNNER_AGENT_STALL_THRESHOLD_SECS",
@@ -155,7 +173,7 @@ pub fn stall_threshold_secs() -> i64 {
     )
 }
 
-/// `RUNNER_AGENT_OBSERVABILITY_STALE_SECS` (`tasks.py:269`).
+/// `RUNNER_AGENT_OBSERVABILITY_STALE_SECS` (`tasks.py:439`).
 pub fn observability_stale_secs() -> i64 {
     setting_secs(
         "RUNNER_AGENT_OBSERVABILITY_STALE_SECS",
@@ -306,7 +324,7 @@ pub fn dedupe_cutoff(now: DateTime<Utc>, ttl_secs: i64) -> DateTime<Utc> {
     now - chrono::Duration::seconds(ttl_secs)
 }
 
-/// The stall cutoffs (`tasks.py:270-272`): the agent-silence cutoff
+/// The stall cutoffs (`tasks.py:440-442`): the agent-silence cutoff
 /// first, the snapshot-freshness cutoff second.
 pub fn stall_cutoffs(
     now: DateTime<Utc>,
@@ -319,16 +337,19 @@ pub fn stall_cutoffs(
     )
 }
 
-/// The stall candidate select (`tasks.py:292-301`): full `agent_run` +
+/// The stall candidate select (`tasks.py:462-472`): full `agent_run` +
 /// full `runner` (`select_related("runner")`) over the two `INNER
 /// JOIN`s. The `WHERE` order is Django's: the `status__in` filter,
 /// then the three live-state conjuncts in Q-sorted (alphabetical)
 /// order — `last_event_at`, `observed_run_id`, `updated_at` — then the
-/// `approvals_pending` OR. Params: `$1`/`$2` the active statuses
-/// (`assigned`, `running`), `$3` the silence cutoff, `$4` the snapshot
-/// cutoff, `$5` zero. `NULL` `last_event_at` rows never match (`__lt`
-/// excludes `NULL`); `NULL` `approvals_pending` rows do (the `IS NULL`
-/// arm). Fixture: FX-RUN-07 `candidate_sql`.
+/// `approvals_pending` OR, then the `agent_health IS NULL` backstop
+/// scope (watchdog runners own their own 24h/48h sweep, `:470`).
+/// Params: `$1`/`$2` the active statuses (`assigned`, `running`),
+/// `$3` the silence cutoff, `$4` the snapshot cutoff, `$5` zero.
+/// `NULL` `last_event_at` rows never match (`__lt` excludes `NULL`);
+/// `NULL` `approvals_pending` rows do (the `IS NULL` arm); only
+/// `NULL` `agent_health` rows match at all. Fixture: FX-RUN-07
+/// `candidate_sql`.
 pub fn stalled_candidate_sql() -> String {
     format!(
         "SELECT {}, {} FROM \"agent_run\" \
@@ -339,7 +360,8 @@ pub fn stalled_candidate_sql() -> String {
          AND \"runner_live_state\".\"observed_run_id\" = (\"agent_run\".\"id\") \
          AND \"runner_live_state\".\"updated_at\" >= $4 \
          AND (\"runner_live_state\".\"approvals_pending\" = $5 \
-         OR \"runner_live_state\".\"approvals_pending\" IS NULL)) \
+         OR \"runner_live_state\".\"approvals_pending\" IS NULL) \
+         AND \"runner_live_state\".\"agent_health\" IS NULL) \
          ORDER BY \"agent_run\".\"created_at\" DESC",
         qualified_columns(agent_run::TABLE, agent_run::COLUMNS),
         qualified_columns(runner_cols::TABLE, runner_cols::COLUMNS),
@@ -906,7 +928,7 @@ async fn sweep_empty_sessions(pool: &PgPool, now: &DateTime<Utc>) -> Result<u64,
 }
 
 // ---------------------------------------------------------------------------
-// Stall watchdog (`tasks.py:246-330`)
+// Stall watchdog (`tasks.py:412-503`)
 // ---------------------------------------------------------------------------
 
 /// The stall detail (`tasks.py:316`).
@@ -1424,58 +1446,44 @@ async fn post_failure_comment(
         return Ok(());
     }
     let actor_id = seams.agent_system_user().await.map_err(SweepError::Seam)?;
-    let comment_id = Uuid::new_v4();
-    let description_id = Uuid::new_v4();
-    // `comment_insert_sql` positional binds (`lifecycle.rs:452-460`):
-    // two `now()` reads, ambient user nulls (workers carry no `crum`
-    // user), then the fetched ids plus the plan.
-    sqlx::query(&lifecycle::comment_insert_sql())
-        .bind(Utc::now())
-        .bind(Utc::now())
-        .bind(None::<Uuid>)
-        .bind(None::<Uuid>)
-        .bind(None::<DateTime<Utc>>)
-        .bind(comment_id)
-        .bind(ids.project_id)
-        .bind(ids.workspace_id)
-        .bind(comment.comment_stripped.clone())
-        .bind(json!({}))
-        .bind(comment.comment_html.clone())
-        .bind(None::<Uuid>)
-        .bind(Vec::<String>::new())
-        .bind(Vec::<String>::new())
-        .bind(ids.issue_id)
-        .bind(actor_id)
-        .bind("INTERNAL")
-        .bind(None::<String>)
-        .bind(None::<String>)
-        .bind(comment.speaker.value())
-        .bind(comment.speaker_label.clone())
-        .bind(comment.speaker_agent_run_id)
-        .bind(None::<DateTime<Utc>>)
-        .bind(None::<Uuid>)
-        .execute(&mut **tx)
-        .await?;
-    sqlx::query(&lifecycle::description_insert_sql())
-        .bind(Utc::now())
-        .bind(Utc::now())
-        .bind(None::<Uuid>)
-        .bind(None::<Uuid>)
-        .bind(None::<DateTime<Utc>>)
-        .bind(description_id)
-        .bind(ids.workspace_id)
-        .bind(ids.project_id)
-        .bind(json!({}))
-        .bind(comment.comment_html.clone())
-        .bind(None::<Vec<u8>>)
-        .bind(comment.description_stripped.clone())
-        .execute(&mut **tx)
-        .await?;
-    sqlx::query(lifecycle::comment_description_link_sql())
-        .bind(description_id)
-        .bind(comment_id)
-        .execute(&mut **tx)
-        .await?;
+    // Domain executor twins, in Django order. Ambient user nulls:
+    // workers carry no `crum` user. Four `now()` reads keep their
+    // positions (comment pair, description pair); the description
+    // stripped value binds verbatim (empty stays `""`, never NULL).
+    let empty_json = json!({});
+    let empty_list: Vec<String> = Vec::new();
+    let rows = comment_domain::CommentRows {
+        id: Uuid::new_v4(),
+        description_id: Uuid::new_v4(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        desc_created_at: Utc::now(),
+        desc_updated_at: Utc::now(),
+        workspace_id: ids.workspace_id,
+        project_id: ids.project_id,
+        issue_id: ids.issue_id,
+        actor_id: Some(actor_id),
+        created_by: None,
+        updated_by: None,
+        deleted_at: None,
+        html: &comment.comment_html,
+        json: &empty_json,
+        stripped: &comment.comment_stripped,
+        desc_stripped: Some(&comment.description_stripped),
+        access: "INTERNAL",
+        speaker_type: comment.speaker.value(),
+        speaker_label: &comment.speaker_label,
+        speaker_agent_run_id: comment.speaker_agent_run_id,
+        external_id: None,
+        external_source: None,
+        parent_id: None,
+        attachments: &empty_list,
+        labels: &empty_list,
+        edited_at: None,
+    };
+    comment_domain::insert_comment_row(&mut **tx, &rows).await?;
+    comment_domain::insert_description_row(&mut **tx, &rows).await?;
+    comment_domain::link_comment_description(&mut **tx, rows.id, rows.description_id).await?;
     Ok(())
 }
 
@@ -1958,7 +1966,7 @@ mod tests {
         );
         assert_eq!(entries, expected);
         assert_eq!(agent_run::COLUMNS.len(), 41);
-        assert_eq!(runner_cols::COLUMNS.len(), 30);
+        assert_eq!(runner_cols::COLUMNS.len(), 32);
     }
 
     #[test]
@@ -1980,7 +1988,9 @@ mod tests {
             );
         assert_eq!(squish(&stalled_candidate_sql()), squish(&normalized));
         // The Q-sorted conjunct order survives normalization: silence
-        // first, then observed, then freshness.
+        // first, then observed, then freshness — with the approvals OR
+        // and the watchdog scope (`agent_health IS NULL`) trailing in
+        // filter order.
         let text = stalled_candidate_sql();
         let silence = text
             .find("\"runner_live_state\".\"last_event_at\" < $3")
@@ -1991,7 +2001,13 @@ mod tests {
         let fresh = text
             .find("\"runner_live_state\".\"updated_at\" >= $4")
             .expect("freshness");
-        assert!(silence < observed && observed < fresh);
+        let approvals = text
+            .find("\"runner_live_state\".\"approvals_pending\" = $5")
+            .expect("approvals");
+        let health = text
+            .find("\"runner_live_state\".\"agent_health\" IS NULL")
+            .expect("health scope");
+        assert!(silence < observed && observed < fresh && fresh < approvals && approvals < health);
     }
 
     #[test]

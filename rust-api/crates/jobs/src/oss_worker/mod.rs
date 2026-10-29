@@ -62,6 +62,10 @@ use crate::worker::Registry;
 pub struct OssWorkerCtx {
     /// The worker's pools (handlers close over clones).
     pub pools: Pools,
+    /// The shared SeaORM connection (ORM-01, design D5), built with
+    /// [`pidash_db::sea_orm_connection`] over the primary pool. The
+    /// handle wraps the pool (no second pool); handlers clone it.
+    pub orm: pidash_db::DatabaseConnection,
     /// The resolved settings (dispatch + runner + execute slices).
     pub settings: Settings,
     /// The Mongo sink for cleanup tasks, if MongoDB is configured.
@@ -73,6 +77,14 @@ pub struct OssWorkerCtx {
     /// executor). The OSS binary installs the CE default; the cloud
     /// binary installs its overlay implementation.
     pub assistant_seam: std::sync::Arc<dyn AssistantModelSeam>,
+}
+
+impl OssWorkerCtx {
+    /// The shared SeaORM connection. Domain services (stage 8) run
+    /// their writes on this handle's transactions.
+    pub fn orm(&self) -> &pidash_db::DatabaseConnection {
+        &self.orm
+    }
 }
 
 /// Register every OSS-owned task handler on `registry`.
@@ -121,8 +133,10 @@ pub struct OssWorkerCtx {
 /// // the client only parses here — it never dials.
 /// let mut settings = Settings::test_defaults();
 /// settings.redis.url = Some("redis://localhost:1/".to_owned());
+/// let pools = pidash_db::Pools::primary_only(pool);
 /// let ctx = OssWorkerCtx {
-///     pools: pidash_db::Pools::primary_only(pool),
+///     orm: pidash_db::sea_orm_connection(pools.primary()),
+///     pools,
 ///     settings,
 ///     mongo: None,
 ///     seed_dir: std::env::temp_dir(),
@@ -180,19 +194,9 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
         ctx.assistant_seam.clone(),
     );
     crate::tasks_cleanup::dummy_data::register(registry, ctx.pools.primary().clone());
-    // D-05 integrations groups (PIDASHCONV-238; kept in sync with
-    // `tests::worker_registry_owns_all_d05_local_tasks`). All six task
-    // names are worker-owned with live providers.
-    crate::integrations::git_sync::register_git_sync_tasks(
-        registry,
-        ctx.pools.primary().clone(),
-        crate::integrations::git_sync::LiveProviders::from_env(),
-    );
-    crate::integrations::github_sync::register_github_sync_tasks(
-        registry,
-        ctx.pools.primary().clone(),
-        crate::integrations::github_sync::LiveTransports::from_env(),
-    );
+    // D-05 integrations groups register below, after the shared Redis
+    // client is built (the sync drivers' transition hook drains pods
+    // through it).
     // D-08 sink tasks (PIDASHCONV-260, FX-LOG-01 for `process_logs`;
     // PIDASHCONV-1107 for `track_event`; kept in sync with
     // `tests::worker_registry_owns_sink_tasks`). EXECUTE parity per
@@ -228,6 +232,24 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
     // the Rust worker owns it — otherwise the task is lost at
     // switchover (parity gap W-license).
     crate::license::tasks::register(registry, ctx.pools.primary().clone());
+    // The shared Redis client (the `LivePorts::new` shape — `None` when
+    // `REDIS_URL` is unset or unparsable): the sweep's post-commit publish
+    // and, below, the runner seams. Built once, cloned per consumer.
+    let redis = match ctx
+        .settings
+        .redis
+        .url
+        .as_deref()
+        .filter(|url| !url.is_empty())
+        .map(pidash_db::redis::open_client)
+    {
+        None => None,
+        Some(Ok(client)) => Some(client),
+        Some(Err(error)) => {
+            tracing::warn!(%error, "redis: REDIS_URL unparsable; continuing without cache");
+            None
+        }
+    };
     // D-06 stale-turn sweep (PIDASHCONV-831; kept in sync with
     // `inventory::tests::mirror_registry_matches_tasks_table`). The live
     // store fails RUNNING turns older than the configured hard limit + 60s
@@ -237,6 +259,7 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
     crate::assistant::register_sweep_handler(
         registry,
         ctx.pools.primary().clone(),
+        redis.clone(),
         ctx.settings.assistant.turn_hard_limit,
     );
     // Loop scan + fire (PIDASHCONV-838; kept in sync with
@@ -271,6 +294,8 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
             ctx.pools.primary().clone(),
             ctx.settings.cloud_agent.clone(),
             ctx.settings.managed_runner.clone(),
+            redis.clone(),
+            ctx.settings.runner.clone(),
             std::sync::Arc::new(NoExtraToolsets),
             ctx.assistant_seam.clone(),
         )),
@@ -282,9 +307,41 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
             ctx.pools.primary().clone(),
             ctx.settings.cloud_agent.clone(),
             ctx.settings.managed_runner.clone(),
+            redis.clone(),
+            ctx.settings.runner.clone(),
             std::sync::Arc::new(NoExtraToolsets),
             ctx.assistant_seam.clone(),
         ),
+    );
+    // D-05 integrations groups (PIDASHCONV-238; kept in sync with
+    // `tests::worker_registry_owns_all_d05_local_tasks`). All six task
+    // names are worker-owned with live providers. The drivers also get
+    // the worker's transition hook, so sync-created/adopted mirrors run
+    // the same post-save legs as every other issue write (PIDASHCONV-1576).
+    // The cloud-agent tools hold the same instance for their domain
+    // write txns (PIDASHCONV-1596).
+    let transition_hook: std::sync::Arc<
+        dyn pidash_services::domain::transition::IssueTransitionHook,
+    > = std::sync::Arc::new(crate::issue_transition::WorkerTransitionHook::new(
+        ctx.pools.primary().clone(),
+        ctx.settings.cloud_agent.clone(),
+        ctx.settings.managed_runner.clone(),
+        redis.clone(),
+        ctx.settings.runner.clone(),
+        std::sync::Arc::new(NoExtraToolsets),
+        ctx.assistant_seam.clone(),
+    ));
+    crate::integrations::git_sync::register_git_sync_tasks(
+        registry,
+        ctx.pools.primary().clone(),
+        crate::integrations::git_sync::LiveProviders::from_env(),
+        Some(transition_hook.clone()),
+    );
+    crate::integrations::github_sync::register_github_sync_tasks(
+        registry,
+        ctx.pools.primary().clone(),
+        crate::integrations::github_sync::LiveTransports::from_env(),
+        Some(transition_hook.clone()),
     );
     // D-07 send/stack (PIDASHCONV-865; kept in sync with
     // `inventory::tests::mirror_registry_matches_tasks_table`). The live
@@ -343,24 +400,9 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
     // all thirteen — otherwise the runs are lost at switchover
     // (parity gap W-runner, plus the four dormant names the
     // registers also own).
-    let redis = match ctx
-        .settings
-        .redis
-        .url
-        .as_deref()
-        .filter(|url| !url.is_empty())
-        .map(redis::Client::open)
-    {
-        None => None,
-        Some(Ok(client)) => Some(client),
-        Some(Err(error)) => {
-            tracing::warn!(%error, "redis: REDIS_URL unparsable; continuing without cache");
-            None
-        }
-    };
     let runner_seams = std::sync::Arc::new(runner_seams::RunnerSeams::new(
         ctx.pools.primary().clone(),
-        redis,
+        redis.clone(),
         &ctx.settings,
         std::sync::Arc::new(NoExtraToolsets),
         ctx.assistant_seam.clone(),
@@ -391,6 +433,7 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
     let invoke = model_runtime::invoke::InvokeCtx {
         tools: model_runtime::tools_exec::ToolCtx {
             pool: ctx.pools.primary().clone(),
+            orm: ctx.orm.clone(),
             cloud: ctx.settings.cloud_agent.clone(),
             managed: ctx.settings.managed_runner.clone(),
             http: reqwest::Client::new(),
@@ -400,6 +443,9 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
                 ctx.settings.secret_key.clone(),
             ),
             toolsets: std::sync::Arc::new(NoExtraToolsets),
+            redis: redis.clone(),
+            runner: ctx.settings.runner.clone(),
+            transition_hook: transition_hook.clone(),
         },
         keys: model_runtime::keys::KeyResolver::from_env(
             ctx.settings.assistant.key_cache_ttl_secs,
@@ -502,8 +548,10 @@ mod tests {
         // the client only parses here — it never dials.
         let mut settings = Settings::test_defaults();
         settings.redis.url = Some("redis://localhost:1/".to_owned());
+        let pools = Pools::primary_only(pool);
         let ctx = OssWorkerCtx {
-            pools: Pools::primary_only(pool),
+            orm: pidash_db::sea_orm_connection(pools.primary()),
+            pools,
             settings,
             mongo: None,
             seed_dir: std::env::temp_dir(),

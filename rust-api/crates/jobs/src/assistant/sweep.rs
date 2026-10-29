@@ -31,6 +31,7 @@ use super::run_turn::{
 };
 use crate::queue::JobRow;
 use crate::worker::{HandlerError, Registry, Verdict};
+use pidash_db::assistant::event_queries::{publish_frame, serialize_event_json, EventParts};
 
 /// Celery task name (`tasks.py:511`, `@shared_task(name=...)`).
 pub const SWEEP_TASK: &str = "assistant.sweep_stale_turns";
@@ -148,15 +149,102 @@ pub async fn drive_sweep<S: SweepStore>(
 
 /// Live store: the two SQL shapes above plus the shared fail-turn write.
 /// Eligibility reuses [`context_eligible`] so a turn that went terminal
-/// between the select and the load is skipped, not failed.
+/// between the select and the load is skipped, not failed. The optional
+/// Redis client feeds the post-commit publish; `None` (no `REDIS_URL`)
+/// skips it like Django's `None` client.
 pub struct LiveSweepStore {
     pool: PgPool,
+    redis: Option<redis::Client>,
 }
 
 impl LiveSweepStore {
-    pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+    pub fn new(pool: PgPool, redis: Option<redis::Client>) -> Self {
+        Self { pool, redis }
     }
+}
+
+/// The committed event row for the post-commit publish (`events.py:67-70`,
+/// `_publish_by_id` re-reads by id). `$1` binds the event id; the payload
+/// crosses as the column's `::text`.
+fn published_event_lookup_sql() -> String {
+    format!(
+        "SELECT \"id\", \"thread_id\", \"message_id\", \"seq\", \"kind\", \
+         \"payload\"::text, \"created_at\" FROM \"{}\" WHERE \"id\" = $1",
+        super::run_turn::TABLE_EVENT
+    )
+}
+
+/// `datetime.isoformat()` for an aware stamp (`events.py:49`): seconds plus
+/// six micro digits iff nonzero, suffixed `+00:00`. The same rendering the
+/// SSE replay uses for this column (this crate cannot name that helper).
+fn py_iso(moment: &DateTime<Utc>) -> String {
+    let base = moment.format("%Y-%m-%dT%H:%M:%S").to_string();
+    let micros = moment.timestamp_subsec_micros();
+    if micros == 0 {
+        format!("{base}+00:00")
+    } else {
+        format!("{base}.{micros:06}+00:00")
+    }
+}
+
+/// PUBLISH one serialized event on its thread channel (`events.py:53-64`).
+/// A missing client is a no-op (`redis_instance()` returning `None`);
+/// every failure surfaces to the caller, which swallows it with a log line
+/// — the source's `except Exception: logger.exception(...)` never fails
+/// the sweep. Same shape as the runner sweeps' chat publish.
+async fn publish_event(
+    client: Option<&redis::Client>,
+    channel: &str,
+    payload: &str,
+) -> Result<(), redis::RedisError> {
+    let Some(client) = client else {
+        return Ok(());
+    };
+    use redis::AsyncCommands;
+    let mut connection = client.get_multiplexed_async_connection().await?;
+    let _: () = connection.publish(channel, payload).await?;
+    Ok(())
+}
+
+/// `_publish_by_id` (`events.py:67-70`): re-read the committed event row (a
+/// miss publishes nothing) and PUBLISH the serialized frame. A lookup
+/// database failure propagates — only the Redis half is swallowed.
+async fn publish_turn_failed(
+    pool: &PgPool,
+    redis: Option<&redis::Client>,
+    event_id: i64,
+) -> Result<(), SeamError> {
+    let row = sqlx::query_as::<_, (i64, Uuid, Option<Uuid>, i64, String, String, DateTime<Utc>)>(
+        &published_event_lookup_sql(),
+    )
+    .bind(event_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| SeamError(e.to_string()))?;
+    let Some((id, thread_id, message_id, seq, kind, payload_text, created_at)) = row else {
+        return Ok(());
+    };
+    let thread_str = thread_id.to_string();
+    let message_str = message_id.map(|id| id.to_string());
+    let created = py_iso(&created_at);
+    // The payload relays the column's `::text` verbatim: `jsonb` text uses
+    // the same `": "`/`", "` separators and short escapes as `json.dumps`,
+    // so for this ASCII payload these are the same bytes the SSE replay
+    // renders for the row (it re-renders the same text through `py_dumps`).
+    let body = serialize_event_json(&EventParts {
+        id,
+        thread_id: &thread_str,
+        message_id: message_str.as_deref(),
+        seq,
+        kind: &kind,
+        payload_json: &payload_text,
+        created_at: &created,
+    });
+    let (channel, body) = publish_frame(&thread_str, &body);
+    if let Err(error) = publish_event(redis, &channel, &body).await {
+        tracing::error!(%error, "publish turn_failed failed for thread {thread_str}");
+    }
+    Ok(())
 }
 
 impl SweepStore for LiveSweepStore {
@@ -222,26 +310,23 @@ impl SweepStore for LiveSweepStore {
             .execute(&mut *tx)
             .await
             .map_err(|e| SeamError(e.to_string()))?;
-        let won = sqlx::query(&rt::fail_turn_update())
-            .bind(ctx.turn_id)
-            .bind(&code)
-            .bind(&detail)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| SeamError(e.to_string()))?
-            .rows_affected();
+        let won =
+            pidash_services::domain::assistant::fail_turn(&mut *tx, ctx.turn_id, &code, &detail)
+                .await
+                .map_err(|e| SeamError(e.to_string()))?;
         if won == 0 {
             // The turn left `running` between the sweep's load and its lock
             // (a concurrent terminal write won): roll back and emit nothing,
             // so the sweep never writes a second terminal event.
             return Ok(false);
         }
-        sqlx::query(&rt::finalize_open_rows_update())
-            .bind(ctx.turn_id)
-            .bind(MSG_FAILED)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| SeamError(e.to_string()))?;
+        pidash_services::domain::assistant::finalize_open_messages(
+            &mut *tx,
+            ctx.turn_id,
+            MSG_FAILED,
+        )
+        .await
+        .map_err(|e| SeamError(e.to_string()))?;
         sqlx::query(&rt::clear_active_turn_update())
             .bind(ctx.thread_id)
             .bind(ctx.turn_id)
@@ -262,35 +347,38 @@ impl SweepStore for LiveSweepStore {
         } else {
             detail.clone()
         };
-        sqlx::query(&rt::error_message_insert())
-            .bind(message_id)
-            .bind(ctx.thread_id)
-            .bind(ctx.turn_id)
-            .bind(&content)
-            .bind(now)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| SeamError(e.to_string()))?;
+        pidash_services::domain::assistant::record_error_message(
+            &mut *tx,
+            message_id,
+            ctx.thread_id,
+            ctx.turn_id,
+            &content,
+            now,
+        )
+        .await
+        .map_err(|e| SeamError(e.to_string()))?;
         let payload = serde_json::json!({
             "turn_id": ctx.turn_id.to_string(),
             "error_code": code,
             "detail": detail,
         });
-        sqlx::query(&rt::turn_failed_event_insert())
-            .bind(ctx.thread_id)
-            .bind(ctx.turn_id)
-            .bind(message_id)
-            .bind(payload)
-            .bind(now)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| SeamError(e.to_string()))?;
-        sqlx::query(&rt::prune_turn_deltas_delete())
-            .bind(ctx.turn_id)
-            .execute(&mut *tx)
+        let event_id: i64 = pidash_services::domain::assistant::append_turn_failed_event(
+            &mut *tx,
+            ctx.thread_id,
+            ctx.turn_id,
+            message_id,
+            &payload,
+            now,
+        )
+        .await
+        .map_err(|e| SeamError(e.to_string()))?;
+        pidash_services::domain::assistant::prune_turn_deltas(&mut *tx, ctx.turn_id)
             .await
             .map_err(|e| SeamError(e.to_string()))?;
         tx.commit().await.map_err(|e| SeamError(e.to_string()))?;
+        // Post-commit publish (`events.append_event`'s `on_commit`): the
+        // event above reaches the thread channel like Django's.
+        publish_turn_failed(&self.pool, self.redis.as_ref(), event_id).await?;
         Ok(true)
     }
 }
@@ -299,12 +387,19 @@ impl SweepStore for LiveSweepStore {
 ///
 /// Unlike the turn task, the sweep keeps the default retry budget: a DB
 /// outage parks-or-retries through the worker's settlement (`tasks.py` sets
-/// no `max_retries` on the sweep, so Celery defaults apply).
+/// no `max_retries` on the sweep, so Celery defaults apply). The Redis
+/// client feeds the post-commit `turn_failed` publish; `None` (no
+/// `REDIS_URL`) skips it like Django's `None` client.
 /// `hard_limit_secs` is the configured `ASSISTANT_TURN_HARD_LIMIT`
 /// (`settings.assistant.turn_hard_limit`); every run sweeps against
 /// `now - (hard + 60)` like Django (`tasks.py:524`).
-pub fn register_sweep_handler(registry: &mut Registry, pool: PgPool, hard_limit_secs: i64) {
-    let store = Arc::new(LiveSweepStore::new(pool));
+pub fn register_sweep_handler(
+    registry: &mut Registry,
+    pool: PgPool,
+    redis: Option<redis::Client>,
+    hard_limit_secs: i64,
+) {
+    let store = Arc::new(LiveSweepStore::new(pool, redis));
     registry.register(
         SWEEP_TASK,
         Arc::new(move |_job: JobRow| {
@@ -324,7 +419,7 @@ pub fn register_sweep_handler(registry: &mut Registry, pool: PgPool, hard_limit_
 
 #[cfg(test)]
 mod tests {
-    use super::super::run_turn::{finalize_open_rows_update, lock_turn_select, CODE_TURN_TIMEOUT};
+    use super::super::run_turn::{lock_turn_select, CODE_TURN_TIMEOUT};
     use super::*;
     use std::sync::Mutex;
 
@@ -391,7 +486,7 @@ mod tests {
         assert!(sql.contains("started_at < $1"), "cutoff predicate: {sql}");
         assert!(sql.contains("ORDER BY"), "created_at ordering: {sql}");
         assert!(lock_turn_select().contains("FOR UPDATE"));
-        assert!(finalize_open_rows_update().contains("streaming"));
+        // (finalize pin moved to `pidash_services::domain::assistant`.)
         // The fail path reuses the shared turn-task writes.
         assert_eq!(CODE_TURN_TIMEOUT, "turn_timeout");
         assert_eq!(
@@ -520,5 +615,58 @@ mod tests {
             entry.cadence,
             crate::schedule::Cadence::IntervalSecs(SWEEP_INTERVAL_SECS)
         );
+    }
+
+    #[test]
+    fn publish_lookup_selects_event_row_by_id() {
+        let sql = published_event_lookup_sql();
+        assert!(sql.contains("assistant_event"), "event table: {sql}");
+        assert!(sql.contains("\"payload\"::text"), "payload text: {sql}");
+        assert!(sql.contains("WHERE \"id\" = $1"), "by-id lookup: {sql}");
+    }
+
+    #[test]
+    fn py_iso_renders_python_isoformat_bytes() {
+        use chrono::TimeZone;
+        let whole = Utc.with_ymd_and_hms(2026, 9, 29, 13, 50, 51).unwrap();
+        assert_eq!(py_iso(&whole), "2026-09-29T13:50:51+00:00");
+        let micros = whole + chrono::Duration::microseconds(378_615);
+        assert_eq!(py_iso(&micros), "2026-09-29T13:50:51.378615+00:00");
+        // Trailing-zero micros keep six digits (where chrono AutoSi would
+        // trim), like the SSE replay's `py_iso`.
+        let millis = whole + chrono::Duration::milliseconds(120);
+        assert_eq!(py_iso(&millis), "2026-09-29T13:50:51.120000+00:00");
+    }
+
+    #[test]
+    fn publish_frame_targets_thread_channel() {
+        // Representative committed row: the payload relays the column's
+        // `::text` verbatim (`jsonb` key order), like the SSE replay renders.
+        let parts = EventParts {
+            id: 7,
+            thread_id: "tid-1",
+            message_id: Some("mid-9"),
+            seq: 3,
+            kind: "turn_failed",
+            payload_json: "{\"Detail\": \"x\", \"turn_id\": \"t\", \"error_code\": \"c\"}",
+            created_at: "2026-09-29T13:50:51+00:00",
+        };
+        let (channel, body) = publish_frame(parts.thread_id, &serialize_event_json(&parts));
+        assert_eq!(channel, "assistant:thread:tid-1");
+        assert_eq!(
+            body,
+            "{\"id\": 7, \"thread\": \"tid-1\", \"message\": \"mid-9\", \"seq\": 3, \
+             \"kind\": \"turn_failed\", \"payload\": {\"Detail\": \"x\", \"turn_id\": \"t\", \
+             \"error_code\": \"c\"}, \"created_at\": \"2026-09-29T13:50:51+00:00\"}"
+        );
+    }
+
+    /// A missing Redis client is a no-op publish (`redis_instance()`
+    /// returning `None`): the sweep keeps working with no `REDIS_URL`.
+    #[tokio::test]
+    async fn publish_without_client_is_noop() {
+        publish_event(None, "assistant:thread:tid-1", "{}")
+            .await
+            .expect("None client publishes nothing, fails nothing");
     }
 }

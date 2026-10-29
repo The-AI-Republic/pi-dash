@@ -12,8 +12,8 @@
 //!   [`reapable_statuses`], the `STALE_*` builders,
 //!   [`reap_error_detail`], [`cancel_retry_message`],
 //!   [`plan_drain_after_commit`], [`SessionEffect`].
-//! * `upsert_runner_live_state` + `parse_optional_uuid` (`:324-397`)
-//!   → [`parse_optional_uuid`], [`plan_live_state_upsert`],
+//! * `upsert_runner_live_state` + `parse_optional_uuid` (`:371-448`)
+//!   → [`parse_optional_uuid`], [`plan_live_state_upsert`], [`is_known_agent_health`],
 //!   [`LIVE_STATE_SELECT_SQL`], [`LIVE_STATE_INSERT_SQL`],
 //!   [`live_state_update_sql`]. (`normalize_usage` is
 //!   [`super::usage::normalize_usage`], re-exported from D-15 L1.)
@@ -90,7 +90,7 @@
 //! * `save(update_fields=…)` orders `SET` by model field-definition
 //!   order, *not* by the `update_fields` list: hello writes
 //!   `capabilities` first (`:130-141`), and the live-state
-//!   `sorted(set(update_fields))` (`:397`) is cosmetic —
+//!   `sorted(set(update_fields))` (`:448`) is cosmetic —
 //!   `observed_run_id` still leads. `.update()` instead preserves
 //!   call order (barrier: `status, ended_at, queue_position`).
 //! * `pod_ids` is a `set`, so multi-pod drain order is arbitrary in
@@ -112,6 +112,7 @@ use uuid::Uuid;
 use crate::runner_runs::finalization::{plan_finalize_values, FinalizeValues};
 use crate::runner_runs::{qualified_columns, SetClause, SetValue};
 use crate::runner_sessions::guards::BUSY_STATUSES;
+use pidash_compat::py::{py_repr, py_str, py_strip, py_truthy};
 
 // ---------------------------------------------------------------------------
 // Grace windows (`session_service.py:33-55`)
@@ -131,33 +132,6 @@ pub const ASSIGN_DELIVERY_GRACE_SECS: i64 = 60;
 // module-private and every services dir keeps its own copies)
 // ---------------------------------------------------------------------------
 
-/// Python truthiness for JSON frame values (`None`/`False`/`0`/`""`/
-/// `[]`/`{}` are falsy; everything else is truthy).
-fn py_truthy(value: &Value) -> bool {
-    match value {
-        Value::Null => false,
-        Value::Bool(b) => *b,
-        Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                i != 0
-            } else if let Some(u) = n.as_u64() {
-                u != 0
-            } else {
-                n.as_f64().map(|f| f != 0.0).unwrap_or(false)
-            }
-        }
-        Value::String(s) => !s.is_empty(),
-        Value::Array(items) => !items.is_empty(),
-        Value::Object(map) => !map.is_empty(),
-    }
-}
-
-/// Python `str.strip()`: Rust's `is_whitespace` set plus
-/// U+001C..=U+001F (same formula as the sibling twins).
-fn py_strip(text: &str) -> &str {
-    text.trim_matches(|c: char| c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c))
-}
-
 /// First `max` Unicode code points of `text` (`text[:max]`).
 /// Byte-slicing would panic on a UTF-8 boundary; `chars().take()`
 /// cannot. A string that fits needs no walk.
@@ -166,126 +140,6 @@ fn truncate_chars(text: &str, max: usize) -> String {
         return text.to_string();
     }
     text.chars().take(max).collect()
-}
-
-/// Python `str(value)` for JSON frame values: `None`/`True`/`False`
-/// spellings, integers verbatim, floats in CPython repr form,
-/// strings as-is, containers in single-quote repr form.
-fn py_str(value: &Value) -> String {
-    match value {
-        Value::Null => "None".to_owned(),
-        Value::Bool(true) => "True".to_owned(),
-        Value::Bool(false) => "False".to_owned(),
-        Value::Number(n) => py_num_str(n),
-        Value::String(s) => s.clone(),
-        Value::Array(items) => {
-            let inner: Vec<String> = items.iter().map(py_repr).collect();
-            format!("[{}]", inner.join(", "))
-        }
-        Value::Object(map) => {
-            let inner: Vec<String> = map
-                .iter()
-                .map(|(k, v)| format!("{}: {}", py_repr_str(k), py_repr(v)))
-                .collect();
-            format!("{{{}}}", inner.join(", "))
-        }
-    }
-}
-
-/// CPython `repr` of a number: integers verbatim, floats via
-/// [`py_float_str`].
-fn py_num_str(n: &serde_json::Number) -> String {
-    if let Some(i) = n.as_i64() {
-        return i.to_string();
-    }
-    if let Some(u) = n.as_u64() {
-        return u.to_string();
-    }
-    n.as_f64()
-        .map(py_float_str)
-        .unwrap_or_else(|| n.to_string())
-}
-
-/// CPython `repr(float)`: Rust's `Debug` shortest round-trip with
-/// the exponent normalized to Python's `e±XX` form (`1e16` →
-/// `1e+16`, `1e-5` → `1e-05`). Same formula as the sibling twin;
-/// the two engines switch to exponent notation at different
-/// magnitudes in rare cases — frame floats are already absurd that
-/// far down.
-fn py_float_str(f: f64) -> String {
-    if f.is_nan() {
-        return "nan".to_owned();
-    }
-    if f.is_infinite() {
-        return if f > 0.0 {
-            "inf".to_owned()
-        } else {
-            "-inf".to_owned()
-        };
-    }
-    let rust = format!("{f:?}");
-    let Some(pos) = rust.find('e') else {
-        return rust;
-    };
-    let (mantissa, exp) = rust.split_at(pos);
-    let exp = &exp[1..];
-    let (sign, digits) = match exp.strip_prefix('-') {
-        Some(digits) => ("-", digits),
-        None => ("+", exp.strip_prefix('+').unwrap_or(exp)),
-    };
-    format!("{mantissa}e{sign}{digits:0>2}")
-}
-
-/// Python `repr(value)` for a value nested in a container: identical
-/// to [`py_str`] except strings, which gain quotes.
-fn py_repr(value: &Value) -> String {
-    match value {
-        Value::String(s) => py_repr_str(s),
-        other => py_str(other),
-    }
-}
-
-/// Python `repr(str)`: single quotes unless the string contains
-/// `'` but not `"`, backslash escapes for quotes/backslash/
-/// whitespace, `\xNN` / `\uNNNN` / `\U00NNNNNN` for the rest of
-/// the non-printables. Same formula as the sibling twin.
-fn py_repr_str(s: &str) -> String {
-    let use_double = s.contains('\'') && !s.contains('"');
-    let quote = if use_double { '"' } else { '\'' };
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push(quote);
-    for c in s.chars() {
-        if c == quote {
-            out.push('\\');
-            out.push(c);
-        } else {
-            match c {
-                '\\' => out.push_str("\\\\"),
-                '\n' => out.push_str("\\n"),
-                '\r' => out.push_str("\\r"),
-                '\t' => out.push_str("\\t"),
-                c if py_printable(c) => out.push(c),
-                c if (c as u32) < 0x100 => {
-                    out.push_str(&format!("\\x{:02x}", c as u32));
-                }
-                c if (c as u32) < 0x1_0000 => {
-                    out.push_str(&format!("\\u{:04x}", c as u32));
-                }
-                c => {
-                    out.push_str(&format!("\\U{:08x}", c as u32));
-                }
-            }
-        }
-    }
-    out.push(quote);
-    out
-}
-
-/// Approximation of `str.isprintable` for [`py_repr_str`]:
-/// controls, DEL and U+2028/2029 are non-printable; everything
-/// else (including the exotic `Cf` format characters) prints raw.
-fn py_printable(c: char) -> bool {
-    !(c.is_control() || c == '\u{7f}' || c == '\u{2028}' || c == '\u{2029}')
 }
 
 /// `UUID(str)` exactly as CPython's `uuid.UUID(hex)` parses it
@@ -1090,14 +944,16 @@ pub fn drain_pod_ids(
 }
 
 // ---------------------------------------------------------------------------
-// Live-state upsert (`upsert_runner_live_state`, `:306-397`)
+// Live-state upsert (`upsert_runner_live_state`, `:383-448`)
 // ---------------------------------------------------------------------------
 
 /// Snapshot fields stored on `RunnerLiveState` (`SNAPSHOT_FIELDS`,
-/// `:312-321`), in source order. `observed_run_id` drives the wipe
+/// `:355-368`), in source order. `observed_run_id` drives the wipe
 /// and is not a wipe target; `tokens` and `model` are unpacked by
-/// the upsert rather than copied field-for-field.
-pub const SNAPSHOT_FIELDS: [&str; 8] = [
+/// the upsert rather than copied field-for-field. The watchdog pair
+/// (`agent_health`, `agent_last_activity_at`) rides every busy poll
+/// ungated by the runner's observability flag.
+pub const SNAPSHOT_FIELDS: [&str; 10] = [
     "last_event_at",
     "last_event_kind",
     "last_event_summary",
@@ -1106,13 +962,32 @@ pub const SNAPSHOT_FIELDS: [&str; 8] = [
     "approvals_pending",
     "llm_model",
     "turn_count",
+    "agent_health",
+    "agent_last_activity_at",
 ];
 
+/// `AgentHealth.values` (`models.py:1492-1501`): the only
+/// `agent_health` labels the upsert stores. Anything else from the
+/// poll — a newer runner's label, a non-string, even explicit null
+/// (`None not in values`) — keeps the known-good value (`:433-435`).
+pub const AGENT_HEALTH_VALUES: [&str; 2] = ["healthy", "unhealthy"];
+
+/// Whether a poll value is a storable `agent_health` label: exactly
+/// one of [`AGENT_HEALTH_VALUES`]. Mirrors `value not in
+/// AgentHealth.values` (`session_service.py:433`), where every
+/// non-member — including `None` — skips.
+pub fn is_known_agent_health(value: &Value) -> bool {
+    match value {
+        Value::String(label) => AGENT_HEALTH_VALUES.contains(&label.as_str()),
+        _ => false,
+    }
+}
+
 /// `runner_live_state` columns in model field-definition order
-/// (`models.py:1471-1501`): the `SELECT` / `INSERT` projection and
+/// (`models.py:1521-1558`): the `SELECT` / `INSERT` projection and
 /// the `UPDATE` `SET` order (Django's `save(update_fields=…)` —
 /// the upsert's `sorted(set(…))` is cosmetic).
-pub const LIVE_STATE_COLUMNS: [&str; 12] = [
+pub const LIVE_STATE_COLUMNS: [&str; 14] = [
     "runner_id",
     "observed_run_id",
     "last_event_at",
@@ -1124,6 +999,8 @@ pub const LIVE_STATE_COLUMNS: [&str; 12] = [
     "usage",
     "llm_model",
     "turn_count",
+    "agent_health",
+    "agent_last_activity_at",
     "updated_at",
 ];
 
@@ -1174,7 +1051,7 @@ pub enum LiveStatePlan {
 }
 
 /// `logger.warning` line for a malformed `observed_run_id`
-/// (`:364-368`): `ignoring runner live-state update for <id>:
+/// (`:410-414`): `ignoring runner live-state update for <id>:
 /// invalid observed_run_id <repr>`. `%r` of a string is
 /// single-quoted; other JSON values render via `py_repr`.
 pub fn invalid_run_id_warning(runner_id: &Uuid, raw: &Value) -> String {
@@ -1184,7 +1061,7 @@ pub fn invalid_run_id_warning(runner_id: &Uuid, raw: &Value) -> String {
     )
 }
 
-/// Plan the observability-snapshot upsert (`:336-397`).
+/// Plan the observability-snapshot upsert (`:383-448`).
 ///
 /// * Non-dict/empty bodies and bodies without `observed_run_id`,
 ///   a snapshot field, `tokens` or `model` are [`LiveStatePlan::Noop`]
@@ -1200,7 +1077,9 @@ pub fn invalid_run_id_warning(runner_id: &Uuid, raw: &Value) -> String {
 ///   a completed run) wipes every snapshot field plus `usage = {}`
 ///   before applying incoming values.
 /// * Missing scalars never overwrite (same-run partial polls); an
-///   explicit JSON null writes `NULL`.
+///   explicit JSON null writes `NULL` — except for `agent_health`,
+///   where every non-member of [`AGENT_HEALTH_VALUES`] (including
+///   null) skips instead (`:433-436`).
 /// * `tokens` normalizes through [`super::usage::normalize_usage`]
 ///   into `usage`; top-level `model` strips, truncates to 128 chars
 ///   (`[:128]`), and stores `None` when blank.
@@ -1258,6 +1137,13 @@ pub fn plan_live_state_upsert(
     }
     for field in SNAPSHOT_FIELDS {
         if let Some(value) = entry.get(field) {
+            if field == "agent_health" && !is_known_agent_health(value) {
+                // Unknown label from a newer runner: keep the
+                // known-good value — skip the setattr AND the
+                // `update_fields` append (`:433-436`). On a wipe
+                // poll the wipe's `NULL` placeholder above survives.
+                continue;
+            }
             let clause = SetClause {
                 column: field_to_column(field),
                 value: scalar_set_value(value),
@@ -1320,6 +1206,8 @@ fn field_to_column(field: &str) -> &'static str {
         "approvals_pending" => "approvals_pending",
         "llm_model" => "llm_model",
         "turn_count" => "turn_count",
+        "agent_health" => "agent_health",
+        "agent_last_activity_at" => "agent_last_activity_at",
         _ => unreachable!("SNAPSHOT_FIELDS is closed"),
     }
 }
@@ -1349,17 +1237,17 @@ fn upsert_clause(sets: &mut Vec<SetClause>, clause: SetClause) {
     }
 }
 
-/// Live-state `get_or_create` select (`:359`,
+/// Live-state `get_or_create` select (`:406`,
 /// `upsert_first_snapshot.sql[0]`): `$1` runner id.
-pub const LIVE_STATE_SELECT_SQL: &str = "SELECT \"runner_live_state\".\"runner_id\", \"runner_live_state\".\"observed_run_id\", \"runner_live_state\".\"last_event_at\", \"runner_live_state\".\"last_event_kind\", \"runner_live_state\".\"last_event_summary\", \"runner_live_state\".\"agent_pid\", \"runner_live_state\".\"agent_subprocess_alive\", \"runner_live_state\".\"approvals_pending\", \"runner_live_state\".\"usage\", \"runner_live_state\".\"llm_model\", \"runner_live_state\".\"turn_count\", \"runner_live_state\".\"updated_at\" FROM \"runner_live_state\" WHERE \"runner_live_state\".\"runner_id\" = $1 LIMIT 21";
+pub const LIVE_STATE_SELECT_SQL: &str = "SELECT \"runner_live_state\".\"runner_id\", \"runner_live_state\".\"observed_run_id\", \"runner_live_state\".\"last_event_at\", \"runner_live_state\".\"last_event_kind\", \"runner_live_state\".\"last_event_summary\", \"runner_live_state\".\"agent_pid\", \"runner_live_state\".\"agent_subprocess_alive\", \"runner_live_state\".\"approvals_pending\", \"runner_live_state\".\"usage\", \"runner_live_state\".\"llm_model\", \"runner_live_state\".\"turn_count\", \"runner_live_state\".\"agent_health\", \"runner_live_state\".\"agent_last_activity_at\", \"runner_live_state\".\"updated_at\" FROM \"runner_live_state\" WHERE \"runner_live_state\".\"runner_id\" = $1 LIMIT 21";
 
-/// Live-state `get_or_create` insert (`:359`,
+/// Live-state `get_or_create` insert (`:406`,
 /// `upsert_first_snapshot.sql[2]`): `$1` runner id, `$2`
 /// `updated_at` (`auto_now`); every snapshot field `NULL`, `usage`
 /// `'{}'::jsonb` (the `default=dict`).
-pub const LIVE_STATE_INSERT_SQL: &str = "INSERT INTO \"runner_live_state\" (\"runner_id\", \"observed_run_id\", \"last_event_at\", \"last_event_kind\", \"last_event_summary\", \"agent_pid\", \"agent_subprocess_alive\", \"approvals_pending\", \"usage\", \"llm_model\", \"turn_count\", \"updated_at\") VALUES ($1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, '{}'::jsonb, NULL, NULL, $2)";
+pub const LIVE_STATE_INSERT_SQL: &str = "INSERT INTO \"runner_live_state\" (\"runner_id\", \"observed_run_id\", \"last_event_at\", \"last_event_kind\", \"last_event_summary\", \"agent_pid\", \"agent_subprocess_alive\", \"approvals_pending\", \"usage\", \"llm_model\", \"turn_count\", \"agent_health\", \"agent_last_activity_at\", \"updated_at\") VALUES ($1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, '{}'::jsonb, NULL, NULL, NULL, NULL, $2)";
 
-/// Render the live-state `UPDATE` (`:397`) from planned `SET`
+/// Render the live-state `UPDATE` (`:448`) from planned `SET`
 /// clauses (model field-definition order): `Null` renders literal
 /// `NULL` (Django inlines `None`), anything else binds `$N` in
 /// order; `updated_at` binds next (`auto_now`), `WHERE runner_id`
@@ -2689,7 +2577,9 @@ mod tests {
                 "approvals_pending",
                 "usage",
                 "llm_model",
-                "turn_count"
+                "turn_count",
+                "agent_health",
+                "agent_last_activity_at"
             ]
         );
         // Wipe placeholder survives only where the poll sent nothing.
@@ -2774,7 +2664,7 @@ mod tests {
             Some(&entry),
             &runner_id(),
         ));
-        assert_eq!(clauses.len(), 10);
+        assert_eq!(clauses.len(), 12);
         pin(
             &live_state_update_sql(&clauses),
             &fx_sql("upsert_run_change_wipe", 1),
@@ -2833,6 +2723,72 @@ mod tests {
             assert_eq!(clauses[0].value, SetValue::Null);
         }
         assert_eq!(trunc["blank_becomes"], Value::Null);
+    }
+
+    #[test]
+    fn live_state_agent_health_skips_unknown_labels() {
+        // Known labels store (`:433-436`): both values bind.
+        for label in ["healthy", "unhealthy"] {
+            let entry = str_body(vec![("agent_health", label)]);
+            let clauses = update_clauses(plan_live_state_upsert(
+                &live_facts(None),
+                Some(&entry),
+                &runner_id(),
+            ));
+            assert_eq!(clauses.len(), 1);
+            assert_eq!(clauses[0].column, "agent_health");
+            assert_eq!(clauses[0].value, SetValue::Text(label.to_string()));
+        }
+        // Unknown labels — a newer runner's string, a non-string,
+        // even explicit null (`None not in values`) — skip the
+        // setattr AND the append: nothing persists (`update_fields`
+        // empty → `NoChange`, no `UPDATE`).
+        for value in [
+            Value::from("bogus-label"),
+            Value::from(5),
+            Value::Bool(true),
+            Value::Null,
+        ] {
+            assert!(!is_known_agent_health(&value), "{value:?} skips");
+            let entry = body(vec![("agent_health", value)]);
+            assert!(
+                matches!(
+                    plan_live_state_upsert(&live_facts(None), Some(&entry), &runner_id()),
+                    LiveStatePlan::NoChange
+                ),
+                "unknown label plans no update"
+            );
+        }
+        // The activity timestamp has no label gate: it stores like
+        // any other snapshot scalar.
+        let entry = str_body(vec![("agent_last_activity_at", "2026-10-20T01:02:03Z")]);
+        let clauses = update_clauses(plan_live_state_upsert(
+            &live_facts(None),
+            Some(&entry),
+            &runner_id(),
+        ));
+        assert_eq!(clauses.len(), 1);
+        assert_eq!(clauses[0].column, "agent_last_activity_at");
+        // On a run-change poll the wipe's `NULL` placeholders persist
+        // through the skip (Django: the wipe's `setattr None` entries
+        // stay in `update_fields`).
+        let entry = body(vec![
+            (
+                "observed_run_id",
+                Value::from("a96a9859-f0af-4777-97e0-d6b69fee305c"),
+            ),
+            ("agent_health", Value::from("bogus-label")),
+        ]);
+        let clauses = update_clauses(plan_live_state_upsert(
+            &live_facts(Some("bd707755-06a0-48bb-8350-9e30eac341f1")),
+            Some(&entry),
+            &runner_id(),
+        ));
+        let health = clauses
+            .iter()
+            .find(|c| c.column == "agent_health")
+            .expect("wipe placeholder survives the skip");
+        assert_eq!(health.value, SetValue::Null);
     }
 
     #[test]
@@ -2907,9 +2863,12 @@ mod tests {
                 "agent_subprocess_alive",
                 "approvals_pending",
                 "llm_model",
-                "turn_count"
+                "turn_count",
+                "agent_health",
+                "agent_last_activity_at"
             ]
         );
+        assert_eq!(AGENT_HEALTH_VALUES, ["healthy", "unhealthy"]);
     }
 
     // -- presence + slug -----------------------------------------------

@@ -43,23 +43,27 @@ use pidash_services::app_views_search::queries_search::{
 };
 
 use super::{
-    actor_user_id, fetch_shaped, json_response, owned, parse_uuid_or_invalid, primary, query_last,
+    actor_user_id, fetch_shaped, json_response, parse_uuid_or_invalid, primary, query_last,
     resolve_project_id, Col, Denial, QueryMap,
 };
+use crate::edge;
 use crate::state::AppState;
 
 /// Register the three search GET routes. Nothing else: sibling paths stay
 /// unmatched and proxy to Django through the fallback.
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/api/workspaces/{slug}/search/", owned(get(global_search)))
+        .route(
+            "/api/workspaces/{slug}/search/",
+            edge::owned(get(global_search), &["GET", "TRACE"]),
+        )
         .route(
             "/api/workspaces/{slug}/projects/{project_id}/search-issues/",
-            owned(get(issue_search)),
+            edge::owned(get(issue_search), &["GET", "TRACE"]),
         )
         .route(
             "/api/workspaces/{slug}/entity-search/",
-            owned(get(entity_search)),
+            edge::owned(get(entity_search), &["GET", "TRACE"]),
         )
 }
 

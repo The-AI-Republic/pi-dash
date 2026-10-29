@@ -93,6 +93,7 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use pidash_db::Pools;
+use pidash_services::domain::issues::{touch_issue, touch_issues};
 use pidash_services::tasks_webhooks::activity_issue::{
     plan_create_comment, plan_create_cycle_issue, plan_create_issue, plan_create_module_issue,
     plan_delete_comment, plan_delete_cycle_issue, plan_delete_issue, plan_delete_module_issue,
@@ -114,8 +115,8 @@ use pidash_services::tasks_webhooks::activity_tracks::{
 use crate::queue::{enqueue, NewJob};
 use crate::worker::{Handler, Registry, Verdict};
 
-/// Celery task name (`@shared_task`, `:1503-1504`).
-pub const ISSUE_ACTIVITY_TASK: &str = "pi_dash.bgtasks.issue_activities_task.issue_activity";
+/// Re-export of the canonical [`pidash_services::domain::activity::ISSUE_ACTIVITY_TASK`].
+pub use pidash_services::domain::activity::ISSUE_ACTIVITY_TASK;
 
 /// `notifications.delay(...)` target (`notification_task.py:190-200`).
 pub const NOTIFICATIONS_TASK: &str = "pi_dash.bgtasks.notification_task.notifications";
@@ -306,19 +307,16 @@ pub const FIND_PROJECT_WORKSPACE_SQL: &str =
     r#"SELECT workspace_id FROM projects WHERE id = $1 AND deleted_at IS NULL"#;
 
 /// `Issue.objects.filter(pk=issue_id).first()` for the touch (`:1532`).
+/// The touch itself is [`pidash_services::domain::issues::touch_issue`].
 pub const FIND_ISSUE_SQL: &str = r#"SELECT id FROM issues WHERE id = $1 AND deleted_at IS NULL"#;
-
-/// `issue.updated_at = timezone.now(); save(update_fields=["updated_at"])`
-/// (`:1535-1536`).
-pub const TOUCH_ISSUE_SQL: &str = r#"UPDATE issues SET updated_at = NOW() WHERE id = $1"#;
 
 /// `IssueReaction.objects.filter(reaction, project_id,
 /// actor_id).values_list("id", flat=True).first()` (`:1082-1090`).
-pub const FIND_ISSUE_REACTION_SQL: &str = r#"SELECT id FROM issue_reactions WHERE reaction = $1 AND project_id = $2 AND actor_id = $3 AND deleted_at IS NULL LIMIT 1"#;
+pub const FIND_ISSUE_REACTION_SQL: &str = r#"SELECT id FROM issue_reactions WHERE reaction = $1 AND project_id = $2 AND actor_id = $3 AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1"#;
 
 /// `CommentReaction.objects.filter(reaction, project_id,
 /// actor_id).values_list("id", "comment__id").first()` (`:1152-1160`).
-pub const FIND_COMMENT_REACTION_SQL: &str = r#"SELECT id, comment_id FROM comment_reactions WHERE reaction = $1 AND project_id = $2 AND actor_id = $3 AND deleted_at IS NULL LIMIT 1"#;
+pub const FIND_COMMENT_REACTION_SQL: &str = r#"SELECT id, comment_id FROM comment_reactions WHERE reaction = $1 AND project_id = $2 AND actor_id = $3 AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1"#;
 
 /// `IssueComment.objects.get(pk=..., project_id=...)`
 /// (`:1161`) and `IssueComment.objects.filter(pk=...,
@@ -345,8 +343,9 @@ pub const FIND_USER_SQL: &str = r#"SELECT id, display_name FROM users WHERE id =
 pub const FIND_PARENT_SQL: &str = r#"SELECT i.id, p.identifier, i.sequence_id FROM issues i JOIN projects p ON p.id = i.project_id WHERE i.id = $1 AND i.deleted_at IS NULL"#;
 
 /// `State.objects.filter(pk=..., project_id=...).first()` (`:208-209`).
-pub const FIND_STATE_SQL: &str =
-    r#"SELECT id, name FROM states WHERE id = $1 AND project_id = $2 AND deleted_at IS NULL"#;
+/// The default `StateManager` excludes `group="triage"`
+/// (`db/models/state.py:79-83`), so the lookup does too.
+pub const FIND_STATE_SQL: &str = r#"SELECT id, name FROM states WHERE id = $1 AND project_id = $2 AND deleted_at IS NULL AND "group" <> 'triage'"#;
 
 /// `Label.objects.filter(...)` for `track_labels` (`activity_tracks`;
 /// `db_table = "labels"`).
@@ -383,13 +382,6 @@ pub const FIND_CYCLE_SQL: &str =
 pub const FIND_MODULE_SQL: &str =
     r#"SELECT name FROM modules WHERE id = $1 AND deleted_at IS NULL"#;
 
-/// Per-record `updated_at` touches from the cycle/module builders
-/// (`activity_issue::CycleOutcome::touched_issue_ids`): one statement over
-/// the soft-filtered set — same final rows as the per-record guarded
-/// saves.
-pub const TOUCH_ISSUES_SQL: &str =
-    r#"UPDATE issues SET updated_at = NOW() WHERE id = ANY($1) AND deleted_at IS NULL"#;
-
 /// The `IssueFlatSerializer` projection for `issue_detail`
 /// (`serializers/issue.py:105-122`): id, name, description_json,
 /// description_html, priority, complexity_score, start_date, target_date,
@@ -419,119 +411,10 @@ pub fn drf_datetime(value: &DateTime<Utc>) -> String {
     }
 }
 
-/// Escape one string exactly like `json.dumps` (`ensure_ascii=True`,
-/// lowercase `\uXXXX`): control escapes, quotes, backslash, then
-/// non-ASCII as `\uXXXX` with surrogate pairs above BMP.
-fn dumps_escape(into: &mut String, text: &str) {
-    for ch in text.chars() {
-        match ch {
-            '"' => into.push_str("\\\""),
-            '\\' => into.push_str("\\\\"),
-            '\n' => into.push_str("\\n"),
-            '\r' => into.push_str("\\r"),
-            '\t' => into.push_str("\\t"),
-            '\u{08}' => into.push_str("\\b"),
-            '\u{0C}' => into.push_str("\\f"),
-            c if (c as u32) < 0x20 => into.push_str(&format!("\\u{:04x}", c as u32)),
-            c if (c as u32) < 0x7F => into.push(c),
-            c => {
-                let code = c as u32;
-                if code < 0x10000 {
-                    into.push_str(&format!("\\u{code:04x}"));
-                } else {
-                    // Surrogate pair, like CPython's `ensure_ascii`.
-                    let v = code - 0x10000;
-                    into.push_str(&format!(
-                        "\\u{:04x}\\u{:04x}",
-                        0xD800 + (v >> 10),
-                        0xDC00 + (v & 0x3FF)
-                    ));
-                }
-            }
-        }
-    }
-}
-
-/// Python `repr()` of a float as `json.dumps` renders it: `repr(f)`
-/// shortest-roundtrip. `ryu` (via `serde_json`) prints the same digits
-/// for finite values; non-finite floats never occur in this payload
-/// (Django would render `Infinity`/`NaN` bare tokens the same way).
-fn dumps_number(into: &mut String, value: &serde_json::Number) {
-    into.push_str(&value.to_string());
-}
-
-/// `json.dumps(obj, cls=DjangoJSONEncoder)` with default separators
-/// (`", "` / `": "`, `ensure_ascii=True`): the tree this module builds
-/// holds only strings, numbers, booleans and nulls (every datetime, UUID
-/// and Decimal is pre-rendered), so no encoder hooks are needed.
-pub fn django_dumps(value: &Value) -> String {
-    let mut out = String::new();
-    dumps_value(&mut out, value);
-    out
-}
-
-fn dumps_value(into: &mut String, value: &Value) {
-    // Iterative over an explicit stack: callers may pass values nested
-    // to the 9939 request cap (the cycle add path echoes raw `issues`),
-    // and the recursive walk overflows 2MB workers. Output is unchanged
-    // (same scalars, separators and key order).
-    enum Task<'v> {
-        Emit(&'v Value),
-        Key(&'v str),
-        Lit(&'static str),
-        Seal(char),
-    }
-    fn scalar(into: &mut String, value: &Value) {
-        match value {
-            Value::Null => into.push_str("null"),
-            Value::Bool(true) => into.push_str("true"),
-            Value::Bool(false) => into.push_str("false"),
-            Value::Number(n) => dumps_number(into, n),
-            Value::String(s) => {
-                into.push('"');
-                dumps_escape(into, s);
-                into.push('"');
-            }
-            Value::Array(_) | Value::Object(_) => unreachable!("scalars only"),
-        }
-    }
-    let mut stack = vec![Task::Emit(value)];
-    while let Some(task) = stack.pop() {
-        match task {
-            Task::Emit(Value::Array(items)) => {
-                into.push('[');
-                stack.push(Task::Seal(']'));
-                for (index, item) in items.iter().rev().enumerate() {
-                    if index > 0 {
-                        stack.push(Task::Lit(", "));
-                    }
-                    stack.push(Task::Emit(item));
-                }
-            }
-            Task::Emit(Value::Object(map)) => {
-                into.push('{');
-                stack.push(Task::Seal('}'));
-                for (index, (key, item)) in map.iter().rev().enumerate() {
-                    if index > 0 {
-                        stack.push(Task::Lit(", "));
-                    }
-                    stack.push(Task::Emit(item));
-                    stack.push(Task::Lit("\": "));
-                    stack.push(Task::Key(key));
-                }
-            }
-            Task::Emit(leaf) => scalar(into, leaf),
-            Task::Key(key) => {
-                // Opening quote plus text; the `": "` literal carries the
-                // closing quote, exactly like the recursive original.
-                into.push('"');
-                dumps_escape(into, key);
-            }
-            Task::Lit(text) => into.push_str(text),
-            Task::Seal(closer) => into.push(closer),
-        }
-    }
-}
+/// `json.dumps` with Django separators — moved to its canonical home
+/// `pidash_compat::py::django_dumps` by OVL-14 (PIDASHCONV-1649);
+/// re-exported here so every existing path keeps working.
+pub use pidash_compat::py::django_dumps;
 
 /// One inserted `IssueActivity` row plus its `RETURNING` columns, ready to
 /// serialize (`bulk_create` returns the created rows, `:1584`, and the
@@ -973,7 +856,8 @@ async fn fetch_update_snapshots(
         );
     }
     // State ids are project-scoped (`State.objects.filter(pk=...,
-    // project_id=...)`).
+    // project_id=...)`), and the default `StateManager` excludes
+    // `group="triage"` (`db/models/state.py:79-83`).
     let mut state_ids: HashSet<String> = HashSet::new();
     for payload in [requested, current] {
         for key in ["state_id", "state"] {
@@ -993,7 +877,7 @@ async fn fetch_update_snapshots(
     let mut states = HashMap::new();
     if !state_list.is_empty() {
         for row in sqlx::query(
-            "SELECT id::text AS sid, name FROM states WHERE id::text = ANY($1) AND project_id = $2 AND deleted_at IS NULL",
+            "SELECT id::text AS sid, name FROM states WHERE id::text = ANY($1) AND project_id = $2 AND deleted_at IS NULL AND \"group\" <> 'triage'",
         )
         .bind(&state_list)
         .bind(project_uuid)
@@ -1823,9 +1707,11 @@ async fn persist(
             .iter()
             .map(|id| lookup_uuid(id, "record touches"))
             .collect::<Result<_, _>>()?;
-        sqlx::query(TOUCH_ISSUES_SQL)
-            .bind(touched)
-            .execute(pool)
+        // Per-record `updated_at` touches from the cycle/module builders
+        // (`activity_issue::CycleOutcome::touched_issue_ids`): one statement
+        // over the soft-filtered set — same final rows as the per-record
+        // guarded saves.
+        touch_issues(pool, &touched)
             .await
             .map_err(|error| DispatchError::Log(format!("record touches: {error}")))?;
     }
@@ -1898,10 +1784,7 @@ pub async fn run_activity<R: RedisOrigin>(
             .is_some();
         if found {
             // Own try/except-pass: touch failures never abort the build.
-            let _ = sqlx::query(TOUCH_ISSUE_SQL)
-                .bind(touch_id)
-                .execute(pool)
-                .await;
+            let _ = touch_issue(pool, touch_id).await;
         }
     }
     let collected = collect_rows(pool, &frame, call, project_id).await?;
@@ -2204,6 +2087,16 @@ mod tests {
         }
         // The custom user manager has no soft-delete scope.
         assert!(!FIND_USER_SQL.contains("deleted_at"));
+    }
+
+    // PIDASHCONV-1278 · the default `StateManager` excludes triage-group
+    // states (`db/models/state.py:79-83`); the lookup renders the same.
+    #[test]
+    fn state_lookup_excludes_triage() {
+        assert!(
+            FIND_STATE_SQL.contains("\"group\" <> 'triage'"),
+            "missing triage exclusion: {FIND_STATE_SQL}"
+        );
     }
 
     // FX-ACT-03 · DRF datetime rendering.

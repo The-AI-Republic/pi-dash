@@ -27,17 +27,18 @@
 
 use axum::body::Bytes;
 use axum::extract::{Extension, Path, State};
-use axum::http::StatusCode;
-use axum::response::Response;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch};
 use axum::Router;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use super::common::{
-    json_response, or_empty_str, owned_thread, parse_json_body, pool_ref, py_bool, request_actor,
-    require_member, role_for, server_error, thread_json, thread_not_found, truncate_chars,
-    unauthenticated, workspace_id_for_slug, HandlerResult, ThreadRow,
+    body_get, json_response, or_empty_body, owned_thread, parse_body, pool_ref, py_bool,
+    request_actor, request_content_type, require_member, role_for, server_error, thread_json,
+    thread_not_found, truncate_chars, unauthenticated, workspace_id_for_slug, BodyField,
+    HandlerResult, ParsedBody, ThreadRow,
 };
 use super::redis::signal_cancel;
 use crate::middleware::SessionHandle;
@@ -155,7 +156,19 @@ async fn delete_thread_rows(conn: &mut sqlx::PgConnection, thread_id: &Uuid) -> 
         "UPDATE \"loop_targets\" SET \"last_run_id\" = NULL \
          WHERE \"last_run_id\" IN (SELECT \"id\" FROM \"assistant_turn\" WHERE \"thread_id\" = $1)",
         "DELETE FROM \"assistant_event\" WHERE \"thread_id\" = $1",
-        "DELETE FROM \"assistant_message\" WHERE \"thread_id\" = $1",
+    ] {
+        sqlx::query(statement)
+            .bind(thread_id)
+            .execute(&mut *conn)
+            .await
+            .map_err(|_| server_error())?;
+    }
+    // Message leg (leaf-first order preserved — messages after events,
+    // before turns).
+    pidash_services::domain::assistant::delete_thread_messages(&mut *conn, *thread_id)
+        .await
+        .map_err(|_| server_error())?;
+    for statement in [
         "DELETE FROM \"assistant_turn\" WHERE \"thread_id\" = $1",
         "DELETE FROM \"assistant_thread\" WHERE \"id\" = $1",
     ] {
@@ -216,6 +229,7 @@ async fn create_thread(
     State(state): State<AppState>,
     Path(slug): Path<String>,
     extension: Option<Extension<SessionHandle>>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> HandlerResult<Response> {
     let pool = pool_ref(&state)?;
@@ -224,8 +238,14 @@ async fn create_thread(
     };
     let role = role_for(pool, &actor.id, &slug).await?;
     require_member(role)?;
-    let data = parse_json_body(&body)?;
-    let title = truncate_chars(&or_empty_str(data.get("title"))?, 255);
+    let data = match parse_body(&body, request_content_type(&headers)) {
+        Ok(ParsedBody::Object(map)) => map,
+        // A non-object body has no `.get`: `AttributeError` → generic
+        // 500. (JSON `null` takes the same path: `None.get` raises too.)
+        Ok(_) => return Err(server_error()),
+        Err(failure) => return Err(failure.into_response()),
+    };
+    let title = truncate_chars(&or_empty_body(body_get(&data, "title"))?, 255);
     let Some(workspace_id) = workspace_id_for_slug(pool, &slug).await? else {
         return Err(thread_not_found());
     };
@@ -296,6 +316,7 @@ async fn patch_thread(
     State(state): State<AppState>,
     Path((slug, thread_id)): Path<(String, String)>,
     extension: Option<Extension<SessionHandle>>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> HandlerResult<Response> {
     let pool = pool_ref(&state)?;
@@ -311,13 +332,22 @@ async fn patch_thread(
     let Some(thread) = owned_thread(pool, &thread_id, &actor.id, &slug).await? else {
         return Err(thread_not_found());
     };
-    let data = parse_json_body(&body)?;
-    let title = match data.get("title") {
-        Some(value) => truncate_chars(&or_empty_str(Some(value))?, 255),
+    let data = match parse_body(&body, request_content_type(&headers)) {
+        Ok(ParsedBody::Object(map)) => map,
+        // A non-object body supports neither `in` nor `.get`:
+        // `TypeError`/`AttributeError` → generic 500. (JSON `null`
+        // takes the same path.)
+        Ok(_) => return Err(server_error()),
+        Err(failure) => return Err(failure.into_response()),
+    };
+    let title = match body_get(&data, "title") {
+        Some(field) => truncate_chars(&or_empty_body(Some(field))?, 255),
         None => thread.title,
     };
-    let is_archived = match data.get("is_archived") {
-        Some(value) => py_bool(value),
+    let is_archived = match body_get(&data, "is_archived") {
+        // `bool(UploadedFile)` is True: objects are truthy.
+        Some(BodyField::File { .. }) => true,
+        Some(BodyField::Json(value)) => py_bool(value),
         None => thread.is_archived,
     };
     let row = sqlx::query_as::<
