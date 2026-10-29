@@ -75,7 +75,18 @@ pub fn py_dumps(value: &serde_json::Value) -> String {
         serde_json::Value::Null => "null".to_owned(),
         serde_json::Value::Bool(true) => "true".to_owned(),
         serde_json::Value::Bool(false) => "false".to_owned(),
-        serde_json::Value::Number(number) => py_float(number),
+        serde_json::Value::Number(number) => {
+            // Integers render verbatim like `json.dumps`; only real floats
+            // go through `py_float` (PIDASHCONV-1241: 0 became "0.0" and
+            // >= 1e16 became scientific). `is_f64` is the discriminator:
+            // with `arbitrary_precision` it is true exactly for float
+            // spellings, so beyond-u64 integers stay verbatim too.
+            if number.is_f64() {
+                py_float(number)
+            } else {
+                number.to_string()
+            }
+        }
         serde_json::Value::String(text) => dumps_string(text),
         serde_json::Value::Array(items) => {
             let parts: Vec<String> = items.iter().map(py_dumps).collect();
@@ -443,6 +454,35 @@ mod tests {
         );
         assert_eq!(py_dumps(&serde_json::json!({})), "{}");
         assert_eq!(py_dumps(&serde_json::json!([])), "[]");
+    }
+
+    #[test]
+    fn py_dumps_renders_integers_verbatim() {
+        // PIDASHCONV-1241: integers never take the float path (0.0,
+        // scientific), whatever their width.
+        assert_eq!(py_dumps(&serde_json::json!(0)), "0");
+        assert_eq!(py_dumps(&serde_json::json!(-0)), "0");
+        assert_eq!(py_dumps(&serde_json::json!(7)), "7");
+        assert_eq!(py_dumps(&serde_json::json!(-42)), "-42");
+        assert_eq!(
+            py_dumps(&serde_json::json!(12345678901234567i64)),
+            "12345678901234567"
+        );
+        assert_eq!(
+            py_dumps(&serde_json::json!(18446744073709551615u64)),
+            "18446744073709551615"
+        );
+        // Beyond u64: arbitrary_precision keeps every digit.
+        let beyond: serde_json::Value =
+            serde_json::from_str("12345678901234567890123").expect("parses");
+        assert_eq!(py_dumps(&beyond), "12345678901234567890123");
+        // Real floats still go through py_float.
+        assert_eq!(py_dumps(&serde_json::json!(0.0)), "0.0");
+        assert_eq!(py_dumps(&serde_json::json!(1e16)), "1e+16");
+        assert_eq!(
+            py_dumps(&serde_json::json!({"index": 0})),
+            r#"{"index": 0}"#
+        );
     }
 
     #[test]

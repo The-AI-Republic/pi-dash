@@ -185,9 +185,10 @@
 //! instead of cross-domain imports (split-review direction for
 //! `agent_run`).
 
+use pidash_compat::py::py_strip;
 use pidash_db::app_project::models::project as project_cols;
 use pidash_db::runner_enroll::columns::{
-    dev_machine as dm_cols, machine_token as mt_cols, pod as pod_cols, runner as r_cols,
+    dev_machine as dm_cols, pod as pod_cols, runner as r_cols,
 };
 
 // ---------------------------------------------------------------------------
@@ -791,54 +792,13 @@ pub fn dev_machine_touch_sql() -> String {
 // K2. Desktop enroll: token rotate + mint
 // ---------------------------------------------------------------------------
 
-/// K2 — per-(machine, workspace) token revoke (`desktop.py:134-138`),
-/// inside the tx.
-///
-/// `MachineToken.objects.select_for_update().filter(dev_machine,
-/// workspace, revoked_at__isnull=True).update(revoked_at=now())`: the
-/// `select_for_update()` is a no-op on updates (same class as the
-/// queries-A QUIRK-lock-before-update), so this is a plain `UPDATE`
-/// with the `SET` bind first. One live token per (machine, workspace)
-/// — rotate, don't append.
-///
-/// `$1` = revoked_at (`now()`), `$2` = dev-machine id, `$3` =
-/// workspace id.
-///
-/// Twin of queries-A `rotate_revoke_sql(true)` (identical text);
-/// owned here so this module has no compile edge on queries-A.
-pub fn desktop_token_revoke_sql() -> String {
-    "UPDATE \"machine_token\" SET \"revoked_at\" = $1 \
-     WHERE (\"machine_token\".\"dev_machine_id\" = $2 \
-     AND \"machine_token\".\"revoked_at\" IS NULL \
-     AND \"machine_token\".\"workspace_id\" = $3)"
-        .to_string()
-}
-
-/// K2 — desktop token mint insert (`desktop.py:139-149`), inside the tx.
-///
-/// `MachineToken.objects.create(user, dev_machine, workspace,
-/// host_label, token_hash, token_fingerprint, label, is_service=True)`:
-/// plain 12-column `INSERT`, `$1..$12` in [`mt_cols::COLUMNS`] order —
-/// `$1` id (fresh uuid4), `$2` user, `$3` dev machine, `$4` workspace,
-/// `$5` host label (stripped `[:255]`), `$6` token hash, `$7`
-/// fingerprint, `$8` label ([`desktop_token_label`]), `$9` is_service
-/// (`TRUE`), `$10` created_at (`now()`), `$11-12` last_used/revoked
-/// (`NULL`). `COMMIT`; response 201 (handlers-owned).
-///
-/// Twin of queries-A `machine_token_insert_sql` (identical text);
-/// owned here so this module has no compile edge on queries-A.
-pub fn machine_token_insert_sql() -> String {
-    let cols = mt_cols::COLUMNS
-        .iter()
-        .map(|col| format!("\"{col}\""))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "INSERT INTO \"{}\" ({cols}) VALUES ({})",
-        mt_cols::TABLE,
-        placeholders(mt_cols::COLUMNS.len()),
-    )
-}
+// NOTE: the K2 rotate-revoke and mint-insert builders lived here; the
+// statements moved to `crate::domain::tokens`
+// (`revoke_tokens_for_machine_in_workspace`, `insert_machine_token`;
+// PIDASHCONV-1520), whose tests carry the pins. Shape notes for the
+// record: `select_for_update()` is a no-op on updates, so the revoke
+// is a plain `UPDATE` with the `SET` bind first; one live token per
+// (machine, workspace) — rotate, don't append.
 
 // ---------------------------------------------------------------------------
 // K3. Desktop delete (sign-out)
@@ -878,33 +838,10 @@ pub fn bundled_machine_ids_sql(with_host_label: bool) -> String {
     }
 }
 
-/// K3 — sign-out token revoke (`desktop.py:183-185`), inside the tx.
-///
-/// `MachineToken.objects.filter(dev_machine_id__in=machine_ids,
-/// revoked_at__isnull=True).update(revoked_at=now())`: one `%s`-slot
-/// per id (Django dedupes repeats — QUIRK-in-dedupe — but ids are PKs,
-/// distinct by definition).
-///
-/// `$1` = revoked_at (`now()`), `$2..$N+1` = machine ids in list order.
-///
-/// # Panics
-///
-/// Panics when `machine_count == 0`: the source returns 204 before any
-/// SQL in that case (Django itself raises `EmptyResultSet`), so there
-/// is no faithful `UPDATE` to emit.
-pub fn signout_revoke_tokens_sql(machine_count: usize) -> String {
-    assert!(
-        machine_count > 0,
-        "signout_revoke_tokens_sql: machine_count must be > 0 \
-         (the source returns 204 with no SQL when no machines match)"
-    );
-    format!(
-        "UPDATE \"machine_token\" SET \"revoked_at\" = $1 \
-         WHERE (\"machine_token\".\"dev_machine_id\" IN ({}) \
-         AND \"machine_token\".\"revoked_at\" IS NULL)",
-        in_placeholders(2, machine_count),
-    )
-}
+// NOTE: the K3 sign-out revoke builder lived here; the statement moved
+// to `crate::domain::tokens::revoke_tokens_for_dev_machines`
+// (PIDASHCONV-1520), whose tests carry the pins (including the
+// empty-list panic).
 
 /// K3 — sign-out bundled-runner offline sweep (`desktop.py:186-191`),
 /// inside the tx.
@@ -921,8 +858,9 @@ pub fn signout_revoke_tokens_sql(machine_count: usize) -> String {
 ///
 /// # Panics
 ///
-/// Panics when `machine_count == 0`, for the same reason as
-/// [`signout_revoke_tokens_sql`].
+/// Panics when `machine_count == 0`, for the same reason as the
+/// domain `revoke_tokens_for_dev_machines` (the source returns 204
+/// with no SQL when no machines match).
 pub fn signout_offline_runners_sql(machine_count: usize) -> String {
     assert!(
         machine_count > 0,
@@ -953,17 +891,6 @@ pub fn truncate_chars(s: &str, max_chars: usize) -> String {
         return s.to_string();
     }
     s.chars().take(max_chars).collect()
-}
-
-/// Python `str.strip()` parity: Python strips `str.isspace()`
-/// characters — Unicode `White_Space` plus U+001C-U+001F and U+0085 —
-/// while Rust `trim()` strips `White_Space` only. (Same gap as the
-/// queries-A helper; owned here so this module has no compile edge on
-/// queries-A.)
-fn py_strip(s: &str) -> &str {
-    s.trim_matches(|c: char| {
-        c.is_whitespace() || c == '\u{85}' || ('\u{1c}'..='\u{1f}').contains(&c)
-    })
 }
 
 /// Desktop host label (`desktop.py:84,169`):
@@ -1008,7 +935,7 @@ pub fn desktop_token_label(host_label: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pidash_db::runner_enroll::columns::enums;
+    use pidash_db::runner_enroll::columns::{enums, machine_token as mt_cols};
 
     const FIXTURE_SQL: &str =
         include_str!("../../../../../fixtures/runner_enroll/queries/pods_projects_desktop.sql");
@@ -1634,38 +1561,8 @@ mod tests {
     }
 
     // -- K2 --
-
-    #[test]
-    fn desktop_revoke_is_plain_update() {
-        let sql = desktop_token_revoke_sql();
-        assert_eq!(
-            squashed(&sql),
-            "UPDATE \"machine_token\" SET \"revoked_at\" = $1 \
-             WHERE (\"machine_token\".\"dev_machine_id\" = $2 \
-             AND \"machine_token\".\"revoked_at\" IS NULL \
-             AND \"machine_token\".\"workspace_id\" = $3)"
-        );
-        for fragment in [
-            fixture_fragment("UPDATE \"machine_token\" SET \"revoked_at\" = "),
-            fixture_fragment("\"dev_machine_id\" = "),
-            fixture_fragment("\"workspace_id\" = "),
-        ] {
-            assert_builder_contains(&sql, &fragment);
-        }
-    }
-
-    #[test]
-    fn machine_token_insert_binds_all_columns_in_order() {
-        let sql = machine_token_insert_sql();
-        assert_eq!(
-            sql,
-            "INSERT INTO \"machine_token\" (\"id\", \"user_id\", \"dev_machine_id\", \
-             \"workspace_id\", \"host_label\", \"token_hash\", \"token_fingerprint\", \
-             \"label\", \"is_service\", \"created_at\", \"last_used_at\", \"revoked_at\") \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)"
-        );
-        assert_builder_contains(&sql, &fixture_fragment("INSERT INTO \"machine_token\""));
-    }
+    // (The K2 SQL pins moved with the statements to
+    // `crate::domain::tokens`.)
 
     // -- K3 --
 
@@ -1701,28 +1598,8 @@ mod tests {
         assert_builder_contains(&hosted, &fixture_fragment("\"host_label\" = "));
     }
 
-    #[test]
-    fn signout_revoke_binds_one_slot_per_machine() {
-        assert_eq!(
-            squashed(&signout_revoke_tokens_sql(1)),
-            "UPDATE \"machine_token\" SET \"revoked_at\" = $1 \
-             WHERE (\"machine_token\".\"dev_machine_id\" IN ($2) \
-             AND \"machine_token\".\"revoked_at\" IS NULL)"
-        );
-        assert_eq!(
-            squashed(&signout_revoke_tokens_sql(3)),
-            "UPDATE \"machine_token\" SET \"revoked_at\" = $1 \
-             WHERE (\"machine_token\".\"dev_machine_id\" IN ($2, $3, $4) \
-             AND \"machine_token\".\"revoked_at\" IS NULL)"
-        );
-        for fragment in [
-            fixture_fragment("UPDATE \"machine_token\" SET \"revoked_at\" = "),
-            fixture_fragment("\"dev_machine_id\" IN ("),
-            fixture_fragment("\"revoked_at\" IS NULL"),
-        ] {
-            assert_builder_contains(&signout_revoke_tokens_sql(2), &fragment);
-        }
-    }
+    // (The signout-revoke SQL pins moved with the statement to
+    // `crate::domain::tokens`.)
 
     #[test]
     fn signout_offline_numbers_binds_after_ids() {
@@ -1748,11 +1625,8 @@ mod tests {
         }
     }
 
-    #[test]
-    #[should_panic(expected = "machine_count must be > 0")]
-    fn signout_revoke_panics_on_empty() {
-        let _ = signout_revoke_tokens_sql(0);
-    }
+    // (The signout-revoke empty-list panic pin moved with the builder
+    // to `crate::domain::tokens`.)
 
     #[test]
     #[should_panic(expected = "machine_count must be > 0")]

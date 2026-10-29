@@ -18,7 +18,7 @@ import string
 
 from _harness.redirects import assert_success_redirect
 
-from .conftest import NEW_PASSWORD, PASSWORD, reprime
+from .conftest import NEW_PASSWORD, PASSWORD, WEAK_PASSWORD, login_cookies, reprime
 
 
 def _outdated_hash(password: str, *, iterations: int = 260_000, salt_len: int = 22) -> str:
@@ -93,3 +93,30 @@ def test_rehash_keeps_issued_session_valid(browser, db, user):
     )
     assert res.status_code == 400
     assert res.json()["error_code"] == 5135
+
+
+def test_change_password_weak_new_rewrites_outdated_hash(browser, base, db, user):
+    # The check_password setter fires inside ChangePasswordEndpoint.post at
+    # common.py:74 — before the zxcvbn gate at :82-89 rejects a weak new
+    # password — so the failed change still upgrades the stored hash.
+    before = _downgrade(db, user)
+    assert before.startswith("pbkdf2_sha256$260000$")
+
+    # Mint after the downgrade so the session hash covers the outdated
+    # field (a session minted before a Django iteration bump looks the
+    # same: valid cookie, outdated hash).
+    res = browser(login_cookies(user)).post(
+        "/auth/change-password/",
+        json={"old_password": PASSWORD, "new_password": WEAK_PASSWORD},
+    )
+    assert res.status_code == 400
+    assert res.json() == {"error_code": 5021, "error_message": "PASSWORD_TOO_WEAK"}
+
+    after = _password_of(db, user["id"])
+    assert after != before
+    assert after.startswith("pbkdf2_sha256$600000$")
+    assert len(after.split("$")[2]) == 22
+
+    # The same password still signs in (against the upgraded hash now).
+    res = browser().post("/auth/sign-in/", data={"email": user["email"], "password": PASSWORD})
+    assert_success_redirect(res, base=base)

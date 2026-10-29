@@ -270,19 +270,7 @@ pub fn email_availability_exists_sql() -> String {
     "SELECT 1 FROM users WHERE users.email = :email AND NOT (users.id = :user) LIMIT 1".to_owned()
 }
 
-/// Email save (`:232-235`): `user.email = new_email`,
-/// `user.is_email_verified = False`, `user.save()`.
-///
-/// Django emits a full-row `UPDATE`; per the D-24 queries convention
-/// the builder lists the semantically-changed columns plus the
-/// `auto_now` stamp. `User.save()` (`db/models/user.py:154-177`)
-/// additionally lowercases the email (no-op — already normalized),
-/// backfills an empty `display_name` from the address, and rotates
-/// `token` iff `token_updated_at` is set (model-owned, PIDASHCONV-607).
-pub fn email_save_sql() -> String {
-    "UPDATE users SET email = :email, is_email_verified = FALSE, updated_at = :now WHERE id = :pk"
-        .to_owned()
-}
+pub use crate::domain::identity::email_save_sql;
 
 /// Session invalidation for `logout(request)` (`:241`, also `:355`):
 /// the session flush deletes the current session row by key
@@ -430,23 +418,7 @@ pub fn workspace_deactivate_scan_sql() -> String {
 /// `bulk_update` batch size (`:308`, `:310`): `batch_size=100`.
 pub const BULK_DEACTIVATE_BATCH_SIZE: usize = 100;
 
-/// Bulk deactivation write (`:308`, `:310`):
-/// `bulk_update(rows, ["is_active"], batch_size=100)`.
-///
-/// Ported bug 5: `bulk_update` bypasses `save()`, so `auto_now` does
-/// NOT stamp `updated_at`, and the write is pk-direct with NO
-/// `deleted_at` filter. The handler chunks `:pks` into batches of
-/// [`BULK_DEACTIVATE_BATCH_SIZE`]; an empty collection issues NO
-/// statement at all.
-pub fn project_bulk_deactivate_sql() -> String {
-    "UPDATE project_members SET is_active = FALSE WHERE project_members.id IN (:pks)".to_owned()
-}
-
-/// Workspace bulk deactivation write (`:310`): same shape as
-/// [`project_bulk_deactivate_sql`].
-pub fn workspace_bulk_deactivate_sql() -> String {
-    "UPDATE workspace_members SET is_active = FALSE WHERE workspace_members.id IN (:pks)".to_owned()
-}
+pub use crate::domain::workspaces::members::workspace_bulk_deactivate_sql;
 
 /// Invite purge (`:313`):
 /// `WorkspaceMemberInvite.objects.filter(email=user.email).delete()`.
@@ -473,32 +445,9 @@ pub fn deactivate_session_purge_sql() -> String {
 /// the wire).
 pub const ONBOARDING_RESET_JSON: &str = r#"{"workspace_join": false, "profile_complete": false, "workspace_create": false, "workspace_invite": false}"#;
 
-/// Profile reset (`:319-339`): `Profile.objects.get(user=user)` (see
-/// [`profile_by_user_sql`]) then `save(update_fields=[
-/// "last_workspace_id", "is_tour_completed", "is_onboarded",
-/// "onboarding_step", "updated_at"])`.
-///
-/// Instance `save()` addresses the row by pk. `last_workspace_id` is
-/// a plain nullable `UUIDField`, not an FK (`user.py:236`).
-pub fn deactivate_profile_reset_sql() -> String {
-    "UPDATE profiles SET last_workspace_id = NULL, is_tour_completed = FALSE, is_onboarded = FALSE, onboarding_step = :step_json, updated_at = :now WHERE id = :pk".to_owned()
-}
+pub use crate::domain::identity::deactivate_profile_reset_sql;
 
-/// User deactivation save (`:342-349`): `is_password_autoset = True`,
-/// `set_password(uuid4().hex)`, `is_active = False`,
-/// `last_logout_ip/time` stamps, full `save()`.
-///
-/// Django emits a full-row `UPDATE`; per convention the builder lists
-/// the semantically-changed columns plus `updated_at`. `:hash` is the
-/// PBKDF2 rendering of a fresh `uuid4().hex` (Django `set_password`
-/// format — the handler hashes, this module binds). `last_logout_ip`
-/// comes from `user_ip(request)` (`:347`), `last_logout_time` from
-/// `timezone.now()` (`:348`). (`user_deactivation_email.delay(...)`
-/// at `:352` is owned by PIDASHCONV-614; `logout(request)` at `:355`
-/// is [`session_flush_sql`].)
-pub fn deactivate_user_save_sql() -> String {
-    "UPDATE users SET password = :hash, is_password_autoset = TRUE, is_active = FALSE, last_logout_ip = :ip, last_logout_time = :now, updated_at = :now WHERE id = :pk".to_owned()
-}
+pub use crate::domain::identity::deactivate_user_save_sql;
 
 // ---------------------------------------------------------------------------
 // Unit 4a — accounts + profile (views/user/base.py:373-462)
@@ -524,38 +473,17 @@ pub fn account_detail_sql() -> String {
         .to_owned()
 }
 
-/// Account delete (`:419`): instance `.delete()` on a model WITHOUT
-/// the soft-delete mixin — a HARD `DELETE` addressed by pk, with no
-/// related-object task.
-pub fn account_hard_delete_sql() -> String {
-    "DELETE FROM accounts WHERE accounts.id = :pk".to_owned()
-}
+pub use crate::domain::identity::account_hard_delete_sql;
 
 /// Onboard-patch `update_fields` (`:380`).
 pub const ONBOARD_UPDATE_FIELDS: &[&str] = &["is_onboarded", "updated_at"];
 
-/// Onboard patch (`:375-380`): `Profile.objects.get(user_id=...)`
-/// (see [`profile_by_user_sql`]) then
-/// `save(update_fields=["is_onboarded", "updated_at"])`.
-///
-/// Ported bug 6: the value is the raw
-/// `request.data.get("is_onboarded", False)` (`:376`) — no serializer
-/// validation or coercion runs; whatever JSON value the client sent
-/// binds at `:value` (defaulting to `False` only when the key is
-/// absent).
-pub fn onboard_patch_sql() -> String {
-    "UPDATE profiles SET is_onboarded = :value, updated_at = :now WHERE id = :pk".to_owned()
-}
+pub use crate::domain::identity::onboard_patch_sql;
 
 /// Tour-patch `update_fields` (`:388`).
 pub const TOUR_UPDATE_FIELDS: &[&str] = &["is_tour_completed", "updated_at"];
 
-/// Tour patch (`:386-388`): same shape as [`onboard_patch_sql`] for
-/// `is_tour_completed` (`request.data.get("is_tour_completed",
-/// False)`, `:387` — likewise unvalidated, ported bug 6).
-pub fn tour_patch_sql() -> String {
-    "UPDATE profiles SET is_tour_completed = :value, updated_at = :now WHERE id = :pk".to_owned()
-}
+pub use crate::domain::identity::tour_patch_sql;
 
 /// Profile locked read (`:455`):
 /// `Profile.objects.select_for_update().get(user=request.user)`
@@ -567,107 +495,17 @@ pub fn profile_lock_sql() -> String {
     "SELECT profiles.* FROM profiles WHERE profiles.user_id = :user FOR UPDATE".to_owned()
 }
 
-/// `profiles` concrete columns in `_meta` order minus the pk:
-/// the full-row `UPDATE` SET set for [`profile_full_save_sql`]
-/// (`user.py:223-271` declared order over the `TimeAuditModel` pair —
-/// abstract parents first, then declared fields).
-pub const PROFILE_SAVE_COLUMNS: &[&str] = &[
-    "created_at",
-    "updated_at",
-    "user_id",
-    "theme",
-    "is_app_rail_docked",
-    "is_tour_completed",
-    "onboarding_step",
-    "use_case",
-    "role",
-    "is_onboarded",
-    "last_workspace_id",
-    "billing_address_country",
-    "billing_address",
-    "has_billing_address",
-    "company_name",
-    "notification_view_mode",
-    "is_smooth_cursor_enabled",
-    "is_mobile_onboarded",
-    "mobile_onboarding_step",
-    "mobile_timezone_auto_set",
-    "language",
-    "start_of_the_week",
-    "goals",
-    "background_color",
-    "is_navigation_tour_completed",
-    "has_marketing_email_consent",
-    "is_subscribed_to_changelog",
-    "product_tour",
-    "settings",
-];
-
-/// Profile patch save (`:456-461`): `ProfileSerializer.save()` issues
-/// a full-row `UPDATE` — `settings` included, since the instance
-/// carries it whether or not the serializer may write it (`:448-449`).
-///
-/// The `settings` merge (`user_settings.merge_settings`, `:460`) runs
-/// BEFORE this write and is handler-owned (PIDASHCONV-620); by the
-/// time this statement executes, `:settings` already holds the merged
-/// bag. Every column renders as `col = :col`; the row is addressed
-/// by pk.
-pub fn profile_full_save_sql() -> String {
-    let mut set_clause = String::new();
-    for (i, col) in PROFILE_SAVE_COLUMNS.iter().enumerate() {
-        if i > 0 {
-            set_clause.push_str(", ");
-        }
-        let _ = write!(set_clause, "{col} = :{col}");
-    }
-    format!("UPDATE profiles SET {set_clause} WHERE id = :pk")
-}
+pub use crate::domain::identity::profile_full_save_sql;
+pub use crate::domain::identity::PROFILE_SAVE_COLUMNS;
 
 // ---------------------------------------------------------------------------
 // Unit 4b — API tokens (views/api.py:20-72)
 // ---------------------------------------------------------------------------
 
-/// `api_tokens` concrete columns in `_meta` order (abstract parents
-/// first, then `id`, then `api.py:37-51` declared order): the
-/// `INSERT` column set for [`api_token_insert_sql`].
-pub const API_TOKEN_INSERT_COLUMNS: &[&str] = &[
-    "created_at",
-    "updated_at",
-    "created_by_id",
-    "updated_by_id",
-    "deleted_at",
-    "id",
-    "label",
-    "description",
-    "is_active",
-    "last_used",
-    "token",
-    "user_id",
-    "user_type",
-    "workspace_id",
-    "expired_at",
-    "is_service",
-    "allowed_rate_limit",
-];
-
-/// Token create (`:29-35`):
-/// `APIToken.objects.create(label=..., description=...,
-/// user=..., user_type=..., expired_at=...)`.
-///
-/// Python-side defaults resolved BEFORE the `INSERT` (`:22-27`):
-/// `label` falls back to `uuid4().hex` only when the key is absent
-/// (ported bug 10 — an explicit empty label stores empty);
-/// `description` defaults to `""`; `expired_at` defaults to `None`;
-/// `user_type` is `1` iff `request.user.is_bot`, else `0`.
-/// Model-side: `token` is `generate_token()` (`"pi_dash_api_" +
-/// `uuid4().hex`, `api.py:20-21`); `is_active` is `TRUE`;
-/// `is_service` is `FALSE`; `workspace_id` is `NULL`;
-/// `allowed_rate_limit` is `"60/min"`; `created_by_id` is stamped
-/// from the request user by `BaseModel.save()` (`None` when
-/// anonymous); `updated_by_id` stays `NULL` on create.
-pub fn api_token_insert_sql() -> String {
-    "INSERT INTO api_tokens (created_at, updated_at, created_by_id, updated_by_id, deleted_at, id, label, description, is_active, last_used, token, user_id, user_type, workspace_id, expired_at, is_service, allowed_rate_limit) VALUES (:now, :now, :actor, NULL, NULL, :id, :label, :description, TRUE, NULL, :token, :user, :user_type, NULL, :expired_at, FALSE, '60/min')".to_owned()
-}
+// NOTE: the token create builder lived here; the statement moved to
+// `crate::domain::tokens::issue_token` (PIDASHCONV-1520), whose tests
+// carry the pins (including ported bug 10's label fallback, resolved
+// by the handler before the call).
 
 /// Token list (`:43`):
 /// `APIToken.objects.filter(user=request.user, is_service=False)`.
@@ -696,14 +534,10 @@ pub fn api_token_delete_lookup_sql() -> String {
     "SELECT api_tokens.* FROM api_tokens WHERE api_tokens.user_id = :user AND api_tokens.id = :pk AND api_tokens.is_service = FALSE AND api_tokens.deleted_at IS NULL".to_owned()
 }
 
-/// Token delete write (`:53`): instance `.delete()` on a soft-delete
-/// model — `deleted_at` is stamped and the instance is SAVED, so
-/// `updated_at` moves too (same full-row-save shape as the sibling
-/// `invite_soft_delete_sql`). The write also enqueues
-/// `soft_delete_related_objects` (tasks-owned, PIDASHCONV-614).
-pub fn api_token_soft_delete_sql() -> String {
-    "UPDATE api_tokens SET deleted_at = :now, updated_at = :now WHERE id = :pk".to_owned()
-}
+// NOTE: the token soft-delete builder lived here; the statement moved
+// to `crate::domain::tokens::soft_delete_token` (PIDASHCONV-1520),
+// whose tests carry the pin (the `soft_delete_related_objects`
+// enqueue stays tasks-owned, PIDASHCONV-614).
 
 /// Token PATCH lookup (`:63-65`):
 /// `APIToken.objects.filter(user=request.user, pk=pk,
@@ -738,13 +572,9 @@ pub const API_TOKEN_PATCH_WRITABLE: &[&str] = &[
     "created_by",
 ];
 
-/// Token PATCH save (`:68-71`): `serializer.save()` on the partial
-/// serializer issues a full-row `UPDATE`; per convention the builder
-/// lists the writable columns ([`API_TOKEN_PATCH_WRITABLE`]) plus the
-/// `auto_now` stamp.
-pub fn api_token_patch_save_sql() -> String {
-    "UPDATE api_tokens SET label = :label, description = :description, is_service = :is_service, allowed_rate_limit = :rate, deleted_at = :deleted_at, created_by_id = :created_by, updated_at = :now WHERE id = :pk".to_owned()
-}
+// NOTE: the token PATCH-save builder lived here; the statement moved
+// to `crate::domain::tokens::update_token` (PIDASHCONV-1520), whose
+// tests carry the pin.
 
 #[cfg(test)]
 mod tests {
@@ -826,7 +656,6 @@ mod tests {
         // WHERE; bulk deactivations are pk-direct (ported bug 5);
         // session/account deletes are hard (no soft-delete mixin).
         assert!(deactivate_invite_purge_sql().contains("deleted_at IS NULL"));
-        assert!(!project_bulk_deactivate_sql().contains("deleted_at"));
         assert!(!workspace_bulk_deactivate_sql().contains("deleted_at"));
         // users / profiles / accounts / sessions have no deleted_at
         // column — assert absence, not scope.
@@ -957,12 +786,9 @@ mod tests {
 
     #[test]
     fn unit3_deactivate_writes() {
-        // bulk_update batch 100, is_active only, no stamp, no scope.
+        // bulk_update batch 100, is_active only, no stamp, no scope
+        // (the project twin moved to `domain::projects::members`).
         assert_eq!(BULK_DEACTIVATE_BATCH_SIZE, 100);
-        assert_eq!(
-            project_bulk_deactivate_sql(),
-            "UPDATE project_members SET is_active = FALSE WHERE project_members.id IN (:pks)"
-        );
         assert_eq!(
             workspace_bulk_deactivate_sql(),
             "UPDATE workspace_members SET is_active = FALSE WHERE workspace_members.id IN (:pks)"
@@ -1037,21 +863,14 @@ mod tests {
 
     #[test]
     fn unit4_api_tokens() {
-        // INSERT column set: audit parents first, then id, then declared.
-        assert_eq!(API_TOKEN_INSERT_COLUMNS.len(), 17);
-        let insert = api_token_insert_sql();
-        assert!(insert.contains("INSERT INTO api_tokens (created_at, updated_at"));
-        assert!(insert.contains(":token, :user, :user_type, NULL, :expired_at, FALSE, '60/min'"));
+        // (The INSERT/soft-delete/PATCH-save pins moved with the
+        // statements to `crate::domain::tokens`.)
         // List carries is_service=False; detail omits it (ported bug 7).
         assert!(api_token_list_sql().contains("api_tokens.is_service = FALSE"));
         assert!(!api_token_detail_sql().contains("is_service"));
         assert!(api_token_detail_sql().contains("api_tokens.id = :pk"));
-        // Delete lookup re-adds the guard; write is a stamp-and-save.
+        // Delete lookup re-adds the guard.
         assert!(api_token_delete_lookup_sql().contains("api_tokens.is_service = FALSE"));
-        assert_eq!(
-            api_token_soft_delete_sql(),
-            "UPDATE api_tokens SET deleted_at = :now, updated_at = :now WHERE id = :pk"
-        );
         // PATCH lookup: scoped .first(); writable set per SER-E probe.
         let lookup = api_token_patch_lookup_sql();
         assert!(lookup.contains("api_tokens.is_service = FALSE"));
@@ -1067,12 +886,6 @@ mod tests {
                 "created_by"
             ]
         );
-        let save = api_token_patch_save_sql();
-        assert!(save.contains("is_service = :is_service"));
-        assert!(save.contains("deleted_at = :deleted_at"));
-        assert!(save.contains("created_by_id = :created_by"));
-        assert!(!save.contains("expired_at"));
-        assert!(!save.contains("user_type"));
     }
 
     #[test]

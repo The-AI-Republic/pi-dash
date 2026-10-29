@@ -310,26 +310,23 @@ impl SweepStore for LiveSweepStore {
             .execute(&mut *tx)
             .await
             .map_err(|e| SeamError(e.to_string()))?;
-        let won = sqlx::query(&rt::fail_turn_update())
-            .bind(ctx.turn_id)
-            .bind(&code)
-            .bind(&detail)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| SeamError(e.to_string()))?
-            .rows_affected();
+        let won =
+            pidash_services::domain::assistant::fail_turn(&mut *tx, ctx.turn_id, &code, &detail)
+                .await
+                .map_err(|e| SeamError(e.to_string()))?;
         if won == 0 {
             // The turn left `running` between the sweep's load and its lock
             // (a concurrent terminal write won): roll back and emit nothing,
             // so the sweep never writes a second terminal event.
             return Ok(false);
         }
-        sqlx::query(&rt::finalize_open_rows_update())
-            .bind(ctx.turn_id)
-            .bind(MSG_FAILED)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| SeamError(e.to_string()))?;
+        pidash_services::domain::assistant::finalize_open_messages(
+            &mut *tx,
+            ctx.turn_id,
+            MSG_FAILED,
+        )
+        .await
+        .map_err(|e| SeamError(e.to_string()))?;
         sqlx::query(&rt::clear_active_turn_update())
             .bind(ctx.thread_id)
             .bind(ctx.turn_id)
@@ -350,32 +347,32 @@ impl SweepStore for LiveSweepStore {
         } else {
             detail.clone()
         };
-        sqlx::query(&rt::error_message_insert())
-            .bind(message_id)
-            .bind(ctx.thread_id)
-            .bind(ctx.turn_id)
-            .bind(&content)
-            .bind(now)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| SeamError(e.to_string()))?;
+        pidash_services::domain::assistant::record_error_message(
+            &mut *tx,
+            message_id,
+            ctx.thread_id,
+            ctx.turn_id,
+            &content,
+            now,
+        )
+        .await
+        .map_err(|e| SeamError(e.to_string()))?;
         let payload = serde_json::json!({
             "turn_id": ctx.turn_id.to_string(),
             "error_code": code,
             "detail": detail,
         });
-        let event_id: i64 = sqlx::query_scalar(&rt::turn_failed_event_insert())
-            .bind(ctx.thread_id)
-            .bind(ctx.turn_id)
-            .bind(message_id)
-            .bind(payload)
-            .bind(now)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(|e| SeamError(e.to_string()))?;
-        sqlx::query(&rt::prune_turn_deltas_delete())
-            .bind(ctx.turn_id)
-            .execute(&mut *tx)
+        let event_id: i64 = pidash_services::domain::assistant::append_turn_failed_event(
+            &mut *tx,
+            ctx.thread_id,
+            ctx.turn_id,
+            message_id,
+            &payload,
+            now,
+        )
+        .await
+        .map_err(|e| SeamError(e.to_string()))?;
+        pidash_services::domain::assistant::prune_turn_deltas(&mut *tx, ctx.turn_id)
             .await
             .map_err(|e| SeamError(e.to_string()))?;
         tx.commit().await.map_err(|e| SeamError(e.to_string()))?;
@@ -422,7 +419,7 @@ pub fn register_sweep_handler(
 
 #[cfg(test)]
 mod tests {
-    use super::super::run_turn::{finalize_open_rows_update, lock_turn_select, CODE_TURN_TIMEOUT};
+    use super::super::run_turn::{lock_turn_select, CODE_TURN_TIMEOUT};
     use super::*;
     use std::sync::Mutex;
 
@@ -489,7 +486,7 @@ mod tests {
         assert!(sql.contains("started_at < $1"), "cutoff predicate: {sql}");
         assert!(sql.contains("ORDER BY"), "created_at ordering: {sql}");
         assert!(lock_turn_select().contains("FOR UPDATE"));
-        assert!(finalize_open_rows_update().contains("streaming"));
+        // (finalize pin moved to `pidash_services::domain::assistant`.)
         // The fail path reuses the shared turn-task writes.
         assert_eq!(CODE_TURN_TIMEOUT, "turn_timeout");
         assert_eq!(

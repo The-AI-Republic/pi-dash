@@ -12,6 +12,7 @@ Cleanup eligibility is env-driven (``HARD_DELETE_AFTER_DAYS=0``,
 minio behind the Django S3 settings (``USE_MINIO=1``).
 """
 
+import json
 import re
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -1656,3 +1657,96 @@ def test_track_page_version_description_stripped(db_conn, broker_url, html):
 
     row = wait_for(_version_row, what="page_version stripped by django worker")
     assert row["description_stripped"] == _ml_strip(html)
+
+
+def test_description_version_task_writes_null_audit(db_conn, broker_url):
+    """issue_description_version_task inserts NULL audit cols (PIDASHCONV-1295).
+
+    Django path: the task calls ``IssueDescriptionVersion.
+    log_issue_description_version`` (issue.py:927-946), which passes
+    ``created_by_id``/``updated_by_id`` as ``create()`` constructor fields.
+    ``BaseModel.save`` (base.py:23-43) then runs with no save kwarg and, with
+    no crum user in the worker, NULLs both columns. ``owned_by_id`` keeps
+    the acting user. The oracle worker boots with
+    issue_description_version_task in -I (oracle_worker_includes.txt); the
+    stock Django worker never registers it (PB-1510).
+    """
+    tag = uuid.uuid4().hex[:8]
+    chain = seed_helpers.issue_chain(db_conn, f"1295desc-{tag}")
+    owner = chain["owner"]
+    issue = chain["issue"]
+    updater = seed_helpers.user(db_conn, f"contract-1295desc-{tag}-updater")
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "UPDATE issues SET created_by_id = %s::uuid,"
+            " updated_by_id = %s::uuid,"
+            " description_html = '<p>live v1</p>'"
+            " WHERE id = %s::uuid",
+            (str(owner["id"]), str(updater["id"]), str(issue["id"])),
+        )
+    celery_wire.publish(
+        f"{M}.issue_description_version_task.issue_description_version_task",
+        args=[
+            json.dumps({"description_html": "<p>stale</p>"}),
+            str(issue["id"]),
+            str(owner["id"]),
+        ],
+        kwargs={"is_creating": True},
+    )
+
+    def _version_row():
+        with db_conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT created_by_id, updated_by_id, owned_by_id"
+                " FROM issue_description_versions"
+                " WHERE issue_id = %s::uuid",
+                (str(issue["id"]),),
+            )
+            return cur.fetchone()
+
+    row = wait_for(_version_row, what="description version by django worker")
+    assert row["created_by_id"] is None
+    assert row["updated_by_id"] is None
+    assert str(row["owned_by_id"]) == str(owner["id"])
+
+
+def test_1327_failing_task_is_recorded_and_worker_continues(db_conn, broker_url):
+    """PIDASHCONV-1327 oracle: a raising task fails loudly, worker carries on.
+
+    In Celery 5.4 an exception inside a task is caught by the worker's
+    tracer: the task is marked failed with its traceback logged, and the
+    worker carries on with the next message (acks-early default keeps no
+    orphaned in-progress state). The Rust queue must match that: a
+    panicking handler settles its row with ``last_error`` instead of
+    stranding it ``running`` (see the replay in ``test_rust_replay.py``).
+
+    A ``PROTECT``-guarded tombstone makes ``hard_delete`` raise
+    ``ProtectedError`` mid-sweep (PIDASHCONV-928 shape): the failing rows
+    remain (the recorded failure), while the barrier task published
+    behind it is consumed (the worker continued past the failure — the
+    helper raises unless both halves happen).
+    """
+    tag = uuid.uuid4().hex[:8]
+    chain = seed_helpers.issue_chain(db_conn, f"1327fail{tag}")
+    marker = seed_helpers.issue_chain(db_conn, f"1327failm{tag}")
+    pod = _seed_pod(db_conn, chain, f"1327 pod {tag}")
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "UPDATE issues SET assigned_pod_id = %s::uuid WHERE id = %s::uuid",
+            (str(pod["id"]), str(chain["issue"]["id"])),
+        )
+    _tombstone(db_conn, "pod", pod["id"])
+    _tombstone(db_conn, "workspaces", marker["workspace"]["id"])
+    _run_hard_delete_expecting_failure(
+        db_conn, "workspaces", marker["workspace"]["id"]
+    )
+    try:
+        assert not _missing(db_conn, "pod", pod["id"])
+        assert not _missing(db_conn, "issues", chain["issue"]["id"])
+    finally:
+        with db_conn.cursor() as cur:
+            cur.execute(
+                'DELETE FROM "issues" WHERE id = %s::uuid',
+                (str(chain["issue"]["id"]),),
+            )
+            cur.execute('DELETE FROM "pod" WHERE id = %s::uuid', (str(pod["id"]),))

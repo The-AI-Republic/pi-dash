@@ -22,10 +22,11 @@
 //!   sqlx's 16-tuple `FromRow`); rendering goes through the merged
 //!   [`shapes`](pidash_services::runner_enroll::serializers::shapes) kernels,
 //!   so key order and omission rules are never re-derived here.
-//! * Request bodies parse through the shared CPython-envelope layer
-//!   ([`crate::v1_cycles_modules::json_cpython`]); unparseable JSON is
-//!   DRF's `ParseError` (`{"detail": "JSON parse error - …"}`), past the
-//!   depth cap is Django's JSON 500. Non-JSON content types proxy to
+//! * Request bodies parse through the shared JSON layer
+//!   ([`crate::v1_cycles_modules::json`]); unparseable JSON is
+//!   DRF's `ParseError` (`{"detail": "JSON parse error - …"}`, serde's
+//!   text since PIDASHCONV-1555); depth failures are 400s, never
+//!   Django's JSON 500. Non-JSON content types proxy to
 //!   Django (the `app_scheduler` `read_request_data` precedent — form
 //!   posts stay on the Python plane).
 //! * `now()` values are truncated to microseconds before bind+render:
@@ -113,7 +114,8 @@ use pidash_types::{UserId, WorkspaceId};
 use crate::middleware::SessionHandle;
 use crate::runner_runs::{json_response, pool_of, server_error};
 use crate::state::AppState;
-use crate::v1_cycles_modules::json_cpython::{self, JObject, JVal, JsonFail};
+use crate::v1_cycles_modules::json::{self, JObject, JVal, JsonFail};
+use pidash_compat::py::py_strip;
 
 // ---------------------------------------------------------------------------
 // Error bodies (D13-F7 `handlers/endpoints.golden.json`, key order verbatim
@@ -241,12 +243,7 @@ async fn workspace_role_in(
     Ok(role.map(i32::from))
 }
 
-/// Django `request.query_params.get`: the last value wins on repeats
-/// (`QueryDict`), and a missing or empty param disables the filter
-/// (every source gate is an `if …:` truthiness check).
-fn query_param(params: &crate::license::QueryMap, key: &str) -> Option<String> {
-    crate::license::query_last(params, key).filter(|raw| !raw.is_empty())
-}
+use pidash_compat::http::query_param;
 
 /// UUID-typed query/body strings: Django's `UUIDField.get_prep_value`
 /// raises `ValidationError` (an unhandled 500) on garbage — the
@@ -277,7 +274,7 @@ fn now_micros() -> DateTime<Utc> {
 }
 
 // ---------------------------------------------------------------------------
-// Request bodies (the `app_scheduler` envelope over `json_cpython`)
+// Request bodies (the `app_scheduler` envelope over `json`)
 // ---------------------------------------------------------------------------
 
 /// Read `request.data` for a POST/PATCH body: content-length 0
@@ -317,7 +314,7 @@ async fn read_request_data(state: &AppState, req: Request) -> Result<JVal, Respo
         .await
         .map(|collected| collected.to_bytes())
         .map_err(|_| server_error())?;
-    match json_cpython::parse_request_data(&bytes) {
+    match json::parse_request_data(&bytes) {
         Ok(value) => Ok(value),
         Err(JsonFail::Message(detail)) => Err(json_response(
             StatusCode::BAD_REQUEST,
@@ -332,7 +329,7 @@ async fn read_request_data(state: &AppState, req: Request) -> Result<JVal, Respo
 fn parse_error_body(detail: &str) -> String {
     format!(
         "{{\"detail\":{}}}",
-        serde_json::to_string(&format!("{}{detail}", json_cpython::JSON_PARSE_PREFIX))
+        serde_json::to_string(&format!("{}{detail}", json::JSON_PARSE_PREFIX))
             .expect("json string")
     )
 }
@@ -375,17 +372,6 @@ fn data_get<'a>(data: &'a JVal, key: &str) -> Result<Option<&'a JVal>, Response>
             Err(server_error())
         }
     }
-}
-
-/// Python `str.strip()` parity (the services-layer `py_strip` twin —
-/// services is read-only from this crate's layer boundary, so the
-/// predicate is mirrored, not imported): Python strips
-/// `str.isspace()` — Unicode `White_Space` plus U+001C-U+001F and
-/// U+0085 — while Rust `trim()` strips `White_Space` only.
-fn py_strip(text: &str) -> &str {
-    text.trim_matches(|c: char| {
-        c.is_whitespace() || c == '\u{85}' || ('\u{1c}'..='\u{1f}').contains(&c)
-    })
 }
 
 /// CPython `int(text)` over base-10 text, `None` on `ValueError`: one
@@ -517,7 +503,7 @@ fn j_description(value: Option<&JVal>) -> Result<String, Response> {
     if !j_truthy(value) {
         return Ok(String::new());
     }
-    let rendered = json_cpython::py_str(value).map_err(|_| server_error())?;
+    let rendered = json::py_str(value).map_err(|_| server_error())?;
     rendered.to_clean_string().ok_or_else(server_error)
 }
 
@@ -619,8 +605,8 @@ fn decode_machine_list_row(row: &sqlx::postgres::PgRow) -> Result<DevMachineOwne
     })
 }
 
-/// Owned `runner` row: the 29 `COLUMNS` (token internals and
-/// `free_worktrees` skipped — never serialized here).
+/// Owned `runner` row: the serialized subset of `COLUMNS` (token
+/// internals and `free_worktrees` skipped — never serialized here).
 struct RunnerOwned {
     id: Uuid,
     owner_id: Uuid,
@@ -644,6 +630,8 @@ struct RunnerOwned {
     updated_at: DateTime<Utc>,
     revoked_at: Option<DateTime<Utc>>,
     revoked_reason: String,
+    paused_at: Option<DateTime<Utc>>,
+    paused_by_id: Option<Uuid>,
 }
 
 /// Decode the runner block at `base` (R1/R2 select it first, so `base`
@@ -672,6 +660,8 @@ fn decode_runner(row: &sqlx::postgres::PgRow, base: usize) -> Result<RunnerOwned
         updated_at: row.try_get(base + 27).map_err(|_| server_error())?,
         revoked_at: row.try_get(base + 28).map_err(|_| server_error())?,
         revoked_reason: row.try_get(base + 29).map_err(|_| server_error())?,
+        paused_at: row.try_get(base + 30).map_err(|_| server_error())?,
+        paused_by_id: row.try_get(base + 31).map_err(|_| server_error())?,
     })
 }
 
@@ -702,7 +692,7 @@ fn decode_machine_mini(
     }))
 }
 
-/// Owned live-state snapshot (`RunnerLiveState`, `models.py:1454-1500`).
+/// Owned live-state snapshot (`RunnerLiveState`, `models.py:1504-1558`).
 struct LiveStateOwned {
     observed_run_id: Option<String>,
     last_event_at: Option<String>,
@@ -714,6 +704,8 @@ struct LiveStateOwned {
     usage: Value,
     llm_model: Option<String>,
     turn_count: Option<i64>,
+    agent_health: Option<String>,
+    agent_last_activity_at: Option<String>,
     updated_at: String,
 }
 
@@ -729,7 +721,8 @@ async fn fetch_live_state(
     let row: Option<sqlx::postgres::PgRow> = sqlx::query(
         r#"SELECT "runner_id", "observed_run_id", "last_event_at", "last_event_kind",
               "last_event_summary", "agent_pid", "agent_subprocess_alive",
-              "approvals_pending", "usage", "llm_model", "turn_count", "updated_at"
+              "approvals_pending", "usage", "llm_model", "turn_count",
+              "agent_health", "agent_last_activity_at", "updated_at"
            FROM "runner_live_state" WHERE "runner_live_state"."runner_id" = $1 LIMIT 1"#,
     )
     .bind(runner_id)
@@ -741,7 +734,9 @@ async fn fetch_live_state(
     };
     let observed: Option<Uuid> = row.try_get(1).map_err(|_| server_error())?;
     let last_event_at: Option<DateTime<Utc>> = row.try_get(2).map_err(|_| server_error())?;
-    let updated_at: DateTime<Utc> = row.try_get(11).map_err(|_| server_error())?;
+    let agent_last_activity_at: Option<DateTime<Utc>> =
+        row.try_get(12).map_err(|_| server_error())?;
+    let updated_at: DateTime<Utc> = row.try_get(13).map_err(|_| server_error())?;
     let agent_pid: Option<i32> = row.try_get(5).map_err(|_| server_error())?;
     let approvals_pending: Option<i32> = row.try_get(7).map_err(|_| server_error())?;
     let turn_count: Option<i32> = row.try_get(10).map_err(|_| server_error())?;
@@ -758,6 +753,10 @@ async fn fetch_live_state(
         usage: row.try_get(8).map_err(|_| server_error())?,
         llm_model: row.try_get(9).map_err(|_| server_error())?,
         turn_count: turn_count.map(i64::from),
+        agent_health: row.try_get(11).map_err(|_| server_error())?,
+        agent_last_activity_at: agent_last_activity_at
+            .as_ref()
+            .map(crate::serializer::render_datetime),
         updated_at: crate::serializer::render_datetime(&updated_at),
     }))
 }
@@ -1028,6 +1027,8 @@ struct RunnerRender {
     enrolled_at: Option<String>,
     revoked_at: Option<String>,
     revoked_reason: String,
+    paused_at: Option<String>,
+    paused_by: Option<String>,
     created_at: String,
     updated_at: String,
 }
@@ -1069,6 +1070,8 @@ impl RunnerRender {
             usage: &live.usage,
             llm_model: live.llm_model.as_deref(),
             turn_count: live.turn_count,
+            agent_health: live.agent_health.as_deref(),
+            agent_last_activity_at: live.agent_last_activity_at.as_deref(),
             updated_at: &live.updated_at,
         });
         let row = shapes::RunnerRow {
@@ -1094,6 +1097,8 @@ impl RunnerRender {
             enrolled_at: self.enrolled_at.as_deref(),
             revoked_at: self.revoked_at.as_deref(),
             revoked_reason: &self.revoked_reason,
+            paused_at: self.paused_at.as_deref(),
+            paused_by: self.paused_by.as_deref(),
             created_at: &self.created_at,
             updated_at: &self.updated_at,
         };
@@ -1153,6 +1158,11 @@ fn runner_render(
             .as_ref()
             .map(crate::serializer::render_datetime),
         revoked_reason: runner.revoked_reason.clone(),
+        paused_at: runner
+            .paused_at
+            .as_ref()
+            .map(crate::serializer::render_datetime),
+        paused_by: runner.paused_by_id.map(|id| id.to_string()),
         created_at: crate::serializer::render_datetime(&runner.created_at),
         updated_at: crate::serializer::render_datetime(&runner.updated_at),
     }
@@ -2251,7 +2261,7 @@ pub fn routes() -> Router<AppState> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::v1_cycles_modules::json_cpython::{JNum, JStr};
+    use crate::v1_cycles_modules::json::{JNum, JStr};
     use pidash_db::runner_enroll::columns::pod as pod_cols;
 
     const FIXTURE_ENDPOINTS: &str =
@@ -2537,17 +2547,9 @@ mod tests {
 
     #[test]
     fn strip_surrogate_split() {
-        // A lone surrogate (e.g. JSON "\udc00"): the pod path keeps the
-        // lossy spelling for the naming validator (which 400s on the
-        // U+FFFD via its ASCII charset, exactly as Python 400s on the
-        // surrogate); the runner rename — with no validator before the
-        // store — 500s, as Django does encoding the row for Postgres.
-        let mut dirty = JStr::from_text("r");
-        dirty.push_surrogate(0xdc00);
-        let value = JVal::Str(dirty);
-        assert_eq!(or_empty_stripped(Some(&value)).unwrap(), "r\u{fffd}");
-        assert!(or_empty_stripped_clean(Some(&value)).is_err());
-        // Clean inputs behave identically on both helpers.
+        // Lone surrogates were a 400 at parse since PIDASHCONV-1555 (tier
+        // 3), so no dirty value reaches these helpers; both strip clean
+        // text identically.
         for clean in [None, Some(JVal::Null), Some(jstr("")), Some(jstr("  x  "))] {
             assert_eq!(
                 or_empty_stripped(clean.as_ref()).unwrap(),
@@ -2626,10 +2628,12 @@ mod tests {
     #[test]
     fn join_block_widths() {
         // Positional decode offsets — fail loudly if the column consts move.
-        assert_eq!(RUNNER_BLOCK_COLS, 30);
+        assert_eq!(RUNNER_BLOCK_COLS, 32);
         assert_eq!(MACHINE_BLOCK_COLS, 10);
         assert_eq!(pod_cols::COLUMNS.len(), 10);
         assert_eq!(r_cols::COLUMNS[29], "revoked_reason");
+        assert_eq!(r_cols::COLUMNS[30], "paused_at");
+        assert_eq!(r_cols::COLUMNS[31], "paused_by_id");
         assert_eq!(dm_cols::COLUMNS[2], "host_label");
         assert_eq!(pod_cols::COLUMNS[5], "created_by_id");
     }
@@ -2739,7 +2743,7 @@ mod tests {
     }
 
     fn budget(raw: &str) -> Result<Option<i32>, &'static str> {
-        let data = json_cpython::parse_json_text(&format!(r#"{{"v":{raw}}}"#)).unwrap();
+        let data = json::parse_json_text(&format!(r#"{{"v":{raw}}}"#)).unwrap();
         parse_pin_wait_budget(data_get(&data, "v").ok().flatten())
     }
 
@@ -2833,6 +2837,8 @@ mod tests {
             updated_at: moment("2026-10-02T01:02:03+00:00"),
             revoked_at: None,
             revoked_reason: String::new(),
+            paused_at: None,
+            paused_by_id: None,
         };
         let live = LiveStateOwned {
             observed_run_id: None,
@@ -2845,6 +2851,8 @@ mod tests {
             usage: serde_json::json!({}),
             llm_model: Some("m".to_owned()),
             turn_count: Some(3),
+            agent_health: Some("healthy".to_owned()),
+            agent_last_activity_at: Some("2026-10-02T01:02:01Z".to_owned()),
             updated_at: "2026-10-02T01:02:03Z".to_owned(),
         };
         let body = runner_render(&runner, &fixed_pod(), "WEB".to_owned(), None, Some(live))
@@ -2852,7 +2860,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             body,
-            r#"{"id":"66666666-6666-6666-6666-666666666666","name":"r1","status":"offline","host_label":"h","provisioning":"manual","os":"","arch":"","runner_version":"","dev_metadata":{},"protocol_version":4,"capabilities":[],"last_heartbeat_at":null,"owner":"44444444-4444-4444-4444-444444444444","dev_machine":null,"dev_machine_detail":null,"visibility":0,"pod":"11111111-1111-1111-1111-111111111111","pod_detail":{"id":"11111111-1111-1111-1111-111111111111","name":"WEB_beefy","is_default":false,"project":"33333333-3333-3333-3333-333333333333","project_identifier":"WEB"},"live_state":{"observed_run_id":null,"last_event_at":"2026-10-02T01:02:03Z","last_event_kind":null,"last_event_summary":null,"agent_pid":null,"agent_subprocess_alive":true,"approvals_pending":null,"input_tokens":null,"output_tokens":null,"total_tokens":null,"usage":{},"llm_model":"m","turn_count":3,"updated_at":"2026-10-02T01:02:03Z"},"enrolled_at":null,"revoked_at":null,"revoked_reason":"","created_at":"2026-10-01T12:34:56.789012Z","updated_at":"2026-10-02T01:02:03Z"}"#
+            r#"{"id":"66666666-6666-6666-6666-666666666666","name":"r1","status":"offline","host_label":"h","provisioning":"manual","os":"","arch":"","runner_version":"","dev_metadata":{},"protocol_version":4,"capabilities":[],"last_heartbeat_at":null,"owner":"44444444-4444-4444-4444-444444444444","dev_machine":null,"dev_machine_detail":null,"visibility":0,"pod":"11111111-1111-1111-1111-111111111111","pod_detail":{"id":"11111111-1111-1111-1111-111111111111","name":"WEB_beefy","is_default":false,"project":"33333333-3333-3333-3333-333333333333","project_identifier":"WEB"},"live_state":{"observed_run_id":null,"last_event_at":"2026-10-02T01:02:03Z","last_event_kind":null,"last_event_summary":null,"agent_pid":null,"agent_subprocess_alive":true,"approvals_pending":null,"input_tokens":null,"output_tokens":null,"total_tokens":null,"usage":{},"llm_model":"m","turn_count":3,"agent_health":"healthy","agent_last_activity_at":"2026-10-02T01:02:01Z","updated_at":"2026-10-02T01:02:03Z"},"enrolled_at":null,"revoked_at":null,"revoked_reason":"","paused_at":null,"paused_by":null,"created_at":"2026-10-01T12:34:56.789012Z","updated_at":"2026-10-02T01:02:03Z"}"#
         );
     }
 }

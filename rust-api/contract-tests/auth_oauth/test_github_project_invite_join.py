@@ -231,47 +231,39 @@ def test_project_members_project_id_is_not_null():
 
 
 def _github_insert_block() -> str:
+    # ORM-07 moved the INSERT into `domain::projects::members::add`;
+    # the pin now covers the call site's `NewProjectMember` literal.
     assert GITHUB_RS.is_file(), (
         f"harness: {GITHUB_RS} moved — update PIDASHCONV-1084 test paths"
     )
     text = GITHUB_RS.read_text()
-    matches = list(re.finditer(r'INSERT\s+INTO\s+"?project_members"?', text))
-    assert len(matches) == 1, (
-        f"harness: expected exactly one project_members INSERT in oauth_github.rs,"
-        f" found {len(matches)} — update the PIDASHCONV-1084 harness"
+    marker = "domain::projects::members::add("
+    at = text.find(marker)
+    assert at != -1, (
+        "harness: no domain::projects::members::add call in oauth_github.rs"
+        " — update the PIDASHCONV-1084 harness"
     )
-    start = text.rfind("sqlx::query(", 0, matches[0].start())
-    await_at = text.find(".await", matches[0].end())
-    assert start != -1 and await_at != -1, (
-        "harness: could not delimit the INSERT statement block — update the harness"
-    )
-    end = text.find("?;", await_at)
-    assert end != -1, "harness: could not delimit the INSERT statement block"
-    return text[start : end + 2]
+    end = text.find(".await?;", at)
+    assert end != -1, "harness: could not delimit the domain call block"
+    return text[at : end + 2]
 
 
 def test_github_project_members_insert_omits_project_id():
     """Regression test: the github INSERT must not carry a real project_id.
 
-    Accepts the two shapes the issue sanctions — omitted column
-    (google/gitlab) or explicit NULL (gitea) — and rejects any
-    ``.bind(project_id)`` feeding the statement. FAILS on pre-fix code.
+    The call site must pass ``project_id: None`` (the explicit-NULL
+    shape the issue sanctions for the per-row replays) and no
+    ``.bind(project_id)`` may feed the write. FAILS on pre-fix code.
     """
     block = _github_insert_block()
-    values_at = block.find("VALUES")
-    assert values_at != -1, "harness: no VALUES in the INSERT block"
-    columns_section = block[:values_at]
-    values_section = block[values_at:]
-    column_has = "project_id" in columns_section
-    null_literal = re.search(r"\bNULL\b", values_section) is not None
     bind_has = re.search(r"\.bind\(\s*&?\s*\*?project_id\s*\)", block) is not None
     assert not bind_has, (
         "PB-1008: oauth_github.rs binds the invite's project_id into"
         " project_members — Django omits it and 500s; drop the bind"
     )
-    assert (not column_has) or null_literal, (
-        "PB-1008: oauth_github.rs lists project_id with a bound value —"
-        " omit the column (google/gitlab) or bind NULL (gitea)"
+    assert "project_id: None" in block, (
+        "PB-1008: oauth_github.rs must pass project_id: None — a real"
+        " project_id would stop the ported 500"
     )
 
 

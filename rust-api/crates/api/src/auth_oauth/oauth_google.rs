@@ -107,6 +107,7 @@ use crate::middleware::SessionHandle;
 use crate::state::AppState;
 use pidash_db::redis::RedisHandle;
 
+use pidash_compat::response::redirect_found;
 use pidash_services::auth_oauth::error::AuthenticationException;
 use pidash_services::auth_oauth::exchange::map_exchange_error;
 use pidash_services::auth_oauth::providers::{
@@ -117,6 +118,7 @@ use pidash_services::auth_session::{
     allowed_hosts_for, base_host, get_safe_redirect_url, redirection_path_str,
     select_redirection_path, HostSettings, ParamValue, MAX_URL_REDIRECT_LENGTH,
 };
+use pidash_services::domain::workspaces::members;
 
 // ---------------------------------------------------------------------------
 // Route registration: the cutover granularity is the route. Only these four
@@ -207,16 +209,14 @@ pub const PASSWORD_HASH_ITERATIONS: u32 = 600_000;
 /// characters the final `Location` answers 400 (`DisallowedRedirect`).
 pub fn redirect_response(location: &str) -> Response {
     let too_long = location.chars().count() > MAX_URL_REDIRECT_LENGTH;
-    let encoded = crate::response_headers::iri_to_uri(location);
+    let encoded = pidash_compat::http::iri_to_uri(location);
     let Some(value) = crate::response_headers::header_value(&encoded) else {
         return server_error();
     };
     if too_long {
         return disallowed_redirect();
     }
-    let mut response = StatusCode::FOUND.into_response();
-    response.headers_mut().insert(header::LOCATION, value);
-    response
+    redirect_found(value)
 }
 
 /// Uncaught-exception answer. Plain Django `View`s have no
@@ -224,7 +224,7 @@ pub fn redirect_response(location: &str) -> Response {
 /// technical 500 page. The contract pins the status only, so the body is
 /// empty.
 pub fn server_error() -> Response {
-    StatusCode::INTERNAL_SERVER_ERROR.into_response()
+    pidash_compat::response::empty_response_no_content_type(StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 /// `params = exc.get_error_dict()` rendered for `get_safe_redirect_url`:
@@ -405,6 +405,7 @@ pub struct RequestContext<'a> {
     pub app_base: String,
     pub space_base: String,
     pub pool: sqlx::PgPool,
+    pub orm: pidash_db::DatabaseConnection,
     pub session: SessionHandle,
     /// Shared Redis handle for the join-path cache invalidation
     /// (`invalidate_cache_directly`, PIDASHCONV-479). `None` when
@@ -438,6 +439,7 @@ impl<'a> RequestContext<'a> {
             .pools()
             .map(|pools| pools.primary().clone())
             .ok_or_else(server_error)?;
+        let orm = state.orm().cloned().ok_or_else(server_error)?;
         let settings = state.settings();
         let settings_view = host_settings(settings);
         let app_base = base_host(&settings_view, false, false, true);
@@ -456,6 +458,7 @@ impl<'a> RequestContext<'a> {
             app_base,
             space_base,
             pool,
+            orm,
             session: session
                 .map(|extension| extension.0)
                 .ok_or_else(server_error)?,
@@ -758,8 +761,8 @@ pub fn expires_at(value: &Value) -> Result<Option<chrono::DateTime<chrono::Utc>>
 /// mapper's `None` stands.
 pub fn token_fields(
     token_response: &Value,
-) -> Result<pidash_db::auth_oauth::queries::account::TokenFields, CallbackError> {
-    use pidash_db::auth_oauth::queries::account::TokenFields;
+) -> Result<pidash_services::domain::identity::account::TokenFields, CallbackError> {
+    use pidash_services::domain::identity::account::TokenFields;
     let mapped = google_token_data(token_response);
     Ok(TokenFields {
         access_token: mapped.access_token.as_str().map(str::to_owned),
@@ -996,109 +999,10 @@ pub fn get_display_name(email: &str) -> String {
         .collect()
 }
 
-/// New-user row (`adapter/base.py:300-328` + `User.save()` side effects
-/// `user.py:167-187`): `User(email, username=uuid4hex)`,
-/// `set_password(uuid4hex)` + autoset/verified flags, names (each `""`
-/// when falsy), then the save backfills `display_name` and leaves
-/// `token` empty (`token_updated_at` is `None`, so no rotation).
-pub async fn create_user(
-    pool: &sqlx::PgPool,
-    email: &str,
-    first_name: &str,
-    last_name: &str,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Result<UserRow, CallbackError> {
-    let id = uuid::Uuid::new_v4();
-    let username = new_state();
-    let password = encode_password(&new_state());
-    let display_name = backfill_display_name(email);
-    let first_name = if first_name.is_empty() {
-        String::new()
-    } else {
-        first_name.to_owned()
-    };
-    let last_name = if last_name.is_empty() {
-        String::new()
-    } else {
-        last_name.to_owned()
-    };
-    sqlx::query(
-        "INSERT INTO \"users\" (\"id\", \"password\", \"last_login\", \"username\", \
-         \"mobile_number\", \"email\", \"display_name\", \"first_name\", \
-         \"last_name\", \"avatar\", \"avatar_asset_id\", \"cover_image\", \
-         \"cover_image_asset_id\", \"date_joined\", \"created_at\", \
-         \"updated_at\", \"last_location\", \"created_location\", \
-         \"is_superuser\", \"is_managed\", \"is_password_expired\", \
-         \"is_active\", \"is_staff\", \"is_email_verified\", \
-         \"is_password_autoset\", \"is_password_reset_required\", \"token\", \
-         \"last_active\", \"last_login_time\", \"last_logout_time\", \
-         \"last_login_ip\", \"last_logout_ip\", \"last_login_medium\", \
-         \"last_login_uagent\", \"token_updated_at\", \"is_bot\", \"bot_type\", \
-         \"user_timezone\", \"is_email_valid\", \"masked_at\") \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, \
-         $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, \
-         $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40)",
-    )
-    .bind(id)
-    .bind(password.clone())
-    .bind(None::<chrono::DateTime<chrono::Utc>>)
-    .bind(username)
-    .bind(None::<String>)
-    .bind(email)
-    .bind(display_name.clone())
-    .bind(first_name.clone())
-    .bind(last_name.clone())
-    .bind(String::new())
-    .bind(None::<uuid::Uuid>)
-    .bind(None::<String>)
-    .bind(None::<uuid::Uuid>)
-    .bind(now)
-    .bind(now)
-    .bind(now)
-    .bind(String::new())
-    .bind(String::new())
-    .bind(false)
-    .bind(false)
-    .bind(false)
-    .bind(true)
-    .bind(false)
-    .bind(true)
-    .bind(true)
-    .bind(false)
-    .bind(String::new())
-    .bind(now)
-    .bind(None::<chrono::DateTime<chrono::Utc>>)
-    .bind(None::<chrono::DateTime<chrono::Utc>>)
-    .bind(String::new())
-    .bind(String::new())
-    .bind("email")
-    .bind(String::new())
-    .bind(None::<chrono::DateTime<chrono::Utc>>)
-    .bind(false)
-    .bind(None::<String>)
-    .bind("UTC")
-    .bind(false)
-    .bind(None::<chrono::DateTime<chrono::Utc>>)
-    .execute(pool)
-    .await
-    .map_err(|_| CallbackError::Internal)?;
-    Ok(UserRow {
-        id,
-        password,
-        email: Some(email.to_owned()),
-        is_active: true,
-        is_superuser: false,
-        first_name,
-        last_name,
-        display_name,
-        avatar: String::new(),
-        avatar_asset_id: None,
-    })
-}
-
-// ---------------------------------------------------------------------------
-// Profile, sync, stamps, task fan-out.
-// ---------------------------------------------------------------------------
+// NOTE: the new-user INSERT, the `create_user_notification` post_save
+// insert and the signup profile row moved to
+// `domain::identity::create_user` (PIDASHCONV-1525). The signup arm
+// below calls it directly.
 
 /// `get_random_color` (`utils/color.py:9-14`): `"#"` + six hexdigits.
 /// Python draws from `string.hexdigits` (mixed case); the port draws from
@@ -1108,9 +1012,6 @@ pub fn random_color() -> String {
     format!("#{}", &new_state()[..6])
 }
 
-/// The `Profile.objects.get_or_create(user=user)` read half: the
-/// onboarding flag and last-workspace pointer `get_redirection_path`
-/// branches on. `None` when the row is missing (the caller creates it).
 pub struct ProfileState {
     pub is_onboarded: bool,
     pub last_workspace_id: Option<uuid::Uuid>,
@@ -1126,89 +1027,13 @@ pub async fn get_or_create_profile(
     user_id: uuid::Uuid,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<ProfileState, CallbackError> {
-    let row: Option<(bool, Option<uuid::Uuid>)> = sqlx::query_as(
-        "SELECT \"is_onboarded\", \"last_workspace_id\" FROM \"profiles\" WHERE \"user_id\" = $1 LIMIT 1",
-    )
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| CallbackError::Internal)?;
-    if let Some((is_onboarded, last_workspace_id)) = row {
-        return Ok(ProfileState {
-            is_onboarded,
-            last_workspace_id,
-        });
-    }
-    let onboarding = serde_json::json!({
-        "profile_complete": false,
-        "workspace_create": false,
-        "workspace_invite": false,
-        "workspace_join": false,
-    });
-    let mobile_onboarding = serde_json::json!({
-        "profile_complete": false,
-        "workspace_create": false,
-        "workspace_join": false,
-    });
-    let product_tour = serde_json::json!({
-        "work_items": false,
-        "cycles": false,
-        "modules": false,
-        "intake": false,
-        "pages": false,
-    });
-    sqlx::query(
-        "INSERT INTO \"profiles\" (\"id\", \"created_at\", \"updated_at\", \
-         \"user_id\", \"theme\", \"is_app_rail_docked\", \"is_tour_completed\", \
-         \"onboarding_step\", \"use_case\", \"role\", \"is_onboarded\", \
-         \"last_workspace_id\", \"billing_address_country\", \
-         \"billing_address\", \"has_billing_address\", \"company_name\", \
-         \"notification_view_mode\", \"is_smooth_cursor_enabled\", \
-         \"is_mobile_onboarded\", \"mobile_onboarding_step\", \
-         \"mobile_timezone_auto_set\", \"language\", \"start_of_the_week\", \
-         \"goals\", \"background_color\", \
-         \"is_navigation_tour_completed\", \"has_marketing_email_consent\", \
-         \"is_subscribed_to_changelog\", \"product_tour\", \"settings\") \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, \
-         $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, \
-         $29, $30)",
-    )
-    .bind(uuid::Uuid::new_v4())
-    .bind(now)
-    .bind(now)
-    .bind(user_id)
-    .bind(serde_json::json!({}))
-    .bind(true)
-    .bind(false)
-    .bind(onboarding)
-    .bind(None::<String>)
-    .bind(None::<String>)
-    .bind(false)
-    .bind(None::<uuid::Uuid>)
-    .bind("INDIA")
-    .bind(None::<serde_json::Value>)
-    .bind(false)
-    .bind(String::new())
-    .bind("full")
-    .bind(false)
-    .bind(false)
-    .bind(mobile_onboarding)
-    .bind(false)
-    .bind("en")
-    .bind(0i16)
-    .bind(serde_json::json!({}))
-    .bind(random_color())
-    .bind(false)
-    .bind(false)
-    .bind(false)
-    .bind(product_tour)
-    .bind(serde_json::json!({}))
-    .execute(pool)
-    .await
-    .map_err(|_| CallbackError::Internal)?;
+    use pidash_services::domain::identity;
+    let path = identity::get_or_create_profile(pool, user_id, now, &random_color())
+        .await
+        .map_err(|_| CallbackError::Internal)?;
     Ok(ProfileState {
-        is_onboarded: false,
-        last_workspace_id: None,
+        is_onboarded: path.is_onboarded,
+        last_workspace_id: path.last_workspace_id,
     })
 }
 
@@ -1235,10 +1060,6 @@ pub async fn google_sync_enabled(pool: &sqlx::PgPool, secret: &str) -> Result<bo
     Ok(config_display(&values[0]) == "1")
 }
 
-/// `settings.DATA_UPLOAD_MAX_MEMORY_SIZE` (`settings/common.py:594`):
-/// `int(get_config("FILE_SIZE_LIMIT", 5242880))`.
-pub const AVATAR_MAX_BYTES: u64 = 5_242_880;
-
 /// `sync_user_data` (`adapter/base.py:256-287`): names, display name
 /// (`get_display_name` — google payloads carry no `display_name`, so the
 /// email prefix always wins), then the avatar pair: `delete_old_avatar`
@@ -1246,6 +1067,7 @@ pub const AVATAR_MAX_BYTES: u64 = 5_242_880;
 /// On success only the new FK is set (the avatar string keeps the `""` the
 /// delete wrote); on failure the provider URL is stored — `base.py:278-284`
 /// verbatim. The FK stays untouched when no asset was linked.
+/// `max_bytes` is `settings.DATA_UPLOAD_MAX_MEMORY_SIZE`.
 #[allow(clippy::too_many_arguments)]
 pub async fn sync_user_data(
     client: &reqwest::Client,
@@ -1258,25 +1080,24 @@ pub async fn sync_user_data(
     first_name: &str,
     last_name: &str,
     avatar_url: &str,
+    max_bytes: u64,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), CallbackError> {
-    sqlx::query(
-        "UPDATE \"users\" SET \"first_name\" = $1, \"last_name\" = $2, \
-         \"display_name\" = $3 WHERE \"id\" = $4",
+    use pidash_services::domain::identity;
+    identity::sync_user_data(
+        pool,
+        user.id,
+        &identity::SyncUpdate {
+            first_name,
+            last_name,
+            display_name: &get_display_name(email),
+            avatar: None,
+            avatar_asset_id: None,
+            is_staff: None,
+            touch_updated_at: false,
+            now,
+        },
     )
-    .bind(if first_name.is_empty() {
-        String::new()
-    } else {
-        first_name.to_owned()
-    })
-    .bind(if last_name.is_empty() {
-        String::new()
-    } else {
-        last_name.to_owned()
-    })
-    .bind(get_display_name(email))
-    .bind(user.id)
-    .execute(pool)
     .await
     .map_err(|_| CallbackError::Internal)?;
     delete_old_avatar(
@@ -1291,23 +1112,17 @@ pub async fn sync_user_data(
     )
     .await;
     match download_and_upload_avatar(
-        client, pool, storage, scheme, host, avatar_url, user.id, now,
+        client, pool, storage, scheme, host, avatar_url, user.id, max_bytes, now,
     )
     .await
     {
         Some(asset_id) => {
-            sqlx::query("UPDATE \"users\" SET \"avatar_asset_id\" = $1 WHERE \"id\" = $2")
-                .bind(asset_id)
-                .bind(user.id)
-                .execute(pool)
+            identity::stamp_avatar_asset(pool, user.id, asset_id)
                 .await
                 .map_err(|_| CallbackError::Internal)?;
         }
         None => {
-            sqlx::query("UPDATE \"users\" SET \"avatar\" = $1 WHERE \"id\" = $2")
-                .bind(avatar_url)
-                .bind(user.id)
-                .execute(pool)
+            identity::stamp_avatar_url(pool, user.id, avatar_url)
                 .await
                 .map_err(|_| CallbackError::Internal)?;
         }
@@ -1322,7 +1137,8 @@ pub async fn sync_user_data(
 /// `None` so the caller falls back to the provider URL
 /// (`except Exception: log_exception; return None`). `storage` /
 /// `scheme` / `host` mirror the `S3Storage(request)` server-side call the
-/// avatar flow makes (`base.py:198`, `is_server=False`).
+/// avatar flow makes (`base.py:198`, `is_server=False`). `max_bytes` is
+/// `settings.DATA_UPLOAD_MAX_MEMORY_SIZE`.
 #[allow(clippy::too_many_arguments)]
 pub async fn download_and_upload_avatar(
     client: &reqwest::Client,
@@ -1332,6 +1148,7 @@ pub async fn download_and_upload_avatar(
     host: &str,
     avatar_url: &str,
     user_id: uuid::Uuid,
+    max_bytes: u64,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Option<uuid::Uuid> {
     if avatar_url.is_empty() {
@@ -1375,10 +1192,7 @@ pub async fn download_and_upload_avatar(
         None | Some("") => {}
         Some(raw) => match raw.parse::<i64>() {
             Ok(length)
-                if pidash_storage::content_length_allowed(
-                    Some(length),
-                    AVATAR_MAX_BYTES as i64,
-                ) => {}
+                if pidash_storage::content_length_allowed(Some(length), max_bytes as i64) => {}
             _ => {
                 tracing::warn!(
                     "avatar over size limit or bad length; falling back to provider URL"
@@ -1419,7 +1233,7 @@ pub async fn download_and_upload_avatar(
                 return None;
             }
         };
-        if !pidash_storage::chunk_fits(content.len() as u64, chunk.len() as u64, AVATAR_MAX_BYTES) {
+        if !pidash_storage::chunk_fits(content.len() as u64, chunk.len() as u64, max_bytes) {
             tracing::warn!("avatar over size limit; falling back to provider URL");
             return None;
         }
@@ -1595,19 +1409,23 @@ pub async fn insert_file_asset(
     Ok(())
 }
 
-/// `delete_old_avatar` (`adapter/base.py:285-287`): when the user carries
-/// an avatar asset, delete the S3 object + the row and clear both columns.
-/// `FileAsset.DoesNotExist` passes silently; any other failure is logged
-/// and the flow continues (`except Exception: log_exception; return`) —
-/// so this returns `()` always and never fails the pipeline.
+/// `delete_old_avatar` (`adapter/base.py:236-254`): when the user carries
+/// a live avatar asset, delete the S3 object, soft-delete the row and
+/// clear both columns. `FileAsset.DoesNotExist` (no row, or a
+/// soft-deleted one — the manager filters `deleted_at IS NULL`) passes
+/// silently; any other failure is logged and the flow continues
+/// (`except Exception: log_exception; return`) — so this returns `()`
+/// always and never fails the pipeline.
 ///
 /// Row-delete policy mirrors `delete_files` exactly: the S3 multi-delete
 /// is idempotent and its `ClientError` collapses to `False`, after which
 /// Python still deletes the row — so any *answered* HTTP response (even
-/// an error status) deletes the row + clears the FK. Only a *transport*
-/// failure (Python's non-`ClientError` raise, e.g. connection loss) or a
-/// misconfigured backend (Python fails lazily on first use) keeps the
-/// old avatar intact.
+/// an error status) soft-deletes the row + clears the FK. Only a
+/// *transport* failure (Python's non-`ClientError` raise, e.g. connection
+/// loss) or a misconfigured backend (Python fails lazily on first use)
+/// keeps the old avatar intact. The row write is a soft delete, never a
+/// hard `DELETE`: the user's FK still points at the row, so a hard
+/// delete would die on the deferred FK in autocommit (PIDASHCONV-1321).
 #[allow(clippy::too_many_arguments)]
 pub async fn delete_old_avatar(
     client: &reqwest::Client,
@@ -1622,18 +1440,19 @@ pub async fn delete_old_avatar(
     let Some(asset_id) = avatar_asset_id else {
         return;
     };
-    let row: Option<(String,)> =
-        match sqlx::query_as("SELECT \"asset\" FROM \"file_assets\" WHERE \"id\" = $1")
-            .bind(asset_id)
-            .fetch_optional(pool)
-            .await
-        {
-            Ok(row) => row,
-            Err(error) => {
-                tracing::warn!(%error, "delete_old_avatar lookup failed");
-                return;
-            }
-        };
+    let row: Option<(String,)> = match sqlx::query_as(
+        "SELECT \"asset\" FROM \"file_assets\" WHERE \"id\" = $1 AND \"deleted_at\" IS NULL",
+    )
+    .bind(asset_id)
+    .fetch_optional(pool)
+    .await
+    {
+        Ok(row) => row,
+        Err(error) => {
+            tracing::warn!(%error, "delete_old_avatar lookup failed");
+            return;
+        }
+    };
     let Some((key,)) = row else {
         return;
     };
@@ -1663,20 +1482,7 @@ pub async fn delete_old_avatar(
             return;
         }
     }
-    if sqlx::query("DELETE FROM \"file_assets\" WHERE \"id\" = $1")
-        .bind(asset_id)
-        .execute(pool)
-        .await
-        .is_err()
-    {
-        return;
-    }
-    let _ = sqlx::query(
-        "UPDATE \"users\" SET \"avatar_asset_id\" = NULL, \"avatar\" = '' WHERE \"id\" = $1",
-    )
-    .bind(user_id)
-    .execute(pool)
-    .await;
+    crate::auth_oauth::soft_delete_avatar_asset(pool, user_id, asset_id, now).await;
 }
 
 /// Best-effort `.delay()` through the Postgres job queue
@@ -1730,23 +1536,23 @@ pub async fn save_user_data(
         .await;
     }
     let token = format!("{}{}", new_state(), new_state());
-    sqlx::query(
-        "UPDATE \"users\" SET \"last_login_medium\" = $1, \"last_active\" = $2, \
-         \"last_login_time\" = $3, \"last_login_ip\" = $4, \
-         \"last_login_uagent\" = $5, \"token_updated_at\" = $6, \
-         \"is_active\" = TRUE, \"token\" = $7, \"updated_at\" = $2, \
-         \"display_name\" = CASE WHEN \"display_name\" = '' THEN split_part(\"email\", '@', 1) ELSE \"display_name\" END, \
-         \"is_staff\" = \"is_staff\" OR \"is_superuser\" WHERE \"id\" = $8",
+    use pidash_services::domain::identity;
+    identity::save_user_data(
+        pool,
+        user.id,
+        &identity::LoginStamps {
+            medium: Some(PROVIDER),
+            login_ip: ip,
+            login_uagent: user_agent,
+            avatar: None,
+            avatar_asset_id: None,
+            display_name: Some(identity::DisplayNameUpdate::BackfillCase),
+            is_staff: Some(identity::StaffSync::OrSuperuser),
+            touch_updated_at: true,
+            rotated_token: &token,
+            now,
+        },
     )
-    .bind(PROVIDER)
-    .bind(now)
-    .bind(now)
-    .bind(ip)
-    .bind(user_agent)
-    .bind(now)
-    .bind(token)
-    .bind(user.id)
-    .execute(pool)
     .await
     .map_err(|_| CallbackError::Internal)?;
     Ok(())
@@ -1876,39 +1682,18 @@ pub async fn insert_workspace_members(
     }
     let props = default_props();
     let issues = issue_props();
-    let empty = serde_json::json!({});
-    let mut builder = sqlx::QueryBuilder::new(
-        "INSERT INTO \"workspace_members\" (\"id\", \"created_at\", \
-         \"updated_at\", \"created_by_id\", \"updated_by_id\", \
-         \"deleted_at\", \"workspace_id\", \"member_id\", \"role\", \
-         \"company_role\", \"view_props\", \"default_props\", \
-         \"issue_props\", \"is_active\", \"getting_started_checklist\", \
-         \"tips\", \"explored_features\") ",
-    );
-    builder.push_values(rows, |mut bind, row| {
-        let (workspace_id, member_id, role, created_by) = row;
-        bind.push_bind(uuid::Uuid::new_v4())
-            .push_bind(now)
-            .push_bind(now)
-            .push_bind(*created_by)
-            .push_bind(None::<uuid::Uuid>)
-            .push_bind(None::<chrono::DateTime<chrono::Utc>>)
-            .push_bind(*workspace_id)
-            .push_bind(*member_id)
-            .push_bind(*role)
-            .push_bind(None::<String>)
-            .push_bind(props.clone())
-            .push_bind(props.clone())
-            .push_bind(issues.clone())
-            .push_bind(true)
-            .push_bind(empty.clone())
-            .push_bind(empty.clone())
-            .push_bind(empty.clone());
-    });
-    builder.push(" ON CONFLICT DO NOTHING");
-    builder
-        .build()
-        .execute(pool)
+    let bulk_rows: Vec<members::BulkMember> = rows
+        .iter()
+        .map(
+            |(workspace_id, member_id, role, created_by)| members::BulkMember {
+                workspace_id: *workspace_id,
+                user_id: *member_id,
+                role: *role,
+                created_by: *created_by,
+            },
+        )
+        .collect();
+    members::bulk_add(pool, &bulk_rows, &props, &issues, now)
         .await
         .map_err(|_| CallbackError::Internal)?;
     Ok(())
@@ -1929,35 +1714,21 @@ pub async fn insert_project_members(
     }
     let props = default_props();
     let prefs = default_preferences();
-    let mut builder = sqlx::QueryBuilder::new(
-        "INSERT INTO \"project_members\" (\"id\", \"created_at\", \
-         \"updated_at\", \"created_by_id\", \"updated_by_id\", \
-         \"deleted_at\", \"workspace_id\", \"member_id\", \"comment\", \
-         \"role\", \"view_props\", \"default_props\", \"preferences\", \
-         \"sort_order\", \"is_active\") ",
-    );
-    builder.push_values(rows, |mut bind, row| {
-        let (workspace_id, member_id, role, created_by) = row;
-        bind.push_bind(uuid::Uuid::new_v4())
-            .push_bind(now)
-            .push_bind(now)
-            .push_bind(*created_by)
-            .push_bind(None::<uuid::Uuid>)
-            .push_bind(None::<chrono::DateTime<chrono::Utc>>)
-            .push_bind(*workspace_id)
-            .push_bind(*member_id)
-            .push_bind(None::<String>)
-            .push_bind(*role)
-            .push_bind(props.clone())
-            .push_bind(props.clone())
-            .push_bind(prefs.clone())
-            .push_bind(65535.0f64)
-            .push_bind(true);
-    });
-    builder.push(" ON CONFLICT DO NOTHING");
-    builder
-        .build()
-        .execute(pool)
+    let bulk: Vec<pidash_services::domain::projects::members::BulkRow> = rows
+        .iter()
+        .map(|(workspace_id, member_id, role, created_by)| {
+            pidash_services::domain::projects::members::BulkRow {
+                workspace_id: *workspace_id,
+                project_id: None,
+                user_id: *member_id,
+                role: pidash_services::domain::projects::members::RoleBind::Int(i64::from(*role)),
+                created_by: *created_by,
+                created_at: now,
+                updated_at: now,
+            }
+        })
+        .collect();
+    pidash_services::domain::projects::members::bulk_add(pool, &bulk, &props, &prefs, false)
         .await
         .map_err(|_| CallbackError::Internal)?;
     Ok(())
@@ -2085,12 +1856,12 @@ pub async fn upsert_account(
     pool: &sqlx::PgPool,
     user_id: uuid::Uuid,
     user_data: &Value,
-    tokens: &pidash_db::auth_oauth::queries::account::TokenFields,
+    tokens: &pidash_services::domain::identity::account::TokenFields,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), CallbackError> {
-    use pidash_db::auth_oauth::queries::account::{create_update_account, ExistingAccount};
+    use pidash_services::domain::identity::account::{create_update_account, ExistingAccount};
     let provider_id =
-        pidash_db::auth_oauth::queries::account::lookup_provider_id(user_data).unwrap_or("");
+        pidash_services::domain::identity::account::lookup_provider_id(user_data).unwrap_or("");
     let prior: Option<(chrono::DateTime<chrono::Utc>, Value)> = if provider_id.is_empty() {
         None
     } else {
@@ -2235,12 +2006,14 @@ pub struct AuthedUser {
 /// avatar upload attempt with provider-URL fallback, then IDP sync for
 /// the new user when enabled — `not is_signup`, never for existing
 /// users), stamps, post-auth workflow on the app side (`with_callback`),
-/// account upsert.
+/// account upsert. `file_size_max` is `settings.file_size_limit.max(0)`
+/// for the avatar size guards.
 pub async fn authenticate_google(
     ctx: &RequestContext<'_>,
     secret: &str,
     code: &str,
     with_callback: bool,
+    file_size_max: u64,
 ) -> Result<AuthedUser, CallbackError> {
     let now = chrono::Utc::now();
     let (client_id, client_secret) = google_config(&ctx.pool, secret).await?;
@@ -2281,12 +2054,56 @@ pub async fn authenticate_google(
         Some(row) => row,
         None => {
             check_signup(&ctx.pool, secret, &email).await?;
-            let mut row = create_user(&ctx.pool, &email, first_name, last_name, now).await?;
+            // `User(...)` + first `save()` with the `post_save`
+            // preferences row and the adapter profile row, all inside
+            // `domain::identity::create_user`.
+            use pidash_services::domain::identity;
+            let password = encode_password(&new_state());
+            let display_name = backfill_display_name(&email);
+            let id = identity::create_user(
+                &ctx.orm,
+                &identity::NewUser {
+                    id: None,
+                    email: &email,
+                    username: new_state(),
+                    password_hash: password.clone(),
+                    first_name: if first_name.is_empty() {
+                        ""
+                    } else {
+                        first_name
+                    },
+                    last_name: if last_name.is_empty() { "" } else { last_name },
+                    display_name: display_name.clone(),
+                    avatar: "",
+                    is_email_verified: true,
+                    is_password_autoset: true,
+                    last_active: Some(now),
+                    login_ip: Some(""),
+                    login_uagent: Some(""),
+                    is_bot: false,
+                    now,
+                    profile: Some(identity::NewProfile {
+                        company_name: "",
+                        background_color: random_color(),
+                    }),
+                },
+            )
+            .await
+            .map_err(|_| CallbackError::Internal)?;
+            let mut row = UserRow {
+                id,
+                password,
+                email: Some(email.clone()),
+                is_active: true,
+                is_superuser: false,
+                first_name: first_name.to_owned(),
+                last_name: last_name.to_owned(),
+                display_name,
+                avatar: String::new(),
+                avatar_asset_id: None,
+            };
             if !avatar_url.is_empty() {
-                sqlx::query("UPDATE \"users\" SET \"avatar\" = $1 WHERE \"id\" = $2")
-                    .bind(avatar_url)
-                    .bind(row.id)
-                    .execute(&ctx.pool)
+                identity::stamp_avatar_url(&ctx.pool, row.id, avatar_url)
                     .await
                     .map_err(|_| CallbackError::Internal)?;
                 row.avatar = avatar_url.to_owned();
@@ -2301,20 +2118,17 @@ pub async fn authenticate_google(
                     &ctx.host,
                     avatar_url,
                     row.id,
+                    file_size_max,
                     now,
                 )
                 .await
                 {
-                    sqlx::query("UPDATE \"users\" SET \"avatar_asset_id\" = $1 WHERE \"id\" = $2")
-                        .bind(asset_id)
-                        .bind(row.id)
-                        .execute(&ctx.pool)
+                    identity::stamp_avatar_asset(&ctx.pool, row.id, asset_id)
                         .await
                         .map_err(|_| CallbackError::Internal)?;
                     row.avatar_asset_id = Some(asset_id);
                 }
             }
-            get_or_create_profile(&ctx.pool, row.id, now).await?;
             if !is_signup && google_sync_enabled(&ctx.pool, secret).await? {
                 sync_user_data(
                     &client,
@@ -2327,6 +2141,7 @@ pub async fn authenticate_google(
                     first_name,
                     last_name,
                     avatar_url,
+                    file_size_max,
                     now,
                 )
                 .await?;
@@ -2403,7 +2218,8 @@ pub async fn app_callback(
         }
     };
     let secret = state.settings().secret_key.clone();
-    match authenticate_google(&ctx, &secret, &code, true).await {
+    let file_size_max = state.settings().file_size_limit.max(0) as u64;
+    match authenticate_google(&ctx, &secret, &code, true, file_size_max).await {
         Err(CallbackError::Auth(exception)) => {
             let url = error_redirect(
                 &ctx.app_base,
@@ -2489,7 +2305,8 @@ pub async fn space_callback(
     let secret = state.settings().secret_key.clone();
     // Valid path: `authenticate()` + `user_login()` side effects run
     // first (Python `:85-90`), then the f-string `base_host(...)` raises.
-    if let Ok(authed) = authenticate_google(&ctx, &secret, &code, false).await {
+    let file_size_max = state.settings().file_size_limit.max(0) as u64;
+    if let Ok(authed) = authenticate_google(&ctx, &secret, &code, false, file_size_max).await {
         let _ = login_user(
             &ctx,
             state.settings(),
@@ -2768,13 +2585,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn avatar_size_limit_matches_settings_default() {
-        // `FILE_SIZE_LIMIT` / `DATA_UPLOAD_MAX_MEMORY_SIZE`
-        // (`settings/common.py:428,594`): `int(get_config(..., 5242880))`.
-        assert_eq!(AVATAR_MAX_BYTES, 5_242_880);
-    }
-
     // -- live kernel tests (env-gated, PIDASHCONV-1089) ------------------
     // Same convention as the github kernel harness (PIDASHCONV-1083):
     // unset DATABASE_URL (plain `cargo test`) skips these. REDIS_URL
@@ -2899,6 +2709,11 @@ mod tests {
                 .await
                 .unwrap_or_default();
         for user_id in &user_ids {
+            sqlx::query(r#"DELETE FROM "user_notification_preferences" WHERE "user_id" = $1"#)
+                .bind(user_id)
+                .execute(pool)
+                .await
+                .ok();
             sqlx::query(r#"DELETE FROM "workspace_members" WHERE "member_id" = $1"#)
                 .bind(user_id)
                 .execute(pool)
@@ -2934,6 +2749,97 @@ mod tests {
             .await
             .ok();
         }
+    }
+
+    /// `create_user` inserts the notification-preferences row
+    /// (`create_user_notification` post_save, `user.py:307-320`): one
+    /// row, all five flags true, NULL audit/scope columns, live.
+    /// PIDASHCONV-1528: the google signup skipped it. `create_user` has
+    /// a single caller — the new-user branch of `authenticate_google` —
+    /// so driving it here pins the real signup wiring (the HTTP
+    /// success path is sealed: hardcoded
+    /// `https://oauth2.googleapis.com` URLs on both backends).
+    #[tokio::test]
+    async fn google_kernel_signup_creates_notification_prefs() {
+        use pidash_services::domain::identity;
+        let Some(pool) = kernel_pool().await else {
+            return;
+        };
+        let orm = pidash_db::sea_orm_connection(&pool);
+        let tag = uuid::Uuid::new_v4().simple().to_string()[..8].to_owned();
+        let email = format!("go1528-{tag}@example.test");
+        let now = chrono::Utc::now();
+        let outcome = identity::create_user(
+            &orm,
+            &identity::NewUser {
+                id: None,
+                email: &email,
+                username: new_state(),
+                password_hash: encode_password(&new_state()),
+                first_name: "Kernel",
+                last_name: "User",
+                display_name: backfill_display_name(&email),
+                avatar: "",
+                is_email_verified: true,
+                is_password_autoset: true,
+                last_active: Some(now),
+                login_ip: Some(""),
+                login_uagent: Some(""),
+                is_bot: false,
+                now,
+                profile: Some(identity::NewProfile {
+                    company_name: "",
+                    background_color: random_color(),
+                }),
+            },
+        )
+        .await;
+
+        // Observe everything before cleanup so a failure still sweeps.
+        let user_id: Option<uuid::Uuid> =
+            sqlx::query_scalar(r#"SELECT "id" FROM "users" WHERE "email" = $1"#)
+                .bind(&email)
+                .fetch_optional(&pool)
+                .await
+                .expect("read user");
+        let flags: Vec<(bool, bool, bool, bool, bool)> = if let Some(id) = user_id {
+            sqlx::query_as(
+                r#"SELECT "property_change", "state_change", "comment", "mention", "issue_completed"
+                   FROM "user_notification_preferences" WHERE "user_id" = $1"#,
+            )
+            .bind(id)
+            .fetch_all(&pool)
+            .await
+            .expect("read prefs")
+        } else {
+            Vec::new()
+        };
+        let live_unscoped: i64 = if let Some(id) = user_id {
+            sqlx::query_scalar(
+                r#"SELECT COUNT(*) FROM "user_notification_preferences"
+                   WHERE "user_id" = $1 AND "deleted_at" IS NULL AND "workspace_id" IS NULL
+                     AND "project_id" IS NULL AND "created_by_id" IS NULL
+                     AND "updated_by_id" IS NULL"#,
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .expect("read prefs scope")
+        } else {
+            0
+        };
+        cleanup_kernel_world(&pool, &email, &[]).await;
+
+        let id = outcome.expect("create_user succeeds");
+        assert_eq!(user_id, Some(id), "returned id matches the row");
+        assert_eq!(flags.len(), 1, "exactly one prefs row");
+        let (property_change, state_change, comment, mention, issue_completed) = flags[0];
+        assert!(property_change, "property_change defaults true");
+        assert!(state_change, "state_change defaults true");
+        assert!(comment, "comment defaults true");
+        assert!(mention, "mention defaults true");
+        assert!(issue_completed, "issue_completed defaults true");
+        assert_eq!(live_unscoped, 1, "prefs row is live with NULL audit/scope");
     }
 
     /// Consumed workspace invites soft-delete: the accepted row survives
@@ -3071,5 +2977,487 @@ mod tests {
         );
         assert!(row.1, "is_staff syncs from is_superuser");
         assert!(row.2 > stale, "updated_at refreshes on the login save");
+    }
+
+    // -- live kernel tests: delete_old_avatar (PIDASHCONV-1321) -----------
+    // The HTTP success path is sealed (hardcoded https googleapis URLs),
+    // so these drive `delete_old_avatar` directly against the scratch DB
+    // with a loopback stub answering 200 to every S3 request.
+
+    /// Loopback S3 stub: answers `200` with an empty body to every
+    /// request. Returns the base URL plus a hit counter.
+    fn s3_stub_200() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::io::{Read, Write};
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind s3 stub");
+        let port = listener.local_addr().expect("stub addr").port();
+        let counted = std::sync::Arc::clone(&hits);
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(8) {
+                let Ok(mut socket) = stream else {
+                    break;
+                };
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = socket.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+                let mut buf = [0u8; 4096];
+                let _ = socket.read(&mut buf);
+                let _ = socket.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+            }
+        });
+        (format!("http://127.0.0.1:{port}"), hits)
+    }
+
+    /// Seed a user carrying a live `USER_AVATAR` asset (column lists mirror
+    /// `insert_file_asset` and `_harness.db.Database.make_user`), with the
+    /// user's FK + avatar string pointed at it. `created_by` is seeded set
+    /// (like `insert_file_asset`) so the test pins Django's anonymous-save
+    /// NULLing (`BaseModel.save`, `db/models/base.py:31-33`).
+    async fn seed_avatar_user(
+        pool: &sqlx::PgPool,
+        email: &str,
+        key: &str,
+    ) -> (uuid::Uuid, uuid::Uuid) {
+        let user_id = uuid::Uuid::new_v4();
+        let asset_id = uuid::Uuid::new_v4();
+        let now = chrono::Utc::now();
+        sqlx::query(
+            r#"INSERT INTO "users" ("password", "id", "username", "email", "first_name", "last_name",
+                "avatar", "date_joined", "created_at", "updated_at", "last_location",
+                "created_location", "is_superuser", "is_managed", "is_password_expired",
+                "is_active", "is_staff", "is_email_verified", "is_password_autoset",
+                "token", "user_timezone", "last_login_ip", "last_logout_ip",
+                "last_login_medium", "last_login_uagent", "is_bot", "display_name",
+                "is_email_valid", "is_password_reset_required")
+               VALUES ('pbkdf2_sha256$600000$kernelseed$kernelhash', $1, $2, $3, 'Kernel', 'User',
+                '', $4, $4, $4, '', '', FALSE, FALSE, FALSE, TRUE, FALSE, TRUE, FALSE,
+                '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+                'UTC', '', '', 'email', '', FALSE, 'Kernel User', TRUE, FALSE)"#,
+        )
+        .bind(user_id)
+        .bind(format!("u-{}", &user_id.simple().to_string()[..8]))
+        .bind(email)
+        .bind(now)
+        .execute(pool)
+        .await
+        .expect("seed user");
+        sqlx::query(
+            r#"INSERT INTO "file_assets"
+               ("id", "created_at", "updated_at", "attributes", "asset",
+                "created_by_id", "updated_by_id", "workspace_id",
+                "is_deleted", "deleted_at", "is_archived",
+                "comment_id", "entity_type", "external_id", "external_source",
+                "is_uploaded", "issue_id", "page_id", "project_id",
+                "size", "storage_metadata", "user_id", "draft_issue_id", "entity_identifier")
+               VALUES ($1, $2, $2, '{"name": "google-avatar.png"}', $3, $4, NULL, NULL,
+                       FALSE, NULL, FALSE,
+                       NULL, 'USER_AVATAR', NULL, NULL,
+                       TRUE, NULL, NULL, NULL,
+                       42, NULL, $4, NULL, NULL)"#,
+        )
+        .bind(asset_id)
+        .bind(now)
+        .bind(key)
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .expect("seed avatar asset");
+        sqlx::query(r#"UPDATE "users" SET "avatar_asset_id" = $1, "avatar" = $2 WHERE "id" = $3"#)
+            .bind(asset_id)
+            .bind("http://avatar.test/old.png")
+            .bind(user_id)
+            .execute(pool)
+            .await
+            .expect("point user at asset");
+        (user_id, asset_id)
+    }
+
+    async fn cleanup_avatar_world(pool: &sqlx::PgPool, user_id: uuid::Uuid) {
+        sqlx::query(r#"DELETE FROM "rust_job_queue" WHERE "args"::text LIKE $1"#)
+            .bind(format!("%{user_id}%"))
+            .execute(pool)
+            .await
+            .ok();
+        sqlx::query(r#"DELETE FROM "file_assets" WHERE "user_id" = $1"#)
+            .bind(user_id)
+            .execute(pool)
+            .await
+            .ok();
+        sqlx::query(r#"DELETE FROM "users" WHERE "id" = $1"#)
+            .bind(user_id)
+            .execute(pool)
+            .await
+            .ok();
+    }
+
+    /// `delete_old_avatar` soft-deletes the asset row (Django
+    /// `SoftDeleteModel.delete`: `deleted_at` + save + the
+    /// `soft_delete_related_objects` enqueue), clears the user's FK +
+    /// avatar string, and deletes the S3 object — instead of hard-deleting
+    /// the still-referenced row (23503, early return, live row + FK left
+    /// pointing at the deleted object).
+    #[tokio::test]
+    async fn google_kernel_delete_old_avatar_soft_deletes() {
+        let Some(pool) = kernel_pool().await else {
+            return;
+        };
+        let (s3_base, hits) = s3_stub_200();
+        let storage = pidash_db::config::StorageSettings {
+            use_minio: false,
+            minio_endpoint_ssl: false,
+            access_key_id: "kernel-access".to_owned(),
+            secret_access_key: "kernel-secret".to_owned(),
+            bucket_name: "uploads".to_owned(),
+            region: "us-east-1".to_owned(),
+            endpoint_url: Some(s3_base),
+            signed_url_expiration_secs: 3600,
+        };
+        let tag = uuid::Uuid::new_v4().simple().to_string()[..8].to_owned();
+        let email = format!("go1321-{tag}@example.test");
+        let (user_id, asset_id) =
+            seed_avatar_user(&pool, &email, &format!("kernel-{tag}-user-avatar.png")).await;
+        let client = reqwest::Client::new();
+
+        delete_old_avatar(
+            &client,
+            &pool,
+            &storage,
+            "http",
+            "127.0.0.1",
+            user_id,
+            Some(asset_id),
+            chrono::Utc::now(),
+        )
+        .await;
+
+        let row: (
+            Option<chrono::DateTime<chrono::Utc>>,
+            Option<uuid::Uuid>,
+            Option<uuid::Uuid>,
+        ) = sqlx::query_as(
+            r#"SELECT "deleted_at", "created_by_id", "updated_by_id"
+               FROM "file_assets" WHERE "id" = $1"#,
+        )
+        .bind(asset_id)
+        .fetch_one(&pool)
+        .await
+        .expect("old asset row survives as a soft delete");
+        let user: (Option<uuid::Uuid>, String) =
+            sqlx::query_as(r#"SELECT "avatar_asset_id", "avatar" FROM "users" WHERE "id" = $1"#)
+                .bind(user_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read user");
+        let jobs: Vec<(String, serde_json::Value, serde_json::Value)> = sqlx::query_as(
+            r#"SELECT "task", "args", "kwargs" FROM "rust_job_queue"
+               WHERE "args"::text LIKE $1"#,
+        )
+        .bind(format!("%{asset_id}%"))
+        .fetch_all(&pool)
+        .await
+        .expect("read queue");
+        cleanup_avatar_world(&pool, user_id).await;
+
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the S3 object is deleted exactly once"
+        );
+        assert!(row.0.is_some(), "old asset row soft-deletes");
+        assert_eq!(row.1, None, "anonymous save NULLs created_by");
+        assert_eq!(row.2, None, "anonymous save NULLs updated_by");
+        assert_eq!(user.0, None, "user FK cleared");
+        assert_eq!(user.1, "", "user avatar string cleared");
+        assert_eq!(jobs.len(), 1, "one soft-delete enqueue, {jobs:?}");
+        assert_eq!(
+            jobs[0].0,
+            "pi_dash.bgtasks.deletion_task.soft_delete_related_objects"
+        );
+        assert_eq!(
+            jobs[0].1,
+            serde_json::json!(["db", "fileasset", asset_id.to_string()])
+        );
+        assert_eq!(jobs[0].2, serde_json::json!({"using": null}));
+    }
+
+    /// A soft-deleted asset reads as missing (Django's `objects.get`
+    /// `deleted_at IS NULL` manager raises `DoesNotExist`): no S3 I/O, no
+    /// user write, no enqueue.
+    #[tokio::test]
+    async fn google_kernel_delete_old_avatar_ignores_soft_deleted() {
+        let Some(pool) = kernel_pool().await else {
+            return;
+        };
+        let (s3_base, hits) = s3_stub_200();
+        let storage = pidash_db::config::StorageSettings {
+            use_minio: false,
+            minio_endpoint_ssl: false,
+            access_key_id: "kernel-access".to_owned(),
+            secret_access_key: "kernel-secret".to_owned(),
+            bucket_name: "uploads".to_owned(),
+            region: "us-east-1".to_owned(),
+            endpoint_url: Some(s3_base),
+            signed_url_expiration_secs: 3600,
+        };
+        let tag = uuid::Uuid::new_v4().simple().to_string()[..8].to_owned();
+        let email = format!("go1321d-{tag}@example.test");
+        let (user_id, asset_id) =
+            seed_avatar_user(&pool, &email, &format!("kernel-{tag}-gone.png")).await;
+        sqlx::query(r#"UPDATE "file_assets" SET "deleted_at" = $1 WHERE "id" = $2"#)
+            .bind(chrono::Utc::now())
+            .bind(asset_id)
+            .execute(&pool)
+            .await
+            .expect("pre-soft-delete the asset");
+        let client = reqwest::Client::new();
+
+        delete_old_avatar(
+            &client,
+            &pool,
+            &storage,
+            "http",
+            "127.0.0.1",
+            user_id,
+            Some(asset_id),
+            chrono::Utc::now(),
+        )
+        .await;
+
+        let user: (Option<uuid::Uuid>, String) =
+            sqlx::query_as(r#"SELECT "avatar_asset_id", "avatar" FROM "users" WHERE "id" = $1"#)
+                .bind(user_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read user");
+        let jobs: i64 = sqlx::query_scalar(
+            r#"SELECT COUNT(*) FROM "rust_job_queue" WHERE "args"::text LIKE $1"#,
+        )
+        .bind(format!("%{asset_id}%"))
+        .fetch_one(&pool)
+        .await
+        .expect("count queue");
+        cleanup_avatar_world(&pool, user_id).await;
+
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no S3 I/O for a soft-deleted asset"
+        );
+        assert_eq!(user.0, Some(asset_id), "user FK untouched");
+        assert_eq!(jobs, 0, "no enqueue for a soft-deleted asset");
+    }
+
+    // -- live kernel tests: download_and_upload_avatar (PIDASHCONV-1324) --
+    // The HTTP success path is sealed (hardcoded https googleapis URLs),
+    // so these drive `download_and_upload_avatar` directly against the
+    // scratch DB with a loopback avatar stub + a draining S3 stub.
+    // Loopback avatar stub: serves `body_len` bytes as image/png, with an
+    // explicit Content-Length unless `with_length` is false (then the
+    // streaming guard alone decides, like a chunked provider response).
+    fn avatar_stub_bytes(body_len: usize, with_length: bool) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind avatar stub");
+        let port = listener.local_addr().expect("stub addr").port();
+        std::thread::spawn(move || {
+            let mut body = vec![0u8; body_len];
+            body[..8].copy_from_slice(&[137, 80, 78, 71, 13, 10, 26, 10]);
+            for stream in listener.incoming().take(8) {
+                let Ok(mut socket) = stream else {
+                    break;
+                };
+                let _ = socket.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+                let mut req = Vec::new();
+                let mut buf = [0u8; 4096];
+                loop {
+                    match socket.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            req.extend_from_slice(&buf[..n]);
+                            if req.windows(4).any(|w| w == b"\r\n\r\n") || req.len() > 65536 {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                let head = if with_length {
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    )
+                } else {
+                    "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nConnection: close\r\n\r\n"
+                        .to_owned()
+                };
+                let _ = socket.write_all(head.as_bytes());
+                let _ = socket.write_all(&body);
+            }
+        });
+        format!("http://127.0.0.1:{port}/avatar.png")
+    }
+
+    /// Loopback S3 stub that drains request bodies (the avatar PUT ships
+    /// megabytes; an early-close stub would RST the upload): answers
+    /// `200` with an empty body to every request.
+    fn s3_stub_drain() -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind s3 stub");
+        let port = listener.local_addr().expect("stub addr").port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(16) {
+                let Ok(mut socket) = stream else {
+                    break;
+                };
+                let _ = socket.set_read_timeout(Some(std::time::Duration::from_secs(30)));
+                let mut req = Vec::new();
+                let mut buf = [0u8; 65536];
+                let mut content_length: usize = 0;
+                let mut header_end: Option<usize> = None;
+                loop {
+                    match socket.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            req.extend_from_slice(&buf[..n]);
+                            if header_end.is_none() {
+                                if let Some(pos) = req.windows(4).position(|w| w == b"\r\n\r\n") {
+                                    header_end = Some(pos + 4);
+                                    let head = String::from_utf8_lossy(&req[..pos + 4]);
+                                    for line in head.lines() {
+                                        if let Some(v) = line
+                                            .strip_prefix("Content-Length:")
+                                            .or_else(|| line.strip_prefix("content-length:"))
+                                        {
+                                            content_length = v.trim().parse::<usize>().unwrap_or(0);
+                                        }
+                                    }
+                                }
+                            }
+                            if let Some(end) = header_end {
+                                if req.len() >= end + content_length {
+                                    break;
+                                }
+                            }
+                            if req.len() > 64 * 1024 * 1024 {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                let _ = socket.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+            }
+        });
+        format!("http://127.0.0.1:{port}")
+    }
+
+    async fn seed_download_user(pool: &sqlx::PgPool, email: &str) -> uuid::Uuid {
+        let user_id = uuid::Uuid::new_v4();
+        let now = chrono::Utc::now();
+        sqlx::query(
+            r#"INSERT INTO "users" ("password", "id", "username", "email", "first_name", "last_name",
+                "avatar", "date_joined", "created_at", "updated_at", "last_location",
+                "created_location", "is_superuser", "is_managed", "is_password_expired",
+                "is_active", "is_staff", "is_email_verified", "is_password_autoset",
+                "token", "user_timezone", "last_login_ip", "last_logout_ip",
+                "last_login_medium", "last_login_uagent", "is_bot", "display_name",
+                "is_email_valid", "is_password_reset_required")
+               VALUES ('pbkdf2_sha256$600000$kernelseed$kernelhash', $1, $2, $3, 'Kernel', 'User',
+                '', $4, $4, $4, '', '', FALSE, FALSE, FALSE, TRUE, FALSE, TRUE, FALSE,
+                '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+                'UTC', '', '', 'email', '', FALSE, 'Kernel User', TRUE, FALSE)"#,
+        )
+        .bind(user_id)
+        .bind(format!("u-{}", &user_id.simple().to_string()[..8]))
+        .bind(email)
+        .bind(now)
+        .execute(pool)
+        .await
+        .expect("seed user");
+        user_id
+    }
+
+    /// The avatar size guards follow the configured limit
+    /// (`settings.DATA_UPLOAD_MAX_MEMORY_SIZE`, i.e. `FILE_SIZE_LIMIT`),
+    /// not a hard-coded 5 MiB: a 6 MB avatar uploads at a 10 MB limit and
+    /// a 3 MB avatar falls back at a 1 MB limit — the Django decisions
+    /// (`base.py:155-158,177-182`). The boundary pins Python's strict
+    /// `>`: exactly-at-limit uploads via the pre-check, one-over falls
+    /// back via the streaming guard (no Content-Length served). Fails on
+    /// the pre-fix code (constant 5 MiB: the 6 MB case falls back).
+    #[tokio::test]
+    async fn google_kernel_download_avatar_follows_file_size_limit() {
+        let Some(pool) = kernel_pool().await else {
+            return;
+        };
+        let s3_base = s3_stub_drain();
+        let storage = pidash_db::config::StorageSettings {
+            use_minio: false,
+            minio_endpoint_ssl: false,
+            access_key_id: "kernel-access".to_owned(),
+            secret_access_key: "kernel-secret".to_owned(),
+            bucket_name: "uploads".to_owned(),
+            region: "us-east-1".to_owned(),
+            endpoint_url: Some(s3_base),
+            signed_url_expiration_secs: 3600,
+        };
+        let client = reqwest::Client::new();
+        // (`max_bytes`, body bytes, Content-Length served?, uploads?)
+        let cases: [(u64, usize, bool, bool); 4] = [
+            (10 * 1024 * 1024, 6 * 1024 * 1024, true, true),
+            (1024 * 1024, 3 * 1024 * 1024, true, false),
+            (5 * 1024 * 1024, 5 * 1024 * 1024, true, true),
+            (5 * 1024 * 1024, 5 * 1024 * 1024 + 1, false, false),
+        ];
+        for (case_no, (max_bytes, body_len, with_length, uploads)) in cases.into_iter().enumerate()
+        {
+            let tag = uuid::Uuid::new_v4().simple().to_string()[..8].to_owned();
+            let email = format!("go1324-{case_no}-{tag}@example.test");
+            let user_id = seed_download_user(&pool, &email).await;
+            let outcome = download_and_upload_avatar(
+                &client,
+                &pool,
+                &storage,
+                "http",
+                "127.0.0.1",
+                &avatar_stub_bytes(body_len, with_length),
+                user_id,
+                max_bytes,
+                chrono::Utc::now(),
+            )
+            .await;
+            let rows: Vec<(uuid::Uuid, f64)> =
+                sqlx::query_as(r#"SELECT "id", "size" FROM "file_assets" WHERE "user_id" = $1"#)
+                    .bind(user_id)
+                    .fetch_all(&pool)
+                    .await
+                    .expect("read assets");
+            cleanup_avatar_world(&pool, user_id).await;
+
+            assert_eq!(
+                outcome.is_some(),
+                uploads,
+                "case {case_no}: {body_len} bytes at a {max_bytes} limit",
+            );
+            if uploads {
+                assert_eq!(rows.len(), 1, "case {case_no}: one FileAsset row lands");
+                assert_eq!(
+                    rows[0].0,
+                    outcome.unwrap(),
+                    "case {case_no}: row id returned"
+                );
+                assert_eq!(
+                    rows[0].1, body_len as f64,
+                    "case {case_no}: stored size is the body length",
+                );
+            } else {
+                assert!(
+                    rows.is_empty(),
+                    "case {case_no}: fallback leaves no FileAsset row",
+                );
+            }
+        }
     }
 }

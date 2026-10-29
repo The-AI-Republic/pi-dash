@@ -77,6 +77,13 @@ pub struct Settings {
     pub gitlab_allowed_hosts: Vec<String>,
     pub cors_allowed_origins: Vec<String>,
     pub cors_allow_all_origins: bool,
+    /// `CSRF_TRUSTED_ORIGINS` (`settings/common.py:617`): the CORS
+    /// allowed origins, cloned. The cloud overlay overwrites this with
+    /// the env list plus the desktop origins
+    /// (`pi_dash_cloud/settings/cloud.py:338`, unconditional), while
+    /// `cors_allowed_origins` keeps the CORS-only semantics (empty
+    /// under the allow-all wildcard).
+    pub csrf_trusted_origins: Vec<String>,
     pub database: DatabaseSettings,
     pub redis: RedisSettings,
     pub assistant: AssistantSettings,
@@ -983,6 +990,8 @@ impl Settings {
             gitlab_allowed_hosts: ctx.csv_stripped("GITLAB_ALLOWED_HOSTS", "")?,
             cors_allowed_origins: cors_allowed_origins.clone(),
             cors_allow_all_origins: cors_allowed_origins.is_empty(),
+            // common.py:617: CSRF_TRUSTED_ORIGINS = cors_allowed_origins.
+            csrf_trusted_origins: cors_allowed_origins.clone(),
             database: DatabaseSettings {
                 url: database_url,
                 name: ctx.opt_string("POSTGRES_DB")?,
@@ -1468,6 +1477,11 @@ mod tests {
             s.cors_allowed_origins,
             vec!["https://a.example", "https://b.example"]
         );
+        // common.py:617: the CSRF list is the CORS list, cloned.
+        assert_eq!(
+            s.csrf_trusted_origins,
+            vec!["https://a.example", "https://b.example"]
+        );
         assert_eq!(s.database.url.as_deref(), Some("postgresql://db/pidash"));
         assert!(s.redis.ssl);
         assert!(s.loop_tuning.enabled);
@@ -1479,6 +1493,18 @@ mod tests {
             s.urls.admin_base_url.as_deref(),
             Some("https://admin.example")
         );
+    }
+
+    #[test]
+    fn csrf_trusted_origins_default_to_the_empty_cors_list() {
+        // common.py:150-155,617: an unset CORS env leaves the allow-all
+        // wildcard on and the CSRF list empty (the cloud overlay, not
+        // OSS resolution, adds the desktop origins there).
+        let s = Settings::from_map_with(&HashMap::new(), Profile::Common, &NoOverlay)
+            .expect("resolves");
+        assert!(s.cors_allow_all_origins);
+        assert!(s.cors_allowed_origins.is_empty());
+        assert!(s.csrf_trusted_origins.is_empty());
     }
 
     #[test]

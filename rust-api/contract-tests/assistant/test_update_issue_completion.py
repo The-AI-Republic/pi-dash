@@ -26,6 +26,11 @@ execute there), so this file is listed in ``TASK_ORACLE_IGNORES.txt``
 like ``test_tasks_turn.py``. Backend-agnostic: the turn is triggered
 through the message POST (both backends enqueue ``assistant.run_turn``
 from it) and the assertion polls Postgres.
+
+PIDASHCONV-1444 adds a second update_issue shape over the same driver:
+a move into a ticking state that bounces to a Backlog target. The DB
+row AND the tool result must say Backlog — Django's bounce mutates the
+in-memory issue the result briefs (``issues.py:388``).
 """
 
 from __future__ import annotations
@@ -45,6 +50,21 @@ from _harness.db import wait_for_condition as wait_for
 from integrations import seed as int_seed
 
 PASSWORD = "contract-suite-password"
+
+BOUNCE_STRIPPED = (
+    "Agent run skipped \u2014 no eligible runner."
+    "No runner is registered in this pod that can serve this issue. "
+    "Add a runner under your account, or assign this issue to a workspace "
+    "member whose runner is registered here."
+)
+
+#: Override body that fails to parse on both template engines (Jinja2 on
+#: Django, minijinja strict on Rust), so the entry-run prompt build raises
+#: inside the post-save orchestration (PIDASHCONV-1571). ``default-posture``
+#: is an ``overridable`` coding-task section, so a workspace-level row wins
+#: over the registry default on both backends.
+BROKEN_OVERRIDE_SECTION = "default-posture"
+BROKEN_OVERRIDE_BODY = "{% if %}\n"
 
 
 def _base_url() -> str:
@@ -73,6 +93,9 @@ class _ToolCallStub:
     def __init__(self, issue_id: str, state_id: str):
         self.arguments = json.dumps({"issue_id": issue_id, "state_id": state_id})
         self.requests: list[dict] = []
+        #: Full request payloads (PIDASHCONV-1444): the follow-up request's
+        #: ``role: tool`` message carries the tool-result JSON.
+        self.payloads: list[dict] = []
         self._server = None
         self._thread = None
         self._lock = threading.Lock()
@@ -105,6 +128,7 @@ class _ToolCallStub:
                             "tool_result_seen": already_ran,
                         }
                     )
+                    stub.payloads.append(payload)
                 if self.path.endswith("/chat/completions") and payload.get("stream"):
                     self.send_response(200)
                     self.send_header("Content-Type", "text/event-stream")
@@ -239,6 +263,45 @@ def _issue_state(db_conn, issue_id):
         return cur.fetchone()["state_id"]
 
 
+def _ticker_rows(db_conn, issue_id):
+    with db_conn.cursor(row_factory=dict_row) as cur:
+        cur.execute("SELECT * FROM issue_agent_ticker WHERE issue_id = %s", (issue_id,))
+        return cur.fetchall()
+
+
+def _run_rows(db_conn, issue_id):
+    with db_conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT * FROM agent_run WHERE work_item_id = %s ORDER BY created_at",
+            (issue_id,),
+        )
+        return cur.fetchall()
+
+
+def _comment_rows(db_conn, issue_id):
+    with db_conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT * FROM issue_comments WHERE issue_id = %s ORDER BY created_at",
+            (issue_id,),
+        )
+        return cur.fetchall()
+
+
+def _tool_results(payloads):
+    """Every tool-result dict across the stub's captured payloads.
+
+    Both lanes send the executed tool's return back to the model as an
+    OpenAI ``role: tool`` message whose content is the result JSON, so the
+    stub observes exactly what the tool returned.
+    """
+    found = []
+    for payload in payloads:
+        for message in payload.get("messages") or []:
+            if isinstance(message, dict) and message.get("role") == "tool":
+                found.append(json.loads(message["content"]))
+    return found
+
+
 def test_update_issue_to_completed_enqueues_post_completion_comment(db_conn):
     """A turn moving a synced issue to Done runs the completion comment.
 
@@ -339,5 +402,218 @@ def test_update_issue_to_completed_enqueues_post_completion_comment(db_conn):
         assert metadata.get("completion_comment_id") or metadata.get(
             "completion_comment_error"
         ), f"sync metadata never recorded the comment attempt: {metadata!r}"
+    finally:
+        stub.stop()
+
+
+def test_update_issue_bounce_reports_backlog_tool_result(db_conn):
+    """Bounce to a Backlog target: the DB row AND the tool result say Backlog.
+
+    PIDASHCONV-1444: a turn moves a Todo issue into a ticking state with a
+    pod but no runner, so the drive bounces it to Backlog. Django's bounce
+    mutates the in-memory issue the result briefs (``issues.py:388``), so
+    the tool result reports the Backlog state — not the requested ticking
+    state. Backend-agnostic like the sibling test: the same assertions run
+    against Django and Rust.
+    """
+    seed_helpers.ensure_setup_done(db_conn)
+    chain = seed_helpers.issue_chain(db_conn, "1444bounce")
+    owner, ws, project = chain["owner"], chain["workspace"], chain["project"]
+    seed_helpers.workspace_member(db_conn, str(ws["id"]), str(owner["id"]), role=15)
+    seed_helpers.project_member(
+        db_conn, str(project["id"]), str(ws["id"]), str(owner["id"]), role=15
+    )
+    seed = seed_helpers.Seed(db_conn)
+    todo_id = seed.state(str(project["id"]), str(ws["id"]), name="Todo", group="unstarted")
+    # The ticking gate pins the literal state name per group
+    # (``agent_phases.is_ticking_state``) — a custom name would not trigger.
+    progress_id = seed.state(
+        str(project["id"]), str(ws["id"]), name="In Progress", group="started"
+    )
+    backlog_id = chain["state"]["id"]
+    issue_id = str(chain["issue"]["id"])
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "UPDATE states SET name = 'Backlog' WHERE id = %s",
+            (str(backlog_id),),
+        )
+        cur.execute(
+            "UPDATE issues SET state_id = %s WHERE id = %s",
+            (str(todo_id), issue_id),
+        )
+    seed.pod(str(ws["id"]), str(project["id"]))
+    db_conn.commit()
+
+    stub = _ToolCallStub(issue_id, str(progress_id))
+    base = stub.start()
+    try:
+        cookie = login_session_cookie(_base_url(), owner["email"], PASSWORD)
+        client = api_client(_base_url(), cookie)
+        _configure_llm(client, base)
+
+        threads_base = f"/api/workspaces/{ws['slug']}/ai-assistant"
+        res = client.post(f"{threads_base}/threads/", json={"title": "move it"})
+        assert res.status_code == 201, res.text
+        thread_id = res.json()["id"]
+        res = client.post(
+            f"{threads_base}/threads/{thread_id}/messages/",
+            json={"content": "Please start work on the issue."},
+        )
+        assert res.status_code == 202, res.text
+        turn_id = res.json()["turn"]["id"]
+
+        row = wait_for(
+            lambda: _turn_row(db_conn, turn_id)
+            if _turn_row(db_conn, turn_id)["status"] == "completed"
+            else None,
+            what="tool-call turn completed",
+            timeout=180,
+        )
+        assert row["status"] == "completed"
+
+        assert str(_issue_state(db_conn, issue_id)) == str(backlog_id), (
+            "the bounce moves the row to Backlog"
+        )
+        results = _tool_results(stub.payloads)
+        assert len(results) == 1, "the follow-up carries exactly one tool result"
+        result = results[0]
+        assert result["updated"] is True
+        assert str(result["id"]) == issue_id
+        assert result["changed"] == ["state"]
+        assert result["state"] == "Backlog"
+        assert result["state_group"] == "backlog"
+        tickers = _ticker_rows(db_conn, issue_id)
+        assert len(tickers) == 1
+        ticker = tickers[0]
+        assert ticker["enabled"] is False
+        assert ticker["disarm_reason"] == "left_ticking_state"
+        assert ticker["next_run_at"] is None
+        assert str(ticker["created_by_id"]) == str(owner["id"])
+        comments = _comment_rows(db_conn, issue_id)
+        assert len(comments) == 1, "the bounce posts exactly one comment"
+        assert comments[0]["comment_stripped"] == BOUNCE_STRIPPED
+        assert _run_rows(db_conn, issue_id) == []
+    finally:
+        stub.stop()
+
+
+def test_update_issue_prompt_failure_commits_move(db_conn):
+    """Prompt build failure mid-drive: the edit commits, the tool briefs.
+
+    PIDASHCONV-1571: a turn moves a Todo issue into a ticking state with a
+    pod and an eligible runner, but the entry-run prompt build raises
+    (broken workspace override). The prompt path finalizes the run FAILED
+    and returns ``render-failed`` with no exception
+    (``orchestration/service.py:820-832``), so Django commits the whole
+    atomic and the tool returns its normal brief — with
+    ``dispatched_run_id`` pointing at the failed run. Backend-agnostic
+    like the sibling tests.
+    """
+    seed_helpers.ensure_setup_done(db_conn)
+    chain = seed_helpers.issue_chain(db_conn, "1571upfail")
+    owner, ws, project = chain["owner"], chain["workspace"], chain["project"]
+    seed_helpers.workspace_member(db_conn, str(ws["id"]), str(owner["id"]), role=15)
+    seed_helpers.project_member(
+        db_conn, str(project["id"]), str(ws["id"]), str(owner["id"]), role=15
+    )
+    seed = seed_helpers.Seed(db_conn)
+    todo_id = seed.state(str(project["id"]), str(ws["id"]), name="Todo", group="unstarted")
+    progress_id = seed.state(
+        str(project["id"]), str(ws["id"]), name="In Progress", group="started"
+    )
+    issue_id = str(chain["issue"]["id"])
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "UPDATE projects SET agent_ticking_enabled=TRUE, "
+            "agent_default_interval_seconds=10800, "
+            "agent_review_default_interval_seconds=10800, "
+            "agent_test_default_interval_seconds=10800, "
+            "agent_default_max_ticks=20, default_agent_executor='local_runner' "
+            "WHERE id = %s",
+            (str(project["id"]),),
+        )
+        cur.execute(
+            "UPDATE issues SET state_id = %s WHERE id = %s",
+            (str(todo_id), issue_id),
+        )
+    pod_id = seed.pod(str(ws["id"]), str(project["id"]))
+    seed.runner(str(owner["id"]), str(ws["id"]), str(pod_id))
+    seed.override(str(ws["id"]), BROKEN_OVERRIDE_SECTION, BROKEN_OVERRIDE_BODY)
+    db_conn.commit()
+
+    stub = _ToolCallStub(issue_id, str(progress_id))
+    base = stub.start()
+    try:
+        cookie = login_session_cookie(_base_url(), owner["email"], PASSWORD)
+        client = api_client(_base_url(), cookie)
+        _configure_llm(client, base)
+
+        threads_base = f"/api/workspaces/{ws['slug']}/ai-assistant"
+        res = client.post(f"{threads_base}/threads/", json={"title": "move it"})
+        assert res.status_code == 201, res.text
+        thread_id = res.json()["id"]
+        res = client.post(
+            f"{threads_base}/threads/{thread_id}/messages/",
+            json={"content": "Please start work on the issue."},
+        )
+        assert res.status_code == 202, res.text
+        turn_id = res.json()["turn"]["id"]
+
+        row = wait_for(
+            lambda: _turn_row(db_conn, turn_id)
+            if _turn_row(db_conn, turn_id)["status"] == "completed"
+            else None,
+            what="tool-call turn completed",
+            timeout=180,
+        )
+        assert row["status"] == "completed"
+
+        assert str(_issue_state(db_conn, issue_id)) == str(progress_id), (
+            "the move commits although the prompt build failed"
+        )
+        tickers = _ticker_rows(db_conn, issue_id)
+        assert len(tickers) == 1, "the entered-bucket fire arms exactly one ticker"
+        ticker = tickers[0]
+        assert ticker["enabled"] is True
+        assert ticker["disarm_reason"] == ""
+        assert ticker["next_run_at"] is not None
+        assert str(ticker["created_by_id"]) == str(owner["id"])
+        runs = _run_rows(db_conn, issue_id)
+        assert len(runs) == 1, "the failed prompt build still commits its run row"
+        run = runs[0]
+        assert run["status"] == "failed"
+        assert run["error_code"] == "prompt_build_failed"
+        assert run["trigger"] == "state_transition"
+        assert run["phase_kind"] == "coding-task"
+        assert run["error"].startswith("prompt build failed:")
+        results = _tool_results(stub.payloads)
+        assert len(results) == 1, "the follow-up carries exactly one tool result"
+        result = results[0]
+        assert result["updated"] is True
+        assert str(result["id"]) == issue_id
+        assert result["changed"] == ["state"]
+        assert result["state"] == "In Progress"
+        assert result["state_group"] == "started"
+        assert result["dispatched_run_id"] == str(run["id"])
+
+        def _failed_comment():
+            comments = _comment_rows(db_conn, issue_id)
+            if len(comments) == 1:
+                return comments[0]
+            return None
+
+        # The failed run's terminal effects post one "Run failed" comment
+        # (its tail is the template engine's own render error, so only the
+        # engine-independent head is pinned). Django applies the effects
+        # inline; Rust enqueues them for its worker — poll for both.
+        comment = wait_for(
+            _failed_comment,
+            what="failed-run comment posted",
+            timeout=180,
+        )
+        stripped = comment["comment_stripped"]
+        assert stripped.startswith("Run failed.")
+        assert "prompt build failed" in stripped
+        assert "default-posture" in stripped
     finally:
         stub.stop()

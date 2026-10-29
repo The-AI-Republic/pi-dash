@@ -68,8 +68,9 @@ use std::pin::Pin;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
+use crate::domain::identity::AgentUserCollisionError;
 use pidash_auth::permissions::membership::{check_project_role, ProjectRoleFacts};
-use pidash_db::orchestration::workpad::AgentUserCollisionError;
+use pidash_db::entity::comment_hooks::comment_stripped_for;
 use pidash_db::tasks_ticker::models::issue_agent_ticker::{
     IssueAgentTicker, COLUMNS as TICKER_COLUMNS,
 };
@@ -181,42 +182,14 @@ pub const PROJECT_DEFAULT_STATE_SQL: &str = "SELECT default_state_id FROM projec
 /// project id.
 pub const PROJECT_CLOCK_POLICY_SQL: &str = "SELECT agent_ticking_enabled, agent_default_max_ticks, agent_default_interval_seconds, agent_review_default_interval_seconds, agent_test_default_interval_seconds FROM projects WHERE id = $1";
 
-/// The state-move write (`:1109`, `:696`, `:1463`):
-/// `save(update_fields=["state", "updated_at"])` — ONLY these columns
-/// (the `updated_by` assignments never reach the row). `$1` state id,
-/// `$2` now, `$3` issue id.
-pub const ISSUE_STATE_UPDATE_SQL: &str =
-    "UPDATE issues SET state_id = $1, updated_at = $2 WHERE id = $3";
-
-/// Bounce comment INSERT (`IssueComment.objects.create`, `:1118-1125`,
-/// through the custom `save()` `:598-627`): full column list with the
-/// Django-side defaults (no DB default to fall back on). `$1` now
-/// (`created_at`), `$2` now (`updated_at`), `$3` id, `$4` project, `$5`
-/// workspace, `$6` stripped (`strip_tags` of `$7`), `$7` body, `$8`
-/// issue, `$9` actor (the system user; `created_by_id` stays NULL — the
-/// bounce path has no crum user, and the fixture pins no audit column).
-pub const COMMENT_INSERT_SQL: &str = "INSERT INTO issue_comments (created_at, updated_at, id, project_id, workspace_id, comment_stripped, comment_html, issue_id, actor_id, created_by_id, updated_by_id, deleted_at, comment_json, description_id, attachments, labels, access, external_source, external_id, speaker_type, speaker_label, speaker_agent_run_id, edited_at, parent_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, NULL, NULL, '{}', NULL, '{}', '{}', 'INTERNAL', NULL, NULL, 'agent', '', NULL, NULL, NULL)";
-
-/// Bounce comment `Description` side row (`:623-625`):
-/// `Description.objects.create(workspace, project, created_by,
-/// updated_by, description_stripped, description_json, description_html)`.
-/// `$1` now, `$2` now, `$3` id, `$4` workspace, `$5` project, `$6` body,
-/// `$7` stripped.
-pub const DESCRIPTION_INSERT_SQL: &str = "INSERT INTO descriptions (created_at, updated_at, id, workspace_id, project_id, description_html, description_stripped, created_by_id, updated_by_id, deleted_at, description_json, description_binary) VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, NULL, NULL, '{}', NULL)";
-
-/// Comment↔description link (`:627`):
-/// `save(update_fields=["description_id"])`. `$1` description id, `$2`
-/// comment id.
-pub const COMMENT_DESCRIPTION_UPDATE_SQL: &str =
-    "UPDATE issue_comments SET description_id = $1 WHERE id = $2";
-
 /// Wait activity row (`_record_wait_activity`, `:839-852`): full column
 /// list with the Django-side defaults. `$1` now, `$2` now, `$3` id, `$4`
 /// project, `$5` workspace, `$6` issue, `$7` pool (`old_value`), `$8`
 /// waited (`new_value`), `$9` comment ([`wait_activity_comment`]), `$10`
-/// actor (or the system user; `created_by_id` stays NULL — the fixture
-/// pins no audit column), `$11` epoch (`time.time()`).
-pub const WAIT_ACTIVITY_INSERT_SQL: &str = "INSERT INTO issue_activities (created_at, updated_at, id, project_id, workspace_id, issue_id, old_value, new_value, comment, actor_id, epoch, created_by_id, updated_by_id, deleted_at, verb, field, attachments, issue_comment_id, old_identifier, new_identifier) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NULL, NULL, NULL, 'updated', 'agent_wait', '{}', NULL, NULL, NULL)";
+/// actor (or the system user), `$11` epoch (`time.time()`), `$12`
+/// creator (the crum user `BaseModel.save` stamps on a Django create;
+/// `updated_by_id` stays NULL as there).
+pub const WAIT_ACTIVITY_INSERT_SQL: &str = "INSERT INTO issue_activities (created_at, updated_at, id, project_id, workspace_id, issue_id, old_value, new_value, comment, actor_id, epoch, created_by_id, updated_by_id, deleted_at, verb, field, attachments, issue_comment_id, old_identifier, new_identifier) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NULL, NULL, 'updated', 'agent_wait', '{}', NULL, NULL, NULL)";
 
 /// Wait write without re-arm (`:792-793, :816`):
 /// `save(update_fields=["waited", "updated_at"])`. `$1` waited, `$2`
@@ -353,28 +326,6 @@ pub fn agent_wait_log_line(
 // ---------------------------------------------------------------------------
 // Pure units
 // ---------------------------------------------------------------------------
-
-/// Django `strip_tags` (`django.utils.html.strip_tags`, the
-/// `tasks_cleanup::versions` algorithm as a per-module copy): scan for
-/// `<...>` spans and drop them; an unclosed `<` is kept verbatim.
-/// ASCII-only delimiters, so every slice lands on a char boundary.
-pub fn strip_tags(html: &str) -> String {
-    let mut out = String::with_capacity(html.len());
-    let mut rest = html;
-    while let Some(lt) = rest.find('<') {
-        out.push_str(&rest[..lt]);
-        rest = &rest[lt..];
-        match rest.find('>') {
-            Some(rel) => rest = &rest[rel + 1..],
-            None => {
-                out.push_str(rest);
-                return out;
-            }
-        }
-    }
-    out.push_str(rest);
-    out
-}
 
 /// `triggered_by in _MACHINE_TRIGGERS` (`:868, :895`): the clock's own
 /// triggers resolve like a tick.
@@ -532,9 +483,8 @@ pub struct RoleVerdict {
     pub is_workspace_admin: bool,
 }
 
-/// One bounce comment ([`COMMENT_INSERT_SQL`] +
-/// [`DESCRIPTION_INSERT_SQL`] + [`COMMENT_DESCRIPTION_UPDATE_SQL`]):
-/// the driver builds it, the seam writes all three rows in order.
+/// One bounce comment (the driver builds it, the seam writes the
+/// three domain executor rows in order).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewIssueComment {
     pub id: Uuid,
@@ -548,7 +498,9 @@ pub struct NewIssueComment {
     pub comment_stripped: String,
 }
 
-/// One wait activity ([`WAIT_ACTIVITY_INSERT_SQL`]).
+/// One wait activity ([`WAIT_ACTIVITY_INSERT_SQL`]). `created_by` is
+/// the crum user `BaseModel.save` stamps on a Django create (`None`
+/// where the caller has no request user).
 #[derive(Debug, Clone, PartialEq)]
 pub struct NewWaitActivity {
     pub id: Uuid,
@@ -560,6 +512,7 @@ pub struct NewWaitActivity {
     pub waited: i32,
     pub run_id: Option<Uuid>,
     pub actor_id: Uuid,
+    pub created_by: Option<Uuid>,
     pub epoch_secs: f64,
 }
 
@@ -687,7 +640,8 @@ pub trait DispatchSeam: CreationSeam + FinalizeAgentRunSeam {
         &mut self,
         project_id: Uuid,
     ) -> Result<ProjectClockPolicy, DispatchError>;
-    /// The state-move write ([`ISSUE_STATE_UPDATE_SQL`]).
+    /// The state-move write
+    /// ([`update_issue_state_no_audit`](crate::domain::issues::update_issue_state_no_audit)).
     async fn update_issue_state(
         &mut self,
         issue_id: Uuid,
@@ -1272,6 +1226,11 @@ pub async fn bounce_issue_no_eligible_runner<S: DispatchSeam>(
     }
 
     let actor_id = seam.agent_system_user_id().await?;
+    // The bounce posts via `IssueComment.objects.create`
+    // (`scheduling.py:1122-1129`), so `save()` recomputes the comment
+    // column with MLStripper (entities decoded — `issue.py:606`),
+    // even though the fixed bodies below carry no entities today
+    // (PIDASHCONV-1581 item 4).
     seam.insert_bounce_comment(&NewIssueComment {
         id: Uuid::new_v4(),
         description_id: Uuid::new_v4(),
@@ -1281,7 +1240,7 @@ pub async fn bounce_issue_no_eligible_runner<S: DispatchSeam>(
         issue_id,
         actor_id,
         comment_html: body.to_owned(),
-        comment_stripped: strip_tags(body),
+        comment_stripped: comment_stripped_for(body),
     })
     .await?;
     Ok(BounceOutcome { moved_to, logs })
@@ -1809,7 +1768,9 @@ pub async fn re_tick_ticker<S: DispatchSeam>(
 }
 
 /// Buy back one tick so an agent can yield without spending budget
-/// (`wait_ticker`, `:766-827`, PDASHOSS01-204).
+/// (`wait_ticker`, `:766-827`, PDASHOSS01-204). `created_by` is the
+/// crum user for the activity row (the HTTP caller; `None` where the
+/// caller has no request user).
 #[allow(clippy::too_many_arguments)]
 pub async fn wait_ticker<S: DispatchSeam>(
     seam: &mut S,
@@ -1819,6 +1780,7 @@ pub async fn wait_ticker<S: DispatchSeam>(
     now: DateTime<Utc>,
     jitter_secs: f64,
     epoch_secs: f64,
+    created_by: Option<Uuid>,
 ) -> Result<WaitOutcome, DispatchError> {
     let mut ticker = seam.lock_ticker_for_issue(issue_id).await?;
     let Some(row) = ticker.as_mut() else {
@@ -1893,6 +1855,7 @@ pub async fn wait_ticker<S: DispatchSeam>(
         waited: row.waited,
         run_id,
         actor_id,
+        created_by,
         epoch_secs,
     })
     .await?;
@@ -2735,14 +2698,24 @@ mod tests {
     }
 
     #[test]
-    fn strip_tags_b9_golden() {
+    fn bounce_stripped_ml_golden() {
+        // The bounce comment column is the `save()` MLStripper
+        // recompute (`issue.py:606`, PIDASHCONV-1581 item 4): entities
+        // decode. The B9 body carries none, so the golden bytes equal
+        // the retired Django-strip port's — the entity case pins the
+        // stripper the bounce now rides.
         let row = &fixture(BOUNCE)["cases"]["B9_comment_row"]["row"];
         let html = row["comment_html"].as_str().unwrap();
         assert_eq!(html, BOUNCE_BODY_DEFAULT);
-        assert_eq!(strip_tags(html), row["comment_stripped"].as_str().unwrap());
-        // The Django edge: an unclosed `<` is kept verbatim.
-        assert_eq!(strip_tags("a<b"), "a<b");
-        assert_eq!(strip_tags(""), "");
+        assert_eq!(
+            comment_stripped_for(html),
+            row["comment_stripped"].as_str().unwrap()
+        );
+        assert_eq!(
+            comment_stripped_for("<p>Run R&amp;D failed</p>"),
+            "Run R&D failed"
+        );
+        assert_eq!(comment_stripped_for(""), "");
     }
 
     #[test]
@@ -4120,6 +4093,7 @@ mod tests {
             now(),
             JITTER,
             EPOCH,
+            Some(uid(0x41)),
         )
         .await
         .expect("wait");
@@ -4139,6 +4113,7 @@ mod tests {
             now(),
             JITTER,
             EPOCH,
+            Some(uid(0x41)),
         )
         .await
         .expect("wait");
@@ -4157,6 +4132,7 @@ mod tests {
             now(),
             JITTER,
             EPOCH,
+            Some(uid(0x41)),
         )
         .await
         .expect("wait");
@@ -4181,6 +4157,7 @@ mod tests {
             now(),
             JITTER,
             EPOCH,
+            Some(uid(0x41)),
         )
         .await
         .expect("wait");
@@ -4210,6 +4187,7 @@ mod tests {
             fx["comment"].as_str().unwrap()
         );
         assert_eq!(activity.actor_id, uid(0x41));
+        assert_eq!(activity.created_by, Some(uid(0x41)));
         assert_eq!(activity.epoch_secs, EPOCH);
         assert_eq!(out.logs.len(), 1);
         assert_eq!(out.logs[0].level, "INFO");
@@ -4238,6 +4216,7 @@ mod tests {
             now(),
             JITTER,
             EPOCH,
+            Some(uid(0x41)),
         )
         .await
         .expect("wait");
@@ -4262,6 +4241,7 @@ mod tests {
             now(),
             JITTER,
             EPOCH,
+            Some(uid(0x41)),
         )
         .await
         .expect("wait");
@@ -4292,6 +4272,7 @@ mod tests {
             now(),
             JITTER,
             EPOCH,
+            Some(uid(0x41)),
         )
         .await
         .expect("wait");
@@ -4306,12 +4287,13 @@ mod tests {
         // W9: no actor — the system bot owns the activity; no run —
         // no suffix.
         let mut seam = wait_case();
-        let out = wait_ticker(&mut seam, uid(0x01), None, None, now(), JITTER, EPOCH)
+        let out = wait_ticker(&mut seam, uid(0x01), None, None, now(), JITTER, EPOCH, None)
             .await
             .expect("wait");
         assert!(out.applied);
         let activity = seam.activities.last().expect("activity written");
         assert_eq!(activity.actor_id, uid(0x99));
+        assert_eq!(activity.created_by, None);
         assert_eq!(
             wait_activity_comment(activity.pool, activity.waited, activity.run_id.as_ref()),
             fixture(WAIT)["cases"]["W9_activity_no_run"]["activity"]["comment"]
@@ -4331,6 +4313,7 @@ mod tests {
             now(),
             JITTER,
             EPOCH,
+            Some(uid(0x41)),
         )
         .await
         .expect("wait");
