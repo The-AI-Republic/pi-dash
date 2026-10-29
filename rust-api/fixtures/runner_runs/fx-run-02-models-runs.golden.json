@@ -875,6 +875,24 @@
      "rel": null
     },
     {
+     "name": "failure_reason",
+     "column": "failure_reason",
+     "type": "CharField",
+     "db_type": "varchar(64)",
+     "null": false,
+     "blank": true,
+     "default": "",
+     "db_default": "NOT_PROVIDED",
+     "db_index": true,
+     "unique": false,
+     "max_length": 64,
+     "choices": null,
+     "editable": true,
+     "auto_now": false,
+     "auto_now_add": false,
+     "rel": null
+    },
+    {
      "name": "llm_model",
      "column": "llm_model",
      "type": "CharField",

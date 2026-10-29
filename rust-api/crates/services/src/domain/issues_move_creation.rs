@@ -37,21 +37,21 @@ use crate::dispatch::execution::{
 use crate::dispatch::{DeferredConsume, LlmProfile};
 use crate::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
 use crate::orchestration::creation::{
-    active_run_sql, finalize_lock_sql, latest_prior_run_sql, run_insert_returning_sql,
-    run_lock_sql, run_select_sql, user_id_for_run, AdmissionError as ServiceAdmissionError,
-    CreationError, CreationSeam, ExecutionError, ExecutionFields as ServiceExecutionFields,
-    ExecutionRequest, FinalizeAgentRunSeam, IssueView, LockedIssue, NewAgentRun, PodView,
-    ProjectView, RenderBundle, RunView, RunnerSelectRow, RunnerView, StateView, TickerBudget,
-    ASSIGNED_POD_SELECT_SQL, BUNDLE_ANCESTOR_HOP_SQL, BUNDLE_ASSIGNEES_SQL, BUNDLE_CHILDREN_SQL,
-    BUNDLE_CODE_REVIEWS_SQL, BUNDLE_COMMENTS_SQL, BUNDLE_DONE_PAYLOAD_SQL, BUNDLE_LABELS_SQL,
-    BUNDLE_OVERRIDES_SQL, BUNDLE_PARENT_COLS_SQL, BUNDLE_PARENT_DESCRIPTION_SQL,
-    BUNDLE_PRIOR_RUN_COUNT_SQL, BUNDLE_PROJECT_IDENTIFIER_SQL, BUNDLE_PROJECT_STATES_SQL,
-    BUNDLE_RELATIONS_SQL, BUNDLE_RELATION_TARGETS_SQL, BUNDLE_REMOTE_SQL, BUNDLE_SEQUENCE_SQL,
-    BUNDLE_TICKER_SQL, BUNDLE_WORKSPACE_SQL, DEFAULT_POD_SELECT_SQL, FINALIZE_UPDATE_SQL,
-    ISSUE_LOCK_SQL, ISSUE_SELECT_SQL, PROJECT_SELECT_SQL, PROMPT_UPDATE_SQL, RUNNER_SELECT_SQL,
-    RUN_CONFIG_UPDATE_SQL, STATE_SELECT_SQL, TERMINAL_EVENT_EXISTS_SQL, TERMINAL_EVENT_INSERT_SQL,
-    TERMINAL_EVENT_SEQ_SQL, TICKER_RESUME_SELECT_SQL, USER_FLAGS_SELECT_SQL,
-    WORK_ITEM_ID_SELECT_SQL,
+    active_run_sql, finalize_failure_reason, finalize_lock_sql, latest_prior_run_sql,
+    run_insert_returning_sql, run_lock_sql, run_select_sql, user_id_for_run,
+    AdmissionError as ServiceAdmissionError, CreationError, CreationSeam, ExecutionError,
+    ExecutionFields as ServiceExecutionFields, ExecutionRequest, FinalizeAgentRunSeam, IssueView,
+    LockedIssue, NewAgentRun, PodView, ProjectView, RenderBundle, RunView, RunnerSelectRow,
+    RunnerView, StateView, TickerBudget, ASSIGNED_POD_SELECT_SQL, BUNDLE_ANCESTOR_HOP_SQL,
+    BUNDLE_ASSIGNEES_SQL, BUNDLE_CHILDREN_SQL, BUNDLE_CODE_REVIEWS_SQL, BUNDLE_COMMENTS_SQL,
+    BUNDLE_DONE_PAYLOAD_SQL, BUNDLE_LABELS_SQL, BUNDLE_OVERRIDES_SQL, BUNDLE_PARENT_COLS_SQL,
+    BUNDLE_PARENT_DESCRIPTION_SQL, BUNDLE_PRIOR_RUN_COUNT_SQL, BUNDLE_PROJECT_IDENTIFIER_SQL,
+    BUNDLE_PROJECT_STATES_SQL, BUNDLE_RELATIONS_SQL, BUNDLE_RELATION_TARGETS_SQL,
+    BUNDLE_REMOTE_SQL, BUNDLE_SEQUENCE_SQL, BUNDLE_TICKER_SQL, BUNDLE_WORKSPACE_SQL,
+    DEFAULT_POD_SELECT_SQL, FINALIZE_UPDATE_SQL, ISSUE_LOCK_SQL, ISSUE_SELECT_SQL,
+    PROJECT_SELECT_SQL, PROMPT_UPDATE_SQL, RUNNER_SELECT_SQL, RUN_CONFIG_UPDATE_SQL,
+    STATE_SELECT_SQL, TERMINAL_EVENT_EXISTS_SQL, TERMINAL_EVENT_INSERT_SQL, TERMINAL_EVENT_SEQ_SQL,
+    TICKER_RESUME_SELECT_SQL, USER_FLAGS_SELECT_SQL, WORK_ITEM_ID_SELECT_SQL,
 };
 use crate::prompting::{composer, context};
 
@@ -617,6 +617,7 @@ impl FinalizeAgentRunSeam for SeaHandoffStore<'_> {
                 sea_orm::Value::from(now),
                 sea_orm::Value::from(error_code),
                 sea_orm::Value::from(error),
+                sea_orm::Value::from(finalize_failure_reason(error_code, error)),
                 sea_orm::Value::from(run_id),
             ],
         )

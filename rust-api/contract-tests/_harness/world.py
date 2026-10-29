@@ -206,7 +206,7 @@ def make_run(issue_id: str, workspace_id: str, creator_id: str, pod_id: str,
     cols = ",".join(row)
     vals = ",".join(["%s"] * len(row))
     _exec(
-        f"INSERT INTO agent_run ({cols}, created_at) VALUES ({vals}, now())",
+        f"INSERT INTO agent_run (failure_reason, {cols}, created_at) VALUES ('', {vals}, now())",
         tuple(row.values()),
     )
     return run_id

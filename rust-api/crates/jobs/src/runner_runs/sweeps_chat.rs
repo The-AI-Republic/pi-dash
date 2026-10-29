@@ -81,6 +81,7 @@ use pidash_db::tasks_ticker::models::scheduler_binding;
 use pidash_services::domain::comments as comment_domain;
 use pidash_services::integrations::serializers::isoformat;
 use pidash_services::runner_runs::chat::{self, ChatEffect, NewEventInputs};
+use pidash_services::runner_runs::failure_effects;
 use pidash_services::runner_runs::finalization::{self, TerminalEffectsInputs};
 use pidash_services::runner_runs::lifecycle::{self, LifecycleError, LiveStateUsageFacts};
 use pidash_services::runner_runs::scheduler_hook::{self, BindingFacts, SchedulerHookPlan};
@@ -1039,6 +1040,9 @@ async fn reap_stalled_row(
         status: AgentRunStatus::Failed,
         done_payload: &null,
         error_detail: &error_detail,
+        // The stall reaper carries no runner reason (`tasks.py`'s
+        // `finalize_run_terminal` call passes none).
+        runner_failure_reason: &null,
         refusal_category: &null,
         tokens: &null,
         model: &null,
@@ -1406,16 +1410,18 @@ async fn run_failure_comment_in_savepoint(
 }
 
 /// Post the failure comment: re-read the run (a missing row or work
-/// item means silence), the speaker dedupe check (a hit means
-/// silence), then the comment + description inserts plus the
-/// link-back.
+/// item means silence), the per-reason gate (a free-retry failure below
+/// the backstop means silence, PDASHOSS01-183), the speaker dedupe check
+/// (a hit means silence), then the comment + description inserts plus
+/// the link-back, and — when the clock stopped — the clock-stopped
+/// notifications behind their own savepoint.
 async fn post_failure_comment(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     seams: &dyn RunnerRunsSeams,
     run_id: &Uuid,
     hooks: &finalization::HooksPlan,
 ) -> Result<(), SweepError> {
-    let Some(comment) = hooks.failure_comment.as_ref() else {
+    let Some(plan) = hooks.failure_comment.as_ref() else {
         return Ok(());
     };
     let reread = sqlx::query(&lifecycle::failure_reread_sql())
@@ -1433,7 +1439,21 @@ async fn post_failure_comment(
     if work_item_id.is_none() {
         return Ok(());
     }
+    let failure_reason: String = reread
+        .try_get(
+            col_index(agent_run::COLUMNS, "failure_reason")
+                .ok_or(SweepError::BadRow("failure_reason"))?,
+        )
+        .map_err(SweepError::Db)?;
     let ids = map_failure_comment_ids(&reread)?;
+    let streak = match lifecycle::failure_comment_streak_reason(&failure_reason) {
+        Some(reason) => failure_effects::failure_streak(tx, ids.issue_id, reason).await?,
+        None => 0,
+    };
+    let clock_stopped = match lifecycle::failure_comment_gate(&failure_reason, streak) {
+        lifecycle::FailureCommentGate::Suppress => return Ok(()),
+        lifecycle::FailureCommentGate::Post { clock_stopped } => clock_stopped,
+    };
     let duplicate = sqlx::query(lifecycle::comment_dedupe_exists_sql())
         .bind(ids.issue_id)
         .bind(*run_id)
@@ -1444,6 +1464,8 @@ async fn post_failure_comment(
     if duplicate {
         return Ok(());
     }
+    let rendered = plan.render(&failure_reason, clock_stopped);
+    let comment = &rendered.comment;
     let actor_id = seams.agent_system_user().await.map_err(SweepError::Seam)?;
     // Domain executor twins, in Django order. Ambient user nulls:
     // workers carry no `crum` user. Four `now()` reads keep their
@@ -1483,6 +1505,35 @@ async fn post_failure_comment(
     comment_domain::insert_comment_row(&mut **tx, &rows).await?;
     comment_domain::insert_description_row(&mut **tx, &rows).await?;
     comment_domain::link_comment_description(&mut **tx, rows.id, rows.description_id).await?;
+    if rendered.clock_stopped {
+        // Isolated like the source's `try/except`: a notification failure
+        // is logged and never drops the comment.
+        sqlx::query("SAVEPOINT sp_clock_stopped_notify")
+            .execute(&mut **tx)
+            .await?;
+        let notified = failure_effects::notify_clock_stopped(
+            tx,
+            *run_id,
+            ids.issue_id,
+            &failure_reason,
+            &rendered.label,
+            &rendered.action,
+        )
+        .await;
+        match notified {
+            Ok(_) => {
+                sqlx::query("RELEASE SAVEPOINT sp_clock_stopped_notify")
+                    .execute(&mut **tx)
+                    .await?;
+            }
+            Err(error) => {
+                tracing::error!(%error, "run_lifecycle: clock-stop notification failed for run {run_id}");
+                sqlx::query("ROLLBACK TO SAVEPOINT sp_clock_stopped_notify")
+                    .execute(&mut **tx)
+                    .await?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1955,7 +2006,7 @@ mod tests {
                 .map(|column| format!("\"runner\".\"{column}\"")),
         );
         assert_eq!(entries, expected);
-        assert_eq!(agent_run::COLUMNS.len(), 41);
+        assert_eq!(agent_run::COLUMNS.len(), 42);
         assert_eq!(runner_cols::COLUMNS.len(), 32);
     }
 

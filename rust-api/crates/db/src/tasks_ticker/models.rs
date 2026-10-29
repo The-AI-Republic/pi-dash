@@ -113,6 +113,15 @@ pub enum TickerDisarmReason {
     StopSignal,
     /// A human disabled the clock.
     UserDisabled,
+    /// The last run failed for a reason a retry cannot fix (expired agent
+    /// login, exhausted quota, missing binary, bad model — the
+    /// `NEEDS_HUMAN` failure policy, PDASHOSS01-183). Never auto-pauses;
+    /// Re-tick re-arms it without granting.
+    FailureNeedsHuman,
+    /// Backstop: `REPEATED_FAILURE_LIMIT` runs in a row failed with the
+    /// same `failure_reason`. Same recovery as
+    /// [`TickerDisarmReason::FailureNeedsHuman`].
+    RepeatedFailure,
 }
 
 impl TickerDisarmReason {
@@ -126,10 +135,13 @@ impl TickerDisarmReason {
             TickerDisarmReason::TerminalSignal => "terminal_signal",
             TickerDisarmReason::StopSignal => "stop_signal",
             TickerDisarmReason::UserDisabled => "user_disabled",
+            TickerDisarmReason::FailureNeedsHuman => "failure_needs_human",
+            TickerDisarmReason::RepeatedFailure => "repeated_failure",
         }
     }
 
-    /// All seven values in declaration order (matches `enums.json`).
+    /// All nine values in declaration order (`enums.json` plus the two
+    /// PDASHOSS01-183 failure-policy reasons, db migration 0169).
     pub const ALL: &[TickerDisarmReason] = &[
         TickerDisarmReason::None,
         TickerDisarmReason::LeftTickingState,
@@ -138,7 +150,19 @@ impl TickerDisarmReason {
         TickerDisarmReason::TerminalSignal,
         TickerDisarmReason::StopSignal,
         TickerDisarmReason::UserDisabled,
+        TickerDisarmReason::FailureNeedsHuman,
+        TickerDisarmReason::RepeatedFailure,
     ];
+
+    /// `_FAILURE_DISARM_REASONS` (`scheduling.py`, PDASHOSS01-183): the
+    /// stops the failure policy writes. Re-tick re-arms these without
+    /// granting budget; the deferred auto-pause never fires on them.
+    pub fn is_failure_stop(self) -> bool {
+        matches!(
+            self,
+            TickerDisarmReason::FailureNeedsHuman | TickerDisarmReason::RepeatedFailure
+        )
+    }
 }
 
 /// Error for unknown disarm-reason strings.
@@ -165,6 +189,8 @@ impl FromStr for TickerDisarmReason {
             "terminal_signal" => Ok(TickerDisarmReason::TerminalSignal),
             "stop_signal" => Ok(TickerDisarmReason::StopSignal),
             "user_disabled" => Ok(TickerDisarmReason::UserDisabled),
+            "failure_needs_human" => Ok(TickerDisarmReason::FailureNeedsHuman),
+            "repeated_failure" => Ok(TickerDisarmReason::RepeatedFailure),
             other => Err(UnknownDisarmReason(other.to_string())),
         }
     }
@@ -1049,7 +1075,7 @@ mod tests {
         let disarm: Vec<&str> = TickerDisarmReason::ALL.iter().map(|r| r.as_str()).collect();
         let expected: Vec<String> = values("ticker_disarm_reason");
         assert_eq!(disarm, expected);
-        assert_eq!(disarm.len(), 7);
+        assert_eq!(disarm.len(), 9);
         for reason in TickerDisarmReason::ALL {
             assert_eq!(TickerDisarmReason::from_str(reason.as_str()), Ok(*reason));
         }

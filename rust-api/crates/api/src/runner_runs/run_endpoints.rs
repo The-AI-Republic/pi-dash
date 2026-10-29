@@ -55,6 +55,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use pidash_services::domain::comments as comment_domain;
+use pidash_services::runner_runs::failure_effects;
 use pidash_services::runner_runs::finalization as finalize_kernel;
 use pidash_services::runner_runs::lifecycle as lifecycle_kernel;
 use pidash_services::runner_runs::{LifecycleEffect, LiveStateUsageFacts};
@@ -610,7 +611,8 @@ fn bind_finalize_value<'q>(
 }
 
 /// `finalize_run_terminal` (`run_lifecycle.py:402-463`) inside the
-/// endpoint transaction: plan, first-writer-wins lock, merge,
+/// endpoint transaction (`runner_failure_reason` is the `RunFailed`
+/// frame's `reason`, `Null` elsewhere): plan, first-writer-wins lock, merge,
 /// update, cloud-only terminal event. Returns the post-commit
 /// effects (`_publish_effects`); a lost race logs and returns none.
 #[allow(clippy::too_many_arguments)]
@@ -624,6 +626,7 @@ pub async fn execute_finalize_terminal(
     refusal_category: &Value,
     tokens: &Value,
     model: &Value,
+    runner_failure_reason: &Value,
 ) -> Result<Vec<LifecycleEffect>, Response> {
     let live = live_state_facts(tx, runner.id, run_id).await?;
     let info = runner_info(runner);
@@ -631,6 +634,7 @@ pub async fn execute_finalize_terminal(
         status,
         done_payload,
         error_detail,
+        runner_failure_reason,
         refusal_category,
         tokens,
         model,
@@ -1172,8 +1176,10 @@ async fn post_failure_comment(
         return Ok(());
     };
     // `failure_reread_sql`: run + work item + project, first row.
-    let reread: Option<(Option<Uuid>, Option<Uuid>, Option<Uuid>)> = sqlx::query_as(
-        r#"SELECT "agent_run"."work_item_id", "issues"."project_id", "issues"."workspace_id"
+    type RereadRow = (Option<Uuid>, Option<Uuid>, Option<Uuid>, String);
+    let reread: Option<RereadRow> = sqlx::query_as(
+        r#"SELECT "agent_run"."work_item_id", "issues"."project_id", "issues"."workspace_id",
+                  "agent_run"."failure_reason"
            FROM "agent_run" LEFT OUTER JOIN "issues"
              ON ("agent_run"."work_item_id" = "issues"."id")
            WHERE "agent_run"."id" = $1
@@ -1183,9 +1189,23 @@ async fn post_failure_comment(
     .fetch_optional(&mut **hooks)
     .await
     .map_err(db)?;
-    let (work_item_id, project_id, workspace_id) = match reread {
-        Some((Some(work_item), Some(project), Some(workspace))) => (work_item, project, workspace),
+    let (work_item_id, project_id, workspace_id, failure_reason) = match reread {
+        Some((Some(work_item), Some(project), Some(workspace), reason)) => {
+            (work_item, project, workspace, reason)
+        }
         _ => return Ok(()),
+    };
+    // Route on the stored canonical reason (PDASHOSS01-183): a free-retry
+    // failure below the backstop is retried silently.
+    let streak = match lifecycle_kernel::failure_comment_streak_reason(&failure_reason) {
+        Some(reason) => failure_effects::failure_streak(hooks, work_item_id, reason)
+            .await
+            .map_err(db)?,
+        None => 0,
+    };
+    let clock_stopped = match lifecycle_kernel::failure_comment_gate(&failure_reason, streak) {
+        lifecycle_kernel::FailureCommentGate::Suppress => return Ok(()),
+        lifecycle_kernel::FailureCommentGate::Post { clock_stopped } => clock_stopped,
     };
     let dupe: Option<i32> = sqlx::query_scalar(lifecycle_kernel::comment_dedupe_exists_sql())
         .bind(work_item_id)
@@ -1197,6 +1217,7 @@ async fn post_failure_comment(
     if dupe.is_some() {
         return Ok(());
     }
+    let rendered = plan.render(&failure_reason, clock_stopped);
     let actor_id = ports
         .agent_system_user_id()
         .await
@@ -1215,11 +1236,53 @@ async fn post_failure_comment(
             actor_id: Some(actor_id),
             created_by_id: created_by,
             updated_by_id: None,
-            plan,
+            plan: rendered.comment.clone(),
         },
     )
     .await
     .map_err(db)?;
+    if rendered.clock_stopped {
+        // A stopped clock with nobody told is the failure mode the
+        // taxonomy exists to prevent: notify the issue's creator and the
+        // runner's owner. Isolated like the source's `try/except` — a
+        // notification failure is logged and never drops the comment.
+        sqlx::query("SAVEPOINT clock_stopped_notify")
+            .execute(&mut **hooks)
+            .await
+            .map_err(db)?;
+        let notified = failure_effects::notify_clock_stopped(
+            hooks,
+            run_id,
+            work_item_id,
+            &failure_reason,
+            &rendered.label,
+            &rendered.action,
+        )
+        .await;
+        match notified {
+            Ok(_) => {
+                sqlx::query("RELEASE SAVEPOINT clock_stopped_notify")
+                    .execute(&mut **hooks)
+                    .await
+                    .map_err(db)?;
+            }
+            Err(error) => {
+                sqlx::query("ROLLBACK TO SAVEPOINT clock_stopped_notify")
+                    .execute(&mut **hooks)
+                    .await
+                    .map_err(db)?;
+                sqlx::query("RELEASE SAVEPOINT clock_stopped_notify")
+                    .execute(&mut **hooks)
+                    .await
+                    .map_err(db)?;
+                tracing::error!(
+                    ?error,
+                    run_id = %run_id,
+                    "run_lifecycle: clock-stop notification failed"
+                );
+            }
+        }
+    }
     Ok(())
 }
 
@@ -2121,6 +2184,7 @@ async fn run_completed_inner(
             &Value::Null,
             &tokens,
             &model,
+            &Value::Null,
         )
         .await
         {
@@ -2323,6 +2387,7 @@ async fn run_failed_inner(
             &category,
             &tokens,
             &model,
+            &Value::Null,
         )
         .await
         {
@@ -2341,6 +2406,10 @@ async fn run_failed_inner(
         }
         return json_response(StatusCode::OK, r#"{"ok":true,"refused":true}"#.to_owned());
     }
+    // `runner_failure_reason=request.data.get("reason") or ""`
+    // (PDASHOSS01-183): the runner's structured reason feeds the
+    // write-time classification.
+    let reason = preamble.data.get("reason").cloned().unwrap_or(Value::Null);
     let effects = match execute_finalize_terminal(
         &mut tx,
         runner,
@@ -2351,6 +2420,7 @@ async fn run_failed_inner(
         &Value::Null,
         &tokens,
         &model,
+        &reason,
     )
     .await
     {
@@ -2402,6 +2472,7 @@ async fn run_failed_requeue(
             runner,
             run_id,
             AgentRunStatus::Cancelled,
+            &Value::Null,
             &Value::Null,
             &Value::Null,
             &Value::Null,
@@ -2512,6 +2583,7 @@ async fn run_cancelled_inner(
             &Value::Null,
             &tokens,
             &model,
+            &Value::Null,
         )
         .await
         {

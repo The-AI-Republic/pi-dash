@@ -2225,6 +2225,7 @@ struct AgentRunOwned {
     done_payload: Option<serde_json::Value>,
     error: String,
     error_code: String,
+    failure_reason: String,
     llm_model: String,
     input_tokens: Option<i64>,
     output_tokens: Option<i64>,
@@ -2532,26 +2533,27 @@ async fn fetch_agent_run(
         row.try_get(9).map_err(|_| Denial::ServerError)?;
     let error: String = row.try_get(10).map_err(|_| Denial::ServerError)?;
     let error_code: String = row.try_get(11).map_err(|_| Denial::ServerError)?;
-    let llm_model: String = row.try_get(12).map_err(|_| Denial::ServerError)?;
-    let input_tokens: Option<i64> = row.try_get(13).map_err(|_| Denial::ServerError)?;
-    let output_tokens: Option<i64> = row.try_get(14).map_err(|_| Denial::ServerError)?;
-    let total_tokens: Option<i64> = row.try_get(15).map_err(|_| Denial::ServerError)?;
-    let runner_name: Option<String> = row.try_get(16).map_err(|_| Denial::ServerError)?;
-    let observed_run_id: Option<Uuid> = row.try_get(17).map_err(|_| Denial::ServerError)?;
-    let last_event_at: Option<DateTime<Utc>> = row.try_get(18).map_err(|_| Denial::ServerError)?;
-    let last_event_kind: Option<String> = row.try_get(19).map_err(|_| Denial::ServerError)?;
-    let last_event_summary: Option<String> = row.try_get(20).map_err(|_| Denial::ServerError)?;
-    let agent_pid: Option<i32> = row.try_get(21).map_err(|_| Denial::ServerError)?;
-    let agent_subprocess_alive: Option<bool> = row.try_get(22).map_err(|_| Denial::ServerError)?;
-    let approvals_pending: Option<i32> = row.try_get(23).map_err(|_| Denial::ServerError)?;
-    let usage: Option<serde_json::Value> = row.try_get(24).map_err(|_| Denial::ServerError)?;
-    let live_llm_model: Option<String> = row.try_get(25).map_err(|_| Denial::ServerError)?;
-    let turn_count: Option<i32> = row.try_get(26).map_err(|_| Denial::ServerError)?;
-    let agent_health: Option<String> = row.try_get(27).map_err(|_| Denial::ServerError)?;
+    let failure_reason: String = row.try_get(12).map_err(|_| Denial::ServerError)?;
+    let llm_model: String = row.try_get(13).map_err(|_| Denial::ServerError)?;
+    let input_tokens: Option<i64> = row.try_get(14).map_err(|_| Denial::ServerError)?;
+    let output_tokens: Option<i64> = row.try_get(15).map_err(|_| Denial::ServerError)?;
+    let total_tokens: Option<i64> = row.try_get(16).map_err(|_| Denial::ServerError)?;
+    let runner_name: Option<String> = row.try_get(17).map_err(|_| Denial::ServerError)?;
+    let observed_run_id: Option<Uuid> = row.try_get(18).map_err(|_| Denial::ServerError)?;
+    let last_event_at: Option<DateTime<Utc>> = row.try_get(19).map_err(|_| Denial::ServerError)?;
+    let last_event_kind: Option<String> = row.try_get(20).map_err(|_| Denial::ServerError)?;
+    let last_event_summary: Option<String> = row.try_get(21).map_err(|_| Denial::ServerError)?;
+    let agent_pid: Option<i32> = row.try_get(22).map_err(|_| Denial::ServerError)?;
+    let agent_subprocess_alive: Option<bool> = row.try_get(23).map_err(|_| Denial::ServerError)?;
+    let approvals_pending: Option<i32> = row.try_get(24).map_err(|_| Denial::ServerError)?;
+    let usage: Option<serde_json::Value> = row.try_get(25).map_err(|_| Denial::ServerError)?;
+    let live_llm_model: Option<String> = row.try_get(26).map_err(|_| Denial::ServerError)?;
+    let turn_count: Option<i32> = row.try_get(27).map_err(|_| Denial::ServerError)?;
+    let agent_health: Option<String> = row.try_get(28).map_err(|_| Denial::ServerError)?;
     let agent_last_activity_at: Option<DateTime<Utc>> =
-        row.try_get(28).map_err(|_| Denial::ServerError)?;
-    let live_updated_at: Option<DateTime<Utc>> =
         row.try_get(29).map_err(|_| Denial::ServerError)?;
+    let live_updated_at: Option<DateTime<Utc>> =
+        row.try_get(30).map_err(|_| Denial::ServerError)?;
     let live = live_updated_at.map(|updated_at| AgentLiveOwned {
         observed_run_id: observed_run_id.map(|id| id.to_string()),
         last_event_at: iso(last_event_at),
@@ -2581,6 +2583,7 @@ async fn fetch_agent_run(
         done_payload,
         error,
         error_code,
+        failure_reason,
         llm_model,
         input_tokens,
         output_tokens,
@@ -2620,6 +2623,7 @@ fn agent_run_detail_row(run: &AgentRunOwned) -> AgentRunDetailRow<'_> {
         done_payload: run.done_payload.as_ref().filter(|value| !value.is_null()),
         error: run.error.as_str(),
         error_code: run.error_code.as_str(),
+        failure_reason: run.failure_reason.as_str(),
         llm_model: run.llm_model.as_str(),
         input_tokens: run.input_tokens,
         output_tokens: run.output_tokens,

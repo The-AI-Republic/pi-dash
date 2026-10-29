@@ -52,6 +52,7 @@ use pidash_services::domain::clock::apply_clock_write;
 use pidash_services::extensions::NoExtraToolsets;
 use pidash_services::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
 use pidash_services::orchestration::clock::{self as clock, ClockIssue, ClockWrite, RunEndedRef};
+use pidash_services::runner_runs::failure_effects;
 use pidash_services::runner_sessions::live_drains::{drain_pod_by_id, DrainError};
 use pidash_types::orchestration::{StateRef, TickerEventKind};
 
@@ -482,13 +483,24 @@ pub enum DisarmError {
 /// work item, or a missing issue answers `false` without a transaction —
 /// the planner's `(false, None)` shape.
 pub async fn disarm_on_terminal_signal(pool: &PgPool, run_id: Uuid) -> Result<bool, DisarmError> {
-    let run: Option<(Option<Uuid>, String, String, Option<Value>)> = sqlx::query_as(
-        r#"SELECT "work_item_id", "status", "phase_kind", "done_payload" FROM "agent_run" WHERE "id" = $1"#,
+    type RunRow = (
+        Option<Uuid>,
+        String,
+        String,
+        Option<Value>,
+        String,
+        String,
+        String,
+    );
+    let run: Option<RunRow> = sqlx::query_as(
+        r#"SELECT "work_item_id", "status", "phase_kind", "done_payload", "failure_reason", "error", "thread_id" FROM "agent_run" WHERE "id" = $1"#,
     )
     .bind(run_id)
     .fetch_optional(pool)
     .await?;
-    let Some((work_item_id, status, phase_kind, done_payload)) = run else {
+    let Some((work_item_id, status, phase_kind, done_payload, failure_reason, error, thread_id)) =
+        run
+    else {
         return Ok(false);
     };
     let Some(work_item_id) = work_item_id else {
@@ -544,6 +556,15 @@ pub async fn disarm_on_terminal_signal(pool: &PgPool, run_id: Uuid) -> Result<bo
         .map(|row| map_ticker(&row))
         .transpose()
         .map_err(|_| DisarmError::Decode("issue_agent_ticker"))?;
+    // `consecutive_failure_streak(issue, reason)` (PDASHOSS01-183): read
+    // under the ticker lock, over the reason the policy routes on; only a
+    // FAILED run consults it.
+    let failure_streak = if status == AgentRunStatus::Failed {
+        let reason = clock::failure_reason_value(&failure_reason, &error);
+        failure_effects::failure_streak(tx.inner(), work_item_id, &reason).await?
+    } else {
+        0
+    };
     let done_payload_ref = done_payload.as_ref().and_then(|payload| match payload {
         Value::Null => None,
         value => Some(value),
@@ -559,6 +580,10 @@ pub async fn disarm_on_terminal_signal(pool: &PgPool, run_id: Uuid) -> Result<bo
             status,
             phase_kind: &phase_kind,
             done_payload: done_payload_ref,
+            failure_reason: &failure_reason,
+            error: &error,
+            thread_id: &thread_id,
+            failure_streak,
         },
         Some(work_item_id),
         now,
@@ -573,6 +598,18 @@ pub async fn disarm_on_terminal_signal(pool: &PgPool, run_id: Uuid) -> Result<bo
             let ticker = ticker.as_ref().expect("clock write has a post-lock row");
             apply_clock_write(&mut **tx.inner(), &outcome.write, ticker, now).await?;
         }
+    }
+    if outcome
+        .as_ref()
+        .is_some_and(|outcome| outcome.clear_run_thread_id)
+    {
+        // The fresh-session lever (PDASHOSS01-183): the next continuation
+        // builds a fresh-session Assign instead of resuming the session
+        // that will fail again.
+        sqlx::query(clock::CLEAR_RUN_THREAD_SQL)
+            .bind(run_id)
+            .execute(&mut **tx.inner())
+            .await?;
     }
     tx.commit().await?;
     if let Some(outcome) = &outcome {
@@ -898,7 +935,7 @@ mod tests {
         .await
         .expect("seed issue");
         sqlx::query(
-            r#"INSERT INTO "agent_run" ("id", "status", "prompt", "run_config", "required_capabilities", "thread_id", "error", "created_at", "workspace_id", "work_item_id", "pod_id", "created_by_id", "llm_model", "refusal_category", "trigger", "executor_kind", "dispatch_attempts", "cancel_reason", "error_code", "tool_plan", "phase_kind", "agent_metadata", "usage") VALUES ($1, 'completed', '', '{}', '{}', '', '', $2, $3, $4, $5, $6, '', '', 'tick', 'local_runner', 0, '', '', '{}', 'coding-task', '{}', '{}')"#,
+            r#"INSERT INTO "agent_run" ("id", "status", "prompt", "run_config", "required_capabilities", "thread_id", "error", "created_at", "workspace_id", "work_item_id", "pod_id", "created_by_id", "llm_model", "refusal_category", "failure_reason", "trigger", "executor_kind", "dispatch_attempts", "cancel_reason", "error_code", "tool_plan", "phase_kind", "agent_metadata", "usage") VALUES ($1, 'completed', '', '{}', '{}', '', '', $2, $3, $4, $5, $6, '', '', '', 'tick', 'local_runner', 0, '', '', '{}', 'coding-task', '{}', '{}')"#,
         )
         .bind(run)
         .bind(now)

@@ -4,7 +4,11 @@
 //!
 //! * `infer_agent_label` (`:103-128`) → [`infer_agent_label`].
 //! * `enrich_run_error` (`:149-170`) → [`enrich_run_error`].
-//! * `classify_run_error` (`:173-245`) → [`classify_run_error`].
+//! * `classify_run_error` (`:173-245`) → [`classify_run_error`] (text rules)
+//!   and [`classify_run_error_for_reason`] (PDASHOSS01-183: the
+//!   `failure_reason=` keyword — a stored canonical reason routes through
+//!   `_REASON_DISPLAY` / `_diagnostic_from_reason` first, the text rules
+//!   stay the fallback).
 //! * `AgentRunSerializer.get_error_diagnostic`
 //!   (`serializers.py:266-272`, the list-serialization `None` contract) →
 //!   [`error_diagnostic`]: the caller passes the `is_list` flag.
@@ -323,6 +327,23 @@ pub enum RunErrorKind {
     RunnerLifecycle,
     AgentStalled,
     Unknown,
+    // Kinds introduced by the stored taxonomy (`_REASON_DISPLAY`,
+    // PDASHOSS01-183); the text rules never produce them.
+    WorkspaceSetup,
+    GitAuth,
+    RunnerNetwork,
+    MaxTurns,
+    Internal,
+    AgentQuota,
+    AgentRateLimit,
+    ProviderServerError,
+    ProviderNetwork,
+    AgentContextOverflow,
+    AgentMissingExecutable,
+    AgentMissingConfig,
+    AgentUnsupportedVersion,
+    AgentOutput,
+    AgentCrash,
 }
 
 impl RunErrorKind {
@@ -335,6 +356,21 @@ impl RunErrorKind {
             RunErrorKind::RunnerLifecycle => "runner_lifecycle",
             RunErrorKind::AgentStalled => "agent_stalled",
             RunErrorKind::Unknown => "unknown",
+            RunErrorKind::WorkspaceSetup => "workspace_setup",
+            RunErrorKind::GitAuth => "git_auth",
+            RunErrorKind::RunnerNetwork => "runner_network",
+            RunErrorKind::MaxTurns => "max_turns",
+            RunErrorKind::Internal => "internal",
+            RunErrorKind::AgentQuota => "agent_quota",
+            RunErrorKind::AgentRateLimit => "agent_rate_limit",
+            RunErrorKind::ProviderServerError => "provider_server_error",
+            RunErrorKind::ProviderNetwork => "provider_network",
+            RunErrorKind::AgentContextOverflow => "agent_context_overflow",
+            RunErrorKind::AgentMissingExecutable => "agent_missing_executable",
+            RunErrorKind::AgentMissingConfig => "agent_missing_config",
+            RunErrorKind::AgentUnsupportedVersion => "agent_unsupported_version",
+            RunErrorKind::AgentOutput => "agent_output",
+            RunErrorKind::AgentCrash => "agent_crash",
         }
     }
 }
@@ -346,7 +382,9 @@ impl std::fmt::Display for RunErrorKind {
 }
 
 /// Compact diagnostic for a stored run error (`diagnostics.py:173-245`),
-/// serialized in the Python dict key order.
+/// serialized in the Python dict key order. `failure_reason` is present
+/// only on diagnostics derived from a stored canonical reason
+/// (`_diagnostic_from_reason`); the text rules never emit the key.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunErrorDiagnostic {
     pub source: RunErrorSource,
@@ -354,6 +392,8 @@ pub struct RunErrorDiagnostic {
     pub kind: RunErrorKind,
     pub summary: String,
     pub action: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<String>,
 }
 
 /// Compact diagnostic for a stored run error, or `None` when empty
@@ -387,6 +427,7 @@ pub fn classify_run_error(error: Option<&str>) -> Option<RunErrorDiagnostic> {
             kind: RunErrorKind::AgentAuthentication,
             summary,
             action: format!("Re-authenticate {action_agent} on the runner machine, then restart the Pi Dash runner."),
+            failure_reason: None,
         });
     }
     if lowered.contains("selected model")
@@ -398,6 +439,7 @@ pub fn classify_run_error(error: Option<&str>) -> Option<RunErrorDiagnostic> {
             kind: RunErrorKind::AgentModelAccess,
             summary,
             action: "Choose a model the agent account can access, then retry the run.".to_string(),
+            failure_reason: None,
         });
     }
     if lowered.contains("runner_not_found") || lowered.contains("run_not_owned_by_runner") {
@@ -407,6 +449,7 @@ pub fn classify_run_error(error: Option<&str>) -> Option<RunErrorDiagnostic> {
             kind: RunErrorKind::RunnerRegistration,
             summary,
             action: "Remove or re-add the stale local runner registration.".to_string(),
+            failure_reason: None,
         });
     }
     if lowered.contains("daemon shutdown requested")
@@ -421,6 +464,7 @@ pub fn classify_run_error(error: Option<&str>) -> Option<RunErrorDiagnostic> {
             action:
                 "Check runner service status and restart the runner if it should still accept work."
                     .to_string(),
+            failure_reason: None,
         });
     }
     if lowered.contains("agent stalled") || lowered.contains("without new agent events") {
@@ -432,6 +476,7 @@ pub fn classify_run_error(error: Option<&str>) -> Option<RunErrorDiagnostic> {
             action:
                 "Inspect the runner machine for a stuck agent process or long-running tool call."
                     .to_string(),
+            failure_reason: None,
         });
     }
     Some(RunErrorDiagnostic {
@@ -440,16 +485,203 @@ pub fn classify_run_error(error: Option<&str>) -> Option<RunErrorDiagnostic> {
         kind: RunErrorKind::Unknown,
         summary,
         action: String::new(),
+        failure_reason: None,
     })
 }
 
+/// `_REASON_DISPLAY` (`diagnostics.py`, PDASHOSS01-183): stored reason →
+/// `(kind, source, source_label, action)`. The auth action is composed
+/// with the recovered agent label at classification time.
+fn reason_display(
+    reason: &str,
+) -> Option<(RunErrorKind, RunErrorSource, &'static str, &'static str)> {
+    use RunErrorKind as K;
+    use RunErrorSource as S;
+    Some(match reason {
+        "workspace_setup" => (
+            K::WorkspaceSetup,
+            S::PidashRunner,
+            "Pi Dash runner",
+            "Fix the runner machine's workspace / repository clone configuration, then re-run.",
+        ),
+        "git_auth" => (
+            K::GitAuth,
+            S::PidashRunner,
+            "Pi Dash runner",
+            "Fix the runner machine's git credentials for this repository, then re-run.",
+        ),
+        "network" => (
+            K::RunnerNetwork,
+            S::PidashRunner,
+            "Pi Dash runner",
+            "Retried automatically — check the runner machine's network if it persists.",
+        ),
+        "runner_offline" => (
+            K::RunnerLifecycle,
+            S::PidashRunner,
+            "Pi Dash runner",
+            "Check runner service status and restart the runner if it should still accept work.",
+        ),
+        "daemon_restart" => (
+            K::RunnerLifecycle,
+            S::PidashRunner,
+            "Pi Dash runner",
+            "The runner daemon restarted; the next run picks the work back up.",
+        ),
+        "assign_rejected_busy" => (
+            K::RunnerLifecycle,
+            S::PidashRunner,
+            "Pi Dash runner",
+            "Retried automatically — the runner was still finishing its previous run.",
+        ),
+        "timeout" => (
+            K::AgentStalled,
+            S::Agent,
+            "Agent CLI",
+            "Inspect the runner machine for a stuck agent process or long-running tool call.",
+        ),
+        "max_turns" => (
+            K::MaxTurns,
+            S::Agent,
+            "Agent CLI",
+            "The agent hit its turn budget; re-run to continue, or split the task.",
+        ),
+        "internal" => (K::Internal, S::PidashCloud, "Pi Dash cloud", ""),
+        "agent_error.provider_auth_or_access" => {
+            (K::AgentAuthentication, S::Agent, "Agent CLI", "")
+        }
+        "agent_error.provider_quota_limit" => (
+            K::AgentQuota,
+            S::Agent,
+            "Agent CLI",
+            "The provider account is out of quota or credits. Add credits or raise the limit, then re-run.",
+        ),
+        "agent_error.provider_capacity_or_rate_limit" => (
+            K::AgentRateLimit,
+            S::Agent,
+            "Agent CLI",
+            "The provider is rate-limiting or at capacity; this usually clears on its own. Re-run later.",
+        ),
+        "agent_error.provider_server_error" => (
+            K::ProviderServerError,
+            S::Agent,
+            "Agent CLI",
+            "Provider-side server error; re-run later.",
+        ),
+        "agent_error.provider_network" => (
+            K::ProviderNetwork,
+            S::Agent,
+            "Agent CLI",
+            "Retried automatically — check the runner machine's network if it persists.",
+        ),
+        "agent_error.context_overflow" => (
+            K::AgentContextOverflow,
+            S::Agent,
+            "Agent CLI",
+            "The session outgrew the model's context window; the next run starts a fresh session automatically.",
+        ),
+        "agent_error.model_not_found_or_unavailable" => (
+            K::AgentModelAccess,
+            S::Agent,
+            "Agent CLI",
+            "Choose a model the agent account can access, then retry the run.",
+        ),
+        "agent_error.missing_executable" => (
+            K::AgentMissingExecutable,
+            S::Agent,
+            "Agent CLI",
+            "Install the agent CLI on the runner machine (or fix its PATH), then restart the Pi Dash runner.",
+        ),
+        "agent_error.missing_config" => (
+            K::AgentMissingConfig,
+            S::Agent,
+            "Agent CLI",
+            "Fix the agent CLI's configuration (API key / config file) on the runner machine, then re-run.",
+        ),
+        "agent_error.unsupported_version" => (
+            K::AgentUnsupportedVersion,
+            S::Agent,
+            "Agent CLI",
+            "Update the agent CLI on the runner machine to a supported version, then re-run.",
+        ),
+        "agent_error.empty_or_unparseable_output" => (
+            K::AgentOutput,
+            S::Agent,
+            "Agent CLI",
+            "The agent produced no parseable output; re-run. If it persists, inspect the agent CLI on the runner machine.",
+        ),
+        "agent_error.process_failure" => (
+            K::AgentCrash,
+            S::Agent,
+            "Agent CLI",
+            "Inspect the run's error detail / stderr tail on the runner machine.",
+        ),
+        "agent_error.unknown" => (K::Unknown, S::Unknown, "Unknown", ""),
+        _ => return None,
+    })
+}
+
+/// `_diagnostic_from_reason` (`diagnostics.py`, PDASHOSS01-183).
+fn diagnostic_from_reason(reason: &str, detail: &str) -> Option<RunErrorDiagnostic> {
+    let (kind, source, source_label, action) = reason_display(reason)?;
+    let summary = first_non_empty_line(detail);
+    let agent_label = agent_label_from_enriched_error(detail);
+    let action = if kind == RunErrorKind::AgentAuthentication {
+        let action_agent = if agent_label.is_empty() {
+            "the agent CLI"
+        } else {
+            agent_label.as_str()
+        };
+        format!("Re-authenticate {action_agent} on the runner machine, then restart the Pi Dash runner.")
+    } else {
+        action.to_string()
+    };
+    let source_label = if source == RunErrorSource::Agent && !agent_label.is_empty() {
+        agent_label.clone()
+    } else {
+        source_label.to_string()
+    };
+    Some(RunErrorDiagnostic {
+        source,
+        source_label,
+        kind,
+        summary,
+        action,
+        failure_reason: Some(reason.to_string()),
+    })
+}
+
+/// `classify_run_error(error, failure_reason=…)` (`diagnostics.py`,
+/// PDASHOSS01-183): a stored canonical reason (stripped, non-empty, known
+/// to `_REASON_DISPLAY`) wins — even over an empty error — so display and
+/// ticker policy cannot drift; anything else falls back to
+/// [`classify_run_error`]'s text rules.
+pub fn classify_run_error_for_reason(
+    error: Option<&str>,
+    failure_reason: Option<&str>,
+) -> Option<RunErrorDiagnostic> {
+    let detail = py_strip(error.unwrap_or(""));
+    let reason = py_strip(failure_reason.unwrap_or(""));
+    if !reason.is_empty() {
+        if let Some(diagnostic) = diagnostic_from_reason(reason, detail) {
+            return Some(diagnostic);
+        }
+    }
+    classify_run_error(error)
+}
+
 /// The serializer's `error_diagnostic` field (`serializers.py:266-272`):
-/// list views skip the classifier's per-row scans and render `None`.
-pub fn error_diagnostic(error: Option<&str>, is_list: bool) -> Option<RunErrorDiagnostic> {
+/// list views skip the classifier's per-row scans and render `None`;
+/// detail views pass the run's stored `failure_reason`.
+pub fn error_diagnostic(
+    error: Option<&str>,
+    failure_reason: Option<&str>,
+    is_list: bool,
+) -> Option<RunErrorDiagnostic> {
     if is_list {
         None
     } else {
-        classify_run_error(error)
+        classify_run_error_for_reason(error, failure_reason)
     }
 }
 
@@ -694,11 +926,47 @@ mod tests {
     #[test]
     fn error_diagnostic_list_flag_skips_classifier() {
         let err = Some("Invalid authentication credentials for model");
-        assert!(error_diagnostic(err, true).is_none());
-        let detail = error_diagnostic(err, false).expect("detail classifies");
+        assert!(error_diagnostic(err, None, true).is_none());
+        let detail = error_diagnostic(err, None, false).expect("detail classifies");
         assert_eq!(detail.kind, RunErrorKind::AgentAuthentication);
-        assert!(error_diagnostic(None, false).is_none());
-        assert!(error_diagnostic(err, true).is_none());
+        assert!(error_diagnostic(None, None, false).is_none());
+        assert!(error_diagnostic(err, None, true).is_none());
+        assert!(error_diagnostic(None, Some("timeout"), true).is_none());
+        let stored = error_diagnostic(None, Some("timeout"), false).expect("reason classifies");
+        assert_eq!(stored.kind, RunErrorKind::AgentStalled);
+        assert_eq!(stored.failure_reason.as_deref(), Some("timeout"));
+    }
+
+    #[test]
+    fn classify_for_reason_replays_fx_run_10() {
+        let fx: Value = serde_json::from_str(include_str!(
+            "../../../../fixtures/runner_runs/fx-run-10-failure.golden.json"
+        ))
+        .expect("FX-RUN-10 parses");
+        let rows = fx["diagnostics"].as_array().expect("diagnostics rows");
+        assert_eq!(rows.len(), 216);
+        for row in rows {
+            let error = row["error"].as_str().expect("error");
+            let reason = row["failure_reason"].as_str().expect("reason");
+            let actual = classify_run_error_for_reason(Some(error), Some(reason))
+                .map(|d| serde_json::to_value(&d).expect("serializes"))
+                .unwrap_or(Value::Null);
+            assert_eq!(
+                actual, row["out"],
+                "classify_run_error({error:?}, {reason:?})"
+            );
+            if let Some(obj) = actual.as_object() {
+                // Key order is the Python dict order, `failure_reason` last.
+                let keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+                let expected: Vec<&str> = row["out"]
+                    .as_object()
+                    .expect("object")
+                    .keys()
+                    .map(String::as_str)
+                    .collect();
+                assert_eq!(keys, expected, "key order");
+            }
+        }
     }
 
     #[test]

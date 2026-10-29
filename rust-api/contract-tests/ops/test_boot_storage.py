@@ -102,11 +102,11 @@ EXPECTED_LEAVES = [
     ("assistant", "0004_usersttconfig"),
     ("auth", "0012_alter_user_first_name_max_length"),
     ("contenttypes", "0002_remove_content_type_name"),
-    ("db", "0168_ticker_stop_signal_disarm_reason"),
+    ("db", "0169_ticker_failure_disarm_reasons"),
     ("django_celery_beat", "0018_improve_crontab_helptext"),
     ("license", "0006_instance_is_current_version_deprecated"),
     ("prompting", "0007_reseed_directional_relations"),
-    ("runner", "0029_drop_agentrun_trigger_blocker_completed"),
+    ("runner", "0033_backfill_failure_reason"),
     ("sessions", "0001_initial"),
 ]
 REPO_LEAVES = [leaf for leaf in EXPECTED_LEAVES if leaf[0] in {"assistant", "db", "license", "prompting", "runner"}]

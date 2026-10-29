@@ -637,16 +637,17 @@ pub fn decode_run(row: &sqlx::postgres::PgRow, base: usize) -> Result<AgentRun, 
         done_payload: row.try_get(base + 28)?,
         error: row.try_get(base + 29)?,
         refusal_category: row.try_get(base + 30)?,
-        llm_model: row.try_get(base + 31)?,
-        usage: row.try_get(base + 32)?,
-        input_tokens: row.try_get(base + 33)?,
-        output_tokens: row.try_get(base + 34)?,
-        total_tokens: row.try_get(base + 35)?,
-        created_at: row.try_get(base + 36)?,
-        assigned_at: row.try_get(base + 37)?,
-        queue_position: row.try_get(base + 38)?,
-        started_at: row.try_get(base + 39)?,
-        ended_at: row.try_get(base + 40)?,
+        failure_reason: row.try_get(base + 31)?,
+        llm_model: row.try_get(base + 32)?,
+        usage: row.try_get(base + 33)?,
+        input_tokens: row.try_get(base + 34)?,
+        output_tokens: row.try_get(base + 35)?,
+        total_tokens: row.try_get(base + 36)?,
+        created_at: row.try_get(base + 37)?,
+        assigned_at: row.try_get(base + 38)?,
+        queue_position: row.try_get(base + 39)?,
+        started_at: row.try_get(base + 40)?,
+        ended_at: row.try_get(base + 41)?,
     })
 }
 
@@ -2282,7 +2283,7 @@ mod tests {
     fn run_select_list_covers_all_columns_once() {
         let list = run_select_list();
         assert_eq!(list.split(", ").count(), agent_run::COLUMNS.len());
-        assert_eq!(agent_run::COLUMNS.len(), 41);
+        assert_eq!(agent_run::COLUMNS.len(), 42);
         assert!(list.starts_with(r#""agent_run"."id""#));
         assert!(list.ends_with(r#""agent_run"."ended_at""#));
     }
@@ -2370,7 +2371,7 @@ mod tests {
         }
     }
 
-    /// Temp `agent_run` in [`agent_run::COLUMNS`] order (the 41-column
+    /// Temp `agent_run` in [`agent_run::COLUMNS`] order (the 42-column
     /// positional image [`decode_run`] reads).
     const LIVE_DDL: &str = "CREATE TEMPORARY TABLE agent_run (
         id UUID PRIMARY KEY, workspace_id UUID, owner_id UUID,
@@ -2386,7 +2387,7 @@ mod tests {
         run_config JSONB, required_capabilities JSONB, thread_id TEXT,
         agent_metadata JSONB, lease_expires_at TIMESTAMPTZ,
         done_payload JSONB, error TEXT, refusal_category TEXT,
-        llm_model TEXT, usage JSONB, input_tokens BIGINT,
+        failure_reason TEXT NOT NULL DEFAULT '', llm_model TEXT, usage JSONB, input_tokens BIGINT,
         output_tokens BIGINT, total_tokens BIGINT, created_at TIMESTAMPTZ,
         assigned_at TIMESTAMPTZ, queue_position SMALLINT,
         started_at TIMESTAMPTZ, ended_at TIMESTAMPTZ)";
@@ -2421,9 +2422,9 @@ mod tests {
                  status, executor_kind, dispatch_attempts, cancel_reason,
                  error_code, tool_plan, prompt, trigger, phase_kind,
                  run_config, required_capabilities, thread_id, agent_metadata,
-                 error, refusal_category, llm_model, usage, created_at)
+                 error, refusal_category, failure_reason, llm_model, usage, created_at)
                  VALUES ($1, $2, $3, $4, 'running', 'local_runner', 0, '', '',
-                 '{}', '', $5, 'work', '{}', '{}', 't', '{}', '', '', '', '{}',
+                 '{}', '', $5, 'work', '{}', '{}', 't', '{}', '', '', '', '', '{}',
                  now())",
             )
             .bind(id)

@@ -53,14 +53,15 @@ use pidash_services::extensions::CloudAgentToolsetsSeam;
 #[cfg(test)]
 use pidash_services::extensions::NoExtraToolsets;
 use pidash_services::orchestration::creation::{
-    active_run_sql, latest_prior_run_sql, run_insert_returning_sql, run_lock_sql, run_select_sql,
-    user_id_for_run, ASSIGNED_POD_SELECT_SQL, BUNDLE_ANCESTOR_HOP_SQL, BUNDLE_ASSIGNEES_SQL,
-    BUNDLE_CHILDREN_SQL, BUNDLE_CODE_REVIEWS_SQL, BUNDLE_COMMENTS_SQL, BUNDLE_DONE_PAYLOAD_SQL,
-    BUNDLE_LABELS_SQL, BUNDLE_OVERRIDES_SQL, BUNDLE_PARENT_COLS_SQL, BUNDLE_PARENT_DESCRIPTION_SQL,
-    BUNDLE_PRIOR_RUN_COUNT_SQL, BUNDLE_PROJECT_IDENTIFIER_SQL, BUNDLE_PROJECT_STATES_SQL,
-    BUNDLE_RELATIONS_SQL, BUNDLE_RELATION_TARGETS_SQL, BUNDLE_REMOTE_SQL, BUNDLE_SEQUENCE_SQL,
-    BUNDLE_TICKER_SQL, BUNDLE_WORKSPACE_SQL, DEFAULT_POD_SELECT_SQL, FINALIZE_UPDATE_SQL,
-    ISSUE_LOCK_SQL, ISSUE_SELECT_SQL, PROJECT_SELECT_SQL, PROMPT_UPDATE_SQL, RUNNER_SELECT_SQL,
+    active_run_sql, finalize_failure_reason, latest_prior_run_sql, run_insert_returning_sql,
+    run_lock_sql, run_select_sql, user_id_for_run, ASSIGNED_POD_SELECT_SQL,
+    BUNDLE_ANCESTOR_HOP_SQL, BUNDLE_ASSIGNEES_SQL, BUNDLE_CHILDREN_SQL, BUNDLE_CODE_REVIEWS_SQL,
+    BUNDLE_COMMENTS_SQL, BUNDLE_DONE_PAYLOAD_SQL, BUNDLE_LABELS_SQL, BUNDLE_OVERRIDES_SQL,
+    BUNDLE_PARENT_COLS_SQL, BUNDLE_PARENT_DESCRIPTION_SQL, BUNDLE_PRIOR_RUN_COUNT_SQL,
+    BUNDLE_PROJECT_IDENTIFIER_SQL, BUNDLE_PROJECT_STATES_SQL, BUNDLE_RELATIONS_SQL,
+    BUNDLE_RELATION_TARGETS_SQL, BUNDLE_REMOTE_SQL, BUNDLE_SEQUENCE_SQL, BUNDLE_TICKER_SQL,
+    BUNDLE_WORKSPACE_SQL, DEFAULT_POD_SELECT_SQL, FINALIZE_UPDATE_SQL, ISSUE_LOCK_SQL,
+    ISSUE_SELECT_SQL, PROJECT_SELECT_SQL, PROMPT_UPDATE_SQL, RUNNER_SELECT_SQL,
     RUN_CONFIG_UPDATE_SQL, STATE_SELECT_SQL, TERMINAL_EVENT_EXISTS_SQL, TERMINAL_EVENT_INSERT_SQL,
     TERMINAL_EVENT_SEQ_SQL, TICKER_RESUME_SELECT_SQL, USER_FLAGS_SELECT_SQL,
     WORK_ITEM_ID_SELECT_SQL,
@@ -1268,6 +1269,7 @@ where
             .bind(now)
             .bind(error_code)
             .bind(error)
+            .bind(finalize_failure_reason(error_code, error))
             .bind(run_id)
             .execute(&mut **self.tx.inner())
             .await
@@ -1908,9 +1910,9 @@ mod tests {
              pinned_runner_id, parent_run_id, work_item_id, status, executor_kind, \
              dispatch_attempts, cancel_reason, error_code, tool_plan, prompt, trigger, \
              phase_kind, run_config, required_capabilities, thread_id, agent_metadata, \
-             error, refusal_category, llm_model, usage, created_at) \
+             error, refusal_category, failure_reason, llm_model, usage, created_at) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 0, '', '', '{}', '', $11, \
-             $12, $13, '[]', '', '{}', '', '', '', '{}', $14)",
+             $12, $13, '[]', '', '{}', '', '', '', '', '{}', $14)",
         )
         .bind(id)
         .bind(graph.ws)

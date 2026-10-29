@@ -135,7 +135,7 @@ def create_agent_run(
     run_id = str(uuid.uuid4())
     seeder.db.execute(
         """INSERT INTO agent_run
-           (id, status, prompt, run_config, required_capabilities, thread_id,
+           (failure_reason, id, status, prompt, run_config, required_capabilities, thread_id,
             lease_expires_at, done_payload, error, created_at, assigned_at,
             started_at, ended_at, owner_id, workspace_id, runner_id, work_item_id,
             parent_run_id, pod_id, created_by_id, pinned_runner_id,
@@ -144,7 +144,7 @@ def create_agent_run(
             cancel_requested_at, cancel_reason, error_code, tool_plan,
             terminal_hooks_applied_at, terminal_capacity_released_at,
             phase_kind, agent_metadata, usage)
-           VALUES (%s,%s,%s,'{}','[]','',
+           VALUES ('', %s,%s,%s,'{}','[]','',
                    %s,
                    NULL,'',%s,NULL,
                    %s,

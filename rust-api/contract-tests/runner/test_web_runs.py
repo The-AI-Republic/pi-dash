@@ -36,7 +36,7 @@ RUN_KEYS = {
     "work_item", "scheduler_binding", "scheduler_binding_detail",
     "pod", "pod_detail", "created_by", "owner", "created_at",
     "assigned_at", "queue_position", "started_at", "ended_at", "done_payload",
-    "error", "error_code", "error_diagnostic", "refusal_category", "llm_model",
+    "error", "error_code", "failure_reason", "error_diagnostic", "refusal_category", "llm_model",
     "input_tokens", "output_tokens", "total_tokens", "usage", "tool_plan",
     "tool_calls",
 }
@@ -1043,12 +1043,12 @@ def _seed_scheduler_run(seeder, daemon_world, binding_id, *, status="completed")
     run_id = str(uuid.uuid4())
     seeder.db.execute(
         """INSERT INTO agent_run
-           (id, workspace_id, created_by_id, pod_id, scheduler_binding_id,
+           (failure_reason, id, workspace_id, created_by_id, pod_id, scheduler_binding_id,
             status, prompt, trigger, executor_kind, run_config,
             required_capabilities, thread_id, agent_metadata, tool_plan,
             usage, dispatch_attempts, error, refusal_category, llm_model,
             cancel_reason, error_code, phase_kind, created_at)
-           VALUES (%s,%s,%s,%s,%s,
+           VALUES ('', %s,%s,%s,%s,%s,
                    %s,'','scheduler','local_runner','{}',
                    '[]','{}','{}','{}',
                    '{}',0,'','','',
