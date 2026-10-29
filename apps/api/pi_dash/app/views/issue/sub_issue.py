@@ -137,68 +137,83 @@ class SubIssuesEndpoint(BaseAPIView):
         if order_by_param:
             sub_issues, order_by_param = order_issue_queryset(sub_issues, order_by_param)
 
-        sub_issues = list(
-            sub_issues.values(
-                "id",
-                "name",
-                "state_id",
-                "sort_order",
-                "completed_at",
-                "estimate_point",
-                "priority",
-                "start_date",
-                "target_date",
-                "sequence_id",
-                "project_id",
-                "parent_id",
-                "cycle_id",
-                "module_ids",
-                "label_ids",
-                "assignee_ids",
-                "sub_issues_count",
-                "created_at",
-                "updated_at",
-                "created_by",
-                "updated_by",
-                "attachment_count",
-                "link_count",
-                "is_draft",
-                "archived_at",
-                "state_group",
-            )
+        # state_distribution is a rollup over the entire child set, so it must
+        # not change with paging; compute it with a slim standalone query.
+        state_distribution = defaultdict(list)
+        state_group_rows = (
+            Issue.issue_objects.filter(parent_id=issue_id, workspace__slug=slug)
+            .annotate(state_group=F("state__group"))
+            .values_list("id", "state_group")
         )
+        for sub_issue_id, state_group in state_group_rows:
+            state_distribution[state_group].append(str(sub_issue_id))
 
-        # create's a dict with state group name with their respective issue id's
-        result = defaultdict(list)
-        for sub_issue in sub_issues:
-            result[sub_issue["state_group"]].append(str(sub_issue["id"]))
-
-        datetime_fields = ["created_at", "updated_at"]
-        sub_issues = user_timezone_converter(sub_issues, datetime_fields, request.user.user_timezone)
-        # Grouping
-        if group_by:
-            result_dict = defaultdict(list)
-
-            for issue in sub_issues:
-                if group_by == "assignees__ids":
-                    if issue["assignee_ids"]:
-                        assignee_ids = issue["assignee_ids"]
-                        for assignee_id in assignee_ids:
-                            result_dict[str(assignee_id)].append(issue)
-                    elif issue["assignee_ids"] == []:
-                        result_dict["None"].append(issue)
-
-                elif group_by:
-                    result_dict[str(issue[group_by])].append(issue)
-
-            return Response(
-                {"sub_issues": result_dict, "state_distribution": result},
-                status=status.HTTP_200_OK,
+        def on_results(paged_sub_issues):
+            results = list(
+                paged_sub_issues.values(
+                    "id",
+                    "name",
+                    "state_id",
+                    "sort_order",
+                    "completed_at",
+                    "estimate_point",
+                    "priority",
+                    "start_date",
+                    "target_date",
+                    "sequence_id",
+                    "project_id",
+                    "parent_id",
+                    "cycle_id",
+                    "module_ids",
+                    "label_ids",
+                    "assignee_ids",
+                    "sub_issues_count",
+                    "created_at",
+                    "updated_at",
+                    "created_by",
+                    "updated_by",
+                    "attachment_count",
+                    "link_count",
+                    "is_draft",
+                    "archived_at",
+                    "state_group",
+                )
             )
-        return Response(
-            {"sub_issues": sub_issues, "state_distribution": result},
-            status=status.HTTP_200_OK,
+            datetime_fields = ["created_at", "updated_at"]
+            results = user_timezone_converter(results, datetime_fields, request.user.user_timezone)
+            # Grouping applies to the returned page
+            if group_by:
+                result_dict = defaultdict(list)
+
+                for issue in results:
+                    if group_by == "assignees__ids":
+                        if issue["assignee_ids"]:
+                            assignee_ids = issue["assignee_ids"]
+                            for assignee_id in assignee_ids:
+                                result_dict[str(assignee_id)].append(issue)
+                        elif issue["assignee_ids"] == []:
+                            result_dict["None"].append(issue)
+
+                    elif group_by:
+                        result_dict[str(issue[group_by])].append(issue)
+
+                return result_dict
+            return results
+
+        response = self.paginate(
+            request=request,
+            order_by=order_by_param,
+            queryset=sub_issues,
+            on_results=on_results,
+            default_per_page=50,
+            max_per_page=100,
         )
+        # Keep the pre-pagination response keys working alongside the standard
+        # envelope: the page lives under "sub_issues" instead of "results", and
+        # "state_distribution" stays the full-set rollup.
+        response.data["sub_issues"] = response.data.pop("results")
+        response.data["state_distribution"] = state_distribution
+        return response
 
     # Assign multiple sub issues
     def post(self, request, slug, project_id, issue_id):

@@ -13,6 +13,8 @@ import type { IGroupByColumn, TIssue, TIssueServiceType, TSubIssueOperations } f
 import { EIssuesStoreType } from "@pi-dash/types";
 import { Collapsible } from "@pi-dash/ui";
 import { cn } from "@pi-dash/utils";
+import RenderIfVisible from "@/components/core/render-if-visible-HOC";
+import { ListLoaderItemRow } from "@/components/ui/loader/layouts/list-layout-loader";
 import { SubIssuesListItem } from "./list-item";
 
 interface TSubIssuesListGroupProps {
@@ -82,20 +84,28 @@ export const SubIssuesListGroup = observer(function SubIssuesListGroup(props: TS
         buttonClassName={cn("hidden", !isAllIssues && "block")}
       >
         {workItemIds?.map((workItemId) => (
-          <SubIssuesListItem
+          <RenderIfVisible
             key={workItemId}
-            workspaceSlug={workspaceSlug}
-            projectId={projectId}
-            parentIssueId={parentIssueId}
-            rootIssueId={rootIssueId}
-            issueId={workItemId}
-            canEdit={canEdit}
-            handleIssueCrudState={handleIssueCrudState}
-            subIssueOperations={subIssueOperations}
-            issueServiceType={serviceType}
-            spacingLeft={spacingLeft}
-            storeType={storeType}
-          />
+            defaultHeight="44px"
+            verticalOffset={100}
+            placeholderChildren={
+              <ListLoaderItemRow shouldAnimate={false} renderForPlaceHolder defaultPropertyCount={4} />
+            }
+          >
+            <SubIssuesListItem
+              workspaceSlug={workspaceSlug}
+              projectId={projectId}
+              parentIssueId={parentIssueId}
+              rootIssueId={rootIssueId}
+              issueId={workItemId}
+              canEdit={canEdit}
+              handleIssueCrudState={handleIssueCrudState}
+              subIssueOperations={subIssueOperations}
+              issueServiceType={serviceType}
+              spacingLeft={spacingLeft}
+              storeType={storeType}
+            />
+          </RenderIfVisible>
         ))}
       </Collapsible>
     </>
