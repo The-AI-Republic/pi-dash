@@ -4,7 +4,7 @@
 // See the LICENSE file for details.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderHook, waitFor } from "@testing-library/react";
-import type { IssueComment, TransportInit } from "@pidash/api-client";
+import type { ApiClient, IssueComment, TransportInit } from "@pidash/api-client";
 import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -569,6 +569,23 @@ describe("duplicateKeptCommentImages", () => {
     const { client } = stubClient(() => ({ status: 404, body: { error: "Asset missing" } }));
     const body = '<p>Keep <image-component src="asset-1" status="uploaded"></image-component></p>';
     await expect(duplicateKeptCommentImages(client, SCOPE_WITH_COMMENT, body, body)).rejects.toBeTruthy();
+  });
+
+  it("keeps the original id when duplication answers 5xx (NEWFRONT-818)", async () => {
+    const { client } = stubClient(() => ({ status: 500, body: { error: "Copy failed" } }));
+    const body = '<p>Keep <image-component src="asset-1" status="uploaded"></image-component> more</p>';
+    const saved = await duplicateKeptCommentImages(client, SCOPE_WITH_COMMENT, body, body);
+    expect(saved).toContain('src="asset-1"');
+  });
+
+  it("rejects when duplication throws outside the contract", async () => {
+    const exploding = {
+      sendJson: async () => {
+        throw new TypeError("socket hung");
+      },
+    } as unknown as ApiClient;
+    const body = '<p>Keep <image-component src="asset-1" status="uploaded"></image-component></p>';
+    await expect(duplicateKeptCommentImages(exploding, SCOPE_WITH_COMMENT, body, body)).rejects.toThrow("socket hung");
   });
 });
 

@@ -1278,7 +1278,7 @@ describe("web_new comments gate driver (NEWFRONT-818)", () => {
       locator: (selector) => (selector === '[id^="comment-"] [contenteditable="true"]' ? editor : locator()),
     });
     await new WebNewDriver(page.page).composerEditAppend(" kept");
-    expect(steps).toEqual(["click", "press:Home", "press:End", "type: kept"]);
+    expect(steps).toEqual(["click", "press:ControlOrMeta+Home", "press:End", "type: kept"]);
   });
 
   it("presses Enter from the focused edit form", async () => {

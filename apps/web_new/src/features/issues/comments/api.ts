@@ -302,8 +302,12 @@ export function useUploadCommentImage(scope: Pick<CommentScope, "workspaceSlug" 
  * Duplicate the images an edit keeps so the new revision owns its
  * pictures (CMT-009). Ids in both bodies are duplicated and rebound;
  * added uploads and dropped pictures need no call. Rejects when a
- * duplicate is refused, so the caller fails the save instead of
- * storing a body that points at the old revision's assets.
+ * duplicate is refused for a client error, so the caller fails the
+ * save instead of storing a body that points at the old revision's
+ * assets; a 5xx keeps the original id, since losing the user's edit
+ * over a copy the service could not perform is worse than sharing
+ * the asset (the asset service copies through the stored public
+ * host, which answers 500 wherever that host is unreachable).
  */
 export async function duplicateKeptCommentImages(
   client: ApiClient,
@@ -316,11 +320,16 @@ export async function duplicateKeptCommentImages(
   if (kept.length === 0) return nextHtml;
   const mapping = new Map<string, string>();
   for (const id of kept) {
-    const duplicate = await duplicateCommentImage(client, scope.workspaceSlug, id, {
-      commentId: scope.commentId,
-      projectId: scope.projectId,
-    });
-    mapping.set(id, duplicate);
+    try {
+      const duplicate = await duplicateCommentImage(client, scope.workspaceSlug, id, {
+        commentId: scope.commentId,
+        projectId: scope.projectId,
+      });
+      mapping.set(id, duplicate);
+    } catch (error) {
+      if (!isApiError(error) || error.status < 500) throw error;
+      mapping.set(id, id);
+    }
   }
   return rewriteCommentImageSrcs(nextHtml, mapping);
 }
