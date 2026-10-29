@@ -262,9 +262,10 @@ describe("modulesGateToFeatures", () => {
 describe("modulesListOpenList", () => {
   it("navigates to the modules address and settles", async () => {
     const fake = new FakePage({
-      'page css([data-testid="modules-list"], [data-testid="modules-zero-state"], [data-testid="modules-no-match"])': {
-        count: 1,
-      },
+      'page css([data-testid="modules-list"], [data-testid="modules-zero-state"], [data-testid="modules-no-match"], [data-testid="modules-feature-gate"])':
+        {
+          count: 1,
+        },
     });
     fake.path = "/acme/projects/p1/overview";
     await new WebNewDriver(fake.asPage()).modulesListOpenList("acme", "p1");
@@ -301,9 +302,10 @@ describe("modulesListSkeletonVisible", () => {
 describe("modulesListEmptyKind", () => {
   it("reads rows once the list settles", async () => {
     const fake = new FakePage({
-      'page css([data-testid="modules-list"], [data-testid="modules-zero-state"], [data-testid="modules-no-match"])': {
-        count: 1,
-      },
+      'page css([data-testid="modules-list"], [data-testid="modules-zero-state"], [data-testid="modules-no-match"], [data-testid="modules-feature-gate"])':
+        {
+          count: 1,
+        },
       "page testid(modules-list) testid(modules-row-name)": { texts: ["Row"] },
     });
     expect(await new WebNewDriver(fake.asPage()).modulesListEmptyKind()).toBe("rows");
@@ -311,9 +313,10 @@ describe("modulesListEmptyKind", () => {
 
   it("settles as the no-match state when that container shows (MOD-010)", async () => {
     const fake = new FakePage({
-      'page css([data-testid="modules-list"], [data-testid="modules-zero-state"], [data-testid="modules-no-match"])': {
-        count: 1,
-      },
+      'page css([data-testid="modules-list"], [data-testid="modules-zero-state"], [data-testid="modules-no-match"], [data-testid="modules-feature-gate"])':
+        {
+          count: 1,
+        },
       "page testid(modules-list)": { count: 0 },
       "page testid(modules-no-match)": { count: 1, visible: true },
     });
@@ -434,9 +437,10 @@ describe("modulesSetLayout", () => {
 describe("modulesListReload", () => {
   it("reloads and settles", async () => {
     const fake = new FakePage({
-      'page css([data-testid="modules-list"], [data-testid="modules-zero-state"], [data-testid="modules-no-match"])': {
-        count: 1,
-      },
+      'page css([data-testid="modules-list"], [data-testid="modules-zero-state"], [data-testid="modules-no-match"], [data-testid="modules-feature-gate"])':
+        {
+          count: 1,
+        },
     });
     await new WebNewDriver(fake.asPage()).modulesListReload();
     expect(fake.pageCalls).toEqual(["reload"]);
@@ -502,7 +506,7 @@ describe("modulesListSkeletonShownOnSlowFetch", () => {
     const fake = new FakePage({
       "page testid(modules-list-skeleton)": { count: 1, visible: true, attrs: { "data-layout": "board" }, ...skeleton },
       "page testid(modules-feature-gate)": { count: 0, visible: false },
-      'page css([data-testid="modules-list"], [data-testid="modules-zero-state"], [data-testid="modules-no-match"])':
+      'page css([data-testid="modules-list"], [data-testid="modules-zero-state"], [data-testid="modules-no-match"], [data-testid="modules-feature-gate"])':
         settled,
       ...extra,
     });

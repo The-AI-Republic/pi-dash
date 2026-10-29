@@ -31642,14 +31642,16 @@ export class WebNewDriver implements ParityDriver {
   }
 
   /**
-   * Wait until the screen leaves the loading body: rows, a zero state or
-   * a no-match state. The zero and no-match probes arrive with slices F
-   * and B; until then a settled empty list reads as rows with no names,
-   * which is what this slice can prove.
+   * Wait until the screen leaves the loading body: rows, a zero state, a
+   * no-match state, or the flag gate. The gate is a terminal state, not
+   * loading (the oracle's settle accepts it too); without it, opening the
+   * list while the flag is off times out instead of settling (MOD-036).
    */
   private async modulesListWaitSettled(): Promise<void> {
     await this.page
-      .locator('[data-testid="modules-list"], [data-testid="modules-zero-state"], [data-testid="modules-no-match"]')
+      .locator(
+        '[data-testid="modules-list"], [data-testid="modules-zero-state"], [data-testid="modules-no-match"], [data-testid="modules-feature-gate"]'
+      )
       .last()
       .waitFor({ timeout: WebNewDriver.WAIT_MS });
   }

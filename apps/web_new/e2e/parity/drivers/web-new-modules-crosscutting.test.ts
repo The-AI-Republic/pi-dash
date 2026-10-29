@@ -156,7 +156,7 @@ afterEach(() => {
 });
 
 const SETTLED =
-  'page css([data-testid="modules-list"], [data-testid="modules-zero-state"], [data-testid="modules-no-match"])';
+  'page css([data-testid="modules-list"], [data-testid="modules-zero-state"], [data-testid="modules-no-match"], [data-testid="modules-feature-gate"])';
 
 describe("modulesXOpenModulesList", () => {
   it("navigates to the list address and settles on its body", async () => {
@@ -164,6 +164,21 @@ describe("modulesXOpenModulesList", () => {
     await new WebNewDriver(fake.asPage()).modulesXOpenModulesList("acme", "p1");
     expect(fake.pageCalls).toContain("goto:/acme/projects/p1/modules");
     expect(fake.pageCalls).toContain("waitForLoadState");
+  });
+
+  it("settles on the flag gate when the list body is absent (MOD-036)", async () => {
+    const fake = new FakePage({
+      [SETTLED]: { count: 1 },
+      "page testid(modules-list)": { count: 0 },
+      "page testid(modules-zero-state)": { count: 0 },
+      "page testid(modules-no-match)": { count: 0 },
+      "page testid(modules-feature-gate)": { count: 1, visible: true },
+    });
+    const driver = new WebNewDriver(fake.asPage());
+    await driver.modulesXOpenModulesList("acme", "p1");
+    expect(fake.pageCalls).toContain("goto:/acme/projects/p1/modules");
+    expect(await driver.modulesXListGateVisible()).toBe(true);
+    expect(await driver.modulesXListNames()).toEqual([]);
   });
 });
 
