@@ -494,8 +494,8 @@ pub fn py_uuid_or_none(id: &Option<Uuid>) -> String {
 /// for the shortest round-trip rendering instead of Rust's `{:?}`
 /// (the two agree on every finite float probed — 300k random patterns
 /// plus edges — but that sampling is not an all-inputs proof, so the
-/// forms stay separate), and the string arm escapes whitespace beyond
-/// the plain space where [`py_repr_str`] passes it through.
+/// forms stay separate). Container strings escape non-printables per
+/// [`py_printable`], like [`py_repr_str`] (PIDASHCONV-1644).
 pub fn py_str_value(value: &Value) -> String {
     match value {
         Value::Null => "None".to_owned(),
@@ -603,7 +603,8 @@ fn py_str_value_repr(value: &Value) -> String {
 
 /// CPython `repr()` of a string (see [`py_str_value`]): single quotes
 /// unless the text holds one but no double quote, short escapes plus
-/// `\xhh` / `\uhhhh` / `\Uhhhhhhhh` for non-printables.
+/// `\xhh` / `\uhhhh` / `\Uhhhhhhhh` for non-printables. Printability
+/// is [`py_printable`], shared with [`py_repr_str`] (PIDASHCONV-1644).
 fn py_str_value_repr_str(text: &str) -> String {
     let use_double = text.contains('\'') && !text.contains('"');
     let quote = if use_double { '"' } else { '\'' };
@@ -620,11 +621,7 @@ fn py_str_value_repr_str(text: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            ch if ch.is_control()
-                || (ch as u32) == 0x7f
-                || ((ch as u32) >= 0x80 && (ch as u32) < 0xa0)
-                || (ch.is_whitespace() && ch != ' ') =>
-            {
+            ch if !py_printable(ch) => {
                 let code = ch as u32;
                 if code < 0x100 {
                     out.push_str(&format!("\\x{code:02x}"));
@@ -1097,6 +1094,62 @@ mod tests {
         assert_eq!(py_str_value_repr(&json!("a\nb")), "'a\\nb'");
         assert_eq!(py_str_value(&json!(1.5)), "1.5");
         assert_eq!(py_str_value(&json!(1e16)), "1e+16");
+    }
+
+    // PIDASHCONV-1644: container strings escape per CPython
+    // `str.isprintable` (via `py_printable`), like `py_repr_str`.
+    // Every literal below was verified against the 3.12 interpreter
+    // (`repr([ch])`); the container probe shape matches the issue.
+    #[test]
+    fn py_str_value_escapes_cpython_nonprintables() {
+        let cases = [
+            // The issue's four vectors: Cf format chars + private-use.
+            ("\u{200b}", "'\\u200b'"),
+            ("\u{200d}", "'\\u200d'"),
+            ("\u{feff}", "'\\ufeff'"),
+            ("\u{e000}", "'\\ue000'"),
+            // Agreement pins (escaped before and after): nbsp, LSEP.
+            ("\u{a0}", "'\\xa0'"),
+            ("\u{2028}", "'\\u2028'"),
+            // 1624 parity mirrors: unassigned, soft hyphen, Zs pair,
+            // astral private-use + tag.
+            ("\u{378}", "'\\u0378'"),
+            ("\u{ad}", "'\\xad'"),
+            ("\u{1680}", "'\\u1680'"),
+            ("\u{2000}", "'\\u2000'"),
+            ("\u{f0000}", "'\\U000f0000'"),
+            ("\u{e0000}", "'\\U000e0000'"),
+            // Narrow no-break space: Zs but not White_Space, so the old
+            // gate passed it raw; CPython escapes it (review probe).
+            ("\u{202f}", "'\\u202f'"),
+            // No-change pins: controls escaped before and after.
+            ("\0", "'\\x00'"),
+            ("\u{7f}", "'\\x7f'"),
+            ("\u{85}", "'\\x85'"),
+        ];
+        for (text, want) in cases {
+            assert_eq!(
+                py_str_value_repr(&Value::String(text.to_owned())),
+                want,
+                "element {text:?}"
+            );
+            assert_eq!(
+                py_str_value(&Value::Array(vec![Value::String(text.to_owned())])),
+                format!("[{want}]"),
+                "container {text:?}"
+            );
+        }
+        // Dict keys share the escaper (`repr({'\u200b': 1})`).
+        assert_eq!(py_str_value(&json!({"\u{200b}": 1})), "{'\\u200b': 1}");
+        // Printable near-misses stay raw (mirrors the 1624 pins).
+        for text in [" ", "\u{377}", "\u{fe00}", "é", "😀", ""] {
+            let want = format!("'{text}'");
+            assert_eq!(
+                py_str_value_repr(&Value::String(text.to_owned())),
+                want,
+                "printable {text:?}"
+            );
+        }
     }
 
     #[test]
