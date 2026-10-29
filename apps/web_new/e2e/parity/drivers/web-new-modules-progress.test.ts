@@ -50,6 +50,7 @@ const NOTICE_ACTIVE = `${SIDEBAR}.getByText("This module isn't active yet.",{"ex
 const NOTICE_INVALID = `${SIDEBAR}.getByText("Invalid date. Please enter valid date.",{"exact":true})`;
 const CHART = `${SIDEBAR}.getByTestId("module-progress-chart")`;
 const MEASURE = `${SIDEBAR}.getByTestId("module-progress-measure")`;
+const MEASURE_VISIBLE = `${MEASURE}.filter({"visible":true})`;
 const OPTIONS = `page.getByRole("option")`;
 const ENTRIES = `${SIDEBAR}.getByTestId("module-progress-entries")`;
 const ENTRY_ROWS = `${ENTRIES}.locator("[data-testid^=\\"module-progress-entry-\\"]")`;
@@ -249,17 +250,16 @@ describe("modulesDetailProgressChartVisible", () => {
 describe("modulesDetailProgressMeasureValue", () => {
   it("reads the trigger label", async () => {
     const script = new Recorder();
-    script.texts.set(MEASURE, "  Work   items\n");
+    script.texts.set(`${MEASURE_VISIBLE}.first()`, "  Work   items\n");
     expect(await script.driver().modulesDetailProgressMeasureValue()).toBe("Work items");
   });
 
-  it("reads null when the trigger is gone or hidden", async () => {
-    const gone = new Recorder();
-    gone.counts.set(MEASURE, 0);
-    expect(await gone.driver().modulesDetailProgressMeasureValue()).toBeNull();
-    const hidden = new Recorder();
-    hidden.visibles.set(MEASURE, false);
-    expect(await hidden.driver().modulesDetailProgressMeasureValue()).toBeNull();
+  it("reads null when no visible trigger mounts", async () => {
+    // The driver filters by visible first, so a gone trigger and a
+    // hidden one both read as a zero count at the filtered path.
+    const script = new Recorder();
+    script.counts.set(MEASURE_VISIBLE, 0);
+    expect(await script.driver().modulesDetailProgressMeasureValue()).toBeNull();
   });
 });
 
@@ -268,23 +268,23 @@ describe("modulesDetailProgressMeasureOptions", () => {
     const script = new Recorder();
     script.optionTexts = ["Work items", "Points", " "];
     expect(await script.driver().modulesDetailProgressMeasureOptions()).toEqual(["Work items", "Points"]);
-    expect(script.callsFor(`${MEASURE}.first()`, "click")).toHaveLength(1);
+    expect(script.callsFor(`${MEASURE_VISIBLE}.first()`, "click")).toHaveLength(1);
     expect(script.callsFor(`${OPTIONS}.first()`, "waitFor")).toHaveLength(1);
     expect(script.presses).toEqual(["Escape"]);
   });
 
   it("reads empty when no trigger mounts", async () => {
     const script = new Recorder();
-    script.counts.set(MEASURE, 0);
+    script.counts.set(MEASURE_VISIBLE, 0);
     expect(await script.driver().modulesDetailProgressMeasureOptions()).toEqual([]);
-    expect(script.callsFor(`${MEASURE}.first()`, "click")).toHaveLength(0);
+    expect(script.callsFor(`${MEASURE_VISIBLE}.first()`, "click")).toHaveLength(0);
   });
 });
 
 describe("modulesDetailMeasureSwitchGetCount", () => {
   it("switches the measure and counts only module-detail GETs", async () => {
     const script = new Recorder();
-    script.texts.set(MEASURE, "Points");
+    script.texts.set(`${MEASURE_VISIBLE}.first()`, "Points");
     script.responses = [
       scriptedResponse("GET", MODULE_GET),
       scriptedResponse("GET", MODULE_GET),
@@ -293,7 +293,7 @@ describe("modulesDetailMeasureSwitchGetCount", () => {
       scriptedResponse("GET", ":::not a url:::"),
     ];
     expect(await script.driver().modulesDetailMeasureSwitchGetCount("Points")).toBe(2);
-    expect(script.callsFor(`${MEASURE}.first()`, "click")).toHaveLength(1);
+    expect(script.callsFor(`${MEASURE_VISIBLE}.first()`, "click")).toHaveLength(1);
     const options = script.calls.filter((call) => call.path === "page" && call.method === "getByRole");
     expect(options).toHaveLength(1);
     expect(options[0]?.args).toEqual(["option", { name: "Points" }]);
@@ -306,10 +306,10 @@ describe("modulesDetailMeasureSwitchGetCount", () => {
 
   it("recovery-clicks when the option never appears", async () => {
     const script = new Recorder();
-    script.texts.set(MEASURE, "Points");
+    script.texts.set(`${MEASURE_VISIBLE}.first()`, "Points");
     script.waitForThrows.add(`page.getByRole("option",{"name":"Points"}).first()`);
     expect(await script.driver().modulesDetailMeasureSwitchGetCount("Points")).toBe(0);
-    expect(script.callsFor(`${MEASURE}.first()`, "click")).toHaveLength(2);
+    expect(script.callsFor(`${MEASURE_VISIBLE}.first()`, "click")).toHaveLength(2);
     expect(script.offCalls).toHaveLength(1);
   });
 });
