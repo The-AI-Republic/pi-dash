@@ -25,7 +25,7 @@ export { SavedViewEmptyCard, loadSavedViewEmptyCard } from "./emptyStates/viewEm
 export type { SavedViewEmptyCardProps } from "./emptyStates/viewEmpty.js";
 export { ProfileIssuesEmpty } from "./emptyStates/cards.js";
 export type { ProfileIssueTab, ProfileIssuesEmptyProps } from "./emptyStates/cards.js";
-export { entityListsKeyPart, writeEntityPrefs } from "./prefs/entities.js";
+export { entityListsKeyPart, mergePrefsResponse, writeEntityPrefs } from "./prefs/entities.js";
 export type { IssuesEntity, PrefsRecord } from "./prefs/entities.js";
 export {
   entityPrefsKeyPart,
