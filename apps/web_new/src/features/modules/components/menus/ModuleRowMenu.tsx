@@ -6,8 +6,9 @@
 // component on rows and cards; the entries assemble from the menu model
 // per role and archive state. Edit and Delete open the shared dialogs,
 // the link actions call the shared helpers, Archive reports to the
-// archive opener slice G wires (MOD-026), and Restore runs straight
-// from the menu with its own notices. A press outside the dialog
+// archive opener slice G wires (MOD-026), a landed delete reports to
+// the host's onDeleted, and Restore runs straight from the menu with
+// its own notices. A press outside the dialog
 // context still renders the read-only entries; the entries that need
 // the dialogs simply have nowhere to open.
 
@@ -43,6 +44,11 @@ export interface ModuleRowMenuProps {
    */
   onArchive?: ((module: ModuleRow) => void) | undefined;
   /**
+   * Runs after a row/card delete lands. The list screen wires its peek
+   * cleanup here: deleting the peeked module closes the panel (spec §5).
+   */
+  onDeleted?: ((module: Pick<ModuleRow, "id" | "name">) => void) | undefined;
+  /**
    * Keep the trigger visible instead of revealing it on row hover
    * (cards and narrow rows always show their actions).
    */
@@ -56,6 +62,7 @@ export function ModuleRowMenu({
   canEdit,
   archived = false,
   onArchive,
+  onDeleted,
   alwaysVisible = false,
 }: ModuleRowMenuProps): React.ReactElement {
   const queryClient = useQueryClient();
@@ -78,7 +85,7 @@ export function ModuleRowMenu({
     else if (id === "copy") void copyModuleLink(workspaceSlug, projectId, module.id);
     else if (id === "archive") onArchive?.(module);
     else if (id === "restore") void restore();
-    else dialogs?.openDelete(module);
+    else dialogs?.openDelete(module, { onDeleted });
   };
 
   const items: KitMenuEntry[] = moduleMenuEntries({

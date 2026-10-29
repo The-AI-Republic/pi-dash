@@ -158,6 +158,18 @@ describe("ModuleRowMenu", () => {
     expect(invalidate).toHaveBeenCalled();
   });
 
+  it("reports a landed delete to the host", async () => {
+    const onDeleted = vi.fn();
+    renderMenu({ onDeleted });
+    await openMenu();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
+    expect(await screen.findByRole("heading", { name: "Delete module" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    await waitFor(() =>
+      expect(onDeleted).toHaveBeenCalledWith(expect.objectContaining({ id: MODULES_MODULE_ID, name: "Delivery" }))
+    );
+  });
+
   it("copies the link and opens new tabs through the shared helpers", async () => {
     renderMenu();
     await openMenu();

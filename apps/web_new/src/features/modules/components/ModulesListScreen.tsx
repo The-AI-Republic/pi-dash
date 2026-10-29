@@ -23,7 +23,8 @@
 // validated, hands every row and card a writer that opens it, and mounts
 // the shared peek panel below the header while the key names a module
 // (§5, MOD-019). Closing writes the key away; the screen never decides a
-// panel's own address.
+// panel's own address. Deleting the peeked module from a row or card menu
+// closes the panel the same way; any other deletion keeps the peek.
 
 import type { ModuleRow, WorkspaceMember } from "@pidash/api-client";
 import { useQuery } from "@tanstack/react-query";
@@ -175,6 +176,11 @@ function ModulesListSettled({
   const openArchive = (module: ModuleRow): void => {
     dialogs?.openArchive(module);
   };
+  // A row/card delete of the peeked module clears the key and closes the
+  // panel (§5); any other module's deletion leaves an unrelated peek up.
+  const closePeekForDeleted = (deleted: Pick<ModuleRow, "id" | "name">): void => {
+    if (deleted.id === peekModuleId) onPeekChange(null);
+  };
   const menuForRow =
     rowMenu ??
     ((module: ModuleRow) => (
@@ -185,6 +191,7 @@ function ModulesListSettled({
         canEdit={createAllowed}
         archived={archived}
         onArchive={openArchive}
+        onDeleted={closePeekForDeleted}
       />
     ));
   const body =
