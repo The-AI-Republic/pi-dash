@@ -770,14 +770,16 @@ pub(crate) enum ChainEffect {
         epoch: i64,
     },
     /// A move's `model_activity` enqueue, built by the move's own kwargs
-    /// builder. Best-effort, like every enqueue leg.
+    /// builder. Best-effort, like every enqueue leg. `origin` is `None`
+    /// for callers with no request host (the MCP layer), rendering JSON
+    /// null — never skipped, exactly Django's `origin=None`.
     MoveModelActivity {
         model: Uuid,
         requested: Value,
         current: String,
         actor: Uuid,
         slug: String,
-        origin: String,
+        origin: Option<String>,
     },
 }
 
@@ -1061,8 +1063,14 @@ pub(crate) async fn run_chain(
                 slug,
                 origin,
             } => {
-                let spec =
-                    move_model_activity_kwargs(&model, requested, &current, &actor, &slug, &origin);
+                let spec = move_model_activity_kwargs(
+                    &model,
+                    requested,
+                    &current,
+                    &actor,
+                    &slug,
+                    origin.as_deref(),
+                );
                 enqueue
                     .enqueue_task(spec.task, spec.args, spec.kwargs)
                     .await;

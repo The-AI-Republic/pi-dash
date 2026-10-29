@@ -1029,7 +1029,7 @@ async fn move_inner(
                     project_id,
                     pk: pk_owned,
                     target_ref: &target_ref,
-                    origin: origin.clone(),
+                    origin: Some(origin.clone()),
                     web_base_url: web_base_owned.as_deref(),
                     now,
                     prev_state: prev,
