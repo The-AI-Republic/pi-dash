@@ -61,9 +61,9 @@
 //!   [`chat`](pidash_services::runner_runs::chat) (release rows),
 //!   [`finalization`](pidash_services::runner_runs::finalization)
 //!   (reap finalizes),
-//!   [`drain`](pidash_services::runner_sessions::drain) +
-//!   [`pubsub`](pidash_services::runner_sessions::pubsub) (drains,
-//!   sends). Kernel SQL runs verbatim where already parameterized;
+//!   [`live_drains`](pidash_services::runner_sessions::live_drains)
+//!   (drains) + [`pubsub`](pidash_services::runner_sessions::pubsub)
+//!   (sends). Kernel SQL runs verbatim where already parameterized;
 //!   the Django-literal chat builders execute as parameterized
 //!   equivalents (same predicates, locks, order — the L8 `chat.rs`
 //!   precedent).
@@ -141,8 +141,6 @@ use pidash_services::runner_runs::chat as chat_kernel;
 use pidash_services::runner_runs::chat::ChatEffect;
 use pidash_services::runner_runs::finalization;
 use pidash_services::runner_runs::LifecycleEffect;
-use pidash_services::runner_sessions::drain as drain_kernel;
-use pidash_services::runner_sessions::guards as session_guards;
 use pidash_services::runner_sessions::pubsub as pubsub_kernel;
 use pidash_services::runner_sessions::pubsub::PubsubStore;
 use pidash_services::runner_sessions::session_service as session_kernel;
@@ -518,7 +516,7 @@ fn txn_fail_response(fail: TxnFail, runner_id: Uuid) -> Response {
 // Cross-domain ports: real D-14 drains, LivePorts for the rest
 // ---------------------------------------------------------------------------
 
-/// Pool-backed [`PubsubStore`] for the drain sends (the
+/// Pool-backed [`PubsubStore`] for the post-commit sends (the
 /// `teardown.rs` `PoolPubsubStore` precedent): each statement
 /// autocommits, like the source paths that run outside any `atomic`.
 struct SessionPubsub<'p, 's> {
@@ -721,215 +719,46 @@ impl RunnerPorts for SessionPorts<'_> {
 }
 
 // ---------------------------------------------------------------------------
-// Drain executors (`matcher.py:194-306` via the `drain` kernel)
+// Drain executors (`matcher.py:194-306` via the public `live_drains` executors)
 // ---------------------------------------------------------------------------
 
-/// `drain_for_runner_by_id` (`:298-303`): runner lookup (miss ⇒ `Ok`,
-/// no tx), else the single-assignment drain.
+/// `drain_for_runner_by_id` (`matcher.py:298-304`): the by-id lookup
+/// (miss ⇒ `Ok`), else the locked drain. Thin caller of the public
+/// executor (PIDASHCONV-1561); the local copy is deleted.
 async fn drain_for_runner_by_id(
     pool: &PgPool,
     state: &AppState,
     runner_id: Uuid,
 ) -> Result<(), String> {
-    let row = sqlx::query(drain_kernel::DRAIN_FOR_RUNNER_BY_ID_LOOKUP_SQL)
-        .bind(runner_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|error| error.to_string())?;
-    if row.is_none() {
-        return Ok(());
-    }
-    drain_for_runner(pool, state, runner_id).await
-}
-
-/// `drain_for_runner` (`:252-296`): re-select the runner under
-/// `SKIP LOCKED`, take the next queued run, write the assignment,
-/// commit, then dispatch the frame (the nested `on_commit` fires
-/// immediately post-commit) and log.
-async fn drain_for_runner(pool: &PgPool, state: &AppState, runner_id: Uuid) -> Result<(), String> {
-    use sqlx::Row;
-    let mut tx = pool.begin().await.map_err(|error| error.to_string())?;
-    let threshold = session_guards::alive_threshold(Utc::now());
-    let locked = sqlx::query(drain_kernel::DRAIN_FOR_RUNNER_LOCK_SQL)
-        .bind(threshold)
-        .bind(runner_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|error| error.to_string())?;
-    let Some(locked) = locked else {
-        tx.commit().await.map_err(|error| error.to_string())?;
-        return Ok(());
-    };
-    let owner_id: Uuid = locked
-        .try_get("owner_id")
-        .map_err(|error| error.to_string())?;
-    let pod_id: Uuid = locked
-        .try_get("pod_id")
-        .map_err(|error| error.to_string())?;
-    let provisioning: String = locked
-        .try_get("provisioning")
-        .map_err(|error| error.to_string())?;
-    let visibility: i16 = locked
-        .try_get("visibility")
-        .map_err(|error| error.to_string())?;
-    // Non-private runners issue no query (the `qs.none()` arm).
-    let Some(next_sql) = drain_kernel::next_for_runner_sql(&provisioning, i32::from(visibility))
-    else {
-        tx.commit().await.map_err(|error| error.to_string())?;
-        return Ok(());
-    };
-    let run = sqlx::query(&next_sql)
-        .bind(pod_id)
-        .bind(runner_id)
-        .bind(owner_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|error| error.to_string())?;
-    let Some(run) = run else {
-        tx.commit().await.map_err(|error| error.to_string())?;
-        return Ok(());
-    };
-    let run_id: Uuid = run.try_get("id").map_err(|error| error.to_string())?;
-    let work_item_id: Option<Uuid> = run
-        .try_get("work_item_id")
-        .map_err(|error| error.to_string())?;
-    let prompt: String = run.try_get("prompt").map_err(|error| error.to_string())?;
-    let run_config: Value = run
-        .try_get("run_config")
-        .map_err(|error| error.to_string())?;
-    let Value::Object(run_config) = run_config else {
-        return Err("drain_for_runner: run_config is not an object".to_owned());
-    };
-    // `$3` is a fresh `timezone.now()` per assignment (`:285-289`).
-    sqlx::query(drain_kernel::ASSIGN_RUN_UPDATE_SQL)
-        .bind(owner_id)
-        .bind(runner_id)
-        .bind(Utc::now())
-        .bind(run_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|error| error.to_string())?;
-    let plan = drain_kernel::plan_assignment(&drain_kernel::AssignmentFacts {
-        run_id,
+    let redis = client_from_settings(state.settings());
+    pidash_services::runner_sessions::live_drains::drain_for_runner_by_id(
+        pool,
+        redis.as_ref(),
+        &state.settings().runner,
         runner_id,
-        owner_id,
-        work_item_id,
-        prompt,
-        run_config,
-    });
-    tx.commit().await.map_err(|error| error.to_string())?;
-    let drain_kernel::DrainEffect::SendAssign { runner_id, message } = &plan.after_commit;
-    let store = SessionPubsub { pool, state };
-    let outcome = pubsub_kernel::send_to_runner(&store, *runner_id, message)
-        .await
-        .map_err(|error| error.to_string())?;
-    for warning in &outcome.warnings {
-        tracing::warn!("{warning}");
-    }
-    tracing::info!("{}", drain_kernel::drain_for_runner_log(runner_id, &run_id));
-    Ok(())
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| error.to_string())
 }
 
-/// `drain_pod_by_id` (`:242-250`): pod lookup (miss ⇒ `Ok`, no tx),
-/// else the drain loop.
+/// `drain_pod_by_id` (`matcher.py:242-251`): pod lookup (miss ⇒
+/// `Ok`, no tx), else the drain loop. Thin caller of the public
+/// executor (PIDASHCONV-1561); the local copy is deleted. The
+/// executor's sends-then-log order fixes this twin, which logged the
+/// info line before sending where Python sends first: a dispatch
+/// failure now propagates with no info line, exactly as Python.
 async fn drain_pod_by_id(pool: &PgPool, state: &AppState, pod_id: Uuid) -> Result<(), String> {
-    let pod = sqlx::query(drain_kernel::DRAIN_POD_BY_ID_LOOKUP_SQL)
-        .bind(pod_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|error| error.to_string())?;
-    if pod.is_none() {
-        return Ok(());
-    }
-    drain_pod(pool, state, pod_id).await
-}
-
-/// `drain_pod` (`:194-239`): lock the idle list, then per runner in
-/// list order take the next queued run, write the assignment, and
-/// plan the frame; commit once; then dispatch each frame in
-/// assignment order (the `teardown.rs` recipe).
-async fn drain_pod(pool: &PgPool, state: &AppState, pod_id: Uuid) -> Result<(), String> {
-    use sqlx::Row;
-    let mut tx = pool.begin().await.map_err(|error| error.to_string())?;
-    let threshold = session_guards::alive_threshold(Utc::now());
-    let runners = sqlx::query(drain_kernel::DRAIN_POD_IDLE_RUNNERS_SQL)
-        .bind(threshold)
-        .bind(pod_id)
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(|error| error.to_string())?;
-    let mut plans: Vec<drain_kernel::AssignmentPlan> = Vec::new();
-    for runner in &runners {
-        let runner_id: Uuid = runner.try_get("id").map_err(|error| error.to_string())?;
-        let owner_id: Uuid = runner
-            .try_get("owner_id")
-            .map_err(|error| error.to_string())?;
-        let provisioning: String = runner
-            .try_get("provisioning")
-            .map_err(|error| error.to_string())?;
-        let visibility: i16 = runner
-            .try_get("visibility")
-            .map_err(|error| error.to_string())?;
-        let Some(next_sql) =
-            drain_kernel::next_for_runner_sql(&provisioning, i32::from(visibility))
-        else {
-            continue;
-        };
-        let run = sqlx::query(&next_sql)
-            .bind(pod_id)
-            .bind(runner_id)
-            .bind(owner_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|error| error.to_string())?;
-        let Some(run) = run else {
-            continue;
-        };
-        let run_id: Uuid = run.try_get("id").map_err(|error| error.to_string())?;
-        let work_item_id: Option<Uuid> = run
-            .try_get("work_item_id")
-            .map_err(|error| error.to_string())?;
-        let prompt: String = run.try_get("prompt").map_err(|error| error.to_string())?;
-        let run_config: Value = run
-            .try_get("run_config")
-            .map_err(|error| error.to_string())?;
-        let Value::Object(run_config) = run_config else {
-            return Err("drain_pod: run_config is not an object".to_owned());
-        };
-        sqlx::query(drain_kernel::ASSIGN_RUN_UPDATE_SQL)
-            .bind(owner_id)
-            .bind(runner_id)
-            .bind(Utc::now())
-            .bind(run_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| error.to_string())?;
-        plans.push(drain_kernel::plan_assignment(
-            &drain_kernel::AssignmentFacts {
-                run_id,
-                runner_id,
-                owner_id,
-                work_item_id,
-                prompt,
-                run_config,
-            },
-        ));
-    }
-    tx.commit().await.map_err(|error| error.to_string())?;
-    if !plans.is_empty() {
-        tracing::info!("{}", drain_kernel::drain_pod_log(&pod_id, plans.len()));
-    }
-    let store = SessionPubsub { pool, state };
-    for plan in &plans {
-        let drain_kernel::DrainEffect::SendAssign { runner_id, message } = &plan.after_commit;
-        let outcome = pubsub_kernel::send_to_runner(&store, *runner_id, message)
-            .await
-            .map_err(|error| error.to_string())?;
-        for warning in &outcome.warnings {
-            tracing::warn!("{warning}");
-        }
-    }
-    Ok(())
+    let redis = client_from_settings(state.settings());
+    pidash_services::runner_sessions::live_drains::drain_pod_by_id(
+        pool,
+        redis.as_ref(),
+        &state.settings().runner,
+        pod_id,
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| error.to_string())
 }
 
 // ---------------------------------------------------------------------------
