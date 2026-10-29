@@ -725,11 +725,21 @@ test.describe("module detail on desktop", () => {
           // Live the rows show avatar initials, never display names: the
           // lead row carries the lead's initial plus the unresolved-name
           // placeholder; identity is proven by server below.
-          expect(await driver.modulesDetailSidebarLead()).toBe(`${owner.displayName.charAt(0)} Lead`);
-          // Member avatars resolve after the module record settles.
-          await expect
-            .poll(() => driver.modulesDetailSidebarMembers(), { timeout: 60_000 })
-            .toEqual([owner.displayName.charAt(0)]);
+          if (driver.target === "web_new") {
+            // The new picker resolves display names where the old row
+            // kept the placeholder.
+            expect(await driver.modulesDetailSidebarLead()).toBe(`${owner.displayName.charAt(0)} ${owner.displayName}`);
+            // Member avatars resolve after the module record settles.
+            await expect
+              .poll(() => driver.modulesDetailSidebarMembers(), { timeout: 60_000 })
+              .toEqual([owner.displayName]);
+          } else {
+            expect(await driver.modulesDetailSidebarLead()).toBe(`${owner.displayName.charAt(0)} Lead`);
+            // Member avatars resolve after the module record settles.
+            await expect
+              .poll(() => driver.modulesDetailSidebarMembers(), { timeout: 60_000 })
+              .toEqual([owner.displayName.charAt(0)]);
+          }
         });
 
         await test.step("counts render without a points row", async () => {

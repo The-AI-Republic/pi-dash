@@ -32,7 +32,7 @@ import {
   type AuthedSession,
 } from "../helpers/api";
 import { specTags, specTitle } from "../helpers/tags";
-import { parityOracleUrl } from "../helpers/parity-env";
+import { parityNewUrl, parityOracleUrl } from "../helpers/parity-env";
 
 const ROW_013 = ["MOD-013"];
 const ROW_014 = ["MOD-014"];
@@ -535,7 +535,11 @@ test(
       "Linked Module",
       world.owner.cookie
     );
-    const origin = parityOracleUrl(process.env).replace(/\/+$/, "");
+    // The copy carries the serving origin, which differs per target.
+    const origin = (driver.target === "web_new" ? parityNewUrl(process.env) : parityOracleUrl(process.env)).replace(
+      /\/+$/,
+      ""
+    );
     const expectedUrl = `${origin}/${world.workspaceSlug}/projects/${world.projectId}/modules/${moduleId}`;
 
     await enterModulesList(driver, world, world.owner, "Linked Module");
@@ -567,7 +571,11 @@ test(
       "Detail Module",
       world.owner.cookie
     );
-    const origin = parityOracleUrl(process.env).replace(/\/+$/, "");
+    // The copy carries the serving origin, which differs per target.
+    const origin = (driver.target === "web_new" ? parityNewUrl(process.env) : parityOracleUrl(process.env)).replace(
+      /\/+$/,
+      ""
+    );
     const expectedUrl = `${origin}/${world.workspaceSlug}/projects/${world.projectId}/modules/${moduleId}`;
 
     await driver.modulesOpenDetail(world.workspaceSlug, world.projectId, moduleId, browserSessionCookies(world.owner));

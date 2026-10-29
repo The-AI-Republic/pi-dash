@@ -163,6 +163,16 @@ export function parityApiUrl(env: Env): string {
 }
 
 /**
+ * The web_new base URL: explicit PARITY_NEW_URL, else the dev default.
+ * Mirrors the `new` project's baseURL in the Playwright config; specs
+ * that pin absolute URLs (clipboard copies) resolve per target through
+ * this and parityOracleUrl.
+ */
+export function parityNewUrl(env: Env): string {
+  return pick(env, "PARITY_NEW_URL") ?? "http://localhost:3010";
+}
+
+/**
  * The admin-console oracle base URL (NEWFRONT-441): the /god-mode mount
  * on the same proxy origin. Explicit PARITY_ORACLE_ADMIN_URL wins;
  * otherwise the oracle URL with trailing slashes stripped plus

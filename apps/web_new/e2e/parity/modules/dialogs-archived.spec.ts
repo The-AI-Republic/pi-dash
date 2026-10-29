@@ -191,11 +191,17 @@ test(
     await enterModulesList(driver, world, world.owner);
     await driver.modulesOpenCreateFromHeader();
 
-    // The row requires a logical tab order; the date-range control
+    // The row requires a logical tab order; the old date-range control
     // renders no tabindex (NEWFRONT-330), so focus reaches it after
     // Submit instead of third. Every other control matches the
     // intended 1..8 sequence.
-    expect(await driver.modulesDialogTabOrder()).toEqual([1, 2, null, 4, 5, 6, 7, 8]);
+    if (driver.target === "web_new") {
+      // Fixed (NEWFRONT-330): the new date control carries its tab
+      // index, so focus reaches it third.
+      expect(await driver.modulesDialogTabOrder()).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    } else {
+      expect(await driver.modulesDialogTabOrder()).toEqual([1, 2, null, 4, 5, 6, 7, 8]);
+    }
     await driver.modulesDialogCancel();
   }
 );
@@ -348,12 +354,19 @@ test(
     await driver.modulesDialogSubmitCreate();
 
     // The dialog stays open with an error notice (the green half of
-    // MOD-023), but the form resets to defaults instead of keeping the
-    // user's input (NEWFRONT-328): the intended behavior is input intact.
+    // MOD-023), but the old form resets to defaults instead of keeping
+    // the user's input (NEWFRONT-328): the intended behavior is input
+    // intact.
     await expect.poll(() => driver.rulesLastToast(), { timeout: 30_000 }).toMatchObject({ title: "Error!" });
     expect(await driver.modulesDialogOpen()).toBe(true);
-    expect(await driver.modulesDialogTitle()).toBe("");
-    expect(await driver.modulesDialogDescription()).toBe("");
+    if (driver.target === "web_new") {
+      // Fixed (NEWFRONT-328): the input stays intact for correction.
+      expect(await driver.modulesDialogTitle()).toBe("Failed Module");
+      expect(await driver.modulesDialogDescription()).toBe("Failed description");
+    } else {
+      expect(await driver.modulesDialogTitle()).toBe("");
+      expect(await driver.modulesDialogDescription()).toBe("");
+    }
     expect(await serverProjectModules(world.workspaceSlug, world.projectId, world.owner.cookie)).toEqual([]);
     await driver.modulesDialogCancel();
   }
@@ -434,11 +447,16 @@ test(
     await driver.modulesDialogSubmitUpdate();
 
     // Same reset bug as creation (NEWFRONT-328 covers both modes): the
-    // dialog stays open with an error notice, but the title clears to
-    // the empty default instead of keeping the user's edit.
+    // old dialog stays open with an error notice, but the title clears
+    // to the empty default instead of keeping the user's edit.
     await expect.poll(() => driver.rulesLastToast(), { timeout: 30_000 }).toMatchObject({ title: "Error!" });
     expect(await driver.modulesDialogOpen()).toBe(true);
-    expect(await driver.modulesDialogTitle()).toBe("");
+    if (driver.target === "web_new") {
+      // Fixed (NEWFRONT-328): the edit stays intact for correction.
+      expect(await driver.modulesDialogTitle()).toBe("Save Fail Edited");
+    } else {
+      expect(await driver.modulesDialogTitle()).toBe("");
+    }
     const detail = await modulesModuleDetail(world.workspaceSlug, world.projectId, moduleId, world.owner.cookie);
     expect(detail.name).toBe("Save Fail");
     await driver.modulesDialogCancel();
@@ -662,8 +680,11 @@ test(
     await test.step("the screen sits on the archives tab strip", async () => {
       expect(await driver.archivesTabNames()).toContain("Modules");
       expect(await driver.archivesActiveTab()).toBe("Modules");
-      expect(await driver.currentUrlPath()).toBe(
-        `/${world.workspaceSlug}/projects/${world.projectId}/archives/modules/`
+      // Trailing-slash tolerant: the old client's hops add one, the new
+      // app serves the bare path on direct entry; the row pins the
+      // address, not the slash.
+      expect((await driver.currentUrlPath()).replace(/\/$/, "")).toBe(
+        `/${world.workspaceSlug}/projects/${world.projectId}/archives/modules`
       );
     });
 
@@ -784,8 +805,10 @@ test(
         message: expect.stringContaining("project modules"),
       });
     // The row's "archives overview" is the archives modules screen the
-    // restore lands on.
-    expect(await driver.currentUrlPath()).toBe(`/${world.workspaceSlug}/projects/${world.projectId}/archives/modules/`);
+    // restore lands on (slash-tolerant: see the tab-strip step above).
+    expect((await driver.currentUrlPath()).replace(/\/$/, "")).toBe(
+      `/${world.workspaceSlug}/projects/${world.projectId}/archives/modules`
+    );
     expect(await archivesModuleIsArchived(world.workspaceSlug, world.projectId, restored, world.owner.cookie)).toBe(
       false
     );
@@ -818,7 +841,9 @@ test(
     await driver.archivesFailNextModuleWrite();
     await driver.archivesChooseArchivedModuleMenuEntry("Restore Fail", "Restore");
     await expect.poll(() => driver.rulesLastToast(), { timeout: 30_000 }).toMatchObject({ title: "Restore success" });
-    expect(await driver.currentUrlPath()).toBe(`/${world.workspaceSlug}/projects/${world.projectId}/archives/modules/`);
+    expect((await driver.currentUrlPath()).replace(/\/$/, "")).toBe(
+      `/${world.workspaceSlug}/projects/${world.projectId}/archives/modules`
+    );
     expect(await archivesModuleIsArchived(world.workspaceSlug, world.projectId, failing, world.owner.cookie)).toBe(
       true
     );

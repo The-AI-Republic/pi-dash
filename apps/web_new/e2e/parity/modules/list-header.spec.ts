@@ -169,9 +169,18 @@ test(
 
     await test.step("the shortcut navigates to the project features settings", async () => {
       await driver.modulesGateToFeatures();
-      expect(await driver.currentUrlPath()).toBe(
-        `/${world.workspaceSlug}/settings/projects/${world.projectId}/features/`
-      );
+      if (driver.target === "web_new") {
+        // NEWFRONT-247: the bare features/ index renders nothing on
+        // either app (only the per-feature leaves exist), so the new
+        // gate links the modules leaf directly.
+        expect(await driver.currentUrlPath()).toBe(
+          `/${world.workspaceSlug}/settings/projects/${world.projectId}/features/modules`
+        );
+      } else {
+        expect(await driver.currentUrlPath()).toBe(
+          `/${world.workspaceSlug}/settings/projects/${world.projectId}/features/`
+        );
+      }
     });
 
     await test.step("a non-admin sees the shortcut disabled", async () => {

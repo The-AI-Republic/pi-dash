@@ -502,7 +502,14 @@ test(
     // Actual: the detail revalidates behind the scenes (SWR defaults) and
     // shows the rename with no navigation and no reload. Intended (row):
     // it stays stale like the list and peek.
-    await expect.poll(async () => driver.modulesXDetailName(), { timeout: 60_000 }).toBe(renamed);
+    if (driver.target === "web_new") {
+      // Fixed (NEWFRONT-332): the detail stays stale, so the rename is
+      // still invisible after the settle window.
+      await new Promise((resolve) => setTimeout(resolve, SETTLE_MS));
+      expect(await driver.modulesXDetailName()).toBe(firstName);
+    } else {
+      await expect.poll(async () => driver.modulesXDetailName(), { timeout: 60_000 }).toBe(renamed);
+    }
   }
 );
 
@@ -638,13 +645,21 @@ test(
     // handler itself is alive — the project flag half of its context is
     // what breaks.) Intended (row): nm keeps working regardless of prior
     // palette use.
-    await driver.modulesXPressKeySequence("nm");
-    await new Promise((resolve) => setTimeout(resolve, SETTLE_MS));
-    expect(await driver.modulesXModuleDialogOpen()).toBe(false);
+    if (driver.target === "web_new") {
+      // Fixed (NEWFRONT-333): nm opens the dialog with no navigation.
+      await driver.modulesXPressKeySequence("nm");
+      await expect.poll(async () => driver.modulesXModuleDialogOpen(), { timeout: 15_000 }).toBe(true);
+      await driver.modulesXPressKey("Escape");
+      await expect.poll(async () => driver.modulesXModuleDialogOpen(), { timeout: 15_000 }).toBe(false);
+    } else {
+      await driver.modulesXPressKeySequence("nm");
+      await new Promise((resolve) => setTimeout(resolve, SETTLE_MS));
+      expect(await driver.modulesXModuleDialogOpen()).toBe(false);
 
-    await driver.modulesXOpenModulesList(world.workspaceSlug, world.projectId);
-    await driver.modulesXPressKeySequence("nm");
-    await expect.poll(async () => driver.modulesXModuleDialogOpen(), { timeout: 15_000 }).toBe(true);
+      await driver.modulesXOpenModulesList(world.workspaceSlug, world.projectId);
+      await driver.modulesXPressKeySequence("nm");
+      await expect.poll(async () => driver.modulesXModuleDialogOpen(), { timeout: 15_000 }).toBe(true);
+    }
   }
 );
 
