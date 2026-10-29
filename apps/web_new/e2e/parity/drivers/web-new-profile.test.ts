@@ -422,24 +422,29 @@ describe("shared peek methods on the profile list", () => {
 describe("shared display methods on the profile tab", () => {
   function displayPage(overrides: { pressed?: string | null; closeFails?: boolean } = {}) {
     const clicks: string[] = [];
-    const dispatched: string[] = [];
     const escape = vi.fn(async () => undefined);
     let panelWaits = 0;
     let profileOpen = false;
     const row = locator({
-      dispatchEvent: async (type: string) => {
-        dispatched.push(type);
+      click: async () => {
+        clicks.push("row");
       },
-      // No check glyph: the pressed attribute alone decides the state.
+      dispatchEvent: async (type: string) => {
+        clicks.push(type);
+      },
+      // No check glyph: the aria attribute alone decides the state.
       locator: () => locator({ count: async () => 0 }),
-      getAttribute: async () => overrides.pressed ?? "false",
+      getAttribute: async (name: string) =>
+        name === "aria-checked"
+          ? (overrides.pressed ?? "false")
+          : name === "aria-pressed"
+            ? (overrides.pressed ?? "false")
+            : null,
     });
-    const scope = locator({ getByRole: (role: string) => locator({ or: () => (role === "radio" ? row : row) }) });
     const panel = locator({
       count: async () => 1,
       isVisible: async () => profileOpen,
-      getByRole: () => locator({ or: () => row }),
-      getByTestId: (id: string) => (id.startsWith("display-section-") ? scope : locator()),
+      getByRole: () => row,
       waitFor: async (options?: unknown) => {
         panelWaits += 1;
         if (overrides.closeFails === true && panelWaits === 1) throw new Error("still open");
@@ -457,16 +462,14 @@ describe("shared display methods on the profile tab", () => {
     });
     const page = pageOf({
       getByTestId: (id: string) => {
-        // When the shared panel is absent the union falls through to the
-        // profile tab's own menu.
-        if (id === "display-options-panel") return locator({ count: async () => 0, or: () => panel });
+        if (id === "display-options-panel") return locator({ count: async () => 0 });
         if (id === "profile-display-panel") return panel;
         if (id === "display-options-trigger") return locator({ count: async () => 0 });
         return trigger;
       },
       keyboard: { press: escape },
     });
-    return { driver: new WebNewDriver(page), clicks, dispatched, escape };
+    return { driver: new WebNewDriver(page), clicks, escape };
   }
 
   it("opens the visible trigger and waits for the panel", async () => {
@@ -490,19 +493,19 @@ describe("shared display methods on the profile tab", () => {
     expect(clicks).toEqual([]);
   });
 
-  it("chooses a group-by row inside its own section", async () => {
-    const { driver, dispatched } = displayPage();
+  it("chooses a group-by radio", async () => {
+    const { driver, clicks } = displayPage();
     await driver.setDisplayGroupBy("Priority");
-    expect(dispatched).toEqual(["click"]);
+    expect(clicks).toEqual(["row"]);
   });
 
   it("toggles an option only when it is not already in the wanted state", async () => {
     const offPage = displayPage({ pressed: "false" });
     await offPage.driver.setDisplayExtraOption("Show empty groups", true);
-    expect(offPage.dispatched).toEqual(["click"]);
+    expect(offPage.clicks).toEqual(["row"]);
     const onPage = displayPage({ pressed: "true" });
     await onPage.driver.setDisplayExtraOption("Show empty groups", true);
-    expect(onPage.dispatched).toEqual([]);
+    expect(onPage.clicks).toEqual([]);
     expect(await onPage.driver.isDisplayOptionChecked("Show empty groups")).toBe(true);
   });
 });
@@ -2564,6 +2567,11 @@ describe("project display methods on DisplayControl surfaces", () => {
               waits.push(waitOptions);
             },
             click: async () => {
+              clicks.push(key);
+            },
+            // DisplayControl rows activate on a dispatched click, which
+            // reaches the moving popover a real mouse press can miss.
+            dispatchEvent: async () => {
               clicks.push(key);
             },
             getAttribute: async () => pressed[key] ?? "false",

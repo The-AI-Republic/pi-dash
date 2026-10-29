@@ -136,19 +136,22 @@ afterEach(() => {
 describe("clickListRow", () => {
   it("clicks the visible shared list row that names the item", async () => {
     const clicked: unknown[] = [];
-    const { page, calls } = stubPage({
-      locatorFor: () =>
-        loc({
-          filter: (options) => {
-            calls.filters.push(options);
-            return loc({ click: async (opts) => void clicked.push(opts) });
-          },
-        }),
+    const filters: unknown[] = [];
+    const anchor = loc({
+      filter: (options) => {
+        filters.push(options);
+        return loc({ click: async (opts) => void clicked.push(opts) });
+      },
+    });
+    const { page } = stubPage({
+      locatorFor: (selector) => (selector === 'a[data-row-anchor="true"]' ? anchor : loc()),
+      // No scoped Issues region: the page-wide anchor read is the one under test.
+      roleFor: () => loc({ count: async () => 0, locator: () => loc({ count: async () => 0 }) }),
     });
 
     await new WebNewDriver(page).clickListRow("Persist urgent");
 
-    expect(calls.filters).toContainEqual({ hasText: "Persist urgent" });
+    expect(filters).toContainEqual({ hasText: "Persist urgent" });
     expect(clicked).toEqual([{ timeout: WebNewDriver.WAIT_MS }]);
   });
 });
@@ -284,12 +287,14 @@ describe("row menu", () => {
         innerText: async () => item.title,
         getAttribute: async (name) => (name === "aria-disabled" && item.disabled === true ? "true" : null),
         locator: (selector) =>
-          selector === "[data-menu-title]"
+          selector === '[data-menu-title="true"]'
             ? loc({ count: async () => 1, innerText: async () => item.title })
-            : loc({
-                count: async () => (item.note === undefined ? 0 : 1),
-                innerText: async () => item.note ?? "",
-              }),
+            : selector === '[data-menu-description="true"]'
+              ? loc({
+                  count: async () => (item.note === undefined ? 0 : 1),
+                  innerText: async () => item.note ?? "",
+                })
+              : loc({ count: async () => 0 }),
         click: async () => void clicks.push(item.title),
         dispatchEvent: async () => void clicks.push(`dispatch:${item.title}`),
       })
@@ -354,7 +359,7 @@ describe("row menu", () => {
     const { page } = menu([{ title: "Restore" }]);
 
     await expect(new WebNewDriver(page).layoutsRowMenuChoose("Ship it", "Archive")).rejects.toThrow(
-      'row menu has no item "Archive"'
+      "open menu has no Archive"
     );
   });
 });
@@ -365,7 +370,7 @@ describe("detail and lifecycle dialogs", () => {
     const menuitem = loc({
       count: async () => 1,
       locator: (selector) =>
-        selector === "[data-menu-title]"
+        selector === '[data-menu-title="true"]'
           ? loc({ count: async () => 1, innerText: async () => "Archive" })
           : loc({ count: async () => 0 }),
     });
@@ -390,7 +395,13 @@ describe("detail and lifecycle dialogs", () => {
         closed += 1;
       },
     };
-    const menuitem = loc({ count: async () => 1, filter: () => menuitem });
+    const entry = loc({
+      locator: (selector) =>
+        selector === '[data-menu-title="true"]'
+          ? loc({ count: async () => 1, innerText: async () => "Open in new tab" })
+          : loc({ count: async () => 0 }),
+    });
+    const menuitem = loc({ count: async () => 1, nth: () => entry });
     const { page } = stubPage({
       locatorFor: () => loc(),
       testIdFor: () => loc(),

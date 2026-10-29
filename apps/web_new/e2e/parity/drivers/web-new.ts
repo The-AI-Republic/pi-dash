@@ -3983,15 +3983,10 @@ export class WebNewDriver implements ParityDriver {
     // row-anchor links (the Issues region, or the fresh strip above it),
     // and the profile list rows are buttons.
     const issues = await this.issueRowAnchors(name);
-    if ((await issues.count()) > 0) {
-      await issues.first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
-      await issues.first().click({ timeout: WebNewDriver.WAIT_MS });
-      return;
-    }
-    const row = this.page
+    const profile = this.page
       .locator('[data-testid="profile-list"] button[data-profile-row]')
-      .filter({ hasText: name })
-      .first();
+      .filter({ hasText: name });
+    const row = (await issues.count()) > 0 ? issues.first() : profile.first();
     await row.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
     await row.click({ timeout: WebNewDriver.WAIT_MS });
   }
@@ -7565,16 +7560,15 @@ export class WebNewDriver implements ParityDriver {
         });
       return;
     }
+    // The profile tab's own menu; its trigger stays mounted, so the
+    // fallback reopens through it.
     await this.page.keyboard.press("Escape");
-    const panels = this.page.getByTestId("display-options-panel").or(this.profileDisplayPanel());
-    await panels
-      .first()
+    await this.profileDisplayPanel()
       .waitFor({ state: "hidden", timeout: 10_000 })
       .catch(async () => {
         // Focus can sit outside the popover, so fall back to the trigger.
-        await this.openDisplayPanelAny();
-        await this.page.keyboard.press("Escape");
-        await panels.first().waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
+        await this.profileDisplayTrigger().click({ timeout: WebNewDriver.WAIT_MS });
+        await this.profileDisplayPanel().waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
       });
   }
 
@@ -7658,12 +7652,13 @@ export class WebNewDriver implements ParityDriver {
 
   async displayPanelText(): Promise<string> {
     const panel = await this.openDisplayPanelAny();
-    return ((await panel.first().innerText()) ?? "").replace(/\s+/g, " ").trim();
+    return ((await panel.first().innerText()) ?? "").trim();
   }
 
   async setDisplayGroupBy(option: string): Promise<void> {
     if (await this.isProfileDisplaySurface()) {
-      const choice = this.profileDisplayPanel().getByRole("radio", { name: option, exact: true });
+      // The profile menu is its own radiogroup, not a DisplayControl panel.
+      const choice = this.profileRadio(option);
       await choice.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
       await choice.click({ timeout: WebNewDriver.WAIT_MS });
       return;
@@ -7674,6 +7669,8 @@ export class WebNewDriver implements ParityDriver {
 
   async setDisplayOrderBy(option: string): Promise<void> {
     if (await this.isProfileDisplaySurface()) {
+      // The profile menu carries no ordering section: its pick is a plain
+      // option button in the same panel.
       const choice = this.profileDisplayOption(option);
       await choice.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
       await choice.click({ timeout: WebNewDriver.WAIT_MS });
@@ -7693,16 +7690,30 @@ export class WebNewDriver implements ParityDriver {
       return;
     }
     const panel = await this.openDisplayPanelAny();
-    const target = panel
-      .getByRole("radio", { name: option, exact: true })
-      .or(panel.getByRole("button", { name: option, exact: true }));
+    // A switch lives in one of the panel's sections, and labels repeat
+    // across them, so resolve the same scope the checker reads.
+    let target = this.displaySectionRow(panel, "options", option);
+    for (const section of ["group", "subGroup", "order"]) {
+      if ((await target.count()) > 0) break;
+      target = this.displaySectionRow(panel, section, option);
+    }
     await target.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
     if ((await this.isDisplayOptionChecked(option)) !== enabled) await this.clickDisplayRow(target);
   }
 
+  /** The profile menu's single-choice row: a semantic radio, not a pressed button. */
+  private profileRadio(option: string): Locator {
+    return this.profileDisplayPanel().getByRole("radio", { name: option, exact: true });
+  }
+
   async isDisplayOptionChecked(option: string): Promise<boolean> {
     if (await this.isProfileDisplaySurface()) {
-      return (await this.profileDisplayOption(option).getAttribute("aria-pressed")) === "true";
+      // The profile menu is a radiogroup (aria-checked) plus switch
+      // buttons (aria-pressed); it carries no section testids.
+      const radio = this.profileRadio(option);
+      const target = (await radio.count()) > 0 ? radio.first() : this.profileDisplayOption(option);
+      if ((await target.getAttribute("aria-checked")) === "true") return true;
+      return (await target.getAttribute("aria-pressed")) === "true";
     }
     const panel = await this.openDisplayPanelAny();
     // Grouping, ordering and switch rows are all aria-pressed buttons;
@@ -7714,7 +7725,7 @@ export class WebNewDriver implements ParityDriver {
         .getByRole("radio", { name: option, exact: true })
         .or(scope.getByRole("button", { name: option, exact: true }));
       if ((await target.count()) === 0) continue;
-      return (await this.isDisplayRowChecked(target));
+      return await this.isDisplayRowChecked(target);
     }
     const missing = panel
       .getByRole("radio", { name: option, exact: true })
@@ -7723,11 +7734,10 @@ export class WebNewDriver implements ParityDriver {
     return this.isDisplayRowChecked(missing);
   }
 
-  /** A single-choice row marks itself checked, pressed, or (profile menu) with a glyph. */
+  /** A DisplayControl row marks itself checked (semantic radio) or pressed (button). */
   private async isDisplayRowChecked(target: Locator): Promise<boolean> {
     if ((await target.getAttribute("aria-checked")) === "true") return true;
-    if ((await target.getAttribute("aria-pressed")) === "true") return true;
-    return (await target.locator("svg").count()) > 0;
+    return (await target.getAttribute("aria-pressed")) === "true";
   }
 
   async toggleDisplayProperty(option: string): Promise<void> {
@@ -7795,11 +7805,11 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async isRichFilterRowVisible(): Promise<boolean> {
-    return this.isShown(this.richFilterRow());
+    return this.isShown(this.richRow());
   }
 
   async richFilterRowText(): Promise<string> {
-    const row = this.richFilterRow();
+    const row = this.richRow();
     if ((await row.count()) === 0) return "";
     return ((await row.innerText()) ?? "").replace(/\s+/g, " ").trim();
   }
@@ -10616,8 +10626,7 @@ export class WebNewDriver implements ParityDriver {
       const entry = await this.layoutsOpenMenuItem(item);
       // Base-ui marks disabled items both ways; either marker counts.
       if ((await entry.getAttribute("aria-disabled")) === "true") return true;
-      if ((await entry.getAttribute("data-disabled")) !== null) return true;
-      return entry.isDisabled().catch(() => false);
+      return (await entry.getAttribute("data-disabled")) !== null;
     } finally {
       await this.layoutsCloseOpenMenu();
     }
@@ -10717,13 +10726,13 @@ export class WebNewDriver implements ParityDriver {
     // failure keeps it open (so the caller can retry) and raises a
     // confirmation. Resolve on either signal instead of only detaching,
     // or a failed write would burn the whole wait and outlive its toast.
-    const deadline = Date.now() + WebNewDriver.WAIT_MS;
-    for (;;) {
-      if (!(await this.layoutsDeleteModalVisible())) return;
-      if ((await toasts.count()) > seenToasts) return;
-      if (Date.now() >= deadline) return;
+    const outcome = Date.now() + 5_000;
+    while (Date.now() < outcome) {
+      if (!(await this.layoutsDeleteModalVisible())) break;
+      if ((await toasts.count()) > seenToasts) break;
       await this.page.waitForTimeout(300);
     }
+    await dialog.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
   }
 
   /**
@@ -10748,9 +10757,7 @@ export class WebNewDriver implements ParityDriver {
     // A landed archive unmounts the dialog; a portal can linger a beat
     // after the write, so detaching is the final settle.
     await dialog.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS }).catch(async () => {
-      await dialog
-        .waitFor({ state: "detached", timeout: 120_000 })
-        .catch(() => undefined);
+      await dialog.waitFor({ state: "detached", timeout: 120_000 }).catch(() => undefined);
     });
   }
 
