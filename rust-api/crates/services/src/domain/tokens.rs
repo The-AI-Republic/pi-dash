@@ -639,6 +639,52 @@ where
         .map(|_| ())
 }
 
+/// Workspace machine-token revoke, user-scoped arm (`ee-overlay`
+/// `service.py:462-467`, `token_qs.update(revoked_at=now)`): the
+/// overlay `revoke_machine_tokens` text verbatim — unquoted
+/// identifiers kept (D6 gap PIDASHCONV-1618). `$1` now, `$2`
+/// workspace, `$3` user, live rows only. Single-column stamp, no
+/// `updated_at` (the table has none).
+const REVOKE_MACHINE_TOKENS_BY_WORKSPACE_AND_USER_SQL: &str =
+    "UPDATE machine_token SET revoked_at = $1 WHERE workspace_id = $2 AND revoked_at IS NULL AND user_id = $3";
+
+/// Workspace machine-token revoke, whole-workspace arm: same source,
+/// `$1` now, `$2` workspace, live rows only.
+const REVOKE_MACHINE_TOKENS_BY_WORKSPACE_SQL: &str =
+    "UPDATE machine_token SET revoked_at = $1 WHERE workspace_id = $2 AND revoked_at IS NULL";
+
+/// Revoke live machine tokens by workspace, optionally scoped to one
+/// user (`_revoke_runtime_access`, `ee-overlay`
+/// `service.py:457-477`). Runs on the caller's executor — the overlay
+/// calls this on its event transaction; `now` is the caller's shared
+/// stamp (tokens and the session sweep stamp the same instant).
+pub async fn revoke_machine_tokens_by_workspace<'e, E>(
+    ex: E,
+    workspace_id: Uuid,
+    user_id: Option<Uuid>,
+    now: DateTime<Utc>,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    if let Some(user) = user_id {
+        sqlx::query(REVOKE_MACHINE_TOKENS_BY_WORKSPACE_AND_USER_SQL)
+            .bind(now)
+            .bind(workspace_id)
+            .bind(user)
+            .execute(ex)
+            .await
+            .map(|_| ())
+    } else {
+        sqlx::query(REVOKE_MACHINE_TOKENS_BY_WORKSPACE_SQL)
+            .bind(now)
+            .bind(workspace_id)
+            .execute(ex)
+            .await
+            .map(|_| ())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // machine_token flows (rotate, mint, sign-out, delete)
 // ---------------------------------------------------------------------------
@@ -934,6 +980,55 @@ where
         .execute(ex)
         .await
         .map(|_| ())
+}
+
+/// Workspace session sweep, owner-scoped arm (`ee-overlay`
+/// `service.py:470-475`): Django's spanning
+/// `runner__workspace`/`runner__owner` update filter as the equivalent
+/// `runner_id IN (SELECT ...)` — the overlay
+/// `revoke_workspace_sessions` text verbatim (D6 gap PIDASHCONV-1618).
+/// `$1` now, `$2` reason, `$3` workspace, `$4` owner, live rows only.
+const REVOKE_RUNNER_SESSIONS_BY_WORKSPACE_AND_OWNER_SQL: &str =
+    "UPDATE runner_session SET revoked_at = $1, revoked_reason = $2 WHERE revoked_at IS NULL AND runner_id IN (SELECT id FROM runner WHERE workspace_id = $3 AND owner_id = $4)";
+
+/// Workspace session sweep, whole-workspace arm: same source, `$1`
+/// now, `$2` reason, `$3` workspace, live rows only.
+const REVOKE_RUNNER_SESSIONS_BY_WORKSPACE_SQL: &str =
+    "UPDATE runner_session SET revoked_at = $1, revoked_reason = $2 WHERE revoked_at IS NULL AND runner_id IN (SELECT id FROM runner WHERE workspace_id = $3)";
+
+/// Revoke live runner sessions by workspace, optionally scoped to one
+/// owner (`_revoke_runtime_access`, `ee-overlay`
+/// `service.py:457-477`). Runs on the caller's executor with the
+/// caller's shared `now`; the overlay passes its `membership_revoked`
+/// reason.
+pub async fn revoke_runner_sessions_by_workspace<'e, E>(
+    ex: E,
+    workspace_id: Uuid,
+    owner_id: Option<Uuid>,
+    now: DateTime<Utc>,
+    reason: &str,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    if let Some(owner) = owner_id {
+        sqlx::query(REVOKE_RUNNER_SESSIONS_BY_WORKSPACE_AND_OWNER_SQL)
+            .bind(now)
+            .bind(reason)
+            .bind(workspace_id)
+            .bind(owner)
+            .execute(ex)
+            .await
+            .map(|_| ())
+    } else {
+        sqlx::query(REVOKE_RUNNER_SESSIONS_BY_WORKSPACE_SQL)
+            .bind(now)
+            .bind(reason)
+            .bind(workspace_id)
+            .execute(ex)
+            .await
+            .map(|_| ())
+    }
 }
 
 /// Stamp a session's heartbeat.
@@ -1332,6 +1427,30 @@ mod tests {
         signout_revoke_tokens_sql(0);
     }
 
+    // D6 gap PIDASHCONV-1618: the workspace revoke consts are the
+    // overlay `revoke_machine_tokens` / `revoke_workspace_sessions`
+    // text verbatim (unquoted identifiers kept) — pinned here so
+    // drift fails loudly.
+    #[test]
+    fn workspace_revoke_sql_pins() {
+        assert_eq!(
+            REVOKE_MACHINE_TOKENS_BY_WORKSPACE_AND_USER_SQL,
+            "UPDATE machine_token SET revoked_at = $1 WHERE workspace_id = $2 AND revoked_at IS NULL AND user_id = $3"
+        );
+        assert_eq!(
+            REVOKE_MACHINE_TOKENS_BY_WORKSPACE_SQL,
+            "UPDATE machine_token SET revoked_at = $1 WHERE workspace_id = $2 AND revoked_at IS NULL"
+        );
+        assert_eq!(
+            REVOKE_RUNNER_SESSIONS_BY_WORKSPACE_AND_OWNER_SQL,
+            "UPDATE runner_session SET revoked_at = $1, revoked_reason = $2 WHERE revoked_at IS NULL AND runner_id IN (SELECT id FROM runner WHERE workspace_id = $3 AND owner_id = $4)"
+        );
+        assert_eq!(
+            REVOKE_RUNNER_SESSIONS_BY_WORKSPACE_SQL,
+            "UPDATE runner_session SET revoked_at = $1, revoked_reason = $2 WHERE revoked_at IS NULL AND runner_id IN (SELECT id FROM runner WHERE workspace_id = $3)"
+        );
+    }
+
     /// Live-db half: insert two rows (machine + legacy shapes),
     /// revoke each through its driver, clear one machine link, and
     /// read every row back — all inside a rolled-back transaction.
@@ -1418,6 +1537,383 @@ mod tests {
                 assert_eq!(machine, None, "legacy row never had a link");
             }
         }
+        tx.rollback().await.expect("rollback");
+    }
+
+    /// One user row for the workspace-revoke graph (the fx6 compact
+    /// user column set).
+    async fn seed_wsrev_user(
+        ex: &mut sqlx::PgConnection,
+        at: DateTime<Utc>,
+        name: &str,
+        email: &str,
+    ) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (id, username, email, password, first_name, last_name, \
+             display_name, avatar, created_location, last_location, last_login_ip, \
+             last_login_medium, last_login_uagent, last_logout_ip, user_timezone, token, \
+             is_active, is_bot, is_email_valid, is_email_verified, is_managed, \
+             is_password_autoset, is_password_expired, is_password_reset_required, \
+             is_staff, is_superuser, created_at, updated_at, date_joined) \
+             VALUES ($1, $2, $3, '!', '', '', '', '', '', '', '', 'email', '', '', 'UTC', \
+             $4, true, false, false, false, false, false, false, false, false, false, \
+             $5, $5, $5)",
+        )
+        .bind(id)
+        .bind(name)
+        .bind(email)
+        .bind(Uuid::new_v4().to_string())
+        .bind(at)
+        .execute(&mut *ex)
+        .await
+        .expect("seed user");
+        id
+    }
+
+    /// One workspace row for the workspace-revoke graph (the fx6
+    /// workspace column set).
+    async fn seed_wsrev_workspace(
+        ex: &mut sqlx::PgConnection,
+        at: DateTime<Utc>,
+        name: &str,
+        slug: &str,
+        owner: Uuid,
+    ) -> Uuid {
+        let ws = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO workspaces (id, created_at, updated_at, name, background_color, \
+             owner_id, slug, timezone) \
+             VALUES ($1, $2, $2, $3, '#f6c8dB', $4, $5, 'UTC')",
+        )
+        .bind(ws)
+        .bind(at)
+        .bind(name)
+        .bind(owner)
+        .bind(slug)
+        .execute(&mut *ex)
+        .await
+        .expect("seed workspace");
+        ws
+    }
+
+    /// One runner row for the workspace-revoke graph (the runner seed
+    /// column set).
+    async fn seed_wsrev_runner(
+        ex: &mut sqlx::PgConnection,
+        at: DateTime<Utc>,
+        name: &str,
+        ws: Uuid,
+        owner: Uuid,
+        pod: Uuid,
+    ) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO runner (id, created_at, updated_at, owner_id, workspace_id, pod_id, \
+             name, host_label, provisioning, visibility, refresh_token_hash, \
+             refresh_token_fingerprint, refresh_token_generation, \
+             previous_refresh_token_hash, access_token_signing_key_version, \
+             enrollment_token_hash, enrollment_token_fingerprint, capabilities, status, \
+             os, arch, runner_version, dev_metadata, protocol_version, revoked_reason) \
+             VALUES ($1, $2, $2, $3, $4, $5, $6, '', 'desktop_bundled', 0, '', '', 0, '', \
+             1, '', '', '[]', $7, '', '', '', '{}', 1, '')",
+        )
+        .bind(id)
+        .bind(at)
+        .bind(owner)
+        .bind(ws)
+        .bind(pod)
+        .bind(name)
+        .bind("offline")
+        .execute(&mut *ex)
+        .await
+        .expect("seed runner");
+        id
+    }
+
+    /// Parent rows for the workspace-revoke roundtrip: two users, two
+    /// workspaces, one project + pod, and three runners
+    /// (`ra`: ws1/u1, `rb`: ws1/u2, `rc`: ws2/u1, all on the one pod —
+    /// the sweep reads the runner's own workspace/owner). The
+    /// `runner` FKs are enforced, so random ids would not do. Names
+    /// carry the tag for parallel safety.
+    async fn seed_workspace_revoke_graph(
+        ex: &mut sqlx::PgConnection,
+        tag: &str,
+    ) -> (Uuid, Uuid, Uuid, Uuid, Uuid, Uuid, Uuid) {
+        let at = Utc::now();
+        let u1 = seed_wsrev_user(
+            &mut *ex,
+            at,
+            &format!("wsrev-{tag}-a"),
+            &format!("wsrev-{tag}-a@example.test"),
+        )
+        .await;
+        let u2 = seed_wsrev_user(
+            &mut *ex,
+            at,
+            &format!("wsrev-{tag}-b"),
+            &format!("wsrev-{tag}-b@example.test"),
+        )
+        .await;
+        let ws1 = seed_wsrev_workspace(
+            &mut *ex,
+            at,
+            &format!("WSREV ws {tag}-1"),
+            &format!("wsrev-ws-{tag}-1"),
+            u1,
+        )
+        .await;
+        let ws2 = seed_wsrev_workspace(
+            &mut *ex,
+            at,
+            &format!("WSREV ws {tag}-2"),
+            &format!("wsrev-ws-{tag}-2"),
+            u1,
+        )
+        .await;
+        let project = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO projects (id, created_at, updated_at, name, identifier, description, \
+             network, module_view, cycle_view, issue_views_view, page_view, intake_view, \
+             is_time_tracking_enabled, is_issue_type_enabled, is_default, \
+             guest_view_all_features, members_can_edit_states, archive_in, close_in, \
+             logo_props, timezone, repo_url, base_branch, agent_default_interval_seconds, \
+             agent_default_max_ticks, agent_review_default_interval_seconds, \
+             agent_test_default_interval_seconds, agent_ticking_enabled, \
+             default_agent_executor, workspace_id) \
+             VALUES ($1, $2, $2, $3, $4, '', 2, false, false, false, true, false, false, \
+             false, false, false, true, 0, 0, '{}', 'UTC', 'https://example.com/wsrev.git', \
+             'main', 10800, 10, 10800, 10800, true, 'local_runner', $5)",
+        )
+        .bind(project)
+        .bind(at)
+        .bind(format!("WSREV-{tag}"))
+        .bind(format!("WR{tag}"))
+        .bind(ws1)
+        .execute(&mut *ex)
+        .await
+        .expect("seed project");
+        let pod = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO pod (id, created_at, updated_at, description, is_default, name, \
+             project_id, workspace_id) \
+             VALUES ($1, $2, $2, '', true, $3, $4, $5)",
+        )
+        .bind(pod)
+        .bind(at)
+        .bind(format!("wsrev-pod-{tag}"))
+        .bind(project)
+        .bind(ws1)
+        .execute(&mut *ex)
+        .await
+        .expect("seed pod");
+        let ra =
+            seed_wsrev_runner(&mut *ex, at, &format!("wsrev-runner-{tag}-a"), ws1, u1, pod).await;
+        let rb =
+            seed_wsrev_runner(&mut *ex, at, &format!("wsrev-runner-{tag}-b"), ws1, u2, pod).await;
+        let rc =
+            seed_wsrev_runner(&mut *ex, at, &format!("wsrev-runner-{tag}-c"), ws2, u1, pod).await;
+        (u1, u2, ws1, ws2, ra, rb, rc)
+    }
+
+    /// One machine-token row for the workspace-revoke roundtrip.
+    async fn seed_wsrev_token(
+        ex: &mut sqlx::PgConnection,
+        tag: &str,
+        suffix: &str,
+        ws: Uuid,
+        user: Uuid,
+        created_at: DateTime<Utc>,
+    ) -> Uuid {
+        let id = Uuid::new_v4();
+        insert_machine_token(
+            &mut *ex,
+            &NewMachineToken {
+                id,
+                user_id: user,
+                dev_machine_id: None,
+                workspace_id: ws,
+                host_label: format!("wsrev-{tag}-{suffix}"),
+                token_hash: format!("wsrev-hash-{tag}-{suffix}"),
+                token_fingerprint: format!("wsrev-fp-{suffix}"),
+                label: format!("wsrev-{suffix}"),
+                is_service: true,
+                created_at,
+            },
+        )
+        .await
+        .expect("seed token");
+        id
+    }
+
+    /// One live session row for the workspace-revoke roundtrip.
+    async fn seed_wsrev_session(ex: &mut sqlx::PgConnection, runner: Uuid) -> Uuid {
+        let id = Uuid::new_v4();
+        open_runner_session(&mut *ex, id, runner, 4)
+            .await
+            .expect("seed session");
+        id
+    }
+
+    /// Live-db half: the workspace revoke scoping. The user/owner arms
+    /// stamp only their rows, the whole-workspace arms sweep the rest,
+    /// pre-revoked rows keep their stamps, and the other workspace is
+    /// untouched. Fixed whole-second stamps so the read-backs compare
+    /// exactly — all inside a rolled-back transaction.
+    #[tokio::test]
+    async fn workspace_revoke_roundtrip() {
+        let url = match std::env::var("DATABASE_URL") {
+            Ok(url) => url,
+            Err(_) => {
+                eprintln!("skipping live-db test: DATABASE_URL is not set");
+                return;
+            }
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect to scratch DATABASE_URL");
+        let mut tx = pool.begin().await.expect("begin");
+        let uniq = Uuid::new_v4().simple().to_string();
+        let tag = &uniq[..8];
+        let (u1, u2, ws1, ws2, ra, rb, rc) = seed_workspace_revoke_graph(&mut tx, tag).await;
+        let old = DateTime::from_timestamp(1_700_000_000, 0).expect("fixed stamp");
+        let now1 = DateTime::from_timestamp(1_780_000_001, 0).expect("fixed stamp");
+        let now2 = DateTime::from_timestamp(1_780_000_002, 0).expect("fixed stamp");
+        let t1 = seed_wsrev_token(&mut tx, tag, "t1", ws1, u1, old).await;
+        let t2 = seed_wsrev_token(&mut tx, tag, "t2", ws1, u2, old).await;
+        let t3 = seed_wsrev_token(&mut tx, tag, "t3", ws2, u1, old).await;
+        let t4 = seed_wsrev_token(&mut tx, tag, "t4", ws1, u1, old).await;
+        revoke_machine_token_by_id(&mut *tx, t4, old)
+            .await
+            .expect("pre-revoke token");
+        // The pre-revoked session goes first: only one live session
+        // per runner (`runner_session_one_active_per_runner`).
+        let sa2 = seed_wsrev_session(&mut tx, ra).await;
+        revoke_runner_session(&mut *tx, sa2, old, "old-reason")
+            .await
+            .expect("pre-revoke session");
+        let sa = seed_wsrev_session(&mut tx, ra).await;
+        let sb = seed_wsrev_session(&mut tx, rb).await;
+        let sc = seed_wsrev_session(&mut tx, rc).await;
+
+        revoke_machine_tokens_by_workspace(&mut *tx, ws1, Some(u1), now1)
+            .await
+            .expect("revoke tokens scoped");
+        revoke_runner_sessions_by_workspace(&mut *tx, ws1, Some(u1), now1, "membership_revoked")
+            .await
+            .expect("revoke sessions scoped");
+        let tokens: Vec<(Uuid, Option<DateTime<Utc>>)> =
+            sqlx::query_as("SELECT id, revoked_at FROM machine_token WHERE id IN ($1, $2, $3, $4)")
+                .bind(t1)
+                .bind(t2)
+                .bind(t3)
+                .bind(t4)
+                .fetch_all(&mut *tx)
+                .await
+                .expect("read tokens");
+        let revoked = |id: Uuid| {
+            tokens
+                .iter()
+                .find(|(row, _)| *row == id)
+                .unwrap_or_else(|| panic!("token row {id} present"))
+                .1
+        };
+        assert_eq!(revoked(t1), Some(now1), "scoped arm stamps its row");
+        assert_eq!(revoked(t2), None, "scoped arm skips other user");
+        assert_eq!(revoked(t3), None, "scoped arm skips other workspace");
+        assert_eq!(revoked(t4), Some(old), "scoped arm keeps prior stamp");
+        let sessions: Vec<(Uuid, Option<DateTime<Utc>>, String)> = sqlx::query_as(
+            "SELECT id, revoked_at, revoked_reason FROM runner_session WHERE id IN ($1, $2, $3, $4)",
+        )
+        .bind(sa)
+        .bind(sb)
+        .bind(sc)
+        .bind(sa2)
+        .fetch_all(&mut *tx)
+        .await
+        .expect("read sessions");
+        let swept = |id: Uuid| {
+            sessions
+                .iter()
+                .find(|(row, _, _)| *row == id)
+                .unwrap_or_else(|| panic!("session row {id} present"))
+                .clone()
+        };
+        assert_eq!(
+            (swept(sa).1, swept(sa).2.as_str()),
+            (Some(now1), "membership_revoked"),
+            "owner arm stamps its runner's session"
+        );
+        assert_eq!(swept(sb).1, None, "owner arm skips other owner's session");
+        assert_eq!(swept(sc).1, None, "owner arm skips other workspace");
+        assert_eq!(
+            (swept(sa2).1, swept(sa2).2.as_str()),
+            (Some(old), "old-reason"),
+            "owner arm keeps prior stamp and reason"
+        );
+
+        revoke_machine_tokens_by_workspace(&mut *tx, ws1, None, now2)
+            .await
+            .expect("revoke tokens sweep");
+        revoke_runner_sessions_by_workspace(&mut *tx, ws1, None, now2, "membership_revoked")
+            .await
+            .expect("revoke sessions sweep");
+        let tokens: Vec<(Uuid, Option<DateTime<Utc>>)> =
+            sqlx::query_as("SELECT id, revoked_at FROM machine_token WHERE id IN ($1, $2, $3, $4)")
+                .bind(t1)
+                .bind(t2)
+                .bind(t3)
+                .bind(t4)
+                .fetch_all(&mut *tx)
+                .await
+                .expect("read tokens");
+        let revoked = |id: Uuid| {
+            tokens
+                .iter()
+                .find(|(row, _)| *row == id)
+                .unwrap_or_else(|| panic!("token row {id} present"))
+                .1
+        };
+        assert_eq!(revoked(t1), Some(now1), "sweep keeps first stamp");
+        assert_eq!(revoked(t2), Some(now2), "sweep stamps remaining row");
+        assert_eq!(revoked(t3), None, "sweep skips other workspace");
+        assert_eq!(revoked(t4), Some(old), "sweep keeps prior stamp");
+        let sessions: Vec<(Uuid, Option<DateTime<Utc>>, String)> = sqlx::query_as(
+            "SELECT id, revoked_at, revoked_reason FROM runner_session WHERE id IN ($1, $2, $3, $4)",
+        )
+        .bind(sa)
+        .bind(sb)
+        .bind(sc)
+        .bind(sa2)
+        .fetch_all(&mut *tx)
+        .await
+        .expect("read sessions");
+        let swept = |id: Uuid| {
+            sessions
+                .iter()
+                .find(|(row, _, _)| *row == id)
+                .unwrap_or_else(|| panic!("session row {id} present"))
+                .clone()
+        };
+        assert_eq!(
+            (swept(sa).1, swept(sa).2.as_str()),
+            (Some(now1), "membership_revoked"),
+            "sweep keeps first stamp"
+        );
+        assert_eq!(
+            (swept(sb).1, swept(sb).2.as_str()),
+            (Some(now2), "membership_revoked"),
+            "sweep stamps remaining session"
+        );
+        assert_eq!(swept(sc).1, None, "sweep skips other workspace");
+        assert_eq!(
+            (swept(sa2).1, swept(sa2).2.as_str()),
+            (Some(old), "old-reason"),
+            "sweep keeps prior stamp and reason"
+        );
         tx.rollback().await.expect("rollback");
     }
 
