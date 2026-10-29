@@ -81,7 +81,7 @@ use crate::middleware::SessionHandle;
 use crate::state::AppState;
 
 use pidash_auth::permissions::allow::AllowFacts;
-use pidash_auth::permissions::{ROLE_ADMIN, ROLE_MEMBER};
+use pidash_auth::permissions::ROLE_ADMIN;
 use pidash_compat::response::json_response;
 pub use pidash_compat::response::SERVER_ERROR_BODY;
 use pidash_types::WorkspaceId;
@@ -325,11 +325,12 @@ async fn membership(
     })
 }
 
-/// Build the gate facts for an archive route: ADMIN/MEMBER project gate,
-/// no creator bypass (`archive.py:271/:586/:606`, F-C27-07).
-fn archive_facts(slug: &str, member: &Membership) -> AllowFacts {
-    let allowed =
-        |role: Option<i16>| matches!(role.map(i32::from), Some(ROLE_ADMIN) | Some(ROLE_MEMBER));
+/// Build the gate facts for an archive route against the row's allowed
+/// roles: ADMIN/MEMBER/GUEST for the GET reads (PDASHOSS01-323),
+/// ADMIN/MEMBER for the writes; no creator bypass (`archive.py:271/:586/:606`,
+/// F-C27-07).
+fn archive_facts(slug: &str, member: &Membership, roles: &[i32]) -> AllowFacts {
+    let allowed = |role: Option<i16>| role.is_some_and(|role| roles.contains(&i32::from(role)));
     AllowFacts {
         workspace: WorkspaceId::from(slug),
         authenticated: true,
@@ -347,8 +348,12 @@ fn archive_facts(slug: &str, member: &Membership) -> AllowFacts {
 /// 403.
 fn check_gate(method: &str, path: &str, slug: &str, member: &Membership) -> Result<(), Denial> {
     let row = super::gates::gate_for(method, path).ok_or(Denial::ServerError)?;
+    let roles = match row.gate {
+        super::gates::Gate::Project { roles } => roles,
+        _ => return Err(Denial::ServerError),
+    };
     let scope = super::gates::tenant_context(slug);
-    match super::gates::decide_gate(&row.gate, &scope, &archive_facts(slug, member)) {
+    match super::gates::decide_gate(&row.gate, &scope, &archive_facts(slug, member, roles)) {
         super::gates::GateOutcome::Allow => Ok(()),
         _ => Err(Denial::Forbidden),
     }
@@ -1725,6 +1730,7 @@ async fn unarchive_delete(
 mod tests {
     use super::*;
     use chrono::{TimeZone, Timelike};
+    use pidash_auth::permissions::{ROLE_GUEST, ROLE_MEMBER};
 
     fn utc(
         year: i32,
@@ -1743,19 +1749,28 @@ mod tests {
 
     #[test]
     fn gate_table_covers_all_five_archive_rows() {
-        // Every owned method+path resolves, all ADMIN/MEMBER project gates
-        // (F-C27-07: `archive.py:271/:586/:606`).
-        for (method, path) in [
-            ("POST", PATH_ARCHIVE),
-            ("DELETE", PATH_ARCHIVE),
-            ("GET", PATH_ARCHIVED_LIST),
-            ("GET", PATH_ARCHIVED_DETAIL),
+        // Every owned method+path resolves to a project gate: the writes
+        // ADMIN/MEMBER, the GET reads ADMIN/MEMBER/GUEST (F-C27-07:
+        // `archive.py:271/:586/:606`; PDASHOSS01-323).
+        for (method, path, expected) in [
+            ("POST", PATH_ARCHIVE, &[ROLE_ADMIN, ROLE_MEMBER][..]),
+            ("DELETE", PATH_ARCHIVE, &[ROLE_ADMIN, ROLE_MEMBER][..]),
+            (
+                "GET",
+                PATH_ARCHIVED_LIST,
+                &[ROLE_ADMIN, ROLE_MEMBER, ROLE_GUEST][..],
+            ),
+            (
+                "GET",
+                PATH_ARCHIVED_DETAIL,
+                &[ROLE_ADMIN, ROLE_MEMBER, ROLE_GUEST][..],
+            ),
         ] {
             let row = super::super::gates::gate_for(method, path)
                 .unwrap_or_else(|| panic!("gate row {method} {path}"));
             match row.gate {
                 super::super::gates::Gate::Project { roles } => {
-                    assert_eq!(roles, &[ROLE_ADMIN, ROLE_MEMBER], "{method} {path}");
+                    assert_eq!(roles, expected, "{method} {path}");
                 }
                 other => panic!("unexpected gate {other:?} for {method} {path}"),
             }
@@ -1778,7 +1793,7 @@ mod tests {
                     roles: &[ROLE_ADMIN, ROLE_MEMBER],
                 },
                 &scope,
-                &archive_facts("acme", &member),
+                &archive_facts("acme", &member, &[ROLE_ADMIN, ROLE_MEMBER]),
             )
         };
         use super::super::gates::GateOutcome as O;
@@ -1803,10 +1818,35 @@ mod tests {
                     roles: &[ROLE_ADMIN, ROLE_MEMBER],
                 },
                 &other,
-                &archive_facts("acme", &member),
+                &archive_facts("acme", &member, &[ROLE_ADMIN, ROLE_MEMBER]),
             ),
             O::Deny
         );
+    }
+
+    #[test]
+    fn archive_read_facts_allow_guest() {
+        // The GET reads allow project guests (PDASHOSS01-323); a
+        // workspace member without a project row is still denied.
+        let scope = super::super::gates::tenant_context("acme");
+        let reads = &[ROLE_ADMIN, ROLE_MEMBER, ROLE_GUEST];
+        let allow = |workspace_role, project_role| {
+            let member = Membership {
+                workspace_role,
+                project_role,
+            };
+            super::super::gates::decide_gate(
+                &super::super::gates::Gate::Project { roles: reads },
+                &scope,
+                &archive_facts("acme", &member, reads),
+            )
+        };
+        use super::super::gates::GateOutcome as O;
+        assert_eq!(allow(Some(5), Some(5)), O::Allow);
+        assert_eq!(allow(Some(15), Some(5)), O::Allow);
+        assert_eq!(allow(Some(20), Some(20)), O::Allow);
+        assert_eq!(allow(Some(15), None), O::Deny);
+        assert_eq!(allow(Some(5), None), O::Deny);
     }
 
     #[test]
