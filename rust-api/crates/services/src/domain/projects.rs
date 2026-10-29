@@ -46,6 +46,7 @@
 //! caller-sequenced.
 
 use chrono::{DateTime, Utc};
+use serde_json::Value;
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
@@ -260,6 +261,220 @@ where
         .execute(ex)
         .await?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// v1 project PATCH / archive / delete + the git-bind project touch
+// ---------------------------------------------------------------------------
+
+/// `POST .../<project_id>/archive/` (`views/project.py:528-538`): stamp
+/// `archived_at` (plus the `save()` audit pair). Returns the rows
+/// matched — the driver 404s on zero.
+pub async fn archive_v1_project<'e, E>(
+    ex: E,
+    id: Uuid,
+    workspace_id: Uuid,
+    actor: Uuid,
+    now: DateTime<Utc>,
+) -> Result<u64, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(ARCHIVE_PROJECT_SQL)
+        .bind(now)
+        .bind(actor)
+        .bind(id)
+        .bind(workspace_id)
+        .execute(ex)
+        .await
+        .map(|done| done.rows_affected())
+}
+
+const ARCHIVE_PROJECT_SQL: &str = "UPDATE \"projects\" SET \"archived_at\" = $1, \"updated_at\" = $1, \"updated_by_id\" = $2 WHERE \"id\" = $3 AND \"workspace_id\" = $4 AND \"deleted_at\" IS NULL";
+
+/// `DELETE .../<project_id>/archive/` (`views/project.py:552-561`):
+/// clear `archived_at` (plus the `save()` audit pair). Returns the rows
+/// matched — the driver 404s on zero.
+pub async fn unarchive_v1_project<'e, E>(
+    ex: E,
+    id: Uuid,
+    workspace_id: Uuid,
+    actor: Uuid,
+    now: DateTime<Utc>,
+) -> Result<u64, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(UNARCHIVE_PROJECT_SQL)
+        .bind(now)
+        .bind(actor)
+        .bind(id)
+        .bind(workspace_id)
+        .execute(ex)
+        .await
+        .map(|done| done.rows_affected())
+}
+
+const UNARCHIVE_PROJECT_SQL: &str = "UPDATE \"projects\" SET \"archived_at\" = NULL, \"updated_at\" = $1, \"updated_by_id\" = $2 WHERE \"id\" = $3 AND \"workspace_id\" = $4 AND \"deleted_at\" IS NULL";
+
+/// The PATCH `is_default` atomic unset: every other live default in the
+/// workspace clears when this project becomes the default. Contrast
+/// `CLEAR_DEFAULTS_SQL`, the create-path sweep with no `id != $2`
+/// arm — Django has both shapes, so they stay separate twins (design
+/// D6). Runs inside the driver's PATCH transaction.
+pub async fn unset_other_project_defaults<'e, E>(
+    ex: E,
+    workspace_id: Uuid,
+    id: Uuid,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(UNSET_OTHER_DEFAULTS_SQL)
+        .bind(workspace_id)
+        .bind(id)
+        .execute(ex)
+        .await?;
+    Ok(())
+}
+
+const UNSET_OTHER_DEFAULTS_SQL: &str = "UPDATE \"projects\" SET \"is_default\" = FALSE WHERE \"workspace_id\" = $1 AND \"is_default\" AND \"id\" != $2 AND \"deleted_at\" IS NULL";
+
+/// One PATCH SET value, in bind order (`$3…` — `$1`/`$2` are the audit
+/// pair). Moved with the PATCH twin; the driver still decides which
+/// provided fields join the SET list.
+#[derive(Debug, Clone)]
+pub enum ProjectPatchBind {
+    Str(String),
+    OptStr(Option<String>),
+    Bool(bool),
+    Int(i32),
+    OptUuid(Option<Uuid>),
+    Json(Value),
+}
+
+/// The PATCH write (`ProjectUpdateSerializer.update` + `Project.save`,
+/// `views/project.py`): the driver's pre-built SET list (audit pair
+/// first, then one `"col" = $N` per provided field) plus the bind
+/// values. `$N` in the WHERE clause is the project id. Conflict arms
+/// stay at the driver (23505 → the 409 name body).
+pub async fn apply_project_patch<'e, E>(
+    ex: E,
+    sets: &[String],
+    binds: &[ProjectPatchBind],
+    now: DateTime<Utc>,
+    actor: Uuid,
+    id: Uuid,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let sql = project_patch_sql(sets, binds.len());
+    let mut query = sqlx::query(&sql).bind(now).bind(actor);
+    for bind in binds {
+        query = match bind {
+            ProjectPatchBind::Str(v) => query.bind(v),
+            ProjectPatchBind::OptStr(v) => query.bind(v),
+            ProjectPatchBind::Bool(v) => query.bind(v),
+            ProjectPatchBind::Int(v) => query.bind(v),
+            ProjectPatchBind::OptUuid(v) => query.bind(v),
+            ProjectPatchBind::Json(v) => query.bind(v),
+        };
+    }
+    query = query.bind(id);
+    query.execute(ex).await.map(|_| ())
+}
+
+/// The PATCH statement for [`apply_project_patch`]: the driver's
+/// pre-built SET list, `$N` in the WHERE clause the project id.
+fn project_patch_sql(sets: &[String], binds_len: usize) -> String {
+    format!(
+        "UPDATE \"projects\" SET {} WHERE \"id\" = ${} AND \"deleted_at\" IS NULL",
+        sets.join(", "),
+        binds_len + 3
+    )
+}
+
+/// `DELETE workspaces/<slug>/projects/<pk>/` (`views/project.py:480-508`,
+/// instance `delete()` → `save()`): `deleted_at` + `updated_*`. The
+/// favorite cascade and the related-objects sweep stay driver-side.
+pub async fn soft_delete_v1_project<'e, E>(
+    ex: E,
+    id: Uuid,
+    actor: Uuid,
+    now: DateTime<Utc>,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query(SOFT_DELETE_PROJECT_SQL)
+        .bind(now)
+        .bind(actor)
+        .bind(id)
+        .execute(ex)
+        .await?;
+    Ok(())
+}
+
+const SOFT_DELETE_PROJECT_SQL: &str = "UPDATE \"projects\" SET \"deleted_at\" = $1, \"updated_at\" = $1, \"updated_by_id\" = $2 WHERE \"id\" = $3";
+
+/// `project.save(update_fields=...)` on git bind (`services.py:341-348`):
+/// only the changed columns plus `updated_at`. One twin serves the app
+/// and v1 `apply_bind` copies (their builders were byte-identical).
+///
+/// Ported quirk, preserved verbatim: the placeholder scheme hardcodes
+/// `repo_url = $2` and numbers the rest from `sets.len() + 3`, so every
+/// arm references an unbound `$N` (`(None, Some)` emits `base_branch =
+/// $3, updated_at = $4` with three binds; `(Some, None)` emits
+/// `updated_at = $4` with three binds; `(Some, Some)` emits `base_branch
+/// = $4, updated_at = $5` with four binds) and Postgres raises 08P01.
+/// Django builds `update_fields` correctly for the same inputs, so this
+/// is a Rust divergence from Django's single behaviour — filed as
+/// PIDASHCONV-1642 (design D6), fixed there or not at all; this twin
+/// keeps the current bytes.
+pub async fn save_bind_project_update<'e, E>(
+    ex: E,
+    project_id: Uuid,
+    repo_url: Option<&str>,
+    base_branch: Option<&str>,
+    now: DateTime<Utc>,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let Some(sql) = bind_project_update_sql(repo_url.is_some(), base_branch.is_some()) else {
+        return Ok(());
+    };
+    let mut query = sqlx::query(&sql).bind(project_id);
+    if let Some(url) = repo_url {
+        query = query.bind(url);
+    }
+    if let Some(branch) = base_branch {
+        query = query.bind(branch);
+    }
+    query = query.bind(now);
+    query.execute(ex).await.map(|_| ())
+}
+
+/// The bind statement for [`save_bind_project_update`]: only the
+/// changed columns plus `updated_at`. `None` when nothing changed.
+/// Carries the ported placeholder quirk documented on the twin.
+fn bind_project_update_sql(repo_url: bool, base_branch: bool) -> Option<String> {
+    if !repo_url && !base_branch {
+        return None;
+    }
+    let mut sets: Vec<String> = Vec::new();
+    if repo_url {
+        sets.push("repo_url = $2".to_owned());
+    }
+    if base_branch {
+        sets.push(format!("base_branch = ${}", sets.len() + 3));
+    }
+    sets.push(format!("updated_at = ${}", sets.len() + 3));
+    Some(format!(
+        "UPDATE projects SET {} WHERE id = $1",
+        sets.join(", ")
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -1627,6 +1842,78 @@ pub mod states {
             .await?;
         Ok(id)
     }
+
+    /// The v1 state PATCH save (`views/state.py`): supplied fields only
+    /// (merged driver-side), the slug recomputed unconditionally
+    /// (`db/models/state.py:132`), `updated_by` stamped (crum) plus
+    /// `updated_at` (auto_now). Conflict arms stay at the driver
+    /// (unique violation → 400).
+    pub struct SaveState<'a> {
+        pub id: Uuid,
+        pub updated_at: DateTime<Utc>,
+        pub updated_by: Option<Uuid>,
+        pub name: &'a str,
+        pub description: &'a str,
+        pub color: &'a str,
+        pub slug: &'a str,
+        pub sequence: f64,
+        pub group: &'a str,
+        pub is_triage: bool,
+        pub default: bool,
+        pub external_source: Option<&'a str>,
+        pub external_id: Option<&'a str>,
+    }
+
+    pub(crate) const STATE_UPDATE_SQL: &str = "UPDATE states SET updated_at = $1, updated_by_id = $2, name = $3, description = $4, color = $5, slug = $6, sequence = $7, \"group\" = $8, is_triage = $9, \"default\" = $10, external_source = $11, external_id = $12 WHERE id = $13";
+
+    /// See [`SaveState`]: the state `UPDATE` only.
+    pub async fn save<'e, E>(ex: E, v: &SaveState<'_>) -> Result<(), sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        sqlx::query(STATE_UPDATE_SQL)
+            .bind(v.updated_at)
+            .bind(v.updated_by)
+            .bind(v.name)
+            .bind(v.description)
+            .bind(v.color)
+            .bind(v.slug)
+            .bind(v.sequence)
+            .bind(v.group)
+            .bind(v.is_triage)
+            .bind(v.default)
+            .bind(v.external_source)
+            .bind(v.external_id)
+            .bind(v.id)
+            .execute(ex)
+            .await?;
+        Ok(())
+    }
+
+    /// `DELETE states/<state_id>/` (`views/state.py:225-249`,
+    /// `SoftDeleteModel.delete()` → `save()`): `deleted_at` plus the
+    /// CRUM `updated_by` stamp. The related-objects sweep stays
+    /// driver-side.
+    pub async fn soft_delete<'e, E>(
+        ex: E,
+        id: Uuid,
+        updated_by: Uuid,
+        deleted_at: DateTime<Utc>,
+    ) -> Result<(), sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        sqlx::query(STATE_SOFT_DELETE_SQL)
+            .bind(deleted_at)
+            .bind(updated_by)
+            .bind(id)
+            .execute(ex)
+            .await?;
+        Ok(())
+    }
+
+    pub(crate) const STATE_SOFT_DELETE_SQL: &str =
+        "UPDATE states SET deleted_at = $1, updated_by_id = $2 WHERE id = $3";
 }
 
 #[cfg(test)]
@@ -1638,6 +1925,64 @@ mod tests {
         TRIAGE_INSERT_QUOTED_SQL, TRIAGE_INSERT_SQL,
     };
     use super::*;
+
+    #[test]
+    fn v1_project_and_state_update_sql_shapes() {
+        // Moved verbatim from the retired v1 project/state drivers and
+        // the two `apply_bind` copies. Full-text pins: the statements
+        // moved byte-for-byte.
+        assert_eq!(
+            ARCHIVE_PROJECT_SQL,
+            "UPDATE \"projects\" SET \"archived_at\" = $1, \"updated_at\" = $1, \"updated_by_id\" = $2 WHERE \"id\" = $3 AND \"workspace_id\" = $4 AND \"deleted_at\" IS NULL"
+        );
+        assert_eq!(
+            UNARCHIVE_PROJECT_SQL,
+            "UPDATE \"projects\" SET \"archived_at\" = NULL, \"updated_at\" = $1, \"updated_by_id\" = $2 WHERE \"id\" = $3 AND \"workspace_id\" = $4 AND \"deleted_at\" IS NULL"
+        );
+        assert_eq!(
+            UNSET_OTHER_DEFAULTS_SQL,
+            "UPDATE \"projects\" SET \"is_default\" = FALSE WHERE \"workspace_id\" = $1 AND \"is_default\" AND \"id\" != $2 AND \"deleted_at\" IS NULL"
+        );
+        assert_eq!(
+            SOFT_DELETE_PROJECT_SQL,
+            "UPDATE \"projects\" SET \"deleted_at\" = $1, \"updated_at\" = $1, \"updated_by_id\" = $2 WHERE \"id\" = $3"
+        );
+        assert_eq!(
+            super::states::STATE_UPDATE_SQL,
+            "UPDATE states SET updated_at = $1, updated_by_id = $2, name = $3, description = $4, color = $5, slug = $6, sequence = $7, \"group\" = $8, is_triage = $9, \"default\" = $10, external_source = $11, external_id = $12 WHERE id = $13"
+        );
+        assert_eq!(
+            super::states::STATE_SOFT_DELETE_SQL,
+            "UPDATE states SET deleted_at = $1, updated_by_id = $2 WHERE id = $3"
+        );
+        // The PATCH shell: the driver-built SET list, `$N` the id.
+        assert_eq!(
+            project_patch_sql(
+                &[
+                    "\"updated_at\" = $1".to_owned(),
+                    "\"updated_by_id\" = $2".to_owned(),
+                    "\"name\" = $3".to_owned(),
+                ],
+                1,
+            ),
+            "UPDATE \"projects\" SET \"updated_at\" = $1, \"updated_by_id\" = $2, \"name\" = $3 WHERE \"id\" = $4 AND \"deleted_at\" IS NULL"
+        );
+        // The bind shell, quirk included (see the twin doc): every arm
+        // references an unbound `$N`; unchanged is no statement.
+        assert_eq!(bind_project_update_sql(false, false), None);
+        assert_eq!(
+            bind_project_update_sql(true, false).as_deref(),
+            Some("UPDATE projects SET repo_url = $2, updated_at = $4 WHERE id = $1")
+        );
+        assert_eq!(
+            bind_project_update_sql(false, true).as_deref(),
+            Some("UPDATE projects SET base_branch = $3, updated_at = $4 WHERE id = $1")
+        );
+        assert_eq!(
+            bind_project_update_sql(true, true).as_deref(),
+            Some("UPDATE projects SET repo_url = $2, base_branch = $4, updated_at = $5 WHERE id = $1")
+        );
+    }
 
     #[test]
     fn project_inserts_bind_every_placeholder() {

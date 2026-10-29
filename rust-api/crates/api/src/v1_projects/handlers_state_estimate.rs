@@ -2332,27 +2332,26 @@ async fn patch_state_inner(
     row.slug = state_model::slugify_name(&row.name);
     row.updated_at = micros_now();
     row.updated_by_id = Some(gate.actor.id);
-    let update = sqlx::query(
-        r#"UPDATE states SET updated_at = $1, updated_by_id = $2, name = $3,
-                  description = $4, color = $5, slug = $6, sequence = $7,
-                  "group" = $8, is_triage = $9, "default" = $10,
-                  external_source = $11, external_id = $12
-           WHERE id = $13"#,
+    match pidash_services::domain::projects::states::save(
+        &pool,
+        &pidash_services::domain::projects::states::SaveState {
+            id: row.id,
+            updated_at: row.updated_at,
+            updated_by: row.updated_by_id,
+            name: &row.name,
+            description: &row.description,
+            color: &row.color,
+            slug: &row.slug,
+            sequence: row.sequence,
+            group: &row.group,
+            is_triage: row.is_triage,
+            default: row.default,
+            external_source: row.external_source.as_deref(),
+            external_id: row.external_id.as_deref(),
+        },
     )
-    .bind(row.updated_at)
-    .bind(row.updated_by_id)
-    .bind(&row.name)
-    .bind(&row.description)
-    .bind(&row.color)
-    .bind(&row.slug)
-    .bind(row.sequence)
-    .bind(&row.group)
-    .bind(row.is_triage)
-    .bind(row.default)
-    .bind(&row.external_source)
-    .bind(&row.external_id)
-    .bind(row.id);
-    match update.execute(&pool).await {
+    .await
+    {
         Ok(_) => {}
         // Uncaught `IntegrityError` → `handle_exception` 400 branch.
         Err(e) if is_unique_violation(&e) => return Err(HandlerError::InvalidPayload),
@@ -2482,11 +2481,7 @@ async fn delete_state_inner(
         ));
     }
     let now = micros_now();
-    sqlx::query(r#"UPDATE states SET deleted_at = $1, updated_by_id = $2 WHERE id = $3"#)
-        .bind(now)
-        .bind(gate.actor.id)
-        .bind(state_id)
-        .execute(&pool)
+    pidash_services::domain::projects::states::soft_delete(&pool, state_id, gate.actor.id, now)
         .await
         .map_err(|_| HandlerError::ServerError)?;
     // Instance `delete()` → `.delay(...)` (`db/mixins.py:77-78`): stamp,

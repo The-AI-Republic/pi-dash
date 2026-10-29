@@ -1854,17 +1854,15 @@ pub async fn archive_project_inner(
     // runs after permissions; an unknown zone 400s only for survivors).
     activate_timezone(pre.actor.timezone.as_deref())?;
     let now = chrono::Utc::now();
-    let updated: u64 = sqlx::query(
-        r#"UPDATE "projects" SET "archived_at" = $1, "updated_at" = $1, "updated_by_id" = $2 WHERE "id" = $3 AND "workspace_id" = $4 AND "deleted_at" IS NULL"#,
+    let updated: u64 = pidash_services::domain::projects::archive_v1_project(
+        &pre.pool,
+        project_id,
+        workspace_id,
+        pre.actor.id,
+        now,
     )
-    .bind(now)
-    .bind(pre.actor.id)
-    .bind(project_id)
-    .bind(workspace_id)
-    .execute(&pre.pool)
     .await
-    .map_err(|_| Denial::ServerError)?
-    .rows_affected();
+    .map_err(|_| Denial::ServerError)?;
     if updated == 0 {
         return Err(Denial::NotFound);
     }
@@ -1907,17 +1905,15 @@ pub async fn unarchive_project_inner(
     // runs after permissions; an unknown zone 400s only for survivors).
     activate_timezone(pre.actor.timezone.as_deref())?;
     let now = chrono::Utc::now();
-    let updated: u64 = sqlx::query(
-        r#"UPDATE "projects" SET "archived_at" = NULL, "updated_at" = $1, "updated_by_id" = $2 WHERE "id" = $3 AND "workspace_id" = $4 AND "deleted_at" IS NULL"#,
+    let updated: u64 = pidash_services::domain::projects::unarchive_v1_project(
+        &pre.pool,
+        project_id,
+        workspace_id,
+        pre.actor.id,
+        now,
     )
-    .bind(now)
-    .bind(pre.actor.id)
-    .bind(project_id)
-    .bind(workspace_id)
-    .execute(&pre.pool)
     .await
-    .map_err(|_| Denial::ServerError)?
-    .rows_affected();
+    .map_err(|_| Denial::ServerError)?;
     if updated == 0 {
         return Err(Denial::NotFound);
     }
@@ -3211,33 +3207,42 @@ pub async fn apply_project_update(
         "\"updated_by_id\" = $2".to_owned(),
     ];
     // (bind index, value) pairs appended in order.
-    let mut binds: Vec<Bound> = Vec::new();
-    let push_str = |sets: &mut Vec<String>, binds: &mut Vec<Bound>, col: &str, v: String| {
-        sets.push(format!("\"{col}\" = ${}", binds.len() + 3));
-        binds.push(Bound::Str(v));
-    };
-    let push_opt_str =
-        |sets: &mut Vec<String>, binds: &mut Vec<Bound>, col: &str, v: Option<String>| {
+    use pidash_services::domain::projects::ProjectPatchBind;
+    let mut binds: Vec<ProjectPatchBind> = Vec::new();
+    let push_str =
+        |sets: &mut Vec<String>, binds: &mut Vec<ProjectPatchBind>, col: &str, v: String| {
             sets.push(format!("\"{col}\" = ${}", binds.len() + 3));
-            binds.push(Bound::OptStr(v));
+            binds.push(ProjectPatchBind::Str(v));
         };
-    let push_bool = |sets: &mut Vec<String>, binds: &mut Vec<Bound>, col: &str, v: bool| {
+    let push_opt_str = |sets: &mut Vec<String>,
+                        binds: &mut Vec<ProjectPatchBind>,
+                        col: &str,
+                        v: Option<String>| {
         sets.push(format!("\"{col}\" = ${}", binds.len() + 3));
-        binds.push(Bound::Bool(v));
+        binds.push(ProjectPatchBind::OptStr(v));
     };
-    let push_int = |sets: &mut Vec<String>, binds: &mut Vec<Bound>, col: &str, v: i32| {
-        sets.push(format!("\"{col}\" = ${}", binds.len() + 3));
-        binds.push(Bound::Int(v));
-    };
-    let push_fk =
-        |sets: &mut Vec<String>, binds: &mut Vec<Bound>, col: &str, v: Option<uuid::Uuid>| {
+    let push_bool =
+        |sets: &mut Vec<String>, binds: &mut Vec<ProjectPatchBind>, col: &str, v: bool| {
             sets.push(format!("\"{col}\" = ${}", binds.len() + 3));
-            binds.push(Bound::OptUuid(v));
+            binds.push(ProjectPatchBind::Bool(v));
         };
-    let push_json = |sets: &mut Vec<String>, binds: &mut Vec<Bound>, col: &str, v: Value| {
+    let push_int =
+        |sets: &mut Vec<String>, binds: &mut Vec<ProjectPatchBind>, col: &str, v: i32| {
+            sets.push(format!("\"{col}\" = ${}", binds.len() + 3));
+            binds.push(ProjectPatchBind::Int(v));
+        };
+    let push_fk = |sets: &mut Vec<String>,
+                   binds: &mut Vec<ProjectPatchBind>,
+                   col: &str,
+                   v: Option<uuid::Uuid>| {
         sets.push(format!("\"{col}\" = ${}", binds.len() + 3));
-        binds.push(Bound::Json(v));
+        binds.push(ProjectPatchBind::OptUuid(v));
     };
+    let push_json =
+        |sets: &mut Vec<String>, binds: &mut Vec<ProjectPatchBind>, col: &str, v: Value| {
+            sets.push(format!("\"{col}\" = ${}", binds.len() + 3));
+            binds.push(ProjectPatchBind::Json(v));
+        };
     if let Some(v) = field_str(data, "name") {
         push_str(&mut sets, &mut binds, "name", v);
     }
@@ -3328,35 +3333,24 @@ pub async fn apply_project_update(
     }
     let mut tx = pool.begin().await.map_err(|_| Denial::ServerError)?;
     if ser::unsets_other_defaults(field_bool(data, "is_default")) {
-        sqlx::query(
-            r#"UPDATE "projects" SET "is_default" = FALSE WHERE "workspace_id" = $1 AND "is_default" AND "id" != $2 AND "deleted_at" IS NULL"#,
+        pidash_services::domain::projects::unset_other_project_defaults(
+            &mut *tx,
+            *workspace_id,
+            *project_id,
         )
-        .bind(workspace_id)
-        .bind(project_id)
-        .execute(&mut *tx)
         .await
         .map_err(|_| Denial::ServerError)?;
     }
-    let sql = format!(
-        "UPDATE \"projects\" SET {} WHERE \"id\" = ${} AND \"deleted_at\" IS NULL",
-        sets.join(", "),
-        binds.len() + 3
-    );
-    let mut query = sqlx::query(&sql).bind(now).bind(actor_id);
-    for bind in binds {
-        query = match bind {
-            Bound::Str(v) => query.bind(v),
-            Bound::OptStr(v) => query.bind(v),
-            Bound::Bool(v) => query.bind(v),
-            Bound::Int(v) => query.bind(v),
-            Bound::OptUuid(v) => query.bind(v),
-            Bound::Json(v) => query.bind(v),
-        };
-    }
-    // `$N` in the WHERE clause is the project id (the SET placeholders are
-    // `$1..=$N-1`); without this bind the update matches nothing.
-    query = query.bind(project_id);
-    match query.execute(&mut *tx).await {
+    match pidash_services::domain::projects::apply_project_patch(
+        &mut *tx,
+        &sets,
+        &binds,
+        now,
+        *actor_id,
+        *project_id,
+    )
+    .await
+    {
         Ok(_) => {}
         Err(sqlx::Error::Database(db)) if db.code().as_deref() == Some("23505") => {
             return Err(Denial::Conflict(ser::NAME_TAKEN_BODY.to_owned()));
@@ -3365,16 +3359,6 @@ pub async fn apply_project_update(
     }
     tx.commit().await.map_err(|_| Denial::ServerError)?;
     Ok(())
-}
-
-#[derive(Debug, Clone)]
-enum Bound {
-    Str(String),
-    OptStr(Option<String>),
-    Bool(bool),
-    Int(i32),
-    OptUuid(Option<uuid::Uuid>),
-    Json(Value),
 }
 
 /// `DELETE workspaces/<slug>/projects/<pk>/`
@@ -3432,13 +3416,12 @@ pub async fn delete_project_inner(
     .await
     .map_err(|_| Denial::ServerError)?;
     // Instance `delete()` → `save()`: `deleted_at` + `updated_*`.
-    sqlx::query(
-        r#"UPDATE "projects" SET "deleted_at" = $1, "updated_at" = $1, "updated_by_id" = $2 WHERE "id" = $3"#,
+    pidash_services::domain::projects::soft_delete_v1_project(
+        &pre.pool,
+        project_id,
+        pre.actor.id,
+        now,
     )
-    .bind(now)
-    .bind(pre.actor.id)
-    .bind(project_id)
-    .execute(&pre.pool)
     .await
     .map_err(|_| Denial::ServerError)?;
     enqueue_soft_delete(&pre.pool, "project", &project_id).await;
