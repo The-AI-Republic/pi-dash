@@ -21093,9 +21093,6 @@ export class WebNewDriver implements ParityDriver {
   private archivedModulesSearchInput(): Locator {
     return this.page.getByTestId("modules-search-input").first();
   }
-  private async archivedModulesSearchText(): Promise<string> {
-    return this.archivedModulesSearchInput().inputValue();
-  }
   /**
    * Wait until the archived tab settles: rows, a known empty, or the
    * error state with its retry. The screen's own skeleton must be gone;
