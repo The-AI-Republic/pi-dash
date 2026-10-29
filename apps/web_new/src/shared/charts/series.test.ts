@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   barSegmentKey,
+  createLegendOrderSorter,
   mapAreaData,
   mapBarData,
   mapBarPayloadValues,
@@ -185,5 +186,41 @@ describe("mapLegendEntries", () => {
 
   it("stringifies non-string labels", () => {
     expect(mapLegendEntries([{ value: 4 }])).toEqual([{ label: "4", color: undefined }]);
+  });
+});
+
+describe("createLegendOrderSorter", () => {
+  const SERIES = [
+    { key: "resolved", name: "Resolved" },
+    { key: "created", name: "Created" },
+  ];
+
+  it("ranks entries by series data key", () => {
+    const rank = createLegendOrderSorter(SERIES);
+    expect(rank({ value: "Resolved", dataKey: "resolved" })).toBe(0);
+    expect(rank({ value: "Created", dataKey: "created" })).toBe(1);
+  });
+
+  it("falls back to the display name when the key is missing", () => {
+    const rank = createLegendOrderSorter(SERIES);
+    expect(rank({ value: "Created" })).toBe(1);
+    expect(rank({ value: "Resolved" })).toBe(0);
+  });
+
+  it("sorts unknown entries after every series", () => {
+    const rank = createLegendOrderSorter(SERIES);
+    expect(rank({ value: "Other", dataKey: "other" })).toBe(2);
+    expect(rank({ value: undefined })).toBe(2);
+    expect(rank({ value: "Created", dataKey: () => 1 })).toBe(1);
+  });
+
+  it("keeps the first series on key or name collisions", () => {
+    const rank = createLegendOrderSorter([
+      ...SERIES,
+      { key: "resolved", name: "Resolved again" },
+      { key: "extra", name: "Created" },
+    ]);
+    expect(rank({ value: "Resolved again", dataKey: "resolved" })).toBe(0);
+    expect(rank({ value: "Created" })).toBe(1);
   });
 });

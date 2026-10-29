@@ -35,6 +35,20 @@ function evaluatingPage(): Page {
 }
 
 /**
+ * A page that runs evaluated reads and settle predicates inside this
+ * jsdom document: settle passes when the predicate holds now, since
+ * the fixture is already the settled markup.
+ */
+function settledEvaluatingPage(): Page {
+  return {
+    evaluate: async (fn: (arg?: never) => unknown, arg?: never) => fn(arg),
+    waitForFunction: async (fn: (arg?: never) => unknown, arg?: never) => {
+      if (!fn(arg)) throw new Error("timeout");
+    },
+  } as unknown as Page;
+}
+
+/**
  * The dialog title read as Playwright resolves it: the dialog's `h2`
  * locator is strict, so it throws while the settled panel has more than
  * one heading; `first()` pins a single node first. This is the panel's
@@ -133,5 +147,111 @@ describe("analytics dialog driver against the rendered panel", () => {
       { text: "Zoe", avatar: false, initial: true, unassigned: false },
       { text: "Unassigned", avatar: false, initial: false, unassigned: true },
     ]);
+  });
+});
+
+describe("analytics dialog wide toggle against settled markup", () => {
+  it("fires on the first width change, then on consecutive stable frames", async () => {
+    document.body.innerHTML = `<div role="dialog"><div role="document"></div></div>`;
+    const content = document.querySelector("[role='dialog'] [role='document']") as HTMLElement;
+    const widths = [800, 850, 900, 900, 900];
+    let reads = 0;
+    content.getBoundingClientRect = () => ({ width: widths[Math.min(reads, widths.length - 1)] }) as DOMRect;
+    const predicates: Array<(...args: never[]) => unknown> = [];
+    const page = {
+      getByTestId: () => ({ first: () => ({ click: async () => undefined }) }),
+      getByRole: () => ({ locator: () => ({ boundingBox: async () => ({ width: 800, height: 600 }) }) }),
+      waitForFunction: async (fn: (...args: never[]) => unknown) => {
+        predicates.push(fn);
+      },
+    } as unknown as Page;
+    await new WebNewDriver(page).analyticsDialogToggleWide();
+    expect(predicates).toHaveLength(2);
+    const [changed, settled] = predicates as [(previous: number) => boolean, () => boolean];
+    // The change predicate fires once the width moves past the pre-click read.
+    reads = 0;
+    expect(changed(800)).toBe(false);
+    reads = 1;
+    expect(changed(800)).toBe(true);
+    // The settle predicate records the first frame, resets on movement,
+    // and fires after two consecutive agreeing frames.
+    reads = 1;
+    expect(settled()).toBe(false);
+    reads = 2;
+    expect(settled()).toBe(false);
+    reads = 3;
+    expect(settled()).toBe(false);
+    reads = 4;
+    expect(settled()).toBe(true);
+  });
+
+  it("holds both waits while the panel content is missing", async () => {
+    document.body.innerHTML = `<div role="dialog"></div>`;
+    const predicates: Array<(...args: never[]) => unknown> = [];
+    const page = {
+      getByTestId: () => ({ first: () => ({ click: async () => undefined }) }),
+      getByRole: () => ({ locator: () => ({ boundingBox: async () => ({ width: 800, height: 600 }) }) }),
+      waitForFunction: async (fn: (...args: never[]) => unknown) => {
+        predicates.push(fn);
+      },
+    } as unknown as Page;
+    await new WebNewDriver(page).analyticsDialogToggleWide();
+    const [changed, settled] = predicates as [(previous: number) => boolean, () => boolean];
+    expect(changed(800)).toBe(false);
+    expect(settled()).toBe(false);
+  });
+});
+
+describe("analytics chart axis reads against settled markup", () => {
+  it("reads created-vs-resolved x labels from the axis tick group", async () => {
+    document.body.innerHTML = `
+      <section data-testid="analytics-created">
+        <svg class="recharts-surface">
+          <g class="recharts-area"></g>
+          <g class="recharts-area"></g>
+          <g class="recharts-xAxis-ticks">
+            <g class="recharts-xAxis-tick-lines"><g class="recharts-cartesian-axis-tick"></g></g>
+            <g class="recharts-xAxis-tick-labels"><g class="recharts-cartesian-axis-tick-label"><text>Oct 01, 2026</text></g></g>
+          </g>
+        </svg>
+        <div data-testid="chart-legend">
+          <span><span></span><span>Resolved</span></span>
+          <span><span></span><span>Created</span></span>
+        </div>
+      </section>`;
+    const facts = await new WebNewDriver(settledEvaluatingPage()).analyticsCreatedResolvedFacts();
+    expect(facts).toEqual({
+      legend: ["Resolved", "Created"],
+      xLabels: ["Oct 01, 2026"],
+      series: 2,
+      guidance: null,
+    });
+  });
+
+  it("reads custom chart x labels from the axis tick group", async () => {
+    const proto = window.Element.prototype as unknown as Record<string, unknown>;
+    const original = proto["getBBox"];
+    proto["getBBox"] = () => ({ x: 10, y: 20, width: 30, height: 40 });
+    try {
+      document.body.innerHTML = `
+        <section data-testid="analytics-custom">
+          <svg class="recharts-surface">
+            <g class="recharts-bar-rectangle"><path fill="#123456" d="M0 0h1v1H0z"></path></g>
+            <g class="recharts-xAxis-ticks">
+              <g class="recharts-xAxis-tick-lines"><g class="recharts-cartesian-axis-tick"></g></g>
+              <g class="recharts-xAxis-tick-labels"><g class="recharts-cartesian-axis-tick-label"><text>High</text></g></g>
+            </g>
+          </svg>
+        </section>`;
+      const facts = await new WebNewDriver(settledEvaluatingPage()).analyticsCustomChartFacts();
+      expect(facts).toEqual({
+        segments: [{ cx: 25, cy: 20, fill: "#123456", topRounded: true, bottomRounded: true }],
+        xLabels: ["High"],
+        legend: false,
+      });
+    } finally {
+      if (original === undefined) delete proto["getBBox"];
+      else proto["getBBox"] = original;
+    }
   });
 });

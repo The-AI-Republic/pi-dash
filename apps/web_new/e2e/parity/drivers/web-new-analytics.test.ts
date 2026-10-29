@@ -1479,13 +1479,14 @@ describe("analytics scoped dialog", () => {
     ]);
   });
 
-  it("toggles the wide panel and waits for the width to change", async () => {
+  it("toggles the wide panel and waits for the width to change, then settle", async () => {
     const recorder = new Recorder();
     recorder.respond = ({ method }) => (method === "boundingBox" ? { x: 0, y: 0, width: 720, height: 900 } : undefined);
     await new WebNewDriver(recorder.page()).analyticsDialogToggleWide();
     expectTrace(recorder.trace(), ['getByTestId("analytics-dialog-wide-toggle").first()', "waitForFunction"]);
-    const [wait] = recorder.waitForFunctions();
-    expect(wait?.[1]).toBe(720);
+    const [changed, settled] = recorder.waitForFunctions();
+    expect(changed?.[1]).toBe(720);
+    expect(settled?.[1]).toEqual({ timeout: 30_000 });
   });
 
   it("throws when the panel width never settles", async () => {

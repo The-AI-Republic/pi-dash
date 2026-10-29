@@ -34499,7 +34499,7 @@ export class WebNewDriver implements ParityDriver {
             : [...legend.children]
                 .map((entry) => ((entry.textContent ?? "") as string).trim())
                 .filter((text) => text !== ""),
-        xLabels: [...(section?.querySelectorAll(".recharts-x-ticks .recharts-cartesian-axis-tick") ?? [])]
+        xLabels: [...(section?.querySelectorAll(".recharts-xAxis-tick-labels text") ?? [])]
           .map((tick) => ((tick.textContent ?? "") as string).trim())
           .filter((text) => text !== ""),
         series: section?.querySelectorAll("g.recharts-area").length ?? 0,
@@ -34674,7 +34674,7 @@ export class WebNewDriver implements ParityDriver {
             };
           }
         ),
-        xLabels: [...(section?.querySelectorAll(".recharts-x-ticks .recharts-cartesian-axis-tick") ?? [])]
+        xLabels: [...(section?.querySelectorAll(".recharts-xAxis-tick-labels text") ?? [])]
           .map((tick) => ((tick.textContent ?? "") as string).trim())
           .filter((text) => text !== ""),
         legend: section?.querySelector('[data-testid="chart-legend"]') !== null,
@@ -34863,6 +34863,31 @@ export class WebNewDriver implements ParityDriver {
           return Math.abs(content.getBoundingClientRect().width - previous) > 1;
         },
         before,
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .catch(() => {
+        throw new Error("[parity] analytics dialog width never settled after the toggle.");
+      });
+    // The panel width animates, so the change above fires on the first
+    // frame. Wait until consecutive frames agree before the caller
+    // measures, or its read lands mid-flight and the toggle looks broken.
+    await this.page
+      .waitForFunction(
+        () => {
+          const content = document.querySelector("[role='dialog'] [role='document']");
+          if (!(content instanceof HTMLElement)) return false;
+          const width = content.getBoundingClientRect().width;
+          const last = Number(content.dataset["parityWidth"] ?? Number.NaN);
+          const stable = Number(content.dataset["parityStable"] ?? "0");
+          if (Number.isNaN(last) || Math.abs(width - last) > 0.5) {
+            content.dataset["parityWidth"] = String(width);
+            content.dataset["parityStable"] = "0";
+            return false;
+          }
+          const next = stable + 1;
+          content.dataset["parityStable"] = String(next);
+          return next >= 2;
+        },
         { timeout: WebNewDriver.WAIT_MS }
       )
       .catch(() => {
