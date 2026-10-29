@@ -284,6 +284,7 @@ pub mod ops {
     pub use pidash_services::orchestration::clock::SAVE_CLOCK_SQL;
     pub use pidash_services::orchestration::creation::fallback_creator_select;
     pub use pidash_services::orchestration::creation::latest_prior_run_sql;
+    pub use pidash_services::orchestration::creation::map_run_view;
     pub use pidash_services::orchestration::creation::run_select_sql;
     pub use pidash_services::orchestration::creation::select_parent_for_next_run;
     pub use pidash_services::orchestration::creation::CreateDispatchRequest;

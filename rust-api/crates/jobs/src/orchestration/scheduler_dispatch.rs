@@ -43,7 +43,7 @@ use pidash_services::domain::identity::{get_agent_system_user, GetAgentUserError
 use pidash_services::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
 use pidash_services::orchestration::clock::{ClockWrite, ProjectClockPolicy};
 use pidash_services::orchestration::creation::{
-    CreationError, PodView, RenderedTurn, RunView, BUNDLE_WORKSPACE_SQL,
+    map_run_view, CreationError, PodView, RenderedTurn, RunView, BUNDLE_WORKSPACE_SQL,
 };
 use pidash_services::orchestration::dispatch::DispatchError;
 use pidash_services::orchestration::entries::{
@@ -56,7 +56,7 @@ use pidash_services::orchestration::entries::{
 use pidash_services::prompting::{composer, context};
 use pidash_services::runner_sessions::live_drains::drain_pod_by_id;
 
-use super::creation_jobs::{bundle_overrides, map_run_view, LiveCreationStore, StoreDeps};
+use super::creation_jobs::{bundle_overrides, LiveCreationStore, StoreDeps};
 use super::fire_tick_seam::{
     drain_dispatch, lock_ticker_by_issue_sql, map_ticker, DispatchJobsError, DispatchOutcome,
 };

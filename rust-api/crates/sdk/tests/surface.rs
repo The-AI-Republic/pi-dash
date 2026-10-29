@@ -494,6 +494,7 @@ surface_snapshot! {
     ops::is_ticking_state,
     ops::latest_prior_run_sql,
     ops::lock_ticker_sql,
+    ops::map_run_view,
     ops::merge_settings,
     ops::model_activity_kwargs,
     ops::move_to_project,
