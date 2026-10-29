@@ -10722,17 +10722,19 @@ export class WebNewDriver implements ParityDriver {
     const toasts = this.page.locator('[data-testid="toast-notification"]');
     const seenToasts = await toasts.count();
     await dialog.getByRole("button", { name: "Delete", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
-    // Settle on the write's outcome: a landed delete closes the dialog, a
-    // failure keeps it open (so the caller can retry) and raises a
-    // confirmation. Resolve on either signal instead of only detaching,
-    // or a failed write would burn the whole wait and outlive its toast.
-    const outcome = Date.now() + 5_000;
-    while (Date.now() < outcome) {
+    // Settle on whichever outcome lands first: a completed delete closes the
+    // dialog, a failed one keeps it open (so the caller can retry) and
+    // raises a confirmation that auto-dismisses after a few seconds.
+    // Returning the moment either signal appears keeps the caller's toast
+    // read inside that lifetime — waiting out the dialog's detach would
+    // outlive the failure toast.
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    for (;;) {
       if (!(await this.layoutsDeleteModalVisible())) break;
       if ((await toasts.count()) > seenToasts) break;
-      await this.page.waitForTimeout(300);
+      if (Date.now() >= deadline) break;
+      await this.page.waitForTimeout(250);
     }
-    await dialog.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
   }
 
   /**
