@@ -15,7 +15,14 @@ import { getAppClient } from "../../../../core/api/client.js";
 import { notifyError } from "../../../../shared/shell/index.js";
 import { issueKeys } from "../../api/keys.js";
 import { useOptionalIssuesLoader } from "../../loaders/loaderContext.js";
-import { entityListsKeyPart, writeEntityPrefs, type IssuesEntity, type PrefsRecord } from "../../prefs/entities.js";
+import {
+  applyPrefsPatch,
+  entityListsKeyPart,
+  mergePrefsResponse,
+  writeEntityPrefs,
+  type IssuesEntity,
+  type PrefsRecord,
+} from "../../prefs/entities.js";
 import { entityPrefsKeyPart, prefsQueryOptions } from "../../prefs/prefsQuery.js";
 import { parseRichExpression, serializeRichExpression, type RichCondition, type RichExpression } from "./expression.js";
 
@@ -60,17 +67,24 @@ export function useUpdateRichFilters(workspaceSlug: string, entity: IssuesEntity
       const record = await queryClient.fetchQuery(prefsQueryOptions(getAppClient(), workspaceSlug, entity));
       const expression = serializeRichExpression(conditions);
       const patch = buildRichFiltersPatch(record, expression);
-      queryClient.setQueryData<PrefsRecord>(prefsKey, { ...record, ...patch });
+      // Key-scoped updater writes (NEWFRONT-1013): the optimistic, success
+      // and rollback writes each touch only the rich_filters key, so an
+      // interleaved display or collapse write survives them.
+      queryClient.setQueryData<PrefsRecord>(prefsKey, (current) => applyPrefsPatch(current, record, patch));
       try {
         const write = async (): Promise<PrefsRecord> => {
           const next = await writeEntityPrefs(getAppClient(), workspaceSlug, entity, patch);
-          queryClient.setQueryData(prefsKey, next);
+          queryClient.setQueryData<PrefsRecord>(prefsKey, (current) =>
+            mergePrefsResponse(current, next, ["rich_filters"])
+          );
           await queryClient.invalidateQueries({ queryKey: listsKey });
           return next;
         };
         return loader === null ? await write() : await loader.runWithMutationLoader(write);
       } catch (error) {
-        queryClient.setQueryData(prefsKey, record);
+        queryClient.setQueryData<PrefsRecord>(prefsKey, (current) =>
+          mergePrefsResponse(current, record, ["rich_filters"])
+        );
         notifyError(FILTERS_FAILED_TITLE, FILTERS_FAILED_BODY);
         throw error;
       }

@@ -17,7 +17,14 @@ import { notifyError } from "../../../shared/shell/index.js";
 import { issueKeys } from "../api/keys.js";
 import { parseLayoutKind, type LayoutKind } from "../layouts/kinds.js";
 import { useIssuesLoader } from "../loaders/loaderContext.js";
-import { entityListsKeyPart, writeEntityPrefs, type IssuesEntity, type PrefsRecord } from "./entities.js";
+import {
+  applyPrefsPatch,
+  entityListsKeyPart,
+  mergePrefsResponse,
+  writeEntityPrefs,
+  type IssuesEntity,
+  type PrefsRecord,
+} from "./entities.js";
 import { entityPrefsKeyPart, prefsQueryOptions } from "./prefsQuery.js";
 
 /** Calendar options inside display_filters.calendar. */
@@ -177,18 +184,24 @@ export function useUpdateDisplayPrefs(workspaceSlug: string, entity: IssuesEntit
       const patch = buildPrefsPatch(record, partial);
       // The fetched record doubles as the rollback snapshot: fetchQuery
       // always caches what it resolves, so the optimistic write below
-      // never runs on an empty cache.
-      queryClient.setQueryData<PrefsRecord>(prefsKey, { ...record, ...patch });
+      // never runs on an empty cache. All three writes are key-scoped
+      // updaters (NEWFRONT-1013): they touch only the display keys, so an
+      // interleaved collapse or rich-filter write survives them.
+      queryClient.setQueryData<PrefsRecord>(prefsKey, (current) => applyPrefsPatch(current, record, patch));
       try {
         return await loader.runWithMutationLoader(async () => {
           const next = await writeEntityPrefs(getAppClient(), workspaceSlug, entity, patch);
-          queryClient.setQueryData(prefsKey, next);
+          queryClient.setQueryData<PrefsRecord>(prefsKey, (current) =>
+            mergePrefsResponse(current, next, ["display_filters", "display_properties"])
+          );
           // Awaited: the loader covers the list refetch, not just the PATCH.
           await queryClient.invalidateQueries({ queryKey: listsKey });
           return next;
         });
       } catch (error) {
-        queryClient.setQueryData(prefsKey, record);
+        queryClient.setQueryData<PrefsRecord>(prefsKey, (current) =>
+          mergePrefsResponse(current, record, ["display_filters", "display_properties"])
+        );
         notifyError(PREFS_FAILED_TITLE, PREFS_FAILED_BODY);
         throw error;
       }

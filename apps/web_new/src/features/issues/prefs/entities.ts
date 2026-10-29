@@ -33,6 +33,46 @@ export interface PrefsRecord {
   rich_filters: Record<string, unknown>;
 }
 
+/**
+ * Overlay a full record's `keys` onto the cached prefs record
+ * (NEWFRONT-1013). Success and rollback writes go through here so an
+ * interleaved mutation's keys survive: each writer touches only the keys
+ * it sent, never the whole record, because the response's other keys are
+ * stale whenever two prefs writes overlap. An empty cache falls back to
+ * the source record.
+ */
+export function mergePrefsResponse(
+  current: PrefsRecord | undefined,
+  source: PrefsRecord,
+  keys: readonly (keyof PrefsRecord)[]
+): PrefsRecord {
+  if (current === undefined) return source;
+  const merged: PrefsRecord = { ...current };
+  for (const key of keys) merged[key] = source[key];
+  return merged;
+}
+
+/**
+ * Overlay an optimistic patch onto the cached prefs record
+ * (NEWFRONT-1013). Updater form: two mutations that both read the cache
+ * before either optimistic write lands still converge instead of the
+ * second write clobbering the first. An empty cache falls back to the
+ * record the patch was built from.
+ */
+export function applyPrefsPatch(
+  current: PrefsRecord | undefined,
+  fallback: PrefsRecord,
+  patch: PrefsPatch
+): PrefsRecord {
+  const base = current ?? fallback;
+  return {
+    filters: patch.filters ?? base.filters,
+    display_filters: patch.display_filters ?? base.display_filters,
+    display_properties: patch.display_properties ?? base.display_properties,
+    rich_filters: patch.rich_filters ?? base.rich_filters,
+  };
+}
+
 /** Key parts beneath `issueKeys.lists` for one entity's lists. */
 export function entityListsKeyPart(entity: IssuesEntity): string[] {
   switch (entity.scope) {
