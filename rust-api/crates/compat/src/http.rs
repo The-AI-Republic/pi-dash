@@ -18,6 +18,12 @@
 //! `percent_encode` (from the `jobs::integrations::{git_sync,
 //! github_sync}` twins, the strict segment/query encoder) here.
 //!
+//! OVL-11 residue (PIDASHCONV-1626): `split_authority` (the
+//! `services::auth_session::shapes` twin, re-shaped to the overlay's
+//! `Option` so the two overlay twins can adopt it) and `form_field`
+//! (one urlencoded field over body + headers, Django `QueryDict.get`
+//! last-wins, for the overlay `auth/session.rs` twin).
+//!
 //! Shapes that stay local: the test-only `body_bytes` / `set_cookies` /
 //! nested `hex_encode` helpers; `csrf_gate`, `csrf_check_token` and
 //! `csrf_rotate_cookie` (thin adapters over the `pidash_auth` kernels
@@ -30,10 +36,17 @@
 //! strips `\x1c`-`\x1f`, `trim` does not); the webhook
 //! `constant_time_eq` (zero-padded, different timing) and the `&str`
 //! password-token one; the `space` / `app_issues` `read_body` variants
-//! (different return shapes).
+//! (different return shapes); the `(pairs, key)` form readers (the
+//! `magic.rs` `String`-default, `password.rs` `Field`, `handlers_admin`
+//! `form_last` and services `FormField` shapes over pre-parsed pairs)
+//! and multipart framing (three divergent OSS semantics).
+//!
+//! PIDASHCONV-1626: OVL-04 listed `urlparse`/`urljoin` as in-scope but
+//! did not ship them; `split_authority` below is the first urlsplit
+//! piece to move here.
 
 use axum::body::Body;
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
@@ -308,6 +321,67 @@ pub fn percent_encode(value: &str) -> String {
     out
 }
 
+// ---------------------------------------------------------------------------
+// URL authority + form field (OVL-11 residue, PIDASHCONV-1626)
+// ---------------------------------------------------------------------------
+
+/// Authority split for the post-scheme remainder: a leading `//`
+/// opens an authority running to the next `/?#` (empty authority, as
+/// in `///x`, yields netloc `""` and path `/x`, matching `urlparse`);
+/// `None` when there is no `//` at all.
+///
+/// Moved from `services::auth_session::shapes` (whose callers restore
+/// the old `("", rest)` tuple with `unwrap_or`) to unblock the two
+/// overlay twins (`cloud-api/src/auth/native.rs`,
+/// `cloud-api/src/auth/web.rs`): `None` versus an empty authority is
+/// load-bearing there (an empty authority still consumes the `//`),
+/// so the tuple shape cannot serve them. The cut itself is identical
+/// in all three twins.
+pub fn split_authority(rest: &str) -> Option<(&str, &str)> {
+    let after = rest.strip_prefix("//")?;
+    let end = after.find(['/', '?', '#']).unwrap_or(after.len());
+    Some((&after[..end], &after[end..]))
+}
+
+/// The request MIME type: the content-type before `;`, lowercased
+/// (the overlay `mime_of` gate, verbatim).
+fn request_mime(headers: &HeaderMap) -> String {
+    headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_lowercase()
+}
+
+/// One urlencoded form field (`request.POST.get`, last wins): the
+/// `application/x-www-form-urlencoded` parse of `body`, or `None`
+/// when the content type is anything else (multipart framing stays
+/// with the callers — the three OSS framers diverge — and Django
+/// leaves `POST` empty for every other type).
+///
+/// Moved for the overlay `auth/session.rs` twin: the MIME gate is its
+/// check verbatim, and `serde_urlencoded::from_bytes` parses through
+/// the same `form_urlencoded::parse` iterator as the overlay's
+/// `url::form_urlencoded::parse`, so both sides read byte-identical
+/// pairs; Django `QueryDict.get` last-wins on top. Present-but-empty
+/// reads `Some("")`, like `QueryDict.get` — callers that treat empty
+/// as missing filter it themselves.
+pub fn form_field(body: &[u8], headers: &HeaderMap, key: &str) -> Option<String> {
+    if request_mime(headers) != "application/x-www-form-urlencoded" {
+        return None;
+    }
+    let pairs: Vec<(String, String)> = serde_urlencoded::from_bytes(body).unwrap_or_default();
+    pairs
+        .iter()
+        .rev()
+        .find(|(name, _)| name == key)
+        .map(|(_, value)| value.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -575,5 +649,70 @@ mod tests {
         assert_eq!(percent_encode("/"), "%2F");
         assert_eq!(percent_encode("%"), "%25");
         assert_eq!(percent_encode("caf\u{e9}"), "caf%C3%A9");
+    }
+
+    #[test]
+    fn split_authority_cuts_at_path_query_fragment() {
+        assert_eq!(split_authority("//host/path"), Some(("host", "/path")));
+        assert_eq!(split_authority("//host?query"), Some(("host", "?query")));
+        assert_eq!(split_authority("//host#frag"), Some(("host", "#frag")));
+        assert_eq!(split_authority("//host"), Some(("host", "")));
+        // An empty authority still consumes the `//` (matches `urlparse`).
+        assert_eq!(split_authority("///x"), Some(("", "/x")));
+        assert_eq!(split_authority("//"), Some(("", "")));
+        // No `//` at all is `None` (never `("", rest)`).
+        assert_eq!(split_authority("no-authority"), None);
+        assert_eq!(split_authority("/relative"), None);
+        assert_eq!(split_authority(""), None);
+    }
+
+    fn headers_with_content_type(value: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_TYPE, value.parse().expect("content type"));
+        headers
+    }
+
+    #[test]
+    fn form_field_last_wins_urlencoded_only() {
+        let headers = headers_with_content_type("application/x-www-form-urlencoded");
+        assert_eq!(form_field(b"a=1&a=2", &headers, "a").as_deref(), Some("2"));
+        assert_eq!(form_field(b"a=1&a=2", &headers, "missing"), None);
+        // Present-but-empty is `Some("")`, like `QueryDict.get`.
+        assert_eq!(form_field(b"a=", &headers, "a").as_deref(), Some(""));
+        assert_eq!(form_field(b"a", &headers, "a").as_deref(), Some(""));
+        // Decoding: `+` is a space, `%XX` percent-decoded (the
+        // overlay `request_token_prefers_post_field_then_header`
+        // vector reads identically through the canonical).
+        assert_eq!(
+            form_field(b"e=a%40x.com+e", &headers, "e").as_deref(),
+            Some("a@x.com e")
+        );
+        assert_eq!(
+            form_field(
+                b"csrfmiddlewaretoken=a+b%20c",
+                &headers,
+                "csrfmiddlewaretoken"
+            )
+            .as_deref(),
+            Some("a b c")
+        );
+        // Parameters ride along; the MIME match is case-insensitive.
+        let params = headers_with_content_type("Application/X-WWW-Form-Urlencoded; charset=UTF-8");
+        assert_eq!(form_field(b"a=1", &params, "a").as_deref(), Some("1"));
+        // Multipart framing stays with the callers: `None` here even
+        // for a framable body.
+        let multipart = headers_with_content_type("multipart/form-data; boundary=abc");
+        let framed = b"--abc\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\n1\r\n--abc--\r\n";
+        assert_eq!(form_field(framed, &multipart, "a"), None);
+        // Anything else (and a missing or non-UTF8 header) is `None`.
+        let json = headers_with_content_type("application/json");
+        assert_eq!(form_field(br#"{"a":"1"}"#, &json, "a"), None);
+        assert_eq!(form_field(b"a=1", &HeaderMap::new(), "a"), None);
+        let mut invalid = HeaderMap::new();
+        invalid.insert(
+            header::CONTENT_TYPE,
+            header::HeaderValue::from_bytes(b"\xff\xfe").expect("non-utf8"),
+        );
+        assert_eq!(form_field(b"a=1", &invalid, "a"), None);
     }
 }

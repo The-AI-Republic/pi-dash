@@ -698,3 +698,20 @@ pub mod db {
 /// imports no test-only items; OVL-03 (PIDASHCONV-1541)..OVL-07
 /// (PIDASHCONV-1545) add what the overlay harness needs.
 pub mod testkit {}
+
+#[cfg(test)]
+mod tests {
+    /// OVL-11 residue (PIDASHCONV-1626): both helpers resolve through
+    /// the SDK facade.
+    #[test]
+    fn compat_http_helpers_are_exported() {
+        assert_eq!(
+            crate::compat::http::split_authority("//h/p"),
+            Some(("h", "/p"))
+        );
+        // `form_field` resolves through the same module re-export; its
+        // behaviour is pinned by pidash-compat's own tests (the facade
+        // takes no external deps, so no `HeaderMap` is built here).
+        let _ = std::mem::size_of_val(&crate::compat::http::form_field);
+    }
+}

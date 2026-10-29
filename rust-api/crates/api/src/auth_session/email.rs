@@ -97,7 +97,8 @@ const AUTHENTICATION_THROTTLE: ThrottleSpec = ThrottleSpec {
 const MODEL_BACKEND: &str = "django.contrib.auth.backends.ModelBackend";
 
 use pidash_compat::http::{
-    csrf_failure_json, csrf_failure_response, csrf_token_source, session_auth_hash, TokenSource,
+    csrf_failure_json, csrf_failure_response, csrf_token_source, form_field, session_auth_hash,
+    TokenSource,
 };
 
 /// Django 4.2 `PBKDF2PasswordHasher`: 600000 iterations, 22-char
@@ -1751,10 +1752,14 @@ async fn signup_space(State(state): State<AppState>, req: axum::extract::Request
 /// the `email` member when the media type yields one, `None` for the
 /// empty-body `{}` and every other falsy shape, or the content type
 /// back when nothing parses it (DRF 415).
-fn check_request_email(content_type: &str, body: &[u8]) -> Result<Option<String>, String> {
+fn check_request_email(headers: &HeaderMap, body: &[u8]) -> Result<Option<String>, String> {
     if body.is_empty() {
         return Ok(None);
     }
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
     let mime = content_type
         .split(';')
         .next()
@@ -1769,9 +1774,18 @@ fn check_request_email(content_type: &str, body: &[u8]) -> Result<Option<String>
             parsed.as_ref().ok().and_then(|v| v.get("email")),
         ));
     }
-    if mime == "application/x-www-form-urlencoded" || mime == "multipart/form-data" {
-        // Both form media types read through `form_pairs` (the DRF
-        // default parsers include `MultiPartParser`; PIDASHCONV-1349):
+    if mime == "application/x-www-form-urlencoded" {
+        // Single-field read through the shared canonical
+        // (PIDASHCONV-1626): `multipart::parse_fields` returns `None`
+        // for this media type, so `form_pairs` here is exactly the
+        // canonical's gate + parse + last-wins. Missing or empty stays
+        // missing (`request.data.get("email", False)` is falsy either
+        // way).
+        return Ok(form_field(body, headers, "email").filter(|value| !value.is_empty()));
+    }
+    if mime == "multipart/form-data" {
+        // Multipart reads through `form_pairs` (the DRF default
+        // parsers include `MultiPartParser`; PIDASHCONV-1349):
         // missing or empty stays missing (`request.data.get("email",
         // False)` is falsy either way).
         return Ok(
@@ -1996,12 +2010,7 @@ async fn serve_email_check(state: &AppState, req: axum::extract::Request) -> Res
         let decision = kernel::EmailCheckDecision::NotConfigured;
         return json_400(&decision.error_pairs());
     }
-    let content_type = parts
-        .headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    let email_raw = match check_request_email(content_type, &body) {
+    let email_raw = match check_request_email(&parts.headers, &body) {
         Ok(email_raw) => email_raw,
         Err(media_type) => return unsupported_media_type_response(&media_type),
     };
@@ -2331,46 +2340,50 @@ mod tests {
         );
     }
 
+    fn headers_with_content_type(value: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_TYPE, value.parse().expect("content type"));
+        headers
+    }
+
     #[test]
     fn check_request_email_follows_the_media_type() {
+        let json = headers_with_content_type("application/json");
+        let urlencoded = headers_with_content_type("application/x-www-form-urlencoded");
+        let multipart = headers_with_content_type("multipart/form-data; boundary=abc");
+        let text = headers_with_content_type("text/plain");
         // JSON object member.
         assert_eq!(
-            check_request_email("application/json", br#"{"email":"h@x.com"}"#),
+            check_request_email(&json, br#"{"email":"h@x.com"}"#),
             Ok(Some("h@x.com".to_owned()))
         );
         // Empty body is `{}` whatever the media type.
-        assert_eq!(check_request_email("application/json", b""), Ok(None));
-        assert_eq!(check_request_email("text/plain", b""), Ok(None));
+        assert_eq!(check_request_email(&json, b""), Ok(None));
+        assert_eq!(check_request_email(&text, b""), Ok(None));
         // Urlencoded reads the last field; empty stays missing.
         assert_eq!(
-            check_request_email(
-                "application/x-www-form-urlencoded",
-                b"email=a%40x.com&email=b%40x.com"
-            ),
+            check_request_email(&urlencoded, b"email=a%40x.com&email=b%40x.com"),
             Ok(Some("b@x.com".to_owned()))
         );
-        assert_eq!(
-            check_request_email("application/x-www-form-urlencoded", b"email="),
-            Ok(None)
-        );
+        assert_eq!(check_request_email(&urlencoded, b"email="), Ok(None));
         // Multipart reads the last field; missing or empty stays missing.
         let framed = b"--abc\r\nContent-Disposition: form-data; name=\"email\"\r\n\r\nh@x.com\r\n--abc--\r\n";
         assert_eq!(
-            check_request_email("multipart/form-data; boundary=abc", framed),
+            check_request_email(&multipart, framed),
             Ok(Some("h@x.com".to_owned()))
         );
         let framed_empty =
             b"--abc\r\nContent-Disposition: form-data; name=\"email\"\r\n\r\n\r\n--abc--\r\n";
-        assert_eq!(
-            check_request_email("multipart/form-data; boundary=abc", framed_empty),
-            Ok(None)
-        );
+        assert_eq!(check_request_email(&multipart, framed_empty), Ok(None));
         // Anything else is the content type back (DRF 415).
         assert_eq!(
-            check_request_email("text/plain", b"h@x.com"),
+            check_request_email(&text, b"h@x.com"),
             Err("text/plain".to_owned())
         );
-        assert_eq!(check_request_email("", b"h@x.com"), Err(String::new()));
+        assert_eq!(
+            check_request_email(&HeaderMap::new(), b"h@x.com"),
+            Err(String::new())
+        );
     }
 
     #[test]
