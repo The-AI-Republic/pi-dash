@@ -66,7 +66,12 @@ build from.
 
 ## CLI-install step (AUTH-030)
 
-- First step. Shows per-OS install guidance in tabs ("macOS / Linux" with
+- First step. Its heading is "Connect your AI agents with Pi Dash" and the
+  explanation says the CLI connects the user's AI agents to Pi Dash so
+  tasks can be handed to them, and that it belongs on the machine where
+  the coding agent runs the work (main PR 357 / `a41baf3a4`,
+  NEWFRONT-1029; both points required, our own sentence).
+- Shows per-OS install guidance in tabs ("macOS / Linux" with
   one shell command, "Windows" with two), preselecting the tab matching the
   browser OS but leaving it switchable. Each command block has a copy
   action with copied confirmation and a manual-copy fallback message.

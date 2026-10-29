@@ -42,6 +42,22 @@ async function freshAccount(prefix: string): Promise<{ email: string; session: s
   return { email, session };
 }
 
+/**
+ * Whether a page is parked on the CLI-install step. Its heading is each
+ * app's own copy: the rebuild says "Connect your AI agents with Pi Dash"
+ * (main#357 / a41baf3a4, NEWFRONT-1029) while the oracle built from this
+ * checkout still renders the earlier "Install the Pi Dash CLI". Scenarios
+ * pin intent — the step the user lands on — not one sentence
+ * (NEWFRONT-934).
+ */
+function isOnCliStep(text: string): boolean {
+  return text.includes("Connect your AI agents with Pi Dash") || text.includes("Install the Pi Dash CLI");
+}
+
+async function expectCliStep(driver: { pageText(): Promise<string> }): Promise<void> {
+  await expect.poll(async () => isOnCliStep(await driver.pageText()), { timeout: 60_000 }).toBe(true);
+}
+
 /** Mint a fresh account, mark it onboarded, and sign it in through the UI. */
 async function onboardedInvitee(
   driver: {
@@ -281,7 +297,7 @@ test(
       await driver.openEntry();
       await driver.signInWithPassword(newcomer.email, FRESH_PASSWORD);
       await driver.openOnboarding();
-      await expect.poll(() => driver.pageText(), { timeout: 60_000 }).toContain("Install the Pi Dash CLI");
+      await expectCliStep(driver);
     });
 
     await test.step("a finished account bounces away from onboarding", async () => {
@@ -291,7 +307,7 @@ test(
         .poll(
           async () => {
             const text = await driver.pageText();
-            return text.includes("Install the Pi Dash CLI") ? "still-onboarding" : "bounced";
+            return isOnCliStep(text) ? "still-onboarding" : "bounced";
           },
           { timeout: 60_000 }
         )
@@ -313,7 +329,7 @@ test(
     await driver.openEntry();
     await driver.signInWithPassword(newcomer.email, FRESH_PASSWORD);
     await driver.openOnboarding();
-    await expect.poll(() => driver.pageText(), { timeout: 60_000 }).toContain("Install the Pi Dash CLI");
+    await expectCliStep(driver);
 
     await driver.skipCliInstall();
     await driver.submitProfileStep("Parity Resume");
@@ -339,10 +355,18 @@ test(
     await driver.openEntry();
     await driver.signInWithPassword(first.email, FRESH_PASSWORD);
     await driver.openOnboarding();
-    await expect.poll(() => driver.pageText(), { timeout: 60_000 }).toContain("Install the Pi Dash CLI");
+    await expectCliStep(driver);
 
     await test.step("the primary continue reaches the profile step", async () => {
       const text = await driver.pageText();
+      if (driver.target === "web_new") {
+        // The rebuild's own heading and explanation (main#357 intent):
+        // the CLI is what connects the agents, and it belongs on the
+        // machine that runs them.
+        expect(text).toContain("Connect your AI agents with Pi Dash");
+        expect(text).toMatch(/hand tasks to those agents/);
+        expect(text).toMatch(/machine where the coding agent will run the work/);
+      }
       expect(text).toContain("macOS / Linux");
       await driver.advanceCliInstall();
       await expect.poll(() => driver.pageText(), { timeout: 60_000 }).toContain("Create your profile");
@@ -357,7 +381,7 @@ test(
       await driver.openEntry();
       await driver.signInWithPassword(second.email, FRESH_PASSWORD);
       await driver.openOnboarding();
-      await expect.poll(() => driver.pageText(), { timeout: 60_000 }).toContain("Install the Pi Dash CLI");
+      await expectCliStep(driver);
       await driver.skipCliInstall();
       await expect.poll(() => driver.pageText(), { timeout: 60_000 }).toContain("Create your profile");
       expect((await userProfile(second.session)).onboarding_step).toEqual(baseline);
@@ -373,7 +397,7 @@ test(
     await driver.openEntry();
     await driver.signInWithPassword(newcomer.email, FRESH_PASSWORD);
     await driver.openOnboarding();
-    await expect.poll(() => driver.pageText(), { timeout: 60_000 }).toContain("Install the Pi Dash CLI");
+    await expectCliStep(driver);
     await driver.skipCliInstall();
     await expect.poll(() => driver.pageText(), { timeout: 60_000 }).toContain("Create your profile");
 
@@ -405,7 +429,7 @@ test(
     await driver.openEntry();
     await driver.signInWithPassword(newcomer.email, FRESH_PASSWORD);
     await driver.openOnboarding();
-    await expect.poll(() => driver.pageText(), { timeout: 60_000 }).toContain("Install the Pi Dash CLI");
+    await expectCliStep(driver);
     await driver.skipCliInstall();
     await driver.submitProfileStep("Parity Roler");
 
@@ -432,7 +456,7 @@ test(
     await driver.openEntry();
     await driver.signInWithPassword(newcomer.email, FRESH_PASSWORD);
     await driver.openOnboarding();
-    await expect.poll(() => driver.pageText(), { timeout: 60_000 }).toContain("Install the Pi Dash CLI");
+    await expectCliStep(driver);
     await driver.skipCliInstall();
     await driver.submitProfileStep("Parity User");
 

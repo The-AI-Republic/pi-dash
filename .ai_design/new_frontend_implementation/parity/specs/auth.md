@@ -659,6 +659,20 @@ now" and the primary continue advance identically to the profile step
 and store nothing — the profile flags stay at their sign-up default (all
 false), which the server distinguishes from null.
 
+The step's heading and explanation carry main PR 357 (`a41baf3a4`,
+PDASHOSS01-127, NEWFRONT-1029). The heading says "Connect your AI agents
+with Pi Dash" and the explanation covers two facts: the CLI is what
+connects the user's AI agents to Pi Dash, so tasks can be handed to
+those agents, and it must be installed on the machine where the coding
+agent runs the work. The rebuild writes its own sentence for the
+explanation (goal 1: our copy, not the old app's), so the parity
+scenario pins intent — the step the user lands on and both required
+facts on the rebuild — while the heading sentence itself is the
+product copy main#357 settled. The oracle built from this checkout
+predates main#357, so its heading still reads "Install the Pi Dash
+CLI" and the scenario accepts either heading there (same intent-pin
+convention as NEWFRONT-934).
+
 On desktop builds this step is omitted entirely and onboarding starts at
 profile setup (target behavior per main PR 494; see the target-behavior
 section). The live old app still shows the step on desktop.

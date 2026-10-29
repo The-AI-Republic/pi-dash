@@ -21,7 +21,9 @@ test(
     await test.step("no CLI-install step; the profile step shows first with no back", async () => {
       await driver.openAuthenticated("/onboarding", browserCookies(user));
       await expect.poll(() => driver.pageText(), { timeout: 30_000 }).toContain("Create your profile");
-      expect(await driver.pageText()).not.toContain("Install the Pi Dash CLI");
+      for (const heading of ["Connect your AI agents with Pi Dash", "Install the Pi Dash CLI"]) {
+        expect(await driver.pageText()).not.toContain(heading);
+      }
       expect(await driver.isOnboardingBackVisible()).toBe(false);
     });
   }
