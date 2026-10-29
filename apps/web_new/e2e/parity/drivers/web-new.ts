@@ -510,6 +510,47 @@ export function moduleVisibleTexts(nodes: Element[]): string[] {
 }
 
 /**
+ * The project key a picker toggle added or removed, read back from the
+ * exports trigger labels around it (NEWFRONT-772, EXP-003). The shared
+ * picker's popup rows name projects without their short keys, while its
+ * caller-supplied trigger compacts picks to those keys ("All projects"
+ * when empty, comma-joined keys otherwise), so the label delta across
+ * one toggle is the toggled project's key. Pure so a unit test can pin
+ * the mapping without a browser.
+ */
+export function exportsProjectKeyDelta(before: string, after: string): string {
+  if (before === after) return "";
+  if (before === "All projects") return after;
+  if (after === "All projects") return before;
+  const beforeKeys = before
+    .split(",")
+    .map((part) => part.trim())
+    .filter((part) => part !== "");
+  const afterKeys = after
+    .split(",")
+    .map((part) => part.trim())
+    .filter((part) => part !== "");
+  return afterKeys.find((key) => !beforeKeys.includes(key)) ?? beforeKeys.find((key) => !afterKeys.includes(key)) ?? "";
+}
+
+/**
+ * The readable name of a project picker option (NEWFRONT-772, EXP-003).
+ * Options render their leading mark (initial, icon) and the selected
+ * check as aria-hidden spans, so innerText prefixes the name with mark
+ * text ("E Exp Alpha ...") while the accessible name the toggle matches
+ * on holds the bare name. aria-label wins when present; otherwise the
+ * text minus aria-hidden descendants, whitespace-collapsed. Self-contained
+ * (no module references) so page.evaluate can serialize it.
+ */
+export function exportsProjectOptionName(option: Element): string {
+  const labelled = option.getAttribute("aria-label");
+  if (labelled !== null && labelled.trim() !== "") return labelled.trim().replace(/\s+/g, " ");
+  const clone = option.cloneNode(true) as HTMLElement;
+  clone.querySelectorAll("[aria-hidden='true']").forEach((hidden) => hidden.remove());
+  return (clone.textContent ?? "").trim().replace(/\s+/g, " ");
+}
+
+/**
  * One page per element (NEWFRONT-926). The tree wraps a row inside each
  * tree item, so naming both ids alone would report every tree row twice;
  * a search/filter result is the bare row rendered straight into the list,
@@ -36001,20 +36042,70 @@ export class WebNewDriver implements ParityDriver {
     return this.currentPath();
   }
 
+  /** The shared project picker's open option list (its listLabel is "Projects"). */
+  private exportsProjectListbox(): Locator {
+    return this.page.getByRole("listbox", { name: "Projects" });
+  }
+
   async exportsSettingsProjectPickerOpen(): Promise<void> {
-    return todo("exportsSettingsProjectPickerOpen");
+    if ((await this.exportsProjectListbox().count()) > 0) return;
+    if ((await this.page.getByText("No matching results", { exact: true }).count()) > 0) return;
+    await this.exportsSettingsPicker("Exporting project").click({ timeout: WebNewDriver.WAIT_MS });
+    // The lazy project read can trail the popup: settle on the list or
+    // on the picker's empty text, never on a bare timeout.
+    await expect
+      .poll(
+        async () =>
+          (await this.exportsProjectListbox().count()) > 0 ||
+          (await this.page.getByText("No matching results", { exact: true }).count()) > 0,
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .toBe(true);
   }
 
   async exportsSettingsProjectPickerOptions(): Promise<Array<{ key: string; name: string }>> {
-    return todo("exportsSettingsProjectPickerOptions");
+    await this.exportsSettingsProjectPickerOpen();
+    const listbox = this.exportsProjectListbox();
+    if ((await listbox.count()) === 0) return [];
+    const options = listbox.getByRole("option");
+    const total = await options.count();
+    const pairs: Array<{ key: string; name: string }> = [];
+    for (let index = 0; index < total; index += 1) {
+      const name = await options.nth(index).evaluate(exportsProjectOptionName);
+      if (name === "") continue;
+      pairs.push({ key: await this.exportsProjectKeyFor(name), name });
+    }
+    return pairs;
   }
 
-  async exportsSettingsProjectPickerSearch(_query: string): Promise<void> {
-    return todo("exportsSettingsProjectPickerSearch");
+  /**
+   * One option's short key, probed through the trigger: toggle the
+   * option, read the trigger delta, toggle back so the read leaves the
+   * selection exactly as it found it. Multi-select stays open across
+   * picks, so the popup survives the probe.
+   */
+  private async exportsProjectKeyFor(name: string): Promise<string> {
+    const before = await this.exportsSettingsProjectPickerLabel();
+    await this.exportsSettingsProjectPickerToggle(name);
+    await expect
+      .poll(() => this.exportsSettingsProjectPickerLabel(), { timeout: WebNewDriver.WAIT_MS })
+      .not.toBe(before);
+    const after = await this.exportsSettingsProjectPickerLabel();
+    await this.exportsSettingsProjectPickerToggle(name);
+    await expect.poll(() => this.exportsSettingsProjectPickerLabel(), { timeout: WebNewDriver.WAIT_MS }).toBe(before);
+    return exportsProjectKeyDelta(before, after);
   }
 
-  async exportsSettingsProjectPickerToggle(_name: string): Promise<void> {
-    return todo("exportsSettingsProjectPickerToggle");
+  async exportsSettingsProjectPickerSearch(query: string): Promise<void> {
+    await this.exportsSettingsProjectPickerOpen();
+    await this.page.getByRole("combobox", { name: "Search projects" }).fill(query, { timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async exportsSettingsProjectPickerToggle(name: string): Promise<void> {
+    await this.exportsSettingsProjectPickerOpen();
+    await this.exportsProjectListbox()
+      .getByRole("option", { name, exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   /** The select control inside the guide box titled `title` (exports area). */
@@ -36035,15 +36126,36 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async exportsSettingsProjectPickerDisabled(): Promise<boolean> {
-    return todo("exportsSettingsProjectPickerDisabled");
+    return this.exportsSettingsPicker("Exporting project").isDisabled();
+  }
+
+  /** The format picker's open option list (search off, listLabel "Format"). */
+  private exportsFormatListbox(): Locator {
+    return this.page.getByRole("listbox", { name: "Format" });
+  }
+
+  private async exportsFormatEnsureOpen(): Promise<void> {
+    if ((await this.exportsFormatListbox().count()) > 0) return;
+    await this.exportsSettingsPicker("Format").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.exportsFormatListbox().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
 
   async exportsSettingsFormatOptions(): Promise<string[]> {
-    return todo("exportsSettingsFormatOptions");
+    await this.exportsFormatEnsureOpen();
+    const labels = await this.exportsFormatListbox().getByRole("option").allTextContents();
+    // Dismiss through the trigger so the popup never covers the submit.
+    await this.exportsSettingsPicker("Format").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.exportsFormatListbox().waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
+    return labels.map((label) => label.trim().replace(/\s+/g, " ")).filter((label) => label !== "");
   }
 
-  async exportsSettingsFormatSelect(_label: string): Promise<void> {
-    return todo("exportsSettingsFormatSelect");
+  async exportsSettingsFormatSelect(label: string): Promise<void> {
+    await this.exportsFormatEnsureOpen();
+    await this.exportsFormatListbox()
+      .getByRole("option", { name: label, exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    // Single-select closes on pick; the trigger settles on the new label.
+    await expect.poll(() => this.exportsSettingsFormatLabel(), { timeout: WebNewDriver.WAIT_MS }).toBe(label);
   }
 
   async exportsSettingsFormatLabel(): Promise<string> {
@@ -36054,8 +36166,35 @@ export class WebNewDriver implements ParityDriver {
     ).trim();
   }
 
+  /** The idle submit; the in-flight button reads "Exporting..." instead. */
+  private exportsSubmitIdle(): Locator {
+    return this.page.getByRole("button", { name: "Export", exact: true });
+  }
+
+  /** The submit in either state, for label and disabled reads. */
+  private exportsSubmitEither(): Locator {
+    return this.page.getByRole("button", { name: /^(Export|Exporting\.\.\.)$/ }).first();
+  }
+
   async exportsSettingsSubmit(): Promise<void> {
-    return todo("exportsSettingsSubmit");
+    await this.exportsDismissPickerPopups();
+    await this.exportsSubmitIdle().click({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  /**
+   * Settle open picker popups before the submit click (NEWFRONT-772,
+   * EXP-005). Multi-select popups stay open across picks and overlap the
+   * submit, so a click lands on the popup instead. One Escape closes an
+   * open popup (a second clears a search query first); a popup still
+   * open after three is a product defect, not a slow close.
+   */
+  private async exportsDismissPickerPopups(): Promise<void> {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const open = (await this.exportsProjectListbox().count()) + (await this.exportsFormatListbox().count());
+      if (open === 0) return;
+      await this.page.keyboard.press("Escape");
+    }
+    throw new Error("[parity] picker popup stayed open; cannot submit the exports form.");
   }
 
   async exportsSettingsSubmitLabel(): Promise<string> {
@@ -36064,11 +36203,31 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async exportsSettingsSubmitDisabled(): Promise<boolean> {
-    return todo("exportsSettingsSubmitDisabled");
+    return this.exportsSubmitEither().isDisabled();
   }
 
   async exportsSettingsToast(): Promise<{ kind: "success" | "error"; title: string; message: string } | null> {
-    return todo("exportsSettingsToast");
+    // The kit cards carry no kind marker, so the pinned copy classifies:
+    // "Export successful" is the success toast, "Error" plus the retry
+    // prompt is the failure toast. Any other card is not this form's.
+    const cards = this.page.locator('[data-testid="toast-notification"]');
+    const total = await cards.count();
+    for (let index = 0; index < total; index += 1) {
+      const card = cards.nth(index);
+      if (!(await card.isVisible().catch(() => false))) continue;
+      const text = (await card.innerText().catch(() => "")).trim();
+      if (text === "") continue;
+      const lines = text
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0);
+      const title = lines[0] ?? "";
+      if (title === "") continue;
+      const message = lines.slice(1).join(" ");
+      if (/export successful/i.test(title)) return { kind: "success", title, message };
+      if (/^error$/i.test(title) && /unsuccessful/i.test(message)) return { kind: "error", title, message };
+    }
+    return null;
   }
 
   // Previous-exports history reads (NEWFRONT-767, EXP-006..013). Fresh
@@ -36198,36 +36357,80 @@ export class WebNewDriver implements ParityDriver {
     return this.exportsHistorySeen;
   }
 
+  private exportsSubmitCaptured: Array<{ provider: string; project: string[]; multiple: boolean }> = [];
+  private exportsSubmitCaptureOn = false;
+  private exportsSubmitMode: "pass" | "stall" | "fail" = "pass";
+  private exportsSubmitGates: Array<() => void> = [];
+
   async exportsSettingsCaptureSubmit(): Promise<void> {
-    return todo("exportsSettingsCaptureSubmit");
+    this.exportsSubmitCaptured = [];
+    this.exportsSubmitCaptureOn = true;
+    await this.exportsHistoryHook();
   }
 
   async exportsSettingsCapturedSubmits(): Promise<Array<{ provider: string; project: string[]; multiple: boolean }>> {
-    return todo("exportsSettingsCapturedSubmits");
+    return [...this.exportsSubmitCaptured];
   }
 
   async exportsSettingsStallSubmit(): Promise<void> {
-    return todo("exportsSettingsStallSubmit");
+    this.exportsSubmitMode = "stall";
+    await this.exportsHistoryHook();
   }
 
   async exportsSettingsReleaseSubmit(): Promise<void> {
-    return todo("exportsSettingsReleaseSubmit");
+    const gates = this.exportsSubmitGates;
+    this.exportsSubmitGates = [];
+    this.exportsSubmitMode = "pass";
+    gates.forEach((release) => release());
   }
 
   async exportsSettingsFailSubmit(): Promise<void> {
-    return todo("exportsSettingsFailSubmit");
+    this.exportsSubmitMode = "fail";
+    await this.exportsHistoryHook();
   }
 
   async exportsSettingsUnfailSubmit(): Promise<void> {
-    return todo("exportsSettingsUnfailSubmit");
+    this.exportsSubmitMode = "pass";
   }
 
-  /** Single route hook stalling the history read while armed. */
+  /**
+   * Single route hook for the exports endpoints: submit capture/stall/
+   * fail on POST plus the history-read stall on GET. One registration
+   * serves both; unarmed requests fall through untouched.
+   */
   private async exportsHistoryHook(): Promise<void> {
     if (this.exportsHistoryHookInstalled) return;
     this.exportsHistoryHookInstalled = true;
     await this.page.route("**/api/workspaces/*/export-issues**", async (route) => {
-      if (route.request().method() === "GET" && this.exportsHistoryStalled) {
+      const request = route.request();
+      if (request.method() === "POST") {
+        if (this.exportsSubmitCaptureOn) {
+          try {
+            const body = request.postDataJSON() as { provider?: unknown; project?: unknown; multiple?: unknown };
+            this.exportsSubmitCaptured.push({
+              provider: typeof body.provider === "string" ? body.provider : "",
+              project: Array.isArray(body.project)
+                ? body.project.filter((entry): entry is string => typeof entry === "string")
+                : [],
+              multiple: body.multiple === true,
+            });
+          } catch {
+            // Unparseable bodies still forward below.
+          }
+        }
+        if (this.exportsSubmitMode === "fail") {
+          await route.abort();
+          return;
+        }
+        if (this.exportsSubmitMode === "stall") {
+          await new Promise<void>((resolve) => {
+            this.exportsSubmitGates.push(resolve);
+          });
+        }
+        await route.fallback();
+        return;
+      }
+      if (request.method() === "GET" && this.exportsHistoryStalled) {
         await new Promise<void>((resolve) => {
           this.exportsHistoryGates.push(resolve);
         });
@@ -46744,27 +46947,94 @@ export class WebNewDriver implements ParityDriver {
   // --- Appended; existing stubs above are untouched per the shared driver
   // --- contract.
   async pageExportHeading(): Promise<string | null> {
-    return todo("pageExportHeading");
+    const dialog = this.pagesHeaderExportDialog();
+    if ((await dialog.count()) === 0) return null;
+    const heading = dialog.getByRole("heading", { name: "Export page" }).first();
+    if ((await heading.count()) === 0) return null;
+    return ((await heading.innerText().catch(() => "")) ?? "").trim().replace(/\s+/g, " ") || null;
   }
 
-  async pageExportOfferedOptions(_row: PageExportRow): Promise<string[]> {
-    return todo("pageExportOfferedOptions");
+  /** One dialog row's native select (the size row unmounts for Markdown). */
+  private pageExportSelect(row: PageExportRow): Locator {
+    const id = row === "format" ? "page-export-format" : row === "scope" ? "page-export-scope" : "page-export-size";
+    return this.pagesHeaderExportDialog().locator(`#${id}`);
+  }
+
+  async pageExportOfferedOptions(row: PageExportRow): Promise<string[]> {
+    const dialog = this.pagesHeaderExportDialog();
+    await dialog.waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS });
+    const select = this.pageExportSelect(row);
+    if ((await select.count()) === 0) return [];
+    const texts = await select.locator("option").allTextContents();
+    return texts.map((text) => text.trim().replace(/\s+/g, " ")).filter((text) => text !== "");
   }
 
   async pageExportConfirmFull(): Promise<PageExportFile> {
-    return todo("pageExportConfirmFull");
+    const [download] = await Promise.all([
+      this.page.waitForEvent("download", { timeout: WebNewDriver.WAIT_MS }),
+      this.pagesHeaderExportDialog()
+        .getByRole("button", { name: "Export", exact: true })
+        .click({ timeout: WebNewDriver.WAIT_MS }),
+    ]);
+    const localPath = await download.path();
+    if (localPath === null) throw new Error("[parity] page export produced no local file.");
+    const bytes = readFileSync(localPath);
+    return { fileName: download.suggestedFilename(), byteLength: bytes.length, content: bytes.toString("latin1") };
   }
 
   async pageExportFailSave(): Promise<void> {
-    return todo("pageExportFailSave");
+    // The dialog funnels every format through the blob-URL save
+    // primitive; replacing it with a thrower deterministically drives
+    // the failure branch (error notice, dialog stays open). A reload
+    // clears it.
+    await this.page.evaluate(() => {
+      (URL as unknown as { createObjectURL: unknown }).createObjectURL = () => {
+        throw new Error("[parity] pageExportFailSave sabotage");
+      };
+    });
   }
 
   async pageExportFocusedFacts(): Promise<PageExportFocusFacts | null> {
-    return todo("pageExportFocusedFacts");
+    return this.page.evaluate(() => {
+      const focused = document.activeElement as HTMLElement | null;
+      if (focused === null || focused === document.body) return null;
+      const role = focused.getAttribute("role") ?? focused.tagName.toLowerCase();
+      const raw = (focused.getAttribute("aria-label") ?? focused.textContent ?? "").trim().replace(/\s+/g, " ");
+      const style = getComputedStyle(focused);
+      const hasOutline = style.outlineStyle !== "none" && style.outlineStyle !== "hidden";
+      const shadow = style.boxShadow;
+      const blankShadow = /^rgba?\(0,\s*0,\s*0,\s*0\)(\s+0(px)?){3,4}(,\s*rgba?\(0,\s*0,\s*0,\s*0\)(\s+0(px)?){3,4})*$/;
+      const hasShadow = shadow !== "none" && shadow !== "" && !blankShadow.test(shadow);
+      return {
+        label: `${role} :: ${raw.slice(0, 60)}`,
+        indicator: hasOutline ? "outline" : hasShadow ? "shadow" : "none",
+        focusVisible: focused.matches(":focus-visible"),
+      };
+    });
   }
 
   async pageExportGateMarkersPresent(): Promise<boolean> {
-    return todo("pageExportGateMarkersPresent");
+    // Upgrade/paywall/desktop-shell markers on the current surface: tight
+    // patterns only — the scenario fails on any hit, so generic words
+    // stay out.
+    const root = this.page.locator("main");
+    for (const role of ["button", "link", "menuitem"] as const) {
+      const found = root.getByRole(role, { name: /upgrade|premium|enterprise|contact sales|go to cloud/i });
+      const total = await found.count();
+      for (let index = 0; index < total; index += 1) {
+        if (
+          await found
+            .nth(index)
+            .isVisible()
+            .catch(() => false)
+        )
+          return true;
+      }
+    }
+    for (const heading of ["Available on", "Not available in your plan", "Desktop app", "Offline mode"]) {
+      if (await this.isShown(root.getByRole("heading", { name: heading }).first())) return true;
+    }
+    return false;
   }
 
   // --- Cloud Apps catalog (NEWFRONT-439, CLOUD-021–031). Appended;

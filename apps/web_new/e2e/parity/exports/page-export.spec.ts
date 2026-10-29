@@ -58,6 +58,7 @@ import {
   uniqueSuffixForProjects,
   type AuthedSession,
 } from "../helpers/api";
+import { isParityApiRequestPath } from "../helpers/api-traffic";
 import { specTags, specTitle } from "../helpers/tags";
 
 const ROW_016 = ["EXP-016"];
@@ -125,12 +126,10 @@ function captureApiPaths(driver: ParityDriver): { stop: () => string[] } {
   const seen: string[] = [];
   const onRequest = (request: { url(): string }): void => {
     const url = request.url();
-    if (!url.includes("/api/")) return;
-    try {
-      seen.push(new URL(url).pathname);
-    } catch {
-      // Unparseable URLs cannot be endpoint calls; ignore them.
-    }
+    // Endpoint calls only: the classifier keeps dev-server module fetches
+    // (which the oracle's production build never emits) out of the set.
+    if (!isParityApiRequestPath(url)) return;
+    seen.push(new URL(url).pathname);
   };
   driver.page.on("request", onRequest);
   return {
