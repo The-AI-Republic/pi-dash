@@ -24,9 +24,10 @@
 //!   caller needs that shape, the direct call is the whole mechanism.
 //! * Everything else is generic over `sqlx::Executor`, like
 //!   [`super::tokens`]: the member insert, the bulk insert, the role /
-//!   reactivate / deactivate updates and the slug rename all run on the
-//!   caller's pool or on the caller's existing `sqlx` transaction (the
-//!   join-request approve path holds one) with no restructuring.
+//!   reactivate / deactivate updates, the platform insert / overwrite /
+//!   sync / no-stamp-deactivate shapes and the slug rename all run on
+//!   the caller's pool or on the caller's existing `sqlx` transaction
+//!   (the join-request approve path holds one) with no restructuring.
 //!
 //! Per-caller deltas (design D6) ride on the input structs. Two Rust-side
 //! divergences the survey found are preserved verbatim:
@@ -148,8 +149,10 @@ where
 // ---------------------------------------------------------------------------
 
 /// OSS `workspace_members` writes: add / bulk-add / role / reactivate /
-// deactivate. Reads (the pre-write existence probes, the role guards)
-// stay at the call sites.
+/// deactivate, plus the platform insert / overwrite / sync /
+/// no-stamp-deactivate shapes (D6 gap PIDASHCONV-1613). Reads (the
+/// pre-write existence probes, the role guards) stay at the call
+/// sites.
 pub mod members {
     use super::*;
 
@@ -466,6 +469,183 @@ pub mod members {
             .await
             .map(|_| ())
     }
+
+    /// One platform member row to insert: the overlay's
+    /// `insert_workspace_member` shape (the owner
+    /// `WorkspaceMember.objects.create(...)` and the member-event
+    /// create, `ee-overlay` `service.py:415-419,598-603`). Unlike
+    /// [`add`], `is_active` is a caller param — the member-event
+    /// applier computes it from the event/status, reachable as
+    /// `FALSE`. `created_by`/`updated_by`/`company_role` bind `NULL`
+    /// (anonymous webhook crum); `default_props` rides the
+    /// `view_props` value and the checklist triple is always `'{}'`.
+    pub struct NewMemberWithActive<'a> {
+        pub workspace_id: Uuid,
+        pub user_id: Uuid,
+        pub role: i16,
+        pub is_active: bool,
+        pub view_props: &'a serde_json::Value,
+        pub issue_props: &'a serde_json::Value,
+        pub now: DateTime<Utc>,
+    }
+
+    /// The overlay `INSERT` text verbatim (unquoted identifiers kept;
+    /// D6 gap PIDASHCONV-1613).
+    pub(crate) const MEMBER_INSERT_ACTIVE_SQL: &str = "INSERT INTO workspace_members \
+        (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, \
+        member_id, role, company_role, view_props, default_props, issue_props, is_active, \
+        getting_started_checklist, tips, explored_features) \
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)";
+
+    /// The platform member insert. Returns the new row id. Integrity
+    /// errors propagate for the caller's savepoint arm.
+    pub async fn add_with_active<'e, E>(
+        ex: E,
+        member: &NewMemberWithActive<'_>,
+    ) -> Result<Uuid, sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        let id = Uuid::new_v4();
+        let empty = serde_json::Value::Object(serde_json::Map::new());
+        sqlx::query(MEMBER_INSERT_ACTIVE_SQL)
+            .bind(id)
+            .bind(member.now)
+            .bind(member.now)
+            .bind(None::<Uuid>)
+            .bind(None::<Uuid>)
+            .bind(None::<DateTime<Utc>>)
+            .bind(member.workspace_id)
+            .bind(member.user_id)
+            .bind(member.role)
+            .bind(None::<String>)
+            .bind(sqlx::types::Json(member.view_props))
+            .bind(sqlx::types::Json(member.view_props))
+            .bind(sqlx::types::Json(member.issue_props))
+            .bind(member.is_active)
+            .bind(sqlx::types::Json(&empty))
+            .bind(sqlx::types::Json(&empty))
+            .bind(sqlx::types::Json(&empty))
+            .execute(ex)
+            .await?;
+        Ok(id)
+    }
+
+    /// An unconditional member overwrite: the overlay's
+    /// `overwrite_workspace_member` shape (the member-event
+    /// `role` + `is_active` write, `ee-overlay`
+    /// `service.py:605-607`). Always executed, even when nothing
+    /// changed; no `updated_by` stamp.
+    pub struct MemberOverwrite {
+        pub id: Uuid,
+        pub role: i16,
+        pub is_active: bool,
+        pub updated_at: DateTime<Utc>,
+    }
+
+    /// The overlay overwrite text verbatim (D6 gap PIDASHCONV-1613).
+    pub(crate) const OVERWRITE_SQL: &str =
+        "UPDATE workspace_members SET updated_at = $1, role = $2, is_active = $3 WHERE id = $4";
+
+    /// Overwrite one member's role and active flag plus `updated_at`.
+    pub async fn overwrite<'e, E>(ex: E, overwrite: &MemberOverwrite) -> Result<(), sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        sqlx::query(OVERWRITE_SQL)
+            .bind(overwrite.updated_at)
+            .bind(overwrite.role)
+            .bind(overwrite.is_active)
+            .bind(overwrite.id)
+            .execute(ex)
+            .await
+            .map(|_| ())
+    }
+
+    /// A dirty-column member sync: the overlay's `sync_owner_member`
+    /// shape (the owner reactivate, `ee-overlay`
+    /// `service.py:420-429`). Only dirty columns (`role` and/or
+    /// `is_active`) plus `updated_at`; no write when already
+    /// converged. Activation only ever sets `TRUE` (the sync runs
+    /// right after a get-or-create).
+    pub struct MemberSync {
+        pub id: Uuid,
+        pub current_role: i16,
+        pub current_is_active: bool,
+        pub role: i16,
+        pub updated_at: DateTime<Utc>,
+    }
+
+    /// The three overlay sync statements verbatim (D6 gap
+    /// PIDASHCONV-1613).
+    pub(crate) const SYNC_ROLE_SQL: &str =
+        "UPDATE workspace_members SET updated_at = $1, role = $2 WHERE id = $3";
+    pub(crate) const SYNC_ACTIVE_SQL: &str =
+        "UPDATE workspace_members SET updated_at = $1, is_active = $2 WHERE id = $3";
+    pub(crate) const SYNC_ROLE_ACTIVE_SQL: &str =
+        "UPDATE workspace_members SET updated_at = $1, role = $2, is_active = $3 WHERE id = $4";
+
+    /// Sync one member toward `role`/active, writing only dirty
+    /// columns; a converged member emits no statement.
+    pub async fn sync<'e, E>(ex: E, sync: &MemberSync) -> Result<(), sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        let role_dirty = sync.current_role != sync.role;
+        let active_dirty = !sync.current_is_active;
+        if !role_dirty && !active_dirty {
+            return Ok(());
+        }
+        if role_dirty && active_dirty {
+            sqlx::query(SYNC_ROLE_ACTIVE_SQL)
+                .bind(sync.updated_at)
+                .bind(sync.role)
+                .bind(true)
+                .bind(sync.id)
+                .execute(ex)
+                .await?;
+        } else if role_dirty {
+            sqlx::query(SYNC_ROLE_SQL)
+                .bind(sync.updated_at)
+                .bind(sync.role)
+                .bind(sync.id)
+                .execute(ex)
+                .await?;
+        } else {
+            sqlx::query(SYNC_ACTIVE_SQL)
+                .bind(sync.updated_at)
+                .bind(true)
+                .bind(sync.id)
+                .execute(ex)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// The overlay sweep text verbatim (D6 gap PIDASHCONV-1613).
+    pub(crate) const DEACTIVATE_NO_STAMP_SQL: &str =
+        "UPDATE workspace_members SET updated_at = $1, is_active = $2 WHERE id = $3";
+
+    /// The sweep member deactivation (`ee-overlay`
+    /// `service.py:847-849`): a queryset-style
+    /// `save(update_fields=["is_active", "updated_at"])` with no
+    /// `updated_by` stamp.
+    pub async fn deactivate_without_updated_by<'e, E>(
+        ex: E,
+        id: Uuid,
+        updated_at: DateTime<Utc>,
+    ) -> Result<(), sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        sqlx::query(DEACTIVATE_NO_STAMP_SQL)
+            .bind(updated_at)
+            .bind(false)
+            .bind(id)
+            .execute(ex)
+            .await
+            .map(|_| ())
+    }
 }
 
 #[cfg(test)]
@@ -539,6 +719,42 @@ mod tests {
         assert!(!two.contains("$15"));
         // Shared props bind: view and default ride the same placeholder.
         assert_eq!(two.matches("$6").count() + two.matches("$13").count(), 4);
+    }
+
+    #[test]
+    fn platform_shapes_match_overlay_statements() {
+        assert_eq!(
+            MEMBER_INSERT_ACTIVE_SQL,
+            "INSERT INTO workspace_members \
+            (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, \
+            workspace_id, member_id, role, company_role, view_props, default_props, \
+            issue_props, is_active, getting_started_checklist, tips, explored_features) \
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)"
+        );
+        assert_eq!(
+            OVERWRITE_SQL,
+            "UPDATE workspace_members SET updated_at = $1, role = $2, is_active = $3 WHERE id = $4"
+        );
+        assert_eq!(
+            SYNC_ROLE_SQL,
+            "UPDATE workspace_members SET updated_at = $1, role = $2 WHERE id = $3"
+        );
+        assert_eq!(
+            SYNC_ACTIVE_SQL,
+            "UPDATE workspace_members SET updated_at = $1, is_active = $2 WHERE id = $3"
+        );
+        assert_eq!(
+            SYNC_ROLE_ACTIVE_SQL,
+            "UPDATE workspace_members SET updated_at = $1, role = $2, is_active = $3 WHERE id = $4"
+        );
+        assert_eq!(
+            DEACTIVATE_NO_STAMP_SQL,
+            "UPDATE workspace_members SET updated_at = $1, is_active = $2 WHERE id = $3"
+        );
+        // The overlay shapes coincide: both-dirty sync is the overwrite
+        // text, and the sweep deactivate is the active-only sync text.
+        assert_eq!(SYNC_ROLE_ACTIVE_SQL, OVERWRITE_SQL);
+        assert_eq!(DEACTIVATE_NO_STAMP_SQL, SYNC_ACTIVE_SQL);
     }
 
     /// One-connection scratch pool: temp tables are
@@ -987,6 +1203,286 @@ mod tests {
                 .await
                 .expect("read back");
         assert_eq!(row, (true, 15));
+    }
+
+    /// `add_with_active` inserts the full row with the caller flag
+    /// (both arms), NULL audit/company columns, `default_props`
+    /// riding `view_props`, and an empty checklist triple.
+    #[tokio::test]
+    async fn live_add_with_active_both_arms() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        sqlx::query(MEMBERS_DDL)
+            .execute(&pool)
+            .await
+            .expect("temp members");
+        let now: DateTime<Utc> = "2026-10-03T12:00:00+00:00".parse().expect("T0");
+        let view = props();
+        let issue = issue_props();
+        let ws = Uuid::new_v4();
+        for is_active in [true, false] {
+            let id = add_with_active(
+                &pool,
+                &NewMemberWithActive {
+                    workspace_id: ws,
+                    user_id: Uuid::new_v4(),
+                    role: 20,
+                    is_active,
+                    view_props: &view,
+                    issue_props: &issue,
+                    now,
+                },
+            )
+            .await
+            .expect("add_with_active");
+            let row: (i16, bool, Option<Uuid>, Option<Uuid>, Option<String>) = sqlx::query_as(
+                "SELECT role, is_active, created_by_id, updated_by_id, company_role \
+                    FROM workspace_members WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .expect("read back");
+            assert_eq!(row, (20, is_active, None, None, None));
+            let stored: (serde_json::Value, serde_json::Value, serde_json::Value) = sqlx::query_as(
+                "SELECT view_props, default_props, tips FROM workspace_members WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .expect("read back");
+            assert_eq!(stored.0, view);
+            assert_eq!(stored.1, view);
+            assert_eq!(stored.2, serde_json::json!({}));
+        }
+    }
+
+    /// `overwrite` unconditionally sets role + active + `updated_at` by
+    /// id on the caller's transaction, leaves `updated_by` NULL, and
+    /// rewrites even when the values already match.
+    #[tokio::test]
+    async fn live_overwrite_unconditional_on_tx() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        sqlx::query(MEMBERS_DDL)
+            .execute(&pool)
+            .await
+            .expect("temp members");
+        let now: DateTime<Utc> = "2026-10-03T12:00:00+00:00".parse().expect("T0");
+        let later: DateTime<Utc> = "2026-10-04T12:00:00+00:00".parse().expect("T1");
+        let again: DateTime<Utc> = "2026-10-05T12:00:00+00:00".parse().expect("T2");
+        let view = props();
+        let issue = issue_props();
+        let id = add_with_active(
+            &pool,
+            &NewMemberWithActive {
+                workspace_id: Uuid::new_v4(),
+                user_id: Uuid::new_v4(),
+                role: 5,
+                is_active: true,
+                view_props: &view,
+                issue_props: &issue,
+                now,
+            },
+        )
+        .await
+        .expect("add");
+        let mut tx = pool.begin().await.expect("tx");
+        overwrite(
+            &mut *tx,
+            &MemberOverwrite {
+                id,
+                role: 15,
+                is_active: false,
+                updated_at: later,
+            },
+        )
+        .await
+        .expect("overwrite on tx");
+        tx.commit().await.expect("commit");
+        let row: (i16, bool, DateTime<Utc>, Option<Uuid>) = sqlx::query_as(
+            "SELECT role, is_active, updated_at, updated_by_id \
+            FROM workspace_members WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .expect("read back");
+        assert_eq!(row, (15, false, later, None));
+        // Same values again: still executes (the stamp moves).
+        overwrite(
+            &pool,
+            &MemberOverwrite {
+                id,
+                role: 15,
+                is_active: false,
+                updated_at: again,
+            },
+        )
+        .await
+        .expect("overwrite again");
+        let stamped: DateTime<Utc> =
+            sqlx::query_scalar("SELECT updated_at FROM workspace_members WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .expect("read back");
+        assert_eq!(stamped, again);
+    }
+
+    /// `sync` writes only dirty columns (role-only, active-only,
+    /// both) and emits no statement when converged — the `updated_at`
+    /// stamp proves each arm.
+    #[tokio::test]
+    async fn live_sync_dirty_only_and_converged_silent() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        sqlx::query(MEMBERS_DDL)
+            .execute(&pool)
+            .await
+            .expect("temp members");
+        let now: DateTime<Utc> = "2026-10-03T12:00:00+00:00".parse().expect("T0");
+        let later: DateTime<Utc> = "2026-10-04T12:00:00+00:00".parse().expect("T1");
+        let view = props();
+        let issue = issue_props();
+        let ws = Uuid::new_v4();
+        async fn seed(
+            pool: &sqlx::PgPool,
+            ws: Uuid,
+            view: &serde_json::Value,
+            issue: &serde_json::Value,
+            now: DateTime<Utc>,
+            is_active: bool,
+        ) -> Uuid {
+            add_with_active(
+                pool,
+                &NewMemberWithActive {
+                    workspace_id: ws,
+                    user_id: Uuid::new_v4(),
+                    role: 5,
+                    is_active,
+                    view_props: view,
+                    issue_props: issue,
+                    now,
+                },
+            )
+            .await
+            .expect("seed")
+        }
+        async fn read_back(pool: &sqlx::PgPool, id: Uuid) -> (i16, bool, DateTime<Utc>) {
+            sqlx::query_as(
+                "SELECT role, is_active, updated_at FROM workspace_members WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .expect("read back")
+        }
+        // Converged: no statement, stamp untouched.
+        let id = seed(&pool, ws, &view, &issue, now, true).await;
+        sync(
+            &pool,
+            &MemberSync {
+                id,
+                current_role: 5,
+                current_is_active: true,
+                role: 5,
+                updated_at: later,
+            },
+        )
+        .await
+        .expect("sync converged");
+        assert_eq!(read_back(&pool, id).await, (5, true, now));
+        // Role-only.
+        let id = seed(&pool, ws, &view, &issue, now, true).await;
+        sync(
+            &pool,
+            &MemberSync {
+                id,
+                current_role: 5,
+                current_is_active: true,
+                role: 15,
+                updated_at: later,
+            },
+        )
+        .await
+        .expect("sync role");
+        assert_eq!(read_back(&pool, id).await, (15, true, later));
+        // Active-only: reactivates, role untouched.
+        let id = seed(&pool, ws, &view, &issue, now, false).await;
+        sync(
+            &pool,
+            &MemberSync {
+                id,
+                current_role: 5,
+                current_is_active: false,
+                role: 5,
+                updated_at: later,
+            },
+        )
+        .await
+        .expect("sync active");
+        assert_eq!(read_back(&pool, id).await, (5, true, later));
+        // Both dirty.
+        let id = seed(&pool, ws, &view, &issue, now, false).await;
+        sync(
+            &pool,
+            &MemberSync {
+                id,
+                current_role: 5,
+                current_is_active: false,
+                role: 15,
+                updated_at: later,
+            },
+        )
+        .await
+        .expect("sync both");
+        assert_eq!(read_back(&pool, id).await, (15, true, later));
+    }
+
+    /// `deactivate_without_updated_by` flips inactive plus
+    /// `updated_at`, never stamps `updated_by`.
+    #[tokio::test]
+    async fn live_deactivate_without_updated_by() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        sqlx::query(MEMBERS_DDL)
+            .execute(&pool)
+            .await
+            .expect("temp members");
+        let now: DateTime<Utc> = "2026-10-03T12:00:00+00:00".parse().expect("T0");
+        let later: DateTime<Utc> = "2026-10-04T12:00:00+00:00".parse().expect("T1");
+        let view = props();
+        let issue = issue_props();
+        let id = add_with_active(
+            &pool,
+            &NewMemberWithActive {
+                workspace_id: Uuid::new_v4(),
+                user_id: Uuid::new_v4(),
+                role: 20,
+                is_active: true,
+                view_props: &view,
+                issue_props: &issue,
+                now,
+            },
+        )
+        .await
+        .expect("add");
+        deactivate_without_updated_by(&pool, id, later)
+            .await
+            .expect("deactivate");
+        let row: (bool, DateTime<Utc>, Option<Uuid>) = sqlx::query_as(
+            "SELECT is_active, updated_at, updated_by_id FROM workspace_members WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .expect("read back");
+        assert_eq!(row, (false, later, None));
     }
 
     /// `rename` rewrites the slug and touches nothing else.
