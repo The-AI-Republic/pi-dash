@@ -32918,8 +32918,14 @@ export class WebNewDriver implements ParityDriver {
         if (!this.page.isClosed()) throw new Error("[parity] loader delay route failed on an open page.");
       }
     });
+    // The delayed refetch stalls the route prefetch, so the loader the
+    // user sees is the route's pending skeleton (the shared list
+    // skeleton); the analytics sidebar skeleton covers that panel's own
+    // refetch window when it is open. Either one proves the loading
+    // state, the way the oracle's any-pulse watch does.
     const seenPromise = this.page
-      .getByTestId("modules-analytics-sidebar-skeleton")
+      .getByTestId("issues-skeleton-list")
+      .or(this.page.getByTestId("modules-analytics-sidebar-skeleton"))
       .first()
       .waitFor({ timeout: 90_000 })
       .then(
