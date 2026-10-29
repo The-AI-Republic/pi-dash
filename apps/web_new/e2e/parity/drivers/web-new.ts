@@ -43274,6 +43274,34 @@ export class WebNewDriver implements ParityDriver {
   async spaceOpenBoard(anchor: string, query = ""): Promise<void> {
     await this.page.goto(`/spaces/issues/${anchor}${query}`, { waitUntil: "domcontentloaded" });
     await this.page.waitForLoadState("domcontentloaded");
+    await this.spaceReloadBoardOnError();
+  }
+
+  /**
+   * Reload once when the board lands on its error screen instead of its
+   * rows. A fetch that fails under a loaded box strands readers that
+   * would otherwise spin until their timeouts (SPC-004 pins
+   * reload-as-recovery); deliberate failures re-error deterministically
+   * and genuine breakage still fails loudly downstream.
+   */
+  private async spaceReloadBoardOnError(): Promise<void> {
+    const deadline = Date.now() + 5_000;
+    for (;;) {
+      const rows = await this.page
+        .locator('a[id^="issue-"]')
+        .count()
+        .catch(() => 0);
+      if (rows > 0) return;
+      const errorShown = await this.page
+        .getByTestId("space-board-error")
+        .isVisible()
+        .catch(() => false);
+      if (errorShown) break;
+      if (Date.now() >= deadline) return;
+      await this.page.waitForTimeout(250);
+    }
+    await this.page.reload({ timeout: WebNewDriver.WAIT_MS }).catch(() => {});
+    await this.page.waitForLoadState("domcontentloaded", { timeout: WebNewDriver.WAIT_MS }).catch(() => {});
   }
 
   async spaceOpenLanding(): Promise<void> {
@@ -48190,6 +48218,7 @@ export class WebNewDriver implements ParityDriver {
   async spaceCommentOpenIssue(anchor: string, issueName: string, view = "list"): Promise<void> {
     await this.page.goto(`/spaces/issues/${anchor}/?board=${view}`, { waitUntil: "domcontentloaded" });
     await this.page.waitForLoadState("domcontentloaded");
+    await this.spaceReloadBoardOnError();
     const card = this.page.getByText(issueName, { exact: true }).first();
     await card.waitFor({ timeout: 120_000 });
     const listed = this.page
