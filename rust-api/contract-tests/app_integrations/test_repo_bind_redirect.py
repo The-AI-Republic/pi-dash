@@ -44,6 +44,9 @@ Each test seeds its own world + PAT account (Fernet ciphertext under the
 server's SECRET_KEY, production shape) and deletes the server-created
 binding rows on teardown. Running against a server without the stub env
 skips every test (loop-membership gate on fresh MITM hits).
+
+PIDASHCONV-1642 adds a rebind case (changed repo_url over a stale bind)
+on the same stub: ``test_rebind_changed_repo_url_rewrites_project``.
 """
 
 from __future__ import annotations
@@ -278,6 +281,64 @@ def test_bind_renamed_github_repo_follows_301(
     assert row["full_name"] == f"{NEW_OWNER}/{NEW_NAME}", row
     assert row["base_branch"] == "main", row
     assert row["repo_url"] == REPO_PAYLOAD["clone_url"], row
+
+
+STALE_REPO_URL = "https://github.com/stale-owner/stale-repo.git"
+
+
+def seed_stale_bind(seeder, db, world) -> tuple[str, str]:
+    """Seed a previous bind with a stale project row; return account/binding ids.
+
+    The project points at ``STALE_REPO_URL`` with ``base_branch`` filled,
+    so a fresh bind changes ``repo_url`` only — the (Some, None) arm of
+    the shared git-bind project touch (PIDASHCONV-1642).
+    """
+    ws_id, proj_id = world["workspace"]["id"], world["project"]["id"]
+    owner_id = world["owner"]["id"]
+    account = seeder.create_git_provider_account(ws_id, provider="github")
+    _store_token(seeder, account["id"])
+    old_repo = seeder.create_git_repository()
+    old_binding = seeder.create_git_binding(
+        ws_id, proj_id, owner_id, old_repo["id"], account["id"]
+    )
+    db.execute(
+        "UPDATE projects SET repo_url = %s, base_branch = 'main' WHERE id = %s",
+        (STALE_REPO_URL, proj_id),
+    )
+    return account["id"], old_binding["id"]
+
+
+def assert_rebound_project_row(db, project_id: str, old_binding_id: str) -> None:
+    """The rebind rewrote the project row and replaced the binding."""
+    row = db.fetchone(
+        "SELECT repo_url, base_branch FROM projects WHERE id = %s", (project_id,)
+    )
+    assert row is not None, "project row missing"
+    assert row["repo_url"] == REPO_PAYLOAD["clone_url"], row
+    assert row["base_branch"] == "main", row
+    bindings = db.fetchall(
+        "SELECT id FROM git_repository_bindings WHERE project_id = %s", (project_id,)
+    )
+    assert len(bindings) == 1, bindings
+    assert bindings[0]["id"] != old_binding_id, bindings
+
+
+def test_rebind_changed_repo_url_rewrites_project(
+    admin, bind_world, seeder, db, redirect_mitm
+):
+    """Rebind with a changed repo_url rewrites the project row (PIDASHCONV-1642)."""
+    world = bind_world
+    account_id, old_binding_id = seed_stale_bind(seeder, db, world)
+    url = proj_url(world, "repository", "bind")
+    before = len(redirect_mitm.snapshot())
+    response = admin.post(
+        url, json={"repo_url": f"https://github.com/{OLD_OWNER}/{OLD_NAME}"}
+    )
+    fresh = redirect_mitm.snapshot()[before:]
+    _gate_on_mitm(fresh)
+    assert response.status_code == 201, response.text[:500]
+    assert_bind_renamed_ok(response.json(), account_id)
+    assert_rebound_project_row(db, world["project"]["id"], old_binding_id)
 
 
 def test_bind_gitlab_redirect_fails_closed(admin, bind_world, seeder, redirect_mitm):

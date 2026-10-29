@@ -485,16 +485,11 @@ const SOFT_DELETE_PROJECT_SQL: &str = "UPDATE \"projects\" SET \"deleted_at\" = 
 /// only the changed columns plus `updated_at`. One twin serves the app
 /// and v1 `apply_bind` copies (their builders were byte-identical).
 ///
-/// Ported quirk, preserved verbatim: the placeholder scheme hardcodes
-/// `repo_url = $2` and numbers the rest from `sets.len() + 3`, so every
-/// arm references an unbound `$N` (`(None, Some)` emits `base_branch =
-/// $3, updated_at = $4` with three binds; `(Some, None)` emits
-/// `updated_at = $4` with three binds; `(Some, Some)` emits `base_branch
-/// = $4, updated_at = $5` with four binds) and Postgres raises 08P01.
-/// Django builds `update_fields` correctly for the same inputs, so this
-/// is a Rust divergence from Django's single behaviour — filed as
-/// PIDASHCONV-1642 (design D6), fixed there or not at all; this twin
-/// keeps the current bytes.
+/// Placeholders number sequentially: `$1` is the project id, then one
+/// placeholder per changed field in arm order (`repo_url`,
+/// `base_branch`), then `updated_at` last — every referenced `$N` is
+/// bound, matching Django's `update_fields` numbering (PIDASHCONV-1642
+/// fixed the skipped `$N` the 1629 move preserved verbatim).
 pub async fn save_bind_project_update<'e, E>(
     ex: E,
     project_id: Uuid,
@@ -521,19 +516,23 @@ where
 
 /// The bind statement for [`save_bind_project_update`]: only the
 /// changed columns plus `updated_at`. `None` when nothing changed.
-/// Carries the ported placeholder quirk documented on the twin.
+/// `$1` is the id; the SET list numbers `$2…` sequentially in arm
+/// order so every referenced placeholder is bound.
 fn bind_project_update_sql(repo_url: bool, base_branch: bool) -> Option<String> {
     if !repo_url && !base_branch {
         return None;
     }
     let mut sets: Vec<String> = Vec::new();
+    let mut placeholder = 2u32;
     if repo_url {
-        sets.push("repo_url = $2".to_owned());
+        sets.push(format!("repo_url = ${placeholder}"));
+        placeholder += 1;
     }
     if base_branch {
-        sets.push(format!("base_branch = ${}", sets.len() + 3));
+        sets.push(format!("base_branch = ${placeholder}"));
+        placeholder += 1;
     }
-    sets.push(format!("updated_at = ${}", sets.len() + 3));
+    sets.push(format!("updated_at = ${placeholder}"));
     Some(format!(
         "UPDATE projects SET {} WHERE id = $1",
         sets.join(", ")
@@ -2858,21 +2857,137 @@ mod tests {
             ),
             "UPDATE \"projects\" SET \"updated_at\" = $1, \"updated_by_id\" = $2, \"name\" = $3 WHERE \"id\" = $4 AND \"deleted_at\" IS NULL"
         );
-        // The bind shell, quirk included (see the twin doc): every arm
-        // references an unbound `$N`; unchanged is no statement.
+        // The bind shell: sequential `$N`, every referenced
+        // placeholder bound; unchanged is no statement.
         assert_eq!(bind_project_update_sql(false, false), None);
         assert_eq!(
             bind_project_update_sql(true, false).as_deref(),
-            Some("UPDATE projects SET repo_url = $2, updated_at = $4 WHERE id = $1")
+            Some("UPDATE projects SET repo_url = $2, updated_at = $3 WHERE id = $1")
         );
         assert_eq!(
             bind_project_update_sql(false, true).as_deref(),
-            Some("UPDATE projects SET base_branch = $3, updated_at = $4 WHERE id = $1")
+            Some("UPDATE projects SET base_branch = $2, updated_at = $3 WHERE id = $1")
         );
         assert_eq!(
             bind_project_update_sql(true, true).as_deref(),
-            Some("UPDATE projects SET repo_url = $2, base_branch = $4, updated_at = $5 WHERE id = $1")
+            Some("UPDATE projects SET repo_url = $2, base_branch = $3, updated_at = $4 WHERE id = $1")
         );
+    }
+
+    #[test]
+    fn bind_project_update_binds_every_placeholder() {
+        // (repo_url, base_branch, binds incl. id + updated_at).
+        // Catches both a skipped `$N` below the max and a reference
+        // past the binds (PIDASHCONV-1642).
+        for (repo, branch, binds) in [(true, false, 3), (false, true, 3), (true, true, 4)] {
+            let sql = bind_project_update_sql(repo, branch).expect("arm builds");
+            for n in 1..=binds {
+                assert!(sql.contains(&format!("${n}")), "{sql} binds ${n}");
+            }
+            assert!(
+                !sql.contains(&format!("${}", binds + 1)),
+                "{sql} references unbound ${}",
+                binds + 1
+            );
+        }
+    }
+
+    /// All three bind arms execute (PIDASHCONV-1642): each writes its
+    /// columns plus `updated_at` and leaves the other column alone;
+    /// the no-change arm runs no statement at all.
+    #[tokio::test]
+    async fn live_bind_project_update_executes_all_arms() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        sqlx::query(PROJECTS_DDL)
+            .execute(&pool)
+            .await
+            .expect("temp projects");
+        let id = Uuid::new_v4();
+        let ws = Uuid::new_v4();
+        let t0: DateTime<Utc> = "2026-10-28T12:00:00+00:00".parse().expect("T0");
+        let t1: DateTime<Utc> = "2026-10-29T12:00:00+00:00".parse().expect("T1");
+        sqlx::query(
+            "INSERT INTO projects (id, created_at, updated_at, name, description, network, \
+             workspace_id, identifier, module_view, cycle_view, issue_views_view, page_view, \
+             intake_view, is_time_tracking_enabled, is_issue_type_enabled, \
+             guest_view_all_features, archive_in, close_in, logo_props, is_default, timezone, \
+             repo_url, base_branch, agent_default_interval_seconds, agent_default_max_ticks, \
+             agent_review_default_interval_seconds, agent_test_default_interval_seconds, \
+             agent_ticking_enabled, default_agent_executor, members_can_edit_states) \
+             VALUES ($1, $2, $2, 'Bind', '', 2, $3, 'BIND', false, false, false, true, false, \
+             false, false, false, 30, 30, '{}', false, 'UTC', $4, $5, 60, 10, 60, 60, true, \
+             'local_runner', true)",
+        )
+        .bind(id)
+        .bind(t0)
+        .bind(ws)
+        .bind("https://example.test/old.git")
+        .bind("develop")
+        .execute(&pool)
+        .await
+        .expect("seed project");
+        save_bind_project_update(&pool, id, Some("https://example.test/new.git"), None, t1)
+            .await
+            .expect("repo arm");
+        assert_eq!(
+            read_bind_row(&pool, id).await,
+            (
+                "https://example.test/new.git".to_owned(),
+                "develop".to_owned(),
+                t1
+            )
+        );
+        save_bind_project_update(&pool, id, None, Some("main"), t1)
+            .await
+            .expect("branch arm");
+        assert_eq!(
+            read_bind_row(&pool, id).await,
+            (
+                "https://example.test/new.git".to_owned(),
+                "main".to_owned(),
+                t1
+            )
+        );
+        save_bind_project_update(
+            &pool,
+            id,
+            Some("https://example.test/both.git"),
+            Some("trunk"),
+            t1,
+        )
+        .await
+        .expect("both arm");
+        assert_eq!(
+            read_bind_row(&pool, id).await,
+            (
+                "https://example.test/both.git".to_owned(),
+                "trunk".to_owned(),
+                t1
+            )
+        );
+        save_bind_project_update(&pool, id, None, None, t0)
+            .await
+            .expect("no-op arm");
+        assert_eq!(
+            read_bind_row(&pool, id).await,
+            (
+                "https://example.test/both.git".to_owned(),
+                "trunk".to_owned(),
+                t1
+            )
+        );
+    }
+
+    async fn read_bind_row(pool: &sqlx::PgPool, id: Uuid) -> (String, String, DateTime<Utc>) {
+        sqlx::query_as::<_, (String, String, DateTime<Utc>)>(
+            "SELECT repo_url, base_branch, updated_at FROM projects WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .expect("read back")
     }
 
     #[test]
