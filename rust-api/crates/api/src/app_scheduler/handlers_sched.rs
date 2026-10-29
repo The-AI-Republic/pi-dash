@@ -58,7 +58,7 @@
 //!   choice as the `app_pages` `char_internal` precedent).
 
 use axum::extract::{Path, Request, State};
-use axum::http::{header, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Extension, Json, Router};
@@ -73,6 +73,9 @@ use pidash_services::app_scheduler::{queries, shape};
 use super::gate::{self, Gate};
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
+use crate::uuid_path::{classify_uuid_segment, UuidSegment};
+use pidash_compat::db::is_integrity_error;
+use pidash_compat::response::json_response;
 
 // ---------------------------------------------------------------------------
 // Exact bodies
@@ -124,14 +127,6 @@ fn error_envelope(message: String) -> Value {
     let mut body = Map::new();
     body.insert("error".to_owned(), Value::String(message));
     Value::Object(body)
-}
-
-fn json_response(status: StatusCode, body: &str) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body.to_owned()))
-        .expect("scheduler-handler response")
 }
 
 impl IntoResponse for Denial {
@@ -321,13 +316,13 @@ fn char_field(
         Value::Number(number) => number.to_string(),
         _ => return Err(vec![INVALID_STRING_MESSAGE.to_owned()]),
     };
-    if raw.is_empty() || raw.trim().is_empty() {
+    if raw.is_empty() || raw.trim_matches(super::is_py_strip_ws).is_empty() {
         if !allow_blank {
             return Err(vec![BLANK_MESSAGE.to_owned()]);
         }
         return Ok(String::new());
     }
-    let stripped = raw.trim().to_owned();
+    let stripped = raw.trim_matches(super::is_py_strip_ws).to_owned();
     let mut errors = Vec::new();
     if let Some(max) = max_length {
         if stripped.chars().count() > max {
@@ -670,16 +665,6 @@ async fn read_json_body(req: Request) -> Result<Value, Denial> {
     serde_json::from_slice(&bytes).map_err(|_| Denial::BadDetail(JSON_PARSE_ERROR.to_owned()))
 }
 
-/// Whether a sqlx failure is an integrity violation (unique, FK,
-/// not-null, check — SQLSTATE class `23`), which Django's
-/// `handle_exception` answers 400 for (`app_pages` precedent).
-fn is_integrity_error(error: &sqlx::Error) -> bool {
-    error
-        .as_database_error()
-        .and_then(|db| db.code())
-        .is_some_and(|code| code.starts_with("23"))
-}
-
 /// `GET /api/workspaces/<slug>/schedulers/` (`views.py:55-72`): any
 /// workspace member lists the workspace's schedulers ordered by name,
 /// each with its annotated `active_binding_count`.
@@ -827,8 +812,14 @@ pub async fn scheduler_detail(
     extension: Option<Extension<SessionHandle>>,
     req: Request,
 ) -> Response {
-    let Ok(scheduler_id) = scheduler_raw.parse::<uuid::Uuid>() else {
-        return crate::edge::proxy(State(state), req).await;
+    let scheduler_id = match classify_uuid_segment(&scheduler_raw) {
+        UuidSegment::Canonical(id) => id,
+        // Django's `<uuid:>` converter routes only the canonical
+        // spelling; non-canonical and garbage proxy to its resolver
+        // 404 (PIDASHCONV-1475).
+        UuidSegment::NonCanonical | UuidSegment::Garbage => {
+            return crate::edge::proxy(State(state), req).await;
+        }
     };
     let gate = match gate::resolve_gate(&state, &Gate::WorkspaceAdmin, &slug, None, extension).await
     {
@@ -875,8 +866,14 @@ pub async fn scheduler_patch(
     extension: Option<Extension<SessionHandle>>,
     req: Request,
 ) -> Response {
-    let Ok(scheduler_id) = scheduler_raw.parse::<uuid::Uuid>() else {
-        return crate::edge::proxy(State(state), req).await;
+    let scheduler_id = match classify_uuid_segment(&scheduler_raw) {
+        UuidSegment::Canonical(id) => id,
+        // Django's `<uuid:>` converter routes only the canonical
+        // spelling; non-canonical and garbage proxy to its resolver
+        // 404 (PIDASHCONV-1475).
+        UuidSegment::NonCanonical | UuidSegment::Garbage => {
+            return crate::edge::proxy(State(state), req).await;
+        }
     };
     let gate = match gate::resolve_gate(&state, &Gate::WorkspaceAdmin, &slug, None, extension).await
     {
@@ -1013,8 +1010,14 @@ pub async fn scheduler_delete(
     extension: Option<Extension<SessionHandle>>,
     req: Request,
 ) -> Response {
-    let Ok(scheduler_id) = scheduler_raw.parse::<uuid::Uuid>() else {
-        return crate::edge::proxy(State(state), req).await;
+    let scheduler_id = match classify_uuid_segment(&scheduler_raw) {
+        UuidSegment::Canonical(id) => id,
+        // Django's `<uuid:>` converter routes only the canonical
+        // spelling; non-canonical and garbage proxy to its resolver
+        // 404 (PIDASHCONV-1475).
+        UuidSegment::NonCanonical | UuidSegment::Garbage => {
+            return crate::edge::proxy(State(state), req).await;
+        }
     };
     let gate = match gate::resolve_gate(&state, &Gate::WorkspaceAdmin, &slug, None, extension).await
     {
@@ -1911,5 +1914,27 @@ mod tests {
         );
         assert_eq!(message.kwargs.len(), 1);
         assert_eq!(message.kwargs.get("using"), Some(&Value::Null));
+    }
+
+    #[test]
+    fn char_field_strips_python_whitespace() {
+        // DRF `CharField` strips with Python `str.strip()`, which also removes
+        // U+001C-U+001F (FS/GS/RS/US); Rust `char::is_whitespace` does not
+        // (PIDASHCONV-1203). Both the blank check and the stripped value must
+        // use the ported predicate so create/PATCH match Django.
+        for sep in ['\u{1c}', '\u{1d}', '\u{1e}', '\u{1f}'] {
+            let padded = Value::String(format!("{sep}dup{sep}"));
+            assert_eq!(
+                char_field(&padded, false, Some(64)).unwrap(),
+                "dup",
+                "U+{:04X} padding must strip like Python",
+                sep as u32
+            );
+        }
+        // A lone control character strips to empty: DRF blank error.
+        assert_eq!(
+            char_field(&Value::String("\u{1f}".to_owned()), false, Some(255)),
+            Err(vec![BLANK_MESSAGE.to_owned()])
+        );
     }
 }

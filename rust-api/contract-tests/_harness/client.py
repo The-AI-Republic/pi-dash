@@ -115,18 +115,23 @@ def _session_auth_hash(password_field: str, secret: str) -> str:
     return hmac.new(derived, password_field.encode(), hashlib.sha256).hexdigest()
 
 
-def forge_session_key(user: SeededUser) -> str:
-    """Insert a live session row for ``user``; return its cookie value."""
+def forge_session_key(user: SeededUser, extra: dict | None = None) -> str:
+    """Insert a live session row for ``user``; return its cookie value.
+
+    ``extra`` merges additional claims into the signed payload (e.g. the
+    desktop marker); omitted by default, so existing callers forge plain
+    browser sessions.
+    """
     secret = _contract_secret()
     key = "".join(secrets.choice("abcdefghijklmnopqrstuvwxyz0123456789") for _ in range(32))
-    data = _sign_session(
-        {
-            "_auth_user_id": user.id,
-            "_auth_user_backend": SESSION_BACKEND,
-            "_auth_user_hash": _session_auth_hash(user.password_hash, secret),
-        },
-        secret,
-    )
+    payload = {
+        "_auth_user_id": user.id,
+        "_auth_user_backend": SESSION_BACKEND,
+        "_auth_user_hash": _session_auth_hash(user.password_hash, secret),
+    }
+    if extra:
+        payload.update(extra)
+    data = _sign_session(payload, secret)
     expires = datetime.now(timezone.utc) + timedelta(seconds=SESSION_AGE_SECONDS)
     with db_cursor() as cur:
         cur.execute(
@@ -137,9 +142,59 @@ def forge_session_key(user: SeededUser) -> str:
     return key
 
 
+def rewrite_session(
+    key: str,
+    user: SeededUser,
+    *,
+    auth_hash: str | None = None,
+    backend: str | None = None,
+) -> None:
+    """Rewrite a live session row's signed payload (tamper tests).
+
+    ``auth_hash``/``backend`` replace the corresponding claim; omitted
+    claims keep the values a real login would carry. The server-side
+    Django auth middleware must treat a mismatching hash or backend as an
+    anonymous request and flush the row.
+    """
+    secret = _contract_secret()
+    data = _sign_session(
+        {
+            "_auth_user_id": user.id,
+            "_auth_user_backend": SESSION_BACKEND if backend is None else backend,
+            "_auth_user_hash": (
+                _session_auth_hash(user.password_hash, secret)
+                if auth_hash is None
+                else auth_hash
+            ),
+        },
+        secret,
+    )
+    with db_cursor() as cur:
+        cur.execute(
+            "UPDATE sessions SET session_data = %s WHERE session_key = %s",
+            (data, key),
+        )
+        assert cur.rowcount == 1, f"no live session row for {key!r}"
+
+
 def login_client(user: SeededUser) -> httpx.Client:
     client = httpx.Client(base_url=config_base_url(), timeout=30.0)
     client.cookies.set(SESSION_COOKIE, forge_session_key(user))
+    return client
+
+
+def login_desktop_client(user: SeededUser) -> httpx.Client:
+    """Authenticated client whose session carries the desktop marker.
+
+    Mirrors what the desktop sign-in flow stamps
+    (``ee/authentication/desktop.py``: ``pidash_client=desktop``), so
+    desktop-only endpoints (agent-profile/token) serve instead of 403ing
+    with ``desktop_session_required``.
+    """
+    client = httpx.Client(base_url=config_base_url(), timeout=30.0)
+    client.cookies.set(
+        SESSION_COOKIE, forge_session_key(user, extra={"pidash_client": "desktop"})
+    )
     return client
 
 

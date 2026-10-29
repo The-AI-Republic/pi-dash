@@ -36,12 +36,14 @@ from __future__ import annotations
 import ast
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
 import threading
 import time
 import uuid
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
@@ -51,6 +53,7 @@ from _harness import broker_probe, celery_wire, taskspec
 from _harness import redis as redis_helper
 from _harness import seed as seed_helpers
 from _harness.auth import api_client, login_session_cookie
+from _harness.db import insert_row
 from _harness.db import wait_for_condition as wait_for
 
 RUN_TURN = "assistant.run_turn"
@@ -67,8 +70,30 @@ SLOW_INTERVAL = 20.0
 SOFT_LIMIT_SECS = 300
 SWEEP_CUTOFF_SECS = 390
 
+#: Configured soft limit survival (PIDASHCONV-1458): the stub streams one
+#: chunk every 20s for ~400s — past the 300s default kill point, inside a
+#: 600s configured soft limit, the 600s per-request client timeout, and the
+#: 960s sweep cutoff the worker-plane job's ASSISTANT_TURN_HARD_LIMIT=900
+#: yields.
+SOFT_STREAM_CHUNKS = 20
+SOFT_STREAM_INTERVAL = 20.0
+CONFIGURED_SOFT_LIMIT_SECS = 600
+
+#: MCP-entry timeout (PIDASHCONV-1572): the turn's ten MCP servers accept
+#: the TCP connection but never answer, and toolsets are entered
+#: sequentially at ~10s (the pinned init timeout) each, so entry spans
+#: ~100s. The test-scoped prefork worker boots with a 60s soft limit, which
+#: deterministically lands mid-entry (never past it, never the sweep), and
+#: the turn fails turn_timeout.
+MCP_ENTRY_SOFT_LIMIT_SECS = 60
+MCP_ENTRY_HANGING_SERVERS = 10
+
 TIMEOUT_CODE = "turn_timeout"
 TIMEOUT_DETAIL = "The assistant took too long to respond."
+
+#: The sweep's failure detail (``tasks.py`` ``sweep_stale_turns``): distinct
+#: from the soft-limit detail above.
+SWEEP_TIMEOUT_DETAIL = "The assistant turn did not finish (worker lost)."
 
 
 # --------------------------------------------------------------------------- #
@@ -192,13 +217,17 @@ def _seed_member(db_conn, tag: str):
     return user, workspace, api_client(_base_url(), cookie)
 
 
-def _seed_turn_trio(db_conn, user, workspace, *, status="queued", started_at=None):
+def _seed_turn_trio(db_conn, user, workspace, *, status="queued", started_at=None,
+                    thread_id=None):
     """Replicate the message-POST 202 rows (``views/messages.py``).
 
     Thread (with ``active_turn`` set) + user message (seq 1, completed) +
     turn pointing at the message. Returns (thread_id, turn_id, message_id).
+    ``thread_id`` pins the thread when the caller must subscribe to its
+    channel before the rows exist (the sweep-publish test).
     """
-    thread_id, turn_id, message_id = (str(uuid.uuid4()) for _ in range(3))
+    thread_id = thread_id or str(uuid.uuid4())
+    turn_id, message_id = (str(uuid.uuid4()) for _ in range(2))
     now = _now_iso()
     # FK order (mirroring the 202 path's create order): thread first with no
     # active turn, then the turn, then the user message, then the backlinks.
@@ -233,6 +262,119 @@ def _seed_turn_trio(db_conn, user, workspace, *, status="queued", started_at=Non
             (turn_id, thread_id),
         )
     return thread_id, turn_id, message_id
+
+
+#: History blobs for the undecodable-turn test (PIDASHCONV-1569): the exact
+#: ``ModelMessagesTypeAdapter.dump_python(..., mode="json")`` shapes (inner
+#: timestamps are cosmetic). The valid blob is a user-prompt request plus a
+#: text response; the bad blob is a response carrying a ``thinking`` part,
+#: which pydantic-ai stores when a reasoning provider returns
+#: ``reasoning_content``.
+_VALID_USER_TEXT = "valid user text 1569"
+_VALID_ASST_TEXT = "valid assistant text 1569"
+_THINK_TEXT = "thinking deliberation 1569"
+
+_VALID_HISTORY_BLOB = [
+    {
+        "parts": [
+            {
+                "content": _VALID_USER_TEXT,
+                "timestamp": "2026-10-27T10:00:00Z",
+                "part_kind": "user-prompt",
+            }
+        ],
+        "timestamp": None,
+        "instructions": None,
+        "kind": "request",
+        "run_id": None,
+        "conversation_id": None,
+        "metadata": None,
+    },
+    {
+        "parts": [
+            {
+                "content": _VALID_ASST_TEXT,
+                "id": None,
+                "provider_name": None,
+                "provider_details": None,
+                "part_kind": "text",
+            }
+        ],
+        "usage": {
+            "input_tokens": 1,
+            "cache_write_tokens": 0,
+            "cache_read_tokens": 0,
+            "output_tokens": 1,
+            "input_audio_tokens": 0,
+            "cache_audio_read_tokens": 0,
+            "output_audio_tokens": 0,
+            "details": {},
+        },
+        "model_name": "oracle-stub",
+        "timestamp": "2026-10-27T10:00:01Z",
+        "kind": "response",
+        "provider_name": None,
+        "provider_url": None,
+        "provider_details": None,
+        "provider_response_id": None,
+        "finish_reason": None,
+        "run_id": None,
+        "conversation_id": None,
+        "metadata": None,
+        "state": "complete",
+    },
+]
+
+_THINKING_HISTORY_BLOB = [
+    {
+        "parts": [
+            {
+                "content": _THINK_TEXT,
+                "id": None,
+                "signature": None,
+                "provider_name": None,
+                "provider_details": None,
+                "part_kind": "thinking",
+            }
+        ],
+        "usage": {
+            "input_tokens": 0,
+            "cache_write_tokens": 0,
+            "cache_read_tokens": 0,
+            "output_tokens": 0,
+            "input_audio_tokens": 0,
+            "cache_audio_read_tokens": 0,
+            "output_audio_tokens": 0,
+            "details": {},
+        },
+        "model_name": "oracle-stub",
+        "timestamp": "2026-10-27T10:00:02Z",
+        "kind": "response",
+        "provider_name": None,
+        "provider_url": None,
+        "provider_details": None,
+        "provider_response_id": None,
+        "finish_reason": None,
+        "run_id": None,
+        "conversation_id": None,
+        "metadata": None,
+        "state": "complete",
+    },
+]
+
+
+def _seed_completed_turn(db_conn, thread_id, blob, created_at):
+    """A stored COMPLETED turn with the given ``model_messages`` blob."""
+    with db_conn.cursor() as cur:
+        cur.execute(
+            # model_used / error_code / error_detail are Django-side
+            # defaults (""), not DB defaults: raw SQL must pass them.
+            "INSERT INTO assistant_turn (id, thread_id, status, model_used, "
+            "error_code, error_detail, model_messages, created_at, started_at, "
+            "completed_at) VALUES (%s, %s, 'completed', 'oracle-stub', '', '', "
+            "%s::jsonb, %s, %s, %s)",
+            (str(uuid.uuid4()), thread_id, json.dumps(blob), created_at, created_at, created_at),
+        )
 
 
 def _turn_row(db_conn, turn_id):
@@ -307,11 +449,18 @@ class _StubProvider:
     by default) ending with ``data: [DONE]``. The slow stream lets the cancel
     test set the cancel key mid-turn: the worker only observes cancellation
     when the next event arrives, so chunks must keep coming.
+
+    ``tool_call`` (``(name, args)``) makes the *first* streaming request emit
+    a single tool call instead of text (PIDASHCONV-1250): one delta carrying
+    the complete call, closed by a ``tool_calls`` finish. Later requests
+    stream ``chunks`` as usual, so the turn completes after the tool runs.
     """
 
-    def __init__(self, chunks=("Hello", " world"), interval=1.0):
+    def __init__(self, chunks=("Hello", " world"), interval=1.0, tool_call=None):
         self.chunks = list(chunks)
         self.interval = interval
+        self.tool_call = tool_call
+        self._tool_call_sent = False
         self.requests = []
         self._server = None
         self._thread = None
@@ -332,11 +481,47 @@ class _StubProvider:
                     payload = json.loads(body or b"{}")
                 except ValueError:
                     payload = {}
-                stub.requests.append({"path": self.path, "stream": payload.get("stream")})
+                stub.requests.append(
+                    {"path": self.path, "stream": payload.get("stream"), "body": payload}
+                )
                 if self.path.endswith("/chat/completions") and payload.get("stream"):
                     self.send_response(200)
                     self.send_header("Content-Type", "text/event-stream")
                     self.end_headers()
+                    if stub.tool_call is not None and not stub._tool_call_sent:
+                        stub._tool_call_sent = True
+                        name, args = stub.tool_call
+                        call_delta = {
+                            "role": "assistant",
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_stateless_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": name,
+                                        "arguments": json.dumps(args),
+                                    },
+                                }
+                            ],
+                        }
+                        for delta, finish in ((call_delta, None), ({}, "tool_calls")):
+                            time.sleep(stub.interval)
+                            self.wfile.write(
+                                (
+                                    'data: {"id":"stub","object":"chat.completion.chunk",'
+                                    '"created":0,"model":"oracle-stub","choices":[{"index":0,'
+                                    '"delta":'
+                                    + json.dumps(delta)
+                                    + ',"finish_reason":'
+                                    + json.dumps(finish)
+                                    + "}]}\n\n"
+                                ).encode()
+                            )
+                            self.wfile.flush()
+                        self.wfile.write(b"data: [DONE]\n\n")
+                        self.wfile.flush()
+                        return
                     for chunk in stub.chunks:
                         time.sleep(stub.interval)
                         self.wfile.write(
@@ -402,16 +587,22 @@ class _PreforkWorker:
     solo worker on the same broker, and is terminated on stop. Boot takes
     ~30s (Django import + pool fork); readiness is the consumer's mingle
     sync plus a pool grace.
+
+    ``extra_env`` overrides the inherited environment for the worker
+    process (PIDASHCONV-1458: the configured-soft-limit test boots with
+    ``ASSISTANT_TURN_SOFT_LIMIT=600`` while the job default stays 300).
     """
 
-    def __init__(self):
+    def __init__(self, extra_env=None):
         self.queue = f"contract-slow-{uuid.uuid4().hex[:8]}"
+        self.extra_env = dict(extra_env or {})
         self._proc = None
         self._log_path = None
 
     def start(self):
         env = dict(os.environ)
         env["DJANGO_SETTINGS_MODULE"] = "pi_dash.settings.local"
+        env.update(self.extra_env)
         handle, self._log_path = tempfile.mkstemp(
             prefix="contract-slow1253-", suffix=".log"
         )
@@ -432,7 +623,10 @@ class _PreforkWorker:
         while time.monotonic() < deadline:
             with open(self._log_path, errors="replace") as fh:
                 tail = fh.read()
-            if "mingle: sync complete" in tail:
+            # "sync complete" when neighbors answered (CI: the shared solo
+            # worker is on the broker), "all alone" without (a local run
+            # with no other worker) — either means the consumer is up.
+            if "mingle: sync complete" in tail or "mingle: all alone" in tail:
                 time.sleep(10)
                 return self.queue
             if self._proc.poll() is not None:
@@ -570,6 +764,45 @@ def test_sweep_ignores_fresh_and_terminal(db_conn, broker_url):
     assert _turn_row(db_conn, done_turn)["status"] == "completed"
 
 
+def _iso_age(age_secs: int) -> str:
+    """UTC ISO instant ``age_secs`` in the past (a turn's ``started_at``)."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - age_secs))
+
+
+def test_sweep_honors_configured_hard_limit(db_conn, broker_url):
+    """The sweep cuts at ASSISTANT_TURN_HARD_LIMIT + 60 (PIDASHCONV-1248).
+
+    The worker under test boots with ASSISTANT_TURN_HARD_LIMIT=900 (see the
+    worker-plane job env): a turn younger than the 960s cutoff survives the
+    sweep while a turn older than it fails with ``turn_timeout``. The ages
+    derive from the configured value, so the same test pins the default 390s
+    horizon when the override is absent.
+    """
+    limit = int(os.environ.get("ASSISTANT_TURN_HARD_LIMIT", "330"))
+    cutoff = limit + 60
+    user, workspace, _client = _seed_member(db_conn, "hardlimit")
+    _young_thread, young_turn, _m1 = _seed_turn_trio(
+        db_conn, user, workspace, status="running", started_at=_iso_age(cutoff - 30)
+    )
+    _old_thread, old_turn, _m2 = _seed_turn_trio(
+        db_conn, user, workspace, status="running", started_at=_iso_age(cutoff + 30)
+    )
+
+    celery_wire.publish(SWEEP, broker_url=broker_url)
+    row = wait_for(
+        lambda: _turn_row(db_conn, old_turn) if _turn_row(db_conn, old_turn)["status"] == "failed" else None,
+        what="over-cutoff turn swept",
+    )
+    assert row["error_code"] == "turn_timeout"
+    assert row["error_detail"] == "The assistant turn did not finish (worker lost)."
+    # Settle: the sweep may still be running when the old row flips.
+    time.sleep(2)
+    assert _turn_row(db_conn, young_turn)["status"] == "running", (
+        f"a turn younger than the configured {cutoff}s cutoff must survive the sweep"
+    )
+    assert [e for e in _turn_events(db_conn, young_turn) if e["kind"] == "turn_failed"] == []
+
+
 def test_complete_turn_streams_and_prunes(db_conn, broker_url):
     """Stub provider: deltas stream, the turn completes, deltas are pruned."""
     stub = _StubProvider()
@@ -618,6 +851,49 @@ def test_complete_turn_streams_and_prunes(db_conn, broker_url):
         assert "assistant_delta" not in kinds, "deltas are pruned on completion"
         completed = next(e for e in _turn_events(db_conn, turn_id) if e["kind"] == "turn_completed")
         assert completed["payload"]["usage"] == row["usage"]
+    finally:
+        stub.stop()
+
+
+def test_undecodable_stored_turn_is_skipped(db_conn, broker_url):
+    """One undecodable stored turn is skipped, not fatal (PIDASHCONV-1569).
+
+    ``history.load_history`` validates each completed turn's blob on its own
+    and skips one that does not deserialize (``history.py:45-52``). The
+    thread here holds one valid completed turn and one completed turn whose
+    blob carries a ``thinking`` part: the new turn completes and the valid
+    turn's messages reach the provider request.
+    """
+    stub = _StubProvider()
+    base = stub.start()
+    try:
+        user, workspace, client = _seed_member(db_conn, "skipbad")
+        _configure_llm(client, base)
+        thread_id, turn_id, _msg = _seed_turn_trio(db_conn, user, workspace)
+        older = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 7200))
+        newer = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 3600))
+        _seed_completed_turn(db_conn, thread_id, _VALID_HISTORY_BLOB, older)
+        _seed_completed_turn(db_conn, thread_id, _THINKING_HISTORY_BLOB, newer)
+
+        celery_wire.publish(RUN_TURN, args=[turn_id], broker_url=broker_url)
+        row = wait_for(
+            lambda: _turn_row(db_conn, turn_id)
+            if _turn_row(db_conn, turn_id)["status"] in ("completed", "failed", "cancelled")
+            else None,
+            what="skipped-history turn terminal",
+        )
+        assert row["status"] == "completed", f"{row['error_code']}: {row['error_detail']}"
+        assert row["error_code"] == ""
+        assert row["error_detail"] == ""
+        assert isinstance(row["model_messages"], list) and row["model_messages"], (
+            "completed content is stored for replay"
+        )
+        assert _thread_row(db_conn, thread_id)["active_turn_id"] is None
+
+        assert stub.requests, "the provider was called"
+        bodies = json.dumps([r["body"] for r in stub.requests])
+        assert _VALID_USER_TEXT in bodies, "the valid turn's user text is replayed"
+        assert _VALID_ASST_TEXT in bodies, "the valid turn's reply is replayed"
     finally:
         stub.stop()
 
@@ -734,4 +1010,410 @@ def test_slow_stream_fails_at_soft_limit(db_conn, broker_url):
         assert "assistant_delta" not in kinds, "deltas are pruned on failure"
     finally:
         stub.stop()
+        worker.stop()
+
+
+def test_turn_honors_configured_soft_limit(db_conn, broker_url):
+    """A turn streaming past 300s but inside ASSISTANT_TURN_SOFT_LIMIT completes (PIDASHCONV-1458).
+
+    The test-scoped prefork worker boots with ASSISTANT_TURN_SOFT_LIMIT=600
+    (the shared solo worker never enforces time limits, and the job default
+    must stay 300 for ``test_slow_stream_fails_at_soft_limit``): the stub
+    streams for ~400s — past the default 300s kill point — and the turn
+    completes instead of failing with ``turn_timeout``. The Rust mirror is
+    ``tasks_assistant/test_soft_limit_rust_replay.py``.
+    """
+    worker = _PreforkWorker(
+        extra_env={"ASSISTANT_TURN_SOFT_LIMIT": str(CONFIGURED_SOFT_LIMIT_SECS)}
+    )
+    queue = worker.start()
+    stub = _StubProvider(
+        chunks=tuple(f"long-{i}" for i in range(SOFT_STREAM_CHUNKS)),
+        interval=SOFT_STREAM_INTERVAL,
+    )
+    base = stub.start()
+    try:
+        user, workspace, client = _seed_member(db_conn, "softlimit")
+        _configure_llm(client, base)
+        thread_id, turn_id, _msg = _seed_turn_trio(db_conn, user, workspace)
+
+        t0 = time.monotonic()
+        celery_wire.publish(RUN_TURN, args=[turn_id], broker_url=broker_url, queue=queue)
+        row = wait_for(
+            lambda: _turn_row(db_conn, turn_id)
+            if _turn_row(db_conn, turn_id)["status"] == "completed"
+            else None,
+            what="long turn completed",
+            timeout=SOFT_STREAM_CHUNKS * SOFT_STREAM_INTERVAL + 120,
+        )
+        elapsed = time.monotonic() - t0
+        assert elapsed > SOFT_LIMIT_SECS, (
+            f"completed after {elapsed:.0f}s: never streamed past the 300s default kill point"
+        )
+        assert row["completed_at"] is not None
+        assert row["error_code"] in (None, ""), "completion writes no error code"
+        assert _thread_row(db_conn, thread_id)["active_turn_id"] is None
+
+        with db_conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT display_content, status FROM assistant_message "
+                "WHERE turn_id = %s AND kind = 'assistant' ORDER BY seq",
+                (turn_id,),
+            )
+            assistant_rows = cur.fetchall()
+        assert assistant_rows, "the stream wrote at least one assistant row"
+        assert "".join(r["display_content"] for r in assistant_rows) == "".join(
+            f"long-{i}" for i in range(SOFT_STREAM_CHUNKS)
+        )
+        assert all(r["status"] == "completed" for r in assistant_rows)
+
+        kinds = [e["kind"] for e in _turn_events(db_conn, turn_id)]
+        assert "turn_started" in kinds
+        assert "turn_completed" in kinds
+        assert "turn_failed" not in kinds, "no failure inside the configured limit"
+        assert "assistant_delta" not in kinds, "deltas are pruned on completion"
+    finally:
+        stub.stop()
+        worker.stop()
+
+
+# --------------------------------------------------------------------------- #
+# Stateless-issue tool visibility (PIDASHCONV-1250)
+# --------------------------------------------------------------------------- #
+
+
+def _seed_stateless_issue(db_conn, user, workspace):
+    """Project (the turn user is an admin member of) + one ``state_id`` NULL issue.
+
+    Column sets mirror ``issue_chain`` (every NOT NULL projects/issues column
+    without a database default); the issue simply carries no state.
+    """
+    project = seed_helpers.project(db_conn, workspace["id"], "Stateless Tools")
+    seed_helpers.project_member(
+        db_conn, project["id"], workspace["id"], user["id"], role=20
+    )
+    issue = insert_row(
+        db_conn,
+        "issues",
+        {
+            "workspace_id": str(workspace["id"]),
+            "project_id": str(project["id"]),
+            "state_id": None,
+            "name": "stateless tool-target issue",
+            "description_json": {},
+            "description_html": "<p></p>",
+            "priority": "none",
+            "complexity_score": 0,
+            "sequence_id": 1,
+            "is_draft": False,
+            "sort_order": 65535,
+            "git_work_branch": "",
+            "workpad": "",
+        },
+    )
+    return project, issue
+
+
+def _tool_returns(model_messages, tool_name):
+    """``tool-return`` parts for ``tool_name`` across the stored messages."""
+    found = []
+    for message in model_messages or []:
+        for part in (message.get("parts") or []):
+            if part.get("part_kind") == "tool-return" and part.get("tool_name") == tool_name:
+                found.append(part)
+    return found
+
+
+def test_turn_tools_see_stateless_issue(db_conn, broker_url):
+    """A turn calling ``get_issue`` on a ``state_id`` NULL issue gets it back.
+
+    Django renders the ``issue_objects`` triage exclusion null-safely (``NOT
+    (group = 'triage' AND group IS NOT NULL)``), so stateless rows stay
+    visible to every read tool. The Rust mirror of this test lives in
+    ``tasks_assistant/test_rust_replay.py``.
+    """
+    user, workspace, client = _seed_member(db_conn, "stateless")
+    _project, issue = _seed_stateless_issue(db_conn, user, workspace)
+    stub = _StubProvider(
+        chunks=("done",),
+        interval=0.1,
+        tool_call=("get_issue", {"issue_id": str(issue["id"])}),
+    )
+    base = stub.start()
+    try:
+        _configure_llm(client, base)
+        _thread_id, turn_id, _msg = _seed_turn_trio(db_conn, user, workspace)
+
+        celery_wire.publish(RUN_TURN, args=[turn_id], broker_url=broker_url)
+        row = wait_for(
+            lambda: _turn_row(db_conn, turn_id)
+            if _turn_row(db_conn, turn_id)["status"] == "completed"
+            else None,
+            what="stateless-issue turn completed",
+        )
+        returns = _tool_returns(row["model_messages"], "get_issue")
+        assert returns, (
+            "no get_issue tool-return in model_messages: "
+            f"{json.dumps(row['model_messages'])[:2000]}"
+        )
+        content = returns[0]["content"]
+        if isinstance(content, str):
+            content = json.loads(content)
+        assert content["id"] == str(issue["id"]), (
+            f"get_issue missed the stateless issue: {str(content)[:500]}"
+        )
+    finally:
+        stub.stop()
+
+
+def _subscribe_thread(rdb, thread_id):
+    """Subscribe to the thread channel; return the confirmed pubsub."""
+    channel = f"assistant:thread:{thread_id}"
+    pubsub = rdb.pubsub(ignore_subscribe_messages=True)
+    pubsub.subscribe(channel)
+    deadline = time.monotonic() + 10
+    while not pubsub.subscribed and time.monotonic() < deadline:
+        pubsub.get_message(timeout=1.0)
+    assert pubsub.subscribed, f"subscription to {channel} never confirmed"
+    return pubsub
+
+
+def _drain_channel(pubsub, timeout=30.0, silence=3.0):
+    """Collect published bodies until ``silence`` idle seconds or ``timeout``.
+
+    A missing publish fails only after the full timeout, so slow
+    assertions stay honest; the silence cut keeps the passing case fast.
+    """
+    bodies = []
+    deadline = time.monotonic() + timeout
+    quiet_until = None
+    while time.monotonic() < deadline:
+        message = pubsub.get_message(timeout=1.0)
+        if message is None:
+            if quiet_until is not None and time.monotonic() >= quiet_until:
+                break
+            continue
+        if message.get("type") != "message":
+            continue
+        bodies.append(message["data"])
+        quiet_until = time.monotonic() + silence
+    return bodies
+
+
+def _failed_event_rows(db_conn, turn_id):
+    with db_conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT id, message_id, seq, created_at FROM assistant_event "
+            "WHERE turn_id = %s AND kind = 'turn_failed' ORDER BY id",
+            (turn_id,),
+        )
+        return cur.fetchall()
+
+
+def test_sweep_publishes_turn_failed_on_thread_channel(db_conn, broker_url):
+    """The sweep's ``turn_failed`` event is PUBLISHed on the thread channel.
+
+    Django persists the event and publishes it on commit (``_publish_by_id``);
+    the SSE live tail only reads Redis, so a silent sweep strands open
+    streams on a spinner (PIDASHCONV-1247). The subscription opens before
+    the stale turn exists, so whichever execution sweeps it — this publish
+    or the 30s beat — its frame is caught, exactly once on the solo worker.
+    """
+    user, workspace, _client = _seed_member(db_conn, "sweeppub")
+    thread_id = str(uuid.uuid4())
+    rdb = redis_helper.client()
+    pubsub = _subscribe_thread(rdb, thread_id)
+    try:
+        _trio_thread, turn_id, _msg = _seed_turn_trio(
+            db_conn, user, workspace, status="running",
+            started_at="2000-01-01T00:00:00Z", thread_id=thread_id,
+        )
+
+        celery_wire.publish(SWEEP, broker_url=broker_url)
+        wait_for(
+            lambda: _turn_row(db_conn, turn_id)
+            if _turn_row(db_conn, turn_id)["status"] == "failed"
+            else None,
+            what="stale turn swept",
+        )
+        bodies = _drain_channel(pubsub)
+        assert len(bodies) == 1, f"expected one turn_failed publish, got {len(bodies)}"
+        raw = bodies[0]
+        parsed = json.loads(raw)
+        assert parsed["kind"] == "turn_failed"
+        assert parsed["thread"] == thread_id
+        assert parsed["payload"] == {
+            "turn_id": turn_id,
+            "error_code": TIMEOUT_CODE,
+            "detail": SWEEP_TIMEOUT_DETAIL,
+        }
+        assert list(parsed.keys()) == [
+            "id", "thread", "message", "seq", "kind", "payload", "created_at",
+        ]
+        assert raw == json.dumps(parsed), (
+            "publish bytes are json.dumps with default separators/escapes"
+        )
+        rows = _failed_event_rows(db_conn, turn_id)
+        assert len(rows) == 1, "exactly one turn_failed row per swept turn"
+        assert parsed["id"] == rows[0]["id"]
+        assert parsed["seq"] == rows[0]["seq"]
+        assert parsed["message"] == str(rows[0]["message_id"])
+        # The session timezone renders the stored stamp in local time;
+        # compare instants, not strings.
+        assert datetime.fromisoformat(parsed["created_at"]) == rows[0]["created_at"]
+        assert parsed["created_at"].endswith("+00:00")
+    finally:
+        pubsub.unsubscribe()
+        pubsub.close()
+        rdb.close()
+
+
+# --------------------------------------------------------------------------- #
+# MCP-entry soft limit (PIDASHCONV-1572)
+# --------------------------------------------------------------------------- #
+
+
+def _hold_open(conn):
+    """Hold one accepted connection open without ever answering.
+
+    Request bytes are consumed and discarded; the client hangs until ITS
+    read timeout — which the test keeps far past the worker's soft limit,
+    so the soft limit deterministically wins.
+    """
+    conn.settimeout(3600)
+    try:
+        while True:
+            if not conn.recv(65536):
+                return
+    except OSError:
+        pass
+    finally:
+        try:
+            conn.close()
+        except OSError:
+            pass
+
+
+class _HangingMcpServer:
+    """An MCP server that accepts the TCP connection but never answers."""
+
+    def __init__(self):
+        self.accepted = []
+        self._sock = None
+        self._thread = None
+
+    def start(self):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(16)
+        port = sock.getsockname()[1]
+        self._sock = sock
+        stub = self
+
+        def serve():
+            while True:
+                try:
+                    conn, _ = sock.accept()
+                except OSError:
+                    return
+                stub.accepted.append(time.time())
+                threading.Thread(target=_hold_open, args=(conn,), daemon=True).start()
+
+        self._thread = threading.Thread(target=serve, daemon=True)
+        self._thread.start()
+        return f"http://127.0.0.1:{port}/mcp"
+
+    def stop(self):
+        if self._sock is not None:
+            try:
+                self._sock.close()
+            except OSError:
+                pass
+            self._sock = None
+
+
+def _seed_mcp_server(db_conn, user, name, url):
+    """One enabled MCP server row for the turn user (raw SQL, like the
+    replay's LLM seeding: the hanging URL is a test double, not endpoint
+    input)."""
+    now = _now_iso()
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO assistant_mcp_server "
+            "(id, user_id, name, url, auth_header_encrypted, is_enabled, "
+            "created_at, updated_at) "
+            "VALUES (%s, %s, %s, %s, NULL, TRUE, %s, %s)",
+            (str(uuid.uuid4()), str(user["id"]), name, url, now, now),
+        )
+    db_conn.commit()
+
+
+def test_mcp_entry_hang_fails_at_soft_limit(db_conn, broker_url):
+    """A turn hung in MCP toolset entry fails turn_timeout at the soft limit (PIDASHCONV-1572).
+
+    The user's ten MCP servers accept the TCP connection but never answer.
+    Toolsets are entered sequentially at ~10s (the pinned init timeout)
+    each, so entry spans ~100s, and the test-scoped prefork worker boots
+    with ASSISTANT_TURN_SOFT_LIMIT=60: the limit deterministically fires
+    mid-entry, and the turn fails with Django's turn_timeout detail before
+    any provider request. The Rust mirror is
+    ``tasks_assistant/test_mcp_entry_soft_limit_rust_replay.py``.
+    """
+    worker = _PreforkWorker(
+        extra_env={"ASSISTANT_TURN_SOFT_LIMIT": str(MCP_ENTRY_SOFT_LIMIT_SECS)}
+    )
+    queue = worker.start()
+    mcp = _HangingMcpServer()
+    mcp_url = mcp.start()
+    stub = _StubProvider()
+    base = stub.start()
+    try:
+        user, workspace, client = _seed_member(db_conn, "mcpentry")
+        _configure_llm(client, base)
+        for n in range(MCP_ENTRY_HANGING_SERVERS):
+            _seed_mcp_server(db_conn, user, f"hang-{n}", mcp_url)
+        thread_id, turn_id, _msg = _seed_turn_trio(db_conn, user, workspace)
+
+        t0 = time.monotonic()
+        celery_wire.publish(RUN_TURN, args=[turn_id], broker_url=broker_url, queue=queue)
+        row = wait_for(
+            lambda: _turn_row(db_conn, turn_id)
+            if _turn_row(db_conn, turn_id)["status"] == "failed"
+            else None,
+            what="mcp-entry turn failed",
+            timeout=MCP_ENTRY_SOFT_LIMIT_SECS + 240,
+        )
+        elapsed = time.monotonic() - t0
+        assert row["error_code"] == TIMEOUT_CODE
+        assert row["error_detail"] == TIMEOUT_DETAIL
+        assert elapsed >= MCP_ENTRY_SOFT_LIMIT_SECS - 5, (
+            f"failed after {elapsed:.0f}s: too early to be the 60s soft limit"
+        )
+        # Past the 10s-per-server entries but nowhere near their ~100s
+        # span: the soft limit won mid-entry (and not the sweep — 390s
+        # locally, 960s in CI).
+        assert elapsed < MCP_ENTRY_SOFT_LIMIT_SECS + 180, (
+            f"failed after {elapsed:.0f}s: too late to be the 60s soft limit"
+        )
+        assert row["completed_at"] is not None
+        assert _thread_row(db_conn, thread_id)["active_turn_id"] is None
+        assert len(mcp.accepted) >= 2, "the turn entered MCP servers in turn"
+        assert not stub.requests, "no provider request happens before MCP entry"
+
+        events = _turn_events(db_conn, turn_id)
+        kinds = [e["kind"] for e in events]
+        assert "turn_started" in kinds
+        failed = [e for e in events if e["kind"] == "turn_failed"]
+        assert len(failed) == 1, "exactly one failure event"
+        assert failed[0]["payload"] == {
+            "turn_id": turn_id,
+            "error_code": TIMEOUT_CODE,
+            "detail": TIMEOUT_DETAIL,
+        }
+        assert "turn_completed" not in kinds, "turn_completed followed turn_failed"
+        assert "assistant_delta" not in kinds, "deltas are pruned on failure"
+    finally:
+        stub.stop()
+        mcp.stop()
         worker.stop()

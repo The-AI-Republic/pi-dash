@@ -428,6 +428,12 @@ fn django_url_valid(url: &str) -> bool {
     if url.chars().any(|c| matches!(c, '\t' | '\r' | '\n')) {
         return false;
     }
+    // `urlsplit` NFKC parity (`urllib/parse.py::_checknetloc`): Django
+    // raises `ValueError` before the regex runs, so a failure here is
+    // final (no IDN retry).
+    if !url_netloc_nfkc_ok(url) {
+        return false;
+    }
     if url_host_pattern_valid(url) {
         // First match: `urlsplit`'s bracket check (strict IP parse) plus
         // the trailing hostname cap.
@@ -445,16 +451,21 @@ fn django_url_valid(url: &str) -> bool {
 
 /// The `URLValidator.regex` match over one URL string: optional
 /// `user:pass@`, then IPv4 | IPv6 | hostname, optional `:port`, optional
-/// path/query/fragment without whitespace.
+/// path/query/fragment without whitespace. The userinfo group is greedy
+/// but backtracks: the userinfo reading is tried first, then the
+/// no-userinfo reading. An `@` past a `?`/`#` is resource text
+/// (`example.com?email=user@…` and `example.com:80?x@y/` validate), while
+/// `?`/`#` may still sit inside real userinfo (`user?x@host/` validates
+/// — all verified against Django's `URLValidator`).
 fn url_host_pattern_valid(url: &str) -> bool {
     let Some(after_scheme) = url.split_once("://").map(|(_, rest)| rest) else {
         return false;
     };
-    // Optional `user:pass@` (`[^\s:@/]+(?::[^\s:@/]*)?@`): the pattern
+    // Greedy userinfo attempt (`[^\s:@/]+(?::[^\s:@/]*)?@`): the pattern
     // cannot cross `/`, so `@` past the first `/` starts the resource
     // (verified live: `/a@b` validates as a path).
-    let host_part = match after_scheme.find('@') {
-        Some(at) if after_scheme.find('/').is_none_or(|slash| at < slash) => {
+    if let Some(at) = after_scheme.find('@') {
+        if after_scheme.find('/').is_none_or(|slash| at < slash) {
             let (userinfo, rest) = after_scheme.split_at(at);
             let rest = &rest[1..];
             // `user` / `pass` carry no whitespace, `:` or `/`.
@@ -465,13 +476,19 @@ fn url_host_pattern_valid(url: &str) -> bool {
             let pass_ok = pieces
                 .next()
                 .is_none_or(|pass| pass.chars().all(valid_userinfo_char));
-            if !(user_ok && pass_ok) || rest.is_empty() {
-                return false;
+            if user_ok && pass_ok && !rest.is_empty() && url_host_tail_valid(rest) {
+                return true;
             }
-            rest
         }
-        _ => after_scheme,
-    };
+    }
+    // No-userinfo reading (also the backtracked fallback).
+    url_host_tail_valid(after_scheme)
+}
+
+/// Host | `:port` | resource match over one authority-plus-resource
+/// string: IPv4 | IPv6 | hostname, optional `:port` (1-5 digits), then an
+/// optional resource starting with `/`, `?` or `#` without whitespace.
+fn url_host_tail_valid(host_part: &str) -> bool {
     // Split host from `:port` / path: brackets (IPv6) protect colons.
     let tail = if let Some(rest) = host_part.strip_prefix('[') {
         let Some((inside, tail)) = rest.split_once(']') else {
@@ -542,6 +559,40 @@ fn valid_ipv6_loose(inside: &str) -> bool {
         && inside
             .chars()
             .all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.')
+}
+
+/// Codepoints whose NFKC normalization introduces one of `/?#@:`
+/// (`urllib/parse.py::_checknetloc`, reached from every `urlsplit` call).
+/// Same table as `ser_extras::NFKC_FORBIDDEN` (per-module copies are the
+/// codebase precedent): enumerated once with CPython's
+/// `unicodedata.normalize` over all 0x110000 codepoints (single-char
+/// table; canonical composition can never produce ASCII `/ ? # @ :`, so
+/// per-char membership is exactly the whole-string check Django runs).
+const NFKC_FORBIDDEN: [char; 19] = [
+    '\u{2047}', '\u{2048}', '\u{2049}', '\u{2100}', '\u{2101}', '\u{2105}', '\u{2106}', '\u{2A74}',
+    '\u{FE13}', '\u{FE16}', '\u{FE55}', '\u{FE56}', '\u{FE5F}', '\u{FE6B}', '\u{FF03}', '\u{FF0F}',
+    '\u{FF1A}', '\u{FF1F}', '\u{FF20}',
+];
+
+/// `urlsplit()` NFKC parity (`urllib/parse.py::_checknetloc`): the
+/// authority (to the first `/?#`, like `_splitnetloc`) must hold no char
+/// whose NFKC form introduces `/?#@:`. Any failure maps to invalid
+/// (Django catches `ValueError` at `validators.py:126-128`).
+fn url_netloc_nfkc_ok(url: &str) -> bool {
+    let Some(after_scheme) = url.split_once("://").map(|(_, rest)| rest) else {
+        return false;
+    };
+    let netloc_end = after_scheme
+        .find(['/', '?', '#'])
+        .unwrap_or(after_scheme.len());
+    let netloc = &after_scheme[..netloc_end];
+    // `_checknetloc`: early return for empty/ASCII; literal `@:?#` are
+    // stripped before Django's check, but every table entry is non-ASCII,
+    // so no stripping is needed here.
+    netloc.is_ascii()
+        || !netloc
+            .chars()
+            .any(|c| NFKC_FORBIDDEN.binary_search(&c).is_ok())
 }
 
 /// `urlsplit`'s bracket check (Python 3.12 `_check_bracketed_netloc`):
@@ -2788,6 +2839,20 @@ mod tests {
             ("http://example.XN--A1-B/", false),
             ("http://example.c0m/", false),
             ("http://example.1a/", false),
+            // PIDASHCONV-1425: `@` past the netloc is resource text
+            // (the userinfo group backtracks to the no-userinfo
+            // reading); NFKC-forbidden chars fail only in the netloc.
+            // Verdicts from Django 4.2.30 `URLValidator` (`.probe1425-dj.py`).
+            ("https://example.com?email=user@gmail.com&ref=x", true),
+            ("https://example.com#user@gmail.com", true),
+            ("http://example.com:8080?x=a@b", true),
+            ("http://user?x@example.com/", true),
+            ("http://example.com:80?x@y/", true),
+            ("http://a:b@c@d/", false),
+            ("http://ab?xy@zw/", false),
+            ("https://example\u{FF0F}evil.com", false),
+            ("https://a.com\u{FF20}b.com", false),
+            ("https://example.com/\u{FF0F}evil", true),
         ] {
             assert_eq!(django_url_valid(url), expected, "{url:?}");
         }

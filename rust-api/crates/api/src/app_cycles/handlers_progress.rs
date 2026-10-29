@@ -18,9 +18,10 @@
 //! - `cycle_id` is a `<uuid:>` converter: a non-UUID tail never reaches
 //!   the view (Django routing 404). Axum captures any segment, so the
 //!   handler proxies those tails to Django instead of inventing a 400.
-//! - The cycle lookup uses the plain `Cycle.objects` manager
-//!   (`base.py:661`): no `deleted_at` predicate — a soft-deleted cycle
-//!   still answers 200 rather than 404. Ported as-is.
+//! - The cycle lookup uses `Cycle.objects` (`base.py:661`), the
+//!   soft-deletion manager (`mixins.py:61-67`), so a soft-deleted cycle
+//!   reads as missing and the view answers 404 `{"error":"Cycle not
+//!   found"}` like an unknown id.
 //! - Estimate aggregates (`:664-711`) scope to issues whose
 //!   `estimate_point.estimate.type` is `"points"` with a live bridge
 //!   row, plus the `IssueManager` base excludes (not triage, not
@@ -44,8 +45,9 @@
 //! branch against that file so transcription drift fails the build.
 //!
 //! Ported bugs (translation, don't redesign; also listed in the PR):
-//! - B1: no `deleted_at` guard on the cycle lookup (plain manager) —
-//!   soft-deleted cycles answer 200 with live-computed data.
+//! - B1 (refuted): the lookup was ported with no `deleted_at` guard on a
+//!   false "plain manager" premise; Django's `Cycle.objects` soft-deletion
+//!   manager makes a soft-deleted cycle answer 404, not 200.
 //! - B2: the estimate aggregate and the live counts carry no
 //!   archived/is-draft guards beyond the manager excludes (differs from
 //!   the list endpoint, which counts drafts/archived differently).
@@ -69,6 +71,8 @@ use crate::middleware::SessionHandle;
 use crate::state::AppState;
 
 use super::gates::{decide_gate, gate_for, tenant_context, GateOutcome, ANON_BODY, FORBIDDEN_BODY};
+use pidash_compat::response::json_response;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -129,8 +133,6 @@ pub const VALIDATION_BODY: &str = r#"{"error":"Please provide valid detail"}"#;
 /// (`db/models/project.py:213-217`) — `_rewrite_project_kwarg`'s
 /// `Http404("Project not found")`.
 pub const PROJECT_NOT_FOUND_BODY: &str = r#"{"detail":"Project not found"}"#;
-/// `handle_exception`'s generic 500 branch.
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 
 /// Handler denials with byte-exact bodies.
 pub enum Denial {
@@ -168,15 +170,6 @@ impl IntoResponse for Denial {
         )
             .into_response()
     }
-}
-
-fn json_response(status: StatusCode, body: String) -> Response {
-    (
-        status,
-        [(axum::http::header::CONTENT_TYPE, "application/json")],
-        body,
-    )
-        .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -320,7 +313,7 @@ fn estimates_sql() -> String {
             group("started"),
             group("cancelled"),
             group("completed"),
-            "SUM(CAST(ep.value AS DOUBLE PRECISION)) AS total".to_owned(),
+            "COALESCE(SUM(CAST(ep.value AS DOUBLE PRECISION)), 0.0) AS total".to_owned(),
         ]
         .join(", "),
         ISSUE_SCOPE_SQL
@@ -359,13 +352,12 @@ fn or_zero(value: Option<f64>) -> Value {
     }
 }
 
-/// `total` is NOT passed through `or 0` (`base.py:774`): the
-/// `COALESCE` zero answers int `0`, a real zero sum answers `0.0`.
+/// `total` is NOT passed through `or 0` (`base.py:774`): Django's
+/// `Sum(default=0, output_field=FloatField())` compiles to
+/// `COALESCE(SUM(...), 0)` typed `double precision`, so the empty
+/// zero answers float `0.0` and renders raw.
 fn total_num(value: Option<f64>) -> Value {
-    match value {
-        None => Value::Number(0.into()),
-        Some(v) => json_float(v),
-    }
+    json_float(value.unwrap_or(0.0))
 }
 
 fn json_float(v: f64) -> Value {
@@ -430,8 +422,8 @@ async fn progress_get(
     // `<uuid:cycle_id>` never matches a non-UUID tail in Django: proxy
     // so the routing 404 comes from Django byte-for-byte.
     let cycle_id: uuid::Uuid = match cycle_raw.parse() {
-        Ok(id) => id,
-        Err(_) => return Ok(crate::edge::proxy(State(state), req).await),
+        Ok(id) if super::is_canonical_uuid(&cycle_raw) => id,
+        _ => return Ok(crate::edge::proxy(State(state), req).await),
     };
     let resolved = actor(&state, extension).await?;
     let pool = pool_of(&state)?.clone();
@@ -449,12 +441,15 @@ async fn progress_get(
         GateOutcome::Unauthenticated => return Err(Denial::Unauthorized),
     }
 
-    // Plain `Cycle.objects` manager: no `deleted_at` predicate (B1).
-    // `NULL` snapshot decodes as `None` and reads falsy, like Python.
+    // `Cycle.objects` is the soft-deletion manager (`mixins.py:61-67`), so
+    // a soft-deleted cycle reads as missing: `.first()` returns None and the
+    // view answers 404 (`base.py:661-663`). `NULL` snapshot decodes as `None`
+    // and reads falsy, like Python.
     let cycle: Option<(uuid::Uuid, Option<Value>)> = sqlx::query_as(
         r#"SELECT c.id, c.progress_snapshot FROM cycles c
            JOIN workspaces w ON w.id = c.workspace_id AND w.slug = $1
-           WHERE c.project_id = $2 AND c.id = $3"#,
+           WHERE c.project_id = $2 AND c.id = $3
+             AND c.deleted_at IS NULL"#,
     )
     .bind(&slug)
     .bind(project_id)
@@ -588,8 +583,8 @@ mod tests {
     }
 
     #[test]
-    fn total_keeps_zero_float_but_coalesce_zero_is_int() {
-        assert_eq!(total_num(None), Value::Number(0.into()));
+    fn total_coalesce_zero_is_float() {
+        assert_eq!(total_num(None).to_string(), "0.0");
         assert_eq!(total_num(Some(0.0)).to_string(), "0.0");
         assert_eq!(total_num(Some(14.5)).to_string(), "14.5");
     }
@@ -613,12 +608,13 @@ mod tests {
     }
 
     #[test]
-    fn empty_cycle_renders_int_zeros() {
-        // F-C27-08 "live-count branch, empty cycle": every value int 0.
+    fn empty_cycle_renders_float_total_int_groups() {
+        // F-C27-08 "live-count branch, empty cycle": the five group keys
+        // go through `or 0` (int 0); the total renders raw as 0.0.
         let body = progress_envelope([None; 5], None, [0; 6]);
         assert_eq!(
             body,
-            r#"{"backlog_estimate_points":0,"unstarted_estimate_points":0,"started_estimate_points":0,"cancelled_estimate_points":0,"completed_estimate_points":0,"total_estimate_points":0,"backlog_issues":0,"total_issues":0,"completed_issues":0,"cancelled_issues":0,"started_issues":0,"unstarted_issues":0}"#
+            r#"{"backlog_estimate_points":0,"unstarted_estimate_points":0,"started_estimate_points":0,"cancelled_estimate_points":0,"completed_estimate_points":0,"total_estimate_points":0.0,"backlog_issues":0,"total_issues":0,"completed_issues":0,"cancelled_issues":0,"started_issues":0,"unstarted_issues":0}"#
         );
     }
 
@@ -691,6 +687,7 @@ mod tests {
             "i.is_draft = FALSE",
             "NOT (s.group = 'triage')",
             "CAST(ep.value AS DOUBLE PRECISION)",
+            "COALESCE(SUM(CAST(ep.value AS DOUBLE PRECISION)), 0.0) AS total",
         ] {
             assert!(
                 sql.contains(fragment),

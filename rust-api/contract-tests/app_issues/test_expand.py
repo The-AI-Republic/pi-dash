@@ -507,3 +507,71 @@ def test_m2m_expand_ignores_through_soft_delete(clients, seed, db_conn):
             cur.execute("DELETE FROM labels WHERE id = %s", (lid,))
             cur.execute("DELETE FROM users WHERE id = %s", (uid,))
             cur.execute("DELETE FROM issues WHERE id = %s", (oid,))
+
+
+# --- NULL-FK created_by expansion -------------------------------------------
+#
+# `?expand=created_by` on an issue whose `created_by_id` is NULL renders the
+# `UserLiteSerializer` initial object, not `{}`: DRF's unbound `.data` falls
+# back to `get_initial()`, which keeps every writable field in field order,
+# and `first_name`, `last_name`, `avatar`, `display_name` are writable
+# CharFields with `initial = ''` (`app/serializers/user.py`, `read_only_fields
+# = ["id", "is_bot"]`, `avatar_url` a model property).  `state`/`parent` keep
+# rendering `{}` (every field read-only).  (PIDASHCONV-1381.)
+
+CREATED_BY_INITIAL_KEYS = ["first_name", "last_name", "avatar", "display_name"]
+CREATED_BY_INITIAL = {key: "" for key in CREATED_BY_INITIAL_KEYS}
+
+
+def test_expand_created_by_null(clients, seed, db_conn):
+    import uuid as _uuid
+    from datetime import datetime, timezone
+
+    from app_issues.conftest import ISSUE_COLUMNS, _issue_row
+
+    admin = clients["admin"]
+    ws, pid = seed["ws_slug"], seed["project"]
+    ws_id = seed["ws"]
+    T = datetime.now(timezone.utc)
+    oid = str(_uuid.uuid4())
+    aid = str(_uuid.uuid4())
+    try:
+        with db_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO issues (%s) VALUES (%s)"
+                % (ISSUE_COLUMNS, ",".join(["%s"] * 19)),
+                _issue_row(oid, "null creator probe", "low", 904,
+                           None, pid, seed["state_backlog"], ws_id),
+            )
+            cur.execute(
+                "INSERT INTO issues (%s) VALUES (%s)"
+                % (ISSUE_COLUMNS, ",".join(["%s"] * 19)),
+                _issue_row(aid, "null creator archived probe", "low", 905,
+                           None, pid, seed["state_done"], ws_id),
+            )
+            cur.execute(
+                "UPDATE issues SET archived_at = %s WHERE id = %s", (T, aid),
+            )
+
+        base = _base(ws, pid)
+
+        # The issue retrieve.
+        body = _get(admin, f"{base}/issues/{oid}/", "created_by").json()
+        assert list(body["created_by"]) == CREATED_BY_INITIAL_KEYS
+        assert body["created_by"] == CREATED_BY_INITIAL
+
+        # The archived-issue retrieve.
+        archived = _get(admin, f"{base}/issues/{aid}/archive/", "created_by").json()
+        assert list(archived["created_by"]) == CREATED_BY_INITIAL_KEYS
+        assert archived["created_by"] == CREATED_BY_INITIAL
+
+        # The flat `issues/list/` row (`fields=id`, same shared kernel).
+        flat = admin.get(
+            f"{base}/issues/list/?issues={oid}&fields=id&expand=created_by"
+        ).json()
+        row = _row_for(flat, oid)
+        assert list(row["created_by"]) == CREATED_BY_INITIAL_KEYS
+        assert row["created_by"] == CREATED_BY_INITIAL
+    finally:
+        with db_conn.cursor() as cur:
+            cur.execute("DELETE FROM issues WHERE id IN (%s,%s)", (oid, aid))

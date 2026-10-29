@@ -20,7 +20,8 @@ RUNNER_KEYS = {
     "runner_version", "dev_metadata", "protocol_version", "capabilities",
     "last_heartbeat_at", "owner", "dev_machine", "dev_machine_detail",
     "visibility", "pod", "pod_detail", "live_state", "enrolled_at",
-    "revoked_at", "revoked_reason", "created_at", "updated_at",
+    "revoked_at", "revoked_reason", "paused_at", "paused_by",
+    "created_at", "updated_at",
 }
 
 

@@ -36,8 +36,14 @@ import psycopg
 import pytest
 
 from _harness.db import Database
-from _harness.sessions import SESSION_COOKIE_NAME, login as mint_session
-from _harness.sessions import make_password_hash
+from _harness.sessions import (
+    AUTH_BACKEND,
+    SESSION_COOKIE_NAME,
+    login as mint_session,
+    make_password_hash,
+    mint_session_data,
+    session_auth_hash,
+)
 from _harness.settings import base_url, database_url, secret_key
 from _harness.throttle import reset_throttle_counters
 
@@ -93,6 +99,76 @@ def login_cookies(user: dict) -> dict:
             password_field = cur.fetchone()[0]
         cookies = mint_session(conn, user["id"], password_field)
     return cookies
+
+
+def tamper_session(
+    db: Database,
+    user: dict,
+    session_key: str,
+    *,
+    backend: str = AUTH_BACKEND,
+    session_hash: str | None = None,
+) -> None:
+    """Rewrite one session row with a Django-signed payload variant."""
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT password FROM users WHERE id = %s", (user["id"],))
+            password_field = cur.fetchone()[0]
+        payload = {
+            "_auth_user_id": user["id"],
+            "_auth_user_backend": backend,
+            "_auth_user_hash": (
+                session_hash
+                if session_hash is not None
+                else session_auth_hash(password_field, secret_key())
+            ),
+        }
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE sessions SET session_data = %s WHERE session_key = %s",
+                (mint_session_data(payload, secret_key()), session_key),
+            )
+        conn.commit()
+
+
+def make_auth_project(db: Database, user: dict) -> dict:
+    """Seed a workspace/project/page the app routes can read as this user."""
+    suffix = uuid.uuid4().hex[:12]
+    workspace = db.make_workspace("Auth session contract", f"as-{suffix}", user["id"])
+    db.make_workspace_member(workspace["id"], user["id"])
+    project = db.make_project(workspace["id"], f"AS{suffix[:6].upper()}")
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO project_members (id, workspace_id, project_id, member_id,"
+                " role, is_active, view_props, default_props, preferences,"
+                " sort_order, created_at, updated_at)"
+                " VALUES (%s,%s,%s,%s,20,true,'{}','{}','{}',0,now(),now())",
+                (str(uuid.uuid4()), workspace["id"], project["id"], user["id"]),
+            )
+            page_id = str(uuid.uuid4())
+            cur.execute(
+                "INSERT INTO pages (id, name, description_json, description_binary,"
+                " description_html, owned_by_id, access, workspace_id, color,"
+                " archived_at, is_locked, view_props, logo_props, is_global,"
+                " sort_order, created_by_id, created_at, updated_at)"
+                " VALUES (%s,'Contract page','{}',NULL,'<p></p>',%s,0,%s,'',NULL,"
+                " false,'{\"full_width\": false}','{}',false,65535,%s,now(),now())",
+                (page_id, user["id"], workspace["id"], user["id"]),
+            )
+            cur.execute(
+                "INSERT INTO project_pages (id, workspace_id, project_id, page_id,"
+                " created_by_id, updated_by_id, deleted_at, created_at, updated_at)"
+                " VALUES (%s,%s,%s,%s,%s,%s,NULL,now(),now())",
+                (str(uuid.uuid4()), workspace["id"], project["id"], page_id,
+                 user["id"], user["id"]),
+            )
+        conn.commit()
+    return {
+        "workspace": workspace,
+        "project": project,
+        "page_id": page_id,
+    }
 
 
 def primed_client(base: str, cookies: dict | None = None) -> httpx.Client:

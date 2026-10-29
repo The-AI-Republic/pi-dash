@@ -85,20 +85,24 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use super::Denial;
+use crate::middleware::body_limit::read_request_bytes;
 use crate::middleware::SessionHandle;
 use crate::permissions::DefaultPermissionDenied;
 use crate::serializer::render_datetime_in;
 use crate::state::AppState;
 use crate::v1_cycles_modules::body as shared_body;
-use crate::v1_cycles_modules::json_cpython::{
+use crate::v1_cycles_modules::json::{
     parse_request_data, to_serde_publish, JsonFail, JSON_PARSE_PREFIX,
 };
 
+use pidash_compat::py::py_json_string;
+use pidash_compat::response::{json_created, json_ok, no_content};
 use pidash_db::redis::RedisHandle;
 use pidash_services::app_issues::serializers_label::{
     app_label_to_representation, AppLabelRow, LABEL_NAME_CONFLICT_BODY,
     LABEL_NAME_CONFLICT_EXCLUDING_SELF_PROBE_SQL, LABEL_NAME_CONFLICT_PROBE_SQL,
 };
+use pidash_services::read;
 
 // ---- owned paths ------------------------------------------------------------
 
@@ -1354,16 +1358,15 @@ async fn actor_timezone(pool: &sqlx::PgPool, user_id: &Uuid) -> Result<Tz, Denia
     name.parse::<Tz>().map_err(|_| Denial::ServerError)
 }
 
-/// `Workspace.objects.get(slug=slug)`: 404 `{"error": ...}` on a miss
-/// (default-manager scoped).
+/// `Workspace.objects.get(slug=slug)` via the public read service:
+/// 404 `{"error": ...}` on a miss (default-manager scoped).
 async fn workspace_row(pool: &sqlx::PgPool, slug: &str) -> Result<(Uuid, String), Denial> {
-    let row: Option<(Uuid, String)> =
-        sqlx::query_as("SELECT id, slug FROM workspaces WHERE slug = $1 AND deleted_at IS NULL")
-            .bind(slug)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    row.ok_or(Denial::NotFound)
+    read::workspace_row(pool, slug)
+        .await
+        .map_err(|error| match error {
+            read::Error::NotFound => Denial::NotFound,
+            read::Error::Db(_) | read::Error::Failed(_) => Denial::ServerError,
+        })
 }
 
 /// `Project.objects.get(pk=...)`: 404 `{"error": ...}` on a miss
@@ -1424,19 +1427,18 @@ async fn invalidate_workspace_labels(
 
 // ---- task publishes -----------------------------------------------------------
 
-/// Celery wire name for `issue_activity`
-/// (`bgtasks/issue_activities_task.py:1504`).
-const ISSUE_ACTIVITY_TASK: &str = "pi_dash.bgtasks.issue_activities_task.issue_activity";
+// Canonical task name lives in `pidash_services::domain::activity`.
+use pidash_services::domain::activity::ISSUE_ACTIVITY_TASK;
 
 /// `base_host(request, is_app=True)` (`utils/host.py:17-66`): `APP_BASE_URL`
 /// wins when set, else `WEB_URL`; unset is `ImproperlyConfigured` → 500.
+/// Empty strings fall through like Python's `or` (PIDASHCONV-1587).
 fn request_origin(state: &AppState) -> Result<String, Denial> {
-    state
-        .settings()
-        .urls
-        .app_base_url
+    let urls = &state.settings().urls;
+    urls.app_base_url
         .clone()
-        .or_else(|| state.settings().urls.web_url.clone())
+        .filter(|s| !s.is_empty())
+        .or_else(|| urls.web_url.clone().filter(|s| !s.is_empty()))
         .ok_or(Denial::ServerError)
 }
 
@@ -1883,37 +1885,6 @@ fn presigned_post(
     Ok(serde_json::json!({"url": url, "fields": fields}))
 }
 
-/// CPython `json.dumps` string encoding (`ensure_ascii`): `"` and
-/// `\` escaped, C0 controls short/`\u00XX`, everything else non-ASCII
-/// as `\uXXXX` (surrogate pairs past the BMP).
-fn py_json_string(input: &str) -> String {
-    let mut out = String::with_capacity(input.len() + 2);
-    out.push('"');
-    for c in input.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{08}' => out.push_str("\\b"),
-            '\u{0c}' => out.push_str("\\f"),
-            c if (c as u32) < 0x20 => {
-                out.push_str(&format!("\\u{:04x}", c as u32));
-            }
-            c if (c as u32) < 0x7f => out.push(c),
-            c => {
-                let mut buf = [0u16; 2];
-                for unit in c.encode_utf16(&mut buf) {
-                    out.push_str(&format!("\\u{unit:04x}"));
-                }
-            }
-        }
-    }
-    out.push('"');
-    out
-}
-
 fn base64_encode(input: &[u8]) -> String {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.encode(input)
@@ -2115,22 +2086,6 @@ fn is_integrity_violation(error: &sqlx::Error) -> bool {
 
 // ---- responses -----------------------------------------------------------------
 
-fn json_ok(body: String) -> Response {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("json response")
-}
-
-fn json_created(body: String) -> Response {
-    Response::builder()
-        .status(StatusCode::CREATED)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("created response")
-}
-
 fn json_bad_request(body: &str) -> Response {
     Response::builder()
         .status(StatusCode::BAD_REQUEST)
@@ -2145,14 +2100,6 @@ fn json_not_found(body: &str) -> Response {
         .header(header::CONTENT_TYPE, "application/json")
         .body(axum::body::Body::from(body.to_owned()))
         .expect("not-found response")
-}
-
-fn no_content() -> Response {
-    // Probed: DRF's empty 204 carries no content type.
-    Response::builder()
-        .status(StatusCode::NO_CONTENT)
-        .body(axum::body::Body::empty())
-        .expect("no-content response")
 }
 
 fn redirect(location: String) -> Response {
@@ -2175,16 +2122,16 @@ fn pool_of(state: &AppState) -> Result<sqlx::PgPool, Denial> {
         .ok_or(Denial::ServerError)
 }
 
-/// Split a proxied-or-read request after the UUID guards passed. The 8MB cap
-/// covers the 5MB attachment ceiling plus multipart framing; overflow is a
-/// 500 (the serve-wide 413 lives in Django middleware and is unported).
+/// Split a proxied-or-read request after the UUID guards passed. The read
+/// is unbounded past the serve-wide `BodyLimitLayer`; a mid-stream
+/// transport failure fails closed with the truncated-body 502.
 async fn split_parts(
     req: axum::extract::Request,
 ) -> Result<(axum::http::request::Parts, Vec<u8>), Denial> {
     let (parts, body) = req.into_parts();
-    let bytes = axum::body::to_bytes(body, 8 * 1024 * 1024)
+    let bytes = read_request_bytes(body)
         .await
-        .map_err(|_| Denial::ServerError)?;
+        .map_err(|_| Denial::TruncatedBody)?;
     Ok((parts, bytes.to_vec()))
 }
 
@@ -2743,6 +2690,11 @@ pub async fn bulk_create_labels(
     // `bulk_create(..., batch_size=50, ignore_conflicts=True)`: one
     // multi-row `INSERT ... ON CONFLICT DO NOTHING` per batch (Django
     // emits the arbiter-less form, which needs no partial-index match).
+    // Django wraps ALL batches in one `transaction.atomic`, so a failing
+    // later batch rolls back the earlier ones: run every batch on one
+    // transaction. Dropping `tx` uncommitted on any early `return` below
+    // rolls back, preserving the all-or-nothing semantics.
+    let mut tx = pool.begin().await.map_err(|_| Denial::ServerError)?;
     for batch in rows.chunks(50) {
         let mut sql = String::from(
             "INSERT INTO labels (id, created_at, updated_at, created_by_id, updated_by_id, workspace_id, project_id, parent_id, name, description, color, sort_order, external_source, external_id) VALUES ",
@@ -2779,13 +2731,14 @@ pub async fn bulk_create_labels(
         // A `NULL` name/description trips `NOT NULL` for its batch (the
         // whole batch fails, like the single Django statement); unique
         // conflicts are swallowed per row by `DO NOTHING`.
-        if let Err(error) = insert.execute(&pool).await {
+        if let Err(error) = insert.execute(&mut *tx).await {
             if is_integrity_violation(&error) {
                 return Ok(json_bad_request(PAYLOAD_NOT_VALID_BODY));
             }
             return Err(Denial::ServerError);
         }
     }
+    tx.commit().await.map_err(|_| Denial::ServerError)?;
 
     // `LabelSerializer(labels, many=True)` over the constructed rows:
     // every input echoes with its pre-assigned id, `sort_order` the field
@@ -3474,6 +3427,32 @@ pub async fn v2_delete(
 mod tests {
     use super::*;
     use pidash_db::config::StorageSettings;
+
+    fn origin_state(app_base_url: Option<&str>, web_url: Option<&str>) -> AppState {
+        let mut settings = pidash_db::config::Settings::test_defaults();
+        settings.urls.app_base_url = app_base_url.map(str::to_owned);
+        settings.urls.web_url = web_url.map(str::to_owned);
+        AppState::with_settings("test", settings)
+    }
+
+    /// `base_host(request, is_app=True)` treats `""` as missing
+    /// (PIDASHCONV-1587): an empty `APP_BASE_URL` falls through to
+    /// `WEB_URL`, and empty everywhere is the 500.
+    #[test]
+    fn request_origin_falls_through_empty_strings() {
+        let web = "https://web.example.invalid";
+        let state = origin_state(Some(""), Some(web));
+        assert_eq!(request_origin(&state).expect("falls through"), web);
+        let state = origin_state(Some(""), Some(""));
+        assert!(matches!(request_origin(&state), Err(Denial::ServerError)));
+        let state = origin_state(None, None);
+        assert!(matches!(request_origin(&state), Err(Denial::ServerError)));
+        let state = origin_state(Some("https://app.example.invalid"), Some(web));
+        assert_eq!(
+            request_origin(&state).expect("app base wins"),
+            "https://app.example.invalid"
+        );
+    }
 
     fn json_data(text: &str) -> RequestData {
         RequestData {

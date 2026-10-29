@@ -29,7 +29,7 @@
   "model_used": "",
   "usage": null,
   "error_code": "provider_out_of_credit",
-  "error_detail": "The provider rejected the request for lack of credit."
+  "error_detail": "The provider rejected the request for lack of credit. The provider said: Insufficient credits. Top up at https://example.test/billing."
  },
  "model_messages": null,
  "provider_exchanges": [

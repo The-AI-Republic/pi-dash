@@ -96,10 +96,16 @@ use chrono_tz::Tz;
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
+use crate::edge;
+use crate::middleware::body_limit::read_request_bytes;
 use crate::state::AppState;
 use crate::v1_cycles_modules::body as shared_body;
 
+use pidash_compat::db::is_unique_violation;
+use pidash_compat::response::{empty_response_no_content_type as empty_response, json_response};
+use pidash_compat::validate::push_pairs_error as push_error;
 use pidash_services::app_issues::relation_mapper::get_actual_relation;
+use pidash_services::domain::relations as relation_domain;
 
 // ---- owned paths ------------------------------------------------------------
 
@@ -134,25 +140,25 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route(
             RELATION_PATH,
-            owned(
+            edge::owned(
                 axum::routing::get(relation_list).post(relation_create),
                 &["GET", "POST"],
             ),
         )
         .route(
             REMOVE_RELATION_PATH,
-            owned(axum::routing::post(remove_relation), &["POST"]),
+            edge::owned(axum::routing::post(remove_relation), &["POST"]),
         )
         .route(
             LINKS_PATH,
-            owned(
+            edge::owned(
                 axum::routing::get(link_list).post(link_create),
                 &["GET", "POST"],
             ),
         )
         .route(
             LINK_PATH,
-            owned(
+            edge::owned(
                 axum::routing::get(link_retrieve)
                     .put(link_update)
                     .patch(link_partial_update)
@@ -162,53 +168,26 @@ pub fn routes() -> Router<AppState> {
         )
         .route(
             PR_LINKS_PATH,
-            owned(
+            edge::owned(
                 axum::routing::get(pr_list).post(pr_create),
                 &["GET", "POST"],
             ),
         )
         .route(
             PR_LINK_PATH,
-            owned(axum::routing::delete(pr_destroy), &["DELETE"]),
+            edge::owned(axum::routing::delete(pr_destroy), &["DELETE"]),
         )
         .route(
             REVIEWS_PATH,
-            owned(
+            edge::owned(
                 axum::routing::get(review_list).post(review_create),
                 &["GET", "POST"],
             ),
         )
         .route(
             REVIEW_PATH,
-            owned(axum::routing::delete(review_destroy), &["DELETE"]),
+            edge::owned(axum::routing::delete(review_destroy), &["DELETE"]),
         )
-}
-
-/// A relations path: the owned methods serve from Rust, everything else
-/// falls through to Django (the engage-handler cutover shape).
-fn owned(
-    methods: axum::routing::MethodRouter<AppState>,
-    owned: &[&str],
-) -> axum::routing::MethodRouter<AppState> {
-    let mut router = methods;
-    for other in [
-        "GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD", "TRACE",
-    ] {
-        if owned.contains(&other) {
-            continue;
-        }
-        router = match other {
-            "GET" => router.get(crate::edge::proxy),
-            "POST" => router.post(crate::edge::proxy),
-            "PUT" => router.put(crate::edge::proxy),
-            "PATCH" => router.patch(crate::edge::proxy),
-            "DELETE" => router.delete(crate::edge::proxy),
-            "HEAD" => router.head(crate::edge::proxy),
-            "TRACE" => router.trace(crate::edge::proxy),
-            _ => router.options(crate::edge::proxy),
-        };
-    }
-    router
 }
 
 // ---------------------------------------------------------------------------
@@ -244,8 +223,8 @@ enum Denial {
     Conflict(String),
     /// 415, `UnsupportedMediaType` (content negotiation).
     UnsupportedMediaType(String),
-    /// 413, `RequestBodySizeLimitMiddleware` past 5 MiB.
-    RequestTooLarge,
+    /// 502, truncated request-body read (the shared bad-gateway shape).
+    TruncatedBody,
     /// 500, generic branch.
     ServerError,
 }
@@ -295,10 +274,9 @@ impl Denial {
                 StatusCode::BAD_REQUEST,
                 serde_json::to_string(body).unwrap_or_else(|_| super::SERVER_ERROR_BODY.to_owned()),
             ),
-            Denial::WorkItemNotFound => (
-                StatusCode::NOT_FOUND,
-                WORK_ITEM_NOT_FOUND_BODY.to_owned(),
-            ),
+            Denial::WorkItemNotFound => {
+                (StatusCode::NOT_FOUND, WORK_ITEM_NOT_FOUND_BODY.to_owned())
+            }
             Denial::Conflict(message) => (
                 StatusCode::CONFLICT,
                 format!("{{\"error\":{}}}", json_string(message)),
@@ -307,9 +285,9 @@ impl Denial {
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
                 format!("{{\"detail\":{}}}", json_string(message)),
             ),
-            Denial::RequestTooLarge => (
-                StatusCode::PAYLOAD_TOO_LARGE,
-                r#"{"error":"REQUEST_BODY_TOO_LARGE","detail":"The size of the request body exceeds the maximum allowed size."}"#.to_owned(),
+            Denial::TruncatedBody => (
+                StatusCode::BAD_GATEWAY,
+                crate::edge::BAD_GATEWAY_BODY.to_owned(),
             ),
             Denial::ServerError => (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -337,24 +315,6 @@ fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
 }
 
-/// Render `body` (already exact JSON bytes) with an explicit status.
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("relations json response")
-}
-
-/// DRF's 204: empty body with NO content type (verified live: Django
-/// only sets `Content-Type` when it renders a body).
-fn empty_response(status: StatusCode) -> Response {
-    Response::builder()
-        .status(status)
-        .body(axum::body::Body::empty())
-        .expect("relations empty response")
-}
-
 fn pool_of(state: &AppState) -> Result<sqlx::PgPool, Denial> {
     state
         .pools()
@@ -373,17 +333,6 @@ fn integrity_denial(error: sqlx::Error) -> Denial {
     }
     let _ = error;
     Denial::ServerError
-}
-
-/// True when the failure is an integrity violation (SQLSTATE class 23).
-fn is_integrity_error(error: &sqlx::Error) -> bool {
-    matches!(error, sqlx::Error::Database(db) if db.code().is_some_and(|code| code.starts_with("23")))
-}
-
-/// True when the failure is a unique violation (SQLSTATE 23505): the
-/// `ignore_conflicts` / create-race arm.
-fn is_unique_violation(error: &sqlx::Error) -> bool {
-    matches!(error, sqlx::Error::Database(db) if db.code().is_some_and(|code| code == "23505"))
 }
 
 // ---------------------------------------------------------------------------
@@ -544,9 +493,6 @@ async fn project_workspace(
 // Request bodies
 // ---------------------------------------------------------------------------
 
-/// `RequestBodySizeLimitMiddleware` answers 413 before the view runs.
-const MAX_BODY: usize = 5_242_880;
-
 /// Relations body semantics for the shared negotiator: no list fields
 /// (repeated form keys arrive as the last value, like `QueryDict.get`),
 /// no blank-skipping (every blank runs field validation).
@@ -563,9 +509,12 @@ struct RequestBody {
 
 async fn read_body(req: axum::extract::Request) -> Result<RequestBody, Denial> {
     let (parts, body) = req.into_parts();
-    let bytes = axum::body::to_bytes(body, MAX_BODY)
+    // The serve-wide `BodyLimitLayer` already 413'd over-limit bodies;
+    // the read below cannot re-cap. A mid-stream transport failure fails
+    // closed with the truncated-body 502.
+    let bytes = read_request_bytes(body)
         .await
-        .map_err(|_| Denial::RequestTooLarge)?;
+        .map_err(|_| Denial::TruncatedBody)?;
     match shared_body::negotiate_body(&parts.headers, &bytes, &RELATIONS_BODY_SPEC) {
         Ok(shared_body::NegotiatedBody::Empty) => Ok(RequestBody { map: Map::new() }),
         Ok(shared_body::NegotiatedBody::JsonText { text, .. }) => {
@@ -603,81 +552,6 @@ fn parse_json_body(text: &str) -> Result<Map<String, Value>, Denial> {
 // ---------------------------------------------------------------------------
 // CPython value semantics (`dumps` / float rendering)
 // ---------------------------------------------------------------------------
-
-/// `json.dumps(value, cls=DjangoJSONEncoder)` for task kwargs: CPython
-/// separators plus `ensure_ascii` string escaping. Inputs here are plain
-/// JSON (no datetimes/UUIDs/Decimals reach these dumps unrendered), so
-/// only separators and escaping are ported.
-fn python_dumps(value: &serde_json::Value) -> String {
-    let mut out = String::new();
-    python_dump_into(&mut out, value);
-    out
-}
-
-fn python_dump_into(out: &mut String, value: &serde_json::Value) {
-    match value {
-        serde_json::Value::Null => out.push_str("null"),
-        serde_json::Value::Bool(true) => out.push_str("true"),
-        serde_json::Value::Bool(false) => out.push_str("false"),
-        serde_json::Value::Number(number) => out.push_str(&number.to_string()),
-        serde_json::Value::String(text) => python_dump_str(out, text),
-        serde_json::Value::Array(items) => {
-            out.push('[');
-            for (index, item) in items.iter().enumerate() {
-                if index > 0 {
-                    out.push_str(", ");
-                }
-                python_dump_into(out, item);
-            }
-            out.push(']');
-        }
-        serde_json::Value::Object(map) => {
-            out.push('{');
-            for (index, (key, item)) in map.iter().enumerate() {
-                if index > 0 {
-                    out.push_str(", ");
-                }
-                python_dump_str(out, key);
-                out.push_str(": ");
-                python_dump_into(out, item);
-            }
-            out.push('}');
-        }
-    }
-}
-
-fn python_dump_str(out: &mut String, text: &str) {
-    out.push('"');
-    for ch in text.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{08}' => out.push_str("\\b"),
-            '\u{0C}' => out.push_str("\\f"),
-            ch if (ch as u32) < 0x20 || (ch as u32) == 0x7F => {
-                out.push_str(&format!("\\u{:04x}", ch as u32));
-            }
-            ch if (ch as u32) > 0x7E => {
-                let code = ch as u32;
-                if code > 0xFFFF {
-                    let v = code - 0x10000;
-                    out.push_str(&format!(
-                        "\\u{:04x}\\u{:04x}",
-                        0xD800 + (v >> 10),
-                        0xDC00 + (v & 0x3FF)
-                    ));
-                } else {
-                    out.push_str(&format!("\\u{code:04x}"));
-                }
-            }
-            ch => out.push(ch),
-        }
-    }
-    out.push('"');
-}
 
 /// Rewrite every parsed f64 to its CPython `repr` literal, so `str()` of
 /// a request float (`title: 1e-3` → `"0.001"`) matches Python.
@@ -736,74 +610,12 @@ fn py_float_repr(value: f64) -> String {
     layout_py_float(&format!("{value:.18e}"), value)
 }
 
-/// Lay out a `d.dddde±xx` rendering per the CPython magnitude rule
-/// (plain inside `[1e-4, 1e16)`, exponent outside). Same algorithm as the
-/// engage handler's copy.
-fn layout_py_float(rendered: &str, value: f64) -> String {
-    let (mantissa, exp) = match rendered.split_once(['e', 'E']) {
-        Some((mantissa, exp)) => (mantissa, exp.parse::<i32>().unwrap_or(0)),
-        None => (rendered, 0),
-    };
-    let negative = mantissa.starts_with('-');
-    let digits: String = mantissa.chars().filter(|ch| ch.is_ascii_digit()).collect();
-    let digits = digits.trim_start_matches('0');
-    let digits = digits.trim_end_matches('0');
-    let digits = if digits.is_empty() { "0" } else { digits };
-    // Decimal exponent of `0.digits × 10^E`.
-    let point_at = mantissa
-        .find('.')
-        .map(|pos| pos - usize::from(negative))
-        .unwrap_or_else(|| mantissa.len() - usize::from(negative));
-    let exp10 = exp + point_at as i32;
-    let abs = value.abs();
-    let mut out = String::new();
-    if negative {
-        out.push('-');
-    }
-    if (1e-4..1e16).contains(&abs) {
-        // Plain layout.
-        if exp10 <= 0 {
-            out.push_str("0.");
-            out.push_str(&"0".repeat((-exp10) as usize));
-            out.push_str(digits);
-        } else if exp10 as usize >= digits.len() {
-            out.push_str(digits);
-            out.push_str(&"0".repeat(exp10 as usize - digits.len()));
-            out.push_str(".0");
-        } else {
-            let at = exp10 as usize;
-            out.push_str(&digits[..at]);
-            out.push('.');
-            out.push_str(&digits[at..]);
-        }
-        return out;
-    }
-    // Exponent layout: `d[.ddd]e±XX`.
-    let head: String = digits.chars().take(1).collect();
-    let tail: String = digits.chars().skip(1).collect();
-    out.push_str(&head);
-    if !tail.is_empty() {
-        out.push('.');
-        out.push_str(&tail);
-    }
-    let exp = exp10 - 1;
-    out.push('e');
-    out.push(if exp < 0 { '-' } else { '+' });
-    let mag = exp.abs().to_string();
-    if mag.len() < 2 {
-        out.push('0');
-    }
-    out.push_str(&mag);
-    out
-}
-
 // ---------------------------------------------------------------------------
 // Tasks: best-effort publishing through the queue
 // ---------------------------------------------------------------------------
 
-/// `issue_activity` Celery wire name (bare `@shared_task` default:
-/// `bgtasks/issue_activities_task.py:1503-1504`).
-const ISSUE_ACTIVITY_TASK: &str = "pi_dash.bgtasks.issue_activities_task.issue_activity";
+// Canonical task name lives in `pidash_services::domain::activity`.
+use pidash_services::domain::activity::ISSUE_ACTIVITY_TASK;
 /// `crawl_work_item_link_title` wire name (`bgtasks/work_item_link_task.py:262`).
 const CRAWL_LINK_TASK: &str = "pi_dash.bgtasks.work_item_link_task.crawl_work_item_link_title";
 
@@ -853,13 +665,15 @@ async fn enqueue_soft_delete(pool: &sqlx::PgPool, model: &str, pk: &uuid::Uuid) 
 }
 
 /// `base_host(request, is_app=True)` (`utils/host.py:17-67`): the app
-/// origin for task kwargs, never the inbound host.
+/// origin for task kwargs, never the inbound host. Empty strings fall
+/// through like Python's `or` (PIDASHCONV-1587).
 fn app_origin(state: &AppState) -> String {
-    if let Some(url) = state.settings().urls.app_base_url.clone() {
-        return url;
+    let urls = &state.settings().urls;
+    if let Some(url) = urls.app_base_url.as_deref().filter(|s| !s.is_empty()) {
+        return url.to_owned();
     }
-    if let Some(url) = state.settings().urls.web_url.clone() {
-        return url;
+    if let Some(url) = urls.web_url.as_deref().filter(|s| !s.is_empty()) {
+        return url.to_owned();
     }
     "http://localhost".to_owned()
 }
@@ -1235,16 +1049,15 @@ async fn relation_create(
         chrono::DateTime<chrono::Utc>,
     )> = Vec::with_capacity(prepared.len());
     for chunk in prepared.chunks(10) {
-        let mut ids: Vec<uuid::Uuid> = Vec::with_capacity(chunk.len());
-        let mut issue_ids: Vec<uuid::Uuid> = Vec::with_capacity(chunk.len());
-        let mut related_ids: Vec<uuid::Uuid> = Vec::with_capacity(chunk.len());
-        let mut created: Vec<chrono::DateTime<chrono::Utc>> = Vec::with_capacity(chunk.len());
-        let mut updated: Vec<chrono::DateTime<chrono::Utc>> = Vec::with_capacity(chunk.len());
+        // Domain batch twin: one chunk-atomic `UNNEST ... ON CONFLICT
+        // DO NOTHING` per chunk (bare — no arbiter is possible: the
+        // dedup index is a partial unique *index*, which `ON CONFLICT
+        // ON CONSTRAINT` rejects with SQLSTATE 42P10).
+        let mut rows = Vec::with_capacity(chunk.len());
         for slot in chunk {
             // `auto_now_add`/`auto_now` stamp each object in Python
             // before the `INSERT`.
             let stamp = chrono::Utc::now();
-            let id = uuid::Uuid::new_v4();
             let item = slot.expect("null items rejected above");
             let (issue_side, related_side) = if flipped {
                 (item, issue_id)
@@ -1252,42 +1065,20 @@ async fn relation_create(
                 (issue_id, item)
             };
             stamps.push((item, stamp, stamp));
-            ids.push(id);
-            issue_ids.push(issue_side);
-            related_ids.push(related_side);
-            created.push(stamp);
-            updated.push(stamp);
+            rows.push(relation_domain::RelationRow {
+                id: uuid::Uuid::new_v4(),
+                created_at: stamp,
+                updated_at: stamp,
+                created_by: Some(user_id),
+                updated_by: Some(user_id),
+                project_id,
+                workspace_id,
+                issue_id: issue_side,
+                related_issue_id: related_side,
+                relation_type: stored_type,
+            });
         }
-        // Bare `ON CONFLICT DO NOTHING`: exactly what
-        // `bulk_create(ignore_conflicts=True)` emits. No arbiter is
-        // possible — the dedup index
-        // (`issue_relation_unique_issue_related_issue_when_deleted_at_null`)
-        // is a partial unique *index*, which `ON CONFLICT ON CONSTRAINT`
-        // rejects (SQLSTATE 42P10).
-        let outcome = sqlx::query(
-            r#"INSERT INTO issue_relations
-               (id, created_at, updated_at, relation_type, issue_id, related_issue_id,
-                created_by_id, updated_by_id, project_id, workspace_id)
-               SELECT u.id, u.created_at, u.updated_at, $6, u.issue_id, u.related_id,
-                      $7, $8, $9, $10
-               FROM UNNEST($1::uuid[], $2::timestamptz[], $3::timestamptz[],
-                           $4::uuid[], $5::uuid[])
-                    AS u(id, created_at, updated_at, issue_id, related_id)
-               ON CONFLICT DO NOTHING"#,
-        )
-        .bind(&ids)
-        .bind(&created)
-        .bind(&updated)
-        .bind(&issue_ids)
-        .bind(&related_ids)
-        .bind(stored_type)
-        .bind(user_id)
-        .bind(user_id)
-        .bind(project_id)
-        .bind(workspace_id)
-        .execute(&pool)
-        .await;
-        if let Err(error) = outcome {
+        if let Err(error) = relation_domain::relate_rows_or_nothing(&pool, &rows).await {
             return integrity_denial(error).into_response();
         }
     }
@@ -1659,16 +1450,10 @@ async fn remove_relation(
     let current_instance = python_dumps(&Value::Object(shape));
     // `.delete()` first (soft row + fan-out), then the activity row.
     let now = chrono::Utc::now();
-    if let Err(error) = sqlx::query(
-        "UPDATE issue_relations SET deleted_at = $1, updated_at = $1, updated_by_id = $2 WHERE id = $3",
-    )
-    .bind(now)
-    .bind(user_id)
-    .bind(edge.id)
-    .execute(&pool)
-    .await
+    if relation_domain::soft_delete_relation_row(&pool, edge.id, user_id, now, now)
+        .await
+        .is_err()
     {
-        let _ = error;
         return Denial::ServerError.into_response();
     }
     enqueue_soft_delete(&pool, "issuerelation", &edge.id).await;
@@ -1770,6 +1555,12 @@ fn django_url_valid(url: &str) -> bool {
     if url.chars().any(|c| matches!(c, '\t' | '\r' | '\n')) {
         return false;
     }
+    // `urlsplit` NFKC parity (`urllib/parse.py::_checknetloc`): Django
+    // raises `ValueError` before the regex runs, so a failure here is
+    // final (no IDN retry).
+    if !url_netloc_nfkc_ok(url) {
+        return false;
+    }
     if url_host_pattern_valid(url) {
         // First match: `urlsplit`'s bracket check (strict IP parse) plus
         // the trailing hostname cap.
@@ -1784,15 +1575,21 @@ fn django_url_valid(url: &str) -> bool {
 
 /// The `URLValidator.regex` match over one URL string: optional
 /// `user:pass@`, then IPv4 | IPv6 | hostname, optional `:port`, optional
-/// path/query/fragment without whitespace.
+/// path/query/fragment without whitespace. The userinfo group is greedy
+/// but backtracks: the userinfo reading is tried first, then the
+/// no-userinfo reading. An `@` past a `?`/`#` is resource text
+/// (`example.com?email=user@…` and `example.com:80?x@y/` validate), while
+/// `?`/`#` may still sit inside real userinfo (`user?x@host/` validates
+/// — all verified against Django's `URLValidator`).
 fn url_host_pattern_valid(url: &str) -> bool {
     let Some(after_scheme) = url.split_once("://").map(|(_, rest)| rest) else {
         return false;
     };
-    // Optional `user:pass@` (`[^\s:@/]+(?::[^\s:@/]*)?@`): the pattern
-    // cannot cross `/`, so `@` past the first `/` starts the resource.
-    let host_part = match after_scheme.find('@') {
-        Some(at) if after_scheme.find('/').is_none_or(|slash| at < slash) => {
+    // Greedy userinfo attempt (`[^\s:@/]+(?::[^\s:@/]*)?@`): the pattern
+    // cannot cross `/`, so `@` past the first `/` starts the resource
+    // (verified live: `/a@b` validates as a path).
+    if let Some(at) = after_scheme.find('@') {
+        if after_scheme.find('/').is_none_or(|slash| at < slash) {
             let (userinfo, rest) = after_scheme.split_at(at);
             let rest = &rest[1..];
             // `user` / `pass` carry no whitespace, `:` or `/`.
@@ -1803,13 +1600,19 @@ fn url_host_pattern_valid(url: &str) -> bool {
             let pass_ok = pieces
                 .next()
                 .is_none_or(|pass| pass.chars().all(valid_userinfo_char));
-            if !(user_ok && pass_ok) || rest.is_empty() {
-                return false;
+            if user_ok && pass_ok && !rest.is_empty() && url_host_tail_valid(rest) {
+                return true;
             }
-            rest
         }
-        _ => after_scheme,
-    };
+    }
+    // No-userinfo reading (also the backtracked fallback).
+    url_host_tail_valid(after_scheme)
+}
+
+/// Host | `:port` | resource match over one authority-plus-resource
+/// string: IPv4 | IPv6 | hostname, optional `:port` (1-5 digits), then an
+/// optional resource starting with `/`, `?` or `#` without whitespace.
+fn url_host_tail_valid(host_part: &str) -> bool {
     // Split host from `:port` / path: brackets (IPv6) protect colons.
     let tail = if let Some(rest) = host_part.strip_prefix('[') {
         let Some((inside, tail)) = rest.split_once(']') else {
@@ -1884,6 +1687,40 @@ fn valid_ipv6_loose(inside: &str) -> bool {
         && inside
             .chars()
             .all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.')
+}
+
+/// Codepoints whose NFKC normalization introduces one of `/?#@:`
+/// (`urllib/parse.py::_checknetloc`, reached from every `urlsplit` call).
+/// Same table as `ser_extras::NFKC_FORBIDDEN` (per-module copies are the
+/// codebase precedent): enumerated once with CPython's
+/// `unicodedata.normalize` over all 0x110000 codepoints (single-char
+/// table; canonical composition can never produce ASCII `/ ? # @ :`, so
+/// per-char membership is exactly the whole-string check Django runs).
+const NFKC_FORBIDDEN: [char; 19] = [
+    '\u{2047}', '\u{2048}', '\u{2049}', '\u{2100}', '\u{2101}', '\u{2105}', '\u{2106}', '\u{2A74}',
+    '\u{FE13}', '\u{FE16}', '\u{FE55}', '\u{FE56}', '\u{FE5F}', '\u{FE6B}', '\u{FF03}', '\u{FF0F}',
+    '\u{FF1A}', '\u{FF1F}', '\u{FF20}',
+];
+
+/// `urlsplit()` NFKC parity (`urllib/parse.py::_checknetloc`): the
+/// authority (to the first `/?#`, like `_splitnetloc`) must hold no char
+/// whose NFKC form introduces `/?#@:`. Any failure maps to invalid
+/// (Django catches `ValueError` at `validators.py:126-128`).
+fn url_netloc_nfkc_ok(url: &str) -> bool {
+    let Some(after_scheme) = url.split_once("://").map(|(_, rest)| rest) else {
+        return false;
+    };
+    let netloc_end = after_scheme
+        .find(['/', '?', '#'])
+        .unwrap_or(after_scheme.len());
+    let netloc = &after_scheme[..netloc_end];
+    // `_checknetloc`: early return for empty/ASCII; literal `@:?#` are
+    // stripped before Django's check, but every table entry is non-ASCII,
+    // so no stripping is needed here.
+    netloc.is_ascii()
+        || !netloc
+            .chars()
+            .any(|c| NFKC_FORBIDDEN.binary_search(&c).is_ok())
 }
 
 /// `urlsplit`'s bracket check (Python 3.12 `_check_bracketed_netloc`):
@@ -2039,17 +1876,6 @@ fn idna_ace_url(url: &str) -> Option<String> {
 /// One field's message list, in writable-field order (`title`, `url`,
 /// `metadata` — model declaration order).
 type FieldErrors = Vec<(String, Value)>;
-
-fn push_error(errors: &mut FieldErrors, field: &str, message: Value) {
-    match errors.iter_mut().find(|(name, _)| name == field) {
-        Some((_, Value::Array(messages))) => messages.push(message),
-        Some((_, slot)) => {
-            let prior = std::mem::replace(slot, Value::Null);
-            *slot = Value::Array(vec![prior, message]);
-        }
-        None => errors.push((field.to_owned(), Value::Array(vec![message]))),
-    }
-}
 
 /// Direct (unlisted) field detail: `ValidationError({"url": {...}})`.
 fn set_error(errors: &mut FieldErrors, field: &str, value: Value) {
@@ -3516,8 +3342,7 @@ async fn review_list(
 // ---------------------------------------------------------------------------
 
 use pidash_services::app_issues::pr_links::{
-    AttachError as PrAttachError, CreatePrLinkOutcome, InstallationRow, NewPrLink, NewReviewLink,
-    PrLinkRow, PrLinksStore, ReviewLinkRow, ReviewMirrorFields, StoreError as PrStoreError,
+    AttachError as PrAttachError, PrLinkRow, StoreError as PrStoreError,
 };
 use pidash_services::integrations::accounts::{
     GitStore, NewProviderAccount, StoreError as GitStoreError,
@@ -3527,12 +3352,6 @@ use pidash_services::integrations::code_reviews::{
     NewLegacyLink, ReviewAdapter, ReviewParser,
 };
 use pidash_services::integrations::repositories::{NewRepository, RepositoryDefaults};
-
-/// Map a sqlx failure into the `pr_links` store error.
-fn pr_store_error(context: &str, error: sqlx::Error) -> PrStoreError {
-    let _ = context;
-    PrStoreError(format!("{context}: {error}"))
-}
 
 /// Sentinel for the deleted-project lookup miss inside PR attach: the
 /// handler maps it to the 404 `DoesNotExist` body (Python's
@@ -3547,358 +3366,6 @@ const PR_RACE_MISS: &str = "pr link lost the create race";
 /// mirror writes): Python's uncaught `IntegrityError` → the payload
 /// 400, so the handler maps these to 400, not 500.
 const PR_PAYLOAD_INVALID: &str = "relations: payload not valid";
-
-/// Map a mid-attach write failure: integrity violations carry the
-/// payload marker (Python's `IntegrityError` 400), anything else the
-/// generic store error (500).
-fn pr_write_error(context: &str, error: sqlx::Error) -> PrStoreError {
-    if is_integrity_error(&error) {
-        PrStoreError(format!("{PR_PAYLOAD_INVALID}: {context}: {error}"))
-    } else {
-        pr_store_error(context, error)
-    }
-}
-
-/// The live `PrLinksStore`: pool + request actor. Audit columns follow
-/// CRUM (`BaseModel.save`): creates stamp `created_by`, updates stamp
-/// `updated_by`, deletes stamp `updated_by`. The project workspace
-/// resolves at write time (mirroring `save()`'s lazy project fetch),
-/// deleted projects miss → the 404 sentinel.
-struct PrStore {
-    pool: sqlx::PgPool,
-}
-
-impl PrStore {
-    fn new(pool: sqlx::PgPool) -> Self {
-        Self { pool }
-    }
-
-    async fn workspace_of(&self, project_id: &uuid::Uuid) -> Result<uuid::Uuid, PrStoreError> {
-        // [`PROJECT_WORKSPACE_LOOKUP_SQL`](pidash_services::app_issues::pr_links::PROJECT_WORKSPACE_LOOKUP_SQL),
-        // plus the default-manager `deleted_at` scope: Python's
-        // `self.project` traversal misses soft-deleted projects
-        // (`DoesNotExist` → 404), so the lookup must too.
-        let row: Option<(Uuid,)> = sqlx::query_as(
-            "SELECT workspace_id FROM projects WHERE id = $1 AND deleted_at IS NULL LIMIT 1",
-        )
-        .bind(project_id)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|error| pr_store_error("project workspace", error))?;
-        row.map(|row| row.0)
-            .ok_or_else(|| PrStoreError(PROJECT_WORKSPACE_MISS.to_owned()))
-    }
-}
-
-fn pr_link_row_from(row: &sqlx::postgres::PgRow) -> Result<PrLinkRow, PrStoreError> {
-    use sqlx::Row as _;
-    Ok(PrLinkRow {
-        id: row
-            .try_get("id")
-            .map_err(|error| pr_store_error("pr link map", error))?,
-        project_id: row
-            .try_get("project_id")
-            .map_err(|error| pr_store_error("pr link map", error))?,
-        issue_id: row
-            .try_get("issue_id")
-            .map_err(|error| pr_store_error("pr link map", error))?,
-        repo_owner: row
-            .try_get("repo_owner")
-            .map_err(|error| pr_store_error("pr link map", error))?,
-        repo_name: row
-            .try_get("repo_name")
-            .map_err(|error| pr_store_error("pr link map", error))?,
-        pr_number: row
-            .try_get::<i32, _>("pr_number")
-            .map(i64::from)
-            .map_err(|error| pr_store_error("pr link map", error))?,
-        url: row
-            .try_get("url")
-            .map_err(|error| pr_store_error("pr link map", error))?,
-        title: row
-            .try_get("title")
-            .map_err(|error| pr_store_error("pr link map", error))?,
-        state: row
-            .try_get("state")
-            .map_err(|error| pr_store_error("pr link map", error))?,
-        merged: row
-            .try_get("merged")
-            .map_err(|error| pr_store_error("pr link map", error))?,
-        draft: row
-            .try_get("draft")
-            .map_err(|error| pr_store_error("pr link map", error))?,
-        pr_updated_at: row
-            .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("pr_updated_at")
-            .map(|stamp| {
-                stamp.map(|stamp| stamp.to_rfc3339_opts(chrono::SecondsFormat::Micros, true))
-            })
-            .map_err(|error| pr_store_error("pr link map", error))?,
-    })
-}
-
-fn review_link_row_from(row: &sqlx::postgres::PgRow) -> Result<ReviewLinkRow, PrStoreError> {
-    use sqlx::Row as _;
-    Ok(ReviewLinkRow {
-        id: row
-            .try_get("id")
-            .map_err(|error| pr_store_error("review link map", error))?,
-        issue_id: row
-            .try_get("issue_id")
-            .map_err(|error| pr_store_error("review link map", error))?,
-        metadata: row
-            .try_get("metadata")
-            .map_err(|error| pr_store_error("review link map", error))?,
-    })
-}
-
-impl PrLinksStore for PrStore {
-    async fn installation_for_account(
-        &self,
-        workspace_slug: &str,
-        owner: &str,
-    ) -> Result<Option<InstallationRow>, PrStoreError> {
-        let row: Option<sqlx::postgres::PgRow> =
-            sqlx::query(pidash_services::app_issues::pr_links::INSTALLATION_LOOKUP_SQL)
-                .bind(workspace_slug)
-                .bind(owner)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|error| pr_store_error("installation lookup", error))?;
-        row.map(|row| {
-            use sqlx::Row as _;
-            let id: Uuid = row
-                .try_get("id")
-                .map_err(|error| pr_store_error("installation map", error))?;
-            let installation_id: i64 = row
-                .try_get("installation_id")
-                .map_err(|error| pr_store_error("installation map", error))?;
-            Ok(InstallationRow {
-                id,
-                installation_id,
-            })
-        })
-        .transpose()
-    }
-
-    async fn issue_exists(
-        &self,
-        issue_id: Uuid,
-        project_id: Uuid,
-        workspace_slug: &str,
-    ) -> Result<bool, PrStoreError> {
-        let row: Option<(i32,)> =
-            sqlx::query_as(pidash_services::app_issues::pr_links::ISSUE_EXISTS_SQL)
-                .bind(issue_id)
-                .bind(project_id)
-                .bind(workspace_slug)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|error| pr_store_error("issue exists", error))?;
-        Ok(row.is_some())
-    }
-
-    async fn pr_link_by_pr(
-        &self,
-        owner: &str,
-        name: &str,
-        number: i64,
-    ) -> Result<Option<PrLinkRow>, PrStoreError> {
-        let number_i32 = i32::try_from(number).map_err(|_| {
-            PrStoreError(format!(
-                "pr_number {number} out of range for integer column"
-            ))
-        })?;
-        let row: Option<sqlx::postgres::PgRow> =
-            sqlx::query(pidash_services::app_issues::pr_links::PR_LINK_LOOKUP_SQL)
-                .bind(owner)
-                .bind(name)
-                .bind(number_i32)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|error| pr_store_error("pr link lookup", error))?;
-        row.map(|row| pr_link_row_from(&row)).transpose()
-    }
-
-    async fn review_link_by_pr(
-        &self,
-        owner: &str,
-        name: &str,
-        number: &str,
-    ) -> Result<Option<ReviewLinkRow>, PrStoreError> {
-        let row: Option<sqlx::postgres::PgRow> =
-            sqlx::query(pidash_services::app_issues::pr_links::REVIEW_LINK_LOOKUP_SQL)
-                .bind(owner)
-                .bind(name)
-                .bind(number)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|error| pr_store_error("review link lookup", error))?;
-        row.map(|row| review_link_row_from(&row)).transpose()
-    }
-
-    async fn create_pr_link(
-        &self,
-        new: &NewPrLink,
-        now: &chrono::DateTime<chrono::Utc>,
-        actor_id: Option<Uuid>,
-    ) -> Result<CreatePrLinkOutcome, PrStoreError> {
-        let workspace_id = self.workspace_of(&new.project_id).await?;
-        let pr_number = i32::try_from(new.pr_number).map_err(|_| {
-            PrStoreError(format!(
-                "pr_number {} out of range for integer column",
-                new.pr_number
-            ))
-        })?;
-        let outcome = sqlx::query(pidash_services::app_issues::pr_links::PR_LINK_INSERT_SQL)
-            .bind(new.id)
-            .bind(now)
-            .bind(now)
-            .bind(actor_id)
-            .bind(new.project_id)
-            .bind(workspace_id)
-            .bind(new.issue_id)
-            .bind(&new.repo_owner)
-            .bind(&new.repo_name)
-            .bind(pr_number)
-            .bind(&new.url)
-            .bind(&new.title)
-            .bind(&new.state)
-            .bind(new.merged)
-            .bind(new.draft)
-            .bind(new.pr_updated_at.as_deref().and_then(parse_snapshot_dt))
-            .execute(&self.pool)
-            .await;
-        match outcome {
-            Ok(_) => Ok(CreatePrLinkOutcome::Created(Box::new(PrLinkRow {
-                id: new.id,
-                project_id: new.project_id,
-                issue_id: new.issue_id,
-                repo_owner: new.repo_owner.clone(),
-                repo_name: new.repo_name.clone(),
-                pr_number: new.pr_number,
-                url: new.url.clone(),
-                title: new.title.clone(),
-                state: new.state.clone(),
-                merged: new.merged,
-                draft: new.draft,
-                pr_updated_at: new.pr_updated_at.clone(),
-            }))),
-            Err(error) if is_unique_violation(&error) => Ok(CreatePrLinkOutcome::Conflict),
-            Err(error) if is_integrity_error(&error) => Err(PrStoreError(format!(
-                "{PR_PAYLOAD_INVALID}: pr link insert: {error}"
-            ))),
-            Err(error) => Err(pr_store_error("pr link insert", error)),
-        }
-    }
-
-    async fn create_review_link(
-        &self,
-        new: &NewReviewLink,
-        now: &chrono::DateTime<chrono::Utc>,
-        actor_id: Option<Uuid>,
-    ) -> Result<ReviewLinkRow, PrStoreError> {
-        let workspace_id = self.workspace_of(&new.project_id).await?;
-        sqlx::query(pidash_services::app_issues::pr_links::REVIEW_LINK_INSERT_SQL)
-            .bind(new.id)
-            .bind(now)
-            .bind(now)
-            .bind(actor_id)
-            .bind(new.project_id)
-            .bind(workspace_id)
-            .bind(new.issue_id)
-            .bind(&new.url)
-            .bind(&new.title)
-            .bind(&new.state)
-            .bind(new.merged)
-            .bind(new.draft)
-            .bind(new.remote_updated_at.as_deref().and_then(parse_snapshot_dt))
-            .bind(&new.metadata)
-            .bind(&new.namespace)
-            .bind(&new.repo_name)
-            .bind(&new.external_iid)
-            .execute(&self.pool)
-            .await
-            .map_err(|error| pr_write_error("review link insert", error))?;
-        Ok(ReviewLinkRow {
-            id: new.id,
-            issue_id: new.issue_id,
-            metadata: new.metadata.clone(),
-        })
-    }
-
-    async fn update_review_link(
-        &self,
-        id: Uuid,
-        fields: &ReviewMirrorFields,
-        now: &chrono::DateTime<chrono::Utc>,
-        actor_id: Option<Uuid>,
-    ) -> Result<(), PrStoreError> {
-        let workspace_id = self.workspace_of(&fields.project_id).await?;
-        sqlx::query(pidash_services::app_issues::pr_links::REVIEW_LINK_UPDATE_SQL)
-            .bind(now)
-            .bind(actor_id)
-            .bind(fields.project_id)
-            .bind(workspace_id)
-            .bind(fields.issue_id)
-            .bind(&fields.url)
-            .bind(&fields.title)
-            .bind(&fields.state)
-            .bind(fields.merged)
-            .bind(fields.draft)
-            .bind(
-                fields
-                    .remote_updated_at
-                    .as_deref()
-                    .and_then(parse_snapshot_dt),
-            )
-            .bind(&fields.metadata)
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(|error| pr_write_error("review link update", error))?;
-        Ok(())
-    }
-
-    async fn delete_pr_link(
-        &self,
-        id: Uuid,
-        now: &chrono::DateTime<chrono::Utc>,
-        actor_id: Option<Uuid>,
-    ) -> Result<(), PrStoreError> {
-        sqlx::query(pidash_services::app_issues::pr_links::PR_LINK_SOFT_DELETE_SQL)
-            .bind(now)
-            .bind(actor_id)
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(|error| pr_store_error("pr link delete", error))?;
-        Ok(())
-    }
-
-    async fn delete_review_link(
-        &self,
-        id: Uuid,
-        now: &chrono::DateTime<chrono::Utc>,
-        actor_id: Option<Uuid>,
-    ) -> Result<(), PrStoreError> {
-        sqlx::query(pidash_services::app_issues::pr_links::REVIEW_LINK_SOFT_DELETE_SQL)
-            .bind(now)
-            .bind(actor_id)
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(|error| pr_store_error("review link delete", error))?;
-        Ok(())
-    }
-}
-
-/// Parse a snapshot ISO datetime (`GithubAdapter.parse_dt` format) for a
-/// timestamptz bind.
-fn parse_snapshot_dt(raw: &str) -> Option<chrono::DateTime<chrono::Utc>> {
-    chrono::DateTime::parse_from_rfc3339(raw)
-        .ok()
-        .map(|aware| aware.with_timezone(&chrono::Utc))
-}
 
 use pidash_db::integrations::git_models::git_code_review_link::GitCodeReviewLink;
 use pidash_db::integrations::git_models::git_provider_account::GitProviderAccount;
@@ -4725,32 +4192,15 @@ impl GitStore for ReviewStore {
             .map_err(|error| git_store_error("bind insert", error))?;
         // `project.save(update_fields=...)`: only the changed columns
         // plus `updated_at` (`services.py:341-348`).
-        match (&plan.repo_url_update, &plan.base_branch_update) {
-            (None, None) => {}
-            (repo_url, base_branch) => {
-                let mut sets: Vec<String> = Vec::new();
-                if repo_url.is_some() {
-                    sets.push("repo_url = $2".to_owned());
-                }
-                if base_branch.is_some() {
-                    sets.push(format!("base_branch = ${}", sets.len() + 3));
-                }
-                sets.push(format!("updated_at = ${}", sets.len() + 3));
-                let sql = format!("UPDATE projects SET {} WHERE id = $1", sets.join(", "));
-                let mut query = sqlx::query(&sql).bind(plan.project_id);
-                if let Some(url) = repo_url {
-                    query = query.bind(url);
-                }
-                if let Some(branch) = base_branch {
-                    query = query.bind(branch);
-                }
-                query = query.bind(plan.now);
-                query
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(|error| git_store_error("bind project update", error))?;
-            }
-        }
+        pidash_services::domain::projects::save_bind_project_update(
+            &mut *tx,
+            plan.project_id,
+            plan.repo_url_update.as_deref(),
+            plan.base_branch_update.as_deref(),
+            plan.now,
+        )
+        .await
+        .map_err(|error| git_store_error("bind project update", error))?;
         tx.commit()
             .await
             .map_err(|error| git_store_error("bind commit", error))?;
@@ -4967,25 +4417,28 @@ impl GitStore for ReviewStore {
 }
 
 // ---------------------------------------------------------------------------
-// Transports: production `GithubClient` + `GitLabTransport`
+// Transports: production `GitLabTransport` (the GitHub twin moved to
+// pidash_services::integrations::github_client)
 // ---------------------------------------------------------------------------
 
-use pidash_db::app_integrations::queries_github::{build_app_jwt_claims, normalize_private_key};
+use pidash_compat::py::{layout_py_float, python_dumps};
 use pidash_db::config::encryption::Keyring;
-use pidash_services::integrations::adapters_github::{
-    ClientAuth, GitHubAdapter, GithubClient, GithubError,
-};
+use pidash_services::integrations::adapters_github::GitHubAdapter;
 use pidash_services::integrations::adapters_gitlab::{
     GitLabAdapter, GitLabConfig, GitLabRequest, GitLabResponse, GitLabTransport,
+};
+use pidash_services::integrations::github_client::{
+    LiveGithubClient, PoolPrStore, PrLinksSurface, TransportContext, TransportGuard,
 };
 use pidash_types::integrations::registry::UnknownProvider;
 use pidash_types::integrations::GitProviderError;
 
-/// Run an async future to completion from the sync transport seams: a
-/// fresh current-thread runtime on a spawned thread. The seams
-/// (`GithubClient`, `GitLabTransport`) are sync because Python's
-/// `requests` is blocking; this keeps the async executor unblocked
-/// without new Cargo features.
+/// Run an async future to completion from the sync `GitLabTransport`
+/// seam: a fresh current-thread runtime on a spawned thread. The seam
+/// is sync because Python's `requests` is blocking; this keeps the
+/// async executor unblocked without new Cargo features. (The GitHub
+/// twin moved to `pidash_services::integrations::github_client` with
+/// its own copy; OVL-04 canonicalizes the pair.)
 fn run_sync<F>(future: F) -> F::Output
 where
     F: std::future::Future + Send + 'static,
@@ -5000,452 +4453,6 @@ where
     })
     .join()
     .expect("relations transport thread")
-}
-
-/// What the transports need beyond the request: pool (app-config
-/// reads), cache (installation-token cache), instance secret (config
-/// decrypt + PAT keyring source).
-#[derive(Clone)]
-struct TransportContext {
-    pool: sqlx::PgPool,
-    redis: Option<pidash_db::redis::RedisHandle>,
-    secret: String,
-}
-
-/// Read app-config values through the instance-configurations
-/// registry (`get_configuration_value`), like the GitHub App handler.
-async fn app_config_values(
-    ctx: &TransportContext,
-    keys: &[&str],
-) -> Option<HashMap<String, pidash_db::config::ConfigValue>> {
-    let store = pidash_db::config::PgConfigStore::new(ctx.pool.clone());
-    let registry = pidash_db::config::registry::global();
-    let keyring = pidash_services::license::encryption::Keyring::from_secret(&ctx.secret);
-    pidash_db::config::accessor::get_many_in(registry, &store, &keyring, keys)
-        .await
-        .ok()
-}
-
-/// `require_github_app_config()` (`github_app_auth.py:63-74`): app id +
-/// slug + private key, each stripped, missing → the config error.
-async fn github_app_config(
-    ctx: &TransportContext,
-) -> Result<(String, String, String), GithubError> {
-    let values = app_config_values(
-        ctx,
-        &["GITHUB_APP_ID", "GITHUB_APP_SLUG", "GITHUB_APP_PRIVATE_KEY"],
-    )
-    .await
-    .unwrap_or_default();
-    let string = |key: &str| match values.get(key) {
-        Some(pidash_db::config::ConfigValue::Str(value)) => value.clone(),
-        Some(pidash_db::config::ConfigValue::Int(value)) => value.to_string(),
-        Some(pidash_db::config::ConfigValue::Float(value)) => value.to_string(),
-        Some(pidash_db::config::ConfigValue::Bool(true)) => "True".to_owned(),
-        Some(pidash_db::config::ConfigValue::Bool(false)) => "False".to_owned(),
-        _ => String::new(),
-    };
-    let app_id = string("GITHUB_APP_ID");
-    let app_slug = string("GITHUB_APP_SLUG");
-    let private_key = string("GITHUB_APP_PRIVATE_KEY");
-    let config = (
-        app_id.trim().to_owned(),
-        app_slug.trim().to_owned(),
-        normalize_private_key(Some(&private_key)),
-    );
-    let mut missing: Vec<&str> = Vec::new();
-    if config.0.is_empty() {
-        missing.push("app_id");
-    }
-    if config.1.is_empty() {
-        missing.push("app_slug");
-    }
-    if config.2.is_empty() {
-        missing.push("private_key");
-    }
-    if !missing.is_empty() {
-        return Err(GithubError::Transport(format!(
-            "GitHub App config missing: {}",
-            missing.join(", ")
-        )));
-    }
-    Ok(config)
-}
-
-/// `build_app_jwt` (`github_app_auth.py:77-89`): RS256 over
-/// `iat=now-60, exp=now+540, iss=app_id`.
-fn build_app_jwt_token(app_id: &str, private_key: &str) -> Result<String, GithubError> {
-    let now = chrono::Utc::now().timestamp();
-    let claims = build_app_jwt_claims(now, app_id);
-    let key = jsonwebtoken::EncodingKey::from_rsa_pem(private_key.as_bytes())
-        .map_err(|error| GithubError::Transport(format!("GitHub App JWT: {error}")))?;
-    let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
-    header.typ = Some("JWT".to_owned());
-    #[derive(serde::Serialize)]
-    struct Claims {
-        iat: i64,
-        exp: i64,
-        iss: String,
-    }
-    jsonwebtoken::encode(
-        &header,
-        &Claims {
-            iat: claims.iat,
-            exp: claims.exp,
-            iss: claims.iss,
-        },
-        &key,
-    )
-    .map_err(|error| GithubError::Transport(format!("GitHub App JWT: {error}")))
-}
-
-/// `installation_token` (`github_app_auth.py:174-193`): cached token or
-/// a fresh mint. Without a Redis handle the mint runs through (the cache
-/// only saves the POST; a mint failure still fails the connect either
-/// way).
-async fn installation_token(
-    ctx: &TransportContext,
-    installation_id: i64,
-) -> Result<String, GithubError> {
-    let cache_key = format!("github_app_installation_token:{installation_id}");
-    if let Some(redis) = ctx.redis.as_ref() {
-        match redis.get_string(&cache_key).await {
-            Ok(Some(token)) if !token.is_empty() => return Ok(token),
-            Ok(_) => {}
-            Err(error) => {
-                return Err(GithubError::Transport(format!(
-                    "installation token cache: {error}"
-                )))
-            }
-        }
-    }
-    let (app_id, _slug, private_key) = github_app_config(ctx).await?;
-    let jwt = build_app_jwt_token(&app_id, &private_key)?;
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|error| GithubError::Transport(error.to_string()))?;
-    let response = client
-        .post(format!(
-            "https://api.github.com/app/installations/{installation_id}/access_tokens"
-        ))
-        .header("Authorization", format!("Bearer {jwt}"))
-        .header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28")
-        .header("User-Agent", "pi-dash-github-app")
-        .send()
-        .await
-        .map_err(|error| GithubError::Transport(error.to_string()))?;
-    let status = response.status();
-    let text = response.text().await.unwrap_or_default();
-    if !status.is_success() {
-        return Err(GithubError::Transport(format!(
-            "installation token mint: HTTP {}: {text}",
-            status.as_u16()
-        )));
-    }
-    let payload: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
-    let token = payload
-        .get("token")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_owned();
-    if token.is_empty() {
-        return Err(GithubError::Transport(
-            "GitHub did not return an installation token".to_owned(),
-        ));
-    }
-    if let Some(redis) = ctx.redis.as_ref() {
-        // `ttl = max(60, expires-now-60)`, default 55 minutes
-        // (`github_app_auth.py:184-188`).
-        let mut ttl: u64 = 55 * 60;
-        if let Some(expires) = payload.get("expires_at").and_then(Value::as_str) {
-            let normalized = expires.replace('Z', "+00:00");
-            if let Ok(when) = chrono::DateTime::parse_from_rfc3339(&normalized) {
-                let seconds =
-                    (when.with_timezone(&chrono::Utc) - chrono::Utc::now()).num_seconds() - 60;
-                ttl = u64::try_from(seconds.max(60)).unwrap_or(60);
-            }
-        }
-        if let Err(error) = redis.set_ex(&cache_key, &token, ttl).await {
-            return Err(GithubError::Transport(format!(
-                "installation token cache: {error}"
-            )));
-        }
-    }
-    Ok(token)
-}
-
-/// The production `GithubClient` (`github_client.py:38-220`): a bearer
-/// token plus the shared context for installation mints.
-struct LiveGithubClient {
-    token: String,
-    ctx: TransportContext,
-}
-
-impl LiveGithubClient {
-    fn headers(&self) -> Vec<(&'static str, String)> {
-        vec![
-            ("Authorization", format!("Bearer {}", self.token)),
-            ("Accept", "application/vnd.github+json".to_owned()),
-            ("X-GitHub-Api-Version", "2022-11-28".to_owned()),
-            ("User-Agent", "pi-dash-github-sync".to_owned()),
-        ]
-    }
-
-    async fn request_json(
-        &self,
-        method: reqwest::Method,
-        url: &str,
-        json: Option<&Value>,
-    ) -> Result<(Value, Option<String>), GithubError> {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .map_err(|error| GithubError::Transport(error.to_string()))?;
-        let mut request = client.request(method, url);
-        for (name, value) in self.headers() {
-            request = request.header(name, value);
-        }
-        if let Some(body) = json {
-            let text = serde_json::to_string(body).unwrap_or_default();
-            request = request
-                .header("Content-Type", "application/json")
-                .body(text);
-        }
-        let response = request
-            .send()
-            .await
-            .map_err(|error| GithubError::Transport(error.to_string()))?;
-        let status = response.status().as_u16();
-        let link = response
-            .headers()
-            .get("link")
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned);
-        let text = response.text().await.unwrap_or_default();
-        // `_request` (`github_client.py:59-71`): 401/403/404 map by
-        // status with the response text; anything else failing raises.
-        if status == 401 {
-            return Err(GithubError::Auth(text));
-        }
-        if status == 403 {
-            return Err(GithubError::Permission(text));
-        }
-        if status == 404 {
-            return Err(GithubError::NotFound(text));
-        }
-        if !(200..300).contains(&status) {
-            return Err(GithubError::Transport(format!("HTTP {status}: {text}")));
-        }
-        let payload: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
-        Ok((payload, link))
-    }
-
-    /// `_next_url`: the `rel="next"` link, if any.
-    fn next_url(link: Option<&str>) -> Option<String> {
-        let link = link?;
-        for part in link.split(',') {
-            let part = part.trim_start();
-            if !part.starts_with('<') {
-                continue;
-            }
-            let Some(end) = part.find('>') else {
-                continue;
-            };
-            let url = &part[1..end];
-            let rest = part[end + 1..].trim_start();
-            if let Some(rest) = rest.strip_prefix(';') {
-                let rest = rest.trim_start();
-                if rest.starts_with("rel=\"next\"") {
-                    return Some(url.to_owned());
-                }
-            }
-        }
-        None
-    }
-
-    async fn paginate(&self, mut url: String) -> Result<Vec<Value>, GithubError> {
-        let mut items = Vec::new();
-        loop {
-            let (payload, link) = self.request_json(reqwest::Method::GET, &url, None).await?;
-            match payload {
-                Value::Array(page) => items.extend(page),
-                Value::Null => {}
-                // A mapping payload iterates its keys, like Python's
-                // `for item in response.json()` (the API never sends
-                // one here, but the iteration is the ported behavior).
-                Value::Object(map) => {
-                    items.extend(map.keys().map(|key| Value::String(key.clone())));
-                }
-                _ => {}
-            }
-            match Self::next_url(link.as_deref()) {
-                Some(next) => url = next,
-                None => return Ok(items),
-            }
-        }
-    }
-}
-
-impl GithubClient for LiveGithubClient {
-    fn connect(auth: &ClientAuth) -> Result<Self, GithubError> {
-        // The context rides a thread-local: the sync seam has no
-        // parameter for it, and `attach` always runs on the request
-        // task that installed it just before calling into the port.
-        let ctx = TRANSPORT_CONTEXT.with(|slot| slot.borrow().clone());
-        let ctx =
-            ctx.ok_or_else(|| GithubError::Transport("github transport context".to_owned()))?;
-        match auth {
-            ClientAuth::Token(token) => {
-                if token.is_empty() {
-                    return Err(GithubError::Auth("empty token".to_owned()));
-                }
-                Ok(Self {
-                    token: token.clone(),
-                    ctx,
-                })
-            }
-            ClientAuth::Installation(id) => {
-                let id = *id;
-                let minted = ctx.clone();
-                let token = run_sync(async move { installation_token(&minted, id).await })?;
-                Ok(Self { token, ctx })
-            }
-        }
-    }
-
-    fn get_authenticated_user(&self) -> Result<Value, GithubError> {
-        let this = Self {
-            token: self.token.clone(),
-            ctx: self.ctx.clone(),
-        };
-        run_sync(async move {
-            this.request_json(reqwest::Method::GET, "https://api.github.com/user", None)
-                .await
-                .map(|(payload, _)| payload)
-        })
-    }
-
-    fn list_user_repos(&self, page: i64) -> Result<(Vec<Value>, bool), GithubError> {
-        let this = Self {
-            token: self.token.clone(),
-            ctx: self.ctx.clone(),
-        };
-        run_sync(async move {
-            let url = format!(
-                "https://api.github.com/user/repos?affiliation=owner%2Ccollaborator%2Corganization_member&per_page=100&sort=updated&page={page}"
-            );
-            let (payload, link) = this.request_json(reqwest::Method::GET, &url, None).await?;
-            let repos = match payload {
-                Value::Array(repos) => repos,
-                _ => Vec::new(),
-            };
-            Ok((repos, Self::next_url(link.as_deref()).is_some()))
-        })
-    }
-
-    fn get_repo(&self, owner: &str, name: &str) -> Result<Value, GithubError> {
-        let this = Self {
-            token: self.token.clone(),
-            ctx: self.ctx.clone(),
-        };
-        let url = format!("https://api.github.com/repos/{owner}/{name}");
-        run_sync(async move {
-            this.request_json(reqwest::Method::GET, &url, None)
-                .await
-                .map(|(payload, _)| payload)
-        })
-    }
-
-    fn list_all_open_issues(&self, owner: &str, name: &str) -> Result<Vec<Value>, GithubError> {
-        let this = Self {
-            token: self.token.clone(),
-            ctx: self.ctx.clone(),
-        };
-        // `{"state": "open", "per_page": 100, "sort": "updated",
-        // "direction": "desc"}` in insertion order (`:136-140`).
-        let url = format!(
-            "https://api.github.com/repos/{owner}/{name}/issues?state=open&per_page=100&sort=updated&direction=desc"
-        );
-        run_sync(async move { this.paginate(url).await })
-    }
-
-    fn list_issue_comments(
-        &self,
-        owner: &str,
-        name: &str,
-        number: i64,
-    ) -> Result<Vec<Value>, GithubError> {
-        let this = Self {
-            token: self.token.clone(),
-            ctx: self.ctx.clone(),
-        };
-        // `{"per_page": 100, "sort": "created", "direction": "asc"}`
-        // (`:149-153`).
-        let url = format!(
-            "https://api.github.com/repos/{owner}/{name}/issues/{number}/comments?per_page=100&sort=created&direction=asc"
-        );
-        run_sync(async move { this.paginate(url).await })
-    }
-
-    fn post_issue_comment(
-        &self,
-        owner: &str,
-        name: &str,
-        number: i64,
-        body: &str,
-    ) -> Result<Value, GithubError> {
-        let this = Self {
-            token: self.token.clone(),
-            ctx: self.ctx.clone(),
-        };
-        let url = format!("https://api.github.com/repos/{owner}/{name}/issues/{number}/comments");
-        let payload = serde_json::json!({"body": body});
-        run_sync(async move {
-            this.request_json(reqwest::Method::POST, &url, Some(&payload))
-                .await
-                .map(|(payload, _)| payload)
-        })
-    }
-
-    fn get_pull_request(&self, owner: &str, name: &str, number: i64) -> Result<Value, GithubError> {
-        let this = Self {
-            token: self.token.clone(),
-            ctx: self.ctx.clone(),
-        };
-        let url = format!("https://api.github.com/repos/{owner}/{name}/pulls/{number}");
-        run_sync(async move {
-            this.request_json(reqwest::Method::GET, &url, None)
-                .await
-                .map(|(payload, _)| payload)
-        })
-    }
-}
-
-std::thread_local! {
-    /// The ambient transport context for the sync `GithubClient` seam.
-    static TRANSPORT_CONTEXT: std::cell::RefCell<Option<TransportContext>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-/// Install the ambient transport context around one sync-seam call.
-/// The guard restores the previous value on drop.
-struct TransportGuard {
-    previous: Option<TransportContext>,
-}
-
-impl TransportGuard {
-    fn install(ctx: TransportContext) -> Self {
-        let previous = TRANSPORT_CONTEXT.with(|slot| slot.borrow_mut().replace(ctx));
-        Self { previous }
-    }
-}
-
-impl Drop for TransportGuard {
-    fn drop(&mut self) {
-        TRANSPORT_CONTEXT.with(|slot| *slot.borrow_mut() = self.previous.take());
-    }
 }
 
 /// The production `GitLabTransport`: `requests.request` over async
@@ -5619,11 +4626,14 @@ async fn pr_create(
         secret: state.settings().secret_key.clone(),
     };
     let _guard = TransportGuard::install(ctx);
-    let store = PrStore::new(pool.clone());
+    let store = PoolPrStore::new(pool.clone(), PrLinksSurface::Relations);
     let now = chrono::Utc::now();
     let outcome = tokio::task::block_in_place(|| {
         tokio::runtime::Handle::current().block_on(
-            pidash_services::app_issues::pr_links::attach_pull_request::<PrStore, LiveGithubClient>(
+            pidash_services::app_issues::pr_links::attach_pull_request::<
+                PoolPrStore,
+                LiveGithubClient,
+            >(
                 &store,
                 project_id,
                 issue_id,
@@ -5777,7 +4787,7 @@ async fn pr_destroy(
     let Some(row) = row else {
         return Denial::NotFound.into_response();
     };
-    let store = PrStore::new(ctx.pool.clone());
+    let store = PoolPrStore::new(ctx.pool.clone(), PrLinksSurface::Relations);
     let link = PrLinkRow {
         id: ctx.pk,
         project_id: ctx.project_id,
@@ -6124,6 +5134,28 @@ fn parse_rfc3339(raw: &str) -> chrono::DateTime<chrono::Utc> {
 mod tests {
     use super::*;
 
+    fn origin_state(app_base_url: Option<&str>, web_url: Option<&str>) -> AppState {
+        let mut settings = pidash_db::config::Settings::test_defaults();
+        settings.urls.app_base_url = app_base_url.map(str::to_owned);
+        settings.urls.web_url = web_url.map(str::to_owned);
+        AppState::with_settings("test", settings)
+    }
+
+    /// `base_host(request, is_app=True)` treats `""` as missing
+    /// (PIDASHCONV-1587): an empty `APP_BASE_URL` falls through to
+    /// `WEB_URL`. (The localhost fallback for unset-everywhere is a
+    /// separate, deliberate-looking deviation — out of scope.)
+    #[test]
+    fn app_origin_falls_through_empty_strings() {
+        let web = "https://web.example.invalid";
+        let state = origin_state(Some(""), Some(web));
+        assert_eq!(app_origin(&state), web);
+        let state = origin_state(Some("https://app.example.invalid"), Some(web));
+        assert_eq!(app_origin(&state), "https://app.example.invalid");
+        let state = origin_state(Some(""), Some(""));
+        assert_eq!(app_origin(&state), "http://localhost");
+    }
+
     fn denied_status(denial: &Denial) -> (StatusCode, String) {
         denial.status_and_body()
     }
@@ -6437,6 +5469,16 @@ mod tests {
             "https://münchen.de/x",
             "ftp://example.com/x",
             "ftps://example.com/x",
+            // PIDASHCONV-1425: `@` past the netloc is resource text
+            // (the userinfo group backtracks to the no-userinfo
+            // reading); fullwidth chars past the netloc are valid.
+            // Verdicts from Django 4.2.30 `URLValidator`.
+            "https://example.com?email=user@gmail.com&ref=x",
+            "https://example.com#user@gmail.com",
+            "http://example.com:8080?x=a@b",
+            "http://user?x@example.com/",
+            "http://example.com:80?x@y/",
+            "https://example.com/\u{FF0F}evil",
         ] {
             assert!(django_url_valid(url), "{url}");
         }
@@ -6451,6 +5493,12 @@ mod tests {
             "example.com/x",
             "http://foo..com/",
             "http://-bad.com/",
+            // PIDASHCONV-1425: no backtracked reading validates these;
+            // NFKC-forbidden chars in the netloc fail the urlsplit gate.
+            "http://a:b@c@d/",
+            "http://ab?xy@zw/",
+            "https://example\u{FF0F}evil.com",
+            "https://a.com\u{FF20}b.com",
         ] {
             assert!(!django_url_valid(url), "{url}");
         }
@@ -6468,22 +5516,6 @@ mod tests {
     }
 
     // -- dumps + floats -----------------------------------------------------
-
-    #[test]
-    fn python_dumps_matches_separators_and_ascii() {
-        let value = serde_json::json!({"b": [1, true, null], "a": "é"});
-        assert_eq!(
-            python_dumps(&value),
-            r#"{"b": [1, true, null], "a": "\u00e9"}"#
-        );
-        // Astral planes escape as surrogate pairs.
-        assert_eq!(python_dumps(&serde_json::json!("𝄞")), r#""\ud834\udd1e""#);
-        // Controls escape short or long.
-        assert_eq!(
-            python_dumps(&serde_json::json!("a\nb\tc\x01")),
-            r#""a\nb\tc\u0001""#
-        );
-    }
 
     #[test]
     fn py_float_repr_matches_cpython() {
@@ -6706,24 +5738,6 @@ mod tests {
         assert!(!kwargs.contains_key("subscriber"));
     }
 
-    // -- github pagination ----------------------------------------------------
-
-    #[test]
-    fn next_url_parses_link_headers() {
-        assert_eq!(
-            LiveGithubClient::next_url(Some(
-                r#"<https://api.github.com/x?page=2>; rel="next", <https://api.github.com/x?page=5>; rel="last""#
-            ))
-            .as_deref(),
-            Some("https://api.github.com/x?page=2")
-        );
-        assert_eq!(
-            LiveGithubClient::next_url(Some(r#"<https://x>; rel="last""#)),
-            None
-        );
-        assert_eq!(LiveGithubClient::next_url(None), None);
-    }
-
     // -- denials -----------------------------------------------------------------
 
     #[test]
@@ -6751,11 +5765,11 @@ mod tests {
             denied_status(&Denial::LinkNotFound).0,
             StatusCode::NOT_FOUND
         );
-        // The 413 shape matches the middleware (lowercase `detail`); the
-        // 415 shape matches DRF content negotiation.
+        // The truncated-body 502 reuses the shared bad-gateway bytes;
+        // the 415 shape matches DRF content negotiation.
         assert_eq!(
-            denied_status(&Denial::RequestTooLarge).1,
-            r#"{"error":"REQUEST_BODY_TOO_LARGE","detail":"The size of the request body exceeds the maximum allowed size."}"#
+            denied_status(&Denial::TruncatedBody).1,
+            crate::edge::BAD_GATEWAY_BODY
         );
         assert_eq!(
             denied_status(&Denial::UnsupportedMediaType(

@@ -150,6 +150,9 @@ use std::convert::Infallible;
 
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
+use pidash_compat::py::{py_is_space, py_strip};
+use pidash_compat::response::json_response;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 
 // ---------------------------------------------------------------------------
 // Exact bodies
@@ -161,8 +164,6 @@ pub const UNAUTHENTICATED_BODY: &str =
 /// `handle_exception`'s `ObjectDoesNotExist` branch (404): scoped-lookup
 /// misses — unknown/cross-workspace/soft-deleted page or favorite id.
 pub const OBJECT_NOT_FOUND_BODY: &str = r#"{"error":"The required object does not exist."}"#;
-/// `handle_exception`'s generic 500 branch.
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// `Project.resolve` miss (`db/models/project.py:213-217`): verbatim
 /// `Http404` args through DRF's handler (no trailing period).
 pub const PROJECT_NOT_FOUND_BODY: &str = r#"{"detail":"Project not found"}"#;
@@ -301,14 +302,6 @@ impl IntoResponse for Denial {
 
 fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
-}
-
-fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("json response")
 }
 
 // ---------------------------------------------------------------------------
@@ -497,8 +490,10 @@ async fn resolve_project_id(pool: &PgPool, slug: &str, raw: &str) -> Result<uuid
 /// `Project` uses `SoftDeletionManager` (`db/mixins.py:56-66`), so a missing
 /// or soft-deleted row raises `DoesNotExist` → the `handle_exception` 404
 /// `{"error":"The required object does not exist."}`. Not workspace-scoped,
-/// matching `pk=` exactly; only these three handlers read the row (the
-/// permission layer, the favorite route, versions and duplicate never do).
+/// matching `pk=` exactly; create reads the same row through its own
+/// workspace lookup (`PageSerializer.create`, `page.py:69-70`) instead of
+/// this helper. The permission layer, the favorite route, versions and
+/// duplicate never read the row.
 async fn require_live_project(pool: &PgPool, project_id: &uuid::Uuid) -> Result<(), Denial> {
     let row: Option<(uuid::Uuid,)> =
         sqlx::query_as(r#"SELECT p.id FROM projects p WHERE p.id = $1 AND p.deleted_at IS NULL"#)
@@ -643,6 +638,8 @@ pub const LIST_ROW_ORDER: &[&str] = &[
     "access",
     "color",
     "parent",
+    "parent_id",
+    "sub_pages_count",
     "is_favorite",
     "is_locked",
     "archived_at",
@@ -666,6 +663,8 @@ pub const DETAIL_ROW_ORDER: &[&str] = &[
     "access",
     "color",
     "parent",
+    "parent_id",
+    "sub_pages_count",
     "is_favorite",
     "is_locked",
     "archived_at",
@@ -740,11 +739,11 @@ fn project_ids_annotation() -> String {
     )
 }
 
-/// The `get_queryset` scope (`base.py:88-98`): workspace slug, active
-/// membership of a live project via the projects M2M, top-level only,
-/// owner-or-public — plus the `pages.deleted_at IS NULL` the base manager
+/// The `visible_pages` scope (`base.py`): workspace slug, active
+/// membership of a live project via the projects M2M, owner-or-public, at
+/// any depth — plus the `pages.deleted_at IS NULL` the base manager
 /// carries. Traversal joins carry no soft-delete predicate (matches the
-/// printed Django SQL).
+/// printed Django SQL). The list narrows depth through [`RowFilter`].
 /// Binds: `$slug`, `$user`.
 fn read_scope_where(slug: &str, user: &str) -> String {
     format!(
@@ -753,8 +752,51 @@ fn read_scope_where(slug: &str, user: &str) -> String {
          AND EXISTS (SELECT 1 FROM project_pages pp_scope JOIN projects ON projects.id = pp_scope.project_id \
          JOIN project_members pm ON pm.project_id = projects.id AND pm.member_id = {user} AND pm.is_active = TRUE \
          WHERE pp_scope.page_id = pages.id AND projects.archived_at IS NULL) \
-         AND pages.parent_id IS NULL AND (pages.owned_by_id = {user} OR pages.access = 0)"
+         AND (pages.owned_by_id = {user} OR pages.access = 0)"
     )
+}
+
+/// The `sub_pages_count` annotation (`visible_pages`): live children
+/// linked to the URL project that the user can see — owner-or-public, or
+/// only their own for a restricted guest. An archived page counts its
+/// archived children too (`Q(archived_at__isnull=True) |
+/// Q(parent__archived_at__isnull=False)`). `Page.objects` /
+/// `ProjectPage.objects` carry `deleted_at IS NULL`.
+/// Binds: `$user`, `$project`.
+fn sub_pages_count_annotation(user: &str, project: &str, guest_count: bool) -> String {
+    let visible = if guest_count {
+        format!("child.owned_by_id = {user}")
+    } else {
+        format!("(child.owned_by_id = {user} OR child.access = 0)")
+    };
+    format!(
+        "COALESCE((SELECT COUNT(child.id) FROM pages child WHERE child.deleted_at IS NULL \
+         AND child.parent_id = pages.id \
+         AND EXISTS (SELECT 1 FROM project_pages cpp WHERE cpp.page_id = child.id \
+         AND cpp.project_id = {project} AND cpp.deleted_at IS NULL) \
+         AND (child.archived_at IS NULL OR pages.archived_at IS NOT NULL) \
+         AND {visible}), 0)"
+    )
+}
+
+/// Which depth an annotated read covers (`PageViewSet.list` /
+/// `retrieve`); `ChildrenOf` and `Page` bind `$4`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RowFilter {
+    /// Default list: `parent__isnull=True`.
+    TopLevel,
+    /// A `?search=` list: every depth.
+    AnyDepth,
+    /// `?parent=<id>` list: that page's children (`pages.parent_id = $4`).
+    ChildrenOf,
+    /// Retrieve: one page (`pages.id = $4`) at any depth.
+    Page,
+}
+
+impl RowFilter {
+    fn binds_id(self) -> bool {
+        matches!(self, RowFilter::ChildrenOf | RowFilter::Page)
+    }
 }
 
 /// The `summary` scope (`base.py:422-438`): the list scope shape WITH
@@ -777,6 +819,9 @@ fn summary_scope_where(slug: &str, user: &str) -> String {
 fn guest_owned_only(user: &str) -> String {
     format!("pages.owned_by_id = {user}")
 }
+
+/// 400 `{"error": ...}` for a malformed `?parent=` on the list.
+pub const INVALID_PARENT_MESSAGE: &str = "Invalid parent page id";
 
 /// Base page columns selected on every annotated read, aliased to the
 /// serializer field names (DRF renders FKs as PK strings under the field
@@ -937,17 +982,6 @@ fn unescape_string_literal(term: &str) -> String {
         .replace("\\\\", "\\")
 }
 
-/// Python whitespace (`str.strip`, `re \s`, `str.isspace` — all the same
-/// 29 chars: Rust's `char::is_whitespace` plus `\x1c`-`\x1f`).
-fn py_is_space(ch: char) -> bool {
-    ch.is_whitespace() || ('\x1c'..='\x1f').contains(&ch)
-}
-
-/// Python `str.strip()` with no arguments.
-fn py_strip(value: &str) -> &str {
-    value.trim_matches(py_is_space)
-}
-
 /// Escape one term for `name__icontains`: Django escapes the LIKE
 /// metacharacters (`\`, `%`, `_`) with a backslash (no explicit `ESCAPE`
 /// clause — Postgres `LIKE` treats backslash as the default escape) and
@@ -1001,10 +1035,17 @@ fn search_sql(first_bind: u32, terms: &[String]) -> String {
 /// `?search=` name filter `get_queryset` carries (`base.py:88`) on both
 /// paths. `?order_by=` stays ignored: the `:105` `order_by` replaces the
 /// `:103` request one in Django (ported bug, fixture F30-06).
-fn read_rows_sql(guest_only: bool, by_page: bool, search: &[String]) -> String {
+fn read_rows_sql(
+    guest_only: bool,
+    filter: RowFilter,
+    guest_count: bool,
+    search: &[String],
+) -> String {
     let annotations = format!(
-        "{}, {} AS is_favorite, {} AS project, {} AS label_ids, {} AS project_ids",
+        "{}, pages.parent_id AS parent_id, {} AS sub_pages_count, {} AS is_favorite, \
+         {} AS project, {} AS label_ids, {} AS project_ids",
         READ_BASE_COLUMNS,
+        sub_pages_count_annotation("$2", "$3", guest_count),
         favorite_annotation("$2", "$1"),
         project_annotation("$3"),
         label_ids_annotation(),
@@ -1020,10 +1061,13 @@ fn read_rows_sql(guest_only: bool, by_page: bool, search: &[String]) -> String {
         sql.push_str(" AND ");
         sql.push_str(&guest_owned_only("$2"));
     }
-    if by_page {
-        sql.push_str(" AND pages.id = $4");
+    match filter {
+        RowFilter::TopLevel => sql.push_str(" AND pages.parent_id IS NULL"),
+        RowFilter::AnyDepth => {}
+        RowFilter::ChildrenOf => sql.push_str(" AND pages.parent_id = $4"),
+        RowFilter::Page => sql.push_str(" AND pages.id = $4"),
     }
-    let first_bind = if by_page { 5 } else { 4 };
+    let first_bind = if filter.binds_id() { 5 } else { 4 };
     sql.push_str(&search_sql(first_bind, search));
     sql.push_str(" ORDER BY is_favorite DESC, pages.created_at DESC) AS __r");
     sql
@@ -1127,20 +1171,23 @@ impl PipeQuote for String {
 }
 
 /// Fetch annotated rows through `read_rows_sql`, returning each row's map.
+#[allow(clippy::too_many_arguments)]
 async fn fetch_read_rows(
     pool: &PgPool,
     slug: &str,
     user_id: &uuid::Uuid,
     project_id: &uuid::Uuid,
-    page_id: Option<&uuid::Uuid>,
+    filter: RowFilter,
+    id: Option<&uuid::Uuid>,
     guest_only: bool,
+    guest_count: bool,
     search: &[String],
 ) -> Result<Vec<Map<String, Value>>, Denial> {
     use sqlx::Row as _;
-    let sql = read_rows_sql(guest_only, page_id.is_some(), search);
+    let sql = read_rows_sql(guest_only, filter, guest_count, search);
     let mut query = sqlx::query(&sql).bind(slug).bind(user_id).bind(project_id);
-    if let Some(id) = page_id {
-        query = query.bind(id);
+    if filter.binds_id() {
+        query = query.bind(id.ok_or(Denial::ServerError)?);
     }
     for term in search {
         query = query.bind(icontains_param(term));
@@ -1161,9 +1208,11 @@ async fn fetch_read_rows(
     Ok(out)
 }
 
-/// `GET .../pages/` (`PageViewSet.list`, `base.py:291-306`): the annotated
-/// queryset (guest-scoped to owned rows for restricted guests), rendered
-/// through `PageSerializer` many, 200.
+/// `GET .../pages/` (`PageViewSet.list`): the annotated queryset —
+/// top-level by default, one page's children for `?parent=<id>` (a
+/// malformed id is a 400), every depth for a non-empty `?search=` —
+/// guest-scoped to owned rows for restricted guests, rendered through
+/// `PageSerializer` many, 200.
 pub async fn list_pages(
     State(state): State<AppState>,
     Path((slug, project_raw)): Path<(String, String)>,
@@ -1194,6 +1243,22 @@ pub async fn list_pages(
         Ok(search) => search,
         Err(response) => return response,
     };
+    // `request.query_params.get("parent")` / `.get("search")` truthiness:
+    // an empty value is absent. The parent id parses like `uuid.UUID(...)`.
+    let parent = match query.get("parent").filter(|raw| !raw.is_empty()) {
+        None => None,
+        Some(raw) => match parse_uuid_hex(raw) {
+            Some(id) => Some(id),
+            None => return Denial::BadError(INVALID_PARENT_MESSAGE.to_owned()).into_response(),
+        },
+    };
+    let filter = if parent.is_some() {
+        RowFilter::ChildrenOf
+    } else if query.get("search").is_some_and(|raw| !raw.is_empty()) {
+        RowFilter::AnyDepth
+    } else {
+        RowFilter::TopLevel
+    };
     if let Err(denial) = require_live_project(pool, &project_id).await {
         return denial.into_response();
     }
@@ -1202,7 +1267,9 @@ pub async fn list_pages(
         &slug,
         &user_id,
         &project_id,
-        None,
+        filter,
+        parent.as_ref(),
+        gate.guest_scoped,
         gate.guest_scoped,
         &search,
     )
@@ -1274,8 +1341,10 @@ pub async fn retrieve_page(
         &slug,
         &user_id,
         &project_id,
+        RowFilter::Page,
         Some(&page_id),
         false,
+        gate.guest_scoped,
         &search,
     )
     .await
@@ -2142,9 +2211,12 @@ pub async fn access_page(
     // against `PositiveSmallIntegerField.get_prep_value`: `1.5` → `1`,
     // `"1"` → `1`). JSON `null` is not an `int()` input: the prep returns
     // `None` and the UPDATE hits the NOT NULL column → `IntegrityError` →
-    // 400 invalid-payload. Anything else `int()` rejects fails at prep or
-    // at the SMALLINT column — both 500. The value binds as `i32` so an
-    // out-of-range integer is rejected by the column itself, exactly
+    // 400 invalid-payload. Anything else `int()` rejects fails at prep
+    // (500); a coerced in-range value can still fail at the column — a
+    // negative trips `CHECK ("access" >= 0)` → `IntegrityError` → 400 —
+    // so the UPDATE error maps through `db_write_denial` exactly like
+    // the create path. The value binds as `i32` so an out-of-range
+    // integer is rejected by the column itself (22003 → 500), exactly
     // like Django's save.
     let effective = match access_assign(raw) {
         AccessAssign::Value(value) => value,
@@ -2153,7 +2225,7 @@ pub async fn access_page(
         }
         AccessAssign::Rejected => return Denial::ServerError.into_response(),
     };
-    if sqlx::query(
+    let updated = sqlx::query(
         r#"UPDATE pages SET access = $1, description_stripped = $2,
            updated_at = now(), updated_by_id = $3 WHERE id = $4"#,
     )
@@ -2162,10 +2234,9 @@ pub async fn access_page(
     .bind(gate.user_id)
     .bind(page_id)
     .execute(pool)
-    .await
-    .is_err()
-    {
-        return Denial::ServerError.into_response();
+    .await;
+    if let Err(error) = updated {
+        return db_write_denial(&error);
     }
     StatusCode::NO_CONTENT.into_response()
 }
@@ -2320,23 +2391,24 @@ pub enum PatchRejection {
 /// value that is empty or whitespace-only validates to `""` (the
 /// serializer's own `if not value` guard then passes it through untouched).
 fn char_internal(value: &Value) -> Result<String, &'static str> {
-    match value {
-        Value::Null => Err("This field may not be null."),
-        Value::Bool(_) | Value::Array(_) | Value::Object(_) => Err("Not a valid string."),
-        Value::Number(number) => {
-            let raw = number.to_string();
-            Ok(if raw.trim().is_empty() {
-                String::new()
-            } else {
-                raw.trim().to_owned()
-            })
-        }
-        Value::String(text) => Ok(if text.is_empty() || text.trim().is_empty() {
-            String::new()
-        } else {
-            text.trim().to_owned()
-        }),
+    let raw = match value {
+        Value::Null => return Err("This field may not be null."),
+        Value::Bool(_) | Value::Array(_) | Value::Object(_) => return Err("Not a valid string."),
+        Value::Number(number) => number.to_string(),
+        Value::String(text) => text.clone(),
+    };
+    let trimmed = raw.trim();
+    // `CharField(required=False, allow_blank=True)` has no length validator,
+    // so `ProhibitNullCharactersValidator` is the only `run_validators` step
+    // (`fields.py:746`); it runs on the trimmed internal value.
+    if trimmed.contains('\0') {
+        return Err(NULL_CHARACTERS_MESSAGE);
     }
+    Ok(if trimmed.is_empty() {
+        String::new()
+    } else {
+        trimmed.to_owned()
+    })
 }
 
 /// Mirror `validate_description_html`'s size gate plus
@@ -2883,28 +2955,48 @@ pub const WRITE_VALIDATION_ORDER: &[&str] = &[
     "description_html",
 ];
 
+pub(crate) const NULL_CHARACTERS_MESSAGE: &str = "Null characters are not allowed.";
+
 /// `PageSerializer` `CharField` coercion (`fields.py` `CharField`: bools and
 /// composites fail, numbers stringify, strings trim): `allow_blank`
 /// decides whether the trimmed-empty value passes or fails `blank`.
-fn coerce_char(value: &Value, allow_blank: bool) -> Result<String, &'static str> {
-    match value {
-        Value::Null => Err("This field may not be null."),
-        Value::Bool(_) | Value::Array(_) | Value::Object(_) => Err("Not a valid string."),
-        Value::Number(_) => {
-            let text = py_scalar(value);
-            let trimmed = text.trim().to_owned();
-            if trimmed.is_empty() && !allow_blank {
-                return Err("This field may not be blank.");
-            }
-            Ok(trimmed)
+/// `max_length` mirrors an optional `MaxLengthValidator`; when the trimmed
+/// value is too long the message is collected first, then the NUL check
+/// (`ProhibitNullCharactersValidator`) runs, matching DRF's
+/// `to_internal_value` (fail-fast type/blank) followed by `run_validators`
+/// (all validators, accumulated) order in `fields.py:731-746`.
+fn coerce_char(
+    value: &Value,
+    allow_blank: bool,
+    max_length: Option<usize>,
+) -> Result<String, Vec<String>> {
+    let text = match value {
+        Value::Null => return Err(vec!["This field may not be null.".to_owned()]),
+        Value::Bool(_) | Value::Array(_) | Value::Object(_) => {
+            return Err(vec!["Not a valid string.".to_owned()])
         }
-        Value::String(text) => {
-            let trimmed = text.trim().to_owned();
-            if trimmed.is_empty() && !allow_blank {
-                return Err("This field may not be blank.");
-            }
-            Ok(trimmed)
+        Value::Number(_) => py_scalar(value),
+        Value::String(text) => text.clone(),
+    };
+    let trimmed = text.trim().to_owned();
+    if trimmed.is_empty() && !allow_blank {
+        return Err(vec!["This field may not be blank.".to_owned()]);
+    }
+    let mut errors: Vec<String> = Vec::new();
+    if let Some(limit) = max_length {
+        if trimmed.chars().count() > limit {
+            errors.push(format!(
+                "Ensure this field has no more than {limit} characters."
+            ));
         }
+    }
+    if trimmed.contains('\0') {
+        errors.push(NULL_CHARACTERS_MESSAGE.to_owned());
+    }
+    if errors.is_empty() {
+        Ok(trimmed)
+    } else {
+        Err(errors)
     }
 }
 
@@ -3285,9 +3377,13 @@ pub async fn validate_page_fields(
     let mut errors: OrderedErrors = Vec::new();
     let mut valid = ValidPage::default();
     if let Some(value) = body.get("name") {
-        match coerce_char(value, true) {
+        match coerce_char(value, true, None) {
             Ok(name) => valid.name = Some(name),
-            Err(message) => push_flat(&mut errors, "name", message.to_owned()),
+            Err(messages) => {
+                for message in messages {
+                    push_flat(&mut errors, "name", message);
+                }
+            }
         }
     }
     if let Some(value) = body.get("access") {
@@ -3297,19 +3393,13 @@ pub async fn validate_page_fields(
         }
     }
     if let Some(value) = body.get("color") {
-        match coerce_char(value, true) {
-            Ok(color) => {
-                if color.chars().count() > 255 {
-                    push_flat(
-                        &mut errors,
-                        "color",
-                        "Ensure this field has no more than 255 characters.".to_owned(),
-                    );
-                } else {
-                    valid.color = Some(color);
+        match coerce_char(value, true, Some(255)) {
+            Ok(color) => valid.color = Some(color),
+            Err(messages) => {
+                for message in messages {
+                    push_flat(&mut errors, "color", message);
                 }
             }
-            Err(message) => push_flat(&mut errors, "color", message.to_owned()),
         }
     }
     if let Some(value) = body.get("labels") {
@@ -3370,9 +3460,13 @@ pub async fn validate_page_fields(
     }
     if detail {
         if let Some(value) = body.get("description_html") {
-            match coerce_char(value, false) {
+            match coerce_char(value, false, None) {
                 Ok(html) => valid.description_html = Some(html),
-                Err(message) => push_flat(&mut errors, "description_html", message.to_owned()),
+                Err(messages) => {
+                    for message in messages {
+                        push_flat(&mut errors, "description_html", message);
+                    }
+                }
             }
         }
     }
@@ -3452,11 +3546,12 @@ async fn fetch_scoped_page(
 }
 
 /// The create re-read (`base.py:149`: `self.get_queryset().get(pk=...)`):
-/// the full detail scope — top-level only (`:97`), owner-or-public (`:98`),
-/// the URL-project bridge (`:125`), plus the `filter_queryset` `?search=`
-/// name filter `get_queryset` carries (`base.py:88`) — with the three
-/// annotations. A child page (or any row the queryset hides, including one
-/// filtered out by `?search=`) misses here and answers 404 through
+/// the full detail scope at any depth — the live-project active-membership
+/// scope (`:92-96`, same `EXISTS` shape as `read_scope_where`), owner-or-public,
+/// the URL-project bridge, plus the `filter_queryset` `?search=` name filter
+/// `get_queryset` carries (`base.py:88`) — with the three annotations. A row
+/// the queryset hides (including one filtered out by `?search=` or linked
+/// only to an archived project) misses here and answers 404 through
 /// `handle_exception`, exactly like Django.
 /// Binds: `$1` page, `$2` project, `$3` slug, `$4` user, then one bind per
 /// `?search=` term.
@@ -3486,7 +3581,10 @@ async fn fetch_detail_row(
            JOIN project_pages pp ON pp.page_id = p.id
                AND pp.project_id = $2 AND pp.deleted_at IS NULL
            WHERE p.id = $1 AND w.slug = $3 AND p.deleted_at IS NULL
-           AND p.parent_id IS NULL AND (p.owned_by_id = $4 OR p.access = 0){}"#,
+           AND EXISTS (SELECT 1 FROM project_pages pp_scope JOIN projects ON projects.id = pp_scope.project_id
+           JOIN project_members pm ON pm.project_id = projects.id AND pm.member_id = $4 AND pm.is_active = TRUE
+           WHERE pp_scope.page_id = p.id AND projects.archived_at IS NULL)
+           AND (p.owned_by_id = $4 OR p.access = 0){}"#,
         search_sql_on("p.name::text", 5, search),
     );
     let mut query = sqlx::query_as::<_, DetailRow>(&sql)
@@ -3542,7 +3640,8 @@ fn render_json(value: &Value) -> String {
 
 /// The create 201 shape: `PageDetailSerializer` over the re-read row —
 /// `Meta.fields` order minus write-only `labels` plus `description_html`
-/// (`page.py:129-133`), 19 keys.
+/// (`page.py:129-133`), 21 keys. `sub_pages_count` is the annotation over
+/// a page created a moment ago, which has no children yet: always 0.
 fn render_create_row(row: &DetailRow, tz: &chrono_tz::Tz) -> String {
     let page = &row.page;
     let mut out = String::from("{");
@@ -3552,6 +3651,11 @@ fn render_create_row(row: &DetailRow, tz: &chrono_tz::Tz) -> String {
     out.push_str(&format!("\"access\":{},", i32::from(page.access)));
     out.push_str(&format!("\"color\":{},", quoted(&page.color)));
     out.push_str(&format!("\"parent\":{},", render_opt_uuid(&page.parent_id)));
+    out.push_str(&format!(
+        "\"parent_id\":{},",
+        render_opt_uuid(&page.parent_id)
+    ));
+    out.push_str("\"sub_pages_count\":0,");
     out.push_str(&format!(
         "\"is_favorite\":{},",
         if row.is_favorite { "true" } else { "false" }
@@ -3618,8 +3722,9 @@ fn render_create_row(row: &DetailRow, tz: &chrono_tz::Tz) -> String {
 /// The PATCH 200 shape: the update-bound `PageDetailSerializer` over the
 /// plain instance — the annotation-backed keys (`is_favorite`,
 /// `label_ids`, `project_ids`) have no attribute and DRF drops them
-/// (`SkipField`), except `label_ids` / `project_ids` render when the
-/// request body set them as ad-hoc attributes (16 base keys).
+/// (`SkipField`), as does the `sub_pages_count` annotation, except
+/// `label_ids` / `project_ids` render when the request body set them as
+/// ad-hoc attributes (17 base keys; `parent_id` is a model attribute).
 #[derive(Debug, Clone, Default)]
 pub struct PatchRender {
     pub page: RenderPage,
@@ -3657,6 +3762,10 @@ fn render_patch_row(render: &PatchRender, tz: &chrono_tz::Tz) -> String {
     out.push_str(&format!("\"access\":{},", page.access));
     out.push_str(&format!("\"color\":{},", quoted(&page.color)));
     out.push_str(&format!("\"parent\":{},", render_opt_uuid(&page.parent_id)));
+    out.push_str(&format!(
+        "\"parent_id\":{},",
+        render_opt_uuid(&page.parent_id)
+    ));
     out.push_str(&format!(
         "\"is_locked\":{},",
         if page.is_locked { "true" } else { "false" }
@@ -3795,6 +3904,15 @@ pub async fn page_create(
         Ok(valid) => valid,
         Err(failure) => return failure_response(failure),
     };
+    // The parent rule (`parent_error(self.visible_pages(), ...)`) runs on
+    // the validated parent, before `serializer.save()`.
+    if let Some(Some(parent_id)) = valid.parent {
+        if let Err(denial) =
+            check_parent(pool, &slug, &user_id, &project_id, &parent_id, None).await
+        {
+            return denial.into_response();
+        }
+    }
     if valid.label_ids.is_some() || valid.project_ids.is_some() {
         return Denial::ServerError.into_response();
     }
@@ -3829,16 +3947,24 @@ pub async fn page_create(
     {
         return Denial::ServerError.into_response();
     }
-    let workspace_id: uuid::Uuid =
-        match sqlx::query_as(r#"SELECT p.workspace_id FROM projects p WHERE p.id = $1"#)
-            .bind(project_id)
-            .fetch_optional(pool)
-            .await
-        {
-            Ok(Some((id,))) => id,
-            Ok(None) => return Denial::ProjectNotFound.into_response(),
-            Err(_) => return Denial::ServerError.into_response(),
-        };
+    // `Project.objects.get(pk=project_id)` (`page.py:69-70`): the create
+    // serializer reads the live project row before `Page.objects.create`,
+    // and `Project` uses `SoftDeletionManager`, so a missing or
+    // soft-deleted row raises `DoesNotExist` → the `handle_exception` 404
+    // `{"error":"The required object does not exist."}` with nothing
+    // written. After `validate_page_fields` (serializer 400s win) and
+    // before any insert, matching `is_valid()` → `save()` order.
+    let workspace_id: uuid::Uuid = match sqlx::query_as(
+        r#"SELECT p.workspace_id FROM projects p WHERE p.id = $1 AND p.deleted_at IS NULL"#,
+    )
+    .bind(project_id)
+    .fetch_optional(pool)
+    .await
+    {
+        Ok(Some((id,))) => id,
+        Ok(None) => return Denial::ObjectNotFound.into_response(),
+        Err(_) => return Denial::ServerError.into_response(),
+    };
     let timezone = match actor_timezone(pool, &user_id).await {
         Ok(tz) => tz,
         Err(denial) => return denial.into_response(),
@@ -4004,29 +4130,74 @@ fn default_view_props() -> Value {
     )]))
 }
 
-/// Scoped existence for the `partial_update` parent re-fetch
-/// (`base.py:166-173`): the same workspace+project+bridge scope as the page
-/// fetch. A miss is `DoesNotExist` → the owner-access 400 (`:196-200`).
-async fn scoped_page_exists(
+/// `parent_error(self.visible_pages(), parent_id, page)`
+/// (`utils/page_tree.py`, shared with `/api/v1/`'s `validate_parent`): the
+/// parent must be a page the user can see in this project (the
+/// [`read_scope_where`] scope, no `?search=`), not archived, and — when
+/// `page_id` is being moved — not the page itself or one of its
+/// descendants. Failures are the 400 `{"error": ...}` bodies the v1 port
+/// renders through [`ValidateParentError`].
+async fn check_parent(
     pool: &PgPool,
     slug: &str,
+    user_id: &uuid::Uuid,
     project_id: &uuid::Uuid,
-    page_id: &uuid::Uuid,
-) -> Result<bool, Denial> {
-    let found: Option<(uuid::Uuid,)> = sqlx::query_as(
-        r#"SELECT p.id FROM pages p
-           JOIN workspaces w ON w.id = p.workspace_id
-           JOIN project_pages pp ON pp.page_id = p.id
-               AND pp.project_id = $2 AND pp.deleted_at IS NULL
-           WHERE p.id = $1 AND w.slug = $3 AND p.deleted_at IS NULL"#,
-    )
-    .bind(page_id)
-    .bind(project_id)
+    parent_id: &uuid::Uuid,
+    page_id: Option<uuid::Uuid>,
+) -> Result<(), Denial> {
+    use pidash_services::v1_work_items::queries_search::ValidateParentError;
+    let reject = |error: ValidateParentError| {
+        Denial::BadError(
+            match error {
+                ValidateParentError::NotFound => "Parent page not found in this project",
+                ValidateParentError::Archived => "Parent page is archived",
+                ValidateParentError::SelfNest => "A page cannot be nested under itself",
+            }
+            .to_owned(),
+        )
+    };
+    let archived: Option<(bool,)> = sqlx::query_as(&format!(
+        "SELECT pages.archived_at IS NOT NULL FROM pages WHERE {} AND ({}) = TRUE \
+         AND pages.id = $4",
+        read_scope_where("$1", "$2"),
+        project_annotation("$3"),
+    ))
     .bind(slug)
+    .bind(user_id)
+    .bind(project_id)
+    .bind(parent_id)
     .fetch_optional(pool)
     .await
     .map_err(|_| Denial::ServerError)?;
-    Ok(found.is_some())
+    match archived {
+        None => return Err(reject(ValidateParentError::NotFound)),
+        Some((true,)) => return Err(reject(ValidateParentError::Archived)),
+        Some((false,)) => {}
+    }
+    let Some(page_id) = page_id else {
+        return Ok(());
+    };
+    // The ancestor walk: unscoped `Page.objects`, `seen`-guarded; a NULL
+    // parent or a missing row ends it.
+    let mut ancestor = *parent_id;
+    let mut seen = std::collections::HashSet::new();
+    while seen.insert(ancestor) {
+        if ancestor == page_id {
+            return Err(reject(ValidateParentError::SelfNest));
+        }
+        let next: Option<Option<uuid::Uuid>> = sqlx::query_scalar(
+            "SELECT parent_id FROM pages WHERE deleted_at IS NULL AND id = $1 LIMIT 1",
+        )
+        .bind(ancestor)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+        match next.flatten() {
+            Some(id) => ancestor = id,
+            None => break,
+        }
+    }
+    Ok(())
 }
 
 /// `PATCH .../pages/<page_id>/` (`PageViewSet.partial_update`,
@@ -4083,39 +4254,6 @@ pub async fn page_partial_update(
     if page.is_locked {
         return json_response(StatusCode::BAD_REQUEST, gate::PAGE_LOCKED_BODY.to_owned());
     }
-    // The parent re-fetch (`:166-173`): only when the raw value is truthy
-    // (`request.data.get("parent")`), through the same scope; a miss — or
-    // an ORM-level rejection — lands in the same `except` body.
-    if body.get("parent").is_some_and(python_truthy) {
-        let parent_id = match &body["parent"] {
-            Value::String(text) => match parse_uuid_hex(text) {
-                Some(id) => id,
-                None => return Denial::ValidDetail.into_response(),
-            },
-            Value::Bool(flag) => uuid::Uuid::from_u128(u128::from(*flag as u8)),
-            Value::Number(number) => {
-                let raw = if let Some(int) = number.as_i64() {
-                    if int < 0 {
-                        return Denial::ValidDetail.into_response();
-                    }
-                    int as u128
-                } else if let Some(uint) = number.as_u64() {
-                    u128::from(uint)
-                } else {
-                    return Denial::ValidDetail.into_response();
-                };
-                uuid::Uuid::from_u128(raw)
-            }
-            _ => return Denial::ValidDetail.into_response(),
-        };
-        match scoped_page_exists(pool, &slug, &project_id, &parent_id).await {
-            Ok(true) => {}
-            Ok(false) => {
-                return json_response(StatusCode::BAD_REQUEST, gate::ACCESS_OWNER_BODY.to_owned());
-            }
-            Err(denial) => return denial.into_response(),
-        }
-    }
     // Owner-only access change (`:176-180`): the RAW request value compares
     // against the stored one with Python equality (`"0" != 0`,
     // `False == 0`), before any serializer runs.
@@ -4144,6 +4282,22 @@ pub async fn page_partial_update(
         Ok(valid) => valid,
         Err(failure) => return failure_response(failure),
     };
+    // The parent rule runs on the validated parent, before the save; an
+    // explicit `null` (detach to the top level) needs no check.
+    if let Some(Some(parent_id)) = valid.parent {
+        if let Err(denial) = check_parent(
+            pool,
+            &slug,
+            &user_id,
+            &project_id,
+            &parent_id,
+            Some(page_id),
+        )
+        .await
+        {
+            return denial.into_response();
+        }
+    }
     let old_html = page.description_html.clone();
     // `update()` label replacement (`page.py:108-126`): soft-stamp the live
     // `PageLabel` rows, then bulk-create the new set (`batch_size=10`) with
@@ -5175,7 +5329,9 @@ mod tests {
         // `serde_json` keeps insertion order (`preserve_order`), so the
         // parsed key order is the render order.
         assert_eq!(keys, expected);
-        assert_eq!(keys.len(), 19);
+        assert_eq!(keys.len(), 21);
+        assert_eq!(body["parent_id"], body["parent"]);
+        assert_eq!(body["sub_pages_count"], serde_json::json!(0));
         // Spot values: FKs render as PK strings, annotations render, the
         // default HTML survives.
         assert_eq!(body["name"], serde_json::json!("Created page"));
@@ -5205,7 +5361,10 @@ mod tests {
             project_ids: None,
         };
         let keys = rendered_keys(&render_patch_row(&base, &chrono_tz::UTC));
-        assert_eq!(keys.len(), 16);
+        assert_eq!(keys.len(), 17);
+        let parent = keys.iter().position(|key| key == "parent").unwrap();
+        assert_eq!(keys[parent + 1], "parent_id");
+        assert!(!keys.contains(&"sub_pages_count".to_owned()));
         assert!(!keys.contains(&"is_favorite".to_owned()));
         assert!(!keys.contains(&"label_ids".to_owned()));
         assert!(!keys.contains(&"project_ids".to_owned()));
@@ -5220,7 +5379,7 @@ mod tests {
             ..base
         };
         let keys = rendered_keys(&render_patch_row(&with_ids, &chrono_tz::UTC));
-        assert_eq!(keys.len(), 18);
+        assert_eq!(keys.len(), 19);
         let logo = keys.iter().position(|key| key == "logo_props").unwrap();
         assert_eq!(keys[logo + 1], "label_ids");
         assert_eq!(keys[logo + 2], "project_ids");
@@ -5234,26 +5393,54 @@ mod tests {
         // Char coercion: null fails, bools/composites fail, numbers
         // stringify, strings trim.
         assert_eq!(
-            coerce_char(&Value::Null, true),
-            Err("This field may not be null.")
+            coerce_char(&Value::Null, true, None),
+            Err(vec!["This field may not be null.".to_owned()])
         );
         assert_eq!(
-            coerce_char(&serde_json::json!(true), true),
-            Err("Not a valid string.")
+            coerce_char(&serde_json::json!(true), true, None),
+            Err(vec!["Not a valid string.".to_owned()])
         );
-        assert_eq!(coerce_char(&serde_json::json!(5), true), Ok("5".to_owned()));
         assert_eq!(
-            coerce_char(&serde_json::json!("  x  "), true),
+            coerce_char(&serde_json::json!(5), true, None),
+            Ok("5".to_owned())
+        );
+        assert_eq!(
+            coerce_char(&serde_json::json!("  x  "), true, None),
             Ok("x".to_owned())
         );
         // Detail HTML rejects blank (allow_blank=False), even whitespace.
         assert_eq!(
-            coerce_char(&serde_json::json!(""), false),
-            Err("This field may not be blank.")
+            coerce_char(&serde_json::json!(""), false, None),
+            Err(vec!["This field may not be blank.".to_owned()])
         );
         assert_eq!(
-            coerce_char(&serde_json::json!("   "), false),
-            Err("This field may not be blank.")
+            coerce_char(&serde_json::json!("   "), false, None),
+            Err(vec!["This field may not be blank.".to_owned()])
+        );
+        // NUL (`ProhibitNullCharactersValidator`) runs after any length
+        // validator, both accumulated (DRF `run_validators`).
+        assert_eq!(
+            coerce_char(&serde_json::json!("ab\u{0}cd"), true, Some(255)),
+            Err(vec!["Null characters are not allowed.".to_owned()])
+        );
+        assert_eq!(
+            coerce_char(
+                &serde_json::json!(format!("{}\u{0}", "x".repeat(256))),
+                true,
+                Some(255)
+            ),
+            Err(vec![
+                "Ensure this field has no more than 255 characters.".to_owned(),
+                "Null characters are not allowed.".to_owned(),
+            ])
+        );
+        assert_eq!(
+            char_internal(&serde_json::json!("ab\u{0}cd")),
+            Err("Null characters are not allowed.")
+        );
+        assert_eq!(
+            char_internal(&serde_json::json!("  ok  ")),
+            Ok("ok".to_owned())
         );
         // Access choices: "0"/0 pass, True renders Python-style.
         assert_eq!(coerce_access(&serde_json::json!(0)), Ok(0));
@@ -5406,10 +5593,27 @@ mod tests {
         assert_eq!(action("create")["invalid"]["status"], 400);
         assert_eq!(action("partial_update")["valid"]["status"], 200);
         assert_eq!(
-            action("partial_update")["missing_or_parent_missing"]["body"],
+            action("partial_update")["missing"]["body"],
             serde_json::json!({
                 "error": "Access cannot be updated since this page is owned by someone else"
             })
+        );
+        // The parent rule's three bodies (`utils/page_tree.py`), all 400.
+        let parent = &action("partial_update")["parent_invalid"];
+        assert_eq!(parent["status"], 400);
+        let messages: Vec<&str> = parent["bodies"]
+            .as_array()
+            .expect("parent bodies")
+            .iter()
+            .map(|body| body["error"].as_str().expect("error string"))
+            .collect();
+        assert_eq!(
+            messages,
+            [
+                "Parent page not found in this project",
+                "Parent page is archived",
+                "A page cannot be nested under itself",
+            ]
         );
         assert_eq!(action("destroy")["valid"]["status"], 204);
         assert_eq!(action("destroy")["not_archived"]["status"], 400);
@@ -5620,7 +5824,7 @@ mod read_tests {
     /// `project_ids` predicate, and no unexecutable `uuid = boolean`.
     #[test]
     fn read_sql_carries_executable_predicates() {
-        let list = read_rows_sql(false, false, &[]);
+        let list = read_rows_sql(false, RowFilter::TopLevel, false, &[]);
         assert!(list.contains("pages.deleted_at IS NULL"), "{list}");
         assert!(list.contains("user_favorites.deleted_at IS NULL"), "{list}");
         assert!(list.contains("project_pages.deleted_at IS NULL"), "{list}");
@@ -5637,9 +5841,9 @@ mod read_tests {
         );
         // No search terms: no LIKE predicate, no extra binds.
         assert!(!list.contains("LIKE"), "{list}");
-        let scoped = read_rows_sql(true, false, &[]);
+        let scoped = read_rows_sql(true, RowFilter::TopLevel, true, &[]);
         assert!(scoped.contains("pages.owned_by_id = $2"), "{scoped}");
-        let one = read_rows_sql(false, true, &[]);
+        let one = read_rows_sql(false, RowFilter::Page, false, &[]);
         assert!(one.contains("pages.id = $4"), "{one}");
         let summary = summary_sql(false);
         assert!(summary.contains("pages.deleted_at IS NULL"), "{summary}");
@@ -5757,14 +5961,14 @@ mod read_tests {
     #[test]
     fn search_sql_binds_follow_positionals() {
         let terms = vec!["home".to_owned(), "page".to_owned()];
-        let list = read_rows_sql(false, false, &terms);
+        let list = read_rows_sql(false, RowFilter::AnyDepth, false, &terms);
         assert!(
             list.contains(
                 "UPPER(pages.name::text) LIKE UPPER($4) AND UPPER(pages.name::text) LIKE UPPER($5)"
             ),
             "{list}"
         );
-        let one = read_rows_sql(false, true, &terms);
+        let one = read_rows_sql(false, RowFilter::Page, false, &terms);
         assert!(
             one.contains(
                 "UPPER(pages.name::text) LIKE UPPER($5) AND UPPER(pages.name::text) LIKE UPPER($6)"
@@ -5772,6 +5976,65 @@ mod read_tests {
             "{one}"
         );
         assert!(one.contains("pages.id = $4"), "{one}");
+    }
+
+    /// Depth filters (`PageViewSet.list` / `retrieve`): top-level by
+    /// default, `?parent=` binds `$4`, a search spans every depth, and
+    /// retrieve reaches any depth; search binds follow the id bind.
+    #[test]
+    fn read_sql_depth_filters() {
+        let top = read_rows_sql(false, RowFilter::TopLevel, false, &[]);
+        assert!(top.contains(" AND pages.parent_id IS NULL"), "{top}");
+        let children = read_rows_sql(false, RowFilter::ChildrenOf, false, &[]);
+        assert!(children.contains(" AND pages.parent_id = $4"), "{children}");
+        assert!(!children.contains("pages.parent_id IS NULL"), "{children}");
+        let terms = vec!["home".to_owned()];
+        let search = read_rows_sql(false, RowFilter::AnyDepth, false, &terms);
+        assert!(!search.contains("pages.parent_id IS NULL"), "{search}");
+        assert!(!search.contains("$5"), "{search}");
+        let children_search = read_rows_sql(false, RowFilter::ChildrenOf, false, &terms);
+        assert!(
+            children_search.contains("UPPER(pages.name::text) LIKE UPPER($5)"),
+            "{children_search}"
+        );
+        let one = read_rows_sql(false, RowFilter::Page, false, &[]);
+        assert!(!one.contains("pages.parent_id IS NULL"), "{one}");
+        // The scope itself is depth-free.
+        assert!(!read_scope_where("$1", "$2").contains("parent_id"));
+    }
+
+    /// `sub_pages_count`: visible, project-linked, live children (all
+    /// children of an archived page); restricted guests count their own.
+    #[test]
+    fn sub_pages_count_annotation_predicates() {
+        let count = sub_pages_count_annotation("$2", "$3", false);
+        assert!(
+            count.starts_with("COALESCE((SELECT COUNT(child.id)"),
+            "{count}"
+        );
+        assert!(count.contains("child.deleted_at IS NULL"), "{count}");
+        assert!(count.contains("child.parent_id = pages.id"), "{count}");
+        assert!(
+            count.contains("cpp.project_id = $3 AND cpp.deleted_at IS NULL"),
+            "{count}"
+        );
+        assert!(
+            count.contains("(child.archived_at IS NULL OR pages.archived_at IS NOT NULL)"),
+            "{count}"
+        );
+        assert!(
+            count.contains("(child.owned_by_id = $2 OR child.access = 0)"),
+            "{count}"
+        );
+        let guest = sub_pages_count_annotation("$2", "$3", true);
+        assert!(guest.contains("AND child.owned_by_id = $2), 0)"), "{guest}");
+        assert!(!guest.contains("child.access = 0"), "{guest}");
+        let list = read_rows_sql(false, RowFilter::TopLevel, false, &[]);
+        assert!(
+            list.contains("pages.parent_id AS parent_id, COALESCE((SELECT COUNT(child.id)"),
+            "{list}"
+        );
+        assert_eq!(INVALID_PARENT_MESSAGE, "Invalid parent page id");
     }
 
     /// Datetime shaping: aware values render in the request zone with the

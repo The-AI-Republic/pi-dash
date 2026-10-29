@@ -14,6 +14,8 @@
 //! template drift is owned by the domain gate). Only `{{ root_url }}`
 //! is substituted; `reason` never renders (ported quirk).
 
+use axum::http::{header, StatusCode};
+use axum::response::{IntoResponse, Response};
 use pidash_services::auth_session::{error_dict_json, get_safe_redirect_url, ParamValue};
 use serde_json::{Map, Value};
 
@@ -53,22 +55,30 @@ pub fn redirect_location(
     get_safe_redirect_url(base_url, next_path, params, allowed_hosts)
 }
 
-/// Django autoescape for the single substituted value (`&<>"'`;
-/// Django renders `'` as `&#x27;`).
-pub fn html_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#x27;"),
-            _ => out.push(c),
-        }
-    }
-    out
+/// `DisallowedRedirect` answer: the final `Location` is longer than
+/// `MAX_URL_REDIRECT_LENGTH` characters, so `HttpResponseRedirectBase`
+/// raises (`django/http/response.py:621-625`) and Django serves its
+/// stock 400 page (`django/views/defaults.py`, `ERROR_PAGE_TEMPLATE`;
+/// the project ships no `400.html` and no `handler400` override).
+/// Under `settings.test` (`DEBUG=True`) Django renders the technical
+/// traceback page instead, which no port reproduces: the contract
+/// suite pins the status only.
+pub const DISALLOWED_REDIRECT_400_BODY: &str = "\n<!doctype html>\n<html lang=\"en\">\n<head>\n  <title>Bad Request (400)</title>\n</head>\n<body>\n  <h1>Bad Request (400)</h1><p></p>\n</body>\n</html>\n";
+
+/// 400 for an over-long redirect `Location` (see
+/// [`DISALLOWED_REDIRECT_400_BODY`]).
+pub fn disallowed_redirect() -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        DISALLOWED_REDIRECT_400_BODY,
+    )
+        .into_response()
 }
+
+/// Canonical Django autoescape, moved to `pidash_compat::html`
+/// (PIDASHCONV-1623); this re-export keeps the old path working.
+pub use pidash_compat::html::html_escape;
 
 /// `apps/api/templates/csrf_failure.html`, verbatim except the
 /// `{{ root_url }}` marker (replaced by [`render_csrf_failure`]).
@@ -188,6 +198,28 @@ mod tests {
         assert_eq!(
             location,
             "http://localhost:8000/spaces/?next_path=/x&error_code=5090&error_message=INVALID_MAGIC_CODE_SIGN_IN&email=u%40x.com"
+        );
+    }
+
+    #[tokio::test]
+    async fn disallowed_redirect_matches_django_production_400() {
+        let response = disallowed_redirect();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .expect("content-type"),
+            "text/html; charset=utf-8"
+        );
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .expect("reads");
+        // `ERROR_PAGE_TEMPLATE % {"title": "Bad Request (400)", "details": ""}`
+        // (`django/views/defaults.py`), 143 bytes.
+        assert_eq!(
+            body.as_ref(),
+            b"\n<!doctype html>\n<html lang=\"en\">\n<head>\n  <title>Bad Request (400)</title>\n</head>\n<body>\n  <h1>Bad Request (400)</h1><p></p>\n</body>\n</html>\n"
         );
     }
 
