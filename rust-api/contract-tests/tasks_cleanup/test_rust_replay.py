@@ -18,7 +18,6 @@ Run with the Django worker (and beat) STOPPED and the Rust worker
 running against the same DATABASE_URL::
 
     export DATABASE_URL=postgresql://...  # your own scratch database
-    export CELERY_BROKER_URL=amqp://...   # same broker the Rust worker uses
     export HARD_DELETE_AFTER_DAYS=0 UNUPLOADED_ASSET_DELETE_DAYS=0
     export SEED_DIR=$PWD/../apps/api/pi_dash/seeds/data  # from rust-api/;
     # the *data* dir itself: the worker joins SEED_DIR with the filenames
@@ -65,6 +64,8 @@ import json as _json
 import re
 import uuid
 from datetime import datetime, timedelta, timezone
+from html.parser import HTMLParser
+from io import StringIO
 
 import pytest
 from psycopg.rows import dict_row
@@ -77,7 +78,7 @@ from _harness.soft_delete_entries import ENTRY_CASES, seed_draft_tree
 
 M = "pi_dash.bgtasks"
 
-def test_rust_worker_liveness(db_conn, broker_url):
+def test_rust_worker_liveness(db_conn):
     """Rust inspect-equivalent: a no-op cleanup job is consumed from Postgres.
 
     Replaces ``test_worker_registration`` (Celery broadcast inspect, which
@@ -97,7 +98,9 @@ def _old(days: int = 60) -> str:
     return (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
 
 
-def test_rust_delete_api_logs(db_conn, broker_url):
+def test_rust_delete_api_logs(db_conn):
+    # Non-NULL ip_address: the column is Postgres inet and every real row
+    # has one (PIDASHCONV-1289). A NULL here would skip the inet decode path.
     row = insert_row(
         db_conn,
         "api_activity_logs",
@@ -106,6 +109,7 @@ def test_rust_delete_api_logs(db_conn, broker_url):
             "path": "/contract/old",
             "method": "GET",
             "response_code": 200,
+            "ip_address": "10.0.0.1",
             "created_at": _old(),
         },
     )
@@ -116,7 +120,7 @@ def test_rust_delete_api_logs(db_conn, broker_url):
     )
 
 
-def test_rust_delete_email_notification_logs(db_conn, broker_url):
+def test_rust_delete_email_notification_logs(db_conn):
     receiver = seed_helpers.user(db_conn, "rust-replay-expire")
     actor = seed_helpers.user(db_conn, "rust-replay-expire-actor")
     row = seed_helpers.email_log(
@@ -134,7 +138,7 @@ def test_rust_delete_email_notification_logs(db_conn, broker_url):
     )
 
 
-def test_rust_delete_webhook_logs(db_conn, broker_url):
+def test_rust_delete_webhook_logs(db_conn):
     owner = seed_helpers.user(db_conn, "rust-replay-weblog-owner")
     workspace = seed_helpers.workspace(db_conn, "rustreplayweblog", owner["id"])
     row = insert_row(
@@ -155,7 +159,7 @@ def test_rust_delete_webhook_logs(db_conn, broker_url):
     )
 
 
-def test_rust_delete_page_versions_keeps_newest_20(db_conn, broker_url):
+def test_rust_delete_page_versions_keeps_newest_20(db_conn):
     """Windowing parity: only versions beyond the newest 20 per page go."""
     owner = seed_helpers.user(db_conn, "rust-replay-pagever-owner")
     workspace = seed_helpers.workspace(db_conn, "rustreplaypagever", owner["id"])
@@ -201,7 +205,7 @@ def test_rust_delete_page_versions_keeps_newest_20(db_conn, broker_url):
     assert remaining == 20
 
 
-def test_rust_delete_unuploaded_file_asset(db_conn, broker_url):
+def test_rust_delete_unuploaded_file_asset(db_conn):
     # NOTE: FileAsset.objects is a SoftDeletionQuerySet, so .delete()
     # stamps deleted_at instead of removing the row — unlike the
     # cleanup_task deletes, which go through all_objects for hard
@@ -226,7 +230,7 @@ def test_rust_delete_unuploaded_file_asset(db_conn, broker_url):
     )
 
 
-def test_rust_delete_old_s3_link_clears_expired_url(db_conn, broker_url):
+def test_rust_delete_old_s3_link_clears_expired_url(db_conn):
     """Rust replay of the empty-key case: URL clears, no S3 call (PIDASHCONV-858)."""
     owner = seed_helpers.user(db_conn, "rust-replay-exporter-owner")
     workspace = seed_helpers.workspace(db_conn, "rustreplayexporter", owner["id"])
@@ -253,7 +257,7 @@ def test_rust_delete_old_s3_link_clears_expired_url(db_conn, broker_url):
     )
 
 
-def test_rust_delete_old_s3_link_deletes_truthy_key_object(db_conn, broker_url):
+def test_rust_delete_old_s3_link_deletes_truthy_key_object(db_conn):
     """Rust replay of the truthy-key case: the S3 object is deleted from
     the live endpoint AND the URL clears (PIDASHCONV-858)."""
     bucket = s3_helpers.contract_bucket()
@@ -292,7 +296,7 @@ def test_rust_delete_old_s3_link_deletes_truthy_key_object(db_conn, broker_url):
     )
 
 
-def test_rust_hard_delete_removes_tombstoned_rows(db_conn, broker_url):
+def test_rust_hard_delete_removes_tombstoned_rows(db_conn):
     owner = seed_helpers.user(db_conn, "rust-replay-tomb-owner")
     workspace = seed_helpers.workspace(db_conn, "rustreplaytomb", owner["id"])
     row = insert_row(
@@ -314,7 +318,7 @@ def test_rust_hard_delete_removes_tombstoned_rows(db_conn, broker_url):
     )
 
 
-def test_rust_soft_delete_loopjob_cascades(db_conn, broker_url):
+def test_rust_soft_delete_loopjob_cascades(db_conn):
     """PIDASHCONV-900: the Rust worker resolves ("db", "loopjob") and runs
     the soft-delete the loop DELETE handler enqueues (PIDASHCONV-888).
 
@@ -383,7 +387,7 @@ def test_rust_soft_delete_loopjob_cascades(db_conn, broker_url):
     )
 
 
-def test_rust_soft_delete_user_nulls_audit_fks(db_conn, broker_url):
+def test_rust_soft_delete_user_nulls_audit_fks(db_conn):
     """PIDASHCONV-900: `SET_NULL` reverse relations null instead of stamping.
 
     Django dispatches on `relation.on_delete` (`deletion_task.py:44-64`),
@@ -447,7 +451,7 @@ def _soft_deleted_int(conn, table: str, pk: int) -> bool:
         return row is not None and row["deleted_at"] is not None
 
 
-def test_rust_soft_delete_project_preserves_triage_subtree(db_conn, broker_url):
+def test_rust_soft_delete_project_preserves_triage_subtree(db_conn):
     """PIDASHCONV-900 review defect 1 (CASCADE side): the to-many fetch is
     the `(manager="objects").all()` queryset. `State.objects` is
     `StateManager`, so triage states are never stamped or recursed into —
@@ -528,7 +532,7 @@ def test_rust_soft_delete_project_preserves_triage_subtree(db_conn, broker_url):
     )
 
 
-def test_rust_soft_delete_user_preserves_triage_audit_fks(db_conn, broker_url):
+def test_rust_soft_delete_user_preserves_triage_audit_fks(db_conn):
     """PIDASHCONV-900 review defect 1 (SET_NULL side): the default reverse
     manager inherits the child default manager, so nulling audit FKs into
     `states` skips triage rows. Deleting a user nulls a live state's
@@ -574,7 +578,7 @@ def test_rust_soft_delete_user_preserves_triage_audit_fks(db_conn, broker_url):
     )
 
 
-def test_rust_soft_delete_user_keeps_hidden_fks(db_conn, broker_url):
+def test_rust_soft_delete_user_keeps_hidden_fks(db_conn):
     """PIDASHCONV-900 review defect 2: `related_name='+'` relations are
     invisible to Python's `get_fields()`, so the walk never nulls them.
     Deleting a user nulls a visible audit FK (control) but leaves the
@@ -653,7 +657,7 @@ def test_rust_soft_delete_user_keeps_hidden_fks(db_conn, broker_url):
     assert not _soft_deleted(db_conn, "issue_agent_ticker", ticker["id"])
 
 
-def test_rust_soft_delete_project_stamps_identifier(db_conn, broker_url):
+def test_rust_soft_delete_project_stamps_identifier(db_conn):
     """PIDASHCONV-900 review defect 3: `project_identifiers` has a bigint
     PK and `deleted_at`; Python stamps it through the project O2O
     (`project_identifier`) CASCADE. The Rust walk must stamp it too —
@@ -690,7 +694,7 @@ def test_rust_soft_delete_project_stamps_identifier(db_conn, broker_url):
     )
 
 
-def test_rust_soft_delete_project_skips_soft_deleted_identifier(db_conn, broker_url):
+def test_rust_soft_delete_project_skips_soft_deleted_identifier(db_conn):
     """PIDASHCONV-936 (CASCADE O2O side): a soft-deleted O2O child is
     found by the unscoped read yet left untouched — no re-stamp, no
     null — exactly like Django's `if not deleted_at` skip
@@ -809,7 +813,7 @@ def _seed_loop_tree(db_conn, tag: str):
     return job, target, pref
 
 
-def test_rust_hard_delete_removes_tombstoned_subtree(db_conn, broker_url):
+def test_rust_hard_delete_removes_tombstoned_subtree(db_conn):
     """PIDASHCONV-928: the Rust Collector removes a tombstoned subtree.
 
     ``loop_jobs`` sorts before ``loop_targets`` alphabetically, and the
@@ -857,7 +861,7 @@ def _queue_failure(conn, celery_id):
         return row["last_error"]
 
 
-def test_rust_hard_delete_cascade_deletes_live_child(db_conn, broker_url):
+def test_rust_hard_delete_cascade_deletes_live_child(db_conn):
     """PIDASHCONV-928: the Rust Collector deletes LIVE CASCADE children.
 
     A tombstoned parent with live CASCADE children is routine input (the
@@ -882,7 +886,7 @@ def test_rust_hard_delete_cascade_deletes_live_child(db_conn, broker_url):
         )
 
 
-def test_rust_hard_delete_mutual_project_state(db_conn, broker_url):
+def test_rust_hard_delete_mutual_project_state(db_conn):
     """PIDASHCONV-928: the model transaction cracks the project/state cycle.
 
     ``projects.default_state_id`` (``SET_NULL``) and ``states.project_id``
@@ -1103,7 +1107,7 @@ def _drop_queue_row(conn, celery_id):
 
 
 def test_rust_hard_delete_do_nothing_fails_with_partial_commits(
-    db_conn, broker_url
+    db_conn
 ):
     """PIDASHCONV-928 replay (BUG-DEL-3): due issue + due activity fails.
 
@@ -1157,7 +1161,7 @@ def test_rust_hard_delete_do_nothing_fails_with_partial_commits(
             )
 
 
-def test_rust_hard_delete_live_do_nothing_child_fails(db_conn, broker_url):
+def test_rust_hard_delete_live_do_nothing_child_fails(db_conn):
     """PIDASHCONV-928 replay: tombstoned parent + LIVE ``DO_NOTHING`` child.
 
     Mirrors ``test_hard_delete_live_do_nothing_child_fails``: the deferred
@@ -1192,7 +1196,7 @@ def test_rust_hard_delete_live_do_nothing_child_fails(db_conn, broker_url):
 
 
 def test_rust_hard_delete_due_comment_resolves_after_activity(
-    db_conn, broker_url
+    db_conn
 ):
     """PIDASHCONV-928 replay: due comment + due activity succeeds in order.
 
@@ -1217,7 +1221,7 @@ def test_rust_hard_delete_due_comment_resolves_after_activity(
     assert not _missing(db_conn, "issues", chain["issue"]["id"])
 
 
-def test_rust_hard_delete_protect_fails_loudly(db_conn, broker_url):
+def test_rust_hard_delete_protect_fails_loudly(db_conn):
     """PIDASHCONV-928 replay: tombstoned pod + LIVE assigned issue.
 
     Mirrors ``test_hard_delete_protect_fails_loudly``: the ``PROTECT``
@@ -1255,7 +1259,7 @@ def test_rust_hard_delete_protect_fails_loudly(db_conn, broker_url):
 
 
 def test_rust_hard_delete_due_protect_child_resolves_in_order(
-    db_conn, broker_url
+    db_conn
 ):
     """PIDASHCONV-928 replay: due pod + due assigned issue succeeds in order.
 
@@ -1283,7 +1287,7 @@ def test_rust_hard_delete_due_protect_child_resolves_in_order(
     )
 
 
-def test_rust_hard_delete_parent_first_protect_fails(db_conn, broker_url):
+def test_rust_hard_delete_parent_first_protect_fails(db_conn):
     """PIDASHCONV-928 replay (BUG-DEL-3): due account + due binding fails.
 
     Mirrors ``test_hard_delete_parent_first_protect_fails``: the account
@@ -1320,7 +1324,7 @@ def test_rust_hard_delete_parent_first_protect_fails(db_conn, broker_url):
 
 
 def test_rust_hard_delete_project_cascade_deletes_live_triage(
-    db_conn, broker_url
+    db_conn
 ):
     """PIDASHCONV-928 replay: due project + LIVE triage state both go.
 
@@ -1344,7 +1348,7 @@ def test_rust_hard_delete_project_cascade_deletes_live_triage(
 
 
 def test_rust_hard_delete_set_null_ignores_manager_scoping(
-    db_conn, broker_url
+    db_conn
 ):
     """PIDASHCONV-928 replay: ``SET_NULL`` nulls through manager guards.
 
@@ -1378,7 +1382,7 @@ def test_rust_hard_delete_set_null_ignores_manager_scoping(
     )
 
 
-def test_rust_hard_delete_due_set_null_child_goes_first(db_conn, broker_url):
+def test_rust_hard_delete_due_set_null_child_goes_first(db_conn):
     """PIDASHCONV-928 replay: due issue + due estimate point both go.
 
     Mirrors ``test_hard_delete_due_set_null_child_goes_first``: the issues
@@ -1406,7 +1410,7 @@ def test_rust_hard_delete_due_set_null_child_goes_first(db_conn, broker_url):
 
 
 def test_rust_hard_delete_set_null_keeps_future_tombstone(
-    db_conn, broker_url
+    db_conn
 ):
     """PIDASHCONV-928 replay: ``SET_NULL`` nulls without a deleted_at scope.
 
@@ -1446,7 +1450,7 @@ def test_rust_hard_delete_set_null_keeps_future_tombstone(
     assert _soft_deleted(db_conn, "issues", chain["issue"]["id"])
 
 
-def test_rust_eta_delayed_execution(db_conn, broker_url):
+def test_rust_eta_delayed_execution(db_conn):
     """ETA parity through the Rust worker: countdown delays the delete."""
     row = insert_row(
         db_conn,
@@ -1469,7 +1473,7 @@ def test_rust_eta_delayed_execution(db_conn, broker_url):
     )
 
 
-def test_rust_cleanup_redelivery_deletes_nothing_twice(db_conn, broker_url):
+def test_rust_cleanup_redelivery_deletes_nothing_twice(db_conn):
     """Redelivery: a second run over an empty eligible set changes nothing."""
     before = snapshot(db_conn, ["api_activity_logs"])
     rust_queue.publish(f"{M}.cleanup_task.delete_api_logs")
@@ -1482,7 +1486,7 @@ def test_rust_cleanup_redelivery_deletes_nothing_twice(db_conn, broker_url):
     assert _diff(before, after) == {}
 
 
-def test_rust_storage_aware_tasks_consumed_without_crash(db_conn, broker_url):
+def test_rust_storage_aware_tasks_consumed_without_crash(db_conn):
     """Execution parity for S3/live-server-dependent tasks: consumed + acked."""
     cases = [
         (f"{M}.storage_metadata_task.get_asset_object_metadata", [str(uuid.uuid4())], {}),
@@ -1577,7 +1581,7 @@ def _seed_project_rows(conn, table, project_id):
         return cur.fetchall()
 
 
-def test_rust_workspace_seed_before_after(db_conn, broker_url):
+def test_rust_workspace_seed_before_after(db_conn):
     tag = uuid.uuid4().hex[:8]
     owner = seed_helpers.user(db_conn, f"rust-replay-seed-owner-{tag}")
     other = seed_helpers.user(db_conn, f"rust-replay-seed-other-{tag}")
@@ -1781,6 +1785,25 @@ def test_rust_workspace_seed_before_after(db_conn, broker_url):
         == expected_modules
     )
 
+    # Link-row audit wipe (PIDASHCONV-1298): the `.objects.create(
+    # created_by_id=bot)` rows run `BaseModel.save` with no save kwarg and
+    # no crum user in the worker, so Django NULLs both audit columns
+    # (`db/models/base.py:31-33`). The explicit IssueSequence create is one
+    # of the two per-issue rows; the `Issue.save` auto-row is NULL-audit on
+    # both backends already, so asserting every project sequence row NULL
+    # pins the explicit row too.
+    link_rows = (
+        _seed_project_rows(db_conn, "issue_labels", project["id"])
+        + _seed_project_rows(db_conn, "cycle_issues", project["id"])
+        + _seed_project_rows(db_conn, "module_issues", project["id"])
+        + _seed_project_rows(db_conn, "issue_sequences", project["id"])
+    )
+    assert len(link_rows) == (
+        expected_labels + expected_cycles + expected_modules + 2 * len(seed_issues)
+    )
+    assert all(r["created_by_id"] is None for r in link_rows)
+    assert all(r["updated_by_id"] is None for r in link_rows)
+
     # Views: empty seed filters store an empty query; first view keeps its
     # seed sort.
     views = _seed_project_rows(db_conn, "issue_views", project["id"])
@@ -1808,9 +1831,70 @@ def test_rust_workspace_seed_before_after(db_conn, broker_url):
         == expected_project_pages
     )
 
+    # Default pod + orchestration (PIDASHCONV-1297): the project-save
+    # post_save creates {IDENT}_pod_1, each issue-save resolves
+    # assigned_pod through it, and the post-save transition fires
+    # (ticker + dispatch or preflight bounce).
+    pods = _seed_project_rows(db_conn, "pod", project["id"])
+    assert len(pods) == 1
+    pod = pods[0]
+    assert pod["name"] == f"{project['identifier']}_pod_1"
+    assert pod["is_default"] is True
+    assert pod["description"] == "Auto-created default pod. Add tier pods anytime."
+    assert pod["created_by_id"] is None
+    assert all(i["assigned_pod_id"] == pod["id"] for i in issues)
+
+    # Ticking seed issues: agent_phases.PHASES pins the literal
+    # (name, group) pairs, so the test names them (no Django import).
+    # Sequence ids are 1-based in seed-file order (pinned above).
+    ticking = {("In Progress", "started"), ("In Review", "review"), ("In Test", "test")}
+    ticking_seed_states = {
+        s["id"] for s in seed_states if (s["name"], s.get("group")) in ticking
+    }
+    by_sequence = {i["sequence_id"]: i for i in issues}
+    ticking_n = [
+        n
+        for n, row in enumerate(seed_issues, start=1)
+        if row["state_id"] in ticking_seed_states
+    ]
+    assert ticking_n, "seed data must carry at least one ticking-state issue"
+    for n in ticking_n:
+        issue = by_sequence[n]
+        with db_conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                'SELECT * FROM "issue_agent_ticker" WHERE issue_id = %s::uuid',
+                (str(issue["id"]),),
+            )
+            ticker = cur.fetchone()
+        assert ticker is not None, f"issue {issue['id']} must own a ticker row"
+        runs = _seed_count(
+            db_conn, "agent_run", "WHERE work_item_id = %s::uuid", (str(issue["id"]),)
+        )
+        if runs:
+            continue  # dispatched: the backend had an eligible runner
+        # Bounced: Backlog state + the no-eligible-runner system comment.
+        with db_conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                'SELECT "group" FROM "states" WHERE id = %s::uuid',
+                (str(issue["state_id"]),),
+            )
+            group = cur.fetchone()["group"]
+        assert group == "backlog", f"issue {issue['id']} must bounce to Backlog"
+        with db_conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                'SELECT speaker_type, comment_html FROM "issue_comments" WHERE issue_id = %s::uuid',
+                (str(issue["id"]),),
+            )
+            comments = cur.fetchall()
+        assert any(
+            c["speaker_type"] == "agent"
+            and "Agent run skipped" in (c["comment_html"] or "")
+            for c in comments
+        ), f"issue {issue['id']} must carry the bounce comment"
 
 
-def test_rust_dummy_data_before_after(db_conn, broker_url):
+
+def test_rust_dummy_data_before_after(db_conn):
     """PIDASHCONV-816: dummy-data task inserts full NOT NULL columns.
 
     The Rust executor historically inserted minimal column lists
@@ -1987,7 +2071,7 @@ def _rust_image_srcs(html: str) -> list:
     return re.findall(r'<image-component\s+src="([^"]+)"', html or "")
 
 
-def test_rust_copy_task_copies_s3_objects_and_rewrites_page(db_conn, broker_url):
+def test_rust_copy_task_copies_s3_objects_and_rewrites_page(db_conn):
     """Rust replay of test_copy_task_copies_s3_objects_and_rewrites_page.
 
     Same seeds, same payload, same assertions through ``rust_queue``: every
@@ -2071,7 +2155,7 @@ def test_rust_copy_task_copies_s3_objects_and_rewrites_page(db_conn, broker_url)
     assert s3_helpers.s3_key_exists(bucket, src_key)
 
 
-def test_rust_metadata_task_stores_head_dict(db_conn, broker_url):
+def test_rust_metadata_task_stores_head_dict(db_conn):
     """Rust replay of test_metadata_task_stores_head_dict.
 
     Same seeds, same payload, same assertions through ``rust_queue``:
@@ -2141,7 +2225,7 @@ def _assert_rust_soft_delete_acked(conn, celery_id: str, model_name: str) -> Non
     assert outcome == "acked", f"rust worker did not ack {model_name}: {outcome}"
 
 
-def test_rust_soft_delete_draftissue_cascades(db_conn, broker_url):
+def test_rust_soft_delete_draftissue_cascades(db_conn):
     """PIDASHCONV-1293: the Rust worker resolves ("db", "draftissue") and
     stamps the CASCADE children plus the draft itself, exactly like the
     Django oracle. Pre-fix this job parked as UnknownModel and every
@@ -2166,7 +2250,7 @@ def test_rust_soft_delete_draftissue_cascades(db_conn, broker_url):
     "model_name,table,seeder", ENTRY_CASES, ids=[case[0] for case in ENTRY_CASES]
 )
 def test_rust_soft_delete_entry_models_ack(
-    db_conn, broker_url, model_name, table, seeder
+    db_conn, model_name, table, seeder
 ):
     """PIDASHCONV-1293: every model name the Rust API enqueues resolves —
     the job acks and stamps the row instead of parking as UnknownModel.
@@ -2190,3 +2274,232 @@ def test_rust_soft_delete_entry_models_ack(
         assert _column_is_null(
             db_conn, "agent_run", extra["agent_run_id"], "scheduler_binding_id"
         ), "SET_NULL parity broken: agent_run still points at the stamped binding"
+
+
+def test_rust_sync_description_version_large_workspace(db_conn):
+    """Rust replay of `test_sync_description_version_large_workspace`.
+
+    Same seeds and assertions through `rust_queue`: 4,400 live issues in
+    one workspace, sync at the default batch_size, exactly one
+    `issue_description_versions` row per seeded issue (PIDASHCONV-1294).
+    """
+    tag = uuid.uuid4().hex[:8]
+    chain = seed_helpers.bulk_issues(db_conn, f"1294rdesc-{tag}", 4400)
+    wid = chain["workspace"]["id"]
+    rust_queue.publish(
+        f"{M}.issue_description_version_sync.sync_issue_description_version",
+        kwargs={"offset": chain["pre_total"], "countdown": 300},
+    )
+
+    def _done():
+        with db_conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT COUNT(*) AS n FROM issue_description_versions"
+                " WHERE workspace_id = %s::uuid",
+                (str(wid),),
+            )
+            n = cur.fetchone()["n"]
+            return n if n == 4400 else None
+
+    wait_for(_done, what="4400 description versions written")
+    with db_conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT COUNT(*) AS n FROM ("
+            " SELECT issue_id FROM issue_description_versions"
+            " WHERE workspace_id = %s::uuid GROUP BY issue_id HAVING COUNT(*) = 1"
+            ") one",
+            (str(wid),),
+        )
+        assert cur.fetchone()["n"] == 4400
+
+
+class _MLStripper(HTMLParser):
+    """Local copy of Django's MLStripper (html_processor.py:9-25)."""
+
+    def __init__(self):
+        super().__init__()
+        self.reset()
+        self.strict = False
+        self.convert_charrefs = True
+        self.text = StringIO()
+
+    def handle_data(self, d):
+        self.text.write(d)
+
+    def get_data(self):
+        return self.text.getvalue()
+
+
+def _ml_strip(html: str) -> str:
+    stripper = _MLStripper()
+    stripper.feed(html)
+    return stripper.get_data()
+
+
+@pytest.mark.parametrize(
+    "html",
+    [
+        "<p>a &amp; b</p>",
+        "<p>1 < 2 and 3 > 1</p>",
+        "<p>x&nbsp;y</p>",
+    ],
+)
+def test_rust_track_page_version_description_stripped(db_conn, html):
+    """Rust track_page_version stores HTMLParser text (PIDASHCONV-1296).
+
+    Replay of ``test_track_page_version_description_stripped``: entities
+    decoded (``a & b``, not ``a &amp; b``), a bare ``<`` kept as text.
+    """
+    tag = uuid.uuid4().hex[:8]
+    owner = seed_helpers.user(db_conn, f"rust-trackver-{tag}")
+    workspace = seed_helpers.workspace(db_conn, f"rusttrackver{tag}", owner["id"])
+    page = insert_row(
+        db_conn,
+        "pages",
+        {
+            "workspace_id": str(workspace["id"]),
+            "owned_by_id": str(owner["id"]),
+            "name": f"rust track version {tag}",
+            "description_json": {},
+            "description_html": html,
+            "access": 0,
+            "color": "",
+            "is_locked": False,
+            "view_props": {},
+            "logo_props": {},
+            "is_global": False,
+            "sort_order": 65535,
+        },
+    )
+    rust_queue.publish(
+        f"{M}.page_version_task.track_page_version",
+        args=[str(page["id"]), None, str(owner["id"])],
+    )
+
+    def _version_row():
+        with db_conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                'SELECT description_stripped FROM "page_versions"'
+                " WHERE page_id = %s::uuid ORDER BY last_saved_at DESC LIMIT 1",
+                (str(page["id"]),),
+            )
+            return cur.fetchone()
+
+    row = wait_for(_version_row, what="page_version stripped by rust worker")
+    assert row["description_stripped"] == _ml_strip(html)
+
+
+def test_rust_description_version_task_writes_null_audit(db_conn):
+    """Rust issue_description_version_task inserts NULL audit cols (PIDASHCONV-1295).
+
+    Replay of ``test_description_version_task_writes_null_audit``: the
+    task-path insert NULLs ``created_by_id`` and ``updated_by_id`` (the
+    crum rule, base.py:31-33) while ``owned_by_id`` keeps the acting user.
+    The sync backfill keeps the issue's audit copies (``bulk_create``
+    skips ``save()``), so only the task path is pinned here.
+    """
+    tag = uuid.uuid4().hex[:8]
+    chain = seed_helpers.issue_chain(db_conn, f"1295rdesc-{tag}")
+    owner = chain["owner"]
+    issue = chain["issue"]
+    updater = seed_helpers.user(db_conn, f"rust-1295desc-{tag}-updater")
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "UPDATE issues SET created_by_id = %s::uuid,"
+            " updated_by_id = %s::uuid,"
+            " description_html = '<p>live v1</p>'"
+            " WHERE id = %s::uuid",
+            (str(owner["id"]), str(updater["id"]), str(issue["id"])),
+        )
+    rust_queue.publish(
+        f"{M}.issue_description_version_task.issue_description_version_task",
+        args=[
+            _json.dumps({"description_html": "<p>stale</p>"}),
+            str(issue["id"]),
+            str(owner["id"]),
+        ],
+        kwargs={"is_creating": True},
+    )
+
+    def _version_row():
+        with db_conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT created_by_id, updated_by_id, owned_by_id"
+                " FROM issue_description_versions"
+                " WHERE issue_id = %s::uuid",
+                (str(issue["id"]),),
+            )
+            return cur.fetchone()
+
+    row = wait_for(_version_row, what="description version by rust worker")
+    assert row["created_by_id"] is None
+    assert row["updated_by_id"] is None
+    assert str(row["owned_by_id"]) == str(owner["id"])
+
+
+# The scheduler reclaims stale running rows at most once per minute, so a
+# row seeded just after a sweep waits nearly a full minute. The bound
+# leaves headroom for loaded CI without letting a never-reclaimed row
+# (the pre-fix behavior) pass.
+RECLAIM_BOUND_SECS = 150
+
+
+def _seed_stale_running(db_conn, celery_id: str, task: str) -> None:
+    """A dead worker's footprint: claimed 2h ago, never settled."""
+    stale = datetime.now(timezone.utc) - timedelta(hours=2)
+    with db_conn.cursor() as cur:
+        cur.execute(
+            f"INSERT INTO {rust_queue.QUEUE_TABLE} "
+            "(celery_id, task, args, kwargs, queue, status, "
+            "claimed_at, claimed_by) "
+            "VALUES (%s, %s, '[]', '{}', 'celery', 'running', %s, %s)",
+            (celery_id, task, stale, "contract-dead-worker"),
+        )
+
+
+def _queue_row(db_conn, celery_id: str):
+    with db_conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            f"SELECT status, attempts, last_error FROM {rust_queue.QUEUE_TABLE} "
+            "WHERE celery_id = %s",
+            (celery_id,),
+        )
+        return cur.fetchone()
+
+
+def test_1327_rust_reclaims_stale_running_rows(db_conn):
+    """PIDASHCONV-1327 replay: stale ``running`` rows are reclaimed.
+
+    A row whose worker died mid-job (panic, SIGKILL, crash, redeploy)
+    must not sit ``running`` forever: the scheduler reclaims it past the
+    lease, and the worker then processes it normally. The unknown-name
+    row parks ``failed`` with its cause; the no-op cleanup row runs and
+    acks. Before the fix both rows stay ``running`` with NULL
+    ``last_error`` and this test times out at its bound.
+    """
+    tag = uuid.uuid4().hex[:8]
+    unknown_id = f"1327-unknown-{tag}"
+    noop_id = f"1327-noop-{tag}"
+    _seed_stale_running(db_conn, unknown_id, f"test.unknown.1327-{tag}")
+    _seed_stale_running(db_conn, noop_id, f"{M}.cleanup_task.delete_api_logs")
+
+    def _unknown_parked():
+        row = _queue_row(db_conn, unknown_id)
+        return row if row and row["status"] == "failed" else None
+
+    parked = wait_for(
+        _unknown_parked,
+        timeout=RECLAIM_BOUND_SECS,
+        what="stale unknown-task row reclaimed and parked",
+    )
+    assert parked["attempts"] >= 1
+    assert parked["last_error"] and "unknown task" in parked["last_error"]
+
+    def _noop_acked():
+        return True if _queue_row(db_conn, noop_id) is None else None
+
+    wait_for(
+        _noop_acked,
+        timeout=RECLAIM_BOUND_SECS,
+        what="stale no-op row reclaimed and acked",
+    )

@@ -38,14 +38,21 @@
 //!   min-sort insert scope is the default manager.
 //! * `create_modules`: per-index `now + index*2d` dates stored as DATEs
 //!   (Django `DateField` truncates the datetimes at `:460-461`).
+//! * `create_project_and_member`: after the insert, the project-`save`
+//!   post-step creates the `{identifier}_pod_1` default pod
+//!   (`runner/signals.py:32-66`), so the issues step below resolves it.
 //! * `create_project_issues`: `Issue.save` advisory xact lock keyed by
 //!   `convert_uuid_to_integer(project.id)` (`sha256(str(uuid))[:8]` signed
 //!   big-endian, `utils/uuid.py:19-26`); the auto `IssueSequence` row from
 //!   `save` (NULL audit, workspace from project) PLUS the explicit
-//!   `IssueSequence.objects.create` row (bot audit) — two rows per issue,
-//!   ported as-is; `assigned_pod` resolves through
-//!   `Pod.default_for_project_id` (`runner/models.py:174-176`, NULL when no
-//!   default pod); `completed_at` from the state's group.
+//!   `IssueSequence.objects.create` row (NULL audit: the constructor arg
+//!   never reaches `BaseModel.save`, which wipes both audit columns with
+//!   no crum user) — two rows per issue, ported as-is; `assigned_pod` resolves through
+//!   `Pod.default_for_project_id` (`runner/models.py:174-176`, NULL only
+//!   when the pod insert was swallowed); `completed_at` from the state's
+//!   group; each insert fires the `post_save` state transition from
+//!   `None` (ticker reconcile, then dispatch or a preflight bounce,
+//!   `orchestration/signals.py:74-107`).
 //! * `create_views`: `query` is `{}` for the seed rows (empty filters).
 //! * `create_pages`: `ProjectPage` link rows for `PROJECT`-type pages with
 //!   a `project_id`.
@@ -62,6 +69,10 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 use pidash_db::context::RequestContext;
+use pidash_db::runner_runs::pod::NewProject;
+use pidash_services::app_project::ser_project::next_work_item_sequence;
+use pidash_services::orchestration::creation::CreationError;
+use pidash_services::orchestration::entries::PreflightSeam;
 use pidash_services::tasks_cleanup::workspace_seed as logic;
 
 use crate::task_message::TaskMessage;
@@ -317,6 +328,18 @@ pub trait SeedStore {
         project: &ProjectInsert,
     ) -> impl std::future::Future<Output = Result<uuid::Uuid, String>> + Send;
 
+    /// The project-`save` post-step
+    /// (`create_default_pod_for_new_project`,
+    /// `runner/signals.py:32-66`): ensure `{identifier}_pod_1` exists
+    /// before the issues step resolves it. Returns the new pod id, or
+    /// `None` when a pod already existed or the insert was swallowed.
+    /// An exists-guard storage failure propagates (outside Django's
+    /// `try`); the insert itself is swallowed and logged.
+    fn ensure_default_pod(
+        &self,
+        project: &NewProject,
+    ) -> impl std::future::Future<Output = Result<Option<uuid::Uuid>, String>> + Send;
+
     /// One `ProjectMember` bulk row (`:115-126`).
     fn insert_project_member(
         &self,
@@ -384,6 +407,21 @@ pub trait SeedStore {
         issue: &IssueInsert,
     ) -> impl std::future::Future<Output = Result<uuid::Uuid, String>> + Send;
 
+    /// The `Issue.save` post-save fire
+    /// (`fire_state_transition`, `orchestration/signals.py:74-107`)
+    /// for one freshly seeded issue: the transition from `None` to
+    /// the seeded state (ticker reconcile, then dispatch or a
+    /// preflight bounce). A handler failure is swallowed and logged
+    /// — the save stands; only a state-lookup storage failure
+    /// propagates (Django's `try` placement: `_lookup_state`
+    /// outside, the handler call inside).
+    fn drive_seed_transition(
+        &self,
+        issue_id: uuid::Uuid,
+        state_id: uuid::Uuid,
+        now: DateTime<Utc>,
+    ) -> impl std::future::Future<Output = Result<(), String>> + Send;
+
     /// The `Issue.save`-created `IssueSequence(issue, sequence=sequence_id)`
     /// row (`issue.py:343`): NULL audit, workspace from project.
     fn insert_save_sequence(
@@ -394,8 +432,9 @@ pub trait SeedStore {
         sequence: i64,
     ) -> impl std::future::Future<Output = Result<uuid::Uuid, String>> + Send;
 
-    /// The explicit `IssueSequence.objects.create :293-298` row (bot
-    /// audit, default `sequence = 1`).
+    /// The explicit `IssueSequence.objects.create :293-298` row (NULL
+    /// audit — `BaseModel.save` wipes the constructor arg with no crum
+    /// user; default `sequence = 1`).
     fn insert_issue_sequence(
         &self,
         ctx: &RequestContext,
@@ -601,7 +640,7 @@ pub async fn run<S: SeedStore>(store: &S, input: &RunInput) -> Result<SeedReport
     let members = store.workspace_members(workspace_id).await?;
     let mut project_map: HashMap<i64, uuid::Uuid> = HashMap::new();
     if let Some(rows) = logic::read_seed_file(&input.seed_data_dir, "projects.json") {
-        let identifier = logic::project_identifier(&workspace.name);
+        let identifier = logic::normalize_identifier(&logic::project_identifier(&workspace.name));
         for mut row in rows {
             let row = row
                 .as_object_mut()
@@ -618,7 +657,7 @@ pub async fn run<S: SeedStore>(store: &S, input: &RunInput) -> Result<SeedReport
                     workspace_id,
                     &ProjectInsert {
                         name: workspace.name.clone(),
-                        identifier: logic::normalize_identifier(&identifier),
+                        identifier: identifier.clone(),
                         timezone: workspace.timezone.clone(),
                         is_default: !store.default_project_exists(workspace_id).await?,
                         description: seed_str(row, "description").unwrap_or("").to_owned(),
@@ -632,6 +671,19 @@ pub async fn run<S: SeedStore>(store: &S, input: &RunInput) -> Result<SeedReport
                     },
                 )
                 .await?;
+            // The project-`save` post-step (`signals.py:32-66`): the
+            // default pod must exist before the issues step resolves
+            // it. The seed project carries no lead or default
+            // assignee, so the pod's `created_by` is NULL.
+            let new_project = NewProject {
+                id: project_id,
+                workspace_id,
+                identifier: identifier.clone(),
+                created: true,
+                project_lead: None,
+                default_assignee: None,
+            };
+            store.ensure_default_pod(&new_project).await?;
             for member in &members {
                 store
                     .insert_project_member(
@@ -851,8 +903,7 @@ pub async fn run<S: SeedStore>(store: &S, input: &RunInput) -> Result<SeedReport
             } else {
                 None
             };
-            let sequence_id =
-                logic::next_issue_sequence_id(store.max_issue_sequence(project_id).await?);
+            let sequence_id = next_work_item_sequence(store.max_issue_sequence(project_id).await?);
             let sort_order = logic::next_issue_sort_order(
                 store.max_issue_sort_order(project_id, state_id).await?,
             )
@@ -907,6 +958,14 @@ pub async fn run<S: SeedStore>(store: &S, input: &RunInput) -> Result<SeedReport
                         rest: plan.rest.clone(),
                     },
                 )
+                .await?;
+            // The `Issue.save` post-save fire (`signals.py:74-107`):
+            // from `None` to the seeded state — the ticker reconcile,
+            // then a dispatch or a preflight bounce. Every issue goes
+            // through the fire, like the receiver; the driver no-ops
+            // on non-trigger states.
+            store
+                .drive_seed_transition(issue_id, state_id, input.now)
                 .await?;
             // `Issue.save` auto-row (ported double-row quirk) + explicit row.
             store
@@ -1168,19 +1227,62 @@ fn page_view_props() -> Value {
 
 /// Postgres [`SeedStore`]: the exact Django query shapes. Timestamps are
 /// one clock (`RunInput::now`) the way `auto_now_add`/`auto_now` stamp
-/// statement time; uuids are v4 like the model default.
+/// statement time; uuids are v4 like the model default. The dispatch
+/// inputs (`cloud`, `managed`, `toolsets`, `assistant_seam`) feed the
+/// per-issue post-save fire ([`SeedStore::drive_seed_transition`]) —
+/// the `LiveFireTickSeam` field shape, worker-installed.
 pub struct PgSeedStore {
     pool: sqlx::PgPool,
     now: DateTime<Utc>,
+    cloud: pidash_db::config::CloudAgentSettings,
+    managed: pidash_db::config::ManagedRunnerSettings,
+    toolsets: std::sync::Arc<dyn pidash_services::extensions::CloudAgentToolsetsSeam>,
+    assistant_seam: std::sync::Arc<dyn pidash_services::extensions::AssistantModelSeam>,
 }
 
 impl PgSeedStore {
-    pub fn new(pool: sqlx::PgPool, now: DateTime<Utc>) -> Self {
-        Self { pool, now }
+    pub fn new(
+        pool: sqlx::PgPool,
+        now: DateTime<Utc>,
+        cloud: pidash_db::config::CloudAgentSettings,
+        managed: pidash_db::config::ManagedRunnerSettings,
+        toolsets: std::sync::Arc<dyn pidash_services::extensions::CloudAgentToolsetsSeam>,
+        assistant_seam: std::sync::Arc<dyn pidash_services::extensions::AssistantModelSeam>,
+    ) -> Self {
+        Self {
+            pool,
+            now,
+            cloud,
+            managed,
+            toolsets,
+            assistant_seam,
+        }
     }
 
     fn db_err(e: sqlx::Error) -> String {
         e.to_string()
+    }
+}
+
+/// Fixed-decision [`PreflightSeam`] for the seed drive (the 1251
+/// probe/stub/re-run shape): answers the probed decision and records
+/// whether the driver consulted it at all, so only a consulted stub
+/// owes the bounce re-run.
+struct FixedPreflight {
+    proceed: bool,
+    consulted: bool,
+}
+
+impl PreflightSeam for FixedPreflight {
+    async fn preflight_eligibility_or_bounce(
+        &mut self,
+        _issue_id: uuid::Uuid,
+        _creator_id: uuid::Uuid,
+        _pod_id: uuid::Uuid,
+        _triggered_by: &str,
+    ) -> Result<bool, CreationError> {
+        self.consulted = true;
+        Ok(self.proceed)
     }
 }
 
@@ -1373,35 +1475,24 @@ impl SeedStore for PgSeedStore {
     ) -> Result<uuid::Uuid, String> {
         // `User.objects.create :522-532` + `User.save` email/display
         // normalization; every other column at its model default.
-        let id: uuid::Uuid = sqlx::query_scalar(
-            "INSERT INTO users (password, last_login, id, username, mobile_number, email,
-               display_name, first_name, last_name, avatar, avatar_asset_id, cover_image,
-               cover_image_asset_id, date_joined, created_at, updated_at, last_location,
-               created_location, is_superuser, is_managed, is_password_expired, is_active,
-               is_staff, is_email_verified, is_password_autoset, is_password_reset_required,
-               token, user_timezone,
-               last_active, last_login_time, last_logout_time, last_login_ip, last_logout_ip,
-               last_login_medium, last_login_uagent, token_updated_at, is_bot, bot_type,
-               is_email_valid, masked_at)
-             VALUES ($1, NULL, $2, $3, NULL, $4,
-               'Pi Dash', 'Pi Dash', '', '', NULL, NULL,
-               NULL, $5, $5, $5, '',
-               '', false, false, false, true,
-               false, false, true, false, '', 'UTC',
-               $5, NULL, NULL, '', '',
-               'email', '', NULL, true, 'WORKSPACE_SEED',
-               false, NULL)
-             RETURNING id",
+        use pidash_services::domain::identity::{create_bot_user, NewBotUser};
+        create_bot_user(
+            &self.pool,
+            &NewBotUser {
+                id: None,
+                username,
+                email,
+                password_hash,
+                display_name: "Pi Dash",
+                first_name: "Pi Dash",
+                last_name: "",
+                is_password_autoset: true,
+                bot_type: Some("WORKSPACE_SEED"),
+                now: self.now,
+            },
         )
-        .bind(password_hash)
-        .bind(uuid::Uuid::new_v4())
-        .bind(username)
-        .bind(email)
-        .bind(self.now)
-        .fetch_one(&self.pool)
         .await
-        .map_err(Self::db_err)?;
-        Ok(id)
+        .map_err(Self::db_err)
     }
 
     async fn insert_workspace_member(
@@ -1412,29 +1503,23 @@ impl SeedStore for PgSeedStore {
         company_role: &str,
     ) -> Result<uuid::Uuid, String> {
         // `.objects.create` without `created_by`: NULL audit.
-        let id: uuid::Uuid = sqlx::query_scalar(
-            "INSERT INTO workspace_members (created_at, updated_at, id, role, created_by_id,
-               member_id, updated_by_id, workspace_id, company_role, view_props,
-               default_props, issue_props, is_active, deleted_at, explored_features,
-               getting_started_checklist, tips)
-             VALUES ($1, $1, $2, $3, NULL,
-               $4, NULL, $5, $6, $7,
-               $7, $8, true, NULL, '{}',
-               '{}', '{}')
-             RETURNING id",
+        use pidash_services::domain::workspaces::members::{add_seed, SeedMember};
+        let view_props = ws_default_props();
+        let issue_props = ws_issue_props();
+        add_seed(
+            &self.pool,
+            &SeedMember {
+                workspace_id,
+                member_id,
+                role,
+                company_role,
+                view_props: &view_props,
+                issue_props: &issue_props,
+                now: self.now,
+            },
         )
-        .bind(self.now)
-        .bind(uuid::Uuid::new_v4())
-        .bind(role)
-        .bind(member_id)
-        .bind(workspace_id)
-        .bind(company_role)
-        .bind(sqlx::types::Json(ws_default_props()))
-        .bind(sqlx::types::Json(ws_issue_props()))
-        .fetch_one(&self.pool)
         .await
-        .map_err(Self::db_err)?;
-        Ok(id)
+        .map_err(Self::db_err)
     }
 
     async fn insert_project(
@@ -1446,62 +1531,33 @@ impl SeedStore for PgSeedStore {
         // `Project(...) :101-111` + `save` in one transaction: the
         // demote-others update (`project.py:292-298`) and the insert are
         // atomic, like `Project.save`'s `transaction.atomic` block.
+        use pidash_services::domain::projects::{create_seed_project, SeedProject};
         let actor = ctx_actor(ctx)?;
-        let mut tx = self.pool.begin().await.map_err(Self::db_err)?;
-        let id: uuid::Uuid = sqlx::query_scalar(
-            "INSERT INTO projects (created_at, updated_at, id, name, description,
-               description_text, description_html, network, identifier, created_by_id,
-               default_assignee_id, project_lead_id, updated_by_id, workspace_id, emoji,
-               cycle_view, module_view, cover_image, issue_views_view, page_view,
-               estimate_id, icon_prop, intake_view, archive_in, close_in, default_state_id,
-               logo_props, archived_at, is_time_tracking_enabled, is_issue_type_enabled,
-               deleted_at, guest_view_all_features, timezone, cover_image_asset_id,
-               external_id, external_source, members_can_edit_states, repo_url, base_branch,
-               agent_default_interval_seconds, agent_default_max_ticks, agent_ticking_enabled,
-               is_default, agent_review_default_interval_seconds, default_agent_executor,
-               agent_test_default_interval_seconds)
-             VALUES ($1, $1, $2, $3, $4,
-               NULL, NULL, $5, $6, $7,
-               NULL, NULL, NULL, $8, NULL,
-               true, true, $9, true, true,
-               NULL, NULL, false, 0, 0, NULL,
-               $10, NULL, false, false,
-               NULL, false, $11, NULL,
-               NULL, NULL, true, '', 'main',
-               10800, 10, true,
-               $12, 10800, $13,
-               10800)
-             RETURNING id",
+        create_seed_project(
+            &self.pool,
+            &SeedProject {
+                workspace_id,
+                name: &project.name,
+                identifier: &project.identifier,
+                timezone: &project.timezone,
+                is_default: project.is_default,
+                description: &project.description,
+                network: project.network,
+                cover_image: project.cover_image.as_deref(),
+                logo_props: &project.logo_props,
+                default_agent_executor: &project.default_agent_executor,
+                created_by: actor,
+                now: self.now,
+            },
         )
-        .bind(self.now)
-        .bind(uuid::Uuid::new_v4())
-        .bind(&project.name)
-        .bind(&project.description)
-        .bind(project.network)
-        .bind(&project.identifier)
-        .bind(actor)
-        .bind(workspace_id)
-        .bind(project.cover_image.as_deref())
-        .bind(sqlx::types::Json(project.logo_props.clone()))
-        .bind(project.timezone.clone())
-        .bind(project.is_default)
-        .bind(project.default_agent_executor.clone())
-        .fetch_one(&mut *tx)
         .await
-        .map_err(Self::db_err)?;
-        if project.is_default {
-            sqlx::query(
-                "UPDATE projects SET is_default = false
-                 WHERE workspace_id = $1 AND is_default AND deleted_at IS NULL AND id <> $2",
-            )
-            .bind(workspace_id)
-            .bind(id)
-            .execute(&mut *tx)
+        .map_err(Self::db_err)
+    }
+
+    async fn ensure_default_pod(&self, project: &NewProject) -> Result<Option<uuid::Uuid>, String> {
+        pidash_db::runner_runs::pod::ensure_default_pod(&self.pool, project)
             .await
-            .map_err(Self::db_err)?;
-        }
-        tx.commit().await.map_err(Self::db_err)?;
-        Ok(id)
+            .map_err(Self::db_err)
     }
 
     async fn insert_project_member(
@@ -1514,29 +1570,25 @@ impl SeedStore for PgSeedStore {
     ) -> Result<uuid::Uuid, String> {
         // One `bulk_create` row (`:115-126`): `bulk_create` skips
         // `ProjectMember.save`, so no auto `ProjectUserProperty` row here.
+        use pidash_services::domain::projects::members::{add_seed, SeedProjectMember};
         let actor = ctx_actor(ctx)?;
-        let id: uuid::Uuid = sqlx::query_scalar(
-            "INSERT INTO project_members (created_at, updated_at, id, comment, role,
-               created_by_id, member_id, project_id, updated_by_id, workspace_id,
-               view_props, default_props, sort_order, preferences, is_active, deleted_at)
-             VALUES ($1, $1, $2, NULL, $3,
-               $4, $5, $6, NULL, $7,
-               $8, $8, 65535, $9, true, NULL)
-             RETURNING id",
+        let view_props = project_default_props();
+        let preferences = default_preferences();
+        add_seed(
+            &self.pool,
+            &SeedProjectMember {
+                project_id,
+                workspace_id,
+                member_id,
+                role,
+                created_by: actor,
+                view_props: &view_props,
+                preferences: &preferences,
+                now: self.now,
+            },
         )
-        .bind(self.now)
-        .bind(uuid::Uuid::new_v4())
-        .bind(role)
-        .bind(actor)
-        .bind(member_id)
-        .bind(project_id)
-        .bind(workspace_id)
-        .bind(sqlx::types::Json(project_default_props()))
-        .bind(sqlx::types::Json(default_preferences()))
-        .fetch_one(&self.pool)
         .await
-        .map_err(Self::db_err)?;
-        Ok(id)
+        .map_err(Self::db_err)
     }
 
     async fn insert_project_user_property(
@@ -1582,31 +1634,25 @@ impl SeedStore for PgSeedStore {
         project_id: uuid::Uuid,
         state: &StateInsert,
     ) -> Result<uuid::Uuid, String> {
+        use pidash_services::domain::projects::states::{add_seed, SeedState};
         let actor = ctx_actor(ctx)?;
-        let id: uuid::Uuid = sqlx::query_scalar(
-            "INSERT INTO states (created_at, updated_at, id, name, description, color,
-               slug, created_by_id, project_id, updated_by_id, workspace_id, sequence,
-               \"group\", \"default\", external_id, external_source, is_triage, deleted_at)
-             VALUES ($1, $1, $2, $3, '', $4,
-               $5, $6, $7, NULL, $8, $9,
-               $10, $11, NULL, NULL, false, NULL)
-             RETURNING id",
+        add_seed(
+            &self.pool,
+            &SeedState {
+                workspace_id,
+                project_id,
+                created_by: actor,
+                name: &state.name,
+                color: &state.color,
+                slug: &state.slug,
+                group: &state.group,
+                sequence: state.sequence,
+                is_default: state.is_default,
+                now: self.now,
+            },
         )
-        .bind(self.now)
-        .bind(uuid::Uuid::new_v4())
-        .bind(&state.name)
-        .bind(&state.color)
-        .bind(&state.slug)
-        .bind(actor)
-        .bind(project_id)
-        .bind(workspace_id)
-        .bind(state.sequence)
-        .bind(&state.group)
-        .bind(state.is_default)
-        .fetch_one(&self.pool)
         .await
-        .map_err(Self::db_err)?;
-        Ok(id)
+        .map_err(Self::db_err)
     }
 
     async fn insert_label(
@@ -1722,42 +1768,270 @@ impl SeedStore for PgSeedStore {
         project_id: uuid::Uuid,
         issue: &IssueInsert,
     ) -> Result<uuid::Uuid, String> {
+        use pidash_services::domain::issues::{insert_seed_issue, SeedIssue};
         let actor = ctx_actor(ctx)?;
-        let id: uuid::Uuid = sqlx::query_scalar(
-            "INSERT INTO issues (created_at, updated_at, id, name, description_json,
-               priority, start_date, target_date, sequence_id, created_by_id, parent_id,
-               project_id, state_id, updated_by_id, workspace_id, description_html,
-               description_stripped, completed_at, sort_order, point, archived_at,
-               is_draft, external_id, external_source, description_binary,
-               estimate_point_id, type_id, deleted_at, git_work_branch, assigned_pod_id,
-               workpad, created_via, agent_executor, complexity_score)
-             VALUES ($1, $1, $2, $3, '{}',
-               $4, NULL, NULL, $5, $6, NULL,
-               $7, $8, NULL, $9, $10,
-               $11, $12, $13, NULL, NULL,
-               false, NULL, NULL, NULL,
-               NULL, NULL, NULL, '', $14,
-               '', NULL, NULL, 0)
-             RETURNING id",
+        insert_seed_issue(
+            &self.pool,
+            &SeedIssue {
+                workspace_id,
+                project_id,
+                state_id: issue.state_id,
+                created_by: actor,
+                name: &issue.name,
+                description_html: &issue.description_html,
+                description_stripped: issue.description_stripped.as_deref(),
+                priority: &issue.priority,
+                sequence_id: issue.sequence_id,
+                sort_order: issue.sort_order,
+                completed_at: issue.completed_at,
+                assigned_pod_id: issue.assigned_pod_id,
+                now: self.now,
+            },
         )
-        .bind(self.now)
-        .bind(uuid::Uuid::new_v4())
-        .bind(&issue.name)
-        .bind(&issue.priority)
-        .bind(issue.sequence_id)
-        .bind(actor)
-        .bind(project_id)
-        .bind(issue.state_id)
-        .bind(workspace_id)
-        .bind(&issue.description_html)
-        .bind(issue.description_stripped.as_deref())
-        .bind(issue.completed_at)
-        .bind(issue.sort_order)
-        .bind(issue.assigned_pod_id)
-        .fetch_one(&self.pool)
         .await
-        .map_err(Self::db_err)?;
-        Ok(id)
+        .map_err(Self::db_err)
+    }
+
+    async fn drive_seed_transition(
+        &self,
+        issue_id: uuid::Uuid,
+        state_id: uuid::Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<(), String> {
+        use crate::admission::RedisAdmissionCache;
+        use crate::orchestration::live_inputs::{
+            creator_universe, fetch_presence, gate_fn, gate_verdicts, profile_fn, JobsMatcher,
+        };
+        use crate::orchestration::{LiveCreationStore, StoreDeps};
+        use pidash_db::dispatch::status::AgentRunTrigger;
+        use pidash_services::dispatch::consume_admission_token;
+        use pidash_services::orchestration::creation::{
+            resolve_fallback_creator, resolve_pod_for_issue,
+        };
+        use pidash_services::orchestration::dispatch::preflight_eligibility_or_bounce;
+        use pidash_services::orchestration::entries::{
+            fire_state_transition, FireOutcome, FireRequest,
+        };
+
+        // Per-fire dispatch inputs (the fire_tick_live shape): the
+        // creator universe over committed state, LLM-key presence,
+        // then one installed-seam consult per user.
+        let universe = creator_universe(&self.pool, None, issue_id)
+            .await
+            .map_err(Self::db_err)?;
+        let presence = std::sync::Arc::new(
+            fetch_presence(&self.pool, &universe)
+                .await
+                .map_err(Self::db_err)?,
+        );
+        let verdicts = std::sync::Arc::new(gate_verdicts(&self.assistant_seam, &presence).await);
+        let cloud = self.cloud.clone();
+        let managed = self.managed.clone();
+        let toolsets = self.toolsets.clone();
+        let now_unix_secs = now.timestamp();
+        // Built fresh per store (probe, drive and bounce take owned
+        // deps; the driver consults preflight at most once per drive).
+        let make_deps = || StoreDeps {
+            cloud: cloud.clone(),
+            managed: managed.clone(),
+            cache: RedisAdmissionCache::from_env(),
+            has_usable_llm_config: gate_fn(verdicts.clone()),
+            toolsets: toolsets.clone(),
+            llm_profile: profile_fn(presence.clone()),
+            now_unix_secs,
+        };
+        // `fire_state_transition` (`signals.py:74-107`): prior state
+        // None (a create has no pre-save row), the seeded state, the
+        // receiver defaults. `jitter_secs: 0.0`: the L5 quirk-5
+        // precedent (every driver passes 0.0). `created_by: None`:
+        // the seed runs in the worker with no request user, so the
+        // ticker create stamps NULL, like Django's crum-less save.
+        let request = FireRequest {
+            issue_id,
+            prev_state_id: None,
+            current_state_id: Some(state_id),
+            dispatch_immediate: true,
+            moved_by_run: None,
+            now,
+            jitter_secs: 0.0,
+            created_by: None,
+        };
+        // One transaction for the whole drive: the issue already
+        // committed (no outer atomic survives `insert_issue`), so the
+        // drive owns it. Preflight runs on that same transaction —
+        // the fused 1251 shape: the bounce must see this drive's own
+        // uncommitted ticker row (a pool-side bounce would see no row
+        // and skip the explicit disarm, while a pool-side lock would
+        // hang on this transaction's ticker lock). So the driver
+        // lends the tx to only one seam at a time: probe the decision
+        // behind a savepoint (the probe's bounce writes roll back),
+        // drive with a fixed-decision stub, and — only when stubbed
+        // false — re-run the services preflight after the drive, so
+        // the real bounce lands post-reconcile, exactly as in Python.
+        let matcher = JobsMatcher::new(self.pool.clone());
+        let triggered_by = AgentRunTrigger::StateTransition.value();
+        let mut tx = pidash_db::tx::Transaction::begin(&self.pool)
+            .await
+            .map_err(Self::db_err)?;
+        sqlx::query("SAVEPOINT seed_preflight_probe")
+            .execute(&mut **tx.inner())
+            .await
+            .map_err(Self::db_err)?;
+        let mut probe_store = LiveCreationStore::new(tx, &self.pool, make_deps());
+        // `resolve_pod_for_issue` reads issue + pods only (no
+        // ticker), and the fallback creator reads issue + project
+        // only, so probing pre-reconcile decides identically to
+        // Python's post-reconcile preflight. A missing creator or pod
+        // stubs false: the drive re-resolves both itself, and only
+        // consults the stub when it finds them (the appear-race) —
+        // the re-run then derives the true decision.
+        let probed_creator = resolve_fallback_creator(&mut probe_store, issue_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        let probed_pod = resolve_pod_for_issue(&mut probe_store, issue_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        let proceed = match (probed_creator, probed_pod) {
+            (Some(creator), Some(pod_id)) => {
+                let probe = preflight_eligibility_or_bounce(
+                    &mut probe_store,
+                    issue_id,
+                    Some(creator),
+                    pod_id,
+                    triggered_by,
+                    &matcher,
+                    now,
+                    0.0,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+                probe.proceed
+            }
+            _ => false,
+        };
+        // The probe's outboxes stay empty (the bounce dispatches,
+        // defers, and finalizes nothing), so only the tx is
+        // recovered; the savepoint rollback erases the probe's
+        // writes, and its log lines are dropped (the re-run emits
+        // the real bounce's lines once).
+        let (mut tx, _, _, _, _, _) = probe_store.into_parts();
+        sqlx::query("ROLLBACK TO SAVEPOINT seed_preflight_probe")
+            .execute(&mut **tx.inner())
+            .await
+            .map_err(Self::db_err)?;
+        let mut drive_store = LiveCreationStore::new(tx, &self.pool, make_deps());
+        let mut stub = FixedPreflight {
+            proceed,
+            consulted: false,
+        };
+        let outcome = fire_state_transition(&mut drive_store, &mut stub, &request).await;
+        let (tx, pool, cache, mut dispatches, mut deferred, mut terminal_effects) =
+            drive_store.into_parts();
+        // Only a state-*lookup* storage failure propagates (Python's
+        // `try` wraps the handler call alone, `signals.py:89-98`); a
+        // handler failure arrives as `Failed` and is swallowed below.
+        let outcome = outcome.map_err(|error| error.to_string())?;
+        // Only a consulted stub owes the re-run: early returns
+        // (parked, queued, no creator/pod, race lost) consult
+        // nothing, and Python bounces on none of them.
+        let (tx, dispatches, deferred, terminal_effects) = if !proceed && stub.consulted {
+            // The re-run IS the real bounce when it still says so
+            // (same services fn, same tx, post-reconcile state);
+            // when eligibility flipped concurrently it proceeds and
+            // the armed ticker covers the entry on the next tick.
+            // Fresh reads first (closest to Python's read position),
+            // the probed ids when the rows vanished mid-drive (as
+            // Python's single read would have seen them).
+            let mut bounce_store = LiveCreationStore::new(tx, &self.pool, make_deps());
+            let fresh_creator = resolve_fallback_creator(&mut bounce_store, issue_id)
+                .await
+                .map_err(|error| error.to_string())?;
+            let fresh_pod = resolve_pod_for_issue(&mut bounce_store, issue_id)
+                .await
+                .map_err(|error| error.to_string())?;
+            if let (Some(creator), Some(pod_id)) =
+                (fresh_creator.or(probed_creator), fresh_pod.or(probed_pod))
+            {
+                let rerun = preflight_eligibility_or_bounce(
+                    &mut bounce_store,
+                    issue_id,
+                    Some(creator),
+                    pod_id,
+                    triggered_by,
+                    &matcher,
+                    now,
+                    0.0,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+                for log in &rerun.logs {
+                    if log.level == "WARNING" {
+                        tracing::warn!(target: "pidash.preflight", "{}", log.message);
+                    } else {
+                        tracing::info!(target: "pidash.preflight", "{}", log.message);
+                    }
+                }
+            } else {
+                tracing::warn!(
+                    target: "pidash.preflight",
+                    "seed drive: creator or pod vanished mid-drive for issue {issue_id}, skipping bounce",
+                );
+            }
+            let (tx, _, _, redispatches, redeferred, reterminal) = bounce_store.into_parts();
+            dispatches.extend(redispatches);
+            deferred.extend(redeferred);
+            terminal_effects.extend(reterminal);
+            (tx, dispatches, deferred, terminal_effects)
+        } else {
+            (tx, dispatches, deferred, terminal_effects)
+        };
+        match outcome {
+            FireOutcome::NoTransition => {
+                let _ = tx.rollback().await;
+                Ok(())
+            }
+            FireOutcome::Failed { log_line, .. } => {
+                // The save stands; nothing this drive wrote is kept
+                // (the `fire_issue_transition` precedent,
+                // PIDASHCONV-1216). The counter already bumped inside.
+                let _ = tx.rollback().await;
+                tracing::error!("{log_line}");
+                Ok(())
+            }
+            FireOutcome::Called(_) => {
+                tx.commit().await.map_err(Self::db_err)?;
+                // Post-commit dispatch drain, after the commit so the
+                // runner read sees the rows (the `drive_transition`
+                // drain shape). A drain failure is swallowed and
+                // logged: the Django signal wraps the whole handler
+                // — dispatch included — in its `try`, so a failed
+                // dispatch never fails the save.
+                for run_id in dispatches {
+                    if let Err(error) =
+                        crate::dispatch::dispatch_agent_run(pool, &cloud, run_id, now).await
+                    {
+                        tracing::error!(
+                            %error,
+                            issue_id = %issue_id,
+                            run_id = %run_id,
+                            "workspace_seed: post-commit dispatch failed; the save stands",
+                        );
+                    }
+                }
+                for consume in &deferred {
+                    consume_admission_token(&cache, consume);
+                }
+                if !terminal_effects.is_empty() {
+                    // Python's transition never finalizes a run:
+                    // loud, but the save stands.
+                    tracing::error!(
+                        issue_id = %issue_id,
+                        "workspace_seed: transition finalized runs: unreachable, no finalization on this path",
+                    );
+                }
+                Ok(())
+            }
+        }
     }
 
     async fn insert_save_sequence(
@@ -1769,52 +2043,44 @@ impl SeedStore for PgSeedStore {
     ) -> Result<uuid::Uuid, String> {
         // The `Issue.save` row (`issue.py:343`): NULL audit, workspace set
         // from the project by `ProjectBaseModel.save`.
-        let id: uuid::Uuid = sqlx::query_scalar(
-            "INSERT INTO issue_sequences (created_at, updated_at, id, sequence, deleted,
-               created_by_id, issue_id, project_id, updated_by_id, workspace_id, deleted_at)
-             VALUES ($1, $1, $2, $3, false,
-               NULL, $4, $5, NULL, $6, NULL)
-             RETURNING id",
+        use pidash_services::domain::issues::{insert_seed_issue_sequence, SeedIssueSequence};
+        insert_seed_issue_sequence(
+            &self.pool,
+            &SeedIssueSequence {
+                issue_id,
+                project_id,
+                workspace_id,
+                sequence,
+                now: self.now,
+            },
         )
-        .bind(self.now)
-        .bind(uuid::Uuid::new_v4())
-        .bind(sequence)
-        .bind(issue_id)
-        .bind(project_id)
-        .bind(workspace_id)
-        .fetch_one(&self.pool)
         .await
-        .map_err(Self::db_err)?;
-        Ok(id)
+        .map_err(Self::db_err)
     }
 
     async fn insert_issue_sequence(
         &self,
-        ctx: &RequestContext,
+        _ctx: &RequestContext,
         issue_id: uuid::Uuid,
         project_id: uuid::Uuid,
         workspace_id: uuid::Uuid,
     ) -> Result<uuid::Uuid, String> {
-        // The explicit `.objects.create` row (`:293-298`): bot audit,
+        // The explicit `.objects.create` row (`:293-298`): NULL audit
+        // (`BaseModel.save` wipes the constructor arg, no crum user),
         // default `sequence = 1`.
-        let actor = ctx_actor(ctx)?;
-        let id: uuid::Uuid = sqlx::query_scalar(
-            "INSERT INTO issue_sequences (created_at, updated_at, id, sequence, deleted,
-               created_by_id, issue_id, project_id, updated_by_id, workspace_id, deleted_at)
-             VALUES ($1, $1, $2, 1, false,
-               $3, $4, $5, NULL, $6, NULL)
-             RETURNING id",
+        use pidash_services::domain::issues::{insert_seed_issue_sequence, SeedIssueSequence};
+        insert_seed_issue_sequence(
+            &self.pool,
+            &SeedIssueSequence {
+                issue_id,
+                project_id,
+                workspace_id,
+                sequence: 1,
+                now: self.now,
+            },
         )
-        .bind(self.now)
-        .bind(uuid::Uuid::new_v4())
-        .bind(actor)
-        .bind(issue_id)
-        .bind(project_id)
-        .bind(workspace_id)
-        .fetch_one(&self.pool)
         .await
-        .map_err(Self::db_err)?;
-        Ok(id)
+        .map_err(Self::db_err)
     }
 
     async fn insert_issue_activity(
@@ -1852,23 +2118,23 @@ impl SeedStore for PgSeedStore {
 
     async fn insert_issue_label(
         &self,
-        ctx: &RequestContext,
+        _ctx: &RequestContext,
         issue_id: uuid::Uuid,
         label_id: uuid::Uuid,
         project_id: uuid::Uuid,
         workspace_id: uuid::Uuid,
     ) -> Result<uuid::Uuid, String> {
-        let actor = ctx_actor(ctx)?;
+        // `.objects.create :312-318`: NULL audit (`BaseModel.save` wipes
+        // the constructor arg, no crum user).
         let id: uuid::Uuid = sqlx::query_scalar(
             "INSERT INTO issue_labels (created_at, updated_at, id, created_by_id,
                issue_id, label_id, project_id, updated_by_id, workspace_id, deleted_at)
-             VALUES ($1, $1, $2, $3,
-               $4, $5, $6, NULL, $7, NULL)
+             VALUES ($1, $1, $2, NULL,
+               $3, $4, $5, NULL, $6, NULL)
              RETURNING id",
         )
         .bind(self.now)
         .bind(uuid::Uuid::new_v4())
-        .bind(actor)
         .bind(issue_id)
         .bind(label_id)
         .bind(project_id)
@@ -1881,23 +2147,23 @@ impl SeedStore for PgSeedStore {
 
     async fn insert_cycle_issue(
         &self,
-        ctx: &RequestContext,
+        _ctx: &RequestContext,
         issue_id: uuid::Uuid,
         cycle_id: uuid::Uuid,
         project_id: uuid::Uuid,
         workspace_id: uuid::Uuid,
     ) -> Result<uuid::Uuid, String> {
-        let actor = ctx_actor(ctx)?;
+        // `.objects.create :322-328`: NULL audit (`BaseModel.save` wipes
+        // the constructor arg, no crum user).
         let id: uuid::Uuid = sqlx::query_scalar(
             "INSERT INTO cycle_issues (created_at, updated_at, id, created_by_id,
                cycle_id, issue_id, project_id, updated_by_id, workspace_id, deleted_at)
-             VALUES ($1, $1, $2, $3,
-               $4, $5, $6, NULL, $7, NULL)
+             VALUES ($1, $1, $2, NULL,
+               $3, $4, $5, NULL, $6, NULL)
              RETURNING id",
         )
         .bind(self.now)
         .bind(uuid::Uuid::new_v4())
-        .bind(actor)
         .bind(cycle_id)
         .bind(issue_id)
         .bind(project_id)
@@ -1910,23 +2176,23 @@ impl SeedStore for PgSeedStore {
 
     async fn insert_module_issue(
         &self,
-        ctx: &RequestContext,
+        _ctx: &RequestContext,
         issue_id: uuid::Uuid,
         module_id: uuid::Uuid,
         project_id: uuid::Uuid,
         workspace_id: uuid::Uuid,
     ) -> Result<uuid::Uuid, String> {
-        let actor = ctx_actor(ctx)?;
+        // `.objects.create :333-339`: NULL audit (`BaseModel.save` wipes
+        // the constructor arg, no crum user).
         let id: uuid::Uuid = sqlx::query_scalar(
             "INSERT INTO module_issues (created_at, updated_at, id, created_by_id,
                issue_id, module_id, project_id, updated_by_id, workspace_id, deleted_at)
-             VALUES ($1, $1, $2, $3,
-               $4, $5, $6, NULL, $7, NULL)
+             VALUES ($1, $1, $2, NULL,
+               $3, $4, $5, NULL, $6, NULL)
              RETURNING id",
         )
         .bind(self.now)
         .bind(uuid::Uuid::new_v4())
-        .bind(actor)
         .bind(issue_id)
         .bind(module_id)
         .bind(project_id)
@@ -2071,14 +2337,24 @@ pub fn delay_message(workspace_id: uuid::Uuid) -> TaskMessage {
 /// Celery retry budget (`max_retries = 3`) lasts, then parks the row as
 /// failed with this text. The bare `@shared_task` carries no ack overrides
 /// (contract `test_task_options_parity` pins the empty option set).
+/// The dispatch inputs feed the per-issue post-save fire
+/// ([`SeedStore::drive_seed_transition`]).
 pub fn register_workspace_seed(
     registry: &mut Registry,
     pool: sqlx::PgPool,
     seed_data_dir: PathBuf,
+    cloud: pidash_db::config::CloudAgentSettings,
+    managed: pidash_db::config::ManagedRunnerSettings,
+    toolsets: std::sync::Arc<dyn pidash_services::extensions::CloudAgentToolsetsSeam>,
+    assistant_seam: std::sync::Arc<dyn pidash_services::extensions::AssistantModelSeam>,
 ) {
     let handler: Handler = Arc::new(move |job: crate::queue::JobRow| {
         let pool = pool.clone();
         let seed_data_dir = seed_data_dir.clone();
+        let cloud = cloud.clone();
+        let managed = managed.clone();
+        let toolsets = toolsets.clone();
+        let assistant_seam = assistant_seam.clone();
         Box::pin(async move {
             let workspace_id: uuid::Uuid = job
                 .args
@@ -2088,7 +2364,7 @@ pub fn register_workspace_seed(
                 .and_then(|s| uuid::Uuid::parse_str(s).ok())
                 .ok_or_else(|| "workspace_seed: args[0] must be a workspace uuid".to_owned())?;
             let now = Utc::now();
-            let store = PgSeedStore::new(pool, now);
+            let store = PgSeedStore::new(pool, now, cloud, managed, toolsets, assistant_seam);
             let input = RunInput::now_for(&seed_data_dir, workspace_id, now);
             match run(&store, &input).await {
                 Ok(report) => {
@@ -2255,6 +2531,18 @@ mod tests {
             assert_eq!(project.identifier, project.identifier.to_uppercase());
             Ok(self.inner.lock().unwrap().mint("project"))
         }
+        async fn ensure_default_pod(
+            &self,
+            project: &NewProject,
+        ) -> Result<Option<uuid::Uuid>, String> {
+            assert!(project.created, "seed projects are always created");
+            self.inner
+                .lock()
+                .unwrap()
+                .events
+                .push(format!("ensure_pod {} {}", project.id, project.identifier));
+            Ok(None)
+        }
         async fn insert_project_member(
             &self,
             ctx: &RequestContext,
@@ -2323,6 +2611,19 @@ mod tests {
             _issue: &IssueInsert,
         ) -> Result<uuid::Uuid, String> {
             Ok(self.inner.lock().unwrap().mint("issue"))
+        }
+        async fn drive_seed_transition(
+            &self,
+            issue_id: uuid::Uuid,
+            state_id: uuid::Uuid,
+            _now: DateTime<Utc>,
+        ) -> Result<(), String> {
+            self.inner
+                .lock()
+                .unwrap()
+                .events
+                .push(format!("drive {issue_id} {state_id}"));
+            Ok(())
         }
         async fn insert_save_sequence(
             &self,
@@ -2513,8 +2814,10 @@ mod tests {
         );
 
         // Insert order mirrors `:543-564`: bot, membership, project (+0
-        // members here), states, labels, cycles, modules, issues (each with
-        // the double sequence rows + activity + links), views, pages.
+        // members here) with its `post_save` default-pod ensure, states,
+        // labels, cycles, modules, issues (each with the post-save
+        // transition drive, then the double sequence rows + activity +
+        // links), views, pages.
         let events = store.events();
         let kinds: Vec<&str> = events
             .iter()
@@ -2526,6 +2829,7 @@ mod tests {
                 "bot",
                 "ws_member",
                 "project",
+                "ensure_pod",
                 "state",
                 "state",
                 "label",
@@ -2533,6 +2837,7 @@ mod tests {
                 "cycle",
                 "module",
                 "issue",
+                "drive",
                 "save_sequence",
                 "issue_sequence",
                 "activity",
@@ -2540,6 +2845,7 @@ mod tests {
                 "cycle_issue",
                 "module_issue",
                 "issue",
+                "drive",
                 "save_sequence",
                 "issue_sequence",
                 "activity",
@@ -2558,6 +2864,42 @@ mod tests {
         let minted = store.minted();
         assert_eq!(minted[0], uuid::Uuid::from_u128(1)); // bot
         assert_eq!(minted[2], uuid::Uuid::from_u128(3)); // project
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn seed_run_ensures_pod_and_drives_each_issue() {
+        // PIDASHCONV-1297: the `post_save` pair — one default-pod
+        // ensure per project (normalized identifier, created) and one
+        // transition drive per issue (inserted id, mapped state id).
+        let ws = uuid::Uuid::from_u128(904);
+        let store = FakeStore::with_workspace("Acme Workspace");
+        let dir = seed_dir("postsave", &mini_seed());
+        run(&store, &input_for(&dir, ws))
+            .await
+            .expect("mini seed runs");
+        let project = uuid::Uuid::from_u128(3);
+        let events = store.events();
+        assert!(
+            events.contains(&format!("ensure_pod {project} ACMEW")),
+            "{events:?}"
+        );
+        assert!(
+            events.contains(&format!(
+                "drive {} {}",
+                uuid::Uuid::from_u128(10),
+                uuid::Uuid::from_u128(4)
+            )),
+            "{events:?}"
+        );
+        assert!(
+            events.contains(&format!(
+                "drive {} {}",
+                uuid::Uuid::from_u128(17),
+                uuid::Uuid::from_u128(5)
+            )),
+            "{events:?}"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

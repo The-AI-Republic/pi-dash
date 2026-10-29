@@ -384,3 +384,59 @@ def test_deleted_issues_list_order(clients, seed, db_conn):
     finally:
         with db_conn.cursor() as cur:
             cur.execute("DELETE FROM issues WHERE id = ANY(%s::uuid[])", (inserted,))
+
+
+def test_destroy_triage_state_issue(clients, seed, db_conn):
+    """DELETE on an issue in a triage-group state soft-deletes (204).
+
+    Django's destroy save reads ``self.state.group`` through
+    ``State._base_manager`` (plain ``Manager``: no triage or soft-delete
+    exclusion), so an intake issue deletes like any other
+    (PIDASHCONV-1379). The row keeps no ``completed_at`` (triage is not
+    ``completed``).
+    """
+    import uuid
+    from datetime import datetime, timezone
+
+    admin = clients["admin"]
+    ws, pid = seed["ws_slug"], seed["project"]
+    now = datetime.now(timezone.utc)
+    state_id = str(uuid.uuid4())
+    issue_id = str(uuid.uuid4())
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO states (created_at, updated_at, id, name, description,"
+            " color, slug, project_id, workspace_id, sequence, \"group\","
+            " \"default\", is_triage)"
+            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (now, now, state_id, "IS Triage", "", "#4E5355",
+             "is-triage-destroy-probe",
+             seed["project"], seed["ws"], 65000.0, "triage", False, True),
+        )
+        cur.execute(
+            "INSERT INTO issues (created_at, updated_at, id, name,"
+            " description_json, priority, sequence_id, created_by_id,"
+            " project_id, state_id, workspace_id, description_html,"
+            " sort_order, point, completed_at, is_draft, git_work_branch,"
+            " workpad, complexity_score)"
+            " VALUES (%s,%s,%s,%s,'{}','high',101,%s,%s,%s,%s,'',0.0,NULL,"
+            " NULL,false,'','',0)",
+            (now, now, issue_id, "Triage intake probe", seed["admin"],
+             seed["project"], state_id, seed["ws"]),
+        )
+    try:
+        resp = admin.delete(f"{_base(ws, pid)}/issues/{issue_id}/")
+        assert resp.status_code == 204
+        assert resp.content == b""
+        with db_conn.cursor() as cur:
+            cur.execute(
+                "SELECT deleted_at, completed_at FROM issues WHERE id = %s",
+                (issue_id,),
+            )
+            deleted_at, completed_at = cur.fetchone()
+        assert deleted_at is not None
+        assert completed_at is None
+    finally:
+        with db_conn.cursor() as cur:
+            cur.execute("DELETE FROM issues WHERE id = %s", (issue_id,))
+            cur.execute("DELETE FROM states WHERE id = %s", (state_id,))

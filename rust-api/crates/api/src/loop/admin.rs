@@ -78,6 +78,7 @@ use crate::state::AppState;
 use crate::v1_cycles_modules::body::{negotiate_body, BodyError, NegotiatedBody};
 
 use super::guards::{self, ValidateFail};
+use pidash_compat::response::json_value as json_response;
 
 /// Register the three owned admin paths. Cutover granularity is the
 /// route + method (pilot `owned()` pattern): sibling methods keep
@@ -190,15 +191,6 @@ impl From<ValidateFail> for Denial {
             ValidateFail::ServerError => Denial::ServerError,
         }
     }
-}
-
-/// Render a JSON body with the exact compact bytes.
-fn json_response(status: StatusCode, body: Value) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body.to_string()))
-        .expect("json response")
 }
 
 // ---------------------------------------------------------------------------

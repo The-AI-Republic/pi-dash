@@ -8,8 +8,11 @@ Routes (apps/api/pi_dash/app/urls/views.py):
   DELETE /api/workspaces/<slug>/projects/<project_id>/user-favorite-views/<view_id>/
 """
 
+import json
 import os
 from datetime import datetime, timedelta, timezone
+
+from _harness.seed import issue_subscriber
 
 from .conftest import session_headers
 
@@ -248,6 +251,99 @@ def test_view_issues_guest_sees_only_own(api, seed, tenant_a, project_a, auth_a)
     assert [e["id"] for e in r.json()["results"]] == [guest_issue]
 
 
+def test_view_issues_state_id_in_filter(api, seed, tenant_a, project_a, auth_a):
+    # PIDASHCONV-1317: the global view-issues list runs the same
+    # rich-filter compiler; UUID lists must bind typed (pre-fix Rust 500d).
+    ws = tenant_a["workspace"]["id"]
+    state_a = seed.state(project_a, ws, name="View state A", group="unstarted")
+    state_b = seed.state(project_a, ws, name="View state B", group="started")
+    issue_a = seed.issue(ws, project_a, name="View filter A", state_id=state_a)
+    issue_b = seed.issue(ws, project_a, name="View filter B", state_id=state_b)
+    url = f"/api/workspaces/{tenant_a['workspace']['slug']}/issues/"
+    r = api.get(
+        url, headers=auth_a,
+        params={"filters": json.dumps({"and": [{"state_id__in": state_a}]})},
+    )
+    assert r.status_code == 200, r.text
+    assert {e["id"] for e in r.json()["results"]} == {issue_a}
+    r = api.get(
+        url, headers=auth_a,
+        params={"filters": json.dumps(
+            {"and": [{"state_id__in": f"{state_a},{state_b}"}]})},
+    )
+    assert r.status_code == 200, r.text
+    assert {e["id"] for e in r.json()["results"]} == {issue_a, issue_b}
+
+
+def test_view_issues_assignees_relation_filter(api, seed, tenant_a, project_a, auth_a):
+    # PIDASHCONV-1446: legacy ?assignees= needs the issue_assignee join;
+    # pre-fix Rust emitted no JOIN (unquoted alias missed the quoted
+    # marker) and 500d on both the list and the count query.
+    ws = tenant_a["workspace"]["id"]
+    member = tenant_a["user"]["id"]
+    assigned = seed.issue(ws, project_a, name="1446 assigned")
+    seed.issue(ws, project_a, name="1446 unassigned")
+    seed.issue_assignee(ws, project_a, assigned, member)
+    r = api.get(
+        f"/api/workspaces/{tenant_a['workspace']['slug']}/issues/",
+        headers=auth_a, params={"assignees": member},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert [e["id"] for e in body["results"]] == [assigned]
+    assert body["total_count"] == 1
+
+
+def test_view_issues_subscriber_relation_filter(
+    api, seed, db, tenant_a, project_a, auth_a
+):
+    # PIDASHCONV-1446: legacy ?subscriber= needs the issue_subscribers
+    # join (same missing-JOIN 500 as ?assignees=). The subscriber row is
+    # deleted explicitly: Seed.cleanup does not sweep issue_subscribers.
+    ws = tenant_a["workspace"]["id"]
+    member = tenant_a["user"]["id"]
+    subbed = seed.issue(ws, project_a, name="1446 subscribed")
+    seed.issue(ws, project_a, name="1446 not subscribed")
+    issue_subscriber(db, project_a, ws, subbed, member)
+    try:
+        r = api.get(
+            f"/api/workspaces/{tenant_a['workspace']['slug']}/issues/",
+            headers=auth_a, params={"subscriber": member},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert [e["id"] for e in body["results"]] == [subbed]
+        assert body["total_count"] == 1
+    finally:
+        with db.cursor() as cur:
+            cur.execute(
+                "DELETE FROM issue_subscribers WHERE issue_id = %s",
+                (subbed,),
+            )
+
+
+def test_view_issues_filters_assignee_id_relation_filter(
+    api, seed, tenant_a, project_a, auth_a
+):
+    # PIDASHCONV-1446: rich ?filters={"assignee_id": ...} quotes the
+    # alias so the join was detected but spliced after WHERE (a syntax
+    # error); pre-fix Rust 500d.
+    ws = tenant_a["workspace"]["id"]
+    member = tenant_a["user"]["id"]
+    assigned = seed.issue(ws, project_a, name="1446 rich assigned")
+    seed.issue(ws, project_a, name="1446 rich unassigned")
+    seed.issue_assignee(ws, project_a, assigned, member)
+    r = api.get(
+        f"/api/workspaces/{tenant_a['workspace']['slug']}/issues/",
+        headers=auth_a,
+        params={"filters": json.dumps({"assignee_id": member})},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert [e["id"] for e in body["results"]] == [assigned]
+    assert body["total_count"] == 1
+
+
 def test_favorite_create_and_delete(api, seed, tenant_a, project_a, auth_a):
     view_id = seed.issue_view(
         tenant_a["workspace"]["id"], tenant_a["user"]["id"],
@@ -291,3 +387,139 @@ def test_global_tenant_isolation(api, seed, tenant_a, tenant_b, auth_b):
     r = api.get(_global_url(tenant_a), headers=auth_b)
     assert r.status_code == 403, r.text
     assert r.json() == {"error": "You don't have the required permissions."}
+
+
+def test_view_issues_datetimes_render_utc_z(api, seed, db, secret):
+    """PIDASHCONV-1198: ``ViewIssueListSerializer.to_representation`` returns
+    the model's raw ``datetime`` objects (view.py:24-53), not DRF
+    ``DateTimeField``s, so DRF's ``JSONEncoder`` renders them as UTC with a
+    trailing ``Z`` no matter what zone the actor is in. The Rust port must not
+    shift these into the actor's ``user_timezone``.
+    """
+    user = seed.user(user_timezone="America/Los_Angeles")
+    ws = seed.workspace(user["id"])
+    seed.member(ws["id"], user["id"], role=20)
+    project_id = seed.project(ws["id"])
+    seed.project_member(project_id, ws["id"], user["id"], role=20)
+    issue_id = seed.issue(
+        ws["id"], project_id, name="TZ issue",
+        completed_at=datetime(2026, 10, 17, 12, 34, 56, 789012, tzinfo=timezone.utc),
+    )
+    headers = session_headers(seed, user, user["password"], secret)
+    r = api.get(
+        f"/api/workspaces/{ws['slug']}/issues/", headers=headers
+    )
+    assert r.status_code == 200, r.text
+    results = r.json()["results"]
+    entry = next((e for e in results if e["id"] == issue_id), None)
+    assert entry is not None, results
+
+    # Django's encoder is ``value.isoformat()`` with a trailing ``+00:00``
+    # rewritten to ``Z`` (rest_framework.utils.encoders.JSONEncoder).
+    def drf(dt):
+        if dt is None:
+            return None
+        text = dt.astimezone(timezone.utc).isoformat()
+        return text[:-6] + "Z" if text.endswith("+00:00") else text
+
+    with db.cursor() as cur:
+        cur.execute(
+            "SELECT created_at, updated_at, completed_at, archived_at "
+            "FROM issues WHERE id = %s",
+            (issue_id,),
+        )
+        created_at, updated_at, completed_at, archived_at = cur.fetchone()
+
+    assert entry["completed_at"] == "2026-10-17T12:34:56.789012Z", entry["completed_at"]
+    for field, db_value in (
+        ("created_at", created_at),
+        ("updated_at", updated_at),
+        ("completed_at", completed_at),
+    ):
+        expected = drf(db_value)
+        assert entry[field] == expected, (field, entry[field], expected)
+        assert entry[field].endswith("Z"), (field, entry[field])
+    # ``IssueManager`` excludes rows with ``archived_at IS NOT NULL``
+    # (db/models/issue.py:95-104), so a listed row always has a null
+    # ``archived_at`` — the other three fields carry the zone coverage.
+    assert drf(archived_at) is None and entry["archived_at"] is None, entry["archived_at"]
+
+
+def test_global_create_trims_name_and_description(api, seed, tenant_a, auth_a):
+    """DRF ``CharField(trim_whitespace=True)`` stores the stripped value;
+    ``max_length`` applies to it, so a 255-char name with trailing spaces
+    still passes (PIDASHCONV-1447)."""
+    r = api.post(
+        _global_url(tenant_a), headers=auth_a,
+        json={"name": "  x  ", "description": "notes\n", "filters": {}},
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    try:
+        assert body["name"] == "x", body["name"]
+        assert body["description"] == "notes", body["description"]
+        g = api.get(f"{_global_url(tenant_a)}{body['id']}/", headers=auth_a)
+        assert g.status_code == 200, g.text
+        assert g.json()["name"] == "x"
+        assert g.json()["description"] == "notes"
+    finally:
+        api.delete(f"{_global_url(tenant_a)}{body['id']}/", headers=auth_a)
+    r = api.post(
+        _global_url(tenant_a), headers=auth_a,
+        json={"name": "y" * 255 + "   ", "filters": {}},
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    try:
+        assert body["name"] == "y" * 255, body["name"][:260]
+    finally:
+        api.delete(f"{_global_url(tenant_a)}{body['id']}/", headers=auth_a)
+
+
+def test_global_create_blank_name_rejected(api, seed, tenant_a, auth_a):
+    """A name blank after stripping is 400, not a blank-looking row
+    (PIDASHCONV-1447)."""
+    r = api.post(
+        _global_url(tenant_a), headers=auth_a,
+        json={"name": "   ", "filters": {}},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json() == {"name": ["This field may not be blank."]}
+
+
+def test_global_create_numeric_name_coerced(api, seed, tenant_a, auth_a):
+    """DRF coerces int/float via ``str()``; booleans stay invalid
+    (PIDASHCONV-1447)."""
+    r = api.post(
+        _global_url(tenant_a), headers=auth_a,
+        json={"name": 123, "filters": {}},
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    try:
+        assert body["name"] == "123", body["name"]
+    finally:
+        api.delete(f"{_global_url(tenant_a)}{body['id']}/", headers=auth_a)
+    r = api.post(
+        _global_url(tenant_a), headers=auth_a,
+        json={"name": True, "filters": {}},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json() == {"name": ["Not a valid string."]}
+
+
+def test_global_patch_trims_description(api, seed, tenant_a, auth_a):
+    """PATCH trims the description the same way create does
+    (PIDASHCONV-1447)."""
+    view_id = seed.issue_view(
+        tenant_a["workspace"]["id"], tenant_a["user"]["id"], name="G-trim"
+    )
+    r = api.patch(
+        f"{_global_url(tenant_a)}{view_id}/", headers=auth_a,
+        json={"description": "d\n"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["description"] == "d", r.json()["description"]
+    g = api.get(f"{_global_url(tenant_a)}{view_id}/", headers=auth_a)
+    assert g.status_code == 200, g.text
+    assert g.json()["description"] == "d"

@@ -59,6 +59,22 @@ pub fn body_too_large_response() -> Response<Body> {
         .expect("static 413 response")
 }
 
+/// Read a request body after [`BodyLimitLayer`] already enforced
+/// `FILE_SIZE_LIMIT`: unbounded (`usize::MAX`), failing closed with the
+/// truncated-body 502 (PIDASHCONV-1308). Handler-local caps below the
+/// setting 500'd (or silently emptied) bodies Django serves; the layer
+/// is the sole enforcer, so handlers must not re-cap. The only failure
+/// left is a mid-stream transport error, which fails closed exactly like
+/// the layer's own buffering does.
+#[allow(clippy::result_large_err)]
+pub(crate) async fn read_request_bytes(
+    body: Body,
+) -> Result<bytes::Bytes, axum::response::Response> {
+    axum::body::to_bytes(body, usize::MAX)
+        .await
+        .map_err(|_| crate::middleware::truncated_body())
+}
+
 #[derive(Debug, Clone)]
 pub struct BodyLimitLayer {
     limit_bytes: u64,

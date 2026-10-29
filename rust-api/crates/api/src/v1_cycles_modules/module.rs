@@ -59,13 +59,16 @@
 //!   project before the body runs anyway.
 //! * The members rewrite and every default-ordered read use `-created_at`
 //!   ordering, including the `str(queryset)` payload text.
+//! * v1 `members` includes soft-deleted `ModuleMember` rows, as Django's
+//!   unfiltered M2M read does (`serializers/module.py:203-206`,
+//!   PIDASHCONV-1418).
 //!
 //! Fixture: `FX-CYCMOD-08`
 //! (`rust-api/fixtures/v1_cycles_modules/handlers/module.golden.json`).
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
@@ -78,6 +81,9 @@ use sqlx::{PgPool, Row};
 use pidash_auth::permissions::project;
 
 use crate::state::AppState;
+use pidash_compat::datetime::{render_date_opt, render_datetime_opt, render_uuid, render_uuid_opt};
+pub use pidash_compat::response::SERVER_ERROR_BODY;
+use pidash_compat::response::{json_created, json_ok, no_content};
 
 // ---------------------------------------------------------------------------
 // Responses
@@ -101,8 +107,6 @@ pub const NOT_FOUND_BODY: &str = r#"{"error":"The requested resource does not ex
 /// survives instead of the `"Not found."` default
 /// (`db/models/project.py:213-218`).
 pub const PROJECT_NOT_FOUND_BODY: &str = r#"{"detail":"Project not found"}"#;
-/// `handle_exception`'s generic branch (`api/views/base.py:166-170`).
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// `handle_exception`'s Django-`ValidationError` branch
 /// (`api/views/base.py:148-152`): invalid UUIDs inside `pk__in` lookups on
 /// the module-issues POST path.
@@ -147,7 +151,7 @@ pub enum Denial {
 impl Denial {
     fn content_type(&self) -> &'static str {
         match self {
-            Denial::RendererCrash => super::json_cpython::PLAIN_CRASH_CONTENT_TYPE,
+            Denial::RendererCrash => super::json::PLAIN_CRASH_CONTENT_TYPE,
             _ => "application/json",
         }
     }
@@ -186,7 +190,7 @@ impl Denial {
             ),
             Denial::RendererCrash => (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                super::json_cpython::PLAIN_CRASH_BODY.to_owned(),
+                super::json::PLAIN_CRASH_BODY.to_owned(),
             ),
         }
     }
@@ -206,32 +210,6 @@ impl IntoResponse for Denial {
 
 fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
-}
-
-/// Render a 200 JSON response with exact bytes.
-fn json_ok(body: String) -> Response {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(axum::http::header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("handler json response")
-}
-
-/// Render a 201 JSON response with exact bytes.
-fn json_created(body: String) -> Response {
-    Response::builder()
-        .status(StatusCode::CREATED)
-        .header(axum::http::header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("handler json response")
-}
-
-/// Render an empty 204 response.
-fn no_content() -> Response {
-    Response::builder()
-        .status(StatusCode::NO_CONTENT)
-        .body(axum::body::Body::empty())
-        .expect("handler empty response")
 }
 
 fn pool_of(state: &AppState) -> Result<PgPool, Denial> {
@@ -335,42 +313,7 @@ pub fn owned_unarchive(
 // Query params
 // ---------------------------------------------------------------------------
 
-/// One query value, repeated or not (same shape as the D-19 `v1_projects`
-/// family: axum's `Query` backend does not coerce a lone `?key=value` into
-/// a sequence, so callers read first/last like Django's `QueryDict`).
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(untagged)]
-pub enum OneOrMany {
-    One(String),
-    Many(Vec<String>),
-}
-
-/// The multi-value query map every handler extracts.
-pub type QueryMap = HashMap<String, OneOrMany>;
-
-/// Django `QueryDict.get`: the last value, or `None`.
-pub fn query_last(query: &QueryMap, key: &str) -> Option<String> {
-    query.get(key).map(|value| match value {
-        OneOrMany::One(one) => one.clone(),
-        OneOrMany::Many(many) => many.last().cloned().unwrap_or_default(),
-    })
-}
-
-/// `self.fields` / `self.expand` (`api/views/base.py:212-220`): comma
-/// split, empties dropped, `None` when empty.
-pub fn fields_param(query: &QueryMap, key: &str) -> Option<Vec<String>> {
-    let raw = query_last(query, key).unwrap_or_default();
-    let fields: Vec<String> = raw
-        .split(',')
-        .filter(|f| !f.is_empty())
-        .map(str::to_owned)
-        .collect();
-    if fields.is_empty() {
-        None
-    } else {
-        Some(fields)
-    }
-}
+pub use pidash_compat::http::{fields_param, query_last, OneOrMany, QueryMap};
 
 // ---------------------------------------------------------------------------
 // Authentication
@@ -450,10 +393,8 @@ pub async fn actor(pool: &PgPool, headers: &HeaderMap, secret_key: &[u8]) -> Res
     // (`api_authentication.py:41-44`); machine tokens stamp `last_used_at`.
     // Best-effort: a failed stamp must not fail the request.
     if !raw.starts_with(pidash_auth::token::MACHINE_TOKEN_PREFIX) {
-        let _ = sqlx::query(r#"UPDATE "api_tokens" SET "last_used" = now() WHERE "token" = $1"#)
-            .bind(raw)
-            .execute(pool)
-            .await;
+        let _ =
+            pidash_services::domain::tokens::touch_api_token_last_used_by_token(pool, raw).await;
     }
     // The token loggers stamp this id on the `process_logs` payload
     // (Django reads `request.user` post-view; PIDASHCONV-937).
@@ -539,19 +480,16 @@ async fn resolve_machine_token(
     if !member {
         // `revoke()` stamps `revoked_at` only (`runner/models.py:865-869`);
         // `last_used_at` is stamped on success only.
-        let _ = sqlx::query(
-            r#"UPDATE "machine_token" SET "revoked_at" = now() WHERE "token_hash" = $1"#,
-        )
-        .bind(&presented_hash)
-        .execute(pool)
-        .await;
+        let _ =
+            pidash_services::domain::tokens::revoke_machine_token_by_hash(pool, &presented_hash)
+                .await;
         return Err(Denial::InvalidToken);
     }
-    let _ =
-        sqlx::query(r#"UPDATE "machine_token" SET "last_used_at" = now() WHERE "token_hash" = $1"#)
-            .bind(&presented_hash)
-            .execute(pool)
-            .await;
+    let _ = pidash_services::domain::tokens::touch_machine_token_last_used_by_hash(
+        pool,
+        &presented_hash,
+    )
+    .await;
     Ok(user_id)
 }
 
@@ -743,11 +681,12 @@ pub async fn preamble(
 /// `base_host(request, is_app=True)` (`utils/host.py:17-67`): the app
 /// origin for task kwargs, never the inbound host.
 pub fn app_origin(state: &AppState) -> String {
-    if let Some(url) = state.settings().urls.app_base_url.clone() {
-        return url;
+    let urls = &state.settings().urls;
+    if let Some(url) = urls.app_base_url.as_deref().filter(|s| !s.is_empty()) {
+        return url.to_owned();
     }
-    if let Some(url) = state.settings().urls.web_url.clone() {
-        return url;
+    if let Some(url) = urls.web_url.as_deref().filter(|s| !s.is_empty()) {
+        return url.to_owned();
     }
     "http://localhost".to_owned()
 }
@@ -905,33 +844,10 @@ fn render_f64(value: f64) -> Value {
     serde_json::Number::from_f64(value).map_or(Value::Null, Value::Number)
 }
 
-fn render_uuid(value: &uuid::Uuid) -> Value {
-    Value::String(value.to_string())
-}
-
-fn render_uuid_opt(value: &Option<uuid::Uuid>) -> Value {
-    value.as_ref().map_or(Value::Null, render_uuid)
-}
-
 fn render_string_opt(value: &Option<String>) -> Value {
     value
         .as_ref()
         .map_or(Value::Null, |v| Value::String(v.clone()))
-}
-
-fn render_date_opt(value: &Option<chrono::NaiveDate>) -> Value {
-    value
-        .map(|d| Value::String(d.format("%Y-%m-%d").to_string()))
-        .unwrap_or(Value::Null)
-}
-
-/// DRF `DateTimeField` rendering in the request time zone (`Z` for UTC,
-/// six-digit micros only when nonzero): the shared
-/// `crate::serializer::render_datetime_in` kernel.
-fn render_datetime_opt(value: &Option<chrono::DateTime<chrono::Utc>>, timezone: &Tz) -> Value {
-    value.map_or(Value::Null, |dt| {
-        Value::String(crate::serializer::render_datetime_in(&dt, timezone))
-    })
 }
 
 // ---------------------------------------------------------------------------
@@ -2337,14 +2253,14 @@ fn json_field_surr(text: &str, surr: &[(usize, u16)]) -> FieldSurr {
     if surr.is_empty() {
         return out;
     }
-    let Ok(value) = super::json_cpython::parse_json_text_spans(text, surr) else {
+    let Ok(value) = super::json::parse_json_text_spans(text, surr) else {
         return out;
     };
     let Some(object) = value.into_object() else {
         return out;
     };
     for (key, value) in object.iter() {
-        let super::json_cpython::JVal::Str(text) = value else {
+        let super::json::JVal::Str(text) = value else {
             continue;
         };
         if let (Some(name), Some(unit)) = (key.to_clean_string(), text.first_surrogate()) {
@@ -2378,7 +2294,7 @@ fn form_field_surr(
         if spans.is_empty() {
             continue;
         }
-        if let Some(unit) = super::json_cpython::JStr::from_dirty(text, spans).first_surrogate() {
+        if let Some(unit) = super::json::JStr::from_dirty(text, spans).first_surrogate() {
             out.insert(key.clone(), unit);
         }
     }
@@ -2402,7 +2318,7 @@ fn json_members_dirty(text: &str, surr: &[(usize, u16)]) -> MembersDirty {
     if surr.is_empty() {
         return out;
     }
-    let Ok(value) = super::json_cpython::parse_json_text_spans(text, surr) else {
+    let Ok(value) = super::json::parse_json_text_spans(text, surr) else {
         return out;
     };
     let Some(object) = value.into_object() else {
@@ -2412,13 +2328,13 @@ fn json_members_dirty(text: &str, surr: &[(usize, u16)]) -> MembersDirty {
         if key.to_clean_string().as_deref() != Some("members") {
             continue;
         }
-        if let super::json_cpython::JVal::Array(items) = value {
+        if let super::json::JVal::Array(items) = value {
             out = items
                 .iter()
                 .map(|item| {
                     matches!(
                         item,
-                        super::json_cpython::JVal::Str(text) if text.has_surrogate()
+                        super::json::JVal::Str(text) if text.has_surrogate()
                     )
                 })
                 .collect();
@@ -2457,7 +2373,7 @@ fn form_members_dirty(
             if spans.is_empty() {
                 return false;
             }
-            super::json_cpython::JStr::from_dirty(text, spans).has_surrogate()
+            super::json::JStr::from_dirty(text, spans).has_surrogate()
         })
         .collect()
 }
@@ -2735,7 +2651,7 @@ fn char_validators(
     })
 }
 
-fn check_max_length(text: &str, max_length: Option<usize>) -> Result<(), CoerceFail> {
+pub(crate) fn check_max_length(text: &str, max_length: Option<usize>) -> Result<(), CoerceFail> {
     if let Some(max) = max_length {
         // DRF counts Unicode scalar values (`len(str)`).
         if text.chars().count() > max {
@@ -3685,8 +3601,10 @@ pub async fn fetch_project(
         .ok_or(Denial::NotFound)
 }
 
-/// `instance.members.all()`: live membership ids in `User` `-created_at`
-/// order (the M2M queryset's default ordering, verified live).
+/// `instance.members.all()`: membership ids in `User` `-created_at`
+/// order (the M2M queryset's default ordering, verified live), including
+/// soft-deleted rows — Django's M2M manager joins the through table with
+/// no soft-delete filter (`serializers/module.py:203-206`, PIDASHCONV-1418).
 pub async fn fetch_members(
     pool: &PgPool,
     module_id: &uuid::Uuid,
@@ -3694,7 +3612,7 @@ pub async fn fetch_members(
     sqlx::query_scalar(
         r#"SELECT mm."member_id" FROM "module_members" mm
            INNER JOIN "users" u ON u."id" = mm."member_id"
-           WHERE mm."module_id" = $1 AND mm."deleted_at" IS NULL
+           WHERE mm."module_id" = $1
            ORDER BY u."created_at" DESC"#,
     )
     .bind(module_id)
@@ -5549,7 +5467,30 @@ pub fn routes() -> axum::Router<AppState> {
 mod tests {
     use super::*;
     use axum::http::StatusCode;
+    use std::collections::HashMap;
     use tower::ServiceExt;
+
+    fn origin_state(app_base_url: Option<&str>, web_url: Option<&str>) -> AppState {
+        let mut settings = pidash_db::config::Settings::test_defaults();
+        settings.urls.app_base_url = app_base_url.map(str::to_owned);
+        settings.urls.web_url = web_url.map(str::to_owned);
+        AppState::with_settings("test", settings)
+    }
+
+    /// `base_host(request, is_app=True)` treats `""` as missing
+    /// (PIDASHCONV-1597): an empty `APP_BASE_URL` falls through to
+    /// `WEB_URL`. (The localhost fallback for unset-everywhere is a
+    /// separate, deliberate-looking deviation — out of scope.)
+    #[test]
+    fn app_origin_falls_through_empty_strings() {
+        let web = "https://web.example.invalid";
+        let state = origin_state(Some(""), Some(web));
+        assert_eq!(app_origin(&state), web);
+        let state = origin_state(Some("https://app.example.invalid"), Some(web));
+        assert_eq!(app_origin(&state), "https://app.example.invalid");
+        let state = origin_state(Some(""), Some(""));
+        assert_eq!(app_origin(&state), "http://localhost");
+    }
 
     #[test]
     fn activate_timezone_empty_zone_500s() {
@@ -5995,71 +5936,32 @@ mod tests {
 
     #[test]
     fn field_surr_attribution_712() {
-        // JSON: the span lands on the clean top-level key holding it.
-        let fields = json_field_surr("{\"name\": \"�693\"}", &[(10, 0xD801)]);
-        assert_eq!(fields.get("name"), Some(&0xD801));
-        assert_eq!(fields.len(), 1);
-        // A literal placeholder with no spans attributes nothing.
-        assert!(json_field_surr("{\"name\": \"�693\"}", &[]).is_empty());
-        // Malformed JSON attributes nothing (serde already answered).
+        // Tier 3 since PIDASHCONV-1552/1555: spans are always empty (JSON
+        // with spans 400s at parse; form spans never filled), so no field
+        // ever attributes a surrogate. A literal placeholder stays text.
+        assert!(json_field_surr("{\"name\": \"\u{fffd}693\"}", &[(10, 0xD801)]).is_empty());
+        assert!(json_field_surr("{\"name\": \"\u{fffd}693\"}", &[]).is_empty());
         assert!(json_field_surr("{\"name\": ", &[(0, 0xD800)]).is_empty());
-        // Dirty keys never match; clean siblings still attribute.
-        let fields = json_field_surr("{\"�\": 1, \"name\": \"�\"}", &[(2, 0xD800), (20, 0xD801)]);
-        assert_eq!(fields.get("name"), Some(&0xD801));
-        assert_eq!(fields.len(), 1);
-        // Form: scalar spans attribute; arrays are skipped.
         let map: serde_json::Map<String, Value> =
-            serde_json::from_str("{\"name\": \"�693\", \"members\": [\"�\"]}").expect("form map");
+            serde_json::from_str("{\"name\": \"\u{fffd}693\"}").expect("form map");
         let mut surr: BTreeMap<String, Vec<Vec<(usize, u16)>>> = BTreeMap::new();
         surr.insert("name".to_owned(), vec![vec![(0, 0xD801)]]);
-        surr.insert("members".to_owned(), vec![vec![(0, 0xD800)]]);
-        let fields = form_field_surr(&map, &surr);
-        assert_eq!(fields.get("name"), Some(&0xD801));
-        assert!(!fields.contains_key("members"));
+        assert!(form_field_surr(&map, &surr).is_empty());
     }
 
     #[test]
     fn members_dirty_attribution_732() {
-        // JSON: per-element flags, index-aligned with the array.
-        assert_eq!(
-            json_members_dirty("{\"members\": [\"�\", \"ok\"]}", &[(14, 0xD801)]),
-            vec![true, false]
+        // Tier 3 since PIDASHCONV-1552/1555: spans never attribute (see
+        // field_surr_attribution_712); members flags stay all-clean.
+        assert!(
+            json_members_dirty("{\"members\": [\"\u{fffd}\", \"ok\"]}", &[(14, 0xD801)]).is_empty()
         );
-        // Only string elements flag; numbers, nulls and nested arrays
-        // never crash (their echoes repr-escape).
-        assert_eq!(
-            json_members_dirty(
-                "{\"members\": [\"�\", 5, null, [\"�\"]]}",
-                &[(14, 0xD801), (31, 0xD800)]
-            ),
-            vec![true, false, false, false]
-        );
-        // Last-wins like serde: a trailing scalar shadows the array, and
-        // its shape error carries no echo, so no flags survive.
-        assert!(json_members_dirty(
-            "{\"members\": [\"�\"], \"members\": \"s\"}",
-            &[(14, 0xD800)]
-        )
-        .is_empty());
-        // A literal placeholder with no spans attributes nothing.
-        assert!(json_members_dirty("{\"members\": [\"�\"]}", &[]).is_empty());
-        // Malformed JSON attributes nothing (serde already answered).
         assert!(json_members_dirty("{\"members\": ", &[(0, 0xD800)]).is_empty());
-        // Form: each string element reads its own aligned slot.
         let map: serde_json::Map<String, Value> =
-            serde_json::from_str("{\"members\": [\"�a\", \"ok\"]}").expect("form map");
+            serde_json::from_str("{\"members\": [\"\u{fffd}a\", \"ok\"]}").expect("form map");
         let mut surr: BTreeMap<String, Vec<Vec<(usize, u16)>>> = BTreeMap::new();
         surr.insert("members".to_owned(), vec![vec![(0, 0xD801)], Vec::new()]);
-        assert_eq!(form_members_dirty(&map, &surr), vec![true, false]);
-        // Placeholders and dict-form slots carry no spans and stay clean;
-        // missing slots read clean too.
-        let map: serde_json::Map<String, Value> =
-            serde_json::from_str("{\"members\": [null, [{\"x\": [\"�\"]}]]}").expect("indexed");
         assert_eq!(form_members_dirty(&map, &surr), vec![false, false]);
-        let map: serde_json::Map<String, Value> =
-            serde_json::from_str("{\"name\": \"m\"}").expect("no members");
-        assert!(form_members_dirty(&map, &surr).is_empty());
-        assert!(form_members_dirty(&map, &BTreeMap::new()).is_empty());
     }
 
     #[test]
@@ -6070,10 +5972,7 @@ mod tests {
         assert_eq!(denial.content_type(), "text/plain");
         let (status, body) = denial.status_and_body();
         assert_eq!(status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(
-            body,
-            super::super::json_cpython::PLAIN_CRASH_BODY.to_owned()
-        );
+        assert_eq!(body, super::super::json::PLAIN_CRASH_BODY.to_owned());
     }
 
     #[test]

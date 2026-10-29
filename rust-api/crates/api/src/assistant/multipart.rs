@@ -144,7 +144,7 @@ fn split_parts(body: &[u8], boundary: &[u8]) -> Vec<Part> {
     let mut i = 0;
     while i + delimiter.len() <= body.len() {
         if body[i..].starts_with(&delimiter)
-            && (i == 0 || &body[i - 2..i] == b"\r\n")
+            && (i == 0 || (i >= 2 && &body[i - 2..i] == b"\r\n"))
             && is_terminated(&body[i + delimiter.len()..])
         {
             marks.push(if i == 0 { 0 } else { i - 2 });
@@ -437,5 +437,27 @@ mod tests {
         assert_eq!(parts.len(), 2);
         assert_eq!(parts[1].body, audio);
         assert!(content_type.contains("pidash-transcribe-7ma4yw3z3x8k9d2v0"));
+    }
+
+    #[test]
+    fn delimiter_at_offset_one_does_not_panic() {
+        // PIDASHCONV-1244: a delimiter starting at body offset 1 has no
+        // room for a preceding CRLF; it must be skipped, not index `i - 2`.
+        let body = b"x--B\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.webm\"\r\n\r\nabc\r\n--B--\r\n";
+        let parts = parse("multipart/form-data; boundary=B", body);
+        assert!(parts.is_empty());
+    }
+
+    #[test]
+    fn delimiter_at_offset_two_after_crlf_still_splits() {
+        // A delimiter at offset 2 preceded by CRLF is a genuine line
+        // start: the guard must not swallow it.
+        let body = b"\r\n--B\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.webm\"\r\n\r\nabc\r\n--B--\r\n";
+        let parts = parse("multipart/form-data; boundary=B", body);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].name, "file");
+        assert_eq!(parts[0].filename.as_deref(), Some("a.webm"));
+        assert_eq!(parts[0].body, b"abc");
+        assert!(is_file(&parts[0]));
     }
 }

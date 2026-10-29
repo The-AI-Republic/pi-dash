@@ -85,11 +85,20 @@ pub fn verify_password(password: &str, encoded: &str) -> Result<bool, PasswordEr
     Ok(bool::from(candidate.as_bytes().ct_eq(encoded.as_bytes())))
 }
 
+/// Salt length (chars) at which Django stops re-hashing for entropy.
+///
+/// `must_update_salt` (`hashers.py:183-185`) wants 128 bits over the
+/// 62-char `RANDOM_STRING_CHARS` alphabet: 21 chars carry
+/// 21 * log2(62) = 125.0 bits (< 128, update) while 22 carry 131.0
+/// (>= 128, keep). Django-generated salts are always 22 chars; shorter
+/// ones come from older installs.
+pub const PBKDF2_FULL_ENTROPY_SALT_LEN: usize = 22;
+
 /// True when the stored hash would be re-hashed on next login.
 ///
-/// Mirrors `must_update` ignoring the salt-entropy leg (Django also
-/// re-hashes short salts; ours are always Django-generated): any iteration
-/// count other than the current default wants an upgrade.
+/// Mirrors `PBKDF2PasswordHasher.must_update` (`hashers.py:339-342`):
+/// any iteration count other than the current default wants an
+/// upgrade, as does a salt below [`PBKDF2_FULL_ENTROPY_SALT_LEN`].
 pub fn needs_update(encoded: &str) -> Result<bool, PasswordError> {
     let mut parts = encoded.split('$');
     match (
@@ -99,15 +108,38 @@ pub fn needs_update(encoded: &str) -> Result<bool, PasswordError> {
         parts.next(),
         parts.next(),
     ) {
-        (Some(algorithm), Some(iterations), Some(_), Some(_), None) => {
+        (Some(algorithm), Some(iterations), Some(salt), Some(_), None) => {
             if algorithm != PBKDF2_ALGORITHM {
                 return Err(PasswordError::UnsupportedAlgorithm(algorithm.to_owned()));
             }
             let iterations: u32 = iterations.parse().map_err(|_| PasswordError::Malformed)?;
-            Ok(iterations != PBKDF2_DEFAULT_ITERATIONS)
+            Ok(
+                iterations != PBKDF2_DEFAULT_ITERATIONS
+                    || salt.len() < PBKDF2_FULL_ENTROPY_SALT_LEN,
+            )
         }
         _ => Err(PasswordError::Malformed),
     }
+}
+
+/// Replacement hash when Django's `check_password` setter would fire.
+///
+/// `hashers.check_password` (`hashers.py:38-73`) calls the setter — which
+/// re-encodes with the default hasher and saves — exactly when the
+/// candidate verifies and [`needs_update`]. Returns that re-encoding
+/// (`make_password(candidate)`: fresh 22-char salt, default iterations),
+/// or `None` when the password is wrong or the stored hash is current,
+/// so callers can `UPDATE users SET password` only on `Some`.
+pub fn rehash_if_outdated(candidate: &str, encoded: &str) -> Option<String> {
+    if !verify_password(candidate, encoded).unwrap_or(false) {
+        return None;
+    }
+    if !needs_update(encoded).unwrap_or(false) {
+        return None;
+    }
+    use rand::distr::{Alphanumeric, SampleString};
+    let salt = Alphanumeric.sample_string(&mut rand::rng(), PBKDF2_FULL_ENTROPY_SALT_LEN);
+    Some(hash_password(candidate, &salt, PBKDF2_DEFAULT_ITERATIONS))
 }
 
 #[cfg(test)]
@@ -199,5 +231,33 @@ mod tests {
     fn update_check() {
         assert!(!needs_update(DJANGO_DEFAULT).unwrap());
         assert!(needs_update(DJANGO_LOW).unwrap());
+    }
+
+    #[test]
+    fn update_check_salt_entropy_leg() {
+        // Default iterations but a 21-char salt: 125.0 bits < 128, Django
+        // re-hashes (`must_update_salt`). A 22-char salt is current.
+        let short = hash_password("s3cr3t-pw", "shortsalt0123456789AB", 600_000);
+        assert_eq!(short.split('$').nth(2).unwrap().len(), 21);
+        assert!(needs_update(&short).unwrap());
+        let full = hash_password("s3cr3t-pw", "fullsalt0123456789ABCD", 600_000);
+        assert_eq!(full.split('$').nth(2).unwrap().len(), 22);
+        assert!(!needs_update(&full).unwrap());
+    }
+
+    #[test]
+    fn rehash_returns_new_default_hash_for_outdated() {
+        let new = rehash_if_outdated("correct-horse", DJANGO_LOW).expect("outdated re-hashes");
+        assert_ne!(new, DJANGO_LOW);
+        assert!(new.starts_with("pbkdf2_sha256$600000$"), "{new}");
+        assert_eq!(new.split('$').nth(2).unwrap().len(), 22);
+        assert!(verify_password("correct-horse", &new).unwrap());
+    }
+
+    #[test]
+    fn rehash_returns_none_for_current_or_wrong() {
+        assert_eq!(rehash_if_outdated("s3cr3t-pw", DJANGO_DEFAULT), None);
+        assert_eq!(rehash_if_outdated("wrong-horse", DJANGO_LOW), None);
+        assert_eq!(rehash_if_outdated("x", "not-a-hash"), None);
     }
 }

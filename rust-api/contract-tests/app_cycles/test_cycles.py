@@ -4,6 +4,7 @@ Every URL pattern in app/urls/cycle.py plus the workspace cycles endpoint in
 app/urls/workspace.py gets a shape assertion against the live backend.
 """
 
+import json
 import os
 import time
 import uuid
@@ -358,6 +359,56 @@ def test_favorite_create_destroy(admin):
     assert r.json() == {"error": "The required object does not exist."}
 
 
+def test_favorite_create_coerces_int_and_bool_ids(admin):
+    # `CycleFavoriteViewSet.create` (`base.py:571-579`) writes
+    # `request.data["cycle"]` straight into `entity_identifier`, a
+    # `UUIDField`, so `UUIDField.to_python` (`input_form = "int"` for a
+    # Python int, and a JSON bool is one) coerces `5`/`true`/`false` to
+    # `UUID(int=n)`: 204 with a row, not a 400.
+    urls = cycle_urls(admin)
+    conn = admin["seed"].conn
+    cases = [
+        (5, "00000000-0000-0000-0000-000000000005"),
+        (True, "00000000-0000-0000-0000-000000000001"),
+        (False, "00000000-0000-0000-0000-000000000000"),
+    ]
+    try:
+        for raw, expected in cases:
+            r = admin["client"].post(urls["favorites"], json={"cycle": raw})
+            assert r.status_code == 204, (raw, r.status_code, r.text[:300])
+            with conn.cursor() as cur:
+                cur.execute(
+                    "select entity_identifier from user_favorites"
+                    " where project_id = %s and user_id = %s"
+                    " and entity_type = 'cycle' and deleted_at is null",
+                    (admin["project"]["id"], admin["user"]["id"]),
+                )
+                rows = [str(row[0]) for row in cur.fetchall()]
+            assert expected in rows, (raw, rows)
+            with conn.cursor() as cur:
+                cur.execute(
+                    "delete from user_favorites where project_id = %s"
+                    " and user_id = %s",
+                    (admin["project"]["id"], admin["user"]["id"]),
+                )
+    finally:
+        with conn.cursor() as cur:
+            cur.execute(
+                "delete from user_favorites where project_id = %s and user_id = %s",
+                (admin["project"]["id"], admin["user"]["id"]),
+            )
+
+
+def test_favorite_create_rejects_invalid_ids(admin):
+    # The same `UUIDField.to_python` still rejects floats, negative and
+    # out-of-range ints (a `ValidationError` → 400 invalid detail).
+    urls = cycle_urls(admin)
+    for raw in (5.5, -1, 340282366920938463463374607431768211456):
+        r = admin["client"].post(urls["favorites"], json={"cycle": raw})
+        assert r.status_code == 400, (raw, r.status_code, r.text[:300])
+        assert r.json() == {"error": "Please provide valid detail"}, (raw, r.text[:300])
+
+
 def test_favorite_list_broken_upstream(admin):
     # PORTED BUG (app/views/cycle/base.py): CycleFavoriteViewSet defines no
     # list method, so GET falls through to the ModelViewSet default, which
@@ -448,6 +499,31 @@ def test_cycle_issue_create_requires_issues(admin):
     r = admin["client"].post(urls["cycle_issues"](admin["cycle"]["id"]), json={})
     assert r.status_code == 400, r.text[:500]
     assert r.json() == {"error": "Issues are required"}
+
+
+def test_cycle_issue_add_coerces_int_and_bool_ids(admin):
+    # `CycleIssueViewSet.create` (`issue.py:225-297`): `issue_id__in=issues`
+    # (`:239`) coerces an int/bool via `UUIDField.to_python` and misses, then
+    # `bulk_create` (`:244-257`) inserts `issue_id=UUID(int=n)`, which no
+    # `issues` row owns, so the FK violation becomes `IntegrityError` →
+    # 400 `{"error": "The payload is not valid"}`.
+    urls = cycle_urls(admin)
+    pk = admin["cycle"]["id"]
+    for raw in (5, True, False):
+        r = admin["client"].post(urls["cycle_issues"](pk), json={"issues": [raw]})
+        assert r.status_code == 400, (raw, r.status_code, r.text[:300])
+        assert r.json() == {"error": "The payload is not valid"}, (raw, r.text[:300])
+
+
+def test_cycle_issue_add_rejects_invalid_ids(admin):
+    # Floats, negative and out-of-range ints, and garbage strings still fail
+    # the `__in` UUID coercion → 400 invalid detail.
+    urls = cycle_urls(admin)
+    pk = admin["cycle"]["id"]
+    for raw in (5.5, -1, 340282366920938463463374607431768211456, "garbage"):
+        r = admin["client"].post(urls["cycle_issues"](pk), json={"issues": [raw]})
+        assert r.status_code == 400, (raw, r.status_code, r.text[:300])
+        assert r.json() == {"error": "Please provide valid detail"}, (raw, r.text[:300])
 
 
 def test_cycle_issue_detail_broken_upstream(admin):
@@ -661,3 +737,46 @@ def test_cycle_create_with_deleted_at_500s_and_no_enqueue(admin):
         assert after_celery == before_celery, (
             f"celery broker depth changed: {before_celery} -> {after_celery}"
         )
+
+
+def test_cycle_issues_state_id_in_filter(admin):
+    # PIDASHCONV-1317: the cycle-issues list runs the same rich-filter
+    # compiler; UUID lists must bind typed (pre-fix Rust 500d).
+    urls = cycle_urls(admin)
+    ws_id, project_id = admin["workspace"]["id"], admin["project"]["id"]
+    state_b = admin["seed"].state(
+        project_id, ws_id, name="Second state", group="started")
+    cycle = create_cycle_for(admin, name="Filter cycle")
+    issue_a = create_issue_for(admin, name="Cycle filter A")
+    issue_b = create_issue_for(admin, name="Cycle filter B")
+    with admin["seed"].conn.cursor() as cur:
+        cur.execute(
+            "UPDATE issues SET state_id = %s WHERE id = %s",
+            (state_b, issue_b["id"]),
+        )
+    try:
+        for issue in (issue_a, issue_b):
+            r = admin["client"].post(
+                urls["cycle_issues"](cycle["id"]),
+                json={"issues": [issue["id"]]},
+            )
+            assert r.status_code == 201, r.text[:500]
+        r = admin["client"].get(
+            urls["cycle_issues"](cycle["id"]),
+            params={"filters": json.dumps(
+                {"and": [{"state_id__in": admin["state"]["id"]}]})},
+        )
+        assert r.status_code == 200, r.text[:500]
+        assert {row["id"] for row in r.json()["results"]} == {issue_a["id"]}
+        r = admin["client"].get(
+            urls["cycle_issues"](cycle["id"]),
+            params={"filters": json.dumps({"and": [{"state_id__in": (
+                f"{admin['state']['id']},{state_b}")}]})},
+        )
+        assert r.status_code == 200, r.text[:500]
+        assert {row["id"] for row in r.json()["results"]} == {
+            issue_a["id"], issue_b["id"]}
+    finally:
+        for issue in (issue_a, issue_b):
+            admin["client"].delete(
+                urls["cycle_issue_detail"](cycle["id"], issue["id"]))

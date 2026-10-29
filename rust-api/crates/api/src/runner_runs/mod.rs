@@ -45,12 +45,15 @@
 //!   `test_web_chat_approval_decide_shape`), so the session lookup, the
 //!   offline-reject matrix, and the XADD wire shape are behavior, not
 //!   plumbing. D-14's outbox port takes over when it merges.
-//! * Matcher drains, D-12 orchestration, and D-11 `dispatch_waiting` are
-//!   warn-logged no-ops: every call site is isolated in Python (a drain
-//!   failure only logs), so no response byte depends on them, and the
-//!   Python plane still runs the beat tasks until cutover. The one
-//!   exception is `_pause_and_drain`'s drain, which is unisolated in
-//!   Python and 500s after commit when it raises — case-closed below.
+//! * Matcher drains (PIDASHCONV-862), D-12 orchestration
+//!   (`disarm_on_terminal_signal`, the deferred pause, the pending-entry
+//!   fire) and D-11 `dispatch_waiting` are real: they call the ported
+//!   executors, so a daemon terminal transition drains the freed runner,
+//!   disarms the ticker after `stop_ticking`, applies a deferred pause,
+//!   fires a pending entry, and completes a move handoff on the api plane.
+//!   The post-run sub-calls are isolated in Python (each logs), while the
+//!   drains stay unisolated (`_pause_and_drain` propagates) — see the
+//!   per-method docs.
 //! * `agent_system_user_id` and the Celery emits (`fire_tick`,
 //!   `runner.apply_agent_run_terminal_effects` via the F-09 publisher)
 //!   are real: comments need the actor row, and the emits are plain
@@ -93,10 +96,10 @@
 //! * Malformed JSON bodies 400 as `{"Detail": "JSON parse error"}`; the
 //!   Python message text (CPython's `json` error) is not reproduced.
 //!
-//! D-15 runner web handlers: runs, approvals, metrics, signals (stage 5, PIDASHCONV-542).
+//! D-15 runner web handlers: runs, approvals, metrics (stage 5, PIDASHCONV-542).
 //!
 //! Ports `apps/api/pi_dash/runner/views/runs.py:1-695`,
-//! `views/approvals.py:1-105`, `views/metrics.py:1-105` and `signals.py:1-66`
+//! `views/approvals.py:1-105` and `views/metrics.py:1-105`
 //! (routes `runner/web_urls.py` under `/api/runners/` plus `runner/urls.py`
 //! `metrics/` under `/api/v1/runner/`).
 //!
@@ -104,9 +107,12 @@
 //!   re-tick, detail (`+include_events`), cancel, release-pin.
 //! * [`approvals`] — creator-routed approval list + decide.
 //! * [`metrics`] — the five Prometheus gauges (AllowAny, `text/plain`).
-//! * [`signals`] — `create_default_pod_for_new_project` as an explicit
-//!   post-commit fn (the project-creation owner wires the call; that
-//!   wiring belongs to that domain's split, not this issue).
+//!
+//! The default-pod signal (`create_default_pod_for_new_project`,
+//! `runner/signals.py:32-66`) lives in
+//! `pidash_services::runner_runs::signals` — the single copy (lifted
+//! from this module, PIDASHCONV-1268, so the jobs dummy-data path can
+//! call it too); the project-create handlers call that copy.
 //!
 //! Fixture: `rust-api/fixtures/runner_runs/fx-run-08-handlers-web.golden.json`
 //! (FX-RUN-08; trace: `rust-api/fixtures/runner_runs/TRACE.md`). Contract:
@@ -179,7 +185,6 @@ pub mod dispatch;
 pub mod metrics;
 pub mod run_endpoints;
 pub mod runs;
-pub mod signals;
 pub mod sse;
 
 use axum::extract::State;
@@ -191,25 +196,12 @@ use serde_json::{Map, Value};
 use sqlx::PgPool;
 
 use crate::state::AppState;
+pub use pidash_compat::response::{json_response, server_error, SERVER_ERROR_BODY};
+use pidash_db::redis::client_from_settings;
 
 // ---------------------------------------------------------------------------
 // Shared responses
 // ---------------------------------------------------------------------------
-
-/// Unhandled-failure body (500). Runner views have no custom
-/// `handle_exception`, so Django renders its HTML error page here; only
-/// the status is contract-pinned, and this JSON text keeps the Rust
-/// surface consistent with the sibling handler ports.
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
-
-/// Render a JSON body with the DRF content type.
-pub fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("runner-runs response builds")
-}
 
 /// The request pool, or the 500 when the server runs pool-less
 /// (unreachable in `serve`, which fail-fasts at boot).
@@ -221,14 +213,6 @@ pub fn pool_of(state: &AppState) -> Result<&PgPool, Response> {
             SERVER_ERROR_BODY.to_owned(),
         )),
     }
-}
-
-/// The 500 shortcut for fallible handler paths.
-pub fn server_error() -> Response {
-    json_response(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        SERVER_ERROR_BODY.to_owned(),
-    )
 }
 
 /// DRF `Allow` values (`APIView.default_response_headers`: each view's
@@ -809,13 +793,8 @@ async fn authenticate_machine_token(
     if !member {
         // `token.revoke()` then deny (`authentication.py:130-132`).
         let now = chrono::Utc::now();
-        let _ = sqlx::query(
-            r#"UPDATE "machine_token" SET "revoked_at" = $1 WHERE "machine_token"."id" = $2"#,
-        )
-        .bind(now)
-        .bind(token.id)
-        .execute(pool)
-        .await;
+        let _ =
+            pidash_services::domain::tokens::revoke_machine_token_by_id(pool, token.id, now).await;
         return Err(auth_failed("membership_revoked"));
     }
     let Some(runner_raw) = request_runner_id(headers) else {
@@ -853,13 +832,9 @@ async fn authenticate_machine_token(
     // `last_used_at` bump (`authentication.py:153`): `QuerySet.update`
     // touches no `updated_at`.
     let now = chrono::Utc::now();
-    let _ = sqlx::query(
-        r#"UPDATE "machine_token" SET "last_used_at" = $1 WHERE "machine_token"."id" = $2"#,
-    )
-    .bind(now)
-    .bind(token.id)
-    .execute(pool)
-    .await;
+    let _ =
+        pidash_services::domain::tokens::touch_machine_token_last_used_by_id(pool, token.id, now)
+            .await;
     Ok(Some(DaemonRunner::from(&row)))
 }
 
@@ -1031,12 +1006,32 @@ pub trait RunnerPorts: Send + Sync {
         &self,
         run_id: uuid::Uuid,
     ) -> impl std::future::Future<Output = Result<(), PortError>> + Send;
+    /// [`post_run_orchestration`](Self::post_run_orchestration) on the
+    /// caller's transaction. `apply_terminal_effects` runs
+    /// `_apply_post_run_orchestration` inside its `transaction.atomic()`
+    /// (`agent_run_finalization.py:105-199`), which already holds the
+    /// issue `FOR UPDATE`; the deferred pause re-locks that issue row, so
+    /// running it on a second connection self-deadlocks (the second
+    /// connection waits for the hooks transaction, which waits for the
+    /// pause). Returns the transaction so the caller keeps writing the
+    /// hooks marker on it.
+    fn post_run_orchestration_in_tx<'t>(
+        &self,
+        tx: pidash_db::tx::Transaction<'t>,
+        pool: &'t PgPool,
+        run_id: uuid::Uuid,
+    ) -> impl std::future::Future<Output = Result<pidash_db::tx::Transaction<'t>, PortError>> + Send;
     /// `complete_project_move_handoff(run_id)` (D-12, after the hooks
-    /// transaction commits, isolated).
+    /// transaction commits, isolated). `terminal_created_by` is the
+    /// ambient crum request user for the inline terminal effects.
+    /// Boxed: the handoff drains terminal effects inline, which can
+    /// recurse into this port, so the unboxed future type is cyclic
+    /// (E0391).
     fn complete_project_move_handoff(
         &self,
         run_id: uuid::Uuid,
-    ) -> impl std::future::Future<Output = Result<(), PortError>> + Send;
+        terminal_created_by: Option<uuid::Uuid>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), PortError>> + Send + '_>>;
     /// `get_agent_system_user()` (`orchestration/workpad.py:44-71`):
     /// the bot user id authoring pause/failure comments.
     fn agent_system_user_id(
@@ -1162,15 +1157,19 @@ pub async fn active_session_exists(
 }
 
 /// The production ports: real outbox enqueue, real system-user lookup,
-/// real Celery emits; matcher drains, D-12 orchestration, and D-11
-/// dispatch stay warn-logged no-ops until their providers merge (every
-/// call site is isolated in Python, so no response byte depends on
-/// them — except `_pause_and_drain`'s drain, which propagates; see
-/// [`run_endpoints`](self::run_endpoints)).
+/// real Celery emits, real matcher drains, real D-12 orchestration, and
+/// real D-11 `dispatch_waiting`. The post-run orchestration sub-calls are
+/// isolated in Python (each logs); the drains are unisolated (propagate);
+/// see [`run_endpoints`](self::run_endpoints).
 #[derive(Debug, Clone)]
 pub struct LivePorts {
     pool: PgPool,
     redis: Option<redis::Client>,
+    /// The request state: carries the resolved settings (cloud-agent /
+    /// managed-runner / runner) plus the toolsets and assistant seams the
+    /// D-12 handoff and deferred-pause drivers need. Held by value
+    /// (`AppState` is `Clone`).
+    state: AppState,
 }
 
 impl LivePorts {
@@ -1186,8 +1185,12 @@ impl LivePorts {
             .url
             .as_deref()
             .filter(|url| !url.is_empty())
-            .and_then(|url| redis::Client::open(url).ok());
-        Self { pool, redis }
+            .and_then(|url| pidash_db::redis::open_client(url).ok());
+        Self {
+            pool,
+            redis,
+            state: state.clone(),
+        }
     }
 
     pub fn pool(&self) -> &PgPool {
@@ -1246,151 +1249,147 @@ impl RunnerPorts for LivePorts {
     }
 
     async fn drain_for_runner_by_id(&self, runner_id: uuid::Uuid) -> Result<(), PortError> {
-        // D-14 provider pending (PIDASHCONV-546 fixtures only): the
-        // matcher still runs on the Python plane until cutover.
-        tracing::warn!(%runner_id, "drain_for_runner_by_id: D-14 provider pending; skipped");
-        Ok(())
+        // `matcher.py:298-304`: real matcher drain (PIDASHCONV-862).
+        // Unisolated in Python (`_pause_and_drain` propagates), so a
+        // failure propagates to the caller.
+        let runner = self.state.settings().runner.clone();
+        pidash_services::runner_sessions::live_drains::drain_for_runner_by_id(
+            &self.pool,
+            self.redis.as_ref(),
+            &runner,
+            runner_id,
+        )
+        .await
+        .map(|_| ())
+        .map_err(|error| PortError::Transport(error.to_string()))
     }
 
     async fn drain_pod_by_id(&self, pod_id: uuid::Uuid) -> Result<(), PortError> {
-        tracing::warn!(%pod_id, "drain_pod_by_id: D-14 provider pending; skipped");
-        Ok(())
+        // `matcher.py:242-251`: real matcher pod drain (PIDASHCONV-862).
+        let runner = self.state.settings().runner.clone();
+        pidash_services::runner_sessions::live_drains::drain_pod_by_id(
+            &self.pool,
+            self.redis.as_ref(),
+            &runner,
+            pod_id,
+        )
+        .await
+        .map(|_| ())
+        .map_err(|error| PortError::Transport(error.to_string()))
     }
 
     async fn post_run_orchestration(&self, run_id: uuid::Uuid) -> Result<(), PortError> {
-        // D-12 provider pending (fixtures only): isolated in Python, so
-        // no response byte depends on it.
-        tracing::warn!(%run_id, "post_run_orchestration: D-12 provider pending; skipped");
+        // Thin caller of the public jobs driver (OVL-06): disarm,
+        // deferred pause, pending-entry fire, each isolated (logged,
+        // still `Ok`). Note: the pending-fire `?error` payload renders
+        // the jobs `sqlx::Error` where this method rendered
+        // `PortError::Transport` — the static message is unchanged.
+        let settings = self.state.settings();
+        pidash_jobs::orchestration::post_run_orchestration(
+            &self.pool,
+            &settings.cloud_agent,
+            &settings.managed_runner,
+            self.state.toolsets().clone(),
+            run_id,
+        )
+        .await;
         Ok(())
     }
 
-    async fn complete_project_move_handoff(&self, run_id: uuid::Uuid) -> Result<(), PortError> {
-        tracing::warn!(%run_id, "complete_project_move_handoff: D-12 provider pending; skipped");
-        Ok(())
+    async fn post_run_orchestration_in_tx<'t>(
+        &self,
+        tx: pidash_db::tx::Transaction<'t>,
+        pool: &'t PgPool,
+        run_id: uuid::Uuid,
+    ) -> Result<pidash_db::tx::Transaction<'t>, PortError> {
+        // Thin caller of the public jobs driver (OVL-06).
+        let settings = self.state.settings();
+        let tx = pidash_jobs::orchestration::post_run_orchestration_in_tx(
+            tx,
+            pool,
+            &settings.cloud_agent,
+            &settings.managed_runner,
+            crate::project_move_handoff::RedisAdmissionCache {
+                client: client_from_settings(self.state.settings()),
+            },
+            self.state.toolsets().clone(),
+            run_id,
+        )
+        .await;
+        Ok(tx)
+    }
+
+    fn complete_project_move_handoff(
+        &self,
+        run_id: uuid::Uuid,
+        terminal_created_by: Option<uuid::Uuid>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), PortError>> + Send + '_>>
+    {
+        // `complete_project_move_handoff(run_id)` (`service.py:644-732`):
+        // the api-crate twin (own transaction, committed, then the
+        // handoff tx's own post-commit effects: the terminal pairs —
+        // queued copy plus the inline apply under the crum user — then
+        // the pod drains). The jobs live executor only enqueues the
+        // terminal effects, so a replacement-run failure comment kept
+        // `created_by_id` NULL until the worker posted it
+        // (PIDASHCONV-1514). Isolated in Python (the terminal
+        // transition already committed), so a failure is logged by the
+        // caller.
+        Box::pin(async move {
+            crate::project_move_handoff::complete_project_move_handoff(
+                &self.pool,
+                &self.state,
+                run_id,
+                terminal_created_by,
+            )
+            .await
+            .map(|_| ())
+            .map_err(|()| PortError::Transport("project move handoff failed".to_owned()))
+        })
     }
 
     async fn agent_system_user_id(&self) -> Result<uuid::Uuid, PortError> {
-        // `get_agent_system_user` (`orchestration/workpad.py:44-71`):
-        // get-or-create on the unique username, refusing a
-        // non-bot collision. Real: pause/failure comments need the row.
-        let row: Option<(uuid::Uuid, bool)> =
-            sqlx::query_as(r#"SELECT "id", "is_bot" FROM "users" WHERE "username" = $1"#)
-                .bind(AGENT_USERNAME)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|error| PortError::Transport(error.to_string()))?;
-        if let Some((id, is_bot)) = row {
-            if !is_bot {
-                return Err(PortError::Transport(format!(
-                    "User {AGENT_USERNAME:?} exists but is not a bot"
-                )));
-            }
-            return Ok(id);
-        }
-        let id = uuid::Uuid::new_v4();
-        let inserted: Result<Option<(uuid::Uuid,)>, sqlx::Error> = sqlx::query_as(
-            r#"INSERT INTO "users"
-               ("id", "username", "email", "first_name", "last_name", "is_bot", "password")
-               VALUES ($1, $2, $3, $4, $5, TRUE, $6)
-               ON CONFLICT ("username") DO NOTHING
-               RETURNING "id""#,
-        )
-        .bind(id)
-        .bind(AGENT_USERNAME)
-        .bind(AGENT_USER_EMAIL)
-        .bind(AGENT_USER_FIRST_NAME)
-        .bind(AGENT_USER_LAST_NAME)
-        .bind(unusable_password())
-        .fetch_optional(&self.pool)
-        .await;
-        match inserted {
-            Ok(Some((id,))) => Ok(id),
-            _ => {
-                // Lost the get-or-create race: re-read the winner.
-                let row: Option<(uuid::Uuid, bool)> =
-                    sqlx::query_as(r#"SELECT "id", "is_bot" FROM "users" WHERE "username" = $1"#)
-                        .bind(AGENT_USERNAME)
-                        .fetch_optional(&self.pool)
-                        .await
-                        .map_err(|error| PortError::Transport(error.to_string()))?;
-                match row {
-                    Some((id, true)) => Ok(id),
-                    Some(_) => Err(PortError::Transport(format!(
-                        "User {AGENT_USERNAME:?} exists but is not a bot"
-                    ))),
-                    None => Err(PortError::Transport(
-                        "agent user missing after race".to_owned(),
-                    )),
-                }
-            }
-        }
+        // Thin caller of the public identity driver (OVL-06): the
+        // own-transaction wrapper over `get_agent_system_user`
+        // (PIDASHCONV-1525 moved the flow to `domain::identity`).
+        pidash_services::domain::identity::agent_system_user_id(&self.pool)
+            .await
+            .map_err(|error| PortError::Transport(error.to_string()))
     }
 
     async fn dispatch_waiting(&self, workspace_id: uuid::Uuid) -> Result<(), PortError> {
-        // D-11 provider pending: unisolated in Python (the capacity
-        // marker stays unset on failure), but no contract input covers
-        // the marker timing.
-        tracing::warn!(%workspace_id, "dispatch_waiting: D-11 provider pending; skipped");
-        Ok(())
+        // `dispatch_waiting(workspace_id)` (`dispatch.py:20-48`): lease and
+        // offer queued cloud runs up to workspace capacity (D-11). Disabled
+        // instances answer `0` without touching the database. Unisolated in
+        // Python (the capacity marker stays unset on failure).
+        let cloud = self.state.settings().cloud_agent.clone();
+        pidash_jobs::dispatch::dispatch_waiting(
+            &self.pool,
+            &cloud,
+            workspace_id,
+            chrono::Utc::now(),
+        )
+        .await
+        .map(|_| ())
+        .map_err(|error| PortError::Transport(error.to_string()))
     }
 
     async fn emit_terminal_effects(&self, run_id: uuid::Uuid) -> Result<(), PortError> {
-        emit_celery(
-            &self.pool,
-            TERMINAL_EFFECTS_TASK,
-            vec![Value::String(run_id.to_string())],
-        )
-        .await
-        .map_err(PortError::Transport)
+        // Thin caller of the public jobs driver (OVL-06).
+        pidash_jobs::runner_runs::emit_terminal_effects(&self.pool, run_id)
+            .await
+            .map_err(|error| PortError::Transport(error.to_string()))
     }
 
     async fn emit_fire_tick(&self, ticker_id: uuid::Uuid) -> Result<(), PortError> {
-        emit_celery(
-            &self.pool,
-            FIRE_TICK_TASK,
-            vec![Value::String(ticker_id.to_string())],
-        )
-        .await
-        .map_err(PortError::Transport)
+        pidash_jobs::tasks_ticker::scan::emit_fire_tick(&self.pool, ticker_id)
+            .await
+            .map_err(|error| PortError::Transport(error.to_string()))
     }
 
     fn redis_client(&self) -> Option<&redis::Client> {
         self.redis.as_ref()
     }
-}
-
-/// Agent bot identity (`orchestration/workpad.py:29-32`).
-const AGENT_USERNAME: &str = "pi_dash_agent";
-const AGENT_USER_EMAIL: &str = "agent@example.com";
-const AGENT_USER_FIRST_NAME: &str = "Pi Dash";
-const AGENT_USER_LAST_NAME: &str = "Agent";
-
-/// `runner.apply_agent_run_terminal_effects` (`runner/tasks.py:333`).
-const TERMINAL_EFFECTS_TASK: &str = "runner.apply_agent_run_terminal_effects";
-/// `pi_dash.bgtasks.agent_ticker.fire_tick` (D-10 task name).
-const FIRE_TICK_TASK: &str = "pi_dash.bgtasks.agent_ticker.fire_tick";
-
-/// `User.set_unusable_password()`: an unmatchable hash (never a valid
-/// encoded hash, so no password validates against it).
-fn unusable_password() -> String {
-    format!("!{}", uuid::Uuid::new_v4().as_simple())
-}
-
-/// Enqueue one task message onto the Postgres-backed queue (`rust_job_queue`),
-/// the `auth_session::email` `publish_message` shape without the broker.
-/// Enqueue errors propagate to the caller, which logs them — every emit site
-/// is isolated in Python.
-async fn emit_celery(pool: &sqlx::PgPool, task: &str, args: Vec<Value>) -> Result<(), String> {
-    let message = pidash_jobs::TaskMessage::new(task, args, Map::new());
-    let job = pidash_jobs::queue::NewJob::new(
-        message.task.clone(),
-        Value::Array(message.args.clone()),
-        Value::Object(message.kwargs.clone()),
-    );
-    pidash_jobs::queue::enqueue(pool, &job)
-        .await
-        .map(|_| ())
-        .map_err(|error| error.to_string())
 }
 
 /// Live enqueue: `_ensure_group` (`outbox.py:139-148`, BUSYGROUP
@@ -1541,21 +1540,20 @@ mod ports_tests {
     }
 
     #[test]
-    fn agent_identity_matches_workpad() {
-        assert_eq!(AGENT_USERNAME, "pi_dash_agent");
-        assert_eq!(AGENT_USER_EMAIL, "agent@example.com");
-        assert_eq!(AGENT_USER_FIRST_NAME, "Pi Dash");
-        assert_eq!(AGENT_USER_LAST_NAME, "Agent");
+    fn celery_task_names_match_python() {
+        // Both pins moved with their consts: TERMINAL_EFFECTS_TASK to
+        // `pidash_services::runner_runs::finalization` (re-exported by
+        // jobs) and FIRE_TICK_TASK to `pidash_jobs::tasks_ticker::scan`
+        // (same assertions there).
         assert_eq!(
-            TERMINAL_EFFECTS_TASK,
+            pidash_jobs::runner_runs::TERMINAL_EFFECTS_TASK,
             "runner.apply_agent_run_terminal_effects"
         );
-        assert_eq!(FIRE_TICK_TASK, "pi_dash.bgtasks.agent_ticker.fire_tick");
     }
 }
 
 // ---------------------------------------------------------------------------
-// L7 web handlers (runs + approvals + metrics + signals, PIDASHCONV-542)
+// L7 web handlers (runs + approvals + metrics, PIDASHCONV-542)
 // ---------------------------------------------------------------------------
 
 /// Whether `raw` matches a Django `<uuid:>` path segment: the converter

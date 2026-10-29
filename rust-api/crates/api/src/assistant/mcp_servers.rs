@@ -32,16 +32,21 @@
 
 use axum::body::Body;
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
+use chrono_tz::Tz;
 use http_body_util::BodyExt as _;
 use serde_json::{Map, Value};
 
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
 
+use super::common::{parse_body, request_content_type, BodyField, BodyMap, ParsedBody};
 use super::{error_response, json_body, pool_of, request_actor, Denial};
+use pidash_compat::validate::{
+    push_error, BLANK_MSG, INVALID_BOOL_MSG, INVALID_STR_MSG, NULL_MSG, REQUIRED_MSG,
+};
 
 /// `users/me/ai-assistant/mcp-servers/` (under the `api/` include).
 pub const SERVERS_PATH: &str = "/api/users/me/ai-assistant/mcp-servers/";
@@ -80,11 +85,6 @@ pub fn routes() -> Router<AppState> {
 
 /// DRF default messages used below (stable English strings, verified
 /// live against the installed DRF).
-const REQUIRED_MSG: &str = "This field is required.";
-const NULL_MSG: &str = "This field may not be null.";
-const BLANK_MSG: &str = "This field may not be blank.";
-const INVALID_STR_MSG: &str = "Not a valid string.";
-const INVALID_BOOL_MSG: &str = "Must be a valid boolean.";
 const INVALID_URL_MSG: &str = "Enter a valid URL.";
 const NULL_CHARS_MSG: &str = "Null characters are not allowed.";
 const NAME_REQUIRED_MSG: &str = "A name is required.";
@@ -222,7 +222,7 @@ fn validate_char_field(
         push_error(
             errors,
             field,
-            &format!("Ensure this field has no more than {max_length} characters."),
+            format!("Ensure this field has no more than {max_length} characters."),
         );
         clean = false;
     }
@@ -339,15 +339,6 @@ fn validate_bool_field(
             None
         }
     }
-}
-
-fn push_error(errors: &mut Map<String, Value>, field: &str, message: &str) {
-    errors
-        .entry(field.to_string())
-        .or_insert_with(|| Value::Array(Vec::new()))
-        .as_array_mut()
-        .expect("error list")
-        .push(Value::String(message.to_string()));
 }
 
 // ---------------------------------------------------------------------------
@@ -670,7 +661,7 @@ struct ServerRow {
 /// disambiguated with a counter. Showing the raw slug tells two
 /// colliding servers they share a prefix when they do not, so the list
 /// view resolves it (see `list_servers`).
-fn serialize_server(row: &ServerRow, effective_prefix: Option<&str>) -> Value {
+fn serialize_server(row: &ServerRow, effective_prefix: Option<&str>, timezone: &Tz) -> Value {
     let mut body = Map::with_capacity(9);
     body.insert("id".to_string(), Value::String(row.id.to_string()));
     body.insert("name".to_string(), Value::String(row.name.clone()));
@@ -692,11 +683,17 @@ fn serialize_server(row: &ServerRow, effective_prefix: Option<&str>) -> Value {
     body.insert("is_enabled".to_string(), Value::Bool(row.is_enabled));
     body.insert(
         "created_at".to_string(),
-        Value::String(crate::serializer::render_datetime(&row.created_at)),
+        Value::String(crate::serializer::render_datetime_in(
+            &row.created_at,
+            timezone,
+        )),
     );
     body.insert(
         "updated_at".to_string(),
-        Value::String(crate::serializer::render_datetime(&row.updated_at)),
+        Value::String(crate::serializer::render_datetime_in(
+            &row.updated_at,
+            timezone,
+        )),
     );
     body.insert(
         "effective_tool_prefix".to_string(),
@@ -711,7 +708,7 @@ fn serialize_server(row: &ServerRow, effective_prefix: Option<&str>) -> Value {
 fn blocked_response() -> Response {
     error_response(
         StatusCode::BAD_REQUEST,
-        &serde_json::json!({
+        serde_json::json!({
             "error": "url_blocked",
             "detail": "That server host is not allowed.",
         }),
@@ -723,7 +720,7 @@ fn blocked_response() -> Response {
 fn duplicate_name_response() -> Response {
     error_response(
         StatusCode::BAD_REQUEST,
-        &serde_json::json!({
+        serde_json::json!({
             "error": "duplicate_name",
             "detail": "You already have a tool server with that name.",
         }),
@@ -740,38 +737,85 @@ fn empty_not_found() -> Response {
         .expect("empty 404")
 }
 
-/// Parse a JSON object body: empty means `{}`; anything else must parse
-/// as JSON and be an object (DRF `ParseError` / non-dict shapes).
+/// Negotiate a create/patch body for [`validate_mcp`]: the field map,
+/// or the already-rendered failure response (DRF `ParseError` 400,
+/// `UnsupportedMediaType` 415, or the non-dict shapes below).
 #[allow(clippy::result_large_err)]
-fn parse_object_body(raw: &[u8]) -> Result<Map<String, Value>, Response> {
-    if raw.is_empty() {
-        return Ok(Map::new());
-    }
-    let value: Value = match serde_json::from_slice(raw) {
-        Ok(value) => value,
-        Err(err) => {
-            return Err(error_response(
-                StatusCode::BAD_REQUEST,
-                &serde_json::json!({"detail": format!("JSON parse error - {err}")}),
-            ));
+fn mcp_request_map(
+    raw: &[u8],
+    content_type: Option<&str>,
+    partial: bool,
+) -> Result<Map<String, Value>, Response> {
+    let fields = match parse_body(raw, content_type) {
+        Ok(ParsedBody::Object(map)) => map,
+        Ok(ParsedBody::Null) => {
+            return Err(validation_error_response(&non_dict_error(&Value::Null)));
         }
+        Ok(ParsedBody::Scalar(value)) => {
+            return Err(validation_error_response(&non_dict_error(&value)));
+        }
+        Err(failure) => return Err(failure.into_response()),
     };
+    let mut data = validation_map(&fields);
+    // HTML forms cannot express an unchecked checkbox: on create, a
+    // missing `is_enabled` arrives as `False` (DRF `default_empty_html`,
+    // `fields.py`), while JSON omits it (the view's `True` default) and
+    // PATCH leaves it untouched (partial skips missing either way).
+    if !partial && !data.contains_key("is_enabled") && is_html_content_type(content_type) {
+        data.insert("is_enabled".to_owned(), Value::Bool(false));
+    }
+    Ok(data)
+}
+
+/// A negotiated object body as the serializer validation expects it:
+/// JSON/form values pass through; a file part where a scalar belongs
+/// is the `UploadedFile` Django hands the serializer, which both
+/// `CharField` and `BooleanField` reject as invalid (verified live) —
+/// the empty array takes those same invalid arms below.
+fn validation_map(fields: &BodyMap) -> Map<String, Value> {
+    let mut data = Map::new();
+    for (key, field) in fields {
+        let value = match field {
+            BodyField::Json(value) => value.clone(),
+            BodyField::File { .. } => Value::Array(Vec::new()),
+        };
+        data.insert(key.clone(), value);
+    }
+    data
+}
+
+/// Whether the body ran through an HTML parser (urlencoded or multipart,
+/// essence-matched like [`parse_body`]): only then does DRF substitute
+/// `default_empty_html` for missing fields.
+fn is_html_content_type(content_type: Option<&str>) -> bool {
+    let Some(raw) = content_type else {
+        return false;
+    };
+    let essence = raw.split(';').next().unwrap_or("").trim().to_lowercase();
+    essence == "application/x-www-form-urlencoded" || essence == "multipart/form-data"
+}
+
+/// The `non_field_errors` 400 for a non-object JSON body: `null` parses
+/// to `None` and the serializer answers its `null` message — not the
+/// dict-shape one — while any other scalar names its DRF type
+/// (`BaseSerializer.run_validation` / `to_internal_value`, verified
+/// live against DRF 3.15).
+fn non_dict_error(value: &Value) -> Map<String, Value> {
     match value {
-        Value::Object(fields) => Ok(fields),
-        // A JSON `null` body parses to `None`, and the serializer
-        // answers its `null` message — not the dict-shape one.
-        Value::Null => Err(validation_error_response(&no_data_error())),
-        Value::Bool(_) => Err(validation_error_response(&dtype_error("bool"))),
+        Value::Null => no_data_error(),
+        Value::Bool(_) => dtype_error("bool"),
         Value::Number(num) => {
             let kind = if num.is_i64() || num.is_u64() {
                 "int"
             } else {
                 "float"
             };
-            Err(validation_error_response(&dtype_error(kind)))
+            dtype_error(kind)
         }
-        Value::String(_) => Err(validation_error_response(&dtype_error("str"))),
-        Value::Array(_) => Err(validation_error_response(&dtype_error("list"))),
+        Value::String(_) => dtype_error("str"),
+        Value::Array(_) => dtype_error("list"),
+        // Unreachable: objects negotiate to `ParsedBody::Object` above.
+        Value::Object(_) => dtype_error("dict"),
     }
 }
 
@@ -802,7 +846,7 @@ fn dtype_error(kind: &str) -> Map<String, Value> {
 
 /// Render a field-error dict 400 (`raise_exception=True`).
 fn validation_error_response(errors: &Map<String, Value>) -> Response {
-    error_response(StatusCode::BAD_REQUEST, &Value::Object(errors.clone()))
+    error_response(StatusCode::BAD_REQUEST, Value::Object(errors.clone()))
 }
 
 /// Set/clear the encrypted auth header (`_apply_auth_header`,
@@ -812,7 +856,8 @@ fn validation_error_response(errors: &Map<String, Value>) -> Response {
 /// crypto `AssistantError` renders as its code/detail/status; an
 /// operational failure propagates to the generic 500.
 #[allow(clippy::result_large_err)]
-fn apply_auth_header(
+async fn apply_auth_header(
+    state: &AppState,
     encrypted: &mut Option<Vec<u8>>,
     auth_header: Option<&str>,
 ) -> Result<(), Response> {
@@ -823,13 +868,15 @@ fn apply_auth_header(
         *encrypted = None;
         return Ok(());
     }
-    match super::encrypt_secret(header) {
+    let config = super::common::crypto_config(state);
+    match super::common::encrypt_api_key(&config, header).await {
         Ok(token) => {
             *encrypted = Some(token);
             Ok(())
         }
-        Err(super::SecretError::Assistant(error)) => Err(super::assistant_error_response(&error)),
-        Err(super::SecretError::Transport(_)) => Err(Denial::ServerError.into_response()),
+        Err(err) => Err(super::common::crypto_failure(err, |error| {
+            super::assistant_error_response(error)
+        })),
     }
 }
 
@@ -886,9 +933,15 @@ async fn list_servers(
     let effective = pidash_services::assistant::mcp::unique_prefixes(&enabled);
     let body: Vec<Value> = rows
         .iter()
-        .map(|row| serialize_server(row, effective.get(&row.id.to_string()).map(String::as_str)))
+        .map(|row| {
+            serialize_server(
+                row,
+                effective.get(&row.id.to_string()).map(String::as_str),
+                &actor.timezone,
+            )
+        })
         .collect();
-    json_body(StatusCode::OK, &Value::Array(body))
+    json_body(StatusCode::OK, Value::Array(body))
 }
 
 /// `POST`: validate, SSRF-guard, duplicate-name check, server-cap
@@ -898,6 +951,7 @@ async fn list_servers(
 async fn create_server(
     State(state): State<AppState>,
     extension: Option<axum::Extension<SessionHandle>>,
+    headers: HeaderMap,
     body: Body,
 ) -> Response {
     let pool = match pool_of(&state) {
@@ -912,7 +966,7 @@ async fn create_server(
         Ok(collected) => collected.to_bytes(),
         Err(_) => return Denial::ServerError.into_response(),
     };
-    let data = match parse_object_body(&raw) {
+    let data = match mcp_request_map(&raw, request_content_type(&headers), false) {
         Ok(data) => data,
         Err(response) => return response,
     };
@@ -942,7 +996,7 @@ async fn create_server(
         Ok(count) if count >= limit as i64 => {
             return error_response(
                 StatusCode::BAD_REQUEST,
-                &serde_json::json!({
+                serde_json::json!({
                     "error": "too_many_servers",
                     "detail": format!(
                         "You can have at most {limit} tool servers. Remove one before adding another."
@@ -954,7 +1008,9 @@ async fn create_server(
         Err(denial) => return denial.into_response(),
     }
     let mut encrypted: Option<Vec<u8>> = None;
-    if let Err(response) = apply_auth_header(&mut encrypted, attrs.auth_header.as_deref()) {
+    if let Err(response) =
+        apply_auth_header(&state, &mut encrypted, attrs.auth_header.as_deref()).await
+    {
         return response;
     }
     let id = uuid::Uuid::new_v4();
@@ -988,7 +1044,7 @@ async fn create_server(
     };
     json_body(
         StatusCode::CREATED,
-        &serialize_server(
+        serialize_server(
             &ServerRow {
                 id,
                 name,
@@ -999,6 +1055,7 @@ async fn create_server(
                 updated_at: saved.try_get("updated_at").unwrap_or(now),
             },
             None,
+            &actor.timezone,
         ),
     )
 }
@@ -1011,6 +1068,7 @@ async fn patch_server(
     State(state): State<AppState>,
     Path(server_id_raw): Path<String>,
     extension: Option<axum::Extension<SessionHandle>>,
+    headers: HeaderMap,
     body: Body,
 ) -> Response {
     let pool = match pool_of(&state) {
@@ -1031,7 +1089,7 @@ async fn patch_server(
         Ok(collected) => collected.to_bytes(),
         Err(_) => return Denial::ServerError.into_response(),
     };
-    let data = match parse_object_body(&raw) {
+    let data = match mcp_request_map(&raw, request_content_type(&headers), true) {
         Ok(data) => data,
         Err(response) => return response,
     };
@@ -1062,8 +1120,12 @@ async fn patch_server(
     if let Some(is_enabled) = attrs.is_enabled {
         row.is_enabled = is_enabled;
     }
-    if let Err(response) =
-        apply_auth_header(&mut row.auth_header_encrypted, attrs.auth_header.as_deref())
+    if let Err(response) = apply_auth_header(
+        &state,
+        &mut row.auth_header_encrypted,
+        attrs.auth_header.as_deref(),
+    )
+    .await
     {
         return response;
     }
@@ -1089,7 +1151,10 @@ async fn patch_server(
         }
         Err(_) => return Denial::ServerError.into_response(),
     }
-    json_body(StatusCode::OK, &serialize_server(&row, None))
+    json_body(
+        StatusCode::OK,
+        serialize_server(&row, None, &actor.timezone),
+    )
 }
 
 /// `DELETE`: own-row lookup (404 on miss), delete, empty 204
@@ -1447,23 +1512,120 @@ mod tests {
             ("1.5", "float"),
             ("true", "bool"),
         ] {
-            let response = parse_object_body(raw.as_bytes()).expect_err("invalid");
-            let _ = (response, kind);
+            let value: Value = serde_json::from_str(raw).expect("json");
+            let errors = non_dict_error(&value);
+            assert_eq!(
+                errors.get("non_field_errors").expect("errors"),
+                &serde_json::json!([format!(
+                    "Invalid data. Expected a dictionary, but got {kind}."
+                )])
+            );
         }
         // A JSON `null` body parses to `None`: the serializer answers
         // `No data provided`, not the dict-shape message (verified live
         // against DRF 3.15).
-        let _ = parse_object_body(b"null").expect_err("invalid");
         assert_eq!(
-            no_data_error().get("non_field_errors").expect("errors"),
+            non_dict_error(&Value::Null)
+                .get("non_field_errors")
+                .expect("errors"),
             &serde_json::json!(["No data provided"])
         );
-        assert!(parse_object_body(b"").expect("empty").is_empty());
-        // The messages themselves:
-        let errors = validate_non_dict(&serde_json::json!([1, 2]));
+        // An empty body never runs the parsers: JSON is `{}`, while a
+        // form media type is still HTML input (DRF `_parse` returns an
+        // empty `QueryDict`), so create sees the missing-checkbox `False`.
+        let map = mcp_request_map(b"", Some("application/json"), false).expect("empty");
+        assert!(map.is_empty());
+        let map =
+            mcp_request_map(b"", Some("application/x-www-form-urlencoded"), false).expect("empty");
+        assert_eq!(map, fields(serde_json::json!({"is_enabled": false})));
+    }
+
+    #[test]
+    fn html_input_missing_is_enabled_is_false_on_create() {
+        const FORM: &str = "application/x-www-form-urlencoded";
+        const FORM_BODY: &[u8] = b"name=a&url=https://8.8.8.8/mcp";
+        // Form create: the missing checkbox arrives as `False` (DRF
+        // `default_empty_html`).
+        let map = mcp_request_map(FORM_BODY, Some(FORM), false).expect("form");
+        let attrs = validate_mcp(&map, false).expect("valid");
+        assert_eq!(attrs.is_enabled, Some(false));
+        // ... unless the form names it (DRF `TRUE_VALUES`).
+        let map = mcp_request_map(
+            b"name=a&url=https://8.8.8.8/mcp&is_enabled=True",
+            Some(FORM),
+            false,
+        )
+        .expect("form");
+        let attrs = validate_mcp(&map, false).expect("valid");
+        assert_eq!(attrs.is_enabled, Some(true));
+        // JSON create omits it (the view defaults to `True` downstream).
+        let map = mcp_request_map(
+            br#"{"name":"a","url":"https://8.8.8.8/mcp"}"#,
+            Some("application/json"),
+            false,
+        )
+        .expect("json");
+        assert!(!map.contains_key("is_enabled"));
+        // PATCH leaves a missing flag untouched on either input.
+        let map = mcp_request_map(FORM_BODY, Some(FORM), true).expect("form");
+        assert!(!map.contains_key("is_enabled"));
+    }
+
+    #[test]
+    fn file_parts_reject_as_invalid_scalars() {
+        // A file part where the serializer expects a scalar is the
+        // `UploadedFile` Django hands it: `CharField`/`BooleanField`
+        // answer their invalid messages (verified live).
+        let raw = concat!(
+            "--xyz\r\n",
+            "Content-Disposition: form-data; name=\"name\"; filename=\"n.txt\"\r\n",
+            "Content-Type: text/plain\r\n",
+            "\r\n",
+            "xx\r\n",
+            "--xyz\r\n",
+            "Content-Disposition: form-data; name=\"url\"\r\n",
+            "\r\n",
+            "https://8.8.8.8/mcp\r\n",
+            "--xyz--\r\n",
+        );
+        let map = mcp_request_map(
+            raw.as_bytes(),
+            Some("multipart/form-data; boundary=xyz"),
+            false,
+        )
+        .expect("multipart");
+        let errors = validate_mcp(&map, false).expect_err("errors");
         assert_eq!(
-            errors.get("non_field_errors").expect("errors"),
-            &serde_json::json!(["Invalid data. Expected a dictionary, but got list."])
+            errors,
+            fields(serde_json::json!({"name": ["Not a valid string."]}))
+        );
+
+        let raw = concat!(
+            "--xyz\r\n",
+            "Content-Disposition: form-data; name=\"name\"\r\n",
+            "\r\n",
+            "a\r\n",
+            "--xyz\r\n",
+            "Content-Disposition: form-data; name=\"url\"\r\n",
+            "\r\n",
+            "https://8.8.8.8/mcp\r\n",
+            "--xyz\r\n",
+            "Content-Disposition: form-data; name=\"is_enabled\"; filename=\"e.txt\"\r\n",
+            "Content-Type: text/plain\r\n",
+            "\r\n",
+            "true\r\n",
+            "--xyz--\r\n",
+        );
+        let map = mcp_request_map(
+            raw.as_bytes(),
+            Some("multipart/form-data; boundary=xyz"),
+            false,
+        )
+        .expect("multipart");
+        let errors = validate_mcp(&map, false).expect_err("errors");
+        assert_eq!(
+            errors,
+            fields(serde_json::json!({"is_enabled": ["Must be a valid boolean."]}))
         );
     }
 
@@ -1528,13 +1690,6 @@ mod tests {
         );
     }
 
-    fn validate_non_dict(value: &Value) -> Map<String, Value> {
-        match value {
-            Value::Array(_) => dtype_error("list"),
-            _ => dtype_error("other"),
-        }
-    }
-
     #[test]
     fn serialize_shape_orders_keys() {
         let id = uuid::Uuid::parse_str("12345678-1234-5678-1234-567812345678").expect("uuid");
@@ -1552,7 +1707,8 @@ mod tests {
                 .with_timezone(&chrono::Utc),
         };
         let rendered =
-            serde_json::to_string(&serialize_server(&row, Some("mcp_tools"))).expect("json");
+            serde_json::to_string(&serialize_server(&row, Some("mcp_tools"), &chrono_tz::UTC))
+                .expect("json");
         assert_eq!(
             rendered,
             "{\"id\":\"12345678-1234-5678-1234-567812345678\",\"name\":\"Tools\",\
@@ -1561,7 +1717,8 @@ mod tests {
              \"created_at\":\"2026-09-29T12:00:00Z\",\"updated_at\":\"2026-09-29T12:00:01Z\",\
              \"effective_tool_prefix\":\"mcp_tools\"}"
         );
-        let nulled = serde_json::to_string(&serialize_server(&row, None)).expect("json");
+        let nulled =
+            serde_json::to_string(&serialize_server(&row, None, &chrono_tz::UTC)).expect("json");
         assert!(nulled.ends_with("\"effective_tool_prefix\":null}"));
     }
 }
