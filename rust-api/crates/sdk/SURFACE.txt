@@ -388,7 +388,9 @@ pidash_sdk::ops::LiveGithubClient
 pidash_sdk::ops::LlmProfile
 pidash_sdk::ops::LogLine
 pidash_sdk::ops::MoveDomainOutcome
+pidash_sdk::ops::MoveGuards
 pidash_sdk::ops::MoveInput
+pidash_sdk::ops::MoveOptions
 pidash_sdk::ops::MovePostCommitHook
 pidash_sdk::ops::MoveRejection
 pidash_sdk::ops::OpsCommand

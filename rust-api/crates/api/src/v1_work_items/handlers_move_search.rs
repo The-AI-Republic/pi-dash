@@ -1033,7 +1033,17 @@ async fn move_inner(
         origin: Some(origin),
         web_base,
     };
-    let outcome = operations::issues::move_to_project(&deps, &ctx, &write, drain, creation).await?;
+    // Exactly the Django behavior: the gate checked the source project
+    // up front (target-only guards), no `updated_by` stamp, handoff on.
+    let outcome = operations::issues::move_to_project(
+        &deps,
+        &ctx,
+        &write,
+        domain_issues::MoveOptions::django(),
+        drain,
+        creation,
+    )
+    .await?;
     op_response(outcome)
 }
 

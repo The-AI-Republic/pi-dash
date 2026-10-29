@@ -3671,11 +3671,16 @@ pub struct MoveWrite<'a> {
 ///
 /// The caller already ran auth, the gate and body negotiation (see
 /// [`create`]); `drain`/`creation` are the move's post-commit drain and
-/// span-creation dependencies, built from the binary's seams.
+/// span-creation dependencies, built from the binary's seams. `options`
+/// is the caller's [`domain_issues::MoveOptions`], forwarded into the
+/// kernel input: the v1 handler passes
+/// [`domain_issues::MoveOptions::django`]; callers the views do not
+/// serve (the MCP tools) pass their own (design D6).
 pub async fn move_to_project(
     deps: &Deps,
     ctx: &WriteCtx,
     write: &MoveWrite<'_>,
+    options: domain_issues::MoveOptions,
     drain: Arc<dyn domain_issues::MovePostCommitHook>,
     creation: domain_issues::CreationDeps,
 ) -> Result<Outcome, Error> {
@@ -3721,7 +3726,7 @@ pub async fn move_to_project(
                     web_base_url: web_base_owned.as_deref(),
                     now,
                     prev_state: prev,
-                    options: domain_issues::MoveOptions::django(),
+                    options,
                     creation,
                 },
             )
@@ -3786,8 +3791,11 @@ fn map_move_rejection(rejection: domain_issues::MoveRejection) -> Error {
         },
         domain_issues::MoveRejection::SourceNotFound => Error::NotFound,
         domain_issues::MoveRejection::TargetNotFound => Error::ProjectNotFound,
-        // Unreachable: this driver passes `TargetOnly` (the gate checked
-        // the source project up front) — the 500 signals the wiring bug.
+        // `Dual` callers only: the v1 handler passes `TargetOnly` (its
+        // gate checked the source project up front), while overlay
+        // drivers pre-check the source themselves — so the kernel's
+        // denial is their TOCTOU twin, and the 500 matches the driver's
+        // own internal mapping for those twins.
         domain_issues::MoveRejection::SourceDenied => Error::ServerError,
     }
 }
@@ -4065,6 +4073,465 @@ mod move_tests {
         assert_eq!(item.identifier, "PROJ-42");
         assert_eq!(item.state, Some("Todo"));
         assert_eq!(item.state_group, Some("unstarted"));
+    }
+
+    // --- Live operation tests: the caller's `MoveOptions` reach the kernel ---
+
+    use crate::domain::issues_move::MoveCreationOutboxes;
+    use crate::domain::WriteActor;
+    use crate::orchestration::entries::{FireOutcome, FireRequest};
+    use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings};
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::Mutex;
+
+    async fn live_pool() -> Option<sqlx::PgPool> {
+        let url = match std::env::var("DATABASE_URL") {
+            Ok(url) => url,
+            Err(_) => {
+                eprintln!("skipping live-db test: DATABASE_URL is not set");
+                return None;
+            }
+        };
+        Some(
+            sqlx::postgres::PgPoolOptions::new()
+                .max_connections(2)
+                .connect(&url)
+                .await
+                .expect("connect to scratch DATABASE_URL"),
+        )
+    }
+
+    type CommentCall = (Uuid, Option<Uuid>, Option<Uuid>);
+
+    struct RecordingTransition {
+        comments: Mutex<Vec<CommentCall>>,
+        fires: Mutex<Vec<FireRequest>>,
+    }
+
+    impl IssueTransitionHook for RecordingTransition {
+        fn enqueue_completion_comment(
+            &self,
+            issue_id: Uuid,
+            prev_state_id: Option<Uuid>,
+            current_state_id: Option<Uuid>,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            self.comments
+                .lock()
+                .expect("lock")
+                .push((issue_id, prev_state_id, current_state_id));
+            Box::pin(async move {})
+        }
+
+        fn fire(
+            &self,
+            _actor_id: Uuid,
+            request: FireRequest,
+        ) -> Pin<Box<dyn Future<Output = Result<FireOutcome, ()>> + Send + '_>> {
+            self.fires.lock().expect("lock").push(request);
+            Box::pin(async move { Ok(FireOutcome::NoTransition) })
+        }
+    }
+
+    type EnqueueCall = (String, Vec<Value>, serde_json::Map<String, Value>);
+
+    struct RecordingEnqueue {
+        calls: Mutex<Vec<EnqueueCall>>,
+    }
+
+    impl TaskEnqueueHook for RecordingEnqueue {
+        fn enqueue_task(
+            &self,
+            task: &str,
+            args: Vec<Value>,
+            kwargs: serde_json::Map<String, Value>,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            self.calls
+                .lock()
+                .expect("lock")
+                .push((task.to_owned(), args, kwargs));
+            Box::pin(async move {})
+        }
+    }
+
+    struct RecordingDrain;
+
+    impl domain_issues::MovePostCommitHook for RecordingDrain {
+        fn drain_creation(
+            &self,
+            _outboxes: MoveCreationOutboxes,
+            _terminal_created_by: Option<Uuid>,
+        ) -> Pin<Box<dyn Future<Output = Result<(), domain_issues::MoveDrainError>> + Send + '_>>
+        {
+            Box::pin(async move { Ok(()) })
+        }
+
+        fn drain_pod(
+            &self,
+            _pod_id: Uuid,
+        ) -> Pin<Box<dyn Future<Output = Result<(), domain_issues::MoveDrainError>> + Send + '_>>
+        {
+            Box::pin(async move { Ok(()) })
+        }
+
+        fn send_cancel(
+            &self,
+            _runner_id: Uuid,
+            _run_id: Uuid,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            Box::pin(async move {})
+        }
+    }
+
+    struct FakeAdmission;
+
+    impl domain_issues::MoveAdmissionCache for FakeAdmission {
+        fn bucket_count(&self, _key: &str) -> Result<Option<i64>, String> {
+            Ok(None)
+        }
+
+        fn add_or_incr(&self, _key: &str, _timeout_secs: i64) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[derive(Debug)]
+    struct NoAssistant;
+
+    impl crate::extensions::AssistantModelSeam for NoAssistant {
+        fn generate_title(
+            &self,
+            _request: crate::extensions::TitleRequest,
+        ) -> crate::extensions::SeamFuture<'_, Result<String, crate::extensions::TitleError>>
+        {
+            Box::pin(async move { unreachable!("move tests never generate titles") })
+        }
+    }
+
+    fn test_creation_deps(pool: sqlx::PgPool) -> domain_issues::CreationDeps {
+        domain_issues::CreationDeps {
+            pool,
+            cloud: CloudAgentSettings {
+                enabled: false,
+                writes_enabled: false,
+                github_tools_enabled: false,
+                disabled_tools: Vec::new(),
+                reconcile_interval_secs: 0,
+                model_request_timeout_secs: 0,
+                execution_timeout_secs: 0,
+                run_soft_limit_secs: 0,
+                run_hard_limit_secs: 0,
+                stale_grace_secs: 0,
+                dispatch_lease_secs: 0,
+                dispatch_backoff_secs: 0,
+                dispatch_scan_interval_secs: 0,
+                sweep_interval_secs: 0,
+                dispatch_scan_batch: 0,
+                max_queue_age_secs: 0,
+                model_request_limit: 0,
+                tool_call_limit: 0,
+                write_call_limit: 0,
+                input_token_limit: 0,
+                output_token_limit: 0,
+                total_token_limit: 0,
+                max_output_tokens_per_request: 0,
+                max_queued_per_workspace: 0,
+                max_running_per_workspace: 0,
+                user_creation_rate_per_minute: 0,
+                workspace_creation_rate_per_minute: 0,
+                tool_timeout_secs: 0,
+                max_tool_result_bytes: 0,
+                max_prompt_bytes: 0,
+                max_final_result_bytes: 0,
+                max_events: 0,
+                block_private_urls: false,
+            },
+            managed: ManagedRunnerSettings {
+                enabled: false,
+                max_per_user_project: 0,
+                queued_max_age_secs: 0,
+                graceful_stop_secs: 0,
+                sweep_interval_secs: 0,
+                desktop_min_version: String::new(),
+            },
+            now_unix_secs: 0,
+            toolsets: Arc::new(crate::extensions::NoExtraToolsets),
+            assistant_seam: Arc::new(NoAssistant),
+            admission: Arc::new(FakeAdmission),
+        }
+    }
+
+    /// The MCP caller's options (`execute_cross_project_move`): dual
+    /// guards, the `updated_by` stamp, no handoff.
+    fn mcp_options() -> domain_issues::MoveOptions {
+        domain_issues::MoveOptions {
+            guards: domain_issues::MoveGuards::Dual,
+            stamp_updated_by: true,
+            handoff: false,
+            dispatch_immediate: None,
+        }
+    }
+
+    struct MoveScope {
+        slug: String,
+        actor_full: Uuid,
+        actor_limited: Uuid,
+        source_project: Uuid,
+        target_project: Uuid,
+        target_identifier: String,
+        issue_id: Uuid,
+    }
+
+    /// Seed one workspace with a source project (one issue, one backlog
+    /// state) and a target project (triage + default backlog states).
+    /// `actor_full` is a member of both projects; `actor_limited` of the
+    /// target only — so the MCP options succeed for the former and deny
+    /// the latter at the kernel's `Dual` source probe.
+    async fn seed_move_scope(pool: &sqlx::PgPool, tag: &str) -> MoveScope {
+        let actor_full = Uuid::new_v4();
+        let actor_limited = Uuid::new_v4();
+        let workspace_id = Uuid::new_v4();
+        let slug = format!("opmv-{tag}-{}", workspace_id.simple());
+        let source_project = Uuid::new_v4();
+        let target_project = Uuid::new_v4();
+        let source_state = Uuid::new_v4();
+        let issue_id = Uuid::new_v4();
+        let target_identifier = format!("M{:08X}", (target_project.as_u128() & 0xffff_ffff) as u32);
+
+        for actor in [actor_full, actor_limited] {
+            let username = format!("opmv-{tag}-{}", actor.simple());
+            sqlx::query(
+                "INSERT INTO users (id, password, username, email, first_name, last_name, avatar, \
+                 date_joined, created_at, updated_at, last_location, created_location, is_superuser, \
+                 is_managed, is_password_expired, is_active, is_staff, is_email_verified, \
+                 is_password_autoset, token, user_timezone, last_login_ip, last_logout_ip, \
+                 last_login_medium, last_login_uagent, is_bot, display_name, is_email_valid, \
+                 is_password_reset_required) VALUES ($1, '!', $2, $3, 'CT', 'User', '', now(), now(), \
+                 now(), '', '', false, false, false, true, false, true, false, $4, 'UTC', '', '', '', \
+                 '', false, $2, true, false)",
+            )
+            .bind(actor)
+            .bind(username.clone())
+            .bind(format!("{username}@example.test"))
+            .bind("t".repeat(64))
+            .execute(pool)
+            .await
+            .expect("seed user");
+        }
+        sqlx::query(
+            "INSERT INTO workspaces (id, created_at, updated_at, name, slug, timezone, \
+             background_color, owner_id) VALUES ($1, now(), now(), 'opmv ws', $2, 'UTC', '#ffffff', \
+             $3)",
+        )
+        .bind(workspace_id)
+        .bind(&slug)
+        .bind(actor_full)
+        .execute(pool)
+        .await
+        .expect("seed workspace");
+        for (id, identifier) in [
+            (
+                source_project,
+                format!("S{:08X}", (source_project.as_u128() & 0xffff_ffff) as u32),
+            ),
+            (target_project, target_identifier.clone()),
+        ] {
+            sqlx::query(
+                "INSERT INTO projects (id, name, description, network, identifier, workspace_id, \
+                 created_by_id, cycle_view, module_view, issue_views_view, page_view, intake_view, \
+                 archive_in, close_in, logo_props, is_time_tracking_enabled, is_issue_type_enabled, \
+                 guest_view_all_features, timezone, members_can_edit_states, repo_url, base_branch, \
+                 agent_default_interval_seconds, agent_default_max_ticks, agent_ticking_enabled, \
+                 is_default, agent_review_default_interval_seconds, default_agent_executor, \
+                 agent_test_default_interval_seconds, created_at, updated_at) VALUES ($1, \
+                 $2, '', 0, $3, $4, $5, true, true, true, true, false, 0, 0, '{}', true, \
+                 true, false, 'UTC', false, '', '', 0, 0, false, false, 0, '', 0, now(), now())",
+            )
+            .bind(id)
+            .bind(format!("opmv-project-{identifier}"))
+            .bind(identifier)
+            .bind(workspace_id)
+            .bind(actor_full)
+            .execute(pool)
+            .await
+            .expect("seed project");
+        }
+        for (project, member) in [
+            (source_project, actor_full),
+            (target_project, actor_full),
+            (target_project, actor_limited),
+        ] {
+            sqlx::query(
+                "INSERT INTO project_members (id, role, project_id, workspace_id, member_id, \
+                 view_props, default_props, sort_order, preferences, is_active, created_at, \
+                 updated_at) VALUES ($1, 15, $2, $3, $4, '{}', '{}', 65535, '{}', true, now(), now())",
+            )
+            .bind(Uuid::new_v4())
+            .bind(project)
+            .bind(workspace_id)
+            .bind(member)
+            .execute(pool)
+            .await
+            .expect("seed membership");
+        }
+        for (id, project, name, group, sequence, default) in [
+            (
+                source_state,
+                source_project,
+                "Backlog",
+                "backlog",
+                100.0,
+                false,
+            ),
+            (
+                Uuid::new_v4(),
+                target_project,
+                "Triage",
+                "triage",
+                100.0,
+                false,
+            ),
+            (
+                Uuid::new_v4(),
+                target_project,
+                "Backlog",
+                "backlog",
+                200.0,
+                true,
+            ),
+        ] {
+            sqlx::query(
+                "INSERT INTO states (id, created_at, updated_at, name, description, color, slug, \
+                 project_id, workspace_id, sequence, \"group\", \"default\", is_triage) VALUES \
+                 ($1, now(), now(), $2, '', '#ff0000', $3, $4, $5, $6, $7, $8, false)",
+            )
+            .bind(id)
+            .bind(name)
+            .bind(format!("opmv-{name}-{sequence}-{project}"))
+            .bind(project)
+            .bind(workspace_id)
+            .bind(sequence)
+            .bind(group)
+            .bind(default)
+            .execute(pool)
+            .await
+            .expect("seed state");
+        }
+        sqlx::query(
+            "INSERT INTO issues (id, created_at, updated_at, project_id, workspace_id, state_id, \
+             name, description_json, description_html, sequence_id, sort_order, priority, \
+             complexity_score, is_draft, git_work_branch, workpad) VALUES ($1, now(), now(), $2, \
+             $3, $4, 'opmv issue', '{}', '<p>opmv</p>', 3, 10000.0, 'none', 0, false, '', '')",
+        )
+        .bind(issue_id)
+        .bind(source_project)
+        .bind(workspace_id)
+        .bind(source_state)
+        .execute(pool)
+        .await
+        .expect("seed issue");
+
+        MoveScope {
+            slug,
+            actor_full,
+            actor_limited,
+            source_project,
+            target_project,
+            target_identifier,
+            issue_id,
+        }
+    }
+
+    async fn call_op_move(
+        pool: &sqlx::PgPool,
+        scope: &MoveScope,
+        actor: Uuid,
+    ) -> Result<Outcome, Error> {
+        let db = pidash_db::sea_orm_connection(pool);
+        let ctx = WriteCtx::new(WriteActor {
+            user_id: actor,
+            timezone: Some("UTC".to_owned()),
+        });
+        let deps = Deps {
+            pool: pool.clone(),
+            orm: db,
+            transition: Arc::new(RecordingTransition {
+                comments: Mutex::new(Vec::new()),
+                fires: Mutex::new(Vec::new()),
+            }),
+            enqueue: Arc::new(RecordingEnqueue {
+                calls: Mutex::new(Vec::new()),
+            }),
+        };
+        let target_ref = serde_json::json!(scope.target_identifier);
+        let write = MoveWrite {
+            slug: &scope.slug,
+            project_id: scope.source_project,
+            pk: scope.issue_id,
+            target_ref: &target_ref,
+            origin: None,
+            web_base: None,
+        };
+        let drain: Arc<dyn domain_issues::MovePostCommitHook> = Arc::new(RecordingDrain);
+        move_to_project(
+            &deps,
+            &ctx,
+            &write,
+            mcp_options(),
+            drain,
+            test_creation_deps(pool.clone()),
+        )
+        .await
+    }
+
+    /// The MCP options reach the kernel through the operation: the move
+    /// succeeds for a member of both projects and the `updated_by` stamp
+    /// lands on the row (NULL under `django()`) and in the render.
+    #[tokio::test]
+    async fn live_mcp_options_stamp_updated_by_through_operation() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let scope = seed_move_scope(&pool, "stamp").await;
+        let outcome = call_op_move(&pool, &scope, scope.actor_full)
+            .await
+            .expect("mcp-options move succeeds");
+        assert_eq!(outcome.status, 200);
+        let row: (Option<Uuid>, Uuid) =
+            sqlx::query_as("SELECT updated_by_id, project_id FROM issues WHERE id = $1")
+                .bind(scope.issue_id)
+                .fetch_one(&pool)
+                .await
+                .expect("moved row");
+        assert_eq!(row.0, Some(scope.actor_full));
+        assert_eq!(row.1, scope.target_project);
+        let body: Value = serde_json::from_str(&outcome.body).expect("json body");
+        assert_eq!(
+            body.get("updated_by").and_then(Value::as_str),
+            Some(scope.actor_full.to_string()).as_deref()
+        );
+    }
+
+    /// The MCP options' `Dual` guards reach the kernel through the
+    /// operation: without a source membership the kernel denies (a
+    /// `TargetOnly` call would sail through) and the operation answers
+    /// the 500 before writing anything.
+    #[tokio::test]
+    async fn live_mcp_dual_guards_deny_without_source_membership() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let scope = seed_move_scope(&pool, "dual").await;
+        let err = call_op_move(&pool, &scope, scope.actor_limited)
+            .await
+            .expect_err("dual denial");
+        assert_eq!(err, Error::ServerError);
+        let project: (Uuid,) = sqlx::query_as("SELECT project_id FROM issues WHERE id = $1")
+            .bind(scope.issue_id)
+            .fetch_one(&pool)
+            .await
+            .expect("unmoved row");
+        assert_eq!(project.0, scope.source_project);
     }
 }
 
