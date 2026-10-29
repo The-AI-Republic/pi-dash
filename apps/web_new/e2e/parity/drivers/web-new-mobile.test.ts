@@ -90,6 +90,7 @@ function pageOf(
         state.keys.push(key);
       },
     },
+    waitForTimeout: async () => undefined,
   } as unknown as Page;
   return state;
 }

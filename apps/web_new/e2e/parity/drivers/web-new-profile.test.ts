@@ -71,6 +71,7 @@ function pageOf(overrides: Partial<Record<string, unknown>> = {}): Page {
     locator: () => locator(),
     keyboard: { press: async () => undefined },
     waitForTimeout: async () => undefined,
+    waitForResponse: async () => ({}),
     on: () => undefined,
     removeListener: () => undefined,
     viewportSize: () => ({ width: 1280, height: 720 }),
@@ -1259,7 +1260,10 @@ describe("settings preferences (NEWFRONT-586, PROF-016..018)", () => {
           first: () => locator({ waitFor }),
         });
       },
-      getByTestId: () => locator({ waitFor, isVisible: async () => true }),
+      getByTestId: (id: string) =>
+        id === "layout-switcher-segmented"
+          ? locator({ locator: () => locator({ getAttribute: async () => "kanban" }) })
+          : locator({ waitFor, isVisible: async () => true }),
     });
     const driver = new WebNewDriver(page);
     await driver.layoutsSwitchTo("calendar");

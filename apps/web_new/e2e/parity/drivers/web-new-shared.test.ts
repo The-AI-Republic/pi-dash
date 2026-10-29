@@ -71,6 +71,7 @@ function pageOf(
     getByTestId: (id: string) => parts.testId?.(id) ?? node({ count: async () => 0 }),
     getByRole: (role: string, options?: unknown) => parts.role?.(role, options) ?? node({ count: async () => 0 }),
     locator: (selector: string) => parts.locator?.(selector) ?? node({ count: async () => 0 }),
+    waitForResponse: async () => ({}),
   } as unknown as Page;
 }
 
@@ -201,9 +202,11 @@ describe("web_new shared layout surfaces", () => {
     const waited: string[] = [];
     const page = pageOf({
       testId: (id: string) =>
-        node({
-          waitFor: async () => void waited.push(id),
-        }),
+        id === "layout-switcher-segmented"
+          ? switcher(["list", "spreadsheet", "kanban", "gantt_chart"], "list")
+          : node({
+              waitFor: async () => void waited.push(id),
+            }),
       locator: (selector: string) => {
         if (selector.startsWith("[data-layout=")) return node();
         return node({ count: async () => 0 });

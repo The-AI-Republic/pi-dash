@@ -88,6 +88,7 @@ function pageOf(parts: { testId?: (id: string) => Locator; locator?: (selector: 
     },
     waitForLoadState: async () => undefined,
     waitForTimeout: async () => undefined,
+    waitForResponse: async () => ({}),
   } as unknown as Page;
   return state;
 }
@@ -139,19 +140,33 @@ describe("web_new selection reads", () => {
 
 describe("web_new layout switching", () => {
   it("switches to the timeline through the segmented switcher", async () => {
-    const { page, selectors } = pageOf();
+    const { page, selectors } = pageOf({
+      testId: (id: string) =>
+        id === "layout-switcher-segmented"
+          ? locator({ locator: () => locator({ getAttribute: async () => "list" }) })
+          : locator(),
+    });
     await new WebNewDriver(page).switchIssueLayout("Timeline Layout");
     expect(selectors).toContain('[data-layout="gantt_chart"]');
   });
 
   it("maps a spacing and case variation of the list label", async () => {
-    const { page, selectors } = pageOf();
+    const { page, selectors } = pageOf({
+      testId: (id: string) =>
+        id === "layout-switcher-segmented"
+          ? locator({ locator: () => locator({ getAttribute: async () => "list" }) })
+          : locator(),
+    });
     await new WebNewDriver(page).switchIssueLayout("list  layout");
     expect(selectors).toContain('[data-layout="list"]');
   });
 
   it("swallows a switch failure in the best-effort list helper", async () => {
     const { page } = pageOf({
+      testId: (id: string) =>
+        id === "layout-switcher-segmented"
+          ? locator({ locator: () => locator({ getAttribute: async () => "kanban" }) })
+          : locator(),
       locator: () =>
         locator({
           click: async () => {
