@@ -2658,8 +2658,8 @@ pub mod states {
 
     /// `DELETE states/<state_id>/` (`views/state.py:225-249`,
     /// `SoftDeleteModel.delete()` → `save()`): `deleted_at` plus the
-    /// CRUM `updated_by` stamp. The related-objects sweep stays
-    /// driver-side.
+    /// `save()` stamps (`updated_at`, CRUM `updated_by`). The
+    /// related-objects sweep stays driver-side.
     pub async fn soft_delete<'e, E>(
         ex: E,
         id: Uuid,
@@ -2679,7 +2679,7 @@ pub mod states {
     }
 
     pub(crate) const STATE_SOFT_DELETE_SQL: &str =
-        "UPDATE states SET deleted_at = $1, updated_by_id = $2 WHERE id = $3";
+        "UPDATE states SET deleted_at = $1, updated_at = $1, updated_by_id = $2 WHERE id = $3";
     /// One state PATCH write: every setter column, fully resolved by
     /// the caller (input-or-current merge; the caller slugifies).
     /// `StateViewSet.partial_update` (`state/base.py:66-82`).
@@ -2843,7 +2843,7 @@ mod tests {
         );
         assert_eq!(
             super::states::STATE_SOFT_DELETE_SQL,
-            "UPDATE states SET deleted_at = $1, updated_by_id = $2 WHERE id = $3"
+            "UPDATE states SET deleted_at = $1, updated_at = $1, updated_by_id = $2 WHERE id = $3"
         );
         // The PATCH shell: the driver-built SET list, `$N` the id.
         assert_eq!(

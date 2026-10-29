@@ -156,8 +156,24 @@ def test_patch_reslugifies_without_name(seed, conn):
 def test_delete_empty(seed, conn):
     tag = db.new_tag()
     st = db.create_state(conn, seed["ws_a"]["id"], seed["project"]["id"], tag)
+    # SoftDeleteModel.delete() -> save(): auto_now stamps updated_at, so the
+    # row's updated_at must advance past its pre-delete value (PIDASHCONV-1647).
+    # Backdated first so the assertion is deterministic, not clock-racy.
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE states SET updated_at = updated_at - make_interval(secs => 5)"
+            " WHERE id = %s",
+            (st["id"],),
+        )
+    before = db.fetch_one(
+        conn, "SELECT updated_at FROM states WHERE id = %s", (st["id"],))
     http.delete(seed["keys"][KEY], f"{base(seed)}/{st['id']}/")
     http.get(seed["keys"][KEY], f"{base(seed)}/{st['id']}/", expect=404)
+    row = db.fetch_one(
+        conn, "SELECT deleted_at, updated_at FROM states WHERE id = %s",
+        (st["id"],))
+    assert row["deleted_at"] is not None
+    assert row["updated_at"] > before["updated_at"]
 
 
 def test_delete_default_400(seed, conn):
