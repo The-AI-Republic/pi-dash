@@ -206,64 +206,8 @@ pub async fn user_exists_by_email(pool: &sqlx::PgPool, email: &str) -> Result<bo
     Ok(exists)
 }
 
-// ---------------------------------------------------------------------------
-// User writes (`user.is_active = True; user.save()` / `set_password`)
-// ---------------------------------------------------------------------------
-
-/// `user.is_active = True; user.save()` (`activate_user.py:35-36`):
-/// `save()` rewrites the row with the normalized email, filled
-/// display name, staff escalation, possible token rotation, and the
-/// `auto_now` `updated_at`.
-pub async fn save_user_activation(
-    pool: &sqlx::PgPool,
-    id: uuid::Uuid,
-    write: &UserSaveWrite,
-) -> Result<(), sqlx::Error> {
-    let now = chrono::Utc::now();
-    sqlx::query(
-        r#"UPDATE "users" SET "is_active" = TRUE, "email" = $2, "display_name" = $3,
-                  "is_staff" = $4, "token" = $5, "token_updated_at" = $6, "updated_at" = $7
-           WHERE "id" = $1"#,
-    )
-    .bind(id)
-    .bind(&write.email)
-    .bind(&write.display_name)
-    .bind(write.is_staff)
-    .bind(&write.token)
-    .bind(write.token_updated_at)
-    .bind(now)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
-/// `user.set_password(password); user.is_password_autoset = False;
-/// user.save()` (`reset_password.py:62-64`).
-pub async fn save_user_password(
-    pool: &sqlx::PgPool,
-    id: uuid::Uuid,
-    encoded_password: &str,
-    write: &UserSaveWrite,
-) -> Result<(), sqlx::Error> {
-    let now = chrono::Utc::now();
-    sqlx::query(
-        r#"UPDATE "users" SET "password" = $2, "is_password_autoset" = FALSE,
-                  "email" = $3, "display_name" = $4, "is_staff" = $5,
-                  "token" = $6, "token_updated_at" = $7, "updated_at" = $8
-           WHERE "id" = $1"#,
-    )
-    .bind(id)
-    .bind(encoded_password)
-    .bind(&write.email)
-    .bind(&write.display_name)
-    .bind(write.is_staff)
-    .bind(&write.token)
-    .bind(write.token_updated_at)
-    .bind(now)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
+// NOTE: the `save_user_activation` / `save_user_password` writes lived
+// here; they moved to `pidash_services::domain::identity` (PIDASHCONV-1631).
 
 // ---------------------------------------------------------------------------
 // Instance admin (`create_instance_admin.py:32-35`)

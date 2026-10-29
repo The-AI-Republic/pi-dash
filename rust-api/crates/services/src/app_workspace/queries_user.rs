@@ -270,19 +270,7 @@ pub fn email_availability_exists_sql() -> String {
     "SELECT 1 FROM users WHERE users.email = :email AND NOT (users.id = :user) LIMIT 1".to_owned()
 }
 
-/// Email save (`:232-235`): `user.email = new_email`,
-/// `user.is_email_verified = False`, `user.save()`.
-///
-/// Django emits a full-row `UPDATE`; per the D-24 queries convention
-/// the builder lists the semantically-changed columns plus the
-/// `auto_now` stamp. `User.save()` (`db/models/user.py:154-177`)
-/// additionally lowercases the email (no-op — already normalized),
-/// backfills an empty `display_name` from the address, and rotates
-/// `token` iff `token_updated_at` is set (model-owned, PIDASHCONV-607).
-pub fn email_save_sql() -> String {
-    "UPDATE users SET email = :email, is_email_verified = FALSE, updated_at = :now WHERE id = :pk"
-        .to_owned()
-}
+pub use crate::domain::identity::email_save_sql;
 
 /// Session invalidation for `logout(request)` (`:241`, also `:355`):
 /// the session flush deletes the current session row by key
@@ -430,18 +418,7 @@ pub fn workspace_deactivate_scan_sql() -> String {
 /// `bulk_update` batch size (`:308`, `:310`): `batch_size=100`.
 pub const BULK_DEACTIVATE_BATCH_SIZE: usize = 100;
 
-/// Workspace bulk deactivation write (`:310`):
-/// `bulk_update(rows, ["is_active"], batch_size=100)`.
-///
-/// Ported bug 5: `bulk_update` bypasses `save()`, so `auto_now` does
-/// NOT stamp `updated_at`, and the write is pk-direct with NO
-/// `deleted_at` filter. The handler chunks `:pks` into batches of
-/// [`BULK_DEACTIVATE_BATCH_SIZE`]; an empty collection issues NO
-/// statement at all. (The project twin moved to
-/// `domain::projects::members`.)
-pub fn workspace_bulk_deactivate_sql() -> String {
-    "UPDATE workspace_members SET is_active = FALSE WHERE workspace_members.id IN (:pks)".to_owned()
-}
+pub use crate::domain::workspaces::members::workspace_bulk_deactivate_sql;
 
 /// Invite purge (`:313`):
 /// `WorkspaceMemberInvite.objects.filter(email=user.email).delete()`.
@@ -468,32 +445,9 @@ pub fn deactivate_session_purge_sql() -> String {
 /// the wire).
 pub const ONBOARDING_RESET_JSON: &str = r#"{"workspace_join": false, "profile_complete": false, "workspace_create": false, "workspace_invite": false}"#;
 
-/// Profile reset (`:319-339`): `Profile.objects.get(user=user)` (see
-/// [`profile_by_user_sql`]) then `save(update_fields=[
-/// "last_workspace_id", "is_tour_completed", "is_onboarded",
-/// "onboarding_step", "updated_at"])`.
-///
-/// Instance `save()` addresses the row by pk. `last_workspace_id` is
-/// a plain nullable `UUIDField`, not an FK (`user.py:236`).
-pub fn deactivate_profile_reset_sql() -> String {
-    "UPDATE profiles SET last_workspace_id = NULL, is_tour_completed = FALSE, is_onboarded = FALSE, onboarding_step = :step_json, updated_at = :now WHERE id = :pk".to_owned()
-}
+pub use crate::domain::identity::deactivate_profile_reset_sql;
 
-/// User deactivation save (`:342-349`): `is_password_autoset = True`,
-/// `set_password(uuid4().hex)`, `is_active = False`,
-/// `last_logout_ip/time` stamps, full `save()`.
-///
-/// Django emits a full-row `UPDATE`; per convention the builder lists
-/// the semantically-changed columns plus `updated_at`. `:hash` is the
-/// PBKDF2 rendering of a fresh `uuid4().hex` (Django `set_password`
-/// format — the handler hashes, this module binds). `last_logout_ip`
-/// comes from `user_ip(request)` (`:347`), `last_logout_time` from
-/// `timezone.now()` (`:348`). (`user_deactivation_email.delay(...)`
-/// at `:352` is owned by PIDASHCONV-614; `logout(request)` at `:355`
-/// is [`session_flush_sql`].)
-pub fn deactivate_user_save_sql() -> String {
-    "UPDATE users SET password = :hash, is_password_autoset = TRUE, is_active = FALSE, last_logout_ip = :ip, last_logout_time = :now, updated_at = :now WHERE id = :pk".to_owned()
-}
+pub use crate::domain::identity::deactivate_user_save_sql;
 
 // ---------------------------------------------------------------------------
 // Unit 4a — accounts + profile (views/user/base.py:373-462)
@@ -519,38 +473,17 @@ pub fn account_detail_sql() -> String {
         .to_owned()
 }
 
-/// Account delete (`:419`): instance `.delete()` on a model WITHOUT
-/// the soft-delete mixin — a HARD `DELETE` addressed by pk, with no
-/// related-object task.
-pub fn account_hard_delete_sql() -> String {
-    "DELETE FROM accounts WHERE accounts.id = :pk".to_owned()
-}
+pub use crate::domain::identity::account_hard_delete_sql;
 
 /// Onboard-patch `update_fields` (`:380`).
 pub const ONBOARD_UPDATE_FIELDS: &[&str] = &["is_onboarded", "updated_at"];
 
-/// Onboard patch (`:375-380`): `Profile.objects.get(user_id=...)`
-/// (see [`profile_by_user_sql`]) then
-/// `save(update_fields=["is_onboarded", "updated_at"])`.
-///
-/// Ported bug 6: the value is the raw
-/// `request.data.get("is_onboarded", False)` (`:376`) — no serializer
-/// validation or coercion runs; whatever JSON value the client sent
-/// binds at `:value` (defaulting to `False` only when the key is
-/// absent).
-pub fn onboard_patch_sql() -> String {
-    "UPDATE profiles SET is_onboarded = :value, updated_at = :now WHERE id = :pk".to_owned()
-}
+pub use crate::domain::identity::onboard_patch_sql;
 
 /// Tour-patch `update_fields` (`:388`).
 pub const TOUR_UPDATE_FIELDS: &[&str] = &["is_tour_completed", "updated_at"];
 
-/// Tour patch (`:386-388`): same shape as [`onboard_patch_sql`] for
-/// `is_tour_completed` (`request.data.get("is_tour_completed",
-/// False)`, `:387` — likewise unvalidated, ported bug 6).
-pub fn tour_patch_sql() -> String {
-    "UPDATE profiles SET is_tour_completed = :value, updated_at = :now WHERE id = :pk".to_owned()
-}
+pub use crate::domain::identity::tour_patch_sql;
 
 /// Profile locked read (`:455`):
 /// `Profile.objects.select_for_update().get(user=request.user)`
@@ -562,61 +495,8 @@ pub fn profile_lock_sql() -> String {
     "SELECT profiles.* FROM profiles WHERE profiles.user_id = :user FOR UPDATE".to_owned()
 }
 
-/// `profiles` concrete columns in `_meta` order minus the pk:
-/// the full-row `UPDATE` SET set for [`profile_full_save_sql`]
-/// (`user.py:223-271` declared order over the `TimeAuditModel` pair —
-/// abstract parents first, then declared fields).
-pub const PROFILE_SAVE_COLUMNS: &[&str] = &[
-    "created_at",
-    "updated_at",
-    "user_id",
-    "theme",
-    "is_app_rail_docked",
-    "is_tour_completed",
-    "onboarding_step",
-    "use_case",
-    "role",
-    "is_onboarded",
-    "last_workspace_id",
-    "billing_address_country",
-    "billing_address",
-    "has_billing_address",
-    "company_name",
-    "notification_view_mode",
-    "is_smooth_cursor_enabled",
-    "is_mobile_onboarded",
-    "mobile_onboarding_step",
-    "mobile_timezone_auto_set",
-    "language",
-    "start_of_the_week",
-    "goals",
-    "background_color",
-    "is_navigation_tour_completed",
-    "has_marketing_email_consent",
-    "is_subscribed_to_changelog",
-    "product_tour",
-    "settings",
-];
-
-/// Profile patch save (`:456-461`): `ProfileSerializer.save()` issues
-/// a full-row `UPDATE` — `settings` included, since the instance
-/// carries it whether or not the serializer may write it (`:448-449`).
-///
-/// The `settings` merge (`user_settings.merge_settings`, `:460`) runs
-/// BEFORE this write and is handler-owned (PIDASHCONV-620); by the
-/// time this statement executes, `:settings` already holds the merged
-/// bag. Every column renders as `col = :col`; the row is addressed
-/// by pk.
-pub fn profile_full_save_sql() -> String {
-    let mut set_clause = String::new();
-    for (i, col) in PROFILE_SAVE_COLUMNS.iter().enumerate() {
-        if i > 0 {
-            set_clause.push_str(", ");
-        }
-        let _ = write!(set_clause, "{col} = :{col}");
-    }
-    format!("UPDATE profiles SET {set_clause} WHERE id = :pk")
-}
+pub use crate::domain::identity::profile_full_save_sql;
+pub use crate::domain::identity::PROFILE_SAVE_COLUMNS;
 
 // ---------------------------------------------------------------------------
 // Unit 4b — API tokens (views/api.py:20-72)

@@ -57,6 +57,7 @@ use chrono::{DateTime, Utc};
 use pidash_compat::db::is_unique_violation;
 use sea_orm::ActiveValue::Set;
 use sea_orm::{ActiveModelTrait, EntityTrait};
+use std::fmt::Write as _;
 use uuid::Uuid;
 
 use super::error::DomainError;
@@ -1749,6 +1750,256 @@ pub mod account {
         after["id_token"] = serde_json::Value::from(tokens.id_token_or_default());
         after
     }
+}
+
+// ---------------------------------------------------------------------------
+// app_workspace user templates (PIDASHCONV-1631; relocated verbatim from
+// `crate::app_workspace::queries_user`, whose `pub use` shims keep the
+// handler paths stable). The api handlers splice these `:placeholder`
+// templates with `positional()` plus model-owned columns, so the writes
+// execute handler-side until those call sites migrate to executing twins.
+// ---------------------------------------------------------------------------
+
+/// Email save (`:232-235`): `user.email = new_email`,
+/// `user.is_email_verified = False`, `user.save()`.
+///
+/// Django emits a full-row `UPDATE`; per the D-24 queries convention
+/// the builder lists the semantically-changed columns plus the
+/// `auto_now` stamp. `User.save()` (`db/models/user.py:154-177`)
+/// additionally lowercases the email (no-op — already normalized),
+/// backfills an empty `display_name` from the address, and rotates
+/// `token` iff `token_updated_at` is set (model-owned, PIDASHCONV-607).
+pub fn email_save_sql() -> String {
+    "UPDATE users SET email = :email, is_email_verified = FALSE, updated_at = :now WHERE id = :pk"
+        .to_owned()
+}
+
+/// Profile reset (`:319-339`): `Profile.objects.get(user=user)` (see
+/// [`crate::app_workspace::queries_user::profile_by_user_sql`]) then
+/// `save(update_fields=["last_workspace_id", "is_tour_completed",
+/// "is_onboarded", "onboarding_step", "updated_at"])`.
+///
+/// Instance `save()` addresses the row by pk. `last_workspace_id` is
+/// a plain nullable `UUIDField`, not an FK (`user.py:236`).
+pub fn deactivate_profile_reset_sql() -> String {
+    "UPDATE profiles SET last_workspace_id = NULL, is_tour_completed = FALSE, is_onboarded = FALSE, onboarding_step = :step_json, updated_at = :now WHERE id = :pk".to_owned()
+}
+
+/// User deactivation save (`:342-349`): `is_password_autoset = True`,
+/// `set_password(uuid4().hex)`, `is_active = False`,
+/// `last_logout_ip/time` stamps, full `save()`.
+///
+/// Django emits a full-row `UPDATE`; per convention the builder lists
+/// the semantically-changed columns plus `updated_at`. `:hash` is the
+/// PBKDF2 rendering of a fresh `uuid4().hex` (Django `set_password`
+/// format — the handler hashes and binds). `last_logout_ip`
+/// comes from `user_ip(request)` (`:347`), `last_logout_time` from
+/// `timezone.now()` (`:348`). (`user_deactivation_email.delay(...)`
+/// at `:352` is owned by PIDASHCONV-614; `logout(request)` at `:355`
+/// is [`crate::app_workspace::queries_user::session_flush_sql`].)
+pub fn deactivate_user_save_sql() -> String {
+    "UPDATE users SET password = :hash, is_password_autoset = TRUE, is_active = FALSE, last_logout_ip = :ip, last_logout_time = :now, updated_at = :now WHERE id = :pk".to_owned()
+}
+
+/// Account delete (`:419`): instance `.delete()` on a model WITHOUT
+/// the soft-delete mixin — a HARD `DELETE` addressed by pk, with no
+/// related-object task.
+pub fn account_hard_delete_sql() -> String {
+    "DELETE FROM accounts WHERE accounts.id = :pk".to_owned()
+}
+
+/// Onboard patch (`:375-380`): `Profile.objects.get(user_id=...)`
+/// (see [`crate::app_workspace::queries_user::profile_by_user_sql`])
+/// then `save(update_fields=["is_onboarded", "updated_at"])`.
+///
+/// Ported bug 6: the value is the raw
+/// `request.data.get("is_onboarded", False)` (`:376`) — no serializer
+/// validation or coercion runs; whatever JSON value the client sent
+/// binds at `:value` (defaulting to `False` only when the key is
+/// absent).
+pub fn onboard_patch_sql() -> String {
+    "UPDATE profiles SET is_onboarded = :value, updated_at = :now WHERE id = :pk".to_owned()
+}
+
+/// Tour patch (`:386-388`): same shape as [`onboard_patch_sql`] for
+/// `is_tour_completed` (`request.data.get("is_tour_completed",
+/// False)`, `:387` — likewise unvalidated, ported bug 6).
+pub fn tour_patch_sql() -> String {
+    "UPDATE profiles SET is_tour_completed = :value, updated_at = :now WHERE id = :pk".to_owned()
+}
+
+/// `profiles` concrete columns in `_meta` order minus the pk:
+/// the full-row `UPDATE` SET set for [`profile_full_save_sql`]
+/// (`user.py:223-271` declared order over the `TimeAuditModel` pair —
+/// abstract parents first, then declared fields).
+pub const PROFILE_SAVE_COLUMNS: &[&str] = &[
+    "created_at",
+    "updated_at",
+    "user_id",
+    "theme",
+    "is_app_rail_docked",
+    "is_tour_completed",
+    "onboarding_step",
+    "use_case",
+    "role",
+    "is_onboarded",
+    "last_workspace_id",
+    "billing_address_country",
+    "billing_address",
+    "has_billing_address",
+    "company_name",
+    "notification_view_mode",
+    "is_smooth_cursor_enabled",
+    "is_mobile_onboarded",
+    "mobile_onboarding_step",
+    "mobile_timezone_auto_set",
+    "language",
+    "start_of_the_week",
+    "goals",
+    "background_color",
+    "is_navigation_tour_completed",
+    "has_marketing_email_consent",
+    "is_subscribed_to_changelog",
+    "product_tour",
+    "settings",
+];
+
+/// Profile patch save (`:456-461`): `ProfileSerializer.save()` issues
+/// a full-row `UPDATE` — `settings` included, since the instance
+/// carries it whether or not the serializer may write it (`:448-449`).
+///
+/// The `settings` merge (`user_settings.merge_settings`, `:460`) runs
+/// BEFORE this write and is handler-owned (PIDASHCONV-620); by the
+/// time this statement executes, `:settings` already holds the merged
+/// bag. Every column renders as `col = :col`; the row is addressed
+/// by pk.
+pub fn profile_full_save_sql() -> String {
+    let mut set_clause = String::new();
+    for (i, col) in PROFILE_SAVE_COLUMNS.iter().enumerate() {
+        if i > 0 {
+            set_clause.push_str(", ");
+        }
+        let _ = write!(set_clause, "{col} = :{col}");
+    }
+    format!("UPDATE profiles SET {set_clause} WHERE id = :pk")
+}
+
+// ---------------------------------------------------------------------------
+// ops user saves (PIDASHCONV-1631; relocated verbatim from
+// `pidash_db::ops::users`, which cannot own covered-table writes).
+// Management commands run each statement in autocommit, so the twins
+// stay executor-generic with `Utc::now()` sampled inside, as before.
+// ---------------------------------------------------------------------------
+
+const SAVE_USER_ACTIVATION_SQL: &str = r#"UPDATE "users" SET "is_active" = TRUE, "email" = $2, "display_name" = $3,
+                  "is_staff" = $4, "token" = $5, "token_updated_at" = $6, "updated_at" = $7
+           WHERE "id" = $1"#;
+
+/// `user.is_active = True; user.save()` (`activate_user.py:35-36`):
+/// `save()` rewrites the row with the normalized email, filled
+/// display name, staff escalation, possible token rotation, and the
+/// `auto_now` `updated_at`.
+pub async fn save_user_activation<'e, E>(
+    ex: E,
+    id: Uuid,
+    write: &pidash_db::ops::users::UserSaveWrite,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let now = Utc::now();
+    sqlx::query(SAVE_USER_ACTIVATION_SQL)
+        .bind(id)
+        .bind(&write.email)
+        .bind(&write.display_name)
+        .bind(write.is_staff)
+        .bind(&write.token)
+        .bind(write.token_updated_at)
+        .bind(now)
+        .execute(ex)
+        .await?;
+    Ok(())
+}
+
+const SAVE_USER_PASSWORD_SQL: &str = r#"UPDATE "users" SET "password" = $2, "is_password_autoset" = FALSE,
+                  "email" = $3, "display_name" = $4, "is_staff" = $5,
+                  "token" = $6, "token_updated_at" = $7, "updated_at" = $8
+           WHERE "id" = $1"#;
+
+/// `user.set_password(password); user.is_password_autoset = False;
+/// user.save()` (`reset_password.py:62-64`).
+pub async fn save_user_password<'e, E>(
+    ex: E,
+    id: Uuid,
+    encoded_password: &str,
+    write: &pidash_db::ops::users::UserSaveWrite,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let now = Utc::now();
+    sqlx::query(SAVE_USER_PASSWORD_SQL)
+        .bind(id)
+        .bind(encoded_password)
+        .bind(&write.email)
+        .bind(&write.display_name)
+        .bind(write.is_staff)
+        .bind(&write.token)
+        .bind(write.token_updated_at)
+        .bind(now)
+        .execute(ex)
+        .await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// v1 asset full-row user save (PIDASHCONV-1631; relocated verbatim from
+// `pidash_db::v1_assets::asset_queries`). The sea-query builder follows
+// the db-owned [`pidash_db::v1_assets::asset_queries::USER_COLUMNS`]
+// list, so a Django user-model sync cannot silently desync the SET.
+// ---------------------------------------------------------------------------
+
+/// `users` table for [`entity_user_save_sql`] (the db-layer literal is
+/// private to `asset_queries`).
+const ENTITY_USER_TABLE: &str = "users";
+
+/// `entity_asset_delete` user write (`asset.py:63-64,69-70`, server
+/// twins `:261-262,:267-268`): `user.save()` with no `update_fields`
+/// is a **full-row** save — every non-pk column in `_meta` order, pk
+/// in `WHERE`. The builder emits exactly that: `SET` over
+/// [`pidash_db::v1_assets::asset_queries::USER_COLUMNS`] minus `id`
+/// (`$1`–`$39`), `WHERE "users"."id" = $40`. Handlers bind the fetched
+/// row with `AvatarAssetId` / `CoverImageAssetId` nulled (see
+/// [`pidash_db::v1_assets::asset_queries::EntityClearTarget`]); the
+/// `NoOp` arm binds the row unchanged (and the handler skips the
+/// statement entirely — the view returns without touching the profile).
+///
+/// `User.save()` also lowercases/strips the email and rotates the
+/// token when `token_updated_at` is set (`db/models/user.py:162-170`);
+/// that value-shaping is handler-owned, like every other Python-side
+/// assignment on this path.
+pub fn entity_user_save_sql() -> String {
+    use pidash_db::v1_assets::asset_queries::USER_COLUMNS;
+    use sea_query::PostgresQueryBuilder;
+    use sea_query::{Alias, Expr, Query};
+    let mut stmt = Query::update();
+    stmt.table(Alias::new(ENTITY_USER_TABLE.to_owned()));
+    let mut bind = 1u32;
+    for col in USER_COLUMNS {
+        if *col == "id" {
+            continue;
+        }
+        stmt.value(
+            Alias::new((*col).to_owned()),
+            Expr::cust(format!("${bind}")),
+        );
+        bind += 1;
+    }
+    stmt.and_where(
+        Expr::col((Alias::new(ENTITY_USER_TABLE), Alias::new("id")))
+            .eq(Expr::cust(format!("${bind}"))),
+    );
+    stmt.to_string(PostgresQueryBuilder)
 }
 
 #[cfg(test)]
@@ -3902,5 +4153,126 @@ mod tests {
                 .expect("lca"),
             t0
         );
+    }
+
+    #[test]
+    fn entity_user_save_is_full_row_with_pk_last() {
+        let sql = entity_user_save_sql();
+        assert!(sql.starts_with("UPDATE \"users\" SET "), "{sql}");
+        // Every non-pk column bound in USER_COLUMNS order ($1-$39),
+        // pk last ($40) — Django save() shape.
+        assert!(sql.contains("\"password\" = $1"), "{sql}");
+        assert!(sql.contains("\"masked_at\" = $39"), "{sql}");
+        assert!(sql.contains("WHERE \"users\".\"id\" = ($40)"), "{sql}");
+        assert!(!sql.contains("\"id\" = $"), "{sql}");
+    }
+
+    #[test]
+    fn ops_save_sql_pins() {
+        // `save_user_activation` (`activate_user.py:35-36`): the active
+        // flag, the `User.save()` outputs, the stamp — pk in WHERE.
+        let act = SAVE_USER_ACTIVATION_SQL;
+        let mut cursor = 0;
+        for frag in [
+            "\"is_active\" = TRUE",
+            "\"email\" = $2",
+            "\"display_name\" = $3",
+            "\"is_staff\" = $4",
+            "\"token\" = $5",
+            "\"token_updated_at\" = $6",
+            "\"updated_at\" = $7",
+            "WHERE \"id\" = $1",
+        ] {
+            let found = act[cursor..]
+                .find(frag)
+                .unwrap_or_else(|| panic!("{frag} present"));
+            cursor += found + frag.len();
+        }
+        // `save_user_password` (`reset_password.py:62-64`): the hash plus
+        // the same save outputs, autoset cleared — pk in WHERE.
+        let pwd = SAVE_USER_PASSWORD_SQL;
+        let mut cursor = 0;
+        for frag in [
+            "\"password\" = $2",
+            "\"is_password_autoset\" = FALSE",
+            "\"email\" = $3",
+            "\"display_name\" = $4",
+            "\"is_staff\" = $5",
+            "\"token\" = $6",
+            "\"token_updated_at\" = $7",
+            "\"updated_at\" = $8",
+            "WHERE \"id\" = $1",
+        ] {
+            let found = pwd[cursor..]
+                .find(frag)
+                .unwrap_or_else(|| panic!("{frag} present"));
+            cursor += found + frag.len();
+        }
+    }
+
+    /// Ops-command saves round-trip: activation flips the flag plus the
+    /// `User.save()` outputs; the password save stores the hash and
+    /// clears autoset. Same temp-`users` shape as the agent-user tests.
+    #[tokio::test]
+    async fn live_ops_activation_and_password_saves() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let mut tx = pool.begin().await.expect("begin scratch tx");
+        sqlx::query(USERS_DDL)
+            .execute(&mut *tx)
+            .await
+            .expect("temp users");
+        let id = live_uuid("aaaaaaaaaaaa");
+        sqlx::query(
+            "INSERT INTO users (id, password, username, email, display_name, \
+             first_name, last_name, avatar, date_joined, created_at, updated_at, \
+             last_location, created_location, is_superuser, is_managed, \
+             is_password_expired, is_active, is_staff, is_email_verified, \
+             is_password_autoset, is_password_reset_required, token, last_login_ip, \
+             last_logout_ip, last_login_medium, last_login_uagent, is_bot, \
+             user_timezone, is_email_valid) \
+             VALUES ($1, 'old-hash', 'op', 'old@x.io', 'Old', 'O', 'L', '', \
+             now(), now(), now(), '', '', FALSE, FALSE, FALSE, FALSE, FALSE, \
+             FALSE, TRUE, FALSE, 'old-tok', '', '', '', '', FALSE, 'UTC', TRUE)",
+        )
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .expect("seed user");
+        let write = pidash_db::ops::users::UserSaveWrite {
+            email: "new@x.io".to_owned(),
+            display_name: "New".to_owned(),
+            is_staff: true,
+            token: "tok2".to_owned(),
+            token_updated_at: None,
+        };
+        save_user_activation(&mut *tx, id, &write)
+            .await
+            .expect("activate");
+        let row: (bool, String, String, bool, String) = sqlx::query_as(
+            "SELECT is_active, email, display_name, is_staff, token \
+             FROM users WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await
+        .expect("read back");
+        assert!(row.0);
+        assert_eq!(row.1, "new@x.io");
+        assert_eq!(row.2, "New");
+        assert!(row.3);
+        assert_eq!(row.4, "tok2");
+        save_user_password(&mut *tx, id, "pbkdf2$new", &write)
+            .await
+            .expect("password");
+        let row: (String, bool) =
+            sqlx::query_as("SELECT password, is_password_autoset FROM users WHERE id = $1")
+                .bind(id)
+                .fetch_one(&mut *tx)
+                .await
+                .expect("read back");
+        assert_eq!(row.0, "pbkdf2$new");
+        assert!(!row.1);
     }
 }
