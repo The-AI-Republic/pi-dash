@@ -3,8 +3,9 @@
 // See the LICENSE file for details.
 // The single module analytics sidebar (parity/specs/modules.md §1.3,
 // §9.1, MOD-033). The detail page mounts it read-write for admins and
-// members; the peek and archived peek mount the same tree with
-// `readOnly` and/or `archived`, so no surface gets a second variant. It
+// members; the live peek keeps that role-gated editing while its progress
+// slot mounts `readOnly`, and the archived peek mounts the same tree with
+// `readOnly` and `archived`, so no surface gets a second variant. It
 // shows the module's status, name, description, date range, lead,
 // members, completed-over-total work items and, only for a points
 // estimate system, completed-over-total points. Every edit is a partial
@@ -65,7 +66,10 @@ export interface ModuleAnalyticsSidebarProps {
   workspaceSlug: string;
   projectId: string;
   moduleId: string;
-  /** The peek's read-only mount; the detail page leaves it false. */
+  /**
+   * Force the fields read-only; the detail page and the live peek leave
+   * it false.
+   */
   readOnly?: boolean;
   /** The archived peek: every field is disabled even for an editor. */
   archived?: boolean;
