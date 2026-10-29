@@ -4,20 +4,3 @@
 # Fingerprints hash the statement, not line numbers: unrelated edits do not churn this list.
 # The list only shrinks: remove the entry in the same PR that removes the site.
 # Seeded at 5e249b4d (399 sites). Do not add new sites; move them into domain/ instead.
-crates/jobs/src/tasks_cleanup/dummy_data.rs | INSERT issue_assignees | c2cedf21ec47 | sql
-crates/jobs/src/tasks_cleanup/dummy_data.rs | INSERT issue_sequences | b5f228b9985d | sql
-crates/jobs/src/tasks_cleanup/dummy_data.rs | INSERT issues | 7f4e35179110 | sql
-crates/jobs/src/tasks_cleanup/dummy_data.rs | INSERT project_members | 7191acf7f986 | sql
-crates/jobs/src/tasks_cleanup/dummy_data.rs | INSERT project_members | c979a921807a | sql
-crates/jobs/src/tasks_cleanup/dummy_data.rs | INSERT projects | bb6bfbc7327a | sql
-crates/jobs/src/tasks_cleanup/dummy_data.rs | INSERT states | 626e25c227fc | sql
-crates/jobs/src/tasks_cleanup/workspace_seed.rs | INSERT issue_sequences | 22a08fa52d53 | sql
-crates/jobs/src/tasks_cleanup/workspace_seed.rs | INSERT issue_sequences | 22a08fa52d53 | sql #2
-crates/jobs/src/tasks_cleanup/workspace_seed.rs | INSERT issues | fe2cdd681dfe | sql
-crates/jobs/src/tasks_cleanup/workspace_seed.rs | INSERT project_members | c049ae59f680 | sql
-crates/jobs/src/tasks_cleanup/workspace_seed.rs | INSERT projects | 255333b455ac | sql
-crates/jobs/src/tasks_cleanup/workspace_seed.rs | INSERT states | e4c26285dc1c | sql
-crates/jobs/src/tasks_cleanup/workspace_seed.rs | INSERT workspace_members | 38f453e35a0a | sql
-crates/jobs/src/tasks_cleanup/workspace_seed.rs | UPDATE projects | 140bbcf424e7 | sql
-crates/jobs/src/tasks_webhooks/activity_dispatch.rs | UPDATE issues | 408189099ae3 | sql
-crates/jobs/src/tasks_webhooks/activity_dispatch.rs | UPDATE issues | 588a92ecf217 | sql

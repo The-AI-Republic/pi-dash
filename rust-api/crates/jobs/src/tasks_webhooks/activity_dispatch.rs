@@ -93,6 +93,7 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use pidash_db::Pools;
+use pidash_services::domain::issues::{touch_issue, touch_issues};
 use pidash_services::tasks_webhooks::activity_issue::{
     plan_create_comment, plan_create_cycle_issue, plan_create_issue, plan_create_module_issue,
     plan_delete_comment, plan_delete_cycle_issue, plan_delete_issue, plan_delete_module_issue,
@@ -306,11 +307,8 @@ pub const FIND_PROJECT_WORKSPACE_SQL: &str =
     r#"SELECT workspace_id FROM projects WHERE id = $1 AND deleted_at IS NULL"#;
 
 /// `Issue.objects.filter(pk=issue_id).first()` for the touch (`:1532`).
+/// The touch itself is [`pidash_services::domain::issues::touch_issue`].
 pub const FIND_ISSUE_SQL: &str = r#"SELECT id FROM issues WHERE id = $1 AND deleted_at IS NULL"#;
-
-/// `issue.updated_at = timezone.now(); save(update_fields=["updated_at"])`
-/// (`:1535-1536`).
-pub const TOUCH_ISSUE_SQL: &str = r#"UPDATE issues SET updated_at = NOW() WHERE id = $1"#;
 
 /// `IssueReaction.objects.filter(reaction, project_id,
 /// actor_id).values_list("id", flat=True).first()` (`:1082-1090`).
@@ -383,13 +381,6 @@ pub const FIND_CYCLE_SQL: &str =
 /// builder (`db_table = "modules"`).
 pub const FIND_MODULE_SQL: &str =
     r#"SELECT name FROM modules WHERE id = $1 AND deleted_at IS NULL"#;
-
-/// Per-record `updated_at` touches from the cycle/module builders
-/// (`activity_issue::CycleOutcome::touched_issue_ids`): one statement over
-/// the soft-filtered set — same final rows as the per-record guarded
-/// saves.
-pub const TOUCH_ISSUES_SQL: &str =
-    r#"UPDATE issues SET updated_at = NOW() WHERE id = ANY($1) AND deleted_at IS NULL"#;
 
 /// The `IssueFlatSerializer` projection for `issue_detail`
 /// (`serializers/issue.py:105-122`): id, name, description_json,
@@ -1825,9 +1816,11 @@ async fn persist(
             .iter()
             .map(|id| lookup_uuid(id, "record touches"))
             .collect::<Result<_, _>>()?;
-        sqlx::query(TOUCH_ISSUES_SQL)
-            .bind(touched)
-            .execute(pool)
+        // Per-record `updated_at` touches from the cycle/module builders
+        // (`activity_issue::CycleOutcome::touched_issue_ids`): one statement
+        // over the soft-filtered set — same final rows as the per-record
+        // guarded saves.
+        touch_issues(pool, &touched)
             .await
             .map_err(|error| DispatchError::Log(format!("record touches: {error}")))?;
     }
@@ -1900,10 +1893,7 @@ pub async fn run_activity<R: RedisOrigin>(
             .is_some();
         if found {
             // Own try/except-pass: touch failures never abort the build.
-            let _ = sqlx::query(TOUCH_ISSUE_SQL)
-                .bind(touch_id)
-                .execute(pool)
-                .await;
+            let _ = touch_issue(pool, touch_id).await;
         }
     }
     let collected = collect_rows(pool, &frame, call, project_id).await?;
