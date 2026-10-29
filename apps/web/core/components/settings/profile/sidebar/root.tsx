@@ -6,29 +6,30 @@
 
 // pi dash imports
 import { ScrollArea } from "@pi-dash/propel/scrollarea";
-import type { TProfileSettingsTabs } from "@pi-dash/types";
 import { cn } from "@pi-dash/utils";
 // local imports
 import { ProfileSettingsSidebarHeader } from "./header";
 import { ProfileSettingsSidebarItemCategories } from "./item-categories";
 
 type Props = {
-  activeTab: TProfileSettingsTabs;
   className?: string;
 };
 
 export function ProfileSettingsSidebarRoot(props: Props) {
-  const { activeTab, className } = props;
+  const { className } = props;
 
   return (
     <ScrollArea
       scrollType="hover"
       orientation="vertical"
       size="sm"
-      rootClassName={cn("shrink-0 overflow-y-scroll border-r border-r-subtle bg-surface-2 px-3 py-4", className)}
+      rootClassName={cn(
+        "h-full w-[250px] shrink-0 animate-fade-in overflow-y-scroll border-r border-r-subtle bg-surface-2 px-3 py-4",
+        className
+      )}
     >
       <ProfileSettingsSidebarHeader />
-      <ProfileSettingsSidebarItemCategories activeTab={activeTab} />
+      <ProfileSettingsSidebarItemCategories />
     </ScrollArea>
   );
 }

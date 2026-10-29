@@ -6,22 +6,22 @@
 
 import { ArrowLeft } from "lucide-react";
 import { observer } from "mobx-react";
+import { useParams } from "react-router";
 // pi dash imports
 import { useTranslation } from "@pi-dash/i18n";
 import { IconButton } from "@pi-dash/propel/icon-button";
 import { Avatar } from "@pi-dash/ui";
 // hooks
 import { useUser } from "@/hooks/store/user";
-import { useWorkspace } from "@/hooks/store/use-workspace";
 import { useAppRouter } from "@/hooks/use-app-router";
 import { getFileURL } from "@pi-dash/utils";
 
 export const ProfileSettingsSidebarHeader = observer(function ProfileSettingsSidebarHeader() {
   // router
   const router = useAppRouter();
+  const { workspaceSlug } = useParams();
   // store hooks
   const { data: currentUser } = useUser();
-  const { getWorkspaceRedirectionUrl } = useWorkspace();
   // translation
   const { t } = useTranslation();
 
@@ -33,7 +33,7 @@ export const ProfileSettingsSidebarHeader = observer(function ProfileSettingsSid
           size="base"
           icon={ArrowLeft}
           aria-label={t("Back to home")}
-          onClick={() => router.push(getWorkspaceRedirectionUrl())}
+          onClick={() => router.push(`/${workspaceSlug}/`)}
         />
         <p>{t("Profile settings")}</p>
       </div>
