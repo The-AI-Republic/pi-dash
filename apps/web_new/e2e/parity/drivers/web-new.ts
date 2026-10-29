@@ -47963,57 +47963,210 @@ export class WebNewDriver implements ParityDriver {
   }
 
   // --- Space engagement: votes, reactions, comments (NEWFRONT-451, SPC-047–057).
-  // --- Throwing stubs per the shared driver contract.
-  async spaceCommentOpenIssue(_anchor: string, _issueName: string, _view?: string): Promise<void> {
-    return todo("spaceCommentOpenIssue");
+  /** Decimal code-point form the API stores ("128077" for 👍). */
+  private static spaceNewEmojiCode(emoji: string): string {
+    return Array.from(emoji)
+      .map((char) => char.codePointAt(0))
+      .join("-");
+  }
+
+  /** Voter/reactor names from one hovered control's tooltip. */
+  private async spaceNewHoverNames(control: Locator): Promise<string[]> {
+    await this.page.mouse.move(5, 5);
+    await this.page
+      .waitForFunction(() => document.querySelectorAll('[role="tooltip"]').length === 0, null, { timeout: 5_000 })
+      .catch(() => {});
+    await control.hover({ timeout: WebNewDriver.WAIT_MS });
+    try {
+      await this.page.waitForFunction(
+        () =>
+          Array.from(document.querySelectorAll('[role="tooltip"]')).some((el) => (el.textContent ?? "").trim() !== ""),
+        null,
+        { timeout: 10_000 }
+      );
+    } catch {
+      return [];
+    }
+    const text = await this.page.evaluate(() => {
+      const tips = Array.from(document.querySelectorAll('[role="tooltip"]'));
+      const opened = tips.find((el) => (el.textContent ?? "").trim() !== "");
+      return opened ? (opened.textContent ?? "").trim() : "";
+    });
+    await this.page.mouse.move(5, 5);
+    if (text === "" || /^No .* yet\.?$/.test(text)) return [];
+    return text
+      .split(",")
+      .map((part) => part.replace(/\s*\(you\)\s*$/, "").trim())
+      .filter((part) => part.length > 0);
+  }
+
+  async spaceCommentOpenIssue(anchor: string, issueName: string, view = "list"): Promise<void> {
+    await this.page.goto(`/spaces/issues/${anchor}/?board=${view}`, { waitUntil: "domcontentloaded" });
+    await this.page.waitForLoadState("domcontentloaded");
+    const card = this.page.getByText(issueName, { exact: true }).first();
+    await card.waitFor({ timeout: 120_000 });
+    const listed = this.page
+      .waitForResponse((response) => response.url().includes("/comments") && response.request().method() === "GET", {
+        timeout: 60_000,
+      })
+      .catch(() => null);
+    await card.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.waitForFunction(() => new URL(window.location.href).searchParams.get("peekId") !== null, null, {
+      timeout: 60_000,
+    });
+    await this.spaceBoardPeekPanel().first().waitFor({ state: "visible", timeout: 60_000 });
+    await listed;
   }
 
   async spaceCommentAuthLanding(): Promise<SpaceAuthLanding> {
-    return todo("spaceCommentAuthLanding");
+    const url = new URL(this.page.url());
+    const landing: SpaceAuthLanding = {
+      onAuthGate: url.pathname === "/spaces/" || url.pathname === "/spaces",
+      returnAnchor: null,
+      returnView: null,
+      returnIssueId: null,
+    };
+    // The sign-in link keeps query punctuation literal, so peekId rides as
+    // its own outer param while the board view stays inside next_path.
+    landing.returnIssueId = url.searchParams.get("peekId");
+    const nextPath = url.searchParams.get("next_path");
+    if (nextPath === null) return landing;
+    const target = new URL(nextPath, url.origin);
+    landing.returnAnchor = /^\/issues\/([^/]+)\/?$/.exec(target.pathname)?.[1] ?? null;
+    if (landing.returnAnchor === null) return landing;
+    landing.returnView = target.searchParams.get("board");
+    return landing;
+  }
+
+  /** Read one up/down vote pair (count, hover voters, own-vote mark). */
+  private async spaceNewReadVotePair(up: Locator, down: Locator): Promise<SpaceVoteState> {
+    const read = async (button: Locator) => {
+      const count = Number.parseInt(((await button.innerText().catch(() => "")) ?? "").trim() || "0", 10);
+      const mine = (await button.getAttribute("aria-pressed").catch(() => null)) === "true";
+      return { count: Number.isNaN(count) ? 0 : count, voters: await this.spaceNewHoverNames(button), mine };
+    };
+    return { up: await read(up), down: await read(down) };
   }
 
   async spaceVoteOverlayVisible(): Promise<boolean> {
-    return todo("spaceVoteOverlayVisible");
+    return this.isShown(this.page.getByTestId("space-peek-votes"));
   }
 
   async spaceVoteOverlay(): Promise<SpaceVoteState> {
-    return todo("spaceVoteOverlay");
+    return this.spaceNewReadVotePair(
+      this.page.getByTestId("space-peek-vote-up"),
+      this.page.getByTestId("space-peek-vote-down")
+    );
   }
 
-  async spaceVoteClick(_direction: "up" | "down"): Promise<void> {
-    return todo("spaceVoteClick");
+  async spaceVoteClick(direction: "up" | "down"): Promise<void> {
+    await this.page
+      .getByTestId(direction === "up" ? "space-peek-vote-up" : "space-peek-vote-down")
+      .click({ timeout: 15_000 });
   }
 
-  async spaceVoteCardVisible(_anchor: string, _issueName: string): Promise<boolean> {
-    return todo("spaceVoteCardVisible");
+  /** One kanban card shell for an issue (the title link's card ancestor). */
+  private spaceNewKanbanCard(issueName: string): Locator {
+    return this.page
+      .locator("a", { hasText: issueName })
+      .first()
+      .locator('xpath=ancestor::*[@data-testid="space-board-card"][1]');
   }
 
-  async spaceVoteCard(_anchor: string, _issueName: string): Promise<SpaceVoteState> {
-    return todo("spaceVoteCard");
+  private async spaceNewOpenKanbanCard(anchor: string, issueName: string): Promise<Locator> {
+    await this.page.goto(`/spaces/issues/${anchor}/?board=kanban`, { waitUntil: "domcontentloaded" });
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.page.getByText(issueName, { exact: true }).first().waitFor({ timeout: 120_000 });
+    return this.spaceNewKanbanCard(issueName);
   }
 
-  async spaceVoteCardClick(_anchor: string, _issueName: string, _direction: "up" | "down"): Promise<void> {
-    return todo("spaceVoteCardClick");
+  async spaceVoteCardVisible(anchor: string, issueName: string): Promise<boolean> {
+    const card = await this.spaceNewOpenKanbanCard(anchor, issueName);
+    return this.isShown(card.getByTestId("space-card-votes"));
+  }
+
+  async spaceVoteCard(anchor: string, issueName: string): Promise<SpaceVoteState> {
+    const card = await this.spaceNewOpenKanbanCard(anchor, issueName);
+    return this.spaceNewReadVotePair(card.getByTestId("space-card-vote-up"), card.getByTestId("space-card-vote-down"));
+  }
+
+  async spaceVoteCardClick(anchor: string, issueName: string, direction: "up" | "down"): Promise<void> {
+    const card = await this.spaceNewOpenKanbanCard(anchor, issueName);
+    const button = card.getByTestId(direction === "up" ? "space-card-vote-up" : "space-card-vote-down");
+    // The card reads navigate fresh, so the write must land before this
+    // returns: an immediate re-navigation would abort the in-flight POST.
+    const landed = this.page
+      .waitForResponse(
+        (response) =>
+          response.url().includes("/votes/") &&
+          (response.request().method() === "POST" || response.request().method() === "DELETE"),
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .catch(() => null);
+    await button.click({ timeout: 15_000 });
+    await landed;
   }
 
   async spaceReactOverlayVisible(): Promise<boolean> {
-    return todo("spaceReactOverlayVisible");
+    return this.isShown(this.page.getByTestId("space-peek-reactions"));
   }
 
   async spaceReactGroups(): Promise<SpaceReactionGroup[]> {
-    return todo("spaceReactGroups");
+    const pills = this.page.getByTestId("space-peek-reaction");
+    const count = await pills.count();
+    const groups: SpaceReactionGroup[] = [];
+    for (let i = 0; i < count; i++) {
+      const pill = pills.nth(i);
+      const emoji = (
+        (
+          (await pill
+            .locator('span[aria-hidden="true"]')
+            .first()
+            .innerText()
+            .catch(() => "")) ?? ""
+        ).trim() ?? ""
+      ).trim();
+      const countText =
+        (await pill
+          .locator(".tabular-nums")
+          .first()
+          .innerText()
+          .catch(() => "0")) ?? "0";
+      const mine = (await pill.getAttribute("aria-pressed").catch(() => null)) === "true";
+      groups.push({
+        emoji,
+        count: Number.parseInt(countText.trim() || "0", 10),
+        mine,
+        users: await this.spaceNewHoverNames(pill),
+      });
+    }
+    return groups;
   }
 
   async spaceReactPick(): Promise<SpacePickedEmoji> {
-    return todo("spaceReactPick");
+    const open = async () => {
+      await this.page.getByTestId("space-peek-reaction-add").click({ timeout: 15_000 });
+      await this.page.getByTestId("space-peek-reaction-add-option").first().waitFor({ timeout: 10_000 });
+    };
+    try {
+      await open();
+    } catch {
+      await open();
+    }
+    const entry = this.page.getByTestId("space-peek-reaction-add-option").first();
+    await entry.waitFor({ timeout: 60_000 });
+    const emoji = (((await entry.textContent()) ?? "").trim() ?? "").trim();
+    if (emoji === "") throw new Error("[parity] first picker entry carried no character.");
+    await entry.click({ force: true, timeout: 15_000 });
+    return { emoji, code: WebNewDriver.spaceNewEmojiCode(emoji) };
   }
 
-  async spaceReactClickGroup(_emoji: string): Promise<void> {
-    return todo("spaceReactClickGroup");
+  async spaceReactClickGroup(emoji: string): Promise<void> {
+    await this.page.getByTestId("space-peek-reaction").filter({ hasText: emoji }).first().click({ timeout: 15_000 });
   }
 
   async spaceReactAddVisible(): Promise<boolean> {
-    return todo("spaceReactAddVisible");
+    return this.isShown(this.page.getByTestId("space-peek-reaction-add"));
   }
 
   async spaceCommentSection(): Promise<SpaceCommentSection> {
@@ -48108,8 +48261,20 @@ export class WebNewDriver implements ParityDriver {
     return todo("spaceCommentPeekMode");
   }
 
-  async spaceCommentOpenEmbed(_anchor: string, _issueName: string): Promise<void> {
-    return todo("spaceCommentOpenEmbed");
+  async spaceCommentOpenEmbed(anchor: string, issueName: string): Promise<void> {
+    // Establish an origin first: a fresh page is about:blank, against
+    // which the iframe's relative src cannot resolve.
+    await this.page.goto("/spaces/", { waitUntil: "domcontentloaded" });
+    await this.page.setContent(
+      `<!doctype html><html><body style="margin:0">` +
+        `<iframe src="/spaces/issues/${anchor}/?board=list" ` +
+        `style="width:1200px;height:900px;border:0" title="embedded board"></iframe></body></html>`
+    );
+    const frame = this.page.frameLocator("iframe");
+    const card = frame.getByText(issueName, { exact: true }).first();
+    await card.waitFor({ timeout: 120_000 });
+    await card.click({ timeout: WebNewDriver.WAIT_MS });
+    await frame.getByTestId("space-peek").first().waitFor({ state: "visible", timeout: 60_000 });
   }
 
   async spaceCommentEmbedSection(): Promise<SpaceCommentSection> {
@@ -48117,7 +48282,11 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async spaceReactEmbedAddVisible(): Promise<boolean> {
-    return todo("spaceReactEmbedAddVisible");
+    const frame = this.page.frameLocator("iframe");
+    return frame
+      .getByTestId("space-peek-reaction-add")
+      .isVisible()
+      .catch(() => false);
   }
 
   async spaceCommentEmbedMenuVisible(_index: number): Promise<boolean> {

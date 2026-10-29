@@ -51,7 +51,7 @@ export function SpaceCommentRow({
   const bodyHtml = spaceCommentBodyHtml(comment);
 
   return (
-    <div className="relative flex items-start gap-(--space-2)">
+    <div data-testid="space-comment-row" className="relative flex items-start gap-(--space-2)">
       <div className="relative px-1 pt-0.5">
         <Avatar
           name={author.name}
@@ -62,13 +62,20 @@ export function SpaceCommentRow({
       </div>
       <div className="flex min-w-0 flex-1 flex-col gap-(--space-1)">
         <div className="flex min-w-0 flex-wrap items-center gap-(--space-2)">
-          <span className="text-meta font-medium text-(--text)">{author.name}</span>
-          <p className="text-caption m-0 text-(--text-muted)" title={comment.created_at}>
+          <span data-testid="space-comment-author" className="text-meta font-medium text-(--text)">
+            {author.name}
+          </span>
+          <p
+            data-testid="space-comment-age"
+            className="text-caption m-0 text-(--text-muted)"
+            title={comment.created_at}
+          >
             {spaceMessage("comments.commented")} {age}
           </p>
           {folded ? (
             <button
               type="button"
+              data-testid="space-comment-fold"
               aria-expanded={expanded}
               className="text-caption cursor-pointer rounded-(--radius-control) text-(--text-muted) hover:text-(--text) focus-visible:ring-2 focus-visible:ring-(--accent) focus-visible:outline-none"
               onClick={() => {
@@ -90,7 +97,9 @@ export function SpaceCommentRow({
                 {":"}
               </span>
             )}
-            <RichTextView html={bodyHtml} label={spaceMessage("comments.bodyLabel")} resolveAsset={resolveAsset} />
+            <div data-testid="space-comment-body">
+              <RichTextView html={bodyHtml} label={spaceMessage("comments.bodyLabel")} resolveAsset={resolveAsset} />
+            </div>
           </div>
         ) : null}
         {showAux && reactions !== undefined ? reactions : null}
