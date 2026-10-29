@@ -5197,7 +5197,9 @@ export class WebNewDriver implements ParityDriver {
 
   /** A comment card, addressed by the words it shows. */
   private commentCard(text: string): Locator {
-    return this.page.getByRole("article", { hasText: text }).first();
+    // The options-form hasText does not filter these articles (it
+    // matches every card); only the chained filter narrows (NEWFRONT-818).
+    return this.page.getByRole("article").filter({ hasText: text }).first();
   }
 
   private composerBox(): Locator {

@@ -37,6 +37,7 @@ interface StubLocator {
   locator?: (selector: string) => StubLocator;
   getByRole?: (role: string, options?: unknown) => StubLocator;
   getByText?: (text: string, options?: unknown) => StubLocator;
+  filter?: (options?: unknown) => StubLocator;
   [key: string]: unknown;
 }
 
@@ -71,6 +72,7 @@ function locator(overrides: Partial<StubLocator> = {}): Locator {
     locator: () => node,
     getByRole: () => node,
     getByText: () => node,
+    filter: () => node,
   };
   for (const [name, value] of Object.entries(defaults)) {
     if (node[name] === undefined) node[name] = value;
@@ -122,7 +124,11 @@ function pageOf(
       if (role === "menuitem") {
         return parts.menuitem?.(String(options?.name)) ?? locator();
       }
-      if (role === "article") return cards(String((options as { hasText?: string } | undefined)?.hasText ?? ""));
+      if (role === "article") {
+        return locator({
+          filter: (filterOptions?: { hasText?: string }) => cards(String(filterOptions?.hasText ?? "")),
+        });
+      }
       if (role === "button") {
         return locator({
           click: async () => {
@@ -863,12 +869,14 @@ describe("web_new comments gate driver (NEWFRONT-818)", () => {
     page.page.getByRole = ((role: string, options?: { hasText?: string }) => {
       if (role === "article") {
         articles += 1;
-        if (articles === 1) {
-          expect(options?.hasText).toBe("@Parity Mention hi");
-          return locator({ first: () => hoverCard });
-        }
-        expect(options?.hasText).toBe("plain words");
-        return locator({ first: () => locator({ waitFor: async () => void steps.push("card") }) });
+        const wanted = articles === 1 ? "@Parity Mention hi" : "plain words";
+        const card = articles === 1 ? hoverCard : locator({ waitFor: async () => void steps.push("card") });
+        return locator({
+          filter: (filterOptions?: { hasText?: string }) => {
+            expect(filterOptions?.hasText).toBe(wanted);
+            return locator({ first: () => card });
+          },
+        });
       }
       return inner(role, options);
     }) as Page["getByRole"];

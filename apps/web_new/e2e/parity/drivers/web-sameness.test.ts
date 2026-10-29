@@ -10,7 +10,6 @@ import type { Locator, Page, Request, Route } from "@playwright/test";
 import { describe, expect, it } from "vitest";
 
 import { WebDriver } from "./web";
-import { WebNewDriver } from "./web-new";
 
 interface StubLocator {
   count?: () => Promise<number>;
@@ -247,18 +246,5 @@ describe("reaction control presence", () => {
   it("reports the issue reaction control present when a trigger sits above the feed", async () => {
     const spy = spyPage({ trigger: locator() });
     await expect(new WebDriver(spy.page).issueReactionControlVisible()).resolves.toBe(true);
-  });
-});
-
-describe("web_new sameness stubs", () => {
-  it("throw a named todo until the comments area lands there", async () => {
-    const page = spyPage();
-    const driver = new WebNewDriver(page.page);
-    await expect(driver.activityBeginTrafficSpy()).rejects.toThrow(/activityBeginTrafficSpy/);
-    await expect(driver.activityTrafficCounts()).rejects.toThrow(/activityTrafficCounts/);
-    await expect(driver.activityCommentReactionControlVisible("hello")).rejects.toThrow(
-      /activityCommentReactionControlVisible/
-    );
-    await expect(driver.issueReactionControlVisible()).rejects.toThrow(/issueReactionControlVisible/);
   });
 });

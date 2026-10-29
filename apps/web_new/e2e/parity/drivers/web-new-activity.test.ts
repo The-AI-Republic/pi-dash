@@ -21,6 +21,7 @@ interface StubLocator {
   locator?: (selector: string, options?: unknown) => StubLocator;
   getByRole?: (role: string, options?: unknown) => StubLocator;
   getByText?: (text: RegExp | string, options?: unknown) => StubLocator;
+  filter?: (options?: unknown) => StubLocator;
   evaluate?: (fn: (element: never, arg?: never) => unknown, arg?: unknown) => Promise<unknown>;
   evaluateAll?: (fn: (nodes: never[]) => unknown) => Promise<unknown>;
   boundingBox?: () => Promise<{ x: number; y: number; width: number; height: number } | null>;
@@ -52,6 +53,7 @@ function locator(overrides: Partial<StubLocator> = {}): Locator {
     locator: () => node,
     getByRole: () => node,
     getByText: () => node,
+    filter: () => node,
   };
   for (const [name, value] of Object.entries(defaults)) {
     if (node[name] === undefined) node[name] = value;
@@ -390,10 +392,14 @@ describe("activity feed driver methods", () => {
           });
         }
         if (role === "article") {
-          expect((options as { hasText?: unknown }).hasText).toBe("hello");
           return locator({
-            waitFor: async () => {
-              cardWaited += 1;
+            filter: (filterOptions?: { hasText?: unknown }) => {
+              expect(filterOptions?.hasText).toBe("hello");
+              return locator({
+                waitFor: async () => {
+                  cardWaited += 1;
+                },
+              });
             },
           });
         }
