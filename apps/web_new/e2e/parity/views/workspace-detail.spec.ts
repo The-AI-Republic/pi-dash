@@ -115,7 +115,7 @@ test(
 );
 
 test(
-  specTitle(["VIEW-038"], "locked customs hide display but keep toggle and add; guests see add"),
+  specTitle(["VIEW-038"], "locked customs: display always hidden; toggle and guest add diverge"),
   { tag: specTags(["VIEW-038"]) },
   async ({ driver }) => {
     // Intended (VIEW-038, spec §11/§16): a locked custom hides the filter
