@@ -4,10 +4,11 @@
 // See the LICENSE file for details.
 // The module quick look (parity/specs/modules.md §5, MOD-019): the panel
 // mounts the shared peek chrome with the module's name, a work-item
-// summary and the analytics sidebar read-only (plus slice L's progress
-// section), reads the archived record on the archived surface, shows a
-// missing state for a module that does not resolve, and closes through the
-// chrome.
+// summary and the analytics sidebar, whose fields stay role-editable on a
+// live mount (ARCH-025's live twin) while slice L's progress section
+// mounts read-only so its entries stay inert (MOD-034), reads the archived
+// record locked on the archived surface, shows a missing state for a module
+// that does not resolve, and closes through the chrome.
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -22,7 +23,7 @@ vi.mock("../../auth/index.js", () => ({
 }));
 
 // The sidebar's own suite covers its fields; here the panel's job is to
-// mount it read-only with the progress section and the right read.
+// mount it with the read-only progress section and the right read.
 vi.mock("./sidebar/index.js", async (importOriginal) => {
   const original = await importOriginal<Record<string, unknown>>();
   return {
@@ -143,7 +144,7 @@ describe("ModulePeekPanel", () => {
     expect(screen.getByTestId("modules-peek-skeleton")).toBeInTheDocument();
   });
 
-  it("fills the panel with the summary and lets an editor use the live sidebar", async () => {
+  it("fills the panel with the summary and keeps the live progress read-only for an editor", async () => {
     renderPanel();
     await waitFor(() => expect(screen.getByTestId("modules-peek-body")).toBeInTheDocument());
     expect(screen.getByRole("heading", { name: "Delivery" })).toBeInTheDocument();
@@ -151,24 +152,26 @@ describe("ModulePeekPanel", () => {
     expect(screen.getByTestId("modules-peek-summary")).toHaveTextContent("1/2 work items");
     const sidebar = screen.getByTestId("sidebar-stub");
     expect(sidebar).toHaveAttribute("data-module-id", MODULE);
-    // The live twin follows the role exactly as the detail page does, so
-    // ARCH-025 can compare it with the locked archived panel.
+    // The live twin's fields follow the role exactly as the detail page
+    // does, so ARCH-025 can compare it with the locked archived panel,
+    // while the progress section mounts read-only so its entries stay
+    // inert and write no filter (MOD-034).
     expect(sidebar).toHaveAttribute("data-read-only", "false");
     expect(sidebar).toHaveAttribute("data-archived", "false");
     expect(sidebar).toHaveAttribute("data-can-edit", "true");
     expect(sidebar).toHaveAttribute("data-has-progress", "true");
     const progress = screen.getByTestId("progress-stub");
-    expect(progress).toHaveAttribute("data-read-only", "false");
+    expect(progress).toHaveAttribute("data-read-only", "true");
     expect(progress).toHaveAttribute("data-archived", "false");
   });
 
-  it("mounts the live sidebar read-only for a viewer with no edit role", async () => {
+  it("mounts the live progress read-only for a viewer with no edit role", async () => {
     rolesHarness.role = 5;
     renderPanel();
     await waitFor(() => expect(screen.getByTestId("modules-peek-body")).toBeInTheDocument());
     expect(screen.getByTestId("sidebar-stub")).toHaveAttribute("data-can-edit", "false");
     expect(screen.getByTestId("sidebar-stub")).toHaveAttribute("data-read-only", "false");
-    expect(screen.getByTestId("progress-stub")).toHaveAttribute("data-read-only", "false");
+    expect(screen.getByTestId("progress-stub")).toHaveAttribute("data-read-only", "true");
   });
 
   it("falls back to the list's name while the detail read lands", async () => {

@@ -10,13 +10,14 @@
 // record the sidebar uses.
 //
 // The panel does not own its address: the screen hands it the close writer
-// and hides it when the key leaves. A live mount follows the viewer's
-// project role, so an editor can change the module from the panel exactly
-// as on the detail page (archives ARCH-025 compares the archived panel with
-// this live twin); an archived mount reads the archived detail and stays
-// read-only in every role. A module that no longer resolves shows the
-// missing state here (never a blank panel), while the address stays
-// reachable so the reader can close it.
+// and hides it when the key leaves. A live mount keeps the sidebar's
+// role-gated editing (archives ARCH-025 compares the archived panel with
+// this live twin) but its progress section mounts read-only, so breakdown
+// entries stay inert and write no filter while tabs still switch (MOD-034);
+// an archived mount reads the archived detail and stays read-only in every
+// role. A module that no longer resolves shows the missing state here
+// (never a blank panel), while the address stays reachable so the reader
+// can close it.
 
 import { Skeleton } from "@pidash/kit";
 import type { ApiClient, ModuleDetail, ArchivedModuleDetail } from "@pidash/api-client";
@@ -150,11 +151,13 @@ export function ModulePeekPanel({
             canEdit={canEdit}
             client={client}
             progress={
+              // Peek entries never filter: the section mounts read-only on
+              // live mounts too, so entries render inert (MOD-034).
               <ModuleProgressSection
                 workspaceSlug={workspaceSlug}
                 projectId={projectId}
                 moduleId={moduleId}
-                readOnly={archived}
+                readOnly
                 archived={archived}
                 canEdit={canEdit}
                 client={client}
