@@ -18,7 +18,7 @@ import * as React from "react";
 import type { CommentAccess } from "@pidash/api-client";
 
 import { CommentRichTextEditor, type RichTextEditorHandle } from "../../../shared/editor/index.js";
-import { commentEnterAction, COMMENT_IMAGE_UPLOADED_STATUS, isCommentBodyEmpty } from "./model.js";
+import { COMMENT_IMAGE_UPLOADED_STATUS, isCommentBodyEmpty } from "./model.js";
 import { useUploadCommentImage } from "./api.js";
 import { CommentMentionSuggestions, useCommentMentionPicker } from "./MentionSuggestions.js";
 
@@ -68,26 +68,34 @@ export function CommentComposer({
   const upload = useUploadCommentImage({ workspaceSlug, projectId });
   const empty = isCommentBodyEmpty(html);
   const busy = sending || uploads > 0;
+
   const mentions = useCommentMentionPicker({
     workspaceSlug,
     projectId,
     getHandle: () => handleRef.current,
     busy,
     empty,
+    submit: (liveHtml) => void post(onCreate, liveHtml),
   });
 
-  const clearDraft = (): void => {
+  function clearDraft(): void {
     assetsRef.current = [];
     mentions.reset();
     setHtml("<p></p>");
     setResetToken((value) => value + 1);
-  };
+  }
 
-  const post = async (via: (input: ComposerPost) => Promise<unknown>): Promise<void> => {
-    if (busy || empty) return;
+  // `liveHtml` is the draft as the editing surface holds it right now.
+  // Enter arrives before React renders the keystroke that filled the
+  // draft, so the `html` snapshot can still be the empty one while the
+  // editor already holds words (ISS-197).
+  async function post(via: (input: ComposerPost) => Promise<unknown>, liveHtml?: string | null): Promise<void> {
+    if (busy) return;
+    const body = liveHtml ?? html;
+    if (isCommentBodyEmpty(body)) return;
     setSending(true);
     try {
-      await via({ html, access, assetIds: assetsRef.current });
+      await via({ html: body, access, assetIds: assetsRef.current });
     } catch {
       // A refused post still clears the draft: parity pins the cleared
       // composer after a failed create (comments.md §11.3), the failure
@@ -96,7 +104,7 @@ export function CommentComposer({
     }
     clearDraft();
     setSending(false);
-  };
+  }
 
   const uploadImage = (file: File): void => {
     setUploads((count) => count + 1);
@@ -124,25 +132,22 @@ export function CommentComposer({
       }}
       onKeyDown={(event) => {
         if (event.key === "Escape") {
-          if (mentions.mentionOpen) {
-            event.preventDefault();
-            mentions.dismiss();
-          }
+          if (!mentions.mentionOpen) return;
+          event.preventDefault();
+          mentions.dismiss();
           return;
         }
         if (event.key !== "Enter" || event.shiftKey || event.ctrlKey || event.metaKey) return;
-        if (event.defaultPrevented) {
-          // The editing surface already swallowed this Enter (a pick or
-          // a no-op); only a pick still needs its insertion (CMT-011).
-          if (commentEnterAction({ mentionOpen: mentions.mentionOpen, busy, empty }) === "pick-mention") {
-            mentions.pickFirst();
-          }
-          return;
-        }
+        // Inside the editing surface the surface owns plain Enter, at key
+        // time and from the live document: it consumes the key itself and
+        // a pick or no-op is already decided by then (CMT-011, ISS-197).
+        // An Enter from anywhere else in the form (a toolbar control, the
+        // file picker) still posts from the newest draft we can read.
+        if (event.defaultPrevented) return;
         // IME composition commits with Enter: leave that Enter to the input.
         if (event.nativeEvent.isComposing) return;
         event.preventDefault();
-        void post(onCreate);
+        void post(onCreate, handleRef.current?.getHtml());
       }}
     >
       <React.Suspense fallback={<div className="min-h-16" />}>

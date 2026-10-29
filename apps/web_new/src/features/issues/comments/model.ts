@@ -174,6 +174,17 @@ export function rewriteCommentImageSrcs(html: string, mapping: ReadonlyMap<strin
   return document.body.innerHTML;
 }
 
+/**
+ * Whether a draft is empty, asking the React snapshot and the live
+ * editing surface (ISS-197). A keystroke reaches the editor before React
+ * renders its output, so an Enter in that gap still reads an empty
+ * snapshot; the live document already holds the typed words and must win.
+ */
+export function isCommentDraftEmpty(snapshotEmpty: boolean, liveHtml: string | null): boolean {
+  if (!snapshotEmpty) return false;
+  return liveHtml === null || isCommentBodyEmpty(liveHtml);
+}
+
 /** Form state a plain Enter keypress decides on (CMT-011). */
 export interface CommentEnterState {
   /** A mention suggestion shows and Enter would pick it. */
@@ -192,15 +203,6 @@ export function commentEnterAction(state: CommentEnterState): CommentEnterAction
   if (state.mentionOpen) return "pick-mention";
   if (state.busy || state.empty) return "none";
   return "submit";
-}
-
-/**
- * Whether the editing surface swallows a plain Enter before it reaches
- * the form (CMT-011). A swallowed Enter inserts no newline: picks and
- * no-ops leave the draft byte-identical, and only a submit bubbles on.
- */
-export function swallowCommentEnter(state: CommentEnterState): boolean {
-  return commentEnterAction(state) !== "submit";
 }
 
 /** A change the card made to the comment, as the cache paints it. */

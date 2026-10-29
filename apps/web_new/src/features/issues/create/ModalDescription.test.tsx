@@ -56,6 +56,7 @@ vi.mock("../../../shared/editor/index.js", async (importOriginal) => {
           insertMention: (target) => handleCalls.push({ kind: "mention", value: target }),
           insertHtml: (html: string) => handleCalls.push({ kind: "html", value: html }),
           textBeforeCaret: () => "",
+          getHtml: () => "",
         });
       }
     }, [props]);

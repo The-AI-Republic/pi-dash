@@ -25,12 +25,14 @@ function Harness({
   empty = false,
   projectId = "p-1",
   probe,
+  submit = () => undefined,
 }: {
   handle: RichTextEditorHandle | null;
   busy?: boolean;
   empty?: boolean;
   projectId?: string;
   probe: { state?: PickerState };
+  submit?: (liveHtml: string | null) => void;
 }) {
   const picker = useCommentMentionPicker({
     workspaceSlug: "acme",
@@ -38,6 +40,7 @@ function Harness({
     getHandle: () => handle,
     busy,
     empty,
+    submit,
   });
   probe.state = picker;
   return (
@@ -67,12 +70,15 @@ function stubMentions(handler: (query: string) => unknown[]) {
   return calls;
 }
 
-function fakeHandle(): RichTextEditorHandle & { insertMention: Mock<(target: { id: string; name: string }) => void> } {
+function fakeHandle(
+  liveHtml = "<p>Draft</p>"
+): RichTextEditorHandle & { insertMention: Mock<(target: { id: string; name: string }) => void> } {
   return {
     insertImage: () => undefined,
     insertMention: vi.fn(),
     insertHtml: () => undefined,
     textBeforeCaret: () => "",
+    getHtml: () => liveHtml,
   };
 }
 
@@ -210,11 +216,26 @@ describe("useCommentMentionPicker", () => {
     );
   });
 
-  it("swallows a plain Enter unless the form would submit (CMT-011)", async () => {
-    const { state } = renderPicker({ handle: fakeHandle() }, () => [person("u-1", "Ada L", null)]);
+  it("owns a plain Enter and submits the live draft (CMT-011, ISS-197)", () => {
+    const submit = vi.fn();
+    const { state } = renderPicker({ handle: fakeHandle("<p>Fresh words</p>"), empty: false, submit }, () => []);
+    expect(state().handleEditorKeyDown(new KeyboardEvent("keydown", { key: "Enter" }))).toBe(true);
+    expect(submit).toHaveBeenCalledTimes(1);
+    expect(submit).toHaveBeenCalledWith("<p>Fresh words</p>");
+  });
+
+  it("reads the live document when the snapshot is still empty (ISS-197)", () => {
+    // The keystroke filled the editor, but React has not rendered it.
+    const submit = vi.fn();
+    const { state } = renderPicker({ handle: fakeHandle("<p>Just typed</p>"), empty: true, submit }, () => []);
+    expect(state().handleEditorKeyDown(new KeyboardEvent("keydown", { key: "Enter" }))).toBe(true);
+    expect(submit).toHaveBeenCalledWith("<p>Just typed</p>");
+  });
+
+  it("lets every other Enter shape through untouched (CMT-011)", () => {
+    const submit = vi.fn();
+    const { state } = renderPicker({ handle: fakeHandle(), empty: false, submit }, () => []);
     const enter = (overrides: KeyboardEventInit = {}) => new KeyboardEvent("keydown", { key: "Enter", ...overrides });
-    // Closed and idle with content: the key bubbles on to submit.
-    expect(state().handleEditorKeyDown(enter())).toBe(false);
     expect(state().handleEditorKeyDown(enter({ shiftKey: true }))).toBe(false);
     expect(state().handleEditorKeyDown(enter({ ctrlKey: true }))).toBe(false);
     expect(state().handleEditorKeyDown(enter({ metaKey: true }))).toBe(false);
@@ -222,16 +243,36 @@ describe("useCommentMentionPicker", () => {
     const composing = enter();
     Object.defineProperty(composing, "isComposing", { value: true });
     expect(state().handleEditorKeyDown(composing)).toBe(false);
-    // Open, busy or empty: swallowed, so no newline lands.
-    act(() => state().onMentionQuery("a"));
-    await screen.findByRole("list", { name: MENTION_SUGGESTIONS_LABEL });
-    expect(state().handleEditorKeyDown(enter())).toBe(true);
+    expect(submit).not.toHaveBeenCalled();
   });
 
-  it("swallows Enter while busy or empty with the popup closed", () => {
-    const busy = renderPicker({ handle: fakeHandle(), busy: true }, () => []);
-    expect(busy.state().handleEditorKeyDown(new KeyboardEvent("keydown", { key: "Enter" }))).toBe(true);
-    const empty = renderPicker({ handle: fakeHandle(), empty: true }, () => []);
-    expect(empty.state().handleEditorKeyDown(new KeyboardEvent("keydown", { key: "Enter" }))).toBe(true);
+  it("picks the open mention instead of submitting (CMT-019)", async () => {
+    const submit = vi.fn();
+    const handle = fakeHandle();
+    const { state } = renderPicker({ handle, empty: false, submit }, () => [person("u-1", "Ada L", null)]);
+    act(() => state().onMentionQuery("a"));
+    await screen.findByRole("list", { name: MENTION_SUGGESTIONS_LABEL });
+    expect(state().handleEditorKeyDown(new KeyboardEvent("keydown", { key: "Enter" }))).toBe(true);
+    expect(handle.insertMention).toHaveBeenCalledWith({ id: "u-1", name: "Ada L" });
+    expect(submit).not.toHaveBeenCalled();
+  });
+
+  it("holds Enter while busy or empty with the popup closed (CMT-011)", () => {
+    const enter = new KeyboardEvent("keydown", { key: "Enter" });
+    const busySubmit = vi.fn();
+    const busy = renderPicker({ handle: fakeHandle("<p>Held</p>"), busy: true, submit: busySubmit }, () => []);
+    expect(busy.state().handleEditorKeyDown(enter)).toBe(true);
+    expect(busySubmit).not.toHaveBeenCalled();
+    const emptySubmit = vi.fn();
+    const empty = renderPicker({ handle: fakeHandle("<p></p>"), empty: true, submit: emptySubmit }, () => []);
+    expect(empty.state().handleEditorKeyDown(enter)).toBe(true);
+    expect(emptySubmit).not.toHaveBeenCalled();
+  });
+
+  it("holds Enter when the editing surface is gone and the snapshot is empty", () => {
+    const submit = vi.fn();
+    const { state } = renderPicker({ handle: null, empty: true, submit }, () => []);
+    expect(state().handleEditorKeyDown(new KeyboardEvent("keydown", { key: "Enter" }))).toBe(true);
+    expect(submit).not.toHaveBeenCalled();
   });
 });

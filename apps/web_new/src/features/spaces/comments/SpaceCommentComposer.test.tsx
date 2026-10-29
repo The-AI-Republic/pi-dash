@@ -36,6 +36,7 @@ vi.mock("../../../shared/editor/RichTextEditor.js", async (importOriginal) => {
     onReady?: (handle: {
       insertImage: (src: string) => void;
       insertMention: (target: { id: string; name: string }) => void;
+      getHtml: () => string;
     }) => void;
     onMentionQuery?: (query: string | null) => void;
     handleKeyDown?: (event: KeyboardEvent) => boolean;
@@ -45,6 +46,7 @@ vi.mock("../../../shared/editor/RichTextEditor.js", async (importOriginal) => {
     const boxRef = React.useRef<HTMLTextAreaElement>(null);
     const [, rerender] = React.useReducer((value: number) => value + 1, 0);
     const text = React.useRef("");
+    const htmlRef = React.useRef("<p></p>");
     const emit = (): void => {
       const markup =
         images.current.map((src) => `<img src="${src}">`).join("") +
@@ -54,7 +56,9 @@ vi.mock("../../../shared/editor/RichTextEditor.js", async (importOriginal) => {
               `<mention-component id="${mention.id}" entity_identifier="${mention.id}" entity_name="user_mention" data-name="${mention.name}"></mention-component>`
           )
           .join("");
-      onChange(text.current.trim() === "" && markup === "" ? "<p></p>" : `<p>${text.current}${markup}</p>`);
+      const nextHtml = text.current.trim() === "" && markup === "" ? "<p></p>" : `<p>${text.current}${markup}</p>`;
+      htmlRef.current = nextHtml;
+      onChange(nextHtml);
       onMentionQuery?.(mentionQueryAt(text.current)?.text ?? null);
     };
     React.useEffect(
@@ -74,6 +78,8 @@ vi.mock("../../../shared/editor/RichTextEditor.js", async (importOriginal) => {
             rerender();
             emit();
           },
+          // The live document, as the real handle reads it at key time.
+          getHtml: () => htmlRef.current,
         }),
       [onReady]
     );
