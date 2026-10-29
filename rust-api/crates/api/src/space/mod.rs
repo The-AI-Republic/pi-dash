@@ -49,7 +49,10 @@ pub mod filters;
 pub mod intake;
 pub mod issues;
 pub mod project_meta;
-pub mod sanitize;
+/// HTML helpers — moved to their canonical home
+/// `pidash_services::space::sanitize` by OVL-14 (PIDASHCONV-1649);
+/// re-exported here so every existing path keeps working.
+pub use pidash_services::space::sanitize;
 pub mod social;
 
 /// Exact bytes of the DRF `NotAuthenticated` denial: anonymous on a guarded

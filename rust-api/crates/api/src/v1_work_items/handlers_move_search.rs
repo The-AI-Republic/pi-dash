@@ -134,20 +134,12 @@ use uuid::Uuid;
 
 use pidash_auth::permissions::project;
 use pidash_auth::scope::TenantScope;
-use pidash_services::app_issues::{SourceIssueRow, ASSIGNEE_IDS_SQL, LABEL_IDS_SQL};
-use pidash_services::domain;
 use pidash_services::domain::activity::TaskEnqueueHook;
 use pidash_services::domain::issues as domain_issues;
-use pidash_services::domain::issues::{
-    CreationDeps, MoveDomainOutcome, MovePostCommitHook, MoveRejection,
-};
 use pidash_services::domain::transition::IssueTransitionHook;
 use pidash_services::domain::{WriteActor, WriteCtx, WriteScope};
-use pidash_services::orchestration::blockers::{has_open_blockers_sql, summary_sql, BlockerRow};
+use pidash_services::operations;
 use pidash_services::v1_work_items::queries_search as q;
-use pidash_services::v1_work_items::shape_issue::{
-    BlockerSummary, IssueRow as ApiIssueRow, RepresentationInput, SummaryItem,
-};
 
 use super::handlers_social::{preamble, query_last, rewrite_project_id, QueryMap};
 use super::perms::{gate_for, V1WorkItemsRoute};
@@ -155,7 +147,7 @@ use crate::domain_hooks::{AppMoveAdmissionCache, AppMovePostCommitHook, AppTaskE
 use crate::issue_transition::AppTransitionHook;
 use crate::middleware::body_limit::read_request_bytes;
 use crate::orchestration::SpanCreationDeps;
-use crate::serializer::{render_datetime, render_datetime_in};
+use crate::serializer::render_datetime;
 use crate::state::AppState;
 use crate::v1_cycles_modules::body as shared_body;
 use crate::v1_cycles_modules::json::{
@@ -254,6 +246,33 @@ impl IntoResponse for Denial {
         let (status, body) = self.status_and_body();
         json_response(status, body)
     }
+}
+
+/// Map an operation failure onto the `Denial` arms the moved move handler
+/// used (OVL-14, PIDASHCONV-1649). The move operation never returns the
+/// issues-family 400/404/409 bodies, so those arms 500 instead of
+/// rendering a body this module cannot spell.
+impl From<operations::Error> for Denial {
+    fn from(error: operations::Error) -> Self {
+        match error {
+            operations::Error::NotFound => Denial::NotFound,
+            operations::Error::ProjectNotFound => Denial::ProjectNotFound,
+            operations::Error::Rejection { status, message } => {
+                Denial::MoveRejection { status, message }
+            }
+            operations::Error::ServerError => Denial::ServerError,
+            operations::Error::BadError(_)
+            | operations::Error::FieldErrors(_)
+            | operations::Error::NotFoundBody(_)
+            | operations::Error::Conflict(_) => Denial::ServerError,
+        }
+    }
+}
+
+/// Wrap an operation outcome in the v1 response.
+fn op_response(outcome: operations::Outcome) -> Result<Response, Denial> {
+    let status = StatusCode::from_u16(outcome.status).map_err(|_| Denial::ServerError)?;
+    Ok(json_response(status, outcome.body))
 }
 
 impl From<super::handlers_social::Denial> for Denial {
@@ -964,7 +983,7 @@ async fn move_inner(
     .await?;
     // `TimezoneMixin.initial` runs after the gate: survivors with an
     // unknown stored zone 400 here (an empty zone 500s).
-    let tz = activate_timezone(pre.actor.timezone.as_deref())?;
+    activate_timezone(pre.actor.timezone.as_deref())?;
     // `request.data` parses lazily in the view — after auth, gate, and
     // timezone — so a denying gate answers before a malformed body 400s.
     let target_ref = read_move_target(&parts.headers, bytes)?;
@@ -973,11 +992,6 @@ async fn move_inner(
         state.settings().urls.web_url.as_deref(),
         state.settings().urls.app_base_url.as_deref(),
     );
-    let now = Utc::now();
-    // The pre-save snapshot, before the move's own write.
-    let prev = crate::issue_transition::capture_prior_state_pool(&pre.pool, Some(*pk))
-        .await
-        .map_err(|_| Denial::ServerError)?;
     let orm = state.orm().ok_or(Denial::ServerError)?;
     let ctx = WriteCtx::new(WriteActor {
         user_id: pre.actor.id,
@@ -990,13 +1004,19 @@ async fn move_inner(
     let transition: Arc<dyn IssueTransitionHook> =
         Arc::new(AppTransitionHook::new(state, &pre.pool));
     let enqueue: Arc<dyn TaskEnqueueHook> = Arc::new(AppTaskEnqueueHook::new(&pre.pool));
+    let deps = operations::Deps {
+        pool: pre.pool.clone(),
+        orm: orm.clone(),
+        transition,
+        enqueue,
+    };
     let span_deps = SpanCreationDeps::from_state(state);
-    let drain: Arc<dyn MovePostCommitHook> = Arc::new(AppMovePostCommitHook::new(
+    let drain: Arc<dyn domain_issues::MovePostCommitHook> = Arc::new(AppMovePostCommitHook::new(
         &pre.pool,
         state,
         span_deps.cache.clone(),
     ));
-    let creation = CreationDeps {
+    let creation = domain_issues::CreationDeps {
         pool: pre.pool.clone(),
         cloud: span_deps.cloud.clone(),
         managed: span_deps.managed.clone(),
@@ -1005,83 +1025,16 @@ async fn move_inner(
         assistant_seam: span_deps.assistant_seam.clone(),
         admission: Arc::new(AppMoveAdmissionCache::new(span_deps.cache)),
     };
-    // Owned copies for the run closure: the `for<'t>` work bound
-    // unifies only moved values and local borrows, not the caller's
-    // `&str` / `&Uuid` params — and the render below still needs
-    // `web_base` afterwards.
-    let slug_owned = slug.to_owned();
-    let pk_owned = *pk;
-    let web_base_owned = web_base.clone();
-    let outcome = domain::run(&ctx, orm, |txn| {
-        let transition = transition.clone();
-        let enqueue = enqueue.clone();
-        let drain = drain.clone();
-        let ctx = ctx.clone();
-        Box::pin(async move {
-            txn.hooks_mut().register(transition);
-            txn.hooks_mut().register(enqueue);
-            txn.hooks_mut().register(drain);
-            domain_issues::move_to_project(
-                &ctx,
-                txn,
-                domain_issues::MoveInput {
-                    slug: &slug_owned,
-                    project_id,
-                    pk: pk_owned,
-                    target_ref: &target_ref,
-                    origin: Some(origin.clone()),
-                    web_base_url: web_base_owned.as_deref(),
-                    now,
-                    prev_state: prev,
-                    options: domain_issues::MoveOptions::django(),
-                    creation,
-                },
-            )
-            .await
-        })
-    })
-    .await
-    .map_err(map_move_domain_error)?;
-    match outcome {
-        MoveDomainOutcome::AlreadyThere {
-            row,
-            workspace_slug,
-            project_identifier,
-        } => {
-            // Same project: no writes at all, no signals, no enqueues —
-            // just the issue in the API read shape. The domain resolved
-            // the serializer's lazy url pair past the commit —
-            // FK-guaranteed.
-            let slug = workspace_slug.ok_or(Denial::ServerError)?;
-            let identifier = project_identifier.ok_or(Denial::ServerError)?;
-            let body = render_moved_issue_api(
-                &pre.pool,
-                &row,
-                &slug,
-                &identifier,
-                web_base.as_deref(),
-                &tz,
-            )
-            .await?;
-            Ok(json_response(StatusCode::OK, body))
-        }
-        MoveDomainOutcome::Moved { row, chain } => {
-            if chain.stopped().is_some() {
-                return Err(Denial::ServerError);
-            }
-            let body = render_moved_issue_api(
-                &pre.pool,
-                &row.row,
-                &row.workspace_slug,
-                &row.project_identifier,
-                web_base.as_deref(),
-                &tz,
-            )
-            .await?;
-            Ok(json_response(StatusCode::OK, body))
-        }
-        MoveDomainOutcome::Rejected(rejection) => Err(map_move_rejection(rejection)),
-    }
+    let write = operations::issues::MoveWrite {
+        slug,
+        project_id,
+        pk: *pk,
+        target_ref: &target_ref,
+        origin,
+        web_base,
+    };
+    let outcome = operations::issues::move_to_project(&deps, &ctx, &write, drain, creation).await?;
+    op_response(outcome)
 }
 
 /// The move's `target_ref` (`views/issue.py:920-924`): `request.data`
@@ -1190,225 +1143,6 @@ async fn require_gate(
     }
 }
 
-/// Map the 650 driver's failures onto the view's responses: the
-/// recoverable `{"error"}` + status, the source-miss 404, the
-/// resolve-miss 404 `detail`, anything else the 500.
-fn map_move_rejection(rejection: MoveRejection) -> Denial {
-    match rejection {
-        MoveRejection::Issue {
-            message,
-            status_code,
-        } => Denial::MoveRejection {
-            status: status_code,
-            message,
-        },
-        MoveRejection::SourceNotFound => Denial::NotFound,
-        MoveRejection::TargetNotFound => Denial::ProjectNotFound,
-        // Unreachable: this driver passes `TargetOnly` (the gate checked
-        // the source project up front).
-        MoveRejection::SourceDenied => Denial::Forbidden,
-    }
-}
-
-/// Map a domain-run failure: a store error is the generic 500; a work
-/// error is the kernel's post-save 409 (the multiple-executing-runs
-/// arm — the span rolled back, as Django's `atomic` exit on raise).
-fn map_move_domain_error(error: domain::DomainError) -> Denial {
-    match error {
-        domain::DomainError::Db(_) => Denial::ServerError,
-        domain::DomainError::Work(message) => Denial::MoveRejection {
-            status: 409,
-            message,
-        },
-    }
-}
-
-/// The move's 200 body: `IssueSerializer(issue).data` (`views/issue.py:937`)
-/// over the refreshed (or same-project) issue — a bare instance, so no
-/// `fields`/`expand` context and no relations viewer (the `relations`
-/// block omits), while the blocker summary always queries
-/// (`serializers/issue.py:436-493`).
-async fn render_moved_issue_api(
-    pool: &PgPool,
-    issue: &SourceIssueRow,
-    workspace_slug: &str,
-    project_identifier: &str,
-    web_base: Option<&str>,
-    tz: &Tz,
-) -> Result<String, Denial> {
-    // Serializer read order (`to_representation`): assignees, labels,
-    // then the blocker summary (blocked_by, blocking, has_open) — the
-    // same seam reads the driver used pre-move, now past the commit.
-    let assignee_rows: Vec<(Uuid,)> = sqlx::query_as(ASSIGNEE_IDS_SQL)
-        .bind(issue.id)
-        .fetch_all(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    let assignee_ids: Vec<String> = assignee_rows
-        .into_iter()
-        .map(|row| row.0.to_string())
-        .collect();
-    let label_rows: Vec<(Uuid,)> = sqlx::query_as(LABEL_IDS_SQL)
-        .bind(issue.id)
-        .fetch_all(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    let label_ids: Vec<String> = label_rows
-        .into_iter()
-        .map(|row| row.0.to_string())
-        .collect();
-    let blocked_by_rows = sqlx::query(&issue_param(summary_sql(false)))
-        .bind(issue.id)
-        .fetch_all(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    let blocked_by: Vec<BlockerRow> = blocked_by_rows
-        .iter()
-        .map(map_blocker_row)
-        .collect::<Result<_, _>>()
-        .map_err(|_| Denial::ServerError)?;
-    let blocking_rows = sqlx::query(&issue_param(summary_sql(true)))
-        .bind(issue.id)
-        .fetch_all(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    let blocking: Vec<BlockerRow> = blocking_rows
-        .iter()
-        .map(map_blocker_row)
-        .collect::<Result<_, _>>()
-        .map_err(|_| Denial::ServerError)?;
-    let open_hit: Option<(i32,)> = sqlx::query_as(&issue_param(has_open_blockers_sql()))
-        .bind(issue.id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    let has_open_blockers = open_hit.is_some();
-    let blocked_by_items: Vec<SummaryItem> = blocked_by.iter().map(summary_item).collect();
-    let blocking_items: Vec<SummaryItem> = blocking.iter().map(summary_item).collect();
-    let blockers = BlockerSummary {
-        blocked_by: blocked_by_items,
-        blocking: blocking_items,
-        has_open_blockers,
-    };
-
-    let id = issue.id.to_string();
-    let created_at = render_datetime_in(&issue.created_at, tz);
-    let updated_at = render_datetime_in(&issue.updated_at, tz);
-    let deleted_at = issue
-        .deleted_at
-        .as_ref()
-        .map(|dt| render_datetime_in(dt, tz));
-    let completed_at = issue
-        .completed_at
-        .as_ref()
-        .map(|dt| render_datetime_in(dt, tz));
-    let archived_at = issue
-        .archived_at
-        .as_ref()
-        .map(|dt| dt.date_naive().to_string());
-    let start_date = issue.start_date.as_ref().map(ToString::to_string);
-    let target_date = issue.target_date.as_ref().map(ToString::to_string);
-    let project = issue.project_id.to_string();
-    let workspace = issue.workspace_id.to_string();
-    let parent = issue.parent_id.map(|id| id.to_string());
-    let state = issue.state_id.map(|id| id.to_string());
-    let estimate_point = issue.estimate_point_id.map(|id| id.to_string());
-    let assigned_pod = issue.assigned_pod_id.map(|id| id.to_string());
-    let created_by = issue.created_by_id.map(|id| id.to_string());
-    let updated_by = issue.updated_by_id.map(|id| id.to_string());
-    let url = pidash_services::v1_work_items::shape_issue::issue_url(
-        web_base,
-        Some(workspace_slug),
-        Some(project_identifier),
-        Some(issue.sequence_id),
-    );
-    let assignee_refs: Vec<&str> = assignee_ids.iter().map(String::as_str).collect();
-    let label_refs: Vec<&str> = label_ids.iter().map(String::as_str).collect();
-    let row = ApiIssueRow {
-        id: &id,
-        type_id: issue.type_id.as_deref(),
-        url,
-        created_at: &created_at,
-        updated_at: &updated_at,
-        deleted_at: deleted_at.as_deref(),
-        point: issue.point,
-        name: &issue.name,
-        description_html: &issue.description_html,
-        description_binary: issue.description_binary.as_deref(),
-        priority: &issue.priority,
-        complexity_score: issue.complexity_score,
-        start_date: start_date.as_deref(),
-        target_date: target_date.as_deref(),
-        sequence_id: issue.sequence_id,
-        sort_order: issue.sort_order,
-        completed_at: completed_at.as_deref(),
-        archived_at: archived_at.as_deref(),
-        is_draft: issue.is_draft,
-        external_source: issue.external_source.as_deref(),
-        external_id: issue.external_id.as_deref(),
-        git_work_branch: &issue.git_work_branch,
-        created_via: issue.created_via.as_deref(),
-        agent_executor: issue.agent_executor.as_deref(),
-        created_by: created_by.as_deref(),
-        updated_by: updated_by.as_deref(),
-        project: &project,
-        workspace: &workspace,
-        parent: parent.as_deref(),
-        state: state.as_deref(),
-        estimate_point: estimate_point.as_deref(),
-        assigned_pod: assigned_pod.as_deref(),
-    };
-    let input = RepresentationInput {
-        row: &row,
-        fields: None,
-        expand: &[],
-        is_list: false,
-        assignee_ids: assignee_refs.as_slice(),
-        assignee_rows: &[],
-        label_ids: label_refs.as_slice(),
-        expanded_labels: &[],
-        blockers: Some(&blockers),
-        relations: None,
-        expansions: &[],
-    };
-    // The binary/NaN arms reproduce Django 500s; the `Missing*` arms are
-    // unreachable (blockers supplied, no fields filter).
-    let view = pidash_services::v1_work_items::shape_issue::render_issue(&input)
-        .map_err(|_| Denial::ServerError)?;
-    serde_json::to_string(&view).map_err(|_| Denial::ServerError)
-}
-
-/// One `relations_summary` item (`orchestration/blockers.py:184-198`):
-/// `{identifier, state, state_group}` — the composed `PROJ-42`
-/// identifier, never the bare sequence.
-fn summary_item(row: &BlockerRow) -> SummaryItem<'_> {
-    SummaryItem {
-        identifier: format!("{}-{}", row.project_identifier, row.sequence_id),
-        state: row.state_name.as_deref(),
-        state_group: row.state_group.as_deref(),
-    }
-}
-
-/// Map one `blockers::summary_sql` row.
-fn map_blocker_row(
-    row: &sqlx::postgres::PgRow,
-) -> Result<BlockerRow, pidash_services::app_issues::issue_move::StoreError> {
-    use pidash_services::app_issues::issue_move::StoreError;
-    let fail = |error: sqlx::Error| StoreError(error.to_string());
-    Ok(BlockerRow {
-        issue_id: row.try_get("id").map_err(fail)?,
-        sequence_id: row.try_get("sequence_id").map_err(fail)?,
-        project_identifier: row.try_get("identifier").map_err(fail)?,
-        state_name: row.try_get("name").map_err(fail)?,
-        state_group: row.try_get("group").map_err(fail)?,
-    })
-}
-
-/// Replace the `:issue_id` anchor placeholder the blocker builders emit
-/// with the caller's `$1` bind.
-fn issue_param(sql: String) -> String {
-    sql.replace(":issue_id", "$1")
-}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1713,62 +1447,6 @@ mod tests {
     }
 
     #[test]
-    fn map_move_rejection_maps_driver_failures() {
-        let rejection = map_move_rejection(MoveRejection::Issue {
-            message: "project is required".to_owned(),
-            status_code: 400,
-        });
-        assert_eq!(
-            rejection,
-            Denial::MoveRejection {
-                status: 400,
-                message: "project is required".to_owned(),
-            }
-        );
-        assert_eq!(
-            map_move_rejection(MoveRejection::SourceNotFound),
-            Denial::NotFound
-        );
-        assert_eq!(
-            map_move_rejection(MoveRejection::TargetNotFound),
-            Denial::ProjectNotFound
-        );
-        assert_eq!(
-            map_move_rejection(MoveRejection::SourceDenied),
-            Denial::Forbidden
-        );
-        let rejection = map_move_domain_error(domain::DomainError::Work("busy".to_owned()));
-        assert_eq!(
-            rejection,
-            Denial::MoveRejection {
-                status: 409,
-                message: "busy".to_owned(),
-            }
-        );
-        assert_eq!(
-            map_move_domain_error(domain::DomainError::Db(sea_orm::DbErr::Custom(
-                "boom".to_owned()
-            ))),
-            Denial::ServerError
-        );
-    }
-
-    #[test]
-    fn blocker_anchor_rewrites() {
-        assert_eq!(
-            issue_param("a :issue_id b :issue_id".to_owned()),
-            "a $1 b $1"
-        );
-        let blocked = issue_param(summary_sql(false));
-        let blocking = issue_param(summary_sql(true));
-        let open = issue_param(has_open_blockers_sql());
-        for sql in [&blocked, &blocking, &open] {
-            assert!(!sql.contains(":issue_id"), "{sql}");
-            assert!(sql.contains("$1"), "{sql}");
-        }
-    }
-
-    #[test]
     fn read_move_target_coerces_non_dict_bodies() {
         use axum::http::header;
         // The negotiator treats a missing `content-length` as empty, so
@@ -1848,21 +1526,6 @@ mod tests {
             &scope,
             &facts(false)
         ));
-    }
-
-    #[test]
-    fn summary_item_composes_identifier() {
-        let row = BlockerRow {
-            issue_id: Uuid::nil(),
-            sequence_id: 42,
-            project_identifier: "PROJ".to_owned(),
-            state_name: Some("Todo".to_owned()),
-            state_group: Some("unstarted".to_owned()),
-        };
-        let item = summary_item(&row);
-        assert_eq!(item.identifier, "PROJ-42");
-        assert_eq!(item.state, Some("Todo"));
-        assert_eq!(item.state_group, Some("unstarted"));
     }
 
     #[test]

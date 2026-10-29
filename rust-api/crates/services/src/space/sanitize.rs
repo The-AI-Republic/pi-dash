@@ -16,6 +16,9 @@
 //! intake paths: the create/patch payloads never carry `description_binary`
 //! (create ignores it, partial_update's 3-key subset drops it), so there is
 //! nothing to port here.
+//!
+//! Moved verbatim from `pidash_api::space::sanitize` by OVL-14
+//! (PIDASHCONV-1649); the api module re-exports it.
 
 use std::collections::{HashMap, HashSet};
 

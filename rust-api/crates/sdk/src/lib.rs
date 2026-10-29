@@ -332,6 +332,24 @@ pub mod ops {
     pub use pidash_types::runner_runs::TERMINAL_RUN_STATUSES;
 }
 
+/// The serializer step of the v1 write endpoints: validate the payload,
+/// apply defaults, save through `domain::*`, render the response
+/// (OVL-14, PIDASHCONV-1649). One submodule per endpoint group; the v1
+/// handlers are thin callers of the same functions, and overlay tools
+/// (notably MCP) call them instead of re-porting the serializers.
+pub mod operations {
+    pub use pidash_services::operations::comments;
+    pub use pidash_services::operations::issues;
+    pub use pidash_services::operations::pull_requests;
+    pub use pidash_services::operations::relations;
+    pub use pidash_services::operations::requested_data_text;
+    pub use pidash_services::operations::requested_data_value;
+    pub use pidash_services::operations::workpad;
+    pub use pidash_services::operations::Deps;
+    pub use pidash_services::operations::Error;
+    pub use pidash_services::operations::Outcome;
+}
+
 /// HTTP and Python-compat plumbing: the serializer kernel, `py_*`
 /// repr/format helpers, response headers, CSRF/token/session auth,
 /// and OAuth provider helpers. OVL-04 (PIDASHCONV-1542) added the

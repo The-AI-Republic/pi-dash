@@ -30,6 +30,7 @@ pub mod html_normalize;
 pub mod integrations;
 pub mod license;
 pub mod r#loop;
+pub mod operations;
 pub mod ops;
 pub mod orchestration;
 pub mod prompting;

@@ -131,11 +131,14 @@ pub use identity::{fetch_asset, fetch_profile, fetch_user, AssetRow, ProfileRow,
 pub use issues::{comment_url, fetch_blocker_summary, resolve_workpad_state, workpad_stripped};
 pub use render::{render_state, state_row_from, StateRow, StateRowTuple};
 pub use work_items::{
-    decode_issue, expand_estimate_point, expand_parent, expand_project, expand_state, expand_user,
-    expand_workspace, fetch_assignee_ids, fetch_assignee_rows, fetch_blocker_rows,
-    fetch_expanded_labels, fetch_grouped_rows, fetch_issue_for_write, fetch_label_ids,
-    render_decoded, render_write_response, requested_names, BlockerRows, DecodedIssue,
-    OwnedAssigneeRow, OwnedRelationItem, RenderRequest, ISSUE_EXTRA_COLS, ISSUE_SELECT_COLS,
+    decode_comment, decode_issue, expand_estimate_point, expand_parent, expand_project,
+    expand_state, expand_user, expand_workspace, fetch_assignee_ids, fetch_assignee_rows,
+    fetch_blocker_rows, fetch_comment_direct, fetch_expanded_labels, fetch_grouped_rows,
+    fetch_issue_for_write, fetch_label_ids, fetch_project_for_write, render_decoded,
+    render_write_response, requested_names, row_datetime, row_datetime_opt, row_string,
+    row_string_opt, row_uuid, row_uuid_opt, BlockerRows, DecodedComment, DecodedIssue,
+    OwnedAssigneeRow, OwnedRelationItem, RenderRequest, WriteProject, ISSUE_EXTRA_COLS,
+    ISSUE_SELECT_COLS,
 };
 pub use workspace::{workspace_of, workspace_row, workspace_slug};
 

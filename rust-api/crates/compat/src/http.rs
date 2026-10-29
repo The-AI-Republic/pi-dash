@@ -49,6 +49,7 @@ use axum::body::Body;
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use hmac::{Hmac, Mac};
+use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
@@ -380,6 +381,53 @@ pub fn form_field(body: &[u8], headers: &HeaderMap, key: &str) -> Option<String>
         .rev()
         .find(|(name, _)| name == key)
         .map(|(_, value)| value.clone())
+}
+
+// ---------------------------------------------------------------------------
+// `project_list_scalars`: moved verbatim from
+// `pidash_api::v1_cycles_modules::body` by OVL-14 (PIDASHCONV-1649) —
+// the v1-write operations in `pidash-services` need it and cannot
+// depend on `pidash-api`. The body module re-exports it.
+// ---------------------------------------------------------------------------
+
+/// Project a negotiated form map to the `QueryDict` scalar-last shape for
+/// task payloads (PIDASHCONV-763).
+///
+/// Django's task bytes render the RAW `request.data`: `json.dumps` over a
+/// `QueryDict` sees last-value-wins scalars — `labels=a&labels=b` dumps as
+/// `{"labels": "b"}`, and even a single `labels=x` dumps as the scalar
+/// `{"labels": "x"}` (probed live). The negotiated `map` instead carries
+/// DRF `getlist` arrays under `list_fields`, which validation needs.
+/// Callers that dump the raw map into a task payload (`requested_data` /
+/// `model_activity` kwargs) run the DUMPED copy through this helper when
+/// the body came from a form; validation inputs keep the arrays.
+///
+/// Only `Array` values under `list_fields` change (the last element wins,
+/// replaced in place so key order is preserved). Anything else under a
+/// list field is left alone — form parsing never emits it, and JSON
+/// callers must not pass their maps here at all (JSON arrays are real
+/// data on both sides). An empty array drops the key: that is the
+/// files-only edge, where Django dies serializing the upload at
+/// `.delay()` time (unpinned — module callers 500 on files before they
+/// dump; social callers ignore uploads).
+pub fn project_list_scalars(map: &mut Map<String, Value>, list_fields: &[&str]) {
+    for field in list_fields {
+        let Some(value) = map.get(*field) else {
+            continue;
+        };
+        let Value::Array(items) = value else {
+            continue;
+        };
+        let last = items.last().cloned();
+        match last {
+            Some(scalar) => {
+                map.insert((*field).to_owned(), scalar);
+            }
+            None => {
+                map.remove(*field);
+            }
+        }
+    }
 }
 
 #[cfg(test)]

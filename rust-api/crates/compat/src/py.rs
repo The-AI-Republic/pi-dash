@@ -17,7 +17,11 @@
 //!   `char::is_whitespace` already covers) + `py_is_space` (4),
 //!   `py_json_string` (7), `python_dumps` + `python_dump_into` +
 //!   `python_dump_str` (5 each), `py_repr_string` (2), `py_bool` (2),
-//!   `py_uuid_or_none` (the `None`-rendering `opt_uuid` pair);
+//!   `py_uuid_or_none` (the `None`-rendering `opt_uuid` pair),
+//!   `django_dumps` + `dumps_value` + `dumps_escape` + `dumps_number`
+//!   (the iterative `json.dumps`, moved from
+//!   `pidash_jobs::tasks_webhooks::activity_dispatch` by OVL-14,
+//!   PIDASHCONV-1649; the jobs module re-exports it);
 //! - kept local: the `shape`/`shape_relations` str/repr set (escapes
 //!   `\u{2028}` through, own float algorithm), the invites str/repr
 //!   set (same `\u{2028}` divergence plus inf/nan number handling),
@@ -840,6 +844,130 @@ fn is_exact_midpoint(digit_value: u128, exp10: i32, m: u64, e: i32) -> bool {
                 return false;
             };
             target.checked_shl(shift) == Some(m)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `django_dumps`: moved verbatim from
+// `pidash_jobs::tasks_webhooks::activity_dispatch` by OVL-14
+// (PIDASHCONV-1649) — the operations in `pidash-services` need it and
+// cannot depend on `pidash-jobs`. The jobs module re-exports it, so
+// every existing path (including the jobs unit tests) runs this copy.
+// Emits the same bytes as `python_dumps` above; the iterative walk
+// (explicit stack instead of recursion) is what differs.
+// ---------------------------------------------------------------------------
+
+/// Escape one string exactly like `json.dumps` (`ensure_ascii=True`,
+/// lowercase `\uXXXX`): control escapes, quotes, backslash, then
+/// non-ASCII as `\uXXXX` with surrogate pairs above BMP.
+fn dumps_escape(into: &mut String, text: &str) {
+    for ch in text.chars() {
+        match ch {
+            '"' => into.push_str("\\\""),
+            '\\' => into.push_str("\\\\"),
+            '\n' => into.push_str("\\n"),
+            '\r' => into.push_str("\\r"),
+            '\t' => into.push_str("\\t"),
+            '\u{08}' => into.push_str("\\b"),
+            '\u{0C}' => into.push_str("\\f"),
+            c if (c as u32) < 0x20 => into.push_str(&format!("\\u{:04x}", c as u32)),
+            c if (c as u32) < 0x7F => into.push(c),
+            c => {
+                let code = c as u32;
+                if code < 0x10000 {
+                    into.push_str(&format!("\\u{code:04x}"));
+                } else {
+                    // Surrogate pair, like CPython's `ensure_ascii`.
+                    let v = code - 0x10000;
+                    into.push_str(&format!(
+                        "\\u{:04x}\\u{:04x}",
+                        0xD800 + (v >> 10),
+                        0xDC00 + (v & 0x3FF)
+                    ));
+                }
+            }
+        }
+    }
+}
+
+/// Python `repr()` of a float as `json.dumps` renders it: `repr(f)`
+/// shortest-roundtrip. `ryu` (via `serde_json`) prints the same digits
+/// for finite values; non-finite floats never occur in this payload
+/// (Django would render `Infinity`/`NaN` bare tokens the same way).
+fn dumps_number(into: &mut String, value: &serde_json::Number) {
+    into.push_str(&value.to_string());
+}
+
+/// `json.dumps(obj, cls=DjangoJSONEncoder)` with default separators
+/// (`", "` / `": "`, `ensure_ascii=True`): callers pass trees of
+/// strings, numbers, booleans and nulls (every datetime, UUID and
+/// Decimal is pre-rendered), so no encoder hooks are needed.
+pub fn django_dumps(value: &Value) -> String {
+    let mut out = String::new();
+    dumps_value(&mut out, value);
+    out
+}
+
+fn dumps_value(into: &mut String, value: &Value) {
+    // Iterative over an explicit stack: callers may pass values nested
+    // to the 9939 request cap (the cycle add path echoes raw `issues`),
+    // and the recursive walk overflows 2MB workers. Output is unchanged
+    // (same scalars, separators and key order).
+    enum Task<'v> {
+        Emit(&'v Value),
+        Key(&'v str),
+        Lit(&'static str),
+        Seal(char),
+    }
+    fn scalar(into: &mut String, value: &Value) {
+        match value {
+            Value::Null => into.push_str("null"),
+            Value::Bool(true) => into.push_str("true"),
+            Value::Bool(false) => into.push_str("false"),
+            Value::Number(n) => dumps_number(into, n),
+            Value::String(s) => {
+                into.push('"');
+                dumps_escape(into, s);
+                into.push('"');
+            }
+            Value::Array(_) | Value::Object(_) => unreachable!("scalars only"),
+        }
+    }
+    let mut stack = vec![Task::Emit(value)];
+    while let Some(task) = stack.pop() {
+        match task {
+            Task::Emit(Value::Array(items)) => {
+                into.push('[');
+                stack.push(Task::Seal(']'));
+                for (index, item) in items.iter().rev().enumerate() {
+                    if index > 0 {
+                        stack.push(Task::Lit(", "));
+                    }
+                    stack.push(Task::Emit(item));
+                }
+            }
+            Task::Emit(Value::Object(map)) => {
+                into.push('{');
+                stack.push(Task::Seal('}'));
+                for (index, (key, item)) in map.iter().rev().enumerate() {
+                    if index > 0 {
+                        stack.push(Task::Lit(", "));
+                    }
+                    stack.push(Task::Emit(item));
+                    stack.push(Task::Lit("\": "));
+                    stack.push(Task::Key(key));
+                }
+            }
+            Task::Emit(leaf) => scalar(into, leaf),
+            Task::Key(key) => {
+                // Opening quote plus text; the `": "` literal carries the
+                // closing quote, exactly like the recursive original.
+                into.push('"');
+                dumps_escape(into, key);
+            }
+            Task::Lit(text) => into.push_str(text),
+            Task::Seal(closer) => into.push(closer),
         }
     }
 }
