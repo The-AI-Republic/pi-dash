@@ -343,10 +343,29 @@ exactly like deployed. That address is the Playwright `oracle` base URL;
 the admin mount is the `PARITY_ORACLE_ADMIN_URL` suite address (see
 "Admin console oracle" above).
 
-The new app is not served by this stack; run its dev server yourself:
+The new app is not served by this stack. Area gates serve it from a
+production build (NEWFRONT-1031): the vite dev server's on-demand
+transform flakes full-area proofs under concurrent host load ("Failed
+to fetch dynamically imported module" at entry and mid-test), while a
+build's plain static files cannot fail that way. From `apps/web_new`,
+with the suite env exported:
 
 ```sh
-pnpm --filter web_new dev   # :3010, the Playwright `new` base URL
+pnpm parity:build-new   # vite build + prerender (rerun when sources change)
+pnpm parity:serve-new   # :3010, the Playwright `new` base URL
+```
+
+The server keeps the dev server's same-origin topology (`/api` and
+`/auth` reach the slot's API from `PIDASH_API_ORIGIN` or
+`PARITY_API_URL`, `/parity19-assets` its minio,
+`/live` its live server) and the production file rule
+(`try_files $uri/index.html $uri /__spa-fallback.html`), so scenarios
+prove what production serves. `PARITY_NEW_PORT` moves the port and
+`PARITY_NEW_DIST=desktop` serves the desktop build instead. Keep the
+dev server for local iteration:
+
+```sh
+pnpm --filter web_new dev   # :3010, hot transform for one scenario at a time
 ```
 
 ## Editions
