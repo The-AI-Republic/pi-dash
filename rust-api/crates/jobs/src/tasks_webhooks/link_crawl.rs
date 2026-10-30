@@ -87,9 +87,13 @@ pub fn parse_link_args(args: &Value, kwargs: &Value) -> Result<(String, String),
 
 /// Live DNS for the SSRF guard: `socket.getaddrinfo(hostname, None)`
 /// (`:54-58`). Resolution errors are `gaierror`; an empty list is its own
-/// branch (`:60-61`).
+/// branch (`:60-61`). CPython IDNA-encodes a `str` host before resolving,
+/// so the lookup runs on the ASCII (punycode) form; an IDNA refusal falls
+/// back to the raw host, which keeps numeric hosts resolving without DNS
+/// exactly as before (PIDASHCONV-1672).
 pub fn live_resolve(hostname: &str) -> Result<Vec<IpAddr>, DnsFailure> {
-    match (hostname, 0).to_socket_addrs() {
+    let ascii = idna::domain_to_ascii(hostname).unwrap_or_else(|_| hostname.to_owned());
+    match (ascii.as_str(), 0).to_socket_addrs() {
         Ok(addrs) => {
             let ips: Vec<IpAddr> = addrs.map(|addr| addr.ip()).collect();
             if ips.is_empty() {
@@ -420,6 +424,41 @@ mod tests {
         let response = fetch(FAVICON_HEAD_TIMEOUT_SECS, reqwest::Method::HEAD, &url).unwrap();
         server.join().unwrap();
         assert_eq!(response.status, 200);
+    }
+
+    #[test]
+    fn live_resolve_idna_encodes_unicode_hostname() {
+        // PIDASHCONV-1672: CPython IDNA-encodes a `str` host before
+        // `getaddrinfo`, so `socket.getaddrinfo('münchen.de', None)`
+        // resolves while the raw UTF-8 bytes fail with `gaierror(-2)`.
+        // `live_resolve` must encode the same way; the fullwidth
+        // 'localhost' below folds to `localhost` and resolves via the
+        // hosts file, so this needs no external DNS.
+        let fullwidth = "ｌｏｃａｌｈｏｓｔ";
+        assert_eq!(idna::domain_to_ascii(fullwidth).unwrap(), "localhost");
+        assert_eq!(
+            idna::domain_to_ascii("münchen.de").unwrap(),
+            "xn--mnchen-3ya.de"
+        );
+        let ips = live_resolve(fullwidth).expect("unicode host must resolve");
+        assert!(
+            ips.iter().any(|ip| ip.to_string() == "127.0.0.1"),
+            "unexpected addresses: {ips:?}"
+        );
+    }
+
+    #[test]
+    fn live_resolve_keeps_ip_literals() {
+        // The IDNA step must not disturb numeric hosts: they resolve
+        // without DNS exactly as before (PIDASHCONV-1672).
+        assert_eq!(
+            live_resolve("127.0.0.1").unwrap(),
+            vec!["127.0.0.1".parse::<IpAddr>().unwrap()]
+        );
+        assert_eq!(
+            live_resolve("::1").unwrap(),
+            vec!["::1".parse::<IpAddr>().unwrap()]
+        );
     }
 
     #[test]
