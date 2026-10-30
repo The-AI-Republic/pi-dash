@@ -612,6 +612,26 @@ export class WebNewDriver implements ParityDriver {
     this.page = page;
   }
 
+  /** Whether the crash watch is attached (one driver serves one test). */
+  private crashWatchArmed = false;
+
+  /**
+   * Crash capture (NEWFRONT-1031, shape 3): log a renderer's death with
+   * its last URL instead of leaving the scenario to time out on a dead
+   * page with no snapshot. Logging only — the scenario's own waits
+   * still judge the run, so no failure is masked. Armed from the boot
+   * check, so stub pages without the boot surface never see it; the
+   * inner guard is for boot stubs without an event surface.
+   */
+  private armCrashWatch(): void {
+    if (this.crashWatchArmed) return;
+    if (typeof (this.page as Partial<Pick<Page, "on">>).on !== "function") return;
+    this.crashWatchArmed = true;
+    this.page.on("crash", () => {
+      console.log(`[parity] page crashed at ${this.page.url()}.`);
+    });
+  }
+
   /** The armed one-shot drafts PATCH failure, if draftFailNextPatch set one. */
   private draftPatchFailureRoute:
     | { matches: (url: URL) => boolean; handler: (route: Route) => Promise<void> }
@@ -680,6 +700,16 @@ export class WebNewDriver implements ParityDriver {
 
   /** Every wait below is explicitly bounded; a bare wait would hang to the test timeout. */
   private static readonly WAIT_MS = 30_000;
+
+  /** Post-paint hold in the boot check: a failed chunk's error commits within ~1s of the shell. */
+  private static readonly BOOT_HOLD_MS = 2_000;
+
+  /**
+   * The vite dev server's chunk-load failure signature, rendered by the
+   * app's error boundary. The boot check reloads past exactly this text
+   * and never past any other error state (NEWFRONT-1031).
+   */
+  private static readonly CHUNK_ERROR_SIGNATURE = "Failed to fetch dynamically imported module";
 
   // --- Pages navigation pane + versions (NEWFRONT-317, PAGE-045-054):
   // --- the version-detail spy and the member-directory filter share the
@@ -1202,6 +1232,52 @@ export class WebNewDriver implements ParityDriver {
     const target = path.startsWith("/issues/") ? `/spaces${path}` : path;
     await this.page.goto(target, { waitUntil: "domcontentloaded" });
     await this.page.waitForLoadState("domcontentloaded");
+    await this.awaitAppBoot(target);
+  }
+
+  /**
+   * Boot retry (NEWFRONT-1031; oracle precedent NEWFRONT-124, same shape
+   * as NEWFRONT-808 batches 12/13): on noisy hosts Chromium
+   * intermittently aborts the vite dev server's route-module fetches, so
+   * the error boundary renders "Failed to fetch dynamically imported
+   * module" instead of the page. Reload while that vite signature shows
+   * (up to five loads); every other state — content, app errors, slow
+   * loads — is left for the scenario's own waits, and a deterministically
+   * broken import still fails after five reloads. The hold past first
+   * paint matters: the shell can paint before the failed chunk's error
+   * commits, so a page counts as booted only when it is still error-free
+   * after the hold. A healthy load pays the hold only.
+   */
+  private async awaitAppBoot(path: string): Promise<void> {
+    // Unit-test stub pages implement only the surface they pin; a page
+    // without the full boot surface keeps the old bare navigation, and
+    // the scenario's own waits judge it. Real pages always qualify.
+    const surface = this.page as Partial<Pick<Page, "waitForFunction" | "waitForTimeout" | "evaluate" | "reload">>;
+    if (
+      typeof surface.waitForFunction !== "function" ||
+      typeof surface.waitForTimeout !== "function" ||
+      typeof surface.evaluate !== "function" ||
+      typeof surface.reload !== "function"
+    ) {
+      return;
+    }
+    this.armCrashWatch();
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const painted = await this.page
+        .waitForFunction(() => (document.body?.innerText ?? "").trim().length > 0, null, { timeout: 15_000 })
+        .then(
+          () => true,
+          () => false
+        );
+      if (!painted) return;
+      await this.page.waitForTimeout(WebNewDriver.BOOT_HOLD_MS);
+      const body = await this.page.evaluate(() => document.body?.innerText ?? "").catch(() => "");
+      if (!body.includes(WebNewDriver.CHUNK_ERROR_SIGNATURE)) return;
+      console.log(`[parity] vite chunk error at ${path} (load ${attempt + 1}/5); reloading.`);
+      if (attempt === 4) throw new Error(`[parity] vite chunk error persists at ${path} after 5 loads.`);
+      await this.page.reload();
+      await this.page.waitForLoadState("domcontentloaded");
+    }
   }
   async currentPath(): Promise<string> {
     const url = new URL(this.page.url());
@@ -24846,8 +24922,10 @@ export class WebNewDriver implements ParityDriver {
 
   /** Open the list and wait until one of its settled bodies shows. */
   async modulesXOpenModulesList(workspaceSlug: string, projectId: string): Promise<void> {
-    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/modules`, { waitUntil: "domcontentloaded" });
+    const path = `/${workspaceSlug}/projects/${projectId}/modules`;
+    await this.page.goto(path, { waitUntil: "domcontentloaded" });
     await this.page.waitForLoadState("domcontentloaded");
+    await this.awaitAppBoot(path);
     await this.modulesListWaitSettled();
   }
 
@@ -24959,10 +25037,12 @@ export class WebNewDriver implements ParityDriver {
   // --- Deep links (MOD-038) ---
 
   async modulesXOpenModuleDetail(workspaceSlug: string, projectId: string, moduleId: string): Promise<void> {
-    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/modules/${moduleId}`, {
+    const path = `/${workspaceSlug}/projects/${projectId}/modules/${moduleId}`;
+    await this.page.goto(path, {
       waitUntil: "domcontentloaded",
     });
     await this.page.waitForLoadState("domcontentloaded");
+    await this.awaitAppBoot(path);
     // One of three verdicts settles: the page, the missing-module view, or
     // the project access wall.
     await this.page
@@ -25004,10 +25084,12 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async modulesXOpenModulesListWithPeek(workspaceSlug: string, projectId: string, moduleId: string): Promise<void> {
-    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/modules?peekModule=${moduleId}`, {
+    const path = `/${workspaceSlug}/projects/${projectId}/modules?peekModule=${moduleId}`;
+    await this.page.goto(path, {
       waitUntil: "domcontentloaded",
     });
     await this.page.waitForLoadState("domcontentloaded");
+    await this.awaitAppBoot(path);
     await this.modulesListWaitSettled();
     // The panel body lands once its own detail read settles; a panel that
     // is still loading is not a failure of the open, the read just waits.
@@ -31571,8 +31653,10 @@ export class WebNewDriver implements ParityDriver {
   async modulesListOpenList(workspaceSlug: string, projectId: string): Promise<void> {
     const current = new URL(this.page.url()).pathname.replace(/\/$/, "");
     if (!current.endsWith(`/projects/${projectId}/modules`)) {
-      await this.page.goto(`/${workspaceSlug}/projects/${projectId}/modules`, { waitUntil: "domcontentloaded" });
+      const path = `/${workspaceSlug}/projects/${projectId}/modules`;
+      await this.page.goto(path, { waitUntil: "domcontentloaded" });
       await this.page.waitForLoadState("domcontentloaded");
+      await this.awaitAppBoot(path);
     }
     await this.modulesListWaitSettled();
   }
