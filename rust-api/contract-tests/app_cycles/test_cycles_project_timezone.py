@@ -6,6 +6,7 @@ never reaches ``start_date``/``end_date``. The rest of the suite runs with both
 zones on UTC, where the two readings cannot be told apart.
 """
 
+import uuid
 from datetime import datetime, timezone
 
 import pytest
@@ -112,6 +113,25 @@ def test_unknown_project_zone_is_key_error_400(dated_cycle):
         r = owner["client"].get(url)
         assert r.status_code == 400, r.text[:500]
         assert r.json() == {"error": "The required key does not exist."}
+
+
+def test_unknown_project_zone_refuses_before_the_missing_cycle_404(dated_cycle):
+    owner = dated_cycle["owner"]
+    set_project_timezone(owner, "Not/AZone")
+    r = owner["client"].get(cycle_urls(owner)["detail"](str(uuid.uuid4())))
+    assert r.status_code == 400, r.text[:500]
+    assert r.json() == {"error": "The required key does not exist."}
+
+
+def test_unknown_project_zone_refuses_patch_before_writing(dated_cycle):
+    owner, pk = dated_cycle["owner"], dated_cycle["pk"]
+    set_project_timezone(owner, "Not/AZone")
+    r = owner["client"].patch(cycle_urls(owner)["detail"](pk), json={"name": "Renamed"})
+    assert r.status_code == 400, r.text[:500]
+    assert r.json() == {"error": "The required key does not exist."}
+    with owner["seed"].conn.cursor() as cur:
+        cur.execute("select name from cycles where id=%s", (pk,))
+        assert cur.fetchone()[0] == "Dated"
 
 
 def test_archived_list_stays_utc(dated_cycle):

@@ -1969,8 +1969,10 @@ async fn cycle_partial_update(
     let pk = parse_pk(&pk).ok_or(Denial::BadDetail)?;
     // `get_queryset` (with its `Project.objects.get`) runs before the
     // row read: a missing project is the 404, and an archived project
-    // behaves like a missing row (the 500 below).
+    // behaves like a missing row (the 500 below). Its `pytz.timezone`
+    // runs there too: an unknown zone refuses before any read or write.
     let project = project_row(&pool, &project_id).await?;
+    let project_zone = project.zone()?;
     let now = chrono::Utc::now();
     let before = if project.archived_at.is_some() {
         None
@@ -2020,7 +2022,6 @@ async fn cycle_partial_update(
     let row = fetch_cycle_by_pk(&pool, &slug, &project_id, &user_id, &now, &pk, false, false)
         .await?
         .ok_or(Denial::ServerError)?;
-    let project_zone = project.zone()?;
     if let Some(origin) = super::activity_origin(&state) {
         enqueue_message(
             &pool,
@@ -2205,7 +2206,9 @@ async fn cycle_retrieve(
         false,
     )
     .await?;
-    let project = project_row(&pool, &project_id).await?;
+    // `get_queryset` opens the view, so an unknown zone (its `pytz.timezone`)
+    // answers before the missing-cycle 404.
+    let timezone = project_row(&pool, &project_id).await?.zone()?;
     let now = chrono::Utc::now();
     let pk = parse_pk(&pk).ok_or(Denial::BadDetail)?;
     let row =
@@ -2213,7 +2216,6 @@ async fn cycle_retrieve(
     let Some(row) = row else {
         return Err(Denial::CycleNotFound);
     };
-    let timezone = project.zone()?;
     enqueue_message(
         &pool,
         recent_visited_message(&pk, &user_id, &project_id, &slug),
