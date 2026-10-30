@@ -17657,6 +17657,32 @@ export async function serverPatchProjectMember(
   if (!res.ok) throw new Error(`[parity] project member patch failed with HTTP ${res.status}.`);
 }
 
+/**
+ * PATCH one member's project role and report the outcome instead of
+ * throwing, for asserting refused writes (NEWFRONT-1037).
+ */
+export async function serverPatchProjectMemberStatus(
+  workspaceSlug: string,
+  projectId: string,
+  memberId: string,
+  sessionCookie: string,
+  role: number,
+  apiBase: string = apiBaseFromEnv()
+): Promise<{ status: number; body: unknown }> {
+  const res = await fetch(`${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/members/${memberId}/`, {
+    method: "PATCH",
+    headers: { cookie: sessionCookie, "content-type": "application/json" },
+    body: JSON.stringify({ role }),
+  });
+  let body: unknown = null;
+  try {
+    body = await res.json();
+  } catch {
+    body = null;
+  }
+  return { status: res.status, body };
+}
+
 /** Remove one member from a project by membership id; throws unless the server accepts. */
 export async function serverRemoveProjectMember(
   workspaceSlug: string,
