@@ -59,6 +59,41 @@ describe("useSessionExpiredRedirect", () => {
     expect(navigate).toHaveBeenCalledTimes(1);
   });
 
+  it("bounces again on a later expiry once the user has signed back in", () => {
+    // NEWFRONT-1039: the one-shot notice used to latch for the life of the
+    // document, so a session that died a second time left the user on the
+    // page with only the failing widgets' own errors.
+    render(<Probe />);
+    act(() => {
+      useSessionStore.setState({ status: "expired", returnUrl: "/acme/issues" });
+    });
+    expect(navigate).toHaveBeenCalledTimes(1);
+    act(() => {
+      useSessionStore.getState().markAuthenticated();
+    });
+    routerHarness.href = "/acme/projects/1/issues";
+    act(() => {
+      useSessionStore.setState({ status: "expired", returnUrl: "/acme/projects/1/issues" });
+    });
+    expect(navigate).toHaveBeenCalledTimes(2);
+    expect(navigate).toHaveBeenLastCalledWith({ to: "/", search: { next_path: "/acme/projects/1/issues" } });
+    expect(notifyError).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a burst of expiries to one bounce", () => {
+    render(<Probe />);
+    act(() => {
+      useSessionStore.setState({ status: "expired", returnUrl: "/acme/a" });
+    });
+    act(() => {
+      useSessionStore.setState({ status: "expired", returnUrl: "/acme/b" });
+    });
+    act(() => {
+      useSessionStore.setState({ status: "expired", returnUrl: "/acme/c" });
+    });
+    expect(navigate).toHaveBeenCalledTimes(1);
+  });
+
   it("falls back to the current location without a kept return path", () => {
     render(<Probe />);
     act(() => {

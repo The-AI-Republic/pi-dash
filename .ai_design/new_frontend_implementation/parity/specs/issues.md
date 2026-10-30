@@ -790,6 +790,24 @@ duplicate panel. In this build the hook returns none, so the button
 and panel are effectively absent; §23 defines the cloud proof.
 Oracle: `create-modal.spec.ts`.
 
+The project field's label is a caption of its own (ISS-117, NEWFRONT-1039).
+The old app rendered the selector bare — no caption beside the state,
+priority and assignee captions — so the only project word on screen was the
+trigger's placeholder text, which disappeared the moment a project was
+picked; with nothing picked the field read "Project" only until the first
+pick. The new dialog instead captions the slot "Project" exactly like its
+neighbours and keeps the trigger naming the chosen project, so the field is
+labelled before and after a pick. A failed project read is also worded by
+cause: a rejected session (401/403, which the cloud rotation layer has
+already handed to the expiry layer) says the session ended and to sign in
+again, while transport, timeout and server failures say the projects could
+not be loaded. The old selector had no failure row at all — it rendered the
+already-loaded project store and simply listed nothing when that store was
+empty, which reads as "no projects" rather than as an error; the new picker
+never shows an empty list in place of a failed read. The session-death cause
+itself is a backend/local-stack question tracked outside this area
+(PRIVATEPI1, NEWFRONT-1039). Oracle: `create-modal.spec.ts`.
+
 Parent handling (ISS-122) runs through an add-parent chip opening a
 project-scoped search, debounced at half a second, excluding the item
 itself (or epics when searching epics) via `GET BASE/search-issues/`

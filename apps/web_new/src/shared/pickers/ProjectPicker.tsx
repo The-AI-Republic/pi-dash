@@ -6,13 +6,30 @@
 // name search and selected-first sorting. The current project stays
 // listed unless the caller excludes it. Multi-select stays open across
 // picks and counts the trigger. Reads resolve lazily on open.
+//
+// A failed read names what the user can do about it. A rejected session
+// (401/403 — the cloud rotation layer already handed a dead session to
+// the expiry layer) is not a load failure: the popup says the session
+// ended and points at sign-in, while transport, timeout and server
+// failures keep the plain "couldn't load" wording (CLOUD-015).
 import { Button, Combobox, IconButton, type ButtonVariant, type ComboboxOption } from "@pidash/kit";
 import { Layers } from "lucide-react";
 import * as React from "react";
 
+import { isSessionRejection } from "../../core/session/guards.js";
 import { ProjectMark as ProjectMarkTile } from "./ProjectMark.js";
 import { selectProjectOptions, type ProjectOption } from "./projects.js";
 import { usePickerProjects } from "./reference.js";
+
+/** Popup wording when the project read fails. */
+export const PROJECTS_LOAD_FAILED_TEXT = "Couldn't load projects.";
+export const PROJECTS_SESSION_ENDED_TEXT = "Your session has ended. Sign in again to load projects.";
+
+/** The popup message for a failed project read, or undefined on success. */
+export function projectsErrorText(error: unknown): string | undefined {
+  if (error === null || error === undefined) return undefined;
+  return isSessionRejection(error) ? PROJECTS_SESSION_ENDED_TEXT : PROJECTS_LOAD_FAILED_TEXT;
+}
 
 interface ProjectPickerBase {
   workspaceSlug: string;
@@ -95,7 +112,7 @@ export function ProjectPicker(props: ProjectPickerProps): React.ReactElement {
     [projects.data, excludeProjectIds, includeProjectIds, props.multiple, props.value]
   );
   const loading = open && !disabled && projects.isPending;
-  const errorText = projects.isError ? "Couldn't load projects." : undefined;
+  const errorText = projects.isError ? projectsErrorText(projects.error) : undefined;
 
   function handleSelect(id: string): void {
     if (props.multiple) {

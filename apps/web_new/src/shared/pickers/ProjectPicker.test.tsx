@@ -8,7 +8,13 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../core/api/client.js";
-import { ProjectPicker } from "./ProjectPicker.js";
+import { useSessionStore } from "../../core/session/store.js";
+import {
+  PROJECTS_LOAD_FAILED_TEXT,
+  PROJECTS_SESSION_ENDED_TEXT,
+  ProjectPicker,
+  projectsErrorText,
+} from "./ProjectPicker.js";
 
 const SEED = "22222222-2222-4222-8222-222222222222";
 const OTHER = "33333333-3333-4333-8333-333333333333";
@@ -60,6 +66,8 @@ function harness(body: unknown, status = 200) {
     }
     return { status, url, headers: { get: () => "application/json" }, text: async () => JSON.stringify(body) };
   };
+  // The app client carries the real session-expiry layer, so a 401 here
+  // moves the session store exactly as it does in the running app.
   createAppClient("https://api.test", transport as never);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return { queryClient, calls };
@@ -73,6 +81,7 @@ function optionNames(): string[] {
 
 afterEach(() => {
   resetAppClient();
+  useSessionStore.setState({ status: "unknown", returnUrl: null });
 });
 
 describe("ProjectPicker", () => {
@@ -196,6 +205,53 @@ describe("ProjectPicker", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "Select project" }));
     screen.queryAllByRole("option").forEach((option) => expect(option).toHaveAccessibleName("Other project"));
+  });
+
+  it("reports a dead session as a session end, not a load failure", async () => {
+    // The reported failure (NEWFRONT-1039): every call 401s and the picker
+    // said "Couldn't load projects.". A rejected session now names the
+    // remedy, and the expiry layer still moves the store so the shell
+    // bounces to sign-in.
+    useSessionStore.setState({ status: "authenticated", returnUrl: null });
+    const dead = harness({ detail: "expired" }, 401);
+    render(
+      <QueryClientProvider client={dead.queryClient}>
+        <ProjectPicker workspaceSlug="acme" value={null} onChange={() => undefined} />
+      </QueryClientProvider>
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Select project" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(PROJECTS_SESSION_ENDED_TEXT);
+    expect(screen.getByRole("alert")).not.toHaveTextContent(PROJECTS_LOAD_FAILED_TEXT);
+    expect(useSessionStore.getState().status).toBe("expired");
+  });
+
+  it("treats a rejected refresh (403) as a session end too", async () => {
+    const refused = harness({ detail: "session_revoked" }, 403);
+    render(
+      <QueryClientProvider client={refused.queryClient}>
+        <ProjectPicker workspaceSlug="acme" value={null} onChange={() => undefined} />
+      </QueryClientProvider>
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Select project" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(PROJECTS_SESSION_ENDED_TEXT);
+  });
+
+  it("keeps the plain load-failure wording for server errors", async () => {
+    const failed = harness({ detail: "boom" }, 500);
+    render(
+      <QueryClientProvider client={failed.queryClient}>
+        <ProjectPicker workspaceSlug="acme" value={null} onChange={() => undefined} />
+      </QueryClientProvider>
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Select project" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(PROJECTS_LOAD_FAILED_TEXT);
+    expect(useSessionStore.getState().status).not.toBe("expired");
+  });
+
+  it("names no message while the read has no error", () => {
+    expect(projectsErrorText(null)).toBeUndefined();
+    expect(projectsErrorText(undefined)).toBeUndefined();
+    expect(projectsErrorText(new Error("plain"))).toBe(PROJECTS_LOAD_FAILED_TEXT);
   });
 
   it("reports failed loads and blocks reads while disabled", async () => {
