@@ -1,13 +1,16 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Workflow transition gate (parity/specs/issues.md §20/§23, ISS-233). In
-// the community build every transition goes through: the gate answers no
-// refusal for any target and every state option stays enabled, which is
-// the "no rules" behavior the oracle pins. A cloud build registers
-// transition rules through the provider seam and turns the flag on; the
-// gate then refuses the moves those rules deny and names the project's
-// blocking state in the message.
+// Workflow transition gate (parity/specs/issues.md §20/§23, ISS-233). No
+// edition imposes transition rules (owner decision 2026-10-30,
+// NEWFRONT-1038): the cloud edition keeps the OSS behavior, so every
+// transition goes through in this build and in the cloud build — the
+// gate answers no refusal for any target and every state option stays
+// enabled, which is the "no rules" behavior the oracle pins. The gate
+// and its provider seam stay in place, inert, because a future product
+// decision may want configurable transitions: a build that turns the
+// flag on and registers rules would have the gate refuse exactly what
+// those rules deny.
 
 import { edition } from "../../../core/edition/index.js";
 import { isEditionFlagOn, WORKFLOW_FLAG } from "./flags.js";

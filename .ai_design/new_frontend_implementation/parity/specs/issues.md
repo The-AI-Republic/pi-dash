@@ -836,11 +836,11 @@ a 128-character cap plus an allowed charset; empty means a new branch
 will be created. Intended, a saved branch round-trips into the edit
 modal; the oracle pins NEWFRONT-140 (the server stores the value but
 no read returns it, so the edit modal always shows empty). Slices
-build the round-trip against the fixed read. The cloud-only trio
-(ISS-129) — issue type picker driving type-specific custom properties,
-template picker prefilling the form plus the editor, and a validated
-additional-properties block — is absent in this build (stubs); §23
-defines the cloud proof. Oracle: `create-modal.spec.ts`.
+build the round-trip against the fixed read. The cloud-only issue type
+picker (ISS-129) is absent in this build, and the cloud edition adds it
+alone: templates and additional custom properties are out of parity
+scope (NEWFRONT-1038), so neither exists in any edition; §23 defines
+the cloud proof. Oracle: `create-modal.spec.ts`.
 
 A draft in the modal publishes through a publish entry (ISS-130):
 it requires a project (else an error toast), persists additional
@@ -1456,18 +1456,20 @@ inertly throughout relations and sub-issue code; epics are a cloud
 feature. Workflow (ISS-233): all workflow components and hooks are
 no-ops here — no disabled overlays or messages, drops never blocked,
 creation never blocked, plain state options — so this build imposes
-no transition rules and every state change or drag is allowed; cloud
-enforces configurable transitions with disabled overlays.
+no transition rules and every state change or drag is allowed. The
+cloud build behaves identically: configurable transitions are out of
+parity scope (NEWFRONT-1038), so no edition enforces any.
 Team-project and issue-type filters (ISS-234): nothing renders here;
 cloud provides a team-project scoping filter and an issue-type filter
 plus applied chips. The oracle notes the stubs mount in the sub-issue
 filter dropdown, the project-list rich-filters toggle never creates
 its filter instance, and the team-project plus applied-type
 components have zero callers. Custom types, templates, and additional
-properties (ISS-235): the type switcher shows only the copyable
-identifier here, with additional-property widgets and type/property
-activity rows empty stubs; cloud adds work-item types, per-type
-custom properties, templates (ISS-129), and their activity entries.
+properties (ISS-235): the type area shows only the copyable
+identifier here, with no property widgets and no type or property
+activity rows; cloud adds work-item types (a detail type badge). Type
+activity, per-type custom properties and templates are out of parity
+scope (NEWFRONT-1038), so no edition adds them.
 Cloud-only detail badges (ISS-236): the overdue badge next to the due
 date and the transfer-hop info note on the cycle row render nothing
 here; cloud shows both. Timeline dependencies (ISS-237): the
@@ -1771,16 +1773,22 @@ the description-editor popover. The cloud legs seed near-duplicate
 issues and assert the button, panel, and popover appear with the
 matches.
 
-Types, templates, and additional properties (ISS-129 owned by
-NEWFRONT-631, ISS-235 owned by NEWFRONT-657; extended scenarios in
-`create-modal.spec.ts` and `edition-stubs.spec.ts`). OSS builds the
-stubs: no type or template dropdowns, no additional-properties block,
-identifier-only type area, empty property widgets and activity rows.
-Cloud builds the type picker driving type-specific custom properties,
-template application prefilling form plus editor, validated custom
-properties in modal and detail, and their activity entries. The cloud
-legs pick a type, apply a template, fill a custom property, and
-assert each renders and persists.
+Types (ISS-129 owned by NEWFRONT-631, ISS-235 owned by NEWFRONT-657;
+extended scenarios in `create-modal.spec.ts` and
+`edition-stubs.spec.ts`). OSS builds the stubs: no type dropdown, no
+types in the detail area, no type or property activity rows. Cloud
+builds the modal type picker and the detail type badge; the cloud legs
+pick a type in the modal and assert the create payload carries it,
+seed a typed issue and assert its badge, and seed an untyped issue and
+assert the badge's absence. Templates, per-type custom properties and
+type activity rows are out of parity scope (owner decision 2026-10-30,
+NEWFRONT-1038): NEWFRONT-984 found no source for them in either app at
+either head — the old cloud build renders type activity through the
+same empty stub and has no template or property surface — so there is
+nothing to prove and no edition renders them. The modal's template and
+additional-properties seams stay declared but unregistered, as do the
+detail property and type-activity seams; they are inert until a future
+product decision.
 
 Worklog (ISS-206 owned by NEWFRONT-650; edition-gated proof in
 `worklog-absent.spec.ts` plus a cloud worklog spec). OSS builds
@@ -1807,12 +1815,19 @@ create and edit through the modal from relations and sub-issue flows.
 The cloud scenarios create and edit an epic and assert the branches
 activate.
 
-Workflow (ISS-233 owned by NEWFRONT-657; extended scenarios in
-`edition-stubs.spec.ts` plus the board specs' cloud legs). OSS builds
-the no-op hooks: every state change and drag allowed, plain state
-options. Cloud builds configurable transitions with disabled overlays
-on board drops, state pickers, and creation. The cloud legs configure
-a blocked transition and assert the overlay plus the refused move.
+Workflow (ISS-233 owned by NEWFRONT-657; extended scenario in
+`edition-stubs.spec.ts`, which runs on both legs). Configurable
+transition rules are out of parity scope (owner decision 2026-10-30,
+NEWFRONT-1038): NEWFRONT-984 found no workflow model, endpoint or
+settings surface in either app at either head, so there is no rule
+source to configure. Both editions therefore behave the same way as
+the OSS oracle always pinned — every state change and drag allowed,
+plain state options with nothing disabled and no workflow message —
+and the one OSS scenario proves the cloud build too when it runs on the
+new leg. The provisional provider that used to inject rules through a
+session key is gone with `workflow-cloud.spec.ts`. The gate
+(`transitionRefusal`, the per-surface gates, the disabled overlays) and
+its provider seam are kept inert for a future product decision.
 
 Team-project and issue-type filters (ISS-234 owned by NEWFRONT-657;
 edition-gated proof in `edition-stubs.spec.ts`). OSS builds the

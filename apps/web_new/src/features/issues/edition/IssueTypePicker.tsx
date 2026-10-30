@@ -3,9 +3,10 @@
 // See the LICENSE file for details.
 // Modal work-item type picker (NEWFRONT-984, ISS-129 type half). The
 // create dialog renders this when the cloud bootstrap registers the
-// type extension; template and extra-property slots stay absent until
-// the Part 5 model lands. Options come from the project type list, so a
-// project without types offers "No type" only.
+// type extension; the template and extra-property slots are out of
+// parity scope (owner decision 2026-10-30, NEWFRONT-1038) and stay
+// absent in every edition. Options come from the project type list, so
+// a project without types offers "No type" only.
 import { Button, Combobox, type ComboboxOption } from "@pidash/kit";
 import { useQuery } from "@tanstack/react-query";
 import * as React from "react";
