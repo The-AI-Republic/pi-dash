@@ -65,10 +65,58 @@ pub mod state {
     pub use pidash_services::extensions::ToolsetsUnavailable;
 }
 
-/// ORM write services (`pidash_services::domain`). Empty: ORM-02
-/// (PIDASHCONV-1520) populates it. Until then the overlay must not
-/// write OSS tables directly.
-pub mod domain {}
+/// ORM write services (`pidash_services::domain`): the write context
+/// plus the assistant/identity/projects/tokens/workspaces writers the
+/// overlay calls. Populated by PIDASHCONV-1663 (OVL-13 needs); ORM-02
+/// (PIDASHCONV-1520) landed without populating it.
+pub mod domain {
+    pub use pidash_services::domain::assistant::delete_llm_config;
+    pub use pidash_services::domain::assistant::insert_llm_config;
+    pub use pidash_services::domain::assistant::save_llm_config_full;
+    pub use pidash_services::domain::assistant::stamp_llm_config_verified;
+    pub use pidash_services::domain::assistant::LlmConfigFullSave;
+    pub use pidash_services::domain::assistant::LlmConfigInsert;
+    pub use pidash_services::domain::identity::account::create_account;
+    pub use pidash_services::domain::identity::account::update_account_metadata;
+    pub use pidash_services::domain::identity::account::update_account_rotated_tokens;
+    pub use pidash_services::domain::identity::account::update_account_upsert;
+    pub use pidash_services::domain::identity::account::AccountUpsert;
+    pub use pidash_services::domain::identity::account::NewAccount;
+    pub use pidash_services::domain::identity::account::TokenFields;
+    pub use pidash_services::domain::identity::get_or_create_profile;
+    pub use pidash_services::domain::identity::insert_default_profile;
+    pub use pidash_services::domain::identity::insert_provisioned_user;
+    pub use pidash_services::domain::identity::insert_user_notification_preference;
+    pub use pidash_services::domain::identity::make_unusable_password;
+    pub use pidash_services::domain::identity::set_profile_last_workspace;
+    pub use pidash_services::domain::identity::update_user_fields;
+    pub use pidash_services::domain::identity::update_user_last_login_time;
+    pub use pidash_services::domain::identity::update_user_relogin;
+    pub use pidash_services::domain::identity::ProvisionedUser;
+    pub use pidash_services::domain::identity::UserFieldUpdates;
+    pub use pidash_services::domain::projects::members::deactivate_by_workspace;
+    pub use pidash_services::domain::projects::members::sync_active_role;
+    pub use pidash_services::domain::tokens::issue_token;
+    pub use pidash_services::domain::tokens::revoke_machine_token_by_hash;
+    pub use pidash_services::domain::tokens::revoke_machine_tokens_by_workspace;
+    pub use pidash_services::domain::tokens::revoke_runner_sessions_by_workspace;
+    pub use pidash_services::domain::tokens::touch_api_token_last_used_by_token;
+    pub use pidash_services::domain::tokens::touch_machine_token_last_used_by_hash;
+    pub use pidash_services::domain::tokens::NewApiToken;
+    pub use pidash_services::domain::workspaces::insert;
+    pub use pidash_services::domain::workspaces::members::add_with_active;
+    pub use pidash_services::domain::workspaces::members::deactivate_without_updated_by;
+    pub use pidash_services::domain::workspaces::members::overwrite;
+    pub use pidash_services::domain::workspaces::members::sync;
+    pub use pidash_services::domain::workspaces::members::MemberOverwrite;
+    pub use pidash_services::domain::workspaces::members::MemberSync;
+    pub use pidash_services::domain::workspaces::members::NewMemberWithActive;
+    pub use pidash_services::domain::workspaces::set_name;
+    pub use pidash_services::domain::workspaces::NewWorkspace;
+    pub use pidash_services::domain::WriteActor;
+    pub use pidash_services::domain::WriteCtx;
+    pub use pidash_services::domain::WriteScope;
+}
 
 /// Reads and render: issue shapes and serializers, workspace, project
 /// and search models, and auth-session shapes. OVL-05 (PIDASHCONV-1543)
@@ -201,6 +249,7 @@ pub mod read {
     pub use pidash_services::read::StateRowTuple;
     pub use pidash_services::read::UserShape;
     pub use pidash_services::read::WorkspaceLiteView;
+    pub use pidash_services::read::WriteProject;
     pub use pidash_services::read::COMMENT_COLUMNS;
     pub use pidash_services::read::FULL_ROW_COLUMNS;
     pub use pidash_services::read::ISSUE_EXTRA_COLS;
@@ -297,6 +346,10 @@ pub mod ops {
     pub use pidash_services::integrations::github_client::PrLinksSurface;
     pub use pidash_services::integrations::github_client::TransportContext;
     pub use pidash_services::integrations::github_client::TransportGuard;
+    pub use pidash_services::ops::users::apply_user_save;
+    pub use pidash_services::ops::users::new_user_token;
+    pub use pidash_services::ops::users::random_color;
+    pub use pidash_services::ops::users::UserSaveInput;
     pub use pidash_services::orchestration::blockers;
     pub use pidash_services::orchestration::blockers::has_open_blockers_sql;
     pub use pidash_services::orchestration::blockers::summary_list;
@@ -344,6 +397,7 @@ pub mod ops {
     pub use pidash_services::runner_sessions::live_drains::PoolPubsubStore;
     pub use pidash_services::runner_sessions::pubsub::send_to_runner;
     pub use pidash_services::scheduler::builtins;
+    pub use pidash_services::scheduler::builtins::seed_builtin_schedulers;
     pub use pidash_services::user_settings::base_settings_schema;
     pub use pidash_services::user_settings::default_for;
     pub use pidash_services::user_settings::extend_settings_schema;
@@ -354,6 +408,7 @@ pub mod ops {
     pub use pidash_services::user_settings::SettingsSchema;
     pub use pidash_services::user_settings::UserSettingsSchema;
     pub use pidash_services::v1_projects::tasks::model_activity_kwargs;
+    pub use pidash_services::v1_work_items::tasks::issue_activity_kwargs;
     pub use pidash_types::orchestration::is_ticking_state;
     pub use pidash_types::orchestration::StateRef;
     pub use pidash_types::orchestration::TickerDecision;
@@ -420,6 +475,7 @@ pub mod compat {
     pub use pidash_api::middleware::RequestSession;
     pub use pidash_api::middleware::SessionHandle;
     pub use pidash_api::response_headers::header_value;
+    pub use pidash_api::response_headers::iri_to_uri;
     pub use pidash_api::runner_runs::run_endpoints::drain_lifecycle_effects;
     pub use pidash_api::runner_runs::LivePorts;
     pub use pidash_api::runner_runs::PortError;
@@ -468,6 +524,7 @@ pub mod compat {
     pub use pidash_jobs::pyformat::dict_repr;
     pub use pidash_jobs::pyformat::py_str_or_empty;
     pub use pidash_services::auth_oauth::providers::json_truthy;
+    pub use pidash_services::auth_oauth::providers::quote_plus;
     pub use pidash_services::auth_oauth::providers::urlencode;
 }
 
@@ -606,6 +663,7 @@ pub mod assistant {
     pub use pidash_jobs::assistant::run_turn::TABLE_MESSAGE;
     pub use pidash_jobs::assistant::run_turn::TURN_HARD_LIMIT_SECS;
     pub use pidash_jobs::assistant::run_turn::TURN_SOFT_LIMIT_SECS;
+    pub use pidash_jobs::assistant::BYOK;
     pub use pidash_jobs::assistant::RUN_TURN_TASK;
     pub use pidash_jobs::assistant::SWEEP_TASK;
     pub use pidash_jobs::oss_worker::model_runtime::github::github_headers;
@@ -644,6 +702,7 @@ pub mod assistant {
     pub use pidash_services::assistant::mcp::EnabledMcpServerRow;
     pub use pidash_services::assistant::mcp::ResilientState;
     pub use pidash_services::assistant::mcp::ToolsetSpec;
+    pub use pidash_services::assistant::probe::ca_bundle_path;
     pub use pidash_services::assistant::probe::classify_probe;
     pub use pidash_services::assistant::probe::probe_provider;
     pub use pidash_services::assistant::probe::ProbeOutcome;
@@ -751,9 +810,12 @@ pub mod db {
     pub use pidash_db::license::models::instance_admin;
     pub use pidash_db::license::models::instance_configuration;
     pub use pidash_db::license::queries::admin_get_by_instance_user_sql;
+    pub use pidash_db::license::queries::create_instance_admin;
     pub use pidash_db::license::queries::fetch_instance_first;
     pub use pidash_db::license::queries::map_instance_admin_row;
     pub use pidash_db::license::queries::map_instance_row;
+    pub use pidash_db::license::queries::soft_delete_configs_by_keys;
+    pub use pidash_db::license::queries::update_instance_setup;
     pub use pidash_db::license::queries::ADMIN_INSERT_SQL;
     pub use pidash_db::license::queries::ADMIN_PERMISSION_ROLE_GTE;
     pub use pidash_db::license::queries::INSTANCE_FIRST_SQL;
@@ -767,6 +829,7 @@ pub mod db {
     pub use pidash_db::runner_enroll::columns::runner;
     pub use pidash_db::runner_sessions::models::runner_session;
     pub use pidash_db::runner_sessions::outbox::schedule_stream_cleanup_for_runner;
+    pub use pidash_db::sea_orm_connection;
     pub use pidash_db::soft_delete::DELETED_AT;
     pub use pidash_db::tasks_cleanup::cleanup_queries::MongoSink;
     pub use pidash_db::tasks_ticker::jitter_seconds;
