@@ -161,7 +161,7 @@ interface ScriptedNavPage {
 function scriptedNavPage(options: { url?: string; bodies?: string[] }): ScriptedNavPage {
   const state = { holds: 0, reloads: 0, gotos: 0, loads: 0 };
   const bodies = options.bodies ?? [CONTENT];
-  const settled = { last: () => ({ waitFor: async () => {} }) };
+  const settled = { last: () => ({ waitFor: async () => {} }), first: () => ({ waitFor: async () => {} }) };
   const page = {
     url: () => options.url ?? "http://localhost:3080/ws",
     goto: async () => {
@@ -178,6 +178,8 @@ function scriptedNavPage(options: { url?: string; bodies?: string[] }): Scripted
       state.loads += 1;
     },
     locator: () => settled,
+    getByRole: () => settled,
+    getByTestId: () => settled,
     context: () => ({ addCookies: async () => {} }),
   };
   return Object.assign(state, { page: page as unknown as Page });
@@ -237,6 +239,15 @@ describe("navigation boot wiring", () => {
     expect(script.gotos).toBe(0);
     expect(script.holds).toBe(0);
     expect(script.reloads).toBe(0);
+  });
+
+  it("modulesXOpenSettingsModules recovers past a first-load chunk error", async () => {
+    silenceLogs();
+    const script = scriptedNavPage({ bodies: [CHUNK_ERROR, CONTENT] });
+    const driver = new WebNewDriver(script.page);
+    await driver.modulesXOpenSettingsModules("ws", "p");
+    expect(script.gotos).toBe(1);
+    expect(script.reloads).toBe(1);
   });
 });
 
@@ -288,100 +299,6 @@ describe("crash watch", () => {
     const driver = new WebNewDriver(script.page);
     await bootOf(driver)("/ws/projects/p/modules");
     expect(script.reloads).toBe(1);
-  });
-});
-
-interface ScriptedNavPage {
-  holds: number;
-  reloads: number;
-  gotos: number;
-  page: Page;
-}
-
-/** A stub page that navigates instantly and settles every locator wait. */
-function scriptedNavPage(options: { url?: string; bodies?: string[] }): ScriptedNavPage {
-  const state = { holds: 0, reloads: 0, gotos: 0, loads: 0 };
-  const bodies = options.bodies ?? [CONTENT];
-  const settled = { last: () => ({ waitFor: async () => {} }), first: () => ({ waitFor: async () => {} }) };
-  const page = {
-    url: () => options.url ?? "http://localhost:3080/ws",
-    goto: async () => {
-      state.gotos += 1;
-    },
-    waitForLoadState: async () => {},
-    waitForFunction: async () => {},
-    waitForTimeout: async () => {
-      state.holds += 1;
-    },
-    evaluate: async () => bodies[Math.min(state.loads, bodies.length - 1)],
-    reload: async () => {
-      state.reloads += 1;
-      state.loads += 1;
-    },
-    locator: () => settled,
-    getByRole: () => settled,
-    getByTestId: () => settled,
-    context: () => ({ addCookies: async () => {} }),
-  };
-  return Object.assign(state, { page: page as unknown as Page });
-}
-
-describe("navigation boot wiring", () => {
-  it("openAuthenticated recovers past a first-load chunk error", async () => {
-    const script = scriptedNavPage({ bodies: [CHUNK_ERROR, CONTENT] });
-    const driver = new WebNewDriver(script.page);
-    await driver.openAuthenticated("/ws/projects/p/modules", []);
-    expect(script.reloads).toBe(1);
-    expect(script.holds).toBe(2);
-  });
-
-  it("modulesXOpenModuleDetail recovers past a first-load chunk error", async () => {
-    const script = scriptedNavPage({ bodies: [CHUNK_ERROR, CONTENT] });
-    const driver = new WebNewDriver(script.page);
-    await driver.modulesXOpenModuleDetail("ws", "p", "m");
-    expect(script.gotos).toBe(1);
-    expect(script.reloads).toBe(1);
-  });
-
-  it("modulesXOpenModulesList recovers past a first-load chunk error", async () => {
-    const script = scriptedNavPage({ bodies: [CHUNK_ERROR, CONTENT] });
-    const driver = new WebNewDriver(script.page);
-    await driver.modulesXOpenModulesList("ws", "p");
-    expect(script.gotos).toBe(1);
-    expect(script.reloads).toBe(1);
-  });
-
-  it("modulesXOpenModulesListWithPeek recovers past a first-load chunk error", async () => {
-    const script = scriptedNavPage({ bodies: [CHUNK_ERROR, CONTENT] });
-    const driver = new WebNewDriver(script.page);
-    await driver.modulesXOpenModulesListWithPeek("ws", "p", "m");
-    expect(script.gotos).toBe(1);
-    expect(script.reloads).toBe(1);
-  });
-
-  it("modulesListOpenList recovers when it navigates", async () => {
-    const script = scriptedNavPage({ bodies: [CHUNK_ERROR, CONTENT] });
-    const driver = new WebNewDriver(script.page);
-    await driver.modulesListOpenList("ws", "p");
-    expect(script.gotos).toBe(1);
-    expect(script.reloads).toBe(1);
-  });
-
-  it("modulesXOpenSettingsModules recovers past a first-load chunk error", async () => {
-    const script = scriptedNavPage({ bodies: [CHUNK_ERROR, CONTENT] });
-    const driver = new WebNewDriver(script.page);
-    await driver.modulesXOpenSettingsModules("ws", "p");
-    expect(script.gotos).toBe(1);
-    expect(script.reloads).toBe(1);
-  });
-
-  it("modulesListOpenList skips the check when already on the list", async () => {
-    const script = scriptedNavPage({ url: "http://localhost:3080/ws/projects/p/modules", bodies: [CHUNK_ERROR] });
-    const driver = new WebNewDriver(script.page);
-    await driver.modulesListOpenList("ws", "p");
-    expect(script.gotos).toBe(0);
-    expect(script.holds).toBe(0);
-    expect(script.reloads).toBe(0);
   });
 });
 
