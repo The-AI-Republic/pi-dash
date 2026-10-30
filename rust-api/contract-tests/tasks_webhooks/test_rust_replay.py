@@ -260,7 +260,7 @@ def test_rust_webhook_send_chunked_streaming_completes_within_bound(
     """Rust side: streamed chunked body decodes in linear time.
 
     Replays ``test_webhook_send_chunked_streaming_completes_within_bound``:
-    the delivery must complete inside the bound with the full 8 MiB body
+    the delivery must complete inside the bound with the full 64 MiB body
     logged, no retry, no requeue.
     """
     hook = _seed_hook_at(db_conn, chunked_stream_sink.url)
