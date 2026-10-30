@@ -295,8 +295,8 @@
         {
           "allows_personal_override": false,
           "allows_workspace_override": false,
-          "body_len": 28050,
-          "body_sha256": "5efbf4a32a81ca68c6d859617b6e6e80a4d4ab3a71b3422824b42792ffda639b",
+          "body_len": 33139,
+          "body_sha256": "bfa2c8dacc4f01e82cc167a282ceb16039480090f8d59619ae6d2c6916fb6113",
           "customizable": "locked",
           "is_locked": true,
           "is_overridable": false,
@@ -496,9 +496,9 @@
     }
   },
   "fixture_id": "FIX-registry",
-  "how_produced": "executed against the real Python under pi_dash.settings.test (Django 4.2): pure units with no DB; DB-backed units against scratch database pidash_prompt_fx (migrated from this tree). Throwaway generators: /tmp/fxP_nodb.py, /tmp/fxP_nodb2.py, /tmp/fxP_db1.py, /tmp/fxP_db2.py (+ /tmp/fxP_setup.py world). PIDASHCONV-1058 re-sync: content-derived fields regenerated from origin/main@3267ceb9 via /tmp/fx1058_gen.py (registry.py + recipes.py loaded by path; stdlib-only, no Django). PIDASHCONV-1534 re-sync: pidash-cli body_len/body_sha256 + fragments assembled_len/assembled_sha256 regenerated from origin/main@0a6fb8eca via /tmp/fx1534_gen.py (registry.py + fragments/__init__.py loaded by path; stdlib-only, no Django).",
+  "how_produced": "executed against the real Python under pi_dash.settings.test (Django 4.2): pure units with no DB; DB-backed units against scratch database pidash_prompt_fx (migrated from this tree). Throwaway generators: /tmp/fxP_nodb.py, /tmp/fxP_nodb2.py, /tmp/fxP_db1.py, /tmp/fxP_db2.py (+ /tmp/fxP_setup.py world). PIDASHCONV-1058 re-sync: content-derived fields regenerated from origin/main@3267ceb9 via /tmp/fx1058_gen.py (registry.py + recipes.py loaded by path; stdlib-only, no Django). PIDASHCONV-1534 re-sync: pidash-cli body_len/body_sha256 + fragments assembled_len/assembled_sha256 regenerated from origin/main@0a6fb8eca via /tmp/fx1534_gen.py (registry.py + fragments/__init__.py loaded by path; stdlib-only, no Django). PIDASHCONV-1667 re-sync: pidash-cli body_len/body_sha256 regenerated from origin/main@7d64d46ad via s7/fx1667_gen.py (registry.py loaded by path; stdlib-only, no Django).",
   "notes": [],
-  "ported_from": "0a6fb8eca0f459802045f22e02af5748a6bdc768",
+  "ported_from": "7d64d46ad7dda1ea840bdc6d3ed9c09d4d4c708b",
   "trace": [
     "prompting/registry.py:26 (SECTIONS_DIR), 28-56 (tiers), 62-66 (MAX_SECTION_BODY_LENGTH), 102-147 (_parse_front_matter), 150-161 (_load_registry), 166-178 (REGISTRY/get_section/all_sections)",
     "prompting/fragments/__init__.py:37-55 (FRAGMENT_GLOB, fragment_paths, assemble)"
