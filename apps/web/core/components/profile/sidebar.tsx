@@ -18,13 +18,11 @@ import { Tooltip } from "@pi-dash/propel/tooltip";
 import type { IUserProfileProjectSegregation } from "@pi-dash/types";
 import { Loader } from "@pi-dash/ui";
 import { cn, renderFormattedDate, getFileURL } from "@pi-dash/utils";
-// components
-import { CoverImage } from "@/components/common/cover-image";
 // hooks
 import { useAppTheme } from "@/hooks/store/use-app-theme";
-import { useCommandPalette } from "@/hooks/store/use-command-palette";
 import { useProject } from "@/hooks/store/use-project";
 import { useUser } from "@/hooks/store/user";
+import { useAppRouter } from "@/hooks/use-app-router";
 import { usePlatformOS } from "@/hooks/use-platform-os";
 // components
 import { ProfileSidebarTime } from "./time";
@@ -39,12 +37,12 @@ export const ProfileSidebar = observer(function ProfileSidebar(props: TProfileSi
   // refs
   const ref = useRef<HTMLDivElement>(null);
   // router
-  const { userId } = useParams();
+  const { workspaceSlug, userId } = useParams();
+  const router = useAppRouter();
   // store hooks
   const { data: currentUser } = useUser();
   const { profileSidebarCollapsed, toggleProfileSidebar } = useAppTheme();
   const { getProjectById } = useProject();
-  const { toggleProfileSettingsModal } = useCommandPalette();
   const { isMobile } = usePlatformOS();
   const { t } = useTranslation();
   // derived values
@@ -94,28 +92,17 @@ export const ProfileSidebar = observer(function ProfileSidebar(props: TProfileSi
     >
       {userProjectsData ? (
         <>
-          <div className="relative h-[110px]">
+          <div className="relative px-5 pt-5">
             {currentUser?.id === userId && (
-              <div className="absolute top-3.5 right-3.5">
+              <div className="absolute top-5 right-3.5">
                 <IconButton
                   variant="secondary"
                   icon={EditIcon}
-                  onClick={() =>
-                    toggleProfileSettingsModal({
-                      activeTab: "general",
-                      isOpen: true,
-                    })
-                  }
+                  onClick={() => router.push(`/${workspaceSlug}/settings/account/general`)}
                 />
               </div>
             )}
-            <CoverImage
-              src={userData?.cover_image_url ?? undefined}
-              alt={userData?.display_name}
-              className="h-[110px] w-full"
-              showDefaultWhenEmpty
-            />
-            <div className="absolute -bottom-[26px] left-5 h-[52px] w-[52px] rounded-sm">
+            <div className="h-[52px] w-[52px] rounded-sm">
               {userData?.avatar_url && userData?.avatar_url !== "" ? (
                 <img
                   src={getFileURL(userData?.avatar_url)}
@@ -130,7 +117,7 @@ export const ProfileSidebar = observer(function ProfileSidebar(props: TProfileSi
             </div>
           </div>
           <div className="px-5">
-            <div className="mt-[38px]">
+            <div className="mt-3.5">
               <h4 className="text-16 font-semibold">
                 {userData?.first_name} {userData?.last_name}
               </h4>

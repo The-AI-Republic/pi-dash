@@ -96,6 +96,14 @@ export interface ISchedulerBinding {
   last_run_status: string | null;
   last_run_ended_at: string | null;
   last_error: string;
+  /**
+   * True when the RRULE bundle is valid but has no occurrence left — a
+   * finite COUNT/UNTIL series that finished, or a single-shot whose dtstart
+   * passed. The binding is disabled quietly in that case; render it as
+   * "Completed", not as misconfigured. Optional until the API change that
+   * emits it (PR #559) is deployed everywhere.
+   */
+  series_exhausted?: boolean;
   actor: string | null;
   created_at: string;
   updated_at: string;
