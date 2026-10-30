@@ -30,7 +30,7 @@ import { SetupCard } from "./SetupCard.js";
 
 describe("SetupCard", () => {
   it("states the key rule and permission scope", () => {
-    render(<SetupCard />);
+    render(<SetupCard workspaceSlug="acme" />);
     const card = screen.getByTestId("assistant-setup-card");
     expect(card).toHaveAccessibleName("Set up your AI assistant");
     expect(screen.getByRole("heading", { name: "Set up your AI assistant" })).toBeInTheDocument();
@@ -39,14 +39,13 @@ describe("SetupCard", () => {
   });
 
   it("links the provider settings page with the pinned action label", () => {
-    render(<SetupCard />);
+    render(<SetupCard workspaceSlug="acme" />);
     const action = screen.getByRole("button", { name: "Configure provider" });
-    expect(action).toHaveAttribute("href", "/settings/profile/ai-assistant");
-    expect(action).toHaveAttribute("data-router-link");
+    expect(action).toHaveAttribute("href", "/acme/settings/account/ai-assistant/");
   });
 
   it("forwards layout classes", () => {
-    render(<SetupCard className="extra-class" />);
+    render(<SetupCard workspaceSlug="acme" className="extra-class" />);
     expect(screen.getByTestId("assistant-setup-card")).toHaveClass("extra-class");
   });
 });

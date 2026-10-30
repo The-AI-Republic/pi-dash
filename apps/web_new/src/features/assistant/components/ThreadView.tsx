@@ -106,7 +106,7 @@ export function ThreadView({ workspaceSlug, threadId, state, configured }: Threa
                 {EMPTY_CONVERSATION_HINT}
               </p>
             ) : (
-              <SetupCard />
+              <SetupCard workspaceSlug={workspaceSlug} />
             )
           ) : (
             <ol
@@ -143,6 +143,7 @@ export function ThreadView({ workspaceSlug, threadId, state, configured }: Threa
           </p>
         )}
         <Composer
+          workspaceSlug={workspaceSlug}
           draft={draft}
           onDraftChange={setDraft}
           onSubmit={submit}

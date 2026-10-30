@@ -28,7 +28,13 @@ import {
   projectCompletionRatio,
 } from "../lib/identity.js";
 
-export const PROFILE_SETTINGS_GENERAL_HREF = "/settings/profile/general";
+/**
+ * The pencil's destination: the general tab of the account settings page in
+ * the workspace being viewed (main#670).
+ */
+export function profileSettingsGeneralHref(workspaceSlug: string): string {
+  return `/${workspaceSlug}/settings/account/general/`;
+}
 
 /** Row label for a project the workspace collection no longer carries. */
 export const UNNAMED_PROJECT = "Unavailable project";
@@ -135,6 +141,7 @@ export interface ProfileSidebarProps {
 /** The identity content, shared by the docked panel and the floating sheet. */
 function ProfileIdentity({
   segregation,
+  workspaceSlug,
   isOwn,
   projects,
   apiBaseUrl,
@@ -187,7 +194,7 @@ function ProfileIdentity({
         </div>
         {isOwn ? (
           <CrossAppLink
-            to={PROFILE_SETTINGS_GENERAL_HREF}
+            to={profileSettingsGeneralHref(workspaceSlug)}
             aria-label="Edit profile"
             data-testid="profile-edit-pencil"
             className="text-body flex items-center gap-(--space-1) rounded-(--radius-control) px-(--space-2) py-(--space-1) text-(--text-muted) hover:bg-(--subtle) hover:text-(--text)"

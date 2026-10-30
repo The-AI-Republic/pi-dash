@@ -425,7 +425,8 @@ function WorkspaceShell({
   };
   const accountShortcuts = {
     onYourWork: () => handleNavigateHref(`/${workspaceSlug}/profile/${me.id}`),
-    onSettings: () => handleNavigateHref("/settings/profile/general"),
+    // Account settings live in the workspace the viewer is in (main#670).
+    onSettings: () => handleNavigateHref(`/${workspaceSlug}/settings/account/general/`),
     onSignOut,
   };
 

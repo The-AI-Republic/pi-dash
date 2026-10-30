@@ -403,7 +403,7 @@ test(
         // it, so only the durable outcomes are pinned: dialog gone, signed
         // out, account moved.
         expect(await driver.settingsProfileEmailModalStep()).toBe("closed");
-        await expect.poll(() => driver.currentPath(), { timeout: 30_000 }).not.toMatch(/^\/settings/);
+        await expect.poll(() => driver.currentPath(), { timeout: 30_000 }).not.toMatch(/(^|\/)settings(\/|$)/);
         await expect(signInSession(newEmail, member.password)).resolves.toContain("session-id=");
         expect((await userFacts(newEmail)).exists).toBe(true);
       });

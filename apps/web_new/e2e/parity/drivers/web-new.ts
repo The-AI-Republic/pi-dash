@@ -42523,6 +42523,11 @@ export class WebNewDriver implements ParityDriver {
     if ((await back.count()) === 0) return null;
     return (await back.first().getAttribute("aria-label")) ?? "Back to home";
   }
+  async settingsProfileBackHref(): Promise<string | null> {
+    const back = this.page.getByTestId("profile-settings-back");
+    if ((await back.count()) === 0) return null;
+    return (await back.first().getAttribute("href")) ?? null;
+  }
   async settingsProfileSidebarTitle(): Promise<string | null> {
     const title = this.page.getByTestId("profile-settings-sidebar").getByText("Profile settings", { exact: true });
     if ((await title.count()) === 0) return null;
@@ -42549,6 +42554,106 @@ export class WebNewDriver implements ParityDriver {
     await this.settingsProfileGoto(path, cookies);
     const url = new URL(this.page.url());
     return `${url.pathname}${url.search}`;
+  }
+  async settingsProfileInsideAppShell(): Promise<boolean> {
+    // Account settings are an ordinary workspace page (main#670), so the
+    // rail and the top bar mount around them exactly as on any other page.
+    const rail = await this.page.getByTestId("workspace-rail").count();
+    const topBar = await this.page
+      .locator('[data-testid="topbar-user-menu"], [aria-label="Open workspace switcher"]')
+      .count();
+    return rail > 0 && topBar > 0;
+  }
+
+  async settingsProfileMobileMenuPresent(): Promise<boolean | null> {
+    return (await this.page.getByTestId("account-settings-menu").count()) > 0;
+  }
+
+  /** The workspace rows of the open settings navigator (each carries data-expandable). */
+  private settingsProfileWorkspaceRowList() {
+    return this.page
+      .getByTestId("profile-settings-sidebar")
+      .locator('[data-testid^="account-settings-workspace-"][data-expandable]');
+  }
+
+  /** A row's name text: the second span of its header link or toggle, past the initial mark. */
+  private async settingsProfileRowLabel(row: Locator): Promise<string> {
+    const header = row
+      .locator('[data-testid^="account-settings-workspace-toggle-"], [data-testid^="account-settings-workspace-link-"]')
+      .first();
+    const name = header.locator("span").nth(1);
+    return ((await name.textContent().catch(() => "")) ?? "").trim();
+  }
+
+  private async settingsProfileRow(label: string): Promise<Locator> {
+    const rows = this.settingsProfileWorkspaceRowList();
+    const total = await rows.count();
+    for (let index = 0; index < total; index += 1) {
+      const row = rows.nth(index);
+      if ((await this.settingsProfileRowLabel(row)) === label) return row;
+    }
+    throw new Error(`[parity] no workspace row named ${label}.`);
+  }
+
+  async settingsProfileWorkspaceRows(): Promise<Array<{ label: string; expandable: boolean; expanded: boolean }>> {
+    const rows = this.settingsProfileWorkspaceRowList();
+    const total = await rows.count();
+    const out: Array<{ label: string; expandable: boolean; expanded: boolean }> = [];
+    for (let index = 0; index < total; index += 1) {
+      const row = rows.nth(index);
+      const expandable = (await row.getAttribute("data-expandable")) === "true";
+      const toggle = row.locator('[data-testid^="account-settings-workspace-toggle-"]');
+      const expanded =
+        expandable && (await toggle.count()) > 0 && (await toggle.first().getAttribute("aria-expanded")) === "true";
+      out.push({ label: await this.settingsProfileRowLabel(row), expandable, expanded });
+    }
+    return out;
+  }
+
+  async settingsProfileToggleWorkspaceRow(label: string): Promise<void> {
+    const toggle = (await this.settingsProfileRow(label)).locator(
+      '[data-testid^="account-settings-workspace-toggle-"]'
+    );
+    if ((await toggle.count()) === 0) return;
+    await toggle.first().click();
+  }
+
+  async settingsProfileWorkspaceEntries(label: string): Promise<string[]> {
+    const row = await this.settingsProfileRow(label);
+    return (await row.locator('[data-testid^="account-settings-workspace-link-"]').allInnerTexts()).map((text) =>
+      text.trim().replace(/\s+/g, " ")
+    );
+  }
+
+  async settingsProfileOpenWorkspaceEntry(rowLabel: string, entryLabel: string): Promise<void> {
+    const before = this.page.url();
+    await (
+      await this.settingsProfileRow(rowLabel)
+    )
+      .getByRole("link", { name: entryLabel, exact: true })
+      .first()
+      .click();
+    await this.page
+      .waitForFunction((prior) => window.location.href !== prior, before, { timeout: WebNewDriver.WAIT_MS })
+      .catch(() => {
+        throw new Error(`[parity] workspace entry ${rowLabel}/${entryLabel} never navigated.`);
+      });
+    await this.wsSettingsAwaitSettingsSurface();
+  }
+
+  async settingsProfileCurrentWorkspaceEntries(): Promise<string[]> {
+    const links = this.page
+      .getByTestId("profile-settings-sidebar")
+      .locator('[data-testid^="account-settings-workspace-link-"][aria-current="page"]');
+    return (await links.allInnerTexts()).map((text) => text.trim().replace(/\s+/g, " "));
+  }
+
+  async settingsProfileWorkspaceRowHref(label: string): Promise<string | null> {
+    const link = (await this.settingsProfileRow(label))
+      .locator('[data-testid^="account-settings-workspace-link-"]')
+      .first();
+    if ((await link.count()) === 0) return null;
+    return (await link.getAttribute("href")) ?? null;
   }
   /** The general tab form scope. */
   private settingsProfileGeneralForm() {

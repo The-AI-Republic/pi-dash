@@ -55,12 +55,3 @@ export function resolveProfileSettingsTab(raw: string | undefined): ProfileSetti
 export function queryWithoutMark(search: string): string {
   return search.startsWith("?") ? search.slice(1) : search;
 }
-
-/**
- * Tab address. In-app links carry a trailing slash, matching the old
- * app's link landings; a query string is preserved verbatim.
- */
-export function profileSettingsHref(tab: ProfileSettingsTabId, search?: string): string {
-  const query = queryWithoutMark(search ?? "");
-  return `/settings/profile/${tab}/${query === "" ? "" : `?${query}`}`;
-}

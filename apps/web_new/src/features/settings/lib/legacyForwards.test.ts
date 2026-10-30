@@ -1,73 +1,84 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
+// Legacy settings address families (parity/specs/profile.md §5, PROF-026;
+// main#670). The pure resolver names the tab and the workspace a retained
+// address stands for; the caller supplies the current workspace.
 import { describe, expect, it } from "vitest";
 
-import { legacySettingsForward } from "./legacyForwards.js";
-import { legacyRedirectOptions } from "./legacyRedirect.js";
+import { legacySettingsTarget, legacyTabOf } from "./legacyForwards.js";
 
-describe("legacy settings forwards", () => {
-  it("sends the bare settings address to general with parameters kept", () => {
-    expect(legacySettingsForward("/settings", "")).toEqual({
-      query: "",
-      href: "/settings/profile/general",
+describe("legacyTabOf", () => {
+  it("keeps a registered tab and defaults anything else", () => {
+    expect(legacyTabOf("security")).toBe("security");
+    expect(legacyTabOf("api-tokens")).toBe("api-tokens");
+    expect(legacyTabOf("bogus-tab-id")).toBe("general");
+    expect(legacyTabOf(undefined)).toBe("general");
+  });
+});
+
+describe("legacySettingsTarget", () => {
+  it("sends the bare settings root to the current workspace", () => {
+    expect(legacySettingsTarget("/settings")).toEqual({ scope: "current", tab: "general" });
+    expect(legacySettingsTarget("/settings/")).toEqual({ scope: "current", tab: "general" });
+  });
+
+  it("reads the tab after the legacy profile segment", () => {
+    expect(legacySettingsTarget("/settings/profile")).toEqual({ scope: "current", tab: "general" });
+    expect(legacySettingsTarget("/settings/profile/")).toEqual({ scope: "current", tab: "general" });
+    expect(legacySettingsTarget("/settings/profile/preferences")).toEqual({
+      scope: "current",
+      tab: "preferences",
     });
-    expect(legacySettingsForward("/settings/", "?keep=1&other=2")).toEqual({
-      query: "keep=1&other=2",
-      href: "/settings/profile/general?keep=1&other=2",
+    expect(legacySettingsTarget("/settings/profile/bogus-tab-id")).toEqual({ scope: "current", tab: "general" });
+    // A deeper leftover is still a settings address: general, not a 404.
+    expect(legacySettingsTarget("/settings/profile/security/extra")).toEqual({ scope: "current", tab: "general" });
+    expect(legacySettingsTarget("/settings/account/security")).toEqual({ scope: "current", tab: "general" });
+  });
+
+  it("reads the older profile family", () => {
+    expect(legacySettingsTarget("/profile")).toEqual({ scope: "current", tab: "general" });
+    expect(legacySettingsTarget("/profile/")).toEqual({ scope: "current", tab: "general" });
+    expect(legacySettingsTarget("/profile/security")).toEqual({ scope: "current", tab: "security" });
+    expect(legacySettingsTarget("/profile/unknown")).toEqual({ scope: "current", tab: "general" });
+    // Two segments below `/profile` is a member address, not a settings
+    // one, and must fall through to the not-found page.
+    expect(legacySettingsTarget("/profile/a/b")).toBeNull();
+  });
+
+  it("reads a workspace account address as that workspace's tab", () => {
+    expect(legacySettingsTarget("/acme/settings/account")).toEqual({
+      scope: "workspace",
+      workspaceSlug: "acme",
+      tab: "general",
+    });
+    expect(legacySettingsTarget("/acme/settings/account/security")).toEqual({
+      scope: "workspace",
+      workspaceSlug: "acme",
+      tab: "security",
+    });
+    expect(legacySettingsTarget("/acme/settings/account/bogus")).toEqual({
+      scope: "workspace",
+      workspaceSlug: "acme",
+      tab: "general",
     });
   });
 
-  it("forwards a direct profile tab address, defaulting unknown ids", () => {
-    expect(legacySettingsForward("/settings/profile/security", "")?.href).toBe("/settings/profile/security");
-    expect(legacySettingsForward("/settings/profile/bogus-tab-id", "")?.href).toBe("/settings/profile/general");
-    // Deeper addresses are not settings forwards.
-    expect(legacySettingsForward("/settings/profile/security/extra", "")).toBeNull();
-    expect(legacySettingsForward("/settings/projects/p1", "")).toBeNull();
-  });
-
-  it("forwards the legacy /profile family", () => {
-    expect(legacySettingsForward("/profile", "")?.href).toBe("/settings/profile/general");
-    expect(legacySettingsForward("/profile/", "")?.href).toBe("/settings/profile/general");
-    expect(legacySettingsForward("/profile/preferences", "?keep=4")).toEqual({
-      query: "keep=4",
-      href: "/settings/profile/preferences?keep=4",
+  it("reads the workspace tokens address as that workspace's tokens tab", () => {
+    expect(legacySettingsTarget("/acme/settings/api-tokens")).toEqual({
+      scope: "workspace",
+      workspaceSlug: "acme",
+      tab: "api-tokens",
     });
-    expect(legacySettingsForward("/profile/unknown", "")?.href).toBe("/settings/profile/general");
-    expect(legacySettingsForward("/profile/a/b", "")).toBeNull();
+    // A deeper tokens address is not the forward.
+    expect(legacySettingsTarget("/acme/settings/api-tokens/more")).toBeNull();
   });
 
-  it("forwards workspace account addresses per tab, defaulting to general", () => {
-    expect(legacySettingsForward("/acme/settings/account/", "")?.href).toBe("/settings/profile/general");
-    expect(legacySettingsForward("/acme/settings/account/security", "?keep=2")).toEqual({
-      query: "keep=2",
-      href: "/settings/profile/security?keep=2",
-    });
-    expect(legacySettingsForward("/acme/settings/account/bogus", "")?.href).toBe("/settings/profile/general");
-    expect(legacySettingsForward("/acme/settings/account/a/b", "")).toBeNull();
-  });
-
-  it("forwards the workspace api-tokens address with its parameters (NEWFRONT-431 target)", () => {
-    expect(legacySettingsForward("/acme/settings/api-tokens", "?keep=3")).toEqual({
-      query: "keep=3",
-      href: "/settings/profile/api-tokens/?keep=3",
-    });
-    expect(legacySettingsForward("/acme/settings/api-tokens", "")?.href).toBe("/settings/profile/api-tokens/");
-    expect(legacySettingsForward("/acme/settings/api-tokens/more", "")).toBeNull();
-  });
-
-  it("ignores addresses outside the four families", () => {
-    expect(legacySettingsForward("/", "")).toBeNull();
-    expect(legacySettingsForward("/acme/projects", "")).toBeNull();
-    expect(legacySettingsForward("/acme/settings", "")).toBeNull();
-    expect(legacySettingsForward("/acme/settings/members", "")).toBeNull();
-  });
-
-  it("builds router redirect options for a forward", () => {
-    expect(legacyRedirectOptions("/acme/settings/account/security", "?keep=2")).toEqual({
-      to: "/settings/profile/security?keep=2",
-      search: true,
-    });
-    expect(legacyRedirectOptions("/acme/projects", "")).toBeNull();
+  it("ignores addresses outside the families", () => {
+    expect(legacySettingsTarget("/")).toBeNull();
+    expect(legacySettingsTarget("/acme/projects")).toBeNull();
+    expect(legacySettingsTarget("/acme/settings")).toBeNull();
+    expect(legacySettingsTarget("/acme/settings/members")).toBeNull();
+    expect(legacySettingsTarget("/api/settings/account/security")).toBeNull();
   });
 });

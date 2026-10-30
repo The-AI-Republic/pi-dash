@@ -32,7 +32,7 @@ vi.mock("@tanstack/react-router", async (importOriginal) => {
 
 import {
   PROFILE_CLOCK_TICK_MS,
-  PROFILE_SETTINGS_GENERAL_HREF,
+  profileSettingsGeneralHref,
   ProfileSidebarFrame,
   useProfileClock,
 } from "./ProfileSidebar.js";
@@ -163,9 +163,8 @@ describe("ProfileSidebarFrame", () => {
     unmount();
     renderFrame({ isOwn: true });
     const pencil = screen.getByTestId("profile-edit-pencil");
-    expect(pencil).toHaveAttribute("href", PROFILE_SETTINGS_GENERAL_HREF);
-    expect(pencil).toHaveAttribute("href", "/settings/profile/general");
-    expect(pencil).toHaveAttribute("data-router-link");
+    expect(pencil).toHaveAttribute("href", profileSettingsGeneralHref("acme"));
+    expect(pencil).toHaveAttribute("href", "/acme/settings/account/general/");
   });
 
   it("collapses on demand and reopens from the show control", async () => {

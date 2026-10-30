@@ -1,19 +1,50 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Router glue for the legacy forwards (PROF-026): the target as router
-// redirect options, or null when the address belongs to no legacy family.
+// Router glue for the legacy forwards (PROF-026; main#670): the final
+// address for a legacy pathname, with the query string kept, or null when
+// the address belongs to no legacy family. The current workspace is the
+// user's last one when they still belong to it, else the remembered
+// fallback, matching where the app lands after sign-in. A user who belongs
+// to no workspace has nowhere to host account settings and continues to
+// workspace creation instead.
 
-import { legacySettingsForward } from "./legacyForwards.js";
+import type { WorkspaceList } from "@pidash/api-client";
+import { CREATE_WORKSPACE_PATH, selectWorkspace } from "../../../core/session/index.js";
+import { accountSettingsHref } from "./accountHref.js";
+import { legacySettingsTarget } from "./legacyForwards.js";
 
-export interface LegacyRedirectOptions {
-  to: string;
-  search: true;
+/** Inputs the current-workspace resolution needs. */
+export interface LegacyWorkspaceInputs {
+  lastSlug: string | null;
+  fallbackSlug: string | null;
+  workspaces: WorkspaceList | undefined;
 }
 
-/** Redirect options for a legacy settings address, or null. */
-export function legacyRedirectOptions(pathname: string, search: string): LegacyRedirectOptions | null {
-  const forward = legacySettingsForward(pathname, search);
-  if (forward === null) return null;
-  return { to: forward.href, search: true };
+/** The workspace a workspace-less legacy address lands in, or null. */
+export function legacyCurrentWorkspaceSlug(inputs: LegacyWorkspaceInputs): string | null {
+  for (const candidate of [inputs.lastSlug, inputs.fallbackSlug]) {
+    if (candidate === null) continue;
+    const found = selectWorkspace(inputs.workspaces, candidate);
+    if (found !== undefined) return found.slug;
+  }
+  return null;
+}
+
+/**
+ * The address a legacy pathname forwards to, or null outside the
+ * families. A workspace-less target resolves through the inputs; an
+ * explicit workspace target uses its own slug.
+ */
+export function legacySettingsRedirect(
+  pathname: string,
+  search: string,
+  current: LegacyWorkspaceInputs
+): string | null {
+  const target = legacySettingsTarget(pathname);
+  if (target === null) return null;
+  if (target.scope === "workspace") return accountSettingsHref(target.workspaceSlug, target.tab, search);
+  const workspaceSlug = legacyCurrentWorkspaceSlug(current);
+  if (workspaceSlug === null) return CREATE_WORKSPACE_PATH;
+  return accountSettingsHref(workspaceSlug, target.tab, search);
 }

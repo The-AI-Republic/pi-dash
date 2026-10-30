@@ -21,10 +21,16 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test, expect } from "../fixtures";
 import type { ParitySeedFacts } from "../drivers/parity-driver";
-import { cloudBrowserCookies, cloudInstanceRaw, sessionBrowserCookies, signInSession } from "../helpers/api";
+import {
+  cloudBrowserCookies,
+  cloudInstanceRaw,
+  sessionBrowserCookies,
+  signInSession,
+  WORKSPACE_ROLE_MEMBER,
+} from "../helpers/api";
 import { parityApiUrl, parityOracleUrl } from "../helpers/parity-env";
 import { specTags, specTitle } from "../helpers/tags";
-import { cloudOnboardedUser } from "./cloud-user-setup";
+import { cloudWorkspaceUser } from "./cloud-user-setup";
 
 /** Resolve the OSS stack's oracle URL, API URL, and seed facts from PARITY_OSS_NS. */
 function ossStack(): { oracle: string; apiBase: string; seed: ParitySeedFacts } {
@@ -50,9 +56,15 @@ function ossStack(): { oracle: string; apiBase: string; seed: ParitySeedFacts } 
 test(
   specTitle(["CLOUD-035"], "profile sidebar omits the security entry on cloud"),
   { tag: specTags(["CLOUD-035"]) },
-  async ({ driver }) => {
-    const session = await cloudOnboardedUser("parity-440-sec", "Security Hidden");
-    await driver.openAuthenticated("/settings/profile/general", cloudBrowserCookies(session.cookie));
+  async ({ driver, seed }) => {
+    // The account tabs are workspace pages on web_new (main#670), and the
+    // cloud security guard keys off the instance either way, so both legs
+    // enter through a member of the seed workspace at its general tab.
+    const session = await cloudWorkspaceUser(seed, "parity-440-sec", WORKSPACE_ROLE_MEMBER, "Security Hidden");
+    await driver.openAuthenticated(
+      `/${seed.workspaceSlug}/settings/account/general/`,
+      cloudBrowserCookies(session.cookie)
+    );
     await expect.poll(() => driver.cloudProfileSidebarTabs(), { timeout: 60_000 }).toContain("AI Assistant");
     const tabs = await driver.cloudProfileSidebarTabs();
     expect(tabs).not.toContain("Security");
@@ -69,10 +81,19 @@ test(
 test(
   specTitle(["CLOUD-035"], "direct security URL forwards to the general tab"),
   { tag: specTags(["CLOUD-035"]) },
-  async ({ driver }) => {
-    const session = await cloudOnboardedUser("parity-440-sec", "Security Forward");
-    await driver.openAuthenticated("/settings/profile/security", cloudBrowserCookies(session.cookie));
-    await expect.poll(() => driver.currentPath(), { timeout: 60_000 }).toBe("/settings/profile/general/");
+  async ({ driver, seed }) => {
+    const session = await cloudWorkspaceUser(seed, "parity-440-sec", WORKSPACE_ROLE_MEMBER, "Security Forward");
+    await driver.openAuthenticated(
+      `/${seed.workspaceSlug}/settings/account/security/`,
+      cloudBrowserCookies(session.cookie)
+    );
+    // The target forwards the withheld tab to the account general tab inside
+    // the reader's workspace (main#670); the old app keeps its standalone one.
+    await expect
+      .poll(() => driver.currentPath(), { timeout: 60_000 })
+      .toBe(
+        driver.target === "web_new" ? `/${seed.workspaceSlug}/settings/account/general/` : "/settings/profile/general/"
+      );
     await expect.poll(() => driver.cloudProfileActiveTab(), { timeout: 60_000 }).toBe("general");
   }
 );
@@ -86,8 +107,16 @@ test(
     await driver.page.context().clearCookies();
     // Single-arg form: both stacks share the localhost cookie domain.
     await driver.page.context().addCookies(sessionBrowserCookies(cookie));
+    // The legacy address still resolves on both targets; only where it lands
+    // differs (main#670).
     await driver.page.goto(`${oss.oracle}/settings/profile/security`);
-    await expect.poll(() => driver.currentPath(), { timeout: 60_000 }).toBe("/settings/profile/security");
+    await expect
+      .poll(() => driver.currentPath(), { timeout: 60_000 })
+      .toBe(
+        driver.target === "web_new"
+          ? `/${oss.seed.workspaceSlug}/settings/account/security/`
+          : "/settings/profile/security"
+      );
     await expect.poll(() => driver.cloudProfileSidebarTabs(), { timeout: 60_000 }).toContain("AI Assistant");
     const tabs = await driver.cloudProfileSidebarTabs();
     expect(tabs).toContain("Security");

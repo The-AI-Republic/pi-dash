@@ -5,20 +5,11 @@
 // Built-in tab registration (parity/specs/profile.md §5/§7/§9): the general,
 // preferences, security, token, notifications, activity, assistant, upkeep
 // and integrations bodies are present on a direct visit, and unmounting
-// them leaves the seam to the sibling slices. The layout's
-// session guard is shared with the app shell (AUTH-020).
-import { render } from "@testing-library/react";
-import * as React from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+// them leaves the seam to the sibling slices.
+import { afterEach, describe, expect, it } from "vitest";
 
 import { getProfileSettingsPage, resetProfileSettingsPages } from "./lib/registry.js";
-import { registerBuiltInSettingsTabs, useProfileSettingsSessionGuard } from "./pageEntries.js";
-
-vi.mock("../../shared/shell/expiredRedirect.js", () => ({
-  useSessionExpiredRedirect: vi.fn(),
-}));
-
-import { useSessionExpiredRedirect } from "../../shared/shell/expiredRedirect.js";
+import { registerBuiltInSettingsTabs } from "./pageEntries.js";
 
 afterEach(() => resetProfileSettingsPages());
 
@@ -47,14 +38,5 @@ describe("built-in settings tabs", () => {
     expect(getProfileSettingsPage("ai-assistant")).toBeNull();
     expect(getProfileSettingsPage("auto-project-management")).toBeNull();
     expect(getProfileSettingsPage("integrations")).toBeNull();
-  });
-
-  it("routes the settings layout through the session-expiry redirect", () => {
-    function Probe(): React.ReactElement | null {
-      useProfileSettingsSessionGuard();
-      return null;
-    }
-    render(<Probe />);
-    expect(useSessionExpiredRedirect).toHaveBeenCalledTimes(1);
   });
 });

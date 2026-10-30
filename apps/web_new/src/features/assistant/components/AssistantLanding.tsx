@@ -72,7 +72,7 @@ export function AssistantLanding({ workspaceSlug }: AssistantLandingProps): Reac
         {config.isPending ? (
           <Spinner label="Loading assistant" />
         ) : needsLaneSetup(config.data) ? (
-          <SetupCard />
+          <SetupCard workspaceSlug={workspaceSlug} />
         ) : (
           <>
             <header className="flex flex-col items-center gap-(--space-2) text-center">
@@ -81,6 +81,7 @@ export function AssistantLanding({ workspaceSlug }: AssistantLandingProps): Reac
               <p className="text-body text-(--text-muted)">{ASSISTANT_CAPTION}</p>
             </header>
             <Composer
+              workspaceSlug={workspaceSlug}
               draft={draft}
               onDraftChange={setDraft}
               onSubmit={onStart}

@@ -53,7 +53,12 @@ function stubTransport(handler: (url: string) => { status: number; body: string;
   };
 }
 
-function renderScreen(email: string, workspaceCount: number, signOutStatus = 200): { posts: string[] } {
+function renderScreen(
+  email: string,
+  workspaceCount: number,
+  signOutStatus = 200,
+  workspaceSlug: string | null = workspaceCount > 0 ? "acme" : null
+): { posts: string[] } {
   const posts: string[] = [];
   createAppClient(
     "https://api.test",
@@ -71,7 +76,7 @@ function renderScreen(email: string, workspaceCount: number, signOutStatus = 200
   render(
     <QueryClientProvider client={queryClient}>
       <RuntimeSignOutLifecycle />
-      <WorkspaceNotFoundScreen email={email} workspaceCount={workspaceCount} />
+      <WorkspaceNotFoundScreen email={email} workspaceCount={workspaceCount} workspaceSlug={workspaceSlug} />
     </QueryClientProvider>
   );
   return { posts };
@@ -91,7 +96,12 @@ describe("WorkspaceNotFoundScreen", () => {
     const home = screen.getByRole("link", { name: "Go Home" });
     expect(home).toHaveAttribute("href", "/");
     expect(home).toHaveFocus();
-    expect(screen.getByRole("link", { name: "Open profile" })).toHaveAttribute("href", "/settings/profile/general/");
+    // Account settings live inside a workspace (main#670): the profile
+    // link hosts itself in the first workspace the reader belongs to.
+    expect(screen.getByRole("link", { name: "Open profile" })).toHaveAttribute(
+      "href",
+      "/acme/settings/account/general/"
+    );
   });
 
   it("offers creation when the user belongs nowhere", () => {

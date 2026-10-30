@@ -127,8 +127,7 @@ export type QuickstartLinkCardId = Exclude<QuickstartCardId, "create-project">;
 
 /**
  * Where a link card leads: the workspace members and settings pages, and
- * the global profile page. The settings areas own these routes; until
- * they migrate, the links resolve through the old app behind the proxy.
+ * the account settings page inside the current workspace.
  */
 export function quickstartLinkHref(cardId: QuickstartLinkCardId, workspaceSlug: string): string {
   switch (cardId) {
@@ -137,7 +136,9 @@ export function quickstartLinkHref(cardId: QuickstartLinkCardId, workspaceSlug: 
     case "configure-workspace":
       return `/${workspaceSlug}/settings`;
     case "personalize-account":
-      return "/settings/profile/general";
+      // Account settings live inside the workspace the card is shown in
+      // (main#670), so the card needs the slug the others already use.
+      return `/${workspaceSlug}/settings/account/general/`;
   }
 }
 

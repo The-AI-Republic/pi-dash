@@ -345,7 +345,7 @@ describe("isSettingsPagePath", () => {
     expect(isSettingsPagePath("/acme/settings/projects/")).toBe(true);
     expect(isSettingsPagePath("/acme/settings/projects/p1")).toBe(true);
     expect(isSettingsPagePath("/acme/settings/projects/p1/features/cycles/")).toBe(true);
-    expect(isSettingsPagePath("/acme/settings/profile")).toBe(false);
+    expect(isSettingsPagePath("/acme/settings/account/security")).toBe(false);
     expect(isSettingsPagePath("/acme/projects/p1/issues")).toBe(false);
     expect(isSettingsPagePath("/acme/projects/p1/settings")).toBe(false);
     expect(isSettingsPagePath("/")).toBe(false);
@@ -1607,7 +1607,7 @@ describe("gated layout shell wiring", () => {
       harness.sidebar?.onYourWork();
       expect(navigate).toHaveBeenLastCalledWith({ href: "/acme/profile/u1" });
       harness.sidebar?.onUserSettings();
-      expect(navigate).toHaveBeenLastCalledWith({ href: "/settings/profile/general" });
+      expect(navigate).toHaveBeenLastCalledWith({ href: "/acme/settings/account/general/" });
     });
 
     it("falls back to guest without an active membership", () => {

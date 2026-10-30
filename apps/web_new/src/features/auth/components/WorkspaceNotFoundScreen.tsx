@@ -22,13 +22,23 @@ export interface WorkspaceNotFoundScreenProps {
   email: string;
   /** How many workspaces the user belongs to (picks the actions). */
   workspaceCount: number;
+  /**
+   * A workspace the reader belongs to, used as the profile link's host
+   * (main#670): account settings live inside a workspace, so the link
+   * needs one. Null only when the reader belongs to none.
+   */
+  workspaceSlug: string | null;
 }
 
-export function WorkspaceNotFoundScreen({ email, workspaceCount }: WorkspaceNotFoundScreenProps): React.ReactElement {
+export function WorkspaceNotFoundScreen({
+  email,
+  workspaceCount,
+  workspaceSlug,
+}: WorkspaceNotFoundScreenProps): React.ReactElement {
   const navigate = useNavigate();
   const signOut = useSignOut();
   const focusPrimary = useFocusOnMount<HTMLAnchorElement>();
-  const belongsSomewhere = workspaceCount > 0;
+  const belongsSomewhere = workspaceCount > 0 && workspaceSlug !== null;
 
   function handleSignOut(): void {
     void runSignOutAction(
@@ -67,7 +77,7 @@ export function WorkspaceNotFoundScreen({ email, workspaceCount }: WorkspaceNotF
                 Go Home
               </Link>
               <CrossAppLink
-                to="/settings/profile/general/"
+                to={`/${workspaceSlug ?? ""}/settings/account/general/`}
                 className="text-body rounded-(--radius-control) border border-(--border) px-(--space-4) py-(--space-2) text-(--text)"
               >
                 Open profile

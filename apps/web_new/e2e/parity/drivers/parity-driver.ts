@@ -11251,6 +11251,8 @@ export interface DeskSigninUpdateLink {
   settingsProfileActiveTab(): Promise<string | null>;
   /** Accessible name of the sidebar back control, or null when it renders none. */
   settingsProfileBackLabel(): Promise<string | null>;
+  /** Where the sidebar back control points, or null when it renders none. */
+  settingsProfileBackHref(): Promise<string | null>;
   /** Sidebar title text ("Profile settings"), or null when the shell is absent. */
   settingsProfileSidebarTitle(): Promise<string | null>;
   /** Workspace shortcut entries (workspaces plus create/invites actions) in display order. */
@@ -11259,6 +11261,37 @@ export interface DeskSigninUpdateLink {
   settingsProfileSelectTab(label: string): Promise<void>;
   /** Open an arbitrary path authenticated; resolves with the final path-plus-query after redirects. */
   settingsProfileOpenPath(path: string, cookies: ParityBrowserCookie[]): Promise<string>;
+  /**
+   * Whether the account-settings page rendered inside the normal app shell
+   * (main#670): the app rail and the top bar are mounted beside it. False on
+   * the old app, whose settings page is a standalone full-window frame.
+   */
+  settingsProfileInsideAppShell(): Promise<boolean>;
+  /**
+   * The account settings' own narrow-screen hamburger, when it has one
+   * (main#670); null when the page offers no such control.
+   */
+  settingsProfileMobileMenuPresent(): Promise<boolean | null>;
+  /**
+   * Workspace rows of the settings navigator's workspace section, in display
+   * order (main#675): the row's name text, whether it carries an expander,
+   * and whether its groups start open.
+   */
+  settingsProfileWorkspaceRows(): Promise<Array<{ label: string; expandable: boolean; expanded: boolean }>>;
+  /** Open or close one workspace row's group; a no-op when it has no expander. */
+  settingsProfileToggleWorkspaceRow(label: string): Promise<void>;
+  /** Entry labels inside one workspace row's open group, in display order. */
+  settingsProfileWorkspaceEntries(label: string): Promise<string[]>;
+  /** Activate one entry inside a workspace row's group; resolves once its address lands. */
+  settingsProfileOpenWorkspaceEntry(rowLabel: string, entryLabel: string): Promise<void>;
+  /** Downloadable/plain href of one workspace row, or null when the row has no expander. */
+  settingsProfileWorkspaceRowHref(label: string): Promise<string | null>;
+  /**
+   * Labels of the workspace-section entries that read current, in display
+   * order (main#675: only the viewed workspace's entries can be lit, and
+   * none are while an account tab is open).
+   */
+  settingsProfileCurrentWorkspaceEntries(): Promise<string[]>;
   /** Current value of one general-tab field. */
   settingsProfileGeneralFieldValue(field: SettingsProfileGeneralField): Promise<string>;
   /** Fill one general-tab field without submitting. */

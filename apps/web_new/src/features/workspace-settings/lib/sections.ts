@@ -8,6 +8,7 @@
 // registry; neither adds sections of its own.
 
 import { ROLE_ADMIN, ROLE_MEMBER, type Permissions } from "../../../core/session/index.js";
+import { permittedWorkspaceSettingGroups } from "./perWorkspace.js";
 
 export type WorkspaceSettingsSectionKey = "general" | "members" | "billing" | "exports" | "webhooks" | "integrations";
 
@@ -126,20 +127,23 @@ export interface VisibleWorkspaceSettingsGroup {
 
 /**
  * The sidebar groups the viewer may see, in display order. Entries and
- * whole groups without permission are absent, never disabled (§1).
+ * whole groups without permission are absent, never disabled (§1). The
+ * role filter and the per-entry addresses come from the per-workspace
+ * catalog, which the account navigator's nested groups share (main#675),
+ * so the two lists cannot drift.
  */
 export function visibleWorkspaceSettingsGroups(
   workspaceSlug: string,
   permissions: Pick<Permissions, "canEdit" | "isAdmin">
 ): VisibleWorkspaceSettingsGroup[] {
-  const groups: VisibleWorkspaceSettingsGroup[] = [];
-  for (const group of WORKSPACE_SETTINGS_GROUPS) {
-    const sections = group.sections
-      .filter((section) => canOpenWorkspaceSettingsSection(section.key, permissions))
-      .map((section) => ({ ...section, href: workspaceSettingsHref(workspaceSlug, section.key) }));
-    if (sections.length > 0) groups.push({ key: group.key, label: group.label, sections });
-  }
-  return groups;
+  return permittedWorkspaceSettingGroups(workspaceSlug, permissions).map((group) => ({
+    key: group.key,
+    label: group.label,
+    sections: group.links.map((link) => ({
+      ...findWorkspaceSettingsSection(link.key),
+      href: link.href,
+    })),
+  }));
 }
 
 /** Role sentence shown beside the workspace identity; empty for no role. */
