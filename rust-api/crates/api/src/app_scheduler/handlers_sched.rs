@@ -732,11 +732,30 @@ pub async fn scheduler_create(
         Ok(body) => body,
         Err(denial) => return denial.into_response(),
     };
-    let validated = validate_create_body(&body);
-    let write = match enforce_slug_unique(pool, &gate.workspace_id, &body, None, validated).await {
-        Ok(write) => write,
+    let (row, count) = match create_scheduler(pool, &gate.workspace_id, &gate.user_id, &body).await
+    {
+        Ok(created) => created,
         Err(denial) => return denial.into_response(),
     };
+    (
+        StatusCode::CREATED,
+        Json(render_scheduler_row(&row, count, &gate.timezone)),
+    )
+        .into_response()
+}
+
+/// The create write shared by the web app and the v1 surface
+/// (`scheduler/definition_writes.py::create_definition`, PDASHOSS01-318):
+/// serializer validation, the R7 slug check, the R3 INSERT, then the R6
+/// fallback count the 201 renders. Returns the fresh row and that count.
+pub(crate) async fn create_scheduler(
+    pool: &PgPool,
+    workspace_id: &uuid::Uuid,
+    user_id: &uuid::Uuid,
+    body: &Value,
+) -> Result<(SchedulerRow, i64), Denial> {
+    let validated = validate_create_body(body);
+    let write = enforce_slug_unique(pool, workspace_id, body, None, validated).await?;
     // R3 (`:79-84`): auto id/timestamps, `created_by` the request user
     // (crum), `updated_by`/`deleted_at` NULL, `source` the `'builtin'`
     // literal. One `:now` sample feeds both timestamps (queries-layer
@@ -747,11 +766,11 @@ pub async fn scheduler_create(
         queries::SCHEDULER_INSERT_SQL,
         queries::SCHEDULER_INSERT_PARAMS,
     );
-    let insert = sqlx::query(&sql)
+    sqlx::query(&sql)
         .bind(id)
         .bind(now)
-        .bind(gate.user_id)
-        .bind(gate.workspace_id)
+        .bind(user_id)
+        .bind(workspace_id)
         .bind(&write.slug)
         .bind(&write.name)
         .bind(&write.description)
@@ -759,36 +778,34 @@ pub async fn scheduler_create(
         .bind(write.is_enabled)
         .bind(&write.color)
         .execute(pool)
-        .await;
-    if let Err(error) = insert {
-        if is_integrity_error(&error) {
-            return Denial::BadError("The payload is not valid".to_owned()).into_response();
-        }
-        return Denial::ServerError.into_response();
-    }
+        .await
+        .map_err(|error| {
+            if is_integrity_error(&error) {
+                Denial::BadError("The payload is not valid".to_owned())
+            } else {
+                Denial::ServerError
+            }
+        })?;
     // The create response serializes the fresh un-annotated row, so the
     // count falls back to the R6 query (always 0 for a new scheduler).
     let count_sql = positional(
         queries::ACTIVE_BINDING_COUNT_SQL,
         queries::ACTIVE_BINDING_COUNT_PARAMS,
     );
-    let fallback: Option<(i64,)> = match sqlx::query_as(&count_sql)
+    let fallback: Option<(i64,)> = sqlx::query_as(&count_sql)
         .bind(id)
         .fetch_optional(pool)
         .await
-    {
-        Ok(count) => count,
-        Err(_) => return Denial::ServerError.into_response(),
-    };
+        .map_err(|_| Denial::ServerError)?;
     let count = shape::resolve_active_binding_count(None, fallback.map(|row| row.0).unwrap_or(0));
     let row = SchedulerRow {
         created_at: now,
         updated_at: now,
-        created_by_id: Some(gate.user_id),
+        created_by_id: Some(*user_id),
         updated_by_id: None,
         deleted_at: None,
         id,
-        workspace_id: gate.workspace_id,
+        workspace_id: *workspace_id,
         slug: write.slug,
         name: write.name,
         description: write.description,
@@ -797,11 +814,7 @@ pub async fn scheduler_create(
         is_enabled: write.is_enabled,
         color: write.color,
     };
-    (
-        StatusCode::CREATED,
-        Json(render_scheduler_row(&row, count, &gate.timezone)),
-    )
-        .into_response()
+    Ok((row, count))
 }
 
 /// `GET /api/workspaces/<slug>/schedulers/<uuid>/` (`views.py:95-111`):
@@ -999,6 +1012,44 @@ pub(crate) async fn enqueue_soft_delete(pool: &PgPool, model: &str, pk: &uuid::U
     }
 }
 
+/// The delete write shared by the web app and the v1 surface
+/// (`scheduler/definition_writes.py::delete_definition`, PDASHOSS01-318),
+/// inside the caller's transaction: two separate `now()` samples (ported
+/// quirk 5), bindings first so no active binding survives, then the
+/// scheduler's own soft delete. The caller commits, then enqueues the
+/// related-objects sweep ([`enqueue_soft_delete`]).
+pub(crate) async fn soft_delete_scheduler(
+    conn: &mut sqlx::PgConnection,
+    scheduler_id: &uuid::Uuid,
+    user_id: &uuid::Uuid,
+) -> Result<(), Denial> {
+    let now = Utc::now();
+    let bindings_sql = positional(
+        queries::SCHEDULER_DELETE_BINDINGS_SQL,
+        queries::SCHEDULER_DELETE_BINDINGS_PARAMS,
+    );
+    sqlx::query(&bindings_sql)
+        .bind(now)
+        .bind(scheduler_id)
+        .execute(&mut *conn)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let now2 = Utc::now();
+    let soft_delete_sql = positional(
+        queries::SCHEDULER_SOFT_DELETE_SQL,
+        queries::SCHEDULER_SOFT_DELETE_PARAMS,
+    );
+    sqlx::query(&soft_delete_sql)
+        .bind(now)
+        .bind(now2)
+        .bind(user_id)
+        .bind(scheduler_id)
+        .execute(&mut *conn)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(())
+}
+
 /// `DELETE /api/workspaces/<slug>/schedulers/<uuid>/`
 /// (`views.py:136-157`): one transaction soft-deletes the still-active
 /// bindings inline and then the scheduler; the instance `delete()` then
@@ -1049,41 +1100,13 @@ pub async fn scheduler_delete(
     if row.is_none() {
         return Denial::ObjectNotFound.into_response();
     }
-    // `transaction.atomic()` (`:151-156`): two separate `now()` samples
-    // (ported quirk 5), bindings first so no active binding survives.
+    // `transaction.atomic()` (`:151-156`).
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
         Err(_) => return Denial::ServerError.into_response(),
     };
-    let now = Utc::now();
-    let bindings_sql = positional(
-        queries::SCHEDULER_DELETE_BINDINGS_SQL,
-        queries::SCHEDULER_DELETE_BINDINGS_PARAMS,
-    );
-    if sqlx::query(&bindings_sql)
-        .bind(now)
-        .bind(scheduler_id)
-        .execute(&mut *tx)
-        .await
-        .is_err()
-    {
-        return Denial::ServerError.into_response();
-    }
-    let now2 = Utc::now();
-    let soft_delete_sql = positional(
-        queries::SCHEDULER_SOFT_DELETE_SQL,
-        queries::SCHEDULER_SOFT_DELETE_PARAMS,
-    );
-    if sqlx::query(&soft_delete_sql)
-        .bind(now)
-        .bind(now2)
-        .bind(gate.user_id)
-        .bind(scheduler_id)
-        .execute(&mut *tx)
-        .await
-        .is_err()
-    {
-        return Denial::ServerError.into_response();
+    if let Err(denial) = soft_delete_scheduler(&mut tx, &scheduler_id, &gate.user_id).await {
+        return denial.into_response();
     }
     if tx.commit().await.is_err() {
         return Denial::ServerError.into_response();
