@@ -257,9 +257,15 @@ test(
 
       await test.step("progress card breaks the cycle down by state", async () => {
         expect(await driver.cyclesHeroGroupHeading()).toMatch(/active cycle/i);
-        expect(await driver.cyclesHeroActiveName()).toBe(hero.cycleName);
+        // The list-body settle lands before the hero content paints, so
+        // the first hero read polls (NEWFRONT-716).
+        await expect.poll(() => driver.cyclesHeroActiveName(), { timeout: 60_000 }).toBe(hero.cycleName);
+        // Each hero card loads on its own query, so each card's first
+        // read polls (NEWFRONT-716).
+        await expect
+          .poll(async () => (await driver.cyclesHeroProgressGroups()).closed, { timeout: 60_000 })
+          .toMatch(/closed/i);
         const progress = await driver.cyclesHeroProgressGroups();
-        expect(progress.closed).toMatch(/closed/i);
         const names = progress.groups.map((group) => group.name.toLowerCase());
         expect(names).toContain("started");
         expect(names).toContain("backlog");
@@ -269,6 +275,9 @@ test(
       });
 
       await test.step("burn-down card shows the pending line and the chart", async () => {
+        await expect
+          .poll(async () => (await driver.cyclesHeroBurndown()).pending, { timeout: 60_000 })
+          .toMatch(/pending/i);
         const burndown = await driver.cyclesHeroBurndown();
         expect(burndown.heading).toMatch(/burndown/i);
         expect(burndown.pending).toMatch(/pending/i);
@@ -277,7 +286,9 @@ test(
       });
 
       await test.step("breakdown card tabs split by priority, assignee, and label", async () => {
-        expect(await driver.cyclesHeroBreakdownTabs()).toEqual(["Priority work items", "Assignees", "Labels"]);
+        await expect
+          .poll(() => driver.cyclesHeroBreakdownTabs(), { timeout: 60_000 })
+          .toEqual(["Priority work items", "Assignees", "Labels"]);
         await driver.cyclesHeroBreakdownSelectTab("Priority work items");
         expect(await driver.cyclesHeroBreakdownEntries()).toContain(hero.startedIssue);
         await driver.cyclesHeroBreakdownSelectTab("Assignees");
@@ -407,10 +418,16 @@ test(
         ownerSession
       );
       await driver.cyclesHeroOpenList(seed.workspaceSlug, projectId);
-      expect(await driver.cyclesHeroActiveName()).toBe(name);
-      expect(await driver.cyclesHeroProgressEmptyVisible()).toBe(true);
-      expect(await driver.cyclesHeroBurndownEmptyVisible()).toBe(true);
-      expect(await driver.cyclesHeroBreakdownTabs()).toEqual(["Priority work items", "Assignees", "Labels"]);
+      // The list-body settle lands before the hero content paints, so
+      // the first hero read polls (NEWFRONT-716).
+      await expect.poll(() => driver.cyclesHeroActiveName(), { timeout: 60_000 }).toBe(name);
+      // Each hero card loads on its own query, so each card's first
+      // read polls (NEWFRONT-716).
+      await expect.poll(() => driver.cyclesHeroProgressEmptyVisible(), { timeout: 60_000 }).toBe(true);
+      await expect.poll(() => driver.cyclesHeroBurndownEmptyVisible(), { timeout: 60_000 }).toBe(true);
+      await expect
+        .poll(() => driver.cyclesHeroBreakdownTabs(), { timeout: 60_000 })
+        .toEqual(["Priority work items", "Assignees", "Labels"]);
       for (const tab of ["Priority work items", "Assignees", "Labels"]) {
         await driver.cyclesHeroBreakdownSelectTab(tab);
         expect(await driver.cyclesHeroBreakdownEmptyVisible()).toBe(true);
@@ -443,6 +460,9 @@ test(
       await driver.cyclesHeroOpenList(seed.workspaceSlug, projectId);
       expect(await driver.cyclesHeroGroupHeading()).toMatch(/active cycle/i);
       expect(await driver.cyclesHeroActiveName()).toBe(null);
+      // The empty panel arrives on its own query, so its first read
+      // polls (NEWFRONT-716).
+      await expect.poll(() => driver.cyclesHeroEmptyCopy(), { timeout: 60_000 }).not.toBe(null);
       const empty = await driver.cyclesHeroEmptyCopy();
       expect(empty).not.toBe(null);
       expect(empty?.title ?? "").toMatch(/active cycle/i);
@@ -512,7 +532,9 @@ test(
 
       await test.step("active row shows the offset chip and hover equivalents", async () => {
         await driver.cyclesHeroOpenList(seed.workspaceSlug, projectId);
-        expect(await driver.cyclesHeroActiveRowOffset()).toMatch(/^UTC -0[45]:00$/);
+        // The list-body settle lands before the hero content paints, so
+        // the first hero read polls (NEWFRONT-716).
+        await expect.poll(() => driver.cyclesHeroActiveRowOffset(), { timeout: 60_000 }).toMatch(/^UTC -0[45]:00$/);
         await driver.cyclesHeroHoverActiveRowDates();
         const tip = await driver.cyclesHeroTooltipText();
         expect(tip ?? "").toMatch(/your timezone/i);
@@ -739,7 +761,9 @@ test(
       await driver.cyclesHeroOpenList(seed.workspaceSlug, project.projectId);
 
       await test.step("browse the hero and the groups", async () => {
-        expect(await driver.cyclesHeroActiveName()).toBe(project.activeName);
+        // The list-body settle lands before the hero content paints, so
+        // the first hero read polls (NEWFRONT-716).
+        await expect.poll(() => driver.cyclesHeroActiveName(), { timeout: 60_000 }).toBe(project.activeName);
         expect(await driver.cyclesHeroVisibleNames()).toContain(project.upcomingName);
       });
 
